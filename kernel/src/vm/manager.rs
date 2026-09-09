@@ -1959,7 +1959,10 @@ mod tests {
         let manager = VirtualMemoryManager::new();
 
         // Test mmap_base functionality
-        assert_eq!(manager.get_mmap_base(), crate::environment::DEFAULT_USER_MMAP_BASE);
+        assert_eq!(
+            manager.get_mmap_base(),
+            crate::environment::DEFAULT_USER_MMAP_BASE
+        );
         manager.set_mmap_base(0x50000000);
         assert_eq!(manager.get_mmap_base(), 0x50000000);
 

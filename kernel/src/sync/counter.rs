@@ -56,7 +56,9 @@ impl SaturatingCounter {
         #[cfg(target_has_atomic = "64")]
         self.value.store(0, Ordering::Relaxed);
         #[cfg(not(target_has_atomic = "64"))]
-        { *self.value.value.lock() = 0; }
+        {
+            *self.value.value.lock() = 0;
+        }
     }
 }
 

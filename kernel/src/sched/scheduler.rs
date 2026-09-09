@@ -34,9 +34,7 @@ extern crate alloc;
 use super::accounting::{Activity, CpuClock};
 use crate::sync::counter::SaturatingCounter;
 use crate::sync::diagnostic::{DiagnosticRecord, ReportInterval};
-use core::sync::atomic::{
-    AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize, Ordering,
-};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use alloc::{
     collections::{BTreeMap, BTreeSet, vec_deque::VecDeque},
@@ -305,11 +303,26 @@ pub(crate) struct SliceDiagnosticSnapshot {
 struct SliceDiagnosticSlot(DiagnosticRecord<12>);
 
 impl SliceDiagnosticSlot {
-    const fn new() -> Self { Self(DiagnosticRecord::new([0; 12])) }
+    const fn new() -> Self {
+        Self(DiagnosticRecord::new([0; 12]))
+    }
 
     #[inline(always)]
     fn publish(&self, snapshot: SliceDiagnosticSnapshot) {
-        let _ = self.0.try_publish([snapshot.action, snapshot.task_id, snapshot.token, snapshot.handle_id, snapshot.generation, snapshot.duration_ns, snapshot.timer_deadline_ns, snapshot.fair_vruntime_ns, snapshot.fair_vdeadline_ns, snapshot.deadline_remaining_ns, snapshot.deadline_absolute_ns, snapshot.flags]);
+        let _ = self.0.try_publish([
+            snapshot.action,
+            snapshot.task_id,
+            snapshot.token,
+            snapshot.handle_id,
+            snapshot.generation,
+            snapshot.duration_ns,
+            snapshot.timer_deadline_ns,
+            snapshot.fair_vruntime_ns,
+            snapshot.fair_vdeadline_ns,
+            snapshot.deadline_remaining_ns,
+            snapshot.deadline_absolute_ns,
+            snapshot.flags,
+        ]);
     }
 
     #[inline(always)]
@@ -357,7 +370,9 @@ struct SliceTimerHandler {
 }
 
 impl SliceTimerHandler {
-    fn diagnostic_token(&self) -> u64 { self as *const Self as usize as u64 }
+    fn diagnostic_token(&self) -> u64 {
+        self as *const Self as usize as u64
+    }
 }
 
 impl TimerHandler for SliceTimerHandler {
@@ -365,7 +380,10 @@ impl TimerHandler for SliceTimerHandler {
         let mut state = slice_states()[self.cpu_id].lock();
         let matched = state.task_id == Some(self.task_id)
             && state.task_generation == Some(self.task_generation)
-            && state.active.as_ref().is_some_and(|active| Arc::ptr_eq(&active.handler, &self));
+            && state
+                .active
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(&active.handler, &self));
         if matched {
             state.active = None;
             state.need_resched = true;
@@ -373,7 +391,11 @@ impl TimerHandler for SliceTimerHandler {
         publish_slice_action(
             self.cpu_id,
             &state,
-            if matched { SLICE_DIAGNOSTIC_EXPIRED } else { SLICE_DIAGNOSTIC_STALE_EXPIRE },
+            if matched {
+                SLICE_DIAGNOSTIC_EXPIRED
+            } else {
+                SLICE_DIAGNOSTIC_STALE_EXPIRE
+            },
             Some(self.task_id),
             self.diagnostic_token(),
             0,
@@ -1924,9 +1946,14 @@ fn account_task_switch(cpu_id: usize, old_id: Option<usize>, next_id: Option<usi
         }
     }
     let idle_id = IDLE_TASK_IDS[cpu_id].load(Ordering::SeqCst);
-    let next_activity = next_id.map(|id| if id == idle_id { Activity::Idle } else { Activity::Busy });
+    let next_activity = next_id.map(|id| {
+        if id == idle_id {
+            Activity::Idle
+        } else {
+            Activity::Busy
+        }
+    });
     cpu_clocks()[cpu_id].switch(now_ns, next_activity);
-
 }
 
 fn account_current_task_slice_boundary(cpu_id: usize) {
@@ -2052,7 +2079,11 @@ pub fn cpu_usage_snapshot() -> CpuUsageSnapshot {
         busy_time_ns = busy_time_ns.saturating_add(busy);
         idle_time_ns = idle_time_ns.saturating_add(idle);
     });
-    CpuUsageSnapshot { online_cpus: num_online_cpus(), busy_time_ns, idle_time_ns }
+    CpuUsageSnapshot {
+        online_cpus: num_online_cpus(),
+        busy_time_ns,
+        idle_time_ns,
+    }
 }
 
 /// Return cumulative busy and idle time for one logical CPU.
@@ -2163,8 +2194,11 @@ fn invalidate_local_slice(cpu_id: usize) {
             &state,
             SLICE_DIAGNOSTIC_INVALIDATED,
             task_id,
-            active.as_ref().map_or(0, |active| active.handler.diagnostic_token()),
-            active.as_ref()
+            active
+                .as_ref()
+                .map_or(0, |active| active.handler.diagnostic_token()),
+            active
+                .as_ref()
                 .and_then(|active| active.handle)
                 .map_or(0, |handle| handle.id),
         );
@@ -2234,7 +2268,11 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
     let fair_anomaly = deadline.is_none()
         && (duration_ns == 0 || (fair_slice_ns != 0 && fair_vdeadline_ns <= fair_vruntime_ns));
     drop(task);
-    let handler = Arc::new(SliceTimerHandler { cpu_id, task_id, task_generation });
+    let handler = Arc::new(SliceTimerHandler {
+        cpu_id,
+        task_id,
+        task_generation,
+    });
     let token = handler.diagnostic_token();
     let (generation, replaced) = {
         let mut state = slice_states()[cpu_id].lock();
@@ -2242,7 +2280,10 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
         state.need_resched = false;
         state.task_id = Some(task_id);
         state.task_generation = Some(task_generation);
-        let replaced = state.active.replace(ActiveSlice { handle: None, handler: handler.clone() });
+        let replaced = state.active.replace(ActiveSlice {
+            handle: None,
+            handler: handler.clone(),
+        });
         let mut diagnostic = SliceDiagnosticSnapshot {
             action: SLICE_DIAGNOSTIC_ARM_PREPARE,
             task_id: task_id as u64,
@@ -2270,7 +2311,9 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
     };
     // Cancel and release superseded callbacks outside the slice-state lock.
     if let Some(replaced) = replaced {
-        if let Some(handle) = replaced.handle { let _ = cancel_timer(handle); }
+        if let Some(handle) = replaced.handle {
+            let _ = cancel_timer(handle);
+        }
     }
     if (deadline_anomaly || fair_anomaly) && should_log_deadline_slice_anomaly(cpu_id, now_ns) {
         let timer = crate::timer::timer_diagnostic_snapshot(cpu_id);
@@ -2317,9 +2360,16 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
         if state.generation == generation
             && state.task_id == Some(task_id)
             && state.task_generation == Some(task_generation)
-            && state.active.as_ref().is_some_and(|active| Arc::ptr_eq(&active.handler, &handler))
+            && state
+                .active
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(&active.handler, &handler))
         {
-            state.active.as_mut().expect("matched active callback").handle = Some(handle);
+            state
+                .active
+                .as_mut()
+                .expect("matched active callback")
+                .handle = Some(handle);
             publish_slice_action(
                 cpu_id,
                 &state,
@@ -2385,8 +2435,11 @@ fn take_local_slice_reschedule(cpu_id: usize) -> bool {
             &state,
             SLICE_DIAGNOSTIC_RESCHEDULE_TAKEN,
             task_id,
-            active.as_ref().map_or(0, |active| active.handler.diagnostic_token()),
-            active.as_ref()
+            active
+                .as_ref()
+                .map_or(0, |active| active.handler.diagnostic_token()),
+            active
+                .as_ref()
                 .and_then(|active| active.handle)
                 .map_or(0, |handle| handle.id),
         );
@@ -4060,8 +4113,12 @@ fn arm_deadline_replenishment(task: &Task) {
 }
 
 fn update_curr_deadline(task: &Task, now_ns: u64) -> bool {
-    let Some(delta_ns) = task.exec_clock.advance(now_ns) else { return false; };
-    if delta_ns == 0 { return task.deadline.lock().throttled; }
+    let Some(delta_ns) = task.exec_clock.advance(now_ns) else {
+        return false;
+    };
+    if delta_ns == 0 {
+        return task.deadline.lock().throttled;
+    }
 
     let exhausted = consume_deadline_budget(&mut task.deadline.lock(), delta_ns);
     if exhausted {
@@ -4209,7 +4266,10 @@ pub fn current_task_scheduler_state() -> Option<SchedulerStateSnapshot> {
     .filter(|cpu_id| *cpu_id < MAX_NUM_CPUS);
     let now_ns = get_time_ns();
     let fair_slice_remaining_ns = if matches!(attributes.policy, SchedulerPolicy::Fair) {
-        let elapsed = task.exec_clock.started_at().map_or(0, |start| now_ns.saturating_sub(start));
+        let elapsed = task
+            .exec_clock
+            .started_at()
+            .map_or(0, |start| now_ns.saturating_sub(start));
         task.sched_slice_ns().saturating_sub(elapsed)
     } else {
         0
@@ -4308,7 +4368,9 @@ fn place_entity(task: &Task, queue: &FairQueue, mode: PlaceMode) -> FairKey {
             PlaceMode::LocalPreempt => request.vruntime,
             PlaceMode::Migrate => request.vruntime.max(min_vruntime),
         };
-        let retain = mode == PlaceMode::LocalPreempt && request.slice_ns != 0 && request.deadline > request.vruntime;
+        let retain = mode == PlaceMode::LocalPreempt
+            && request.slice_ns != 0
+            && request.deadline > request.vruntime;
         if !retain {
             request.slice_ns = sched_slice(period, weight, total_weight);
             request.deadline = fair_deadline(request.vruntime, request.slice_ns, weight);
@@ -4324,13 +4386,22 @@ fn place_entity(task: &Task, queue: &FairQueue, mode: PlaceMode) -> FairKey {
 /// so this only updates authoritative Task fields plus the queue's
 /// `min_vruntime` floor; no `rekey` is needed.
 fn update_curr_fair(task: &Task, queue: &mut FairQueue, now_ns: u64) {
-    let Some(delta_ns) = task.exec_clock.advance(now_ns) else { return; };
-    if delta_ns == 0 { return; }
+    let Some(delta_ns) = task.exec_clock.advance(now_ns) else {
+        return;
+    };
+    if delta_ns == 0 {
+        return;
+    }
     let weight = task.sched_weight();
     let delta_fair = calc_delta_fair(delta_ns, weight);
     let vruntime = task.fair_request.update(|request| {
         request.vruntime = request.vruntime.saturating_add(delta_fair);
-        request.deadline = renew_deadline_if_consumed(request.vruntime, request.deadline, request.slice_ns, weight);
+        request.deadline = renew_deadline_if_consumed(
+            request.vruntime,
+            request.deadline,
+            request.slice_ns,
+            weight,
+        );
         request.vruntime
     });
     queue.bump_min_vruntime(vruntime);
@@ -4347,12 +4418,7 @@ fn enqueue_fair(cpu_id: usize, task: &Task, mode: PlaceMode) {
     }
     let mut queue = fair_queue(cpu_id).lock();
     let key = place_entity(task, &queue, mode);
-    queue.insert(
-        task.get_id(),
-        key,
-        key.vruntime,
-        task.sched_weight(),
-    );
+    queue.insert(task.get_id(), key, key.vruntime, task.sched_weight());
 }
 
 /// Pop the eligible min-deadline entity from the local fair queue and return
@@ -5815,13 +5881,24 @@ mod tests {
     #[test_case]
     fn stale_slice_callback_cannot_expire_a_replacement_with_the_same_task_metadata() {
         reset();
-        let old = Arc::new(SliceTimerHandler { cpu_id: 0, task_id: 12, task_generation: 34 });
-        let current = Arc::new(SliceTimerHandler { cpu_id: 0, task_id: 12, task_generation: 34 });
+        let old = Arc::new(SliceTimerHandler {
+            cpu_id: 0,
+            task_id: 12,
+            task_generation: 34,
+        });
+        let current = Arc::new(SliceTimerHandler {
+            cpu_id: 0,
+            task_id: 12,
+            task_generation: 34,
+        });
         {
             let mut state = slice_states()[0].lock();
             state.task_id = Some(12);
             state.task_generation = Some(34);
-            state.active = Some(ActiveSlice { handle: None, handler: current.clone() });
+            state.active = Some(ActiveSlice {
+                handle: None,
+                handler: current.clone(),
+            });
         }
         old.on_timer_expired(0);
         assert!(!take_local_slice_reschedule(0));
@@ -7383,7 +7460,10 @@ mod fair_tests {
         );
         task.set_id(1);
         task.fair_request.update(|request| request.vruntime = 100);
-        task.fair_request.update(|request| { request.slice_ns = 1_000; request.deadline = 1_100; });
+        task.fair_request.update(|request| {
+            request.slice_ns = 1_000;
+            request.deadline = 1_100;
+        });
 
         let placed = place_entity(&task, &q, PlaceMode::LocalPreempt);
 

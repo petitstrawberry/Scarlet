@@ -757,8 +757,8 @@ mod tests {
     use super::*;
     use crate::network::NetworkManager;
     use crate::sync::IrqRwSpinLock;
-    use alloc::{string::ToString, sync::Arc};
     use crate::sync::counter::SaturatingCounter;
+    use alloc::{string::ToString, sync::Arc};
 
     #[test_case]
     fn test_protocol_stack_manager_creation() {
