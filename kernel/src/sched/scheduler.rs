@@ -35,7 +35,7 @@ use super::accounting::{Activity, CpuClock};
 use crate::sync::counter::SaturatingCounter;
 use crate::sync::diagnostic::{DiagnosticRecord, ReportInterval};
 use core::sync::atomic::{
-    AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+    AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize, Ordering,
 };
 
 use alloc::{
@@ -82,11 +82,7 @@ static TASK_POOL: Once<TaskPool> = Once::new();
 static TASK_REAPER_STARTED: AtomicBool = AtomicBool::new(false);
 static TASK_REAPER_WAKER: crate::sync::Waker =
     crate::sync::Waker::new_uninterruptible("task-reaper");
-static SLICE_CALLBACK_TOKENS: AtomicU64 = AtomicU64::new(1);
-static SLICE_CALLBACK_CONTEXTS: Once<IrqSpinLock<BTreeMap<u64, SliceCallbackContext>>> =
-    Once::new();
 static SLICE_STATES: Once<[IrqSpinLock<SliceState>; MAX_NUM_CPUS]> = Once::new();
-static SLICE_TIMER_HANDLER: Once<Arc<SliceTimerHandler>> = Once::new();
 static DEADLINE_TIMER_HANDLER: Once<Arc<DeadlineTimerHandler>> = Once::new();
 static DEADLINE_CALLBACK_TOKENS: AtomicUsize = AtomicUsize::new(1);
 static DEADLINE_CALLBACK_CONTEXTS: Once<IrqSpinLock<BTreeMap<usize, DeadlineCallbackContext>>> =
@@ -267,18 +263,9 @@ fn deadline_timer_handler() -> Arc<dyn TimerHandler> {
         .clone()
 }
 
-#[derive(Clone, Copy)]
-struct SliceCallbackContext {
-    cpu_id: usize,
-    task_id: usize,
-    task_generation: usize,
-    generation: u64,
-}
-
-#[derive(Clone, Copy)]
 struct ActiveSlice {
     handle: Option<TimerHandle>,
-    token: u64,
+    handler: Arc<SliceTimerHandler>,
 }
 
 struct SliceState {
@@ -309,7 +296,7 @@ pub(crate) struct SliceDiagnosticSnapshot {
     pub action: u64,
     /// Task owning the slice, or zero when no task is associated.
     pub task_id: u64,
-    /// Slice callback token.
+    /// Identity of the retained callback object, for diagnostics only.
     pub token: u64,
     /// Software-timer handle ID, or zero before timer insertion.
     pub handle_id: u64,
@@ -377,50 +364,42 @@ impl SliceState {
     }
 }
 
-struct SliceTimerHandler;
+/// Each arm owns its callback context. The timer queue holds a Weak reference;
+/// cancellation releases ownership, while an already claimed callback retains
+/// its Arc until completion. Pointer identity cannot be reused while it lives.
+struct SliceTimerHandler {
+    cpu_id: usize,
+    task_id: usize,
+    task_generation: usize,
+}
+
+impl SliceTimerHandler {
+    fn diagnostic_token(&self) -> u64 { self as *const Self as usize as u64 }
+}
 
 impl TimerHandler for SliceTimerHandler {
-    fn on_timer_expired(self: Arc<Self>, context: usize) {
-        let token = context as u64;
-        let Some(context) = slice_callback_contexts().lock().remove(&token) else {
-            return;
-        };
-        let mut state = slice_states()[context.cpu_id].lock();
-        let matched = state.generation == context.generation
-            && state.task_id == Some(context.task_id)
-            && state.task_generation == Some(context.task_generation)
-            && state.active.is_some_and(|active| active.token == token);
+    fn on_timer_expired(self: Arc<Self>, _context: usize) {
+        let mut state = slice_states()[self.cpu_id].lock();
+        let matched = state.task_id == Some(self.task_id)
+            && state.task_generation == Some(self.task_generation)
+            && state.active.as_ref().is_some_and(|active| Arc::ptr_eq(&active.handler, &self));
         if matched {
             state.active = None;
             state.need_resched = true;
         }
         publish_slice_action(
-            context.cpu_id,
+            self.cpu_id,
             &state,
-            if matched {
-                SLICE_DIAGNOSTIC_EXPIRED
-            } else {
-                SLICE_DIAGNOSTIC_STALE_EXPIRE
-            },
-            Some(context.task_id),
-            token,
+            if matched { SLICE_DIAGNOSTIC_EXPIRED } else { SLICE_DIAGNOSTIC_STALE_EXPIRE },
+            Some(self.task_id),
+            self.diagnostic_token(),
             0,
         );
     }
 }
 
-fn slice_callback_contexts() -> &'static IrqSpinLock<BTreeMap<u64, SliceCallbackContext>> {
-    SLICE_CALLBACK_CONTEXTS.call_once(|| IrqSpinLock::new(BTreeMap::new()))
-}
-
 fn slice_states() -> &'static [IrqSpinLock<SliceState>; MAX_NUM_CPUS] {
     SLICE_STATES.call_once(|| core::array::from_fn(|_| IrqSpinLock::new(SliceState::new())))
-}
-
-fn slice_timer_handler() -> Arc<dyn TimerHandler> {
-    SLICE_TIMER_HANDLER
-        .call_once(|| Arc::new(SliceTimerHandler))
-        .clone()
 }
 
 #[inline(always)]
@@ -2191,7 +2170,7 @@ fn invalidate_local_slice(cpu_id: usize) {
     let (active, task_id) = {
         let mut state = slice_states()[cpu_id].lock();
         let task_id = state.task_id;
-        state.generation = state.generation.wrapping_add(1);
+        state.generation = state.generation.saturating_add(1);
         state.need_resched = false;
         state.task_id = None;
         state.task_generation = None;
@@ -2201,15 +2180,14 @@ fn invalidate_local_slice(cpu_id: usize) {
             &state,
             SLICE_DIAGNOSTIC_INVALIDATED,
             task_id,
-            active.map_or(0, |active| active.token),
-            active
+            active.as_ref().map_or(0, |active| active.handler.diagnostic_token()),
+            active.as_ref()
                 .and_then(|active| active.handle)
                 .map_or(0, |handle| handle.id),
         );
         (active, task_id)
     };
     if let Some(active) = active {
-        slice_callback_contexts().lock().remove(&active.token);
         if let Some(handle) = active.handle {
             let cancelled = cancel_timer(handle);
             let state = slice_states()[cpu_id].lock();
@@ -2222,7 +2200,7 @@ fn invalidate_local_slice(cpu_id: usize) {
                     SLICE_DIAGNOSTIC_CANCEL_MISSED
                 },
                 task_id,
-                active.token,
+                active.handler.diagnostic_token(),
                 handle.id,
             );
         }
@@ -2273,17 +2251,15 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
     let fair_anomaly = deadline.is_none()
         && (duration_ns == 0 || (fair_slice_ns != 0 && fair_vdeadline_ns <= fair_vruntime_ns));
     drop(task);
-    let token = SLICE_CALLBACK_TOKENS.fetch_add(1, Ordering::Relaxed);
-    let generation = {
+    let handler = Arc::new(SliceTimerHandler { cpu_id, task_id, task_generation });
+    let token = handler.diagnostic_token();
+    let (generation, replaced) = {
         let mut state = slice_states()[cpu_id].lock();
-        state.generation = state.generation.wrapping_add(1);
+        state.generation = state.generation.saturating_add(1);
         state.need_resched = false;
         state.task_id = Some(task_id);
         state.task_generation = Some(task_generation);
-        state.active = Some(ActiveSlice {
-            handle: None,
-            token,
-        });
+        let replaced = state.active.replace(ActiveSlice { handle: None, handler: handler.clone() });
         let mut diagnostic = SliceDiagnosticSnapshot {
             action: SLICE_DIAGNOSTIC_ARM_PREPARE,
             task_id: task_id as u64,
@@ -2307,8 +2283,12 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
         };
         diagnostic.generation = state.generation;
         SLICE_DIAGNOSTICS[cpu_id].publish(diagnostic);
-        state.generation
+        (state.generation, replaced)
     };
+    // Cancel and release superseded callbacks outside the slice-state lock.
+    if let Some(replaced) = replaced {
+        if let Some(handle) = replaced.handle { let _ = cancel_timer(handle); }
+    }
     if (deadline_anomaly || fair_anomaly) && should_log_deadline_slice_anomaly(cpu_id, now_ns) {
         let timer = crate::timer::timer_diagnostic_snapshot(cpu_id);
         let timer_available = timer.is_some();
@@ -2337,37 +2317,26 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
             timer.programmed_deadline_ns,
         );
     }
-    slice_callback_contexts().lock().insert(
-        token,
-        SliceCallbackContext {
-            cpu_id,
-            task_id,
-            task_generation,
-            generation,
-        },
-    );
-    let handler = slice_timer_handler();
+    let timer_handler: Arc<dyn TimerHandler> = handler.clone();
     let deadline_ns = get_time_ns().saturating_add(duration_ns);
     let handle = if deadline.is_some() {
-        add_scheduler_timer(deadline_ns, &handler, token as usize)
+        add_scheduler_timer(deadline_ns, &timer_handler, 0)
     } else {
         add_timer(
             deadline_ns,
             crate::timer::TimerPrecision::Exact,
-            &handler,
-            token as usize,
+            &timer_handler,
+            0,
         )
     };
     let keep_handle = {
         let mut state = slice_states()[cpu_id].lock();
         if state.generation == generation
             && state.task_id == Some(task_id)
-            && state.active.is_some_and(|active| active.token == token)
+            && state.task_generation == Some(task_generation)
+            && state.active.as_ref().is_some_and(|active| Arc::ptr_eq(&active.handler, &handler))
         {
-            state.active = Some(ActiveSlice {
-                handle: Some(handle),
-                token,
-            });
+            state.active.as_mut().expect("matched active callback").handle = Some(handle);
             publish_slice_action(
                 cpu_id,
                 &state,
@@ -2427,14 +2396,14 @@ fn take_local_slice_reschedule(cpu_id: usize) -> bool {
     state.need_resched = false;
     if requested {
         let task_id = state.task_id;
-        let active = state.active;
+        let active = state.active.as_ref();
         publish_slice_action(
             cpu_id,
             &state,
             SLICE_DIAGNOSTIC_RESCHEDULE_TAKEN,
             task_id,
-            active.map_or(0, |active| active.token),
-            active
+            active.as_ref().map_or(0, |active| active.handler.diagnostic_token()),
+            active.as_ref()
                 .and_then(|active| active.handle)
                 .map_or(0, |handle| handle.id),
         );
@@ -5767,7 +5736,6 @@ pub fn reset() {
         DEBUG_REMOTE_ENQUEUE_SEQ[cpu_id].store(0, Ordering::SeqCst);
         *slice_states()[cpu_id].lock() = SliceState::new();
     }
-    slice_callback_contexts().lock().clear();
     deadline_callback_contexts().lock().clear();
     NEXT_CPU.store(0, Ordering::SeqCst);
     DEBUG_ENQUEUE_SEQ.store(0, Ordering::SeqCst);
@@ -5865,6 +5833,25 @@ pub fn make_test_tasks() {
 
 #[cfg(test)]
 mod tests {
+    #[test_case]
+    fn stale_slice_callback_cannot_expire_a_replacement_with_the_same_task_metadata() {
+        reset();
+        let old = Arc::new(SliceTimerHandler { cpu_id: 0, task_id: 12, task_generation: 34 });
+        let current = Arc::new(SliceTimerHandler { cpu_id: 0, task_id: 12, task_generation: 34 });
+        {
+            let mut state = slice_states()[0].lock();
+            state.task_id = Some(12);
+            state.task_generation = Some(34);
+            state.active = Some(ActiveSlice { handle: None, handler: current.clone() });
+        }
+        old.on_timer_expired(0);
+        assert!(!take_local_slice_reschedule(0));
+        current.clone().on_timer_expired(0);
+        assert!(take_local_slice_reschedule(0));
+        current.on_timer_expired(0);
+        assert!(!take_local_slice_reschedule(0));
+    }
+
     use crate::task::{
         TaskCorePreference, TaskType, cleanup_parent_waker, cleanup_task_waker,
         get_parent_waitpid_waker,
