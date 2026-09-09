@@ -1,5 +1,5 @@
 use core::arch::naked_asm;
-use core::mem::{MaybeUninit, offset_of};
+use core::mem::MaybeUninit;
 
 use limine::mp::MpInfo;
 
@@ -40,9 +40,10 @@ unsafe extern "C" fn limine_ap_entry(_info: &MpInfo) -> ! {
         ".option arch, +m",
         "csrci sstatus, 0x2",
         "csrw sscratch, zero",
-        "ld a0, {hartid_offset}(a0)",
+        "call {logical_cpu_id}",
         // Limine's stack is not mapped by Scarlet's runtime page table.
-        // Select this hart's permanent stack before entering any Rust frame.
+        // The short ID accessor has returned; select the permanent stack
+        // before waiting or entering Rust frames that span a page-table switch.
         "la t0, {kernel_stack}",
         "li t1, {stack_size}",
         "addi t2, a0, 1",
@@ -50,11 +51,15 @@ unsafe extern "C" fn limine_ap_entry(_info: &MpInfo) -> ! {
         "add sp, t0, t1",
         "tail {ap_wait}",
         ".option pop",
-        hartid_offset = const offset_of!(MpInfo, hartid),
+        logical_cpu_id = sym logical_cpu_for_ap,
         kernel_stack = sym KERNEL_STACK,
         stack_size = const STACK_SIZE,
         ap_wait = sym secondary_cpu_entry,
     );
+}
+
+extern "C" fn logical_cpu_for_ap(info: &MpInfo) -> usize {
+    usize::try_from(info.extra_argument()).expect("Limine CPU slot exceeds pointer width")
 }
 
 extern "C" fn secondary_cpu_entry(cpu_id: usize) -> ! {
@@ -87,7 +92,9 @@ fn bootstrap_aps() {
             continue;
         }
         println!("[riscv64] Bootstrapping hart {}...", cpu.hartid);
-        cpu.bootstrap(limine_ap_entry, cpu.hartid);
+        let cpu_id = crate::arch::riscv::cpu::logical_id(cpu.hartid as usize)
+            .expect("Limine hart is absent from CPU inventory");
+        cpu.bootstrap(limine_ap_entry, cpu_id as u64);
     }
 }
 
@@ -102,7 +109,20 @@ pub fn limine_entry() -> ! {
     init_bss();
 
     let bsp = response(RISCV_BSP_HARTID_REQUEST.response(), "riscv-bsp-hartid");
-    crate::arch::riscv::boot::init_cpu(bsp.bsp_hartid as usize);
+    crate::arch::riscv::boot::init_cpu(0);
+    if let Some(mp) = MP_REQUEST.response() {
+        crate::arch::riscv::cpu::init_harts(
+            bsp.bsp_hartid as usize,
+            mp.cpus().iter().map(|cpu| cpu.hartid as usize),
+        )
+        .expect("invalid Limine CPU inventory");
+    } else {
+        crate::arch::riscv::cpu::init_harts(
+            bsp.bsp_hartid as usize,
+            core::iter::once(bsp.bsp_hartid as usize),
+        )
+        .expect("invalid Limine boot hart");
+    }
 
     let hhdm = response(HHDM_REQUEST.response(), "hhdm");
     let executable = response(EXECUTABLE_ADDRESS_REQUEST.response(), "executable-address");
@@ -151,7 +171,7 @@ pub fn limine_entry() -> ! {
     let usable_memory_paddr = reserve_front(usable_region, reserved_bytes);
     let initramfs_paddr = module_area(MODULE_REQUEST.response());
     let fdt_manager = FdtManager::get_manager();
-    let cpu_count = fdt_manager.get_cpu_count().unwrap_or(1);
+    let cpu_count = crate::arch::riscv::cpu::count();
     let fdt_cmdline = fdt_manager
         .get_fdt()
         .and_then(|fdt| fdt.chosen().bootargs());
@@ -163,7 +183,7 @@ pub fn limine_entry() -> ! {
         usable_memory_regions(memmap.entries(), usable_region, usable_memory_paddr, None)
             .unwrap_or_else(|error| panic!("failed to build PMM memory regions: {}", error));
     let bootinfo = BootInfo::new(
-        bsp.bsp_hartid as usize,
+        0,
         cpu_count,
         usable_memory_paddr,
         direct_map_regions,
@@ -180,9 +200,8 @@ pub fn limine_entry() -> ! {
     bootstrap_aps();
 
     unsafe {
-        // The BSP may be any hart. Do not share hart 0's stack with AP 0.
-        let stack_top = (&raw const KERNEL_STACK) as *const _ as usize
-            + STACK_SIZE * (bsp.bsp_hartid as usize + 1);
+        // The boot hart owns logical slot 0 regardless of its physical ID.
+        let stack_top = (&raw const KERNEL_STACK) as *const _ as usize + STACK_SIZE;
         (&raw mut EARLY_BOOTINFO).write(MaybeUninit::new(bootinfo));
         let bootinfo_ptr = (&raw const EARLY_BOOTINFO).cast::<BootInfo>();
         crate::arch::riscv::switch_stack_and_jump(

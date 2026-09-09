@@ -447,30 +447,18 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         e
     })?;
 
-    // Try to get PLIC configuration from FDT for proper context mapping
-    let controller =
-        if let Some((max_interrupts, s_mode_contexts)) = get_plic_config_from_fdt(device.name()) {
-            crate::println!(
-                "[interrupt] PLIC: FDT config found - ndev={}, contexts={:?}",
-                max_interrupts,
-                s_mode_contexts
-            );
-            Box::new(Plic::with_contexts(
-                base_addr,
-                max_interrupts,
-                s_mode_contexts,
-            ))
-        } else {
-            // Fallback to hardcoded values (TCG-style: M+S per hart)
-            crate::println!(
-                "[interrupt] PLIC: Using default config (1023 interrupts, MAX_NUM_CPUS contexts)"
-            );
-            Box::new(Plic::new(
-                base_addr,
-                1023,
-                crate::environment::MAX_NUM_CPUS as CpuId,
-            ))
-        };
+    let (max_interrupts, s_mode_contexts) = get_plic_config_from_fdt(device.name())
+        .ok_or("PLIC requires valid CPU interrupt-context mappings")?;
+    crate::println!(
+        "[interrupt] PLIC: FDT config found - ndev={}, contexts={:?}",
+        max_interrupts,
+        s_mode_contexts
+    );
+    let controller = Box::new(Plic::with_contexts(
+        base_addr,
+        max_interrupts,
+        s_mode_contexts,
+    ));
 
     match crate::interrupt::InterruptManager::global().register_external_controller(controller) {
         Ok(_) => {
@@ -500,130 +488,56 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
 /// * `Some((max_interrupts, s_mode_contexts))` on success
 /// * `None` if FDT is not available or properties cannot be read
 fn get_plic_config_from_fdt(device_name: &str) -> Option<(InterruptId, Vec<usize>)> {
-    let fdt_manager = FdtManager::get_manager();
-    let fdt = fdt_manager.get_fdt()?;
-
-    fn read_be_u32(bytes: &[u8]) -> Option<u32> {
-        if bytes.len() < 4 {
+    let fdt = FdtManager::get_manager().get_fdt()?;
+    let plic_node = fdt.all_nodes().find(|node| node.name == device_name)?;
+    let max_interrupts =
+        u32::from_be_bytes(plic_node.property("riscv,ndev")?.value.try_into().ok()?);
+    let cpus = fdt.find_node("/cpus")?;
+    let mut contexts = vec![None; crate::environment::MAX_NUM_CPUS];
+    let mut offset = 0usize;
+    let mut context_id = 0usize;
+    let bytes = plic_node.property("interrupts-extended")?.value;
+    while offset < bytes.len() {
+        let phandle =
+            u32::from_be_bytes(bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?);
+        offset += 4;
+        let intc = fdt.all_nodes().find(|node| {
+            node.property("phandle")
+                .is_some_and(|p| p.value == phandle.to_be_bytes())
+        })?;
+        // RISC-V per-CPU interrupt controllers encode a single interrupt ID.
+        let cells = u32::from_be_bytes(intc.property("#interrupt-cells")?.value.try_into().ok()?);
+        if cells != 1 {
             return None;
         }
-        Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-    }
-
-    fn get_u32_prop<'a, 'b>(node: &fdt::node::FdtNode<'a, 'b>, name: &str) -> Option<u32> {
-        let prop = node.property(name)?;
-        read_be_u32(prop.value)
-    }
-
-    fn find_node_by_phandle<'a>(
-        fdt: &'a fdt::Fdt<'a>,
-        phandle: u32,
-    ) -> Option<fdt::node::FdtNode<'a, 'a>> {
-        let mut stack: alloc::vec::Vec<fdt::node::FdtNode<'a, 'a>> = alloc::vec::Vec::new();
-        stack.push(fdt.find_node("/")?);
-
-        while let Some(node) = stack.pop() {
-            if let Some(p) = get_u32_prop(&node, "phandle") {
-                if p == phandle {
-                    return Some(node);
+        let irq = u32::from_be_bytes(bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?);
+        offset += 4;
+        if irq == 9 {
+            let cpu = cpus.children().find(|cpu| {
+                cpu.children().any(|child| {
+                    child
+                        .property("phandle")
+                        .is_some_and(|p| p.value == phandle.to_be_bytes())
+                })
+            })?;
+            let reg = cpu.raw_reg()?.next()?;
+            let hart = usize::try_from(crate::device::fdt::decode_address(reg.address)?).ok()?;
+            if let Some(logical) = crate::arch::riscv::cpu::logical_id(hart) {
+                if contexts[logical].replace(context_id).is_some() {
+                    return None;
                 }
-            }
-            for child in node.children() {
-                stack.push(child);
             }
         }
-
-        None
+        context_id += 1;
     }
-
-    // Find the PLIC node in /soc
-    let soc = fdt.find_node("/soc")?;
-    let plic_node = soc.children().find(|node| node.name == device_name)?;
-
-    // Read riscv,ndev property for max interrupt count
-    let max_interrupts = plic_node
-        .property("riscv,ndev")
-        .and_then(|prop| {
-            if prop.value.len() >= 4 {
-                Some(u32::from_be_bytes([
-                    prop.value[0],
-                    prop.value[1],
-                    prop.value[2],
-                    prop.value[3],
-                ]))
-            } else {
-                None
-            }
-        })
-        .unwrap_or(1023);
-
-    // Read interrupts-extended property to find S-mode contexts.
-    // The entry size depends on the referenced interrupt-controller node's
-    // #interrupt-cells, so we must decode it dynamically.
-    //
-    // Typical RISC-V CPU interrupt controller uses #interrupt-cells = <1>
-    // and provides irq_type values:
-    // - 9  = Supervisor External Interrupt (SEI)
-    // - 11 = Machine External Interrupt (MEI)
-    let s_mode_contexts = plic_node
-        .property("interrupts-extended")
-        .map(|prop| {
-            let mut contexts = Vec::new();
-            let mut offset = 0usize;
-            let mut context_id = 0usize;
-            let bytes = prop.value;
-
-            while offset + 4 <= bytes.len() {
-                let phandle = match read_be_u32(&bytes[offset..offset + 4]) {
-                    Some(v) => v,
-                    None => break,
-                };
-                offset += 4;
-
-                let intc_node = find_node_by_phandle(fdt, phandle);
-                let interrupt_cells = intc_node
-                    .as_ref()
-                    .and_then(|n| get_u32_prop(n, "#interrupt-cells"))
-                    .unwrap_or(1) as usize;
-
-                if interrupt_cells == 0 {
-                    break;
-                }
-                let needed = interrupt_cells.saturating_mul(4);
-                if offset + needed > bytes.len() {
-                    break;
-                }
-
-                // Interpret the first interrupt cell as the irq_type.
-                let irq_type = read_be_u32(&bytes[offset..offset + 4]).unwrap_or(0);
-                if irq_type == 9 {
-                    contexts.push(context_id);
-                }
-
-                offset += needed;
-                context_id += 1;
-            }
-
-            // Backward-compatible fallback: if decoding failed (e.g. phandle lookup),
-            // fall back to fixed 2-cell entries.
-            if contexts.is_empty() {
-                for (idx, chunk) in bytes.chunks_exact(8).enumerate() {
-                    let irq_type = u32::from_be_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
-                    if irq_type == 9 {
-                        contexts.push(idx);
-                    }
-                }
-            }
-
-            contexts
-        })
-        .unwrap_or_else(Vec::new);
-
-    if s_mode_contexts.is_empty() {
-        return None;
-    }
-
-    Some((max_interrupts, s_mode_contexts))
+    let len = contexts.iter().rposition(Option::is_some)? + 1;
+    contexts.truncate(len);
+    // Reject incomplete mappings instead of silently directing a CPU at a
+    // different hart's context. Firmware entry order has no meaning here.
+    Some((
+        max_interrupts,
+        contexts.into_iter().collect::<Option<Vec<_>>>()?,
+    ))
 }
 
 fn remove_fn(_device: &PlatformDeviceInfo) -> Result<(), &'static str> {

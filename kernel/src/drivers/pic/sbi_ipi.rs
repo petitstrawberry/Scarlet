@@ -57,8 +57,12 @@ impl SoftwareInterruptController for SbiIpi {
     /// Send a software interrupt to a CPU.
     fn send_software_interrupt(&self, target_cpu: CpuId) -> InterruptResult<()> {
         self.validate_cpu_id(target_cpu)?;
-        crate::arch::riscv::instruction::sbi::sbi_send_ipi(1 << target_cpu, 0);
-        Ok(())
+        let hart = crate::arch::riscv::cpu::hart_id(target_cpu as usize)
+            .ok_or(InterruptError::InvalidCpuId)?;
+        // One bit at the hart's own base also works for sparse IDs larger
+        // than the native register's bit count.
+        crate::arch::riscv::instruction::sbi::sbi_send_ipi(1, hart)
+            .map_err(|_| InterruptError::HardwareError)
     }
 }
 

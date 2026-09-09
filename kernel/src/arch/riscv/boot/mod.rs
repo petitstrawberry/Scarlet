@@ -25,10 +25,10 @@ pub fn init_cpu(cpu_id: usize) {
     // SAFETY: Boot code initializes each `CPUS[cpu_id]` slot exactly once on
     // its assigned hart before publishing the pointer through `sscratch`.
     let riscv = unsafe { &mut *(&raw mut CPUS[cpu_id]) };
-    riscv.hartid = cpu_id;
+    riscv.cpu_id = cpu_id;
     trap_init(riscv);
     println!(
-        "[riscv64] init_cpu: cpu_id={} cpu struct={:#x} done",
+        "[riscv] init_cpu: cpu_id={} cpu struct={:#x} done",
         cpu_id, riscv as *mut _ as usize
     );
 }
@@ -39,7 +39,7 @@ pub(crate) fn trap_init(riscv: &mut Riscv) {
     let trap_stack_start = unsafe { KERNEL_STACK.start() };
     let stack_size = STACK_SIZE;
 
-    let trap_stack = trap_stack_start + stack_size * (riscv.hartid + 1) as usize;
+    let trap_stack = trap_stack_start + stack_size * (riscv.cpu_id + 1) as usize;
     riscv.kernel_stack = trap_stack;
     riscv.kernel_trap = arch_kernel_trap_handler as usize;
     let scratch_addr = riscv as *const _ as usize;
@@ -61,8 +61,8 @@ pub(crate) fn trap_init(riscv: &mut Riscv) {
     }
 
     println!(
-        "[riscv64] trap_init: hart={} trap_stack={:#x} scratch={:#x} trap CSRs installed",
-        riscv.hartid, trap_stack, scratch_addr
+        "[riscv] trap_init: cpu={} trap_stack={:#x} scratch={:#x} trap CSRs installed",
+        riscv.cpu_id, trap_stack, scratch_addr
     );
 
     #[cfg(feature = "user-fpu")]

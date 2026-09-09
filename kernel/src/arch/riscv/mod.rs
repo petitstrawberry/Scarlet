@@ -22,6 +22,7 @@ use crate::task::Task;
 pub mod registers;
 pub mod boot;
 pub mod context;
+pub(crate) mod cpu;
 pub mod earlycon;
 pub mod fdt;
 pub mod fpu;
@@ -393,7 +394,7 @@ pub fn first_switch_to_user(task: &Task) -> ! {
     };
 
     crate::println!(
-        "[riscv64] CPU {}: First switch to user task PID {} with kernel SP {:#x}",
+        "[riscv] CPU {}: First switch to user task PID {} with kernel SP {:#x}",
         crate::arch::get_cpu().get_cpuid(),
         task.get_id(),
         kernel_sp,
@@ -444,7 +445,7 @@ static mut CPUS: [Riscv; MAX_NUM_CPUS] = [const { Riscv::new(0) }; MAX_NUM_CPUS]
 #[derive(Debug, Clone)]
 pub struct Riscv {
     scratch: usize,             // word: 0
-    pub hartid: usize,          // word: 1
+    pub cpu_id: usize,          // word: 1
     satp: usize,                // word: 2
     kernel_stack: usize,        // word: 3
     kernel_trap: usize,         // word: 4
@@ -455,7 +456,7 @@ impl Riscv {
     pub const fn new(cpu_id: usize) -> Self {
         Riscv {
             scratch: 0,
-            hartid: cpu_id,
+            cpu_id,
             kernel_stack: 0,
             kernel_trap: 0,
             satp: 0,
@@ -464,7 +465,7 @@ impl Riscv {
     }
 
     pub fn get_cpuid(&self) -> usize {
-        self.hartid as usize
+        self.cpu_id as usize
     }
 
     pub fn get_trapframe_paddr(&self) -> usize {
@@ -501,7 +502,7 @@ impl Riscv {
     }
 
     pub fn as_paddr_cpu(&mut self) -> &mut Riscv {
-        unsafe { &mut CPUS[self.hartid as usize] }
+        unsafe { &mut CPUS[self.cpu_id as usize] }
     }
 }
 
@@ -770,7 +771,7 @@ pub fn get_cpu() -> &'static mut Riscv {
 /// Reads `sscratch` directly. Boot entry code explicitly clears `sscratch`
 /// to zero, so a zero value deterministically means "before init_cpu".
 /// `init_cpu` publishes the per-CPU pointer in `sscratch` last, after
-/// `hartid` has been stored.
+/// `cpu_id` has been stored.
 ///
 /// # Returns
 ///
@@ -790,10 +791,10 @@ pub fn try_get_cpuid() -> Option<usize> {
         return None;
     }
     // SAFETY: Non-zero `sscratch` is published only by `init_cpu` after
-    // `hartid` is set. Boot entry code zeroes `sscratch` first, so any
+    // `cpu_id` is set. Boot entry code zeroes `sscratch` first, so any
     // non-zero value here is the per-CPU pointer.
     let riscv = unsafe { &*(scratch as *const Riscv) };
-    Some(riscv.hartid as usize)
+    Some(riscv.cpu_id as usize)
 }
 
 pub fn set_next_mode(mode: Mode) {
@@ -880,7 +881,7 @@ const _: () = {
     use core::mem::{offset_of, size_of};
     let word = size_of::<usize>();
     assert!(offset_of!(Riscv, scratch) == 0);
-    assert!(offset_of!(Riscv, hartid) == word);
+    assert!(offset_of!(Riscv, cpu_id) == word);
     assert!(offset_of!(Riscv, satp) == 2 * word);
     assert!(offset_of!(Riscv, kernel_stack) == 3 * word);
     assert!(offset_of!(Riscv, kernel_trap) == 4 * word);

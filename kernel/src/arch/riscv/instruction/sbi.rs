@@ -268,8 +268,23 @@ pub fn sbi_set_timer(stime_value: u64) {
 }
 
 /// Sends an SBI software interrupt to the selected harts.
-pub fn sbi_send_ipi(hart_mask: usize, hart_mask_base: usize) {
-    let _ = sbi_call(Extension::Ipi, 0, hart_mask, hart_mask_base);
+pub fn sbi_send_ipi(hart_mask: usize, hart_mask_base: usize) -> Result<(), SbiError> {
+    sbi_call(Extension::Ipi, 0, hart_mask, hart_mask_base).map(|_| ())
+}
+
+/// Start a hart at a physical supervisor entry. SBI returns before entry may
+/// run; the caller must publish all entry state before this request.
+pub(crate) fn hart_start(
+    hart: usize,
+    entry: crate::mem::address::PhysAddr,
+    opaque: usize,
+) -> Result<(), SbiError> {
+    let entry = usize::try_from(entry.as_u64()).map_err(|_| SbiError::InvalidAddress)?;
+    sbi_result_unit(sbi_call_v02_raw(
+        Extension::Hsm,
+        0,
+        [hart, entry, opaque, 0, 0, 0],
+    ))
 }
 
 /// Requests an SBI system reset and does not return.
