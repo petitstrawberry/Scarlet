@@ -168,7 +168,7 @@ pub fn sys_vfs_open(trapframe: &mut Trapframe) -> usize {
 pub fn sys_vfs_truncate(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let path_ptr = trapframe.get_arg(0);
-    let length = trapframe.get_arg(1) as u64;
+    let length = crate::syscall::u64_arg(trapframe, 1);
 
     trapframe.increment_pc_next(&task);
 

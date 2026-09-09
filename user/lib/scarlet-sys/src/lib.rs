@@ -50,6 +50,38 @@ mod arch;
 #[path = "arch/riscv.rs"]
 mod arch;
 
+pub use scarlet_abi::native_scalar;
+
+/// Invoke an operation returning a full u64, with up to six native argument words.
+/// RV32 returns its low/high halves in a0/a1; 64-bit targets return one word.
+///
+/// # Safety
+/// The caller must select a wide-result operation and satisfy its complete
+/// pointer, ownership and lifetime contract, as for the other raw syscalls.
+pub unsafe fn syscall_u64(syscall: Syscall, args: [usize; 6]) -> u64 {
+    #[cfg(target_pointer_width = "64")]
+    // SAFETY: The caller supplies the selected operation's contract.
+    unsafe {
+        arch::syscall6(
+            syscall, args[0], args[1], args[2], args[3], args[4], args[5],
+        ) as u64
+    }
+    #[cfg(target_arch = "riscv32")]
+    // SAFETY: The caller supplies the selected operation's contract.
+    unsafe {
+        arch::syscall_u64(syscall, args)
+    }
+}
+
+/// Sleep for a full-width nanosecond duration using Scarlet Native's scalar ABI.
+pub fn sleep_ns(nanoseconds: u64) -> usize {
+    let words = native_scalar::u64_to_words(nanoseconds);
+    let mut args = [0; 2];
+    args[..words.len()].copy_from_slice(&words);
+    // SAFETY: Sleep takes a scalar duration, without user pointers or ownership effects.
+    unsafe { syscall2(Syscall::Sleep, args[0], args[1]) }
+}
+
 /// Invoke a Scarlet Native syscall with no arguments.
 ///
 /// # Arguments

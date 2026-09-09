@@ -2,6 +2,24 @@ use core::arch::asm;
 
 use scarlet_abi::Syscall;
 
+#[cfg(target_arch = "riscv32")]
+pub(super) unsafe fn syscall_u64(syscall: Syscall, args: [usize; 6]) -> u64 {
+    let low: usize;
+    let high: usize;
+    // SAFETY: The caller chose a wide-result Native syscall. Both result
+    // registers are outputs; a1 must not be silently treated as a clobber.
+    unsafe {
+        asm!("ecall",
+            in("a7") syscall as usize,
+            inlateout("a0") args[0] => low,
+            inlateout("a1") args[1] => high,
+            in("a2") args[2], in("a3") args[3],
+            in("a4") args[4], in("a5") args[5],
+            clobber_abi("C"), options(nostack));
+    }
+    scarlet_abi::native_scalar::u64_from_words([low, high])
+}
+
 pub(super) unsafe fn syscall0(syscall: Syscall) -> usize {
     let ret;
     // SAFETY: Scarlet Native RISC-V syscalls use a7 for the syscall number,

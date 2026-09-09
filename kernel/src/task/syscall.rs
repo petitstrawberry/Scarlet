@@ -1599,7 +1599,7 @@ mod scheduler_control_tests {
 }
 
 pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
-    let nanosecs = trapframe.get_arg(0) as u64;
+    let nanosecs = crate::syscall::u64_arg(trapframe, 0);
     let task = mytask().unwrap();
 
     // Increment PC before sleeping to avoid infinite loop
@@ -1624,24 +1624,21 @@ pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
 pub fn sys_monotonic_time(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(&task);
-    crate::time::current_time_ns() as usize
+    crate::syscall::u64_result(trapframe, crate::time::current_time_ns())
 }
 
 /// Read the kernel wall-clock (real) time.
 ///
 /// Returns wall-clock nanoseconds since the Unix epoch. If no RTC source has
-/// initialized the wall clock yet, returns `usize::MAX` as a sentinel.
+/// initialized the wall clock yet, returns the full `u64::MAX` sentinel.
 ///
 /// # Returns
 ///
-/// Wall-clock nanoseconds since the Unix epoch, or `usize::MAX` if unavailable.
+/// Wall-clock nanoseconds since the Unix epoch, or `u64::MAX` if unavailable.
 pub fn sys_system_time(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(&task);
-    match crate::time::system_time_ns() {
-        Some(ns) => ns as usize,
-        None => usize::MAX,
-    }
+    crate::syscall::u64_result(trapframe, crate::time::system_time_ns().unwrap_or(u64::MAX))
 }
 
 /// Read cumulative system-wide CPU usage accounting.

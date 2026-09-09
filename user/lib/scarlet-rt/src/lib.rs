@@ -63,7 +63,7 @@ pub fn exit(code: i32) -> ! {
     // permanent 100% CPU task.
     loop {
         // SAFETY: This fixed sleep operation takes only a scalar duration and has no userspace pointer arguments.
-        let _ = unsafe { syscall1(Syscall::Sleep, 1_000_000_000) };
+        let _ = scarlet_sys::sleep_ns(1_000_000_000);
     }
 }
 

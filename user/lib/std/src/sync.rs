@@ -2,7 +2,7 @@
 //!
 //! This module provides minimal synchronization primitives for multi-threaded applications.
 
-use crate::syscall::{Syscall, syscall1, syscall2, syscall3};
+use crate::syscall::{Syscall, syscall2, syscall3};
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -36,7 +36,7 @@ fn futex_wait(word: &AtomicU32, expected: u32) {
         // Keep mixed old-kernel/new-userland images from turning lock
         // contention into a tight syscall loop.
         // SAFETY: This fixed sleep operation takes only a scalar duration and has no userspace pointer arguments.
-        let _ = unsafe { syscall1(Syscall::Sleep, 10_000_000) };
+        let _ = scarlet_sys::sleep_ns(10_000_000);
     }
 }
 
