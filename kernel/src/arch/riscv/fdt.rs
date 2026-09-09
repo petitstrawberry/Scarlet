@@ -72,10 +72,7 @@ fn is_enabled_cpu_node(cpu: &fdt::node::FdtNode) -> bool {
     }
 
     if let Some(status) = cpu.property("status") {
-        if bytes_to_cstr(status.value)
-            .map(|s| s == "disabled")
-            .unwrap_or(false)
-        {
+        if !matches!(bytes_to_cstr(status.value), Some("okay" | "ok")) {
             return false;
         }
     }
@@ -110,7 +107,7 @@ fn isa_extension_list_has_extension(list: &[u8], extension: &[u8]) -> bool {
 fn isa_string_has_extension(isa: &[u8], extension: &[u8]) -> bool {
     let len = isa.iter().position(|&b| b == 0).unwrap_or(isa.len());
     let isa = &isa[..len];
-    if isa.len() < 4 {
+    if isa.len() < 5 || !matches!(&isa[2..4], b"32" | b"64") {
         return false;
     }
 
@@ -121,6 +118,23 @@ fn isa_string_has_extension(isa: &[u8], extension: &[u8]) -> bool {
     }
 
     let start = 4;
+    let base_end = isa[start..]
+        .iter()
+        .position(|&b| b == b'_')
+        .map(|offset| start + offset)
+        .unwrap_or(isa.len());
+    let base = &isa[start..base_end];
+    if extension.len() == 1 && base.iter().any(|b| b.to_ascii_lowercase() == extension[0]) {
+        return true;
+    }
+    if base.iter().any(|b| b.to_ascii_lowercase() == b'g')
+        && matches!(
+            extension,
+            b"i" | b"m" | b"a" | b"f" | b"d" | b"zicsr" | b"zifencei"
+        )
+    {
+        return true;
+    }
     let mut token_start = start;
     while token_start < isa.len() {
         let token_end = isa[token_start..]
@@ -160,4 +174,20 @@ fn riscv_token_matches_extension(token: &[u8], extension: &[u8]) -> bool {
 fn bytes_to_cstr(bytes: &[u8]) -> Option<&str> {
     let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     core::str::from_utf8(&bytes[..len]).ok()
+}
+
+#[cfg(test)]
+#[test_case]
+fn isa_detection_distinguishes_base_extensions_from_suffix_substrings() {
+    assert!(isa_string_has_extension(b"rv32ima_zicsr_zifencei\0", b"a"));
+    assert!(!isa_string_has_extension(b"rv32ima_zicsr_zifencei\0", b"d"));
+    assert!(isa_string_has_extension(b"rv64gc\0", b"d"));
+    assert!(isa_string_has_extension(b"rv64i2p1_m2p0_a2p1_d2p2\0", b"d"));
+    assert!(!isa_string_has_extension(
+        b"rv64imafdc_svvptc_zve32x_zvl128b\0",
+        b"v"
+    ));
+    assert!(isa_extension_list_has_extension(b"i\0m\0sstc\0", b"sstc"));
+    assert!(!isa_extension_list_has_extension(b"i\0m\0svvptc\0", b"v"));
+    assert!(!isa_string_has_extension(b"rv16imafd\0", b"d"));
 }

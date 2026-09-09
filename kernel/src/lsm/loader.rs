@@ -363,6 +363,11 @@ pub fn list_modules() -> Vec<(u64, String)> {
 }
 
 pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
+    // This relocation backend consumes ELF64. It must not install 64-bit
+    // machine code into a native ELF32 kernel merely because e_machine matches.
+    if usize::BITS != 64 {
+        return Err(LsmError::ArchMismatch);
+    }
     let object = elf::parse_reloc_object(data).map_err(LsmError::InvalidElf)?;
 
     if object.e_machine != MODULE_ELF_MACHINE {
