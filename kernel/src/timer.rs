@@ -429,6 +429,7 @@ fn should_sample_timer_stalls(cpu_id: usize, now_ns: u64) -> bool {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct TimerHandle {
     pub owner_cpu: usize,
+    /// Unique within the owner queue; never reused during that queue's lifetime.
     pub id: u64,
 }
 
@@ -576,6 +577,7 @@ struct TimerQueue {
     heap: BinaryHeap<QueuedTimer>,
     entries: BTreeMap<u64, Arc<SoftwareTimer>>,
     next_sequence: u64,
+    next_id: u64,
     stale_heap_nodes: usize,
 }
 
@@ -585,8 +587,19 @@ impl TimerQueue {
             heap: BinaryHeap::new(),
             entries: BTreeMap::new(),
             next_sequence: 0,
+            next_id: 1,
             stale_heap_nodes: 0,
         }
+    }
+
+    // Called only while the queue is exclusively owned, together with insertion.
+    // A stale handle must never identify a later timer after integer wraparound.
+    fn reserve_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id = id
+            .checked_add(1)
+            .expect("software timer identities exhausted");
+        id
     }
 
     fn add(
@@ -606,7 +619,10 @@ impl TimerQueue {
             context,
             state: AtomicU8::new(TimerState::Pending as u8),
         });
-        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .expect("software timer sequence exhausted");
         self.entries.insert(id, timer.clone());
         self.heap.push(QueuedTimer(timer));
     }
@@ -703,7 +719,6 @@ impl TimerQueue {
     }
 }
 
-static TIMER_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 static SOFTWARE_TIMER_QUEUES: Once<[IrqSpinLock<TimerQueue>; MAX_NUM_CPUS]> = Once::new();
 
 fn timer_queues() -> &'static [IrqSpinLock<TimerQueue>; MAX_NUM_CPUS] {
@@ -787,13 +802,14 @@ pub fn add_timer(
     context: usize,
 ) -> TimerHandle {
     let owner_cpu = local_cpu_id();
-    let id = TIMER_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     let (soft_deadline_ns, _) = software_timer_deadlines(get_time_ns(), deadline_ns, precision);
-    {
+    let id = {
         let mut queue = timer_queues()[owner_cpu].lock();
+        let id = queue.reserve_id();
         queue.add(id, soft_deadline_ns, precision, handler, context);
         publish_queue_diagnostic(owner_cpu, &mut queue);
-    }
+        id
+    };
     // This is deliberately local: add_timer owns the new entry on the current
     // CPU and must never program a remote CPU's local hardware comparator.
     reprogram_local_timer();
@@ -821,10 +837,10 @@ pub(crate) fn add_scheduler_timer(
     context: usize,
 ) -> TimerHandle {
     let owner_cpu = local_cpu_id();
-    let id = TIMER_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     let soft_deadline_ns = scheduler_timer_deadline(get_time_ns(), deadline_ns);
-    {
+    let id = {
         let mut queue = timer_queues()[owner_cpu].lock();
+        let id = queue.reserve_id();
         queue.add(
             id,
             soft_deadline_ns,
@@ -833,7 +849,8 @@ pub(crate) fn add_scheduler_timer(
             context,
         );
         publish_queue_diagnostic(owner_cpu, &mut queue);
-    }
+        id
+    };
     reprogram_local_timer();
     TimerHandle { owner_cpu, id }
 }
@@ -1277,6 +1294,21 @@ mod tests {
         run_due(&mut cpu_zero, 10);
         assert_eq!(*calls.lock(), alloc::vec![0]);
         assert_eq!(cpu_one.earliest_live_hard_deadline(), Some(5));
+    }
+
+    #[test_case]
+    fn timer_identity_crosses_32_bits_without_reusing_cancelled_handles() {
+        let (mut queue, handler, calls) = queue_with_handler();
+        queue.next_id = u32::MAX as u64;
+        let cancelled = queue.reserve_id();
+        queue.add(cancelled, 10, TimerPrecision::Exact, &handler, 0);
+        assert!(queue.cancel(cancelled));
+        let live = queue.reserve_id();
+        assert_eq!(live, 0x1_0000_0000);
+        queue.add(live, 10, TimerPrecision::Exact, &handler, 1);
+        assert!(!queue.cancel(cancelled));
+        run_due(&mut queue, 10);
+        assert_eq!(*calls.lock(), alloc::vec![1]);
     }
 
     #[test_case]
