@@ -669,7 +669,7 @@ pub(crate) struct TaskDeadlineState {
     pub(crate) admission_units: u32,
     pub(crate) generation: u64,
     pub(crate) replenishment_timer: Option<TimerHandle>,
-    pub(crate) replenishment_token: Option<usize>,
+    pub(crate) replenishment_handler: Option<Arc<crate::sched::scheduler::DeadlineTimerHandler>>,
 }
 
 impl TaskDeadlineState {
@@ -686,7 +686,7 @@ impl TaskDeadlineState {
             admission_units: 0,
             generation: 0,
             replenishment_timer: None,
-            replenishment_token: None,
+            replenishment_handler: None,
         }
     }
 }

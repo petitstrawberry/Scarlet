@@ -83,10 +83,6 @@ static TASK_REAPER_STARTED: AtomicBool = AtomicBool::new(false);
 static TASK_REAPER_WAKER: crate::sync::Waker =
     crate::sync::Waker::new_uninterruptible("task-reaper");
 static SLICE_STATES: Once<[IrqSpinLock<SliceState>; MAX_NUM_CPUS]> = Once::new();
-static DEADLINE_TIMER_HANDLER: Once<Arc<DeadlineTimerHandler>> = Once::new();
-static DEADLINE_CALLBACK_TOKENS: AtomicUsize = AtomicUsize::new(1);
-static DEADLINE_CALLBACK_CONTEXTS: Once<IrqSpinLock<BTreeMap<usize, DeadlineCallbackContext>>> =
-    Once::new();
 static TASK_CPU_WATCHDOG_HANDLER: Once<Arc<TaskCpuWatchdogTimerHandler>> = Once::new();
 static TASK_CPU_WATCHDOG_STARTED: [AtomicBool; MAX_NUM_CPUS] =
     [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
@@ -233,34 +229,21 @@ enum SchedulerTransaction {
     LegacyDeadline(Option<TaskDeadlineParams>),
 }
 
-#[derive(Clone, Copy)]
-struct DeadlineCallbackContext {
+/// An individual replenishment registration owns its callback identity.
+/// The timer queue retains a Weak reference; the task retains this Arc until
+/// cancellation or expiry. Pointer identity remains valid while a callback runs.
+pub(crate) struct DeadlineTimerHandler {
     task_id: usize,
     generation: u64,
 }
 
-struct DeadlineTimerHandler;
-
 impl TimerHandler for DeadlineTimerHandler {
-    fn on_timer_expired(self: Arc<Self>, context: usize) {
-        let Some(context) = deadline_callback_contexts().lock().remove(&context) else {
+    fn on_timer_expired(self: Arc<Self>, _context: usize) {
+        let Some(task) = TaskPool::get_task(self.task_id) else {
             return;
         };
-        let Some(task) = TaskPool::get_task(context.task_id) else {
-            return;
-        };
-        replenish_deadline_task(&task, get_time_ns(), context.generation);
+        let _ = advance_deadline_period(&task, get_time_ns(), Some(&self));
     }
-}
-
-fn deadline_callback_contexts() -> &'static IrqSpinLock<BTreeMap<usize, DeadlineCallbackContext>> {
-    DEADLINE_CALLBACK_CONTEXTS.call_once(|| IrqSpinLock::new(BTreeMap::new()))
-}
-
-fn deadline_timer_handler() -> Arc<dyn TimerHandler> {
-    DEADLINE_TIMER_HANDLER
-        .call_once(|| Arc::new(DeadlineTimerHandler))
-        .clone()
 }
 
 struct ActiveSlice {
@@ -3542,13 +3525,13 @@ fn publish_scheduler_affinity(task: &Task, affinity: SchedulerAffinity) {
     }
 }
 
-fn cancel_replenishment(timer: Option<TimerHandle>, token: Option<usize>) {
-    if let Some(token) = token {
-        deadline_callback_contexts().lock().remove(&token);
-    }
+fn cancel_replenishment(timer: Option<TimerHandle>, handler: Option<Arc<DeadlineTimerHandler>>) {
     if let Some(timer) = timer {
         let _ = cancel_timer(timer);
     }
+    // Keep ownership until cancellation completes, and deallocate outside the
+    // task's deadline-state guard.
+    drop(handler);
 }
 
 fn initialize_deadline_state(
@@ -3571,7 +3554,7 @@ fn initialize_deadline_state(
     state.budget_overruns = 0;
     state.admission_units = units;
     state.replenishment_timer = None;
-    state.replenishment_token = None;
+    state.replenishment_handler = None;
     task.exec_clock.start(now_ns);
 }
 
@@ -3599,7 +3582,7 @@ fn reconfigure_deadline_state(
 
     let now_ns = get_time_ns();
     let _ = update_curr_deadline(task, now_ns);
-    let (timer, token) = {
+    let (timer, handler) = {
         let mut state = task.deadline.lock();
         if state.params.is_none() {
             if old_cpu == target_cpu && units > old_units {
@@ -3610,7 +3593,7 @@ fn reconfigure_deadline_state(
             return SchedulerControlResult::Busy;
         }
         let timer = state.replenishment_timer.take();
-        let token = state.replenishment_token.take();
+        let handler = state.replenishment_handler.take();
         state.generation = state.generation.wrapping_add(1);
         state.params = Some(params);
         state.remaining_ns = params.runtime_ns;
@@ -3622,9 +3605,9 @@ fn reconfigure_deadline_state(
         state.budget_overruns = 0;
         state.admission_units = units;
         task.exec_clock.start(now_ns);
-        (timer, token)
+        (timer, handler)
     };
-    cancel_replenishment(timer, token);
+    cancel_replenishment(timer, handler);
 
     if old_cpu == target_cpu {
         if old_units > units {
@@ -3891,7 +3874,7 @@ fn deadline_wakeup_overflows(state: &TaskDeadlineState, now_ns: u64) -> bool {
 /// ahead of queue insertion ensures the queue key is built from the refreshed
 /// absolute deadline.
 fn prepare_deadline_wakeup(task: &Task, now_ns: u64) -> bool {
-    let (timer, token, refreshed) = {
+    let (timer, handler, refreshed) = {
         let mut state = task.deadline.lock();
         let Some(params) = state.params else {
             return false;
@@ -3919,12 +3902,12 @@ fn prepare_deadline_wakeup(task: &Task, now_ns: u64) -> bool {
         }
         (
             state.replenishment_timer.take(),
-            state.replenishment_token.take(),
+            state.replenishment_handler.take(),
             true,
         )
     };
 
-    cancel_replenishment(timer, token);
+    cancel_replenishment(timer, handler);
     refreshed
 }
 
@@ -4006,14 +3989,25 @@ fn remove_deadline_task_from_cpu(cpu_id: usize, task: &Task) -> bool {
     removed
 }
 
-fn advance_deadline_period(task: &Task, now_ns: u64, expected_generation: Option<u64>) -> bool {
-    let (timer, token, should_enqueue) = {
+fn advance_deadline_period(
+    task: &Task,
+    now_ns: u64,
+    expected_callback: Option<&Arc<DeadlineTimerHandler>>,
+) -> bool {
+    let (timer, handler, should_enqueue) = {
         let mut state = task.deadline.lock();
         let Some(params) = state.params else {
             return false;
         };
-        if expected_generation.is_some_and(|generation| generation != state.generation) {
-            return false;
+        if let Some(expected) = expected_callback {
+            if expected.generation != state.generation
+                || !state
+                    .replenishment_handler
+                    .as_ref()
+                    .is_some_and(|active| Arc::ptr_eq(active, expected))
+            {
+                return false;
+            }
         }
         if now_ns < state.next_replenishment_ns {
             return false;
@@ -4022,20 +4016,17 @@ fn advance_deadline_period(task: &Task, now_ns: u64, expected_generation: Option
         debug_assert!(params.period_ns > 0);
         let _ = replenish_deadline_state(&mut state, now_ns);
         let timer = state.replenishment_timer.take();
-        let token = state.replenishment_token.take();
+        let handler = state.replenishment_handler.take();
         let should_enqueue = matches!(task.state.load(Ordering::SeqCst), TaskState::Ready)
             && task.running_cpu.load(Ordering::SeqCst) == NO_CPU
             && !task.deadline_on_rq.load(Ordering::SeqCst);
-        (timer, token, should_enqueue)
+        (timer, handler, should_enqueue)
     };
 
-    if let Some(token) = token {
-        deadline_callback_contexts().lock().remove(&token);
-    }
-    if expected_generation.is_none()
-        && let Some(timer) = timer
-    {
-        let _ = cancel_timer(timer);
+    if expected_callback.is_none() {
+        cancel_replenishment(timer, handler);
+    } else {
+        drop(handler);
     }
     if should_enqueue && enqueue_deadline(task) {
         let cpu_id = task
@@ -4051,27 +4042,21 @@ fn advance_deadline_period(task: &Task, now_ns: u64, expected_generation: Option
     true
 }
 
-fn replenish_deadline_task(task: &Task, now_ns: u64, generation: u64) {
-    let _ = advance_deadline_period(task, now_ns, Some(generation));
-}
-
 fn arm_deadline_replenishment(task: &Task) {
     let mut state = task.deadline.lock();
     if state.params.is_none() || !state.throttled || state.replenishment_timer.is_some() {
         return;
     }
-    let token = DEADLINE_CALLBACK_TOKENS.fetch_add(1, Ordering::Relaxed);
-    deadline_callback_contexts().lock().insert(
-        token,
-        DeadlineCallbackContext {
-            task_id: task.get_id(),
-            generation: state.generation,
-        },
-    );
-    let handler = deadline_timer_handler();
-    let handle = add_scheduler_timer(state.next_replenishment_ns, &handler, token);
+    let handler = Arc::new(DeadlineTimerHandler {
+        task_id: task.get_id(),
+        generation: state.generation,
+    });
+    let timer_handler: Arc<dyn TimerHandler> = handler.clone();
+    // This queue is local to the arming CPU. The deadline guard masks its
+    // interrupts until both the timer handle and its strong owner are stored.
+    let handle = add_scheduler_timer(state.next_replenishment_ns, &timer_handler, 0);
     state.replenishment_timer = Some(handle);
-    state.replenishment_token = Some(token);
+    state.replenishment_handler = Some(handler);
 }
 
 fn update_curr_deadline(task: &Task, now_ns: u64) -> bool {
@@ -4259,7 +4244,7 @@ pub fn current_task_scheduler_state() -> Option<SchedulerStateSnapshot> {
 ///
 /// * `task` - Task whose reservation should be released.
 pub(crate) fn release_task_deadline(task: &Task) {
-    let (cpu_id, units, timer, token, was_enabled) = {
+    let (cpu_id, units, timer, handler, was_enabled) = {
         let mut state = task.deadline.lock();
         let was_enabled = state.params.is_some();
         let cpu_id = state.cpu_id;
@@ -4272,7 +4257,7 @@ pub(crate) fn release_task_deadline(task: &Task) {
         task.deadline_on_rq.store(false, Ordering::SeqCst);
         let units = state.admission_units;
         let timer = state.replenishment_timer.take();
-        let token = state.replenishment_token.take();
+        let handler = state.replenishment_handler.take();
         state.params = None;
         state.remaining_ns = 0;
         state.absolute_deadline_ns = 0;
@@ -4281,14 +4266,9 @@ pub(crate) fn release_task_deadline(task: &Task) {
         state.throttled = false;
         state.admission_units = 0;
         state.generation = state.generation.wrapping_add(1);
-        (cpu_id, units, timer, token, was_enabled)
+        (cpu_id, units, timer, handler, was_enabled)
     };
-    if let Some(token) = token {
-        deadline_callback_contexts().lock().remove(&token);
-    }
-    if let Some(timer) = timer {
-        let _ = cancel_timer(timer);
-    }
+    cancel_replenishment(timer, handler);
     if was_enabled {
         release_deadline_bandwidth(cpu_id, units);
     }
@@ -5736,7 +5716,6 @@ pub fn reset() {
         DEBUG_REMOTE_ENQUEUE_SEQ[cpu_id].store(0, Ordering::SeqCst);
         *slice_states()[cpu_id].lock() = SliceState::new();
     }
-    deadline_callback_contexts().lock().clear();
     NEXT_CPU.store(0, Ordering::SeqCst);
     DEBUG_ENQUEUE_SEQ.store(0, Ordering::SeqCst);
     SCHED_MIGRATIONS_TOTAL.reset_for_test();
@@ -6135,6 +6114,37 @@ mod tests {
         assert_eq!(queue.pop(), Some(DeadlineKey::new(10, 4)));
         assert_eq!(queue.pop(), Some(DeadlineKey::new(30, 2)));
         assert!(queue.is_empty());
+    }
+
+    #[test_case]
+    fn stale_deadline_callback_cannot_replenish_a_replacement_registration() {
+        let task = crate::task::new_user_task("deadline-owner".to_string(), 0);
+        let old = Arc::new(DeadlineTimerHandler {
+            task_id: 12,
+            generation: u32::MAX as u64 + 9,
+        });
+        let current = Arc::new(DeadlineTimerHandler {
+            task_id: 12,
+            generation: old.generation,
+        });
+        {
+            let mut state = task.deadline.lock();
+            state.params = Some(implicit_deadline_params(5, 20));
+            state.remaining_ns = 0;
+            state.absolute_deadline_ns = 20;
+            state.next_replenishment_ns = 20;
+            state.throttled = true;
+            state.generation = current.generation;
+            state.replenishment_handler = Some(current.clone());
+        }
+        assert!(!advance_deadline_period(&task, 20, Some(&old)));
+        assert_eq!(task.deadline_snapshot().unwrap().remaining_ns, 0);
+        assert!(advance_deadline_period(&task, 20, Some(&current)));
+        assert_eq!(task.deadline_snapshot().unwrap().remaining_ns, 5);
+        // Even once the next period is due, this expired registration has no
+        // authority to replenish a second time.
+        assert!(!advance_deadline_period(&task, 40, Some(&current)));
+        assert_eq!(task.deadline_snapshot().unwrap().next_replenishment_ns, 40);
     }
 
     #[test_case]
