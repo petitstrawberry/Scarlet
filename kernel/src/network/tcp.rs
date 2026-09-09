@@ -3,6 +3,7 @@
 //! This module provides a full TCP implementation with 3-way handshake,
 //! flow control, and retransmission.
 
+use crate::sync::counter::SaturatingCounter;
 use crate::sync::{IrqRwSpinLock, IrqSpinLock, WaitResult};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
@@ -390,8 +391,8 @@ pub struct TcpSocket {
     max_backlog: AtomicUsize,
 
     /// Statistics
-    bytes_sent: AtomicU64,
-    bytes_received: AtomicU64,
+    bytes_sent: SaturatingCounter,
+    bytes_received: SaturatingCounter,
 
     /// RTO (Retransmission Timeout) calculation - RFC 6298
     /// Smoothed RTT in nanoseconds, scaled by eight for fixed-point arithmetic.
@@ -426,9 +427,9 @@ pub struct TcpSocket {
     /// Block mode: true for blocking, false for non-blocking
     blocking_mode: AtomicBool,
     /// Read timeout in milliseconds. Zero means no timeout.
-    read_timeout_ms: AtomicU64,
+    read_timeout_ms: AtomicU32,
     /// Write timeout in milliseconds. Zero means no timeout.
-    write_timeout_ms: AtomicU64,
+    write_timeout_ms: AtomicU32,
     /// Deferred asynchronous error consumed by `SO_ERROR`-style queries.
     pending_error: IrqSpinLock<Option<SocketError>>,
     /// Direct peer for in-kernel loopback connections.
@@ -527,8 +528,8 @@ impl TcpSocket {
             pending_accept: IrqSpinLock::new(VecDeque::new()),
             pending_syn: IrqSpinLock::new(VecDeque::new()),
             max_backlog: AtomicUsize::new(0),
-            bytes_sent: AtomicU64::new(0),
-            bytes_received: AtomicU64::new(0),
+            bytes_sent: SaturatingCounter::new(0),
+            bytes_received: SaturatingCounter::new(0),
 
             // RTO initialization - RFC 6298
             srtt_ns: AtomicU64::new(0),
@@ -551,8 +552,8 @@ impl TcpSocket {
             recv_waker: IrqSpinLock::new(None),
             send_waker: IrqSpinLock::new(None),
             blocking_mode: AtomicBool::new(true), // Default to blocking mode
-            read_timeout_ms: AtomicU64::new(0),
-            write_timeout_ms: AtomicU64::new(0),
+            read_timeout_ms: AtomicU32::new(0),
+            write_timeout_ms: AtomicU32::new(0),
             pending_error: IrqSpinLock::new(None),
             loopback_peer: IrqSpinLock::new(Weak::new()),
             accept_listener: IrqSpinLock::new(Weak::new()),
@@ -611,10 +612,8 @@ impl TcpSocket {
             recv_buf.extend(data);
         }
 
-        peer.bytes_received
-            .fetch_add(data.len() as u64, Ordering::SeqCst);
-        self.bytes_sent
-            .fetch_add(data.len() as u64, Ordering::SeqCst);
+        peer.bytes_received.add(data.len() as u64);
+        self.bytes_sent.add(data.len() as u64);
 
         if let Some(waker) = peer.recv_waker.lock().as_ref() {
             waker.wake_one();
@@ -776,11 +775,11 @@ impl TcpSocket {
     }
 
     fn read_timeout_ns(&self) -> Option<u64> {
-        Self::timeout_ms_to_ns(self.read_timeout_ms.load(Ordering::SeqCst))
+        Self::timeout_ms_to_ns(u64::from(self.read_timeout_ms.load(Ordering::SeqCst)))
     }
 
     fn write_timeout_ns(&self) -> Option<u64> {
-        Self::timeout_ms_to_ns(self.write_timeout_ms.load(Ordering::SeqCst))
+        Self::timeout_ms_to_ns(u64::from(self.write_timeout_ms.load(Ordering::SeqCst)))
     }
 
     fn set_read_timeout_ms(&self, timeout_ms: usize) -> Result<(), SocketError> {
@@ -788,7 +787,7 @@ impl TcpSocket {
             return Err(SocketError::InvalidArgument);
         }
         self.read_timeout_ms
-            .store(timeout_ms as u64, Ordering::SeqCst);
+            .store(timeout_ms as u32, Ordering::SeqCst);
         Ok(())
     }
 
@@ -797,7 +796,7 @@ impl TcpSocket {
             return Err(SocketError::InvalidArgument);
         }
         self.write_timeout_ms
-            .store(timeout_ms as u64, Ordering::SeqCst);
+            .store(timeout_ms as u32, Ordering::SeqCst);
         Ok(())
     }
 
@@ -1325,8 +1324,7 @@ impl TcpSocket {
             }
 
             // Update received bytes
-            self.bytes_received
-                .fetch_add(payload.len() as u64, Ordering::SeqCst);
+            self.bytes_received.add(payload.len() as u64);
         }
 
         // Process ACK if present
@@ -1610,8 +1608,7 @@ impl TcpSocket {
         segment.extend_from_slice(data);
 
         if dest_ip.0[0] == 127 {
-            self.bytes_sent
-                .fetch_add(segment.len() as u64, Ordering::SeqCst);
+            self.bytes_sent.add(segment.len() as u64);
 
             if update_seq {
                 let mut advance = data.len() as u32;
@@ -1669,8 +1666,7 @@ impl TcpSocket {
             Err(err) => return Err(err),
         }
 
-        self.bytes_sent
-            .fetch_add(segment.len() as u64, Ordering::SeqCst);
+        self.bytes_sent.add(segment.len() as u64);
 
         if update_seq {
             let mut advance = data.len() as u32;
