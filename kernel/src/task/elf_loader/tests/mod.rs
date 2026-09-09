@@ -9,6 +9,110 @@ use super::*;
 
 const O_RDWR: u32 = 0x2;
 
+// Construct actual class-specific headers for mapped-memory tests. The payload
+// is inspected as data; these fixtures are never executed by a CPU.
+fn fixture(class: u8, machine: u16, payload: &[u8], mem_size: u64) -> alloc::vec::Vec<u8> {
+    let (eh, ph) = elf_sizes(class).unwrap();
+    let mut bytes = vec![0; 0x1000 + payload.len()];
+    bytes[..4].copy_from_slice(&ELFMAG);
+    bytes[4] = class;
+    bytes[5] = 1;
+    bytes[6] = 1;
+    bytes[16..18].copy_from_slice(&ET_EXEC.to_le_bytes());
+    bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+    bytes[20..24].copy_from_slice(&1u32.to_le_bytes());
+    let tail;
+    if class == ELFCLASS32 {
+        bytes[24..28].copy_from_slice(&0x1000u32.to_le_bytes());
+        bytes[28..32].copy_from_slice(&(eh as u32).to_le_bytes());
+        tail = 36;
+        for (offset, value) in [
+            (0, PT_LOAD),
+            (4, 0x1000),
+            (8, 0x1000),
+            (12, 0),
+            (16, payload.len() as u32),
+            (20, mem_size as u32),
+            (24, PF_R | PF_W | PF_X),
+            (28, 0x1000),
+        ] {
+            bytes[eh + offset..eh + offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    } else {
+        bytes[24..32].copy_from_slice(&0x1000u64.to_le_bytes());
+        bytes[32..40].copy_from_slice(&(eh as u64).to_le_bytes());
+        tail = 48;
+        bytes[eh..eh + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
+        bytes[eh + 4..eh + 8].copy_from_slice(&(PF_R | PF_W | PF_X).to_le_bytes());
+        for (offset, value) in [
+            (8, 0x1000),
+            (16, 0x1000),
+            (24, 0),
+            (32, payload.len() as u64),
+            (40, mem_size),
+            (48, 0x1000),
+        ] {
+            bytes[eh + offset..eh + offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    bytes[tail + 4..tail + 6].copy_from_slice(&(eh as u16).to_le_bytes());
+    bytes[tail + 6..tail + 8].copy_from_slice(&(ph as u16).to_le_bytes());
+    bytes[tail + 8..tail + 10].copy_from_slice(&1u16.to_le_bytes());
+    bytes[0x1000..].copy_from_slice(payload);
+    bytes
+}
+
+fn native_fixture(payload: &[u8], mem_size: u64) -> alloc::vec::Vec<u8> {
+    #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+    let machine = 243;
+    #[cfg(target_arch = "aarch64")]
+    let machine = 183;
+    fixture(
+        if usize::BITS == 32 {
+            ELFCLASS32
+        } else {
+            ELFCLASS64
+        },
+        machine,
+        payload,
+        mem_size,
+    )
+}
+
+#[test_case]
+fn elf32_fields_and_program_header_order_are_decoded_independently_of_host_width() {
+    let mut bytes = fixture(ELFCLASS32, 243, &[1, 2, 3, 4], 0x2000);
+    bytes[24..28].copy_from_slice(&0xf123_4567u32.to_le_bytes());
+    let header = ElfHeader::parse(&bytes[..52]).unwrap();
+    assert_eq!(header.e_entry, 0xf123_4567);
+    assert_eq!(header.e_phoff, 52);
+    let ph = ProgramHeader::parse(&bytes[52..84], header.ei_class, true).unwrap();
+    assert_eq!(ph.p_flags, PF_R | PF_W | PF_X);
+    assert_eq!(ph.p_offset, 0x1000);
+    assert_eq!(ph.p_filesz, 4);
+    assert_eq!(ph.p_memsz, 0x2000);
+    assert!(ElfHeader::parse(&bytes[..51]).is_err());
+    assert!(ProgramHeader::parse(&bytes[52..83], ELFCLASS32, true).is_err());
+    bytes[5] = 0;
+    assert!(ElfHeader::parse(&bytes).is_err());
+}
+
+#[test_case]
+fn execution_rejects_wrong_machine_and_pointer_width() {
+    let native = native_fixture(&[0; 4], 4);
+    let mut header = ElfHeader::parse(&native).unwrap();
+    assert!(header.validate_executable().is_ok());
+    header.e_machine = 0;
+    assert!(header.validate_executable().is_err());
+    let mut header = ElfHeader::parse(&native).unwrap();
+    header.ei_class = if usize::BITS == 32 {
+        ELFCLASS64
+    } else {
+        ELFCLASS32
+    };
+    assert!(header.validate_executable().is_err());
+}
+
 #[test_case]
 fn test_parse_elf_header() {
     let elf_data: &[u8] = include_bytes!("test.elf");
@@ -59,8 +163,9 @@ fn test_parse_program_headers() {
     for i in 0..header.e_phnum {
         let offset = header.e_phoff + (i as u64) * (header.e_phentsize as u64);
         let ph_buffer = &elf_data[offset as usize..(offset + header.e_phentsize as u64) as usize];
-        let program_header = ProgramHeader::parse(ph_buffer, header.ei_data == ELFDATA2LSB)
-            .expect("Failed to parse program header");
+        let program_header =
+            ProgramHeader::parse(ph_buffer, header.ei_class, header.ei_data == ELFDATA2LSB)
+                .expect("Failed to parse program header");
 
         match i {
             0 => {
@@ -210,7 +315,7 @@ fn test_load_elf() {
         .expect("Failed to create test file");
     let kernel_obj = manager.open(file_path, 0).expect("Failed to open file");
     let file = kernel_obj.as_file().expect("Failed to get file reference");
-    file.write(include_bytes!("test.elf"))
+    file.write(&native_fixture(&0x73u32.to_le_bytes(), 0x1000))
         .expect("Failed to write test ELF file");
 
     // Seek to beginning for reading
@@ -300,31 +405,14 @@ fn test_load_elf_invalid_alignment() {
         .create_file(file_path, FileType::RegularFile)
         .expect("Failed to create test file");
 
-    // Create a mock ELF file with an invalid alignment
-    let mut invalid_elf_data = vec![0u8; 64];
-    invalid_elf_data[EI_MAG0] = ELFMAG[0];
-    invalid_elf_data[EI_MAG1] = ELFMAG[1];
-    invalid_elf_data[EI_MAG2] = ELFMAG[2];
-    invalid_elf_data[EI_MAG3] = ELFMAG[3];
-    invalid_elf_data[EI_CLASS] = ELFCLASS64;
-    invalid_elf_data[EI_DATA] = ELFDATA2LSB;
-    invalid_elf_data[16] = 0x2; // e_type
-    invalid_elf_data[18] = 0xF3; // e_machine
-    invalid_elf_data[20] = 0x1; // e_version
-    invalid_elf_data[24] = 0x0; // e_entry
-    invalid_elf_data[32] = 0x40; // e_phoff
-    invalid_elf_data[54] = 0x38; // e_phentsize
-    invalid_elf_data[56] = 0x1; // e_phnum
-
-    // Add a program header with invalid alignment
-    invalid_elf_data.extend_from_slice(&[0x1, 0x0, 0x0, 0x0]); // p_type = PT_LOAD
-    invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0]); // p_flags
-    invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_offset
-    invalid_elf_data.extend_from_slice(&[0x1, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_vaddr (unaligned)
-    invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_paddr
-    invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_filesz
-    invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_memsz
-    invalid_elf_data.extend_from_slice(&[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]); // p_align = 0
+    let mut invalid_elf_data = native_fixture(&[0; 4], 0x1000);
+    let (eh, _) = elf_sizes(invalid_elf_data[4]).unwrap();
+    let offset = if invalid_elf_data[4] == ELFCLASS32 {
+        eh + 28
+    } else {
+        eh + 48
+    };
+    invalid_elf_data[offset..offset + 4].copy_from_slice(&3u32.to_le_bytes());
 
     let kernel_obj = manager
         .open("/invalid_align.elf", O_RDWR)
@@ -364,32 +452,7 @@ fn test_load_elf_bss_zeroed() {
         .expect("Failed to open test ELF file");
     let file = kernel_obj.as_file().expect("Failed to get file reference");
 
-    // Create a mock ELF file with a .bss section
-    let mut elf_data = vec![0u8; 64];
-    elf_data[EI_MAG0] = ELFMAG[0];
-    elf_data[EI_MAG1] = ELFMAG[1];
-    elf_data[EI_MAG2] = ELFMAG[2];
-    elf_data[EI_MAG3] = ELFMAG[3];
-    elf_data[EI_CLASS] = ELFCLASS64;
-    elf_data[EI_DATA] = ELFDATA2LSB;
-    elf_data[16] = 0x2; // e_type
-    elf_data[18] = 0xF3; // e_machine
-    elf_data[20] = 0x1; // e_version
-    elf_data[24] = 0x00;
-    elf_data[25] = 0x10; // e_entry = 0x1000 (start of .bss section)
-    elf_data[32] = 0x40; // e_phoff
-    elf_data[54] = 0x38; // e_phentsize
-    elf_data[56] = 0x1; // e_phnum
-
-    // Add a program header with .bss section
-    elf_data.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]); // p_type = PT_LOAD (LE)
-    elf_data.extend_from_slice(&[0x06, 0x00, 0x00, 0x00]); // p_flags = RW (LE)
-    elf_data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_offset (LE)
-    elf_data.extend_from_slice(&[0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_vaddr = 0x1000 (LE)
-    elf_data.extend_from_slice(&[0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_paddr = 0x1000 (LE)
-    elf_data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_filesz (LE)
-    elf_data.extend_from_slice(&[0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_memsz = 0x2000 (LE)
-    elf_data.extend_from_slice(&[0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // p_align = 0x1000 (LE)
+    let elf_data = native_fixture(&[], 0x2000);
 
     file.write(&elf_data).expect("Failed to write ELF data");
 
