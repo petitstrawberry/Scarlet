@@ -21,6 +21,7 @@
 //! - `Ext2Driver`: Filesystem driver for registration
 //! - Data structures for ext2 format (superblock, inode, directory entries, etc.)
 
+use crate::sync::counter::SaturatingCounter;
 use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{
     boxed::Box,
@@ -31,7 +32,6 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::sync::atomic::{AtomicU64, Ordering};
 use core::{any::Any, mem};
 use hashbrown::HashMap;
 
@@ -321,7 +321,7 @@ pub struct Ext2FileSystem {
 struct InodeLruNode {
     inode_num: u32,
     inode: Ext2Inode,
-    access_count: AtomicU64,
+    access_count: SaturatingCounter,
 }
 
 /// O(1) LRU cache implementation for inodes using HashMap + doubly-linked list
@@ -347,12 +347,12 @@ impl InodeLruCache {
     }
 
     /// O(1) get operation with LRU update
-    /// O(1) get with atomic access-count bump (no list mutation).
+    /// O(1) lookup with a synchronized frequency update (no list mutation).
     /// Safe to call through a shared (`&self`) reference.
     fn get(&self, inode_num: u32) -> Option<Ext2Inode> {
         if let Some(&node_id) = self.map.get(&inode_num) {
             if let Some(node) = self.nodes.get(&node_id) {
-                node.access_count.fetch_add(1, Ordering::Relaxed);
+                node.access_count.add(1);
                 return Some(node.inode.clone());
             }
             None
@@ -367,7 +367,7 @@ impl InodeLruCache {
         if let Some((&lru_id, _)) = self
             .nodes
             .iter()
-            .min_by_key(|(_, node)| node.access_count.load(Ordering::Relaxed))
+            .min_by_key(|(_, node)| node.access_count.snapshot())
         {
             if let Some(node) = self.nodes.remove(&lru_id) {
                 self.map.remove(&node.inode_num);
@@ -390,7 +390,7 @@ impl InodeLruCache {
         if let Some(&node_id) = self.map.get(&inode_num) {
             if let Some(node) = self.nodes.get_mut(&node_id) {
                 node.inode = inode;
-                node.access_count.fetch_add(1, Ordering::Relaxed);
+                node.access_count.add(1);
             }
             return;
         }
@@ -407,7 +407,7 @@ impl InodeLruCache {
         let new_node = InodeLruNode {
             inode_num,
             inode,
-            access_count: AtomicU64::new(1),
+            access_count: SaturatingCounter::new(1),
         };
 
         self.nodes.insert(new_node_id, new_node);
@@ -441,7 +441,7 @@ type NodeId = u32;
 struct LruNode {
     block_num: u64,
     data: Vec<u8>,
-    access_count: AtomicU64,
+    access_count: SaturatingCounter,
 }
 
 /// O(1) LRU cache implementation using HashMap + doubly-linked list
@@ -467,12 +467,12 @@ impl BlockLruCache {
         }
     }
 
-    /// O(1) get with atomic access-count bump (no list mutation).
+    /// O(1) lookup with a synchronized frequency update (no list mutation).
     /// Safe to call through a shared (`&self`) reference.
     fn get(&self, block_num: u64) -> Option<Vec<u8>> {
         if let Some(&node_id) = self.map.get(&block_num) {
             if let Some(node) = self.nodes.get(&node_id) {
-                node.access_count.fetch_add(1, Ordering::Relaxed);
+                node.access_count.add(1);
                 return Some(node.data.clone());
             }
             None
@@ -487,7 +487,7 @@ impl BlockLruCache {
         if let Some((&lru_id, _)) = self
             .nodes
             .iter()
-            .min_by_key(|(_, node)| node.access_count.load(Ordering::Relaxed))
+            .min_by_key(|(_, node)| node.access_count.snapshot())
         {
             if let Some(node) = self.nodes.remove(&lru_id) {
                 self.map.remove(&node.block_num);
@@ -508,7 +508,7 @@ impl BlockLruCache {
         if let Some(&existing_id) = self.map.get(&block_num) {
             if let Some(existing_node) = self.nodes.get_mut(&existing_id) {
                 existing_node.data = block_data;
-                existing_node.access_count.fetch_add(1, Ordering::Relaxed);
+                existing_node.access_count.add(1);
             }
             return;
         }
@@ -525,7 +525,7 @@ impl BlockLruCache {
         let new_node = LruNode {
             block_num,
             data: block_data,
-            access_count: AtomicU64::new(1),
+            access_count: SaturatingCounter::new(1),
         };
 
         // Insert into data structures
