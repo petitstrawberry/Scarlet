@@ -157,6 +157,65 @@ fn native_fixture(payload: &[u8], mem_size: u64) -> alloc::vec::Vec<u8> {
 }
 
 #[test_case]
+fn relocated_elf_preserves_header_addresses_and_main_program_break() {
+    use crate::library::std::usercopy::copy_from_user;
+    use scarlet_abi::data_model::AbiDataModel;
+    let model = AbiDataModel::NATIVE;
+    for headers_in_segment in [false, true] {
+        let mut bytes = native_fixture(&vec![0x73; PAGE_SIZE], PAGE_SIZE as u64);
+        let (eh, ph_size) = elf_sizes(bytes[EI_CLASS]).unwrap();
+        bytes[16..18].copy_from_slice(&ET_DYN.to_le_bytes());
+        model.write_word(&mut bytes, 24, 0x3000).unwrap();
+        let vaddr_offset = if usize::BITS == 32 { 8 } else { 16 };
+        model
+            .write_word(&mut bytes, eh + vaddr_offset, 0x3000)
+            .unwrap();
+        if headers_in_segment {
+            bytes.copy_within(eh..eh + ph_size, 0x1040);
+            let phoff_offset = if usize::BITS == 32 { 28 } else { 32 };
+            model.write_word(&mut bytes, phoff_offset, 0x1040).unwrap();
+        }
+        let manager = VfsManager::new();
+        manager.mount(TmpFS::new(0), "/", 0).unwrap();
+        manager.create_file("/pie", FileType::RegularFile).unwrap();
+        let object = manager.open("/pie", O_RDWR).unwrap();
+        let file = object.as_file().unwrap();
+        file.write(&bytes).unwrap();
+        let task = new_user_task("pie-metadata".into(), 0);
+        let result =
+            analyze_and_load_elf_with_strategy(file, &task, &LoadStrategy::default()).unwrap();
+        assert_eq!(result.base_address, Some(0x10000));
+        assert_eq!(result.entry_point, 0x13000);
+        assert_eq!(task.brk.load(Ordering::Relaxed), 0x14000);
+        if headers_in_segment {
+            assert_eq!(result.program_headers.phdr_addr, 0x13040);
+        }
+        let header = read_elf_header(file).unwrap();
+        let mut actual_headers = vec![0; ph_size];
+        copy_from_user(
+            &task,
+            result.program_headers.phdr_addr as usize,
+            &mut actual_headers,
+        )
+        .unwrap();
+        let file_offset = header.e_phoff as usize;
+        assert_eq!(actual_headers, bytes[file_offset..file_offset + ph_size]);
+
+        let interpreter_task = new_user_task("linker-metadata".into(), 0);
+        interpreter_task.brk.store(0x6000, Ordering::Relaxed);
+        assert!(
+            load_elf_segments_with_base(&header, file, &interpreter_task, 0x20001, false).is_err()
+        );
+        load_elf_segments_with_base(&header, file, &interpreter_task, 0x20000, false).unwrap();
+        assert_eq!(interpreter_task.brk.load(Ordering::Relaxed), 0x6000);
+        assert_eq!(
+            executable_entry(&header, file, &interpreter_task, 0x20000).unwrap(),
+            0x23000
+        );
+    }
+}
+
+#[test_case]
 fn elf32_fields_and_program_header_order_are_decoded_independently_of_host_width() {
     let mut bytes = fixture(ELFCLASS32, 243, &[1, 2, 3, 4], 0x2000);
     bytes[24..28].copy_from_slice(&0xf123_4567u32.to_le_bytes());
