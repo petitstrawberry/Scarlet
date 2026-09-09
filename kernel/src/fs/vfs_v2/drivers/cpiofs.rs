@@ -14,7 +14,7 @@ use alloc::{
     vec::Vec,
 };
 use core::any::Any;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::fs::{
     FileMetadata, FileObject, FilePermission, FileSystemError, FileSystemErrorKind, FileType,
@@ -54,8 +54,9 @@ pub struct CpioNode {
     /// File content (for regular files)
     content: Vec<u8>,
 
-    /// Unix modification time from the archive header, set during parsing.
-    modified_time: AtomicU64,
+    /// Unsigned 32-bit Unix seconds encoded by the eight-hex-digit newc field.
+    /// Parsing can update a previously created directory node.
+    modified_time: AtomicU32,
 
     /// Child nodes (for directories)
     children: IrqRwSpinLock<BTreeMap<String, Arc<CpioNode>>>,
@@ -77,7 +78,7 @@ impl CpioNode {
             name,
             file_type,
             content,
-            modified_time: AtomicU64::new(0),
+            modified_time: AtomicU32::new(0),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             filesystem: IrqRwSpinLock::new(None),
             file_id,
@@ -144,7 +145,7 @@ impl VfsNode for CpioNode {
             file_type: self.file_type.clone(),
             size: self.content.len(),
             created_time: 0,
-            modified_time: self.modified_time.load(Ordering::Relaxed),
+            modified_time: u64::from(self.modified_time.load(Ordering::Relaxed)),
             accessed_time: 0,
             permissions: FilePermission {
                 read: true,
@@ -238,7 +239,7 @@ impl CpioFS {
             };
             let modified_time = core::str::from_utf8(&data[offset + 46..offset + 54])
                 .ok()
-                .and_then(|value| u64::from_str_radix(value, 16).ok())
+                .and_then(|value| u32::from_str_radix(value, 16).ok())
                 .ok_or_else(|| {
                     FileSystemError::new(FileSystemErrorKind::InvalidData, "Invalid mtime value")
                 })?;

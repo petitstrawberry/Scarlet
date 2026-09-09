@@ -7,17 +7,22 @@ mod tests {
 
     #[test_case]
     fn test_cpio_preserves_archive_modification_time() {
-        let mut archive = create_test_cpio_with_symlink();
-        archive[46..54].copy_from_slice(b"6553f100");
-        let fs = CpioFS::new("test".to_string(), &archive).unwrap();
-        let node = fs.lookup(&fs.root_node(), &"file.txt".to_string()).unwrap();
-        let metadata = node.metadata().unwrap();
-        assert_eq!(metadata.size, 13);
-        assert_eq!(metadata.modified_time, 1_700_000_000);
-        assert_eq!(
-            fs.open(&node, 0).unwrap().metadata().unwrap().modified_time,
-            1_700_000_000
-        );
+        for (encoded, expected) in [
+            (*b"6553f100", 1_700_000_000u64),
+            (*b"ffffffff", u32::MAX as u64),
+        ] {
+            let mut archive = create_test_cpio_with_symlink();
+            archive[46..54].copy_from_slice(&encoded);
+            let fs = CpioFS::new("test".to_string(), &archive).unwrap();
+            let node = fs.lookup(&fs.root_node(), &"file.txt".to_string()).unwrap();
+            let metadata = node.metadata().unwrap();
+            assert_eq!(metadata.size, 13);
+            assert_eq!(metadata.modified_time, expected);
+            assert_eq!(
+                fs.open(&node, 0).unwrap().metadata().unwrap().modified_time,
+                expected
+            );
+        }
     }
 
     /// Create a minimal CPIO archive with a symbolic link for testing

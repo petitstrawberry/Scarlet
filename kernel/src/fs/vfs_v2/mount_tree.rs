@@ -6,13 +6,12 @@
 //! - Proper path resolution across mount boundaries
 //! - Efficient mount point lookup and traversal
 
-use crate::sync::IrqRwSpinLock;
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::core::{FileSystemOperations, VfsEntry};
 use super::manager::{PathResolutionOptions, VfsManager};
@@ -32,9 +31,13 @@ fn vfs_error(kind: FileSystemErrorKind, message: &str) -> FileSystemError {
 pub struct MountId(u64);
 
 impl MountId {
+    /// Allocate a non-reused identity; panics if the 64-bit space is exhausted.
     pub(crate) fn new() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(1);
-        Self(COUNTER.fetch_add(1, Ordering::Relaxed))
+        static NEXT_ID: IrqSpinLock<MountId> = IrqSpinLock::new(MountId(1));
+        let mut next = NEXT_ID.lock();
+        let id = *next;
+        next.0 = next.0.checked_add(1).expect("mount identities exhausted");
+        id
     }
 }
 
@@ -43,9 +46,16 @@ impl MountId {
 pub struct VfsManagerId(u64);
 
 impl VfsManagerId {
+    /// Allocate a non-reused identity; panics if the 64-bit space is exhausted.
     pub fn new() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(1);
-        Self(COUNTER.fetch_add(1, Ordering::Relaxed))
+        static NEXT_ID: IrqSpinLock<VfsManagerId> = IrqSpinLock::new(VfsManagerId(1));
+        let mut next = NEXT_ID.lock();
+        let id = *next;
+        next.0 = next
+            .0
+            .checked_add(1)
+            .expect("VFS manager identities exhausted");
+        id
     }
 }
 

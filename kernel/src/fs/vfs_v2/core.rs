@@ -5,7 +5,7 @@
 //! - VfsNode: Abstract interface for file entities
 //! - FileSystemOperations: Driver API for filesystem operations
 
-use crate::sync::IrqRwSpinLock;
+use crate::sync::{IrqRwSpinLock, IrqSpinLock};
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
@@ -13,7 +13,6 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
 use core::{any::Any, fmt::Debug};
 
 use super::mount_tree::MountPoint;
@@ -38,10 +37,17 @@ pub struct DirectoryEntryInternal {
 pub struct FileSystemId(u64);
 
 impl FileSystemId {
-    /// Generate a new unique FileSystemId.
+    /// Allocate a unique filesystem identity, independent of pointer width.
+    /// Panics on exhaustion rather than reusing an identity still held by VFS.
     pub fn new() -> Self {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-        Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+        static NEXT_ID: IrqSpinLock<FileSystemId> = IrqSpinLock::new(FileSystemId(1));
+        let mut next = NEXT_ID.lock();
+        let id = *next;
+        next.0 = next
+            .0
+            .checked_add(1)
+            .expect("filesystem identities exhausted");
+        id
     }
 
     /// Get the raw u64 value.
