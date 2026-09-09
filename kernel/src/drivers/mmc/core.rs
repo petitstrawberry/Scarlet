@@ -4,7 +4,7 @@ extern crate alloc;
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::any::Any;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::device::block::BlockDevice;
 use crate::device::block::request::{BlockIORequest, BlockIORequestType, BlockIOResult};
@@ -107,8 +107,9 @@ pub struct EmmcBlockDevice {
     host: Mutex<Box<dyn MmcHost>>,
     card: EmmcCardInfo,
     request_queue: IrqSpinLock<Vec<Box<BlockIORequest>>>,
+    // This adapter owns one immutable card identity. Removal permanently
+    // invalidates it; identifying a replacement card constructs a new adapter.
     media_online: AtomicBool,
-    media_generation: AtomicU64,
 }
 
 impl EmmcBlockDevice {
@@ -155,7 +156,6 @@ impl EmmcBlockDevice {
             card,
             request_queue: IrqSpinLock::new(Vec::new()),
             media_online: AtomicBool::new(true),
-            media_generation: AtomicU64::new(1),
         })
     }
 
@@ -163,10 +163,16 @@ impl EmmcBlockDevice {
     ///
     /// # Returns
     ///
-    /// A value incremented when removal is first observed. Future removable
-    /// media support uses this to invalidate stale partition endpoints.
+    /// `1` for the card identified by this adapter, or `2` after its removal.
+    /// An adapter never becomes valid for a replacement card: its card metadata
+    /// is immutable. Deriving the generation from the invalidation state keeps
+    /// both observations consistent without a second publication.
     pub fn media_generation(&self) -> u64 {
-        self.media_generation.load(Ordering::Acquire)
+        if self.media_online.load(Ordering::Acquire) {
+            1
+        } else {
+            2
+        }
     }
 
     /// Return information discovered during card identification.
@@ -179,9 +185,7 @@ impl EmmcBlockDevice {
     }
 
     fn note_media_removed(&self) {
-        if self.media_online.swap(false, Ordering::AcqRel) {
-            self.media_generation.fetch_add(1, Ordering::AcqRel);
-        }
+        self.media_online.store(false, Ordering::Release);
     }
 
     fn command_address(&self, sector: u64) -> MmcResult<u32> {
