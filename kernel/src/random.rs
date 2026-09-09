@@ -27,7 +27,6 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::device::char::CharDevice;
 use crate::device::manager::DeviceManager;
@@ -45,7 +44,32 @@ const FALLBACK_RANDOM_SEED: u64 = 0x4f1b_bcdc_b7a4_3413;
 // intentionally does not depend on user-space ABI crates.
 const GET_RANDOM_FLAG_REQUIRE_ENTROPY: usize = 1 << 0;
 
-static FALLBACK_RANDOM_STATE: AtomicU64 = AtomicU64::new(0);
+/// Non-cryptographic generator state. Advancing the entire 64-bit state is one
+/// operation under the generator's lock on every architecture.
+struct XorShift64 {
+    state: u64,
+}
+
+impl XorShift64 {
+    fn new(seed: u64) -> Self {
+        Self {
+            state: if seed == 0 {
+                FALLBACK_RANDOM_SEED
+            } else {
+                seed
+            },
+        }
+    }
+
+    fn next(&mut self) -> u64 {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        self.state
+    }
+}
+
+static FALLBACK_RANDOM: Once<IrqSpinLock<XorShift64>> = Once::new();
 
 /// Trait for entropy sources that can provide random data
 pub trait EntropySource: Send + Sync {
@@ -207,52 +231,21 @@ impl RandomManager {
 }
 
 fn next_fallback_random_u64() -> u64 {
-    loop {
-        let state = FALLBACK_RANDOM_STATE.load(Ordering::Relaxed);
-
-        // Lazily transition the atomic out of its initial 0. The xorshift
-        // advance below uses CAS(current, next), which can never succeed while
-        // the atomic is still 0, so we must install a seed first. xorshift64 is
-        // a bijection with 0 as its sole fixed point, so once nonzero the state
-        // can never become 0 again.
-        let current = if state == 0 {
+    let generator = match FALLBACK_RANDOM.get() {
+        Some(generator) => generator,
+        None => {
+            // Clock access precedes both initialization and the generator lock.
             let seed = crate::time::current_time()
                 ^ crate::timer::get_time_ns().rotate_left(17)
                 ^ FALLBACK_RANDOM_SEED;
-            let seed = if seed == 0 {
-                FALLBACK_RANDOM_SEED
-            } else {
-                seed
-            };
-            match FALLBACK_RANDOM_STATE.compare_exchange(
-                0,
-                seed,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => seed,
-                // Lost the race to another CPU; adopt the value they installed.
-                Err(actual) => actual,
-            }
-        } else {
-            state
-        };
-
-        let mut next = current;
-        next ^= next << 13;
-        next ^= next >> 7;
-        next ^= next << 17;
-
-        if FALLBACK_RANDOM_STATE
-            .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            return next;
+            FALLBACK_RANDOM.get_or_init(|| IrqSpinLock::new(XorShift64::new(seed)))
         }
-    }
+    };
+    generator.lock().next()
 }
 
-fn fill_fallback_random(buffer: &mut [u8]) {
+/// Fill from the existing non-cryptographic generator when no entropy is available.
+pub(crate) fn fill_fallback_random(buffer: &mut [u8]) {
     let mut offset = 0usize;
     while offset < buffer.len() {
         let bytes = next_fallback_random_u64().to_le_bytes();
