@@ -8,6 +8,7 @@
 //! longer re-exported.
 
 pub(crate) mod counter;
+pub(crate) mod diagnostic;
 pub mod cpu_local;
 pub mod futex;
 pub mod irq_guard;

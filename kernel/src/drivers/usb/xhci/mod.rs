@@ -55,6 +55,7 @@ use crate::interrupt::{
 use crate::mem::address::PhysAddr;
 use crate::mem::page::ContiguousPages;
 use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps, Selectable};
+use crate::sync::diagnostic::{DiagnosticCounter, ReportInterval};
 use crate::sync::{IrqSpinLock, Mutex, Once};
 use crate::timer::get_time_ns;
 use crate::vm;
@@ -67,7 +68,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use core::mem::size_of;
 use core::ptr::{read_unaligned, read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering, fence};
 
 const COMMAND_RING_TRBS: usize = 256;
 const EVENT_RING_TRBS: usize = 256;
@@ -758,8 +759,8 @@ pub struct XhciController {
     deferred_interrupt_mode: AtomicBool,
     deferred_interrupt_completions: IrqSpinLock<VecDeque<DeferredInterruptCompletion>>,
     deferred_interrupt_cause_seen: AtomicBool,
-    deferred_spurious_count: AtomicU64,
-    deferred_spurious_last_report_ns: AtomicU64,
+    deferred_spurious_count: DiagnosticCounter,
+    deferred_spurious_reports: ReportInterval,
     self_weak: Once<Weak<XhciController>>,
 }
 
@@ -1027,8 +1028,8 @@ impl XhciController {
                 crate::environment::MAX_NUM_CPUS,
             )),
             deferred_interrupt_cause_seen: AtomicBool::new(false),
-            deferred_spurious_count: AtomicU64::new(0),
-            deferred_spurious_last_report_ns: AtomicU64::new(0),
+            deferred_spurious_count: DiagnosticCounter::new(),
+            deferred_spurious_reports: ReportInterval::new(),
             self_weak: Once::new(),
         })
     }
@@ -6468,7 +6469,7 @@ impl XhciController {
                 if !cause_seen {
                     self.report_deferred_interrupt_without_cause();
                 }
-                self.deferred_spurious_count.store(0, Ordering::Relaxed);
+                self.deferred_spurious_count.reset();
             }
         }
 
@@ -6541,25 +6542,11 @@ impl XhciController {
     }
 
     fn take_deferred_diagnostic_report_slot(&self) -> Option<u64> {
-        let count = self
-            .deferred_spurious_count
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        let now_ns = get_time_ns();
-        let last_report_ns = self
-            .deferred_spurious_last_report_ns
-            .load(Ordering::Relaxed);
+        let count = self.deferred_spurious_count.tick()?;
         if (count == 1 || count.is_power_of_two())
-            && (last_report_ns == 0 || now_ns.saturating_sub(last_report_ns) >= 1_000_000_000)
             && self
-                .deferred_spurious_last_report_ns
-                .compare_exchange(
-                    last_report_ns,
-                    now_ns.max(1),
-                    Ordering::AcqRel,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
+                .deferred_spurious_reports
+                .try_claim(get_time_ns(), 1_000_000_000)
         {
             Some(count)
         } else {
