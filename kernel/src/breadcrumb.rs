@@ -1,16 +1,15 @@
-//! Per-CPU lock-free breadcrumb diagnostics for SMP hang localization.
+//! Per-CPU best-effort breadcrumb diagnostics for SMP hang localization.
 //!
 //! When a CPU hangs with FIQ masked it cannot print. Each CPU therefore records
-//! its last execution phase in a lock-free atomic. Surviving CPUs periodically
+//! its last execution phase in a bounded diagnostic publication. Surviving CPUs periodically
 //! sample a stopped CPU's latest breadcrumb from a timer heartbeat, revealing
 //! where that CPU stopped and whether the state is still changing.
 //!
-//! Each record is enclosed by an odd/even sequence generation. Readers accept
-//! the phase and context fields only when the generation remains unchanged and
-//! even. The path uses no locks or formatting, so it remains safe from FIQ
-//! handlers and trap-vector prologues reached after `daifset`.
+//! A snapshot contains a complete publication or an explicit in-progress
+//! marker. Native targets use atomic words; other targets use try-only
+//! protection. Neither path waits, formats, or enters lock instrumentation.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::sync::diagnostic::{DiagnosticRecord, ReportInterval, TryDiagnosticState};
 
 use crate::arch::get_cpu;
 use crate::environment::MAX_NUM_CPUS;
@@ -152,103 +151,82 @@ pub const VMM_DROP_ASID_BEGIN: u64 = 0x5658; // 'VX' VMM ASID teardown entered (
 pub const VMM_DROP_DONE: u64 = 0x565a; // 'VZ' VMM drop completed (aux=ASID)
 pub const PUBLICATION_IN_PROGRESS: u64 = 0x4259; // 'BY' bounded snapshot found an in-flight writer
 
-const SNAPSHOT_RETRY_LIMIT: usize = 4;
 const STALL_REPORT_AFTER_SAMPLES: u64 = 2;
 const STALL_REPEAT_SAMPLES: u64 = 6;
 const STALL_SAMPLE_SLOTS: usize = MAX_NUM_CPUS * MAX_NUM_CPUS;
-static STALL_SAMPLE_INITIALIZED: [AtomicBool; STALL_SAMPLE_SLOTS] =
-    [const { AtomicBool::new(false) }; STALL_SAMPLE_SLOTS];
-static STALL_LAST_TIMER_COUNT: [AtomicU64; STALL_SAMPLE_SLOTS] =
-    [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
-static STALL_LAST_SEQUENCE: [AtomicU64; STALL_SAMPLE_SLOTS] =
-    [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
-static STALL_LAST_PHASE: [AtomicU64; STALL_SAMPLE_SLOTS] =
-    [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
-static STALL_LAST_AUX: [AtomicU64; STALL_SAMPLE_SLOTS] =
-    [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
-static STALL_LAST_AUX2: [AtomicU64; STALL_SAMPLE_SLOTS] =
-    [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
-static STALL_STALE_SAMPLES: [AtomicU64; STALL_SAMPLE_SLOTS] =
-    [const { AtomicU64::new(0) }; STALL_SAMPLE_SLOTS];
-static STALL_LAST_REPORT_NS: [AtomicU64; MAX_NUM_CPUS] =
-    [const { AtomicU64::new(0) }; MAX_NUM_CPUS];
 const STALL_REPORT_RATE_LIMIT_NS: u64 = 1_000_000_000;
+
+#[derive(Clone, Copy)]
+struct StallHistory {
+    previous: Option<(u64, BreadcrumbSnapshot)>,
+    stale_samples: u64,
+}
+
+impl StallHistory {
+    fn observe(&mut self, timer_count: u64, breadcrumb: BreadcrumbSnapshot) -> bool {
+        let current = (timer_count, breadcrumb);
+        if self.previous != Some(current) {
+            self.previous = Some(current);
+            self.stale_samples = 0;
+            return false;
+        }
+        self.stale_samples = self.stale_samples.saturating_add(1);
+        self.stale_samples == STALL_REPORT_AFTER_SAMPLES
+            || (self.stale_samples > STALL_REPORT_AFTER_SAMPLES
+                && (self.stale_samples - STALL_REPORT_AFTER_SAMPLES) % STALL_REPEAT_SAMPLES == 0)
+    }
+}
+
+static STALL_HISTORY: [TryDiagnosticState<StallHistory>; STALL_SAMPLE_SLOTS] = [const {
+    TryDiagnosticState::new(StallHistory {
+        previous: None,
+        stale_samples: 0,
+    })
+};
+    STALL_SAMPLE_SLOTS];
+static STALL_REPORTS: [ReportInterval; MAX_NUM_CPUS] =
+    [const { ReportInterval::new() }; MAX_NUM_CPUS];
 
 // Keep independently-written CPU slots off the same cache line. Apple Silicon
 // uses 128-byte cache lines, while the extra alignment is harmless on systems
 // with 64-byte lines and avoids diagnostic false sharing under IPC wake load.
 #[repr(align(128))]
-struct BreadcrumbSlot {
-    sequence: AtomicU64,
-    phase: AtomicU64,
-    aux: AtomicU64,
-    aux2: AtomicU64,
-}
+struct BreadcrumbSlot(DiagnosticRecord<3>);
 
 impl BreadcrumbSlot {
     const fn new() -> Self {
-        Self {
-            sequence: AtomicU64::new(0),
-            phase: AtomicU64::new(NONE),
-            aux: AtomicU64::new(0),
-            aux2: AtomicU64::new(0),
-        }
+        Self(DiagnosticRecord::new([NONE, 0, 0]))
     }
 
     #[inline(always)]
     fn record(&self, phase: u64, aux: u64, aux2: u64) {
-        let odd_sequence = self.sequence.load(Ordering::Relaxed).wrapping_add(1);
-        self.sequence.store(odd_sequence, Ordering::SeqCst);
-        self.phase.store(phase, Ordering::SeqCst);
-        self.aux.store(aux, Ordering::SeqCst);
-        self.aux2.store(aux2, Ordering::SeqCst);
-        self.sequence
-            .store(odd_sequence.wrapping_add(1), Ordering::SeqCst);
+        let _ = self.0.try_publish([phase, aux, aux2]);
     }
 
     #[inline(always)]
     fn snapshot(&self) -> BreadcrumbSnapshot {
-        self.snapshot_with_probe(|| {})
-            .unwrap_or_else(|| BreadcrumbSnapshot {
-                sequence: self.sequence.load(Ordering::SeqCst),
+        match self.0.snapshot() {
+            Some(record) => BreadcrumbSnapshot {
+                sequence: record.sequence,
+                phase: record.words[0],
+                aux: record.words[1],
+                aux2: record.words[2],
+            },
+            None => BreadcrumbSnapshot {
+                sequence: u64::MAX,
                 phase: PUBLICATION_IN_PROGRESS,
-                aux: self.sequence.load(Ordering::SeqCst),
+                aux: 0,
                 aux2: 0,
-            })
-    }
-
-    #[inline(always)]
-    fn snapshot_with_probe(&self, mut after_aux: impl FnMut()) -> Option<BreadcrumbSnapshot> {
-        for _ in 0..SNAPSHOT_RETRY_LIMIT {
-            let sequence_before = self.sequence.load(Ordering::SeqCst);
-            if sequence_before & 1 != 0 {
-                continue;
-            }
-
-            let phase = self.phase.load(Ordering::SeqCst);
-            let aux = self.aux.load(Ordering::SeqCst);
-            after_aux();
-            let aux2 = self.aux2.load(Ordering::SeqCst);
-            let sequence_after = self.sequence.load(Ordering::SeqCst);
-            if sequence_before == sequence_after {
-                return Some(BreadcrumbSnapshot {
-                    sequence: sequence_after,
-                    phase,
-                    aux,
-                    aux2,
-                });
-            }
+            },
         }
-
-        None
     }
 }
 
 static BREADCRUMBS: [BreadcrumbSlot; MAX_NUM_CPUS] =
     [const { BreadcrumbSlot::new() }; MAX_NUM_CPUS];
 
-/// Lock-free breadcrumb state sampled from one CPU.
-#[derive(Clone, Copy, Debug)]
+/// A coherent breadcrumb or an explicit unavailable marker from one CPU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BreadcrumbSnapshot {
     /// Even commit sequence for this record; changes on every publication.
     pub sequence: u64,
@@ -260,23 +238,11 @@ pub struct BreadcrumbSnapshot {
     pub aux2: u64,
 }
 
-/// Return a lock-free snapshot of a CPU's last breadcrumb.
+/// Return a bounded snapshot of a CPU's last breadcrumb.
 ///
-/// # Arguments
-///
-/// * `cpu_id` - Logical CPU whose breadcrumb should be sampled.
-///
-/// # Returns
-///
-/// The sampled phase and context fields, or `None` when `cpu_id` is outside
-/// the supported CPU range. If all bounded attempts overlap a publication,
-/// the returned phase is [`PUBLICATION_IN_PROGRESS`] and `aux` is the observed
-/// sequence value instead of an inconsistent payload tuple.
-///
-/// The sequence is sampled before and after the context fields. A sample is
-/// returned only when both sequence reads match and are even, so a following
-/// writer cannot mix a previous phase with new context. Sampling is bounded;
-/// a CPU stopped during publication cannot spin the observing CPU forever.
+/// Invalid CPU IDs return None. Contention returns PUBLICATION_IN_PROGRESS
+/// with sequence u64::MAX, never a mixed or zero-filled successful record.
+/// A CPU stopped during publication cannot make its observer wait.
 #[inline(always)]
 pub fn snapshot(cpu_id: usize) -> Option<BreadcrumbSnapshot> {
     if cpu_id >= MAX_NUM_CPUS {
@@ -291,7 +257,7 @@ pub fn snapshot(cpu_id: usize) -> Option<BreadcrumbSnapshot> {
 /// # Arguments
 ///
 /// * `observer_cpu` - CPU collecting the diagnostic sample.
-/// * `timer_irq_count` - Lock-free local timer IRQ counter accessor.
+/// * `timer_irq_count` - Best-effort local timer IRQ counter accessor.
 /// * `now_ns` - Observer's monotonic timestamp used for report rate limiting.
 ///
 /// This diagnostic boundary keeps the timer core independent from scheduler
@@ -324,49 +290,19 @@ pub fn sample_timer_stalls(
         }
 
         let slot = observer_cpu * MAX_NUM_CPUS + target_cpu;
-        let changed = !STALL_SAMPLE_INITIALIZED[slot].swap(true, Ordering::Relaxed)
-            || STALL_LAST_TIMER_COUNT[slot].load(Ordering::Relaxed) != timer_count
-            || STALL_LAST_SEQUENCE[slot].load(Ordering::Relaxed) != breadcrumb.sequence
-            || STALL_LAST_PHASE[slot].load(Ordering::Relaxed) != breadcrumb.phase
-            || STALL_LAST_AUX[slot].load(Ordering::Relaxed) != breadcrumb.aux
-            || STALL_LAST_AUX2[slot].load(Ordering::Relaxed) != breadcrumb.aux2;
-        if changed {
-            STALL_LAST_TIMER_COUNT[slot].store(timer_count, Ordering::Relaxed);
-            STALL_LAST_SEQUENCE[slot].store(breadcrumb.sequence, Ordering::Relaxed);
-            STALL_LAST_PHASE[slot].store(breadcrumb.phase, Ordering::Relaxed);
-            STALL_LAST_AUX[slot].store(breadcrumb.aux, Ordering::Relaxed);
-            STALL_LAST_AUX2[slot].store(breadcrumb.aux2, Ordering::Relaxed);
-            STALL_STALE_SAMPLES[slot].store(0, Ordering::Relaxed);
-            continue;
-        }
-
-        let stale_samples = STALL_STALE_SAMPLES[slot]
-            .load(Ordering::Relaxed)
-            .saturating_add(1);
-        STALL_STALE_SAMPLES[slot].store(stale_samples, Ordering::Relaxed);
-        let should_report = stale_samples == STALL_REPORT_AFTER_SAMPLES
-            || (stale_samples > STALL_REPORT_AFTER_SAMPLES
-                && (stale_samples - STALL_REPORT_AFTER_SAMPLES) % STALL_REPEAT_SAMPLES == 0);
-        let report_slot = &STALL_LAST_REPORT_NS[target_cpu];
-        let last_report_ns = report_slot.load(Ordering::Relaxed);
-        let rate_limited = last_report_ns != 0
-            && now_ns.saturating_sub(last_report_ns) < STALL_REPORT_RATE_LIMIT_NS;
-        if should_report
-            && !rate_limited
-            && report_slot
-                .compare_exchange(
-                    last_report_ns,
-                    now_ns.max(1),
-                    Ordering::AcqRel,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
+        let should_report = STALL_HISTORY[slot]
+            .try_update(|history| history.observe(timer_count, breadcrumb))
+            .unwrap_or(false);
+        if should_report && STALL_REPORTS[target_cpu].try_claim(now_ns, STALL_REPORT_RATE_LIMIT_NS)
         {
-            let timer = crate::timer::timer_diagnostic_snapshot(target_cpu).unwrap_or_default();
-            let slice =
-                crate::sched::scheduler::slice_diagnostic_snapshot(target_cpu).unwrap_or_default();
+            let timer = crate::timer::timer_diagnostic_snapshot(target_cpu);
+            let timer_available = timer.is_some();
+            let timer = timer.unwrap_or_default();
+            let slice = crate::sched::scheduler::slice_diagnostic_snapshot(target_cpu);
+            let slice_available = slice.is_some();
+            let slice = slice.unwrap_or_default();
             crate::emergency_println!(
-                "[timer-stall] observer={} cpu={} count={} now={} phase={:#06x} phase_seq={} aux={:#x} aux2={:#x} task={} idle={} resched={} programmed_id={} programmed_deadline={} queue_seq={} head_id={} head_context={} head_soft={} head_hard={} live={} heap={} stale={}",
+                "[timer-stall] observer={} cpu={} count={} now={} phase={:#06x} phase_seq={} aux={:#x} aux2={:#x} task={} idle={} resched={} timer_available={} programmed_id={} programmed_deadline={} queue_seq={} head_id={} head_context={} head_soft={} head_hard={} live={} heap={} stale={}",
                 observer_cpu,
                 target_cpu,
                 timer_count,
@@ -378,6 +314,7 @@ pub fn sample_timer_stalls(
                 scheduler.current_task_id,
                 scheduler.is_idle,
                 scheduler.pending_reschedule,
+                timer_available,
                 timer.programmed_id,
                 timer.programmed_deadline_ns,
                 timer.queue.sequence,
@@ -390,8 +327,9 @@ pub fn sample_timer_stalls(
                 timer.queue.stale_heap_nodes,
             );
             crate::emergency_println!(
-                "[timer-stall] cpu={} slice_action={} slice_task={} token={} handle={} generation={} duration={} slice_deadline={} vruntime={} vdeadline={} dl_remaining={} dl_absolute={} dl_flags={:#x} timer_ctl={:#x} timer_counter={} timer_compare={} return_spsr={:#x} return_pc={:#x}",
+                "[timer-stall] cpu={} slice_available={} slice_action={} slice_task={} token={} handle={} generation={} duration={} slice_deadline={} vruntime={} vdeadline={} dl_remaining={} dl_absolute={} dl_flags={:#x} timer_ctl={:#x} timer_counter={} timer_compare={} return_spsr={:#x} return_pc={:#x}",
                 target_cpu,
+                slice_available,
                 crate::sched::scheduler::slice_diagnostic_action_name(slice.action),
                 slice.task_id,
                 slice.token,
@@ -416,10 +354,9 @@ pub fn sample_timer_stalls(
 
 /// Record the current execution phase for the running CPU.
 ///
-/// Lock-free and FIQ-safe: only atomic operations, no allocation or formatting.
-/// `aux`/`aux2` carry context such as FAR, task id, or exception class. An
-/// odd/even sequence brackets the fields so readers can reject a concurrent
-/// publication, including consecutive records that use the same phase code.
+/// Bounded and safe to reenter: no waiting, allocation, or formatting. A nested
+/// publisher skips its update if another writer owns the publication slot.
+/// Context values retain all 64 bits even when the native word is narrower.
 #[inline(always)]
 pub fn drop(phase: u64, aux: u64, aux2: u64) {
     let cpu = get_cpu().get_cpuid();
@@ -432,8 +369,8 @@ pub fn drop(phase: u64, aux: u64, aux2: u64) {
 ///
 /// Use this after `set_arch()` has repointed `TPIDR_EL1` at the trampoline
 /// Arch, where `get_cpu().get_cpuid()` may read an unexpected struct.
-/// The caller must name the currently executing CPU. The odd/even protocol has
-/// exactly one writer per slot and does not support remote concurrent writers.
+/// The caller must name the currently executing CPU. Reentrant or competing
+/// publications are skipped rather than mixed into the active publication.
 #[inline(always)]
 pub fn drop_cpu(cpu_id: usize, phase: u64, aux: u64) {
     if cpu_id < MAX_NUM_CPUS {

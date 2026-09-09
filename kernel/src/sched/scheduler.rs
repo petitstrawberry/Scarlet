@@ -2420,9 +2420,11 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
         state.generation
     };
     if (deadline_anomaly || fair_anomaly) && should_log_deadline_slice_anomaly(cpu_id, now_ns) {
-        let timer = crate::timer::timer_diagnostic_snapshot(cpu_id).unwrap_or_default();
+        let timer = crate::timer::timer_diagnostic_snapshot(cpu_id);
+        let timer_available = timer.is_some();
+        let timer = timer.unwrap_or_default();
         crate::emergency_println!(
-            "[sched-timer-anomaly] cpu={} task={} class={} throttled={} remaining={} abs={} now={} duration={} vruntime={} vdeadline={} fair_slice={} queue_head={} queue_hard={} programmed_id={} programmed_deadline={}",
+            "[sched-timer-anomaly] cpu={} task={} class={} throttled={} remaining={} abs={} now={} duration={} vruntime={} vdeadline={} fair_slice={} timer_available={} queue_head={} queue_hard={} programmed_id={} programmed_deadline={}",
             cpu_id,
             task_id,
             if deadline.is_some() {
@@ -2438,6 +2440,7 @@ fn arm_local_slice(cpu_id: usize, task_id: usize) {
             fair_vruntime_ns,
             fair_vdeadline_ns,
             fair_slice_ns,
+            timer_available,
             timer.queue.head_id,
             timer.queue.head_hard_deadline_ns,
             timer.programmed_id,
