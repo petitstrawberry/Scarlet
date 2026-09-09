@@ -1,0 +1,22 @@
+[package]
+name = "scarlet-riscv32-sbi"
+version = "1.0.0"
+edition = "2024"
+
+[[bin]]
+name = "scarlet"
+path = "src/main.rs"
+
+[dependencies]
+scarlet = { path = "../../../kernel", default-features = false, features = ["sbi-boot"] }
+
+[features]
+default = ["network"]
+network = ["scarlet/network"]
+sync-debug = ["scarlet/sync-debug"]
+
+[profile.dev]
+opt-level = 3
+
+[profile.release]
+debug = true
