@@ -135,6 +135,7 @@ pub(super) struct ControlQueue {
     pending: [Option<PendingControl>; VIRTIO_GPU_CONTROL_QUEUE_SIZE],
     failed: Option<&'static str>,
     device_owned: bool,
+    event_idx: bool,
 }
 
 impl ControlQueue {
@@ -163,6 +164,7 @@ impl ControlQueue {
             pending: core::array::from_fn(|_| None),
             failed: None,
             device_owned: false,
+            event_idx: false,
         }
     }
 
@@ -176,6 +178,42 @@ impl ControlQueue {
 
     pub(super) fn has_pending(&self) -> bool {
         self.pending.iter().any(Option::is_some)
+    }
+
+    pub(super) fn set_event_idx(&mut self, enabled: bool) {
+        self.event_idx = enabled;
+    }
+
+    pub(super) fn suppress_notifications(&mut self) {
+        let ring = &mut *self.ring;
+        // With EVENT_IDX the notification that woke this worker has already
+        // crossed used_event. Leave that threshold unchanged until rearm: even
+        // a consumed used entry can still have its notification in flight, so
+        // writing a newer threshold here could request another interrupt.
+        if !self.event_idx {
+            unsafe { core::ptr::write_volatile(ring.avail.flags, 1) };
+        }
+        crate::arch::io_mb();
+    }
+
+    pub(super) fn rearm_notifications(&mut self) -> bool {
+        let ring = &mut *self.ring;
+        if self.event_idx {
+            // Request the next completion once. Further completions coalesce
+            // until the worker advances this index after draining responses.
+            unsafe { core::ptr::write_volatile(ring.avail.used_event, ring.last_used_idx) };
+        } else {
+            unsafe { core::ptr::write_volatile(ring.avail.flags, 0) };
+        }
+        // A device may have completed a buffer while notifications were off.
+        // Publish the rearm before checking used.idx so that either we observe
+        // the reply here or the device observes that it must notify us.
+        crate::arch::io_mb();
+        let caught_up = ring.last_used_idx == unsafe { core::ptr::read_volatile(ring.used.idx) };
+        if !caught_up {
+            self.suppress_notifications();
+        }
+        caught_up
     }
 
     pub(super) fn enqueue(
@@ -359,6 +397,81 @@ mod tests {
         queue.ring.used.ring[index].id = head as u32;
         queue.ring.used.ring[index].len = written;
         *queue.ring.used.idx = queue.ring.used.idx.wrapping_add(1);
+    }
+
+    #[test_case]
+    fn control_event_idx_keeps_triggered_threshold_until_rearm() {
+        let mut queue = ControlQueue::new();
+        queue.set_event_idx(true);
+        let reply = request(1);
+        queue.enqueue(&reply, 0).expect("enqueue");
+        let head = last_head(&queue);
+        respond(&mut queue, head, 24, 9);
+        let second = request(2);
+        queue.enqueue(&second, 0).expect("second enqueue");
+        let second_head = last_head(&queue);
+        respond(&mut queue, second_head, 24, 9);
+        // A synchronous waiter can consume used.idx before the device finishes
+        // sending the associated notification. Suppression must not move the
+        // threshold forward to an entry whose notification is still in flight.
+        queue.reap(1).expect("synchronous completion");
+        assert_eq!(queue.ring.last_used_idx, 2);
+        queue.suppress_notifications();
+        assert_eq!(*queue.ring.avail.used_event, 0);
+        assert_eq!(*queue.ring.avail.flags, 0);
+        assert!(queue.rearm_notifications());
+        assert_eq!(*queue.ring.avail.used_event, 2);
+    }
+
+    #[test_case]
+    fn control_rearm_detects_response_completed_while_notifications_were_suppressed() {
+        for event_idx in [false, true] {
+            let mut queue = ControlQueue::new();
+            queue.set_event_idx(event_idx);
+            let reply = request(1);
+            queue.enqueue(&reply, 0).expect("enqueue");
+            let head = last_head(&queue);
+            queue.suppress_notifications();
+            queue.reap(1).expect("nothing completed yet");
+            // The device completes after the drain and before notification rearm.
+            respond(&mut queue, head, 24, 9);
+            assert!(!queue.rearm_notifications());
+            assert_eq!(*queue.ring.avail.flags, u16::from(!event_idx));
+            assert_eq!(reply.status(), ControlStatus::Pending);
+            queue
+                .reap(2)
+                .expect("recover completion without another IRQ");
+            assert!(queue.rearm_notifications());
+            assert_eq!(*queue.ring.avail.flags, 0);
+            if event_idx {
+                assert_eq!(*queue.ring.avail.used_event, 1);
+            }
+            assert_eq!(reply.status(), ControlStatus::Complete(24));
+        }
+    }
+
+    #[test_case]
+    fn control_rearm_detects_used_index_wrap() {
+        for event_idx in [false, true] {
+            let mut queue = ControlQueue::new();
+            queue.set_event_idx(event_idx);
+            queue.ring.last_used_idx = u16::MAX;
+            *queue.ring.used.idx = u16::MAX;
+            let reply = request(1);
+            queue.enqueue(&reply, 0).expect("enqueue");
+            let head = last_head(&queue);
+            queue.suppress_notifications();
+            respond(&mut queue, head, 24, 9);
+            assert_eq!(*queue.ring.used.idx, 0);
+            assert!(!queue.rearm_notifications());
+            queue.reap(1).expect("reap wrapped completion");
+            assert!(queue.rearm_notifications());
+            assert_eq!(*queue.ring.avail.flags, 0);
+            if event_idx {
+                assert_eq!(*queue.ring.avail.used_event, 0);
+            }
+            assert_eq!(reply.status(), ControlStatus::Complete(24));
+        }
     }
 
     #[test_case]

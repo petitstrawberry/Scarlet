@@ -486,6 +486,7 @@ impl VirtioGpuQueues {
 pub struct VirtioGpuDeviceCore {
     base_addr: usize,
     pci_transport: Option<VirtioPciTransport>,
+    interrupt_state: Arc<asynchronous::InterruptState>,
     virtqueues: IrqSpinLock<VirtioGpuQueues>, // Control queue (0) and Cursor queue (1)
     async_submissions: asynchronous::AsyncSubmissions,
     async_enabled: bool,
@@ -536,6 +537,7 @@ impl VirtioGpuDeviceCore {
         let mut device = Self {
             base_addr,
             pci_transport,
+            interrupt_state: Arc::new(asynchronous::InterruptState::new(base_addr, pci_transport)),
             virtqueues: IrqSpinLock::new(VirtioGpuQueues::new()),
             async_submissions: asynchronous::AsyncSubmissions::default(),
             async_enabled: false,
@@ -561,6 +563,10 @@ impl VirtioGpuDeviceCore {
         // Initialize the VirtIO device - this will set up the queues with the device
         match device.init() {
             Ok(features) => {
+                device.virtqueues.lock().control.set_event_idx(
+                    features & (1u64 << crate::drivers::virtio::features::VIRTIO_RING_F_EVENT_IDX)
+                        != 0,
+                );
                 *device.negotiated_features.write() = features;
                 *device.transport_ready.write() = true;
             }
@@ -1562,7 +1568,8 @@ impl VirtioDevice for VirtioGpuDeviceCore {
     fn get_supported_features(&self, device_features: u64) -> u64 {
         let mut supported = (1u64 << VIRTIO_GPU_F_VIRGL)
             | (1u64 << VIRTIO_GPU_F_EDID)
-            | (1u64 << VIRTIO_GPU_F_CONTEXT_INIT);
+            | (1u64 << VIRTIO_GPU_F_CONTEXT_INIT)
+            | (1u64 << crate::drivers::virtio::features::VIRTIO_RING_F_EVENT_IDX);
         if self.pci_transport().is_some() {
             supported |= 1u64 << crate::drivers::virtio::features::VIRTIO_F_VERSION_1;
         }
@@ -1572,7 +1579,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
 
 pub struct VirtioGpuDevice {
     core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
-    interrupt_state: asynchronous::InterruptState,
+    interrupt_state: Arc<asynchronous::InterruptState>,
 }
 
 impl VirtioGpuDevice {
@@ -1586,9 +1593,10 @@ impl VirtioGpuDevice {
     ///
     /// A new instance of `VirtioGpuDevice`
     pub fn new(base_addr: usize) -> Self {
+        let core = VirtioGpuDeviceCore::new(base_addr);
         Self {
-            core: Arc::new(IrqSpinLock::new(VirtioGpuDeviceCore::new(base_addr))),
-            interrupt_state: asynchronous::InterruptState::new(base_addr, None),
+            interrupt_state: Arc::clone(&core.interrupt_state),
+            core: Arc::new(IrqSpinLock::new(core)),
         }
     }
 
@@ -1602,12 +1610,10 @@ impl VirtioGpuDevice {
     ///
     /// A new instance of `VirtioGpuDevice`.
     pub fn new_pci(transport: VirtioPciTransport) -> Self {
+        let core = VirtioGpuDeviceCore::new_pci(transport);
         Self {
-            core: Arc::new(IrqSpinLock::new(VirtioGpuDeviceCore::new_pci(transport))),
-            interrupt_state: asynchronous::InterruptState::new(
-                transport.common_cfg,
-                Some(transport),
-            ),
+            interrupt_state: Arc::clone(&core.interrupt_state),
+            core: Arc::new(IrqSpinLock::new(core)),
         }
     }
 }

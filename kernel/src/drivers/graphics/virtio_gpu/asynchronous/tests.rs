@@ -8,13 +8,25 @@ use super::super::{
     VIRTIO_GPU_FLAG_FENCE, VIRTIO_GPU_MAX_OPAQUE_COMMAND_SIZE,
     VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, VIRTIO_GPU_RESP_OK_NODATA, VirtioGpuCtrlHdr,
 };
-use super::{ASYNC_CAPACITY, AsyncSubmissions};
+use super::{ASYNC_CAPACITY, AsyncSubmissions, InterruptState};
 use crate::device::gpu::{
     GpuBackendContext, GpuBackendContextInfo, GpuBackendEnqueueError, GpuBackendQueue,
     GpuBackendQueueInfo, GpuBackendSubmitError, GpuCompletion, GpuCompletionFailure,
     GpuCompletionState, GpuSubmission,
 };
 use crate::sync::IrqSpinLock;
+
+#[test_case]
+fn mmio_irq_claim_preserves_cause_until_deferred_worker_acknowledges() {
+    use crate::drivers::virtio::device::Register;
+    let mut registers = [0u32; 64];
+    registers[Register::InterruptStatus.offset() / 4] = 1;
+    let state = InterruptState::new(registers.as_mut_ptr() as usize, None);
+    assert!(state.pending());
+    assert_eq!(registers[Register::InterruptAck.offset() / 4], 0);
+    assert_eq!(state.acknowledge(), 1);
+    assert_eq!(registers[Register::InterruptAck.offset() / 4], 1);
+}
 
 struct TestContext {
     drops: Arc<AtomicUsize>,

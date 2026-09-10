@@ -20,7 +20,7 @@ use crate::device::gpu::{
     GpuCompletionFailure, GpuSubmission,
 };
 use crate::drivers::virtio::{device::Register, pci::VirtioPciTransport};
-use crate::interrupt::{InterruptClaim, InterruptId, InterruptResult};
+use crate::interrupt::{DeferredInterruptCompletion, InterruptClaim, InterruptId, InterruptResult};
 use crate::sync::{IrqSpinLock, Once, Waker};
 
 use super::control::{ControlEnqueueError, ControlQueue, ControlRequest, ControlStatus};
@@ -248,27 +248,55 @@ pub(super) fn register(core: &Arc<IrqSpinLock<VirtioGpuDeviceCore>>) -> bool {
         task.init();
         crate::sched::scheduler::add_task(task, crate::arch::get_cpu().get_cpuid());
     }
+    core.lock()
+        .interrupt_state
+        .deferred_enabled
+        .store(true, Ordering::Release);
     true
 }
 
 fn process_device(core: &Arc<IrqSpinLock<VirtioGpuDeviceCore>>) -> bool {
     for _ in 0..ASYNC_CAPACITY {
-        let retired = {
+        let (retired, active, interrupt, completion_count, caught_up) = {
             let Some(mut guard) = core.try_lock() else {
                 return true;
             };
             let core = &mut *guard;
+            let interrupt = Arc::clone(&core.interrupt_state);
+            let completion_count = interrupt.completions.lock().len();
             let mut queues = core.virtqueues.lock();
+            if completion_count != 0 {
+                queues.control.suppress_notifications();
+                // Only the owner of a deferred delivery may clear ISR state.
+                // Timed polling must not consume a not-yet-claimed interrupt.
+                interrupt.acknowledge();
+            }
             let retired = core
                 .async_submissions
                 .poll_one(&mut queues.control, crate::timer::get_time_ns());
-            if retired.is_none() {
-                return core.async_submissions.active();
-            }
-            retired
+            let caught_up = if completion_count == 0 || queues.control.check().is_err() {
+                // Timed progress may reap replies but must not rearm an IRQ
+                // whose delivery has not yet reached deferred_interrupt_ready.
+                // Otherwise it could request a second notification before the
+                // first delivery has been acknowledged by its owning worker.
+                // Keep a failed queue quiet; no further replies can be retired.
+                true
+            } else {
+                queues.control.rearm_notifications()
+            };
+            (
+                retired,
+                core.async_submissions.active(),
+                interrupt,
+                completion_count,
+                caught_up,
+            )
         };
+        let released = caught_up && interrupt.complete(completion_count);
         if let Some(retired) = retired {
             retired.retire();
+        } else if caught_up {
+            return active || !released;
         }
     }
     true
@@ -308,6 +336,8 @@ pub(super) struct InterruptState {
     base_addr: usize,
     pci_transport: Option<VirtioPciTransport>,
     id: IrqSpinLock<Option<InterruptId>>,
+    deferred_enabled: AtomicBool,
+    completions: IrqSpinLock<VecDeque<DeferredInterruptCompletion>>,
 }
 
 impl InterruptState {
@@ -316,7 +346,38 @@ impl InterruptState {
             base_addr,
             pci_transport,
             id: IrqSpinLock::new(None),
+            deferred_enabled: AtomicBool::new(false),
+            completions: IrqSpinLock::new(VecDeque::with_capacity(1)),
         }
+    }
+
+    fn complete(&self, count: usize) -> bool {
+        for _ in 0..count {
+            let Some(mut completion) = self.completions.lock().pop_front() else {
+                break;
+            };
+            if completion.complete().is_err() {
+                self.completions.lock().push_front(completion);
+                return false;
+            }
+        }
+        true
+    }
+
+    fn pending(&self) -> bool {
+        crate::arch::io_mb();
+        // PCI's ISR is read-to-clear, so checking a shared INTx line also
+        // acknowledges it. MMIO preserves the cause until the core masks the
+        // line and hands ownership to the worker.
+        let status = unsafe {
+            if let Some(pci) = self.pci_transport {
+                u32::from(crate::arch::mmio::read8(pci.isr_cfg))
+            } else {
+                crate::arch::mmio::read32(self.base_addr + Register::InterruptStatus.offset())
+            }
+        };
+        crate::arch::io_mb();
+        status & 3 != 0
     }
 
     fn acknowledge(&self) -> u32 {
@@ -373,12 +434,31 @@ impl InterruptCapableDevice for VirtioGpuDevice {
     }
 
     fn claim_interrupt(&self) -> InterruptResult<InterruptClaim> {
+        if self
+            .interrupt_state
+            .deferred_enabled
+            .load(Ordering::Acquire)
+        {
+            return Ok(if self.interrupt_state.pending() {
+                InterruptClaim::Deferred
+            } else {
+                InterruptClaim::NotMine
+            });
+        }
         if self.interrupt_state.acknowledge() == 0 {
             return Ok(InterruptClaim::NotMine);
         }
         // No allocation, GPU wait, or resource destructor runs in IRQ context.
         wake_worker();
         Ok(InterruptClaim::Handled)
+    }
+
+    fn deferred_interrupt_ready(&self, completion: DeferredInterruptCompletion) {
+        self.interrupt_state
+            .completions
+            .lock()
+            .push_back(completion);
+        wake_worker();
     }
 }
 
