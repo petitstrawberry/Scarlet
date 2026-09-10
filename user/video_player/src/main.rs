@@ -13,6 +13,9 @@
 )]
 
 mod h264_sw;
+mod shared_u64;
+
+use shared_u64::SharedU64;
 
 extern crate alloc;
 extern crate scarlet_std as std;
@@ -31,7 +34,7 @@ use core::simd::{
     Simd,
     num::{SimdInt, SimdUint},
 };
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use core::time::Duration;
 
 use sas_client::{SasClient, SasStream, StreamConfig};
@@ -310,20 +313,20 @@ struct ControlsOverlay {
     replay_epoch: AtomicU32,
     seek_epoch: AtomicU32,
     video_ready_seek_epoch: AtomicU32,
-    seek_target_us: AtomicU64,
-    desired_position_us: AtomicU64,
-    media_duration_us: AtomicU64,
-    buffered_position_us: AtomicU64,
+    seek_target_us: SharedU64,
+    desired_position_us: SharedU64,
+    media_duration_us: SharedU64,
+    buffered_position_us: SharedU64,
     canvas_width: AtomicU32,
     canvas_height: AtomicU32,
-    presented_frames: AtomicU64,
-    dropped_frames: AtomicU64,
+    presented_frames: SharedU64,
+    dropped_frames: SharedU64,
     fps_display_x10: AtomicU32,
-    fps_window_frames: AtomicU64,
-    fps_window_start_us: AtomicU64,
-    last_clock_us: AtomicU64,
-    last_video_pts_us: AtomicU64,
-    last_lag_us: AtomicU64,
+    fps_window_frames: SharedU64,
+    fps_window_start_us: SharedU64,
+    last_clock_us: SharedU64,
+    last_video_pts_us: SharedU64,
+    last_lag_us: SharedU64,
 }
 
 #[derive(Clone, Copy)]
@@ -375,20 +378,20 @@ impl ControlsOverlay {
             replay_epoch: AtomicU32::new(0),
             seek_epoch: AtomicU32::new(0),
             video_ready_seek_epoch: AtomicU32::new(u32::MAX),
-            seek_target_us: AtomicU64::new(0),
-            desired_position_us: AtomicU64::new(0),
-            media_duration_us: AtomicU64::new(0),
-            buffered_position_us: AtomicU64::new(0),
+            seek_target_us: SharedU64::new(0),
+            desired_position_us: SharedU64::new(0),
+            media_duration_us: SharedU64::new(0),
+            buffered_position_us: SharedU64::new(0),
             canvas_width: AtomicU32::new(DISPLAY_WIDTH),
             canvas_height: AtomicU32::new(DISPLAY_HEIGHT),
-            presented_frames: AtomicU64::new(0),
-            dropped_frames: AtomicU64::new(0),
+            presented_frames: SharedU64::new(0),
+            dropped_frames: SharedU64::new(0),
             fps_display_x10: AtomicU32::new(0),
-            fps_window_frames: AtomicU64::new(0),
-            fps_window_start_us: AtomicU64::new(u64::MAX),
-            last_clock_us: AtomicU64::new(0),
-            last_video_pts_us: AtomicU64::new(0),
-            last_lag_us: AtomicU64::new(0),
+            fps_window_frames: SharedU64::new(0),
+            fps_window_start_us: SharedU64::new(u64::MAX),
+            last_clock_us: SharedU64::new(0),
+            last_video_pts_us: SharedU64::new(0),
+            last_lag_us: SharedU64::new(0),
         }
     }
 
@@ -404,18 +407,18 @@ impl ControlsOverlay {
         self.seek_epoch.store(0, Ordering::Release);
         self.video_ready_seek_epoch
             .store(u32::MAX, Ordering::Release);
-        self.seek_target_us.store(0, Ordering::Release);
-        self.desired_position_us.store(0, Ordering::Release);
-        self.media_duration_us.store(0, Ordering::Release);
-        self.buffered_position_us.store(0, Ordering::Release);
-        self.presented_frames.store(0, Ordering::Release);
-        self.dropped_frames.store(0, Ordering::Release);
+        self.seek_target_us.store(0);
+        self.desired_position_us.store(0);
+        self.media_duration_us.store(0);
+        self.buffered_position_us.store(0);
+        self.presented_frames.store(0);
+        self.dropped_frames.store(0);
         self.fps_display_x10.store(0, Ordering::Release);
-        self.fps_window_frames.store(0, Ordering::Release);
-        self.fps_window_start_us.store(u64::MAX, Ordering::Release);
-        self.last_clock_us.store(0, Ordering::Release);
-        self.last_video_pts_us.store(0, Ordering::Release);
-        self.last_lag_us.store(0, Ordering::Release);
+        self.fps_window_frames.store(0);
+        self.fps_window_start_us.store(u64::MAX);
+        self.last_clock_us.store(0);
+        self.last_video_pts_us.store(0);
+        self.last_lag_us.store(0);
     }
 
     fn is_visible(&self) -> bool {
@@ -463,8 +466,8 @@ impl ControlsOverlay {
     }
 
     fn request_replay(&self) {
-        self.desired_position_us.store(0, Ordering::Release);
-        self.seek_target_us.store(0, Ordering::Release);
+        self.desired_position_us.store(0);
+        self.seek_target_us.store(0);
         self.pause_after_seek.store(false, Ordering::Release);
         self.paused.store(false, Ordering::Release);
         self.reset_fps_window();
@@ -478,38 +481,15 @@ impl ControlsOverlay {
     }
 
     fn set_media_duration_us(&self, duration_us: u64) {
-        let mut current = self.media_duration_us.load(Ordering::Acquire);
-        while duration_us > current {
-            match self.media_duration_us.compare_exchange_weak(
-                current,
-                duration_us,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(actual) => current = actual,
-            }
-        }
+        self.media_duration_us.fetch_max(duration_us);
     }
 
     fn media_duration_us(&self) -> u64 {
-        self.media_duration_us.load(Ordering::Acquire)
+        self.media_duration_us.load()
     }
 
     fn set_buffered_position_us(&self, buffered_position_us: u64) -> bool {
-        let mut current = self.buffered_position_us.load(Ordering::Acquire);
-        while buffered_position_us > current {
-            match self.buffered_position_us.compare_exchange_weak(
-                current,
-                buffered_position_us,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return true,
-                Err(actual) => current = actual,
-            }
-        }
-        false
+        self.buffered_position_us.fetch_max(buffered_position_us) < buffered_position_us
     }
 
     fn current_seek_epoch(&self) -> u32 {
@@ -517,7 +497,7 @@ impl ControlsOverlay {
     }
 
     fn current_seek_target_us(&self) -> u64 {
-        self.seek_target_us.load(Ordering::Acquire)
+        self.seek_target_us.load()
     }
 
     fn mark_video_ready_for_seek(&self, seek_epoch: u32) {
@@ -546,9 +526,9 @@ impl ControlsOverlay {
 
     fn request_seek_to_us(&self, target_us: u64) {
         let target_us = self.clamp_seek_target_us(target_us);
-        self.desired_position_us.store(target_us, Ordering::Release);
+        self.desired_position_us.store(target_us);
         let was_finished = self.finished.swap(false, Ordering::AcqRel);
-        self.seek_target_us.store(target_us, Ordering::Release);
+        self.seek_target_us.store(target_us);
         let pause_after_seek =
             !was_finished && (self.is_paused() || self.pause_after_seek.load(Ordering::Acquire));
         self.pause_after_seek
@@ -561,7 +541,7 @@ impl ControlsOverlay {
 
     fn preview_seek_to_us(&self, target_us: u64) {
         self.desired_position_us
-            .store(self.clamp_seek_target_us(target_us), Ordering::Release);
+            .store(self.clamp_seek_target_us(target_us));
         self.show_for_mouse_activity();
     }
 
@@ -577,7 +557,7 @@ impl ControlsOverlay {
     fn request_relative_seek_ms(&self, delta_ms: i64) {
         let seek_epoch = self.current_seek_epoch();
         let current_us = if self.is_video_ready_for_seek(seek_epoch) {
-            self.last_video_pts_us.load(Ordering::Acquire)
+            self.last_video_pts_us.load()
         } else {
             self.current_seek_target_us()
         };
@@ -611,65 +591,52 @@ impl ControlsOverlay {
     }
 
     fn record_presented_frame(&self, presentation_time_us: u64, clock_time_us: Option<u64>) {
-        self.presented_frames.fetch_add(1, Ordering::AcqRel);
+        self.presented_frames.fetch_add(1);
         self.record_video_timing(presentation_time_us, clock_time_us);
     }
 
     fn record_preview_frame(&self, presentation_time_us: u64) {
-        self.last_clock_us
-            .store(presentation_time_us, Ordering::Release);
-        self.last_video_pts_us
-            .store(presentation_time_us, Ordering::Release);
-        self.last_lag_us.store(0, Ordering::Release);
+        self.last_clock_us.store(presentation_time_us);
+        self.last_video_pts_us.store(presentation_time_us);
+        self.last_lag_us.store(0);
     }
 
     fn record_dropped_frame(&self, presentation_time_us: u64, clock_time_us: Option<u64>) {
-        self.dropped_frames.fetch_add(1, Ordering::AcqRel);
+        self.dropped_frames.fetch_add(1);
         self.record_video_timing(presentation_time_us, clock_time_us);
     }
 
     fn reset_fps_window(&self) {
-        self.fps_window_start_us.store(u64::MAX, Ordering::Release);
-        self.fps_window_frames.store(
-            self.presented_frames.load(Ordering::Acquire),
-            Ordering::Release,
-        );
+        self.fps_window_start_us.store(u64::MAX);
+        self.fps_window_frames.store(self.presented_frames.load());
     }
 
     fn record_video_timing(&self, presentation_time_us: u64, clock_time_us: Option<u64>) {
         let clock_time_us = clock_time_us.unwrap_or(presentation_time_us);
         const FPS_WINDOW_US: u64 = 1_000_000;
-        let window_start = self.fps_window_start_us.load(Ordering::Acquire);
+        let window_start = self.fps_window_start_us.load();
         let elapsed = clock_time_us.saturating_sub(window_start);
         if window_start == u64::MAX || elapsed >= FPS_WINDOW_US {
             if window_start != u64::MAX && elapsed > 0 {
                 let window_frames = self
                     .presented_frames
-                    .load(Ordering::Acquire)
-                    .saturating_sub(self.fps_window_frames.load(Ordering::Acquire));
+                    .load()
+                    .saturating_sub(self.fps_window_frames.load());
                 self.fps_display_x10.store(
                     (window_frames.saturating_mul(10_000_000) / elapsed) as u32,
                     Ordering::Release,
                 );
             }
-            self.fps_window_start_us
-                .store(clock_time_us, Ordering::Release);
-            self.fps_window_frames.store(
-                self.presented_frames.load(Ordering::Acquire),
-                Ordering::Release,
-            );
+            self.fps_window_start_us.store(clock_time_us);
+            self.fps_window_frames.store(self.presented_frames.load());
         }
-        self.last_clock_us.store(clock_time_us, Ordering::Release);
-        self.last_video_pts_us
-            .store(presentation_time_us, Ordering::Release);
+        self.last_clock_us.store(clock_time_us);
+        self.last_video_pts_us.store(presentation_time_us);
         if !self.is_scrubbing() && self.is_video_ready_for_seek(self.current_seek_epoch()) {
-            self.desired_position_us
-                .store(presentation_time_us, Ordering::Release);
+            self.desired_position_us.store(presentation_time_us);
         }
-        self.last_lag_us.store(
-            clock_time_us.saturating_sub(presentation_time_us),
-            Ordering::Release,
-        );
+        self.last_lag_us
+            .store(clock_time_us.saturating_sub(presentation_time_us));
     }
 
     fn update_canvas_size(&self, width: u32, height: u32) {
@@ -1033,10 +1000,10 @@ struct AudioClock {
     finished: AtomicBool,
     unavailable: AtomicBool,
     active_seek_epoch: AtomicU32,
-    sample_rate: AtomicU64,
-    base_frames: AtomicU64,
-    read_frames: AtomicU64,
-    loop_duration_us: AtomicU64,
+    sample_rate: SharedU64,
+    base_frames: SharedU64,
+    read_frames: SharedU64,
+    loop_duration_us: SharedU64,
 }
 
 impl AudioClock {
@@ -1047,10 +1014,10 @@ impl AudioClock {
             finished: AtomicBool::new(false),
             unavailable: AtomicBool::new(false),
             active_seek_epoch: AtomicU32::new(0),
-            sample_rate: AtomicU64::new(48_000),
-            base_frames: AtomicU64::new(0),
-            read_frames: AtomicU64::new(0),
-            loop_duration_us: AtomicU64::new(0),
+            sample_rate: SharedU64::new(48_000),
+            base_frames: SharedU64::new(0),
+            read_frames: SharedU64::new(0),
+            loop_duration_us: SharedU64::new(0),
         }
     }
 
@@ -1059,8 +1026,7 @@ impl AudioClock {
     }
 
     fn mark_started(&self, sample_rate: u32, seek_epoch: u32) {
-        self.sample_rate
-            .store(u64::from(sample_rate), Ordering::Release);
+        self.sample_rate.store(u64::from(sample_rate));
         self.active_seek_epoch.store(seek_epoch, Ordering::Release);
         self.unavailable.store(false, Ordering::Release);
         self.finished.store(false, Ordering::Release);
@@ -1088,31 +1054,30 @@ impl AudioClock {
     }
 
     fn update_read_frames(&self, read_frames: u64) {
-        let base_frames = self.base_frames.load(Ordering::Acquire);
+        let base_frames = self.base_frames.load();
         self.read_frames
-            .store(base_frames.saturating_add(read_frames), Ordering::Release);
+            .store(base_frames.saturating_add(read_frames));
     }
 
     fn advance_base_frames(&self, frames: u64) {
-        self.base_frames.fetch_add(frames, Ordering::AcqRel);
+        self.base_frames.fetch_add(frames);
     }
 
     fn set_start_position_us(&self, start_us: u64, sample_rate: u32) {
         let rate = u64::from(sample_rate).max(1);
         let base_frames = start_us.saturating_mul(rate) / 1_000_000;
-        self.sample_rate.store(rate, Ordering::Release);
-        self.base_frames.store(base_frames, Ordering::Release);
-        self.read_frames.store(base_frames, Ordering::Release);
+        self.sample_rate.store(rate);
+        self.base_frames.store(base_frames);
+        self.read_frames.store(base_frames);
         self.finished.store(false, Ordering::Release);
     }
 
     fn set_loop_duration_us(&self, duration_us: u64) {
-        self.loop_duration_us
-            .store(duration_us.max(1), Ordering::Release);
+        self.loop_duration_us.store(duration_us.max(1));
     }
 
     fn loop_duration_us(&self) -> Option<u64> {
-        let duration = self.loop_duration_us.load(Ordering::Acquire);
+        let duration = self.loop_duration_us.load();
         (duration != 0).then_some(duration)
     }
 
@@ -1133,14 +1098,14 @@ impl AudioClock {
         if !self.started.load(Ordering::Acquire) {
             return None;
         }
-        let rate = self.sample_rate.load(Ordering::Acquire).max(1);
-        let audio_frames = self.read_frames.load(Ordering::Acquire);
+        let rate = self.sample_rate.load().max(1);
+        let audio_frames = self.read_frames.load();
         Some(audio_frames.saturating_mul(1_000_000) / rate)
     }
 
     fn reset_for_replay(&self) {
-        self.base_frames.store(0, Ordering::Release);
-        self.read_frames.store(0, Ordering::Release);
+        self.base_frames.store(0);
+        self.read_frames.store(0);
         self.started.store(false, Ordering::Release);
         self.finished.store(false, Ordering::Release);
         self.video_ready.store(false, Ordering::Release);
@@ -1154,8 +1119,8 @@ impl AudioClock {
     /// If the audio thread also cleared `video_ready` it could race
     /// with the decoder and deadlock.
     fn reset_for_replay_audio(&self) {
-        self.base_frames.store(0, Ordering::Release);
-        self.read_frames.store(0, Ordering::Release);
+        self.base_frames.store(0);
+        self.read_frames.store(0);
         self.started.store(false, Ordering::Release);
         self.finished.store(false, Ordering::Release);
         // intentionally skip video_ready
@@ -7621,10 +7586,10 @@ fn draw_debug_overlay(
         return;
     }
 
-    let presented = controls.presented_frames.load(Ordering::Acquire);
-    let dropped = controls.dropped_frames.load(Ordering::Acquire);
-    let last_video_pts_us = controls.last_video_pts_us.load(Ordering::Acquire);
-    let lag_ms = controls.last_lag_us.load(Ordering::Acquire) / 1_000;
+    let presented = controls.presented_frames.load();
+    let dropped = controls.dropped_frames.load();
+    let last_video_pts_us = controls.last_video_pts_us.load();
+    let lag_ms = controls.last_lag_us.load() / 1_000;
     let total_frames = frame.total_frames.max(frame.current_frame).max(1);
     let current_frame = frame.current_frame.min(total_frames);
     let fps_x10 = controls.fps_display_x10.load(Ordering::Acquire);
@@ -7738,14 +7703,8 @@ fn draw_seek_bar(
     let track_y = logical_canvas_height.saturating_sub(SEEK_TRACK_BOTTOM_INSET);
     let duration_us = controls.media_duration_us();
     let (buffered_width, progress_width) = if duration_us != 0 {
-        let buffered_us = controls
-            .buffered_position_us
-            .load(Ordering::Acquire)
-            .min(duration_us);
-        let position_us = controls
-            .desired_position_us
-            .load(Ordering::Acquire)
-            .min(duration_us);
+        let buffered_us = controls.buffered_position_us.load().min(duration_us);
+        let position_us = controls.desired_position_us.load().min(duration_us);
         (
             (u128::from(track_width) * u128::from(buffered_us) / u128::from(duration_us)) as u32,
             (u128::from(track_width) * u128::from(position_us) / u128::from(duration_us)) as u32,

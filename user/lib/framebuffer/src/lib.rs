@@ -135,8 +135,14 @@ pub struct DisplayInfo {
     ///
     /// This value changes when the display surface's mapped backing changes,
     /// even if `buffer_len` remains the same.
-    pub backing_id: usize,
+    pub backing_id: u64,
 }
+
+// DISPLAY_GET_INFO writes this fixed-width kernel record, including on RV32.
+const _: () = {
+    assert!(core::mem::size_of::<DisplayInfo>() == 32);
+    assert!(core::mem::offset_of!(DisplayInfo, backing_id) == 24);
+};
 
 /// Region argument for DISPLAY_PRESENT_REGION.
 #[repr(C)]
@@ -395,7 +401,7 @@ pub struct Framebuffer {
 pub struct DisplaySurface {
     file: File,
     mapped_buffer: Option<(usize, usize)>,
-    mapped_backing_id: usize,
+    mapped_backing_id: u64,
     scratch_line: alloc::vec::Vec<u8>,
     cached_info: Option<DisplayInfo>,
     swapchain_buffers: alloc::vec::Vec<(usize, usize)>,

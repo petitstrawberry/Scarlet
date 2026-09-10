@@ -7,7 +7,7 @@
 
 mod file_icons;
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::fs;
@@ -155,7 +155,8 @@ static PENDING_THUMBNAIL_JOBS: Mutex<VecDeque<ThumbnailJob>> = Mutex::new(VecDeq
 static PENDING_THUMBNAIL_RESULTS: Mutex<Vec<ThumbnailResult>> = Mutex::new(Vec::new());
 static THUMBNAIL_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 static PICKER_WINDOW_CLOSING: AtomicBool = AtomicBool::new(false);
-static IDLE_TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
+// Diagnostic-only ticks may wrap; no identity or application state uses them.
+static IDLE_TICK_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Picker child processes spawned via `launch_picker_process`. The background
 /// reaper thread polls them with `try_wait` so the UI thread never blocks and

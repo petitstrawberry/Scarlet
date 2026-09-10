@@ -51,3 +51,10 @@ fn main() -> i32 {
 fn main() -> i32 {
     aarch64::run()
 }
+
+#[cfg(not(any(target_arch = "riscv64", target_arch = "aarch64")))]
+#[unsafe(no_mangle)]
+fn main() -> i32 {
+    scarlet_std::println!("ushv: hardware virtualization is unavailable on this architecture");
+    127
+}

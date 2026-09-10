@@ -35,8 +35,9 @@ See [userspace development](../userspace/README.md) for application-only builds.
 
 The tracked reference projects are
 [AArch64 full](../../projects/aarch64-limine-full/scarlet.toml),
-[RISC-V full](../../projects/riscv64-limine-full/scarlet.toml), and
-[AArch64 microvm](../../projects/aarch64-limine-microvm/scarlet.toml).
+[RISC-V full](../../projects/riscv64-limine-full/scarlet.toml),
+[AArch64 microvm](../../projects/aarch64-limine-microvm/scarlet.toml), and
+[RV32GC SBI desktop](../../projects/riscv32-sbi-desktop/README.md).
 Their layout is:
 
 ```text
@@ -56,7 +57,7 @@ projects/<project>/
     cache/                     # Git, downloads, child Cargo state and outputs
 ```
 
-There are no separate tracked desktop or Apple Limine projects in this tree.
+There are no separate tracked Apple Limine projects in this tree.
 External BSP repositories and historical board investigations have their own
 scope. Do not use their paths as checked-in reference project names.
 

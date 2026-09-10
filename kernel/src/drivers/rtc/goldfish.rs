@@ -65,5 +65,5 @@ fn goldfish_rtc_remove(_device_info: &PlatformDeviceInfo) -> Result<(), &'static
     Ok(())
 }
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
 driver_initcall!(register_goldfish_rtc);

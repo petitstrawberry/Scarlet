@@ -1,7 +1,7 @@
 [env]
 # Environment variable settings for build
 CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
-CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["kernel", "projects/riscv64-limine-full/bsp", "projects/aarch64-limine-full/bsp", "projects/aarch64-limine-microvm/bsp", "user/lib/std", "user/bin", "user/video_player", "user/std-bin"]
+CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["kernel", "projects/riscv32-sbi-desktop/bsp", "projects/riscv64-limine-full/bsp", "projects/aarch64-limine-full/bsp", "projects/aarch64-limine-microvm/bsp", "user/lib/std", "user/bin", "user/video_player", "user/std-bin"]
 
 [config]
 default_task = "build-riscv64"
@@ -9,11 +9,11 @@ skip_core_tasks = true
 
 [tasks.fmt]
 description = "Format all code"
-dependencies = ["fmt-kernel", "fmt-project-riscv64", "fmt-project-aarch64", "fmt-project-aarch64-microvm", "fmt-userlib", "fmt-userbin", "fmt-video-player", "fmt-userbin-std", "fmt-drivers", "fmt-modules", "fmt-cross-cc", "fmt-abi"]
+dependencies = ["fmt-kernel", "fmt-project-riscv32", "fmt-project-riscv64", "fmt-project-aarch64", "fmt-project-aarch64-microvm", "fmt-userlib", "fmt-userbin", "fmt-video-player", "fmt-userbin-std", "fmt-drivers", "fmt-modules", "fmt-cross-cc", "fmt-abi"]
 
 [tasks.fmt-check]
 description = "Check formatting (no changes)"
-dependencies = ["fmt-kernel-check", "fmt-project-riscv64-check", "fmt-project-aarch64-check", "fmt-project-aarch64-microvm-check", "fmt-userlib-check", "fmt-userbin-check", "fmt-video-player-check", "fmt-userbin-std-check", "fmt-drivers-check", "fmt-modules-check", "fmt-cross-cc-check", "fmt-abi-check"]
+dependencies = ["fmt-kernel-check", "fmt-project-riscv32-check", "fmt-project-riscv64-check", "fmt-project-aarch64-check", "fmt-project-aarch64-microvm-check", "fmt-userlib-check", "fmt-userbin-check", "fmt-video-player-check", "fmt-userbin-std-check", "fmt-drivers-check", "fmt-modules-check", "fmt-cross-cc-check", "fmt-abi-check"]
 
 [tasks.test-cross-cc]
 description = "Check Nix cross C defaults, application overrides, and native compiler selection"
@@ -102,6 +102,12 @@ done
 [tasks.fmt-kernel-check]
 description = "Check kernel formatting"
 cwd = "kernel"
+command = "cargo"
+args = ["fmt", "--", "--check"]
+
+[tasks.fmt-project-riscv32-check]
+description = "Check RV32 desktop BSP formatting"
+cwd = "projects/riscv32-sbi-desktop/bsp"
 command = "cargo"
 args = ["fmt", "--", "--check"]
 
@@ -217,6 +223,12 @@ cwd = "kernel"
 command = "cargo"
 args = ["fmt"]
 
+[tasks.fmt-project-riscv32]
+description = "Format RV32 desktop BSP"
+cwd = "projects/riscv32-sbi-desktop/bsp"
+command = "cargo"
+args = ["fmt"]
+
 [tasks.fmt-project-riscv64]
 description = "Format RISC-V project code"
 cwd = "projects/riscv64-limine-full/bsp"
@@ -276,6 +288,16 @@ for dir in $(find modules -name Cargo.toml -exec dirname {} \;); do
   cargo fmt --manifest-path "$dir/Cargo.toml"
 done
 '''
+
+[tasks.build-riscv32]
+description = "Build the RV32 desktop kernel/BSP (debug)"
+command = "cargo"
+args = ["scarlet", "build", "--project", "projects/riscv32-sbi-desktop"]
+
+[tasks.image-riscv32]
+description = "Build the RV32 desktop kernel, initramfs and rootfs (release)"
+command = "cargo"
+args = ["scarlet", "image", "--project", "projects/riscv32-sbi-desktop", "--release"]
 
 [tasks.build-riscv64]
 description = "Build all components (RISC-V, debug)"
@@ -576,6 +598,21 @@ cwd = "kernel"
 env = { "CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER" = "tools/test_aarch64.sh" }
 command = "cargo"
 args = ["test", "--target", "targets/aarch64-unknown-none-elf.json"]
+
+[tasks.run-riscv32]
+description = "Run the RV32 desktop (release)"
+command = "cargo"
+args = ["scarlet", "run", "--project", "projects/riscv32-sbi-desktop", "--release"]
+
+[tasks.run-debug-riscv32]
+description = "Run the RV32 desktop with a debug kernel"
+command = "cargo"
+args = ["scarlet", "run", "--project", "projects/riscv32-sbi-desktop"]
+
+[tasks.debug-riscv32]
+description = "Start the RV32 desktop paused with a GDB server"
+command = "cargo"
+args = ["scarlet", "run", "--project", "projects/riscv32-sbi-desktop", "--", "--debug"]
 
 [tasks.run-riscv64]
 description = "Run the kernel in release mode (RISC-V)"

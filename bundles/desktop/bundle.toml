@@ -100,7 +100,7 @@ to = "/bin/ui-benchmark"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "c980c960b073b6a7c71a2ab501210e3b3a570e77" }
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "cc29019ba2377bdf7c4f4844596334aa3148661c" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
@@ -268,28 +268,28 @@ to = "/bin/dcp-flip-test"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/carmine", rev = "ab5b679b92e141b345549bba11e43555b6bf3eb3" }
+source = { git = "https://github.com/petitstrawberry/carmine", rev = "2383a6b80743aebe1af88d6698f2f52e3974efa5" }
 package = "carmine"
 bin = "carmine"
 to = "/bin/carmine"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "9e3e904ad7117162adc5bd3b9415bef8aec59c83" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "663dfb757810d49323deb4405fdb928e54c709fa" }
 package = "myrica"
 bin = "myrica"
 to = "/bin/myrica"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/vellum", rev = "48e9d9886b1c21c4f33a0433f7f4183d9d3ecb7e" }
+source = { git = "https://github.com/petitstrawberry/vellum", rev = "8f129023bf058313cfd43cc3281b88fe98387f32" }
 package = "vellum"
 bin = "vellum"
 to = "/bin/vellum"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/boxcraft", rev = "e50a70d77e8c23152a2efff2e0ac11ccafea972f" }
+source = { git = "https://github.com/petitstrawberry/boxcraft", rev = "08a868c8de5594af6c9d5b343827bc816b0c8f82" }
 package = "boxcraft"
 bin = "boxcraft"
 to = "/bin/boxcraft"

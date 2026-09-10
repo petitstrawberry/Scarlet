@@ -16,15 +16,22 @@ use std::{env, fs, println};
 
 const SERVER_PATH: &str = "/usr/lib/mozc/mozc_server";
 #[cfg(target_arch = "aarch64")]
-const LINUX_ABI: &str = "linux-aarch64";
+const LINUX_ABI: Option<&str> = Some("linux-aarch64");
 
 #[cfg(target_arch = "riscv64")]
-const LINUX_ABI: &str = "linux-riscv64";
+const LINUX_ABI: Option<&str> = Some("linux-riscv64");
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+const LINUX_ABI: Option<&str> = None;
 
 const MOZC_PROFILE_DIR: &str = "/root/.config/mozc";
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
+    let Some(linux_abi) = LINUX_ABI else {
+        println!("mozc-server: Linux ABI is unavailable on this architecture");
+        return 127;
+    };
     ensure_mozc_profile_dir();
 
     let args: Vec<String> = env::args().collect();
@@ -45,11 +52,11 @@ fn main() -> i32 {
         "XDG_RUNTIME_DIR=/tmp",
     ];
 
-    let result = abi_exec::exec(LINUX_ABI, SERVER_PATH, &argv, &envp, "/", None);
+    let result = abi_exec::exec(linux_abi, SERVER_PATH, &argv, &envp, "/", None);
 
     println!(
         "mozc-server: failed to launch {} via {} ({:?})",
-        SERVER_PATH, LINUX_ABI, result
+        SERVER_PATH, linux_abi, result
     );
     127
 }

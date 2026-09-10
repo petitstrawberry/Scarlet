@@ -50,6 +50,10 @@ application-only builds.
 
 ## QEMU
 
+The [RV32GC SBI desktop project](../../projects/riscv32-sbi-desktop/README.md)
+adds `build-riscv32`, `image-riscv32`, and `run-riscv32` tasks. See its README
+for the OpenSBI boot flow and runner settings.
+
 Full projects open a QEMU GUI by default: Cocoa on macOS, or GTK (with SDL as
 the fallback) on Linux when `DISPLAY` or `WAYLAND_DISPLAY` is set. The Linux
 runner checks which backends the selected QEMU supports. Without a local GUI

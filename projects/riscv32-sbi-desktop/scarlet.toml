@@ -1,0 +1,43 @@
+schema_version = 2
+
+[project]
+name = "scarlet-riscv32-sbi-desktop"
+
+[bsp]
+path = "bsp"
+package = "scarlet"
+
+[bsp.kernel]
+source = { path = "../../kernel" }
+features = ["linux-boot", "network", "user-fpu"]
+
+[modules]
+"scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = true }
+
+[images.initramfs]
+format = "newc"
+output = ".scarlet/images/initramfs-riscv32-sbi-desktop.cpio"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/base/bundle.toml"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/cli-utils/bundle.toml"
+
+[images.rootfs]
+format = "ext2"
+output = ".scarlet/images/rootfs-riscv32-sbi-desktop.ext2"
+
+[[images.rootfs.layers]]
+kind = "bundle"
+path = "../../bundles/desktop/bundle.toml"
+
+[[images.rootfs.layers]]
+kind = "copy"
+source = "rootfs"
+to = "/"
+
+[runner]
+command = "tools/run.sh"

@@ -1,6 +1,6 @@
 //! Low-overhead SWS liveness tracing enabled with `SWS_LOG=trace`.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use core::time::Duration;
 use std::env;
 use std::println;
@@ -24,47 +24,49 @@ pub(crate) const STAGE_GPU_NOTIFY_RELEASES: u32 = 13;
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static COMPOSITOR_STAGE: AtomicU32 = AtomicU32::new(STAGE_STARTING);
 static GPU_WINDOW_ID: AtomicU32 = AtomicU32::new(0);
-static COMPOSITOR_LOOPS: AtomicU64 = AtomicU64::new(0);
-static COMPOSITOR_PRESENTS: AtomicU64 = AtomicU64::new(0);
-static IPC_CLIENT_LOOPS: AtomicU64 = AtomicU64::new(0);
-static IPC_POLLS: AtomicU64 = AtomicU64::new(0);
-static IPC_POLL_READY: AtomicU64 = AtomicU64::new(0);
-static IPC_SOCKET_READY: AtomicU64 = AtomicU64::new(0);
-static IPC_WAKE_READY: AtomicU64 = AtomicU64::new(0);
-static IPC_POLL_FATAL: AtomicU64 = AtomicU64::new(0);
-static IPC_POLL_SPURIOUS: AtomicU64 = AtomicU64::new(0);
-static IPC_FRAMES: AtomicU64 = AtomicU64::new(0);
-static IPC_FLUSH_PROGRESS: AtomicU64 = AtomicU64::new(0);
-static WAKE_CALLS: AtomicU64 = AtomicU64::new(0);
-static WAKE_COALESCED: AtomicU64 = AtomicU64::new(0);
-static INPUT_LOOPS: AtomicU64 = AtomicU64::new(0);
-static INPUT_EVENTS: AtomicU64 = AtomicU64::new(0);
-static INPUT_EMPTY: AtomicU64 = AtomicU64::new(0);
-static KEYBOARD_LOOPS: AtomicU64 = AtomicU64::new(0);
-static KEYBOARD_EVENTS: AtomicU64 = AtomicU64::new(0);
-static KEYBOARD_SHORT_READS: AtomicU64 = AtomicU64::new(0);
+// Diagnostic counts wrap at the native atomic width. Snapshots retain that
+// width so wrapping_sub handles a rollover between watchdog samples.
+static COMPOSITOR_LOOPS: AtomicUsize = AtomicUsize::new(0);
+static COMPOSITOR_PRESENTS: AtomicUsize = AtomicUsize::new(0);
+static IPC_CLIENT_LOOPS: AtomicUsize = AtomicUsize::new(0);
+static IPC_POLLS: AtomicUsize = AtomicUsize::new(0);
+static IPC_POLL_READY: AtomicUsize = AtomicUsize::new(0);
+static IPC_SOCKET_READY: AtomicUsize = AtomicUsize::new(0);
+static IPC_WAKE_READY: AtomicUsize = AtomicUsize::new(0);
+static IPC_POLL_FATAL: AtomicUsize = AtomicUsize::new(0);
+static IPC_POLL_SPURIOUS: AtomicUsize = AtomicUsize::new(0);
+static IPC_FRAMES: AtomicUsize = AtomicUsize::new(0);
+static IPC_FLUSH_PROGRESS: AtomicUsize = AtomicUsize::new(0);
+static WAKE_CALLS: AtomicUsize = AtomicUsize::new(0);
+static WAKE_COALESCED: AtomicUsize = AtomicUsize::new(0);
+static INPUT_LOOPS: AtomicUsize = AtomicUsize::new(0);
+static INPUT_EVENTS: AtomicUsize = AtomicUsize::new(0);
+static INPUT_EMPTY: AtomicUsize = AtomicUsize::new(0);
+static KEYBOARD_LOOPS: AtomicUsize = AtomicUsize::new(0);
+static KEYBOARD_EVENTS: AtomicUsize = AtomicUsize::new(0);
+static KEYBOARD_SHORT_READS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, Default)]
 struct Snapshot {
-    compositor_loops: u64,
-    compositor_presents: u64,
-    ipc_client_loops: u64,
-    ipc_polls: u64,
-    ipc_poll_ready: u64,
-    ipc_socket_ready: u64,
-    ipc_wake_ready: u64,
-    ipc_poll_fatal: u64,
-    ipc_poll_spurious: u64,
-    ipc_frames: u64,
-    ipc_flush_progress: u64,
-    wake_calls: u64,
-    wake_coalesced: u64,
-    input_loops: u64,
-    input_events: u64,
-    input_empty: u64,
-    keyboard_loops: u64,
-    keyboard_events: u64,
-    keyboard_short_reads: u64,
+    compositor_loops: usize,
+    compositor_presents: usize,
+    ipc_client_loops: usize,
+    ipc_polls: usize,
+    ipc_poll_ready: usize,
+    ipc_socket_ready: usize,
+    ipc_wake_ready: usize,
+    ipc_poll_fatal: usize,
+    ipc_poll_spurious: usize,
+    ipc_frames: usize,
+    ipc_flush_progress: usize,
+    wake_calls: usize,
+    wake_coalesced: usize,
+    input_loops: usize,
+    input_events: usize,
+    input_empty: usize,
+    keyboard_loops: usize,
+    keyboard_events: usize,
+    keyboard_short_reads: usize,
 }
 
 impl Snapshot {

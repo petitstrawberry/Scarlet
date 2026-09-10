@@ -8,6 +8,10 @@ the runner is reached through `cargo make run-*` or `cargo scarlet run
 
 The scope labels used below refer to these scripts:
 
+The RV32GC SBI desktop runner has its own
+[settings and boot instructions](../../projects/riscv32-sbi-desktop/README.md).
+The table below covers the existing Limine runners.
+
 | Scope | Project runner |
 | --- | --- |
 | AArch64 full | [aarch64-limine-full](../../projects/aarch64-limine-full/tools/run_aarch64.sh) |

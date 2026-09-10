@@ -12,7 +12,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     scarlet-rust-toolchain.url = "github:petitstrawberry/scarlet-rust-nix";
     scarlet-sdk = {
-      url = "github:petitstrawberry/scarlet-sdk/f63ffddf5051c9d4ae113179f96a60e3053ad675";
+      url = "github:petitstrawberry/scarlet-sdk/71c7d9e0510989c23ead340883b30f2b4191521e";
       flake = false;
     };
     macvdmtool-src = {
@@ -396,6 +396,8 @@
             # .cargo/config.toml (for example, yt's cross GCC). Native builds
             # continue to use HOST_CC/CC and the Nix wrapper.
             TARGET_CC = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+            # cc-rs defaults RV32 C objects to soft-float; Scarlet GC uses ilp32d.
+            CFLAGS_riscv32gc_unknown_scarlet = "-march=rv32gc -mabi=ilp32d";
             CARGO_NET_GIT_FETCH_WITH_CLI = "true";
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
               pkgs.stdenv.cc.cc.lib
@@ -406,7 +408,7 @@
             RUST_BOOTSTRAP_CONFIG = "${rustBootstrapConfig}";
             FONTCONFIG_FILE = "${pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts ]; }}";
             SCARLET_RUST_HOST_TRIPLE = rustHostTriple;
-            SCARLET_RUST_TARGET_TRIPLES = "riscv64gc-unknown-scarlet aarch64-unknown-scarlet";
+            SCARLET_RUST_TARGET_TRIPLES = "riscv32gc-unknown-scarlet riscv64gc-unknown-scarlet aarch64-unknown-scarlet";
             SCARLET_CACHED_RUST_TOOLCHAIN = "${rustToolchain}";
             SCARLET_RUST_TOOLCHAIN = "${rustToolchain}";
           };
