@@ -2,6 +2,8 @@
 Name=Video Player
 Exec=/bin/video-player %F
 Icon=video
+X-Scarlet-Background=/share/app-art/video-player-cover.png
+X-Scarlet-BackgroundBlur=label
 Type=Application
 Terminal=false
 MimeType=video/mp4;video/webm;

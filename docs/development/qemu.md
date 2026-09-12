@@ -14,6 +14,7 @@ The table below covers the existing Limine runners.
 
 | Scope | Project runner |
 | --- | --- |
+| AArch64 console | [aarch64-limine-console](../../projects/aarch64-limine-console/tools/run_aarch64.sh), which delegates to the AArch64 full runner |
 | AArch64 full | [aarch64-limine-full](../../projects/aarch64-limine-full/tools/run_aarch64.sh) |
 | RISC-V full | [riscv64-limine-full](../../projects/riscv64-limine-full/tools/run.sh) |
 | Microvm | [aarch64-limine-microvm](../../projects/aarch64-limine-microvm/tools/run_aarch64.sh) |
@@ -200,6 +201,8 @@ the ext2 root partition at `/dev/vblk0p2`. Their default rootfs transport is
 | Variable | Scope | Default | Effect |
 | --- | --- | --- | --- |
 | `SCARLET_QEMU_PROJECT_DIR` | Full | Runner's project directory | Changes where the runner looks for its manifest and project artifacts. Does not select a different project for the preceding build. |
+| `SCARLET_QEMU_BOOT_IMAGE` | AArch64 full / console | Project disk image | Overrides the GPT boot-disk path; console runner selects its own image. |
+| `SCARLET_QEMU_ROOTFS_IMAGE` | AArch64 full / console | Project rootfs image | Overrides the separate rootfs path for optional USB/virtio transport. |
 | `SCARLET_QEMU_ROOTFS_TRANSPORT` | Full | `usb` when `scarlet.toml` contains a `cmdline` with `root=/dev/usbblk0`; otherwise `none` | Selects `usb`, `virtio`, or `none` for the rootfs disk attachment. Does not change the kernel command line. |
 | `SCARLET_QEMU_USB_STORAGE` | Full | `1` when rootfs transport is `usb`; otherwise `0` | Adds a USB mass-storage device and xHCI controller. |
 | `SCARLET_QEMU_USB_STORAGE_IMAGE` | Full | Rootfs image for USB rootfs; otherwise `<project>/.scarlet/images/qemu-usb-storage.img` | Raw image attached to the USB storage device. |

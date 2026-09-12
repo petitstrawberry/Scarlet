@@ -111,6 +111,8 @@ pub enum WindowType {
     ShellBackground,
     /// Pointer-transparent shell decoration above app scenes.
     ShellChrome,
+    /// Interactive shell controls with native size and no keyboard focus.
+    ShellPanel,
     /// Input-method-owned popup surface.
     ImePopup,
 }
@@ -186,6 +188,8 @@ pub struct Window {
     pub owner_client_id: Option<usize>,
     /// Application identifier (e.g., "org.scarlet-os.desktop.settings")
     pub app_id: Option<Vec<u8>>,
+    pub surface_regions: Vec<sws_protocol::surface_regions::SurfaceRegion>,
+    pub restrict_input_to_regions: bool,
     /// Optional logical parent window (transient relationship).
     ///
     /// When set, the compositor may keep this window stacked above its parent and
@@ -601,6 +605,8 @@ impl Window {
             id,
             owner_client_id: None,
             app_id: None,
+            surface_regions: Vec::new(),
+            restrict_input_to_regions: false,
             parent: None,
             transient_flags: 0,
             x,
@@ -664,6 +670,8 @@ impl Window {
             id,
             owner_client_id: None,
             app_id: None,
+            surface_regions: Vec::new(),
+            restrict_input_to_regions: false,
             parent: None,
             transient_flags: 0,
             x,
@@ -755,6 +763,8 @@ impl Window {
             id,
             owner_client_id: None,
             app_id: None,
+            surface_regions: Vec::new(),
+            restrict_input_to_regions: false,
             parent: None,
             transient_flags: 0,
             x,
@@ -873,6 +883,10 @@ impl Window {
             && px < x.saturating_add(width as i32)
             && py >= y
             && py < y.saturating_add(height as i32)
+            && self.input_region_contains(
+                ((i64::from(px - x) * i64::from(self.width)) / i64::from(width.max(1))) as i32,
+                ((i64::from(py - y) * i64::from(self.height)) / i64::from(height.max(1))) as i32,
+            )
     }
 
     /// Return the complete surface rectangle used for composition and damage.
@@ -990,6 +1004,20 @@ impl Window {
             && x < self.x.saturating_add(self.width as i32)
             && y >= self.y
             && y < self.y.saturating_add(self.height as i32)
+            && self.input_region_contains(x - self.x, y - self.y)
+    }
+
+    fn input_region_contains(&self, x: i32, y: i32) -> bool {
+        !self.restrict_input_to_regions
+            || self.surface_regions.iter().any(|region| {
+                region.flags & sws_protocol::surface_regions::INPUT != 0
+                    && rounded_rect_contains_point(
+                        (region.x, region.y, region.width, region.height),
+                        region.corner_radius,
+                        x,
+                        y,
+                    )
+            })
     }
 
     /// Return compositor-visible presentation-state flags.
@@ -1071,7 +1099,11 @@ impl Window {
     ///
     /// `true` when the surface changed from ready to waiting.
     pub fn invalidate_presentation_content(&mut self) -> bool {
-        if self.window_type != WindowType::ShellBackground || !self.presentation_content_ready {
+        if !matches!(
+            self.window_type,
+            WindowType::ShellBackground | WindowType::ShellPanel
+        ) || !self.presentation_content_ready
+        {
             return false;
         }
         self.presentation_content_ready = false;
@@ -1375,6 +1407,8 @@ impl WindowManager {
             id,
             owner_client_id: Some(owner_client_id),
             app_id: None,
+            surface_regions: Vec::new(),
+            restrict_input_to_regions: false,
             parent: None,
             transient_flags: 0,
             x,
@@ -1457,7 +1491,9 @@ impl WindowManager {
         let window = Window {
             id,
             owner_client_id: None,
-            app_id: None, // Will be set from IPC CREATE_WINDOW message
+            app_id: None,
+            surface_regions: Vec::new(),
+            restrict_input_to_regions: false, // Will be set from IPC CREATE_WINDOW message
             parent: None,
             transient_flags: 0,
             x,
@@ -1672,7 +1708,7 @@ impl WindowManager {
             WindowType::Taskbar => false,
             WindowType::Desktop => true, // Desktop can now accept focus (for events), but won't raise
             WindowType::ShellBackground => true,
-            WindowType::ShellChrome => false,
+            WindowType::ShellChrome | WindowType::ShellPanel => false,
             WindowType::ImePopup => false,
         }
     }
@@ -2388,6 +2424,7 @@ impl WindowManager {
                 | WindowType::Desktop
                 | WindowType::ShellBackground
                 | WindowType::ShellChrome
+                | WindowType::ShellPanel
                 | WindowType::ImePopup => {
                     w.resizable = false;
                 }
@@ -2398,7 +2435,10 @@ impl WindowManager {
             // Set raise_on_focus behavior based on window type
             // Desktop windows should NOT raise when focused (they stay in background)
             match window_type {
-                WindowType::Desktop | WindowType::ShellBackground | WindowType::ShellChrome => {
+                WindowType::Desktop
+                | WindowType::ShellBackground
+                | WindowType::ShellChrome
+                | WindowType::ShellPanel => {
                     w.raise_on_focus = false;
                 }
                 WindowType::Normal | WindowType::Taskbar | WindowType::AlwaysOnTop => {
@@ -2409,7 +2449,10 @@ impl WindowManager {
                     w.visible = false;
                 }
             }
-            if window_type == WindowType::ShellBackground {
+            if matches!(
+                window_type,
+                WindowType::ShellBackground | WindowType::ShellPanel
+            ) {
                 // The role is assigned before the client's first real frame.
                 // Keep any zero-filled or predecessor buffer out of the
                 // composition until that commit arrives.
@@ -2463,7 +2506,7 @@ impl WindowManager {
                 WindowType::Desktop => desktop.push(w),
                 WindowType::ShellBackground => shell_background.push(w),
                 WindowType::Normal => normal.push(w),
-                WindowType::ShellChrome => shell_chrome.push(w),
+                WindowType::ShellChrome | WindowType::ShellPanel => shell_chrome.push(w),
                 WindowType::Taskbar => taskbar.push(w),
                 WindowType::AlwaysOnTop => always_on_top.push(w),
                 WindowType::ImePopup => ime_popup.push(w),
@@ -2614,7 +2657,7 @@ impl WindowManager {
                     WindowType::Desktop => desktop.push(w),
                     WindowType::ShellBackground => shell_background.push(w),
                     WindowType::Normal => normal.push(w),
-                    WindowType::ShellChrome => shell_chrome.push(w),
+                    WindowType::ShellChrome | WindowType::ShellPanel => shell_chrome.push(w),
                     WindowType::Taskbar => taskbar.push(w),
                     WindowType::AlwaysOnTop => always_on_top.push(w),
                     WindowType::ImePopup => ime_popup.push(w),
@@ -2697,7 +2740,7 @@ impl WindowManager {
                 self.windows.extend(always_on_top);
                 self.windows.extend(ime_popup);
             }
-            WindowType::ShellChrome => {
+            WindowType::ShellChrome | WindowType::ShellPanel => {
                 self.windows = desktop;
                 self.windows.extend(shell_background);
                 self.windows.extend(normal);
@@ -2766,6 +2809,7 @@ impl WindowManager {
                     | WindowType::Desktop
                     | WindowType::ShellBackground
                     | WindowType::ShellChrome
+                    | WindowType::ShellPanel
                     | WindowType::ImePopup
             ) {
                 continue;
@@ -2793,6 +2837,7 @@ impl WindowManager {
                 WindowType::ImePopup => 4,
                 WindowType::ShellBackground => 5,
                 WindowType::ShellChrome => 6,
+                WindowType::ShellPanel => 7,
             };
 
             result.push((

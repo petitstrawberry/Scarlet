@@ -16,6 +16,9 @@
 //!
 //! Launcher activation focuses an existing window by default. Set
 //! `X-Scarlet-NewInstance=true` to start a new process on every activation.
+//! `Icon` can also name an absolute PNG/JPEG path. Console artwork is optional:
+//! `X-Scarlet-Background=/path/to/cover.jpg` and
+//! `X-Scarlet-BackgroundBlur=none|full|label`.
 
 use std::format;
 use std::fs::{self, File};
@@ -32,6 +35,8 @@ pub struct DesktopEntry {
     pub name: String,
     pub exec: String,
     pub icon: Option<String>,
+    pub background: Option<String>,
+    pub background_blur: Option<String>,
     pub terminal: bool,
     /// Start a new process for each activation instead of focusing an existing
     /// window. Set by `X-Scarlet-NewInstance`; defaults to false.
@@ -59,6 +64,8 @@ impl DesktopParser {
         let mut name = None;
         let mut exec = None;
         let mut icon = None;
+        let mut background = None;
+        let mut background_blur = None;
         let mut terminal = false;
         let mut new_instance = false;
         let mut mime_types = Vec::new();
@@ -95,6 +102,8 @@ impl DesktopParser {
                     "Name" => name = Some(Self::unquote(value)),
                     "Exec" => exec = Some(Self::unquote(value)),
                     "Icon" => icon = Some(Self::unquote(value)),
+                    "X-Scarlet-Background" => background = Some(Self::unquote(value)),
+                    "X-Scarlet-BackgroundBlur" => background_blur = Some(Self::unquote(value)),
                     "Terminal" => terminal = value == "true" || value == "1",
                     "X-Scarlet-NewInstance" => new_instance = value == "true" || value == "1",
                     "MimeType" => {
@@ -119,6 +128,8 @@ impl DesktopParser {
             name,
             exec,
             icon,
+            background,
+            background_blur,
             terminal,
             new_instance,
             mime_types,
@@ -490,6 +501,29 @@ mod tests {
     use super::{DesktopParser, expand_exec, mime_type_for_path};
     use std::string::String;
     use std::vec;
+
+    #[test]
+    fn artwork_fields_are_optional_and_preserve_absolute_paths_with_spaces() {
+        let old = DesktopParser::new(String::from(
+            "[Desktop Entry]\nName=Files\nExec=/bin/files\nIcon=folder\n",
+        ))
+        .parse("files.desktop")
+        .unwrap();
+        assert_eq!(old.icon.as_deref(), Some("folder"));
+        assert!(old.background.is_none());
+        assert!(old.background_blur.is_none());
+
+        let entry = DesktopParser::new(String::from(
+            "[Desktop Entry]\nName=Files\nExec=/bin/files\nIcon=\"/share/app art/files.png\"\nX-Scarlet-Background='/share/app art/files.jpg'\nX-Scarlet-BackgroundBlur=label\n[Desktop Action Open]\nX-Scarlet-Background=/ignored.png\n",
+        )).parse("files.desktop").unwrap();
+        assert_eq!(entry.icon.as_deref(), Some("/share/app art/files.png"));
+        assert_eq!(
+            entry.background.as_deref(),
+            Some("/share/app art/files.jpg")
+        );
+        assert_eq!(entry.background_blur.as_deref(), Some("label"));
+        assert_eq!(entry.exec, "/bin/files");
+    }
 
     #[test]
     fn new_instance_launch_requires_an_explicit_opt_in() {

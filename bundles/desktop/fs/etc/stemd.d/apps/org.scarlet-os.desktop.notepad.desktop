@@ -2,6 +2,8 @@
 Name=Notepad
 Exec=/bin/notepad %f
 Icon=text-editor
+X-Scarlet-Background=/share/app-art/notepad-cover.png
+X-Scarlet-BackgroundBlur=label
 Type=Application
 Terminal=false
 MimeType=text/plain;application/json;

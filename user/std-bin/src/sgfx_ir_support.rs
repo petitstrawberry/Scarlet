@@ -4,10 +4,15 @@ use std::rc::Rc;
 use std::vec::Vec;
 use std::{error, fmt};
 
+#[cfg(target_os = "scarlet")]
 use framebuffer::{DisplayPresentRegion, DisplaySurface};
+#[cfg(target_os = "scarlet")]
 use scarlet_os::handle::Handle;
+#[cfg(target_os = "scarlet")]
 use scarlet_ui_renderer_sgfx::{FrameExecutor, FrameSubmissionError};
-use sgfx::backend::{CommandExecutor, CompletionStatus};
+use sgfx::backend::CommandExecutor;
+#[cfg(target_os = "scarlet")]
+use sgfx::backend::CompletionStatus;
 use sgfx::ir::{
     self, AddressMode, BlendState, BufferDesc, BufferId, BufferUsage, CommandEncoder, DrawUniforms,
     Extent2D, FilterMode, FragmentProgram, LoadOp, PixelRect, PrimitiveTopology, RasterState,
@@ -15,6 +20,7 @@ use sgfx::ir::{
     StoreOp, TextureDesc, TextureFormat, TextureId, TextureSampleMode, TextureUsage, TextureWrite,
     Transform, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
+#[cfg(target_os = "scarlet")]
 use sgfx::{Context, Instance, MappedTargetSession};
 
 const QUAD_VERTEX_STRIDE: u32 = 24;
@@ -76,6 +82,7 @@ fn take_reusable_import(
     Some(imports.swap_remove(index))
 }
 
+#[cfg(target_os = "scarlet")]
 pub(crate) struct MappedTarget {
     pub(crate) resources: Rc<ResourceTable>,
     pub(crate) texture: TextureId,
@@ -92,6 +99,7 @@ pub(crate) struct MappedTarget {
     tracked_submission: bool,
 }
 
+#[cfg(target_os = "scarlet")]
 impl MappedTarget {
     pub(crate) fn supports_tracked_submission(&self) -> bool {
         self.tracked_submission
@@ -368,6 +376,12 @@ pub(crate) enum Quad {
         clip: Option<PixelRect>,
     },
     Sampled(SampledRect),
+    /// Fractional source-texel offsets for separable linear-sampler kernels.
+    /// UVs may extend beyond the texture; the sampler clamps at its edges.
+    SampledOffset {
+        rect: SampledRect,
+        offset: [f32; 2],
+    },
     Copy(CopiedRect),
 }
 
@@ -377,6 +391,44 @@ pub(crate) struct TextureUpload<'a> {
     pub(crate) destination: PixelRect,
     pub(crate) stride: u32,
     pub(crate) bytes: &'a [u8],
+}
+
+/// Reusable, bounded render targets for a separable backdrop filter. The
+/// first texture captures the composed scene, so the presentation image does
+/// not need to be sampleable and no CPU readback is involved.
+pub(crate) struct BackdropTextures {
+    levels: Vec<(TextureId, u32, u32)>,
+}
+
+impl BackdropTextures {
+    pub(crate) fn define(resources: &ResourceTable, width: u32, height: u32) -> ir::Result<Self> {
+        let half = (width.div_ceil(2), height.div_ceil(2));
+        let mut levels = Vec::with_capacity(3);
+        for (width, height) in [(width, height), half, half] {
+            let texture = resources
+                .define_texture(TextureDesc::new(
+                    TextureFormat::Bgra8Unorm,
+                    Extent2D::new(width, height)?,
+                    TextureUsage::SAMPLED
+                        | TextureUsage::RENDER_ATTACHMENT
+                        | TextureUsage::COPY_SRC
+                        | TextureUsage::COPY_DST,
+                )?)?
+                .id();
+            levels.push((texture, width, height));
+        }
+        Ok(Self { levels })
+    }
+}
+
+pub(crate) struct BackdropPass<'a> {
+    pub(crate) textures: &'a BackdropTextures,
+    /// Draw the scene below the chrome first; filter it, then draw the rest.
+    pub(crate) split: usize,
+    pub(crate) source: PixelRect,
+    pub(crate) output: PixelRect,
+    pub(crate) clips: Vec<PixelRect>,
+    pub(crate) radius: u32,
 }
 
 /// Failure while recording or executing one quad-composition submission.
@@ -467,6 +519,7 @@ impl QuadRenderer {
         })
     }
 
+    #[cfg(target_os = "scarlet")]
     pub(crate) fn submit(
         &self,
         target: &mut MappedTarget,
@@ -479,6 +532,7 @@ impl QuadRenderer {
     }
 
     /// Submit quads while limiting render-target work to one damaged region.
+    #[cfg(target_os = "scarlet")]
     pub(crate) fn submit_region(
         &self,
         target: &mut MappedTarget,
@@ -486,7 +540,7 @@ impl QuadRenderer {
         load: LoadOp,
         operations: &[Quad],
     ) -> Result<(), QuadSubmitError> {
-        self.submit_region_with_uploads(target, area, load, &[], operations)
+        self.submit_region_with_uploads(target, area, load, &[], operations, &[])
     }
 
     /// Upload CPU-backed textures and compose one damaged target region.
@@ -494,6 +548,7 @@ impl QuadRenderer {
     /// Keeping uploads in the first composition command buffer removes a
     /// synchronous executor round trip from CPU-rendered clients such as
     /// Wayland SHM applications.
+    #[cfg(target_os = "scarlet")]
     pub(crate) fn submit_region_with_uploads(
         &self,
         target: &mut MappedTarget,
@@ -501,8 +556,9 @@ impl QuadRenderer {
         load: LoadOp,
         uploads: &[TextureUpload<'_>],
         operations: &[Quad],
+        backdrops: &[BackdropPass<'_>],
     ) -> Result<(), QuadSubmitError> {
-        self.encode_region_with_uploads(
+        self.encode_scene_with_uploads(
             &mut target.session.executor(),
             Rc::clone(&target.resources),
             target.texture,
@@ -512,10 +568,12 @@ impl QuadRenderer {
             load,
             uploads,
             operations,
+            backdrops,
         )
     }
 
     /// Queue the complete composition and observe it once before presentation.
+    #[cfg(target_os = "scarlet")]
     pub(crate) fn submit_region_with_uploads_tracked(
         &self,
         target: &mut MappedTarget,
@@ -523,9 +581,10 @@ impl QuadRenderer {
         load: LoadOp,
         uploads: &[TextureUpload<'_>],
         operations: &[Quad],
+        backdrops: &[BackdropPass<'_>],
     ) -> Result<(), QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>> {
         let mut executor = FrameExecutor::new(target.session.executor());
-        self.encode_region_with_uploads(
+        self.encode_scene_with_uploads(
             &mut executor,
             Rc::clone(&target.resources),
             target.texture,
@@ -535,12 +594,198 @@ impl QuadRenderer {
             load,
             uploads,
             operations,
+            backdrops,
         )?;
         match executor.wait() {
             Ok(CompletionStatus::Complete) => Ok(()),
             Ok(_) => Err(QuadSubmitError::Execution(FrameSubmissionError::Pending)),
             Err(error) => Err(QuadSubmitError::Execution(error)),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_scene_with_uploads<E: CommandExecutor>(
+        &self,
+        executor: &mut E,
+        resources: Rc<ResourceTable>,
+        texture: TextureId,
+        width: u32,
+        height: u32,
+        area: PixelRect,
+        load: LoadOp,
+        uploads: &[TextureUpload<'_>],
+        operations: &[Quad],
+        backdrops: &[BackdropPass<'_>],
+    ) -> Result<(), QuadSubmitError<E::Error>> {
+        if backdrops.is_empty() {
+            return self.encode_region_with_uploads(
+                executor, resources, texture, width, height, area, load, uploads, operations,
+            );
+        }
+        let white = ir::Color::rgba(1.0, 1.0, 1.0, 1.0).map_err(|_| "Invalid backdrop tint")?;
+        let mut previous_split = 0;
+        let mut first = 0;
+        while first < backdrops.len() {
+            let split = backdrops[first].split;
+            if split < previous_split || split > operations.len() {
+                return Err("Invalid SGFX backdrop split".into());
+            }
+            let end = first
+                + backdrops[first..]
+                    .iter()
+                    .take_while(|b| b.split == split)
+                    .count();
+            self.encode_region_with_uploads(
+                executor,
+                Rc::clone(&resources),
+                texture,
+                width,
+                height,
+                area,
+                if first == 0 { load } else { LoadOp::Load },
+                if first == 0 { uploads } else { &[] },
+                &operations[previous_split..split],
+            )?;
+
+            // Prepare every material before writing any of them to the main
+            // target. Adjacent controls often have overlapping source halos.
+            for backdrop in &backdrops[first..end] {
+                if backdrop.textures.levels.len() != 3 {
+                    return Err("Invalid SGFX backdrop textures".into());
+                }
+                let (capture, sw, sh) = backdrop.textures.levels[0];
+                let local = PixelRect::new(0, 0, sw, sh).map_err(|_| "Invalid backdrop source")?;
+                self.encode_region_with_uploads(
+                    executor,
+                    Rc::clone(&resources),
+                    capture,
+                    sw,
+                    sh,
+                    local,
+                    LoadOp::Load,
+                    &[],
+                    &[Quad::Copy(CopiedRect {
+                        texture,
+                        source: backdrop.source,
+                        destination: local,
+                        clip: None,
+                    })],
+                )?;
+                let (ping, bw, bh) = backdrop.textures.levels[1];
+                let blur_area =
+                    PixelRect::new(0, 0, bw, bh).map_err(|_| "Invalid backdrop extent")?;
+                self.encode_region_with_uploads(
+                    executor,
+                    Rc::clone(&resources),
+                    ping,
+                    bw,
+                    bh,
+                    blur_area,
+                    LoadOp::Load,
+                    &[],
+                    &[Quad::Sampled(SampledRect {
+                        texture: capture,
+                        texture_width: sw,
+                        texture_height: sh,
+                        destination: blur_area,
+                        source: local,
+                        tint: white,
+                        ignore_source_alpha: true,
+                        clip: None,
+                    })],
+                )?;
+                // At most a 2x reduction, followed by actual filtering. Linear
+                // paired taps halve draw count without a coarse blur pyramid.
+                let radius = backdrop.radius.div_ceil(2).max(1) as i32;
+                for pass in 0..6 {
+                    let (source, _, _) = backdrop.textures.levels[1 + pass % 2];
+                    let (destination, _, _) = backdrop.textures.levels[2 - pass % 2];
+                    let mut taps = Vec::with_capacity(radius as usize + 1);
+                    let mut total = 0.0f32;
+                    let mut tap = -radius;
+                    while tap <= radius {
+                        let weight = if tap < radius { 2.0 } else { 1.0 };
+                        let offset = tap as f32 + (weight - 1.0) * 0.5;
+                        total += weight;
+                        taps.push(Quad::SampledOffset {
+                            rect: SampledRect {
+                                texture: source,
+                                texture_width: bw,
+                                texture_height: bh,
+                                destination: blur_area,
+                                source: blur_area,
+                                tint: ir::Color::rgba(1.0, 1.0, 1.0, weight / total)
+                                    .map_err(|_| "Invalid backdrop sample weight")?,
+                                ignore_source_alpha: true,
+                                clip: None,
+                            },
+                            offset: if pass % 2 == 0 {
+                                [offset, 0.0]
+                            } else {
+                                [0.0, offset]
+                            },
+                        });
+                        tap += weight as i32;
+                    }
+                    self.encode_region_with_uploads(
+                        executor,
+                        Rc::clone(&resources),
+                        destination,
+                        bw,
+                        bh,
+                        blur_area,
+                        LoadOp::Load,
+                        &[],
+                        &taps,
+                    )?;
+                }
+            }
+            for backdrop in &backdrops[first..end] {
+                let (filtered, fw, fh) = backdrop.textures.levels[1];
+                let filtered_area =
+                    PixelRect::new(0, 0, fw, fh).map_err(|_| "Invalid filtered extent")?;
+                let quads: Vec<_> = backdrop
+                    .clips
+                    .iter()
+                    .map(|&clip| {
+                        Quad::Sampled(SampledRect {
+                            texture: filtered,
+                            texture_width: fw,
+                            texture_height: fh,
+                            destination: backdrop.source,
+                            source: filtered_area,
+                            tint: white,
+                            ignore_source_alpha: true,
+                            clip: Some(clip),
+                        })
+                    })
+                    .collect();
+                self.encode_region_with_uploads(
+                    executor,
+                    Rc::clone(&resources),
+                    texture,
+                    width,
+                    height,
+                    backdrop.output,
+                    LoadOp::Load,
+                    &[],
+                    &quads,
+                )?;
+            }
+            previous_split = split;
+            first = end;
+        }
+        self.encode_region_with_uploads(
+            executor,
+            resources,
+            texture,
+            width,
+            height,
+            area,
+            LoadOp::Load,
+            &[],
+            &operations[previous_split..],
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -584,7 +829,7 @@ impl QuadRenderer {
                     1,
                     1,
                 ),
-                Quad::Sampled(rect) => (
+                Quad::Sampled(rect) | Quad::SampledOffset { rect, .. } => (
                     rect.destination,
                     rect.source,
                     rect.texture_width,
@@ -611,6 +856,10 @@ impl QuadRenderer {
                 height,
                 texture_width,
                 texture_height,
+                match operation {
+                    Quad::SampledOffset { offset, .. } => *offset,
+                    _ => [0.0, 0.0],
+                },
             );
         }
 
@@ -674,9 +923,17 @@ impl QuadRenderer {
             let commands = encoder
                 .finish()
                 .map_err(|_| "Failed to finish SGFX composition commands")?;
-            executor
-                .execute(&commands)
-                .map_err(QuadSubmitError::Execution)?;
+            // A fully clipped segment may contain only an unused vertex
+            // upload. Do not submit a draw-free stream to synchronous backends.
+            if commands
+                .commands()
+                .iter()
+                .any(|command| !matches!(command, ir::Command::WriteBuffer { .. }))
+            {
+                executor
+                    .execute(&commands)
+                    .map_err(QuadSubmitError::Execution)?;
+            }
             if batch_end == operations.len() {
                 break;
             }
@@ -756,6 +1013,26 @@ impl QuadRenderer {
         operations: &[Quad],
         base_index: usize,
     ) -> Result<(), &'static str> {
+        // Copy-only backdrop captures and empty scene segments do not need a
+        // render pass. VirGL rejects Load/Store passes without any draws; that
+        // used to disable GPU composition as soon as a material was shown.
+        if matches!(load, LoadOp::Load) {
+            let mut has_draw = false;
+            for operation in operations {
+                let clip = match operation {
+                    Quad::Solid { clip, .. } => *clip,
+                    Quad::Sampled(rect) | Quad::SampledOffset { rect, .. } => rect.clip,
+                    Quad::Copy(_) => return Err("SGFX copy leaked into a render segment"),
+                };
+                if clip.is_none() || intersect_pixel_rect(clip.unwrap(), area)?.is_some() {
+                    has_draw = true;
+                    break;
+                }
+            }
+            if !has_draw {
+                return Ok(());
+            }
+        }
         let descriptor = RenderPassDesc::new(
             resources,
             resources
@@ -772,7 +1049,7 @@ impl QuadRenderer {
         for (local_index, operation) in operations.iter().enumerate() {
             let requested_clip = match operation {
                 Quad::Solid { clip, .. } => *clip,
-                Quad::Sampled(rect) => rect.clip,
+                Quad::Sampled(rect) | Quad::SampledOffset { rect, .. } => rect.clip,
                 Quad::Copy(_) => return Err("SGFX copy leaked into a render segment"),
             };
             let effective_clip = match requested_clip {
@@ -811,7 +1088,7 @@ impl QuadRenderer {
                     pass.set_scissor(effective_clip)
                         .map_err(|_| "Failed to set solid scissor")?;
                 }
-                Quad::Sampled(rect) => {
+                Quad::Sampled(rect) | Quad::SampledOffset { rect, .. } => {
                     let pipeline = if rect.ignore_source_alpha {
                         self.opaque_pipeline
                     } else {
@@ -931,6 +1208,7 @@ pub(crate) fn define_bgra_texture(
         .id())
 }
 
+#[cfg(target_os = "scarlet")]
 pub(crate) fn upload_bgra(
     target: &mut MappedTarget,
     texture: TextureId,
@@ -965,15 +1243,16 @@ fn append_quad(
     target_height: u32,
     texture_width: u32,
     texture_height: u32,
+    offset: [f32; 2],
 ) {
     let left = destination.x() as f32 * 2.0 / target_width as f32 - 1.0;
     let right = (destination.x() + destination.width()) as f32 * 2.0 / target_width as f32 - 1.0;
     let top = 1.0 - destination.y() as f32 * 2.0 / target_height as f32;
     let bottom = 1.0 - (destination.y() + destination.height()) as f32 * 2.0 / target_height as f32;
-    let u0 = source.x() as f32 / texture_width as f32;
-    let u1 = (source.x() + source.width()) as f32 / texture_width as f32;
-    let v0 = source.y() as f32 / texture_height as f32;
-    let v1 = (source.y() + source.height()) as f32 / texture_height as f32;
+    let u0 = (source.x() as f32 + offset[0]) / texture_width as f32;
+    let u1 = ((source.x() + source.width()) as f32 + offset[0]) / texture_width as f32;
+    let v0 = (source.y() as f32 + offset[1]) / texture_height as f32;
+    let v1 = ((source.y() + source.height()) as f32 + offset[1]) / texture_height as f32;
     for vertex in [
         [left, top, 0.0, 1.0, u0, v0],
         [left, bottom, 0.0, 1.0, u0, v1],

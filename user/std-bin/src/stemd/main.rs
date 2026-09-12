@@ -13,7 +13,9 @@ use log_protocol::{
     SOCKET_PATH as LOG_SOCKET_PATH,
 };
 use sbus_client as sbus;
-use scarlet_desktop_config::DESKTOP_STEMD_LIST_APPLICATIONS_METHOD;
+use scarlet_desktop_config::{
+    DESKTOP_STEMD_LIST_APPLICATIONS_METHOD, DESKTOP_STEMD_LIST_APPLICATIONS_WITH_ARTWORK_METHOD,
+};
 use scarlet_os::handle::capability::StreamOps;
 use scarlet_os::process::{ShutdownType, WAIT_NOHANG, shutdown, waitpid};
 use scarlet_os::socket::Socket;
@@ -1746,15 +1748,20 @@ fn handle_sbus_message(
                     }
                     Ok(())
                 }
-                DESKTOP_STEMD_LIST_APPLICATIONS_METHOD => {
+                DESKTOP_STEMD_LIST_APPLICATIONS_METHOD
+                | DESKTOP_STEMD_LIST_APPLICATIONS_WITH_ARTWORK_METHOD => {
                     let mut result_args = Vec::new();
                     for app in list_apps() {
-                        // The response is a flat sequence of triples so this
-                        // remains usable with the current sbus argument model:
-                        // app_id, display name, and desktop icon name.
+                        // Preserve legacy triples (id, name, icon). The new
+                        // method appends background path and blur per entry.
                         result_args.push(Argument::String(app.app_id));
                         result_args.push(Argument::String(app.name));
                         result_args.push(Argument::String(app.icon.unwrap_or_default()));
+                        if method == DESKTOP_STEMD_LIST_APPLICATIONS_WITH_ARTWORK_METHOD {
+                            result_args.push(Argument::String(app.background.unwrap_or_default()));
+                            result_args
+                                .push(Argument::String(app.background_blur.unwrap_or_default()));
+                        }
                     }
 
                     if let Some(conn) = conn_guard.as_mut() {
@@ -2020,7 +2027,7 @@ tty = "/dev/tty0"
             "stemd: Could not register with sbus after {} attempts",
             SBUS_REGISTRATION_ATTEMPTS
         );
-        println!("stemd: Continuing without sbus registration");
+        println!("stemd: Will retry sbus registration after loading applications");
     }
 
     // Phase 3: Launch other services (excluding stemd itself)
@@ -2086,11 +2093,11 @@ tty = "/dev/tty0"
         println!("stemd: No application definitions found");
     }
 
-    // Spawn sbus handler thread if we registered with sbus
-    if registered {
-        println!("stemd: Starting sbus handler thread");
-        let _sbus_handle = thread::spawn(sbus_handler_thread);
-    }
+    // The handler also reconnects an absent connection. Start it even when
+    // sbusd was not ready during the initial registration attempts, so the
+    // application catalog and launch service can recover without a reboot.
+    println!("stemd: Starting sbus handler thread");
+    let _sbus_handle = thread::spawn(sbus_handler_thread);
 
     loop {
         let (pid, status) = waitpid(-1, 0);

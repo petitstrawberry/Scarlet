@@ -3,5 +3,7 @@ Name=Myrica
 Comment=Browse the web
 Exec=/bin/myrica
 Icon=apps
+X-Scarlet-Background=/share/app-art/myrica-cover.png
+X-Scarlet-BackgroundBlur=label
 Type=Application
 Terminal=false

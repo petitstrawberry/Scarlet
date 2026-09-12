@@ -688,7 +688,8 @@ fn sws_capabilities() -> u64 {
         | protocol::capabilities::CONFIGURED_WINDOW_CREATION
         | protocol::capabilities::WORKSPACE_SHELL
         | protocol::capabilities::FRAME_CALLBACKS
-        | protocol::capabilities::EXTENSION_BUFFER_OBJECTS;
+        | protocol::capabilities::EXTENSION_BUFFER_OBJECTS
+        | protocol::capabilities::SURFACE_REGIONS;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
         capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE;
     }
@@ -3655,6 +3656,21 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     has_alpha,
                 });
             }
+            Ok(ClientMessageRef::SetSurfaceRegions {
+                window_id,
+                restrict_input,
+                regions,
+            }) => {
+                if let Ok((_, _, regions)) = protocol::surface_regions::parse(regions) {
+                    push_ipc_event(IpcEvent::SetSurfaceRegions {
+                        client_id,
+                        request_id,
+                        window_id,
+                        restrict_input,
+                        regions,
+                    });
+                }
+            }
             Ok(ClientMessageRef::SetWindowGeometry {
                 window_id,
                 geometry,
@@ -4625,6 +4641,13 @@ pub enum IpcEvent {
     SetWindowHasAlphaContent {
         window_id: u32,
         has_alpha: bool,
+    },
+    SetSurfaceRegions {
+        client_id: usize,
+        request_id: u8,
+        window_id: u32,
+        restrict_input: bool,
+        regions: Vec<protocol::surface_regions::SurfaceRegion>,
     },
     /// Set visible geometry inside the complete surface bounds.
     SetWindowGeometry {

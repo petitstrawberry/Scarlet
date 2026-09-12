@@ -22,6 +22,12 @@ pub(crate) const STAGE_GPU_COLLECT_RELEASES: u32 = 12;
 pub(crate) const STAGE_GPU_NOTIFY_RELEASES: u32 = 13;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
+static PROFILE_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Enable per-frame compositor timings only for an explicit profiling run.
+pub(crate) fn profile_enabled() -> bool {
+    PROFILE_ENABLED.load(Ordering::Relaxed)
+}
 static COMPOSITOR_STAGE: AtomicU32 = AtomicU32::new(STAGE_STARTING);
 static GPU_WINDOW_ID: AtomicU32 = AtomicU32::new(0);
 // Diagnostic counts wrap at the native atomic width. Snapshots retain that
@@ -116,6 +122,10 @@ fn stage_name(stage: u32) -> &'static str {
 
 /// Start the trace watchdog when `SWS_LOG=trace` is selected.
 pub(crate) fn start_watchdog() {
+    PROFILE_ENABLED.store(
+        env::var("SWS_PROFILE").is_ok_and(|value| value == "1"),
+        Ordering::Relaxed,
+    );
     let enabled =
         env::var("SWS_LOG").is_ok_and(|value| matches!(value.as_str(), "trace" | "TRACE" | "4"));
     ENABLED.store(enabled, Ordering::Release);

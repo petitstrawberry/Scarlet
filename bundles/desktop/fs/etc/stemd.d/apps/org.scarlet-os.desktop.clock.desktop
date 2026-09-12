@@ -2,5 +2,7 @@
 Name=Clock
 Exec=/bin/clock
 Icon=preferences-system-time
+X-Scarlet-Background=/share/app-art/clock-cover.png
+X-Scarlet-BackgroundBlur=label
 Type=Application
 Terminal=false

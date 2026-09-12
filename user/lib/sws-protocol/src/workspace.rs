@@ -123,6 +123,11 @@ pub fn workspace_region_height(
 /// Stable identifier for one workspace.
 pub type WorkspaceId = u32;
 
+/// Opt-in identity for the privileged shell's full-screen console Home surface.
+/// While registered, SWS applies console session windowing and maps Overview
+/// to Home. Home itself omits the compositor's desktop workspace rail.
+pub const CONSOLE_HOME_APP_ID: &str = "org.scarlet-os.desktop.shell.console-home";
+
 /// Shell-level output presentation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(u32)]

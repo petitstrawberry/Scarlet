@@ -79,6 +79,7 @@ struct EnvironmentState {
     hardware_lid_closed: Option<bool>,
     tablet_mode_override: Option<bool>,
     windowing_mode_override: Option<WindowingMode>,
+    console_session: bool,
 }
 
 impl EnvironmentState {
@@ -89,6 +90,7 @@ impl EnvironmentState {
             hardware_lid_closed: None,
             tablet_mode_override: None,
             windowing_mode_override: None,
+            console_session: false,
         }
     }
 
@@ -112,20 +114,24 @@ impl EnvironmentState {
             }
         }
 
-        let windowing_mode = self.windowing_mode_override.unwrap_or_else(|| {
-            if tablet_mode == Some(true) {
-                WindowingMode::Focused
-            } else {
-                WindowingMode::Freeform
-            }
-        });
+        let windowing_mode = if self.console_session {
+            WindowingMode::Focused
+        } else {
+            self.windowing_mode_override.unwrap_or_else(|| {
+                if tablet_mode == Some(true) {
+                    WindowingMode::Focused
+                } else {
+                    WindowingMode::Freeform
+                }
+            })
+        };
         if windowing_mode == WindowingMode::Focused {
             state_flags |= FOCUSED_WINDOWING_STATE;
         }
         if self.tablet_mode_override.is_some() {
             state_flags |= TABLET_OVERRIDE_STATE;
         }
-        if self.windowing_mode_override.is_some() {
+        if self.windowing_mode_override.is_some() || self.console_session {
             state_flags |= WINDOWING_OVERRIDE_STATE;
         }
 
@@ -327,6 +333,21 @@ pub fn set_windowing_mode_override(windowing_mode: Option<WindowingMode>) -> Opt
     finish_update(&mut state, previous)
 }
 
+/// Apply the lifetime-scoped windowing policy of the console system shell.
+///
+/// This changes window placement without inventing a tablet posture or input
+/// capability. Hardware state and the user's override are retained and become
+/// effective again when the console shell disconnects.
+pub fn set_console_session(active: bool) -> Option<Snapshot> {
+    let mut state = STATE.lock().expect("SWS input-environment mutex poisoned");
+    if state.console_session == active {
+        return None;
+    }
+    let previous = state.snapshot;
+    state.console_session = active;
+    finish_update(&mut state, previous)
+}
+
 /// Replace the present-device capability bitset.
 ///
 /// # Arguments
@@ -367,6 +388,36 @@ pub fn protocol_payload(snapshot: Snapshot) -> [u8; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_session_focuses_windows_without_changing_posture_or_losing_user_policy() {
+        let _guard = TEST_STATE_LOCK.lock().unwrap();
+        initialize(Some(false), Some(WindowingMode::Freeform));
+        let console = set_console_session(true).unwrap();
+        assert_eq!(console.windowing_mode(), WindowingMode::Focused);
+        assert!(!console.tablet_mode());
+        assert!(set_console_session(true).is_none());
+        assert!(set_windowing_mode_override(Some(WindowingMode::Freeform)).is_none());
+        assert_eq!(snapshot().windowing_mode(), WindowingMode::Focused);
+        let restored = set_console_session(false).unwrap();
+        assert_eq!(restored.windowing_mode(), WindowingMode::Freeform);
+        assert!(restored.windowing_mode_override_active());
+        assert!(!restored.tablet_mode());
+    }
+
+    #[test]
+    fn leaving_console_restores_current_hardware_policy() {
+        let _guard = TEST_STATE_LOCK.lock().unwrap();
+        initialize(None, None);
+        set_console_session(true).unwrap();
+        update_posture(Some(Some(true)), None).unwrap();
+        let tablet = set_console_session(false).unwrap();
+        assert!(tablet.tablet_mode());
+        assert_eq!(tablet.windowing_mode(), WindowingMode::Focused);
+        assert!(!tablet.windowing_mode_override_active());
+        let laptop = update_posture(Some(Some(false)), None).unwrap();
+        assert_eq!(laptop.windowing_mode(), WindowingMode::Freeform);
+    }
 
     #[test]
     fn parsers_accept_documented_values_case_insensitively() {

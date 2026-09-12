@@ -411,12 +411,10 @@ struct FilerApp {
     current_path: State<String>,
     entries: State<Vec<FileEntry>>,
     selected: State<Option<usize>>,
-    hovered: State<Option<usize>>,
     last_click: State<Option<(usize, Instant)>>,
     picker_current_path: State<String>,
     picker_entries: State<Vec<FileEntry>>,
     picker_selected: State<Option<usize>>,
-    picker_hovered: State<Option<usize>>,
     picker_last_click: State<Option<(usize, Instant)>>,
     picker_request: State<Option<PickerRequest>>,
     picker_file_name: State<String>,
@@ -452,7 +450,6 @@ impl FilerApp {
         self.directory_read_generation.set(generation);
         self.entries.set(Vec::new());
         self.selected.set(None);
-        self.hovered.set(None);
         self.last_click.set(None);
         self.status.set(format!("Loading {path}"));
         println!("[filer-dbg] refresh: spawning directory read for {path}");
@@ -494,7 +491,6 @@ impl FilerApp {
         self.picker_read_generation.set(generation);
         self.picker_entries.set(Vec::new());
         self.picker_selected.set(None);
-        self.picker_hovered.set(None);
         self.picker_last_click.set(None);
         self.picker_status.set(format!("Loading {path}"));
 
@@ -883,15 +879,8 @@ impl FilerApp {
         picker: bool,
     ) -> impl View + Clone + use<> {
         let palette = ColorPalette::default();
-        let hovered_index = if picker {
-            self.picker_hovered.get()
-        } else {
-            self.hovered.get()
-        };
         let background = if selected_index == Some(index) {
             palette.primary_light().with_opacity(0.16)
-        } else if hovered_index == Some(index) {
-            palette.background_tertiary()
         } else {
             Color::CLEAR
         };
@@ -928,12 +917,6 @@ impl FilerApp {
             )
         };
         let app = self.clone();
-        let hover_state = if picker {
-            self.picker_hovered.clone()
-        } else {
-            self.hovered.clone()
-        };
-        let exit_state = hover_state.clone();
 
         vstack! {
             preview,
@@ -946,14 +929,13 @@ impl FilerApp {
         .frame(f32::INFINITY, GRID_ROW_HEIGHT)
         .padding(8.0)
         .background(background)
+        .hover_color(if selected_index == Some(index) {
+            background
+        } else {
+            palette.background_tertiary()
+        })
         .clip_radius(8.0)
         .border_rounded(border, 2.0, 8.0)
-        .on_hover(move || hover_state.set(Some(index)))
-        .on_exit(move || {
-            if exit_state.get() == Some(index) {
-                exit_state.set(None);
-            }
-        })
         .on_click(move || {
             if picker {
                 app.activate_picker_entry(index);

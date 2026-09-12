@@ -2,5 +2,7 @@
 Name=Settings
 Exec=/bin/settings
 Icon=preferences-system
+X-Scarlet-Background=/share/app-art/settings-cover.png
+X-Scarlet-BackgroundBlur=label
 Type=Application
 Terminal=false

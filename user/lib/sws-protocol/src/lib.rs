@@ -22,6 +22,7 @@ extern crate scarlet_std as std;
 
 use std::vec::Vec;
 
+pub mod surface_regions;
 pub mod workspace;
 
 /// Maximum payload we accept from the socket.
@@ -62,6 +63,8 @@ pub mod capabilities {
     pub const FRAME_CALLBACKS: u64 = 1 << 9;
     /// Extensions may register persistent external buffers and commit them by ID.
     pub const EXTENSION_BUFFER_OBJECTS: u64 = 1 << 10;
+    /// Owned surfaces may declare rounded backdrop and input regions.
+    pub const SURFACE_REGIONS: u64 = 1 << 11;
 }
 
 /// Flags attached to an extension-buffer commit.
@@ -407,6 +410,7 @@ pub mod client_msg {
     pub const APPLY_WORKSPACE_TRANSACTION: u32 = 52;
     /// Request one compositor-paced frame opportunity for an owned window.
     pub const REQUEST_FRAME: u32 = 53;
+    pub const SET_SURFACE_REGIONS: u32 = 54;
 
     // Text input client API messages (200-219)
     pub const TEXT_INPUT_CREATE: u32 = 200;
@@ -645,6 +649,9 @@ pub mod window_types {
     pub const SHELL_BACKGROUND: u32 = 5;
     /// Pointer-transparent system-shell chrome rendered above app scenes.
     pub const SHELL_CHROME: u32 = 6;
+    /// Interactive shell panel with client-owned size; preserves Home keyboard focus.
+    /// Available with the SURFACE_REGIONS capability.
+    pub const SHELL_PANEL: u32 = 7;
 }
 
 /// Window presentation-state flags reported by `WINDOW_STATE_CHANGED`.
@@ -1513,6 +1520,11 @@ pub enum ClientMessageRef<'a> {
     SetWindowGeometry {
         window_id: u32,
         geometry: WindowGeometry,
+    },
+    SetSurfaceRegions {
+        window_id: u32,
+        restrict_input: bool,
+        regions: &'a [u8],
     },
     SetWindowMenuTitles {
         window_id: u32,
@@ -2724,6 +2736,14 @@ pub fn parse_client_message<'a>(
             Ok(ClientMessageRef::SetWindowHasAlphaContent {
                 window_id,
                 has_alpha,
+            })
+        }
+        client_msg::SET_SURFACE_REGIONS => {
+            let (window_id, restrict_input, _) = surface_regions::parse(payload)?;
+            Ok(ClientMessageRef::SetSurfaceRegions {
+                window_id,
+                restrict_input,
+                regions: payload,
             })
         }
         client_msg::SET_WINDOW_GEOMETRY => {

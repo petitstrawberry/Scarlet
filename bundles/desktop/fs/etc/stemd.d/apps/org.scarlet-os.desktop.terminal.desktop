@@ -2,6 +2,8 @@
 Name=Terminal
 Exec=/bin/terminal
 Icon=utilities-terminal
+X-Scarlet-Background=/share/app-art/terminal-cover.png
+X-Scarlet-BackgroundBlur=label
 Type=Application
 Terminal=false
 X-Scarlet-NewInstance=true

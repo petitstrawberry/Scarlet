@@ -1,6 +1,7 @@
 //! Optional GPU-backed scene composition for SWS.
 
 use super::cursor::Cursor;
+use super::status_backdrop::{BackdropGeometry, expand_damage};
 use super::window::{PresentationInstance, Window, WindowId, WindowType, rounded_rect_row_span};
 use framebuffer::{DisplayPresentRegion, DisplaySurface};
 use gpu_raw::{Gpu, GpuContext, GpuImage, GpuImageBgraRect};
@@ -10,11 +11,12 @@ use scarlet_ui_renderer_sgfx::FrameSubmissionError;
 use sgfx::ir::{Color, LoadOp, PixelRect, TextureId};
 use std::env;
 use std::fmt;
+use std::time::Instant;
 use std::vec::Vec;
 
 use crate::sgfx_ir_support::{
-    CopiedRect, MappedTarget, Quad, QuadRenderer, QuadSubmitError, SampledRect, TextureUpload,
-    define_bgra_texture, upload_bgra,
+    BackdropPass, BackdropTextures, CopiedRect, MappedTarget, Quad, QuadRenderer, QuadSubmitError,
+    SampledRect, TextureUpload, define_bgra_texture, upload_bgra,
 };
 
 type DamageRect = (u32, u32, u32, u32);
@@ -228,6 +230,7 @@ pub(super) struct GpuCompositor {
     rebuild_pending: bool,
     rebuild_extent: Option<(u32, u32)>,
     force_full_repaint: bool,
+    backdrops: Vec<(WindowId, BackdropGeometry, BackdropTextures)>,
 }
 
 impl GpuCompositor {
@@ -275,6 +278,7 @@ impl GpuCompositor {
             rebuild_pending: false,
             rebuild_extent: None,
             force_full_repaint: false,
+            backdrops: Vec::new(),
         })
     }
 
@@ -921,8 +925,26 @@ impl GpuCompositor {
         resize_outline: Option<(i32, i32, u32, u32)>,
         cursor_visible: bool,
         damage: Option<DamageRect>,
+        backdrops: &[(WindowId, BackdropGeometry)],
     ) -> Result<Vec<SgfxCommitToken>, GpuCompositionError> {
+        let profiling = super::trace::profile_enabled();
+        let profile_start = profiling.then(Instant::now);
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_SYNC_WINDOWS);
+        // ResourceTable slots live for the session. Rebuild before changing
+        // material extents instead of leaking retired textures on each resize.
+        if !self.backdrops.is_empty()
+            && (backdrops.iter().any(|(id, geometry)| {
+                !self
+                    .backdrops
+                    .iter()
+                    .any(|(cached_id, cached, _)| id == cached_id && geometry == cached)
+            }) || self
+                .backdrops
+                .iter()
+                .any(|(id, _, _)| !windows.iter().any(|w| w.id == *id)))
+        {
+            self.rebuild_pending = true;
+        }
         self.rebuild_if_needed(cursor, windows)?;
         self.transfer_visible_imported_shm(windows)?;
         let force_full_repaint = self.force_full_repaint;
@@ -948,6 +970,7 @@ impl GpuCompositor {
         }
 
         super::trace::set_gpu_window(0);
+        let profile_synced = profiling.then(Instant::now);
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_ENCODE);
         let clear_color = bgra_color(background);
         let requested_clip = damage
@@ -956,12 +979,41 @@ impl GpuCompositor {
             .map_err(|_| "Invalid GPU composition damage")?;
         let full_area = PixelRect::new(0, 0, self.target.width, self.target.height)
             .map_err(|_| "Invalid GPU composition target area")?;
-        let render_area = self
+        let mut render_area = self
             .target
             .prepare_render_area(requested_clip.unwrap_or(full_area))
             .map_err(|_| "Failed to prepare GPU swapchain damage")?;
+        // Buffer-age repair can touch a material independently of this
+        // frame's logical damage. Expand repair only, not damage history.
+        let geometries: Vec<_> = backdrops.iter().map(|(_, geometry)| *geometry).collect();
+        let mut repair = vec![(
+            render_area.x() as i32,
+            render_area.y() as i32,
+            render_area.width(),
+            render_area.height(),
+        )];
+        expand_damage(&geometries, &mut repair);
+        let repair = repair[0];
+        render_area = PixelRect::new(repair.0 as u32, repair.1 as u32, repair.2, repair.3)
+            .map_err(|_| "Invalid backdrop repair damage")?;
+        for &(id, geometry) in backdrops {
+            if !self
+                .backdrops
+                .iter()
+                .any(|(cached_id, cached, _)| *cached_id == id && *cached == geometry)
+            {
+                let textures = BackdropTextures::define(
+                    self.target.resources.as_ref(),
+                    geometry.source.2,
+                    geometry.source.3,
+                )
+                .map_err(|_| "Failed to define backdrop textures")?;
+                self.backdrops.push((id, geometry, textures));
+            }
+        }
         let damage_clip = (render_area != full_area).then_some(render_area);
         let mut operations = Vec::new();
+        let mut backdrop_splits = Vec::new();
         let mut overview_backplates_drawn = false;
         for window in windows {
             if !window.is_presented() {
@@ -988,6 +1040,14 @@ impl GpuCompositor {
                     damage_clip,
                 )?;
                 overview_backplates_drawn = true;
+            }
+            for (index, (id, geometry, _)) in self.backdrops.iter().enumerate() {
+                if *id == window.id
+                    && backdrops.contains(&(*id, *geometry))
+                    && geometry.intersects_source(repair)
+                {
+                    backdrop_splits.push((index, operations.len()));
+                }
             }
             self.append_window_projection(&mut operations, window, None, damage_clip)?;
             for instance in &window.presentation_instances {
@@ -1069,6 +1129,39 @@ impl GpuCompositor {
         }
 
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_SUBMIT);
+        let mut backdrop_passes = Vec::new();
+        for (index, split) in backdrop_splits {
+            let (_, geometry, textures) = &self.backdrops[index];
+            let source = geometry.source;
+            let output = geometry.output;
+            let mut clips = Vec::new();
+            let mut y = 0;
+            while y < output.3 {
+                let (x, width) = geometry.row_span(y);
+                let mut end = y + 1;
+                while end < output.3 && geometry.row_span(end) == (x, width) {
+                    end += 1;
+                }
+                if width > 0 {
+                    clips.push(
+                        PixelRect::new(x, output.1 as u32 + y, width, end - y)
+                            .map_err(|_| "Invalid rounded backdrop mask")?,
+                    );
+                }
+                y = end;
+            }
+            backdrop_passes.push(BackdropPass {
+                textures,
+                split,
+                clips,
+                radius: geometry.radius,
+                source: PixelRect::new(source.0 as u32, source.1 as u32, source.2, source.3)
+                    .map_err(|_| "Invalid backdrop source")?,
+                output: PixelRect::new(output.0 as u32, output.1 as u32, output.2, output.3)
+                    .map_err(|_| "Invalid backdrop output")?,
+            });
+        }
+        let profile_encoded = profiling.then(Instant::now);
         if self.target.supports_tracked_submission() {
             self.quad_renderer
                 .submit_region_with_uploads_tracked(
@@ -1077,6 +1170,7 @@ impl GpuCompositor {
                     LoadOp::Clear(clear_color),
                     &texture_uploads,
                     &operations,
+                    &backdrop_passes,
                 )
                 .map_err(|error| match error {
                     // Recording can fail after an earlier batch was accepted.
@@ -1096,12 +1190,14 @@ impl GpuCompositor {
                 LoadOp::Clear(clear_color),
                 &texture_uploads,
                 &operations,
+                &backdrop_passes,
             )?;
         }
         for texture_index in uploaded_texture_indices {
             self.textures[texture_index].pending_damage = None;
         }
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_PRESENT);
+        let profile_submitted = profiling.then(Instant::now);
         let region = (render_area != full_area).then_some(DisplayPresentRegion {
             x: render_area.x(),
             y: render_area.y(),
@@ -1111,6 +1207,26 @@ impl GpuCompositor {
         self.target
             .present(display, region)
             .map_err(GpuCompositionError::Backend)?;
+        if let (Some(start), Some(synced), Some(encoded), Some(submitted)) = (
+            profile_start,
+            profile_synced,
+            profile_encoded,
+            profile_submitted,
+        ) {
+            std::println!(
+                "[SWS_PROFILE] {}x{} damage={}x{} blur={} quads={} sync_us={} encode_us={} submit_us={} present_us={}",
+                self.target.width,
+                self.target.height,
+                render_area.width(),
+                render_area.height(),
+                backdrop_passes.len(),
+                operations.len(),
+                synced.duration_since(start).as_micros(),
+                encoded.duration_since(synced).as_micros(),
+                submitted.duration_since(encoded).as_micros(),
+                submitted.elapsed().as_micros(),
+            );
+        }
         self.force_full_repaint = false;
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_COLLECT_RELEASES);
         Ok(self.take_presented_releases())
@@ -1321,6 +1437,7 @@ impl GpuCompositor {
         // entire target before presenting it.
         self.target = target;
         self.quad_renderer = quad_renderer;
+        self.backdrops.clear();
         self.cursor_images = cursor_images;
         self.textures.clear();
         for (imported, texture) in self
@@ -1595,6 +1712,10 @@ fn quad_with_clip(operation: Quad, clip: Option<PixelRect>) -> Quad {
         Quad::Copy(mut rect) => {
             rect.clip = clip;
             Quad::Copy(rect)
+        }
+        Quad::SampledOffset { mut rect, offset } => {
+            rect.clip = clip;
+            Quad::SampledOffset { rect, offset }
         }
     }
 }

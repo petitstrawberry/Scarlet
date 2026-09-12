@@ -4,6 +4,7 @@ use super::config;
 use super::cursor::Cursor;
 use super::cursor_theme::CursorTheme;
 use super::damage::{DamageRect, PresentDamage, WindowGeometrySnapshot, changed_geometry_damage};
+use super::frame_callback::{frame_callback_is_ready, frame_callback_target};
 use super::gpu_compositor::{GpuCompositor, SgfxBufferError, SgfxBufferIdentity, SgfxCommitToken};
 use super::input::{
     CompositorInputEvent, ConsumedKeys, GestureEvent, GestureRecognizer, HeldKeys, InputManager,
@@ -19,6 +20,7 @@ use super::pointer_lock::{
 };
 use super::remote::capture::CaptureSession;
 use super::remote::server::{RemoteEvent, RemoteServer};
+use super::status_backdrop::{BackdropGeometry, CpuBackdrop, expand_damage};
 use super::window::{
     PresentationInstance, PresentationTransform, WindowManager, WindowType, maximized_geometry_for,
     rounded_rect_contains_point, rounded_rect_row_span,
@@ -662,25 +664,6 @@ mod touch_modality_tests {
         };
         assert!(modality.pointer_motion());
         assert!(!modality.cursor_hidden_by_touch);
-    }
-
-    #[test]
-    fn frame_callbacks_wait_for_visibility_and_a_new_presentation_boundary() {
-        assert!(frame_callback_is_ready(true, false, 0, 0));
-        assert!(!frame_callback_is_ready(false, false, 1, 0));
-        assert!(!frame_callback_is_ready(true, true, 4, 4));
-        assert!(frame_callback_is_ready(true, true, 5, 4));
-    }
-
-    #[test]
-    fn late_frame_request_targets_the_commit_that_already_presented() {
-        let target = frame_callback_target(5, Some(4));
-        assert_eq!(target, 4);
-        assert!(frame_callback_is_ready(true, true, 5, target));
-
-        let pending_target = frame_callback_target(5, Some(5));
-        assert_eq!(pending_target, 5);
-        assert!(!frame_callback_is_ready(true, true, 5, pending_target));
     }
 
     #[test]
@@ -2244,6 +2227,8 @@ fn is_shell_app_id(app_id: &[u8]) -> bool {
         || app_id == b"org.scarlet-os.desktop.launcher"
         || app_id == b"org.scarlet-os.desktop.shell"
         || app_id == b"org.scarlet-os.desktop.shell.home"
+        || app_id == b"org.scarlet-os.desktop.shell.console-chrome"
+        || app_id == sws_protocol::workspace::CONSOLE_HOME_APP_ID.as_bytes()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2253,25 +2238,6 @@ struct PendingFrameCallback {
     callback_id: u64,
     /// Presentation counter observed when the request entered the compositor.
     requested_after_present: u64,
-}
-
-const fn frame_callback_is_ready(
-    is_presented: bool,
-    has_submitted_frame: bool,
-    presentation_counter: u64,
-    requested_after_present: u64,
-) -> bool {
-    is_presented && (!has_submitted_frame || presentation_counter > requested_after_present)
-}
-
-const fn frame_callback_target(
-    presentation_counter: u64,
-    last_submission_counter: Option<u64>,
-) -> u64 {
-    match last_submission_counter {
-        Some(counter) => counter,
-        None => presentation_counter,
-    }
 }
 
 fn shell_background_must_be_withheld(
@@ -2352,6 +2318,7 @@ pub struct Compositor {
     bytes_per_pixel: u32,
     backbuffer: Vec<u8>,
     backbuffer_stride: u32,
+    backdrops: Vec<(u32, CpuBackdrop)>,
     full_redraw_needed: bool,
     pending_damage: Vec<(i32, i32, u32, u32)>,
     presented_damage: Vec<PresentDamage>,
@@ -2800,6 +2767,7 @@ impl Compositor {
             bytes_per_pixel,
             backbuffer,
             backbuffer_stride,
+            backdrops: Vec::new(),
             full_redraw_needed: true,
             pending_damage: Vec::new(),
             presented_damage: Vec::new(),
@@ -2921,7 +2889,18 @@ impl Compositor {
     }
 
     fn toggle_overview_presentation(&mut self) -> bool {
-        let changed = self.workspace_manager.toggle_overview();
+        let changed = if self.console_shell_present() {
+            if self.workspace_manager.presentation()
+                == sws_protocol::workspace::ShellPresentation::Home
+            {
+                self.workspace_manager.return_to_workspace()
+            } else {
+                self.workspace_manager
+                    .set_presentation(sws_protocol::workspace::ShellPresentation::Home)
+            }
+        } else {
+            self.workspace_manager.toggle_overview()
+        };
         if changed {
             self.commit_workspace_change();
         }
@@ -3963,6 +3942,12 @@ impl Compositor {
             if let Some(rect) = cursor_dirty {
                 Self::push_damage_rect(&mut rects, rect);
             }
+            let geometries: Vec<_> = self
+                .window_backdrops()
+                .into_iter()
+                .map(|(_, g)| g)
+                .collect();
+            expand_damage(&geometries, &mut rects);
             Some(rects)
         }
     }
@@ -4209,6 +4194,7 @@ impl Compositor {
     /// frame. The strict `sgfx` mode instead propagates a fatal error.
     fn composite_and_present_gpu(&mut self) -> Result<bool, &'static str> {
         let damage = self.gpu_present_damage();
+        let backdrops = self.window_backdrops();
         let overview_shadows = self.overview_render_shadows();
         let overview_cards = self.overview_render_backplates();
         let overview_remove_buttons = self.overview_remove_buttons();
@@ -4226,6 +4212,7 @@ impl Compositor {
             self.resize_outline,
             cursor_visible(self.pointer_lock) && !self.input_modality.cursor_hidden_by_touch,
             damage,
+            &backdrops,
         );
         match result {
             Ok(releases) => {
@@ -4896,6 +4883,19 @@ impl Compositor {
             return Ok(());
         }
 
+        let backdrops = self.window_backdrops();
+        self.backdrops
+            .retain(|(id, filter)| backdrops.contains(&(*id, filter.geometry)));
+        for &(id, geometry) in &backdrops {
+            if !self
+                .backdrops
+                .iter()
+                .any(|(cached_id, f)| *cached_id == id && f.geometry == geometry)
+            {
+                self.backdrops.push((id, CpuBackdrop::new(geometry)));
+            }
+        }
+
         // Mutate backbuffer within a limited scope so we can immutably borrow `self`
         // afterwards for validation/present.
         {
@@ -4963,6 +4963,18 @@ impl Compositor {
                         clip,
                     );
                     overview_backplates_drawn = true;
+                }
+                // Capture every region against the same unfiltered background
+                // before writing any material with an overlapping source halo.
+                for (id, filter) in &mut self.backdrops {
+                    if *id == window.id && filter.geometry.intersects_source((x0, y0, w, h)) {
+                        filter.prepare(backbuffer, stride);
+                    }
+                }
+                for (id, filter) in &self.backdrops {
+                    if *id == window.id && filter.geometry.intersects_source((x0, y0, w, h)) {
+                        filter.composite(backbuffer, stride);
+                    }
                 }
                 Self::draw_window_to_buffer_clipped(
                     screen_width,
@@ -8310,6 +8322,7 @@ impl Compositor {
             self.window_manager.close_window(*window_id);
             self.add_pending_damage(*rect);
         }
+        self.sync_console_session_policy()?;
 
         if notify_client {
             for retained in retained_extension_buffers {
@@ -8508,7 +8521,7 @@ impl Compositor {
         if !self.is_workspace_scene_root(window_id) {
             return false;
         }
-        if self.tablet_mode {
+        if self.tablet_mode || self.console_shell_present() {
             if !self.pending_workspace_scenes.contains(&window_id) {
                 self.pending_workspace_scenes.push(window_id);
             }
@@ -8548,7 +8561,7 @@ impl Compositor {
 
         self.workspace_manager.add_scene_root(
             window_id,
-            self.tablet_mode,
+            self.tablet_mode || self.console_shell_present(),
             self.windowing_mode == sws_protocol::WindowingMode::Focused,
         );
         if let Some(focused_window_id) = self.window_manager.get_focused_window_id()
@@ -8557,6 +8570,10 @@ impl Compositor {
             self.last_workspace_focus = Some(focused_window_id);
         }
         self.apply_workspace_presentation_policy();
+        // The bootstrap frame was permitted while membership was pending.
+        // Publish the final suspension state even when visibility stayed false
+        // (for example, a background launch while Home remains active).
+        self.send_window_state_changed(window_id);
         self.publish_workspace_state();
         self.full_redraw_needed = true;
         true
@@ -8624,6 +8641,9 @@ impl Compositor {
             let ready = frame_callback_is_ready(
                 window.is_logically_presented(),
                 window.has_presented_frame,
+                self.pending_workspace_scenes.contains(&callback.window_id)
+                    && window.visible
+                    && !window.minimized,
                 self.event_counter,
                 callback.requested_after_present,
             );
@@ -8646,7 +8666,18 @@ impl Compositor {
         let Some(window) = self.window_manager.get_window(window_id) else {
             return;
         };
-        let payload = sws_protocol::payload_window_state_changed(window_id, window.state_flags());
+        let mut flags = window.state_flags();
+        if self.pending_workspace_scenes.contains(&window_id)
+            && !window.has_presented_frame
+            && window.visible
+            && !window.minimized
+        {
+            // Scene roots are classified after their first submitted frame.
+            // Keep them compositor-hidden, but allow that bootstrap frame:
+            // suspending the client here deadlocks first-frame registration.
+            flags &= !sws_protocol::window_state::SUSPENDED;
+        }
+        let payload = sws_protocol::payload_window_state_changed(window_id, flags);
         super::ipc::send_message_to_window(
             window_id,
             sws_protocol::server_msg::WINDOW_STATE_CHANGED,
@@ -9022,7 +9053,7 @@ impl Compositor {
         };
         if matches!(
             window.window_type,
-            WindowType::ShellBackground | WindowType::ShellChrome
+            WindowType::ShellBackground | WindowType::ShellChrome | WindowType::ShellPanel
         ) {
             return matches!(
                 self.workspace_manager.presentation(),
@@ -9073,10 +9104,78 @@ impl Compositor {
         }
     }
 
+    fn console_shell_present(&self) -> bool {
+        self.window_manager.get_windows().iter().any(|window| {
+            window.window_type == WindowType::ShellBackground
+                && window.app_id.as_deref()
+                    == Some(sws_protocol::workspace::CONSOLE_HOME_APP_ID.as_bytes())
+        })
+    }
+
+    fn console_home_active(&self) -> bool {
+        self.workspace_manager.presentation() == sws_protocol::workspace::ShellPresentation::Home
+            && self.console_shell_present()
+    }
+
+    /// Backdrop regions are surface metadata, shared by status bars and
+    /// floating native controls. Transformed overview actors retain their
+    /// ordinary surfaces; materials apply at the surface's native placement.
+    fn window_backdrops(&self) -> Vec<(u32, BackdropGeometry)> {
+        let mut result = Vec::new();
+        for window in self.window_manager.get_windows() {
+            if !window.is_presented()
+                || window.presentation_opacity() < 1.0
+                || window.presentation_geometry() != window.surface_geometry()
+            {
+                continue;
+            }
+            for region in &window.surface_regions {
+                if region.flags & sws_protocol::surface_regions::BACKDROP == 0 {
+                    continue;
+                }
+                let width = region
+                    .width
+                    .min(window.width.saturating_sub(region.x as u32));
+                let height = region
+                    .height
+                    .min(window.height.saturating_sub(region.y as u32));
+                let output = (
+                    window.x.saturating_add(region.x),
+                    window.y.saturating_add(region.y),
+                    width,
+                    height,
+                );
+                if let Some(geometry) = BackdropGeometry::new(
+                    self.screen_width,
+                    self.screen_height,
+                    output,
+                    region.blur_radius,
+                    region.corner_radius,
+                ) {
+                    result.push((window.id, geometry));
+                }
+            }
+        }
+        result
+    }
+
+    fn sync_console_session_policy(&mut self) -> Result<(), &'static str> {
+        if let Some(snapshot) = input_environment::set_console_session(self.console_shell_present())
+        {
+            if self.apply_input_environment_snapshot(snapshot)? {
+                self.full_redraw_needed = true;
+            }
+        }
+        Ok(())
+    }
+
     fn overview_workspace_region(&self) -> (i32, i32, u32, u32) {
         let workarea = self
             .workarea
             .unwrap_or((0, 0, self.screen_width, self.screen_height));
+        if self.console_home_active() {
+            return (workarea.0, workarea.1, workarea.2, 0);
+        }
         overview_workspace_region_for(
             workarea,
             self.tablet_mode,
@@ -9086,6 +9185,9 @@ impl Compositor {
     }
 
     fn overview_layout_rects(&self) -> Vec<(u32, (i32, i32, u32, u32))> {
+        if self.console_home_active() {
+            return Vec::new();
+        }
         let state = self.workspace_manager.snapshot();
         let workarea = self
             .workarea
@@ -9637,6 +9739,15 @@ impl Compositor {
     }
 
     fn apply_workspace_presentation_policy(&mut self) -> bool {
+        // Console Home owns the application/workspace switcher. Normalize
+        // gestures and external Overview requests before visibility, focus or
+        // transforms can expose an intermediate desktop Overview frame.
+        let normalized = self.console_shell_present()
+            && self.workspace_manager.presentation()
+                == sws_protocol::workspace::ShellPresentation::Overview
+            && self
+                .workspace_manager
+                .set_presentation(sws_protocol::workspace::ShellPresentation::Home);
         let presentation = self.workspace_manager.presentation();
         let withhold_shell_background =
             shell_background_must_be_withheld(self.last_shell_presentation, presentation);
@@ -9650,7 +9761,7 @@ impl Compositor {
             .iter()
             .map(|window| window.id)
             .collect::<Vec<_>>();
-        let mut changed = false;
+        let mut changed = normalized;
         let mut visibility_changed = Vec::new();
 
         if withhold_shell_background {
@@ -9977,6 +10088,7 @@ impl Compositor {
                     window_types::IME_POPUP => super::window::WindowType::ImePopup,
                     window_types::SHELL_BACKGROUND => super::window::WindowType::ShellBackground,
                     window_types::SHELL_CHROME => super::window::WindowType::ShellChrome,
+                    window_types::SHELL_PANEL => super::window::WindowType::ShellPanel,
                     _ => super::window::WindowType::Normal,
                 };
 
@@ -10020,6 +10132,7 @@ impl Compositor {
                 if self.window_manager.set_window_type(window_id, wtype) {
                     println!("[Compositor] Set window #{} type to {:?}", window_id, wtype);
                 }
+                self.sync_console_session_policy()?;
                 self.window_manager
                     .set_window_resizable(window_id, resizable);
                 if let Some(window) = self.window_manager.get_window_mut(window_id) {
@@ -10159,6 +10272,7 @@ impl Compositor {
                     wtype,
                     super::window::WindowType::ShellBackground
                         | super::window::WindowType::ShellChrome
+                        | super::window::WindowType::ShellPanel
                 ) {
                     // Shell scenes may be created after the presentation was
                     // already selected. Apply visibility and focus
@@ -10647,7 +10761,7 @@ impl Compositor {
                         self.discard_pending_workspace_scene(window_id);
                         self.workspace_manager.add_scene_root(
                             window_id,
-                            self.tablet_mode,
+                            self.tablet_mode || self.console_shell_present(),
                             self.windowing_mode == sws_protocol::WindowingMode::Focused,
                         );
                         true
@@ -11158,12 +11272,14 @@ impl Compositor {
                     window_types::IME_POPUP => super::window::WindowType::ImePopup,
                     window_types::SHELL_BACKGROUND => super::window::WindowType::ShellBackground,
                     window_types::SHELL_CHROME => super::window::WindowType::ShellChrome,
+                    window_types::SHELL_PANEL => super::window::WindowType::ShellPanel,
                     _ => {
                         println!("[Compositor] Invalid window type {}, ignoring", window_type);
                         return Ok(false);
                     }
                 };
                 if self.window_manager.set_window_type(window_id, wtype) {
+                    self.sync_console_session_policy()?;
                     if self.windowing_mode == sws_protocol::WindowingMode::Focused {
                         self.apply_focused_policy_to_window(window_id);
                     }
@@ -11519,6 +11635,33 @@ impl Compositor {
                 {
                     if let Some(w) = self.window_manager.get_window(window_id) {
                         self.add_pending_damage((w.x, w.y, w.width, w.height));
+                    }
+                }
+            }
+            IpcEvent::SetSurfaceRegions {
+                client_id,
+                request_id,
+                window_id,
+                restrict_input,
+                regions,
+            } => {
+                if !self.client_owns_window(client_id, window_id) {
+                    send_response_to_client(
+                        client_id,
+                        sws_protocol::server_msg::ERROR,
+                        request_id,
+                        sws_protocol::payload_error(sws_protocol::error_codes::WINDOW_NOT_OWNED)
+                            .to_vec(),
+                    );
+                    return Ok(false);
+                }
+                if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                    if window.surface_regions != regions
+                        || window.restrict_input_to_regions != restrict_input
+                    {
+                        window.surface_regions = regions;
+                        window.restrict_input_to_regions = restrict_input;
+                        self.full_redraw_needed = true;
                     }
                 }
             }
@@ -11897,9 +12040,11 @@ impl Compositor {
                     .workspace_manager
                     .apply_transaction(transaction, &live_window_ids)
                 {
-                    Ok(applied) => {
+                    Ok(_) => {
                         self.apply_workspace_presentation_policy();
-                        let payload = sws_protocol::workspace::encode_state(&applied.state);
+                        let payload = sws_protocol::workspace::encode_state(
+                            &self.workspace_manager.snapshot(),
+                        );
                         send_response_to_client(
                             client_id,
                             sws_protocol::server_msg::WORKSPACE_STATE,

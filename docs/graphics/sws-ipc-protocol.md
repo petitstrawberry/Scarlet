@@ -6,7 +6,8 @@ The canonical implementation is the `sws_protocol` crate located at `user/lib/sw
 
 The current protocol version is **9**. Clients discover the version and
 optional feature bits with `GET_CAPABILITIES`; reusable extension buffers are
-advertised by `EXTENSION_BUFFER_OBJECTS` (`1 << 10`).
+advertised by `EXTENSION_BUFFER_OBJECTS` (`1 << 10`). Rounded input and backdrop
+regions are advertised by the optional `SURFACE_REGIONS` bit (`1 << 11`).
 
 Client-side reference implementations:
 
@@ -522,6 +523,44 @@ advertises the original visible window rectangle with this request, and keeps
 Applications may explicitly disable the standard shadow; transient shell UI
 such as Control Center selects the floating elevation while the same top-level
 window machinery derives its surface outsets and managed geometry automatically.
+
+#### `SET_SURFACE_REGIONS` (type = 54)
+
+Requires `SURFACE_REGIONS` (`1 << 11`). This additive request does not change
+protocol version 9. It replaces the surface's entire region list.
+
+| Offset | Size | Field | Type |
+|--------|------|-------|------|
+| 0 | 4 | `window_id` | u32 |
+| 4 | 4 | `restrict_input` | u32 boolean, 0 or 1 |
+| 8 | 4 | `region_count` | u32, at most 16 |
+| 12 | 28 × count | regions | entries below |
+
+Each entry is `x: i32, y: i32, width: u32, height: u32, corner_radius: u32,
+blur_radius: u32, flags: u32`, in surface-local physical pixels. Origins must
+be nonnegative, sizes positive, and rectangle ends no greater than `i32::MAX`.
+The corner radius must not exceed half the smaller dimension; the blur radius
+must not exceed 64. Unknown flags and malformed payloads are rejected.
+
+- `INPUT` (`1`): include this rounded rectangle in the input mask. With
+  `restrict_input = 1`, areas outside all input regions pass through to lower
+  windows; an empty mask makes the entire surface pass through. With
+  `restrict_input = 0`, ordinary window input behavior is retained.
+- `BACKDROP` (`2`): blur the composed content below this surface inside this
+  rounded rectangle before drawing the surface itself. SWS clips the output to
+  the surface and display. Current filtering supports untransformed surfaces
+  with full presentation opacity; it does not blur their foreground glyphs.
+
+The sender must own the window. Successful updates are fire-and-forget and
+invalidate the affected composition. Clients resend regions when their layout
+or scale changes; the rectangles do not automatically scale with the buffer.
+
+The same capability also introduces window type `SHELL_PANEL` (`7`). This
+shell overlay keeps its requested geometry, appears above application and Home
+surfaces but below the taskbar, and accepts pointer input without taking
+keyboard focus. Console Home uses it for the floating system controls, with
+`restrict_input = 1`. It is excluded from the application window list and
+follows shell presentation visibility.
 
 #### `REGISTER_EXTENSION` (type = 100)
 

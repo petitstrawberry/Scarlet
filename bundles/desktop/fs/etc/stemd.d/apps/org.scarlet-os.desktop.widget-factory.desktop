@@ -2,5 +2,7 @@
 Name=Widget Factory
 Exec=/bin/widget-factory
 Icon=applications-development
+X-Scarlet-Background=/share/app-art/widget-factory-cover.png
+X-Scarlet-BackgroundBlur=label
 Type=Application
 Terminal=false

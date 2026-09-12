@@ -2,5 +2,7 @@
 Name=Task Manager
 Exec=/bin/task-manager
 Icon=utilities-system-monitor
+X-Scarlet-Background=/share/app-art/task-manager-cover.png
+X-Scarlet-BackgroundBlur=label
 Type=Application
 Terminal=false

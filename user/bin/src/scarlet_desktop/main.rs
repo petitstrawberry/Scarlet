@@ -75,6 +75,26 @@ fn spawn_component(name: &str, args: &[&str]) -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> i32 {
+    let args = std::env::args_vec();
+    let shell_args: &[&str] = match args.get(1).map(|arg| arg.as_str()) {
+        None => &[],
+        Some("--shell-mode") if args.len() == 3 => match args[2].as_str() {
+            "desktop" => &["--mode", "desktop"],
+            "console" => &["--mode", "console"],
+            _ => {
+                println!("scarlet-desktop: --shell-mode must be desktop or console");
+                return 2;
+            }
+        },
+        Some("--help" | "-h") => {
+            println!("Usage: scarlet-desktop [--shell-mode desktop|console]");
+            return 0;
+        }
+        _ => {
+            println!("Usage: scarlet-desktop [--shell-mode desktop|console]");
+            return 2;
+        }
+    };
     println!("[scarlet-desktop] Starting desktop session");
     wait_for_sws_ready();
 
@@ -83,7 +103,7 @@ pub extern "C" fn main() -> i32 {
         println!("[scarlet-desktop] settingsd pid={}", settingsd_pid);
     }
 
-    let mut shell_pid = spawn_component("scarlet-shell", &[]);
+    let mut shell_pid = spawn_component("scarlet-shell", shell_args);
     if shell_pid > 0 {
         println!("[scarlet-desktop] shell pid={}", shell_pid);
     }
@@ -103,7 +123,7 @@ pub extern "C" fn main() -> i32 {
             println!("[scarlet-desktop] shell exited; respawning");
             thread::sleep(Duration::from_millis(COMPONENT_RESPAWN_DELAY_MS));
             wait_for_sws_ready();
-            shell_pid = spawn_component("scarlet-shell", &[]);
+            shell_pid = spawn_component("scarlet-shell", shell_args);
             if shell_pid > 0 {
                 println!("[scarlet-desktop] shell respawned pid={}", shell_pid);
             }

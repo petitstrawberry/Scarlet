@@ -82,6 +82,10 @@ pub const DESKTOP_STEMD_OPEN_PATH_METHOD: &str = "OpenPath";
 /// Method used to list applications registered from desktop entries.
 pub const DESKTOP_STEMD_LIST_APPLICATIONS_METHOD: &str = "ListApplications";
 
+/// Application catalog with optional background path and blur treatment.
+/// Returns app_id, name, icon, background, blur; the legacy triples stay unchanged.
+pub const DESKTOP_STEMD_LIST_APPLICATIONS_WITH_ARTWORK_METHOD: &str = "ListApplicationsWithArtwork";
+
 /// Method used to launch an application or focus its existing window.
 pub const DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD: &str = "LaunchOrFocus";
 

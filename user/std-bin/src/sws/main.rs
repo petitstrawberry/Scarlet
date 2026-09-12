@@ -7,6 +7,7 @@ mod config;
 mod cursor;
 mod cursor_theme;
 mod damage;
+mod frame_callback;
 mod gpu_compositor;
 mod input;
 mod input_environment;
@@ -16,6 +17,7 @@ mod pointer_lock;
 mod remote;
 #[path = "../sgfx_ir_support.rs"]
 mod sgfx_ir_support;
+mod status_backdrop;
 mod trace;
 mod window;
 mod workspace;

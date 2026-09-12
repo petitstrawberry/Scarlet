@@ -105,6 +105,10 @@ impl Capabilities {
         self.capabilities & protocol::capabilities::WINDOW_GEOMETRY != 0
     }
 
+    pub const fn supports_surface_regions(self) -> bool {
+        self.capabilities & protocol::capabilities::SURFACE_REGIONS != 0
+    }
+
     /// Whether the server accepts system-wide tablet and windowing overrides.
     ///
     /// # Returns
@@ -329,8 +333,7 @@ fn window_events_pending(
 ) -> bool {
     pending_head < pending_events.len()
         || subscribers.values().any(|mailbox| {
-            matches!(mailbox.filter, EventFilter::Window(_))
-                && mailbox.head < mailbox.events.len()
+            matches!(mailbox.filter, EventFilter::Window(_)) && mailbox.head < mailbox.events.len()
         })
 }
 
@@ -347,8 +350,11 @@ struct WindowEventWake {
 impl WindowEventWake {
     fn new() -> Result<Self, Error> {
         let (read, write) = Socket::pair().map_err(|_| Error::SocketCreation)?;
-        read.set_nonblocking(true).map_err(|_| Error::SocketConfig)?;
-        write.set_nonblocking(true).map_err(|_| Error::SocketConfig)?;
+        read.set_nonblocking(true)
+            .map_err(|_| Error::SocketConfig)?;
+        write
+            .set_nonblocking(true)
+            .map_err(|_| Error::SocketConfig)?;
         Ok(Self {
             read,
             write,
@@ -2512,6 +2518,22 @@ impl Connection {
             .map_err(|_| Error::SendFailed)
     }
 
+    /// Set physical input/backdrop regions for an owned surface.
+    pub fn set_surface_regions(
+        &self,
+        surface_id: u32,
+        restrict_input: bool,
+        regions: &[protocol::surface_regions::SurfaceRegion],
+    ) -> Result<(), Error> {
+        if !mutex_lock(&self.surfaces).contains_key(&surface_id) {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::surface_regions::payload(surface_id, restrict_input, regions)
+            .map_err(|_| Error::InvalidRequest)?;
+        self.send_message(protocol::client_msg::SET_SURFACE_REGIONS, &payload)
+            .map_err(|_| Error::SendFailed)
+    }
+
     /// Set the workarea (usable screen area) for the window manager.
     ///
     /// This informs the window manager about the area where normal windows
@@ -3638,7 +3660,10 @@ mod window_wait_tests {
 
         assert!(window_events_pending(0, &[], &subscribers));
         assert!(window_events_pending(0, &[], &subscribers));
-        assert_eq!(subscribers.get_mut(&2).unwrap().poll(), Some(frame_done(102)));
+        assert_eq!(
+            subscribers.get_mut(&2).unwrap().poll(),
+            Some(frame_done(102))
+        );
         assert!(!window_events_pending(0, &[], &subscribers));
     }
 

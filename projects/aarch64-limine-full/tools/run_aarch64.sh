@@ -58,8 +58,8 @@ fi
 
 PROJECT_ROOT="$(cd "$SCRIPT_DIR" && cd .. && cd .. && cd .. && pwd)"
 PROJECT_DIR="${SCARLET_QEMU_PROJECT_DIR:-$(cd "$SCRIPT_DIR" && cd .. && pwd)}"
-BOOT_IMAGE="$PROJECT_DIR/.scarlet/images/limine-aarch64-full.img"
-ROOTFS_IMAGE="$PROJECT_DIR/.scarlet/images/rootfs-aarch64-full.ext2"
+BOOT_IMAGE="${SCARLET_QEMU_BOOT_IMAGE:-$PROJECT_DIR/.scarlet/images/limine-aarch64-full.img}"
+ROOTFS_IMAGE="${SCARLET_QEMU_ROOTFS_IMAGE:-$PROJECT_DIR/.scarlet/images/rootfs-aarch64-full.ext2}"
 
 QEMU_DEBUG_ARGS=""
 QEMU_ACCEL="${SCARLET_QEMU_ACCEL:-tcg}"

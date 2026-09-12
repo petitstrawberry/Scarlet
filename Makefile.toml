@@ -1,7 +1,7 @@
 [env]
 # Environment variable settings for build
 CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
-CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["kernel", "projects/riscv32-sbi-desktop/bsp", "projects/riscv64-limine-full/bsp", "projects/aarch64-limine-full/bsp", "projects/aarch64-limine-microvm/bsp", "user/lib/std", "user/bin", "user/video_player", "user/std-bin"]
+CARGO_MAKE_WORKSPACE_INCLUDE_MEMBERS = ["kernel", "projects/riscv32-sbi-desktop/bsp", "projects/riscv64-limine-full/bsp", "projects/aarch64-limine-full/bsp", "projects/aarch64-limine-console/bsp", "projects/aarch64-limine-microvm/bsp", "user/lib/std", "user/bin", "user/video_player", "user/std-bin"]
 
 [config]
 default_task = "build-riscv64"
@@ -623,6 +623,16 @@ args = ["scarlet", "run", "--project", "projects/riscv64-limine-full", "--releas
 description = "Run the kernel in release mode (AArch64)"
 command = "cargo"
 args = ["scarlet", "run", "--project", "projects/aarch64-limine-full", "--release"]
+
+[tasks.run-aarch64-console]
+description = "Run the AArch64 console desktop in release mode"
+command = "cargo"
+args = ["scarlet", "run", "--project", "projects/aarch64-limine-console", "--release"]
+
+[tasks.image-aarch64-console]
+description = "Build the AArch64 console desktop image"
+command = "cargo"
+args = ["scarlet", "image", "--project", "projects/aarch64-limine-console", "--release"]
 
 [tasks.run-aarch64-microvm]
 description = "Run the kernel in release mode (AArch64 microvm)"

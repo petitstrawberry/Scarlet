@@ -2,6 +2,8 @@
 Name=Media Player
 Exec=/bin/mplayer %F
 Icon=file-music
+X-Scarlet-Background=/share/app-art/media-player-cover.png
+X-Scarlet-BackgroundBlur=label
 Type=Application
 Terminal=false
 MimeType=audio/wav;audio/x-wav;

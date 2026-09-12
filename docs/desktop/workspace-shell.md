@@ -684,6 +684,9 @@ geometry needed to clip live actors; richer shell chrome remains shell policy.
 
 ### `scarlet-shell`
 
+The optional [console Home mode](console-shell.md) is selected with
+`scarlet-shell --mode console`; the desktop drawer remains the default.
+
 One process owns:
 
 - the Overview window layer and application-catalog layer;

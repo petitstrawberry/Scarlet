@@ -5,8 +5,12 @@
 
 extern crate alloc;
 
+mod app_artwork;
 mod background;
+mod console;
 mod control_center;
+mod home_style;
+mod options;
 mod status;
 
 use alloc::collections::BTreeMap;
@@ -28,7 +32,8 @@ use scarlet_desktop_config::{
     DESKTOP_SETTINGS_SERVICE_OBJECT_PATH, DESKTOP_SETTINGS_SIGNAL_SENDER,
     DESKTOP_STATUS_PREFERENCES_CHANGED_SIGNAL, DESKTOP_STEMD_BUS_NAME, DESKTOP_STEMD_INTERFACE,
     DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD, DESKTOP_STEMD_LIST_APPLICATIONS_METHOD,
-    DESKTOP_STEMD_OBJECT_PATH, StatusItemId, StatusPreferences,
+    DESKTOP_STEMD_LIST_APPLICATIONS_WITH_ARTWORK_METHOD, DESKTOP_STEMD_OBJECT_PATH, StatusItemId,
+    StatusPreferences,
 };
 use scarlet_os::socket::Socket;
 use scarlet_os::time;
@@ -57,12 +62,16 @@ use std::{format, println};
 use sws_client as sws;
 use sws_protocol::window_types;
 
+use clap::Parser;
+use console::{ConsoleAction, ConsoleSnapshot, ConsoleState, PowerAction};
 use control_center::{
     ArmedPowerAction, AudioOutputSnapshot, AudioSnapshot, ControlCenterAction,
     ControlCenterMetrics, ControlCenterPresentation, ControlCenterSettingsLink,
     ControlCenterSnapshot, DynamicViews, InputEnvironmentSnapshot, NetworkInterfaceSnapshot,
     NetworkInterfaceState, NetworkSnapshot, SystemSnapshot, boxed, build_control_center_view,
 };
+use home_style::{icon as home_icon, icon_tile_color as home_icon_tile_color};
+use options::{Options, ShellMode};
 use status::{StatusPresentation, StatusProvider, StatusProviderSnapshot};
 
 const SWS_CONNECT_RETRIES: usize = 100;
@@ -72,6 +81,7 @@ const WINDOW_LIST_REFRESH_TICKS: u32 = 60;
 const OVERVIEW_MENU_INDEX: usize = usize::MAX;
 const CONTROL_CENTER_SCENE_KEY: &str = "control-center";
 const HOME_SCENE_KEY: &str = "home";
+const CONSOLE_CHROME_SCENE_KEY: &str = "console-chrome";
 const HOME_CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const HOME_CATALOG_TIMEOUT_MS: u64 = 3_000;
 const HOME_SEARCH_RESULT_ROW_HEIGHT: f32 = 64.0;
@@ -144,6 +154,7 @@ struct HomeApplication {
     app_id: String,
     name: String,
     icon: String,
+    artwork: app_artwork::AppArtwork,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,6 +165,7 @@ enum WorkspaceCommand {
     ToggleOverview,
     Cycle(i32),
     ToggleSplit,
+    Select(u32),
 }
 
 fn repaired_shell_layout_after_removal(
@@ -255,6 +267,13 @@ fn workspace_transaction_for_command(
                 (next < workspaces.len()).then_some(next)?
             };
             active_workspace = workspaces[next].id;
+            presentation = sws::ShellPresentation::Workspace;
+        }
+        WorkspaceCommand::Select(id) => {
+            if !workspaces.iter().any(|workspace| workspace.id == id) {
+                return None;
+            }
+            active_workspace = id;
             presentation = sws::ShellPresentation::Workspace;
         }
         WorkspaceCommand::ToggleSplit => {
@@ -908,6 +927,12 @@ fn listen_for_input_environment_changes(
 /// Unified visual workspace shell application.
 #[derive(View, Clone)]
 struct ShellApp {
+    mode: State<ShellMode>,
+    console_state: State<ConsoleState>,
+    recent_app_ids: State<Vec<String>>,
+    console_launch_error: State<Option<String>>,
+    console_chrome_position: State<Option<i32>>,
+    console_audio: State<(Option<u8>, Option<bool>)>,
     clock: State<u32>,
     screen_width: State<f32>,
     screen_height: State<f32>,
@@ -951,6 +976,18 @@ impl ShellApp {
         let initial_control_center =
             ControlCenterMetrics::resolve(ControlCenterPresentation::LaptopPopover, 0);
         Self {
+            mode: State::new(StateId::new(35), ShellMode::Desktop),
+            console_state: State::new(StateId::new(32), ConsoleState::default()),
+            recent_app_ids: State::new(StateId::new(33), Vec::new()),
+            console_launch_error: State::new(StateId::new(34), None),
+            console_chrome_position: State::new(StateId::new(36), None),
+            console_audio: State::new(
+                StateId::new(37),
+                (
+                    status_snapshot.audio_volume_percent,
+                    status_snapshot.audio_muted,
+                ),
+            ),
             clock: State::new(StateId::new(2), 0),
             screen_width: State::new(StateId::new(3), 1920.0),
             screen_height: State::new(StateId::new(22), 1080.0),
@@ -1120,7 +1157,10 @@ fn listen_for_status_preferences(status_snapshot: State<StatusProviderSnapshot>)
     }
 }
 
-fn poll_status_provider(status_snapshot: State<StatusProviderSnapshot>) {
+fn poll_status_provider(
+    status_snapshot: State<StatusProviderSnapshot>,
+    console_audio: State<(Option<u8>, Option<bool>)>,
+) {
     let mut provider = StatusProvider::new();
     let mut audio_client = None;
 
@@ -1140,11 +1180,26 @@ fn poll_status_provider(status_snapshot: State<StatusProviderSnapshot>) {
         };
         let preferences = status_snapshot.get().preferences;
         let sampled = provider.snapshot(&preferences, scheduler::cpu_usage(), audio_state);
-        status_snapshot.update(|current| {
-            current.cpu_percent = sampled.cpu_percent;
-            current.audio_volume_percent = sampled.audio_volume_percent;
-            current.audio_muted = sampled.audio_muted;
-        });
+        let current = status_snapshot.get();
+        if (
+            current.cpu_percent,
+            current.audio_volume_percent,
+            current.audio_muted,
+        ) != (
+            sampled.cpu_percent,
+            sampled.audio_volume_percent,
+            sampled.audio_muted,
+        ) {
+            status_snapshot.update(|current| {
+                current.cpu_percent = sampled.cpu_percent;
+                current.audio_volume_percent = sampled.audio_volume_percent;
+                current.audio_muted = sampled.audio_muted;
+            });
+        }
+        set_state_if_changed(
+            &console_audio,
+            (sampled.audio_volume_percent, sampled.audio_muted),
+        );
         std::thread::sleep(Duration::from_secs(1));
     }
 }
@@ -2128,42 +2183,6 @@ impl ShellPopupRenderer {
     }
 }
 
-fn home_icon(name: &str) -> Icon {
-    match name {
-        "apps" => Icon::Package,
-        "applications-development" | "code" => Icon::Code,
-        "file-description" => Icon::FileDescription,
-        "file-music" => Icon::FileMusic,
-        "folder" => Icon::Folder,
-        "image" => Icon::Photo,
-        "preferences-system" => Icon::Settings,
-        "preferences-system-time" => Icon::Clock,
-        "text-editor" => Icon::FileText,
-        "utilities-system-monitor" => Icon::ChartBar,
-        "utilities-terminal" => Icon::Terminal,
-        "video" | "multimedia-player" => Icon::Video,
-        _ => Icon::Apps,
-    }
-}
-
-fn home_icon_tile_color(name: &str) -> Color {
-    match name {
-        "apps" => Color::rgb(186, 95, 43),
-        "applications-development" | "code" => Color::rgb(47, 94, 174),
-        "file-description" => Color::rgb(28, 119, 126),
-        "file-music" => Color::rgb(152, 62, 161),
-        "folder" => Color::rgb(46, 112, 190),
-        "image" => Color::rgb(180, 62, 121),
-        "preferences-system" => Color::rgb(84, 96, 119),
-        "preferences-system-time" => Color::rgb(195, 76, 54),
-        "text-editor" => Color::rgb(31, 132, 103),
-        "utilities-system-monitor" => Color::rgb(25, 128, 139),
-        "utilities-terminal" => Color::rgb(68, 78, 96),
-        "video" | "multimedia-player" => Color::rgb(103, 70, 177),
-        _ => Color::rgb(184, 55, 79),
-    }
-}
-
 fn launch_home_application(source_window_id: u32, application: &HomeApplication) -> bool {
     let Ok(connection) = sws::Connection::connect("/tmp/sws.sock") else {
         return false;
@@ -2189,27 +2208,35 @@ fn launch_home_application(source_window_id: u32, application: &HomeApplication)
         .is_ok()
 }
 
-fn load_home_applications() -> Vec<HomeApplication> {
-    let Ok(arguments) = SbusConnection::connect().and_then(|mut connection| {
-        connection.call_method_timeout(
-            DESKTOP_STEMD_BUS_NAME,
-            DESKTOP_STEMD_OBJECT_PATH,
-            DESKTOP_STEMD_INTERFACE,
-            DESKTOP_STEMD_LIST_APPLICATIONS_METHOD,
-            Vec::new(),
-            HOME_CATALOG_TIMEOUT_MS,
-        )
-    }) else {
-        return Vec::new();
+fn load_home_applications(artwork_cache: &mut app_artwork::ArtworkCache) -> Vec<HomeApplication> {
+    let query = |method| {
+        SbusConnection::connect().and_then(|mut connection| {
+            connection.call_method_timeout(
+                DESKTOP_STEMD_BUS_NAME,
+                DESKTOP_STEMD_OBJECT_PATH,
+                DESKTOP_STEMD_INTERFACE,
+                method,
+                Vec::new(),
+                HOME_CATALOG_TIMEOUT_MS,
+            )
+        })
     };
+    let (arguments, fields_per_app) =
+        match query(DESKTOP_STEMD_LIST_APPLICATIONS_WITH_ARTWORK_METHOD) {
+            Ok(arguments) => (arguments, 5),
+            Err(_) => match query(DESKTOP_STEMD_LIST_APPLICATIONS_METHOD) {
+                Ok(arguments) => (arguments, 3),
+                Err(_) => return Vec::new(),
+            },
+        };
 
     let mut applications = Vec::new();
-    for fields in arguments.chunks(3) {
+    for fields in arguments.chunks_exact(fields_per_app) {
         let [
             SbusArgument::String(app_id),
             SbusArgument::String(name),
             SbusArgument::String(icon),
-        ] = fields
+        ] = &fields[..3]
         else {
             continue;
         };
@@ -2220,10 +2247,21 @@ fn load_home_applications() -> Vec<HomeApplication> {
         {
             continue;
         }
+        let artwork_value = |index| match fields.get(index) {
+            Some(SbusArgument::String(value)) => value.as_str(),
+            _ => "",
+        };
+        let artwork = artwork_cache.load(
+            app_id,
+            icon,
+            artwork_value(3),
+            app_artwork::BackgroundBlur::parse(artwork_value(4)),
+        );
         applications.push(HomeApplication {
             app_id: app_id.clone(),
             name: name.clone(),
             icon: icon.clone(),
+            artwork,
         });
     }
     applications.sort_by(|left, right| {
@@ -2232,13 +2270,20 @@ fn load_home_applications() -> Vec<HomeApplication> {
             .cmp(&right.name.to_lowercase())
             .then_with(|| left.app_id.cmp(&right.app_id))
     });
+    artwork_cache.retain(
+        &applications
+            .iter()
+            .map(|app| app.app_id.clone())
+            .collect::<Vec<_>>(),
+    );
     applications
 }
 
 fn refresh_home_catalog(applications: State<Vec<HomeApplication>>) {
     let mut previous = Vec::new();
+    let mut artwork_cache = app_artwork::ArtworkCache::default();
     loop {
-        let next = load_home_applications();
+        let next = load_home_applications(&mut artwork_cache);
         if next != previous {
             applications.set(next.clone());
             previous = next;
@@ -2341,15 +2386,27 @@ fn maintain_workspace_shell_role(
     state: State<Option<sws::WorkspaceState>>,
     commands: State<Vec<WorkspaceCommand>>,
 ) {
+    let mut registration_warning_reported = false;
     loop {
         let Ok(connection) = sws::Connection::connect("/tmp/sws.sock") else {
             std::thread::sleep(Duration::from_millis(100));
             continue;
         };
-        let Ok(mut snapshot) = connection.register_system_shell() else {
-            std::thread::sleep(Duration::from_millis(250));
-            continue;
+        let mut snapshot = match connection.register_system_shell() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                if !registration_warning_reported {
+                    println!(
+                        "[Shell] Workspace role registration failed: {:?}; retrying",
+                        error
+                    );
+                    registration_warning_reported = true;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+                continue;
+            }
         };
+        registration_warning_reported = false;
         println!(
             "[Shell] Registered workspace role at generation {}",
             snapshot.generation
@@ -2412,7 +2469,14 @@ impl ShellApp {
     fn lower_application_drawer(&self) {
         if self.shell_presentation() == sws::ShellPresentation::Home {
             self.home_search_focused.set(false);
-            enqueue_workspace_command(&self.workspace_commands, WorkspaceCommand::ToggleOverview);
+            enqueue_workspace_command(
+                &self.workspace_commands,
+                if self.mode.get() == ShellMode::Console {
+                    WorkspaceCommand::ReturnToWorkspace
+                } else {
+                    WorkspaceCommand::ToggleOverview
+                },
+            );
         }
     }
 
@@ -2429,9 +2493,123 @@ impl ShellApp {
 
     fn launch_home_application(&self, application: HomeApplication) {
         if launch_home_application(self.home_window_id.get(), &application) {
+            self.console_state.update(ConsoleState::did_launch);
+            self.recent_app_ids
+                .update(|recent| console::record_recent(recent, &application.app_id));
+            set_state_if_changed(&self.console_launch_error, None);
             self.home_query.set(String::new());
             self.home_search_focused.set(false);
             enqueue_workspace_command(&self.workspace_commands, WorkspaceCommand::ShowWorkspace);
+        } else if self.mode.get() == ShellMode::Console {
+            self.console_launch_error.set(Some(format!(
+                "Could not open {}. Try again.",
+                application.name
+            )));
+        }
+    }
+
+    fn handle_console_action(&self, action: ConsoleAction) {
+        match action {
+            ConsoleAction::Launch(id) => {
+                if let Some(application) = self
+                    .home_applications
+                    .get()
+                    .into_iter()
+                    .find(|app| app.app_id == id)
+                {
+                    self.launch_home_application(application);
+                } else {
+                    self.console_launch_error.set(Some(String::from(
+                        "Application unavailable. Wait for the catalog to refresh.",
+                    )));
+                }
+            }
+            ConsoleAction::Settings => {
+                self.handle_console_action(ConsoleAction::Launch(String::from(
+                    "org.scarlet-os.desktop.settings",
+                )));
+            }
+            ConsoleAction::Workspace(id) => {
+                enqueue_workspace_command(&self.workspace_commands, WorkspaceCommand::Select(id))
+            }
+            ConsoleAction::CycleWorkspace(direction) => enqueue_workspace_command(
+                &self.workspace_commands,
+                WorkspaceCommand::Cycle(direction),
+            ),
+            ConsoleAction::Back => enqueue_workspace_command(
+                &self.workspace_commands,
+                WorkspaceCommand::ReturnToWorkspace,
+            ),
+            ConsoleAction::Volume(value) => self
+                .control_center_action
+                .set(Some(ControlCenterAction::SetVolume(value))),
+            ConsoleAction::Mute => self
+                .control_center_action
+                .set(Some(ControlCenterAction::ToggleMute)),
+            ConsoleAction::Power(PowerAction::Reboot) => self
+                .control_center_action
+                .set(Some(ControlCenterAction::ConfirmReboot)),
+            ConsoleAction::Power(PowerAction::PowerOff) => self
+                .control_center_action
+                .set(Some(ControlCenterAction::ConfirmPowerOff)),
+        }
+    }
+
+    fn console_snapshot(&self) -> ConsoleSnapshot {
+        let workspace = self.workspace_state.get();
+        let (volume, muted) = self.console_audio.get();
+        ConsoleSnapshot {
+            width: self.screen_width.get(),
+            height: self.screen_height.get(),
+            bar_height: self.shell_layout.get().status_bar_height() as f32,
+            applications: self
+                .home_applications
+                .get()
+                .into_iter()
+                .map(|app| console::ApplicationTile {
+                    icon: home_icon(&app.icon),
+                    color: home_icon_tile_color(&app.icon),
+                    artwork: app.artwork,
+                    app_id: app.app_id,
+                    name: app.name,
+                })
+                .collect(),
+            recent_ids: self.recent_app_ids.get(),
+            workspaces: workspace
+                .as_ref()
+                .map(|state| {
+                    state
+                        .workspaces
+                        .iter()
+                        .map(|workspace| console::WorkspaceTile {
+                            id: workspace.id,
+                            window_count: workspace.window_ids.len(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            active_workspace: workspace.as_ref().map_or(0, |state| state.active_workspace),
+            volume,
+            muted,
+            launch_error: self.console_launch_error.get(),
+        }
+    }
+
+    fn console_content(&self, part: console::ConsolePart) -> impl View + Clone + use<> {
+        let app = self.clone();
+        console::build_console_part(
+            self.console_snapshot(),
+            self.console_state.clone(),
+            move |action| app.handle_console_action(action),
+            part,
+        )
+    }
+
+    fn home_content(&self) -> impl View + Clone + use<> {
+        if self.mode.get() == ShellMode::Console {
+            Either::A(self.console_content(console::ConsolePart::Applications))
+        } else {
+            Either::B(self.desktop_home_content())
         }
     }
 
@@ -2532,7 +2710,6 @@ impl ShellApp {
         } else {
             palette.window_background().with_opacity(0.0)
         };
-        let icon_tile_color = home_icon_tile_color(&application.icon);
         let icon_tile_size = HOME_GRID_ICON_SIZE as f32 + HOME_GRID_ICON_PADDING * 2.0;
         let label_height =
             graphics::measure_text_sized(&application.name, HOME_GRID_LABEL_SIZE).1 as f32;
@@ -2545,13 +2722,10 @@ impl ShellApp {
         let launch_application = application.clone();
         vstack! {
             Spacer::new().frame(1.0, outer_padding),
-            IconView::new(home_icon(&application.icon))
-                .size(IconSize::Pixels(HOME_GRID_ICON_SIZE))
-                .weight(IconWeight::Bold)
-                .color(Color::WHITE)
-                .padding(HOME_GRID_ICON_PADDING)
-                .background(icon_tile_color)
-                .clip_radius(17.5),
+            home_style::launcher_icon(
+                &application.artwork, &application.icon,
+                HOME_GRID_ICON_SIZE, HOME_GRID_ICON_PADDING, 17.5,
+            ),
             Spacer::new().frame(1.0, label_gap),
             Text::new(application.name)
                 .font_size(HOME_GRID_LABEL_SIZE)
@@ -2589,20 +2763,13 @@ impl ShellApp {
         } else {
             palette.window_background().with_opacity(0.0)
         };
-        let icon_tile_color = home_icon_tile_color(&application.icon);
         let hover_state = self.home_hovered.clone();
         let exit_state = hover_state.clone();
         let launch_app = self.clone();
         let launch_application = application.clone();
 
         hstack! {
-            IconView::new(home_icon(&application.icon))
-                .size(IconSize::Pixels(26))
-                .weight(IconWeight::Bold)
-                .color(Color::WHITE)
-                .padding(8.0)
-                .background(icon_tile_color)
-                .clip_radius(11.0),
+            home_style::launcher_icon(&application.artwork, &application.icon, 26, 8.0, 11.0),
             hstack! {
                 Text::new(application.name)
                     .font_size(15.0)
@@ -2638,7 +2805,7 @@ impl ShellApp {
         .on_click(move || launch_app.launch_home_application(launch_application.clone()))
     }
 
-    fn home_content(&self) -> impl View + Clone + use<> {
+    fn desktop_home_content(&self) -> impl View + Clone + use<> {
         let width = self.screen_width.get().max(320.0);
         let height = self.screen_height.get().max(320.0);
         let shell_layout = self.shell_layout.get();
@@ -2877,6 +3044,31 @@ impl ShellApp {
 }
 
 impl Application for ShellApp {
+    fn scene_listenables(
+        &self,
+        key: &scarlet_ui::scene::SceneWindowKey,
+    ) -> Option<Vec<&dyn scarlet_ui::state::Listenable>> {
+        if self.mode.get() != ShellMode::Console
+            || !matches!(key.as_str(), HOME_SCENE_KEY | CONSOLE_CHROME_SCENE_KEY)
+        {
+            return None;
+        }
+        // Status clock/CPU and desktop-menu updates do not change console
+        // content. Keep their invalidations in the separate status window.
+        Some(vec![
+            &self.mode,
+            &self.screen_width,
+            &self.screen_height,
+            &self.shell_layout,
+            &self.console_state,
+            &self.console_audio,
+            &self.home_applications,
+            &self.recent_app_ids,
+            &self.workspace_state,
+            &self.console_launch_error,
+        ])
+    }
+
     fn on_focus_changed(&mut self, window_id: u32, app_name: &str, menu_titles: &str) {
         status_bar_debug!(
             "[StatusBar] on_focus_changed: window_id={}, app_name={}, menu_titles={}",
@@ -2898,13 +3090,21 @@ impl Application for ShellApp {
     }
 
     fn on_window_created(&mut self, ctx: &WindowContext, window: &mut dyn PlatformWindow) {
-        if ctx.scene_key.as_str() == CONTROL_CENTER_SCENE_KEY {
+        if ctx.scene_key.as_str() == CONSOLE_CHROME_SCENE_KEY {
+            let _ = window.set_surface_regions(
+                true,
+                &console::chrome_regions(self.console_snapshot(), self.console_state.clone()),
+            );
+        } else if ctx.scene_key.as_str() == CONTROL_CENTER_SCENE_KEY {
             self.control_center_window_id
                 .set(Some(ctx.platform_window_id as u32));
             let _ = window.set_opaque(false);
         } else if ctx.scene_key.as_str() == HOME_SCENE_KEY {
             self.home_window_id.set(ctx.platform_window_id as u32);
             let _ = window.set_opaque(false);
+            if self.mode.get() == ShellMode::Console {
+                enqueue_workspace_command(&self.workspace_commands, WorkspaceCommand::ShowHome);
+            }
         }
     }
 
@@ -2918,6 +3118,20 @@ impl Application for ShellApp {
     }
 
     fn on_active_app_changed(&mut self, window_id: u32, app_name: &str, menu_titles: &str) {
+        if let Some(window) = self
+            .windows
+            .get()
+            .iter()
+            .find(|window| window.window_id == window_id)
+            && self
+                .home_applications
+                .get()
+                .iter()
+                .any(|app| app.app_id == window.app_id)
+        {
+            self.recent_app_ids
+                .update(|recent| console::record_recent(recent, &window.app_id));
+        }
         status_bar_debug!(
             "[StatusBar] on_active_app_changed: window_id={}, app_name={}, menu_titles={}",
             window_id,
@@ -2929,21 +3143,36 @@ impl Application for ShellApp {
     }
 
     fn on_window_resize(&mut self, ctx: &WindowContext, width: u32, height: u32) {
-        if ctx.scene_key.as_str() == HOME_SCENE_KEY {
-            self.screen_width.set(width as f32);
-            self.screen_height.set(height as f32);
-            return;
-        }
         if ctx.scene_key.as_str() != "main" {
             return;
         }
         println!("[StatusBar] on_resize: width={}, height={}", width, height);
-        self.screen_width.set(width as f32);
+        // Surface configure events can lag behind the display notification.
+        // Only ScreenSizeChanged owns the output dimensions; a Home or bar
+        // resize must not overwrite them with an older surface size.
         self.open_menu_index.set(None);
         self.update_workarea_from_screen_query(width, self.shell_layout.get());
     }
 
     fn on_window_sync(&mut self, ctx: &WindowContext, window: &mut dyn PlatformWindow) {
+        if ctx.scene_key.as_str() == CONSOLE_CHROME_SCENE_KEY {
+            let snapshot = self.console_snapshot();
+            let layout = console::ConsoleLayout::resolve(&snapshot);
+            let desired = Size::new(layout.width, layout.chrome_height());
+            if status_bar_resize_needed(window.size(), desired) {
+                let _ = window.resize(desired.width as u32, desired.height as u32);
+            }
+            let top = layout.chrome_top() as i32;
+            if self.console_chrome_position.get() != Some(top) && window.move_window(0, top).is_ok()
+            {
+                self.console_chrome_position.set(Some(top));
+            }
+            let _ = window.set_surface_regions(
+                true,
+                &console::chrome_regions(snapshot, self.console_state.clone()),
+            );
+            return;
+        }
         if ctx.scene_key.as_str() == CONTROL_CENTER_SCENE_KEY {
             let desired = self.control_center_size.get();
             if status_bar_resize_needed(window.managed_size(), desired) {
@@ -2975,6 +3204,21 @@ impl Application for ShellApp {
         {
             println!("[StatusBar] Failed to resize shell surface: {}", error);
         }
+        let console_home = self.mode.get() == ShellMode::Console
+            && self.workspace_state.get().is_some_and(|state| {
+                state.presentation == sws_protocol::workspace::ShellPresentation::Home
+            });
+        let regions = if console_home {
+            vec![scarlet_ui::platform::SurfaceRegion {
+                rect: scarlet_ui::geometry::Rect::new(scarlet_ui::geometry::Point::ZERO, desired),
+                corner_radius: 0.0,
+                blur_radius: console::MATERIAL_BLUR_RADIUS,
+                accepts_input: false,
+            }]
+        } else {
+            Vec::new()
+        };
+        let _ = window.set_surface_regions(false, &regions);
     }
 
     fn on_screen_size_changed(&mut self, width: u32, height: u32) -> Option<Size> {
@@ -2984,7 +3228,11 @@ impl Application for ShellApp {
         self.open_menu_index.set(None);
         let layout = self.shell_layout.get();
         self.update_workarea(width, height, layout);
-        Some(layout.status_bar_window_size(width as f32))
+        // ScarletUI delivers this callback once per scene and applies its
+        // return value to that scene. A bar-sized return also shrinks Home
+        // and Control Center. Their own configure events/on_window_sync
+        // already apply the appropriate size to each surface.
+        None
     }
 
     fn scenes(&self) -> impl Scene {
@@ -3008,13 +3256,18 @@ impl Application for ShellApp {
         let clock_label = status_snapshot.clock_label(hours as u8, mins as u8);
         // The desktop top bar intentionally uses a light material. Its status
         // labels and Tabler icons use ScarletUI's matching dark foreground.
+        let console_layout = console::ConsoleLayout::resolve(&self.console_snapshot());
         let status_bar_palette = if shell_navigation {
             ColorPalette::dark()
         } else {
             ColorPalette::light()
         };
         let status_bar_background = if shell_navigation {
-            scarlet_ui::color::Color::TRANSPARENT
+            if self.mode.get() == ShellMode::Console {
+                console::FROST
+            } else {
+                Color::TRANSPARENT
+            }
         } else {
             status_bar_palette.surface_variant()
         };
@@ -3158,7 +3411,11 @@ impl Application for ShellApp {
             Window::new("Home", self.home_content())
                 .scene_key(HOME_SCENE_KEY)
                 .open_at_launch(false)
-                .app_id("org.scarlet-os.desktop.shell.home")
+                .app_id(if self.mode.get() == ShellMode::Console {
+                    sws_protocol::workspace::CONSOLE_HOME_APP_ID
+                } else {
+                    "org.scarlet-os.desktop.shell.home"
+                })
                 .decorated(false)
                 .background_color(scarlet_ui::color::Color::TRANSPARENT)
                 .opaque(false)
@@ -3169,6 +3426,26 @@ impl Application for ShellApp {
                 .movable(false)
                 .placement(WindowPlacement::At { x: 0, y: 0 })
                 .size(Size::new(screen_width, screen_height)),
+            Window::new(
+                "Console Controls",
+                self.console_content(console::ConsolePart::Chrome),
+            )
+            .scene_key(CONSOLE_CHROME_SCENE_KEY)
+            .open_at_launch(false)
+            .app_id("org.scarlet-os.desktop.shell.console-chrome")
+            .decorated(false)
+            .background_color(Color::TRANSPARENT)
+            .opaque(false)
+            .window_type(sws_protocol::window_types::SHELL_PANEL)
+            .focus_on_create(false)
+            .active_on_focus(false)
+            .resizable(false)
+            .movable(false)
+            .placement(WindowPlacement::At {
+                x: 0,
+                y: console_layout.chrome_top() as i32,
+            })
+            .size(Size::new(screen_width, console_layout.chrome_height())),
         )
     }
 
@@ -3183,6 +3460,10 @@ impl Application for ShellApp {
         // first reveal is only a visibility change and never exposes a
         // create-then-move or create-then-resize frame.
         open_window(HOME_SCENE_KEY);
+        if self.mode.get() == ShellMode::Console {
+            open_window(CONSOLE_CHROME_SCENE_KEY);
+            enqueue_workspace_command(&self.workspace_commands, WorkspaceCommand::ShowHome);
+        }
         // Screen size will be obtained by sws_client in main()
         std::thread::spawn(background::run);
         self.start_background_tasks();
@@ -3247,6 +3528,7 @@ impl ShellApp {
         let menu_tree_popup = menu_tree.clone();
         let active_window_id_popup = active_window_id.clone();
         let status_snapshot_provider = self.status_snapshot.clone();
+        let console_audio_provider = self.console_audio.clone();
         let status_snapshot_listener = self.status_snapshot.clone();
         let windows_listener = self.windows.clone();
         let windows_popup = self.windows.clone();
@@ -3256,6 +3538,7 @@ impl ShellApp {
         let open_menu_index_listener = self.open_menu_index.clone();
         let control_center_action = self.control_center_action.clone();
         let control_center_status = self.status_snapshot.clone();
+        let control_center_audio = self.console_audio.clone();
         let control_center_volume = self.control_center_volume.clone();
         let control_center_open = self.control_center_open.clone();
 
@@ -3264,7 +3547,7 @@ impl ShellApp {
         });
 
         std::thread::spawn(move || {
-            poll_status_provider(status_snapshot_provider);
+            poll_status_provider(status_snapshot_provider, console_audio_provider);
         });
 
         std::thread::spawn(move || {
@@ -3286,6 +3569,11 @@ impl ShellApp {
                         &control_center_status,
                         &control_center_volume,
                         &control_center_open,
+                    );
+                    let status = control_center_status.get();
+                    set_state_if_changed(
+                        &control_center_audio,
+                        (status.audio_volume_percent, status.audio_muted),
                     );
                 }
                 std::thread::sleep(Duration::from_millis(16));
@@ -3612,7 +3900,7 @@ impl ShellApp {
             }
         });
 
-        // Wall clock: seconds-of-day (UTC), refreshed once per second.
+        // Poll wall time once per second, but publish only the displayed minute.
         let clock = self.clock.clone();
 
         std::thread::spawn(move || {
@@ -3624,7 +3912,9 @@ impl ShellApp {
                         (((local % 86_400) + 86_400) % 86_400) as u32
                     })
                     .unwrap_or(0);
-                clock.update(|c| *c = secs_of_day);
+                // The displayed clock has minute precision. Poll for the
+                // boundary, but do not rebuild the shell for unseen seconds.
+                set_state_if_changed(&clock, secs_of_day / 60 * 60);
                 std::thread::sleep(Duration::from_secs(1));
             }
         });
@@ -3693,6 +3983,9 @@ impl ShellApp {
 }
 
 fn main() {
+    let options = Options::parse();
+    #[cfg(target_os = "scarlet")]
+    home_style::initialize_fonts();
     println!("[Shell] Starting Scarlet workspace shell");
 
     // Get screen size from SWS before creating the app
@@ -3723,6 +4016,7 @@ fn main() {
     };
 
     let mut app = ShellApp::new(shell_layout);
+    app.mode.set(options.mode);
 
     // Update screen_width state with actual screen size
     app.screen_width.update(|w| *w = screen_width);
@@ -3973,16 +4267,19 @@ mod tests {
                 app_id: String::from("org.example.search-tool"),
                 name: String::from("Utilities"),
                 icon: String::new(),
+                artwork: Default::default(),
             },
             HomeApplication {
                 app_id: String::from("org.example.editor"),
                 name: String::from("Search Notes"),
                 icon: String::new(),
+                artwork: Default::default(),
             },
             HomeApplication {
                 app_id: String::from("org.example.search"),
                 name: String::from("Search"),
                 icon: String::new(),
+                artwork: Default::default(),
             },
         ];
 

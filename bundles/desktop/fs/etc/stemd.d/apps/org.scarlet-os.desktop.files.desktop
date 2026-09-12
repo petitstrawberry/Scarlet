@@ -2,5 +2,7 @@
 Name=Files
 Exec=/bin/files --main
 Icon=folder
+X-Scarlet-Background=/share/app-art/files-cover.png
+X-Scarlet-BackgroundBlur=label
 Type=Application
 Terminal=false
