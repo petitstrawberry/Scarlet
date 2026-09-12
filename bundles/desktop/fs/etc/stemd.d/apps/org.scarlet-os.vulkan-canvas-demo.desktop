@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Vulkan-SGFX Cube
+Comment=Run a Vulkan cube inside ScarletUI through a shared SGFX image
+Exec=/bin/vulkan-canvas-demo
+Icon=applications-development
+Type=Application
+Terminal=false

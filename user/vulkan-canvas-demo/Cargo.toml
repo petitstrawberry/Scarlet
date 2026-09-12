@@ -1,0 +1,17 @@
+[package]
+name = "vulkan-canvas-demo"
+version = "0.1.0"
+edition = "2024"
+workspace = "../../.cargo"
+build = "build.rs"
+
+[build-dependencies]
+naga = { version = "24", features = ["wgsl-in", "spv-out"] }
+
+[target.'cfg(target_os = "scarlet")'.dependencies]
+ash = { version = "0.38", default-features = false, features = ["debug", "std"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ec463295d5108ad057835b806c7e6284098ea80b", default-features = false, features = ["std", "platform-sws"] }
+vulkan-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "c100cd537e6f1c71b685db38c1bb152aa8619e90" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("scarlet"))'] }

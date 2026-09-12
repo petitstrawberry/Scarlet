@@ -6,6 +6,7 @@ members = [
     "../user/tonic-demo",
     "../user/websocket-demo",
     "../user/video_player",
+    "../user/vulkan-canvas-demo",
 ]
 
 [profile.dev]

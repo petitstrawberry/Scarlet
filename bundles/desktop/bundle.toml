@@ -100,7 +100,7 @@ to = "/bin/ui-benchmark"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "e4ffcc6e2addff4f45a6abcb223a3f62494aa4b5" }
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ec463295d5108ad057835b806c7e6284098ea80b" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
@@ -184,6 +184,13 @@ kind = "cargo"
 source = "../../user/std-bin"
 bin = "sgfx-showcase"
 to = "/bin/sgfx-showcase"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/vulkan-canvas-demo"
+package = "vulkan-canvas-demo"
+bin = "vulkan-canvas-demo"
+to = "/bin/vulkan-canvas-demo"
 
 [[layers]]
 kind = "cargo"

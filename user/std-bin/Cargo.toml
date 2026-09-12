@@ -18,7 +18,7 @@ mp4-aac = ["dep:symphonia-core", "dep:symphonia-codec-aac"]
 clap = { version = "4.5.32", features = ["derive"] }
 csv = "1.3"
 framebuffer = { path = "../lib/framebuffer", default-features = false, features = ["std"] }
-sgfx = { git = "https://github.com/petitstrawberry/sgfx" }
+sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "c100cd537e6f1c71b685db38c1bb152aa8619e90" }
 httparse = "1.9"
 libm = "0.2"
 log-protocol = { path = "../lib/log-protocol" }
@@ -26,7 +26,7 @@ lyon_path = "1.0"
 lyon_tessellation = "1.0"
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 scarlet-sys = { path = "../lib/scarlet-sys" }
-scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui-macros" }
+scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ec463295d5108ad057835b806c7e6284098ea80b", package = "scarlet-ui-macros" }
 rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "a559fe2545fd88def12146dcc06286475b53ead3", default-features = false, features = ["portable-simd"] }
 symphonia-core = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
 symphonia-codec-aac = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
@@ -51,16 +51,16 @@ sws-remote-protocol = { path = "../lib/sws-remote-protocol", default-features = 
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 getrandom = { version = "0.2.16", default-features = false, features = ["custom"] }
 gpu-raw = { path = "../lib/gpu-raw", default-features = false, features = ["std"] }
-scarlet-ui-renderer-sgfx = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui-renderer-sgfx" }
+scarlet-ui-renderer-sgfx = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ec463295d5108ad057835b806c7e6284098ea80b", package = "scarlet-ui-renderer-sgfx" }
 reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls-webpki-roots"] }
 scarlet-os = { path = "../lib/scarlet-os", default-features = false, features = ["std"] }
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ec463295d5108ad057835b806c7e6284098ea80b", package = "scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
 sas-protocol = { path = "../lib/sas-protocol", default-features = false, features = ["std"] }
 sas-client = { path = "../lib/sas-client", default-features = false, features = ["std"] }
 tokio = { version = "1.53.1", features = ["macros", "net", "rt", "time"] }
 
 [target.'cfg(not(target_os = "scarlet"))'.dependencies]
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", package = "scarlet-ui", default-features = false, features = ["std", "platform-winit"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ec463295d5108ad057835b806c7e6284098ea80b", package = "scarlet-ui", default-features = false, features = ["std", "platform-winit"] }
 
 [[bin]]
 name = "gpu-async-smoke"
