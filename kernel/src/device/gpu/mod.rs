@@ -54,7 +54,6 @@ pub use abi::{
     GPU_QUEUE_QUERY_ASYNC, GPU_QUEUE_SUBMIT_ASYNC, GPU_RESULT_BUSY, GPU_RESULT_DEVICE_LOST,
 };
 pub use async_abi::{GpuQueueAsyncInfo, GpuQueueSubmitAsync};
-pub use backend::GpuBackendEnqueueError;
 pub use backend::{
     GPU_EXECUTION_SUPPORT_ADDRESS_SPACE, GPU_EXECUTION_SUPPORT_DEPTH,
     GPU_EXECUTION_SUPPORT_IMAGE_READBACK, GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD,
@@ -66,6 +65,7 @@ pub use backend::{
     GpuBackendQueueInfo, GpuBackendSubmitError, GpuBufferCreateInfo, GpuDeviceInfo, GpuDeviceState,
     GpuImageBackingInfo, GpuImageCreateInfo, GpuImageUploadInfo,
 };
+pub use backend::{GpuBackendCpuAccessGuard, GpuBackendEnqueueError};
 pub use completion::{
     GpuCompletion, GpuCompletionFailure, GpuCompletionSignal, GpuCompletionState,
 };

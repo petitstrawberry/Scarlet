@@ -480,10 +480,7 @@ impl GpuContext {
             return Ok(0);
         }
         if image
-            .upload_bgra_from_user(source_ptr, layout, |backend_image, upload| {
-                self.backend_context
-                    .upload_image_bgra(backend_image, upload)
-            })
+            .upload_bgra_from_user(source_ptr, layout, self.backend_context.as_ref())
             .is_err()
         {
             request.result = GPU_RESULT_INVALID_STATE;
@@ -532,10 +529,7 @@ impl GpuContext {
                 request.dst_y,
                 request.width,
                 request.height,
-                |backend_image, transfer| {
-                    self.backend_context
-                        .transfer_imported_image_bgra(backend_image, transfer)
-                },
+                self.backend_context.as_ref(),
             )
             .is_err()
         {
@@ -600,10 +594,7 @@ impl GpuContext {
             return Ok(0);
         }
         if image
-            .readback_bgra_to_user(destination_ptr, layout, |backend_image, readback| {
-                self.backend_context
-                    .readback_image_bgra(backend_image, readback)
-            })
+            .readback_bgra_to_user(destination_ptr, layout, self.backend_context.as_ref())
             .is_err()
         {
             request.result = GPU_RESULT_INVALID_STATE;
@@ -686,6 +677,19 @@ impl GpuQueue {
         Ok(0)
     }
 
+    fn submit_with_retained_attachments(
+        &self,
+        commands: &[u8],
+    ) -> Result<(), super::GpuBackendSubmitError> {
+        // Match async admission's image-before-buffer lock order. Synchronous
+        // drivers may release their own context lock while waiting for DMA;
+        // keep both attachment authority and physical backing alive until they
+        // return, preventing concurrent detach from freeing in-flight memory.
+        let _images = self._attached_images.lock();
+        let _buffers = self._attached_buffers.lock();
+        self.backend_queue.submit(commands)
+    }
+
     fn handle_submit(&self, arg: usize) -> Result<i32, &'static str> {
         let mut request: GpuQueueSubmit = read_user_value(arg)?;
         let reserved = request.reserved;
@@ -746,7 +750,7 @@ impl GpuQueue {
             .and_then(KernelObject::as_gpu)
             .and_then(GpuObject::as_timeline);
 
-        if let Err(error) = self.backend_queue.submit(&commands) {
+        if let Err(error) = self.submit_with_retained_attachments(&commands) {
             request.result = match error {
                 super::GpuBackendSubmitError::Rejected(_) => GPU_RESULT_INVALID_ARGUMENT,
                 super::GpuBackendSubmitError::Unavailable(_) => GPU_RESULT_INVALID_STATE,
@@ -850,6 +854,7 @@ fn copy_command_bytes(command_ptr: u64, command_size: u32) -> Result<Vec<u8>, &'
 #[cfg(test)]
 mod tests {
     mod asynchronous;
+    mod synchronous;
     use alloc::sync::Arc;
 
     use super::{GpuContext, bounded_command_limit, command_size_is_valid};

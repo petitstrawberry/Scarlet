@@ -8,7 +8,7 @@ use super::{
     GPU_IMAGE_QUERY_LAYOUT, GPU_IMAGE_USAGE_TRANSFER_DST, GPU_IMAGE_USAGE_VALID,
     GPU_MAX_IMAGE_UPLOAD_SIZE, GPU_RESULT_INVALID_ABI, GPU_TIMELINE_CREATE_POINT,
     GPU_TIMELINE_FAIL, GPU_TIMELINE_QUERY, GPU_TIMELINE_SIGNAL, GpuBackend, GpuBackendBuffer,
-    GpuBackendImage, GpuBackendImageLayout, GpuBufferCreateInfo, GpuBufferInfo,
+    GpuBackendContext, GpuBackendImage, GpuBackendImageLayout, GpuBufferCreateInfo, GpuBufferInfo,
     GpuContextReadbackImageBgra, GpuContextUploadImageBgra, GpuImageBackingInfo,
     GpuImageCreateInfo, GpuImageInfo, GpuImageLayout, GpuImagePlaneLayout, GpuImageUploadInfo,
     GpuTimelineCreatePoint, GpuTimelineFail, GpuTimelineInfo, GpuTimelineSignal,
@@ -1109,18 +1109,26 @@ impl GpuImage {
         Arc::clone(&self.backing)
     }
 
-    pub(crate) fn upload_bgra_from_user<F>(
+    pub(crate) fn upload_bgra_from_user(
         &self,
         source_ptr: usize,
         layout: GpuImageUploadLayout,
-        transfer: F,
-    ) -> Result<(), &'static str>
-    where
-        F: FnOnce(&dyn GpuBackendImage, GpuImageUploadInfo) -> Result<(), &'static str>,
-    {
-        let _upload_guard = self.upload_lock.lock();
+        context: &dyn GpuBackendContext,
+    ) -> Result<(), &'static str> {
         let task = crate::task::mytask().ok_or("No current task for GPU image upload")?;
+        self.upload_bgra_for_task(&task, source_ptr, layout, context)
+    }
+
+    fn upload_bgra_for_task(
+        &self,
+        task: &crate::task::Task,
+        source_ptr: usize,
+        layout: GpuImageUploadLayout,
+        context: &dyn GpuBackendContext,
+    ) -> Result<(), &'static str> {
+        let _upload_guard = self.upload_lock.lock();
         let backing = self.backing.private_backing()?;
+        let _cpu_access = context.begin_image_cpu_access(self.backend_image.as_ref())?;
         for row in 0..layout.height {
             let source_offset = row
                 .checked_mul(layout.source_stride)
@@ -1133,7 +1141,7 @@ impl GpuImage {
                 .and_then(|offset| offset.checked_add(layout.destination_offset))
                 .ok_or("GPU image upload destination row offset overflows")?;
             backing.copy_from_user(
-                &task,
+                task,
                 source_address,
                 destination_offset,
                 layout.source_row_bytes,
@@ -1146,20 +1154,17 @@ impl GpuImage {
                 .ok_or("GPU image upload destination row offset overflows")?;
             backing.clean_range(destination_offset, layout.source_row_bytes)?;
         }
-        transfer(self.backend_image.as_ref(), layout.transfer)
+        context.upload_image_bgra(self.backend_image.as_ref(), layout.transfer)
     }
 
-    pub(crate) fn transfer_imported_bgra<F>(
+    pub(crate) fn transfer_imported_bgra(
         &self,
         dst_x: u32,
         dst_y: u32,
         width: u32,
         height: u32,
-        transfer: F,
-    ) -> Result<(), &'static str>
-    where
-        F: FnOnce(&dyn GpuBackendImage, GpuImageUploadInfo) -> Result<(), &'static str>,
-    {
+        context: &dyn GpuBackendContext,
+    ) -> Result<(), &'static str> {
         let _upload_guard = self.upload_lock.lock();
         let layout = self.backing.imported_transfer_layout(
             self.query_info(),
@@ -1168,23 +1173,32 @@ impl GpuImage {
             width,
             height,
         )?;
+        let _cpu_access = context.begin_image_cpu_access(self.backend_image.as_ref())?;
         self.backing.clean_imported_transfer_range(layout)?;
-        transfer(self.backend_image.as_ref(), layout)
+        context.transfer_imported_image_bgra(self.backend_image.as_ref(), layout)
     }
 
-    pub(crate) fn readback_bgra_to_user<F>(
+    pub(crate) fn readback_bgra_to_user(
         &self,
         destination_ptr: usize,
         layout: GpuImageReadbackLayout,
-        readback: F,
-    ) -> Result<(), &'static str>
-    where
-        F: FnOnce(&dyn GpuBackendImage, GpuImageUploadInfo) -> Result<(), &'static str>,
-    {
-        let _upload_guard = self.upload_lock.lock();
+        context: &dyn GpuBackendContext,
+    ) -> Result<(), &'static str> {
         let task = crate::task::mytask().ok_or("No current task for GPU image readback")?;
+        self.readback_bgra_for_task(&task, destination_ptr, layout, context)
+    }
+
+    fn readback_bgra_for_task(
+        &self,
+        task: &crate::task::Task,
+        destination_ptr: usize,
+        layout: GpuImageReadbackLayout,
+        context: &dyn GpuBackendContext,
+    ) -> Result<(), &'static str> {
+        let _upload_guard = self.upload_lock.lock();
         let backing = self.backing.private_backing()?;
-        readback(self.backend_image.as_ref(), layout.transfer)?;
+        let _cpu_access = context.begin_image_cpu_access(self.backend_image.as_ref())?;
+        context.readback_image_bgra(self.backend_image.as_ref(), layout.transfer)?;
         for row in 0..layout.height {
             let source_offset = row
                 .checked_mul(layout.source_stride)
@@ -1196,7 +1210,7 @@ impl GpuImage {
                 .and_then(|offset| destination_ptr.checked_add(offset))
                 .ok_or("GPU image readback destination row address overflows")?;
             backing.copy_to_user(
-                &task,
+                task,
                 destination_address,
                 source_offset,
                 layout.destination_row_bytes,
@@ -1881,3 +1895,7 @@ impl GpuObject for GpuTimelinePoint {
         Some(self)
     }
 }
+
+#[cfg(test)]
+#[path = "resource/cpu_access_tests.rs"]
+mod cpu_access_tests;
