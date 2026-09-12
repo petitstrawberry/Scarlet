@@ -8,7 +8,7 @@ to = "/"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/moonlight-scarlet.git", rev = "7e9708be295aa1b03a4a6737d7e2208635cc599c" }
+source = { git = "https://github.com/petitstrawberry/moonlight-scarlet.git", rev = "c36d9b0367fa7b6fc88d9104f0a7a3b03f6755df" }
 package = "moonlight"
 bin = "moonlight"
 to = "/bin/moonlight"
