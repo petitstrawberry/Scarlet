@@ -5,6 +5,8 @@ use std::{
     format,
     fs::{self, File},
     handle::Handle,
+    println,
+    time::Duration,
     vec::Vec,
 };
 
@@ -48,18 +50,43 @@ pub fn backing(cmdline: &str, require_disk: bool) -> Result<VfsView, &'static st
     directory("/mnt/newroot")?;
     let fstype = cmdline_value(cmdline, "rootfstype=").unwrap_or("ext2");
     let root = cmdline_value(cmdline, "root=");
+    let rootwait = cmdline.split_whitespace().any(|word| word == "rootwait");
     let candidates = [root.unwrap_or("/dev/vblk0"), "/dev/usbblk0"];
-    let mut mounted = false;
-    for (index, device) in candidates.iter().enumerate() {
-        if index > 0 && root.is_some() {
-            break;
+    let mut attempts = 0u64;
+    let mounted = 'retry: loop {
+        attempts += 1;
+        for (index, device) in candidates.iter().enumerate() {
+            if index > 0 && root.is_some() {
+                break;
+            }
+            // Avoid asking the filesystem to mount a device that has not yet
+            // appeared while asynchronous device discovery is still running.
+            if rootwait && File::open(device).is_err() {
+                continue;
+            }
+            let options = format!("device={},rw", device);
+            if fs::mount(device, "/mnt/newroot", fstype, 0, Some(&options)).is_ok() {
+                if rootwait {
+                    println!(
+                        "init: rootwait: {} mounted after {} attempt(s)",
+                        device, attempts
+                    );
+                }
+                break 'retry true;
+            }
         }
-        let options = format!("device={},rw", device);
-        if fs::mount(device, "/mnt/newroot", fstype, 0, Some(&options)).is_ok() {
-            mounted = true;
-            break;
+        if !rootwait {
+            break false;
         }
-    }
+        if attempts == 1 || attempts % 30 == 0 {
+            println!(
+                "init: rootwait: {} ({}) is not ready; retrying every second",
+                root.unwrap_or("configured block device"),
+                fstype
+            );
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    };
     if mounted {
         directory("/mnt/newroot/old_root")?;
         fs::pivot_root("/mnt/newroot", "/mnt/newroot/old_root")
