@@ -1,6 +1,6 @@
 //! Backend-neutral GPU information model.
 
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 
 use super::{GPU_BACKEND_ID_BYTES, GPU_BACKEND_INFO_BYTES};
 use crate::device::graphics::{GpuBackingSegment, GpuDisplayResource, PixelFormat};
@@ -768,6 +768,14 @@ pub trait GpuBackendImage: Send + Sync {
     }
 }
 
+/// Backend reservation protecting generic image CPU access until drop.
+///
+/// Backends release their admission reservation in the implementation's `Drop`.
+/// The generic resource retains this guard throughout the CPU access, cache
+/// maintenance, and synchronous backend transfer. The guard need not be `Send`:
+/// a backend may retain a lock borrowed from the calling context.
+pub trait GpuBackendCpuAccessGuard {}
+
 /// Backend execution context retained by a [`crate::device::gpu::GpuContext`].
 pub trait GpuBackendContext: Send + Sync {
     /// Query the effective execution dialect selected for this context.
@@ -810,6 +818,37 @@ pub trait GpuBackendContext: Send + Sync {
     /// Nothing after the image is no longer attached to this context.
     fn detach_image(&self, _image: &dyn GpuBackendImage) -> Result<(), &'static str> {
         Err("GPU backend context does not support image detachment")
+    }
+
+    /// Reserve ordered CPU access to an attached image's generic backing.
+    ///
+    /// This is called before upload writes, imported-backing cache maintenance,
+    /// or readback transfer and reads. The returned guard remains live through
+    /// the synchronous transfer callback and all generic CPU/cache operations.
+    /// It is also dropped on any copy, transfer, or validation error.
+    ///
+    /// An asynchronous backend must atomically exclude conflicting new work and
+    /// retire previously admitted work before returning success. A drain alone
+    /// is insufficient: submissions from every context sharing the backing must
+    /// remain excluded until the guard drops. Transfer callbacks invoked while
+    /// the guard is live must not reacquire or wait on their own reservation.
+    /// CPU mappings writable by userspace remain the caller's responsibility.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Attached backend image whose backing will be accessed.
+    ///
+    /// # Returns
+    ///
+    /// A reservation to retain until the complete access finishes, or an error
+    /// before generic code touches the backing. Synchronous backends whose
+    /// existing transfer implementation needs no reservation may use the
+    /// default `Ok(None)`.
+    fn begin_image_cpu_access(
+        &self,
+        _image: &dyn GpuBackendImage,
+    ) -> Result<Option<Box<dyn GpuBackendCpuAccessGuard + '_>>, &'static str> {
+        Ok(None)
     }
 
     /// Upload an already copied BGRA rectangle into an attached image.
@@ -944,6 +983,11 @@ pub trait GpuBackendQueue: Send + Sync {
     ///
     /// Nothing after the backend has completed the submitted work, or an error
     /// if the backend rejected or failed the submission.
+    /// Generic attachment authority and backing remain retained during this
+    /// call, but may be detached immediately after any return, including an
+    /// error. The backend must not return while submitted accesses can still
+    /// touch that backing unless it independently retains the backing until
+    /// hardware quiescence. A failure notification alone does not retire DMA.
     fn submit(&self, commands: &[u8]) -> Result<(), GpuBackendSubmitError>;
 
     /// Query the bounded number of asynchronously retained submissions.

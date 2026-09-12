@@ -98,6 +98,23 @@ copy failure cannot remove that ownership.
 5. Bound shared transport storage and return Busy without waiting for a free slot.
    Preserve ordering with existing synchronous submission and upload/readback
    operations, including when both interfaces share a device.
+   Implement `GpuBackendContext::begin_image_cpu_access` when asynchronous work
+   can access generic image backing. The resource calls it before the first CPU
+   upload write, imported transfer cache clean, or readback transfer/read, and
+   keeps its `GpuBackendCpuAccessGuard` alive through the entire operation.
+   Acquisition must exclude conflicting new submissions atomically with retiring
+   previous work; draining without reserving admission leaves a race. The guard
+   releases admission on drop, including copy and backend-transfer failures.
+   Transfer callbacks must not wait for the reservation held by their own guard.
+   The default no-op preserves synchronous backend implementations. This hook
+   does not synchronize writes performed directly through userspace mappings.
+
+Legacy synchronous submission retains both generic image and buffer attachment
+lists until the backend returns, so releasing a driver context lock while waiting
+cannot let a concurrent detach release physical backing. Any backend return,
+including an error, must mean accesses have retired or the backend independently
+retains the backing until hardware quiescence. An unknown DMA retirement must
+not merely wake the synchronous caller with an error and free its attachments.
 
 Dropping an unretired `GpuSubmission` is a fail-safe: its generic command storage,
 resource references, and slot are permanently quarantined rather than freed.
