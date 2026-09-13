@@ -7,9 +7,10 @@ mod bootstrap;
 use std::{environment::HandleMapping, println, vec::Vec};
 
 fn boot() -> Result<core::convert::Infallible, &'static str> {
-    let stdio = bootstrap::console()?;
     let args = std::env::args_vec();
     let cmdline = args.get(1).map(|s| s.as_str()).unwrap_or("");
+    let console = bootstrap::cmdline_value(cmdline, "init.console=").unwrap_or("/dev/tty0");
+    let stdio = bootstrap::console_at(console)?;
     let backing = bootstrap::backing(cmdline, false)?;
     let (environment, views) = bootstrap::environment(backing)?;
     // Distribution policy is independent of CPU width. A console/recovery

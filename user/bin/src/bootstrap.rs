@@ -34,8 +34,16 @@ fn devfs() -> Result<(), &'static str> {
     fs::mount("devpts", "/dev/pts", "devpts", 0, None).map_err(|_| "cannot mount devpts")
 }
 pub fn console() -> Result<[Handle; 3], &'static str> {
+    console_at("/dev/tty0")
+}
+
+/// Open the distribution's explicitly selected standard I/O device.
+pub fn console_at(path: &str) -> Result<[Handle; 3], &'static str> {
+    if !path.starts_with('/') || path.as_bytes().contains(&0) {
+        return Err("init.console must name an absolute device path");
+    }
     devfs()?;
-    let input = File::open("/dev/tty0")
+    let input = File::open(path)
         .map_err(|_| "cannot open console")?
         .into_handle();
     let output = input.duplicate().map_err(|_| "cannot duplicate console")?;
