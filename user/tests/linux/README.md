@@ -13,3 +13,20 @@ Install the executable in the Linux view's `/bin`, backed by
 real relative and absolute deadlines, Linux error returns, pointer validation,
 and the shared nanosleep implementation. It does not verify userspace signal
 handler delivery or realtime clock adjustments.
+
+The thread-signal check uses ordinary musl pthreads and credential functions:
+
+```sh
+cc -O3 -Wall -Wextra -pthread thread-signals.c -o thread-signals
+# First run on Linux, then install it in Scarlet's Linux view.
+./thread-signals
+abi-run linux-aarch64 /bin/thread-signals --expect-unavailable
+```
+
+Scarlet currently cannot execute custom userspace handlers through `tkill` or
+`tgkill`. These sends must return `ENOSYS`, including masked sends to another
+thread in the same group, rather than claim successful delivery. Otherwise musl's
+synchronous credential broadcast waits forever for a handler that never runs.
+The check verifies explicit errors, signal-zero probes, a default ignored signal,
+prompt libc broadcast failure, unchanged credentials, and successful thread
+joins. It does not establish general signal-handler or credential support.
