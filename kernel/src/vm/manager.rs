@@ -684,9 +684,18 @@ impl VirtualMemoryManager {
         let mut mappings_to_add = Vec::new();
 
         // Find all mappings that overlap with the removal range
+        // A sorted, non-overlapping map can intersect the range only at its
+        // predecessor or at keys inside the range. Avoid scanning every VMA
+        // for each small allocator munmap in a shader-heavy process.
+        let first_key = g
+            .memmap
+            .range(..=remove_start)
+            .next_back()
+            .map(|(key, _)| *key)
+            .unwrap_or(remove_start);
         let overlapping_keys: alloc::vec::Vec<usize> = g
             .memmap
-            .range(..)
+            .range(first_key..=remove_end)
             .filter_map(|(start_addr, existing_map)| {
                 let existing_start = existing_map.vmarea.start;
                 let existing_end = existing_map.vmarea.end;
