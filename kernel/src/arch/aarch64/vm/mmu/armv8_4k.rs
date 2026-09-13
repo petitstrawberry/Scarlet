@@ -11,7 +11,7 @@ use core::arch::asm;
 use core::result::Result;
 
 use crate::arch::vm::new_raw_pagetable;
-use crate::environment::PAGE_SIZE;
+use crate::environment::{IOREMAP_START, PAGE_SIZE, SCARLET_HHDM_BASE};
 use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use crate::vm::vmem::MemoryAttribute;
 use crate::vm::vmem::VirtualMemoryMap;
@@ -588,6 +588,13 @@ impl PageTable {
             permissions: mmap.permissions,
             memory_attribute: mmap.memory_attribute,
         };
+        // PMM-owned DMA allocations can change the attributes of individual
+        // HHDM pages. Splitting a live block would temporarily unmap unrelated
+        // allocations, including the page table used to restore that block.
+        // Build the direct map with 4 KiB leaves before it becomes active.
+        let is_direct_map = mmap.is_shared
+            && mmap.vmarea.start >= SCARLET_HHDM_BASE
+            && mmap.vmarea.end < IOREMAP_START;
         let mut vaddr = mmap.vmarea.start;
         let mut paddr = mmap.pmarea.start;
         let mut mutation = PageTableMutation::NoChange;
@@ -598,7 +605,11 @@ impl PageTable {
                 .checked_sub(vaddr)
                 .and_then(|remaining| remaining.checked_add(1))
                 .ok_or("Address range overflow")?;
-            let mut level = best_page_level(vaddr, paddr, remaining);
+            let mut level = if is_direct_map {
+                0
+            } else {
+                best_page_level(vaddr, paddr, remaining)
+            };
             let leaf_mutation = loop {
                 match self.try_map_at_level(asid, vaddr, paddr, attrs, level) {
                     Ok(leaf_mutation) => break leaf_mutation,
@@ -670,6 +681,9 @@ impl PageTable {
             let (_, level) = self
                 .walk_leaf(vaddr)
                 .ok_or("retag memory area has no existing leaf mapping")?;
+            if level > 0 && (SCARLET_HHDM_BASE..IOREMAP_START).contains(&vaddr) {
+                return Err("live HHDM retag requires 4 KiB leaves");
+            }
             let leaf_size = page_size_for_level(level);
             let leaf_start = vaddr & !(leaf_size - 1);
             let leaf_end = leaf_start
