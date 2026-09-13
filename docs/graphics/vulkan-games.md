@@ -58,6 +58,7 @@ entries. No source substitution or build-time dependency rewriting is needed.
 | Canonical SGFX IR | `517529778de9412989f317550dff85dac9eb0598` |
 | SGFX facade, VirGL backend and Vulkan frontend | `10eb666555e341032eae54cf01433b63ea88f00c` |
 | ScarletUI | `e3795f40057ddd223b78b2c2c382aac95eaf906b` |
+| Linux SWS C SDK and game platform adapter | `838333bc392f5e345136aa84132c178de2b64c11` |
 | Native GPU/SWS SDK | `4b5257897e341a0d0d3136b37d47b0157b9985cd` |
 | Full-image kernel and Linux ABI module | `7297aac3e91c09daecd4c09c4c9cb7d57d2e6af3` |
 | A618 backend and shader/codegen consumers | `b7bc2c038795527cf538b475649cdeda8e58bdbf` |
@@ -122,14 +123,25 @@ windowed display scaling are not implemented by this initial platform port.
 
 Actual Scarlet checks verify automatic ordinary-loader ICD discovery and
 60 `VK_KHR_display` presentations with clean shutdown. The upstream game loads
-its renderer and game module, initializes the `demo1` server, and displays
-textured console backgrounds and font glyphs through the native GPU path.
+its renderer and game module, initializes the `demo1` server, and renders the
+textured 3D world, first-person weapon and HUD through the native VirGL GPU
+path. Captures of the actual QEMU window show different player views after
+input; an explicit keyboard event opens the game console and pauses the world.
+These checks used the normal full-project release image and the coordinated
+revisions above. Sustained FPS, combat and a normal game shutdown have not been
+verified. The game screenshot command has not been verified on Scarlet;
+the world/input evidence is captured from the actual QEMU display.
+
 Initial world loading exposed missing Linux `mremap`; in-place shrinking now
 passes four real 16 MiB C checks on Scarlet, including data retention, page
-rounding and reuse of zeroed discarded pages. This alone does not establish
-playable world rendering or an FPS result. AArch64 range unmapping also now
+rounding and reuse of zeroed discarded pages. AArch64 range unmapping also now
 invalidates the TLB once after removing the range, rather than globally for
-every 4 KiB leaf; the four 8 MiB partial-unmap regression passes on Scarlet.
+every 4 KiB leaf. Physical backing ranges are reclaimed in one registry pass
+per unmap request instead of repeatedly scanning all allocations and task pages.
+The same four 8 MiB partial-unmap regression passes on Scarlet and reports
+4 ms total unmap time, compared with 509 ms before batch physical reclamation.
+Retained neighbors and zeroed replacements are checked in both runs. This
+microbenchmark does not measure game FPS.
 
 ## Verified release results
 
@@ -165,7 +177,8 @@ preparation tests and 26 submit-validation tests passed on the host with
 the same canonical IR revision. Physical A618 hardware was not tested.
 The macOS game check is complete. The cube integration result alone does not
 establish an ordinary-loader game run or FPS benchmark; the Linux checks above
-record their own scope.
+separately establish game world rendering and console input through the ordinary
+loader. Neither run establishes a sustained FPS benchmark.
 
 ## API, IR and game limits
 
@@ -205,12 +218,12 @@ its 23 original SPIR-V modules are accepted. The ordinary game setting
 `vk_point_particles=0` selects triangle billboards instead of the unsupported
 PointSize path. World frames continue and the game's own screenshot command
 produces actual GPU-read images. See SGFX's
-[compatibility record](https://github.com/petitstrawberry/sgfx/blob/10eb666555e341032eae54cf01433b63ea88f00c/docs/vulkan-game-compatibility.md)
+[compatibility record](https://github.com/petitstrawberry/sgfx/blob/ff6af0531bda21ef27e96c4e22495a4957f86d8c/docs/vulkan-game-compatibility.md)
 for the optimized diagnostic build flags, checks and remaining limits.
 Native VirGL now has the mip storage/blit, push-constant and dynamic fullscreen
 vertex-read support used by the game, and an ordinary Linux loader/ICD package.
-The separately recorded Scarlet game checks remain necessary to establish
-rendering and input compatibility; Metal results do not establish native results.
+The separately recorded Scarlet game checks verify world rendering and console
+input. Broader input, combat, shutdown and performance checks remain necessary.
 
 A618 consumers use the same pinned canonical IR revision, but arbitrary
 SPIR-V-to-A618 compilation is not implemented. Host validation and target

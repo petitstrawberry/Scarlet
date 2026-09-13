@@ -89,14 +89,23 @@ Ordinary musl, libc and Rust std syscalls remain Linux ABI calls. The C SDK and
 native GPU backend use the explicit Scarlet namespace for native object handles.
 Use a kernel containing the native namespace, `clock_nanosleep`, pagewise
 vectored I/O, mip image controls, in-place `mremap` shrinking, batched AArch64
-unmap invalidation, and unsupported custom-signal error fixes.
+unmap invalidation, batched private backing reclamation, and unsupported
+custom-signal error fixes.
 The full project's kernel and module pins select these fixes together.
 
 Actual Scarlet AArch64 QEMU checks establish ordinary-loader device discovery,
 60 `VK_KHR_display` presentations with clean shutdown, and all 19 thread-signal
 regression checks. The game loads its upstream renderer, creates its Vulkan
-resources, loads the game module, and initializes the `demo1` server. The native game also presents textured console backgrounds and font glyphs;
-world loading and playable input remain under investigation. Four real 16 MiB
-`mremap` shrink checks pass on Scarlet after implementing the game's hunk resize.
-These results do not establish playable world rendering or Chromebook/A618
+resources, loads the game module, and initializes the `demo1` server.
+The normal full-project release image also renders the textured `demo1` 3D
+world, first-person weapon and HUD through the native VirGL GPU path. Actual
+QEMU window captures show different player views after input, and an explicit
+keyboard event opens the console and pauses the world. Combat, sustained FPS,
+the game's screenshot command and normal game shutdown have not been verified.
+
+Four real 16 MiB `mremap` shrink checks pass on Scarlet after implementing the
+game's hunk resize. Four 8 MiB partial-unmap checks preserve retained neighbors
+and zeroed replacement pages; their total unmap time drops from 509 ms to 4 ms
+after batch physical reclamation. This is an allocator microbenchmark, not a
+game FPS measurement. These results do not establish Chromebook/A618 game
 compatibility.
