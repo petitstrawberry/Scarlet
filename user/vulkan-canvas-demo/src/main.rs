@@ -43,40 +43,52 @@ mod scarlet_app {
         started: Instant,
         rendering_enabled: bool,
         frame_pending: bool,
+        frames_presented: u64,
     }
 
     impl DemoApp {
         fn new() -> AppResult<Self> {
-            let (mut renderer, raw_handle) = VulkanCube::new()?;
+            let (mut renderer, raw_handle) = VulkanCube::new()
+                .map_err(|error| format!("Vulkan cube initialization failed: {error}"))?;
             let texture = unsafe {
                 shared_bgra8_texture_from_raw(raw_handle, IMAGE_WIDTH, IMAGE_HEIGHT)
                     .map_err(|error| format!("cannot adopt Vulkan shared image: {error}"))?
             };
-            renderer.render(0.58)?;
+            renderer
+                .render(0.58)
+                .map_err(|error| format!("initial Vulkan frame failed: {error}"))?;
+            renderer
+                .verify_readback()
+                .map_err(|error| format!("initial Vulkan GPU readback failed: {error}"))?;
             Ok(Self {
                 texture: State::new(StateId::new(ID_TEXTURE), texture),
                 renderer: Rc::new(RefCell::new(renderer)),
                 started: Instant::now(),
                 rendering_enabled: true,
                 frame_pending: true,
+                frames_presented: 0,
             })
         }
 
         fn content(&self) -> impl View + Clone {
             vstack! {
-                Text::new("Vulkan-SGFX shared image").font_size(22.0),
-                Text::new("Indexed Vulkan cube embedded between ordinary ScarletUI views")
-                    .font_size(14.0),
+                Text::new("Vulkan-SGFX shared image")
+                    .font_size(18.0)
+                    .color(Color::rgb(235u8, 241u8, 255u8)),
+                Text::new("Textured Vulkan cube embedded between ScarletUI views")
+                    .font_size(12.0)
+                    .color(Color::rgb(176u8, 190u8, 215u8)),
                 ExternalGpuSurface::from_state(
-                    f32::INFINITY,
-                    f32::INFINITY,
+                    230.0,
+                    230.0,
                     self.texture.clone(),
                 ),
                 Text::new("Vulkan core API  →  SGFX IR  →  VirGL  →  direct shared-image composite")
-                    .font_size(13.0),
+                    .font_size(11.0)
+                    .color(Color::rgb(176u8, 190u8, 215u8)),
             }
-            .spacing(8.0)
-            .padding(14.0)
+            .spacing(6.0)
+            .padding(10.0)
         }
     }
 
@@ -94,8 +106,8 @@ mod scarlet_app {
         fn scenes(&self) -> impl Scene {
             Window::new("Vulkan-SGFX Cube", self.content())
                 .app_id("org.scarlet-os.vulkan-canvas-demo")
-                .size(Size::new(620.0, 700.0))
-                .min_size(Size::new(360.0, 440.0))
+                .size(Size::new(600.0, 330.0))
+                .min_size(Size::new(360.0, 320.0))
                 .resizable(true)
                 .background_color(Color::rgb(7u8, 11u8, 22u8))
         }
@@ -129,6 +141,13 @@ mod scarlet_app {
 
         fn on_frame_presented(&mut self, _context: &WindowContext) {
             self.frame_pending = false;
+            self.frames_presented += 1;
+            if self.frames_presented == 1 || self.frames_presented == 120 {
+                println!(
+                    "ScarletUI presented {} shared Vulkan cube frames",
+                    self.frames_presented
+                );
+            }
         }
 
         fn debug_logging(&self) -> bool {
