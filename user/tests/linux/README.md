@@ -41,3 +41,19 @@ cc -O3 -Wall -Wextra mapping-churn.c -o mapping-churn
 ./mapping-churn
 abi-run linux-aarch64 /bin/mapping-churn
 ```
+
+The `mremap` check uses the same unaligned lengths as a game hunk allocator,
+touches retained and discarded pages, and reuses the freed tail without
+`MAP_FIXED`. It verifies retained data, new zeroed backing, same-page resizing,
+and invalid arguments:
+
+```sh
+cc -O3 -Wall -Wextra mremap-shrink.c -o mremap-shrink
+./mremap-shrink
+abi-run linux-aarch64 /bin/mremap-shrink
+```
+
+Scarlet supports in-place shrinking with flags zero or `MREMAP_MAYMOVE`.
+Growth, relocation, `MREMAP_FIXED`, `MREMAP_DONTUNMAP`, and zero-length shared
+mapping duplication are not implemented. Unsupported resize operations return
+an error and leave the source mapping intact.
