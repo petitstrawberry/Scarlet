@@ -30,3 +30,14 @@ synchronous credential broadcast waits forever for a handler that never runs.
 The check verifies explicit errors, signal-zero probes, a default ignored signal,
 prompt libc broadcast failure, unchanged credentials, and successful thread
 joins. It does not establish general signal-handler or credential support.
+
+The mapping check repeatedly touches and partially unmaps an 8 MiB anonymous
+region, preserving guard pages on both sides and replacing the removed range
+at the same address. It checks zeroed replacement pages and reports the actual
+unmap time, without imposing a machine-dependent performance threshold:
+
+```sh
+cc -O3 -Wall -Wextra mapping-churn.c -o mapping-churn
+./mapping-churn
+abi-run linux-aarch64 /bin/mapping-churn
+```
