@@ -11,6 +11,10 @@ name = "cpufreqctl"
 path = "src/cpufreqctl.rs"
 
 [[bin]]
+name = "gpu-info"
+path = "src/gpu_info.rs"
+
+[[bin]]
 name = "abi-run"
 path = "src/abi_run.rs"
 
