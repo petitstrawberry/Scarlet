@@ -20,7 +20,15 @@ Ordinary macOS Vulkan application (vulkan-cube, render_demo, vkQuake2)
   -> libvulkan_sgfx.dylib selected by VK_DRIVER_FILES and its JSON manifest
   -> vulkan-sgfx -> canonical SGFX IR -> SGFX WGPU backend -> Metal
 
-Scarlet vulkan-canvas-demo (current linked executable test path)
+Scarlet Linux ABI vkQuake2 (ordinary loader/ICD path)
+  -> upstream ref_vk.so -> unmodified Khronos libvulkan.so.1
+  -> /usr/share/vulkan/icd.d/sgfx.json -> /usr/lib/libvulkan_sgfx.so
+  -> canonical SGFX IR -> Naga/TGSI -> native SGFX VirGL backend
+  -> explicit Scarlet native object syscalls -> kernel virtio-gpu
+  -> QEMU VirGLRenderer -> host OpenGL driver
+  -> the same libsws_client_c.so for GPU-image presentation and game input
+
+Scarlet vulkan-canvas-demo (linked executable integration test)
   -> Vulkan calls through ash and the linked vulkan-sgfx entry
   -> canonical SGFX IR -> SGFX VirGL backend -> /dev/gpu0
   -> VirtIO-GPU -> VirGLRenderer -> host OpenGL driver
@@ -31,12 +39,14 @@ Scarlet UI presentation
   -> display surface
 ```
 
-The Scarlet toolchain currently discards `cdylib` output. This linked test is
-not evidence that an existing C game can discover a system-installed Vulkan
-ICD on Scarlet. A dynamically packaged Khronos loader/ICD remains necessary
-for that deployment model. On macOS the host application uses the existing
-Khronos loader; it has no direct ICD-loading branch and does not use
-`SGFX_VULKAN_LOADER`.
+The linked cube integration and ordinary Linux C application are separate
+checks. The native Scarlet Rust target currently discards `cdylib` output;
+the deployed Linux/musl ICD is built as an ordinary Linux shared library and
+uses the explicit native syscall namespace for GPU objects. Musl and Rust std
+continue using Linux ABI calls. The installed Khronos loader discovers the
+system ICD manifest. No private loader or `LD_PRELOAD` is used. On macOS the
+application also uses the existing Khronos loader, without an ICD-loading
+branch or `SGFX_VULKAN_LOADER`.
 
 ## Coordinated source revisions
 
@@ -46,9 +56,11 @@ entries. No source substitution or build-time dependency rewriting is needed.
 | Component | Revision |
 | --- | --- |
 | Canonical SGFX IR | `517529778de9412989f317550dff85dac9eb0598` |
-| SGFX facade, VirGL backend and Vulkan frontend | `4511b0ab13821c71c81376f855031b7b1011287b` |
-| ScarletUI | `5c738b05333fb9da5d465c5333f0a432582be45b` |
-| A618 backend and shader/codegen consumers | `48ae5170fac3a22aa5ad992ae9c8d8833155ca3d` |
+| SGFX facade, VirGL backend and Vulkan frontend | `10eb666555e341032eae54cf01433b63ea88f00c` |
+| ScarletUI | `e3795f40057ddd223b78b2c2c382aac95eaf906b` |
+| Native GPU/SWS SDK | `4b5257897e341a0d0d3136b37d47b0157b9985cd` |
+| Full-image kernel and Linux ABI module | `7297aac3e91c09daecd4c09c4c9cb7d57d2e6af3` |
+| A618 backend and shader/codegen consumers | `b7bc2c038795527cf538b475649cdeda8e58bdbf` |
 
 ## Build and run on Scarlet VirGL
 
@@ -79,6 +91,45 @@ A successful initial check prints
 counts, then the application embeds the rotating image between ordinary UI
 views. This requires native VirGL support; a software/CPU SWS compositor
 cannot consume this shared GPU image.
+
+## Linux ABI game installation
+
+Build the upstream `kondrak/vkQuake2` source at
+`6763f207229f97cffabb6fc2da72017a794b139b` with the
+[SWS platform adapter](../../user/lib/sws-client-c/examples/vkquake2/README.md).
+Its ordinary Make target builds the engine, unchanged Vulkan renderer and game
+module with `-O3 -DNDEBUG`; it uses C++17 for the upstream VMA allocator and the
+null sound driver. Install them into
+`projects/aarch64-limine-full/rootfs/systems/linux-aarch64` with `sws-install`.
+Supply your own game data there. The adapter README lists the Linux shared
+libraries and standard ICD manifest to install in this same tree. The normal
+full-project rootfs copy layer includes it; local binaries and assets are
+ignored by Git. Build the full image with the release command above.
+
+Linux sees the libraries at `/usr/lib`; the default Scarlet Environment sees
+`/systems/linux-aarch64/usr/lib`. Existing `LD_LIBRARY_PATH=/usr/lib:/lib`
+resolves the shared dependencies. In the native Scarlet shell:
+
+```sh
+abi-run linux-aarch64 /bin/sh /usr/games/vkquake2 +map demo1 </dev/null &
+```
+
+The game uses `VK_KHR_display` and the primary display's full 1280x800 extent.
+SWS delivers keyboard, mouse, focus and close events to the adapter through the
+same shared C SDK connection used by the ICD. The launcher disables point
+particles, CD audio and music using upstream settings. Audio output and
+windowed display scaling are not implemented by this initial platform port.
+
+Actual Scarlet checks verify automatic ordinary-loader ICD discovery and
+60 `VK_KHR_display` presentations with clean shutdown. The upstream game loads
+its renderer and game module, initializes the `demo1` server, and displays
+textured console backgrounds and font glyphs through the native GPU path.
+Initial world loading exposed missing Linux `mremap`; in-place shrinking now
+passes four real 16 MiB C checks on Scarlet, including data retention, page
+rounding and reuse of zeroed discarded pages. This alone does not establish
+playable world rendering or an FPS result. AArch64 range unmapping also now
+invalidates the TLB once after removing the range, rather than globally for
+every 4 KiB leaf; the four 8 MiB partial-unmap regression passes on Scarlet.
 
 ## Verified release results
 
@@ -112,12 +163,15 @@ The coordinated changes also passed 332 ScarletUI core tests, 43 SGFX
 renderer tests and 23 doctests in release mode. A618's 19 asynchronous
 preparation tests and 26 submit-validation tests passed on the host with
 the same canonical IR revision. Physical A618 hardware was not tested.
-The macOS game check is complete; no Scarlet game run or FPS benchmark is
-claimed by the cube integration result.
+The macOS game check is complete. The cube integration result alone does not
+establish an ordinary-loader game run or FPS benchmark; the Linux checks above
+record their own scope.
 
 ## API, IR and game limits
 
-This development ICD registers 104 procedures on macOS and 92 on Scarlet,
+The initial development ICD registered 104 procedures on macOS and 92 in the
+linked Scarlet path. Linux display WSI additionally registers seven display
+procedures and the common surface/swapchain procedures,
 including 17 command entrypoints. Native capability checks reject unsupported
 commands even when their entrypoint is present. These counts describe a bounded Vulkan 1.0
 implementation, not conformance or general game compatibility. Canonical IR
@@ -135,9 +189,13 @@ blits, sampler mip filtering/LOD clamps, and per-mip uploads/barriers/readback.
 Stage-specific push constants support incremental updates up to 128 bytes.
 Metal also executes nonindexed triangle strips and signed indexed base
 vertices. Indexed strips are rejected before GPU acceptance because implicit
-restart would change ordinary Vulkan index semantics. Native VirGL currently
-supports triangle lists, single-mip images and no push constants; unsupported
-layouts, mip storage and blits return errors. Uploads lower from coherent
+restart would change ordinary Vulkan index semantics. Native VirGL supports triangle lists and indexed/nonindexed strips without
+primitive restart, color mip storage and complete mip blits when device caps
+allow them, stage-specific push constants up to 128 bytes, and bounded dynamic
+reads of arrays/vectors/matrix columns. Bounded reads lower to integer comparisons
+and selects; dynamic stores, runtime-sized indexing and arbitrary loops remain
+unsupported. Native mip readback remains limited to supported paths. Unsupported
+layouts, resource types and capabilities return explicit errors. Uploads lower from coherent
 CPU-shadow buffer data to owned IR texture writes; they are not a native GPU
 buffer-to-image copy implementation.
 
@@ -147,11 +205,12 @@ its 23 original SPIR-V modules are accepted. The ordinary game setting
 `vk_point_particles=0` selects triangle billboards instead of the unsupported
 PointSize path. World frames continue and the game's own screenshot command
 produces actual GPU-read images. See SGFX's
-[compatibility record](https://github.com/petitstrawberry/sgfx/blob/4511b0ab13821c71c81376f855031b7b1011287b/docs/vulkan-game-compatibility.md)
+[compatibility record](https://github.com/petitstrawberry/sgfx/blob/10eb666555e341032eae54cf01433b63ea88f00c/docs/vulkan-game-compatibility.md)
 for the optimized diagnostic build flags, checks and remaining limits.
-This result does not establish Scarlet game compatibility: native VirGL mip
-storage/blits and push constants, broader resource reclamation, and a packaged
-dynamic loader/ICD remain necessary for that deployment.
+Native VirGL now has the mip storage/blit, push-constant and dynamic fullscreen
+vertex-read support used by the game, and an ordinary Linux loader/ICD package.
+The separately recorded Scarlet game checks remain necessary to establish
+rendering and input compatibility; Metal results do not establish native results.
 
 A618 consumers use the same pinned canonical IR revision, but arbitrary
 SPIR-V-to-A618 compilation is not implemented. Host validation and target

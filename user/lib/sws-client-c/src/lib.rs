@@ -85,6 +85,9 @@ impl Client {
                     width,
                     height,
                 } => {
+                    if !self.gpu_events.contains_key(&surface_id) {
+                        continue;
+                    }
                     self.connection.resize_window(surface_id, width, height)?;
                     SwsEvent {
                         window_id: surface_id,
@@ -95,6 +98,9 @@ impl Client {
                     }
                 }
                 Event::SurfaceDestroyed { surface_id } => {
+                    if !self.gpu_events.contains_key(&surface_id) {
+                        continue;
+                    }
                     self.closed.insert(surface_id);
                     SwsEvent {
                         window_id: surface_id,
@@ -106,17 +112,27 @@ impl Client {
                     surface_id,
                     state_flags,
                 } => {
-                    self.states.insert(surface_id, state_flags);
+                    if self.gpu_events.contains_key(&surface_id) {
+                        self.states.insert(surface_id, state_flags);
+                    }
                     continue;
                 }
-                Event::FocusChanged { window_id, .. } => SwsEvent {
-                    window_id,
-                    kind: 4,
-                    ..Default::default()
-                },
+                Event::FocusChanged { window_id, .. } => {
+                    for &id in self.gpu_events.keys() {
+                        self.events.push_back(SwsEvent {
+                            window_id: id,
+                            kind: 4,
+                            value: i32::from(id == window_id),
+                            ..Default::default()
+                        });
+                    }
+                    continue;
+                }
                 _ => continue,
             };
-            self.events.push_back(event);
+            if self.gpu_events.contains_key(&event.window_id) {
+                self.events.push_back(event);
+            }
         }
         Ok(())
     }
@@ -211,8 +227,13 @@ pub unsafe extern "C" fn sws_window_create(
 #[unsafe(no_mangle)]
 pub extern "C" fn sws_window_destroy(id: u32) -> i32 {
     call(|client| {
-        client.connection.destroy_surface(id)?;
+        if !client.closed.contains(&id) {
+            client.connection.destroy_surface(id)?;
+        }
         client.gpu_events.remove(&id);
+        client.states.remove(&id);
+        client.closed.remove(&id);
+        client.events.retain(|event| event.window_id != id);
         Ok(0)
     })
 }

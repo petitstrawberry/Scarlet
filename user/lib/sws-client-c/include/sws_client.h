@@ -22,6 +22,7 @@ typedef struct SwsEvent {
 } SwsEvent;
 enum { SWS_EVENT_INPUT = 1, SWS_EVENT_CONFIGURE = 2,
        SWS_EVENT_DESTROYED = 3, SWS_EVENT_FOCUS = 4 };
+/* SWS_EVENT_FOCUS.value is 1 when this window gains focus and 0 when it loses it. */
 typedef struct SwsBuffer {
     uint32_t window_id, buffer_id, generation, compositor_epoch;
 } SwsBuffer;
