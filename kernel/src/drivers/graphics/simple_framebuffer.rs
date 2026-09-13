@@ -1,3 +1,4 @@
+use crate::{mem::page::ContiguousPages, vm::vmem::MemoryAttribute};
 use alloc::{boxed::Box, string::String, sync::Arc};
 
 use crate::{
@@ -18,6 +19,9 @@ pub struct SimpleFramebufferDevice {
     display_name: &'static str,
     config: FramebufferConfig,
     framebuffer_addr: u64,
+    scanout_config: FramebufferConfig,
+    scanout_addr: u64,
+    shadow: Option<ContiguousPages>,
 }
 
 impl SimpleFramebufferDevice {
@@ -26,13 +30,47 @@ impl SimpleFramebufferDevice {
         display_name: &'static str,
         config: FramebufferConfig,
         framebuffer_addr: u64,
-    ) -> Self {
-        Self {
+        rotation: u32,
+    ) -> Result<Self, &'static str> {
+        let scanout_config = config.clone();
+        let (config, shadow) = match rotation {
+            0 => (config, None),
+            3 => {
+                if framebuffer_addr & 3 != 0 || config.stride & 3 != 0 {
+                    return Err("Rotation requires aligned framebuffer pixels");
+                }
+                if !matches!(
+                    config.format,
+                    PixelFormat::RGBA8888
+                        | PixelFormat::BGRA8888
+                        | PixelFormat::XRGB8888
+                        | PixelFormat::XBGR8888
+                ) {
+                    return Err("Rotation requires a 32-bit RGB framebuffer");
+                }
+                let config =
+                    FramebufferConfig::new(config.height, config.width, PixelFormat::BGRA8888);
+                let size = config.size();
+                if size > 16 * 1024 * 1024 {
+                    return Err("Rotated framebuffer is too large");
+                }
+                let pages = size.div_ceil(crate::environment::PAGE_SIZE);
+                let shadow =
+                    ContiguousPages::new(pages).ok_or("Cannot allocate rotated framebuffer")?;
+                (config, Some(shadow))
+            }
+            _ => return Err("Unsupported framebuffer rotation"),
+        };
+        let exported_addr = shadow.as_ref().map_or(framebuffer_addr, |p| p.as_paddr());
+        Ok(Self {
             name,
             display_name,
             config,
-            framebuffer_addr,
-        }
+            framebuffer_addr: exported_addr,
+            scanout_config,
+            scanout_addr: framebuffer_addr,
+            shadow,
+        })
     }
 }
 
@@ -111,12 +149,64 @@ impl GraphicsDevice for SimpleFramebufferDevice {
         Ok(self.framebuffer_addr)
     }
 
+    fn framebuffer_memory_attribute(&self) -> MemoryAttribute {
+        if self.shadow.is_some() {
+            MemoryAttribute::Normal
+        } else {
+            MemoryAttribute::DeviceBurstable
+        }
+    }
+
     fn present_framebuffer_region(
         &self,
-        _config: &FramebufferConfig,
-        _physical_addr: u64,
-        _region: DisplayRegion,
+        config: &FramebufferConfig,
+        physical_addr: u64,
+        region: DisplayRegion,
     ) -> Result<(), &'static str> {
+        if let Some(shadow) = &self.shadow {
+            if physical_addr != self.framebuffer_addr
+                || config.width != self.config.width
+                || config.height != self.config.height
+                || config.stride != self.config.stride
+                || config.format != self.config.format
+            {
+                return Err("Unsupported rotated framebuffer backing");
+            }
+            let end_x = region
+                .x
+                .checked_add(region.width)
+                .ok_or("Framebuffer region overflows")?;
+            let end_y = region
+                .y
+                .checked_add(region.height)
+                .ok_or("Framebuffer region overflows")?;
+            if end_x > config.width || end_y > config.height {
+                return Err("Framebuffer region exceeds the surface");
+            }
+            let scanout = crate::vm::addr::phys_to_virt(self.scanout_addr);
+            let red_low = matches!(
+                self.scanout_config.format,
+                PixelFormat::RGBA8888 | PixelFormat::XRGB8888
+            );
+            for y in region.y..end_y {
+                for x in region.x..end_x {
+                    let source = shadow.as_vaddr() + (y * config.stride + x * 4) as usize;
+                    let mut pixel = unsafe { core::ptr::read_volatile(source as *const u32) };
+                    if red_low {
+                        pixel =
+                            (pixel & 0xff00ff00) | ((pixel & 0xff) << 16) | ((pixel >> 16) & 0xff);
+                    }
+                    let offset = (config.width - 1 - x) * self.scanout_config.stride + y * 4;
+                    unsafe {
+                        core::ptr::write_volatile(
+                            (scanout + offset as usize) as *mut u32,
+                            pixel | 0xff000000,
+                        );
+                    }
+                }
+            }
+        }
+        crate::earlyfb::deactivate();
         Ok(())
     }
 
@@ -193,10 +283,10 @@ fn log_probe_properties(device: &PlatformDeviceInfo) {
 
 fn parse_pixel_format(device: &PlatformDeviceInfo) -> Result<PixelFormat, &'static str> {
     match property_str(device, "format")? {
-        "a8r8g8b8" => Ok(PixelFormat::RGBA8888),
-        "a8b8g8r8" => Ok(PixelFormat::BGRA8888),
-        "x8r8g8b8" => Ok(PixelFormat::XRGB8888),
-        "x8b8g8r8" => Ok(PixelFormat::XBGR8888),
+        "a8r8g8b8" => Ok(PixelFormat::BGRA8888),
+        "a8b8g8r8" => Ok(PixelFormat::RGBA8888),
+        "x8r8g8b8" => Ok(PixelFormat::XBGR8888),
+        "x8b8g8r8" => Ok(PixelFormat::XRGB8888),
         "x2r10g10b10" => Ok(PixelFormat::XRGB2101010),
         "r8g8b8" => Ok(PixelFormat::RGB888),
         "r5g6b5" => Ok(PixelFormat::RGB565),
@@ -235,6 +325,17 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
     let height = property_u32(device, "height")?;
     let stride = property_u32(device, "stride")?;
     let format = parse_pixel_format(device)?;
+    let rotation = device
+        .property("scarlet,rotation")
+        .and_then(|p| p.as_usize())
+        .unwrap_or(0);
+    if !(64..=4096).contains(&width)
+        || !(64..=4096).contains(&height)
+        || stride < width * format.bytes_per_pixel() as u32
+        || stride.checked_mul(height).is_none()
+    {
+        return Err("Invalid simple framebuffer dimensions or stride");
+    }
 
     let config = FramebufferConfig {
         width,
@@ -259,7 +360,8 @@ fn probe_fn(device: &PlatformDeviceInfo) -> Result<(), &'static str> {
         display_name,
         config,
         framebuffer_addr,
-    ));
+        u32::try_from(rotation).map_err(|_| "Invalid framebuffer rotation")?,
+    )?);
     let registered_name = String::from(device.name());
 
     let device_id = DeviceManager::get_manager()

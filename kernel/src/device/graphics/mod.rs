@@ -493,6 +493,11 @@ pub trait GraphicsDevice: Device {
     /// Get framebuffer memory address
     fn get_framebuffer_address(&self) -> Result<u64, &'static str>;
 
+    /// Memory attribute for CPU mappings of this device's framebuffer storage.
+    fn framebuffer_memory_attribute(&self) -> crate::vm::vmem::MemoryAttribute {
+        crate::vm::vmem::MemoryAttribute::DeviceBurstable
+    }
+
     /// Get framebuffer configuration and memory address as one snapshot.
     ///
     /// # Returns
