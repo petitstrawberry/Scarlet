@@ -7,7 +7,7 @@ use super::{
     errno,
     signal::{LinuxSignal, SignalState},
 };
-use crate::sync::{IrqSpinLock, IrqSpinLockGuard};
+use crate::sync::{IrqSpinLock, IrqSpinLockGuard, Waker};
 use crate::{
     abi::linux::generic::LinuxAbi,
     arch::Trapframe,
@@ -820,44 +820,109 @@ pub fn sys_clock_gettime(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
     0 // Success
 }
 
-/// sys_nanosleep - Sleep for the specified time (Linux ABI)
-///
-/// Arguments:
-/// - a0 (x10): rqtp - pointer to requested sleep time (struct __kernel_timespec __user *)
-/// - a1 (x11): rmtp - pointer to remaining time (struct __kernel_timespec __user *)
-///
-/// Returns:
-/// - 0 on success
-/// - -EFAULT (-14) for invalid pointer
-/// - -EINTR (-4) if interrupted by signal (not implemented, always 0)
-pub fn sys_nanosleep(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    // Get current task
+/// Sleep relative to monotonic time, validating the Linux timespec and writing
+/// the unslept interval when an interruptible wake wins.
+pub fn sys_nanosleep(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let requested = trapframe.get_arg(0);
+    let remaining = trapframe.get_arg(1);
+    clock_sleep(abi, trapframe, CLOCK_MONOTONIC, 0, requested, remaining)
+}
+
+/// Linux clock_nanosleep. Absolute realtime waits recheck the wall clock at
+/// least once per second so an RTC correction does not become a permanently
+/// stale monotonic deadline. CPU clocks do not yet have scheduler accounting.
+pub fn sys_clock_nanosleep(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let clock_id = trapframe.get_arg(0) as i32;
+    let flags = trapframe.get_arg(1) as i32;
+    let requested = trapframe.get_arg(2);
+    let remaining = trapframe.get_arg(3);
+    clock_sleep(abi, trapframe, clock_id, flags, requested, remaining)
+}
+
+fn sleep_clock_now(clock_id: i32) -> u64 {
+    if clock_id == CLOCK_REALTIME {
+        system_time_ns().unwrap_or_else(current_time_ns)
+    } else {
+        current_time_ns()
+    }
+}
+
+fn clock_sleep(
+    abi: &LinuxAbi,
+    trapframe: &mut Trapframe,
+    clock_id: i32,
+    flags: i32,
+    requested_ptr: usize,
+    remaining_ptr: usize,
+) -> usize {
+    use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+
     let task = match mytask() {
         Some(task) => task,
-        None => return (-14_isize) as usize, // -EFAULT
+        None => return errno::to_result(errno::EFAULT),
     };
     trapframe.increment_pc_next(&task);
-
-    // Get user pointer to requested timespec
-    let rqtp_ptr = trapframe.get_arg(0);
-    let _rmtp_ptr = trapframe.get_arg(1);
-    let rqtp = match task.vm_manager.translate_to_kva(rqtp_ptr) {
-        Some(ptr) => unsafe { &*(ptr as *const TimeSpec) },
-        None => return (-14_isize) as usize, // -EFAULT
-    };
-    // Preserve the existing nanosleep validation behavior here. Broader
-    // timespec validation is tracked separately from the tickless migration.
-    let ns = rqtp
-        .tv_sec
-        .saturating_mul(1_000_000_000)
-        .saturating_add(rqtp.tv_nsec);
-    if ns <= 0 {
-        return 0;
+    if flags & !TIMER_ABSTIME != 0 {
+        return errno::to_result(errno::EINVAL);
     }
-    trapframe.set_return_value(0); // Set return value to 0 (success)
-    task.sleep(trapframe, ns as u64);
-    // If sleep is successful, this will not be reached. If interrupted, return -EINTR (not implemented)
-    0
+    match clock_id {
+        CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_BOOTTIME => {}
+        CLOCK_PROCESS_CPUTIME_ID => return errno::to_result(errno::EOPNOTSUPP),
+        _ => return errno::to_result(errno::EINVAL),
+    }
+    let mut bytes = [0; 16];
+    if copy_from_user(&task, requested_ptr, &mut bytes).is_err() {
+        return errno::to_result(errno::EFAULT);
+    }
+    let requested = TimeSpec {
+        tv_sec: i64::from_ne_bytes(bytes[..8].try_into().unwrap()),
+        tv_nsec: i64::from_ne_bytes(bytes[8..].try_into().unwrap()),
+    };
+    let requested_ns = match timespec_to_ns(&requested) {
+        Ok(ns) => ns,
+        Err(error) => return errno::to_result(error),
+    };
+    let absolute = flags & TIMER_ABSTIME != 0;
+    // A relative CLOCK_REALTIME sleep is unaffected by wall-clock changes.
+    let deadline_clock = if absolute { clock_id } else { CLOCK_MONOTONIC };
+    let deadline = if absolute {
+        requested_ns
+    } else {
+        current_time_ns().saturating_add(requested_ns)
+    };
+    loop {
+        let remaining_ns = deadline.saturating_sub(sleep_clock_now(deadline_clock));
+        if remaining_ns == 0 {
+            return 0;
+        }
+        let interrupted = if abi.has_pending_signals() {
+            true
+        } else {
+            let interval = if deadline_clock == CLOCK_REALTIME {
+                remaining_ns.min(NSEC_PER_SEC_U64)
+            } else {
+                remaining_ns
+            };
+            // No event producer owns this private queue; only its timeout or
+            // an interruptible task wake can end the wait.
+            Arc::new(Waker::new_interruptible("linux_clock_nanosleep")).wait_with_timeout_owned(
+                task.get_id(),
+                trapframe,
+                interval,
+            )
+        };
+        if interrupted {
+            if !absolute && remaining_ptr != 0 {
+                let remaining = ns_to_timespec(deadline.saturating_sub(current_time_ns()));
+                bytes[..8].copy_from_slice(&remaining.tv_sec.to_ne_bytes());
+                bytes[8..].copy_from_slice(&remaining.tv_nsec.to_ne_bytes());
+                if copy_to_user(&task, remaining_ptr, &bytes).is_err() {
+                    return errno::to_result(errno::EFAULT);
+                }
+            }
+            return errno::to_result(errno::EINTR);
+        }
+    }
 }
 
 /// Linux sys_clock_getres implementation (stub)

@@ -494,6 +494,7 @@ syscall_table! {
     TimerDelete = 111 => time::sys_timer_delete,
     ClockGettime = 113 => time::sys_clock_gettime,
     ClockGetres = 114 => time::sys_clock_getres,
+    ClockNanosleep = 115 => time::sys_clock_nanosleep,
     SchedGetscheduler = 120 => proc::sys_sched_getscheduler,
     SchedGetparam = 121 => proc::sys_sched_getparam,
     SchedSetaffinity = 122 => proc::sys_sched_setaffinity,
