@@ -2,17 +2,18 @@
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Ordinary musl pthreads exercise the libc setxid broadcast, not a mock. */
-static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t condition = PTHREAD_COND_INITIALIZER;
 static pid_t worker_tids[2];
-static int ready, stop, failures, checks, unavailable;
+static _Atomic int ready, stop;
+static int failures, checks, unavailable;
 static volatile sig_atomic_t handled;
 
 static void check(int ok, const char *name)
@@ -31,12 +32,12 @@ static void handler(int signal)
 static void *worker(void *argument)
 {
     size_t index = (size_t)argument;
-    pthread_mutex_lock(&mutex);
     worker_tids[index] = (pid_t)syscall(SYS_gettid);
-    ++ready;
-    pthread_cond_broadcast(&condition);
-    while (!stop) pthread_cond_wait(&condition, &mutex);
-    pthread_mutex_unlock(&mutex);
+    atomic_fetch_add_explicit(&ready, 1, memory_order_release);
+    while (!atomic_load_explicit(&stop, memory_order_acquire)) {
+        struct timespec pause = { .tv_nsec = 1000000 };
+        nanosleep(&pause, NULL);
+    }
     return NULL;
 }
 
@@ -91,9 +92,10 @@ int main(int argc, char **argv)
             return 1;
         }
     }
-    pthread_mutex_lock(&mutex);
-    while (ready != 2) pthread_cond_wait(&condition, &mutex);
-    pthread_mutex_unlock(&mutex);
+    while (atomic_load_explicit(&ready, memory_order_acquire) != 2) {
+        struct timespec pause = { .tv_nsec = 1000000 };
+        nanosleep(&pause, NULL);
+    }
     check(worker_tids[0] != tid && worker_tids[1] != tid &&
           worker_tids[0] != worker_tids[1], "two live pthread TIDs");
     errno = 0;
@@ -124,10 +126,7 @@ int main(int argc, char **argv)
           getgid() == gid && getegid() == egid,
           "same-identity calls leave credentials unchanged");
 
-    pthread_mutex_lock(&mutex);
-    stop = 1;
-    pthread_cond_broadcast(&condition);
-    pthread_mutex_unlock(&mutex);
+    atomic_store_explicit(&stop, 1, memory_order_release);
     check(pthread_join(threads[0], NULL) == 0 &&
           pthread_join(threads[1], NULL) == 0, "both pthreads remain joinable");
     printf("%s: %d thread-signal checks (%s)\n", failures ? "FAIL" : "PASS",
