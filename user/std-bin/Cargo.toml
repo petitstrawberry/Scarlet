@@ -7,6 +7,10 @@ workspace = "../../.cargo"
 # User-facing executable names use kebab-case. Rust source paths stay snake_case.
 
 [[bin]]
+name = "cpufreqctl"
+path = "src/cpufreqctl.rs"
+
+[[bin]]
 name = "abi-run"
 path = "src/abi_run.rs"
 

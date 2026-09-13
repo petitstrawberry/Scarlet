@@ -146,8 +146,8 @@ impl Gic {
 
     /// Get the address of a CPU interface register for a specific CPU
     fn cpu_reg_addr(&self, _cpu_id: CpuId, offset: usize) -> usize {
-        // For now, assume single CPU interface base
-        // In multi-core systems, this might need adjustment
+        // GICv2 exposes banked CPU-interface registers at the same address on
+        // every CPU. The calling CPU selects the interface, not an MMIO stride.
         self.cpu_base_addr + offset
     }
 
@@ -297,16 +297,27 @@ impl Gic {
         // [23:16] CPUTargetList
         // [15] reserved
         // [14:0] INTID
-        let cpu_target_list = 1u32 << (target_cpu_id + 16);
+        let cpu_mask = self.cpu_target_masks[target_cpu_id as usize].load(Ordering::Acquire);
+        if cpu_mask == 0 {
+            return Err(InterruptError::InvalidCpuId);
+        }
+        let cpu_target_list = cpu_mask << 16;
         let int_id = match ipi_type {
             LocalInterruptType::Timer => crate::drivers::pic::arm_generic_timer::timer_ppi_irq(),
             LocalInterruptType::Software => 0, // Software Generated Interrupt
             LocalInterruptType::External => 1, // Software Generated Interrupt
         };
+        if int_id >= 16 {
+            return Err(InterruptError::InvalidInterruptId);
+        }
 
         let sgir_value = cpu_target_list | int_id;
         let sgir_addr = self.dist_reg_addr(GICD_SGIR);
-        unsafe { mmio::write32(sgir_addr, sgir_value) }
+        unsafe {
+            // Publish runnable-task/queue writes before the remote CPU wakes.
+            core::arch::asm!("dsb ishst", options(nostack));
+            mmio::write32(sgir_addr, sgir_value);
+        }
 
         Ok(())
     }

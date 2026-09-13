@@ -1,6 +1,7 @@
 //! Allocator-independent AArch64 page tables for Linux Image entry.
 
 use core::ptr::{read_volatile, write_volatile};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::aarch64::clean_dcache_to_poc_range;
 use crate::environment::PAGE_SIZE;
@@ -30,6 +31,13 @@ static mut EARLY_PAGE_TABLES: EarlyPageTablePool = EarlyPageTablePool {
     tables: [[0; ENTRY_COUNT]; EARLY_TABLE_COUNT],
     next: 0,
 };
+
+// CPU_ON enters with the MMU/data cache off. Keep the handoff value on its
+// own cache line, and clean it before any secondary CPU can read it.
+#[repr(C, align(64))]
+struct EarlyRoot(AtomicU64);
+
+static EARLY_ROOT: EarlyRoot = EarlyRoot(AtomicU64::new(0));
 
 /// Installs the temporary identity and higher-half mappings.
 ///
@@ -90,10 +98,31 @@ pub fn install(
         }
 
         clean_allocated_tables();
+        EARLY_ROOT.0.store(root as u64, Ordering::Release);
+        clean_dcache_to_poc_range(
+            (&raw const EARLY_ROOT) as usize,
+            core::mem::size_of::<EarlyRoot>(),
+        );
         crate::arch::aarch64::vm::mmu::activate_early_boot_page_table(root as u64);
     }
 
     Ok(())
+}
+
+/// Enable the immutable bootstrap mappings on a PSCI-started CPU.
+///
+/// Its private stack and entry code are inside the identity-mapped kernel.
+/// The common AP entry immediately replaces this root with the saved runtime
+/// kernel tables, making the allocator and relocated direct map accessible.
+pub(super) fn install_secondary() {
+    let root = EARLY_ROOT.0.load(Ordering::Acquire);
+    assert_ne!(
+        root, 0,
+        "secondary CPU started before early tables were ready"
+    );
+    // SAFETY: The BSP built and cleaned these tables before CPU_ON. They are
+    // never mutated or freed, and map this CPU's current code and stack.
+    unsafe { crate::arch::aarch64::vm::mmu::activate_early_boot_page_table(root) };
 }
 
 unsafe fn map_identity_area(

@@ -6,6 +6,9 @@
 
 mod framebuffer;
 mod page_table;
+mod smp;
+
+pub use smp::secondary_image_entry;
 
 use core::arch::naked_asm;
 use core::mem::MaybeUninit;
@@ -70,48 +73,78 @@ pub extern "C" fn image_head() -> ! {
 #[unsafe(naked)]
 pub extern "C" fn image_entry() -> ! {
     naked_asm!(
-        "mov x19, x0",
+        "adrp x1, BOOT_STACK",
+        "add x1, x1, :lo12:BOOT_STACK",
+        "add x1, x1, {boot_stack_size}",
+        "adrp x2, {rust_entry}",
+        "add x2, x2, :lo12:{rust_entry}",
+        "b {prepare}",
+        boot_stack_size = const 64 * 1024,
+        rust_entry = sym linux_image_entry,
+        prepare = sym prepare_el1_entry,
+    );
+}
+
+/// Establish the same EL1 runtime for the Image entry and PSCI CPU_ON entry.
+///
+/// No memory is accessed until the caller's CPU-private stack is installed.
+/// x0 carries the continuation argument, x1 its stack top, and x2 its address.
+#[unsafe(naked)]
+extern "C" fn prepare_el1_entry(_argument: usize, _stack: usize, _continuation: usize) -> ! {
+    naked_asm!(
         "msr daifset, #0xf",
-        "mrs x1, CurrentEL",
-        "lsr x1, x1, #2",
-        "cmp x1, #1",
+        "mov x19, x0",
+        "mov x20, x1",
+        "mov x21, x2",
+        "mrs x3, CurrentEL",
+        "lsr x3, x3, #2",
+        "cmp x3, #1",
         "b.eq 1f",
-        "cmp x1, #2",
+        "cmp x3, #2",
         "b.ne 2f",
-        "mov x1, #(1 << 31)",
-        "msr hcr_el2, x1",
-        "mov x1, #3",
-        "msr cnthctl_el2, x1",
+        "mov x3, #(1 << 31)",
+        "msr hcr_el2, x3",
+        "isb",
+        "mov x3, #3",
+        "msr cnthctl_el2, x3",
         "msr cntvoff_el2, xzr",
-        "msr cptr_el2, xzr",
-        "mov x1, #0x3c5",
-        "msr spsr_el2, x1",
-        "adr x1, 1f",
-        "msr elr_el2, x1",
+        "mov x3, #2",
+        "msr cntp_ctl_el0, x3",
+        "mov x3, #0x33ff",
+        "msr cptr_el2, x3",
+        "msr hstr_el2, xzr",
+        "msr mdcr_el2, xzr",
+        "msr vttbr_el2, xzr",
+        "movz x3, #0x0800",
+        "movk x3, #0x30d0, lsl #16",
+        "msr sctlr_el1, x3",
+        "mov x3, #0x3c5",
+        "msr spsr_el2, x3",
+        "adr x3, 1f",
+        "msr elr_el2, x3",
         "eret",
         "1:",
         // Establish SCTLR_EL1's architectural RES1 baseline without enabling
         // the MMU or caches; do not inherit unknown firmware policy bits.
-        "movz x1, #0x0800",
-        "movk x1, #0x30d0, lsl #16",
-        "msr sctlr_el1, x1",
+        "movz x3, #0x0800",
+        "movk x3, #0x30d0, lsl #16",
+        "msr sctlr_el1, x3",
         "isb",
         "msr spsel, #1",
-        "movz x1, #0x30, lsl #16",
-        "msr cpacr_el1, x1",
+        "and sp, x20, #~0xf",
+        "movz x3, #0x30, lsl #16",
+        "msr cpacr_el1, x3",
         "msr tpidr_el1, xzr",
+        // Firmware timer compares must not fire while the AP installs its
+        // translation regime, vectors and banked GIC interrupt state.
+        "mov x3, #2",
+        "msr cntv_ctl_el0, x3",
         "isb",
-        "adrp x2, BOOT_STACK",
-        "add x2, x2, :lo12:BOOT_STACK",
-        "add x2, x2, {boot_stack_size}",
-        "and sp, x2, #~0xf",
         "mov x0, x19",
-        "b {rust_entry}",
+        "br x21",
         "2:",
         "wfe",
         "b 2b",
-        boot_stack_size = const 64 * 1024,
-        rust_entry = sym linux_image_entry,
     );
 }
 
@@ -225,9 +258,15 @@ pub extern "C" fn linux_image_entry(dtb_paddr: usize) -> ! {
         .get_fdt()
         .and_then(|fdt| fdt.chosen().bootargs());
 
+    let cpu_count = smp::initialize(
+        fdt_manager
+            .get_fdt()
+            .expect("relocated FDT must be available"),
+        cmdline.unwrap_or(""),
+    );
     let bootinfo = BootInfo::new(
         0,
-        1,
+        cpu_count,
         usable_memory,
         direct_map_regions,
         initramfs_paddr,
@@ -235,7 +274,7 @@ pub extern "C" fn linux_image_entry(dtb_paddr: usize) -> ! {
         cmdline,
         DeviceSource::Fdt(fdt_destination_paddr),
         None,
-        None,
+        (cpu_count > 1).then_some(smp::start_secondary_cpus as fn()),
     );
     crate::arch::init_user_context_from_fdt();
 

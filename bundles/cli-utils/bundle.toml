@@ -1,6 +1,12 @@
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
+bin = "cpufreqctl"
+to = "/bin/cpufreqctl"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
 bin = "abi-run"
 to = "/bin/abi-run"
 

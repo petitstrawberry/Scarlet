@@ -1132,6 +1132,7 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
     crate::arch::vm::register_trampoline_for_ap();
 
     crate::interrupt::InterruptManager::global().init_controllers_for_cpu(cpu_id as u32);
+    crate::timer::get_kernel_timer().init(cpu_id);
     crate::interrupt::enable_cpu_interrupts();
     fence(Ordering::SeqCst);
 
@@ -1143,6 +1144,11 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
     crate::sched::scheduler::spawn_idle_task(cpu_id);
 
     let next_task_id = crate::sched::scheduler::start_scheduler();
+    crate::sched::scheduler::register_online_cpu(cpu_id);
+    println!(
+        "[Scarlet Kernel] AP {}: scheduler online; local timer ready",
+        cpu_id
+    );
     if let Some(next_task_id) = next_task_id {
         let next_task = crate::sched::scheduler::get_task_by_id(next_task_id)
             .expect("AP: first runnable task must exist");
