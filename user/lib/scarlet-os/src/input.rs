@@ -99,6 +99,8 @@ pub enum InputDeviceKind {
     Tablet = 5,
     /// Posture, lid, or other switch device.
     Switch = 6,
+    /// Game controller with buttons and absolute stick or hat axes.
+    Gamepad = 7,
 }
 
 impl TryFrom<i32> for InputDeviceKind {
@@ -113,6 +115,7 @@ impl TryFrom<i32> for InputDeviceKind {
             4 => Ok(Self::Touchscreen),
             5 => Ok(Self::Tablet),
             6 => Ok(Self::Switch),
+            7 => Ok(Self::Gamepad),
             _ => Err(()),
         }
     }
@@ -335,7 +338,8 @@ mod tests {
             Ok(InputDeviceKind::Touchscreen)
         );
         assert!(InputDeviceKind::try_from(-1).is_err());
-        assert!(InputDeviceKind::try_from(7).is_err());
+        assert_eq!(InputDeviceKind::try_from(7), Ok(InputDeviceKind::Gamepad));
+        assert!(InputDeviceKind::try_from(8).is_err());
     }
 
     #[test]

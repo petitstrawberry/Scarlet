@@ -8,6 +8,8 @@ The current protocol version is **9**. Clients discover the version and
 optional feature bits with `GET_CAPABILITIES`; reusable extension buffers are
 advertised by `EXTENSION_BUFFER_OBJECTS` (`1 << 10`). Rounded input and backdrop
 regions are advertised by the optional `SURFACE_REGIONS` bit (`1 << 11`).
+Native gamepad snapshots use optional `GAMEPAD_INPUT` (`1 << 12`), with client
+message 55 and server event 39; see [gamepad input](gamepad-input.md).
 
 Client-side reference implementations:
 

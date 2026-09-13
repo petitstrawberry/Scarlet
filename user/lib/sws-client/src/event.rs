@@ -147,6 +147,10 @@ impl InputEnvironment {
     pub const fn has_pen(self) -> bool {
         self.capability_flags & sws_protocol::input_environment_capability_flags::PEN != 0
     }
+    /// Whether a gamepad device is available, independently of keyboard presence.
+    pub const fn has_gamepad(self) -> bool {
+        self.capability_flags & sws_protocol::input_environment_capability_flags::GAMEPAD != 0
+    }
 }
 
 /// Text-input context state sent to an input method service.
@@ -170,6 +174,11 @@ pub struct ImeContextState {
 /// Events from the SWS server
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    /// Authoritative native gamepad state for a subscribed focused surface.
+    GamepadInput {
+        surface_id: u32,
+        state: sws_protocol::gamepad::State,
+    },
     /// Input event (keyboard, mouse, etc.)
     Input(InputEvent),
     /// IME preedit text for a text-input context.

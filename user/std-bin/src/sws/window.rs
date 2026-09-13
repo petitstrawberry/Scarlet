@@ -291,6 +291,10 @@ pub struct Window {
     pub opacity: f32,
     /// Whether the window can be resized by the user via interactive resize
     pub resizable: bool,
+    /// Native snapshots are opt-in so older clients retain their protocol.
+    pub gamepad_input: bool,
+    /// Generic SWS menu navigation defaults on for existing applications.
+    pub gamepad_navigation: bool,
     /// Cursor requested by the client while the pointer is over this window.
     pub cursor_icon: sws_protocol::CursorIcon,
     /// Whether focusing this window should make it the active application
@@ -651,6 +655,8 @@ impl Window {
             fullscreen: false,
             fullscreen_restore_geometry: None,
             opacity: 1.0,
+            gamepad_input: false,
+            gamepad_navigation: true,
             resizable: true, // Default to resizable
             cursor_icon: sws_protocol::CursorIcon::Arrow,
             active_on_focus: true,
@@ -716,6 +722,8 @@ impl Window {
             fullscreen: false,
             fullscreen_restore_geometry: None,
             opacity: 1.0,
+            gamepad_input: false,
+            gamepad_navigation: true,
             resizable: true, // Default to resizable
             cursor_icon: sws_protocol::CursorIcon::Arrow,
             active_on_focus: true,
@@ -809,6 +817,8 @@ impl Window {
             fullscreen: false,
             fullscreen_restore_geometry: None,
             opacity: 1.0,
+            gamepad_input: false,
+            gamepad_navigation: true,
             resizable: true, // Default to resizable
             cursor_icon: sws_protocol::CursorIcon::Arrow,
             active_on_focus: true,
@@ -1453,6 +1463,8 @@ impl WindowManager {
             fullscreen: false,
             fullscreen_restore_geometry: None,
             opacity: 1.0,
+            gamepad_input: false,
+            gamepad_navigation: true,
             resizable: true,
             cursor_icon: sws_protocol::CursorIcon::Arrow,
             active_on_focus: true,
@@ -1538,6 +1550,8 @@ impl WindowManager {
             fullscreen: false,
             fullscreen_restore_geometry: None,
             opacity: 1.0,
+            gamepad_input: false,
+            gamepad_navigation: true,
             resizable: true, // Default to resizable
             cursor_icon: sws_protocol::CursorIcon::Arrow,
             active_on_focus: true,

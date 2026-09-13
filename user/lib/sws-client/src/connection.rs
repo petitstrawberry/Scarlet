@@ -108,6 +108,9 @@ impl Capabilities {
     pub const fn supports_surface_regions(self) -> bool {
         self.capabilities & protocol::capabilities::SURFACE_REGIONS != 0
     }
+    pub const fn supports_gamepad_input(self) -> bool {
+        self.capabilities & protocol::capabilities::GAMEPAD_INPUT != 0
+    }
 
     /// Whether the server accepts system-wide tablet and windowing overrides.
     ///
@@ -996,6 +999,7 @@ impl TransportState {
     fn event_window_id(&self, event: &Event) -> Option<u32> {
         match event {
             Event::Input(event) => Some(event.surface_id),
+            Event::GamepadInput { surface_id, .. } => Some(*surface_id),
             Event::TextInputPreedit { context_id, .. }
             | Event::TextInputCommit { context_id, .. }
             | Event::TextInputDeleteSurroundingText { context_id, .. }
@@ -2534,6 +2538,22 @@ impl Connection {
             .map_err(|_| Error::SendFailed)
     }
 
+    /// Subscribe an owned surface to focused gamepad snapshots. Set navigation
+    /// false when the application handles gamepad actions itself.
+    pub fn set_gamepad_input(
+        &self,
+        surface_id: u32,
+        enabled: bool,
+        navigation: bool,
+    ) -> Result<(), Error> {
+        if !mutex_lock(&self.surfaces).contains_key(&surface_id) {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::gamepad::input_payload(surface_id, enabled, navigation);
+        self.send_message(protocol::client_msg::SET_GAMEPAD_INPUT, &payload)
+            .map_err(|_| Error::SendFailed)
+    }
+
     /// Set the workarea (usable screen area) for the window manager.
     ///
     /// This informs the window manager about the area where normal windows
@@ -2714,6 +2734,13 @@ impl TransportState {
                     code,
                     value,
                 }));
+                true
+            }
+            ServerMessage::GamepadInput { window_id, state } => {
+                self.push_event(Event::GamepadInput {
+                    surface_id: window_id,
+                    state,
+                });
                 true
             }
             ServerMessage::TextInputPreedit {
