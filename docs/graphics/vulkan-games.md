@@ -48,7 +48,7 @@ system ICD manifest. No private loader or `LD_PRELOAD` is used. On macOS the
 application also uses the existing Khronos loader, without an ICD-loading
 branch or `SGFX_VULKAN_LOADER`.
 
-## Coordinated source revisions
+## Tested source revisions
 
 The manifests use ordinary exact Git revisions, and Cargo generates their lock
 entries. No source substitution or build-time dependency rewriting is needed.
@@ -56,12 +56,17 @@ entries. No source substitution or build-time dependency rewriting is needed.
 | Component | Revision |
 | --- | --- |
 | Canonical SGFX IR | `517529778de9412989f317550dff85dac9eb0598` |
-| SGFX facade, VirGL backend and Vulkan frontend | `10eb666555e341032eae54cf01433b63ea88f00c` |
+| SGFX for native Rust applications and the linked cube | `10eb666555e341032eae54cf01433b63ea88f00c` |
+| Linux/musl ordinary-loader ICD with shared bindings, changed buffer ranges and ordered insertions | `08143f8dcf23cc29065a78a965d629a401106e9b` |
+| QEMU Cocoa GL display with window-sized buffers and resize synchronization | `922577606033eade699d231ba7cebcee0d6b92b6` |
 | ScarletUI | `e3795f40057ddd223b78b2c2c382aac95eaf906b` |
 | Linux SWS C SDK and game platform adapter | `838333bc392f5e345136aa84132c178de2b64c11` |
 | Native GPU/SWS SDK | `4b5257897e341a0d0d3136b37d47b0157b9985cd` |
 | Full-image kernel and Linux ABI module | `7297aac3e91c09daecd4c09c4c9cb7d57d2e6af3` |
 | A618 backend and shader/codegen consumers | `b7bc2c038795527cf538b475649cdeda8e58bdbf` |
+
+The Linux ICD embeds the backend planning correction from its listed SGFX
+revision. Both SGFX builds use the same canonical IR and native GPU/SWS SDK.
 
 ## Build and run on Scarlet VirGL
 
@@ -115,7 +120,13 @@ resolves the shared dependencies. In the native Scarlet shell:
 abi-run linux-aarch64 /bin/sh /usr/games/vkquake2 +map demo1 </dev/null &
 ```
 
-The game uses `VK_KHR_display` and the primary display's full 1280x800 extent.
+For the game's GPU-readback and clean-exit checks, append
+`+bind f12 screenshot +bind f11 quit` before the redirection. F12 saves the
+game's TGA under `/usr/share/vkquake2/baseq2/scrnshot`; F11 executes its normal
+`quit` command. The default Scarlet view prefixes that path with
+`/systems/linux-aarch64`.
+
+The game uses `VK_KHR_display`; the tested initial swapchain is 1280x800.
 SWS delivers keyboard, mouse, focus and close events to the adapter through the
 same shared C SDK connection used by the ICD. The launcher disables point
 particles, CD audio and music using upstream settings. Audio output and
@@ -127,10 +138,66 @@ its renderer and game module, initializes the `demo1` server, and renders the
 textured 3D world, first-person weapon and HUD through the native VirGL GPU
 path. Captures of the actual QEMU window show different player views after
 input; an explicit keyboard event opens the game console and pauses the world.
-These checks used the normal full-project release image and the coordinated
-revisions above. Sustained FPS, combat and a normal game shutdown have not been
-verified. The game screenshot command has not been verified on Scarlet;
-the world/input evidence is captured from the actual QEMU display.
+Initial world/input checks used the normal full-project release image.
+Subsequent release checks with the batched ICD also save the game's own
+`quake00.tga` and shut down through its upstream `quit` command with exit status
+0 and no remaining SGFX worker tasks. A Linux-shell `if`/`else` also verifies
+zero exit for the shared-binding backend without native-shell `$?` expansion. The TGA extracted from the stopped guest
+disk is 4,096,018 bytes and decodes to the actual 1280x800 world, weapon and HUD,
+with 12,898 distinct RGBA colors and opaque alpha throughout. Sustained FPS and
+combat have not been verified.
+
+The native backend now batches consecutive programmable draws sharing an
+immutable pipeline, up to 64 draws and a conservative 64 KiB command budget.
+Draw order, per-draw constants and first-pass clears are preserved. All 57
+Linux release VirGL backend library tests pass, covering batching, shadow writes
+and shared binding/index snapshots. No Vulkan procedure or canonical IR command is added by this fix.
+One release comparison with four HVF guest CPUs and 8 GiB RAM measured
+loading-console submissions of exactly 7,327 owned IR commands: median
+`queue.submit` time fell from 388 ms to 200.5 ms, with 36 samples in each run.
+Temporary clocks measured CPU submission through acceptance, rather than GPU
+completion or FPS. World views differed between runs, and the SGFX device worker
+still saturates one CPU. The installed release ICD is rebuilt from committed
+source without these clocks. Follow-up clocks on exactly 915 loading-console
+draws in 18 chunks (the same 7,327 owned IR commands; 36 samples per run) report
+backend work including cleanup at 201.5 ms before shared bindings and 60 ms
+afterwards. Destruction of lowered drawing events falls from 139.5 ms to 16 ms;
+the whole Vulkan queue worker job falls from 274.5 ms to 143.5 ms. Indexed draw
+ranges keep independent bounds checks and share immutable constant/texture
+snapshots. Ordered identical buffer writes retain their revisions, and native
+buffer uploads reuse bounded packet storage. No public API or IR revision is
+changed. World views differed between runs; these medians are CPU elapsed times,
+not FPS. Producer completion and SWS presentation usually take 0-2 ms, while CPU
+recording/lowering and reclamation still dominate. The worker remains busy on
+one CPU and playable performance has not been established.
+
+Changed buffer writes now bound the uploaded bytes and preserve neighboring
+transport words. Partial uploads require the exact physical predecessor
+revision; stale or partially failed storage is repaired from the complete
+initialized CPU shadow. Vulkan execution also consumes deferred descriptors,
+barriers and readbacks in order, instead of rescanning each entire list at every
+command. The 26 Linux release ICD library tests pass, including a position-check
+bound for 10,000 commands and repeated trailing insertions.
+
+Three short upstream timedemo runs used the same 1280x800 display, four AArch64
+HVF guest CPUs, 8 GiB RAM, game settings and Cocoa GL binary. The demo contains
+64 complete network messages from the bundled `q2demo1.dm2` and a normal EOF
+marker; the game reports 57 timed frames in every run. Clean release ICDs report
+19.0 s / 3.0 FPS with shared bindings, 17.1 s / 3.3 FPS with changed buffer ranges,
+and 15.7 s / 3.6 FPS with ordered Vulkan insertions. These single short runs
+confirm modest improvement and remain too slow for normal play. The private
+copied demo prefix is not installed in the normal image. To time the full
+bundled demo, use:
+
+```sh
+abi-run linux-aarch64 /bin/sh /usr/games/vkquake2 +set timedemo 1 +demomap q2demo1.dm2 +bind f11 quit </dev/null &
+```
+
+One final clean-image boot also reports an invalid-return user fault in the
+native GUI `/bin/scarlet-shell` before the game is launched. The serial shell
+remains usable for the game checks. This separate desktop startup failure is
+recorded in the verification log; these game results do not establish desktop
+stability.
 
 Initial world loading exposed missing Linux `mremap`; in-place shrinking now
 passes four real 16 MiB C checks on Scarlet, including data retention, page
@@ -142,6 +209,37 @@ The same four 8 MiB partial-unmap regression passes on Scarlet and reports
 4 ms total unmap time, compared with 509 ms before batch physical reclamation.
 Retained neighbors and zeroed replacements are checked in both runs. This
 microbenchmark does not measure game FPS.
+
+## Display resize
+
+SWS samples a retained shared GPU image into the current window geometry.
+When those extents differ, its image-space damage now repaints the full sampled
+window, preventing old frames in the expanded part of a fullscreen display.
+Unscaled images retain their bounded partial damage. Six damage-bookkeeping
+tests cover expansion, shrinkage, partial updates, movement and visibility.
+
+The pinned QEMU Cocoa frontend converts guest-coordinate bounds through window
+points and explicitly sizes its OpenGL buffer in actual backing pixels. It also
+completes replacement snapshot storage initialization before another shared GL
+context uses it. Native checks expand 1280x800 to 2074x1296, shrink to 986x616 and
+repeat both transitions; the game world, weapon, HUD and menu remain fully
+visible. The swapchain image remains 1280x800 and SWS scales it to the output.
+This verifies retained-image presentation, not swapchain recreation by the game.
+The ordinary full image built with the listed QEMU and Linux ICD revisions also
+renders its world and menu after a 1280x800 to 1408x880 transition, then exits
+through the upstream quit command with status 0 and no remaining SGFX workers.
+The installed ICD matches a clean build from its committed source byte for byte.
+A second ordinary-image boot saves the game's own 1280x800 world/weapon/HUD TGA
+through Vulkan readback: 4,096,018 bytes, 10,849 RGBA colors and opaque alpha.
+It also quits with status 0 and no remaining SGFX workers. Automated key checks
+use QMP `send-key` with a 1000 ms hold time.
+
+Initial Vulkan images remain limited to 2048 pixels per dimension. Starting
+the game on a larger initial display can fail swapchain creation; resizing an
+already initialized 1280x800 image does not require a larger Vulkan image.
+For this test, start QEMU with `zoom-to-fit=off`, launch the game, then enable
+View > Zoom To Fit for window resizing. General larger-image support and
+long-running resize stress remain unverified.
 
 ## Verified release results
 
@@ -218,12 +316,13 @@ its 23 original SPIR-V modules are accepted. The ordinary game setting
 `vk_point_particles=0` selects triangle billboards instead of the unsupported
 PointSize path. World frames continue and the game's own screenshot command
 produces actual GPU-read images. See SGFX's
-[compatibility record](https://github.com/petitstrawberry/sgfx/blob/ff6af0531bda21ef27e96c4e22495a4957f86d8c/docs/vulkan-game-compatibility.md)
+[compatibility record](https://github.com/petitstrawberry/sgfx/blob/08143f8dcf23cc29065a78a965d629a401106e9b/docs/vulkan-game-compatibility.md)
 for the optimized diagnostic build flags, checks and remaining limits.
 Native VirGL now has the mip storage/blit, push-constant and dynamic fullscreen
 vertex-read support used by the game, and an ordinary Linux loader/ICD package.
-The separately recorded Scarlet game checks verify world rendering and console
-input. Broader input, combat, shutdown and performance checks remain necessary.
+The separately recorded Scarlet game checks verify world rendering, console
+input, game GPU readback and normal shutdown. Broader input, combat and sustained
+performance checks remain necessary.
 
 A618 consumers use the same pinned canonical IR revision, but arbitrary
 SPIR-V-to-A618 compilation is not implemented. Host validation and target

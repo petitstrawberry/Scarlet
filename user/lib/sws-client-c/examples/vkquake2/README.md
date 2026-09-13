@@ -64,6 +64,10 @@ environment variable is needed. Run from the native Scarlet shell:
 abi-run linux-aarch64 /bin/sh /usr/games/vkquake2 +map demo1 </dev/null
 ```
 
+Append `+bind f12 screenshot +bind f11 quit` before the redirection to bind
+the upstream screenshot and clean-exit commands. F12 writes a TGA under
+`/usr/share/vkquake2/baseq2/scrnshot`; F11 shuts down the game normally.
+
 Redirecting stdin gives the game its own nonblocking input descriptor; keyboard
 and mouse input arrive through SWS. The launcher disables CD audio, music, and
 point particles through ordinary upstream settings. Audio output is not part of
@@ -100,8 +104,14 @@ resources, loads the game module, and initializes the `demo1` server.
 The normal full-project release image also renders the textured `demo1` 3D
 world, first-person weapon and HUD through the native VirGL GPU path. Actual
 QEMU window captures show different player views after input, and an explicit
-keyboard event opens the console and pauses the world. Combat, sustained FPS,
-the game's screenshot command and normal game shutdown have not been verified.
+keyboard event opens the console and pauses the world. The game also saves its
+own 1280x800 GPU-read TGA, and its normal `quit` command returns exit status 0
+with no SGFX worker tasks remaining. Combat and sustained FPS have not been
+verified. The Linux release ICD now batches consecutive programmable VirGL
+draws sharing a pipeline, with bounds on draw count and packet bytes. The
+graphics execution guide records its source revision, limited CPU submission
+comparisons and three short timedemo measurements. They remain too slow for
+normal play and do not establish sustained performance.
 
 Four real 16 MiB `mremap` shrink checks pass on Scarlet after implementing the
 game's hunk resize. Four 8 MiB partial-unmap checks preserve retained neighbors

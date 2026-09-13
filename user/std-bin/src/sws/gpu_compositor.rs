@@ -21,6 +21,12 @@ use crate::sgfx_ir_support::{
 
 type DamageRect = (u32, u32, u32, u32);
 
+/// Damage is expressed in pixels of the registered image, not the window.
+pub(super) struct SharedFrameDamage {
+    pub(super) extent: (u32, u32),
+    pub(super) rects: Vec<DamageRect>,
+}
+
 /// Scope of one failed GPU-composition frame.
 #[derive(Debug)]
 pub(super) enum GpuCompositionError {
@@ -519,7 +525,7 @@ impl GpuCompositor {
         identity: SgfxBufferIdentity,
         commit_serial: u64,
         damage_rects: &[sws_protocol::SgfxDamageRect],
-    ) -> Result<Vec<DamageRect>, SgfxBufferError> {
+    ) -> Result<SharedFrameDamage, SgfxBufferError> {
         if commit_serial == 0 {
             return Err(SgfxBufferError::InvalidBuffer);
         }
@@ -587,7 +593,10 @@ impl GpuCompositor {
         } else {
             state.pending = Some(commit);
         }
-        Ok(clipped_damage)
+        Ok(SharedFrameDamage {
+            extent: (texture.width, texture.height),
+            rects: clipped_damage,
+        })
     }
 
     /// Remove a registered shared buffer that is not retained by SWS.
