@@ -55,18 +55,21 @@ entries. No source substitution or build-time dependency rewriting is needed.
 
 | Component | Revision |
 | --- | --- |
-| Canonical SGFX IR | `517529778de9412989f317550dff85dac9eb0598` |
+| Canonical SGFX IR for native Rust applications and the linked cube | `517529778de9412989f317550dff85dac9eb0598` |
+| Canonical SGFX IR metadata for the Linux/musl ICD | `a18b5a585616f05cf5df0fa5be1977752ceca1ea` |
 | SGFX for native Rust applications and the linked cube | `10eb666555e341032eae54cf01433b63ea88f00c` |
-| Linux/musl ordinary-loader ICD with shared bindings, changed buffer ranges and ordered insertions | `08143f8dcf23cc29065a78a965d629a401106e9b` |
+| Linux/musl ordinary-loader ICD with shared recordings and native draw bindings | `cdefc6df6068eee2c49f2d0dc5ddc3c3c766a8d5` |
 | QEMU Cocoa GL display with window-sized buffers and resize synchronization | `922577606033eade699d231ba7cebcee0d6b92b6` |
 | ScarletUI | `e3795f40057ddd223b78b2c2c382aac95eaf906b` |
 | Linux SWS C SDK and game platform adapter | `838333bc392f5e345136aa84132c178de2b64c11` |
 | Native GPU/SWS SDK | `4b5257897e341a0d0d3136b37d47b0157b9985cd` |
 | Full-image kernel and Linux ABI module | `7297aac3e91c09daecd4c09c4c9cb7d57d2e6af3` |
-| A618 backend and shader/codegen consumers | `b7bc2c038795527cf538b475649cdeda8e58bdbf` |
+| A618 backend selected by the native Rust revision | `b7bc2c038795527cf538b475649cdeda8e58bdbf` |
+| A618 metadata consumers tested on the host with the newer canonical IR | `699787696beaa82ee02614c60fe85eef4714d41e` |
 
-The Linux ICD embeds the backend planning correction from its listed SGFX
-revision. Both SGFX builds use the same canonical IR and native GPU/SWS SDK.
+The Linux ICD uses the newer shared metadata API; the native Rust applications
+and linked cube retain their listed canonical IR revision. The canonical command
+encoding is unchanged, and both builds use the same native GPU/SWS SDK.
 
 ## Build and run on Scarlet VirGL
 
@@ -192,6 +195,19 @@ bundled demo, use:
 ```sh
 abi-run linux-aarch64 /bin/sh /usr/games/vkquake2 +set timedemo 1 +demomap q2demo1.dm2 +bind f11 quit </dev/null &
 ```
+
+The later ordinary release checkpoint at SGFX
+`cdefc6df6068eee2c49f2d0dc5ddc3c3c766a8d5` retains shared command recordings,
+canonical binding suppression, native binding caches and per-pass constant and
+texture scratch storage. Replaying the session's recorded source changes rebuilt
+its ICD byte for byte against the saved 4.2 FPS binary. A fresh run with the same
+57 timed frames, HVF, four guest CPUs, 8 GiB RAM and 1280x800 swapchain reported
+13.0 s / 4.4 FPS. These are single short runs and remain too slow for normal play.
+The ordinary ICD is installed in both the project's normal rootfs copy layer
+and release image; the private demo prefix remains confined to verification disks.
+The game returned status 0 through its upstream quit command with no remaining
+Vulkan or native GPU workers. The restored backend passed 61 release library
+tests and a Scarlet-target release check.
 
 One final clean-image boot also reports an invalid-return user fault in the
 native GUI `/bin/scarlet-shell` before the game is launched. The serial shell
