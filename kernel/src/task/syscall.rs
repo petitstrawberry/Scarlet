@@ -293,6 +293,13 @@ pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
             return 0;
         }
 
+        // A screen-only boot may have no writable TTY backend. Prefer the
+        // boot framebuffer to arbitrary character devices, including null.
+        if crate::earlyfb::is_redirection_enabled() && crate::earlyfb::is_initialized() {
+            crate::earlyfb::putc(ch as u8);
+            return 0;
+        }
+
         for (_name, device) in manager.get_named_devices() {
             if let Some(char_device) = device.as_char_device()
                 && char_device.can_write()
