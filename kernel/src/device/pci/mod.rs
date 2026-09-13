@@ -60,6 +60,17 @@ use alloc::vec::Vec;
 use crate::println;
 use crate::vm;
 
+/// Only enabled controllers that promise the generic ECAM register layout
+/// can be scanned without a controller-specific host driver.
+pub(crate) fn is_generic_ecam_host_node(node: &fdt::node::FdtNode<'_, '_>) -> bool {
+    !node
+        .property("status")
+        .is_some_and(|p| !matches!(p.as_str(), Some("okay" | "ok")))
+        && node
+            .compatible()
+            .is_some_and(|compat| compat.all().any(|entry| entry == "pci-host-ecam-generic"))
+}
+
 /// PCI device address components
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PciAddress {
