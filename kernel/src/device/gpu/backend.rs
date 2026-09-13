@@ -30,6 +30,8 @@ pub const GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD: u32 = 1 << 5;
 pub const GPU_EXECUTION_SUPPORT_DEPTH: u32 = 1 << 6;
 /// Generic synchronous image readback operations are available.
 pub const GPU_EXECUTION_SUPPORT_IMAGE_READBACK: u32 = 1 << 7;
+/// Explicit allocation of multiple image mip levels is available.
+pub const GPU_EXECUTION_SUPPORT_IMAGE_MIPS: u32 = 1 << 8;
 
 /// Stable state of a GPU device.
 #[repr(u32)]
@@ -349,6 +351,8 @@ pub struct GpuImageCreateInfo {
     pub width: u32,
     /// Image height in pixels.
     pub height: u32,
+    /// Number of allocated mip levels, including the base level.
+    pub mip_levels: u32,
 }
 
 /// Maximum image planes represented by the generic GPU layout model.
@@ -647,6 +651,7 @@ impl GpuImageCreateInfo {
             usage,
             width,
             height,
+            mip_levels: 1,
         }
     }
 }
@@ -662,6 +667,8 @@ pub struct GpuBackendImageInfo {
     pub width: u32,
     /// Image height in pixels.
     pub height: u32,
+    /// Immutable allocated mip-level count.
+    pub mip_levels: u32,
     /// Opaque backend token used only by opaque command bytes.
     pub command_resource_token: u64,
     /// Backing allocation size in bytes.
@@ -690,6 +697,7 @@ impl GpuBackendImageInfo {
             usage: create.usage,
             width: create.width,
             height: create.height,
+            mip_levels: create.mip_levels,
             command_resource_token,
             allocation_size,
         }
@@ -1098,6 +1106,9 @@ pub trait GpuBackend: Send + Sync {
         &self,
         create: GpuImageCreateInfo,
     ) -> Result<GpuBackendImageLayout, &'static str> {
+        if create.mip_levels != 1 {
+            return Err("GPU backend does not support mipmapped images");
+        }
         GpuBackendImageLayout::tight_32bpp(create)
     }
 

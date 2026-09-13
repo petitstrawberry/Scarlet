@@ -13,7 +13,7 @@ use crate::{
     device::{
         Device, DeviceType,
         gpu::{
-            GPU_DIALECT_INFO_BYTES, GPU_EXECUTION_SUPPORT_DEPTH,
+            GPU_DIALECT_INFO_BYTES, GPU_EXECUTION_SUPPORT_DEPTH, GPU_EXECUTION_SUPPORT_IMAGE_MIPS,
             GPU_EXECUTION_SUPPORT_IMAGE_READBACK, GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD,
             GPU_EXECUTION_SUPPORT_MEMORY, GPU_EXECUTION_SUPPORT_PRESENTATION,
             GPU_EXECUTION_SUPPORT_QUEUE, GPU_EXECUTION_SUPPORT_TIMELINE,
@@ -749,6 +749,7 @@ impl VirtioGpuDeviceCore {
                     | GPU_EXECUTION_SUPPORT_TIMELINE
                     | if acceleration_usable {
                         GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD
+                            | GPU_EXECUTION_SUPPORT_IMAGE_MIPS
                             | GPU_EXECUTION_SUPPORT_IMAGE_READBACK
                             | GPU_EXECUTION_SUPPORT_DEPTH
                             | GPU_EXECUTION_SUPPORT_QUEUE
@@ -2095,6 +2096,22 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
 }
 
 impl GpuBackend for VirtioGpuBackend {
+    fn plan_image(
+        &self,
+        create: GpuImageCreateInfo,
+    ) -> Result<crate::device::gpu::GpuBackendImageLayout, &'static str> {
+        let mut layout = crate::device::gpu::GpuBackendImageLayout::tight_32bpp(create)?;
+        let mut total = 0u64;
+        for level in 0..create.mip_levels {
+            let width = (create.width >> level).max(1);
+            let height = (create.height >> level).max(1);
+            total = total
+                .checked_add(u64::from(width) * u64::from(height) * 4)
+                .ok_or("VirtIO GPU mip allocation overflows")?;
+        }
+        layout.total_size = total;
+        Ok(layout)
+    }
     fn query_info(&self) -> GpuBackendInfo {
         self.core.lock().gpu_backend_info()
     }
@@ -2169,7 +2186,7 @@ impl GpuBackend for VirtioGpuBackend {
             height: create.height,
             depth: 1,
             array_size: 1,
-            last_level: 0,
+            last_level: create.mip_levels - 1,
             nr_samples: 0,
             flags: 0,
         })?;

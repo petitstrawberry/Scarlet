@@ -51,19 +51,23 @@ pub use abi::{
     GPU_COMPLETION_FAILURE_NONE, GPU_COMPLETION_PENDING, GPU_COMPLETION_QUERY, GpuCompletionInfo,
 };
 pub use abi::{
+    GPU_CREATE_MIP_IMAGE, GPU_IMAGE_QUERY_MIP_LEVELS, GpuCreateMipImage, GpuImageMipLevels,
+};
+pub use abi::{
     GPU_QUEUE_QUERY_ASYNC, GPU_QUEUE_SUBMIT_ASYNC, GPU_RESULT_BUSY, GPU_RESULT_DEVICE_LOST,
 };
 pub use async_abi::{GpuQueueAsyncInfo, GpuQueueSubmitAsync};
 pub use backend::{
     GPU_EXECUTION_SUPPORT_ADDRESS_SPACE, GPU_EXECUTION_SUPPORT_DEPTH,
-    GPU_EXECUTION_SUPPORT_IMAGE_READBACK, GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD,
-    GPU_EXECUTION_SUPPORT_MEMORY, GPU_EXECUTION_SUPPORT_NONE, GPU_EXECUTION_SUPPORT_PRESENTATION,
-    GPU_EXECUTION_SUPPORT_QUEUE, GPU_EXECUTION_SUPPORT_TIMELINE, GpuBackend, GpuBackendBuffer,
-    GpuBackendBufferInfo, GpuBackendContext, GpuBackendContextInfo, GpuBackendDialectDescriptor,
-    GpuBackendDialectInfo, GpuBackendImage, GpuBackendImageInfo, GpuBackendImageLayout,
-    GpuBackendImagePlaneLayout, GpuBackendInfo, GpuBackendLinearDisplayInfo, GpuBackendQueue,
-    GpuBackendQueueInfo, GpuBackendSubmitError, GpuBufferCreateInfo, GpuDeviceInfo, GpuDeviceState,
-    GpuImageBackingInfo, GpuImageCreateInfo, GpuImageUploadInfo,
+    GPU_EXECUTION_SUPPORT_IMAGE_MIPS, GPU_EXECUTION_SUPPORT_IMAGE_READBACK,
+    GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD, GPU_EXECUTION_SUPPORT_MEMORY, GPU_EXECUTION_SUPPORT_NONE,
+    GPU_EXECUTION_SUPPORT_PRESENTATION, GPU_EXECUTION_SUPPORT_QUEUE,
+    GPU_EXECUTION_SUPPORT_TIMELINE, GpuBackend, GpuBackendBuffer, GpuBackendBufferInfo,
+    GpuBackendContext, GpuBackendContextInfo, GpuBackendDialectDescriptor, GpuBackendDialectInfo,
+    GpuBackendImage, GpuBackendImageInfo, GpuBackendImageLayout, GpuBackendImagePlaneLayout,
+    GpuBackendInfo, GpuBackendLinearDisplayInfo, GpuBackendQueue, GpuBackendQueueInfo,
+    GpuBackendSubmitError, GpuBufferCreateInfo, GpuDeviceInfo, GpuDeviceState, GpuImageBackingInfo,
+    GpuImageCreateInfo, GpuImageUploadInfo,
 };
 pub use backend::{GpuBackendCpuAccessGuard, GpuBackendEnqueueError};
 pub use completion::{
@@ -246,6 +250,12 @@ mod tests {
         assert_eq!(core::mem::size_of::<super::GpuQueueInfo>(), 24);
         assert_eq!(core::mem::size_of::<super::GpuQueueSubmit>(), 56);
         assert_eq!(core::mem::size_of::<super::GpuCreateImage>(), 48);
+        assert_eq!(core::mem::size_of::<super::GpuCreateMipImage>(), 56);
+        assert_eq!(
+            core::mem::offset_of!(super::GpuCreateMipImage, mip_levels),
+            48
+        );
+        assert_eq!(core::mem::size_of::<super::GpuImageMipLevels>(), 16);
         assert_eq!(core::mem::size_of::<super::GpuImageInfo>(), 40);
         assert_eq!(core::mem::size_of::<super::GpuImagePlaneLayout>(), 32);
         assert_eq!(core::mem::size_of::<super::GpuImageLayout>(), 168);
@@ -322,6 +332,39 @@ mod tests {
                 valid.height,
             )
         ));
+    }
+
+    #[test_case]
+    fn gpu_mip_storage_validation_preserves_legacy_and_import_contracts() {
+        let mut create = GpuImageCreateInfo::new(
+            GPU_IMAGE_FORMAT_BGRA8_UNORM,
+            GPU_IMAGE_USAGE_SAMPLED | GPU_IMAGE_USAGE_TRANSFER_DST,
+            7,
+            1,
+        );
+        assert!(super::resource::imported_image_create_is_valid(create));
+        create.mip_levels = 3; // 7x1, 3x1, 1x1.
+        assert!(super::resource::image_create_is_valid(create));
+        assert!(!super::resource::imported_image_create_is_valid(create));
+        create.mip_levels = 4;
+        assert!(!super::resource::image_create_is_valid(create));
+        create.mip_levels = 0;
+        assert!(!super::resource::image_create_is_valid(create));
+        create.mip_levels = 2;
+        create.width = 1;
+        assert!(!super::resource::image_create_is_valid(create));
+        create.height = 2;
+        assert!(super::resource::image_create_is_valid(create));
+        create.usage |= GPU_IMAGE_USAGE_PRESENTABLE;
+        assert!(!super::resource::image_create_is_valid(create));
+        create = GpuImageCreateInfo::new(
+            GPU_IMAGE_FORMAT_DEPTH32_FLOAT,
+            GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT,
+            8,
+            8,
+        );
+        create.mip_levels = 2;
+        assert!(!super::resource::image_create_is_valid(create));
     }
 
     #[test_case]

@@ -13,6 +13,7 @@ use super::{
     GpuImageCreateInfo, GpuImageInfo, GpuImageLayout, GpuImagePlaneLayout, GpuImageUploadInfo,
     GpuTimelineCreatePoint, GpuTimelineFail, GpuTimelineInfo, GpuTimelineSignal,
 };
+use super::{GPU_IMAGE_QUERY_MIP_LEVELS, GpuImageMipLevels};
 use crate::device::graphics::GpuBackingSegment;
 use crate::environment::PAGE_SIZE;
 use crate::ipc::shared_memory::{SharedMemoryObject, SharedMemoryPin};
@@ -118,6 +119,20 @@ pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
         && create.width != 0
         && create.height != 0
         && create.width <= u32::MAX / 4
+        && create.mip_levels != 0
+        && create.mip_levels
+            <= 32
+                - (if create.width > create.height {
+                    create.width
+                } else {
+                    create.height
+                })
+                .leading_zeros()
+        && (create.mip_levels == 1
+            || create.usage
+                & (super::GPU_IMAGE_USAGE_PRESENTABLE
+                    | super::GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT)
+                == 0)
         && if create.format == super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT {
             create.usage == super::GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT
         } else {
@@ -128,6 +143,7 @@ pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
 /// Return whether a generic image descriptor is valid for imported SHM backing.
 pub(crate) const fn imported_image_create_is_valid(create: GpuImageCreateInfo) -> bool {
     image_create_is_valid(create)
+        && create.mip_levels == 1
         && create.format == GPU_IMAGE_FORMAT_BGRA8_UNORM
         && create.usage == super::GPU_IMAGE_USAGE_SAMPLED | super::GPU_IMAGE_USAGE_TRANSFER_DST
 }
@@ -1010,6 +1026,7 @@ impl GpuImage {
             || info.usage != create.usage
             || info.width != create.width
             || info.height != create.height
+            || info.mip_levels != create.mip_levels
             || info.command_resource_token == 0
             || info.allocation_size != backing_allocation_size
         {
@@ -1065,6 +1082,7 @@ impl GpuImage {
             || info.usage != create.usage
             || info.width != create.width
             || info.height != create.height
+            || info.mip_levels != create.mip_levels
             || info.command_resource_token == 0
             || info.allocation_size != backing_allocation_size
         {
@@ -1314,6 +1332,20 @@ impl ControlOps for GpuImage {
         match command {
             GPU_IMAGE_QUERY_INFO => self.handle_query_info(arg),
             GPU_IMAGE_QUERY_LAYOUT => self.handle_query_layout(arg),
+            GPU_IMAGE_QUERY_MIP_LEVELS => {
+                let mut info: GpuImageMipLevels = read_user_value(arg)?;
+                info.result = super::GPU_RESULT_SUCCESS;
+                info.mip_levels = 0;
+                if info.abi_version != GPU_ABI_VERSION {
+                    info.result = GPU_RESULT_INVALID_ABI;
+                } else if info.reserved != 0 {
+                    info.result = super::GPU_RESULT_INVALID_ARGUMENT;
+                } else {
+                    info.mip_levels = self.query_info().mip_levels;
+                }
+                write_user_value(arg, &info)?;
+                Ok(0)
+            }
             _ => Err("Unsupported GPU image control command"),
         }
     }
