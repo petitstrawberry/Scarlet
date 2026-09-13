@@ -13,51 +13,52 @@ use crate::vm::vmem::{MemoryArea, VirtualMemoryMap};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-pub(crate) fn reclaim_private_removed_mapping(
+/// Reclaim one completed unmap transaction. The VM has already removed the
+/// PTEs and synchronized the TLB before these physical allocations are freed.
+/// Collect and merge private backing ranges so COW-split VMAs do not rescan or
+/// rebuild the entire allocation registry once per removed page.
+pub(crate) fn reclaim_private_removed_mappings(
     task: &crate::task::Task,
-    removed_map: &VirtualMemoryMap,
+    removed_maps: &[VirtualMemoryMap],
 ) {
-    if removed_map.is_shared {
-        return;
-    }
-
-    if let Some(owner) = &removed_map.owner {
-        let start_page_idx = (removed_map.vmarea.start - removed_map.vm_start) / PAGE_SIZE;
-        let page_count =
-            (removed_map.vmarea.end - removed_map.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
-        owner.release_pages(start_page_idx, page_count);
-        return;
-    }
-
-    let pm_start = removed_map.pmarea.start;
-    let pm_end = removed_map.pmarea.end;
-    if pm_start == 0 && pm_end == 0 {
-        return;
-    }
-
-    {
-        let mut allocs = task.page_allocations.write();
-        let mut retained = Vec::new();
-        for alloc in allocs.drain(..) {
-            let alloc_start = alloc.as_paddr();
-            let alloc_end = alloc_start + (alloc.len() * PAGE_SIZE) as u64 - 1;
-
-            if alloc_start >= pm_start && alloc_end <= pm_end {
-                drop(alloc);
-            } else {
-                retained.push(alloc);
-            }
+    let mut ranges = Vec::new();
+    for map in removed_maps {
+        if map.is_shared {
+            continue;
         }
-        *allocs = retained;
-    }
-
-    {
-        let mut task_pages_allocs = task.task_pages.write();
-        for alloc in task_pages_allocs.iter_mut() {
-            let _ = alloc.reclaim_paddr_range(pm_start, pm_end);
+        if let Some(owner) = &map.owner {
+            let first = (map.vmarea.start - map.vm_start) / PAGE_SIZE;
+            owner.release_pages(first, map.vmarea.size().div_ceil(PAGE_SIZE));
+        } else if map.pmarea.start != 0 && map.pmarea.end >= map.pmarea.start {
+            ranges.push((map.pmarea.start, map.pmarea.end));
         }
-        task_pages_allocs.retain(|alloc| !alloc.is_empty());
     }
+    if ranges.is_empty() {
+        return;
+    }
+    ranges.sort_unstable_by_key(|range| range.0);
+    let mut count = 0;
+    for index in 0..ranges.len() {
+        let range = ranges[index];
+        if count != 0 && range.0 <= ranges[count - 1].1.saturating_add(1) {
+            ranges[count - 1].1 = ranges[count - 1].1.max(range.1);
+        } else {
+            ranges[count] = range;
+            count += 1;
+        }
+    }
+    ranges.truncate(count);
+    task.page_allocations.write().retain(|alloc| {
+        let start = alloc.as_paddr();
+        let end = start + (alloc.len() * PAGE_SIZE) as u64 - 1;
+        let index = ranges.partition_point(|range| range.0 <= start);
+        index == 0 || end > ranges[index - 1].1
+    });
+    let mut allocations = task.task_pages.write();
+    for alloc in allocations.iter_mut() {
+        alloc.reclaim_paddr_ranges(&ranges);
+    }
+    allocations.retain(|alloc| !alloc.is_empty());
 }
 
 // Memory mapping flags (MAP_*)
@@ -221,9 +222,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
                 owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
             }
         }
-        for removed_map in removed_mappings {
-            reclaim_private_removed_mapping(&task, &removed_map);
-        }
+        reclaim_private_removed_mappings(&task, &removed_mappings);
 
         memory_mappable.on_mapped(final_vaddr, 0, aligned_length, offset);
         return final_vaddr;
@@ -308,9 +307,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
                 }
             }
 
-            for removed_map in removed_mappings {
-                reclaim_private_removed_mapping(&task, &removed_map);
-            }
+            reclaim_private_removed_mappings(&task, &removed_mappings);
 
             final_vaddr
         }
@@ -425,9 +422,7 @@ fn handle_anonymous_mapping(
             }
         }
     }
-    for removed_map in removed_mappings {
-        reclaim_private_removed_mapping(task, &removed_map);
-    }
+    reclaim_private_removed_mappings(task, &removed_mappings);
     final_vaddr
 }
 
@@ -469,9 +464,8 @@ pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
         if let Some(owner) = &removed_map.owner {
             owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
         }
-
-        reclaim_private_removed_mapping(&task, removed_map);
     }
+    reclaim_private_removed_mappings(&task, &removed_maps);
 
     0
 }

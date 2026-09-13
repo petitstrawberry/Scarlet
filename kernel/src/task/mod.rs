@@ -40,7 +40,7 @@ use crate::{
     mem::page::ContiguousPages,
     object::{
         capability::memory_mapping::{
-            anon_owner::ForkCowPageOwner, syscall::reclaim_private_removed_mapping,
+            anon_owner::ForkCowPageOwner, syscall::reclaim_private_removed_mappings,
         },
         handle::HandleTable,
     },
@@ -2152,8 +2152,8 @@ impl Task {
             if let Some(owner) = &removed_map.owner {
                 owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
             }
-            reclaim_private_removed_mapping(self, removed_map);
         }
+        reclaim_private_removed_mappings(self, &removed_maps);
     }
 
     /// Allocate text pages for the task. And increment the size of the task.
@@ -3135,8 +3135,8 @@ impl Task {
             if let Some(owner) = &removed_map.owner {
                 owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
             }
-            reclaim_private_removed_mapping(self, removed_map);
         }
+        reclaim_private_removed_mappings(self, &removed_maps);
     }
 
     fn exit_with_thread_cleanup(
@@ -3172,8 +3172,8 @@ impl Task {
             if let Some(owner) = &removed_map.owner {
                 owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
             }
-            reclaim_private_removed_mapping(self, removed_map);
         }
+        reclaim_private_removed_mappings(self, &removed_maps);
         crate::breadcrumb::drop(crate::breadcrumb::EXIT_VM_DONE, self.id as u64, 0);
         self.trace_fork_exit_phase("exit-vm-done", removed_maps.len());
     }

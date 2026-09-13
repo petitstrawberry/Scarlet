@@ -5,7 +5,7 @@ use crate::{
     },
     arch::Trapframe,
     environment::PAGE_SIZE,
-    object::capability::memory_mapping::syscall::reclaim_private_removed_mapping,
+    object::capability::memory_mapping::syscall::reclaim_private_removed_mappings,
     task::mytask,
     vm::addr::{is_direct_mapped, virt_to_phys},
     vm::vmem::{MemoryArea, VirtualMemoryMap},
@@ -213,9 +213,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
             }
         }
-        for removed_map in removed_mappings {
-            reclaim_private_removed_mapping(&task, &removed_map);
-        }
+        reclaim_private_removed_mappings(&task, &removed_mappings);
 
         memory_mappable.on_mapped(final_vaddr, 0, aligned_length, offset);
         return final_vaddr;
@@ -286,9 +284,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
 
             if let Some(removed_mappings) = removed_mappings_opt {
-                for removed_map in removed_mappings {
-                    reclaim_private_removed_mapping(&task, &removed_map);
-                }
+                reclaim_private_removed_mappings(&task, &removed_mappings);
             }
 
             final_vaddr
@@ -437,9 +433,7 @@ fn handle_anonymous_mapping(
             }
         }
     }
-    for removed_map in removed_mappings {
-        reclaim_private_removed_mapping(task, &removed_map);
-    }
+    reclaim_private_removed_mappings(task, &removed_mappings);
     mapped_vaddr
 }
 
@@ -748,9 +742,8 @@ pub fn sys_munmap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         if let Some(owner) = &removed_map.owner {
             owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
         }
-
-        reclaim_private_removed_mapping(&task, removed_map);
     }
+    reclaim_private_removed_mappings(&task, &removed_maps);
 
     0
 }
@@ -814,8 +807,8 @@ pub fn sys_mremap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         if let Some(owner) = &map.owner {
             owner.on_unmapped(map.vmarea.start, map.vmarea.size());
         }
-        reclaim_private_removed_mapping(&task, map);
     }
+    reclaim_private_removed_mappings(&task, &removed);
     address
 }
 
