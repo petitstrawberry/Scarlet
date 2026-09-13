@@ -30,6 +30,11 @@ macro_rules! syscall_table {
         /// Returns an error if the syscall number is invalid
         pub fn syscall_handler(trapframe: &mut Trapframe) -> Result<usize, &'static str> {
             let syscall_number = trapframe.get_syscall_number();
+            syscall_handler_number(trapframe, syscall_number)
+        }
+
+        /// Dispatch an explicitly selected native operation, retaining raw results.
+        pub fn syscall_handler_number(trapframe: &mut Trapframe, syscall_number: usize) -> Result<usize, &'static str> {
             // crate::println!("Syscall number: {}", syscall_number);
             if syscall_number == 0 {
                 return Err("Invalid syscall number");

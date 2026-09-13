@@ -599,10 +599,14 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
     );
 
     // 3. Resolve the appropriate ABI based on PC address and handle the syscall
-    let res = task.with_resolve_abi_mut(pc, |abi_module| {
-        // 4. Handle the system call with the resolved ABI
-        abi_module.handle_syscall(trapframe)
-    });
+    let res = if let Some(native_number) = scarlet_abi::decode_native_call(syscall_number) {
+        crate::syscall::syscall_handler_number(trapframe, native_number)
+    } else {
+        task.with_resolve_abi_mut(pc, |abi_module| {
+            // 4. Handle the system call with the resolved ABI
+            abi_module.handle_syscall(trapframe)
+        })
+    };
     crate::breadcrumb::drop(
         crate::breadcrumb::SYSCALL_ABI_DONE,
         task.get_id() as u64,
