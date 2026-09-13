@@ -1712,6 +1712,10 @@ impl CharDevice for TtyDevice {
 
         let _lock = self.write_lock.lock();
 
+        if crate::earlyfb::is_redirection_enabled() && crate::earlyfb::is_initialized() {
+            crate::earlyfb::putc(byte);
+        }
+
         if self.output_postprocess_enabled.load(Ordering::Relaxed) && byte == b'\n' {
             self.backend.write(&[b'\r', b'\n'])?;
         } else {
