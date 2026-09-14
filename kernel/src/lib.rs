@@ -980,6 +980,11 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
 
     fence(Ordering::SeqCst); // Ensure VFS and initramfs are initialized before proceeding
 
+    // Firmware-backed drivers may have deferred before their files existed.
+    // Retry the queued probes once the global root filesystem is mounted.
+    println!("[boot] Retrying deferred devices after root filesystem initialization...");
+    device_manager.retry_deferred_probes();
+
     /* Apply network configuration from cmdline */
     #[cfg(feature = "network")]
     {
