@@ -3498,6 +3498,12 @@ impl DeviceManager {
         ProbeOutcome::NoMatch
     }
 
+    /// Retry queued platform probes after a new dependency becomes available.
+    /// Already bound devices are not rescanned or probed again.
+    pub fn retry_deferred_probes(&self) {
+        self.retry_deferred_devices(DriverPriority::Late);
+    }
+
     fn retry_deferred_devices(&self, max_priority: DriverPriority) {
         loop {
             let retry_batch = {
