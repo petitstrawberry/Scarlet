@@ -23,6 +23,7 @@ impl Selectable for KmsgDevice {
         if interest.read {
             set.read = !crate::log::is_empty();
         }
+        set.write = interest.write;
         set
     }
 
@@ -33,7 +34,7 @@ impl Selectable for KmsgDevice {
         _timeout_ticks: Option<u64>,
         _min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
-        if interest.read && crate::log::is_empty() {
+        if interest.read && !interest.write && crate::log::is_empty() {
             if let Some(task) = mytask() {
                 if crate::log::READER_WAKER.wait_result(task.get_id(), trapframe)
                     == WaitResult::Interrupted
