@@ -78,6 +78,10 @@ pub mod commands {
     pub const GPU_QUEUE_SUBMIT: u32 = 0x475d;
     /// Create a backend-owned GPU image child handle.
     pub const GPU_CREATE_IMAGE: u32 = 0x475e;
+    /// Create an image with an explicit mip-level count.
+    pub const GPU_CREATE_MIP_IMAGE: u32 = 0x476c;
+    /// Query an image's allocated mip-level count.
+    pub const GPU_IMAGE_QUERY_MIP_LEVELS: u32 = 0x476d;
     /// Query a GPU image child handle.
     pub const GPU_IMAGE_QUERY_INFO: u32 = 0x475f;
     /// Attach a GPU image to an execution context.
@@ -183,6 +187,8 @@ pub const GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD: u32 = 1 << 5;
 pub const GPU_EXECUTION_SUPPORT_DEPTH: u32 = 1 << 6;
 /// Generic synchronous image readback operations are available.
 pub const GPU_EXECUTION_SUPPORT_IMAGE_READBACK: u32 = 1 << 7;
+/// Explicit allocation of multiple image mip levels is available.
+pub const GPU_EXECUTION_SUPPORT_IMAGE_MIPS: u32 = 1 << 8;
 
 /// Fixed byte capacity of an opaque backend or dialect identifier.
 pub const GPU_BACKEND_ID_BYTES: usize = 32;
@@ -270,6 +276,28 @@ impl GpuCreateImage {
             allocation_size: 0,
         }
     }
+}
+
+/// Extended image request for [`commands::GPU_CREATE_MIP_IMAGE`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuCreateMipImage {
+    /// The unchanged base image creation contract.
+    pub image: GpuCreateImage,
+    /// Allocated levels including level zero; must fit the full mip chain.
+    pub mip_levels: u32,
+    /// Must be zero.
+    pub reserved: u32,
+}
+
+/// Fixed-width response for [`commands::GPU_IMAGE_QUERY_MIP_LEVELS`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuImageMipLevels {
+    pub abi_version: u32,
+    pub result: u32,
+    pub mip_levels: u32,
+    pub reserved: u32,
 }
 
 /// Fixed-width response for [`commands::GPU_IMAGE_QUERY_INFO`].
@@ -1614,6 +1642,40 @@ impl Gpu {
         self.create_image_request(&mut request)
     }
 
+    /// Allocate a color image with real backend mip storage. Presentable and
+    /// depth images retain the single-level contract. Backends without the
+    /// image-mips capability reject this request before allocation.
+    pub fn create_mip_image_with_format_and_usage(
+        &self,
+        format: u32,
+        width: u32,
+        height: u32,
+        usage: u32,
+        mip_levels: u32,
+    ) -> HandleResult<GpuImage> {
+        if mip_levels == 1 {
+            return self.create_image_with_format_and_usage(format, width, height, usage);
+        }
+        let mut request = GpuCreateMipImage {
+            image: GpuCreateImage::new_with_usage(width, height, usage),
+            mip_levels,
+            reserved: 0,
+        };
+        request.image.format = format;
+        // SAFETY: the complete initialized extended record stays exclusively borrowed during control.
+        unsafe {
+            self.file.as_handle().control(
+                commands::GPU_CREATE_MIP_IMAGE,
+                &mut request as *mut _ as usize,
+            )
+        }?;
+        result_to_handle_error(request.image.result)?;
+        Ok(GpuImage {
+            handle: adopt_child_handle(request.image.image_handle)?,
+            command_resource_token: request.image.command_resource_token,
+        })
+    }
+
     /// Create a sampled BGRA texture image backed by an existing SharedMemory object.
     ///
     /// # Arguments
@@ -2177,6 +2239,24 @@ pub struct GpuImage {
 }
 
 impl GpuImage {
+    /// Query immutable allocated mip storage, including the base level.
+    pub fn query_mip_levels(&self) -> HandleResult<u32> {
+        let mut request = GpuImageMipLevels {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            mip_levels: 0,
+            reserved: 0,
+        };
+        // SAFETY: initialized writable fixed-width query record.
+        unsafe {
+            self.handle.control(
+                commands::GPU_IMAGE_QUERY_MIP_LEVELS,
+                &mut request as *mut _ as usize,
+            )
+        }?;
+        result_to_handle_error(request.result)?;
+        Ok(request.mip_levels)
+    }
     /// Adopt a transferred GPU image capability handle.
     ///
     /// The handle is queried before it is accepted, which verifies that it is a
@@ -2542,6 +2622,8 @@ const _: [(); 32] = [(); core::mem::size_of::<GpuCreateQueue>()];
 const _: [(); 24] = [(); core::mem::size_of::<GpuQueueInfo>()];
 const _: [(); 56] = [(); core::mem::size_of::<GpuQueueSubmit>()];
 const _: [(); 48] = [(); core::mem::size_of::<GpuCreateImage>()];
+const _: [(); 56] = [(); core::mem::size_of::<GpuCreateMipImage>()];
+const _: [(); 16] = [(); core::mem::size_of::<GpuImageMipLevels>()];
 const _: [(); 40] = [(); core::mem::size_of::<GpuImageInfo>()];
 const _: [(); 32] = [(); core::mem::size_of::<GpuImagePlaneLayout>()];
 const _: [(); 168] = [(); core::mem::size_of::<GpuImageLayout>()];
