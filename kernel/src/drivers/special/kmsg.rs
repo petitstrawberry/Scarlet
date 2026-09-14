@@ -92,12 +92,18 @@ impl CharDevice for KmsgDevice {
         }
     }
 
-    fn write_byte(&self, _byte: u8) -> Result<(), &'static str> {
-        Err("kmsg is read-only")
+    fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
+        self.write(&[byte]).map(|_| ())
     }
 
-    fn write(&self, _buffer: &[u8]) -> Result<usize, &'static str> {
-        Err("kmsg is read-only")
+    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
+        // Like Linux /dev/kmsg, accept userspace diagnostic messages. The
+        // normal print path retains them and uses the configured console.
+        // This device must never be selected as that console itself.
+        if !buffer.is_empty() {
+            crate::print!("{}", String::from_utf8_lossy(buffer));
+        }
+        Ok(buffer.len())
     }
 
     fn can_read(&self) -> bool {
@@ -105,7 +111,7 @@ impl CharDevice for KmsgDevice {
     }
 
     fn can_write(&self) -> bool {
-        false
+        true
     }
 
     fn read_at(&self, position: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
