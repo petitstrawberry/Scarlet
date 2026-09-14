@@ -676,6 +676,7 @@ impl BootInfo {
 /// enters normal kernel operation mode.
 #[unsafe(no_mangle)]
 pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
+    crate::earlyfb::configure(boot_info.get_cmdline());
     let cpu_id = boot_info.cpu_id;
     let cpu_count = boot_info.cpu_count;
     crate::sched::scheduler::register_boot_cpu(cpu_id);

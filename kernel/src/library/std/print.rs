@@ -150,7 +150,7 @@ fn write_to_normal_console(args: fmt::Arguments) -> bool {
         let mut after = None;
         while let Some((id, dev)) = manager.get_next_device(after) {
             after = Some(id);
-            if dev.device_type() != DeviceType::Char || dev.name() == "null" {
+            if dev.device_type() != DeviceType::Char || matches!(dev.name(), "null" | "kmsg") {
                 continue;
             }
             let capabilities = dev.capabilities();

@@ -15,6 +15,7 @@ const GLYPH_HEIGHT: usize = FONT_HEIGHT * FONT_SCALE;
 // stop mirroring normal kernel, TTY, and breadcrumb output into it.
 const DIAGNOSTIC_ENABLE_FBCON_REDIRECTION: bool = false;
 static REDIRECTION_ENABLED: AtomicBool = AtomicBool::new(DIAGNOSTIC_ENABLE_FBCON_REDIRECTION);
+static KEEP_BOOT_CONSOLE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "linux-boot")]
 static EMERGENCY_ADDR: AtomicUsize = AtomicUsize::new(0);
@@ -375,8 +376,26 @@ pub(crate) fn is_redirection_enabled() -> bool {
 }
 
 pub fn deactivate() {
+    if keep_boot_console() {
+        return;
+    }
     let mut console = EARLY_CONSOLE.lock();
     console.initialized = false;
+}
+
+/// Retain boot-console output when the display driver can preserve its surface.
+/// This is an explicit diagnostic option, independent of distribution policy.
+pub fn keep_boot_console() -> bool {
+    KEEP_BOOT_CONSOLE.load(Ordering::Acquire)
+}
+
+pub(crate) fn configure(cmdline: &str) {
+    KEEP_BOOT_CONSOLE.store(
+        cmdline
+            .split_whitespace()
+            .any(|word| word == "keep_bootcon"),
+        Ordering::Release,
+    );
 }
 
 /// Previous boot-console surface retained for a failed native display handoff.
