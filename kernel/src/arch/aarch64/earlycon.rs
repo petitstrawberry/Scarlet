@@ -29,6 +29,14 @@ fn publish_uart(kind: EarlyUartKind, vaddr: usize) {
     crate::log::register_emergency_putc(emergency_uart_putc);
 }
 
+/// Return whether the boot contract selected an early UART.
+///
+/// Runtime console discovery uses this to avoid turning an unrelated serial
+/// device into the kernel console merely because its driver was registered.
+pub(crate) fn has_active_uart() -> bool {
+    EarlyUartKind::from_raw(EARLY_UART_KIND.load(Ordering::Acquire)) != EarlyUartKind::None
+}
+
 fn try_uart_putc(c: u8) -> bool {
     let kind = EarlyUartKind::from_raw(EARLY_UART_KIND.load(Ordering::Acquire));
     let uart = EARLY_UART_VADDR.load(Ordering::Relaxed);
