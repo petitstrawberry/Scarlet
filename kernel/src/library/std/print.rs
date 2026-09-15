@@ -132,6 +132,14 @@ pub fn _print(args: fmt::Arguments) {
 }
 
 fn write_to_normal_console(args: fmt::Arguments) -> bool {
+    // A registered serial device is not necessarily the selected console.
+    // In particular, Linux-boot platforms may expose a UART node while
+    // /chosen/stdout-path intentionally selects the boot framebuffer. Keep
+    // using that architecture console unless early boot selected a UART.
+    if !crate::arch::has_active_uart() {
+        return false;
+    }
+
     let manager = DeviceManager::get_manager();
 
     // The lower character device is a raw byte stream. Apply serial-console
