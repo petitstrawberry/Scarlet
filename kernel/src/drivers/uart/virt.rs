@@ -22,8 +22,6 @@ use crate::{
     object::capability::{ControlOps, MemoryMappingOps, Selectable},
 };
 
-const TX_PACE_BYTES: usize = 64;
-
 pub struct Uart {
     // inner: Arc<IrqSpinLock<UartInner>>,
     base: usize,
@@ -43,7 +41,6 @@ pub const LCR_OFFSET: usize = 0x03; // Line Control Register
 pub const LSR_OFFSET: usize = 0x05;
 
 pub const LSR_THRE: u8 = 0x20;
-pub const LSR_TEMT: u8 = 0x40;
 pub const LSR_DR: u8 = 0x01;
 
 // IER bits
@@ -121,12 +118,6 @@ impl Uart {
             core::hint::spin_loop();
         }
         self.reg_write(THR_OFFSET, c);
-    }
-
-    fn wait_tx_idle(&self) {
-        while self.reg_read(LSR_OFFSET) & LSR_TEMT == 0 {
-            core::hint::spin_loop();
-        }
     }
 
     fn read_byte_internal(&self) -> u8 {
@@ -248,9 +239,6 @@ impl CharDevice for Uart {
         let _lock = self.tx_lock.lock();
 
         self.write_byte_internal(byte);
-        if byte == b'\n' {
-            self.wait_tx_idle();
-        }
         Ok(())
     }
 
@@ -260,14 +248,8 @@ impl CharDevice for Uart {
         }
         let _lock = self.tx_lock.lock();
 
-        let mut paced = 0;
         for &byte in buffer {
             self.write_byte_internal(byte);
-            paced += 1;
-            if byte == b'\n' || paced >= TX_PACE_BYTES {
-                self.wait_tx_idle();
-                paced = 0;
-            }
         }
 
         Ok(buffer.len())

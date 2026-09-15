@@ -15,11 +15,11 @@
 //! ## Implementation Details
 //!
 //! Output uses earlycon until device initialization enables the normal console.
-//! Callers use the same macros throughout boot and normal operation. UART writers
-//! implement the `Write` trait and handle CR+LF conversion for newlines.
+//! Callers use the same macros throughout boot and normal operation.
 //! Normal-console discovery does not allocate a device snapshot. It waits for the
 //! device registry lock; contention alone never switches output to earlycon.
 //! If no console can be reached after discovery, output falls back to earlycon.
+//! Console writers expand LF to CR+LF while UART drivers remain byte-transparent.
 //! The print lock still serializes messages, and UART drivers retain their TX locks.
 
 use core::fmt;
@@ -132,13 +132,39 @@ pub fn _print(args: fmt::Arguments) {
 }
 
 fn write_to_normal_console(args: fmt::Arguments) -> bool {
+    // A registered serial device is not necessarily the selected console.
+    // In particular, Linux-boot platforms may expose a UART node while
+    // /chosen/stdout-path intentionally selects the boot framebuffer. Keep
+    // using that architecture console unless early boot selected a UART.
+    if !crate::arch::has_active_uart() {
+        return false;
+    }
+
     let manager = DeviceManager::get_manager();
 
-    struct CharDeviceWriter<'a>(&'a dyn CharDevice);
+    // The lower character device is a raw byte stream. Apply serial-console
+    // newline semantics here without changing the log ring or raw UART API.
+    struct ConsoleWriter<'a>(&'a dyn CharDevice);
 
-    impl<'a> fmt::Write for CharDeviceWriter<'a> {
+    impl<'a> fmt::Write for ConsoleWriter<'a> {
         fn write_str(&mut self, s: &str) -> fmt::Result {
-            self.0.write(s.as_bytes()).map_err(|_| fmt::Error)?;
+            let bytes = s.as_bytes();
+            let mut start = 0;
+
+            for (index, &byte) in bytes.iter().enumerate() {
+                if byte != b'\n' {
+                    continue;
+                }
+                if start != index {
+                    self.0.write(&bytes[start..index]).map_err(|_| fmt::Error)?;
+                }
+                self.0.write(b"\r\n").map_err(|_| fmt::Error)?;
+                start = index + 1;
+            }
+
+            if start != bytes.len() {
+                self.0.write(&bytes[start..]).map_err(|_| fmt::Error)?;
+            }
             Ok(())
         }
     }
@@ -150,7 +176,7 @@ fn write_to_normal_console(args: fmt::Arguments) -> bool {
         let mut after = None;
         while let Some((id, dev)) = manager.get_next_device(after) {
             after = Some(id);
-            if dev.device_type() != DeviceType::Char || dev.name() == "null" {
+            if dev.device_type() != DeviceType::Char || matches!(dev.name(), "null" | "kmsg") {
                 continue;
             }
             let capabilities = dev.capabilities();
@@ -163,7 +189,7 @@ fn write_to_normal_console(args: fmt::Arguments) -> bool {
             }
 
             if let Some(char_dev) = dev.as_char_device() {
-                let mut writer = CharDeviceWriter(char_dev);
+                let mut writer = ConsoleWriter(char_dev);
                 if writer.write_fmt(args).is_ok() {
                     return true;
                 }
