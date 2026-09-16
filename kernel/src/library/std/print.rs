@@ -146,7 +146,10 @@ fn write_to_normal_console(args: fmt::Arguments) -> bool {
 
     // The lower character device is a raw byte stream. Apply serial-console
     // newline semantics here without changing the log ring or raw UART API.
-    struct ConsoleWriter<'a>(&'a dyn CharDevice);
+    struct ConsoleWriter<'a> {
+        device: &'a dyn CharDevice,
+        last_was_cr: bool,
+    }
 
     impl<'a> fmt::Write for ConsoleWriter<'a> {
         fn write_str(&mut self, s: &str) -> fmt::Result {
@@ -154,18 +157,21 @@ fn write_to_normal_console(args: fmt::Arguments) -> bool {
             let mut start = 0;
 
             for (index, &byte) in bytes.iter().enumerate() {
-                if byte != b'\n' {
-                    continue;
+                if byte == b'\n' {
+                    if start != index {
+                        self.device
+                            .write(&bytes[start..index])
+                            .map_err(|_| fmt::Error)?;
+                    }
+                    let newline: &[u8] = if self.last_was_cr { b"\n" } else { b"\r\n" };
+                    self.device.write(newline).map_err(|_| fmt::Error)?;
+                    start = index + 1;
                 }
-                if start != index {
-                    self.0.write(&bytes[start..index]).map_err(|_| fmt::Error)?;
-                }
-                self.0.write(b"\r\n").map_err(|_| fmt::Error)?;
-                start = index + 1;
+                self.last_was_cr = byte == b'\r';
             }
 
             if start != bytes.len() {
-                self.0.write(&bytes[start..]).map_err(|_| fmt::Error)?;
+                self.device.write(&bytes[start..]).map_err(|_| fmt::Error)?;
             }
             Ok(())
         }
@@ -191,7 +197,10 @@ fn write_to_normal_console(args: fmt::Arguments) -> bool {
             }
 
             if let Some(char_dev) = dev.as_char_device() {
-                let mut writer = ConsoleWriter(char_dev);
+                let mut writer = ConsoleWriter {
+                    device: char_dev,
+                    last_was_cr: false,
+                };
                 if writer.write_fmt(args).is_ok() {
                     return true;
                 }
