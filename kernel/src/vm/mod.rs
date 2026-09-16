@@ -282,22 +282,21 @@ pub fn kernel_vm_init(
             start: crate::vm::addr::kernel_direct_map_vaddr(physical_area.start),
             end: crate::vm::addr::kernel_direct_map_vaddr(physical_area.end),
         };
-        root_page_table
-            .map_memory_area(
-                VirtualMemoryMap {
-                    vmarea: hhdm_area,
-                    pmarea: physical_area,
-                    vm_start: hhdm_area.start,
-                    permissions: VirtualMemoryPermission::Read as usize
-                        | VirtualMemoryPermission::Write as usize,
-                    is_shared: true,
-                    memory_attribute: region.memory_attribute(),
-                    owner: None,
-                },
-                true,
-                true,
-            )
-            .unwrap_or_else(|error| panic!("Failed to map HHDM memory area: {}", error));
+        let hhdm_map = VirtualMemoryMap {
+            vmarea: hhdm_area,
+            pmarea: physical_area,
+            vm_start: hhdm_area.start,
+            permissions: VirtualMemoryPermission::Read as usize
+                | VirtualMemoryPermission::Write as usize,
+            is_shared: true,
+            memory_attribute: region.memory_attribute(),
+            owner: None,
+        };
+        #[cfg(target_arch = "aarch64")]
+        let result = root_page_table.map_direct_map_memory_area(hhdm_map);
+        #[cfg(not(target_arch = "aarch64"))]
+        let result = root_page_table.map_memory_area(hhdm_map, true, true);
+        result.unwrap_or_else(|error| panic!("Failed to map HHDM memory area: {}", error));
     }
     root_page_table
         .map_memory_area(heap_map, true, true)
