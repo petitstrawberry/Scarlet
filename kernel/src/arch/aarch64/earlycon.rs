@@ -85,6 +85,10 @@ fn emergency_uart_putc(c: u8) {
 /// * `c` - Byte to emit.
 pub fn early_putc(c: u8) {
     if try_uart_putc(c) {
+        #[cfg(feature = "linux-boot")]
+        if crate::earlyfb::is_redirection_enabled() {
+            crate::earlyfb::putc(c);
+        }
         return;
     }
 

@@ -1,4 +1,7 @@
 use crate::sync::IrqSpinLock;
+#[cfg(feature = "linux-boot")]
+use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicBool, Ordering};
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 #[cfg(feature = "limine")]
 use limine::framebuffer::{FRAMEBUFFER_RGB, Framebuffer};
@@ -11,6 +14,22 @@ const GLYPH_HEIGHT: usize = FONT_HEIGHT * FONT_SCALE;
 // DIAGNOSTIC: Keep early-console output on the framebuffer, but temporarily
 // stop mirroring normal kernel, TTY, and breadcrumb output into it.
 const DIAGNOSTIC_ENABLE_FBCON_REDIRECTION: bool = false;
+static REDIRECTION_ENABLED: AtomicBool = AtomicBool::new(DIAGNOSTIC_ENABLE_FBCON_REDIRECTION);
+
+#[cfg(feature = "linux-boot")]
+static EMERGENCY_ADDR: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "linux-boot")]
+static EMERGENCY_WIDTH: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "linux-boot")]
+static EMERGENCY_HEIGHT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "linux-boot")]
+static EMERGENCY_PITCH: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "linux-boot")]
+static EMERGENCY_ROTATED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "linux-boot")]
+static EMERGENCY_RED_LOW: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "linux-boot")]
+static EMERGENCY_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Copy)]
 struct FramebufferConsole {
@@ -28,6 +47,8 @@ struct FramebufferConsole {
     cursor_x: usize,
     cursor_y: usize,
     initialized: bool,
+    rotated: bool,
+    opaque: bool,
 }
 
 impl FramebufferConsole {
@@ -47,6 +68,8 @@ impl FramebufferConsole {
             cursor_x: 0,
             cursor_y: 0,
             initialized: false,
+            rotated: false,
+            opaque: false,
         }
     }
 
@@ -76,6 +99,14 @@ impl FramebufferConsole {
         self.cursor_y = 0;
         self.initialized = true;
         self.clear_screen();
+    }
+
+    fn surface_height(&self) -> usize {
+        if self.rotated {
+            self.width
+        } else {
+            self.height
+        }
     }
 
     fn write_byte(&mut self, byte: u8) {
@@ -144,10 +175,28 @@ impl FramebufferConsole {
             return;
         }
 
-        let total_bytes = self.pitch.saturating_mul(self.height);
-        for offset in 0..total_bytes {
-            unsafe {
-                core::ptr::write_volatile((self.addr + offset) as *mut u8, 0);
+        let total_bytes = self.pitch.saturating_mul(self.surface_height());
+        if self.opaque
+            && self.bytes_per_pixel == core::mem::size_of::<u32>()
+            && self.addr % core::mem::align_of::<u32>() == 0
+        {
+            let opaque_bytes =
+                total_bytes / core::mem::size_of::<u32>() * core::mem::size_of::<u32>();
+            for offset in (0..opaque_bytes).step_by(core::mem::size_of::<u32>()) {
+                unsafe {
+                    core::ptr::write_volatile((self.addr + offset) as *mut u32, 0xff000000);
+                }
+            }
+            for offset in opaque_bytes..total_bytes {
+                unsafe {
+                    core::ptr::write_volatile((self.addr + offset) as *mut u8, 0);
+                }
+            }
+        } else {
+            for offset in 0..total_bytes {
+                unsafe {
+                    core::ptr::write_volatile((self.addr + offset) as *mut u8, 0);
+                }
             }
         }
         self.cursor_x = 0;
@@ -159,6 +208,11 @@ impl FramebufferConsole {
             return;
         }
 
+        let (x, y) = if self.rotated {
+            (y, self.width - 1 - x)
+        } else {
+            (x, y)
+        };
         let offset = y
             .saturating_mul(self.pitch)
             .saturating_add(x.saturating_mul(self.bytes_per_pixel));
@@ -182,6 +236,7 @@ impl FramebufferConsole {
         Self::pack_component(r, self.red_mask_size, self.red_mask_shift)
             | Self::pack_component(g, self.green_mask_size, self.green_mask_shift)
             | Self::pack_component(b, self.blue_mask_size, self.blue_mask_shift)
+            | if self.opaque { 0xff000000 } else { 0 }
     }
 }
 
@@ -198,6 +253,92 @@ pub fn init(framebuffer: &Framebuffer) {
         return;
     }
     console.init(framebuffer);
+}
+
+/// Initialize an already validated, NonCacheable-mapped Linux boot surface.
+#[cfg(feature = "linux-boot")]
+pub(crate) fn init_linux_framebuffer(
+    addr: usize,
+    width: usize,
+    height: usize,
+    pitch: usize,
+    red_low: bool,
+    rotated: bool,
+) {
+    let mut console = EARLY_CONSOLE.lock();
+    if console.initialized {
+        return;
+    }
+    console.addr = addr;
+    console.width = if rotated { height } else { width };
+    console.height = if rotated { width } else { height };
+    console.pitch = pitch;
+    console.bytes_per_pixel = 4;
+    console.red_mask_size = 8;
+    console.red_mask_shift = if red_low { 0 } else { 16 };
+    console.green_mask_size = 8;
+    console.green_mask_shift = 8;
+    console.blue_mask_size = 8;
+    console.blue_mask_shift = if red_low { 16 } else { 0 };
+    console.rotated = rotated;
+    console.opaque = true;
+    console.initialized = true;
+    console.clear_screen();
+    EMERGENCY_WIDTH.store(console.width, Ordering::Relaxed);
+    EMERGENCY_HEIGHT.store(console.height, Ordering::Relaxed);
+    EMERGENCY_PITCH.store(pitch, Ordering::Relaxed);
+    EMERGENCY_ROTATED.store(rotated, Ordering::Relaxed);
+    EMERGENCY_RED_LOW.store(red_low, Ordering::Relaxed);
+    EMERGENCY_ADDR.store(addr, Ordering::Release);
+    REDIRECTION_ENABLED.store(true, Ordering::Release);
+    crate::log::register_emergency_putc(emergency_framebuffer_putc);
+}
+
+/// Panic output uses its own atomic cursor, without the normal console lock.
+#[cfg(feature = "linux-boot")]
+fn emergency_framebuffer_putc(byte: u8) {
+    let addr = EMERGENCY_ADDR.load(Ordering::Acquire);
+    if addr == 0 || byte == b'\r' {
+        return;
+    }
+    let width = EMERGENCY_WIDTH.load(Ordering::Relaxed);
+    let height = EMERGENCY_HEIGHT.load(Ordering::Relaxed);
+    let red_low = EMERGENCY_RED_LOW.load(Ordering::Relaxed);
+    let columns = width / GLYPH_WIDTH;
+    let rows = height / GLYPH_HEIGHT;
+    if columns == 0 || rows == 0 {
+        return;
+    }
+    if byte == b'\n' {
+        let _ = EMERGENCY_CURSOR.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cursor| {
+            Some((cursor / columns + 1) * columns % (columns * rows))
+        });
+        return;
+    }
+    let cell = EMERGENCY_CURSOR.fetch_add(1, Ordering::Relaxed) % (columns * rows);
+    let mut console = FramebufferConsole {
+        addr,
+        width,
+        height,
+        pitch: EMERGENCY_PITCH.load(Ordering::Relaxed),
+        bytes_per_pixel: 4,
+        red_mask_size: 8,
+        red_mask_shift: if red_low { 0 } else { 16 },
+        green_mask_size: 8,
+        green_mask_shift: 8,
+        blue_mask_size: 8,
+        blue_mask_shift: if red_low { 16 } else { 0 },
+        cursor_x: (cell % columns) * GLYPH_WIDTH,
+        cursor_y: (cell / columns) * GLYPH_HEIGHT,
+        initialized: true,
+        rotated: EMERGENCY_ROTATED.load(Ordering::Relaxed),
+        opaque: true,
+    };
+    console.draw_char(if byte.is_ascii_graphic() || byte == b' ' {
+        byte as char
+    } else {
+        '?'
+    });
 }
 
 pub fn putc(c: u8) {
@@ -228,7 +369,7 @@ pub fn is_initialized() -> bool {
 }
 
 pub(crate) fn is_redirection_enabled() -> bool {
-    DIAGNOSTIC_ENABLE_FBCON_REDIRECTION
+    REDIRECTION_ENABLED.load(Ordering::Acquire)
 }
 
 pub fn deactivate() {
@@ -250,7 +391,7 @@ pub fn relocate_direct_map(
     }
     let bytes = console
         .pitch
-        .checked_mul(console.height)
+        .checked_mul(console.surface_height())
         .and_then(|size| size.checked_sub(1))
         .expect("invalid framebuffer byte range");
     let old_base = VirtAddr::new(console.addr);
@@ -270,4 +411,8 @@ pub fn relocate_direct_map(
         .phys_to_virt(paddr)
         .expect("framebuffer is outside the runtime mapping")
         .as_usize();
+    #[cfg(feature = "linux-boot")]
+    if EMERGENCY_ADDR.load(Ordering::Acquire) != 0 {
+        EMERGENCY_ADDR.store(console.addr, Ordering::Release);
+    }
 }

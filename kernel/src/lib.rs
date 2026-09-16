@@ -350,15 +350,6 @@ use vm::{
     vmem::{MemoryArea, PhysicalMemoryArea},
 };
 
-fn is_pci_host_node(node: &fdt::node::FdtNode<'_, '_>) -> bool {
-    node.name.starts_with("pci@")
-        || node.name.starts_with("pcie@")
-        || node
-            .compatible()
-            .map(|compat| compat.all().any(|entry| entry == "pci-host-ecam-generic"))
-            .unwrap_or(false)
-}
-
 fn find_pci_ecam(fdt: &fdt::Fdt<'_>) -> Option<(u64, usize)> {
     for parent_path in ["/soc", "/"] {
         let Some(parent) = fdt.find_node(parent_path) else {
@@ -366,7 +357,7 @@ fn find_pci_ecam(fdt: &fdt::Fdt<'_>) -> Option<(u64, usize)> {
         };
 
         for child in parent.children() {
-            if !is_pci_host_node(&child) {
+            if !device::pci::is_generic_ecam_host_node(&child) {
                 continue;
             }
 

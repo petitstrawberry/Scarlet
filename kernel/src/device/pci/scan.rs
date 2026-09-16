@@ -69,15 +69,6 @@ impl<'a> PciScanner<'a> {
         }
     }
 
-    fn is_pci_host_node(node: &fdt::node::FdtNode<'_, '_>) -> bool {
-        node.name.starts_with("pci@")
-            || node.name.starts_with("pcie@")
-            || node
-                .compatible()
-                .map(|compat| compat.all().any(|entry| entry == "pci-host-ecam-generic"))
-                .unwrap_or(false)
-    }
-
     fn read_be_u32(bytes: &[u8]) -> Option<u32> {
         if bytes.len() < 4 {
             return None;
@@ -121,7 +112,7 @@ impl<'a> PciScanner<'a> {
             let Some(parent) = fdt.find_node(parent_path) else {
                 continue;
             };
-            if let Some(node) = parent.children().find(Self::is_pci_host_node) {
+            if let Some(node) = parent.children().find(super::is_generic_ecam_host_node) {
                 return Some(node);
             }
         }
@@ -434,6 +425,10 @@ impl<'a> PciScanner<'a> {
     ) {
         let addr = PciAddress::new(0, bus, device, 0);
 
+        if !self.bus.is_valid_address(&addr) {
+            return;
+        }
+
         // Check if device exists by reading vendor ID
         let vendor_id = self.config.read_vendor_id(&addr);
         if vendor_id == vendor::INVALID {
@@ -503,6 +498,10 @@ impl<'a> PciScanner<'a> {
         id_counter: &mut usize,
     ) -> Option<PciDeviceInfo> {
         let addr = PciAddress::new(0, bus, device, function);
+
+        if !self.bus.is_valid_address(&addr) {
+            return None;
+        }
 
         // Check if function exists
         // Note: In test environment, ECAM might not be properly mapped
