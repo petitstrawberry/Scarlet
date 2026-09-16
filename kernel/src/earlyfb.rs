@@ -27,6 +27,8 @@ static EMERGENCY_PITCH: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "linux-boot")]
 static EMERGENCY_ROTATED: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "linux-boot")]
+static EMERGENCY_RED_LOW: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "linux-boot")]
 static EMERGENCY_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Copy)]
@@ -174,10 +176,20 @@ impl FramebufferConsole {
         }
 
         let total_bytes = self.pitch.saturating_mul(self.surface_height());
-        if self.opaque {
-            for offset in (0..total_bytes).step_by(4) {
+        if self.opaque
+            && self.bytes_per_pixel == core::mem::size_of::<u32>()
+            && self.addr % core::mem::align_of::<u32>() == 0
+        {
+            let opaque_bytes =
+                total_bytes / core::mem::size_of::<u32>() * core::mem::size_of::<u32>();
+            for offset in (0..opaque_bytes).step_by(core::mem::size_of::<u32>()) {
                 unsafe {
                     core::ptr::write_volatile((self.addr + offset) as *mut u32, 0xff000000);
+                }
+            }
+            for offset in opaque_bytes..total_bytes {
+                unsafe {
+                    core::ptr::write_volatile((self.addr + offset) as *mut u8, 0);
                 }
             }
         } else {
@@ -276,6 +288,7 @@ pub(crate) fn init_linux_framebuffer(
     EMERGENCY_HEIGHT.store(console.height, Ordering::Relaxed);
     EMERGENCY_PITCH.store(pitch, Ordering::Relaxed);
     EMERGENCY_ROTATED.store(rotated, Ordering::Relaxed);
+    EMERGENCY_RED_LOW.store(red_low, Ordering::Relaxed);
     EMERGENCY_ADDR.store(addr, Ordering::Release);
     REDIRECTION_ENABLED.store(true, Ordering::Release);
     crate::log::register_emergency_putc(emergency_framebuffer_putc);
@@ -290,6 +303,7 @@ fn emergency_framebuffer_putc(byte: u8) {
     }
     let width = EMERGENCY_WIDTH.load(Ordering::Relaxed);
     let height = EMERGENCY_HEIGHT.load(Ordering::Relaxed);
+    let red_low = EMERGENCY_RED_LOW.load(Ordering::Relaxed);
     let columns = width / GLYPH_WIDTH;
     let rows = height / GLYPH_HEIGHT;
     if columns == 0 || rows == 0 {
@@ -309,11 +323,11 @@ fn emergency_framebuffer_putc(byte: u8) {
         pitch: EMERGENCY_PITCH.load(Ordering::Relaxed),
         bytes_per_pixel: 4,
         red_mask_size: 8,
-        red_mask_shift: 0,
+        red_mask_shift: if red_low { 0 } else { 16 },
         green_mask_size: 8,
         green_mask_shift: 8,
         blue_mask_size: 8,
-        blue_mask_shift: 16,
+        blue_mask_shift: if red_low { 16 } else { 0 },
         cursor_x: (cell % columns) * GLYPH_WIDTH,
         cursor_y: (cell / columns) * GLYPH_HEIGHT,
         initialized: true,
