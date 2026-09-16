@@ -23,7 +23,6 @@ impl Selectable for KmsgDevice {
         if interest.read {
             set.read = !crate::log::is_empty();
         }
-        set.write = interest.write;
         set
     }
 
@@ -34,7 +33,7 @@ impl Selectable for KmsgDevice {
         _timeout_ticks: Option<u64>,
         _min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
-        if interest.read && !interest.write && crate::log::is_empty() {
+        if interest.read && crate::log::is_empty() {
             if let Some(task) = mytask() {
                 if crate::log::READER_WAKER.wait_result(task.get_id(), trapframe)
                     == WaitResult::Interrupted
@@ -93,19 +92,12 @@ impl CharDevice for KmsgDevice {
         }
     }
 
-    fn write_byte(&self, byte: u8) -> Result<(), &'static str> {
-        self.write(&[byte]).map(|_| ())
+    fn write_byte(&self, _byte: u8) -> Result<(), &'static str> {
+        Err("kmsg is read-only")
     }
 
-    fn write(&self, buffer: &[u8]) -> Result<usize, &'static str> {
-        // Like Linux /dev/kmsg, accept userspace diagnostic messages. The
-        // normal print path retains them and uses the configured console.
-        // This device must never be selected as that console itself.
-        if !buffer.is_empty() {
-            crate::print!("{}", String::from_utf8_lossy(buffer));
-            crate::log::READER_WAKER.wake_all();
-        }
-        Ok(buffer.len())
+    fn write(&self, _buffer: &[u8]) -> Result<usize, &'static str> {
+        Err("kmsg is read-only")
     }
 
     fn can_read(&self) -> bool {
@@ -113,7 +105,7 @@ impl CharDevice for KmsgDevice {
     }
 
     fn can_write(&self) -> bool {
-        true
+        false
     }
 
     fn read_at(&self, position: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
