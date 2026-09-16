@@ -136,7 +136,9 @@ fn write_to_normal_console(args: fmt::Arguments) -> bool {
     // In particular, Linux-boot platforms may expose a UART node while
     // /chosen/stdout-path intentionally selects the boot framebuffer. Keep
     // using that architecture console unless early boot selected a UART.
-    if !crate::arch::has_active_uart() {
+    // The headless test runner reads its result from QEMU's serial stream.
+    // Production output still follows the UART selected by the boot contract.
+    if !cfg!(test) && !crate::arch::has_active_uart() {
         return false;
     }
 

@@ -103,6 +103,7 @@ impl CharDevice for KmsgDevice {
         // This device must never be selected as that console itself.
         if !buffer.is_empty() {
             crate::print!("{}", String::from_utf8_lossy(buffer));
+            crate::log::READER_WAKER.wake_all();
         }
         Ok(buffer.len())
     }
