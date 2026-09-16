@@ -285,6 +285,13 @@ pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(&task);
     if let Some(ch) = char::from_u32(c) {
         let manager = DeviceManager::get_manager();
+
+        let wrote_to_framebuffer =
+            crate::earlyfb::is_redirection_enabled() && crate::earlyfb::is_initialized();
+        if wrote_to_framebuffer {
+            crate::earlyfb::putc(ch as u8);
+        }
+
         if let Some(device) = manager.get_device_by_name("tty0")
             && let Some(char_device) = device.as_char_device()
             && char_device.can_write()
@@ -300,6 +307,10 @@ pub fn sys_putchar(trapframe: &mut Trapframe) -> usize {
             {
                 return 0;
             }
+        }
+
+        if wrote_to_framebuffer {
+            return 0;
         }
     }
     return usize::MAX; // -1

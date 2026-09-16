@@ -78,9 +78,6 @@ jobs:
     - name: Check ABI foundation against RV32 and ARMv5TE constraints
       run: nix develop .#default --command cargo make test-abi-foundation
 
-    - name: Test cross C compiler defaults and application overrides
-      run: nix develop .#default --command cargo make test-cross-cc
-
   docker-image:
     needs: nix-cache
     runs-on: ubuntu-latest

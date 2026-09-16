@@ -4,6 +4,7 @@
 //! builds its own temporary page table and HHDM before entering common kernel
 //! initialization; no Limine response or bootloader-owned direct map is used.
 
+mod framebuffer;
 mod page_table;
 
 use core::arch::naked_asm;
@@ -139,8 +140,11 @@ pub extern "C" fn linux_image_entry(dtb_paddr: usize) -> ! {
             .expect("Linux boot FDT range overflows"),
     );
     let original_initramfs = initramfs_area(&early_fdt);
-    let (direct_map_regions, usable_memory, early_uart) = build_memory_map(&early_fdt)
-        .unwrap_or_else(|error| panic!("Linux boot memory map: {}", error));
+    let early_framebuffer =
+        framebuffer::BootFramebuffer::parse(&early_fdt, kernel_area, dtb_area, original_initramfs);
+    let (direct_map_regions, usable_memory, early_uart) =
+        build_memory_map(&early_fdt, early_framebuffer.as_ref())
+            .unwrap_or_else(|error| panic!("Linux boot memory map: {}", error));
     let direct_map_bounds = direct_map_regions
         .bounding_area()
         .expect("Linux boot direct map must not be empty");
@@ -172,6 +176,22 @@ pub extern "C" fn linux_image_entry(dtb_paddr: usize) -> ! {
     // Formatting and FDT initialization both acquire IRQ/preemption guards.
     // Publish the boot CPU's per-CPU identity before either path can log.
     crate::arch::aarch64::init_arch(0);
+    if let Some(fb) = early_framebuffer {
+        let vaddr = boot_direct_map
+            .phys_to_virt(PhysAddr::new(fb.paddr))
+            .expect("early framebuffer is outside the direct map")
+            .as_usize();
+        crate::earlyfb::init_linux_framebuffer(
+            vaddr, fb.width, fb.height, fb.stride, fb.red_low, fb.rotated,
+        );
+        crate::println!(
+            "[linux-boot] framebuffer console active; {}x{} stride={} rotation={}",
+            fb.width,
+            fb.height,
+            fb.stride,
+            if fb.rotated { 3 } else { 0 }
+        );
+    }
     crate::println!(
         "[linux-boot] temporary identity/HHDM page table active; DTB at {:#x}",
         dtb_paddr
@@ -256,6 +276,7 @@ fn validate_dtb(dtb_paddr: usize) {
 
 fn build_memory_map(
     fdt: &fdt::Fdt<'_>,
+    framebuffer: Option<&framebuffer::BootFramebuffer>,
 ) -> Result<(DirectMapRegions, PhysicalMemoryArea, Option<usize>), &'static str> {
     let mut regions = DirectMapRegions::new();
     let mut best_usable: Option<PhysicalMemoryArea> = None;
@@ -287,7 +308,7 @@ fn build_memory_map(
             let area = PhysicalMemoryArea::new(start, end);
             regions.insert(area, MemoryAttribute::Normal)?;
 
-            let candidate = largest_usable_area(fdt, area);
+            let candidate = largest_usable_area(fdt, area, framebuffer.map(|fb| fb.area));
             best_usable = match (best_usable, candidate) {
                 (Some(current), Some(next)) if next.size() > current.size() => Some(next),
                 (None, Some(next)) => Some(next),
@@ -297,6 +318,13 @@ fn build_memory_map(
     }
 
     let usable = best_usable.ok_or("no usable FDT RAM remains after the kernel image")?;
+    if let Some(fb) = framebuffer {
+        if regions.contains_area_with_attribute(fb.area, MemoryAttribute::Normal) {
+            regions.retag(fb.area, MemoryAttribute::NonCacheable)?;
+        } else {
+            regions.insert(fb.area, MemoryAttribute::NonCacheable)?;
+        }
+    }
     let early_uart = fdt
         .chosen()
         .stdout()
@@ -321,11 +349,18 @@ fn build_memory_map(
     Ok((regions, usable, early_uart))
 }
 
-fn largest_usable_area(fdt: &fdt::Fdt<'_>, ram: PhysicalMemoryArea) -> Option<PhysicalMemoryArea> {
+fn largest_usable_area(
+    fdt: &fdt::Fdt<'_>,
+    ram: PhysicalMemoryArea,
+    framebuffer: Option<PhysicalMemoryArea>,
+) -> Option<PhysicalMemoryArea> {
     let mut reserved = [None; MAX_EARLY_RESERVED_AREAS];
     let mut reserved_len = 0;
 
     push_reserved(&mut reserved, &mut reserved_len, linked_kernel_area())?;
+    if let Some(area) = framebuffer {
+        push_reserved(&mut reserved, &mut reserved_len, area)?;
+    }
     for reservation in fdt.memory_reservations() {
         let size = reservation.size();
         if size == 0 {
