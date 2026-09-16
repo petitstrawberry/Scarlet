@@ -11,7 +11,7 @@ use core::arch::asm;
 use core::result::Result;
 
 use crate::arch::vm::new_raw_pagetable;
-use crate::environment::PAGE_SIZE;
+use crate::environment::{IOREMAP_START, PAGE_SIZE, SCARLET_HHDM_BASE};
 use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use crate::vm::vmem::MemoryAttribute;
 use crate::vm::vmem::VirtualMemoryMap;
@@ -575,6 +575,31 @@ impl PageTable {
         _accessed: bool,
         _dirty: bool,
     ) -> Result<(), &'static str> {
+        self.map_memory_area_with_granularity(asid, mmap, false)
+    }
+
+    /// Build the live kernel direct map without blocks so individual DMA pages
+    /// can be retagged without splitting an active translation.
+    pub(in crate::arch::aarch64::vm) fn map_direct_map_memory_area(
+        &mut self,
+        asid: u16,
+        mmap: VirtualMemoryMap,
+    ) -> Result<(), &'static str> {
+        if !mmap.is_shared
+            || mmap.vmarea.start < SCARLET_HHDM_BASE
+            || mmap.vmarea.end >= IOREMAP_START
+        {
+            return Err("page-granular mapping requires a shared HHDM area");
+        }
+        self.map_memory_area_with_granularity(asid, mmap, true)
+    }
+
+    fn map_memory_area_with_granularity(
+        &mut self,
+        asid: u16,
+        mmap: VirtualMemoryMap,
+        page_granular: bool,
+    ) -> Result<(), &'static str> {
         let is_user_mapping = VirtualMemoryPermission::User.contained_in(mmap.permissions);
         if mmap.vmarea.start % PAGE_SIZE != 0
             || mmap.pmarea.start % PAGE_SIZE as u64 != 0
@@ -598,7 +623,11 @@ impl PageTable {
                 .checked_sub(vaddr)
                 .and_then(|remaining| remaining.checked_add(1))
                 .ok_or("Address range overflow")?;
-            let mut level = best_page_level(vaddr, paddr, remaining);
+            let mut level = if page_granular {
+                0
+            } else {
+                best_page_level(vaddr, paddr, remaining)
+            };
             let leaf_mutation = loop {
                 match self.try_map_at_level(asid, vaddr, paddr, attrs, level) {
                     Ok(leaf_mutation) => break leaf_mutation,
@@ -670,6 +699,9 @@ impl PageTable {
             let (_, level) = self
                 .walk_leaf(vaddr)
                 .ok_or("retag memory area has no existing leaf mapping")?;
+            if level > 0 && (SCARLET_HHDM_BASE..IOREMAP_START).contains(&vaddr) {
+                return Err("live HHDM retag requires 4 KiB leaves");
+            }
             let leaf_size = page_size_for_level(level);
             let leaf_start = vaddr & !(leaf_size - 1);
             let leaf_end = leaf_start
@@ -1624,6 +1656,60 @@ mod tests {
         assert!(pte.is_leaf());
         assert!(pte.is_aligned_for_level(1));
         assert_eq!(root.translate(vaddr + 0x1234), Some(paddr + 0x1234));
+
+        drop(root);
+        free_virtual_address_space(asid);
+    }
+
+    #[test_case]
+    fn test_only_explicit_kernel_direct_map_uses_4k_leaves() {
+        let asid = alloc_virtual_address_space();
+        let mut root =
+            crate::arch::vm::get_root_pagetable(asid).expect("root page table not found");
+        let block_size = page_size_for_level(1);
+        let paddr = 0x8000_0000;
+        let vaddr = SCARLET_HHDM_BASE + paddr as usize;
+        let permissions =
+            VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize;
+        let task_hhdm = VirtualMemoryMap::new(
+            crate::vm::vmem::PhysicalMemoryArea::new(paddr, paddr + block_size as u64 - 1),
+            MemoryArea::new(vaddr, vaddr + block_size - 1),
+            permissions,
+            true,
+            None,
+        );
+        root.map_memory_area(task_hhdm, true, true)
+            .expect("ordinary HHDM mapping failed");
+        assert!(
+            root.walk_to_level(vaddr, 1, false)
+                .expect("ordinary HHDM block not found")
+                .is_leaf()
+        );
+
+        let direct_paddr = paddr + block_size as u64;
+        let direct_vaddr = vaddr + block_size;
+        let kernel_hhdm = VirtualMemoryMap::new(
+            crate::vm::vmem::PhysicalMemoryArea::new(
+                direct_paddr,
+                direct_paddr + block_size as u64 - 1,
+            ),
+            MemoryArea::new(direct_vaddr, direct_vaddr + block_size - 1),
+            permissions,
+            true,
+            None,
+        );
+        root.map_direct_map_memory_area(kernel_hhdm)
+            .expect("kernel direct-map mapping failed");
+        assert!(
+            root.walk_to_level(direct_vaddr, 1, false)
+                .expect("kernel direct-map table not found")
+                .is_table()
+        );
+        assert!(
+            root.walk_to_level(direct_vaddr, 0, false)
+                .expect("kernel direct-map page not found")
+                .is_leaf_for_level(0)
+        );
 
         drop(root);
         free_virtual_address_space(asid);

@@ -262,7 +262,12 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             crate::breadcrumb::drop(crate::breadcrumb::KFAULT, trapframe.far_el1, esr);
             let far = trapframe.far_el1;
             print_trap_info(trapframe, esr);
-            crate::println!("Kernel instruction abort at FAR={:#x}", far);
+            crate::println!(
+                "Kernel instruction abort: ESR={:#x} ELR={:#x} FAR={:#x}",
+                esr,
+                trapframe.elr,
+                far
+            );
             loop {
                 unsafe { asm!("wfi") }
             }
@@ -273,7 +278,12 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
             crate::breadcrumb::drop(crate::breadcrumb::KFAULT, trapframe.far_el1, esr);
             let far = trapframe.far_el1;
             print_trap_info(trapframe, esr);
-            crate::println!("Kernel data abort at FAR={:#x}", far);
+            crate::println!(
+                "Kernel data abort: ESR={:#x} ELR={:#x} FAR={:#x}",
+                esr,
+                trapframe.elr,
+                far
+            );
             loop {
                 unsafe { asm!("wfi") }
             }
