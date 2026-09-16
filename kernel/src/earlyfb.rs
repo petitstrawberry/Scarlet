@@ -29,6 +29,8 @@ static EMERGENCY_ROTATED: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "linux-boot")]
 static EMERGENCY_RED_LOW: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "linux-boot")]
+static EMERGENCY_SURFACE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "linux-boot")]
 static EMERGENCY_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Copy)]
@@ -297,13 +299,22 @@ pub(crate) fn init_linux_framebuffer(
 /// Panic output uses its own atomic cursor, without the normal console lock.
 #[cfg(feature = "linux-boot")]
 fn emergency_framebuffer_putc(byte: u8) {
+    let sequence = EMERGENCY_SURFACE_SEQUENCE.load(Ordering::Acquire);
+    if sequence & 1 != 0 {
+        return;
+    }
     let addr = EMERGENCY_ADDR.load(Ordering::Acquire);
     if addr == 0 || byte == b'\r' {
         return;
     }
     let width = EMERGENCY_WIDTH.load(Ordering::Relaxed);
     let height = EMERGENCY_HEIGHT.load(Ordering::Relaxed);
+    let pitch = EMERGENCY_PITCH.load(Ordering::Relaxed);
+    let rotated = EMERGENCY_ROTATED.load(Ordering::Relaxed);
     let red_low = EMERGENCY_RED_LOW.load(Ordering::Relaxed);
+    if EMERGENCY_SURFACE_SEQUENCE.load(Ordering::Acquire) != sequence {
+        return;
+    }
     let columns = width / GLYPH_WIDTH;
     let rows = height / GLYPH_HEIGHT;
     if columns == 0 || rows == 0 {
@@ -320,7 +331,7 @@ fn emergency_framebuffer_putc(byte: u8) {
         addr,
         width,
         height,
-        pitch: EMERGENCY_PITCH.load(Ordering::Relaxed),
+        pitch,
         bytes_per_pixel: 4,
         red_mask_size: 8,
         red_mask_shift: if red_low { 0 } else { 16 },
@@ -331,7 +342,7 @@ fn emergency_framebuffer_putc(byte: u8) {
         cursor_x: (cell % columns) * GLYPH_WIDTH,
         cursor_y: (cell / columns) * GLYPH_HEIGHT,
         initialized: true,
-        rotated: EMERGENCY_ROTATED.load(Ordering::Relaxed),
+        rotated,
         opaque: true,
     };
     console.draw_char(if byte.is_ascii_graphic() || byte == b' ' {
@@ -375,6 +386,100 @@ pub(crate) fn is_redirection_enabled() -> bool {
 pub fn deactivate() {
     let mut console = EARLY_CONSOLE.lock();
     console.initialized = false;
+}
+
+/// Previous boot-console surface retained for a failed native display handoff.
+/// The native driver must keep the original backing alive until rollback is
+/// no longer possible. This token does not own the framebuffer allocation.
+#[must_use]
+pub struct EarlyFramebufferSurface {
+    console: FramebufferConsole,
+}
+
+#[cfg(feature = "linux-boot")]
+fn publish_emergency_surface(console: &FramebufferConsole) {
+    EMERGENCY_SURFACE_SEQUENCE.fetch_add(1, Ordering::AcqRel);
+    EMERGENCY_ADDR.store(0, Ordering::Release);
+    EMERGENCY_WIDTH.store(console.width, Ordering::Relaxed);
+    EMERGENCY_HEIGHT.store(console.height, Ordering::Relaxed);
+    EMERGENCY_PITCH.store(console.pitch, Ordering::Relaxed);
+    EMERGENCY_ROTATED.store(console.rotated, Ordering::Relaxed);
+    EMERGENCY_RED_LOW.store(console.red_mask_shift == 0, Ordering::Relaxed);
+    EMERGENCY_ADDR.store(console.addr, Ordering::Release);
+    EMERGENCY_SURFACE_SEQUENCE.fetch_add(1, Ordering::Release);
+}
+
+/// Move boot and emergency output onto a native display's linear surface.
+/// Contents and the logical dimensions must be preserved by the caller; the
+/// existing cursor is retained. No framebuffer or console policy is selected.
+///
+/// # Safety
+/// `addr` must map the entire `pitch * height` surface with noncacheable or
+/// device attributes and remain valid while either console can use it,
+/// including after [`deactivate`]. The caller must preserve the old surface
+/// until rollback completes and outstanding emergency writers finish, and
+/// must serialize display ownership changes.
+pub unsafe fn replace_surface(
+    addr: usize,
+    width: usize,
+    height: usize,
+    pitch: usize,
+    red_low: bool,
+    rotated: bool,
+) -> Result<Option<EarlyFramebufferSurface>, &'static str> {
+    let mut console = EARLY_CONSOLE.lock();
+    if !console.initialized {
+        return Ok(None);
+    }
+    let logical_width = if rotated { height } else { width };
+    let logical_height = if rotated { width } else { height };
+    if addr == 0
+        || width == 0
+        || height == 0
+        || addr & 3 != 0
+        || pitch & 3 != 0
+        || width.checked_mul(4).is_none_or(|row| row > pitch)
+        || pitch
+            .checked_mul(height)
+            .and_then(|size| addr.checked_add(size))
+            .is_none()
+        || console.width != logical_width
+        || console.height != logical_height
+    {
+        return Err("native early console surface layout mismatch");
+    }
+    let previous = EarlyFramebufferSurface { console: *console };
+    console.addr = addr;
+    console.pitch = pitch;
+    console.bytes_per_pixel = 4;
+    console.red_mask_size = 8;
+    console.green_mask_size = 8;
+    console.blue_mask_size = 8;
+    console.red_mask_shift = if red_low { 0 } else { 16 };
+    console.green_mask_shift = 8;
+    console.blue_mask_shift = if red_low { 16 } else { 0 };
+    console.rotated = rotated;
+    console.opaque = true;
+    #[cfg(feature = "linux-boot")]
+    publish_emergency_surface(&console);
+    Ok(Some(previous))
+}
+
+/// Restore boot and emergency output after a native display rolls back.
+///
+/// # Safety
+/// The token's original mapping must still be live and displayed. The caller
+/// must serialize this with display ownership and console-surface changes. If
+/// output may have been written after [`replace_surface`], the replacement
+/// contents must first be copied back to the original surface so the pixels
+/// remain consistent with the retained cursor position.
+pub unsafe fn restore_surface(mut surface: EarlyFramebufferSurface) {
+    let mut console = EARLY_CONSOLE.lock();
+    surface.console.cursor_x = console.cursor_x;
+    surface.console.cursor_y = console.cursor_y;
+    *console = surface.console;
+    #[cfg(feature = "linux-boot")]
+    publish_emergency_surface(&console);
 }
 
 /// Rebind the early framebuffer after the page-table handoff.
