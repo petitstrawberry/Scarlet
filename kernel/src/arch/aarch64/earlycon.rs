@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[repr(usize)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -20,6 +20,7 @@ impl EarlyUartKind {
 
 static EARLY_UART_KIND: AtomicUsize = AtomicUsize::new(EarlyUartKind::None as usize);
 static EARLY_UART_VADDR: AtomicUsize = AtomicUsize::new(0);
+static BOOT_SELECTED_UART: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "limine")]
 static PENDING_QCOM_GENI_PADDR: AtomicUsize = AtomicUsize::new(0);
 
@@ -27,6 +28,14 @@ fn publish_uart(kind: EarlyUartKind, vaddr: usize) {
     EARLY_UART_VADDR.store(vaddr, Ordering::Relaxed);
     EARLY_UART_KIND.store(kind as usize, Ordering::Release);
     crate::log::register_emergency_putc(emergency_uart_putc);
+}
+
+/// Return whether the boot contract selected an early UART.
+///
+/// Runtime console discovery uses this to avoid turning an unrelated serial
+/// device into the kernel console merely because its driver was registered.
+pub(crate) fn has_active_uart() -> bool {
+    BOOT_SELECTED_UART.load(Ordering::Acquire)
 }
 
 fn try_uart_putc(c: u8) -> bool {
@@ -112,6 +121,7 @@ pub(crate) fn register_linux_boot_pl011(
             .expect("early UART is outside the direct map")
             .as_usize(),
     );
+    BOOT_SELECTED_UART.store(true, Ordering::Release);
 }
 
 /// Prepare an FDT-selected Qualcomm GENI UART for the Limine page-table handoff.
@@ -147,6 +157,7 @@ pub(crate) fn activate_after_boot_page_table_switch(
                     .expect("early UART is outside the direct map")
                     .as_usize(),
             );
+            BOOT_SELECTED_UART.store(true, Ordering::Release);
             for &byte in b"\x1b[2J\x1b[H" {
                 emergency_uart_putc(byte);
             }
@@ -163,6 +174,12 @@ pub(crate) fn activate_after_boot_page_table_switch(
 ///
 /// * `vaddr` - Device-typed virtual base returned by `ioremap`.
 pub(crate) fn register_runtime_qcom_geni(vaddr: usize) {
+    if !has_active_uart()
+        || EarlyUartKind::from_raw(EARLY_UART_KIND.load(Ordering::Acquire))
+            != EarlyUartKind::QcomGeni
+    {
+        return;
+    }
     crate::earlyfb::deactivate();
     publish_uart(EarlyUartKind::QcomGeni, vaddr);
 }

@@ -730,13 +730,6 @@ fn qcom_geni_debug_uart_paddr(fdt: &fdt::Fdt<'_>) -> Option<usize> {
         .and_then(|node| node.reg())
         .and_then(|mut regions| regions.next())
         .map(|region| region.starting_address as usize)
-        .or_else(|| {
-            fdt.all_nodes()
-                .find(is_qcom_geni_debug_uart)
-                .and_then(|node| node.reg())
-                .and_then(|mut regions| regions.next())
-                .map(|region| region.starting_address as usize)
-        })
 }
 
 fn is_qcom_geni_debug_uart(node: &fdt::node::FdtNode<'_, '_>) -> bool {
