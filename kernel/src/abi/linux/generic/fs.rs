@@ -837,18 +837,18 @@ pub fn sys_mount(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let dirfd = trapframe.get_arg(0) as i32;
-    let path_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(1))
-        .unwrap() as *const u8;
+    let path_ptr = trapframe.get_arg(1);
     let flags = trapframe.get_arg(2) as i32;
 
     // Increment PC to avoid infinite loop if openat fails
     trapframe.increment_pc_next(&task);
 
     // Parse path from user space
-    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
-        Ok((path, _)) => path,
+    let path_str = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(path) => path,
+        Err(crate::library::std::string::StringConversionError::ExceedsMaxLength) => {
+            return errno::to_result(errno::ENAMETOOLONG);
+        }
         Err(_) => return errno::to_result(errno::EFAULT), // Invalid UTF-8 or bad address
     };
 
