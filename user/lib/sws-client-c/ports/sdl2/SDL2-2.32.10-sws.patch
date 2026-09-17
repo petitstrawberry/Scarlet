@@ -1,0 +1,54 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2968,6 +2968,19 @@
+   set(SDL_VIDEO_VULKAN 0)
+ endif()
+ 
++option(SDL_SWS "Build the Scarlet SWS fullscreen Vulkan video driver" OFF)
++if(SDL_SWS)
++  find_path(SWS_CLIENT_INCLUDE_DIR sws_client.h REQUIRED)
++  find_library(SWS_CLIENT_LIBRARY sws_client_c REQUIRED)
++  set(SDL_VIDEO_DRIVER_SWS 1)
++  set(SDL_VIDEO_VULKAN 1)
++  set(HAVE_VULKAN TRUE)
++  set(HAVE_SDL_VIDEO TRUE)
++  include_directories(${SWS_CLIENT_INCLUDE_DIR})
++  list(APPEND SOURCE_FILES ${SDL2_SOURCE_DIR}/src/video/sws/SDL_swsvideo.c)
++  list(APPEND EXTRA_LIBS ${SWS_CLIENT_LIBRARY})
++endif()
++
+ # Platform-independent options
+ CheckLibSampleRate()
+ 
+--- a/include/SDL_config.h.cmake
++++ b/include/SDL_config.h.cmake
+@@ -411,6 +411,7 @@
+ #cmakedefine SDL_VIDEO_DRIVER_UIKIT @SDL_VIDEO_DRIVER_UIKIT@
+ #cmakedefine SDL_VIDEO_DRIVER_DIRECTFB @SDL_VIDEO_DRIVER_DIRECTFB@
+ #cmakedefine SDL_VIDEO_DRIVER_DIRECTFB_DYNAMIC @SDL_VIDEO_DRIVER_DIRECTFB_DYNAMIC@
++#cmakedefine SDL_VIDEO_DRIVER_SWS @SDL_VIDEO_DRIVER_SWS@
+ #cmakedefine SDL_VIDEO_DRIVER_DUMMY @SDL_VIDEO_DRIVER_DUMMY@
+ #cmakedefine SDL_VIDEO_DRIVER_OFFSCREEN @SDL_VIDEO_DRIVER_OFFSCREEN@
+ #cmakedefine SDL_VIDEO_DRIVER_WINDOWS @SDL_VIDEO_DRIVER_WINDOWS@
+--- a/src/video/SDL_sysvideo.h
++++ b/src/video/SDL_sysvideo.h
+@@ -473,6 +473,7 @@
+ extern VideoBootStrap RPI_bootstrap;
+ extern VideoBootStrap KMSDRM_bootstrap;
+ extern VideoBootStrap KMSDRM_LEGACY_bootstrap;
++extern VideoBootStrap SWS_bootstrap;
+ extern VideoBootStrap DUMMY_bootstrap;
+ extern VideoBootStrap DUMMY_evdev_bootstrap;
+ extern VideoBootStrap Wayland_bootstrap;
+--- a/src/video/SDL_video.c
++++ b/src/video/SDL_video.c
+@@ -72,6 +72,9 @@
+ 
+ /* Available video drivers */
+ static VideoBootStrap *bootstrap[] = {
++#ifdef SDL_VIDEO_DRIVER_SWS
++    &SWS_bootstrap,
++#endif
+ #ifdef SDL_VIDEO_DRIVER_COCOA
+     &COCOA_bootstrap,
+ #endif
