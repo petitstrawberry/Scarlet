@@ -10,7 +10,7 @@ pub(super) unsafe fn syscall_u64(syscall: Syscall, args: [usize; 6]) -> u64 {
     // registers are outputs; a1 must not be silently treated as a clobber.
     unsafe {
         asm!("ecall",
-            in("a7") syscall as usize,
+            in("a7") scarlet_abi::syscall_transport_number(syscall),
             inlateout("a0") args[0] => low,
             inlateout("a1") args[1] => high,
             in("a2") args[2], in("a3") args[3],
@@ -29,7 +29,7 @@ pub(super) unsafe fn syscall0(syscall: Syscall) -> usize {
     unsafe {
         asm!(
             "ecall",
-            in("a7") syscall as usize,
+            in("a7") scarlet_abi::syscall_transport_number(syscall),
             out("a0") ret,
             clobber_abi("C"),
             options(nostack)
@@ -44,7 +44,7 @@ pub(super) unsafe fn syscall1(syscall: Syscall, arg1: usize) -> usize {
     unsafe {
         asm!(
             "ecall",
-            in("a7") syscall as usize,
+            in("a7") scarlet_abi::syscall_transport_number(syscall),
             inlateout("a0") arg1 => ret,
             clobber_abi("C"),
             options(nostack)
@@ -59,7 +59,7 @@ pub(super) unsafe fn syscall2(syscall: Syscall, arg1: usize, arg2: usize) -> usi
     unsafe {
         asm!(
             "ecall",
-            in("a7") syscall as usize,
+            in("a7") scarlet_abi::syscall_transport_number(syscall),
             inlateout("a0") arg1 => ret,
             in("a1") arg2,
             clobber_abi("C"),
@@ -75,7 +75,7 @@ pub(super) unsafe fn syscall3(syscall: Syscall, arg1: usize, arg2: usize, arg3: 
     unsafe {
         asm!(
             "ecall",
-            in("a7") syscall as usize,
+            in("a7") scarlet_abi::syscall_transport_number(syscall),
             inlateout("a0") arg1 => ret,
             in("a1") arg2,
             in("a2") arg3,
@@ -98,7 +98,7 @@ pub(super) unsafe fn syscall4(
     unsafe {
         asm!(
             "ecall",
-            in("a7") syscall as usize,
+            in("a7") scarlet_abi::syscall_transport_number(syscall),
             inlateout("a0") arg1 => ret,
             in("a1") arg2,
             in("a2") arg3,
@@ -123,7 +123,7 @@ pub(super) unsafe fn syscall5(
     unsafe {
         asm!(
             "ecall",
-            in("a7") syscall as usize,
+            in("a7") scarlet_abi::syscall_transport_number(syscall),
             inlateout("a0") arg1 => ret,
             in("a1") arg2,
             in("a2") arg3,
@@ -150,7 +150,7 @@ pub(super) unsafe fn syscall6(
     unsafe {
         asm!(
             "ecall",
-            in("a7") syscall as usize,
+            in("a7") scarlet_abi::syscall_transport_number(syscall),
             inlateout("a0") arg1 => ret,
             in("a1") arg2,
             in("a2") arg3,

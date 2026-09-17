@@ -20,7 +20,7 @@
       flake = false;
     };
     qemu-scarlet = {
-      url = "git+https://gitlab.com/petitstrawberry/qemu.git?ref=scarlet&submodules=1";
+      url = "git+https://gitlab.com/petitstrawberry/qemu.git?rev=922577606033eade699d231ba7cebcee0d6b92b6&submodules=1";
       flake = false;
     };
   };

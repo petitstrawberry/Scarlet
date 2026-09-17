@@ -3,7 +3,9 @@
 use super::config;
 use super::cursor::Cursor;
 use super::cursor_theme::CursorTheme;
-use super::damage::{DamageRect, PresentDamage, WindowGeometrySnapshot, changed_geometry_damage};
+use super::damage::{
+    DamageRect, PresentDamage, WindowGeometrySnapshot, changed_geometry_damage, shared_frame_damage,
+};
 use super::frame_callback::{frame_callback_is_ready, frame_callback_target};
 use super::gpu_compositor::{GpuCompositor, SgfxBufferError, SgfxBufferIdentity, SgfxCommitToken};
 use super::input::{
@@ -10572,11 +10574,10 @@ impl Compositor {
                 };
                 match result {
                     Ok(damage) => {
-                        if let Some((window_x, window_y, presented, transform, instances)) =
+                        if let Some((geometry, presented, transform, instances)) =
                             self.window_manager.get_window(window_id).map(|window| {
                                 (
-                                    window.x,
-                                    window.y,
+                                    (window.x, window.y, window.width, window.height),
                                     window.is_presented(),
                                     window.presentation_transform,
                                     window
@@ -10596,13 +10597,10 @@ impl Compositor {
                                     transform.height,
                                 ));
                             } else {
-                                for (x, y, width, height) in &damage {
-                                    self.add_pending_damage((
-                                        window_x.saturating_add(*x as i32),
-                                        window_y.saturating_add(*y as i32),
-                                        *width,
-                                        *height,
-                                    ));
+                                for rect in
+                                    shared_frame_damage(damage.extent, geometry, &damage.rects)
+                                {
+                                    self.add_pending_damage(rect);
                                 }
                             }
                             for instance in instances {

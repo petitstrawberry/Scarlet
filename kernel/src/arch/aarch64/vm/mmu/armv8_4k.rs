@@ -1084,8 +1084,8 @@ impl PageTable {
         Some((pte.get_ppn() << 12) | page_offset as u64)
     }
 
-    /// Unmap a single page (like RISC-V's unmap())
-    fn unmap(&mut self, asid: u16, vaddr: usize) {
+    /// Clear one leaf, leaving TLB invalidation to the range caller.
+    fn clear_leaf(&mut self, vaddr: usize) -> bool {
         if !Self::is_canonical_48(vaddr) {
             panic!(
                 "Virtual address {:#x} is not canonical for 48-bit VA",
@@ -1101,9 +1101,9 @@ impl PageTable {
                 (pte as *const PageTableEntry) as usize,
                 core::mem::size_of::<PageTableEntry>(),
             );
-            crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_BEGIN, vaddr as u64, asid as u64);
-            invalidate_stage1_translations_inner_shareable();
-            crate::breadcrumb::drop(crate::breadcrumb::PT_TLBI_DONE, vaddr as u64, asid as u64);
+            true
+        } else {
+            false
         }
     }
 
@@ -1123,6 +1123,7 @@ impl PageTable {
         }
 
         let mut vaddr = vaddr_start & !(PAGE_SIZE - 1);
+        let mut changed = false;
         while vaddr <= vaddr_end {
             let Some((_, level)) = self.walk_leaf(vaddr) else {
                 match vaddr.checked_add(PAGE_SIZE) {
@@ -1137,13 +1138,13 @@ impl PageTable {
             let leaf_end = leaf_start + leaf_size - 1;
 
             if vaddr_start <= leaf_start && leaf_end <= vaddr_end {
-                self.unmap(asid, leaf_start);
+                changed |= self.clear_leaf(leaf_start);
                 match leaf_end.checked_add(1) {
                     Some(next) => vaddr = next,
                     None => break,
                 }
             } else if level == 0 {
-                self.unmap(asid, vaddr);
+                changed |= self.clear_leaf(vaddr);
                 match vaddr.checked_add(PAGE_SIZE) {
                     Some(next) => vaddr = next,
                     None => break,
@@ -1152,6 +1153,23 @@ impl PageTable {
                 self.split_leaf(asid, vaddr, level)
                     .expect("unmap_range: failed to split huge-page leaf");
             }
+        }
+        // The caller reclaims physical pages only after this method returns.
+        // Publish every cleared PTE, then invalidate once for the whole range.
+        // Flushing all stage-1 translations per 4 KiB page is especially costly
+        // under HVF and turns ordinary libc allocation churn into long stalls.
+        if changed {
+            crate::breadcrumb::drop(
+                crate::breadcrumb::PT_TLBI_BEGIN,
+                vaddr_start as u64,
+                asid as u64,
+            );
+            invalidate_stage1_translations_inner_shareable();
+            crate::breadcrumb::drop(
+                crate::breadcrumb::PT_TLBI_DONE,
+                vaddr_start as u64,
+                asid as u64,
+            );
         }
     }
 

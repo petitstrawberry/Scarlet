@@ -603,16 +603,99 @@ impl VirtualMemoryManager {
             Some(end) if remove_start <= end => end,
             _ => return Vec::new(),
         };
+        let mut g = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_REMOVE_RANGE);
+        let removed_maps = Self::remove_memory_map_range_locked(&mut g, remove_start, remove_end);
+        drop(g);
+        self.unmap_range_from_mmu(remove_start, remove_end);
+        removed_maps
+    }
+
+    /// Shrink a covered portion of one logical mapping, including its COW splits.
+    /// Validation and metadata removal share one lock. Physical backing remains
+    /// owned by the returned descriptors until the caller reclaims it after the
+    /// page-table invalidation performed here.
+    pub(crate) fn shrink_memory_map_range(
+        &self,
+        vaddr: usize,
+        old_len: usize,
+        new_len: usize,
+    ) -> Result<Vec<VirtualMemoryMap>, &'static str> {
+        if !vaddr.is_multiple_of(PAGE_SIZE)
+            || !old_len.is_multiple_of(PAGE_SIZE)
+            || !new_len.is_multiple_of(PAGE_SIZE)
+            || new_len == 0
+            || new_len > old_len
+        {
+            return Err("Invalid mapping shrink range");
+        }
+        let old_end = vaddr.checked_add(old_len - 1).ok_or("Range overflow")?;
+        let new_end = vaddr.checked_add(new_len - 1).ok_or("Range overflow")?;
+        let mut g = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_REMOVE_RANGE);
+        let first = g
+            .memmap
+            .range(..=vaddr)
+            .next_back()
+            .map(|(_, map)| map)
+            .filter(|map| vaddr <= map.vmarea.end)
+            .ok_or("Unmapped source range")?;
+        let (origin, permissions, shared, attribute) = (
+            first.vm_start,
+            first.permissions,
+            first.is_shared,
+            first.memory_attribute,
+        );
+        let mut next = vaddr;
+        let mut covered = false;
+        for (_, map) in g.memmap.range(first.vmarea.start..) {
+            if map.vmarea.start > next
+                || map.vm_start != origin
+                || map.permissions != permissions
+                || map.is_shared != shared
+                || map.memory_attribute != attribute
+            {
+                return Err("Source range has a gap or different mapping types");
+            }
+            if map.vmarea.end >= old_end {
+                covered = true;
+                break;
+            }
+            next = map.vmarea.end + 1;
+        }
+        if !covered {
+            return Err("Unmapped source range");
+        }
+        if new_len == old_len {
+            return Ok(Vec::new());
+        }
+        let removed = Self::remove_memory_map_range_locked(&mut g, new_end + 1, old_end);
+        drop(g);
+        self.unmap_range_from_mmu(new_end + 1, old_end);
+        Ok(removed)
+    }
+
+    fn remove_memory_map_range_locked(
+        g: &mut InnerVmm,
+        remove_start: usize,
+        remove_end: usize,
+    ) -> Vec<VirtualMemoryMap> {
         let mut removed_maps = Vec::new();
         let mut mappings_to_add = Vec::new();
 
-        let mut g = self.inner.write();
-        self.record_inner_writer(WRITE_SITE_REMOVE_RANGE);
-
         // Find all mappings that overlap with the removal range
+        // A sorted, non-overlapping map can intersect the range only at its
+        // predecessor or at keys inside the range. Avoid scanning every VMA
+        // for each small allocator munmap in a shader-heavy process.
+        let first_key = g
+            .memmap
+            .range(..=remove_start)
+            .next_back()
+            .map(|(key, _)| *key)
+            .unwrap_or(remove_start);
         let overlapping_keys: alloc::vec::Vec<usize> = g
             .memmap
-            .range(..)
+            .range(first_key..=remove_end)
             .filter_map(|(start_addr, existing_map)| {
                 let existing_start = existing_map.vmarea.start;
                 let existing_end = existing_map.vmarea.end;
@@ -712,11 +795,6 @@ impl VirtualMemoryManager {
                 g.last_search_cache = None;
             }
         }
-
-        drop(g);
-
-        // Unmap the removed range from MMU
-        self.unmap_range_from_mmu(remove_start, remove_end);
 
         removed_maps
     }

@@ -450,14 +450,20 @@ impl TaskPages {
     }
 
     pub fn reclaim_paddr_range(&mut self, start: u64, end: u64) -> usize {
-        if self.pages.is_empty() {
+        self.reclaim_paddr_ranges(&[(start, end)])
+    }
+
+    /// Reclaim pages fully covered by sorted, disjoint inclusive ranges.
+    pub(crate) fn reclaim_paddr_ranges(&mut self, ranges: &[(u64, u64)]) -> usize {
+        if self.pages.is_empty() || ranges.is_empty() {
             return 0;
         }
 
         let mut to_free = Vec::new();
         self.pages.retain(|&paddr| {
             let page_end = paddr.saturating_add(PAGE_SIZE as u64 - 1);
-            let in_range = paddr >= start && page_end <= end;
+            let index = ranges.partition_point(|range| range.0 <= paddr);
+            let in_range = index != 0 && page_end <= ranges[index - 1].1;
             if in_range {
                 to_free.push(paddr);
                 false

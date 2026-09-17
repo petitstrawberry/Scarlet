@@ -756,6 +756,31 @@ pub struct RawFileMetadata {
     pub _reserved: u32,
 }
 
+/// Explicit native object API calls from a process using another ABI.
+///
+/// The lower 16 bits retain the native operation number and native return
+/// convention. This namespace never changes the process's default ABI or
+/// converts a native object handle into a Linux file descriptor.
+pub const NATIVE_CALL_BASE: usize = 0x5343_0000;
+
+/// Recognize only the complete native-call namespace.
+pub const fn decode_native_call(number: usize) -> Option<usize> {
+    if number & !0xffff == NATIVE_CALL_BASE {
+        Some(number & 0xffff)
+    } else {
+        None
+    }
+}
+
+/// Select the native SDK transport without changing its argument convention.
+pub const fn syscall_transport_number(syscall: Syscall) -> usize {
+    if cfg!(target_os = "linux") {
+        NATIVE_CALL_BASE | syscall as usize
+    } else {
+        syscall as usize
+    }
+}
+
 /// Scarlet Native syscall numbers.
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

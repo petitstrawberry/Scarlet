@@ -252,7 +252,13 @@ fn copy_from_user_pagewise(
     while copied < dst_len {
         let page_off = cur_user & (crate::environment::PAGE_SIZE - 1);
         let chunk = core::cmp::min(crate::environment::PAGE_SIZE - page_off, dst_len - copied);
-        match vm_manager.translate_to_kva(cur_user) {
+        match vm_manager
+            .translate_to_phys_with_access(
+                cur_user,
+                crate::object::capability::memory_mapping::AccessOp::Load,
+            )
+            .map(crate::vm::addr::phys_to_virt)
+        {
             Some(kva) => unsafe {
                 core::ptr::copy_nonoverlapping(
                     kva as *const u8,
@@ -1684,120 +1690,7 @@ fn stream_error_to_errno(err: StreamError) -> usize {
 /// - Number of bytes written on success
 /// - usize::MAX on error
 pub fn sys_writev(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as usize;
-    let iovec_ptr = trapframe.get_arg(1);
-    let iovcnt = trapframe.get_arg(2) as usize;
-
-    // Increment PC to avoid infinite loop if writev fails
-    trapframe.increment_pc_next(&task);
-
-    // Validate parameters
-    if iovcnt == 0 {
-        return 0; // Nothing to write
-    }
-
-    // Linux typically limits iovcnt to prevent resource exhaustion
-    const IOV_MAX: usize = 1024;
-    if iovcnt > IOV_MAX {
-        return usize::MAX; // Too many vectors
-    }
-
-    // Get handle from Linux fd
-    let handle = match abi.get_handle(fd) {
-        Some(h) => h,
-        None => return usize::MAX, // Invalid file descriptor
-    };
-
-    let kernel_obj = match task.handle_table.get(handle) {
-        Some(obj) => obj,
-        None => return usize::MAX, // Invalid file descriptor
-    };
-
-    let stream = match kernel_obj.as_stream() {
-        Some(stream) => stream,
-        None => return usize::MAX, // Not a stream object
-    };
-
-    let nonblocking = abi
-        .get_file_status_flags(fd)
-        .map(|f| ((f as i32) & O_NONBLOCK) != 0)
-        .unwrap_or(false);
-
-    // Translate and validate iovec array pointer
-    let iovec_vaddr = match task.vm_manager.translate_to_kva(iovec_ptr) {
-        Some(addr) => addr as *const IoVec,
-        None => return usize::MAX, // Invalid address
-    };
-
-    if iovec_vaddr.is_null() {
-        return usize::MAX; // NULL pointer
-    }
-
-    // Read iovec structures from user space
-    let iovecs = unsafe { core::slice::from_raw_parts(iovec_vaddr, iovcnt) };
-
-    let mut total_written = 0usize;
-
-    // Process each iovec
-    for iovec in iovecs {
-        if iovec.iov_len == 0 {
-            continue; // Skip empty buffers
-        }
-
-        // Translate buffer address
-        let buf_vaddr = match task.vm_manager.translate_to_kva(iovec.iov_base as usize) {
-            Some(addr) => addr as *const u8,
-            None => return usize::MAX, // Invalid buffer address
-        };
-
-        if buf_vaddr.is_null() {
-            return usize::MAX; // NULL buffer pointer
-        }
-
-        // Create a slice from the user buffer
-        let buffer = unsafe { core::slice::from_raw_parts(buf_vaddr, iovec.iov_len) };
-
-        // Write data from this buffer
-        match stream.write(buffer) {
-            Ok(n) => {
-                total_written = total_written.saturating_add(n);
-
-                // If partial write occurred, stop processing remaining vectors
-                // This matches Linux behavior for writev
-                if n < iovec.iov_len {
-                    break;
-                }
-            }
-            Err(StreamError::WouldBlock) => {
-                if nonblocking {
-                    // If some bytes were written, return them; otherwise, EAGAIN
-                    if total_written == 0 {
-                        return errno::to_result(errno::EAGAIN);
-                    } else {
-                        break;
-                    }
-                } else {
-                    schedule(trapframe);
-                    return usize::MAX;
-                }
-            }
-            Err(_) => {
-                // If no bytes were written at all, return error
-                // If some bytes were written, return the count
-                if total_written == 0 {
-                    return usize::MAX;
-                } else {
-                    break;
-                }
-            }
-        }
-    }
-
-    if let Some(file) = kernel_obj.as_file() {
-        log_mozc_ipc_file(file, "writev", total_written);
-    }
-    total_written
+    sys_vectored_io(abi, trapframe, false)
 }
 
 pub fn sys_lseek(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
@@ -3128,89 +3021,178 @@ pub fn sys_getdents64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 /// - On success: number of bytes read
 /// - On error: usize::MAX
 pub fn sys_readv(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as usize;
-    let iovec_ptr = trapframe.get_arg(1);
-    let iovcnt = trapframe.get_arg(2) as usize;
-    trapframe.increment_pc_next(&task);
+    sys_vectored_io(abi, trapframe, true)
+}
 
-    if iovcnt == 0 {
-        return 0;
-    }
+// Neither iovec metadata nor its buffers need physically contiguous pages.
+// Gather/scatter through one bounded kernel buffer, keeping small pipe writes
+// atomic and allowing legal short I/O for requests larger than the bound.
+fn sys_vectored_io(abi: &mut LinuxAbi, trapframe: &mut Trapframe, reading: bool) -> usize {
+    use crate::object::capability::memory_mapping::AccessOp;
+    use crate::object::capability::selectable::ReadyInterest;
     const IOV_MAX: usize = 1024;
-    if iovcnt > IOV_MAX {
-        return usize::MAX;
+    const MAX_TRANSFER: usize = 1024 * 1024;
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0);
+    let address = trapframe.get_arg(1);
+    let count = trapframe.get_arg(2);
+    trapframe.increment_pc_next(&task);
+    if count > IOV_MAX {
+        return errno::to_result(errno::EINVAL);
     }
     let handle = match abi.get_handle(fd) {
-        Some(h) => h,
-        None => return usize::MAX,
+        Some(handle) => handle,
+        None => return errno::to_result(errno::EBADF),
     };
-    let kernel_obj = match task.handle_table.get(handle) {
-        Some(obj) => obj,
-        None => return usize::MAX,
+    let object = match task.handle_table.get(handle) {
+        Some(object) => object,
+        None => return errno::to_result(errno::EBADF),
     };
-    let stream = match kernel_obj.as_stream() {
-        Some(s) => s,
-        None => return usize::MAX, // Not a stream object
+    if object
+        .as_file()
+        .and_then(|file| file.metadata().ok())
+        .is_some_and(|metadata| matches!(metadata.file_type, FileType::Directory))
+    {
+        return errno::to_result(errno::EISDIR);
+    }
+    let stream = match object.as_stream() {
+        Some(stream) => stream,
+        None => return errno::to_result(errno::EINVAL),
     };
-
+    let mut vectors = Vec::new();
+    if vectors.try_reserve_exact(count).is_err() {
+        return errno::to_result(errno::ENOMEM);
+    }
+    let mut total = 0usize;
+    for index in 0..count {
+        let Some(element) = index
+            .checked_mul(16)
+            .and_then(|offset| address.checked_add(offset))
+        else {
+            return errno::to_result(errno::EFAULT);
+        };
+        let mut bytes = [0u8; 16];
+        if copy_from_user_pagewise(&mut bytes, element, &task.vm_manager) != bytes.len() {
+            return errno::to_result(errno::EFAULT);
+        }
+        let base = usize::from_ne_bytes(bytes[..8].try_into().unwrap());
+        let length = usize::from_ne_bytes(bytes[8..].try_into().unwrap());
+        let Some(next) = total
+            .checked_add(length)
+            .filter(|value| *value <= isize::MAX as usize)
+        else {
+            return errno::to_result(errno::EINVAL);
+        };
+        if length != 0 && base.checked_add(length - 1).is_none() {
+            return errno::to_result(errno::EFAULT);
+        }
+        vectors.push((base, length));
+        total = next;
+    }
+    let length = total.min(MAX_TRANSFER);
+    if length == 0 {
+        return 0;
+    }
+    // Resolve every page in the transfer prefix before consuming stream bytes.
+    let mut remaining = length;
+    let access = if reading {
+        AccessOp::Store
+    } else {
+        AccessOp::Load
+    };
+    for &(base, vector_length) in &vectors {
+        let mut offset = 0;
+        let limit = vector_length.min(remaining);
+        while offset < limit {
+            let cursor = base + offset;
+            if task
+                .vm_manager
+                .translate_to_phys_with_access(cursor, access)
+                .is_none()
+            {
+                return errno::to_result(errno::EFAULT);
+            }
+            offset += (crate::environment::PAGE_SIZE
+                - (cursor & (crate::environment::PAGE_SIZE - 1)))
+                .min(limit - offset);
+        }
+        remaining -= limit;
+        if remaining == 0 {
+            break;
+        }
+    }
+    let mut buffer = Vec::new();
+    if buffer.try_reserve_exact(length).is_err() {
+        return errno::to_result(errno::ENOMEM);
+    }
+    buffer.resize(length, 0);
+    if !reading {
+        let mut offset = 0;
+        for &(base, vector_length) in &vectors {
+            let part = vector_length.min(length - offset);
+            if copy_from_user_pagewise(&mut buffer[offset..offset + part], base, &task.vm_manager)
+                != part
+            {
+                return errno::to_result(errno::EFAULT);
+            }
+            offset += part;
+            if offset == length {
+                break;
+            }
+        }
+    }
     let nonblocking = abi
         .get_file_status_flags(fd)
-        .map(|f| ((f as i32) & O_NONBLOCK) != 0)
-        .unwrap_or(false);
-    let iovec_vaddr = match task.vm_manager.translate_to_kva(iovec_ptr) {
-        Some(addr) => addr as *mut IoVec,
-        None => return usize::MAX,
-    };
-    if iovec_vaddr.is_null() {
-        return usize::MAX;
-    }
-    let iovecs = unsafe { core::slice::from_raw_parts_mut(iovec_vaddr, iovcnt) };
-    let mut total_read = 0usize;
-    for iovec in iovecs.iter_mut() {
-        if iovec.iov_len == 0 {
-            continue;
-        }
-        let buf_vaddr = match task.vm_manager.translate_to_kva(iovec.iov_base as usize) {
-            Some(addr) => addr as *mut u8,
-            None => return usize::MAX,
+        .is_some_and(|flags| flags as i32 & O_NONBLOCK != 0);
+    let transferred = loop {
+        let result = if reading {
+            stream.read(&mut buffer)
+        } else {
+            stream.write(&buffer)
         };
-        if buf_vaddr.is_null() {
-            return usize::MAX;
+        match result {
+            Ok(amount) => break amount.min(length),
+            Err(StreamError::EndOfStream) if reading => return 0,
+            Err(StreamError::WouldBlock) if !nonblocking => {
+                let Some(selectable) = object.as_selectable() else {
+                    return errno::to_result(errno::EAGAIN);
+                };
+                let interest = if reading {
+                    ReadyInterest::read()
+                } else {
+                    ReadyInterest::write()
+                };
+                if abi.has_pending_signals() {
+                    return errno::to_result(errno::EINTR);
+                }
+                let _ = selectable.wait_until_ready(interest, trapframe, None, 0);
+                if abi.has_pending_signals() {
+                    return errno::to_result(errno::EINTR);
+                }
+            }
+            Err(error) => return errno::to_result(stream_error_to_errno(error)),
         }
-        let buffer = unsafe { core::slice::from_raw_parts_mut(buf_vaddr, iovec.iov_len) };
-        match stream.read(buffer) {
-            Ok(n) => {
-                total_read = total_read.saturating_add(n);
-                // If partial read occurred, stop processing remaining vectors
-                // This matches Linux behavior for readv
-                if n < iovec.iov_len {
-                    break;
-                }
-            }
-            Err(StreamError::EndOfStream) => break,
-            Err(StreamError::WouldBlock) => {
-                if nonblocking {
-                    if total_read == 0 {
-                        return errno::to_result(errno::EAGAIN);
-                    } else {
-                        break;
-                    }
+    };
+    if reading {
+        let mut offset = 0;
+        for &(base, vector_length) in &vectors {
+            let part = vector_length.min(transferred - offset);
+            let copied =
+                copy_to_user_pagewise(base, &buffer[offset..offset + part], &task.vm_manager);
+            offset += copied;
+            if copied != part {
+                return if offset == 0 {
+                    errno::to_result(errno::EFAULT)
                 } else {
-                    schedule(trapframe);
-                    return usize::MAX;
-                }
+                    offset
+                };
             }
-            Err(_) => {
-                if total_read == 0 {
-                    return usize::MAX;
-                } else {
-                    break;
-                }
+            if offset == transferred {
+                break;
             }
         }
     }
-    total_read
+    transferred
 }
 
 /// Linux sys_fsync system call implementation
