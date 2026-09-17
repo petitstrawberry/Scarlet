@@ -68,7 +68,7 @@ dependencies = [
 [[package]]
 name = "scarlet"
 version = "1.0.1"
-source = "git+https://github.com/petitstrawberry/Scarlet?rev=0897996f4703707390c6cad8997795d8db03405c#0897996f4703707390c6cad8997795d8db03405c"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=22cd14abafb24a504004ce8f6cd863708a90a95b#22cd14abafb24a504004ce8f6cd863708a90a95b"
 dependencies = [
  "fdt",
  "font8x8",
@@ -82,12 +82,12 @@ dependencies = [
 [[package]]
 name = "scarlet-abi"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?rev=0897996f4703707390c6cad8997795d8db03405c#0897996f4703707390c6cad8997795d8db03405c"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=22cd14abafb24a504004ce8f6cd863708a90a95b#22cd14abafb24a504004ce8f6cd863708a90a95b"
 
 [[package]]
 name = "scarlet-module-prototype"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?rev=0897996f4703707390c6cad8997795d8db03405c#0897996f4703707390c6cad8997795d8db03405c"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=22cd14abafb24a504004ce8f6cd863708a90a95b#22cd14abafb24a504004ce8f6cd863708a90a95b"
 dependencies = [
  "scarlet",
 ]
