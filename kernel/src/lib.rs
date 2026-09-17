@@ -1138,7 +1138,6 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
     crate::arch::vm::register_trampoline_for_ap();
 
     crate::interrupt::InterruptManager::global().init_controllers_for_cpu(cpu_id as u32);
-    crate::timer::get_kernel_timer().init(cpu_id);
     crate::interrupt::enable_cpu_interrupts();
     fence(Ordering::SeqCst);
 
