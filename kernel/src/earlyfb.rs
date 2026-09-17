@@ -179,10 +179,20 @@ impl FramebufferConsole {
         }
 
         let total_bytes = self.pitch.saturating_mul(self.surface_height());
-        if self.opaque {
-            for offset in (0..total_bytes).step_by(4) {
+        if self.opaque
+            && self.bytes_per_pixel == core::mem::size_of::<u32>()
+            && self.addr % core::mem::align_of::<u32>() == 0
+        {
+            let opaque_bytes =
+                total_bytes / core::mem::size_of::<u32>() * core::mem::size_of::<u32>();
+            for offset in (0..opaque_bytes).step_by(core::mem::size_of::<u32>()) {
                 unsafe {
                     core::ptr::write_volatile((self.addr + offset) as *mut u32, 0xff000000);
+                }
+            }
+            for offset in opaque_bytes..total_bytes {
+                unsafe {
+                    core::ptr::write_volatile((self.addr + offset) as *mut u8, 0);
                 }
             }
         } else {
@@ -479,9 +489,14 @@ pub unsafe fn replace_surface(
 ///
 /// # Safety
 /// The token's original mapping must still be live and displayed. The caller
-/// must serialize this with display ownership and console-surface changes.
-pub unsafe fn restore_surface(surface: EarlyFramebufferSurface) {
+/// must serialize this with display ownership and console-surface changes. If
+/// output may have been written after [`replace_surface`], the replacement
+/// contents must first be copied back to the original surface so the pixels
+/// remain consistent with the retained cursor position.
+pub unsafe fn restore_surface(mut surface: EarlyFramebufferSurface) {
     let mut console = EARLY_CONSOLE.lock();
+    surface.console.cursor_x = console.cursor_x;
+    surface.console.cursor_y = console.cursor_y;
     *console = surface.console;
     #[cfg(feature = "linux-boot")]
     publish_emergency_surface(&console);
