@@ -1,0 +1,56 @@
+--- a/src/vrend/vrend_shader.c
++++ b/src/vrend/vrend_shader.c
+@@ -6301,10 +6301,11 @@
+ 
+       if (ctx->prog_type == TGSI_PROCESSOR_VERTEX && ctx->cfg->use_explicit_locations)
+          emit_ext(glsl_strbufs, "ARB_explicit_attrib_location", "require");
+-      if (ctx->prog_type == TGSI_PROCESSOR_FRAGMENT && fs_emit_layout(ctx))
++      if (ctx->prog_type == TGSI_PROCESSOR_FRAGMENT && fs_emit_layout(ctx) &&
++          ctx->glsl_ver_required < 150)
+          emit_ext(glsl_strbufs, "ARB_fragment_coord_conventions", "require");
+ 
+-      if (ctx->ubo_used_mask)
++      if (ctx->ubo_used_mask && ctx->glsl_ver_required < 140)
+          emit_ext(glsl_strbufs, "ARB_uniform_buffer_object", "require");
+ 
+       if (ctx->num_cull_dist_prop || ctx->key->num_in_cull || ctx->key->num_out_cull)
+@@ -6320,6 +6321,10 @@
+       for (uint32_t i = 0; i < ARRAY_SIZE(shader_req_table); i++) {
+          if (shader_req_table[i].key == SHADER_REQ_SAMPLER_RECT && ctx->glsl_ver_required >= 140)
+             continue;
++         if (shader_req_table[i].key == SHADER_REQ_INSTANCE_ID && ctx->glsl_ver_required >= 140)
++            continue;
++         if (shader_req_table[i].key == SHADER_REQ_INTS && ctx->glsl_ver_required >= 330)
++            continue;
+ 
+          if (ctx->shader_req_bits & shader_req_table[i].key) {
+             emit_ext(glsl_strbufs, shader_req_table[i].string, "require");
+@@ -8140,8 +8145,11 @@
+    if (!tgsi_scan_shader(tokens, &ctx.info))
+       goto fail;
+ 
+-   /* if we are in core profile mode we should use GLSL 1.40 */
+-   if (cfg->glsl_version >= 140)
++   /* A core profile need not advertise extension names for core GLSL
++    * features. Use the core language version that the host actually offers. */
++   if (cfg->use_core_profile && cfg->glsl_version >= 330)
++      ctx.glsl_ver_required = require_glsl_ver(&ctx, 330);
++   else if (cfg->glsl_version >= 140)
+       ctx.glsl_ver_required = require_glsl_ver(&ctx, 140);
+ 
+    if (ctx.iter.processor.Processor == TGSI_PROCESSOR_GEOMETRY ||
+--- a/src/vrend/vrend_renderer.c
++++ b/src/vrend/vrend_renderer.c
+@@ -3765,8 +3765,11 @@
+             offset *= blsize;
+             size *= blsize;
+             glTexBufferRange(GL_TEXTURE_BUFFER, internalformat, view->texture->gl_id, offset, size);
+-         } else
++         } else {
+             glTexBuffer(GL_TEXTURE_BUFFER, internalformat, view->texture->gl_id);
++            /* Do not leave the buffer texture bound across later buffer uploads. */
++            glBindTexture(GL_TEXTURE_BUFFER, 0);
++         }
+       }
+    }
+ 

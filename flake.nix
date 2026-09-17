@@ -105,6 +105,7 @@
           virglrenderer = pkgs.virglrenderer.overrideAttrs (_finalAttrs: prevAttrs: {
             patches = (prevAttrs.patches or [ ]) ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
               ./nix/patches/virglrenderer-macos-kqueue-sync.patch
+              ./nix/patches/virglrenderer-macos-core-gl.patch
             ];
           });
 
