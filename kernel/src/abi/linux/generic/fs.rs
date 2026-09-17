@@ -3320,75 +3320,134 @@ pub fn sys_ftruncate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 }
 
-/// Linux sys_faccessat implementation (dummy: always returns 0)
-///
-/// Arguments:
-/// - abi: LinuxAbi context
-/// - trapframe: Trapframe containing syscall arguments
-///
-/// Returns:
-/// - 0 (success)
-pub fn sys_faccessat(_abi: &mut LinuxAbi, trapframe: &mut crate::arch::Trapframe) -> usize {
-    let task = crate::task::mytask().unwrap();
-    trapframe.increment_pc_next(&task);
+const ACCESS_AT_SYMLINK_NOFOLLOW: i32 = 0x100;
+const ACCESS_AT_EACCESS: i32 = 0x200;
+const ACCESS_AT_EMPTY_PATH: i32 = 0x1000;
 
-    let dirfd = trapframe.get_arg(0) as i32;
-    let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
-        Some(ptr) => ptr as *const u8,
-        None => return usize::MAX,
-    };
-    let mode = trapframe.get_arg(2) as i32;
-    let path_str = match get_path_str_v2(path_ptr) {
-        Ok(p) => p,
-        Err(_) => return usize::MAX,
-    };
-
-    // crate::println!(
-    //     "sys_faccessat: epc={:#x}, dirfd={}, path='{}', mode={:#o}",
-    //     trapframe.epc,
-    //     dirfd,
-    //     path_str,
-    //     mode
-    // );
-
-    0
+fn validate_access_arguments(mode: i32, flags: i32) -> Result<(), usize> {
+    if mode & !7 != 0
+        || flags & !(ACCESS_AT_SYMLINK_NOFOLLOW | ACCESS_AT_EACCESS | ACCESS_AT_EMPTY_PATH) != 0
+    {
+        return Err(errno::EINVAL);
+    }
+    Ok(())
 }
 
-/// Linux faccessat2 system call (syscall 439)
-///
-/// Checks user's permissions for a file. Similar to faccessat but with
-/// additional flag support (AT_EACCESS, AT_SYMLINK_NOFOLLOW).
-///
-/// Signature: int faccessat2(int dirfd, const char *pathname, int mode, int flags);
-///
-/// Returns:
-/// - 0 (success)
-pub fn sys_faccessat2(_abi: &mut LinuxAbi, trapframe: &mut crate::arch::Trapframe) -> usize {
-    let task = crate::task::mytask().unwrap();
+fn linux_access_metadata(
+    metadata: &crate::fs::FileMetadata,
+    read_only: bool,
+    mode: i32,
+) -> Result<(), usize> {
+    // The current Linux ABI exposes both real and effective UID as zero.
+    // Root bypasses DAC read/write bits, but cannot execute a regular file
+    // without an execute bit or write a read-only filesystem.
+    if mode & 2 != 0 && read_only {
+        return Err(errno::EROFS);
+    }
+    if mode & 1 != 0 && metadata.file_type == FileType::RegularFile && !metadata.permissions.execute
+    {
+        return Err(errno::EACCES);
+    }
+    Ok(())
+}
+
+fn linux_access_path(
+    vfs: &crate::fs::VfsManager,
+    path: &str,
+    mode: i32,
+    flags: i32,
+) -> Result<(), usize> {
+    validate_access_arguments(mode, flags)?;
+    if path.is_empty() {
+        return Err(errno::ENOENT);
+    }
+    let options = crate::fs::vfs_v2::manager::PathResolutionOptions {
+        no_follow: flags & ACCESS_AT_SYMLINK_NOFOLLOW != 0,
+    };
+    let (entry, _) = vfs
+        .resolve_path_with_options(path, &options)
+        .map_err(|error| errno::from_fs_error(&error))?;
+    let node = entry.node();
+    let metadata = node
+        .metadata()
+        .map_err(|error| errno::from_fs_error(&error))?;
+    linux_access_metadata(
+        &metadata,
+        node.filesystem()
+            .and_then(|fs| fs.upgrade())
+            .is_some_and(|fs| fs.is_read_only()),
+        mode,
+    )
+}
+
+fn faccessat(abi: &LinuxAbi, trapframe: &mut Trapframe, flags: i32) -> usize {
+    let Some(task) = mytask() else {
+        return errno::to_result(errno::EIO);
+    };
     trapframe.increment_pc_next(&task);
-
     let dirfd = trapframe.get_arg(0) as i32;
-    let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
-        Some(ptr) => ptr as *const u8,
-        None => return usize::MAX,
-    };
     let mode = trapframe.get_arg(2) as i32;
-    let flags = trapframe.get_arg(3) as i32;
-    let path_str = match get_path_str_v2(path_ptr) {
-        Ok(p) => p,
-        Err(_) => return usize::MAX,
+    if let Err(error) = validate_access_arguments(mode, flags) {
+        return errno::to_result(error);
+    }
+    let path = match parse_c_string_from_userspace(&task, trapframe.get_arg(1), MAX_PATH_LENGTH) {
+        Ok(path) => remap_shm_path(&path),
+        Err(_) => return errno::to_result(errno::EFAULT),
     };
+    let Some(vfs) = task.get_vfs() else {
+        return errno::to_result(errno::EIO);
+    };
+    if path.is_empty() && flags & ACCESS_AT_EMPTY_PATH != 0 {
+        if dirfd == -100 {
+            return linux_access_path(&vfs, &vfs.get_cwd_path(), mode, flags)
+                .err()
+                .map_or(0, errno::to_result);
+        }
+        let Some(handle) = abi.get_handle(dirfd as usize) else {
+            return errno::to_result(errno::EBADF);
+        };
+        let Some(object) = task.handle_table.get(handle) else {
+            return errno::to_result(errno::EBADF);
+        };
+        let Some(file) = object.as_file() else {
+            return errno::to_result(errno::EBADF);
+        };
+        let metadata = match file.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => return errno::to_result(errno::EIO),
+        };
+        let read_only = file
+            .as_any()
+            .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
+            .is_some_and(|file| {
+                file.get_vfs_entry()
+                    .node()
+                    .filesystem()
+                    .and_then(|fs| fs.upgrade())
+                    .is_some_and(|fs| fs.is_read_only())
+            });
+        return linux_access_metadata(&metadata, read_only, mode)
+            .err()
+            .map_or(0, errno::to_result);
+    }
+    let path = match path_at_to_absolute(abi, &task, &vfs, dirfd, &path) {
+        Ok(path) => path,
+        Err(error) => return errno::to_result(error),
+    };
+    linux_access_path(&vfs, &path, mode, flags)
+        .err()
+        .map_or(0, errno::to_result)
+}
 
-    // crate::println!(
-    //     "sys_faccessat2: epc={:#x}, dirfd={}, path='{}', mode={:#o}, flags={:#x}",
-    //     trapframe.epc,
-    //     dirfd,
-    //     path_str,
-    //     mode,
-    //     flags
-    // );
+/// Check a path in the process's Linux ABI filesystem view.
+pub fn sys_faccessat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    faccessat(abi, trapframe, 0)
+}
 
-    0
+/// Check a path with Linux faccessat2 flags, including descriptor-relative paths.
+pub fn sys_faccessat2(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let flags = trapframe.get_arg(3) as i32;
+    faccessat(abi, trapframe, flags)
 }
 
 /// Linux sys_mkdirat implementation
@@ -3427,6 +3486,9 @@ pub fn sys_mkdirat(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Some(v) => v,
         None => return errno::to_result(errno::EIO),
     };
+    if vfs.resolve_path(&abs_path).is_ok() {
+        return errno::to_result(errno::EEXIST);
+    }
     match vfs.create_dir(&abs_path) {
         Ok(_) => 0,
         Err(error) => errno::to_result(errno::from_fs_error(&error)),
@@ -5337,6 +5399,39 @@ mod tests {
         proc_exe_linux_stat, proc_exe_selector,
     };
     use crate::abi::linux::generic::errno;
+
+    #[test_case]
+    fn access_checks_existence_and_final_symlink_in_the_selected_view() {
+        let vfs = crate::fs::VfsManager::new();
+        vfs.create_dir("/data").unwrap();
+        vfs.create_file(
+            "/dangling",
+            crate::fs::FileType::SymbolicLink("/absent".into()),
+        )
+        .unwrap();
+        assert_eq!(super::linux_access_path(&vfs, "/data", 0, 0), Ok(()));
+        assert_eq!(
+            super::linux_access_path(&vfs, "/absent", 0, 0),
+            Err(errno::ENOENT)
+        );
+        assert_eq!(
+            super::linux_access_path(&vfs, "/dangling", 0, 0),
+            Err(errno::ENOENT)
+        );
+        assert_eq!(
+            super::linux_access_path(&vfs, "/dangling", 0, super::ACCESS_AT_SYMLINK_NOFOLLOW),
+            Ok(())
+        );
+        assert_eq!(super::linux_access_path(&vfs, "", 0, 0), Err(errno::ENOENT));
+        assert_eq!(
+            super::linux_access_path(&vfs, "/data", 8, 0),
+            Err(errno::EINVAL)
+        );
+        assert_eq!(
+            super::linux_access_path(&vfs, "/data", 0, 0x400),
+            Err(errno::EINVAL)
+        );
+    }
 
     #[test_case]
     fn statfs_matches_asm_generic_64_layout() {
