@@ -2910,102 +2910,109 @@ pub fn sys_fallocate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     0
 }
 
-/// Linux struct linux_dirent64 (for getdents64 syscall)
-#[repr(C)]
-pub struct LinuxDirent64 {
-    pub d_ino: u64,
-    pub d_off: i64,
-    pub d_reclen: u16,
-    pub d_type: u8,
-    pub d_name: [u8; 256], // Linux allows up to 255 + null
+// linux_dirent64 records use a 19-byte header and 8-byte record alignment.
+const LINUX_DIRENT64_MAX_SIZE: usize = 280;
+
+fn encode_linux_dirent64(
+    entry: &DirectoryEntry,
+    next_offset: i64,
+) -> ([u8; LINUX_DIRENT64_MAX_SIZE], usize) {
+    let mut bytes = [0u8; LINUX_DIRENT64_MAX_SIZE];
+    let name_len = entry.name_len as usize;
+    let record_len = (19 + name_len + 1 + 7) & !7;
+    bytes[..8].copy_from_slice(&entry.file_id.to_ne_bytes());
+    bytes[8..16].copy_from_slice(&next_offset.to_ne_bytes());
+    bytes[16..18].copy_from_slice(&(record_len as u16).to_ne_bytes());
+    // Scarlet's FileType discriminants differ from Linux DT_* values.
+    bytes[18] = match entry.file_type {
+        0 => 8,  // DT_REG
+        1 => 4,  // DT_DIR
+        2 => 10, // DT_LNK
+        3 => 2,  // DT_CHR
+        4 => 6,  // DT_BLK
+        5 => 1,  // DT_FIFO
+        6 => 12, // DT_SOCK
+        _ => 0,  // DT_UNKNOWN
+    };
+    bytes[19..19 + name_len].copy_from_slice(&entry.name[..name_len]);
+    (bytes, record_len)
 }
 
-impl LinuxDirent64 {
-    pub fn new(entry: &DirectoryEntry, d_off: i64) -> Self {
-        let mut d_name = [0u8; 256];
-        let name_len = entry.name_len as usize;
-        d_name[..name_len].copy_from_slice(&entry.name[..name_len]);
-        d_name[name_len] = 0; // null-terminated
-        Self {
-            d_ino: entry.file_id,
-            d_off,
-            d_reclen: (core::mem::size_of::<u64>()
-                + core::mem::size_of::<i64>()
-                + core::mem::size_of::<u16>()
-                + core::mem::size_of::<u8>()
-                + name_len
-                + 1) as u16,
-            d_type: entry.file_type,
-            d_name,
+fn read_linux_dirents_to_user(
+    stream: &dyn crate::object::capability::stream::StreamOps,
+    vm: &crate::vm::manager::VirtualMemoryManager,
+    user_address: usize,
+    buffer_size: usize,
+) -> Result<usize, usize> {
+    // Reserve enough room before consuming a native directory entry.
+    if buffer_size < LINUX_DIRENT64_MAX_SIZE {
+        return Err(errno::EINVAL);
+    }
+    user_address.checked_add(buffer_size).ok_or(errno::EFAULT)?;
+    let mut dir_buffer = [0u8; core::mem::size_of::<DirectoryEntry>()];
+    let mut written = 0;
+    let mut next_offset = 1;
+    while buffer_size - written >= LINUX_DIRENT64_MAX_SIZE {
+        match stream.read(&mut dir_buffer) {
+            Ok(0) | Err(StreamError::EndOfStream) => break,
+            Ok(n) if n == dir_buffer.len() => {
+                let entry = DirectoryEntry::parse(&dir_buffer).ok_or(errno::EIO)?;
+                let (bytes, length) = encode_linux_dirent64(&entry, next_offset);
+                // A libc DIR buffer can span unrelated physical pages. Never
+                // advance a kernel alias obtained from only its first page.
+                if copy_to_user_pagewise(user_address + written, &bytes[..length], vm) != length {
+                    return if written == 0 {
+                        Err(errno::EFAULT)
+                    } else {
+                        Ok(written)
+                    };
+                }
+                written += length;
+                next_offset += 1;
+            }
+            Ok(_) => {
+                return if written == 0 {
+                    Err(errno::EIO)
+                } else {
+                    Ok(written)
+                };
+            }
+            Err(error) => {
+                return if written == 0 {
+                    Err(stream_error_to_errno(error))
+                } else {
+                    Ok(written)
+                };
+            }
         }
     }
-    pub fn as_bytes(&self) -> &[u8] {
-        let len = self.d_reclen as usize;
-        unsafe { core::slice::from_raw_parts(self as *const _ as *const u8, len) }
-    }
+    Ok(written)
 }
 
 /// getdents64 syscall implementation
 pub fn sys_getdents64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as usize;
-    let buf_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(1))
-        .unwrap() as *mut u8;
-    let buf_size = trapframe.get_arg(2) as usize;
+    let fd = trapframe.get_arg(0);
+    let buf_ptr = trapframe.get_arg(1);
+    let buf_size = trapframe.get_arg(2);
     trapframe.increment_pc_next(&task);
 
-    // Get handle from Linux fd
-    let handle = match abi.get_handle(fd) {
-        Some(h) => h,
-        None => return usize::MAX,
+    let Some(handle) = abi.get_handle(fd) else {
+        return errno::to_result(errno::EBADF);
     };
-    let kernel_obj = match task.handle_table.get(handle) {
-        Some(obj) => obj,
-        None => return usize::MAX,
+    let Some(object) = task.handle_table.get(handle) else {
+        return errno::to_result(errno::EBADF);
     };
-    let stream = match kernel_obj.as_stream() {
-        Some(s) => s,
-        None => return usize::MAX,
+    let Some(file) = object.as_file() else {
+        return errno::to_result(errno::ENOTDIR);
     };
-
-    let mut dir_buffer = vec![0u8; core::mem::size_of::<DirectoryEntry>()];
-    let mut written = 0usize;
-    let mut d_off = 0i64;
-    while written + core::mem::size_of::<LinuxDirent64>() <= buf_size {
-        match stream.read(&mut dir_buffer) {
-            Ok(n) if n == dir_buffer.len() => {
-                if let Some(entry) = DirectoryEntry::parse(&dir_buffer) {
-                    let dirent = LinuxDirent64::new(&entry, d_off);
-                    let dirent_bytes = dirent.as_bytes();
-                    if written + dirent_bytes.len() > buf_size {
-                        break;
-                    }
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            dirent_bytes.as_ptr(),
-                            buf_ptr.add(written),
-                            dirent_bytes.len(),
-                        );
-                    }
-                    written += dirent_bytes.len();
-                    d_off += 1;
-                } else {
-                    break;
-                }
-            }
-            Ok(0) => break, // EOF
-            Ok(_) => break, // partial read, treat as error/EOF
-            Err(StreamError::EndOfStream) => break,
-            Err(StreamError::WouldBlock) => {
-                schedule(trapframe);
-                return usize::MAX;
-            }
-            Err(_) => break,
-        }
+    match file.metadata() {
+        Ok(metadata) if matches!(metadata.file_type, FileType::Directory) => {}
+        Ok(_) => return errno::to_result(errno::ENOTDIR),
+        Err(error) => return errno::to_result(stream_error_to_errno(error)),
     }
-    written
+    read_linux_dirents_to_user(file, &task.vm_manager, buf_ptr, buf_size)
+        .unwrap_or_else(errno::to_result)
 }
 
 /// Linux readv system call implementation
@@ -5399,6 +5406,94 @@ mod tests {
         proc_exe_linux_stat, proc_exe_selector,
     };
     use crate::abi::linux::generic::errno;
+
+    #[test_case]
+    fn getdents_records_cross_noncontiguous_pages_and_reach_eof() {
+        use crate::environment::PAGE_SIZE;
+        use crate::mem::page::ContiguousPages;
+        use crate::object::capability::stream::{StreamError, StreamOps};
+        use crate::vm::vmem::{MemoryArea, PhysicalMemoryArea, VirtualMemoryMap};
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Entries(AtomicUsize);
+        impl StreamOps for Entries {
+            fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+                let index = self.0.fetch_add(1, Ordering::Relaxed);
+                if index >= 3 {
+                    return Ok(0);
+                }
+                let entry =
+                    crate::fs::DirectoryEntry::from_internal(&crate::fs::DirectoryEntryInternal {
+                        name: alloc::format!("asset-{index}"),
+                        file_type: crate::fs::FileType::Directory,
+                        size: 0,
+                        file_id: index as u64 + 10,
+                        metadata: None,
+                    });
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        (&entry as *const crate::fs::DirectoryEntry).cast::<u8>(),
+                        core::mem::size_of_val(&entry),
+                    )
+                };
+                buffer[..bytes.len()].copy_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn write(&self, _: &[u8]) -> Result<usize, StreamError> {
+                Err(StreamError::NotSupported)
+            }
+        }
+        let pages = ContiguousPages::new(3).unwrap();
+        let task = crate::task::new_user_task("dirent-cross-page".into(), 1);
+        let base = 0x20_000;
+        for (virtual_page, physical_page) in [(0, 0), (1, 2)] {
+            let va = base + virtual_page * PAGE_SIZE;
+            let pa = pages.as_paddr() + (physical_page * PAGE_SIZE) as u64;
+            task.vm_manager
+                .add_memory_map(VirtualMemoryMap::new(
+                    PhysicalMemoryArea::new(pa, pa + PAGE_SIZE as u64 - 1),
+                    MemoryArea::new(va, va + PAGE_SIZE - 1),
+                    0x0b, // Read | Write | User
+                    false,
+                    None,
+                ))
+                .unwrap();
+        }
+        let address = base + PAGE_SIZE - 17;
+        let entries = Entries(AtomicUsize::new(0));
+        let size =
+            super::read_linux_dirents_to_user(&entries, &task.vm_manager, address, 1024).unwrap();
+        let mut bytes = [0u8; 96];
+        assert_eq!(size, bytes.len());
+        assert_eq!(
+            super::copy_from_user_pagewise(&mut bytes, address, &task.vm_manager),
+            size
+        );
+        for (index, record) in bytes.chunks_exact(32).enumerate() {
+            assert_eq!(
+                u64::from_ne_bytes(record[..8].try_into().unwrap()),
+                index as u64 + 10
+            );
+            assert_eq!(u16::from_ne_bytes(record[16..18].try_into().unwrap()), 32);
+            assert_eq!(record[18], 4); // Linux DT_DIR
+            assert_eq!(&record[19..26], alloc::format!("asset-{index}").as_bytes());
+            assert!(record[26..].iter().all(|byte| *byte == 0));
+        }
+        // The physical page between the two user pages must remain untouched.
+        let gap = unsafe {
+            core::slice::from_raw_parts(pages.as_ptr().cast::<u8>().add(PAGE_SIZE), PAGE_SIZE)
+        };
+        assert!(gap.iter().all(|byte| *byte == 0));
+        assert_eq!(
+            super::read_linux_dirents_to_user(&entries, &task.vm_manager, address, 1024),
+            Ok(0)
+        );
+        let entries = Entries(AtomicUsize::new(0));
+        assert_eq!(
+            super::read_linux_dirents_to_user(&entries, &task.vm_manager, 0, 1024),
+            Err(errno::EFAULT)
+        );
+    }
 
     #[test_case]
     fn access_checks_existence_and_final_symlink_in_the_selected_view() {
