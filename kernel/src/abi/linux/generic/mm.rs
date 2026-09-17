@@ -403,23 +403,10 @@ fn handle_anonymous_mapping(
         match task.vm_manager.add_memory_map(vm_map.clone()) {
             Ok(()) => (final_vaddr, Vec::new()),
             Err(_) => {
-                // The address space may have changed between selecting the
-                // range and inserting it. Retry once with a fresh range.
-                let retry_vaddr = match task
-                    .vm_manager
-                    .find_unmapped_area(aligned_length, PAGE_SIZE)
-                {
-                    Some(addr) => addr,
-                    None => return to_result(errno::ENOMEM),
-                };
-                let retry_vmarea = MemoryArea::new(retry_vaddr, retry_vaddr + aligned_length - 1);
-                let retry_map = VirtualMemoryMap {
-                    vmarea: retry_vmarea,
-                    vm_start: retry_vaddr,
-                    ..vm_map
-                };
-                match task.vm_manager.add_memory_map(retry_map) {
-                    Ok(()) => (retry_vaddr, Vec::new()),
+                // First-fit search and insertion can race another thread.
+                // Retry the selection and insertion atomically.
+                match task.vm_manager.add_memory_map_anywhere(vm_map) {
+                    Ok(addr) => (addr, Vec::new()),
                     Err(_) => return to_result(errno::ENOMEM),
                 }
             }

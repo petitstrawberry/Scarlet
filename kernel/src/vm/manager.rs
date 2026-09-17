@@ -1520,12 +1520,35 @@ impl VirtualMemoryManager {
     /// # Returns
     /// A suitable virtual address for the new mapping, or None if no space available
     pub fn find_unmapped_area(&self, size: usize, alignment: usize) -> Option<usize> {
+        let g = self.inner.read();
+        Self::find_unmapped_area_in(&g, size, alignment)
+    }
+
+    /// Select and insert a free user mapping while holding the same VM lock.
+    /// Concurrent mmap callers must not all reserve the same first-fit gap.
+    pub fn add_memory_map_anywhere(
+        &self,
+        mut map: VirtualMemoryMap,
+    ) -> Result<usize, &'static str> {
+        Self::validate_memory_map(&map)?;
+        let size = map.vmarea.size();
+        let mut g = self.inner.write();
+        let addr = Self::find_unmapped_area_in(&g, size, PAGE_SIZE)
+            .ok_or("No unmapped user address range")?;
+        map.vmarea = MemoryArea::new(addr, addr + size - 1);
+        map.vm_start = addr;
+        self.record_inner_writer(WRITE_SITE_ADD_MAP);
+        Self::insert_memory_map(&mut g.memmap, map)?;
+        g.last_search_cache = None;
+        Ok(addr)
+    }
+
+    fn find_unmapped_area_in(g: &InnerVmm, size: usize, alignment: usize) -> Option<usize> {
         let aligned_size = checked_align_up(size, alignment)?;
         if aligned_size == 0 {
             return None;
         }
 
-        let g = self.inner.read();
         let mut search_addr = checked_align_up(g.mmap_base, alignment)?;
 
         // If there is a mapping that starts before (or at) search_addr but still covers it,
@@ -1549,8 +1572,6 @@ impl VirtualMemoryManager {
                 search_addr = checked_align_up(memory_map.vmarea.end.checked_add(1)?, alignment)?;
             }
         }
-        drop(g);
-
         search_addr
             .checked_add(aligned_size)
             .filter(|end| *end <= USER_LOWER_CANONICAL_END)
