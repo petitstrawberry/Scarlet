@@ -63,6 +63,12 @@ pub const GPU_QUEUE_SUBMIT_ASYNC: u32 = 0x476b;
 pub const GPU_CREATE_MIP_IMAGE: u32 = 0x476c;
 /// Query the immutable mip-level count of an image capability.
 pub const GPU_IMAGE_QUERY_MIP_LEVELS: u32 = 0x476d;
+/// Allocate a layered texture with explicit cube-compatible storage.
+pub const GPU_CREATE_TEXTURE: u32 = 0x476e;
+/// Query immutable texture dimensions and creation flags.
+pub const GPU_IMAGE_QUERY_TEXTURE: u32 = 0x476f;
+/// Allocate six square faces as a cube texture.
+pub const GPU_TEXTURE_CREATE_CUBE: u32 = 1;
 
 /// Covered GPU work has not yet been observed to retire.
 pub const GPU_COMPLETION_PENDING: u32 = 0;
@@ -182,6 +188,28 @@ pub struct GpuCreateMipImage {
     pub reserved: u32,
 }
 
+/// Extended allocation without changing either legacy image request layout.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuCreateTexture {
+    pub image: GpuCreateImage,
+    pub mip_levels: u32,
+    pub array_layers: u32,
+    pub flags: u32,
+    pub reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuTextureInfo {
+    pub abi_version: u32,
+    pub result: u32,
+    pub mip_levels: u32,
+    pub array_layers: u32,
+    pub flags: u32,
+    pub reserved: u32,
+}
+
 /// Fixed-width response for [`GPU_IMAGE_QUERY_MIP_LEVELS`].
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -196,6 +224,8 @@ pub struct GpuImageMipLevels {
 const _: [(); 48] = [(); core::mem::size_of::<GpuCreateImage>()];
 const _: [(); 56] = [(); core::mem::size_of::<GpuCreateMipImage>()];
 const _: [(); 16] = [(); core::mem::size_of::<GpuImageMipLevels>()];
+const _: [(); 64] = [(); core::mem::size_of::<GpuCreateTexture>()];
+const _: [(); 24] = [(); core::mem::size_of::<GpuTextureInfo>()];
 
 impl GpuCreateImage {
     /// Create an image request for the current ABI version.

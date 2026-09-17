@@ -82,6 +82,10 @@ pub mod commands {
     pub const GPU_CREATE_MIP_IMAGE: u32 = 0x476c;
     /// Query an image's allocated mip-level count.
     pub const GPU_IMAGE_QUERY_MIP_LEVELS: u32 = 0x476d;
+    /// Allocate a layered or cube texture.
+    pub const GPU_CREATE_TEXTURE: u32 = 0x476e;
+    /// Query immutable texture dimensions.
+    pub const GPU_IMAGE_QUERY_TEXTURE: u32 = 0x476f;
     /// Query a GPU image child handle.
     pub const GPU_IMAGE_QUERY_INFO: u32 = 0x475f;
     /// Attach a GPU image to an execution context.
@@ -189,6 +193,12 @@ pub const GPU_EXECUTION_SUPPORT_DEPTH: u32 = 1 << 6;
 pub const GPU_EXECUTION_SUPPORT_IMAGE_READBACK: u32 = 1 << 7;
 /// Explicit allocation of multiple image mip levels is available.
 pub const GPU_EXECUTION_SUPPORT_IMAGE_MIPS: u32 = 1 << 8;
+/// Layered and cube texture allocation is available.
+pub const GPU_EXECUTION_SUPPORT_TEXTURE_ARRAYS: u32 = 1 << 9;
+/// Depth textures can also be sampled.
+pub const GPU_EXECUTION_SUPPORT_DEPTH_SAMPLING: u32 = 1 << 10;
+/// Allocate six square faces as a cube texture.
+pub const GPU_TEXTURE_CREATE_CUBE: u32 = 1;
 
 /// Fixed byte capacity of an opaque backend or dialect identifier.
 pub const GPU_BACKEND_ID_BYTES: usize = 32;
@@ -287,6 +297,28 @@ pub struct GpuCreateMipImage {
     /// Allocated levels including level zero; must fit the full mip chain.
     pub mip_levels: u32,
     /// Must be zero.
+    pub reserved: u32,
+}
+
+/// Extended allocation without changing either legacy image request layout.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuCreateTexture {
+    pub image: GpuCreateImage,
+    pub mip_levels: u32,
+    pub array_layers: u32,
+    pub flags: u32,
+    pub reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuTextureInfo {
+    pub abi_version: u32,
+    pub result: u32,
+    pub mip_levels: u32,
+    pub array_layers: u32,
+    pub flags: u32,
     pub reserved: u32,
 }
 
@@ -1676,6 +1708,45 @@ impl Gpu {
         })
     }
 
+    /// Allocate real array/cube storage using the extended image ABI. Ordinary
+    /// 2D images retain the existing request, including older-kernel support.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_layered_image_with_format_and_usage(
+        &self,
+        format: u32,
+        width: u32,
+        height: u32,
+        usage: u32,
+        mip_levels: u32,
+        array_layers: u32,
+        cube: bool,
+    ) -> HandleResult<GpuImage> {
+        if array_layers == 1 && !cube {
+            return self
+                .create_mip_image_with_format_and_usage(format, width, height, usage, mip_levels);
+        }
+        let mut request = GpuCreateTexture {
+            image: GpuCreateImage::new_with_usage(width, height, usage),
+            mip_levels,
+            array_layers,
+            flags: if cube { GPU_TEXTURE_CREATE_CUBE } else { 0 },
+            reserved: 0,
+        };
+        request.image.format = format;
+        // SAFETY: the initialized request remains exclusively borrowed for the call.
+        unsafe {
+            self.file.as_handle().control(
+                commands::GPU_CREATE_TEXTURE,
+                &mut request as *mut _ as usize,
+            )
+        }?;
+        result_to_handle_error(request.image.result)?;
+        Ok(GpuImage {
+            handle: adopt_child_handle(request.image.image_handle)?,
+            command_resource_token: request.image.command_resource_token,
+        })
+    }
+
     /// Create a sampled BGRA texture image backed by an existing SharedMemory object.
     ///
     /// # Arguments
@@ -2239,6 +2310,27 @@ pub struct GpuImage {
 }
 
 impl GpuImage {
+    /// Query the immutable mip, layer and cube-allocation description.
+    pub fn query_texture(&self) -> HandleResult<GpuTextureInfo> {
+        let mut request = GpuTextureInfo {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            mip_levels: 0,
+            array_layers: 0,
+            flags: 0,
+            reserved: 0,
+        };
+        // SAFETY: initialized writable fixed-width query record.
+        unsafe {
+            self.handle.control(
+                commands::GPU_IMAGE_QUERY_TEXTURE,
+                &mut request as *mut _ as usize,
+            )
+        }?;
+        result_to_handle_error(request.result)?;
+        Ok(request)
+    }
+
     /// Query immutable allocated mip storage, including the base level.
     pub fn query_mip_levels(&self) -> HandleResult<u32> {
         let mut request = GpuImageMipLevels {

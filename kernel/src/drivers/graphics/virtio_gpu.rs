@@ -750,6 +750,8 @@ impl VirtioGpuDeviceCore {
                     | if acceleration_usable {
                         GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD
                             | GPU_EXECUTION_SUPPORT_IMAGE_MIPS
+                            | crate::device::gpu::GPU_EXECUTION_SUPPORT_TEXTURE_ARRAYS
+                            | crate::device::gpu::GPU_EXECUTION_SUPPORT_DEPTH_SAMPLING
                             | GPU_EXECUTION_SUPPORT_IMAGE_READBACK
                             | GPU_EXECUTION_SUPPORT_DEPTH
                             | GPU_EXECUTION_SUPPORT_QUEUE
@@ -2109,7 +2111,9 @@ impl GpuBackend for VirtioGpuBackend {
                 .checked_add(u64::from(width) * u64::from(height) * 4)
                 .ok_or("VirtIO GPU mip allocation overflows")?;
         }
-        layout.total_size = total;
+        layout.total_size = total
+            .checked_mul(u64::from(create.array_layers))
+            .ok_or("VirtIO GPU array allocation overflows")?;
         Ok(layout)
     }
     fn query_info(&self) -> GpuBackendInfo {
@@ -2175,7 +2179,13 @@ impl GpuBackend for VirtioGpuBackend {
         core.require_virgl()?;
         let resource_id = core.create_acceleration_resource(VirtioGpuAccelerationResource3d {
             resource_id: 0,
-            target: PIPE_TEXTURE_2D,
+            target: if create.cube {
+                4 /* PIPE_TEXTURE_CUBE */
+            } else if create.array_layers > 1 {
+                7 /* PIPE_TEXTURE_2D_ARRAY */
+            } else {
+                PIPE_TEXTURE_2D
+            },
             format: match create.format {
                 GPU_IMAGE_FORMAT_BGRA8_UNORM => VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
                 GPU_IMAGE_FORMAT_DEPTH32_FLOAT => VIRGL_FORMAT_Z32_FLOAT,
@@ -2185,7 +2195,7 @@ impl GpuBackend for VirtioGpuBackend {
             width: create.width,
             height: create.height,
             depth: 1,
-            array_size: 1,
+            array_size: create.array_layers,
             last_level: create.mip_levels - 1,
             nr_samples: 0,
             flags: 0,

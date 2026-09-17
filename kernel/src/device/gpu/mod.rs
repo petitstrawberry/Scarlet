@@ -54,6 +54,10 @@ pub use abi::{
     GPU_CREATE_MIP_IMAGE, GPU_IMAGE_QUERY_MIP_LEVELS, GpuCreateMipImage, GpuImageMipLevels,
 };
 pub use abi::{
+    GPU_CREATE_TEXTURE, GPU_IMAGE_QUERY_TEXTURE, GPU_TEXTURE_CREATE_CUBE, GpuCreateTexture,
+    GpuTextureInfo,
+};
+pub use abi::{
     GPU_QUEUE_QUERY_ASYNC, GPU_QUEUE_SUBMIT_ASYNC, GPU_RESULT_BUSY, GPU_RESULT_DEVICE_LOST,
 };
 pub use async_abi::{GpuQueueAsyncInfo, GpuQueueSubmitAsync};
@@ -69,6 +73,7 @@ pub use backend::{
     GpuBackendSubmitError, GpuBufferCreateInfo, GpuDeviceInfo, GpuDeviceState, GpuImageBackingInfo,
     GpuImageCreateInfo, GpuImageUploadInfo,
 };
+pub use backend::{GPU_EXECUTION_SUPPORT_DEPTH_SAMPLING, GPU_EXECUTION_SUPPORT_TEXTURE_ARRAYS};
 pub use backend::{GpuBackendCpuAccessGuard, GpuBackendEnqueueError};
 pub use completion::{
     GpuCompletion, GpuCompletionFailure, GpuCompletionSignal, GpuCompletionState,
@@ -251,6 +256,12 @@ mod tests {
         assert_eq!(core::mem::size_of::<super::GpuQueueSubmit>(), 56);
         assert_eq!(core::mem::size_of::<super::GpuCreateImage>(), 48);
         assert_eq!(core::mem::size_of::<super::GpuCreateMipImage>(), 56);
+        assert_eq!(core::mem::size_of::<super::GpuCreateTexture>(), 64);
+        assert_eq!(
+            core::mem::offset_of!(super::GpuCreateTexture, array_layers),
+            52
+        );
+        assert_eq!(core::mem::size_of::<super::GpuTextureInfo>(), 24);
         assert_eq!(
             core::mem::offset_of!(super::GpuCreateMipImage, mip_levels),
             48
@@ -364,6 +375,44 @@ mod tests {
             8,
         );
         create.mip_levels = 2;
+        assert!(!super::resource::image_create_is_valid(create));
+    }
+
+    #[test_case]
+    fn gpu_layered_texture_validation_bounds_cube_and_depth_sampling() {
+        let mut create = GpuImageCreateInfo::new(
+            GPU_IMAGE_FORMAT_BGRA8_UNORM,
+            GPU_IMAGE_USAGE_SAMPLED | GPU_IMAGE_USAGE_TRANSFER_DST,
+            16,
+            16,
+        );
+        create.array_layers = 6;
+        create.cube = true;
+        assert!(super::resource::image_create_is_valid(create));
+        assert!(!super::resource::imported_image_create_is_valid(create));
+        create.array_layers = 5;
+        assert!(!super::resource::image_create_is_valid(create));
+        create.cube = false;
+        assert!(super::resource::image_create_is_valid(create));
+        create.array_layers = 0;
+        assert!(!super::resource::image_create_is_valid(create));
+        create.array_layers = 2049;
+        assert!(!super::resource::image_create_is_valid(create));
+        create.array_layers = 6;
+        create.cube = true;
+        create.height = 8;
+        assert!(!super::resource::image_create_is_valid(create));
+        create.height = 16;
+        create.usage |= GPU_IMAGE_USAGE_PRESENTABLE;
+        assert!(!super::resource::image_create_is_valid(create));
+        create = GpuImageCreateInfo::new(
+            GPU_IMAGE_FORMAT_DEPTH32_FLOAT,
+            GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT | GPU_IMAGE_USAGE_SAMPLED,
+            16,
+            16,
+        );
+        assert!(super::resource::image_create_is_valid(create));
+        create.usage |= GPU_IMAGE_USAGE_TRANSFER_DST;
         assert!(!super::resource::image_create_is_valid(create));
     }
 

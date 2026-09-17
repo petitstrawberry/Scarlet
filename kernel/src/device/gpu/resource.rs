@@ -110,7 +110,7 @@ pub trait GpuObject: Send + Sync {
 /// # Returns
 ///
 /// `true` for a non-empty BGRA8 image with known color usages, or a
-/// `Depth32Float` image used exclusively as a depth-stencil attachment.
+/// `Depth32Float` image used as a depth attachment or sampled texture.
 pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
     (create.format == GPU_IMAGE_FORMAT_BGRA8_UNORM
         || create.format == super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT)
@@ -118,6 +118,10 @@ pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
         && create.usage & !GPU_IMAGE_USAGE_VALID == 0
         && create.width != 0
         && create.height != 0
+        && create.array_layers != 0
+        && create.array_layers <= 2048
+        && (!create.cube || (create.array_layers == 6 && create.width == create.height))
+        && (create.array_layers == 1 || create.usage & super::GPU_IMAGE_USAGE_PRESENTABLE == 0)
         && create.width <= u32::MAX / 4
         && create.mip_levels != 0
         && create.mip_levels
@@ -134,7 +138,10 @@ pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
                     | super::GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT)
                 == 0)
         && if create.format == super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT {
-            create.usage == super::GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT
+            create.usage
+                & !(super::GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT
+                    | super::GPU_IMAGE_USAGE_SAMPLED)
+                == 0
         } else {
             create.usage & super::GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT == 0
         }
@@ -144,6 +151,8 @@ pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
 pub(crate) const fn imported_image_create_is_valid(create: GpuImageCreateInfo) -> bool {
     image_create_is_valid(create)
         && create.mip_levels == 1
+        && create.array_layers == 1
+        && !create.cube
         && create.format == GPU_IMAGE_FORMAT_BGRA8_UNORM
         && create.usage == super::GPU_IMAGE_USAGE_SAMPLED | super::GPU_IMAGE_USAGE_TRANSFER_DST
 }
@@ -217,6 +226,8 @@ pub(crate) fn imported_image_transfer_layout(
     if width == 0
         || height == 0
         || image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM
+        || image.array_layers != 1
+        || image.cube
         || image.usage & (super::GPU_IMAGE_USAGE_SAMPLED | GPU_IMAGE_USAGE_TRANSFER_DST)
             != (super::GPU_IMAGE_USAGE_SAMPLED | super::GPU_IMAGE_USAGE_TRANSFER_DST)
     {
@@ -322,6 +333,8 @@ pub(crate) fn image_upload_layout(
         || request.width == 0
         || request.height == 0
         || image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM
+        || image.array_layers != 1
+        || image.cube
         || image.usage & GPU_IMAGE_USAGE_TRANSFER_DST == 0
         || layout.modifier != super::GPU_IMAGE_MODIFIER_LINEAR
         || layout.plane_count != 1
@@ -476,6 +489,8 @@ pub(crate) fn image_readback_layout(
         || request.width == 0
         || request.height == 0
         || image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM
+        || image.array_layers != 1
+        || image.cube
         || image.usage & super::GPU_IMAGE_USAGE_TRANSFER_SRC == 0
         || layout.modifier != super::GPU_IMAGE_MODIFIER_LINEAR
         || layout.plane_count != 1
@@ -1027,6 +1042,8 @@ impl GpuImage {
             || info.width != create.width
             || info.height != create.height
             || info.mip_levels != create.mip_levels
+            || info.array_layers != create.array_layers
+            || info.cube != create.cube
             || info.command_resource_token == 0
             || info.allocation_size != backing_allocation_size
         {
@@ -1083,6 +1100,8 @@ impl GpuImage {
             || info.width != create.width
             || info.height != create.height
             || info.mip_levels != create.mip_levels
+            || info.array_layers != create.array_layers
+            || info.cube != create.cube
             || info.command_resource_token == 0
             || info.allocation_size != backing_allocation_size
         {
@@ -1331,6 +1350,29 @@ impl ControlOps for GpuImage {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         match command {
             GPU_IMAGE_QUERY_INFO => self.handle_query_info(arg),
+            super::GPU_IMAGE_QUERY_TEXTURE => {
+                let mut info: super::GpuTextureInfo = read_user_value(arg)?;
+                info.result = super::GPU_RESULT_SUCCESS;
+                info.mip_levels = 0;
+                info.array_layers = 0;
+                info.flags = 0;
+                if info.abi_version != GPU_ABI_VERSION {
+                    info.result = GPU_RESULT_INVALID_ABI;
+                } else if info.reserved != 0 {
+                    info.result = super::GPU_RESULT_INVALID_ARGUMENT;
+                } else {
+                    let texture = self.query_info();
+                    info.mip_levels = texture.mip_levels;
+                    info.array_layers = texture.array_layers;
+                    info.flags = if texture.cube {
+                        super::GPU_TEXTURE_CREATE_CUBE
+                    } else {
+                        0
+                    };
+                }
+                write_user_value(arg, &info)?;
+                Ok(0)
+            }
             GPU_IMAGE_QUERY_LAYOUT => self.handle_query_layout(arg),
             GPU_IMAGE_QUERY_MIP_LEVELS => {
                 let mut info: GpuImageMipLevels = read_user_value(arg)?;

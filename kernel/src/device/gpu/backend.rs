@@ -32,6 +32,10 @@ pub const GPU_EXECUTION_SUPPORT_DEPTH: u32 = 1 << 6;
 pub const GPU_EXECUTION_SUPPORT_IMAGE_READBACK: u32 = 1 << 7;
 /// Explicit allocation of multiple image mip levels is available.
 pub const GPU_EXECUTION_SUPPORT_IMAGE_MIPS: u32 = 1 << 8;
+/// Explicit 2D array and six-face cube texture allocation is available.
+pub const GPU_EXECUTION_SUPPORT_TEXTURE_ARRAYS: u32 = 1 << 9;
+/// Depth textures can also be bound for shader sampling.
+pub const GPU_EXECUTION_SUPPORT_DEPTH_SAMPLING: u32 = 1 << 10;
 
 /// Stable state of a GPU device.
 #[repr(u32)]
@@ -353,6 +357,8 @@ pub struct GpuImageCreateInfo {
     pub height: u32,
     /// Number of allocated mip levels, including the base level.
     pub mip_levels: u32,
+    pub array_layers: u32,
+    pub cube: bool,
 }
 
 /// Maximum image planes represented by the generic GPU layout model.
@@ -652,6 +658,8 @@ impl GpuImageCreateInfo {
             width,
             height,
             mip_levels: 1,
+            array_layers: 1,
+            cube: false,
         }
     }
 }
@@ -669,6 +677,8 @@ pub struct GpuBackendImageInfo {
     pub height: u32,
     /// Immutable allocated mip-level count.
     pub mip_levels: u32,
+    pub array_layers: u32,
+    pub cube: bool,
     /// Opaque backend token used only by opaque command bytes.
     pub command_resource_token: u64,
     /// Backing allocation size in bytes.
@@ -698,6 +708,8 @@ impl GpuBackendImageInfo {
             width: create.width,
             height: create.height,
             mip_levels: create.mip_levels,
+            array_layers: create.array_layers,
+            cube: create.cube,
             command_resource_token,
             allocation_size,
         }
@@ -1106,7 +1118,7 @@ pub trait GpuBackend: Send + Sync {
         &self,
         create: GpuImageCreateInfo,
     ) -> Result<GpuBackendImageLayout, &'static str> {
-        if create.mip_levels != 1 {
+        if create.mip_levels != 1 || create.array_layers != 1 || create.cube {
             return Err("GPU backend does not support mipmapped images");
         }
         GpuBackendImageLayout::tight_32bpp(create)
