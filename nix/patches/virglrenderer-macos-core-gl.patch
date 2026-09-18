@@ -41,7 +41,13 @@
     if (ctx.iter.processor.Processor == TGSI_PROCESSOR_GEOMETRY ||
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
-@@ -3765,8 +3765,11 @@
+@@ -3417,2 +3417,5 @@
+          v->elements[i].norm = GL_TRUE;
++      /* Legacy glVertexAttribIPointer needs integer GLSL inputs too. */
++      UPDATE_INT_SIGN_MASK(elements[i].src_format, i,
++                           v->signed_int_bitmask, v->unsigned_int_bitmask);
+       v->elements[i].nr_chan = desc->nr_channels;
+@@ -3765,8 +3768,11 @@
              offset *= blsize;
              size *= blsize;
              glTexBufferRange(GL_TEXTURE_BUFFER, internalformat, view->texture->gl_id, offset, size);
@@ -54,3 +60,12 @@
        }
     }
  
+@@ -7558,6 +7564,8 @@
+    const char * a = (const char *) glGetString(GL_VENDOR);
+    if (!a)
+        return false;
++   if (strcmp(a, "Apple") == 0)
++      return true;
+    if (strcmp(a, "ARM") == 0)
+       return true;
+    return false;
