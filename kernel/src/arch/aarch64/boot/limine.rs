@@ -392,7 +392,7 @@ fn register_cpu_topology_from_fdt() {
             ),
         }
 
-        if let Some(domain) = cpu_performance_domain_id(&cpu) {
+        if let Some(domain) = crate::device::cpufreq::performance_domain_from_fdt(&cpu) {
             if let Err(err) = crate::sched::scheduler::register_cpu_topology_domain(cpu_id, domain)
             {
                 println!(
@@ -432,17 +432,6 @@ fn is_enabled_cpu_node(cpu: &fdt::node::FdtNode) -> bool {
 fn cpu_capacity_dmips_mhz(cpu: &fdt::node::FdtNode) -> Option<u32> {
     let prop = cpu.property("capacity-dmips-mhz")?;
     read_be_u32(prop.value)
-}
-
-fn cpu_performance_domain_id(cpu: &fdt::node::FdtNode) -> Option<u32> {
-    if let Some(prop) = cpu.property("performance-domains") {
-        return read_be_u32(prop.value).filter(|domain| *domain != 0);
-    }
-
-    let prop = cpu.property("qcom,freq-domain")?;
-    let provider = read_be_u32(prop.value)?;
-    let selector = read_be_u32(prop.value.get(4..)?)?;
-    crate::device::cpufreq::compose_performance_domain_id(provider, selector)
 }
 
 fn classify_cpu_node(

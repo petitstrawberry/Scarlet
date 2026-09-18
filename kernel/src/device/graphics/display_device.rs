@@ -727,6 +727,15 @@ impl MemoryMappingOps for DisplayCharDevice {
     ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         let info = self.current_backing_info()?;
 
+        let source = self
+            .device_manager()
+            .get_device(self.fb_resource.source_device_id)
+            .ok_or("Display source device not found")?;
+        let memory_attribute = source
+            .as_graphics_device()
+            .ok_or("Display source device is not graphics-capable")?
+            .framebuffer_memory_attribute();
+
         if offset % crate::environment::PAGE_SIZE != 0 {
             return Err("Display mmap offset must be page-aligned");
         }
@@ -759,7 +768,7 @@ impl MemoryMappingOps for DisplayCharDevice {
                 .ok_or("Display scanout physical address overflow")?;
             return Ok(
                 crate::object::capability::MemoryMappingInfo::new(mapping_paddr, 0x3, true)
-                    .with_memory_attribute(crate::vm::vmem::MemoryAttribute::DeviceBurstable),
+                    .with_memory_attribute(memory_attribute),
             );
         }
 
@@ -774,7 +783,7 @@ impl MemoryMappingOps for DisplayCharDevice {
             .ok_or("Display backing physical address overflow")?;
         Ok(
             crate::object::capability::MemoryMappingInfo::new(mapping_paddr, 0x3, true)
-                .with_memory_attribute(crate::vm::vmem::MemoryAttribute::DeviceBurstable),
+                .with_memory_attribute(memory_attribute),
         )
     }
 

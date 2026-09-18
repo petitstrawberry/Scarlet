@@ -1149,6 +1149,11 @@ pub extern "C" fn start_ap(cpu_id: usize) -> ! {
     crate::sched::scheduler::spawn_idle_task(cpu_id);
 
     let next_task_id = crate::sched::scheduler::start_scheduler();
+    crate::sched::scheduler::register_online_cpu(cpu_id);
+    println!(
+        "[Scarlet Kernel] AP {}: scheduler online; local timer ready",
+        cpu_id
+    );
     if let Some(next_task_id) = next_task_id {
         let next_task = crate::sched::scheduler::get_task_by_id(next_task_id)
             .expect("AP: first runnable task must exist");

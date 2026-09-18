@@ -252,7 +252,13 @@ fn copy_from_user_pagewise(
     while copied < dst_len {
         let page_off = cur_user & (crate::environment::PAGE_SIZE - 1);
         let chunk = core::cmp::min(crate::environment::PAGE_SIZE - page_off, dst_len - copied);
-        match vm_manager.translate_to_kva(cur_user) {
+        match vm_manager
+            .translate_to_phys_with_access(
+                cur_user,
+                crate::object::capability::memory_mapping::AccessOp::Load,
+            )
+            .map(crate::vm::addr::phys_to_virt)
+        {
             Some(kva) => unsafe {
                 core::ptr::copy_nonoverlapping(
                     kva as *const u8,
@@ -831,18 +837,18 @@ pub fn sys_mount(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let dirfd = trapframe.get_arg(0) as i32;
-    let path_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(1))
-        .unwrap() as *const u8;
+    let path_ptr = trapframe.get_arg(1);
     let flags = trapframe.get_arg(2) as i32;
 
     // Increment PC to avoid infinite loop if openat fails
     trapframe.increment_pc_next(&task);
 
     // Parse path from user space
-    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
-        Ok((path, _)) => path,
+    let path_str = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(path) => path,
+        Err(crate::library::std::string::StringConversionError::ExceedsMaxLength) => {
+            return errno::to_result(errno::ENAMETOOLONG);
+        }
         Err(_) => return errno::to_result(errno::EFAULT), // Invalid UTF-8 or bad address
     };
 
@@ -1684,120 +1690,7 @@ fn stream_error_to_errno(err: StreamError) -> usize {
 /// - Number of bytes written on success
 /// - usize::MAX on error
 pub fn sys_writev(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as usize;
-    let iovec_ptr = trapframe.get_arg(1);
-    let iovcnt = trapframe.get_arg(2) as usize;
-
-    // Increment PC to avoid infinite loop if writev fails
-    trapframe.increment_pc_next(&task);
-
-    // Validate parameters
-    if iovcnt == 0 {
-        return 0; // Nothing to write
-    }
-
-    // Linux typically limits iovcnt to prevent resource exhaustion
-    const IOV_MAX: usize = 1024;
-    if iovcnt > IOV_MAX {
-        return usize::MAX; // Too many vectors
-    }
-
-    // Get handle from Linux fd
-    let handle = match abi.get_handle(fd) {
-        Some(h) => h,
-        None => return usize::MAX, // Invalid file descriptor
-    };
-
-    let kernel_obj = match task.handle_table.get(handle) {
-        Some(obj) => obj,
-        None => return usize::MAX, // Invalid file descriptor
-    };
-
-    let stream = match kernel_obj.as_stream() {
-        Some(stream) => stream,
-        None => return usize::MAX, // Not a stream object
-    };
-
-    let nonblocking = abi
-        .get_file_status_flags(fd)
-        .map(|f| ((f as i32) & O_NONBLOCK) != 0)
-        .unwrap_or(false);
-
-    // Translate and validate iovec array pointer
-    let iovec_vaddr = match task.vm_manager.translate_to_kva(iovec_ptr) {
-        Some(addr) => addr as *const IoVec,
-        None => return usize::MAX, // Invalid address
-    };
-
-    if iovec_vaddr.is_null() {
-        return usize::MAX; // NULL pointer
-    }
-
-    // Read iovec structures from user space
-    let iovecs = unsafe { core::slice::from_raw_parts(iovec_vaddr, iovcnt) };
-
-    let mut total_written = 0usize;
-
-    // Process each iovec
-    for iovec in iovecs {
-        if iovec.iov_len == 0 {
-            continue; // Skip empty buffers
-        }
-
-        // Translate buffer address
-        let buf_vaddr = match task.vm_manager.translate_to_kva(iovec.iov_base as usize) {
-            Some(addr) => addr as *const u8,
-            None => return usize::MAX, // Invalid buffer address
-        };
-
-        if buf_vaddr.is_null() {
-            return usize::MAX; // NULL buffer pointer
-        }
-
-        // Create a slice from the user buffer
-        let buffer = unsafe { core::slice::from_raw_parts(buf_vaddr, iovec.iov_len) };
-
-        // Write data from this buffer
-        match stream.write(buffer) {
-            Ok(n) => {
-                total_written = total_written.saturating_add(n);
-
-                // If partial write occurred, stop processing remaining vectors
-                // This matches Linux behavior for writev
-                if n < iovec.iov_len {
-                    break;
-                }
-            }
-            Err(StreamError::WouldBlock) => {
-                if nonblocking {
-                    // If some bytes were written, return them; otherwise, EAGAIN
-                    if total_written == 0 {
-                        return errno::to_result(errno::EAGAIN);
-                    } else {
-                        break;
-                    }
-                } else {
-                    schedule(trapframe);
-                    return usize::MAX;
-                }
-            }
-            Err(_) => {
-                // If no bytes were written at all, return error
-                // If some bytes were written, return the count
-                if total_written == 0 {
-                    return usize::MAX;
-                } else {
-                    break;
-                }
-            }
-        }
-    }
-
-    if let Some(file) = kernel_obj.as_file() {
-        log_mozc_ipc_file(file, "writev", total_written);
-    }
-    total_written
+    sys_vectored_io(abi, trapframe, false)
 }
 
 pub fn sys_lseek(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
@@ -3017,102 +2910,109 @@ pub fn sys_fallocate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     0
 }
 
-/// Linux struct linux_dirent64 (for getdents64 syscall)
-#[repr(C)]
-pub struct LinuxDirent64 {
-    pub d_ino: u64,
-    pub d_off: i64,
-    pub d_reclen: u16,
-    pub d_type: u8,
-    pub d_name: [u8; 256], // Linux allows up to 255 + null
+// linux_dirent64 records use a 19-byte header and 8-byte record alignment.
+const LINUX_DIRENT64_MAX_SIZE: usize = 280;
+
+fn encode_linux_dirent64(
+    entry: &DirectoryEntry,
+    next_offset: i64,
+) -> ([u8; LINUX_DIRENT64_MAX_SIZE], usize) {
+    let mut bytes = [0u8; LINUX_DIRENT64_MAX_SIZE];
+    let name_len = entry.name_len as usize;
+    let record_len = (19 + name_len + 1 + 7) & !7;
+    bytes[..8].copy_from_slice(&entry.file_id.to_ne_bytes());
+    bytes[8..16].copy_from_slice(&next_offset.to_ne_bytes());
+    bytes[16..18].copy_from_slice(&(record_len as u16).to_ne_bytes());
+    // Scarlet's FileType discriminants differ from Linux DT_* values.
+    bytes[18] = match entry.file_type {
+        0 => 8,  // DT_REG
+        1 => 4,  // DT_DIR
+        2 => 10, // DT_LNK
+        3 => 2,  // DT_CHR
+        4 => 6,  // DT_BLK
+        5 => 1,  // DT_FIFO
+        6 => 12, // DT_SOCK
+        _ => 0,  // DT_UNKNOWN
+    };
+    bytes[19..19 + name_len].copy_from_slice(&entry.name[..name_len]);
+    (bytes, record_len)
 }
 
-impl LinuxDirent64 {
-    pub fn new(entry: &DirectoryEntry, d_off: i64) -> Self {
-        let mut d_name = [0u8; 256];
-        let name_len = entry.name_len as usize;
-        d_name[..name_len].copy_from_slice(&entry.name[..name_len]);
-        d_name[name_len] = 0; // null-terminated
-        Self {
-            d_ino: entry.file_id,
-            d_off,
-            d_reclen: (core::mem::size_of::<u64>()
-                + core::mem::size_of::<i64>()
-                + core::mem::size_of::<u16>()
-                + core::mem::size_of::<u8>()
-                + name_len
-                + 1) as u16,
-            d_type: entry.file_type,
-            d_name,
+fn read_linux_dirents_to_user(
+    stream: &dyn crate::object::capability::stream::StreamOps,
+    vm: &crate::vm::manager::VirtualMemoryManager,
+    user_address: usize,
+    buffer_size: usize,
+) -> Result<usize, usize> {
+    // Reserve enough room before consuming a native directory entry.
+    if buffer_size < LINUX_DIRENT64_MAX_SIZE {
+        return Err(errno::EINVAL);
+    }
+    user_address.checked_add(buffer_size).ok_or(errno::EFAULT)?;
+    let mut dir_buffer = [0u8; core::mem::size_of::<DirectoryEntry>()];
+    let mut written = 0;
+    let mut next_offset = 1;
+    while buffer_size - written >= LINUX_DIRENT64_MAX_SIZE {
+        match stream.read(&mut dir_buffer) {
+            Ok(0) | Err(StreamError::EndOfStream) => break,
+            Ok(n) if n == dir_buffer.len() => {
+                let entry = DirectoryEntry::parse(&dir_buffer).ok_or(errno::EIO)?;
+                let (bytes, length) = encode_linux_dirent64(&entry, next_offset);
+                // A libc DIR buffer can span unrelated physical pages. Never
+                // advance a kernel alias obtained from only its first page.
+                if copy_to_user_pagewise(user_address + written, &bytes[..length], vm) != length {
+                    return if written == 0 {
+                        Err(errno::EFAULT)
+                    } else {
+                        Ok(written)
+                    };
+                }
+                written += length;
+                next_offset += 1;
+            }
+            Ok(_) => {
+                return if written == 0 {
+                    Err(errno::EIO)
+                } else {
+                    Ok(written)
+                };
+            }
+            Err(error) => {
+                return if written == 0 {
+                    Err(stream_error_to_errno(error))
+                } else {
+                    Ok(written)
+                };
+            }
         }
     }
-    pub fn as_bytes(&self) -> &[u8] {
-        let len = self.d_reclen as usize;
-        unsafe { core::slice::from_raw_parts(self as *const _ as *const u8, len) }
-    }
+    Ok(written)
 }
 
 /// getdents64 syscall implementation
 pub fn sys_getdents64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as usize;
-    let buf_ptr = task
-        .vm_manager
-        .translate_to_kva(trapframe.get_arg(1))
-        .unwrap() as *mut u8;
-    let buf_size = trapframe.get_arg(2) as usize;
+    let fd = trapframe.get_arg(0);
+    let buf_ptr = trapframe.get_arg(1);
+    let buf_size = trapframe.get_arg(2);
     trapframe.increment_pc_next(&task);
 
-    // Get handle from Linux fd
-    let handle = match abi.get_handle(fd) {
-        Some(h) => h,
-        None => return usize::MAX,
+    let Some(handle) = abi.get_handle(fd) else {
+        return errno::to_result(errno::EBADF);
     };
-    let kernel_obj = match task.handle_table.get(handle) {
-        Some(obj) => obj,
-        None => return usize::MAX,
+    let Some(object) = task.handle_table.get(handle) else {
+        return errno::to_result(errno::EBADF);
     };
-    let stream = match kernel_obj.as_stream() {
-        Some(s) => s,
-        None => return usize::MAX,
+    let Some(file) = object.as_file() else {
+        return errno::to_result(errno::ENOTDIR);
     };
-
-    let mut dir_buffer = vec![0u8; core::mem::size_of::<DirectoryEntry>()];
-    let mut written = 0usize;
-    let mut d_off = 0i64;
-    while written + core::mem::size_of::<LinuxDirent64>() <= buf_size {
-        match stream.read(&mut dir_buffer) {
-            Ok(n) if n == dir_buffer.len() => {
-                if let Some(entry) = DirectoryEntry::parse(&dir_buffer) {
-                    let dirent = LinuxDirent64::new(&entry, d_off);
-                    let dirent_bytes = dirent.as_bytes();
-                    if written + dirent_bytes.len() > buf_size {
-                        break;
-                    }
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            dirent_bytes.as_ptr(),
-                            buf_ptr.add(written),
-                            dirent_bytes.len(),
-                        );
-                    }
-                    written += dirent_bytes.len();
-                    d_off += 1;
-                } else {
-                    break;
-                }
-            }
-            Ok(0) => break, // EOF
-            Ok(_) => break, // partial read, treat as error/EOF
-            Err(StreamError::EndOfStream) => break,
-            Err(StreamError::WouldBlock) => {
-                schedule(trapframe);
-                return usize::MAX;
-            }
-            Err(_) => break,
-        }
+    match file.metadata() {
+        Ok(metadata) if matches!(metadata.file_type, FileType::Directory) => {}
+        Ok(_) => return errno::to_result(errno::ENOTDIR),
+        Err(error) => return errno::to_result(stream_error_to_errno(error)),
     }
-    written
+    read_linux_dirents_to_user(file, &task.vm_manager, buf_ptr, buf_size)
+        .unwrap_or_else(errno::to_result)
 }
 
 /// Linux readv system call implementation
@@ -3128,89 +3028,178 @@ pub fn sys_getdents64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 /// - On success: number of bytes read
 /// - On error: usize::MAX
 pub fn sys_readv(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as usize;
-    let iovec_ptr = trapframe.get_arg(1);
-    let iovcnt = trapframe.get_arg(2) as usize;
-    trapframe.increment_pc_next(&task);
+    sys_vectored_io(abi, trapframe, true)
+}
 
-    if iovcnt == 0 {
-        return 0;
-    }
+// Neither iovec metadata nor its buffers need physically contiguous pages.
+// Gather/scatter through one bounded kernel buffer, keeping small pipe writes
+// atomic and allowing legal short I/O for requests larger than the bound.
+fn sys_vectored_io(abi: &mut LinuxAbi, trapframe: &mut Trapframe, reading: bool) -> usize {
+    use crate::object::capability::memory_mapping::AccessOp;
+    use crate::object::capability::selectable::ReadyInterest;
     const IOV_MAX: usize = 1024;
-    if iovcnt > IOV_MAX {
-        return usize::MAX;
+    const MAX_TRANSFER: usize = 1024 * 1024;
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0);
+    let address = trapframe.get_arg(1);
+    let count = trapframe.get_arg(2);
+    trapframe.increment_pc_next(&task);
+    if count > IOV_MAX {
+        return errno::to_result(errno::EINVAL);
     }
     let handle = match abi.get_handle(fd) {
-        Some(h) => h,
-        None => return usize::MAX,
+        Some(handle) => handle,
+        None => return errno::to_result(errno::EBADF),
     };
-    let kernel_obj = match task.handle_table.get(handle) {
-        Some(obj) => obj,
-        None => return usize::MAX,
+    let object = match task.handle_table.get(handle) {
+        Some(object) => object,
+        None => return errno::to_result(errno::EBADF),
     };
-    let stream = match kernel_obj.as_stream() {
-        Some(s) => s,
-        None => return usize::MAX, // Not a stream object
+    if object
+        .as_file()
+        .and_then(|file| file.metadata().ok())
+        .is_some_and(|metadata| matches!(metadata.file_type, FileType::Directory))
+    {
+        return errno::to_result(errno::EISDIR);
+    }
+    let stream = match object.as_stream() {
+        Some(stream) => stream,
+        None => return errno::to_result(errno::EINVAL),
     };
-
+    let mut vectors = Vec::new();
+    if vectors.try_reserve_exact(count).is_err() {
+        return errno::to_result(errno::ENOMEM);
+    }
+    let mut total = 0usize;
+    for index in 0..count {
+        let Some(element) = index
+            .checked_mul(16)
+            .and_then(|offset| address.checked_add(offset))
+        else {
+            return errno::to_result(errno::EFAULT);
+        };
+        let mut bytes = [0u8; 16];
+        if copy_from_user_pagewise(&mut bytes, element, &task.vm_manager) != bytes.len() {
+            return errno::to_result(errno::EFAULT);
+        }
+        let base = usize::from_ne_bytes(bytes[..8].try_into().unwrap());
+        let length = usize::from_ne_bytes(bytes[8..].try_into().unwrap());
+        let Some(next) = total
+            .checked_add(length)
+            .filter(|value| *value <= isize::MAX as usize)
+        else {
+            return errno::to_result(errno::EINVAL);
+        };
+        if length != 0 && base.checked_add(length - 1).is_none() {
+            return errno::to_result(errno::EFAULT);
+        }
+        vectors.push((base, length));
+        total = next;
+    }
+    let length = total.min(MAX_TRANSFER);
+    if length == 0 {
+        return 0;
+    }
+    // Resolve every page in the transfer prefix before consuming stream bytes.
+    let mut remaining = length;
+    let access = if reading {
+        AccessOp::Store
+    } else {
+        AccessOp::Load
+    };
+    for &(base, vector_length) in &vectors {
+        let mut offset = 0;
+        let limit = vector_length.min(remaining);
+        while offset < limit {
+            let cursor = base + offset;
+            if task
+                .vm_manager
+                .translate_to_phys_with_access(cursor, access)
+                .is_none()
+            {
+                return errno::to_result(errno::EFAULT);
+            }
+            offset += (crate::environment::PAGE_SIZE
+                - (cursor & (crate::environment::PAGE_SIZE - 1)))
+                .min(limit - offset);
+        }
+        remaining -= limit;
+        if remaining == 0 {
+            break;
+        }
+    }
+    let mut buffer = Vec::new();
+    if buffer.try_reserve_exact(length).is_err() {
+        return errno::to_result(errno::ENOMEM);
+    }
+    buffer.resize(length, 0);
+    if !reading {
+        let mut offset = 0;
+        for &(base, vector_length) in &vectors {
+            let part = vector_length.min(length - offset);
+            if copy_from_user_pagewise(&mut buffer[offset..offset + part], base, &task.vm_manager)
+                != part
+            {
+                return errno::to_result(errno::EFAULT);
+            }
+            offset += part;
+            if offset == length {
+                break;
+            }
+        }
+    }
     let nonblocking = abi
         .get_file_status_flags(fd)
-        .map(|f| ((f as i32) & O_NONBLOCK) != 0)
-        .unwrap_or(false);
-    let iovec_vaddr = match task.vm_manager.translate_to_kva(iovec_ptr) {
-        Some(addr) => addr as *mut IoVec,
-        None => return usize::MAX,
-    };
-    if iovec_vaddr.is_null() {
-        return usize::MAX;
-    }
-    let iovecs = unsafe { core::slice::from_raw_parts_mut(iovec_vaddr, iovcnt) };
-    let mut total_read = 0usize;
-    for iovec in iovecs.iter_mut() {
-        if iovec.iov_len == 0 {
-            continue;
-        }
-        let buf_vaddr = match task.vm_manager.translate_to_kva(iovec.iov_base as usize) {
-            Some(addr) => addr as *mut u8,
-            None => return usize::MAX,
+        .is_some_and(|flags| flags as i32 & O_NONBLOCK != 0);
+    let transferred = loop {
+        let result = if reading {
+            stream.read(&mut buffer)
+        } else {
+            stream.write(&buffer)
         };
-        if buf_vaddr.is_null() {
-            return usize::MAX;
+        match result {
+            Ok(amount) => break amount.min(length),
+            Err(StreamError::EndOfStream) if reading => return 0,
+            Err(StreamError::WouldBlock) if !nonblocking => {
+                let Some(selectable) = object.as_selectable() else {
+                    return errno::to_result(errno::EAGAIN);
+                };
+                let interest = if reading {
+                    ReadyInterest::read()
+                } else {
+                    ReadyInterest::write()
+                };
+                if abi.has_pending_signals() {
+                    return errno::to_result(errno::EINTR);
+                }
+                let _ = selectable.wait_until_ready(interest, trapframe, None, 0);
+                if abi.has_pending_signals() {
+                    return errno::to_result(errno::EINTR);
+                }
+            }
+            Err(error) => return errno::to_result(stream_error_to_errno(error)),
         }
-        let buffer = unsafe { core::slice::from_raw_parts_mut(buf_vaddr, iovec.iov_len) };
-        match stream.read(buffer) {
-            Ok(n) => {
-                total_read = total_read.saturating_add(n);
-                // If partial read occurred, stop processing remaining vectors
-                // This matches Linux behavior for readv
-                if n < iovec.iov_len {
-                    break;
-                }
-            }
-            Err(StreamError::EndOfStream) => break,
-            Err(StreamError::WouldBlock) => {
-                if nonblocking {
-                    if total_read == 0 {
-                        return errno::to_result(errno::EAGAIN);
-                    } else {
-                        break;
-                    }
+    };
+    if reading {
+        let mut offset = 0;
+        for &(base, vector_length) in &vectors {
+            let part = vector_length.min(transferred - offset);
+            let copied =
+                copy_to_user_pagewise(base, &buffer[offset..offset + part], &task.vm_manager);
+            offset += copied;
+            if copied != part {
+                return if offset == 0 {
+                    errno::to_result(errno::EFAULT)
                 } else {
-                    schedule(trapframe);
-                    return usize::MAX;
-                }
+                    offset
+                };
             }
-            Err(_) => {
-                if total_read == 0 {
-                    return usize::MAX;
-                } else {
-                    break;
-                }
+            if offset == transferred {
+                break;
             }
         }
     }
-    total_read
+    transferred
 }
 
 /// Linux sys_fsync system call implementation
@@ -3338,75 +3327,134 @@ pub fn sys_ftruncate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 }
 
-/// Linux sys_faccessat implementation (dummy: always returns 0)
-///
-/// Arguments:
-/// - abi: LinuxAbi context
-/// - trapframe: Trapframe containing syscall arguments
-///
-/// Returns:
-/// - 0 (success)
-pub fn sys_faccessat(_abi: &mut LinuxAbi, trapframe: &mut crate::arch::Trapframe) -> usize {
-    let task = crate::task::mytask().unwrap();
-    trapframe.increment_pc_next(&task);
+const ACCESS_AT_SYMLINK_NOFOLLOW: i32 = 0x100;
+const ACCESS_AT_EACCESS: i32 = 0x200;
+const ACCESS_AT_EMPTY_PATH: i32 = 0x1000;
 
-    let dirfd = trapframe.get_arg(0) as i32;
-    let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
-        Some(ptr) => ptr as *const u8,
-        None => return usize::MAX,
-    };
-    let mode = trapframe.get_arg(2) as i32;
-    let path_str = match get_path_str_v2(path_ptr) {
-        Ok(p) => p,
-        Err(_) => return usize::MAX,
-    };
-
-    // crate::println!(
-    //     "sys_faccessat: epc={:#x}, dirfd={}, path='{}', mode={:#o}",
-    //     trapframe.epc,
-    //     dirfd,
-    //     path_str,
-    //     mode
-    // );
-
-    0
+fn validate_access_arguments(mode: i32, flags: i32) -> Result<(), usize> {
+    if mode & !7 != 0
+        || flags & !(ACCESS_AT_SYMLINK_NOFOLLOW | ACCESS_AT_EACCESS | ACCESS_AT_EMPTY_PATH) != 0
+    {
+        return Err(errno::EINVAL);
+    }
+    Ok(())
 }
 
-/// Linux faccessat2 system call (syscall 439)
-///
-/// Checks user's permissions for a file. Similar to faccessat but with
-/// additional flag support (AT_EACCESS, AT_SYMLINK_NOFOLLOW).
-///
-/// Signature: int faccessat2(int dirfd, const char *pathname, int mode, int flags);
-///
-/// Returns:
-/// - 0 (success)
-pub fn sys_faccessat2(_abi: &mut LinuxAbi, trapframe: &mut crate::arch::Trapframe) -> usize {
-    let task = crate::task::mytask().unwrap();
+fn linux_access_metadata(
+    metadata: &crate::fs::FileMetadata,
+    read_only: bool,
+    mode: i32,
+) -> Result<(), usize> {
+    // The current Linux ABI exposes both real and effective UID as zero.
+    // Root bypasses DAC read/write bits, but cannot execute a regular file
+    // without an execute bit or write a read-only filesystem.
+    if mode & 2 != 0 && read_only {
+        return Err(errno::EROFS);
+    }
+    if mode & 1 != 0 && metadata.file_type == FileType::RegularFile && !metadata.permissions.execute
+    {
+        return Err(errno::EACCES);
+    }
+    Ok(())
+}
+
+fn linux_access_path(
+    vfs: &crate::fs::VfsManager,
+    path: &str,
+    mode: i32,
+    flags: i32,
+) -> Result<(), usize> {
+    validate_access_arguments(mode, flags)?;
+    if path.is_empty() {
+        return Err(errno::ENOENT);
+    }
+    let options = crate::fs::vfs_v2::manager::PathResolutionOptions {
+        no_follow: flags & ACCESS_AT_SYMLINK_NOFOLLOW != 0,
+    };
+    let (entry, _) = vfs
+        .resolve_path_with_options(path, &options)
+        .map_err(|error| errno::from_fs_error(&error))?;
+    let node = entry.node();
+    let metadata = node
+        .metadata()
+        .map_err(|error| errno::from_fs_error(&error))?;
+    linux_access_metadata(
+        &metadata,
+        node.filesystem()
+            .and_then(|fs| fs.upgrade())
+            .is_some_and(|fs| fs.is_read_only()),
+        mode,
+    )
+}
+
+fn faccessat(abi: &LinuxAbi, trapframe: &mut Trapframe, flags: i32) -> usize {
+    let Some(task) = mytask() else {
+        return errno::to_result(errno::EIO);
+    };
     trapframe.increment_pc_next(&task);
-
     let dirfd = trapframe.get_arg(0) as i32;
-    let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
-        Some(ptr) => ptr as *const u8,
-        None => return usize::MAX,
-    };
     let mode = trapframe.get_arg(2) as i32;
-    let flags = trapframe.get_arg(3) as i32;
-    let path_str = match get_path_str_v2(path_ptr) {
-        Ok(p) => p,
-        Err(_) => return usize::MAX,
+    if let Err(error) = validate_access_arguments(mode, flags) {
+        return errno::to_result(error);
+    }
+    let path = match parse_c_string_from_userspace(&task, trapframe.get_arg(1), MAX_PATH_LENGTH) {
+        Ok(path) => remap_shm_path(&path),
+        Err(_) => return errno::to_result(errno::EFAULT),
     };
+    let Some(vfs) = task.get_vfs() else {
+        return errno::to_result(errno::EIO);
+    };
+    if path.is_empty() && flags & ACCESS_AT_EMPTY_PATH != 0 {
+        if dirfd == -100 {
+            return linux_access_path(&vfs, &vfs.get_cwd_path(), mode, flags)
+                .err()
+                .map_or(0, errno::to_result);
+        }
+        let Some(handle) = abi.get_handle(dirfd as usize) else {
+            return errno::to_result(errno::EBADF);
+        };
+        let Some(object) = task.handle_table.get(handle) else {
+            return errno::to_result(errno::EBADF);
+        };
+        let Some(file) = object.as_file() else {
+            return errno::to_result(errno::EBADF);
+        };
+        let metadata = match file.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => return errno::to_result(errno::EIO),
+        };
+        let read_only = file
+            .as_any()
+            .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
+            .is_some_and(|file| {
+                file.get_vfs_entry()
+                    .node()
+                    .filesystem()
+                    .and_then(|fs| fs.upgrade())
+                    .is_some_and(|fs| fs.is_read_only())
+            });
+        return linux_access_metadata(&metadata, read_only, mode)
+            .err()
+            .map_or(0, errno::to_result);
+    }
+    let path = match path_at_to_absolute(abi, &task, &vfs, dirfd, &path) {
+        Ok(path) => path,
+        Err(error) => return errno::to_result(error),
+    };
+    linux_access_path(&vfs, &path, mode, flags)
+        .err()
+        .map_or(0, errno::to_result)
+}
 
-    // crate::println!(
-    //     "sys_faccessat2: epc={:#x}, dirfd={}, path='{}', mode={:#o}, flags={:#x}",
-    //     trapframe.epc,
-    //     dirfd,
-    //     path_str,
-    //     mode,
-    //     flags
-    // );
+/// Check a path in the process's Linux ABI filesystem view.
+pub fn sys_faccessat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    faccessat(abi, trapframe, 0)
+}
 
-    0
+/// Check a path with Linux faccessat2 flags, including descriptor-relative paths.
+pub fn sys_faccessat2(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let flags = trapframe.get_arg(3) as i32;
+    faccessat(abi, trapframe, flags)
 }
 
 /// Linux sys_mkdirat implementation
@@ -3445,6 +3493,9 @@ pub fn sys_mkdirat(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Some(v) => v,
         None => return errno::to_result(errno::EIO),
     };
+    if vfs.resolve_path(&abs_path).is_ok() {
+        return errno::to_result(errno::EEXIST);
+    }
     match vfs.create_dir(&abs_path) {
         Ok(_) => 0,
         Err(error) => errno::to_result(errno::from_fs_error(&error)),
@@ -5355,6 +5406,127 @@ mod tests {
         proc_exe_linux_stat, proc_exe_selector,
     };
     use crate::abi::linux::generic::errno;
+
+    #[test_case]
+    fn getdents_records_cross_noncontiguous_pages_and_reach_eof() {
+        use crate::environment::PAGE_SIZE;
+        use crate::mem::page::ContiguousPages;
+        use crate::object::capability::stream::{StreamError, StreamOps};
+        use crate::vm::vmem::{MemoryArea, PhysicalMemoryArea, VirtualMemoryMap};
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Entries(AtomicUsize);
+        impl StreamOps for Entries {
+            fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+                let index = self.0.fetch_add(1, Ordering::Relaxed);
+                if index >= 3 {
+                    return Ok(0);
+                }
+                let entry =
+                    crate::fs::DirectoryEntry::from_internal(&crate::fs::DirectoryEntryInternal {
+                        name: alloc::format!("asset-{index}"),
+                        file_type: crate::fs::FileType::Directory,
+                        size: 0,
+                        file_id: index as u64 + 10,
+                        metadata: None,
+                    });
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        (&entry as *const crate::fs::DirectoryEntry).cast::<u8>(),
+                        core::mem::size_of_val(&entry),
+                    )
+                };
+                buffer[..bytes.len()].copy_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn write(&self, _: &[u8]) -> Result<usize, StreamError> {
+                Err(StreamError::NotSupported)
+            }
+        }
+        let pages = ContiguousPages::new(3).unwrap();
+        let task = crate::task::new_user_task("dirent-cross-page".into(), 1);
+        let base = 0x20_000;
+        for (virtual_page, physical_page) in [(0, 0), (1, 2)] {
+            let va = base + virtual_page * PAGE_SIZE;
+            let pa = pages.as_paddr() + (physical_page * PAGE_SIZE) as u64;
+            task.vm_manager
+                .add_memory_map(VirtualMemoryMap::new(
+                    PhysicalMemoryArea::new(pa, pa + PAGE_SIZE as u64 - 1),
+                    MemoryArea::new(va, va + PAGE_SIZE - 1),
+                    0x0b, // Read | Write | User
+                    false,
+                    None,
+                ))
+                .unwrap();
+        }
+        let address = base + PAGE_SIZE - 17;
+        let entries = Entries(AtomicUsize::new(0));
+        let size =
+            super::read_linux_dirents_to_user(&entries, &task.vm_manager, address, 1024).unwrap();
+        let mut bytes = [0u8; 96];
+        assert_eq!(size, bytes.len());
+        assert_eq!(
+            super::copy_from_user_pagewise(&mut bytes, address, &task.vm_manager),
+            size
+        );
+        for (index, record) in bytes.chunks_exact(32).enumerate() {
+            assert_eq!(
+                u64::from_ne_bytes(record[..8].try_into().unwrap()),
+                index as u64 + 10
+            );
+            assert_eq!(u16::from_ne_bytes(record[16..18].try_into().unwrap()), 32);
+            assert_eq!(record[18], 4); // Linux DT_DIR
+            assert_eq!(&record[19..26], alloc::format!("asset-{index}").as_bytes());
+            assert!(record[26..].iter().all(|byte| *byte == 0));
+        }
+        // The physical page between the two user pages must remain untouched.
+        let gap = unsafe {
+            core::slice::from_raw_parts(pages.as_ptr().cast::<u8>().add(PAGE_SIZE), PAGE_SIZE)
+        };
+        assert!(gap.iter().all(|byte| *byte == 0));
+        assert_eq!(
+            super::read_linux_dirents_to_user(&entries, &task.vm_manager, address, 1024),
+            Ok(0)
+        );
+        let entries = Entries(AtomicUsize::new(0));
+        assert_eq!(
+            super::read_linux_dirents_to_user(&entries, &task.vm_manager, 0, 1024),
+            Err(errno::EFAULT)
+        );
+    }
+
+    #[test_case]
+    fn access_checks_existence_and_final_symlink_in_the_selected_view() {
+        let vfs = crate::fs::VfsManager::new();
+        vfs.create_dir("/data").unwrap();
+        vfs.create_file(
+            "/dangling",
+            crate::fs::FileType::SymbolicLink("/absent".into()),
+        )
+        .unwrap();
+        assert_eq!(super::linux_access_path(&vfs, "/data", 0, 0), Ok(()));
+        assert_eq!(
+            super::linux_access_path(&vfs, "/absent", 0, 0),
+            Err(errno::ENOENT)
+        );
+        assert_eq!(
+            super::linux_access_path(&vfs, "/dangling", 0, 0),
+            Err(errno::ENOENT)
+        );
+        assert_eq!(
+            super::linux_access_path(&vfs, "/dangling", 0, super::ACCESS_AT_SYMLINK_NOFOLLOW),
+            Ok(())
+        );
+        assert_eq!(super::linux_access_path(&vfs, "", 0, 0), Err(errno::ENOENT));
+        assert_eq!(
+            super::linux_access_path(&vfs, "/data", 8, 0),
+            Err(errno::EINVAL)
+        );
+        assert_eq!(
+            super::linux_access_path(&vfs, "/data", 0, 0x400),
+            Err(errno::EINVAL)
+        );
+    }
 
     #[test_case]
     fn statfs_matches_asm_generic_64_layout() {

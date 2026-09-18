@@ -11,7 +11,7 @@ pub(super) unsafe fn syscall0(syscall: Syscall) -> usize {
     unsafe {
         asm!(
             "svc #0",
-            in("x8") syscall as usize,
+            in("x8") scarlet_abi::syscall_transport_number(syscall),
             out("x0") ret,
             clobber_abi("C"),
             options(nostack)
@@ -26,7 +26,7 @@ pub(super) unsafe fn syscall1(syscall: Syscall, arg1: usize) -> usize {
     unsafe {
         asm!(
             "svc #0",
-            in("x8") syscall as usize,
+            in("x8") scarlet_abi::syscall_transport_number(syscall),
             inlateout("x0") arg1 => ret,
             clobber_abi("C"),
             options(nostack)
@@ -41,7 +41,7 @@ pub(super) unsafe fn syscall2(syscall: Syscall, arg1: usize, arg2: usize) -> usi
     unsafe {
         asm!(
             "svc #0",
-            in("x8") syscall as usize,
+            in("x8") scarlet_abi::syscall_transport_number(syscall),
             inlateout("x0") arg1 => ret,
             in("x1") arg2,
             clobber_abi("C"),
@@ -57,7 +57,7 @@ pub(super) unsafe fn syscall3(syscall: Syscall, arg1: usize, arg2: usize, arg3: 
     unsafe {
         asm!(
             "svc #0",
-            in("x8") syscall as usize,
+            in("x8") scarlet_abi::syscall_transport_number(syscall),
             inlateout("x0") arg1 => ret,
             in("x1") arg2,
             in("x2") arg3,
@@ -80,7 +80,7 @@ pub(super) unsafe fn syscall4(
     unsafe {
         asm!(
             "svc #0",
-            in("x8") syscall as usize,
+            in("x8") scarlet_abi::syscall_transport_number(syscall),
             inlateout("x0") arg1 => ret,
             in("x1") arg2,
             in("x2") arg3,
@@ -105,7 +105,7 @@ pub(super) unsafe fn syscall5(
     unsafe {
         asm!(
             "svc #0",
-            in("x8") syscall as usize,
+            in("x8") scarlet_abi::syscall_transport_number(syscall),
             inlateout("x0") arg1 => ret,
             in("x1") arg2,
             in("x2") arg3,
@@ -132,7 +132,7 @@ pub(super) unsafe fn syscall6(
     unsafe {
         asm!(
             "svc #0",
-            in("x8") syscall as usize,
+            in("x8") scarlet_abi::syscall_transport_number(syscall),
             inlateout("x0") arg1 => ret,
             in("x1") arg2,
             in("x2") arg3,

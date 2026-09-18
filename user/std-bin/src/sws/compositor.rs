@@ -3,7 +3,9 @@
 use super::config;
 use super::cursor::Cursor;
 use super::cursor_theme::CursorTheme;
-use super::damage::{DamageRect, PresentDamage, WindowGeometrySnapshot, changed_geometry_damage};
+use super::damage::{
+    DamageRect, PresentDamage, WindowGeometrySnapshot, changed_geometry_damage, shared_frame_damage,
+};
 use super::frame_callback::{frame_callback_is_ready, frame_callback_target};
 use super::gpu_compositor::{GpuCompositor, SgfxBufferError, SgfxBufferIdentity, SgfxCommitToken};
 use super::input::{
@@ -2351,6 +2353,7 @@ pub struct Compositor {
     /// Scene to restore after leaving Home or Overview.
     overview_restore_focus: Option<u32>,
     held_keys: HeldKeys,
+    gamepad_routing: super::input::GamepadRouting,
     shell_action_bindings: Vec<(KeyBinding, ShellAction)>,
     overview_super_tap: bool,
     super_tap_state: ModifierTapState,
@@ -2791,6 +2794,7 @@ impl Compositor {
             workarea: None,
             active_app_id: None,
             last_focused_window_id: None,
+            gamepad_routing: super::input::GamepadRouting::default(),
             last_workspace_focus: None,
             overview_restore_focus: None,
             held_keys: HeldKeys::default(),
@@ -5120,6 +5124,7 @@ impl Compositor {
 
     /// Broadcast focus change event to all connected clients
     fn broadcast_focus_change(&mut self, window_id: u32) {
+        self.sync_gamepad_focus();
         if self.workspace_manager.activate_window(
             window_id,
             self.windowing_mode == sws_protocol::WindowingMode::Focused,
@@ -6468,6 +6473,8 @@ impl Compositor {
             self.handle_remote_event(event)?;
         }
 
+        self.sync_gamepad_focus();
+
         // Process input events from global queue (non-blocking)
         let input_events = super::input::pop_all_input_events();
         if !input_events.is_empty() {
@@ -7569,6 +7576,50 @@ impl Compositor {
                 self.release_keyboard_source(source)?;
                 Ok(false)
             }
+            CompositorInputEvent::Gamepad {
+                state,
+                navigation,
+                source,
+            } => {
+                let policy = self.window_manager.get_focused_window_id().and_then(|id| {
+                    self.window_manager
+                        .get_window(id)
+                        .map(|w| (id, w.gamepad_input, w.gamepad_navigation))
+                });
+                let target = policy.and_then(|(id, enabled, _)| enabled.then_some(id));
+                for (window_id, state) in self.gamepad_routing.route(target, state) {
+                    super::ipc::send_gamepad_to_window(window_id, state);
+                }
+                let navigation_enabled = policy.map_or(true, |(_, _, navigation)| navigation);
+                let mut redraw = false;
+                for (code, value) in navigation {
+                    // Home remains a system action even for games using raw input.
+                    // Releases always retire ownership established in another window.
+                    if navigation_enabled || value == 0 || code == 125 || code == 57 {
+                        redraw |= self.handle_input_event(CompositorInputEvent::Keyboard {
+                            code,
+                            value,
+                            source,
+                            synthetic: false,
+                        })?;
+                    }
+                }
+                Ok(redraw)
+            }
+        }
+    }
+
+    fn sync_gamepad_focus(&mut self) {
+        let target = self.window_manager.get_focused_window_id().filter(|id| {
+            self.window_manager
+                .get_window(*id)
+                .is_some_and(|window| window.gamepad_input)
+        });
+        for (window_id, state) in self
+            .gamepad_routing
+            .reset_except(target, monotonic_time_ns())
+        {
+            super::ipc::send_gamepad_to_window(window_id, state);
         }
     }
 
@@ -10523,11 +10574,10 @@ impl Compositor {
                 };
                 match result {
                     Ok(damage) => {
-                        if let Some((window_x, window_y, presented, transform, instances)) =
+                        if let Some((geometry, presented, transform, instances)) =
                             self.window_manager.get_window(window_id).map(|window| {
                                 (
-                                    window.x,
-                                    window.y,
+                                    (window.x, window.y, window.width, window.height),
                                     window.is_presented(),
                                     window.presentation_transform,
                                     window
@@ -10547,13 +10597,10 @@ impl Compositor {
                                     transform.height,
                                 ));
                             } else {
-                                for (x, y, width, height) in &damage {
-                                    self.add_pending_damage((
-                                        window_x.saturating_add(*x as i32),
-                                        window_y.saturating_add(*y as i32),
-                                        *width,
-                                        *height,
-                                    ));
+                                for rect in
+                                    shared_frame_damage(damage.extent, geometry, &damage.rects)
+                                {
+                                    self.add_pending_damage(rect);
                                 }
                             }
                             for instance in instances {
@@ -11663,6 +11710,28 @@ impl Compositor {
                         window.restrict_input_to_regions = restrict_input;
                         self.full_redraw_needed = true;
                     }
+                }
+            }
+            IpcEvent::SetGamepadInput {
+                client_id,
+                request_id,
+                window_id,
+                enabled,
+                navigation,
+            } => {
+                if !self.client_owns_window(client_id, window_id) {
+                    send_response_to_client(
+                        client_id,
+                        sws_protocol::server_msg::ERROR,
+                        request_id,
+                        sws_protocol::payload_error(sws_protocol::error_codes::WINDOW_NOT_OWNED)
+                            .to_vec(),
+                    );
+                    return Ok(false);
+                }
+                if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                    window.gamepad_input = enabled;
+                    window.gamepad_navigation = navigation;
                 }
             }
             IpcEvent::SetWindowGeometry {

@@ -74,6 +74,13 @@ active; zero means inactive.
 
 ## Kernel Usage
 
+### Gamepads
+
+`InputDeviceKind::Gamepad` is kind **7** and uses `/dev/gamepadN` names.
+Standard button identities and declared raw axis ranges are preserved in the
+driver. SWS provides normalized snapshots and optional menu navigation; see
+[native gamepad input](../graphics/gamepad-input.md).
+
 ### 1. Device Registration
 
 ```rust

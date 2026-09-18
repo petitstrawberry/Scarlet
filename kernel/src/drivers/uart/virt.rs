@@ -120,14 +120,7 @@ impl Uart {
         self.reg_write(THR_OFFSET, c);
     }
 
-    fn read_byte_internal(&self) -> u8 {
-        if self.reg_read(LSR_OFFSET) & LSR_DR == 0 {
-            return 0;
-        }
-        self.reg_read(RHR_OFFSET)
-    }
-
-    fn can_read(&self) -> bool {
+    fn hardware_can_read(&self) -> bool {
         self.reg_read(LSR_OFFSET) & LSR_DR != 0
     }
 
@@ -139,9 +132,10 @@ impl Uart {
         // Drain all available RX bytes. Reading only one byte can leave the
         // FIFO non-empty without producing a new edge, which loses interactive
         // input such as "ls\n" after the first interrupt.
-        while self.can_read() {
-            let c = self.read_byte_internal();
+        while self.hardware_can_read() {
+            let c = self.reg_read(RHR_OFFSET);
             self.emit_event(&InputEvent { data: c });
+            self.rx_buffer.lock().push_back(c);
         }
     }
 }
@@ -256,7 +250,7 @@ impl CharDevice for Uart {
     }
 
     fn can_read(&self) -> bool {
-        self.can_read()
+        !self.rx_buffer.lock().is_empty()
     }
 
     fn can_write(&self) -> bool {

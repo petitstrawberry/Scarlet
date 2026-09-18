@@ -129,6 +129,52 @@ mod tests {
     use super::*;
 
     #[test_case]
+    fn userspace_string_crosses_noncontiguous_physical_pages() {
+        use crate::environment::PAGE_SIZE;
+        use crate::mem::page::ContiguousPages;
+        use crate::vm::vmem::{MemoryArea, PhysicalMemoryArea, VirtualMemoryMap};
+
+        let pages = ContiguousPages::new(3).unwrap();
+        let task = crate::task::new_user_task("path-cross-page".into(), 1);
+        let base = 0x20_000;
+        for (virtual_page, physical_page) in [(0, 0), (1, 2)] {
+            let va = base + virtual_page * PAGE_SIZE;
+            let pa = pages.as_paddr() + (physical_page * PAGE_SIZE) as u64;
+            task.vm_manager
+                .add_memory_map(VirtualMemoryMap::new(
+                    PhysicalMemoryArea::new(pa, pa + PAGE_SIZE as u64 - 1),
+                    MemoryArea::new(va, va + PAGE_SIZE - 1),
+                    0o644,
+                    false,
+                    None,
+                ))
+                .unwrap();
+        }
+        let path = b"/usr/share/supertuxkart/data/shaders/ge_shaders/unlit.frag\0";
+        let split = 17;
+        // The intervening physical page stays zeroed. Reading linearly from
+        // the first kernel alias would truncate this valid userspace path.
+        unsafe {
+            let bytes = pages.as_ptr().cast::<u8>();
+            core::ptr::copy_nonoverlapping(path.as_ptr(), bytes.add(PAGE_SIZE - split), split);
+            core::ptr::copy_nonoverlapping(
+                path.as_ptr().add(split),
+                bytes.add(2 * PAGE_SIZE),
+                path.len() - split,
+            );
+        }
+        assert_eq!(
+            parse_c_string_from_userspace(&task, base + PAGE_SIZE - split, 4096).unwrap(),
+            core::str::from_utf8(&path[..path.len() - 1]).unwrap()
+        );
+        task.vm_manager.remove_memory_map_by_addr(base + PAGE_SIZE);
+        assert_eq!(
+            parse_c_string_from_userspace(&task, base + PAGE_SIZE - split, 4096),
+            Err(StringConversionError::TranslationError)
+        );
+    }
+
+    #[test_case]
     fn test_cstring_to_string() {
         let cstr = b"Hello, world!\0";
         let res = cstring_to_string(cstr.as_ptr(), cstr.len()).unwrap();

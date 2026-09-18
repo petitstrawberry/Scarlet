@@ -1,9 +1,13 @@
 //! Input event handling module
 
+#[path = "gamepad.rs"]
+mod gamepad;
 #[path = "key_repeat.rs"]
 mod key_repeat;
 #[path = "touch.rs"]
 mod touch;
+pub(crate) use gamepad::Routing as GamepadRouting;
+pub(crate) use gamepad::compact_backlog as compact_gamepad_backlog;
 
 pub(crate) use key_repeat::{
     ConsumedKeys, HeldKeys, KeyRepeatState, KeyboardSource, ModifierTapState,
@@ -78,6 +82,12 @@ pub enum CompositorInputEvent {
     /// The keyboard stream disconnected; release keys owned by that source.
     KeyboardReset {
         /// Only state owned by this producer is discarded.
+        source: KeyboardSource,
+    },
+    /// Native gamepad snapshot plus optional userspace menu transitions.
+    Gamepad {
+        state: sws_protocol::gamepad::State,
+        navigation: Vec<(u16, i32)>,
         source: KeyboardSource,
     },
     /// A normalized per-device multitouch snapshot for compositor-thread policy.
@@ -213,6 +223,7 @@ struct CapabilityRegistry {
     direct_touch: u32,
     fine_pointer: u32,
     keyboard: u32,
+    gamepad: u32,
 }
 
 impl CapabilityRegistry {
@@ -227,6 +238,9 @@ impl CapabilityRegistry {
         if self.keyboard != 0 {
             flags |= environment_capabilities::KEYBOARD;
         }
+        if self.gamepad != 0 {
+            flags |= environment_capabilities::GAMEPAD;
+        }
         flags
     }
 
@@ -240,6 +254,9 @@ impl CapabilityRegistry {
         }
         if flags & environment_capabilities::KEYBOARD != 0 {
             self.keyboard = self.keyboard.saturating_add(1);
+        }
+        if flags & environment_capabilities::GAMEPAD != 0 {
+            self.gamepad = self.gamepad.saturating_add(1);
         }
         let current = self.flags();
         (current != previous).then_some(current)
@@ -256,6 +273,9 @@ impl CapabilityRegistry {
         if flags & environment_capabilities::KEYBOARD != 0 {
             self.keyboard = self.keyboard.saturating_sub(1);
         }
+        if flags & environment_capabilities::GAMEPAD != 0 {
+            self.gamepad = self.gamepad.saturating_sub(1);
+        }
         let current = self.flags();
         (current != previous).then_some(current)
     }
@@ -265,6 +285,7 @@ static LIVE_CAPABILITIES: Mutex<CapabilityRegistry> = Mutex::new(CapabilityRegis
     direct_touch: 0,
     fine_pointer: 0,
     keyboard: 0,
+    gamepad: 0,
 });
 
 struct CapabilityRegistration {
@@ -829,6 +850,9 @@ fn input_discovery_supervisor() {
         for index in 0..DEVICE_INDEX_LIMIT {
             try_spawn_switch_reader(&active_paths, std::format!("/dev/switch{index}"), index);
         }
+        for index in 0..DEVICE_INDEX_LIMIT {
+            try_spawn_gamepad_reader(&active_paths, std::format!("/dev/gamepad{index}"), index);
+        }
         thread::sleep(DEVICE_SCAN_INTERVAL);
     }
 }
@@ -1143,6 +1167,91 @@ fn consume_keyboard_event(
         source,
         synthetic: false,
     })
+}
+
+fn try_spawn_gamepad_reader(
+    active_paths: &Arc<Mutex<Vec<std::string::String>>>,
+    path: std::string::String,
+    index: u8,
+) {
+    let Some(device) = claim_device(active_paths, &path) else {
+        return;
+    };
+    if device.kind() != Ok(InputDeviceKind::Gamepad) {
+        release_device(active_paths, &path);
+        return;
+    }
+    let reader_paths = Arc::clone(active_paths);
+    let failure_path = path.clone();
+    if thread::Builder::new()
+        .spawn(move || {
+            gamepad_device_reader(device, &path, index);
+            release_device(&reader_paths, &path);
+        })
+        .is_err()
+    {
+        release_device(active_paths, &failure_path);
+    }
+}
+
+fn gamepad_device_reader(device: InputDevice, path: &str, index: u8) {
+    let source = KeyboardSource::Gamepad(index);
+    let config = super::config::read_sws_config().unwrap_or_default();
+    let mut navigation = gamepad::Navigation::new(gamepad::Config::parse(&config));
+    let mut snapshot = gamepad::Snapshot::new(index as u32);
+    for code in 0..6 {
+        if let Ok(axis) = device.absolute_axis(code) {
+            navigation.set_axis_range(code, axis.minimum, axis.maximum);
+            snapshot.set_axis_range(code, axis.minimum, axis.maximum);
+        }
+    }
+    println!("[GamepadThread] Opened {} for menu navigation", path);
+    let _capability_registration = register_live_capabilities(environment_capabilities::GAMEPAD);
+    loop {
+        match read_input_event(&device) {
+            Ok(Some(event)) => {
+                let frame = navigation.consume(event.type_, event.code, event.value);
+                if matches!(frame, gamepad::Frame::Discard) {
+                    continue;
+                }
+                snapshot.update(event.type_, event.code, event.value, event.time);
+                match frame {
+                    gamepad::Frame::Reset => {
+                        push_input_event(CompositorInputEvent::Gamepad {
+                            state: snapshot.reset(event.time),
+                            navigation: Vec::new(),
+                            source,
+                        });
+                        push_input_event(CompositorInputEvent::KeyboardReset { source });
+                    }
+                    gamepad::Frame::Keys(keys) => push_input_event(CompositorInputEvent::Gamepad {
+                        state: snapshot.state,
+                        navigation: keys,
+                        source,
+                    }),
+                    gamepad::Frame::None if event.type_ == 0 && event.code == 0 => {
+                        push_input_event(CompositorInputEvent::Gamepad {
+                            state: snapshot.state,
+                            navigation: Vec::new(),
+                            source,
+                        });
+                    }
+                    gamepad::Frame::None | gamepad::Frame::Discard => (),
+                }
+            }
+            Ok(None) => thread::sleep(SHORT_READ_DELAY),
+            Err(error) => {
+                println!("[GamepadThread] {} disconnected: {:?}", path, error);
+                break;
+            }
+        }
+    }
+    push_input_event(CompositorInputEvent::Gamepad {
+        state: snapshot.reset(0),
+        navigation: Vec::new(),
+        source,
+    });
+    push_input_event(CompositorInputEvent::KeyboardReset { source });
 }
 
 fn read_input_event(device: &InputDevice) -> Result<Option<InputEvent>, StreamError> {

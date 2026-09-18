@@ -3390,6 +3390,7 @@ impl DeviceManager {
         };
 
         if let Some(driver) = driver {
+            let options = driver.platform_probe_options();
             if let Err(e) = crate::device::power::PowerManager::enable_device_domains(device) {
                 if is_probe_defer(e) {
                     return ProbeOutcome::Deferred;
@@ -3408,7 +3409,9 @@ impl DeviceManager {
                 println!("[clk] failed to apply assigned clocks: {}", e);
                 return ProbeOutcome::Failed;
             }
-            if let Err(e) = self.deassert_device_resets(device) {
+            if options.deassert_resets
+                && let Err(e) = self.deassert_device_resets(device)
+            {
                 if is_probe_defer(e) {
                     return ProbeOutcome::Deferred;
                 }
@@ -3424,7 +3427,9 @@ impl DeviceManager {
                 return ProbeOutcome::Failed;
             }
 
-            if let Err(e) = self.pre_probe_resolve_iommu(device) {
+            if options.resolve_iommu
+                && let Err(e) = self.pre_probe_resolve_iommu(device)
+            {
                 if is_probe_defer(e) {
                     return ProbeOutcome::Deferred;
                 }
@@ -3432,7 +3437,9 @@ impl DeviceManager {
                 return ProbeOutcome::Failed;
             }
 
-            if let Err(e) = self.pre_probe_resolve_dma(device) {
+            if options.resolve_dma
+                && let Err(e) = self.pre_probe_resolve_dma(device)
+            {
                 if is_probe_defer(e) {
                     return ProbeOutcome::Deferred;
                 }
@@ -3808,6 +3815,64 @@ mod tests {
     fn test_is_probe_defer_recognizes_string() {
         assert!(is_probe_defer(PROBE_DEFER));
         assert!(!is_probe_defer("other error"));
+    }
+
+    #[test_case]
+    fn test_platform_probe_requires_only_selected_provider_hooks() {
+        for (property, options) in [
+            (
+                "resets",
+                PlatformProbeOptions {
+                    deassert_resets: false,
+                    ..PlatformProbeOptions::default()
+                },
+            ),
+            (
+                "iommus",
+                PlatformProbeOptions {
+                    resolve_iommu: false,
+                    ..PlatformProbeOptions::default()
+                },
+            ),
+            (
+                "dmas",
+                PlatformProbeOptions {
+                    resolve_dma: false,
+                    ..PlatformProbeOptions::default()
+                },
+            ),
+        ] {
+            let device = PlatformDeviceInfo::new(
+                "pio-test",
+                0,
+                vec!["test,probe-options"],
+                vec![],
+                vec![PlatformDeviceProperty::new(property, &be_cells(&[0x90, 7]))],
+                None,
+            );
+            for (selected, expected_probe) in
+                [(PlatformProbeOptions::default(), false), (options, true)]
+            {
+                let manager = DeviceManager::new();
+                manager.register_driver(
+                    Box::new(
+                        PlatformDeviceDriver::new(
+                            "pio-test",
+                            |_| Ok(()),
+                            |_| Ok(()),
+                            vec!["test,probe-options"],
+                        )
+                        .with_probe_options(selected),
+                    ),
+                    DriverPriority::Core,
+                );
+                let result = manager.probe_platform_device(DriverPriority::Core, &device);
+                assert_eq!(matches!(result, ProbeOutcome::Probed), expected_probe);
+                if !expected_probe {
+                    assert!(matches!(result, ProbeOutcome::Deferred));
+                }
+            }
+        }
     }
 
     #[test_case]

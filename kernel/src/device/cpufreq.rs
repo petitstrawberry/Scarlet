@@ -305,6 +305,16 @@ pub fn cpu_performance_domain(cpu_id: usize) -> Option<u32> {
     }
 }
 
+/// Resolve a CPU's firmware performance-domain binding.
+pub fn performance_domain_from_fdt(cpu: &fdt::node::FdtNode<'_, '_>) -> Option<u32> {
+    let cell = |bytes: &[u8]| Some(u32::from_be_bytes(bytes.get(..4)?.try_into().ok()?));
+    if let Some(property) = cpu.property("performance-domains") {
+        return cell(property.value).filter(|domain| *domain != 0);
+    }
+    let property = cpu.property("qcom,freq-domain")?;
+    compose_performance_domain_id(cell(property.value)?, cell(property.value.get(4..)?)?)
+}
+
 /// Register a CPU frequency backend.
 ///
 /// # Arguments
@@ -437,6 +447,20 @@ pub fn cpu_frequency_policy_info_by_domain(domain: u32) -> Option<CpuFrequencyPo
         .map(CpuFrequencyPolicy::info)
 }
 
+/// Copy the registered operating points for a policy into a caller's buffer.
+pub fn operating_points(domain: u32, output: &mut [CpuFrequencyOpp]) -> usize {
+    let policies = CPUFREQ_POLICIES.lock();
+    let Some(policy) = policies
+        .iter()
+        .find(|policy| policy.valid && policy.domain == domain)
+    else {
+        return 0;
+    };
+    let count = output.len().min(policy.opp_count);
+    output[..count].copy_from_slice(&policy.opps[..count]);
+    count
+}
+
 /// Set the governor attached to a performance domain.
 ///
 /// # Arguments
@@ -487,6 +511,28 @@ pub fn set_domain_target_frequency(
     };
 
     apply_target_request_locked(request)?;
+    Ok(request.opp)
+}
+
+/// Set a manual target and attach the userspace governor as one transition.
+///
+/// The governor changes only after the backend successfully applies the target.
+/// Call only from task context, never from an IRQ or FIQ handler.
+pub fn set_domain_userspace_frequency(
+    domain: u32,
+    target_freq_khz: u64,
+) -> Result<CpuFrequencyOpp, &'static str> {
+    let _transition = CPUFREQ_TRANSITION_LOCK.lock();
+    let request = explicit_target_request_for_domain(domain, target_freq_khz)
+        .ok_or("cpufreq: policy not found")?;
+    apply_target_request_locked(request)?;
+    let mut policies = CPUFREQ_POLICIES.lock();
+    let policy = policies
+        .iter_mut()
+        .find(|policy| policy.valid && policy.domain == domain)
+        .ok_or("cpufreq: policy not found")?;
+    policy.governor = CpuFrequencyGovernor::Userspace;
+    policy.invalidate_deferred_requests();
     Ok(request.opp)
 }
 

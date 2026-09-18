@@ -65,7 +65,11 @@ pub mod capabilities {
     pub const EXTENSION_BUFFER_OBJECTS: u64 = 1 << 10;
     /// Owned surfaces may declare rounded backdrop and input regions.
     pub const SURFACE_REGIONS: u64 = 1 << 11;
+    /// Owned windows may receive native gamepad snapshots and select menu policy.
+    pub const GAMEPAD_INPUT: u64 = 1 << 12;
 }
+
+pub mod gamepad;
 
 /// Flags attached to an extension-buffer commit.
 pub mod extension_commit_flags {
@@ -158,6 +162,8 @@ pub mod input_environment_capability_flags {
     pub const KEYBOARD: u32 = 1 << 2;
     /// A pen input device is present.
     pub const PEN: u32 = 1 << 3;
+    /// A gamepad input device is present.
+    pub const GAMEPAD: u32 = 1 << 4;
 }
 
 /// Snapshot of the compositor's current input environment.
@@ -411,6 +417,7 @@ pub mod client_msg {
     /// Request one compositor-paced frame opportunity for an owned window.
     pub const REQUEST_FRAME: u32 = 53;
     pub const SET_SURFACE_REGIONS: u32 = 54;
+    pub const SET_GAMEPAD_INPUT: u32 = 55;
 
     // Text input client API messages (200-219)
     pub const TEXT_INPUT_CREATE: u32 = 200;
@@ -489,6 +496,7 @@ pub mod server_msg {
     pub const WORKSPACE_STATE: u32 = 37;
     /// One requested frame may now be rendered for the identified window.
     pub const FRAME_DONE: u32 = 38;
+    pub const GAMEPAD_INPUT: u32 = 39;
 
     // Text input client events (200-219)
     pub const TEXT_INPUT_CREATED: u32 = 200;
@@ -1526,6 +1534,11 @@ pub enum ClientMessageRef<'a> {
         restrict_input: bool,
         regions: &'a [u8],
     },
+    SetGamepadInput {
+        window_id: u32,
+        enabled: bool,
+        navigation: bool,
+    },
     SetWindowMenuTitles {
         window_id: u32,
         menu_titles: &'a [u8], // Format: "menu1|menu2|menu3"
@@ -1627,6 +1640,10 @@ pub enum ClientMessageRef<'a> {
 /// Server->client messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerMessage {
+    GamepadInput {
+        window_id: u32,
+        state: gamepad::State,
+    },
     WindowCreated {
         window_id: u32,
         shm_size: u64,
@@ -2587,6 +2604,21 @@ pub fn parse_client_message<'a>(
             }
             Ok(ClientMessageRef::GetInputEnvironment {})
         }
+        client_msg::SET_GAMEPAD_INPUT => {
+            if payload.len() != 12 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let enabled = read_u32(payload, 4)?;
+            let navigation = read_u32(payload, 8)?;
+            if enabled > 1 || navigation > 1 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::SetGamepadInput {
+                window_id: read_u32(payload, 0)?,
+                enabled: enabled != 0,
+                navigation: navigation != 0,
+            })
+        }
         client_msg::SET_TABLET_MODE_OVERRIDE => {
             if payload.len() != 4 {
                 return Err(ProtocolError::MalformedPayload);
@@ -3118,6 +3150,10 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             }
             let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             Ok(ServerMessage::WindowDestroyed { window_id })
+        }
+        server_msg::GAMEPAD_INPUT => {
+            let (window_id, state) = gamepad::State::parse(payload)?;
+            Ok(ServerMessage::GamepadInput { window_id, state })
         }
         server_msg::WINDOW_RESIZED => {
             if payload.len() != 20 {

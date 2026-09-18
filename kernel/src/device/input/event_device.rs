@@ -19,6 +19,7 @@ static TOUCHPAD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static TABLET_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static TOUCHSCREEN_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static SWITCH_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static GAMEPAD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static INPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 use crate::arch::Trapframe;
@@ -110,6 +111,8 @@ pub enum InputDeviceKind {
     Tablet = 5,
     /// Posture, lid, or other switch device.
     Switch = 6,
+    /// Game controller with buttons and absolute stick or hat axes.
+    Gamepad = 7,
 }
 
 impl InputDeviceKind {
@@ -121,6 +124,7 @@ impl InputDeviceKind {
             "touchscreen" => Self::Touchscreen,
             "tablet" => Self::Tablet,
             "switch" => Self::Switch,
+            "gamepad" => Self::Gamepad,
             _ => Self::Unknown,
         }
     }
@@ -319,6 +323,7 @@ impl EventDevice {
             "tablet" => TABLET_COUNTER.fetch_add(1, Ordering::SeqCst),
             "touchscreen" => TOUCHSCREEN_COUNTER.fetch_add(1, Ordering::SeqCst),
             "switch" => SWITCH_COUNTER.fetch_add(1, Ordering::SeqCst),
+            "gamepad" => GAMEPAD_COUNTER.fetch_add(1, Ordering::SeqCst),
             _ => INPUT_COUNTER.fetch_add(1, Ordering::SeqCst),
         };
 

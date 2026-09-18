@@ -12,6 +12,7 @@ use super::{
     GpuCreateImportedImageBgra, GpuCreateTimeline, GpuImage, GpuImageCreateInfo, GpuQueryDialect,
     GpuQueryInfo, GpuTimeline,
 };
+use super::{GPU_CREATE_MIP_IMAGE, GPU_CREATE_TEXTURE, GpuCreateMipImage, GpuCreateTexture};
 use crate::device::{Device, DeviceType, char::CharDevice};
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::object::KernelObject;
@@ -170,30 +171,104 @@ impl GpuConnection {
 
     fn handle_create_image(&self, arg: usize) -> Result<i32, &'static str> {
         let mut request: GpuCreateImage = read_user_value(arg)?;
+        self.allocate_image(&mut request, 1, 1, 0)?;
+        if let Err(error) = write_user_value(arg, &request) {
+            if request.image_handle != 0 {
+                crate::task::mytask()
+                    .unwrap()
+                    .handle_table
+                    .remove(request.image_handle);
+            }
+            return Err(error);
+        }
+        Ok(0)
+    }
+
+    fn handle_create_mip_image(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut request: GpuCreateMipImage = read_user_value(arg)?;
+        if request.reserved != 0 {
+            request.image.clear_response();
+            request.image.result = GPU_RESULT_INVALID_ARGUMENT;
+        } else {
+            self.allocate_image(&mut request.image, request.mip_levels, 1, 0)?;
+        }
+        if let Err(error) = write_user_value(arg, &request) {
+            if request.image.image_handle != 0 {
+                crate::task::mytask()
+                    .unwrap()
+                    .handle_table
+                    .remove(request.image.image_handle);
+            }
+            return Err(error);
+        }
+        Ok(0)
+    }
+
+    fn handle_create_texture(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut request: GpuCreateTexture = read_user_value(arg)?;
+        if request.reserved != 0 {
+            request.image.clear_response();
+            request.image.result = GPU_RESULT_INVALID_ARGUMENT;
+        } else {
+            self.allocate_image(
+                &mut request.image,
+                request.mip_levels,
+                request.array_layers,
+                request.flags,
+            )?;
+        }
+        if let Err(error) = write_user_value(arg, &request) {
+            if request.image.image_handle != 0 {
+                crate::task::mytask()
+                    .unwrap()
+                    .handle_table
+                    .remove(request.image.image_handle);
+            }
+            return Err(error);
+        }
+        Ok(0)
+    }
+
+    fn allocate_image(
+        &self,
+        request: &mut GpuCreateImage,
+        mip_levels: u32,
+        array_layers: u32,
+        flags: u32,
+    ) -> Result<(), &'static str> {
         request.clear_response();
         if request.abi_version != GPU_ABI_VERSION {
             request.result = GPU_RESULT_INVALID_ABI;
-            write_user_value(arg, &request)?;
-            return Ok(0);
+            return Ok(());
         }
-        if request.reserved != 0 {
+        if request.reserved != 0 || flags & !super::GPU_TEXTURE_CREATE_CUBE != 0 {
             request.result = GPU_RESULT_INVALID_ARGUMENT;
-            write_user_value(arg, &request)?;
-            return Ok(0);
+            return Ok(());
         }
-        let create =
+        let mut create =
             GpuImageCreateInfo::new(request.format, request.usage, request.width, request.height);
+        create.mip_levels = mip_levels;
+        create.array_layers = array_layers;
+        create.cube = flags & super::GPU_TEXTURE_CREATE_CUBE != 0;
         if !super::resource::image_create_is_valid(create) {
             request.result = GPU_RESULT_INVALID_ARGUMENT;
-            write_user_value(arg, &request)?;
-            return Ok(0);
+            return Ok(());
+        }
+        let support = self.backend.query_info().device.execution_support;
+        if (mip_levels > 1 && support & super::GPU_EXECUTION_SUPPORT_IMAGE_MIPS == 0)
+            || (array_layers > 1 && support & super::GPU_EXECUTION_SUPPORT_TEXTURE_ARRAYS == 0)
+            || (create.format == super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT
+                && create.usage & super::GPU_IMAGE_USAGE_SAMPLED != 0
+                && support & super::GPU_EXECUTION_SUPPORT_DEPTH_SAMPLING == 0)
+        {
+            request.result = GPU_RESULT_UNSUPPORTED;
+            return Ok(());
         }
         let image = match GpuImage::new(Arc::clone(&self.backend), create) {
             Ok(image) => image,
             Err(_) => {
                 request.result = GPU_RESULT_UNSUPPORTED;
-                write_user_value(arg, &request)?;
-                return Ok(0);
+                return Ok(());
             }
         };
         let info = image.query_info();
@@ -207,16 +282,11 @@ impl GpuConnection {
                 request.image_handle = handle;
                 request.command_resource_token = info.command_resource_token;
                 request.allocation_size = info.allocation_size;
-                if let Err(error) = write_user_value(arg, &request) {
-                    task.handle_table.remove(handle);
-                    return Err(error);
-                }
-                Ok(0)
+                Ok(())
             }
             Err(_) => {
                 request.result = GPU_RESULT_OUT_OF_RESOURCES;
-                write_user_value(arg, &request)?;
-                Ok(0)
+                Ok(())
             }
         }
     }
@@ -443,6 +513,8 @@ impl ControlOps for GpuConnection {
             GPU_CREATE_BUFFER => self.handle_create_buffer(arg),
             GPU_CREATE_TIMELINE => self.handle_create_timeline(arg),
             GPU_CREATE_IMAGE => self.handle_create_image(arg),
+            GPU_CREATE_MIP_IMAGE => self.handle_create_mip_image(arg),
+            GPU_CREATE_TEXTURE => self.handle_create_texture(arg),
             GPU_CREATE_IMPORTED_IMAGE_BGRA => self.handle_create_imported_image_bgra(arg),
             GPU_QUERY_DIALECT => self.handle_query_dialect(arg),
             GPU_CREATE_CONTEXT => self.handle_create_context(arg),
@@ -456,6 +528,14 @@ impl ControlOps for GpuConnection {
             (GPU_CREATE_BUFFER, "Create a GPU buffer child handle"),
             (GPU_CREATE_TIMELINE, "Create a GPU timeline child handle"),
             (GPU_CREATE_IMAGE, "Create a GPU image child handle"),
+            (
+                GPU_CREATE_MIP_IMAGE,
+                "Create a mipmapped GPU image child handle"
+            ),
+            (
+                GPU_CREATE_TEXTURE,
+                "Create a layered GPU texture child handle"
+            ),
             (
                 GPU_CREATE_IMPORTED_IMAGE_BGRA,
                 "Create a sampled GPU image imported from shared memory"

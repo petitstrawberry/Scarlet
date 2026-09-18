@@ -8,11 +8,11 @@ path = "bsp"
 package = "scarlet"
 
 [bsp.kernel]
-source = { git = "https://github.com/petitstrawberry/Scarlet", tag = "kernel-v1.0.1" }
+source = { git = "https://github.com/petitstrawberry/Scarlet", rev = "e63216b2a05a5ec19042a9700ba03213002c56ea" }
 features = { network = true, user-fpu = true, user-vector = true, hypervisor = false, limine = true, sync-debug = true }
 
 [modules]
-"scarlet-module-prototype" = { git = "https://github.com/petitstrawberry/Scarlet", tag = "kernel-v1.0.1", enabled = true }
+"scarlet-module-prototype" = { git = "https://github.com/petitstrawberry/Scarlet", rev = "e63216b2a05a5ec19042a9700ba03213002c56ea", enabled = true }
 
 [images]
 
@@ -38,8 +38,8 @@ path = "../../bundles/full/bundle.toml"
 
 [[images.rootfs.layers]]
 kind = "copy"
-source = "rootfs/root"
-to = "/root"
+source = "rootfs"
+to = "/"
 
 [images.boot]
 format = "limine-uefi"

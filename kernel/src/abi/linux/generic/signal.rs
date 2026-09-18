@@ -904,14 +904,25 @@ fn deliver_signal_to_remote(target: &Task, signal: LinuxSignal) {
 /// * `current` - Currently running task
 /// * `target` - Task the signal is addressed to
 /// * `signal` - Signal to deliver
-pub fn deliver_signal(abi: &LinuxAbi, current: &Task, target: &Task, signal: LinuxSignal) {
+///
+/// Returns a Linux syscall result. Custom userspace handler delivery is not
+/// implemented by this path. Reporting success would strand libc protocols
+/// such as musl's synchronous setxid broadcast waiting for a callback forever.
+pub fn deliver_signal(abi: &LinuxAbi, current: &Task, target: &Task, signal: LinuxSignal) -> usize {
     let is_self = target.get_id() == current.get_id()
         || target.get_thread_group_id() == current.get_thread_group_id();
     if is_self {
+        if matches!(
+            abi.signal_state.lock().get_handler(signal),
+            SignalAction::Custom(_)
+        ) {
+            return errno::to_result(errno::ENOSYS);
+        }
         deliver_signal_to_self(abi, current, signal);
     } else {
         deliver_signal_to_remote(target, signal);
     }
+    0
 }
 
 /// Deliver unblocked pending signals when returning from a syscall.
@@ -1075,9 +1086,7 @@ pub fn sys_tkill(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         crate::arch::log_user_backtrace(&task, trapframe);
     }
 
-    deliver_signal(abi, &task, &target, signal);
-
-    0
+    deliver_signal(abi, &task, &target, signal)
 }
 
 /// Send a signal to a thread in a specific thread group.
@@ -1143,7 +1152,5 @@ pub fn sys_tgkill(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         crate::arch::log_user_backtrace(&task, trapframe);
     }
 
-    deliver_signal(abi, &task, &target, signal);
-
-    0
+    deliver_signal(abi, &task, &target, signal)
 }

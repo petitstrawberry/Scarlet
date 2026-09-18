@@ -1,6 +1,6 @@
 //! Backend-neutral GPU information model.
 
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 
 use super::{GPU_BACKEND_ID_BYTES, GPU_BACKEND_INFO_BYTES};
 use crate::device::graphics::{GpuBackingSegment, GpuDisplayResource, PixelFormat};
@@ -30,6 +30,12 @@ pub const GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD: u32 = 1 << 5;
 pub const GPU_EXECUTION_SUPPORT_DEPTH: u32 = 1 << 6;
 /// Generic synchronous image readback operations are available.
 pub const GPU_EXECUTION_SUPPORT_IMAGE_READBACK: u32 = 1 << 7;
+/// Explicit allocation of multiple image mip levels is available.
+pub const GPU_EXECUTION_SUPPORT_IMAGE_MIPS: u32 = 1 << 8;
+/// Explicit 2D array and six-face cube texture allocation is available.
+pub const GPU_EXECUTION_SUPPORT_TEXTURE_ARRAYS: u32 = 1 << 9;
+/// Depth textures can also be bound for shader sampling.
+pub const GPU_EXECUTION_SUPPORT_DEPTH_SAMPLING: u32 = 1 << 10;
 
 /// Stable state of a GPU device.
 #[repr(u32)]
@@ -349,6 +355,10 @@ pub struct GpuImageCreateInfo {
     pub width: u32,
     /// Image height in pixels.
     pub height: u32,
+    /// Number of allocated mip levels, including the base level.
+    pub mip_levels: u32,
+    pub array_layers: u32,
+    pub cube: bool,
 }
 
 /// Maximum image planes represented by the generic GPU layout model.
@@ -647,6 +657,9 @@ impl GpuImageCreateInfo {
             usage,
             width,
             height,
+            mip_levels: 1,
+            array_layers: 1,
+            cube: false,
         }
     }
 }
@@ -662,6 +675,10 @@ pub struct GpuBackendImageInfo {
     pub width: u32,
     /// Image height in pixels.
     pub height: u32,
+    /// Immutable allocated mip-level count.
+    pub mip_levels: u32,
+    pub array_layers: u32,
+    pub cube: bool,
     /// Opaque backend token used only by opaque command bytes.
     pub command_resource_token: u64,
     /// Backing allocation size in bytes.
@@ -690,6 +707,9 @@ impl GpuBackendImageInfo {
             usage: create.usage,
             width: create.width,
             height: create.height,
+            mip_levels: create.mip_levels,
+            array_layers: create.array_layers,
+            cube: create.cube,
             command_resource_token,
             allocation_size,
         }
@@ -768,6 +788,14 @@ pub trait GpuBackendImage: Send + Sync {
     }
 }
 
+/// Backend reservation protecting generic image CPU access until drop.
+///
+/// Backends release their admission reservation in the implementation's `Drop`.
+/// The generic resource retains this guard throughout the CPU access, cache
+/// maintenance, and synchronous backend transfer. The guard need not be `Send`:
+/// a backend may retain a lock borrowed from the calling context.
+pub trait GpuBackendCpuAccessGuard {}
+
 /// Backend execution context retained by a [`crate::device::gpu::GpuContext`].
 pub trait GpuBackendContext: Send + Sync {
     /// Query the effective execution dialect selected for this context.
@@ -810,6 +838,37 @@ pub trait GpuBackendContext: Send + Sync {
     /// Nothing after the image is no longer attached to this context.
     fn detach_image(&self, _image: &dyn GpuBackendImage) -> Result<(), &'static str> {
         Err("GPU backend context does not support image detachment")
+    }
+
+    /// Reserve ordered CPU access to an attached image's generic backing.
+    ///
+    /// This is called before upload writes, imported-backing cache maintenance,
+    /// or readback transfer and reads. The returned guard remains live through
+    /// the synchronous transfer callback and all generic CPU/cache operations.
+    /// It is also dropped on any copy, transfer, or validation error.
+    ///
+    /// An asynchronous backend must atomically exclude conflicting new work and
+    /// retire previously admitted work before returning success. A drain alone
+    /// is insufficient: submissions from every context sharing the backing must
+    /// remain excluded until the guard drops. Transfer callbacks invoked while
+    /// the guard is live must not reacquire or wait on their own reservation.
+    /// CPU mappings writable by userspace remain the caller's responsibility.
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - Attached backend image whose backing will be accessed.
+    ///
+    /// # Returns
+    ///
+    /// A reservation to retain until the complete access finishes, or an error
+    /// before generic code touches the backing. Synchronous backends whose
+    /// existing transfer implementation needs no reservation may use the
+    /// default `Ok(None)`.
+    fn begin_image_cpu_access(
+        &self,
+        _image: &dyn GpuBackendImage,
+    ) -> Result<Option<Box<dyn GpuBackendCpuAccessGuard + '_>>, &'static str> {
+        Ok(None)
     }
 
     /// Upload an already copied BGRA rectangle into an attached image.
@@ -944,6 +1003,11 @@ pub trait GpuBackendQueue: Send + Sync {
     ///
     /// Nothing after the backend has completed the submitted work, or an error
     /// if the backend rejected or failed the submission.
+    /// Generic attachment authority and backing remain retained during this
+    /// call, but may be detached immediately after any return, including an
+    /// error. The backend must not return while submitted accesses can still
+    /// touch that backing unless it independently retains the backing until
+    /// hardware quiescence. A failure notification alone does not retire DMA.
     fn submit(&self, commands: &[u8]) -> Result<(), GpuBackendSubmitError>;
 
     /// Query the bounded number of asynchronously retained submissions.
@@ -1054,6 +1118,9 @@ pub trait GpuBackend: Send + Sync {
         &self,
         create: GpuImageCreateInfo,
     ) -> Result<GpuBackendImageLayout, &'static str> {
+        if create.mip_levels != 1 || create.array_layers != 1 || create.cube {
+            return Err("GPU backend does not support mipmapped images");
+        }
         GpuBackendImageLayout::tight_32bpp(create)
     }
 

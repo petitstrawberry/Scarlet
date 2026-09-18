@@ -102,6 +102,15 @@ pub trait DeviceInfo {
 ///
 /// All device drivers must be Send + Sync to be stored in global DeviceManager.
 pub trait DeviceDriver: Send + Sync {
+    /// Select automatic provider hooks before a platform device probe.
+    ///
+    /// The default preserves reset, IOMMU and DMA dependency resolution.
+    /// Drivers opting out must handle their own resets and use PIO for any
+    /// omitted DMA/IOMMU dependencies.
+    fn platform_probe_options(&self) -> platform::PlatformProbeOptions {
+        platform::PlatformProbeOptions::default()
+    }
+
     /// Return the driver's diagnostic name.
     ///
     /// # Arguments

@@ -914,6 +914,15 @@ impl MemoryMappingOps for FramebufferCharDevice {
     ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
         let info = self.current_framebuffer_info()?;
 
+        let source = self
+            .device_manager()
+            .get_device(self.fb_resource.source_device_id)
+            .ok_or("Framebuffer source device not found")?;
+        let memory_attribute = source
+            .as_graphics_device()
+            .ok_or("Framebuffer source device is not graphics-capable")?
+            .framebuffer_memory_attribute();
+
         // VMM requires page-aligned physical mappings.
         if offset % crate::environment::PAGE_SIZE != 0 {
             return Err("Framebuffer mmap offset must be page-aligned");
@@ -947,7 +956,7 @@ impl MemoryMappingOps for FramebufferCharDevice {
 
         Ok(
             crate::object::capability::MemoryMappingInfo::new(paddr, permissions, is_shared)
-                .with_memory_attribute(crate::vm::vmem::MemoryAttribute::DeviceBurstable),
+                .with_memory_attribute(memory_attribute),
         )
     }
 

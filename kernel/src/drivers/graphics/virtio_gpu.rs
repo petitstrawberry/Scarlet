@@ -13,7 +13,7 @@ use crate::{
     device::{
         Device, DeviceType,
         gpu::{
-            GPU_DIALECT_INFO_BYTES, GPU_EXECUTION_SUPPORT_DEPTH,
+            GPU_DIALECT_INFO_BYTES, GPU_EXECUTION_SUPPORT_DEPTH, GPU_EXECUTION_SUPPORT_IMAGE_MIPS,
             GPU_EXECUTION_SUPPORT_IMAGE_READBACK, GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD,
             GPU_EXECUTION_SUPPORT_MEMORY, GPU_EXECUTION_SUPPORT_PRESENTATION,
             GPU_EXECUTION_SUPPORT_QUEUE, GPU_EXECUTION_SUPPORT_TIMELINE,
@@ -85,8 +85,9 @@ const VIRTIO_GPU_MAX_CONTEXT_NAME: usize = 64;
 const VIRTIO_GPU_CONFIG_NUM_CAPSETS_OFFSET: usize = 12;
 const VIRTIO_GPU_CONTROL_QUEUE_SIZE: usize = 64;
 const VIRTIO_GPU_CURSOR_QUEUE_SIZE: usize = 16;
-const VIRTIO_GPU_CONTROL_TIMEOUT_NS: u64 = 2_000_000_000;
-const VIRTIO_GPU_CONTROL_MAX_SPINS: u64 = 10_000_000;
+// A bounded batch can contain several 2 MiB VirGL submissions. QEMU may spend
+// seconds compiling shaders or uploading them before returning the last fence.
+const VIRTIO_GPU_CONTROL_TIMEOUT_NS: u64 = 10_000_000_000;
 // Preserve the established VirGL/QEMU transport budget independently of the
 // generic GPU ABI's larger absolute bound.
 const VIRTIO_GPU_MAX_OPAQUE_COMMAND_SIZE: u32 = 64 * 1024;
@@ -680,17 +681,12 @@ impl VirtioGpuDeviceCore {
     }
 
     fn wait_control_idle(&self) -> Result<(), &'static str> {
-        let mut spins = 0u64;
         loop {
             {
                 let mut queues = self.virtqueues.lock();
                 queues.control.reap(crate::timer::get_time_ns())?;
                 if !queues.control.has_pending() {
                     return Ok(());
-                }
-                spins = spins.saturating_add(1);
-                if spins >= VIRTIO_GPU_CONTROL_MAX_SPINS {
-                    return queues.control.fail(control::CONTROL_TIMEOUT);
                 }
             }
             // Never hold the transport lock while waiting for DMA. The async
@@ -749,6 +745,9 @@ impl VirtioGpuDeviceCore {
                     | GPU_EXECUTION_SUPPORT_TIMELINE
                     | if acceleration_usable {
                         GPU_EXECUTION_SUPPORT_IMAGE_UPLOAD
+                            | GPU_EXECUTION_SUPPORT_IMAGE_MIPS
+                            | crate::device::gpu::GPU_EXECUTION_SUPPORT_TEXTURE_ARRAYS
+                            | crate::device::gpu::GPU_EXECUTION_SUPPORT_DEPTH_SAMPLING
                             | GPU_EXECUTION_SUPPORT_IMAGE_READBACK
                             | GPU_EXECUTION_SUPPORT_DEPTH
                             | GPU_EXECUTION_SUPPORT_QUEUE
@@ -2095,6 +2094,24 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
 }
 
 impl GpuBackend for VirtioGpuBackend {
+    fn plan_image(
+        &self,
+        create: GpuImageCreateInfo,
+    ) -> Result<crate::device::gpu::GpuBackendImageLayout, &'static str> {
+        let mut layout = crate::device::gpu::GpuBackendImageLayout::tight_32bpp(create)?;
+        let mut total = 0u64;
+        for level in 0..create.mip_levels {
+            let width = (create.width >> level).max(1);
+            let height = (create.height >> level).max(1);
+            total = total
+                .checked_add(u64::from(width) * u64::from(height) * 4)
+                .ok_or("VirtIO GPU mip allocation overflows")?;
+        }
+        layout.total_size = total
+            .checked_mul(u64::from(create.array_layers))
+            .ok_or("VirtIO GPU array allocation overflows")?;
+        Ok(layout)
+    }
     fn query_info(&self) -> GpuBackendInfo {
         self.core.lock().gpu_backend_info()
     }
@@ -2158,7 +2175,13 @@ impl GpuBackend for VirtioGpuBackend {
         core.require_virgl()?;
         let resource_id = core.create_acceleration_resource(VirtioGpuAccelerationResource3d {
             resource_id: 0,
-            target: PIPE_TEXTURE_2D,
+            target: if create.cube {
+                4 /* PIPE_TEXTURE_CUBE */
+            } else if create.array_layers > 1 {
+                7 /* PIPE_TEXTURE_2D_ARRAY */
+            } else {
+                PIPE_TEXTURE_2D
+            },
             format: match create.format {
                 GPU_IMAGE_FORMAT_BGRA8_UNORM => VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
                 GPU_IMAGE_FORMAT_DEPTH32_FLOAT => VIRGL_FORMAT_Z32_FLOAT,
@@ -2168,8 +2191,8 @@ impl GpuBackend for VirtioGpuBackend {
             width: create.width,
             height: create.height,
             depth: 1,
-            array_size: 1,
-            last_level: 0,
+            array_size: create.array_layers,
+            last_level: create.mip_levels - 1,
             nr_samples: 0,
             flags: 0,
         })?;

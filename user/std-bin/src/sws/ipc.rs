@@ -689,7 +689,8 @@ fn sws_capabilities() -> u64 {
         | protocol::capabilities::WORKSPACE_SHELL
         | protocol::capabilities::FRAME_CALLBACKS
         | protocol::capabilities::EXTENSION_BUFFER_OBJECTS
-        | protocol::capabilities::SURFACE_REGIONS;
+        | protocol::capabilities::SURFACE_REGIONS
+        | protocol::capabilities::GAMEPAD_INPUT;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
         capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE;
     }
@@ -1176,6 +1177,50 @@ pub fn send_message_to_window(window_id: u32, msg_type: u32, payload: Vec<u8>) {
     if should_wake {
         wake_window_owner(window_id);
     }
+}
+
+/// Keep gamepad backlog bounded without dropping unrelated window messages.
+pub fn send_gamepad_to_window(window_id: u32, state: protocol::gamepad::State) {
+    let mut pending = PENDING_SERVER_FRAMES.lock().expect("SWS mutex poisoned");
+    let Some(frames) = pending.get_mut(&window_id) else {
+        return;
+    };
+    if frames
+        .iter()
+        .filter(|f| f.msg_type == protocol::server_msg::GAMEPAD_INPUT)
+        .count()
+        >= 64
+    {
+        let compacted = super::input::compact_gamepad_backlog(
+            frames
+                .iter()
+                .filter(|f| f.msg_type == protocol::server_msg::GAMEPAD_INPUT)
+                .filter_map(|f| {
+                    protocol::gamepad::State::parse(&f.payload)
+                        .ok()
+                        .map(|(_, state)| state)
+                }),
+            state,
+        );
+        frames.retain(|f| f.msg_type != protocol::server_msg::GAMEPAD_INPUT);
+        for state in compacted {
+            frames.push(PendingServerFrame {
+                msg_type: protocol::server_msg::GAMEPAD_INPUT,
+                flags: 0,
+                request_id: 0,
+                payload: state.payload(window_id).to_vec(),
+            });
+        }
+    } else {
+        frames.push(PendingServerFrame {
+            msg_type: protocol::server_msg::GAMEPAD_INPUT,
+            flags: 0,
+            request_id: 0,
+            payload: state.payload(window_id).to_vec(),
+        });
+    }
+    drop(pending);
+    wake_window_owner(window_id);
 }
 
 /// Queue a server->client protocol message for a specific client (by client_id).
@@ -3671,6 +3716,19 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     });
                 }
             }
+            Ok(ClientMessageRef::SetGamepadInput {
+                window_id,
+                enabled,
+                navigation,
+            }) => {
+                push_ipc_event(IpcEvent::SetGamepadInput {
+                    client_id,
+                    request_id,
+                    window_id,
+                    enabled,
+                    navigation,
+                });
+            }
             Ok(ClientMessageRef::SetWindowGeometry {
                 window_id,
                 geometry,
@@ -4648,6 +4706,13 @@ pub enum IpcEvent {
         window_id: u32,
         restrict_input: bool,
         regions: Vec<protocol::surface_regions::SurfaceRegion>,
+    },
+    SetGamepadInput {
+        client_id: usize,
+        request_id: u8,
+        window_id: u32,
+        enabled: bool,
+        navigation: bool,
     },
     /// Set visible geometry inside the complete surface bounds.
     SetWindowGeometry {

@@ -81,6 +81,9 @@ struct BootLayout {
 /// Fields are private so the handoff consumes the layout that was checked.
 pub struct KernelRuntimeLayout {
     direct_map: DirectMapWindow,
+    // Retagging changes attributes, but never which physical addresses are
+    // mapped. Translation can check this snapshot without taking an IRQ lock.
+    mapped_regions: DirectMapRegions,
     regions: IrqSpinLock<DirectMapRegions>,
     heap: KernelMapping,
 }
@@ -165,6 +168,7 @@ impl KernelMemoryLayout {
         );
         KernelRuntimeLayout {
             direct_map,
+            mapped_regions: regions,
             regions: IrqSpinLock::new(regions),
             heap,
         }
@@ -204,9 +208,9 @@ impl KernelMemoryLayout {
         }
     }
 
-    fn current_direct_map(&self) -> (DirectMapWindow, Option<&IrqSpinLock<DirectMapRegions>>) {
+    fn current_direct_map(&self) -> (DirectMapWindow, Option<&DirectMapRegions>) {
         match self.current_runtime() {
-            Some(runtime) => (runtime.direct_map, Some(&runtime.regions)),
+            Some(runtime) => (runtime.direct_map, Some(&runtime.mapped_regions)),
             None => (self.boot().direct_map, None),
         }
     }
@@ -214,7 +218,7 @@ impl KernelMemoryLayout {
     fn direct_map_phys(&self, vaddr: VirtAddr) -> Option<PhysAddr> {
         let (window, regions) = self.current_direct_map();
         let paddr = window.virt_to_phys(vaddr)?;
-        if regions.is_some_and(|regions| !regions.lock().contains(paddr.as_u64())) {
+        if regions.is_some_and(|regions| !regions.contains(paddr.as_u64())) {
             return None;
         }
         Some(paddr)
@@ -223,7 +227,7 @@ impl KernelMemoryLayout {
     fn phys_to_current_virt(&self, paddr: PhysAddr) -> VirtAddr {
         let (window, regions) = self.current_direct_map();
         assert!(
-            !regions.is_some_and(|regions| !regions.lock().contains(paddr.as_u64())),
+            !regions.is_some_and(|regions| !regions.contains(paddr.as_u64())),
             "physical address {:#x} is outside the sparse direct map",
             paddr
         );

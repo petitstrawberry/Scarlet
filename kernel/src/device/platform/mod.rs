@@ -218,11 +218,34 @@ impl DeviceInfo for PlatformDeviceInfo {
     }
 }
 
+/// Provider operations performed by the manager before a platform probe.
+///
+/// Existing drivers use all hooks. A PIO implementation may omit DMA/IOMMU
+/// dependencies, and a driver with a hardware-specific reset sequence may
+/// deassert its own resets. Opting out does not modify firmware properties.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlatformProbeOptions {
+    pub deassert_resets: bool,
+    pub resolve_iommu: bool,
+    pub resolve_dma: bool,
+}
+
+impl Default for PlatformProbeOptions {
+    fn default() -> Self {
+        Self {
+            deassert_resets: true,
+            resolve_iommu: true,
+            resolve_dma: true,
+        }
+    }
+}
+
 pub struct PlatformDeviceDriver {
     name: &'static str,
     probe_fn: fn(&PlatformDeviceInfo) -> Result<(), &'static str>,
     remove_fn: fn(&PlatformDeviceInfo) -> Result<(), &'static str>,
     compatible: Vec<&'static str>, // Change to Vec<&'static str>
+    probe_options: PlatformProbeOptions,
 }
 
 impl PlatformDeviceDriver {
@@ -237,11 +260,22 @@ impl PlatformDeviceDriver {
             probe_fn,
             remove_fn,
             compatible,
+            probe_options: PlatformProbeOptions::default(),
         }
+    }
+
+    /// Select the provider hooks required by this implementation.
+    pub fn with_probe_options(mut self, options: PlatformProbeOptions) -> Self {
+        self.probe_options = options;
+        self
     }
 }
 
 impl DeviceDriver for PlatformDeviceDriver {
+    fn platform_probe_options(&self) -> PlatformProbeOptions {
+        self.probe_options
+    }
+
     fn name(&self) -> &'static str {
         self.name
     }

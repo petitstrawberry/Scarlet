@@ -5,7 +5,7 @@ use crate::{
     },
     arch::Trapframe,
     environment::PAGE_SIZE,
-    object::capability::memory_mapping::syscall::reclaim_private_removed_mapping,
+    object::capability::memory_mapping::syscall::reclaim_private_removed_mappings,
     task::mytask,
     vm::addr::{is_direct_mapped, virt_to_phys},
     vm::vmem::{MemoryArea, VirtualMemoryMap},
@@ -213,9 +213,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
             }
         }
-        for removed_map in removed_mappings {
-            reclaim_private_removed_mapping(&task, &removed_map);
-        }
+        reclaim_private_removed_mappings(&task, &removed_mappings);
 
         memory_mappable.on_mapped(final_vaddr, 0, aligned_length, offset);
         return final_vaddr;
@@ -286,9 +284,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
 
             if let Some(removed_mappings) = removed_mappings_opt {
-                for removed_map in removed_mappings {
-                    reclaim_private_removed_mapping(&task, &removed_map);
-                }
+                reclaim_private_removed_mappings(&task, &removed_mappings);
             }
 
             final_vaddr
@@ -407,23 +403,10 @@ fn handle_anonymous_mapping(
         match task.vm_manager.add_memory_map(vm_map.clone()) {
             Ok(()) => (final_vaddr, Vec::new()),
             Err(_) => {
-                // The address space may have changed between selecting the
-                // range and inserting it. Retry once with a fresh range.
-                let retry_vaddr = match task
-                    .vm_manager
-                    .find_unmapped_area(aligned_length, PAGE_SIZE)
-                {
-                    Some(addr) => addr,
-                    None => return to_result(errno::ENOMEM),
-                };
-                let retry_vmarea = MemoryArea::new(retry_vaddr, retry_vaddr + aligned_length - 1);
-                let retry_map = VirtualMemoryMap {
-                    vmarea: retry_vmarea,
-                    vm_start: retry_vaddr,
-                    ..vm_map
-                };
-                match task.vm_manager.add_memory_map(retry_map) {
-                    Ok(()) => (retry_vaddr, Vec::new()),
+                // First-fit search and insertion can race another thread.
+                // Retry the selection and insertion atomically.
+                match task.vm_manager.add_memory_map_anywhere(vm_map) {
+                    Ok(addr) => (addr, Vec::new()),
                     Err(_) => return to_result(errno::ENOMEM),
                 }
             }
@@ -437,9 +420,7 @@ fn handle_anonymous_mapping(
             }
         }
     }
-    for removed_map in removed_mappings {
-        reclaim_private_removed_mapping(task, &removed_map);
-    }
+    reclaim_private_removed_mappings(task, &removed_mappings);
     mapped_vaddr
 }
 
@@ -748,22 +729,74 @@ pub fn sys_munmap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         if let Some(owner) = &removed_map.owner {
             owner.on_unmapped(removed_map.vmarea.start, removed_map.vmarea.size());
         }
-
-        reclaim_private_removed_mapping(&task, removed_map);
     }
+    reclaim_private_removed_mappings(&task, &removed_maps);
 
     0
 }
 
+/// Linux in-place mapping shrink. Relocation and growth remain unsupported;
+/// never report success while leaving the original range unchanged.
 pub fn sys_mremap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
         None => return usize::MAX,
     };
-
+    let address = trapframe.get_arg(0);
+    let old_size = trapframe.get_arg(1);
+    let new_size = trapframe.get_arg(2);
+    let flags = trapframe.get_arg(3);
     trapframe.increment_pc_next(&task);
 
-    to_result(errno::ENOSYS)
+    const MREMAP_MAYMOVE: usize = 1;
+    const MREMAP_FIXED: usize = 2;
+    const MREMAP_DONTUNMAP: usize = 4;
+    if !address.is_multiple_of(PAGE_SIZE)
+        || old_size == 0
+        || new_size == 0
+        || flags & !(MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP) != 0
+        || (flags & (MREMAP_FIXED | MREMAP_DONTUNMAP) != 0 && flags & MREMAP_MAYMOVE == 0)
+    {
+        return to_result(errno::EINVAL);
+    }
+    let Some(old_len) = old_size
+        .checked_add(PAGE_SIZE - 1)
+        .map(|n| n & !(PAGE_SIZE - 1))
+    else {
+        return to_result(errno::EINVAL);
+    };
+    let Some(new_len) = new_size
+        .checked_add(PAGE_SIZE - 1)
+        .map(|n| n & !(PAGE_SIZE - 1))
+    else {
+        return to_result(errno::EINVAL);
+    };
+    if address
+        .checked_add(old_len - 1)
+        .is_none_or(|end| end > crate::environment::USER_LOWER_CANONICAL_END)
+        || address
+            .checked_add(new_len - 1)
+            .is_none_or(|end| end > crate::environment::USER_LOWER_CANONICAL_END)
+    {
+        return to_result(errno::EINVAL);
+    }
+    if flags & (MREMAP_FIXED | MREMAP_DONTUNMAP) != 0 || new_len > old_len {
+        return to_result(errno::EOPNOTSUPP);
+    }
+    let removed = match task
+        .vm_manager
+        .shrink_memory_map_range(address, old_len, new_len)
+    {
+        Ok(removed) => removed,
+        Err(_) => return to_result(errno::EFAULT),
+    };
+    for map in &removed {
+        if let Some(owner) = &map.owner {
+            owner.on_unmapped(map.vmarea.start, map.vmarea.size());
+        }
+    }
+    reclaim_private_removed_mappings(&task, &removed);
+    address
 }
 
 /// Handle mmap for a KVM vCPU fd — maps the shared kvm_run page.

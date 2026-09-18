@@ -30,6 +30,8 @@ pub(crate) const fn should_retry_keyboard_read(bytes_read: usize, record_size: u
 pub(crate) enum KeyboardSource {
     /// One Scarlet-native `/dev/keyboardN` stream.
     Local(u8),
+    /// Menu navigation produced by one native gamepad reader.
+    Gamepad(u8),
     /// One authenticated remote-input transport connection.
     Remote(usize),
 }

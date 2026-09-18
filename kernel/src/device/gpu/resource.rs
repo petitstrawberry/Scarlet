@@ -8,11 +8,12 @@ use super::{
     GPU_IMAGE_QUERY_LAYOUT, GPU_IMAGE_USAGE_TRANSFER_DST, GPU_IMAGE_USAGE_VALID,
     GPU_MAX_IMAGE_UPLOAD_SIZE, GPU_RESULT_INVALID_ABI, GPU_TIMELINE_CREATE_POINT,
     GPU_TIMELINE_FAIL, GPU_TIMELINE_QUERY, GPU_TIMELINE_SIGNAL, GpuBackend, GpuBackendBuffer,
-    GpuBackendImage, GpuBackendImageLayout, GpuBufferCreateInfo, GpuBufferInfo,
+    GpuBackendContext, GpuBackendImage, GpuBackendImageLayout, GpuBufferCreateInfo, GpuBufferInfo,
     GpuContextReadbackImageBgra, GpuContextUploadImageBgra, GpuImageBackingInfo,
     GpuImageCreateInfo, GpuImageInfo, GpuImageLayout, GpuImagePlaneLayout, GpuImageUploadInfo,
     GpuTimelineCreatePoint, GpuTimelineFail, GpuTimelineInfo, GpuTimelineSignal,
 };
+use super::{GPU_IMAGE_QUERY_MIP_LEVELS, GpuImageMipLevels};
 use crate::device::graphics::GpuBackingSegment;
 use crate::environment::PAGE_SIZE;
 use crate::ipc::shared_memory::{SharedMemoryObject, SharedMemoryPin};
@@ -109,7 +110,7 @@ pub trait GpuObject: Send + Sync {
 /// # Returns
 ///
 /// `true` for a non-empty BGRA8 image with known color usages, or a
-/// `Depth32Float` image used exclusively as a depth-stencil attachment.
+/// `Depth32Float` image used as a depth attachment or sampled texture.
 pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
     (create.format == GPU_IMAGE_FORMAT_BGRA8_UNORM
         || create.format == super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT)
@@ -117,9 +118,30 @@ pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
         && create.usage & !GPU_IMAGE_USAGE_VALID == 0
         && create.width != 0
         && create.height != 0
+        && create.array_layers != 0
+        && create.array_layers <= 2048
+        && (!create.cube || (create.array_layers == 6 && create.width == create.height))
+        && (create.array_layers == 1 || create.usage & super::GPU_IMAGE_USAGE_PRESENTABLE == 0)
         && create.width <= u32::MAX / 4
+        && create.mip_levels != 0
+        && create.mip_levels
+            <= 32
+                - (if create.width > create.height {
+                    create.width
+                } else {
+                    create.height
+                })
+                .leading_zeros()
+        && (create.mip_levels == 1
+            || create.usage
+                & (super::GPU_IMAGE_USAGE_PRESENTABLE
+                    | super::GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT)
+                == 0)
         && if create.format == super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT {
-            create.usage == super::GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT
+            create.usage
+                & !(super::GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT
+                    | super::GPU_IMAGE_USAGE_SAMPLED)
+                == 0
         } else {
             create.usage & super::GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT == 0
         }
@@ -128,6 +150,9 @@ pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
 /// Return whether a generic image descriptor is valid for imported SHM backing.
 pub(crate) const fn imported_image_create_is_valid(create: GpuImageCreateInfo) -> bool {
     image_create_is_valid(create)
+        && create.mip_levels == 1
+        && create.array_layers == 1
+        && !create.cube
         && create.format == GPU_IMAGE_FORMAT_BGRA8_UNORM
         && create.usage == super::GPU_IMAGE_USAGE_SAMPLED | super::GPU_IMAGE_USAGE_TRANSFER_DST
 }
@@ -201,6 +226,8 @@ pub(crate) fn imported_image_transfer_layout(
     if width == 0
         || height == 0
         || image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM
+        || image.array_layers != 1
+        || image.cube
         || image.usage & (super::GPU_IMAGE_USAGE_SAMPLED | GPU_IMAGE_USAGE_TRANSFER_DST)
             != (super::GPU_IMAGE_USAGE_SAMPLED | super::GPU_IMAGE_USAGE_TRANSFER_DST)
     {
@@ -306,6 +333,8 @@ pub(crate) fn image_upload_layout(
         || request.width == 0
         || request.height == 0
         || image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM
+        || image.array_layers != 1
+        || image.cube
         || image.usage & GPU_IMAGE_USAGE_TRANSFER_DST == 0
         || layout.modifier != super::GPU_IMAGE_MODIFIER_LINEAR
         || layout.plane_count != 1
@@ -460,6 +489,8 @@ pub(crate) fn image_readback_layout(
         || request.width == 0
         || request.height == 0
         || image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM
+        || image.array_layers != 1
+        || image.cube
         || image.usage & super::GPU_IMAGE_USAGE_TRANSFER_SRC == 0
         || layout.modifier != super::GPU_IMAGE_MODIFIER_LINEAR
         || layout.plane_count != 1
@@ -1010,6 +1041,9 @@ impl GpuImage {
             || info.usage != create.usage
             || info.width != create.width
             || info.height != create.height
+            || info.mip_levels != create.mip_levels
+            || info.array_layers != create.array_layers
+            || info.cube != create.cube
             || info.command_resource_token == 0
             || info.allocation_size != backing_allocation_size
         {
@@ -1065,6 +1099,9 @@ impl GpuImage {
             || info.usage != create.usage
             || info.width != create.width
             || info.height != create.height
+            || info.mip_levels != create.mip_levels
+            || info.array_layers != create.array_layers
+            || info.cube != create.cube
             || info.command_resource_token == 0
             || info.allocation_size != backing_allocation_size
         {
@@ -1109,18 +1146,26 @@ impl GpuImage {
         Arc::clone(&self.backing)
     }
 
-    pub(crate) fn upload_bgra_from_user<F>(
+    pub(crate) fn upload_bgra_from_user(
         &self,
         source_ptr: usize,
         layout: GpuImageUploadLayout,
-        transfer: F,
-    ) -> Result<(), &'static str>
-    where
-        F: FnOnce(&dyn GpuBackendImage, GpuImageUploadInfo) -> Result<(), &'static str>,
-    {
-        let _upload_guard = self.upload_lock.lock();
+        context: &dyn GpuBackendContext,
+    ) -> Result<(), &'static str> {
         let task = crate::task::mytask().ok_or("No current task for GPU image upload")?;
+        self.upload_bgra_for_task(&task, source_ptr, layout, context)
+    }
+
+    fn upload_bgra_for_task(
+        &self,
+        task: &crate::task::Task,
+        source_ptr: usize,
+        layout: GpuImageUploadLayout,
+        context: &dyn GpuBackendContext,
+    ) -> Result<(), &'static str> {
+        let _upload_guard = self.upload_lock.lock();
         let backing = self.backing.private_backing()?;
+        let _cpu_access = context.begin_image_cpu_access(self.backend_image.as_ref())?;
         for row in 0..layout.height {
             let source_offset = row
                 .checked_mul(layout.source_stride)
@@ -1133,7 +1178,7 @@ impl GpuImage {
                 .and_then(|offset| offset.checked_add(layout.destination_offset))
                 .ok_or("GPU image upload destination row offset overflows")?;
             backing.copy_from_user(
-                &task,
+                task,
                 source_address,
                 destination_offset,
                 layout.source_row_bytes,
@@ -1146,20 +1191,17 @@ impl GpuImage {
                 .ok_or("GPU image upload destination row offset overflows")?;
             backing.clean_range(destination_offset, layout.source_row_bytes)?;
         }
-        transfer(self.backend_image.as_ref(), layout.transfer)
+        context.upload_image_bgra(self.backend_image.as_ref(), layout.transfer)
     }
 
-    pub(crate) fn transfer_imported_bgra<F>(
+    pub(crate) fn transfer_imported_bgra(
         &self,
         dst_x: u32,
         dst_y: u32,
         width: u32,
         height: u32,
-        transfer: F,
-    ) -> Result<(), &'static str>
-    where
-        F: FnOnce(&dyn GpuBackendImage, GpuImageUploadInfo) -> Result<(), &'static str>,
-    {
+        context: &dyn GpuBackendContext,
+    ) -> Result<(), &'static str> {
         let _upload_guard = self.upload_lock.lock();
         let layout = self.backing.imported_transfer_layout(
             self.query_info(),
@@ -1168,23 +1210,32 @@ impl GpuImage {
             width,
             height,
         )?;
+        let _cpu_access = context.begin_image_cpu_access(self.backend_image.as_ref())?;
         self.backing.clean_imported_transfer_range(layout)?;
-        transfer(self.backend_image.as_ref(), layout)
+        context.transfer_imported_image_bgra(self.backend_image.as_ref(), layout)
     }
 
-    pub(crate) fn readback_bgra_to_user<F>(
+    pub(crate) fn readback_bgra_to_user(
         &self,
         destination_ptr: usize,
         layout: GpuImageReadbackLayout,
-        readback: F,
-    ) -> Result<(), &'static str>
-    where
-        F: FnOnce(&dyn GpuBackendImage, GpuImageUploadInfo) -> Result<(), &'static str>,
-    {
-        let _upload_guard = self.upload_lock.lock();
+        context: &dyn GpuBackendContext,
+    ) -> Result<(), &'static str> {
         let task = crate::task::mytask().ok_or("No current task for GPU image readback")?;
+        self.readback_bgra_for_task(&task, destination_ptr, layout, context)
+    }
+
+    fn readback_bgra_for_task(
+        &self,
+        task: &crate::task::Task,
+        destination_ptr: usize,
+        layout: GpuImageReadbackLayout,
+        context: &dyn GpuBackendContext,
+    ) -> Result<(), &'static str> {
+        let _upload_guard = self.upload_lock.lock();
         let backing = self.backing.private_backing()?;
-        readback(self.backend_image.as_ref(), layout.transfer)?;
+        let _cpu_access = context.begin_image_cpu_access(self.backend_image.as_ref())?;
+        context.readback_image_bgra(self.backend_image.as_ref(), layout.transfer)?;
         for row in 0..layout.height {
             let source_offset = row
                 .checked_mul(layout.source_stride)
@@ -1196,7 +1247,7 @@ impl GpuImage {
                 .and_then(|offset| destination_ptr.checked_add(offset))
                 .ok_or("GPU image readback destination row address overflows")?;
             backing.copy_to_user(
-                &task,
+                task,
                 destination_address,
                 source_offset,
                 layout.destination_row_bytes,
@@ -1299,7 +1350,44 @@ impl ControlOps for GpuImage {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         match command {
             GPU_IMAGE_QUERY_INFO => self.handle_query_info(arg),
+            super::GPU_IMAGE_QUERY_TEXTURE => {
+                let mut info: super::GpuTextureInfo = read_user_value(arg)?;
+                info.result = super::GPU_RESULT_SUCCESS;
+                info.mip_levels = 0;
+                info.array_layers = 0;
+                info.flags = 0;
+                if info.abi_version != GPU_ABI_VERSION {
+                    info.result = GPU_RESULT_INVALID_ABI;
+                } else if info.reserved != 0 {
+                    info.result = super::GPU_RESULT_INVALID_ARGUMENT;
+                } else {
+                    let texture = self.query_info();
+                    info.mip_levels = texture.mip_levels;
+                    info.array_layers = texture.array_layers;
+                    info.flags = if texture.cube {
+                        super::GPU_TEXTURE_CREATE_CUBE
+                    } else {
+                        0
+                    };
+                }
+                write_user_value(arg, &info)?;
+                Ok(0)
+            }
             GPU_IMAGE_QUERY_LAYOUT => self.handle_query_layout(arg),
+            GPU_IMAGE_QUERY_MIP_LEVELS => {
+                let mut info: GpuImageMipLevels = read_user_value(arg)?;
+                info.result = super::GPU_RESULT_SUCCESS;
+                info.mip_levels = 0;
+                if info.abi_version != GPU_ABI_VERSION {
+                    info.result = GPU_RESULT_INVALID_ABI;
+                } else if info.reserved != 0 {
+                    info.result = super::GPU_RESULT_INVALID_ARGUMENT;
+                } else {
+                    info.mip_levels = self.query_info().mip_levels;
+                }
+                write_user_value(arg, &info)?;
+                Ok(0)
+            }
             _ => Err("Unsupported GPU image control command"),
         }
     }
@@ -1881,3 +1969,7 @@ impl GpuObject for GpuTimelinePoint {
         Some(self)
     }
 }
+
+#[cfg(test)]
+#[path = "resource/cpu_access_tests.rs"]
+mod cpu_access_tests;

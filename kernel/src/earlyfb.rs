@@ -313,7 +313,8 @@ fn emergency_framebuffer_putc(byte: u8) {
     let pitch = EMERGENCY_PITCH.load(Ordering::Relaxed);
     let rotated = EMERGENCY_ROTATED.load(Ordering::Relaxed);
     let red_low = EMERGENCY_RED_LOW.load(Ordering::Relaxed);
-    if EMERGENCY_SURFACE_SEQUENCE.load(Ordering::Acquire) != sequence {
+    core::sync::atomic::fence(Ordering::Acquire);
+    if EMERGENCY_SURFACE_SEQUENCE.load(Ordering::Relaxed) != sequence {
         return;
     }
     let columns = width / GLYPH_WIDTH;

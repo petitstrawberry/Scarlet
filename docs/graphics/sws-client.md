@@ -17,6 +17,9 @@ This library is intentionally **not** a widget toolkit. It is the "Wayland clien
 - Shared-memory handle reception and buffer mapping
 - Converting protocol messages into typed events
 
+Focused native gamepad snapshots and per-window menu policy are available
+through `set_gamepad_input`; see [gamepad input](gamepad-input.md).
+
 ## Design goals
 
 - Event-driven control flow: `dispatch()` reads everything available (non-blocking), then the app consumes events.
