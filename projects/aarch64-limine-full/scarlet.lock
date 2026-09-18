@@ -776,18 +776,18 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/scarlet-ui"
-git_ref = "f8c3a7e4ca90cfa32eb83218783fbe69121ea67e"
-resolved_rev = "f8c3a7e4ca90cfa32eb83218783fbe69121ea67e"
+git_ref = "45e1c0162754fd65d7358a6198f403dc392c8bee"
+resolved_rev = "45e1c0162754fd65d7358a6198f403dc392c8bee"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
 subdir = "examples/widget-factory"
 to = "/bin/widget-factory"
-hash = "sha256:b65d475a8c0685ee8ffa4d139a08d58de86f895f9d86cf7598a2ee5afffa751b"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/scarlet-ui"
-rev = "f8c3a7e4ca90cfa32eb83218783fbe69121ea67e"
+rev = "45e1c0162754fd65d7358a6198f403dc392c8bee"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
