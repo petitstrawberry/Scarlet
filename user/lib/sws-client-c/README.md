@@ -29,6 +29,6 @@ library calls continue to use the process's Linux ABI. The kernel must include
 the same native-call transport contract. Native Scarlet applications continue
 to use their original syscall numbers.
 
-Consumers maintained separately include the [SDL2 SWS video driver](https://github.com/petitstrawberry/scarlet-sdl2-sws),
+Consumers maintained separately include the [SDL2 SWS video driver](https://github.com/petitstrawberry/sdl2-sws),
 the [vkQuake2 SWS adapter](https://github.com/petitstrawberry/vkquake2-scarlet/tree/master/scarlet),
 and the [SuperTuxKart test recipe](https://github.com/petitstrawberry/scarlet-bundle-linux/tree/main/producer/recipes/supertuxkart).

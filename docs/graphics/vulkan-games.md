@@ -104,7 +104,7 @@ cannot consume this shared GPU image.
 ## Linux ABI game installation
 
 The [SuperTuxKart 1.5 test recipe](https://github.com/petitstrawberry/scarlet-bundle-linux/tree/main/producer/recipes/supertuxkart)
-records the tested [SDL2 SWS port](https://github.com/petitstrawberry/scarlet-sdl2-sws),
+records the tested [SDL2 SWS port](https://github.com/petitstrawberry/sdl2-sws),
 ordinary Vulkan loader setup, and game launch without adding game assets to
 the public image. STK itself needed no source patch.
 
