@@ -85,8 +85,9 @@ const VIRTIO_GPU_MAX_CONTEXT_NAME: usize = 64;
 const VIRTIO_GPU_CONFIG_NUM_CAPSETS_OFFSET: usize = 12;
 const VIRTIO_GPU_CONTROL_QUEUE_SIZE: usize = 64;
 const VIRTIO_GPU_CURSOR_QUEUE_SIZE: usize = 16;
-const VIRTIO_GPU_CONTROL_TIMEOUT_NS: u64 = 2_000_000_000;
-const VIRTIO_GPU_CONTROL_MAX_SPINS: u64 = 10_000_000;
+// A bounded batch can contain several 2 MiB VirGL submissions. QEMU may spend
+// seconds compiling shaders or uploading them before returning the last fence.
+const VIRTIO_GPU_CONTROL_TIMEOUT_NS: u64 = 10_000_000_000;
 // Preserve the established VirGL/QEMU transport budget independently of the
 // generic GPU ABI's larger absolute bound.
 const VIRTIO_GPU_MAX_OPAQUE_COMMAND_SIZE: u32 = 64 * 1024;
@@ -680,17 +681,12 @@ impl VirtioGpuDeviceCore {
     }
 
     fn wait_control_idle(&self) -> Result<(), &'static str> {
-        let mut spins = 0u64;
         loop {
             {
                 let mut queues = self.virtqueues.lock();
                 queues.control.reap(crate::timer::get_time_ns())?;
                 if !queues.control.has_pending() {
                     return Ok(());
-                }
-                spins = spins.saturating_add(1);
-                if spins >= VIRTIO_GPU_CONTROL_MAX_SPINS {
-                    return queues.control.fail(control::CONTROL_TIMEOUT);
                 }
             }
             // Never hold the transport lock while waiting for DMA. The async
