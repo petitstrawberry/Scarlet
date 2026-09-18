@@ -103,10 +103,15 @@ cannot consume this shared GPU image.
 
 ## Linux ABI game installation
 
-Build the upstream `kondrak/vkQuake2` source at
-`6763f207229f97cffabb6fc2da72017a794b139b` with the
-[SWS platform adapter](../../user/lib/sws-client-c/examples/vkquake2/README.md).
-Its ordinary Make target builds the engine, unchanged Vulkan renderer and game
+The [SuperTuxKart 1.5 test recipe](https://github.com/petitstrawberry/stk-scarlet/tree/master/scarlet)
+records the tested [SDL2 SWS port](https://github.com/petitstrawberry/scarlet-sdl2-sws),
+ordinary Vulkan loader setup, and game launch without adding game assets to
+the public image. STK itself needed no source patch.
+
+The [vkQuake2 fork](https://github.com/petitstrawberry/vkquake2-scarlet/tree/master/scarlet)
+adds an SWS platform adapter to upstream commit
+`6763f207229f97cffabb6fc2da72017a794b139b`. Its `scarlet/Makefile`
+builds the engine, unchanged Vulkan renderer and game
 module with `-O3 -DNDEBUG`; it uses C++17 for the upstream VMA allocator and the
 null sound driver. Install them into
 `projects/aarch64-limine-full/rootfs/systems/linux-aarch64` with `sws-install`.
