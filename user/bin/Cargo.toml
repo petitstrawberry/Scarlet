@@ -179,12 +179,12 @@ path = "src/sas/main.rs"
 scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }
 framebuffer = { path = "../lib/framebuffer" }
-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "f4c098826ba4561fb705c2cf2ec8d506f235deec", default-features = false, features = ["legacy-scarlet-std"] }
+sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "ec7950c6fb4ebb9584e91c90f88d0814e8984302", default-features = false, features = ["legacy-scarlet-std"] }
 sws-protocol = { path = "../lib/sws-protocol" }
 sws-client = { path = "../lib/sws-client" }
 scarlet-os = { path = "../lib/scarlet-os" }
-scarlet-ui = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "8de1b3ca307341a35a0f6b001fdc885d22ba478b", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
-scarlet-ui-macros = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "8de1b3ca307341a35a0f6b001fdc885d22ba478b", package = "scarlet-ui-macros" }
+scarlet-ui = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "6cca273f4a13ec78d03903ed6244cdc11b5f35bf", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
+scarlet-ui-macros = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "6cca273f4a13ec78d03903ed6244cdc11b5f35bf", package = "scarlet-ui-macros" }
 scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
 scarlet-sys = { path = "../lib/scarlet-sys" }
 sunset = { path = "../lib/sunset", default-features = false, features = ["larger", "mlkem", "openssh-key", "rsa"] }
