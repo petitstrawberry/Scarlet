@@ -41,6 +41,7 @@ const CPU_GRID_MINIMUM_CELL_WIDTH: f32 = 190.0;
 const CPU_CARD_GRAPH_HEIGHT: f32 = 62.0;
 const DEVICE_GRAPH_HEIGHT: f32 = 116.0;
 const DEVICE_CARD_HEIGHT: f32 = 332.0;
+const THERMAL_CARD_HEIGHT: f32 = 160.0;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(750);
 const MAX_TASKS: usize = 8_192;
 const CPU_HISTORY_CAPACITY: usize = 60;
@@ -262,6 +263,22 @@ struct DeviceFrequencySnapshot {
 }
 
 #[derive(Clone, Debug, Default)]
+struct ThermalZoneSnapshot {
+    name: String,
+    temperature_mc: Option<i32>,
+    sample_count: u64,
+    failed_samples: u64,
+    coolers: Vec<ThermalCoolerSnapshot>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ThermalCoolerSnapshot {
+    name: String,
+    applied_state: u32,
+    max_state: u32,
+}
+
+#[derive(Clone, Debug, Default)]
 struct TaskCounts {
     total: usize,
     running: usize,
@@ -292,6 +309,7 @@ struct SchedulerSummary {
 struct Snapshot {
     cpus: Vec<CpuSnapshot>,
     devices: Vec<DeviceFrequencySnapshot>,
+    thermal_zones: Vec<ThermalZoneSnapshot>,
     tasks: Vec<TaskRow>,
     counts: TaskCounts,
     scheduler: SchedulerSummary,
@@ -306,6 +324,7 @@ impl Default for Snapshot {
         Self {
             cpus: Vec::new(),
             devices: Vec::new(),
+            thermal_zones: Vec::new(),
             tasks: Vec::new(),
             counts: TaskCounts::default(),
             scheduler: SchedulerSummary::default(),
@@ -394,6 +413,7 @@ fn start_sampler(snapshot: State<Arc<Snapshot>>, cpu_cards: State<Vec<CpuSnapsho
             );
             next.devices = read_device_frequencies();
             update_device_histories(&mut device_histories, &mut next.devices);
+            next.thermal_zones = read_thermal_zones();
 
             previous_tasks = current_tasks;
             // CPU counters cover the entire interval between snapshots,
@@ -502,6 +522,7 @@ fn build_snapshot(
     Snapshot {
         cpus,
         devices: Vec::new(),
+        thermal_zones: Vec::new(),
         tasks: rows,
         counts,
         scheduler: SchedulerSummary { runnable },
@@ -757,6 +778,62 @@ fn update_device_histories(
     }
 }
 
+fn read_thermal_zones() -> Vec<ThermalZoneSnapshot> {
+    fs::read_to_string("/dev/thermal")
+        .map(|contents| parse_thermal_zones(&contents))
+        .unwrap_or_default()
+}
+
+fn parse_thermal_zones(contents: &str) -> Vec<ThermalZoneSnapshot> {
+    let mut zones = Vec::new();
+    let mut current: Option<ThermalZoneSnapshot> = None;
+    for line in contents.lines() {
+        if line.starts_with("zone=") {
+            if let Some(zone) = current.take() {
+                zones.push(zone);
+            }
+            let mut zone = ThermalZoneSnapshot::default();
+            for word in line.split_whitespace() {
+                let Some((key, value)) = word.split_once('=') else {
+                    continue;
+                };
+                match key {
+                    "zone" => zone.name = value.to_string(),
+                    "temperature_mc" => zone.temperature_mc = value.parse().ok(),
+                    "sample_count" => zone.sample_count = value.parse().unwrap_or(0),
+                    "failed_samples" => zone.failed_samples = value.parse().unwrap_or(0),
+                    _ => {}
+                }
+            }
+            current = Some(zone);
+        } else if line.starts_with("cooler=") {
+            let Some(zone) = current.as_mut() else {
+                continue;
+            };
+            let mut cooler = ThermalCoolerSnapshot::default();
+            for word in line.split_whitespace() {
+                let Some((key, value)) = word.split_once('=') else {
+                    continue;
+                };
+                match key {
+                    "cooler" => cooler.name = value.to_string(),
+                    "applied_state" => cooler.applied_state = value.parse().unwrap_or(0),
+                    "max_state" => cooler.max_state = value.parse().unwrap_or(0),
+                    _ => {}
+                }
+            }
+            if !cooler.name.is_empty() {
+                zone.coolers.push(cooler);
+            }
+        }
+    }
+    if let Some(zone) = current {
+        zones.push(zone);
+    }
+    zones.retain(|zone| !zone.name.is_empty());
+    zones
+}
+
 fn decode_name(bytes: &[u8; 64]) -> String {
     let length = bytes
         .iter()
@@ -798,6 +875,7 @@ fn task_manager_view(
     let overview_snapshot = snapshot.clone();
     let cpu_snapshot = snapshot.clone();
     let device_snapshot = snapshot.clone();
+    let thermal_snapshot = snapshot.clone();
     let task_snapshot = snapshot.clone();
     let tabs = vec![
         TabItem::new("Overview", move || overview_page(overview_snapshot.clone())),
@@ -811,6 +889,7 @@ fn task_manager_view(
         TabItem::new("GPU / Devices", move || {
             device_page(device_snapshot.clone())
         }),
+        TabItem::new("Thermal", move || thermal_page(thermal_snapshot.clone())),
         TabItem::new("Tasks", move || task_page(task_snapshot.clone())),
     ];
 
@@ -1031,6 +1110,96 @@ fn device_history_graph(history: Vec<u32>) -> impl View + Clone + use<> {
     )
     .frame(f32::INFINITY, DEVICE_GRAPH_HEIGHT)
     .clip_radius(5.0)
+}
+
+fn thermal_page(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
+    let palette = ColorPalette::default();
+    let count = snapshot.thermal_zones.len();
+    let list = ScrollView::new(LazyVStack::new(
+        count.max(1),
+        THERMAL_CARD_HEIGHT,
+        move |index| thermal_card(snapshot.thermal_zones.get(index).cloned()),
+    ))
+    .frame(f32::INFINITY, 354.0);
+
+    vstack! {
+        hstack! {
+            Text::new("Thermal zones")
+                .font_size(16.0)
+                .color(palette.text_primary()),
+            Spacer::new(),
+            Text::new(format!("{} zone(s) · applied cooling states", count))
+                .font_size(11.0)
+                .color(palette.text_secondary()),
+        },
+        list,
+    }
+    .spacing(10.0)
+    .alignment(Alignment::Leading)
+    .padding(14.0)
+    .frame(f32::INFINITY, PANEL_HEIGHT - TAB_BAR_HEIGHT)
+    .background(palette.surface())
+}
+
+fn thermal_card(zone: Option<ThermalZoneSnapshot>) -> impl View + Clone + use<> {
+    let palette = ColorPalette::default();
+    let available = zone.is_some();
+    let zone = zone.unwrap_or_default();
+    let title = if available {
+        zone.name.clone()
+    } else {
+        String::from("No thermal zones available")
+    };
+    let temperature = zone
+        .temperature_mc
+        .map(|value| format!("{:.1} °C", value as f64 / 1_000.0))
+        .unwrap_or_else(|| String::from("—"));
+    let cooling = if zone.coolers.is_empty() {
+        String::from("Applied cooling: unavailable")
+    } else {
+        format!(
+            "Applied cooling: {}",
+            zone.coolers
+                .iter()
+                .map(|cooler| format!(
+                    "{} {}/{}",
+                    cooler.name, cooler.applied_state, cooler.max_state,
+                ))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        )
+    };
+    let samples = if available {
+        format!(
+            "Samples: {} · Failed: {}",
+            zone.sample_count, zone.failed_samples,
+        )
+    } else {
+        String::from("Sensor data will appear when a thermal driver is available")
+    };
+
+    vstack! {
+        hstack! {
+            Text::new(title)
+                .font_size(16.0)
+                .color(palette.text_primary()),
+            Spacer::new(),
+            Text::new(temperature)
+                .font_size(22.0)
+                .color(palette.warning()),
+        },
+        Text::new(cooling)
+            .font_size(12.0)
+            .color(palette.text_primary()),
+        Text::new(samples)
+            .font_size(10.0)
+            .color(palette.text_secondary()),
+    }
+    .spacing(10.0)
+    .padding(14.0)
+    .frame(f32::INFINITY, THERMAL_CARD_HEIGHT)
+    .background(palette.surface_variant())
+    .clip_radius(8.0)
 }
 
 fn cpu_overall_summary(snapshot: &Snapshot) -> impl View + Clone + use<> {
