@@ -105,6 +105,7 @@ pub struct GpuDisplayResource {
     height: u32,
     backend_cookie: u64,
     linear_backing: Option<GpuLinearDisplayBacking>,
+    modified_backing: Option<GpuModifiedDisplayBacking>,
 }
 
 /// Producer guarantees attached to one GPU-image presentation.
@@ -144,6 +145,49 @@ pub struct GpuLinearDisplayBacking {
     // present call returns. Keep the producer's allocation alive until the
     // controller replaces this scanout resource.
     _owner: Arc<dyn GpuDisplayBackingOwner>,
+}
+
+/// Physically contiguous, non-linear GPU storage offered to a display engine.
+/// The modifier describes the byte layout independently of either device.
+#[derive(Clone)]
+pub struct GpuModifiedDisplayBacking {
+    physical_addr: u64,
+    allocation_size: u64,
+    stride: u32,
+    format: PixelFormat,
+    modifier: u64,
+    _owner: Arc<dyn GpuDisplayBackingOwner>,
+}
+
+impl core::fmt::Debug for GpuModifiedDisplayBacking {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("GpuModifiedDisplayBacking")
+            .field("physical_addr", &self.physical_addr)
+            .field("allocation_size", &self.allocation_size)
+            .field("stride", &self.stride)
+            .field("format", &self.format)
+            .field("modifier", &self.modifier)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GpuModifiedDisplayBacking {
+    pub const fn physical_addr(&self) -> u64 {
+        self.physical_addr
+    }
+    pub const fn allocation_size(&self) -> u64 {
+        self.allocation_size
+    }
+    pub const fn stride(&self) -> u32 {
+        self.stride
+    }
+    pub const fn format(&self) -> PixelFormat {
+        self.format
+    }
+    pub const fn modifier(&self) -> u64 {
+        self.modifier
+    }
 }
 
 /// One physically contiguous extent of a logically linear GPU allocation.
@@ -280,6 +324,7 @@ impl GpuDisplayResource {
             height,
             backend_cookie,
             linear_backing: None,
+            modified_backing: None,
         }
     }
 
@@ -388,6 +433,47 @@ impl GpuDisplayResource {
                 format,
                 _owner: owner,
             }),
+            modified_backing: None,
+        })
+    }
+
+    /// Export one contiguous non-linear image. The consumer must match the
+    /// modifier and check its own pitch, padding, format and address limits.
+    pub fn new_modified(
+        physical_addr: u64,
+        allocation_size: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: PixelFormat,
+        modifier: u64,
+        owner: Arc<dyn GpuDisplayBackingOwner>,
+    ) -> Result<Self, &'static str> {
+        if physical_addr == 0
+            || physical_addr & 0xfff != 0
+            || width == 0
+            || height == 0
+            || modifier == 0
+            || u64::from(stride) < u64::from(width) * format.bytes_per_pixel() as u64
+            || allocation_size == 0
+            || physical_addr.checked_add(allocation_size).is_none()
+        {
+            return Err("GPU modified display backing is invalid");
+        }
+        Ok(Self {
+            resource_id: 0,
+            width,
+            height,
+            backend_cookie: 0,
+            linear_backing: None,
+            modified_backing: Some(GpuModifiedDisplayBacking {
+                physical_addr,
+                allocation_size,
+                stride,
+                format,
+                modifier,
+                _owner: owner,
+            }),
         })
     }
 
@@ -419,6 +505,11 @@ impl GpuDisplayResource {
     /// VirtIO resource identifiers.
     pub fn linear_backing(&self) -> Option<GpuLinearDisplayBacking> {
         self.linear_backing.clone()
+    }
+
+    /// Return non-linear physical backing when exported by the GPU.
+    pub fn modified_backing(&self) -> Option<GpuModifiedDisplayBacking> {
+        self.modified_backing.clone()
     }
 
     /// Get the full resource region.

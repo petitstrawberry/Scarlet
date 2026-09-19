@@ -146,6 +146,8 @@ pub const GPU_IMAGE_FORMAT_DEPTH32_FLOAT: u32 = 2;
 pub const GPU_IMAGE_MAX_PLANES: usize = 4;
 /// Modifier value for an uncompressed linear image.
 pub const GPU_IMAGE_MODIFIER_LINEAR: u64 = 0;
+/// NVIDIA Tegra X1 uncompressed block-linear BGRA8, block-height log2 4.
+pub const GPU_IMAGE_MODIFIER_NVIDIA_BLOCK_LINEAR_16BX2_H4: u64 = 0x0300_0000_000f_e014;
 /// Image usage permitting the image to be bound as a render target.
 pub const GPU_IMAGE_USAGE_RENDER_TARGET: u32 = 1 << 0;
 /// Image usage permitting the image to be selected for display scanout.
