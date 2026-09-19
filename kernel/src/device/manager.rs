@@ -1116,12 +1116,14 @@ impl DeviceManager {
         resources: &mut Vec<PlatformDeviceResource>,
         irq_num: usize,
         metadata: Option<crate::device::platform::resource::IrqMetadata>,
+        irq_parent: Option<u32>,
     ) {
         resources.push(PlatformDeviceResource {
             res_type: PlatformDeviceResourceType::IRQ,
             start: irq_num as u64,
             end: irq_num as u64,
             irq_metadata: metadata,
+            irq_parent,
         });
     }
 
@@ -1132,6 +1134,7 @@ impl DeviceManager {
             start: area.start,
             end: area.end,
             irq_metadata: None,
+            irq_parent: None,
         })
     }
 
@@ -2989,14 +2992,17 @@ impl DeviceManager {
         for child in root_node.children() {
             let parent_ph = Self::get_u32_prop(&root_node, "phandle")
                 .or_else(|| Self::get_u32_prop(&root_node, "linux,phandle"));
-            self.process_device_subtree(&child, priority, &mut idx, parent_ph);
+            let irq_parent = Self::get_u32_prop(&root_node, "interrupt-parent");
+            self.process_device_subtree(&child, priority, &mut idx, parent_ph, irq_parent);
         }
 
         if let Some(chosen_node) = fdt.find_node("/chosen") {
             for child in chosen_node.children() {
                 let parent_ph = Self::get_u32_prop(&chosen_node, "phandle")
                     .or_else(|| Self::get_u32_prop(&chosen_node, "linux,phandle"));
-                self.process_device_subtree(&child, priority, &mut idx, parent_ph);
+                let irq_parent = Self::get_u32_prop(&chosen_node, "interrupt-parent")
+                    .or_else(|| Self::get_u32_prop(&root_node, "interrupt-parent"));
+                self.process_device_subtree(&child, priority, &mut idx, parent_ph, irq_parent);
             }
         }
     }
@@ -3007,7 +3013,9 @@ impl DeviceManager {
         priority: DriverPriority,
         idx: &mut usize,
         parent_phandle: Option<u32>,
+        inherited_irq_parent: Option<u32>,
     ) {
+        let irq_parent = Self::get_u32_prop(node, "interrupt-parent").or(inherited_irq_parent);
         let has_explicit_phandle = Self::get_u32_prop(node, "phandle")
             .or_else(|| Self::get_u32_prop(node, "linux,phandle"))
             .is_some();
@@ -3033,6 +3041,7 @@ impl DeviceManager {
             priority,
             idx,
             parent_phandle,
+            irq_parent,
             if has_explicit_phandle {
                 None
             } else {
@@ -3041,7 +3050,7 @@ impl DeviceManager {
         );
 
         for child in node.children() {
-            self.process_device_subtree(&child, priority, idx, Some(this_phandle));
+            self.process_device_subtree(&child, priority, idx, Some(this_phandle), irq_parent);
         }
     }
 
@@ -3052,6 +3061,7 @@ impl DeviceManager {
         priority: DriverPriority,
         idx: &mut usize,
         parent_phandle: Option<u32>,
+        irq_parent: Option<u32>,
         synthetic_phandle: Option<u32>,
     ) {
         if let Some(status_prop) = child.property("status")
@@ -3077,7 +3087,7 @@ impl DeviceManager {
             return;
         }
 
-        let resources = self.build_minimal_resources(child);
+        let resources = self.build_minimal_resources(child, irq_parent);
         let mut properties = self.build_device_properties(child);
 
         if let Some(ph) = synthetic_phandle {
@@ -3144,6 +3154,7 @@ impl DeviceManager {
     fn build_minimal_resources(
         &self,
         child: &fdt::node::FdtNode,
+        irq_parent: Option<u32>,
     ) -> alloc::vec::Vec<PlatformDeviceResource> {
         let mut resources = alloc::vec::Vec::new();
 
@@ -3162,7 +3173,7 @@ impl DeviceManager {
         if let Some(irqs) = child.interrupts() {
             // Standard path: fdt-rs successfully parsed interrupts
             for irq in irqs {
-                Self::push_irq_resource(&mut resources, irq, None);
+                Self::push_irq_resource(&mut resources, irq, None, irq_parent);
                 parsed_any_irq = true;
             }
         }
@@ -3234,7 +3245,7 @@ impl DeviceManager {
                     _ => (cell0 as usize, None),
                 };
 
-                Self::push_irq_resource(&mut resources, irq_num, metadata);
+                Self::push_irq_resource(&mut resources, irq_num, metadata, Some(phandle));
                 parsed_any_irq = true;
                 offset += needed;
             }
@@ -3331,7 +3342,7 @@ impl DeviceManager {
                     _ => unreachable!(),
                 };
 
-                Self::push_irq_resource(&mut resources, irq_num, metadata);
+                Self::push_irq_resource(&mut resources, irq_num, metadata, irq_parent);
             }
         }
 

@@ -2,7 +2,7 @@
 //!
 //! This module defines the basic traits for local and external interrupt controllers.
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, collections::BTreeMap, sync::Arc};
 
 use crate::device::platform::resource::{PlatformDeviceResource, PlatformDeviceResourceType};
 use crate::interrupt::InterruptError;
@@ -84,6 +84,16 @@ pub struct PendingIrq {
     pub mapping: IrqMapping,
     /// CPU that observed the interrupt.
     pub cpu_id: CpuId,
+}
+
+/// A DT interrupt controller that gates a CPU-facing external controller.
+/// Hardware IRQs passed here are the translated parent IRQ numbers. The
+/// interrupt core calls this gate with the parent for every mask, unmask and
+/// EOI, including deferred-interrupt lifecycle operations.
+pub trait ExternalInterruptGate: Send + Sync {
+    fn mask(&self, hwirq: Hwirq) -> InterruptResult<()>;
+    fn unmask(&self, hwirq: Hwirq) -> InterruptResult<()>;
+    fn eoi(&self, hwirq: Hwirq) -> InterruptResult<()>;
 }
 
 /// Trait for per-CPU timer controllers.
@@ -572,6 +582,7 @@ pub struct InterruptControllers {
     timer_controllers: alloc::vec::Vec<Box<dyn TimerController>>,
     software_interrupt_controllers: alloc::vec::Vec<Box<dyn SoftwareInterruptController>>,
     external_controller: Option<Box<dyn ExternalInterruptController>>,
+    external_gates: BTreeMap<u32, Arc<dyn ExternalInterruptGate>>,
     cpu_to_timer_controller: alloc::collections::BTreeMap<CpuId, usize>,
     cpu_to_software_interrupt_controller: alloc::collections::BTreeMap<CpuId, usize>,
 }
@@ -586,6 +597,7 @@ impl InterruptControllers {
             timer_controllers: alloc::vec::Vec::new(),
             software_interrupt_controllers: alloc::vec::Vec::new(),
             external_controller: None,
+            external_gates: BTreeMap::new(),
             cpu_to_timer_controller: alloc::collections::BTreeMap::new(),
             cpu_to_software_interrupt_controller: alloc::collections::BTreeMap::new(),
         }
@@ -683,6 +695,27 @@ impl InterruptControllers {
         controller: Box<dyn ExternalInterruptController>,
     ) {
         self.external_controller = Some(controller);
+    }
+
+    /// Register a DT interrupt-parent gate by its phandle.
+    pub fn register_external_gate(
+        &mut self,
+        phandle: u32,
+        gate: Arc<dyn ExternalInterruptGate>,
+    ) -> InterruptResult<()> {
+        if phandle == 0 || self.external_gates.contains_key(&phandle) {
+            return Err(InterruptError::InvalidOperation);
+        }
+        self.external_gates.insert(phandle, gate);
+        Ok(())
+    }
+
+    pub fn external_gate(&self, phandle: Option<u32>) -> Option<&dyn ExternalInterruptGate> {
+        self.external_gates.get(&phandle?).map(Arc::as_ref)
+    }
+
+    pub fn unregister_external_gate(&mut self, phandle: u32) {
+        self.external_gates.remove(&phandle);
     }
 
     /// Get a reference to the timer controller for a specific CPU

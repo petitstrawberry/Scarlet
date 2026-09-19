@@ -151,6 +151,7 @@ impl<'a> PciScanner<'a> {
                     irq_number: parent_irq_cells[1],
                     irq_flags: parent_irq_cells[2],
                 }),
+                irq_parent: None,
             }),
             _ => {
                 let irq = *parent_irq_cells.first()? as usize;
@@ -159,6 +160,7 @@ impl<'a> PciScanner<'a> {
                     start: irq as u64,
                     end: irq as u64,
                     irq_metadata: None,
+                    irq_parent: None,
                 })
             }
         }

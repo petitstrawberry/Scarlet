@@ -74,6 +74,16 @@ pub fn register_and_enable_platform_irq_device(
     InterruptManager::global().register_and_enable_platform_irq_device(resource, device, cpu_id)
 }
 
+/// Register an intermediate DT interrupt controller by its phandle. Its
+/// mask/unmask/EOI operations are paired with the CPU-facing controller for
+/// IRQ resources whose `interrupt-parent` names that phandle.
+pub fn register_external_interrupt_gate(
+    phandle: u32,
+    gate: Arc<dyn controllers::ExternalInterruptGate>,
+) -> InterruptResult<()> {
+    InterruptManager::global().register_external_interrupt_gate(phandle, gate)
+}
+
 /// Register and enable a maskable interrupt source in lifecycle-safe order.
 ///
 /// # Arguments
@@ -335,6 +345,7 @@ impl InterruptSource for InterruptDeviceSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct IrqDesc {
     mapping: controllers::IrqMapping,
+    irq_parent: Option<u32>,
     enabled_cpu: Option<CpuId>,
     needs_enable: bool,
     deliveries_in_progress: usize,
@@ -342,9 +353,10 @@ struct IrqDesc {
 }
 
 impl IrqDesc {
-    fn new(mapping: controllers::IrqMapping) -> Self {
+    fn new(mapping: controllers::IrqMapping, irq_parent: Option<u32>) -> Self {
         Self {
             mapping,
+            irq_parent,
             enabled_cpu: None,
             needs_enable: false,
             deliveries_in_progress: 0,
@@ -385,6 +397,106 @@ impl InterruptManager {
             .call_once(|| IrqRwSpinLock::new(controllers::InterruptControllers::new()))
     }
 
+    pub fn register_external_interrupt_gate(
+        &self,
+        phandle: u32,
+        gate: Arc<dyn controllers::ExternalInterruptGate>,
+    ) -> InterruptResult<()> {
+        // A child may have enabled its GIC line before this intermediate
+        // controller probes. Registration runs during cold boot, before CPU
+        // interrupts are enabled, so restore those existing child routes.
+        self.controllers()
+            .write()
+            .register_external_gate(phandle, gate.clone())?;
+        let enabled: Vec<_> = self
+            .irq_descs
+            .lock()
+            .values()
+            .filter(|desc| {
+                desc.irq_parent == Some(phandle)
+                    && desc.enabled_cpu.is_some()
+                    && desc.deferred_completions == 0
+            })
+            .map(|desc| desc.mapping.hwirq)
+            .collect();
+        let mut restored = Vec::new();
+        for hwirq in enabled {
+            if let Err(error) = gate.unmask(hwirq) {
+                for previous in restored {
+                    let _ = gate.mask(previous);
+                }
+                self.controllers().write().unregister_external_gate(phandle);
+                return Err(error);
+            }
+            restored.push(hwirq);
+        }
+        Ok(())
+    }
+
+    fn enable_external_route(
+        controllers: &controllers::InterruptControllers,
+        mapping: controllers::IrqMapping,
+        irq_parent: Option<u32>,
+        cpu_id: CpuId,
+    ) -> InterruptResult<()> {
+        let controller = controllers
+            .external_controller()
+            .ok_or(InterruptError::ControllerNotFound)?;
+        let gate = controllers.external_gate(irq_parent);
+        if let Some(gate) = gate {
+            gate.unmask(mapping.hwirq)?;
+        }
+        if let Err(error) = controller.enable_interrupt(mapping.hwirq, cpu_id) {
+            if let Some(gate) = gate {
+                let _ = gate.mask(mapping.hwirq);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn mask_external_route(
+        controllers: &controllers::InterruptControllers,
+        pending: &controllers::PendingIrq,
+        irq_parent: Option<u32>,
+    ) -> InterruptResult<()> {
+        let controller = controllers
+            .external_controller()
+            .ok_or(InterruptError::ControllerNotFound)?;
+        let gate = controllers.external_gate(irq_parent);
+        if let Some(gate) = gate {
+            gate.mask(pending.mapping.hwirq)?;
+        }
+        if let Err(error) = controller.mask_irq(pending) {
+            if let Some(gate) = gate {
+                let _ = gate.unmask(pending.mapping.hwirq);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn unmask_external_route(
+        controllers: &controllers::InterruptControllers,
+        pending: &controllers::PendingIrq,
+        irq_parent: Option<u32>,
+    ) -> InterruptResult<()> {
+        let controller = controllers
+            .external_controller()
+            .ok_or(InterruptError::ControllerNotFound)?;
+        let gate = controllers.external_gate(irq_parent);
+        if let Some(gate) = gate {
+            gate.unmask(pending.mapping.hwirq)?;
+        }
+        if let Err(error) = controller.unmask_irq(pending) {
+            if let Some(gate) = gate {
+                let _ = gate.mask(pending.mapping.hwirq);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub fn init_controllers(&self) {
         crate::println!("[interrupt] init: external controller...");
 
@@ -396,10 +508,7 @@ impl InterruptManager {
                 (desc.deferred_completions == 0)
                     .then_some(desc.enabled_cpu)
                     .flatten()
-                    .map(|cpu_id| controllers::PendingIrq {
-                        mapping: desc.mapping,
-                        cpu_id,
-                    })
+                    .map(|cpu_id| (desc.mapping, desc.irq_parent, cpu_id))
             })
             .collect();
 
@@ -412,14 +521,16 @@ impl InterruptManager {
                 crate::println!("Failed to initialize external controller: {}", e);
             }
         }
-        if let Some(controller) = controllers.external_controller() {
+        if controllers.external_controller().is_some() {
             let reenable_count = enabled_external_interrupts.len();
-            for pending in enabled_external_interrupts {
-                if let Err(e) = controller.enable_interrupt(pending.mapping.hwirq, pending.cpu_id) {
+            for (mapping, irq_parent, cpu_id) in enabled_external_interrupts {
+                if let Err(e) =
+                    Self::enable_external_route(&controllers, mapping, irq_parent, cpu_id)
+                {
                     crate::println!(
                         "[interrupt] failed to re-enable IRQ {} for CPU {} after controller init: {}",
-                        pending.mapping.virq,
-                        pending.cpu_id,
+                        mapping.virq,
+                        cpu_id,
                         e
                     );
                 }
@@ -513,15 +624,20 @@ impl InterruptManager {
             }
         };
 
-        self.register_irq_mapping(mapping);
+        self.register_irq_mapping(mapping, resource.irq_parent);
         Ok(mapping.virq)
     }
 
-    fn register_irq_mapping(&self, mapping: controllers::IrqMapping) {
+    fn register_irq_mapping(&self, mapping: controllers::IrqMapping, irq_parent: Option<u32>) {
         let mut descs = self.irq_descs.lock();
         descs
             .entry(mapping.virq)
-            .or_insert_with(|| IrqDesc::new(mapping));
+            .and_modify(|desc| {
+                if irq_parent.is_some() {
+                    desc.irq_parent = irq_parent;
+                }
+            })
+            .or_insert_with(|| IrqDesc::new(mapping, irq_parent));
     }
 
     fn irq_desc_or_legacy(&self, interrupt_id: InterruptId) -> IrqDesc {
@@ -533,7 +649,7 @@ impl InterruptManager {
         }
 
         let mapping = controllers::IrqMapping::legacy(interrupt_id, controllers::IrqFlow::Level);
-        let desc = IrqDesc::new(mapping);
+        let desc = IrqDesc::new(mapping, None);
         self.irq_descs.lock().entry(interrupt_id).or_insert(desc);
         desc
     }
@@ -542,7 +658,7 @@ impl InterruptManager {
         let mut descs = self.irq_descs.lock();
         let desc = descs
             .entry(pending.mapping.virq)
-            .or_insert_with(|| IrqDesc::new(pending.mapping));
+            .or_insert_with(|| IrqDesc::new(pending.mapping, None));
         desc.mapping = pending.mapping;
         desc.deliveries_in_progress = desc
             .deliveries_in_progress
@@ -565,10 +681,7 @@ impl InterruptManager {
             .ok_or(InterruptError::InvalidOperation)?;
         if desc.deferred_completions == 0 {
             let controllers = self.controllers().read();
-            let controller = controllers
-                .external_controller()
-                .ok_or(InterruptError::ControllerNotFound)?;
-            controller.mask_irq(&pending)?;
+            Self::mask_external_route(&controllers, &pending, desc.irq_parent)?;
         }
         desc.deferred_completions = next_count;
         Ok(DeferredInterruptCompletion::new(pending.mapping.virq))
@@ -597,15 +710,17 @@ impl InterruptManager {
             cpu_id,
         };
         let controllers = self.controllers().read();
-        let controller = controllers
-            .external_controller()
-            .ok_or(InterruptError::ControllerNotFound)?;
         if desc.needs_enable {
-            controller.enable_interrupt(unmask.mapping.hwirq, unmask.cpu_id)?;
+            Self::enable_external_route(
+                &controllers,
+                unmask.mapping,
+                desc.irq_parent,
+                unmask.cpu_id,
+            )?;
             desc.needs_enable = false;
             Ok(())
         } else {
-            controller.unmask_irq(&unmask)
+            Self::unmask_external_route(&controllers, &unmask, desc.irq_parent)
         }
     }
 
@@ -635,14 +750,16 @@ impl InterruptManager {
             cpu_id,
         };
         let controllers = self.controllers().read();
-        let controller = controllers
-            .external_controller()
-            .ok_or(InterruptError::ControllerNotFound)?;
         if desc.needs_enable {
-            controller.enable_interrupt(pending.mapping.hwirq, pending.cpu_id)?;
+            Self::enable_external_route(
+                &controllers,
+                pending.mapping,
+                desc.irq_parent,
+                pending.cpu_id,
+            )?;
             desc.needs_enable = false;
         } else {
-            controller.unmask_irq(&pending)?;
+            Self::unmask_external_route(&controllers, &pending, desc.irq_parent)?;
         }
         desc.deferred_completions = 0;
         Ok(())
@@ -654,9 +771,14 @@ impl InterruptManager {
             u64::from(irq.mapping.virq),
             u64::from(irq.mapping.hwirq),
         );
+        let desc = self.irq_desc_or_legacy(irq.mapping.virq);
         let controllers = self.controllers().read();
         let result = if let Some(controller) = controllers.external_controller() {
-            controller.eoi_irq(irq)
+            let gate_result = controllers
+                .external_gate(desc.irq_parent)
+                .map_or(Ok(()), |gate| gate.eoi(irq.mapping.hwirq));
+            let parent_result = controller.eoi_irq(irq);
+            gate_result.and(parent_result)
         } else {
             Err(InterruptError::ControllerNotFound)
         };
@@ -696,7 +818,7 @@ impl InterruptManager {
             u64::from(pending.mapping.virq),
             u64::from(pending.mapping.hwirq),
         );
-        self.register_irq_mapping(pending.mapping);
+        self.register_irq_mapping(pending.mapping, None);
         {
             let controllers = self.controllers().read();
             if let Some(controller) = controllers.external_controller() {
@@ -1197,8 +1319,10 @@ impl InterruptManager {
             return Ok(());
         }
         let controllers = self.controllers().read();
-        if let Some(controller) = controllers.external_controller() {
-            if let Err(error) = controller.enable_interrupt(desc.mapping.hwirq, cpu_id) {
+        if controllers.external_controller().is_some() {
+            if let Err(error) =
+                Self::enable_external_route(&controllers, desc.mapping, desc.irq_parent, cpu_id)
+            {
                 desc.enabled_cpu = previous_cpu;
                 desc.needs_enable = previous_needs_enable;
                 return Err(error);
@@ -1258,11 +1382,14 @@ impl InterruptManager {
         };
 
         for vector in &allocation.vectors {
-            self.register_irq_mapping(controllers::IrqMapping {
-                virq: vector.virq,
-                hwirq: vector.hwirq,
-                flow: controllers::IrqFlow::Msi,
-            });
+            self.register_irq_mapping(
+                controllers::IrqMapping {
+                    virq: vector.virq,
+                    hwirq: vector.hwirq,
+                    flow: controllers::IrqFlow::Msi,
+                },
+                None,
+            );
         }
 
         Ok(allocation)
@@ -1299,8 +1426,8 @@ impl InterruptManager {
             cpu_id: mask_cpu,
         };
         let controllers = self.controllers().read();
-        if let Some(controller) = controllers.external_controller() {
-            if let Err(error) = controller.mask_irq(&pending) {
+        if controllers.external_controller().is_some() {
+            if let Err(error) = Self::mask_external_route(&controllers, &pending, desc.irq_parent) {
                 desc.enabled_cpu = previous_cpu;
                 desc.needs_enable = previous_needs_enable;
                 return Err(error);

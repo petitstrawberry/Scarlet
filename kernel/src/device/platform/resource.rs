@@ -16,6 +16,9 @@ pub struct PlatformDeviceResource {
     pub end: u64,
     /// Optional metadata for IRQ resources (e.g., type, flags from Device Tree)
     pub irq_metadata: Option<IrqMetadata>,
+    /// DT interrupt controller phandle for IRQ resources. This identifies
+    /// intermediate controllers between the device and the CPU-facing PIC.
+    pub irq_parent: Option<u32>,
 }
 
 /// IRQ metadata from Device Tree interrupt specifiers
