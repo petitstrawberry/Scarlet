@@ -70,12 +70,20 @@ pub struct ThermalZoneRegistration {
     pub coolers: Vec<CoolingPolicy>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ThermalZoneSnapshot {
     pub name: &'static str,
     pub hottest_mc: Option<i32>,
     pub sample_count: u64,
     pub failed_samples: u64,
+    pub coolers: Vec<ThermalCoolingSnapshot>,
+}
+
+#[derive(Clone, Copy)]
+pub struct ThermalCoolingSnapshot {
+    pub name: &'static str,
+    pub applied_state: u32,
+    pub max_state: u32,
 }
 
 struct CoolerState {
@@ -251,6 +259,17 @@ pub fn snapshots() -> Vec<ThermalZoneSnapshot> {
                 hottest_mc: state.hottest_mc,
                 sample_count: state.sample_count,
                 failed_samples: state.failed_samples,
+                coolers: zone
+                    .registration
+                    .coolers
+                    .iter()
+                    .zip(&state.coolers)
+                    .map(|(policy, cooler)| ThermalCoolingSnapshot {
+                        name: policy.device.name(),
+                        applied_state: cooler.applied_state,
+                        max_state: policy.device.max_state(),
+                    })
+                    .collect(),
             }
         })
         .collect()
