@@ -12,7 +12,7 @@ use scarlet_os::handle::Handle;
 use scarlet_ui_renderer_sgfx::{FrameExecutor, FrameSubmissionError};
 use sgfx::backend::CommandExecutor;
 #[cfg(target_os = "scarlet")]
-use sgfx::backend::CompletionStatus;
+use sgfx::backend::{CommandSubmitter, CompletionStatus, SubmitError};
 use sgfx::ir::{
     self, AddressMode, BlendState, BufferDesc, BufferId, BufferUsage, CommandEncoder, DrawUniforms,
     Extent2D, FilterMode, FragmentProgram, LoadOp, PixelRect, PrimitiveTopology, RasterState,
@@ -22,6 +22,12 @@ use sgfx::ir::{
 };
 #[cfg(target_os = "scarlet")]
 use sgfx::{Context, Instance, MappedTargetSession};
+
+#[cfg(target_os = "scarlet")]
+#[path = "sgfx_presentation.rs"]
+mod presentation;
+#[cfg(target_os = "scarlet")]
+use presentation::PresentationQueue;
 
 const QUAD_VERTEX_STRIDE: u32 = 24;
 const QUAD_VERTEX_COUNT: usize = 6;
@@ -83,16 +89,24 @@ fn take_reusable_import(
 }
 
 #[cfg(target_os = "scarlet")]
+struct TargetSlot {
+    texture: TextureId,
+    initialized: bool,
+    damage: Option<PixelRect>,
+    last_present: Option<u64>,
+}
+
+#[cfg(target_os = "scarlet")]
 pub(crate) struct MappedTarget {
     pub(crate) resources: Rc<ResourceTable>,
     pub(crate) texture: TextureId,
     pub(crate) width: u32,
     pub(crate) height: u32,
     presented_texture: Option<TextureId>,
-    spare_texture: Option<TextureId>,
-    current_initialized: bool,
-    spare_initialized: bool,
-    previous_damage: Option<PixelRect>,
+    slots: Vec<TargetSlot>,
+    current_slot: usize,
+    present_sequence: u64,
+    presentation: Option<PresentationQueue>,
     pending_damage: Option<PixelRect>,
     session: MappedTargetSession,
     reusable_imports: Vec<ReusableImport>,
@@ -109,13 +123,13 @@ impl MappedTarget {
         Self::open_with_target_count(width, height, 1, false)
     }
 
-    /// Open a two-image presentation target for tear-free direct scanout.
+    /// Open a three-image presentation target for tear-free direct scanout.
     pub(crate) fn open_swapchain(width: u32, height: u32) -> Result<Self, Error> {
         // Readback is an optional remote-capture capability, not a prerequisite
         // for local GPU composition or presentation. Backends such as native
         // Adreno can therefore keep the desktop on the GPU while an attempted
         // capture reports its own unsupported readback operation.
-        Self::open_with_target_count(width, height, 2, false)
+        Self::open_with_target_count(width, height, 3, false)
     }
 
     fn open_with_target_count(
@@ -146,7 +160,6 @@ impl MappedTarget {
         height: u32,
         target_count: usize,
     ) -> Result<Self, Error> {
-        let tracked_submission = matches!(&context, Context::Virgl(_));
         let resources = Rc::new(ResourceTable::new());
         let extent = Extent2D::new(width, height)?;
         let define_target = || -> Result<TextureId, Error> {
@@ -161,28 +174,34 @@ impl MappedTarget {
                 )?)?
                 .id())
         };
-        let texture = define_target()?;
-        let spare_texture = match target_count {
-            1 => None,
-            2 => Some(define_target()?),
-            _ => return Err(ir::Error::InvalidValue.into()),
-        };
-        let mut targets = Vec::with_capacity(target_count);
-        targets.push(texture);
-        if let Some(spare) = spare_texture {
-            targets.push(spare);
+        if !matches!(target_count, 1 | 3) {
+            return Err(ir::Error::InvalidValue.into());
         }
-        let session = context.create_mapped_target_session(Rc::clone(&resources), &targets)?;
+        let mut targets = Vec::with_capacity(target_count);
+        let mut slots = Vec::with_capacity(target_count);
+        for _ in 0..target_count {
+            let texture = define_target()?;
+            targets.push(texture);
+            slots.push(TargetSlot {
+                texture,
+                initialized: false,
+                damage: None,
+                last_present: None,
+            });
+        }
+        let texture = targets[0];
+        let mut session = context.create_mapped_target_session(Rc::clone(&resources), &targets)?;
+        let tracked_submission = session.executor().supports_async_submission();
         Ok(Self {
             resources,
             texture,
             width,
             height,
             presented_texture: None,
-            spare_texture,
-            current_initialized: false,
-            spare_initialized: false,
-            previous_damage: None,
+            slots,
+            current_slot: 0,
+            present_sequence: 0,
+            presentation: None,
             pending_damage: None,
             session,
             reusable_imports: Vec::new(),
@@ -202,30 +221,34 @@ impl MappedTarget {
             Some(pending) => union_pixel_rect(pending, requested)?,
             None => requested,
         });
-        if self.spare_texture.is_none() {
+        if self.slots.len() == 1 {
             return Ok(requested);
         }
-        if !self.current_initialized {
+        let slot = &self.slots[self.current_slot];
+        if !slot.initialized {
             return Ok(full);
         }
-        match self.previous_damage {
-            Some(previous) => union_pixel_rect(previous, requested).map_err(Into::into),
-            None => Ok(full),
+        match slot.damage {
+            Some(damage) => union_pixel_rect(damage, requested).map_err(Into::into),
+            None => Ok(requested),
         }
     }
 
-    fn finish_present(&mut self) -> Result<(), Error> {
-        let Some(mut spare) = self.spare_texture else {
-            self.pending_damage = None;
-            return Ok(());
-        };
+    fn finish_present(&mut self, sequence: u64) -> Result<(), Error> {
         let full = PixelRect::new(0, 0, self.width, self.height)?;
         let logical_damage = self.pending_damage.take().unwrap_or(full);
-        self.current_initialized = true;
-        self.previous_damage = Some(logical_damage);
-        core::mem::swap(&mut self.texture, &mut spare);
-        self.spare_texture = Some(spare);
-        core::mem::swap(&mut self.current_initialized, &mut self.spare_initialized);
+        for (index, slot) in self.slots.iter_mut().enumerate() {
+            if index == self.current_slot {
+                slot.initialized = true;
+                slot.damage = None;
+                slot.last_present = Some(sequence);
+            } else if slot.initialized {
+                slot.damage = Some(match slot.damage {
+                    Some(damage) => union_pixel_rect(damage, logical_damage)?,
+                    None => logical_damage,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -284,26 +307,60 @@ impl MappedTarget {
         region: Option<DisplayPresentRegion>,
     ) -> Result<(), &'static str> {
         let presented_texture = self.texture;
-        let image = self
-            .session
-            .image(presented_texture)
-            .map_err(|_| "Failed to resolve mapped SGFX target")?;
-        if self.spare_texture.is_some() {
-            display
-                .present_swapchain_image(image.shared_handle(), region)
-                .map_err(|_| "Failed to present mapped SGFX swapchain target")?;
+        if self.slots.len() > 1 {
+            if self.presentation.is_none() {
+                let mut images = Vec::with_capacity(self.slots.len());
+                for slot in &self.slots {
+                    images.push(
+                        self.session
+                            .image(slot.texture)
+                            .map_err(|_| "Failed to resolve SGFX swapchain image")?
+                            .shared_handle()
+                            .duplicate()
+                            .map_err(|_| "Failed to retain SGFX swapchain image")?,
+                    );
+                }
+                self.presentation = Some(PresentationQueue::new(display, images)?);
+                println!(
+                    "sgfx: asynchronous display presentation with {} images",
+                    self.slots.len()
+                );
+            }
+            let sequence = self
+                .present_sequence
+                .checked_add(1)
+                .ok_or("SGFX presentation sequence exhausted")?;
+            self.presentation
+                .as_mut()
+                .unwrap()
+                .present(sequence, self.current_slot, region)?;
+            self.present_sequence = sequence;
+            self.finish_present(sequence)
+                .map_err(|_| "Failed to track SGFX swapchain damage")?;
+            let next = (self.current_slot + 1) % self.slots.len();
+            if let Some(previous) = self.slots[next].last_present {
+                // Completing image N's flip makes it the front. It is released
+                // only when a LATER image has actually replaced it at scanout.
+                self.presentation.as_mut().unwrap().wait_after(previous)?;
+            }
+            self.current_slot = next;
+            self.texture = self.slots[next].texture;
         } else {
+            let image = self
+                .session
+                .image(presented_texture)
+                .map_err(|_| "Failed to resolve mapped SGFX target")?;
             display
                 .present_image(image.shared_handle(), region)
                 .map_err(|_| "Failed to present mapped SGFX target")?;
+            self.pending_damage = None;
         }
-        self.finish_present()
-            .map_err(|_| "Failed to advance mapped SGFX swapchain")?;
         self.presented_texture = Some(presented_texture);
         Ok(())
     }
 
-    /// Read damaged regions from the most recently presented target.
+    /// Read the most recently composed and queued image. GPU work has retired;
+    /// the independent display worker may still be waiting for its scanout flip.
     pub(crate) fn readback_bgra(
         &self,
         destination: &mut [u8],
@@ -319,6 +376,15 @@ impl MappedTarget {
                 .map_err(|_| "Failed to read back the SGFX presentation target")?;
         }
         Ok(())
+    }
+}
+
+#[cfg(target_os = "scarlet")]
+impl Drop for MappedTarget {
+    fn drop(&mut self) {
+        // Join accepted display flips before releasing session images or
+        // replacing this compositor with CPU composition after an error.
+        self.presentation.take();
     }
 }
 
@@ -435,6 +501,9 @@ pub(crate) struct BackdropPass<'a> {
 /// Failure while recording or executing one quad-composition submission.
 #[derive(Debug)]
 pub(crate) enum QuadSubmitError<E = sgfx::Error> {
+    /// Admission was busy and every accepted stream from this frame retired.
+    /// Keep its inputs and retry the frame; no image has been published.
+    Busy,
     /// Portable IR recording rejected the requested frame.
     Recording(&'static str),
     /// The selected SGFX backend failed while executing valid recorded IR.
@@ -450,6 +519,7 @@ impl<E> From<&'static str> for QuadSubmitError<E> {
 impl<E: fmt::Display> fmt::Display for QuadSubmitError<E> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Busy => formatter.write_str("GPU admission is busy; frame safely discarded"),
             Self::Recording(error) => formatter.write_str(error),
             Self::Execution(error) => write!(formatter, "SGFX execution failed: {error}"),
         }
@@ -585,7 +655,7 @@ impl QuadRenderer {
         backdrops: &[BackdropPass<'_>],
     ) -> Result<(), QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>> {
         let mut executor = FrameExecutor::new(target.session.executor());
-        self.encode_scene_with_uploads(
+        let encoded = self.encode_scene_with_uploads(
             &mut executor,
             Rc::clone(&target.resources),
             target.texture,
@@ -596,7 +666,20 @@ impl QuadRenderer {
             uploads,
             operations,
             backdrops,
-        )?;
+        );
+        if let Err(error) = encoded {
+            if matches!(
+                &error,
+                QuadSubmitError::Execution(FrameSubmissionError::Submit(SubmitError::Busy))
+            ) {
+                return match executor.discard() {
+                    Ok(CompletionStatus::Complete) => Err(QuadSubmitError::Busy),
+                    Ok(_) => Err(QuadSubmitError::Execution(FrameSubmissionError::Pending)),
+                    Err(error) => Err(QuadSubmitError::Execution(error)),
+                };
+            }
+            return Err(error);
+        }
         match executor.wait() {
             Ok(CompletionStatus::Complete) => Ok(()),
             Ok(_) => Err(QuadSubmitError::Execution(FrameSubmissionError::Pending)),

@@ -11,17 +11,17 @@ extern crate scarlet_std as std;
 
 use alloc::{format, vec};
 #[cfg(feature = "std")]
-use scarlet_os::handle::capability::memory_mapping::{flags, munmap, prot};
-#[cfg(feature = "std")]
 use scarlet_os::handle::capability::SeekFrom;
+#[cfg(feature = "std")]
+use scarlet_os::handle::capability::memory_mapping::{flags, munmap, prot};
 #[cfg(feature = "std")]
 use scarlet_os::handle::{Handle, HandleError, HandleResult};
 #[cfg(not(feature = "std"))]
 use std::{
     fs::File,
     handle::{
-        capability::memory_mapping::{flags, munmap, prot},
         Handle, HandleError, HandleResult,
+        capability::memory_mapping::{flags, munmap, prot},
     },
     io::SeekFrom,
 };
@@ -409,6 +409,66 @@ pub struct DisplaySurface {
     swapchain_pending_damage: alloc::vec::Vec<alloc::vec::Vec<DisplayPresentRegion>>,
     present_sequence: u64,
     draw_buffer: usize,
+}
+
+/// An owning display-control handle for GPU-image presentation on another thread.
+/// Completion of `present_swapchain_image` still certifies hardware retirement
+/// of the prior front image; moving the wait does not weaken that contract.
+pub struct DisplayPresenter {
+    handle: Handle,
+}
+impl DisplayPresenter {
+    /// Present a producer-managed swapchain image and wait for the actual flip.
+    pub fn present_swapchain_image(
+        &self,
+        image: &Handle,
+        region: Option<DisplayPresentRegion>,
+    ) -> HandleResult<()> {
+        present_gpu_image_with_flags(
+            &self.handle,
+            image,
+            region,
+            DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER,
+        )
+    }
+}
+
+fn present_gpu_image_with_flags(
+    display: &Handle,
+    image: &Handle,
+    region: Option<DisplayPresentRegion>,
+    flags: u32,
+) -> HandleResult<()> {
+    let image_handle = u32::try_from(image.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
+    let request = match region {
+        Some(region) => {
+            if region.width == 0 || region.height == 0 {
+                return Err(HandleError::InvalidParameter);
+            }
+            DisplayPresentImage {
+                image_handle,
+                flags,
+                x: region.x,
+                y: region.y,
+                width: region.width,
+                height: region.height,
+                ..DisplayPresentImage::default()
+            }
+        }
+        None => DisplayPresentImage {
+            image_handle,
+            flags: flags | DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME,
+            ..DisplayPresentImage::default()
+        },
+    };
+    // SAFETY: The fixed present record and any nested damage storage remain valid through this synchronous control call.
+    unsafe {
+        display.control(
+            display_commands::DISPLAY_PRESENT_IMAGE,
+            &request as *const DisplayPresentImage as usize,
+        )
+    }?;
+    Ok(())
 }
 
 /// Lightweight display control wrapper.
@@ -1134,42 +1194,21 @@ impl DisplaySurface {
         )
     }
 
+    /// Duplicate only display control ownership for a presentation worker.
+    /// The new owner does not map or recycle CPU scanout buffers.
+    pub fn presenter(&self) -> HandleResult<DisplayPresenter> {
+        Ok(DisplayPresenter {
+            handle: self.file.as_handle().duplicate()?,
+        })
+    }
+
     fn present_gpu_image_with_flags(
         &self,
         image: &Handle,
         region: Option<DisplayPresentRegion>,
         flags: u32,
     ) -> HandleResult<()> {
-        let image_handle = u32::try_from(image.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
-        let request = match region {
-            Some(region) => {
-                if region.width == 0 || region.height == 0 {
-                    return Err(HandleError::InvalidParameter);
-                }
-                DisplayPresentImage {
-                    image_handle,
-                    flags,
-                    x: region.x,
-                    y: region.y,
-                    width: region.width,
-                    height: region.height,
-                    ..DisplayPresentImage::default()
-                }
-            }
-            None => DisplayPresentImage {
-                image_handle,
-                flags: flags | DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME,
-                ..DisplayPresentImage::default()
-            },
-        };
-        // SAFETY: The fixed present record and any nested damage storage remain valid through this synchronous control call.
-        unsafe {
-            self.file.as_handle().control(
-                display_commands::DISPLAY_PRESENT_IMAGE,
-                &request as *const DisplayPresentImage as usize,
-            )
-        }?;
-        Ok(())
+        present_gpu_image_with_flags(self.file.as_handle(), image, region, flags)
     }
 
     /// Present the current scanout buffer with the regions copied by the producer.
@@ -2411,7 +2450,7 @@ impl Drop for DisplaySurface {
 
 #[cfg(test)]
 mod tests {
-    use super::{brightness_percent_from_control, HandleError};
+    use super::{HandleError, brightness_percent_from_control};
 
     #[test]
     fn brightness_control_result_accepts_inclusive_range() {

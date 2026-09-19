@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::env;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use std::vec::Vec;
 
 use scarlet_ui::element::{
@@ -32,7 +32,6 @@ fn canvas_aspect() -> f32 {
     content_width / (content_height - HUD_HEIGHT)
 }
 const STATS_INTERVAL_NS: u64 = 500_000_000;
-const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 const PARTICLE_COUNT: usize = 72;
 const CUBE_WINDOW_KEY: &str = "cube";
 const GEARS_WINDOW_KEY: &str = "gears";
@@ -40,6 +39,7 @@ const SWARM_WINDOW_KEY: &str = "swarm";
 
 #[derive(Debug)]
 struct FpsMeter {
+    log_name: Option<&'static str>,
     started_at: Instant,
     last_paint_at: Instant,
     frames: u64,
@@ -48,9 +48,10 @@ struct FpsMeter {
 }
 
 impl FpsMeter {
-    fn new() -> Self {
+    fn new(log_name: Option<&'static str>) -> Self {
         let now = Instant::now();
         Self {
+            log_name,
             started_at: now,
             last_paint_at: now,
             frames: 0,
@@ -78,6 +79,16 @@ impl FpsMeter {
                 .saturating_mul(1_000)
                 / elapsed_ns.max(1);
             self.frame_us = elapsed_ns / self.frames.max(1) / 1_000;
+            if let Some(name) = self.log_name {
+                println!(
+                    "[ui-sgfx-showcase] {name} paint_fps={}.{:03} frame_us={} frames={} elapsed_us={}",
+                    self.fps_milli / 1_000,
+                    self.fps_milli % 1_000,
+                    self.frame_us,
+                    self.frames,
+                    elapsed_ns / 1_000
+                );
+            }
             self.started_at = now;
             self.frames = 0;
         }
@@ -192,7 +203,6 @@ impl ElementRenderObject for FpsHudRenderObject {
 #[derive(Clone)]
 struct SgfxShowcaseApp {
     start_cube: bool,
-    active_windows: [bool; 3],
     cube_canvas: SgfxCanvasHandle,
     gears_canvas: SgfxCanvasHandle,
     swarm_canvas: SgfxCanvasHandle,
@@ -208,11 +218,10 @@ struct SgfxShowcaseApp {
     particle: Arc<SgfxMesh>,
     frame_number: u64,
     animation_started_at: Instant,
-    last_frame_at: Instant,
 }
 
 impl SgfxShowcaseApp {
-    fn new(start_cube: bool) -> Self {
+    fn new(start_cube: bool, log_fps: bool) -> Self {
         let cube = cube_mesh();
         let cube_texture = cube_texture();
         let gears = [
@@ -227,23 +236,21 @@ impl SgfxShowcaseApp {
         let now = Instant::now();
         Self {
             start_cube,
-            active_windows: [false; 3],
             cube_canvas: SgfxCanvasHandle::new(),
             gears_canvas: SgfxCanvasHandle::new(),
             swarm_canvas: SgfxCanvasHandle::new(),
             cube_frame: State::new(StateId::new(300), Arc::new(initial_cube.clone())),
             gears_frame: State::new(StateId::new(301), Arc::new(initial_gears.clone())),
             swarm_frame: State::new(StateId::new(302), Arc::new(initial_swarm.clone())),
-            cube_meter: Rc::new(RefCell::new(FpsMeter::new())),
-            gears_meter: Rc::new(RefCell::new(FpsMeter::new())),
-            swarm_meter: Rc::new(RefCell::new(FpsMeter::new())),
+            cube_meter: Rc::new(RefCell::new(FpsMeter::new(log_fps.then_some("cube")))),
+            gears_meter: Rc::new(RefCell::new(FpsMeter::new(log_fps.then_some("gears")))),
+            swarm_meter: Rc::new(RefCell::new(FpsMeter::new(log_fps.then_some("swarm")))),
             cube,
             cube_texture,
             gears,
             particle,
             frame_number: 0,
             animation_started_at: now,
-            last_frame_at: now,
         }
     }
 
@@ -341,25 +348,6 @@ impl Application for SgfxShowcaseApp {
         }
     }
 
-    fn on_window_created(&mut self, ctx: &WindowContext, _window: &mut dyn PlatformWindow) {
-        match ctx.scene_key.as_str() {
-            CUBE_WINDOW_KEY => self.active_windows[0] = true,
-            GEARS_WINDOW_KEY => self.active_windows[1] = true,
-            SWARM_WINDOW_KEY => self.active_windows[2] = true,
-            _ => {}
-        }
-    }
-
-    fn on_window_close_requested(&mut self, ctx: &WindowContext) -> bool {
-        match ctx.scene_key.as_str() {
-            CUBE_WINDOW_KEY => self.active_windows[0] = false,
-            GEARS_WINDOW_KEY => self.active_windows[1] = false,
-            SWARM_WINDOW_KEY => self.active_windows[2] = false,
-            _ => {}
-        }
-        true
-    }
-
     fn scenes(&self) -> impl Scene {
         scenes! {
             Window::new("ScarletUI SGFX Showcase", self.launcher_content())
@@ -427,20 +415,21 @@ impl Application for SgfxShowcaseApp {
         }
     }
 
-    fn on_idle(&mut self) {
-        if !self.active_windows.iter().any(|active| *active) {
+    fn on_frame_presented(&mut self, ctx: &WindowContext) {
+        let scene = ctx.scene_key.as_str();
+        if !matches!(scene, CUBE_WINDOW_KEY | GEARS_WINDOW_KEY | SWARM_WINDOW_KEY) {
             return;
         }
+        // Prepare exactly one successor for the window that submitted a
+        // frame. SWS callbacks (or the runner's CPU pacing) decide when it
+        // renders. An extra 16.7-ms idle throttle can skip an early callback
+        // and turn a 60-Hz presentation stream into a 30-Hz animation.
         let now = Instant::now();
-        if now.duration_since(self.last_frame_at) < FRAME_INTERVAL {
-            return;
-        }
-        self.last_frame_at = now;
         self.frame_number = self.frame_number.wrapping_add(1);
         let elapsed_ns = u64::try_from(now.duration_since(self.animation_started_at).as_nanos())
             .unwrap_or(u64::MAX);
         let animation_seconds = elapsed_ns as f32 / 1_000_000_000.0;
-        if self.active_windows[0] {
+        if scene == CUBE_WINDOW_KEY {
             self.cube_frame.set(Arc::new(cube_frame(
                 self.frame_number,
                 animation_seconds,
@@ -448,14 +437,14 @@ impl Application for SgfxShowcaseApp {
                 &self.cube_texture,
             )));
         }
-        if self.active_windows[1] {
+        if scene == GEARS_WINDOW_KEY {
             self.gears_frame.set(Arc::new(gears_frame(
                 self.frame_number,
                 animation_seconds,
                 &self.gears,
             )));
         }
-        if self.active_windows[2] {
+        if scene == SWARM_WINDOW_KEY {
             self.swarm_frame.set(Arc::new(swarm_frame(
                 self.frame_number,
                 animation_seconds,
@@ -971,8 +960,16 @@ fn rotation_z(angle: f32) -> [f32; 16] {
 
 fn main() {
     println!("[ui-sgfx-showcase] starting");
-    let start_cube = env::args().skip(1).any(|argument| argument == "--cube");
-    let mut app = SgfxShowcaseApp::new(start_cube);
+    let mut start_cube = false;
+    let mut log_fps = false;
+    for argument in env::args().skip(1) {
+        match argument.as_str() {
+            "--cube" => start_cube = true,
+            "--log-fps" => log_fps = true,
+            _ => {}
+        }
+    }
+    let mut app = SgfxShowcaseApp::new(start_cube, log_fps);
     match app.run() {
         Ok(()) => println!("[ui-sgfx-showcase] exited"),
         Err(error) => {

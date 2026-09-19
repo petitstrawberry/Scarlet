@@ -1224,6 +1224,12 @@ enum SwsBackend {
     Sgfx,
 }
 
+enum GpuPresentResult {
+    Presented,
+    Retry,
+    CpuFallback,
+}
+
 fn selected_sws_backend() -> Result<SwsBackend, &'static str> {
     match env::var("SWS_BACKEND").ok() {
         None => Ok(SwsBackend::Auto),
@@ -4114,15 +4120,17 @@ impl Compositor {
     }
 
     /// Composite all layers directly to the display backing store.
-    fn composite_and_present(&mut self) -> Result<(), &'static str> {
+    fn composite_and_present(&mut self) -> Result<bool, &'static str> {
         if self.backend == SwsBackend::Sgfx && self.gpu_compositor.is_none() {
             return Err("SWS_BACKEND=sgfx compositor is unavailable");
         }
-        if self.composite_and_present_gpu()? {
-            return Ok(());
+        match self.composite_and_present_gpu()? {
+            GpuPresentResult::Presented => return Ok(true),
+            GpuPresentResult::Retry => return Ok(false),
+            GpuPresentResult::CpuFallback => {}
         }
         let dirty_rects = self.composite_pending_to_display()?;
-        self.present_damage(dirty_rects)
+        self.present_damage(dirty_rects).map(|()| true)
     }
 
     /// Disable the failed GPU backend and apply the selected fallback policy.
@@ -4196,14 +4204,14 @@ impl Compositor {
     ///
     /// In `auto` mode a GPU error triggers a full CPU redraw during this same
     /// frame. The strict `sgfx` mode instead propagates a fatal error.
-    fn composite_and_present_gpu(&mut self) -> Result<bool, &'static str> {
+    fn composite_and_present_gpu(&mut self) -> Result<GpuPresentResult, &'static str> {
         let damage = self.gpu_present_damage();
         let backdrops = self.window_backdrops();
         let overview_shadows = self.overview_render_shadows();
         let overview_cards = self.overview_render_backplates();
         let overview_remove_buttons = self.overview_remove_buttons();
         let Some(gpu_compositor) = self.gpu_compositor.as_mut() else {
-            return Ok(false);
+            return Ok(GpuPresentResult::CpuFallback);
         };
         let result = gpu_compositor.compose_and_present(
             &self.display,
@@ -4228,7 +4236,15 @@ impl Compositor {
                 self.full_redraw_needed = false;
                 self.pending_damage.clear();
                 self.presented_damage.clear();
-                Ok(true)
+                Ok(GpuPresentResult::Presented)
+            }
+            Err(super::gpu_compositor::GpuCompositionError::Busy) => {
+                // The accepted prefix retired, but this frame was not
+                // published. Preserve client buffers and all upload damage;
+                // retry after the worker progresses without disabling GPU.
+                self.full_redraw_needed = true;
+                std::thread::yield_now();
+                Ok(GpuPresentResult::Retry)
             }
             Err(error) => {
                 println!("[Compositor] GPU composition failed: {}", error);
@@ -4249,7 +4265,7 @@ impl Compositor {
                         println!("[Compositor] Using CPU fallback for this frame");
                     }
                 }
-                Ok(false)
+                Ok(GpuPresentResult::CpuFallback)
             }
         }
     }
@@ -6600,7 +6616,13 @@ impl Compositor {
                 }
                 super::trace::set_compositor_stage(super::trace::STAGE_GPU_COMPOSITE);
                 let present_damage = self.pending_present_damage();
-                self.composite_and_present()?;
+                if !self.composite_and_present()? {
+                    // Admission pressure did not publish an image. Keep all
+                    // damage and defer capture, frame callbacks and window
+                    // policy until a later retry is actually presented.
+                    super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
+                    return Ok(());
+                }
                 if self.gpu_compositor.is_some() {
                     self.capture_session.frame_presented(&present_damage);
                 } else {

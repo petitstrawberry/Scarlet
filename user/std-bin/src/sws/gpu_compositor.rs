@@ -30,6 +30,8 @@ pub(super) struct SharedFrameDamage {
 /// Scope of one failed GPU-composition frame.
 #[derive(Debug)]
 pub(super) enum GpuCompositionError {
+    /// Temporary admission pressure, with the discarded prefix fully retired.
+    Busy,
     /// Frame construction failed before valid work reached the backend.
     Frame(&'static str),
     /// The mapped target or selected backend can no longer be trusted.
@@ -61,6 +63,7 @@ impl From<&'static str> for GpuCompositionError {
 impl From<QuadSubmitError> for GpuCompositionError {
     fn from(error: QuadSubmitError) -> Self {
         match error {
+            QuadSubmitError::Busy => Self::Busy,
             QuadSubmitError::Recording(error) => Self::Frame(error),
             QuadSubmitError::Execution(error) => Self::Execution(error),
         }
@@ -70,6 +73,7 @@ impl From<QuadSubmitError> for GpuCompositionError {
 impl fmt::Display for GpuCompositionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Busy => formatter.write_str("GPU admission is temporarily busy"),
             Self::Frame(error) | Self::Backend(error) => formatter.write_str(error),
             Self::Execution(error) => write!(formatter, "SGFX execution failed: {error}"),
             Self::TrackedExecution(error) => {
@@ -1182,6 +1186,7 @@ impl GpuCompositor {
                     &backdrop_passes,
                 )
                 .map_err(|error| match error {
+                    QuadSubmitError::Busy => GpuCompositionError::Busy,
                     // Recording can fail after an earlier batch was accepted.
                     // Conservatively invalidate rather than reuse an uncertain
                     // target or acknowledge release of its imported sources.
@@ -1191,8 +1196,8 @@ impl GpuCompositor {
                     }
                 })?;
         } else {
-            // Adreno's existing synchronous path remains explicit until its
-            // backend advertises tracked submission.
+            // Older backends without negotiated asynchronous admission use
+            // synchronous execution with the same presentation contract.
             self.quad_renderer.submit_region_with_uploads(
                 &mut self.target,
                 render_area,
