@@ -374,41 +374,63 @@ impl EventDevice {
     /// event_dev.push_event(EV_SYN, SYN_REPORT, 0);
     /// ```
     pub fn push_event(&self, type_: u16, code: u16, value: i32) {
-        let event = InputEvent::new(type_, code, value);
+        self.push_events(&[(type_, code, value)]);
+    }
 
-        if type_ == EV_SW && code <= SW_MAX {
-            let bit = 1_u32 << u32::from(code);
-            let mut switch_state = self.switch_state.lock();
-            if value == 0 {
-                *switch_state &= !bit;
-            } else {
-                *switch_state |= bit;
+    /// Publish a batch with one timestamp, queue lock, and reader wakeup.
+    /// Callers may pass a complete frame ending in `SYN_REPORT` so no reader
+    /// can observe a partial frame before the producer has finished it.
+    pub fn push_events(&self, events: &[(u16, u16, i32)]) {
+        if events.is_empty() {
+            return;
+        }
+        for &(type_, code, value) in events {
+            if type_ == EV_SW && code <= SW_MAX {
+                let bit = 1_u32 << u32::from(code);
+                let mut switch_state = self.switch_state.lock();
+                if value == 0 {
+                    *switch_state &= !bit;
+                } else {
+                    *switch_state |= bit;
+                }
             }
         }
 
+        let time = crate::time::current_time_ns();
         {
             let mut q = self.queue.lock();
-
-            if q.discard_until_syn_report {
-                if type_ == super::event_types::EV_SYN && code == SYN_REPORT {
-                    q.discard_until_syn_report = false;
+            for &(type_, code, value) in events {
+                if q.discard_until_syn_report {
+                    if type_ == super::event_types::EV_SYN && code == SYN_REPORT {
+                        q.discard_until_syn_report = false;
+                    }
+                } else if q.events.len() >= EVENT_QUEUE_CAPACITY {
+                    // Discard the interrupted frame through its boundary so
+                    // the next accepted event begins a complete frame.
+                    q.events.clear();
+                    q.events.push_back(InputEvent {
+                        time,
+                        type_: super::event_types::EV_SYN,
+                        code: SYN_DROPPED,
+                        value: 0,
+                    });
+                    q.events.push_back(InputEvent {
+                        time,
+                        type_: super::event_types::EV_SYN,
+                        code: SYN_REPORT,
+                        value: 0,
+                    });
+                    q.discard_until_syn_report = true;
+                } else {
+                    q.events.push_back(InputEvent {
+                        time,
+                        type_,
+                        code,
+                        value,
+                    });
                 }
-            } else if q.events.len() >= EVENT_QUEUE_CAPACITY {
-                // Do not expose a partial frame after overflow. The triggering
-                // event and the rest of its frame are discarded until its
-                // boundary, so the next accepted event begins a complete frame.
-                q.events.clear();
-                q.events
-                    .push_back(InputEvent::new(super::event_types::EV_SYN, SYN_DROPPED, 0));
-                q.events
-                    .push_back(InputEvent::new(super::event_types::EV_SYN, SYN_REPORT, 0));
-                q.discard_until_syn_report = true;
-            } else {
-                q.events.push_back(event);
             }
         }
-
-        // Wake up any waiting tasks
         self.waker.wake_one();
     }
 
