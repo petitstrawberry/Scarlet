@@ -342,6 +342,7 @@ impl Application for TaskManagerApp {
 fn start_sampler(snapshot: State<Arc<Snapshot>>, cpu_cards: State<Vec<CpuSnapshot>>) {
     thread::spawn(move || {
         let mut previous_tasks = read_tasks();
+        let mut previous_sampled_at = Instant::now();
         let mut previous_cpu = read_cpu_usage();
         let mut previous_cpus = read_cpuinfo();
         let mut cpu_history = Vec::with_capacity(CPU_HISTORY_CAPACITY);
@@ -349,10 +350,10 @@ fn start_sampler(snapshot: State<Arc<Snapshot>>, cpu_cards: State<Vec<CpuSnapsho
         let mut sample_number: u64 = 0;
 
         loop {
-            let started = Instant::now();
             thread::sleep(SAMPLE_INTERVAL);
 
             let current_tasks = read_tasks();
+            let sampled_at = Instant::now();
             let current_cpu = read_cpu_usage();
             let cpus = read_cpuinfo();
             sample_number = sample_number.saturating_add(1);
@@ -365,12 +366,16 @@ fn start_sampler(snapshot: State<Arc<Snapshot>>, cpu_cards: State<Vec<CpuSnapsho
                 &previous_cpus,
                 cpus,
                 sample_number,
-                started.elapsed(),
+                sampled_at.duration_since(previous_sampled_at),
                 &mut cpu_history,
                 &mut per_cpu_histories,
             );
 
             previous_tasks = current_tasks;
+            // CPU counters cover the entire interval between snapshots,
+            // including time spent building and publishing the previous UI.
+            // Excluding that work inflates CPU% when the display is slow.
+            previous_sampled_at = sampled_at;
             previous_cpu = current_cpu;
             previous_cpus = next.cpus.clone();
             cpu_cards.set(next.cpus.clone());

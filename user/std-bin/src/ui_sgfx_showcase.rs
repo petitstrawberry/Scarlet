@@ -5,7 +5,7 @@ use std::boxed::Box;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::vec::Vec;
 
 use scarlet_ui::element::{
@@ -30,6 +30,7 @@ fn canvas_aspect() -> f32 {
     content_width / (content_height - HUD_HEIGHT)
 }
 const STATS_INTERVAL_NS: u64 = 500_000_000;
+const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 const PARTICLE_COUNT: usize = 72;
 const CUBE_WINDOW_KEY: &str = "cube";
 const GEARS_WINDOW_KEY: &str = "gears";
@@ -203,6 +204,7 @@ struct SgfxShowcaseApp {
     particle: Arc<SgfxMesh>,
     frame_number: u64,
     animation_started_at: Instant,
+    last_frame_at: Instant,
 }
 
 impl SgfxShowcaseApp {
@@ -218,6 +220,7 @@ impl SgfxShowcaseApp {
         let initial_cube = cube_frame(0, 0.0, &cube, &cube_texture);
         let initial_gears = gears_frame(0, 0.0, &gears);
         let initial_swarm = swarm_frame(0, 0.0, &particle);
+        let now = Instant::now();
         Self {
             cube_canvas: SgfxCanvasHandle::new(),
             gears_canvas: SgfxCanvasHandle::new(),
@@ -233,7 +236,8 @@ impl SgfxShowcaseApp {
             gears,
             particle,
             frame_number: 0,
-            animation_started_at: Instant::now(),
+            animation_started_at: now,
+            last_frame_at: now,
         }
     }
 
@@ -393,8 +397,12 @@ impl Application for SgfxShowcaseApp {
     }
 
     fn on_idle(&mut self) {
-        self.frame_number = self.frame_number.wrapping_add(1);
         let now = Instant::now();
+        if now.duration_since(self.last_frame_at) < FRAME_INTERVAL {
+            return;
+        }
+        self.last_frame_at = now;
+        self.frame_number = self.frame_number.wrapping_add(1);
         let elapsed_ns = u64::try_from(now.duration_since(self.animation_started_at).as_nanos())
             .unwrap_or(u64::MAX);
         let animation_seconds = elapsed_ns as f32 / 1_000_000_000.0;

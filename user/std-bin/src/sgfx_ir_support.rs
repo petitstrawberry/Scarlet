@@ -126,6 +126,7 @@ impl MappedTarget {
     ) -> Result<Self, Error> {
         let instance = Instance::new()?;
         let device = instance.open_device("/dev/gpu0")?;
+        println!("sgfx: selected backend {}", device.backend());
         let capabilities = device.capabilities();
         if !supports_mapped_target(
             capabilities.supports_rendering(),
