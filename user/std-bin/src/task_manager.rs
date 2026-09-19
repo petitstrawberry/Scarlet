@@ -1,4 +1,4 @@
-//! Live task and CPU overview for the Scarlet desktop.
+//! Live task, CPU, and device-frequency overview for the Scarlet desktop.
 //!
 //! The task manager deliberately keeps the data path small and synchronous:
 //! the kernel is sampled on a worker thread, the resulting snapshot is sent
@@ -39,6 +39,8 @@ const CPU_GRID_SPACING: f32 = 10.0;
 const CPU_GRID_COLUMNS: usize = 4;
 const CPU_GRID_MINIMUM_CELL_WIDTH: f32 = 190.0;
 const CPU_CARD_GRAPH_HEIGHT: f32 = 62.0;
+const DEVICE_GRAPH_HEIGHT: f32 = 116.0;
+const DEVICE_CARD_HEIGHT: f32 = 332.0;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(750);
 const MAX_TASKS: usize = 8_192;
 const CPU_HISTORY_CAPACITY: usize = 60;
@@ -243,6 +245,23 @@ struct CpuSnapshot {
 }
 
 #[derive(Clone, Debug, Default)]
+struct DeviceFrequencySnapshot {
+    name: String,
+    governor: String,
+    min_khz: u64,
+    max_khz: u64,
+    thermal_max_khz: u64,
+    requested_khz: u64,
+    target_khz: u64,
+    current_khz: Option<u64>,
+    utilization_pct: Option<u32>,
+    sample_count: u64,
+    failed_samples: u64,
+    available_khz: Vec<u64>,
+    history: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Default)]
 struct TaskCounts {
     total: usize,
     running: usize,
@@ -272,6 +291,7 @@ struct SchedulerSummary {
 #[derive(Clone, Debug)]
 struct Snapshot {
     cpus: Vec<CpuSnapshot>,
+    devices: Vec<DeviceFrequencySnapshot>,
     tasks: Vec<TaskRow>,
     counts: TaskCounts,
     scheduler: SchedulerSummary,
@@ -285,6 +305,7 @@ impl Default for Snapshot {
     fn default() -> Self {
         Self {
             cpus: Vec::new(),
+            devices: Vec::new(),
             tasks: Vec::new(),
             counts: TaskCounts::default(),
             scheduler: SchedulerSummary::default(),
@@ -347,6 +368,7 @@ fn start_sampler(snapshot: State<Arc<Snapshot>>, cpu_cards: State<Vec<CpuSnapsho
         let mut previous_cpus = read_cpuinfo();
         let mut cpu_history = Vec::with_capacity(CPU_HISTORY_CAPACITY);
         let mut per_cpu_histories = BTreeMap::new();
+        let mut device_histories = BTreeMap::new();
         let mut sample_number: u64 = 0;
 
         loop {
@@ -358,7 +380,7 @@ fn start_sampler(snapshot: State<Arc<Snapshot>>, cpu_cards: State<Vec<CpuSnapsho
             let cpus = read_cpuinfo();
             sample_number = sample_number.saturating_add(1);
 
-            let next = build_snapshot(
+            let mut next = build_snapshot(
                 &previous_tasks,
                 &current_tasks,
                 previous_cpu,
@@ -370,6 +392,8 @@ fn start_sampler(snapshot: State<Arc<Snapshot>>, cpu_cards: State<Vec<CpuSnapsho
                 &mut cpu_history,
                 &mut per_cpu_histories,
             );
+            next.devices = read_device_frequencies();
+            update_device_histories(&mut device_histories, &mut next.devices);
 
             previous_tasks = current_tasks;
             // CPU counters cover the entire interval between snapshots,
@@ -477,6 +501,7 @@ fn build_snapshot(
 
     Snapshot {
         cpus,
+        devices: Vec::new(),
         tasks: rows,
         counts,
         scheduler: SchedulerSummary { runnable },
@@ -665,6 +690,73 @@ fn read_cpuinfo() -> Vec<CpuSnapshot> {
     cpus
 }
 
+fn read_device_frequencies() -> Vec<DeviceFrequencySnapshot> {
+    fs::read_to_string("/dev/devfreq")
+        .map(|contents| parse_device_frequencies(&contents))
+        .unwrap_or_default()
+}
+
+fn parse_device_frequencies(contents: &str) -> Vec<DeviceFrequencySnapshot> {
+    let mut devices = Vec::new();
+    let mut current: Option<DeviceFrequencySnapshot> = None;
+
+    for line in contents.lines() {
+        if line.starts_with("device=") {
+            if let Some(device) = current.take() {
+                devices.push(device);
+            }
+            current = Some(DeviceFrequencySnapshot::default());
+        }
+        let Some(device) = current.as_mut() else {
+            continue;
+        };
+        if let Some(values) = line.strip_prefix("available_khz=") {
+            device.available_khz = values
+                .split_whitespace()
+                .filter_map(|value| value.parse().ok())
+                .collect();
+            continue;
+        }
+        for word in line.split_whitespace() {
+            let Some((key, value)) = word.split_once('=') else {
+                continue;
+            };
+            match key {
+                "device" => device.name = value.to_string(),
+                "governor" => device.governor = value.to_string(),
+                "min_khz" => device.min_khz = value.parse().unwrap_or(0),
+                "max_khz" => device.max_khz = value.parse().unwrap_or(0),
+                "thermal_max_khz" => device.thermal_max_khz = value.parse().unwrap_or(0),
+                "requested_khz" => device.requested_khz = value.parse().unwrap_or(0),
+                "target_khz" => device.target_khz = value.parse().unwrap_or(0),
+                "current_khz" => device.current_khz = value.parse().ok(),
+                "utilization_pct" => device.utilization_pct = value.parse().ok(),
+                "sample_count" => device.sample_count = value.parse().unwrap_or(0),
+                "failed_samples" => device.failed_samples = value.parse().unwrap_or(0),
+                _ => {}
+            }
+        }
+    }
+    if let Some(device) = current {
+        devices.push(device);
+    }
+    devices.retain(|device| !device.name.is_empty());
+    devices
+}
+
+fn update_device_histories(
+    histories: &mut BTreeMap<String, Vec<u32>>,
+    devices: &mut [DeviceFrequencySnapshot],
+) {
+    for device in devices {
+        let history = histories.entry(device.name.clone()).or_default();
+        if let Some(utilization) = device.utilization_pct {
+            push_cpu_history(history, utilization.min(100) * 10);
+        }
+        device.history = history.clone();
+    }
+}
+
 fn decode_name(bytes: &[u8; 64]) -> String {
     let length = bytes
         .iter()
@@ -705,6 +797,7 @@ fn task_manager_view(
     let palette = ColorPalette::default();
     let overview_snapshot = snapshot.clone();
     let cpu_snapshot = snapshot.clone();
+    let device_snapshot = snapshot.clone();
     let task_snapshot = snapshot.clone();
     let tabs = vec![
         TabItem::new("Overview", move || overview_page(overview_snapshot.clone())),
@@ -714,6 +807,9 @@ fn task_manager_view(
                 cpu_cards.clone(),
                 selected_cpu.clone(),
             )
+        }),
+        TabItem::new("GPU / Devices", move || {
+            device_page(device_snapshot.clone())
         }),
         TabItem::new("Tasks", move || task_page(task_snapshot.clone())),
     ];
@@ -798,6 +894,143 @@ fn cpu_page(
     .padding(14.0)
     .frame(f32::INFINITY, PANEL_HEIGHT - TAB_BAR_HEIGHT)
     .background(palette.surface())
+}
+
+fn device_page(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
+    let palette = ColorPalette::default();
+    let count = snapshot.devices.len();
+    let list = ScrollView::new(LazyVStack::new(
+        count.max(1),
+        DEVICE_CARD_HEIGHT,
+        move |index| device_card(snapshot.devices.get(index).cloned()),
+    ))
+    .frame(f32::INFINITY, 354.0);
+
+    vstack! {
+        hstack! {
+            Text::new("Device frequency")
+                .font_size(16.0)
+                .color(palette.text_primary()),
+            Spacer::new(),
+            Text::new(format!("{} device(s) · {} ms interval", count, SAMPLE_INTERVAL.as_millis()))
+                .font_size(11.0)
+                .color(palette.text_secondary()),
+        },
+        list,
+    }
+    .spacing(10.0)
+    .alignment(Alignment::Leading)
+    .padding(14.0)
+    .frame(f32::INFINITY, PANEL_HEIGHT - TAB_BAR_HEIGHT)
+    .background(palette.surface())
+}
+
+fn device_card(device: Option<DeviceFrequencySnapshot>) -> impl View + Clone + use<> {
+    let palette = ColorPalette::default();
+    let available = device.is_some();
+    let device = device.unwrap_or_default();
+    let title = if available {
+        device.name.clone()
+    } else {
+        String::from("No device frequency policies available")
+    };
+    let governor = if device.governor.is_empty() {
+        String::from("The kernel has not registered a device policy")
+    } else {
+        format!("Governor: {}", device.governor)
+    };
+    let utilization = device
+        .utilization_pct
+        .map(|value| format!("{}%", value.min(100)))
+        .unwrap_or_else(|| String::from("—"));
+    let current = device
+        .current_khz
+        .map(format_frequency_value)
+        .unwrap_or_else(|| String::from("—"));
+    let target = frequency_or_dash(device.target_khz);
+    let maximum = frequency_or_dash(device.max_khz);
+    let thermal_limit = frequency_or_dash(device.thermal_max_khz);
+    let history = device.history.clone();
+    let available_rates = if device.available_khz.is_empty() {
+        String::from("OPPs: unavailable")
+    } else {
+        format!(
+            "OPPs: {}",
+            device
+                .available_khz
+                .iter()
+                .map(|frequency| format_frequency_value(*frequency))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        )
+    };
+    let details = if available {
+        format!(
+            "Requested: {} · Minimum: {} · Samples: {} · Failed: {}",
+            frequency_or_dash(device.requested_khz),
+            frequency_or_dash(device.min_khz),
+            device.sample_count,
+            device.failed_samples,
+        )
+    } else {
+        String::from("GPU data will appear when a device frequency driver is available")
+    };
+
+    vstack! {
+        hstack! {
+            vstack! {
+                Text::new(title)
+                    .font_size(16.0)
+                    .color(palette.text_primary()),
+                Text::new(governor)
+                    .font_size(11.0)
+                    .color(palette.text_secondary()),
+            }
+            .spacing(2.0),
+            Spacer::new(),
+            Text::new(format!("{} utilization", utilization))
+                .font_size(16.0)
+                .color(palette.info()),
+        },
+        ProgressView::new(device.utilization_pct.unwrap_or(0).min(100) as f32 / 100.0),
+        device_history_graph(history),
+        hstack! {
+            summary_card("CURRENT", current, palette.info()),
+            summary_card("TARGET", target, palette.primary()),
+            summary_card("MAXIMUM", maximum, palette.success()),
+            summary_card("THERMAL CAP", thermal_limit, palette.warning()),
+        }
+        .spacing(8.0),
+        Text::new(available_rates)
+            .font_size(10.0)
+            .color(palette.text_secondary()),
+        Text::new(details)
+            .font_size(10.0)
+            .color(palette.text_secondary()),
+    }
+    .spacing(8.0)
+    .padding(12.0)
+    .frame(f32::INFINITY, DEVICE_CARD_HEIGHT)
+    .background(palette.surface_variant())
+    .clip_radius(8.0)
+}
+
+fn device_history_graph(history: Vec<u32>) -> impl View + Clone + use<> {
+    let palette = ColorPalette::default();
+    let background = palette.background_secondary();
+    let grid = palette.border().with_opacity(0.32);
+    let line = palette.info();
+
+    CanvasView::new(
+        600.0,
+        DEVICE_GRAPH_HEIGHT,
+        Rc::new(move |buffer, width, height| {
+            let mut canvas = Canvas::new(buffer, width, height);
+            draw_usage_history(&mut canvas, width, height, &history, background, grid, line);
+        }),
+    )
+    .frame(f32::INFINITY, DEVICE_GRAPH_HEIGHT)
+    .clip_radius(5.0)
 }
 
 fn cpu_overall_summary(snapshot: &Snapshot) -> impl View + Clone + use<> {
@@ -1020,7 +1253,7 @@ fn cpu_card(cpu: CpuSnapshot) -> impl View + Clone + use<> {
         cpu.target_frequency_khz
     };
     let frequency = if frequency_khz > 0 {
-        format_frequency_value(frequency_khz)
+        format_frequency_value(frequency_khz as u64)
     } else {
         String::from("—")
     };
@@ -1163,7 +1396,15 @@ fn util_to_per_mille(util: u32) -> u32 {
     ((util.min(SCHED_UTIL_SCALE) as u64 * 1_000) / SCHED_UTIL_SCALE as u64) as u32
 }
 
-fn format_frequency_value(khz: u32) -> String {
+fn frequency_or_dash(khz: u64) -> String {
+    if khz == 0 {
+        String::from("—")
+    } else {
+        format_frequency_value(khz)
+    }
+}
+
+fn format_frequency_value(khz: u64) -> String {
     if khz >= 1_000_000 {
         format!("{}.{:02} GHz", khz / 1_000_000, (khz % 1_000_000) / 10_000)
     } else if khz >= 1_000 {
@@ -1204,6 +1445,38 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_multiple_device_policies_and_unavailable_measurements() {
+        let mut devices = parse_device_frequencies(
+            "device=gm20b governor=simple_ondemand min_khz=76800 max_khz=307200 thermal_max_khz=230400 requested_khz=153600 target_khz=153600\n\
+             current_khz=153600\n\
+             utilization_pct=37\n\
+             sample_count=28 failed_samples=1\n\
+             available_khz=76800 153600 230400 307200\n\
+             device=other governor=userspace min_khz=100 max_khz=200 thermal_max_khz=200 requested_khz=100 target_khz=100\n\
+             current_khz=unavailable\n\
+             utilization_pct=unavailable\n\
+             sample_count=0 failed_samples=0\n\
+             available_khz=100 200\n",
+        );
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].name, "gm20b");
+        assert_eq!(devices[0].utilization_pct, Some(37));
+        assert_eq!(devices[0].thermal_max_khz, 230_400);
+        assert_eq!(
+            devices[0].available_khz,
+            [76_800, 153_600, 230_400, 307_200]
+        );
+        assert_eq!(devices[1].name, "other");
+        assert_eq!(devices[1].current_khz, None);
+        assert_eq!(devices[1].utilization_pct, None);
+
+        let mut histories = BTreeMap::new();
+        update_device_histories(&mut histories, &mut devices);
+        assert_eq!(devices[0].history, [370]);
+        assert!(devices[1].history.is_empty());
+    }
 
     fn task_info(
         pid: usize,
