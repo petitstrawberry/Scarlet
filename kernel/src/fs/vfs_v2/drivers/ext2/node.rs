@@ -377,7 +377,6 @@ impl StreamOps for Ext2FileObject {
         let inode = ext2_fs
             .read_inode(self.inode_number)
             .map_err(|_| StreamError::IoError)?;
-        let cache_id = self.cache_id();
         let file_size = self.effective_size(inode.get_size() as usize);
 
         if buffer.is_empty() {
@@ -401,18 +400,7 @@ impl StreamOps for Ext2FileObject {
             let last_page = ((end_pos - 1) / PAGE_SIZE) as PageIndex;
             let page_count = usize::try_from(last_page - first_page + 1)
                 .map_err(|_| StreamError::InvalidArgument)?;
-            let mut pinned_pages = Vec::with_capacity(page_count);
-
-            for page_index in first_page..=last_page {
-                let pinned = PageCacheManager::global()
-                    .pin_or_load(cache_id, page_index, |paddr| {
-                        ext2_fs
-                            .read_page_content(self.inode_number, page_index, paddr)
-                            .map_err(|_| "Failed to load page")
-                    })
-                    .map_err(|_| StreamError::IoError)?;
-                pinned_pages.push(pinned);
-            }
+            let pinned_pages = ext2_fs.pin_file_pages(self.inode_number, first_page, page_count)?;
 
             // Reserve exactly the range whose pages were loaded. If another
             // thread advanced this shared file description meanwhile, discard
@@ -869,71 +857,43 @@ impl FileObject for Ext2FileObject {
     }
 
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
-        let cache_id = self.cache_id();
-        let file_size = {
-            let fs = self
-                .filesystem
-                .read()
-                .as_ref()
-                .and_then(|weak| weak.upgrade())
-                .ok_or(StreamError::Closed)?;
-            let ext2_fs = fs
-                .as_any()
-                .downcast_ref::<Ext2FileSystem>()
-                .ok_or(StreamError::NotSupported)?;
-            let inode_size = ext2_fs
-                .read_inode(self.inode_number)
-                .map_err(|_| StreamError::IoError)?
-                .size as usize;
-            PageCacheManager::global()
-                .cached_object_size(cache_id)
-                .unwrap_or(inode_size)
-        };
-
+        let fs = self
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
+        let ext2_fs = fs
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+        let inode_size = ext2_fs
+            .read_inode(self.inode_number)
+            .map_err(|_| StreamError::IoError)?
+            .get_size() as usize;
+        let file_size = self.effective_size(inode_size);
         let off = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
-        if off >= file_size {
+        if off >= file_size || buffer.is_empty() {
             return Ok(0);
         }
-
-        let mut total_read = 0usize;
-        while total_read < buffer.len() && off + total_read < file_size {
-            let absolute = off + total_read;
-            let page_index = (absolute / PAGE_SIZE) as PageIndex;
-            let offset_in_page = absolute % PAGE_SIZE;
-
-            let pinned = PageCacheManager::global()
-                .pin_or_load(cache_id, page_index, |paddr| {
-                    let fs = self
-                        .filesystem
-                        .read()
-                        .as_ref()
-                        .and_then(|weak| weak.upgrade())
-                        .ok_or("filesystem gone")?;
-                    let ext2_fs = fs
-                        .as_any()
-                        .downcast_ref::<Ext2FileSystem>()
-                        .ok_or("bad fs type")?;
-                    ext2_fs
-                        .read_page_content(self.inode_number, page_index, paddr)
-                        .map_err(|_| "Failed to load page")
-                })
-                .map_err(|_| StreamError::IoError)?;
-
+        let bytes = buffer.len().min(file_size - off);
+        let first_page = (off / PAGE_SIZE) as PageIndex;
+        let count = (off % PAGE_SIZE + bytes).div_ceil(PAGE_SIZE);
+        let pinned = ext2_fs.pin_file_pages(self.inode_number, first_page, count)?;
+        let mut copied = 0;
+        for page in pinned {
+            let page_offset = (off + copied) % PAGE_SIZE;
+            let len = (PAGE_SIZE - page_offset).min(bytes - copied);
             unsafe {
-                let src = (phys_to_virt(pinned.paddr()) as *const u8).add(offset_in_page);
-                let remaining_in_page = PAGE_SIZE - offset_in_page;
-                let remaining_file = file_size - (off + total_read);
-                let remaining_buf = buffer.len() - total_read;
-                let chunk = core::cmp::min(
-                    remaining_in_page,
-                    core::cmp::min(remaining_file, remaining_buf),
+                core::ptr::copy_nonoverlapping(
+                    (phys_to_virt(page.paddr()) as *const u8).add(page_offset),
+                    buffer.as_mut_ptr().add(copied),
+                    len,
                 );
-                core::ptr::copy_nonoverlapping(src, buffer.as_mut_ptr().add(total_read), chunk);
-                total_read += chunk;
             }
+            copied += len;
         }
-
-        Ok(total_read)
+        Ok(copied)
     }
 
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<usize, StreamError> {
@@ -1075,6 +1035,13 @@ impl FileObject for Ext2FileObject {
     }
 
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
+        // Metadata may read an uncached inode from a sleepable block device.
+        // Resolve EOF before taking the IRQ-off file-position lock.
+        let end_size = if let SeekFrom::End(_) = &whence {
+            self.metadata()?.size as u64
+        } else {
+            0
+        };
         let mut pos = self.position.lock();
 
         match whence {
@@ -1096,7 +1063,7 @@ impl FileObject for Ext2FileObject {
                 Ok(*pos)
             }
             SeekFrom::End(offset) => {
-                let file_size = self.metadata()?.size as u64;
+                let file_size = end_size;
 
                 let new_pos = if offset >= 0 {
                     file_size.saturating_add(offset as u64)

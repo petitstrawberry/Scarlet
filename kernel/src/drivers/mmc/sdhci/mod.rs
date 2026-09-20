@@ -1,14 +1,13 @@
 //! Generic Secure Digital Host Controller Interface support.
 //!
-//! This module implements the standard SDHCI register interface using polling
-//! and programmed I/O. Bus discovery and platform quirks live in sibling
-//! modules so the command engine can be reused by both QEMU PCI SDHCI and the
-//! future Qualcomm SC7180 binding.
+//! This module implements the standard SDHCI register interface using PIO or
+//! owned ADMA2 transfers. Bus discovery and platform quirks live in bindings.
 
 use crate::device::mmc::{
     MmcBusWidth, MmcCommand, MmcData, MmcError, MmcHost, MmcResponse, MmcResponseType, MmcResult,
 };
 
+mod adma;
 pub mod pci;
 
 mod register {
@@ -32,6 +31,8 @@ mod register {
     pub const ERROR_SIGNAL_ENABLE: usize = 0x3a;
     pub const HOST_CONTROL2: usize = 0x3e;
     pub const CAPABILITIES: usize = 0x40;
+    pub const ADMA_ADDRESS: usize = 0x58;
+    pub const ADMA_ADDRESS_HIGH: usize = 0x5c;
     pub const HOST_VERSION: usize = 0xfe;
 }
 
@@ -44,6 +45,7 @@ mod present_state {
 }
 
 mod transfer_mode {
+    pub const DMA_ENABLE: u16 = 1 << 0;
     pub const BLOCK_COUNT_ENABLE: u16 = 1 << 1;
     pub const READ: u16 = 1 << 4;
     pub const MULTI_BLOCK: u16 = 1 << 5;
@@ -131,6 +133,10 @@ pub struct SdhciHostConfig {
 
     /// Reset the command and data state machines together on any error.
     pub reset_command_and_data_together: bool,
+
+    /// Use 16-byte rather than standard 12-byte ADMA2 64-bit descriptors.
+    /// NVIDIA's Tegra210 SDHCI integration uses this padded address format.
+    pub adma2_64bit_descriptor_16: bool,
 }
 
 /// Generic MMIO-backed SDHCI host.
@@ -140,6 +146,9 @@ pub struct SdhciHost {
     base_clock_hz: u32,
     specification_version: u8,
     config: SdhciHostConfig,
+    adma: Option<adma::Adma2>,
+    adma_active: bool,
+    poisoned: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -274,6 +283,9 @@ impl SdhciHost {
             base_clock_hz: Self::normalize_base_clock_hz(base_clock_hz),
             specification_version,
             config,
+            adma: None,
+            adma_active: false,
+            poisoned: false,
         }
     }
 
@@ -284,6 +296,32 @@ impl SdhciHost {
     /// The MMIO base address supplied when this host was constructed.
     pub const fn mmio_base(&self) -> usize {
         self.mmio_base
+    }
+
+    /// Enable ADMA2 after the binding has established a valid DMA context.
+    /// Unsupported controllers retain the existing PIO path. No caller buffer
+    /// is exposed to DMA; mappings and aligned storage are allocated once.
+    pub fn enable_adma2(
+        &mut self,
+        context: &crate::device::iommu::DmaContext,
+    ) -> Result<(), &'static str> {
+        if self.adma_active || self.poisoned || self.adma.is_some() {
+            return Err("SDHCI: cannot replace an active DMA context");
+        }
+        let capabilities = self.read32(register::CAPABILITIES);
+        if capabilities == u32::MAX
+            || capabilities & (1 << 19) == 0
+            || self.specification_version < 1
+            || self.specification_version > 3
+        {
+            return Err("SDHCI: ADMA2 requires a supported SDHCI 2.00/3.00/4.00 controller");
+        }
+        self.adma = Some(adma::Adma2::new(
+            context,
+            capabilities & (1 << 28) != 0,
+            self.config.adma2_64bit_descriptor_16 || self.specification_version == 3,
+        )?);
+        Ok(())
     }
 
     /// Return the source clock used to program the SDHCI divider.
@@ -515,6 +553,10 @@ impl SdhciHost {
 
     fn wait_for_interrupt(&self, wanted: u32, data_phase: bool) -> MmcResult<u32> {
         let started = crate::time::current_time();
+        let may_sleep = self.adma_active
+            && crate::arch::interrupt::are_interrupts_enabled()
+            && crate::sync::preempt::preempt_count() == 0
+            && crate::sched::scheduler::scheduler_ready(crate::arch::get_cpu().get_cpuid());
         loop {
             let status = self.read32(register::INTERRUPT_STATUS);
             if status & interrupt::ERROR != 0 || status & interrupt::ERROR_MASK != 0 {
@@ -545,7 +587,20 @@ impl SdhciHost {
                 let _ = self.reset_lines(reset);
                 return Err(MmcError::Timeout);
             }
-            core::hint::spin_loop();
+            // DMA moves the payload independently. After a short command
+            // latency window, relinquish the CPU between status checks. Early
+            // identification still works before the scheduler/timer is ready.
+            if may_sleep && crate::time::current_time().wrapping_sub(started) >= 50 {
+                if let Some(task) = crate::task::mytask() {
+                    task.sleep_with_precision(
+                        task.get_trapframe(),
+                        100_000,
+                        crate::timer::TimerPrecision::Exact,
+                    );
+                }
+            } else {
+                core::hint::spin_loop();
+            }
         }
     }
 
@@ -616,6 +671,9 @@ impl MmcHost for SdhciHost {
     }
 
     fn reset(&mut self) -> MmcResult<()> {
+        if self.poisoned {
+            return Err(MmcError::Data);
+        }
         let reset_plan = Self::reset_plan(self.preserves_power_control());
         let inherited_power_control = if reset_plan.write_power_control {
             None
@@ -715,6 +773,35 @@ impl MmcHost for SdhciHost {
         command: MmcCommand,
         data: Option<MmcData<'_>>,
     ) -> MmcResult<MmcResponse> {
+        if self.poisoned {
+            return Err(MmcError::Data);
+        }
+        let result = self.issue_command(command, data);
+        if self.adma_active {
+            // Every failure after COMMAND publication must stop DMA before
+            // storage can be reused or freed, including command-phase errors.
+            if self
+                .reset_lines(software_reset::COMMAND | software_reset::DATA)
+                .is_err()
+            {
+                self.poisoned = true;
+                // A broken controller may still fetch descriptors/data. Keep
+                // mappings and backing alive permanently rather than freeing
+                // memory that hardware can still access.
+                core::mem::forget(self.adma.take());
+            }
+            self.adma_active = false;
+        }
+        result
+    }
+}
+
+impl SdhciHost {
+    fn issue_command(
+        &mut self,
+        command: MmcCommand,
+        data: Option<MmcData<'_>>,
+    ) -> MmcResult<MmcResponse> {
         if !self.card_present() {
             return Err(MmcError::NoMedia);
         }
@@ -741,6 +828,8 @@ impl MmcHost for SdhciHost {
         }
 
         let data_phase = data_len != 0;
+        let use_adma =
+            self.adma.is_some() && data_len >= MMC_BLOCK_SIZE && data_len <= adma::MAX_TRANSFER;
         // CMD12 must be able to abort a data transfer with DATA_INHIBIT set.
         self.wait_for_inhibit(
             command.index() != 12
@@ -770,12 +859,53 @@ impl MmcHost for SdhciHost {
                 mode |= transfer_mode::MULTI_BLOCK | (1 << 2); // Auto CMD12.
             }
         }
+        let dma_control = if use_adma {
+            let adma = self.adma.as_mut().unwrap();
+            adma.prepare(
+                data_len,
+                match data.as_ref() {
+                    Some(MmcData::Write(buffer)) => Some(*buffer),
+                    _ => None,
+                },
+            );
+            let address = adma.table_address();
+            let control = adma.host_control();
+            let address_64 = control == 3 << 3;
+            if self.specification_version == 3 {
+                // SDHCI 4.00 selects address width in HOST_CONTROL2. The
+                // HOST_CONTROL DMA selector remains ADMA2 (not legacy ADMA64).
+                self.write16(
+                    register::HOST_CONTROL2,
+                    (self.read16(register::HOST_CONTROL2) & !(1 << 13))
+                        | (1 << 12)
+                        | if address_64 { 1 << 13 } else { 0 },
+                );
+            }
+            self.write32(register::ADMA_ADDRESS, address as u32);
+            if address_64 {
+                self.write32(register::ADMA_ADDRESS_HIGH, (address >> 32) as u32);
+            }
+            mode |= transfer_mode::DMA_ENABLE;
+            if self.specification_version == 3 {
+                2 << 3
+            } else {
+                control
+            }
+        } else {
+            0
+        };
+        // PIO must not inherit ADMA selection from the preceding command.
+        self.write8(
+            register::HOST_CONTROL,
+            (self.read8(register::HOST_CONTROL) & !HOST_CONTROL_DMA_SELECT_MASK) | dma_control,
+        );
         // Program TRANSFER_MODE for every command, including command-only
         // operations. Firmware may leave this register non-zero, and the
         // controller samples it together with the subsequent COMMAND write.
         self.write16(register::TRANSFER_MODE, mode);
         self.write32(register::ARGUMENT, command.argument());
         let encoded_command = Self::command_bits(command, data_phase);
+        self.adma_active = use_adma;
         self.write16(register::COMMAND, encoded_command);
 
         let status = self.wait_for_interrupt(interrupt::COMMAND_COMPLETE, false)?;
@@ -804,10 +934,13 @@ impl MmcHost for SdhciHost {
             MmcResponse::new(words)
         };
 
-        match data {
-            Some(MmcData::Read(buffer)) => self.read_pio(buffer, block_size)?,
-            Some(MmcData::Write(buffer)) => self.write_pio(buffer, block_size)?,
-            None => {}
+        let mut data = data;
+        if !use_adma {
+            match data.as_mut() {
+                Some(MmcData::Read(buffer)) => self.read_pio(buffer, block_size)?,
+                Some(MmcData::Write(buffer)) => self.write_pio(buffer, block_size)?,
+                None => {}
+            }
         }
 
         if data_phase {
@@ -816,6 +949,12 @@ impl MmcHost for SdhciHost {
                 register::INTERRUPT_STATUS,
                 status & interrupt::TRANSFER_COMPLETE,
             );
+            self.adma_active = false;
+            if use_adma {
+                if let Some(MmcData::Read(buffer)) = data {
+                    self.adma.as_ref().unwrap().finish_read(buffer);
+                }
+            }
         } else if matches!(command.response(), MmcResponseType::R1b) {
             self.wait_until(COMMAND_TIMEOUT_US, || {
                 self.read32(register::PRESENT_STATE) & present_state::DATA_INHIBIT == 0
@@ -823,6 +962,16 @@ impl MmcHost for SdhciHost {
         }
 
         Ok(response)
+    }
+}
+
+impl Drop for SdhciHost {
+    fn drop(&mut self) {
+        // Bindings may already have unmapped MMIO, so no hardware access here.
+        // Normal completion/error handling retires DMA before reaching Drop.
+        if self.adma_active {
+            core::mem::forget(self.adma.take());
+        }
     }
 }
 
