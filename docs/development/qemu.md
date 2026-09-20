@@ -117,9 +117,36 @@ to `none` for both display and GPU. Serial output remains in the terminal.
 | `SCARLET_QEMU_DISPLAY` | All | Full: host-based selection above; microvm: `none` | Replaces the entire `-display` value, including options. Explicit values do not inherit the default display options listed above. |
 | `SCARLET_QEMU_GPU` | All | Full: display-based selection above; microvm: `none` | GPU `-device` value, or `none` to omit the GPU. Explicit values override display-based selection. |
 | `SCARLET_QEMU_INPUT` | Full | `1` | Adds virtio keyboard and mouse devices. |
+| `SCARLET_QEMU_TOUCH` | AArch64 full | `0` | Adds a direct `virtio-multitouch-device` for touchscreen testing; use QMP `input-send-event` with `mtt` events for repeatable contacts. |
 | `SCARLET_QEMU_AUDIO` | All | `0` | Adds a virtio sound device and a host audio backend. |
 | `SCARLET_QEMU_AUDIO_DRIVER` | All | `coreaudio` | QEMU audio backend used when audio is enabled. This default is not selected by host OS; Linux users must choose an available backend. |
 | `SCARLET_QEMU_SERIAL` | Full | `mon:stdio` | Replaces the QEMU serial backend. Microvm keeps `mon:stdio`. |
+
+`virtio-tablet` supplies one absolute pointer; it is useful for pointer
+positioning but does not exercise multi-contact touch. QEMU's
+[`virtio-multitouch` device](https://github.com/qemu/qemu/blob/master/hw/input/virtio-input-hid.c)
+declares type-B slots and `INPUT_PROP_DIRECT`. Its
+[`input-send-event` QMP command](https://www.qemu.org/docs/master/interop/qemu-qmp-ref.html)
+accepts `mtt` events. Scarlet's AArch64 runner only adds this device when
+`SCARLET_QEMU_TOUCH=1`; it does not turn mouse movement into touch automatically.
+QEMU selects the first active handler for each event type. With both tablet and
+multitouch devices, absolute position can reach the tablet while `BTN_LEFT`
+reaches the multitouch device. SWS accepts a standalone button report from
+that device and suppresses a button mirrored by an active touch contact, so
+ordinary mouse clicks still work without changing QEMU's handler priority.
+See QEMU's [input handler selection](https://github.com/qemu/qemu/blob/master/ui/input.c)
+and [VirtIO HID event masks](https://github.com/qemu/qemu/blob/master/hw/input/virtio-input-hid.c).
+
+With `SCARLET_QEMU_QMP=/tmp/scarlet-input-qmp.sock` set on the runner, inject
+contacts using normalized display coordinates (0 to 1):
+
+```sh
+python3 tools/qmp_touch.py tap 0.5 0.5
+python3 tools/qmp_touch.py swipe 0.3 0.6 0.7 0.6
+python3 tools/qmp_touch.py pinch 0.5 0.5 0.1 0.2
+```
+
+The pinch radii are each contact's horizontal distance from the center.
 
 Input capture differs by backend:
 

@@ -187,8 +187,8 @@ sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "d53d9b0062e18a7
 sws-protocol = { path = "../lib/sws-protocol" }
 sws-client = { path = "../lib/sws-client" }
 scarlet-os = { path = "../lib/scarlet-os" }
-scarlet-ui = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ddad057af60a7db7f463f4c653bc0ab220dc4658", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
-scarlet-ui-macros = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ddad057af60a7db7f463f4c653bc0ab220dc4658", package = "scarlet-ui-macros" }
+scarlet-ui = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ac138e357299bd42724118e6e196c483464b741b", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
+scarlet-ui-macros = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ac138e357299bd42724118e6e196c483464b741b", package = "scarlet-ui-macros" }
 scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
 scarlet-sys = { path = "../lib/scarlet-sys" }
 sunset = { path = "../lib/sunset", default-features = false, features = ["larger", "mlkem", "openssh-key", "rsa"] }

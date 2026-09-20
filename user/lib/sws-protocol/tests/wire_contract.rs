@@ -48,7 +48,7 @@ fn request_routing_has_a_fixed_eight_byte_header() {
 
 #[test]
 fn capability_version_bits_and_payload_are_independent_of_package_version() {
-    assert_eq!(SWS_PROTOCOL_VERSION, 9);
+    assert_eq!(SWS_PROTOCOL_VERSION, 10);
     assert_eq!(client_msg::GET_CAPABILITIES, 32);
     assert_eq!(server_msg::CAPABILITIES, 25);
     assert_eq!(
@@ -64,17 +64,24 @@ fn capability_version_bits_and_payload_are_independent_of_package_version() {
             capabilities::WORKSPACE_SHELL,
             capabilities::FRAME_CALLBACKS,
             capabilities::EXTENSION_BUFFER_OBJECTS,
+            capabilities::SURFACE_REGIONS,
+            capabilities::GAMEPAD_INPUT,
+            capabilities::TOUCH_INPUT,
         ],
-        [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
+        [
+            1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192
+        ],
     );
     // Unknown feature bits survive decoding; they must not become known support.
-    let bytes = [9, 0, 0, 0, 1, 4, 0, 0, 0, 0, 0, 128, 4, 3, 2, 1, 2, 0, 0, 0];
+    let bytes = [
+        10, 0, 0, 0, 1, 4, 0, 0, 0, 0, 0, 128, 4, 3, 2, 1, 2, 0, 0, 0,
+    ];
     let flags = 0x8000_0000_0000_0401;
-    assert_eq!(payload_capabilities(9, flags, 0x0102_0304, 2), bytes);
+    assert_eq!(payload_capabilities(10, flags, 0x0102_0304, 2), bytes);
     assert_eq!(
         parse_server_message(25, &bytes),
         Ok(ServerMessage::Capabilities {
-            protocol_version: 9,
+            protocol_version: 10,
             capabilities: flags,
             compositor_epoch: 0x0102_0304,
             compositor_backend: 2,

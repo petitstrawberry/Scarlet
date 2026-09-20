@@ -17,7 +17,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::size_of;
 
-use crate::device::input::event_device::EventDevice;
+use crate::device::input::event_device::{
+    EventDevice, INPUT_CAP_ABS, INPUT_CAP_DIRECT_TOUCH, INPUT_CAP_KEY, INPUT_CAP_REL,
+    InputDeviceKind, InputDeviceMetadata, MAX_MT_SLOTS,
+};
+use crate::device::input::{abs_codes, event_types, key_codes, rel_codes};
 use crate::device::manager::DeviceManager;
 use crate::drivers::virtio::device::{DeviceStatus, Register, VirtioDevice};
 use crate::drivers::virtio::queue::{DescriptorFlag, VirtQueue};
@@ -61,6 +65,58 @@ mod config_select {
     pub const VIRTIO_INPUT_CFG_PROP_BITS: u8 = 0x10;
     pub const VIRTIO_INPUT_CFG_EV_BITS: u8 = 0x11;
     pub const VIRTIO_INPUT_CFG_ABS_INFO: u8 = 0x12;
+}
+
+const ABS_X: u16 = 0;
+const ABS_Y: u16 = 1;
+const INPUT_PROP_DIRECT: u16 = 1;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct DeviceFeatures {
+    keyboard_keys: bool,
+    relative_xy: bool,
+    absolute_xy: bool,
+    multitouch: bool,
+    direct: bool,
+}
+
+impl DeviceFeatures {
+    fn kind(self, name: &str) -> InputDeviceKind {
+        if self.multitouch {
+            if self.direct {
+                InputDeviceKind::Touchscreen
+            } else {
+                InputDeviceKind::Touchpad
+            }
+        } else if self.direct && self.absolute_xy {
+            InputDeviceKind::Touchscreen
+        } else if self.absolute_xy {
+            InputDeviceKind::Tablet
+        } else if self.relative_xy {
+            InputDeviceKind::Mouse
+        } else if self.keyboard_keys {
+            InputDeviceKind::Keyboard
+        } else {
+            match VirtioInputDevice::determine_device_type(name) {
+                "keyboard" => InputDeviceKind::Keyboard,
+                "mouse" => InputDeviceKind::Mouse,
+                "touchpad" => InputDeviceKind::Touchpad,
+                "tablet" => InputDeviceKind::Tablet,
+                _ => InputDeviceKind::Unknown,
+            }
+        }
+    }
+}
+
+fn device_type(kind: InputDeviceKind) -> &'static str {
+    match kind {
+        InputDeviceKind::Keyboard => "keyboard",
+        InputDeviceKind::Mouse => "mouse",
+        InputDeviceKind::Touchpad => "touchpad",
+        InputDeviceKind::Touchscreen => "touchscreen",
+        InputDeviceKind::Tablet => "tablet",
+        _ => "input",
+    }
 }
 
 /// VirtIO Input Device
@@ -118,6 +174,108 @@ impl VirtioInputDevice {
         alloc::string::String::from_utf8(name_bytes).ok()
     }
 
+    fn config_has_bit(&self, select: u8, subsel: u8, bit: u16) -> bool {
+        self.write8_config(0, select);
+        self.write8_config(1, subsel);
+        let byte = usize::from(bit / 8);
+        let size = usize::from(self.read8_config(2));
+        size <= 128 && byte < size && self.read8_config(8 + byte) & (1 << (bit % 8)) != 0
+    }
+
+    fn config_bitmap_present(&self, select: u8, subsel: u8) -> bool {
+        self.write8_config(0, select);
+        self.write8_config(1, subsel);
+        let size = self.read8_config(2);
+        size != 0 && size <= 128
+    }
+
+    fn read_abs_range(&self, code: u16) -> Option<(i32, i32)> {
+        self.write8_config(0, config_select::VIRTIO_INPUT_CFG_ABS_INFO);
+        self.write8_config(1, u8::try_from(code).ok()?);
+        if self.read8_config(2) < 8 {
+            return None;
+        }
+        let mut bytes = [0u8; 4];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = self.read8_config(8 + index);
+        }
+        let minimum = i32::from_le_bytes(bytes);
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = self.read8_config(12 + index);
+        }
+        let maximum = i32::from_le_bytes(bytes);
+        (minimum < maximum).then_some((minimum, maximum))
+    }
+
+    fn read_input_metadata(&self, name: &str) -> (InputDeviceKind, InputDeviceMetadata) {
+        use config_select::{VIRTIO_INPUT_CFG_EV_BITS, VIRTIO_INPUT_CFG_PROP_BITS};
+
+        let has_abs =
+            |code| self.config_has_bit(VIRTIO_INPUT_CFG_EV_BITS, event_types::EV_ABS as u8, code);
+        let features = DeviceFeatures {
+            keyboard_keys: self.config_has_bit(
+                VIRTIO_INPUT_CFG_EV_BITS,
+                event_types::EV_KEY as u8,
+                key_codes::KEY_A,
+            ),
+            relative_xy: self.config_has_bit(
+                VIRTIO_INPUT_CFG_EV_BITS,
+                event_types::EV_REL as u8,
+                rel_codes::REL_X,
+            ) && self.config_has_bit(
+                VIRTIO_INPUT_CFG_EV_BITS,
+                event_types::EV_REL as u8,
+                rel_codes::REL_Y,
+            ),
+            absolute_xy: has_abs(ABS_X) && has_abs(ABS_Y),
+            multitouch: has_abs(abs_codes::ABS_MT_SLOT)
+                && has_abs(abs_codes::ABS_MT_TRACKING_ID)
+                && has_abs(abs_codes::ABS_MT_POSITION_X)
+                && has_abs(abs_codes::ABS_MT_POSITION_Y),
+            direct: self.config_has_bit(VIRTIO_INPUT_CFG_PROP_BITS, 0, INPUT_PROP_DIRECT),
+        };
+        let kind = features.kind(name);
+        let mut capabilities = 0;
+        if self.config_bitmap_present(VIRTIO_INPUT_CFG_EV_BITS, event_types::EV_KEY as u8) {
+            capabilities |= INPUT_CAP_KEY;
+        }
+        if self.config_bitmap_present(VIRTIO_INPUT_CFG_EV_BITS, event_types::EV_REL as u8) {
+            capabilities |= INPUT_CAP_REL;
+        }
+        if self.config_bitmap_present(VIRTIO_INPUT_CFG_EV_BITS, event_types::EV_ABS as u8) {
+            capabilities |= INPUT_CAP_ABS;
+        }
+        if features.direct {
+            capabilities |= INPUT_CAP_DIRECT_TOUCH;
+        }
+        let mut metadata = InputDeviceMetadata::new(kind, capabilities);
+        for code in [
+            ABS_X,
+            ABS_Y,
+            abs_codes::ABS_MT_POSITION_X,
+            abs_codes::ABS_MT_POSITION_Y,
+        ] {
+            if let Some((minimum, maximum)) = self.read_abs_range(code) {
+                metadata = metadata
+                    .clone()
+                    .with_absolute_axis(code, minimum, maximum)
+                    .unwrap_or(metadata);
+            }
+        }
+        if features.multitouch
+            && let Some((minimum, maximum)) = self.read_abs_range(abs_codes::ABS_MT_SLOT)
+            && minimum == 0
+            && let Ok(slot_count) = usize::try_from(maximum.saturating_add(1))
+            && slot_count <= MAX_MT_SLOTS
+        {
+            metadata = metadata
+                .clone()
+                .with_multitouch_slots(slot_count)
+                .unwrap_or(metadata);
+        }
+        (kind, metadata)
+    }
+
     /// Determine device type from name
     fn determine_device_type(name: &str) -> &'static str {
         let name_lower = name.to_lowercase();
@@ -160,8 +318,10 @@ impl VirtioInputDevice {
             .read_device_name()
             .unwrap_or_else(|| "Unknown Device".to_string());
 
-        // Determine device type
-        let device_type = Self::determine_device_type(&virtio_name);
+        // Describe physical capabilities to userspace. Gesture policy remains
+        // outside the driver and device names are only a legacy fallback.
+        let (kind, metadata) = temp_device.read_input_metadata(&virtio_name);
+        let device_type = device_type(kind);
 
         println!(
             "[virtio-input] Device at {:#x}: \"{}\"",
@@ -169,7 +329,7 @@ impl VirtioInputDevice {
         );
 
         // Create the EventDevice with the device type (it will assign the name)
-        let event_device = Arc::new(EventDevice::new(device_type));
+        let event_device = Arc::new(EventDevice::new_with_metadata(device_type, metadata));
         let device_name = event_device.get_name();
 
         println!("[virtio-input] Registered as /dev/{}", device_name);
@@ -544,6 +704,35 @@ mod tests {
         assert_eq!(virtio_event.type_, EV_KEY);
         assert_eq!(virtio_event.code, KEY_A);
         assert_eq!(virtio_event.value, 1);
+    }
+
+    #[test_case]
+    fn multitouch_classification_uses_capabilities() {
+        let touch = DeviceFeatures {
+            multitouch: true,
+            direct: true,
+            ..DeviceFeatures::default()
+        };
+        assert_eq!(
+            touch.kind("QEMU Virtio MultiTouch"),
+            InputDeviceKind::Touchscreen
+        );
+        assert_eq!(
+            DeviceFeatures {
+                direct: false,
+                ..touch
+            }
+            .kind("indirect MT device"),
+            InputDeviceKind::Touchpad
+        );
+        assert_eq!(
+            DeviceFeatures {
+                absolute_xy: true,
+                ..DeviceFeatures::default()
+            }
+            .kind("QEMU Virtio Tablet"),
+            InputDeviceKind::Tablet
+        );
     }
 }
 

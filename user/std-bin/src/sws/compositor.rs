@@ -60,6 +60,45 @@ pub(super) fn is_sws_debug_enabled() -> bool {
     enabled
 }
 
+fn focused_overlay_survives_workspace_policy(window_manager: &WindowManager) -> bool {
+    window_manager
+        .get_focused_window_id()
+        .and_then(|window_id| {
+            window_manager.get_window(window_id).map(|window| {
+                window.window_type == WindowType::AlwaysOnTop
+                    && window.is_logically_presented()
+                    && window_manager.window_accepts_focus(window_id)
+            })
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod overlay_focus_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_policy_keeps_focus_on_a_visible_overlay_while_an_app_exists() {
+        let mut windows = WindowManager::new();
+        windows.create_window_with_id(1, 0, 0, 640, 400);
+        windows.create_window_with_id(2, 100, 40, 300, 200);
+        windows.set_window_type(2, WindowType::AlwaysOnTop);
+        windows.set_focus(2);
+        windows
+            .get_window_mut(2)
+            .unwrap()
+            .presentation_content_ready = false;
+
+        assert!(focused_overlay_survives_workspace_policy(&windows));
+
+        windows.get_window_mut(2).unwrap().workspace_visible = false;
+        assert!(!focused_overlay_survives_workspace_policy(&windows));
+
+        windows.set_focus(1);
+        assert!(!focused_overlay_survives_workspace_policy(&windows));
+    }
+}
+
 fn overview_workspace_region_for(
     workarea: (i32, i32, u32, u32),
     tablet_mode: bool,
@@ -1062,20 +1101,28 @@ mod touch_modality_tests {
         let primary = DirectTouchGrab {
             source: PointerSource::Local(24),
             tracking_id: 1,
+            contact_id: 1,
             window_id: 100,
+            native: false,
             legacy_primary: true,
             driving_move_drag: false,
             screen_x: 10,
             screen_y: 20,
+            pressure: None,
+            touch_major: None,
         };
         let secondary = DirectTouchGrab {
             source: PointerSource::Local(25),
             tracking_id: 2,
+            contact_id: 2,
             window_id: 100,
+            native: false,
             legacy_primary: false,
             driving_move_drag: false,
             screen_x: 10,
             screen_y: 20,
+            pressure: None,
+            touch_major: None,
         };
 
         assert!(direct_touch_legacy_primary_available(&[]));
@@ -2369,6 +2416,10 @@ pub struct Compositor {
     key_repeat: KeyRepeatState,
     gesture_recognizer: GestureRecognizer,
     direct_touch_grabs: Vec<DirectTouchGrab>,
+    next_touch_contact_id: u64,
+    next_seat_serial: u64,
+    last_input_frame_no: u64,
+    current_input_frame: Option<InputDispatchContext>,
     system_touch_navigation: Option<SystemTouchNavigation>,
     input_modality: InputModality,
     tablet_mode: bool,
@@ -2403,12 +2454,24 @@ struct ImePopupWindow {
 struct DirectTouchGrab {
     source: PointerSource,
     tracking_id: i32,
+    contact_id: u64,
     window_id: u32,
+    native: bool,
     legacy_primary: bool,
     /// This contact has taken over a client-requested interactive move.
     driving_move_drag: bool,
     screen_x: i32,
     screen_y: i32,
+    pressure: Option<i32>,
+    touch_major: Option<i32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InputDispatchContext {
+    seat_id: u32,
+    serial: u64,
+    time_ns: u64,
+    source: Option<super::input::InputSourceId>,
 }
 
 fn direct_touch_legacy_primary_available(grabs: &[DirectTouchGrab]) -> bool {
@@ -2813,6 +2876,10 @@ impl Compositor {
             key_repeat: KeyRepeatState::default(),
             gesture_recognizer,
             direct_touch_grabs: Vec::new(),
+            next_touch_contact_id: 1,
+            next_seat_serial: 1,
+            last_input_frame_no: 0,
+            current_input_frame: None,
             system_touch_navigation: None,
             input_modality: InputModality::default(),
             tablet_mode: input_environment.tablet_mode(),
@@ -5414,6 +5481,91 @@ impl Compositor {
         }
     }
 
+    fn collect_direct_native_change(
+        &self,
+        changes: &mut BTreeMap<u32, Vec<sws_protocol::touch::Change>>,
+        grab: DirectTouchGrab,
+        phase: sws_protocol::touch::Phase,
+    ) {
+        if !grab.native {
+            return;
+        }
+        let Some(window) = self.window_manager.get_window(grab.window_id) else {
+            return;
+        };
+        changes
+            .entry(grab.window_id)
+            .or_default()
+            .push(sws_protocol::touch::Change {
+                id: grab.contact_id,
+                phase,
+                x: grab.screen_x - window.x,
+                y: grab.screen_y - window.y,
+                pressure: grab.pressure.filter(|value| *value >= 0),
+                touch_major: grab.touch_major.filter(|value| *value >= 0),
+            });
+    }
+
+    fn send_direct_native_changes(
+        &self,
+        changes: BTreeMap<u32, Vec<sws_protocol::touch::Change>>,
+        seat_id: u32,
+        serial: u64,
+        time_ns: u64,
+    ) {
+        for (window_id, changes) in changes {
+            let frame = sws_protocol::touch::Frame {
+                seat_id,
+                serial,
+                time_ns,
+                changes,
+            };
+            if let Ok(payload) = sws_protocol::touch::payload(window_id, &frame) {
+                super::ipc::send_message_to_window(
+                    window_id,
+                    sws_protocol::server_msg::TOUCH_FRAME,
+                    payload,
+                );
+            }
+        }
+    }
+
+    /// Unsubscribing cancels the client stream, while keeping tombstone grabs
+    /// until lift so an ongoing finger cannot be retargeted to another window.
+    fn cancel_direct_native_window(&mut self, window_id: u32) {
+        let mut changes = BTreeMap::new();
+        for grab in self
+            .direct_touch_grabs
+            .iter()
+            .copied()
+            .filter(|grab| grab.window_id == window_id && grab.native)
+        {
+            self.collect_direct_native_change(
+                &mut changes,
+                grab,
+                sws_protocol::touch::Phase::Cancel,
+            );
+        }
+        if changes.is_empty() {
+            return;
+        }
+        for grab in &mut self.direct_touch_grabs {
+            if grab.window_id == window_id && grab.native {
+                grab.native = false;
+                grab.driving_move_drag = false;
+            }
+        }
+        if self
+            .move_drag
+            .is_some_and(|state| state.window_id == window_id)
+        {
+            self.move_drag = None;
+        }
+        let serial = self.next_seat_serial;
+        self.next_seat_serial = self.next_seat_serial.wrapping_add(1);
+        self.send_direct_native_changes(changes, 0, serial, monotonic_time_ns());
+    }
+
     fn workspace_card_at_point(&self, x: i32, y: i32) -> Option<u32> {
         self.overview_card_rects()
             .into_iter()
@@ -5922,6 +6074,28 @@ impl Compositor {
         if let Some(redraw) = self.handle_system_touch_navigation(&frame) {
             return redraw;
         }
+        let context = self.current_input_frame;
+        debug_assert!(
+            context
+                .and_then(|context| context.source)
+                .is_none_or(|source| { source.class == super::input::InputSourceClass::Pointer })
+        );
+        let (seat_id, serial, time_ns) = if let Some(context) = context {
+            (
+                context.seat_id,
+                context.serial,
+                if frame.time_ns == 0 {
+                    context.time_ns
+                } else {
+                    frame.time_ns
+                },
+            )
+        } else {
+            let serial = self.next_seat_serial;
+            self.next_seat_serial = self.next_seat_serial.wrapping_add(1);
+            (0, serial, frame.time_ns)
+        };
+        let mut native_changes = BTreeMap::new();
         // An empty/cancel frame can be generated during device discovery,
         // disconnect, or SYN_DROPPED recovery.  It must not hide an otherwise
         // active mouse cursor.  Once a real direct contact occurs, keep the
@@ -5943,6 +6117,17 @@ impl Compositor {
                         .any(|contact| contact.tracking_id == grab.tracking_id));
             if ended {
                 let grab = self.direct_touch_grabs.remove(index);
+                if grab.native {
+                    self.collect_direct_native_change(
+                        &mut native_changes,
+                        grab,
+                        if frame.cancelled {
+                            sws_protocol::touch::Phase::Cancel
+                        } else {
+                            sws_protocol::touch::Phase::Up
+                        },
+                    );
+                }
                 if grab.legacy_primary {
                     let kind = if frame.cancelled {
                         DirectLegacyEventKind::Cancel
@@ -5950,13 +6135,13 @@ impl Compositor {
                         DirectLegacyEventKind::Release
                     };
                     self.send_direct_legacy_event(grab, kind);
-                    if grab.driving_move_drag
-                        && self
-                            .move_drag
-                            .is_some_and(|state| state.window_id == grab.window_id)
-                    {
-                        self.move_drag = None;
-                    }
+                }
+                if grab.driving_move_drag
+                    && self
+                        .move_drag
+                        .is_some_and(|state| state.window_id == grab.window_id)
+                {
+                    self.move_drag = None;
                 }
             } else {
                 index += 1;
@@ -5964,6 +6149,7 @@ impl Compositor {
         }
 
         if frame.cancelled {
+            self.send_direct_native_changes(native_changes, seat_id, serial, time_ns);
             return redraw;
         }
         for contact in frame.contacts {
@@ -5975,7 +6161,9 @@ impl Compositor {
                 let previous = self.direct_touch_grabs[index];
                 self.direct_touch_grabs[index].screen_x = screen_x;
                 self.direct_touch_grabs[index].screen_y = screen_y;
-                if previous.legacy_primary
+                self.direct_touch_grabs[index].pressure = contact.pressure;
+                self.direct_touch_grabs[index].touch_major = contact.touch_major;
+                if (previous.legacy_primary || previous.native)
                     && let Some(mut state) = self.move_drag
                     && state.window_id == previous.window_id
                 {
@@ -5996,6 +6184,11 @@ impl Compositor {
                     redraw = true;
                 }
                 let grab = self.direct_touch_grabs[index];
+                self.collect_direct_native_change(
+                    &mut native_changes,
+                    grab,
+                    sws_protocol::touch::Phase::Move,
+                );
                 if grab.legacy_primary {
                     self.send_direct_legacy_event(grab, DirectLegacyEventKind::Move);
                 }
@@ -6005,29 +6198,49 @@ impl Compositor {
             let Some(window_id) = self.window_manager.window_at_point(screen_x, screen_y) else {
                 continue;
             };
+            let native = self
+                .window_manager
+                .get_window(window_id)
+                .is_some_and(|window| window.touch_input && window.extension_owner.is_none());
             // The compatibility ABI exposes one logical pointer, not one
             // pointer per physical source. Keep a single legacy-primary
             // contact across the whole seat so duplicate/overlapping direct
             // devices cannot deliver two button lifecycles for one tap.
-            let legacy_primary = direct_touch_legacy_primary_available(&self.direct_touch_grabs);
-            if legacy_primary {
+            let legacy_primary =
+                !native && direct_touch_legacy_primary_available(&self.direct_touch_grabs);
+            if native || legacy_primary {
                 self.activate_window_from_input(window_id);
                 redraw = true;
             }
+            let contact_id = self.next_touch_contact_id;
+            self.next_touch_contact_id = self
+                .next_touch_contact_id
+                .checked_add(1)
+                .expect("touch contact ID exhausted");
             let grab = DirectTouchGrab {
                 source: frame.source,
                 tracking_id: contact.tracking_id,
+                contact_id,
                 window_id,
+                native,
                 legacy_primary,
                 driving_move_drag: false,
                 screen_x,
                 screen_y,
+                pressure: contact.pressure,
+                touch_major: contact.touch_major,
             };
             self.direct_touch_grabs.push(grab);
+            self.collect_direct_native_change(
+                &mut native_changes,
+                grab,
+                sws_protocol::touch::Phase::Down,
+            );
             if legacy_primary {
                 self.send_direct_legacy_event(grab, DirectLegacyEventKind::Press);
             }
         }
+        self.send_direct_native_changes(native_changes, seat_id, serial, time_ns);
         redraw
     }
 
@@ -6491,12 +6704,23 @@ impl Compositor {
 
         self.sync_gamepad_focus();
 
-        // Process input events from global queue (non-blocking)
-        let input_events = super::input::pop_all_input_events();
-        if !input_events.is_empty() {
-            for event in input_events {
+        // Preserve each device report as one ordered dispatch unit.
+        let input_frames = super::input::pop_all_input_frames();
+        for frame in input_frames {
+            debug_assert!(frame.frame_no > self.last_input_frame_no);
+            self.last_input_frame_no = frame.frame_no;
+            let serial = self.next_seat_serial;
+            self.next_seat_serial = self.next_seat_serial.wrapping_add(1);
+            self.current_input_frame = Some(InputDispatchContext {
+                seat_id: frame.seat_id,
+                serial,
+                time_ns: frame.time_ns,
+                source: frame.source,
+            });
+            for event in frame.events {
                 self.handle_input_event(event)?;
             }
+            self.current_input_frame = None;
         }
 
         let focused_id = self.window_manager.get_focused_window_id();
@@ -9735,6 +9959,14 @@ impl Compositor {
         );
         let current_focus = self.window_manager.get_focused_window_id();
 
+        // Workspace presentation chooses the fallback focus for normal app
+        // surfaces. A focused system popup is independent of the workspace;
+        // changing its visibility or updating the workspace must not steal
+        // focus back to the app (which would immediately dismiss the popup).
+        if focused_overlay_survives_workspace_policy(&self.window_manager) {
+            return false;
+        }
+
         if shell_presentation {
             if self.overview_restore_focus.is_none() {
                 self.overview_restore_focus = current_focus
@@ -10722,7 +10954,9 @@ impl Compositor {
                 let direct_grab_position = self
                     .direct_touch_grabs
                     .iter()
-                    .find(|grab| grab.window_id == window_id && grab.legacy_primary)
+                    .find(|grab| {
+                        grab.window_id == window_id && (grab.legacy_primary || grab.native)
+                    })
                     .map(|grab| (grab.screen_x, grab.screen_y));
                 let move_grab_origin = interactive_move_grab_origin(
                     self.left_button_down,
@@ -10775,10 +11009,9 @@ impl Compositor {
                     start_window_y,
                 });
                 if direct_grab_position.is_some()
-                    && let Some(grab) = self
-                        .direct_touch_grabs
-                        .iter_mut()
-                        .find(|grab| grab.window_id == window_id && grab.legacy_primary)
+                    && let Some(grab) = self.direct_touch_grabs.iter_mut().find(|grab| {
+                        grab.window_id == window_id && (grab.legacy_primary || grab.native)
+                    })
                 {
                     grab.driving_move_drag = true;
                 }
@@ -11754,6 +11987,30 @@ impl Compositor {
                 if let Some(window) = self.window_manager.get_window_mut(window_id) {
                     window.gamepad_input = enabled;
                     window.gamepad_navigation = navigation;
+                }
+                self.sync_gamepad_focus();
+            }
+            IpcEvent::SetTouchInput {
+                client_id,
+                request_id,
+                window_id,
+                enabled,
+            } => {
+                if !self.client_owns_window(client_id, window_id) {
+                    send_response_to_client(
+                        client_id,
+                        sws_protocol::server_msg::ERROR,
+                        request_id,
+                        sws_protocol::payload_error(sws_protocol::error_codes::WINDOW_NOT_OWNED)
+                            .to_vec(),
+                    );
+                    return Ok(false);
+                }
+                if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                    window.touch_input = enabled;
+                }
+                if !enabled {
+                    self.cancel_direct_native_window(window_id);
                 }
             }
             IpcEvent::SetWindowGeometry {

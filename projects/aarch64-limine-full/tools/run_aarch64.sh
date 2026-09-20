@@ -341,6 +341,14 @@ QEMU_INPUT_ARGS=()
 if [ "$QEMU_INPUT" = "1" ] || [ "$QEMU_INPUT" = "true" ]; then
     QEMU_INPUT_ARGS=(-device virtio-keyboard-device,bus=virtio-mmio-bus.4 -device virtio-mouse-device,bus=virtio-mmio-bus.5)
 fi
+QEMU_TOUCH_ARGS=()
+if [ "${SCARLET_QEMU_TOUCH:-0}" = "1" ] || [ "${SCARLET_QEMU_TOUCH:-}" = "true" ]; then
+    if ! qemu-system-aarch64 -device help 2>/dev/null | grep -q 'virtio-multitouch-device'; then
+        echo "Error: qemu-system-aarch64 does not provide virtio-multitouch-device"
+        exit 1
+    fi
+    QEMU_TOUCH_ARGS=(-device virtio-multitouch-device,bus=virtio-mmio-bus.7)
+fi
 
 QEMU_MEMORY_ARGS=(-m "$QEMU_MEMORY")
 QEMU_AUDIO="${SCARLET_QEMU_AUDIO:-0}"
@@ -508,6 +516,7 @@ QEMU_CMD=(qemu-system-aarch64
     "${QEMU_GPU_ARGS[@]}" \
     "${QEMU_NET_ARGS[@]}" \
     "${QEMU_INPUT_ARGS[@]}" \
+    "${QEMU_TOUCH_ARGS[@]}" \
     "${QEMU_AUDIO_ARGS[@]}" \
     "${QEMU_XHCI_ARGS[@]}" \
     "${QEMU_USB_STORAGE_ARGS[@]}" \

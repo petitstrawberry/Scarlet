@@ -3597,6 +3597,9 @@ impl ShellApp {
             };
             graphics::set_current_scale_milli(scale_milli);
             screen_width_popup.set(popup_screen_width as f32);
+            let native_touch = conn
+                .get_capabilities()
+                .is_ok_and(|capabilities| capabilities.supports_touch_input());
 
             let mut popup_surface_id: Option<u32> = None;
             let mut popup_renderer: Option<ShellPopupRenderer> = None;
@@ -3607,6 +3610,7 @@ impl ShellApp {
             let mut pointer_x = 0i32;
             let mut pointer_y = 0i32;
             let mut pointer_pressed = false;
+            let mut popup_touch_id: Option<u64> = None;
             let mut pending_move = false;
             let mut needs_render = false;
 
@@ -3621,6 +3625,7 @@ impl ShellApp {
                     popup_surface_id_popup.set(None);
                     popup_renderer = None;
                     pointer_pressed = false;
+                    popup_touch_id = None;
                     last_open_index = open_index;
                 }
 
@@ -3636,6 +3641,7 @@ impl ShellApp {
                     }
                     popup_surface_id_popup.set(None);
                     popup_renderer = None;
+                    popup_touch_id = None;
                 }
 
                 if let Some(index) = open_index {
@@ -3724,6 +3730,9 @@ impl ShellApp {
                                         Ok(id) => {
                                             popup_surface_id = Some(id);
                                             popup_surface_id_popup.set(Some(id));
+                                            if native_touch {
+                                                let _ = conn.set_touch_input(id, true);
+                                            }
                                             // Creating a surface with
                                             // `focus_on_create` focuses it, but
                                             // older SWS versions did not also
@@ -3754,6 +3763,7 @@ impl ShellApp {
                         }
                         popup_surface_id_popup.set(None);
                         popup_renderer = None;
+                        popup_touch_id = None;
                         last_open_index = None;
                         open_menu_index_popup.set(None);
                     }
@@ -3832,6 +3842,52 @@ impl ShellApp {
                                 _ => {}
                             }
                         }
+                        sws::event::Event::TouchFrame { surface_id, frame }
+                            if Some(surface_id) == popup_surface_id =>
+                        {
+                            for change in frame.changes {
+                                let x = unscale_i32(change.x, scale_milli);
+                                let y = unscale_i32(change.y, scale_milli);
+                                match change.phase {
+                                    sws_protocol::touch::Phase::Down
+                                        if popup_touch_id.is_none() =>
+                                    {
+                                        popup_touch_id = Some(change.id);
+                                        if let Some(renderer) = popup_renderer.as_mut() {
+                                            let _ = renderer.handle_press(x, y);
+                                            needs_render = true;
+                                        }
+                                    }
+                                    sws_protocol::touch::Phase::Move
+                                        if popup_touch_id == Some(change.id) =>
+                                    {
+                                        if let Some(renderer) = popup_renderer.as_mut() {
+                                            let _ = renderer.handle_move(x, y, true);
+                                            needs_render = true;
+                                        }
+                                    }
+                                    sws_protocol::touch::Phase::Up
+                                        if popup_touch_id == Some(change.id) =>
+                                    {
+                                        popup_touch_id = None;
+                                        if let Some(renderer) = popup_renderer.as_mut() {
+                                            let _ = renderer.handle_release(x, y);
+                                            needs_render = true;
+                                        }
+                                    }
+                                    sws_protocol::touch::Phase::Cancel
+                                        if popup_touch_id == Some(change.id) =>
+                                    {
+                                        popup_touch_id = None;
+                                        if let Some(renderer) = popup_renderer.as_mut() {
+                                            let _ = renderer.handle_cancel();
+                                            needs_render = true;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                         sws::event::Event::ScreenSizeChanged { width, height } => {
                             screen_width_popup.set(unscale_u32(width, scale_milli) as f32);
                             popup_screen_height = unscale_u32(height, scale_milli);
@@ -3841,6 +3897,7 @@ impl ShellApp {
                             }
                             popup_surface_id_popup.set(None);
                             popup_renderer = None;
+                            popup_touch_id = None;
                             last_open_index = None;
                         }
                         sws::event::Event::OutputScaleChanged {
@@ -3858,6 +3915,7 @@ impl ShellApp {
                             }
                             popup_surface_id_popup.set(None);
                             popup_renderer = None;
+                            popup_touch_id = None;
                             last_open_index = None;
                         }
                         _ => {}
