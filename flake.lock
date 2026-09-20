@@ -103,11 +103,11 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1789024923,
-        "narHash": "sha256-OLVKVFXyM8NzruagLRmKDt7E9mroYo2mLyhZkzldwYk=",
+        "lastModified": 1789886404,
+        "narHash": "sha256-qOYgPAiBdMfUpGmcKQTVDxRvcNiIYGHJZLDK3p9WF4s=",
         "owner": "petitstrawberry",
         "repo": "scarlet-rust-nix",
-        "rev": "ac74be7447d14d801ac0eaaa5235ec1fe388c365",
+        "rev": "7e579ad8de2b85ad9dff6748a30b0a836f8d322a",
         "type": "github"
       },
       "original": {

@@ -120,13 +120,11 @@ impl CpuFeatureRegistry {
     }
 }
 
-// The RV32 toolchain does not package libtest; run this registry test on the
-// 64-bit kernel targets while still compiling the registry for RV32.
-#[cfg(all(test, target_pointer_width = "64"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn intersection_is_frozen_and_late_weak_cpu_is_rejected() {
         let registry = CpuFeatureRegistry::new();
         registry.report(

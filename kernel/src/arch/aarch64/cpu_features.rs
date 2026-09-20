@@ -146,7 +146,7 @@ pub(crate) fn userspace_capabilities() -> CpuCapabilities {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn lse_and_reserved_values() {
         assert_eq!(hwcap_from_id(2 << 20, 0, false), HWCAP_ATOMICS);
         assert_eq!(hwcap_from_id(3 << 20, 0, false), HWCAP_ATOMICS);
@@ -155,7 +155,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_case]
     fn simd_features_require_saved_context() {
         let crypto = (2 << 4) | (1 << 8) | (2 << 12) | (1 << 16);
         assert_eq!(hwcap_from_id(crypto, 0, false), HWCAP_CRC32);
