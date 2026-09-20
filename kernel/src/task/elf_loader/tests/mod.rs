@@ -54,6 +54,7 @@ fn native_stack_preserves_auxv_and_strings_across_pages() {
         &["KEY=value"],
         top,
         &auxv,
+        None,
     )
     .unwrap();
     assert_eq!(sp % 16, 0);
@@ -76,9 +77,11 @@ fn native_stack_preserves_auxv_and_strings_across_pages() {
         assert_eq!(&bytes[offset..offset + string.len()], string.as_bytes());
         assert_eq!(bytes[offset + string.len()], 0);
     }
-    assert!(setup_native_stack(&task, &["bad\0argument"], &[], top, &auxv).is_err());
-    assert!(setup_native_stack(&task, &[&"x".repeat(4 * PAGE_SIZE)], &[], top, &auxv).is_err());
-    let (sp, _) = setup_native_stack(&task, &[], &["KEY=value"], top, &auxv).unwrap();
+    assert!(setup_native_stack(&task, &["bad\0argument"], &[], top, &auxv, None).is_err());
+    assert!(
+        setup_native_stack(&task, &[&"x".repeat(4 * PAGE_SIZE)], &[], top, &auxv, None).is_err()
+    );
+    let (sp, _) = setup_native_stack(&task, &[], &["KEY=value"], top, &auxv, None).unwrap();
     let mut words = vec![0; 4 * word];
     copy_from_user(&task, sp, &mut words).unwrap();
     assert_eq!(model.read_word(&words, 0).unwrap().unsigned(), 0);
@@ -212,6 +215,202 @@ fn relocated_elf_preserves_header_addresses_and_main_program_break() {
             executable_entry(&header, file, &interpreter_task, 0x20000).unwrap(),
             0x23000
         );
+    }
+}
+
+// Place one interpreter request in a native fixture without depending on a
+// cross-linker. Its PT_LOAD payload still begins at file offset 0x1000.
+fn fixture_with_interpreter(path: &str) -> alloc::vec::Vec<u8> {
+    use scarlet_abi::data_model::AbiDataModel;
+    let model = AbiDataModel::NATIVE;
+    let mut bytes = native_fixture(&[0x73; 4], PAGE_SIZE as u64);
+    let (eh, ph_size) = elf_sizes(bytes[EI_CLASS]).unwrap();
+    let count_offset = if usize::BITS == 32 { 44 } else { 56 };
+    bytes[count_offset..count_offset + 2].copy_from_slice(&2u16.to_le_bytes());
+    let ph = eh + ph_size;
+    bytes[ph..ph + 4].copy_from_slice(&PT_INTERP.to_le_bytes());
+    let (file_offset, file_size) = if usize::BITS == 32 { (4, 16) } else { (8, 32) };
+    model
+        .write_word(&mut bytes, ph + file_offset, 0x200)
+        .unwrap();
+    model
+        .write_word(&mut bytes, ph + file_size, (path.len() + 1) as u64)
+        .unwrap();
+    bytes[0x200..0x200 + path.len()].copy_from_slice(path.as_bytes());
+    bytes
+}
+
+#[test_case]
+fn native_interpreter_handoff_preserves_main_metadata_and_initial_stack() {
+    use crate::library::std::usercopy::copy_from_user;
+    use alloc::sync::Arc;
+    use scarlet_abi::data_model::AbiDataModel;
+    let model = AbiDataModel::NATIVE;
+    let word = model.word_width.bytes();
+    for interpreter_kind in [ET_EXEC, ET_DYN] {
+        let manager = Arc::new(VfsManager::new());
+        manager.mount(TmpFS::new(0), "/", 0).unwrap();
+        let mut main = fixture_with_interpreter("/scarlet-ld");
+        main[16..18].copy_from_slice(&ET_DYN.to_le_bytes());
+        let mut interpreter = native_fixture(&[0x42; 4], PAGE_SIZE as u64);
+        interpreter[16..18].copy_from_slice(&interpreter_kind.to_le_bytes());
+        let interpreter_vaddr = if interpreter_kind == ET_EXEC {
+            0x4000_0000
+        } else {
+            0x3000
+        };
+        let (eh, ph_size) = elf_sizes(main[EI_CLASS]).unwrap();
+        let vaddr_offset = if usize::BITS == 32 { 8 } else { 16 };
+        model
+            .write_word(&mut interpreter, 24, interpreter_vaddr)
+            .unwrap();
+        model
+            .write_word(&mut interpreter, eh + vaddr_offset, interpreter_vaddr)
+            .unwrap();
+        for (path, bytes) in [("/main", &main), ("/scarlet-ld", &interpreter)] {
+            manager.create_file(path, FileType::RegularFile).unwrap();
+            manager
+                .open(path, O_RDWR)
+                .unwrap()
+                .as_file()
+                .unwrap()
+                .write(bytes)
+                .unwrap();
+        }
+        let task = new_user_task("native-interpreter-handoff".into(), 0);
+        task.set_vfs(manager.clone());
+        let object = manager.open("/main", 0).unwrap();
+        let result = analyze_and_load_elf(object.as_file().unwrap(), &task).unwrap();
+        assert!(matches!(result.mode, ExecutionMode::Dynamic { .. }));
+        assert_eq!(result.original_entry_point, Some(0x11000));
+        assert_eq!(result.base_address, Some(0x10000));
+        assert_eq!(task.brk.load(Ordering::Relaxed), 0x12000);
+        let bias = result.interpreter_base.unwrap();
+        if interpreter_kind == ET_EXEC {
+            assert_eq!(bias, 0); // AT_BASE is the load bias, not the first mapping.
+        } else {
+            assert_ne!(bias, 0);
+        }
+        assert_eq!(result.entry_point, interpreter_vaddr + bias);
+        let mut payload = [0; 4];
+        copy_from_user(&task, result.entry_point as usize, &mut payload).unwrap();
+        assert_eq!(payload, [0x42; 4]);
+        let mut headers = vec![0; 2 * ph_size];
+        copy_from_user(
+            &task,
+            result.program_headers.phdr_addr as usize,
+            &mut headers,
+        )
+        .unwrap();
+        assert_eq!(headers, main[eh..eh + 2 * ph_size]);
+
+        let top = crate::environment::USER_STACK_END;
+        task.allocate_stack_pages(top - PAGE_SIZE, 1).unwrap();
+        let auxv = build_auxiliary_vector(&result);
+        let (sp, argv) = setup_native_exec_stack(
+            &task,
+            &object,
+            &["display-name", "argument"],
+            &["KEY=value"],
+            top,
+            &result,
+        )
+        .unwrap();
+        assert_eq!(sp % 16, 0);
+        assert_eq!(argv, sp + word);
+        let mut stack = vec![0; top - sp];
+        copy_from_user(&task, sp, &mut stack).unwrap();
+        let read = |index| model.read_word(&stack, index * word).unwrap().unsigned();
+        assert_eq!(read(0), 2);
+        assert_eq!(read(3), 0); // argv terminator
+        assert_eq!(read(5), 0); // envp terminator
+        for (kind, expected) in [
+            (AT_ENTRY, 0x11000),
+            (AT_BASE, bias),
+            (AT_PHDR, result.program_headers.phdr_addr),
+            (AT_PHENT, ph_size as u64),
+            (AT_PHNUM, 2),
+        ] {
+            let index = auxv.iter().position(|entry| entry.a_type == kind).unwrap();
+            assert_eq!(read(6 + 2 * index), kind);
+            assert_eq!(read(7 + 2 * index), expected);
+        }
+        let mut fd = None;
+        let mut execfn = None;
+        let mut index = 6;
+        while read(index) != AT_NULL {
+            match read(index) {
+                AT_EXECFD => fd = Some(read(index + 1) as u32),
+                AT_EXECFN => execfn = Some(read(index + 1) as usize),
+                _ => {}
+            }
+            index += 2;
+        }
+        let fd = fd.expect("dynamic main must supply AT_EXECFD");
+        assert!(fd >= 3);
+        assert!(!task.handle_table.is_valid_handle(0));
+        let held = task.handle_table.get(fd).unwrap();
+        let held = held.as_file().unwrap();
+        held.seek(SeekFrom::Start(0)).unwrap();
+        let mut magic = [0; 4];
+        held.read(&mut magic).unwrap();
+        assert_eq!(magic, ELFMAG);
+        let metadata = task.handle_table.get_metadata(fd).unwrap();
+        assert_eq!(
+            metadata.access_mode,
+            crate::object::handle::AccessMode::ReadOnly
+        );
+        assert_eq!(
+            metadata.special_semantics,
+            Some(crate::object::handle::SpecialSemantics::CloseOnExec)
+        );
+        let offset = execfn.expect("visible main must supply AT_EXECFN") - sp;
+        assert_eq!(&stack[offset..offset + 6], b"/main\0");
+        for (index, string) in [(1, "display-name"), (2, "argument"), (4, "KEY=value")] {
+            let offset = read(index) as usize - sp;
+            assert_eq!(&stack[offset..offset + string.len()], string.as_bytes());
+            assert_eq!(stack[offset + string.len()], 0);
+        }
+        // A failed startup stack must roll back its newly inserted handle.
+        let before = task.handle_table.open_count();
+        assert!(
+            setup_native_exec_stack(&task, &object, &["bad\0argument"], &[], top, &result).is_err()
+        );
+        assert_eq!(task.handle_table.open_count(), before);
+        task.handle_table.remove(fd);
+        // Source-view files need not be reachable in the target Environment.
+        // A different inode at the same spelling must not become AT_EXECFN.
+        let other = Arc::new(VfsManager::new());
+        other.mount(TmpFS::new(0), "/", 0).unwrap();
+        other.create_file("/main", FileType::RegularFile).unwrap();
+        other
+            .open("/main", O_RDWR)
+            .unwrap()
+            .as_file()
+            .unwrap()
+            .write(b"replacement")
+            .unwrap();
+        task.set_vfs(other);
+        assert!(native_executable_path(object.as_file().unwrap(), &task).is_none());
+        let (sp, _) =
+            setup_native_exec_stack(&task, &object, &["alias"], &[], top, &result).unwrap();
+        let mut stack = vec![0; top - sp];
+        copy_from_user(&task, sp, &mut stack).unwrap();
+        let read = |index| model.read_word(&stack, index * word).unwrap().unsigned();
+        let mut index = 4; // argc, one argv, NULL, empty envp NULL
+        let mut execfd = None;
+        while read(index) != AT_NULL {
+            assert_ne!(read(index), AT_EXECFN);
+            if read(index) == AT_EXECFD {
+                execfd = Some(read(index + 1) as u32);
+            }
+            index += 2;
+        }
+        let held = task.handle_table.get(execfd.unwrap()).unwrap();
+        let held = held.as_file().unwrap();
+        held.seek(SeekFrom::Start(0)).unwrap();
+        held.read(&mut magic).unwrap();
+        assert_eq!(magic, ELFMAG); // The original image, never the target-view replacement.
     }
 }
 

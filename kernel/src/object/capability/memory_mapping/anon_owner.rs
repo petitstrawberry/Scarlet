@@ -53,6 +53,10 @@ impl MemoryMappingOps for AnonymousPageOwner {
         false
     }
 
+    fn supports_permission_changes(&self) -> bool {
+        true
+    }
+
     fn mmap_owner_name(&self) -> String {
         String::from("anonymous")
     }
@@ -152,6 +156,10 @@ impl MemoryMappingOps for ForkCowPageOwner {
 
     fn supports_mmap(&self) -> bool {
         false
+    }
+
+    fn supports_permission_changes(&self) -> bool {
+        true
     }
 
     fn mmap_owner_name(&self) -> String {

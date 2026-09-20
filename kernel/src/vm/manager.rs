@@ -68,6 +68,7 @@ const WRITE_SITE_ADD_FIXED: u64 = 0x4146;
 const WRITE_SITE_COALESCE: u64 = 0x434f;
 const WRITE_SITE_DROP: u64 = 0x4452;
 const WRITE_SITE_RETAG: u64 = 0x5254;
+const WRITE_SITE_PROTECT: u64 = 0x5052;
 const DEBUG_VM_MAPPING_EXTEND_LOGGING: bool = false;
 use crate::environment::{DEFAULT_USER_MMAP_BASE, USER_LOWER_CANONICAL_END};
 
@@ -424,6 +425,105 @@ impl VirtualMemoryManager {
         }
 
         maps.insert(map.vmarea.start, map);
+        Ok(())
+    }
+
+    /// Change permissions on a fully mapped native user range, preserving its
+    /// backing, owner page indices, and memory attributes through VMA splits.
+    /// Old PTEs are revoked before return. Subsequent faults install the new
+    /// permissions and synchronize executable pages via
+    /// `sync_executable_page_for_mapping` on AArch64 and RISC-V.
+    ///
+    /// Permission increases are supported for private normal memory backed by
+    /// the task or an anonymous/COW owner. Object/device mappings may only lose
+    /// permissions because their original maximum is not recorded in the VMA.
+    pub(crate) fn protect_memory_map_range(
+        &self,
+        vmarea: MemoryArea,
+        prot: usize,
+    ) -> Result<(), &'static str> {
+        if vmarea.start > vmarea.end
+            || vmarea.end >= USER_LOWER_CANONICAL_END
+            || !vmarea.start.is_multiple_of(PAGE_SIZE)
+            || vmarea.end % PAGE_SIZE != PAGE_SIZE - 1
+            || prot & !0x7 != 0
+        {
+            return Err("Invalid memory protection range or flags");
+        }
+        let permissions = prot | VirtualMemoryPermission::User as usize;
+        let mut g = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_PROTECT);
+        let keys: Vec<usize> = g
+            .memmap
+            .iter()
+            .filter_map(|(key, map)| {
+                (map.vmarea.start <= vmarea.end && vmarea.start <= map.vmarea.end).then_some(*key)
+            })
+            .collect();
+        let mut covered_until = vmarea.start;
+        for key in &keys {
+            let map = &g.memmap[key];
+            let start = map.vmarea.start.max(vmarea.start);
+            let end = map.vmarea.end.min(vmarea.end);
+            if start != covered_until
+                || !VirtualMemoryPermission::User.contained_in(map.permissions)
+            {
+                return Err("Memory protection range is not fully user-mapped");
+            }
+            if prot & !map.permissions != 0
+                && (map.is_shared
+                    || map.memory_attribute != MemoryAttribute::Normal
+                    || map
+                        .owner
+                        .as_ref()
+                        .is_some_and(|owner| !owner.supports_permission_changes()))
+            {
+                return Err("Mapping does not support increasing permissions");
+            }
+            covered_until = end + 1;
+        }
+        if covered_until != vmarea.end + 1 {
+            return Err("Memory protection range has an unmapped gap");
+        }
+        for key in keys {
+            let map = g.memmap.remove(&key).unwrap();
+            let start = map.vmarea.start.max(vmarea.start);
+            let end = map.vmarea.end.min(vmarea.end);
+            if map.vmarea.start < start {
+                g.memmap.insert(
+                    map.vmarea.start,
+                    VirtualMemoryMap {
+                        vmarea: MemoryArea::new(map.vmarea.start, start - 1),
+                        pmarea: Self::subrange_pmarea(&map, map.vmarea.start, start - 1),
+                        ..map.clone()
+                    },
+                );
+            }
+            if end < map.vmarea.end {
+                g.memmap.insert(
+                    end + 1,
+                    VirtualMemoryMap {
+                        vmarea: MemoryArea::new(end + 1, map.vmarea.end),
+                        pmarea: Self::subrange_pmarea(&map, end + 1, map.vmarea.end),
+                        ..map.clone()
+                    },
+                );
+            }
+            g.memmap.insert(
+                start,
+                VirtualMemoryMap {
+                    vmarea: MemoryArea::new(start, end),
+                    pmarea: Self::subrange_pmarea(&map, start, end),
+                    permissions,
+                    ..map
+                },
+            );
+        }
+        g.last_search_cache = None;
+        drop(g);
+        // This is a permission change, not an unmap: owners and physical pages
+        // remain alive, so do not send on_unmapped or reclaim backing storage.
+        self.unmap_range_from_mmu(vmarea.start, vmarea.end);
         Ok(())
     }
 

@@ -151,3 +151,8 @@ does not emulate a different CPU architecture.
 Host library tests, Scarlet-target compilation, image construction, and actual
 application execution establish different things. Record the selected source
 and lock set with results; a host test does not certify a native device path.
+
+## Native dynamic linker
+
+See [Scarlet native dynamic linking](dynamic-linker.md) for the shared loader
+core, interpreter contract, runtime API, and executable smoke tests.

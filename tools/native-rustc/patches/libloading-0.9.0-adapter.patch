@@ -1,0 +1,44 @@
+--- a/src/scarlet.rs
++++ b/src/scarlet.rs
+@@ -43,14 +43,14 @@
+     /// The library's initializers and exported symbols must be safe to load.
+     pub unsafe fn new<P: AsRef<OsStr>>(filename: P) -> Result<Self, Error> {
+         let name = CString::new(filename.as_ref().as_encoded_bytes())
+-            .map_err(|source| Error::CreateCString { source })?;
++            .map_err(|_| Error::InteriorZeroElements)?;
+         let _guard = calls().map_err(|_| Error::DlOpenUnknown)?;
+         unsafe { dlerror() };
+         let handle = unsafe { dlopen(name.as_ptr(), 0x102) };
+         if handle.is_null() {
+             let err = unsafe { dlerror() };
+             return Err(if err.is_null() { Error::DlOpenUnknown }
+-                else { Error::DlOpen { desc: unsafe { CStr::from_ptr(err) }.into() } });
++                else { Error::DlOpen { source: unsafe { CStr::from_ptr(err) }.into() } });
+         }
+         Ok(Self { handle, _not_send_sync: PhantomData })
+     }
+@@ -64,13 +64,13 @@
+             return Err(Error::IncompatibleSize);
+         }
+         let bytes = name.strip_suffix(&[0]).unwrap_or(name);
+-        let name = CString::new(bytes).map_err(|source| Error::CreateCString { source })?;
++        let name = CString::new(bytes).map_err(|_| Error::InteriorZeroElements)?;
+         let _guard = calls().map_err(|_| Error::DlSymUnknown)?;
+         unsafe { dlerror() };
+         let pointer = unsafe { dlsym(self.handle, name.as_ptr()) };
+         let err = unsafe { dlerror() };
+         if !err.is_null() {
+-            return Err(Error::DlSym { desc: unsafe { CStr::from_ptr(err) }.into() });
++            return Err(Error::DlSym { source: unsafe { CStr::from_ptr(err) }.into() });
+         }
+         // This adapter conservatively rejects null-valued symbols; the loader can
+         // resolve them, but null is invalid for some caller-provided T types.
+@@ -87,7 +87,7 @@
+         if unsafe { dlclose(handle) } != 0 {
+             let err = unsafe { dlerror() };
+             return Err(if err.is_null() { Error::DlCloseUnknown }
+-                else { Error::DlClose { desc: unsafe { CStr::from_ptr(err) }.into() } });
++                else { Error::DlClose { source: unsafe { CStr::from_ptr(err) }.into() } });
+         }
+         Ok(())
+     }
