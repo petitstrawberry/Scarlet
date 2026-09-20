@@ -296,6 +296,7 @@ extern "C" fn secondary_cpu_entry_after_el_drop(cpu_id: usize, inherited_sctlr: 
     prepare_el1_runtime();
     let _ = configure_vhe_host_control();
     // log_el1_memory_state("handoff", cpu_id, inherited_sctlr);
+    crate::arch::aarch64::cpu_features::register_secondary_cpu(cpu_id);
     wait_for_ap_release();
     start_ap(cpu_id)
 }
@@ -663,6 +664,9 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
     // after the page-table switch in start_kernel.
     crate::boot::limine::capture_date_at_boot();
 
+    // AP feature probes use the user FP/SIMD context policy, so publish that
+    // policy before Limine can transfer control to any secondary CPU.
+    crate::arch::init_user_context_from_fdt();
     bootstrap_aps();
     register_cpu_topology_from_fdt();
 
@@ -686,8 +690,6 @@ extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> 
         Some(start_secondary_cpus),
     )
     .with_usable_memory_regions(usable_memory_regions);
-
-    crate::arch::init_user_context_from_fdt();
 
     let current_el = unsafe {
         let el: usize;

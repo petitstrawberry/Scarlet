@@ -272,7 +272,8 @@ pub extern "C" fn linux_image_entry(dtb_paddr: usize) -> ! {
         None,
         (cpu_count > 1).then_some(smp::start_secondary_cpus as fn()),
     )
-    .with_usable_memory_regions(memory.usable);
+    .with_usable_memory_regions(memory.usable)
+    .with_probe_secondary_cpus_hook(smp::probe_secondary_cpus);
     crate::arch::init_user_context_from_fdt();
 
     // SAFETY: The boot CPU owns this static handoff slot. Its stack and the
