@@ -5,6 +5,7 @@
 //! [`StatusProvider`] to produce a normalized, ordered model suitable for
 //! compact laptop or touch-first shell-bar presentations.
 
+use super::power::PowerStatus;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
@@ -152,6 +153,8 @@ pub struct StatusProviderSnapshot {
     pub audio_volume_percent: Option<u8>,
     /// Latest real SAS master mute state, when available.
     pub audio_muted: Option<bool>,
+    /// Latest battery and external-supply observation.
+    pub power: PowerStatus,
 }
 
 impl StatusProviderSnapshot {
@@ -245,6 +248,7 @@ impl StatusProvider {
             cpu_percent: self.cpu_sampler.sample(cpu_usage).percent(),
             audio_volume_percent,
             audio_muted,
+            power: PowerStatus::default(),
         }
     }
 }
@@ -552,6 +556,7 @@ mod tests {
             cpu_percent: Some(50),
             audio_volume_percent: Some(35),
             audio_muted: Some(false),
+            power: Default::default(),
         };
         assert_eq!(snapshot.clone(), snapshot);
         assert_eq!(snapshot.clock_label(13, 7), "13:07");

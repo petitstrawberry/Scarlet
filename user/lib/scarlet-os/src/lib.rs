@@ -34,6 +34,9 @@ pub mod network;
 /// Poll/select-style readiness APIs for Scarlet handles.
 pub mod poll;
 
+/// Read-only battery and external-power telemetry.
+pub mod power_supply;
+
 /// Scarlet Native process-control APIs not exposed by portable Rust `std`.
 pub mod process;
 

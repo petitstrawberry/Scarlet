@@ -9,6 +9,7 @@
 pub mod data_model;
 pub mod environment;
 pub mod native_scalar;
+pub mod power_supply;
 pub mod shared_image;
 pub mod video_image;
 

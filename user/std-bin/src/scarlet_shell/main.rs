@@ -11,6 +11,7 @@ mod console;
 mod control_center;
 mod home_style;
 mod options;
+mod power;
 mod status;
 
 use alloc::collections::BTreeMap;
@@ -72,6 +73,7 @@ use control_center::{
 };
 use home_style::{icon as home_icon, icon_tile_color as home_icon_tile_color};
 use options::{Options, ShellMode};
+use power::{PowerIcon, PowerStatus};
 use status::{StatusPresentation, StatusProvider, StatusProviderSnapshot};
 
 const SWS_CONNECT_RETRIES: usize = 100;
@@ -705,10 +707,35 @@ fn build_status_cluster(
             .font_size(tokens.font_size)
             .padding(tokens.horizontal_padding)
             .selected(selected)
-            .on_click(move || toggle_control_center(control_center_open.clone()));
+            .on_click({
+                let open = control_center_open.clone();
+                move || toggle_control_center(open.clone())
+            });
         let item = menu_item_with_foreground(item, foreground);
         items.push(boxed(
             item.frame(tokens.logical_height, tokens.logical_height),
+        ));
+    }
+    if let Some(power_icon) = snapshot.power.icon() {
+        let icon = match power_icon {
+            PowerIcon::Empty => Icon::Battery,
+            PowerIcon::One => Icon::Battery1,
+            PowerIcon::Two => Icon::Battery2,
+            PowerIcon::Three => Icon::Battery3,
+            PowerIcon::Four => Icon::Battery4,
+            PowerIcon::Charging => Icon::BatteryCharging,
+            PowerIcon::Plugged => Icon::BatteryCharging2,
+            PowerIcon::Unknown => Icon::BatteryExclamation,
+        };
+        let item = MenuItem::new("")
+            .icon(icon)
+            .icon_size(IconSize::Small)
+            .padding(tokens.horizontal_padding)
+            .selected(control_center_open.get())
+            .on_click(move || toggle_control_center(control_center_open.clone()));
+        items.push(boxed(
+            menu_item_with_foreground(item, foreground)
+                .frame(tokens.logical_height, tokens.logical_height),
         ));
     }
     HStack::new(DynamicViews::new(items))
@@ -1163,6 +1190,8 @@ fn poll_status_provider(
 ) {
     let mut provider = StatusProvider::new();
     let mut audio_client = None;
+    let mut power = PowerStatus::default();
+    let mut power_poll_countdown = 0;
 
     loop {
         if audio_client.is_none() {
@@ -1179,21 +1208,30 @@ fn poll_status_provider(
             None => None,
         };
         let preferences = status_snapshot.get().preferences;
-        let sampled = provider.snapshot(&preferences, scheduler::cpu_usage(), audio_state);
+        if power_poll_countdown == 0 {
+            power = collect_power_status().unwrap_or_else(|| power.unavailable());
+            power_poll_countdown = 5;
+        }
+        power_poll_countdown -= 1;
+        let mut sampled = provider.snapshot(&preferences, scheduler::cpu_usage(), audio_state);
+        sampled.power = power;
         let current = status_snapshot.get();
         if (
             current.cpu_percent,
             current.audio_volume_percent,
             current.audio_muted,
+            current.power,
         ) != (
             sampled.cpu_percent,
             sampled.audio_volume_percent,
             sampled.audio_muted,
+            sampled.power,
         ) {
             status_snapshot.update(|current| {
                 current.cpu_percent = sampled.cpu_percent;
                 current.audio_volume_percent = sampled.audio_volume_percent;
                 current.audio_muted = sampled.audio_muted;
+                current.power = sampled.power;
             });
         }
         set_state_if_changed(
@@ -1202,6 +1240,15 @@ fn poll_status_provider(
         );
         std::thread::sleep(Duration::from_secs(1));
     }
+}
+
+fn collect_power_status() -> Option<PowerStatus> {
+    let supplies = scarlet_os::power_supply::PowerSupplies::open().ok()?;
+    let mut snapshots = Vec::new();
+    for id in 0..supplies.count().ok()? {
+        snapshots.push(supplies.snapshot(id).ok()?);
+    }
+    Some(PowerStatus::from_supplies(&snapshots))
 }
 
 fn fixed_string(bytes: &[u8]) -> String {
@@ -1322,6 +1369,7 @@ fn collect_input_environment_snapshot() -> InputEnvironmentSnapshot {
 fn collect_control_center_snapshot(status: StatusProviderSnapshot) -> ControlCenterSnapshot {
     ControlCenterSnapshot {
         audio: collect_audio_snapshot(&status),
+        power: status.power,
         network: collect_network_snapshot(),
         system: SystemSnapshot {
             cpu_percent: status.cpu_percent,
@@ -3287,6 +3335,7 @@ impl Application for ShellApp {
             collect_control_center_snapshot(status_snapshot.clone())
         } else {
             ControlCenterSnapshot {
+                power: status_snapshot.power,
                 audio: AudioSnapshot::unavailable(),
                 network: NetworkSnapshot {
                     available: false,

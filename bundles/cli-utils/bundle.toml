@@ -20,6 +20,12 @@ to = "/bin/gpu-info"
 [[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
+bin = "power-info"
+to = "/bin/power-info"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
 bin = "abi-run"
 to = "/bin/abi-run"
 
