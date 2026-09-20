@@ -106,8 +106,8 @@ pub struct ScarletVideoH264ScalingMatrix {
 impl Default for ScarletVideoH264ScalingMatrix {
     fn default() -> Self {
         Self {
-            scaling_list_4x4: [[0; 16]; 6],
-            scaling_list_8x8: [[0; 64]; 6],
+            scaling_list_4x4: [[16; 16]; 6],
+            scaling_list_8x8: [[16; 64]; 6],
         }
     }
 }
@@ -541,6 +541,8 @@ struct H264DpbFrame {
 struct H264PocState {
     prev_pic_order_cnt_msb: i32,
     prev_pic_order_cnt_lsb: u16,
+    prev_frame_num: u16,
+    prev_frame_num_offset: i32,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -871,7 +873,7 @@ impl H264RequestContext {
 
 #[cfg(test)]
 mod tests {
-    use super::H264RequestContext;
+    use super::{H264PocState, H264RequestContext, h264_type2_poc};
 
     #[test]
     fn preserves_explicit_nonzero_timestamp() {
@@ -879,6 +881,33 @@ mod tests {
         assert_eq!(context.resolve_submit_timestamp(Some(42)), 42);
         assert_eq!(context.resolve_submit_timestamp(Some(0)), 43);
         assert_eq!(context.resolve_submit_timestamp(None), 44);
+    }
+
+    #[test]
+    fn type2_poc_handles_wrap_nonreference_and_idr() {
+        let state = H264PocState {
+            prev_frame_num: 15,
+            ..Default::default()
+        };
+        assert_eq!(
+            h264_type2_poc(0, 16, false, true, &state).unwrap(),
+            (32, 16)
+        );
+        let state = H264PocState {
+            prev_frame_num: 0,
+            prev_frame_num_offset: 16,
+            ..Default::default()
+        };
+        assert_eq!(
+            h264_type2_poc(1, 16, false, false, &state).unwrap(),
+            (33, 16)
+        );
+        assert_eq!(h264_type2_poc(0, 16, true, true, &state).unwrap(), (0, 0));
+        let overflow = H264PocState {
+            prev_frame_num_offset: i32::MAX,
+            ..Default::default()
+        };
+        assert!(h264_type2_poc(1, 16, false, true, &overflow).is_err());
     }
 }
 
@@ -921,16 +950,7 @@ fn parse_h264_sps(nal: &[u8]) -> Result<ScarletVideoH264Sps, String> {
             .ok_or_else(|| String::from("H.264 SPS scaling matrix flag missing"))?
             != 0;
         if scaling_matrix_present {
-            let count = if chroma_format_idc != 3 { 8 } else { 12 };
-            for index in 0..count {
-                let present = reader
-                    .read_bit()
-                    .ok_or_else(|| String::from("H.264 SPS scaling list flag missing"))?
-                    != 0;
-                if present {
-                    skip_h264_scaling_list(&mut reader, if index < 6 { 16 } else { 64 })?;
-                }
-            }
+            return Err(String::from("H.264 SPS scaling matrices are unsupported"));
         }
     }
 
@@ -968,6 +988,7 @@ fn parse_h264_sps(nal: &[u8]) -> Result<ScarletVideoH264Sps, String> {
                     .ok_or_else(|| String::from("H.264 offset_for_ref_frame missing"))?;
             }
         }
+        2 => {}
         _ => return Err(String::from("H.264 pic_order_cnt_type is unsupported")),
     }
     let max_num_ref_frames = read_u8_ue(&mut reader, "H.264 max_num_ref_frames")?;
@@ -1167,6 +1188,7 @@ fn parse_h264_slice(
         ..Default::default()
     };
     let max_frame_num = h264_max_frame_num(sps);
+    let mut frame_num_offset = 0;
     fill_h264_decode_dpb(&mut decode_params, dpb, frame_num, max_frame_num);
     if nal.nal_type == 5 {
         decode_params.flags |= SCARLET_VIDEO_H264_DECODE_PARAM_FLAG_IDR;
@@ -1204,6 +1226,17 @@ fn parse_h264_slice(
         decode_params.bottom_field_order_cnt = decode_params
             .top_field_order_cnt
             .saturating_add(decode_params.delta_pic_order_cnt1);
+    } else if sps.pic_order_cnt_type == 2 {
+        let (poc, offset) = h264_type2_poc(
+            frame_num,
+            max_frame_num,
+            nal.nal_type == 5,
+            nal.nal_ref_idc != 0,
+            poc_state,
+        )?;
+        frame_num_offset = offset;
+        decode_params.top_field_order_cnt = poc;
+        decode_params.bottom_field_order_cnt = poc;
     }
     let mut redundant_pic_cnt = 0;
     if pps.flags & SCARLET_VIDEO_H264_PPS_FLAG_REDUNDANT_PIC_CNT_PRESENT != 0 {
@@ -1304,6 +1337,11 @@ fn parse_h264_slice(
             poc_state.prev_pic_order_cnt_lsb = decode_params.pic_order_cnt_lsb;
         }
     }
+    if sps.pic_order_cnt_type == 2 {
+        let reset = ref_pic_marking.resets_poc();
+        poc_state.prev_frame_num = if reset { 0 } else { frame_num };
+        poc_state.prev_frame_num_offset = if reset { 0 } else { frame_num_offset };
+    }
 
     let mut slice_params = ScarletVideoH264SliceParams {
         header_bit_size: reader.position_bits() as u32,
@@ -1328,6 +1366,31 @@ fn parse_h264_slice(
     slice_params.ref_pic_list0 = ref_pic_list0;
     slice_params.ref_pic_list1 = ref_pic_list1;
     Ok((slice_params, decode_params, ref_pic_marking))
+}
+
+/// H.264 8.2.1.3: type 2 has no POC syntax in the slice header. Extend
+/// frame_num across wrap, then place non-reference pictures one count earlier.
+fn h264_type2_poc(
+    frame_num: u16,
+    max_frame_num: u32,
+    idr: bool,
+    reference: bool,
+    state: &H264PocState,
+) -> Result<(i32, i32), String> {
+    if idr {
+        return Ok((0, 0));
+    }
+    let offset = i64::from(state.prev_frame_num_offset)
+        + if frame_num < state.prev_frame_num {
+            i64::from(max_frame_num)
+        } else {
+            0
+        };
+    let poc = 2 * (offset + i64::from(frame_num)) - i64::from(!reference);
+    Ok((
+        i32::try_from(poc).map_err(|_| String::from("H.264 type 2 POC overflow"))?,
+        i32::try_from(offset).map_err(|_| String::from("H.264 frame number offset overflow"))?,
+    ))
 }
 
 fn h264_pic_order_cnt_msb(
@@ -1948,25 +2011,6 @@ fn read_i8_se(reader: &mut EbspBitReader<'_>, name: &'static str) -> Result<i8, 
 fn read_i16_se(reader: &mut EbspBitReader<'_>, name: &'static str) -> Result<i16, String> {
     let value = reader.read_se().ok_or_else(|| format!("{name} missing"))?;
     i16::try_from(value).map_err(|_| format!("{name} overflows i16"))
-}
-
-fn skip_h264_scaling_list(reader: &mut EbspBitReader<'_>, count: usize) -> Result<(), String> {
-    let mut last_scale = 8i32;
-    let mut next_scale = 8i32;
-    for _ in 0..count {
-        if next_scale != 0 {
-            let delta_scale = reader
-                .read_se()
-                .ok_or_else(|| String::from("H.264 scaling list is truncated"))?;
-            next_scale = (last_scale + delta_scale + 256) % 256;
-        }
-        last_scale = if next_scale == 0 {
-            last_scale
-        } else {
-            next_scale
-        };
-    }
-    Ok(())
 }
 
 fn is_h264_high_profile(profile_idc: u8) -> bool {

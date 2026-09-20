@@ -71,7 +71,8 @@ pub const SCARLET_VIDEO_CAP_STATELESS_H264: u32 = 1 << 8;
 pub const SCARLET_VIDEO_CAP_STATELESS_VP9: u32 = 1 << 9;
 /// Backend supports the common mmap input/output buffer.
 pub const SCARLET_VIDEO_CAP_MAPPED_BUFFERS: u32 = 1 << 16;
-/// Backend supports multiple mapped stream sessions.
+/// Backend supports mapped session commands. `max_sessions` limits concurrency;
+/// a single-session backend still needs this API to report its current stream ID.
 pub const SCARLET_VIDEO_CAP_SESSIONS: u32 = 1 << 17;
 /// Backend accepts per-session mapped-buffer capacities up to its advertised maxima.
 pub const SCARLET_VIDEO_CAP_VARIABLE_MAPPED_BUFFERS: u32 = 1 << 18;
@@ -269,7 +270,7 @@ impl VideoBackendCapabilities {
         if self.mapped_input_len != 0 && self.mapped_output_len != 0 {
             flags |= SCARLET_VIDEO_CAP_MAPPED_BUFFERS;
         }
-        if self.max_sessions > 1 {
+        if self.max_sessions != 0 {
             flags |= SCARLET_VIDEO_CAP_SESSIONS;
         }
         flags
