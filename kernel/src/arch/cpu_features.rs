@@ -4,7 +4,8 @@
 //! is frozen before the first exec. Late APs wait for publication and may enter
 //! the scheduler only when they contain every bit already promised to userspace.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::environment::MAX_NUM_CPUS;
 
@@ -29,34 +30,42 @@ impl CpuCapabilities {
 }
 
 pub struct CpuFeatureRegistry {
-    hwcap: [AtomicU64; MAX_NUM_CPUS],
-    hwcap2: [AtomicU64; MAX_NUM_CPUS],
-    reported: AtomicU64,
-    published_hwcap: AtomicU64,
-    published_hwcap2: AtomicU64,
+    reports: [UnsafeCell<CpuCapabilities>; MAX_NUM_CPUS],
+    reported: [AtomicBool; MAX_NUM_CPUS],
+    published_capabilities: UnsafeCell<CpuCapabilities>,
     published: AtomicBool,
 }
+
+// Each CPU writes only its own report before publishing the corresponding
+// reported flag. The BSP reads a report only after an Acquire load of that
+// flag. It writes the final value once, before publishing it with Release.
+unsafe impl Sync for CpuFeatureRegistry {}
 
 impl CpuFeatureRegistry {
     pub const fn new() -> Self {
         Self {
-            hwcap: [const { AtomicU64::new(0) }; MAX_NUM_CPUS],
-            hwcap2: [const { AtomicU64::new(0) }; MAX_NUM_CPUS],
-            reported: AtomicU64::new(0),
-            published_hwcap: AtomicU64::new(0),
-            published_hwcap2: AtomicU64::new(0),
+            reports: [const {
+                UnsafeCell::new(CpuCapabilities {
+                    hwcap: 0,
+                    hwcap2: 0,
+                })
+            }; MAX_NUM_CPUS],
+            reported: [const { AtomicBool::new(false) }; MAX_NUM_CPUS],
+            published_capabilities: UnsafeCell::new(CpuCapabilities {
+                hwcap: 0,
+                hwcap2: 0,
+            }),
             published: AtomicBool::new(false),
         }
     }
 
     pub fn report(&self, cpu_id: usize, capabilities: CpuCapabilities) {
         assert!(cpu_id < MAX_NUM_CPUS);
-        assert!(
-            !self.published.load(Ordering::Acquire) || self.reported_mask() & (1 << cpu_id) == 0
-        );
-        self.hwcap[cpu_id].store(capabilities.hwcap, Ordering::Relaxed);
-        self.hwcap2[cpu_id].store(capabilities.hwcap2, Ordering::Relaxed);
-        self.reported.fetch_or(1 << cpu_id, Ordering::Release);
+        assert!(!self.reported[cpu_id].load(Ordering::Acquire));
+        // SAFETY: Each logical CPU has exactly one reporter. Readers wait for
+        // this slot's Release store to `reported` before accessing the value.
+        unsafe { *self.reports[cpu_id].get() = capabilities };
+        self.reported[cpu_id].store(true, Ordering::Release);
     }
 
     pub fn report_secondary_and_wait(&self, cpu_id: usize, capabilities: CpuCapabilities) -> bool {
@@ -68,30 +77,36 @@ impl CpuFeatureRegistry {
     }
 
     pub fn reported_mask(&self) -> u64 {
-        self.reported.load(Ordering::Acquire)
+        let mut mask = 0;
+        for cpu_id in 0..MAX_NUM_CPUS {
+            if self.reported[cpu_id].load(Ordering::Acquire) {
+                mask |= 1 << cpu_id;
+            }
+        }
+        mask
     }
 
     /// Freeze the intersection of CPUs that completed their probe. The boot
     /// protocol controls how long to wait for missing APs before calling this.
     pub fn publish(&self) -> CpuCapabilities {
         assert!(!self.published.load(Ordering::Relaxed));
-        let mask = self.reported_mask();
-        assert_ne!(mask, 0, "boot CPU has not reported its capabilities");
         let mut common = CpuCapabilities {
             hwcap: u64::MAX,
             hwcap2: u64::MAX,
         };
+        let mut reports = 0;
         for cpu_id in 0..MAX_NUM_CPUS {
-            if mask & (1 << cpu_id) != 0 {
-                common = common.intersection(CpuCapabilities {
-                    hwcap: self.hwcap[cpu_id].load(Ordering::Relaxed),
-                    hwcap2: self.hwcap2[cpu_id].load(Ordering::Relaxed),
-                });
+            if self.reported[cpu_id].load(Ordering::Acquire) {
+                // SAFETY: The Acquire load observes this CPU's completed
+                // report. That slot will not be written a second time.
+                common = common.intersection(unsafe { *self.reports[cpu_id].get() });
+                reports += 1;
             }
         }
-        self.published_hwcap.store(common.hwcap, Ordering::Relaxed);
-        self.published_hwcap2
-            .store(common.hwcap2, Ordering::Relaxed);
+        assert_ne!(reports, 0, "boot CPU has not reported its capabilities");
+        // SAFETY: Only the BSP publishes, exactly once. Readers wait for the
+        // Release store to `published` before accessing the final value.
+        unsafe { *self.published_capabilities.get() = common };
         self.published.store(true, Ordering::Release);
         common
     }
@@ -100,14 +115,14 @@ impl CpuFeatureRegistry {
         if !self.published.load(Ordering::Acquire) {
             return CpuCapabilities::default();
         }
-        CpuCapabilities {
-            hwcap: self.published_hwcap.load(Ordering::Relaxed),
-            hwcap2: self.published_hwcap2.load(Ordering::Relaxed),
-        }
+        // SAFETY: The Acquire load above observes the BSP's completed write.
+        unsafe { *self.published_capabilities.get() }
     }
 }
 
-#[cfg(test)]
+// The RV32 toolchain does not package libtest; run this registry test on the
+// 64-bit kernel targets while still compiling the registry for RV32.
+#[cfg(all(test, target_pointer_width = "64"))]
 mod tests {
     use super::*;
 
