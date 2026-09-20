@@ -1,4 +1,4 @@
-//! Run on Scarlet after staging a native compiler. No shell status parsing required.
+//! Execute on Scarlet; a full PASS requires compiling and running a new program here.
 use std::env;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -6,87 +6,331 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-fn phase(rustc: &Path, sysroot: &Path, output: &Path, name: &str, args: &[&str], dummy: bool)
-    -> Result<String, String>
-{
+const HELLO: &str = "SCARLET_NATIVE_RUSTC_HELLO_OK\n";
+const HELLO_EXIT: i32 = 37;
+const CONFIG: &str = "/etc/native-rustc-probe.args";
+const USAGE: &str = "usage: native-rustc-probe RUSTC SYSROOT TARGET NEW_OUTPUT_DIR [--dummy] [--full --linker PATH] [--backend PATH_OR_NAME] [--linker-flavor FLAVOR] [--timeout SECONDS] [--run-timeout SECONDS]; no arguments reads /etc/native-rustc-probe.args (one argument per line)";
+
+#[derive(Debug)]
+struct Options {
+    rustc: PathBuf,
+    sysroot: PathBuf,
+    target: String,
+    output: PathBuf,
+    full: bool,
+    dummy: bool,
+    backend: Option<String>,
+    linker: Option<PathBuf>,
+    linker_flavor: Option<String>,
+    timeout: Duration,
+    run_timeout: Duration,
+}
+
+fn seconds(value: &str) -> Result<Duration, String> {
+    let seconds: u64 = value
+        .parse()
+        .map_err(|_| "timeout must be an integer".to_string())?;
+    if !(1..=86400).contains(&seconds) {
+        return Err("timeout must be between 1 and 86400 seconds".into());
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
+fn options(args: &[String]) -> Result<Options, String> {
+    if args.len() < 4 {
+        return Err(USAGE.into());
+    }
+    let mut result = Options {
+        rustc: PathBuf::from(&args[0]),
+        sysroot: PathBuf::from(&args[1]),
+        target: args[2].clone(),
+        output: PathBuf::from(&args[3]),
+        full: false,
+        dummy: false,
+        backend: None,
+        linker: None,
+        linker_flavor: None,
+        timeout: Duration::from_secs(900),
+        run_timeout: Duration::from_secs(60),
+    };
+    let mut rest = args[4..].iter();
+    while let Some(flag) = rest.next() {
+        match flag.as_str() {
+            "--full" => result.full = true,
+            "--dummy" => result.dummy = true,
+            "--backend" | "--linker" | "--linker-flavor" | "--timeout" | "--run-timeout" => {
+                let value = rest
+                    .next()
+                    .ok_or_else(|| format!("missing value for {flag}"))?;
+                if value.is_empty() {
+                    return Err(format!("empty value for {flag}"));
+                }
+                match flag.as_str() {
+                    "--backend" => result.backend = Some(value.clone()),
+                    "--linker" => result.linker = Some(value.into()),
+                    "--linker-flavor" => result.linker_flavor = Some(value.clone()),
+                    "--timeout" => result.timeout = seconds(value)?,
+                    "--run-timeout" => result.run_timeout = seconds(value)?,
+                    _ => unreachable!(),
+                }
+            }
+            _ => return Err(format!("unknown option {flag}; {USAGE}")),
+        }
+    }
+    if result.full && result.dummy {
+        return Err("--dummy is only a frontend diagnostic and cannot be used with --full".into());
+    }
+    if result.dummy && result.backend.is_some() {
+        return Err("--dummy and --backend are mutually exclusive".into());
+    }
+    if result.full && result.linker.is_none() {
+        return Err("--full requires --linker pointing to a native Scarlet executable".into());
+    }
+    if !result.full && (result.linker.is_some() || result.linker_flavor.is_some()) {
+        return Err("linker options require --full".into());
+    }
+    if !matches!(
+        result.target.as_str(),
+        "riscv64gc-unknown-scarlet" | "aarch64-unknown-scarlet"
+    ) {
+        return Err("expected a supported 64-bit native Scarlet target".into());
+    }
+    Ok(result)
+}
+
+fn phase(
+    mut command: Command,
+    output: &Path,
+    name: &str,
+    timeout: Duration,
+    expected_exit: i32,
+) -> Result<Vec<u8>, String> {
     let stdout_path = output.join(format!("{name}.stdout"));
     let stderr_path = output.join(format!("{name}.stderr"));
     let stdout = File::create(&stdout_path).map_err(|e| e.to_string())?;
     let stderr = File::create(&stderr_path).map_err(|e| e.to_string())?;
-    let mut command = Command::new(rustc);
-    command.args(args).arg("--sysroot").arg(sysroot).current_dir(output)
-        .stdin(Stdio::null()).stdout(stdout).stderr(stderr);
-    if dummy {
-        command.arg("-Zcodegen-backend=dummy");
-    }
-    fs::write(output.join(format!("{name}.command")), format!("{command:?}\n"))
-        .map_err(|e| e.to_string())?;
-    println!("NATIVE_RUSTC START {name}");
-    let mut child = command.spawn().map_err(|e| format!("spawn: {e}"))?;
-    let start = Instant::now();
+    command
+        .current_dir(output)
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr);
+    let invocation = format!("{command:?}");
+    fs::write(
+        output.join(format!("{name}.command")),
+        format!("{invocation}\n"),
+    )
+    .map_err(|e| e.to_string())?;
+    println!(
+        "NATIVE_RUSTC START {name} timeout={} command={invocation}",
+        timeout.as_secs()
+    );
+    let mut child = command.spawn().map_err(|e| format!("{name}: spawn: {e}"))?;
+    // Release the parent copies of redirected descriptors. Ext2 persists a file
+    // when its final handle closes; child exit must finish that before we read.
+    drop(command);
+    let started = Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => (),
-            Err(e) => return Err(format!("wait: {e}")),
+            Err(e) => return Err(format!("{name}: wait: {e}")),
         }
-        if start.elapsed() > Duration::from_secs(120) {
+        if started.elapsed() > timeout {
+            // Scarlet currently does not support Child::kill. Never block in
+            // wait() after a failed kill: the host's QEMU deadline reaps the VM.
             let killed = child.kill();
             if killed.is_ok() {
                 let _ = child.wait();
             }
-            return Err(format!("timed out after 120 seconds; kill result: {killed:?}"));
+            return Err(format!(
+                "{name}: timed out after {} seconds; kill result: {killed:?}",
+                timeout.as_secs()
+            ));
         }
         thread::sleep(Duration::from_millis(50));
     };
-    let out = fs::read_to_string(stdout_path).map_err(|e| e.to_string())?;
-    let err = fs::read_to_string(stderr_path).map_err(|e| e.to_string())?;
-    print!("{out}");
-    eprint!("{err}");
-    if !status.success() {
-        return Err(format!("{name}: {status}"));
+    let out = fs::read(stdout_path).map_err(|e| e.to_string())?;
+    let err = fs::read(stderr_path).map_err(|e| e.to_string())?;
+    println!(
+        "NATIVE_RUSTC OUTPUT {name} stdout_bytes={} stderr_bytes={}",
+        out.len(),
+        err.len()
+    );
+    print!("{}", String::from_utf8_lossy(&out));
+    eprint!("{}", String::from_utf8_lossy(&err));
+    let outcome = format!(
+        "exit={:?} elapsed_ms={} expected_exit={expected_exit}\n",
+        status.code(),
+        started.elapsed().as_millis()
+    );
+    fs::write(output.join(format!("{name}.status")), &outcome).map_err(|e| e.to_string())?;
+    println!("NATIVE_RUSTC STATUS {name} {}", outcome.trim_end());
+    if status.code() != Some(expected_exit) {
+        return Err(format!(
+            "{name}: expected exit {expected_exit}, got {status}"
+        ));
     }
     Ok(out)
 }
 
-fn run() -> Result<(), String> {
-    let args: Vec<String> = env::args().collect();
-    if !(args.len() == 5 || args.len() == 6 && args[5] == "--dummy") {
-        return Err("usage: native-rustc-probe RUSTC SYSROOT TARGET NEW_OUTPUT_DIR [--dummy]".into());
+fn compiler(options: &Options) -> Command {
+    let mut command = Command::new(&options.rustc);
+    command.arg("--sysroot").arg(&options.sysroot);
+    if options.dummy {
+        command.arg("-Zcodegen-backend=dummy");
+    } else if let Some(backend) = &options.backend {
+        command.arg(format!("-Zcodegen-backend={backend}"));
     }
+    command
+}
+
+fn check_elf(path: &Path, target: &str) -> Result<(), String> {
+    use std::io::Read;
+    let mut header = [0u8; 64];
+    File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .map_err(|e| format!("generated executable: {e}"))?;
+    let machine = if target.starts_with("aarch64") {
+        183
+    } else {
+        243
+    };
+    if &header[..4] != b"\x7fELF"
+        || header[4] != 2
+        || header[5] != 1
+        || header[7] != 83
+        || !matches!(u16::from_le_bytes([header[16], header[17]]), 2 | 3)
+        || u16::from_le_bytes([header[18], header[19]]) != machine
+    {
+        return Err(
+            "compiler output is not a native Scarlet ELF executable for this architecture".into(),
+        );
+    }
+    Ok(())
+}
+
+fn run() -> Result<(), String> {
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    if args.is_empty() {
+        args = fs::read_to_string(CONFIG)
+            .map_err(|e| format!("read {CONFIG}: {e}; {USAGE}"))?
+            .lines()
+            .map(str::to_owned)
+            .collect();
+    }
+    let mut options = options(&args)?;
     if !cfg!(target_os = "scarlet") {
         return Err("this probe must run as a native Scarlet program".into());
     }
-    let rustc = fs::canonicalize(&args[1]).map_err(|e| format!("rustc: {e}"))?;
-    let sysroot = fs::canonicalize(&args[2]).map_err(|e| format!("sysroot: {e}"))?;
-    let target = &args[3];
-    if !matches!(target.as_str(), "riscv64gc-unknown-scarlet" | "aarch64-unknown-scarlet") {
-        return Err("expected a supported 64-bit native Scarlet target".into());
+    if (cfg!(target_arch = "aarch64") && !options.target.starts_with("aarch64"))
+        || (cfg!(target_arch = "riscv64") && !options.target.starts_with("riscv64"))
+    {
+        return Err("probe architecture and requested native target differ".into());
     }
-    let output = PathBuf::from(&args[4]);
-    // Refuse to reuse old evidence or accidentally overwrite a previous run.
-    fs::create_dir(&output).map_err(|e| format!("create fresh output directory: {e}"))?;
-    let output = fs::canonicalize(output).map_err(|e| e.to_string())?;
-    let dummy = args.len() == 6;
-    fs::write(output.join("hello.rs"), "fn main() { println!(\"native rustc hello\"); }\n")
-        .map_err(|e| e.to_string())?;
-    fs::write(output.join("mode.txt"), if dummy { "dummy\n" } else { "default\n" })
-        .map_err(|e| e.to_string())?;
-    let version = phase(&rustc, &sysroot, &output, "version", &["-Vv"], dummy)?;
-    if !version.lines().any(|l| l == format!("host: {target}")) {
+    options.rustc = fs::canonicalize(&options.rustc).map_err(|e| format!("rustc: {e}"))?;
+    options.sysroot = fs::canonicalize(&options.sysroot).map_err(|e| format!("sysroot: {e}"))?;
+    if let Some(linker) = &mut options.linker {
+        *linker = fs::canonicalize(&linker).map_err(|e| format!("linker: {e}"))?;
+        check_elf(linker, &options.target).map_err(|e| format!("native linker: {e}"))?;
+    }
+    // Refuse to reuse old evidence or overwrite any prior run's generated binary.
+    fs::create_dir(&options.output).map_err(|e| format!("create fresh output directory: {e}"))?;
+    options.output = fs::canonicalize(&options.output).map_err(|e| e.to_string())?;
+    let output = &options.output;
+    let mode = if options.full {
+        "full"
+    } else if options.dummy {
+        "frontend-dummy"
+    } else {
+        "frontend"
+    };
+    fs::write(output.join("mode.txt"), format!("{mode}\n")).map_err(|e| e.to_string())?;
+    // Only the native process creates this source and the compiler output.
+    fs::write(
+        output.join("hello.rs"),
+        format!(
+            "fn main() {{ println!(\"{}\"); std::process::exit({HELLO_EXIT}); }}\n",
+            HELLO.trim_end()
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    println!("NATIVE_RUSTC MODE {mode} output={}", output.display());
+    let mut command = compiler(&options);
+    command.arg("-Vv");
+    let version = phase(command, output, "version", options.timeout, 0)?;
+    if !String::from_utf8_lossy(&version)
+        .lines()
+        .any(|l| l == format!("host: {}", options.target))
+    {
         return Err("rustc -Vv did not report the requested Scarlet host".into());
     }
-    println!("NATIVE_RUSTC PASS version");
-    let cfg = phase(&rustc, &sysroot, &output, "cfg", &["--print", "cfg", "--target", target], dummy)?;
-    if !cfg.lines().any(|l| l == "target_os=\"scarlet\"") {
+    let mut command = compiler(&options);
+    command.args(["--print", "cfg", "--target", &options.target]);
+    let cfg = phase(command, output, "cfg", options.timeout, 0)?;
+    if !String::from_utf8_lossy(&cfg)
+        .lines()
+        .any(|l| l == "target_os=\"scarlet\"")
+    {
         return Err("--print cfg did not report target_os=scarlet".into());
     }
-    println!("NATIVE_RUSTC PASS cfg");
-    phase(&rustc, &sysroot, &output, "frontend",
-        &["--target", target, "--edition=2021", "-Zno-codegen", "hello.rs"], dummy)?;
-    println!("NATIVE_RUSTC PASS frontend");
-    fs::write(output.join("PASS"), "version\ncfg\nfrontend\n").map_err(|e| e.to_string())?;
-    println!("NATIVE_RUSTC PASS all mode={}", if dummy { "dummy" } else { "default" });
+    let mut command = compiler(&options);
+    command.args([
+        "--target",
+        &options.target,
+        "--edition=2021",
+        "-Zno-codegen",
+        "hello.rs",
+    ]);
+    phase(command, output, "frontend", options.timeout, 0)?;
+    if !options.full {
+        fs::write(
+            output.join("FRONTEND_PASS"),
+            format!("mode={mode}\nversion\ncfg\nfrontend\ncodegen_and_execution=not_tested\n"),
+        )
+        .map_err(|e| e.to_string())?;
+        println!("NATIVE_RUSTC FRONTEND PASS");
+        return Ok(());
+    }
+    let executable = output.join("hello");
+    let mut command = compiler(&options);
+    command
+        .args([
+            "--target",
+            &options.target,
+            "--edition=2021",
+            "-Cpanic=abort",
+            "-Copt-level=0",
+        ])
+        .arg(format!(
+            "-Clinker={}",
+            options.linker.as_ref().unwrap().display()
+        ));
+    if let Some(flavor) = &options.linker_flavor {
+        command.arg(format!("-Clinker-flavor={flavor}"));
+    }
+    command.arg("hello.rs").arg("-o").arg(&executable);
+    phase(command, output, "compile", options.timeout, 0)?;
+    check_elf(&executable, &options.target)?;
+    println!(
+        "NATIVE_RUSTC GENERATED bytes={}",
+        fs::metadata(&executable).map_err(|e| e.to_string())?.len()
+    );
+    let stdout = phase(
+        Command::new(&executable),
+        output,
+        "execute",
+        options.run_timeout,
+        HELLO_EXIT,
+    )?;
+    if stdout != HELLO.as_bytes() {
+        return Err(format!(
+            "generated program stdout mismatch: expected {HELLO:?}, got {:?}",
+            String::from_utf8_lossy(&stdout)
+        ));
+    }
+    fs::write(output.join("PASS"), format!("mode=full\nversion\ncfg\nfrontend\ncompile\nexecute\nhello_exit={HELLO_EXIT}\nhello_stdout={HELLO:?}\n"))
+        .map_err(|e| e.to_string())?;
+    println!("NATIVE_RUSTC FULL PASS");
     Ok(())
 }
 
@@ -94,5 +338,60 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("NATIVE_RUSTC FAIL {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(extra: &[&str]) -> Result<Options, String> {
+        options(
+            &["/rustc", "/sysroot", "aarch64-unknown-scarlet", "/tmp/new"]
+                .into_iter()
+                .chain(extra.iter().copied())
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn legacy_modes_never_select_full() {
+        assert!(!parse(&[]).unwrap().full);
+        assert!(parse(&["--dummy"]).unwrap().dummy);
+        assert!(!parse(&["--dummy"]).unwrap().full);
+    }
+
+    #[test]
+    fn full_requires_a_real_linker_and_forbids_dummy() {
+        assert!(parse(&["--full"]).is_err());
+        assert!(parse(&["--full", "--linker", "/lld", "--dummy"]).is_err());
+        let full = parse(&[
+            "--full",
+            "--linker",
+            "/lld",
+            "--backend",
+            "/cg.so",
+            "--linker-flavor",
+            "gnu-lld",
+        ])
+        .unwrap();
+        assert!(full.full);
+        assert_eq!(full.backend.as_deref(), Some("/cg.so"));
+    }
+
+    #[test]
+    fn bounded_timeouts_and_unknown_flags() {
+        for value in ["0", "86401", "-1", "nan"] {
+            assert!(parse(&["--timeout", value]).is_err());
+        }
+        assert_eq!(
+            parse(&["--run-timeout", "3"])
+                .unwrap()
+                .run_timeout
+                .as_secs(),
+            3
+        );
+        assert!(parse(&["--full", "--unknown"]).is_err());
     }
 }

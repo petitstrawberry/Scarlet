@@ -6,6 +6,22 @@ a separate milestone. **Native rustc has not yet been built or run.** The tools
 below make the existing blockers reproducible and provide staging and guest
 probes for the next compiler build.
 
+## Actions build and artifact retrieval
+
+Heavy native compiler builds run in the separate
+[scarlet-rust-nix native-host pipeline](https://github.com/petitstrawberry/scarlet-rust-nix/pull/20).
+The initial job targets AArch64 with Cranelift; RV64 and the diagnostic dummy
+backend are selectable workflow inputs. The ordinary cached cross toolchain
+remains unchanged. Successful native sysroots are downloadable by exact Actions
+run ID using that repository's `scripts/fetch-native-host.sh`; the helper rejects
+dummy-backend artifacts. Logs, source patch hashes, and bootstrap configuration
+are retained even when the build fails.
+
+The pipeline applies additional version-pinned native compiler/CRT/Cranelift
+and dependency ports. Its successful build would establish ELF identity and
+cross compilation, not execution in Scarlet. The guest acceptance below remains
+required. See [the build recipe](../../tools/native-rustc/HOST-BUILD.md).
+
 ## Verified baseline, 2026-09-21
 
 The inspected Rust fork was
@@ -127,11 +143,27 @@ skips later code generation, not every earlier initialization step. The guest
 probe's `--dummy` mode passes `-Zcodegen-backend=dummy` to all three phases to
 isolate the frontend from default backend initialization.
 
-This is a runtime diagnostic option, **not an existing no-LLVM bootstrap recipe**.
-The audited bootstrap rejects `codegen-backends = []`, treats `"dummy"` as a
-custom backend, and still has LLVM build assumptions. A minimal frontend-only
-host build needs additional deliberate bootstrap work. Passing that option to a
-compiler which still has LLVM in its driver does not remove LLVM's ELF dependencies.
+A deeper source audit and a bootstrap dry-run confirmed an LLVM-free native
+compiler build selection: keep the development-host backend as `["llvm"]`, and
+set `[target.aarch64-unknown-scarlet] codegen-backends = ["dummy"]`. Although
+bootstrap warns that dummy is an unknown custom backend, its normal compiler
+assembly explicitly skips building custom backend crates. It sets
+`CFG_DEFAULT_CODEGEN_BACKEND=dummy` and omits the native compiler's LLVM feature.
+No `rustc_codegen_dummy` crate or bootstrap enum patch is required.
+
+The [Actions host-build recipe](../../tools/native-rustc/HOST-BUILD.md) and
+[config generator](../../tools/native-rustc/prepare_host_build.py) create the
+portable stage2 command, using an existing development-host LLVM and a freshly
+rebuilt stage1 cross compiler. Heavy builds run through scarlet-rust-nix Actions.
+The generator itself only writes configuration and command metadata.
+Use `x build`; the audited `x check` path enables LLVM regardless of the target
+backend list. Empty backend lists remain invalid.
+
+The dummy compiler is an initial execution milestone. Select `--backend cranelift`
+for the subsequent native backend build, port its dependencies, supply a native
+linker, and validate compiling and running Rust programs inside Scarlet. A
+successful config/dry-run does not establish successful compilation or guest
+execution of native rustc, and the dummy backend cannot generate executable code.
 
 ## Audit and stage a future native build
 
@@ -186,25 +218,37 @@ claim the inventory satisfies all current loader restrictions.
 
 ## Guest acceptance probes
 
-Merge the prepared overlay into a separate test image using the normal project
-image workflow. Run this native program from Scarlet's shell:
-
-```text
-/system/bin/native-rustc-probe /opt/native-rustc/bin/rustc /opt/native-rustc riscv64gc-unknown-scarlet /tmp/native-rustc-default
-```
-
-For runtime backend isolation, use a new directory and append `--dummy`.
-The runner sequentially requires:
+The native runner accepts a fresh output directory and captures every command,
+stdout, stderr, and exit status. Its default diagnostic mode requires:
 
 1. `rustc -Vv`: exit 0 and exact `host: ...-scarlet`.
 2. `rustc --print cfg --target ...-scarlet`: exit 0 and `target_os="scarlet"`.
 3. `rustc -Zno-codegen hello.rs`: exit 0 for an ordinary std program.
 
-Each phase captures separate stdout/stderr/arguments, stops on failure, and has
-a 120-second child timeout. Only completion writes a `PASS` file and prints
-`NATIVE_RUSTC PASS all`. The runner requires `cfg(target_os="scarlet")`, avoiding
-accidental success from executing the probes with a development-host compiler.
-Keep the serial log, manifest, ELF audit and guest output directory together.
-The three phases establish frontend bring-up only; code generation, linking,
-proc-macro loading, compiler parallelism, and a self-hosted rebuild require
-separate subsequent tests.
+These phases write `FRONTEND_PASS` and print `NATIVE_RUSTC FRONTEND PASS` only.
+They never claim code generation or full compilation. `--dummy` is available
+only in this diagnostic mode.
+
+Full acceptance additionally requires `--full --linker /actual/native/linker`.
+The runner creates the source inside Scarlet, compiles it to a native ELF using
+that native linker, then executes the resulting program. Success requires the
+exact stdout `SCARLET_NATIVE_RUSTC_HELLO_OK` and exit status 37. Only this path
+writes `PASS` and prints `NATIVE_RUSTC FULL PASS`. `--backend` can select the
+matching native Cranelift DSO; `--linker-flavor` handles a direct linker such as
+`gnu-lld`. Neither the assembler nor native linker is currently supplied by the
+compiler-only Actions artifact.
+
+[run-qemu.py](../../tools/native-rustc/run-qemu.py) boots an isolated ext2 root
+containing the prepared toolchain overlay. It requires the standard static
+Scarlet bootstrap init, fresh native probe, matching kernel/interpreter, and
+actual native backend/linker paths. Its default mode is full acceptance;
+`--frontend-only` explicitly selects diagnostics. Run `--help` for all required
+artifact arguments. The host preserves the private root disk and extracts guest
+commands, outputs, compiled ELF, and acceptance evidence after execution.
+
+Compiler phases default to 900 seconds, with a 60-second generated-program
+limit. The outer VM deadline also provides cleanup because Scarlet's current
+std cannot kill a child. A VirtIO RNG supplies entropy for the native getrandom
+backend; a pseudo-random fallback is not accepted. Full acceptance does not
+establish proc-macro support, compiler parallelism, or self-hosted rebuilding;
+those require subsequent tests.
