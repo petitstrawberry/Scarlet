@@ -9,6 +9,8 @@
 pub mod data_model;
 pub mod environment;
 pub mod native_scalar;
+pub mod shared_image;
+pub mod video_image;
 
 /// Raw kernel object handle value used at the Scarlet Native ABI boundary.
 pub type RawHandle = i32;

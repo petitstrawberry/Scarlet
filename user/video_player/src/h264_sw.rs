@@ -238,6 +238,7 @@ pub fn update_frame_store(
     let width = frame.frame.width;
     let height = frame.frame.height;
     let mut data = frame_store.data.lock();
+    data.image = None;
     let required_len = width as usize * height as usize * 4;
     if data.pixels.len() != required_len {
         data.pixels.resize(required_len, 0);

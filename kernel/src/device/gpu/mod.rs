@@ -11,7 +11,7 @@ mod abi;
 mod async_abi;
 mod backend;
 mod completion;
-mod connection;
+pub(crate) mod connection;
 mod execution;
 mod object;
 mod resource;
@@ -29,17 +29,18 @@ pub use abi::{
     GPU_CREATE_IMPORTED_IMAGE_BGRA, GPU_CREATE_QUEUE, GPU_CREATE_TIMELINE, GPU_DIALECT_INFO_BYTES,
     GPU_IMAGE_FORMAT_BGRA8_UNORM, GPU_IMAGE_FORMAT_DEPTH32_FLOAT, GPU_IMAGE_MAX_PLANES,
     GPU_IMAGE_MODIFIER_LINEAR, GPU_IMAGE_MODIFIER_NVIDIA_BLOCK_LINEAR_16BX2_H4,
-    GPU_IMAGE_MODIFIER_NVIDIA_ZF32_BLOCK_LINEAR_16BX2_H4, GPU_IMAGE_USAGE_DEPTH_COMPATIBLE,
-    GPU_IMAGE_QUERY_INFO, GPU_IMAGE_QUERY_LAYOUT, GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT,
-    GPU_IMAGE_USAGE_PRESENTABLE, GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED,
-    GPU_IMAGE_USAGE_TRANSFER_DST, GPU_IMAGE_USAGE_TRANSFER_SRC, GPU_IMAGE_USAGE_VALID,
-    GPU_MAX_IMAGE_UPLOAD_SIZE, GPU_MAX_OPAQUE_COMMAND_SIZE, GPU_QUERY_DIALECT, GPU_QUERY_INFO,
-    GPU_QUEUE_QUERY, GPU_QUEUE_SUBMIT, GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMELINE,
-    GPU_QUEUE_SUBMIT_FLAGS_VALID, GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT,
-    GPU_RESULT_INVALID_STATE, GPU_RESULT_OUT_OF_RESOURCES, GPU_RESULT_SUCCESS,
-    GPU_RESULT_UNSUPPORTED, GPU_TIMELINE_CREATE_POINT, GPU_TIMELINE_FAIL, GPU_TIMELINE_QUERY,
-    GPU_TIMELINE_SIGNAL, GpuBufferInfo, GpuContextAttachBuffer, GpuContextAttachImage,
-    GpuContextDetachBuffer, GpuContextDetachImage, GpuContextInfo, GpuContextReadbackImageBgra,
+    GPU_IMAGE_MODIFIER_NVIDIA_ZF32_BLOCK_LINEAR_16BX2_H4, GPU_IMAGE_QUERY_INFO,
+    GPU_IMAGE_QUERY_LAYOUT, GPU_IMAGE_USAGE_DEPTH_COMPATIBLE,
+    GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT, GPU_IMAGE_USAGE_PRESENTABLE,
+    GPU_IMAGE_USAGE_RENDER_TARGET, GPU_IMAGE_USAGE_SAMPLED, GPU_IMAGE_USAGE_TRANSFER_DST,
+    GPU_IMAGE_USAGE_TRANSFER_SRC, GPU_IMAGE_USAGE_VALID, GPU_MAX_IMAGE_UPLOAD_SIZE,
+    GPU_MAX_OPAQUE_COMMAND_SIZE, GPU_QUERY_DIALECT, GPU_QUERY_INFO, GPU_QUEUE_QUERY,
+    GPU_QUEUE_SUBMIT, GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMELINE, GPU_QUEUE_SUBMIT_FLAGS_VALID,
+    GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT, GPU_RESULT_INVALID_STATE,
+    GPU_RESULT_OUT_OF_RESOURCES, GPU_RESULT_SUCCESS, GPU_RESULT_UNSUPPORTED,
+    GPU_TIMELINE_CREATE_POINT, GPU_TIMELINE_FAIL, GPU_TIMELINE_QUERY, GPU_TIMELINE_SIGNAL,
+    GpuBufferInfo, GpuContextAttachBuffer, GpuContextAttachImage, GpuContextDetachBuffer,
+    GpuContextDetachImage, GpuContextInfo, GpuContextReadbackImageBgra,
     GpuContextTransferImportedImageBgra, GpuContextUploadImageBgra, GpuCreateBuffer,
     GpuCreateContext, GpuCreateImage, GpuCreateImportedImageBgra, GpuCreateQueue,
     GpuCreateTimeline, GpuImageInfo, GpuImageLayout, GpuImagePlaneLayout, GpuQueryDialect,
@@ -85,7 +86,7 @@ pub use object::{GpuControlDevice, register_gpu_control_device};
 pub use resource::{GpuBuffer, GpuImage, GpuObject, GpuTimeline, GpuTimelinePoint};
 pub use submission::GpuSubmission;
 
-fn child_handle_metadata(
+pub(crate) fn child_handle_metadata(
     access_mode: crate::object::handle::AccessMode,
 ) -> crate::object::handle::HandleMetadata {
     crate::object::handle::HandleMetadata {
@@ -697,3 +698,5 @@ mod tests {
         assert!(timeline.control(super::GPU_BUFFER_QUERY_INFO, 0).is_err());
     }
 }
+
+pub use abi::{GPU_IMAGE_FORMAT_NV12, GPU_IMPORT_SHARED_IMAGE, GpuImportSharedImage};

@@ -1070,6 +1070,7 @@ impl VideoDecodeBackend for VirtioVideoDevice {
             return Ok(None);
         };
         Ok(Some(VideoBackendDecodedFrame {
+            image: None,
             stream_id: session.stream_id,
             frame: ScarletVideoDequeuedFrame {
                 width: frame.width,

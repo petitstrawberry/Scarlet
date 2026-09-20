@@ -1362,6 +1362,7 @@ dependencies = [
 name = "gpu-raw"
 version = "1.0.0"
 dependencies = [
+ "scarlet-abi",
  "scarlet-os",
  "scarlet-std",
 ]
@@ -3711,6 +3712,7 @@ dependencies = [
 name = "scarlet-video-client"
 version = "1.0.0"
 dependencies = [
+ "scarlet-abi",
  "scarlet-codecs",
  "scarlet-os",
  "scarlet-std",

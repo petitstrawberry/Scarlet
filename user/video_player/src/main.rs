@@ -14,6 +14,7 @@
 
 mod h264_sw;
 mod shared_u64;
+mod video_view;
 
 use shared_u64::SharedU64;
 
@@ -22,7 +23,6 @@ extern crate scarlet_std as std;
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
-use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -47,15 +47,15 @@ use scarlet_desktop_config::{
     DESKTOP_STEMD_INTERFACE, DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD, DESKTOP_STEMD_OBJECT_PATH,
 };
 use scarlet_ui::{
-    Application, ApplicationRunExt, Canvas, CanvasView, Color, ComponentElement, Element, Event,
+    Application, ApplicationRunExt, Canvas, Color, ComponentElement, Element, Event,
     InvalidationKind, KeyCode, KeyEvent, Listenable, MenuBarModel, MenuEntry, MenuItemModel,
     MouseButton, MouseEvent, Scene, Size, SubscriptionId, View, ViewExt, Window, WindowGroup,
     dismiss_window, graphics,
 };
 use scarlet_video_client::{
-    AUTOMATIC_TIMESTAMP, DecodedFrame, DecoderOptions, OwnedDecodedFrame, ScarletVideoDecoder,
-    VideoBufferRequest, VideoFormat, enable_vp9_stateless_dump, recommended_input_buffer_len,
-    recommended_nv12_output_buffer_len,
+    AUTOMATIC_TIMESTAMP, DecodedImage, DecodedOutput, DecoderOptions, OwnedDecodedFrame,
+    ScarletVideoDecoder, VideoBufferRequest, VideoFormat, enable_vp9_stateless_dump,
+    recommended_input_buffer_len, recommended_nv12_output_buffer_len,
 };
 use std::audio::AUDIO_PCM_FORMAT_S16LE;
 use std::fs::File;
@@ -226,7 +226,15 @@ struct VideoFrameStore {
     data: Mutex<VideoFrameData>,
 }
 
+struct SharedVideoFrame {
+    handle: std::handle::Handle,
+    width: u32,
+    height: u32,
+    conversion: scarlet_ui::YcbcrConversion,
+}
+
 struct VideoFrameData {
+    image: Option<Arc<SharedVideoFrame>>,
     pixels: Vec<u8>,
     width: u32,
     height: u32,
@@ -238,6 +246,7 @@ impl VideoFrameStore {
     fn new() -> Self {
         Self {
             data: Mutex::new(VideoFrameData {
+                image: None,
                 pixels: vec![0; (VIDEO_WIDTH * VIDEO_HEIGHT * 4) as usize],
                 width: VIDEO_WIDTH,
                 height: VIDEO_HEIGHT,
@@ -258,6 +267,7 @@ impl VideoFrameStore {
         let payload = frame.payload();
 
         let mut data = self.data.lock();
+        data.image = None;
         let required_len = width as usize * height as usize * 4;
         if data.pixels.len() != required_len {
             let additional = required_len.saturating_sub(data.pixels.len());
@@ -291,6 +301,7 @@ impl VideoFrameStore {
 
     fn reset_for_session(&self) {
         let mut data = self.data.lock();
+        data.image = None;
         for (index, pixel) in data.pixels.iter_mut().enumerate() {
             *pixel = if index % 4 == 3 { 255 } else { 0 };
         }
@@ -1146,28 +1157,12 @@ impl Application for VideoPlayerApp {
     fn scenes(&self) -> impl Scene {
         let frame_store = self.frame_store.clone();
         let controls = self.controls.clone();
-        let controls_for_event = self.controls.clone();
-        let paint_signal_for_event = self.paint_signal.clone();
-        let controls_for_key = self.controls.clone();
-        let paint_signal_for_key = self.paint_signal.clone();
         let picker_request_id = self.picker_request_id.clone();
         WindowGroup::new(
             "main",
             Window::new(
                 self.window_title.lock().clone(),
-                CanvasView::new(
-                    DISPLAY_WIDTH as f32,
-                    DISPLAY_HEIGHT as f32,
-                    Rc::new(move |buffer, width, height| {
-                        draw_video_frame(buffer, width, height, &frame_store, &controls);
-                    }),
-                )
-                .on_event(move |event| {
-                    handle_canvas_event(event, &controls_for_event, &paint_signal_for_event)
-                })
-                .on_key(move |event| {
-                    handle_key_event(event, &controls_for_key, &paint_signal_for_key)
-                }),
+                video_view::view(frame_store, controls, self.paint_signal.clone()),
             )
             .app_id("org.scarlet-os.video-player")
             .menu_bar(MenuBarModel::new(vec![
@@ -2686,6 +2681,7 @@ fn open_hardware_decoder(
     HardwareVideoDecoder::open_with_options(
         DecoderOptions::new()
             .with_buffer_request(buffer_request)
+            .with_shared_images(true)
             .with_cancellation(cancel),
     )
 }
@@ -2696,11 +2692,11 @@ fn decode_hardware_access_unit<'decoder>(
     access_unit_bytes: &[u8],
     controls: &ControlsOverlay,
     seek_epoch: u32,
-) -> Result<Option<DecodedFrame<'decoder>>, String> {
+) -> Result<Option<DecodedOutput<'decoder>>, String> {
     if controls.current_seek_epoch() != seek_epoch {
         return Ok(None);
     }
-    decoder.decode(
+    decoder.decode_output(
         access_unit.codec.video_format(),
         access_unit_bytes,
         AUTOMATIC_TIMESTAMP,
@@ -5522,6 +5518,7 @@ enum DecodedVideoFrame {
     Software(h264_sw::DecodedFrame),
     #[allow(dead_code)]
     Hardware(OwnedDecodedFrame),
+    Image(DecodedImage),
 }
 
 enum DisplayItem {
@@ -5564,6 +5561,9 @@ impl DisplayItem {
         match self {
             Self::Frame { frame, .. } => match frame {
                 DecodedVideoFrame::Software(frame) => h264_sw::estimated_bytes(frame),
+                DecodedVideoFrame::Image(frame) => {
+                    frame.descriptor().buffer_sizes.iter().copied().sum::<u64>() as usize
+                }
                 DecodedVideoFrame::Hardware(frame) => {
                     let payload_len = frame.payload().len();
                     if payload_len != 0 {
@@ -6768,8 +6768,11 @@ fn publish_seek_preview(
     Ok(controls.current_seek_epoch() == seek_epoch)
 }
 
-fn hardware_frame_to_owned(frame: DecodedFrame<'_>) -> Result<DecodedVideoFrame, String> {
-    Ok(DecodedVideoFrame::Hardware(frame.try_into_owned()?))
+fn hardware_frame_to_owned(frame: DecodedOutput<'_>) -> Result<DecodedVideoFrame, String> {
+    match frame {
+        DecodedOutput::Nv12(frame) => Ok(DecodedVideoFrame::Hardware(frame.try_into_owned()?)),
+        DecodedOutput::Image(frame) => Ok(DecodedVideoFrame::Image(frame)),
+    }
 }
 
 fn publish_frame(
@@ -6786,6 +6789,57 @@ fn publish_frame(
         }
         DecodedVideoFrame::Hardware(frame) => {
             frame_store.update_from_nv12(&frame, current_frame, total_frames)?;
+        }
+        DecodedVideoFrame::Image(frame) => {
+            use scarlet_ui::{ChromaLocation, YcbcrConversion, YcbcrMatrix, YcbcrRange};
+            use scarlet_video_client::shared_image::*;
+            let descriptor = frame.descriptor();
+            let color = frame.color();
+            let matrix = match color.matrix {
+                // Explicit legacy policy for streams without color metadata.
+                COLOR_UNSPECIFIED | COLOR_MATRIX_BT601 => YcbcrMatrix::Bt601,
+                COLOR_MATRIX_BT709 => YcbcrMatrix::Bt709,
+                _ => return Err(String::from("shared video color matrix is unsupported")),
+            };
+            if !matches!(color.primaries, 0 | 1 | 5 | 6)
+                || !matches!(color.transfer, 0 | 1 | 6 | 13)
+                || color.chroma_x > CHROMA_MIDPOINT
+                || color.chroma_y > CHROMA_MIDPOINT
+            {
+                return Err(String::from(
+                    "shared video color space/chroma location is unsupported",
+                ));
+            }
+            let conversion = YcbcrConversion {
+                matrix,
+                range: if color.range == COLOR_RANGE_FULL {
+                    YcbcrRange::Full
+                } else {
+                    YcbcrRange::Limited
+                },
+                chroma_x: if color.chroma_x == CHROMA_MIDPOINT {
+                    ChromaLocation::Midpoint
+                } else {
+                    ChromaLocation::Cosited
+                },
+                chroma_y: if color.chroma_y == CHROMA_COSITED {
+                    ChromaLocation::Cosited
+                } else {
+                    ChromaLocation::Midpoint
+                },
+            };
+            let image = Arc::new(SharedVideoFrame {
+                handle: frame.into_handle(),
+                width: descriptor.visible.width,
+                height: descriptor.visible.height,
+                conversion,
+            });
+            let mut data = frame_store.data.lock();
+            data.image = Some(image);
+            data.width = descriptor.visible.width;
+            data.height = descriptor.visible.height;
+            data.current_frame = current_frame;
+            data.total_frames = total_frames;
         }
     }
     paint_signal.notify();

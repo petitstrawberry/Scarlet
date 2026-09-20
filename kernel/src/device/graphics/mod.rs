@@ -17,6 +17,7 @@ pub mod display_device;
 pub mod framebuffer_device;
 pub mod manager;
 pub mod output;
+pub mod shared_image;
 
 #[cfg(test)]
 mod tests;
