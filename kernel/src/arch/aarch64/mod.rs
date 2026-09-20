@@ -20,6 +20,7 @@ pub const fn is_vhe_enabled() -> bool {
     false
 }
 pub mod context;
+pub mod cpu_features;
 pub mod earlycon;
 pub mod fpu;
 #[cfg(feature = "hypervisor")]

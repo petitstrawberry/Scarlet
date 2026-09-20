@@ -481,6 +481,8 @@ pub struct BootInfo {
     /// `start_ap()` with the appropriate CPU ID. `None` for single-CPU or
     /// test configurations.
     pub start_secondary_cpus_hook: Option<fn()>,
+    /// Optional hook to start AP feature probes before the first ELF's auxv.
+    pub probe_secondary_cpus_hook: Option<fn()>,
 }
 
 impl BootInfo {
@@ -533,7 +535,14 @@ impl BootInfo {
             device_source,
             framebuffer_paddr,
             start_secondary_cpus_hook,
+            probe_secondary_cpus_hook: None,
         }
+    }
+
+    /// Attach the boot protocol's early AP feature probe hook.
+    pub fn with_probe_secondary_cpus_hook(mut self, hook: fn()) -> Self {
+        self.probe_secondary_cpus_hook = Some(hook);
+        self
     }
 
     /// Replace the default single PMM region with the complete firmware RAM set.
@@ -679,6 +688,7 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     crate::earlyfb::configure(boot_info.get_cmdline());
     let cpu_id = boot_info.cpu_id;
     let cpu_count = boot_info.cpu_count;
+    crate::arch::report_boot_cpu_features(cpu_id);
     crate::sched::scheduler::register_boot_cpu(cpu_id);
 
     println!("[Scarlet Kernel] Hello, I'm Scarlet kernel!");
@@ -1031,6 +1041,11 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
     } else {
         &init_argv_with_cmdline
     };
+
+    if let Some(hook) = boot_info.probe_secondary_cpus_hook {
+        hook();
+    }
+    crate::arch::publish_user_cpu_features(boot_info.cpu_count);
 
     match TransparentExecutor::execute_binary(
         init_path,
