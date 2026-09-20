@@ -32,8 +32,8 @@ use core::{
 
 use crate::device::events::InterruptCapableDevice;
 use crate::device::{Device, DeviceType};
-use crate::drivers::virtio::features::VIRTIO_F_ANY_LAYOUT;
 use crate::drivers::virtio::features::VIRTIO_RING_F_INDIRECT_DESC;
+use crate::drivers::virtio::features::{VIRTIO_F_ANY_LAYOUT, VIRTIO_F_VERSION_1};
 use crate::environment::PAGE_SIZE;
 use crate::interrupt::{InterruptClaim, InterruptId};
 use crate::mem::page::ContiguousPages;
@@ -412,8 +412,12 @@ impl VirtioNetDevice {
 
     /// Get the appropriate header size based on device features
     fn get_header_size(&self) -> usize {
-        // Always use basic header since we don't support mergeable RX buffers
-        mem::size_of::<VirtioNetHdrBasic>()
+        // Modern virtio includes num_buffers even without MRG_RXBUF.
+        if *self.features.read() & (1u64 << VIRTIO_F_VERSION_1) != 0 {
+            mem::size_of::<VirtioNetHdr>()
+        } else {
+            mem::size_of::<VirtioNetHdrBasic>()
+        }
     }
 
     /// Setup receive buffers in the RX queue
@@ -425,7 +429,7 @@ impl VirtioNetDevice {
         let buffer_count = 16; // Provide extra RX headroom
 
         for _ in 0..buffer_count {
-            let hdr_size = self.get_header_size(); // 10 bytes for VirtioNetHdrBasic
+            let hdr_size = self.get_header_size();
             let packet_size = 1514; // Standard Ethernet frame size
             let total_size = hdr_size + packet_size;
 
@@ -470,7 +474,7 @@ impl VirtioNetDevice {
     /// Process a single packet transmission
     fn transmit_packet(&self, packet: &DevicePacket) -> Result<(), &'static str> {
         // combine header and packet in single buffer like their send() function
-        let hdr_size = mem::size_of::<VirtioNetHdrBasic>();
+        let hdr_size = self.get_header_size();
         let total_size = hdr_size + packet.len;
 
         // Allocate from PMM for DMA
@@ -480,13 +484,9 @@ impl VirtioNetDevice {
         let buffer_ptr = buffer_alloc.as_ptr() as *mut u8;
 
         // Fill header at the beginning
-        let header = VirtioNetHdrBasic::new();
         unsafe {
-            let header_bytes = core::slice::from_raw_parts(
-                &header as *const VirtioNetHdrBasic as *const u8,
-                hdr_size,
-            );
-            core::ptr::copy_nonoverlapping(header_bytes.as_ptr(), buffer_ptr, hdr_size);
+            // No checksum/GSO offload; TX num_buffers is also zero.
+            core::ptr::write_bytes(buffer_ptr, 0, hdr_size);
             // Copy packet data after header
             core::ptr::copy_nonoverlapping(
                 packet.data.as_ptr(),
@@ -790,7 +790,8 @@ impl VirtioDevice for VirtioNetDevice {
             & (1u64 << VIRTIO_NET_F_STATUS
                 | 1u64 << VIRTIO_NET_F_MAC
                 | 1u64 << VIRTIO_NET_F_MTU
-                | 1u64 << VIRTIO_F_ANY_LAYOUT);
+                | 1u64 << VIRTIO_F_ANY_LAYOUT
+                | 1u64 << VIRTIO_F_VERSION_1);
 
         if self.allow_ring_features() {
             // TODO: Implement EVENT_IDX before negotiating it.
@@ -945,6 +946,10 @@ mod tests {
         assert_eq!(device.device_type(), DeviceType::Network);
         assert_eq!(device.name(), "virtio-net");
         assert_eq!(device.get_interface_name(), "virtio-net");
+        // The runner forces modern MMIO. VERSION_1 is required and the wire
+        // header includes num_buffers even without mergeable RX buffers.
+        assert_ne!(*device.features.read() & (1u64 << VIRTIO_F_VERSION_1), 0);
+        assert_eq!(device.get_header_size(), 12);
         crate::vm::iounmap(vaddr);
     }
 
