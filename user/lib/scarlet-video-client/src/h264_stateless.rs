@@ -116,3 +116,52 @@ fn read_decoder_status(device: &Handle) -> String {
         }
     }
 }
+
+/// Color interpretation accompanies each frame without altering the codec ABI.
+pub(crate) fn output_color(context: &Context) -> scarlet_abi::shared_image::ImageColor {
+    use scarlet_abi::shared_image::*;
+    #[cfg(feature = "h264-stateless-hw")]
+    {
+        let c = context.request.color_info();
+        ImageColor {
+            matrix: match c.matrix {
+                1 => COLOR_MATRIX_BT709,
+                5 | 6 => COLOR_MATRIX_BT601,
+                9 => COLOR_MATRIX_BT2020,
+                2 => 0,
+                _ => u32::MAX,
+            },
+            range: if c.full_range {
+                COLOR_RANGE_FULL
+            } else {
+                COLOR_RANGE_LIMITED
+            },
+            primaries: if c.primaries == 2 {
+                0
+            } else {
+                c.primaries as u32
+            },
+            transfer: if c.transfer == 2 {
+                0
+            } else {
+                c.transfer as u32
+            },
+            chroma_x: if c.chroma_location % 2 == 0 {
+                CHROMA_COSITED
+            } else {
+                CHROMA_MIDPOINT
+            },
+            chroma_y: match c.chroma_location {
+                0 | 1 => CHROMA_MIDPOINT,
+                2 | 3 => CHROMA_COSITED,
+                _ => u32::MAX,
+            },
+            reserved: [0; 2],
+        }
+    }
+    #[cfg(not(feature = "h264-stateless-hw"))]
+    {
+        let _ = context;
+        ImageColor::default()
+    }
+}

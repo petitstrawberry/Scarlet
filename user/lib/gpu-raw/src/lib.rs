@@ -7,6 +7,9 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub use scarlet_abi::shared_image;
+pub const GPU_IMAGE_FORMAT_NV12: u32 = 3;
+
 mod completion;
 mod submission;
 pub use completion::{
@@ -1753,6 +1756,35 @@ impl Gpu {
             handle: adopt_child_handle(request.image.image_handle)?,
             command_resource_token: request.image.command_resource_token,
         })
+    }
+
+    /// Import a ready, immutable image capability for read-only GPU sampling.
+    /// The GPU retains the backing lease independently of the source handle.
+    /// `color` explicitly selects the sampled RGB interpretation; unsupported
+    /// format, modifier or conversion combinations fail before submission.
+    pub fn import_shared_image(
+        &self,
+        source: &Handle,
+        color: shared_image::ImageColor,
+    ) -> HandleResult<GpuImage> {
+        let mut request = shared_image::GpuImportSharedImage {
+            abi_version: GPU_ABI_VERSION,
+            source_handle: source.as_raw() as u32,
+            color,
+            ..Default::default()
+        };
+        // SAFETY: fixed-size initialized request lives through the synchronous ioctl.
+        unsafe {
+            self.file.as_handle().control(
+                shared_image::GPU_IMPORT_SHARED_IMAGE,
+                &mut request as *mut _ as usize,
+            )
+        }?;
+        result_to_handle_error(request.result)?;
+        if request.image_handle == 0 {
+            return Err(HandleError::InvalidHandle);
+        }
+        GpuImage::from_handle(unsafe { Handle::from_raw(request.image_handle as i32) }?)
     }
 
     /// Create a sampled BGRA texture image backed by an existing SharedMemory object.

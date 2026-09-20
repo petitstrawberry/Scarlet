@@ -489,7 +489,9 @@ impl MountTree {
             path
         );
 
-        let root_mount = self.root_mount.read();
+        // Keep the mount alive without retaining the registry's IRQ-off lock:
+        // resolving an uncached component can perform filesystem I/O.
+        let root_mount = self.root_mount.read().clone();
         let root_entry = root_mount.root.clone();
         self.resolve_path_from_internal(&root_entry, &root_mount, path, resolve_mount, options)
     }
@@ -534,10 +536,8 @@ impl MountTree {
             return Ok((base_entry.clone(), base_mount.clone()));
         } else if path == "/" {
             // Special case for root path,
-            return Ok((
-                self.root_mount.read().root.clone(),
-                self.root_mount.read().clone(),
-            ));
+            let root_mount = self.root_mount.read().clone();
+            return Ok((root_mount.root.clone(), root_mount));
         }
 
         let components = self.parse_path(path);
@@ -596,7 +596,7 @@ impl MountTree {
                             .map_err(|e| vfs_error(e.kind, &e.message))?;
                         let resolved = if link_target.starts_with('/') {
                             let (root_entry, root_mount) = {
-                                let root_mount = self.root_mount.read();
+                                let root_mount = self.root_mount.read().clone();
                                 (root_mount.root.clone(), root_mount.clone())
                             };
                             self.resolve_path_from_internal_with_depth(

@@ -774,7 +774,7 @@ pub fn get_fs_driver_manager() -> &'static FileSystemDriverManager {
 /// ```
 pub struct FileSystemDriverManager {
     /// Registered file system drivers indexed by name
-    drivers: IrqRwSpinLock<BTreeMap<String, Box<dyn FileSystemDriver>>>,
+    drivers: IrqRwSpinLock<BTreeMap<String, Arc<dyn FileSystemDriver>>>,
 }
 
 impl FileSystemDriverManager {
@@ -810,9 +810,20 @@ impl FileSystemDriverManager {
     /// manager.register_driver(Box::new(MyFileSystemDriver));
     /// ```
     pub fn register_driver(&self, driver: Box<dyn FileSystemDriver>) {
-        self.drivers
-            .write()
-            .insert(driver.name().to_string(), driver);
+        let name = driver.name().to_string();
+        let driver = Arc::from(driver);
+        let previous = self.drivers.write().insert(name, driver);
+        drop(previous);
+    }
+
+    /// Pin the driver, then release the registry lock before invoking it.
+    /// Filesystem creation can perform device I/O and sleep.
+    fn driver(&self, name: &str) -> Result<Arc<dyn FileSystemDriver>, FileSystemError> {
+        let driver = self.drivers.read().get(name).cloned();
+        driver.ok_or_else(|| FileSystemError {
+            kind: FileSystemErrorKind::NotFound,
+            message: format!("File system driver '{}' not found", name),
+        })
     }
 
     /// Get a list of registered driver names
@@ -878,11 +889,7 @@ impl FileSystemDriverManager {
         block_device: Arc<dyn BlockDevice>,
         block_size: usize,
     ) -> Result<Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations>, FileSystemError> {
-        let binding = self.drivers.read();
-        let driver = binding.get(driver_name).ok_or(FileSystemError {
-            kind: FileSystemErrorKind::NotFound,
-            message: format!("File system driver '{}' not found", driver_name),
-        })?;
+        let driver = self.driver(driver_name)?;
 
         if driver.filesystem_type() == FileSystemType::Memory
             || driver.filesystem_type() == FileSystemType::Virtual
@@ -932,11 +939,7 @@ impl FileSystemDriverManager {
         driver_name: &str,
         memory_area: &MemoryArea,
     ) -> Result<Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations>, FileSystemError> {
-        let binding = self.drivers.read();
-        let driver = binding.get(driver_name).ok_or(FileSystemError {
-            kind: FileSystemErrorKind::NotFound,
-            message: format!("File system driver '{}' not found", driver_name),
-        })?;
+        let driver = self.driver(driver_name)?;
 
         if driver.filesystem_type() == FileSystemType::Block {
             return Err(FileSystemError {
@@ -995,11 +998,7 @@ impl FileSystemDriverManager {
         driver_name: &str,
         params: &dyn crate::fs::params::FileSystemParams,
     ) -> Result<Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations>, FileSystemError> {
-        let binding = self.drivers.read();
-        let driver = binding.get(driver_name).ok_or_else(|| FileSystemError {
-            kind: FileSystemErrorKind::NotFound,
-            message: format!("File system driver '{}' not found", driver_name),
-        })?;
+        let driver = self.driver(driver_name)?;
         driver.create_from_params(params)
     }
 
@@ -1035,11 +1034,7 @@ impl FileSystemDriverManager {
         driver_name: &str,
         options: &str,
     ) -> Result<Arc<dyn crate::fs::vfs_v2::core::FileSystemOperations>, FileSystemError> {
-        let binding = self.drivers.read();
-        let driver = binding.get(driver_name).ok_or_else(|| FileSystemError {
-            kind: FileSystemErrorKind::NotFound,
-            message: format!("File system driver '{}' not found", driver_name),
-        })?;
+        let driver = self.driver(driver_name)?;
 
         driver.create_from_option_string(options)
     }
@@ -1070,9 +1065,8 @@ impl FileSystemDriverManager {
     /// }
     /// ```
     pub fn get_driver_type(&self, driver_name: &str) -> Option<FileSystemType> {
-        self.drivers
-            .read()
-            .get(driver_name)
+        self.driver(driver_name)
+            .ok()
             .map(|driver| driver.filesystem_type())
     }
 }

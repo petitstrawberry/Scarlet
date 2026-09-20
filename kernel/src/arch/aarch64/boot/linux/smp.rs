@@ -4,6 +4,7 @@
 //! address and our logical CPU ID as its context. No Limine data is involved.
 
 use core::arch::{asm, naked_asm};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use fdt::node::FdtNode;
 
@@ -83,6 +84,7 @@ struct Configuration {
 }
 
 static CONFIGURATION: Once<Configuration> = Once::new();
+static REQUESTED_CPUS: AtomicU64 = AtomicU64::new(0);
 
 fn enabled(node: &FdtNode<'_, '_>) -> bool {
     node.property("status")
@@ -216,6 +218,7 @@ pub unsafe extern "C" fn secondary_image_entry() -> ! {
 
 extern "C" fn secondary_cpu_entry(cpu_id: usize) -> ! {
     super::page_table::install_secondary();
+    crate::arch::aarch64::cpu_features::register_secondary_cpu(cpu_id);
     crate::wait_for_ap_release();
     crate::start_ap(cpu_id)
 }
@@ -227,8 +230,9 @@ fn counter() -> u64 {
     value
 }
 
-/// Start APs after global kernel initialization and the BSP's first task claim.
-pub(super) fn start_secondary_cpus() {
+/// Start APs while they are still behind the scheduler release barrier.
+/// This runs before the first ELF and lets the BSP publish a system-wide HWCAP.
+pub(super) fn probe_secondary_cpus() {
     let configuration = CONFIGURATION.get().expect("Linux CPU topology unavailable");
     let Some(conduit) = configuration.conduit else {
         return;
@@ -255,8 +259,6 @@ pub(super) fn start_secondary_cpus() {
         frequency, 0,
         "PSCI CPU startup requires the architected counter"
     );
-    crate::release_aps();
-
     for cpu_id in 1..configuration.cpu_count {
         let result = conduit.invoke(
             PSCI_CPU_ON_64,
@@ -274,8 +276,34 @@ pub(super) fn start_secondary_cpus() {
         if result != 0 {
             continue;
         }
-        // Firmware success only means the request was accepted. Wait at most
-        // one second for actual per-CPU initialization and scheduler publication.
+        REQUESTED_CPUS.fetch_or(1 << cpu_id, Ordering::Release);
+        // Firmware success only means the request was accepted. The AP reports
+        // its ID registers before waiting for the later scheduler release.
+        let start = counter();
+        while crate::arch::aarch64::cpu_features::probed_cpu_mask() & (1 << cpu_id) == 0 {
+            if counter().wrapping_sub(start) >= frequency {
+                crate::println!("[linux-boot] CPU {}: feature-probe timeout", cpu_id);
+                break;
+            }
+            core::hint::spin_loop();
+        }
+    }
+    crate::arch::interrupt::restore_interrupts(saved_daif);
+}
+
+/// Release APs only after the BSP has claimed its first runnable task.
+pub(super) fn start_secondary_cpus() {
+    let configuration = CONFIGURATION.get().expect("Linux CPU topology unavailable");
+    let requested = REQUESTED_CPUS.load(Ordering::Acquire);
+    let saved_daif = crate::arch::interrupt::save_and_disable_interrupts();
+    let frequency: u64;
+    // SAFETY: CNTFRQ is initialized by firmware on the boot CPU.
+    unsafe { asm!("mrs {}, cntfrq_el0", out(reg) frequency, options(nomem, nostack)) };
+    crate::release_aps();
+    for cpu_id in 1..configuration.cpu_count {
+        if requested & (1 << cpu_id) == 0 {
+            continue;
+        }
         let start = counter();
         while !scheduler_ready(cpu_id) || online_cpu_mask() & (1 << cpu_id) == 0 {
             if counter().wrapping_sub(start) >= frequency {

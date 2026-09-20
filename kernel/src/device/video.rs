@@ -16,6 +16,7 @@ use core::any::Any;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::arch::Trapframe;
+use crate::device::graphics::shared_image::SharedImage;
 use crate::device::{Device, DeviceType, char::CharDevice, manager::DeviceManager};
 use crate::environment::PAGE_SIZE;
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
@@ -26,6 +27,7 @@ use crate::object::capability::{
 };
 use crate::sync::{IrqGuard, IrqSpinLock, Waker};
 use crate::task::mytask;
+pub use scarlet_abi::video_image::*;
 
 /// FourCC-like Scarlet frame stream magic.
 pub const SCARLET_VIDEO_FRAME_MAGIC: &[u8; 4] = b"SVF1";
@@ -280,6 +282,8 @@ impl VideoBackendCapabilities {
 /// Backend decode request for a mapped access unit.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct VideoBackendDecodeRequest {
+    /// Return an immutable shared image rather than writing the mapped output.
+    pub shared_output: bool,
     /// Backend stream/session identifier.
     pub stream_id: u32,
     /// Scarlet coded stream format.
@@ -321,8 +325,10 @@ pub struct VideoBackendVp9StatelessRequest {
 }
 
 /// Decoded frame returned by a backend.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct VideoBackendDecodedFrame {
+    /// Ready immutable image lease, present only for negotiated shared output.
+    pub image: Option<Arc<SharedImage>>,
     /// Backend stream/session identifier.
     pub stream_id: u32,
     /// User-visible decoded frame metadata.
@@ -341,6 +347,10 @@ pub trait VideoCompletionNotifier: Send + Sync {
 
 /// Common interface for Scarlet video decode backends.
 pub trait VideoDecodeBackend: Send + Sync {
+    /// Whether completed frames can be exported as ready/read-only images.
+    fn supports_shared_images(&self) -> bool {
+        false
+    }
     /// Return a short backend name for diagnostics.
     ///
     /// # Returns
@@ -757,6 +767,9 @@ impl ScarletVideoDevice {
         if self.backend.supports_variable_mapped_buffers() {
             flags |= SCARLET_VIDEO_CAP_VARIABLE_MAPPED_BUFFERS;
         }
+        if self.backend.supports_shared_images() {
+            flags |= VIDEO_CAP_SHARED_IMAGES;
+        }
         ScarletVideoCapabilities {
             version: SCARLET_VIDEO_CAPS_VERSION,
             flags,
@@ -1055,6 +1068,7 @@ impl ScarletVideoDevice {
             output_offset: layout.output_offset as u64,
             output_len: layout.output_len as u32,
             timestamp,
+            shared_output: false,
         })
     }
 
@@ -1326,6 +1340,8 @@ impl ScarletVideoDevice {
 }
 
 struct ScarletVideoOpen {
+    // The representation is frozen by the first submit on an open handle.
+    output_mode: IrqSpinLock<(u32, bool)>,
     device: Arc<ScarletVideoDevice>,
     buffer_layout: IrqSpinLock<Option<VideoBufferLayout>>,
     mapped_buffer: IrqSpinLock<Option<ContiguousPages>>,
@@ -1349,6 +1365,7 @@ impl ScarletVideoOpen {
         };
         Ok(Self {
             device,
+            output_mode: IrqSpinLock::new((VIDEO_OUTPUT_MAPPED, false)),
             buffer_layout: IrqSpinLock::new(None),
             mapped_buffer: IrqSpinLock::new(None),
             last_error: IrqSpinLock::new(None),
@@ -1447,6 +1464,7 @@ impl ScarletVideoOpen {
         *self.stream_id.lock() = None;
         *self.coded_format.lock() = 0;
         *self.next_timestamp.lock() = 1;
+        *self.output_mode.lock() = (VIDEO_OUTPUT_MAPPED, false);
         Ok(())
     }
 
@@ -1581,6 +1599,11 @@ impl ScarletVideoOpen {
         } else {
             timestamp
         };
+        let shared_output = {
+            let mut state = self.output_mode.lock();
+            state.1 = true;
+            state.0 == VIDEO_OUTPUT_SHARED_IMAGE
+        };
         Ok(VideoBackendDecodeRequest {
             stream_id,
             coded_format,
@@ -1592,6 +1615,7 @@ impl ScarletVideoOpen {
             output_offset: layout.output_offset as u64,
             output_len: layout.output_len as u32,
             timestamp,
+            shared_output,
         })
     }
 
@@ -1631,6 +1655,60 @@ impl ScarletVideoOpen {
     ) -> Result<Option<VideoBackendDecodedFrame>, &'static str> {
         let stream_id = self.checked_stream_id(stream_id)?;
         self.device.dequeue_scheduled_frame(stream_id)
+    }
+
+    fn set_output_mode(&self, arg: usize) -> Result<i32, &'static str> {
+        let request: VideoOutputMode = read_user_value(arg)?;
+        self.checked_stream_id(request.stream_id)?;
+        if request.reserved != [0; 2]
+            || request.mode > VIDEO_OUTPUT_SHARED_IMAGE
+            || (request.mode == VIDEO_OUTPUT_SHARED_IMAGE
+                && !self.device.backend.supports_shared_images())
+        {
+            return Err("scarlet-video: unsupported output representation");
+        }
+        let mut state = self.output_mode.lock();
+        if state.1 {
+            return Err("scarlet-video: output representation is fixed after submit");
+        }
+        state.0 = request.mode;
+        Ok(0)
+    }
+
+    fn dequeue_image(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut request: VideoDequeuedImage = read_user_value(arg)?;
+        if request.image_handle != 0
+            || request.flags != 0
+            || request.reserved != 0
+            || self.output_mode.lock().0 != VIDEO_OUTPUT_SHARED_IMAGE
+        {
+            return Err("scarlet-video: shared output was not negotiated");
+        }
+        let Some(frame) = self.dequeue_frame(request.stream_id)? else {
+            return Ok(0);
+        };
+        let image = frame
+            .image
+            .ok_or("scarlet-video: backend omitted shared image")?;
+        let task = mytask().ok_or("scarlet-video: no current task")?;
+        let handle = task
+            .handle_table
+            .insert_with_metadata(
+                crate::object::KernelObject::Gpu(image),
+                crate::device::gpu::child_handle_metadata(
+                    crate::object::handle::AccessMode::ReadOnly,
+                ),
+            )
+            .map_err(|_| "scarlet-video: image handle allocation failed")?;
+        request.stream_id = frame.stream_id;
+        request.image_handle = handle;
+        request.timestamp = frame.frame.timestamp;
+        request.flags = frame.frame.flags;
+        if let Err(error) = write_user_value(arg, &request) {
+            task.handle_table.remove(handle);
+            return Err(error);
+        }
+        Ok(1)
     }
 
     fn handle_get_buffer(&self, arg: usize) -> Result<i32, &'static str> {
@@ -1789,6 +1867,8 @@ impl CharDevice for ScarletVideoOpen {
 impl ControlOps for ScarletVideoOpen {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         match command {
+            VIDEO_SET_OUTPUT_MODE => self.set_output_mode(arg),
+            VIDEO_DEQUEUE_IMAGE => self.dequeue_image(arg),
             SCARLET_VIDEO_GET_BUFFER => self.handle_get_buffer(arg),
             SCARLET_VIDEO_GET_CAPS => self.device.handle_get_caps(arg),
             SCARLET_VIDEO_CREATE_SESSION => {
@@ -1909,6 +1989,9 @@ impl ControlOps for ScarletVideoOpen {
                 }
             }
             SCARLET_VIDEO_DEQUEUE => {
+                if self.output_mode.lock().0 != VIDEO_OUTPUT_MAPPED {
+                    return Err("scarlet-video: mapped output was not negotiated");
+                }
                 let decoded = match self.dequeue_frame(0) {
                     Ok(decoded) => decoded,
                     Err(e) => {
@@ -1925,6 +2008,9 @@ impl ControlOps for ScarletVideoOpen {
                 Ok(1)
             }
             SCARLET_VIDEO_DEQUEUE_SESSION => {
+                if self.output_mode.lock().0 != VIDEO_OUTPUT_MAPPED {
+                    return Err("scarlet-video: mapped output was not negotiated");
+                }
                 let mut dequeued: ScarletVideoSessionDequeuedFrame = read_user_value(arg)?;
                 let decoded = match self.dequeue_frame(dequeued.stream_id) {
                     Ok(decoded) => decoded,
@@ -2146,6 +2232,11 @@ impl ControlOps for ScarletVideoDevice {
     fn supported_control_commands(&self) -> Vec<(u32, &'static str)> {
         alloc::vec![
             (SCARLET_VIDEO_GET_BUFFER, "Get mmap video buffer layout"),
+            (VIDEO_SET_OUTPUT_MODE, "Select decoded image representation"),
+            (
+                VIDEO_DEQUEUE_IMAGE,
+                "Dequeue a ready shared image capability"
+            ),
             (
                 SCARLET_VIDEO_SUBMIT,
                 "Submit mmap-written coded video access unit"

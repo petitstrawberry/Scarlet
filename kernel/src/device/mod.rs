@@ -29,6 +29,7 @@ pub mod phy;
 pub mod pinctrl;
 pub mod platform;
 pub mod power;
+pub mod power_supply;
 pub mod remoteproc;
 pub mod reset;
 pub mod sensor;

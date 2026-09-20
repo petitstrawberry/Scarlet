@@ -4,4 +4,5 @@ pub mod devfreq;
 pub mod interrupts;
 pub mod kmsg;
 pub mod null;
+pub mod power_supply;
 pub mod thermal;

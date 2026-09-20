@@ -144,6 +144,8 @@ pub struct InputEnvironmentSnapshot {
 /// Complete provider snapshot consumed by Control Center.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ControlCenterSnapshot {
+    /// Battery and input-power state from the shared background sample.
+    pub power: super::power::PowerStatus,
     /// Audio state sourced from the StatusBar's shared sample.
     pub audio: AudioSnapshot,
     /// Read-only network state.
@@ -223,8 +225,8 @@ impl ControlCenterMetrics {
     /// Presentation-specific dimensions for pointer and touch targets.
     pub fn resolve(presentation: ControlCenterPresentation, output_count: usize) -> Self {
         let (width, margin, gap, target_height, details_height) = match presentation {
-            ControlCenterPresentation::LaptopPopover => (304, 8, 6, 32, 84),
-            ControlCenterPresentation::TabletSheet => (392, 16, 10, 44, 112),
+            ControlCenterPresentation::LaptopPopover => (304, 8, 6, 32, 116),
+            ControlCenterPresentation::TabletSheet => (392, 16, 10, 44, 144),
         };
         let output_rows = if output_count > 1 {
             output_count as u32
@@ -383,6 +385,7 @@ pub fn build_control_center_view(
         vec![
             boxed(Text::new("System").font_size(title_size)),
             boxed(Text::new(system_label(&snapshot.system)).font_size(detail_size)),
+            boxed(Text::new(snapshot.power.detail()).font_size(11.0)),
             boxed(
                 Text::new(input_label(&snapshot.input_environment))
                     .font_size(11.0)

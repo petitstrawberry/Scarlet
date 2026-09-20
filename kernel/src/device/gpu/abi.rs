@@ -1697,3 +1697,7 @@ impl GpuQueueSubmit {
         self.reserved2 = 0;
     }
 }
+
+/// Sampled-only, two-plane 8-bit Y and interleaved CbCr image.
+pub const GPU_IMAGE_FORMAT_NV12: u32 = 3;
+pub use scarlet_abi::shared_image::{GPU_IMPORT_SHARED_IMAGE, GpuImportSharedImage};

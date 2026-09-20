@@ -22,7 +22,7 @@
 //! - Data structures for ext2 format (superblock, inode, directory entries, etc.)
 
 use crate::sync::counter::SaturatingCounter;
-use crate::sync::{IrqRwSpinLock, IrqSpinLock};
+use crate::sync::{IrqRwSpinLock, IrqSpinLock, Mutex};
 use alloc::{
     boxed::Box,
     collections::BTreeMap,
@@ -311,9 +311,9 @@ pub struct Ext2FileSystem {
     block_cache: IrqRwSpinLock<BlockLruCache>,
     /// Per-inode locks to serialize directory-mutating operations on the same inode,
     /// preventing concurrent read-modify-write races on directory blocks
-    inode_locks: IrqRwSpinLock<BTreeMap<u32, Arc<IrqSpinLock<()>>>>,
+    inode_locks: IrqRwSpinLock<BTreeMap<u32, Arc<Mutex<()>>>>,
     /// Global lock to serialize block allocation operations
-    allocation_lock: IrqSpinLock<()>,
+    allocation_lock: Mutex<()>,
 }
 
 /// Node in doubly-linked list for O(1) LRU operations for inodes
@@ -610,7 +610,7 @@ impl Ext2FileSystem {
             inode_cache: IrqRwSpinLock::new(InodeLruCache::new(8192)),
             block_cache: IrqRwSpinLock::new(BlockLruCache::new(8192)),
             inode_locks: IrqRwSpinLock::new(BTreeMap::new()),
-            allocation_lock: IrqSpinLock::new(()),
+            allocation_lock: Mutex::new(()),
         });
 
         // Set filesystem reference in root node
@@ -656,16 +656,17 @@ impl Ext2FileSystem {
         }
     }
 
-    fn get_inode_lock(&self, inode_num: u32) -> Arc<IrqSpinLock<()>> {
+    fn get_inode_lock(&self, inode_num: u32) -> Arc<Mutex<()>> {
         let mut locks = self.inode_locks.write();
         locks
             .entry(inode_num)
-            .or_insert_with(|| Arc::new(IrqSpinLock::new(())))
+            .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
 
     /// Execute a closure while holding the allocation lock.
     /// This ensures bitmap read-modify-write operations are atomic.
+    /// The lock must permit sleeping while metadata is read or written.
     #[inline]
     fn with_allocation_lock<F, T>(&self, f: F) -> T
     where
@@ -1173,108 +1174,110 @@ impl Ext2FileSystem {
         page_index: u64,
         paddr: u64,
     ) -> Result<(), FileSystemError> {
+        self.read_pages_content(inode_num, &[(page_index, paddr)])
+    }
+
+    /// Fill private page-cache allocations with batched filesystem-block I/O.
+    /// Sparse blocks and the tail past EOF stay zero. Existing cached pages
+    /// are excluded by the page cache, so dirty data is never overwritten.
+    pub fn read_pages_content(
+        &self,
+        inode_num: u32,
+        pages: &[(u64, u64)],
+    ) -> Result<(), FileSystemError> {
         use crate::environment::PAGE_SIZE;
         use crate::vm::addr::phys_to_virt;
 
-        profile_scope!("ext2::read_page_content");
-
+        profile_scope!("ext2::read_pages_content");
         let inode = self.read_inode(inode_num)?;
-        let file_size = inode.size as u64;
-        let page_offset = page_index.checked_mul(PAGE_SIZE as u64).ok_or_else(|| {
-            FileSystemError::new(
-                FileSystemErrorKind::InvalidData,
-                "Page offset overflow while reading ext2 file",
-            )
-        })?;
-
-        // Clear the page first
-        unsafe {
-            core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
-        }
-
-        // If page is beyond EOF, return zeros
-        if page_offset >= file_size {
-            return Ok(());
-        }
-
-        // Calculate how many bytes to read from this page
-        let page_end = page_offset.saturating_add(PAGE_SIZE as u64);
-        let bytes_in_page = if page_end > file_size {
-            (file_size - page_offset) as usize
-        } else {
-            PAGE_SIZE
-        };
-
-        // Calculate block range for this page
-        let start_block = page_offset / self.block_size as u64;
-        let end_offset = page_offset
-            .checked_add(bytes_in_page as u64)
-            .and_then(|end| end.checked_add(self.block_size as u64 - 1))
-            .ok_or_else(|| {
+        let file_size = u64::from(inode.get_size());
+        let block_size = self.block_size as u64;
+        let mut block_nums = Vec::new();
+        let mut copies = Vec::new();
+        for &(page_index, paddr) in pages {
+            let page_offset = page_index.checked_mul(PAGE_SIZE as u64).ok_or_else(|| {
                 FileSystemError::new(
                     FileSystemErrorKind::InvalidData,
-                    "Block range overflow while reading ext2 page",
+                    "Page offset overflow while reading ext2 file",
                 )
             })?;
-        let end_block = end_offset / self.block_size as u64;
-        let num_blocks = end_block - start_block;
-
-        if num_blocks == 0 {
-            return Ok(());
-        }
-
-        // Get block numbers
-        let block_nums = self.get_inode_blocks(&inode, start_block, num_blocks)?;
-
-        let mut page_ptr = phys_to_virt(paddr) as *mut u8;
-        let mut bytes_written = 0usize;
-
-        for (i, &block_num) in block_nums.iter().enumerate() {
-            if block_num == 0 {
-                // Sparse block - already zeroed
-                let bytes_to_skip =
-                    core::cmp::min(self.block_size as usize, bytes_in_page - bytes_written);
-                unsafe {
-                    page_ptr = page_ptr.add(bytes_to_skip);
-                }
-                bytes_written += bytes_to_skip;
+            let page_ptr = phys_to_virt(paddr) as *mut u8;
+            // These allocations are private until the whole load succeeds.
+            unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE) };
+            if page_offset >= file_size {
                 continue;
             }
-
-            // Read the block
-            let block_data = self.read_block_cached(block_num)?;
-
-            // Calculate offset within this block
-            let block_offset = if i == 0 {
-                (page_offset % self.block_size as u64) as usize
-            } else {
-                0
-            };
-
-            // Calculate how many bytes to copy from this block
-            let bytes_to_copy = core::cmp::min(
-                self.block_size as usize - block_offset,
-                bytes_in_page - bytes_written,
-            );
-
-            // Copy to page
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    block_data.as_ptr().add(block_offset),
-                    page_ptr,
-                    bytes_to_copy,
-                );
-                page_ptr = page_ptr.add(bytes_to_copy);
-            }
-
-            bytes_written += bytes_to_copy;
-
-            if bytes_written >= bytes_in_page {
-                break;
+            let bytes_in_page = (file_size - page_offset).min(PAGE_SIZE as u64) as usize;
+            let first_block = page_offset / block_size;
+            let count = (page_offset % block_size + bytes_in_page as u64).div_ceil(block_size);
+            let blocks = self.get_inode_blocks(&inode, first_block, count)?;
+            let mut copied = 0;
+            for (index, block) in blocks.into_iter().enumerate() {
+                let block_offset = if index == 0 {
+                    (page_offset % block_size) as usize
+                } else {
+                    0
+                };
+                let len = (self.block_size as usize - block_offset).min(bytes_in_page - copied);
+                if block != 0 {
+                    block_nums.push(block);
+                    copies.push((page_ptr, copied, block_offset, len));
+                }
+                copied += len;
             }
         }
-
+        // File data already has a canonical home in the global page cache.
+        // Do not duplicate it in the metadata/block cache: a sequential ELF
+        // read used to fill that cache, evict metadata and scan all entries
+        // under its IRQ-off write lock for each new file block.
+        let data = self.read_blocks(&block_nums, false)?;
+        for (block, (page_ptr, page_offset, block_offset, len)) in data.iter().zip(copies) {
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    block.as_ptr().add(block_offset),
+                    page_ptr.add(page_offset),
+                    len,
+                );
+            }
+        }
         Ok(())
+    }
+
+    /// Pin requested file pages in bounded I/O batches. This is also the ELF
+    /// loader's path, so a large executable is no longer read one page per
+    /// command. No speculative pages beyond the caller's range are loaded.
+    fn pin_file_pages(
+        &self,
+        inode_num: u32,
+        first_page: u64,
+        count: usize,
+    ) -> Result<Vec<crate::mem::page_cache::PinnedPage>, crate::object::capability::StreamError>
+    {
+        use crate::mem::page_cache::PageCacheManager;
+        use crate::object::capability::StreamError;
+
+        let cache_id =
+            crate::fs::vfs_v2::cache::CacheId::new((self.fs_id().get() << 32) | inode_num as u64);
+        const READ_BATCH_PAGES: usize = 64;
+        let mut pages = Vec::with_capacity(count);
+        while pages.len() < count {
+            let first = first_page
+                .checked_add(pages.len() as u64)
+                .ok_or(StreamError::InvalidArgument)?;
+            let batch = PageCacheManager::global()
+                .pin_or_load_range(
+                    cache_id,
+                    first,
+                    (count - pages.len()).min(READ_BATCH_PAGES),
+                    |missing| {
+                        self.read_pages_content(inode_num, missing)
+                            .map_err(|_| "Failed to load ext2 pages")
+                    },
+                )
+                .map_err(|_| StreamError::IoError)?;
+            pages.extend(batch);
+        }
+        Ok(pages)
     }
 
     /// Write dirty page-cache pages without constructing a full-file buffer.
@@ -1312,55 +1315,55 @@ impl Ext2FileSystem {
         let mut write_blocks = BTreeMap::new();
         const WRITEBACK_BLOCK_BATCH: usize = 64;
 
-        for &(page_index, paddr) in pages {
-            let page_offset = usize::try_from(page_index)
-                .ok()
-                .and_then(|index| index.checked_mul(crate::environment::PAGE_SIZE))
-                .ok_or_else(|| {
-                    FileSystemError::new(
-                        FileSystemErrorKind::InvalidData,
-                        "ext2 page writeback offset overflow",
-                    )
-                })?;
-            if page_offset >= file_size {
-                continue;
-            }
-            let page_end = page_offset
-                .saturating_add(crate::environment::PAGE_SIZE)
-                .min(file_size);
-            let first_logical_block = page_offset / block_size;
-            let block_count = (page_end - page_offset + block_size - 1) / block_size;
-            let mut blocks =
-                self.get_inode_blocks(&inode, first_logical_block as u64, block_count as u64)?;
-            blocks.resize(block_count, 0);
-
-            let mut assignments = Vec::new();
-            let mut index = 0usize;
-            while index < blocks.len() {
-                if blocks[index] != 0 {
-                    index += 1;
+        let pages_per_batch =
+            (WRITEBACK_BLOCK_BATCH * block_size / crate::environment::PAGE_SIZE).max(1);
+        for batch in pages.chunks(pages_per_batch) {
+            // Keep allocation and indirect-block updates at the writeback
+            // batch size, not the page size. With 4 KiB filesystem blocks,
+            // per-page allocation would rewrite the same bitmap and group
+            // descriptor once for every data block.
+            let mut pending = Vec::new();
+            for &(page_index, paddr) in batch {
+                let page_offset = usize::try_from(page_index)
+                    .ok()
+                    .and_then(|index| index.checked_mul(crate::environment::PAGE_SIZE))
+                    .ok_or_else(|| {
+                        FileSystemError::new(
+                            FileSystemErrorKind::InvalidData,
+                            "ext2 page writeback offset overflow",
+                        )
+                    })?;
+                if page_offset >= file_size {
                     continue;
                 }
-                let range_start = index;
-                while index < blocks.len() && blocks[index] == 0 {
-                    index += 1;
+                let page_end = page_offset
+                    .saturating_add(crate::environment::PAGE_SIZE)
+                    .min(file_size);
+                let first = page_offset / block_size;
+                let count = (page_end - page_offset).div_ceil(block_size);
+                let mut blocks = self.get_inode_blocks(&inode, first as u64, count as u64)?;
+                blocks.resize(count, 0);
+                for (relative, block) in blocks.into_iter().enumerate() {
+                    let offset = relative * block_size;
+                    let len = (page_end - page_offset - offset).min(block_size);
+                    pending.push(((first + relative) as u64, block, paddr, offset, len));
                 }
-                let count = index - range_start;
-                let allocated = if count >= 3 {
-                    self.allocate_blocks_contiguous(count as u32)?
-                } else {
-                    let mut allocated = Vec::with_capacity(count);
-                    for _ in 0..count {
-                        allocated.push(self.allocate_block()?);
-                    }
-                    allocated
-                };
-                for (relative, block) in allocated.into_iter().enumerate() {
-                    let slot = range_start + relative;
-                    blocks[slot] = block;
+            }
+
+            let missing = pending.iter().filter(|entry| entry.1 == 0).count();
+            let mut allocated = self.allocate_blocks_contiguous(missing as u32)?.into_iter();
+            let mut assignments = Vec::with_capacity(missing);
+            for (logical, block, ..) in &mut pending {
+                if *block == 0 {
+                    *block = allocated.next().ok_or_else(|| {
+                        FileSystemError::new(
+                            FileSystemErrorKind::NoSpace,
+                            "Incomplete ext2 allocation batch",
+                        )
+                    })?;
                     assignments.push((
-                        (first_logical_block + slot) as u64,
-                        u32::try_from(block).map_err(|_| {
+                        *logical,
+                        u32::try_from(*block).map_err(|_| {
                             FileSystemError::new(
                                 FileSystemErrorKind::InvalidData,
                                 "ext2 allocated block number overflow",
@@ -1373,25 +1376,22 @@ impl Ext2FileSystem {
                 self.set_inode_blocks_simple_batch(&mut inode, &assignments)?;
             }
 
-            for (relative, &block) in blocks.iter().enumerate() {
-                let block_file_offset = page_offset + relative * block_size;
-                let bytes_to_write = (page_end - block_file_offset).min(block_size);
+            for (_, block, paddr, offset, len) in pending {
                 let mut block_data = vec![0u8; block_size];
-                // SAFETY: every supplied physical address owns one pinned page
-                // for the duration of PageCacheManager::flush_batch.
+                // SAFETY: the page-cache callback retains the source pages
+                // throughout writeback, and offset + len fits in one page.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
-                        (crate::vm::addr::phys_to_virt(paddr) as *const u8)
-                            .add(relative * block_size),
+                        (crate::vm::addr::phys_to_virt(paddr) as *const u8).add(offset),
                         block_data.as_mut_ptr(),
-                        bytes_to_write,
+                        len,
                     );
                 }
                 write_blocks.insert(block, block_data);
-                if write_blocks.len() >= WRITEBACK_BLOCK_BATCH {
-                    self.write_blocks_cached(&write_blocks)?;
-                    write_blocks.clear();
-                }
+            }
+            if !write_blocks.is_empty() {
+                self.write_blocks_cached(&write_blocks)?;
+                write_blocks.clear();
             }
         }
 
@@ -3737,6 +3737,11 @@ impl Ext2FileSystem {
         let mut needed_first_level_indirects = alloc::collections::BTreeSet::new();
         let mut need_single_indirect = false;
         let mut need_double_indirect = false;
+        let existing_double = if inode.block[13] != 0 {
+            Some(self.read_block_cached(inode.block[13] as u64)?)
+        } else {
+            None
+        };
 
         for &(logical_block, _) in assignments {
             if logical_block >= 12 && logical_block < 12 + blocks_per_indirect as u64 {
@@ -3752,7 +3757,17 @@ impl Ext2FileSystem {
                 let double_base = 12 + blocks_per_indirect as u64;
                 let double_offset = logical_block - double_base;
                 let first_indirect_index = double_offset / blocks_per_indirect as u64;
-                needed_first_level_indirects.insert(first_indirect_index);
+                if first_indirect_index < blocks_per_indirect as u64 {
+                    let pointer = existing_double.as_ref().map_or(0, |data| {
+                        let offset = first_indirect_index as usize * 4;
+                        u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+                    });
+                    // Existing first-level tables need only a pointer update.
+                    // Reserving one again leaks a block on every later flush.
+                    if pointer == 0 {
+                        needed_first_level_indirects.insert(first_indirect_index);
+                    }
+                }
             }
         }
 
@@ -4197,10 +4212,20 @@ impl Ext2FileSystem {
     /// Read multiple filesystem blocks with improved LRU cache and batching
     /// Optimized for fast path when all blocks are cached
     fn read_blocks_cached(&self, block_nums: &[u64]) -> Result<Vec<Vec<u8>>, FileSystemError> {
+        self.read_blocks(block_nums, true)
+    }
+
+    /// Submit contiguous block ranges. File-page fills bypass this cache;
+    /// inode tables, indirect maps and directory blocks retain it.
+    fn read_blocks(
+        &self,
+        block_nums: &[u64],
+        cache_blocks: bool,
+    ) -> Result<Vec<Vec<u8>>, FileSystemError> {
         profile_scope!("ext2::read_blocks_cached");
 
         // Fast path: if only one block, try cache-only first
-        if block_nums.len() == 1 {
+        if cache_blocks && block_nums.len() == 1 {
             let block_num = block_nums[0];
             let cache = self.block_cache.read();
             if let Some(data) = cache.get(block_num) {
@@ -4212,11 +4237,11 @@ impl Ext2FileSystem {
         // Slower path: multiple blocks or cache miss
         let mut results = Vec::with_capacity(block_nums.len());
         let mut missing_blocks = Vec::new();
-        let cache = self.block_cache.read();
+        let cache = cache_blocks.then(|| self.block_cache.read());
 
         // Check cache for existing blocks, maintain order
         for &block_num in block_nums {
-            if let Some(data) = cache.get(block_num) {
+            if let Some(data) = cache.as_ref().and_then(|cache| cache.get(block_num)) {
                 results.push((block_num, data));
             } else {
                 missing_blocks.push(block_num);
@@ -4304,7 +4329,7 @@ impl Ext2FileSystem {
             }
 
             // Process results and update cache
-            let mut cache = self.block_cache.write();
+            let mut cache = cache_blocks.then(|| self.block_cache.write());
             let mut missing_data = HashMap::new();
 
             for (result_idx, result) in read_results.iter().enumerate() {
@@ -4359,8 +4384,10 @@ impl Ext2FileSystem {
                             })?;
 
                     let block_data = data[offset..end_offset].to_vec();
-                    missing_data.insert(current_block, block_data.clone());
-                    cache.insert(current_block, block_data);
+                    if let Some(cache) = cache.as_mut() {
+                        cache.insert(current_block, block_data.clone());
+                    }
+                    missing_data.insert(current_block, block_data);
                 }
             }
 

@@ -11,7 +11,7 @@ mod abi;
 mod async_abi;
 mod backend;
 mod completion;
-mod connection;
+pub(crate) mod connection;
 mod execution;
 mod object;
 mod resource;
@@ -86,7 +86,7 @@ pub use object::{GpuControlDevice, register_gpu_control_device};
 pub use resource::{GpuBuffer, GpuImage, GpuObject, GpuTimeline, GpuTimelinePoint};
 pub use submission::GpuSubmission;
 
-fn child_handle_metadata(
+pub(crate) fn child_handle_metadata(
     access_mode: crate::object::handle::AccessMode,
 ) -> crate::object::handle::HandleMetadata {
     crate::object::handle::HandleMetadata {
@@ -698,3 +698,5 @@ mod tests {
         assert!(timeline.control(super::GPU_BUFFER_QUERY_INFO, 0).is_err());
     }
 }
+
+pub use abi::{GPU_IMAGE_FORMAT_NV12, GPU_IMPORT_SHARED_IMAGE, GpuImportSharedImage};

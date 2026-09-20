@@ -19,6 +19,7 @@ vp9-stateful-hw = []
 vp9-stateless-hw = ["dep:scarlet-codecs", "scarlet-codecs/vp9"]
 
 [dependencies]
+scarlet-abi = { path = "../scarlet-abi" }
 scarlet-os = { path = "../scarlet-os", default-features = false }
 scarlet-std = { path = "../std", optional = true }
 scarlet-codecs = { path = "../scarlet-codecs", default-features = false, optional = true }

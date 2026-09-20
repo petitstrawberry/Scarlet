@@ -276,5 +276,5 @@ the complete guest menu flow still needs an integration run. None of these
 unfinished boundaries should be inferred from a passing compile check.
 
 Scarlet pins the companion ScarletUI branch at commit
-`ac138e357299bd42724118e6e196c483464b741b`. The combined AArch64 build
-also passes with that published revision and no local Cargo patch.
+`6ef3e3c4da42898e8077b3698f08a95f9f718b8c`. The combined AArch64 build
+is validated with that published revision and no local Cargo patch.

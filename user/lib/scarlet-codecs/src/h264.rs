@@ -385,11 +385,33 @@ impl<'a> EbspBitReader<'a> {
     }
 }
 
+/// H.264 VUI color code points, kept separate from the hardware parameter ABI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct H264ColorInfo {
+    pub matrix: u8,
+    pub primaries: u8,
+    pub transfer: u8,
+    pub full_range: bool,
+    pub chroma_location: u32,
+}
+impl Default for H264ColorInfo {
+    fn default() -> Self {
+        Self {
+            matrix: 2,
+            primaries: 2,
+            transfer: 2,
+            full_range: false,
+            chroma_location: 0,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct H264RequestContext {
     // The kernel ABI is stateless per request; userspace still keeps the
     // stream context needed to build those requests.
     sps: Option<ScarletVideoH264Sps>,
+    color: H264ColorInfo,
     pps: Option<ScarletVideoH264Pps>,
     scaling_matrix: ScarletVideoH264ScalingMatrix,
     pred_weights: ScarletVideoH264PredWeights,
@@ -593,6 +615,9 @@ enum H264MemoryManagementControl {
 }
 
 impl H264RequestContext {
+    pub fn color_info(&self) -> H264ColorInfo {
+        self.color
+    }
     /// Reset decode-order state after a stream discontinuity while retaining
     /// parameter sets and the monotonically increasing request timestamp.
     ///
@@ -661,7 +686,7 @@ impl H264RequestContext {
         for_each_raw_annex_b(access_unit, |nal| -> Result<(), String> {
             match nal.nal_type {
                 7 => {
-                    self.sps = Some(parse_h264_sps(nal.bytes)?);
+                    self.sps = Some(parse_h264_sps(nal.bytes, &mut self.color)?);
                 }
                 8 => {
                     self.pps = Some(parse_h264_pps(nal.bytes)?);
@@ -876,6 +901,54 @@ mod tests {
     use super::{H264PocState, H264RequestContext, h264_type2_poc};
 
     #[test]
+    fn sps_vui_preserves_color_and_resets_absent_metadata() {
+        use super::{H264ColorInfo, parse_h264_sps};
+        let mut color = H264ColorInfo::default();
+        parse_h264_sps(
+            &[
+                0x67, 0x42, 0x00, 0x1e, 0xf4, 0xf7, 0xfe, 0x00, 0x20, 0x00, 0x13, 0x6e, 0x02, 0x02,
+                0x03, 0x48, 0x10,
+            ],
+            &mut color,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                color.full_range,
+                color.primaries,
+                color.transfer,
+                color.matrix,
+                color.chroma_location
+            ),
+            (true, 1, 1, 1, 1)
+        );
+        parse_h264_sps(
+            &[
+                0x67, 0x42, 0x00, 0x1e, 0xf4, 0xf7, 0xfe, 0x00, 0x20, 0x00, 0x13, 0x6a, 0x0c, 0x0c,
+                0x0d, 0xc1,
+            ],
+            &mut color,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                color.full_range,
+                color.primaries,
+                color.transfer,
+                color.matrix,
+                color.chroma_location
+            ),
+            (false, 6, 6, 6, 0)
+        );
+        parse_h264_sps(&[0x67, 0x42, 0x00, 0x1e, 0xf4, 0xf2], &mut color).unwrap();
+        assert_eq!(
+            (color.full_range, color.matrix, color.chroma_location),
+            (false, 2, 0)
+        );
+        assert!(parse_h264_sps(&[0x67, 0x42, 0x00, 0x1e, 0xf4, 0xfb, 0xff], &mut color).is_err());
+    }
+
+    #[test]
     fn preserves_explicit_nonzero_timestamp() {
         let mut context = H264RequestContext::default();
         assert_eq!(context.resolve_submit_timestamp(Some(42)), 42);
@@ -911,7 +984,7 @@ mod tests {
     }
 }
 
-fn parse_h264_sps(nal: &[u8]) -> Result<ScarletVideoH264Sps, String> {
+fn parse_h264_sps(nal: &[u8], color: &mut H264ColorInfo) -> Result<ScarletVideoH264Sps, String> {
     if nal.len() < 2 {
         return Err(String::from("H.264 SPS is truncated"));
     }
@@ -1036,6 +1109,41 @@ fn parse_h264_sps(nal: &[u8]) -> Result<ScarletVideoH264Sps, String> {
         frame_crop_right_offset = read_u32_ue(&mut reader, "H.264 frame_crop_right_offset")?;
         frame_crop_top_offset = read_u32_ue(&mut reader, "H.264 frame_crop_top_offset")?;
         frame_crop_bottom_offset = read_u32_ue(&mut reader, "H.264 frame_crop_bottom_offset")?;
+    }
+
+    *color = H264ColorInfo::default();
+    if read_bool(&mut reader, "H.264 vui_parameters_present_flag")? {
+        if read_bool(&mut reader, "H.264 aspect_ratio_info_present_flag")? {
+            let aspect = read_u8_bits(&mut reader, 8, "H.264 aspect_ratio_idc")?;
+            if aspect == 255 {
+                reader
+                    .read_bits(16)
+                    .ok_or_else(|| String::from("H.264 sar_width missing"))?;
+                reader
+                    .read_bits(16)
+                    .ok_or_else(|| String::from("H.264 sar_height missing"))?;
+            }
+        }
+        if read_bool(&mut reader, "H.264 overscan_info_present_flag")? {
+            read_bool(&mut reader, "H.264 overscan_appropriate_flag")?;
+        }
+        if read_bool(&mut reader, "H.264 video_signal_type_present_flag")? {
+            read_u8_bits(&mut reader, 3, "H.264 video_format")?;
+            color.full_range = read_bool(&mut reader, "H.264 video_full_range_flag")?;
+            if read_bool(&mut reader, "H.264 colour_description_present_flag")? {
+                color.primaries = read_u8_bits(&mut reader, 8, "H.264 colour_primaries")?;
+                color.transfer = read_u8_bits(&mut reader, 8, "H.264 transfer_characteristics")?;
+                color.matrix = read_u8_bits(&mut reader, 8, "H.264 matrix_coefficients")?;
+            }
+        }
+        if read_bool(&mut reader, "H.264 chroma_loc_info_present_flag")? {
+            color.chroma_location =
+                read_u32_ue(&mut reader, "H.264 chroma_sample_loc_type_top_field")?;
+            read_u32_ue(&mut reader, "H.264 chroma_sample_loc_type_bottom_field")?;
+            if color.chroma_location > 5 {
+                return Err(String::from("H.264 chroma sample location invalid"));
+            }
+        }
     }
 
     Ok(ScarletVideoH264Sps {

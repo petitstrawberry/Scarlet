@@ -34,6 +34,7 @@
 
 use crate::sync::IrqRwSpinLock;
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::fs::vfs_v2::cache::CacheId;
@@ -203,6 +204,62 @@ impl PageCacheManager {
             entry.pin();
             entry.paddr()
         })
+    }
+
+    /// Pin a range, loading all missing pages with one filesystem callback.
+    ///
+    /// The callback receives ordered `(index, physical address)` pairs for
+    /// private, zeroed allocations. It runs without the cache lock and may
+    /// combine adjacent pages into block I/O. Pages are published only after
+    /// the complete load succeeds. A concurrent insertion wins, preserving
+    /// cached writes instead of overwriting them with older disk contents.
+    /// Callers should bound the range to limit temporary allocations.
+    pub fn pin_or_load_range<F>(
+        &self,
+        id: CacheId,
+        first: PageIndex,
+        count: usize,
+        loader: F,
+    ) -> Result<Vec<PinnedPage>, &'static str>
+    where
+        F: FnOnce(&[(PageIndex, PhysicalAddress)]) -> Result<(), &'static str>,
+    {
+        first
+            .checked_add(count as u64)
+            .ok_or("Page range overflow")?;
+        let mut pages = Vec::with_capacity(count);
+        let mut pending = Vec::new();
+        let mut targets = Vec::new();
+        for offset in 0..count {
+            let index = first + offset as u64;
+            if let Some(paddr) = self.try_get_pinned(id, index) {
+                pages.push(Some(PinnedPage { id, index, paddr }));
+            } else {
+                let allocation = ContiguousPages::new(1).ok_or("Page cache allocation failed")?;
+                targets.push((index, allocation.as_paddr()));
+                pending.push((offset, index, allocation));
+                pages.push(None);
+            }
+        }
+
+        if !targets.is_empty() {
+            loader(&targets)?;
+            for (offset, index, allocation) in pending {
+                let paddr = {
+                    let mut map = self.entries.write();
+                    let entry = map
+                        .entry((id, index))
+                        .or_insert_with(|| PageCacheEntry::new(allocation));
+                    entry.pin();
+                    entry.paddr()
+                };
+                pages[offset] = Some(PinnedPage { id, index, paddr });
+            }
+        }
+        Ok(pages
+            .into_iter()
+            .map(|page| page.expect("loaded page"))
+            .collect())
     }
 
     /// Unpin a page, allowing it to be evicted

@@ -1164,6 +1164,17 @@ pub trait GpuBackend: Send + Sync {
         Err("GPU backend does not support images")
     }
 
+    /// Import an immutable image lease without CPU conversion or staging.
+    /// The backend must retain the lease until every device read has retired,
+    /// including fault recovery. Unsupported layouts/conversions are rejected.
+    fn import_shared_image(
+        &self,
+        _image: Arc<crate::device::graphics::shared_image::SharedImage>,
+        _color: scarlet_abi::shared_image::ImageColor,
+    ) -> Result<(Arc<dyn GpuBackendImage>, GpuBackendImageLayout), &'static str> {
+        Err("GPU backend does not support shared image import")
+    }
+
     /// Create a backend-owned GPU buffer resource from generic page backing.
     ///
     /// # Arguments

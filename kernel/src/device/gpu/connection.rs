@@ -291,6 +291,58 @@ impl GpuConnection {
         }
     }
 
+    fn handle_import_shared_image(&self, arg: usize) -> Result<i32, &'static str> {
+        use super::{
+            GPU_RESULT_INVALID_ABI, GPU_RESULT_INVALID_ARGUMENT, GPU_RESULT_SUCCESS,
+            GPU_RESULT_UNSUPPORTED, GpuImportSharedImage,
+        };
+        let mut request: GpuImportSharedImage = read_user_value(arg)?;
+        request.image_handle = 0;
+        request.result = GPU_RESULT_SUCCESS;
+        let task = crate::task::mytask().ok_or("No current task for shared image import")?;
+        let result = (|| {
+            if request.abi_version != GPU_ABI_VERSION {
+                return Err(GPU_RESULT_INVALID_ABI);
+            }
+            let (source, access) = task
+                .handle_table
+                .get_arc_clone_with_metadata(request.source_handle)
+                .ok_or(GPU_RESULT_INVALID_ARGUMENT)?;
+            if !shared_memory_import_access_is_allowed(access.access_mode) {
+                return Err(GPU_RESULT_INVALID_ARGUMENT);
+            }
+            let KernelObject::Gpu(source) = source else {
+                return Err(GPU_RESULT_INVALID_ARGUMENT);
+            };
+            let image = source
+                .as_shared_image()
+                .ok_or(GPU_RESULT_INVALID_ARGUMENT)?;
+            let imported = GpuImage::new_shared(
+                Arc::clone(&self.backend),
+                Arc::new(image.clone()),
+                request.color,
+            )
+            .map_err(|_| GPU_RESULT_UNSUPPORTED)?;
+            task.handle_table
+                .insert_with_metadata(
+                    KernelObject::Gpu(Arc::new(imported)),
+                    super::child_handle_metadata(AccessMode::ReadOnly),
+                )
+                .map_err(|_| super::GPU_RESULT_OUT_OF_RESOURCES)
+        })();
+        match result {
+            Ok(handle) => request.image_handle = handle,
+            Err(code) => request.result = code,
+        }
+        if let Err(error) = write_user_value(arg, &request) {
+            if request.image_handle != 0 {
+                task.handle_table.remove(request.image_handle);
+            }
+            return Err(error);
+        }
+        Ok(0)
+    }
+
     fn handle_create_imported_image_bgra(&self, arg: usize) -> Result<i32, &'static str> {
         let mut request: GpuCreateImportedImageBgra = read_user_value(arg)?;
         request.clear_response();
@@ -509,6 +561,7 @@ impl CharDevice for GpuConnection {
 impl ControlOps for GpuConnection {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         match command {
+            super::GPU_IMPORT_SHARED_IMAGE => self.handle_import_shared_image(arg),
             GPU_QUERY_INFO => self.handle_query_info(arg),
             GPU_CREATE_BUFFER => self.handle_create_buffer(arg),
             GPU_CREATE_TIMELINE => self.handle_create_timeline(arg),
@@ -524,6 +577,10 @@ impl ControlOps for GpuConnection {
 
     fn supported_control_commands(&self) -> alloc::vec::Vec<(u32, &'static str)> {
         alloc::vec![
+            (
+                super::GPU_IMPORT_SHARED_IMAGE,
+                "Import a ready shared image for sampling"
+            ),
             (GPU_QUERY_INFO, "Query GPU and backend information"),
             (GPU_CREATE_BUFFER, "Create a GPU buffer child handle"),
             (GPU_CREATE_TIMELINE, "Create a GPU timeline child handle"),
@@ -600,7 +657,7 @@ pub(super) fn read_user_value<T: Copy>(ptr: usize) -> Result<T, &'static str> {
     Ok(unsafe { value.assume_init() })
 }
 
-pub(super) fn write_user_value<T: Copy>(ptr: usize, value: &T) -> Result<(), &'static str> {
+pub(crate) fn write_user_value<T: Copy>(ptr: usize, value: &T) -> Result<(), &'static str> {
     if ptr == 0 {
         return Err("GPU query pointer is null");
     }

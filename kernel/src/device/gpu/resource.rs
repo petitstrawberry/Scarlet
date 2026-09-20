@@ -37,6 +37,10 @@ use crate::vm::addr::{phys_to_virt, virt_to_phys};
 /// capability surface. Callers must use these accessors rather than assuming
 /// that every GPU object is controllable, mappable, or selectable.
 pub trait GpuObject: Send + Sync {
+    /// A ready/read-only shared image exported by any trusted producer.
+    fn as_shared_image(&self) -> Option<&crate::device::graphics::shared_image::SharedImage> {
+        None
+    }
     /// Return control operations when this GPU object supports them.
     ///
     /// # Returns
@@ -828,6 +832,7 @@ struct GpuImportedImageBacking {
 pub(crate) enum GpuImageBacking {
     Private(GpuPrivateImageBacking),
     Imported(GpuImportedImageBacking),
+    Shared(Arc<crate::device::graphics::shared_image::SharedImage>),
 }
 
 impl GpuImageBacking {
@@ -853,6 +858,7 @@ impl GpuImageBacking {
 
     fn info(&self) -> Result<GpuImageBackingInfo, &'static str> {
         match self {
+            Self::Shared(_) => Err("Shared image storage is consumer-defined"),
             Self::Private(backing) => Ok(GpuImageBackingInfo::new_segmented(
                 Arc::clone(&backing.physical_segments),
                 u64::try_from(backing.allocation_size)
@@ -873,7 +879,9 @@ impl GpuImageBacking {
     fn private_backing(&self) -> Result<&GpuPrivateImageBacking, &'static str> {
         match self {
             Self::Private(backing) => Ok(backing),
-            Self::Imported(_) => Err("Imported GPU images cannot copy pixels from userspace"),
+            Self::Imported(_) | Self::Shared(_) => {
+                Err("Imported GPU images cannot copy pixels from userspace")
+            }
         }
     }
 
@@ -883,6 +891,7 @@ impl GpuImageBacking {
         length: usize,
     ) -> Result<Arc<[GpuBackingSegment]>, &'static str> {
         let (segments, allocation_size) = match self {
+            Self::Shared(_) => return Err("Shared image planes require an explicit consumer"),
             Self::Private(backing) => (
                 Arc::clone(&backing.physical_segments),
                 backing.allocation_size,
@@ -1015,6 +1024,41 @@ pub struct GpuImage {
 }
 
 impl GpuImage {
+    pub(crate) fn new_shared(
+        backend: Arc<dyn GpuBackend>,
+        image: Arc<crate::device::graphics::shared_image::SharedImage>,
+        color: scarlet_abi::shared_image::ImageColor,
+    ) -> Result<Self, &'static str> {
+        use scarlet_abi::shared_image::*;
+        let descriptor = image.descriptor();
+        let format = match descriptor.format {
+            IMAGE_FORMAT_NV12 => super::GPU_IMAGE_FORMAT_NV12,
+            IMAGE_FORMAT_BGRA8888 => GPU_IMAGE_FORMAT_BGRA8_UNORM,
+            _ => return Err("Unsupported shared image format"),
+        };
+        let (backend_image, layout) = backend.import_shared_image(Arc::clone(&image), color)?;
+        let info = backend_image.query_info();
+        if !layout.is_valid()
+            || info.format != format
+            || info.width != descriptor.visible.width
+            || info.height != descriptor.visible.height
+            || info.usage != super::GPU_IMAGE_USAGE_SAMPLED
+            || info.mip_levels != 1
+            || info.array_layers != 1
+            || info.cube
+            || info.command_resource_token == 0
+            || info.allocation_size < layout.total_size
+        {
+            return Err("Invalid imported image metadata");
+        }
+        Ok(Self {
+            backend_image,
+            backing: Arc::new(GpuImageBacking::Shared(image)),
+            layout,
+            upload_lock: Mutex::new(()),
+        })
+    }
+
     /// Create a real backend image with kernel-owned backing.
     ///
     /// # Arguments

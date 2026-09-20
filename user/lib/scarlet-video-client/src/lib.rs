@@ -16,6 +16,7 @@ extern crate alloc;
 #[cfg(feature = "legacy-scarlet-std")]
 extern crate scarlet_std as std;
 
+pub use scarlet_abi::shared_image;
 mod abi;
 mod h264_stateless;
 mod vp9_stateless;
@@ -235,11 +236,18 @@ impl VideoBufferRequest {
 
 /// Options used while opening a Scarlet decoder.
 pub struct DecoderOptions {
+    prefer_shared_images: bool,
     buffer_request: VideoBufferRequest,
     cancellation: Arc<AtomicBool>,
 }
 
 impl DecoderOptions {
+    /// Prefer ready shared images when the producer supports them. Existing
+    /// backends retain mapped output; use `decode_output` to accept both forms.
+    pub fn with_shared_images(mut self, enabled: bool) -> Self {
+        self.prefer_shared_images = enabled;
+        self
+    }
     /// Construct decoder options with backend-selected buffers and a fresh
     /// cancellation flag.
     ///
@@ -284,6 +292,7 @@ impl DecoderOptions {
 impl Default for DecoderOptions {
     fn default() -> Self {
         Self {
+            prefer_shared_images: false,
             buffer_request: VideoBufferRequest::default(),
             cancellation: Arc::new(AtomicBool::new(false)),
         }
@@ -526,6 +535,43 @@ impl DecodedFrame<'_> {
     }
 }
 
+/// Output representation is explicit; native images never masquerade as byte slices.
+pub enum DecodedOutput<'decoder> {
+    Nv12(DecodedFrame<'decoder>),
+    Image(DecodedImage),
+}
+impl DecodedOutput<'_> {
+    pub fn timestamp(&self) -> u64 {
+        match self {
+            Self::Nv12(frame) => frame.timestamp(),
+            Self::Image(frame) => frame.timestamp,
+        }
+    }
+}
+/// Ready image lease. It can outlive the decoder and is immutable until the
+/// final handle/consumer releases it. No producer addresses escape userspace.
+pub struct DecodedImage {
+    handle: Handle,
+    descriptor: scarlet_abi::shared_image::SharedImageDescriptor,
+    timestamp: u64,
+    color: scarlet_abi::shared_image::ImageColor,
+}
+impl DecodedImage {
+    pub fn descriptor(&self) -> scarlet_abi::shared_image::SharedImageDescriptor {
+        self.descriptor
+    }
+    /// Parsed stream color interpretation; unspecified values stay explicit.
+    pub fn color(&self) -> scarlet_abi::shared_image::ImageColor {
+        self.color
+    }
+    pub fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+    pub fn into_handle(self) -> Handle {
+        self.handle
+    }
+}
+
 /// An owned decoded NV12 frame that may outlive its decoder borrow.
 pub struct OwnedDecodedFrame {
     width: u32,
@@ -640,6 +686,8 @@ struct PendingDecode {
 
 /// Decoder session backed by a Scarlet `/dev/video*` device.
 pub struct ScarletVideoDecoder {
+    shared_images: bool,
+    prefer_shared_images: bool,
     device: Handle,
     mapped: Option<MappedVideoBuffer>,
     caps: Option<ScarletVideoCapabilities>,
@@ -700,7 +748,26 @@ impl ScarletVideoDecoder {
                 buffer.output_len
             );
         }
+        let shared_images = options.prefer_shared_images
+            && caps.is_some_and(|caps| {
+                caps.has_flag(scarlet_abi::video_image::VIDEO_CAP_SHARED_IMAGES)
+            })
+            && mapped.is_some_and(|buffer| buffer.session_commands);
+        if shared_images {
+            use scarlet_abi::video_image::*;
+            let request = VideoOutputMode {
+                stream_id: mapped.unwrap().stream_id,
+                mode: VIDEO_OUTPUT_SHARED_IMAGE,
+                ..Default::default()
+            };
+            // SAFETY: fixed-size initialized request is read synchronously.
+            unsafe { device.control(VIDEO_SET_OUTPUT_MODE, &request as *const _ as usize) }
+                .map_err(|_| String::from("hardware decoder shared output negotiation failed"))?;
+            std::println!("[scarlet-video-client] output=shared-image");
+        }
         Ok(Self {
+            shared_images,
+            prefer_shared_images: options.prefer_shared_images,
             device,
             mapped,
             caps,
@@ -838,6 +905,9 @@ impl ScarletVideoDecoder {
     /// A validated NV12 frame, `None` for a non-display frame or cancellation,
     /// or an error for invalid state/backend output.
     pub fn dequeue(&mut self) -> Result<Option<DecodedFrame<'_>>, String> {
+        if self.shared_images {
+            return Err(String::from("shared image output requires dequeue_output"));
+        }
         let pending = self
             .pending
             .ok_or_else(|| String::from("hardware decoder has no pending decode"))?;
@@ -845,6 +915,103 @@ impl ScarletVideoDecoder {
             PendingTransport::Stream => self.dequeue_stream(pending.submitted_timestamp),
             PendingTransport::Mapped { should_display } => self.dequeue_mapped(should_display),
         }
+    }
+
+    /// Dequeue either mapped pixels or an independently owned ready image.
+    pub fn dequeue_output(&mut self) -> Result<Option<DecodedOutput<'_>>, String> {
+        if self.shared_images {
+            self.dequeue_shared_image()
+                .map(|frame| frame.map(DecodedOutput::Image))
+        } else {
+            self.dequeue().map(|frame| frame.map(DecodedOutput::Nv12))
+        }
+    }
+
+    /// Decode while preserving a backend's native shared-image representation.
+    pub fn decode_output(
+        &mut self,
+        format: VideoFormat,
+        access_unit: &[u8],
+        timestamp: u64,
+    ) -> Result<Option<DecodedOutput<'_>>, String> {
+        if self.is_cancelled() || access_unit.is_empty() {
+            return Ok(None);
+        }
+        if self.configured_format != Some(format) {
+            self.configure(format)?;
+        }
+        self.submit(access_unit, timestamp)?;
+        self.dequeue_output()
+    }
+
+    fn dequeue_shared_image(&mut self) -> Result<Option<DecodedImage>, String> {
+        use scarlet_abi::{shared_image::*, video_image::*};
+        let pending = self
+            .pending
+            .ok_or_else(|| String::from("hardware decoder has no pending decode"))?;
+        let buffer = self
+            .mapped
+            .ok_or_else(|| String::from("shared image decoder mapping missing"))?;
+        for _ in 0..DEQUEUE_POLL_LIMIT {
+            if self.is_cancelled() {
+                self.pending = None;
+                return Ok(None);
+            }
+            let mut request = VideoDequeuedImage {
+                stream_id: buffer.stream_id,
+                ..Default::default()
+            };
+            // SAFETY: request has the exact initialized dequeue ABI layout.
+            let result = unsafe {
+                self.device
+                    .control(VIDEO_DEQUEUE_IMAGE, &mut request as *mut _ as usize)
+            };
+            match result {
+                Ok(0) => {
+                    thread::sleep(Duration::from_millis(DEQUEUE_POLL_INTERVAL_MS));
+                }
+                Ok(1) => {
+                    self.pending = None;
+                    // SAFETY: successful dequeue transfers one owning image capability.
+                    let handle = unsafe { Handle::from_raw(request.image_handle as i32) }
+                        .map_err(|_| String::from("invalid decoded image capability"))?;
+                    let mut descriptor = SharedImageDescriptor::default();
+                    // SAFETY: exact writable query record remains live during ioctl.
+                    unsafe {
+                        handle.control(SHARED_IMAGE_QUERY, &mut descriptor as *mut _ as usize)
+                    }
+                    .map_err(|_| String::from("decoded image query failed"))?;
+                    descriptor.validate().map_err(String::from)?;
+                    if matches!(
+                        pending.transport,
+                        PendingTransport::Mapped {
+                            should_display: false
+                        }
+                    ) {
+                        return Ok(None);
+                    }
+                    return Ok(Some(DecodedImage {
+                        handle,
+                        descriptor,
+                        timestamp: request.timestamp,
+                        color: if self.last_decode_mode == Some(HardwareDecodeMode::StatelessH264) {
+                            h264_stateless::output_color(&self.h264_stateless_context)
+                        } else {
+                            descriptor.color
+                        },
+                    }));
+                }
+                _ => {
+                    self.pending = None;
+                    return Err(format!(
+                        "hardware decoder shared dequeue failed{}",
+                        self.read_decoder_status()
+                    ));
+                }
+            }
+        }
+        self.pending = None;
+        Err(String::from("hardware decoder shared image timed out"))
     }
 
     /// Configure, submit, and dequeue one access unit.
@@ -928,6 +1095,7 @@ impl ScarletVideoDecoder {
         }
 
         let options = DecoderOptions::new()
+            .with_shared_images(self.prefer_shared_images)
             .with_buffer_request(self.buffer_request)
             .with_cancellation(self.cancellation.clone());
         drop(self);
@@ -1240,6 +1408,20 @@ impl ScarletVideoDecoder {
         buffer.input_len = session_info.buffer.input_len as usize;
         buffer.output_offset = session_info.buffer.output_offset as usize;
         buffer.output_len = session_info.buffer.output_len as usize;
+        if self.shared_images {
+            use scarlet_abi::video_image::*;
+            let request = VideoOutputMode {
+                stream_id: buffer.stream_id,
+                mode: VIDEO_OUTPUT_SHARED_IMAGE,
+                ..Default::default()
+            };
+            // SAFETY: fixed-size initialized request is read synchronously.
+            unsafe {
+                self.device
+                    .control(VIDEO_SET_OUTPUT_MODE, &request as *const _ as usize)
+            }
+            .map_err(|_| String::from("shared output negotiation after codec change failed"))?;
+        }
         self.mapped = Some(buffer);
         Ok(buffer)
     }
