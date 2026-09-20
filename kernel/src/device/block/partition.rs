@@ -309,7 +309,10 @@ fn scan_gpt(
     let header_sector = read_lbas(parent.as_ref(), GPT_HEADER_LBA, 1, sector_size)?;
 
     if header_sector.get(0..GPT_SIGNATURE.len()) != Some(GPT_SIGNATURE) {
-        return Ok(0);
+        if has_protective_mbr(&mbr) {
+            return Err("Protective MBR has no primary GPT header");
+        }
+        return scan_mbr(parent_name, parent, manager, sector_size, total_lbas, &mbr);
     }
 
     if !has_protective_mbr(&mbr) {
@@ -405,6 +408,74 @@ fn scan_gpt(
         registered += 1;
     }
 
+    Ok(registered)
+}
+
+fn scan_mbr(
+    parent_name: &str,
+    parent: Arc<dyn BlockDevice>,
+    manager: &DeviceManager,
+    sector_size: usize,
+    total_lbas: u64,
+    mbr: &[u8],
+) -> Result<usize, &'static str> {
+    if mbr.get(MBR_SIGNATURE_OFFSET..MBR_SIGNATURE_OFFSET + 2) != Some(&[0x55, 0xaa]) {
+        return Ok(0);
+    }
+    // Preserve table slot numbers rather than sorting by physical address.
+    // A shared boot card can legitimately place partition 4 before slot 3.
+    let mut partitions = Vec::new();
+    for index in 0..MBR_PARTITION_ENTRY_COUNT {
+        let offset = MBR_PARTITION_TABLE_OFFSET + index * MBR_PARTITION_ENTRY_SIZE;
+        let entry = &mbr[offset..offset + MBR_PARTITION_ENTRY_SIZE];
+        let kind = entry[4];
+        if kind == 0 {
+            continue;
+        }
+        let first = u64::from(u32::from_le_bytes(entry[8..12].try_into().unwrap()));
+        let count = u64::from(u32::from_le_bytes(entry[12..16].try_into().unwrap()));
+        if !matches!(entry[0], 0 | 0x80)
+            || first == 0
+            || count == 0
+            || first >= total_lbas
+            || count > total_lbas - first
+        {
+            return Err("Invalid MBR primary partition range or boot flag");
+        }
+        let end = first + count;
+        if partitions.iter().any(|&(_, _, other_first, other_count)| {
+            first < other_first + other_count && other_first < end
+        }) {
+            return Err("Overlapping MBR primary partitions");
+        }
+        partitions.push((index + 1, kind, first, count));
+    }
+    let mut registered = 0;
+    for (number, kind, first, count) in partitions {
+        // Extended tables require a separate bounded EBR walk. Do not expose
+        // their container as if it were a filesystem partition.
+        if matches!(kind, 0x05 | 0x0f | 0x85 | PROTECTIVE_MBR_PARTITION_TYPE) {
+            continue;
+        }
+        let name = format!("{}p{}", parent_name, number);
+        crate::println!(
+            "[partition] {}: MBR type={:#04x} first_lba={} sectors={} size={} bytes",
+            name,
+            kind,
+            first,
+            count,
+            count * sector_size as u64
+        );
+        let partition = Arc::new(PartitionBlockDevice::new(
+            name.clone(),
+            parent.clone(),
+            first,
+            count,
+            sector_size,
+        ));
+        manager.register_device_with_name(name, partition);
+        registered += 1;
+    }
     Ok(registered)
 }
 

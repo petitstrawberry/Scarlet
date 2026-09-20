@@ -29,6 +29,10 @@ name = "sh"
 path = "src/sh/main.rs"
 
 [[bin]]
+name = "storage-check"
+path = "src/storage_check.rs"
+
+[[bin]]
 name = "test"
 path = "src/test.rs"
 

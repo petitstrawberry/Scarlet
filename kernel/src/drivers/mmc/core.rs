@@ -1,4 +1,4 @@
-//! Host-independent eMMC card initialization and block I/O.
+//! Host-independent SD/eMMC card initialization and shared block I/O.
 
 extern crate alloc;
 
@@ -46,16 +46,32 @@ const EXT_CSD_BUS_WIDTH_8: u8 = 2;
 const R1_STATUS_ERROR_MASK: u32 = 0xfff9_a000;
 const R1_SWITCH_ERROR: u32 = 1 << 7;
 
-/// Information discovered while identifying one eMMC device.
+/// Card protocol selected during identification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EmmcCardInfo {
+pub enum MmcCardKind {
+    Emmc,
+    Sd,
+}
+
+/// Information discovered while identifying one SD or eMMC card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MmcCardInfo {
+    kind: MmcCardKind,
     sector_count: u64,
     high_capacity: bool,
     ext_csd_revision: u8,
     device_type: u8,
 }
 
-impl EmmcCardInfo {
+/// Compatibility name for existing eMMC consumers.
+pub type EmmcCardInfo = MmcCardInfo;
+
+impl MmcCardInfo {
+    /// Return the card protocol used for identification.
+    pub const fn kind(self) -> MmcCardKind {
+        self.kind
+    }
+
     fn disk_size(self) -> usize {
         self.sector_count
             .saturating_mul(MMC_SECTOR_SIZE as u64)
@@ -85,7 +101,7 @@ impl EmmcCardInfo {
     ///
     /// # Returns
     ///
-    /// Raw `EXT_CSD_REV` value reported by the card.
+    /// Raw `EXT_CSD_REV` value for eMMC; zero for SD.
     pub const fn ext_csd_revision(self) -> u8 {
         self.ext_csd_revision
     }
@@ -94,25 +110,49 @@ impl EmmcCardInfo {
     ///
     /// # Returns
     ///
-    /// Raw `DEVICE_TYPE` value reported by the card.
+    /// Raw `DEVICE_TYPE` value for eMMC; zero for SD.
     pub const fn device_type(self) -> u8 {
         self.device_type
     }
 }
 
-/// Block-device adapter around one initialized eMMC card.
+/// Block-device adapter around one initialized SD or eMMC card.
 #[allow(clippy::vec_box)]
-pub struct EmmcBlockDevice {
+pub struct MmcBlockDevice {
     name: &'static str,
     host: Mutex<Box<dyn MmcHost>>,
-    card: EmmcCardInfo,
+    card: MmcCardInfo,
     request_queue: IrqSpinLock<Vec<Box<BlockIORequest>>>,
     // This adapter owns one immutable card identity. Removal permanently
     // invalidates it; identifying a replacement card constructs a new adapter.
     media_online: AtomicBool,
 }
 
-impl EmmcBlockDevice {
+/// Compatibility name for existing eMMC host bindings.
+pub type EmmcBlockDevice = MmcBlockDevice;
+
+impl MmcBlockDevice {
+    /// Identify an SD memory card, then publish it through the same block
+    /// adapter as eMMC. SD supports one- or four-bit legacy SDR operation.
+    pub fn probe_sd(
+        name: &'static str,
+        mut host: Box<dyn MmcHost>,
+        bus_width: MmcBusWidth,
+    ) -> MmcResult<Self> {
+        let card = super::sd::initialize_sd(host.as_mut(), bus_width)?;
+        Ok(Self::from_card(name, host, card))
+    }
+
+    fn from_card(name: &'static str, host: Box<dyn MmcHost>, card: MmcCardInfo) -> Self {
+        Self {
+            name,
+            host: Mutex::new(host),
+            card,
+            request_queue: IrqSpinLock::new(Vec::new()),
+            media_online: AtomicBool::new(true),
+        }
+    }
+
     /// Identify an eMMC card and construct its block-device adapter.
     ///
     /// # Arguments
@@ -150,13 +190,7 @@ impl EmmcBlockDevice {
         bus_width: MmcBusWidth,
     ) -> MmcResult<Self> {
         let card = initialize_emmc(host.as_mut(), bus_width)?;
-        Ok(Self {
-            name,
-            host: Mutex::new(host),
-            card,
-            request_queue: IrqSpinLock::new(Vec::new()),
-            media_online: AtomicBool::new(true),
-        })
+        Ok(Self::from_card(name, host, card))
     }
 
     /// Return the current media generation.
@@ -180,7 +214,7 @@ impl EmmcBlockDevice {
     /// # Returns
     ///
     /// A copy of the immutable card metadata.
-    pub const fn card_info(&self) -> EmmcCardInfo {
+    pub const fn card_info(&self) -> MmcCardInfo {
         self.card
     }
 
@@ -236,30 +270,81 @@ impl EmmcBlockDevice {
             return Err(MmcError::MediaChanged.as_str());
         }
 
-        for offset in 0..request.sector_count {
+        let max_blocks = host.max_blocks_per_transfer().clamp(1, 128);
+        let mut offset = 0;
+        while offset < request.sector_count {
+            if !host.card_present() {
+                self.note_media_removed();
+                return Err(MmcError::NoMedia.as_str());
+            }
+            let blocks = (request.sector_count - offset).min(max_blocks);
             let sector = first_sector
                 .checked_add(offset as u64)
                 .ok_or(MmcError::OutOfRange.as_str())?;
             let argument = self.command_address(sector).map_err(MmcError::as_str)?;
             let start = offset * MMC_SECTOR_SIZE;
-            let end = start + MMC_SECTOR_SIZE;
+            let end = start + blocks * MMC_SECTOR_SIZE;
             let result = match request.request_type {
                 BlockIORequestType::Read => host.send_command(
-                    MmcCommand::new(CMD_READ_SINGLE_BLOCK, argument, MmcResponseType::R1),
+                    MmcCommand::new(
+                        if blocks > 1 {
+                            18
+                        } else {
+                            CMD_READ_SINGLE_BLOCK
+                        },
+                        argument,
+                        MmcResponseType::R1,
+                    ),
                     Some(MmcData::Read(&mut request.buffer[start..end])),
                 ),
                 BlockIORequestType::Write => host.send_command(
-                    MmcCommand::new(CMD_WRITE_SINGLE_BLOCK, argument, MmcResponseType::R1),
+                    MmcCommand::new(
+                        if blocks > 1 {
+                            25
+                        } else {
+                            CMD_WRITE_SINGLE_BLOCK
+                        },
+                        argument,
+                        MmcResponseType::R1,
+                    ),
                     Some(MmcData::Write(&request.buffer[start..end])),
                 ),
             };
-            result.map_err(MmcError::as_str)?;
+            if result.is_err() && blocks > 1 {
+                // Auto CMD12 may not run after a CRC/timeout failure. Stop the
+                // card before allowing another block request onto the bus.
+                let stop = host.send_command(MmcCommand::new(12, 0, MmcResponseType::R1b), None);
+                if stop.is_err() {
+                    self.note_media_removed();
+                }
+            }
+            let response = result.map_err(MmcError::as_str)?;
+            check_r1(response.word(0)).map_err(MmcError::as_str)?;
+            offset += blocks;
         }
         Ok(())
     }
 }
 
-fn initialize_emmc(host: &mut dyn MmcHost, bus_width: MmcBusWidth) -> MmcResult<EmmcCardInfo> {
+pub(super) fn sd_card_info(sector_count: u64, high_capacity: bool) -> MmcCardInfo {
+    MmcCardInfo {
+        kind: MmcCardKind::Sd,
+        sector_count,
+        high_capacity,
+        ext_csd_revision: 0,
+        device_type: 0,
+    }
+}
+
+pub(super) fn check_r1(status: u32) -> MmcResult<()> {
+    if status & R1_STATUS_ERROR_MASK != 0 {
+        Err(MmcError::Response)
+    } else {
+        Ok(())
+    }
+}
+
+fn initialize_emmc(host: &mut dyn MmcHost, bus_width: MmcBusWidth) -> MmcResult<MmcCardInfo> {
     if !host.card_present() {
         return Err(MmcError::NoMedia);
     }
@@ -349,7 +434,8 @@ fn initialize_emmc(host: &mut dyn MmcHost, bus_width: MmcBusWidth) -> MmcResult<
     }
     host.set_clock(LEGACY_MMC_CLOCK_HZ)?;
 
-    Ok(EmmcCardInfo {
+    Ok(MmcCardInfo {
+        kind: MmcCardKind::Emmc,
         sector_count,
         high_capacity,
         ext_csd_revision: ext_csd[EXT_CSD_REVISION],
@@ -379,7 +465,7 @@ const fn bus_width_switch_argument(bus_width: MmcBusWidth) -> Option<u32> {
     Some(MMC_SWITCH_WRITE_BYTE | ((EXT_CSD_BUS_WIDTH as u32) << 16) | ((value as u32) << 8))
 }
 
-impl Device for EmmcBlockDevice {
+impl Device for MmcBlockDevice {
     fn device_type(&self) -> DeviceType {
         DeviceType::Block
     }
@@ -405,7 +491,7 @@ impl Device for EmmcBlockDevice {
     }
 }
 
-impl BlockDevice for EmmcBlockDevice {
+impl BlockDevice for MmcBlockDevice {
     fn get_disk_name(&self) -> &'static str {
         self.name
     }
@@ -441,19 +527,19 @@ impl BlockDevice for EmmcBlockDevice {
     }
 }
 
-impl ControlOps for EmmcBlockDevice {
+impl ControlOps for MmcBlockDevice {
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
-        Err("Control operations not supported by eMMC")
+        Err("Control operations not supported by MMC block devices")
     }
 }
 
-impl MemoryMappingOps for EmmcBlockDevice {
+impl MemoryMappingOps for MmcBlockDevice {
     fn get_mapping_info(
         &self,
         _offset: usize,
         _length: usize,
     ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
-        Err("Memory mapping not supported by eMMC")
+        Err("Memory mapping not supported by MMC block devices")
     }
 
     fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {}
@@ -465,7 +551,7 @@ impl MemoryMappingOps for EmmcBlockDevice {
     }
 }
 
-impl Selectable for EmmcBlockDevice {
+impl Selectable for MmcBlockDevice {
     fn wait_until_ready(
         &self,
         _interest: crate::object::capability::selectable::ReadyInterest,
@@ -619,7 +705,7 @@ mod tests {
     fn initializes_emmc_through_host_independent_sequence() {
         let host = MockHost::new(32);
         let commands = host.commands.clone();
-        let device = EmmcBlockDevice::probe("mmcblk-test", Box::new(host)).unwrap();
+        let device = MmcBlockDevice::probe("mmcblk-test", Box::new(host)).unwrap();
 
         assert_eq!(device.get_disk_size(), 32 * MMC_SECTOR_SIZE);
         let command_indices: Vec<u8> = commands
@@ -647,12 +733,9 @@ mod tests {
         let commands = host.commands.clone();
         let bus_widths = host.bus_widths.clone();
         let events = host.events.clone();
-        let _device = EmmcBlockDevice::probe_with_bus_width(
-            "mmcblk-test",
-            Box::new(host),
-            MmcBusWidth::Eight,
-        )
-        .unwrap();
+        let _device =
+            MmcBlockDevice::probe_with_bus_width("mmcblk-test", Box::new(host), MmcBusWidth::Eight)
+                .unwrap();
 
         let commands = commands.lock();
         let switch = commands.last().unwrap();
@@ -723,11 +806,8 @@ mod tests {
         host.switch_status = R1_SWITCH_ERROR;
         let bus_widths = host.bus_widths.clone();
 
-        let result = EmmcBlockDevice::probe_with_bus_width(
-            "mmcblk-test",
-            Box::new(host),
-            MmcBusWidth::Eight,
-        );
+        let result =
+            MmcBlockDevice::probe_with_bus_width("mmcblk-test", Box::new(host), MmcBusWidth::Eight);
 
         assert!(matches!(result, Err(MmcError::Response)));
         assert_eq!(bus_widths.lock().as_slice(), &[MmcBusWidth::One]);
@@ -740,11 +820,8 @@ mod tests {
         let commands = host.commands.clone();
         let bus_widths = host.bus_widths.clone();
 
-        let result = EmmcBlockDevice::probe_with_bus_width(
-            "mmcblk-test",
-            Box::new(host),
-            MmcBusWidth::Eight,
-        );
+        let result =
+            MmcBlockDevice::probe_with_bus_width("mmcblk-test", Box::new(host), MmcBusWidth::Eight);
 
         assert!(matches!(result, Err(MmcError::Response)));
         let command_indices: Vec<u8> = commands
@@ -760,7 +837,7 @@ mod tests {
     #[test_case]
     fn block_adapter_round_trips_one_sector() {
         let host = MockHost::new(32);
-        let device = EmmcBlockDevice::probe("mmcblk-test", Box::new(host)).unwrap();
+        let device = MmcBlockDevice::probe("mmcblk-test", Box::new(host)).unwrap();
         let pattern = vec![0x5a; MMC_SECTOR_SIZE];
         let write = Box::new(BlockIORequest {
             request_type: BlockIORequestType::Write,
@@ -790,7 +867,7 @@ mod tests {
     fn removed_media_invalidates_the_existing_block_endpoint() {
         let host = MockHost::new(32);
         let present = host.present.clone();
-        let device = EmmcBlockDevice::probe("mmcblk-test", Box::new(host)).unwrap();
+        let device = MmcBlockDevice::probe("mmcblk-test", Box::new(host)).unwrap();
         assert_eq!(device.media_generation(), 1);
 
         present.store(false, Ordering::Release);

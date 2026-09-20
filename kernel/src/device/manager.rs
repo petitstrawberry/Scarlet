@@ -2648,12 +2648,30 @@ impl DeviceManager {
         self.apply_pinctrl_default_inner(device, true)
     }
 
+    fn default_pinctrl_property(
+        device: &PlatformDeviceInfo,
+    ) -> Result<Option<&super::platform::PlatformDeviceProperty>, &'static str> {
+        // Numbered states are not implicitly "default" when names exist.
+        // Tegra SDMMC, for example, names state 0 "sdmmc_schmitt_enable";
+        // selecting it here would apply an optional timing transition early.
+        let index = if let Some(names) = device.property("pinctrl-names") {
+            let names = names.as_string_list().ok_or("pinctrl: malformed names")?;
+            let Some(index) = names.iter().position(|name| *name == "default") else {
+                return Ok(None);
+            };
+            index
+        } else {
+            0
+        };
+        Ok(device.property(&alloc::format!("pinctrl-{}", index)))
+    }
+
     fn apply_pinctrl_default_inner(
         &self,
         device: &PlatformDeviceInfo,
         apply_self_states: bool,
     ) -> Result<(), &'static str> {
-        let Some(pinctrl) = device.property("pinctrl-0") else {
+        let Some(pinctrl) = Self::default_pinctrl_property(device)? else {
             return Ok(());
         };
 
@@ -2675,9 +2693,9 @@ impl DeviceManager {
         fdt: &fdt::Fdt<'_>,
         apply_self_states: bool,
     ) -> Result<(), &'static str> {
-        let pinctrl = device
-            .property("pinctrl-0")
-            .ok_or("pinctrl: state missing")?;
+        let Some(pinctrl) = Self::default_pinctrl_property(device)? else {
+            return Ok(());
+        };
         let states = Self::read_be_u32_cells(pinctrl.value()).ok_or("pinctrl: malformed state")?;
 
         for state_phandle in states {

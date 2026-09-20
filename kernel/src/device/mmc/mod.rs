@@ -65,6 +65,10 @@ pub enum MmcResponseType {
     R2,
     /// 48-bit OCR response without CRC or command-index validation.
     R3,
+    /// SD assigned relative address, with CRC and command-index validation.
+    R6,
+    /// SD interface condition, with CRC and command-index validation.
+    R7,
 }
 
 /// One command submitted to an MMC host controller.
@@ -130,11 +134,13 @@ pub struct MmcResponse {
 }
 
 impl MmcResponse {
-    /// Construct a response from host-controller response registers.
+    /// Construct a response in protocol order, independent of the controller.
     ///
     /// # Arguments
     ///
-    /// * `words` - Response words ordered from response register 0 through 3.
+    /// * `words` - Short responses occupy word 0. For R2, word 0 contains
+    ///   CID/CSD bits 127:96 and word 3 contains bits 31:0. Controllers which
+    ///   strip the CRC byte must restore its position with zero padding.
     ///
     /// # Returns
     ///
@@ -147,7 +153,7 @@ impl MmcResponse {
     ///
     /// # Arguments
     ///
-    /// * `index` - Response register index from 0 through 3.
+    /// * `index` - Protocol word index from 0 through 3.
     ///
     /// # Returns
     ///
@@ -164,9 +170,24 @@ impl MmcResponse {
     ///
     /// # Returns
     ///
-    /// Response registers ordered from 0 through 3.
+    /// Protocol words ordered from 0 through 3.
     pub const fn words(self) -> [u32; 4] {
         self.words
+    }
+
+    /// Extract up to 32 bits from a normalized 128-bit CID/CSD response.
+    /// Bit zero is the least significant bit of word 3.
+    pub fn bits(self, start: u32, width: u32) -> u32 {
+        if width == 0 || width > 32 || start >= 128 || width > 128 - start {
+            return 0;
+        }
+        let index = 3 - (start / 32) as usize;
+        let shift = start % 32;
+        let mut value = self.words[index] >> shift;
+        if shift != 0 && width > 32 - shift {
+            value |= self.words[index - 1] << (32 - shift);
+        }
+        value & (u32::MAX >> (32 - width))
     }
 }
 
@@ -223,6 +244,14 @@ pub enum MmcBusWidth {
 
 /// Controller interface consumed by host-independent MMC card logic.
 pub trait MmcHost: Send {
+    /// Maximum sectors in one CMD18/CMD25 request. Hosts advertising more
+    /// than one must terminate successful transfers with CMD12 themselves
+    /// (for example SDHCI Auto CMD12). Failed transfers may need explicit
+    /// CMD12 recovery by the card layer. The default supports single blocks.
+    fn max_blocks_per_transfer(&self) -> usize {
+        1
+    }
+
     /// Reset and power up the host controller for card identification.
     ///
     /// # Returns

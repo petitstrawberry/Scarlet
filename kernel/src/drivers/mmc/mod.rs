@@ -4,4 +4,5 @@
 //! the first controller implementation and is bound to QEMU through PCI.
 
 pub mod core;
+mod sd;
 pub mod sdhci;

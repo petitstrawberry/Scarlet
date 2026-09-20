@@ -120,6 +120,17 @@ pub struct SdhciHostConfig {
     /// returns [`MmcError::Unsupported`]. This is for platforms whose firmware
     /// owns an always-on card power supply.
     pub preserve_power_control: bool,
+
+    /// Drain posted register writes before the next access. FIFO writes use
+    /// PRESENT_STATE as the readback so they never consume receive data.
+    pub write_readback: bool,
+
+    /// The platform wrapper checks a GPIO because the controller's internal
+    /// card-detect input is not wired. The wrapper must check before commands.
+    pub external_card_detect: bool,
+
+    /// Reset the command and data state machines together on any error.
+    pub reset_command_and_data_together: bool,
 }
 
 /// Generic MMIO-backed SDHCI host.
@@ -368,18 +379,31 @@ impl SdhciHost {
         // SAFETY: `mmio_base` is a mapped SDHCI aperture and every call uses a
         // standard register offset within that aperture.
         unsafe { crate::arch::mmio::write8(self.mmio_base + offset, value) }
+        if self.config.write_readback {
+            let _ = self.read8(offset);
+        }
     }
 
     fn write16(&self, offset: usize, value: u16) {
         // SAFETY: `mmio_base` is a mapped SDHCI aperture and every call uses an
         // aligned standard register offset within that aperture.
         unsafe { crate::arch::mmio::write16(self.mmio_base + offset, value) }
+        if self.config.write_readback {
+            let _ = self.read16(offset);
+        }
     }
 
     fn write32(&self, offset: usize, value: u32) {
         // SAFETY: `mmio_base` is a mapped SDHCI aperture and every call uses an
         // aligned standard register offset within that aperture.
         unsafe { crate::arch::mmio::write32(self.mmio_base + offset, value) }
+        if self.config.write_readback {
+            let _ = self.read32(if offset == register::BUFFER_DATA {
+                register::PRESENT_STATE
+            } else {
+                offset
+            });
+        }
     }
 
     fn wait_until(&self, timeout_us: u64, mut condition: impl FnMut() -> bool) -> MmcResult<()> {
@@ -396,6 +420,13 @@ impl SdhciHost {
     }
 
     fn reset_lines(&self, mask: u8) -> MmcResult<()> {
+        let mask = if self.config.reset_command_and_data_together
+            && mask & (software_reset::COMMAND | software_reset::DATA) != 0
+        {
+            mask | software_reset::COMMAND | software_reset::DATA
+        } else {
+            mask
+        };
         self.write8(register::SOFTWARE_RESET, mask);
         self.wait_until(RESET_TIMEOUT_US, || {
             self.read8(register::SOFTWARE_RESET) & mask == 0
@@ -494,7 +525,9 @@ impl SdhciHost {
                     software_reset::COMMAND
                 };
                 let _ = self.reset_lines(reset);
-                return Err(if data_phase {
+                return Err(if status & ((1 << 16) | (1 << 20)) != 0 {
+                    MmcError::Timeout
+                } else if data_phase {
                     MmcError::Data
                 } else {
                     MmcError::Command
@@ -556,7 +589,7 @@ impl SdhciHost {
     fn command_bits(command: MmcCommand, has_data: bool) -> u16 {
         let response = match command.response() {
             MmcResponseType::None => 0,
-            MmcResponseType::R1 => {
+            MmcResponseType::R1 | MmcResponseType::R6 | MmcResponseType::R7 => {
                 command_flag::RESPONSE_48 | command_flag::CRC_CHECK | command_flag::INDEX_CHECK
             }
             MmcResponseType::R1b => {
@@ -576,6 +609,12 @@ impl SdhciHost {
 }
 
 impl MmcHost for SdhciHost {
+    fn max_blocks_per_transfer(&self) -> usize {
+        // Bound a polling request to 64 KiB. Larger block-layer requests are
+        // split by the card layer rather than monopolizing the host forever.
+        128
+    }
+
     fn reset(&mut self) -> MmcResult<()> {
         let reset_plan = Self::reset_plan(self.preserves_power_control());
         let inherited_power_control = if reset_plan.write_power_control {
@@ -663,6 +702,7 @@ impl MmcHost for SdhciHost {
 
     fn card_present(&self) -> bool {
         self.non_removable
+            || self.config.external_card_detect
             || self.read32(register::PRESENT_STATE) & present_state::CARD_INSERTED != 0
     }
 
@@ -701,7 +741,11 @@ impl MmcHost for SdhciHost {
         }
 
         let data_phase = data_len != 0;
-        self.wait_for_inhibit(data_phase || matches!(command.response(), MmcResponseType::R1b))?;
+        // CMD12 must be able to abort a data transfer with DATA_INHIBIT set.
+        self.wait_for_inhibit(
+            command.index() != 12
+                && (data_phase || matches!(command.response(), MmcResponseType::R1b)),
+        )?;
         self.write32(register::INTERRUPT_STATUS, u32::MAX);
 
         let mut mode = 0u16;
@@ -718,7 +762,12 @@ impl MmcHost for SdhciHost {
                 mode |= transfer_mode::READ;
             }
             if block_count > 1 {
-                mode |= transfer_mode::MULTI_BLOCK;
+                if !matches!(command.index(), 18 | 25) {
+                    return Err(MmcError::Unsupported);
+                }
+                // Terminate open-ended SD/eMMC multi-block commands. Merely
+                // programming BLOCK_COUNT does not stop the card itself.
+                mode |= transfer_mode::MULTI_BLOCK | (1 << 2); // Auto CMD12.
             }
         }
         // Program TRANSFER_MODE for every command, including command-only
@@ -735,12 +784,25 @@ impl MmcHost for SdhciHost {
             status & interrupt::COMMAND_COMPLETE,
         );
 
-        let response = MmcResponse::new([
+        let words = [
             self.read32(register::RESPONSE_0),
             self.read32(register::RESPONSE_0 + 4),
             self.read32(register::RESPONSE_0 + 8),
             self.read32(register::RESPONSE_0 + 12),
-        ]);
+        ];
+        let response = if command.response() == MmcResponseType::R2 {
+            // SDHCI strips the CRC/end byte from a long response. Restore
+            // protocol bit positions and return the most significant word
+            // first, as Linux does before its host-independent CSD decoder.
+            MmcResponse::new([
+                (words[3] << 8) | (words[2] >> 24),
+                (words[2] << 8) | (words[1] >> 24),
+                (words[1] << 8) | (words[0] >> 24),
+                words[0] << 8,
+            ])
+        } else {
+            MmcResponse::new(words)
+        };
 
         match data {
             Some(MmcData::Read(buffer)) => self.read_pio(buffer, block_size)?,
