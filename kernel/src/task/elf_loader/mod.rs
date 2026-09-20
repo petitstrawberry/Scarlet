@@ -120,6 +120,7 @@ pub const AT_PLATFORM: u64 = 15; // String identifying platform
 pub const AT_HWCAP: u64 = 16; // Machine dependent hints about processor capabilities
 pub const AT_CLKTCK: u64 = 17; // Frequency of times()
 pub const AT_RANDOM: u64 = 25; // Address of 16 random bytes
+pub const AT_HWCAP2: u64 = 26; // Second hardware capability word
 
 /// Auxiliary Vector entry
 #[derive(Debug, Clone, Copy)]
@@ -1029,6 +1030,10 @@ pub fn build_auxiliary_vector(load_result: &LoadElfResult) -> alloc::vec::Vec<Au
 
     // System information
     auxv.push(AuxVec::new(AT_PAGESZ, PAGE_SIZE as u64));
+    if let Some(capabilities) = crate::arch::user_cpu_capabilities() {
+        auxv.push(AuxVec::new(AT_HWCAP, capabilities.hwcap));
+        auxv.push(AuxVec::new(AT_HWCAP2, capabilities.hwcap2));
+    }
 
     // Entry point of main program (not the interpreter)
     // For dynamic executables, AT_ENTRY should be the original program's entry point
@@ -1061,7 +1066,6 @@ pub fn build_auxiliary_vector(load_result: &LoadElfResult) -> alloc::vec::Vec<Au
     // TODO: Add more auxiliary vector entries as needed:
     // - AT_RANDOM: Random bytes for stack canaries
     // - AT_PLATFORM: Platform string
-    // - AT_HWCAP: Hardware capabilities
 
     // Terminate auxiliary vector
     auxv.push(AuxVec::new(AT_NULL, 0));

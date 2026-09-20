@@ -40,7 +40,36 @@ impl Default for UserEntryOptions {
     }
 }
 
+pub mod cpu_features;
 pub mod user_context;
+
+/// Report the BSP's features after the user register-context policy is set.
+pub(crate) fn report_boot_cpu_features(cpu_id: usize) {
+    #[cfg(target_arch = "aarch64")]
+    aarch64::cpu_features::register_boot_cpu(cpu_id);
+    #[cfg(not(target_arch = "aarch64"))]
+    let _ = cpu_id;
+}
+
+/// Freeze the userspace feature contract before the first ELF is loaded.
+pub(crate) fn publish_user_cpu_features(cpu_count: usize) {
+    #[cfg(target_arch = "aarch64")]
+    aarch64::cpu_features::publish(cpu_count);
+    #[cfg(not(target_arch = "aarch64"))]
+    let _ = cpu_count;
+}
+
+/// ELF capability words, when this architecture has a published ABI for them.
+pub(crate) fn user_cpu_capabilities() -> Option<cpu_features::CpuCapabilities> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        Some(aarch64::cpu_features::userspace_capabilities())
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        None
+    }
+}
 
 pub use user_context::{
     init_from_fdt as init_user_context_from_fdt, user_fpu_enabled, user_vector_enabled,
