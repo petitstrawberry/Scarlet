@@ -14,7 +14,8 @@ mod native {
     use sws_client::event::Event;
     use sws_client::{Connection, Error};
     use sws_protocol::{
-        MessageHeader, payload_frame_done, payload_sgfx_buffer_released, server_msg,
+        MessageHeader, payload_frame_done, payload_sgfx_buffer_released, payload_window_destroyed,
+        server_msg,
     };
 
     const WAIT: Duration = Duration::from_millis(500);
@@ -51,11 +52,15 @@ mod native {
         let lifecycle = connection.subscribe_sgfx_events(102);
 
         let started = Instant::now();
-        assert!(!connection.wait_for_window_events(Duration::ZERO).unwrap());
+        assert!(
+            !connection
+                .wait_for_subscribed_window_events(Duration::ZERO)
+                .unwrap()
+        );
         assert!(started.elapsed() < EARLY, "zero timeout blocked");
         let idle = Duration::from_millis(25);
         let started = Instant::now();
-        assert!(!connection.wait_for_window_events(idle).unwrap());
+        assert!(!connection.wait_for_subscribed_window_events(idle).unwrap());
         assert!(
             started.elapsed() >= idle,
             "idle wait returned before timeout"
@@ -71,7 +76,7 @@ mod native {
         assert!(!first.has_events());
         assert!(second.has_events());
         let started = Instant::now();
-        assert!(connection.wait_for_window_events(WAIT).unwrap());
+        assert!(connection.wait_for_subscribed_window_events(WAIT).unwrap());
         assert!(
             started.elapsed() < EARLY,
             "queued second-window event slept"
@@ -80,7 +85,11 @@ mod native {
             second.poll_event(),
             Some(Event::FrameDone { callback_id: 1, .. })
         ));
-        assert!(!connection.wait_for_window_events(Duration::ZERO).unwrap());
+        assert!(
+            !connection
+                .wait_for_subscribed_window_events(Duration::ZERO)
+                .unwrap()
+        );
         println!("[sws-event-wait-smoke] PASS queued other-window event and rearm");
 
         let delayed_peer = Arc::clone(&peer);
@@ -93,7 +102,7 @@ mod native {
             );
         });
         let started = Instant::now();
-        assert!(connection.wait_for_window_events(WAIT).unwrap());
+        assert!(connection.wait_for_subscribed_window_events(WAIT).unwrap());
         assert!(
             started.elapsed() < EARLY,
             "socket input did not interrupt wait"
@@ -119,7 +128,11 @@ mod native {
             }
         });
         for callback in 3..35 {
-            assert!(!connection.wait_for_window_events(Duration::ZERO).unwrap());
+            assert!(
+                !connection
+                    .wait_for_subscribed_window_events(Duration::ZERO)
+                    .unwrap()
+            );
             let delayed_peer = Arc::clone(&peer);
             let sender = thread::spawn(move || {
                 thread::sleep(Duration::from_millis(2));
@@ -130,7 +143,7 @@ mod native {
                 );
             });
             let started = Instant::now();
-            assert!(connection.wait_for_window_events(WAIT).unwrap());
+            assert!(connection.wait_for_subscribed_window_events(WAIT).unwrap());
             assert!(started.elapsed() < EARLY, "concurrent reader lost a wake");
             sender.join().expect("concurrent sender");
             connection.dispatch().unwrap();
@@ -150,7 +163,7 @@ mod native {
         connection.dispatch().unwrap();
         assert!(lifecycle.has_events());
         let started = Instant::now();
-        assert!(!connection.wait_for_window_events(idle).unwrap());
+        assert!(!connection.wait_for_subscribed_window_events(idle).unwrap());
         assert!(
             started.elapsed() >= idle,
             "retained lifecycle event caused a spin"
@@ -161,11 +174,55 @@ mod native {
         );
         println!("[sws-event-wait-smoke] PASS SGFX lifecycle isolation");
 
+        // The app drops its window receiver before the asynchronous destroy
+        // reply arrives. That reply belongs to the unclaimed queue; ScarletUI
+        // drains only the remaining window subscriptions.
+        drop(second);
+        drop(lifecycle);
+        send(
+            &peer,
+            server_msg::WINDOW_DESTROYED,
+            &payload_window_destroyed(102),
+        );
+        connection.dispatch().unwrap();
+        assert!(connection.has_events());
+        assert!(connection.wait_for_window_events(Duration::ZERO).unwrap());
+        let started = Instant::now();
+        assert!(!connection.wait_for_subscribed_window_events(idle).unwrap());
+        assert!(
+            started.elapsed() >= idle,
+            "closed-window reply caused a spin"
+        );
+        // An unclaimed event must neither hide a live window's wake nor be
+        // consumed by the subscription-only wait.
+        send(
+            &peer,
+            server_msg::FRAME_DONE,
+            &payload_frame_done(101, 35, 35),
+        );
+        connection.dispatch().unwrap();
+        assert!(connection.wait_for_subscribed_window_events(WAIT).unwrap());
+        assert!(matches!(
+            first.poll_event(),
+            Some(Event::FrameDone {
+                callback_id: 35,
+                ..
+            })
+        ));
+        let started = Instant::now();
+        assert!(!connection.wait_for_subscribed_window_events(idle).unwrap());
+        assert!(started.elapsed() >= idle, "unclaimed queue prevented rearm");
+        assert!(matches!(
+            connection.poll_event(),
+            Some(Event::SurfaceDestroyed { surface_id: 102 })
+        ));
+        println!("[sws-event-wait-smoke] PASS closed-window isolation and live-window wake");
+
         drop(peer);
-        assert!(connection.wait_for_window_events(WAIT).unwrap());
+        assert!(connection.wait_for_subscribed_window_events(WAIT).unwrap());
         assert_eq!(connection.dispatch(), Err(Error::Disconnected));
         assert_eq!(
-            connection.wait_for_window_events(WAIT),
+            connection.wait_for_subscribed_window_events(WAIT),
             Err(Error::Disconnected)
         );
         println!("[sws-event-wait-smoke] PASS disconnect");

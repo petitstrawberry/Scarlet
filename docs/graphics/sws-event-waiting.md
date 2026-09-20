@@ -1,15 +1,22 @@
 # SWS application event waiting
 
-ScarletUI's SWS backend uses `Connection::wait_for_window_events` to sleep
+ScarletUI's SWS backend uses `Connection::wait_for_subscribed_window_events` to sleep
 until connection activity or its caller's timeout. It does not poll the
 compositor at a fixed 1 ms interval or sleep through incoming frame grants.
 The compositor's frame-pacing policy is unchanged.
 
-The connection checks its ordinary event queue and **all** window subscriber
-mailboxes before sleeping. The ScarletUI runner waits through its first
+The connection checks **all** window subscriber mailboxes before sleeping.
+The ScarletUI runner waits through its first
 window, but that window can share a connection with an animating second
 window. A grant already routed for the second window must prevent sleep.
 No application or buffer-lifecycle event is consumed by the wait operation.
+
+ScarletUI drains subscriptions, so its wait excludes the ordinary, unclaimed
+event queue. A notification arriving after a closed window's subscriber was
+dropped can remain in that queue; counting it as ready would make surviving
+windows spin without consuming anything. The existing
+`Connection::wait_for_window_events` still includes the ordinary queue for
+clients that consume it, and both waits leave those events intact.
 
 The native poll watches both the server socket and a lazy, coalesced wake
 socket pair owned by the shared connection. A concurrent dispatcher can
@@ -37,6 +44,15 @@ and isolation of retained SGFX lifecycle events. The native
 `/bin/sws-event-wait-smoke` probe covers real Scarlet sockets and polling,
 including 32 concurrent-dispatch races and disconnect handling. It uses a
 private protocol peer rather than the desktop's connection.
+
+The September 20 Switch check also drops a second window subscription, then
+delivers its delayed `WINDOW_DESTROYED` notification. The ordinary wait stays
+ready for clients that consume the unclaimed queue, while the subscription
+wait sleeps for its requested 25 ms. A subsequent live-window frame grant
+wakes it, and the unclaimed destruction event remains retrievable. This
+scenario and all existing native scenarios passed on the real Switch.
+It verifies the client wait contract, not the cause of every previously
+observed application or system-wide CPU spike.
 
 For performance checks, build a release image with the pinned Scarlet Rust
 toolchain and keep the QEMU configuration fixed. Compare visible showcase

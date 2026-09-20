@@ -334,10 +334,13 @@ fn window_events_pending(
     pending_events: &[Event],
     subscribers: &BTreeMap<u64, EventMailbox>,
 ) -> bool {
-    pending_head < pending_events.len()
-        || subscribers.values().any(|mailbox| {
-            matches!(mailbox.filter, EventFilter::Window(_)) && mailbox.head < mailbox.events.len()
-        })
+    pending_head < pending_events.len() || subscribed_window_events_pending(subscribers)
+}
+
+fn subscribed_window_events_pending(subscribers: &BTreeMap<u64, EventMailbox>) -> bool {
+    subscribers.values().any(|mailbox| {
+        matches!(mailbox.filter, EventFilter::Window(_)) && mailbox.head < mailbox.events.len()
+    })
 }
 
 /// A coalesced, level-readable notification for concurrent transport readers.
@@ -2660,16 +2663,40 @@ impl Connection {
     /// transport/wait error. Readiness is a hint, not a promise that a complete
     /// event is available. Neither socket data nor queued events are consumed.
     pub fn wait_for_window_events(&self, timeout: core::time::Duration) -> Result<bool, Error> {
+        self.wait_for_window_events_inner(timeout, true)
+    }
+
+    /// Wait for activity for any window subscription on this connection.
+    ///
+    /// Unlike [`Self::wait_for_window_events`], queued unclaimed events do not
+    /// prevent sleeping. Use this when the application consumes window events
+    /// exclusively through subscriptions: a late notification for a destroyed
+    /// window may remain in the ordinary queue after its subscriber is dropped.
+    /// The ordinary queue remains available to [`Self::poll_event`].
+    ///
+    /// New socket activity still wakes the caller to dispatch and recheck. The
+    /// timeout, concurrent-reader wake and error behavior are otherwise the
+    /// same as [`Self::wait_for_window_events`]. No event is consumed.
+    pub fn wait_for_subscribed_window_events(
+        &self,
+        timeout: core::time::Duration,
+    ) -> Result<bool, Error> {
+        self.wait_for_window_events_inner(timeout, false)
+    }
+
+    fn wait_for_window_events_inner(
+        &self,
+        timeout: core::time::Duration,
+        include_unclaimed: bool,
+    ) -> Result<bool, Error> {
         let (socket, wake) = {
             let mut transport = mutex_lock(&self.transport);
             if let Some(error) = transport.terminal_error {
                 return Err(error);
             }
-            if window_events_pending(
-                transport.pending_head,
-                &transport.pending_events,
-                &transport.subscribers,
-            ) {
+            if (include_unclaimed && transport.pending_head < transport.pending_events.len())
+                || subscribed_window_events_pending(&transport.subscribers)
+            {
                 return Ok(true);
             }
             if transport.window_event_wake.is_none() {

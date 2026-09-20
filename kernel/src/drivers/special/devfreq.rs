@@ -57,6 +57,11 @@ impl DeviceFrequencyDevice {
                 "sample_count={} failed_samples={}",
                 policy.sample_count, policy.failed_samples
             );
+            let _ = writeln!(
+                output,
+                "upthreshold_pct={} downdifferential_pct={}",
+                policy.ondemand.upthreshold_pct, policy.ondemand.downdifferential_pct
+            );
             if let Ok(opps) = devfreq::operating_points(policy.name) {
                 let _ = write!(output, "available_khz=");
                 for (index, opp) in opps.iter().enumerate() {
@@ -83,11 +88,22 @@ impl DeviceFrequencyDevice {
         let command = core::str::from_utf8(bytes).map_err(|_| "devfreq: invalid UTF-8")?;
         let mut words = command.split_whitespace();
         if words.next() != Some("device") {
-            return Err("devfreq: expected device <name> <frequency|governor> <value>");
+            return Err("devfreq: expected device <name> <frequency|governor|thresholds> <value>");
         }
         let name = words.next().ok_or("devfreq: missing device name")?;
         let operation = words.next().ok_or("devfreq: missing operation")?;
         let value = words.next().ok_or("devfreq: missing value")?;
+        let differential = if operation == "thresholds" {
+            Some(
+                words
+                    .next()
+                    .ok_or("devfreq: missing downdifferential")?
+                    .parse::<u32>()
+                    .map_err(|_| "devfreq: invalid downdifferential")?,
+            )
+        } else {
+            None
+        };
         if words.next().is_some() {
             return Err("devfreq: unexpected argument");
         }
@@ -108,6 +124,15 @@ impl DeviceFrequencyDevice {
                 };
                 devfreq::set_governor(name, governor)
             }
+            "thresholds" => devfreq::configure_simple_ondemand(
+                name,
+                devfreq::SimpleOndemandConfig {
+                    upthreshold_pct: value
+                        .parse::<u32>()
+                        .map_err(|_| "devfreq: invalid upthreshold")?,
+                    downdifferential_pct: differential.unwrap(),
+                },
+            ),
             _ => Err("devfreq: unknown operation"),
         }
     }

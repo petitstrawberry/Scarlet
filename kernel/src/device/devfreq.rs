@@ -43,6 +43,23 @@ pub struct DeviceFrequencyUtilization {
     pub total: u32,
 }
 
+/// Linux simple_ondemand's per-domain tuning. Interactive devices can leave
+/// more execution headroom without changing another domain's policy.
+#[derive(Clone, Copy, Debug)]
+pub struct SimpleOndemandConfig {
+    pub upthreshold_pct: u32,
+    pub downdifferential_pct: u32,
+}
+
+impl Default for SimpleOndemandConfig {
+    fn default() -> Self {
+        Self {
+            upthreshold_pct: 90,
+            downdifferential_pct: 5,
+        }
+    }
+}
+
 pub trait DeviceFrequencyDriver: Send + Sync {
     /// Read the active hardware rate. The driver must serialize this with work.
     fn current_frequency_khz(&self) -> Result<u64, &'static str>;
@@ -71,6 +88,7 @@ pub struct DeviceFrequencySnapshot {
     pub utilization_pct: Option<u32>,
     pub sample_count: u64,
     pub failed_samples: u64,
+    pub ondemand: SimpleOndemandConfig,
 }
 
 #[derive(Clone, Copy)]
@@ -83,6 +101,7 @@ struct PolicyState {
     sample_count: u64,
     failed_samples: u64,
     down_samples: u8,
+    ondemand: SimpleOndemandConfig,
 }
 
 struct Policy {
@@ -178,6 +197,7 @@ pub fn register(
             sample_count: 0,
             failed_samples: 0,
             down_samples: 0,
+            ondemand: SimpleOndemandConfig::default(),
         }),
         worker_started: AtomicBool::new(false),
     }));
@@ -188,14 +208,11 @@ const MAX_POLICIES: usize = 8;
 const POLL_NS: u64 = 25_000_000;
 
 fn poll(policy: &Policy) {
-    if policy.state.lock().governor != DeviceFrequencyGovernor::SimpleOndemand {
-        return;
-    }
+    // Keep the activity window fresh even while a manual/performance policy
+    // is selected. Besides useful telemetry, this prevents finite-width
+    // hardware counters from spanning minutes when automatic control resumes.
     let measurement = policy.driver.sample_utilization();
     let mut state = policy.state.lock();
-    if state.governor != DeviceFrequencyGovernor::SimpleOndemand {
-        return;
-    }
     let measurement = match measurement {
         Ok(value) if value.total != 0 && value.busy <= value.total => value,
         _ => {
@@ -208,17 +225,22 @@ fn poll(policy: &Policy) {
     let total = u64::from(measurement.total);
     state.utilization_pct = Some((busy * 100 / total) as u32);
     state.sample_count = state.sample_count.saturating_add(1);
+    if state.governor != DeviceFrequencyGovernor::SimpleOndemand {
+        return;
+    }
 
-    // Linux devfreq simple_ondemand: 90% jumps to the top OPP, 85-90%
-    // retains the current OPP, otherwise aim at busy/total * current / 87.5%.
+    // Linux devfreq simple_ondemand, including per-domain thresholds.
     // Round the result upward to a supported OPP so demand is not clipped.
+    let up = u64::from(state.ondemand.upthreshold_pct);
+    let differential = u64::from(state.ondemand.downdifferential_pct);
     let current = state.target_khz;
-    let requested = if busy * 100 > total * 90 {
+    let requested = if busy * 100 > total * up {
         policy.opps.last().unwrap().freq_khz
-    } else if busy * 100 > total * 85 {
+    } else if busy * 100 > total * (up - differential) {
         current
     } else {
-        let raw = busy.saturating_mul(current).saturating_mul(100) / total / 88;
+        let raw =
+            busy.saturating_mul(current).saturating_mul(100) / total / (up - differential / 2);
         policy
             .opps
             .iter()
@@ -304,9 +326,26 @@ pub fn snapshots() -> Vec<DeviceFrequencySnapshot> {
                 utilization_pct: state.utilization_pct,
                 sample_count: state.sample_count,
                 failed_samples: state.failed_samples,
+                ondemand: state.ondemand,
             }
         })
         .collect()
+}
+
+pub fn configure_simple_ondemand(
+    name: &str,
+    config: SimpleOndemandConfig,
+) -> Result<(), &'static str> {
+    if !(1..=100).contains(&config.upthreshold_pct)
+        || config.downdifferential_pct >= config.upthreshold_pct
+    {
+        return Err("devfreq: invalid ondemand thresholds");
+    }
+    let policy = find(name)?;
+    let mut state = policy.state.lock();
+    state.ondemand = config;
+    state.down_samples = 0;
+    Ok(())
 }
 
 pub fn set_userspace_frequency(name: &str, freq_khz: u64) -> Result<(), &'static str> {
