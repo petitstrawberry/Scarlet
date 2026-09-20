@@ -350,6 +350,7 @@ struct IrqDesc {
     needs_enable: bool,
     deliveries_in_progress: usize,
     deferred_completions: usize,
+    deliveries: u64,
 }
 
 impl IrqDesc {
@@ -361,8 +362,19 @@ impl IrqDesc {
             needs_enable: false,
             deliveries_in_progress: 0,
             deferred_completions: 0,
+            deliveries: 0,
         }
     }
+}
+
+/// Cumulative deliveries through the common IRQ dispatcher. On controllers
+/// that route local timers and IPIs through this dispatcher those lines are
+/// included too. These are observations, not a control interface.
+#[derive(Debug, Clone, Copy)]
+pub struct InterruptStatistics {
+    pub interrupt_id: Virq,
+    pub hardware_id: Hwirq,
+    pub deliveries: u64,
 }
 
 pub struct InterruptManager {
@@ -390,6 +402,24 @@ impl InterruptManager {
 
     pub fn global() -> &'static InterruptManager {
         INTERRUPT_MANAGER.call_once(Self::new)
+    }
+
+    /// Snapshot counters without holding the IRQ registry lock while formatting
+    /// or copying data to userspace. Counting reuses the delivery lock; it does
+    /// not allocate, log, or perform an extra MMIO access in the interrupt path.
+    pub fn statistics(&self) -> Vec<InterruptStatistics> {
+        let mut entries: Vec<_> = self
+            .irq_descs
+            .lock()
+            .values()
+            .map(|desc| InterruptStatistics {
+                interrupt_id: desc.mapping.virq,
+                hardware_id: desc.mapping.hwirq,
+                deliveries: desc.deliveries,
+            })
+            .collect();
+        entries.sort_unstable_by_key(|entry| entry.interrupt_id);
+        entries
     }
 
     fn controllers(&self) -> &IrqRwSpinLock<controllers::InterruptControllers> {
@@ -660,6 +690,7 @@ impl InterruptManager {
             .entry(pending.mapping.virq)
             .or_insert_with(|| IrqDesc::new(pending.mapping, None));
         desc.mapping = pending.mapping;
+        desc.deliveries = desc.deliveries.saturating_add(1);
         desc.deliveries_in_progress = desc
             .deliveries_in_progress
             .checked_add(1)
