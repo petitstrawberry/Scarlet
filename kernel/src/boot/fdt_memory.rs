@@ -97,6 +97,18 @@ impl FdtMemory {
             .max_by_key(|area| area.end - area.start)
             .expect("nonempty usable RAM")
     }
+
+    /// Keep a boot object out of every PMM region, including partial pages.
+    pub fn reserve(&mut self, area: PhysicalMemoryArea) -> Result<(), &'static str> {
+        let mut reserved = DirectMapRegions::new();
+        reserved.insert(area, MemoryAttribute::Normal)?;
+        let usable = subtract(&self.usable, &reserved)?;
+        if usable.is_empty() {
+            return Err("no unreserved RAM pages");
+        }
+        self.usable = usable;
+        Ok(())
+    }
 }
 
 fn enabled(node: &fdt::node::FdtNode<'_, '_>) -> bool {
@@ -264,6 +276,52 @@ impl Iterator for ReservationEntries<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn boot_reservations_keep_both_ram_banks_and_all_fragments() {
+        let mut ram = DirectMapRegions::new();
+        for (start, end) in [(0x8000_0000, 0xfebf_ffff), (0x1_0000_0000, 0x1_7fff_ffff)] {
+            ram.insert(PhysicalMemoryArea::new(start, end), MemoryAttribute::Normal)
+                .unwrap();
+        }
+        let mut memory = FdtMemory {
+            direct_map: ram,
+            usable: ram,
+            initramfs: None,
+        };
+        // Kernel, original DTB, initramfs, and inherited framebuffer.
+        for (start, end) in [
+            (0x8020_0000, 0x813f_ffff),
+            (0x8d00_0000, 0x8d02_9001),
+            (0x9200_0040, 0x972e_a65f),
+            (0xf5a0_0000, 0xf5df_ffff),
+        ] {
+            memory.reserve(PhysicalMemoryArea::new(start, end)).unwrap();
+        }
+        assert_eq!(memory.usable.len(), 6);
+        assert!(memory.usable.contains(0x8000_0000));
+        assert!(memory.usable.contains(0x8140_0000));
+        assert!(memory.usable.contains(0x972e_b000));
+        assert!(memory.usable.contains(0xf5e0_0000));
+        assert!(memory.usable.contains(0x1_7fff_f000));
+        for reserved in [
+            0x8020_0000,
+            0x8d02_9fff,
+            0x9200_0000,
+            0xf5df_ffff,
+            0xfec0_0000,
+        ] {
+            assert!(!memory.usable.contains(reserved));
+        }
+        let total: u64 = (0..memory.usable.len())
+            .map(|i| {
+                let area = memory.usable.get(i).unwrap().area();
+                area.end - area.start + 1
+            })
+            .sum();
+        assert!(total > 3 * 1024 * 1024 * 1024);
+        assert_eq!(memory.primary_usable().start, 0x1_0000_0000);
+    }
 
     #[test_case]
     fn reservation_subtraction_preserves_fragments_and_wide_addresses() {
