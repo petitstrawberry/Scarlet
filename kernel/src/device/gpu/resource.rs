@@ -116,6 +116,9 @@ pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
         || create.format == super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT)
         && create.usage != 0
         && create.usage & !GPU_IMAGE_USAGE_VALID == 0
+        && (create.usage & super::GPU_IMAGE_USAGE_DEPTH_COMPATIBLE == 0
+            || (create.format == GPU_IMAGE_FORMAT_BGRA8_UNORM
+                && create.usage & super::GPU_IMAGE_USAGE_RENDER_TARGET != 0))
         && create.width != 0
         && create.height != 0
         && create.array_layers != 0
@@ -336,7 +339,11 @@ pub(crate) fn image_upload_layout(
         || image.array_layers != 1
         || image.cube
         || image.usage & GPU_IMAGE_USAGE_TRANSFER_DST == 0
-        || layout.modifier != super::GPU_IMAGE_MODIFIER_LINEAR
+        || !matches!(
+            layout.modifier,
+            super::GPU_IMAGE_MODIFIER_LINEAR
+                | super::GPU_IMAGE_MODIFIER_NVIDIA_BLOCK_LINEAR_16BX2_H4
+        )
         || layout.plane_count != 1
     {
         return Err("GPU image upload request is invalid");
@@ -492,7 +499,11 @@ pub(crate) fn image_readback_layout(
         || image.array_layers != 1
         || image.cube
         || image.usage & super::GPU_IMAGE_USAGE_TRANSFER_SRC == 0
-        || layout.modifier != super::GPU_IMAGE_MODIFIER_LINEAR
+        || !matches!(
+            layout.modifier,
+            super::GPU_IMAGE_MODIFIER_LINEAR
+                | super::GPU_IMAGE_MODIFIER_NVIDIA_BLOCK_LINEAR_16BX2_H4
+        )
         || layout.plane_count != 1
     {
         return Err("GPU image readback request is invalid");

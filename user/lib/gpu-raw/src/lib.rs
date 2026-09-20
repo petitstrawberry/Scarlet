@@ -148,6 +148,8 @@ pub const GPU_IMAGE_MAX_PLANES: usize = 4;
 pub const GPU_IMAGE_MODIFIER_LINEAR: u64 = 0;
 /// NVIDIA Tegra X1 uncompressed block-linear BGRA8, block-height log2 4.
 pub const GPU_IMAGE_MODIFIER_NVIDIA_BLOCK_LINEAR_16BX2_H4: u64 = 0x0300_0000_000f_e014;
+/// NVIDIA Tegra X1 uncompressed ZF32 (kind 0x7b), block-height log2 4.
+pub const GPU_IMAGE_MODIFIER_NVIDIA_ZF32_BLOCK_LINEAR_16BX2_H4: u64 = 0x0300_0000_0007_b014;
 /// Image usage permitting the image to be bound as a render target.
 pub const GPU_IMAGE_USAGE_RENDER_TARGET: u32 = 1 << 0;
 /// Image usage permitting the image to be selected for display scanout.
@@ -160,13 +162,17 @@ pub const GPU_IMAGE_USAGE_TRANSFER_DST: u32 = 1 << 3;
 pub const GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT: u32 = 1 << 4;
 /// Image usage permitting BGRA pixel transfers out of the image.
 pub const GPU_IMAGE_USAGE_TRANSFER_SRC: u32 = 1 << 5;
+/// Color render target that must support a simultaneous depth attachment.
+/// Opting in permits backends to choose a different layout from 2D targets.
+pub const GPU_IMAGE_USAGE_DEPTH_COMPATIBLE: u32 = 1 << 6;
 /// All currently defined GPU image usage flags.
 pub const GPU_IMAGE_USAGE_VALID: u32 = GPU_IMAGE_USAGE_RENDER_TARGET
     | GPU_IMAGE_USAGE_PRESENTABLE
     | GPU_IMAGE_USAGE_SAMPLED
     | GPU_IMAGE_USAGE_TRANSFER_DST
     | GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT
-    | GPU_IMAGE_USAGE_TRANSFER_SRC;
+    | GPU_IMAGE_USAGE_TRANSFER_SRC
+    | GPU_IMAGE_USAGE_DEPTH_COMPATIBLE;
 
 /// The GPU backend is not available for control.
 pub const GPU_DEVICE_STATE_UNAVAILABLE: u32 = 0;
