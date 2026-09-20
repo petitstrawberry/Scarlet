@@ -45,9 +45,16 @@ def in_root(root, guest):
 
 
 def executable(path, arch, label, static=False):
-    report = Elf(path).report()
-    if report["machine"] != arch or report["osabi"] != 83 or not report["entry"]:
+    elf = Elf(path)
+    report = elf.report()
+    if report["machine"] != arch or report["osabi"] != 83:
         raise ValueError(f"{label} is not a native {arch} Scarlet executable: {path}")
+    # The standard RISC-V bootstrap deliberately links _entry at address zero.
+    # Validate its actual executable mapping rather than treating zero as absent.
+    if not any(header["type"] == 1 and header["flags"] & 1
+               and header["vaddr"] <= report["entry"] < header["vaddr"] + header["filesz"]
+               for header in elf.headers):
+        raise ValueError(f"{label} entry is outside a file-backed executable PT_LOAD: {path}")
     if static and (report["interpreter"] or report["needed"]):
         raise ValueError(f"{label} must be statically linked for bootstrap: {path}")
     return report

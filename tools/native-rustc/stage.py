@@ -9,12 +9,36 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import struct
 import sys
 
-from audit_elf import Elf, ElfError
+from audit_elf import Elf, ElfError, MACHINES
 
 TARGETS = {"riscv64gc-unknown-scarlet": "riscv64", "aarch64-unknown-scarlet": "aarch64"}
 INTERPRETER = "/system/bin/scarlet-ld"
+
+
+def object_report(path):
+    """Audit link inputs separately: a CRT object has sections, not PT_LOADs."""
+    data = path.read_bytes()
+    if len(data) < 64 or data[:7] != b"\x7fELF\x02\x01\x01":
+        raise ElfError(f"expected little-endian ELF64 object: {path}")
+    kind, machine, version, _, _, shoff, _, ehsize, _, phnum, shsize, shnum, shstr = struct.unpack_from(
+        "<HHIQQQIHHHHHH", data, 16)
+    if kind != 1 or version != 1 or ehsize != 64 or phnum != 0:
+        raise ElfError(f"expected version-1 relocatable ELF object: {path}")
+    if data[7] not in (0, 0x53):
+        raise ElfError(f"unexpected object OSABI: {path}")
+    if shsize != 64 or not 0 < shnum < 65535 or shstr >= shnum or shoff < 64 or shoff + shnum * shsize > len(data):
+        raise ElfError(f"invalid object section headers: {path}")
+    for index in range(shnum):
+        _, section_kind, _, _, offset, size, _, _, _, _ = struct.unpack_from(
+            "<IIQQQQIIQQ", data, shoff + index * shsize)
+        if section_kind != 8 and (offset > len(data) or size > len(data) - offset):
+            raise ElfError(f"object section extends outside the file: {path}")
+    return {"path": str(path), "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data), "elf_type": "REL", "machine": MACHINES.get(machine, f"unknown:{machine}"),
+            "osabi": data[7]}
 
 
 def main():
@@ -39,9 +63,9 @@ def main():
     target_lib = Path("lib/rustlib") / args.target / "lib"
     if not list((source / target_lib).glob("libstd-*.rlib")):
         p.error("native sysroot is missing the matching target libstd rlib")
-    for path in (source / target_lib).glob("*"):
-        if path.is_file() and path.suffix in (".rlib", ".rmeta"):
-            copies[relative / target_lib / path.name] = path
+    for path in (source / target_lib).rglob("*"):
+        if path.is_file() and path.suffix in (".rlib", ".rmeta", ".a", ".o"):
+            copies[relative / path.relative_to(source)] = path
     shared = [p for p in (source / "lib").glob("*.so*") if p.is_file()]
     backend_dir = Path("lib/rustlib") / args.target / "codegen-backends"
     shared += [p for p in (source / backend_dir).glob("*.so*") if p.is_file()]
@@ -57,9 +81,9 @@ def main():
         copies[runtime_path] = path
     reports = {}
     for dest, src in copies.items():
-        if src.suffix in (".rlib", ".rmeta"):
+        if src.suffix in (".rlib", ".rmeta", ".a"):
             continue
-        report = Elf(src).report()
+        report = object_report(src) if src.suffix == ".o" else Elf(src).report()
         if report["machine"] != TARGETS[args.target]:
             p.error(f"wrong ELF machine: {src}")
         if dest in (relative / "bin/rustc", Path("system/bin/scarlet-ld"), Path("system/bin/native-rustc-probe")):
