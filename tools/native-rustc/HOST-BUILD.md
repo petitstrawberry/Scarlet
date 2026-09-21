@@ -111,6 +111,12 @@ checks, native compiler builds, and guest execution have passed for AArch64 and
 RV64. Each future artifact still needs the same acceptance before it is marked
 guest-verified.
 
+The separate [versioned packaging workflow](https://github.com/petitstrawberry/scarlet-rust-nix/actions/workflows/native-toolchain-release.yml)
+accepts exact native-host and Wild run IDs, validates their provenance, and emits
+deterministic archives for AArch64 and RV64. It packages Wild as `bin/wild` and
+`bin/rust-lld`, but deliberately excludes `scarlet-ld`; the matching Scarlet
+image provides that runtime interpreter at `/system/bin/scarlet-ld`.
+
 ## Preflight and dependency audit
 
 Before dispatching a heavy Actions build, validate patch application, vendor

@@ -31,6 +31,14 @@ both architectures. See [linker evidence and usage](../../tools/native-linker/RE
 This removes the previously unimplemented build-time linker as a bring-up task;
 the full native-rustc acceptance now uses that Wild build.
 
+The [versioned native-toolchain packaging workflow](https://github.com/petitstrawberry/scarlet-rust-nix/actions/workflows/native-toolchain-release.yml)
+combines exact native-host and Wild run IDs without rebuilding either component.
+[Run 35581141086](https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35581141086)
+produced downloadable AArch64 and RV64 `v0.1.0-rc.1` artifacts with publication
+disabled. Their downloaded checksums, archive manifests, and payload equivalence
+to the guest-tested candidates are recorded below. Creating a GitHub release is
+a separate opt-in workflow input.
+
 ## Current guest-verified status, 2026-09-21
 
 The tested distribution layout installs under

@@ -7,10 +7,15 @@
   "install_prefix": "/opt/scarlet/toolchains/rust/v0.1.0-rc.1",
   "packaging": {
     "repository": "petitstrawberry/scarlet-rust-nix",
-    "commit": "2cc2b84c6e254d57433eaa2c31ad4ccc298e7ed8",
+    "guest_verified_candidate_commit": "2cc2b84c6e254d57433eaa2c31ad4ccc298e7ed8",
+    "ci_commit": "28d534cc56abf9ea4701c6e8df550beeff425da9",
+    "ci_run": "https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35581141086",
     "scarlet_ld_included": false,
     "required_dynamic_loader": "/system/bin/scarlet-ld",
-    "aarch64_repeat_archive_byte_identical": true
+    "aarch64_repeat_archive_byte_identical": true,
+    "ci_regular_file_payload_matches_guest_verified_candidate": true,
+    "ci_symlink_targets_match_guest_verified_candidate": true,
+    "ci_symlink_mode_note": "The macOS-packaged guest candidate reports symlink mode 0755; the Linux Actions artifacts report the conventional symlink mode 0777. Symlink paths and relative targets are identical, and symlink permission bits do not affect resolution."
   },
   "harness": {
     "base_commit": "d8ad9bb514f263013734661fdaa166e48c3dcdf9",
@@ -38,6 +43,18 @@
           "codegen_backend_sha256": "37a3ac198d105194ea46f8b6fb07fb0caada54328544f0c58af8b556061b71ba",
           "wild_sha256": "42cc5a6d06e557a304273b5f91fe41f40296da2b5cfad05eb699b31e9a3ebb62"
         }
+      },
+      "ci_artifact": {
+        "artifact_id": 10630217423,
+        "archive_name": "native-rust-aarch64-v0.1.0-rc.1.tar.zst",
+        "archive_bytes": 51343948,
+        "archive_sha256": "f3c2cd2a361eb36276c3052d547064b50aff7422d8616f903001c6c9067b444c",
+        "manifest_sha256": "9192c20004a48693b9e1cf9232f46e57fbcb81e77976e21439bc850647459ede",
+        "workflow_inventory_verified": true,
+        "downloaded_checksum_verified": true,
+        "archive_manifest_matches_companion": true,
+        "regular_file_payload_matches_guest_verified_candidate": true,
+        "symlink_targets_match_guest_verified_candidate": true
       },
       "scarlet_inputs": {
         "scarlet_ld_sha256": "c9e399bf1c9192dc5e7611cb3f949d1ec1d6559c08fa26c1fce24ae5feb7f927",
@@ -102,6 +119,18 @@
           "codegen_backend_sha256": "b4b11afb9d9334169f530913edf0d8757eaf4b9d311a156670555bc05cb7a864",
           "wild_sha256": "d80e6c80463d665fe0df4b0ded8b6b00b2f3a80d1ad6870c7ff1be86bd51ccc6"
         }
+      },
+      "ci_artifact": {
+        "artifact_id": 10630257367,
+        "archive_name": "native-rust-riscv64-v0.1.0-rc.1.tar.zst",
+        "archive_bytes": 54201267,
+        "archive_sha256": "4934fd276231ea79b221c88cd5403eb5ce2328e13e063a09b149e0de0ab1bafe",
+        "manifest_sha256": "0b98b00657b9a102b73236c8bad3264090fbb6d172d10ebc14877dff79c29945",
+        "workflow_inventory_verified": true,
+        "downloaded_checksum_verified": true,
+        "archive_manifest_matches_companion": true,
+        "regular_file_payload_matches_guest_verified_candidate": true,
+        "symlink_targets_match_guest_verified_candidate": true
       },
       "scarlet_inputs": {
         "scarlet_ld_sha256": "d8cdd3b23712b0f9f9f7932b38819192b205d7fdac15a1f17526c09ab3bc893c",
