@@ -13,9 +13,11 @@ symbol was rejected. The [evidence record](evidence/2026-09-21.json) identifies
 the exact build, inputs, commands and serial-log hashes. This initial run does
 not establish execution of a native rustc. A subsequent
 [Rust std guest test](evidence/2026-09-21-rust-std.json) passed on both architectures
-using the same unchanged Actions-built Wild, a small locally cross-built probe,
-and captured object/rlib inputs from the cached cross compiler. Each generated
-Rust program printed the expected text and returned 37.
+using the complete artifact from
+[Actions run 35555398664](https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35555398664).
+Wild, the native probe and all object/rlib inputs were downloaded and checksum
+verified; no part of that artifact was rebuilt locally. Each generated Rust
+program printed the expected text and returned 37.
 
 Download and verify the `native-linker-TARGET` Actions artifact, then extract its
 `native-linker.tar.xz`. Enter the Scarlet development shell and run:
