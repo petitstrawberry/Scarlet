@@ -17,8 +17,8 @@ panic = "abort"
 
 [patch.crates-io]
 ring = { git = "https://github.com/petitstrawberry/ring.git", branch = "scarlet" }
-socket2 = { git = "https://github.com/petitstrawberry/socket2.git", branch = "scarlet" }
-tokio = { git = "https://github.com/petitstrawberry/tokio.git", branch = "scarlet" }
+socket2 = { git = "https://github.com/petitstrawberry/socket2.git", rev = "15f0140af367c76befdab2606c7b643f29552bfd" }
+tokio = { git = "https://github.com/petitstrawberry/tokio.git", rev = "8610548b5826d9405a2c7bff6465aee01813be83" }
 tonic = { git = "https://github.com/petitstrawberry/grpc-rust.git", branch = "scarlet" }
 
 [patch."https://github.com/petitstrawberry/Scarlet"]
