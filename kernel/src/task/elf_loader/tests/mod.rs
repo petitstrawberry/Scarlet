@@ -255,7 +255,13 @@ fn native_interpreter_handoff_preserves_main_metadata_and_initial_stack() {
         let mut interpreter = native_fixture(&[0x42; 4], PAGE_SIZE as u64);
         interpreter[16..18].copy_from_slice(&interpreter_kind.to_le_bytes());
         let interpreter_vaddr = if interpreter_kind == ET_EXEC {
-            0x4000_0000
+            // The 32-bit mmap arena already holds the main ELF's copied program
+            // headers at 0x4000_0000. Keep this fixed-address fixture below it.
+            if usize::BITS == 32 {
+                0x2000_0000
+            } else {
+                0x4000_0000
+            }
         } else {
             0x3000
         };
