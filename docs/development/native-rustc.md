@@ -25,7 +25,8 @@ required. See [the build recipe](../../tools/native-rustc/HOST-BUILD.md).
 The separate [native Wild linker port](https://github.com/petitstrawberry/scarlet-rust-nix/pull/21)
 now builds on Actions for both targets. Its initial native guest acceptance
 linked fresh object/archive inputs and executed both outputs on AArch64 and
-RV64. See [linker evidence and usage](../../tools/native-linker/README.md).
+RV64. A subsequent test also linked and executed captured Rust std inputs on
+both architectures. See [linker evidence and usage](../../tools/native-linker/README.md).
 This removes the previously unimplemented build-time linker as a bring-up task;
 integration with native rustc remains subject to the full acceptance below.
 
