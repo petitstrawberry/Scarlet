@@ -29,7 +29,7 @@ pub fn monotonic_time() -> Duration {
 ///
 /// # Returns
 ///
-/// `Some(ns)` if an RTC source has initialized the wall clock, or `None` if
+/// `Some(ns)` if an RTC source or userspace has initialized the wall clock, or `None` if
 /// wall-clock time is unavailable (e.g. no RTC present).
 pub fn system_time_ns() -> Option<u64> {
     // SAFETY: This fixed clock query has no arguments or userspace memory effects.
@@ -44,6 +44,34 @@ pub fn system_time_ns() -> Option<u64> {
 /// `Some(Duration)` if the wall clock is available, or `None` otherwise.
 pub fn system_time() -> Option<Duration> {
     system_time_ns().map(Duration::from_nanos)
+}
+
+/// Set UTC valid at a previously sampled boot-relative monotonic instant.
+///
+/// Only the init thread group may call this; other processes request an update
+/// through the system service. Delivery delay is added by the kernel. Wall time
+/// may step in either direction, while monotonic time and hardware RTC remain
+/// unchanged. Rejects future monotonic references, UTC overflow and u64::MAX.
+pub fn set_system_time_at(unix_ns: u64, monotonic_ns: u64) -> Result<(), &'static str> {
+    let update = scarlet_sys::RawSystemTimeUpdateV1 {
+        version: 1,
+        reserved: 0,
+        unix_ns,
+        monotonic_ns,
+    };
+    // SAFETY: The initialized fixed-width record stays readable for this call.
+    let result = unsafe {
+        scarlet_sys::syscall2(
+            Syscall::SetSystemTime,
+            core::ptr::from_ref(&update) as usize,
+            core::mem::size_of_val(&update),
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err("wall-clock update denied or invalid")
+    }
 }
 
 extern crate alloc;

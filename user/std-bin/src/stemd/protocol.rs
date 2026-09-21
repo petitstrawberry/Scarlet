@@ -31,6 +31,12 @@
 //!   - service_name_len (u32, little-endian)
 //!   - service_name_bytes (variable)
 //! - Used by services to notify stemd that they finished initialization.
+//!
+//! ### SET_SYSTEM_TIME (0x07)
+//! - Payload: Unix nanoseconds (u64 LE), corresponding monotonic nanoseconds (u64 LE).
+//! - Response: "OK: System time updated\n" or "ERROR: <message>\n".
+//! - Like SHUTDOWN, this is a trusted local service request; the kernel only
+//!   permits the init thread group to perform the actual operation.
 
 use std::vec::Vec;
 
@@ -43,6 +49,15 @@ pub mod cmd {
     pub const SHUTDOWN: u8 = 0x04;
     pub const LAUNCH: u8 = 0x05;
     pub const SERVICE_READY: u8 = 0x06;
+    pub const SET_SYSTEM_TIME: u8 = 0x07;
+}
+
+pub fn system_time_command(unix_ns: u64, monotonic_ns: u64) -> [u8; 17] {
+    let mut command = [0; 17];
+    command[0] = cmd::SET_SYSTEM_TIME;
+    command[1..9].copy_from_slice(&unix_ns.to_le_bytes());
+    command[9..17].copy_from_slice(&monotonic_ns.to_le_bytes());
+    command
 }
 
 /// Build LAUNCH_OR_FOCUS command payload

@@ -184,6 +184,10 @@ name = "resolverd"
 path = "src/resolverd.rs"
 
 [[bin]]
+name = "ntpd"
+path = "src/ntpd/main.rs"
+
+[[bin]]
 name = "resolve"
 path = "src/resolve.rs"
 

@@ -1642,8 +1642,8 @@ pub fn sys_monotonic_time(trapframe: &mut Trapframe) -> usize {
 
 /// Read the kernel wall-clock (real) time.
 ///
-/// Returns wall-clock nanoseconds since the Unix epoch. If no RTC source has
-/// initialized the wall clock yet, returns the full `u64::MAX` sentinel.
+/// Returns wall-clock nanoseconds since the Unix epoch. If neither an RTC
+/// source nor userspace initialized it, returns the full `u64::MAX` sentinel.
 ///
 /// # Returns
 ///
@@ -1652,6 +1652,31 @@ pub fn sys_system_time(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(&task);
     crate::syscall::u64_result(trapframe, crate::time::system_time_ns().unwrap_or(u64::MAX))
+}
+
+/// Apply an init-owned wall-clock update from a fixed-width Native ABI record.
+pub fn sys_set_system_time(trapframe: &mut Trapframe) -> usize {
+    use crate::library::std::usercopy::copy_from_user;
+    let task = mytask().unwrap();
+    trapframe.increment_pc_next(&task);
+    if task.get_thread_group_id() != 1 || trapframe.get_arg(1) != 24 {
+        return SYSCALL_ERROR;
+    }
+    let mut bytes = [0u8; 24];
+    if copy_from_user(&task, trapframe.get_arg(0), &mut bytes).is_err() {
+        return SYSCALL_ERROR;
+    }
+    let version = u32::from_ne_bytes(bytes[0..4].try_into().unwrap());
+    let reserved = u32::from_ne_bytes(bytes[4..8].try_into().unwrap());
+    if version != 1 || reserved != 0 {
+        return SYSCALL_ERROR;
+    }
+    let unix_ns = u64::from_ne_bytes(bytes[8..16].try_into().unwrap());
+    let monotonic_ns = u64::from_ne_bytes(bytes[16..24].try_into().unwrap());
+    match crate::time::set_system_time_at(unix_ns, monotonic_ns) {
+        Ok(()) => 0,
+        Err(_) => SYSCALL_ERROR,
+    }
 }
 
 /// Read cumulative system-wide CPU usage accounting.

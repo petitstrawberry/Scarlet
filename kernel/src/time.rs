@@ -3,7 +3,10 @@
 //! This module provides time-related functionality for the kernel,
 //! including current time access for filesystem operations.
 
-use crate::sync::Once;
+use crate::sync::IrqSpinLock;
+
+mod wall_clock;
+use wall_clock::WallClock;
 
 use crate::timer::get_time_us;
 
@@ -47,20 +50,26 @@ pub fn udelay(us: u64) {
 // Wall-clock (system / real) time
 // ---------------------------------------------------------------------------
 
-// Immutable after the first RTC sample. Once publishes the value before its
-// ready flag, so readers cannot observe an initialized clock with a zero base.
-static WALL_CLOCK_BASE_NS: Once<u64> = Once::new();
+// Keep each UTC/monotonic pair coherent across CPUs, including readers in IRQs.
+static WALL_CLOCK: IrqSpinLock<WallClock> = IrqSpinLock::new(WallClock::new());
 
 /// Get the current wall-clock time in nanoseconds since the Unix epoch.
 ///
 /// # Returns
 ///
-/// `Some(ns)` once an RTC source has initialized the wall clock, or `None`
-/// before the first RTC probe completes.
+/// `Some(ns)` once an RTC source or userspace has initialized the wall clock.
+/// Adjustments can step this clock forward or backward; elapsed-time users
+/// must use `current_time_ns()` instead.
 pub fn system_time_ns() -> Option<u64> {
-    WALL_CLOCK_BASE_NS
-        .get()
-        .map(|base| base.wrapping_add(current_time_ns()))
+    let clock = WALL_CLOCK.lock();
+    clock.read(current_time_ns())
+}
+
+/// Apply UTC valid at a prior monotonic instant, accounting for delivery delay.
+/// This neither changes the monotonic clock nor writes any hardware RTC.
+pub fn set_system_time_at(unix_ns: u64, monotonic_ns: u64) -> Result<(), &'static str> {
+    let mut clock = WALL_CLOCK.lock();
+    clock.set(unix_ns, monotonic_ns, current_time_ns())
 }
 
 /// Get the current wall-clock time in microseconds since the Unix epoch.
@@ -81,9 +90,9 @@ pub fn system_time_s() -> Option<u64> {
     system_time_ns().map(|ns| ns / 1_000_000_000)
 }
 
-/// Whether the wall clock has been initialized from an RTC source.
+/// Whether an RTC source or userspace has initialized the wall clock.
 pub fn is_system_time_available() -> bool {
-    WALL_CLOCK_BASE_NS.is_completed()
+    system_time_ns().is_some()
 }
 
 /// Establish the wall-clock epoch from a single RTC sample.
@@ -92,7 +101,7 @@ pub fn is_system_time_available() -> bool {
 /// probe. The caller brackets the RTC read with two monotonic samples
 /// (`mono_before_ns` just before the RTC read, `mono_after_ns` just after) so
 /// the midpoint is the best estimate of the monotonic instant at which the RTC
-/// value was valid. The offset is `rtc_epoch_ns - midpoint_ns`.
+/// value was valid. A later RTC probe never replaces a userspace adjustment.
 ///
 /// # Arguments
 ///
@@ -111,21 +120,9 @@ pub fn initialize_wall_clock_from_rtc_sample(
     mono_before_ns: u64,
     mono_after_ns: u64,
 ) -> Result<(), &'static str> {
-    // Best estimate of the monotonic instant matching the RTC reading.
-    let midpoint_ns = mono_before_ns + (mono_after_ns.saturating_sub(mono_before_ns) / 2);
-
-    if rtc_epoch_ns < midpoint_ns {
-        // rtc_epoch_ns - midpoint would underflow: the RTC reports an epoch
-        // older than the system's uptime, which is not a usable base.
-        return Err("RTC epoch precedes monotonic uptime; rejected to avoid underflow");
-    }
-
-    let base_ns = rtc_epoch_ns - midpoint_ns;
-
-    // First-wins: only the first RTC source seeds the wall clock.
-    WALL_CLOCK_BASE_NS
-        .set(base_ns)
-        .map_err(|_| "wall clock already initialized")
+    WALL_CLOCK
+        .lock()
+        .initialize(rtc_epoch_ns, mono_before_ns, mono_after_ns)
 }
 
 /// Convert microseconds to a human-readable format (for debugging)

@@ -128,7 +128,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Ok(Err((request_id, url, error))) => {
                 failed += 1;
                 println!(
-                    "[request {request_id}, done {}] failed {url}: {error}",
+                    "[request {request_id}, done {}] failed {url}: {error:?}",
                     completed + failed
                 );
             }

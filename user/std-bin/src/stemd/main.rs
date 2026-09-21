@@ -1330,6 +1330,18 @@ fn handle_ipc_client(client: Socket) {
                 } else {
                     let _ = stream.write("ERROR: Malformed SERVICE_READY command\n".as_bytes());
                 }
+            } else if buffer[0] == cmd::SET_SYSTEM_TIME {
+                let response = if read_until(&stream, &mut buffer, &mut n, 17) {
+                    let unix_ns = u64::from_le_bytes(buffer[1..9].try_into().unwrap());
+                    let monotonic_ns = u64::from_le_bytes(buffer[9..17].try_into().unwrap());
+                    match scarlet_os::time::set_system_time_at(unix_ns, monotonic_ns) {
+                        Ok(()) => "OK: System time updated\n",
+                        Err(_) => "ERROR: Wall-clock update denied or invalid\n",
+                    }
+                } else {
+                    "ERROR: Incomplete SET_SYSTEM_TIME command\n"
+                };
+                let _ = stream.write(response.as_bytes());
             } else if buffer[0] == cmd::SHUTDOWN {
                 println!("stemd: Received SHUTDOWN command");
 

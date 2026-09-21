@@ -1,0 +1,5 @@
+# Network time is optional: failure or an offline network never blocks boot.
+[service.ntpd]
+exec = "/bin/ntpd"
+depends = ["resolverd"]
+order = 04

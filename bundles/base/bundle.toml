@@ -121,3 +121,9 @@ kind = "cargo"
 source = "../../user/std-bin"
 bin = "resolverd"
 to = "/bin/resolverd"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "ntpd"
+to = "/bin/ntpd"

@@ -86,6 +86,21 @@ const _: [(); 8] = [(); core::mem::size_of::<RawEnvironmentHandleMapping>()];
 /// non-cryptographic emergency fallback.
 pub const GET_RANDOM_FLAG_REQUIRE_ENTROPY: usize = 1 << 0;
 
+/// Wall-clock update for [`Syscall::SetSystemTime`]. Fixed-width on every ABI.
+/// UTC is valid at `monotonic_ns`; delivery delay is added by the kernel.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawSystemTimeUpdateV1 {
+    /// Must be 1.
+    pub version: u32,
+    /// Must be zero.
+    pub reserved: u32,
+    pub unix_ns: u64,
+    pub monotonic_ns: u64,
+}
+
+const _: [(); 24] = [(); core::mem::size_of::<RawSystemTimeUpdateV1>()];
+
 /// Running-kernel identity returned by [`Syscall::GetKernelInfo`].
 ///
 /// Every field contains a NUL-terminated UTF-8 string. This record describes
@@ -847,6 +862,12 @@ pub enum Syscall {
     /// or `usize::MAX` for a null, undersized, or unwritable buffer. The kernel
     /// does not retain the pointer; output must be ignored on failure.
     GetKernelInfo = 51,
+    /// Init-thread-group-only wall-clock adjustment. Argument 0 points to a
+    /// readable [`RawSystemTimeUpdateV1`], argument 1 must equal 24. Returns 0
+    /// on success or `usize::MAX` for denied/invalid requests. Future monotonic
+    /// references and UTC overflow (including the unavailable sentinel) fail.
+    /// Does not change monotonic time or persist to hardware RTC.
+    SetSystemTime = 52,
 
     // Process information
     GetTaskInfoCount = 24,

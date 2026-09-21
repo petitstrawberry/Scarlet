@@ -28,7 +28,7 @@
 //! - Getpid (7), Getppid (8), Brk (12), Sbrk (13)
 //! - Session/Process Groups: CreateSession (26), GetSessionId (27),
 //!   GetProcessGroupId (28), SetProcessGroup (29)
-//! - Time: Sleep (20), MonotonicTime (35)
+//! - Time: Sleep (20), MonotonicTime (35), SystemTime (37), SetSystemTime (52)
 //! - Kernel identity: GetKernelInfo (51)
 //! - Basic I/O: Putchar (16), Getchar (17)
 //! - Random: GetRandom (22)
@@ -280,6 +280,7 @@ syscall_table! {
     FutexWait = 49 => sys_futex_wait,
     FutexWake = 50 => sys_futex_wake,
     GetKernelInfo = 51 => crate::system::sys_get_kernel_info,
+    SetSystemTime = 52 => crate::task::syscall::sys_set_system_time,
 
     // ABI Zone Management
     RegisterAbiZone = 90 => sys_register_abi_zone,

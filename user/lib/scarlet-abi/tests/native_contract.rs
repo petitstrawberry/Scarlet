@@ -38,6 +38,13 @@ fn environment_exec_record_layouts() {
 }
 
 #[test]
+fn system_time_update_v1_layout() {
+    assert_layout!(abi::RawSystemTimeUpdateV1, 24, 8, {
+        version: 0, reserved: 4, unix_ns: 8, monotonic_ns: 16,
+    });
+}
+
+#[test]
 fn scheduler_v1_field_layouts() {
     assert_layout!(abi::RawTaskDeadlineParams, 24, 8, {
         runtime_ns: 0, deadline_ns: 8, period_ns: 16,
@@ -192,7 +199,7 @@ fn native_syscall_numbers() {
         SetTaskCpuAffinity = 42, GetTaskCpuAffinity = 43,
         SetTaskDeadline = 44, GetTaskDeadline = 45, SetSchedulerAttr = 46,
         GetSchedulerAttr = 47, GetSchedulerState = 48, FutexWait = 49,
-        FutexWake = 50, GetKernelInfo = 51,
+        FutexWake = 50, GetKernelInfo = 51, SetSystemTime = 52,
         RegisterAbiZone = 90, UnregisterAbiZone = 91,
         CreateNamespace = 92, HandleQuery = 100, HandleSetRole = 101,
         HandleClose = 102, HandleDuplicate = 103, HandleControl = 110,
