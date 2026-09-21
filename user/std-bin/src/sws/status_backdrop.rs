@@ -57,18 +57,29 @@ impl BackdropGeometry {
     pub fn row_span(self, y: u32) -> (u32, u32) {
         let (_, _, width, height) = self.output;
         let radius = self.corner_radius;
-        let dy = if y < radius {
-            radius - y
-        } else if y >= height - radius {
-            y - (height - radius - 1)
+        if radius == 0 {
+            return (self.output.0 as u32, width);
+        }
+
+        // Evaluate the circle at the centre of each pixel row. Using integer
+        // row edges makes the first row jump inward by the full radius, which
+        // produces a visibly stepped corner on small translucent controls.
+        let sample_y = y as f64 + 0.5;
+        let top_center = radius as f64;
+        let bottom_center = height as f64 - radius as f64;
+        let dy = if sample_y < top_center {
+            top_center - sample_y
+        } else if sample_y > bottom_center {
+            sample_y - bottom_center
         } else {
-            0
+            0.0
         };
-        let inset = if dy == 0 {
+        let inset = if dy <= 0.0 {
             0
         } else {
-            let square = u64::from(radius) * u64::from(radius) - u64::from(dy) * u64::from(dy);
-            radius - (square as f64).sqrt() as u32
+            let radius = radius as f64;
+            let reach = (radius * radius - dy * dy).max(0.0).sqrt();
+            (radius - reach - 0.5).ceil().max(0.0) as u32
         };
         (self.output.0 as u32 + inset, width - inset * 2)
     }
@@ -264,6 +275,21 @@ mod tests {
         let old = damage.clone();
         expand_damage(&[a, b], &mut damage);
         assert_eq!(damage, old);
+    }
+
+    #[test]
+    fn rounded_material_rows_are_symmetric_and_do_not_collapse_at_the_tip() {
+        let geometry = BackdropGeometry::new(100, 60, (10, 10, 80, 40), 8, 10).unwrap();
+        let spans: Vec<_> = (0..geometry.output.3)
+            .map(|row| geometry.row_span(row))
+            .collect();
+
+        for row in 0..spans.len() {
+            assert_eq!(spans[row], spans[spans.len() - row - 1]);
+        }
+        assert_eq!(spans[0], (17, 66));
+        assert_eq!(spans[1], (15, 70));
+        assert!(spans.windows(2).take(10).all(|pair| pair[1].1 >= pair[0].1));
     }
 
     #[test]

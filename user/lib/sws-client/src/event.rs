@@ -174,6 +174,10 @@ pub struct ImeContextState {
 /// Events from the SWS server
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    /// Active editor metadata for the input-panel provider (no surrounding text).
+    InputPanelContext(sws_protocol::input_panel::Context),
+    /// Output-space area occupied by the input panel, zero-sized when hidden.
+    InputPanelOcclusion(sws_protocol::input_panel::Occlusion),
     /// Native direct-touch changes belonging to one target surface and seat frame.
     TouchFrame {
         surface_id: u32,

@@ -1020,6 +1020,8 @@ impl TransportState {
                 self.text_input_windows.get(context_id).copied()
             }
             Event::ImeActivate(state) | Event::ImeContextState(state) => Some(state.window_id),
+            Event::InputPanelOcclusion(area) => Some(area.window_id),
+            Event::InputPanelContext(_) => None,
             Event::ImeKeyEvent { window_id, .. } => Some(*window_id),
             Event::SurfaceConfigure { surface_id, .. }
             | Event::SurfaceStateChanged { surface_id, .. }
@@ -1441,6 +1443,50 @@ impl Connection {
     pub fn commit_text_input_state(&self, context_id: u32, serial: u32) -> Result<(), Error> {
         let payload = protocol::payload_text_input_commit_state(context_id, serial);
         self.send_message(protocol::client_msg::TEXT_INPUT_COMMIT_STATE, &payload)
+    }
+
+    /// Request the panel for an enabled editor after an explicit user interaction.
+    pub fn show_text_input_panel(&self, context_id: u32) -> Result<(), Error> {
+        let (kind, payload) = protocol::input_panel::Request::Show { context_id }.encode();
+        self.send_message(kind, &payload)
+    }
+    /// Claim the exclusive input-panel role for an owned, non-focusing surface.
+    /// This does not change the user's selected IME.
+    pub fn register_input_panel(&self, window_id: u32) -> Result<bool, Error> {
+        let (kind, payload) = protocol::input_panel::Request::Register { window_id }.encode();
+        match self.request(kind, &payload)?.message() {
+            ServerMessage::InputPanelRegistered { accepted } => Ok(accepted),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+    pub fn set_input_panel_visible(
+        &self,
+        context: protocol::input_panel::Context,
+        visible: bool,
+    ) -> Result<(), Error> {
+        let (kind, payload) = protocol::input_panel::Request::SetVisible {
+            context_id: context.context_id,
+            generation: context.generation,
+            visible,
+        }
+        .encode();
+        self.send_message(kind, &payload)
+    }
+    /// Send one complete key stroke to this activation. Stale activations are ignored.
+    pub fn input_panel_key(
+        &self,
+        context: protocol::input_panel::Context,
+        code: u16,
+        modifiers: u32,
+    ) -> Result<(), Error> {
+        let (kind, payload) = protocol::input_panel::Request::Key {
+            context_id: context.context_id,
+            generation: context.generation,
+            code,
+            modifiers,
+        }
+        .encode();
+        self.send_message(kind, &payload)
     }
 
     /// Register this connection as an input method service.
@@ -2793,6 +2839,14 @@ impl TransportState {
                     debug_assert_eq!(surface_id, header.window_id);
                     self.push_event(Event::TouchFrame { surface_id, frame });
                 }
+                true
+            }
+            ServerMessage::InputPanelContext(context) => {
+                self.push_event(Event::InputPanelContext(context));
+                true
+            }
+            ServerMessage::InputPanelOcclusion(area) => {
+                self.push_event(Event::InputPanelOcclusion(area));
                 true
             }
             ServerMessage::TextInputPreedit {

@@ -460,30 +460,24 @@ pub(crate) struct TextureUpload<'a> {
     pub(crate) bytes: &'a [u8],
 }
 
-/// Reusable, bounded render targets for a separable backdrop filter. The
-/// first texture captures the composed scene, so the presentation image does
-/// not need to be sampleable and no CPU readback is involved.
+/// Reusable linear capture for a backdrop filter. Native Maxwell presentation
+/// and render targets are block-linear; copying the composed source into this
+/// sampled-only texture keeps the blur path on the proven tiled-to-linear copy
+/// and linear-sampler paths.
 pub(crate) struct BackdropTextures {
     levels: Vec<(TextureId, u32, u32)>,
 }
 
 impl BackdropTextures {
     pub(crate) fn define(resources: &ResourceTable, width: u32, height: u32) -> ir::Result<Self> {
-        let half = (width.div_ceil(2), height.div_ceil(2));
-        let mut levels = Vec::with_capacity(3);
-        for (width, height) in [(width, height), half, half] {
-            let texture = resources
-                .define_texture(TextureDesc::new(
-                    TextureFormat::Bgra8Unorm,
-                    Extent2D::new(width, height)?,
-                    TextureUsage::SAMPLED
-                        | TextureUsage::RENDER_ATTACHMENT
-                        | TextureUsage::COPY_SRC
-                        | TextureUsage::COPY_DST,
-                )?)?
-                .id();
-            levels.push((texture, width, height));
-        }
+        let texture = resources
+            .define_texture(TextureDesc::new(
+                TextureFormat::Bgra8Unorm,
+                Extent2D::new(width, height)?,
+                TextureUsage::SAMPLED | TextureUsage::COPY_DST,
+            )?)?
+            .id();
+        let levels = vec![(texture, width, height)];
         Ok(Self { levels })
     }
 }
@@ -731,10 +725,10 @@ impl QuadRenderer {
                 &operations[previous_split..split],
             )?;
 
-            // Prepare every material before writing any of them to the main
-            // target. Adjacent controls often have overlapping source halos.
+            // Capture every material before writing any of them back to the
+            // main target. Adjacent controls often have overlapping halos.
             for backdrop in &backdrops[first..end] {
-                if backdrop.textures.levels.len() != 3 {
+                if backdrop.textures.levels.len() != 1 {
                     return Err("Invalid SGFX backdrop textures".into());
                 }
                 let (capture, sw, sh) = backdrop.textures.levels[0];
@@ -755,95 +749,92 @@ impl QuadRenderer {
                         clip: None,
                     })],
                 )?;
-                let (ping, bw, bh) = backdrop.textures.levels[1];
-                let blur_area =
-                    PixelRect::new(0, 0, bw, bh).map_err(|_| "Invalid backdrop extent")?;
-                self.encode_region_with_uploads(
-                    executor,
-                    Rc::clone(&resources),
-                    ping,
-                    bw,
-                    bh,
-                    blur_area,
-                    LoadOp::Load,
-                    &[],
-                    &[Quad::Sampled(SampledRect {
-                        texture: capture,
-                        texture_width: sw,
-                        texture_height: sh,
-                        destination: blur_area,
-                        source: local,
-                        tint: white,
-                        ignore_source_alpha: true,
-                        clip: None,
-                    })],
-                )?;
-                // At most a 2x reduction, followed by actual filtering. Linear
-                // paired taps halve draw count without a coarse blur pyramid.
-                let radius = backdrop.radius.div_ceil(2).max(1) as i32;
-                for pass in 0..6 {
-                    let (source, _, _) = backdrop.textures.levels[1 + pass % 2];
-                    let (destination, _, _) = backdrop.textures.levels[2 - pass % 2];
-                    let mut taps = Vec::with_capacity(radius as usize + 1);
-                    let mut total = 0.0f32;
-                    let mut tap = -radius;
-                    while tap <= radius {
-                        let weight = if tap < radius { 2.0 } else { 1.0 };
-                        let offset = tap as f32 + (weight - 1.0) * 0.5;
+            }
+            for backdrop in &backdrops[first..end] {
+                let (capture, sw, sh) = backdrop.textures.levels[0];
+                let local = PixelRect::new(0, 0, sw, sh).map_err(|_| "Invalid backdrop source")?;
+                // A 5x5 binomial kernel approximates the three box passes used
+                // by the CPU compositor. SOURCE_OVER can form an exact weighted
+                // average when each successive alpha is weight/running_total;
+                // the first tap is opaque and replaces the unfiltered pixels.
+                let positions = [-2.0f32, -1.0, 0.0, 1.0, 2.0];
+                let weights = [1.0f32, 4.0, 6.0, 4.0, 1.0];
+                let step = backdrop.radius.max(1) as f32;
+                let mut quads = Vec::with_capacity(25 + backdrop.clips.len() * 2);
+                let mut total = 0.0f32;
+                for (y, wy) in positions.into_iter().zip(weights) {
+                    for (x, wx) in positions.into_iter().zip(weights) {
+                        let weight = wx * wy;
                         total += weight;
-                        taps.push(Quad::SampledOffset {
+                        quads.push(Quad::SampledOffset {
                             rect: SampledRect {
-                                texture: source,
-                                texture_width: bw,
-                                texture_height: bh,
-                                destination: blur_area,
-                                source: blur_area,
+                                texture: capture,
+                                texture_width: sw,
+                                texture_height: sh,
+                                destination: backdrop.source,
+                                source: local,
                                 tint: ir::Color::rgba(1.0, 1.0, 1.0, weight / total)
                                     .map_err(|_| "Invalid backdrop sample weight")?,
                                 ignore_source_alpha: true,
-                                clip: None,
+                                clip: Some(backdrop.output),
                             },
-                            offset: if pass % 2 == 0 {
-                                [offset, 0.0]
-                            } else {
-                                [0.0, offset]
-                            },
+                            offset: [x * step, y * step],
                         });
-                        tap += weight as i32;
                     }
-                    self.encode_region_with_uploads(
-                        executor,
-                        Rc::clone(&resources),
-                        destination,
-                        bw,
-                        bh,
-                        blur_area,
-                        LoadOp::Load,
-                        &[],
-                        &taps,
-                    )?;
                 }
-            }
-            for backdrop in &backdrops[first..end] {
-                let (filtered, fw, fh) = backdrop.textures.levels[1];
-                let filtered_area =
-                    PixelRect::new(0, 0, fw, fh).map_err(|_| "Invalid filtered extent")?;
-                let quads: Vec<_> = backdrop
-                    .clips
-                    .iter()
-                    .map(|&clip| {
-                        Quad::Sampled(SampledRect {
-                            texture: filtered,
-                            texture_width: fw,
-                            texture_height: fh,
+
+                // The kernel uses one rectangular scissor. Restore the small
+                // corner areas outside the rounded material from the clean
+                // capture so blur never leaks through transparent corners.
+                let output_right = backdrop
+                    .output
+                    .x()
+                    .checked_add(backdrop.output.width())
+                    .ok_or("Invalid backdrop output")?;
+                for clip in &backdrop.clips {
+                    if clip.x() > backdrop.output.x() {
+                        let corner = PixelRect::new(
+                            backdrop.output.x(),
+                            clip.y(),
+                            clip.x() - backdrop.output.x(),
+                            clip.height(),
+                        )
+                        .map_err(|_| "Invalid backdrop corner")?;
+                        quads.push(Quad::Sampled(SampledRect {
+                            texture: capture,
+                            texture_width: sw,
+                            texture_height: sh,
                             destination: backdrop.source,
-                            source: filtered_area,
+                            source: local,
                             tint: white,
                             ignore_source_alpha: true,
-                            clip: Some(clip),
-                        })
-                    })
-                    .collect();
+                            clip: Some(corner),
+                        }));
+                    }
+                    let clip_right = clip
+                        .x()
+                        .checked_add(clip.width())
+                        .ok_or("Invalid backdrop clip")?;
+                    if clip_right < output_right {
+                        let corner = PixelRect::new(
+                            clip_right,
+                            clip.y(),
+                            output_right - clip_right,
+                            clip.height(),
+                        )
+                        .map_err(|_| "Invalid backdrop corner")?;
+                        quads.push(Quad::Sampled(SampledRect {
+                            texture: capture,
+                            texture_width: sw,
+                            texture_height: sh,
+                            destination: backdrop.source,
+                            source: local,
+                            tint: white,
+                            ignore_source_alpha: true,
+                            clip: Some(corner),
+                        }));
+                    }
+                }
                 self.encode_region_with_uploads(
                     executor,
                     Rc::clone(&resources),

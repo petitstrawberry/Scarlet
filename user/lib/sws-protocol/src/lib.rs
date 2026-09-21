@@ -22,6 +22,7 @@ extern crate scarlet_std as std;
 
 use std::vec::Vec;
 
+pub mod input_panel;
 pub mod surface_regions;
 pub mod workspace;
 
@@ -31,7 +32,7 @@ pub mod workspace;
 pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024; // 1 MiB
 
 /// Current SWS capability-negotiation protocol version.
-pub const SWS_PROTOCOL_VERSION: u32 = 10;
+pub const SWS_PROTOCOL_VERSION: u32 = 11;
 
 /// Maximum damage rectangles carried by one shared SGFX frame commit.
 pub const SGFX_MAX_DAMAGE_RECTS: usize = 16;
@@ -69,6 +70,8 @@ pub mod capabilities {
     pub const GAMEPAD_INPUT: u64 = 1 << 12;
     /// Owned windows may subscribe to target-local direct-touch frames.
     pub const TOUCH_INPUT: u64 = 1 << 13;
+    /// A separate input panel may supply keys to the active TextInput context.
+    pub const INPUT_PANEL: u64 = 1 << 14;
 }
 
 pub mod gamepad;
@@ -435,6 +438,7 @@ pub mod client_msg {
     pub const TEXT_INPUT_COMMIT_STATE: u32 = 208;
     pub const IME_GET_METHODS: u32 = 209;
     pub const IME_GET_ACTIVE: u32 = 210;
+    pub const TEXT_INPUT_SHOW_PANEL: u32 = 211;
 
     // Input method service messages (220-239)
     pub const IME_REGISTER: u32 = 220;
@@ -447,6 +451,10 @@ pub mod client_msg {
     pub const IME_RELEASE_KEYBOARD: u32 = 227;
     pub const IME_SET_STATUS: u32 = 228;
     pub const IME_SET_POPUP_WINDOW: u32 = 229;
+
+    pub const INPUT_PANEL_REGISTER: u32 = 240;
+    pub const INPUT_PANEL_SET_VISIBLE: u32 = 241;
+    pub const INPUT_PANEL_KEY: u32 = 242;
 }
 
 /// Message type IDs (server -> client).
@@ -514,6 +522,9 @@ pub mod server_msg {
     pub const IME_ACTIVE: u32 = 207;
 
     // Input method service events (220-239)
+    pub const INPUT_PANEL_REGISTERED: u32 = 240;
+    pub const INPUT_PANEL_CONTEXT: u32 = 241;
+    pub const INPUT_PANEL_OCCLUSION: u32 = 242;
     pub const IME_REGISTERED: u32 = 220;
     pub const IME_ACTIVATE: u32 = 221;
     pub const IME_DEACTIVATE: u32 = 222;
@@ -658,6 +669,8 @@ pub mod window_types {
     pub const DESKTOP: u32 = 3;
     /// Input-method-owned popup surface anchored to the active text input.
     pub const IME_POPUP: u32 = 4;
+    /// Non-focusing input panel; initially hidden until registered and activated.
+    pub const INPUT_PANEL: u32 = 8;
     /// System-shell background rendered above wallpaper and below app scenes.
     pub const SHELL_BACKGROUND: u32 = 5;
     /// Pointer-transparent system-shell chrome rendered above app scenes.
@@ -1190,6 +1203,7 @@ pub struct InitialWindowConfiguration {
 /// Borrowed client->server messages (payload may be borrowed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientMessageRef<'a> {
+    InputPanel(input_panel::Request),
     CreateWindow {
         app_id: &'a [u8],
         app_name: &'a [u8],
@@ -1649,6 +1663,11 @@ pub enum ClientMessageRef<'a> {
 /// Server->client messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerMessage {
+    InputPanelRegistered {
+        accepted: bool,
+    },
+    InputPanelContext(input_panel::Context),
+    InputPanelOcclusion(input_panel::Occlusion),
     GamepadInput {
         window_id: u32,
         state: gamepad::State,
@@ -2947,6 +2966,12 @@ pub fn parse_client_message<'a>(
             }
             Ok(ClientMessageRef::ImeGetActive {})
         }
+        client_msg::INPUT_PANEL_REGISTER
+        | client_msg::INPUT_PANEL_SET_VISIBLE
+        | client_msg::INPUT_PANEL_KEY
+        | client_msg::TEXT_INPUT_SHOW_PANEL => {
+            input_panel::Request::parse(msg_type, payload).map(ClientMessageRef::InputPanel)
+        }
         client_msg::IME_REGISTER => {
             if payload.len() < 8 {
                 return Err(ProtocolError::MalformedPayload);
@@ -3401,6 +3426,20 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 mode_label,
                 mode_label_len,
             })
+        }
+        server_msg::INPUT_PANEL_REGISTERED => {
+            if payload.len() != 4 || read_u32(payload, 0)? > 1 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::InputPanelRegistered {
+                accepted: read_u32(payload, 0)? != 0,
+            })
+        }
+        server_msg::INPUT_PANEL_CONTEXT => {
+            input_panel::Context::parse(payload).map(ServerMessage::InputPanelContext)
+        }
+        server_msg::INPUT_PANEL_OCCLUSION => {
+            input_panel::Occlusion::parse(payload).map(ServerMessage::InputPanelOcclusion)
         }
         server_msg::IME_REGISTERED => {
             if payload.len() != 4 {

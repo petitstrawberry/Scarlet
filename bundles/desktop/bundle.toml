@@ -306,3 +306,10 @@ kind = "cargo"
 source = "../../user/std-bin"
 bin = "remote-desktop"
 to = "/bin/remote-desktop"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
+bin = "soft-keyboard"
+to = "/bin/soft-keyboard"

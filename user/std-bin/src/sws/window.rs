@@ -115,6 +115,8 @@ pub enum WindowType {
     ShellPanel,
     /// Input-method-owned popup surface.
     ImePopup,
+    /// Software keyboard, independent of the active IME.
+    InputPanel,
 }
 
 impl Default for WindowType {
@@ -1730,7 +1732,7 @@ impl WindowManager {
             WindowType::Desktop => true, // Desktop can now accept focus (for events), but won't raise
             WindowType::ShellBackground => true,
             WindowType::ShellChrome | WindowType::ShellPanel => false,
-            WindowType::ImePopup => false,
+            WindowType::ImePopup | WindowType::InputPanel => false,
         }
     }
 
@@ -2446,7 +2448,8 @@ impl WindowManager {
                 | WindowType::ShellBackground
                 | WindowType::ShellChrome
                 | WindowType::ShellPanel
-                | WindowType::ImePopup => {
+                | WindowType::ImePopup
+                | WindowType::InputPanel => {
                     w.resizable = false;
                 }
                 WindowType::Normal | WindowType::AlwaysOnTop => {
@@ -2465,7 +2468,7 @@ impl WindowManager {
                 WindowType::Normal | WindowType::Taskbar | WindowType::AlwaysOnTop => {
                     w.raise_on_focus = true;
                 }
-                WindowType::ImePopup => {
+                WindowType::ImePopup | WindowType::InputPanel => {
                     w.raise_on_focus = false;
                     w.visible = false;
                 }
@@ -2530,7 +2533,7 @@ impl WindowManager {
                 WindowType::ShellChrome | WindowType::ShellPanel => shell_chrome.push(w),
                 WindowType::Taskbar => taskbar.push(w),
                 WindowType::AlwaysOnTop => always_on_top.push(w),
-                WindowType::ImePopup => ime_popup.push(w),
+                WindowType::ImePopup | WindowType::InputPanel => ime_popup.push(w),
             }
         }
 
@@ -2681,7 +2684,7 @@ impl WindowManager {
                     WindowType::ShellChrome | WindowType::ShellPanel => shell_chrome.push(w),
                     WindowType::Taskbar => taskbar.push(w),
                     WindowType::AlwaysOnTop => always_on_top.push(w),
-                    WindowType::ImePopup => ime_popup.push(w),
+                    WindowType::ImePopup | WindowType::InputPanel => ime_popup.push(w),
                 }
             }
         }
@@ -2740,7 +2743,7 @@ impl WindowManager {
                 self.windows.extend(group);
                 self.windows.extend(ime_popup);
             }
-            WindowType::ImePopup => {
+            WindowType::ImePopup | WindowType::InputPanel => {
                 // IME popup: always above application and shell UI.
                 self.windows = desktop;
                 self.windows.extend(shell_background);
@@ -2832,6 +2835,7 @@ impl WindowManager {
                     | WindowType::ShellChrome
                     | WindowType::ShellPanel
                     | WindowType::ImePopup
+                    | WindowType::InputPanel
             ) {
                 continue;
             }
@@ -2855,7 +2859,7 @@ impl WindowManager {
                 WindowType::AlwaysOnTop => 1,
                 WindowType::Taskbar => 2,
                 WindowType::Desktop => 3,
-                WindowType::ImePopup => 4,
+                WindowType::ImePopup | WindowType::InputPanel => 4,
                 WindowType::ShellBackground => 5,
                 WindowType::ShellChrome => 6,
                 WindowType::ShellPanel => 7,

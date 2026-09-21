@@ -173,6 +173,7 @@ static NEXT_IME_KEY_SERIAL: AtomicU32 = AtomicU32::new(1);
 static TEXT_INPUT_CONTEXTS: Mutex<BTreeMap<u32, TextInputContext>> = Mutex::new(BTreeMap::new());
 static INPUT_METHODS: Mutex<BTreeMap<u32, InputMethodService>> = Mutex::new(BTreeMap::new());
 static ACTIVE_IME_ID: Mutex<Option<u32>> = Mutex::new(None);
+static INPUT_PANEL: Mutex<super::input_panel::Panel> = Mutex::new(super::input_panel::Panel::new());
 static PREFERRED_IME_NAME: Mutex<Option<String>> = Mutex::new(None);
 static ACTIVE_TEXT_INPUT_CONTEXT: Mutex<Option<u32>> = Mutex::new(None);
 static PENDING_IME_KEYS: Mutex<BTreeMap<u32, PendingImeKey>> = Mutex::new(BTreeMap::new());
@@ -691,7 +692,8 @@ fn sws_capabilities() -> u64 {
         | protocol::capabilities::EXTENSION_BUFFER_OBJECTS
         | protocol::capabilities::SURFACE_REGIONS
         | protocol::capabilities::GAMEPAD_INPUT
-        | protocol::capabilities::TOUCH_INPUT;
+        | protocol::capabilities::TOUCH_INPUT
+        | protocol::capabilities::INPUT_PANEL;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
         capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE;
     }
@@ -1036,6 +1038,18 @@ fn unregister_window(window_id: u32) {
 }
 
 fn cleanup_window_state(window_id: u32) {
+    // An editor can close one surface while retaining its shared connection.
+    // End its text-input activation before removing the routing ownership.
+    let contexts: Vec<(usize, u32)> = TEXT_INPUT_CONTEXTS
+        .lock()
+        .expect("SWS mutex poisoned")
+        .values()
+        .filter(|context| context.window_id == window_id)
+        .map(|context| (context.client_id, context.context_id))
+        .collect();
+    for (client_id, context_id) in contexts {
+        destroy_text_input_context(client_id, context_id);
+    }
     unregister_window(window_id);
 
     let mut sessions = APP_SESSIONS.lock().expect("SWS mutex poisoned");
@@ -1318,6 +1332,67 @@ pub fn broadcast_input_environment_changed(snapshot: Snapshot) {
     }
 }
 
+pub fn input_panel_state() -> super::input_panel::Panel {
+    *INPUT_PANEL.lock().expect("SWS input panel mutex poisoned")
+}
+fn update_input_panel_context(context: Option<&TextInputContext>) {
+    let state = context.map_or_else(protocol::input_panel::Context::default, |context| {
+        protocol::input_panel::Context {
+            context_id: context.context_id,
+            window_id: context.window_id,
+            generation: 0,
+            content_hint: context.current.content_hint,
+            content_purpose: context.current.content_purpose,
+        }
+    });
+    let snapshot = {
+        let mut panel = INPUT_PANEL.lock().expect("SWS input panel mutex poisoned");
+        if !panel.update(state) {
+            return;
+        }
+        *panel
+    };
+    if let Some((client_id, _)) = snapshot.provider {
+        send_message_to_client(
+            client_id,
+            protocol::server_msg::INPUT_PANEL_CONTEXT,
+            snapshot.context.encode(),
+        );
+    }
+    push_ipc_event(IpcEvent::InputPanelChanged);
+}
+pub fn register_input_panel(client_id: usize, window_id: u32, request_id: u8, valid: bool) {
+    let accepted = valid
+        && INPUT_PANEL
+            .lock()
+            .expect("SWS input panel mutex poisoned")
+            .register(client_id, window_id);
+    send_response_to_client(
+        client_id,
+        protocol::server_msg::INPUT_PANEL_REGISTERED,
+        request_id,
+        u32::from(accepted).to_le_bytes().to_vec(),
+    );
+    if accepted {
+        let snapshot = input_panel_state();
+        send_message_to_client(
+            client_id,
+            protocol::server_msg::INPUT_PANEL_CONTEXT,
+            snapshot.context.encode(),
+        );
+        push_ipc_event(IpcEvent::InputPanelChanged);
+    }
+}
+fn unregister_input_panel(client_id: usize) {
+    if INPUT_PANEL
+        .lock()
+        .expect("SWS input panel mutex poisoned")
+        .unregister(client_id)
+    {
+        push_ipc_event(IpcEvent::InputPanelChanged);
+    }
+}
+
 fn active_input_method() -> Option<InputMethodService> {
     let active_ime_id = *ACTIVE_IME_ID.lock().expect("SWS mutex poisoned");
     let ime_id = active_ime_id?;
@@ -1363,6 +1438,9 @@ fn send_ime_context_frame(msg_type: u32, context: &TextInputContext) {
 }
 
 fn deactivate_context(context_id: u32) {
+    if input_panel_state().context.context_id == context_id {
+        update_input_panel_context(None);
+    }
     {
         let mut contexts = TEXT_INPUT_CONTEXTS.lock().expect("SWS mutex poisoned");
         if let Some(context) = contexts.get_mut(&context_id) {
@@ -1411,6 +1489,7 @@ fn activate_text_input_for_window(window_id: u32) {
         deactivate_context(old_context_id);
     }
 
+    update_input_panel_context(next_context.as_ref());
     if let Some(context) = next_context {
         send_ime_context_frame(sws_protocol::server_msg::IME_ACTIVATE, &context);
     }
@@ -1446,6 +1525,9 @@ fn create_text_input_context(client_id: usize, window_id: u32, seat_id: u32) -> 
 }
 
 fn destroy_text_input_context(client_id: usize, context_id: u32) {
+    if !text_input_context(context_id).is_some_and(|context| context.client_id == client_id) {
+        return;
+    }
     let was_active = *ACTIVE_TEXT_INPUT_CONTEXT
         .lock()
         .expect("SWS mutex poisoned")
@@ -1626,6 +1708,7 @@ fn commit_text_input_state(client_id: usize, context_id: u32, client_serial: u32
         == Some(context_id)
         && context.enabled
     {
+        update_input_panel_context(Some(&context));
         send_ime_context_frame(sws_protocol::server_msg::IME_CONTEXT_STATE, &context);
     }
     push_ipc_event(IpcEvent::TextInputContextUpdated { context_id });
@@ -2998,6 +3081,9 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 }
             }
             Ok(ClientMessageRef::DestroyWindow { window_id }) => {
+                if !managed_windows.contains(&window_id) {
+                    continue;
+                }
                 println!(
                     "[ClientThread {}] DestroyWindow request for window {}",
                     client_id, window_id
@@ -3010,6 +3096,9 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 }
 
                 // Remove from managed windows
+                if input_panel_state().provider == Some((client_id, window_id)) {
+                    unregister_input_panel(client_id);
+                }
                 managed_windows.retain(|&id| id != window_id);
 
                 push_ipc_event(IpcEvent::DestroyWindow {
@@ -4225,6 +4314,79 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     break;
                 }
             }
+            Ok(ClientMessageRef::InputPanel(request)) => {
+                use protocol::input_panel::Request;
+                match request {
+                    Request::Show { context_id } => {
+                        if text_input_context(context_id).is_some_and(|context| {
+                            context.client_id == client_id && context.enabled
+                        }) && input_panel_state().context.context_id == context_id
+                        {
+                            let snapshot = {
+                                let mut panel =
+                                    INPUT_PANEL.lock().expect("SWS input panel mutex poisoned");
+                                if panel.context.context_id != context_id {
+                                    continue;
+                                }
+                                panel.context.generation = panel.context.generation.wrapping_add(1);
+                                *panel
+                            };
+                            if let Some((provider, _)) = snapshot.provider {
+                                send_message_to_client(
+                                    provider,
+                                    protocol::server_msg::INPUT_PANEL_CONTEXT,
+                                    snapshot.context.encode(),
+                                );
+                            }
+                        }
+                    }
+                    Request::Register { window_id } => {
+                        if !managed_windows.contains(&window_id) {
+                            send_response_to_client(
+                                client_id,
+                                protocol::server_msg::INPUT_PANEL_REGISTERED,
+                                request_id,
+                                0u32.to_le_bytes().to_vec(),
+                            );
+                        } else {
+                            push_ipc_event(IpcEvent::InputPanelRegister {
+                                client_id,
+                                window_id,
+                                request_id,
+                            });
+                        }
+                    }
+                    Request::SetVisible {
+                        context_id,
+                        generation,
+                        visible,
+                    } => {
+                        if INPUT_PANEL
+                            .lock()
+                            .expect("SWS input panel mutex poisoned")
+                            .show(client_id, context_id, generation, visible)
+                        {
+                            push_ipc_event(IpcEvent::InputPanelChanged);
+                        }
+                    }
+                    Request::Key {
+                        context_id,
+                        generation,
+                        code,
+                        modifiers,
+                    } => {
+                        if input_panel_state().accepts(client_id, context_id, generation) {
+                            push_ipc_event(IpcEvent::InputPanelKey {
+                                client_id,
+                                context_id,
+                                generation,
+                                code,
+                                modifiers,
+                            });
+                        }
+                    }
+                }
+            }
             Ok(ClientMessageRef::ImeRegister { name, capabilities }) => {
                 let service = register_input_method(client_id, name, capabilities);
                 println!(
@@ -4382,6 +4544,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
         .lock()
         .expect("SWS mutex poisoned")
         .remove(&client_id);
+    unregister_input_panel(client_id);
     cleanup_text_input_contexts_for_client(client_id);
     cleanup_input_methods_for_client(client_id);
 
@@ -4405,6 +4568,19 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
 /// IPC Events that can be sent from clients
 #[derive(Debug)]
 pub enum IpcEvent {
+    InputPanelRegister {
+        client_id: usize,
+        window_id: u32,
+        request_id: u8,
+    },
+    InputPanelChanged,
+    InputPanelKey {
+        client_id: usize,
+        context_id: u32,
+        generation: u32,
+        code: u16,
+        modifiers: u32,
+    },
     /// Client requested to create a window
     CreateWindow {
         client_id: usize,

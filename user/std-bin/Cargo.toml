@@ -330,3 +330,7 @@ path = "src/logctl.rs"
 [[bin]]
 name = "axum-demo"
 path = "src/axum_demo.rs"
+
+[[bin]]
+name = "soft-keyboard"
+path = "src/soft_keyboard.rs"

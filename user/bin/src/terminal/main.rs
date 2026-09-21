@@ -15,13 +15,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::f32;
+use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
 
 use scarlet_ui::{
     Application, ApplicationRunExt, Color, ComponentElement, Element, KeyCode, KeyEvent,
-    Listenable, PlatformWindow, SWSPlatformWindow, Scene, Size, State, StateId, TextGrid,
-    TextGridBuffer, TextGridCell, TextGridCursor, View, ViewExt, Window, WindowContentLayout,
-    WindowContext, WindowGroup, text_grid_cell_width,
+    PlatformWindow, SWSPlatformWindow, Scene, Size, State, StateId, TextGrid, TextGridBuffer,
+    TextGridCell, TextGridCursor, View, ViewExt, Window, WindowContentLayout, WindowContext,
+    WindowGroup, text_grid_cell_width,
 };
 use std::fs::File;
 use std::handle::Handle;
@@ -95,6 +96,7 @@ struct TerminalApp {
     master_writer: Arc<Mutex<Option<File>>>,
     window_size: Arc<Mutex<(u32, u32)>>,
     text_input: Arc<Mutex<Option<TerminalTextInput>>>,
+    show_input_panel: Arc<AtomicBool>,
     preedit: Arc<Mutex<Option<TerminalPreedit>>>,
     child_task: Arc<OwnedChildTask>,
 }
@@ -116,6 +118,7 @@ impl TerminalApp {
             master_writer: Arc::new(Mutex::new(None)),
             window_size: Arc::new(Mutex::new((DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT))),
             text_input: Arc::new(Mutex::new(None)),
+            show_input_panel: Arc::new(AtomicBool::new(false)),
             preedit: Arc::new(Mutex::new(None)),
             child_task: Arc::new(OwnedChildTask::new()),
         }
@@ -325,6 +328,7 @@ impl Application for TerminalApp {
         let metrics_state = self.metrics.clone();
         let window_size = self.window_size.clone();
         let preedit = self.preedit.clone();
+        let show_input_panel = self.show_input_panel.clone();
         let metrics = self.metrics.get();
         WindowGroup::new(
             "main",
@@ -348,6 +352,7 @@ impl Application for TerminalApp {
                             event,
                         )
                     })
+                    .on_click(move || show_input_panel.store(true, Ordering::Release))
                     .frame(f32::INFINITY, f32::INFINITY),
             )
             .app_id("org.scarlet-os.desktop.terminal")
@@ -388,6 +393,7 @@ impl Application for TerminalApp {
         if let Err(error) = window.connection_mut().enable_text_input(context_id) {
             println!("[terminal] failed to enable text-input: {:?}", error);
         } else {
+            let _ = window.connection_mut().show_text_input_panel(context_id);
             println!(
                 "[terminal] text-input enabled context={} window={}",
                 context_id, window_id
@@ -489,6 +495,13 @@ impl Application for TerminalApp {
         let Some(window) = window.as_any_mut().downcast_mut::<SWSPlatformWindow>() else {
             return;
         };
+        if self.show_input_panel.swap(false, Ordering::AcqRel)
+            && let Some(text_input) = *self.text_input.lock()
+        {
+            let _ = window
+                .connection_mut()
+                .show_text_input_panel(text_input.context_id);
+        }
         self.refresh_text_input_state(window);
     }
 }

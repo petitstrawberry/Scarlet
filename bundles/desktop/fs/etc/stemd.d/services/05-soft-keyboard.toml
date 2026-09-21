@@ -1,0 +1,3 @@
+[service.soft-keyboard]
+exec = "/bin/soft-keyboard"
+depends = ["sws"]

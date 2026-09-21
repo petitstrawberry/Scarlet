@@ -34,6 +34,8 @@ pub(crate) enum KeyboardSource {
     Gamepad(u8),
     /// One authenticated remote-input transport connection.
     Remote(usize),
+    /// The registered software input panel.
+    InputPanel(usize),
 }
 
 /// Physical keys currently held by each keyboard source.

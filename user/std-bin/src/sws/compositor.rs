@@ -2437,6 +2437,8 @@ pub struct Compositor {
     window_policy_after_present: bool,
     lid_closed: bool,
     ime_popup_windows: Vec<ImePopupWindow>,
+    input_panel_window: Option<u32>,
+    input_panel_occlusion: Option<sws_protocol::input_panel::Occlusion>,
     next_activation_token_serial: u64,
     activation_tokens: Vec<ActivationRecord>,
 }
@@ -2892,6 +2894,8 @@ impl Compositor {
             window_policy_after_present: false,
             lid_closed: input_environment.lid_closed(),
             ime_popup_windows: Vec::new(),
+            input_panel_window: None,
+            input_panel_occlusion: None,
             next_activation_token_serial: 1,
             activation_tokens: Vec::new(),
         })
@@ -3569,6 +3573,7 @@ impl Compositor {
             self.apply_windowing_mode_policy();
         }
 
+        self.refresh_input_panel();
         self.full_redraw_needed = true;
         self.pending_damage.clear();
         Ok(true)
@@ -8766,11 +8771,14 @@ impl Compositor {
             .saturating_add(popup.offset_y);
 
         let max_x = (self.screen_width as i32).saturating_sub(old_rect.2 as i32);
-        let max_y = (self.screen_height as i32).saturating_sub(old_rect.3 as i32);
+        let available_bottom = self
+            .input_panel_occlusion
+            .map_or(self.screen_height as i32, |area| area.y);
+        let max_y = available_bottom.saturating_sub(old_rect.3 as i32);
         if y > max_y {
             let cursor_top = anchor_y.saturating_add(cursor.y);
             let cursor_bottom = cursor_top.saturating_add(cursor.height as i32);
-            let below_space = (self.screen_height as i32).saturating_sub(cursor_bottom);
+            let below_space = available_bottom.saturating_sub(cursor_bottom);
             let above_space = cursor_top.max(0);
             let above_y = anchor_y
                 .saturating_add(cursor.y)
@@ -8995,11 +9003,96 @@ impl Compositor {
         );
     }
 
+    fn input_workarea(&self) -> (i32, i32, u32, u32) {
+        let (x, y, width, height) =
+            self.workarea
+                .unwrap_or((0, 0, self.screen_width, self.screen_height));
+        let bottom = self
+            .input_panel_occlusion
+            .map_or(y.saturating_add(height as i32), |area| area.y);
+        (
+            x,
+            y,
+            width,
+            height.min(bottom.saturating_sub(y).max(1) as u32),
+        )
+    }
+
+    fn refresh_input_panel(&mut self) {
+        let panel = super::ipc::input_panel_state();
+        let next_window = panel.provider.map(|(_, window)| window);
+        if self.input_panel_window != next_window {
+            if let Some(old) = self.input_panel_window {
+                if let Some(window) = self.window_manager.get_window_mut(old) {
+                    window.visible = false;
+                }
+            }
+            self.input_panel_window = next_window;
+        }
+        let mut next = None;
+        if let Some(id) = next_window {
+            if let Some(window) = self.window_manager.get_window(id) {
+                let height = window.height.min(self.screen_height / 2).max(1);
+                let y = self.screen_height.saturating_sub(height) as i32;
+                let resized = window.width != self.screen_width || window.height != height;
+                self.window_manager.set_window_position(id, 0, y);
+                if resized {
+                    self.window_manager.resize_window_geometry_in_place(
+                        id,
+                        self.screen_width,
+                        height,
+                    );
+                    self.send_current_window_configure(id);
+                }
+                if let Some(window) = self.window_manager.get_window_mut(id) {
+                    window.visible = panel.visible && panel.context.active();
+                    if window.visible {
+                        next = Some(sws_protocol::input_panel::Occlusion {
+                            window_id: panel.context.window_id,
+                            x: 0,
+                            y,
+                            width: self.screen_width,
+                            height,
+                        });
+                    }
+                }
+            }
+        }
+        if next != self.input_panel_occlusion {
+            if let Some(old) = self.input_panel_occlusion {
+                let clear = sws_protocol::input_panel::Occlusion {
+                    window_id: old.window_id,
+                    ..Default::default()
+                };
+                super::ipc::send_message_to_window(
+                    old.window_id,
+                    sws_protocol::server_msg::INPUT_PANEL_OCCLUSION,
+                    clear.encode(),
+                );
+            }
+            self.input_panel_occlusion = next;
+            if let Some(area) = next {
+                super::ipc::send_message_to_window(
+                    area.window_id,
+                    sws_protocol::server_msg::INPUT_PANEL_OCCLUSION,
+                    area.encode(),
+                );
+            }
+            // Existing configure/resize handling keeps focused and maximized apps above the panel.
+            self.reflow_maximized_windows_to_workarea();
+            if self.windowing_mode == sws_protocol::WindowingMode::Focused {
+                self.apply_windowing_mode_policy();
+            }
+            self.position_all_ime_popup_windows();
+        }
+        self.full_redraw_needed = true;
+    }
+
     fn maximized_geometry(&self, window_id: u32) -> Option<(i32, i32, u32, u32)> {
         let window = self.window_manager.get_window(window_id)?;
         Some(maximized_geometry_for(
             window.window_type,
-            self.workarea,
+            Some(self.input_workarea()),
             self.screen_width,
             self.screen_height,
         ))
@@ -9218,9 +9311,7 @@ impl Compositor {
         let workspace_id = self
             .workspace_manager
             .workspace_for_window(self.top_level_window_id(window_id))?;
-        let (x, y, width, height) =
-            self.workarea
-                .unwrap_or((0, 0, self.screen_width, self.screen_height));
+        let (x, y, width, height) = self.input_workarea();
         let divider = 8u32.min(width.saturating_sub(2));
         match self.workspace_manager.tablet_layout(workspace_id) {
             sws_protocol::workspace::TabletLayout::Empty => None,
@@ -10305,6 +10396,67 @@ impl Compositor {
 
     fn handle_ipc_event(&mut self, event: IpcEvent) -> Result<bool, &'static str> {
         match event {
+            IpcEvent::InputPanelRegister {
+                client_id,
+                window_id,
+                request_id,
+            } => {
+                let valid = self
+                    .window_manager
+                    .get_window(window_id)
+                    .is_some_and(|window| window.window_type == WindowType::InputPanel);
+                super::ipc::register_input_panel(client_id, window_id, request_id, valid);
+            }
+            IpcEvent::InputPanelChanged => self.refresh_input_panel(),
+            IpcEvent::InputPanelKey {
+                client_id,
+                context_id,
+                generation,
+                code,
+                modifiers,
+            } => {
+                let panel = super::ipc::input_panel_state();
+                // Validate again on the compositor thread: focus can change after IPC receipt.
+                if !panel.visible
+                    || !panel.accepts(client_id, context_id, generation)
+                    || self.window_manager.get_focused_window_id() != Some(panel.context.window_id)
+                {
+                    return Ok(false);
+                }
+                let source = KeyboardSource::InputPanel(client_id);
+                let keys = [
+                    (sws_protocol::input_panel::CTRL, key_codes::KEY_LEFTCTRL),
+                    (sws_protocol::input_panel::ALT, key_codes::KEY_LEFTALT),
+                    (sws_protocol::input_panel::SHIFT, key_codes::KEY_LEFTSHIFT),
+                ];
+                let result = (|| {
+                    for (flag, key) in keys {
+                        if modifiers & flag != 0 {
+                            self.handle_input_event(CompositorInputEvent::Keyboard {
+                                code: key,
+                                value: 1,
+                                source,
+                                synthetic: false,
+                            })?;
+                        }
+                    }
+                    self.handle_input_event(CompositorInputEvent::Keyboard {
+                        code,
+                        value: 1,
+                        source,
+                        synthetic: false,
+                    })?;
+                    self.handle_input_event(CompositorInputEvent::Keyboard {
+                        code,
+                        value: 0,
+                        source,
+                        synthetic: false,
+                    })?;
+                    Ok::<(), &'static str>(())
+                })();
+                self.release_keyboard_source(source)?;
+                result?;
+            }
             IpcEvent::CreateWindow {
                 client_id,
                 app_id,
@@ -10391,6 +10543,7 @@ impl Compositor {
                     window_types::TASKBAR => super::window::WindowType::Taskbar,
                     window_types::DESKTOP => super::window::WindowType::Desktop,
                     window_types::IME_POPUP => super::window::WindowType::ImePopup,
+                    window_types::INPUT_PANEL => super::window::WindowType::InputPanel,
                     window_types::SHELL_BACKGROUND => super::window::WindowType::ShellBackground,
                     window_types::SHELL_CHROME => super::window::WindowType::ShellChrome,
                     window_types::SHELL_PANEL => super::window::WindowType::ShellPanel,
@@ -11512,6 +11665,13 @@ impl Compositor {
                 ),
             },
             IpcEvent::FocusWindow { window_id } => {
+                if self
+                    .window_manager
+                    .get_window(window_id)
+                    .is_some_and(|window| window.window_type == WindowType::InputPanel)
+                {
+                    return Ok(false);
+                }
                 if let Some(fullscreen_id) = self
                     .window_manager
                     .get_windows()
@@ -11572,6 +11732,7 @@ impl Compositor {
                     window_types::TASKBAR => super::window::WindowType::Taskbar,
                     window_types::DESKTOP => super::window::WindowType::Desktop,
                     window_types::IME_POPUP => super::window::WindowType::ImePopup,
+                    window_types::INPUT_PANEL => super::window::WindowType::InputPanel,
                     window_types::SHELL_BACKGROUND => super::window::WindowType::ShellBackground,
                     window_types::SHELL_CHROME => super::window::WindowType::ShellChrome,
                     window_types::SHELL_PANEL => super::window::WindowType::ShellPanel,

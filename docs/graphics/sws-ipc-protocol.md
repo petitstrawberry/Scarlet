@@ -1432,3 +1432,47 @@ Input events for extension-created windows are delivered via `EXTENSION_INPUT_EV
 - Currently, any client can register as an extension (no authentication)
 
 ## Compatibility and Versioning
+
+
+## Software input panel
+
+Protocol version 11 advertises `capabilities::INPUT_PANEL` (bit 14). A single
+connection may register one owned `window_types::INPUT_PANEL` (8) surface.
+This role is separate from `IME_REGISTER` and never changes the selected IME.
+Its surface starts hidden, receives pointer/touch input without taking editor
+keyboard focus, and is docked at the bottom of the output.
+
+| Direction | ID | Message | Payload |
+| --- | --- | --- | --- |
+| Editor → SWS | 211 | TEXT_INPUT_SHOW_PANEL | context_id: u32 |
+| Panel → SWS | 240 | INPUT_PANEL_REGISTER | window_id: u32 |
+| Panel → SWS | 241 | INPUT_PANEL_SET_VISIBLE | context_id, generation, visible: u32 |
+| Panel → SWS | 242 | INPUT_PANEL_KEY | context_id, generation, key_code, modifiers: u32 |
+| SWS → Panel | 240 | INPUT_PANEL_REGISTERED | accepted: u32 (0 or 1), routed response |
+| SWS → Panel | 241 | INPUT_PANEL_CONTEXT | context_id, window_id, generation, content_hint, content_purpose: u32 |
+| SWS → Editor | 242 | INPUT_PANEL_OCCLUSION | window_id: u32, x/y: i32, width/height: u32 |
+
+All fields are little-endian; fixed payload sizes and boolean/modifier values
+are validated. `context_id = 0` means no active editor. The activation generation
+changes when focus/enable state changes or the editor explicitly requests its
+panel again. Queued strokes for previous activations are discarded. Only the
+registered provider may send keys, and only to the current focused, enabled
+editor while its panel is visible. The compositor revalidates this when it
+dispatches the stroke. Provider disconnect and editor destruction hide the panel.
+
+A stroke is a Linux-compatible keyboard code (1–255) with Shift=1, Ctrl=2 and
+Alt=4 modifiers. SWS synthesizes the matching down/up sequence through its
+ordinary keyboard/IME arbitration. Modifiers belong to a separate keyboard
+source, so releasing a panel modifier does not release a physical keyboard's
+modifier. Unhandled keys use the existing application-key fallback. Text
+composition, candidate UI and commits keep using the existing TextInput API.
+
+The panel receives content hints/purpose but no surrounding text. Occlusion
+rectangles use output coordinates; zero size means hidden. Focused-layout and
+maximized application windows are reconfigured above the panel. Other clients
+can use the notification for their own scrolling/viewport policy.
+
+The desktop bundle starts `/bin/soft-keyboard`. It opens for active editors on
+touch devices, supports QWERTY and numeric layouts, one-shot Shift, toggled Ctrl
+and Alt, cursor keys, and the existing IME toggle key. Hiding it keeps the editor
+active. ScarletUI requests it again when a touch activates a text editor.
