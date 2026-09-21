@@ -112,6 +112,8 @@ def main():
     parser.add_argument("--timeout", type=float, default=3900, help="outer VM timeout; also cleans up unkillable guest children")
     parser.add_argument("--memory", default="4G", help="QEMU guest RAM (does not change kernel heap capacity)")
     parser.add_argument("--cpus", type=int, default=1)
+    parser.add_argument("--accel", choices=("tcg", "hvf"), default="tcg",
+                        help="QEMU accelerator; hvf is available for AArch64 guests on Apple Silicon")
     parser.add_argument("--storage", choices=("ext2", "initramfs"), default="ext2")
     parser.add_argument("--disk-size-mib", type=int, default=0, help="private ext2 size; 0 reserves payload plus at least 1 GiB")
     parser.add_argument("--root-device", type=guest_path, default="/dev/vblk1", help="kernel path for the second attached virtio block disk")
@@ -128,6 +130,8 @@ def main():
         parser.error("guest timeouts must be between 1 and 86400 seconds")
     if not math.isfinite(args.timeout) or args.timeout <= 0 or args.cpus < 1 or args.disk_size_mib < 0:
         parser.error("invalid timeout, CPU count, or disk size")
+    if args.accel == "hvf" and args.arch != "aarch64":
+        parser.error("--accel hvf is supported only for an AArch64 guest")
     if not re.fullmatch(r"[1-9][0-9]*[MG]", args.memory):
         parser.error("--memory must be a positive integer followed by M or G")
     kernel, staging, bootstrap, output = (p.resolve() for p in (args.kernel, args.staging, args.bootstrap, args.output))
@@ -168,9 +172,15 @@ def main():
     if not list(in_root(staging, args.sysroot).glob(f"lib/rustlib/{TARGETS[args.arch]}/lib/libstd-*.rlib")):
         parser.error("staged native sysroot is missing target libstd rlib")
     if args.arch == "aarch64":
-        code = smoke.firmware(("SCARLET_EFI_CODE_ARM64_EL2", "SCARLET_EFI_CODE_ARM64"))
-        variables = smoke.firmware(("SCARLET_EFI_VARS_ARM64_EL2", "SCARLET_EFI_VARS_ARM64"))
-        machine = ["-machine", "virt,gic-version=3,acpi=off", "-cpu", "max"]
+        code_names = ("SCARLET_EFI_CODE_ARM64_EL2", "SCARLET_EFI_CODE_ARM64")
+        variable_names = ("SCARLET_EFI_VARS_ARM64_EL2", "SCARLET_EFI_VARS_ARM64")
+        if args.accel == "hvf":
+            code_names = ("SCARLET_EFI_CODE_ARM64_HVF", *code_names)
+            variable_names = ("SCARLET_EFI_VARS_ARM64_HVF", *variable_names)
+        code = smoke.firmware(code_names)
+        variables = smoke.firmware(variable_names)
+        cpu = "host" if args.accel == "hvf" else "max"
+        machine = ["-machine", "virt,gic-version=3,acpi=off", "-cpu", cpu]
         boot_device = "virtio-blk-device,drive=boot,bus=virtio-mmio-bus.0"
         root_device = "virtio-blk-device,drive=root,bus=virtio-mmio-bus.1"
         gpu_device = "virtio-gpu-device,bus=virtio-mmio-bus.3"
@@ -253,7 +263,7 @@ def main():
     runtime_variables = output / "efi-vars.fd"
     shutil.copyfile(variables, runtime_variables)
     runtime_variables.chmod(0o600)
-    command = [qemu, *machine, "-m", args.memory, "-accel", "tcg", "-smp", str(args.cpus), "-no-reboot",
+    command = [qemu, *machine, "-m", args.memory, "-accel", args.accel, "-smp", str(args.cpus), "-no-reboot",
                "-display", "none", "-monitor", "none", "-serial", "stdio",
                "-drive", f"if=pflash,format=raw,unit=0,file={smoke.qemu_filename(code)},readonly=on",
                "-drive", f"if=pflash,format=raw,unit=1,file={smoke.qemu_filename(runtime_variables)}",

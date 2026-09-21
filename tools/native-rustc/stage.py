@@ -64,7 +64,10 @@ def main():
     if not list((source / target_lib).glob("libstd-*.rlib")):
         p.error("native sysroot is missing the matching target libstd rlib")
     for path in (source / target_lib).rglob("*"):
-        if path.is_file() and path.suffix in (".rlib", ".rmeta", ".a", ".o"):
+        # Installed rlibs already contain the metadata needed by downstream
+        # crates. Standalone .rmeta files here are bootstrap intermediates for
+        # rustc itself; staging hundreds of them bloats target crate discovery.
+        if path.is_file() and path.suffix in (".rlib", ".a", ".o"):
             copies[relative / path.relative_to(source)] = path
     shared = [p for p in (source / "lib").glob("*.so*") if p.is_file()]
     backend_dir = Path("lib/rustlib") / args.target / "codegen-backends"
@@ -81,7 +84,7 @@ def main():
         copies[runtime_path] = path
     reports = {}
     for dest, src in copies.items():
-        if src.suffix in (".rlib", ".rmeta", ".a"):
+        if src.suffix in (".rlib", ".a"):
             continue
         report = object_report(src) if src.suffix == ".o" else Elf(src).report()
         if report["machine"] != TARGETS[args.target]:

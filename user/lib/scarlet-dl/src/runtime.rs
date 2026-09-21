@@ -1,6 +1,5 @@
 use crate::{platform::NativePlatform, process::Process};
 use scarlet_loader_core::{Error, LoaderContext, Machine, ObjectId};
-use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -21,19 +20,28 @@ struct Runtime {
 // transfer, and owns both startup DT_NEEDED and later dlopen objects.
 static RUNTIME: OnceLock<Mutex<Runtime>> = OnceLock::new();
 
-#[derive(Default)]
 struct ErrorState {
     pending: Option<CString>,
     returned: Option<CString>,
 }
 
-thread_local! {
-    static ERROR: RefCell<ErrorState> = RefCell::new(ErrorState::default());
+// scarlet-ld and the loaded program currently have independent Rust standard
+// libraries but share Scarlet's emulated TLS key table. A loader-owned
+// `thread_local!` can therefore alias a program-owned key. The current loader
+// contract rejects concurrent operations and its libloading adapter serializes
+// calls, so keep dlerror state in the interpreter instead.
+static ERROR: Mutex<ErrorState> = Mutex::new(ErrorState {
+    pending: None,
+    returned: None,
+});
+
+fn lock_error() -> MutexGuard<'static, ErrorState> {
+    ERROR.lock().unwrap_or_else(|error| error.into_inner())
 }
 
 fn fail(error: impl std::fmt::Display) {
     let message = error.to_string().replace('\0', "?");
-    ERROR.with(|state| state.borrow_mut().pending = Some(CString::new(message).unwrap()));
+    lock_error().pending = Some(CString::new(message).unwrap());
 }
 
 fn lock_runtime() -> Result<MutexGuard<'static, Runtime>, &'static str> {
@@ -219,16 +227,14 @@ pub extern "C" fn dlclose(handle: *mut c_void) -> c_int {
     }
 }
 
-/// Return and clear this thread's last pending error. The returned string
-/// remains valid until this thread's next call to dlerror.
+/// Return and clear the last pending loader error. Loader calls are serialized;
+/// the returned string remains valid until the next call to dlerror.
 #[unsafe(no_mangle)]
 pub extern "C" fn dlerror() -> *mut c_char {
-    ERROR.with(|state| {
-        let mut state = state.borrow_mut();
-        state.returned = state.pending.take();
-        state
-            .returned
-            .as_ref()
-            .map_or(std::ptr::null_mut(), |s| s.as_ptr().cast_mut())
-    })
+    let mut state = lock_error();
+    state.returned = state.pending.take();
+    state
+        .returned
+        .as_ref()
+        .map_or(std::ptr::null_mut(), |s| s.as_ptr().cast_mut())
 }

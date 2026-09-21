@@ -1,15 +1,20 @@
 //! Execute on Scarlet; a full PASS requires compiling and running a new program here.
+use std::cell::Cell;
 use std::env;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HELLO: &str = "SCARLET_NATIVE_RUSTC_HELLO_OK\n";
 const HELLO_EXIT: i32 = 37;
 const CONFIG: &str = "/etc/native-rustc-probe.args";
 const USAGE: &str = "usage: native-rustc-probe RUSTC SYSROOT TARGET NEW_OUTPUT_DIR [--dummy] [--full --linker PATH] [--backend PATH_OR_NAME] [--linker-flavor FLAVOR] [--timeout SECONDS] [--run-timeout SECONDS]; no arguments reads /etc/native-rustc-probe.args (one argument per line)";
+
+thread_local! {
+    static THREAD_PREFLIGHT: Cell<u32> = const { Cell::new(0) };
+}
 
 #[derive(Debug)]
 struct Options {
@@ -209,6 +214,88 @@ fn check_elf(path: &Path, target: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn existing_absolute(path: &Path, label: &str, directory: bool) -> Result<PathBuf, String> {
+    // Scarlet's current std Path::is_absolute/canonicalize implementation is
+    // not reliable for slash-rooted target paths. has_root is correct, and the
+    // probe only receives paths from its rootfs-owned configuration file.
+    if !path.has_root() {
+        return Err(format!(
+            "{label}: expected an absolute path: {}",
+            path.display()
+        ));
+    }
+    let metadata = fs::metadata(path).map_err(|error| format!("{label}: {error:?}"))?;
+    if directory != metadata.is_dir() {
+        let expected = if directory { "directory" } else { "file" };
+        return Err(format!(
+            "{label}: expected a {expected}: {}",
+            path.display()
+        ));
+    }
+    Ok(path.to_owned())
+}
+
+fn check_thread_runtime() -> Result<(), String> {
+    println!("NATIVE_RUSTC THREAD START");
+    let child = thread::Builder::new()
+        .name("native-rustc-preflight".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            println!("NATIVE_RUSTC THREAD CHILD");
+            THREAD_PREFLIGHT.with(|value| {
+                value.set(42);
+                value.get()
+            })
+        })
+        .map_err(|error| format!("thread spawn: {error:?}"))?;
+    let value = child
+        .join()
+        .map_err(|_| "thread join: child panicked".to_string())?;
+    if value != 42 {
+        return Err(format!("thread join: expected 42, got {value}"));
+    }
+    println!("NATIVE_RUSTC THREAD PASS");
+
+    println!("NATIVE_RUSTC SCOPED_THREAD START");
+    let captured = 41;
+    let scoped_value = thread::scope(|scope| -> Result<u32, String> {
+        let child = thread::Builder::new()
+            .name("native-rustc-scoped-preflight".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn_scoped(scope, || {
+                THREAD_PREFLIGHT.with(|value| {
+                    value.set(captured + 1);
+                    value.get()
+                })
+            })
+            .map_err(|error| format!("scoped thread spawn: {error:?}"))?;
+        child
+            .join()
+            .map_err(|_| "scoped thread join: child panicked".to_string())
+    })?;
+    if scoped_value != 42 {
+        return Err(format!(
+            "scoped thread join: expected 42, got {scoped_value}"
+        ));
+    }
+    println!("NATIVE_RUSTC SCOPED_THREAD PASS");
+    Ok(())
+}
+
+fn check_process_runtime() -> Result<(), String> {
+    println!("NATIVE_RUSTC PROCESS_RUNTIME START");
+    let cwd = env::current_dir().map_err(|error| format!("current_dir: {error:?}"))?;
+    println!("NATIVE_RUSTC CWD {}", cwd.display());
+    let system_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system time before Unix epoch: {error:?}"))?;
+    println!(
+        "NATIVE_RUSTC SYSTEM_TIME PASS unix_seconds={}",
+        system_time.as_secs()
+    );
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let mut args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() {
@@ -227,15 +314,20 @@ fn run() -> Result<(), String> {
     {
         return Err("probe architecture and requested native target differ".into());
     }
-    options.rustc = fs::canonicalize(&options.rustc).map_err(|e| format!("rustc: {e}"))?;
-    options.sysroot = fs::canonicalize(&options.sysroot).map_err(|e| format!("sysroot: {e}"))?;
+    options.rustc = existing_absolute(&options.rustc, "rustc", false)?;
+    options.sysroot = existing_absolute(&options.sysroot, "sysroot", true)?;
     if let Some(linker) = &mut options.linker {
-        *linker = fs::canonicalize(&linker).map_err(|e| format!("linker: {e}"))?;
+        *linker = existing_absolute(linker, "linker", false)?;
         check_elf(linker, &options.target).map_err(|e| format!("native linker: {e}"))?;
     }
     // Refuse to reuse old evidence or overwrite any prior run's generated binary.
+    if !options.output.has_root() {
+        return Err(format!(
+            "output: expected an absolute path: {}",
+            options.output.display()
+        ));
+    }
     fs::create_dir(&options.output).map_err(|e| format!("create fresh output directory: {e}"))?;
-    options.output = fs::canonicalize(&options.output).map_err(|e| e.to_string())?;
     let output = &options.output;
     let mode = if options.full {
         "full"
@@ -255,6 +347,10 @@ fn run() -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     println!("NATIVE_RUSTC MODE {mode} output={}", output.display());
+    check_process_runtime()?;
+    check_thread_runtime()?;
+    // Load the selected backend once up front so the version probe also
+    // verifies its DSO dependencies.
     let mut command = compiler(&options);
     command.arg("-Vv");
     let version = phase(command, output, "version", options.timeout, 0)?;
@@ -265,11 +361,11 @@ fn run() -> Result<(), String> {
         return Err("rustc -Vv did not report the requested Scarlet host".into());
     }
     let mut command = compiler(&options);
-    command.args(["--print", "cfg", "--target", &options.target]);
+    command.args(["--target", &options.target, "--print", "cfg"]);
     let cfg = phase(command, output, "cfg", options.timeout, 0)?;
     if !String::from_utf8_lossy(&cfg)
         .lines()
-        .any(|l| l == "target_os=\"scarlet\"")
+        .any(|line| line == "target_os=\"scarlet\"")
     {
         return Err("--print cfg did not report target_os=scarlet".into());
     }
@@ -281,6 +377,12 @@ fn run() -> Result<(), String> {
         "-Zno-codegen",
         "hello.rs",
     ]);
+    // The dummy backend intentionally rejects linking executables, even with
+    // `-Zno-codegen`. An rlib still exercises parsing, analysis, metadata, and
+    // the runtime paths this diagnostic is meant to cover.
+    if options.dummy {
+        command.arg("--crate-type=rlib");
+    }
     phase(command, output, "frontend", options.timeout, 0)?;
     if !options.full {
         fs::write(

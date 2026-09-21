@@ -42,6 +42,7 @@ class StageTests(unittest.TestCase):
             Path("bin/rustc"): executable_bytes(stage.INTERPRETER),
             Path("lib/librustc_driver-fixture.so"): executable_bytes(),
             target_lib / "libstd-fixture.rlib": b"archive",
+            target_lib / "librustc_session-build-only.rmeta": b"metadata",
             target_lib / "scarlet-crt0.o": object_bytes(),
             target_lib / "self-contained/libfixture.a": b"archive",
         }.items():
@@ -66,6 +67,7 @@ class StageTests(unittest.TestCase):
             staged = root / "overlay/opt/native-rustc/lib/rustlib/aarch64-unknown-scarlet/lib"
             self.assertEqual((staged / "scarlet-crt0.o").read_bytes(), (libs / "scarlet-crt0.o").read_bytes())
             self.assertTrue((staged / "self-contained/libfixture.a").is_file())
+            self.assertFalse((staged / "librustc_session-build-only.rmeta").exists())
             manifest = json.loads((root / "overlay/native-rustc-manifest.json").read_text())
             report = manifest["elf"][str((staged / "scarlet-crt0.o").relative_to(root / "overlay"))]
             self.assertEqual(report["elf_type"], "REL")
