@@ -2153,7 +2153,7 @@ dependencies = [
 [[package]]
 name = "mio"
 version = "1.2.3"
-source = "git+https://github.com/petitstrawberry/mio.git?branch=scarlet#2d8b4d4e6ca762c96db8487e7f917d6d36893e37"
+source = "git+https://github.com/petitstrawberry/mio.git?rev=2eaecdf13b4cdf525fae61e06a8ed57c671731cd#2eaecdf13b4cdf525fae61e06a8ed57c671731cd"
 dependencies = [
  "libc",
  "scarlet-os",
@@ -4103,7 +4103,7 @@ dependencies = [
 [[package]]
 name = "socket2"
 version = "0.6.5"
-source = "git+https://github.com/petitstrawberry/socket2.git?branch=scarlet#0788a51d0a612880af805e6b8838025e9d1964a2"
+source = "git+https://github.com/petitstrawberry/socket2.git?rev=15f0140af367c76befdab2606c7b643f29552bfd#15f0140af367c76befdab2606c7b643f29552bfd"
 dependencies = [
  "libc",
  "scarlet-os",
@@ -4562,7 +4562,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 [[package]]
 name = "tokio"
 version = "1.53.1"
-source = "git+https://github.com/petitstrawberry/tokio.git?branch=scarlet#393ab6e0be05406315ddc37995942d5dcecbec48"
+source = "git+https://github.com/petitstrawberry/tokio.git?rev=8610548b5826d9405a2c7bff6465aee01813be83#8610548b5826d9405a2c7bff6465aee01813be83"
 dependencies = [
  "bytes",
  "libc",

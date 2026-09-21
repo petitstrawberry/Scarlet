@@ -275,28 +275,28 @@ to = "/bin/dcp-flip-test"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/carmine", rev = "de71bdc8826b1fd81ec58cca4f901a768755f82c" }
+source = { git = "https://github.com/petitstrawberry/carmine", rev = "5ed3e9270b4949e4ee27052e62d12443770d1884" }
 package = "carmine"
 bin = "carmine"
 to = "/bin/carmine"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "bae87e0a7da998d9c6bd25e30ff566bbc5324169" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "37a34c4195def793923cfb5868f41780aaded167" }
 package = "myrica"
 bin = "myrica"
 to = "/bin/myrica"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/vellum", rev = "6b214d224fb97b26658de29858d6d03292d640bb" }
+source = { git = "https://github.com/petitstrawberry/vellum", rev = "98dfc25b60a0b179ad8f0b65738f0d2191f160ea" }
 package = "vellum"
 bin = "vellum"
 to = "/bin/vellum"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/boxcraft", rev = "903e890ab91fc120ac1aa5d68e07fdad9f4ac8df" }
+source = { git = "https://github.com/petitstrawberry/boxcraft", rev = "859bb7b41c0c8fa46bc3cd3e54a0b607fb26f90e" }
 package = "boxcraft"
 bin = "boxcraft"
 to = "/bin/boxcraft"
