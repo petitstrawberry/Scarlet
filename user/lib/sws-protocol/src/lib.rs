@@ -31,7 +31,7 @@ pub mod workspace;
 pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024; // 1 MiB
 
 /// Current SWS capability-negotiation protocol version.
-pub const SWS_PROTOCOL_VERSION: u32 = 9;
+pub const SWS_PROTOCOL_VERSION: u32 = 10;
 
 /// Maximum damage rectangles carried by one shared SGFX frame commit.
 pub const SGFX_MAX_DAMAGE_RECTS: usize = 16;
@@ -67,9 +67,12 @@ pub mod capabilities {
     pub const SURFACE_REGIONS: u64 = 1 << 11;
     /// Owned windows may receive native gamepad snapshots and select menu policy.
     pub const GAMEPAD_INPUT: u64 = 1 << 12;
+    /// Owned windows may subscribe to target-local direct-touch frames.
+    pub const TOUCH_INPUT: u64 = 1 << 13;
 }
 
 pub mod gamepad;
+pub mod touch;
 
 /// Flags attached to an extension-buffer commit.
 pub mod extension_commit_flags {
@@ -418,6 +421,7 @@ pub mod client_msg {
     pub const REQUEST_FRAME: u32 = 53;
     pub const SET_SURFACE_REGIONS: u32 = 54;
     pub const SET_GAMEPAD_INPUT: u32 = 55;
+    pub const SET_TOUCH_INPUT: u32 = 56;
 
     // Text input client API messages (200-219)
     pub const TEXT_INPUT_CREATE: u32 = 200;
@@ -497,6 +501,7 @@ pub mod server_msg {
     /// One requested frame may now be rendered for the identified window.
     pub const FRAME_DONE: u32 = 38;
     pub const GAMEPAD_INPUT: u32 = 39;
+    pub const TOUCH_FRAME: u32 = 40;
 
     // Text input client events (200-219)
     pub const TEXT_INPUT_CREATED: u32 = 200;
@@ -1539,6 +1544,10 @@ pub enum ClientMessageRef<'a> {
         enabled: bool,
         navigation: bool,
     },
+    SetTouchInput {
+        window_id: u32,
+        enabled: bool,
+    },
     SetWindowMenuTitles {
         window_id: u32,
         menu_titles: &'a [u8], // Format: "menu1|menu2|menu3"
@@ -1644,6 +1653,7 @@ pub enum ServerMessage {
         window_id: u32,
         state: gamepad::State,
     },
+    TouchFrame(touch::Header),
     WindowCreated {
         window_id: u32,
         shm_size: u64,
@@ -2619,6 +2629,19 @@ pub fn parse_client_message<'a>(
                 navigation: navigation != 0,
             })
         }
+        client_msg::SET_TOUCH_INPUT => {
+            if payload.len() != 8 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            let enabled = read_u32(payload, 4)?;
+            if enabled > 1 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::SetTouchInput {
+                window_id: read_u32(payload, 0)?,
+                enabled: enabled != 0,
+            })
+        }
         client_msg::SET_TABLET_MODE_OVERRIDE => {
             if payload.len() != 4 {
                 return Err(ProtocolError::MalformedPayload);
@@ -3155,6 +3178,7 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             let (window_id, state) = gamepad::State::parse(payload)?;
             Ok(ServerMessage::GamepadInput { window_id, state })
         }
+        server_msg::TOUCH_FRAME => Ok(ServerMessage::TouchFrame(touch::parse_header(payload)?)),
         server_msg::WINDOW_RESIZED => {
             if payload.len() != 20 {
                 return Err(ProtocolError::MalformedPayload);

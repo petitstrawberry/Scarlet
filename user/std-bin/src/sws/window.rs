@@ -293,6 +293,8 @@ pub struct Window {
     pub resizable: bool,
     /// Native snapshots are opt-in so older clients retain their protocol.
     pub gamepad_input: bool,
+    /// Direct contacts use typed frames after opt-in; legacy clients keep pointer emulation.
+    pub touch_input: bool,
     /// Generic SWS menu navigation defaults on for existing applications.
     pub gamepad_navigation: bool,
     /// Cursor requested by the client while the pointer is over this window.
@@ -656,6 +658,7 @@ impl Window {
             fullscreen_restore_geometry: None,
             opacity: 1.0,
             gamepad_input: false,
+            touch_input: false,
             gamepad_navigation: true,
             resizable: true, // Default to resizable
             cursor_icon: sws_protocol::CursorIcon::Arrow,
@@ -723,6 +726,7 @@ impl Window {
             fullscreen_restore_geometry: None,
             opacity: 1.0,
             gamepad_input: false,
+            touch_input: false,
             gamepad_navigation: true,
             resizable: true, // Default to resizable
             cursor_icon: sws_protocol::CursorIcon::Arrow,
@@ -818,6 +822,7 @@ impl Window {
             fullscreen_restore_geometry: None,
             opacity: 1.0,
             gamepad_input: false,
+            touch_input: false,
             gamepad_navigation: true,
             resizable: true, // Default to resizable
             cursor_icon: sws_protocol::CursorIcon::Arrow,
@@ -1464,6 +1469,7 @@ impl WindowManager {
             fullscreen_restore_geometry: None,
             opacity: 1.0,
             gamepad_input: false,
+            touch_input: false,
             gamepad_navigation: true,
             resizable: true,
             cursor_icon: sws_protocol::CursorIcon::Arrow,
@@ -1551,6 +1557,7 @@ impl WindowManager {
             fullscreen_restore_geometry: None,
             opacity: 1.0,
             gamepad_input: false,
+            touch_input: false,
             gamepad_navigation: true,
             resizable: true, // Default to resizable
             cursor_icon: sws_protocol::CursorIcon::Arrow,

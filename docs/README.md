@@ -82,6 +82,8 @@ this is not a claim that every historical document or device was revalidated.
 
 ## User Space and Desktop
 
+- [Input architecture](desktop/input-architecture.md) - device frames, seat
+  routing, gesture ownership, native touch, and popup input lifecycle.
 - [Workspace shell](desktop/workspace-shell.md) - unified laptop/tablet
   workspace model, Home, Overview, gestures, and compositor boundary.
 - [SWS IPC protocol](graphics/sws-ipc-protocol.md) - Scarlet Window Server wire

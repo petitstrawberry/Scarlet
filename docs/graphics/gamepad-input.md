@@ -43,6 +43,9 @@ owned window. Raw snapshots are opt-in and go to the focused subscribed
 window. Set `navigation` to false for games handling their own controls;
 the HOME system action remains available when global navigation is enabled.
 The server rejects requests for another client's window.
+ScarletUI surfaces default to navigation only (`enabled = false`,
+`navigation = true`). A game using `PlatformWindow::set_gamepad_input(true,
+false)` receives raw snapshots without a second synthetic confirm key.
 
 Client message **55**, `SET_GAMEPAD_INPUT`, has exactly 12 little-endian bytes:
 `window_id: u32`, `enabled: u32`, `navigation: u32`. Both flags must be 0 or 1.
@@ -53,7 +56,7 @@ Server event **39**, `GAMEPAD_INPUT`, has exactly 36 little-endian bytes:
 | Offset | Field | Encoding |
 | --- | --- | --- |
 | 0 | Window ID | u32 |
-| 4 | Device ID | u32, stable for the reader's lifetime |
+| 4 | Device ID | u32, unique per reader instance, including reconnects |
 | 8 | Buttons | u32 bit mask |
 | 12, 14 | Left X/Y | i16, −32767…32767 |
 | 16, 18 | Right X/Y | i16, −32767…32767 |

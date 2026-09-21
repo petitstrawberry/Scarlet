@@ -112,6 +112,11 @@ impl Capabilities {
         self.capabilities & protocol::capabilities::GAMEPAD_INPUT != 0
     }
 
+    /// Whether an owned surface can receive native direct-touch frames.
+    pub const fn supports_touch_input(self) -> bool {
+        self.capabilities & protocol::capabilities::TOUCH_INPUT != 0
+    }
+
     /// Whether the server accepts system-wide tablet and windowing overrides.
     ///
     /// # Returns
@@ -1002,6 +1007,7 @@ impl TransportState {
     fn event_window_id(&self, event: &Event) -> Option<u32> {
         match event {
             Event::Input(event) => Some(event.surface_id),
+            Event::TouchFrame { surface_id, .. } => Some(*surface_id),
             Event::GamepadInput { surface_id, .. } => Some(*surface_id),
             Event::TextInputPreedit { context_id, .. }
             | Event::TextInputCommit { context_id, .. }
@@ -2557,6 +2563,18 @@ impl Connection {
             .map_err(|_| Error::SendFailed)
     }
 
+    /// Subscribe an owned surface to native direct-touch frames. Disabling
+    /// cancels its active native contacts; enabling does not promote contacts
+    /// already sent through the legacy pointer stream.
+    pub fn set_touch_input(&self, surface_id: u32, enabled: bool) -> Result<(), Error> {
+        if !mutex_lock(&self.surfaces).contains_key(&surface_id) {
+            return Err(Error::SurfaceNotFound);
+        }
+        let payload = protocol::touch::subscription_payload(surface_id, enabled);
+        self.send_message(protocol::client_msg::SET_TOUCH_INPUT, &payload)
+            .map_err(|_| Error::SendFailed)
+    }
+
     /// Set the workarea (usable screen area) for the window manager.
     ///
     /// This informs the window manager about the area where normal windows
@@ -2768,6 +2786,13 @@ impl TransportState {
                     surface_id: window_id,
                     state,
                 });
+                true
+            }
+            ServerMessage::TouchFrame(header) => {
+                if let Ok((surface_id, frame)) = protocol::touch::parse(payload) {
+                    debug_assert_eq!(surface_id, header.window_id);
+                    self.push_event(Event::TouchFrame { surface_id, frame });
+                }
                 true
             }
             ServerMessage::TextInputPreedit {

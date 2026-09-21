@@ -19,7 +19,7 @@ pub(crate) use touch::{
     TouchSurface,
 };
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::println;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -103,8 +103,74 @@ pub enum CompositorInputEvent {
     },
 }
 
-/// Global input event queue
-static INPUT_EVENT_QUEUE: Mutex<Vec<CompositorInputEvent>> = Mutex::new(Vec::new());
+/// A device instance, rather than its reusable `/dev` index, owns an input stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputSourceClass {
+    Pointer,
+    Keyboard,
+    Gamepad,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InputSourceId {
+    pub class: InputSourceClass,
+    pub instance: u64,
+}
+
+impl InputSourceId {
+    fn new(class: InputSourceClass) -> Self {
+        Self {
+            class,
+            instance: NEXT_INPUT_INSTANCE.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+}
+
+/// One atomic report from a source. Seat 0 is the current local seat.
+#[derive(Debug)]
+pub(crate) struct InputFrame {
+    pub seat_id: u32,
+    pub source: Option<InputSourceId>,
+    pub frame_no: u64,
+    pub time_ns: u64,
+    pub events: Vec<CompositorInputEvent>,
+}
+
+struct InputFrameQueue {
+    frames: Vec<InputFrame>,
+    next_frame_no: u64,
+}
+
+impl InputFrameQueue {
+    const fn new() -> Self {
+        Self {
+            frames: Vec::new(),
+            next_frame_no: 1,
+        }
+    }
+
+    fn push(
+        &mut self,
+        source: Option<InputSourceId>,
+        time_ns: u64,
+        events: Vec<CompositorInputEvent>,
+    ) {
+        if events.is_empty() {
+            return;
+        }
+        self.frames.push(InputFrame {
+            seat_id: 0,
+            source,
+            frame_no: self.next_frame_no,
+            time_ns,
+            events,
+        });
+        self.next_frame_no = self.next_frame_no.wrapping_add(1);
+    }
+}
+
+static INPUT_EVENT_QUEUE: Mutex<InputFrameQueue> = Mutex::new(InputFrameQueue::new());
+static NEXT_INPUT_INSTANCE: AtomicU64 = AtomicU64::new(1);
 static SCREEN_WIDTH: AtomicU32 = AtomicU32::new(1);
 static SCREEN_HEIGHT: AtomicU32 = AtomicU32::new(1);
 static INPUT_STARTED: AtomicBool = AtomicBool::new(false);
@@ -332,21 +398,31 @@ pub fn set_screen_size(width: u32, height: u32) {
     SCREEN_HEIGHT.store(height.max(1), Ordering::Relaxed);
 }
 
-/// Add an input event to the global queue
-pub fn push_input_event(event: CompositorInputEvent) {
+/// Add a complete source report to the global queue without interleaving.
+fn push_input_frame(
+    source: Option<InputSourceId>,
+    time_ns: u64,
+    events: Vec<CompositorInputEvent>,
+) {
     let mut queue = INPUT_EVENT_QUEUE.lock().expect("SWS mutex poisoned");
-    let should_wake = queue.is_empty();
-    queue.push(event);
+    let should_wake = queue.frames.is_empty();
+    queue.push(source, time_ns, events);
+    let has_events = !queue.frames.is_empty();
     drop(queue);
-    if should_wake {
+    if should_wake && has_events {
         super::ipc::wake_compositor();
     }
 }
 
-/// Get all pending input events from the queue
-pub fn pop_all_input_events() -> Vec<CompositorInputEvent> {
+/// Compatibility entry point for virtual/remote events during migration.
+pub fn push_input_event(event: CompositorInputEvent) {
+    push_input_frame(None, 0, std::vec![event]);
+}
+
+/// Get all pending complete reports from the queue.
+pub(crate) fn pop_all_input_frames() -> Vec<InputFrame> {
     let mut queue = INPUT_EVENT_QUEUE.lock().expect("SWS mutex poisoned");
-    core::mem::take(&mut *queue)
+    core::mem::take(&mut queue.frames)
 }
 
 /// Return whether the compositor input queue has pending events.
@@ -358,6 +434,7 @@ pub fn has_pending_input_events() -> bool {
     !INPUT_EVENT_QUEUE
         .lock()
         .expect("SWS mutex poisoned")
+        .frames
         .is_empty()
 }
 
@@ -618,14 +695,10 @@ impl PointerFrame {
             event_types::EV_KEY => {
                 if metadata.multitouch() {
                     // A multitouch contact lifecycle is owned exclusively by
-                    // MtFrameAssembler. Direct-touch devices commonly mirror
-                    // it through BTN_TOUCH and may also expose BTN_LEFT for
-                    // legacy consumers; forwarding either mirror would turn
-                    // one physical contact into both TouchFrame and mouse
-                    // button streams.
-                    if event.code == key_codes::BTN_TOUCH
-                        || metadata.direct_touch && event.code == key_codes::BTN_LEFT
-                    {
+                    // MtFrameAssembler. BTN_LEFT needs report-level contact
+                    // context: an input multiplexer can send an independent
+                    // pointer click through this same device.
+                    if event.code == key_codes::BTN_TOUCH {
                         return None;
                     }
                 }
@@ -718,6 +791,51 @@ impl PointerFrame {
     }
 }
 
+/// Classify BTN_LEFT on a direct multitouch device after its complete report.
+/// Some devices mirror a contact through BTN_LEFT, while an input multiplexer
+/// can route an unrelated mouse button through the very same event device.
+#[derive(Debug, Default)]
+struct DirectTouchButtonState {
+    contacts_active: bool,
+    left_button_forwarded: bool,
+}
+
+impl DirectTouchButtonState {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn filter_report(
+        &mut self,
+        contacts_active: bool,
+        events: Vec<CompositorInputEvent>,
+    ) -> Vec<CompositorInputEvent> {
+        let contact_in_report = self.contacts_active || contacts_active;
+        self.contacts_active = contacts_active;
+        events
+            .into_iter()
+            .filter(|event| match event {
+                CompositorInputEvent::MouseButton {
+                    button: key_codes::BTN_LEFT,
+                    pressed: true,
+                } => {
+                    if contact_in_report {
+                        false
+                    } else {
+                        self.left_button_forwarded = true;
+                        true
+                    }
+                }
+                CompositorInputEvent::MouseButton {
+                    button: key_codes::BTN_LEFT,
+                    pressed: false,
+                } => core::mem::take(&mut self.left_button_forwarded),
+                _ => true,
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PointerSource {
     Local(u8),
@@ -766,15 +884,30 @@ impl LogicalPointerButtons {
 static POINTER_BUTTONS: Mutex<LogicalPointerButtons> =
     Mutex::new(LogicalPointerButtons { held: Vec::new() });
 
-fn push_pointer_frame(source: PointerSource, events: Vec<CompositorInputEvent>) {
-    for event in events {
-        match event {
-            CompositorInputEvent::MouseButton { button, pressed } => {
-                push_pointer_button(source, button, pressed);
-            }
-            event => push_input_event(event),
-        }
-    }
+fn translate_pointer_frame(
+    source: PointerSource,
+    events: Vec<CompositorInputEvent>,
+) -> Vec<CompositorInputEvent> {
+    let mut buttons = POINTER_BUTTONS.lock().expect("SWS pointer mutex poisoned");
+    events
+        .into_iter()
+        .filter_map(|event| match event {
+            CompositorInputEvent::MouseButton { button, pressed } => buttons
+                .update(source, button, pressed)
+                .map(|pressed| CompositorInputEvent::MouseButton { button, pressed }),
+            event => Some(event),
+        })
+        .collect()
+}
+
+fn take_pointer_source_releases(source: PointerSource) -> Vec<CompositorInputEvent> {
+    POINTER_BUTTONS
+        .lock()
+        .expect("SWS pointer mutex poisoned")
+        .drain_source(source)
+        .into_iter()
+        .map(|(button, pressed)| CompositorInputEvent::MouseButton { button, pressed })
+        .collect()
 }
 
 pub(crate) fn push_pointer_button(source: PointerSource, button: u16, pressed: bool) {
@@ -788,13 +921,7 @@ pub(crate) fn push_pointer_button(source: PointerSource, button: u16, pressed: b
 }
 
 pub(crate) fn release_pointer_source(source: PointerSource) {
-    let releases = POINTER_BUTTONS
-        .lock()
-        .expect("SWS pointer mutex poisoned")
-        .drain_source(source);
-    for (button, pressed) in releases {
-        push_input_event(CompositorInputEvent::MouseButton { button, pressed });
-    }
+    push_input_frame(None, 0, take_pointer_source_releases(source));
 }
 
 impl InputManager {
@@ -906,6 +1033,7 @@ fn pointer_device_reader(
     expected_kind: InputDeviceKind,
     source: PointerSource,
 ) {
+    let input_source = InputSourceId::new(InputSourceClass::Pointer);
     let metadata = PointerMetadata::query(&device, expected_kind);
     println!("[InputThread] Opened {} as {:?}", path, metadata.kind);
     let _capability_registration = register_live_capabilities(metadata.environment_capabilities());
@@ -924,6 +1052,7 @@ fn pointer_device_reader(
     };
     let mut mt_desynced = false;
     let mut legacy_desynced = false;
+    let mut direct_touch_button = DirectTouchButtonState::default();
     loop {
         super::trace::input_loop();
         match read_input_event(&device) {
@@ -934,7 +1063,11 @@ fn pointer_device_reader(
                     && event.code == syn_codes::SYN_DROPPED
                 {
                     frame.reset();
-                    release_pointer_source(source);
+                    push_input_frame(
+                        Some(input_source),
+                        event.time,
+                        take_pointer_source_releases(source),
+                    );
                     legacy_desynced = true;
                     continue;
                 }
@@ -944,24 +1077,37 @@ fn pointer_device_reader(
                     }
                     continue;
                 }
+                let mut output = Vec::new();
                 if let Some(mt) = mt.as_mut() {
                     if let Some(touch_frame) = consume_mt_event(mt, &mut mt_desynced, event) {
                         if touch_frame.cancelled {
                             frame.reset();
-                            release_pointer_source(source);
+                            direct_touch_button.reset();
+                            output.extend(take_pointer_source_releases(source));
                         }
-                        push_input_event(CompositorInputEvent::TouchFrame(touch_frame));
+                        output.push(CompositorInputEvent::TouchFrame(touch_frame));
                     }
                     if mt_desynced
                         || event.type_ == event_types::EV_SYN
                             && event.code == syn_codes::SYN_DROPPED
                     {
+                        push_input_frame(Some(input_source), event.time, output);
                         continue;
                     }
                 }
                 if let Some(events) = frame.consume(metadata, source, event) {
-                    push_pointer_frame(source, events);
+                    let events = if metadata.multitouch() && metadata.direct_touch {
+                        direct_touch_button.filter_report(
+                            mt.as_ref()
+                                .is_some_and(touch::MtFrameAssembler::has_active_contact),
+                            events,
+                        )
+                    } else {
+                        events
+                    };
+                    output.extend(translate_pointer_frame(source, events));
                 }
+                push_input_frame(Some(input_source), event.time, output);
             }
             Ok(None) => {
                 super::trace::input_empty();
@@ -973,10 +1119,12 @@ fn pointer_device_reader(
             }
         }
     }
+    let mut output = Vec::new();
     if let Some(mt) = mt.as_mut() {
-        push_input_event(CompositorInputEvent::TouchFrame(mt.cancel()));
+        output.push(CompositorInputEvent::TouchFrame(mt.cancel()));
     }
-    release_pointer_source(source);
+    output.extend(take_pointer_source_releases(source));
+    push_input_frame(Some(input_source), 0, output);
 }
 
 fn consume_mt_event(
@@ -1121,16 +1269,32 @@ fn try_spawn_keyboard_reader(
 
 fn keyboard_device_reader(device: InputDevice, path: std::string::String, index: u8) {
     let source = KeyboardSource::Local(index);
+    let input_source = InputSourceId::new(InputSourceClass::Keyboard);
     println!("[KeyboardThread] Opened {}", path);
     let _capability_registration = register_live_capabilities(environment_capabilities::KEYBOARD);
     let mut desynced = false;
+    let mut pending = Vec::new();
     loop {
         super::trace::keyboard_loop();
         match read_input_event(&device) {
             Ok(Some(event)) => {
                 super::trace::keyboard_event();
-                if let Some(event) = consume_keyboard_event(source, &mut desynced, event) {
-                    push_input_event(event);
+                let dropped =
+                    event.type_ == event_types::EV_SYN && event.code == syn_codes::SYN_DROPPED;
+                if dropped {
+                    pending.clear();
+                }
+                if let Some(transition) = consume_keyboard_event(source, &mut desynced, event) {
+                    pending.push(transition);
+                }
+                if event.type_ == event_types::EV_SYN
+                    && (event.code == syn_codes::SYN_REPORT || dropped)
+                {
+                    push_input_frame(
+                        Some(input_source),
+                        event.time,
+                        core::mem::take(&mut pending),
+                    );
                 }
             }
             Ok(None) => {
@@ -1143,7 +1307,11 @@ fn keyboard_device_reader(device: InputDevice, path: std::string::String, index:
             }
         }
     }
-    push_input_event(CompositorInputEvent::KeyboardReset { source });
+    push_input_frame(
+        Some(input_source),
+        0,
+        std::vec![CompositorInputEvent::KeyboardReset { source }],
+    );
 }
 
 fn consume_keyboard_event(
@@ -1196,9 +1364,14 @@ fn try_spawn_gamepad_reader(
 
 fn gamepad_device_reader(device: InputDevice, path: &str, index: u8) {
     let source = KeyboardSource::Gamepad(index);
+    let input_source = InputSourceId::new(InputSourceClass::Gamepad);
     let config = super::config::read_sws_config().unwrap_or_default();
     let mut navigation = gamepad::Navigation::new(gamepad::Config::parse(&config));
-    let mut snapshot = gamepad::Snapshot::new(index as u32);
+    // The /dev index may be reused while an old reset is still in flight.
+    // Bind the client-visible gamepad ID to this reader instance instead.
+    let mut snapshot = gamepad::Snapshot::new(
+        u32::try_from(input_source.instance).expect("gamepad device instance ID exhausted"),
+    );
     for code in 0..6 {
         if let Ok(axis) = device.absolute_axis(code) {
             navigation.set_axis_range(code, axis.minimum, axis.maximum);
@@ -1217,24 +1390,38 @@ fn gamepad_device_reader(device: InputDevice, path: &str, index: u8) {
                 snapshot.update(event.type_, event.code, event.value, event.time);
                 match frame {
                     gamepad::Frame::Reset => {
-                        push_input_event(CompositorInputEvent::Gamepad {
-                            state: snapshot.reset(event.time),
-                            navigation: Vec::new(),
-                            source,
-                        });
-                        push_input_event(CompositorInputEvent::KeyboardReset { source });
+                        push_input_frame(
+                            Some(input_source),
+                            event.time,
+                            std::vec![
+                                CompositorInputEvent::Gamepad {
+                                    state: snapshot.reset(event.time),
+                                    navigation: Vec::new(),
+                                    source,
+                                },
+                                CompositorInputEvent::KeyboardReset { source },
+                            ],
+                        );
                     }
-                    gamepad::Frame::Keys(keys) => push_input_event(CompositorInputEvent::Gamepad {
-                        state: snapshot.state,
-                        navigation: keys,
-                        source,
-                    }),
-                    gamepad::Frame::None if event.type_ == 0 && event.code == 0 => {
-                        push_input_event(CompositorInputEvent::Gamepad {
+                    gamepad::Frame::Keys(keys) => push_input_frame(
+                        Some(input_source),
+                        event.time,
+                        std::vec![CompositorInputEvent::Gamepad {
                             state: snapshot.state,
-                            navigation: Vec::new(),
+                            navigation: keys,
                             source,
-                        });
+                        }],
+                    ),
+                    gamepad::Frame::None if event.type_ == 0 && event.code == 0 => {
+                        push_input_frame(
+                            Some(input_source),
+                            event.time,
+                            std::vec![CompositorInputEvent::Gamepad {
+                                state: snapshot.state,
+                                navigation: Vec::new(),
+                                source,
+                            }],
+                        );
                     }
                     gamepad::Frame::None | gamepad::Frame::Discard => (),
                 }
@@ -1246,12 +1433,18 @@ fn gamepad_device_reader(device: InputDevice, path: &str, index: u8) {
             }
         }
     }
-    push_input_event(CompositorInputEvent::Gamepad {
-        state: snapshot.reset(0),
-        navigation: Vec::new(),
-        source,
-    });
-    push_input_event(CompositorInputEvent::KeyboardReset { source });
+    push_input_frame(
+        Some(input_source),
+        0,
+        std::vec![
+            CompositorInputEvent::Gamepad {
+                state: snapshot.reset(0),
+                navigation: Vec::new(),
+                source,
+            },
+            CompositorInputEvent::KeyboardReset { source },
+        ],
+    );
 }
 
 fn read_input_event(device: &InputDevice) -> Result<Option<InputEvent>, StreamError> {
@@ -1599,7 +1792,7 @@ mod tests {
     }
 
     #[test]
-    fn multitouch_touchscreen_does_not_duplicate_legacy_button_mirrors() {
+    fn multitouch_touchscreen_classifies_left_button_after_complete_report() {
         let metadata = multitouch_metadata(InputDeviceKind::Touchscreen);
         let source = PointerSource::Local(24);
         let mut frame = PointerFrame::default();
@@ -1622,13 +1815,76 @@ mod tests {
                 )
                 .is_none()
         );
-        assert_eq!(
-            frame.consume(
+        let events = frame
+            .consume(
                 metadata,
                 source,
                 event(event_types::EV_SYN, syn_codes::SYN_REPORT, 0),
-            ),
-            Some(std::vec![])
+            )
+            .unwrap();
+        assert_eq!(
+            DirectTouchButtonState::default().filter_report(true, events),
+            std::vec![]
+        );
+    }
+
+    #[test]
+    fn direct_touch_device_can_carry_an_independent_mouse_click() {
+        let mut state = DirectTouchButtonState::default();
+        let down = CompositorInputEvent::MouseButton {
+            button: key_codes::BTN_LEFT,
+            pressed: true,
+        };
+        let up = CompositorInputEvent::MouseButton {
+            button: key_codes::BTN_LEFT,
+            pressed: false,
+        };
+
+        assert_eq!(
+            state.filter_report(false, std::vec![down.clone()]),
+            std::vec![down]
+        );
+        assert_eq!(
+            state.filter_report(false, std::vec![up.clone()]),
+            std::vec![up]
+        );
+    }
+
+    #[test]
+    fn direct_touch_mirror_is_suppressed_through_contact_release() {
+        let mut state = DirectTouchButtonState::default();
+        let down = CompositorInputEvent::MouseButton {
+            button: key_codes::BTN_LEFT,
+            pressed: true,
+        };
+        let up = CompositorInputEvent::MouseButton {
+            button: key_codes::BTN_LEFT,
+            pressed: false,
+        };
+
+        assert!(state.filter_report(true, std::vec![down]).is_empty());
+        assert!(state.filter_report(false, std::vec![up]).is_empty());
+    }
+
+    #[test]
+    fn mouse_release_survives_a_new_touch_contact() {
+        let mut state = DirectTouchButtonState::default();
+        let down = CompositorInputEvent::MouseButton {
+            button: key_codes::BTN_LEFT,
+            pressed: true,
+        };
+        let up = CompositorInputEvent::MouseButton {
+            button: key_codes::BTN_LEFT,
+            pressed: false,
+        };
+
+        assert_eq!(
+            state.filter_report(false, std::vec![down.clone()]),
+            std::vec![down]
+        );
+        assert_eq!(
+            state.filter_report(true, std::vec![up.clone()]),
+            std::vec![up]
         );
     }
 

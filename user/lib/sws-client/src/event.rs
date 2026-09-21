@@ -174,6 +174,11 @@ pub struct ImeContextState {
 /// Events from the SWS server
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    /// Native direct-touch changes belonging to one target surface and seat frame.
+    TouchFrame {
+        surface_id: u32,
+        frame: sws_protocol::touch::Frame,
+    },
     /// Authoritative native gamepad state for a subscribed focused surface.
     GamepadInput {
         surface_id: u32,

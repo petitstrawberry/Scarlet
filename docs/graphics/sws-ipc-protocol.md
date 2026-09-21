@@ -4,12 +4,14 @@ This document describes the wire protocol used between the Scarlet Window Server
 
 The canonical implementation is the `sws_protocol` crate located at `user/lib/sws-protocol`.
 
-The current protocol version is **9**. Clients discover the version and
+The current protocol version is **10**. Clients discover the version and
 optional feature bits with `GET_CAPABILITIES`; reusable extension buffers are
 advertised by `EXTENSION_BUFFER_OBJECTS` (`1 << 10`). Rounded input and backdrop
 regions are advertised by the optional `SURFACE_REGIONS` bit (`1 << 11`).
 Native gamepad snapshots use optional `GAMEPAD_INPUT` (`1 << 12`), with client
 message 55 and server event 39; see [gamepad input](gamepad-input.md).
+Native direct-touch frames use optional `TOUCH_INPUT` (`1 << 13`), with client
+message 56 and server event 40; see [input architecture](../desktop/input-architecture.md).
 
 Client-side reference implementations:
 
@@ -564,6 +566,15 @@ keyboard focus. Console Home uses it for the floating system controls, with
 `restrict_input = 1`. It is excluded from the application window list and
 follows shell presentation visibility.
 
+#### `SET_TOUCH_INPUT` (type = 56, protocol version 10)
+
+Requires `TOUCH_INPUT` (`1 << 13`). Payload is exactly 8 little-endian bytes:
+`window_id: u32`, `enabled: u32` (0 or 1). Only the window owner may change
+the setting. An enabled window receives native `TOUCH_FRAME` messages for
+direct contacts instead of compatibility `INPUT_EVENT` mouse packets for
+those contacts. Each contact keeps the surface selected on its initial down.
+Indirect touchpads continue through the seat pointer and gesture policy.
+
 #### `REGISTER_EXTENSION` (type = 100)
 
 **Extension API**: This message is part of the SWS Extension API.
@@ -1116,6 +1127,30 @@ This asynchronous event grants exactly one render opportunity. It is normally
 sent after a display presentation boundary. A newly created surface may receive
 one bootstrap grant before its first submitted frame so that callback-driven
 clients can produce initial content.
+
+#### `TOUCH_FRAME` (type = 40, protocol version 10)
+
+Requires `TOUCH_INPUT` and an enabled window. The payload is a 28-byte header
+followed by 1–128 records of 28 bytes each. All integers are little-endian.
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 4 | window ID, u32 |
+| 4 | 4 | seat ID, u32 |
+| 8 | 8 | seat serial, u64 |
+| 16 | 8 | monotonic timestamp in nanoseconds, u64 |
+| 24 | 2 | contact-change count, u16 |
+| 26 | 2 | reserved, zero |
+
+Each record contains `contact_id: u64` at offset 0, `phase: u8` at offset 8,
+three zero reserved bytes, `x: i32` at offset 12, `y: i32` at offset 16,
+`pressure: i32` at offset 20 and `touch_major: i32` at offset 24. Coordinates
+are surface-local physical pixels. The contact ID is nonzero and unique across
+device reconnects. Phases are down=0, move=1, up=2, cancel=3. Optional pressure
+and major axes use -1 when absent and otherwise must be nonnegative. A contact
+is routed to the same surface through up or cancel, including when it moves
+outside the surface. Changes from one physical report targeting the same
+surface share a seat serial.
 
 #### `CURSOR_THEME_CHANGED` (type = 34, protocol version 3)
 

@@ -690,7 +690,8 @@ fn sws_capabilities() -> u64 {
         | protocol::capabilities::FRAME_CALLBACKS
         | protocol::capabilities::EXTENSION_BUFFER_OBJECTS
         | protocol::capabilities::SURFACE_REGIONS
-        | protocol::capabilities::GAMEPAD_INPUT;
+        | protocol::capabilities::GAMEPAD_INPUT
+        | protocol::capabilities::TOUCH_INPUT;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
         capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE;
     }
@@ -3729,6 +3730,14 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     navigation,
                 });
             }
+            Ok(ClientMessageRef::SetTouchInput { window_id, enabled }) => {
+                push_ipc_event(IpcEvent::SetTouchInput {
+                    client_id,
+                    request_id,
+                    window_id,
+                    enabled,
+                });
+            }
             Ok(ClientMessageRef::SetWindowGeometry {
                 window_id,
                 geometry,
@@ -4713,6 +4722,12 @@ pub enum IpcEvent {
         window_id: u32,
         enabled: bool,
         navigation: bool,
+    },
+    SetTouchInput {
+        client_id: usize,
+        request_id: u8,
+        window_id: u32,
+        enabled: bool,
     },
     /// Set visible geometry inside the complete surface bounds.
     SetWindowGeometry {

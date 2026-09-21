@@ -152,6 +152,10 @@ impl MtFrameAssembler {
         self.slots[self.current_slot].touch_major = Some(value);
     }
 
+    pub(crate) fn has_active_contact(&self) -> bool {
+        self.slots.iter().any(|slot| slot.tracking_id.is_some())
+    }
+
     pub(crate) fn commit(&self, time_ns: u64) -> TouchFrame {
         let contacts = self
             .slots
@@ -240,6 +244,7 @@ pub(crate) struct GestureConfig {
     pub tap_timeout_ns: u64,
     pub double_tap_timeout_ns: u64,
     pub scroll_step: i32,
+    pub scroll_threshold: i32,
     pub pinch_threshold: i32,
     pub swipe_threshold: i32,
 }
@@ -251,6 +256,7 @@ impl Default for GestureConfig {
             tap_timeout_ns: 250_000_000,
             double_tap_timeout_ns: 400_000_000,
             scroll_step: 35,
+            scroll_threshold: 80,
             pinch_threshold: 140,
             swipe_threshold: 180,
         }
@@ -490,7 +496,7 @@ fn indirect_frame(
                 phase: GesturePhase::Begin,
                 scale_milli: 1000,
             }));
-        } else if delta != (0, 0) {
+        } else if distance(state.start_centroid, current) >= config.scroll_threshold {
             state.active = ActiveGesture::Scroll;
             events.push(gesture(GestureEvent::Scroll {
                 phase: GesturePhase::Begin,
@@ -665,6 +671,24 @@ fn integer_sqrt(value: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tracking_id_marks_contact_active_before_coordinates_arrive() {
+        let mut assembler = MtFrameAssembler::new(
+            PointerSource::Local(24),
+            TouchSurface::Touchscreen,
+            0,
+            1000,
+            0,
+            1000,
+            2,
+        );
+        assembler.tracking_id(7);
+        assert!(assembler.has_active_contact());
+        assert!(assembler.commit(0).contacts.is_empty());
+        assembler.tracking_id(-1);
+        assert!(!assembler.has_active_contact());
+    }
 
     fn contact(id: i32, x: i32, y: i32) -> TouchContact {
         TouchContact {
@@ -886,6 +910,35 @@ mod tests {
                 phase: GesturePhase::Begin,
                 ..
             })
+        )));
+    }
+
+    #[test]
+    fn small_two_finger_motion_stays_pending_until_scroll_or_pinch_wins() {
+        let mut recognizer = GestureRecognizer::new(1000, 1000);
+        recognizer.process(frame(
+            1,
+            std::vec![contact(1, 2000, 2000), contact(2, 4000, 2000)],
+        ));
+        let undecided = recognizer.process(frame(
+            2,
+            std::vec![contact(1, 2010, 2000), contact(2, 4010, 2000)],
+        ));
+        assert!(undecided.is_empty());
+        let pinch = recognizer.process(frame(
+            3,
+            std::vec![contact(1, 1800, 2000), contact(2, 4200, 2000)],
+        ));
+        assert!(pinch.iter().any(|event| matches!(
+            event,
+            TouchPolicyEvent::Gesture(GestureEvent::Pinch {
+                phase: GesturePhase::Begin,
+                ..
+            })
+        )));
+        assert!(!pinch.iter().any(|event| matches!(
+            event,
+            TouchPolicyEvent::Gesture(GestureEvent::Scroll { .. })
         )));
     }
 
