@@ -44,6 +44,22 @@ def in_root(root, guest):
     return path
 
 
+def validate_staging_links(root):
+    """Allow packaged relative links only when they resolve inside staging."""
+    for path in root.rglob("*"):
+        if not path.is_symlink():
+            continue
+        target = Path(os.readlink(path))
+        if target.is_absolute():
+            raise ValueError(f"staged symlink must be relative: {path}")
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise ValueError(f"invalid staged symlink: {path}: {error}") from error
+        if root not in resolved.parents:
+            raise ValueError(f"staged symlink escapes its root: {path}")
+
+
 def executable(path, arch, label, static=False):
     elf = Elf(path)
     report = elf.report()
@@ -145,8 +161,10 @@ def main():
         parser.error("--output and --staging must not overlap")
     if not kernel.is_file() or not staging.is_dir():
         parser.error("kernel or staging does not exist")
-    if any(path.is_symlink() for path in staging.rglob("*")):
-        parser.error("staging must contain regular copies, not symlinks (stage.py creates these)")
+    try:
+        validate_staging_links(staging)
+    except ValueError as error:
+        parser.error(str(error))
     qemu = f"qemu-system-{args.arch}"
     required_tools = [qemu, "cargo-scarlet-plugin-limine"]
     if args.storage == "ext2":

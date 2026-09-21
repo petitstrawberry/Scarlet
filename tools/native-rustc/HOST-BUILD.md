@@ -77,13 +77,12 @@ executable link against rustc_driver's runtime `dl*` imports, which the Scarlet
 interpreter provides. Undefined references from executable object files still
 fail to link; this is narrower than suppressing all undefined-symbol errors.
 
-For the next phase, generate a separate recipe with `--backend cranelift`.
-Bootstrap builds the native Cranelift backend against the matching compiler
-artifacts and installs it into the native sysroot. Its default feature set does
-not include JIT. The backend and its dependencies still require their Scarlet
-ports; selecting the backend is not proof those ports are complete. Native
-compilation to an executable additionally needs a native linker and its runtime
-integration, followed by guest compile/run acceptance tests.
+The production native-host pipeline uses `--backend cranelift`. Bootstrap builds
+the native Cranelift backend against the matching compiler artifacts and installs
+it into the native sysroot. Its default feature set does not include JIT. Backend
+selection alone is not proof of a working port, so the downloadable artifact is
+also subjected to the guest compile/link/run acceptance described in
+[`docs/development/native-rustc.md`](../../docs/development/native-rustc.md).
 
 ## Packaging the matching std
 
@@ -103,13 +102,14 @@ explicitly constructs an additional stage2 build-host compiler before uplifting
 the already built stage1 std. Keep compiler/driver/backend hashes and manifests
 with the packaged result.
 
-The integrated pipeline and downloadable artifact helper are in
-[scarlet-rust-nix PR #20](https://github.com/petitstrawberry/scarlet-rust-nix/pull/20).
+The integrated pipeline and downloadable artifact helper are in the
+[scarlet-rust-nix native-host workflow](https://github.com/petitstrawberry/scarlet-rust-nix/actions/workflows/native-host.yml).
 Its prepared source includes the CRT separation, native compiler cfg fixes,
 Cranelift/target-lexicon changes, libloading adapters, aligned stacker fallback,
 named tempfile support, and entropy-required getrandom backend. Their lightweight
-checks have passed; the compiler build and guest execution must establish the
-complete dependency closure.
+checks, native compiler builds, and guest execution have passed for AArch64 and
+RV64. Each future artifact still needs the same acceptance before it is marked
+guest-verified.
 
 ## Preflight and dependency audit
 

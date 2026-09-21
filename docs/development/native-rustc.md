@@ -2,35 +2,61 @@
 
 This work targets `riscv64gc-unknown-scarlet` and `aarch64-unknown-scarlet` running
 on Scarlet's native ABI. A Linux compiler running through Linux compatibility is
-a separate milestone. **Native rustc has not yet been built or run.** The tools
-below make the existing blockers reproducible and provide staging and guest
-probes for the next compiler build.
+a separate milestone. Native rustc, its Cranelift backend, and the native Wild
+linker have now completed the full guest acceptance path on both architectures.
+The tools below retain the original audit and provide reproducible staging and
+guest probes for subsequent toolchain builds.
 
 ## Actions build and artifact retrieval
 
 Heavy native compiler builds run in the separate
-[scarlet-rust-nix native-host pipeline](https://github.com/petitstrawberry/scarlet-rust-nix/pull/20).
-The initial job targets AArch64 with Cranelift; RV64 and the diagnostic dummy
-backend are selectable workflow inputs. The ordinary cached cross toolchain
-remains unchanged. Successful native sysroots are downloadable by exact Actions
-run ID using that repository's `scripts/fetch-native-host.sh`; the helper rejects
-dummy-backend artifacts. Logs, source patch hashes, and bootstrap configuration
-are retained even when the build fails.
+[scarlet-rust-nix native-host pipeline](https://github.com/petitstrawberry/scarlet-rust-nix/actions/workflows/native-host.yml).
+AArch64 and RV64 Cranelift builds are supported; the diagnostic dummy backend
+remains selectable. The ordinary cached cross toolchain remains unchanged.
+Successful native sysroots are downloadable by exact Actions run ID using that
+repository's `scripts/fetch-native-host.sh`; the helper rejects dummy-backend
+artifacts. Logs, source patch hashes, and bootstrap configuration are retained
+even when the build fails.
 
 The pipeline applies additional version-pinned native compiler/CRT/Cranelift
-and dependency ports. Its successful build would establish ELF identity and
-cross compilation, not execution in Scarlet. The guest acceptance below remains
-required. See [the build recipe](../../tools/native-rustc/HOST-BUILD.md).
+and dependency ports. An Actions build establishes ELF identity and cross
+compilation; the separate guest acceptance below establishes execution in
+Scarlet. See [the build recipe](../../tools/native-rustc/HOST-BUILD.md).
 
-The separate [native Wild linker port](https://github.com/petitstrawberry/scarlet-rust-nix/pull/21)
+The separate [native Wild linker pipeline](https://github.com/petitstrawberry/scarlet-rust-nix/actions/workflows/native-linker.yml)
 now builds on Actions for both targets. Its initial native guest acceptance
 linked fresh object/archive inputs and executed both outputs on AArch64 and
 RV64. A subsequent test also linked and executed captured Rust std inputs on
 both architectures. See [linker evidence and usage](../../tools/native-linker/README.md).
 This removes the previously unimplemented build-time linker as a bring-up task;
-integration with native rustc remains subject to the full acceptance below.
+the full native-rustc acceptance now uses that Wild build.
 
-## Verified baseline, 2026-09-21
+## Current guest-verified status, 2026-09-21
+
+The tested distribution layout installs under
+`/opt/scarlet/toolchains/rust/<version>`. It contains `rustc`, its private
+`librustc_driver`, the Cranelift backend, static target libraries, and Wild.
+`/system/bin/scarlet-ld` remains owned by the matching Scarlet image and is not
+part of the toolchain archive.
+
+| Target | VM | Result | Total guest run | Native-host Actions run |
+| --- | --- | --- | ---: | --- |
+| `aarch64-unknown-scarlet` | HVF, 4 CPUs | `FULL_PASS` | 10.368 s | [35566457388](https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35566457388) |
+| `riscv64gc-unknown-scarlet` | TCG, 4 CPUs | `FULL_PASS` | 89.262 s | [35574074906](https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35574074906) |
+
+Both runs used native Wild from [Actions run 35573648820](https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35573648820)
+and Scarlet commit `d8ad9bb514f263013734661fdaa166e48c3dcdf9`. Each run checked
+`rustc -Vv`, target cfg, frontend analysis, Cranelift code generation, native
+linking, exact program stdout, and exit status 37. The
+[versioned-bundle evidence](../../tools/native-rustc/evidence/2026-09-21-toolchain-bundle.json)
+records component hashes and phase timings.
+
+The RV64 compiler currently warns that target feature `d` must be enabled for
+the target ABI. It does not fail this toolchain, but the target specification
+must be corrected before a future rustc turns that warning into an error. Cargo,
+procedural-macro execution, and compiler self-hosting remain unverified.
+
+## Pre-bring-up baseline, 2026-09-21
 
 The inspected Rust fork was
 `petitstrawberry/rust@39c689a4859b9d8ee1828720135defd125c03d31`.
@@ -84,7 +110,7 @@ built-in targets above. It proves Rust-generated shared-object output for a C
 entry point. Both architectures subsequently loaded and called that library in
 a Scarlet QEMU guest, together with startup dependencies and runtime plugins;
 see the [guest validation record](../../tools/loader-smoke/evidence/2026-09-21.json).
-This does not prove Rust `dylib`, shared std, or native rustc. For example:
+By itself this did not prove Rust `dylib`, shared std, or native rustc. For example:
 
 ```sh
 python3 tools/loader-smoke/build-rust-dso.py \
@@ -92,9 +118,10 @@ python3 tools/loader-smoke/build-rust-dso.py \
   --output /tmp/scarlet-rust-dso-aarch64 --offline
 ```
 
-## Source findings and prepared patches
+## Initial source findings and prepared patches
 
-The version-pinned source establishes these independent compiler porting gaps:
+The initial audit of the version-pinned source established these independent
+compiler porting gaps:
 
 1. The [RV64 target](https://github.com/petitstrawberry/rust/blob/39c689a4859b9d8ee1828720135defd125c03d31/compiler/rustc_target/src/spec/targets/riscv64gc_unknown_scarlet.rs)
    and [AArch64 target](https://github.com/petitstrawberry/rust/blob/39c689a4859b9d8ee1828720135defd125c03d31/compiler/rustc_target/src/spec/targets/aarch64_unknown_scarlet.rs)
@@ -167,13 +194,12 @@ The generator itself only writes configuration and command metadata.
 Use `x build`; the audited `x check` path enables LLVM regardless of the target
 backend list. Empty backend lists remain invalid.
 
-The dummy compiler is an initial execution milestone. Select `--backend cranelift`
-for the subsequent native backend build, port its dependencies, supply a native
-linker, and validate compiling and running Rust programs inside Scarlet. A
-successful config/dry-run does not establish successful compilation or guest
-execution of native rustc, and the dummy backend cannot generate executable code.
+The dummy compiler remains useful as an initial execution diagnostic. The
+accepted toolchain uses `--backend cranelift` and native Wild. A successful
+config/dry-run alone still does not establish guest execution, and the dummy
+backend cannot generate executable code.
 
-## Audit and stage a future native build
+## Audit and stage a native build
 
 The dependency-free audit reads ELF64 program headers, dynamic tags and relocation
 tables; section headers may be stripped. It reports interpreter, dependencies,
@@ -217,6 +243,10 @@ the compiler to `/opt/native-rustc`, matching target rlibs/rmeta and backend DSO
 and the interpreter/probe to `/system/bin`. The manifest records file hashes and
 ELF inventories with `executed_on_scarlet: false`.
 
+`stage.py` is the lower-level bring-up overlay. Release packaging uses the
+versioned `/opt/scarlet/toolchains/rust/<version>` layout described above and
+does not copy `scarlet-ld`; the Scarlet image supplies it from `/system/bin`.
+
 Because the initial loader does not search RPATH/RUNPATH, runtime shared objects
 are also copied to `/system/lib` under their existing filenames. Rust driver
 hashes stay toolchain-specific. Review non-hashed dependencies for collisions
@@ -253,6 +283,8 @@ actual native backend/linker paths. Its default mode is full acceptance;
 `--frontend-only` explicitly selects diagnostics. Run `--help` for all required
 artifact arguments. The host preserves the private root disk and extracts guest
 commands, outputs, compiled ELF, and acceptance evidence after execution.
+Relative links within the staging tree are allowed for versioned toolchain
+packages; broken links and links escaping the staging root are rejected.
 
 Compiler phases default to 900 seconds, with a 60-second generated-program
 limit. The outer VM deadline also provides cleanup because Scarlet's current
