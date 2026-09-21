@@ -1,0 +1,453 @@
+{
+  "date": "2026-09-21",
+  "rust_source_commit": "39c689a4859b9d8ee1828720135defd125c03d31",
+  "executed_on_scarlet": false,
+  "targets": [
+    {
+      "target": "riscv64gc-unknown-scarlet",
+      "rustc": "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+      "executed_on_scarlet": false,
+      "phases": [
+        {
+          "phase": "compiler-version",
+          "exit": 0,
+          "passed": true,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "-Vv"
+          ],
+          "stdout": "rustc 1.94.0-nightly\nbinary: rustc\ncommit-hash: unknown\ncommit-date: unknown\nhost: aarch64-apple-darwin\nrelease: 1.94.0-nightly\nLLVM version: 21.1.8\n",
+          "stderr": ""
+        },
+        {
+          "phase": "target-spec",
+          "exit": 0,
+          "passed": true,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "-Zunstable-options",
+            "--print",
+            "target-spec-json",
+            "--target",
+            "riscv64gc-unknown-scarlet"
+          ],
+          "stdout": "{\n  \"arch\": \"riscv64\",\n  \"code-model\": \"medium\",\n  \"cpu\": \"generic-rv64\",\n  \"crt-objects-fallback\": \"false\",\n  \"data-layout\": \"e-m:e-p:64:64-i64:64-i128:128-n32:64-S128\",\n  \"eh-frame-header\": false,\n  \"emit-debug-gdb-scripts\": false,\n  \"features\": \"+m,+a,+f,+d,+c,+zicsr,+zifencei\",\n  \"linker\": \"rust-lld\",\n  \"linker-flavor\": \"gnu-lld\",\n  \"llvm-abiname\": \"lp64d\",\n  \"llvm-target\": \"riscv64-unknown-scarlet\",\n  \"max-atomic-width\": 64,\n  \"metadata\": {\n    \"description\": \"Scarlet Native RISC-V (RV64IMAFDC ISA)\",\n    \"host_tools\": false,\n    \"std\": true,\n    \"tier\": 3\n  },\n  \"os\": \"scarlet\",\n  \"panic-strategy\": \"abort\",\n  \"relocation-model\": \"static\",\n  \"supported-sanitizers\": [\n    \"shadow-call-stack\",\n    \"kernel-address\"\n  ],\n  \"target-pointer-width\": 64\n}\n",
+          "stderr": ""
+        },
+        {
+          "phase": "target-cfg",
+          "exit": 0,
+          "passed": true,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "--print",
+            "cfg",
+            "--target",
+            "riscv64gc-unknown-scarlet"
+          ],
+          "stdout": "debug_assertions\nemscripten_wasm_eh\nfmt_debug=\"full\"\noverflow_checks\npanic=\"abort\"\nrelocation_model=\"static\"\ntarget_abi=\"\"\ntarget_arch=\"riscv64\"\ntarget_endian=\"little\"\ntarget_env=\"\"\ntarget_feature=\"a\"\ntarget_feature=\"c\"\ntarget_feature=\"d\"\ntarget_feature=\"f\"\ntarget_feature=\"m\"\ntarget_feature=\"zaamo\"\ntarget_feature=\"zalrsc\"\ntarget_feature=\"zca\"\ntarget_feature=\"zicsr\"\ntarget_feature=\"zifencei\"\ntarget_has_atomic\ntarget_has_atomic=\"16\"\ntarget_has_atomic=\"32\"\ntarget_has_atomic=\"64\"\ntarget_has_atomic=\"8\"\ntarget_has_atomic=\"ptr\"\ntarget_has_atomic_equal_alignment=\"16\"\ntarget_has_atomic_equal_alignment=\"32\"\ntarget_has_atomic_equal_alignment=\"64\"\ntarget_has_atomic_equal_alignment=\"8\"\ntarget_has_atomic_equal_alignment=\"ptr\"\ntarget_has_atomic_load_store\ntarget_has_atomic_load_store=\"16\"\ntarget_has_atomic_load_store=\"32\"\ntarget_has_atomic_load_store=\"64\"\ntarget_has_atomic_load_store=\"8\"\ntarget_has_atomic_load_store=\"ptr\"\ntarget_has_reliable_f128\ntarget_has_reliable_f16\ntarget_has_reliable_f16_math\ntarget_os=\"scarlet\"\ntarget_pointer_width=\"64\"\ntarget_vendor=\"unknown\"\nub_checks\n",
+          "stderr": ""
+        },
+        {
+          "phase": "static-std",
+          "exit": 0,
+          "passed": true,
+          "artifact": "hello",
+          "artifact_exists": true,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "--edition=2021",
+            "--target",
+            "riscv64gc-unknown-scarlet",
+            "-Cpanic=abort",
+            "hello.rs",
+            "-o",
+            "hello"
+          ],
+          "stdout": "",
+          "stderr": ""
+        },
+        {
+          "phase": "cdylib",
+          "exit": 0,
+          "passed": false,
+          "artifact": "libprobe-c.so",
+          "artifact_exists": false,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "--edition=2021",
+            "--target",
+            "riscv64gc-unknown-scarlet",
+            "-Cpanic=abort",
+            "--crate-type=cdylib",
+            "cdylib.rs",
+            "-o",
+            "libprobe-c.so"
+          ],
+          "stdout": "",
+          "stderr": "warning: dropping unsupported crate type `cdylib` for target `riscv64gc-unknown-scarlet`\n\nwarning: 1 warning emitted\n\n"
+        },
+        {
+          "phase": "rust-dylib",
+          "exit": 0,
+          "passed": false,
+          "artifact": "libprobe-rust.so",
+          "artifact_exists": false,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "--edition=2021",
+            "--target",
+            "riscv64gc-unknown-scarlet",
+            "-Cpanic=abort",
+            "--crate-type=dylib",
+            "dylib.rs",
+            "-o",
+            "libprobe-rust.so"
+          ],
+          "stdout": "",
+          "stderr": "warning: dropping unsupported crate type `dylib` for target `riscv64gc-unknown-scarlet`\n\nwarning: 1 warning emitted\n\n"
+        },
+        {
+          "phase": "guest-probe",
+          "exit": 0,
+          "passed": true,
+          "artifact": "native-rustc-probe",
+          "artifact_exists": true,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "--edition=2021",
+            "--target",
+            "riscv64gc-unknown-scarlet",
+            "-Cpanic=abort",
+            "/Users/petitstrawberry/.codex/worktrees/native-rustc-loader/Scarlet/tools/native-rustc/probe.rs",
+            "-o",
+            "native-rustc-probe"
+          ],
+          "stdout": "",
+          "stderr": ""
+        },
+        {
+          "phase": "libloading-build",
+          "exit": 0,
+          "passed": true,
+          "artifact": "libloading.rlib",
+          "artifact_exists": true,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "--edition=2021",
+            "--target",
+            "riscv64gc-unknown-scarlet",
+            "-Cpanic=abort",
+            "--crate-name=libloading",
+            "--crate-type=rlib",
+            "/Users/petitstrawberry/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libloading-0.8.9/src/lib.rs",
+            "-o",
+            "libloading.rlib"
+          ],
+          "stdout": "",
+          "stderr": "warning: function `cstr_cow_from_bytes` is never used\n  --> /Users/petitstrawberry/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libloading-0.8.9/src/util.rs:10:15\n   |\n10 | pub(crate) fn cstr_cow_from_bytes(slice: &[u8]) -> Result<Cow<'_, CStr>, Error> {\n   |               ^^^^^^^^^^^^^^^^^^^\n   |\n   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default\n\nwarning: function `ensure_compatible_types` is never used\n  --> /Users/petitstrawberry/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libloading-0.8.9/src/util.rs:28:15\n   |\n28 | pub(crate) fn ensure_compatible_types<T, E>() -> Result<(), Error> {\n   |               ^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: 2 warnings emitted\n\n"
+        },
+        {
+          "phase": "libloading-api",
+          "exit": 1,
+          "passed": false,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "--edition=2021",
+            "--target",
+            "riscv64gc-unknown-scarlet",
+            "-Cpanic=abort",
+            "--emit=metadata",
+            "libloading_api.rs",
+            "--extern",
+            "libloading=libloading.rlib"
+          ],
+          "stdout": "",
+          "stderr": "error[E0432]: unresolved import `libloading::Library`\n  --> libloading_api.rs:1:5\n   |\n 1 | use libloading::Library;\n   |     ^^^^^^^^^^^^^^^^^^^ no `Library` in the root\n   |\nnote: found an item that was configured out\n  --> /Users/petitstrawberry/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libloading-0.8.9/src/lib.rs:53:22\n   |\n52 | #[cfg(any(unix, windows, libloading_docs))]\n   |          -------------------------------- the item is gated here\n53 | pub use self::safe::{Library, Symbol};\n   |                      ^^^^^^^\n\nerror: aborting due to 1 previous error\n\nFor more information about this error, try `rustc --explain E0432`.\n"
+        }
+      ],
+      "probe_command": [
+        "/Applications/Xcode.app/Contents/Developer/usr/bin/python3",
+        "/Users/petitstrawberry/.codex/worktrees/native-rustc-loader/Scarlet/tools/native-rustc/probe_target.py",
+        "--rustc",
+        "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+        "--target",
+        "riscv64gc-unknown-scarlet",
+        "--output",
+        "/private/tmp/scarlet-native-rustc-final-riscv64gc-unknown-scarlet",
+        "--libloading-source",
+        "/Users/petitstrawberry/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libloading-0.8.9"
+      ],
+      "probe_exit": 1,
+      "elf_artifacts": [
+        {
+          "path": "/private/tmp/scarlet-native-rustc-final-riscv64gc-unknown-scarlet/hello",
+          "sha256": "a4eba5a3df42f5f5aacb21d78f0fe9de3499dc410385238774e2651b1110d03c",
+          "bytes": 121224,
+          "elf_type": "EXEC",
+          "machine": "riscv64",
+          "osabi": 83,
+          "entry": 105608,
+          "interpreter": null,
+          "needed": [],
+          "rpath": null,
+          "runpath": null,
+          "soname": null,
+          "tls": [],
+          "relocations": {},
+          "undefined_relocated_symbols": [],
+          "hash_tables": [],
+          "textrel": false,
+          "relr": false,
+          "symbol_versioning": false,
+          "init_fini": []
+        },
+        {
+          "path": "/private/tmp/scarlet-native-rustc-final-riscv64gc-unknown-scarlet/native-rustc-probe",
+          "sha256": "71dad13158c2242678a671ec3ed981334e331c9c97e09b8136dc1ea75546d0c4",
+          "bytes": 354984,
+          "elf_type": "EXEC",
+          "machine": "riscv64",
+          "osabi": 83,
+          "entry": 176014,
+          "interpreter": null,
+          "needed": [],
+          "rpath": null,
+          "runpath": null,
+          "soname": null,
+          "tls": [],
+          "relocations": {},
+          "undefined_relocated_symbols": [],
+          "hash_tables": [],
+          "textrel": false,
+          "relr": false,
+          "symbol_versioning": false,
+          "init_fini": []
+        }
+      ]
+    },
+    {
+      "target": "aarch64-unknown-scarlet",
+      "rustc": "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+      "executed_on_scarlet": false,
+      "phases": [
+        {
+          "phase": "compiler-version",
+          "exit": 0,
+          "passed": true,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "-Vv"
+          ],
+          "stdout": "rustc 1.94.0-nightly\nbinary: rustc\ncommit-hash: unknown\ncommit-date: unknown\nhost: aarch64-apple-darwin\nrelease: 1.94.0-nightly\nLLVM version: 21.1.8\n",
+          "stderr": ""
+        },
+        {
+          "phase": "target-spec",
+          "exit": 0,
+          "passed": true,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "-Zunstable-options",
+            "--print",
+            "target-spec-json",
+            "--target",
+            "aarch64-unknown-scarlet"
+          ],
+          "stdout": "{\n  \"arch\": \"aarch64\",\n  \"crt-objects-fallback\": \"false\",\n  \"data-layout\": \"e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32\",\n  \"default-uwtable\": true,\n  \"disable-redzone\": true,\n  \"features\": \"+v8a,+outline-atomics,+strict-align,+neon\",\n  \"linker\": \"rust-lld\",\n  \"linker-flavor\": \"gnu-lld\",\n  \"llvm-target\": \"aarch64-unknown-scarlet\",\n  \"max-atomic-width\": 128,\n  \"metadata\": {\n    \"description\": \"Scarlet Native AArch64 (ARMv8-A with outline atomics)\",\n    \"host_tools\": false,\n    \"std\": true,\n    \"tier\": 3\n  },\n  \"os\": \"scarlet\",\n  \"panic-strategy\": \"abort\",\n  \"pre-link-args\": {\n    \"gnu\": [\n      \"--fix-cortex-a53-843419\"\n    ],\n    \"gnu-lld\": [\n      \"--fix-cortex-a53-843419\"\n    ]\n  },\n  \"relocation-model\": \"static\",\n  \"stack-probes\": {\n    \"kind\": \"inline\"\n  },\n  \"supported-sanitizers\": [\n    \"kcfi\",\n    \"kernel-address\"\n  ],\n  \"target-pointer-width\": 64\n}\n",
+          "stderr": ""
+        },
+        {
+          "phase": "target-cfg",
+          "exit": 0,
+          "passed": true,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "--print",
+            "cfg",
+            "--target",
+            "aarch64-unknown-scarlet"
+          ],
+          "stdout": "debug_assertions\nemscripten_wasm_eh\nfmt_debug=\"full\"\noverflow_checks\npanic=\"abort\"\nrelocation_model=\"static\"\ntarget_abi=\"\"\ntarget_arch=\"aarch64\"\ntarget_endian=\"little\"\ntarget_env=\"\"\ntarget_feature=\"neon\"\ntarget_feature=\"outline-atomics\"\ntarget_has_atomic\ntarget_has_atomic=\"128\"\ntarget_has_atomic=\"16\"\ntarget_has_atomic=\"32\"\ntarget_has_atomic=\"64\"\ntarget_has_atomic=\"8\"\ntarget_has_atomic=\"ptr\"\ntarget_has_atomic_equal_alignment=\"128\"\ntarget_has_atomic_equal_alignment=\"16\"\ntarget_has_atomic_equal_alignment=\"32\"\ntarget_has_atomic_equal_alignment=\"64\"\ntarget_has_atomic_equal_alignment=\"8\"\ntarget_has_atomic_equal_alignment=\"ptr\"\ntarget_has_atomic_load_store\ntarget_has_atomic_load_store=\"128\"\ntarget_has_atomic_load_store=\"16\"\ntarget_has_atomic_load_store=\"32\"\ntarget_has_atomic_load_store=\"64\"\ntarget_has_atomic_load_store=\"8\"\ntarget_has_atomic_load_store=\"ptr\"\ntarget_has_reliable_f128\ntarget_has_reliable_f16\ntarget_has_reliable_f16_math\ntarget_os=\"scarlet\"\ntarget_pointer_width=\"64\"\ntarget_vendor=\"unknown\"\nub_checks\n",
+          "stderr": ""
+        },
+        {
+          "phase": "static-std",
+          "exit": 0,
+          "passed": true,
+          "artifact": "hello",
+          "artifact_exists": true,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "--edition=2021",
+            "--target",
+            "aarch64-unknown-scarlet",
+            "-Cpanic=abort",
+            "hello.rs",
+            "-o",
+            "hello"
+          ],
+          "stdout": "",
+          "stderr": ""
+        },
+        {
+          "phase": "cdylib",
+          "exit": 0,
+          "passed": false,
+          "artifact": "libprobe-c.so",
+          "artifact_exists": false,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "--edition=2021",
+            "--target",
+            "aarch64-unknown-scarlet",
+            "-Cpanic=abort",
+            "--crate-type=cdylib",
+            "cdylib.rs",
+            "-o",
+            "libprobe-c.so"
+          ],
+          "stdout": "",
+          "stderr": "warning: dropping unsupported crate type `cdylib` for target `aarch64-unknown-scarlet`\n\nwarning: 1 warning emitted\n\n"
+        },
+        {
+          "phase": "rust-dylib",
+          "exit": 0,
+          "passed": false,
+          "artifact": "libprobe-rust.so",
+          "artifact_exists": false,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "--edition=2021",
+            "--target",
+            "aarch64-unknown-scarlet",
+            "-Cpanic=abort",
+            "--crate-type=dylib",
+            "dylib.rs",
+            "-o",
+            "libprobe-rust.so"
+          ],
+          "stdout": "",
+          "stderr": "warning: dropping unsupported crate type `dylib` for target `aarch64-unknown-scarlet`\n\nwarning: 1 warning emitted\n\n"
+        },
+        {
+          "phase": "guest-probe",
+          "exit": 0,
+          "passed": true,
+          "artifact": "native-rustc-probe",
+          "artifact_exists": true,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "--edition=2021",
+            "--target",
+            "aarch64-unknown-scarlet",
+            "-Cpanic=abort",
+            "/Users/petitstrawberry/.codex/worktrees/native-rustc-loader/Scarlet/tools/native-rustc/probe.rs",
+            "-o",
+            "native-rustc-probe"
+          ],
+          "stdout": "",
+          "stderr": ""
+        },
+        {
+          "phase": "libloading-build",
+          "exit": 0,
+          "passed": true,
+          "artifact": "libloading.rlib",
+          "artifact_exists": true,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "--edition=2021",
+            "--target",
+            "aarch64-unknown-scarlet",
+            "-Cpanic=abort",
+            "--crate-name=libloading",
+            "--crate-type=rlib",
+            "/Users/petitstrawberry/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libloading-0.8.9/src/lib.rs",
+            "-o",
+            "libloading.rlib"
+          ],
+          "stdout": "",
+          "stderr": "warning: function `cstr_cow_from_bytes` is never used\n  --> /Users/petitstrawberry/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libloading-0.8.9/src/util.rs:10:15\n   |\n10 | pub(crate) fn cstr_cow_from_bytes(slice: &[u8]) -> Result<Cow<'_, CStr>, Error> {\n   |               ^^^^^^^^^^^^^^^^^^^\n   |\n   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default\n\nwarning: function `ensure_compatible_types` is never used\n  --> /Users/petitstrawberry/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libloading-0.8.9/src/util.rs:28:15\n   |\n28 | pub(crate) fn ensure_compatible_types<T, E>() -> Result<(), Error> {\n   |               ^^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: 2 warnings emitted\n\n"
+        },
+        {
+          "phase": "libloading-api",
+          "exit": 1,
+          "passed": false,
+          "command": [
+            "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+            "--edition=2021",
+            "--target",
+            "aarch64-unknown-scarlet",
+            "-Cpanic=abort",
+            "--emit=metadata",
+            "libloading_api.rs",
+            "--extern",
+            "libloading=libloading.rlib"
+          ],
+          "stdout": "",
+          "stderr": "error[E0432]: unresolved import `libloading::Library`\n  --> libloading_api.rs:1:5\n   |\n 1 | use libloading::Library;\n   |     ^^^^^^^^^^^^^^^^^^^ no `Library` in the root\n   |\nnote: found an item that was configured out\n  --> /Users/petitstrawberry/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libloading-0.8.9/src/lib.rs:53:22\n   |\n52 | #[cfg(any(unix, windows, libloading_docs))]\n   |          -------------------------------- the item is gated here\n53 | pub use self::safe::{Library, Symbol};\n   |                      ^^^^^^^\n\nerror: aborting due to 1 previous error\n\nFor more information about this error, try `rustc --explain E0432`.\n"
+        }
+      ],
+      "probe_command": [
+        "/Applications/Xcode.app/Contents/Developer/usr/bin/python3",
+        "/Users/petitstrawberry/.codex/worktrees/native-rustc-loader/Scarlet/tools/native-rustc/probe_target.py",
+        "--rustc",
+        "/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/bin/rustc",
+        "--target",
+        "aarch64-unknown-scarlet",
+        "--output",
+        "/private/tmp/scarlet-native-rustc-final-aarch64-unknown-scarlet",
+        "--libloading-source",
+        "/Users/petitstrawberry/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libloading-0.8.9"
+      ],
+      "probe_exit": 1,
+      "elf_artifacts": [
+        {
+          "path": "/private/tmp/scarlet-native-rustc-final-aarch64-unknown-scarlet/hello",
+          "sha256": "d06bc4f5177fb8c17645211f1262d7c8e51495c607697ecc68cc0447e0097afa",
+          "bytes": 112664,
+          "elf_type": "EXEC",
+          "machine": "aarch64",
+          "osabi": 83,
+          "entry": 2214672,
+          "interpreter": null,
+          "needed": [],
+          "rpath": null,
+          "runpath": null,
+          "soname": null,
+          "tls": [],
+          "relocations": {},
+          "undefined_relocated_symbols": [],
+          "hash_tables": [],
+          "textrel": false,
+          "relr": false,
+          "symbol_versioning": false,
+          "init_fini": []
+        },
+        {
+          "path": "/private/tmp/scarlet-native-rustc-final-aarch64-unknown-scarlet/native-rustc-probe",
+          "sha256": "26044286db387151ce4705ee7c6658118b116f419872eb0f2aa7ca269a33f6fd",
+          "bytes": 325272,
+          "elf_type": "EXEC",
+          "machine": "aarch64",
+          "osabi": 83,
+          "entry": 2321448,
+          "interpreter": null,
+          "needed": [],
+          "rpath": null,
+          "runpath": null,
+          "soname": null,
+          "tls": [],
+          "relocations": {},
+          "undefined_relocated_symbols": [],
+          "hash_tables": [],
+          "textrel": false,
+          "relr": false,
+          "symbol_versioning": false,
+          "init_fini": []
+        }
+      ]
+    }
+  ]
+}

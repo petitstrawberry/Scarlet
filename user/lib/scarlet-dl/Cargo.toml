@@ -1,0 +1,16 @@
+[package]
+name = "scarlet-dl"
+version = "0.1.0"
+edition = "2024"
+description = "Scarlet Native process-owned ELF dynamic loading runtime"
+
+[workspace]
+
+[dependencies]
+scarlet-loader-core = { path = "../scarlet-loader-core" }
+
+[target.'cfg(target_os = "scarlet")'.dependencies]
+scarlet-sys = { path = "../scarlet-sys" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("scarlet"))'] }

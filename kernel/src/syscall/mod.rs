@@ -56,7 +56,7 @@
 //! - Shared Memory: Create (620)
 //!
 //! ### Memory Mapping Operations (700-799)
-//! - MemoryMap (700), MemoryUnmap (701)
+//! - MemoryMap (700), MemoryUnmap (701), MemoryProtect (702)
 //!
 //! ### Socket Operations (900-999)
 //! - SocketCreate (900), SocketBind (901), SocketListen (902), SocketConnect (903)
@@ -107,7 +107,9 @@ use crate::network::syscall::{
     sys_socket_listen, sys_socket_recvfrom, sys_socket_sendto, sys_socket_shutdown, sys_socketpair,
 };
 use crate::object::capability::file::{sys_file_metadata, sys_file_seek, sys_file_truncate};
-use crate::object::capability::memory_mapping::{sys_memory_map, sys_memory_unmap};
+use crate::object::capability::memory_mapping::{
+    sys_memory_map, sys_memory_protect, sys_memory_unmap,
+};
 use crate::object::capability::selectable::syscall::sys_poll;
 use crate::object::capability::stream::{sys_stream_read, sys_stream_write};
 use crate::object::handle::syscall::{
@@ -361,6 +363,7 @@ syscall_table! {
     // === Memory Mapping Operations ===
     MemoryMap = 700 => sys_memory_map,     // Memory map operation (mmap)
     MemoryUnmap = 701 => sys_memory_unmap, // Memory unmap operation (munmap)
+    MemoryProtect = 702 => sys_memory_protect, // Change existing page protections
 
     // === Socket Operations (Scarlet Native) ===
     SocketCreate = 900 => sys_socket_create,     // Create a socket (domain/type/protocol)

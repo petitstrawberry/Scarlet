@@ -1,0 +1,17 @@
+[package]
+name = "scarlet-ld"
+version = "0.1.0"
+edition = "2024"
+description = "Scarlet Native static ELF program interpreter"
+
+[workspace]
+
+[dependencies]
+scarlet-dl = { path = "../lib/scarlet-dl" }
+scarlet-sys = { path = "../lib/scarlet-sys" }
+
+[profile.release]
+panic = "abort"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("scarlet"))'] }

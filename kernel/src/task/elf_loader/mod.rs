@@ -121,6 +121,7 @@ pub const AT_HWCAP: u64 = 16; // Machine dependent hints about processor capabil
 pub const AT_CLKTCK: u64 = 17; // Frequency of times()
 pub const AT_RANDOM: u64 = 25; // Address of 16 random bytes
 pub const AT_HWCAP2: u64 = 26; // Second hardware capability word
+pub const AT_EXECFN: u64 = 31; // Executable pathname in the process filesystem view
 
 /// Auxiliary Vector entry
 #[derive(Debug, Clone, Copy)]
@@ -1094,6 +1095,74 @@ fn encode_auxiliary_vector(
     Ok(bytes)
 }
 
+/// Return an executable path only when it names this exact VFS node in the
+/// new process view. Environment exec may carry a file from another view;
+/// neither its source pathname nor argv[0] identifies a target-view path.
+fn native_executable_path(file: &dyn FileObject, task: &Task) -> Option<String> {
+    let file = file
+        .as_any()
+        .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()?;
+    let vfs = task.get_vfs()?;
+    let path = vfs.build_absolute_path(file.get_vfs_entry(), file.get_mount_point());
+    let (resolved, _) = vfs.resolve_path(&path).ok()?;
+    let expected = file.get_vfs_entry().node();
+    let actual = resolved.node();
+    if expected.id() != actual.id()
+        || !alloc::sync::Weak::ptr_eq(&expected.filesystem()?, &actual.filesystem()?)
+    {
+        return None;
+    }
+    Some(path)
+}
+
+/// Add the authoritative main-image handle for a native interpreter. The
+/// caller is constructing an unpublished exec image with an exclusive handle
+/// table. The interpreter owns AT_EXECFD, must seek to zero before reading,
+/// and closes it after loading. CLOEXEC also prevents later exec leakage.
+/// AT_EXECFN is optional origin metadata; it never replaces the held file.
+pub(crate) fn setup_native_exec_stack(
+    task: &Task,
+    file: &crate::object::KernelObject,
+    argv: &[&str],
+    envp: &[&str],
+    top: usize,
+    load_result: &LoadElfResult,
+) -> Result<(usize, usize), &'static str> {
+    use crate::object::handle::{
+        AccessMode, HandleMetadata, HandleTable, HandleType, SpecialSemantics,
+    };
+    let mut auxv = build_auxiliary_vector(load_result);
+    let execfn = file
+        .as_file()
+        .and_then(|file| native_executable_path(file, task));
+    let handle = if matches!(load_result.mode, ExecutionMode::Dynamic { .. }) {
+        // Never consume a vacant standard-stream slot in the new image.
+        let handle = (3..HandleTable::MAX_HANDLES as u32)
+            .find(|handle| !task.handle_table.is_valid_handle(*handle))
+            .ok_or("No handle available for executable handoff")?;
+        task.handle_table.insert_exec_handle(
+            handle,
+            file.clone(),
+            HandleMetadata {
+                handle_type: HandleType::Regular,
+                access_mode: AccessMode::ReadOnly,
+                special_semantics: Some(SpecialSemantics::CloseOnExec),
+            },
+        )?;
+        auxv.insert(auxv.len() - 1, AuxVec::new(AT_EXECFD, handle as u64));
+        Some(handle)
+    } else {
+        None
+    };
+    let result = setup_native_stack(task, argv, envp, top, &auxv, execfn.as_deref());
+    if result.is_err() {
+        if let Some(handle) = handle {
+            drop(task.handle_table.remove(handle));
+        }
+    }
+    result
+}
+
 /// Construct one native process-start stack: argc, argv, NULL, envp, NULL,
 /// auxv, then string storage. Metadata always uses native words and the stack
 /// pointer is aligned to 16 bytes. RISC-V and AArch64 share this layout.
@@ -1103,14 +1172,23 @@ pub(crate) fn setup_native_stack(
     envp: &[&str],
     top: usize,
     auxv: &[AuxVec],
+    execfn: Option<&str>,
 ) -> Result<(usize, usize), &'static str> {
+    let mut auxv = auxv.to_vec();
+    if execfn.is_some() {
+        if auxv.last().map(|entry| entry.a_type) != Some(AT_NULL) {
+            return Err("Native auxiliary vector is unterminated");
+        }
+        auxv.insert(auxv.len() - 1, AuxVec::new(AT_EXECFN, 0));
+    }
     let model = scarlet_abi::data_model::AbiDataModel::NATIVE;
     let word = model.word_width.bytes();
-    let aux_bytes =
-        encode_auxiliary_vector(auxv, model).map_err(|_| "Invalid native auxiliary vector")?;
+    let mut aux_bytes =
+        encode_auxiliary_vector(&auxv, model).map_err(|_| "Invalid native auxiliary vector")?;
     let strings_size = argv
         .iter()
         .chain(envp)
+        .chain(execfn.iter())
         .try_fold(0usize, |size, string| {
             if string.as_bytes().contains(&0) {
                 return None;
@@ -1154,6 +1232,16 @@ pub(crate) fn setup_native_stack(
             pointer += word;
         }
         pointer += word; // Zero-filled argv/envp terminator.
+    }
+    if let Some(execfn) = execfn {
+        bytes[string_offset..string_offset + execfn.len()].copy_from_slice(execfn.as_bytes());
+        model
+            .write_word(
+                &mut aux_bytes,
+                (auxv.len() - 2) * 2 * word + word,
+                (start + string_offset) as u64,
+            )
+            .map_err(|_| "Invalid executable path address")?;
     }
     bytes[pointer..pointer + aux_bytes.len()].copy_from_slice(&aux_bytes);
     crate::library::std::usercopy::copy_to_user(task, start, &bytes)

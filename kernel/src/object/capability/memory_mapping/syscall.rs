@@ -426,6 +426,46 @@ fn handle_anonymous_mapping(
     final_vaddr
 }
 
+/// Change existing native user pages to `prot` (read=1, write=2, execute=4).
+/// The address must be page-aligned; the nonzero length is rounded up. Returns
+/// zero on success or `usize::MAX` on invalid ranges or unsupported protections.
+/// Anonymous/private task memory supports adding permissions; object/device
+/// mappings currently support only reducing their existing permissions.
+pub fn sys_memory_protect(trapframe: &mut Trapframe) -> usize {
+    let Some(task) = mytask() else {
+        return usize::MAX;
+    };
+    let address = trapframe.get_arg(0);
+    let length = trapframe.get_arg(1);
+    let prot = trapframe.get_arg(2);
+    trapframe.increment_pc_next(&task);
+    if protect_user_memory(&task, address, length, prot).is_ok() {
+        0
+    } else {
+        usize::MAX
+    }
+}
+
+fn protect_user_memory(
+    task: &crate::task::Task,
+    address: usize,
+    length: usize,
+    prot: usize,
+) -> Result<(), &'static str> {
+    if length == 0 {
+        return Err("Memory protection length is zero");
+    }
+    let length = length
+        .checked_add(PAGE_SIZE - 1)
+        .ok_or("Memory protection length overflows")?
+        & !(PAGE_SIZE - 1);
+    let end = address
+        .checked_add(length - 1)
+        .ok_or("Memory protection address overflows")?;
+    task.vm_manager
+        .protect_memory_map_range(MemoryArea::new(address, end), prot)
+}
+
 /// System call for unmapping memory from a KernelObject or anonymous mapping
 ///
 /// # Arguments
@@ -533,6 +573,180 @@ pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn native_protect_preserves_anonymous_data_and_lazy_page_indices() {
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+        use crate::object::capability::memory_mapping::AccessOp;
+        let task = crate::task::new_user_task("native-protect".into(), 0);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let address = handle_anonymous_mapping(
+            &task,
+            0,
+            3 * PAGE_SIZE,
+            3,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+        );
+        assert_ne!(address, usize::MAX);
+        let original = task.vm_manager.search_memory_map(address).unwrap();
+        // Protecting an untouched middle page must retain its owner's original
+        // page index and zero physical sentinel, rather than inventing a PA.
+        protect_user_memory(&task, address + PAGE_SIZE, 1, PROT_READ | PROT_EXEC).unwrap();
+        let middle = task
+            .vm_manager
+            .search_memory_map(address + PAGE_SIZE)
+            .unwrap();
+        assert_eq!(middle.vm_start, address);
+        assert_eq!(middle.pmarea, original.pmarea);
+        assert!(Arc::ptr_eq(
+            middle.owner.as_ref().unwrap(),
+            original.owner.as_ref().unwrap()
+        ));
+        assert_eq!(middle.permissions, 0x0d);
+        assert_eq!(
+            task.vm_manager
+                .search_memory_map(address)
+                .unwrap()
+                .permissions,
+            0x0b
+        );
+        assert_eq!(
+            task.vm_manager
+                .search_memory_map(address + 2 * PAGE_SIZE)
+                .unwrap()
+                .permissions,
+            0x0b
+        );
+        // Restore RW, write a value, then seal RX. Existing private COW data
+        // must survive both the VMA split and its PTE permission replacement.
+        protect_user_memory(
+            &task,
+            address + PAGE_SIZE,
+            PAGE_SIZE,
+            PROT_READ | PROT_WRITE,
+        )
+        .unwrap();
+        copy_to_user(&task, address + PAGE_SIZE + 7, b"loader-code").unwrap();
+        let backing = task
+            .vm_manager
+            .translate_to_phys(address + PAGE_SIZE)
+            .unwrap();
+        protect_user_memory(&task, address + PAGE_SIZE, PAGE_SIZE, PROT_READ | PROT_EXEC).unwrap();
+        assert_eq!(
+            task.vm_manager.translate_to_phys(address + PAGE_SIZE),
+            Some(backing)
+        );
+        assert_eq!(
+            task.vm_manager
+                .translate_to_phys_with_access(address + PAGE_SIZE, AccessOp::Store),
+            None
+        );
+        assert_eq!(
+            task.vm_manager
+                .translate_to_phys_with_access(address + PAGE_SIZE, AccessOp::Instruction),
+            Some(backing)
+        );
+        let mut bytes = [0; 11];
+        copy_from_user(&task, address + PAGE_SIZE + 7, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"loader-code");
+        protect_user_memory(&task, address + PAGE_SIZE, PAGE_SIZE, 0).unwrap();
+        assert_eq!(
+            task.vm_manager
+                .translate_to_phys_with_access(address + PAGE_SIZE, AccessOp::Load),
+            None
+        );
+        protect_user_memory(&task, address + PAGE_SIZE, PAGE_SIZE, PROT_READ).unwrap();
+        copy_from_user(&task, address + PAGE_SIZE + 7, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"loader-code");
+    }
+
+    #[test_case]
+    fn native_protect_rejects_shared_device_and_object_permission_increases() {
+        use crate::object::capability::memory_mapping::{MemoryMappingInfo, MemoryMappingOps};
+        use crate::vm::vmem::{MemoryAttribute, PhysicalMemoryArea};
+        struct RestrictedOwner;
+        impl MemoryMappingOps for RestrictedOwner {
+            fn get_mapping_info(
+                &self,
+                _: usize,
+                _: usize,
+            ) -> Result<MemoryMappingInfo, &'static str> {
+                Err("No direct backing")
+            }
+        }
+        let anonymous: Arc<dyn MemoryMappingOps> = Arc::new(AnonymousPageOwner::new());
+        let restricted: Arc<dyn MemoryMappingOps> = Arc::new(RestrictedOwner);
+        for (shared, attribute, owner) in [
+            (true, MemoryAttribute::Normal, anonymous.clone()),
+            (false, MemoryAttribute::Device, anonymous),
+            (false, MemoryAttribute::Normal, restricted),
+        ] {
+            let task = crate::task::new_user_task("restricted-native-protect".into(), 0);
+            let address = 0x10000;
+            task.vm_manager
+                .add_memory_map(VirtualMemoryMap {
+                    pmarea: PhysicalMemoryArea::new(0, 0),
+                    vmarea: MemoryArea::new(address, address + PAGE_SIZE - 1),
+                    vm_start: address,
+                    permissions: 0x0b,
+                    is_shared: shared,
+                    memory_attribute: attribute,
+                    owner: Some(owner.clone()),
+                })
+                .unwrap();
+            assert!(protect_user_memory(&task, address, PAGE_SIZE, PROT_READ | PROT_EXEC).is_err());
+            assert_eq!(
+                task.vm_manager
+                    .search_memory_map(address)
+                    .unwrap()
+                    .permissions,
+                0x0b
+            );
+            // Reductions remain legal and preserve the restricted backing.
+            protect_user_memory(&task, address, PAGE_SIZE, PROT_READ).unwrap();
+            let map = task.vm_manager.search_memory_map(address).unwrap();
+            assert_eq!(map.permissions, 0x09);
+            assert_eq!(map.memory_attribute, attribute);
+            assert_eq!(map.is_shared, shared);
+            assert!(Arc::ptr_eq(map.owner.as_ref().unwrap(), &owner));
+            assert!(
+                protect_user_memory(&task, address, PAGE_SIZE, PROT_READ | PROT_WRITE).is_err()
+            );
+        }
+    }
+
+    #[test_case]
+    fn native_protect_rejects_invalid_ranges_without_changing_permissions() {
+        let task = crate::task::new_user_task("invalid-native-protect".into(), 0);
+        let address = handle_anonymous_mapping(
+            &task,
+            0,
+            PAGE_SIZE,
+            1,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+        );
+        assert_ne!(address, usize::MAX);
+        for (start, length, prot) in [
+            (address, 0, PROT_READ),
+            (address + 1, PAGE_SIZE, PROT_READ),
+            (address, usize::MAX, PROT_READ),
+            (usize::MAX - PAGE_SIZE + 1, PAGE_SIZE, PROT_READ),
+            (address, PAGE_SIZE, 0x8),
+            (address, 2 * PAGE_SIZE, PROT_READ),
+        ] {
+            assert!(protect_user_memory(&task, start, length, prot).is_err());
+            assert_eq!(
+                task.vm_manager
+                    .search_memory_map(address)
+                    .unwrap()
+                    .permissions,
+                0x0b
+            );
+        }
+    }
 
     #[test_case]
     fn owner_backed_mapping_uses_unresolved_physical_sentinel() {

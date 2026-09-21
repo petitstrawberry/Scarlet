@@ -1,0 +1,88 @@
+{
+  "recorded_date": "2026-09-21",
+  "harness_commit": "60230b0b073e881d362c6284c7b4c3f1f2273b5e",
+  "scope": "An Actions-built aarch64-unknown-scarlet rustc loads Cranelift, checks a Rust source file, compiles and links it with native Wild, and executes the generated program inside Scarlet.",
+  "architecture": "aarch64",
+  "acceleration": "hvf",
+  "result": "FULL_PASS",
+  "full_compilation_verified": true,
+  "build_artifact": {
+    "run": "https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35566457388",
+    "artifact_id": 10624851528,
+    "artifact_name": "native-host-aarch64-unknown-scarlet",
+    "zip_sha256": "1fe596e3c280ad77f31db788f97c0ceecfb2d2d6575d2106bdda60ceb117368d",
+    "payload_tar_sha256": "34ee96d1d3b39c1ee194200474c47a23cdccbd404ef5316a31f764e6dcb6fee5",
+    "manifest_sha256": "351fb7dd8d95765b0870e9101a985199453afc4b1841a7c1d2cd6f3e512690e8",
+    "packaging_commit": "daba8df7fb8dd51d05e0f0246dad367acfb145ca",
+    "source_branch_commit": "a5a8cf7cd6ecf61eea99a075dbb2836118fbc6ac",
+    "rust_commit": "39c689a4859b9d8ee1828720135defd125c03d31",
+    "backend": "cranelift",
+    "rustc_sha256": "b5daf46406391570b77cad248a639d13ecd236c4aebd75981d90b7bcf378c0b4",
+    "rustc_driver_sha256": "2f831b76a4fdbe00a2b80c161ee736a9433caf2125c661cc913f8b6891347bca",
+    "codegen_backend_sha256": "37a3ac198d105194ea46f8b6fb07fb0caada54328544f0c58af8b556061b71ba"
+  },
+  "staged_inputs": {
+    "manifest_sha256": "11c6e4dd0490f4ae5b841d3266ced79d2bd1920e88fd5b9280023073371c7f1a",
+    "scarlet_ld_sha256": "b0e928a19b8b2e0eab36498603be2cc619df5117de1fa0f7bd9deae9ee7e138d",
+    "native_rustc_probe_sha256": "48a473cabec935d0c599a1e6a1a145e6c7f6685c7b852511f2b77b0ce3032f6c",
+    "wild_sha256": "42cc5a6d06e557a304273b5f91fe41f40296da2b5cfad05eb699b31e9a3ebb62",
+    "wild_build_run": "https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35555398664",
+    "kernel_sha256": "25a262dd3eed7821fd9ec07701d1df45913ef53d7d7bc1766590bf9f78c0d3d0"
+  },
+  "qemu": {
+    "result": "FULL_PASS",
+    "qemu_exit_code": 0,
+    "elapsed_seconds": 9.873,
+    "cpus": 4,
+    "result_sha256": "71d59c27d7ab16f88590970ac693758a2d63c31d16b9ff2bb76bfa69d228a7b1",
+    "commands_sha256": "f7e075843053515b61d3626ac3e1e7425a33cc8333b369c5b9bf2a18d6b18317",
+    "serial_log_sha256": "ff8a9f1de433d5ab0a5bca1f3223cc70e125bdcc70d0893287c57cbcdc58f49b",
+    "phases": [
+      {
+        "name": "version",
+        "exit": 0,
+        "elapsed_ms": 828
+      },
+      {
+        "name": "cfg",
+        "exit": 0,
+        "elapsed_ms": 409
+      },
+      {
+        "name": "frontend",
+        "exit": 0,
+        "elapsed_ms": 880
+      },
+      {
+        "name": "compile",
+        "exit": 0,
+        "elapsed_ms": 1740
+      },
+      {
+        "name": "execute",
+        "exit": 37,
+        "elapsed_ms": 70
+      }
+    ],
+    "generated_executable": {
+      "bytes": 113740,
+      "sha256": "ad74912772b70136818be6c2abecd68b398eac5c5c59d4b07e84d13d891af43d"
+    },
+    "pass_file_sha256": "488ec506264c2975576a2c477ee5f6fb92edb7131280b864039e54c49478deb7",
+    "serial_markers": [
+      "NATIVE_RUSTC THREAD PASS",
+      "NATIVE_RUSTC SCOPED_THREAD PASS",
+      "NATIVE_RUSTC STATUS cfg exit=Some(0)",
+      "NATIVE_RUSTC STATUS frontend exit=Some(0)",
+      "NATIVE_RUSTC STATUS compile exit=Some(0)",
+      "SCARLET_NATIVE_RUSTC_HELLO_OK",
+      "NATIVE_RUSTC STATUS execute exit=Some(37)",
+      "NATIVE_RUSTC FULL PASS"
+    ]
+  },
+  "limitations": [
+    "This acceptance run covers AArch64 only; the native rustc Actions workflow does not yet build an RV64 host compiler.",
+    "Cargo, proc-macro execution, compiler self-hosting and parallel rustc with more than one compiler worker remain outside this probe.",
+    "Rust ABI compatibility remains toolchain-private, and the runtime loader still does not implement native ELF TLS, symbol versioning, IFUNC, RELR, RPATH/RUNPATH or unloading."
+  ]
+}

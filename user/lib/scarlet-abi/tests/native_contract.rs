@@ -221,7 +221,7 @@ fn native_syscall_numbers() {
         SocketSendHandleAndData = 632, SocketRecvHandleAndData = 633,
         EventHandlerRegister = 640, EventHandlerUnregister = 641,
         EventMask = 642, EventReturn = 643, EventHandlerRegisterWithRestorer = 644,
-        MemoryMap = 700, MemoryUnmap = 701, SocketCreate = 900, SocketBind = 901,
+        MemoryMap = 700, MemoryUnmap = 701, MemoryProtect = 702, SocketCreate = 900, SocketBind = 901,
         SocketListen = 902, SocketConnect = 903, SocketAccept = 904,
         Socketpair = 905, SocketShutdown = 906, SocketRecvFrom = 907,
         SocketSendTo = 908, SocketBindInterface = 909, NetworkSetIpv4 = 910,

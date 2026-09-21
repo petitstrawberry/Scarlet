@@ -8,7 +8,7 @@ pub mod syscall;
 
 use crate::vm::vmem::MemoryAttribute;
 
-pub use syscall::{sys_memory_map, sys_memory_unmap};
+pub use syscall::{sys_memory_map, sys_memory_protect, sys_memory_unmap};
 
 /// Information needed to map a region of an object into virtual memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +148,13 @@ pub trait MemoryMappingOps: Send + Sync {
     ///   A particular range can still be rejected by `get_mapping_info`.
     fn supports_mmap(&self) -> bool {
         true
+    }
+
+    /// Whether a private normal-memory mapping may gain read/write/execute
+    /// permissions after creation. Anonymous and fork-COW backing can opt in;
+    /// object/device mappings retain their existing permission ceiling.
+    fn supports_permission_changes(&self) -> bool {
+        false
     }
 
     /// Return whether this object supports private copy-on-write mappings.

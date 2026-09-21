@@ -19,8 +19,7 @@ use crate::{
     late_initcall, register_abi,
     syscall::syscall_handler,
     task::elf_loader::{
-        LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy, build_auxiliary_vector,
-        setup_native_stack,
+        LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy, setup_native_exec_stack,
     },
     vm::setup_user_stack,
 };
@@ -875,7 +874,6 @@ impl AbiModule for ScarletAbi {
                             usize::try_from(elf_result.entry_point)
                                 .map_err(|_| "ELF entry exceeds native address width")?,
                         );
-                        let auxv = build_auxiliary_vector(&elf_result);
 
                         // Reset task's registers for clean start
                         task.vcpu.lock().reset_iregs();
@@ -883,8 +881,14 @@ impl AbiModule for ScarletAbi {
                         task.vcpu.lock().set_sp(stack_pointer);
 
                         // Setup argv/envp on stack following Unix and RISC-V conventions
-                        let (adjusted_sp, argv_ptr) =
-                            setup_native_stack(task, argv, envp, stack_pointer, &auxv)?;
+                        let (adjusted_sp, argv_ptr) = setup_native_exec_stack(
+                            task,
+                            file_object,
+                            argv,
+                            envp,
+                            stack_pointer,
+                            &elf_result,
+                        )?;
                         task.vcpu.lock().set_sp(adjusted_sp);
 
                         // crate::println!(

@@ -1,0 +1,11 @@
+[package]
+name = "scarlet-loader-core"
+version = "0.1.0"
+edition = "2024"
+description = "Checked no_std ELF64 native dynamic loader for Scarlet"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[workspace]

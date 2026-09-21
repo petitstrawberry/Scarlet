@@ -1,0 +1,15 @@
+[package]
+name = "scarlet-smoke-rust"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+debug = 0
+
+[workspace]

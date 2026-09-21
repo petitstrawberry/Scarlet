@@ -955,6 +955,8 @@ pub enum Syscall {
     // Memory mapping operations
     MemoryMap = 700,
     MemoryUnmap = 701,
+    /// Change page protections: (address, length, RWX bits 1/2/4), 0 or usize::MAX.
+    MemoryProtect = 702,
 
     // Socket operations
     SocketCreate = 900,
