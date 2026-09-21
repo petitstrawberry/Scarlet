@@ -75,6 +75,8 @@ def main():
     # Stage only link inputs. Pre-linked host test executables cannot satisfy the probe.
     for name in ("main.o", "answer.o", "bias.o", "libanswer.a"):
         shutil.copy2(artifact / "fixtures" / name, staging / "opt/native-linker/fixtures" / name)
+    if (artifact / "fixtures/rust").is_dir():
+        shutil.copytree(artifact / "fixtures/rust", staging / "opt/native-linker/fixtures/rust")
     if sum(p.stat().st_size for p in staging.rglob("*") if p.is_file()) >= 256 * 1048576:
         raise ValueError("linker initramfs exceeds the 256 MiB bring-up limit")
     archive, boot_image, cache = output / "initramfs.cpio", output / "boot.img", output / "limine-cache"

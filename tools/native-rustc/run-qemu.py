@@ -103,7 +103,7 @@ def main():
     parser.add_argument("--rustc", type=guest_path, default="/opt/native-rustc/bin/rustc")
     parser.add_argument("--sysroot", type=guest_path, default="/opt/native-rustc")
     parser.add_argument("--linker", type=guest_path, help="native Scarlet linker executable already in staging; required in full mode")
-    parser.add_argument("--linker-flavor", help="rustc -C linker-flavor, e.g. gnu-lld for a direct native ld.lld")
+    parser.add_argument("--linker-flavor", help="rustc -C linker-flavor, e.g. ld.lld for direct native Wild/LLD")
     parser.add_argument("--backend", type=guest_path, help="native codegen backend DSO already in staging")
     parser.add_argument("--frontend-only", action="store_true", help="diagnose version/cfg/frontend only; never a full success")
     parser.add_argument("--dummy", action="store_true", help="dummy backend, valid only with --frontend-only")

@@ -22,6 +22,13 @@ and dependency ports. Its successful build would establish ELF identity and
 cross compilation, not execution in Scarlet. The guest acceptance below remains
 required. See [the build recipe](../../tools/native-rustc/HOST-BUILD.md).
 
+The separate [native Wild linker port](https://github.com/petitstrawberry/scarlet-rust-nix/pull/21)
+now builds on Actions for both targets. Its initial native guest acceptance
+linked fresh object/archive inputs and executed both outputs on AArch64 and
+RV64. See [linker evidence and usage](../../tools/native-linker/README.md).
+This removes the previously unimplemented build-time linker as a bring-up task;
+integration with native rustc remains subject to the full acceptance below.
+
 ## Verified baseline, 2026-09-21
 
 The inspected Rust fork was
@@ -235,8 +242,8 @@ that native linker, then executes the resulting program. Success requires the
 exact stdout `SCARLET_NATIVE_RUSTC_HELLO_OK` and exit status 37. Only this path
 writes `PASS` and prints `NATIVE_RUSTC FULL PASS`. `--backend` can select the
 matching native Cranelift DSO; `--linker-flavor` handles a direct linker such as
-`gnu-lld`. Neither the assembler nor native linker is currently supplied by the
-compiler-only Actions artifact.
+`ld.lld`. The native Wild binary is supplied by the separate linker Actions
+artifact. The compiler-only artifact does not include a native assembler.
 
 [run-qemu.py](../../tools/native-rustc/run-qemu.py) boots an isolated ext2 root
 containing the prepared toolchain overlay. It requires the standard static
