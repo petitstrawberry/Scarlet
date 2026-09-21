@@ -47,6 +47,16 @@ The tested distribution layout installs under
 `/system/bin/scarlet-ld` remains owned by the matching Scarlet image and is not
 part of the toolchain archive.
 
+The Scarlet full distribution composes
+[`bundles/rust-toolchain`](../../bundles/rust-toolchain/bundle.toml), which
+installs the published `v0.1.0-rc.1` archives and selects that version through
+`/opt/scarlet/toolchains/rust/current`. The common
+[`bundles/base`](../../bundles/base/bundle.toml) installs the matching runtime
+interpreter at `/system/bin/scarlet-ld` for AArch64 and RISC-V64; its
+architecture filter omits that ELF64-only layer for RV32. Interactive shells
+include both `/system/bin` and the selected toolchain's `bin` directory in
+`PATH`; Cargo is not included yet.
+
 | Target | VM | Result | Total guest run | Native-host Actions run |
 | --- | --- | --- | ---: | --- |
 | `aarch64-unknown-scarlet` | HVF, 4 CPUs | `FULL_PASS` | 10.368 s | [35566457388](https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35566457388) |

@@ -1,0 +1,18 @@
+# Scarlet-native Rust compiler toolchain.
+#
+# The archive contains rustc, matching static target libraries, the Cranelift
+# backend, and Wild. The runtime interpreter is owned by bundles/base and lives
+# at /system/bin/scarlet-ld.
+
+[[layers]]
+kind = "archive"
+url = "https://github.com/petitstrawberry/scarlet-rust-nix/releases/download/v0.1.0-rc.1/native-rust-{arch}-v0.1.0-rc.1.tar.zst"
+sha256 = { aarch64 = "sha256:f3c2cd2a361eb36276c3052d547064b50aff7422d8616f903001c6c9067b444c", riscv64 = "sha256:4934fd276231ea79b221c88cd5403eb5ce2328e13e063a09b149e0de0ab1bafe" }
+format = "tar-zst"
+strip_components = 1
+to = "/opt/scarlet/toolchains/rust/v0.1.0-rc.1"
+
+[[layers]]
+kind = "copy"
+source = "fs"
+to = "/"
