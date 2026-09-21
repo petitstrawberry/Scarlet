@@ -2,7 +2,7 @@
 # Scarlet Shell Initialization Script
 
 # Set environment variables
-export PATH=/bin
+export PATH=/opt/scarlet/toolchains/rust/current/bin:/system/bin:/bin
 export HOME=/root
 
 echo "Welcome to Scarlet Shell!"

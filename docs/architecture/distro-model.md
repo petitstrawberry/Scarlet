@@ -97,6 +97,9 @@ Scarlet/
     linux/
       bundle.toml
       rootfs/
+    rust-toolchain/
+      bundle.toml
+      fs/
     full/
       bundle.toml
   projects/
@@ -234,12 +237,13 @@ The current reference distro uses these bundle roles:
 
 | Bundle | Role |
 |---|---|
-| `base` | Minimal system files and core Scarlet services/commands. |
+| `base` | Minimal system files, core Scarlet services/commands, and the native ELF64 interpreter on supported architectures. |
 | `cli-utils` | Common command-line utilities. |
 | `desktop` | Desktop shell, UI demos, media, input, and desktop support files. |
 | `linux` | Architecture-specific Linux guest artifacts and config files. |
 | `experimental` | External or experimental apps, including git sources. |
-| `full` | Composes desktop, Linux, and experimental layers. |
+| `rust-toolchain` | Published Scarlet-native rustc, target libraries, codegen backend, and linkers. |
+| `full` | Composes desktop, Linux, experimental, and Rust toolchain layers. |
 
 ## Locking
 

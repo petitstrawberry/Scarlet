@@ -12,3 +12,7 @@ path = "../linux/bundle.toml"
 [[layers]]
 kind = "bundle"
 path = "../experimental/bundle.toml"
+
+[[layers]]
+kind = "bundle"
+path = "../rust-toolchain/bundle.toml"

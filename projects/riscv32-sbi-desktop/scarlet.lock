@@ -189,6 +189,57 @@ path = "../../user/std-bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
+bin = "ntpd"
+to = "/bin/ntpd"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.initramfs.layers]]
+kind = "cargo"
+bin = "cpufreqctl"
+to = "/bin/cpufreqctl"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.initramfs.layers]]
+kind = "cargo"
+package = "user-bin"
+bin = "storage-check"
+to = "/bin/storage-check"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.initramfs.layers]]
+kind = "cargo"
+bin = "gpu-info"
+to = "/bin/gpu-info"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.initramfs.layers]]
+kind = "cargo"
+bin = "power-info"
+to = "/bin/power-info"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.initramfs.layers]]
+kind = "cargo"
 bin = "abi-run"
 to = "/bin/abi-run"
 hash = "sha256:28cadd1003cef1f30232f801722a9b031cf40166ebc370c21a2f8e1c18561c13"
@@ -486,6 +537,57 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
+bin = "ntpd"
+to = "/bin/ntpd"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+bin = "cpufreqctl"
+to = "/bin/cpufreqctl"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "user-bin"
+bin = "storage-check"
+to = "/bin/storage-check"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+bin = "gpu-info"
+to = "/bin/gpu-info"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+bin = "power-info"
+to = "/bin/power-info"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
 bin = "abi-run"
 to = "/bin/abi-run"
 hash = "sha256:28cadd1003cef1f30232f801722a9b031cf40166ebc370c21a2f8e1c18561c13"
@@ -728,18 +830,18 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/scarlet-ui"
-git_ref = "e4ffcc6e2addff4f45a6abcb223a3f62494aa4b5"
-resolved_rev = "e4ffcc6e2addff4f45a6abcb223a3f62494aa4b5"
+git_ref = "e6e00f11c95de371057899ec05b7a832d04adc7f"
+resolved_rev = "e6e00f11c95de371057899ec05b7a832d04adc7f"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
 subdir = "examples/widget-factory"
 to = "/bin/widget-factory"
-hash = "sha256:8e047c225c157f6628c612f1a974250e098210feeff3ed7b6312d0ec6778d3d4"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/scarlet-ui"
-rev = "e4ffcc6e2addff4f45a6abcb223a3f62494aa4b5"
+rev = "e6e00f11c95de371057899ec05b7a832d04adc7f"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -871,6 +973,17 @@ hash = "sha256:aef6b82fe56315a81732b3dd00c4aa7d53a7a3c49a76fed728b452aa75e8571f"
 [sections.rootfs.layers.source]
 type = "path"
 path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "vulkan-canvas-demo"
+bin = "vulkan-canvas-demo"
+to = "/bin/vulkan-canvas-demo"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/vulkan-canvas-demo"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1008,68 +1121,79 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/carmine"
-git_ref = "de71bdc8826b1fd81ec58cca4f901a768755f82c"
-resolved_rev = "de71bdc8826b1fd81ec58cca4f901a768755f82c"
+git_ref = "5ed3e9270b4949e4ee27052e62d12443770d1884"
+resolved_rev = "5ed3e9270b4949e4ee27052e62d12443770d1884"
 package = "carmine"
 bin = "carmine"
 to = "/bin/carmine"
-hash = "sha256:c1e4c757d969523876acd1f55ed59659b09ab55a788039e6a70e9c66632f2496"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/carmine"
-rev = "de71bdc8826b1fd81ec58cca4f901a768755f82c"
+rev = "5ed3e9270b4949e4ee27052e62d12443770d1884"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/myrica"
-git_ref = "bae87e0a7da998d9c6bd25e30ff566bbc5324169"
-resolved_rev = "bae87e0a7da998d9c6bd25e30ff566bbc5324169"
+git_ref = "37a34c4195def793923cfb5868f41780aaded167"
+resolved_rev = "37a34c4195def793923cfb5868f41780aaded167"
 package = "myrica"
 bin = "myrica"
 to = "/bin/myrica"
-hash = "sha256:2141fde39aa7d97879e57d57df8f5effe31c90eea6343ffeb381ca571ae16b23"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/myrica"
-rev = "bae87e0a7da998d9c6bd25e30ff566bbc5324169"
+rev = "37a34c4195def793923cfb5868f41780aaded167"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/vellum"
-git_ref = "6b214d224fb97b26658de29858d6d03292d640bb"
-resolved_rev = "6b214d224fb97b26658de29858d6d03292d640bb"
+git_ref = "98dfc25b60a0b179ad8f0b65738f0d2191f160ea"
+resolved_rev = "98dfc25b60a0b179ad8f0b65738f0d2191f160ea"
 package = "vellum"
 bin = "vellum"
 to = "/bin/vellum"
-hash = "sha256:51713534c20f33b37068a04972a3882f3e710e6de08371b550d97db527e5c3d7"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/vellum"
-rev = "6b214d224fb97b26658de29858d6d03292d640bb"
+rev = "98dfc25b60a0b179ad8f0b65738f0d2191f160ea"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/boxcraft"
-git_ref = "903e890ab91fc120ac1aa5d68e07fdad9f4ac8df"
-resolved_rev = "903e890ab91fc120ac1aa5d68e07fdad9f4ac8df"
+git_ref = "859bb7b41c0c8fa46bc3cd3e54a0b607fb26f90e"
+resolved_rev = "859bb7b41c0c8fa46bc3cd3e54a0b607fb26f90e"
 package = "boxcraft"
 bin = "boxcraft"
 to = "/bin/boxcraft"
-hash = "sha256:be97c9f87cd570587eb5aaa222e65437a9e7282083ed9a7db771b43b42177ad0"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/boxcraft"
-rev = "903e890ab91fc120ac1aa5d68e07fdad9f4ac8df"
+rev = "859bb7b41c0c8fa46bc3cd3e54a0b607fb26f90e"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 bin = "remote-desktop"
 to = "/bin/remote-desktop"
 hash = "sha256:6015026726f83365c74c285878279d44f91b43a1c269b296525f454d4661274a"
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "cargo"
+package = "scarlet-std-bin"
+bin = "soft-keyboard"
+to = "/bin/soft-keyboard"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
