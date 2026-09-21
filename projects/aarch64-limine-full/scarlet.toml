@@ -8,11 +8,11 @@ path = "bsp"
 package = "scarlet"
 
 [bsp.kernel]
-source = { git = "https://github.com/petitstrawberry/Scarlet", rev = "e63216b2a05a5ec19042a9700ba03213002c56ea" }
+source = { git = "https://github.com/petitstrawberry/Scarlet", rev = "d3ad0a9d7d72241d4d9b1a3edb9599577698b020" }
 features = { network = true, user-fpu = true, user-vector = true, hypervisor = false, limine = true, sync-debug = true }
 
 [modules]
-"scarlet-module-prototype" = { git = "https://github.com/petitstrawberry/Scarlet", rev = "e63216b2a05a5ec19042a9700ba03213002c56ea", enabled = true }
+"scarlet-module-prototype" = { git = "https://github.com/petitstrawberry/Scarlet", rev = "d3ad0a9d7d72241d4d9b1a3edb9599577698b020", enabled = true }
 
 [images]
 
