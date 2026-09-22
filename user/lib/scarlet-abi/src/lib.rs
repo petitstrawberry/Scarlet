@@ -8,6 +8,7 @@
 
 pub mod data_model;
 pub mod environment;
+pub mod fs;
 pub mod native_scalar;
 pub mod power_supply;
 pub mod shared_image;
@@ -907,6 +908,10 @@ pub enum Syscall {
     FileSeek = 300,
     FileTruncate = 301,
     FileMetadata = 302,
+    /// Update selected file timestamps. Returns zero or a negated errno.
+    FileSetTimes = 303,
+    /// Flush file data and metadata. Returns zero or a negated errno.
+    FileSync = 304,
 
     // VFS operations
     VfsOpen = 400,
@@ -923,6 +928,14 @@ pub enum Syscall {
     VfsCreateHardlink = 411,
     /// Query path metadata without following the final symbolic link.
     VfsSymlinkMetadata = 412,
+    /// Resolve an existing path. Returns byte count (without NUL) or -errno.
+    VfsCanonicalize = 413,
+    /// Update timestamps by path, optionally without following the final link.
+    VfsSetTimes = 414,
+    /// Metadata(path, output, nofollow): returns zero or -errno.
+    VfsMetadataWithStatus = 415,
+    /// CreateDirectory(path): returns zero or -errno.
+    VfsCreateDirectoryWithStatus = 416,
 
     // Filesystem operations
     FsMount = 500,

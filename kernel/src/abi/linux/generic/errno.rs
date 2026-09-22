@@ -429,6 +429,8 @@ pub fn from_fs_error(error: &crate::fs::FileSystemError) -> usize {
         FileSystemErrorKind::NotSupported => ENOSYS,
         FileSystemErrorKind::BrokenFileSystem => EIO,
         FileSystemErrorKind::Busy => EBUSY,
+        FileSystemErrorKind::TooManySymlinks => ELOOP,
+        FileSystemErrorKind::ValueOverflow => EOVERFLOW,
     }
 }
 

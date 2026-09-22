@@ -1,4 +1,6 @@
 import importlib.util
+import contextlib
+import io
 from pathlib import Path
 import sys
 import tempfile
@@ -53,6 +55,23 @@ class StagingLinkTests(unittest.TestCase):
         (self.root / "bin/driver.so").symlink_to("../lib/missing.so")
         with self.assertRaisesRegex(ValueError, "invalid staged symlink"):
             RUN_QEMU.validate_staging_links(self.root)
+
+
+class SerialDiagnosticTests(unittest.TestCase):
+    def test_panic_diagnostic_is_drained_and_late_success_cannot_override_failure(self):
+        script = (
+            "import sys,time; "
+            "sys.stdout.write('panicked at'); sys.stdout.flush(); time.sleep(0.03); "
+            "sys.stdout.write(' fixture.rs:42: assertion failed\\nSCARLET_LOADER_SMOKE_OK\\n'); "
+            "sys.stdout.flush(); time.sleep(1)"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            captured = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+            with contextlib.redirect_stdout(captured):
+                result = RUN_QEMU.smoke.run_guest([sys.executable, "-c", script], output, 3)
+            self.assertEqual(result["result"], "guest panic")
+            self.assertIn(b"fixture.rs:42: assertion failed", (output / "serial.log").read_bytes())
 
 
 if __name__ == "__main__":

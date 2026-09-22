@@ -1,0 +1,204 @@
+UEFI firmware (version edk2-stable202408-prebuilt.qemu.org built at 16:28:50 on Sep 12 2024)
+ArmTrngLib could not be correctly initialized.
+Error: Image at 0013FDB6000 start failed: 00000001
+Error: Image at 0013FD6D000 start failed: Not Found
+Error: Image at 0013FCBA000 start failed: Unsupported
+Error: Image at 0013FC3F000 start failed: Not Found
+Error: Image at 0013FB65000 start failed: Aborted
+Tpm2SubmitCommand - Tcg2 - Not Found
+Tpm2GetCapabilityPcrs fail!
+Tpm2SubmitCommand - Tcg2 - Not Found
+Image type X64 can't be loaded on AARCH64 UEFI system.
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI Non-Block Boot Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,0000000A00000000)
+BdsDxe: starting Boot0001 "UEFI Non-Block Boot Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,0000000A00000000)
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+[01;01H[01;01H[01;01Hl[01;02Hi[01;03Hm[01;04Hi[01;05Hn[01;06He[01;07H:[01;08H [01;09HL[01;10Ho[01;11Ha[01;12Hd[01;13Hi[01;14Hn[01;15Hg[01;16H [01;17He[01;18Hx[01;19He[01;20Hc[01;21Hu[01;22Ht[01;23Ha[01;24Hb[01;25Hl[01;26He[01;27H [01;28H`[01;29Hb[01;30Ho[01;31Ho[01;32Ht[01;33H([01;34H)[01;35H:[01;36H/[01;37Hb[01;38Ho[01;39Ho[01;40Ht[01;41H/[01;42Hk[01;43He[01;44Hr[01;45Hn[01;46He[01;47Hl[01;48H`[01;49H.[01;50H.[01;51H.[01;52H[01;01H[02;01Hl[02;02Hi[02;03Hm[02;04Hi[02;05Hn[02;06He[02;07H:[02;08H [02;09HL[02;10Ho[02;11Ha[02;12Hd[02;13Hi[02;14Hn[02;15Hg[02;16H [02;17Hm[02;18Ho[02;19Hd[02;20Hu[02;21Hl[02;22He[02;23H [02;24H`[02;25Hb[02;26Ho[02;27Ho[02;28Ht[02;29H([02;30H)[02;31H:[02;32H/[02;33Hb[02;34Ho[02;35Ho[02;36Ht[02;37H/[02;38Hi[02;39Hn[02;40Hi[02;41Ht[02;42Hr[02;43Ha[02;44Hm[02;45Hf[02;46Hs[02;47H-[02;48Ha[02;49Ha[02;50Hr[02;51Hc[02;52Hh[02;53H6[02;54H4[02;55H.[02;56Hc[02;57Hp[02;58Hi[02;59Ho[02;60H`[02;61H.[02;62H.[02;63H.[02;64H[02;01H[03;01Hinit: rootwait: /dev/vblk1 mounted after 1 attempt(s)
+init: starting /system/bin/native-rustc-probe in the default Environment
+NATIVE_RUSTC MODE full output=/native-rustc-output
+NATIVE_RUSTC PROCESS_RUNTIME START
+NATIVE_RUSTC CWD /
+NATIVE_RUSTC SYSTEM_TIME PASS unix_seconds=1790054523
+NATIVE_RUSTC THREAD START
+NATIVE_RUSTC THREAD CHILD
+NATIVE_RUSTC THREAD PASS
+NATIVE_RUSTC SCOPED_THREAD START
+NATIVE_RUSTC SCOPED_THREAD PASS
+NATIVE_RUSTC FILESYSTEM START
+NATIVE_RUSTC FILESYSTEM fixture=/native-rustc-output/fs-ext2
+NATIVE_RUSTC FILESYSTEM fixture=/native-rustc-output/fs-tmpfs
+NATIVE_RUSTC FILESYSTEM PASS
+NATIVE_RUSTC START version timeout=900 command=cd "/native-rustc-output" && "/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/rustc" "--sysroot" "/opt/scarlet/toolchains/rust/v0.1.0-rc.1" "-Vv"
+NATIVE_RUSTC OUTPUT version stdout_bytes=217 stderr_bytes=117
+rustc 1.94.0-nightly (39c689a48 2026-09-20)
+binary: rustc
+commit-hash: 39c689a4859b9d8ee1828720135defd125c03d31
+commit-date: 2026-09-20
+host: aarch64-unknown-scarlet
+release: 1.94.0-nightly
+Cranelift version: 0.127.0
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+NATIVE_RUSTC STATUS version exit=Some(0) elapsed_ms=748 expected_exit=0
+NATIVE_RUSTC START cfg timeout=900 command=cd "/native-rustc-output" && "/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/rustc" "--sysroot" "/opt/scarlet/toolchains/rust/v0.1.0-rc.1" "--target" "aarch64-unknown-scarlet" "--print" "cfg"
+NATIVE_RUSTC OUTPUT cfg stdout_bytes=1015 stderr_bytes=432
+debug_assertions
+emscripten_wasm_eh
+fmt_debug="full"
+overflow_checks
+panic="abort"
+relocation_model="pic"
+target_abi=""
+target_arch="aarch64"
+target_endian="little"
+target_env=""
+target_feature="neon"
+target_has_atomic
+target_has_atomic="128"
+target_has_atomic="16"
+target_has_atomic="32"
+target_has_atomic="64"
+target_has_atomic="8"
+target_has_atomic="ptr"
+target_has_atomic_equal_alignment="128"
+target_has_atomic_equal_alignment="16"
+target_has_atomic_equal_alignment="32"
+target_has_atomic_equal_alignment="64"
+target_has_atomic_equal_alignment="8"
+target_has_atomic_equal_alignment="ptr"
+target_has_atomic_load_store
+target_has_atomic_load_store="128"
+target_has_atomic_load_store="16"
+target_has_atomic_load_store="32"
+target_has_atomic_load_store="64"
+target_has_atomic_load_store="8"
+target_has_atomic_load_store="ptr"
+target_has_reliable_f128
+target_has_reliable_f128_math
+target_has_reliable_f16
+target_has_reliable_f16_math
+target_os="scarlet"
+target_pointer_width="64"
+target_vendor="unknown"
+ub_checks
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_CGCLIF init enter
+SCARLET_CGCLIF init config enter
+SCARLET_CGCLIF from_opts enter
+SCARLET_CGCLIF from_opts env enter
+SCARLET_CGCLIF from_opts env exit
+SCARLET_CGCLIF from_opts exit
+SCARLET_CGCLIF init config exit
+SCARLET_CGCLIF init exit
+SCARLET_CGCLIF target_config enter
+SCARLET_CGCLIF target_config exit
+NATIVE_RUSTC STATUS cfg exit=Some(0) elapsed_ms=608 expected_exit=0
+NATIVE_RUSTC START frontend timeout=900 command=cd "/native-rustc-output" && "/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/rustc" "--sysroot" "/opt/scarlet/toolchains/rust/v0.1.0-rc.1" "--target" "aarch64-unknown-scarlet" "--edition=2021" "-Zno-codegen" "hello.rs"
+NATIVE_RUSTC OUTPUT frontend stdout_bytes=0 stderr_bytes=432
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_CGCLIF init enter
+SCARLET_CGCLIF init config enter
+SCARLET_CGCLIF from_opts enter
+SCARLET_CGCLIF from_opts env enter
+SCARLET_CGCLIF from_opts env exit
+SCARLET_CGCLIF from_opts exit
+SCARLET_CGCLIF init config exit
+SCARLET_CGCLIF init exit
+SCARLET_CGCLIF target_config enter
+SCARLET_CGCLIF target_config exit
+NATIVE_RUSTC STATUS frontend exit=Some(0) elapsed_ms=697 expected_exit=0
+NATIVE_RUSTC START compile timeout=900 command=cd "/native-rustc-output" && "/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/rustc" "--sysroot" "/opt/scarlet/toolchains/rust/v0.1.0-rc.1" "--target" "aarch64-unknown-scarlet" "--edition=2021" "-Cpanic=abort" "-Copt-level=0" "-Clinker=/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/wild" "-Clinker-flavor=ld.lld" "hello.rs" "-o" "/native-rustc-output/hello"
+NATIVE_RUSTC OUTPUT compile stdout_bytes=0 stderr_bytes=432
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_CGCLIF init enter
+SCARLET_CGCLIF init config enter
+SCARLET_CGCLIF from_opts enter
+SCARLET_CGCLIF from_opts env enter
+SCARLET_CGCLIF from_opts env exit
+SCARLET_CGCLIF from_opts exit
+SCARLET_CGCLIF init config exit
+SCARLET_CGCLIF init exit
+SCARLET_CGCLIF target_config enter
+SCARLET_CGCLIF target_config exit
+NATIVE_RUSTC STATUS compile exit=Some(0) elapsed_ms=1127 expected_exit=0
+NATIVE_RUSTC GENERATED bytes=114080
+NATIVE_RUSTC START execute timeout=60 command=cd "/native-rustc-output" && "/native-rustc-output/hello"
+NATIVE_RUSTC OUTPUT execute stdout_bytes=30 stderr_bytes=0
+SCARLET_NATIVE_RUSTC_HELLO_OK
+NATIVE_RUSTC STATUS execute exit=Some(37) elapsed_ms=56 expected_exit=37
+NATIVE_RUSTC START proc-macro-build timeout=900 command=cd "/native-rustc-output" && "/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/rustc" "--sysroot" "/opt/scarlet/toolchains/rust/v0.1.0-rc.1" "--target" "aarch64-unknown-scarlet" "--edition=2021" "-Cpanic=abort" "-Clinker=/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/wild" "-Clinker-flavor=ld.lld" "--crate-type=proc-macro" "--crate-name=scarlet_probe_macros" "macros.rs" "-o" "/native-rustc-output/libscarlet_probe_macros.so"
+NATIVE_RUSTC OUTPUT proc-macro-build stdout_bytes=0 stderr_bytes=593
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_CGCLIF init enter
+SCARLET_CGCLIF init config enter
+SCARLET_CGCLIF from_opts enter
+SCARLET_CGCLIF from_opts env enter
+SCARLET_CGCLIF from_opts env exit
+SCARLET_CGCLIF from_opts exit
+SCARLET_CGCLIF init config exit
+SCARLET_CGCLIF init exit
+SCARLET_CGCLIF target_config enter
+SCARLET_CGCLIF target_config exit
+warning: building proc macro crate with `panic=abort` or `panic=immediate-abort` may crash the compiler should the proc-macro panic
+
+warning: 1 warning emitted
+
+NATIVE_RUSTC STATUS proc-macro-build exit=Some(0) elapsed_ms=1502 expected_exit=0
+NATIVE_RUSTC START proc-macro-build-other timeout=900 command=cd "/native-rustc-output" && "/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/rustc" "--sysroot" "/opt/scarlet/toolchains/rust/v0.1.0-rc.1" "--target" "aarch64-unknown-scarlet" "--edition=2021" "-Cpanic=abort" "-Clinker=/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/wild" "-Clinker-flavor=ld.lld" "--crate-type=proc-macro" "--crate-name=scarlet_probe_macros_other" "macros.rs" "-o" "/native-rustc-output/libscarlet_probe_macros_other.so"
+NATIVE_RUSTC OUTPUT proc-macro-build-other stdout_bytes=0 stderr_bytes=593
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_CGCLIF init enter
+SCARLET_CGCLIF init config enter
+SCARLET_CGCLIF from_opts enter
+SCARLET_CGCLIF from_opts env enter
+SCARLET_CGCLIF from_opts env exit
+SCARLET_CGCLIF from_opts exit
+SCARLET_CGCLIF init config exit
+SCARLET_CGCLIF init exit
+SCARLET_CGCLIF target_config enter
+SCARLET_CGCLIF target_config exit
+warning: building proc macro crate with `panic=abort` or `panic=immediate-abort` may crash the compiler should the proc-macro panic
+
+warning: 1 warning emitted
+
+NATIVE_RUSTC STATUS proc-macro-build-other exit=Some(0) elapsed_ms=1446 expected_exit=0
+NATIVE_RUSTC START proc-macro-expand timeout=900 command=cd "/native-rustc-output" && "/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/rustc" "--sysroot" "/opt/scarlet/toolchains/rust/v0.1.0-rc.1" "--target" "aarch64-unknown-scarlet" "--edition=2021" "-Cpanic=abort" "-Clinker=/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/wild" "-Clinker-flavor=ld.lld" "macro-app.rs" "--crate-name=macro_app" "--extern" "scarlet_probe_macros=/native-rustc-output/libscarlet_probe_macros.so" "--extern" "scarlet_probe_macros_other=/native-rustc-output/libscarlet_probe_macros_other.so" "-o" "/native-rustc-output/macro-app"
+NATIVE_RUSTC OUTPUT proc-macro-expand stdout_bytes=0 stderr_bytes=432
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_CGCLIF init enter
+SCARLET_CGCLIF init config enter
+SCARLET_CGCLIF from_opts enter
+SCARLET_CGCLIF from_opts env enter
+SCARLET_CGCLIF from_opts env exit
+SCARLET_CGCLIF from_opts exit
+SCARLET_CGCLIF init config exit
+SCARLET_CGCLIF init exit
+SCARLET_CGCLIF target_config enter
+SCARLET_CGCLIF target_config exit
+NATIVE_RUSTC STATUS proc-macro-expand exit=Some(0) elapsed_ms=1100 expected_exit=0
+NATIVE_RUSTC START proc-macro-execute timeout=60 command=cd "/native-rustc-output" && "/native-rustc-output/macro-app"
+NATIVE_RUSTC OUTPUT proc-macro-execute stdout_bytes=32 stderr_bytes=0
+SCARLET_NATIVE_PROC_MACRO_OK=42
+NATIVE_RUSTC STATUS proc-macro-execute exit=Some(0) elapsed_ms=59 expected_exit=0
+NATIVE_RUSTC PROC_MACRO PASS
+NATIVE_RUSTC FULL PASS

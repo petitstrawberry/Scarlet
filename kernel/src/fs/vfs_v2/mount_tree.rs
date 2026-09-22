@@ -510,7 +510,7 @@ impl MountTree {
             path,
             resolve_mount,
             options,
-            0,
+            &mut 0,
         )
     }
 
@@ -521,34 +521,34 @@ impl MountTree {
         path: &str,
         resolve_mount: bool,
         options: &PathResolutionOptions,
-        symlink_depth: u32,
+        symlinks_followed: &mut u32,
     ) -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
-        const MAX_SYMLINK_DEPTH: u32 = 32;
-
-        if symlink_depth > MAX_SYMLINK_DEPTH {
-            return Err(vfs_error(
-                FileSystemErrorKind::InvalidPath,
-                "Too many symbolic links",
-            ));
-        }
+        const MAX_SYMLINKS: u32 = 40;
 
         if path.is_empty() {
-            return Ok((base_entry.clone(), base_mount.clone()));
+            return Err(vfs_error(FileSystemErrorKind::NotFound, "Empty pathname"));
         } else if path == "/" {
             // Special case for root path,
             let root_mount = self.root_mount.read().clone();
             return Ok((root_mount.root.clone(), root_mount));
         }
 
-        let components = self.parse_path(path);
+        // Keep `.`: file/. must fail, and link/. must follow the link even when
+        // the caller requests not to follow the final component.
+        let components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
         let mut current_mount = base_mount.clone();
         let mut current_entry = base_entry.clone();
 
-        let mut resolved_path = String::new();
         for (i, component) in components.iter().enumerate() {
             let is_final_component = i == components.len() - 1;
+            if !current_entry.node().is_directory()? {
+                return Err(vfs_error(
+                    FileSystemErrorKind::NotADirectory,
+                    "Non-directory pathname component",
+                ));
+            }
 
-            if component == ".." {
+            if *component == ".." {
                 // Handle parent directory traversal (same as original implementation)
                 let is_at_mount_root = current_entry.node().id() == current_mount.root.node().id();
 
@@ -580,7 +580,7 @@ impl MountTree {
                 // Regular path traversal with symlink handling based on options
                 let should_follow_symlinks = if is_final_component {
                     // For the final component, check no_follow option
-                    !options.no_follow
+                    !options.no_follow || path.ends_with('/')
                 } else {
                     // For intermediate components, always follow symlinks
                     true
@@ -590,6 +590,13 @@ impl MountTree {
                     let next_entry =
                         self.resolve_component_no_symlink(current_entry.clone(), &component)?;
                     if next_entry.node().is_symlink()? {
+                        *symlinks_followed += 1;
+                        if *symlinks_followed > MAX_SYMLINKS {
+                            return Err(vfs_error(
+                                FileSystemErrorKind::TooManySymlinks,
+                                "Too many symbolic links",
+                            ));
+                        }
                         let link_target = next_entry
                             .node()
                             .read_link()
@@ -605,7 +612,7 @@ impl MountTree {
                                 &link_target,
                                 false,
                                 &PathResolutionOptions { no_follow: false },
-                                symlink_depth + 1,
+                                symlinks_followed,
                             )?
                         } else {
                             self.resolve_path_from_internal_with_depth(
@@ -614,7 +621,7 @@ impl MountTree {
                                 &link_target,
                                 false,
                                 &PathResolutionOptions { no_follow: false },
-                                symlink_depth + 1,
+                                symlinks_followed,
                             )?
                         };
                         current_entry = resolved.0;
@@ -639,9 +646,13 @@ impl MountTree {
                     }
                 }
             }
+        }
 
-            resolved_path.push('/');
-            resolved_path.push_str(&component);
+        if path.ends_with('/') && !current_entry.node().is_directory()? {
+            return Err(vfs_error(
+                FileSystemErrorKind::NotADirectory,
+                "Trailing slash requires a directory",
+            ));
         }
 
         Ok((current_entry, current_mount))
@@ -710,20 +721,22 @@ impl MountTree {
 
     /// Get the full path of a mount point
     fn get_mount_path(&self, mount: &Arc<MountPoint>) -> String {
-        if mount.is_root_mount() {
-            return "/".to_string();
-        }
-
         let mut components = Vec::new();
-        let mut current = Some(mount.clone());
-
-        while let Some(mount) = current {
-            if !mount.is_root_mount() {
-                components.push(mount.path.read().clone());
-                current = mount.get_parent();
-            } else {
-                break;
+        let mut current = mount.clone();
+        while let Some(parent) = current.get_parent() {
+            // A mount's name alone loses directories between mount points:
+            // mounting at /work/build/tmp must retain /work/build as well.
+            // Walk the actual mountpoint entry in its parent mount so renames
+            // and nested/bind mounts preserve the caller's namespace path.
+            let mut entry = current.parent_entry.read().clone();
+            while let Some(node) = entry {
+                if Arc::ptr_eq(&node, &parent.root) {
+                    break;
+                }
+                components.push(node.name().clone());
+                entry = node.parent();
             }
+            current = parent;
         }
 
         components.reverse();

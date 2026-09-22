@@ -1,0 +1,24 @@
+[package]
+name = "native-rustc-probe"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[[bin]]
+name = "native-rustc-probe"
+path = "probe.rs"
+
+[features]
+native-fs = ["dep:scarlet-c", "dep:scarlet-abi", "dep:scarlet-sys"]
+
+[target.'cfg(target_os = "scarlet")'.dependencies]
+scarlet-c = { package = "scarlet-libc", path = "../../user/lib/scarlet-libc", optional = true }
+scarlet-abi = { path = "../../user/lib/scarlet-abi", optional = true }
+scarlet-sys = { path = "../../user/lib/scarlet-sys", optional = true }
+
+[profile.release]
+panic = "abort"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("scarlet"))'] }

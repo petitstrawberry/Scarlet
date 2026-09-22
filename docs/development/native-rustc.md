@@ -71,8 +71,9 @@ records component hashes and phase timings.
 
 The RV64 compiler currently warns that target feature `d` must be enabled for
 the target ABI. It does not fail this toolchain, but the target specification
-must be corrected before a future rustc turns that warning into an error. Cargo,
-procedural-macro execution, and compiler self-hosting remain unverified.
+must be corrected before a future rustc turns that warning into an error. Cargo
+and compiler self-hosting remain unverified. The later AArch64 proc-macro and
+filesystem acceptance below uses an updated local toolchain.
 
 ## Pre-bring-up baseline, 2026-09-21
 
@@ -352,7 +353,66 @@ getrandom 0.2.16/0.3.4 and reusing the tempfile port advances the check to:
   bundled SQLite. `--no-default-features` does not remove those dependencies;
   a separate build attempt already fails in libz-sys without native C headers.
 
-These need real Scarlet implementations or explicit upstream feature boundaries.
+The filesystem work below now supplies real timestamp operations and error
+reporting in Rust std. A `filetime` Scarlet backend still needs to select those
+APIs; merely rebuilding the unchanged crate does not make it portable.
+
+The remaining dependencies need real Scarlet implementations or explicit upstream feature boundaries.
 Treating the target as Unix does not supply the missing ABI. The first Cargo
 acceptance scenario remains an offline workspace with a path dependency, a build
 script and a proc-macro crate, followed by execution of the produced binary.
+
+### Native filesystem and initial libc, 2026-09-22
+
+The [AArch64 filesystem evidence](../../tools/native-rustc/evidence/2026-09-22-native-fs-aarch64.json)
+records a release-kernel HVF run with four CPUs. The guest returned `FULL_PASS`
+with both `native_fs_verified` and `proc_macro_verified`. Tests cover:
+
+- Rust `canonicalize` and C `realpath`, including symlinks before `..`, empty
+  and missing paths, non-directory components, trailing slashes and link loops.
+- The 40-link total lookup limit, exact error numbers, and undersized output
+  buffers remaining unchanged.
+- Mount-aware canonical paths and cwd on ext2 and a private tmpfs mount below
+  `/native-rustc-output`, preserving the mountpoint's parent directories.
+- C allocation/reallocation, descriptor-relative `utimensat`, nofollow link
+  times, `futimens`, `fsync`, and Rust `FileTimes` after renaming an open file.
+- ext2 range checking without a partial timestamp change, preservation through
+  writeback, and independent extraction of the final inode from the disk image.
+- The existing native std program and two proc-macro DSOs, including execution
+  of their generated program.
+
+The native ABI adds six filesystem operations, documented in
+[Native filesystem extensions](../abi/native-filesystem.md). Legacy calls keep
+their existing error contract. The updated std uses detailed metadata/mkdir
+errors, so `create_dir_all` can recognize missing parents. It no longer treats
+canonicalization as string concatenation or `sync_all` as a no-op.
+
+[`scarlet-libc`](../../user/lib/scarlet-libc/README.md) is the initial static
+C ABI adapter, with headers and an actual C fixture linked into the guest probe.
+It is not yet a complete C library for Cargo's curl, libgit2 and SQLite dependencies.
+Scarlet remains outside `cfg(unix)` and retains its Native syscall numbering.
+
+Build the enhanced probe with a matching Scarlet cross compiler and updated
+sysroot, selecting a Clang that supports the requested architecture:
+
+```sh
+RUSTC=/path/to/matching-cross-rustc \
+SCARLET_PROBE_CC=/path/to/clang SCARLET_PROBE_AR=/path/to/llvm-ar \
+cargo build --manifest-path tools/native-rustc/Cargo.toml \
+  --release --target aarch64-unknown-scarlet --features native-fs
+```
+
+Pass that binary as `--probe` and add `--native-fs --proc-macro` to the full
+`run-qemu.py` command above. RV64 uses `riscv64gc-unknown-scarlet`; the C fixture
+explicitly matches its RV64GC/lp64d ABI. Both target std libraries and both C/Rust
+probe binaries cross-built locally. This filesystem change has guest execution
+evidence for AArch64 only.
+
+The tested sysroot is a local experimental overlay. The compiler/driver were
+reused from the compatible previous local build; the probe and newly compiled
+applications use the rebuilt std. This does not update the published
+`v0.1.0-rc.1` archive or the bundle pin. Adopting the overlay requires both the
+new kernel syscalls and a matching rebuilt toolchain; full compiler rebuilds run
+in [scarlet-rust-nix PR #26](https://github.com/petitstrawberry/scarlet-rust-nix/pull/26)
+on Actions ([AArch64](https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35690454081),
+[RV64](https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35690489167)).

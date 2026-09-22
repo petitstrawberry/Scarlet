@@ -89,13 +89,15 @@ def debugfs_quote(value):
     return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
-def collect_evidence(image, output, guest_output, mode, arch, proc_macro=False):
+def collect_evidence(image, output, guest_output, mode, arch, proc_macro=False, native_fs=False):
     evidence = output / "guest-evidence"
     evidence.mkdir()
     command = ["debugfs", "-R", f"rdump {debugfs_quote(guest_output)} {debugfs_quote(evidence)}", str(image)]
     with (output / "evidence-extract.log").open("wb") as log:
         subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=120)
     extracted = evidence / PurePosixPath(guest_output).name
+    if native_fs and not (extracted / "NATIVE_FS_PASS").is_file():
+        raise ValueError("native filesystem evidence is missing")
     if mode == "full":
         if not (extracted / "PASS").is_file():
             raise ValueError("full marker appeared without persisted guest PASS evidence")
@@ -138,6 +140,7 @@ def main():
     parser.add_argument("--frontend-only", action="store_true", help="diagnose version/cfg/frontend only; never a full success")
     parser.add_argument("--dummy", action="store_true", help="dummy backend, valid only with --frontend-only")
     parser.add_argument("--proc-macro", action="store_true", help="also compile and load function-like, attribute and derive macros")
+    parser.add_argument("--native-fs", action="store_true", help="also run C ABI and Rust filesystem checks; requires the native-fs probe feature")
     parser.add_argument("--phase-timeout", type=int, default=900, help="guest compiler timeout per phase, seconds")
     parser.add_argument("--run-timeout", type=int, default=60, help="guest generated-program timeout, seconds")
     parser.add_argument("--timeout", type=float, default=3900, help="outer VM timeout; also cleans up unkillable guest children")
@@ -253,6 +256,8 @@ def main():
         probe_args += ["--dummy"]
     if args.proc_macro:
         probe_args += ["--proc-macro"]
+    if args.native_fs:
+        probe_args += ["--native-fs"]
     if any(any(char in arg for char in "\r\n\0") for arg in probe_args):
         raise ValueError("probe arguments cannot contain line breaks or NUL")
     (root / "etc/native-rustc-probe.args").write_text("\n".join(probe_args) + "\n")
@@ -318,12 +323,12 @@ def main():
     smoke.SUCCESS = re.compile(rb"\nNATIVE_RUSTC " + (b"FRONTEND" if args.frontend_only else b"FULL") + rb" PASS\r?\n")
     smoke.FAILURE = re.compile(rb"\nNATIVE_RUSTC FAIL(?:[ :\r\n]|$)")
     result = smoke.run_guest(command, output, args.timeout)
-    result.update(mode=mode, full_compilation_verified=False, proc_macro_verified=False)
+    result.update(mode=mode, full_compilation_verified=False, proc_macro_verified=False, native_fs_verified=False)
     succeeded = result["result"] == "PASS"
     if root_image:
         try:
             if succeeded:
-                result["guest_evidence"] = collect_evidence(root_image, output, guest_output, mode, args.arch, args.proc_macro)
+                result["guest_evidence"] = collect_evidence(root_image, output, guest_output, mode, args.arch, args.proc_macro, args.native_fs)
             else:
                 # Preserve partial logs for failed compiler or bootstrap attempts.
                 evidence = output / "guest-evidence"
@@ -340,6 +345,7 @@ def main():
         result["result"] = "FULL_PASS" if mode == "full" else "FRONTEND_PASS"
         result["full_compilation_verified"] = mode == "full"
         result["proc_macro_verified"] = args.proc_macro
+        result["native_fs_verified"] = args.native_fs
     result_path.write_text(json.dumps(result, indent=2) + "\n")
     print(f"\nNative rustc ({mode}): {result['result']} (artifacts: {output})")
     return 0 if succeeded else 1

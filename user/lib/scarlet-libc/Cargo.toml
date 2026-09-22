@@ -1,0 +1,23 @@
+[package]
+name = "scarlet-libc"
+version = "0.1.0"
+edition = "2024"
+description = "Initial Scarlet Native C ABI: allocation, canonical paths and file timestamps"
+
+[workspace]
+
+[lib]
+name = "scarlet_c"
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+scarlet-abi = { path = "../scarlet-abi" }
+
+[target.'cfg(target_os = "scarlet")'.dependencies]
+scarlet-sys = { path = "../scarlet-sys" }
+
+[profile.release]
+panic = "abort"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("scarlet"))'] }

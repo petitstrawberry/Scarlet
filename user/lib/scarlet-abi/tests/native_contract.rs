@@ -27,6 +27,17 @@ fn native_identifiers_and_file_metadata_layout() {
 }
 
 #[test]
+fn filesystem_timestamp_record_layout() {
+    assert_layout!(abi::fs::RawFileTimes, 24, 8, {
+        version: 0, flags: 4, accessed: 8, modified: 16,
+    });
+    assert_eq!(abi::fs::FILE_TIMES_VERSION, 1);
+    assert_eq!(abi::fs::FILE_TIMES_ACCESSED, 1);
+    assert_eq!(abi::fs::FILE_TIMES_MODIFIED, 2);
+    assert_eq!(abi::fs::FILE_TIMES_NOFOLLOW, 1);
+}
+
+#[test]
 fn environment_exec_record_layouts() {
     assert_layout!(abi::RawEnvironmentExec, 48, 8, {
         size: 0, flags: 4, argv: 8, envp: 16, cwd: 24,
@@ -204,11 +215,14 @@ fn native_syscall_numbers() {
         CreateNamespace = 92, HandleQuery = 100, HandleSetRole = 101,
         HandleClose = 102, HandleDuplicate = 103, HandleControl = 110,
         StreamRead = 200, StreamWrite = 201, Poll = 202, FileSeek = 300,
-        FileTruncate = 301, FileMetadata = 302, VfsOpen = 400, VfsRemove = 401,
+        FileTruncate = 301, FileMetadata = 302, FileSetTimes = 303, FileSync = 304,
+        VfsOpen = 400, VfsRemove = 401,
         VfsCreateFile = 402, VfsCreateDirectory = 403, VfsChangeDirectory = 404,
         VfsTruncate = 405, VfsCreateSymlink = 406, VfsReadlink = 407,
         VfsGetCwdPath = 408, VfsRename = 409, VfsMetadata = 410,
         VfsCreateHardlink = 411, VfsSymlinkMetadata = 412,
+        VfsCanonicalize = 413, VfsSetTimes = 414,
+        VfsMetadataWithStatus = 415, VfsCreateDirectoryWithStatus = 416,
         FsMount = 500, FsUmount = 501,
         FsPivotRoot = 502,
         VfsViewCreate = 520, VfsViewCurrent = 521, VfsViewClone = 522,

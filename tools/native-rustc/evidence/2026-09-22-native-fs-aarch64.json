@@ -1,0 +1,176 @@
+{
+  "recorded_date": "2026-09-22",
+  "scope": "Local release kernel and updated target std/C ABI probe; compatible previous local rustc/driver reused. Published bundle is unchanged.",
+  "architecture": "aarch64",
+  "acceleration": "hvf",
+  "cpus": 4,
+  "scarlet_base_revision": "23639489acdd2423e50aee151558238f56c535c0",
+  "rust_revision": "39c689a4859b9d8ee1828720135defd125c03d31",
+  "native_host_recipe_commit": "4394ecbb20d80284b80797406ec200d8829e1bed",
+  "native_host_pr": "https://github.com/petitstrawberry/scarlet-rust-nix/pull/26",
+  "qemu": {
+    "result": "FULL_PASS",
+    "qemu_exit_code": 0,
+    "elapsed_seconds": 12.997,
+    "mode": "full",
+    "full_compilation_verified": true,
+    "proc_macro_verified": true,
+    "native_fs_verified": true,
+    "guest_evidence": "/private/tmp/scarlet-native-fs-aarch64-final/guest-evidence/native-rustc-output"
+  },
+  "inputs": {
+    "release_kernel": {
+      "path": "/tmp/scarlet-native-fs-kernel-build/aarch64-unknown-none-elf/release/scarlet",
+      "sha256": "160fcb6650bb844618137aaefc534ce3c5656e8ada24c1215a324da41249bab4"
+    },
+    "probe": {
+      "path": "/tmp/scarlet-native-fs-probe-build/aarch64-unknown-scarlet/release/native-rustc-probe",
+      "sha256": "8df8594b29686c1170121f28d711f85c18325e23148a70bb9fefe8864939c2cc"
+    },
+    "rustc": {
+      "path": "/tmp/scarlet-native-fs-staging/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/rustc",
+      "sha256": "b51bab261fe067f60a926efb16d5956aacf67429e64bfe736a8baab85c3b024f"
+    },
+    "loader": {
+      "path": "/tmp/scarlet-native-fs-staging/system/bin/scarlet-ld",
+      "sha256": "493564f6234bcf83374d1bf4769cde9d8474bae5da5895abe5cbbdc762049c26"
+    },
+    "driver": {
+      "path": "/tmp/scarlet-native-fs-staging/opt/scarlet/toolchains/rust/v0.1.0-rc.1/lib/librustc_driver-971288f04f51fd65.so",
+      "sha256": "f62f3d538a2733156aedac3c70c2484e3d1f965630d8c3b626661bb65052673f"
+    },
+    "libstd": {
+      "path": "/tmp/scarlet-native-fs-staging/opt/scarlet/toolchains/rust/v0.1.0-rc.1/lib/rustlib/aarch64-unknown-scarlet/lib/libstd-73fdd94a3355757f.rlib",
+      "sha256": "30ccee59115d4f5a8749af99d5729aef77742ed5f25e145d93c65041ad81cf2a"
+    },
+    "libproc_macro": {
+      "path": "/tmp/scarlet-native-fs-staging/opt/scarlet/toolchains/rust/v0.1.0-rc.1/lib/rustlib/aarch64-unknown-scarlet/lib/libproc_macro-aaf8ff9f85c85d65.rlib",
+      "sha256": "caf1b0e21544da4df64c15d3c56e19a4fb52dd73b6f2e2ef7a72d2c00146bcad"
+    },
+    "rv64_probe": {
+      "path": "/tmp/scarlet-native-fs-probe-rv64-build/riscv64gc-unknown-scarlet/release/native-rustc-probe",
+      "sha256": "74facf3f7f198af5aaa8d0311ecdddf233bbdb00001e28e247bf5bc63239359f"
+    }
+  },
+  "probe_sources_sha256": {
+    "tools/native-rustc/probe.rs": "da58bc9532583f90f83dc08db30cd318f453e0399b8214645c152fe83405b518",
+    "tools/native-rustc/native_fs.rs": "a8db0423a2e7ebceba177834248bce6967ddbfc32b74cb54edb6d0954dd32f18",
+    "tools/native-rustc/build.rs": "b31ffb4ce32e1b83706dd3c83c4826f89cc3b16dd053bda5817ac925d7d2559f",
+    "user/lib/scarlet-libc/tests/native.c": "c7f471c151fcad1b8e096ffdd4e20cb7828af13ddc8e464bbfcf3080ce07ec83",
+    "user/lib/scarlet-libc/src/lib.rs": "d9e3538ceabcacadcfda1b85c43d9becec3066c0923938b1cc639fbb9ef2c834",
+    "user/lib/scarlet-libc/src/allocation.rs": "2bf0ad3db647be979fac478dc943c583dd84b6ee36e13e2e986ea34b79db9a70",
+    "user/lib/scarlet-abi/src/fs.rs": "123b337f2a4944a18554da5bf30d8cc84e1cb48829932b08e1fcb20e81c11b72"
+  },
+  "evidence_sha256": {
+    "NATIVE_FS_PASS": "1932929a879b1627e650b9e753a9386b637ea47ab1d8276d1e568ba620efbf5c",
+    "PASS": "488ec506264c2975576a2c477ee5f6fb92edb7131280b864039e54c49478deb7",
+    "PROC_MACRO_PASS": "585198c5fd53d949ad956aff184a2588f384b206c3bc5cbc226b25a6b4814469",
+    "cfg.command": "da13ddfcbd355b17a95a3920540f7e1b99d9545b3de03cac63ef7d280ef39fd9",
+    "cfg.status": "0e27d0f0d29b55e0ce95c684c68e49efee90c4dd27799ceeecb33a3bf72a136c",
+    "cfg.stderr": "f80fd06949cdf1d760f887b4c46c585601482b336d144cc247ac9140a1c52821",
+    "cfg.stdout": "ab08b29f15cb9933ea369d816219a72f199027190798d410876f11e27bc5cb1b",
+    "commands.json": "36d8ee1443b40756bb691c968131457d6edc7aff99abb2338d0082aadaea0b84",
+    "compile.command": "d51d77ffedd9f19f08aeb49c75d6d952246e470cc7074d1d0d6dc4723327a4b0",
+    "compile.status": "0f368f7ce4a11231f23a237b3ab3b7a04dac369cc4fbdbb03711888d5b770873",
+    "compile.stderr": "f80fd06949cdf1d760f887b4c46c585601482b336d144cc247ac9140a1c52821",
+    "compile.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "execute.command": "d479b5bf26bdeb46ae826319ba6986b8835427ed0c0c5a270b8ace9ccffe5549",
+    "execute.status": "841e0e1c76d5196ce70198611fc15dd3208e6fd42bef7228d269dceb3c766cd8",
+    "execute.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "execute.stdout": "f7db1accdcc0c5d3a36ca1fa83beaa4f1d6a838f963945549006b84066c5e40c",
+    "ext2-inode.log": "782d98efd40ddb618edea10c77f2e1f0e21c6470393e91f673407dd6b17bd801",
+    "frontend.command": "a7473a14cdf4e641de6426a3574abe215dc14fe5dd36735a2c393e8093acd1cd",
+    "frontend.status": "a7388538c77ea0ce051feea1e13f3ff760371de11229c8d03b97a7b14fc1b6bf",
+    "frontend.stderr": "f80fd06949cdf1d760f887b4c46c585601482b336d144cc247ac9140a1c52821",
+    "frontend.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "hello.rs": "3ab01a600239173f5292731f10f0f7714907954c2978481e953b574278281b73",
+    "macro-app.rs": "740b05d489ffb92bbe2e4b102169990545d4039645e76c6f5c4c4766cd4577bf",
+    "macros.rs": "b41b4d7a2467b48f6c9f7d4b05287d016533e72386ad9c1fd877546ce90c93ac",
+    "proc-macro-build-other.command": "7d99488972e99187160f94311780d1dbc7c44ef499630d014f87128250dd4f2c",
+    "proc-macro-build-other.status": "75f89adb2c6e74fdf374f1832c7e0d8c66c4b1ac04a26c6cf0a9b31030a4a0ad",
+    "proc-macro-build-other.stderr": "ce61291a700eaa0fc6961ac2a141122a43d1894e1b3d021331f01a37d2e881f0",
+    "proc-macro-build-other.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proc-macro-build.command": "54e4c8d2af8d9150b6d0a2486243bf827baef79639c4042eeefe414627778383",
+    "proc-macro-build.status": "d95d3d1d52fd6aff38c308aa04d3db8fa45918f5fb519beee704fcd9a56ff375",
+    "proc-macro-build.stderr": "ce61291a700eaa0fc6961ac2a141122a43d1894e1b3d021331f01a37d2e881f0",
+    "proc-macro-build.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proc-macro-execute.command": "46bd77e74fe3d2803ee1738017d88229bbc4a282ded2b0ee3fac8e553805150a",
+    "proc-macro-execute.status": "83e01c3265fac424c2698e124574ebfe6a91f7fd5ac7940c292ab11d7bebc837",
+    "proc-macro-execute.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proc-macro-execute.stdout": "5af2b9bbbc7f9374ba2690a53defa24ddef5cdd6aca60c46e2b717114b6edc1a",
+    "proc-macro-expand.command": "4ef296b71d74acfe6e8d2bbfb183a0c54df6c1300f30bebd1bf6795f5c7b6fbb",
+    "proc-macro-expand.status": "d1868411a32c11f8c732ee707194ede3a3a785328dce3c23ceb96ffed7c73186",
+    "proc-macro-expand.stderr": "f80fd06949cdf1d760f887b4c46c585601482b336d144cc247ac9140a1c52821",
+    "proc-macro-expand.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "result.json": "18979dd0f7032b0be93a95cf77c541e4419d63164889ae30996bc7a89bb6cf4a",
+    "rv64-probe-build.log": "23f3364cfb03073d5a280d27e7e4d4f84163e8c264e2feb231cab0bc3ec6f7fc",
+    "serial.log": "a209f778bb36d4135d23909084e7056ac357755822e879122c45c5663c9fe021",
+    "version.command": "d1895acf984785b74e6d1cc88841089711c336c8bd5810680ff020a04b0ddc8e",
+    "version.status": "980ef12e605177bc3d7904999bbe90eca28cf0306229da96847434eec0906970",
+    "version.stderr": "b765948e24c26c18c0cda2314995bf88eae488d8b61fed6fdce8825ca3f6ad2d",
+    "version.stdout": "7b470863f2743b445f051637801f8df2e4e852f6d150f9cf9bea3f1362388d67"
+  },
+  "phases": [
+    {
+      "name": "cfg",
+      "status": "exit=Some(0) elapsed_ms=608 expected_exit=0"
+    },
+    {
+      "name": "compile",
+      "status": "exit=Some(0) elapsed_ms=1127 expected_exit=0"
+    },
+    {
+      "name": "execute",
+      "status": "exit=Some(37) elapsed_ms=56 expected_exit=37"
+    },
+    {
+      "name": "frontend",
+      "status": "exit=Some(0) elapsed_ms=697 expected_exit=0"
+    },
+    {
+      "name": "proc-macro-build-other",
+      "status": "exit=Some(0) elapsed_ms=1446 expected_exit=0"
+    },
+    {
+      "name": "proc-macro-build",
+      "status": "exit=Some(0) elapsed_ms=1502 expected_exit=0"
+    },
+    {
+      "name": "proc-macro-execute",
+      "status": "exit=Some(0) elapsed_ms=59 expected_exit=0"
+    },
+    {
+      "name": "proc-macro-expand",
+      "status": "exit=Some(0) elapsed_ms=1100 expected_exit=0"
+    },
+    {
+      "name": "version",
+      "status": "exit=Some(0) elapsed_ms=748 expected_exit=0"
+    }
+  ],
+  "checks": [
+    "Rust canonicalize and C realpath resolve symlinks before ..; missing, empty, dangling, loop and non-directory paths report precise errors",
+    "40 total links succeed; 41 fail with ELOOP; try_exists propagates lookup errors",
+    "Ext2 and nested tmpfs mount canonical paths preserve all parent directories, including cwd reconstruction",
+    "C allocations are aligned; calloc zeroes; realloc preserves bytes and preserves the old allocation on failure",
+    "utimensat directory handles, AT_FDCWD, absolute-path invalid-dirfd bypass, nofollow, UTIME_NOW/OMIT and null times",
+    "Rust FileTimes updates the open inode after rename; file sync preserves data and times",
+    "Ext2 rejects out-of-range seconds before mutating either timestamp",
+    "Undersized canonical buffers remain untouched; null syscall pointers and invalid timestamp records fail",
+    "Disk-image inode independently confirms atime=1234 and mtime=9876 after the guest exits",
+    "Existing native std compile/link/execute plus two proc-macro DSOs and generated program execution"
+  ],
+  "host_tests": {
+    "scarlet_libc": 3,
+    "probe_parser": 3,
+    "native_rustc_python": 18,
+    "native_abi": 27,
+    "native_host_scripts": 15
+  },
+  "remaining": [
+    "Complete rebuilt Actions toolchain guest acceptance, including RV64 filesystem execution",
+    "Publishing a new native toolchain bundle and updating the bundle pin",
+    "Full C descriptor/stdio/locking/thread/network and ownership/permission interfaces needed by Cargo C dependencies",
+    "Cargo executable and offline workspace acceptance"
+  ]
+}

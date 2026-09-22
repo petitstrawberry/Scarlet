@@ -11,7 +11,9 @@ const HELLO: &str = "SCARLET_NATIVE_RUSTC_HELLO_OK\n";
 const HELLO_EXIT: i32 = 37;
 const MACRO_HELLO: &str = "SCARLET_NATIVE_PROC_MACRO_OK=42\n";
 const CONFIG: &str = "/etc/native-rustc-probe.args";
-const USAGE: &str = "usage: native-rustc-probe RUSTC SYSROOT TARGET NEW_OUTPUT_DIR [--dummy] [--full --linker PATH] [--proc-macro] [--backend PATH_OR_NAME] [--linker-flavor FLAVOR] [--timeout SECONDS] [--run-timeout SECONDS]; no arguments reads /etc/native-rustc-probe.args (one argument per line)";
+#[cfg(all(feature = "native-fs", target_os = "scarlet"))]
+mod native_fs;
+const USAGE: &str = "usage: native-rustc-probe RUSTC SYSROOT TARGET NEW_OUTPUT_DIR [--dummy] [--full --linker PATH] [--proc-macro] [--native-fs] [--backend PATH_OR_NAME] [--linker-flavor FLAVOR] [--timeout SECONDS] [--run-timeout SECONDS]; no arguments reads /etc/native-rustc-probe.args (one argument per line)";
 
 thread_local! {
     static THREAD_PREFLIGHT: Cell<u32> = const { Cell::new(0) };
@@ -26,6 +28,7 @@ struct Options {
     full: bool,
     dummy: bool,
     proc_macro: bool,
+    native_fs: bool,
     backend: Option<String>,
     linker: Option<PathBuf>,
     linker_flavor: Option<String>,
@@ -55,6 +58,7 @@ fn options(args: &[String]) -> Result<Options, String> {
         full: false,
         dummy: false,
         proc_macro: false,
+        native_fs: false,
         backend: None,
         linker: None,
         linker_flavor: None,
@@ -67,6 +71,7 @@ fn options(args: &[String]) -> Result<Options, String> {
             "--full" => result.full = true,
             "--dummy" => result.dummy = true,
             "--proc-macro" => result.proc_macro = true,
+            "--native-fs" => result.native_fs = true,
             "--backend" | "--linker" | "--linker-flavor" | "--timeout" | "--run-timeout" => {
                 let value = rest
                     .next()
@@ -460,6 +465,16 @@ fn run() -> Result<(), String> {
     println!("NATIVE_RUSTC MODE {mode} output={}", output.display());
     check_process_runtime()?;
     check_thread_runtime()?;
+    if options.native_fs {
+        #[cfg(all(feature = "native-fs", target_os = "scarlet"))]
+        {
+            println!("NATIVE_RUSTC FILESYSTEM START");
+            native_fs::run(output)?;
+            println!("NATIVE_RUSTC FILESYSTEM PASS");
+        }
+        #[cfg(not(all(feature = "native-fs", target_os = "scarlet")))]
+        return Err("--native-fs requires building the probe with --features native-fs".into());
+    }
     // Load the selected backend once up front so the version probe also
     // verifies its DSO dependencies.
     let mut command = compiler(&options);

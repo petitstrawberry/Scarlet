@@ -330,6 +330,18 @@ impl PageCacheManager {
             .and_then(|metadata| metadata.modified_time)
     }
 
+    /// Publish an explicit timestamp change without replacing a live size.
+    pub fn set_object_modified_time(&self, id: CacheId, stored_size: usize, time: u64) {
+        let mut objects = self.object_metadata.write();
+        objects
+            .entry(id)
+            .or_insert(CachedObjectMetadata {
+                size: stored_size,
+                modified_time: None,
+            })
+            .modified_time = Some(time);
+    }
+
     /// Set object-level lock (prevents eviction of all pages for this object)
     ///
     /// Used during mmap to keep all mapped pages resident.

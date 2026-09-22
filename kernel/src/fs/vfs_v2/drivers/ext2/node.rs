@@ -76,6 +76,22 @@ impl Ext2Node {
 }
 
 impl VfsNode for Ext2Node {
+    fn set_times(&self, times: crate::fs::FileTimeUpdate) -> Result<(), FileSystemError> {
+        let filesystem = self
+            .filesystem()
+            .and_then(|weak| weak.upgrade())
+            .ok_or_else(|| {
+                FileSystemError::new(FileSystemErrorKind::NotSupported, "Filesystem unavailable")
+            })?;
+        let ext2 = filesystem
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or_else(|| {
+                FileSystemError::new(FileSystemErrorKind::NotSupported, "Invalid filesystem")
+            })?;
+        ext2.set_inode_times(self.inode_number, times)
+    }
+
     fn id(&self) -> u64 {
         self.file_id
     }

@@ -51,6 +51,11 @@ pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps + Selectable {
     /// A metadata snapshot, or a stream error if it cannot be obtained.
     fn metadata(&self) -> Result<crate::fs::FileMetadata, StreamError>;
 
+    /// Update selected timestamps without reopening the pathname.
+    fn set_times(&self, _times: crate::fs::FileTimeUpdate) -> Result<(), StreamError> {
+        Err(StreamError::NotSupported)
+    }
+
     /// Read data from a specific offset without changing internal position
     ///
     /// This method performs a random-access read operation that must not

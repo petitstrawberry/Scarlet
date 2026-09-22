@@ -868,6 +868,13 @@ impl VfsManager {
         }
     }
 
+    /// Resolve an existing path in this namespace, including symbolic links.
+    /// Parent components are interpreted after following the preceding link.
+    pub fn canonicalize(&self, path: &str) -> Result<String, FileSystemError> {
+        let (entry, mount) = self.resolve_path(path)?;
+        Ok(self.build_absolute_path(&entry, &mount))
+    }
+
     /// Build absolute path from VfsEntry and MountPoint
     ///
     /// This safely constructs the absolute path for a given VfsEntry by using
@@ -1406,29 +1413,13 @@ impl VfsManager {
     /// # Returns
     /// An absolute path string
     pub fn resolve_path_to_absolute(&self, path: &str) -> String {
-        let raw = if path.starts_with('/') {
+        // This only anchors a relative path. Resolving `..` lexically changes
+        // symlink/../file and loses errors such as regular-file/.. or file/.
+        // Keep every component and trailing slash for the VFS path walker.
+        if path.starts_with('/') || path.is_empty() {
             path.to_string()
         } else {
-            // Relative path - combine with current working directory
             self.get_cwd_path() + "/" + path
-        };
-
-        // Normalize the path: resolve `.`, `..`, and duplicate slashes
-        let mut components: Vec<&str> = Vec::new();
-        for component in raw.split('/') {
-            match component {
-                "" | "." => {} // Skip empty (duplicate slashes) and current dir
-                ".." => {
-                    components.pop(); // Go up one level
-                }
-                c => components.push(c),
-            }
-        }
-
-        if components.is_empty() {
-            "/".to_string()
-        } else {
-            alloc::format!("/{}", components.join("/"))
         }
     }
 }

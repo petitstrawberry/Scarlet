@@ -882,6 +882,17 @@ impl TmpNode {
 }
 
 impl VfsNode for TmpNode {
+    fn set_times(&self, times: crate::fs::FileTimeUpdate) -> Result<(), FileSystemError> {
+        let mut metadata = self.metadata.write();
+        if let Some(accessed) = times.accessed {
+            metadata.accessed_time = accessed;
+        }
+        if let Some(modified) = times.modified {
+            metadata.modified_time = modified;
+        }
+        Ok(())
+    }
+
     fn id(&self) -> u64 {
         self.metadata.read().file_id
     }

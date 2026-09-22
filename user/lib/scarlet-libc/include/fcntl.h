@@ -1,0 +1,5 @@
+#ifndef SCARLET_FCNTL_H
+#define SCARLET_FCNTL_H
+#define AT_FDCWD (-100)
+#define AT_SYMLINK_NOFOLLOW 0x100
+#endif

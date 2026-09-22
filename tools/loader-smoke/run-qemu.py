@@ -74,11 +74,18 @@ def run_guest(command, output, timeout):
                 # Supply the one real start-of-stream boundary; truncation must
                 # never invent another beginning-of-line before a partial line.
                 tail = b"\n"
+                failure_deadline = None
                 while True:
-                    remaining = timeout - (time.monotonic() - started)
-                    if remaining <= 0:
-                        result = "timeout waiting for the success marker"
+                    now = time.monotonic()
+                    if failure_deadline is not None and now >= failure_deadline:
                         break
+                    remaining = timeout - (now - started)
+                    if remaining <= 0:
+                        if failure_deadline is None:
+                            result = "timeout waiting for the success marker"
+                        break
+                    if failure_deadline is not None:
+                        remaining = min(remaining, failure_deadline - now)
                     events = selector.select(min(remaining, 0.5))
                     if not events:
                         if process.poll() is not None:
@@ -92,18 +99,23 @@ def run_guest(command, output, timeout):
                     sys.stdout.buffer.write(data)
                     sys.stdout.buffer.flush()
                     tail += data
+                    if failure_deadline is not None:
+                        continue
                     if PANIC.search(tail):
                         result = "guest panic"
-                        break
-                    if FAILURE.search(tail):
+                    elif FAILURE.search(tail):
                         result = "fixture failure marker"
-                        break
-                    if INTERPRETER_ERROR.search(tail):
+                    elif INTERPRETER_ERROR.search(tail):
                         result = "interpreter error"
-                        break
-                    if SUCCESS.search(tail):
+                    elif SUCCESS.search(tail):
                         result = "PASS"
                         break
+                    else:
+                        tail = tail[-512:]
+                        continue
+                    # A serial marker may arrive before its diagnostic text.
+                    # Drain briefly, keeping the first failure authoritative.
+                    failure_deadline = time.monotonic() + 0.25
                     tail = tail[-512:]
         finally:
             if process.poll() is None:

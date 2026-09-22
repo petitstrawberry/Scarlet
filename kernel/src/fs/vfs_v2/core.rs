@@ -201,6 +201,14 @@ pub trait VfsNode: Send + Sync + Any {
     /// Get metadata for this node
     fn metadata(&self) -> Result<FileMetadata, FileSystemError>;
 
+    /// Update only selected timestamps. Unsupported filesystems must fail.
+    fn set_times(&self, _times: crate::fs::FileTimeUpdate) -> Result<(), FileSystemError> {
+        Err(FileSystemError::new(
+            FileSystemErrorKind::NotSupported,
+            "Timestamp updates are unsupported",
+        ))
+    }
+
     /// Get the file type of this node
     fn file_type(&self) -> Result<FileType, FileSystemError> {
         Ok(self.metadata()?.file_type)
@@ -516,6 +524,13 @@ impl MemoryMappingOps for VfsFileObject {
 }
 
 impl FileObject for VfsFileObject {
+    fn set_times(&self, times: crate::fs::FileTimeUpdate) -> Result<(), StreamError> {
+        self.vfs_entry
+            .node()
+            .set_times(times)
+            .map_err(StreamError::from)
+    }
+
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
         self.inner.read_at(offset, buffer)
     }

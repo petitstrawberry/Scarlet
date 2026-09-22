@@ -309,6 +309,8 @@ syscall_table! {
     FileSeek = 300 => sys_file_seek,       // FileObject::seek
     FileTruncate = 301 => sys_file_truncate, // FileObject::truncate
     FileMetadata = 302 => sys_file_metadata, // FileObject::metadata
+    FileSetTimes = 303 => crate::object::capability::file::syscall::sys_file_set_times,
+    FileSync = 304 => crate::object::capability::file::syscall::sys_file_sync,
 
     // === VFS Operations ===
     VfsOpen = 400 => sys_vfs_open,             // VFS file/directory open
@@ -324,6 +326,10 @@ syscall_table! {
     VfsMetadata = 410 => sys_vfs_metadata,     // Get metadata for a VFS path
     VfsCreateHardlink = 411 => sys_vfs_create_hardlink, // Create hard links through VFS
     VfsSymlinkMetadata = 412 => sys_vfs_symlink_metadata, // Metadata without following the final symlink
+    VfsCanonicalize = 413 => crate::fs::vfs_v2::syscall::sys_vfs_canonicalize,
+    VfsSetTimes = 414 => crate::fs::vfs_v2::syscall::sys_vfs_set_times,
+    VfsMetadataWithStatus = 415 => crate::fs::vfs_v2::syscall::sys_vfs_metadata_with_status,
+    VfsCreateDirectoryWithStatus = 416 => crate::fs::vfs_v2::syscall::sys_vfs_create_directory_with_status,
 
     // === Filesystem Operations ===
     FsMount = 500 => sys_fs_mount,         // Mount filesystem

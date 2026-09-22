@@ -196,7 +196,7 @@ use alloc::{
 use crate::sync::{IrqRwSpinLock, Once};
 extern crate alloc;
 
-pub const MAX_PATH_LENGTH: usize = 1024;
+pub const MAX_PATH_LENGTH: usize = scarlet_abi::fs::PATH_MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FileSystemErrorKind {
@@ -219,6 +219,8 @@ pub enum FileSystemErrorKind {
     InvalidOperation,
     CrossDevice,
     FileExists,
+    TooManySymlinks,
+    ValueOverflow,
 }
 
 #[derive(Clone, PartialEq)]
@@ -353,6 +355,13 @@ pub struct FileMetadata {
     /// Number of hard links pointing to this file
     /// File data is only deleted when link_count reaches zero
     pub link_count: u32,
+}
+
+/// Optional timestamp changes, measured in seconds since the Unix epoch.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FileTimeUpdate {
+    pub accessed: Option<u64>,
+    pub modified: Option<u64>,
 }
 
 pub const ABI_FILE_TYPE_REGULAR: u32 = 0;

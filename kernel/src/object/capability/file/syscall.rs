@@ -9,6 +9,65 @@ use crate::fs::AbiFileMetadata;
 use crate::library::std::usercopy::copy_to_user;
 use crate::task::mytask;
 
+fn stream_errno(error: crate::object::capability::StreamError) -> usize {
+    use crate::object::capability::StreamError;
+    let errno = match error {
+        StreamError::FileSystemError(error) => return crate::fs::vfs_v2::syscall::fs_errno(error),
+        StreamError::NotSupported => scarlet_abi::ERRNO_EOPNOTSUPP,
+        StreamError::InvalidArgument => scarlet_abi::ERRNO_EINVAL,
+        StreamError::PermissionDenied => scarlet_abi::fs::ERRNO_EACCES,
+        StreamError::NoSpace => scarlet_abi::fs::ERRNO_ENOSPC,
+        StreamError::Interrupted => scarlet_abi::ERRNO_EINTR,
+        StreamError::WouldBlock => scarlet_abi::ERRNO_EAGAIN,
+        _ => scarlet_abi::ERRNO_EIO,
+    };
+    (-(errno as isize)) as usize
+}
+
+/// FileSetTimes(handle, RawFileTimes*). The open object survives a rename.
+pub fn sys_file_set_times(tf: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let (handle, times_ptr) = (tf.get_arg(0), tf.get_arg(1));
+    tf.increment_pc_next(&task);
+    let Some(object) = u32::try_from(handle)
+        .ok()
+        .and_then(|handle| task.handle_table.get(handle))
+    else {
+        return (-(scarlet_abi::ERRNO_EBADF as isize)) as usize;
+    };
+    let Some(file) = object.as_file() else {
+        return (-(scarlet_abi::ERRNO_EBADF as isize)) as usize;
+    };
+    let times = match crate::fs::vfs_v2::syscall::read_file_times(&task, times_ptr) {
+        Ok(times) => times,
+        Err(error) => return error,
+    };
+    match file.set_times(times) {
+        Ok(()) => 0,
+        Err(error) => stream_errno(error),
+    }
+}
+
+/// FileSync(handle): write pending file data and metadata to the backing device.
+pub fn sys_file_sync(tf: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let handle = tf.get_arg(0);
+    tf.increment_pc_next(&task);
+    let Some(object) = u32::try_from(handle)
+        .ok()
+        .and_then(|handle| task.handle_table.get(handle))
+    else {
+        return (-(scarlet_abi::ERRNO_EBADF as isize)) as usize;
+    };
+    let Some(file) = object.as_file() else {
+        return (-(scarlet_abi::ERRNO_EBADF as isize)) as usize;
+    };
+    match file.sync() {
+        Ok(()) => 0,
+        Err(error) => stream_errno(error),
+    }
+}
+
 /// System call for seeking within a file
 ///
 /// # Arguments

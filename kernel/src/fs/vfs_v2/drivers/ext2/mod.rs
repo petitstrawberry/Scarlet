@@ -1297,6 +1297,9 @@ impl Ext2FileSystem {
         if pages.is_empty() {
             return Ok(());
         }
+        // Serialize inode read/modify/write with explicit timestamp updates.
+        let inode_lock = self.get_inode_lock(inode_num);
+        let _inode_guard = inode_lock.lock();
         let file_size_u32 = u32::try_from(file_size).map_err(|_| {
             FileSystemError::new(
                 FileSystemErrorKind::InvalidData,
@@ -1420,6 +1423,52 @@ impl Ext2FileSystem {
             .saturating_mul(self.block_size / 512);
         self.write_inode(inode_num, &inode)?;
         self.inode_cache.write().insert(inode_num, inode);
+        Ok(())
+    }
+
+    /// Persist selected times without losing cached writes or a later fsync.
+    fn set_inode_times(
+        &self,
+        inode_num: u32,
+        times: crate::fs::FileTimeUpdate,
+    ) -> Result<(), FileSystemError> {
+        let checked = |value: u64| {
+            u32::try_from(value).map_err(|_| {
+                FileSystemError::new(
+                    FileSystemErrorKind::ValueOverflow,
+                    "Timestamp exceeds ext2 range",
+                )
+            })
+        };
+        let accessed = times.accessed.map(checked).transpose()?;
+        let modified = times.modified.map(checked).transpose()?;
+        if accessed.is_none() && modified.is_none() {
+            return Ok(());
+        }
+        let inode_lock = self.get_inode_lock(inode_num);
+        let _inode_guard = inode_lock.lock();
+        let mut inode = self.read_inode(inode_num)?;
+        if let Some(time) = accessed {
+            inode.atime = time.to_le();
+        }
+        if let Some(time) = modified {
+            inode.mtime = time.to_le();
+        }
+        if let Some(now) = current_timestamp() {
+            inode.ctime = now.to_le();
+        }
+        self.write_inode(inode_num, &inode)?;
+        self.inode_cache.write().insert(inode_num, inode);
+        if let Some(time) = modified {
+            let cache_id = crate::fs::vfs_v2::cache::CacheId::new(
+                (self.fs_id().get() << 32) | inode_num as u64,
+            );
+            crate::mem::page_cache::PageCacheManager::global().set_object_modified_time(
+                cache_id,
+                inode.get_size() as usize,
+                u64::from(time),
+            );
+        }
         Ok(())
     }
 

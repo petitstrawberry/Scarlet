@@ -54,6 +54,142 @@ const VFS_O_EXCL: i32 = 0x80;
 const VFS_O_TRUNC: i32 = 0x200;
 const VFS_O_APPEND: i32 = 0x400;
 
+/// Error mapping for new Native filesystem operations. Legacy operations keep
+/// their -1 contract so existing binaries cannot mistake an errno for a handle.
+pub(crate) fn fs_errno(error: crate::fs::FileSystemError) -> usize {
+    use crate::fs::FileSystemErrorKind::*;
+    use scarlet_abi::fs::*;
+    let errno = match error.kind {
+        NotFound => ERRNO_ENOENT,
+        PermissionDenied => ERRNO_EACCES,
+        AlreadyExists | FileExists => ERRNO_EEXIST,
+        NotADirectory => ERRNO_ENOTDIR,
+        IsADirectory => ERRNO_EISDIR,
+        NoSpace => ERRNO_ENOSPC,
+        ReadOnly => ERRNO_EROFS,
+        Busy => ERRNO_EBUSY,
+        DirectoryNotEmpty => ERRNO_ENOTEMPTY,
+        CrossDevice => ERRNO_EXDEV,
+        TooManySymlinks => ERRNO_ELOOP,
+        ValueOverflow => ERRNO_EOVERFLOW,
+        NotSupported => scarlet_abi::ERRNO_EOPNOTSUPP,
+        InvalidPath | InvalidOperation | InvalidData | NotAFile => scarlet_abi::ERRNO_EINVAL,
+        IoError | DeviceError | BrokenFileSystem => scarlet_abi::ERRNO_EIO,
+    };
+    (-(errno as isize)) as usize
+}
+
+fn pathname_errno(error: crate::library::std::string::StringConversionError) -> usize {
+    use crate::library::std::string::StringConversionError;
+    let errno = match error {
+        StringConversionError::ExceedsMaxLength => scarlet_abi::fs::ERRNO_ENAMETOOLONG,
+        StringConversionError::Utf8Error => scarlet_abi::ERRNO_EINVAL,
+        _ => scarlet_abi::fs::ERRNO_EFAULT,
+    };
+    (-(errno as isize)) as usize
+}
+
+/// VfsCanonicalize(path, output, capacity): no NUL, no partial output on ERANGE.
+pub fn sys_vfs_canonicalize(tf: &mut Trapframe) -> usize {
+    use scarlet_abi::fs::*;
+    let task = mytask().unwrap();
+    let (path_ptr, output, capacity) = (tf.get_arg(0), tf.get_arg(1), tf.get_arg(2));
+    tf.increment_pc_next(&task);
+    let path = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(path) => path,
+        Err(error) => return pathname_errno(error),
+    };
+    let Some(vfs) = task.get_vfs() else {
+        return (-(scarlet_abi::ERRNO_EIO as isize)) as usize;
+    };
+    let path = match vfs.canonicalize(&path) {
+        Ok(path) => path,
+        Err(error) => return fs_errno(error),
+    };
+    if path.len() >= MAX_PATH_LENGTH {
+        return (-(ERRNO_ENAMETOOLONG as isize)) as usize;
+    }
+    if path.len() > capacity {
+        return (-(ERRNO_ERANGE as isize)) as usize;
+    }
+    if copy_to_user(&task, output, path.as_bytes()).is_err() {
+        return (-(ERRNO_EFAULT as isize)) as usize;
+    }
+    path.len()
+}
+
+pub(crate) fn read_file_times(
+    task: &crate::task::Task,
+    address: usize,
+) -> Result<crate::fs::FileTimeUpdate, usize> {
+    use scarlet_abi::fs::*;
+    let mut bytes = [0u8; core::mem::size_of::<RawFileTimes>()];
+    crate::library::std::usercopy::copy_from_user(task, address, &mut bytes)
+        .map_err(|_| (-(ERRNO_EFAULT as isize)) as usize)?;
+    // SAFETY: the full fixed-size integer-only record was copied above.
+    let raw = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<RawFileTimes>()) };
+    if !raw.valid() {
+        return Err((-(scarlet_abi::ERRNO_EINVAL as isize)) as usize);
+    }
+    Ok(crate::fs::FileTimeUpdate {
+        accessed: (raw.flags & FILE_TIMES_ACCESSED != 0).then_some(raw.accessed),
+        modified: (raw.flags & FILE_TIMES_MODIFIED != 0).then_some(raw.modified),
+    })
+}
+
+/// VfsSetTimes(path, RawFileTimes*, flags, base). Absolute paths ignore base;
+/// CURRENT_DIRECTORY uses cwd; other values must name an open VFS directory.
+pub fn sys_vfs_set_times(tf: &mut Trapframe) -> usize {
+    use scarlet_abi::fs::*;
+    let task = mytask().unwrap();
+    let (path_ptr, times_ptr, flags) = (tf.get_arg(0), tf.get_arg(1), tf.get_arg(2));
+    let base = tf.get_arg(3);
+    tf.increment_pc_next(&task);
+    if flags & !FILE_TIMES_NOFOLLOW != 0 {
+        return (-(scarlet_abi::ERRNO_EINVAL as isize)) as usize;
+    }
+    let times = match read_file_times(&task, times_ptr) {
+        Ok(times) => times,
+        Err(error) => return error,
+    };
+    let path = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(path) => path,
+        Err(error) => return pathname_errno(error),
+    };
+    let Some(vfs) = task.get_vfs() else {
+        return (-(scarlet_abi::ERRNO_EIO as isize)) as usize;
+    };
+    let options = super::manager::PathResolutionOptions {
+        no_follow: flags & FILE_TIMES_NOFOLLOW != 0,
+    };
+    let resolved = if path.starts_with('/') || base == CURRENT_DIRECTORY {
+        vfs.resolve_path_with_options(&path, &options)
+    } else {
+        let Some(object) = u32::try_from(base)
+            .ok()
+            .and_then(|handle| task.handle_table.get(handle))
+        else {
+            return (-(scarlet_abi::ERRNO_EBADF as isize)) as usize;
+        };
+        let Some(file) = object.as_file() else {
+            return (-(ERRNO_ENOTDIR as isize)) as usize;
+        };
+        let Some(file) = file.as_any().downcast_ref::<super::core::VfsFileObject>() else {
+            return (-(ERRNO_ENOTDIR as isize)) as usize;
+        };
+        vfs.resolve_path_from_with_options(
+            file.get_vfs_entry(),
+            file.get_mount_point(),
+            &path,
+            &options,
+        )
+    };
+    match resolved.and_then(|(entry, _)| entry.node().set_times(times)) {
+        Ok(()) => 0,
+        Err(error) => fs_errno(error),
+    }
+}
+
 /// Open a file or directory using VFS (VfsOpen)
 ///
 /// This system call opens a file or directory at the specified path using the VFS layer.
@@ -212,7 +348,7 @@ pub fn sys_vfs_truncate(trapframe: &mut Trapframe) -> usize {
 /// * `0` on success
 /// * `usize::MAX` on error (file not found, invalid pointer, etc.)
 pub fn sys_vfs_metadata(trapframe: &mut Trapframe) -> usize {
-    vfs_metadata(trapframe, false)
+    vfs_metadata(trapframe, false, false)
 }
 
 /// Get metadata without following the final symbolic link (VfsSymlinkMetadata).
@@ -220,10 +356,20 @@ pub fn sys_vfs_metadata(trapframe: &mut Trapframe) -> usize {
 /// Arguments and return values are identical to [`sys_vfs_metadata`]. Links in
 /// parent components are followed; a dangling final link can be queried.
 pub fn sys_vfs_symlink_metadata(trapframe: &mut Trapframe) -> usize {
-    vfs_metadata(trapframe, true)
+    vfs_metadata(trapframe, true, false)
 }
 
-fn vfs_metadata(trapframe: &mut Trapframe, no_follow: bool) -> usize {
+pub fn sys_vfs_metadata_with_status(trapframe: &mut Trapframe) -> usize {
+    let flags = trapframe.get_arg(2);
+    if flags > 1 {
+        trapframe.increment_pc_next(&mytask().unwrap());
+        return (-(scarlet_abi::ERRNO_EINVAL as isize)) as usize;
+    }
+    vfs_metadata(trapframe, flags != 0, true)
+}
+
+fn vfs_metadata(trapframe: &mut Trapframe, no_follow: bool, detailed: bool) -> usize {
+    let failure = |errno| if detailed { errno } else { usize::MAX };
     let task = mytask().unwrap();
     let path_ptr = trapframe.get_arg(0);
     let metadata_ptr = trapframe.get_arg(1);
@@ -233,12 +379,12 @@ fn vfs_metadata(trapframe: &mut Trapframe, no_follow: bool) -> usize {
     // Let VFS resolve relative paths and `..` after symbolic links.
     let path_str = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
         Ok(s) => s,
-        Err(_) => return usize::MAX,
+        Err(error) => return failure(pathname_errno(error)),
     };
 
     let vfs = match task.get_vfs() {
         Some(vfs) => vfs,
-        None => return usize::MAX,
+        None => return failure((-(scarlet_abi::ERRNO_EIO as isize)) as usize),
     };
 
     let result = if no_follow {
@@ -248,7 +394,7 @@ fn vfs_metadata(trapframe: &mut Trapframe, no_follow: bool) -> usize {
     };
     let metadata = match result {
         Ok(metadata) => AbiFileMetadata::from_metadata(&metadata),
-        Err(_) => return usize::MAX,
+        Err(error) => return failure(fs_errno(error)),
     };
 
     // SAFETY: `metadata` is a plain `repr(C)` byte record and is only read for
@@ -262,7 +408,7 @@ fn vfs_metadata(trapframe: &mut Trapframe, no_follow: bool) -> usize {
 
     match copy_to_user(&task, metadata_ptr, bytes) {
         Ok(()) => 0,
-        Err(_) => usize::MAX,
+        Err(_) => failure((-(scarlet_abi::fs::ERRNO_EFAULT as isize)) as usize),
     }
 }
 
@@ -363,27 +509,36 @@ pub fn sys_vfs_create_file(trapframe: &mut Trapframe) -> usize {
 /// * `0` on success
 /// * `usize::MAX` on error (path already exists, permission denied, etc.)
 pub fn sys_vfs_create_directory(trapframe: &mut Trapframe) -> usize {
+    vfs_create_directory(trapframe, false)
+}
+
+pub fn sys_vfs_create_directory_with_status(trapframe: &mut Trapframe) -> usize {
+    vfs_create_directory(trapframe, true)
+}
+
+fn vfs_create_directory(trapframe: &mut Trapframe, detailed: bool) -> usize {
+    let failure = |errno| if detailed { errno } else { usize::MAX };
     let task = mytask().unwrap();
     let path_ptr = trapframe.get_arg(0);
 
     trapframe.increment_pc_next(&task);
 
     let path_str = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
-        Ok(s) => match to_absolute_path_v2(&task, &s) {
-            Ok(abs_path) => abs_path,
-            Err(_) => return usize::MAX,
-        },
-        Err(_) => return usize::MAX,
+        Ok(path) => path,
+        Err(error) => return failure(pathname_errno(error)),
     };
+    if path_str.is_empty() {
+        return failure((-(scarlet_abi::fs::ERRNO_ENOENT as isize)) as usize);
+    }
 
     let vfs = match task.get_vfs() {
         Some(vfs) => vfs,
-        None => return usize::MAX, // VFS not initialized
+        None => return failure((-(scarlet_abi::ERRNO_EIO as isize)) as usize),
     };
 
     match vfs.create_dir(&path_str) {
         Ok(_) => 0,
-        Err(_) => usize::MAX, // -1
+        Err(error) => failure(fs_errno(error)),
     }
 }
 
