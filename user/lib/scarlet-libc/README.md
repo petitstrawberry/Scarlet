@@ -4,19 +4,21 @@
 AArch64 and RV64 targets. The current library is a small static C ABI adapter:
 allocation, thread-local `errno`, `realpath`, file timestamps, and file sync.
 The [support matrix and acceptance gates](STATUS.md) distinguish implemented
-behavior from the work needed for a standalone runtime.
+behavior from the work needed for a complete C runtime.
 
-The direction is to grow this Rust implementation toward a `no_std` C runtime,
-with musl-level completeness and robustness as a goal. **The current version
-still depends on Rust std** for allocation and TLS. It is not a complete libc,
-does not yet build Cargo's C dependencies, and does not enable `cfg(unix)` or
-the Linux syscall ABI.
+The direction is to grow this Rust implementation using Scarlet Rust std as
+its backend, with musl-level completeness and robustness as a goal. Allocation
+and TLS can continue to use std; `no_std` is not a requirement. The public
+contract is the C ABI, with the matching Rust runtime managed internally by the
+toolchain. The library is not complete, does not yet build Cargo's C
+dependencies, and does not enable `cfg(unix)` or the Linux syscall ABI.
 
 ## Current integration contract
 
 - Link one `libscarlet_c.a` into a native 64-bit executable using the matching
   Scarlet Rust toolchain and CRT. Allocation and deallocation must use the same
-  library. A standalone C startup/link workflow remains an acceptance gate.
+  library. A C startup/link workflow that initializes the Rust backend remains
+  an acceptance gate; C applications should not need a Rust source wrapper.
 - The implementing crate uses `#![no_builtins]`: LLVM must preserve its actual
   C export behavior for Rust callers. An optimized `calloc(SIZE_MAX, 2)` call
   must still return null and set `ENOMEM`, as checked inside the guest.

@@ -1,9 +1,10 @@
 # Support and acceptance status
 
-The implementation will remain in Rust. The goal is a standalone `no_std`
-C runtime with broad standards compatibility and musl-level quality. This is
-a direction, not a claim of present parity or POSIX conformance. The current
-archive is an adapter over Scarlet Rust std and Native syscalls.
+The implementation will remain in Rust, using Scarlet Rust std as its backend.
+The goal is broad C/POSIX compatibility and musl-level quality; `no_std` and
+removing std are not requirements. This is a direction, not a claim of present
+parity or POSIX conformance. The current archive adapts Scarlet Rust std and
+Native syscalls to a C ABI.
 
 ## Implemented surface
 
@@ -32,9 +33,11 @@ write-publication locking and second-handle fsync persistence regressions.
 
 ## Limits that callers must account for
 
-- **Runtime dependency:** allocation and TLS still use Rust std and its CRT.
-  This cannot become the foundation of Rust std if it creates a libc/std
-  dependency cycle. Allocations from another libc instance are not interchangeable.
+- **Runtime integration:** allocation and TLS use Rust std and its CRT by
+  design. The toolchain must supply and initialize the matching backend.
+  Keep this dependency one-way: the std primitives used by scarlet-libc must
+  not call back into these same C exports. Allocations from another libc
+  instance are not interchangeable.
 - **Error-path allocation:** first use of `errno` can allocate Rust TLS storage.
   Exhaustion before that initialization can abort while trying to report
   `ENOMEM`. This is a source-identified risk; forced guest exhaustion is not yet
@@ -57,19 +60,22 @@ write-publication locking and second-handle fsync persistence regressions.
   a complete libc surface. Existing kernel or Rust APIs do not imply matching
   C exports. Cargo, curl, libgit2 and SQLite acceptance remains outstanding.
 
-## Acceptance gates toward a standalone runtime
+## Acceptance gates toward a complete C runtime
 
 These gates apply to the Rust implementation; passing a smoke test is not a
 substitute for declaring a standards baseline and checking its requirements.
 
-1. **Standalone C startup and ABI.** Specify AArch64/RV64 calling conventions,
+1. **C startup and ABI.** Specify AArch64/RV64 calling conventions,
    public type layouts, errno/flag values, CRT, environment, initialization and
    exit behavior. Link and run ordinary C `main` programs using the installed
-   SDK, with no Rust std dependency and no host libraries or headers. Audit
-   symbols and reproduce the SDK from pinned sources.
-2. **Memory and thread foundations.** Provide allocator and thread storage
-   below both libc and Rust std. `errno` must remain available without allocating
-   on the error path. Exercise odd sizes, alignment, overflow, real exhaustion,
+   SDK, with the Scarlet Rust backend linked and initialized internally, no
+   Rust source wrapper, and no host libraries or headers. Audit symbols and
+   reproduce the SDK from pinned sources.
+2. **Memory and thread behavior.** Use std allocation and thread facilities
+   where they satisfy the C contract, extending the backend or using Native
+   primitives where necessary. `errno` must remain available without allocating
+   on the error path; recoverable C errors must not become Rust panics or aborts.
+   Exercise odd sizes, alignment, overflow, real exhaustion,
    concurrent allocation, TLS lifetime and destructor order on both targets.
 3. **Declared C standard surface.** Complete the selected standard's headers
    and runtime families, including stdio/varargs, strings and conversions,

@@ -449,7 +449,9 @@ bundle is unchanged. Allocator rebuilds are tracked in
 ([AArch64](https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35693141878),
 [RV64](https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35693166722)).
 
-The chosen direction is a Rust `no_std` libc. Its
+The chosen direction is a Rust libc backed by Scarlet Rust std. Its
 [acceptance gates](../../user/lib/scarlet-libc/STATUS.md) describe the work still
-required for standalone C startup, allocation-free errno, standards coverage and
-real Cargo dependencies; the current library still uses Rust std.
+required for C startup with backend initialization, allocation-free errno,
+standards coverage and real Cargo dependencies. Keeping std as the backend is
+supported; `no_std` is not a prerequisite for these compatibility and quality
+goals.
