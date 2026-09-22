@@ -42,6 +42,13 @@ pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps + Selectable {
     /// The resulting absolute byte position, or an error if seeking fails or is unsupported.
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError>;
 
+    /// Seek using a signed POSIX offset, rejecting negative or overflowing
+    /// results without changing the cursor. `whence` is 0, 1, or 2 for the
+    /// beginning, current position, or end of the file respectively.
+    fn seek_signed(&self, _offset: i64, _whence: u32) -> Result<u64, StreamError> {
+        Err(StreamError::NotSupported)
+    }
+
     /// Get metadata about the file
     ///
     /// # Arguments
@@ -89,6 +96,19 @@ pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps + Selectable {
     /// `StreamError::NotSupported`; success does not itself guarantee durability.
     fn write_at(&self, offset: u64, buffer: &[u8]) -> Result<usize, StreamError> {
         let _ = (offset, buffer);
+        Err(StreamError::NotSupported)
+    }
+
+    /// Whether this object implements atomic append for its file type.
+    fn supports_append(&self) -> bool {
+        false
+    }
+
+    /// Write at the current EOF and move this open file's cursor past the
+    /// bytes written. Selecting EOF and publishing the write must be one
+    /// operation with respect to other writes and truncation on the inode.
+    /// Implementations must not emulate this with an unlocked seek + write.
+    fn append(&self, _buffer: &[u8]) -> Result<usize, StreamError> {
         Err(StreamError::NotSupported)
     }
 
@@ -147,4 +167,52 @@ pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps + Selectable {
     /// # Returns
     /// A type-erased borrow with the same lifetime as `self`.
     fn as_any(&self) -> &dyn Any;
+}
+
+pub(crate) fn checked_seek_position(base: u64, offset: i64) -> Result<u64, StreamError> {
+    let position = i128::from(base) + i128::from(offset);
+    if position < 0 {
+        return Err(StreamError::InvalidArgument);
+    }
+    if position > i128::from(i64::MAX) {
+        return Err(crate::fs::FileSystemError::new(
+            crate::fs::FileSystemErrorKind::ValueOverflow,
+            "File offset exceeds signed 64-bit range",
+        )
+        .into());
+    }
+    Ok(position as u64)
+}
+
+/// Kernel callers may already hold a preemption guard. Preserve their
+/// uncontended access, but never sleep behind another file operation there.
+pub(crate) fn lock_file_operation(
+    lock: &crate::sync::Mutex<()>,
+) -> Result<crate::sync::MutexGuard<'_, ()>, crate::fs::FileSystemError> {
+    if let Some(guard) = lock.try_lock() {
+        return Ok(guard);
+    }
+    if !crate::sync::preemptible() {
+        return Err(crate::fs::FileSystemError::new(
+            crate::fs::FileSystemErrorKind::Busy,
+            "File operation would block with preemption disabled",
+        ));
+    }
+    Ok(lock.lock())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test_case]
+    fn file_operation_lock_never_sleeps_with_preemption_disabled() {
+        let lock = crate::sync::Mutex::new(());
+        let _preempt = crate::sync::PreemptGuard::new();
+        let guard = super::lock_file_operation(&lock).unwrap();
+        assert!(matches!(
+            super::lock_file_operation(&lock),
+            Err(error) if error.kind == crate::fs::FileSystemErrorKind::Busy
+        ));
+        drop(guard);
+        assert!(super::lock_file_operation(&lock).is_ok());
+    }
 }

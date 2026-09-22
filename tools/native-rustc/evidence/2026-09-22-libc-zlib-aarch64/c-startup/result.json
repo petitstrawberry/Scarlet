@@ -1,0 +1,128 @@
+{
+  "scope": "One plain C main and C constructor linked directly with Scarlet CRT and std-backed libc; not a complete C SDK.",
+  "target": "aarch64-unknown-scarlet",
+  "expected_exit_code": 43,
+  "guest_execution": "pending",
+  "executed_on_scarlet": false,
+  "inputs": {
+    "source": {
+      "path": "/Users/petitstrawberry/Development/Rust/Scarlet/user/lib/scarlet-libc/tests/c_main.c",
+      "sha256": "060c5b827aad73a4b21beeaa347d4e9208989841a7fbfbbc9fdc85841912a1ea"
+    },
+    "crt": {
+      "path": "/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/build-native-host/aarch64-apple-darwin/stage1/lib/rustlib/aarch64-unknown-scarlet/lib/scarlet-crt0.o",
+      "sha256": "362e7a49bf14de7baf966ca6e61ac2f7c1e516b7b8cf0bc633c1fba8ccdccc65"
+    },
+    "libc": {
+      "path": "/private/tmp/scarlet-libc-surface-aarch64-unknown-scarlet/aarch64-unknown-scarlet/release/libscarlet_c.a",
+      "sha256": "c74abd55992d4bc52902b101674b397cf787dac91cac70c375c481e9edb9e357"
+    },
+    "object": {
+      "path": "/private/tmp/scarlet-libc-surface-c-startup-aarch64/c_main.o",
+      "sha256": "9a5200b525f26c9add28e0ea7883268a2f2af85a0c068ff6f41bdfb14a26cdce"
+    }
+  },
+  "commands": [
+    [
+      "/nix/store/1g31prgnyak0bdszc40z72lmafkhjz64-clang-21.1.8/bin/clang",
+      "-print-resource-dir"
+    ],
+    [
+      "/nix/store/1g31prgnyak0bdszc40z72lmafkhjz64-clang-21.1.8/bin/clang",
+      "-target",
+      "aarch64-none-elf",
+      "-std=c11",
+      "-ffreestanding",
+      "-fno-builtin",
+      "-fno-stack-protector",
+      "-nostdinc",
+      "-isystem",
+      "/nix/store/vhg4azj1sd88x317byclhyzbqr4xlfpw-clang-21.1.8-lib/lib/clang/21/include",
+      "-I",
+      "/Users/petitstrawberry/Development/Rust/Scarlet/user/lib/scarlet-libc/include",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-c",
+      "/Users/petitstrawberry/Development/Rust/Scarlet/user/lib/scarlet-libc/tests/c_main.c",
+      "-o",
+      "/private/tmp/scarlet-libc-surface-c-startup-aarch64/c_main.o"
+    ],
+    [
+      "/nix/store/j9qx1hvhsibni3hjhvs156pnqn24hq1p-lld-21.1.8/bin/ld.lld",
+      "--gc-sections",
+      "--no-undefined",
+      "-static",
+      "-e",
+      "_start",
+      "-z",
+      "max-page-size=4096",
+      "--fix-cortex-a53-843419",
+      "-Map=/private/tmp/scarlet-libc-surface-c-startup-aarch64/link.map",
+      "--trace",
+      "/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/build-native-host/aarch64-apple-darwin/stage1/lib/rustlib/aarch64-unknown-scarlet/lib/scarlet-crt0.o",
+      "/private/tmp/scarlet-libc-surface-c-startup-aarch64/c_main.o",
+      "/private/tmp/scarlet-libc-surface-aarch64-unknown-scarlet/aarch64-unknown-scarlet/release/libscarlet_c.a",
+      "-o",
+      "/private/tmp/scarlet-libc-surface-c-startup-aarch64/c-startup-probe"
+    ],
+    [
+      "/Applications/Xcode.app/Contents/Developer/usr/bin/python3",
+      "/Users/petitstrawberry/Development/Rust/Scarlet/tools/native-rustc/audit_elf.py",
+      "--machine",
+      "aarch64",
+      "--scarlet",
+      "/private/tmp/scarlet-libc-surface-c-startup-aarch64/c-startup-probe"
+    ]
+  ],
+  "archive": {
+    "elf_members": 542,
+    "machine": 183,
+    "osabi_counts": {
+      "83": 542
+    }
+  },
+  "elf": {
+    "path": "/private/tmp/scarlet-libc-surface-c-startup-aarch64/c-startup-probe",
+    "sha256": "9c3f4d4ad90e2ab8e0794b4deea7ff66afaf4518bc2ed9b7f76f38ddb0ced362",
+    "bytes": 101896,
+    "elf_type": "EXEC",
+    "machine": "aarch64",
+    "osabi": 83,
+    "entry": 2114148,
+    "interpreter": null,
+    "needed": [],
+    "rpath": null,
+    "runpath": null,
+    "soname": null,
+    "tls": [],
+    "relocations": {},
+    "undefined_relocated_symbols": [],
+    "hash_tables": [],
+    "textrel": false,
+    "relr": false,
+    "symbol_versioning": false,
+    "init_fini": []
+  },
+  "symbols": {
+    "required_defined_symbols": {
+      "_start": 2114148,
+      "__scarlet_start": 2119820,
+      "before_main": 2114196,
+      "main": 2114396,
+      "__errno_location": 2115396,
+      "malloc": 2115828,
+      "free": 2115748,
+      "aligned_alloc": 2115436,
+      "posix_memalign": 2116032,
+      "realloc": 2116316,
+      "reallocarray": 2116840
+    },
+    "undefined_symbols": [],
+    "constructor_addresses": [
+      2119612,
+      2114196
+    ]
+  }
+}

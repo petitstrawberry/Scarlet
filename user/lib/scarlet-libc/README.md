@@ -1,9 +1,10 @@
 # Scarlet Native libc
 
 `scarlet-libc` implements a growing C runtime in Rust for Scarlet's native
-AArch64 and RV64 targets. The current library is a small static C ABI adapter:
-ordinary and aligned allocation, thread-local `errno`, `realpath`, file
-timestamps, and file sync.
+AArch64 and RV64 targets. The static C ABI now includes ordinary and aligned
+allocation, thread-local `errno`, byte strings, integer conversion, descriptor
+I/O, unbuffered streams and integer/string formatted output, plus `realpath`,
+file timestamps and sync.
 The [support matrix and acceptance gates](STATUS.md) distinguish implemented
 behavior from the work needed for a complete C runtime.
 
@@ -11,8 +12,8 @@ The direction is to grow this Rust implementation using Scarlet Rust std as
 its backend, with musl-level completeness and robustness as a goal. Allocation
 and TLS can continue to use std; `no_std` is not a requirement. The public
 contract is the C ABI, with the matching Rust runtime managed internally by the
-toolchain. The library is not complete, does not yet build Cargo's C
-dependencies, and does not enable `cfg(unix)` or the Linux syscall ABI.
+toolchain. The library is not complete and does not yet supply Cargo's full C
+dependency closure. It does not enable `cfg(unix)` or the Linux syscall ABI.
 
 ## Current integration contract
 
@@ -40,7 +41,8 @@ dependencies, and does not enable `cfg(unix)` or the Linux syscall ABI.
   ext2 also rejects seconds above `UINT32_MAX`. `UTIME_NOW`, `UTIME_OMIT`, relative
   directory handles, and `AT_SYMLINK_NOFOLLOW` are implemented.
 - The kernel and toolchain must agree on the
-  [Native filesystem extensions](../../../docs/abi/native-filesystem.md).
+  [Native filesystem extensions](../../../docs/abi/native-filesystem.md) and
+  [Native descriptor operations](../../../docs/abi/native-descriptors.md).
   Older filesystem syscalls retain their legacy error contract.
 
 `malloc` and successful zero-size allocations have at least 16-byte alignment
@@ -59,10 +61,45 @@ old block live. All these allocation APIs use the same prefix metadata and
 support ordinary `free` and `realloc`; realloc guarantees fundamental alignment,
 not preservation of an earlier extended alignment.
 
+## Strings, descriptors and streams
+
+`string.h` provides byte comparisons, copies, bounded scans, searches,
+concatenation, owned duplication and stable C-locale error descriptions.
+`memcpy`, `memmove`, `memset`, `memcmp` and `strlen` come from the matching Rust
+compiler-builtins runtime; the libc archive does not replace them with recursive
+wrappers. `ctype.h` implements the ASCII C locale, independent of plain `char`
+signedness. `strtol`, `strtoul`, `strtoll`, `strtoull`, `atoi`, `atol` and `atoll`
+use C17/POSIX integer prefix grammar: base zero recognizes decimal, octal and
+hexadecimal, without C23 binary prefixes. The `strto*` functions consume all
+valid digits on overflow, set `ERANGE` and preserve the required end pointer.
+
+`open`, `openat`, `creat`, `close`, `read`, `write`, `lseek` and `dup` use the
+kernel's status-preserving descriptor operations. Duplicates share offset and
+append state, while close-on-exec remains descriptor-local. `fcntl` supports
+`F_GETFD`, `F_SETFD`, `F_GETFL` and `F_SETFL`; the last changes append while
+preserving access mode. Unsupported flags and commands fail explicitly. The
+kernel checks descriptor access and provides atomic append in ext2 and tmpfs.
+Creation modes do not establish Unix ownership, umask or permission enforcement.
+
+`stdio.h` supplies opaque, internally locked `FILE` streams: `fopen`/`fdopen`,
+close/flush, block and character I/O, line I/O, seek/tell, EOF/error indicators,
+and one-byte `ungetc`. Output is unbuffered, so there is no pending output to
+flush at process exit; `fflush` does not imply `fsync`. `fdopen` takes ownership
+only on success and does not truncate an existing descriptor for mode `w`.
+
+The `printf`/`fprintf`/`sprintf`/`snprintf` families and their `v` variants support
+integers, byte strings, characters, pointers, flags, widths, precisions and
+integer length modifiers. Bounded output counts discarded bytes and terminates
+when capacity is nonzero; an unrepresentable return count reports `EOVERFLOW`.
+Floating-point, wide, positional, grouping and `%n` conversions report
+`ENOTSUP`. There is no scanf family, stream buffering API, floating-point
+conversion or general locale implementation yet.
+
 ## Build and checks
 
-Run these commands from the Scarlet repository root. Host tests need a Rust
-compiler supporting edition 2024; they do not execute Scarlet syscalls:
+Run these commands from the Scarlet repository root. Host tests need a nightly
+Rust compiler supporting edition 2024 and `c_variadic`; they do not execute
+Scarlet syscalls:
 
 ```sh
 cargo test --manifest-path user/lib/scarlet-libc/Cargo.toml
@@ -91,7 +128,9 @@ code generator and llvm-ar; select them with `SCARLET_PROBE_CC` and
 `SCARLET_PROBE_AR`. Building the archive alone does not establish C startup or
 guest compatibility.
 
-The probe links the actual [C fixture](tests/native.c) and runs it alongside
+The probe links the actual [allocation/filesystem](tests/native.c),
+[strings/conversion](tests/strings.c), [descriptor](tests/descriptor.c) and
+[stdio](tests/stdio.c) C fixtures and runs them alongside
 [Rust filesystem checks](../../../tools/native-rustc/native_fs.rs). Pass the
 fresh probe to `tools/native-rustc/run-qemu.py` with `--native-fs --proc-macro`.
 Use `--accel hvf` for AArch64 on Apple Silicon. The
@@ -135,6 +174,48 @@ both persisted `C_STARTUP_PASS` and `c-startup.status` before setting
 `c_startup_verified`. The existing kernel, staging, bootstrap, probe, native
 linker and fresh output arguments are still required. For RV64, build with
 `riscv64gc-unknown-scarlet` and run the harness with `--arch riscv64`.
+
+## Upstream zlib consumer
+
+The [zlib builder](../../../tools/native-rustc/consumer-zlib/README.md) downloads
+or reuses the SHA-256-pinned upstream zlib 1.3.2 release, compiles all 15
+unmodified core/gzip C sources, and links a plain C consumer with the matching
+CRT and `libscarlet_c.a`. Both AArch64 and RV64 have static cross-build and ELF
+audit results. The consumer covers compression, incremental inflate/deflate,
+gzip file I/O, integer/string `gzprintf`, descriptor ownership and corruption
+errors. It uses Scarlet headers and Clang builtin headers, without a host libc.
+
+```sh
+python3 tools/native-rustc/consumer-zlib/build.py \
+  --target aarch64-unknown-scarlet \
+  --sysroot "$(rustc --print sysroot)" \
+  --libc user/lib/scarlet-libc/target/aarch64-unknown-scarlet/release/libscarlet_c.a \
+  --output /tmp/scarlet-zlib-aarch64
+```
+
+Use a fresh output directory and select `--clang`, `--ar` and `--linker` when
+the desired tools are not on PATH. `--source-archive` reuses a local release
+archive only when its hash matches. Add these options to the complete matching
+QEMU harness invocation:
+
+```sh
+--storage ext2 --native-fs --proc-macro \
+--c-startup-probe /tmp/scarlet-c-startup-aarch64/c-startup-probe \
+--zlib-probe /tmp/scarlet-zlib-aarch64/zlib-probe
+```
+
+The harness requires persisted `ZLIB_PASS`, exit status 47 and the exact stdout
+line `SCARLET_LIBC_ZLIB_OK` before recording `zlib_verified`. Build success does
+not satisfy this guest check. The
+[AArch64/HVF milestone](../../../tools/native-rustc/evidence/2026-09-22-libc-zlib-aarch64.json)
+passes this gate, all C string/descriptor/stdio fixtures on ext2 and tmpfs,
+the direct-C startup fixture, native std compilation/execution and proc macros.
+The complete release kernel suite also passes all 1293 tests, including 20
+added regressions. RV64 has cross-build and ELF-audit evidence only. The
+published bundle remains unchanged, and this does not establish complete
+zlib/libc conformance or installed SDK acceptance.
+
+## Recorded milestones
 
 The recorded [2026-09-22 filesystem run](../../../tools/native-rustc/evidence/2026-09-22-native-fs-aarch64.json)
 passed on AArch64/HVF with ext2 and tmpfs. RV64 has cross-build evidence, not

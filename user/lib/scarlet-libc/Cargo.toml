@@ -2,7 +2,7 @@
 name = "scarlet-libc"
 version = "0.1.0"
 edition = "2024"
-description = "Initial Scarlet Native C ABI: allocation, canonical paths and file timestamps"
+description = "Rust std-backed C runtime for the Scarlet Native ABI"
 
 [workspace]
 

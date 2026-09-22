@@ -63,6 +63,89 @@ mod tests {
         }
     }
 
+    #[test_case]
+    fn test_append_tracks_shared_eof_and_keeps_failed_write_cursor() {
+        use crate::fs::vfs_v2::core::FileSystemOperations;
+
+        let tmpfs = TmpFS::new(8);
+        let node = tmpfs
+            .create(
+                &tmpfs.root_node(),
+                &"append".to_string(),
+                FileType::RegularFile,
+                0o644,
+            )
+            .unwrap();
+        let first = tmpfs.open(&node, 0).unwrap();
+        let second = tmpfs.open(&node, 0).unwrap();
+        let duplicate = first.clone();
+        assert_eq!(first.append(b"ab").unwrap(), 2);
+        assert_eq!(second.append(b"cd").unwrap(), 2);
+        first.seek_signed(0, 0).unwrap();
+        assert_eq!(duplicate.append(b"ef").unwrap(), 2);
+        assert_eq!(first.seek_signed(0, 1).unwrap(), 6);
+        assert_eq!(second.seek_signed(0, 1).unwrap(), 4);
+        assert_eq!(second.write_at(1, b"B").unwrap(), 1);
+        assert_eq!(second.seek_signed(0, 1).unwrap(), 4);
+        first.truncate(3).unwrap();
+        assert_eq!(second.append(b"gh").unwrap(), 2);
+        assert_eq!(second.seek_signed(0, 1).unwrap(), 5);
+        assert_no_space_error(second.append(b"over").unwrap_err());
+        assert_eq!(second.seek_signed(0, 1).unwrap(), 5);
+        first.seek_signed(1, 0).unwrap();
+        assert_eq!(first.append(b"").unwrap(), 0);
+        assert_eq!(first.seek_signed(0, 1).unwrap(), 1);
+        let mut bytes = [0; 8];
+        assert_eq!(first.read_at(0, &mut bytes).unwrap(), 5);
+        assert_eq!(&bytes[..5], b"aBcgh");
+    }
+
+    #[test_case]
+    fn test_signed_seek_checks_range_and_supports_holes() {
+        use crate::fs::vfs_v2::core::FileSystemOperations;
+
+        let tmpfs = TmpFS::new(0);
+        let node = tmpfs
+            .create(
+                &tmpfs.root_node(),
+                &"seek".to_string(),
+                FileType::RegularFile,
+                0o644,
+            )
+            .unwrap();
+        let file = tmpfs.open(&node, 0).unwrap();
+        assert_eq!(file.seek_signed(3, 0).unwrap(), 3);
+        assert!(matches!(
+            file.seek_signed(i64::MIN, 1),
+            Err(StreamError::InvalidArgument)
+        ));
+        assert!(matches!(
+            file.seek_signed(-4, 1),
+            Err(StreamError::InvalidArgument)
+        ));
+        assert!(matches!(
+            file.seek_signed(0, 3),
+            Err(StreamError::InvalidArgument)
+        ));
+        assert_eq!(file.seek_signed(0, 1).unwrap(), 3);
+        assert!(matches!(
+            file.seek_signed(i64::MAX, 1),
+            Err(StreamError::FileSystemError(error)) if error.kind == FileSystemErrorKind::ValueOverflow
+        ));
+        assert_eq!(file.seek_signed(0, 1).unwrap(), 3);
+        assert_eq!(file.write(b"Z").unwrap(), 1);
+        assert_eq!(file.seek_signed(-1, 2).unwrap(), 3);
+        let mut bytes = [1; 4];
+        assert_eq!(file.read_at(0, &mut bytes).unwrap(), 4);
+        assert_eq!(&bytes, b"\0\0\0Z");
+        assert_eq!(file.seek_signed(i64::MAX, 0).unwrap(), i64::MAX as u64);
+        assert!(matches!(
+            file.seek_signed(1, 1),
+            Err(StreamError::FileSystemError(error)) if error.kind == FileSystemErrorKind::ValueOverflow
+        ));
+        assert_eq!(file.seek_signed(0, 1).unwrap(), i64::MAX as u64);
+    }
+
     /// Test basic hard link creation and functionality
     #[test_case]
     fn test_hardlink_basic() {

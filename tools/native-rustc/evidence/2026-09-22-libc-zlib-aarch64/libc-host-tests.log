@@ -1,0 +1,47 @@
+   Compiling scarlet-libc v0.1.0 (/Users/petitstrawberry/Development/Rust/Scarlet/user/lib/scarlet-libc)
+    Finished `release` profile [optimized] target(s) in 0.86s
+     Running unittests src/lib.rs (/tmp/scarlet-libc-surface-host/release/deps/scarlet_c-ad05b067d905a726)
+
+running 33 tests
+test allocation::tests::invalid_alignment_and_impossible_layouts_report_errors ... ok
+test allocation::tests::allocations_align_zero_and_preserve_data ... ok
+test allocation::tests::posix_memalign_preserves_errno_and_failure_output ... ok
+test allocation::tests::reallocarray_checks_multiplication_and_preserves_failed_input ... ok
+test allocation::tests::zero_size_allocations_are_freeable_and_reallocation_frees ... ok
+test allocation::tests::fundamental_and_extended_alignment_survive_free_and_realloc ... ok
+test conversion::tests::incomplete_prefix_and_absent_digits ... ok
+test conversion::tests::invalid_base_sets_errno_and_original_end_pointer ... ok
+test conversion::tests::signed_boundaries_and_overflow_consume_all_digits ... ok
+test conversion::tests::long_width_and_decimal_convenience_functions ... ok
+test conversion::tests::unsigned_negative_and_overflow_are_distinct ... ok
+test conversion::tests::all_radices_round_trip_limits_and_reject_next_magnitude ... ok
+test conversion::tests::whitespace_sign_prefix_and_end_pointer ... ok
+test descriptor::tests::status_results_preserve_byte_counts_and_distinct_errors ... ok
+test descriptor::tests::transfer_boundaries_allow_zero_length_and_reject_unrepresentable_counts ... ok
+test formatting::tests::integer_flags_precision_and_signed_minimum ... ok
+test formatting::tests::large_padding_is_counted_without_visiting_discarded_bytes ... ok
+test formatting::tests::precision_limits_unterminated_strings_and_negative_precision_is_ignored ... ok
+test formatting::tests::star_width_precision_and_length_modifiers ... ok
+test formatting::tests::truncation_and_zero_capacity_count_complete_output ... ok
+test formatting::tests::unsupported_and_malformed_formats_fail_and_terminate ... ok
+test formatting::tests::va_list_forwarding_and_sink_failure ... ok
+test stdio::tests::malformed_modes_are_rejected ... ok
+test stdio::tests::modes_accept_ordered_binary_update_and_exclusive_create ... ok
+test strings::tests::c_locale_classification_covers_every_byte_and_eof ... ok
+test strings::tests::comparisons_and_searches_use_unsigned_bytes_and_include_nul ... ok
+test strings::tests::bounded_operations_do_not_need_a_terminator ... ok
+test strings::tests::duplicate_is_owned_bounded_terminated_and_preserves_errno ... ok
+test strings::tests::concatenation_and_substrings_preserve_boundaries ... ok
+test strings::tests::error_descriptions_have_stable_storage_and_preserve_errno ... ok
+test tests::special_times_ignore_seconds_and_validate_nanoseconds ... ok
+test tests::errno_is_independent_between_threads ... ok
+test formatting::tests::integer_flag_combinations_match_host_libc ... ok
+
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests scarlet_c
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

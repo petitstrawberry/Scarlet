@@ -10,12 +10,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const HELLO: &str = "SCARLET_NATIVE_RUSTC_HELLO_OK\n";
 const HELLO_EXIT: i32 = 37;
 const MACRO_HELLO: &str = "SCARLET_NATIVE_PROC_MACRO_OK=42\n";
+const ZLIB_HELLO: &str = "SCARLET_LIBC_ZLIB_OK";
 const CONFIG: &str = "/etc/native-rustc-probe.args";
 #[cfg(all(feature = "native-fs", target_os = "scarlet"))]
 mod allocation_failure;
 #[cfg(all(feature = "native-fs", target_os = "scarlet"))]
 mod native_fs;
-const USAGE: &str = "usage: native-rustc-probe RUSTC SYSROOT TARGET NEW_OUTPUT_DIR [--dummy] [--full --linker PATH] [--proc-macro] [--native-fs] [--c-startup PATH] [--backend PATH_OR_NAME] [--linker-flavor FLAVOR] [--timeout SECONDS] [--run-timeout SECONDS]; no arguments reads /etc/native-rustc-probe.args (one argument per line)";
+const USAGE: &str = "usage: native-rustc-probe RUSTC SYSROOT TARGET NEW_OUTPUT_DIR [--dummy] [--full --linker PATH] [--proc-macro] [--native-fs] [--c-startup PATH] [--zlib PATH] [--backend PATH_OR_NAME] [--linker-flavor FLAVOR] [--timeout SECONDS] [--run-timeout SECONDS]; no arguments reads /etc/native-rustc-probe.args (one argument per line)";
 
 thread_local! {
     static THREAD_PREFLIGHT: Cell<u32> = const { Cell::new(0) };
@@ -32,6 +33,7 @@ struct Options {
     proc_macro: bool,
     native_fs: bool,
     c_startup: Option<PathBuf>,
+    zlib: Option<PathBuf>,
     backend: Option<String>,
     linker: Option<PathBuf>,
     linker_flavor: Option<String>,
@@ -63,6 +65,7 @@ fn options(args: &[String]) -> Result<Options, String> {
         proc_macro: false,
         native_fs: false,
         c_startup: None,
+        zlib: None,
         backend: None,
         linker: None,
         linker_flavor: None,
@@ -77,7 +80,7 @@ fn options(args: &[String]) -> Result<Options, String> {
             "--proc-macro" => result.proc_macro = true,
             "--native-fs" => result.native_fs = true,
             "--backend" | "--linker" | "--linker-flavor" | "--timeout" | "--run-timeout"
-            | "--c-startup" => {
+            | "--c-startup" | "--zlib" => {
                 let value = rest
                     .next()
                     .ok_or_else(|| format!("missing value for {flag}"))?;
@@ -87,6 +90,7 @@ fn options(args: &[String]) -> Result<Options, String> {
                 match flag.as_str() {
                     "--backend" => result.backend = Some(value.clone()),
                     "--c-startup" => result.c_startup = Some(value.into()),
+                    "--zlib" => result.zlib = Some(value.into()),
                     "--linker" => result.linker = Some(value.into()),
                     "--linker-flavor" => result.linker_flavor = Some(value.clone()),
                     "--timeout" => result.timeout = seconds(value)?,
@@ -442,6 +446,10 @@ fn run() -> Result<(), String> {
         *startup = existing_absolute(startup, "C startup probe", false)?;
         check_elf(startup, &options.target).map_err(|e| format!("C startup probe: {e}"))?;
     }
+    if let Some(zlib) = &mut options.zlib {
+        *zlib = existing_absolute(zlib, "zlib consumer", false)?;
+        check_elf(zlib, &options.target).map_err(|e| format!("zlib consumer: {e}"))?;
+    }
     if let Some(linker) = &mut options.linker {
         *linker = existing_absolute(linker, "linker", false)?;
         check_elf(linker, &options.target).map_err(|e| format!("native linker: {e}"))?;
@@ -499,6 +507,23 @@ fn run() -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
         println!("NATIVE_RUSTC C_STARTUP PASS");
+    }
+    if let Some(zlib) = &options.zlib {
+        let mut command = Command::new(zlib);
+        command.arg(output);
+        let stdout = phase(command, output, "zlib", options.run_timeout, 47)?;
+        if !String::from_utf8_lossy(&stdout)
+            .lines()
+            .any(|line| line == ZLIB_HELLO)
+        {
+            return Err("zlib consumer did not produce its required success marker".into());
+        }
+        fs::write(
+            output.join("ZLIB_PASS"),
+            "upstream zlib fixture exited 47\n",
+        )
+        .map_err(|e| e.to_string())?;
+        println!("NATIVE_RUSTC ZLIB PASS");
     }
     // Load the selected backend once up front so the version probe also
     // verifies its DSO dependencies.

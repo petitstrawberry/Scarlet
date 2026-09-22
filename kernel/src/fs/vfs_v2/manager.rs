@@ -2,6 +2,7 @@
 
 use crate::sync::{IrqRwSpinLock, Mutex, MutexGuard, Once};
 use alloc::{
+    collections::VecDeque,
     string::{String, ToString},
     sync::Arc,
     vec,
@@ -21,6 +22,12 @@ pub type FSId = u64;
 
 const O_CREAT: u32 = 0x40;
 const O_EXCL: u32 = 0x80;
+const O_ACCMODE: u32 = 0x3;
+const O_TRUNC: u32 = 0x200;
+const O_APPEND: u32 = 0x400;
+const O_DIRECTORY: u32 = 0x10000;
+const O_NOFOLLOW: u32 = 0x20000;
+const O_CLOEXEC: u32 = 0x80000;
 
 // Filesystems can be shared by independent mount namespaces, so a per-manager
 // lock would not exclude their create/unlink/rename operations. This sleepable
@@ -508,6 +515,225 @@ impl VfsManager {
             super::core::VfsFileObject::new(inner_file_obj, entry, mount_point, path.to_string());
 
         Ok(KernelObject::File(Arc::new(vfs_file_obj)))
+    }
+
+    /// Open using the native `openat` contract, without changing legacy `open`.
+    ///
+    /// Relative paths retain the supplied directory (or cwd) as their anchor;
+    /// absolute paths ignore it. Creation, overlay copy-up and truncation share
+    /// one namespace mutation guard. Creation is not rolled back if open fails.
+    /// `mode` supplies permission metadata, not a permission enforcement policy.
+    pub fn open_at(
+        &self,
+        base: Option<(&Arc<VfsEntry>, &Arc<MountPoint>)>,
+        path: &str,
+        flags: u32,
+        mode: u32,
+    ) -> Result<KernelObject, FileSystemError> {
+        let supported = O_ACCMODE
+            | O_CREAT
+            | O_EXCL
+            | O_TRUNC
+            | O_APPEND
+            | O_DIRECTORY
+            | O_NOFOLLOW
+            | O_CLOEXEC;
+        if flags & !supported != 0
+            || flags & O_ACCMODE == O_ACCMODE
+            || (flags & O_TRUNC != 0 && flags & O_ACCMODE == 0)
+        {
+            return Err(vfs_error(
+                FileSystemErrorKind::InvalidOperation,
+                "Invalid open flags",
+            ));
+        }
+        if path.is_empty() {
+            return Err(vfs_error(FileSystemErrorKind::NotFound, "Empty pathname"));
+        }
+        if path.as_bytes().contains(&0) {
+            return Err(vfs_error(
+                FileSystemErrorKind::InvalidPath,
+                "NUL in pathname",
+            ));
+        }
+        let _namespace_guard = lock_namespace_mutations()?;
+        let (entry, mount_point) = self.resolve_open_at(base, path, flags, mode)?;
+        let node = entry.node();
+        let file_type = node.file_type()?;
+        if flags & O_DIRECTORY != 0 && file_type != FileType::Directory {
+            return Err(vfs_error(
+                FileSystemErrorKind::NotADirectory,
+                "Directory required",
+            ));
+        }
+        if file_type == FileType::Directory && flags & O_ACCMODE != 0 {
+            return Err(vfs_error(
+                FileSystemErrorKind::IsADirectory,
+                "Cannot open directory for writing",
+            ));
+        }
+        let filesystem = node.filesystem().and_then(|w| w.upgrade()).ok_or_else(|| {
+            vfs_error(FileSystemErrorKind::NotSupported, "No filesystem reference")
+        })?;
+        let inner = filesystem.open(&node, flags)?;
+        if flags & O_APPEND != 0 && !inner.supports_append() {
+            return Err(vfs_error(
+                FileSystemErrorKind::NotSupported,
+                "Filesystem does not support atomic append",
+            ));
+        }
+        if flags & O_TRUNC != 0 && file_type == FileType::RegularFile {
+            use crate::object::capability::StreamError;
+            inner.truncate(0).map_err(|error| {
+                let kind = match error {
+                    StreamError::FileSystemError(error) => return error,
+                    StreamError::PermissionDenied => FileSystemErrorKind::PermissionDenied,
+                    StreamError::NotSupported => FileSystemErrorKind::NotSupported,
+                    StreamError::InvalidArgument => FileSystemErrorKind::InvalidOperation,
+                    StreamError::NoSpace => FileSystemErrorKind::NoSpace,
+                    _ => FileSystemErrorKind::IoError,
+                };
+                vfs_error(kind, "Failed to truncate opened file")
+            })?;
+        }
+        Ok(KernelObject::File(Arc::new(
+            super::core::VfsFileObject::new_with_flags(
+                inner,
+                entry,
+                mount_point,
+                path.to_string(),
+                flags,
+            ),
+        )))
+    }
+
+    /// Resolve each component with the existing mount walker. Keeping unresolved
+    /// components lets O_CREAT create a dangling final symlink's target, while
+    /// preserving symlink/.. semantics and one shared symlink traversal budget.
+    /// The caller holds NAMESPACE_MUTATIONS; this helper must not reacquire it.
+    fn resolve_open_at(
+        &self,
+        base: Option<(&Arc<VfsEntry>, &Arc<MountPoint>)>,
+        path: &str,
+        flags: u32,
+        mode: u32,
+    ) -> Result<(Arc<VfsEntry>, Arc<MountPoint>), FileSystemError> {
+        let (mut entry, mut mount) = if path.starts_with('/') {
+            self.resolve_path("/")?
+        } else if let Some((entry, mount)) = base {
+            (entry.clone(), mount.clone())
+        } else {
+            self.get_cwd().ok_or_else(|| {
+                vfs_error(
+                    FileSystemErrorKind::InvalidPath,
+                    "Relative path requires cwd",
+                )
+            })?
+        };
+        if !entry.node().is_directory()? {
+            return Err(vfs_error(
+                FileSystemErrorKind::NotADirectory,
+                "Open base is not a directory",
+            ));
+        }
+        let mut pending: VecDeque<String> = path
+            .split('/')
+            .filter(|c| !c.is_empty())
+            .map(String::from)
+            .collect();
+        let mut requires_directory = path.ends_with('/');
+        let mut symlinks = 0;
+        let exclusive = flags & (O_CREAT | O_EXCL) == (O_CREAT | O_EXCL);
+        let no_follow = PathResolutionOptions::no_follow();
+        while let Some(component) = pending.pop_front() {
+            let final_component = pending.is_empty();
+            let found = self.resolve_path_from_with_options(&entry, &mount, &component, &no_follow);
+            let (next, next_mount) = match found {
+                Ok(found) => found,
+                Err(error)
+                    if error.kind == FileSystemErrorKind::NotFound
+                        && final_component
+                        && flags & O_CREAT != 0 =>
+                {
+                    if requires_directory || flags & O_DIRECTORY != 0 {
+                        return Err(vfs_error(
+                            FileSystemErrorKind::NotADirectory,
+                            "Cannot create a directory with open",
+                        ));
+                    }
+                    let parent_node = entry.node();
+                    let filesystem = parent_node
+                        .filesystem()
+                        .and_then(|w| w.upgrade())
+                        .ok_or_else(|| {
+                            vfs_error(FileSystemErrorKind::NotSupported, "No filesystem reference")
+                        })?;
+                    let node = filesystem.create(
+                        &parent_node,
+                        &component,
+                        FileType::RegularFile,
+                        mode & 0o777,
+                    )?;
+                    let created =
+                        VfsEntry::new(Some(Arc::downgrade(&entry)), component.clone(), node);
+                    entry.add_child(component, created.clone());
+                    return Ok((created, mount));
+                }
+                Err(error) => return Err(error),
+            };
+            if final_component && exclusive {
+                return Err(vfs_error(
+                    FileSystemErrorKind::AlreadyExists,
+                    "File already exists",
+                ));
+            }
+            if next.node().is_symlink()? {
+                if final_component && flags & O_NOFOLLOW != 0 && !requires_directory {
+                    return Err(vfs_error(
+                        FileSystemErrorKind::TooManySymlinks,
+                        "Final component is a symbolic link",
+                    ));
+                }
+                symlinks += 1;
+                if symlinks > 40 {
+                    return Err(vfs_error(
+                        FileSystemErrorKind::TooManySymlinks,
+                        "Too many symbolic links",
+                    ));
+                }
+                let target = next.node().read_link()?;
+                if target.is_empty() {
+                    return Err(vfs_error(
+                        FileSystemErrorKind::NotFound,
+                        "Empty symbolic link target",
+                    ));
+                }
+                if final_component && target.ends_with('/') {
+                    requires_directory = true;
+                }
+                if target.starts_with('/') {
+                    (entry, mount) = self.resolve_path("/")?;
+                }
+                for component in target.split('/').filter(|c| !c.is_empty()).rev() {
+                    pending.push_front(component.to_string());
+                }
+            } else {
+                (entry, mount) = (next, next_mount);
+            }
+        }
+        if exclusive {
+            return Err(vfs_error(
+                FileSystemErrorKind::AlreadyExists,
+                "File already exists",
+            ));
+        }
+        if requires_directory && !entry.node().is_directory()? {
+            return Err(vfs_error(
+                FileSystemErrorKind::NotADirectory,
+                "Trailing slash requires a directory",
+            ));
+        }
+        Ok((entry, mount))
     }
 
     fn create_new_and_open(&self, path: &str, flags: u32) -> Result<KernelObject, FileSystemError> {

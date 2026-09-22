@@ -494,3 +494,104 @@ recovery or async-signal safety. The published bundle is unchanged. Full compile
 builds for both targets are tracked in
 [toolchain PR #28](https://github.com/petitstrawberry/scarlet-rust-nix/pull/28),
 stacked on the allocator correction in #27.
+
+### C library surface and upstream zlib, 2026-09-22
+
+This milestone extends the std-backed libc with byte strings, C-locale
+classification and integer conversion, native descriptor I/O, unbuffered
+streams and integer/string formatted output. The
+[support matrix](../../user/lib/scarlet-libc/STATUS.md) lists the exact surface
+and remaining gaps. Stdio uses locked opaque `FILE` objects and one-byte
+pushback. Formatted output supports C varargs and integer length modifiers;
+float, wide, positional, grouping and `%n` formats return `ENOTSUP`. There is no
+scanf family or stream-buffering interface. Integer conversion follows
+C17/POSIX prefixes, without C23 `0b`/`0B`. The matching compiler-builtins provides
+the five `memcpy`/`memmove`/`memset`/`memcmp`/`strlen` symbols.
+
+The [Native descriptor extensions](../abi/native-descriptors.md) supply
+status-preserving open, close, read/write, seek, duplicate and flag operations.
+The kernel checks descriptor access mode, shares offset and append state
+across duplicates, and keeps close-on-exec descriptor-local. Tmpfs and ext2
+append select EOF and publish the write while holding the inode lock; this is
+not implemented by a userspace seek followed by a write. These additive
+operations leave old Native syscall error conventions intact. They do not
+implement Unix credentials, umask or full permission enforcement.
+
+The probe's `native-fs` feature now links C fixtures for
+[strings/conversion](../../user/lib/scarlet-libc/tests/strings.c),
+[descriptors](../../user/lib/scarlet-libc/tests/descriptor.c), and
+[stdio](../../user/lib/scarlet-libc/tests/stdio.c), alongside the previous
+filesystem/allocation checks. They are compiled with builtins disabled to call
+the linked C ABI. The varargs fixture crosses register-save and stack argument
+areas, so host Rust tests alone are insufficient evidence for either guest ABI.
+
+The [zlib consumer builder](../../tools/native-rustc/consumer-zlib/README.md)
+compiles all 15 unmodified core/gzip sources from the pinned upstream zlib 1.3.2
+release, then statically links an ordinary C consumer with the matching CRT
+and `libscarlet_c.a`. AArch64 and RV64 cross-build and ELF audits are complete.
+The consumer tests one-shot and incremental compression, gzip file I/O and
+seeking, integer/string `gzprintf`, duplicated-descriptor ownership, missing
+files and corrupted CRC errors. Neither building the ELF nor auditing it
+establishes guest execution.
+
+Build the libc archive and enhanced probe as described above, then build the
+consumer with a fresh output directory:
+
+```sh
+python3 tools/native-rustc/consumer-zlib/build.py \
+  --target aarch64-unknown-scarlet \
+  --sysroot /path/to/matching-cross-sysroot \
+  --libc /path/to/aarch64-unknown-scarlet/release/libscarlet_c.a \
+  --clang /path/to/unwrapped/clang --ar /path/to/llvm-ar \
+  --linker /path/to/ld.lld \
+  --output /tmp/scarlet-zlib-aarch64
+```
+
+The builder downloads the SHA-256-pinned archive by default; use
+`--source-archive /path/to/zlib-1.3.2.tar.gz` to reuse a verified local copy.
+It records tool versions, commands, input hashes, archive members and final ELF
+properties, and uses only Scarlet and Clang builtin headers. For RV64, select
+`riscv64gc-unknown-scarlet` and matching inputs.
+
+Use a release kernel containing the descriptor changes, a complete matching
+staged native toolchain, and the freshly rebuilt probe. For example, on an
+Apple Silicon host with the versioned toolchain layout:
+
+```sh
+python3 tools/native-rustc/run-qemu.py \
+  --arch aarch64 --accel hvf --cpus 4 --storage ext2 \
+  --kernel /path/to/aarch64-release-scarlet \
+  --staging /path/to/matching-staging-tree \
+  --bootstrap /path/to/matching-probe-bootstrap \
+  --probe /path/to/aarch64-release-native-rustc-probe \
+  --rustc /opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/rustc \
+  --sysroot /opt/scarlet/toolchains/rust/v0.1.0-rc.1 \
+  --linker /opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/wild \
+  --linker-flavor ld.lld --native-fs --proc-macro \
+  --c-startup-probe /path/to/matching-c-startup-probe \
+  --zlib-probe /tmp/scarlet-zlib-aarch64/zlib-probe \
+  --output /tmp/scarlet-libc-zlib-aarch64
+```
+
+All host paths are examples; the output directory must be new. The versioned
+guest path is a staging layout, not evidence that the published archive contains
+these changes. `--zlib-probe` stages the static consumer and gives it a writable
+guest output directory. Acceptance requires persisted `ZLIB_PASS`,
+`zlib.status` with exit 47 and the exact `SCARLET_LIBC_ZLIB_OK` stdout line.
+Only then does the harness set `zlib_verified`. The native std application,
+proc-macro checks and optional direct-C startup check retain their own gates.
+
+The [recorded AArch64/HVF run](../../tools/native-rustc/evidence/2026-09-22-libc-zlib-aarch64.json)
+returns `FULL_PASS` with all five verification flags true: native compilation,
+proc macros, native filesystem, direct-C startup and zlib. The C string,
+descriptor and stdio fixtures pass on ext2 and tmpfs; zlib returns 47 and prints
+the required success marker. A separate complete release kernel run passes all
+1293 tests, including 20 added regressions. It also verifies the correction for
+seeking with a detached ext2 node, found during this milestone's test run.
+Host validation passes 33 libc tests, 27 ABI tests, three probe tests, 21 Python
+tests and 56 header checks.
+
+RV64 has cross-build and ELF-audit evidence, with guest execution outstanding
+for this milestone. The published bundle remains unchanged. Complete standards
+coverage, permissions and process/thread/network contracts, installed SDK
+acceptance, and Cargo's curl/libgit2/SQLite dependencies remain separate work.

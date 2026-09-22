@@ -1,0 +1,1411 @@
+warning: Git tree '/Users/petitstrawberry/Development/Rust/Scarlet' is dirty
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on shared package cache
+   Compiling scarlet v1.0.1 (/Users/petitstrawberry/Development/Rust/Scarlet/kernel)
+warning: unused import: `vec`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/abi/linux/generic/fs.rs:18:5
+   |
+18 |     vec,
+   |     ^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `is_direct_mapped` and `virt_to_phys`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/abi/linux/generic/mm.rs:10:16
+   |
+10 |     vm::addr::{is_direct_mapped, virt_to_phys},
+   |                ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused import: `MemoryArea`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/boot/limine.rs:18:23
+   |
+18 | use crate::vm::vmem::{MemoryArea, MemoryAttribute};
+   |                       ^^^^^^^^^^
+
+warning: unused import: `alloc::boxed::Box`
+ --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/context.rs:7:5
+  |
+7 | use alloc::boxed::Box;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Page`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/context.rs:11:41
+   |
+11 | use crate::mem::page::{ContiguousPages, Page};
+   |                                         ^^^^
+
+warning: unused import: `crate::vm::vmem::MemoryArea`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/context.rs:12:5
+   |
+12 | use crate::vm::vmem::MemoryArea;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around function argument
+    --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/iommu/arm_smmu_v2.rs:1068:23
+     |
+1068 |             return Ok((entry & TABLE_ADDRESS_MASK));
+     |                       ^                          ^
+     |
+     = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+     |
+1068 -             return Ok((entry & TABLE_ADDRESS_MASK));
+1068 +             return Ok(entry & TABLE_ADDRESS_MASK);
+     |
+
+warning: unnecessary parentheses around assigned value
+    --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/iommu/arm_smmu_v2.rs:1097:21
+     |
+1097 |             table = (entry & TABLE_ADDRESS_MASK);
+     |                     ^                          ^
+     |
+help: remove these parentheses
+     |
+1097 -             table = (entry & TABLE_ADDRESS_MASK);
+1097 +             table = entry & TABLE_ADDRESS_MASK;
+     |
+
+warning: unused imports: `RelocationEntry` and `RelocationSection`
+ --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/lsm/mod.rs:5:32
+  |
+5 |     ParsedSymbol, RelocObject, RelocationEntry, RelocationSection, SHF_ALLOC, SHN_UNDEF,
+  |                                ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `free_raw_pages`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/vm/mod.rs:18:44
+   |
+18 | use crate::mem::page::{allocate_raw_pages, free_raw_pages};
+   |                                            ^^^^^^^^^^^^^^
+
+warning: unused imports: `KERNEL_KSTACK_REGION_END` and `KERNEL_KSTACK_REGION_START`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/vm/mod.rs:23:26
+   |
+23 | use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, TRAMPOLINE_VA_END};
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::println`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/vm/mod.rs:24:5
+   |
+24 | use crate::println;
+   |     ^^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around function argument
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/boot/limine.rs:172:56
+    |
+172 |         let area = PhysicalMemoryArea::new(entry.base, (entry.base + entry.length - 1));
+    |                                                        ^                             ^
+    |
+help: remove these parentheses
+    |
+172 -         let area = PhysicalMemoryArea::new(entry.base, (entry.base + entry.length - 1));
+172 +         let area = PhysicalMemoryArea::new(entry.base, entry.base + entry.length - 1 );
+    |
+
+warning: unnecessary parentheses around assigned value
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/boot/limine.rs:272:25
+    |
+272 |         let entry_end = (entry.base + entry.length - 1);
+    |                         ^                             ^
+    |
+help: remove these parentheses
+    |
+272 -         let entry_end = (entry.base + entry.length - 1);
+272 +         let entry_end = entry.base + entry.length - 1 ;
+    |
+
+warning: unused imports: `boxed::Box` and `vec`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:27:13
+   |
+27 | use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
+   |             ^^^^^^^^^^                                         ^^^
+
+warning: unused import: `driver_initcall`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/pic/gic.rs:15:5
+   |
+15 |     driver_initcall, early_initcall,
+   |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::initcall::early`
+ --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/uart/pl011.rs:7:5
+  |
+7 | use crate::initcall::early;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::boxed::Box`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/virtio_input.rs:13:5
+   |
+13 | use alloc::boxed::Box;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/virtio_input.rs:16:5
+   |
+16 | use alloc::vec;
+   |     ^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/virtio_input.rs:17:5
+   |
+17 | use alloc::vec::Vec;
+   |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::environment::PAGE_SIZE`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/virtio_input.rs:28:5
+   |
+28 | use crate::environment::PAGE_SIZE;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `boxed::Box` and `vec`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/virtio_rng.rs:23:13
+   |
+23 | use alloc::{boxed::Box, collections::VecDeque, vec};
+   |             ^^^^^^^^^^                         ^^^
+
+warning: unused import: `crate::environment::PAGE_SIZE`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/virtio_rng.rs:29:5
+   |
+29 | use crate::environment::PAGE_SIZE;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around assigned value
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/environment/aarch64.rs:38:5
+   |
+38 |     (((TRAMPOLINE_VA_END - TRAMPOLINE_VA_RESERVE) & !(PAGE_SIZE - 1)) - 1);
+   |     ^                                                                    ^
+   |
+help: remove these parentheses
+   |
+38 -     (((TRAMPOLINE_VA_END - TRAMPOLINE_VA_RESERVE) & !(PAGE_SIZE - 1)) - 1);
+38 +     ((TRAMPOLINE_VA_END - TRAMPOLINE_VA_RESERVE) & !(PAGE_SIZE - 1)) - 1;
+   |
+
+warning: unused imports: `boxed::Box` and `vec`
+ --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/fs/vfs_v2/drivers/ext2/node.rs:7:13
+  |
+7 | use alloc::{boxed::Box, collections::BTreeMap, format, string::String, sync::Weak, vec, vec::Vec};
+  |             ^^^^^^^^^^                                                             ^^^
+
+warning: unused imports: `boxed::Box` and `vec`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/fs/vfs_v2/drivers/fat32/node.rs:8:5
+   |
+ 8 |     boxed::Box,
+   |     ^^^^^^^^^^
+...
+12 |     vec,
+   |     ^^^
+
+warning: unused import: `crate::vm::vmem::VirtualMemoryMap`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/ipc/shared_memory.rs:15:5
+   |
+15 | use crate::vm::vmem::VirtualMemoryMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::earlycon::EarlyConsole`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/log.rs:11:5
+   |
+11 | use crate::earlycon::EarlyConsole;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `vec`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/network/protocol_stack.rs:49:63
+   |
+49 | use alloc::{collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
+   |                                                               ^^^
+
+warning: unused import: `phys_to_virt`
+ --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/task/elf_loader/mod.rs:9:23
+  |
+9 | use crate::vm::addr::{phys_to_virt, virt_to_phys};
+  |                       ^^^^^^^^^^^^
+
+warning: unused import: `VirtualMemoryRegion`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/task/elf_loader/mod.rs:10:78
+   |
+10 | use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion};
+   |                                                                              ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::boxed::Box`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/task/elf_loader/mod.rs:11:5
+   |
+11 | use alloc::boxed::Box;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `object::capability::selectable::Selectable`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/abi/linux/generic/pipe.rs:11:5
+   |
+11 |     object::capability::selectable::Selectable,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `err`
+    --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/abi/linux/generic/fs.rs:3321:13
+     |
+3321 |         Err(err) => {
+     |             ^^^ help: if this is intentional, prefix it with an underscore: `_err`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `kind`
+    --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/abi/linux/generic/fs.rs:3323:21
+     |
+3323 |                 let kind = kernel_obj.type_name();
+     |                     ^^^^ help: if this is intentional, prefix it with an underscore: `_kind`
+
+warning: unused variable: `inherited_sctlr`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/boot/limine.rs:295:64
+    |
+295 | extern "C" fn secondary_cpu_entry_after_el_drop(cpu_id: usize, inherited_sctlr: u64) -> ! {
+    |                                                                ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_inherited_sctlr`
+
+warning: unused variable: `cpu`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/boot/limine.rs:439:5
+    |
+439 |     cpu: &fdt::node::FdtNode,
+    |     ^^^ help: if this is intentional, prefix it with an underscore: `_cpu`
+
+warning: unused variable: `inherited_sctlr`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/boot/limine.rs:569:56
+    |
+569 | extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> ! {
+    |                                                        ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_inherited_sctlr`
+
+warning[E0133]: use of inline assembly is unsafe and requires unsafe block
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/fpu.rs:52:9
+   |
+52 | /         asm!(
+53 | |             ".arch armv8-a+fp+simd",
+54 | |             // Save all 32 vector registers using STP for Q registers
+55 | |             "stp q0, q1, [{0}, #0*32]",
+...  |
+72 | |             options(nostack),
+73 | |         );
+   | |_________^ use of inline assembly
+   |
+   = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+   = note: inline assembly is entirely unchecked and can cause undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/fpu.rs:50:5
+   |
+50 |     pub unsafe fn save(&mut self) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(unsafe_op_in_unsafe_fn)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+
+warning[E0133]: use of inline assembly is unsafe and requires unsafe block
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/fpu.rs:77:9
+   |
+77 | /         asm!(
+78 | |             ".arch armv8-a+fp+simd",
+79 | |             "mrs {0}, fpcr",
+80 | |             "mrs {1}, fpsr",
+...  |
+83 | |             options(nomem, nostack),
+84 | |         );
+   | |_________^ use of inline assembly
+   |
+   = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+   = note: inline assembly is entirely unchecked and can cause undefined behavior
+
+warning: unused variable: `vaddr`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/vm/mmu/armv8_4k.rs:862:9
+    |
+862 |         vaddr: usize,
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_vaddr`
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/device/fdt.rs:157:14
+    |
+157 |         &mut *MANAGER.0.get()
+    |              ^^^^^^^^^^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/device/fdt.rs:155:5
+    |
+155 |     pub unsafe fn get_mut_manager() -> &'static mut FdtManager<'static> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `trapframe`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/device/input/event_device.rs:563:9
+    |
+563 |         trapframe: &mut Trapframe,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_trapframe`
+
+warning: unused variable: `enabled`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/device/network/mod.rs:417:36
+    |
+417 |     fn set_promiscuous_mode(&self, enabled: bool) -> Result<(), &'static str> {
+    |                                    ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_enabled`
+
+warning: unused variable: `read_count`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/block/virtio_blk.rs:397:13
+    |
+397 |         let read_count = requests
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_read_count`
+
+warning: unused variable: `write_count`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/block/virtio_blk.rs:401:13
+    |
+401 |         let write_count = requests
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_write_count`
+
+warning: unused variable: `status_ptr`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/block/virtio_blk.rs:481:17
+    |
+481 |             let status_ptr = status_alloc.as_ptr() as *mut u8;
+    |                 ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_status_ptr`
+
+warning: unused variable: `status`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/block/virtio_blk.rs:597:17
+    |
+597 |             let status = self.read32_register(crate::drivers::virtio::device::Register::Status);
+    |                 ^^^^^^ help: if this is intentional, prefix it with an underscore: `_status`
+
+warning: variable does not need to be mutable
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:117:9
+    |
+117 |     let mut task =
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `buffer_ptr`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:440:17
+    |
+440 |             let buffer_ptr = buffer_alloc.as_ptr() as *mut u8;
+    |                 ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_buffer_ptr`
+
+warning: unused variable: `option`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/fs/vfs_v2/drivers/cpiofs.rs:197:9
+    |
+197 |         option: Option<&str>,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_option`
+
+warning: unused variable: `inode_cache`
+    --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/fs/vfs_v2/drivers/ext2/mod.rs:4659:13
+     |
+4659 |         let inode_cache = self.inode_cache.read();
+     |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_inode_cache`
+
+warning: unused variable: `block_cache`
+    --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/fs/vfs_v2/drivers/ext2/mod.rs:4660:13
+     |
+4660 |         let block_cache = self.block_cache.read();
+     |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_block_cache`
+
+warning: unused variable: `cluster_size`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/fs/vfs_v2/drivers/fat32/mod.rs:646:13
+    |
+646 |         let cluster_size = (self.sectors_per_cluster * self.bytes_per_sector) as usize;
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cluster_size`
+
+warning: unused variable: `cluster_index`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/fs/vfs_v2/drivers/fat32/mod.rs:820:13
+    |
+820 |         for cluster_index in 0..clusters_needed {
+    |             ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cluster_index`
+
+warning: unused variable: `new_root_mount`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/fs/vfs_v2/syscall.rs:840:9
+    |
+840 |     let new_root_mount = match parent_mount.get_child(&new_root_entry) {
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_root_mount`
+
+warning: variable does not need to be mutable
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/ipc/counter.rs:112:13
+    |
+112 |         let mut counter = Self::new(initval, semaphore);
+    |             ----^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unnecessary `unsafe` block
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/lsm/symbol.rs:86:17
+   |
+86 |     let start = unsafe { core::ptr::addr_of!(__SCARLET_KSYMS_START) as usize };
+   |                 ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/lsm/symbol.rs:87:15
+   |
+87 |     let end = unsafe { core::ptr::addr_of!(__SCARLET_KSYMS_END) as usize };
+   |               ^^^^^^ unnecessary `unsafe` block
+
+warning: value assigned to `offset` is never read
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/lsm/symbol.rs:97:22
+   |
+97 |     let mut offset = 0usize;
+   |                      ^^^^^^
+   |
+   = help: maybe it is overwritten before being read?
+   = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `e`
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/lsm/syscall.rs:80:13
+   |
+80 |         Err(e) => {
+   |             ^ help: if this is intentional, prefix it with an underscore: `_e`
+
+warning[E0133]: call to unsafe function `core::ptr::mut_ptr::<impl *mut T>::add` is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/mem/pmm.rs:244:20
+    |
+244 |         let page = self.pages.add(page_idx);
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: consult the function's documentation for information on how to avoid undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/mem/pmm.rs:243:5
+    |
+243 |     unsafe fn add_to_free_list(&mut self, page_idx: usize, order: usize) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/mem/pmm.rs:245:9
+    |
+245 |         (*page).order = order as u8;
+    |         ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/mem/pmm.rs:246:9
+    |
+246 |         (*page).flags |= PAGE_FLAG_BUDDY;
+    |         ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: call to unsafe function `mem::pmm::ListHead::add` is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/mem/pmm.rs:249:9
+    |
+249 |         (*free_list).add(&mut (*page).lru as *mut ListHead);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: consult the function's documentation for information on how to avoid undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/mem/pmm.rs:249:9
+    |
+249 |         (*free_list).add(&mut (*page).lru as *mut ListHead);
+    |         ^^^^^^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/mem/pmm.rs:249:31
+    |
+249 |         (*free_list).add(&mut (*page).lru as *mut ListHead);
+    |                               ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: call to unsafe function `mem::pmm::ListHead::remove` is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/mem/pmm.rs:255:9
+    |
+255 |         (*free_list).remove(&mut (*page).lru as *mut ListHead);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: consult the function's documentation for information on how to avoid undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/mem/pmm.rs:253:5
+    |
+253 |     unsafe fn del_from_free_list(&mut self, page: *mut Page, order: usize) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/mem/pmm.rs:255:9
+    |
+255 |         (*free_list).remove(&mut (*page).lru as *mut ListHead);
+    |         ^^^^^^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/mem/pmm.rs:255:34
+    |
+255 |         (*free_list).remove(&mut (*page).lru as *mut ListHead);
+    |                                  ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/mem/pmm.rs:256:9
+    |
+256 |         (*page).flags &= !PAGE_FLAG_BUDDY;
+    |         ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/mem/pmm.rs:281:9
+    |
+281 |         (*page).order == order as u8 && ((*page).flags & PAGE_FLAG_BUDDY) != 0
+    |         ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/mem/pmm.rs:280:5
+    |
+280 |     unsafe fn page_is_buddy(&self, page: *const Page, order: usize) -> bool {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/mem/pmm.rs:281:42
+    |
+281 |         (*page).order == order as u8 && ((*page).flags & PAGE_FLAG_BUDDY) != 0
+    |                                          ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning: unused variable: `num_pages`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/object/capability/memory_mapping/syscall.rs:322:5
+    |
+322 |     num_pages: usize,
+    |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_pages`
+
+warning: unused variable: `vaddr`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/object/capability/memory_mapping/mod.rs:124:25
+    |
+124 |     fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {}
+    |                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_vaddr`
+
+warning: unused variable: `paddr`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/object/capability/memory_mapping/mod.rs:124:39
+    |
+124 |     fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {}
+    |                                       ^^^^^ help: if this is intentional, prefix it with an underscore: `_paddr`
+
+warning: unused variable: `length`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/object/capability/memory_mapping/mod.rs:124:51
+    |
+124 |     fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {}
+    |                                                   ^^^^^^ help: if this is intentional, prefix it with an underscore: `_length`
+
+warning: unused variable: `offset`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/object/capability/memory_mapping/mod.rs:124:66
+    |
+124 |     fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {}
+    |                                                                  ^^^^^^ help: if this is intentional, prefix it with an underscore: `_offset`
+
+warning: unused variable: `vaddr`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/object/capability/memory_mapping/mod.rs:139:27
+    |
+139 |     fn on_unmapped(&self, vaddr: usize, length: usize) {}
+    |                           ^^^^^ help: if this is intentional, prefix it with an underscore: `_vaddr`
+
+warning: unused variable: `length`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/object/capability/memory_mapping/mod.rs:139:41
+    |
+139 |     fn on_unmapped(&self, vaddr: usize, length: usize) {}
+    |                                         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_length`
+
+warning: variable does not need to be mutable
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/object/capability/selectable/syscall.rs:100:9
+    |
+100 |     let mut options: PollOptions = if options_ptr != 0 {
+    |         ----^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/lib.rs:834:9
+    |
+834 |     let mut init_task = new_user_task("init".to_string(), 0);
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: type `GpuPrivateImageBacking` is more private than the item `GpuImageBacking::Private::0`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/device/gpu/resource.rs:833:13
+    |
+833 |     Private(GpuPrivateImageBacking),
+    |             ^^^^^^^^^^^^^^^^^^^^^^ field `GpuImageBacking::Private::0` is reachable at visibility `pub(crate)`
+    |
+note: but type `GpuPrivateImageBacking` is only usable at visibility `pub(self)`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/device/gpu/resource.rs:639:1
+    |
+639 | struct GpuPrivateImageBacking {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `GpuImportedImageBacking` is more private than the item `GpuImageBacking::Imported::0`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/device/gpu/resource.rs:834:14
+    |
+834 |     Imported(GpuImportedImageBacking),
+    |              ^^^^^^^^^^^^^^^^^^^^^^^ field `GpuImageBacking::Imported::0` is reachable at visibility `pub(crate)`
+    |
+note: but type `GpuImportedImageBacking` is only usable at visibility `pub(self)`
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/device/gpu/resource.rs:826:1
+    |
+826 | struct GpuImportedImageBacking {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MIN_HEAP_SIZE` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/lib.rs:333:7
+    |
+333 | const MIN_HEAP_SIZE: usize = 32 * 1024;
+    |       ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `id` is never read
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/abi/xv6/drivers/console.rs:11:5
+   |
+10 | pub struct ConsoleDevice {
+   |            ------------- field in this struct
+11 |     id: usize,
+   |     ^^
+
+warning: method `leaf_entry_bits` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/vm/mod.rs:232:19
+    |
+151 | impl RootPageTableGuard {
+    | ----------------------- method in this implementation
+...
+232 |     pub(crate) fn leaf_entry_bits(&mut self, vaddr: usize) -> Option<u64> {
+    |                   ^^^^^^^^^^^^^^^
+
+warning: constant `DEBUG_DEVICE_FAULT_VA` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/vm/mmu/armv8_4k.rs:41:7
+   |
+41 | const DEBUG_DEVICE_FAULT_VA: usize = 0xffff_0008_3afd_b000;
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `activate_early_boot_page_table` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/vm/mmu/armv8_4k.rs:58:22
+   |
+58 | pub(crate) unsafe fn activate_early_boot_page_table(root_paddr: u64) {
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new` and `walk` are never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/vm/mmu/armv8_4k.rs:464:41
+    |
+457 | impl PageTable {
+    | -------------- associated items in this implementation
+...
+464 |     pub(in crate::arch::aarch64::vm) fn new() -> Self {
+    |                                         ^^^
+...
+936 |     pub(in crate::arch::aarch64::vm) fn walk(
+    |                                         ^^^^
+
+warning: struct `FdtMemory` is never constructed
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/boot/fdt_memory.rs:12:19
+   |
+12 | pub(crate) struct FdtMemory {
+   |                   ^^^^^^^^^
+
+warning: associated items `parse`, `primary_usable`, and `reserve` are never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/boot/fdt_memory.rs:19:12
+    |
+ 18 | impl FdtMemory {
+    | -------------- associated items in this implementation
+ 19 |     pub fn parse(
+    |            ^^^^^
+...
+ 94 |     pub fn primary_usable(&self) -> PhysicalMemoryArea {
+    |            ^^^^^^^^^^^^^^
+...
+102 |     pub fn reserve(&mut self, area: PhysicalMemoryArea) -> Result<(), &'static str> {
+    |            ^^^^^^^
+
+warning: function `enabled` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/boot/fdt_memory.rs:114:4
+    |
+114 | fn enabled(node: &fdt::node::FdtNode<'_, '_>) -> bool {
+    |    ^^^^^^^
+
+warning: function `reg_area` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/boot/fdt_memory.rs:119:4
+    |
+119 | fn reg_area(reg: fdt::node::RawReg<'_>) -> Result<Option<PhysicalMemoryArea>, &'static str> {
+    |    ^^^^^^^^
+
+warning: function `area_from_size` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/boot/fdt_memory.rs:125:4
+    |
+125 | fn area_from_size(start: u64, size: u64) -> Result<Option<PhysicalMemoryArea>, &'static str> {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `complete_pages` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/boot/fdt_memory.rs:137:4
+    |
+137 | fn complete_pages(area: PhysicalMemoryArea) -> Result<Option<PhysicalMemoryArea>, &'static str> {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `subtract` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/boot/fdt_memory.rs:149:4
+    |
+149 | fn subtract(
+    |    ^^^^^^^^
+
+warning: function `initramfs_area` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/boot/fdt_memory.rs:189:4
+    |
+189 | fn initramfs_area(fdt: &fdt::Fdt<'_>) -> Result<Option<PhysicalMemoryArea>, &'static str> {
+    |    ^^^^^^^^^^^^^^
+
+warning: struct `ReservationEntries` is never constructed
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/boot/fdt_memory.rs:213:8
+    |
+213 | struct ReservationEntries<'a> {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/boot/fdt_memory.rs:219:8
+    |
+218 | impl<'a> ReservationEntries<'a> {
+    | ------------------------------- associated function in this implementation
+219 |     fn new(blob: &'a [u8]) -> Result<Self, &'static str> {
+    |        ^^^
+
+warning: function `target_request_for_domain` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/device/cpufreq.rs:713:4
+    |
+713 | fn target_request_for_domain(domain: u32, target_freq_khz: u64) -> Option<TargetRequest> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/device/gpu/resource.rs:835:12
+    |
+835 |     Shared(Arc<crate::device::graphics::shared_image::SharedImage>),
+    |     ------ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+    |
+835 -     Shared(Arc<crate::device::graphics::shared_image::SharedImage>),
+835 +     Shared(()),
+    |
+
+warning: field `promiscuous` is never read
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/device/network/mod.rs:257:5
+    |
+253 | pub struct GenericNetworkDevice {
+    |            -------------------- field in this struct
+...
+257 |     promiscuous: bool,
+    |     ^^^^^^^^^^^
+
+warning: field `remove_fn` is never read
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/device/platform/mod.rs:246:5
+    |
+243 | pub struct PlatformDeviceDriver {
+    |            -------------------- field in this struct
+...
+246 |     remove_fn: fn(&PlatformDeviceInfo) -> Result<(), &'static str>,
+    |     ^^^^^^^^^
+
+warning: method `process_request` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/block/virtio_blk.rs:195:8
+    |
+127 | impl VirtioBlockDevice {
+    | ---------------------- method in this implementation
+...
+195 |     fn process_request(&self, req: &mut BlockIORequest) -> Result<(), &'static str> {
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `log_probe_properties` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/graphics/simple_framebuffer.rs:235:4
+    |
+235 | fn log_probe_properties(device: &PlatformDeviceInfo) {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/graphics/virtio_gpu.rs:99:7
+   |
+99 | const VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM: u32 = 3;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/graphics/virtio_gpu.rs:100:7
+    |
+100 | const VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM: u32 = 4;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/graphics/virtio_gpu.rs:101:7
+    |
+101 | const VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM: u32 = 67;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/graphics/virtio_gpu.rs:102:7
+    |
+102 | const VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM: u32 = 68;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/graphics/virtio_gpu.rs:103:7
+    |
+103 | const VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM: u32 = 121;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/graphics/virtio_gpu.rs:104:7
+    |
+104 | const VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM: u32 = 134;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `get_display_name` is never used
+    --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/graphics/virtio_gpu.rs:1361:8
+     |
+ 510 | impl VirtioGpuDeviceCore {
+     | ------------------------ method in this implementation
+...
+1361 |     fn get_display_name(&self) -> &'static str {
+     |        ^^^^^^^^^^^^^^^^
+
+warning: constant `BLOCK_COUNT` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/mmc/sdhci/mod.rs:15:15
+   |
+15 |     pub const BLOCK_COUNT: usize = 0x06;
+   |               ^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CSUM` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:58:7
+   |
+58 | const VIRTIO_NET_F_CSUM: u32 = 0; // Device handles packets with partial checksum
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_CSUM` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:59:7
+   |
+59 | const VIRTIO_NET_F_GUEST_CSUM: u32 = 1; // Guest handles packets with partial checksum
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CTRL_GUEST_OFFLOADS` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:60:7
+   |
+60 | const VIRTIO_NET_F_CTRL_GUEST_OFFLOADS: u32 = 2; // Control channel offloads reconfiguration support
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_TSO4` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:63:7
+   |
+63 | const VIRTIO_NET_F_GUEST_TSO4: u32 = 7; // Guest can handle TSOv4
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_TSO6` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:64:7
+   |
+64 | const VIRTIO_NET_F_GUEST_TSO6: u32 = 8; // Guest can handle TSOv6
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_ECN` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:65:7
+   |
+65 | const VIRTIO_NET_F_GUEST_ECN: u32 = 9; // Guest can handle TSO with ECN
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_UFO` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:66:7
+   |
+66 | const VIRTIO_NET_F_GUEST_UFO: u32 = 10; // Guest can handle UFO
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_HOST_TSO4` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:67:7
+   |
+67 | const VIRTIO_NET_F_HOST_TSO4: u32 = 11; // Device can handle TSOv4
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_HOST_TSO6` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:68:7
+   |
+68 | const VIRTIO_NET_F_HOST_TSO6: u32 = 12; // Device can handle TSOv6
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_HOST_ECN` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:69:7
+   |
+69 | const VIRTIO_NET_F_HOST_ECN: u32 = 13; // Device can handle TSO with ECN
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_HOST_UFO` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:70:7
+   |
+70 | const VIRTIO_NET_F_HOST_UFO: u32 = 14; // Device can handle UFO
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_MRG_RXBUF` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:71:7
+   |
+71 | const VIRTIO_NET_F_MRG_RXBUF: u32 = 15; // Guest can merge receive buffers
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CTRL_VQ` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:73:7
+   |
+73 | const VIRTIO_NET_F_CTRL_VQ: u32 = 17; // Control channel available
+   |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CTRL_RX` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:74:7
+   |
+74 | const VIRTIO_NET_F_CTRL_RX: u32 = 18; // Control channel RX mode support
+   |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CTRL_VLAN` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:75:7
+   |
+75 | const VIRTIO_NET_F_CTRL_VLAN: u32 = 19; // Control channel VLAN filtering
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_ANNOUNCE` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:76:7
+   |
+76 | const VIRTIO_NET_F_GUEST_ANNOUNCE: u32 = 21; // Guest can send gratuitous packets
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_MQ` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:77:7
+   |
+77 | const VIRTIO_NET_F_MQ: u32 = 22; // Device supports multiqueue with automatic receive steering
+   |       ^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CTRL_MAC_ADDR` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:78:7
+   |
+78 | const VIRTIO_NET_F_CTRL_MAC_ADDR: u32 = 23; // Set MAC address through control channel
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_S_ANNOUNCE` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/network/virtio_net.rs:82:7
+   |
+82 | const VIRTIO_NET_S_ANNOUNCE: u16 = 2; // Gratuitous packets should be sent
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GICD_TYPER` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/pic/gic.rs:29:7
+   |
+29 | const GICD_TYPER: usize = 0x0004; // Interrupt Controller Type Register
+   |       ^^^^^^^^^^
+
+warning: constant `GICD_IIDR` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/pic/gic.rs:30:7
+   |
+30 | const GICD_IIDR: usize = 0x0008; // Distributor Implementer Identification Register
+   |       ^^^^^^^^^
+
+warning: constant `GICD_ICPENDR` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/pic/gic.rs:35:7
+   |
+35 | const GICD_ICPENDR: usize = 0x0280; // Interrupt Clear-Pending Registers
+   |       ^^^^^^^^^^^^
+
+warning: constant `GICD_ISACTIVER` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/pic/gic.rs:36:7
+   |
+36 | const GICD_ISACTIVER: usize = 0x0300; // Interrupt Set-Active Registers
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `GICC_RPR` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/pic/gic.rs:49:7
+   |
+49 | const GICC_RPR: usize = 0x0014; // Running Priority Register
+   |       ^^^^^^^^
+
+warning: constant `GICC_HPPIR` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/pic/gic.rs:50:7
+   |
+50 | const GICC_HPPIR: usize = 0x0018; // Highest Priority Pending Interrupt Register
+   |       ^^^^^^^^^^
+
+warning: constant `UARTRSR` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/uart/pl011.rs:28:7
+   |
+28 | const UARTRSR: usize = 0x004; // Receive Status Register
+   |       ^^^^^^^
+
+warning: constant `FR_TXFE` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/uart/pl011.rs:39:7
+   |
+39 | const FR_TXFE: u32 = 1 << 7; // Transmit FIFO empty
+   |       ^^^^^^^
+
+warning: constant `FR_RXFF` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/uart/pl011.rs:40:7
+   |
+40 | const FR_RXFF: u32 = 1 << 6; // Receive FIFO full
+   |       ^^^^^^^
+
+warning: field `multi_tt` is never read
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/usb/xhci/mod.rs:439:5
+    |
+435 | struct HubRuntime {
+    |        ---------- field in this struct
+...
+439 |     multi_tt: bool,
+    |     ^^^^^^^^
+    |
+    = note: `HubRuntime` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: field `max_intrs` is never read
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/usb/xhci/mod.rs:745:5
+    |
+735 | pub struct XhciController {
+    |            -------------- field in this struct
+...
+745 |     max_intrs: u16,
+    |     ^^^^^^^^^
+
+warning: static `INPUT_COUNTER` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/virtio/device/mod.rs:33:8
+   |
+33 | static INPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+   |        ^^^^^^^^^^^^^
+
+warning: struct `VirtioInputConfig` is never constructed
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/virtio_input.rs:51:8
+   |
+51 | struct VirtioInputConfig {
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_INPUT_CFG_UNSET` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/virtio_input.rs:61:15
+   |
+61 |     pub const VIRTIO_INPUT_CFG_UNSET: u8 = 0x00;
+   |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_INPUT_CFG_ID_SERIAL` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/virtio_input.rs:63:15
+   |
+63 |     pub const VIRTIO_INPUT_CFG_ID_SERIAL: u8 = 0x02;
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_INPUT_CFG_ID_DEVIDS` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/drivers/virtio_input.rs:64:15
+   |
+64 |     pub const VIRTIO_INPUT_CFG_ID_DEVIDS: u8 = 0x03;
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `root_inode` and `next_file_id` are never read
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/fs/vfs_v2/drivers/ext2/mod.rs:301:5
+    |
+291 | pub struct Ext2FileSystem {
+    |            -------------- fields in this struct
+...
+301 |     root_inode: u32,
+    |     ^^^^^^^^^^
+...
+307 |     next_file_id: IrqSpinLock<u64>,
+    |     ^^^^^^^^^^^^
+
+warning: methods `len`, `get_stats`, and `print_stats` are never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/fs/vfs_v2/drivers/ext2/mod.rs:419:8
+    |
+341 | impl InodeLruCache {
+    | ------------------ methods in this implementation
+...
+419 |     fn len(&self) -> usize {
+    |        ^^^
+...
+424 |     fn get_stats(&self) -> (u64, u64, usize) {
+    |        ^^^^^^^^^
+...
+429 |     fn print_stats(&self, cache_name: &str) {
+    |        ^^^^^^^^^^^
+
+warning: methods `len`, `get_stats`, and `print_stats` are never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/fs/vfs_v2/drivers/ext2/mod.rs:538:8
+    |
+462 | impl BlockLruCache {
+    | ------------------ methods in this implementation
+...
+538 |     fn len(&self) -> usize {
+    |        ^^^
+...
+543 |     fn get_stats(&self) -> (u64, u64, usize) {
+    |        ^^^^^^^^^
+...
+548 |     fn print_stats(&self, cache_name: &str) {
+    |        ^^^^^^^^^^^
+
+warning: method `free_block` is never used
+    --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/fs/vfs_v2/drivers/ext2/mod.rs:3549:8
+     |
+ 557 | impl Ext2FileSystem {
+     | ------------------- method in this implementation
+...
+3549 |     fn free_block(&self, block_number: u32) -> Result<(), FileSystemError> {
+     |        ^^^^^^^^^^
+
+warning: field `content` is never read
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/fs/vfs_v2/drivers/tmpfs/mod.rs:707:5
+    |
+697 | pub struct TmpNode {
+    |            ------- field in this struct
+...
+707 |     content: IrqRwSpinLock<Vec<u8>>,
+    |     ^^^^^^^
+
+warning: method `resolve_symlink_target` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/fs/vfs_v2/mount_tree.rs:851:8
+    |
+228 | impl MountTree {
+    | -------------- method in this implementation
+...
+851 |     fn resolve_symlink_target(
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `e_type` is never read
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/lsm/elf.rs:155:5
+    |
+154 | struct Elf64_Ehdr {
+    |        ---------- field in this struct
+155 |     e_type: u16,
+    |     ^^^^^^
+    |
+    = note: `Elf64_Ehdr` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `is_object_locked` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/mem/page_cache.rs:382:8
+    |
+128 | impl PageCacheManager {
+    | --------------------- method in this implementation
+...
+382 |     fn is_object_locked(&self, id: CacheId) -> bool {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/mem/pmm.rs:82:14
+   |
+81 | impl Page {
+   | --------- associated function in this implementation
+82 |     const fn new() -> Self {
+   |              ^^^
+
+warning: field `entry` is never read
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/network/arp.rs:219:5
+    |
+217 | struct ArpPendingEntry {
+    |        --------------- field in this struct
+218 |     /// Cache entry
+219 |     entry: ArpCacheEntry,
+    |     ^^^^^
+    |
+    = note: `ArpPendingEntry` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: fields `timeout_ticks` and `cache_timeout` are never read
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/network/arp.rs:247:5
+    |
+241 | pub struct ArpLayer {
+    |            -------- fields in this struct
+...
+247 |     timeout_ticks: u64,
+    |     ^^^^^^^^^^^^^
+248 |     /// Cache timeout (in ticks)
+249 |     cache_timeout: u64,
+    |     ^^^^^^^^^^^^^
+
+warning: methods `send_syn_ack` and `send_fin_ack` are never used
+    --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/network/tcp.rs:1452:8
+     |
+ 440 | impl TcpSocket {
+     | -------------- methods in this implementation
+...
+1452 |     fn send_syn_ack(&self, dest_ip: Ipv4Address, dest_port: u16, their_seq: u32, ack_seq: u32) {
+     |        ^^^^^^^^^^^^
+...
+1526 |     fn send_fin_ack(&self) {
+     |        ^^^^^^^^^^^^
+
+warning: method `as_kernel_object` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/object/mod.rs:272:19
+    |
+248 | impl<'a> KernelObjectRef<'a> {
+    | ---------------------------- method in this implementation
+...
+272 |     pub(crate) fn as_kernel_object(&self) -> &'a KernelObject {
+    |                   ^^^^^^^^^^^^^^^^
+
+warning: constant `SLICE_DIAGNOSTIC_NONE` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/sched/scheduler.rs:260:7
+    |
+260 | const SLICE_DIAGNOSTIC_NONE: u64 = 0;
+    |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `snapshot` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/sync/diagnostic.rs:53:12
+   |
+33 | impl<T: Copy> TryDiagnosticState<T> {
+   | ----------------------------------- method in this implementation
+...
+53 |     pub fn snapshot(&self) -> Option<T> {
+   |            ^^^^^^^^
+
+warning: method `as_mut_ptr` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/sync/spinlock.rs:113:26
+    |
+ 39 | impl<T> SpinLock<T> {
+    | ------------------- method in this implementation
+...
+113 |     pub(crate) unsafe fn as_mut_ptr(&self) -> *mut T {
+    |                          ^^^^^^^^^^
+
+warning: constant `EI_MAG0` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/task/elf_loader/mod.rs:145:7
+    |
+145 | const EI_MAG0: usize = 0;
+    |       ^^^^^^^
+
+warning: constant `EI_MAG1` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/task/elf_loader/mod.rs:146:7
+    |
+146 | const EI_MAG1: usize = 1;
+    |       ^^^^^^^
+
+warning: constant `EI_MAG2` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/task/elf_loader/mod.rs:147:7
+    |
+147 | const EI_MAG2: usize = 2;
+    |       ^^^^^^^
+
+warning: constant `EI_MAG3` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/task/elf_loader/mod.rs:148:7
+    |
+148 | const EI_MAG3: usize = 3;
+    |       ^^^^^^^
+
+warning: function `align_down` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/vm/mod.rs:54:4
+   |
+54 | fn align_down(addr: usize, align: usize) -> usize {
+   |    ^^^^^^^^^^
+
+warning: function `align_up` is never used
+  --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/vm/mod.rs:58:4
+   |
+58 | fn align_up(addr: usize, align: usize) -> usize {
+   |    ^^^^^^^^
+
+warning: method `slot_index_for_base` is never used
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/vm/mod.rs:551:8
+    |
+526 | impl KernelKstackAllocator {
+    | -------------------------- method in this implementation
+...
+551 |     fn slot_index_for_base(&self, base: usize) -> Option<usize> {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: direct cast of function item into an integer
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/mod.rs:248:79
+    |
+248 |     let trap_exit_offset = (crate::arch::aarch64::trap::user::_switch_to_user as usize)
+    |                                                                               ^^^^^^^^
+    |
+    = note: `#[warn(function_casts_as_integer)]` on by default
+help: first cast to a pointer `as *const ()`
+    |
+248 |     let trap_exit_offset = (crate::arch::aarch64::trap::user::_switch_to_user as *const () as usize)
+    |                                                                               ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/mod.rs:249:74
+    |
+249 |         .wrapping_sub(crate::arch::aarch64::trap::user::_user_trap_entry as usize);
+    |                                                                          ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+249 |         .wrapping_sub(crate::arch::aarch64::trap::user::_user_trap_entry as *const () as usize);
+    |                                                                          ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/mod.rs:502:34
+    |
+502 |     trap::user::_user_trap_entry as usize
+    |                                  ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+502 |     trap::user::_user_trap_entry as *const () as usize
+    |                                  ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/mod.rs:516:38
+    |
+516 |     trap::kernel::_kernel_trap_entry as usize
+    |                                      ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+516 |     trap::kernel::_kernel_trap_entry as *const () as usize
+    |                                      ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/mod.rs:520:44
+    |
+520 |     trap::kernel::arch_kernel_trap_handler as usize
+    |                                            ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+520 |     trap::kernel::arch_kernel_trap_handler as *const () as usize
+    |                                            ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/mod.rs:524:40
+    |
+524 |     trap::user::arch_user_trap_handler as usize
+    |                                        ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+524 |     trap::user::arch_user_trap_handler as *const () as usize
+    |                                        ++++++++++++
+
+warning: transmuting an integer to a pointer creates a pointer without provenance
+   --> /Users/petitstrawberry/Development/Rust/Scarlet/kernel/src/arch/aarch64/mod.rs:676:21
+    |
+676 |     return unsafe { transmute(tpidr_el1) };
+    |                     ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this is dangerous because dereferencing the resulting pointer is undefined behavior
+    = note: exposed provenance semantics can be used to create a pointer based on some previously exposed provenance
+    = help: if you truly mean to create a pointer without provenance, use `std::ptr::without_provenance_mut`
+    = help: for more information about transmute, see <https://doc.rust-lang.org/std/mem/fn.transmute.html#transmutation-between-pointers-and-integers>
+    = help: for more information about exposed provenance, see <https://doc.rust-lang.org/std/ptr/index.html#exposed-provenance>
+    = note: `#[warn(integer_to_ptr_transmutes)]` on by default
+help: use `std::ptr::with_exposed_provenance_mut` instead to use a previously exposed provenance
+    |
+676 -     return unsafe { transmute(tpidr_el1) };
+676 +     return unsafe { &mut *std::ptr::with_exposed_provenance_mut::<arch::aarch64::Aarch64>(tpidr_el1) };
+    |
+
+For more information about this error, try `rustc --explain E0133`.
+warning: `scarlet` (lib) generated 179 warnings (run `cargo fix --lib -p scarlet` to apply 75 suggestions)
+   Compiling scarlet-native-fs-kernel v0.1.0 (/tmp/scarlet-native-fs-kernel)
+warning: unnecessary `unsafe` block
+  --> src/main.rs:26:5
+   |
+26 |     unsafe {
+   |     ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: `scarlet-native-fs-kernel` (bin "scarlet") generated 1 warning
+    Finished `release` profile [optimized] target(s) in 30.71s
+warning: the following packages contain code that will be rejected by a future version of Rust: core v0.0.0 (/nix/store/14q5lk7drlypwwwlv8vv3qachyqx9za6-scarlet-rust-toolchain-39c689a4859b/lib/rustlib/src/rust/library/core)
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

@@ -17,7 +17,13 @@ Native syscalls to a C ABI.
 | `realpath` | Existing UTF-8 paths; caller buffer or library allocation; VFS resolution follows symlinks before `..`. | C/Rust guest checks for missing, empty, dangling, cyclic, non-directory and trailing-slash paths; nested tmpfs mount paths. |
 | `futimens`, `utimensat` | Seconds precision; NOW/OMIT/null times; dirfd-relative paths; absolute paths ignore dirfd; final-link nofollow. | C guest flag/fd/time errors and resulting inode metadata; Rust checks updates after rename and ext2 overflow without partial updates. |
 | `fsync`, `fdatasync` | Native file sync; `fdatasync` currently uses the same full sync operation. | Guest file/data/timestamp checks and independent ext2 inode extraction after shutdown. Power-loss durability is not established by this test. |
-| C headers | Partial `errno.h`, `fcntl.h`, `limits.h`, `stdlib.h`, `time.h`, `unistd.h`, `sys/types.h`, `sys/stat.h`; LP64 layouts. | [Header checks](tests/check_headers.py) compile standalone/repeated inclusion, C11/C++11 linkage and layouts for AArch64/RV64. |
+| Byte strings and memory | Comparisons, copies, concatenation, bounded scans, searches, `strdup`/`strndup`, stable `strerror` storage. The matching compiler-builtins supplies `memcpy`, `memmove`, `memset`, `memcmp` and `strlen`. | Host boundary, unsigned-byte and ownership tests; [C fixture](tests/strings.c) calls the actual symbols with builtins disabled and passes on AArch64/HVF. |
+| C-locale classification and integer conversion | ASCII `ctype` operations; `strtol`/`strtoul`/`strtoll`/`strtoull` plus decimal convenience functions. C17/POSIX prefixes, no C23 binary prefix. Overflow consumes valid digits, saturates and reports `ERANGE`. | Host all-byte/EOF, radix, signed/unsigned limit and end-pointer checks; C fixture passes on AArch64/HVF. |
+| Native descriptor I/O | `open`/`openat`/`creat`, `close`, `read`/`write`, `lseek`, `dup`; four `fcntl` commands for descriptor flags and access/append state. Kernel enforces descriptor access and owns shared offset/append state. | [C fixture](tests/descriptor.c) passes relative/absolute paths, flag errors, access, duplication, append and errno checks on ext2/tmpfs in AArch64/HVF. See the [descriptor ABI](../../../docs/abi/native-descriptors.md). |
+| Unbuffered stdio | Locked opaque `FILE`, standard streams, open/close/flush, block/character/line I/O, seek/tell, indicators and one-byte pushback. `fdopen` retains the descriptor on failure. | Host mode-parser checks and [C fixture](tests/stdio.c) for file state, partial items, ownership, append and pushback; AArch64/HVF passes on ext2/tmpfs. |
+| Formatted output | `printf`, `fprintf`, `sprintf`, `snprintf` and all four `v` variants; integer/string/character/pointer formatting, width, precision and integer length modifiers. Unsupported float/wide/positional/grouping/`%n` formats return `ENOTSUP`. | Host comparisons with the host libc, truncation/overflow and forwarded-varargs tests; C tests pass arguments through register and stack areas in AArch64/HVF. RV64 has cross-build evidence only. |
+| Upstream zlib consumer | All 15 unmodified zlib 1.3.2 core/gzip sources compile and statically link against the matching CRT and std-backed libc. | [Pinned builder](../../../tools/native-rustc/consumer-zlib/README.md) records both target builds, hashes and ELF audits. AArch64/HVF passes compression/gzip/error-path acceptance with exit 47 and the required stdout marker. |
+| C headers | Partial `ctype.h`, `errno.h`, `fcntl.h`, `limits.h`, `stdio.h`, `stdlib.h`, `string.h`, `time.h`, `unistd.h`, `sys/types.h`, `sys/stat.h`; LP64 layouts. | [Header checks](tests/check_headers.py) compile standalone/repeated inclusion, C11/C++11 linkage and layouts for AArch64/RV64 without host libc headers. |
 
 The [recorded filesystem evidence](../../../tools/native-rustc/evidence/2026-09-22-native-fs-aarch64.json)
 identifies the exact kernel, sysroot and probe inputs. It establishes guest
@@ -40,6 +46,16 @@ the plain C fixture. The final run also passes native filesystem checks, full
 native compilation and proc macros with a matching staged runtime. RV64 has
 cross-build and ELF-audit checks for the probe, loader, static libc and C fixture;
 guest execution on RV64 remains outstanding.
+
+The [string/descriptor/stdio and zlib evidence](../../../tools/native-rustc/evidence/2026-09-22-libc-zlib-aarch64.json)
+records AArch64/HVF `FULL_PASS`: the new C fixtures pass on ext2 and tmpfs,
+zlib returns 47 with its required stdout marker, and the direct-C startup,
+native filesystem, full native compilation and proc-macro gates all pass.
+The complete release kernel suite passes all 1293 tests, including 20 added
+regressions and the fix for seeking with a detached ext2 node. Host checks pass
+33 libc tests, 27 ABI tests, three probe tests, 21 Python tests and 56 header
+checks. RV64 has cross-build and ELF-audit evidence only. The published bundle
+is unchanged; Cargo and installed SDK acceptance remain outstanding.
 
 ## Limits that callers must account for
 
@@ -65,17 +81,25 @@ guest execution on RV64 remains outstanding.
   ext2 timestamps are limited to unsigned 32-bit seconds. These are explicit
   implementation limits, not a general POSIX timestamp guarantee.
 - **Permissions:** ownership/credential and permission enforcement semantics
-  still need definition and implementation. Successful file operations here
-  do not establish Unix access-control behavior.
+  still need definition and implementation. Creation forwards low `0777` mode
+  bits; the metadata model and tmpfs do not preserve full owner/group/other
+  permission classes. There is no umask contract. Checking a descriptor's
+  read/write access mode does not establish Unix access-control behavior.
+- **Descriptors and streams:** `fcntl` currently implements only `F_GETFD`,
+  `F_SETFD`, `F_GETFL` and `F_SETFL`, with append as the only mutable status
+  flag. There is no nonblocking or record-lock interface. Stdio is unbuffered;
+  buffering controls, scanf, wide streams and the remaining stdio surface are
+  absent. Floating-point, wide, positional, grouping and `%n` output formats
+  report `ENOTSUP`; this is a supported subset, not printf conformance.
 - **Concurrency and persistence:** normal ext2 writes, timestamp updates,
   truncation and fsync share an inode mutex. Full mmap/unlink and namespace
   concurrency, pinned-page invalidation and crash consistency still need
   separate acceptance tests and fixes; these results do not establish them.
-- **Coverage:** partial headers are not general-purpose C SDK headers. stdio,
-  the remaining descriptor APIs, strings/conversions, locale, math, process and
-  signal APIs, locks, pthreads, sockets and name resolution are not supplied as
-  a complete libc surface. Existing kernel or Rust APIs do not imply matching
-  C exports. Cargo, curl, libgit2 and SQLite acceptance remains outstanding.
+- **Coverage:** partial headers are not general-purpose C SDK headers. The
+  remaining strings/conversions and descriptor APIs, general locale, math,
+  process and signal APIs, locks, pthreads, sockets and name resolution remain
+  incomplete or absent. Existing kernel or Rust APIs do not imply matching C
+  exports. Cargo, curl, libgit2 and SQLite acceptance remains outstanding.
 
 ## Acceptance gates toward a complete C runtime
 
@@ -110,7 +134,10 @@ substitute for declaring a standards baseline and checking its requirements.
    DNS. Verify multithreaded failure paths and lifetime rules, not just wrappers
    around existing Native syscalls.
 6. **Real consumers and release evidence.** Build and run native zlib, SQLite,
-   libgit2 and curl tests against the SDK. Then run Cargo on an offline workspace
+   libgit2 and curl tests against the SDK. The pinned zlib consumer now builds
+   for both targets and passes in AArch64/HVF; RV64 guest execution, exhaustive
+   upstream tests and installed SDK acceptance remain gates.
+   Then run Cargo on an offline workspace
    with a path dependency, build script and proc macro, and execute its output.
    Record AArch64 and RV64 guest results for the shipped artifacts; automate
    regressions, preserve logs/hashes, and verify the installed bundle separately

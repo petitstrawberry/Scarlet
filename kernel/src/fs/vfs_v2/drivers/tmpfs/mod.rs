@@ -4,7 +4,7 @@
 //! It implements FileSystemOperations directly and uses VfsNode for internal
 //! structure representation.
 
-use crate::sync::{IrqRwSpinLock, IrqSpinLock};
+use crate::sync::{IrqRwSpinLock, IrqSpinLock, Mutex};
 use alloc::{
     boxed::Box,
     collections::BTreeMap,
@@ -231,7 +231,7 @@ impl FileSystemOperations for TmpFS {
         parent_node: &Arc<dyn VfsNode>,
         name: &String,
         file_type: FileType,
-        _mode: u32,
+        mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
         let tmp_parent = Arc::downcast::<TmpNode>(parent_node.clone()).map_err(|_| {
             FileSystemError::new(
@@ -274,7 +274,15 @@ impl FileSystemOperations for TmpFS {
         }
 
         let new_node = match file_type {
-            FileType::RegularFile => Arc::new(TmpNode::new_file(name.clone().to_string(), file_id)),
+            FileType::RegularFile => {
+                let node = Arc::new(TmpNode::new_file(name.clone().to_string(), file_id));
+                node.metadata.write().permissions = FilePermission {
+                    read: mode & 0o444 != 0,
+                    write: mode & 0o222 != 0,
+                    execute: mode & 0o111 != 0,
+                };
+                node
+            }
             FileType::Directory => {
                 Arc::new(TmpNode::new_directory(name.clone().to_string(), file_id))
             }
@@ -693,6 +701,8 @@ pub struct TmpNode {
     file_type: IrqRwSpinLock<FileType>,
     /// File metadata
     metadata: IrqRwSpinLock<FileMetadata>,
+    /// Serializes regular-file data and size changes across all open handles.
+    data_lock: Mutex<()>,
     /// File content (for symlinks)
     content: IrqRwSpinLock<Vec<u8>>,
     /// Child nodes (for directories)
@@ -738,6 +748,7 @@ impl TmpNode {
                 file_id,
                 link_count: 1,
             }),
+            data_lock: Mutex::new(()),
             content: IrqRwSpinLock::new(Vec::new()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
@@ -765,6 +776,7 @@ impl TmpNode {
                 file_id,
                 link_count: 1,
             }),
+            data_lock: Mutex::new(()),
             content: IrqRwSpinLock::new(Vec::new()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
@@ -792,6 +804,7 @@ impl TmpNode {
                 file_id,
                 link_count: 1,
             }),
+            data_lock: Mutex::new(()),
             content: IrqRwSpinLock::new(Vec::new()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
@@ -819,6 +832,7 @@ impl TmpNode {
                 file_id,
                 link_count: 1,
             }),
+            data_lock: Mutex::new(()),
             // Store symlink target in content as UTF-8 bytes
             content: IrqRwSpinLock::new(target.into_bytes()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
@@ -1204,6 +1218,8 @@ impl TmpFileObject {
     }
 
     fn read_regular_file(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
+        let _data_guard =
+            crate::object::capability::file::lock_file_operation(&self.node.data_lock)?;
         let mut pos = *self.position.read();
         let cache_id = self.cache_id();
         let file_size = PageCacheManager::global()
@@ -1320,28 +1336,37 @@ impl TmpFileObject {
         }
     }
 
-    fn write_regular_file(&self, buffer: &[u8]) -> Result<usize, FileSystemError> {
+    fn write_regular_file(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        let _data_guard =
+            crate::object::capability::file::lock_file_operation(&self.node.data_lock)?;
+        let offset =
+            usize::try_from(*self.position.read()).map_err(|_| StreamError::InvalidArgument)?;
+        let written = self.write_at_locked(offset, buffer)?;
+        *self.position.write() = (offset + written) as u64;
+        Ok(written)
+    }
+
+    /// The caller holds `node.data_lock` through cursor and size publication.
+    fn write_at_locked(&self, offset: usize, buffer: &[u8]) -> Result<usize, StreamError> {
         if buffer.is_empty() {
             return Ok(0);
         }
-
-        let mut pos = *self.position.read() as usize;
+        let requested_end = offset
+            .checked_add(buffer.len())
+            .ok_or(StreamError::InvalidArgument)?;
         let old_size = self.node.metadata.read().size;
-        let requested_end = pos.checked_add(buffer.len()).ok_or_else(|| {
-            FileSystemError::new(FileSystemErrorKind::InvalidOperation, "write overflow")
-        })?;
-        let reserved_growth = self.reserve_growth(old_size, requested_end)?;
-        let mut written = 0usize;
+        let reserved_growth = self
+            .reserve_growth(old_size, requested_end)
+            .map_err(StreamError::from)?;
         let cache_id = self.cache_id();
-
-        while written < buffer.len() {
-            let page_index = (pos / PAGE_SIZE) as u64;
-            let page_off = pos % PAGE_SIZE;
-            let remain_in_page = PAGE_SIZE - page_off;
-            let chunk = core::cmp::min(buffer.len() - written, remain_in_page);
-
+        let first_page = offset / PAGE_SIZE;
+        let last_page = (requested_end - 1) / PAGE_SIZE;
+        // Resolve every page before modifying any bytes, so a failed page
+        // allocation can return an error without hiding a partial write.
+        let mut pages = Vec::with_capacity(last_page - first_page + 1);
+        for page_index in first_page..=last_page {
             let pinned =
-                match PageCacheManager::global().pin_or_load(cache_id, page_index, |paddr| {
+                match PageCacheManager::global().pin_or_load(cache_id, page_index as u64, |paddr| {
                     unsafe {
                         core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
                     }
@@ -1350,33 +1375,30 @@ impl TmpFileObject {
                     Ok(pinned) => pinned,
                     Err(_) => {
                         self.release_memory_usage(reserved_growth);
-                        return Err(FileSystemError::new(
-                            FileSystemErrorKind::IoError,
-                            "tmpfs page load error",
-                        ));
+                        return Err(StreamError::IoError);
                     }
                 };
-
-            unsafe {
-                let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
-                let src = buffer.as_ptr().add(written);
-                core::ptr::copy_nonoverlapping(src, dst, chunk);
-            }
-            pinned.mark_dirty();
-
-            written += chunk;
-            pos += chunk;
+            pages.push(pinned);
         }
-
-        {
-            *self.position.write() = pos as u64;
-            let mut meta = self.node.metadata.write();
-            if pos > meta.size {
-                meta.size = pos;
+        let mut written = 0;
+        for page in &pages {
+            let page_offset = (offset + written) % PAGE_SIZE;
+            let chunk = (PAGE_SIZE - page_offset).min(buffer.len() - written);
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    buffer.as_ptr().add(written),
+                    (phys_to_virt(page.paddr()) as *mut u8).add(page_offset),
+                    chunk,
+                );
             }
+            page.mark_dirty();
+            written += chunk;
+        }
+        {
+            let mut meta = self.node.metadata.write();
+            meta.size = meta.size.max(requested_end);
             PageCacheManager::global().record_object_size(cache_id, meta.size);
         }
-
         self.node.record_modified();
         Ok(written)
     }
@@ -1494,7 +1516,7 @@ impl StreamOps for TmpFileObject {
 
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
         match self.node.file_type() {
-            FileType::RegularFile => self.write_regular_file(buffer).map_err(StreamError::from),
+            FileType::RegularFile => self.write_regular_file(buffer),
             FileType::Directory => Err(StreamError::from(FileSystemError::new(
                 FileSystemErrorKind::IsADirectory,
                 "Cannot write to directory",
@@ -1725,67 +1747,54 @@ impl FileObject for TmpFileObject {
         if self.node.file_type() != FileType::RegularFile {
             return Err(StreamError::NotSupported);
         }
-
         let offset = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
+        let _data_guard =
+            crate::object::capability::file::lock_file_operation(&self.node.data_lock)?;
+        self.write_at_locked(offset, buffer)
+    }
+
+    fn supports_append(&self) -> bool {
+        self.node.file_type() == FileType::RegularFile
+    }
+
+    fn append(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        if self.node.file_type() != FileType::RegularFile {
+            return Err(StreamError::NotSupported);
+        }
         if buffer.is_empty() {
             return Ok(0);
         }
-        let old_size = self.node.metadata.read().size;
-        let requested_end = offset
-            .checked_add(buffer.len())
-            .ok_or(StreamError::InvalidArgument)?;
-        let reserved_growth = self
-            .reserve_growth(old_size, requested_end)
-            .map_err(StreamError::from)?;
-        let mut written = 0usize;
-        let cache_id = self.cache_id();
-
-        while written < buffer.len() {
-            let absolute = offset + written;
-            let page_index = (absolute / PAGE_SIZE) as u64;
-            let page_off = absolute % PAGE_SIZE;
-            let remain_in_page = PAGE_SIZE - page_off;
-            let chunk = core::cmp::min(buffer.len() - written, remain_in_page);
-
-            let pinned =
-                match PageCacheManager::global().pin_or_load(cache_id, page_index, |paddr| {
-                    unsafe {
-                        core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
-                    }
-                    Ok(())
-                }) {
-                    Ok(pinned) => pinned,
-                    Err(_) => {
-                        self.release_memory_usage(reserved_growth);
-                        return Err(StreamError::IoError);
-                    }
-                };
-
-            unsafe {
-                let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
-                let src = buffer.as_ptr().add(written);
-                core::ptr::copy_nonoverlapping(src, dst, chunk);
-            }
-            pinned.mark_dirty();
-            written += chunk;
-        }
-
-        let new_end = offset + written;
-        {
-            let mut meta = self.node.metadata.write();
-            if new_end > meta.size {
-                meta.size = new_end;
-            }
-            PageCacheManager::global().record_object_size(cache_id, meta.size);
-        }
-
-        self.node.record_modified();
+        let _data_guard =
+            crate::object::capability::file::lock_file_operation(&self.node.data_lock)?;
+        let offset = self.node.metadata.read().size;
+        let written = self.write_at_locked(offset, buffer)?;
+        *self.position.write() = (offset + written) as u64;
         Ok(written)
+    }
+
+    fn seek_signed(&self, offset: i64, whence: u32) -> Result<u64, StreamError> {
+        if self.node.file_type() != FileType::RegularFile {
+            return Err(StreamError::NotSupported);
+        }
+        let _data_guard =
+            crate::object::capability::file::lock_file_operation(&self.node.data_lock)?;
+        let mut position = self.position.write();
+        let base = match whence {
+            0 => 0,
+            1 => *position,
+            2 => self.node.metadata.read().size as u64,
+            _ => return Err(StreamError::InvalidArgument),
+        };
+        let next = crate::object::capability::file::checked_seek_position(base, offset)?;
+        *position = next;
+        Ok(next)
     }
 
     fn seek(&self, pos: crate::fs::SeekFrom) -> Result<u64, StreamError> {
         use crate::fs::SeekFrom;
 
+        let _data_guard =
+            crate::object::capability::file::lock_file_operation(&self.node.data_lock)?;
         let mut position = self.position.write();
         let file_size = self.node.metadata.read().size as u64;
 
@@ -1837,6 +1846,8 @@ impl FileObject for TmpFileObject {
         }
 
         let new_size = usize::try_from(size).map_err(|_| StreamError::InvalidArgument)?;
+        let _data_guard =
+            crate::object::capability::file::lock_file_operation(&self.node.data_lock)?;
         let old_size = self.node.metadata.read().size;
         if new_size == old_size {
             return Ok(());

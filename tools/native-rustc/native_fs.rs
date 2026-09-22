@@ -9,6 +9,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 unsafe extern "C" {
     fn scarlet_libc_probe(file: i32, directory: i32, expected: *const std::ffi::c_char) -> i32;
+    fn scarlet_libc_strings_test() -> i32;
+    fn scarlet_libc_descriptor_test(directory: *const std::ffi::c_char) -> i32;
+    fn scarlet_libc_stdio_test(directory: *const std::ffi::c_char) -> i32;
 }
 
 fn symlink(target: &str, link: &Path) {
@@ -78,6 +81,18 @@ fn check(root: &Path, ext2: bool) -> Result<(), Box<dyn std::error::Error>> {
     let c_line =
         unsafe { scarlet_libc_probe(file.as_raw_fd(), directory.as_raw_fd(), expected_c.as_ptr()) };
     assert_eq!(c_line, 0, "C ABI check failed at native.c:{c_line}");
+    let root_c = CString::new(root.as_os_str().as_encoded_bytes())?;
+    symlink("descriptor-file", &root.join("descriptor-link"));
+    let line = unsafe { scarlet_libc_strings_test() };
+    assert_eq!(
+        line, 0,
+        "C string/conversion check failed at strings.c:{line}"
+    );
+    let line = unsafe { scarlet_libc_descriptor_test(root_c.as_ptr()) };
+    assert_eq!(line, 0, "C descriptor check failed at descriptor.c:{line}");
+    let line = unsafe { scarlet_libc_stdio_test(root_c.as_ptr()) };
+    assert_eq!(line, 0, "C stdio check failed at stdio.c:{line}");
+    println!("NATIVE_RUSTC LIBC_SURFACE PASS strings + conversions + descriptors + stdio");
     let metadata = file.metadata()?;
     assert_eq!(
         metadata.accessed()?.duration_since(UNIX_EPOCH)?.as_secs(),

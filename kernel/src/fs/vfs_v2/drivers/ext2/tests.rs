@@ -343,6 +343,12 @@ fn test_ext2_file_object_operations() {
     assert!(seek_result.is_ok(), "Should be able to seek current");
     assert_eq!(seek_result.unwrap(), 10);
 
+    // Seeking from EOF still requires a filesystem. A failed lookup must leave
+    // the legacy detached cursor usable and unchanged.
+    assert!(file_obj.seek(crate::fs::SeekFrom::End(0)).is_err());
+    assert_eq!(file_obj.seek(crate::fs::SeekFrom::Current(0)).unwrap(), 10);
+    assert_eq!(file_obj.seek(crate::fs::SeekFrom::Start(3)).unwrap(), 3);
+
     // Test read (should fail gracefully since no filesystem is set)
     let mut buffer = vec![0u8; 100];
     let read_result = file_obj.read(&mut buffer);
@@ -565,6 +571,102 @@ fn test_ext2_write_publication_excludes_second_handle_writeback() {
     drop(syncing_handle);
     drop(writer);
     cache.invalidate(cache_id);
+}
+
+#[test_case]
+fn test_ext2_append_tracks_shared_eof_and_honors_inode_exclusion() {
+    use crate::fs::vfs_v2::cache::CacheId;
+    use crate::mem::page_cache::PageCacheManager;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    static OBSERVED_APPENDS: AtomicUsize = AtomicUsize::new(0);
+    fn before_publish(fs: &Ext2FileSystem, inode: u32, end: usize) {
+        let cache_id = CacheId::new((fs.fs_id().get() << 32) | u64::from(inode));
+        let previous = PageCacheManager::global()
+            .cached_object_size(cache_id)
+            .unwrap_or_else(|| fs.read_inode(inode).unwrap().get_size() as usize);
+        assert!(previous < end);
+        // A competing append/write/truncate must not acquire the inode before
+        // these new pages and their EOF are published together.
+        assert!(fs.get_inode_lock(inode).try_lock().is_none());
+        OBSERVED_APPENDS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    let (_device, fs, node) = create_writeback_test_file();
+    let first = fs.open(&node, 0).unwrap();
+    let second = fs.open(&node, 0).unwrap();
+    let duplicate = first.clone();
+    let cache_id = CacheId::new((fs.fs_id().get() << 32) | 11);
+    OBSERVED_APPENDS.store(0, Ordering::SeqCst);
+    *fs.before_write_publish.lock() = Some(before_publish);
+    assert_eq!(first.append(b"ab").unwrap(), 2);
+    assert_eq!(second.append(b"cd").unwrap(), 2);
+    first.seek_signed(0, 0).unwrap();
+    assert_eq!(duplicate.append(b"ef").unwrap(), 2);
+    *fs.before_write_publish.lock() = None;
+    assert_eq!(OBSERVED_APPENDS.load(Ordering::SeqCst), 3);
+    assert_eq!(first.seek_signed(0, 1).unwrap(), 70);
+    assert_eq!(second.seek_signed(0, 1).unwrap(), 68);
+    assert_eq!(second.write_at(65, b"B").unwrap(), 1);
+    assert_eq!(second.seek_signed(0, 1).unwrap(), 68);
+    first.truncate(67).unwrap();
+    assert_eq!(second.append(b"gh").unwrap(), 2);
+    assert_eq!(second.seek_signed(0, 1).unwrap(), 69);
+    first.seek_signed(1, 0).unwrap();
+    assert_eq!(first.append(b"").unwrap(), 0);
+    assert_eq!(first.seek_signed(0, 1).unwrap(), 1);
+    let mut bytes = [0; 8];
+    assert_eq!(first.read_at(64, &mut bytes).unwrap(), 5);
+    assert_eq!(&bytes[..5], b"aBcgh");
+    second.sync().unwrap();
+    assert_eq!(fs.read_inode(11).unwrap().get_size(), 69);
+    drop(duplicate);
+    drop(first);
+    drop(second);
+    PageCacheManager::global().invalidate(cache_id);
+}
+
+#[test_case]
+fn test_ext2_signed_seek_checks_range_and_supports_holes() {
+    use crate::fs::vfs_v2::cache::CacheId;
+    use crate::mem::page_cache::PageCacheManager;
+    use crate::object::capability::StreamError;
+
+    let (_device, fs, node) = create_writeback_test_file();
+    let file = fs.open(&node, 0).unwrap();
+    let cache_id = CacheId::new((fs.fs_id().get() << 32) | 11);
+    assert_eq!(file.seek_signed(67, 0).unwrap(), 67);
+    assert!(matches!(
+        file.seek_signed(i64::MIN, 1),
+        Err(StreamError::InvalidArgument)
+    ));
+    assert!(matches!(
+        file.seek_signed(-68, 1),
+        Err(StreamError::InvalidArgument)
+    ));
+    assert!(matches!(
+        file.seek_signed(0, 3),
+        Err(StreamError::InvalidArgument)
+    ));
+    assert_eq!(file.seek_signed(0, 1).unwrap(), 67);
+    assert!(matches!(
+        file.seek_signed(i64::MAX, 1),
+        Err(StreamError::FileSystemError(error)) if error.kind == FileSystemErrorKind::ValueOverflow
+    ));
+    assert_eq!(file.seek_signed(0, 1).unwrap(), 67);
+    assert_eq!(file.write(b"Z").unwrap(), 1);
+    assert_eq!(file.seek_signed(-1, 2).unwrap(), 67);
+    let mut bytes = [1; 4];
+    assert_eq!(file.read_at(64, &mut bytes).unwrap(), 4);
+    assert_eq!(&bytes, b"\0\0\0Z");
+    assert_eq!(file.seek_signed(i64::MAX, 0).unwrap(), i64::MAX as u64);
+    assert!(matches!(
+        file.seek_signed(1, 1),
+        Err(StreamError::FileSystemError(error)) if error.kind == FileSystemErrorKind::ValueOverflow
+    ));
+    assert_eq!(file.seek_signed(0, 1).unwrap(), i64::MAX as u64);
+    drop(file);
+    PageCacheManager::global().invalidate(cache_id);
 }
 
 // Helper function to create a mock ext2 device with proper structure

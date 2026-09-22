@@ -1,0 +1,11 @@
+[package]
+name = "scarlet-native-fs-kernel"
+version = "0.1.0"
+edition = "2024"
+[[bin]]
+name = "scarlet"
+path = "src/main.rs"
+[dependencies]
+scarlet = { path = "/Users/petitstrawberry/Development/Rust/Scarlet/kernel", default-features = false, features = ["limine", "network", "sync-debug", "user-fpu", "user-vector"] }
+[profile.release]
+panic = "abort"

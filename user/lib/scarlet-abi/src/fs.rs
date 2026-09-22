@@ -8,6 +8,24 @@ pub const PATH_MAX: usize = 1024;
 /// Use the current working directory for a relative VfsSetTimes pathname.
 pub const CURRENT_DIRECTORY: usize = usize::MAX;
 
+/// Open flags for `VfsOpenAt`. Unlisted flag bits are rejected.
+pub const VFS_O_RDONLY: u32 = 0;
+pub const VFS_O_WRONLY: u32 = 1;
+pub const VFS_O_RDWR: u32 = 2;
+pub const VFS_O_ACCMODE: u32 = 3;
+pub const VFS_O_CREAT: u32 = 0x40;
+pub const VFS_O_EXCL: u32 = 0x80;
+pub const VFS_O_TRUNC: u32 = 0x200;
+pub const VFS_O_APPEND: u32 = 0x400;
+pub const VFS_O_DIRECTORY: u32 = 0x10000;
+pub const VFS_O_NOFOLLOW: u32 = 0x20000;
+pub const VFS_O_CLOEXEC: u32 = 0x80000;
+
+pub const ERRNO_ENOMEM: i32 = 12;
+pub const ERRNO_EMFILE: i32 = 24;
+pub const ERRNO_ESPIPE: i32 = 29;
+pub const ERRNO_EPIPE: i32 = 32;
+
 pub const ERRNO_ENOENT: i32 = 2;
 pub const ERRNO_EACCES: i32 = 13;
 pub const ERRNO_EFAULT: i32 = 14;

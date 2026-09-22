@@ -256,7 +256,7 @@ impl Ext2FileObject {
             .downcast_ref::<Ext2FileSystem>()
             .ok_or(StreamError::NotSupported)?;
         let inode_lock = ext2_fs.get_inode_lock(self.inode_number);
-        let _inode_guard = inode_lock.lock();
+        let _inode_guard = crate::object::capability::file::lock_file_operation(&inode_lock)?;
         let no_size_override = self.size_override.lock().is_none();
         let is_dirty = *self.dirty.lock();
         let cache_id = self.cache_id();
@@ -314,6 +314,57 @@ impl Ext2FileObject {
             }
         }
         file_size
+    }
+
+    /// Caller holds this inode's lock until size and cursor publication finish.
+    fn write_at_locked(
+        &self,
+        ext2_fs: &Ext2FileSystem,
+        off: usize,
+        buffer: &[u8],
+    ) -> Result<usize, StreamError> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let new_end = off
+            .checked_add(buffer.len())
+            .ok_or(StreamError::InvalidArgument)?;
+        let stored_size = self.metadata()?.size;
+        let first_page = (off / PAGE_SIZE) as PageIndex;
+        let last_page = ((new_end - 1) / PAGE_SIZE) as PageIndex;
+        let count = usize::try_from(last_page - first_page + 1)
+            .map_err(|_| StreamError::InvalidArgument)?;
+        // A page-load failure must not hide a partial write. Resolve all pages
+        // before changing their data or publishing the new EOF.
+        let pages = ext2_fs.pin_file_pages(self.inode_number, first_page, count)?;
+        let mut written = 0;
+        for page in &pages {
+            let page_offset = (off + written) % PAGE_SIZE;
+            let chunk = (PAGE_SIZE - page_offset).min(buffer.len() - written);
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    buffer.as_ptr().add(written),
+                    (phys_to_virt(page.paddr()) as *mut u8).add(page_offset),
+                    chunk,
+                );
+            }
+            page.mark_dirty();
+            written += chunk;
+        }
+        drop(pages);
+        #[cfg(test)]
+        ext2_fs.observe_pending_write(self.inode_number, new_end);
+        let mut size_override = self.size_override.lock();
+        *size_override = Some(size_override.unwrap_or(0).max(new_end));
+        drop(size_override);
+        PageCacheManager::global().record_object_write(
+            self.cache_id(),
+            new_end,
+            stored_size,
+            super::current_timestamp().map(u64::from),
+        );
+        *self.dirty.lock() = true;
+        Ok(written)
     }
 
     fn ensure_mmap_backing(
@@ -394,6 +445,10 @@ impl StreamOps for Ext2FileObject {
             .downcast_ref::<Ext2FileSystem>()
             .ok_or(StreamError::NotSupported)?;
 
+        // Append publishes EOF and this handle's cursor together while holding
+        // the inode lock. Reads must not observe the intervening state.
+        let inode_lock = ext2_fs.get_inode_lock(self.inode_number);
+        let _inode_guard = crate::object::capability::file::lock_file_operation(&inode_lock)?;
         let inode = ext2_fs
             .read_inode(self.inode_number)
             .map_err(|_| StreamError::IoError)?;
@@ -480,7 +535,7 @@ impl StreamOps for Ext2FileObject {
         }
 
         let inode_lock = ext2_fs.get_inode_lock(self.inode_number);
-        let _inode_guard = inode_lock.lock();
+        let _inode_guard = crate::object::capability::file::lock_file_operation(&inode_lock)?;
         let cache_id = self.cache_id();
         let end_pos = loop {
             let current_pos =
@@ -933,8 +988,6 @@ impl FileObject for Ext2FileObject {
             return Ok(0);
         }
         let off = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
-        off.checked_add(buffer.len())
-            .ok_or(StreamError::InvalidArgument)?;
         let fs = self
             .filesystem
             .read()
@@ -946,72 +999,65 @@ impl FileObject for Ext2FileObject {
             .downcast_ref::<Ext2FileSystem>()
             .ok_or(StreamError::NotSupported)?;
         let inode_lock = ext2_fs.get_inode_lock(self.inode_number);
-        let _inode_guard = inode_lock.lock();
-        let stored_size = self.metadata()?.size;
-        let mut written = 0usize;
-        let cache_id = self.cache_id();
+        let _inode_guard = crate::object::capability::file::lock_file_operation(&inode_lock)?;
+        self.write_at_locked(ext2_fs, off, buffer)
+    }
 
-        while written < buffer.len() {
-            let absolute = off + written;
-            let page_index = (absolute / PAGE_SIZE) as PageIndex;
-            let page_off = absolute % PAGE_SIZE;
-            let remain_in_page = PAGE_SIZE - page_off;
-            let chunk = core::cmp::min(buffer.len() - written, remain_in_page);
+    fn supports_append(&self) -> bool {
+        true
+    }
 
-            let pinned = PageCacheManager::global()
-                .pin_or_load(cache_id, page_index, |paddr| {
-                    let fs = self
-                        .filesystem
-                        .read()
-                        .as_ref()
-                        .and_then(|weak| weak.upgrade())
-                        .ok_or("filesystem gone")?;
-                    let ext2_fs = fs
-                        .as_any()
-                        .downcast_ref::<Ext2FileSystem>()
-                        .ok_or("bad fs type")?;
-                    ext2_fs
-                        .read_page_content(self.inode_number, page_index, paddr)
-                        .map_err(|_| "Failed to load page")
-                })
-                .map_err(|_| StreamError::IoError)?;
-
-            unsafe {
-                let dst = (phys_to_virt(pinned.paddr()) as *mut u8).add(page_off);
-                let src = buffer.as_ptr().add(written);
-                core::ptr::copy_nonoverlapping(src, dst, chunk);
-            }
-
-            pinned.mark_dirty();
-            written += chunk;
+    fn append(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        if buffer.is_empty() {
+            return Ok(0);
         }
-
-        let new_end = off + written;
-        #[cfg(test)]
-        ext2_fs.observe_pending_write(self.inode_number, new_end);
-        let mut size_override = self.size_override.lock();
-        match *size_override {
-            Some(cur) => {
-                if new_end > cur {
-                    *size_override = Some(new_end);
-                }
-            }
-            None => {
-                *size_override = Some(new_end);
-            }
-        }
-        // Release the per-handle lock before updating shared metadata.
-        drop(size_override);
-        PageCacheManager::global().record_object_write(
-            cache_id,
-            new_end,
-            stored_size,
-            super::current_timestamp().map(u64::from),
-        );
-
-        *self.dirty.lock() = true;
-
+        let fs = self
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
+        let ext2_fs = fs
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+        let inode_lock = ext2_fs.get_inode_lock(self.inode_number);
+        let _inode_guard = crate::object::capability::file::lock_file_operation(&inode_lock)?;
+        let off = self.metadata()?.size;
+        let written = self.write_at_locked(ext2_fs, off, buffer)?;
+        *self.position.lock() = (off + written) as u64;
         Ok(written)
+    }
+
+    fn seek_signed(&self, offset: i64, whence: u32) -> Result<u64, StreamError> {
+        let fs = self
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
+        let ext2_fs = fs
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+        let inode_lock = ext2_fs.get_inode_lock(self.inode_number);
+        let _inode_guard = crate::object::capability::file::lock_file_operation(&inode_lock)?;
+        // Fetch metadata before disabling preemption with the position lock.
+        let eof = if whence == 2 {
+            self.metadata()?.size as u64
+        } else {
+            0
+        };
+        let mut position = self.position.lock();
+        let base = match whence {
+            0 => 0,
+            1 => *position,
+            2 => eof,
+            _ => return Err(StreamError::InvalidArgument),
+        };
+        let next = crate::object::capability::file::checked_seek_position(base, offset)?;
+        *position = next;
+        Ok(next)
     }
 
     fn truncate(&self, size: u64) -> Result<(), StreamError> {
@@ -1027,7 +1073,7 @@ impl FileObject for Ext2FileObject {
             .downcast_ref::<Ext2FileSystem>()
             .ok_or(StreamError::NotSupported)?;
         let inode_lock = ext2_fs.get_inode_lock(self.inode_number);
-        let _inode_guard = inode_lock.lock();
+        let _inode_guard = crate::object::capability::file::lock_file_operation(&inode_lock)?;
         let inode_size = ext2_fs
             .read_inode(self.inode_number)
             .map_err(|_| StreamError::IoError)?
@@ -1083,6 +1129,22 @@ impl FileObject for Ext2FileObject {
     }
 
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
+        let fs = self
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade());
+        // Detached objects historically permit Start/Current cursor changes.
+        // Only attached objects can race inode writes/append and need this lock;
+        // End still obtains metadata below and fails if no filesystem exists.
+        let inode_lock = fs
+            .as_ref()
+            .and_then(|fs| fs.as_any().downcast_ref::<Ext2FileSystem>())
+            .map(|fs| fs.get_inode_lock(self.inode_number));
+        let _inode_guard = inode_lock
+            .as_ref()
+            .map(|lock| crate::object::capability::file::lock_file_operation(lock))
+            .transpose()?;
         // Metadata may read an uncached inode from a sleepable block device.
         // Resolve EOF before taking the IRQ-off file-position lock.
         let end_size = if let SeekFrom::End(_) = &whence {

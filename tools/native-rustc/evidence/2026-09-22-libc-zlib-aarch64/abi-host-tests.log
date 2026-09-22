@@ -1,0 +1,59 @@
+   Compiling scarlet-abi v1.0.0 (/Users/petitstrawberry/Development/Rust/Scarlet/user/lib/scarlet-abi)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.76s
+     Running unittests src/lib.rs (/tmp/scarlet-libc-surface-host-abi/debug/deps/scarlet_abi-8e819fd7b1f14795)
+
+running 7 tests
+test shared_image::tests::rejects_crop_overflow_and_unused_metadata ... ok
+test power_supply::tests::fixed_wire_units_and_unknown_are_distinct_from_zero ... ok
+test power_supply::tests::rejects_malformed_request_and_invalid_values ... ok
+test shared_image::tests::unknown_modifier_requires_consumer_validation ... ok
+test shared_image::tests::rejects_plane_range_overflow ... ok
+test shared_image::tests::rejects_truncated_chroma ... ok
+test shared_image::tests::separate_buffers_and_odd_chroma_extent ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/data_model.rs (/tmp/scarlet-libc-surface-host-abi/debug/deps/data_model-b55162276d96819b)
+
+running 9 tests
+test pointer_slots_reject_high_bits_instead_of_narrowing ... ok
+test native_environment_record_matches_the_existing_literal_bytes ... ok
+test environment_has_explicit_32_and_64_bit_record_layouts ... ok
+test user_ranges_check_the_last_byte_and_array_multiplication ... ok
+test unaligned_word_bytes_and_byte_order ... ok
+test environment_rejects_truncated_wrong_width_and_reserved_records ... ok
+test wide_time_and_file_values_do_not_become_words ... ok
+test register_sign_extension_and_all_ones_sentinel ... ok
+test short_buffers_and_overflowing_offsets_never_panic_or_partially_write ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/native_call.rs (/tmp/scarlet-libc-surface-host-abi/debug/deps/native_call-8bd7f8e8e7c7f2a8)
+
+running 2 tests
+test native_object_calls_cannot_collide_with_linux_syscalls ... ok
+test other_namespaces_and_high_bits_are_not_native_calls ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/native_contract.rs (/tmp/scarlet-libc-surface-host-abi/debug/deps/native_contract-f6455b6abe2c47a4)
+
+running 9 tests
+test debug_snapshot_v1_field_layouts ... ok
+test filesystem_timestamp_record_layout ... ok
+test environment_exec_record_layouts ... ok
+test native_identifiers_and_file_metadata_layout ... ok
+test scheduler_results_preserve_unknown_values ... ok
+test scheduler_v1_field_layouts ... ok
+test scheduler_v1_headers_and_reserved_fields ... ok
+test native_syscall_numbers ... ok
+test system_time_update_v1_layout ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests scarlet_abi
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

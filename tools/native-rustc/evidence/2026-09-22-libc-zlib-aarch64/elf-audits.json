@@ -1,0 +1,232 @@
+{
+  "probe": {
+    "path": "/tmp/scarlet-libc-surface-aarch64-unknown-scarlet/aarch64-unknown-scarlet/release/native-rustc-probe",
+    "sha256": "901467cd9bbdc37da930eb2ca5c6b534fec9eae494102ec5154b968d901f807d",
+    "bytes": 477080,
+    "elf_type": "EXEC",
+    "machine": "aarch64",
+    "osabi": 83,
+    "entry": 2173956,
+    "interpreter": "/system/bin/scarlet-ld",
+    "needed": [],
+    "rpath": null,
+    "runpath": null,
+    "soname": null,
+    "tls": [],
+    "relocations": {},
+    "undefined_relocated_symbols": [],
+    "hash_tables": [],
+    "textrel": false,
+    "relr": false,
+    "symbol_versioning": false,
+    "init_fini": []
+  },
+  "rv64_probe": {
+    "path": "/tmp/scarlet-libc-surface-riscv64gc-unknown-scarlet/riscv64gc-unknown-scarlet/release/native-rustc-probe",
+    "sha256": "d3d2d337bb6dc718a5af0423e3a8ced3e35e63c97545dcefcc73d186b32147fa",
+    "bytes": 554592,
+    "elf_type": "EXEC",
+    "machine": "riscv64",
+    "osabi": 83,
+    "entry": 122580,
+    "interpreter": "/system/bin/scarlet-ld",
+    "needed": [],
+    "rpath": null,
+    "runpath": null,
+    "soname": null,
+    "tls": [],
+    "relocations": {},
+    "undefined_relocated_symbols": [],
+    "hash_tables": [],
+    "textrel": false,
+    "relr": false,
+    "symbol_versioning": false,
+    "init_fini": []
+  },
+  "rustc": {
+    "path": "/tmp/scarlet-errno-staging/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/rustc",
+    "sha256": "b51bab261fe067f60a926efb16d5956aacf67429e64bfe736a8baab85c3b024f",
+    "bytes": 4776,
+    "elf_type": "EXEC",
+    "machine": "aarch64",
+    "osabi": 83,
+    "entry": 2102500,
+    "interpreter": "/system/bin/scarlet-ld",
+    "needed": [
+      "librustc_driver-971288f04f51fd65.so"
+    ],
+    "rpath": null,
+    "runpath": null,
+    "soname": null,
+    "tls": [],
+    "relocations": {
+      "JUMP_SLOT": 3
+    },
+    "undefined_relocated_symbols": [
+      {
+        "name": "__scarlet_start",
+        "binding": "GLOBAL",
+        "type": "2"
+      },
+      {
+        "name": "_RNvNtCs1rcjlBMYMYv_3std2rt19lang_start_internal",
+        "binding": "GLOBAL",
+        "type": "2"
+      },
+      {
+        "name": "_RNvCs8JELPYKzGga_17rustc_driver_impl4main",
+        "binding": "GLOBAL",
+        "type": "2"
+      }
+    ],
+    "hash_tables": [
+      "sysv",
+      "gnu"
+    ],
+    "textrel": false,
+    "relr": false,
+    "symbol_versioning": false,
+    "init_fini": []
+  },
+  "driver": {
+    "path": "/tmp/scarlet-errno-staging/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/librustc_driver-971288f04f51fd65.so",
+    "sha256": "434a3d9a9df392713b9c6d544144d6e4c802f4674c210ad3cf13ef436b749a03",
+    "bytes": 125342384,
+    "elf_type": "DYN",
+    "machine": "aarch64",
+    "osabi": 83,
+    "entry": 0,
+    "interpreter": null,
+    "needed": [],
+    "rpath": null,
+    "runpath": null,
+    "soname": "librustc_driver-971288f04f51fd65.so",
+    "tls": [],
+    "relocations": {
+      "ABS64": 4948,
+      "GLOB_DAT": 1356,
+      "JUMP_SLOT": 10908,
+      "RELATIVE": 136997
+    },
+    "undefined_relocated_symbols": [
+      {
+        "name": "dlerror",
+        "binding": "GLOBAL",
+        "type": "0"
+      },
+      {
+        "name": "dlsym",
+        "binding": "GLOBAL",
+        "type": "0"
+      },
+      {
+        "name": "dlopen",
+        "binding": "GLOBAL",
+        "type": "0"
+      },
+      {
+        "name": "dlclose",
+        "binding": "GLOBAL",
+        "type": "0"
+      }
+    ],
+    "hash_tables": [
+      "sysv",
+      "gnu"
+    ],
+    "textrel": false,
+    "relr": false,
+    "symbol_versioning": false,
+    "init_fini": [
+      "init_array"
+    ]
+  },
+  "loader": {
+    "path": "/tmp/scarlet-errno-staging/system/bin/scarlet-ld",
+    "sha256": "4dae3a3e065707a0cbb73b8c343c35a9ee2b7532090a608521d3f774f107e937",
+    "bytes": 265800,
+    "elf_type": "EXEC",
+    "machine": "aarch64",
+    "osabi": 83,
+    "entry": 1073785860,
+    "interpreter": null,
+    "needed": [],
+    "rpath": null,
+    "runpath": null,
+    "soname": null,
+    "tls": [],
+    "relocations": {},
+    "undefined_relocated_symbols": [],
+    "hash_tables": [],
+    "textrel": false,
+    "relr": false,
+    "symbol_versioning": false,
+    "init_fini": []
+  },
+  "zlib_probe": {
+    "path": "/tmp/scarlet-zlib-surface-aarch64-v3/zlib-probe",
+    "sha256": "13c17a128b213d55a5ae3c1641ca0958db1460028b26c0cd75d4d3d20c5e2793",
+    "bytes": 195080,
+    "elf_type": "EXEC",
+    "machine": "aarch64",
+    "osabi": 83,
+    "entry": 2135324,
+    "interpreter": null,
+    "needed": [],
+    "rpath": null,
+    "runpath": null,
+    "soname": null,
+    "tls": [],
+    "relocations": {},
+    "undefined_relocated_symbols": [],
+    "hash_tables": [],
+    "textrel": false,
+    "relr": false,
+    "symbol_versioning": false,
+    "init_fini": []
+  },
+  "rv64_zlib_probe": {
+    "path": "/tmp/scarlet-zlib-surface-rv64-v1/zlib-probe",
+    "sha256": "de04d380347fe6548c292d4923567b2dff149cef674570d4ece26f987c4e8d9e",
+    "bytes": 204104,
+    "elf_type": "EXEC",
+    "machine": "riscv64",
+    "osabi": 83,
+    "entry": 99088,
+    "interpreter": null,
+    "needed": [],
+    "rpath": null,
+    "runpath": null,
+    "soname": null,
+    "tls": [],
+    "relocations": {},
+    "undefined_relocated_symbols": [],
+    "hash_tables": [],
+    "textrel": false,
+    "relr": false,
+    "symbol_versioning": false,
+    "init_fini": []
+  },
+  "c_startup": {
+    "path": "/tmp/scarlet-libc-surface-c-startup-aarch64/c-startup-probe",
+    "sha256": "9c3f4d4ad90e2ab8e0794b4deea7ff66afaf4518bc2ed9b7f76f38ddb0ced362",
+    "bytes": 101896,
+    "elf_type": "EXEC",
+    "machine": "aarch64",
+    "osabi": 83,
+    "entry": 2114148,
+    "interpreter": null,
+    "needed": [],
+    "rpath": null,
+    "runpath": null,
+    "soname": null,
+    "tls": [],
+    "relocations": {},
+    "undefined_relocated_symbols": [],
+    "hash_tables": [],
+    "textrel": false,
+    "relr": false,
+    "symbol_versioning": false,
+    "init_fini": []
+  }
+}

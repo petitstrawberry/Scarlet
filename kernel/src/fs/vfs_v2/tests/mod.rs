@@ -3,6 +3,7 @@
 /// These are basic tests to verify that VFS v2 components compile and work correctly.
 pub mod advanced_tests;
 pub mod cross_vfs_tests;
+pub mod open_at_tests;
 pub mod performance_tests;
 pub mod symlink_cross_fs_test;
 

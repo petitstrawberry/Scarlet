@@ -67,6 +67,24 @@ class StagingLinkTests(unittest.TestCase):
 
 
 class CStartupEvidenceTests(unittest.TestCase):
+    def test_zlib_requires_successful_status_and_exact_stdout_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with self.assertRaisesRegex(ValueError, "evidence is missing"):
+                RUN_QEMU.validate_zlib_evidence(output)
+            (output / "ZLIB_PASS").touch()
+            (output / "zlib.status").write_text("exit=Some(1) elapsed_ms=5\n")
+            (output / "zlib.stdout").write_bytes(RUN_QEMU.ZLIB_HELLO + b"\n")
+            with self.assertRaisesRegex(ValueError, "required status 47"):
+                RUN_QEMU.validate_zlib_evidence(output)
+            (output / "zlib.status").write_text("exit=Some(47) elapsed_ms=5\n")
+            for text in (b"", b"prefix" + RUN_QEMU.ZLIB_HELLO, RUN_QEMU.ZLIB_HELLO + b"suffix"):
+                (output / "zlib.stdout").write_bytes(text)
+                with self.assertRaisesRegex(ValueError, "success marker"):
+                    RUN_QEMU.validate_zlib_evidence(output)
+            (output / "zlib.stdout").write_bytes(RUN_QEMU.ZLIB_HELLO + b"\n")
+            RUN_QEMU.validate_zlib_evidence(output)
+
     def test_marker_cannot_mask_missing_or_failed_exit_status(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)

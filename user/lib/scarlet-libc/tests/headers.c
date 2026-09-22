@@ -1,5 +1,8 @@
 /* Compile this file as C11 and, via headers.cpp, C++11. Compile each public
  * header on its own as well: the aggregate cannot detect missing includes. */
+#include <string.h>
+#include <ctype.h>
+#include <stdio.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -17,6 +20,9 @@
 #include <time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <string.h>
+#include <ctype.h>
+#include <stdio.h>
 #include <unistd.h>
 
 #ifdef __cplusplus
@@ -47,6 +53,7 @@ HEADER_ASSERT(CHAR_MIN == -128 && CHAR_MAX == 127);
 /* The supported C ABI is LP64 on both AArch64 and RV64GC. */
 HEADER_ASSERT(sizeof(void *) == 8 && sizeof(int) == 4 && sizeof(long) == 8);
 HEADER_ASSERT(sizeof(size_t) == 8 && sizeof(ssize_t) == 8);
+HEADER_ASSERT(sizeof(mode_t) == 4);
 HEADER_ASSERT(sizeof(time_t) == 8 && sizeof(off_t) == 8);
 HEADER_ASSERT(sizeof(struct timespec) == 16);
 HEADER_ASSERT(HEADER_ALIGNOF(struct timespec) == 8);

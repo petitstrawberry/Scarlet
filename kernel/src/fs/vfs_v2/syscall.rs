@@ -79,7 +79,7 @@ pub(crate) fn fs_errno(error: crate::fs::FileSystemError) -> usize {
     (-(errno as isize)) as usize
 }
 
-fn pathname_errno(error: crate::library::std::string::StringConversionError) -> usize {
+pub(crate) fn pathname_errno(error: crate::library::std::string::StringConversionError) -> usize {
     use crate::library::std::string::StringConversionError;
     let errno = match error {
         StringConversionError::ExceedsMaxLength => scarlet_abi::fs::ERRNO_ENAMETOOLONG,

@@ -14,6 +14,7 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt;
+use core::sync::atomic::{AtomicU32, Ordering};
 use core::{any::Any, fmt::Debug};
 
 use super::mount_tree::MountPoint;
@@ -419,6 +420,8 @@ pub struct VfsFileObject {
     mount_point: Arc<MountPoint>,
     /// The original path used to open this file (for debugging/logging)
     original_path: String,
+    /// Shared open-file status; duplicated handles reference the same wrapper.
+    status_flags: AtomicU32,
 }
 
 impl VfsFileObject {
@@ -434,7 +437,35 @@ impl VfsFileObject {
             vfs_entry,
             mount_point,
             original_path,
+            status_flags: AtomicU32::new(0),
         }
+    }
+
+    pub fn new_with_flags(
+        inner: Arc<dyn FileObject>,
+        vfs_entry: Arc<VfsEntry>,
+        mount_point: Arc<MountPoint>,
+        original_path: String,
+        flags: u32,
+    ) -> Self {
+        let object = Self::new(inner, vfs_entry, mount_point, original_path);
+        object.set_append(flags & scarlet_abi::fs::VFS_O_APPEND != 0);
+        object
+    }
+
+    pub fn status_flags(&self) -> u32 {
+        self.status_flags.load(Ordering::Acquire)
+    }
+
+    pub fn set_append(&self, append: bool) {
+        self.status_flags.store(
+            if append {
+                scarlet_abi::fs::VFS_O_APPEND
+            } else {
+                0
+            },
+            Ordering::Release,
+        );
     }
 
     /// Get the VfsEntry this FileObject was created from
@@ -473,7 +504,11 @@ impl StreamOps for VfsFileObject {
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
-        self.inner.write(buffer)
+        if self.status_flags() & scarlet_abi::fs::VFS_O_APPEND != 0 {
+            self.inner.append(buffer)
+        } else {
+            self.inner.write(buffer)
+        }
     }
 }
 
@@ -531,6 +566,18 @@ impl MemoryMappingOps for VfsFileObject {
 }
 
 impl FileObject for VfsFileObject {
+    fn supports_append(&self) -> bool {
+        self.inner.supports_append()
+    }
+
+    fn append(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        self.inner.append(buffer)
+    }
+
+    fn seek_signed(&self, offset: i64, whence: u32) -> Result<u64, StreamError> {
+        self.inner.seek_signed(offset, whence)
+    }
+
     fn set_times(&self, times: crate::fs::FileTimeUpdate) -> Result<(), StreamError> {
         self.vfs_entry
             .node()

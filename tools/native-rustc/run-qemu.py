@@ -28,6 +28,7 @@ spec.loader.exec_module(smoke)
 TARGETS = {"aarch64": "aarch64-unknown-scarlet", "riscv64": "riscv64gc-unknown-scarlet"}
 HELLO = b"SCARLET_NATIVE_RUSTC_HELLO_OK\n"
 MACRO_HELLO = b"SCARLET_NATIVE_PROC_MACRO_OK=42\n"
+ZLIB_HELLO = b"SCARLET_LIBC_ZLIB_OK"
 
 
 def guest_path(value):
@@ -108,7 +109,16 @@ def validate_c_startup_evidence(extracted):
         raise ValueError("C startup did not exit with the required status 43")
 
 
-def collect_evidence(image, output, guest_output, mode, arch, proc_macro=False, native_fs=False, c_startup=False):
+def validate_zlib_evidence(extracted):
+    if not (extracted / "ZLIB_PASS").is_file():
+        raise ValueError("zlib evidence is missing")
+    if not (extracted / "zlib.status").read_text().startswith("exit=Some(47) "):
+        raise ValueError("zlib did not exit with the required status 47")
+    if ZLIB_HELLO not in (extracted / "zlib.stdout").read_bytes().splitlines():
+        raise ValueError("zlib stdout is missing the success marker")
+
+
+def collect_evidence(image, output, guest_output, mode, arch, proc_macro=False, native_fs=False, c_startup=False, zlib=False):
     evidence = output / "guest-evidence"
     evidence.mkdir()
     command = ["debugfs", "-R", f"rdump {debugfs_quote(guest_output)} {debugfs_quote(evidence)}", str(image)]
@@ -117,6 +127,8 @@ def collect_evidence(image, output, guest_output, mode, arch, proc_macro=False, 
     extracted = evidence / PurePosixPath(guest_output).name
     if c_startup:
         validate_c_startup_evidence(extracted)
+    if zlib:
+        validate_zlib_evidence(extracted)
     if native_fs and not (extracted / "NATIVE_FS_PASS").is_file():
         raise ValueError("native filesystem evidence is missing")
     if mode == "full":
@@ -153,6 +165,7 @@ def main():
     parser.add_argument("--bootstrap", type=Path, required=True, help="standard user/bin native static init")
     parser.add_argument("--probe", type=Path, help="override the staged native-rustc-probe with a fresh build")
     parser.add_argument("--c-startup-probe", type=Path, help="also execute a static C main + Scarlet CRT + std-backed libc fixture (expected exit 43)")
+    parser.add_argument("--zlib-probe", type=Path, help="also execute the upstream zlib C consumer (expected exit 47 and success marker)")
     parser.add_argument("--output", type=Path, required=True, help="NEW private artifacts directory")
     parser.add_argument("--rustc", type=guest_path, default="/opt/native-rustc/bin/rustc")
     parser.add_argument("--sysroot", type=guest_path, default="/opt/native-rustc")
@@ -184,8 +197,8 @@ def main():
         parser.error("linker options require full mode")
     if args.proc_macro and args.frontend_only:
         parser.error("--proc-macro requires full mode")
-    if args.c_startup_probe and args.storage != "ext2":
-        parser.error("--c-startup-probe requires ext2 to verify persisted exit evidence")
+    if (args.c_startup_probe or args.zlib_probe) and args.storage != "ext2":
+        parser.error("C startup and zlib probes require ext2 to verify persisted evidence")
     if not all(1 <= seconds <= 86400 for seconds in (args.phase_timeout, args.run_timeout)):
         parser.error("guest timeouts must be between 1 and 86400 seconds")
     if not math.isfinite(args.timeout) or args.timeout <= 0 or args.cpus < 1 or args.disk_size_mib < 0:
@@ -229,6 +242,9 @@ def main():
     c_startup = args.c_startup_probe.resolve() if args.c_startup_probe else None
     if c_startup:
         executable(c_startup, args.arch, "C startup probe", static=True)
+    zlib = args.zlib_probe.resolve() if args.zlib_probe else None
+    if zlib:
+        executable(zlib, args.arch, "zlib consumer", static=True)
     if args.linker:
         executable(in_root(staging, args.linker), args.arch, "linker")
     if args.backend:
@@ -269,6 +285,8 @@ def main():
     shutil.copy2(probe, root / "system/bin/native-rustc-probe")
     if c_startup:
         shutil.copy2(c_startup, root / "system/bin/native-c-startup-probe")
+    if zlib:
+        shutil.copy2(zlib, root / "system/bin/native-zlib-probe")
     for directory in ("dev/pts", "mnt/newroot", "etc", "root", "old_root", "tmp"):
         (root / directory).mkdir(parents=True, exist_ok=True)
     guest_output = "/native-rustc-output" if args.storage == "ext2" else "/tmp/native-rustc-output"
@@ -290,6 +308,8 @@ def main():
         probe_args += ["--native-fs"]
     if c_startup:
         probe_args += ["--c-startup", "/system/bin/native-c-startup-probe"]
+    if zlib:
+        probe_args += ["--zlib", "/system/bin/native-zlib-probe"]
     if any(any(char in arg for char in "\r\n\0") for arg in probe_args):
         raise ValueError("probe arguments cannot contain line breaks or NUL")
     (root / "etc/native-rustc-probe.args").write_text("\n".join(probe_args) + "\n")
@@ -355,12 +375,12 @@ def main():
     smoke.SUCCESS = re.compile(rb"\nNATIVE_RUSTC " + (b"FRONTEND" if args.frontend_only else b"FULL") + rb" PASS\r?\n")
     smoke.FAILURE = re.compile(rb"\nNATIVE_RUSTC FAIL(?:[ :\r\n]|$)")
     result = smoke.run_guest(command, output, args.timeout)
-    result.update(mode=mode, full_compilation_verified=False, proc_macro_verified=False, native_fs_verified=False, c_startup_verified=False)
+    result.update(mode=mode, full_compilation_verified=False, proc_macro_verified=False, native_fs_verified=False, c_startup_verified=False, zlib_verified=False)
     succeeded = result["result"] == "PASS"
     if root_image:
         try:
             if succeeded:
-                result["guest_evidence"] = collect_evidence(root_image, output, guest_output, mode, args.arch, args.proc_macro, args.native_fs, bool(c_startup))
+                result["guest_evidence"] = collect_evidence(root_image, output, guest_output, mode, args.arch, args.proc_macro, args.native_fs, bool(c_startup), bool(zlib))
             else:
                 # Preserve partial logs for failed compiler or bootstrap attempts.
                 evidence = output / "guest-evidence"
@@ -379,6 +399,7 @@ def main():
         result["proc_macro_verified"] = args.proc_macro
         result["native_fs_verified"] = args.native_fs
         result["c_startup_verified"] = bool(c_startup)
+        result["zlib_verified"] = bool(zlib)
     result_path.write_text(json.dumps(result, indent=2) + "\n")
     print(f"\nNative rustc ({mode}): {result['result']} (artifacts: {output})")
     return 0 if succeeded else 1

@@ -5,6 +5,7 @@
 //! link one copy into a native 64-bit executable using the matching Rust CRT.
 
 #![deny(unsafe_op_in_unsafe_fn)]
+#![feature(c_variadic)]
 // These exports implement libc. LLVM must not infer builtin allocation
 // contracts for their Rust callers (e.g. fold overflowing calloc to non-null).
 #![no_builtins]
@@ -21,7 +22,14 @@ use scarlet_abi::Syscall;
 use scarlet_abi::fs::*;
 
 pub mod allocation;
+pub mod conversion;
+pub mod descriptor;
 mod errno;
+#[cfg(any(test, target_os = "scarlet"))]
+mod formatting;
+#[cfg(any(test, target_os = "scarlet"))]
+pub mod stdio;
+pub mod strings;
 pub use errno::__errno_location;
 
 #[cfg(all(target_os = "scarlet", not(target_pointer_width = "64")))]

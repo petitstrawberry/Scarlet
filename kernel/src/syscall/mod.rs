@@ -296,6 +296,12 @@ syscall_table! {
     HandleSetRole = 101 => sys_handle_set_role, // Change handle role after creation
     HandleClose = 102 => sys_handle_close,     // Close any handle (files, pipes, etc.)
     HandleDuplicate = 103 => sys_handle_duplicate, // Duplicate any handle
+    HandleGetFlags = 104 => crate::fs::vfs_v2::descriptor::sys_handle_get_flags,
+    HandleSetFlags = 105 => crate::fs::vfs_v2::descriptor::sys_handle_set_flags,
+    HandleCloseWithStatus = 106 => crate::fs::vfs_v2::descriptor::sys_handle_close_with_status,
+    HandleDuplicateWithStatus = 107 => crate::fs::vfs_v2::descriptor::sys_handle_duplicate_with_status,
+    HandleGetDescriptorFlags = 108 => crate::fs::vfs_v2::descriptor::sys_handle_get_descriptor_flags,
+    HandleSetDescriptorFlags = 109 => crate::fs::vfs_v2::descriptor::sys_handle_set_descriptor_flags,
     HandleControl = 110 => sys_handle_control,  // Control operations on handles (ioctl-equivalent)
 
     // === StreamOps Capability ===
@@ -303,6 +309,8 @@ syscall_table! {
     StreamRead = 200 => sys_stream_read,   // StreamOps::read
     StreamWrite = 201 => sys_stream_write, // StreamOps::write
     Poll = 202 => sys_poll,               // Poll handles for readiness
+    StreamReadWithStatus = 203 => crate::fs::vfs_v2::descriptor::sys_stream_read_with_status,
+    StreamWriteWithStatus = 204 => crate::fs::vfs_v2::descriptor::sys_stream_write_with_status,
 
     // === FileObject Capability ===
     // File operations for any KernelObject with FileObject capability
@@ -311,6 +319,7 @@ syscall_table! {
     FileMetadata = 302 => sys_file_metadata, // FileObject::metadata
     FileSetTimes = 303 => crate::object::capability::file::syscall::sys_file_set_times,
     FileSync = 304 => crate::object::capability::file::syscall::sys_file_sync,
+    FileSeekWithStatus = 305 => crate::fs::vfs_v2::descriptor::sys_file_seek_with_status,
 
     // === VFS Operations ===
     VfsOpen = 400 => sys_vfs_open,             // VFS file/directory open
@@ -330,6 +339,7 @@ syscall_table! {
     VfsSetTimes = 414 => crate::fs::vfs_v2::syscall::sys_vfs_set_times,
     VfsMetadataWithStatus = 415 => crate::fs::vfs_v2::syscall::sys_vfs_metadata_with_status,
     VfsCreateDirectoryWithStatus = 416 => crate::fs::vfs_v2::syscall::sys_vfs_create_directory_with_status,
+    VfsOpenAt = 417 => crate::fs::vfs_v2::descriptor::sys_vfs_open_at,
 
     // === Filesystem Operations ===
     FsMount = 500 => sys_fs_mount,         // Mount filesystem

@@ -114,6 +114,28 @@ impl HandleTable {
         }
     }
 
+    /// Allocate the lowest available descriptor for C/POSIX adapters. Legacy
+    /// handle insertion retains its O(1) free-stack allocation policy.
+    pub fn insert_lowest_with_metadata(
+        &self,
+        mut obj: KernelObject,
+        metadata: HandleMetadata,
+    ) -> Result<Handle, &'static str> {
+        obj.ensure_handle_ownership();
+        let mut inner = self.inner.write();
+        let index = inner
+            .free_handles
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, handle)| *handle)
+            .map(|(index, _)| index)
+            .ok_or("Too many open KernelObjects, limit reached")?;
+        let handle = inner.free_handles.swap_remove(index);
+        inner.handles[handle as usize] = Some(obj);
+        inner.metadata[handle as usize] = Some(metadata);
+        Ok(handle)
+    }
+
     /// Infer metadata from KernelObject type and usage context
     ///
     /// This function provides reasonable defaults for handle roles based on the KernelObject type.
@@ -441,6 +463,30 @@ impl HandleTable {
         }
         let inner = self.inner.read();
         inner.metadata[handle as usize].clone()
+    }
+
+    /// Set close-on-exec while holding the same lock that protects descriptor
+    /// removal/reuse. Do not fetch and replace metadata through separate locks.
+    pub fn set_close_on_exec(&self, handle: Handle, enabled: bool) -> Result<(), &'static str> {
+        if handle as usize >= Self::MAX_HANDLES {
+            return Err("Invalid handle");
+        }
+        let mut inner = self.inner.write();
+        let metadata = inner.metadata[handle as usize]
+            .as_mut()
+            .ok_or("Invalid handle")?;
+        if enabled {
+            if metadata.special_semantics.is_some()
+                && metadata.special_semantics != Some(SpecialSemantics::CloseOnExec)
+            {
+                // The legacy metadata model cannot store two special semantics.
+                return Err("Conflicting special semantics");
+            }
+            metadata.special_semantics = Some(SpecialSemantics::CloseOnExec);
+        } else if metadata.special_semantics == Some(SpecialSemantics::CloseOnExec) {
+            metadata.special_semantics = None;
+        }
+        Ok(())
     }
 
     /// Execute a closure with access to metadata

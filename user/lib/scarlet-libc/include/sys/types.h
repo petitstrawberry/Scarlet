@@ -4,4 +4,5 @@
 typedef __INT64_TYPE__ time_t;
 typedef __INT64_TYPE__ off_t;
 typedef __PTRDIFF_TYPE__ ssize_t;
+typedef __UINT32_TYPE__ mode_t;
 #endif

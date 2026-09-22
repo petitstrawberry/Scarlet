@@ -35,6 +35,7 @@
 //! New code should use the v2 interfaces for better performance and maintainability.
 pub mod cache;
 pub mod core;
+pub mod descriptor;
 pub mod drivers;
 pub mod manager;
 pub mod mount_tree;

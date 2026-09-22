@@ -898,12 +898,24 @@ pub enum Syscall {
     HandleSetRole = 101,
     HandleClose = 102,
     HandleDuplicate = 103,
+    /// Descriptor access mode and shared append flag, or -errno.
+    HandleGetFlags = 104,
+    /// Set shared append flag; access mode must match. Returns zero or -errno.
+    HandleSetFlags = 105,
+    HandleCloseWithStatus = 106,
+    HandleDuplicateWithStatus = 107,
+    /// Return descriptor close-on-exec bit (0 or 1), or -errno.
+    HandleGetDescriptorFlags = 108,
+    /// Set descriptor close-on-exec bit (0 or 1), returning zero or -errno.
+    HandleSetDescriptorFlags = 109,
     HandleControl = 110,
 
     // Core capabilities
     StreamRead = 200,
     StreamWrite = 201,
     Poll = 202,
+    StreamReadWithStatus = 203,
+    StreamWriteWithStatus = 204,
 
     // FileObject capability
     FileSeek = 300,
@@ -913,6 +925,8 @@ pub enum Syscall {
     FileSetTimes = 303,
     /// Flush file data and metadata. Returns zero or a negated errno.
     FileSync = 304,
+    /// (fd, Native i64 offset, whence, u64* output): zero or -errno.
+    FileSeekWithStatus = 305,
 
     // VFS operations
     VfsOpen = 400,
@@ -937,6 +951,8 @@ pub enum Syscall {
     VfsMetadataWithStatus = 415,
     /// CreateDirectory(path): returns zero or -errno.
     VfsCreateDirectoryWithStatus = 416,
+    /// (base, path, flags, mode): descriptor or -errno.
+    VfsOpenAt = 417,
 
     // Filesystem operations
     FsMount = 500,
