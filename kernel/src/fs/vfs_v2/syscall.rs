@@ -984,6 +984,28 @@ pub fn sys_vfs_remove(trapframe: &mut Trapframe) -> usize {
     }
 }
 
+/// VfsRemoveWithStatus(path, flags): flags 0 unlinks a non-directory entry;
+/// flags 1 removes an empty directory. Errors are returned as negative errno.
+pub fn sys_vfs_remove_with_status(tf: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let (path_ptr, flags) = (tf.get_arg(0), tf.get_arg(1));
+    tf.increment_pc_next(&task);
+    if flags > 1 {
+        return (-(scarlet_abi::ERRNO_EINVAL as isize)) as usize;
+    }
+    let path = match parse_c_string_from_userspace(&task, path_ptr, MAX_PATH_LENGTH) {
+        Ok(path) => path,
+        Err(error) => return pathname_errno(error),
+    };
+    let Some(vfs) = task.get_vfs() else {
+        return (-(scarlet_abi::ERRNO_EIO as isize)) as usize;
+    };
+    match vfs.remove_with_kind(&path, flags == 1) {
+        Ok(()) => 0,
+        Err(error) => fs_errno(error),
+    }
+}
+
 /// Create a symbolic link (VfsCreateSymlink)
 ///
 /// This system call creates a symbolic link at the specified path pointing to the target.

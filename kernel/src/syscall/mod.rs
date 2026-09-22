@@ -320,6 +320,11 @@ syscall_table! {
     FileSetTimes = 303 => crate::object::capability::file::syscall::sys_file_set_times,
     FileSync = 304 => crate::object::capability::file::syscall::sys_file_sync,
     FileSeekWithStatus = 305 => crate::fs::vfs_v2::descriptor::sys_file_seek_with_status,
+    FileTruncateWithStatus = 306 => crate::fs::vfs_v2::descriptor::sys_file_truncate_with_status,
+    // 307 is reserved for a future metadata operation.
+    FileReadAtWithStatus = 308 => crate::fs::vfs_v2::descriptor::sys_file_read_at_with_status,
+    FileWriteAtWithStatus = 309 => crate::fs::vfs_v2::descriptor::sys_file_write_at_with_status,
+    FileLock = 310 => crate::fs::vfs_v2::file_lock::sys_file_lock,
 
     // === VFS Operations ===
     VfsOpen = 400 => sys_vfs_open,             // VFS file/directory open
@@ -340,6 +345,7 @@ syscall_table! {
     VfsMetadataWithStatus = 415 => crate::fs::vfs_v2::syscall::sys_vfs_metadata_with_status,
     VfsCreateDirectoryWithStatus = 416 => crate::fs::vfs_v2::syscall::sys_vfs_create_directory_with_status,
     VfsOpenAt = 417 => crate::fs::vfs_v2::descriptor::sys_vfs_open_at,
+    VfsRemoveWithStatus = 418 => crate::fs::vfs_v2::syscall::sys_vfs_remove_with_status,
 
     // === Filesystem Operations ===
     FsMount = 500 => sys_fs_mount,         // Mount filesystem

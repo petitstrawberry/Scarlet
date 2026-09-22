@@ -117,6 +117,9 @@ pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps + Selectable {
     /// This method changes the size of the file to the specified length.
     /// If the new size is smaller than the current size, the file is truncated.
     /// If the new size is larger, the file is extended with zero bytes.
+    /// The open-file cursor is unchanged, including when it lies beyond the
+    /// resulting EOF. Unsupported lengths must fail without size-proportional
+    /// infallible allocations.
     ///
     /// # Arguments
     ///

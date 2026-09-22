@@ -31,6 +31,10 @@ use super::{
 };
 use crate::fs::vfs_v2::core::{FileSystemOperations, VfsNode};
 
+/// Temporary reconstruction bound for the current ext2 truncate implementation.
+/// This does not limit ordinary file writes, which use bounded page writeback.
+pub const MAX_TRUNCATE_SIZE: u64 = 16 * 1024 * 1024;
+
 /// ext2 VFS Node
 ///
 /// Represents a file or directory in the ext2 filesystem. This node
@@ -197,6 +201,8 @@ impl VfsNode for Ext2Node {
 /// Handles file operations for regular files in the ext2 filesystem.
 #[derive(Debug)]
 pub struct Ext2FileObject {
+    /// Released after the Drop writeback finishes; prevents live inode reuse.
+    open_guard: Option<super::Ext2OpenGuard>,
     /// Inode number of the file
     inode_number: u32,
     /// File ID
@@ -218,9 +224,20 @@ pub struct Ext2FileObject {
 }
 
 impl Ext2FileObject {
+    pub(super) fn with_open_guard(
+        inode_number: u32,
+        file_id: u64,
+        guard: super::Ext2OpenGuard,
+    ) -> Self {
+        let mut object = Self::new(inode_number, file_id);
+        object.open_guard = Some(guard);
+        object
+    }
+
     /// Create a new ext2 file object
     pub fn new(inode_number: u32, file_id: u64) -> Self {
         Self {
+            open_guard: None,
             inode_number,
             file_id,
             position: IrqSpinLock::new(0),
@@ -328,7 +345,13 @@ impl Ext2FileObject {
         }
         let new_end = off
             .checked_add(buffer.len())
-            .ok_or(StreamError::InvalidArgument)?;
+            .filter(|end| *end <= u32::MAX as usize)
+            .ok_or_else(|| {
+                StreamError::from(FileSystemError::new(
+                    FileSystemErrorKind::ValueOverflow,
+                    "ext2 file exceeds the supported 32-bit inode size",
+                ))
+            })?;
         let stored_size = self.metadata()?.size;
         let first_page = (off / PAGE_SIZE) as PageIndex;
         let last_page = ((new_end - 1) / PAGE_SIZE) as PageIndex;
@@ -1061,7 +1084,17 @@ impl FileObject for Ext2FileObject {
     }
 
     fn truncate(&self, size: u64) -> Result<(), StreamError> {
-        let new_size = usize::try_from(size).map_err(|_| StreamError::InvalidArgument)?;
+        // This path still reconstructs the retained contents before committing
+        // them through write_file_content. Bound that temporary allocation;
+        // larger files can still be shortened below this limit (including 0).
+        // This is an implementation limit, not ext2's on-disk maximum.
+        if size > MAX_TRUNCATE_SIZE {
+            return Err(StreamError::from(FileSystemError::new(
+                FileSystemErrorKind::ValueOverflow,
+                "ext2 truncate reconstruction exceeds 16 MiB",
+            )));
+        }
+        let new_size = size as usize;
         let fs = self
             .filesystem
             .read()
@@ -1083,7 +1116,13 @@ impl FileObject for Ext2FileObject {
             return Ok(());
         }
 
-        let mut buffer = Vec::with_capacity(new_size);
+        let mut buffer = Vec::new();
+        buffer.try_reserve_exact(new_size).map_err(|_| {
+            StreamError::from(FileSystemError::new(
+                FileSystemErrorKind::NoSpace,
+                "Cannot allocate ext2 truncate reconstruction buffer",
+            ))
+        })?;
         buffer.resize(new_size, 0);
         let copy_len = core::cmp::min(cur_size, new_size);
         if copy_len > 0 {
@@ -1114,16 +1153,19 @@ impl FileObject for Ext2FileObject {
 
         ext2_fs
             .write_file_content(self.inode_number, &buffer)
-            .map_err(|_| StreamError::IoError)?;
-        PageCacheManager::global().invalidate(self.cache_id());
+            .map_err(StreamError::from)?;
+        // Readers and shared mappings can still hold these physical pages.
+        // Keep them alive, but discard cached bytes beyond the successful EOF.
+        PageCacheManager::global().zero_cached_tail(self.cache_id(), new_size);
         *self.size_override.lock() = None;
         *self.dirty.lock() = false;
         PageCacheManager::global().record_object_size(self.cache_id(), new_size);
-
-        let mut position = self.position.lock();
-        if *position > size {
-            *position = size;
-        }
+        PageCacheManager::global().record_object_write(
+            self.cache_id(),
+            new_size,
+            new_size,
+            super::current_timestamp().map(u64::from),
+        );
 
         Ok(())
     }
@@ -1275,6 +1317,7 @@ impl Drop for Ext2FileObject {
 /// Handles directory operations for directories in the ext2 filesystem.
 #[derive(Debug)]
 pub struct Ext2DirectoryObject {
+    open_guard: Option<super::Ext2OpenGuard>,
     /// Inode number of the directory
     inode_number: u32,
     /// File ID
@@ -1290,9 +1333,20 @@ pub struct Ext2DirectoryObject {
 }
 
 impl Ext2DirectoryObject {
+    pub(super) fn with_open_guard(
+        inode_number: u32,
+        file_id: u64,
+        guard: super::Ext2OpenGuard,
+    ) -> Self {
+        let mut object = Self::new(inode_number, file_id);
+        object.open_guard = Some(guard);
+        object
+    }
+
     /// Create a new ext2 directory object
     pub fn new(inode_number: u32, file_id: u64) -> Self {
         Self {
+            open_guard: None,
             inode_number,
             file_id,
             position: IrqSpinLock::new(0),
@@ -1597,6 +1651,7 @@ impl crate::object::capability::selectable::Selectable for Ext2DirectoryObject {
 /// Handles character device operations through ext2 device files.
 #[derive(Debug)]
 pub struct Ext2CharDeviceFileObject {
+    open_guard: Option<super::Ext2OpenGuard>,
     /// Device file info
     device_info: DeviceFileInfo,
     /// File ID
@@ -1608,9 +1663,20 @@ pub struct Ext2CharDeviceFileObject {
 }
 
 impl Ext2CharDeviceFileObject {
+    pub(super) fn with_open_guard(
+        device_info: DeviceFileInfo,
+        file_id: u64,
+        guard: super::Ext2OpenGuard,
+    ) -> Self {
+        let mut object = Self::new(device_info, file_id);
+        object.open_guard = Some(guard);
+        object
+    }
+
     /// Create a new ext2 character device file object
     pub fn new(device_info: DeviceFileInfo, file_id: u64) -> Self {
         Self {
+            open_guard: None,
             device_info,
             file_id,
             position: IrqSpinLock::new(0),

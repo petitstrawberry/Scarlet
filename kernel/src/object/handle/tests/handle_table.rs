@@ -614,3 +614,45 @@ fn duplicated_socket_reference_defers_final_listener_close() {
     assert_eq!(socket.state(), SocketState::Closed);
     assert!(manager.lookup_named_socket(path).is_err());
 }
+
+#[test_case]
+fn descriptor_reservation_excludes_shared_allocators_and_releases_on_drop() {
+    let table = HandleTable::new();
+    let shared = table.clone();
+    let reserved = table.reserve_lowest().unwrap();
+    assert!(table.get(0).is_none());
+    assert!(shared.remove(0).is_none());
+    let object = || KernelObject::File(Arc::new(MockFileObject::new(b"reserved".to_vec())));
+    assert_eq!(shared.insert(object()).unwrap(), 1);
+    // Unpublished work is not inherited as a permanently occupied fork slot.
+    let child = table.deep_clone();
+    assert_eq!(child.insert(object()).unwrap(), 0);
+    drop(reserved);
+    assert_eq!(table.insert(object()).unwrap(), 0);
+    assert_eq!(table.open_count(), 2);
+}
+
+#[test_case]
+fn descriptor_reservation_install_publishes_exact_slot_and_metadata() {
+    let table = HandleTable::new();
+    let reserved = table.reserve_lowest().unwrap();
+    table.close_all(); // Closing published descriptors cannot steal reservations.
+    let metadata = HandleMetadata {
+        handle_type: HandleType::Regular,
+        access_mode: AccessMode::ReadOnly,
+        special_semantics: None,
+    };
+    let object = KernelObject::File(Arc::new(MockFileObject::new(b"installed".to_vec())));
+    assert!(
+        table
+            .insert_exec_handle(0, object.clone(), metadata.clone())
+            .is_err()
+    );
+    assert_eq!(reserved.install(object, metadata), 0);
+    assert_eq!(
+        table.get_metadata(0).unwrap().access_mode,
+        AccessMode::ReadOnly
+    );
+    table.remove(0).unwrap();
+    assert_eq!(table.free_handles_len(), HandleTable::MAX_HANDLES);
+}

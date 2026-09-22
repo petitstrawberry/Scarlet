@@ -595,3 +595,80 @@ RV64 has cross-build and ELF-audit evidence, with guest execution outstanding
 for this milestone. The published bundle remains unchanged. Complete standards
 coverage, permissions and process/thread/network contracts, installed SDK
 acceptance, and Cargo's curl/libgit2/SQLite dependencies remain separate work.
+
+
+### Positioned C I/O and native SQLite, 2026-09-22
+
+The next libc milestone adds `pread`/`pwrite`, offset-preserving `ftruncate`,
+nonblocking whole-file `flock`, `unlink`/`rmdir` and `getcwd`. The
+[Native descriptor contract](../abi/native-descriptors.md) documents syscall
+numbers, errors and limits. Descriptor reservation now precedes create/truncate
+side effects. Ext2 truncation is bounded to 16 MiB and last-link unlink of an
+open ext2 file returns `EBUSY`. Ext2 rmdir returns `ENOTEMPTY` for nonempty
+directories and `EOPNOTSUPP` before mutation for empty directories, because
+retained-cwd lifetime is unresolved. These limits must not be presented as full
+Unix file lifetime or unrestricted sparse-file support.
+
+The C library also adds sorting/searching, span/tokenizer/case-folding routines,
+clock/sleep and entropy APIs, `fabs`/`fabsf`, and `assert`/`abort`. Registered
+entropy is required; Native failure maps to `EIO`, and recognized nonzero random
+flags return `ENOTSUP`. Abort uses process exit 134 rather than `SIGABRT`.
+[Runtime](../../user/lib/scarlet-libc/tests/runtime.c),
+[path](../../user/lib/scarlet-libc/tests/path.c),
+[positioned-I/O](../../user/lib/scarlet-libc/tests/positioned.c) and
+[algorithm](../../user/lib/scarlet-libc/tests/algorithms.c) fixtures are linked
+into the `native-fs` probe. Separate child processes exercise assertion and
+abort termination.
+
+The [SQLite builder](../../tools/native-rustc/consumer-sqlite/build.py) pins
+SQLite 3.53.4 by SHA-256, SHA3-256 and source identity. It compiles the unmodified
+amalgamation with Scarlet/Clang builtin headers and a separate
+[Native VFS](../../tools/native-rustc/consumer-sqlite/scarlet_vfs.c), using
+`SQLITE_OS_OTHER=1`. This is a SQLite platform port, not Unix-VFS or Cargo
+acceptance. The build disables pthreads, WAL, mmap, extension loading and
+localtime conversion, and uses memory temp storage. Rollback-journal operations
+use positioned I/O and real exclusive nonblocking inode locks at every logical
+SQLite lock level, deliberately serializing concurrent readers.
+
+```sh
+python3 tools/native-rustc/consumer-sqlite/build.py \
+  --target aarch64-unknown-scarlet \
+  --sysroot /path/to/matching-cross-sysroot \
+  --libc /path/to/aarch64-unknown-scarlet/release/libscarlet_c.a \
+  --clang /path/to/unwrapped/clang --ar /path/to/llvm-ar \
+  --linker /path/to/ld.lld \
+  --output /tmp/scarlet-sqlite-aarch64
+```
+
+Use `--source-archive /path/to/sqlite-amalgamation-3530400.zip` to reuse a pinned
+local archive. Rebuild the release kernel, libc and native probe, then add
+`--sqlite-probe /tmp/scarlet-sqlite-aarch64/sqlite-probe` to the complete HVF
+command in the preceding section. The harness runs create, verify, forced
+transaction exit and recovery as separate processes on both ext2 and tmpfs.
+The forced-exit phase must first verify that a transaction change spilled into
+the database and leave a hot journal, then exit 134 with its readiness marker.
+The other phases must exit 53 and print `SCARLET_LIBC_SQLITE_OK`. The harness
+snapshots both hot journals before recovery and checks every exit and marker.
+It extracts the ext2 database after VM shutdown for independent host SQLite
+integrity and exact-content checks. This tests process-exit recovery; power loss
+is not simulated.
+
+The [recorded AArch64/HVF run](../../tools/native-rustc/evidence/2026-09-22-libc-sqlite-aarch64.json)
+returns `FULL_PASS` in 19.327 seconds, with all seven verification flags true.
+The [saved logs and reports](../../tools/native-rustc/evidence/2026-09-22-libc-sqlite-aarch64/)
+include all new C fixtures on ext2/tmpfs, assertion/abort child exits 134, and all
+eight SQLite processes. The forced-exit phases verify actual dirty database
+spill and leave 405504-byte hot journals before recovery. Independent host
+SQLite validates the recovered ext2 database's integrity, foreign keys, all
+24 rows and the complete 131113-byte BLOB. Plain C startup, zlib, native Rust
+compilation/execution and proc macros also remain passing.
+
+The complete unfiltered release kernel suite passes 1328 tests, including
+35 added regressions. The guest exposed tmpfs unlink prematurely erasing an
+open file's cached data; final-node ownership now retains data/cache/quota, and
+pinned pages retire only after unpin. Three dedicated kernel tests cover that
+fix. Host checks pass 47 libc tests, 27 ABI tests, 80 header checks, 31 harness
+tests and four probe tests; repository formatting passes. Final RV64/RV32
+kernel compilation passes, and RV64 libc/probe/SQLite cross-build and ELF audits
+pass. RV64 guest execution, physical OOM, power-loss durability, published bundle
+and general Cargo/installed SDK acceptance remain outstanding.

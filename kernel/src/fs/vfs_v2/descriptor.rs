@@ -118,6 +118,12 @@ fn open_at(
         let file = vfs_file(&base_object).ok_or(negative(ERRNO_ENOTDIR))?;
         Some((file.get_vfs_entry(), file.get_mount_point()))
     };
+    // Allocate before create/truncate side effects. The guard returns the slot
+    // on every error, and concurrent opens cannot consume this reservation.
+    let reservation = task
+        .handle_table
+        .reserve_lowest()
+        .map_err(|_| negative(ERRNO_EMFILE))?;
     let object = vfs
         .open_at(from, path, flags, mode as u32)
         .map_err(super::syscall::fs_errno)?;
@@ -130,10 +136,7 @@ fn open_at(
         },
         special_semantics: (flags & VFS_O_CLOEXEC != 0).then_some(SpecialSemantics::CloseOnExec),
     };
-    task.handle_table
-        .insert_lowest_with_metadata(object, metadata)
-        .map(|handle| handle as usize)
-        .map_err(|_| negative(ERRNO_EMFILE))
+    Ok(reservation.install(object, metadata) as usize)
 }
 
 pub fn sys_vfs_open_at(tf: &mut Trapframe) -> usize {
@@ -330,6 +333,109 @@ pub fn sys_stream_read_with_status(tf: &mut Trapframe) -> usize {
 }
 pub fn sys_stream_write_with_status(tf: &mut Trapframe) -> usize {
     stream_syscall(tf, true)
+}
+
+fn truncate(table: &HandleTable, handle: usize, length: i64) -> Result<usize, usize> {
+    let object = check_stream(table, handle, true)?;
+    if length < 0 {
+        return Err(negative(ERRNO_EINVAL));
+    }
+    let file = object.as_file().ok_or(negative(ERRNO_EINVAL))?;
+    file.truncate(length as u64).map_err(stream_errno)?;
+    Ok(0)
+}
+
+pub fn sys_file_truncate_with_status(tf: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let handle = tf.get_arg(0);
+    let length = crate::syscall::u64_arg(tf, 1) as i64;
+    tf.increment_pc_next(&task);
+    truncate(&task.handle_table, handle, length).unwrap_or_else(|error| error)
+}
+
+fn positioned_descriptor(
+    table: &HandleTable,
+    handle: usize,
+    count: usize,
+    offset: i64,
+    write: bool,
+) -> Result<KernelObject, usize> {
+    let object = check_stream(table, handle, write)?;
+    if offset < 0 || count > isize::MAX as usize {
+        return Err(negative(ERRNO_EINVAL));
+    }
+    if (offset as u64)
+        .checked_add(count as u64)
+        .is_none_or(|end| end > i64::MAX as u64)
+    {
+        return Err(negative(ERRNO_EOVERFLOW));
+    }
+    if object.as_file().is_none() {
+        return Err(negative(ERRNO_ESPIPE));
+    }
+    Ok(object)
+}
+
+fn positioned_transfer(
+    task: &Task,
+    handle: usize,
+    address: usize,
+    count: usize,
+    offset: i64,
+    write: bool,
+) -> Result<usize, usize> {
+    // Access and signed-range checks precede both zero-count and usercopy.
+    let object = positioned_descriptor(&task.handle_table, handle, count, offset, write)?;
+    if count == 0 {
+        return Ok(0);
+    }
+    let count = count.min(64 * 1024);
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(count)
+        .map_err(|_| negative(ERRNO_ENOMEM))?;
+    buffer.resize(count, 0);
+    let file = object.as_file().ok_or(negative(ERRNO_ESPIPE))?;
+    if write {
+        copy_from_user(task, address, &mut buffer).map_err(|_| negative(ERRNO_EFAULT))?;
+        // VfsFileObject::write_at forwards directly, deliberately bypassing
+        // append status and never changing the shared open-file cursor.
+        let n = file
+            .write_at(offset as u64, &buffer)
+            .map_err(stream_errno)?;
+        if n > count {
+            return Err(negative(ERRNO_EIO));
+        }
+        Ok(n)
+    } else {
+        writable(task, address, count)?;
+        let n = match file.read_at(offset as u64, &mut buffer) {
+            Ok(n) => n,
+            Err(StreamError::EndOfStream) => 0,
+            Err(error) => return Err(stream_errno(error)),
+        };
+        if n > count {
+            return Err(negative(ERRNO_EIO));
+        }
+        copy_to_user(task, address, &buffer[..n]).map_err(|_| negative(ERRNO_EFAULT))?;
+        Ok(n)
+    }
+}
+
+fn positioned_syscall(tf: &mut Trapframe, write: bool) -> usize {
+    let task = mytask().unwrap();
+    let (handle, address, count) = (tf.get_arg(0), tf.get_arg(1), tf.get_arg(2));
+    let offset = crate::syscall::u64_arg(tf, 3) as i64;
+    tf.increment_pc_next(&task);
+    positioned_transfer(&task, handle, address, count, offset, write).unwrap_or_else(|error| error)
+}
+
+pub fn sys_file_read_at_with_status(tf: &mut Trapframe) -> usize {
+    positioned_syscall(tf, false)
+}
+
+pub fn sys_file_write_at_with_status(tf: &mut Trapframe) -> usize {
+    positioned_syscall(tf, true)
 }
 
 fn seek(table: &HandleTable, handle: usize, offset: i64, whence: usize) -> Result<u64, usize> {
@@ -622,5 +728,200 @@ mod tests {
             4
         );
         assert_eq!(&data, b"data");
+    }
+    #[test_case]
+    fn detailed_open_full_table_does_not_create_or_truncate() {
+        let task = task();
+        let fd = open_at(
+            &task,
+            CURRENT_DIRECTORY,
+            "/kept",
+            (VFS_O_CREAT | VFS_O_RDWR) as usize,
+            0o600,
+        )
+        .unwrap();
+        let object = check_stream(&task.handle_table, fd, true).unwrap();
+        object.as_stream().unwrap().write(b"preserved").unwrap();
+        while duplicate(&task.handle_table, fd).is_ok() {}
+        assert_eq!(task.handle_table.open_count(), HandleTable::MAX_HANDLES);
+        assert_eq!(
+            open_at(
+                &task,
+                CURRENT_DIRECTORY,
+                "/kept",
+                (VFS_O_TRUNC | VFS_O_RDWR) as usize,
+                0
+            ),
+            Err(negative(ERRNO_EMFILE))
+        );
+        assert_eq!(
+            open_at(
+                &task,
+                CURRENT_DIRECTORY,
+                "/absent",
+                (VFS_O_CREAT | VFS_O_RDWR) as usize,
+                0o600
+            ),
+            Err(negative(ERRNO_EMFILE))
+        );
+        assert!(task.get_vfs().unwrap().metadata("/absent").is_err());
+        let mut content = [0; 9];
+        assert_eq!(
+            object.as_file().unwrap().read_at(0, &mut content).unwrap(),
+            9
+        );
+        assert_eq!(&content, b"preserved");
+        assert_eq!(seek(&task.handle_table, fd, 0, 1), Ok(9));
+    }
+
+    #[test_case]
+    fn failed_open_returns_reserved_slot_to_shared_table() {
+        let task = task();
+        let before = task.handle_table.free_handles_len();
+        assert_eq!(
+            open_at(&task, CURRENT_DIRECTORY, "/absent", VFS_O_RDWR as usize, 0),
+            Err(negative(ERRNO_ENOENT))
+        );
+        assert_eq!(task.handle_table.free_handles_len(), before);
+        assert_eq!(
+            open_at(
+                &task,
+                CURRENT_DIRECTORY,
+                "/created",
+                (VFS_O_CREAT | VFS_O_RDWR) as usize,
+                0o600
+            ),
+            Ok(0)
+        );
+    }
+
+    #[test_case]
+    fn detailed_positioned_io_validates_access_ranges_before_usercopy() {
+        let task = task();
+        let rw = open_at(
+            &task,
+            CURRENT_DIRECTORY,
+            "/positioned",
+            (VFS_O_CREAT | VFS_O_RDWR) as usize,
+            0o600,
+        )
+        .unwrap();
+        let ro = open_at(
+            &task,
+            CURRENT_DIRECTORY,
+            "/positioned",
+            VFS_O_RDONLY as usize,
+            0,
+        )
+        .unwrap();
+        let wo = open_at(
+            &task,
+            CURRENT_DIRECTORY,
+            "/positioned",
+            VFS_O_WRONLY as usize,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            positioned_transfer(&task, ro, 0, 0, 0, true),
+            Err(negative(ERRNO_EBADF))
+        );
+        assert_eq!(
+            positioned_transfer(&task, wo, 0, 0, 0, false),
+            Err(negative(ERRNO_EBADF))
+        );
+        assert_eq!(
+            positioned_transfer(&task, usize::MAX, 0, 0, 0, false),
+            Err(negative(ERRNO_EBADF))
+        );
+        assert_eq!(
+            positioned_transfer(&task, rw, 0, 0, -1, false),
+            Err(negative(ERRNO_EINVAL))
+        );
+        assert_eq!(
+            positioned_transfer(&task, rw, 0, usize::MAX, 0, false),
+            Err(negative(ERRNO_EINVAL))
+        );
+        assert_eq!(
+            positioned_transfer(&task, rw, 0, 1, i64::MAX, true),
+            Err(negative(ERRNO_EOVERFLOW))
+        );
+        assert_eq!(positioned_transfer(&task, rw, 0, 0, i64::MAX, true), Ok(0));
+        assert_eq!(
+            positioned_transfer(&task, rw, 0, 1, 0, true),
+            Err(negative(ERRNO_EFAULT))
+        );
+        assert_eq!(
+            positioned_transfer(&task, rw, 0, 1, 0, false),
+            Err(negative(ERRNO_EFAULT))
+        );
+        assert_eq!(seek(&task.handle_table, rw, 0, 1), Ok(0));
+    }
+
+    #[test_case]
+    fn detailed_truncate_preserves_dup_cursor_and_rejects_invalid_access() {
+        let task = task();
+        let fd = open_at(
+            &task,
+            CURRENT_DIRECTORY,
+            "/truncate",
+            (VFS_O_CREAT | VFS_O_RDWR) as usize,
+            0o600,
+        )
+        .unwrap();
+        let other = duplicate(&task.handle_table, fd).unwrap();
+        let object = check_stream(&task.handle_table, fd, true).unwrap();
+        object.as_stream().unwrap().write(b"abcdef").unwrap();
+        assert_eq!(seek(&task.handle_table, fd, 100, 0), Ok(100));
+        assert_eq!(truncate(&task.handle_table, fd, 2), Ok(0));
+        assert_eq!(truncate(&task.handle_table, other, 6), Ok(0));
+        let mut data = [1; 6];
+        assert_eq!(object.as_file().unwrap().read_at(0, &mut data).unwrap(), 6);
+        assert_eq!(&data, b"ab\0\0\0\0");
+        assert_eq!(seek(&task.handle_table, other, 0, 1), Ok(100));
+        assert_eq!(
+            truncate(&task.handle_table, fd, -1),
+            Err(negative(ERRNO_EINVAL))
+        );
+        assert_eq!(
+            truncate(&task.handle_table, usize::MAX, 0),
+            Err(negative(ERRNO_EBADF))
+        );
+        let ro = open_at(
+            &task,
+            CURRENT_DIRECTORY,
+            "/truncate",
+            VFS_O_RDONLY as usize,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            truncate(&task.handle_table, ro, 0),
+            Err(negative(ERRNO_EBADF))
+        );
+        assert_eq!(object.as_file().unwrap().metadata().unwrap().size, 6);
+        assert_eq!(seek(&task.handle_table, fd, 0, 1), Ok(100));
+    }
+
+    #[test_case]
+    fn positioned_write_ignores_append_and_preserves_shared_cursor() {
+        let task = task();
+        let fd = open_at(
+            &task,
+            CURRENT_DIRECTORY,
+            "/pwrite",
+            (VFS_O_CREAT | VFS_O_RDWR | VFS_O_APPEND) as usize,
+            0o600,
+        )
+        .unwrap();
+        let other = duplicate(&task.handle_table, fd).unwrap();
+        let object = positioned_descriptor(&task.handle_table, fd, 3, 0, true).unwrap();
+        object.as_stream().unwrap().write(b"abc").unwrap();
+        assert_eq!(object.as_file().unwrap().write_at(0, b"Z").unwrap(), 1);
+        assert_eq!(seek(&task.handle_table, other, 0, 1), Ok(3));
+        let mut data = [0; 3];
+        assert_eq!(object.as_file().unwrap().read_at(0, &mut data).unwrap(), 3);
+        assert_eq!(&data, b"Zbc");
+        assert_eq!(seek(&task.handle_table, fd, 0, 1), Ok(3));
     }
 }

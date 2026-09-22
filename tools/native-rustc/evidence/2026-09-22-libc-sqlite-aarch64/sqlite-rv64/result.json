@@ -1,0 +1,290 @@
+{
+  "scope": "Unmodified SQLite with a Scarlet-native rollback-journal VFS and real libc fd I/O/locks; not the Unix VFS, full POSIX, or a power-loss durability claim.",
+  "target": "riscv64gc-unknown-scarlet",
+  "upstream": {
+    "name": "sqlite",
+    "version": "3.53.4",
+    "url": "https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip",
+    "archive_sha256": "1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d",
+    "archive_sha3_256": "628a44cfe82c66aed1ccbbe85a562d2e33ebe64b3288981ed76285612227934e",
+    "source_id": "2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc",
+    "source_modified": false
+  },
+  "configuration": [
+    "NDEBUG",
+    "SQLITE_OS_OTHER=1",
+    "SQLITE_THREADSAFE=0",
+    "SQLITE_OMIT_LOAD_EXTENSION",
+    "SQLITE_OMIT_LOCALTIME",
+    "SQLITE_TEMP_STORE=3",
+    "SQLITE_OMIT_WAL",
+    "SQLITE_MAX_MMAP_SIZE=0"
+  ],
+  "vfs": {
+    "name": "scarlet-native",
+    "file_methods_version": 1,
+    "concurrency": "exclusive nonblocking inode flock from SHARED until NONE",
+    "wal": false,
+    "mmap": false,
+    "disk_temporary_files": false
+  },
+  "expected_exit_code": 53,
+  "crash_mode": {
+    "expected_exit_code": 134,
+    "expected_stdout_line": "SCARLET_LIBC_SQLITE_CRASH_READY",
+    "requires_followup": "verify in a fresh process"
+  },
+  "expected_stdout_line": "SCARLET_LIBC_SQLITE_OK",
+  "guest_execution": "pending",
+  "executed_on_scarlet": false,
+  "binary": {
+    "path": "/private/tmp/scarlet-sqlite-rv64-v2/sqlite-probe",
+    "sha256": "2e325840c5b50755a943ad6ac1228ee0d47177f9326c8de8879c1521d779f311"
+  },
+  "inputs": {
+    "libc": {
+      "path": "/private/tmp/scarlet-libc-surface-riscv64gc-unknown-scarlet/riscv64gc-unknown-scarlet/release/libscarlet_c.a",
+      "sha256": "73ff83d964ef383310eb96dff8fc252cdf48d8e5421c9e33e1a4de3cce082b5c"
+    },
+    "crt": {
+      "path": "/private/tmp/scarlet-c-startup-rv64-sysroot/lib/rustlib/riscv64gc-unknown-scarlet/lib/scarlet-crt0.o",
+      "sha256": "78df46facdd195a335a52ecec836256d7b107d3650158ff3a9366ba9430f1886"
+    },
+    "fixture": {
+      "path": "/private/tmp/scarlet-sqlite-rv64-v2/main.c",
+      "sha256": "79b2b2551dbd21bc4e60b55690218876dfe6587e6d44be6ad2a94c9eda8f9610"
+    },
+    "vfs": {
+      "path": "/private/tmp/scarlet-sqlite-rv64-v2/scarlet_vfs.c",
+      "sha256": "32a82f2d1f59cf9adc7e333d75ca4d9614cb0aa9b75b00c2d54a1e32bad83482"
+    }
+  },
+  "header_sha256": {
+    "assert.h": "f594e6311e503005093e0242c3a15fd3fdbe64e0ee6ad49b2a44aa0023a0813f",
+    "ctype.h": "3674b83337d7b92147779b3986ec899d6ea9de974334daae4cac99b837254263",
+    "errno.h": "136b174927057ba3cf1925afbedd695477441c31394b32018fee69b8fc6f99ee",
+    "fcntl.h": "95406f79429ae5f6a5f55e51c83b611540592e807c27090c649376798aa582f1",
+    "limits.h": "703fafa584a1db37764400351291a2a2242881f09d631ccfbbc89fdd4a70376c",
+    "math.h": "6b480f4c4f1e4068692728e50d9f20c85de1b143585efe782a559bdf3370dd1b",
+    "stdio.h": "4c79db71084639f2d2d4f0104a727f1cf6b583312ce5e12dd914ca41bd3d806d",
+    "stdlib.h": "aeae1bdb015b90ac05e7d15c01f14492886fc52a542ea81d5013b85ed04d54c3",
+    "string.h": "a4806f8dc0d2a8f783e370a32aaf9ab107740bf4c3dca3798da757617945894b",
+    "strings.h": "b462db88add7f9e73b0ced2623d603e9629c733e06c95f86f81a3177e70f1ee8",
+    "sys/file.h": "b60edecdbf885beeac668b50b88a8f0a2cf518cb44ca70223b475ed5b3c76563",
+    "sys/random.h": "7575830ae2e82f82ad2041486f71cc0ebd12132492268d277d91eb979bb3b675",
+    "sys/stat.h": "4db2fb431d64db0e822149700a3cf018af6f405853b275e032362209671ebd1a",
+    "sys/time.h": "50943c2ddf25c8acb06fcd110a08796c752b0ef0caa48070787bed1e4e21bee6",
+    "sys/types.h": "658c237c298ef09e92e999980e32b19b2d87e5ca2a5dd543cf9eb3dc5abc6765",
+    "time.h": "378b7a8f44fa65e9ebffd684d1b49691029b11fe63fbd0dd2fee26f51603d500",
+    "unistd.h": "9b14e3b2b51bd5e68b225f96f3b7448da9246b7706fb4b18608dfa66d94d99d5"
+  },
+  "upstream_source_sha256": {
+    "sqlite3.c": "b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189",
+    "sqlite3.h": "919e7f2e8ed1d8f56ac17b412b8971c76aa5d1a879752cc6058f75e7d5910e1d",
+    "sqlite3ext.h": "ac9645e5c9ff0cf176efdd6e75cb5e98f46295d38e02db5c4d208826a39ab4be",
+    "shell.c": "8011ed018aa12969f93573b7bb1eae2d939d64d0f451b297ff847a0211c85179"
+  },
+  "commands": [
+    [
+      "/nix/store/1g31prgnyak0bdszc40z72lmafkhjz64-clang-21.1.8/bin/clang",
+      "--version"
+    ],
+    [
+      "/Users/petitstrawberry/Development/Rust/rust-scarlet/build/aarch64-apple-darwin/llvm/bin/llvm-ar",
+      "--version"
+    ],
+    [
+      "/nix/store/j9qx1hvhsibni3hjhvs156pnqn24hq1p-lld-21.1.8/bin/ld.lld",
+      "--version"
+    ],
+    [
+      "/nix/store/1g31prgnyak0bdszc40z72lmafkhjz64-clang-21.1.8/bin/clang",
+      "-print-resource-dir"
+    ],
+    [
+      "/nix/store/1g31prgnyak0bdszc40z72lmafkhjz64-clang-21.1.8/bin/clang",
+      "-target",
+      "riscv64-unknown-elf",
+      "-march=rv64gc",
+      "-mabi=lp64d",
+      "-std=c11",
+      "-ffreestanding",
+      "-fno-builtin",
+      "-fno-stack-protector",
+      "-ffunction-sections",
+      "-fdata-sections",
+      "-nostdinc",
+      "-isystem",
+      "/nix/store/vhg4azj1sd88x317byclhyzbqr4xlfpw-clang-21.1.8-lib/lib/clang/21/include",
+      "-I",
+      "/private/tmp/scarlet-sqlite-rv64-v2/scarlet-include",
+      "-I",
+      "/private/tmp/scarlet-sqlite-rv64-v2/sqlite-amalgamation-3530400",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-DNDEBUG",
+      "-DSQLITE_OS_OTHER=1",
+      "-DSQLITE_THREADSAFE=0",
+      "-DSQLITE_OMIT_LOAD_EXTENSION",
+      "-DSQLITE_OMIT_LOCALTIME",
+      "-DSQLITE_TEMP_STORE=3",
+      "-DSQLITE_OMIT_WAL",
+      "-DSQLITE_MAX_MMAP_SIZE=0",
+      "-Wno-unused-parameter",
+      "-c",
+      "/private/tmp/scarlet-sqlite-rv64-v2/sqlite-amalgamation-3530400/sqlite3.c",
+      "-o",
+      "/private/tmp/scarlet-sqlite-rv64-v2/sqlite3.o"
+    ],
+    [
+      "/Users/petitstrawberry/Development/Rust/rust-scarlet/build/aarch64-apple-darwin/llvm/bin/llvm-ar",
+      "rcsD",
+      "/private/tmp/scarlet-sqlite-rv64-v2/libsqlite3.a",
+      "/private/tmp/scarlet-sqlite-rv64-v2/sqlite3.o"
+    ],
+    [
+      "/nix/store/1g31prgnyak0bdszc40z72lmafkhjz64-clang-21.1.8/bin/clang",
+      "-target",
+      "riscv64-unknown-elf",
+      "-march=rv64gc",
+      "-mabi=lp64d",
+      "-std=c11",
+      "-ffreestanding",
+      "-fno-builtin",
+      "-fno-stack-protector",
+      "-ffunction-sections",
+      "-fdata-sections",
+      "-nostdinc",
+      "-isystem",
+      "/nix/store/vhg4azj1sd88x317byclhyzbqr4xlfpw-clang-21.1.8-lib/lib/clang/21/include",
+      "-I",
+      "/private/tmp/scarlet-sqlite-rv64-v2/scarlet-include",
+      "-I",
+      "/private/tmp/scarlet-sqlite-rv64-v2/sqlite-amalgamation-3530400",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-DNDEBUG",
+      "-DSQLITE_OS_OTHER=1",
+      "-DSQLITE_THREADSAFE=0",
+      "-DSQLITE_OMIT_LOAD_EXTENSION",
+      "-DSQLITE_OMIT_LOCALTIME",
+      "-DSQLITE_TEMP_STORE=3",
+      "-DSQLITE_OMIT_WAL",
+      "-DSQLITE_MAX_MMAP_SIZE=0",
+      "-c",
+      "/private/tmp/scarlet-sqlite-rv64-v2/main.c",
+      "-o",
+      "/private/tmp/scarlet-sqlite-rv64-v2/main.o"
+    ],
+    [
+      "/nix/store/1g31prgnyak0bdszc40z72lmafkhjz64-clang-21.1.8/bin/clang",
+      "-target",
+      "riscv64-unknown-elf",
+      "-march=rv64gc",
+      "-mabi=lp64d",
+      "-std=c11",
+      "-ffreestanding",
+      "-fno-builtin",
+      "-fno-stack-protector",
+      "-ffunction-sections",
+      "-fdata-sections",
+      "-nostdinc",
+      "-isystem",
+      "/nix/store/vhg4azj1sd88x317byclhyzbqr4xlfpw-clang-21.1.8-lib/lib/clang/21/include",
+      "-I",
+      "/private/tmp/scarlet-sqlite-rv64-v2/scarlet-include",
+      "-I",
+      "/private/tmp/scarlet-sqlite-rv64-v2/sqlite-amalgamation-3530400",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-DNDEBUG",
+      "-DSQLITE_OS_OTHER=1",
+      "-DSQLITE_THREADSAFE=0",
+      "-DSQLITE_OMIT_LOAD_EXTENSION",
+      "-DSQLITE_OMIT_LOCALTIME",
+      "-DSQLITE_TEMP_STORE=3",
+      "-DSQLITE_OMIT_WAL",
+      "-DSQLITE_MAX_MMAP_SIZE=0",
+      "-c",
+      "/private/tmp/scarlet-sqlite-rv64-v2/scarlet_vfs.c",
+      "-o",
+      "/private/tmp/scarlet-sqlite-rv64-v2/scarlet_vfs.o"
+    ],
+    [
+      "/nix/store/j9qx1hvhsibni3hjhvs156pnqn24hq1p-lld-21.1.8/bin/ld.lld",
+      "--gc-sections",
+      "--no-undefined",
+      "-static",
+      "-e",
+      "_start",
+      "-z",
+      "max-page-size=4096",
+      "-Map=/private/tmp/scarlet-sqlite-rv64-v2/link.map",
+      "--trace",
+      "/private/tmp/scarlet-c-startup-rv64-sysroot/lib/rustlib/riscv64gc-unknown-scarlet/lib/scarlet-crt0.o",
+      "/private/tmp/scarlet-sqlite-rv64-v2/main.o",
+      "/private/tmp/scarlet-sqlite-rv64-v2/scarlet_vfs.o",
+      "/private/tmp/scarlet-sqlite-rv64-v2/libsqlite3.a",
+      "/private/tmp/scarlet-libc-surface-riscv64gc-unknown-scarlet/riscv64gc-unknown-scarlet/release/libscarlet_c.a",
+      "-o",
+      "/private/tmp/scarlet-sqlite-rv64-v2/sqlite-probe"
+    ],
+    [
+      "/Applications/Xcode.app/Contents/Developer/usr/bin/python3",
+      "/Users/petitstrawberry/Development/Rust/Scarlet/tools/native-rustc/audit_elf.py",
+      "--machine",
+      "riscv64",
+      "--scarlet",
+      "/private/tmp/scarlet-sqlite-rv64-v2/sqlite-probe"
+    ]
+  ],
+  "tool_versions": {
+    "clang": "clang version 21.1.8\nTarget: arm64-apple-darwin25.6.0\nThread model: posix\nInstalledDir: /nix/store/1g31prgnyak0bdszc40z72lmafkhjz64-clang-21.1.8/bin",
+    "ar": "LLVM (http://llvm.org/):\n  LLVM version 21.1.8-rust-dev\n  Optimized build.",
+    "linker": "LLD 21.1.8 (compatible with GNU linkers)"
+  },
+  "archives": {
+    "libc": {
+      "elf_members": 448,
+      "machine": 243,
+      "osabi_counts": {
+        "83": 448
+      }
+    },
+    "sqlite": {
+      "elf_members": 1,
+      "machine": 243,
+      "osabi_counts": {
+        "0": 1
+      }
+    }
+  },
+  "elf": {
+    "path": "/private/tmp/scarlet-sqlite-rv64-v2/sqlite-probe",
+    "sha256": "2e325840c5b50755a943ad6ac1228ee0d47177f9326c8de8879c1521d779f311",
+    "bytes": 1438736,
+    "elf_type": "EXEC",
+    "machine": "riscv64",
+    "osabi": 83,
+    "entry": 158724,
+    "interpreter": null,
+    "needed": [],
+    "rpath": null,
+    "runpath": null,
+    "soname": null,
+    "tls": [],
+    "relocations": {},
+    "undefined_relocated_symbols": [],
+    "hash_tables": [],
+    "textrel": false,
+    "relr": false,
+    "symbol_versioning": false,
+    "init_fini": []
+  }
+}

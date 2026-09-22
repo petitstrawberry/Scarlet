@@ -139,6 +139,10 @@ impl FileSystemOperations for TmpFS {
         self.fs_id
     }
 
+    fn supports_advisory_locks(&self) -> bool {
+        true
+    }
+
     fn lookup(
         &self,
         parent_node: &Arc<dyn VfsNode>,
@@ -594,49 +598,30 @@ impl FileSystemOperations for TmpFS {
             ));
         }
 
-        // Remove from parent directory
-        let mut children = tmp_parent.children.write();
-        if let Some(removed_node) = children.get(name) {
-            // If it's a directory, check if it's empty first
-            if let Some(tmp_node) = removed_node.as_any().downcast_ref::<TmpNode>() {
-                if tmp_node.file_type() == FileType::Directory {
-                    let child_children = tmp_node.children.read();
-                    if !child_children.is_empty() {
-                        return Err(FileSystemError::new(
-                            FileSystemErrorKind::DirectoryNotEmpty,
-                            "Directory not empty",
-                        ));
-                    }
+        let removed_node = {
+            let mut children = tmp_parent.children.write();
+            let node = children.get(name).ok_or_else(|| {
+                FileSystemError::new(FileSystemErrorKind::NotFound, "File not found")
+            })?;
+            if let Some(tmp_node) = node.as_any().downcast_ref::<TmpNode>() {
+                if tmp_node.file_type() == FileType::Directory
+                    && !tmp_node.children.read().is_empty()
+                {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::DirectoryNotEmpty,
+                        "Directory not empty",
+                    ));
                 }
-
-                // Update memory usage for regular files and symbolic links
-                match tmp_node.file_type() {
-                    FileType::RegularFile => {
-                        let mut metadata = tmp_node.metadata.write();
-                        if metadata.link_count > 1 {
-                            metadata.link_count -= 1;
-                        } else {
-                            let size = metadata.size;
-                            self.subtract_memory_usage(size);
-                            let fs_id = self.fs_id().get();
-                            let file_id = metadata.file_id;
-                            let cache_key = (fs_id << 32) | (file_id & 0xFFFF_FFFF);
-                            PageCacheManager::global()
-                                .invalidate(crate::fs::vfs_v2::cache::CacheId::new(cache_key));
-                        }
-                    }
-                    FileType::SymbolicLink(target) => {
-                        self.subtract_memory_usage(target.len());
-                    }
-                    _ => {}
-                }
+                let mut metadata = tmp_node.metadata.write();
+                metadata.link_count = metadata.link_count.saturating_sub(1);
             }
-        }
-
-        // Now remove the node
-        children
-            .remove(name)
-            .ok_or_else(|| FileSystemError::new(FileSystemErrorKind::NotFound, "File not found"))?;
+            children.remove(name).expect("checked directory entry")
+        };
+        // The directory entry is gone, but open descriptions (including dup),
+        // mappings and other node references still own its data and quota.
+        // Reclaim only when TmpNode itself is finally dropped, outside the
+        // parent directory lock. A recreated pathname gets a distinct CacheId.
+        drop(removed_node);
 
         Ok(())
     }
@@ -711,6 +696,30 @@ pub struct TmpNode {
     parent: IrqRwSpinLock<Option<Weak<TmpNode>>>,
     /// Reference to filesystem (`Weak<dyn FileSystemOperations>`)
     filesystem: IrqRwSpinLock<Option<Weak<dyn FileSystemOperations>>>,
+    /// Cache identity survives filesystem teardown; page ownership follows the
+    /// node's lifetime, never the lifetime of an individual directory entry.
+    cache_id: IrqRwSpinLock<Option<crate::fs::vfs_v2::cache::CacheId>>,
+}
+
+impl Drop for TmpNode {
+    fn drop(&mut self) {
+        let metadata = self.metadata.read();
+        if metadata.file_type == FileType::RegularFile {
+            if let Some(cache_id) = *self.cache_id.read() {
+                PageCacheManager::global().retire_object(cache_id);
+            }
+        }
+        if matches!(
+            metadata.file_type,
+            FileType::RegularFile | FileType::SymbolicLink(_)
+        ) {
+            if let Some(filesystem) = self.filesystem().and_then(|weak| weak.upgrade()) {
+                if let Some(tmpfs) = filesystem.as_any().downcast_ref::<TmpFS>() {
+                    tmpfs.subtract_memory_usage(metadata.size);
+                }
+            }
+        }
+    }
 }
 
 impl Debug for TmpNode {
@@ -753,6 +762,7 @@ impl TmpNode {
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
+            cache_id: IrqRwSpinLock::new(None),
         }
     }
 
@@ -781,6 +791,7 @@ impl TmpNode {
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
+            cache_id: IrqRwSpinLock::new(None),
         }
     }
 
@@ -809,6 +820,7 @@ impl TmpNode {
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
+            cache_id: IrqRwSpinLock::new(None),
         }
     }
 
@@ -838,11 +850,18 @@ impl TmpNode {
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
+            cache_id: IrqRwSpinLock::new(None),
         }
     }
 
     /// Set the filesystem reference for this node
     pub fn set_filesystem(&self, fs: Weak<dyn FileSystemOperations>) {
+        if let Some(filesystem) = fs.upgrade() {
+            let file_id = self.metadata.read().file_id & 0xFFFF_FFFF;
+            *self.cache_id.write() = Some(crate::fs::vfs_v2::cache::CacheId::new(
+                (filesystem.fs_id().get() << 32) | file_id,
+            ));
+        }
         *self.filesystem.write() = Some(fs);
     }
 
@@ -1130,19 +1149,6 @@ impl TmpFileObject {
         }
     }
 
-    fn subtract_memory_usage(&self, bytes: usize) -> Result<(), FileSystemError> {
-        if bytes == 0 {
-            return Ok(());
-        }
-
-        let fs = self.tmpfs()?;
-        let tmpfs = fs.as_any().downcast_ref::<TmpFS>().ok_or_else(|| {
-            FileSystemError::new(FileSystemErrorKind::IoError, "node is not on tmpfs")
-        })?;
-        tmpfs.subtract_memory_usage(bytes);
-        Ok(())
-    }
-
     fn read_device(&self, buffer: &mut [u8]) -> Result<usize, FileSystemError> {
         if let Some(ref device_guard) = self.device_guard {
             let device_guard_ref = device_guard.as_ref();
@@ -1353,7 +1359,13 @@ impl TmpFileObject {
         }
         let requested_end = offset
             .checked_add(buffer.len())
-            .ok_or(StreamError::InvalidArgument)?;
+            .filter(|end| *end <= isize::MAX as usize)
+            .ok_or_else(|| {
+                StreamError::from(FileSystemError::new(
+                    FileSystemErrorKind::ValueOverflow,
+                    "TmpFS file size exceeds the supported signed address range",
+                ))
+            })?;
         let old_size = self.node.metadata.read().size;
         let reserved_growth = self
             .reserve_growth(old_size, requested_end)
@@ -1363,7 +1375,11 @@ impl TmpFileObject {
         let last_page = (requested_end - 1) / PAGE_SIZE;
         // Resolve every page before modifying any bytes, so a failed page
         // allocation can return an error without hiding a partial write.
-        let mut pages = Vec::with_capacity(last_page - first_page + 1);
+        let mut pages = Vec::new();
+        if pages.try_reserve_exact(last_page - first_page + 1).is_err() {
+            self.release_memory_usage(reserved_growth);
+            return Err(StreamError::NoSpace);
+        }
         for page_index in first_page..=last_page {
             let pinned =
                 match PageCacheManager::global().pin_or_load(cache_id, page_index as u64, |paddr| {
@@ -1845,7 +1861,15 @@ impl FileObject for TmpFileObject {
             )));
         }
 
-        let new_size = usize::try_from(size).map_err(|_| StreamError::InvalidArgument)?;
+        let new_size = usize::try_from(size)
+            .ok()
+            .filter(|size| *size <= isize::MAX as usize)
+            .ok_or_else(|| {
+                StreamError::from(FileSystemError::new(
+                    FileSystemErrorKind::ValueOverflow,
+                    "TmpFS file size exceeds the supported signed address range",
+                ))
+            })?;
         let _data_guard =
             crate::object::capability::file::lock_file_operation(&self.node.data_lock)?;
         let old_size = self.node.metadata.read().size;
@@ -1858,32 +1882,8 @@ impl FileObject for TmpFileObject {
         }
 
         let cache_id = self.cache_id();
-        if new_size == 0 {
-            PageCacheManager::global().invalidate(cache_id);
-        } else if new_size < old_size {
-            let start_page = new_size / PAGE_SIZE;
-            let end_page = (old_size - 1) / PAGE_SIZE;
-            let tail_offset = new_size % PAGE_SIZE;
-            for page_index in start_page..=end_page {
-                let pinned = PageCacheManager::global()
-                    .pin_or_load(cache_id, page_index as u64, |paddr| {
-                        unsafe {
-                            core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, PAGE_SIZE);
-                        }
-                        Ok(())
-                    })
-                    .map_err(|_| StreamError::IoError)?;
-
-                unsafe {
-                    let base = phys_to_virt(pinned.paddr()) as *mut u8;
-                    if page_index == start_page && tail_offset != 0 {
-                        core::ptr::write_bytes(base.add(tail_offset), 0, PAGE_SIZE - tail_offset);
-                    } else {
-                        core::ptr::write_bytes(base, 0, PAGE_SIZE);
-                    }
-                }
-                pinned.mark_dirty();
-            }
+        if new_size < old_size {
+            PageCacheManager::global().zero_cached_tail(cache_id, new_size);
         }
 
         {
@@ -1892,8 +1892,7 @@ impl FileObject for TmpFileObject {
             PageCacheManager::global().record_object_size(cache_id, meta.size);
         }
         if new_size < old_size {
-            self.subtract_memory_usage(old_size - new_size)
-                .map_err(StreamError::from)?;
+            self.release_memory_usage(old_size - new_size);
         }
         self.node.record_modified();
         Ok(())
@@ -1906,15 +1905,10 @@ impl FileObject for TmpFileObject {
 
 impl PageCacheCapable for TmpFileObject {
     fn cache_id(&self) -> crate::fs::vfs_v2::cache::CacheId {
-        let fs = self
-            .node
-            .filesystem()
-            .and_then(|weak| weak.upgrade())
-            .expect("TmpFileObject: filesystem gone");
-        let fs_id = fs.fs_id().get();
-        let file_id = self.node.metadata.read().file_id & 0xFFFF_FFFF;
-        let id = (fs_id << 32) | file_id;
-        crate::fs::vfs_v2::cache::CacheId::new(id)
+        self.node
+            .cache_id
+            .read()
+            .expect("TmpFileObject: node has no cache identity")
     }
 }
 

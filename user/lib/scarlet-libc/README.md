@@ -3,8 +3,8 @@
 `scarlet-libc` implements a growing C runtime in Rust for Scarlet's native
 AArch64 and RV64 targets. The static C ABI now includes ordinary and aligned
 allocation, thread-local `errno`, byte strings, integer conversion, descriptor
-I/O, unbuffered streams and integer/string formatted output, plus `realpath`,
-file timestamps and sync.
+I/O, unbuffered streams and integer/string formatted output, plus pathname
+operations, clocks, entropy, sorting/searching, file timestamps and sync.
 The [support matrix and acceptance gates](STATUS.md) distinguish implemented
 behavior from the work needed for a complete C runtime.
 
@@ -73,6 +73,13 @@ use C17/POSIX integer prefix grammar: base zero recognizes decimal, octal and
 hexadecimal, without C23 binary prefixes. The `strto*` functions consume all
 valid digits on overflow, set `ERANGE` and preserve the required end pointer.
 
+`qsort` uses allocation-free heapsort and `bsearch` searches sorted records.
+`strspn`, `strcspn`, `strpbrk`, `strtok`/`strtok_r`, and ASCII
+`strcasecmp`/`strncasecmp` extend the byte-string surface. `strtok` keeps its
+continuation in Rust thread-local storage; `strtok_r` uses caller-owned state.
+Integer absolute-value functions and IEEE `fabs`/`fabsf` are available; this is
+not a general math library, and binary128 `long double` has no `fabsl` export.
+
 `open`, `openat`, `creat`, `close`, `read`, `write`, `lseek` and `dup` use the
 kernel's status-preserving descriptor operations. Duplicates share offset and
 append state, while close-on-exec remains descriptor-local. `fcntl` supports
@@ -80,6 +87,25 @@ append state, while close-on-exec remains descriptor-local. `fcntl` supports
 preserving access mode. Unsupported flags and commands fail explicitly. The
 kernel checks descriptor access and provides atomic append in ext2 and tmpfs.
 Creation modes do not establish Unix ownership, umask or permission enforcement.
+
+`pread`/`pwrite` perform positioned I/O without changing the shared offset;
+`pwrite` ignores append. `ftruncate` preserves the offset, including through
+`dup`, and zeroes bytes exposed by reextension. Ext2 currently limits this
+operation to 16 MiB because it reconstructs file content; this is not a general
+file-size limit. Shrinking currently retains disk/cache allocations, and device
+I/O failure does not have complete rollback guarantees. Nonblocking `flock` implements advisory shared/exclusive locks
+on regular ext2/tmpfs files. Lock ownership follows the open description, so
+closing one duplicate does not release the remaining duplicate's lock. Blocking
+acquisition and other filesystems return `ENOTSUP`; POSIX record locks are absent.
+
+`unlink` and `rmdir` use a type-checked Native removal operation. Ext2 currently
+returns `EBUSY` for last-link removal while an open description exists; tmpfs
+retains the unlinked node until its references disappear. Ext2 `rmdir` returns
+`ENOTEMPTY` for nonempty directories and `ENOTSUP` before mutation for empty
+directories: retained-cwd lifetime is not solved, so removal remains unsupported.
+`getcwd` uses Rust std
+and writes the NUL-terminated result only after checking capacity. A null buffer
+requests `malloc` storage; `getcwd(NULL, 0)` chooses the required capacity.
 
 `stdio.h` supplies opaque, internally locked `FILE` streams: `fopen`/`fdopen`,
 close/flush, block and character I/O, line I/O, seek/tell, EOF/error indicators,
@@ -94,6 +120,25 @@ when capacity is nonzero; an unrepresentable return count reports `EOVERFLOW`.
 Floating-point, wide, positional, grouping and `%n` conversions report
 `ENOTSUP`. There is no scanf family, stream buffering API, floating-point
 conversion or general locale implementation yet.
+
+## Clocks, entropy and assertions
+
+`time`, `gettimeofday`, `clock_gettime` and `clock_getres` expose realtime and
+monotonic Native clocks, quantized to microseconds. An unavailable realtime
+clock reports `EIO`. `nanosleep` validates the Native timer range and uses Rust
+std sleep; the current backend does not report interruption, and the remainder
+is left unchanged. Calendar conversion and timezone handling remain absent.
+
+`getrandom` with flags zero and `getentropy` require a registered entropy
+source and never accept the kernel's emergency PRNG. The latter fills at most
+256 bytes. `GRND_RANDOM` and `GRND_NONBLOCK` return `ENOTSUP`; other flag bits
+return `EINVAL`. Native entropy failures currently map to `EIO`, may leave
+partial output, and are not proof that entropy hardware is available.
+
+`assert.h` supports repeated inclusion after changing `NDEBUG`. Failed
+assertions print a diagnostic without stdio buffering and terminate through
+`abort`. Native `abort` exits the whole process with status 134; it does not
+deliver `SIGABRT`, run destructors, or establish POSIX signal semantics.
 
 ## Build and checks
 
@@ -130,7 +175,9 @@ guest compatibility.
 
 The probe links the actual [allocation/filesystem](tests/native.c),
 [strings/conversion](tests/strings.c), [descriptor](tests/descriptor.c) and
-[stdio](tests/stdio.c) C fixtures and runs them alongside
+[stdio](tests/stdio.c), [algorithms](tests/algorithms.c),
+[positioned I/O and locks](tests/positioned.c), [paths](tests/path.c), and
+[clocks/entropy/assertions](tests/runtime.c) C fixtures and runs them alongside
 [Rust filesystem checks](../../../tools/native-rustc/native_fs.rs). Pass the
 fresh probe to `tools/native-rustc/run-qemu.py` with `--native-fs --proc-macro`.
 Use `--accel hvf` for AArch64 on Apple Silicon. The
@@ -214,6 +261,61 @@ The complete release kernel suite also passes all 1293 tests, including 20
 added regressions. RV64 has cross-build and ELF-audit evidence only. The
 published bundle remains unchanged, and this does not establish complete
 zlib/libc conformance or installed SDK acceptance.
+
+## Upstream SQLite consumer
+
+The [SQLite builder](../../../tools/native-rustc/consumer-sqlite/build.py) compiles
+unmodified, hash-pinned SQLite 3.53.4 with the separate
+[Scarlet Native VFS](../../../tools/native-rustc/consumer-sqlite/scarlet_vfs.c),
+then links an ordinary C executable against the matching CRT and libc.
+This uses SQLite's supported `SQLITE_OS_OTHER` port interface. It does not
+establish that SQLite's Unix VFS or Cargo's bundled SQLite dependency works.
+
+```sh
+python3 tools/native-rustc/consumer-sqlite/build.py \
+  --target aarch64-unknown-scarlet \
+  --sysroot "$(rustc --print sysroot)" \
+  --libc user/lib/scarlet-libc/target/aarch64-unknown-scarlet/release/libscarlet_c.a \
+  --output /tmp/scarlet-sqlite-aarch64
+```
+
+The same `--clang`, `--ar`, `--linker`, `--source-archive`, fresh-output and RV64
+rules as the zlib builder apply. Add
+`--sqlite-probe /tmp/scarlet-sqlite-aarch64/sqlite-probe` to the complete matching
+QEMU command above. On each of ext2 and tmpfs, the harness requires four
+separate processes: create, verify, forced transaction exit, and recovery.
+Create/verify/recovery must return 53 with `SCARLET_LIBC_SQLITE_OK`; the
+interrupted transaction must return 134 with its readiness marker. That phase
+verifies a spilled database change and leaves a hot rollback journal; the
+harness snapshots the journal before the recovery process opens the database.
+It checks every exit, marker and journal before setting `sqlite_verified`, then
+extracts the ext2 database after VM exit for independent host SQLite integrity
+and exact-content checks. This tests process-exit recovery, not power loss.
+
+The VFS uses real exclusive nonblocking whole-file locks for every SQLite lock
+level, including logical read locks. This serializes readers; contention must
+return `SQLITE_BUSY`. The selected build uses rollback journals, memory temp
+storage and no pthreads, WAL, mmap, loadable extensions or localtime conversion.
+SQL, bindings, binary/text values, transactions, rollback, reopen, integrity,
+locking, positioned-I/O and hot-journal recovery fixtures are implemented.
+The [AArch64/HVF evidence](../../../tools/native-rustc/evidence/2026-09-22-libc-sqlite-aarch64.json)
+records `FULL_PASS` in 19.327 seconds: all new C fixtures pass on ext2 and tmpfs,
+assertion/abort children return 134, and all eight SQLite processes satisfy their
+exit/marker gates. Both hot journals are saved before recovery. Host SQLite
+then verifies the recovered ext2 database's integrity, foreign keys, all 24 rows
+and the complete 131113-byte BLOB. Plain C startup, zlib, native Rust compilation
+and proc macros also continue to pass.
+
+The complete release kernel suite passes 1328 tests, including 35 added
+regressions. Guest testing caught tmpfs unlink erasing data still owned by an
+open descriptor; final-node ownership now retains cache/quota until release,
+and pinned cache pages retire after unpin. Three kernel regressions cover that
+correction. Host checks pass 47 libc tests, 27 ABI tests, 80 header checks,
+31 harness tests and four probe tests; repository formatting passes. RV64
+libc/probe/SQLite cross-build and ELF audits and RV64/RV32 kernel compilation
+pass; guest acceptance here is AArch64 only. [Saved logs and reports](../../../tools/native-rustc/evidence/2026-09-22-libc-sqlite-aarch64/)
+identify the tested artifacts. Physical OOM, power-loss durability, general
+Cargo/SDK acceptance and published bundle validation remain separate gates.
 
 ## Recorded milestones
 

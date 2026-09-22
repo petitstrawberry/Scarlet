@@ -1,6 +1,7 @@
 import importlib.util
 import contextlib
 import io
+import sqlite3
 from pathlib import Path
 import sys
 import tempfile
@@ -99,6 +100,142 @@ class CStartupEvidenceTests(unittest.TestCase):
                     RUN_QEMU.validate_c_startup_evidence(output)
             (output / "c-startup.status").write_text("exit=Some(43) elapsed_ms=10 expected_exit=43\n")
             RUN_QEMU.validate_c_startup_evidence(output)
+
+
+class SQLiteEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.output = Path(self.temporary.name)
+        (self.output / "SQLITE_PASS").touch()
+        for phase, (expected_exit, marker) in RUN_QEMU.SQLITE_PHASES.items():
+            (self.output / f"{phase}.status").write_text(f"exit=Some({expected_exit}) elapsed_ms=5\n")
+            (self.output / f"{phase}.stdout").write_bytes(marker + b"\n")
+        for storage in ("ext2", "tmpfs"):
+            (self.output / f"sqlite-{storage}-crash.journal").write_bytes(
+                RUN_QEMU.SQLITE_JOURNAL_MAGIC + bytes(1024))
+        self.database = self.output / "sqlite/sqlite-roundtrip.db"
+        self.database.parent.mkdir()
+        with contextlib.closing(sqlite3.connect(self.database)) as connection:
+            connection.executescript("""
+                CREATE TABLE groups(id INTEGER PRIMARY KEY, title TEXT NOT NULL);
+                CREATE TABLE items(id INTEGER PRIMARY KEY, label TEXT NOT NULL UNIQUE,
+                    score REAL NOT NULL, group_id INTEGER NOT NULL REFERENCES groups(id), payload BLOB);
+                CREATE INDEX idx_items_group ON items(group_id);
+            """)
+            connection.executemany("INSERT INTO groups VALUES (?, ?)",
+                                   [(index, f"group-{index}") for index in range(3)])
+            connection.executemany("INSERT INTO items VALUES (?, ?, ?, ?, ?)",
+                                   [(index, f"scarlet-{index:02d}-苺", index * 0.25, index % 3,
+                                     RUN_QEMU.sqlite_expected_blob() if index == 7 else None)
+                                    for index in range(1, 25)])
+            connection.commit()
+
+    def test_all_eight_processes_and_persisted_database_are_required(self):
+        before = self.database.read_bytes()
+        result = RUN_QEMU.validate_sqlite_evidence(self.output)
+        self.assertEqual(result["integrity_check"], "ok")
+        self.assertEqual(result["item_count"], 24)
+        self.assertEqual(result["blob_bytes"], 131113)
+        self.assertTrue(result["read_only"])
+        self.assertTrue(result["process_exit_recovery_verified"])
+        self.assertEqual(set(result["hot_journal_snapshots"]), {"ext2", "tmpfs"})
+        self.assertEqual(self.database.read_bytes(), before)
+        self.assertEqual(list(self.database.parent.iterdir()), [self.database])
+        (self.output / "SQLITE_PASS").unlink()
+        with self.assertRaisesRegex(ValueError, "evidence is missing"):
+            RUN_QEMU.validate_sqlite_evidence(self.output)
+
+    def test_marker_cannot_mask_any_failed_process(self):
+        for phase, (expected_exit, _) in RUN_QEMU.SQLITE_PHASES.items():
+            path = self.output / f"{phase}.status"
+            for status in ("exit=Some(0) ", "exit=Some(139) ", "exit=None "):
+                path.write_text(status)
+                with self.assertRaisesRegex(ValueError, f"required status {expected_exit}"):
+                    RUN_QEMU.validate_sqlite_evidence(self.output)
+            path.write_text(f"exit=Some({expected_exit}) elapsed_ms=5\n")
+            path.unlink()
+            with self.assertRaises(FileNotFoundError):
+                RUN_QEMU.validate_sqlite_evidence(self.output)
+            path.write_text(f"exit=Some({expected_exit}) elapsed_ms=5\n")
+
+    def test_every_process_requires_an_exact_stdout_marker(self):
+        for phase, (_, marker) in RUN_QEMU.SQLITE_PHASES.items():
+            path = self.output / f"{phase}.stdout"
+            for text in (b"", b"prefix" + marker, marker + b"suffix"):
+                path.write_bytes(text)
+                with self.assertRaisesRegex(ValueError, "success marker"):
+                    RUN_QEMU.validate_sqlite_evidence(self.output)
+            path.write_bytes(marker + b"\n")
+
+    def test_crash_and_recover_have_distinct_success_contracts(self):
+        for storage in ("ext2", "tmpfs"):
+            crash = self.output / f"sqlite-{storage}-crash"
+            recover = self.output / f"sqlite-{storage}-recover"
+            crash.with_suffix(".status").write_text("exit=Some(53) elapsed_ms=5\n")
+            with self.assertRaisesRegex(ValueError, "required status 134"):
+                RUN_QEMU.validate_sqlite_evidence(self.output)
+            crash.with_suffix(".status").write_text("exit=Some(134) elapsed_ms=5\n")
+            crash.with_suffix(".stdout").write_bytes(RUN_QEMU.SQLITE_HELLO + b"\n")
+            with self.assertRaisesRegex(ValueError, "success marker"):
+                RUN_QEMU.validate_sqlite_evidence(self.output)
+            crash.with_suffix(".stdout").write_bytes(RUN_QEMU.SQLITE_CRASH_READY + b"\n")
+            recover.with_suffix(".status").write_text("exit=Some(134) elapsed_ms=5\n")
+            with self.assertRaisesRegex(ValueError, "required status 53"):
+                RUN_QEMU.validate_sqlite_evidence(self.output)
+            recover.with_suffix(".status").write_text("exit=Some(53) elapsed_ms=5\n")
+            recover.with_suffix(".stdout").write_bytes(RUN_QEMU.SQLITE_CRASH_READY + b"\n")
+            with self.assertRaisesRegex(ValueError, "success marker"):
+                RUN_QEMU.validate_sqlite_evidence(self.output)
+            recover.with_suffix(".stdout").write_bytes(RUN_QEMU.SQLITE_HELLO + b"\n")
+
+    def test_crash_marker_cannot_replace_a_hot_journal_snapshot(self):
+        for storage in ("ext2", "tmpfs"):
+            journal = self.output / f"sqlite-{storage}-crash.journal"
+            original = journal.read_bytes()
+            journal.unlink()
+            with self.assertRaises(FileNotFoundError):
+                RUN_QEMU.validate_sqlite_evidence(self.output)
+            for data in (b"", RUN_QEMU.SQLITE_JOURNAL_MAGIC + bytes(100), bytes(2048)):
+                journal.write_bytes(data)
+                with self.assertRaisesRegex(ValueError, "valid hot rollback journal"):
+                    RUN_QEMU.validate_sqlite_evidence(self.output)
+            journal.write_bytes(original)
+
+    def test_markers_cannot_mask_a_missing_database(self):
+        self.database.unlink()
+        with self.assertRaisesRegex(ValueError, "database is missing"):
+            RUN_QEMU.validate_sqlite_evidence(self.output)
+        self.assertFalse(self.database.exists())
+
+    def test_markers_cannot_mask_corrupted_database_bytes(self):
+        self.database.write_bytes(b"not a SQLite database" + bytes(4096))
+        with self.assertRaisesRegex(ValueError, "database validation failed"):
+            RUN_QEMU.validate_sqlite_evidence(self.output)
+
+    def test_integrity_ok_cannot_mask_incorrect_data(self):
+        with contextlib.closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("UPDATE items SET label='wrong' WHERE id=24")
+            connection.commit()
+            self.assertEqual(connection.execute("PRAGMA integrity_check").fetchall(), [("ok",)])
+        with self.assertRaisesRegex(ValueError, "rows or BLOB differ"):
+            RUN_QEMU.validate_sqlite_evidence(self.output)
+
+    def test_blob_bytes_are_checked_not_only_size(self):
+        with contextlib.closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("UPDATE items SET payload=zeroblob(131113) WHERE id=7")
+            connection.commit()
+        with self.assertRaisesRegex(ValueError, "rows or BLOB differ"):
+            RUN_QEMU.validate_sqlite_evidence(self.output)
+
+    def test_unrecovered_journals_are_rejected_without_host_mutation(self):
+        for suffix in ("-journal", "-wal", "-shm"):
+            sidecar = self.database.with_name(self.database.name + suffix)
+            sidecar.write_bytes(b"unrecovered journal")
+            with self.assertRaisesRegex(ValueError, "unexpected nonempty"):
+                RUN_QEMU.validate_sqlite_evidence(self.output)
+            self.assertEqual(sidecar.read_bytes(), b"unrecovered journal")
+            sidecar.unlink()
 
 
 class SerialDiagnosticTests(unittest.TestCase):

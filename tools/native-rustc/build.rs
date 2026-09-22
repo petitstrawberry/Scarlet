@@ -8,7 +8,16 @@ fn run(command: &mut Command) {
 }
 
 fn main() {
-    let fixtures = ["native", "strings", "descriptor", "stdio"];
+    let fixtures = [
+        "native",
+        "strings",
+        "descriptor",
+        "stdio",
+        "algorithms",
+        "positioned",
+        "path",
+        "runtime",
+    ];
     for fixture in fixtures {
         println!("cargo:rerun-if-changed=../../user/lib/scarlet-libc/tests/{fixture}.c");
     }

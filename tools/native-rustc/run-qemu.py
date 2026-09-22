@@ -15,6 +15,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 
@@ -29,6 +30,13 @@ TARGETS = {"aarch64": "aarch64-unknown-scarlet", "riscv64": "riscv64gc-unknown-s
 HELLO = b"SCARLET_NATIVE_RUSTC_HELLO_OK\n"
 MACRO_HELLO = b"SCARLET_NATIVE_PROC_MACRO_OK=42\n"
 ZLIB_HELLO = b"SCARLET_LIBC_ZLIB_OK"
+SQLITE_HELLO = b"SCARLET_LIBC_SQLITE_OK"
+SQLITE_CRASH_READY = b"SCARLET_LIBC_SQLITE_CRASH_READY"
+SQLITE_JOURNAL_MAGIC = bytes.fromhex("d9d505f920a163d7")
+SQLITE_PHASES = {
+    f"sqlite-{storage}-{phase}": (134, SQLITE_CRASH_READY) if phase == "crash" else (53, SQLITE_HELLO)
+    for storage in ("ext2", "tmpfs") for phase in ("create", "verify", "crash", "recover")
+}
 
 
 def guest_path(value):
@@ -118,7 +126,78 @@ def validate_zlib_evidence(extracted):
         raise ValueError("zlib stdout is missing the success marker")
 
 
-def collect_evidence(image, output, guest_output, mode, arch, proc_macro=False, native_fs=False, c_startup=False, zlib=False):
+def sqlite_expected_blob():
+    """Independent transcription of the C fixture's deterministic BLOB contract."""
+    state = 0x735C91A7
+    payload = bytearray(131113)
+    for index in range(len(payload)):
+        state = (state * 1664525 + 1013904223) & 0xFFFFFFFF
+        payload[index] = (state >> 24) ^ (index & 255)
+    for index in range(65539, 69638):
+        payload[index] ^= 0x5A
+    return bytes(payload)
+
+
+def validate_sqlite_database(database):
+    if not database.is_file():
+        raise ValueError("persisted SQLite database is missing")
+    # No journal recovery or mutation of the evidence is allowed on the host.
+    for suffix in ("-journal", "-wal", "-shm"):
+        sidecar = database.with_name(database.name + suffix)
+        if sidecar.exists() and sidecar.stat().st_size:
+            raise ValueError(f"persisted SQLite database has an unexpected nonempty {suffix} sidecar")
+    try:
+        connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
+        try:
+            integrity = connection.execute("PRAGMA integrity_check").fetchall()
+            if integrity != [("ok",)]:
+                raise ValueError(f"persisted SQLite integrity check failed: {integrity!r}")
+            if connection.execute("PRAGMA foreign_key_check").fetchall():
+                raise ValueError("persisted SQLite foreign key check failed")
+            groups = connection.execute("SELECT id, title FROM groups ORDER BY id").fetchall()
+            if groups != [(index, f"group-{index}") for index in range(3)]:
+                raise ValueError("persisted SQLite groups differ from the fixture")
+            rows = connection.execute("SELECT id, label, score, group_id, payload FROM items ORDER BY id").fetchall()
+            payload = sqlite_expected_blob()
+            expected = [(index, f"scarlet-{index:02d}-苺", index * 0.25, index % 3,
+                         payload if index == 7 else None) for index in range(1, 25)]
+            if rows != expected:
+                raise ValueError("persisted SQLite rows or BLOB differ from the fixture")
+            if connection.execute("PRAGMA index_info(idx_items_group)").fetchall() != [(0, 3, "group_id")]:
+                raise ValueError("persisted SQLite group index is missing or incorrect")
+        finally:
+            connection.close()
+    except sqlite3.Error as error:
+        raise ValueError(f"persisted SQLite database validation failed: {error}") from error
+    return {"database": str(database), "database_sha256": hashlib.sha256(database.read_bytes()).hexdigest(),
+            "host_sqlite_version": sqlite3.sqlite_version, "integrity_check": "ok",
+            "foreign_key_check": "ok", "group_count": 3, "item_count": 24,
+            "score_sum": 75.0, "blob_bytes": len(payload),
+            "blob_sha256": hashlib.sha256(payload).hexdigest(), "read_only": True,
+            "scope": "ext2 bytes extracted after VM exit; no power-loss durability claim"}
+
+
+def validate_sqlite_evidence(extracted):
+    if not (extracted / "SQLITE_PASS").is_file():
+        raise ValueError("SQLite evidence is missing")
+    for phase, (expected_exit, marker) in SQLITE_PHASES.items():
+        if not (extracted / f"{phase}.status").read_text().startswith(f"exit=Some({expected_exit}) "):
+            raise ValueError(f"{phase} did not exit with the required status {expected_exit}")
+        if marker not in (extracted / f"{phase}.stdout").read_bytes().splitlines():
+            raise ValueError(f"{phase} stdout is missing the success marker")
+    journals = {}
+    for storage in ("ext2", "tmpfs"):
+        journal = extracted / f"sqlite-{storage}-crash.journal"
+        data = journal.read_bytes()
+        if len(data) <= 512 or not data.startswith(SQLITE_JOURNAL_MAGIC):
+            raise ValueError(f"SQLite {storage} crash evidence is missing a valid hot rollback journal")
+        journals[storage] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    report = validate_sqlite_database(extracted / "sqlite/sqlite-roundtrip.db")
+    report.update(process_exit_recovery_verified=True, hot_journal_snapshots=journals)
+    return report
+
+
+def collect_evidence(image, output, guest_output, mode, arch, proc_macro=False, native_fs=False, c_startup=False, zlib=False, sqlite=False):
     evidence = output / "guest-evidence"
     evidence.mkdir()
     command = ["debugfs", "-R", f"rdump {debugfs_quote(guest_output)} {debugfs_quote(evidence)}", str(image)]
@@ -129,6 +208,9 @@ def collect_evidence(image, output, guest_output, mode, arch, proc_macro=False, 
         validate_c_startup_evidence(extracted)
     if zlib:
         validate_zlib_evidence(extracted)
+    if sqlite:
+        validation = validate_sqlite_evidence(extracted)
+        (output / "sqlite-host-validation.json").write_text(json.dumps(validation, indent=2) + "\n")
     if native_fs and not (extracted / "NATIVE_FS_PASS").is_file():
         raise ValueError("native filesystem evidence is missing")
     if mode == "full":
@@ -166,6 +248,7 @@ def main():
     parser.add_argument("--probe", type=Path, help="override the staged native-rustc-probe with a fresh build")
     parser.add_argument("--c-startup-probe", type=Path, help="also execute a static C main + Scarlet CRT + std-backed libc fixture (expected exit 43)")
     parser.add_argument("--zlib-probe", type=Path, help="also execute the upstream zlib C consumer (expected exit 47 and success marker)")
+    parser.add_argument("--sqlite-probe", type=Path, help="also execute separate create/verify/crash/recover SQLite processes on ext2 and tmpfs, then verify the extracted ext2 database on the host")
     parser.add_argument("--output", type=Path, required=True, help="NEW private artifacts directory")
     parser.add_argument("--rustc", type=guest_path, default="/opt/native-rustc/bin/rustc")
     parser.add_argument("--sysroot", type=guest_path, default="/opt/native-rustc")
@@ -197,8 +280,8 @@ def main():
         parser.error("linker options require full mode")
     if args.proc_macro and args.frontend_only:
         parser.error("--proc-macro requires full mode")
-    if (args.c_startup_probe or args.zlib_probe) and args.storage != "ext2":
-        parser.error("C startup and zlib probes require ext2 to verify persisted evidence")
+    if (args.c_startup_probe or args.zlib_probe or args.sqlite_probe) and args.storage != "ext2":
+        parser.error("C startup, zlib and SQLite probes require ext2 to verify persisted evidence")
     if not all(1 <= seconds <= 86400 for seconds in (args.phase_timeout, args.run_timeout)):
         parser.error("guest timeouts must be between 1 and 86400 seconds")
     if not math.isfinite(args.timeout) or args.timeout <= 0 or args.cpus < 1 or args.disk_size_mib < 0:
@@ -245,6 +328,9 @@ def main():
     zlib = args.zlib_probe.resolve() if args.zlib_probe else None
     if zlib:
         executable(zlib, args.arch, "zlib consumer", static=True)
+    sqlite = args.sqlite_probe.resolve() if args.sqlite_probe else None
+    if sqlite:
+        executable(sqlite, args.arch, "SQLite consumer", static=True)
     if args.linker:
         executable(in_root(staging, args.linker), args.arch, "linker")
     if args.backend:
@@ -287,6 +373,8 @@ def main():
         shutil.copy2(c_startup, root / "system/bin/native-c-startup-probe")
     if zlib:
         shutil.copy2(zlib, root / "system/bin/native-zlib-probe")
+    if sqlite:
+        shutil.copy2(sqlite, root / "system/bin/native-sqlite-probe")
     for directory in ("dev/pts", "mnt/newroot", "etc", "root", "old_root", "tmp"):
         (root / directory).mkdir(parents=True, exist_ok=True)
     guest_output = "/native-rustc-output" if args.storage == "ext2" else "/tmp/native-rustc-output"
@@ -310,6 +398,8 @@ def main():
         probe_args += ["--c-startup", "/system/bin/native-c-startup-probe"]
     if zlib:
         probe_args += ["--zlib", "/system/bin/native-zlib-probe"]
+    if sqlite:
+        probe_args += ["--sqlite", "/system/bin/native-sqlite-probe"]
     if any(any(char in arg for char in "\r\n\0") for arg in probe_args):
         raise ValueError("probe arguments cannot contain line breaks or NUL")
     (root / "etc/native-rustc-probe.args").write_text("\n".join(probe_args) + "\n")
@@ -375,12 +465,12 @@ def main():
     smoke.SUCCESS = re.compile(rb"\nNATIVE_RUSTC " + (b"FRONTEND" if args.frontend_only else b"FULL") + rb" PASS\r?\n")
     smoke.FAILURE = re.compile(rb"\nNATIVE_RUSTC FAIL(?:[ :\r\n]|$)")
     result = smoke.run_guest(command, output, args.timeout)
-    result.update(mode=mode, full_compilation_verified=False, proc_macro_verified=False, native_fs_verified=False, c_startup_verified=False, zlib_verified=False)
+    result.update(mode=mode, full_compilation_verified=False, proc_macro_verified=False, native_fs_verified=False, c_startup_verified=False, zlib_verified=False, sqlite_verified=False, sqlite_disk_verified=False)
     succeeded = result["result"] == "PASS"
     if root_image:
         try:
             if succeeded:
-                result["guest_evidence"] = collect_evidence(root_image, output, guest_output, mode, args.arch, args.proc_macro, args.native_fs, bool(c_startup), bool(zlib))
+                result["guest_evidence"] = collect_evidence(root_image, output, guest_output, mode, args.arch, args.proc_macro, args.native_fs, bool(c_startup), bool(zlib), bool(sqlite))
             else:
                 # Preserve partial logs for failed compiler or bootstrap attempts.
                 evidence = output / "guest-evidence"
@@ -400,6 +490,8 @@ def main():
         result["native_fs_verified"] = args.native_fs
         result["c_startup_verified"] = bool(c_startup)
         result["zlib_verified"] = bool(zlib)
+        result["sqlite_verified"] = bool(sqlite)
+        result["sqlite_disk_verified"] = bool(sqlite)
     result_path.write_text(json.dumps(result, indent=2) + "\n")
     print(f"\nNative rustc ({mode}): {result['result']} (artifacts: {output})")
     return 0 if succeeded else 1

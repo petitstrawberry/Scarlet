@@ -32,6 +32,35 @@ pub struct HandleTable {
     inner: Arc<IrqRwSpinLock<HandleTableInner>>,
 }
 
+/// An unpublished descriptor slot reserved before an operation with filesystem
+/// side effects. Other threads sharing the table cannot allocate this slot.
+/// Dropping the reservation on any error restores the slot automatically.
+pub struct HandleReservation<'a> {
+    table: &'a HandleTable,
+    handle: Option<Handle>,
+}
+
+impl HandleReservation<'_> {
+    pub fn install(mut self, mut object: KernelObject, metadata: HandleMetadata) -> Handle {
+        object.ensure_handle_ownership();
+        let handle = self.handle.take().expect("live handle reservation");
+        let mut inner = self.table.inner.write();
+        debug_assert!(inner.handles[handle as usize].is_none());
+        debug_assert!(!inner.free_handles.contains(&handle));
+        inner.handles[handle as usize] = Some(object);
+        inner.metadata[handle as usize] = Some(metadata);
+        handle
+    }
+}
+
+impl Drop for HandleReservation<'_> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            self.table.inner.write().free_handles.push(handle);
+        }
+    }
+}
+
 impl HandleTable {
     /// Maximum number of handles per table (POSIX standard limit for fd)
     pub const MAX_HANDLES: usize = 1024;
@@ -82,11 +111,20 @@ impl HandleTable {
                 .unwrap_or_else(|_| panic!("slice with incorrect length"))
         };
 
+        // An in-progress open belongs only to the originating table. A fork
+        // sees published descriptors and must not inherit an unfillable slot.
+        let mut free_handles = inner.free_handles.clone();
+        for (index, object) in inner.handles.iter().enumerate() {
+            let handle = index as Handle;
+            if object.is_none() && !free_handles.contains(&handle) {
+                free_handles.push(handle);
+            }
+        }
         Self {
             inner: Arc::new(IrqRwSpinLock::new(HandleTableInner {
                 handles: handles_clone,
                 metadata: metadata_clone,
-                free_handles: inner.free_handles.clone(),
+                free_handles,
             })),
         }
     }
@@ -114,14 +152,10 @@ impl HandleTable {
         }
     }
 
-    /// Allocate the lowest available descriptor for C/POSIX adapters. Legacy
-    /// handle insertion retains its O(1) free-stack allocation policy.
-    pub fn insert_lowest_with_metadata(
-        &self,
-        mut obj: KernelObject,
-        metadata: HandleMetadata,
-    ) -> Result<Handle, &'static str> {
-        obj.ensure_handle_ownership();
+    /// Atomically reserve the lowest unused slot without holding the table
+    /// lock across VFS operations, which may block. The slot is invisible to
+    /// get/close and unavailable to all allocators until installed or dropped.
+    pub fn reserve_lowest(&self) -> Result<HandleReservation<'_>, &'static str> {
         let mut inner = self.inner.write();
         let index = inner
             .free_handles
@@ -131,9 +165,20 @@ impl HandleTable {
             .map(|(index, _)| index)
             .ok_or("Too many open KernelObjects, limit reached")?;
         let handle = inner.free_handles.swap_remove(index);
-        inner.handles[handle as usize] = Some(obj);
-        inner.metadata[handle as usize] = Some(metadata);
-        Ok(handle)
+        Ok(HandleReservation {
+            table: self,
+            handle: Some(handle),
+        })
+    }
+
+    /// Allocate the lowest available descriptor for C/POSIX adapters. Legacy
+    /// handle insertion retains its O(1) free-stack allocation policy.
+    pub fn insert_lowest_with_metadata(
+        &self,
+        obj: KernelObject,
+        metadata: HandleMetadata,
+    ) -> Result<Handle, &'static str> {
+        Ok(self.reserve_lowest()?.install(obj, metadata))
     }
 
     /// Infer metadata from KernelObject type and usage context
@@ -355,7 +400,7 @@ impl HandleTable {
         }
     }
 
-    /// Get the number of open handles
+    /// Get the number of occupied slots, including unpublished reservations.
     pub fn open_count(&self) -> usize {
         let inner = self.inner.read();
         Self::MAX_HANDLES - inner.free_handles.len()
@@ -406,8 +451,8 @@ impl HandleTable {
         }
         object.ensure_handle_ownership();
         let mut inner = self.inner.write();
-        if inner.handles[handle as usize].is_some() {
-            return Err("duplicate target handle");
+        if !inner.free_handles.contains(&handle) {
+            return Err("duplicate or reserved target handle");
         }
         inner.free_handles.retain(|&free| free != handle);
         inner.handles[handle as usize] = Some(object);

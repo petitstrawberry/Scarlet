@@ -669,6 +669,98 @@ fn test_ext2_signed_seek_checks_range_and_supports_holes() {
     PageCacheManager::global().invalidate(cache_id);
 }
 
+#[test_case]
+fn test_ext2_truncate_preserves_cursor_and_rejects_huge_sizes_before_mutation() {
+    use crate::fs::vfs_v2::cache::CacheId;
+    use crate::mem::page_cache::PageCacheManager;
+    use crate::object::capability::StreamError;
+
+    let (_device, fs, node) = create_writeback_test_file();
+    let file = fs.open(&node, 0).unwrap();
+    let cache_id = CacheId::new((fs.fs_id().get() << 32) | 11);
+    file.write_at(0, b"abcdefgh").unwrap();
+    file.seek_signed(123, 0).unwrap();
+    file.truncate(4).unwrap();
+    assert_eq!(file.seek_signed(0, 1).unwrap(), 123);
+    file.truncate(8).unwrap();
+    assert_eq!(file.seek_signed(0, 1).unwrap(), 123);
+    let mut bytes = [1; 8];
+    assert_eq!(file.read_at(0, &mut bytes).unwrap(), bytes.len());
+    assert_eq!(&bytes, b"abcd\0\0\0\0");
+    for size in [super::node::MAX_TRUNCATE_SIZE + 1, u64::MAX] {
+        assert!(
+            matches!(file.truncate(size), Err(StreamError::FileSystemError(error))
+            if error.kind == FileSystemErrorKind::ValueOverflow)
+        );
+    }
+    assert!(matches!(file.write_at(u32::MAX as u64, b"X"),
+        Err(StreamError::FileSystemError(error))
+        if error.kind == FileSystemErrorKind::ValueOverflow));
+    assert_eq!(file.metadata().unwrap().size, 8);
+    assert_eq!(file.seek_signed(0, 1).unwrap(), 123);
+    assert_eq!(file.read_at(0, &mut bytes).unwrap(), bytes.len());
+    assert_eq!(&bytes, b"abcd\0\0\0\0");
+    drop(file);
+    PageCacheManager::global().invalidate(cache_id);
+}
+
+#[test_case]
+fn test_ext2_truncate_sparse_rewrite_does_not_restore_discarded_disk_data() {
+    use crate::environment::PAGE_SIZE;
+    use crate::fs::vfs_v2::cache::CacheId;
+    use crate::mem::page_cache::PageCacheManager;
+
+    let (_device, fs, node) = create_writeback_test_file();
+    // Give the fixture all twelve direct blocks. This tests truncate and
+    // sparse rewrite without relying on the fixture's absent allocation map.
+    let mut inode = fs.read_inode(11).unwrap();
+    let mut blocks = inode.block;
+    for (index, block) in blocks[..12].iter_mut().enumerate() {
+        *block = (300 + index as u32).to_le();
+    }
+    inode.block = blocks;
+    inode.size = (3 * PAGE_SIZE as u32).to_le();
+    inode.blocks = 24_u32.to_le();
+    fs.write_inode(11, &inode).unwrap();
+    let file = fs.open(&node, 0).unwrap();
+    let cache_id = CacheId::new((fs.fs_id().get() << 32) | 11);
+    let contents = vec![b'X'; 3 * PAGE_SIZE];
+    file.write_at(0, &contents).unwrap();
+    file.sync().unwrap();
+    file.seek_signed(77, 0).unwrap();
+    // A pin held across truncation must still refer to a live, zeroed page.
+    let pinned = PageCacheManager::global().try_pin(cache_id, 1).unwrap();
+    file.truncate(0).unwrap();
+    assert_eq!(file.seek_signed(0, 1).unwrap(), 77);
+    unsafe {
+        assert_eq!(
+            *(crate::vm::addr::phys_to_virt(pinned.paddr()) as *const u8),
+            0
+        );
+    }
+    drop(pinned);
+    file.write_at((2 * PAGE_SIZE) as u64, b"Z").unwrap();
+    file.sync().unwrap();
+    drop(file);
+    // Force disk reload: cached zeroes alone would hide stale disk blocks.
+    PageCacheManager::global().invalidate(cache_id);
+    let reopened = fs.open(&node, 0).unwrap();
+    let mut gap = [1; PAGE_SIZE];
+    assert_eq!(
+        reopened.read_at(PAGE_SIZE as u64, &mut gap).unwrap(),
+        PAGE_SIZE
+    );
+    assert!(gap.iter().all(|byte| *byte == 0));
+    let mut last = [0];
+    assert_eq!(
+        reopened.read_at((2 * PAGE_SIZE) as u64, &mut last).unwrap(),
+        1
+    );
+    assert_eq!(last, [b'Z']);
+    drop(reopened);
+    PageCacheManager::global().invalidate(cache_id);
+}
+
 // Helper function to create a mock ext2 device with proper structure
 fn create_test_ext2_device() -> MockBlockDevice {
     let sector_size = 512;
@@ -2478,3 +2570,85 @@ fn test_ext2_rename_same_path() {
         }
     }
 }
+
+#[test_case]
+fn test_ext2_truncate_preserves_blocks_after_sparse_hole() {
+    use crate::fs::vfs_v2::cache::CacheId;
+    use crate::mem::page_cache::PageCacheManager;
+
+    let device = Arc::new(create_test_ext2_device());
+    let transfer = |request_type, block: usize, buffer: Vec<u8>| {
+        device.enqueue_request(Box::new(BlockIORequest {
+            request_type,
+            sector: block * 2,
+            sector_count: 2,
+            head: 0,
+            cylinder: 0,
+            buffer,
+        }));
+        let mut results = device.process_requests();
+        assert_eq!(results.len(), 1);
+        let result = results.remove(0);
+        assert!(result.result.is_ok());
+        result.request.buffer
+    };
+    let mut superblock = transfer(BlockIORequestType::Read, 1, vec![0; 1024]);
+    superblock[12..16].copy_from_slice(&1_u32.to_le_bytes());
+    transfer(BlockIORequestType::Write, 1, superblock);
+    let mut descriptors = vec![0; 1024];
+    descriptors[..4].copy_from_slice(&3_u32.to_le_bytes());
+    descriptors[8..12].copy_from_slice(&5_u32.to_le_bytes());
+    descriptors[12..14].copy_from_slice(&1_u16.to_le_bytes());
+    transfer(BlockIORequestType::Write, 2, descriptors);
+    // Only block 400 is free. Bitmap indexing starts at first_data_block=1.
+    let mut bitmap = vec![0xff; 1024];
+    bitmap[399 / 8] &= !(1 << (399 % 8));
+    transfer(BlockIORequestType::Write, 3, bitmap);
+    transfer(BlockIORequestType::Write, 300, vec![b'A'; 1024]);
+    transfer(BlockIORequestType::Write, 302, vec![b'C'; 1024]);
+
+    let fs = Ext2FileSystem::new(device.clone()).unwrap();
+    let mut inode = Ext2Inode::empty();
+    inode.mode = (EXT2_S_IFREG | 0o644).to_le();
+    inode.size = 3072_u32.to_le();
+    inode.blocks = 4_u32.to_le();
+    inode.block[0] = 300_u32.to_le();
+    inode.block[2] = 302_u32.to_le();
+    fs.inode_cache.write().insert(11, inode);
+    let node = Arc::new(Ext2Node::new(11, FileType::RegularFile, 11));
+    node.set_filesystem(Arc::downgrade(
+        &(fs.clone() as Arc<dyn FileSystemOperations>),
+    ));
+    let node: Arc<dyn VfsNode> = node;
+    let file = fs.open(&node, 0).unwrap();
+    let marker = b"dirty third block survives truncation";
+    assert_eq!(file.write_at(2148, marker).unwrap(), marker.len());
+    file.truncate(2560).unwrap();
+
+    let mut expected = vec![b'A'; 2560];
+    expected[1024..2048].fill(0);
+    expected[2048..].fill(b'C');
+    expected[2148..2148 + marker.len()].copy_from_slice(marker);
+    // Check disk before sync: sync could otherwise repair a missing write
+    // from the still-correct cached page and conceal the block-order defect.
+    assert_eq!(fs.read_file_content(11, 2560).unwrap(), expected);
+    let stored = fs.read_inode(11).unwrap();
+    let stored_blocks = stored.block;
+    let stored_sectors = stored.blocks;
+    assert_eq!(stored_blocks[0], 300);
+    assert_eq!(stored_blocks[1], 400);
+    assert_eq!(stored_blocks[2], 302);
+    assert_eq!(stored_sectors, 6);
+
+    file.sync().unwrap();
+    let cache_id = CacheId::new((fs.fs_id().get() << 32) | 11);
+    PageCacheManager::global().invalidate(cache_id);
+    let mut reloaded = vec![0; 2560];
+    assert_eq!(file.read_at(0, &mut reloaded).unwrap(), reloaded.len());
+    assert_eq!(reloaded, expected);
+    drop(file);
+    PageCacheManager::global().invalidate(cache_id);
+}
+
+#[path = "unlink_tests.rs"]
+mod unlink_tests;

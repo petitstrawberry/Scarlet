@@ -12,6 +12,24 @@ unsafe extern "C" {
     fn scarlet_libc_strings_test() -> i32;
     fn scarlet_libc_descriptor_test(directory: *const std::ffi::c_char) -> i32;
     fn scarlet_libc_stdio_test(directory: *const std::ffi::c_char) -> i32;
+    fn scarlet_libc_algorithms_test() -> i32;
+    fn scarlet_libc_positioned_test(directory: *const std::ffi::c_char) -> i32;
+    fn scarlet_libc_path_test(directory: *const std::ffi::c_char, ext2: i32) -> i32;
+    fn scarlet_libc_runtime_test() -> i32;
+    fn scarlet_libc_assert_failure_test() -> i32;
+    fn scarlet_libc_abort_test() -> i32;
+}
+
+pub fn runtime_child(argument: &str) -> ! {
+    let result = unsafe {
+        match argument {
+            "--libc-assert-child" => scarlet_libc_assert_failure_test(),
+            "--libc-abort-child" => scarlet_libc_abort_test(),
+            _ => 2,
+        }
+    };
+    // The two C functions are required to terminate, so returning is a failure.
+    std::process::exit(result);
 }
 
 fn symlink(target: &str, link: &Path) {
@@ -93,6 +111,26 @@ fn check(root: &Path, ext2: bool) -> Result<(), Box<dyn std::error::Error>> {
     let line = unsafe { scarlet_libc_stdio_test(root_c.as_ptr()) };
     assert_eq!(line, 0, "C stdio check failed at stdio.c:{line}");
     println!("NATIVE_RUSTC LIBC_SURFACE PASS strings + conversions + descriptors + stdio");
+    let line = unsafe { scarlet_libc_algorithms_test() };
+    assert_eq!(line, 0, "C algorithms check failed at algorithms.c:{line}");
+    let line = unsafe { scarlet_libc_positioned_test(root_c.as_ptr()) };
+    assert_eq!(
+        line, 0,
+        "C positioned I/O check failed at positioned.c:{line}"
+    );
+    fs::create_dir(root.join("path-dir"))?;
+    fs::create_dir(root.join("path-nonempty"))?;
+    fs::write(root.join("path-nonempty/child"), b"child")?;
+    symlink("path-target", &root.join("path-link"));
+    symlink("path-missing", &root.join("path-dangling"));
+    symlink("path-dir", &root.join("path-dir-link"));
+    let line = unsafe { scarlet_libc_path_test(root_c.as_ptr(), i32::from(ext2)) };
+    assert_eq!(line, 0, "C path check failed at path.c:{line}");
+    let line = unsafe { scarlet_libc_runtime_test() };
+    assert_eq!(line, 0, "C runtime check failed at runtime.c:{line}");
+    println!(
+        "NATIVE_RUSTC LIBC_DATABASE_APIS PASS algorithms + positioned I/O + locks + paths + runtime"
+    );
     let metadata = file.metadata()?;
     assert_eq!(
         metadata.accessed()?.duration_since(UNIX_EPOCH)?.as_secs(),
@@ -271,6 +309,31 @@ pub fn run(output: &Path) -> Result<(), String> {
         .join()
         .unwrap();
         assert_eq!(unsafe { *scarlet_c::__errno_location() }, 22);
+        for (name, argument, diagnostic) in [
+            ("libc-assert", "--libc-assert-child", true),
+            ("libc-abort", "--libc-abort-child", false),
+        ] {
+            let result = std::process::Command::new(std::env::current_exe()?)
+                .arg(argument)
+                .output()?;
+            fs::write(output.join(format!("{name}.stdout")), &result.stdout)?;
+            fs::write(output.join(format!("{name}.stderr")), &result.stderr)?;
+            fs::write(
+                output.join(format!("{name}.status")),
+                format!("exit={:?}\n", result.status.code()),
+            )?;
+            assert_eq!(
+                result.status.code(),
+                Some(134),
+                "{name} did not terminate abnormally"
+            );
+            if diagnostic {
+                assert!(
+                    String::from_utf8_lossy(&result.stderr).contains("scarlet assertion fixture")
+                );
+            }
+        }
+        println!("NATIVE_RUSTC LIBC_ABORT PASS assertion diagnostic + abnormal termination");
         let ext2 = output.join("fs-ext2");
         check(&ext2, true)?;
         let mount_parent = output.join("mount-parent");

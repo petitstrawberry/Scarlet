@@ -11,6 +11,12 @@
 #include <limits.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <strings.h>
+#include <sys/file.h>
+#include <sys/random.h>
+#include <sys/time.h>
+#include <math.h>
+#include <assert.h>
 
 /* Reverse the order and repeat every header to exercise include guards. */
 #include <errno.h>
@@ -24,6 +30,12 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <strings.h>
+#include <sys/file.h>
+#include <sys/random.h>
+#include <sys/time.h>
+#include <math.h>
+#include <assert.h>
 
 #ifdef __cplusplus
 #define HEADER_ASSERT(condition) static_assert(condition, #condition)
@@ -56,6 +68,7 @@ HEADER_ASSERT(sizeof(size_t) == 8 && sizeof(ssize_t) == 8);
 HEADER_ASSERT(sizeof(mode_t) == 4);
 HEADER_ASSERT(sizeof(time_t) == 8 && sizeof(off_t) == 8);
 HEADER_ASSERT(sizeof(struct timespec) == 16);
+HEADER_ASSERT(sizeof(struct timeval) == 16);
 HEADER_ASSERT(HEADER_ALIGNOF(struct timespec) == 8);
 HEADER_ASSERT(offsetof(struct timespec, tv_nsec) == 8);
 HEADER_ASSERT(HEADER_ALIGNOF(max_align_t) <= 16);

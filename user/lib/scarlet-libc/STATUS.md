@@ -23,7 +23,12 @@ Native syscalls to a C ABI.
 | Unbuffered stdio | Locked opaque `FILE`, standard streams, open/close/flush, block/character/line I/O, seek/tell, indicators and one-byte pushback. `fdopen` retains the descriptor on failure. | Host mode-parser checks and [C fixture](tests/stdio.c) for file state, partial items, ownership, append and pushback; AArch64/HVF passes on ext2/tmpfs. |
 | Formatted output | `printf`, `fprintf`, `sprintf`, `snprintf` and all four `v` variants; integer/string/character/pointer formatting, width, precision and integer length modifiers. Unsupported float/wide/positional/grouping/`%n` formats return `ENOTSUP`. | Host comparisons with the host libc, truncation/overflow and forwarded-varargs tests; C tests pass arguments through register and stack areas in AArch64/HVF. RV64 has cross-build evidence only. |
 | Upstream zlib consumer | All 15 unmodified zlib 1.3.2 core/gzip sources compile and statically link against the matching CRT and std-backed libc. | [Pinned builder](../../../tools/native-rustc/consumer-zlib/README.md) records both target builds, hashes and ELF audits. AArch64/HVF passes compression/gzip/error-path acceptance with exit 47 and the required stdout marker. |
-| C headers | Partial `ctype.h`, `errno.h`, `fcntl.h`, `limits.h`, `stdio.h`, `stdlib.h`, `string.h`, `time.h`, `unistd.h`, `sys/types.h`, `sys/stat.h`; LP64 layouts. | [Header checks](tests/check_headers.py) compile standalone/repeated inclusion, C11/C++11 linkage and layouts for AArch64/RV64 without host libc headers. |
+| Positioned I/O, truncation and locks | `pread`/`pwrite` preserve the shared offset; `pwrite` ignores append. `ftruncate` preserves offset. Nonblocking `flock` on regular ext2/tmpfs files follows open-description lifetime. | [C fixture](tests/positioned.c) covers bounds, access, sparse/zero-tail behavior, duplicate offsets and lock contention; passes on AArch64/HVF. |
+| Path removal and cwd | Type-checked `unlink`/`rmdir`; `getcwd` checks capacity before output and supports a malloc-owned null-buffer result. Ext2 last-link removal of an open file returns `EBUSY`; empty-directory removal returns `ENOTSUP`, nonempty returns `ENOTEMPTY`. | [C fixture](tests/path.c) covers symlink/trailing-slash/type errors, live duplicate lifetime, replacement and cwd bounds; passes on AArch64/HVF. |
+| Sorting and byte algorithms | Allocation-free heapsort, binary search, spans, tokenizers, ASCII case-insensitive comparisons and integer absolute values. `strtok` uses Rust TLS. | Host shape/boundary/thread tests and [C fixture](tests/algorithms.c); passes on AArch64/HVF. |
+| Clocks, entropy and termination | Realtime/monotonic clocks, validated sleep, entropy-only random bytes, IEEE `fabs`/`fabsf`, repeatable `assert.h`; abort exits the process with status 134. | Host validation helpers and [C fixture](tests/runtime.c), plus child assertion/abort checks; passes on AArch64/HVF. |
+| Upstream SQLite consumer | Unmodified pinned SQLite 3.53.4 plus a separate Native VFS; exclusive nonblocking locks serialize reads and writes, rollback journals, memory temp storage. | [Builder](../../../tools/native-rustc/consumer-sqlite/build.py) and create/verify/forced-exit/hot-journal-recovery fixtures on ext2/tmpfs, plus host exact-content checks; all eight guest processes and host checks pass on AArch64/HVF. No Unix-VFS, WAL or pthread claim. |
+| C headers | Partial `assert.h`, `ctype.h`, `errno.h`, `fcntl.h`, `limits.h`, `math.h`, `stdio.h`, `stdlib.h`, `string.h`, `strings.h`, `time.h`, `unistd.h`, `sys/file.h`, `sys/random.h`, `sys/time.h`, `sys/types.h`, `sys/stat.h`; LP64 layouts. | [Header checks](tests/check_headers.py) compile standalone/repeated inclusion, C11/C++11 linkage and layouts for AArch64/RV64 without host libc headers. |
 
 The [recorded filesystem evidence](../../../tools/native-rustc/evidence/2026-09-22-native-fs-aarch64.json)
 identifies the exact kernel, sysroot and probe inputs. It establishes guest
@@ -57,6 +62,25 @@ regressions and the fix for seeking with a detached ext2 node. Host checks pass
 checks. RV64 has cross-build and ELF-audit evidence only. The published bundle
 is unchanged; Cargo and installed SDK acceptance remain outstanding.
 
+The [SQLite milestone evidence](../../../tools/native-rustc/evidence/2026-09-22-libc-sqlite-aarch64.json)
+and [saved logs](../../../tools/native-rustc/evidence/2026-09-22-libc-sqlite-aarch64/)
+record AArch64/HVF `FULL_PASS` in 19.327 seconds. All new C fixtures pass on ext2
+and tmpfs; assertion/abort children return 134. SQLite create/verify/crash/recover
+passes in eight separate processes across both filesystems, with verified dirty
+database spill and saved hot rollback journals. Independent host SQLite checks
+the recovered ext2 database's integrity, foreign keys, 24 exact rows and complete
+131113-byte BLOB. Prior plain C startup, zlib, native Rust compilation and proc
+macro gates remain passing.
+
+The unfiltered release kernel suite passes 1328 tests, 35 more than the previous
+milestone. This includes three regressions for the tmpfs unlink bug found in
+the guest: open descriptors now retain data/cache/quota through final node
+ownership, and pinned cache storage retires only after unpin. Host checks pass
+47 libc tests, 27 ABI tests, 80 header checks, 31 harness tests and four probe
+tests; repository formatting passes. Final RV64/RV32 kernel compilation also
+passes. RV64 libc/probe/SQLite cross-build and ELF audits do not establish RV64
+guest execution. The published bundle remains unchanged.
+
 ## Limits that callers must account for
 
 - **Runtime integration:** allocation and TLS use Rust std and its CRT by
@@ -87,10 +111,25 @@ is unchanged; Cargo and installed SDK acceptance remain outstanding.
   read/write access mode does not establish Unix access-control behavior.
 - **Descriptors and streams:** `fcntl` currently implements only `F_GETFD`,
   `F_SETFD`, `F_GETFL` and `F_SETFL`, with append as the only mutable status
-  flag. There is no nonblocking or record-lock interface. Stdio is unbuffered;
+  flag. Nonblocking whole-file `flock` is limited to regular ext2/tmpfs files;
+  blocking acquisition and POSIX record locks remain absent. Stdio is unbuffered;
   buffering controls, scanf, wide streams and the remaining stdio surface are
   absent. Floating-point, wide, positional, grouping and `%n` output formats
   report `ENOTSUP`; this is a supported subset, not printf conformance.
+- **Clock, entropy and termination contracts:** clocks are microsecond-quantized,
+  with realtime availability required. Sleep has no EINTR/remainder behavior.
+  Entropy requests use registered hardware/providers only; nonzero recognized
+  flags are unsupported and the legacy failure sentinel maps to EIO. A failed
+  fill may alter part of the buffer. Abort terminates with exit 134 rather than
+  signal delivery. These are explicit limits, not full POSIX behavior.
+- **Truncation and unlink:** ext2 reconstruction limits truncate to 16 MiB, uses
+  fallible allocation, and preserves the open offset. Shrink retains disk/cache
+  allocations; complete rollback after device I/O failure is not established.
+  Last-link removal of an
+  open ext2 file returns EBUSY; full Unix unlink lifetime remains outstanding.
+  Ext2 rmdir reports ENOTEMPTY for nonempty directories and EOPNOTSUPP before
+  mutation for empty directories because retained-cwd lifetime is unresolved.
+  Deterministic allocation errors do not establish physical OOM behavior.
 - **Concurrency and persistence:** normal ext2 writes, timestamp updates,
   truncation and fsync share an inode mutex. Full mmap/unlink and namespace
   concurrency, pinned-page invalidation and crash consistency still need
@@ -99,7 +138,10 @@ is unchanged; Cargo and installed SDK acceptance remain outstanding.
   remaining strings/conversions and descriptor APIs, general locale, math,
   process and signal APIs, locks, pthreads, sockets and name resolution remain
   incomplete or absent. Existing kernel or Rust APIs do not imply matching C
-  exports. Cargo, curl, libgit2 and SQLite acceptance remains outstanding.
+  exports. Cargo, curl, libgit2 and SQLite Unix-VFS acceptance remain outstanding.
+  The separate Native SQLite VFS intentionally serializes readers, omits WAL and
+  pthreads. Process-exit hot-journal recovery passes on ext2/tmpfs; it does not
+  establish power-loss safety or all crash-recovery cases.
 
 ## Acceptance gates toward a complete C runtime
 
@@ -137,6 +179,9 @@ substitute for declaring a standards baseline and checking its requirements.
    libgit2 and curl tests against the SDK. The pinned zlib consumer now builds
    for both targets and passes in AArch64/HVF; RV64 guest execution, exhaustive
    upstream tests and installed SDK acceptance remain gates.
+   SQLite Native VFS create/reopen, forced-exit hot-journal recovery and
+   extracted-database exact-content checks pass on AArch64/HVF. Its supported
+   subset does not replace Unix-VFS, full upstream-suite or RV64 acceptance.
    Then run Cargo on an offline workspace
    with a path dependency, build script and proc macro, and execute its output.
    Record AArch64 and RV64 guest results for the shipped artifacts; automate

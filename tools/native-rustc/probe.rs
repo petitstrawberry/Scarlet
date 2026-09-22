@@ -11,12 +11,15 @@ const HELLO: &str = "SCARLET_NATIVE_RUSTC_HELLO_OK\n";
 const HELLO_EXIT: i32 = 37;
 const MACRO_HELLO: &str = "SCARLET_NATIVE_PROC_MACRO_OK=42\n";
 const ZLIB_HELLO: &str = "SCARLET_LIBC_ZLIB_OK";
+const SQLITE_HELLO: &str = "SCARLET_LIBC_SQLITE_OK";
+const SQLITE_CRASH_READY: &str = "SCARLET_LIBC_SQLITE_CRASH_READY";
+const SQLITE_JOURNAL_MAGIC: &[u8] = &[0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
 const CONFIG: &str = "/etc/native-rustc-probe.args";
 #[cfg(all(feature = "native-fs", target_os = "scarlet"))]
 mod allocation_failure;
 #[cfg(all(feature = "native-fs", target_os = "scarlet"))]
 mod native_fs;
-const USAGE: &str = "usage: native-rustc-probe RUSTC SYSROOT TARGET NEW_OUTPUT_DIR [--dummy] [--full --linker PATH] [--proc-macro] [--native-fs] [--c-startup PATH] [--zlib PATH] [--backend PATH_OR_NAME] [--linker-flavor FLAVOR] [--timeout SECONDS] [--run-timeout SECONDS]; no arguments reads /etc/native-rustc-probe.args (one argument per line)";
+const USAGE: &str = "usage: native-rustc-probe RUSTC SYSROOT TARGET NEW_OUTPUT_DIR [--dummy] [--full --linker PATH] [--proc-macro] [--native-fs] [--c-startup PATH] [--zlib PATH] [--sqlite PATH] [--backend PATH_OR_NAME] [--linker-flavor FLAVOR] [--timeout SECONDS] [--run-timeout SECONDS]; no arguments reads /etc/native-rustc-probe.args (one argument per line)";
 
 thread_local! {
     static THREAD_PREFLIGHT: Cell<u32> = const { Cell::new(0) };
@@ -34,6 +37,7 @@ struct Options {
     native_fs: bool,
     c_startup: Option<PathBuf>,
     zlib: Option<PathBuf>,
+    sqlite: Option<PathBuf>,
     backend: Option<String>,
     linker: Option<PathBuf>,
     linker_flavor: Option<String>,
@@ -66,6 +70,7 @@ fn options(args: &[String]) -> Result<Options, String> {
         native_fs: false,
         c_startup: None,
         zlib: None,
+        sqlite: None,
         backend: None,
         linker: None,
         linker_flavor: None,
@@ -80,7 +85,7 @@ fn options(args: &[String]) -> Result<Options, String> {
             "--proc-macro" => result.proc_macro = true,
             "--native-fs" => result.native_fs = true,
             "--backend" | "--linker" | "--linker-flavor" | "--timeout" | "--run-timeout"
-            | "--c-startup" | "--zlib" => {
+            | "--c-startup" | "--zlib" | "--sqlite" => {
                 let value = rest
                     .next()
                     .ok_or_else(|| format!("missing value for {flag}"))?;
@@ -91,6 +96,7 @@ fn options(args: &[String]) -> Result<Options, String> {
                     "--backend" => result.backend = Some(value.clone()),
                     "--c-startup" => result.c_startup = Some(value.into()),
                     "--zlib" => result.zlib = Some(value.into()),
+                    "--sqlite" => result.sqlite = Some(value.into()),
                     "--linker" => result.linker = Some(value.into()),
                     "--linker-flavor" => result.linker_flavor = Some(value.clone()),
                     "--timeout" => result.timeout = seconds(value)?,
@@ -450,6 +456,10 @@ fn run() -> Result<(), String> {
         *zlib = existing_absolute(zlib, "zlib consumer", false)?;
         check_elf(zlib, &options.target).map_err(|e| format!("zlib consumer: {e}"))?;
     }
+    if let Some(sqlite) = &mut options.sqlite {
+        *sqlite = existing_absolute(sqlite, "SQLite consumer", false)?;
+        check_elf(sqlite, &options.target).map_err(|e| format!("SQLite consumer: {e}"))?;
+    }
     if let Some(linker) = &mut options.linker {
         *linker = existing_absolute(linker, "linker", false)?;
         check_elf(linker, &options.target).map_err(|e| format!("native linker: {e}"))?;
@@ -524,6 +534,52 @@ fn run() -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
         println!("NATIVE_RUSTC ZLIB PASS");
+    }
+    if let Some(sqlite) = &options.sqlite {
+        for (storage, directory) in [
+            ("ext2", output.join("sqlite")),
+            ("tmpfs", PathBuf::from("/tmp/native-rustc-sqlite")),
+        ] {
+            fs::create_dir(&directory)
+                .map_err(|e| format!("create fresh SQLite {storage} directory: {e}"))?;
+            // Each phase runs in a new process. Recovery must roll back the
+            // abandoned transaction before verifying the original committed data.
+            for (stage, mode, expected_exit, marker) in [
+                ("create", "create", 53, SQLITE_HELLO),
+                ("verify", "verify", 53, SQLITE_HELLO),
+                ("crash", "crash", 134, SQLITE_CRASH_READY),
+                ("recover", "verify", 53, SQLITE_HELLO),
+            ] {
+                let name = format!("sqlite-{storage}-{stage}");
+                let mut command = Command::new(sqlite);
+                command.arg(&directory).arg(mode);
+                let stdout = phase(command, output, &name, options.run_timeout, expected_exit)?;
+                if !String::from_utf8_lossy(&stdout)
+                    .lines()
+                    .any(|line| line == marker)
+                {
+                    return Err(format!(
+                        "{name}: SQLite consumer did not produce its required success marker"
+                    ));
+                }
+                if stage == "crash" {
+                    let journal = fs::read(directory.join("sqlite-roundtrip.db-journal"))
+                        .map_err(|e| format!("{name}: read hot journal: {e}"))?;
+                    if journal.len() <= 512 || !journal.starts_with(SQLITE_JOURNAL_MAGIC) {
+                        return Err(format!("{name}: missing valid hot rollback journal"));
+                    }
+                    // Preserve evidence before the next process rolls it back.
+                    fs::write(output.join(format!("{name}.journal")), journal)
+                        .map_err(|e| format!("{name}: preserve hot journal: {e}"))?;
+                }
+            }
+        }
+        fs::write(
+            output.join("SQLITE_PASS"),
+            "SQLite create/verify/crash/recover passed on ext2 and tmpfs; crash exit 134, other exits 53\n",
+        )
+        .map_err(|e| e.to_string())?;
+        println!("NATIVE_RUSTC SQLITE PASS");
     }
     // Load the selected backend once up front so the version probe also
     // verifies its DSO dependencies.
@@ -617,6 +673,15 @@ fn run() -> Result<(), String> {
 
 fn main() {
     #[cfg(all(feature = "native-fs", target_os = "scarlet"))]
+    if let Some(argument) = env::args().nth(1) {
+        if matches!(
+            argument.as_str(),
+            "--libc-assert-child" | "--libc-abort-child"
+        ) {
+            native_fs::runtime_child(&argument);
+        }
+    }
+    #[cfg(all(feature = "native-fs", target_os = "scarlet"))]
     allocation_failure::check();
     if let Err(error) = run() {
         eprintln!("NATIVE_RUSTC FAIL {error}");
@@ -666,6 +731,19 @@ mod tests {
             parse(&["--full", "--linker", "/lld", "--proc-macro"])
                 .unwrap()
                 .proc_macro
+        );
+    }
+
+    #[test]
+    fn sqlite_consumer_requires_a_nonempty_path() {
+        assert!(parse(&["--sqlite"]).is_err());
+        assert!(parse(&["--sqlite", ""]).is_err());
+        assert_eq!(
+            parse(&["--sqlite", "/system/bin/native-sqlite-probe"])
+                .unwrap()
+                .sqlite
+                .as_deref(),
+            Some(Path::new("/system/bin/native-sqlite-probe"))
         );
     }
 

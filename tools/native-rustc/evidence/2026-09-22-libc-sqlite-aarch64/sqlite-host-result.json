@@ -1,0 +1,43 @@
+{
+  "scope": "Host macOS VFS fixture validation; host-only getentropy adapter supplies getrandom",
+  "results": [
+    {
+      "phase": "create",
+      "mode": "create",
+      "exit_code": 53,
+      "stdout": "SCARLET_SQLITE VFS PASS\nSCARLET_SQLITE TRANSACTIONS PASS\nSCARLET_SQLITE REOPEN PASS\nSCARLET_SQLITE CREATE PASS\nSCARLET_SQLITE 3.53.4 PASS\nSCARLET_LIBC_SQLITE_OK\n",
+      "stderr": ""
+    },
+    {
+      "phase": "verify",
+      "mode": "verify",
+      "exit_code": 53,
+      "stdout": "SCARLET_SQLITE REOPEN PASS\nSCARLET_SQLITE VERIFY PASS\nSCARLET_SQLITE 3.53.4 PASS\nSCARLET_LIBC_SQLITE_OK\n",
+      "stderr": ""
+    },
+    {
+      "phase": "crash",
+      "mode": "crash",
+      "exit_code": -6,
+      "stdout": "SCARLET_SQLITE DIRTY_DATABASE_AND_HOT_JOURNAL PASS\nSCARLET_LIBC_SQLITE_CRASH_READY\n",
+      "stderr": ""
+    },
+    {
+      "phase": "recover",
+      "mode": "verify",
+      "exit_code": 53,
+      "stdout": "SCARLET_SQLITE REOPEN PASS\nSCARLET_SQLITE VERIFY PASS\nSCARLET_SQLITE 3.53.4 PASS\nSCARLET_LIBC_SQLITE_OK\n",
+      "stderr": ""
+    }
+  ],
+  "restored_database_sha256": "a3aaa4fabbe065947a5b2d6431653dda7363eb69dbd8e64306211216f585fd22",
+  "source_sha256": {
+    "tools/native-rustc/consumer-sqlite/main.c": "79b2b2551dbd21bc4e60b55690218876dfe6587e6d44be6ad2a94c9eda8f9610",
+    "tools/native-rustc/consumer-sqlite/scarlet_vfs.c": "32a82f2d1f59cf9adc7e333d75ca4d9614cb0aa9b75b00c2d54a1e32bad83482",
+    "/tmp/scarlet-sqlite-host-getrandom.h": "61ad4a9b28e29ece8caf71be2163fbeb0ab1f89f8d7196994058448b05764463",
+    "/tmp/scarlet-sqlite-host-getrandom.c": "1c8ed30cf87087bc86bd1f8f1155858bcb0f5eaedd15e424430742149dc31ca7",
+    "/tmp/scarlet-sqlite-source/sqlite-amalgamation-3530400/sqlite3.c": "b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189"
+  },
+  "binary_sha256": "628c17eb8d61b1ce50835f8c04c120df0f65ffea57917dfd0826ff12192608c5",
+  "compiler": "Apple clang version 21.0.0 (clang-2100.0.123.102)\nTarget: arm64-apple-darwin25.6.0\nThread model: posix\nInstalledDir: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin\n"
+}

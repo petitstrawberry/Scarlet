@@ -192,6 +192,109 @@ pub unsafe extern "C" fn write(fd: c_int, buffer: *const c_void, count: usize) -
     }
 }
 
+#[cfg(any(test, target_os = "scarlet"))]
+fn positioned_arguments(
+    fd: c_int,
+    null_buffer: bool,
+    count: usize,
+    offset: i64,
+) -> Result<(), c_int> {
+    transfer_arguments(fd, null_buffer, count)?;
+    if offset < 0 {
+        return Err(ERRNO_EINVAL);
+    }
+    if count as u64 > (i64::MAX - offset) as u64 {
+        return Err(scarlet_abi::fs::ERRNO_EOVERFLOW);
+    }
+    Ok(())
+}
+
+/// Read at an absolute offset without changing the shared descriptor cursor.
+///
+/// # Safety
+/// `buffer` must be writable for `count` bytes unless count is zero.
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pread(fd: c_int, buffer: *mut c_void, count: usize, offset: i64) -> isize {
+    if let Err(error) = positioned_arguments(fd, buffer.is_null(), count, offset) {
+        return crate::fail(error) as isize;
+    }
+    // SAFETY: the C caller supplies a writable buffer; offset is nonnegative.
+    match result(unsafe {
+        scarlet_sys::syscall4(
+            Syscall::FileReadAtWithStatus,
+            fd as usize,
+            buffer as usize,
+            count,
+            offset as usize,
+        )
+    }) {
+        Ok(count) => count as isize,
+        Err(error) => crate::fail(error) as isize,
+    }
+}
+
+/// Write at an absolute offset, ignoring O_APPEND and preserving the cursor.
+///
+/// # Safety
+/// `buffer` must be readable for `count` bytes unless count is zero.
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pwrite(
+    fd: c_int,
+    buffer: *const c_void,
+    count: usize,
+    offset: i64,
+) -> isize {
+    if let Err(error) = positioned_arguments(fd, buffer.is_null(), count, offset) {
+        return crate::fail(error) as isize;
+    }
+    // SAFETY: the C caller supplies a readable buffer; offset is nonnegative.
+    match result(unsafe {
+        scarlet_sys::syscall4(
+            Syscall::FileWriteAtWithStatus,
+            fd as usize,
+            buffer as usize,
+            count,
+            offset as usize,
+        )
+    }) {
+        Ok(count) => count as isize,
+        Err(error) => crate::fail(error) as isize,
+    }
+}
+
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub extern "C" fn ftruncate(fd: c_int, length: i64) -> c_int {
+    if fd < 0 {
+        return crate::fail(ERRNO_EBADF);
+    }
+    if length < 0 {
+        return crate::fail(ERRNO_EINVAL);
+    }
+    // SAFETY: this syscall takes only scalars and retains ownership of fd.
+    descriptor_result(unsafe {
+        scarlet_sys::syscall2(
+            Syscall::FileTruncateWithStatus,
+            fd as usize,
+            length as usize,
+        )
+    })
+}
+
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub extern "C" fn flock(fd: c_int, operation: c_int) -> c_int {
+    if fd < 0 {
+        return crate::fail(ERRNO_EBADF);
+    }
+    // SAFETY: the kernel validates the scalar operation and descriptor.
+    descriptor_result(unsafe {
+        scarlet_sys::syscall2(Syscall::FileLock, fd as usize, operation as usize)
+    })
+}
+
 #[cfg(target_os = "scarlet")]
 #[unsafe(no_mangle)]
 pub extern "C" fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
@@ -325,6 +428,18 @@ pub unsafe extern "C" fn fcntl(fd: c_int, command: c_int, mut args: ...) -> c_in
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn positioned_ranges_reject_negative_and_overflow_without_wrapping() {
+        assert_eq!(positioned_arguments(1, true, 0, i64::MAX), Ok(()));
+        assert_eq!(positioned_arguments(1, false, 2, i64::MAX - 2), Ok(()));
+        assert_eq!(
+            positioned_arguments(1, false, 3, i64::MAX - 2),
+            Err(scarlet_abi::fs::ERRNO_EOVERFLOW)
+        );
+        assert_eq!(positioned_arguments(1, false, 0, -1), Err(ERRNO_EINVAL));
+        assert_eq!(positioned_arguments(-1, true, 0, 0), Err(ERRNO_EBADF));
+    }
 
     #[test]
     fn transfer_boundaries_allow_zero_length_and_reject_unrepresentable_counts() {

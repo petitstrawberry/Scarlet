@@ -1,0 +1,24 @@
+[
+  {
+    "path": "/private/tmp/scarlet-sqlite-aarch64-v2/sqlite-probe",
+    "sha256": "fae0bdfc0a2f1e3b3315347380f6dffaa7aaa384d6f86681cc3a8e958d8e339b",
+    "bytes": 1187240,
+    "elf_type": "EXEC",
+    "machine": "aarch64",
+    "osabi": 83,
+    "entry": 2184628,
+    "interpreter": null,
+    "needed": [],
+    "rpath": null,
+    "runpath": null,
+    "soname": null,
+    "tls": [],
+    "relocations": {},
+    "undefined_relocated_symbols": [],
+    "hash_tables": [],
+    "textrel": false,
+    "relr": false,
+    "symbol_versioning": false,
+    "init_fini": []
+  }
+]

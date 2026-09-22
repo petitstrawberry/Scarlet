@@ -55,6 +55,8 @@ pub struct PageCacheEntry {
     pin_count: AtomicUsize,
     /// Dirty flag - true if page has been modified and needs writeback
     is_dirty: AtomicUsize, // Using AtomicUsize as AtomicBool
+    /// The owning node has disappeared; reclaim after its final external pin.
+    retired: bool,
 }
 
 impl PageCacheEntry {
@@ -64,6 +66,7 @@ impl PageCacheEntry {
             allocation,
             pin_count: AtomicUsize::new(0),
             is_dirty: AtomicUsize::new(0),
+            retired: false,
         }
     }
 
@@ -268,8 +271,18 @@ impl PageCacheManager {
     /// Decrements the pin count. When pin_count reaches 0, the page
     /// becomes eligible for eviction (if not locked).
     pub fn unpin(&self, id: CacheId, index: PageIndex) {
-        if let Some(entry) = self.entries.read().get(&(id, index)) {
+        let should_reclaim = self.entries.read().get(&(id, index)).is_some_and(|entry| {
             entry.unpin();
+            entry.retired && entry.pin_count() == 0
+        });
+        if should_reclaim {
+            let mut entries = self.entries.write();
+            if entries
+                .get(&(id, index))
+                .is_some_and(|entry| entry.retired && entry.pin_count() == 0)
+            {
+                entries.remove(&(id, index));
+            }
         }
     }
 
@@ -481,6 +494,50 @@ impl PageCacheManager {
     pub fn try_pin(&self, id: CacheId, index: PageIndex) -> Option<PinnedPage> {
         self.try_get_pinned(id, index)
             .map(|paddr| PinnedPage { id, index, paddr })
+    }
+
+    /// Zero cached bytes removed by a truncate without allocating sparse holes.
+    ///
+    /// The caller must serialize the object's data operations. Keep the pages
+    /// themselves alive: existing pins and mmap mappings may still refer to
+    /// their physical addresses. The work is bounded by cached pages, rather
+    /// than by the previous logical length, and cannot fail after zeroing starts.
+    /// Metadata/size publication remains the caller's responsibility.
+    pub fn zero_cached_tail(&self, id: CacheId, size: usize) {
+        use crate::environment::PAGE_SIZE;
+        use crate::vm::addr::phys_to_virt;
+
+        let first_page = (size / PAGE_SIZE) as PageIndex;
+        let tail_offset = size % PAGE_SIZE;
+        let entries = self.entries.write();
+        for (&(_, index), entry) in entries.range((id, first_page)..=(id, PageIndex::MAX)) {
+            let offset = if index == first_page { tail_offset } else { 0 };
+            // SAFETY: the cache owns this full page while the entries lock is
+            // held, and the caller holds its file's data-operation lock.
+            unsafe {
+                core::ptr::write_bytes(
+                    (phys_to_virt(entry.paddr()) as *mut u8).add(offset),
+                    0,
+                    PAGE_SIZE - offset,
+                );
+            }
+            entry.mark_dirty();
+        }
+    }
+
+    /// Retire the data of a permanently destroyed node. Its CacheId must not
+    /// be reused. Existing page guards may outlive the node, so release pinned
+    /// pages on final unpin instead of invalidating their physical addresses.
+    /// Unlike invalidation, this operation neither allocates nor frees a pin.
+    pub fn retire_object(&self, id: CacheId) {
+        self.entries.write().retain(|&(cache_id, _), entry| {
+            if cache_id != id {
+                return true;
+            }
+            entry.retired = true;
+            entry.pin_count() != 0
+        });
+        self.object_metadata.write().remove(&id);
     }
 
     /// Invalidate (drop) all cached pages belonging to the given CacheId.

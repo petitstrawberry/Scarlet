@@ -312,10 +312,33 @@ pub struct Ext2FileSystem {
     /// Per-inode locks serialize directory mutations and regular-file writes,
     /// size/timestamp publication, truncation, and writeback across open handles.
     inode_locks: IrqRwSpinLock<BTreeMap<u32, Arc<Mutex<()>>>>,
+    /// Live open descriptions, shared by all nodes and mount namespaces. The
+    /// last directory entry cannot be removed until these have been closed.
+    open_inodes: Arc<IrqSpinLock<BTreeMap<u32, usize>>>,
     #[cfg(test)]
     before_write_publish: IrqSpinLock<Option<fn(&Ext2FileSystem, u32, usize)>>,
     /// Global lock to serialize block allocation operations
     allocation_lock: Mutex<()>,
+}
+
+/// Counts one open description (dup shares the same object). Its final drop
+/// runs after Ext2FileObject's writeback, before a last-link unlink may proceed.
+#[derive(Debug)]
+pub(super) struct Ext2OpenGuard {
+    inode: u32,
+    counts: Arc<IrqSpinLock<BTreeMap<u32, usize>>>,
+}
+
+impl Drop for Ext2OpenGuard {
+    fn drop(&mut self) {
+        let mut counts = self.counts.lock();
+        if let Some(count) = counts.get_mut(&self.inode) {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(&self.inode);
+            }
+        }
+    }
 }
 
 /// Node in doubly-linked list for O(1) LRU operations for inodes
@@ -612,6 +635,7 @@ impl Ext2FileSystem {
             inode_cache: IrqRwSpinLock::new(InodeLruCache::new(8192)),
             block_cache: IrqRwSpinLock::new(BlockLruCache::new(8192)),
             inode_locks: IrqRwSpinLock::new(BTreeMap::new()),
+            open_inodes: Arc::new(IrqSpinLock::new(BTreeMap::new())),
             #[cfg(test)]
             before_write_publish: IrqSpinLock::new(None),
             allocation_lock: Mutex::new(()),
@@ -657,6 +681,16 @@ impl Ext2FileSystem {
                 FileSystemErrorKind::InvalidData,
                 "Device ID not resolved in parameters",
             ))
+        }
+    }
+
+    /// Caller holds this inode's operation lock. The token is released only
+    /// after final close writeback; separate aliases share this inode key.
+    fn pin_open_inode(&self, inode: u32) -> Ext2OpenGuard {
+        *self.open_inodes.lock().entry(inode).or_insert(0) += 1;
+        Ext2OpenGuard {
+            inode,
+            counts: self.open_inodes.clone(),
         }
     }
 
@@ -3063,6 +3097,13 @@ impl Ext2FileSystem {
 
         // Read the current inode
         let mut inode = self.read_inode(inode_num)?;
+        let old_size = u64::from(inode.get_size());
+        let content_size = u32::try_from(content.len()).map_err(|_| {
+            FileSystemError::new(
+                FileSystemErrorKind::ValueOverflow,
+                "ext2 content exceeds the supported 32-bit inode size",
+            )
+        })?;
 
         // Calculate the number of blocks needed
         let blocks_needed = if content.is_empty() {
@@ -3077,16 +3118,33 @@ impl Ext2FileSystem {
         // Allocate blocks as needed
         let mut block_list = Vec::new();
         let mut new_block_assignments = Vec::new(); // (logical_block_index, block_number)
+        new_block_assignments
+            .try_reserve_exact(blocks_needed as usize)
+            .map_err(|_| {
+                FileSystemError::new(
+                    FileSystemErrorKind::NoSpace,
+                    "Cannot allocate ext2 block assignments",
+                )
+            })?;
+        let mut added_indirect_blocks = 0u32;
         if blocks_needed > 0 {
             // Use batched block reading to get existing blocks
-            let existing_blocks = self.get_inode_blocks(&inode, 0, blocks_needed as u64)?;
+            block_list = self.get_inode_blocks(&inode, 0, blocks_needed as u64)?;
 
             // Find contiguous ranges of blocks that need allocation
             let mut allocation_ranges = Vec::new(); // (start_idx, count)
+            allocation_ranges
+                .try_reserve_exact(blocks_needed as usize)
+                .map_err(|_| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::NoSpace,
+                        "Cannot allocate ext2 allocation ranges",
+                    )
+                })?;
             let mut current_start = None;
             let mut current_count = 0;
 
-            for (block_idx, &existing_block) in existing_blocks.iter().enumerate() {
+            for (block_idx, &existing_block) in block_list.iter().enumerate() {
                 if existing_block == 0 {
                     // Need to allocate a new block
                     if current_start.is_none() {
@@ -3108,13 +3166,53 @@ impl Ext2FileSystem {
                         existing_block,
                         block_idx
                     );
-                    block_list.push(existing_block);
                 }
             }
 
             // Finalize any remaining allocation range
             if let Some(start) = current_start {
                 allocation_ranges.push((start, current_count));
+            }
+
+            // i_blocks counts allocated data AND indirect blocks, including
+            // allocations retained past EOF after an earlier shrink.
+            let pointers = u64::from(self.block_size / 4);
+            let double_start = 12 + pointers;
+            let mut counted_single = false;
+            let mut counted_double = false;
+            let mut previous_double_index = None;
+            let existing_double = if inode.block[13] != 0 {
+                Some(self.read_block_cached(u64::from(inode.block[13]))?)
+            } else {
+                None
+            };
+            for (logical, &block) in block_list.iter().enumerate() {
+                if block != 0 || logical < 12 {
+                    continue;
+                }
+                let logical = logical as u64;
+                if logical < double_start {
+                    if !counted_single && inode.block[12] == 0 {
+                        added_indirect_blocks += 1;
+                    }
+                    counted_single = true;
+                } else if logical < double_start + pointers * pointers {
+                    if !counted_double && inode.block[13] == 0 {
+                        added_indirect_blocks += 1;
+                    }
+                    counted_double = true;
+                    let index = (logical - double_start) / pointers;
+                    if previous_double_index != Some(index) {
+                        let pointer = existing_double.as_ref().map_or(0, |data| {
+                            let offset = index as usize * 4;
+                            u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+                        });
+                        if pointer == 0 {
+                            added_indirect_blocks += 1;
+                        }
+                        previous_double_index = Some(index);
+                    }
+                }
             }
 
             // Perform allocations using multi-block allocation where beneficial
@@ -3134,10 +3232,8 @@ impl Ext2FileSystem {
                         let logical_idx = start_idx + i;
                         new_block_assignments.push((logical_idx as u64, block_num as u32));
 
-                        // Insert at the correct position in block_list
-                        while block_list.len() <= logical_idx {
-                            block_list.push(0);
-                        }
+                        // Keep logical slots, including holes: compacting the
+                        // existing blocks would overwrite later block numbers.
                         block_list[logical_idx] = block_num;
 
                         #[cfg(test)]
@@ -3162,15 +3258,25 @@ impl Ext2FileSystem {
 
                         new_block_assignments.push((logical_idx as u64, new_block as u32));
 
-                        // Insert at the correct position in block_list
-                        while block_list.len() <= logical_idx {
-                            block_list.push(0);
-                        }
                         block_list[logical_idx] = new_block;
                     }
                 }
             }
         }
+
+        // Shrinking currently retains allocation. Do not pretend its sectors
+        // were freed, and include newly allocated indirect tables on growth.
+        let allocated_sectors = u32::try_from(new_block_assignments.len())
+            .ok()
+            .and_then(|count| count.checked_add(added_indirect_blocks))
+            .and_then(|count| count.checked_mul(self.block_size / 512))
+            .and_then(|sectors| inode.blocks.checked_add(sectors))
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::ValueOverflow,
+                    "ext2 allocated sector count overflow",
+                )
+            })?;
 
         // Apply all new block assignments at once using simple batch function
         if !new_block_assignments.is_empty() {
@@ -3188,7 +3294,16 @@ impl Ext2FileSystem {
             }
 
             let bytes_to_write = core::cmp::min(remaining, self.block_size as usize);
-            let mut block_data = vec![0u8; self.block_size as usize];
+            let mut block_data = Vec::new();
+            block_data
+                .try_reserve_exact(self.block_size as usize)
+                .map_err(|_| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::NoSpace,
+                        "Cannot allocate ext2 content write buffer",
+                    )
+                })?;
+            block_data.resize(self.block_size as usize, 0);
 
             // Copy content to block buffer
             block_data[..bytes_to_write]
@@ -3206,6 +3321,10 @@ impl Ext2FileSystem {
 
             remaining -= bytes_to_write;
             content_offset += bytes_to_write;
+            if write_blocks.len() == 64 {
+                self.write_blocks_cached(&write_blocks)?;
+                write_blocks.clear();
+            }
         }
 
         // Write all content blocks in one batch
@@ -3218,15 +3337,18 @@ impl Ext2FileSystem {
             self.write_blocks_cached(&write_blocks)?;
         }
 
+        if u64::from(content_size) < old_size {
+            self.zero_retained_file_tail(&inode, u64::from(content_size), old_size)?;
+        }
+
         // Update inode size, block count, and modification time
-        inode.size = content.len() as u32;
+        inode.size = content_size;
         if let Some(time) = current_timestamp() {
             inode.mtime = time.to_le();
             inode.ctime = time.to_le();
         }
 
-        // Update i_blocks field (count in 512-byte sectors)
-        inode.blocks = blocks_needed * (self.block_size / 512);
+        inode.blocks = allocated_sectors;
 
         // Write updated inode to disk
         self.write_inode(inode_num, &inode)?;
@@ -3237,6 +3359,46 @@ impl Ext2FileSystem {
             cache.insert(inode_num, inode);
         }
 
+        Ok(())
+    }
+
+    /// Zero allocated blocks removed from EOF while retaining their allocation.
+    ///
+    /// The partial final block is already zero-padded by write_file_content.
+    /// Clearing the remaining allocated blocks prevents a later sparse write
+    /// from exposing discarded bytes after it grows the inode. Holes are not
+    /// allocated, and both block lookup and transfer memory are bounded to 64
+    /// filesystem blocks. This is not transactional: an I/O failure can leave
+    /// already written data/metadata changed even though the size is uncommitted.
+    fn zero_retained_file_tail(
+        &self,
+        inode: &Ext2Inode,
+        new_size: u64,
+        old_size: u64,
+    ) -> Result<(), FileSystemError> {
+        let block_size = u64::from(self.block_size);
+        let mut first = new_size.div_ceil(block_size);
+        let end = old_size.div_ceil(block_size);
+        while first < end {
+            let count = (end - first).min(64);
+            let blocks = self.get_inode_blocks(inode, first, count)?;
+            let mut writes = BTreeMap::new();
+            for block in blocks.into_iter().filter(|block| *block != 0) {
+                let mut zeroes = Vec::new();
+                zeroes
+                    .try_reserve_exact(self.block_size as usize)
+                    .map_err(|_| {
+                        FileSystemError::new(
+                            FileSystemErrorKind::NoSpace,
+                            "Cannot allocate ext2 truncate zero buffer",
+                        )
+                    })?;
+                zeroes.resize(self.block_size as usize, 0);
+                writes.insert(block, zeroes);
+            }
+            self.write_blocks_cached(&writes)?;
+            first += count;
+        }
         Ok(())
     }
 
@@ -4665,6 +4827,10 @@ impl Ext2FileSystem {
 }
 
 impl FileSystemOperations for Ext2FileSystem {
+    fn supports_advisory_locks(&self) -> bool {
+        true
+    }
+
     fn fs_id(&self) -> FileSystemId {
         self.fs_id
     }
@@ -4796,9 +4962,12 @@ impl FileSystemOperations for Ext2FileSystem {
                         "Node is not an Ext2Node",
                     )
                 })?;
-                let file_obj = Arc::new(Ext2FileObject::new(
+                let inode_lock = self.get_inode_lock(ext2_node.inode_number());
+                let _inode_guard = inode_lock.lock();
+                let file_obj = Arc::new(Ext2FileObject::with_open_guard(
                     ext2_node.inode_number(),
                     ext2_node.id(),
+                    self.pin_open_inode(ext2_node.inode_number()),
                 ));
 
                 // Set filesystem reference
@@ -4818,9 +4987,12 @@ impl FileSystemOperations for Ext2FileSystem {
                         "Node is not an Ext2Node",
                     )
                 })?;
-                let dir_obj = Arc::new(Ext2DirectoryObject::new(
+                let inode_lock = self.get_inode_lock(ext2_node.inode_number());
+                let _inode_guard = inode_lock.lock();
+                let dir_obj = Arc::new(Ext2DirectoryObject::with_open_guard(
                     ext2_node.inode_number(),
                     ext2_node.id(),
+                    self.pin_open_inode(ext2_node.inode_number()),
                 ));
 
                 // Set filesystem reference
@@ -4843,8 +5015,13 @@ impl FileSystemOperations for Ext2FileSystem {
                         "Node is not an Ext2Node",
                     )
                 })?;
-                let char_device_obj =
-                    Arc::new(Ext2CharDeviceFileObject::new(device_info, ext2_node.id()));
+                let inode_lock = self.get_inode_lock(ext2_node.inode_number());
+                let _inode_guard = inode_lock.lock();
+                let char_device_obj = Arc::new(Ext2CharDeviceFileObject::with_open_guard(
+                    device_info,
+                    ext2_node.id(),
+                    self.pin_open_inode(ext2_node.inode_number()),
+                ));
 
                 // Set filesystem reference
                 if let Some(fs_weak) = ext2_node.filesystem() {
@@ -5211,28 +5388,68 @@ impl FileSystemOperations for Ext2FileSystem {
         })?;
 
         let inode_number = ext2_node.inode_number();
-
-        // Check if the node being deleted is a directory
-        let is_directory = match ext2_node.file_type() {
-            Ok(FileType::Directory) => true,
-            _ => false,
-        };
+        if inode_number == ext2_parent.inode_number() || inode_number == self.root_inode {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::Busy,
+                "Cannot remove ext2 root/self",
+            ));
+        }
+        let target_lock = self.get_inode_lock(inode_number);
+        let _target_guard = target_lock.lock();
+        let mut inode = self.read_inode(inode_number)?;
+        let is_directory = inode.is_dir();
+        if is_directory
+            && self
+                .readdir(&node)?
+                .iter()
+                .any(|entry| entry.name != "." && entry.name != "..")
+        {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::DirectoryNotEmpty,
+                "Directory not empty",
+            ));
+        }
+        // cwd and retained directory entries are not open descriptions, and
+        // separate mount namespaces can hold distinct nodes for this inode.
+        // Reject deletion until those references participate in inode lifetime;
+        // freeing it here would let a stale cwd access a subsequently reused inode.
+        if is_directory {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Ext2 directory removal requires retained-node lifetime tracking",
+            ));
+        }
+        let links = inode.get_links_count();
+        let reclaim = links <= 1;
+        // Until deferred deletion exists, reject last-link removal while any
+        // description still refers to the inode. This is shared across aliases
+        // and mount namespaces, so the inode cannot be reused under a live fd.
+        if reclaim
+            && self
+                .open_inodes
+                .lock()
+                .get(&inode_number)
+                .copied()
+                .unwrap_or(0)
+                != 0
+        {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::Busy,
+                "Open ext2 inode cannot be unlinked yet",
+            ));
+        }
 
         // Remove the directory entry from the parent directory
         self.remove_directory_entry(ext2_parent.inode_number(), name)?;
 
-        // If deleting a directory, update parent directory's link count
-        // (removing the ".." entry decrements parent's link count)
-        if is_directory {
-            let mut parent_inode = self.read_inode(ext2_parent.inode_number())?;
-            let current_links = u16::from_le(parent_inode.links_count);
-            if current_links > 0 {
-                parent_inode.links_count = (current_links - 1).to_le();
-                self.write_inode(ext2_parent.inode_number(), &parent_inode)?;
-            }
+        if !reclaim {
+            // Other hard links still own the inode and its cached contents.
+            inode.links_count = (links - 1).to_le();
+            self.write_inode(inode_number, &inode)?;
+            return Ok(());
         }
 
-        // Free the inode and its data blocks
+        // Free only the last link, after the open-description check above.
         self.free_inode(inode_number)?;
 
         // Invalidate page cache entries for this file to avoid stale data after delete/recreate

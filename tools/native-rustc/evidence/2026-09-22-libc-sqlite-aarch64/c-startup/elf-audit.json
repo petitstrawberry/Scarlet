@@ -1,0 +1,24 @@
+[
+  {
+    "path": "/private/tmp/scarlet-libc-sqlite-c-startup-aarch64/c-startup-probe",
+    "sha256": "dc09e94f550a7bed7a9937f7e9307d6dfd409080bae723ec7f34b986c7789e0a",
+    "bytes": 102112,
+    "elf_type": "EXEC",
+    "machine": "aarch64",
+    "osabi": 83,
+    "entry": 2114148,
+    "interpreter": null,
+    "needed": [],
+    "rpath": null,
+    "runpath": null,
+    "soname": null,
+    "tls": [],
+    "relocations": {},
+    "undefined_relocated_symbols": [],
+    "hash_tables": [],
+    "textrel": false,
+    "relr": false,
+    "symbol_versioning": false,
+    "init_fini": []
+  }
+]

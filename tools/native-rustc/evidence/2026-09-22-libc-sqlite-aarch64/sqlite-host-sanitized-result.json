@@ -1,0 +1,35 @@
+{
+  "scope": "Host ASan/UBSan SQLite+VFS fixture validation; host-only getentropy adapter supplies getrandom",
+  "results": [
+    {
+      "phase": "create",
+      "mode": "create",
+      "exit_code": 53,
+      "stdout": "SCARLET_SQLITE VFS PASS\nSCARLET_SQLITE TRANSACTIONS PASS\nSCARLET_SQLITE REOPEN PASS\nSCARLET_SQLITE CREATE PASS\nSCARLET_SQLITE 3.53.4 PASS\nSCARLET_LIBC_SQLITE_OK\n",
+      "stderr": ""
+    },
+    {
+      "phase": "verify",
+      "mode": "verify",
+      "exit_code": 53,
+      "stdout": "SCARLET_SQLITE REOPEN PASS\nSCARLET_SQLITE VERIFY PASS\nSCARLET_SQLITE 3.53.4 PASS\nSCARLET_LIBC_SQLITE_OK\n",
+      "stderr": ""
+    },
+    {
+      "phase": "crash",
+      "mode": "crash",
+      "exit_code": -6,
+      "stdout": "SCARLET_SQLITE DIRTY_DATABASE_AND_HOT_JOURNAL PASS\nSCARLET_LIBC_SQLITE_CRASH_READY\n",
+      "stderr": ""
+    },
+    {
+      "phase": "recover",
+      "mode": "verify",
+      "exit_code": 53,
+      "stdout": "SCARLET_SQLITE REOPEN PASS\nSCARLET_SQLITE VERIFY PASS\nSCARLET_SQLITE 3.53.4 PASS\nSCARLET_LIBC_SQLITE_OK\n",
+      "stderr": ""
+    }
+  ],
+  "restored_database_sha256": "a3aaa4fabbe065947a5b2d6431653dda7363eb69dbd8e64306211216f585fd22",
+  "binary_sha256": "5761dc052aab3bfbd04daf89d42f28f0177eea9a7decaf5bf3b316a26967f76d"
+}

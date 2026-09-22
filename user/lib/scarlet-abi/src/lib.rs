@@ -927,6 +927,15 @@ pub enum Syscall {
     FileSync = 304,
     /// (fd, Native i64 offset, whence, u64* output): zero or -errno.
     FileSeekWithStatus = 305,
+    /// (fd, Native i64 length): zero or -errno; preserves the open-file cursor.
+    FileTruncateWithStatus = 306,
+    // 307 is reserved for a future metadata operation.
+    /// (fd, buffer, count, Native i64 offset): byte count or -errno; preserves cursor.
+    FileReadAtWithStatus = 308,
+    /// Positioned write ignores append status and preserves the open-file cursor.
+    FileWriteAtWithStatus = 309,
+    /// (fd, operation): nonblocking whole-file advisory lock, zero or -errno.
+    FileLock = 310,
 
     // VFS operations
     VfsOpen = 400,
@@ -953,6 +962,8 @@ pub enum Syscall {
     VfsCreateDirectoryWithStatus = 416,
     /// (base, path, flags, mode): descriptor or -errno.
     VfsOpenAt = 417,
+    /// (path, flags): remove a file or directory, returning zero or -errno.
+    VfsRemoveWithStatus = 418,
 
     // Filesystem operations
     FsMount = 500,

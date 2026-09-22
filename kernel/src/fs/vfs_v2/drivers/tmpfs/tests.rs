@@ -64,6 +64,76 @@ mod tests {
     }
 
     #[test_case]
+    fn test_truncate_preserves_cursor_and_failed_growth_preserves_contents() {
+        use crate::fs::vfs_v2::core::FileSystemOperations;
+
+        let tmpfs = TmpFS::new(8);
+        let node = tmpfs
+            .create(
+                &tmpfs.root_node(),
+                &"truncate".to_string(),
+                FileType::RegularFile,
+                0o644,
+            )
+            .unwrap();
+        let file = tmpfs.open(&node, 0).unwrap();
+        file.write(b"abcdefgh").unwrap();
+        file.seek_signed(123, 0).unwrap();
+        file.truncate(4).unwrap();
+        assert_eq!(file.seek_signed(0, 1).unwrap(), 123);
+        file.truncate(8).unwrap();
+        assert_eq!(file.seek_signed(0, 1).unwrap(), 123);
+        assert_no_space_error(file.truncate(9).unwrap_err());
+        assert!(matches!(file.truncate(u64::MAX),
+            Err(StreamError::FileSystemError(error))
+            if error.kind == FileSystemErrorKind::ValueOverflow));
+        assert!(matches!(file.write_at(isize::MAX as u64, b"X"),
+            Err(StreamError::FileSystemError(error))
+            if error.kind == FileSystemErrorKind::ValueOverflow));
+        assert_eq!(file.metadata().unwrap().size, 8);
+        assert_eq!(file.seek_signed(0, 1).unwrap(), 123);
+        let mut bytes = [1; 8];
+        assert_eq!(file.read_at(0, &mut bytes).unwrap(), 8);
+        assert_eq!(&bytes, b"abcd\0\0\0\0");
+    }
+
+    #[test_case]
+    fn test_sparse_truncate_only_clears_existing_pages() {
+        use crate::fs::vfs_v2::core::FileSystemOperations;
+
+        let tmpfs = TmpFS::new(0);
+        let node = tmpfs
+            .create(
+                &tmpfs.root_node(),
+                &"sparse-truncate".to_string(),
+                FileType::RegularFile,
+                0o644,
+            )
+            .unwrap();
+        let file = tmpfs.open(&node, 0).unwrap();
+        file.write(b"abcd").unwrap();
+        // Only two pages exist despite a near-address-limit logical length.
+        // Truncating it must neither scan nor allocate all the intervening holes.
+        let far = isize::MAX as u64 - 1;
+        assert_eq!(file.write_at(far, b"X").unwrap(), 1);
+        assert_eq!(file.metadata().unwrap().size, isize::MAX as usize);
+        file.truncate(2).unwrap();
+        assert_eq!(file.seek_signed(0, 1).unwrap(), 4);
+        file.truncate(far + 1).unwrap();
+        let mut last = [1];
+        assert_eq!(file.read_at(far, &mut last).unwrap(), 1);
+        assert_eq!(last, [0]);
+        file.truncate(6).unwrap();
+        let mut prefix = [1; 6];
+        assert_eq!(file.read_at(0, &mut prefix).unwrap(), 6);
+        assert_eq!(&prefix, b"ab\0\0\0\0");
+        file.truncate(0).unwrap();
+        file.truncate(6).unwrap();
+        assert_eq!(file.read_at(0, &mut prefix).unwrap(), 6);
+        assert_eq!(prefix, [0; 6]);
+    }
+
+    #[test_case]
     fn test_append_tracks_shared_eof_and_keeps_failed_write_cursor() {
         use crate::fs::vfs_v2::core::FileSystemOperations;
 
@@ -240,6 +310,144 @@ mod tests {
         let (entry, _) = vfs.mount_tree.resolve_path("/link.txt").unwrap();
         let metadata = entry.node().metadata().unwrap();
         assert_eq!(metadata.link_count, 1);
+    }
+
+    #[test_case]
+    fn test_unlink_open_descriptions_keep_data_and_quota_until_final_node_drop() {
+        use crate::fs::vfs_v2::cache::CacheId;
+        use crate::fs::vfs_v2::core::FileSystemOperations;
+        use crate::mem::page_cache::PageCacheManager;
+
+        let tmpfs = TmpFS::new(8);
+        let fs_id = tmpfs.fs_id().get();
+        let vfs = VfsManager::new_with_root(tmpfs);
+        vfs.create_file("/same", FileType::RegularFile).unwrap();
+        let original = vfs.open("/same", 0x02).unwrap();
+        original.as_stream().unwrap().write(b"keep").unwrap();
+        let duplicate = original.clone();
+        let separate = vfs.open("/same", 0x02).unwrap();
+        let old_id = original.as_file().unwrap().metadata().unwrap().file_id;
+        let old_cache = CacheId::new((fs_id << 32) | (old_id & 0xFFFF_FFFF));
+        drop(original);
+        vfs.remove("/same").unwrap();
+        assert_eq!(
+            duplicate.as_file().unwrap().metadata().unwrap().link_count,
+            0
+        );
+        let mut bytes = [0; 4];
+        assert_eq!(
+            duplicate.as_file().unwrap().read_at(0, &mut bytes).unwrap(),
+            4
+        );
+        assert_eq!(&bytes, b"keep");
+        vfs.create_file("/same", FileType::RegularFile).unwrap();
+        let replacement = vfs.open("/same", 0x02).unwrap();
+        assert_ne!(
+            replacement.as_file().unwrap().metadata().unwrap().file_id,
+            old_id
+        );
+        replacement.as_stream().unwrap().write(b"NEW!").unwrap();
+        // The unlinked file still consumes its quota and remains writable.
+        assert_no_space_error(replacement.as_file().unwrap().truncate(5).unwrap_err());
+        assert_eq!(duplicate.as_file().unwrap().write_at(0, b"K").unwrap(), 1);
+        assert_eq!(
+            separate.as_file().unwrap().read_at(0, &mut bytes).unwrap(),
+            4
+        );
+        assert_eq!(&bytes, b"Keep");
+        assert_eq!(
+            replacement
+                .as_file()
+                .unwrap()
+                .read_at(0, &mut bytes)
+                .unwrap(),
+            4
+        );
+        assert_eq!(&bytes, b"NEW!");
+        drop(duplicate);
+        assert_no_space_error(replacement.as_file().unwrap().truncate(5).unwrap_err());
+        assert_eq!(
+            PageCacheManager::global().cached_object_size(old_cache),
+            Some(4)
+        );
+        drop(separate);
+        assert_eq!(
+            PageCacheManager::global().cached_object_size(old_cache),
+            None
+        );
+        replacement.as_file().unwrap().truncate(8).unwrap();
+    }
+
+    #[test_case]
+    fn test_tmpfs_final_node_drop_reclaims_cache_after_filesystem_teardown() {
+        use crate::fs::vfs_v2::cache::CacheId;
+        use crate::fs::vfs_v2::core::FileSystemOperations;
+        use crate::mem::page_cache::PageCacheManager;
+
+        let tmpfs = TmpFS::new(0);
+        let node = tmpfs
+            .create(
+                &tmpfs.root_node(),
+                &"drop".to_string(),
+                FileType::RegularFile,
+                0o600,
+            )
+            .unwrap();
+        let cache = CacheId::new((tmpfs.fs_id().get() << 32) | (node.id() & 0xFFFF_FFFF));
+        let file = tmpfs.open(&node, 0).unwrap();
+        file.write(b"owned").unwrap();
+        drop(file);
+        assert_eq!(
+            PageCacheManager::global().cached_object_size(cache),
+            Some(5)
+        );
+        drop(tmpfs); // Weak filesystem reference can no longer be upgraded.
+        assert_eq!(
+            PageCacheManager::global().cached_object_size(cache),
+            Some(5)
+        );
+        drop(node);
+        assert_eq!(PageCacheManager::global().cached_object_size(cache), None);
+    }
+
+    #[test_case]
+    fn test_unlinked_node_final_drop_preserves_live_page_pin() {
+        use crate::fs::vfs_v2::cache::CacheId;
+        use crate::fs::vfs_v2::core::FileSystemOperations;
+        use crate::mem::page_cache::PageCacheManager;
+        use crate::vm::addr::phys_to_virt;
+
+        let tmpfs = TmpFS::new(0);
+        let node = tmpfs
+            .create(
+                &tmpfs.root_node(),
+                &"pinned".to_string(),
+                FileType::RegularFile,
+                0o600,
+            )
+            .unwrap();
+        let cache = CacheId::new((tmpfs.fs_id().get() << 32) | (node.id() & 0xFFFF_FFFF));
+        let file = tmpfs.open(&node, 0).unwrap();
+        file.write(b"pinned").unwrap();
+        let pin = PageCacheManager::global()
+            .pin_or_load(cache, 0, |_| Err("must already be cached"))
+            .unwrap();
+        tmpfs
+            .remove(&tmpfs.root_node(), &"pinned".to_string())
+            .unwrap();
+        drop(file);
+        drop(node);
+        assert_eq!(PageCacheManager::global().cached_object_size(cache), None);
+        assert_eq!(
+            PageCacheManager::global().try_get_pinned(cache, 0),
+            Some(pin.paddr())
+        );
+        PageCacheManager::global().unpin(cache, 0);
+        let bytes =
+            unsafe { core::slice::from_raw_parts(phys_to_virt(pin.paddr()) as *const u8, 6) };
+        assert_eq!(bytes, b"pinned");
+        drop(pin);
+        assert_eq!(PageCacheManager::global().try_get_pinned(cache, 0), None);
     }
 
     /// Test hardlink link count metadata

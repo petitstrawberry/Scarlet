@@ -1,0 +1,12 @@
+   Compiling native-rustc-probe v0.1.0 (/Users/petitstrawberry/Development/Rust/Scarlet/tools/native-rustc)
+    Finished `release` profile [optimized] target(s) in 1.03s
+     Running unittests probe.rs (/tmp/scarlet-sqlite-harness-host/aarch64-apple-darwin/release/deps/native_rustc_probe-df68aebb821afb4c)
+
+running 4 tests
+test tests::legacy_modes_never_select_full ... ok
+test tests::full_requires_a_real_linker_and_forbids_dummy ... ok
+test tests::bounded_timeouts_and_unknown_flags ... ok
+test tests::sqlite_consumer_requires_a_nonempty_path ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

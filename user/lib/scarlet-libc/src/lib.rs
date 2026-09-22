@@ -21,12 +21,15 @@ use scarlet_abi::Syscall;
 #[cfg(any(test, target_os = "scarlet"))]
 use scarlet_abi::fs::*;
 
+pub mod algorithms;
 pub mod allocation;
 pub mod conversion;
 pub mod descriptor;
 mod errno;
 #[cfg(any(test, target_os = "scarlet"))]
 mod formatting;
+pub mod path;
+pub mod runtime;
 #[cfg(any(test, target_os = "scarlet"))]
 pub mod stdio;
 pub mod strings;

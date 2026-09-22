@@ -1,0 +1,43 @@
+warning: Git tree '/Users/petitstrawberry/Development/Rust/Scarlet' is dirty
+UEFI firmware (version edk2-stable202408-prebuilt.qemu.org built at 16:28:50 on Sep 12 2024)
+ArmTrngLib could not be correctly initialized.
+Error: Image at 0013FDB6000 start failed: 00000001
+Error: Image at 0013FD6D000 start failed: Not Found
+Error: Image at 0013FCBA000 start failed: Unsupported
+Error: Image at 0013FC3F000 start failed: Not Found
+Error: Image at 0013FB65000 start failed: Aborted
+Tpm2SubmitCommand - Tcg2 - Not Found
+Tpm2GetCapabilityPcrs fail!
+Tpm2SubmitCommand - Tcg2 - Not Found
+Image type X64 can't be loaded on AARCH64 UEFI system.
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI Non-Block Boot Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,0000000A00000000)
+BdsDxe: starting Boot0001 "UEFI Non-Block Boot Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,0000000A00000000)
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+[01;01H[01;01H[01;01Hl[01;02Hi[01;03Hm[01;04Hi[01;05Hn[01;06He[01;07H:[01;08H [01;09HL[01;10Ho[01;11Ha[01;12Hd[01;13Hi[01;14Hn[01;15Hg[01;16H [01;17He[01;18Hx[01;19He[01;20Hc[01;21Hu[01;22Ht[01;23Ha[01;24Hb[01;25Hl[01;26He[01;27H [01;28H`[01;29Hb[01;30Ho[01;31Ho[01;32Ht[01;33H([01;34H)[01;35H:[01;36H/[01;37Hb[01;38Ho[01;39Ho[01;40Ht[01;41H/[01;42Hk[01;43He[01;44Hr[01;45Hn[01;46He[01;47Hl[01;48H`[01;49H.[01;50H.[01;51H.[01;52H[01;01H[02;01Hl[02;02Hi[02;03Hm[02;04Hi[02;05Hn[02;06He[02;07H:[02;08H [02;09HL[02;10Ho[02;11Ha[02;12Hd[02;13Hi[02;14Hn[02;15Hg[02;16H [02;17Hm[02;18Ho[02;19Hd[02;20Hu[02;21Hl[02;22He[02;23H [02;24H`[02;25Hb[02;26Ho[02;27Ho[02;28Ht[02;29H([02;30H)[02;31H:[02;32H/[02;33Hb[02;34Ho[02;35Ho[02;36Ht[02;37H/[02;38Hi[02;39Hn[02;40Hi[02;41Ht[02;42Hr[02;43Ha[02;44Hm[02;45Hf[02;46Hs[02;47H-[02;48Ha[02;49Ha[02;50Hr[02;51Hc[02;52Hh[02;53H6[02;54H4[02;55H.[02;56Hc[02;57Hp[02;58Hi[02;59Ho[02;60H`[02;61H.[02;62H.[02;63H.[02;64H[02;01H[03;01Hinit: rootwait: /dev/vblk1 mounted after 1 attempt(s)
+init: starting /system/bin/native-rustc-probe in the default Environment
+NATIVE_RUSTC ERRNO_RUNTIME PASS constructor + first child access + destructor + backend ENOMEM
+NATIVE_RUSTC MODE full output=/native-rustc-output
+NATIVE_RUSTC PROCESS_RUNTIME START
+NATIVE_RUSTC CWD /
+NATIVE_RUSTC SYSTEM_TIME PASS unix_seconds=1790066452
+NATIVE_RUSTC THREAD START
+NATIVE_RUSTC THREAD CHILD
+NATIVE_RUSTC THREAD PASS
+NATIVE_RUSTC SCOPED_THREAD START
+NATIVE_RUSTC SCOPED_THREAD PASS
+NATIVE_RUSTC FILESYSTEM START
+NATIVE_RUSTC LIBC_ABORT PASS assertion diagnostic + abnormal termination
+NATIVE_RUSTC FILESYSTEM fixture=/native-rustc-output/fs-ext2
+NATIVE_RUSTC LIBC_SURFACE PASS strings + conversions + descriptors + stdio
+NATIVE_RUSTC LIBC_DATABASE_APIS PASS algorithms + positioned I/O + locks + paths + runtime
+NATIVE_RUSTC FILESYSTEM fixture=/native-rustc-output/mount-parent/fs-tmpfs
+NATIVE_RUSTC LIBC_SURFACE PASS strings + conversions + descriptors + stdio
+
+thread 'main' (1) panicked at native_fs.rs:128:5:
+assertion `left == right` failed: C path check failed at path.c:73
+  left: 73
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+Native rustc (full): guest panic (artifacts: /private/tmp/scarlet-libc-sqlite-aarch64-v1)

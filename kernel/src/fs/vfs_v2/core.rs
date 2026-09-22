@@ -273,6 +273,15 @@ pub trait FileSystemOperations: Send + Sync {
     /// in combination with file identifiers to create globally unique cache keys.
     fn fs_id(&self) -> FileSystemId;
 
+    /// Whether `(fs_id(), VfsNode::id())` is a safe advisory-lock identity.
+    ///
+    /// All aliases, including hard links, must keep the same node ID, and a
+    /// live open description must prevent reuse of its inode identity. A
+    /// path-based identity (such as the current overlay nodes) is insufficient.
+    fn supports_advisory_locks(&self) -> bool {
+        false
+    }
+
     /// Look up a child node by name within a parent directory
     ///
     /// This is the heart of the new driver API. It takes a parent directory's
@@ -412,6 +421,9 @@ impl fmt::Debug for dyn FileSystemOperations {
 /// This wrapper provides the VFS layer with access to path hierarchy information
 /// while delegating actual file operations to the underlying FileSystem implementation.
 pub struct VfsFileObject {
+    /// Advisory locks belong to the open description, so dup/fork share them.
+    /// Drop this before the backing file can release/reuse its inode identity.
+    lock_owner: super::file_lock::LockOwner,
     /// The underlying FileObject from the filesystem implementation
     inner: Arc<dyn FileObject>,
     /// The VfsEntry this FileObject was created from (for *at syscalls)
@@ -438,6 +450,7 @@ impl VfsFileObject {
             mount_point,
             original_path,
             status_flags: AtomicU32::new(0),
+            lock_owner: super::file_lock::LockOwner::new(),
         }
     }
 
@@ -455,6 +468,10 @@ impl VfsFileObject {
 
     pub fn status_flags(&self) -> u32 {
         self.status_flags.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn lock_owner(&self) -> &super::file_lock::LockOwner {
+        &self.lock_owner
     }
 
     pub fn set_append(&self, append: bool) {

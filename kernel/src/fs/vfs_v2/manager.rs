@@ -32,7 +32,8 @@ const O_CLOEXEC: u32 = 0x80000;
 // Filesystems can be shared by independent mount namespaces, so a per-manager
 // lock would not exclude their create/unlink/rename operations. This sleepable
 // lock covers VFS namespace mutations through opening the newly created node.
-// Write-mode opens participate because OverlayFS may create upper-layer entries.
+// All opens participate so lookup and driver-open cannot straddle unlink and
+// inode reuse. Write-mode opens can additionally create OverlayFS entries.
 // Do not reacquire it from driver callbacks or from delegating VFS helpers.
 static NAMESPACE_MUTATIONS: Mutex<()> = Mutex::new(());
 
@@ -487,19 +488,15 @@ impl VfsManager {
     /// the filesystem cannot be resolved.
     /// Exclusive creation also rejects existing entries, invalid final names,
     /// creation failures, and namespace contention in non-preemptible context.
-    /// Write-mode opens also report `Busy` on that contention, since overlay
-    /// copy-up can mutate the namespace. Reads and writes on open handles do not
+    /// All opens report `Busy` on that contention, since lookup and driver open
+    /// must not straddle unlink/inode reuse. Reads and writes on open handles do not
     /// acquire this namespace lock.
     ///
     pub fn open(&self, path: &str, flags: u32) -> Result<KernelObject, FileSystemError> {
         if flags & (O_CREAT | O_EXCL) == (O_CREAT | O_EXCL) {
             return self.create_new_and_open(path, flags);
         }
-        let _namespace_guard = if flags & 0x3 != 0 {
-            Some(lock_namespace_mutations()?)
-        } else {
-            None
-        };
+        let _namespace_guard = lock_namespace_mutations()?;
         // Use MountTreeV2 to resolve filesystem and relative path, then open
         let (entry, mount_point) = self.resolve_path(path)?;
         let node = entry.node();
@@ -889,11 +886,67 @@ impl VfsManager {
     /// Returns `Busy` if namespace mutation would block with preemption disabled.
     ///
     pub fn remove(&self, path: &str) -> Result<(), FileSystemError> {
+        self.remove_impl(path, None)
+    }
+
+    /// Remove a final directory entry with unlink/rmdir type checking. Both
+    /// validation and mutation use the namespace guard so another namespace
+    /// cannot replace the checked entry before the driver removes it.
+    pub fn remove_with_kind(&self, path: &str, directory: bool) -> Result<(), FileSystemError> {
+        self.remove_impl(path, Some(directory))
+    }
+
+    fn remove_impl(&self, path: &str, directory: Option<bool>) -> Result<(), FileSystemError> {
         let _namespace_guard = lock_namespace_mutations()?;
+        if directory.is_some() && path.is_empty() {
+            return Err(vfs_error(
+                FileSystemErrorKind::NotFound,
+                "Empty remove pathname",
+            ));
+        }
+        // Shared filesystem contexts can change cwd concurrently. Anchor once
+        // so the target check and parent lookup use the same directory, while
+        // retaining symlink/.. and trailing slash semantics for the path walker.
+        let anchored_path = self.resolve_path_to_absolute(path);
+        let path = anchored_path.as_str();
+        // A trailing slash must never make the check refer to a symlink target
+        // while the filesystem callback removes the symlink itself. Preserve
+        // all intermediate components, but require an actual final directory.
+        let lookup = if directory.is_some() {
+            path.trim_end_matches('/')
+        } else {
+            path
+        };
+        let lookup = if lookup.is_empty() && path.starts_with('/') {
+            "/"
+        } else {
+            lookup
+        };
         // Resolve the entry to be removed - use no_follow to follow intermediate symlinks
         // but not the final component (like POSIX rm behavior)
         let options = PathResolutionOptions::no_follow();
-        let (entry_to_remove, mount_point) = self.resolve_path_with_options(path, &options)?;
+        let (entry_to_remove, mount_point) = self.resolve_path_with_options(lookup, &options)?;
+        if let Some(directory) = directory {
+            let is_directory = entry_to_remove.node().is_directory()?;
+            if (path.ends_with('/') || directory) && !is_directory {
+                return Err(vfs_error(
+                    FileSystemErrorKind::NotADirectory,
+                    "Removal requires a directory",
+                ));
+            }
+            if !directory && is_directory {
+                return Err(vfs_error(
+                    FileSystemErrorKind::IsADirectory,
+                    "Cannot unlink a directory",
+                ));
+            }
+            if Arc::ptr_eq(&entry_to_remove, &mount_point.root) {
+                return Err(vfs_error(
+                    FileSystemErrorKind::Busy,
+                    "Cannot remove a mount root",
+                ));
+            }
+        }
         #[cfg(feature = "network")]
         let socket_id = entry_to_remove
             .node()
@@ -910,13 +963,23 @@ impl VfsManager {
             .is_entry_used_in_mount(&entry_to_remove, &mount_point)
         {
             return Err(vfs_error(
-                FileSystemErrorKind::NotSupported,
+                if directory.is_some() {
+                    FileSystemErrorKind::Busy
+                } else {
+                    FileSystemErrorKind::NotSupported
+                },
                 "Resource is busy",
             ));
         }
 
         // Split path into parent and filename
         let (parent_path, filename) = self.split_parent_child(path)?;
+        if directory.is_some() && (filename == "." || filename == "..") {
+            return Err(vfs_error(
+                FileSystemErrorKind::InvalidPath,
+                "Cannot remove dot entries",
+            ));
+        }
 
         // Resolve parent directory using MountTreeV2 (follow all symlinks for parent path)
         let parent_entry = self.resolve_path(&parent_path)?.0;
@@ -929,6 +992,17 @@ impl VfsManager {
             .ok_or_else(|| {
                 FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference")
             })?;
+        if directory == Some(true)
+            && filesystem
+                .readdir(&entry_to_remove.node())?
+                .iter()
+                .any(|entry| entry.name != "." && entry.name != "..")
+        {
+            return Err(vfs_error(
+                FileSystemErrorKind::DirectoryNotEmpty,
+                "Directory not empty",
+            ));
+        }
         filesystem.remove(&parent_node, &filename)?;
 
         // Remove from parent cache
@@ -1689,9 +1763,9 @@ impl VfsManager {
     /// responsibility in this path.
     ///
     /// # Errors
-    /// Returns path resolution or filesystem open errors. Write-mode opens also
+    /// Returns path resolution or filesystem open errors. All opens also
     /// return `Busy` if namespace mutation would block with preemption disabled;
-    /// overlay copy-up must be serialized with exclusive creation.
+    /// lookup and driver open must be serialized with unlink/inode reuse.
     pub fn open_from(
         &self,
         base_entry: &Arc<VfsEntry>,
@@ -1699,11 +1773,7 @@ impl VfsManager {
         path: &str,
         flags: u32,
     ) -> Result<KernelObject, FileSystemError> {
-        let _namespace_guard = if flags & 0x3 != 0 {
-            Some(lock_namespace_mutations()?)
-        } else {
-            None
-        };
+        let _namespace_guard = lock_namespace_mutations()?;
         let (entry, mount_point) = self.resolve_path_from(base_entry, base_mount, path)?;
         let node = entry.node();
         let filesystem = node.filesystem().and_then(|w| w.upgrade()).ok_or_else(|| {
@@ -1905,10 +1975,10 @@ mod exclusive_create_tests {
                         .kind,
                     FileSystemErrorKind::Busy
                 );
-                // A write-mode open may perform overlay copy-up. Read-only
-                // opens do not need to wait for the namespace mutation lock.
+                // Read-only opens also pin the inode before unlink can reuse
+                // it, so they cannot race namespace mutation in atomic context.
                 assert_open_error(vfs, "/existing", 0x2, FileSystemErrorKind::Busy);
-                assert!(vfs.open("/existing", 0).is_ok());
+                assert_open_error(vfs, "/existing", 0, FileSystemErrorKind::Busy);
             }
             assert!(matches!(
                 shared.open_from(&base, &mount, "existing", 0x2),

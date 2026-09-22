@@ -37,6 +37,7 @@ pub mod cache;
 pub mod core;
 pub mod descriptor;
 pub mod drivers;
+pub mod file_lock;
 pub mod manager;
 pub mod mount_tree;
 pub mod syscall;
