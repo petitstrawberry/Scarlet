@@ -10,8 +10,10 @@ Native syscalls to a C ABI.
 
 | Surface | Current behavior | Existing checks |
 | --- | --- | --- |
-| `malloc`, `calloc`, `realloc`, `free` | 16-byte alignment; checked size arithmetic; zeroing; failed realloc preserves the old allocation. `malloc(0)` requests a minimum allocation; `realloc(p, 0)` frees non-null `p` and returns null. Builtin substitution is disabled in the implementing crate. | Host allocation test; C guest odd-size fragmentation/reallocation stress; optimized Rust caller checks overflow returns null and sets `ENOMEM`. |
-| `errno`, `__errno_location` | Per-thread writable `int`; wrappers set it on failure. Rust TLS supplies storage. | Host and Scarlet guest thread-isolation tests; C guest checks errno values after syscall failures. |
+| `malloc`, `calloc`, `realloc`, `free` | At least 16-byte alignment; checked size arithmetic; zeroing; failed realloc preserves the old allocation. Zero-size allocation requests a freeable minimum block; `realloc(p, 0)` frees non-null `p` and returns null. Success and free preserve errno. Builtin substitution is disabled in the implementing crate. | Host tests; C guest mixed-allocation fragmentation/reallocation stress; optimized overflow and forced null-backend checks. |
+| `aligned_alloc`, `posix_memalign`, `reallocarray` | Power-of-two aligned allocation; non-multiple sizes supported. `posix_memalign` also requires pointer-size alignment and preserves errno/output on failure. `reallocarray` checks multiplication and retains the old block on failure. All results support ordinary free/realloc. | Host boundary, zero-size, alignment and reuse tests; C guest checks; deterministic backend failure checks for all three APIs. |
+| `errno`, `__errno_location` | Per-thread writable `int` in the versioned [Native TLS header](../../../docs/abi/native-tls.md), prepared before constructors or thread entry. Access needs no allocation or syscall; std `last_os_error` reads the same slot. | Host isolation tests; AArch64 guest constructor, fresh-thread and TLS-destructor checks with heap allocation denied; C syscall-error checks. |
+| Plain C startup fixture | The matching CRT initializes native TLS and calls a C constructor and `main`; the directly linked static archive includes Rust std. | [Builder](tests/build_c_startup.py) audits inputs, symbols and ELF; AArch64/HVF guest executes [C fixture](tests/c_main.c) and exits 43, with persisted marker and exit-status validation. This is not installed SDK acceptance. |
 | `realpath` | Existing UTF-8 paths; caller buffer or library allocation; VFS resolution follows symlinks before `..`. | C/Rust guest checks for missing, empty, dangling, cyclic, non-directory and trailing-slash paths; nested tmpfs mount paths. |
 | `futimens`, `utimensat` | Seconds precision; NOW/OMIT/null times; dirfd-relative paths; absolute paths ignore dirfd; final-link nofollow. | C guest flag/fd/time errors and resulting inode metadata; Rust checks updates after rename and ext2 overflow without partial updates. |
 | `fsync`, `fdatasync` | Native file sync; `fdatasync` currently uses the same full sync operation. | Guest file/data/timestamp checks and independent ext2 inode extraction after shutdown. Power-loss durability is not established by this test. |
@@ -31,17 +33,32 @@ directory handles, renamed mount ancestor and growing ext2 directory cases.
 It also records all 1273 kernel tests passing on HVF, including deterministic
 write-publication locking and second-handle fsync persistence regressions.
 
+The [errno and C startup evidence](../../../tools/native-rustc/evidence/2026-09-22-libc-errno-aarch64.json)
+records AArch64/HVF passes for allocation-free errno through constructor,
+thread entry and destructor paths, deterministic null allocation results, and
+the plain C fixture. The final run also passes native filesystem checks, full
+native compilation and proc macros with a matching staged runtime. RV64 has
+cross-build and ELF-audit checks for the probe, loader, static libc and C fixture;
+guest execution on RV64 remains outstanding.
+
 ## Limits that callers must account for
 
 - **Runtime integration:** allocation and TLS use Rust std and its CRT by
   design. The toolchain must supply and initialize the matching backend.
   Keep this dependency one-way: the std primitives used by scarlet-libc must
   not call back into these same C exports. Allocations from another libc
-  instance are not interchangeable.
-- **Error-path allocation:** first use of `errno` can allocate Rust TLS storage.
-  Exhaustion before that initialization can abort while trying to report
-  `ENOMEM`. This is a source-identified risk; forced guest exhaustion is not yet
-  a recorded acceptance result. Signal-safe errno access is not established.
+  instance are not interchangeable. Every runtime-bearing executable, loader
+  and DSO must agree on the TLS header; old runtime artifacts must be rebuilt
+  or replaced together. Reentering startup on the same thread preserves the
+  existing header, errno and Rust TLS namespace list.
+- **Error paths and exhaustion:** the errno slot is preallocated at startup or
+  before clone. Errno access adds no allocation, including when an allocation
+  backend returns null.
+  Missing or incompatible TLS aborts; custom entry points and foreign thread
+  creators must establish the runtime contract. Creating the mapping itself
+  can fail before application startup. Deterministic null-backend tests do not
+  establish behavior under physical memory exhaustion, signal interruption or
+  all destructor orders. Signal-safe errno access is not established.
 - **Paths:** UTF-8 and a 1024-byte maximum are Native ABI constraints. Arbitrary
   non-NUL Unix pathname bytes are not currently supported.
 - **Time:** subsecond input is truncated; pre-epoch timestamps are rejected;
@@ -65,8 +82,10 @@ write-publication locking and second-handle fsync persistence regressions.
 These gates apply to the Rust implementation; passing a smoke test is not a
 substitute for declaring a standards baseline and checking its requirements.
 
-1. **C startup and ABI.** Specify AArch64/RV64 calling conventions,
-   public type layouts, errno/flag values, CRT, environment, initialization and
+1. **C startup and ABI.** The bounded direct C constructor/main fixture and
+   versioned native TLS layout are implemented. Specify the complete
+   AArch64/RV64 calling conventions, public type layouts, errno/flag values,
+   CRT, environment, initialization and
    exit behavior. Link and run ordinary C `main` programs using the installed
    SDK, with the Scarlet Rust backend linked and initialized internally, no
    Rust source wrapper, and no host libraries or headers. Audit symbols and
@@ -75,8 +94,9 @@ substitute for declaring a standards baseline and checking its requirements.
    where they satisfy the C contract, extending the backend or using Native
    primitives where necessary. `errno` must remain available without allocating
    on the error path; recoverable C errors must not become Rust panics or aborts.
-   Exercise odd sizes, alignment, overflow, real exhaustion,
-   concurrent allocation, TLS lifetime and destructor order on both targets.
+   Current tests cover odd sizes, extended alignment, overflow, null backend
+   results and selected TLS lifetime paths. Exercise physical exhaustion,
+   concurrent allocation, interruption and destructor order on both targets.
 3. **Declared C standard surface.** Complete the selected standard's headers
    and runtime families, including stdio/varargs, strings and conversions,
    numeric behavior, time and locale. Run an independent conformance suite;

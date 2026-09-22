@@ -12,6 +12,7 @@ pub mod fs;
 pub mod native_scalar;
 pub mod power_supply;
 pub mod shared_image;
+pub mod tls;
 pub mod video_image;
 
 /// Raw kernel object handle value used at the Scarlet Native ABI boundary.

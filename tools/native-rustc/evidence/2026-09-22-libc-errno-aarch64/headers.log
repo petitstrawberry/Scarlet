@@ -1,0 +1,3 @@
+warning: Git tree '/Users/petitstrawberry/Development/Rust/Scarlet' is dirty
+building '/nix/store/n2jfsb5m45dgiw992jk1045si5zmqgga-nix-shell-env.drv'...
+44 header compiler checks passed (AArch64/RV64, C11/C++11, standalone/repeated includes, default/signed/unsigned char; no host libc headers)

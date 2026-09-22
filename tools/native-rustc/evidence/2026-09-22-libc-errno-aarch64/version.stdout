@@ -1,0 +1,7 @@
+rustc 1.94.0-nightly (39c689a48 2026-09-20)
+binary: rustc
+commit-hash: 39c689a4859b9d8ee1828720135defd125c03d31
+commit-date: 2026-09-20
+host: aarch64-unknown-scarlet
+release: 1.94.0-nightly
+Cranelift version: 0.127.0

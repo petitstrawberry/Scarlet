@@ -1,0 +1,24 @@
+[
+  {
+    "path": "/private/tmp/scarlet-c-startup-persistent-aarch64/c-startup-probe",
+    "sha256": "b89d478e3ab4f5bddc9a0e218f87c43ca310d6bad877542efbf25175f11fe42d",
+    "bytes": 101896,
+    "elf_type": "EXEC",
+    "machine": "aarch64",
+    "osabi": 83,
+    "entry": 2114148,
+    "interpreter": null,
+    "needed": [],
+    "rpath": null,
+    "runpath": null,
+    "soname": null,
+    "tls": [],
+    "relocations": {},
+    "undefined_relocated_symbols": [],
+    "hash_tables": [],
+    "textrel": false,
+    "relr": false,
+    "symbol_versioning": false,
+    "init_fini": []
+  }
+]

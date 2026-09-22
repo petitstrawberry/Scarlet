@@ -12,8 +12,10 @@ const HELLO_EXIT: i32 = 37;
 const MACRO_HELLO: &str = "SCARLET_NATIVE_PROC_MACRO_OK=42\n";
 const CONFIG: &str = "/etc/native-rustc-probe.args";
 #[cfg(all(feature = "native-fs", target_os = "scarlet"))]
+mod allocation_failure;
+#[cfg(all(feature = "native-fs", target_os = "scarlet"))]
 mod native_fs;
-const USAGE: &str = "usage: native-rustc-probe RUSTC SYSROOT TARGET NEW_OUTPUT_DIR [--dummy] [--full --linker PATH] [--proc-macro] [--native-fs] [--backend PATH_OR_NAME] [--linker-flavor FLAVOR] [--timeout SECONDS] [--run-timeout SECONDS]; no arguments reads /etc/native-rustc-probe.args (one argument per line)";
+const USAGE: &str = "usage: native-rustc-probe RUSTC SYSROOT TARGET NEW_OUTPUT_DIR [--dummy] [--full --linker PATH] [--proc-macro] [--native-fs] [--c-startup PATH] [--backend PATH_OR_NAME] [--linker-flavor FLAVOR] [--timeout SECONDS] [--run-timeout SECONDS]; no arguments reads /etc/native-rustc-probe.args (one argument per line)";
 
 thread_local! {
     static THREAD_PREFLIGHT: Cell<u32> = const { Cell::new(0) };
@@ -29,6 +31,7 @@ struct Options {
     dummy: bool,
     proc_macro: bool,
     native_fs: bool,
+    c_startup: Option<PathBuf>,
     backend: Option<String>,
     linker: Option<PathBuf>,
     linker_flavor: Option<String>,
@@ -59,6 +62,7 @@ fn options(args: &[String]) -> Result<Options, String> {
         dummy: false,
         proc_macro: false,
         native_fs: false,
+        c_startup: None,
         backend: None,
         linker: None,
         linker_flavor: None,
@@ -72,7 +76,8 @@ fn options(args: &[String]) -> Result<Options, String> {
             "--dummy" => result.dummy = true,
             "--proc-macro" => result.proc_macro = true,
             "--native-fs" => result.native_fs = true,
-            "--backend" | "--linker" | "--linker-flavor" | "--timeout" | "--run-timeout" => {
+            "--backend" | "--linker" | "--linker-flavor" | "--timeout" | "--run-timeout"
+            | "--c-startup" => {
                 let value = rest
                     .next()
                     .ok_or_else(|| format!("missing value for {flag}"))?;
@@ -81,6 +86,7 @@ fn options(args: &[String]) -> Result<Options, String> {
                 }
                 match flag.as_str() {
                     "--backend" => result.backend = Some(value.clone()),
+                    "--c-startup" => result.c_startup = Some(value.into()),
                     "--linker" => result.linker = Some(value.into()),
                     "--linker-flavor" => result.linker_flavor = Some(value.clone()),
                     "--timeout" => result.timeout = seconds(value)?,
@@ -432,6 +438,10 @@ fn run() -> Result<(), String> {
     }
     options.rustc = existing_absolute(&options.rustc, "rustc", false)?;
     options.sysroot = existing_absolute(&options.sysroot, "sysroot", true)?;
+    if let Some(startup) = &mut options.c_startup {
+        *startup = existing_absolute(startup, "C startup probe", false)?;
+        check_elf(startup, &options.target).map_err(|e| format!("C startup probe: {e}"))?;
+    }
     if let Some(linker) = &mut options.linker {
         *linker = existing_absolute(linker, "linker", false)?;
         check_elf(linker, &options.target).map_err(|e| format!("native linker: {e}"))?;
@@ -474,6 +484,21 @@ fn run() -> Result<(), String> {
         }
         #[cfg(not(all(feature = "native-fs", target_os = "scarlet")))]
         return Err("--native-fs requires building the probe with --features native-fs".into());
+    }
+    if let Some(startup) = &options.c_startup {
+        phase(
+            Command::new(startup),
+            output,
+            "c-startup",
+            options.run_timeout,
+            43,
+        )?;
+        fs::write(
+            output.join("C_STARTUP_PASS"),
+            "C constructor and main exited 43\n",
+        )
+        .map_err(|e| e.to_string())?;
+        println!("NATIVE_RUSTC C_STARTUP PASS");
     }
     // Load the selected backend once up front so the version probe also
     // verifies its DSO dependencies.
@@ -566,6 +591,8 @@ fn run() -> Result<(), String> {
 }
 
 fn main() {
+    #[cfg(all(feature = "native-fs", target_os = "scarlet"))]
+    allocation_failure::check();
     if let Err(error) = run() {
         eprintln!("NATIVE_RUSTC FAIL {error}");
         std::process::exit(1);

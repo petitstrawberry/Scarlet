@@ -396,7 +396,8 @@
             # TARGET_CC, so applications can still choose their compiler in
             # .cargo/config.toml (for example, yt's cross GCC). Native builds
             # continue to use HOST_CC/CC and the Nix wrapper.
-            TARGET_CC = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+          TARGET_CC = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+            SCARLET_PROBE_CC = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
             # cc-rs defaults RV32 C objects to soft-float; Scarlet GC uses ilp32d.
             CFLAGS_riscv32gc_unknown_scarlet = "-march=rv32gc -mabi=ilp32d";
             CARGO_NET_GIT_FETCH_WITH_CLI = "true";

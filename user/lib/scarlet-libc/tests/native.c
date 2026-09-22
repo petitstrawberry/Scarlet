@@ -40,14 +40,85 @@ int scarlet_libc_probe(int file, int directory, const char *expected) {
     CHECK(p[0] == 42);
     free(p);
 
+    /* The C contract permits small alignments and non-multiple sizes.
+       Aligned results must also work with ordinary realloc and free. */
+    const size_t alignments[] = {1, 2, 4, 8, 16, 64, 4096};
+    for (size_t i = 0; i < sizeof(alignments) / sizeof(alignments[0]); i++) {
+        size_t alignment = alignments[i];
+        errno = ERANGE;
+        p = aligned_alloc(alignment, 65);
+        CHECK(p != NULL && (size_t)p % alignment == 0 && (size_t)p % 16 == 0);
+        CHECK(errno == ERANGE);
+        for (size_t j = 0; j < 65; j++) p[j] = (unsigned char)j;
+        unsigned char *grown = reallocarray(p, 19, 7);
+        CHECK(grown != NULL && errno == ERANGE);
+        for (size_t j = 0; j < 65; j++) CHECK(grown[j] == (unsigned char)j);
+        CHECK(reallocarray(grown, (size_t)-1, 2) == NULL && errno == ENOMEM);
+        for (size_t j = 0; j < 65; j++) CHECK(grown[j] == (unsigned char)j);
+        unsigned char *shrunk = realloc(grown, 17);
+        CHECK(shrunk != NULL);
+        for (size_t j = 0; j < 17; j++) CHECK(shrunk[j] == (unsigned char)j);
+        errno = ERANGE;
+        free(shrunk);
+        CHECK(errno == ERANGE);
+        p = aligned_alloc(alignment, 0);
+        CHECK(p != NULL && (size_t)p % alignment == 0);
+        free(p);
+        CHECK(errno == ERANGE);
+    }
+    CHECK(aligned_alloc(0, 64) == NULL && errno == EINVAL);
+    CHECK(aligned_alloc(3, 64) == NULL && errno == EINVAL);
+    CHECK(aligned_alloc(64, (size_t)-1) == NULL && errno == ENOMEM);
+    CHECK(aligned_alloc((size_t)1 << 63, 0) == NULL && errno == ENOMEM);
+    CHECK(reallocarray(NULL, (size_t)-1, 2) == NULL && errno == ENOMEM);
+    void *sentinel = &buffer[0];
+    void *aligned = sentinel;
+    errno = ERANGE;
+    CHECK(posix_memalign(&aligned, 3, 65) == EINVAL);
+    CHECK(aligned == sentinel && errno == ERANGE);
+    CHECK(posix_memalign(&aligned, sizeof(void *) / 2, 65) == EINVAL);
+    CHECK(aligned == sentinel && errno == ERANGE);
+    CHECK(posix_memalign(&aligned, 64, (size_t)-1) == ENOMEM);
+    CHECK(aligned == sentinel && errno == ERANGE);
+    CHECK(posix_memalign(&aligned, (size_t)1 << 63, 1) == ENOMEM);
+    CHECK(aligned == sentinel && errno == ERANGE);
+    CHECK(posix_memalign(&aligned, 4096, 65) == 0);
+    CHECK(aligned != NULL && (size_t)aligned % 4096 == 0 && errno == ERANGE);
+    p = aligned;
+    for (size_t j = 0; j < 65; j++) p[j] = (unsigned char)j;
+    unsigned char *resized = realloc(p, 127);
+    CHECK(resized != NULL);
+    for (size_t j = 0; j < 65; j++) CHECK(resized[j] == (unsigned char)j);
+    free(resized);
+    CHECK(errno == ERANGE);
+    CHECK(posix_memalign(&aligned, 64, 0) == 0);
+    CHECK(aligned != NULL && (size_t)aligned % 64 == 0 && errno == ERANGE);
+    CHECK(reallocarray(aligned, (size_t)-1, 0) == NULL && errno == ERANGE);
+    p = reallocarray(NULL, 7, 3);
+    CHECK(p != NULL);
+    free(p);
+    free(NULL);
+    CHECK(errno == ERANGE);
+
     /* Repeated small, odd-sized requests exercise allocator split alignment,
-       preservation through realloc, and reuse of fragmented free blocks. */
+       preservation through realloc, and reuse of fragmented free blocks with
+       mixed ordinary and extended alignments. */
     unsigned char *blocks[96];
     for (int round = 0; round < 4; round++) {
         for (int i = 0; i < 96; i++) {
             size_t size = (size_t)i * 2 + 1;
-            blocks[i] = malloc(size);
-            CHECK(blocks[i] != NULL && (size_t)blocks[i] % 16 == 0);
+            size_t alignment = (size_t)16 << (i % 4);
+            if (i % 3 == 0) {
+                blocks[i] = aligned_alloc(alignment, size);
+            } else if (i % 3 == 1) {
+                void *block = NULL;
+                CHECK(posix_memalign(&block, alignment, size) == 0);
+                blocks[i] = block;
+            } else {
+                alignment = 16;
+                blocks[i] = malloc(size);
+            }
+            CHECK(blocks[i] != NULL && (size_t)blocks[i] % alignment == 0);
             for (size_t j = 0; j < size; j++) blocks[i][j] = (unsigned char)(i + j);
         }
         for (int i = 1; i < 96; i += 2) { free(blocks[i]); blocks[i] = NULL; }

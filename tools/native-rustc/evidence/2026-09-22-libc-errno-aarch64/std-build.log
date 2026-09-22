@@ -1,0 +1,402 @@
+warning: Git tree '/Users/petitstrawberry/Development/Rust/Scarlet' is dirty
+/tmp/nix-shell.ePTdtp: line 2537: /Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/scripts/scarlet-rust-dev.sh: No such file or directory
+Building bootstrap
+    Finished `dev` profile [unoptimized] target(s) in 0.10s
+cargo:warning=Warning: supplying the --target riscv64-unknown-elf != arm64-apple-darwin argument to a nix-wrapped compiler may not work correctly - cc-wrapper is currently not designed with multi-target compilers in mind. You may want to use an un-wrapped compiler instead.
+cargo:warning=Warning: supplying the --target aarch64-none-elf != arm64-apple-darwin argument to a nix-wrapped compiler may not work correctly - cc-wrapper is currently not designed with multi-target compilers in mind. You may want to use an un-wrapped compiler instead.
+cargo:warning=Warning: supplying the --target aarch64-none-elf != arm64-apple-darwin argument to a nix-wrapped compiler may not work correctly - cc-wrapper is currently not designed with multi-target compilers in mind. You may want to use an un-wrapped compiler instead.
+WARNING: Using a potentially old librustc. This may not behave well.
+WARNING: Use `--keep-stage-std` if you want to rebuild the compiler when it changes
+Creating a sysroot for stage1 compiler (use `rustup toolchain link 'name' build/host/stage1`)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+Building stage1 library artifacts{alloc, compiler_builtins, core, panic_abort, panic_unwind, proc_macro, rustc-std-workspace-core, scarlet-abi, scarlet-sys, std, std_detect, sysroot, test, unwind} (stage1 -> stage1, aarch64-apple-darwin)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling std v0.0.0 (/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/library/std)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling rustc-std-workspace-std v1.99.0 (/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/library/rustc-std-workspace-std)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling getopts v0.2.24
+   Compiling rustc-literal-escaper v0.0.5
+SCARLET_BACKEND get enter
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling proc_macro v0.0.0 (/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/library/proc_macro)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling test v0.0.0 (/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/library/test)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling sysroot v0.0.0 (/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/library/sysroot)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+    Finished `release` profile [optimized] target(s) in 6.36s
+Warning: supplying the --target aarch64-none-elf != arm64-apple-darwin argument to a nix-wrapped compiler may not work correctly - cc-wrapper is currently not designed with multi-target compilers in mind. You may want to use an un-wrapped compiler instead.
+clang: warning: argument unused during compilation: '-mmacos-version-min=14.0' [-Wunused-command-line-argument]
+Building stage1 library artifacts{alloc, compiler_builtins, core, panic_abort, panic_unwind, proc_macro, rustc-std-workspace-core, scarlet-abi, scarlet-sys, std, std_detect, sysroot, test, unwind} (stage1:aarch64-apple-darwin -> stage1:aarch64-unknown-scarlet)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling std v0.0.0 (/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/library/std)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+warning: function `socket_recvfrom` is never used
+   --> library/std/src/sys/pal/scarlet/abi.rs:619:8
+    |
+619 | pub fn socket_recvfrom(handle: usize, data: &mut [u8], address: &mut [u8; 8]) -> Result<usize, ()> {
+    |        ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `std` (lib) generated 1 warning
+   Compiling rustc-std-workspace-std v1.99.0 (/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/library/rustc-std-workspace-std)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling rustc-literal-escaper v0.0.5
+   Compiling getopts v0.2.24
+SCARLET_BACKEND get enter
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling proc_macro v0.0.0 (/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/library/proc_macro)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling test v0.0.0 (/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/library/test)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling sysroot v0.0.0 (/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/library/sysroot)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+    Finished `release` profile [optimized] target(s) in 4.97s
+Warning: supplying the --target riscv64-unknown-elf != arm64-apple-darwin argument to a nix-wrapped compiler may not work correctly - cc-wrapper is currently not designed with multi-target compilers in mind. You may want to use an un-wrapped compiler instead.
+clang: warning: argument unused during compilation: '-mmacos-version-min=14.0' [-Wunused-command-line-argument]
+Building stage1 library artifacts{alloc, compiler_builtins, core, panic_abort, panic_unwind, proc_macro, rustc-std-workspace-core, scarlet-abi, scarlet-sys, std, std_detect, sysroot, test, unwind} (stage1:aarch64-apple-darwin -> stage1:riscv64gc-unknown-scarlet)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling scarlet-abi v0.16.0 (/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/library/scarlet-abi)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling scarlet-sys v0.16.0 (/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/library/scarlet-sys)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling std v0.0.0 (/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/library/std)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+warning: function `socket_recvfrom` is never used
+   --> library/std/src/sys/pal/scarlet/abi.rs:619:8
+    |
+619 | pub fn socket_recvfrom(handle: usize, data: &mut [u8], address: &mut [u8; 8]) -> Result<usize, ()> {
+    |        ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `std` (lib) generated 1 warning
+   Compiling rustc-std-workspace-std v1.99.0 (/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/library/rustc-std-workspace-std)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling getopts v0.2.24
+   Compiling rustc-literal-escaper v0.0.5
+SCARLET_BACKEND get enter
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND factory exit
+   Compiling proc_macro v0.0.0 (/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/library/proc_macro)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling test v0.0.0 (/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/library/test)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling sysroot v0.0.0 (/Users/petitstrawberry/.codex/worktrees/native-rustc-host/rust/library/sysroot)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+    Finished `release` profile [optimized] target(s) in 5.51s
+Build completed successfully in 0:00:19

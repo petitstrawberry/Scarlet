@@ -1,0 +1,351 @@
+[aarch64] CPU 0: Initializing core....
+FDT initialized
+No bootargs found
+Model: linux,dummy-virt
+FDT relocated to address: 0xffff000048000000
+[boot] Limine Date at Boot: timestamp = 1790060344 (0x6ab22738)
+[userctx] enabled: user-fpu=true user-vector=false
+[aarch64] BSP mpidr=0x0, 4 CPU(s) detected by Limine
+[aarch64] Bootstrapping CPU 1 mpidr=0x1...
+[aarch64] Bootstrapping CPU 2 mpidr=0x2...
+[aarch64] Bootstrapping CPU 3 mpidr=0x3...
+[aarch64] CPU topology: cpu=0 class=Balanced capacity=1024
+[aarch64] CPU topology: cpu=1 class=Balanced capacity=1024
+[aarch64] CPU topology: cpu=2 class=Balanced capacity=1024
+[aarch64] CPU topology: cpu=3 class=Balanced capacity=1024
+Current EL: EL1
+[Scarlet Kernel] Hello, I'm Scarlet kernel!
+[Scarlet Kernel] Boot on CPU 0
+[Scarlet Kernel] Detected 4 CPU(s)
+[Scarlet Kernel] Usable memory (PA) : 0x48101000 - 0x138408fff
+[Scarlet Kernel] PMM usable regions : 7
+[Scarlet Kernel] Direct-map bounds   : 0x40000000 - 0x13e4a3fff (9 sparse regions)
+[Scarlet Kernel] Boot direct map    : PA 0x4000000 -> VA 0xffff000004000000
+[Scarlet Kernel] InitramFS (PA)    : 0x13cb79000 - 0x13cba51ff
+[Scarlet Kernel] Initializing PMM...
+[PMM] Initializing buddy system with region: 0x40000000 - 0x43ffffff
+[PMM] Buddy system initialized: 16288 pages (63 MB) available
+[PMM] Initializing buddy system with region: 0x44020000 - 0x47665fff
+[PMM] Buddy system initialized: 30100 pages (117 MB) available
+[PMM] Initializing buddy system with region: 0x48101000 - 0x138408fff
+[PMM] Buddy system initialized: 1008151 pages (3938 MB) available
+[PMM] Initializing buddy system with region: 0x13a01a000 - 0x13c715fff
+[PMM] Buddy system initialized: 1018072 pages (3976 MB) available
+[PMM] Initializing buddy system with region: 0x13cb40000 - 0x13cb41fff
+[PMM] Buddy system initialized: 1018073 pages (3976 MB) available
+[PMM] Initializing buddy system with region: 0x13cb44000 - 0x13cb44fff
+[PMM] Failed to add region: Maximum number of PMM regions reached or region too small
+[PMM] Initializing buddy system with region: 0x13cbb6000 - 0x13e4a3fff
+[PMM] Buddy system initialized: 1024417 pages (4001 MB) available
+[Scarlet Kernel] Allocating initial heap from PMM...
+[Scarlet Kernel] Building Scarlet boot page table...
+FDT initialized
+No bootargs found
+Model: linux,dummy-virt
+[Scarlet Kernel] Initializing heap...
+[Scarlet Kernel] Heap initialized at 0xffffd00000000000 - 0xffffd0001fffffff
+[Scarlet Kernel] Heap allocation test passed
+Running early initcalls... 
+Running driver initcalls... 
+[Scarlet Kernel] Initializing Virtual Memory...
+Kernel space mapped       : 0xffffffff80000000 - 0xffffffff80cfbfff
+HHDM mapped               : 0xffff800040000000 - 0xffff800043ffffff (Normal)
+HHDM mapped               : 0xffff800044020000 - 0xffff800047665fff (Normal)
+HHDM mapped               : 0xffff800048000000 - 0xffff800138408fff (Normal)
+HHDM mapped               : 0xffff800138530000 - 0xffff80013922ffff (Normal)
+HHDM mapped               : 0xffff80013a01a000 - 0xffff80013c715fff (Normal)
+HHDM mapped               : 0xffff80013cb40000 - 0xffff80013cb41fff (Normal)
+HHDM mapped               : 0xffff80013cb44000 - 0xffff80013cb44fff (Normal)
+HHDM mapped               : 0xffff80013cb79000 - 0xffff80013cba5fff (Normal)
+HHDM mapped               : 0xffff80013cbb6000 - 0xffff80013e4a3fff (Normal)
+Kernel heap mapped        : 0xffffd00000000000 - 0xffffd0001fffffff
+IOREMAP region            : 0xffffc00000000000 - 0xffffc0003fffffff
+[lsm] symbol table: 0 symbol(s) registered (0 errors)
+[boot] Creating initial user task...
+[Scarlet Kernel] Populating devices...
+Populating devices from FDT...
+Populating devices with Critical Infrastructure drivers from FDT...
+[ioremap] paddr=0x8000000 -> vaddr=0xffffc00000000000 (size=0x10000)
+[ioremap] paddr=0x80a0000 -> vaddr=0xffffc00000010000 (size=0xf60000)
+[interrupt] GICv3 selected: dist=0xffffc00000000000 redist=0xffffc00000010000 max_intid=1023 max_cpus=16
+Successfully probed Critical Infrastructure device: intc@8000000
+[interrupt] ARM generic timer: using virt PPI 27 from firmware
+Successfully probed Critical Infrastructure device: timer
+[Scarlet Kernel] Initializing interrupt controllers...
+[interrupt] init: external controller...
+[interrupt] init_external_controller: calling controller.init()
+[interrupt] GICv3 init: dist=0xffffc00000000000 redist=0xffffc00000010000
+[interrupt] GICv3 dist cold-reset: SPIs=32..=1020 priority=0xc0 route_cpu=0
+[interrupt] init_external_controller: controller.init() returned
+[interrupt] re-enabled 0 external IRQs after controller init
+[interrupt] init: external controller done
+[interrupt] CPU 0: per-CPU controller init begin
+[interrupt] CPU 0: interrupts disabled
+[interrupt] CPU 0: controller registry locked
+[interrupt] CPU 0: timer controller init begin
+[interrupt] CPU 0: timer controller init done
+[interrupt] CPU 0: external controller per-CPU init begin
+[interrupt] CPU 0: external controller per-CPU init done
+[interrupt] CPU 0: per-CPU controller init done
+[NetworkManager] Initializing NetworkLayers...
+[Scarlet Kernel] Populating remaining devices...
+Populating devices from FDT...
+Populating devices with Core System drivers from FDT...
+Probing PL011 UART device: pl011@9000000
+PL011 paddr: 0x9000000, size: 0x1000
+[ioremap] paddr=0x9000000 -> vaddr=0xffffc00000f70000 (size=0x1000)
+PL011 base address (virt): 0xffffc00000f70000
+PL011 interrupt ID: 33
+PL011 interrupts enabled (ID: 33)
+PL011 interrupt device registered
+PL011 UART device registered with ID: 11
+Successfully probed Core System device: pl011@9000000
+Successfully probed Core System device: apb-pclk
+Populating devices with Standard Devices drivers from FDT...
+[ioremap] paddr=0xa000000 -> vaddr=0xffffc00000f71000 (size=0x200)
+[Virtio] Detected Virtio Block Device at 0xffffc00000f71000, registering as vblk0
+[virtio][feat] device_features=0x00000101:30006e54 driver_features=0x00000000:30006654
+[partition] Failed to scan vblk0 for partitions: Invalid MBR primary partition range or boot flag
+Successfully probed Standard Devices device: virtio_mmio@a000000
+[ioremap] paddr=0xa000200 -> vaddr=0xffffc00000f72200 (size=0x200)
+[Virtio] Detected Virtio Block Device at 0xffffc00000f72200, registering as vblk1
+[virtio][feat] device_features=0x00000101:30006e54 driver_features=0x00000000:30006654
+Successfully probed Standard Devices device: virtio_mmio@a000200
+[ioremap] paddr=0xa000400 -> vaddr=0xffffc00000f73400 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a000400: Unsupported device type
+[ioremap] paddr=0xa000600 -> vaddr=0xffffc00000f74600 (size=0x200)
+[virtio][feat] device_features=0x00000101:30000002 driver_features=0x00000000:20000002
+[Virtio] Detected Virtio GPU Device at 0xffffc00000f74600, registered as gpu0
+Successfully probed Standard Devices device: virtio_mmio@a000600
+[ioremap] paddr=0xa000800 -> vaddr=0xffffc00000f75800 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a000800: Unsupported device type
+[ioremap] paddr=0xa000a00 -> vaddr=0xffffc00000f76a00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a000a00: Unsupported device type
+[ioremap] paddr=0xa000c00 -> vaddr=0xffffc00000f77c00 (size=0x200)
+[Virtio] Detected Virtio RNG Device at 0xffffc00000f77c00
+[virtio][feat] device_features=0x00000101:30000000 driver_features=0x00000000:00000000
+[VirtIO RNG] Device initialized with features: 0x0
+[Random] Registering entropy source: virtio-rng
+Successfully probed Standard Devices device: virtio_mmio@a000c00
+[ioremap] paddr=0xa000e00 -> vaddr=0xffffc00000f78e00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a000e00: Unsupported device type
+[ioremap] paddr=0xa001000 -> vaddr=0xffffc00000f79000 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a001000: Unsupported device type
+[ioremap] paddr=0xa001200 -> vaddr=0xffffc00000f7a200 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a001200: Unsupported device type
+[ioremap] paddr=0xa001400 -> vaddr=0xffffc00000f7b400 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a001400: Unsupported device type
+[ioremap] paddr=0xa001600 -> vaddr=0xffffc00000f7c600 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a001600: Unsupported device type
+[ioremap] paddr=0xa001800 -> vaddr=0xffffc00000f7d800 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a001800: Unsupported device type
+[ioremap] paddr=0xa001a00 -> vaddr=0xffffc00000f7ea00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a001a00: Unsupported device type
+[ioremap] paddr=0xa001c00 -> vaddr=0xffffc00000f7fc00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a001c00: Unsupported device type
+[ioremap] paddr=0xa001e00 -> vaddr=0xffffc00000f80e00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a001e00: Unsupported device type
+[ioremap] paddr=0xa002000 -> vaddr=0xffffc00000f81000 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a002000: Unsupported device type
+[ioremap] paddr=0xa002200 -> vaddr=0xffffc00000f82200 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a002200: Unsupported device type
+[ioremap] paddr=0xa002400 -> vaddr=0xffffc00000f83400 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a002400: Unsupported device type
+[ioremap] paddr=0xa002600 -> vaddr=0xffffc00000f84600 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a002600: Unsupported device type
+[ioremap] paddr=0xa002800 -> vaddr=0xffffc00000f85800 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a002800: Unsupported device type
+[ioremap] paddr=0xa002a00 -> vaddr=0xffffc00000f86a00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a002a00: Unsupported device type
+[ioremap] paddr=0xa002c00 -> vaddr=0xffffc00000f87c00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a002c00: Unsupported device type
+[ioremap] paddr=0xa002e00 -> vaddr=0xffffc00000f88e00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a002e00: Unsupported device type
+[ioremap] paddr=0xa003000 -> vaddr=0xffffc00000f89000 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a003000: Unsupported device type
+[ioremap] paddr=0xa003200 -> vaddr=0xffffc00000f8a200 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a003200: Unsupported device type
+[ioremap] paddr=0xa003400 -> vaddr=0xffffc00000f8b400 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a003400: Unsupported device type
+[ioremap] paddr=0xa003600 -> vaddr=0xffffc00000f8c600 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a003600: Unsupported device type
+[ioremap] paddr=0xa003800 -> vaddr=0xffffc00000f8d800 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a003800: Unsupported device type
+[ioremap] paddr=0xa003a00 -> vaddr=0xffffc00000f8ea00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a003a00: Unsupported device type
+[ioremap] paddr=0xa003c00 -> vaddr=0xffffc00000f8fc00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a003c00: Unsupported device type
+[ioremap] paddr=0xa003e00 -> vaddr=0xffffc00000f90e00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a003e00: Unsupported device type
+Populating devices with Late Initialization drivers from FDT...
+[PCI] ECAM discovered from FDT paddr=0x4010000000 size=0x10000000
+[ioremap] paddr=0x4010000000 -> vaddr=0xffffc00000f91000 (size=0x10000000)
+[PCI] ECAM mapped paddr=0x4010000000 -> vaddr=0xffffc00000f91000 size=0x10000000
+Scanning PCI bus...
+[PCI] Reusing ECAM mapping 0xffffc00000f91000 for paddr 0x4010000000
+pci 0000:00:00.0: [1b36:0008] type 00 class 0x060000
+[PCI] Reusing ECAM mapping 0xffffc00000f91000 for paddr 0x4010000000
+pci 0000:00:01.0: [1af4:1000] type 00 class 0x020000
+pci 0000:00:01.0: reg 0x10: [io size=0x20] unassigned
+pci 0000:00:01.0: reg 0x14: [mem 0x10040000-0x10040fff size=0x1000]
+pci 0000:00:01.0: reg 0x20: [mem 0x8000000000-0x8000003fff size=0x4000 64bit pref]
+pci 0000:00:01.0: INTA -> IRQ 36
+pci 0000:00:01.0: MSI-X cap 0x98 table BAR 1 offset 0x0 entries=4 enabled=false
+PCI scan complete: found 2 devices
+Registering 2 PCI devices with DeviceManager
+  - pci_device (1b36:0008)
+  - virtio_pci_device (1af4:1000)
+Probing 2 discovered PCI devices...
+[virtio-pci] Probing device 1af4:1000
+[ioremap] paddr=0x8000003000 -> vaddr=0xffffc00010f91000 (size=0x1000)
+[virtio-pci] cap type=2 bar=4 base=0x8000000000 offset=0x3000 len=0x1000 vaddr=0xffffc00010f91000
+[ioremap] paddr=0x8000002000 -> vaddr=0xffffc00010f92000 (size=0x1000)
+[virtio-pci] cap type=4 bar=4 base=0x8000000000 offset=0x2000 len=0x1000 vaddr=0xffffc00010f92000
+[ioremap] paddr=0x8000001000 -> vaddr=0xffffc00010f93000 (size=0x1000)
+[virtio-pci] cap type=3 bar=4 base=0x8000000000 offset=0x1000 len=0x1000 vaddr=0xffffc00010f93000
+[ioremap] paddr=0x8000000000 -> vaddr=0xffffc00010f94000 (size=0x1000)
+[virtio-pci] cap type=1 bar=4 base=0x8000000000 offset=0x0 len=0x1000 vaddr=0xffffc00010f94000
+[virtio-pci] MSI-X present for 00:01.0: entries=4 table_bar=1 table_offset=0x0 queues=3
+[virtio-pci] MSI allocation unavailable (NotSupported); using INTx fallback when an interrupt handler is needed
+[virtio][feat] device_features=0x00000101:30bf8024 driver_features=0x00000001:10010020
+[virtio-net] Registered veth0 with EthernetLayer (MAC: 52:54:00:12:34:56)
+[virtio-net] Registered interface veth0
+[virtio-pci] Registered INTx IRQ 36 pin 1 for 00:01.0
+[virtio-pci] Registered net device veth0
+Successfully probed PCI device virtio_pci_device with driver virtio-pci
+[Scarlet Kernel] Initializing graphics subsystem...
+[Scarlet Kernel] Found 16 devices before graphics initialization
+[GraphicsManager] Initializing graphics device 14
+[virtio-gpu] init_graphics: get_display_info
+[virtio-gpu] init_graphics: setup_framebuffer
+[virtio-gpu] init_graphics: done
+[GraphicsManager] Graphics device 14 initialized
+[GraphicsManager] Graphics device 14 config 1280x800
+[GraphicsManager] Graphics device 14 framebuffer paddr=0x42860000
+[GraphicsManager] Registered framebuffer resource: 14 -> fb0
+[GraphicsManager] Creating framebuffer char device for fb0
+[GraphicsManager] Created framebuffer character device: /dev/fb0
+[GraphicsManager] Creating display char device for fb0
+[GraphicsManager] Created display character device: /dev/display0
+[GraphicsManager] Successfully registered framebuffer from device 14
+[boot] entering initcalls
+[initcall] Running initcalls...
+TTY registered as UART event listener
+TTY subsystem initialized successfully
+Registering ABI module: linux-aarch64
+Registering ABI module: scarlet
+[initcall] Initcalls completed
+[boot] leaving initcalls
+[boot] pre-init devices: count=19 tty0=true
+[boot] pre-init device: id=1 name=interrupts type=Char capabilities=[]
+[boot] pre-init device: id=2 name=null type=Char capabilities=[]
+[boot] pre-init device: id=3 name=power_supply type=Char capabilities=[]
+[boot] pre-init device: id=4 name=cpufreq type=Char capabilities=[]
+[boot] pre-init device: id=5 name=devfreq type=Char capabilities=[]
+[boot] pre-init device: id=6 name=thermal type=Char capabilities=[]
+[boot] pre-init device: id=7 name=random type=Char capabilities=[]
+[boot] pre-init device: id=8 name=random type=Char capabilities=[]
+[boot] pre-init device: id=9 name=kmsg type=Char capabilities=[]
+[boot] pre-init device: id=10 name=cpuinfo type=Char capabilities=[]
+[boot] pre-init device: id=11 name=pl011-uart type=Char capabilities=[Serial]
+[boot] pre-init device: id=12 name=virtio-blk type=Block capabilities=[]
+[boot] pre-init device: id=13 name=virtio-blk type=Block capabilities=[]
+[boot] pre-init device: id=14 name=virtio-gpu type=Graphics capabilities=[]
+[boot] pre-init device: id=15 name=gpu type=Char capabilities=[]
+[boot] pre-init device: id=16 name=virtio-net type=Network capabilities=[]
+[boot] pre-init device: id=17 name=framebuffer type=Char capabilities=[]
+[boot] pre-init device: id=18 name=display type=Char capabilities=[]
+[boot] pre-init device: id=19 name=tty0 type=Char capabilities=[Tty]
+[Scarlet Kernel] Enabling CPU interrupts...
+[boot] Initializing timer...
+[boot] wall clock seeded from Limine Date at Boot
+[boot] Initializing scheduler...
+[boot] Initializing global VFS...
+[Scarlet Kernel] Initializing initramfs from BootInfo...
+[InitRamFS] Initializing initramfs
+[InitRamFS] Using initramfs at address: 0xffff80013cb79000, size: 180736 bytes
+[InitRamFS] Successfully mounted initramfs at root directory
+[boot] Retrying deferred devices after root filesystem initialization...
+[aarch64] user HWCAP=0x2007fb, probed CPUs=0xf
+Loaded text segment at 0x10000 (size: 0xe000)
+Loaded data segment at 0x1e000 (size: 0x5000)
+Loaded data segment at 0x23000 (size: 0x1000)
+[Scarlet Kernel] Task memory map: 0x10000 - 0x1dfff
+[Scarlet Kernel] Task memory map: 0x1e000 - 0x22fff
+[Scarlet Kernel] Task memory map: 0x23000 - 0x23fff
+[Scarlet Kernel] Task memory map: 0x100000000 - 0x100000fff
+[Scarlet Kernel] Task memory map: 0x7fffffef0000 - 0x7ffffffeffff
+[Scarlet Kernel] Init ELF loaded with entry point at 0x10000
+[Scarlet Kernel] Successfully loaded init ELF into task
+[Scarlet Kernel] Adding init task to scheduler...
+[Scarlet Kernel] cpu_id for init task: 0
+[Scarlet Kernel] Init task added to scheduler
+[aarch64] CPU 0: First switch to user task PID 1 with kernel SP 0xfffffffffeef0000
+[interrupt] CPU 2: per-CPU controller init begin
+[interrupt] CPU 1: per-CPU controller init begin
+[interrupt] CPU 2: interrupts disabled
+[interrupt] CPU 1: interrupts disabled
+[interrupt] CPU 3: per-CPU controller init begin
+[interrupt] CPU 2: controller registry locked
+[interrupt] CPU 3: interrupts disabled
+[interrupt] CPU 2: timer controller init begin
+[interrupt] CPU 2: timer controller init done
+[interrupt] CPU 2: external controller per-CPU init begin
+[interrupt] CPU 2: external controller per-CPU init done
+[interrupt] CPU 2: per-CPU controller init done
+[interrupt] CPU 3: controller registry locked
+[interrupt] CPU 3: timer controller init begin
+[interrupt] CPU 3: timer controller init done
+[interrupt] CPU 3: external controller per-CPU init begin
+[interrupt] CPU 3: external controller per-CPU init done
+[interrupt] CPU 3: per-CPU controller init done
+[interrupt] CPU 1: controller registry locked
+[interrupt] CPU 1: timer controller init begin
+[interrupt] CPU 1: timer controller init done
+[interrupt] CPU 1: external controller per-CPU init begin
+[interrupt] CPU 1: external controller per-CPU init done
+[interrupt] CPU 1: per-CPU controller init done
+[Scarlet Kernel] AP 2: scheduler online; local timer ready
+[Scarlet Kernel] AP 1: scheduler online; local timer ready
+[Scarlet Kernel] AP 3: scheduler online; local timer ready
+Loaded data segment at 0x200000 (size: 0x11000)
+Loaded text segment at 0x211068 (size: 0x2b000)
+Loaded data segment at 0x23c170 (size: 0x3000)
+Loaded data segment at 0x23f730 (size: 0x3000)
+Loaded data segment at 0x40000000 (size: 0xa000)
+Loaded text segment at 0x4000abd4 (size: 0x1f000)
+Loaded data segment at 0x40029638 (size: 0x2000)
+Loaded data segment at 0x4002b5f8 (size: 0x3000)
+Loaded data segment at 0x200000 (size: 0x4000)
+Loaded text segment at 0x204264 (size: 0xb000)
+Loaded data segment at 0x20f1e0 (size: 0x1000)
+Loaded data segment at 0x210750 (size: 0x3000)
+Loaded data segment at 0x200000 (size: 0x1000)
+Loaded text segment at 0x2014e4 (size: 0x1000)
+Loaded data segment at 0x202600 (size: 0x1000)
+Loaded data segment at 0x203700 (size: 0x1000)
+Loaded data segment at 0x40000000 (size: 0xa000)
+Loaded text segment at 0x4000abd4 (size: 0x1f000)
+Loaded data segment at 0x40029638 (size: 0x2000)
+Loaded data segment at 0x4002b5f8 (size: 0x3000)
+=== Trap Info ===
+ESR_EL1: 0x0000000092000006 (EC=0x24, FSC=0x6)
+FAR_EL1: 0x0000000053435401
+ELR_EL1: 0x0000000103eacc1c
+INSN_ELR: 0xf9400000 (kva=0xffff8000ce19cc1c)
+x0=0x53435401 x1=0x1 x2=0x104239c68 x3=0x7ffffffefe48
+x4=0x201584 x5=0x200000 x6=0x200000 x7=0x0
+x8=0x53435401 x9=0x2014e4 x10=0x50 x11=0x2074d8
+x12=0x190 x13=0x118 x14=0x207e88 x15=0x0
+x16=0x10423a1e0 x17=0x103eb4970 x18=0x0 x19=0x1042535a0
+x20=0x7ffffffefe30 x21=0x7ffffffefe08 x22=0x200000 x23=0x4
+x24=0x1 x25=0x7ffffffefe48 x26=0x7ffffffefe30 x27=0x0
+x28=0x0 x29=0x7ffffffefc80 x30=0x103eacc14 sp=0x7ffffffefc80 spsr=0x20000000
+Task /opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/rustc (PID 7) caused data fault at vaddr: 0x53435401 (write=false) from PC: 0x103eacc1c: No extendable memory mapping found for virtual address
+[fault] task memory: brk=0x91bf000 text_size=0x20000 data_size=0x8fcd000 trap_tls=0x100000000 vcpu_tls=0x0
+[fault] previous map: va=0x4002b000-0x4002dfff vm_start=0x4002b000 perm=0xb
+[fault] next map: va=0x100000000-0x100000fff vm_start=0x100000000 perm=0xb
+[fault] code words: pc=0x103eacc1c kva=0xffff8000ce19cc1c words=f9400000 f9400501 91000409 f9000109
+[user-bt] #0 pc=0x103eacc1c lr=0x103eacc14 fp=0x7ffffffefc80
+[user-bt] #1 pc=0x103ebbf08 lr=0x103ebbf0c fp=0x7ffffffefc80
+[user-bt] #2 pc=0x103eb8434 lr=0x103eb8438 fp=0x7ffffffefd20

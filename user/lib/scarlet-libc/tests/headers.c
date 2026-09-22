@@ -64,7 +64,10 @@ extern "C" {
 int *__errno_location(void);
 void *malloc(size_t);
 void *calloc(size_t, size_t);
+void *aligned_alloc(size_t, size_t);
+int posix_memalign(void **, size_t, size_t);
 void *realloc(void *, size_t);
+void *reallocarray(void *, size_t, size_t);
 void free(void *);
 char *realpath(const char *, char *);
 int futimens(int, const struct timespec *);

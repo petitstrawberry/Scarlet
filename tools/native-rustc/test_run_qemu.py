@@ -56,6 +56,32 @@ class StagingLinkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid staged symlink"):
             RUN_QEMU.validate_staging_links(self.root)
 
+    def test_old_runtime_copy_in_loader_search_path_is_rejected(self):
+        name = "librustc_driver-fixture.so"
+        (self.root / "bin" / name).write_bytes(b"old TLS layout")
+        (self.root / "lib" / name).write_bytes(b"new TLS layout")
+        with self.assertRaisesRegex(ValueError, "conflicting Rust runtime copies"):
+            RUN_QEMU.validate_runtime_copies(self.root)
+        (self.root / "bin" / name).write_bytes(b"new TLS layout")
+        RUN_QEMU.validate_runtime_copies(self.root)
+
+
+class CStartupEvidenceTests(unittest.TestCase):
+    def test_marker_cannot_mask_missing_or_failed_exit_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with self.assertRaisesRegex(ValueError, "evidence is missing"):
+                RUN_QEMU.validate_c_startup_evidence(output)
+            (output / "C_STARTUP_PASS").touch()
+            with self.assertRaises(FileNotFoundError):
+                RUN_QEMU.validate_c_startup_evidence(output)
+            for status in ("exit=Some(0) ", "exit=Some(139) ", "exit=None "):
+                (output / "c-startup.status").write_text(status)
+                with self.assertRaisesRegex(ValueError, "required status 43"):
+                    RUN_QEMU.validate_c_startup_evidence(output)
+            (output / "c-startup.status").write_text("exit=Some(43) elapsed_ms=10 expected_exit=43\n")
+            RUN_QEMU.validate_c_startup_evidence(output)
+
 
 class SerialDiagnosticTests(unittest.TestCase):
     def test_panic_diagnostic_is_drained_and_late_success_cannot_override_failure(self):

@@ -1,0 +1,23 @@
+   Compiling scarlet-abi v1.0.0 (/Users/petitstrawberry/Development/Rust/Scarlet/user/lib/scarlet-abi)
+   Compiling scarlet-libc v0.1.0 (/Users/petitstrawberry/Development/Rust/Scarlet/user/lib/scarlet-libc)
+    Finished `release` profile [optimized] target(s) in 0.52s
+     Running unittests src/lib.rs (/tmp/scarlet-errno-host-tests/release/deps/scarlet_c-ad05b067d905a726)
+
+running 8 tests
+test allocation::tests::allocations_align_zero_and_preserve_data ... ok
+test allocation::tests::invalid_alignment_and_impossible_layouts_report_errors ... ok
+test allocation::tests::reallocarray_checks_multiplication_and_preserves_failed_input ... ok
+test allocation::tests::zero_size_allocations_are_freeable_and_reallocation_frees ... ok
+test allocation::tests::fundamental_and_extended_alignment_survive_free_and_realloc ... ok
+test allocation::tests::posix_memalign_preserves_errno_and_failure_output ... ok
+test tests::special_times_ignore_seconds_and_validate_nanoseconds ... ok
+test tests::errno_is_independent_between_threads ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests scarlet_c
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

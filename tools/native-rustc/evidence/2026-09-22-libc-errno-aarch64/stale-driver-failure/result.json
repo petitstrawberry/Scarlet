@@ -1,0 +1,10 @@
+{
+  "result": "fixture failure marker",
+  "qemu_exit_code": 0,
+  "elapsed_seconds": 6.367,
+  "mode": "full",
+  "full_compilation_verified": false,
+  "proc_macro_verified": false,
+  "native_fs_verified": false,
+  "c_startup_verified": false
+}

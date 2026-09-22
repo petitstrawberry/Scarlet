@@ -1,0 +1,8 @@
+mode=full
+version
+cfg
+frontend
+compile
+execute
+hello_exit=37
+hello_stdout="SCARLET_NATIVE_RUSTC_HELLO_OK\n"

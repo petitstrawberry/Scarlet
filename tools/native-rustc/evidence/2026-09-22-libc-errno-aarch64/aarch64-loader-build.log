@@ -1,0 +1,30 @@
+   Compiling scarlet-abi v1.0.0 (/Users/petitstrawberry/Development/Rust/Scarlet/user/lib/scarlet-abi)
+   Compiling scarlet-loader-core v0.1.0 (/Users/petitstrawberry/Development/Rust/Scarlet/user/lib/scarlet-loader-core)
+   Compiling scarlet-ld v0.1.0 (/Users/petitstrawberry/Development/Rust/Scarlet/user/scarlet-ld)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling scarlet-sys v1.0.0 (/Users/petitstrawberry/Development/Rust/Scarlet/user/lib/scarlet-sys)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling scarlet-dl v0.1.0 (/Users/petitstrawberry/Development/Rust/Scarlet/user/lib/scarlet-dl)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+    Finished `release` profile [optimized] target(s) in 2.07s

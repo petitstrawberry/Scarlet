@@ -1,7 +1,7 @@
 //! Initial C/POSIX adapters for the Scarlet Native ABI.
 //!
 //! This is an incremental libc, not yet a complete C library for Cargo's C
-//! dependencies. It uses Scarlet Rust std for allocation and thread-local errno;
+//! dependencies. It uses Scarlet Rust std for allocation and its native TLS ABI for errno;
 //! link one copy into a native 64-bit executable using the matching Rust CRT.
 
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -9,7 +9,6 @@
 // contracts for their Rust callers (e.g. fold overflowing calloc to non-null).
 #![no_builtins]
 
-use std::cell::UnsafeCell;
 #[cfg(target_os = "scarlet")]
 use std::ffi::c_char;
 use std::ffi::{c_int, c_long};
@@ -22,19 +21,11 @@ use scarlet_abi::Syscall;
 use scarlet_abi::fs::*;
 
 pub mod allocation;
+mod errno;
+pub use errno::__errno_location;
 
 #[cfg(all(target_os = "scarlet", not(target_pointer_width = "64")))]
 compile_error!("the initial Scarlet C ABI supports AArch64 and RV64 only");
-
-thread_local! {
-    static ERRNO: UnsafeCell<c_int> = const { UnsafeCell::new(0) };
-}
-
-/// errno belongs to the calling thread. C must not retain it past thread exit.
-#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
-pub extern "C" fn __errno_location() -> *mut c_int {
-    ERRNO.with(UnsafeCell::get)
-}
 
 pub(crate) fn fail(errno: c_int) -> c_int {
     // SAFETY: only this thread can access its errno cell.

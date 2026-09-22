@@ -7,6 +7,7 @@ and avoids copying the complete compiler sysroot into the kernel's CPIO heap.
 """
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import math
@@ -61,6 +62,17 @@ def validate_staging_links(root):
             raise ValueError(f"staged symlink escapes its root: {path}")
 
 
+def validate_runtime_copies(sysroot):
+    """A loader search directory must not shadow a rebuilt Rust runtime DSO."""
+    seen = {}
+    for pattern in ("librustc_driver-*.so", "libstd-*.so", "librustc_codegen_*.so"):
+        for path in sorted(sysroot.rglob(pattern)):
+            digest = hashlib.sha256(path.read_bytes()).digest()
+            if path.name in seen and seen[path.name][0] != digest:
+                raise ValueError(f"conflicting Rust runtime copies: {seen[path.name][1]} and {path}")
+            seen[path.name] = digest, path
+
+
 def executable(path, arch, label, static=False):
     elf = Elf(path)
     report = elf.report()
@@ -89,13 +101,22 @@ def debugfs_quote(value):
     return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
-def collect_evidence(image, output, guest_output, mode, arch, proc_macro=False, native_fs=False):
+def validate_c_startup_evidence(extracted):
+    if not (extracted / "C_STARTUP_PASS").is_file():
+        raise ValueError("C startup evidence is missing")
+    if not (extracted / "c-startup.status").read_text().startswith("exit=Some(43) "):
+        raise ValueError("C startup did not exit with the required status 43")
+
+
+def collect_evidence(image, output, guest_output, mode, arch, proc_macro=False, native_fs=False, c_startup=False):
     evidence = output / "guest-evidence"
     evidence.mkdir()
     command = ["debugfs", "-R", f"rdump {debugfs_quote(guest_output)} {debugfs_quote(evidence)}", str(image)]
     with (output / "evidence-extract.log").open("wb") as log:
         subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=120)
     extracted = evidence / PurePosixPath(guest_output).name
+    if c_startup:
+        validate_c_startup_evidence(extracted)
     if native_fs and not (extracted / "NATIVE_FS_PASS").is_file():
         raise ValueError("native filesystem evidence is missing")
     if mode == "full":
@@ -131,6 +152,7 @@ def main():
     parser.add_argument("--staging", type=Path, required=True, help="native sysroot overlay produced by stage.py")
     parser.add_argument("--bootstrap", type=Path, required=True, help="standard user/bin native static init")
     parser.add_argument("--probe", type=Path, help="override the staged native-rustc-probe with a fresh build")
+    parser.add_argument("--c-startup-probe", type=Path, help="also execute a static C main + Scarlet CRT + std-backed libc fixture (expected exit 43)")
     parser.add_argument("--output", type=Path, required=True, help="NEW private artifacts directory")
     parser.add_argument("--rustc", type=guest_path, default="/opt/native-rustc/bin/rustc")
     parser.add_argument("--sysroot", type=guest_path, default="/opt/native-rustc")
@@ -162,6 +184,8 @@ def main():
         parser.error("linker options require full mode")
     if args.proc_macro and args.frontend_only:
         parser.error("--proc-macro requires full mode")
+    if args.c_startup_probe and args.storage != "ext2":
+        parser.error("--c-startup-probe requires ext2 to verify persisted exit evidence")
     if not all(1 <= seconds <= 86400 for seconds in (args.phase_timeout, args.run_timeout)):
         parser.error("guest timeouts must be between 1 and 86400 seconds")
     if not math.isfinite(args.timeout) or args.timeout <= 0 or args.cpus < 1 or args.disk_size_mib < 0:
@@ -183,6 +207,7 @@ def main():
         parser.error("kernel or staging does not exist")
     try:
         validate_staging_links(staging)
+        validate_runtime_copies(in_root(staging, args.sysroot))
     except ValueError as error:
         parser.error(str(error))
     qemu = f"qemu-system-{args.arch}"
@@ -201,6 +226,9 @@ def main():
     executable(in_root(staging, "/system/bin/scarlet-ld"), args.arch, "loader", static=True)
     probe = args.probe.resolve() if args.probe else in_root(staging, "/system/bin/native-rustc-probe")
     executable(probe, args.arch, "guest probe")
+    c_startup = args.c_startup_probe.resolve() if args.c_startup_probe else None
+    if c_startup:
+        executable(c_startup, args.arch, "C startup probe", static=True)
     if args.linker:
         executable(in_root(staging, args.linker), args.arch, "linker")
     if args.backend:
@@ -239,6 +267,8 @@ def main():
     shutil.copytree(staging, root, symlinks=True)
     shutil.copy2(bootstrap, root / "init")
     shutil.copy2(probe, root / "system/bin/native-rustc-probe")
+    if c_startup:
+        shutil.copy2(c_startup, root / "system/bin/native-c-startup-probe")
     for directory in ("dev/pts", "mnt/newroot", "etc", "root", "old_root", "tmp"):
         (root / directory).mkdir(parents=True, exist_ok=True)
     guest_output = "/native-rustc-output" if args.storage == "ext2" else "/tmp/native-rustc-output"
@@ -258,6 +288,8 @@ def main():
         probe_args += ["--proc-macro"]
     if args.native_fs:
         probe_args += ["--native-fs"]
+    if c_startup:
+        probe_args += ["--c-startup", "/system/bin/native-c-startup-probe"]
     if any(any(char in arg for char in "\r\n\0") for arg in probe_args):
         raise ValueError("probe arguments cannot contain line breaks or NUL")
     (root / "etc/native-rustc-probe.args").write_text("\n".join(probe_args) + "\n")
@@ -323,12 +355,12 @@ def main():
     smoke.SUCCESS = re.compile(rb"\nNATIVE_RUSTC " + (b"FRONTEND" if args.frontend_only else b"FULL") + rb" PASS\r?\n")
     smoke.FAILURE = re.compile(rb"\nNATIVE_RUSTC FAIL(?:[ :\r\n]|$)")
     result = smoke.run_guest(command, output, args.timeout)
-    result.update(mode=mode, full_compilation_verified=False, proc_macro_verified=False, native_fs_verified=False)
+    result.update(mode=mode, full_compilation_verified=False, proc_macro_verified=False, native_fs_verified=False, c_startup_verified=False)
     succeeded = result["result"] == "PASS"
     if root_image:
         try:
             if succeeded:
-                result["guest_evidence"] = collect_evidence(root_image, output, guest_output, mode, args.arch, args.proc_macro, args.native_fs)
+                result["guest_evidence"] = collect_evidence(root_image, output, guest_output, mode, args.arch, args.proc_macro, args.native_fs, bool(c_startup))
             else:
                 # Preserve partial logs for failed compiler or bootstrap attempts.
                 evidence = output / "guest-evidence"
@@ -346,6 +378,7 @@ def main():
         result["full_compilation_verified"] = mode == "full"
         result["proc_macro_verified"] = args.proc_macro
         result["native_fs_verified"] = args.native_fs
+        result["c_startup_verified"] = bool(c_startup)
     result_path.write_text(json.dumps(result, indent=2) + "\n")
     print(f"\nNative rustc ({mode}): {result['result']} (artifacts: {output})")
     return 0 if succeeded else 1

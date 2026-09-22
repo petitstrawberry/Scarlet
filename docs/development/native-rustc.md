@@ -455,3 +455,42 @@ required for C startup with backend initialization, allocation-free errno,
 standards coverage and real Cargo dependencies. Keeping std as the backend is
 supported; `no_std` is not a prerequisite for these compatibility and quality
 goals.
+
+
+### std-backed libc errno and C startup, 2026-09-22
+
+The [errno milestone evidence](../../tools/native-rustc/evidence/2026-09-22-libc-errno-aarch64.json)
+records a fresh AArch64/HVF `FULL_PASS` with four CPUs and the release kernel.
+This run rebuilds std, loader, native rustc/driver/Cranelift and the guest probe
+for the [versioned native TLS header](../abi/native-tls.md). The implementation
+continues to use Rust std as its backend.
+
+- `errno` occupies preallocated per-thread storage, initialized before
+  constructors and child-thread code. First access does not allocate. A
+  deterministic allocator returning null tests a pre-main constructor, a fresh
+  thread, TLS destruction, `malloc`/`calloc` and preservation on failed realloc.
+- `aligned_alloc`, `posix_memalign` and `reallocarray` extend the C allocation
+  surface. C and Rust tests cover alignment, overflow and errno/output/old-buffer
+  preservation according to each API's contract.
+- An ordinary C constructor and `main` are compiled without host libc headers,
+  linked directly with `scarlet-crt0.o` and the std-backed `libscarlet_c.a`, then
+  executed on Scarlet with the required exit code 43. The reproducible builder
+  and invocation are in the [libc README](../../user/lib/scarlet-libc/README.md).
+  Pass its binary to the harness using `--c-startup-probe`; success requires
+  both the persisted marker and matching exit status.
+- Existing native filesystem, std hello compilation/execution, and two proc
+  macro DSOs plus their consumer pass with the rebuilt runtime.
+
+The harness also rejects conflicting same-named std, driver and backend DSOs
+in the staged sysroot. A development run initially loaded an older driver from
+`bin` ahead of the rebuilt copy in `lib`, causing exit 139 on the new TLS header.
+The final run uses matching copies; the failure log and final inputs are retained
+in the evidence. Always rebuild and stage the complete matching runtime set.
+
+Both targets cross-build std, loader, libc, the enhanced probe and the direct-C
+fixture. RV64 guest execution and installed SDK acceptance remain outstanding
+for this milestone. Allocation fault injection does not establish physical OOM
+recovery or async-signal safety. The published bundle is unchanged. Full compiler
+builds for both targets are tracked in
+[toolchain PR #28](https://github.com/petitstrawberry/scarlet-rust-nix/pull/28),
+stacked on the allocator correction in #27.

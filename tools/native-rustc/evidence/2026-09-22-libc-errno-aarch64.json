@@ -1,0 +1,216 @@
+{
+  "recorded_date": "2026-09-22",
+  "scope": "std-backed Rust libc: allocation-free initialized errno, aligned allocation and direct C main startup. Local release/HVF validation with rebuilt runtime; published bundle unchanged.",
+  "scarlet_base_revision": "1a97b1dbc286eb9c5d04091277c9d3a6cce85cdc",
+  "rust_revision": "39c689a4859b9d8ee1828720135defd125c03d31",
+  "native_host_recipe_commit": "617b49d0fe085ca630fb9c65b96bafe8a48cd98e",
+  "native_host_pr": "https://github.com/petitstrawberry/scarlet-rust-nix/pull/28",
+  "runtime_patch_sha256": "7b70986bdc900cca5f4fefae84e4a0e2825f566a4d299d02041f97aac8889862",
+  "architecture": "aarch64",
+  "acceleration": "hvf",
+  "cpus": 4,
+  "qemu": {
+    "result": "FULL_PASS",
+    "qemu_exit_code": 0,
+    "elapsed_seconds": 16.232,
+    "mode": "full",
+    "full_compilation_verified": true,
+    "proc_macro_verified": true,
+    "native_fs_verified": true,
+    "c_startup_verified": true,
+    "guest_evidence": "/private/tmp/scarlet-errno-aarch64-final-v2/guest-evidence/native-rustc-output"
+  },
+  "errno_runtime_marker": "NATIVE_RUSTC ERRNO_RUNTIME PASS constructor + first child access + destructor + backend ENOMEM",
+  "c_startup_guest_exit": 43,
+  "kernel_reused_from": "2026-09-22-libc-quality-aarch64.json (unchanged kernel; its 1273-test suite was not rerun in this milestone)",
+  "inputs": {
+    "release_kernel": {
+      "path": "/tmp/scarlet-native-fs-kernel-build/aarch64-unknown-none-elf/release/scarlet",
+      "sha256": "d51d221708dd866ba89630adf20f4df4a90b4e59e300ecbda471ed2e42e5734f"
+    },
+    "probe": {
+      "path": "/tmp/scarlet-errno-probe-aarch64-unknown-scarlet/aarch64-unknown-scarlet/release/native-rustc-probe",
+      "sha256": "dfd1611f86c14f9a8ff36aa19b184a3a983d8f9e8592c665eb67d76392a6669b"
+    },
+    "rustc": {
+      "path": "/tmp/scarlet-errno-staging/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/rustc",
+      "sha256": "b51bab261fe067f60a926efb16d5956aacf67429e64bfe736a8baab85c3b024f"
+    },
+    "loader": {
+      "path": "/tmp/scarlet-errno-staging/system/bin/scarlet-ld",
+      "sha256": "4dae3a3e065707a0cbb73b8c343c35a9ee2b7532090a608521d3f774f107e937"
+    },
+    "driver": {
+      "path": "/tmp/scarlet-errno-staging/opt/scarlet/toolchains/rust/v0.1.0-rc.1/lib/librustc_driver-971288f04f51fd65.so",
+      "sha256": "434a3d9a9df392713b9c6d544144d6e4c802f4674c210ad3cf13ef436b749a03"
+    },
+    "libstd": {
+      "path": "/tmp/scarlet-errno-staging/opt/scarlet/toolchains/rust/v0.1.0-rc.1/lib/rustlib/aarch64-unknown-scarlet/lib/libstd-73fdd94a3355757f.rlib",
+      "sha256": "cfb906c867208a395dc82127a1223114a1b4c9221728d25cb6a5ab8321c71a7e"
+    },
+    "libproc_macro": {
+      "path": "/tmp/scarlet-errno-staging/opt/scarlet/toolchains/rust/v0.1.0-rc.1/lib/rustlib/aarch64-unknown-scarlet/lib/libproc_macro-aaf8ff9f85c85d65.rlib",
+      "sha256": "10896decd78deb8add4cbcaaeacdfec5531714b98aee3df137b9258dfe56053d"
+    },
+    "native_linker": {
+      "path": "/tmp/scarlet-errno-staging/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/wild",
+      "sha256": "42cc5a6d06e557a304273b5f91fe41f40296da2b5cfad05eb699b31e9a3ebb62"
+    },
+    "backend": {
+      "path": "/tmp/scarlet-errno-staging/opt/scarlet/toolchains/rust/v0.1.0-rc.1/lib/rustlib/aarch64-unknown-scarlet/codegen-backends/librustc_codegen_cranelift-1.94.0-nightly.so",
+      "sha256": "d33d0f0c19daf45084482bdad7cd138e7f1850af313ac7f9051dd592003693c1"
+    },
+    "c_startup_probe": {
+      "path": "/tmp/scarlet-c-startup-persistent-aarch64/c-startup-probe",
+      "sha256": "b89d478e3ab4f5bddc9a0e218f87c43ca310d6bad877542efbf25175f11fe42d"
+    },
+    "rv64_probe": {
+      "path": "/tmp/scarlet-errno-probe-riscv64gc-unknown-scarlet/riscv64gc-unknown-scarlet/release/native-rustc-probe",
+      "sha256": "0da473701491c38d62c1bdedd5d4e246b5d648f2c657266b60af7d7ff1d1c3b1"
+    },
+    "rv64_loader": {
+      "path": "/tmp/scarlet-errno-loader-riscv64gc-unknown-scarlet/riscv64gc-unknown-scarlet/release/scarlet-ld",
+      "sha256": "3ccd549d77e18d49b963aca1fcb8ba0964642883b9a5232a8f5ce00d2c226e91"
+    },
+    "rv64_c_startup_probe": {
+      "path": "/tmp/scarlet-c-startup-persistent-rv64/c-startup-probe",
+      "sha256": "335af28ffb4d4b97e6b184ef85d56f805b68b501907d8c2e3cd82c7e08e45be9"
+    }
+  },
+  "host_checks": {
+    "libc_release_tests": 8,
+    "abi_tests": 9,
+    "header_compilations": 44,
+    "harness_python_tests": 20,
+    "nix_script_tests": 23,
+    "production_tls_helper_tests": 6
+  },
+  "cross_builds": [
+    "AArch64 and RV64 std, scarlet-ld, native-fs probe, std-backed libc static archive, plain C startup ELF"
+  ],
+  "regressions": [
+    "Pre-main constructor, fresh child first access and TLS destructor obtain stable errno under a thread-scoped allocator returning null; exact backend call counts are checked.",
+    "malloc/calloc report ENOMEM; realloc and reallocarray preserve old bytes on backend failure; posix_memalign preserves errno and output pointer on failure.",
+    "C aligned_alloc/posix_memalign/reallocarray check alignment, overflow, errno and buffer preservation on ext2 and tmpfs fixtures.",
+    "Plain C constructor and main linked directly to matching CRT and static std-backed libc execute with expected exit43; no Rust executable source wrapper.",
+    "Native rustc builds a std hello and two proc-macro DSOs; hello and macro consumer execute successfully.",
+    "Old bin/driver DSO shadowing rebuilt lib/driver caused version exit139. All copies now match, and harness rejects conflicting runtime copies before boot.",
+    "Nix shell selects unwrapped Clang for header checks, avoiding host linker flags in cross-target -fsyntax-only -Werror checks."
+  ],
+  "limits": [
+    "Not a complete libc or installed C SDK; Cargo/C dependencies and standards conformance remain outstanding.",
+    "Fault injection tests a null allocation backend, not physical-memory exhaustion or signal safety.",
+    "RV64 guest execution not performed for this milestone; cross-build and ELF audits only.",
+    "TLS header is a coordinated runtime ABI change: loader, std, compiler DSOs and consumers must match.",
+    "Fresh full runtime and probe built locally; old independent static Wild linker reused. Published bundle pin unchanged."
+  ],
+  "changed_source_sha256": {
+    "flake.nix": "acbf420a83302d8c6cd2db6ad5e353a99959cd48396d404f10b73179785097e7",
+    "tools/native-rustc/probe.rs": "b86f7b35640d3726558add9ad7d785ba03789cba0793d6edb99f5102ce941916",
+    "tools/native-rustc/run-qemu.py": "73dc4bf611abe45edd4dc1087ad79ebecf443a243fdedc6910da390a995d9f20",
+    "tools/native-rustc/allocation_failure.rs": "b38a3f0ccb361b189fce0bca4d6bd10e3ca65d23966340f64eb853f2d8ffb600",
+    "tools/native-rustc/test_run_qemu.py": "8f96a5f6191641ac0265f195ba5b028dee3dfe9a657049c9fc352ddfb5f702b1",
+    "user/lib/scarlet-abi/src/lib.rs": "976f2a1eb3964bd1ddeb2e0c8056317f3b575c30179e1666575ac97ee348925f",
+    "user/lib/scarlet-abi/src/tls.rs": "c26faef5ca22dda75029e92fc92da40660fbcd4b25e82628727e758e231f60fd",
+    "user/lib/scarlet-libc/src/lib.rs": "2557f098ed2b38604dca5ef2e15a917b787958368dbd382745f2f34a0e616283",
+    "user/lib/scarlet-libc/src/errno.rs": "4b3e847aeb16553c1f1136d4109018a976a052a09954ce476ae632511407f4fb",
+    "user/lib/scarlet-libc/src/allocation.rs": "e8f92f7b9b618b17509b3dc3543ec5d2676b7919347966fb3d4bc6d59a5ba4b2",
+    "user/lib/scarlet-libc/include/stdlib.h": "33816eb43a0d2f1544ee6a13847d55593ea6e0d6e675371689bfcfa6c8613845",
+    "user/lib/scarlet-libc/tests/headers.c": "bac7a122beddfc7c19c750e839709a8c46a5f7a147025f82df7cb6b20120b4af",
+    "user/lib/scarlet-libc/tests/native.c": "4d0257123bc5439583f83de7161d616f7359b2c8edbdf2660b76f0710e7d633d",
+    "user/lib/scarlet-libc/tests/c_main.c": "060c5b827aad73a4b21beeaa347d4e9208989841a7fbfbbc9fdc85841912a1ea",
+    "user/lib/scarlet-libc/tests/build_c_startup.py": "98a0c79e84def4de276da7ce80f013cda910f374d3c05dcd2d30fb217ff4ce5a"
+  },
+  "evidence_sha256": {
+    "C_STARTUP_PASS": "2dc4280e74df404345fb2fd3625fab0aeef5d51d016bae9ff9cd213e86c4b44d",
+    "NATIVE_FS_PASS": "1932929a879b1627e650b9e753a9386b637ea47ab1d8276d1e568ba620efbf5c",
+    "PASS": "488ec506264c2975576a2c477ee5f6fb92edb7131280b864039e54c49478deb7",
+    "PROC_MACRO_PASS": "585198c5fd53d949ad956aff184a2588f384b206c3bc5cbc226b25a6b4814469",
+    "aarch64-loader-build.log": "f2d781d7036ea8c362f0466ce27b5462fe70411742a7ed825f84bd09a9e8223a",
+    "aarch64-probe-build.log": "98279aa67ac7397bd61b9debcad8a81a338585194477ceabff5880b5738a373e",
+    "abi-host-tests.log": "54263fe4edd99f366e2afd4f937bd3a19acdd0843d819058721462155c33c9b6",
+    "c-startup-aarch64/c-build.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "c-startup-aarch64/commands.json": "c7515c2c0768bbcc0114e28aa7c75fde2851fe8019698613618f79b4aab1be79",
+    "c-startup-aarch64/elf-audit.json": "6d12b29241653fd519bfbfa02612d38683602ec3268a88abde4514f2d5eb7edf",
+    "c-startup-aarch64/link.log": "d7c3877c5395071e87a92f9124394d6bc90ba12767c85e18d29188d2db9e8f5c",
+    "c-startup-aarch64/result.json": "db9495a8306ce9e7db402a0405e493e3a0e45a4fd1ef14b8e443f7f5790601bb",
+    "c-startup-rv64/c-build.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "c-startup-rv64/commands.json": "02ec63e52262793af68b40adc5fc747818b779e7509cd9e6bb9b2d1d65852dbe",
+    "c-startup-rv64/elf-audit.json": "ed7b659a6ae6355be2c6b9e868cc42997ea04823a775d3996b1cba4ef5bd53b5",
+    "c-startup-rv64/link.log": "bd2c49be770741037020b258a27707a3e4e8ddb39f22c5930a8ff6868f5468e6",
+    "c-startup-rv64/result.json": "87d4801d9d227414cf2a2231f19e0b7b945237d0db514cd8f0ef16f5727a776b",
+    "c-startup.command": "8ea92d9c121289f537b73704d7623009125aa739040cc48e9772bf4efad25303",
+    "c-startup.status": "20fcb103c9ef430b85b89296d2ab000d2c83521a4f1bd15ebbaa1fe255eca102",
+    "c-startup.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "c-startup.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "cfg.command": "da13ddfcbd355b17a95a3920540f7e1b99d9545b3de03cac63ef7d280ef39fd9",
+    "cfg.status": "dd214266d3da0f893762859bc7809f3995aa9ccaa572a5783fd1b58e9de54003",
+    "cfg.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "cfg.stdout": "ab08b29f15cb9933ea369d816219a72f199027190798d410876f11e27bc5cb1b",
+    "commands.json": "db1fd1a864518c343bb84df06c1c2fd67fe9ee61fd506fe468ff1018a8b600f6",
+    "compile.command": "d51d77ffedd9f19f08aeb49c75d6d952246e470cc7074d1d0d6dc4723327a4b0",
+    "compile.status": "8603e234e3247b3cf3c1be6583c7ca3e8579a4fa7c5fec0b0fc3cab82bedb4b4",
+    "compile.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "compile.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "elf-audits.json": "cf06990e54fff9a3d15ae60d828e3ab5e357d3b5cba7bf04e7fb08c6b228f07f",
+    "execute.command": "d479b5bf26bdeb46ae826319ba6986b8835427ed0c0c5a270b8ace9ccffe5549",
+    "execute.status": "4cf42aec07c3c7f04a518409cd47ea87452a1ab89e20033b96ec7255b61c3144",
+    "execute.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "execute.stdout": "f7db1accdcc0c5d3a36ca1fa83beaa4f1d6a838f963945549006b84066c5e40c",
+    "frontend.command": "a7473a14cdf4e641de6426a3574abe215dc14fe5dd36735a2c393e8093acd1cd",
+    "frontend.status": "bf9bfeec268ebf54b1f8359afcd8922a55661f2a11e45dda4ae90fa7f12556c0",
+    "frontend.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "frontend.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "harness-tests.log": "c61fa0d290454011c9b710a38e59894557e7a93295e8a84be2fe6b2fd05c53a3",
+    "headers.log": "cfc3ee4e5b476816f38f385c050727c860180751ee794f9910a41e13e8f77cb6",
+    "hello.rs": "3ab01a600239173f5292731f10f0f7714907954c2978481e953b574278281b73",
+    "libc-host-tests.log": "2bae697507760bdfff51425e79859235e7e8020e0b4e1dfc34f3bb8a3d6217ef",
+    "macro-app.rs": "740b05d489ffb92bbe2e4b102169990545d4039645e76c6f5c4c4766cd4577bf",
+    "macros.rs": "b41b4d7a2467b48f6c9f7d4b05287d016533e72386ad9c1fd877546ce90c93ac",
+    "mode.txt": "0e716a5fef4e6dc1bcfff22ad52f73ca4eee3f4ea8292f4a1918daa32592889f",
+    "native-compiler-build.log": "8f233536d45db66cc8987e79b50ed8683208de171e053f5477df44891f08211f",
+    "nix-script-tests.log": "6b72068d831f210caeabe4026b17ae1e0139d5ca501b5a4c33f9b1d8f58aa660",
+    "proc-macro-build-other.command": "7d99488972e99187160f94311780d1dbc7c44ef499630d014f87128250dd4f2c",
+    "proc-macro-build-other.status": "d958f75e4f6388a6fcd98887b70db268cf77a43c24e6f5aa21400bc48a951325",
+    "proc-macro-build-other.stderr": "95e535d322106ecf51210d9bc46fabd87b33574556f942d35b32c5bab7ae7ae0",
+    "proc-macro-build-other.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proc-macro-build.command": "54e4c8d2af8d9150b6d0a2486243bf827baef79639c4042eeefe414627778383",
+    "proc-macro-build.status": "5a4c52d64a927e07a322bf567b9a913b139a019f4bf4d8732d046878e4d41c62",
+    "proc-macro-build.stderr": "95e535d322106ecf51210d9bc46fabd87b33574556f942d35b32c5bab7ae7ae0",
+    "proc-macro-build.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proc-macro-execute.command": "46bd77e74fe3d2803ee1738017d88229bbc4a282ded2b0ee3fac8e553805150a",
+    "proc-macro-execute.status": "1ff83fbb13f211f0157b772cf43d44ca507c96592356cb966bc4280fa44107e7",
+    "proc-macro-execute.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proc-macro-execute.stdout": "5af2b9bbbc7f9374ba2690a53defa24ddef5cdd6aca60c46e2b717114b6edc1a",
+    "proc-macro-expand.command": "4ef296b71d74acfe6e8d2bbfb183a0c54df6c1300f30bebd1bf6795f5c7b6fbb",
+    "proc-macro-expand.status": "98e73be195c68b9d7d56745108d99f1e9e038a4bfbe1ad6596f2bb244d7e532e",
+    "proc-macro-expand.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proc-macro-expand.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "result.json": "1ad1bfa107ffbdefcf96e7c22a6da207fbb61291edb7818c9246faf69dda82d5",
+    "runtime-patch-check.json": "0cdd0b5d308080203cfd519375064489475980f6fc5558cb063b3bd221490a55",
+    "rv64-loader-build.log": "7e3db58a9bf2f88b8a444ecf7b8b62cde646131c0a6155f92ce98a2210e6b1bb",
+    "rv64-probe-build.log": "c29ec53650a0bfe927991605da42deafd015f724b8739c1ef21364296f566c81",
+    "serial.log": "fa976bd0c8a2ce134581f33cee80e618f3bcd7eb060d82e11c246e10249e46af",
+    "stale-driver-failure/result.json": "2eeeaf30b33dee243e51aa172a0131f5ada894c5680115adcebb7686053464e2",
+    "stale-driver-failure/serial.log": "0b682a0649ef119227e55ce4cc425deb7668bce08382f2b396cfbb2ab5cbf6a4",
+    "stale-driver-failure/version.kernel.log": "bfb22e56d51aaeb3e1b11cc25e04368259473bff167d0ee2eaf6095c104a581e",
+    "stale-driver-failure/version.status": "3208880b3961872585112275da6d2cdbb2aa836404bc3b5a68cab5c2c1b57ac0",
+    "std-build.log": "1d0ccc527c73ab48374490cade147cac82656b28d8068fb3423ef53dc0589119",
+    "version.command": "d1895acf984785b74e6d1cc88841089711c336c8bd5810680ff020a04b0ddc8e",
+    "version.status": "d1ff5aaab844650fab4f3b3294bb1e5228acc4cbcce105b396afa9ada7bedba0",
+    "version.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "version.stdout": "7b470863f2743b445f051637801f8df2e4e852f6d150f9cf9bea3f1362388d67"
+  },
+  "ci_at_submission": {
+    "aarch64": {
+      "run": "https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35697751209",
+      "status": "in_progress",
+      "script_checks": "success"
+    },
+    "riscv64": {
+      "run": "https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35697810903",
+      "status": "in_progress",
+      "script_checks": "success"
+    }
+  }
+}

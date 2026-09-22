@@ -1,0 +1,17 @@
+{
+  "base": "39c689a4859b9d8ee1828720135defd125c03d31",
+  "files_in_complete_patch": 36,
+  "applied_tree": "/var/folders/sy/h5zyj4m52gx6pwb_fb970cwm0000gn/T/scarlet-errno-patch-apply-ad_26hyh",
+  "owned_files_equal": 8,
+  "patch_sha256": "7b70986bdc900cca5f4fefae84e4a0e2825f566a4d299d02041f97aac8889862",
+  "source_sha256": {
+    "library/scarlet-abi/src/lib.rs": "e50eb4889e13d3bf33540d5c8236e24c3d8bbd1c9f537c56539e767aa91a1fe0",
+    "library/scarlet-abi/src/tls.rs": "c26faef5ca22dda75029e92fc92da40660fbcd4b25e82628727e758e231f60fd",
+    "library/scarlet-sys/src/lib.rs": "648d1c9c3175bd6311508be66774e8c423b2dd806f3a9c740cb358f5ff4bb847",
+    "library/std/src/sys/thread_local/key/scarlet.rs": "72c605ce7a3f1060f4d4d0e2e895fdbf46c0370ca4c4b5b81657252b2b3a294f",
+    "library/std/src/sys/thread_local/mod.rs": "f29e3e4953150df5409391f0db80928e4c94d9184dc94611607dd11b6ad55e9e",
+    "library/std/src/sys/thread/scarlet.rs": "ef3221128ea63641de81635ab2cafc3d61b9a5080f4643f4762e1c669eb3aaf5",
+    "library/std/src/sys/pal/scarlet/common.rs": "54aa1f3e61c889fb788361f7a7519bcee1b88f1c4733ce17c85952b4625927b7",
+    "library/std/src/sys/pal/scarlet/os.rs": "68cf7375a555474bbb509fcef6eae9558ccb15d8f5f02ef2ed7645df6899c3c1"
+  }
+}
