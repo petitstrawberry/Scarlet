@@ -5,6 +5,9 @@
 //! link one copy into a native 64-bit executable using the matching Rust CRT.
 
 #![deny(unsafe_op_in_unsafe_fn)]
+// These exports implement libc. LLVM must not infer builtin allocation
+// contracts for their Rust callers (e.g. fold overflowing calloc to non-null).
+#![no_builtins]
 
 use std::cell::UnsafeCell;
 #[cfg(target_os = "scarlet")]

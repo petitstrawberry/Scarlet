@@ -252,7 +252,7 @@ impl MountTree {
         target_mount_point: Arc<MountPoint>,
     ) -> VfsResult<MountId> {
         // Create a new bind mount point. The name of the mount point is the name of the target entry.
-        let bind_mount = MountPoint::new_bind(target_entry.name().clone(), source_entry);
+        let bind_mount = MountPoint::new_bind(target_entry.name(), source_entry);
         let mount_id = bind_mount.id;
 
         // Add the new mount as a child of the target's containing mount point, attached to the target entry.
@@ -275,11 +275,8 @@ impl MountTree {
         let new_fs_root_entry = VfsEntry::new(None, "/".to_string(), new_fs_root_node);
 
         // Create a new mount point for the filesystem.
-        let new_mount = MountPoint::new_regular(
-            target_entry.name().clone(),
-            new_fs_root_entry,
-            filesystem.clone(),
-        );
+        let new_mount =
+            MountPoint::new_regular(target_entry.name(), new_fs_root_entry, filesystem.clone());
         let mount_id = new_mount.id;
 
         // Add the new mount as a child to the target's mount point.
@@ -733,8 +730,9 @@ impl MountTree {
                 if Arc::ptr_eq(&node, &parent.root) {
                     break;
                 }
-                components.push(node.name().clone());
-                entry = node.parent();
+                let (name, parent_entry) = node.location();
+                components.push(name);
+                entry = parent_entry;
             }
             current = parent;
         }

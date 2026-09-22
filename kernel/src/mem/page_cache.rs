@@ -122,6 +122,7 @@ pub struct PageCacheManager {
 struct CachedObjectMetadata {
     size: usize,
     modified_time: Option<u64>,
+    changed_time: Option<u64>,
 }
 
 impl PageCacheManager {
@@ -289,6 +290,7 @@ impl PageCacheManager {
             .or_insert(CachedObjectMetadata {
                 size,
                 modified_time: None,
+                changed_time: None,
             })
             .size = size;
     }
@@ -315,10 +317,12 @@ impl PageCacheManager {
         let metadata = objects.entry(id).or_insert(CachedObjectMetadata {
             size: stored_size,
             modified_time: None,
+            changed_time: None,
         });
         metadata.size = metadata.size.max(write_end);
         if let Some(time) = modified_time {
             metadata.modified_time = Some(time);
+            metadata.changed_time = Some(time);
         }
     }
 
@@ -330,16 +334,33 @@ impl PageCacheManager {
             .and_then(|metadata| metadata.modified_time)
     }
 
-    /// Publish an explicit timestamp change without replacing a live size.
-    pub fn set_object_modified_time(&self, id: CacheId, stored_size: usize, time: u64) {
+    /// Return the last inode change time independently of user-selected mtime.
+    pub fn cached_object_changed_time(&self, id: CacheId) -> Option<u64> {
+        self.object_metadata
+            .read()
+            .get(&id)
+            .and_then(|metadata| metadata.changed_time)
+    }
+
+    /// Publish explicit timestamps for a page-cache-backed file without
+    /// replacing its live size or changing an omitted mtime.
+    pub fn set_object_times(
+        &self,
+        id: CacheId,
+        stored_size: usize,
+        modified_time: Option<u64>,
+        changed_time: u64,
+    ) {
         let mut objects = self.object_metadata.write();
-        objects
-            .entry(id)
-            .or_insert(CachedObjectMetadata {
-                size: stored_size,
-                modified_time: None,
-            })
-            .modified_time = Some(time);
+        let metadata = objects.entry(id).or_insert(CachedObjectMetadata {
+            size: stored_size,
+            modified_time: None,
+            changed_time: None,
+        });
+        if let Some(time) = modified_time {
+            metadata.modified_time = Some(time);
+        }
+        metadata.changed_time = Some(changed_time);
     }
 
     /// Set object-level lock (prevents eviction of all pages for this object)
@@ -552,11 +573,13 @@ mod tests {
         cache.record_object_write(id, 20, 100, Some(123));
         assert_eq!(cache.cached_object_size(id), Some(100));
         assert_eq!(cache.cached_object_modified_time(id), Some(123));
+        assert_eq!(cache.cached_object_changed_time(id), Some(123));
 
         cache.record_object_write(id, 200, 100, Some(124));
         cache.record_object_write(id, 50, 100, None);
         assert_eq!(cache.cached_object_size(id), Some(200));
         assert_eq!(cache.cached_object_modified_time(id), Some(124));
+        assert_eq!(cache.cached_object_changed_time(id), Some(124));
     }
 
     #[test_case]
@@ -578,5 +601,38 @@ mod tests {
         cache.invalidate(id);
         assert_eq!(cache.cached_object_size(id), None);
         assert_eq!(cache.cached_object_modified_time(id), None);
+        assert_eq!(cache.cached_object_changed_time(id), None);
+    }
+
+    #[test_case]
+    fn explicit_mtime_keeps_change_time_and_live_size_separate() {
+        let cache = PageCacheManager::new();
+        let id = CacheId::new(1);
+        cache.record_object_write(id, 200, 100, Some(123));
+        cache.set_object_times(id, 100, Some(5), 124);
+        assert_eq!(cache.cached_object_size(id), Some(200));
+        assert_eq!(cache.cached_object_modified_time(id), Some(5));
+        assert_eq!(cache.cached_object_changed_time(id), Some(124));
+
+        // An access-time-only update changes ctime without changing mtime.
+        cache.set_object_times(id, 100, None, 125);
+        assert_eq!(cache.cached_object_modified_time(id), Some(5));
+        assert_eq!(cache.cached_object_changed_time(id), Some(125));
+
+        // A subsequent data write updates both timestamps again.
+        cache.record_object_write(id, 20, 100, Some(126));
+        assert_eq!(cache.cached_object_size(id), Some(200));
+        assert_eq!(cache.cached_object_modified_time(id), Some(126));
+        assert_eq!(cache.cached_object_changed_time(id), Some(126));
+    }
+
+    #[test_case]
+    fn access_time_only_update_does_not_invent_an_mtime() {
+        let cache = PageCacheManager::new();
+        let id = CacheId::new(1);
+        cache.set_object_times(id, 100, None, 124);
+        assert_eq!(cache.cached_object_size(id), Some(100));
+        assert_eq!(cache.cached_object_modified_time(id), None);
+        assert_eq!(cache.cached_object_changed_time(id), Some(124));
     }
 }

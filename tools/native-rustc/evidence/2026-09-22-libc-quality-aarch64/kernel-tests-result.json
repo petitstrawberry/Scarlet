@@ -1,0 +1,30 @@
+{
+  "status": "passed",
+  "tests": 1273,
+  "accelerator": "hvf",
+  "profile": "release",
+  "features": [
+    "limine",
+    "network",
+    "user-fpu",
+    "user-vector",
+    "sync-debug"
+  ],
+  "full_suite": true,
+  "filtered_runner_used": false,
+  "qemu_exit_code": 0,
+  "kernel_sha256": "ff419faec41ee201544f1a5496c90224167dded37956d8f0a3aaf783da083921",
+  "recorded_at": "2026-09-22T06:08:44.044124+00:00",
+  "build_command": "nix develop -c env CARGO_TARGET_DIR=/tmp/scarlet-fs-quality-kernel-tests/build RUSTFLAGS=\"-C no-vectorize-loops -C no-vectorize-slp\" cargo test --manifest-path kernel/Cargo.toml --release --lib --no-default-features --features limine,network,user-fpu,user-vector,sync-debug --target kernel/targets/aarch64-unknown-none-elf.json -Z build-std=core,compiler_builtins,alloc -Z build-std-features=compiler-builtins-mem --no-run",
+  "run_command": "nix develop -c /tmp/scarlet-fs-quality-kernel-tests/run-tests.sh /tmp/scarlet-fs-quality-kernel-tests/build/aarch64-unknown-none-elf/release/deps/scarlet-7d7e5bb7db626597",
+  "required_regression_tests": [
+    "test_ext2_sync_through_second_handle_persists_shared_writes_and_times",
+    "test_ext2_write_publication_excludes_second_handle_writeback",
+    "test_rename_relocates_cwd_and_open_directory_entries",
+    "test_rename_rejects_paths_that_would_corrupt_retained_entries",
+    "test_rename_mount_ancestor_preserves_namespace_path",
+    "explicit_mtime_keeps_change_time_and_live_size_separate",
+    "access_time_only_update_does_not_invent_an_mtime"
+  ],
+  "note": "Normal unfiltered kernel test runner. Private wrapper only selects HVF/host CPU and known working UEFI firmware; no production source changed for test execution."
+}

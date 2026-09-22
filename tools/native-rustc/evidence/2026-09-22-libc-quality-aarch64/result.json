@@ -1,0 +1,10 @@
+{
+  "result": "FULL_PASS",
+  "qemu_exit_code": 0,
+  "elapsed_seconds": 12.829,
+  "mode": "full",
+  "full_compilation_verified": true,
+  "proc_macro_verified": true,
+  "native_fs_verified": true,
+  "guest_evidence": "/private/tmp/scarlet-libc-quality-aarch64-final/guest-evidence/native-rustc-output"
+}

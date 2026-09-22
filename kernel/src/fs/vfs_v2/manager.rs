@@ -428,7 +428,7 @@ impl VfsManager {
         target_mount_point: Arc<MountPoint>,
     ) -> Result<(), FileSystemError> {
         // Create a new MountPoint for the bind mount
-        let bind_mount = MountPoint::new_bind(target_entry.name().clone(), source_entry);
+        let bind_mount = MountPoint::new_bind(target_entry.name(), source_entry);
         // Set parent/parent_entry
         *bind_mount.parent.write() = Some(Arc::downgrade(&target_mount_point));
         *bind_mount.parent_entry.write() = Some(target_entry.clone());
@@ -903,8 +903,9 @@ impl VfsManager {
                 break;
             }
 
-            path_components.push(entry.name().clone());
-            current = entry.parent();
+            let (name, parent) = entry.location();
+            path_components.push(name);
+            current = parent;
         }
 
         // Get the mount path using MountTree's method
@@ -1251,15 +1252,104 @@ impl VfsManager {
         let _namespace_guard = lock_namespace_mutations()?;
         // Resolve old path (do not follow the final symlink, like POSIX rename)
         let options = PathResolutionOptions::no_follow();
-        let (old_entry, _old_mount) = self.resolve_path_with_options(old_path, &options)?;
+        if old_path.is_empty() || new_path.is_empty() {
+            return Err(vfs_error(
+                FileSystemErrorKind::NotFound,
+                "Empty rename pathname",
+            ));
+        }
+        // The driver mutates the final directory entry itself. A trailing slash
+        // must not make the retained VfsEntry refer to a symlink's target while
+        // the driver renames the link. Require a real directory in this case.
+        let old_lookup = old_path.trim_end_matches('/');
+        let old_lookup = if old_lookup.is_empty() {
+            "/"
+        } else {
+            old_lookup
+        };
+        let new_lookup = new_path.trim_end_matches('/');
+        let new_lookup = if new_lookup.is_empty() {
+            "/"
+        } else {
+            new_lookup
+        };
+        let (old_entry, old_mount) = self.resolve_path_with_options(old_lookup, &options)?;
+        if old_path.ends_with('/') && !old_entry.node().is_directory()? {
+            return Err(vfs_error(
+                FileSystemErrorKind::NotADirectory,
+                "Trailing slash on rename source",
+            ));
+        }
 
         // Split both paths into (parent, name)
         let (old_parent_path, old_name) = self.split_parent_child(old_path)?;
         let (new_parent_path, new_name) = self.split_parent_child(new_path)?;
 
         // Resolve parent directories (follow symlinks in intermediate components)
-        let (old_parent_entry, _old_parent_mount) = self.resolve_path(&old_parent_path)?;
-        let (new_parent_entry, _new_parent_mount) = self.resolve_path(&new_parent_path)?;
+        let (old_parent_entry, old_parent_mount) = self.resolve_path(&old_parent_path)?;
+        let (new_parent_entry, new_parent_mount) = self.resolve_path(&new_parent_path)?;
+
+        if Arc::ptr_eq(&old_entry, &old_mount.root) {
+            return Err(vfs_error(
+                FileSystemErrorKind::Busy,
+                "Cannot rename a mount root",
+            ));
+        }
+        if !Arc::ptr_eq(&old_parent_mount, &new_parent_mount) {
+            return Err(vfs_error(
+                FileSystemErrorKind::CrossDevice,
+                "Rename crosses mounts",
+            ));
+        }
+        if old_name == "." || old_name == ".." || new_name == "." || new_name == ".." {
+            return Err(vfs_error(
+                FileSystemErrorKind::InvalidPath,
+                "Cannot rename dot entries",
+            ));
+        }
+
+        // Reject cycles before the driver mutates anything. Retained entry
+        // parents are strong references, so moving a directory inside itself
+        // would otherwise create a cycle and make getcwd loop indefinitely.
+        if old_entry.node().is_directory()? {
+            let mut ancestor = Some(new_parent_entry.clone());
+            while let Some(entry) = ancestor {
+                if entry.node().id() == old_entry.node().id() {
+                    return Err(vfs_error(
+                        FileSystemErrorKind::InvalidPath,
+                        "Directory moved into itself",
+                    ));
+                }
+                if Arc::ptr_eq(&entry, &new_parent_mount.root) {
+                    break;
+                }
+                ancestor = entry.parent();
+            }
+        }
+
+        match self.resolve_path_with_options(new_lookup, &options) {
+            Ok((entry, _)) if new_path.ends_with('/') && !entry.node().is_directory()? => {
+                return Err(vfs_error(
+                    FileSystemErrorKind::NotADirectory,
+                    "Trailing slash on rename destination",
+                ));
+            }
+            Ok((entry, mount)) if Arc::ptr_eq(&entry, &mount.root) => {
+                return Err(vfs_error(
+                    FileSystemErrorKind::Busy,
+                    "Cannot replace a mount root",
+                ));
+            }
+            Ok((entry, _)) if !no_replace && entry.node().id() == old_entry.node().id() => {
+                // POSIX rename of the same file (including hard links) is a no-op.
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(error)
+                if error.kind == FileSystemErrorKind::NotFound
+                    && (!new_path.ends_with('/') || old_entry.node().is_directory()?) => {}
+            Err(error) => return Err(error),
+        }
 
         let old_parent_node = old_parent_entry.node();
         let new_parent_node = new_parent_entry.node();
@@ -1315,13 +1405,10 @@ impl VfsManager {
         // 2. If a destination entry existed in the cache, evict it
         new_parent_entry.remove_child(&new_name);
 
-        // 3. Re-attach the (now renamed) entry under the new name in the new parent cache
-        let new_entry = VfsEntry::new(
-            Some(Arc::downgrade(&new_parent_entry)),
-            new_name.clone(),
-            old_entry.node(),
-        );
-        new_parent_entry.add_child(new_name, new_entry);
+        // 3. Move the original entry so cwd, children, open directory handles
+        // and descendant mountpoints observe its new location too.
+        old_entry.relocate(new_name.clone(), new_parent_entry.clone());
+        new_parent_entry.add_child(new_name, old_entry);
 
         Ok(())
     }

@@ -25,8 +25,12 @@ fn test_nested_cwd_retains_ancestors_and_releases_them() {
     vfs.set_cwd_by_path("icons").unwrap();
 
     assert_eq!(vfs.get_cwd_path(), "/usr/share/icons");
-    assert_eq!(vfs.resolve_path_to_absolute("."), "/usr/share/icons");
-    assert_eq!(vfs.resolve_path_to_absolute("../"), "/usr/share");
+    // Anchoring deliberately preserves components until the VFS walker checks
+    // symlinks and directory requirements. Canonicalization resolves them.
+    assert_eq!(vfs.resolve_path_to_absolute("."), "/usr/share/icons/.");
+    assert_eq!(vfs.resolve_path_to_absolute("../"), "/usr/share/icons/../");
+    assert_eq!(vfs.canonicalize(".").unwrap(), "/usr/share/icons");
+    assert_eq!(vfs.canonicalize("../").unwrap(), "/usr/share");
     assert!(vfs.open(".", 0).is_ok());
 
     let (icons, _) = vfs.get_cwd().unwrap();
@@ -48,6 +52,68 @@ fn test_nested_cwd_retains_ancestors_and_releases_them() {
     vfs.set_cwd_by_path("/").unwrap();
     assert!(weak_share.upgrade().is_none());
     assert!(weak_usr.upgrade().is_none());
+}
+
+#[test_case]
+fn test_rename_relocates_cwd_and_open_directory_entries() {
+    let vfs = VfsManager::new();
+    for path in ["/from", "/from/child", "/to"] {
+        vfs.create_dir(path).unwrap();
+    }
+    let (directory, mount) = vfs.resolve_path("/from").unwrap();
+    vfs.set_cwd_by_path("/from/child").unwrap();
+    vfs.rename("/from", "/to/moved").unwrap();
+    assert_eq!(vfs.get_cwd_path(), "/to/moved/child");
+    assert_eq!(vfs.canonicalize("..").unwrap(), "/to/moved");
+    assert!(Arc::ptr_eq(
+        &vfs.resolve_path("/to/moved").unwrap().0,
+        &directory
+    ));
+    let (child, _) = vfs.resolve_path_from(&directory, &mount, "child").unwrap();
+    assert!(Arc::ptr_eq(&child, &vfs.get_cwd().unwrap().0));
+    vfs.rename("/to/moved", "/to/moved").unwrap();
+    assert_eq!(vfs.get_cwd_path(), "/to/moved/child");
+    vfs.rename("/to/moved/", "/to/renamed/").unwrap();
+    assert_eq!(vfs.get_cwd_path(), "/to/renamed/child");
+}
+
+#[test_case]
+fn test_rename_rejects_paths_that_would_corrupt_retained_entries() {
+    let vfs = VfsManager::new();
+    vfs.create_dir("/dir").unwrap();
+    vfs.create_dir("/dir/child").unwrap();
+    vfs.create_file("/file", crate::fs::FileType::RegularFile)
+        .unwrap();
+    vfs.create_symlink("/alias", "/dir").unwrap();
+    vfs.set_cwd_by_path("/dir/child").unwrap();
+    for (old, new) in [
+        ("/alias/", "/moved"),
+        ("/dir", ""),
+        ("/file", "/missing/"),
+        ("/dir", "/dir/child/cycle"),
+        ("/dir", "/alias/"),
+        ("/dir/.", "/moved"),
+    ] {
+        assert!(vfs.rename(old, new).is_err(), "rename {old} -> {new}");
+        assert_eq!(vfs.get_cwd_path(), "/dir/child");
+        assert_eq!(vfs.canonicalize("/alias/child").unwrap(), "/dir/child");
+    }
+}
+
+#[test_case]
+fn test_rename_mount_ancestor_preserves_namespace_path() {
+    let vfs = VfsManager::new();
+    vfs.create_dir("/parent").unwrap();
+    vfs.create_dir("/parent/mount").unwrap();
+    vfs.mount(TmpFS::new(1024 * 1024), "/parent/mount", 0)
+        .unwrap();
+    vfs.create_dir("/parent/mount/child").unwrap();
+    vfs.set_cwd_by_path("/parent/mount/child").unwrap();
+    vfs.rename("/parent", "/moved").unwrap();
+    assert_eq!(vfs.get_cwd_path(), "/moved/mount/child");
+    assert_eq!(vfs.canonicalize("../..").unwrap(), "/moved");
+    assert!(vfs.rename("/moved/mount", "/other").is_err());
+    assert_eq!(vfs.get_cwd_path(), "/moved/mount/child");
 }
 
 #[test_case]

@@ -416,3 +416,40 @@ new kernel syscalls and a matching rebuilt toolchain; full compiler rebuilds run
 in [scarlet-rust-nix PR #26](https://github.com/petitstrawberry/scarlet-rust-nix/pull/26)
 on Actions ([AArch64](https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35690454081),
 [RV64](https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35690489167)).
+
+### libc and filesystem hardening, 2026-09-22
+
+The [follow-up evidence](../../tools/native-rustc/evidence/2026-09-22-libc-quality-aarch64.json)
+records the updated AArch64 release kernel and probe on HVF, plus a complete
+1273-test release kernel run. The changes address:
+
+- Odd-sized allocations leaving the next std allocator block header unaligned.
+  The toolchain overlay rounds split points and tests the actual placement
+  helpers before bootstrap. Native C checks stress fragmentation and realloc.
+- LLVM builtin recognition deleting an overflowing Rust call to the exported
+  `calloc`. `scarlet-libc` now uses `#![no_builtins]`; the optimized guest checks
+  both the null return and child-thread `ENOMEM`, preserving the parent's errno.
+  A [minimal codegen reproduction](../../tools/native-rustc/evidence/2026-09-22-libc-quality-aarch64/calloc-codegen/build.py)
+  and before/after IR preserve the failure independently of guest execution.
+- ext2 fsync through a second descriptor missing another descriptor's writes.
+  Shared inode locking now covers writes, size publication, timestamps, truncate
+  and writeback. Tests check the former publication race and read raw disk bytes.
+- Explicit mtime overwriting ctime during writeback, and directory timestamp
+  updates freezing cached directory size.
+- Renames replacing entry objects and leaving cwd, open directory handles and
+  descendant mounts attached to old paths. Renames retain and relocate entries;
+  tests cover cycles, mount roots and symlink/trailing-slash cases. Directory
+  renames to new names ending in `/` follow Linux behavior.
+
+The 44 header checks cover standalone/repeated inclusion and aggregate C11/C++11
+declarations on AArch64/RV64 without host libc headers. Both native C/Rust probes
+cross-build; filesystem guest execution remains AArch64-only. The published
+bundle is unchanged. Allocator rebuilds are tracked in
+[toolchain PR #27](https://github.com/petitstrawberry/scarlet-rust-nix/pull/27)
+([AArch64](https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35693141878),
+[RV64](https://github.com/petitstrawberry/scarlet-rust-nix/actions/runs/35693166722)).
+
+The chosen direction is a Rust `no_std` libc. Its
+[acceptance gates](../../user/lib/scarlet-libc/STATUS.md) describe the work still
+required for standalone C startup, allocation-free errno, standards coverage and
+real Cargo dependencies; the current library still uses Rust std.

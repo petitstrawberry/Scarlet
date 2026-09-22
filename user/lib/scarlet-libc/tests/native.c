@@ -40,6 +40,27 @@ int scarlet_libc_probe(int file, int directory, const char *expected) {
     CHECK(p[0] == 42);
     free(p);
 
+    /* Repeated small, odd-sized requests exercise allocator split alignment,
+       preservation through realloc, and reuse of fragmented free blocks. */
+    unsigned char *blocks[96];
+    for (int round = 0; round < 4; round++) {
+        for (int i = 0; i < 96; i++) {
+            size_t size = (size_t)i * 2 + 1;
+            blocks[i] = malloc(size);
+            CHECK(blocks[i] != NULL && (size_t)blocks[i] % 16 == 0);
+            for (size_t j = 0; j < size; j++) blocks[i][j] = (unsigned char)(i + j);
+        }
+        for (int i = 1; i < 96; i += 2) { free(blocks[i]); blocks[i] = NULL; }
+        for (int i = 0; i < 96; i += 2) {
+            size_t size = (size_t)i * 2 + 1;
+            unsigned char *grown = realloc(blocks[i], size + 137);
+            CHECK(grown != NULL);
+            for (size_t j = 0; j < size; j++) CHECK(grown[j] == (unsigned char)(i + j));
+            blocks[i] = grown;
+        }
+        for (int i = 0; i < 96; i++) free(blocks[i]);
+    }
+
     CHECK(futimens(file, NULL) == 0);
     struct timespec times[2] = {{-1, UTIME_NOW}, {-1, UTIME_NOW}};
     CHECK(utimensat(AT_FDCWD, "real/file", times, 0) == 0);

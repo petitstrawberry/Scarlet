@@ -1,0 +1,190 @@
+{
+  "recorded_date": "2026-09-22",
+  "scope": "Rust scarlet-libc and filesystem hardening; private rebuilt static std/probe and release kernel. Compatible prior compiler/driver reused. Published bundle unchanged.",
+  "architecture": "aarch64",
+  "acceleration": "hvf",
+  "cpus": 4,
+  "scarlet_base_revision": "97c532dd08aab5e37b99e6cdb69f4a1e3705a5d1",
+  "rust_revision": "39c689a4859b9d8ee1828720135defd125c03d31",
+  "native_host_recipe_commit": "f1985e4cf9b7158ee6a7e1a4b91edac5eb1a3536",
+  "native_host_pr": "https://github.com/petitstrawberry/scarlet-rust-nix/pull/27",
+  "qemu": {
+    "result": "FULL_PASS",
+    "qemu_exit_code": 0,
+    "elapsed_seconds": 12.829,
+    "mode": "full",
+    "full_compilation_verified": true,
+    "proc_macro_verified": true,
+    "native_fs_verified": true,
+    "guest_evidence": "/private/tmp/scarlet-libc-quality-aarch64-final/guest-evidence/native-rustc-output"
+  },
+  "kernel_tests": {
+    "status": "passed",
+    "tests": 1273,
+    "accelerator": "hvf",
+    "profile": "release",
+    "features": [
+      "limine",
+      "network",
+      "user-fpu",
+      "user-vector",
+      "sync-debug"
+    ],
+    "full_suite": true,
+    "filtered_runner_used": false,
+    "qemu_exit_code": 0,
+    "kernel_sha256": "ff419faec41ee201544f1a5496c90224167dded37956d8f0a3aaf783da083921",
+    "recorded_at": "2026-09-22T06:08:44.044124+00:00",
+    "build_command": "nix develop -c env CARGO_TARGET_DIR=/tmp/scarlet-fs-quality-kernel-tests/build RUSTFLAGS=\"-C no-vectorize-loops -C no-vectorize-slp\" cargo test --manifest-path kernel/Cargo.toml --release --lib --no-default-features --features limine,network,user-fpu,user-vector,sync-debug --target kernel/targets/aarch64-unknown-none-elf.json -Z build-std=core,compiler_builtins,alloc -Z build-std-features=compiler-builtins-mem --no-run",
+    "run_command": "nix develop -c /tmp/scarlet-fs-quality-kernel-tests/run-tests.sh /tmp/scarlet-fs-quality-kernel-tests/build/aarch64-unknown-none-elf/release/deps/scarlet-7d7e5bb7db626597",
+    "required_regression_tests": [
+      "test_ext2_sync_through_second_handle_persists_shared_writes_and_times",
+      "test_ext2_write_publication_excludes_second_handle_writeback",
+      "test_rename_relocates_cwd_and_open_directory_entries",
+      "test_rename_rejects_paths_that_would_corrupt_retained_entries",
+      "test_rename_mount_ancestor_preserves_namespace_path",
+      "explicit_mtime_keeps_change_time_and_live_size_separate",
+      "access_time_only_update_does_not_invent_an_mtime"
+    ],
+    "note": "Normal unfiltered kernel test runner. Private wrapper only selects HVF/host CPU and known working UEFI firmware; no production source changed for test execution."
+  },
+  "disk_inode_times": {
+    "atime": 1234,
+    "mtime": 9876,
+    "ctime": 1790057340
+  },
+  "inputs": {
+    "release_kernel": {
+      "path": "/tmp/scarlet-native-fs-kernel-build/aarch64-unknown-none-elf/release/scarlet",
+      "sha256": "d51d221708dd866ba89630adf20f4df4a90b4e59e300ecbda471ed2e42e5734f"
+    },
+    "probe": {
+      "path": "/tmp/scarlet-libc-quality-probe-aarch64-unknown-scarlet/aarch64-unknown-scarlet/release/native-rustc-probe",
+      "sha256": "9afeef76fdf4bf55637e94d03b95b29f1ed4593b3d89d025e5716e1338346fb0"
+    },
+    "rustc": {
+      "path": "/tmp/scarlet-native-fs-staging/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/rustc",
+      "sha256": "b51bab261fe067f60a926efb16d5956aacf67429e64bfe736a8baab85c3b024f"
+    },
+    "loader": {
+      "path": "/tmp/scarlet-native-fs-staging/system/bin/scarlet-ld",
+      "sha256": "493564f6234bcf83374d1bf4769cde9d8474bae5da5895abe5cbbdc762049c26"
+    },
+    "driver": {
+      "path": "/tmp/scarlet-native-fs-staging/opt/scarlet/toolchains/rust/v0.1.0-rc.1/lib/librustc_driver-971288f04f51fd65.so",
+      "sha256": "f62f3d538a2733156aedac3c70c2484e3d1f965630d8c3b626661bb65052673f"
+    },
+    "libstd": {
+      "path": "/tmp/scarlet-native-fs-staging/opt/scarlet/toolchains/rust/v0.1.0-rc.1/lib/rustlib/aarch64-unknown-scarlet/lib/libstd-73fdd94a3355757f.rlib",
+      "sha256": "cdb62fdf4a6a052bf88eeac9e1bbea0375fd94268ddd2f9d426beeca2d7fabe7"
+    },
+    "libproc_macro": {
+      "path": "/tmp/scarlet-native-fs-staging/opt/scarlet/toolchains/rust/v0.1.0-rc.1/lib/rustlib/aarch64-unknown-scarlet/lib/libproc_macro-aaf8ff9f85c85d65.rlib",
+      "sha256": "3d77d585f52e6f15d5d9446fd088f538086d6457431d7e27a183e44c58c7bb5e"
+    },
+    "rv64_probe": {
+      "path": "/tmp/scarlet-libc-quality-probe-riscv64gc-unknown-scarlet/riscv64gc-unknown-scarlet/release/native-rustc-probe",
+      "sha256": "3481d86e90f02806cb910ab40fb98a866dcf2ea0ae11999d1a7f8b667f637d19"
+    }
+  },
+  "changed_source_sha256": {
+    "kernel/src/fs/vfs_v2/core.rs": "e322126342e61bc7f0e562ece80fa81cc8fc2a9d97a5c52fa7d847ca55e26708",
+    "kernel/src/fs/vfs_v2/drivers/ext2/mod.rs": "8fd1839edfc12592124df2a3839b6e339d4c84880ee0a03741d2c03f0137d45f",
+    "kernel/src/fs/vfs_v2/drivers/ext2/node.rs": "a831e11326748bd7c8794f698b3367067bac8695664be93883f1e48c31bc8f3a",
+    "kernel/src/fs/vfs_v2/drivers/ext2/tests.rs": "dda05e435ed1b50b0b43c7862afd4759c62daa36cb8ddd61dfa752851f6baecd",
+    "kernel/src/fs/vfs_v2/manager.rs": "da691127502926507dad8eee47454c56c8ecb49dc3102a2fdc1b326144a44218",
+    "kernel/src/fs/vfs_v2/mount_tree.rs": "ee679fcb5aba99998861f9a61f4e2f07de8183b97d7d07bbb1380a981bbe0d02",
+    "kernel/src/fs/vfs_v2/tests/mod.rs": "1c2c29e14eaf8fa740e25b3cd5383efece44d8bdf13ab0668ea1cfdc73928332",
+    "kernel/src/mem/page_cache.rs": "927c0bc59606290e79649dc467aa23186029778e1a7b81830226731c1e3f7368",
+    "tools/native-rustc/native_fs.rs": "513cc499ccd5e7680845312585b609efcebed4260486786dff64e435454924ac",
+    "user/lib/scarlet-libc/include/limits.h": "703fafa584a1db37764400351291a2a2242881f09d631ccfbbc89fdd4a70376c",
+    "user/lib/scarlet-libc/src/lib.rs": "d331d311f4d6e31e80af33ccdc289daf64dcd11f29d75a86c80c5876e3a91f1b",
+    "user/lib/scarlet-libc/tests/native.c": "05175c87eafc71dec8f0460fc8bc1e20349bbbd9b7442126526ad63045885eaf"
+  },
+  "host_checks": {
+    "header_compilations": 44,
+    "libc_tests_release": 3,
+    "probe_python_tests": 18,
+    "allocator_placement_tests": 4,
+    "nix_packaging_script_tests": 22
+  },
+  "regressions": [
+    "Odd-size allocation placement is aligned; original production helper fails 3/4 checks, patched helper passes all 4",
+    "C allocation fragmentation: four rounds of 96 odd-size allocations and realloc preservation on each of ext2/tmpfs fixtures",
+    "Optimized Rust calloc(SIZE_MAX,2) returns null and sets child errno=ENOMEM, leaving parent errno=EINVAL; no_builtins fixes reproduced unconditional-panic codegen",
+    "Second-handle fsync persists shared dirty pages before writer close; raw mock-device data and inode times verified",
+    "Inode mutex excludes writeback between dirty-page and size publication for positional and sequential writes; extension and truncate persist",
+    "ctime remains independent of explicit historical mtime; directory size grows after directory timestamp update",
+    "cwd and retained directory fd remain usable after rename; cycle, empty, symlink/trailing slash and mount-root failures preserve entries",
+    "Renaming an ancestor of a mounted tmpfs preserves cwd, canonical paths and unmount at the new pathname",
+    "Existing C/Rust filesystem checks and native std program/proc-macro DSO build, load, expansion and execution all pass"
+  ],
+  "limits": [
+    "Rust std allocation/TLS dependency remains; no standalone C CRT or no_std libc yet",
+    "Initial errno TLS access may allocate and cannot yet guarantee ENOMEM reporting under exhaustion",
+    "RV64 static std/probe cross-build only; no new RV64 filesystem guest run",
+    "Full mmap/unlink/namespace concurrency and power-loss durability not established",
+    "Kernel suite used limine,network,user-fpu,user-vector,sync-debug features; hypervisor feature excluded for this HVF run"
+  ],
+  "evidence_sha256": {
+    "NATIVE_FS_PASS": "1932929a879b1627e650b9e753a9386b637ea47ab1d8276d1e568ba620efbf5c",
+    "PASS": "488ec506264c2975576a2c477ee5f6fb92edb7131280b864039e54c49478deb7",
+    "PROC_MACRO_PASS": "585198c5fd53d949ad956aff184a2588f384b206c3bc5cbc226b25a6b4814469",
+    "calloc-before-fix-serial.log": "8483b55f8dad7ef16f4dfaa67dba6c5830831c9b26d00fad07f52fe90aada3a0",
+    "calloc-codegen/build.py": "2050b3b6cec893a26137a95af514c11d7813f34d3e4fbdc4c187789aedc2bb5c",
+    "calloc-codegen/caller-baseline.ll": "b0687aee7e33ae0ec61652c666a3867c64869560301bab4fdc0d81ab82af78e9",
+    "calloc-codegen/caller-nobuiltins.ll": "9e0a82f7fae2799faff224001b2ad97f5dd83e46852508e4567c88efc81ccb7a",
+    "calloc-codegen/caller.rs": "507b379a9a51ba49749a3590e084ff5039766cd11fa9456f2b5e9c9e864ec803",
+    "calloc-codegen/lib.rs": "eab7d7bbe8f39a8ab28969a4fc850b3708f7fce4291ff875d976518fe922f042",
+    "cfg.command": "da13ddfcbd355b17a95a3920540f7e1b99d9545b3de03cac63ef7d280ef39fd9",
+    "cfg.status": "37f53597ff54a8a024e8a53630bffe2acf8e4ea47380b5f49602176d5aabb2f3",
+    "cfg.stderr": "f80fd06949cdf1d760f887b4c46c585601482b336d144cc247ac9140a1c52821",
+    "cfg.stdout": "ab08b29f15cb9933ea369d816219a72f199027190798d410876f11e27bc5cb1b",
+    "commands.json": "2fe35bbf12a3feb7ef10e2ffb80691f4d22b4031e1f978b2c8fd48d8369bc422",
+    "compile.command": "d51d77ffedd9f19f08aeb49c75d6d952246e470cc7074d1d0d6dc4723327a4b0",
+    "compile.status": "9383b25cca45fae6d3264a3823230bad595365daeffe73cc4614df69daca73d2",
+    "compile.stderr": "f80fd06949cdf1d760f887b4c46c585601482b336d144cc247ac9140a1c52821",
+    "compile.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "execute.command": "d479b5bf26bdeb46ae826319ba6986b8835427ed0c0c5a270b8ace9ccffe5549",
+    "execute.status": "bff254dd9067b753fa63a5e1ab17d5a419eb55e17467dccc25a5ff1a51842a70",
+    "execute.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "execute.stdout": "f7db1accdcc0c5d3a36ca1fa83beaa4f1d6a838f963945549006b84066c5e40c",
+    "ext2-inode.log": "83056b3010dcf250d4a509f6e3558cfbf76ab4e8d227df7c6b922ce1da64d8f4",
+    "frontend.command": "a7473a14cdf4e641de6426a3574abe215dc14fe5dd36735a2c393e8093acd1cd",
+    "frontend.status": "d9b60cdaac5e2e97f54a4a28c86270639983c8814e9706cfa283006ad85010ed",
+    "frontend.stderr": "f80fd06949cdf1d760f887b4c46c585601482b336d144cc247ac9140a1c52821",
+    "frontend.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "hello.rs": "3ab01a600239173f5292731f10f0f7714907954c2978481e953b574278281b73",
+    "kernel-tests-command.json": "ba8b83ce4c84779eedf377b816ba536c6ca3c347e01f5a6f7623f46459292b4a",
+    "kernel-tests-regression-results.log": "64cfb6eb466eee7dbc254c9358be999dbd6e3cf08ecedac4ad1e05e33046ddf0",
+    "kernel-tests-result.json": "571fe48f6ed595aa219037c0278c2b3299ae6f4af331233bbd8e7d1b1d71166e",
+    "kernel-tests-serial.log": "eee836b9f0ff1790146177657bfa9f64e7ee1e4fcba2519daaf31a8a76095197",
+    "kernel-tests-source-hashes.json": "e28bf2fe0afa87874b899371ee464990e47c9778305831ac213d3f59ba07b96a",
+    "libc-host-tests.log": "8d773cc9f5533999b34ce73be530ac403b7842d7b19dfda728f4bb915dae8992",
+    "macro-app.rs": "740b05d489ffb92bbe2e4b102169990545d4039645e76c6f5c4c4766cd4577bf",
+    "macros.rs": "b41b4d7a2467b48f6c9f7d4b05287d016533e72386ad9c1fd877546ce90c93ac",
+    "proc-macro-build-other.command": "7d99488972e99187160f94311780d1dbc7c44ef499630d014f87128250dd4f2c",
+    "proc-macro-build-other.status": "9b94a7f5e93caa2b476f853cf7ce6096cff13d6fce1f896369ab5fcdaf38fc93",
+    "proc-macro-build-other.stderr": "ce61291a700eaa0fc6961ac2a141122a43d1894e1b3d021331f01a37d2e881f0",
+    "proc-macro-build-other.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proc-macro-build.command": "54e4c8d2af8d9150b6d0a2486243bf827baef79639c4042eeefe414627778383",
+    "proc-macro-build.status": "42e014959426ad2a634429d6ad9fdcb8a23817e7ea2c5b554d62f900cb92fff5",
+    "proc-macro-build.stderr": "ce61291a700eaa0fc6961ac2a141122a43d1894e1b3d021331f01a37d2e881f0",
+    "proc-macro-build.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proc-macro-execute.command": "46bd77e74fe3d2803ee1738017d88229bbc4a282ded2b0ee3fac8e553805150a",
+    "proc-macro-execute.status": "8acbfd137f2f716a892828be8dabe9a88c6afdc6e4c7e840aaac43d9e0a9f26c",
+    "proc-macro-execute.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proc-macro-execute.stdout": "5af2b9bbbc7f9374ba2690a53defa24ddef5cdd6aca60c46e2b717114b6edc1a",
+    "proc-macro-expand.command": "4ef296b71d74acfe6e8d2bbfb183a0c54df6c1300f30bebd1bf6795f5c7b6fbb",
+    "proc-macro-expand.status": "b7bf887fa72c39df1e3fa0c20709c00cbfe8c9ccb4d0016b766343010654a80a",
+    "proc-macro-expand.stderr": "f80fd06949cdf1d760f887b4c46c585601482b336d144cc247ac9140a1c52821",
+    "proc-macro-expand.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "result.json": "b6703d3dccf1b9fbd1780649c911d434af4845ae628c288a1bb2daf553816304",
+    "rv64-probe-build.log": "57e045bc7220a59c71b6fbfacca02ae1a9e07fbed2513d79bc59b996133de53b",
+    "serial.log": "a2ff8d560c18bfedaf5b14634e65c13e55dc9a0ef2888dbc2ab84e8a870b0006",
+    "version.command": "d1895acf984785b74e6d1cc88841089711c336c8bd5810680ff020a04b0ddc8e",
+    "version.status": "b7e16c1127c6410d4072ac69876e0a1d3fb2b107d120f4ef74c4731352ac2df8",
+    "version.stderr": "b765948e24c26c18c0cda2314995bf88eae488d8b61fed6fdce8825ca3f6ad2d",
+    "version.stdout": "7b470863f2743b445f051637801f8df2e4e852f6d150f9cf9bea3f1362388d67"
+  }
+}

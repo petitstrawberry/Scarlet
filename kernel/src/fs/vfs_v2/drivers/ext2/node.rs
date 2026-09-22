@@ -141,12 +141,13 @@ impl VfsNode for Ext2Node {
             .cached_object_size(cache_id)
             .unwrap_or_else(|| inode.get_size() as usize);
         let modified_time = PageCacheManager::global().cached_object_modified_time(cache_id);
+        let changed_time = PageCacheManager::global().cached_object_changed_time(cache_id);
 
         Ok(FileMetadata {
             file_type: self.file_type.clone(),
             size,
             permissions,
-            created_time: modified_time.unwrap_or(inode.get_ctime() as u64),
+            created_time: changed_time.unwrap_or(inode.get_ctime() as u64),
             modified_time: modified_time.unwrap_or(inode.get_mtime() as u64),
             accessed_time: inode.get_atime() as u64,
             file_id: self.file_id,
@@ -244,12 +245,6 @@ impl Ext2FileObject {
 
     /// Flush current page-cache-backed content to disk.
     fn sync_to_disk(&self) -> Result<(), StreamError> {
-        let no_size_override = self.size_override.lock().is_none();
-        let is_dirty = *self.dirty.lock();
-        if no_size_override && !is_dirty {
-            return Ok(());
-        }
-
         let fs = self
             .filesystem
             .read()
@@ -260,6 +255,16 @@ impl Ext2FileObject {
             .as_any()
             .downcast_ref::<Ext2FileSystem>()
             .ok_or(StreamError::NotSupported)?;
+        let inode_lock = ext2_fs.get_inode_lock(self.inode_number);
+        let _inode_guard = inode_lock.lock();
+        let no_size_override = self.size_override.lock().is_none();
+        let is_dirty = *self.dirty.lock();
+        let cache_id = self.cache_id();
+        // fsync applies to the inode, including writes through another open
+        // handle. Per-handle flags alone cannot describe the shared cache.
+        if no_size_override && !is_dirty && !PageCacheManager::global().has_dirty_pages(cache_id) {
+            return Ok(());
+        }
 
         let on_disk = ext2_fs
             .read_inode(self.inode_number)
@@ -272,14 +277,13 @@ impl Ext2FileObject {
                 StreamError::IoError
             })?
             .size as usize;
-        let cache_id = self.cache_id();
         let eff_size = PageCacheManager::global()
             .cached_object_size(cache_id)
             .unwrap_or_else(|| self.effective_size(on_disk));
         PageCacheManager::global()
             .flush_batch(cache_id, |pages| {
                 ext2_fs
-                    .write_cached_pages(self.inode_number, eff_size, pages)
+                    .write_cached_pages_locked(self.inode_number, eff_size, pages)
                     .map_err(|_| "ext2 page writeback failed")
             })
             .map_err(|e| {
@@ -475,6 +479,8 @@ impl StreamOps for Ext2FileObject {
             return Ok(0);
         }
 
+        let inode_lock = ext2_fs.get_inode_lock(self.inode_number);
+        let _inode_guard = inode_lock.lock();
         let cache_id = self.cache_id();
         let end_pos = loop {
             let current_pos =
@@ -534,6 +540,8 @@ impl StreamOps for Ext2FileObject {
             break end_pos;
         };
 
+        #[cfg(test)]
+        ext2_fs.observe_pending_write(self.inode_number, end_pos);
         let mut override_size = self.size_override.lock();
         let new_end = end_pos;
         match *override_size {
@@ -671,19 +679,6 @@ impl MemoryMappingOps for Ext2FileObject {
 
     fn on_unmapped(&self, vaddr: usize, _length: usize) {
         self.mmap_ranges.write().remove(&vaddr);
-        let backing_guard = self.mmap_backing.read();
-        let backing = match backing_guard.as_ref() {
-            Some(buf) => buf,
-            None => {
-                let _ = self.sync_to_disk();
-                return;
-            }
-        };
-        let backing_len = *self.mmap_backing_len.lock();
-        if backing_len == 0 {
-            return;
-        }
-
         let fs = match self
             .filesystem
             .read()
@@ -698,9 +693,29 @@ impl MemoryMappingOps for Ext2FileObject {
             None => return,
         };
 
-        let backing_ptr = backing.as_ptr() as *const u8;
-        let data = unsafe { core::slice::from_raw_parts(backing_ptr, backing_len) };
-        let _ = ext2_fs.write_file_content(self.inode_number, data);
+        let inode_lock = ext2_fs.get_inode_lock(self.inode_number);
+        let inode_guard = inode_lock.lock();
+        // Snapshot the backing before doing sleepable I/O. The backing lock
+        // disables interrupts and must not cover inode locking or writeback.
+        let data = {
+            let backing_guard = self.mmap_backing.read();
+            let backing = match backing_guard.as_ref() {
+                Some(buf) => buf,
+                None => {
+                    drop(backing_guard);
+                    drop(inode_guard);
+                    let _ = self.sync_to_disk();
+                    return;
+                }
+            };
+            let backing_len = *self.mmap_backing_len.lock();
+            if backing_len == 0 {
+                return;
+            }
+            let backing_ptr = backing.as_ptr() as *const u8;
+            unsafe { core::slice::from_raw_parts(backing_ptr, backing_len) }.to_vec()
+        };
+        let _ = ext2_fs.write_file_content(self.inode_number, &data);
         PageCacheManager::global().invalidate(self.cache_id());
     }
 
@@ -859,12 +874,13 @@ impl FileObject for Ext2FileObject {
             .cached_object_size(self.cache_id())
             .unwrap_or_else(|| self.effective_size(inode_size));
         let modified_time = PageCacheManager::global().cached_object_modified_time(self.cache_id());
+        let changed_time = PageCacheManager::global().cached_object_changed_time(self.cache_id());
 
         Ok(FileMetadata {
             file_type,
             size,
             permissions,
-            created_time: modified_time.unwrap_or(inode.get_ctime() as u64),
+            created_time: changed_time.unwrap_or(inode.get_ctime() as u64),
             modified_time: modified_time.unwrap_or(inode.get_mtime() as u64),
             accessed_time: inode.atime as u64,
             file_id: self.file_id,
@@ -919,6 +935,18 @@ impl FileObject for Ext2FileObject {
         let off = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
         off.checked_add(buffer.len())
             .ok_or(StreamError::InvalidArgument)?;
+        let fs = self
+            .filesystem
+            .read()
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(StreamError::Closed)?;
+        let ext2_fs = fs
+            .as_any()
+            .downcast_ref::<Ext2FileSystem>()
+            .ok_or(StreamError::NotSupported)?;
+        let inode_lock = ext2_fs.get_inode_lock(self.inode_number);
+        let _inode_guard = inode_lock.lock();
         let stored_size = self.metadata()?.size;
         let mut written = 0usize;
         let cache_id = self.cache_id();
@@ -959,6 +987,8 @@ impl FileObject for Ext2FileObject {
         }
 
         let new_end = off + written;
+        #[cfg(test)]
+        ext2_fs.observe_pending_write(self.inode_number, new_end);
         let mut size_override = self.size_override.lock();
         match *size_override {
             Some(cur) => {
@@ -996,6 +1026,8 @@ impl FileObject for Ext2FileObject {
             .as_any()
             .downcast_ref::<Ext2FileSystem>()
             .ok_or(StreamError::NotSupported)?;
+        let inode_lock = ext2_fs.get_inode_lock(self.inode_number);
+        let _inode_guard = inode_lock.lock();
         let inode_size = ext2_fs
             .read_inode(self.inode_number)
             .map_err(|_| StreamError::IoError)?

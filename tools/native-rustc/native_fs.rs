@@ -178,16 +178,89 @@ fn check(root: &Path, ext2: bool) -> Result<(), Box<dyn std::error::Error>> {
             .as_secs(),
         9876
     );
+    drop(file);
+    check_renamed_directory(root)?;
+    if ext2 {
+        let directory = root.join("growing-directory");
+        fs::create_dir(&directory)?;
+        File::open(&directory)?
+            .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(42)))?;
+        let before = fs::metadata(&directory)?.len();
+        // Force more than one 4 KiB ext2 directory block after its timestamp
+        // update. Cached file sizes must not freeze directory metadata.
+        for i in 0..32 {
+            File::create(directory.join(format!("{i:03}-{}", "x".repeat(200))))?;
+        }
+        assert!(fs::metadata(&directory)?.len() > before);
+    }
+    Ok(())
+}
+
+fn check_renamed_directory(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir_all(root.join("rename/from/child"))?;
+    fs::create_dir(root.join("rename/to"))?;
+    let old = root.join("rename/from");
+    let moved = root.join("rename/to/moved");
+    let retained = File::open(&old)?;
+    std::env::set_current_dir(old.join("child"))?;
+    fs::rename(
+        format!("{}/", old.display()),
+        format!("{}/", moved.display()),
+    )?;
+    assert_eq!(std::env::current_dir()?, moved.join("child"));
+    assert_eq!(fs::canonicalize("..")?, moved);
+    fs::write("item", b"renamed cwd")?;
+    let times = [scarlet_c::Timespec {
+        tv_sec: 100,
+        tv_nsec: 0,
+    }; 2];
+    assert_eq!(
+        unsafe {
+            scarlet_c::utimensat(
+                retained.as_raw_fd(),
+                c"child/item".as_ptr(),
+                times.as_ptr(),
+                0,
+            )
+        },
+        0
+    );
+    assert_eq!(
+        fs::metadata("item")?
+            .modified()?
+            .duration_since(UNIX_EPOCH)?
+            .as_secs(),
+        100
+    );
+    assert!(fs::rename(&moved, moved.join("child/cycle")).is_err());
+    assert!(fs::rename(&moved, "").is_err());
+    let alias = root.join("rename/alias");
+    symlink("to/moved", &alias);
+    assert!(fs::rename(format!("{}/", alias.display()), root.join("rename/bad")).is_err());
+    assert!(fs::symlink_metadata(&alias)?.file_type().is_symlink());
+    assert_eq!(std::env::current_dir()?, moved.join("child"));
+    assert_eq!(fs::canonicalize("item")?, moved.join("child/item"));
+    std::env::set_current_dir(root)?;
     Ok(())
 }
 
 pub fn run(output: &Path) -> Result<(), String> {
     let original = std::env::current_dir().map_err(|error| error.to_string())?;
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        // Check the actual Scarlet TLS backend, not only host thread_local!.
+        unsafe { *scarlet_c::__errno_location() = 22 };
+        std::thread::spawn(|| {
+            assert!(scarlet_c::allocation::calloc(usize::MAX, 2).is_null());
+            assert_eq!(unsafe { *scarlet_c::__errno_location() }, 12);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(unsafe { *scarlet_c::__errno_location() }, 22);
         let ext2 = output.join("fs-ext2");
         check(&ext2, true)?;
-        let tmpfs = output.join("fs-tmpfs");
-        fs::create_dir(&tmpfs)?;
+        let mount_parent = output.join("mount-parent");
+        let tmpfs = mount_parent.join("fs-tmpfs");
+        fs::create_dir_all(&tmpfs)?;
         let mount = CString::new(tmpfs.as_os_str().as_encoded_bytes())?;
         let mounted = unsafe {
             scarlet_sys::syscall5(
@@ -201,7 +274,16 @@ pub fn run(output: &Path) -> Result<(), String> {
         };
         assert_eq!(mounted, 0, "mount private tmpfs");
         check(&tmpfs, false)?;
+        let moved_parent = output.join("moved-mount-parent");
+        fs::rename(&mount_parent, &moved_parent)?;
+        let moved_tmpfs = moved_parent.join("fs-tmpfs");
+        assert_eq!(std::env::current_dir()?, moved_tmpfs);
+        assert_eq!(
+            fs::canonicalize("real/moved")?,
+            moved_tmpfs.join("real/moved")
+        );
         std::env::set_current_dir(&original)?;
+        let mount = CString::new(moved_tmpfs.as_os_str().as_encoded_bytes())?;
         let unmounted =
             unsafe { scarlet_sys::syscall2(Syscall::FsUmount, mount.as_ptr() as usize, 0) };
         assert_eq!(unmounted, 0);

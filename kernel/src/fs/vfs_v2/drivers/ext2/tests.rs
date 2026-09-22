@@ -412,6 +412,161 @@ fn test_ext2_directory_size_and_metadata_follow_cached_writes() {
     PageCacheManager::global().invalidate(cache_id);
 }
 
+fn create_writeback_test_file() -> (Arc<MockBlockDevice>, Arc<Ext2FileSystem>, Arc<dyn VfsNode>) {
+    let device = Arc::new(create_test_ext2_device());
+    // The minimal fixture supplies the superblock; locate this test's inode
+    // table so writeback cannot accidentally overwrite the superblock.
+    let mut descriptors = vec![0; 1024];
+    descriptors[8..12].copy_from_slice(&5_u32.to_le_bytes());
+    device.enqueue_request(Box::new(BlockIORequest {
+        request_type: BlockIORequestType::Write,
+        sector: 4,
+        sector_count: 2,
+        head: 0,
+        cylinder: 0,
+        buffer: descriptors,
+    }));
+    assert!(device.process_requests()[0].result.is_ok());
+    let fs = Ext2FileSystem::new(device.clone()).unwrap();
+    let mut inode = Ext2Inode::empty();
+    inode.mode = (EXT2_S_IFREG | 0o644).to_le();
+    inode.size = 64_u32.to_le();
+    inode.ctime = 222_u32.to_le();
+    // Reuse one allocated block to avoid depending on allocator bitmaps in
+    // this focused writeback test. Block 300 is beyond the inode table.
+    inode.block[0] = 300_u32.to_le();
+    fs.inode_cache.write().insert(11, inode);
+    let node = Arc::new(Ext2Node::new(11, FileType::RegularFile, 11));
+    node.set_filesystem(Arc::downgrade(
+        &(fs.clone() as Arc<dyn FileSystemOperations>),
+    ));
+    let node: Arc<dyn VfsNode> = node;
+    (device, fs, node)
+}
+
+#[test_case]
+fn test_ext2_sync_through_second_handle_persists_shared_writes_and_times() {
+    use crate::fs::FileTimeUpdate;
+    use crate::fs::vfs_v2::cache::CacheId;
+    use crate::mem::page_cache::PageCacheManager;
+
+    let (device, fs, node) = create_writeback_test_file();
+    let writer = fs.open(&node, 0).unwrap();
+    let syncing_handle = fs.open(&node, 0).unwrap();
+    let cache_id = CacheId::new((fs.fs_id().get() << 32) | 11);
+    let cache = PageCacheManager::global();
+    let contents = b"shared inode fsync";
+
+    assert_eq!(writer.write_at(0, contents).unwrap(), contents.len());
+    assert!(cache.has_dirty_pages(cache_id));
+    node.set_times(FileTimeUpdate {
+        accessed: None,
+        modified: Some(7),
+    })
+    .unwrap();
+    let changed_time = fs.read_inode(11).unwrap().get_ctime() as u64;
+    assert_eq!(writer.metadata().unwrap().created_time, changed_time);
+
+    syncing_handle.sync().unwrap();
+    // Keep the writer alive until after this assertion: dropping it first
+    // would flush its private dirty flag and conceal the fsync regression.
+    assert!(!cache.has_dirty_pages(cache_id));
+    let persisted = fs.read_inode(11).unwrap();
+    assert_eq!(persisted.get_mtime(), 7);
+    assert_eq!(persisted.get_ctime() as u64, changed_time);
+    assert_eq!(node.metadata().unwrap().created_time, changed_time);
+    device.enqueue_request(Box::new(BlockIORequest {
+        request_type: BlockIORequestType::Read,
+        sector: 600,
+        sector_count: 2,
+        head: 0,
+        cylinder: 0,
+        buffer: vec![0; 1024],
+    }));
+    let result = device.process_requests();
+    assert!(result[0].result.is_ok());
+    assert_eq!(&result[0].request.buffer[..contents.len()], contents);
+
+    drop(syncing_handle);
+    drop(writer);
+    cache.invalidate(cache_id);
+}
+
+#[test_case]
+fn test_ext2_write_publication_excludes_second_handle_writeback() {
+    use crate::fs::SeekFrom;
+    use crate::fs::vfs_v2::cache::CacheId;
+    use crate::mem::page_cache::PageCacheManager;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    static OBSERVED_WRITES: AtomicUsize = AtomicUsize::new(0);
+    fn before_publish(fs: &Ext2FileSystem, inode: u32, write_end: usize) {
+        let cache_id = CacheId::new((fs.fs_id().get() << 32) | u64::from(inode));
+        let cache = PageCacheManager::global();
+        // This is the former loss window: pages are dirty and unpinned, but
+        // the larger size is not visible yet. A second handle must be unable
+        // to snapshot that old size and clear these pages during writeback.
+        assert!(cache.has_dirty_pages(cache_id));
+        let published_size = cache
+            .cached_object_size(cache_id)
+            .unwrap_or_else(|| fs.read_inode(inode).unwrap().get_size() as usize);
+        assert!(published_size < write_end);
+        assert!(fs.get_inode_lock(inode).try_lock().is_none());
+        OBSERVED_WRITES.fetch_add(1, Ordering::SeqCst);
+    }
+
+    let (device, fs, node) = create_writeback_test_file();
+    let writer = fs.open(&node, 0).unwrap();
+    let syncing_handle = fs.open(&node, 0).unwrap();
+    let cache_id = CacheId::new((fs.fs_id().get() << 32) | 11);
+    let cache = PageCacheManager::global();
+    OBSERVED_WRITES.store(0, Ordering::SeqCst);
+    *fs.before_write_publish.lock() = Some(before_publish);
+    let positional = b"positional extension";
+    let sequential = b"sequential extension";
+
+    assert_eq!(writer.write_at(64, positional).unwrap(), positional.len());
+    syncing_handle.sync().unwrap();
+    assert_eq!(
+        fs.read_inode(11).unwrap().get_size() as usize,
+        64 + positional.len()
+    );
+    writer.seek(SeekFrom::End(0)).unwrap();
+    assert_eq!(writer.write(sequential).unwrap(), sequential.len());
+    syncing_handle.sync().unwrap();
+    *fs.before_write_publish.lock() = None;
+    assert_eq!(OBSERVED_WRITES.load(Ordering::SeqCst), 2);
+    assert!(!cache.has_dirty_pages(cache_id));
+    let end = 64 + positional.len() + sequential.len();
+    assert_eq!(fs.read_inode(11).unwrap().get_size() as usize, end);
+
+    device.enqueue_request(Box::new(BlockIORequest {
+        request_type: BlockIORequestType::Read,
+        sector: 600,
+        sector_count: 2,
+        head: 0,
+        cylinder: 0,
+        buffer: vec![0; 1024],
+    }));
+    let result = device.process_requests();
+    assert!(result[0].result.is_ok());
+    assert_eq!(
+        &result[0].request.buffer[64..64 + positional.len()],
+        positional
+    );
+    assert_eq!(
+        &result[0].request.buffer[64 + positional.len()..end],
+        sequential
+    );
+
+    writer.truncate(8).unwrap();
+    syncing_handle.sync().unwrap();
+    assert_eq!(fs.read_inode(11).unwrap().get_size(), 8);
+    drop(syncing_handle);
+    drop(writer);
+    cache.invalidate(cache_id);
+}
+
 // Helper function to create a mock ext2 device with proper structure
 fn create_test_ext2_device() -> MockBlockDevice {
     let sector_size = 512;

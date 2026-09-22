@@ -309,9 +309,11 @@ pub struct Ext2FileSystem {
     inode_cache: IrqRwSpinLock<InodeLruCache>,
     /// LRU cached blocks
     block_cache: IrqRwSpinLock<BlockLruCache>,
-    /// Per-inode locks to serialize directory-mutating operations on the same inode,
-    /// preventing concurrent read-modify-write races on directory blocks
+    /// Per-inode locks serialize directory mutations and regular-file writes,
+    /// size/timestamp publication, truncation, and writeback across open handles.
     inode_locks: IrqRwSpinLock<BTreeMap<u32, Arc<Mutex<()>>>>,
+    #[cfg(test)]
+    before_write_publish: IrqSpinLock<Option<fn(&Ext2FileSystem, u32, usize)>>,
     /// Global lock to serialize block allocation operations
     allocation_lock: Mutex<()>,
 }
@@ -610,6 +612,8 @@ impl Ext2FileSystem {
             inode_cache: IrqRwSpinLock::new(InodeLruCache::new(8192)),
             block_cache: IrqRwSpinLock::new(BlockLruCache::new(8192)),
             inode_locks: IrqRwSpinLock::new(BTreeMap::new()),
+            #[cfg(test)]
+            before_write_publish: IrqSpinLock::new(None),
             allocation_lock: Mutex::new(()),
         });
 
@@ -662,6 +666,14 @@ impl Ext2FileSystem {
             .entry(inode_num)
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
+    }
+
+    #[cfg(test)]
+    fn observe_pending_write(&self, inode_num: u32, write_end: usize) {
+        let observer = *self.before_write_publish.lock();
+        if let Some(observer) = observer {
+            observer(self, inode_num, write_end);
+        }
     }
 
     /// Execute a closure while holding the allocation lock.
@@ -1286,7 +1298,9 @@ impl Ext2FileSystem {
     /// writing it. A growing video spool therefore needed a second contiguous
     /// allocation as large as the stream. This routine retains at most 64 ext2
     /// blocks (normally 256 KiB) and commits the inode once per flush.
-    pub fn write_cached_pages(
+    /// The caller must hold this inode's lock through the page-cache dirty-flag
+    /// clearing too, so another write cannot be mistaken for persisted data.
+    fn write_cached_pages_locked(
         &self,
         inode_num: u32,
         file_size: usize,
@@ -1297,9 +1311,6 @@ impl Ext2FileSystem {
         if pages.is_empty() {
             return Ok(());
         }
-        // Serialize inode read/modify/write with explicit timestamp updates.
-        let inode_lock = self.get_inode_lock(inode_num);
-        let _inode_guard = inode_lock.lock();
         let file_size_u32 = u32::try_from(file_size).map_err(|_| {
             FileSystemError::new(
                 FileSystemErrorKind::InvalidData,
@@ -1416,6 +1427,12 @@ impl Ext2FileSystem {
             .or_else(current_timestamp);
         if let Some(time) = modified_time {
             inode.mtime = time.to_le();
+        }
+        let changed_time = crate::mem::page_cache::PageCacheManager::global()
+            .cached_object_changed_time(cache_id)
+            .map(|seconds| seconds as u32)
+            .or_else(current_timestamp);
+        if let Some(time) = changed_time {
             inode.ctime = time.to_le();
         }
         inode.blocks = u32::try_from(blocks_needed)
@@ -1459,14 +1476,17 @@ impl Ext2FileSystem {
         }
         self.write_inode(inode_num, &inode)?;
         self.inode_cache.write().insert(inode_num, inode);
-        if let Some(time) = modified {
+        // Directory and symlink contents bypass the regular-file page cache.
+        // Recording their size/mtime here would hide later directory mutations.
+        if inode.get_mode() & EXT2_S_IFMT == EXT2_S_IFREG {
             let cache_id = crate::fs::vfs_v2::cache::CacheId::new(
                 (self.fs_id().get() << 32) | inode_num as u64,
             );
-            crate::mem::page_cache::PageCacheManager::global().set_object_modified_time(
+            crate::mem::page_cache::PageCacheManager::global().set_object_times(
                 cache_id,
                 inode.get_size() as usize,
-                u64::from(time),
+                modified.map(u64::from),
+                u64::from(inode.get_ctime()),
             );
         }
         Ok(())

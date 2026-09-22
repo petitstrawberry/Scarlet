@@ -77,6 +77,7 @@ jobs:
 
     - name: Test native libc and compiler probe helpers
       run: |
+        nix develop .#default --command python3 user/lib/scarlet-libc/tests/check_headers.py
         nix develop .#default --command cargo test --manifest-path user/lib/scarlet-libc/Cargo.toml
         nix develop .#default --command cargo test --manifest-path tools/native-rustc/Cargo.toml --all-features
         nix develop .#default --command python3 -m unittest discover -s tools/native-rustc -p 'test_*.py'

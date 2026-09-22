@@ -71,10 +71,9 @@ pub type FileSystemRef = Arc<dyn FileSystemOperations>;
 pub struct VfsEntry {
     /// Keep ancestors alive while this entry is in use (for cwd, openat, etc.).
     /// The reverse child-cache links are weak, so this does not form a cycle.
-    parent: IrqRwSpinLock<Option<Arc<VfsEntry>>>,
-
-    /// Name of this VfsEntry (e.g., "user", "file.txt")
-    name: String,
+    /// Name and parent change together on rename. Open handles and cwd retain
+    /// this entry, so replacing it would leave their path hierarchy stale.
+    location: IrqRwSpinLock<(String, Option<Arc<VfsEntry>>)>,
 
     /// Reference to the corresponding file entity (VfsNode)
     node: Arc<dyn VfsNode>,
@@ -99,16 +98,25 @@ impl VfsEntry {
         );
 
         Arc::new(Self {
-            parent: IrqRwSpinLock::new(parent.and_then(|parent| parent.upgrade())),
-            name,
+            location: IrqRwSpinLock::new((name, parent.and_then(|parent| parent.upgrade()))),
             node,
             children: IrqRwSpinLock::new(BTreeMap::new()),
         })
     }
 
     /// Get the name of this entry
-    pub fn name(&self) -> &String {
-        &self.name
+    pub fn name(&self) -> String {
+        self.location.read().0.clone()
+    }
+
+    /// Snapshot both parts of the location under the same lock.
+    pub fn location(&self) -> (String, Option<Arc<VfsEntry>>) {
+        self.location.read().clone()
+    }
+
+    /// Called with the VFS namespace mutation lock held, after driver rename.
+    pub(crate) fn relocate(&self, name: String, parent: Arc<VfsEntry>) {
+        *self.location.write() = (name, Some(parent));
     }
 
     /// Get the VfsNode for this entry
@@ -118,11 +126,11 @@ impl VfsEntry {
 
     /// Get parent VfsEntry if it exists
     pub fn parent(&self) -> Option<Arc<VfsEntry>> {
-        self.parent.read().clone()
+        self.location.read().1.clone()
     }
 
     pub fn set_parent(&self, parent: Weak<VfsEntry>) {
-        *self.parent.write() = parent.upgrade();
+        self.location.write().1 = parent.upgrade();
     }
 
     /// Add a child to the cache
@@ -169,8 +177,7 @@ impl VfsEntry {
 impl Clone for VfsEntry {
     fn clone(&self) -> Self {
         Self {
-            parent: IrqRwSpinLock::new(self.parent.read().clone()),
-            name: self.name.clone(),
+            location: IrqRwSpinLock::new(self.location()),
             node: Arc::clone(&self.node),
             children: IrqRwSpinLock::new(self.children.read().clone()),
         }
@@ -180,7 +187,7 @@ impl Clone for VfsEntry {
 impl fmt::Debug for VfsEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VfsEntry")
-            .field("name", &self.name)
+            .field("name", &self.name())
             .field("node", &self.node)
             .field("children_count", &self.children.read().len())
             .finish()
