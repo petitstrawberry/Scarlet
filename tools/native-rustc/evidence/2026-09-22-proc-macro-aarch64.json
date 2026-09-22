@@ -1,0 +1,102 @@
+{
+  "recorded_date": "2026-09-22",
+  "scope": "Local native compiler with rebuilt matching std/proc_macro sysroot; not the rebuilt Actions distribution",
+  "architecture": "aarch64",
+  "acceleration": "hvf",
+  "cpus": 4,
+  "rust_revision": "39c689a4859b9d8ee1828720135defd125c03d31",
+  "native_host_recipe_commit": "8365c98292d9ba0d5f588252c313079c754ada73",
+  "native_host_pr": "https://github.com/petitstrawberry/scarlet-rust-nix/pull/25",
+  "qemu": {
+    "result": "FULL_PASS",
+    "qemu_exit_code": 0,
+    "elapsed_seconds": 13.348,
+    "mode": "full",
+    "full_compilation_verified": true,
+    "proc_macro_verified": true,
+    "guest_evidence": "/private/tmp/scarlet-proc-macro-aarch64-namespaces-v3/guest-evidence/native-rustc-output"
+  },
+  "commands_sha256": "d382bc330aac076e044db183fe2286e032258076da016b5a0b709b397b507238",
+  "serial_sha256": "2642245290895000c4f26dc6987f470ad384905509fca130e6bdff2454968759",
+  "compiler_version": [
+    "rustc 1.94.0-nightly (39c689a48 2026-09-20)",
+    "binary: rustc",
+    "commit-hash: 39c689a4859b9d8ee1828720135defd125c03d31",
+    "commit-date: 2026-09-20",
+    "host: aarch64-unknown-scarlet",
+    "release: 1.94.0-nightly",
+    "Cranelift version: 0.127.0"
+  ],
+  "inputs": {
+    "rustc_sha256": "b51bab261fe067f60a926efb16d5956aacf67429e64bfe736a8baab85c3b024f",
+    "loader_sha256": "493564f6234bcf83374d1bf4769cde9d8474bae5da5895abe5cbbdc762049c26",
+    "driver_sha256": "f62f3d538a2733156aedac3c70c2484e3d1f965630d8c3b626661bb65052673f",
+    "probe_sha256": "976e47b892b1b06d87c304ddc070812049a60a07c7e9eec5320d76625d4e5e9c",
+    "libstd_sha256": "6baca47f054dc9bf730c8100ee39edf3074041baf26f2f9296abf5b5b0c577ed",
+    "libproc_macro_sha256": "b6eb84d61a7127bc627ccd4113c61285d5467a99ed313eceff59c4f3d230c56b"
+  },
+  "phases": [
+    {
+      "name": "cfg",
+      "status": "exit=Some(0) elapsed_ms=392 expected_exit=0"
+    },
+    {
+      "name": "compile",
+      "status": "exit=Some(0) elapsed_ms=1045 expected_exit=0"
+    },
+    {
+      "name": "execute",
+      "status": "exit=Some(37) elapsed_ms=56 expected_exit=37"
+    },
+    {
+      "name": "frontend",
+      "status": "exit=Some(0) elapsed_ms=1061 expected_exit=0"
+    },
+    {
+      "name": "proc-macro-build-other",
+      "status": "exit=Some(0) elapsed_ms=1368 expected_exit=0"
+    },
+    {
+      "name": "proc-macro-build",
+      "status": "exit=Some(0) elapsed_ms=1414 expected_exit=0"
+    },
+    {
+      "name": "proc-macro-execute",
+      "status": "exit=Some(0) elapsed_ms=51 expected_exit=0"
+    },
+    {
+      "name": "proc-macro-expand",
+      "status": "exit=Some(0) elapsed_ms=1052 expected_exit=0"
+    },
+    {
+      "name": "version",
+      "status": "exit=Some(0) elapsed_ms=1222 expected_exit=0"
+    }
+  ],
+  "checks": [
+    "function-like macro",
+    "attribute macro",
+    "derive macro",
+    "two independently linked macro DSOs in one rustc process",
+    "macro-created thread TLS destructor",
+    "generated binary stdout and exit"
+  ],
+  "before_fix": {
+    "status": "exit=Some(139) elapsed_ms=496 expected_exit=0",
+    "fault": "AArch64 data fault reading 0x2 in proc_macro bridge LocalKey<Cell<*const ()>>::replace",
+    "kernel_log_sha256": "7d6e9c1e4f1bca8bb4f0c88d52dbeb485951bae9b86057e1e6f4c5b60148ff84",
+    "tls_key_range_experiment": "Starting only the test DSO key counter at 512 avoids the fault; diagnostic only, not the shipped fix"
+  },
+  "outputs": {
+    "libscarlet_probe_macros.so": "1ec845566dff8bbded599d789772231a35549c880553fa25440a3992224635df",
+    "libscarlet_probe_macros_other.so": "585d8446a6bb321e163030a58ebeea93dcbe0c9a3b547301bcf95ae047a15b6e",
+    "macro-app": "28263075af2ed2e370eac3b6d2781149f268e31e54f677a429159dd8ed556d46",
+    "proc-macro-execute.stdout": "5af2b9bbbc7f9374ba2690a53defa24ddef5cdd6aca60c46e2b717114b6edc1a"
+  },
+  "remaining": [
+    "Full rebuilt Actions artifact verification",
+    "RV64 guest verification",
+    "Cargo executable and offline workspace acceptance",
+    "proc-macro panic unwinding (native target remains panic=abort)"
+  ]
+}

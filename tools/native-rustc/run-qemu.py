@@ -26,6 +26,7 @@ smoke = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(smoke)
 TARGETS = {"aarch64": "aarch64-unknown-scarlet", "riscv64": "riscv64gc-unknown-scarlet"}
 HELLO = b"SCARLET_NATIVE_RUSTC_HELLO_OK\n"
+MACRO_HELLO = b"SCARLET_NATIVE_PROC_MACRO_OK=42\n"
 
 
 def guest_path(value):
@@ -88,7 +89,7 @@ def debugfs_quote(value):
     return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
-def collect_evidence(image, output, guest_output, mode, arch):
+def collect_evidence(image, output, guest_output, mode, arch, proc_macro=False):
     evidence = output / "guest-evidence"
     evidence.mkdir()
     command = ["debugfs", "-R", f"rdump {debugfs_quote(guest_output)} {debugfs_quote(evidence)}", str(image)]
@@ -103,6 +104,19 @@ def collect_evidence(image, output, guest_output, mode, arch):
         if not (extracted / "execute.status").read_text().startswith("exit=Some(37) "):
             raise ValueError("persisted generated-program exit status is not 37")
         executable(extracted / "hello", arch, "generated guest hello")
+        if proc_macro:
+            if not (extracted / "PROC_MACRO_PASS").is_file():
+                raise ValueError("proc macro evidence is missing")
+            if (extracted / "proc-macro-execute.stdout").read_bytes() != MACRO_HELLO:
+                raise ValueError("proc macro program stdout differs from the required marker")
+            for phase in ("proc-macro-build", "proc-macro-build-other", "proc-macro-expand", "proc-macro-execute"):
+                if not (extracted / f"{phase}.status").read_text().startswith("exit=Some(0) "):
+                    raise ValueError(f"{phase} did not exit successfully")
+            executable(extracted / "macro-app", arch, "generated proc macro consumer")
+            for name in ("libscarlet_probe_macros.so", "libscarlet_probe_macros_other.so"):
+                macro = Elf(extracted / name).report()
+                if macro["elf_type"] != "DYN" or macro["machine"] != arch or macro["osabi"] != 83:
+                    raise ValueError("proc macro is not a native Scarlet shared object")
     elif not (extracted / "FRONTEND_PASS").is_file():
         raise ValueError("frontend marker appeared without persisted guest diagnostic evidence")
     return str(extracted)
@@ -123,6 +137,7 @@ def main():
     parser.add_argument("--backend", type=guest_path, help="native codegen backend DSO already in staging")
     parser.add_argument("--frontend-only", action="store_true", help="diagnose version/cfg/frontend only; never a full success")
     parser.add_argument("--dummy", action="store_true", help="dummy backend, valid only with --frontend-only")
+    parser.add_argument("--proc-macro", action="store_true", help="also compile and load function-like, attribute and derive macros")
     parser.add_argument("--phase-timeout", type=int, default=900, help="guest compiler timeout per phase, seconds")
     parser.add_argument("--run-timeout", type=int, default=60, help="guest generated-program timeout, seconds")
     parser.add_argument("--timeout", type=float, default=3900, help="outer VM timeout; also cleans up unkillable guest children")
@@ -142,6 +157,8 @@ def main():
         parser.error("--dummy requires --frontend-only and cannot be combined with --backend")
     if args.frontend_only and (args.linker or args.linker_flavor):
         parser.error("linker options require full mode")
+    if args.proc_macro and args.frontend_only:
+        parser.error("--proc-macro requires full mode")
     if not all(1 <= seconds <= 86400 for seconds in (args.phase_timeout, args.run_timeout)):
         parser.error("guest timeouts must be between 1 and 86400 seconds")
     if not math.isfinite(args.timeout) or args.timeout <= 0 or args.cpus < 1 or args.disk_size_mib < 0:
@@ -234,6 +251,8 @@ def main():
         probe_args += ["--backend", args.backend]
     if args.dummy:
         probe_args += ["--dummy"]
+    if args.proc_macro:
+        probe_args += ["--proc-macro"]
     if any(any(char in arg for char in "\r\n\0") for arg in probe_args):
         raise ValueError("probe arguments cannot contain line breaks or NUL")
     (root / "etc/native-rustc-probe.args").write_text("\n".join(probe_args) + "\n")
@@ -299,12 +318,12 @@ def main():
     smoke.SUCCESS = re.compile(rb"\nNATIVE_RUSTC " + (b"FRONTEND" if args.frontend_only else b"FULL") + rb" PASS\r?\n")
     smoke.FAILURE = re.compile(rb"\nNATIVE_RUSTC FAIL(?:[ :\r\n]|$)")
     result = smoke.run_guest(command, output, args.timeout)
-    result.update(mode=mode, full_compilation_verified=False)
+    result.update(mode=mode, full_compilation_verified=False, proc_macro_verified=False)
     succeeded = result["result"] == "PASS"
     if root_image:
         try:
             if succeeded:
-                result["guest_evidence"] = collect_evidence(root_image, output, guest_output, mode, args.arch)
+                result["guest_evidence"] = collect_evidence(root_image, output, guest_output, mode, args.arch, args.proc_macro)
             else:
                 # Preserve partial logs for failed compiler or bootstrap attempts.
                 evidence = output / "guest-evidence"
@@ -320,6 +339,7 @@ def main():
     if succeeded:
         result["result"] = "FULL_PASS" if mode == "full" else "FRONTEND_PASS"
         result["full_compilation_verified"] = mode == "full"
+        result["proc_macro_verified"] = args.proc_macro
     result_path.write_text(json.dumps(result, indent=2) + "\n")
     print(f"\nNative rustc ({mode}): {result['result']} (artifacts: {output})")
     return 0 if succeeded else 1

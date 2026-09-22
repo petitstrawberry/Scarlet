@@ -307,6 +307,52 @@ packages; broken links and links escaping the staging root are rejected.
 Compiler phases default to 900 seconds, with a 60-second generated-program
 limit. The outer VM deadline also provides cleanup because Scarlet's current
 std cannot kill a child. A VirtIO RNG supplies entropy for the native getrandom
-backend; a pseudo-random fallback is not accepted. Full acceptance does not
-establish proc-macro support, compiler parallelism, or self-hosted rebuilding;
-those require subsequent tests.
+backend; a pseudo-random fallback is not accepted. Full acceptance without
+`--proc-macro` does not establish proc-macro support. Compiler parallelism and
+self-hosted rebuilding still require separate tests.
+
+### Procedural macros
+
+Add `--proc-macro` to the full guest probe to build two independent native macro
+DSOs and load both in one compiler process. The fixture exercises function-like,
+attribute and derive macros, token parsing/iteration, and a macro-created thread
+whose TLS destructor must run before join returns. The generated application
+must print `SCARLET_NATIVE_PROC_MACRO_OK=42` and exit zero. This adds
+`PROC_MACRO_PASS`, four phase logs, and `proc_macro_verified` to the evidence.
+The ordinary std hello still has to pass first. A failed compiler returning 139
+also records the kernel fault log when `/dev/kmsg` is available.
+
+The [2026-09-22 AArch64 evidence](../../tools/native-rustc/evidence/2026-09-22-proc-macro-aarch64.json)
+records a QEMU/HVF pass using the existing local native compiler and a rebuilt,
+matching sysroot. The released `v0.1.0-rc.1` runtime fails macro expansion because
+independent static std copies allocate the same TLS key numbers in a shared
+thread table. The fix gives each std instance a namespace, shares the namespace
+list through the thread pointer, and runs destructors across all namespaces.
+std remains statically linked into applications and macro libraries.
+
+The distribution rebuild is tracked in
+[scarlet-rust-nix PR #25](https://github.com/petitstrawberry/scarlet-rust-nix/pull/25).
+This local evidence does not validate the resulting CI artifacts or RV64, and
+does not upgrade an installed bundle. All components must be rebuilt and shipped
+together; Rust crate metadata from the local commit-stamped compiler cannot be
+mixed with the existing unstamped Actions compiler. The native target still
+uses `panic=abort`, so a panicking macro can terminate the compiler.
+
+### Cargo port status
+
+Cargo is not yet included or executable as a native Scarlet component. A build
+attempt uses the Rust fork's pinned Cargo revision
+`94c368ad2b9db0f0da5bdd8421cea13786ce4412` (Cargo 0.95.0). The initial stop is
+`getrandom 0.2.16` lacking a native entropy backend. Applying native backends to
+getrandom 0.2.16/0.3.4 and reusing the tempfile port advances the check to:
+
+- `gix-sec 0.12.2`: file owner information and `libc::geteuid`.
+- `filetime 0.2.26`: Unix file descriptors, metadata and timestamp operations.
+- Native C dependencies: Cargo unconditionally depends on curl, libgit2 and
+  bundled SQLite. `--no-default-features` does not remove those dependencies;
+  a separate build attempt already fails in libz-sys without native C headers.
+
+These need real Scarlet implementations or explicit upstream feature boundaries.
+Treating the target as Unix does not supply the missing ABI. The first Cargo
+acceptance scenario remains an offline workspace with a path dependency, a build
+script and a proc-macro crate, followed by execution of the produced binary.

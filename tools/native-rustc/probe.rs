@@ -9,8 +9,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HELLO: &str = "SCARLET_NATIVE_RUSTC_HELLO_OK\n";
 const HELLO_EXIT: i32 = 37;
+const MACRO_HELLO: &str = "SCARLET_NATIVE_PROC_MACRO_OK=42\n";
 const CONFIG: &str = "/etc/native-rustc-probe.args";
-const USAGE: &str = "usage: native-rustc-probe RUSTC SYSROOT TARGET NEW_OUTPUT_DIR [--dummy] [--full --linker PATH] [--backend PATH_OR_NAME] [--linker-flavor FLAVOR] [--timeout SECONDS] [--run-timeout SECONDS]; no arguments reads /etc/native-rustc-probe.args (one argument per line)";
+const USAGE: &str = "usage: native-rustc-probe RUSTC SYSROOT TARGET NEW_OUTPUT_DIR [--dummy] [--full --linker PATH] [--proc-macro] [--backend PATH_OR_NAME] [--linker-flavor FLAVOR] [--timeout SECONDS] [--run-timeout SECONDS]; no arguments reads /etc/native-rustc-probe.args (one argument per line)";
 
 thread_local! {
     static THREAD_PREFLIGHT: Cell<u32> = const { Cell::new(0) };
@@ -24,6 +25,7 @@ struct Options {
     output: PathBuf,
     full: bool,
     dummy: bool,
+    proc_macro: bool,
     backend: Option<String>,
     linker: Option<PathBuf>,
     linker_flavor: Option<String>,
@@ -52,6 +54,7 @@ fn options(args: &[String]) -> Result<Options, String> {
         output: PathBuf::from(&args[3]),
         full: false,
         dummy: false,
+        proc_macro: false,
         backend: None,
         linker: None,
         linker_flavor: None,
@@ -63,6 +66,7 @@ fn options(args: &[String]) -> Result<Options, String> {
         match flag.as_str() {
             "--full" => result.full = true,
             "--dummy" => result.dummy = true,
+            "--proc-macro" => result.proc_macro = true,
             "--backend" | "--linker" | "--linker-flavor" | "--timeout" | "--run-timeout" => {
                 let value = rest
                     .next()
@@ -84,6 +88,9 @@ fn options(args: &[String]) -> Result<Options, String> {
     }
     if result.full && result.dummy {
         return Err("--dummy is only a frontend diagnostic and cannot be used with --full".into());
+    }
+    if result.proc_macro && !result.full {
+        return Err("--proc-macro requires --full".into());
     }
     if result.dummy && result.backend.is_some() {
         return Err("--dummy and --backend are mutually exclusive".into());
@@ -171,6 +178,15 @@ fn phase(
     fs::write(output.join(format!("{name}.status")), &outcome).map_err(|e| e.to_string())?;
     println!("NATIVE_RUSTC STATUS {name} {}", outcome.trim_end());
     if status.code() != Some(expected_exit) {
+        if status.code() == Some(139) {
+            // A single read captures the current ring without waiting for EOF
+            // on /dev/kmsg, which remains open for future kernel messages.
+            use std::io::Read;
+            let mut log = vec![0; 1024 * 1024];
+            if let Ok(size) = File::open("/dev/kmsg").and_then(|mut file| file.read(&mut log)) {
+                let _ = fs::write(output.join(format!("{name}.kernel.log")), &log[..size]);
+            }
+        }
         return Err(format!(
             "{name}: expected exit {expected_exit}, got {status}"
         ));
@@ -187,6 +203,101 @@ fn compiler(options: &Options) -> Command {
         command.arg(format!("-Zcodegen-backend={backend}"));
     }
     command
+}
+
+fn native_compiler(options: &Options) -> Command {
+    let mut command = compiler(options);
+    command.args([
+        "--target",
+        &options.target,
+        "--edition=2021",
+        "-Cpanic=abort",
+    ]);
+    command.arg(format!(
+        "-Clinker={}",
+        options.linker.as_ref().unwrap().display()
+    ));
+    if let Some(flavor) = &options.linker_flavor {
+        command.arg(format!("-Clinker-flavor={flavor}"));
+    }
+    command
+}
+
+fn check_proc_macro(options: &Options) -> Result<(), String> {
+    let output = &options.output;
+    fs::write(output.join("macros.rs"), include_str!("fixtures/macros.rs"))
+        .map_err(|e| e.to_string())?;
+    fs::write(
+        output.join("macro-app.rs"),
+        include_str!("fixtures/macro-app.rs"),
+    )
+    .map_err(|e| e.to_string())?;
+    let library = output.join("libscarlet_probe_macros.so");
+    let mut command = native_compiler(options);
+    command
+        .args([
+            "--crate-type=proc-macro",
+            "--crate-name=scarlet_probe_macros",
+            "macros.rs",
+            "-o",
+        ])
+        .arg(&library);
+    phase(command, output, "proc-macro-build", options.timeout, 0)?;
+    check_elf(&library, &options.target)?;
+    let other_library = output.join("libscarlet_probe_macros_other.so");
+    let mut command = native_compiler(options);
+    command
+        .args([
+            "--crate-type=proc-macro",
+            "--crate-name=scarlet_probe_macros_other",
+            "macros.rs",
+            "-o",
+        ])
+        .arg(&other_library);
+    phase(
+        command,
+        output,
+        "proc-macro-build-other",
+        options.timeout,
+        0,
+    )?;
+    check_elf(&other_library, &options.target)?;
+    let executable = output.join("macro-app");
+    let mut command = native_compiler(options);
+    command
+        .arg("macro-app.rs")
+        .arg("--crate-name=macro_app")
+        .arg("--extern")
+        .arg(format!("scarlet_probe_macros={}", library.display()))
+        .arg("--extern")
+        .arg(format!(
+            "scarlet_probe_macros_other={}",
+            other_library.display()
+        ))
+        .arg("-o")
+        .arg(&executable);
+    phase(command, output, "proc-macro-expand", options.timeout, 0)?;
+    check_elf(&executable, &options.target)?;
+    let stdout = phase(
+        Command::new(&executable),
+        output,
+        "proc-macro-execute",
+        options.run_timeout,
+        0,
+    )?;
+    if stdout != MACRO_HELLO.as_bytes() {
+        return Err(format!(
+            "proc macro program stdout mismatch: {:?}",
+            String::from_utf8_lossy(&stdout)
+        ));
+    }
+    fs::write(
+        output.join("PROC_MACRO_PASS"),
+        "function_like\nattribute\nderive\ntwo_macro_libraries\nthread_tls_destructor\ncompile\nexecute\n",
+    )
+    .map_err(|e| e.to_string())?;
+    println!("NATIVE_RUSTC PROC_MACRO PASS");
+    Ok(())
 }
 
 fn check_elf(path: &Path, target: &str) -> Result<(), String> {
@@ -430,6 +541,9 @@ fn run() -> Result<(), String> {
             String::from_utf8_lossy(&stdout)
         ));
     }
+    if options.proc_macro {
+        check_proc_macro(&options)?;
+    }
     fs::write(output.join("PASS"), format!("mode=full\nversion\ncfg\nfrontend\ncompile\nexecute\nhello_exit={HELLO_EXIT}\nhello_stdout={HELLO:?}\n"))
         .map_err(|e| e.to_string())?;
     println!("NATIVE_RUSTC FULL PASS");
@@ -480,6 +594,12 @@ mod tests {
         .unwrap();
         assert!(full.full);
         assert_eq!(full.backend.as_deref(), Some("/cg.so"));
+        assert!(parse(&["--proc-macro"]).is_err());
+        assert!(
+            parse(&["--full", "--linker", "/lld", "--proc-macro"])
+                .unwrap()
+                .proc_macro
+        );
     }
 
     #[test]
