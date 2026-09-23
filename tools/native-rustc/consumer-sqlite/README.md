@@ -44,7 +44,7 @@ stubs intentionally have unused arguments; fixture and VFS warnings remain
 errors. The configuration is explicit:
 
 ```text
-NDEBUG SQLITE_OS_OTHER=1 SQLITE_THREADSAFE=0
+NDEBUG SQLITE_OS_OTHER=1 SQLITE_THREADSAFE=1
 SQLITE_OMIT_LOAD_EXTENSION SQLITE_OMIT_LOCALTIME SQLITE_TEMP_STORE=3
 SQLITE_OMIT_WAL SQLITE_MAX_MMAP_SIZE=0
 ```
@@ -52,6 +52,19 @@ SQLITE_OMIT_WAL SQLITE_MAX_MMAP_SIZE=0
 SQL floating point, prepared statements, transactions, rollback journals,
 UTF-8, indexes, joins, BLOBs and the usual built-in SQL functions remain enabled.
 SQLite uses its own numeric formatter, independently of libc printf support.
+
+Before `sqlite3_initialize`, `scarlet_sqlite_configure` selects serialized mode
+and installs a real pthread mutex backend through `SQLITE_CONFIG_MUTEX`.
+`SQLITE_OS_OTHER=1` makes upstream SQLite choose its configurable no-op default;
+simply defining `SQLITE_MUTEX_PTHREADS` as well creates two default backends.
+The documented custom mutex interface keeps the amalgamation unmodified while
+using Scarlet's Rust-std-backed pthread implementation for dynamic normal and
+recursive mutexes and all twelve static SQLite mutexes. The compile-option
+list therefore still contains `MUTEX_NOOP`; it describes the replaceable build
+default, not the installed runtime backend. The VFS and this fixture must be
+built with `NDEBUG`, since the optional debug ownership callbacks are omitted.
+Initialization/shutdown run before/after all worker lifetimes. Static mutexes
+live for the process lifetime, as in upstream SQLite's pthread backend.
 
 ## Guest acceptance
 
@@ -73,6 +86,13 @@ committed rows. The native-rustc harness runs the sequence on both ext2 and
 tmpfs, then independently validates the extracted ext2 database with the host's
 SQLite implementation after the VM stops.
 
+Each `create` must also print `SCARLET_LIBC_SQLITE_PTHREAD_OK` once. This marker
+is emitted only after the shared-connection and separate-connection thread
+tests finish and every worker has been joined. The thread fixture is run on
+both ext2 and tmpfs. The in-memory database used for the shared-connection
+test is separate from the persisted database, whose deterministic contents
+remain unchanged.
+
 The fixture covers:
 
 - Direct VFS I/O larger than the Native 64 KiB transfer limit, partial-EOF and
@@ -80,6 +100,20 @@ The fixture covers:
   unknown file controls, and deletion with parent-directory sync.
 - Actual kernel lock contention between separately opened file descriptions,
   logical SQLite lock upgrades/downgrades and release on close.
+- Four pthread workers released together by a mutex/condition-variable gate.
+  Each first opens a private in-memory connection and runs 64 PRNG operations,
+  so different connection mutexes exercise SQLite's shared allocator/PRNG
+  synchronization. Each then owns a prepared statement and concurrently inserts
+  64 rows into one
+  serialized in-memory connection, including SQLite PRNG calls. Exact row
+  counts, checksums, BLOB lengths and database integrity are checked after
+  joining. A second phase holds the connection's recursive mutex across a
+  multi-call transaction and tests recursive `trylock` through SQLite itself.
+- A separate worker opens a separate connection to the persisted inode while
+  the main thread owns an immediate transaction. Both a read and a competing
+  transaction must return `SQLITE_BUSY`. A condition-variable handshake then
+  releases the owner before retrying successfully, with no sleeps or timing
+  assumptions. Neither transaction changes the persisted data.
 - A 131,113-byte deterministic BLOB, including incremental BLOB read/write
   across offset 65,539, plus exact byte comparison after reopen.
 - Prepared/bound inserts, UTF-8 labels, REAL values, indexed joins, grouping,
@@ -108,9 +142,13 @@ flock**, retained until SQLite unlocks to NONE or the file closes. Logical lock
 upgrades do not bypass another owner's physical lock. This deliberately
 serializes readers as well as writers, following the same conservative pattern
 as SQLite's upstream flock VFS. Locks are advisory: unrelated applications
-that directly overwrite a database can still corrupt it. `SQLITE_THREADSAFE=0`
-requires one thread to use this SQLite library at a time, including distinct
-connections; separate processes are protected by the kernel file locks.
+that directly overwrite a database can still corrupt it. The configured
+pthread backend serializes access within each SQLite connection and protects
+SQLite's allocator, PRNG and other shared state. Separate connections and
+processes are arbitrated by the kernel file locks. Individual serialized API
+calls are thread-safe; callers still need the connection mutex when a sequence
+of API calls must belong to a single transaction. WAL and simultaneous readers
+remain outside this conservative locking model.
 
 Pathnames are bounded by Scarlet's 1024-byte native limit. Existing symlink
 aliases are canonicalized, and a new leaf uses its real parent plus basename.

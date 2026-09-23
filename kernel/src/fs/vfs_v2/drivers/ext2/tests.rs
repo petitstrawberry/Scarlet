@@ -441,6 +441,7 @@ fn create_writeback_test_file() -> (Arc<MockBlockDevice>, Arc<Ext2FileSystem>, A
     // Reuse one allocated block to avoid depending on allocator bitmaps in
     // this focused writeback test. Block 300 is beyond the inode table.
     inode.block[0] = 300_u32.to_le();
+    inode.blocks = 2_u32.to_le();
     fs.inode_cache.write().insert(11, inode);
     let node = Arc::new(Ext2Node::new(11, FileType::RegularFile, 11));
     node.set_filesystem(Arc::downgrade(
@@ -687,7 +688,7 @@ fn test_ext2_truncate_preserves_cursor_and_rejects_huge_sizes_before_mutation() 
     let mut bytes = [1; 8];
     assert_eq!(file.read_at(0, &mut bytes).unwrap(), bytes.len());
     assert_eq!(&bytes, b"abcd\0\0\0\0");
-    for size in [super::node::MAX_TRUNCATE_SIZE + 1, u64::MAX] {
+    for size in [u64::from(u32::MAX) + 1, u64::MAX] {
         assert!(
             matches!(file.truncate(size), Err(StreamError::FileSystemError(error))
             if error.kind == FileSystemErrorKind::ValueOverflow)
@@ -1634,63 +1635,35 @@ fn test_ext2_virtio_blk_delete_operations() {
                                         }
                                     }
 
-                                    // Delete the child directory (should be empty now)
-                                    match fs.remove(&parent_node, &child_dir) {
-                                        Ok(_) => {
-                                            println!(
-                                                "[Test] ✓ Successfully deleted child directory"
-                                            );
-
-                                            // Verify the directory is really gone
-                                            match fs.lookup(&parent_node, &child_dir) {
-                                                Ok(_) => {
-                                                    panic!(
-                                                        "[Test] Deleted directory still exists!"
-                                                    );
-                                                }
-                                                Err(_) => {
-                                                    println!(
-                                                        "[Test] ✓ Confirmed child directory is deleted"
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            panic!(
-                                                "[Test] Failed to delete child directory: {:?}",
-                                                e
-                                            );
-                                        }
-                                    }
-
-                                    // Delete the parent directory (should be empty now)
-                                    match fs.remove(&root_node, &parent_dir) {
-                                        Ok(_) => {
-                                            println!(
-                                                "[Test] ✓ Successfully deleted parent directory"
-                                            );
-
-                                            // Verify the parent directory is really gone
-                                            match fs.lookup(&root_node, &parent_dir) {
-                                                Ok(_) => {
-                                                    panic!(
-                                                        "[Test] Deleted parent directory still exists!"
-                                                    );
-                                                }
-                                                Err(_) => {
-                                                    println!(
-                                                        "[Test] ✓ Confirmed parent directory is deleted"
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            panic!(
-                                                "[Test] Failed to delete parent directory: {:?}",
-                                                e
-                                            );
-                                        }
-                                    }
+                                    // Retained directory nodes do not yet take part in
+                                    // inode lifetime tracking. Refusal must preserve the
+                                    // path and inode instead of permitting stale cwd reuse.
+                                    let child_id = child_node.id();
+                                    let parent_id = parent_node.id();
+                                    assert_eq!(
+                                        fs.remove(&parent_node, &child_dir).unwrap_err().kind,
+                                        FileSystemErrorKind::NotSupported
+                                    );
+                                    assert_eq!(
+                                        fs.lookup(&parent_node, &child_dir).unwrap().id(),
+                                        child_id
+                                    );
+                                    assert_eq!(
+                                        child_node.metadata().unwrap().file_type,
+                                        FileType::Directory
+                                    );
+                                    assert_eq!(
+                                        fs.remove(&root_node, &parent_dir).unwrap_err().kind,
+                                        FileSystemErrorKind::DirectoryNotEmpty
+                                    );
+                                    assert_eq!(
+                                        fs.lookup(&root_node, &parent_dir).unwrap().id(),
+                                        parent_id
+                                    );
+                                    assert_eq!(
+                                        fs.lookup(&parent_node, &child_dir).unwrap().id(),
+                                        child_id
+                                    );
                                 }
                                 Err(e) => {
                                     panic!("[Test] Failed to create nested file: {:?}", e);
@@ -2623,7 +2596,18 @@ fn test_ext2_truncate_preserves_blocks_after_sparse_hole() {
     let file = fs.open(&node, 0).unwrap();
     let marker = b"dirty third block survives truncation";
     assert_eq!(file.write_at(2148, marker).unwrap(), marker.len());
+    let cache_id = CacheId::new((fs.fs_id().get() << 32) | 11);
+    let pinned = PageCacheManager::global().try_pin(cache_id, 0).unwrap();
     file.truncate(2560).unwrap();
+    unsafe {
+        let bytes = core::slice::from_raw_parts(
+            crate::vm::addr::phys_to_virt(pinned.paddr()) as *const u8,
+            4096,
+        );
+        assert_eq!(&bytes[2148..2148 + marker.len()], marker);
+        assert!(bytes[2560..].iter().all(|byte| *byte == 0));
+    }
+    drop(pinned);
 
     let mut expected = vec![b'A'; 2560];
     expected[1024..2048].fill(0);
@@ -2636,9 +2620,9 @@ fn test_ext2_truncate_preserves_blocks_after_sparse_hole() {
     let stored_blocks = stored.block;
     let stored_sectors = stored.blocks;
     assert_eq!(stored_blocks[0], 300);
-    assert_eq!(stored_blocks[1], 400);
+    assert_eq!(stored_blocks[1], 0);
     assert_eq!(stored_blocks[2], 302);
-    assert_eq!(stored_sectors, 6);
+    assert_eq!(stored_sectors, 4);
 
     file.sync().unwrap();
     let cache_id = CacheId::new((fs.fs_id().get() << 32) | 11);
@@ -2652,3 +2636,6 @@ fn test_ext2_truncate_preserves_blocks_after_sparse_hole() {
 
 #[path = "unlink_tests.rs"]
 mod unlink_tests;
+
+#[path = "truncate_tests.rs"]
+mod truncate_tests;

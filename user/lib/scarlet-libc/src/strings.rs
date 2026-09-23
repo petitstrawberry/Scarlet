@@ -265,7 +265,9 @@ pub extern "C" fn strerror(error: c_int) -> *mut c_char {
     };
     let message = match error {
         0 => c"Success",
+        1 => c"Operation not permitted",
         ERRNO_ENOENT => c"No such file or directory",
+        3 => c"No such process",
         ERRNO_EINTR => c"Interrupted system call",
         ERRNO_EIO => c"Input/output error",
         ERRNO_EBADF => c"Bad file descriptor",
@@ -286,12 +288,14 @@ pub extern "C" fn strerror(error: c_int) -> *mut c_char {
         ERRNO_EROFS => c"Read-only file system",
         32 => c"Broken pipe",
         ERRNO_ERANGE => c"Numerical result out of range",
+        35 => c"Resource deadlock avoided",
         ERRNO_ENAMETOOLONG => c"File name too long",
         38 => c"Function not implemented",
         ERRNO_ENOTEMPTY => c"Directory not empty",
         ERRNO_ELOOP => c"Too many levels of symbolic links",
         ERRNO_EOVERFLOW => c"Value too large for defined data type",
         ERRNO_EOPNOTSUPP => c"Operation not supported",
+        110 => c"Connection timed out",
         _ => c"Unknown error",
     };
     message.as_ptr().cast_mut()

@@ -474,6 +474,61 @@ impl PageCacheManager {
             .any(|(&(cache_id, _), entry)| cache_id == id && entry.is_dirty())
     }
 
+    /// Persist retained dirty pages during a serialized truncate, including
+    /// pages already pinned by readers or mappings. The caller must exclude
+    /// concurrent data modifications and cache invalidation for this object.
+    /// Pins protect each bounded batch while the writer runs without cache locks.
+    pub fn flush_dirty_range<F>(
+        &self,
+        id: CacheId,
+        end_page: PageIndex,
+        mut writer: F,
+    ) -> Result<(), &'static str>
+    where
+        F: FnMut(&[(PageIndex, PhysicalAddress)]) -> Result<(), &'static str>,
+    {
+        const BATCH_PAGES: usize = 64;
+        let mut targets = Vec::new();
+        targets
+            .try_reserve_exact(BATCH_PAGES)
+            .map_err(|_| "Cannot allocate truncate page batch")?;
+        let mut first = 0;
+        while first < end_page {
+            targets.clear();
+            {
+                let entries = self.entries.read();
+                for (&(_, index), entry) in entries.range((id, first)..(id, end_page)) {
+                    if entry.is_dirty() {
+                        entry.pin();
+                        targets.push((index, entry.paddr()));
+                        if targets.len() == BATCH_PAGES {
+                            break;
+                        }
+                    }
+                }
+            }
+            let Some(&(last, _)) = targets.last() else {
+                break;
+            };
+            let result = writer(&targets);
+            // Release our pins on both success and error; external pins remain.
+            {
+                let entries = self.entries.read();
+                for &(index, _) in &targets {
+                    if let Some(entry) = entries.get(&(id, index)) {
+                        if result.is_ok() {
+                            entry.is_dirty.store(0, Ordering::SeqCst);
+                        }
+                        entry.unpin();
+                    }
+                }
+            }
+            result?;
+            first = last + 1;
+        }
+        Ok(())
+    }
+
     /// Get or load a page and return an RAII guard that unpins on drop.
     #[inline]
     pub fn pin_or_load<F>(
@@ -622,6 +677,26 @@ pub static GLOBAL_PAGE_CACHE: PageCacheManager = PageCacheManager::new();
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn retained_dirty_flush_releases_only_its_pins_on_error() {
+        let cache = PageCacheManager::new();
+        let id = CacheId::new(1);
+        let paddr = cache.get_or_create_pinned(id, 7, |_| Ok(())).unwrap();
+        cache.mark_dirty(id, 7);
+        let result = cache.flush_dirty_range(id, 8, |pages| {
+            assert_eq!(pages, &[(7, paddr)]);
+            assert_eq!(cache.entries.read().get(&(id, 7)).unwrap().pin_count(), 2);
+            Err("injected write error")
+        });
+        assert_eq!(result, Err("injected write error"));
+        assert!(cache.has_dirty_pages(id));
+        assert_eq!(cache.entries.read().get(&(id, 7)).unwrap().pin_count(), 1);
+        cache.flush_dirty_range(id, 8, |_| Ok(())).unwrap();
+        assert!(!cache.has_dirty_pages(id));
+        assert_eq!(cache.entries.read().get(&(id, 7)).unwrap().pin_count(), 1);
+        cache.unpin(id, 7);
+    }
 
     #[test_case]
     fn overwrite_preserves_size_and_updates_timestamp() {

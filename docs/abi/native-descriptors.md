@@ -94,10 +94,12 @@ without temporarily moving the shared cursor.
 
 Operation 306 accepts a nonnegative signed 64-bit length with the same scalar
 convention, requires write access, and preserves the shared offset even when
-shrinking past it. Reextending exposes zero bytes. Ext2 currently reconstructs
-content and limits this operation to 16 MiB, rejecting larger requests before
-allocation or mutation; this is not a general maximum for normal writes.
-Allocation is fallible. Shrinking currently retains disk/cache allocations;
+shrinking past it. Reextending exposes zero bytes. Ext2 uses bounded dirty-page
+writeback and preserves sparse holes; growing the file updates its size without
+allocating gap blocks. Requests beyond its unsigned 32-bit file-size range are
+rejected before mutation. Allocation is fallible. Shrinking retains blocks
+until final inode deletion, with `i_blocks` accounting for retained data and
+indirect blocks;
 complete rollback after device I/O failure is not established. No physical
 memory-exhaustion or power-loss guarantee is established by these checks.
 

@@ -1,11 +1,14 @@
 /* Real SQLite SQL/storage acceptance against the Scarlet-native VFS. */
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include "sqlite3.h"
+
+int scarlet_sqlite_configure(void);
 
 #define BLOB_SIZE 131113
 #define CHANGE_OFFSET 65539
@@ -32,6 +35,54 @@
 
 static unsigned char blob[BLOB_SIZE];
 static unsigned char readback[BLOB_SIZE + 32];
+
+/* A synchronization failure cannot safely fall through a gate or leave a
+ * worker accessing a returned stack frame. Terminate this failed fixture. */
+#define THREAD_CALL(expression) do { \
+    int thread_result = (expression); \
+    if (thread_result != 0) { \
+        printf("SCARLET_SQLITE PTHREAD FAIL line=%d expression=%s result=%d\n", \
+               __LINE__, #expression, thread_result); \
+        abort(); \
+    } \
+} while (0)
+
+typedef struct ThreadGate {
+    pthread_mutex_t mutex;
+    pthread_cond_t condition;
+    int ready;
+    int phase;
+} ThreadGate;
+
+#define THREAD_GATE_INITIALIZER { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0 }
+
+static void worker_gate(ThreadGate *gate) {
+    THREAD_CALL(pthread_mutex_lock(&gate->mutex));
+    gate->ready++;
+    THREAD_CALL(pthread_cond_broadcast(&gate->condition));
+    while (gate->phase == 0)
+        THREAD_CALL(pthread_cond_wait(&gate->condition, &gate->mutex));
+    THREAD_CALL(pthread_mutex_unlock(&gate->mutex));
+}
+
+static void gate_wait(ThreadGate *gate, int count) {
+    THREAD_CALL(pthread_mutex_lock(&gate->mutex));
+    while (gate->ready < count)
+        THREAD_CALL(pthread_cond_wait(&gate->condition, &gate->mutex));
+    THREAD_CALL(pthread_mutex_unlock(&gate->mutex));
+}
+
+static void gate_release(ThreadGate *gate) {
+    THREAD_CALL(pthread_mutex_lock(&gate->mutex));
+    gate->phase = 1;
+    THREAD_CALL(pthread_cond_broadcast(&gate->condition));
+    THREAD_CALL(pthread_mutex_unlock(&gate->mutex));
+}
+
+static void gate_destroy(ThreadGate *gate) {
+    THREAD_CALL(pthread_cond_destroy(&gate->condition));
+    THREAD_CALL(pthread_mutex_destroy(&gate->mutex));
+}
 
 static int execute(sqlite3 *database, const char *sql, int line) {
     char *message = NULL;
@@ -282,6 +333,190 @@ static int reopen_database(const char *path) {
     return 0;
 }
 
+#define WORKER_COUNT 4
+#define WORKER_ITERATIONS 64
+
+typedef struct SharedWork {
+    ThreadGate *gate;
+    sqlite3 *database;
+    int worker;
+    int failed_line;
+} SharedWork;
+
+static void *shared_connection_worker(void *argument) {
+    SharedWork *work = argument;
+    sqlite3_stmt *statement = NULL;
+    sqlite3 *private_database = NULL;
+    sqlite3_mutex *mutex;
+    int index;
+    int result;
+    int saved_errno = 0x400 + work->worker;
+    errno = saved_errno;
+    worker_gate(work->gate);
+    if (errno != saved_errno) {
+        work->failed_line = __LINE__;
+        return argument;
+    }
+    /* Different connection mutexes cannot serialize this phase. SQLite's
+     * shared allocator and PRNG mutexes must protect their own global state. */
+    result = sqlite3_open_v2(":memory:", &private_database,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+        "scarlet-native");
+    if (result != SQLITE_OK || scalar_integer(private_database,
+        "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<64) "
+        "SELECT sum(length(randomblob(17))) FROM n", 64 * 17) != 0)
+        work->failed_line = __LINE__;
+    if (private_database != NULL && sqlite3_close(private_database) != SQLITE_OK)
+        work->failed_line = __LINE__;
+    if (work->failed_line != 0) return argument;
+    /* Each worker owns its statement, while the same serialized connection
+     * arbitrates concurrent prepare/bind/step/reset/finalize calls. There is
+     * deliberately no application mutex around this first phase. */
+    result = sqlite3_prepare_v2(work->database,
+        "INSERT INTO work VALUES(?1,?2,?1*1000+?2,randomblob(17))",
+        -1, &statement, NULL);
+    if (result != SQLITE_OK) {
+        work->failed_line = __LINE__;
+        return argument;
+    }
+    for (index = 0; index < WORKER_ITERATIONS; ++index) {
+        if (sqlite3_bind_int(statement, 1, work->worker) != SQLITE_OK
+            || sqlite3_bind_int(statement, 2, index) != SQLITE_OK
+            || sqlite3_step(statement) != SQLITE_DONE
+            || sqlite3_reset(statement) != SQLITE_OK) {
+            work->failed_line = __LINE__;
+            break;
+        }
+    }
+    if (sqlite3_finalize(statement) != SQLITE_OK) work->failed_line = __LINE__;
+    if (work->failed_line != 0) return argument;
+    /* A multi-call transaction requires an application-held connection mutex
+     * so another worker cannot accidentally join that transaction. This also
+     * verifies recursive lock and trylock through SQLite's actual backend. */
+    mutex = sqlite3_db_mutex(work->database);
+    sqlite3_mutex_enter(mutex);
+    if (sqlite3_mutex_try(mutex) != SQLITE_OK) {
+        work->failed_line = __LINE__;
+    } else {
+        sqlite3_mutex_leave(mutex);
+        if (sqlite3_exec(work->database,
+            "BEGIN; UPDATE tally SET total=total+1; COMMIT;",
+            NULL, NULL, NULL) != SQLITE_OK) {
+            work->failed_line = __LINE__;
+            (void)sqlite3_exec(work->database, "ROLLBACK", NULL, NULL, NULL);
+        }
+    }
+    sqlite3_mutex_leave(mutex);
+    return argument;
+}
+
+static int shared_connection_test(void) {
+    sqlite3 *database = NULL;
+    ThreadGate gate = THREAD_GATE_INITIALIZER;
+    SharedWork work[WORKER_COUNT];
+    pthread_t threads[WORKER_COUNT];
+    int index;
+    int returned_correctly = 1;
+    DB_CHECK(database, sqlite3_open_v2(":memory:", &database,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+        "scarlet-native") == SQLITE_OK);
+    CHECK(sqlite3_db_mutex(database) != NULL);
+    SQL(database, "CREATE TABLE work(worker INTEGER,iteration INTEGER,checksum INTEGER,"
+        "payload BLOB,PRIMARY KEY(worker,iteration));"
+        "CREATE TABLE tally(total INTEGER); INSERT INTO tally VALUES(0);");
+    for (index = 0; index < WORKER_COUNT; ++index) {
+        work[index].gate = &gate;
+        work[index].database = database;
+        work[index].worker = index;
+        work[index].failed_line = 0;
+        THREAD_CALL(pthread_create(&threads[index], NULL,
+                                    shared_connection_worker, &work[index]));
+    }
+    gate_wait(&gate, WORKER_COUNT);
+    gate_release(&gate);
+    for (index = 0; index < WORKER_COUNT; ++index) {
+        void *returned = NULL;
+        THREAD_CALL(pthread_join(threads[index], &returned));
+        if (returned != &work[index]) returned_correctly = 0;
+    }
+    gate_destroy(&gate);
+    CHECK(returned_correctly);
+    for (index = 0; index < WORKER_COUNT; ++index) {
+        if (work[index].failed_line != 0)
+            printf("SCARLET_SQLITE worker=%d failed_line=%d\n", index, work[index].failed_line);
+        CHECK(work[index].failed_line == 0);
+    }
+    CHECK(scalar_integer(database, "SELECT count(*) FROM work",
+                          WORKER_COUNT * WORKER_ITERATIONS) == 0);
+    CHECK(scalar_integer(database, "SELECT sum(checksum) FROM work",
+        WORKER_ITERATIONS * 1000 * (WORKER_COUNT * (WORKER_COUNT - 1) / 2)
+        + WORKER_COUNT * WORKER_ITERATIONS * (WORKER_ITERATIONS - 1) / 2) == 0);
+    CHECK(scalar_integer(database, "SELECT count(*) FROM work WHERE length(payload)=17",
+                          WORKER_COUNT * WORKER_ITERATIONS) == 0);
+    CHECK(scalar_integer(database, "SELECT total FROM tally", WORKER_COUNT) == 0);
+    CHECK(scalar_text(database, "PRAGMA integrity_check", "ok") == 0);
+    DB_CHECK(database, sqlite3_close(database) == SQLITE_OK);
+    CHECK(puts("SCARLET_SQLITE SHARED_CONNECTION_THREADS PASS") >= 0);
+    return 0;
+}
+
+typedef struct ContendingWork {
+    ThreadGate *gate;
+    const char *path;
+    int failed_line;
+} ContendingWork;
+
+static void *contending_connection_worker(void *argument) {
+    ContendingWork *work = argument;
+    sqlite3 *database = NULL;
+    int result = sqlite3_open_v2(work->path, &database,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, "scarlet-native");
+    if (result != SQLITE_OK) {
+        work->failed_line = __LINE__;
+    } else if (sqlite3_exec(database, "SELECT count(*) FROM items", NULL, NULL, NULL)
+                   != SQLITE_BUSY
+        || sqlite3_exec(database, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_BUSY) {
+        work->failed_line = __LINE__;
+    }
+    /* Tell the main thread both BUSY attempts finished while it still owns
+     * its transaction. Wait until it has actually rolled back before retry. */
+    worker_gate(work->gate);
+    if (work->failed_line == 0
+        && (scalar_integer(database, "SELECT count(*) FROM items", 24) != 0
+            || sqlite3_exec(database, "BEGIN IMMEDIATE; ROLLBACK;",
+                            NULL, NULL, NULL) != SQLITE_OK))
+        work->failed_line = __LINE__;
+    if (database != NULL && sqlite3_close(database) != SQLITE_OK)
+        work->failed_line = __LINE__;
+    return argument;
+}
+
+static int contending_connection_test(const char *path) {
+    sqlite3 *database = NULL;
+    ThreadGate gate = THREAD_GATE_INITIALIZER;
+    ContendingWork work = { &gate, path, 0 };
+    pthread_t thread;
+    void *returned = NULL;
+    DB_CHECK(database, sqlite3_open_v2(path, &database,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, "scarlet-native") == SQLITE_OK);
+    SQL(database, "BEGIN IMMEDIATE;");
+    THREAD_CALL(pthread_create(&thread, NULL, contending_connection_worker, &work));
+    gate_wait(&gate, 1);
+    /* A recoverable return here would strand a worker on a dead stack gate. */
+    if (execute(database, "ROLLBACK;", __LINE__) != SQLITE_OK) abort();
+    gate_release(&gate);
+    THREAD_CALL(pthread_join(thread, &returned));
+    gate_destroy(&gate);
+    CHECK(returned == &work);
+    if (work.failed_line != 0)
+        printf("SCARLET_SQLITE contending_worker failed_line=%d\n", work.failed_line);
+    CHECK(work.failed_line == 0);
+    CHECK(scalar_integer(database, "SELECT count(*) FROM items", 24) == 0);
+    DB_CHECK(database, sqlite3_close(database) == SQLITE_OK);
+    CHECK(puts("SCARLET_SQLITE CONTENDING_CONNECTION_THREADS PASS") >= 0);
+    return 0;
+}
+
 static int read_exact(int fd, unsigned char *data, size_t amount) {
     size_t done = 0;
     while (done < amount) {
@@ -351,13 +586,17 @@ int main(int argc, char **argv) {
     crash = argc == 3 && strcmp(argv[2], "crash") == 0;
     CHECK(create || crash || strcmp(argv[2], "verify") == 0);
     CHECK(strcmp(sqlite3_libversion(), "3.53.4") == 0);
-    CHECK(sqlite3_threadsafe() == 0);
+    CHECK(sqlite3_threadsafe() == 1);
+    CHECK(scarlet_sqlite_configure() == SQLITE_OK);
     CHECK(sqlite3_initialize() == SQLITE_OK);
     CHECK(make_path(path, sizeof(path), argv[1], "sqlite-roundtrip.db") == 0);
     if (crash) return crash_database(path);
     if (create) {
         CHECK(vfs_test(argv[1]) == 0);
         CHECK(create_database(path) == 0);
+        CHECK(shared_connection_test() == 0);
+        CHECK(contending_connection_test(path) == 0);
+        CHECK(puts("SCARLET_LIBC_SQLITE_PTHREAD_OK") >= 0);
     }
     CHECK(reopen_database(path) == 0);
     CHECK(sqlite3_shutdown() == SQLITE_OK);

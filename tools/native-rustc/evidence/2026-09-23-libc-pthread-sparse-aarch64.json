@@ -1,0 +1,300 @@
+{
+  "recorded_at_utc": "2026-09-23T06:26:27.615197+00:00",
+  "scope": "Rust std-backed process-private pthread subset; unmodified SQLite 3.53.4 serialized concurrent acceptance; bounded sparse ext2 truncate; prior RV64 integration expectation fixed",
+  "base_revision": "e2cfa445de759b4d602f2ff9336d40d902a28d22",
+  "arch": "aarch64",
+  "acceleration": "hvf",
+  "cpus": 4,
+  "guest": {
+    "result": "FULL_PASS",
+    "qemu_exit_code": 0,
+    "elapsed_seconds": 19.341,
+    "mode": "full",
+    "full_compilation_verified": true,
+    "proc_macro_verified": true,
+    "native_fs_verified": true,
+    "c_startup_verified": true,
+    "zlib_verified": true,
+    "sqlite_verified": true,
+    "sqlite_disk_verified": true,
+    "guest_evidence": "/private/tmp/scarlet-pthread-sparse-final-aarch64/guest-evidence/native-rustc-output"
+  },
+  "guest_sqlite_validation": {
+    "database": "/private/tmp/scarlet-pthread-sparse-final-aarch64/guest-evidence/native-rustc-output/sqlite/sqlite-roundtrip.db",
+    "database_sha256": "a3aaa4fabbe065947a5b2d6431653dda7363eb69dbd8e64306211216f585fd22",
+    "host_sqlite_version": "3.51.2",
+    "integrity_check": "ok",
+    "foreign_key_check": "ok",
+    "group_count": 3,
+    "item_count": 24,
+    "score_sum": 75.0,
+    "blob_bytes": 131113,
+    "blob_sha256": "468600547ef9c672c70c4ec1a58b5f29d0113d842d04cfd42d2daa5793446716",
+    "read_only": true,
+    "scope": "ext2 bytes extracted after VM exit; no power-loss durability claim",
+    "process_exit_recovery_verified": true,
+    "pthread_verified": true,
+    "hot_journal_snapshots": {
+      "ext2": {
+        "bytes": 405504,
+        "sha256": "dc1f6eef63219b99d59cc45afcdef1bb0ca412817de18d351a850ca9f92e4948"
+      },
+      "tmpfs": {
+        "bytes": 405504,
+        "sha256": "162e8c529fd8a27e962f7968d21b8dc0190d3a9175c16cfa7e1a558686dd45e8"
+      }
+    }
+  },
+  "kernel_tests": {
+    "profile": "release",
+    "full_suite": true,
+    "accelerator": "hvf",
+    "passed": 1333
+  },
+  "host_checks": {
+    "libc_release_tests": 65,
+    "header_compilations": 88,
+    "python_harness_tests": 32,
+    "kernel_check_rv64": true,
+    "kernel_check_rv32": true
+  },
+  "cargo_baseline": {
+    "status": "compile-blocked-not-linked-or-guest-verified",
+    "revision": "94c368ad2b9db0f0da5bdd8421cea13786ce4412",
+    "measured_before_pthread_changes": true
+  },
+  "known_limits": [
+    "Cargo remains blocked by Rust and C platform dependency closures; baseline is not a current post-pthread cross-check",
+    "SQLite uses a custom pthread mutex backend under SQLITE_OS_OTHER; no Unix VFS or WAL",
+    "ext2 retained allocated blocks after shrink are reclaimed at final inode deletion; no power-loss atomicity",
+    "ext2 last-link unlink open EBUSY; empty rmdir ENOTSUP pending retained inode lifetime",
+    "RV64 ELF/cross compilation only; no RV64 guest runtime proof",
+    "No full POSIX or musl parity, installed C SDK or published bundle"
+  ],
+  "inputs": {
+    "kernel": {
+      "path": "/private/tmp/scarlet-native-fs-kernel-build/aarch64-unknown-none-elf/release/scarlet",
+      "sha256": "eae49e3207652445e504f0b9eec3507f288450bbc3b385aa85b30db4963ac436"
+    },
+    "libc_aarch64": {
+      "path": "/private/tmp/scarlet-libc-surface-aarch64-unknown-scarlet/aarch64-unknown-scarlet/release/libscarlet_c.a",
+      "sha256": "e32d579a143517a75b9687312f75212a6158c2056bb5162162e34ff38147d79b"
+    },
+    "libc_rv64": {
+      "path": "/private/tmp/scarlet-libc-surface-riscv64gc-unknown-scarlet/riscv64gc-unknown-scarlet/release/libscarlet_c.a",
+      "sha256": "dde31d7e2e05a40337a164db15ecfd31b0ba2c84d3fcace2847765c4b6c296e6"
+    },
+    "probe_aarch64": {
+      "path": "/private/tmp/scarlet-libc-surface-aarch64-unknown-scarlet/aarch64-unknown-scarlet/release/native-rustc-probe",
+      "sha256": "8af2479fddc34d11fdeb1440ab7fd172508ce377590304f56013c919a172652f"
+    },
+    "probe_rv64": {
+      "path": "/private/tmp/scarlet-libc-surface-riscv64gc-unknown-scarlet/riscv64gc-unknown-scarlet/release/native-rustc-probe",
+      "sha256": "3a1555e457b2fcd3b15333ff66c8e58a929aaf14f8139d8232046047c99ffe89"
+    },
+    "sqlite_aarch64": {
+      "path": "/private/tmp/scarlet-pthread-sqlite-aarch64/sqlite-probe",
+      "sha256": "6a8fcdbc4775165d6bc02d51ae7d293d9338b3d900276324265dcdda96b7a19d"
+    },
+    "sqlite_rv64": {
+      "path": "/private/tmp/scarlet-pthread-sqlite-rv64/sqlite-probe",
+      "sha256": "52b044c74763752dae6689a8907273d77db2cae3dc0c1c0585da34759813c075"
+    },
+    "zlib_aarch64": {
+      "path": "/private/tmp/scarlet-pthread-zlib-aarch64/zlib-probe",
+      "sha256": "91f15b345becb8d57a8204d1c23614c32103013ce6329aa69dbd228e6efa0d9d"
+    },
+    "c_startup_aarch64": {
+      "path": "/private/tmp/scarlet-pthread-c-startup-aarch64/c-startup-probe",
+      "sha256": "9b4a4a9dfd9d3de091713beac25e5873061e827966f8bd52ac476f6cd75f912c"
+    }
+  },
+  "source_sha256": {
+    "docs/abi/native-descriptors.md": "3a93af23adf3b3d1b1042232f0fcf0ba37bf62c36754a9ff922cabb558061b17",
+    "kernel/src/fs/vfs_v2/drivers/ext2/mod.rs": "a48a5e99277a3f6ca51559da03a2b8dde61dd0435e84b201bbaeb38dabc279f1",
+    "kernel/src/fs/vfs_v2/drivers/ext2/node.rs": "75521ea2eb1520ad5418bd643810528e3925c8c08b9ae8a97922dca736b4395f",
+    "kernel/src/fs/vfs_v2/drivers/ext2/tests.rs": "3bc7bbc779393111a1c01b65d05ab40ffe6a1a523d67015295caecf35d7d1896",
+    "kernel/src/fs/vfs_v2/drivers/ext2/truncate_tests.rs": "5a7cd97e8593b294ceedf19ac3e29755a130a64d22d24929fe5910292bdd374d",
+    "kernel/src/mem/page_cache.rs": "90298a3393ad6415c28a1478a83da8bfc2e58213a297c5109f354211eddbfd3a",
+    "tools/native-rustc/build.rs": "5c32c0e8716e3d88f786fd8662289c396147449a24eaffcabfe2a138ab671615",
+    "tools/native-rustc/consumer-sqlite/build.py": "1409b42a9dd3d806d9c63559202a5f8766e9dfc5ee506be9198ea61242b8ed35",
+    "tools/native-rustc/consumer-sqlite/main.c": "75aeda01fa9c00f417f6363af816de8b0ddba4b3f5c29237300a219360b7431e",
+    "tools/native-rustc/consumer-sqlite/scarlet_vfs.c": "77dbf1f3a781c59c8c5f68d17caaf0da899116e114a6dd14bdab7e5fc5baa63f",
+    "tools/native-rustc/native_fs.rs": "b5ae4e0b8c657bd97b752d3a5d159224470ba9e3cbea0a69779fddc1d940c414",
+    "tools/native-rustc/probe.rs": "06989a39617d5314febd51f6655f012b83ab7fb8a43173216754fa99af894cb3",
+    "tools/native-rustc/run-qemu.py": "54d9708a85d9964332e5d69771becaada06d37d755f2e8ac05ca94a800f662f5",
+    "tools/native-rustc/test_run_qemu.py": "96b3028de7e4e7fb7632149c1924a6a0655371e90b8063b82b0dcdb6b20ca29f",
+    "user/lib/scarlet-libc/src/lib.rs": "5f90bcbacfa9eb99a3e6bbef2c8ca17463fbd584113bd8ff614bcbe64ff1676c",
+    "user/lib/scarlet-libc/src/threading.rs": "ba61e2a5ee4a8e3b747c0790eacbe1216e50d45c84a762c36041aa4b9ec80a12",
+    "user/lib/scarlet-libc/src/pthread_sync.rs": "3be0c62e9b60ac4b77b5a141e9d65b22e6e2f83fb9931a5be006f8ecfe917519",
+    "user/lib/scarlet-libc/src/strings.rs": "714dacbf709261887397b5be2400227cfb768cbf309d81b4b54d06e8ae5c49a0",
+    "user/lib/scarlet-libc/include/errno.h": "a6bec7bee6333a695bb93e52fb352076ae659197d34b24d6657eaed41488714f",
+    "user/lib/scarlet-libc/include/pthread.h": "3bbfed6baf4c0650cc8c3213a860a11c6a67a9b23d58d7490d12b933db42f434",
+    "user/lib/scarlet-libc/include/bits/pthread_sync.h": "444506165d69b8b6bc26b59438f76a6f2255e29964bb0431b4e4f2d1c86e1291",
+    "user/lib/scarlet-libc/tests/threading.c": "0b4dc50aedcb09dc05e788ccecbce91569a43a3d1d8822cbc70560af0accb74c",
+    "user/lib/scarlet-libc/tests/pthread_sync.c": "da6023724b7103388ac16ee5ff75f95f7f8d86b30d8eff3dc9240801b488a77c",
+    "user/lib/scarlet-libc/tests/headers.c": "185f727caf68cd942024d2ebe62ac784fb269a4264ece056271bdca04b25e84c"
+  },
+  "evidence_sha256": {
+    "C_STARTUP_PASS": "2dc4280e74df404345fb2fd3625fab0aeef5d51d016bae9ff9cd213e86c4b44d",
+    "LIBC_PTHREAD_PASS": "3d2e6221cc87be21769d20ec7daa2684d185a4bf68f4d615cff7310fca2d7d79",
+    "NATIVE_FS_PASS": "1932929a879b1627e650b9e753a9386b637ea47ab1d8276d1e568ba620efbf5c",
+    "PASS": "488ec506264c2975576a2c477ee5f6fb92edb7131280b864039e54c49478deb7",
+    "PROC_MACRO_PASS": "585198c5fd53d949ad956aff184a2588f384b206c3bc5cbc226b25a6b4814469",
+    "SQLITE_PASS": "b3b1a4dac94ffe77b7d8f40b1468af2d7b42e2323b092ce6fd3e07586d617fbf",
+    "ZLIB_PASS": "124749df7c5cd002352b2b48910e81b58d4c38713629fc2f01e2fa4afc00485b",
+    "aarch64-libc-build.log": "1fc0b94163dcda4cede856ba5226736a0af41d0123fc0b7b4ef07049c5d890fc",
+    "aarch64-probe-build.log": "79013f93bd22e726f73060de7d2f6f4caeebfecbadbca444c69dab30b7d0c73e",
+    "c-startup-aarch64/commands.json": "a29b49ae5b7c72198f8663ed4da404fe11cf5294c4a65ba2dfb248851049d3e9",
+    "c-startup-aarch64/elf-audit.json": "c777ad3fcf1ff203f1d56612abe155c7b8004b5ee9517df922ba925cd93dfc96",
+    "c-startup-aarch64/link.log": "950c4090418767f3e01a4d12e9ed107d8e68b8e0e65d180f2c85f73a2ad768e9",
+    "c-startup-aarch64/result.json": "e5c42e013995376f628af8e13b01171db2390ed2023b479ed3922d2a63cafd0f",
+    "c-startup-build-aarch64.log": "63ed1e78b119d2051b46b6442e282f34d719b1c610d89d304849c0e684ebc0a2",
+    "c-startup.command": "8ea92d9c121289f537b73704d7623009125aa739040cc48e9772bf4efad25303",
+    "c-startup.status": "20fcb103c9ef430b85b89296d2ab000d2c83521a4f1bd15ebbaa1fe255eca102",
+    "c-startup.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "c-startup.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "cargo-baseline.json": "fe00855f6aaaca3b6dd68ac69a11a1075f859cef1d517e2256b4e204160dc585",
+    "cargo-baseline.log": "0f870af9b46e449c4e18ed85f537ffd008b302f49ea61f3e5478967ce2e45f79",
+    "cfg.command": "da13ddfcbd355b17a95a3920540f7e1b99d9545b3de03cac63ef7d280ef39fd9",
+    "cfg.status": "655efeec687c6c10ad68c655dcfbdaf183e2a7bef5e8f9f43b49a1aa17b4819c",
+    "cfg.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "cfg.stdout": "ab08b29f15cb9933ea369d816219a72f199027190798d410876f11e27bc5cb1b",
+    "commands.json": "9aa6adde99dbae2b470913c3b5c750e53b9beb60839c0daa5de7d6cdc319dde6",
+    "compile.command": "d51d77ffedd9f19f08aeb49c75d6d952246e470cc7074d1d0d6dc4723327a4b0",
+    "compile.status": "31be84d9a7b9f35d7687bd1a3ec164c1aaa6fffb0de0c5cccc27b0b463ac84a0",
+    "compile.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "compile.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "execute.command": "d479b5bf26bdeb46ae826319ba6986b8835427ed0c0c5a270b8ace9ccffe5549",
+    "execute.status": "841e0e1c76d5196ce70198611fc15dd3208e6fd42bef7228d269dceb3c766cd8",
+    "execute.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "execute.stdout": "f7db1accdcc0c5d3a36ca1fa83beaa4f1d6a838f963945549006b84066c5e40c",
+    "frontend.command": "a7473a14cdf4e641de6426a3574abe215dc14fe5dd36735a2c393e8093acd1cd",
+    "frontend.status": "da887b2befbc2ac4399ae68457845aa6d293234ffa8fbba313026658b12d7860",
+    "frontend.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "frontend.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "harness-tests.log": "1cc823f16bd89dddc07588ceafe26afe50d509519b29d8ea5d717c3e1a6e9fd1",
+    "headers.log": "fe4ee18f14012b9a3ffa1ff8336b05e48abe2cc35757f0cf4f4508f0577d1835",
+    "hello.rs": "3ab01a600239173f5292731f10f0f7714907954c2978481e953b574278281b73",
+    "kernel-build.log": "86300a35cf100796a570de09c382eee84f0d9c96dec83ad51d64fa911ba90b7a",
+    "kernel-check-rv32.log": "61590c3d45f16f8f38b55ee61c7e910fd00670ced5791f0d46dd79854e206e46",
+    "kernel-check-rv64.log": "d20506ee814d3910f2bb357c9488123e457b4127c0caa92be863ce41170943a9",
+    "kernel-tests-hvf.log.gz": "489c77f14526ccc714824383c4cc69beb77cb2232be13b7fa6b9327b2d93e188",
+    "libc-abort.status": "90331a1bc4f5db5f192fdb31ca52db76201854a8754c6a27508f2800f51dde8a",
+    "libc-abort.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "libc-abort.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "libc-assert.status": "90331a1bc4f5db5f192fdb31ca52db76201854a8754c6a27508f2800f51dde8a",
+    "libc-assert.stderr": "3fef577d2f4d9e020597da398441e1f34685ace86a9cef5e3b817550a0c19a20",
+    "libc-assert.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "libc-host-tests.log.gz": "5818df022ffb77192d8e924867dd92a0e3137c13a402c36849df04b12337fbb5",
+    "macro-app.rs": "740b05d489ffb92bbe2e4b102169990545d4039645e76c6f5c4c4766cd4577bf",
+    "macros.rs": "b41b4d7a2467b48f6c9f7d4b05287d016533e72386ad9c1fd877546ce90c93ac",
+    "mode.txt": "0e716a5fef4e6dc1bcfff22ad52f73ca4eee3f4ea8292f4a1918daa32592889f",
+    "previous-rv64-ci-failure.log.gz": "0345e4ea610ef77cf132e464d2e8e4ffa8ca3856ef1bf7fdcb00f9576157016e",
+    "proc-macro-build-other.command": "7d99488972e99187160f94311780d1dbc7c44ef499630d014f87128250dd4f2c",
+    "proc-macro-build-other.status": "fac9f5d41cb8d35d40d7214d861c02ace5d15d13ac633a620f295d027e50d3d7",
+    "proc-macro-build-other.stderr.gz": "1a045408870d97061931e884eef2c25fb236d961064332905f2cd6c5180dd821",
+    "proc-macro-build-other.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proc-macro-build.command": "54e4c8d2af8d9150b6d0a2486243bf827baef79639c4042eeefe414627778383",
+    "proc-macro-build.status": "fac9f5d41cb8d35d40d7214d861c02ace5d15d13ac633a620f295d027e50d3d7",
+    "proc-macro-build.stderr.gz": "1a045408870d97061931e884eef2c25fb236d961064332905f2cd6c5180dd821",
+    "proc-macro-build.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proc-macro-execute.command": "46bd77e74fe3d2803ee1738017d88229bbc4a282ded2b0ee3fac8e553805150a",
+    "proc-macro-execute.status": "1ff83fbb13f211f0157b772cf43d44ca507c96592356cb966bc4280fa44107e7",
+    "proc-macro-execute.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proc-macro-execute.stdout": "5af2b9bbbc7f9374ba2690a53defa24ddef5cdd6aca60c46e2b717114b6edc1a",
+    "proc-macro-expand.command": "4ef296b71d74acfe6e8d2bbfb183a0c54df6c1300f30bebd1bf6795f5c7b6fbb",
+    "proc-macro-expand.status": "21f909d795136c416ea26dc266d89f3d02a7026f64c0b41b8e4811be614657fe",
+    "proc-macro-expand.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "proc-macro-expand.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "result.json": "0c175b637dd251135debe3b4d8c3367032e14c3790200c87131a8a195b5f4ae4",
+    "rv64-libc-build.log": "03e8afccf5ff404f68e96ca3e2af3c4bb9254136dda6fb36d126ef77a99e4526",
+    "rv64-probe-build.log": "5c491d3e28b2eb65a43c368682094f736d06862334f54ceeb2209e48ff8caaa3",
+    "serial.log.gz": "29e022fa9e57173e59a6ab6091b9b105731bdc2e8f8858a79f38bde78d32590b",
+    "sqlite/sqlite-roundtrip.db": "a3aaa4fabbe065947a5b2d6431653dda7363eb69dbd8e64306211216f585fd22",
+    "sqlite-aarch64/commands.json": "0e8d4797f3136c94e9b081454312962382b709d7d0d1ceeceb029cd03d722535",
+    "sqlite-aarch64/elf-audit.json": "3ece904c9cb838b4d1a848cb893ca8a88c1dd7ec963de821ba00f1ebdf7d0ba1",
+    "sqlite-aarch64/link.log": "70b21dc839b225d44d3027f2d44f3d608ca7a7086cd819a2b91103847869d560",
+    "sqlite-aarch64/result.json": "de1e095a4d3122694ed77a1ae5c40d479b8ea0a7fe57bfd32b27653cab4c128b",
+    "sqlite-build-aarch64.log": "1474c97528d975e197832a308daf0c5895c211ca18b7b8329fa4a9aa2864e88a",
+    "sqlite-build-rv64.log": "b30f0908ce286b2b53cc2e232e7ddf0f0966ee3161d97d25cea4f5027068516c",
+    "sqlite-ext2-crash.command": "7038bf05aee6419c6033eb4748fad6ea9e6e161e2a55849876a1f232c2619151",
+    "sqlite-ext2-crash.journal": "dc1f6eef63219b99d59cc45afcdef1bb0ca412817de18d351a850ca9f92e4948",
+    "sqlite-ext2-crash.status": "f564951b01db08ce7f7d218b5293082c0bce84ffa62db970eeeeb4f0810f3e2e",
+    "sqlite-ext2-crash.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sqlite-ext2-crash.stdout": "3d086e1f0f60d4c47a9f3fe6d467a0879717b9e831e62bca481b7f88e56d851f",
+    "sqlite-ext2-create.command": "c5b59d6cdac5720ad0663112bff84d42628e239043b54dd821dea61c0be4ced8",
+    "sqlite-ext2-create.status": "7bdce29c1be179be5ee03edc509c8dcfe0ea9d733d5350b8d80ab924db826f7e",
+    "sqlite-ext2-create.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sqlite-ext2-create.stdout": "82300f5a566a5720d82afb63e7586d6f483c6cf9dced51e38353c9079a2eef8e",
+    "sqlite-ext2-recover.command": "eb28e8a0d06fc49e8dbd90ca8f8d044fcc44c25d8b6bb4593cbcf399137beab6",
+    "sqlite-ext2-recover.status": "81859e2f74ef7cef7367dfe11f32ca0b20130dda6384b9f7dc2c3cf3a231b76d",
+    "sqlite-ext2-recover.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sqlite-ext2-recover.stdout": "3af921c1fc21c354beb193414553f2b619ab0faedc90b3be7ad50aa77a8d2a3a",
+    "sqlite-ext2-verify.command": "eb28e8a0d06fc49e8dbd90ca8f8d044fcc44c25d8b6bb4593cbcf399137beab6",
+    "sqlite-ext2-verify.status": "e339cfa043de56873d3596f420397e6c5ab990249c96283dcd04168f5d947438",
+    "sqlite-ext2-verify.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sqlite-ext2-verify.stdout": "3af921c1fc21c354beb193414553f2b619ab0faedc90b3be7ad50aa77a8d2a3a",
+    "sqlite-host-validation.json": "397f11d8564cc71cd4dabd57adb8af4056cc1a03ec87762fee9df16ab095e43f",
+    "sqlite-rv64/commands.json": "c358b137de9c204d40cb8aed52b3f4b451ef94c1bef53f9350b86e10dd582db3",
+    "sqlite-rv64/elf-audit.json": "86356fb013ea525804bf7d01785051de70ca84b3838fdf7f3cf0448274b3d8b2",
+    "sqlite-rv64/link.log": "cb52bfb973bdc42112d557e2c17dfe32c7bc5205388f3f96352c5aa566a77047",
+    "sqlite-rv64/result.json": "c0a806ccaca18081f8470e060c317eb587d66aabe92676300ddf54aade2b78b1",
+    "sqlite-tmpfs-crash.command": "469e7f631c0b8591ddd534be6f50dcf91abeaddd5c24da5f41f01f850a67c5ef",
+    "sqlite-tmpfs-crash.journal": "162e8c529fd8a27e962f7968d21b8dc0190d3a9175c16cfa7e1a558686dd45e8",
+    "sqlite-tmpfs-crash.status": "f564951b01db08ce7f7d218b5293082c0bce84ffa62db970eeeeb4f0810f3e2e",
+    "sqlite-tmpfs-crash.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sqlite-tmpfs-crash.stdout": "3d086e1f0f60d4c47a9f3fe6d467a0879717b9e831e62bca481b7f88e56d851f",
+    "sqlite-tmpfs-create.command": "0cf0515dbb29a3982e27dfd8e05f7e922efe75a8304f627f5de41a74f7e5243b",
+    "sqlite-tmpfs-create.status": "d3a59721500e5ab53e39297e25748c89b25dd42cb2a0652d7db64e11ed068af1",
+    "sqlite-tmpfs-create.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sqlite-tmpfs-create.stdout": "82300f5a566a5720d82afb63e7586d6f483c6cf9dced51e38353c9079a2eef8e",
+    "sqlite-tmpfs-recover.command": "0079ffed34b64e518f566f48f71ed08c3270848947025dfde8b02b385c5d8038",
+    "sqlite-tmpfs-recover.status": "38b94dc8309a199e84911d48e20b26e296e03b0ccadeace07cf268b84516ba9b",
+    "sqlite-tmpfs-recover.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sqlite-tmpfs-recover.stdout": "3af921c1fc21c354beb193414553f2b619ab0faedc90b3be7ad50aa77a8d2a3a",
+    "sqlite-tmpfs-verify.command": "0079ffed34b64e518f566f48f71ed08c3270848947025dfde8b02b385c5d8038",
+    "sqlite-tmpfs-verify.status": "e339cfa043de56873d3596f420397e6c5ab990249c96283dcd04168f5d947438",
+    "sqlite-tmpfs-verify.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sqlite-tmpfs-verify.stdout": "3af921c1fc21c354beb193414553f2b619ab0faedc90b3be7ad50aa77a8d2a3a",
+    "version.command": "d1895acf984785b74e6d1cc88841089711c336c8bd5810680ff020a04b0ddc8e",
+    "version.status": "e2bc142cdaf1e8f5d6550a22d21b43a3851cfe0d628652825a5506c5877b3dd0",
+    "version.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "version.stdout": "7b470863f2743b445f051637801f8df2e4e852f6d150f9cf9bea3f1362388d67",
+    "zlib-aarch64/commands.json": "b00a320f2737d7dc2f75540c9c918fbefc3aa115e503e3b80f926eff5ab30f85",
+    "zlib-aarch64/elf-audit.json": "c2ca3496eabb9df53767a60c718807899e0fc49e711db68acb5c0e40f8e6c992",
+    "zlib-aarch64/link.log": "57d7ec6b8eb13847a56cb252eb2ebe03dcd37febb35c9b3ca1c52268250d3140",
+    "zlib-aarch64/result.json": "1b4c200b0aa24434910d99d383ff8eb121557163a5f4a7c156089d6cc49dd919",
+    "zlib-build-aarch64.log": "2257b3dba1b458631a0132252deffe0eed0caa92d6cfc523aca20a48ec7215e5",
+    "zlib.command": "69b88beeaa9285fdce72c8c07d933bab7e351fd21aadc6e2342ccfec4c3cdf82",
+    "zlib.status": "16308b3f8a3d2b96375d64bb47c07a8dd35e73bab282bfe90db2fd0530c75380",
+    "zlib.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "zlib.stdout": "0ad3328ddf7f344e88b1b727f60f2392a24fc6ec25524fb5fc50b6152f63e42b"
+  },
+  "compressed_logs": {
+    "kernel-tests-hvf.log": {
+      "raw_sha256": "bdf8b4a8b55ee4e82b61d2e250b5bf55adefa0babf895a038fe7a4ff7f16a096",
+      "artifact": "kernel-tests-hvf.log.gz"
+    },
+    "previous-rv64-ci-failure.log": {
+      "raw_sha256": "bfb8fae8a2fb317334e1151411a2be7493b864d3746a586ed6eeb37509bead6b",
+      "artifact": "previous-rv64-ci-failure.log.gz"
+    },
+    "serial.log": {
+      "raw_sha256": "14612011aaf5c6ba52d03eafdea93db9fd3be476a1abec950b158a5b912534e6",
+      "artifact": "serial.log.gz"
+    },
+    "libc-host-tests.log": {
+      "raw_sha256": "7038866daaf7b59346ff5956b807b9aeb1a1709139c9cb2a88c8037d26cc3690",
+      "artifact": "libc-host-tests.log.gz"
+    },
+    "proc-macro-build-other.stderr": {
+      "raw_sha256": "95e535d322106ecf51210d9bc46fabd87b33574556f942d35b32c5bab7ae7ae0",
+      "artifact": "proc-macro-build-other.stderr.gz"
+    },
+    "proc-macro-build.stderr": {
+      "raw_sha256": "95e535d322106ecf51210d9bc46fabd87b33574556f942d35b32c5bab7ae7ae0",
+      "artifact": "proc-macro-build.stderr.gz"
+    }
+  }
+}

@@ -979,11 +979,28 @@ impl Ext2FileSystem {
 
             Ok(block_ptr as u64)
         } else {
-            // Triple indirect blocks - not implemented yet
-            Err(FileSystemError::new(
-                FileSystemErrorKind::NotSupported,
-                "Triple indirect blocks not yet supported",
-            ))
+            let pointers = u64::from(blocks_per_indirect);
+            let triple_start = 12 + pointers + pointers * pointers;
+            let mut relative = logical_block - triple_start;
+            if relative >= pointers * pointers * pointers {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::ValueOverflow,
+                    "ext2 logical block exceeds pointer tree",
+                ));
+            }
+            let mut block = u64::from(inode.block[14]);
+            for divisor in [pointers * pointers, pointers, 1] {
+                if block == 0 {
+                    return Ok(0);
+                }
+                let data = self.read_block_cached(block)?;
+                let offset = (relative / divisor) as usize * 4;
+                block = u64::from(u32::from_le_bytes(
+                    data[offset..offset + 4].try_into().unwrap(),
+                ));
+                relative %= divisor;
+            }
+            Ok(block)
         }
     }
 
@@ -1150,11 +1167,8 @@ impl Ext2FileSystem {
                     current_block = double_indirect_end;
                 }
             } else {
-                // Triple indirect blocks - not implemented yet
-                return Err(FileSystemError::new(
-                    FileSystemErrorKind::NotSupported,
-                    "Triple indirect blocks not yet supported",
-                ));
+                result.push(self.get_inode_block(inode, current_block)?);
+                current_block += 1;
             }
         }
 
@@ -1340,6 +1354,18 @@ impl Ext2FileSystem {
         file_size: usize,
         pages: &[(u64, u64)],
     ) -> Result<(), FileSystemError> {
+        self.write_cached_pages_inner(inode_num, file_size, pages, true)
+    }
+
+    /// Truncate writeback updates allocated pointers but leaves the old EOF
+    /// visible until the discarded disk tail has also been cleared.
+    fn write_cached_pages_inner(
+        &self,
+        inode_num: u32,
+        file_size: usize,
+        pages: &[(u64, u64)],
+        publish_size: bool,
+    ) -> Result<(), FileSystemError> {
         profile_scope!("ext2::write_cached_pages");
 
         if pages.is_empty() {
@@ -1360,6 +1386,45 @@ impl Ext2FileSystem {
         }
 
         let mut inode = self.read_inode(inode_num)?;
+        let pointers = u64::from(self.block_size / 4);
+        let allocation_limit = 12 + pointers + pointers * pointers;
+        for &(page_index, paddr) in pages {
+            let page_offset = page_index
+                .checked_mul(crate::environment::PAGE_SIZE as u64)
+                .ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::ValueOverflow,
+                        "ext2 page writeback offset overflow",
+                    )
+                })?;
+            if page_offset >= file_size as u64 {
+                continue;
+            }
+            let end =
+                (file_size as u64 - page_offset).min(crate::environment::PAGE_SIZE as u64) as usize;
+            let first = page_offset / block_size as u64;
+            if first + (end.div_ceil(block_size) as u64) <= allocation_limit {
+                continue;
+            }
+            for offset in (0..end).step_by(block_size) {
+                let logical = first + (offset / block_size) as u64;
+                if logical < allocation_limit || self.get_inode_block(&inode, logical)? != 0 {
+                    continue;
+                }
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        (crate::vm::addr::phys_to_virt(paddr) as *const u8).add(offset),
+                        (end - offset).min(block_size),
+                    )
+                };
+                if bytes.iter().any(|byte| *byte != 0) {
+                    return Err(FileSystemError::new(
+                        FileSystemErrorKind::NotSupported,
+                        "Allocating triple indirect blocks is not supported",
+                    ));
+                }
+            }
+        }
         let mut write_blocks = BTreeMap::new();
         const WRITEBACK_BLOCK_BATCH: usize = 64;
 
@@ -1394,6 +1459,26 @@ impl Ext2FileSystem {
                 for (relative, block) in blocks.into_iter().enumerate() {
                     let offset = relative * block_size;
                     let len = (page_end - page_offset - offset).min(block_size);
+                    // A page can span allocated data and sparse holes. Writing
+                    // one byte in it must not allocate its zero-filled holes.
+                    if block == 0 {
+                        let bytes = unsafe {
+                            core::slice::from_raw_parts(
+                                (crate::vm::addr::phys_to_virt(paddr) as *const u8).add(offset),
+                                len,
+                            )
+                        };
+                        if bytes.iter().all(|byte| *byte == 0) {
+                            continue;
+                        }
+                        let pointers = u64::from(self.block_size / 4);
+                        if (first + relative) as u64 >= 12 + pointers + pointers * pointers {
+                            return Err(FileSystemError::new(
+                                FileSystemErrorKind::NotSupported,
+                                "Allocating triple indirect blocks is not supported",
+                            ));
+                        }
+                    }
                     pending.push(((first + relative) as u64, block, paddr, offset, len));
                 }
             }
@@ -1421,7 +1506,8 @@ impl Ext2FileSystem {
                 }
             }
             if !assignments.is_empty() {
-                self.set_inode_blocks_simple_batch(&mut inode, &assignments)?;
+                let tables = self.set_inode_blocks_simple_batch(&mut inode, &assignments)?;
+                self.add_inode_allocated_blocks(&mut inode, missing as u32 + tables)?;
             }
 
             for (_, block, paddr, offset, len) in pending {
@@ -1447,12 +1533,9 @@ impl Ext2FileSystem {
             self.write_blocks_cached(&write_blocks)?;
         }
 
-        let blocks_needed = if file_size == 0 {
-            0
-        } else {
-            (file_size + block_size - 1) / block_size
-        };
-        inode.size = file_size_u32;
+        if publish_size {
+            inode.size = file_size_u32.to_le();
+        }
         let cache_id =
             crate::fs::vfs_v2::cache::CacheId::new((self.fs_id().get() << 32) | inode_num as u64);
         let modified_time = crate::mem::page_cache::PageCacheManager::global()
@@ -1469,9 +1552,6 @@ impl Ext2FileSystem {
         if let Some(time) = changed_time {
             inode.ctime = time.to_le();
         }
-        inode.blocks = u32::try_from(blocks_needed)
-            .unwrap_or(u32::MAX)
-            .saturating_mul(self.block_size / 512);
         self.write_inode(inode_num, &inode)?;
         self.inode_cache.write().insert(inode_num, inode);
         Ok(())
@@ -2886,14 +2966,11 @@ impl Ext2FileSystem {
             // Read the inode first to get its data blocks and determine if it's a directory
             let inode = self.read_inode(inode_number)?;
             let is_directory = inode.is_dir();
-            let blocks_to_free = self.get_inode_data_blocks(&inode)?;
-
-            // Free all data blocks used by this inode
-            for block_num in blocks_to_free {
-                // Debug: Freeing data block (disabled to reduce log noise)
-                // crate::println!("EXT2: Freeing data block {}", block_num);
-                self.free_block_unlocked(block_num)?;
-            }
+            // Truncation may retain blocks beyond EOF. Visit the complete
+            // allocated tree, freeing data and its indirect tables post-order.
+            self.walk_inode_allocated_blocks(&inode, &mut |_, block, _| {
+                self.free_block_unlocked(block)
+            })?;
 
             // Calculate which block group contains this inode
             let group = (inode_number - 1) / self.superblock.get_inodes_per_group();
@@ -3126,10 +3203,21 @@ impl Ext2FileSystem {
                     "Cannot allocate ext2 block assignments",
                 )
             })?;
-        let mut added_indirect_blocks = 0u32;
         if blocks_needed > 0 {
             // Use batched block reading to get existing blocks
             block_list = self.get_inode_blocks(&inode, 0, blocks_needed as u64)?;
+            let pointers = u64::from(self.block_size / 4);
+            let allocation_limit = 12 + pointers + pointers * pointers;
+            if block_list
+                .iter()
+                .enumerate()
+                .any(|(logical, block)| logical as u64 >= allocation_limit && *block == 0)
+            {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "Allocating triple indirect blocks is not supported",
+                ));
+            }
 
             // Find contiguous ranges of blocks that need allocation
             let mut allocation_ranges = Vec::new(); // (start_idx, count)
@@ -3172,47 +3260,6 @@ impl Ext2FileSystem {
             // Finalize any remaining allocation range
             if let Some(start) = current_start {
                 allocation_ranges.push((start, current_count));
-            }
-
-            // i_blocks counts allocated data AND indirect blocks, including
-            // allocations retained past EOF after an earlier shrink.
-            let pointers = u64::from(self.block_size / 4);
-            let double_start = 12 + pointers;
-            let mut counted_single = false;
-            let mut counted_double = false;
-            let mut previous_double_index = None;
-            let existing_double = if inode.block[13] != 0 {
-                Some(self.read_block_cached(u64::from(inode.block[13]))?)
-            } else {
-                None
-            };
-            for (logical, &block) in block_list.iter().enumerate() {
-                if block != 0 || logical < 12 {
-                    continue;
-                }
-                let logical = logical as u64;
-                if logical < double_start {
-                    if !counted_single && inode.block[12] == 0 {
-                        added_indirect_blocks += 1;
-                    }
-                    counted_single = true;
-                } else if logical < double_start + pointers * pointers {
-                    if !counted_double && inode.block[13] == 0 {
-                        added_indirect_blocks += 1;
-                    }
-                    counted_double = true;
-                    let index = (logical - double_start) / pointers;
-                    if previous_double_index != Some(index) {
-                        let pointer = existing_double.as_ref().map_or(0, |data| {
-                            let offset = index as usize * 4;
-                            u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
-                        });
-                        if pointer == 0 {
-                            added_indirect_blocks += 1;
-                        }
-                        previous_double_index = Some(index);
-                    }
-                }
             }
 
             // Perform allocations using multi-block allocation where beneficial
@@ -3264,23 +3311,12 @@ impl Ext2FileSystem {
             }
         }
 
-        // Shrinking currently retains allocation. Do not pretend its sectors
-        // were freed, and include newly allocated indirect tables on growth.
-        let allocated_sectors = u32::try_from(new_block_assignments.len())
-            .ok()
-            .and_then(|count| count.checked_add(added_indirect_blocks))
-            .and_then(|count| count.checked_mul(self.block_size / 512))
-            .and_then(|sectors| inode.blocks.checked_add(sectors))
-            .ok_or_else(|| {
-                FileSystemError::new(
-                    FileSystemErrorKind::ValueOverflow,
-                    "ext2 allocated sector count overflow",
-                )
-            })?;
-
-        // Apply all new block assignments at once using simple batch function
         if !new_block_assignments.is_empty() {
-            self.set_inode_blocks_simple_batch(&mut inode, &new_block_assignments)?;
+            let tables = self.set_inode_blocks_simple_batch(&mut inode, &new_block_assignments)?;
+            self.add_inode_allocated_blocks(
+                &mut inode,
+                new_block_assignments.len() as u32 + tables,
+            )?;
         }
 
         // Write content to blocks using batching
@@ -3348,8 +3384,6 @@ impl Ext2FileSystem {
             inode.ctime = time.to_le();
         }
 
-        inode.blocks = allocated_sectors;
-
         // Write updated inode to disk
         self.write_inode(inode_num, &inode)?;
 
@@ -3362,44 +3396,189 @@ impl Ext2FileSystem {
         Ok(())
     }
 
-    /// Zero allocated blocks removed from EOF while retaining their allocation.
-    ///
-    /// The partial final block is already zero-padded by write_file_content.
-    /// Clearing the remaining allocated blocks prevents a later sparse write
-    /// from exposing discarded bytes after it grows the inode. Holes are not
-    /// allocated, and both block lookup and transfer memory are bounded to 64
-    /// filesystem blocks. This is not transactional: an I/O failure can leave
-    /// already written data/metadata changed even though the size is uncommitted.
+    fn add_inode_allocated_blocks(
+        &self,
+        inode: &mut Ext2Inode,
+        blocks: u32,
+    ) -> Result<(), FileSystemError> {
+        let sectors = blocks
+            .checked_mul(self.block_size / 512)
+            .and_then(|added| inode.get_blocks().checked_add(added))
+            .ok_or_else(|| {
+                FileSystemError::new(
+                    FileSystemErrorKind::ValueOverflow,
+                    "ext2 allocated sector count overflow",
+                )
+            })?;
+        inode.blocks = sectors.to_le();
+        Ok(())
+    }
+
+    /// Finish a truncate under the inode operation lock. Data writes and tail
+    /// zeroing are not transactional on I/O errors, but EOF is published last.
+    /// Allocation is retained until final unlink; growing a hole allocates none.
+    fn truncate_inode_locked(
+        &self,
+        inode_num: u32,
+        old_size: usize,
+        new_size: usize,
+    ) -> Result<(), FileSystemError> {
+        let size = u32::try_from(new_size).map_err(|_| {
+            FileSystemError::new(
+                FileSystemErrorKind::ValueOverflow,
+                "ext2 file exceeds the supported 32-bit inode size",
+            )
+        })?;
+        let mut inode = self.read_inode(inode_num)?;
+        if new_size < old_size {
+            self.zero_allocated_file_range(
+                &inode,
+                new_size as u64,
+                (old_size as u64).max(u64::from(inode.get_size())),
+            )?;
+        } else {
+            self.zero_allocated_file_range(&inode, old_size as u64, new_size as u64)?;
+        }
+        inode.size = size.to_le();
+        if let Some(now) = current_timestamp() {
+            inode.mtime = now.to_le();
+            inode.ctime = now.to_le();
+        }
+        self.write_inode(inode_num, &inode)?;
+        self.inode_cache.write().insert(inode_num, inode);
+        Ok(())
+    }
+
+    /// The full-content writer already zero-pads its partial final block.
     fn zero_retained_file_tail(
         &self,
         inode: &Ext2Inode,
         new_size: u64,
         old_size: u64,
     ) -> Result<(), FileSystemError> {
+        self.zero_allocated_file_range(
+            inode,
+            new_size.div_ceil(u64::from(self.block_size)) * u64::from(self.block_size),
+            old_size,
+        )
+    }
+
+    /// Zero only allocated bytes in a range. Walk allocated subtrees rather
+    /// than iterating every logical block of a potentially 4 GiB sparse file.
+    /// At most 64 data buffers and three indirect tables are live at once.
+    fn zero_allocated_file_range(
+        &self,
+        inode: &Ext2Inode,
+        start: u64,
+        end: u64,
+    ) -> Result<(), FileSystemError> {
+        if start >= end {
+            return Ok(());
+        }
         let block_size = u64::from(self.block_size);
-        let mut first = new_size.div_ceil(block_size);
-        let end = old_size.div_ceil(block_size);
-        while first < end {
-            let count = (end - first).min(64);
-            let blocks = self.get_inode_blocks(inode, first, count)?;
-            let mut writes = BTreeMap::new();
-            for block in blocks.into_iter().filter(|block| *block != 0) {
-                let mut zeroes = Vec::new();
-                zeroes
-                    .try_reserve_exact(self.block_size as usize)
+        let mut writes = BTreeMap::new();
+        self.walk_inode_allocated_blocks(inode, &mut |logical, block, depth| {
+            let offset = logical * block_size;
+            if depth != 0 || offset >= end || offset + block_size <= start {
+                return Ok(());
+            }
+            let first = start.saturating_sub(offset) as usize;
+            let last = (end - offset).min(block_size) as usize;
+            let mut data = if first != 0 || last != self.block_size as usize {
+                self.read_block_cached(u64::from(block))?
+            } else {
+                let mut data = Vec::new();
+                data.try_reserve_exact(self.block_size as usize)
                     .map_err(|_| {
                         FileSystemError::new(
                             FileSystemErrorKind::NoSpace,
                             "Cannot allocate ext2 truncate zero buffer",
                         )
                     })?;
-                zeroes.resize(self.block_size as usize, 0);
-                writes.insert(block, zeroes);
+                data.resize(self.block_size as usize, 0);
+                data
+            };
+            data[first..last].fill(0);
+            writes.insert(u64::from(block), data);
+            if writes.len() == 64 {
+                self.write_blocks_cached(&writes)?;
+                writes.clear();
             }
+            Ok(())
+        })?;
+        if !writes.is_empty() {
             self.write_blocks_cached(&writes)?;
-            first += count;
         }
         Ok(())
+    }
+
+    /// Visit all allocated data and pointer blocks, including allocation past
+    /// EOF. Pointer blocks follow their children so reclamation is post-order.
+    /// Inline symlinks and device encodings are not allocation trees.
+    fn walk_inode_allocated_blocks<F>(
+        &self,
+        inode: &Ext2Inode,
+        visitor: &mut F,
+    ) -> Result<(), FileSystemError>
+    where
+        F: FnMut(u64, u32, u8) -> Result<(), FileSystemError>,
+    {
+        let kind = inode.get_mode() & EXT2_S_IFMT;
+        if !matches!(kind, EXT2_S_IFREG | EXT2_S_IFDIR | EXT2_S_IFLNK)
+            || (kind == EXT2_S_IFLNK && inode.get_size() <= 60)
+        {
+            return Ok(());
+        }
+        for logical in 0..12 {
+            self.walk_allocated_subtree(inode.block[logical], logical as u64, 0, visitor)?;
+        }
+        let pointers = u64::from(self.block_size / 4);
+        let mut logical = 12;
+        let mut span = pointers;
+        for depth in 1..=3 {
+            self.walk_allocated_subtree(inode.block[11 + depth as usize], logical, depth, visitor)?;
+            logical += span;
+            span *= pointers;
+        }
+        Ok(())
+    }
+
+    fn walk_allocated_subtree<F>(
+        &self,
+        block: u32,
+        logical: u64,
+        depth: u8,
+        visitor: &mut F,
+    ) -> Result<(), FileSystemError>
+    where
+        F: FnMut(u64, u32, u8) -> Result<(), FileSystemError>,
+    {
+        let block = u32::from_le(block);
+        if block == 0 {
+            return Ok(());
+        }
+        if block < self.superblock.get_first_data_block()
+            || block >= self.superblock.get_blocks_count()
+        {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidData,
+                "ext2 allocation pointer is out of range",
+            ));
+        }
+        if depth != 0 {
+            let data = self.read_block_cached(u64::from(block))?;
+            let span = u64::from(self.block_size / 4).pow(u32::from(depth - 1));
+            for (index, bytes) in data.chunks_exact(4).enumerate() {
+                let child = u32::from_le_bytes(bytes.try_into().unwrap());
+                self.walk_allocated_subtree(
+                    child.to_le(),
+                    logical + index as u64 * span,
+                    depth - 1,
+                    visitor,
+                )?;
+            }
+        }
+        visitor(logical, block, depth)
     }
 
     /// Convert ext2 inode mode to FileType
@@ -3481,38 +3660,6 @@ impl Ext2FileSystem {
             })), // Socket ID will be bound at runtime
             _ => Ok(FileType::Unknown),
         }
-    }
-
-    /// Get all data blocks used by an inode
-    fn get_inode_data_blocks(&self, inode: &Ext2Inode) -> Result<Vec<u32>, FileSystemError> {
-        let mut blocks = Vec::new();
-
-        // Check if this is a symbolic link
-        let mode = inode.get_mode();
-        let is_symlink = (mode & EXT2_S_IFMT) == EXT2_S_IFLNK;
-
-        if is_symlink && inode.get_size() <= 60 {
-            // Fast symlink: target is stored in inode.block array, no data blocks used
-            return Ok(blocks);
-        }
-
-        let blocks_in_file =
-            (inode.get_size() as u64 + self.block_size as u64 - 1) / self.block_size as u64;
-
-        if blocks_in_file == 0 {
-            return Ok(blocks);
-        }
-
-        // Use batched block reading for better performance
-        let block_nums = self.get_inode_blocks(inode, 0, blocks_in_file)?;
-
-        for &block_num in &block_nums {
-            if block_num != 0 {
-                blocks.push(block_num as u32);
-            }
-        }
-
-        Ok(blocks)
     }
 
     /// Free a block and update bitmaps (internal, assumes lock is held)
@@ -3954,10 +4101,22 @@ impl Ext2FileSystem {
         &self,
         inode: &mut Ext2Inode,
         assignments: &[(u64, u32)],
-    ) -> Result<(), FileSystemError> {
+    ) -> Result<u32, FileSystemError> {
         profile_scope!("ext2::set_inode_blocks_simple_batch");
 
         let blocks_per_indirect = self.block_size / 4;
+        let max_blocks = 12
+            + u64::from(blocks_per_indirect)
+            + u64::from(blocks_per_indirect) * u64::from(blocks_per_indirect);
+        if assignments
+            .iter()
+            .any(|(logical, _)| *logical >= max_blocks)
+        {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Allocating triple indirect blocks is not supported",
+            ));
+        }
         let mut indirect_blocks_cache = alloc::collections::BTreeMap::new();
         let mut double_indirect_cache = alloc::collections::BTreeMap::new();
         let mut _batched_writes = 0;
@@ -4245,7 +4404,7 @@ impl Ext2FileSystem {
 
         // crate::println!("[ext2] set_inode_blocks_simple_batch: completed {} assignments, {} batched writes",
         //     assignments.len(), batched_writes);
-        Ok(())
+        Ok(needed_indirect_blocks)
     }
 
     /// Update group descriptor on disk

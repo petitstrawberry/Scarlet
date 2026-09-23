@@ -2,7 +2,7 @@
 use scarlet_abi::{Syscall, fs::*};
 use std::ffi::CString;
 use std::fs::{self, File, FileTimes, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
@@ -16,6 +16,8 @@ unsafe extern "C" {
     fn scarlet_libc_positioned_test(directory: *const std::ffi::c_char) -> i32;
     fn scarlet_libc_path_test(directory: *const std::ffi::c_char, ext2: i32) -> i32;
     fn scarlet_libc_runtime_test() -> i32;
+    fn scarlet_libc_threading_test() -> i32;
+    fn scarlet_libc_pthread_sync_test() -> i32;
     fn scarlet_libc_assert_failure_test() -> i32;
     fn scarlet_libc_abort_test() -> i32;
 }
@@ -128,6 +130,48 @@ fn check(root: &Path, ext2: bool) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(line, 0, "C path check failed at path.c:{line}");
     let line = unsafe { scarlet_libc_runtime_test() };
     assert_eq!(line, 0, "C runtime check failed at runtime.c:{line}");
+    let line = unsafe { scarlet_libc_threading_test() };
+    assert_eq!(line, 0, "C threading check failed at threading.c:{line}");
+    let line = unsafe { scarlet_libc_pthread_sync_test() };
+    assert_eq!(
+        line, 0,
+        "C pthread synchronization check failed at pthread_sync.c:{line}"
+    );
+    println!("NATIVE_RUSTC LIBC_PTHREAD PASS threads + once + keys + mutexes + conditions");
+    // Large holes must not require a file-sized allocation. Shrink/regrowth
+    // must zero discarded disk bytes while preserving the open cursor.
+    let sparse_path = root.join("sparse-truncate");
+    let mut sparse = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&sparse_path)?;
+    const LARGE: u64 = 32 * 1024 * 1024 + 123;
+    sparse.write_all(b"A")?;
+    sparse.set_len(LARGE)?;
+    assert_eq!(sparse.stream_position()?, 1);
+    sparse.seek(SeekFrom::End(-9))?;
+    sparse.write_all(b"discarded")?;
+    sparse.sync_all()?;
+    sparse.set_len(1)?;
+    assert_eq!(sparse.stream_position()?, LARGE);
+    sparse.set_len(LARGE)?;
+    sparse.sync_all()?;
+    drop(sparse);
+    let mut sparse = File::open(&sparse_path)?;
+    assert_eq!(sparse.metadata()?.len(), LARGE);
+    let mut first = [0; 1];
+    sparse.read_exact(&mut first)?;
+    assert_eq!(first, *b"A");
+    for offset in [4093, 16 * 1024 * 1024, LARGE - 9] {
+        sparse.seek(SeekFrom::Start(offset))?;
+        let mut zeros = [0xa5; 9];
+        sparse.read_exact(&mut zeros)?;
+        assert_eq!(zeros, [0; 9]);
+    }
+    drop(sparse);
+    fs::remove_file(sparse_path)?;
+    println!("NATIVE_RUSTC SPARSE_TRUNCATE PASS 32 MiB + shrink/regrow + zero holes + cursor");
     println!(
         "NATIVE_RUSTC LIBC_DATABASE_APIS PASS algorithms + positioned I/O + locks + paths + runtime"
     );
@@ -367,6 +411,11 @@ pub fn run(output: &Path) -> Result<(), String> {
         assert_eq!(unmounted, 0);
         let marker = File::create(output.join("NATIVE_FS_PASS"))?;
         (&marker).write_all(b"C ABI + Rust std: canonical paths, errno, allocation, timestamps, fsync; ext2 + tmpfs\n")?;
+        marker.sync_all()?;
+        let marker = File::create(output.join("LIBC_PTHREAD_PASS"))?;
+        (&marker).write_all(
+            b"C pthread lifecycle, once, TSD, mutex and condition fixtures passed twice\n",
+        )?;
         marker.sync_all()?;
         Ok(())
     })();

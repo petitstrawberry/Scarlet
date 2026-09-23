@@ -1,0 +1,1 @@
+SQLite create/verify/crash/recover passed on ext2 and tmpfs; crash exit 134, other exits 53

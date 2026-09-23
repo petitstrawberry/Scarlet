@@ -112,6 +112,8 @@ class SQLiteEvidenceTests(unittest.TestCase):
             (self.output / f"{phase}.status").write_text(f"exit=Some({expected_exit}) elapsed_ms=5\n")
             (self.output / f"{phase}.stdout").write_bytes(marker + b"\n")
         for storage in ("ext2", "tmpfs"):
+            with (self.output / f"sqlite-{storage}-create.stdout").open("ab") as stdout:
+                stdout.write(RUN_QEMU.SQLITE_PTHREAD_HELLO + b"\n")
             (self.output / f"sqlite-{storage}-crash.journal").write_bytes(
                 RUN_QEMU.SQLITE_JOURNAL_MAGIC + bytes(1024))
         self.database = self.output / "sqlite/sqlite-roundtrip.db"
@@ -139,6 +141,7 @@ class SQLiteEvidenceTests(unittest.TestCase):
         self.assertEqual(result["blob_bytes"], 131113)
         self.assertTrue(result["read_only"])
         self.assertTrue(result["process_exit_recovery_verified"])
+        self.assertTrue(result["pthread_verified"])
         self.assertEqual(set(result["hot_journal_snapshots"]), {"ext2", "tmpfs"})
         self.assertEqual(self.database.read_bytes(), before)
         self.assertEqual(list(self.database.parent.iterdir()), [self.database])
@@ -158,6 +161,17 @@ class SQLiteEvidenceTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 RUN_QEMU.validate_sqlite_evidence(self.output)
             path.write_text(f"exit=Some({expected_exit}) elapsed_ms=5\n")
+
+    def test_both_filesystems_require_exact_pthread_acceptance(self):
+        for storage in ("ext2", "tmpfs"):
+            path = self.output / f"sqlite-{storage}-create.stdout"
+            original = path.read_bytes()
+            for marker in (b"", b"prefix" + RUN_QEMU.SQLITE_PTHREAD_HELLO,
+                           RUN_QEMU.SQLITE_PTHREAD_HELLO + b"suffix"):
+                path.write_bytes(RUN_QEMU.SQLITE_HELLO + b"\n" + marker + b"\n")
+                with self.assertRaisesRegex(ValueError, "pthread success marker"):
+                    RUN_QEMU.validate_sqlite_evidence(self.output)
+            path.write_bytes(original)
 
     def test_every_process_requires_an_exact_stdout_marker(self):
         for phase, (_, marker) in RUN_QEMU.SQLITE_PHASES.items():

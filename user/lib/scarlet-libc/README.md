@@ -4,7 +4,8 @@
 AArch64 and RV64 targets. The static C ABI now includes ordinary and aligned
 allocation, thread-local `errno`, byte strings, integer conversion, descriptor
 I/O, unbuffered streams and integer/string formatted output, plus pathname
-operations, clocks, entropy, sorting/searching, file timestamps and sync.
+operations, clocks, entropy, sorting/searching, file timestamps and sync,
+plus process-private pthread lifecycle and synchronization.
 The [support matrix and acceptance gates](STATUS.md) distinguish implemented
 behavior from the work needed for a complete C runtime.
 
@@ -90,10 +91,11 @@ Creation modes do not establish Unix ownership, umask or permission enforcement.
 
 `pread`/`pwrite` perform positioned I/O without changing the shared offset;
 `pwrite` ignores append. `ftruncate` preserves the offset, including through
-`dup`, and zeroes bytes exposed by reextension. Ext2 currently limits this
-operation to 16 MiB because it reconstructs file content; this is not a general
-file-size limit. Shrinking currently retains disk/cache allocations, and device
-I/O failure does not have complete rollback guarantees. Nonblocking `flock` implements advisory shared/exclusive locks
+`dup`, and zeroes bytes exposed by reextension. Ext2 truncation now preserves
+sparse holes with bounded writeback buffers and supports its unsigned 32-bit
+file-size range. Growth does not allocate the gap. Shrinking retains allocated
+blocks until final inode deletion; `i_blocks` counts those data and indirect
+blocks. Device I/O failure does not have complete rollback guarantees. Nonblocking `flock` implements advisory shared/exclusive locks
 on regular ext2/tmpfs files. Lock ownership follows the open description, so
 closing one duplicate does not release the remaining duplicate's lock. Blocking
 acquisition and other filesystems return `ENOTSUP`; POSIX record locks are absent.
@@ -139,6 +141,30 @@ partial output, and are not proof that entropy hardware is available.
 assertions print a diagnostic without stdio buffering and terminate through
 `abort`. Native `abort` exits the whole process with status 134; it does not
 deliver `SIGABRT`, run destructors, or establish POSIX signal semantics.
+
+## Threads and synchronization
+
+`pthread.h` exposes thread creation, join/detach, identity, stack/detach
+attributes, once initialization, thread-specific keys and process-private
+mutexes/condition variables. Threads and blocking use the matching Rust std
+runtime. Pthread functions return error numbers directly and preserve errno.
+C thread handles use process-unique Rust thread identities; a completed join
+consumes the handle. `pthread_once` publishes initialization to all callers.
+Thread-specific destructors may reinstall values, with at most four rounds;
+key deletion suppresses destruction and does not reuse a stale key identity.
+
+Mutexes support normal, error-checking and recursive types. Static initializers
+are all-zero. Condition waits release the mutex and reacquire it before return,
+including timeout; absolute deadlines can use realtime or monotonic clocks.
+Process-shared attributes return `ENOTSUP`. The public objects contain registry
+identities, and internal ownership keeps blocked operations alive. There is no
+`pthread_exit`, cancellation/cleanup API, robust mutex, priority protocol,
+rwlock, barrier, scheduling or atfork support yet.
+
+Native stack attributes require a 4096-byte multiple of at least 64 KiB; the
+default is 2 MiB. Registry allocation is fallible, but Rust std thread creation
+still contains infallible allocations, so complete physical-OOM recovery is
+not established. This subset is not full POSIX threads conformance.
 
 ## Build and checks
 

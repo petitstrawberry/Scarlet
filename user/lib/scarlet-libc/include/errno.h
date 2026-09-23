@@ -8,7 +8,9 @@ int *__errno_location(void);
 }
 #endif
 #define errno (*__errno_location())
+#define EPERM 1
 #define ENOENT 2
+#define ESRCH 3
 #define EINTR 4
 #define EIO 5
 #define EBADF 9
@@ -29,10 +31,12 @@ int *__errno_location(void);
 #define EROFS 30
 #define EPIPE 32
 #define ERANGE 34
+#define EDEADLK 35
 #define ENAMETOOLONG 36
 #define ENOTEMPTY 39
 #define ELOOP 40
 #define EOVERFLOW 75
 #define ENOTSUP 95
 #define EOPNOTSUPP ENOTSUP
+#define ETIMEDOUT 110
 #endif

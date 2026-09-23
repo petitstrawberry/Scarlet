@@ -27,7 +27,7 @@ SOURCE_SHA3_256 = "628a44cfe82c66aed1ccbbe85a562d2e33ebe64b3288981ed762856122279
 SOURCE_ID = "2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc"
 SOURCES = ("sqlite3.c",)
 CONFIGURATION = (
-    "NDEBUG", "SQLITE_OS_OTHER=1", "SQLITE_THREADSAFE=0",
+    "NDEBUG", "SQLITE_OS_OTHER=1", "SQLITE_THREADSAFE=1",
     "SQLITE_OMIT_LOAD_EXTENSION", "SQLITE_OMIT_LOCALTIME", "SQLITE_TEMP_STORE=3",
     "SQLITE_OMIT_WAL", "SQLITE_MAX_MMAP_SIZE=0",
 )
@@ -194,6 +194,7 @@ def main():
                          "archive_sha256": SOURCE_SHA256, "archive_sha3_256": SOURCE_SHA3_256,
                          "source_id": SOURCE_ID, "source_modified": False},
             "configuration": list(CONFIGURATION),
+            "mutex_backend": "SQLITE_CONFIG_MUTEX with real scarlet-libc pthread mutexes; configured before initialization",
             "vfs": {"name": "scarlet-native", "file_methods_version": 1,
                     "concurrency": "exclusive nonblocking inode flock from SHARED until NONE",
                     "wal": False, "mmap": False, "disk_temporary_files": False},
@@ -202,6 +203,7 @@ def main():
                            "expected_stdout_line": "SCARLET_LIBC_SQLITE_CRASH_READY",
                            "requires_followup": "verify in a fresh process"},
             "expected_stdout_line": "SCARLET_LIBC_SQLITE_OK",
+            "create_expected_thread_stdout_line": "SCARLET_LIBC_SQLITE_PTHREAD_OK",
             "guest_execution": "pending",
             "executed_on_scarlet": False,
             "binary": {"path": str(binary), "sha256": sha256(binary)},

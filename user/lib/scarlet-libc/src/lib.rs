@@ -6,6 +6,9 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![feature(c_variadic)]
+#![feature(thread_id_value)]
+#![feature(current_thread_id)]
+#![feature(allocator_api)]
 // These exports implement libc. LLVM must not infer builtin allocation
 // contracts for their Rust callers (e.g. fold overflowing calloc to non-null).
 #![no_builtins]
@@ -29,10 +32,12 @@ mod errno;
 #[cfg(any(test, target_os = "scarlet"))]
 mod formatting;
 pub mod path;
+pub mod pthread_sync;
 pub mod runtime;
 #[cfg(any(test, target_os = "scarlet"))]
 pub mod stdio;
 pub mod strings;
+pub mod threading;
 pub use errno::__errno_location;
 
 #[cfg(all(target_os = "scarlet", not(target_pointer_width = "64")))]

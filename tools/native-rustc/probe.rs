@@ -12,6 +12,7 @@ const HELLO_EXIT: i32 = 37;
 const MACRO_HELLO: &str = "SCARLET_NATIVE_PROC_MACRO_OK=42\n";
 const ZLIB_HELLO: &str = "SCARLET_LIBC_ZLIB_OK";
 const SQLITE_HELLO: &str = "SCARLET_LIBC_SQLITE_OK";
+const SQLITE_PTHREAD_HELLO: &str = "SCARLET_LIBC_SQLITE_PTHREAD_OK";
 const SQLITE_CRASH_READY: &str = "SCARLET_LIBC_SQLITE_CRASH_READY";
 const SQLITE_JOURNAL_MAGIC: &[u8] = &[0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
 const CONFIG: &str = "/etc/native-rustc-probe.args";
@@ -571,6 +572,13 @@ fn run() -> Result<(), String> {
                     // Preserve evidence before the next process rolls it back.
                     fs::write(output.join(format!("{name}.journal")), journal)
                         .map_err(|e| format!("{name}: preserve hot journal: {e}"))?;
+                }
+                if stage == "create"
+                    && !String::from_utf8_lossy(&stdout)
+                        .lines()
+                        .any(|line| line == SQLITE_PTHREAD_HELLO)
+                {
+                    return Err(format!("{name}: missing SQLite pthread acceptance marker"));
                 }
             }
         }

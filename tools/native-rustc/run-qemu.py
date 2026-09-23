@@ -31,6 +31,7 @@ HELLO = b"SCARLET_NATIVE_RUSTC_HELLO_OK\n"
 MACRO_HELLO = b"SCARLET_NATIVE_PROC_MACRO_OK=42\n"
 ZLIB_HELLO = b"SCARLET_LIBC_ZLIB_OK"
 SQLITE_HELLO = b"SCARLET_LIBC_SQLITE_OK"
+SQLITE_PTHREAD_HELLO = b"SCARLET_LIBC_SQLITE_PTHREAD_OK"
 SQLITE_CRASH_READY = b"SCARLET_LIBC_SQLITE_CRASH_READY"
 SQLITE_JOURNAL_MAGIC = bytes.fromhex("d9d505f920a163d7")
 SQLITE_PHASES = {
@@ -187,13 +188,15 @@ def validate_sqlite_evidence(extracted):
             raise ValueError(f"{phase} stdout is missing the success marker")
     journals = {}
     for storage in ("ext2", "tmpfs"):
+        if SQLITE_PTHREAD_HELLO not in (extracted / f"sqlite-{storage}-create.stdout").read_bytes().splitlines():
+            raise ValueError(f"SQLite {storage} evidence is missing the pthread success marker")
         journal = extracted / f"sqlite-{storage}-crash.journal"
         data = journal.read_bytes()
         if len(data) <= 512 or not data.startswith(SQLITE_JOURNAL_MAGIC):
             raise ValueError(f"SQLite {storage} crash evidence is missing a valid hot rollback journal")
         journals[storage] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
     report = validate_sqlite_database(extracted / "sqlite/sqlite-roundtrip.db")
-    report.update(process_exit_recovery_verified=True, hot_journal_snapshots=journals)
+    report.update(process_exit_recovery_verified=True, pthread_verified=True, hot_journal_snapshots=journals)
     return report
 
 
@@ -213,6 +216,8 @@ def collect_evidence(image, output, guest_output, mode, arch, proc_macro=False, 
         (output / "sqlite-host-validation.json").write_text(json.dumps(validation, indent=2) + "\n")
     if native_fs and not (extracted / "NATIVE_FS_PASS").is_file():
         raise ValueError("native filesystem evidence is missing")
+    if native_fs and not (extracted / "LIBC_PTHREAD_PASS").is_file():
+        raise ValueError("native pthread evidence is missing")
     if mode == "full":
         if not (extracted / "PASS").is_file():
             raise ValueError("full marker appeared without persisted guest PASS evidence")

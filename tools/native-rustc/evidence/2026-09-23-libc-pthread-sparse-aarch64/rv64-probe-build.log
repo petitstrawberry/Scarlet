@@ -1,0 +1,22 @@
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+   Compiling native-rustc-probe v0.1.0 (/Users/petitstrawberry/Development/Rust/Scarlet/tools/native-rustc)
+SCARLET_BACKEND get enter
+SCARLET_BACKEND load init enter
+SCARLET_BACKEND factory enter
+SCARLET_BACKEND factory exit
+    Finished `release` profile [optimized] target(s) in 1.41s

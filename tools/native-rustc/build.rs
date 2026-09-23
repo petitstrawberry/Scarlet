@@ -17,6 +17,8 @@ fn main() {
         "positioned",
         "path",
         "runtime",
+        "threading",
+        "pthread_sync",
     ];
     for fixture in fixtures {
         println!("cargo:rerun-if-changed=../../user/lib/scarlet-libc/tests/{fixture}.c");

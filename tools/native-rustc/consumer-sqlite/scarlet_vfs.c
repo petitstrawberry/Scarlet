@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,89 @@
 
 #define SCARLET_PATH_MAX 1024
 
+/* SQLITE_OS_OTHER selects SQLite's default no-op mutex backend even when
+ * SQLITE_MUTEX_PTHREADS is predefined. Install the documented custom mutex
+ * interface before initialization so the upstream source stays unmodified.
+ * These mutexes also protect SQLite's allocator, PRNG, VFS registry and each
+ * serialized connection, not merely the fixture's worker start gate. */
+struct sqlite3_mutex {
+    pthread_mutex_t native;
+    int dynamic;
+};
+
+#define SCARLET_STATIC_MUTEX { PTHREAD_MUTEX_INITIALIZER, 0 }
+static sqlite3_mutex scarlet_static_mutexes[] = {
+    SCARLET_STATIC_MUTEX, SCARLET_STATIC_MUTEX, SCARLET_STATIC_MUTEX,
+    SCARLET_STATIC_MUTEX, SCARLET_STATIC_MUTEX, SCARLET_STATIC_MUTEX,
+    SCARLET_STATIC_MUTEX, SCARLET_STATIC_MUTEX, SCARLET_STATIC_MUTEX,
+    SCARLET_STATIC_MUTEX, SCARLET_STATIC_MUTEX, SCARLET_STATIC_MUTEX,
+};
+#undef SCARLET_STATIC_MUTEX
+
+static int scarlet_mutex_init(void) { return SQLITE_OK; }
+static int scarlet_mutex_end(void) { return SQLITE_OK; }
+
+static sqlite3_mutex *scarlet_mutex_alloc(int kind) {
+    sqlite3_mutex *mutex;
+    pthread_mutexattr_t attribute;
+    int result;
+    if (kind >= SQLITE_MUTEX_STATIC_MAIN && kind <= SQLITE_MUTEX_STATIC_VFS3)
+        return &scarlet_static_mutexes[kind - SQLITE_MUTEX_STATIC_MAIN];
+    if (kind != SQLITE_MUTEX_FAST && kind != SQLITE_MUTEX_RECURSIVE) return NULL;
+    mutex = malloc(sizeof(*mutex));
+    if (mutex == NULL) return NULL;
+    mutex->dynamic = 1;
+    if (kind == SQLITE_MUTEX_RECURSIVE) {
+        if (pthread_mutexattr_init(&attribute) != 0) {
+            free(mutex);
+            return NULL;
+        }
+        result = pthread_mutexattr_settype(&attribute, PTHREAD_MUTEX_RECURSIVE);
+        if (result == 0) result = pthread_mutex_init(&mutex->native, &attribute);
+        if (pthread_mutexattr_destroy(&attribute) != 0) abort();
+    } else {
+        result = pthread_mutex_init(&mutex->native, NULL);
+    }
+    if (result != 0) {
+        free(mutex);
+        return NULL;
+    }
+    return mutex;
+}
+
+static void scarlet_mutex_free(sqlite3_mutex *mutex) {
+    if (!mutex->dynamic || pthread_mutex_destroy(&mutex->native) != 0) abort();
+    free(mutex);
+}
+
+static void scarlet_mutex_enter(sqlite3_mutex *mutex) {
+    /* SQLite's void mutex methods cannot propagate a pthread error. A broken
+     * mutex must terminate rather than silently enter an unprotected region. */
+    if (pthread_mutex_lock(&mutex->native) != 0) abort();
+}
+
+static int scarlet_mutex_try(sqlite3_mutex *mutex) {
+    int result = pthread_mutex_trylock(&mutex->native);
+    if (result == 0) return SQLITE_OK;
+    if (result == EBUSY) return SQLITE_BUSY;
+    abort();
+}
+
+static void scarlet_mutex_leave(sqlite3_mutex *mutex) {
+    if (pthread_mutex_unlock(&mutex->native) != 0) abort();
+}
+
+int scarlet_sqlite_configure(void) {
+    static const sqlite3_mutex_methods methods = {
+        scarlet_mutex_init, scarlet_mutex_end, scarlet_mutex_alloc,
+        scarlet_mutex_free, scarlet_mutex_enter, scarlet_mutex_try,
+        scarlet_mutex_leave, NULL, NULL,
+    };
+    int result = sqlite3_config(SQLITE_CONFIG_SERIALIZED);
+    if (result == SQLITE_OK) result = sqlite3_config(SQLITE_CONFIG_MUTEX, &methods);
+    return result;
+}
+
 typedef struct ScarletFile {
     sqlite3_file base;
     int fd;
@@ -24,6 +108,13 @@ typedef struct ScarletFile {
     int sync_parent;
     const char *name;
 } ScarletFile;
+
+/* File state belongs to one SQLite handle and is protected by that
+ * connection's serialized SQLite mutex. Separate handles share no mutable
+ * user-space state; inode flock arbitrates them in the kernel. VFS callbacks
+ * for time/randomness use caller-owned buffers and stack locals, and errno
+ * comes from libc's per-thread storage. Initialization and shutdown happen
+ * outside worker lifetimes. */
 
 static int busy_errno(void) {
     return errno == EAGAIN || errno == EWOULDBLOCK;

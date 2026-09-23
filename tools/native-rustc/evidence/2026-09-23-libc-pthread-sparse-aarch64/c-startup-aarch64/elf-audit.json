@@ -1,0 +1,24 @@
+[
+  {
+    "path": "/private/tmp/scarlet-pthread-c-startup-aarch64/c-startup-probe",
+    "sha256": "9b4a4a9dfd9d3de091713beac25e5873061e827966f8bd52ac476f6cd75f912c",
+    "bytes": 102008,
+    "elf_type": "EXEC",
+    "machine": "aarch64",
+    "osabi": 83,
+    "entry": 2114148,
+    "interpreter": null,
+    "needed": [],
+    "rpath": null,
+    "runpath": null,
+    "soname": null,
+    "tls": [],
+    "relocations": {},
+    "undefined_relocated_symbols": [],
+    "hash_tables": [],
+    "textrel": false,
+    "relr": false,
+    "symbol_versioning": false,
+    "init_fini": []
+  }
+]

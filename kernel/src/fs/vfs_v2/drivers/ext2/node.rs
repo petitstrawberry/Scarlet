@@ -31,10 +31,6 @@ use super::{
 };
 use crate::fs::vfs_v2::core::{FileSystemOperations, VfsNode};
 
-/// Temporary reconstruction bound for the current ext2 truncate implementation.
-/// This does not limit ordinary file writes, which use bounded page writeback.
-pub const MAX_TRUNCATE_SIZE: u64 = 16 * 1024 * 1024;
-
 /// ext2 VFS Node
 ///
 /// Represents a file or directory in the ext2 filesystem. This node
@@ -1084,17 +1080,12 @@ impl FileObject for Ext2FileObject {
     }
 
     fn truncate(&self, size: u64) -> Result<(), StreamError> {
-        // This path still reconstructs the retained contents before committing
-        // them through write_file_content. Bound that temporary allocation;
-        // larger files can still be shortened below this limit (including 0).
-        // This is an implementation limit, not ext2's on-disk maximum.
-        if size > MAX_TRUNCATE_SIZE {
-            return Err(StreamError::from(FileSystemError::new(
+        let new_size = u32::try_from(size).map_err(|_| {
+            StreamError::from(FileSystemError::new(
                 FileSystemErrorKind::ValueOverflow,
-                "ext2 truncate reconstruction exceeds 16 MiB",
-            )));
-        }
-        let new_size = size as usize;
+                "ext2 file exceeds the supported 32-bit inode size",
+            ))
+        })? as usize;
         let fs = self
             .filesystem
             .read()
@@ -1116,47 +1107,28 @@ impl FileObject for Ext2FileObject {
             return Ok(());
         }
 
-        let mut buffer = Vec::new();
-        buffer.try_reserve_exact(new_size).map_err(|_| {
-            StreamError::from(FileSystemError::new(
-                FileSystemErrorKind::NoSpace,
-                "Cannot allocate ext2 truncate reconstruction buffer",
-            ))
-        })?;
-        buffer.resize(new_size, 0);
-        let copy_len = core::cmp::min(cur_size, new_size);
-        if copy_len > 0 {
-            let cache_id = self.cache_id();
-            let page_count = (copy_len + PAGE_SIZE - 1) / PAGE_SIZE;
-            for page_index in 0..(page_count as u64) {
-                let start = page_index as usize * PAGE_SIZE;
-                let len = core::cmp::min(PAGE_SIZE, copy_len.saturating_sub(start));
-                if len == 0 {
-                    break;
-                }
-                let pinned = PageCacheManager::global()
-                    .pin_or_load(cache_id, page_index, |paddr| {
-                        ext2_fs
-                            .read_page_content(self.inode_number, page_index, paddr)
-                            .map_err(|_| "io error")
-                    })
-                    .map_err(|_| StreamError::IoError)?;
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        phys_to_virt(pinned.paddr()) as *const u8,
-                        buffer.as_mut_ptr().add(start),
-                        len,
-                    );
-                }
-            }
-        }
-
+        // Preserve only dirty retained pages, in bounded pin batches. Clean
+        // pages already have disk backing; holes need neither pages nor blocks.
+        // Read pins remain live across truncation. Concurrent mmap stores still
+        // require mapping-level synchronization, as with ordinary writeback.
+        let retained = cur_size.min(new_size);
+        PageCacheManager::global()
+            .flush_dirty_range(
+                self.cache_id(),
+                retained.div_ceil(PAGE_SIZE) as u64,
+                |pages| {
+                    ext2_fs
+                        .write_cached_pages_inner(self.inode_number, retained, pages, false)
+                        .map_err(|_| "ext2 truncate writeback failed")
+                },
+            )
+            .map_err(|_| StreamError::IoError)?;
         ext2_fs
-            .write_file_content(self.inode_number, &buffer)
+            .truncate_inode_locked(self.inode_number, cur_size, new_size)
             .map_err(StreamError::from)?;
         // Readers and shared mappings can still hold these physical pages.
         // Keep them alive, but discard cached bytes beyond the successful EOF.
-        PageCacheManager::global().zero_cached_tail(self.cache_id(), new_size);
+        PageCacheManager::global().zero_cached_tail(self.cache_id(), retained);
         *self.size_override.lock() = None;
         *self.dirty.lock() = false;
         PageCacheManager::global().record_object_size(self.cache_id(), new_size);

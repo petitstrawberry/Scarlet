@@ -17,6 +17,7 @@
 #include <sys/time.h>
 #include <math.h>
 #include <assert.h>
+#include <pthread.h>
 
 /* Reverse the order and repeat every header to exercise include guards. */
 #include <errno.h>
@@ -36,6 +37,7 @@
 #include <sys/time.h>
 #include <math.h>
 #include <assert.h>
+#include <pthread.h>
 
 #ifdef __cplusplus
 #define HEADER_ASSERT(condition) static_assert(condition, #condition)
@@ -71,6 +73,14 @@ HEADER_ASSERT(sizeof(struct timespec) == 16);
 HEADER_ASSERT(sizeof(struct timeval) == 16);
 HEADER_ASSERT(HEADER_ALIGNOF(struct timespec) == 8);
 HEADER_ASSERT(offsetof(struct timespec, tv_nsec) == 8);
+HEADER_ASSERT(sizeof(pthread_t) == 8);
+HEADER_ASSERT(sizeof(pthread_key_t) == 4);
+HEADER_ASSERT(sizeof(pthread_attr_t) == 16);
+HEADER_ASSERT(sizeof(pthread_once_t) == 8);
+HEADER_ASSERT(sizeof(pthread_mutex_t) == 8);
+HEADER_ASSERT(sizeof(pthread_cond_t) == 8);
+HEADER_ASSERT(HEADER_ALIGNOF(pthread_mutex_t) == 8);
+HEADER_ASSERT(HEADER_ALIGNOF(pthread_cond_t) == 8);
 HEADER_ASSERT(HEADER_ALIGNOF(max_align_t) <= 16);
 HEADER_ASSERT((time_t)-1 < 0 && (off_t)-1 < 0 && (ssize_t)-1 < 0);
 HEADER_ASSERT(PATH_MAX == 1024);
