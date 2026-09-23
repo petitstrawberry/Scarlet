@@ -81,8 +81,7 @@ replacing an initialized native TLS mapping is outside this contract.
 
 ## Bounded validation
 
-The [AArch64 errno evidence](../../tools/native-rustc/evidence/2026-09-22-libc-errno-aarch64.json)
-tracks the tested artifacts and bounded guest checks: constructor access,
+The bounded AArch64 guest checks covered constructor access,
 new-thread isolation, destructor access, a controlled allocation-backend null
 result, and an ordinary C `main` linked with Scarlet CRT and libc that exits
 with status 43. The recorded AArch64/HVF run also passed full native

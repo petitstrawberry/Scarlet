@@ -140,11 +140,6 @@ cargo make doc-kernel
 cargo make doc-userlib
 ```
 
-## Native compiler experiments
-
-See [native rustc bring-up](native-rustc.md) for the isolated dynamic-loader
-work, reproducible target probes, compiler patches, and remaining host-port gaps.
-
 ## See also
 
 - [Project tooling](../build-system/README.md)

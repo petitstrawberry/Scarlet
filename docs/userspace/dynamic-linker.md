@@ -63,9 +63,7 @@ relocations and RELR are outside this initial scope and must not be assumed to
 work. This is insufficient by itself to run an unmodified native rustc.
 
 See [the executable smoke test](../../tools/loader-smoke/README.md) for building
-fixtures and booting an isolated guest, and
-[native rustc bring-up](../development/native-rustc.md) for the compiler target
-and dependency changes still required. Test success only establishes the
+fixtures and booting an isolated guest. Test success only establishes the
 behaviors exercised by the fixtures, not arbitrary ELF compatibility.
 
 ## Verified guest execution, 2026-09-21
@@ -77,8 +75,5 @@ GNU-only hashes in the C fixtures. The Rust fixture exercises data/GOT
 relocations; it uses a C entry point and does not establish Rust `dylib` ABI
 compatibility or compiler execution.
 
-The [validation record](../../tools/loader-smoke/evidence/2026-09-21.json)
-contains the QEMU commands, success markers, artifact hashes, and successful
-AArch64 (1,266) / RISC-V64 (1,293) kernel regression counts. Reproduction commands
-are in the smoke-test README linked above. Native rustc remains unbuilt and
-unexecuted.
+Reproduction commands are in the smoke-test README linked above. This loader
+test does not establish native rustc behavior.

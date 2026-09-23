@@ -1,8 +1,0 @@
-[Test Runner] test name=scarlet::fs::vfs_v2::drivers::ext2::tests::test_ext2_sync_through_second_handle_persists_shared_writes_and_times
-[Test Runner] test name=scarlet::fs::vfs_v2::drivers::ext2::tests::test_ext2_write_publication_excludes_second_handle_writeback
-[Test Runner] test name=scarlet::fs::vfs_v2::tests::test_rename_mount_ancestor_preserves_namespace_path
-[Test Runner] test name=scarlet::fs::vfs_v2::tests::test_rename_rejects_paths_that_would_corrupt_retained_entries
-[Test Runner] test name=scarlet::fs::vfs_v2::tests::test_rename_relocates_cwd_and_open_directory_entries
-[Test Runner] test name=scarlet::mem::page_cache::tests::access_time_only_update_does_not_invent_an_mtime
-[Test Runner] test name=scarlet::mem::page_cache::tests::explicit_mtime_keeps_change_time_and_live_size_separate
-[Test Runner] All 1273 tests passed

@@ -185,39 +185,18 @@ It uses only Scarlet and Clang builtin headers, with no host libc fallback.
 shell sets it to unwrapped Clang so host include and linker flags are not
 injected into cross-target checks.
 
-With the matching Scarlet cross compiler/sysroot selected as `rustc`, build:
+With the matching Scarlet cross compiler/sysroot selected as `rustc`, build the
+library for the desired target:
 
 ```sh
 cargo build --manifest-path user/lib/scarlet-libc/Cargo.toml \
   --release --target aarch64-unknown-scarlet
-cargo build --manifest-path tools/native-rustc/Cargo.toml \
-  --release --target aarch64-unknown-scarlet --features native-fs
 ```
 
-RV64 uses `riscv64gc-unknown-scarlet`. The probe needs Clang with that target's
-code generator and llvm-ar; select them with `SCARLET_PROBE_CC` and
-`SCARLET_PROBE_AR`. Building the archive alone does not establish C startup or
-guest compatibility.
-
-The probe links the actual [allocation/filesystem](tests/native.c),
-[strings/conversion](tests/strings.c), [descriptor](tests/descriptor.c) and
-[stdio](tests/stdio.c), [algorithms](tests/algorithms.c),
-[positioned I/O and locks](tests/positioned.c), [paths](tests/path.c), and
-[clocks/entropy/assertions](tests/runtime.c) C fixtures and runs them alongside
-[Rust filesystem checks](../../../tools/native-rustc/native_fs.rs). Pass the
-fresh probe to `tools/native-rustc/run-qemu.py` with `--native-fs --proc-macro`.
-Use `--accel hvf` for AArch64 on Apple Silicon. The
-[native rustc guide](../../../docs/development/native-rustc.md#native-filesystem-and-initial-libc-2026-09-22)
-describes the required kernel, staging tree, bootstrap, and linker inputs.
-
-The probe's `native-fs` build also includes
-[deterministic allocator failure checks](../../../tools/native-rustc/allocation_failure.rs).
-They deny heap allocation in a constructor, on a fresh thread and during its
-TLS destructor, checking errno access, overflow handling, actual null backend
-results and `last_os_error`. This tests a failing allocator result, not physical
-memory exhaustion or signal delivery.
-
-To build the separate plain C startup fixture with a freshly built archive:
+Use `riscv64gc-unknown-scarlet` for RV64. A successful archive build does not
+establish C startup or guest compatibility. The [C startup builder](tests/build_c_startup.py)
+links a plain C constructor and `main` with the matching CRT and libc, then
+checks the ELF and archive members:
 
 ```sh
 python3 user/lib/scarlet-libc/tests/build_c_startup.py \
@@ -227,138 +206,9 @@ python3 user/lib/scarlet-libc/tests/build_c_startup.py \
   --output /tmp/scarlet-c-startup-aarch64
 ```
 
-Choose a new output directory and adjust the archive path if using
-`CARGO_TARGET_DIR`. Use `--clang` and `--linker` to select Clang and `ld.lld`
-explicitly. The builder compiles [c_main.c](tests/c_main.c), links it with
-`scarlet-crt0.o` and the archive, and audits archive members, symbols, entry
-point, constructor membership and static ELF properties. It records input
-hashes and commands; a successful build alone is not a guest pass.
-
-Add the following options to the matching `tools/native-rustc/run-qemu.py`
-invocation described in the native rustc guide:
-
-```sh
---storage ext2 --native-fs --proc-macro \
---c-startup-probe /tmp/scarlet-c-startup-aarch64/c-startup-probe
-```
-
-The harness executes the C program and requires exit status 43. It validates
-both persisted `C_STARTUP_PASS` and `c-startup.status` before setting
-`c_startup_verified`. The existing kernel, staging, bootstrap, probe, native
-linker and fresh output arguments are still required. For RV64, build with
-`riscv64gc-unknown-scarlet` and run the harness with `--arch riscv64`.
-
-## Upstream zlib consumer
-
-The [zlib builder](../../../tools/native-rustc/consumer-zlib/README.md) downloads
-or reuses the SHA-256-pinned upstream zlib 1.3.2 release, compiles all 15
-unmodified core/gzip C sources, and links a plain C consumer with the matching
-CRT and `libscarlet_c.a`. Both AArch64 and RV64 have static cross-build and ELF
-audit results. The consumer covers compression, incremental inflate/deflate,
-gzip file I/O, integer/string `gzprintf`, descriptor ownership and corruption
-errors. It uses Scarlet headers and Clang builtin headers, without a host libc.
-
-```sh
-python3 tools/native-rustc/consumer-zlib/build.py \
-  --target aarch64-unknown-scarlet \
-  --sysroot "$(rustc --print sysroot)" \
-  --libc user/lib/scarlet-libc/target/aarch64-unknown-scarlet/release/libscarlet_c.a \
-  --output /tmp/scarlet-zlib-aarch64
-```
-
-Use a fresh output directory and select `--clang`, `--ar` and `--linker` when
-the desired tools are not on PATH. `--source-archive` reuses a local release
-archive only when its hash matches. Add these options to the complete matching
-QEMU harness invocation:
-
-```sh
---storage ext2 --native-fs --proc-macro \
---c-startup-probe /tmp/scarlet-c-startup-aarch64/c-startup-probe \
---zlib-probe /tmp/scarlet-zlib-aarch64/zlib-probe
-```
-
-The harness requires persisted `ZLIB_PASS`, exit status 47 and the exact stdout
-line `SCARLET_LIBC_ZLIB_OK` before recording `zlib_verified`. Build success does
-not satisfy this guest check. The
-[AArch64/HVF milestone](../../../tools/native-rustc/evidence/2026-09-22-libc-zlib-aarch64.json)
-passes this gate, all C string/descriptor/stdio fixtures on ext2 and tmpfs,
-the direct-C startup fixture, native std compilation/execution and proc macros.
-The complete release kernel suite also passes all 1293 tests, including 20
-added regressions. RV64 has cross-build and ELF-audit evidence only. The
-published bundle remains unchanged, and this does not establish complete
-zlib/libc conformance or installed SDK acceptance.
-
-## Upstream SQLite consumer
-
-The [SQLite builder](../../../tools/native-rustc/consumer-sqlite/build.py) compiles
-unmodified, hash-pinned SQLite 3.53.4 with the separate
-[Scarlet Native VFS](../../../tools/native-rustc/consumer-sqlite/scarlet_vfs.c),
-then links an ordinary C executable against the matching CRT and libc.
-This uses SQLite's supported `SQLITE_OS_OTHER` port interface. It does not
-establish that SQLite's Unix VFS or Cargo's bundled SQLite dependency works.
-
-```sh
-python3 tools/native-rustc/consumer-sqlite/build.py \
-  --target aarch64-unknown-scarlet \
-  --sysroot "$(rustc --print sysroot)" \
-  --libc user/lib/scarlet-libc/target/aarch64-unknown-scarlet/release/libscarlet_c.a \
-  --output /tmp/scarlet-sqlite-aarch64
-```
-
-The same `--clang`, `--ar`, `--linker`, `--source-archive`, fresh-output and RV64
-rules as the zlib builder apply. Add
-`--sqlite-probe /tmp/scarlet-sqlite-aarch64/sqlite-probe` to the complete matching
-QEMU command above. On each of ext2 and tmpfs, the harness requires four
-separate processes: create, verify, forced transaction exit, and recovery.
-Create/verify/recovery must return 53 with `SCARLET_LIBC_SQLITE_OK`; the
-interrupted transaction must return 134 with its readiness marker. That phase
-verifies a spilled database change and leaves a hot rollback journal; the
-harness snapshots the journal before the recovery process opens the database.
-It checks every exit, marker and journal before setting `sqlite_verified`, then
-extracts the ext2 database after VM exit for independent host SQLite integrity
-and exact-content checks. This tests process-exit recovery, not power loss.
-
-The VFS uses real exclusive nonblocking whole-file locks for every SQLite lock
-level, including logical read locks. This serializes readers; contention must
-return `SQLITE_BUSY`. The selected build uses rollback journals, memory temp
-storage and no pthreads, WAL, mmap, loadable extensions or localtime conversion.
-SQL, bindings, binary/text values, transactions, rollback, reopen, integrity,
-locking, positioned-I/O and hot-journal recovery fixtures are implemented.
-The [AArch64/HVF evidence](../../../tools/native-rustc/evidence/2026-09-22-libc-sqlite-aarch64.json)
-records `FULL_PASS` in 19.327 seconds: all new C fixtures pass on ext2 and tmpfs,
-assertion/abort children return 134, and all eight SQLite processes satisfy their
-exit/marker gates. Both hot journals are saved before recovery. Host SQLite
-then verifies the recovered ext2 database's integrity, foreign keys, all 24 rows
-and the complete 131113-byte BLOB. Plain C startup, zlib, native Rust compilation
-and proc macros also continue to pass.
-
-The complete release kernel suite passes 1328 tests, including 35 added
-regressions. Guest testing caught tmpfs unlink erasing data still owned by an
-open descriptor; final-node ownership now retains cache/quota until release,
-and pinned cache pages retire after unpin. Three kernel regressions cover that
-correction. Host checks pass 47 libc tests, 27 ABI tests, 80 header checks,
-31 harness tests and four probe tests; repository formatting passes. RV64
-libc/probe/SQLite cross-build and ELF audits and RV64/RV32 kernel compilation
-pass; guest acceptance here is AArch64 only. [Saved logs and reports](../../../tools/native-rustc/evidence/2026-09-22-libc-sqlite-aarch64/)
-identify the tested artifacts. Physical OOM, power-loss durability, general
-Cargo/SDK acceptance and published bundle validation remain separate gates.
-
-## Recorded milestones
-
-The recorded [2026-09-22 filesystem run](../../../tools/native-rustc/evidence/2026-09-22-native-fs-aarch64.json)
-passed on AArch64/HVF with ext2 and tmpfs. RV64 has cross-build evidence, not
-filesystem guest execution evidence from that run. Local results validate the
-recorded inputs; they do not update or validate an installed distribution bundle.
-
-The [follow-up quality run](../../../tools/native-rustc/evidence/2026-09-22-libc-quality-aarch64.json)
-also checks allocation fragmentation, optimized overflow/errno behavior across
-threads, renamed directory handles and mount ancestors, and ext2 directory
-growth. It includes the release kernel's complete 1273-test HVF result.
-
-The [errno and C startup milestone](../../../tools/native-rustc/evidence/2026-09-22-libc-errno-aarch64.json)
-passed on AArch64/HVF: constructor/new-thread/destructor errno access under
-allocation denial, null backend allocation failures, the plain C constructor
-and `main` returning 43, native filesystem checks, full native compilation and
-proc macros. RV64 has probe, loader, static libc and C fixture cross-build and
-ELF-audit evidence only; this milestone does not establish RV64 guest execution,
-installed SDK acceptance, signal safety or musl parity.
+Choose a fresh output directory and adjust the archive path if using
+`CARGO_TARGET_DIR`. The output is local build data, not repository source. The
+[Native TLS](../../../docs/abi/native-tls.md),
+[filesystem](../../../docs/abi/native-filesystem.md), and
+[descriptor](../../../docs/abi/native-descriptors.md) documents define the
+runtime contracts that a matching guest image must provide.

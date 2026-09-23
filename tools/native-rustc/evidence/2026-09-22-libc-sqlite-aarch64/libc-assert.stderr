@@ -1,1 +1,0 @@
-Assertion failed: 0 && "scarlet assertion fixture" (/Users/petitstrawberry/Development/Rust/Scarlet/tools/native-rustc/../../user/lib/scarlet-libc/tests/runtime.c:36, scarlet_libc_assert_failure_test)

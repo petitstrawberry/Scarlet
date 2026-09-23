@@ -1,2 +1,0 @@
-Built and audited /private/tmp/scarlet-pthread-zlib-aarch64/zlib-probe; guest execution remains required.
-Run with one writable directory argument; require exit 47 and SCARLET_LIBC_ZLIB_OK.

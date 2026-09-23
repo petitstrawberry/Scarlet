@@ -177,7 +177,7 @@ def main():
         run([linker, "--gc-sections", "--no-undefined", "-static", "-e", "_start",
              "-z", "max-page-size=4096", *link_flags, "-Map=" + str(output / "link.map"),
              "--trace", crt, obj, archive, "-o", binary], "link.log")
-        audit_path = repo / "tools/native-rustc/audit_elf.py"
+        audit_path = repo / "tools/elf_audit.py"
         elf_report = json.loads(run([sys.executable, audit_path, "--machine", machine_name,
                                     "--scarlet", binary], "elf-audit.json"))[0]
         if (elf_report["elf_type"] != "EXEC" or elf_report["interpreter"] is not None

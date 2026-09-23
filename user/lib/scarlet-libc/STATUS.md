@@ -22,74 +22,14 @@ Native syscalls to a C ABI.
 | Native descriptor I/O | `open`/`openat`/`creat`, `close`, `read`/`write`, `lseek`, `dup`; four `fcntl` commands for descriptor flags and access/append state. Kernel enforces descriptor access and owns shared offset/append state. | [C fixture](tests/descriptor.c) passes relative/absolute paths, flag errors, access, duplication, append and errno checks on ext2/tmpfs in AArch64/HVF. See the [descriptor ABI](../../../docs/abi/native-descriptors.md). |
 | Unbuffered stdio | Locked opaque `FILE`, standard streams, open/close/flush, block/character/line I/O, seek/tell, indicators and one-byte pushback. `fdopen` retains the descriptor on failure. | Host mode-parser checks and [C fixture](tests/stdio.c) for file state, partial items, ownership, append and pushback; AArch64/HVF passes on ext2/tmpfs. |
 | Formatted output | `printf`, `fprintf`, `sprintf`, `snprintf` and all four `v` variants; integer/string/character/pointer formatting, width, precision and integer length modifiers. Unsupported float/wide/positional/grouping/`%n` formats return `ENOTSUP`. | Host comparisons with the host libc, truncation/overflow and forwarded-varargs tests; C tests pass arguments through register and stack areas in AArch64/HVF. RV64 has cross-build evidence only. |
-| Upstream zlib consumer | All 15 unmodified zlib 1.3.2 core/gzip sources compile and statically link against the matching CRT and std-backed libc. | [Pinned builder](../../../tools/native-rustc/consumer-zlib/README.md) records both target builds, hashes and ELF audits. AArch64/HVF passes compression/gzip/error-path acceptance with exit 47 and the required stdout marker. |
+| Upstream zlib consumer | The unmodified zlib 1.3.2 core/gzip sources were statically linked against the matching CRT and std-backed libc. | A bounded AArch64 guest run covered compression, gzip and error paths. Repeat with the current SDK before treating this as release support. |
 | Positioned I/O, truncation and locks | `pread`/`pwrite` preserve the shared offset; `pwrite` ignores append. `ftruncate` preserves offset. Nonblocking `flock` on regular ext2/tmpfs files follows open-description lifetime. | [C fixture](tests/positioned.c) covers bounds, access, sparse/zero-tail behavior, duplicate offsets and lock contention; passes on AArch64/HVF. |
 | Path removal and cwd | Type-checked `unlink`/`rmdir`; `getcwd` checks capacity before output and supports a malloc-owned null-buffer result. Ext2 last-link removal of an open file returns `EBUSY`; empty-directory removal returns `ENOTSUP`, nonempty returns `ENOTEMPTY`. | [C fixture](tests/path.c) covers symlink/trailing-slash/type errors, live duplicate lifetime, replacement and cwd bounds; passes on AArch64/HVF. |
 | Sorting and byte algorithms | Allocation-free heapsort, binary search, spans, tokenizers, ASCII case-insensitive comparisons and integer absolute values. `strtok` uses Rust TLS. | Host shape/boundary/thread tests and [C fixture](tests/algorithms.c); passes on AArch64/HVF. |
 | Clocks, entropy and termination | Realtime/monotonic clocks, validated sleep, entropy-only random bytes, IEEE `fabs`/`fabsf`, repeatable `assert.h`; abort exits the process with status 134. | Host validation helpers and [C fixture](tests/runtime.c), plus child assertion/abort checks; passes on AArch64/HVF. |
-| Upstream SQLite consumer | Unmodified pinned SQLite 3.53.4 plus a separate Native VFS; exclusive nonblocking locks serialize reads and writes, rollback journals, memory temp storage. | [Builder](../../../tools/native-rustc/consumer-sqlite/build.py) and create/verify/forced-exit/hot-journal-recovery fixtures on ext2/tmpfs, plus host exact-content checks; all eight guest processes and host checks pass on AArch64/HVF. The pthread follow-up enables serialized multithreaded access through real C pthread mutexes; no Unix-VFS or WAL claim. |
-| POSIX thread subset | Rust std-backed create/join/detach, identity, stack/detach attributes, once, thread-specific keys with four destructor rounds; process-private normal/error-checking/recursive mutexes and timed condition variables. Direct error returns preserve errno. | Host concurrency/lifetime tests; C fixtures exercise the exported ABI. See the pthread milestone evidence for recorded native execution. No cancellation, robust/shared mutexes, rwlocks or full POSIX claim. |
+| Upstream SQLite consumer | A separate Native VFS uses positioned I/O, exclusive nonblocking locks, rollback journals and memory temp storage. | Bounded AArch64 guest checks covered create/verify/process-exit recovery on ext2 and tmpfs. Unix-VFS, WAL, power-loss durability and RV64 guest support are not established. |
+| POSIX thread subset | Rust std-backed create/join/detach, identity, stack/detach attributes, once, thread-specific keys with four destructor rounds; process-private normal/error-checking/recursive mutexes and timed condition variables. Direct error returns preserve errno. | Host concurrency/lifetime tests and C ABI fixtures cover this subset. Cancellation, robust/shared mutexes, rwlocks and full POSIX behavior remain outside it. |
 | C headers | Partial `pthread.h`, `assert.h`, `ctype.h`, `errno.h`, `fcntl.h`, `limits.h`, `math.h`, `stdio.h`, `stdlib.h`, `string.h`, `strings.h`, `time.h`, `unistd.h`, `sys/file.h`, `sys/random.h`, `sys/time.h`, `sys/types.h`, `sys/stat.h`; LP64 layouts. | [Header checks](tests/check_headers.py) compile standalone/repeated inclusion, C11/C++11 linkage and layouts for AArch64/RV64 without host libc headers. |
-
-The [recorded filesystem evidence](../../../tools/native-rustc/evidence/2026-09-22-native-fs-aarch64.json)
-identifies the exact kernel, sysroot and probe inputs. It establishes guest
-execution on AArch64/HVF only, plus RV64 cross compilation. The
-[C fixture](tests/native.c), [Rust companion](../../../tools/native-rustc/native_fs.rs),
-and [host tests](src/) are executable specifications for their covered cases;
-adding a case does not establish a guest pass until a matching run is recorded.
-Commands are in the [README](README.md#build-and-checks).
-
-The [follow-up quality evidence](../../../tools/native-rustc/evidence/2026-09-22-libc-quality-aarch64.json)
-adds the allocation stress, optimized calloc/errno thread check, renamed cwd and
-directory handles, renamed mount ancestor and growing ext2 directory cases.
-It also records all 1273 kernel tests passing on HVF, including deterministic
-write-publication locking and second-handle fsync persistence regressions.
-
-The [errno and C startup evidence](../../../tools/native-rustc/evidence/2026-09-22-libc-errno-aarch64.json)
-records AArch64/HVF passes for allocation-free errno through constructor,
-thread entry and destructor paths, deterministic null allocation results, and
-the plain C fixture. The final run also passes native filesystem checks, full
-native compilation and proc macros with a matching staged runtime. RV64 has
-cross-build and ELF-audit checks for the probe, loader, static libc and C fixture;
-guest execution on RV64 remains outstanding.
-
-The [string/descriptor/stdio and zlib evidence](../../../tools/native-rustc/evidence/2026-09-22-libc-zlib-aarch64.json)
-records AArch64/HVF `FULL_PASS`: the new C fixtures pass on ext2 and tmpfs,
-zlib returns 47 with its required stdout marker, and the direct-C startup,
-native filesystem, full native compilation and proc-macro gates all pass.
-The complete release kernel suite passes all 1293 tests, including 20 added
-regressions and the fix for seeking with a detached ext2 node. Host checks pass
-33 libc tests, 27 ABI tests, three probe tests, 21 Python tests and 56 header
-checks. RV64 has cross-build and ELF-audit evidence only. The published bundle
-is unchanged; Cargo and installed SDK acceptance remain outstanding.
-
-The [SQLite milestone evidence](../../../tools/native-rustc/evidence/2026-09-22-libc-sqlite-aarch64.json)
-and [saved logs](../../../tools/native-rustc/evidence/2026-09-22-libc-sqlite-aarch64/)
-record AArch64/HVF `FULL_PASS` in 19.327 seconds. All new C fixtures pass on ext2
-and tmpfs; assertion/abort children return 134. SQLite create/verify/crash/recover
-passes in eight separate processes across both filesystems, with verified dirty
-database spill and saved hot rollback journals. Independent host SQLite checks
-the recovered ext2 database's integrity, foreign keys, 24 exact rows and complete
-131113-byte BLOB. Prior plain C startup, zlib, native Rust compilation and proc
-macro gates remain passing.
-
-The unfiltered release kernel suite passes 1328 tests, 35 more than the previous
-milestone. This includes three regressions for the tmpfs unlink bug found in
-the guest: open descriptors now retain data/cache/quota through final node
-ownership, and pinned cache storage retires only after unpin. Host checks pass
-47 libc tests, 27 ABI tests, 80 header checks, 31 harness tests and four probe
-tests; repository formatting passes. Final RV64/RV32 kernel compilation also
-passes. RV64 libc/probe/SQLite cross-build and ELF audits do not establish RV64
-guest execution. The published bundle remains unchanged.
-
-The [pthread and sparse truncate evidence](../../../tools/native-rustc/evidence/2026-09-23-libc-pthread-sparse-aarch64.json)
-records an AArch64/HVF `FULL_PASS` with the process-private C pthread subset,
-SQLite serialized access from four concurrent workers, and a 32 MiB sparse
-ext2 shrink/reextension check on both ext2 and tmpfs. The unfiltered release
-kernel suite passes all 1333 tests. Host libc tests pass 65 cases, C headers
-pass 88 cross-target checks, and the Python harness passes 32 cases. RV64 libc,
-probe and SQLite build with ELF audits; RV64 and RV32 kernel test sources also
-cross-check. Native Cargo remains at the separate dependency-porting gate below.
 
 ## Limits that callers must account for
 
@@ -154,29 +94,6 @@ cross-check. Native Cargo remains at the separate dependency-porting gate below.
   mmap and loadable extensions. Process-exit hot-journal recovery passes on ext2/tmpfs; it does not
   establish power-loss safety or all crash-recovery cases.
 
-## Measured Cargo porting gaps
-
-A locked cross-check of Cargo 0.95.0 at
-`94c368ad2b9db0f0da5bdd8421cea13786ce4412`, using the matching Scarlet
-rustc 1.94.0-nightly, failed during dependency compilation. The baseline was
-measured at Scarlet `e2cfa445`, before the pthread additions; it did not link
-or execute Cargo. The recorded command uses `--keep-going` to expose independent
-failures without rebuilding LLVM or changing Rust platform cfgs.
-
-The Rust `libc`, `getrandom`, `errno`, `socket2`, `filetime`, `home`, Git support
-crates and credential helpers still need Scarlet platform support. C dependencies
-also need more headers/APIs: nghttp2 first stopped at `inttypes.h`, libssh2 at
-`poll.h`, and SQLite at calendar-time and pthread declarations. This milestone
-adds pthreads but does not claim to resolve that whole dependency chain. Cargo's
-own process-output, job and file-lock backends also need explicit Scarlet
-implementations. Disabling Cargo's default features does not remove its
-unconditional curl, libgit2 and rusqlite dependencies.
-
-The first Cargo acceptance gate remains an offline workspace with a path
-dependency, build script, proc macro and concurrent target-directory locking.
-Neither building this libc nor the independent SQLite consumer establishes
-that gate.
-
 ## Acceptance gates toward a complete C runtime
 
 These gates apply to the Rust implementation; passing a smoke test is not a
@@ -219,5 +136,5 @@ substitute for declaring a standards baseline and checking its requirements.
    Then run Cargo on an offline workspace
    with a path dependency, build script and proc macro, and execute its output.
    Record AArch64 and RV64 guest results for the shipped artifacts; automate
-   regressions, preserve logs/hashes, and verify the installed bundle separately
+   regressions, retain logs and hashes as CI artifacts, and verify the installed bundle separately
    from private development builds.

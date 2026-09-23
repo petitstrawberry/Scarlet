@@ -1,2 +1,0 @@
-Built and audited /private/tmp/scarlet-pthread-sqlite-aarch64/sqlite-probe; guest execution remains required.
-Run with DIRECTORY create, then DIRECTORY verify in a separate process; require exit 53 and SCARLET_LIBC_SQLITE_OK.

@@ -1,1 +1,0 @@
-cd "/native-rustc-output" && "/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/rustc" "--sysroot" "/opt/scarlet/toolchains/rust/v0.1.0-rc.1" "--target" "aarch64-unknown-scarlet" "--edition=2021" "-Cpanic=abort" "-Copt-level=0" "-Clinker=/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/wild" "-Clinker-flavor=ld.lld" "hello.rs" "-o" "/native-rustc-output/hello"

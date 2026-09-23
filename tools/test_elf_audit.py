@@ -4,7 +4,7 @@ import struct
 import tempfile
 import unittest
 
-from audit_elf import Elf, ElfError
+from elf_audit import Elf, ElfError
 
 
 def fixture(tags=(), relocations=(), machine=243, tls=False):

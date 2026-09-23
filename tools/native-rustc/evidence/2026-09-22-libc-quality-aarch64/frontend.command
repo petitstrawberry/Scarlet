@@ -1,1 +1,0 @@
-cd "/native-rustc-output" && "/opt/scarlet/toolchains/rust/v0.1.0-rc.1/bin/rustc" "--sysroot" "/opt/scarlet/toolchains/rust/v0.1.0-rc.1" "--target" "aarch64-unknown-scarlet" "--edition=2021" "-Zno-codegen" "hello.rs"

@@ -134,9 +134,8 @@ unsupported rather than reclaiming referenced directory storage.
 
 ## Recorded acceptance
 
-The [AArch64/HVF SQLite milestone](../../tools/native-rustc/evidence/2026-09-22-libc-sqlite-aarch64.json)
-and [logs](../../tools/native-rustc/evidence/2026-09-22-libc-sqlite-aarch64/)
-record the C positioned-I/O, locking and pathname fixtures passing on ext2 and
+The AArch64/HVF guest checks covered C positioned-I/O, locking and pathname
+fixtures on ext2 and
 tmpfs, alongside eight SQLite create/verify/crash/recover processes and host
 verification of the recovered ext2 database. The unfiltered release kernel
 suite passes all 1328 tests. Actual guest testing exposed tmpfs unlink retiring

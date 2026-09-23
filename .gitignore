@@ -23,6 +23,11 @@ kernel/src/lsm/generated_symbols.rs
 /bundles/linux/cache/
 /bundles/linux/prebuilt/
 
+# Generated validation output and retired native-toolchain scratch trees.
+**/evidence/
+/tools/native-rustc/
+/tools/native-linker/
+
 # Build artifacts
 tools/guest/*.o
 tools/guest/*.elf
