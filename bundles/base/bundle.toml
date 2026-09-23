@@ -10,7 +10,7 @@ to = "/"
 # is the pinned nixpkgs cacert derivation, not a compiler-embedded root list.
 [[layers]]
 kind = "script"
-source = "tools/install-ca-certificates.sh"
+source = "../../tools/install-ca-certificates.sh"
 to = "/etc/ssl/certs/ca-certificates.crt"
 
 # Native ELF64 interpreter. RV32 skips this layer until scarlet-ld gains
