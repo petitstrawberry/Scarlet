@@ -72,7 +72,7 @@ class StageTests(unittest.TestCase):
             report = manifest["elf"][str((staged / "scarlet-crt0.o").relative_to(root / "overlay"))]
             self.assertEqual(report["elf_type"], "REL")
             self.assertTrue((root / "overlay/bin/scarlet-ld").is_file())
-            self.assertEqual((root / "overlay/system/bin/scarlet-ld").readlink(), Path("../../bin/scarlet-ld"))
+            self.assertFalse((root / "overlay/system/bin/scarlet-ld").exists())
 
     def test_rejects_foreign_startup_object_before_creating_overlay(self):
         with tempfile.TemporaryDirectory() as tmp:

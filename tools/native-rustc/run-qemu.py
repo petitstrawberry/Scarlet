@@ -377,13 +377,13 @@ def main():
     cargo = args.cargo.resolve() if args.cargo else None
     if cargo:
         cargo_report = executable(cargo, args.arch, "native Cargo")
-        if cargo_report["interpreter"] not in ("/bin/scarlet-ld", "/system/bin/scarlet-ld"):
-            parser.error("native Cargo must use /bin/scarlet-ld (or the temporary compatibility path)")
+        if cargo_report["interpreter"] != "/bin/scarlet-ld":
+            parser.error("native Cargo must use /bin/scarlet-ld")
     resolverd = args.resolverd.resolve() if args.resolverd else None
     if resolverd:
         resolver_report = executable(resolverd, args.arch, "native resolverd")
-        if resolver_report["interpreter"] not in ("/bin/scarlet-ld", "/system/bin/scarlet-ld"):
-            parser.error("native resolverd must use /bin/scarlet-ld (or the temporary compatibility path)")
+        if resolver_report["interpreter"] != "/bin/scarlet-ld":
+            parser.error("native resolverd must use /bin/scarlet-ld")
     ca_bundle = args.ca_bundle.resolve() if args.ca_bundle else None
     if ca_bundle and (not ca_bundle.is_file() or b"-----BEGIN CERTIFICATE-----" not in ca_bundle.read_bytes()):
         parser.error("--ca-bundle must name a PEM CA certificate bundle")

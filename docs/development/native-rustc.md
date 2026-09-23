@@ -57,10 +57,9 @@ architecture filter omits that ELF64-only layer for RV32. Interactive shells
 include both `/system/bin` and the selected toolchain's `bin` directory in
 `PATH`; Cargo is not included yet.
 
-The published `v0.1.0-rc.1` compiler was linked against that earlier path.
-Current base installs the loader at `/bin/scarlet-ld` and keeps the old path as
-a compatibility symlink until those artifacts are replaced. New toolchains
-must request `/bin/scarlet-ld` directly.
+The published `v0.1.0-rc.1` compiler was linked against that earlier path and
+cannot run with the new image layout. Current base installs the loader only at
+`/bin/scarlet-ld`; toolchain artifacts must be rebuilt for that path.
 
 | Target | VM | Result | Total guest run | Native-host Actions run |
 | --- | --- | --- | ---: | --- |

@@ -108,12 +108,6 @@ def main():
         path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, path, follow_symlinks=True)
         manifest["files"].append({"path": str(dest), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
-    # Already-built native Cargo and resolver binaries still request the old
-    # path. Keep them runnable while new toolchain artifacts are rebuilt.
-    legacy = output / "system/bin/scarlet-ld"
-    legacy.parent.mkdir(parents=True, exist_ok=True)
-    legacy.symlink_to("../../bin/scarlet-ld")
-    manifest["files"].append({"path": "system/bin/scarlet-ld", "symlink": "../../bin/scarlet-ld"})
     (output / "native-rustc-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"Staged {len(copies)} files in {output}; guest probes have not run.")
     return 0

@@ -13,9 +13,8 @@ kind = "script"
 source = "../../tools/install-ca-certificates.sh"
 to = "/etc/ssl/certs/ca-certificates.crt"
 
-# Native ELF64 interpreter. The fs layer also retains a compatibility symlink
-# at /system/bin/scarlet-ld for already-published native Rust binaries. RV32
-# skips this layer until scarlet-ld gains 32-bit ELF support.
+# Native ELF64 interpreter. RV32 skips this layer until scarlet-ld gains
+# 32-bit ELF support.
 [[layers]]
 kind = "cargo"
 source = "../../user/scarlet-ld"
