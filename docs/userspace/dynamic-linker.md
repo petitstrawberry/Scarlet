@@ -9,6 +9,9 @@ Scarlet's native dynamic linker consists of three components:
 - `user/scarlet-ld`: a statically linked interpreter at
   `/bin/scarlet-ld`, selected by an executable's `PT_INTERP`.
 
+Base retains `/system/bin/scarlet-ld` as a compatibility symlink for native
+Rust binaries published before the interpreter moved to `/bin`.
+
 The loader is an initial implementation for 64-bit little-endian AArch64 and
 RISC-V ELF. It is not a Linux compatibility layer. Ordinary native applications
 continue to use their existing static runtime. Rust shared objects must be
