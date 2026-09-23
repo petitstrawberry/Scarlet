@@ -115,7 +115,7 @@ The separate [versioned packaging workflow](https://github.com/petitstrawberry/s
 accepts exact native-host and Wild run IDs, validates their provenance, and emits
 deterministic archives for AArch64 and RV64. It packages Wild as `bin/wild` and
 `bin/rust-lld`, but deliberately excludes `scarlet-ld`; the matching Scarlet
-image provides that runtime interpreter at `/system/bin/scarlet-ld`.
+image provides that runtime interpreter at `/bin/scarlet-ld`.
 
 ## Preflight and dependency audit
 

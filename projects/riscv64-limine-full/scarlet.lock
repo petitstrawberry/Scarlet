@@ -12,10 +12,19 @@ layers = []
 hash = "sha256:301fe5d1b0c8aec22c18a356de13b113a01d40af7ae22031683e062dfabfea4d"
 
 [[sections.initramfs.layers]]
+kind = "script"
+to = "/etc/ssl/certs/ca-certificates.crt"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../tools/install-ca-certificates.sh"
+
+[[sections.initramfs.layers]]
 kind = "cargo"
 package = "scarlet-ld"
 bin = "scarlet-ld"
-to = "/system/bin/scarlet-ld"
+to = "/bin/scarlet-ld"
 hash = ""
 
 [sections.initramfs.layers.source]
@@ -371,10 +380,19 @@ path = "../../user/std-bin"
 hash = "sha256:913e42ef6bda2e1682de49a7c8c212fa94245a13a691805cb6211b79b620f678"
 
 [[sections.rootfs.layers]]
+kind = "script"
+to = "/etc/ssl/certs/ca-certificates.crt"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../tools/install-ca-certificates.sh"
+
+[[sections.rootfs.layers]]
 kind = "cargo"
 package = "scarlet-ld"
 bin = "scarlet-ld"
-to = "/system/bin/scarlet-ld"
+to = "/bin/scarlet-ld"
 hash = ""
 
 [sections.rootfs.layers.source]

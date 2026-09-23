@@ -31,7 +31,7 @@ python3 tools/loader-smoke/run-qemu.py \
 ```
 
 The generated staging root contains a native dynamically linked `/init`, the
-interpreter at `/system/bin/scarlet-ld`, and shared libraries under `/system/lib`.
+interpreter at `/bin/scarlet-ld`, and shared libraries under `/system/lib`.
 The kernel helper enables Limine, networking, and user floating-point/vector
 support, and omits the hypervisor and optional loadable modules. Use a freshly
 built kernel so the native handoff and memory-protection ABI match the loader.

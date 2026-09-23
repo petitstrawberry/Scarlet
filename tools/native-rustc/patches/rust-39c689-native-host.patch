@@ -15,7 +15,7 @@
              linker: Some("rust-lld".into()),
 +            pre_link_args: TargetOptions::link_args(
 +                LinkerFlavor::Gnu(Cc::No, Lld::No),
-+                &["--dynamic-linker=/system/bin/scarlet-ld"],
++                &["--dynamic-linker=/bin/scarlet-ld"],
 +            ),
              llvm_abiname: "lp64d".into(),
              cpu: "generic-rv64".into(),
@@ -37,7 +37,7 @@
          pre_link_args: TargetOptions::link_args(
              LinkerFlavor::Gnu(Cc::No, Lld::No),
 -            &["--fix-cortex-a53-843419"],
-+            &["--fix-cortex-a53-843419", "--dynamic-linker=/system/bin/scarlet-ld"],
++            &["--fix-cortex-a53-843419", "--dynamic-linker=/bin/scarlet-ld"],
          ),
          features: "+v8a,+outline-atomics,+strict-align,+neon".into(),
          supported_sanitizers: SanitizerSet::KCFI | SanitizerSet::KERNELADDRESS,

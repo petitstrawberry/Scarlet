@@ -2,7 +2,7 @@
 #
 # The archive contains rustc, matching static target libraries, the Cranelift
 # backend, and Wild. The runtime interpreter is owned by bundles/base and lives
-# at /system/bin/scarlet-ld.
+# at /bin/scarlet-ld.
 
 [[layers]]
 kind = "archive"

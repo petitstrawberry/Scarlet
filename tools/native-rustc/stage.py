@@ -15,7 +15,7 @@ import sys
 from audit_elf import Elf, ElfError, MACHINES
 
 TARGETS = {"riscv64gc-unknown-scarlet": "riscv64", "aarch64-unknown-scarlet": "aarch64"}
-INTERPRETER = "/system/bin/scarlet-ld"
+INTERPRETER = "/bin/scarlet-ld"
 
 
 def object_report(path):
@@ -58,7 +58,7 @@ def main():
         p.error("source-commit must be a full lowercase Git SHA")
     relative = Path("opt/native-rustc")
     copies = {relative / "bin/rustc": source / "bin/rustc",
-              Path("system/bin/scarlet-ld"): args.loader.resolve(),
+              Path("bin/scarlet-ld"): args.loader.resolve(),
               Path("system/bin/native-rustc-probe"): args.probe.resolve()}
     target_lib = Path("lib/rustlib") / args.target / "lib"
     if not list((source / target_lib).glob("libstd-*.rlib")):
@@ -89,12 +89,12 @@ def main():
         report = object_report(src) if src.suffix == ".o" else Elf(src).report()
         if report["machine"] != TARGETS[args.target]:
             p.error(f"wrong ELF machine: {src}")
-        if dest in (relative / "bin/rustc", Path("system/bin/scarlet-ld"), Path("system/bin/native-rustc-probe")):
+        if dest in (relative / "bin/rustc", Path("bin/scarlet-ld"), Path("system/bin/native-rustc-probe")):
             if report["osabi"] != 0x53:
                 p.error(f"expected native Scarlet OSABI 0x53: {src}")
         if dest == relative / "bin/rustc" and report["interpreter"] != INTERPRETER:
             p.error(f"rustc must request {INTERPRETER}")
-        if dest == Path("system/bin/scarlet-ld") and (report["interpreter"] or report["needed"]):
+        if dest == Path("bin/scarlet-ld") and (report["interpreter"] or report["needed"]):
             p.error("the interpreter itself must be statically linked")
         report["source"] = report.pop("path")
         reports[str(dest)] = report
@@ -108,6 +108,12 @@ def main():
         path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, path, follow_symlinks=True)
         manifest["files"].append({"path": str(dest), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+    # Already-built native Cargo and resolver binaries still request the old
+    # path. Keep them runnable while new toolchain artifacts are rebuilt.
+    legacy = output / "system/bin/scarlet-ld"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.symlink_to("../../bin/scarlet-ld")
+    manifest["files"].append({"path": "system/bin/scarlet-ld", "symlink": "../../bin/scarlet-ld"})
     (output / "native-rustc-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"Staged {len(copies)} files in {output}; guest probes have not run.")
     return 0

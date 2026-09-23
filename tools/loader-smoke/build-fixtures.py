@@ -38,7 +38,7 @@ def main():
         subprocess.run(common + ["-shared", "-soname", soname, str(objects / f"{name}.o"), *[f"-lsmoke-{dep}" for dep in dependencies], "-o", str(libraries / soname)], check=True)
     # The four C loader APIs are supplied by the interpreter, not by a libc.
     # LLD records their undefined dynamic symbols and eager PLT relocations.
-    subprocess.run(common + ["-pie", "--export-dynamic", "--unresolved-symbols=ignore-all", "--dynamic-linker=/system/bin/scarlet-ld", "-e", "_start", str(objects / "main.o"), "-lsmoke-answer", "-o", str(staging / "init")], check=True)
+    subprocess.run(common + ["-pie", "--export-dynamic", "--unresolved-symbols=ignore-all", "--dynamic-linker=/bin/scarlet-ld", "-e", "_start", str(objects / "main.o"), "-lsmoke-answer", "-o", str(staging / "init")], check=True)
     for elf in [staging / "init", *libraries.glob("*.so")]:
         with elf.open("r+b") as stream:
             stream.seek(7)
@@ -46,8 +46,8 @@ def main():
     if args.rust_library:
         shutil.copy2(args.rust_library, libraries / "libsmoke-rust.so")
     if args.loader:
-        (staging / "system/bin").mkdir(parents=True, exist_ok=True)
-        shutil.copy2(args.loader, staging / "system/bin/scarlet-ld")
+        (staging / "bin").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(args.loader, staging / "bin/scarlet-ld")
     print(staging)
 
 

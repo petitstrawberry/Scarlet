@@ -150,7 +150,7 @@ def main():
     (output / "serial.log").unlink(missing_ok=True)
     if not kernel.is_file():
         parser.error(f"kernel does not exist: {kernel}")
-    for required in ("init", "system/bin/scarlet-ld"):
+    for required in ("init", "bin/scarlet-ld"):
         if not (staging / required).is_file():
             parser.error(f"staging is missing {required}")
     qemu = f"qemu-system-{args.arch}"

@@ -44,7 +44,7 @@ a separate opt-in workflow input.
 The tested distribution layout installs under
 `/opt/scarlet/toolchains/rust/<version>`. It contains `rustc`, its private
 `librustc_driver`, the Cranelift backend, static target libraries, and Wild.
-`/system/bin/scarlet-ld` remains owned by the matching Scarlet image and is not
+`/system/bin/scarlet-ld` was owned by the matching Scarlet image and was not
 part of the toolchain archive.
 
 The Scarlet full distribution composes
@@ -52,10 +52,15 @@ The Scarlet full distribution composes
 installs the published `v0.1.0-rc.1` archives and selects that version through
 `/opt/scarlet/toolchains/rust/current`. The common
 [`bundles/base`](../../bundles/base/bundle.toml) installs the matching runtime
-interpreter at `/system/bin/scarlet-ld` for AArch64 and RISC-V64; its
+interpreter at `/system/bin/scarlet-ld` for AArch64 and RISC-V64 at the time; its
 architecture filter omits that ELF64-only layer for RV32. Interactive shells
 include both `/system/bin` and the selected toolchain's `bin` directory in
 `PATH`; Cargo is not included yet.
+
+The published `v0.1.0-rc.1` compiler was linked against that earlier path.
+Current base installs the loader at `/bin/scarlet-ld` and keeps the old path as
+a compatibility symlink until those artifacts are replaced. New toolchains
+must request `/bin/scarlet-ld` directly.
 
 | Target | VM | Result | Total guest run | Native-host Actions run |
 | --- | --- | --- | ---: | --- |
@@ -247,7 +252,7 @@ versioning, RELR, text relocations, initialization hooks, and RPATH/RUNPATH.
 ```sh
 python3 tools/native-rustc/audit_elf.py \
   --machine riscv64 --scarlet \
-  --require-interpreter /system/bin/scarlet-ld \
+  --require-interpreter /bin/scarlet-ld \
   /absolute/native-sysroot/bin/rustc
 
 python3 tools/native-rustc/audit_elf.py \

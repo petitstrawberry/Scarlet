@@ -368,22 +368,22 @@ def main():
     # These checks are performed even for prepare-only: a cross-compiler on the
     # host cannot silently replace the native compiler being tested.
     compiler_report = executable(in_root(staging, args.rustc), args.arch, "rustc")
-    if compiler_report["interpreter"] != "/system/bin/scarlet-ld":
-        parser.error("staged native rustc must use /system/bin/scarlet-ld")
+    if compiler_report["interpreter"] != "/bin/scarlet-ld":
+        parser.error("staged native rustc must use /bin/scarlet-ld")
     executable(bootstrap, args.arch, "bootstrap init", static=True)
-    executable(in_root(staging, "/system/bin/scarlet-ld"), args.arch, "loader", static=True)
+    executable(in_root(staging, "/bin/scarlet-ld"), args.arch, "loader", static=True)
     probe = args.probe.resolve() if args.probe else in_root(staging, "/system/bin/native-rustc-probe")
     executable(probe, args.arch, "guest probe")
     cargo = args.cargo.resolve() if args.cargo else None
     if cargo:
         cargo_report = executable(cargo, args.arch, "native Cargo")
-        if cargo_report["interpreter"] != "/system/bin/scarlet-ld":
-            parser.error("native Cargo must use /system/bin/scarlet-ld")
+        if cargo_report["interpreter"] not in ("/bin/scarlet-ld", "/system/bin/scarlet-ld"):
+            parser.error("native Cargo must use /bin/scarlet-ld (or the temporary compatibility path)")
     resolverd = args.resolverd.resolve() if args.resolverd else None
     if resolverd:
         resolver_report = executable(resolverd, args.arch, "native resolverd")
-        if resolver_report["interpreter"] != "/system/bin/scarlet-ld":
-            parser.error("native resolverd must use /system/bin/scarlet-ld")
+        if resolver_report["interpreter"] not in ("/bin/scarlet-ld", "/system/bin/scarlet-ld"):
+            parser.error("native resolverd must use /bin/scarlet-ld (or the temporary compatibility path)")
     ca_bundle = args.ca_bundle.resolve() if args.ca_bundle else None
     if ca_bundle and (not ca_bundle.is_file() or b"-----BEGIN CERTIFICATE-----" not in ca_bundle.read_bytes()):
         parser.error("--ca-bundle must name a PEM CA certificate bundle")

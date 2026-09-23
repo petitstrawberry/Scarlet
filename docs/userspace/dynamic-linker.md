@@ -7,7 +7,7 @@ Scarlet's native dynamic linker consists of three components:
 - `user/lib/scarlet-dl`: native file/memory operations and the process loader
   context, including the C dynamic-loading entry points.
 - `user/scarlet-ld`: a statically linked interpreter at
-  `/system/bin/scarlet-ld`, selected by an executable's `PT_INTERP`.
+  `/bin/scarlet-ld`, selected by an executable's `PT_INTERP`.
 
 The loader is an initial implementation for 64-bit little-endian AArch64 and
 RISC-V ELF. It is not a Linux compatibility layer. Ordinary native applications

@@ -6,7 +6,7 @@ installed cross-toolchain. They are **not a complete native rustc port**.
 `rust-39c689-native-host.patch` applies to
 `petitstrawberry/rust@39c689a4859b9d8ee1828720135defd125c03d31`. It enables PIC and
 dynamic linking for the two 64-bit Scarlet targets, requests
-`/system/bin/scarlet-ld`, sets experimental host metadata, and supplies Scarlet's
+`/bin/scarlet-ld`, sets experimental host metadata, and supplies Scarlet's
 `std::env::consts` values. It also fixes the Scarlet omission in the std
 Unix-path `is_absolute` cfg list, so paths such as `/init` are recognized as
 absolute without declaring Scarlet to be Unix. It preserves panic=abort, OS-level TLS, and the empty
