@@ -75,6 +75,25 @@ must be corrected before a future rustc turns that warning into an error. Cargo
 and compiler self-hosting remain unverified. The later AArch64 proc-macro and
 filesystem acceptance below uses an updated local toolchain.
 
+## Native Cargo HTTPS acceptance, 2026-09-23
+
+A local AArch64 HVF guest now runs a cross-built Scarlet-native Cargo. With an
+empty Cargo home it fetches `itoa 1.0.15` from crates.io over HTTPS, compiles
+the dependency and an application with the native compiler, and runs the
+application. A negative control substitutes an unrelated root CA and reaches
+the TLS handshake but fails with `UnknownIssuer`. The CA source, client
+selection, update path, and trust limits are described in
+[Native Cargo TLS trust](native-cargo-trust.md). The
+[guest result and diagnostic logs](../../tools/native-rustc/evidence/2026-09-23-cargo-online-aarch64/result.json)
+record the positive run and the untrusted-CA control.
+
+This acceptance is local and does not change the published RC toolchain. Its
+online build target is guest tmpfs because ext2 still rejects removal of an
+empty rustc temporary archive directory. A default disk-backed Cargo workflow
+and Cargo/proc-macro integration in the distributed toolchain remain separate
+acceptance steps. The Cargo port uses exact Git revisions of Scarlet-specific
+crate forks; remaining local dependency ports are still being migrated.
+
 ## Pre-bring-up baseline, 2026-09-21
 
 The inspected Rust fork was
@@ -339,7 +358,10 @@ together; Rust crate metadata from the local commit-stamped compiler cannot be
 mixed with the existing unstamped Actions compiler. The native target still
 uses `panic=abort`, so a panicking macro can terminate the compiler.
 
-### Cargo port status
+### Initial Cargo port assessment, 2026-09-22 (superseded)
+
+This section records the original dependency failures before the native Cargo
+HTTPS acceptance above. Its status statements describe that earlier build.
 
 Cargo is not yet included or executable as a native Scarlet component. A build
 attempt uses the Rust fork's pinned Cargo revision

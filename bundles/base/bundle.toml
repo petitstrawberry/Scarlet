@@ -6,6 +6,13 @@ kind = "copy"
 source = "fs"
 to = "/"
 
+# The OS trust store is an updateable file shared by TLS clients. Its source
+# is the pinned nixpkgs cacert derivation, not a compiler-embedded root list.
+[[layers]]
+kind = "script"
+source = "tools/install-ca-certificates.sh"
+to = "/etc/ssl/certs/ca-certificates.crt"
+
 # Native ELF64 interpreter. RV32 skips this layer until scarlet-ld gains
 # 32-bit ELF support.
 [[layers]]

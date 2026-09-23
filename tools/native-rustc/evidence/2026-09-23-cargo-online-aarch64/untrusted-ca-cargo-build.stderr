@@ -1,0 +1,119 @@
+   0.005750000s DEBUG network: Version {
+    version: "8.15.0-DEV",
+    rust_crate_version: "0.4.49",
+    rust_sys_crate_version: "0.4.83+curl-8.15.0",
+    vendored: true,
+    host: "unknown",
+    feature_ipv6: false,
+    feature_ssl: true,
+    feature_libz: true,
+    feature_ntlm: false,
+    feature_gss_negotiate: false,
+    feature_debug: false,
+    feature_spnego: false,
+    feature_largefile: false,
+    feature_idn: false,
+    feature_sspi: false,
+    feature_async_dns: false,
+    feature_conv: false,
+    feature_tlsauth_srp: false,
+    feature_ntlm_wb: false,
+    feature_unix_domain_socket: false,
+    feature_https_proxy: true,
+    feature_altsvc: true,
+    feature_zstd: false,
+    feature_unicode: false,
+    feature_http3: false,
+    feature_http2: false,
+    feature_gsasl: false,
+    feature_brotli: false,
+    ssl_version: "rustls-ffi/0.15.0/rustls/0.23.25/ring",
+    libz_version: "1.3.1",
+    iconv_version_num: "0",
+    brotli_version_num: "0",
+    nghttp2_version_num: "0",
+    zstd_ver_num: "0",
+    cainfo: "/etc/ssl/certs/ca-certificates.crt",
+    protocols: [
+        "file",
+        "http",
+        "https",
+        "mqtt",
+        "ws",
+        "wss",
+    ],
+}
+   1.890567000s TRACE network::HttpRegistry::block_until_ready: 0 transfers pending
+   1.890654000s TRACE network: 0 transfers remaining
+    Updating crates.io index
+   1.892112000s DEBUG network: Version {
+    version: "8.15.0-DEV",
+    rust_crate_version: "0.4.49",
+    rust_sys_crate_version: "0.4.83+curl-8.15.0",
+    vendored: true,
+    host: "unknown",
+    feature_ipv6: false,
+    feature_ssl: true,
+    feature_libz: true,
+    feature_ntlm: false,
+    feature_gss_negotiate: false,
+    feature_debug: false,
+    feature_spnego: false,
+    feature_largefile: false,
+    feature_idn: false,
+    feature_sspi: false,
+    feature_async_dns: false,
+    feature_conv: false,
+    feature_tlsauth_srp: false,
+    feature_ntlm_wb: false,
+    feature_unix_domain_socket: false,
+    feature_https_proxy: true,
+    feature_altsvc: true,
+    feature_zstd: false,
+    feature_unicode: false,
+    feature_http3: false,
+    feature_http2: false,
+    feature_gsasl: false,
+    feature_brotli: false,
+    ssl_version: "rustls-ffi/0.15.0/rustls/0.23.25/ring",
+    libz_version: "1.3.1",
+    iconv_version_num: "0",
+    brotli_version_num: "0",
+    nghttp2_version_num: "0",
+    zstd_ver_num: "0",
+    cainfo: "/etc/ssl/certs/ca-certificates.crt",
+    protocols: [
+        "file",
+        "http",
+        "https",
+        "mqtt",
+        "ws",
+        "wss",
+    ],
+}
+   1.892173000s DEBUG network: fetch https://index.crates.io/config.json
+   1.892199000s DEBUG network: downloading config.json as 0
+   1.892500000s TRACE network::HttpRegistry::block_until_ready: 1 transfers pending
+   1.892616000s DEBUG network: http-debug: * timeout on name lookup is not supported
+   1.911203000s DEBUG network: http-debug: * Host index.crates.io:443 was resolved.
+   1.911232000s DEBUG network: http-debug: * IPv4: 151.101.2.137, 151.101.66.137, 151.101.130.137, 151.101.194.137
+   1.911306000s DEBUG network: http-debug: *   Trying 151.101.2.137:443...
+   1.911321000s DEBUG network: http-debug: * Could not set TCP_NODELAY: Operation not supported
+   1.911608000s TRACE network: 1 transfers remaining
+   1.921784000s DEBUG network: http-debug: * ALPN: curl offers http/1.1
+   1.923549000s TRACE network: 1 transfers remaining
+   1.935311000s TRACE network: 1 transfers remaining
+   1.935438000s TRACE network: 1 transfers remaining
+   1.935827000s DEBUG network: http-debug: * rustls_connection_process_new_packets: invalid peer certificate: UnknownIssuer
+   1.935863000s DEBUG network: http-debug: * closing connection #0
+   1.936133000s TRACE network: 0 transfers remaining
+error: failed to get `itoa` as a dependency of package `native-cargo-online v0.1.0 (/native-rustc-output/cargo-online-fixture)`
+
+Caused by:
+  download of config.json failed
+
+Caused by:
+  failed to download from `https://index.crates.io/config.json`
+
+Caused by:
+  [60] SSL peer certificate or SSH remote key was not OK (rustls_connection_process_new_packets: invalid peer certificate: UnknownIssuer)

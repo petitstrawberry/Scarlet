@@ -7,6 +7,7 @@ and avoids copying the complete compiler sysroot into the kernel's CPIO heap.
 """
 
 import argparse
+import ipaddress
 import hashlib
 import importlib.util
 import json
@@ -29,6 +30,8 @@ spec.loader.exec_module(smoke)
 TARGETS = {"aarch64": "aarch64-unknown-scarlet", "riscv64": "riscv64gc-unknown-scarlet"}
 HELLO = b"SCARLET_NATIVE_RUSTC_HELLO_OK\n"
 MACRO_HELLO = b"SCARLET_NATIVE_PROC_MACRO_OK=42\n"
+CARGO_HELLO = b"SCARLET_NATIVE_CARGO_HELLO_OK\n"
+CARGO_ONLINE_HELLO = b"SCARLET_NATIVE_CARGO_ONLINE_OK=42\n"
 ZLIB_HELLO = b"SCARLET_LIBC_ZLIB_OK"
 SQLITE_HELLO = b"SCARLET_LIBC_SQLITE_OK"
 SQLITE_PTHREAD_HELLO = b"SCARLET_LIBC_SQLITE_PTHREAD_OK"
@@ -200,7 +203,7 @@ def validate_sqlite_evidence(extracted):
     return report
 
 
-def collect_evidence(image, output, guest_output, mode, arch, proc_macro=False, native_fs=False, c_startup=False, zlib=False, sqlite=False):
+def collect_evidence(image, output, guest_output, mode, arch, proc_macro=False, native_fs=False, c_startup=False, zlib=False, sqlite=False, cargo=False, cargo_online=False):
     evidence = output / "guest-evidence"
     evidence.mkdir()
     command = ["debugfs", "-R", f"rdump {debugfs_quote(guest_output)} {debugfs_quote(evidence)}", str(image)]
@@ -214,6 +217,31 @@ def collect_evidence(image, output, guest_output, mode, arch, proc_macro=False, 
     if sqlite:
         validation = validate_sqlite_evidence(extracted)
         (output / "sqlite-host-validation.json").write_text(json.dumps(validation, indent=2) + "\n")
+    if cargo:
+        if not (extracted / "CARGO_PASS").is_file():
+            raise ValueError("native Cargo evidence is missing")
+        if not (extracted / "cargo-version.stdout").read_bytes().startswith(b"cargo "):
+            raise ValueError("native Cargo version output is missing")
+        for phase in ("cargo-version", "cargo-build", "cargo-execute"):
+            if not (extracted / f"{phase}.status").read_text().startswith("exit=Some(0) "):
+                raise ValueError(f"native Cargo {phase} did not exit successfully")
+        if (extracted / "cargo-execute.stdout").read_bytes() != CARGO_HELLO:
+            raise ValueError("Cargo-built program stdout differs from the required marker")
+        executable(extracted / "cargo-target" / TARGETS[arch] / "release/native-cargo-hello",
+                   arch, "Cargo-built guest program")
+    if cargo_online:
+        if not (extracted / "CARGO_ONLINE_PASS").is_file():
+            raise ValueError("native Cargo online evidence is missing")
+        for phase in ("cargo-online-build", "cargo-online-execute"):
+            if not (extracted / f"{phase}.status").read_text().startswith("exit=Some(0) "):
+                raise ValueError(f"native Cargo {phase} did not exit successfully")
+        if (extracted / "cargo-online-execute.stdout").read_bytes() != CARGO_ONLINE_HELLO:
+            raise ValueError("Cargo online program stdout differs from the required marker")
+        executable(extracted / "cargo-online-binary",
+                   arch, "Cargo online-built guest program")
+        if not any(path.stat().st_size > 0 for path in
+                   (extracted / "cargo-online-home" / "registry" / "cache").rglob("itoa-1.0.15.crate")):
+            raise ValueError("Cargo online evidence is missing the downloaded itoa crate")
     if native_fs and not (extracted / "NATIVE_FS_PASS").is_file():
         raise ValueError("native filesystem evidence is missing")
     if native_fs and not (extracted / "LIBC_PTHREAD_PASS").is_file():
@@ -251,6 +279,13 @@ def main():
     parser.add_argument("--staging", type=Path, required=True, help="native sysroot overlay produced by stage.py")
     parser.add_argument("--bootstrap", type=Path, required=True, help="standard user/bin native static init")
     parser.add_argument("--probe", type=Path, help="override the staged native-rustc-probe with a fresh build")
+    parser.add_argument("--cargo", type=Path, help="cross-built Scarlet-native Cargo executable to test inside the guest")
+    parser.add_argument("--cargo-online", action="store_true", help="also fetch itoa from crates.io over HTTPS and build it on Scarlet")
+    parser.add_argument("--resolverd", type=Path, help="Scarlet-native resolverd executable required for --cargo-online")
+    parser.add_argument("--ca-bundle", type=Path, help="OS CA bundle to install for the online Cargo guest")
+    parser.add_argument("--dns-server", type=ipaddress.IPv4Address,
+                        default=ipaddress.IPv4Address("10.0.2.3"),
+                        help="IPv4 nameserver for the online guest; defaults to QEMU's resolver")
     parser.add_argument("--c-startup-probe", type=Path, help="also execute a static C main + Scarlet CRT + std-backed libc fixture (expected exit 43)")
     parser.add_argument("--zlib-probe", type=Path, help="also execute the upstream zlib C consumer (expected exit 47 and success marker)")
     parser.add_argument("--sqlite-probe", type=Path, help="also execute separate create/verify/crash/recover SQLite processes on ext2 and tmpfs, then verify the extracted ext2 database on the host")
@@ -285,6 +320,18 @@ def main():
         parser.error("linker options require full mode")
     if args.proc_macro and args.frontend_only:
         parser.error("--proc-macro requires full mode")
+    if args.cargo and args.frontend_only:
+        parser.error("--cargo requires full mode")
+    if args.cargo and args.storage != "ext2":
+        parser.error("--cargo requires ext2 storage for persisted build evidence")
+    if args.cargo_online and (not args.cargo or not args.resolverd or args.frontend_only):
+        parser.error("--cargo-online requires --cargo, --resolverd and full mode")
+    if args.cargo_online and not args.ca_bundle:
+        parser.error("--cargo-online requires --ca-bundle")
+    if args.ca_bundle and not args.cargo_online:
+        parser.error("--ca-bundle requires --cargo-online")
+    if args.resolverd and not args.cargo_online:
+        parser.error("--resolverd requires --cargo-online")
     if (args.c_startup_probe or args.zlib_probe or args.sqlite_probe) and args.storage != "ext2":
         parser.error("C startup, zlib and SQLite probes require ext2 to verify persisted evidence")
     if not all(1 <= seconds <= 86400 for seconds in (args.phase_timeout, args.run_timeout)):
@@ -327,6 +374,19 @@ def main():
     executable(in_root(staging, "/system/bin/scarlet-ld"), args.arch, "loader", static=True)
     probe = args.probe.resolve() if args.probe else in_root(staging, "/system/bin/native-rustc-probe")
     executable(probe, args.arch, "guest probe")
+    cargo = args.cargo.resolve() if args.cargo else None
+    if cargo:
+        cargo_report = executable(cargo, args.arch, "native Cargo")
+        if cargo_report["interpreter"] != "/system/bin/scarlet-ld":
+            parser.error("native Cargo must use /system/bin/scarlet-ld")
+    resolverd = args.resolverd.resolve() if args.resolverd else None
+    if resolverd:
+        resolver_report = executable(resolverd, args.arch, "native resolverd")
+        if resolver_report["interpreter"] != "/system/bin/scarlet-ld":
+            parser.error("native resolverd must use /system/bin/scarlet-ld")
+    ca_bundle = args.ca_bundle.resolve() if args.ca_bundle else None
+    if ca_bundle and (not ca_bundle.is_file() or b"-----BEGIN CERTIFICATE-----" not in ca_bundle.read_bytes()):
+        parser.error("--ca-bundle must name a PEM CA certificate bundle")
     c_startup = args.c_startup_probe.resolve() if args.c_startup_probe else None
     if c_startup:
         executable(c_startup, args.arch, "C startup probe", static=True)
@@ -374,6 +434,14 @@ def main():
     shutil.copytree(staging, root, symlinks=True)
     shutil.copy2(bootstrap, root / "init")
     shutil.copy2(probe, root / "system/bin/native-rustc-probe")
+    if cargo:
+        shutil.copy2(cargo, root / "opt/native-rustc/bin/cargo")
+    if resolverd:
+        shutil.copy2(resolverd, root / "opt/native-rustc/bin/resolverd")
+        (root / "etc/resolv.conf").write_text(f"nameserver {args.dns_server}\n")
+    if ca_bundle:
+        (root / "etc/ssl/certs").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ca_bundle, root / "etc/ssl/certs/ca-certificates.crt")
     if c_startup:
         shutil.copy2(c_startup, root / "system/bin/native-c-startup-probe")
     if zlib:
@@ -397,6 +465,10 @@ def main():
         probe_args += ["--dummy"]
     if args.proc_macro:
         probe_args += ["--proc-macro"]
+    if cargo:
+        probe_args += ["--cargo", "/opt/native-rustc/bin/cargo"]
+    if resolverd:
+        probe_args += ["--cargo-online", "--resolverd", "/opt/native-rustc/bin/resolverd"]
     if args.native_fs:
         probe_args += ["--native-fs"]
     if c_startup:
@@ -430,6 +502,8 @@ def main():
         with (output / "root-image-build.log").open("wb") as log:
             subprocess.run(make_ext2, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=300)
         cmdline += f" root={args.root_device} rootfstype=ext2 rootwait"
+    if args.cargo_online:
+        cmdline += " net.ip=10.0.2.15 net.mask=255.255.255.0 net.gw=10.0.2.2"
     else:
         payload = sum(p.stat().st_size for p in root.rglob("*") if p.is_file())
         if payload >= 256 * 1048576:
@@ -462,6 +536,8 @@ def main():
     if root_image:
         command += ["-drive", f"id=root,file={smoke.qemu_filename(root_image)},format=raw,if=none", "-device", root_device]
     command += ["-device", gpu_device, *entropy_arguments(args.arch)]
+    if args.cargo_online:
+        command += ["-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0,bus=pcie.0"]
     (output / "commands.json").write_text(json.dumps({"image": image_commands, "qemu": command, "probe": probe_args}, indent=2) + "\n")
     if args.prepare_only:
         result_path.write_text(json.dumps({"result": "PREPARED", "mode": mode, "executed_on_scarlet": False}) + "\n")
@@ -470,12 +546,12 @@ def main():
     smoke.SUCCESS = re.compile(rb"\nNATIVE_RUSTC " + (b"FRONTEND" if args.frontend_only else b"FULL") + rb" PASS\r?\n")
     smoke.FAILURE = re.compile(rb"\nNATIVE_RUSTC FAIL(?:[ :\r\n]|$)")
     result = smoke.run_guest(command, output, args.timeout)
-    result.update(mode=mode, full_compilation_verified=False, proc_macro_verified=False, native_fs_verified=False, c_startup_verified=False, zlib_verified=False, sqlite_verified=False, sqlite_disk_verified=False)
+    result.update(mode=mode, full_compilation_verified=False, proc_macro_verified=False, native_fs_verified=False, c_startup_verified=False, zlib_verified=False, sqlite_verified=False, sqlite_disk_verified=False, cargo_verified=False, cargo_online_verified=False)
     succeeded = result["result"] == "PASS"
     if root_image:
         try:
             if succeeded:
-                result["guest_evidence"] = collect_evidence(root_image, output, guest_output, mode, args.arch, args.proc_macro, args.native_fs, bool(c_startup), bool(zlib), bool(sqlite))
+                result["guest_evidence"] = collect_evidence(root_image, output, guest_output, mode, args.arch, args.proc_macro, args.native_fs, bool(c_startup), bool(zlib), bool(sqlite), bool(cargo), args.cargo_online)
             else:
                 # Preserve partial logs for failed compiler or bootstrap attempts.
                 evidence = output / "guest-evidence"
@@ -497,6 +573,8 @@ def main():
         result["zlib_verified"] = bool(zlib)
         result["sqlite_verified"] = bool(sqlite)
         result["sqlite_disk_verified"] = bool(sqlite)
+        result["cargo_verified"] = bool(cargo)
+        result["cargo_online_verified"] = args.cargo_online
     result_path.write_text(json.dumps(result, indent=2) + "\n")
     print(f"\nNative rustc ({mode}): {result['result']} (artifacts: {output})")
     return 0 if succeeded else 1

@@ -9,6 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HELLO: &str = "SCARLET_NATIVE_RUSTC_HELLO_OK\n";
 const HELLO_EXIT: i32 = 37;
+const CARGO_HELLO: &str = "SCARLET_NATIVE_CARGO_HELLO_OK\n";
+const CARGO_ONLINE_HELLO: &str = "SCARLET_NATIVE_CARGO_ONLINE_OK=42\n";
 const MACRO_HELLO: &str = "SCARLET_NATIVE_PROC_MACRO_OK=42\n";
 const ZLIB_HELLO: &str = "SCARLET_LIBC_ZLIB_OK";
 const SQLITE_HELLO: &str = "SCARLET_LIBC_SQLITE_OK";
@@ -20,7 +22,7 @@ const CONFIG: &str = "/etc/native-rustc-probe.args";
 mod allocation_failure;
 #[cfg(all(feature = "native-fs", target_os = "scarlet"))]
 mod native_fs;
-const USAGE: &str = "usage: native-rustc-probe RUSTC SYSROOT TARGET NEW_OUTPUT_DIR [--dummy] [--full --linker PATH] [--proc-macro] [--native-fs] [--c-startup PATH] [--zlib PATH] [--sqlite PATH] [--backend PATH_OR_NAME] [--linker-flavor FLAVOR] [--timeout SECONDS] [--run-timeout SECONDS]; no arguments reads /etc/native-rustc-probe.args (one argument per line)";
+const USAGE: &str = "usage: native-rustc-probe RUSTC SYSROOT TARGET NEW_OUTPUT_DIR [--dummy] [--full --linker PATH] [--cargo PATH [--cargo-online --resolverd PATH]] [--proc-macro] [--native-fs] [--c-startup PATH] [--zlib PATH] [--sqlite PATH] [--backend PATH_OR_NAME] [--linker-flavor FLAVOR] [--timeout SECONDS] [--run-timeout SECONDS]; no arguments reads /etc/native-rustc-probe.args (one argument per line)";
 
 thread_local! {
     static THREAD_PREFLIGHT: Cell<u32> = const { Cell::new(0) };
@@ -36,6 +38,9 @@ struct Options {
     dummy: bool,
     proc_macro: bool,
     native_fs: bool,
+    cargo: Option<PathBuf>,
+    cargo_online: bool,
+    resolverd: Option<PathBuf>,
     c_startup: Option<PathBuf>,
     zlib: Option<PathBuf>,
     sqlite: Option<PathBuf>,
@@ -69,6 +74,9 @@ fn options(args: &[String]) -> Result<Options, String> {
         dummy: false,
         proc_macro: false,
         native_fs: false,
+        cargo: None,
+        cargo_online: false,
+        resolverd: None,
         c_startup: None,
         zlib: None,
         sqlite: None,
@@ -85,8 +93,9 @@ fn options(args: &[String]) -> Result<Options, String> {
             "--dummy" => result.dummy = true,
             "--proc-macro" => result.proc_macro = true,
             "--native-fs" => result.native_fs = true,
+            "--cargo-online" => result.cargo_online = true,
             "--backend" | "--linker" | "--linker-flavor" | "--timeout" | "--run-timeout"
-            | "--c-startup" | "--zlib" | "--sqlite" => {
+            | "--c-startup" | "--zlib" | "--sqlite" | "--cargo" | "--resolverd" => {
                 let value = rest
                     .next()
                     .ok_or_else(|| format!("missing value for {flag}"))?;
@@ -98,6 +107,8 @@ fn options(args: &[String]) -> Result<Options, String> {
                     "--c-startup" => result.c_startup = Some(value.into()),
                     "--zlib" => result.zlib = Some(value.into()),
                     "--sqlite" => result.sqlite = Some(value.into()),
+                    "--cargo" => result.cargo = Some(value.into()),
+                    "--resolverd" => result.resolverd = Some(value.into()),
                     "--linker" => result.linker = Some(value.into()),
                     "--linker-flavor" => result.linker_flavor = Some(value.clone()),
                     "--timeout" => result.timeout = seconds(value)?,
@@ -113,6 +124,15 @@ fn options(args: &[String]) -> Result<Options, String> {
     }
     if result.proc_macro && !result.full {
         return Err("--proc-macro requires --full".into());
+    }
+    if result.cargo.is_some() && !result.full {
+        return Err("--cargo requires --full".into());
+    }
+    if result.cargo_online && (result.cargo.is_none() || result.resolverd.is_none()) {
+        return Err("--cargo-online requires --cargo and --resolverd".into());
+    }
+    if result.resolverd.is_some() && !result.cargo_online {
+        return Err("--resolverd requires --cargo-online".into());
     }
     if result.dummy && result.backend.is_some() {
         return Err("--dummy and --backend are mutually exclusive".into());
@@ -170,6 +190,17 @@ fn phase(
             Err(e) => return Err(format!("{name}: wait: {e}")),
         }
         if started.elapsed() > timeout {
+            // A timed-out child may still own the output descriptors on Scarlet.
+            // Read the in-flight log before leaving the guest so the host-side
+            // image extraction does not depend on the child's final close.
+            if let Ok(bytes) = fs::read(&stderr_path) {
+                let tail = &bytes[bytes.len().saturating_sub(12 * 1024)..];
+                eprintln!(
+                    "NATIVE_RUSTC TIMEOUT {name} stderr_tail_bytes={}:\n{}",
+                    tail.len(),
+                    String::from_utf8_lossy(tail)
+                );
+            }
             // Scarlet currently does not support Child::kill. Never block in
             // wait() after a failed kill: the host's QEMU deadline reaps the VM.
             let killed = child.kill();
@@ -347,6 +378,186 @@ fn check_elf(path: &Path, target: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn cargo_rustflags(options: &Options) -> String {
+    let mut flags = format!(
+        "-Cpanic=abort -Clinker={}",
+        options.linker.as_ref().unwrap().display()
+    );
+    if let Some(flavor) = &options.linker_flavor {
+        flags.push_str(&format!(" -Clinker-flavor={flavor}"));
+    }
+    if let Some(backend) = &options.backend {
+        flags.push_str(&format!(" -Zcodegen-backend={backend}"));
+    }
+    flags
+}
+
+fn check_cargo(options: &Options) -> Result<(), String> {
+    let output = &options.output;
+    let cargo = options.cargo.as_ref().unwrap();
+    let mut version_command = Command::new(cargo);
+    version_command.arg("-vV");
+    let version = phase(
+        version_command,
+        output,
+        "cargo-version",
+        options.run_timeout,
+        0,
+    )?;
+    if !version.starts_with(b"cargo ") {
+        return Err("cargo version output is missing".into());
+    }
+
+    let fixture = output.join("cargo-fixture");
+    fs::create_dir(&fixture).map_err(|e| format!("create Cargo fixture: {e}"))?;
+    fs::create_dir(fixture.join("src")).map_err(|e| format!("create Cargo source: {e}"))?;
+    fs::write(
+        fixture.join("Cargo.toml"),
+        "[package]\nname = \"native-cargo-hello\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .map_err(|e| e.to_string())?;
+    fs::write(
+        fixture.join("src/main.rs"),
+        "fn main() { println!(\"SCARLET_NATIVE_CARGO_HELLO_OK\"); }\n",
+    )
+    .map_err(|e| e.to_string())?;
+
+    let mut command = Command::new(cargo);
+    command
+        .args([
+            "build",
+            "--offline",
+            "--release",
+            "--jobs",
+            "1",
+            "--target",
+            &options.target,
+        ])
+        .arg("--manifest-path")
+        .arg(fixture.join("Cargo.toml"))
+        .env("CARGO_HOME", output.join("cargo-home"))
+        .env("CARGO_TARGET_DIR", output.join("cargo-target"))
+        .env("RUSTC", &options.rustc)
+        .env("RUSTFLAGS", cargo_rustflags(options));
+    phase(command, output, "cargo-build", options.timeout, 0)?;
+
+    let executable = output
+        .join("cargo-target")
+        .join(&options.target)
+        .join("release/native-cargo-hello");
+    check_elf(&executable, &options.target)?;
+    let stdout = phase(
+        Command::new(&executable),
+        output,
+        "cargo-execute",
+        options.run_timeout,
+        0,
+    )?;
+    if stdout != CARGO_HELLO.as_bytes() {
+        return Err(format!(
+            "Cargo-built program stdout mismatch: {:?}",
+            String::from_utf8_lossy(&stdout)
+        ));
+    }
+    fs::write(output.join("CARGO_PASS"), "offline_build\nexecute\n").map_err(|e| e.to_string())?;
+    println!("NATIVE_RUSTC CARGO PASS");
+    Ok(())
+}
+
+fn check_cargo_online(options: &Options) -> Result<(), String> {
+    let output = &options.output;
+    // ext2 currently rejects rmdir even for an empty temporary directory.
+    // rustc removes its .temp-archive directory when finishing every rlib, so
+    // build in the guest tmpfs and persist the executable as evidence below.
+    let target_dir = Path::new("/tmp/native-cargo-online-target");
+    let resolverd = options.resolverd.as_ref().unwrap();
+    let mut daemon = Command::new(resolverd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("start resolverd: {e}"))?;
+    let socket = Path::new("/tmp/resolverd.sock");
+    for _ in 0..100 {
+        if fs::metadata(socket).is_ok() {
+            break;
+        }
+        if let Some(status) = daemon.try_wait().map_err(|e| e.to_string())? {
+            return Err(format!("resolverd exited before binding: {status}"));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    if fs::metadata(socket).is_err() {
+        return Err("resolverd did not bind /tmp/resolverd.sock".into());
+    }
+    let mut dns = Command::new(env::current_exe().map_err(|e| e.to_string())?);
+    dns.arg("--network-dns-child");
+    phase(dns, output, "network-dns", Duration::from_secs(15), 0)?;
+    let mut tcp = Command::new(env::current_exe().map_err(|e| e.to_string())?);
+    tcp.arg("--network-tcp-child");
+    phase(tcp, output, "network-tcp", Duration::from_secs(15), 0)?;
+
+    let fixture = output.join("cargo-online-fixture");
+    fs::create_dir(&fixture).map_err(|e| e.to_string())?;
+    fs::create_dir(fixture.join("src")).map_err(|e| e.to_string())?;
+    fs::write(
+        fixture.join("Cargo.toml"),
+        "[package]\nname = \"native-cargo-online\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[dependencies]\nitoa = \"=1.0.15\"\n",
+    )
+    .map_err(|e| e.to_string())?;
+    fs::write(
+        fixture.join("src/main.rs"),
+        "fn main() { let mut buffer = itoa::Buffer::new(); println!(\"SCARLET_NATIVE_CARGO_ONLINE_OK={}\", buffer.format(42)); }\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let mut command = Command::new(options.cargo.as_ref().unwrap());
+    command
+        .args([
+            "build",
+            "--release",
+            "--jobs",
+            "1",
+            "--target",
+            &options.target,
+        ])
+        .arg("--manifest-path")
+        .arg(fixture.join("Cargo.toml"))
+        .env("CARGO_HOME", output.join("cargo-online-home"))
+        .env("CARGO_TARGET_DIR", target_dir)
+        .env("CARGO_NET_RETRY", "0")
+        .env("CARGO_HTTP_TIMEOUT", "20")
+        .env("CARGO_HTTP_DEBUG", "true")
+        .env("CARGO_LOG", "network=trace")
+        .env("CARGO_HTTP_MULTIPLEXING", "false")
+        .env("CARGO_REGISTRIES_CRATES_IO_PROTOCOL", "sparse")
+        .env("RUSTC", &options.rustc)
+        .env("RUSTFLAGS", cargo_rustflags(options));
+    phase(command, output, "cargo-online-build", options.timeout, 0)?;
+    let executable = target_dir
+        .join(&options.target)
+        .join("release/native-cargo-online");
+    check_elf(&executable, &options.target)?;
+    fs::copy(&executable, output.join("cargo-online-binary"))
+        .map_err(|error| format!("persist online-built executable: {error}"))?;
+    let stdout = phase(
+        Command::new(&executable),
+        output,
+        "cargo-online-execute",
+        options.run_timeout,
+        0,
+    )?;
+    if stdout != CARGO_ONLINE_HELLO.as_bytes() {
+        return Err("Cargo online fixture stdout mismatch".into());
+    }
+    fs::write(
+        output.join("CARGO_ONLINE_PASS"),
+        "crates.io sparse HTTPS\nitoa 1.0.15\n",
+    )
+    .map_err(|e| e.to_string())?;
+    println!("NATIVE_RUSTC CARGO_ONLINE PASS");
+    Ok(())
+}
+
 fn existing_absolute(path: &Path, label: &str, directory: bool) -> Result<PathBuf, String> {
     // Scarlet's current std Path::is_absolute/canonicalize implementation is
     // not reliable for slash-rooted target paths. has_root is correct, and the
@@ -460,6 +671,14 @@ fn run() -> Result<(), String> {
     if let Some(sqlite) = &mut options.sqlite {
         *sqlite = existing_absolute(sqlite, "SQLite consumer", false)?;
         check_elf(sqlite, &options.target).map_err(|e| format!("SQLite consumer: {e}"))?;
+    }
+    if let Some(cargo) = &mut options.cargo {
+        *cargo = existing_absolute(cargo, "cargo", false)?;
+        check_elf(cargo, &options.target).map_err(|e| format!("Cargo executable: {e}"))?;
+    }
+    if let Some(resolverd) = &mut options.resolverd {
+        *resolverd = existing_absolute(resolverd, "resolverd", false)?;
+        check_elf(resolverd, &options.target).map_err(|e| format!("resolverd executable: {e}"))?;
     }
     if let Some(linker) = &mut options.linker {
         *linker = existing_absolute(linker, "linker", false)?;
@@ -673,6 +892,12 @@ fn run() -> Result<(), String> {
     if options.proc_macro {
         check_proc_macro(&options)?;
     }
+    if options.cargo.is_some() {
+        check_cargo(&options)?;
+        if options.cargo_online {
+            check_cargo_online(&options)?;
+        }
+    }
     fs::write(output.join("PASS"), format!("mode=full\nversion\ncfg\nfrontend\ncompile\nexecute\nhello_exit={HELLO_EXIT}\nhello_stdout={HELLO:?}\n"))
         .map_err(|e| e.to_string())?;
     println!("NATIVE_RUSTC FULL PASS");
@@ -680,6 +905,39 @@ fn run() -> Result<(), String> {
 }
 
 fn main() {
+    if env::args().nth(1).as_deref() == Some("--network-tcp-child") {
+        use std::net::{TcpStream, ToSocketAddrs};
+        let result = ("index.crates.io", 443)
+            .to_socket_addrs()
+            .and_then(|mut addrs| {
+                let address = addrs.next().ok_or(std::io::ErrorKind::NotFound)?;
+                TcpStream::connect_timeout(&address, Duration::from_secs(5))
+            });
+        match result {
+            Ok(_) => {
+                println!("NETWORK_TCP_OK index.crates.io:443");
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("NETWORK_TCP_FAIL {error:?}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if env::args().nth(1).as_deref() == Some("--network-dns-child") {
+        use std::net::ToSocketAddrs;
+        match ("index.crates.io", 443).to_socket_addrs() {
+            Ok(addrs) => {
+                let addresses: Vec<_> = addrs.collect();
+                println!("NETWORK_DNS {addresses:?}");
+                std::process::exit(i32::from(addresses.is_empty()));
+            }
+            Err(error) => {
+                eprintln!("NETWORK_DNS_FAIL {error:?}");
+                std::process::exit(1);
+            }
+        }
+    }
     #[cfg(all(feature = "native-fs", target_os = "scarlet"))]
     if let Some(argument) = env::args().nth(1) {
         if matches!(
@@ -753,6 +1011,45 @@ mod tests {
                 .as_deref(),
             Some(Path::new("/system/bin/native-sqlite-probe"))
         );
+    }
+
+    #[test]
+    fn cargo_requires_full_mode_and_a_path() {
+        assert!(parse(&["--cargo", "/cargo"]).is_err());
+        assert!(parse(&["--full", "--linker", "/lld", "--cargo"]).is_err());
+        assert_eq!(
+            parse(&["--full", "--linker", "/lld", "--cargo", "/cargo"])
+                .unwrap()
+                .cargo
+                .as_deref(),
+            Some(Path::new("/cargo"))
+        );
+        assert!(parse(&["--full", "--linker", "/lld", "--cargo-online"]).is_err());
+        assert!(parse(&["--full", "--linker", "/lld", "--resolverd", "/resolverd"]).is_err());
+        assert!(
+            parse(&[
+                "--full",
+                "--linker",
+                "/lld",
+                "--cargo",
+                "/cargo",
+                "--cargo-online"
+            ])
+            .is_err()
+        );
+        let online = parse(&[
+            "--full",
+            "--linker",
+            "/lld",
+            "--cargo",
+            "/cargo",
+            "--cargo-online",
+            "--resolverd",
+            "/resolverd",
+        ])
+        .unwrap();
+        assert!(online.cargo_online);
+        assert_eq!(online.resolverd.as_deref(), Some(Path::new("/resolverd")));
     }
 
     #[test]

@@ -40,12 +40,7 @@
         "aarch64-linux"
         "aarch64-darwin"
       ];
-      linuxSystems = [
-        "x86_64-linux"
-        "aarch64-linux"
-      ];
       forAllSystems = f: nixpkgs.lib.genAttrs supportedSystems (system: f system);
-      forLinuxSystems = f: nixpkgs.lib.genAttrs linuxSystems (system: f system);
 
       mkSystem =
         system:
@@ -490,7 +485,9 @@
             };
           };
 
-          packages = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          packages = {
+            scarlet-ca-certificates = pkgs.cacert;
+          } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
             scarlet-dev-image = dockerImage;
             default = dockerImage;
           };
@@ -500,6 +497,6 @@
       devShells = forAllSystems (system: {
         default = (mkSystem system).devShell;
       });
-      packages = forLinuxSystems (system: (mkSystem system).packages);
+      packages = forAllSystems (system: (mkSystem system).packages);
     };
 }
