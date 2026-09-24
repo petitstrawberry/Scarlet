@@ -1,16 +1,12 @@
-# Scarlet-native Rust compiler toolchain.
-#
-# The archive contains rustc, matching static target libraries, the Cranelift
-# backend, and Wild. The runtime interpreter is owned by bundles/base and lives
-# at /bin/scarlet-ld.
-
+# Native Rust v0.1.0-dev.825856ca4819; requires /bin/scarlet-ld from Scarlet 368c53e5f5ca970042bdb18eb86d8a70dd6554da.
+# Select this release explicitly when building a Scarlet image.
 [[layers]]
 kind = "archive"
-url = "https://github.com/petitstrawberry/scarlet-rust-nix/releases/download/v0.1.0-rc.1/native-rust-{arch}-v0.1.0-rc.1.tar.zst"
-sha256 = { aarch64 = "sha256:f3c2cd2a361eb36276c3052d547064b50aff7422d8616f903001c6c9067b444c", riscv64 = "sha256:4934fd276231ea79b221c88cd5403eb5ce2328e13e063a09b149e0de0ab1bafe" }
+url = "https://github.com/petitstrawberry/scarlet-rust-nix/releases/download/v0.1.0-dev.825856ca4819/native-rust-{arch}-v0.1.0-dev.825856ca4819.tar.zst"
+sha256 = { aarch64 = "sha256:bcd6c090278c3ff8ce20be4f225a33cd0b0837cb90f37f1240444bc22b7dc320", riscv64 = "sha256:1d63de9d364bfdc3cedcbd0e5b062d8a6f3dc46d185da9aec54f4b8a4f2c2a5e" }
 format = "tar-zst"
 strip_components = 1
-to = "/opt/scarlet/toolchains/rust/v0.1.0-rc.1"
+to = "/opt/scarlet/toolchains/rust/v0.1.0-dev.825856ca4819"
 
 [[layers]]
 kind = "copy"
