@@ -1,27 +1,21 @@
 //! GPU capability probe utility.
 
-#![no_std]
-#![no_main]
-
-extern crate scarlet_std as std;
-
 use sgfx::Instance;
-use std::println;
+use std::process::ExitCode;
 
-#[unsafe(no_mangle)]
-fn main() -> i32 {
+fn main() -> ExitCode {
     let instance = match Instance::new() {
         Ok(instance) => instance,
         Err(error) => {
             println!("failed to select an SGFX backend: {}", error);
-            return 1;
+            return ExitCode::FAILURE;
         }
     };
     let device = match instance.open_device("/dev/gpu0") {
         Ok(device) => device,
         Err(error) => {
             println!("failed to open /dev/gpu0: {:?}", error);
-            return 1;
+            return ExitCode::FAILURE;
         }
     };
     println!("SGFX backend: {}", device.backend());
@@ -31,15 +25,11 @@ fn main() -> i32 {
     println!("  rendering: {}", capabilities.supports_rendering());
     println!("  presentation: {}", capabilities.supports_presentation());
 
-    let context = match device.create_context() {
-        Ok(context) => context,
-        Err(error) => {
-            println!("failed to create GPU context: {:?}", error);
-            return 1;
-        }
-    };
-    let _ = context;
+    if let Err(error) = device.create_context() {
+        println!("failed to create GPU context: {:?}", error);
+        return ExitCode::FAILURE;
+    }
     println!("  graphics context: available");
 
-    0
+    ExitCode::SUCCESS
 }

@@ -4949,7 +4949,6 @@ dependencies = [
  "scpm",
  "serde",
  "serde-json-core",
- "sgfx",
  "sha2",
  "ssh-key",
  "subtle",

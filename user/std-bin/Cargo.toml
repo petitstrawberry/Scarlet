@@ -334,3 +334,7 @@ path = "src/axum_demo.rs"
 [[bin]]
 name = "soft-keyboard"
 path = "src/soft_keyboard.rs"
+
+[[bin]]
+name = "sgfx-probe"
+path = "src/sgfx_probe.rs"

@@ -162,8 +162,8 @@ to = "/bin/video-player"
 
 [[layers]]
 kind = "cargo"
-source = "../../user/bin"
-package = "user-bin"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
 bin = "sgfx-probe"
 to = "/bin/sgfx-probe"
 
