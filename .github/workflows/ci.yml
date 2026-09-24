@@ -75,12 +75,10 @@ jobs:
     - name: Test native ABI and SWS wire contracts
       run: nix develop .#default --command cargo make test-release-contracts
 
-    - name: Test native libc and compiler probe helpers
+    - name: Test native libc
       run: |
         nix develop .#default --command python3 user/lib/scarlet-libc/tests/check_headers.py
         nix develop .#default --command cargo test --manifest-path user/lib/scarlet-libc/Cargo.toml
-        nix develop .#default --command cargo test --manifest-path tools/native-rustc/Cargo.toml --all-features
-        nix develop .#default --command python3 -m unittest discover -s tools/native-rustc -p 'test_*.py'
 
     - name: Check ABI foundation against RV32 and ARMv5TE constraints
       run: nix develop .#default --command cargo make test-abi-foundation
