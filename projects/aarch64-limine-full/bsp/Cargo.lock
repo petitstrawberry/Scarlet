@@ -159,7 +159,7 @@ dependencies = [
 [[package]]
 name = "scarlet"
 version = "1.0.1"
-source = "git+https://github.com/petitstrawberry/Scarlet?rev=d3ad0a9d7d72241d4d9b1a3edb9599577698b020#d3ad0a9d7d72241d4d9b1a3edb9599577698b020"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=368c53e5f5ca970042bdb18eb86d8a70dd6554da#368c53e5f5ca970042bdb18eb86d8a70dd6554da"
 dependencies = [
  "chacha20",
  "fdt",
@@ -176,12 +176,12 @@ dependencies = [
 [[package]]
 name = "scarlet-abi"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?rev=d3ad0a9d7d72241d4d9b1a3edb9599577698b020#d3ad0a9d7d72241d4d9b1a3edb9599577698b020"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=368c53e5f5ca970042bdb18eb86d8a70dd6554da#368c53e5f5ca970042bdb18eb86d8a70dd6554da"
 
 [[package]]
 name = "scarlet-module-prototype"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?rev=d3ad0a9d7d72241d4d9b1a3edb9599577698b020#d3ad0a9d7d72241d4d9b1a3edb9599577698b020"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=368c53e5f5ca970042bdb18eb86d8a70dd6554da#368c53e5f5ca970042bdb18eb86d8a70dd6554da"
 dependencies = [
  "scarlet",
 ]
