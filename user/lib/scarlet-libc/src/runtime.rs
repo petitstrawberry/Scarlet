@@ -8,9 +8,9 @@
 //! emergency PRNG. The legacy entropy syscall has only an undifferentiated
 //! failure sentinel, so failures after local validation are reported as EIO.
 
+use std::ffi::{c_char, c_int, c_long};
 #[cfg(target_os = "scarlet")]
-use std::ffi::{c_char, c_uint, c_void};
-use std::ffi::{c_int, c_long};
+use std::ffi::{c_uint, c_void};
 #[cfg(any(test, target_os = "scarlet"))]
 use std::time::Duration;
 
@@ -27,11 +27,202 @@ pub const CLOCK_MONOTONIC: c_int = 1;
 pub const GRND_NONBLOCK: u32 = 1;
 pub const GRND_RANDOM: u32 = 2;
 
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub extern "C" fn sysconf(name: c_int) -> c_long {
+    match name {
+        30 => 4096, // _SC_PAGESIZE; Scarlet's architecture-independent PAGE_SIZE
+        70 => 4096, // _SC_GETPW_R_SIZE_MAX; upper bound for the synthetic user record
+        _ => crate::fail(ERRNO_EINVAL) as c_long,
+    }
+}
+
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub extern "C" fn sched_yield() -> c_int {
+    std::thread::yield_now();
+    0
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct Timeval {
     pub tv_sec: i64,
     pub tv_usec: c_long,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tm {
+    pub tm_sec: c_int,
+    pub tm_min: c_int,
+    pub tm_hour: c_int,
+    pub tm_mday: c_int,
+    pub tm_mon: c_int,
+    pub tm_year: c_int,
+    pub tm_wday: c_int,
+    pub tm_yday: c_int,
+    pub tm_isdst: c_int,
+    pub tm_gmtoff: c_long,
+    pub tm_zone: *const c_char,
+}
+
+#[cfg(any(test, target_os = "scarlet"))]
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    // Proleptic Gregorian calendar, with the Unix epoch shifted to the civil
+    // epoch. Division uses floor semantics for dates before 1970.
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    (year + i64::from(month <= 2), month, day)
+}
+
+#[cfg(any(test, target_os = "scarlet"))]
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month_prime = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+#[cfg(any(test, target_os = "scarlet"))]
+fn utc_calendar(seconds: i64) -> Result<Tm, c_int> {
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let tm_year = c_int::try_from(year - 1900).map_err(|_| ERRNO_EOVERFLOW)?;
+    Ok(Tm {
+        tm_sec: (seconds_of_day % 60) as c_int,
+        tm_min: ((seconds_of_day / 60) % 60) as c_int,
+        tm_hour: (seconds_of_day / 3_600) as c_int,
+        tm_mday: day as c_int,
+        tm_mon: (month - 1) as c_int,
+        tm_year,
+        tm_wday: (days + 4).rem_euclid(7) as c_int,
+        tm_yday: (days - days_from_civil(year, 1, 1)) as c_int,
+        tm_isdst: 0,
+        tm_gmtoff: 0,
+        tm_zone: c"UTC".as_ptr(),
+    })
+}
+
+#[cfg(any(test, target_os = "scarlet"))]
+fn utc_timestamp(input: Tm) -> Result<(i64, Tm), c_int> {
+    let year = i64::from(input.tm_year) + 1900 + i64::from(input.tm_mon).div_euclid(12);
+    let month = i64::from(input.tm_mon).rem_euclid(12) + 1;
+    let days = days_from_civil(year, month, i64::from(input.tm_mday));
+    let seconds = days
+        .checked_mul(86_400)
+        .and_then(|value| value.checked_add(i64::from(input.tm_hour) * 3_600))
+        .and_then(|value| value.checked_add(i64::from(input.tm_min) * 60))
+        .and_then(|value| value.checked_add(i64::from(input.tm_sec)))
+        .ok_or(ERRNO_EOVERFLOW)?;
+    Ok((seconds, utc_calendar(seconds)?))
+}
+
+/// # Safety
+/// `input` points to a writable struct tm.
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mktime(input: *mut Tm) -> i64 {
+    if input.is_null() {
+        crate::fail(scarlet_abi::fs::ERRNO_EFAULT);
+        return -1;
+    }
+    // SAFETY: the C caller supplies a readable/writable struct tm.
+    let original = unsafe { *input };
+    match utc_timestamp(original) {
+        Ok((seconds, normalized)) => {
+            // SAFETY: the pointer was checked above.
+            unsafe { *input = normalized };
+            seconds
+        }
+        Err(errno) => {
+            crate::fail(errno);
+            -1
+        }
+    }
+}
+
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub extern "C" fn difftime(end: i64, beginning: i64) -> f64 {
+    (i128::from(end) - i128::from(beginning)) as f64
+}
+
+/// # Safety
+/// Both pointers must be valid for reading/writing a time_t/struct tm.
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gmtime_r(input: *const i64, output: *mut Tm) -> *mut Tm {
+    if input.is_null() || output.is_null() {
+        crate::fail(ERRNO_EFAULT);
+        return std::ptr::null_mut();
+    }
+    // SAFETY: The caller provides a readable time_t.
+    let value = unsafe { *input };
+    let calendar = match utc_calendar(value) {
+        Ok(calendar) => calendar,
+        Err(error) => {
+            crate::fail(error);
+            return std::ptr::null_mut();
+        }
+    };
+    // SAFETY: The caller provides a writable struct tm.
+    unsafe { *output = calendar };
+    output
+}
+
+/// Scarlet's local clock is UTC until timezone configuration is available.
+/// # Safety
+/// Both pointers must be valid for reading/writing a time_t/struct tm.
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn localtime_r(input: *const i64, output: *mut Tm) -> *mut Tm {
+    // SAFETY: The contracts are identical while local time equals UTC.
+    unsafe { gmtime_r(input, output) }
+}
+
+#[cfg(target_os = "scarlet")]
+thread_local! {
+    static CALENDAR_BUFFER: std::cell::UnsafeCell<Tm> = const {
+        std::cell::UnsafeCell::new(Tm {
+            tm_sec: 0, tm_min: 0, tm_hour: 0, tm_mday: 0, tm_mon: 0,
+            tm_year: 0, tm_wday: 0, tm_yday: 0, tm_isdst: 0,
+            tm_gmtoff: 0, tm_zone: std::ptr::null(),
+        })
+    };
+}
+
+/// # Safety
+/// `input` must point to a readable time_t. The returned thread-local buffer
+/// is replaced by the next gmtime or localtime call from this thread.
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gmtime(input: *const i64) -> *mut Tm {
+    CALENDAR_BUFFER.with(|buffer| {
+        // SAFETY: this thread owns its TLS calendar buffer.
+        unsafe { gmtime_r(input, buffer.get()) }
+    })
+}
+
+/// # Safety
+/// `input` must point to a readable time_t. Scarlet local time is UTC.
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn localtime(input: *const i64) -> *mut Tm {
+    // SAFETY: localtime and gmtime share the same contract and UTC backend.
+    unsafe { gmtime(input) }
 }
 
 /// Clear only the IEEE sign bit, including for signed zeros and NaN payloads.
@@ -364,6 +555,50 @@ pub unsafe extern "C" fn __assert_fail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utc_calendar_handles_epoch_leap_years_and_range() {
+        for (seconds, year, month, day, weekday, yearday) in [
+            (0, 1970, 1, 1, 4, 0),
+            (-1, 1969, 12, 31, 3, 364),
+            (-2_203_891_200, 1900, 3, 1, 4, 59),
+            (951_782_400, 2000, 2, 29, 2, 59),
+            (4_107_542_400, 2100, 3, 1, 1, 59),
+        ] {
+            let calendar = utc_calendar(seconds).unwrap();
+            assert_eq!(calendar.tm_year, year - 1900);
+            assert_eq!(calendar.tm_mon, month - 1);
+            assert_eq!(calendar.tm_mday, day);
+            assert_eq!(calendar.tm_wday, weekday);
+            assert_eq!(calendar.tm_yday, yearday);
+            assert_eq!(calendar.tm_isdst, 0);
+            assert_eq!(calendar.tm_gmtoff, 0);
+            assert_eq!(
+                days_from_civil(year.into(), month.into(), day.into()),
+                seconds.div_euclid(86_400)
+            );
+        }
+        assert_eq!(utc_calendar(i64::MAX).unwrap_err(), ERRNO_EOVERFLOW);
+        assert_eq!(utc_calendar(i64::MIN).unwrap_err(), ERRNO_EOVERFLOW);
+    }
+
+    #[test]
+    fn utc_timestamp_round_trips_and_normalizes_fields() {
+        for seconds in [-2_203_891_200, -1, 0, 951_782_400, 4_107_542_400] {
+            let calendar = utc_calendar(seconds).unwrap();
+            assert_eq!(utc_timestamp(calendar).unwrap().0, seconds);
+        }
+        let mut input = utc_calendar(0).unwrap();
+        input.tm_mon = 13;
+        input.tm_mday = 0;
+        input.tm_hour = 24;
+        let (seconds, normalized) = utc_timestamp(input).unwrap();
+        assert_eq!(seconds, days_from_civil(1971, 2, 1) * 86_400);
+        assert_eq!(
+            (normalized.tm_year, normalized.tm_mon, normalized.tm_mday),
+            (71, 1, 1)
+        );
+    }
 
     #[test]
     fn absolute_value_preserves_all_non_sign_bits() {

@@ -2,6 +2,7 @@
 #define SCARLET_MATH_H
 #define INFINITY (__builtin_inff())
 #define NAN (__builtin_nanf(""))
+#define isnan(value) __builtin_isnan(value)
 #ifdef __cplusplus
 extern "C" {
 #endif

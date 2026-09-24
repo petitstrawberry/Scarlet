@@ -6,6 +6,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+int remove(const char *);
 /* Opaque, internally synchronized streams. This first implementation performs
    unbuffered I/O. Float, wide, positional and %n formatting are unsupported. */
 typedef struct scarlet_FILE FILE;
@@ -15,6 +16,9 @@ typedef struct scarlet_FILE FILE;
 #define SEEK_END 2
 #define BUFSIZ 8192
 #define FILENAME_MAX 4096
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
 extern FILE *stdin;
 extern FILE *stdout;
 extern FILE *stderr;
@@ -22,6 +26,8 @@ FILE *fopen(const char *, const char *);
 FILE *fdopen(int, const char *);
 int fclose(FILE *);
 int fflush(FILE *);
+int setvbuf(FILE *, char *, int, size_t);
+int rename(const char *, const char *);
 size_t fread(void *, size_t, size_t, FILE *);
 size_t fwrite(const void *, size_t, size_t, FILE *);
 int fseek(FILE *, long, int);

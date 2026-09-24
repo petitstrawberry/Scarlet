@@ -26,6 +26,7 @@ int *__errno_location(void);
 #define EISDIR 21
 #define EINVAL 22
 #define EMFILE 24
+#define ENOTTY 25
 #define ENOSPC 28
 #define ESPIPE 29
 #define EROFS 30
@@ -33,10 +34,24 @@ int *__errno_location(void);
 #define ERANGE 34
 #define EDEADLK 35
 #define ENAMETOOLONG 36
+#define ENOLCK 37
 #define ENOTEMPTY 39
 #define ELOOP 40
 #define EOVERFLOW 75
+#define ENOTSOCK 88
+#define EMSGSIZE 90
+#define EPROTONOSUPPORT 93
 #define ENOTSUP 95
 #define EOPNOTSUPP ENOTSUP
+#define EAFNOSUPPORT 97
+#define EADDRINUSE 98
+#define EADDRNOTAVAIL 99
+#define ENETUNREACH 101
+#define ECONNABORTED 103
+#define ECONNRESET 104
+#define EISCONN 106
+#define ENOTCONN 107
 #define ETIMEDOUT 110
+#define ECONNREFUSED 111
+#define EINPROGRESS 115
 #endif

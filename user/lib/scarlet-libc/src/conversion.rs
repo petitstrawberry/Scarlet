@@ -197,6 +197,45 @@ pub unsafe extern "C" fn strtoull(
     }
 }
 
+#[repr(C)]
+pub struct Imaxdiv {
+    pub quot: i64,
+    pub rem: i64,
+}
+
+/// Return the absolute value of a C intmax_t; the minimum value is undefined
+/// by C, and wraps rather than panicking at the Rust FFI boundary.
+#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+pub extern "C" fn imaxabs(value: i64) -> i64 {
+    value.wrapping_abs()
+}
+
+/// Divide two C intmax_t values and return quotient and remainder.
+/// Division by zero and the MIN/-1 pair are undefined by C.
+#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+pub extern "C" fn imaxdiv(numerator: i64, denominator: i64) -> Imaxdiv {
+    Imaxdiv {
+        quot: numerator / denominator,
+        rem: numerator % denominator,
+    }
+}
+
+/// # Safety
+/// `text` is a readable NUL-terminated string and `end`, if non-null, is writable.
+#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+pub unsafe extern "C" fn strtoimax(text: *const c_char, end: *mut *mut c_char, base: c_int) -> i64 {
+    // SAFETY: intmax_t and long long are both signed 64-bit on Scarlet.
+    unsafe { strtoll(text, end, base) }
+}
+
+/// # Safety
+/// `text` is a readable NUL-terminated string and `end`, if non-null, is writable.
+#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+pub unsafe extern "C" fn strtoumax(text: *const c_char, end: *mut *mut c_char, base: c_int) -> u64 {
+    // SAFETY: uintmax_t and unsigned long long are both 64-bit on Scarlet.
+    unsafe { strtoull(text, end, base) }
+}
+
 /// Convert a decimal C string to int. Use strtol when range checking is needed.
 ///
 /// # Safety

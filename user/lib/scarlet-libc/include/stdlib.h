@@ -17,6 +17,7 @@ void free(void *);
 _Noreturn void abort(void);
 #endif
 char *realpath(const char *, char *);
+char *getenv(const char *);
 void qsort(void *, size_t, size_t, int (*)(const void *, const void *));
 void *bsearch(const void *, const void *, size_t, size_t, int (*)(const void *, const void *));
 int abs(int);

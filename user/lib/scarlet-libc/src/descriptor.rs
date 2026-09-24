@@ -20,6 +20,7 @@ pub const O_CREAT: c_int = scarlet_abi::fs::VFS_O_CREAT as c_int;
 pub const O_EXCL: c_int = scarlet_abi::fs::VFS_O_EXCL as c_int;
 pub const O_TRUNC: c_int = scarlet_abi::fs::VFS_O_TRUNC as c_int;
 pub const O_APPEND: c_int = scarlet_abi::fs::VFS_O_APPEND as c_int;
+pub const O_NONBLOCK: c_int = 0x800;
 pub const O_DIRECTORY: c_int = scarlet_abi::fs::VFS_O_DIRECTORY as c_int;
 pub const O_NOFOLLOW: c_int = scarlet_abi::fs::VFS_O_NOFOLLOW as c_int;
 pub const O_CLOEXEC: c_int = scarlet_abi::fs::VFS_O_CLOEXEC as c_int;
@@ -27,6 +28,9 @@ pub const F_GETFD: c_int = 1;
 pub const F_SETFD: c_int = 2;
 pub const F_GETFL: c_int = 3;
 pub const F_SETFL: c_int = 4;
+pub const F_GETLK: c_int = 5;
+pub const F_SETLK: c_int = 6;
+pub const F_SETLKW: c_int = 7;
 pub const FD_CLOEXEC: c_int = 1;
 
 #[cfg(any(test, target_os = "scarlet"))]
@@ -397,13 +401,25 @@ pub unsafe extern "C" fn fcntl(fd: c_int, command: c_int, mut args: ...) -> c_in
             })
         }
         F_GETFL => match descriptor_flags(fd) {
-            Ok(flags) => flags,
+            Ok(flags) => {
+                // Socket nonblocking is a Native control rather than a VFS
+                // status flag. Other handle types reject this query.
+                let nonblocking = unsafe {
+                    scarlet_sys::syscall3(
+                        Syscall::HandleControl,
+                        fd as usize,
+                        scarlet_abi::SCTL_SOCKET_GET_NONBLOCK as usize,
+                        0,
+                    )
+                };
+                flags | if nonblocking == 1 { O_NONBLOCK } else { 0 }
+            }
             Err(error) => crate::fail(error),
         },
         F_SETFL => {
             // SAFETY: this command requires one promoted int argument.
             let requested = unsafe { args.arg::<c_int>() };
-            if requested & !(O_ACCMODE | O_APPEND) != 0 {
+            if requested & !(O_ACCMODE | O_APPEND | O_NONBLOCK) != 0 {
                 return crate::fail(ERRNO_EINVAL);
             }
             // The access mode is immutable; F_SETFL ignores the requested
@@ -412,6 +428,31 @@ pub unsafe extern "C" fn fcntl(fd: c_int, command: c_int, mut args: ...) -> c_in
                 Ok(access) => access,
                 Err(error) => return crate::fail(error),
             };
+            // For sockets, adjust Native nonblocking state. Do not silently
+            // accept O_NONBLOCK for file handles without such a backend.
+            let socket_mode = unsafe {
+                scarlet_sys::syscall3(
+                    Syscall::HandleControl,
+                    fd as usize,
+                    scarlet_abi::SCTL_SOCKET_GET_NONBLOCK as usize,
+                    0,
+                )
+            };
+            if socket_mode <= 1 {
+                let result = unsafe {
+                    scarlet_sys::syscall3(
+                        Syscall::HandleControl,
+                        fd as usize,
+                        scarlet_abi::SCTL_SOCKET_SET_NONBLOCK as usize,
+                        usize::from(requested & O_NONBLOCK != 0),
+                    )
+                };
+                if result == usize::MAX {
+                    return crate::fail(scarlet_abi::ERRNO_EOPNOTSUPP);
+                }
+            } else if requested & O_NONBLOCK != 0 {
+                return crate::fail(scarlet_abi::ERRNO_EOPNOTSUPP);
+            }
             // SAFETY: the flags are scalar ABI values; the descriptor remains open.
             descriptor_result(unsafe {
                 scarlet_sys::syscall2(
@@ -421,6 +462,10 @@ pub unsafe extern "C" fn fcntl(fd: c_int, command: c_int, mut args: ...) -> c_in
                 )
             })
         }
+        // POSIX byte-range locks are not implemented by Native FileLock.
+        // Explicitly reject them; SQLite's Scarlet cache DB uses unix-none
+        // under Cargo's separate whole-file package cache lock.
+        F_GETLK | F_SETLK | F_SETLKW => crate::fail(37), // ENOLCK
         _ => crate::fail(ERRNO_EINVAL),
     }
 }
