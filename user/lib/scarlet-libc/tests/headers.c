@@ -18,6 +18,22 @@
 #include <math.h>
 #include <assert.h>
 #include <pthread.h>
+#include <inttypes.h>
+#include <poll.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/select.h>
+#include <sys/uio.h>
+#include <sys/un.h>
+#include <netinet/tcp.h>
+#include <netdb.h>
+#include <sched.h>
+#include <dirent.h>
+#include <sys/param.h>
+#include <pwd.h>
 
 /* Reverse the order and repeat every header to exercise include guards. */
 #include <errno.h>
@@ -38,6 +54,22 @@
 #include <math.h>
 #include <assert.h>
 #include <pthread.h>
+#include <inttypes.h>
+#include <poll.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/select.h>
+#include <sys/uio.h>
+#include <sys/un.h>
+#include <netinet/tcp.h>
+#include <netdb.h>
+#include <sched.h>
+#include <dirent.h>
+#include <sys/param.h>
+#include <pwd.h>
 
 #ifdef __cplusplus
 #define HEADER_ASSERT(condition) static_assert(condition, #condition)
@@ -71,6 +103,23 @@ HEADER_ASSERT(sizeof(mode_t) == 4);
 HEADER_ASSERT(sizeof(time_t) == 8 && sizeof(off_t) == 8);
 HEADER_ASSERT(sizeof(struct timespec) == 16);
 HEADER_ASSERT(sizeof(struct timeval) == 16);
+HEADER_ASSERT(sizeof(struct stat) == 120);
+HEADER_ASSERT(sizeof(struct flock) == 32);
+HEADER_ASSERT(sizeof(struct dirent) == 280);
+HEADER_ASSERT(sizeof(struct passwd) == 48);
+HEADER_ASSERT(sizeof(pthread_rwlock_t) == 8);
+HEADER_ASSERT(sizeof(struct tm) == 56);
+HEADER_ASSERT(sizeof(struct pollfd) == 8);
+HEADER_ASSERT(sizeof(struct sockaddr) == 16);
+HEADER_ASSERT(sizeof(struct sockaddr_storage) == 128);
+HEADER_ASSERT(HEADER_ALIGNOF(struct sockaddr_storage) == 8);
+HEADER_ASSERT(sizeof(struct sockaddr_in) == 16);
+HEADER_ASSERT(sizeof(struct sockaddr_in6) == 28);
+HEADER_ASSERT(sizeof(struct sockaddr_un) == 110);
+HEADER_ASSERT(sizeof(struct iovec) == 16);
+HEADER_ASSERT(sizeof(fd_set) == 128);
+HEADER_ASSERT(sizeof(struct addrinfo) == 48);
+HEADER_ASSERT(sizeof(socklen_t) == 4 && sizeof(sa_family_t) == 2);
 HEADER_ASSERT(HEADER_ALIGNOF(struct timespec) == 8);
 HEADER_ASSERT(offsetof(struct timespec, tv_nsec) == 8);
 HEADER_ASSERT(sizeof(pthread_t) == 8);

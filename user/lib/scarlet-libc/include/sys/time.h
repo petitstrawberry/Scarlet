@@ -8,7 +8,9 @@ extern "C" {
 #endif
 /* The obsolete timezone argument must be NULL. */
 int gettimeofday(struct timeval *, void *);
+int utimes(const char *, const struct timeval [2]);
 #ifdef __cplusplus
 }
 #endif
+#include <sys/select.h>
 #endif

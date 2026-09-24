@@ -264,6 +264,26 @@ mod native {
         0
     }
 
+    /// # Safety
+    /// `stream` must remain live for this call. C streams are currently
+    /// unbuffered; requesting a buffered mode is rejected explicitly.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn setvbuf(
+        stream: *mut File,
+        _buffer: *mut c_char,
+        mode: c_int,
+        _size: usize,
+    ) -> c_int {
+        if let Err(code) = unsafe { lock(stream) } {
+            return fail(code);
+        }
+        if mode == 2 {
+            0
+        } else {
+            fail(scarlet_abi::ERRNO_EOPNOTSUPP)
+        }
+    }
+
     unsafe fn read_bytes(state: &mut State, output: *mut u8, count: usize) -> usize {
         if !state.read {
             error(state, ERRNO_EBADF);

@@ -37,6 +37,88 @@ pub unsafe extern "C" fn rmdir(path: *const c_char) -> c_int {
     unsafe { remove_entry(path, true) }
 }
 
+/// # Safety
+/// Both paths must be readable NUL-terminated strings.
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn symlink(target: *const c_char, link_path: *const c_char) -> c_int {
+    if target.is_null() || link_path.is_null() {
+        return crate::fail(scarlet_abi::fs::ERRNO_EFAULT);
+    }
+    // Native takes the new pathname before the symlink target.
+    crate::status(unsafe {
+        scarlet_sys::syscall2(
+            scarlet_abi::Syscall::VfsCreateSymlink,
+            link_path as usize,
+            target as usize,
+        )
+    })
+}
+
+/// # Safety
+/// Both paths must be readable NUL-terminated strings.
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn link(old: *const c_char, new: *const c_char) -> c_int {
+    if old.is_null() || new.is_null() {
+        return crate::fail(scarlet_abi::fs::ERRNO_EFAULT);
+    }
+    crate::status(unsafe {
+        scarlet_sys::syscall2(
+            scarlet_abi::Syscall::VfsCreateHardlink,
+            old as usize,
+            new as usize,
+        )
+    })
+}
+
+/// Remove a file, symlink, or empty directory.
+///
+/// # Safety
+/// `path` must reference a readable NUL-terminated C string.
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn remove(path: *const c_char) -> c_int {
+    if path.is_null() {
+        return crate::fail(scarlet_abi::fs::ERRNO_EFAULT);
+    }
+    let mut metadata = std::mem::MaybeUninit::<crate::stat::Stat>::uninit();
+    // SAFETY: path and metadata satisfy lstat's C contract.
+    if unsafe { crate::stat::lstat(path, metadata.as_mut_ptr()) } != 0 {
+        return -1;
+    }
+    // SAFETY: lstat initialized the record on success.
+    let metadata = unsafe { metadata.assume_init() };
+    if metadata.mode & 0o170000 == 0o040000 {
+        // SAFETY: the path contract is forwarded.
+        unsafe { rmdir(path) }
+    } else {
+        // SAFETY: the path contract is forwarded.
+        unsafe { unlink(path) }
+    }
+}
+
+/// # Safety
+/// Both paths must be readable NUL-terminated strings.
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rename(old: *const c_char, new: *const c_char) -> c_int {
+    use std::ffi::CStr;
+    if old.is_null() || new.is_null() {
+        return crate::fail(scarlet_abi::fs::ERRNO_EFAULT);
+    }
+    // SAFETY: both pointers satisfy the C pathname contract.
+    let old = unsafe { CStr::from_ptr(old) };
+    let new = unsafe { CStr::from_ptr(new) };
+    let (Ok(old), Ok(new)) = (old.to_str(), new.to_str()) else {
+        return crate::fail(scarlet_abi::ERRNO_EINVAL);
+    };
+    match std::fs::rename(old, new) {
+        Ok(()) => 0,
+        Err(error) => crate::fail(error.raw_os_error().unwrap_or(scarlet_abi::ERRNO_EIO)),
+    }
+}
+
 #[cfg(any(test, target_os = "scarlet"))]
 fn cwd_capacity(length: usize, allocate: bool, size: usize) -> Result<usize, c_int> {
     if !allocate && size == 0 {

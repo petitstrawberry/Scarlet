@@ -28,12 +28,30 @@ pub mod algorithms;
 pub mod allocation;
 pub mod conversion;
 pub mod descriptor;
+#[cfg(target_os = "scarlet")]
+mod directory;
 mod errno;
 #[cfg(any(test, target_os = "scarlet"))]
 mod formatting;
+#[cfg(any(test, target_os = "scarlet"))]
+mod inet;
+#[cfg(target_os = "scarlet")]
+mod ioctl;
+#[cfg(target_os = "scarlet")]
+mod mapping;
+#[cfg(target_os = "scarlet")]
+mod passwd;
 pub mod path;
+#[cfg(target_os = "scarlet")]
+mod polling;
 pub mod pthread_sync;
+#[cfg(any(test, target_os = "scarlet"))]
+mod resolver;
 pub mod runtime;
+#[cfg(target_os = "scarlet")]
+mod socket;
+#[cfg(any(test, target_os = "scarlet"))]
+mod stat;
 #[cfg(any(test, target_os = "scarlet"))]
 pub mod stdio;
 pub mod strings;
@@ -47,6 +65,36 @@ pub(crate) fn fail(errno: c_int) -> c_int {
     // SAFETY: only this thread can access its errno cell.
     unsafe { *__errno_location() = errno };
     -1
+}
+
+#[cfg(target_os = "scarlet")]
+thread_local! {
+    static ENV_VALUE: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// # Safety
+/// `name` must be a NUL-terminated environment variable name. The returned
+/// pointer is valid until this thread next calls getenv.
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getenv(name: *const c_char) -> *mut c_char {
+    if name.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the caller supplies a NUL-terminated name.
+    let Ok(name) = unsafe { std::ffi::CStr::from_ptr(name) }.to_str() else {
+        return std::ptr::null_mut();
+    };
+    let Ok(value) = std::env::var(name) else {
+        return std::ptr::null_mut();
+    };
+    ENV_VALUE.with(|buffer| {
+        let mut buffer = buffer.borrow_mut();
+        buffer.clear();
+        buffer.extend_from_slice(value.as_bytes());
+        buffer.push(0);
+        buffer.as_mut_ptr().cast::<c_char>()
+    })
 }
 
 #[cfg(target_os = "scarlet")]
@@ -224,6 +272,32 @@ pub unsafe extern "C" fn utimensat(
             base,
         )
     })
+}
+
+/// # Safety
+/// `path` is NUL-terminated; non-null `times` points to two timeval records.
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn utimes(path: *const c_char, times: *const runtime::Timeval) -> c_int {
+    if times.is_null() {
+        // SAFETY: the path contract is forwarded; a null times pointer sets now.
+        return unsafe { utimensat(AT_FDCWD, path, std::ptr::null(), 0) };
+    }
+    // SAFETY: the caller supplies two readable timeval records.
+    let pair = unsafe { [*times, *times.add(1)] };
+    let mut converted = [Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    }; 2];
+    for (output, input) in converted.iter_mut().zip(pair) {
+        if !(0..1_000_000).contains(&input.tv_usec) {
+            return fail(ERRNO_EINVAL);
+        }
+        output.tv_sec = input.tv_sec;
+        output.tv_nsec = input.tv_usec * 1_000;
+    }
+    // SAFETY: converted is a live pair, and path has the C caller's contract.
+    unsafe { utimensat(AT_FDCWD, path, converted.as_ptr(), 0) }
 }
 
 #[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]

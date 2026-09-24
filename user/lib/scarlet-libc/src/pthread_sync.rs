@@ -51,6 +51,14 @@ pub struct PthreadCond {
     handle: AtomicUsize,
 }
 #[repr(C)]
+pub struct PthreadRwLock {
+    handle: AtomicUsize,
+}
+#[repr(C)]
+pub struct PthreadRwLockAttr {
+    pshared: c_int,
+}
+#[repr(C)]
 pub struct PthreadMutexAttr {
     kind: c_int,
 }
@@ -66,6 +74,13 @@ impl PthreadMutex {
     }
 }
 impl PthreadCond {
+    pub const fn new() -> Self {
+        Self {
+            handle: AtomicUsize::new(0),
+        }
+    }
+}
+impl PthreadRwLock {
     pub const fn new() -> Self {
         Self {
             handle: AtomicUsize::new(0),
@@ -203,6 +218,105 @@ struct CondState {
     next_ticket: usize,
     bound_mutex: usize,
 }
+struct RwState {
+    readers: Vec<(usize, usize)>,
+    writer: usize,
+    waiting_writers: usize,
+}
+struct RwInner {
+    state: Mutex<RwState>,
+    changed: Condvar,
+}
+impl RwInner {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(RwState {
+                readers: Vec::new(),
+                writer: 0,
+                waiting_writers: 0,
+            }),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn acquire_read(&self, blocking: bool) -> c_int {
+        let owner = crate::threading::current_id();
+        let mut state = lock(&self.state);
+        if state.writer == owner {
+            return EDEADLK;
+        }
+        while state.writer != 0
+            || (state.waiting_writers != 0 && !state.readers.iter().any(|(id, _)| *id == owner))
+        {
+            if !blocking {
+                return EBUSY;
+            }
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        if let Some((_, count)) = state.readers.iter_mut().find(|(id, _)| *id == owner) {
+            let Some(next) = count.checked_add(1) else {
+                return EAGAIN;
+            };
+            *count = next;
+        } else {
+            if state.readers.try_reserve(1).is_err() {
+                return ENOMEM;
+            }
+            state.readers.push((owner, 1));
+        }
+        0
+    }
+
+    fn acquire_write(&self, blocking: bool) -> c_int {
+        let owner = crate::threading::current_id();
+        let mut state = lock(&self.state);
+        if state.writer == owner || state.readers.iter().any(|(id, _)| *id == owner) {
+            return EDEADLK;
+        }
+        if !blocking && (state.writer != 0 || !state.readers.is_empty()) {
+            return EBUSY;
+        }
+        if state.writer != 0 || !state.readers.is_empty() {
+            let Some(waiting) = state.waiting_writers.checked_add(1) else {
+                return EAGAIN;
+            };
+            state.waiting_writers = waiting;
+            while state.writer != 0 || !state.readers.is_empty() {
+                state = self
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(|error| error.into_inner());
+            }
+            state.waiting_writers -= 1;
+        }
+        state.writer = owner;
+        0
+    }
+
+    fn release(&self) -> c_int {
+        let owner = crate::threading::current_id();
+        let mut state = lock(&self.state);
+        if state.writer == owner {
+            state.writer = 0;
+            self.changed.notify_all();
+            return 0;
+        }
+        let Some(index) = state.readers.iter().position(|(id, _)| *id == owner) else {
+            return EPERM;
+        };
+        state.readers[index].1 -= 1;
+        if state.readers[index].1 == 0 {
+            state.readers.swap_remove(index);
+        }
+        if state.readers.is_empty() {
+            self.changed.notify_all();
+        }
+        0
+    }
+}
 impl CondState {
     fn remove(&mut self, ticket: usize) {
         if let Some(index) = self.blocked.iter().position(|value| *value == ticket) {
@@ -233,6 +347,7 @@ impl CondInner {
 }
 static MUTEXES: Mutex<Registry<MutexInner>> = Mutex::new(Registry::new());
 static CONDITIONS: Mutex<Registry<CondInner>> = Mutex::new(Registry::new());
+static RWLOCKS: Mutex<Registry<RwInner>> = Mutex::new(Registry::new());
 
 unsafe fn mutex(value: *mut PthreadMutex) -> Result<(usize, Arc<MutexInner>), c_int> {
     // SAFETY: callers must provide live, aligned pthread objects.
@@ -243,6 +358,11 @@ unsafe fn condition(value: *mut PthreadCond) -> Result<(usize, Arc<CondInner>), 
     // SAFETY: callers must provide live, aligned pthread objects.
     let value = unsafe { value.as_ref() }.ok_or(EINVAL)?;
     lock(&CONDITIONS).get_or_insert(&value.handle, || CondInner::new(0))
+}
+unsafe fn rwlock(value: *mut PthreadRwLock) -> Result<(usize, Arc<RwInner>), c_int> {
+    // SAFETY: callers must provide live, aligned pthread objects.
+    let value = unsafe { value.as_ref() }.ok_or(EINVAL)?;
+    lock(&RWLOCKS).get_or_insert(&value.handle, RwInner::new)
 }
 fn valid_kind(value: c_int) -> bool {
     matches!(value, NORMAL | RECURSIVE | ERRORCHECK)
@@ -453,6 +573,112 @@ pub unsafe extern "C" fn pthread_mutex_unlock(value: *mut PthreadMutex) -> c_int
     // SAFETY: required by the C API contract.
     match unsafe { mutex(value) } {
         Ok((_, inner)) => inner.release(false),
+        Err(error) => error,
+    }
+}
+
+/// # Safety
+/// value must address writable rwlock storage; attr is null or initialized.
+#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+pub unsafe extern "C" fn pthread_rwlock_init(
+    value: *mut PthreadRwLock,
+    attr: *const PthreadRwLockAttr,
+) -> c_int {
+    let _errno = PreserveErrno::new();
+    if value.is_null() {
+        return EINVAL;
+    }
+    // SAFETY: a non-null attr is initialized by the C caller.
+    if unsafe { attr.as_ref() }.is_some_and(|attr| attr.pshared != 0) {
+        return ENOTSUP;
+    }
+    let handle = match lock(&RWLOCKS).insert(RwInner::new()) {
+        Ok(handle) => handle,
+        Err(error) => return error,
+    };
+    // SAFETY: init owns the uninitialized output storage.
+    unsafe {
+        std::ptr::write(
+            value,
+            PthreadRwLock {
+                handle: AtomicUsize::new(handle),
+            },
+        )
+    };
+    0
+}
+
+/// # Safety
+/// value must address an initialized rwlock.
+#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+pub unsafe extern "C" fn pthread_rwlock_destroy(value: *mut PthreadRwLock) -> c_int {
+    let _errno = PreserveErrno::new();
+    // SAFETY: required by the C API contract.
+    let Some(value) = (unsafe { value.as_ref() }) else {
+        return EINVAL;
+    };
+    lock(&RWLOCKS).destroy(&value.handle, true, |inner| {
+        let state = lock(&inner.state);
+        state.writer != 0 || !state.readers.is_empty() || state.waiting_writers != 0
+    })
+}
+
+/// # Safety
+/// value must address an initialized rwlock.
+#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+pub unsafe extern "C" fn pthread_rwlock_rdlock(value: *mut PthreadRwLock) -> c_int {
+    let _errno = PreserveErrno::new();
+    // SAFETY: required by the C API contract.
+    match unsafe { rwlock(value) } {
+        Ok((_, inner)) => inner.acquire_read(true),
+        Err(error) => error,
+    }
+}
+
+/// # Safety
+/// value must address an initialized rwlock.
+#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+pub unsafe extern "C" fn pthread_rwlock_tryrdlock(value: *mut PthreadRwLock) -> c_int {
+    let _errno = PreserveErrno::new();
+    // SAFETY: required by the C API contract.
+    match unsafe { rwlock(value) } {
+        Ok((_, inner)) => inner.acquire_read(false),
+        Err(error) => error,
+    }
+}
+
+/// # Safety
+/// value must address an initialized rwlock.
+#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+pub unsafe extern "C" fn pthread_rwlock_wrlock(value: *mut PthreadRwLock) -> c_int {
+    let _errno = PreserveErrno::new();
+    // SAFETY: required by the C API contract.
+    match unsafe { rwlock(value) } {
+        Ok((_, inner)) => inner.acquire_write(true),
+        Err(error) => error,
+    }
+}
+
+/// # Safety
+/// value must address an initialized rwlock.
+#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+pub unsafe extern "C" fn pthread_rwlock_trywrlock(value: *mut PthreadRwLock) -> c_int {
+    let _errno = PreserveErrno::new();
+    // SAFETY: required by the C API contract.
+    match unsafe { rwlock(value) } {
+        Ok((_, inner)) => inner.acquire_write(false),
+        Err(error) => error,
+    }
+}
+
+/// # Safety
+/// value must address an initialized rwlock held by the calling thread.
+#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+pub unsafe extern "C" fn pthread_rwlock_unlock(value: *mut PthreadRwLock) -> c_int {
+    let _errno = PreserveErrno::new();
+    // SAFETY: required by the C API contract.
+    match unsafe { rwlock(value) } {
+        Ok((_, inner)) => inner.release(),
         Err(error) => error,
     }
 }
@@ -687,6 +913,47 @@ mod tests {
     }
     fn cond_ptr(value: &PthreadCond) -> *mut PthreadCond {
         ptr::from_ref(value).cast_mut()
+    }
+
+    fn rwlock_ptr(value: &PthreadRwLock) -> *mut PthreadRwLock {
+        ptr::from_ref(value).cast_mut()
+    }
+
+    #[test]
+    fn rwlock_allows_concurrent_readers_and_blocks_writer_until_release() {
+        let rwlock = Arc::new(PthreadRwLock::new());
+        assert_eq!(unsafe { pthread_rwlock_rdlock(rwlock_ptr(&rwlock)) }, 0);
+        let (read_ready_tx, read_ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let second = Arc::clone(&rwlock);
+        let reader = std::thread::spawn(move || {
+            assert_eq!(unsafe { pthread_rwlock_rdlock(rwlock_ptr(&second)) }, 0);
+            read_ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            assert_eq!(unsafe { pthread_rwlock_unlock(rwlock_ptr(&second)) }, 0);
+        });
+        read_ready_rx.recv().unwrap();
+        assert_eq!(
+            unsafe { pthread_rwlock_trywrlock(rwlock_ptr(&rwlock)) },
+            EDEADLK
+        );
+        let third = Arc::clone(&rwlock);
+        let (write_ready_tx, write_ready_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            assert_eq!(unsafe { pthread_rwlock_wrlock(rwlock_ptr(&third)) }, 0);
+            write_ready_tx.send(()).unwrap();
+            assert_eq!(unsafe { pthread_rwlock_unlock(rwlock_ptr(&third)) }, 0);
+        });
+        assert_eq!(
+            unsafe { pthread_rwlock_destroy(rwlock_ptr(&rwlock)) },
+            EBUSY
+        );
+        assert_eq!(unsafe { pthread_rwlock_unlock(rwlock_ptr(&rwlock)) }, 0);
+        release_tx.send(()).unwrap();
+        write_ready_rx.recv().unwrap();
+        reader.join().unwrap();
+        writer.join().unwrap();
+        assert_eq!(unsafe { pthread_rwlock_destroy(rwlock_ptr(&rwlock)) }, 0);
     }
 
     #[test]
