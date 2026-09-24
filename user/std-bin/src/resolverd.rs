@@ -88,7 +88,10 @@ fn handle_client(client: Socket) -> Result<(), String> {
                 response
             }
             Ok(_) => String::from("ERR no A records\n"),
-            Err(err) => format!("ERR {err}\n"),
+            Err(err) => {
+                eprintln!("[resolverd] lookup {host} failed: {err}");
+                format!("ERR {err}\n")
+            }
         },
         Err(err) => format!("ERR {err}\n"),
     };
