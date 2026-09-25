@@ -103,8 +103,6 @@ const EPOLL_HANDLE_BASE: u32 = 0x3000_0000;
 const EPOLLIN: u32 = 0x0001;
 const EPOLLPRI: u32 = 0x0002;
 const EPOLLOUT: u32 = 0x0004;
-const EPOLLERR: u32 = 0x0008;
-const EPOLLHUP: u32 = 0x0010;
 const EPOLL_CTL_ADD: i32 = 1;
 const EPOLL_CTL_DEL: i32 = 2;
 const EPOLL_CTL_MOD: i32 = 3;
@@ -115,6 +113,7 @@ const EPOLL_EVENT_SIZE: usize = 16;
 struct EpollInterest {
     epoll_handle: u32,
     fd: i32,
+    watched_handle: u32,
     events: u32,
     data: u64,
 }
@@ -160,10 +159,13 @@ fn write_linux_epoll_event(
 
 fn epoll_ready_events(abi: &LinuxAbi, task: &crate::task::Task, interest: EpollInterest) -> u32 {
     let Some(handle) = abi.get_handle(interest.fd as usize) else {
-        return EPOLLERR | EPOLLHUP;
+        return 0;
     };
+    if handle != interest.watched_handle {
+        return 0;
+    }
     let Some(kobj) = task.handle_table.get(handle) else {
-        return EPOLLERR | EPOLLHUP;
+        return 0;
     };
 
     let mut ready = 0u32;
@@ -1203,6 +1205,11 @@ pub fn sys_close(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Get handle from Linux fd and remove mapping
     if let Some(handle) = abi.remove_fd(fd) {
+        if is_epoll_handle(handle) {
+            // Forked tasks may still hold this epoll instance. The registry is
+            // shared by handle, so closing one descriptor cannot discard it.
+            return 0;
+        }
         if let Some(object) = task.handle_table.remove(handle) {
             super::close_kernel_object_for_linux(&object);
             0
@@ -2112,6 +2119,19 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 .unwrap_or_else(errno::to_result);
         }
 
+        if file_obj.as_any().is::<super::memfd::MemfdFile>() {
+            let metadata = match file_obj.metadata() {
+                Ok(metadata) => metadata,
+                Err(err) => return errno::to_result(stream_error_to_errno(err)),
+            };
+            let stat = LinuxStat::from_metadata(&metadata);
+            let mut statx = unsafe { core::mem::zeroed::<LinuxStatx>() };
+            fill_statx_from_stat(&mut statx, &stat, metadata.created_time, mask);
+            return write_linux_statx(&task, statx_ptr, &statx)
+                .map(|_| 0)
+                .unwrap_or_else(errno::to_result);
+        }
+
         let stat = LinuxStat {
             st_dev: 0,
             st_ino: handle as u64,
@@ -2995,6 +3015,8 @@ pub fn sys_flock(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 pub fn sys_fallocate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     use super::errno;
 
+    const FALLOC_FL_KEEP_SIZE: i32 = 0x01;
+
     let task = match mytask() {
         Some(t) => t,
         None => return errno::to_result(errno::EFAULT),
@@ -3010,6 +3032,12 @@ pub fn sys_fallocate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     if offset < 0 || len <= 0 {
         return errno::to_result(errno::EINVAL);
     }
+    if mode & !FALLOC_FL_KEEP_SIZE != 0 {
+        return errno::to_result(errno::EOPNOTSUPP);
+    }
+    let Some(end) = (offset as u64).checked_add(len as u64) else {
+        return errno::to_result(errno::EFBIG);
+    };
 
     let handle = match abi.get_handle(fd) {
         Some(h) => h,
@@ -3023,10 +3051,9 @@ pub fn sys_fallocate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Handle SharedMemory (memfd)
     if let Some(shared_memory) = kernel_obj.as_shared_memory() {
-        // FALLOC_FL_KEEP_SIZE = 0x01 - don't change file size
-        const FALLOC_FL_KEEP_SIZE: i32 = 0x01;
-
-        let new_size = (offset + len) as usize;
+        let Ok(new_size) = usize::try_from(end) else {
+            return errno::to_result(errno::EFBIG);
+        };
         let current_size = shared_memory.size();
 
         // If mode doesn't have KEEP_SIZE, extend the file
@@ -3039,9 +3066,29 @@ pub fn sys_fallocate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return 0;
     }
 
-    // For regular files, just succeed (no-op for now)
-    // Real implementation would preallocate disk space
-    0
+    // Regular-file storage is sparse today. Extending EOF gives mmap users
+    // the requested range; KEEP_SIZE needs real block reservation, which the
+    // filesystem cannot provide yet.
+    if mode == FALLOC_FL_KEEP_SIZE {
+        return errno::to_result(errno::EOPNOTSUPP);
+    }
+    let Some(file) = kernel_obj.as_file() else {
+        return errno::to_result(errno::EBADF);
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(err) => return errno::to_result(stream_error_to_errno(err)),
+    };
+    if metadata.file_type != FileType::RegularFile {
+        return errno::to_result(errno::EOPNOTSUPP);
+    }
+    if end <= metadata.size as u64 {
+        return 0;
+    }
+    match file.truncate(end) {
+        Ok(()) => 0,
+        Err(err) => errno::to_result(stream_error_to_errno(err)),
+    }
 }
 
 // linux_dirent64 records use a 19-byte header and 8-byte record alignment.
@@ -3860,6 +3907,16 @@ pub fn sys_newfstat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let vfs_file_obj = match file_obj.as_any().downcast_ref::<VfsFileObject>() {
         Some(vfs_obj) => vfs_obj,
         None => {
+            if file_obj.as_any().is::<super::memfd::MemfdFile>() {
+                let metadata = match file_obj.metadata() {
+                    Ok(metadata) => metadata,
+                    Err(err) => return errno::to_result(stream_error_to_errno(err)),
+                };
+                let stat = LinuxStat::from_metadata(&metadata);
+                return write_linux_stat(&task, stat_ptr, &stat)
+                    .map(|_| 0)
+                    .unwrap_or_else(errno::to_result);
+            }
             // For non-VFS files (like devices), create a basic stat with minimal info
             let stat = LinuxStat {
                 st_dev: 0,
@@ -4083,7 +4140,12 @@ pub fn sys_epoll_create1(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize
         handle as u64,
     );
     match result {
-        Ok(fd) => fd,
+        Ok(fd) => {
+            if flags & EPOLL_CLOEXEC != 0 {
+                let _ = abi.set_fd_flags(fd, FD_CLOEXEC);
+            }
+            fd
+        }
         Err(_) => errno::to_result(errno::EMFILE),
     }
 }
@@ -4113,20 +4175,22 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             let Some((events, data)) = read_linux_epoll_event(&task, event_ptr) else {
                 return errno::to_result(errno::EFAULT);
             };
-            if abi.get_handle(fd as usize).is_none() {
+            let Some(watched_handle) = abi.get_handle(fd as usize) else {
                 return errno::to_result(errno::EBADF);
-            }
+            };
 
             let mut interests = epoll_interests().write();
-            if let Some(existing) = interests
-                .iter_mut()
-                .find(|interest| interest.epoll_handle == epoll_handle && interest.fd == fd)
-            {
+            if let Some(existing) = interests.iter_mut().find(|interest| {
+                interest.epoll_handle == epoll_handle
+                    && interest.fd == fd
+                    && interest.watched_handle == watched_handle
+            }) {
                 if op == EPOLL_CTL_ADD {
                     return errno::to_result(errno::EEXIST);
                 }
                 existing.events = events;
                 existing.data = data;
+                existing.watched_handle = watched_handle;
             } else {
                 if op == EPOLL_CTL_MOD {
                     return errno::to_result(errno::ENOENT);
@@ -4134,6 +4198,7 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 interests.push(EpollInterest {
                     epoll_handle,
                     fd,
+                    watched_handle,
                     events,
                     data,
                 });
@@ -4141,10 +4206,16 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             0
         }
         EPOLL_CTL_DEL => {
+            let Some(watched_handle) = abi.get_handle(fd as usize) else {
+                return errno::to_result(errno::EBADF);
+            };
             let mut interests = epoll_interests().write();
             let before = interests.len();
-            interests
-                .retain(|interest| !(interest.epoll_handle == epoll_handle && interest.fd == fd));
+            interests.retain(|interest| {
+                !(interest.epoll_handle == epoll_handle
+                    && interest.fd == fd
+                    && interest.watched_handle == watched_handle)
+            });
             if interests.len() == before {
                 errno::to_result(errno::ENOENT)
             } else {

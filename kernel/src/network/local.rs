@@ -90,12 +90,16 @@ fn local_socket_address_from_registry_name(name: &str) -> LocalSocketAddress {
 }
 
 enum SocketSegment {
-    Bytes(VecDeque<u8>),
+    Bytes {
+        data: VecDeque<u8>,
+        sender_process_id: usize,
+    },
     Handle(KernelObject, HandleMetadata),
     HandleData {
         object: KernelObject,
         metadata: HandleMetadata,
         data: Vec<u8>,
+        sender_process_id: usize,
     },
 }
 
@@ -120,25 +124,46 @@ impl SocketQueue {
         self.segments.is_empty()
     }
 
-    fn push_bytes(&mut self, data: &[u8]) -> Result<(), StreamError> {
+    fn push_bytes(
+        &mut self,
+        data: &[u8],
+        sender_process_id: usize,
+        coalesce: bool,
+    ) -> Result<(), StreamError> {
         if self.stream_bytes.saturating_add(data.len()) > MAX_STREAM_BUFFER_SIZE {
             return Err(StreamError::WouldBlock);
         }
 
-        if let Some(SocketSegment::Bytes(bytes)) = self.segments.back_mut() {
-            bytes.extend(data.iter().copied());
-        } else {
-            self.segments
-                .push_back(SocketSegment::Bytes(data.iter().copied().collect()));
+        if coalesce {
+            if let Some(SocketSegment::Bytes {
+                data: bytes,
+                sender_process_id: prior,
+            }) = self.segments.back_mut()
+                && *prior == sender_process_id
+            {
+                bytes.extend(data.iter().copied());
+                self.stream_bytes += data.len();
+                return Ok(());
+            }
         }
+        self.segments.push_back(SocketSegment::Bytes {
+            data: data.iter().copied().collect(),
+            sender_process_id,
+        });
         self.stream_bytes += data.len();
         Ok(())
     }
 
-    fn read_bytes(&mut self, output: &mut [u8]) -> Option<usize> {
-        let SocketSegment::Bytes(bytes) = self.segments.front_mut()? else {
+    fn read_bytes(&mut self, output: &mut [u8]) -> Option<(usize, usize)> {
+        let SocketSegment::Bytes {
+            data: bytes,
+            sender_process_id,
+        } = self.segments.front_mut()?
+        else {
             return None;
         };
+
+        let sender_process_id = *sender_process_id;
 
         let bytes_to_read = output.len().min(bytes.len());
         for slot in output.iter_mut().take(bytes_to_read) {
@@ -151,7 +176,7 @@ impl SocketQueue {
         if bytes.is_empty() {
             self.segments.pop_front();
         }
-        Some(bytes_to_read)
+        Some((bytes_to_read, sender_process_id))
     }
 
     fn push_handle(
@@ -173,6 +198,7 @@ impl SocketQueue {
         &mut self,
         mut handles: Vec<(KernelObject, HandleMetadata)>,
         data: &[u8],
+        sender_process_id: usize,
     ) -> Result<(), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
@@ -200,6 +226,7 @@ impl SocketQueue {
             object: last_object,
             metadata: last_metadata,
             data: data.to_vec(),
+            sender_process_id,
         });
         self.record_bytes += data.len();
         self.handles += handle_count;
@@ -236,6 +263,7 @@ impl SocketQueue {
             object,
             metadata,
             data,
+            ..
         }) = self.segments.pop_front()
         else {
             return Err(IpcError::ChannelEmpty);
@@ -251,7 +279,7 @@ impl SocketQueue {
         &mut self,
         data_capacity: usize,
         handle_capacity: usize,
-    ) -> Result<(Vec<(KernelObject, HandleMetadata)>, Vec<u8>), crate::ipc::IpcError> {
+    ) -> Result<(Vec<(KernelObject, HandleMetadata)>, Vec<u8>, usize), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
         let mut handle_count = 0;
@@ -264,7 +292,7 @@ impl SocketQueue {
                     data_len = Some(data.len());
                     break;
                 }
-                SocketSegment::Bytes(_) => return Err(IpcError::ChannelEmpty),
+                SocketSegment::Bytes { .. } => return Err(IpcError::ChannelEmpty),
             }
         }
         let data_len = data_len.ok_or(IpcError::ChannelEmpty)?;
@@ -288,6 +316,7 @@ impl SocketQueue {
             object,
             metadata,
             data,
+            sender_process_id,
         }) = self.segments.pop_front()
         else {
             unreachable!("checked final handle-data segment before consuming it")
@@ -295,7 +324,7 @@ impl SocketQueue {
         handles.push((object, metadata));
         self.record_bytes -= data.len();
         self.handles -= handle_count;
-        Ok((handles, data))
+        Ok((handles, data, sender_process_id))
     }
 }
 
@@ -383,6 +412,9 @@ pub struct LocalSocket {
 
     /// Nonblocking I/O flag
     nonblocking: IrqRwSpinLock<bool>,
+
+    /// Whether recvmsg should attach the sending process credentials.
+    passcred: IrqRwSpinLock<bool>,
 }
 
 impl LocalSocket {
@@ -440,6 +472,7 @@ impl LocalSocket {
             write_waker: Waker::new_interruptible("socket_write"),
             self_weak: IrqRwSpinLock::new(Weak::new()),
             nonblocking: IrqRwSpinLock::new(false),
+            passcred: IrqRwSpinLock::new(false),
         }
     }
 
@@ -452,6 +485,14 @@ impl LocalSocket {
     pub fn peer_process_id(&self) -> Option<usize> {
         let process_id = self.peer_process_id.load(Ordering::Acquire);
         (process_id != 0).then_some(process_id)
+    }
+
+    pub fn set_passcred(&self, enabled: bool) {
+        *self.passcred.write() = enabled;
+    }
+
+    pub fn passcred(&self) -> bool {
+        *self.passcred.read()
     }
 
     fn current_process_id() -> Option<usize> {
@@ -582,7 +623,7 @@ impl LocalSocket {
         }
         let mut peer_queue = peer_buffer.queue.write();
         let became_readable = peer_queue.is_empty();
-        peer_queue.push_handles_data(handles, data)?;
+        peer_queue.push_handles_data(handles, data, Self::current_process_id().unwrap_or(0))?;
         drop(peer_queue);
         drop(peer_buffer);
 
@@ -638,6 +679,15 @@ impl LocalSocket {
         max_data_len: usize,
         max_handles: usize,
     ) -> Result<(Vec<(KernelObject, HandleMetadata)>, Vec<u8>), crate::ipc::IpcError> {
+        self.recv_handles_and_data_batch_with_sender(max_data_len, max_handles)
+            .map(|(handles, data, _)| (handles, data))
+    }
+
+    pub(crate) fn recv_handles_and_data_batch_with_sender(
+        &self,
+        max_data_len: usize,
+        max_handles: usize,
+    ) -> Result<(Vec<(KernelObject, HandleMetadata)>, Vec<u8>, usize), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
 
         if *self.state.read() != SocketState::Connected {
@@ -766,6 +816,7 @@ impl LocalSocket {
             write_waker: Waker::new_interruptible("socket_write"),
             self_weak: IrqRwSpinLock::new(Weak::new()),
             nonblocking: IrqRwSpinLock::new(false),
+            passcred: IrqRwSpinLock::new(false),
         });
 
         // Create peer socket (client side)
@@ -789,6 +840,7 @@ impl LocalSocket {
             write_waker: Waker::new_interruptible("socket_write"),
             self_weak: IrqRwSpinLock::new(Weak::new()),
             nonblocking: IrqRwSpinLock::new(false),
+            passcred: IrqRwSpinLock::new(false),
         });
 
         Self::init_self_weak(&local_socket);
@@ -865,12 +917,13 @@ impl LocalSocket {
     }
 }
 
-impl StreamOps for LocalSocket {
-    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+impl LocalSocket {
+    /// Read bytes together with the process that wrote the first byte.
+    pub fn read_with_sender(&self, buffer: &mut [u8]) -> Result<(usize, usize), StreamError> {
         use crate::task::mytask;
 
         if buffer.is_empty() {
-            return Ok(0);
+            return Ok((0, 0));
         }
 
         loop {
@@ -881,7 +934,7 @@ impl StreamOps for LocalSocket {
                 let bytes_to_read = queue.read_bytes(buffer);
                 let blocked_by_ordered_segment = bytes_to_read.is_none() && !queue.is_empty();
                 let freed_full_buffer =
-                    was_full && matches!(bytes_to_read, Some(bytes) if bytes > 0);
+                    was_full && matches!(bytes_to_read, Some((bytes, _)) if bytes > 0);
                 (bytes_to_read, blocked_by_ordered_segment, freed_full_buffer)
             };
 
@@ -908,7 +961,7 @@ impl StreamOps for LocalSocket {
                 // non-blocking socket.
                 let my_state = *self.state.read();
                 if my_state == SocketState::Closed {
-                    return Ok(0);
+                    return Ok((0, 0));
                 }
 
                 if my_state == SocketState::Connected {
@@ -920,12 +973,12 @@ impl StreamOps for LocalSocket {
                         None => true,
                     };
                     if peer_closed {
-                        return Ok(0);
+                        return Ok((0, 0));
                     }
                 }
 
                 if *read_buf_arc.closed.read() {
-                    return Ok(0);
+                    return Ok((0, 0));
                 }
             }
 
@@ -939,6 +992,12 @@ impl StreamOps for LocalSocket {
                 return Err(StreamError::WouldBlock);
             }
         }
+    }
+}
+
+impl StreamOps for LocalSocket {
+    fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        self.read_with_sender(buffer).map(|(count, _)| count)
     }
 
     fn write(&self, data: &[u8]) -> Result<usize, StreamError> {
@@ -972,7 +1031,11 @@ impl StreamOps for LocalSocket {
                 } else {
                     let bytes_written = available.min(data.len());
                     let became_readable = peer_queue.is_empty();
-                    peer_queue.push_bytes(&data[..bytes_written])?;
+                    peer_queue.push_bytes(
+                        &data[..bytes_written],
+                        Self::current_process_id().unwrap_or(0),
+                        self.socket_type == SocketType::Stream,
+                    )?;
                     (bytes_written, became_readable)
                 }
             };
@@ -1207,6 +1270,7 @@ impl SocketControl for LocalSocket {
             write_waker: Waker::new_interruptible("socket_write"),
             self_weak: IrqRwSpinLock::new(Weak::new()),
             nonblocking: IrqRwSpinLock::new(false),
+            passcred: IrqRwSpinLock::new(server_local.passcred()),
         });
 
         Self::init_self_weak(&server_conn);

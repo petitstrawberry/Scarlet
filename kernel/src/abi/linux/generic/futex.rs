@@ -12,6 +12,8 @@ use core::sync::atomic::{AtomicU8, Ordering};
 // Minimal FUTEX op codes (match Linux)
 const FUTEX_WAIT: u32 = 0;
 const FUTEX_WAKE: u32 = 1;
+// musl probes this operation before enabling priority-inheritance mutexes.
+const FUTEX_LOCK_PI: u32 = 6;
 // Extended ops commonly used by musl
 const FUTEX_WAIT_BITSET: u32 = 9;
 const FUTEX_WAKE_BITSET: u32 = 10;
@@ -494,6 +496,11 @@ pub fn sys_futex(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             let woken = wake_key(key, val as usize, wake_bitset);
             // Return number of woken tasks
             woken
+        }
+        FUTEX_LOCK_PI => {
+            // PI futexes are not implemented. Report the feature as unsupported
+            // so pthread users can fall back to ordinary mutexes.
+            super::errno::to_result(super::errno::EOPNOTSUPP)
         }
         _ => {
             // Not implemented ops

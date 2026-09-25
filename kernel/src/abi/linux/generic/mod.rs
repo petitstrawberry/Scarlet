@@ -3,6 +3,7 @@ mod macros;
 pub mod errno;
 pub mod fs;
 pub mod futex;
+mod memfd;
 pub mod mm;
 mod mode;
 pub mod pipe;

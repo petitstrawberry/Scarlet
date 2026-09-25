@@ -62,6 +62,8 @@ pub const SOCK_TYPE_MASK: i32 = 0xF;
 pub const SOL_SOCKET: i32 = 1;
 pub const SO_TYPE: i32 = 3;
 pub const SCM_RIGHTS: i32 = 1;
+pub const SCM_CREDENTIALS: i32 = 2;
+pub const SO_PASSCRED: i32 = 16;
 pub const SO_PEERCRED: i32 = 17;
 pub const MSG_DONTWAIT: i32 = 0x40;
 
@@ -1142,6 +1144,35 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return 0;
     }
 
+    if level == SOL_SOCKET && optname == SO_PASSCRED {
+        if optlen < size_of::<i32>() as u32 {
+            return errno::to_result(errno::EINVAL);
+        }
+        let handle = match abi.get_handle(sockfd as usize) {
+            Some(handle) => handle,
+            None => return errno::to_result(errno::EBADF),
+        };
+        let socket = match task
+            .handle_table
+            .get(handle)
+            .and_then(KernelObject::into_socket_arc)
+        {
+            Some(socket) => socket,
+            None => return errno::to_result(errno::ENOTSOCK),
+        };
+        let local_socket = match LocalSocket::from_socket_object(socket.as_ref()) {
+            Some(socket) => socket,
+            None => return errno::to_result(errno::ENOPROTOOPT),
+        };
+        let enabled = i32::from(local_socket.passcred());
+        if copy_to_user(&task, optval_ptr, &enabled.to_ne_bytes()).is_err()
+            || copy_to_user(&task, optlen_ptr, &(size_of::<i32>() as u32).to_ne_bytes()).is_err()
+        {
+            return errno::to_result(errno::EFAULT);
+        }
+        return 0;
+    }
+
     if level == SOL_SOCKET && optname == SO_PEERCRED {
         if optlen < size_of::<LinuxUcred>() as u32 {
             return errno::to_result(errno::EINVAL);
@@ -1217,10 +1248,10 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     0
 }
 
-/// Linux sys_setsockopt implementation (mock)
+/// Linux sys_setsockopt implementation.
 ///
-/// Sets socket options. This is a mock implementation that
-/// always succeeds to allow applications to proceed.
+/// Implements SO_PASSCRED for local sockets. Other options retain the
+/// compatibility fallback until their behavior is implemented.
 ///
 /// Arguments:
 /// - abi: LinuxAbi context
@@ -1234,20 +1265,48 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 /// Returns:
 /// - 0 on success
 /// - usize::MAX (Linux -1) indicating failure
-pub fn sys_setsockopt(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_setsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
     };
 
-    let _sockfd = trapframe.get_arg(0) as i32;
-    let _level = trapframe.get_arg(1) as i32;
-    let _optname = trapframe.get_arg(2) as i32;
-    let _optval_ptr = trapframe.get_arg(3);
-    let _optlen = trapframe.get_arg(4) as u32;
+    let sockfd = trapframe.get_arg(0) as i32;
+    let level = trapframe.get_arg(1) as i32;
+    let optname = trapframe.get_arg(2) as i32;
+    let optval_ptr = trapframe.get_arg(3);
+    let optlen = trapframe.get_arg(4) as u32;
 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
+
+    if level == SOL_SOCKET && optname == SO_PASSCRED {
+        if optlen != size_of::<i32>() as u32 {
+            return errno::to_result(errno::EINVAL);
+        }
+        let mut value = [0u8; size_of::<i32>()];
+        if copy_from_user(&task, optval_ptr, &mut value).is_err() {
+            return errno::to_result(errno::EFAULT);
+        }
+        let handle = match abi.get_handle(sockfd as usize) {
+            Some(handle) => handle,
+            None => return errno::to_result(errno::EBADF),
+        };
+        let socket = match task
+            .handle_table
+            .get(handle)
+            .and_then(KernelObject::into_socket_arc)
+        {
+            Some(socket) => socket,
+            None => return errno::to_result(errno::ENOTSOCK),
+        };
+        let local_socket = match LocalSocket::from_socket_object(socket.as_ref()) {
+            Some(socket) => socket,
+            None => return errno::to_result(errno::ENOPROTOOPT),
+        };
+        local_socket.set_passcred(i32::from_ne_bytes(value) != 0);
+        return 0;
+    }
 
     // Mock implementation - always succeed
     0
@@ -1578,6 +1637,11 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
     // crate::println!("[linux recvmsg] iovcnt={}", iovecs.len());
     let mut total_read = 0usize;
+    let local_socket = kernel_obj
+        .as_socket()
+        .and_then(LocalSocket::from_socket_object);
+    let wants_credentials = local_socket.is_some_and(LocalSocket::passcred);
+    let mut sender_process_id = None;
     let mut pending_fds: Vec<i32> = Vec::new();
     fn rollback_received_fds(abi: &mut LinuxAbi, task: &crate::task::Task, fds: &[i32]) {
         for &fd in fds {
@@ -1586,7 +1650,6 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
         }
     }
-    let mut msg_controllen = 0usize;
     struct NonblockGuard<'a> {
         sel: Option<&'a dyn Selectable>,
         prev: bool,
@@ -1644,10 +1707,14 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             };
 
             if let Some(local_socket) = LocalSocket::from_socket_object(socket) {
-                match local_socket
-                    .recv_handles_and_data_batch(total_buffer_size, max_received_handles)
-                {
-                    Ok((handles, data)) => {
+                match local_socket.recv_handles_and_data_batch_with_sender(
+                    total_buffer_size,
+                    max_received_handles,
+                ) {
+                    Ok((handles, data, sender)) => {
+                        if !data.is_empty() {
+                            sender_process_id = Some(sender);
+                        }
                         for (obj, metadata) in handles {
                             let access_mode = metadata.access_mode;
                             let new_handle =
@@ -1728,10 +1795,17 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 let mut buffer = Vec::new();
                 buffer.resize(iovec.iov_len, 0);
 
-                match stream.read(&mut buffer) {
-                    Ok(n) => {
+                let read_result = match local_socket {
+                    Some(socket) => socket.read_with_sender(&mut buffer),
+                    None => stream.read(&mut buffer).map(|count| (count, 0)),
+                };
+                match read_result {
+                    Ok((n, sender)) => {
                         if copy_to_user(&task, iovec.iov_base as usize, &buffer[..n]).is_err() {
                             return errno::to_result(errno::EFAULT);
+                        }
+                        if n != 0 && sender_process_id.is_none() {
+                            sender_process_id = Some(sender);
                         }
                         total_read = total_read.saturating_add(n);
                         if n < iovec.iov_len {
@@ -1759,11 +1833,12 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         break 'receive;
     }
 
+    let mut control = Vec::new();
     if !pending_fds.is_empty() {
-        msg_controllen = size_of::<LinuxCmsghdr>() + pending_fds.len() * size_of::<i32>();
-        let mut control = alloc::vec![0u8; msg_controllen];
+        let rights_len = size_of::<LinuxCmsghdr>() + pending_fds.len() * size_of::<i32>();
+        control.resize(rights_len, 0);
         let header = LinuxCmsghdr {
-            cmsg_len: msg_controllen,
+            cmsg_len: rights_len,
             cmsg_level: SOL_SOCKET,
             cmsg_type: SCM_RIGHTS,
         };
@@ -1778,14 +1853,49 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             let start = size_of::<LinuxCmsghdr>() + index * size_of::<i32>();
             control[start..start + size_of::<i32>()].copy_from_slice(&fd.to_ne_bytes());
         }
-        if copy_to_user(&task, msg.msg_control as usize, &control).is_err() {
-            rollback_received_fds(abi, &task, &pending_fds);
-            return errno::to_result(errno::EFAULT);
-        }
     }
 
     msg.msg_flags = 0;
-    msg.msg_controllen = msg_controllen as u64;
+    if wants_credentials && let Some(sender) = sender_process_id {
+        let aligned = (control.len() + size_of::<usize>() - 1) & !(size_of::<usize>() - 1);
+        let cred_len = size_of::<LinuxCmsghdr>() + size_of::<LinuxUcred>();
+        if msg.msg_control != 0 && aligned + cred_len <= msg.msg_controllen as usize {
+            control.resize(aligned + cred_len, 0);
+            let header = LinuxCmsghdr {
+                cmsg_len: cred_len,
+                cmsg_level: SOL_SOCKET,
+                cmsg_type: SCM_CREDENTIALS,
+            };
+            let cred = LinuxUcred {
+                pid: task.get_namespace().resolve_local_id(sender).unwrap_or(0) as i32,
+                uid: 0,
+                gid: 0,
+            };
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    (&header as *const LinuxCmsghdr).cast::<u8>(),
+                    control.as_mut_ptr().add(aligned),
+                    size_of::<LinuxCmsghdr>(),
+                );
+                core::ptr::copy_nonoverlapping(
+                    (&cred as *const LinuxUcred).cast::<u8>(),
+                    control
+                        .as_mut_ptr()
+                        .add(aligned + size_of::<LinuxCmsghdr>()),
+                    size_of::<LinuxUcred>(),
+                );
+            }
+        } else {
+            msg.msg_flags |= 0x8; // MSG_CTRUNC
+        }
+    }
+
+    if !control.is_empty() && copy_to_user(&task, msg.msg_control as usize, &control).is_err() {
+        rollback_received_fds(abi, &task, &pending_fds);
+        return errno::to_result(errno::EFAULT);
+    }
+
+    msg.msg_controllen = control.len() as u64;
     let message_bytes = unsafe {
         core::slice::from_raw_parts(
             (&msg as *const LinuxMsghdr).cast::<u8>(),
@@ -1988,18 +2098,20 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             .map(|f| ((f as i32) & O_NONBLOCK) != 0)
             .unwrap_or(false);
 
-    // Set non-blocking if requested
-    if let Some(selectable) = socket.as_selectable() {
-        if nonblocking {
+    // MSG_DONTWAIT affects this receive only. Preserve the socket's existing
+    // mode, including when another descriptor shares the same socket.
+    let previous_nonblocking = socket.as_selectable().map(|selectable| {
+        let previous = selectable.is_nonblocking();
+        if nonblocking && !previous {
             selectable.set_nonblocking(true);
         }
-    }
+        previous
+    });
 
     // Receive data
     let result = socket.recvfrom(&mut buffer, flags);
 
-    // Restore blocking mode if we changed it
-    if nonblocking {
+    if nonblocking && previous_nonblocking == Some(false) {
         if let Some(selectable) = socket.as_selectable() {
             selectable.set_nonblocking(false);
         }
@@ -2068,9 +2180,7 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
             n
         }
-        Err(crate::network::socket::SocketError::WouldBlock) => errno::to_result(errno::EAGAIN),
-        Err(crate::network::socket::SocketError::NotConnected) => errno::to_result(errno::ENOTCONN),
-        Err(_) => errno::to_result(errno::EIO),
+        Err(error) => errno::to_result(socket_error_to_errno(error)),
     }
 }
 

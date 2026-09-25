@@ -193,24 +193,29 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             owner: Some(owner),
         };
 
-        let removed_mappings = if is_fixed {
+        let mapped = if is_fixed {
             task.vm_manager
                 .add_memory_map_fixed(vm_map)
+                .map(|removed| (final_vaddr, removed))
                 .map_err(|_| to_result(errno::ENOMEM))
         } else if is_fixed_noreplace {
             task.vm_manager
                 .add_memory_map(vm_map)
-                .map(|_| Vec::new())
+                .map(|_| (final_vaddr, Vec::new()))
                 .map_err(|_| to_result(errno::EEXIST))
         } else {
-            task.vm_manager
-                .add_memory_map(vm_map)
-                .map(|_| Vec::new())
-                .map_err(|_| to_result(errno::ENOMEM))
+            match task.vm_manager.add_memory_map(vm_map.clone()) {
+                Ok(()) => Ok((final_vaddr, Vec::new())),
+                Err(_) => task
+                    .vm_manager
+                    .add_memory_map_anywhere(vm_map)
+                    .map(|addr| (addr, Vec::new()))
+                    .map_err(|_| to_result(errno::ENOMEM)),
+            }
         };
 
-        let removed_mappings = match removed_mappings {
-            Ok(rm) => rm,
+        let (mapped_vaddr, removed_mappings) = match mapped {
+            Ok(mapped) => mapped,
             Err(e) => return e,
         };
 
@@ -221,8 +226,8 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
         reclaim_private_removed_mappings(&task, &removed_mappings);
 
-        memory_mappable.on_mapped(final_vaddr, 0, aligned_length, offset);
-        return final_vaddr;
+        memory_mappable.on_mapped(mapped_vaddr, 0, aligned_length, offset);
+        return mapped_vaddr;
     }
 
     // Shared path: need get_mapping_info_with for pmarea, permissions, and memory attribute.
@@ -270,16 +275,24 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let map_result = if is_fixed {
         task.vm_manager
             .add_memory_map_fixed(vm_map)
-            .map(|removed| Some(removed))
+            .map(|removed| (final_vaddr, Some(removed)))
     } else if is_fixed_noreplace {
-        task.vm_manager.add_memory_map(vm_map).map(|_| None)
+        task.vm_manager
+            .add_memory_map(vm_map)
+            .map(|_| (final_vaddr, None))
     } else {
-        task.vm_manager.add_memory_map(vm_map).map(|_| None)
+        match task.vm_manager.add_memory_map(vm_map.clone()) {
+            Ok(()) => Ok((final_vaddr, None)),
+            Err(_) => task
+                .vm_manager
+                .add_memory_map_anywhere(vm_map)
+                .map(|addr| (addr, None)),
+        }
     };
 
     match map_result {
-        Ok(removed_mappings_opt) => {
-            memory_mappable.on_mapped(final_vaddr, paddr, ok_len_aligned, offset);
+        Ok((mapped_vaddr, removed_mappings_opt)) => {
+            memory_mappable.on_mapped(mapped_vaddr, paddr, ok_len_aligned, offset);
 
             if let Some(removed_mappings) = &removed_mappings_opt {
                 for removed_map in removed_mappings {
@@ -295,7 +308,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 reclaim_private_removed_mappings(&task, &removed_mappings);
             }
 
-            final_vaddr
+            mapped_vaddr
         }
         Err(_) if is_fixed_noreplace => to_result(errno::EEXIST),
         Err(_) => to_result(errno::ENOMEM),

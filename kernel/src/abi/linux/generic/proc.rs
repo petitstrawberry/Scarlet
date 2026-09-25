@@ -1747,7 +1747,6 @@ pub fn sys_membarrier(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 /// - New file descriptor on success
 /// - usize::MAX (Linux -1) on error
 pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    use crate::ipc::SharedMemory;
     use crate::object::KernelObject;
 
     let task = match mytask() {
@@ -1770,14 +1769,10 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
         return errno::to_result(errno::EINVAL);
     }
 
-    // Create shared memory object (size 0 initially, will be resized by ftruncate)
-    // Default size for Wayland SHM pools
-    const DEFAULT_SHM_SIZE: usize = crate::environment::PAGE_SIZE; // one page as starting point
-
-    let shm = match SharedMemory::new(DEFAULT_SHM_SIZE, 0x3 /* READ | WRITE */) {
-        Ok(shm) => shm,
+    let file = match super::memfd::MemfdFile::new() {
+        Ok(file) => file,
         Err(e) => {
-            crate::println!("[sys_memfd_create] Failed to create shared memory: {:?}", e);
+            crate::println!("[sys_memfd_create] Failed to create memfd: {:?}", e);
             return usize::MAX;
         }
     };
@@ -1785,7 +1780,7 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
     // Insert into handle table
     let handle = match task
         .handle_table
-        .insert(KernelObject::SharedMemory(alloc::sync::Arc::new(shm)))
+        .insert(KernelObject::File(alloc::sync::Arc::new(file)))
     {
         Ok(h) => h,
         Err(_) => {

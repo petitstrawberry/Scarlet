@@ -18,7 +18,18 @@
 use alloc::{string::String, sync::Arc};
 
 use crate::ipc::StreamIpcOps;
-use crate::object::capability::Selectable;
+use crate::object::capability::{Selectable, StreamError};
+
+fn stream_error_to_socket_error(error: StreamError) -> SocketError {
+    match error {
+        StreamError::WouldBlock => SocketError::WouldBlock,
+        StreamError::Interrupted => SocketError::Interrupted,
+        StreamError::Closed | StreamError::BrokenPipe => SocketError::NotConnected,
+        StreamError::InvalidArgument => SocketError::InvalidArgument,
+        StreamError::NotSupported => SocketError::NotSupported,
+        _ => SocketError::Other(String::from("socket I/O failed")),
+    }
+}
 
 /// Scarlet-private, OS-agnostic control opcodes for Socket operations.
 /// These are stable only within Scarlet and must be mapped by ABI adapters.
@@ -437,7 +448,7 @@ pub trait SocketObject: StreamIpcOps + SocketControl + Send + Sync {
     ) -> Result<usize, SocketError> {
         let _ = (address, flags);
         // Default implementation for stream sockets - ignore address
-        self.write(data).map_err(|_| SocketError::NotSupported)
+        self.write(data).map_err(stream_error_to_socket_error)
     }
 
     /// Receive data with source address (for datagram sockets)
@@ -449,7 +460,7 @@ pub trait SocketObject: StreamIpcOps + SocketControl + Send + Sync {
     ) -> Result<(usize, SocketAddress), SocketError> {
         let _ = flags;
         // Default implementation for stream sockets
-        let n = self.read(buffer).map_err(|_| SocketError::NotSupported)?;
+        let n = self.read(buffer).map_err(stream_error_to_socket_error)?;
         Ok((n, SocketAddress::Unspecified))
     }
 
