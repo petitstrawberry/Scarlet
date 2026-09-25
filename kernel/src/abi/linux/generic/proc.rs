@@ -856,22 +856,46 @@ pub fn sys_prlimit64(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     trapframe.increment_pc_next(&task);
 
-    // If old_rlim is requested, write some reasonable default values
+    // Linux validates the output pointer for write access. Chromium also
+    // relies on EFAULT here to verify that protected memory is read-only.
     if old_rlim_ptr != 0 {
-        if let Some(old_rlim_paddr) = task.vm_manager.translate_to_kva(old_rlim_ptr) {
-            unsafe {
-                // Write a simple rlimit structure with high limits
-                // struct rlimit { rlim_t rlim_cur; rlim_t rlim_max; }
-                let rlimit = old_rlim_paddr as *mut [u64; 2];
-                *rlimit = [
-                    0xFFFFFFFF, // rlim_cur - current limit (high value)
-                    0xFFFFFFFF, // rlim_max - maximum limit (high value)
-                ];
-            }
+        let mut rlimit = [0u8; 16];
+        rlimit[..8].copy_from_slice(&0xFFFF_FFFFu64.to_ne_bytes());
+        rlimit[8..].copy_from_slice(&0xFFFF_FFFFu64.to_ne_bytes());
+        if copy_to_user(&task, old_rlim_ptr, &rlimit).is_err() {
+            return errno::to_result(errno::EFAULT);
         }
     }
 
     0 // Always succeed
+}
+
+/// Accept a Linux capability drop in the view, which currently runs without
+/// a separate capability model. Validate the v3 UAPI data before succeeding.
+pub fn sys_capset(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return errno::to_result(errno::ESRCH),
+    };
+    let header_ptr = trapframe.get_arg(0);
+    let data_ptr = trapframe.get_arg(1);
+    trapframe.increment_pc_next(&task);
+
+    let mut header = [0u8; 8];
+    if copy_from_user(&task, header_ptr, &mut header).is_err() {
+        return errno::to_result(errno::EFAULT);
+    }
+    let version = u32::from_ne_bytes(header[..4].try_into().unwrap());
+    let data_len = match version {
+        0x1998_0330 => 12,
+        0x2007_1026 | 0x2008_0522 => 24,
+        _ => return errno::to_result(errno::EINVAL),
+    };
+    let mut data = [0u8; 24];
+    if copy_from_user(&task, data_ptr, &mut data[..data_len]).is_err() {
+        return errno::to_result(errno::EFAULT);
+    }
+    0
 }
 
 #[repr(C)]
@@ -1740,11 +1764,11 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
     // Parse flags (Linux memfd_create flags)
     const MFD_CLOEXEC: u32 = 0x0001;
     const MFD_ALLOW_SEALING: u32 = 0x0002;
-    const MFD_SEAL_SEAL: u32 = 0x0004;
-
-    let _cloexec = (flags & MFD_CLOEXEC) != 0;
-    let _allow_sealing = (flags & MFD_ALLOW_SEALING) != 0;
-    let _seal = (flags & MFD_SEAL_SEAL) != 0;
+    // Reject unknown flags before creating an object. Chromium probes with
+    // memfd_create("", ~0) and requires EINVAL to detect support.
+    if flags & !(MFD_CLOEXEC | MFD_ALLOW_SEALING) != 0 {
+        return errno::to_result(errno::EINVAL);
+    }
 
     // Create shared memory object (size 0 initially, will be resized by ftruncate)
     // Default size for Wayland SHM pools
@@ -1780,6 +1804,13 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
             return usize::MAX;
         }
     };
+
+    // A memfd is an O_RDWR file description; Chromium validates this through
+    // fcntl(F_GETFL) before accepting it as a shared-memory handle.
+    let _ = abi.set_file_status_flags(fd, 2);
+    if flags & MFD_CLOEXEC != 0 {
+        let _ = abi.set_fd_flags(fd, crate::abi::linux::generic::fs::FD_CLOEXEC);
+    }
 
     // crate::println!(
     //     "sys_memfd_create: fd={} handle={} flags={:#x}",

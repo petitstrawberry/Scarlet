@@ -83,7 +83,12 @@ impl MemoryMappingOps for AnonymousPageOwner {
 
     fn release_pages(&self, start_page_idx: usize, page_count: usize) {
         let mut pages = self.pages.write();
-        for idx in start_page_idx..start_page_idx + page_count {
+        let end_page_idx = start_page_idx.saturating_add(page_count);
+        let allocated: alloc::vec::Vec<usize> = pages
+            .range(start_page_idx..end_page_idx)
+            .map(|(&idx, _)| idx)
+            .collect();
+        for idx in allocated {
             if let Some(paddr) = pages.remove(&idx) {
                 // SAFETY: The VM removed this mapping before releasing its
                 // exclusively owned page, now removed from the owner's map.

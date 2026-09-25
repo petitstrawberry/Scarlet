@@ -1634,7 +1634,8 @@ impl MemoryMappingOps for TmpFileObject {
     }
 
     fn on_unmapped(&self, vaddr: usize, _length: usize) {
-        self.mmap_ranges.write().remove(&vaddr);
+        // Preserve the original mapping offset across partial unmaps. The
+        // remaining VMA still uses its initial vm_start for fault resolution.
     }
 
     fn supports_mmap(&self) -> bool {

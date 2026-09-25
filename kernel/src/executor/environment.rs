@@ -1,6 +1,6 @@
 //! ABI-to-filesystem mappings, independent of distribution layout.
 
-use alloc::{collections::BTreeMap, string::String, sync::Arc};
+use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 
 use crate::{
     fs::vfs_v2::manager::{VfsManager, VfsView},
@@ -71,6 +71,15 @@ impl Environment {
             .get(abi)
             .cloned()
             .ok_or("ABI unavailable in environment")
+    }
+
+    pub(crate) fn roots(&self) -> Vec<(String, Arc<VfsView>)> {
+        self.state
+            .read()
+            .roots
+            .iter()
+            .map(|(abi, view)| (abi.clone(), view.clone()))
+            .collect()
     }
 
     pub fn is_sealed(&self) -> bool {

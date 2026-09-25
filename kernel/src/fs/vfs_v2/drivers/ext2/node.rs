@@ -752,7 +752,9 @@ impl MemoryMappingOps for Ext2FileObject {
     }
 
     fn on_unmapped(&self, vaddr: usize, _length: usize) {
-        self.mmap_ranges.write().remove(&vaddr);
+        // A partial munmap can remove the first fragment while later VMAs
+        // still reference this original mapping start for file offsets.
+        // Retain the range until the open file object itself is dropped.
         let fs = match self
             .filesystem
             .read()

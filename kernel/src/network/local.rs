@@ -244,6 +244,59 @@ impl SocketQueue {
         self.handles -= 1;
         Ok((object, metadata, data))
     }
+
+    /// Receive one Linux SCM_RIGHTS message, including every descriptor that
+    /// preceded its payload in the ordered queue.
+    fn pop_handles_data_batch(
+        &mut self,
+        data_capacity: usize,
+        handle_capacity: usize,
+    ) -> Result<(Vec<(KernelObject, HandleMetadata)>, Vec<u8>), crate::ipc::IpcError> {
+        use crate::ipc::IpcError;
+
+        let mut handle_count = 0;
+        let mut data_len = None;
+        for segment in &self.segments {
+            match segment {
+                SocketSegment::Handle(_, _) => handle_count += 1,
+                SocketSegment::HandleData { data, .. } => {
+                    handle_count += 1;
+                    data_len = Some(data.len());
+                    break;
+                }
+                SocketSegment::Bytes(_) => return Err(IpcError::ChannelEmpty),
+            }
+        }
+        let data_len = data_len.ok_or(IpcError::ChannelEmpty)?;
+        if data_len > data_capacity {
+            return Err(IpcError::BufferTooSmall { required: data_len });
+        }
+        if handle_count > handle_capacity {
+            return Err(IpcError::BufferTooSmall {
+                required: handle_count,
+            });
+        }
+
+        let mut handles = Vec::with_capacity(handle_count);
+        for _ in 1..handle_count {
+            let Some(SocketSegment::Handle(object, metadata)) = self.segments.pop_front() else {
+                unreachable!("checked handle sequence before consuming it")
+            };
+            handles.push((object, metadata));
+        }
+        let Some(SocketSegment::HandleData {
+            object,
+            metadata,
+            data,
+        }) = self.segments.pop_front()
+        else {
+            unreachable!("checked final handle-data segment before consuming it")
+        };
+        handles.push((object, metadata));
+        self.record_bytes -= data.len();
+        self.handles -= handle_count;
+        Ok((handles, data))
+    }
 }
 
 /// Shared ordered receive queue for socket data and transferred handles.
@@ -580,6 +633,23 @@ impl LocalSocket {
         result
     }
 
+    pub(crate) fn recv_handles_and_data_batch(
+        &self,
+        max_data_len: usize,
+        max_handles: usize,
+    ) -> Result<(Vec<(KernelObject, HandleMetadata)>, Vec<u8>), crate::ipc::IpcError> {
+        use crate::ipc::IpcError;
+
+        if *self.state.read() != SocketState::Connected {
+            return Err(IpcError::InvalidState);
+        }
+        self.read_buffer
+            .read()
+            .queue
+            .write()
+            .pop_handles_data_batch(max_data_len, max_handles)
+    }
+
     /// Receive a KernelObject handle and its metadata from this socket (non-blocking).
     ///
     /// # Returns
@@ -661,6 +731,15 @@ impl LocalSocket {
     ///
     /// A tuple of (local_socket, peer_socket) that are connected
     pub fn create_connected_pair(local_addr: String, peer_addr: String) -> (Arc<Self>, Arc<Self>) {
+        Self::create_connected_pair_with_type(SocketType::Stream, local_addr, peer_addr)
+    }
+
+    /// Create a connected pair with the requested socket type.
+    pub fn create_connected_pair_with_type(
+        socket_type: SocketType,
+        local_addr: String,
+        peer_addr: String,
+    ) -> (Arc<Self>, Arc<Self>) {
         let owner_process_id = Self::current_process_id().unwrap_or(0);
         // Create shared buffers for bidirectional communication
         let local_read_buffer = SocketBuffer::new();
@@ -669,7 +748,7 @@ impl LocalSocket {
         // Create local socket (server side)
         // It reads from local_read_buffer, writes to peer_read_buffer
         let local_socket = Arc::new(Self {
-            socket_type: SocketType::Stream,
+            socket_type,
             protocol: SocketProtocol::Default,
             state: IrqRwSpinLock::new(SocketState::Connected),
             local_addr: IrqRwSpinLock::new(Some(local_addr.clone())),
@@ -692,7 +771,7 @@ impl LocalSocket {
         // Create peer socket (client side)
         // It reads from peer_read_buffer, writes to local_read_buffer
         let peer_socket = Arc::new(Self {
-            socket_type: SocketType::Stream,
+            socket_type,
             protocol: SocketProtocol::Default,
             state: IrqRwSpinLock::new(SocketState::Connected),
             local_addr: IrqRwSpinLock::new(Some(peer_addr)),
@@ -1831,6 +1910,38 @@ mod tests {
         let (third, _, data) = receiver.recv_handle_and_data(5).unwrap();
         assert_eq!(third.as_shared_memory().unwrap().size(), 12288);
         assert_eq!(data.as_slice(), b"batch");
+    }
+
+    #[test_case]
+    fn test_linux_ancillary_batch_receives_all_handles_atomically() {
+        use crate::ipc::{IpcError, SharedMemory};
+        use alloc::sync::Arc;
+
+        let (sender, receiver) =
+            LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
+        let mut handles = Vec::new();
+        for size in [4096, 8192] {
+            let memory = SharedMemory::new(size, 0x3).unwrap();
+            handles.push((
+                KernelObject::from_shared_memory_object(Arc::new(memory)),
+                HandleMetadata::default(),
+            ));
+        }
+        sender.send_handles_and_data(handles, b"mojo").unwrap();
+
+        assert!(matches!(
+            receiver.recv_handles_and_data_batch(4, 1),
+            Err(IpcError::BufferTooSmall { required: 2 })
+        ));
+        let (received, data) = receiver.recv_handles_and_data_batch(4, 2).unwrap();
+        assert_eq!(received.len(), 2);
+        assert_eq!(received[0].0.as_shared_memory().unwrap().size(), 4096);
+        assert_eq!(received[1].0.as_shared_memory().unwrap().size(), 8192);
+        assert_eq!(data.as_slice(), b"mojo");
+        assert!(matches!(
+            receiver.recv_handles_and_data_batch(4, 2),
+            Err(IpcError::ChannelEmpty)
+        ));
     }
 
     #[test_case]

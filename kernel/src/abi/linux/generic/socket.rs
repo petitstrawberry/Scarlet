@@ -60,6 +60,7 @@ pub const SOCK_CLOEXEC: i32 = 0x80000;
 pub const SOCK_TYPE_MASK: i32 = 0xF;
 
 pub const SOL_SOCKET: i32 = 1;
+pub const SO_TYPE: i32 = 3;
 pub const SCM_RIGHTS: i32 = 1;
 pub const SO_PEERCRED: i32 = 17;
 pub const MSG_DONTWAIT: i32 = 0x40;
@@ -267,6 +268,37 @@ struct LinuxCmsghdr {
     cmsg_len: usize,
     cmsg_level: i32,
     cmsg_type: i32,
+}
+
+fn read_linux_msghdr(task: &crate::task::Task, address: usize) -> Result<LinuxMsghdr, usize> {
+    let mut message = unsafe { core::mem::zeroed::<LinuxMsghdr>() };
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(
+            (&mut message as *mut LinuxMsghdr).cast::<u8>(),
+            size_of::<LinuxMsghdr>(),
+        )
+    };
+    copy_from_user(task, address, bytes).map_err(|_| errno::EFAULT)?;
+    Ok(message)
+}
+
+fn read_linux_iovecs(
+    task: &crate::task::Task,
+    address: usize,
+    count: usize,
+) -> Result<Vec<IoVec>, usize> {
+    let mut iovecs = alloc::vec![IoVec {
+        iov_base: core::ptr::null_mut(),
+        iov_len: 0,
+    }; count];
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(
+            iovecs.as_mut_ptr().cast::<u8>(),
+            count * size_of::<IoVec>(),
+        )
+    };
+    copy_from_user(task, address, bytes).map_err(|_| errno::EFAULT)?;
+    Ok(iovecs)
 }
 
 /// Linux sys_socket implementation
@@ -484,20 +516,16 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    // Translate address pointer to physical
-    let addr_paddr = match task.vm_manager.translate_to_kva(addr_ptr) {
-        Some(addr) => addr,
-        None => {
-            crate::println!("[linux socket] bind bad addr {:x}", addr_ptr);
-            return usize::MAX;
-        }
-    };
-
-    // Read sockaddr structure from userspace
-    // sockaddr_un structure: { sa_family: u16, sun_path: [u8; 108] }
-    if addrlen < 2 {
-        return usize::MAX; // Too small
+    // A sockaddr may straddle user pages, which need not be physically
+    // contiguous. Copy it before parsing the family and Unix path.
+    let mut addr_bytes = [0u8; 128];
+    if addrlen < 2 || addrlen as usize > addr_bytes.len() {
+        return errno::to_result(errno::EINVAL);
     }
+    if copy_from_user(&task, addr_ptr, &mut addr_bytes[..addrlen as usize]).is_err() {
+        return errno::to_result(errno::EFAULT);
+    }
+    let addr_paddr = addr_bytes.as_ptr() as usize;
 
     unsafe {
         let sa_family = *(addr_paddr as *const u16);
@@ -823,17 +851,14 @@ pub fn sys_connect(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    let addr_paddr = match task.vm_manager.translate_to_kva(addr_ptr) {
-        Some(addr) => addr,
-        None => {
-            crate::println!("[linux socket] connect bad addr {:x}", addr_ptr);
-            return usize::MAX;
-        }
-    };
-
-    if addrlen < 2 {
-        return usize::MAX;
+    let mut addr_bytes = [0u8; 128];
+    if addrlen < 2 || addrlen as usize > addr_bytes.len() {
+        return errno::to_result(errno::EINVAL);
     }
+    if copy_from_user(&task, addr_ptr, &mut addr_bytes[..addrlen as usize]).is_err() {
+        return errno::to_result(errno::EFAULT);
+    }
+    let addr_paddr = addr_bytes.as_ptr() as usize;
 
     unsafe {
         let sa_family = *(addr_paddr as *const u16);
@@ -1087,6 +1112,36 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
     let optlen = u32::from_ne_bytes(optlen_bytes);
 
+    if level == SOL_SOCKET && optname == SO_TYPE {
+        if optlen < size_of::<i32>() as u32 {
+            return errno::to_result(errno::EINVAL);
+        }
+        let handle = match abi.get_handle(sockfd as usize) {
+            Some(handle) => handle,
+            None => return errno::to_result(errno::EBADF),
+        };
+        let socket = match task
+            .handle_table
+            .get(handle)
+            .and_then(KernelObject::into_socket_arc)
+        {
+            Some(socket) => socket,
+            None => return errno::to_result(errno::ENOTSOCK),
+        };
+        let socket_type: i32 = match socket.socket_type() {
+            SocketType::Stream => SOCK_STREAM,
+            SocketType::Datagram => SOCK_DGRAM,
+            SocketType::Raw => SOCK_RAW,
+            SocketType::SeqPacket => SOCK_SEQPACKET,
+        };
+        if copy_to_user(&task, optval_ptr, &socket_type.to_ne_bytes()).is_err()
+            || copy_to_user(&task, optlen_ptr, &(size_of::<i32>() as u32).to_ne_bytes()).is_err()
+        {
+            return errno::to_result(errno::EFAULT);
+        }
+        return 0;
+    }
+
     if level == SOL_SOCKET && optname == SO_PEERCRED {
         if optlen < size_of::<LinuxUcred>() as u32 {
             return errno::to_result(errno::EINVAL);
@@ -1241,20 +1296,10 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             .map(|f| ((f as i32) & O_NONBLOCK) != 0)
             .unwrap_or(false);
 
-    let msg_addr = match task.vm_manager.translate_to_kva(msg_ptr) {
-        Some(addr) => addr as *const LinuxMsghdr,
-        None => {
-            crate::println!("[linux socket] sendmsg bad msg ptr {:x}", msg_ptr);
-            return errno::to_result(errno::EFAULT);
-        }
+    let msg = match read_linux_msghdr(&task, msg_ptr) {
+        Ok(msg) => msg,
+        Err(error) => return errno::to_result(error),
     };
-
-    if msg_addr.is_null() {
-        crate::println!("[linux socket] sendmsg null msg ptr");
-        return errno::to_result(errno::EFAULT);
-    }
-
-    let msg = unsafe { *msg_addr };
     let iovcnt = msg.msg_iovlen as usize;
     if iovcnt == 0 {
         return 0;
@@ -1265,20 +1310,10 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return errno::to_result(errno::EINVAL);
     }
 
-    let iovec_addr = match task.vm_manager.translate_to_kva(msg.msg_iov as usize) {
-        Some(addr) => addr as *const IoVec,
-        None => {
-            crate::println!("[linux socket] sendmsg bad iov ptr {:x}", msg.msg_iov);
-            return errno::to_result(errno::EFAULT);
-        }
+    let iovecs = match read_linux_iovecs(&task, msg.msg_iov as usize, iovcnt) {
+        Ok(iovecs) => iovecs,
+        Err(error) => return errno::to_result(error),
     };
-
-    if iovec_addr.is_null() {
-        crate::println!("[linux socket] sendmsg null iov ptr");
-        return errno::to_result(errno::EFAULT);
-    }
-
-    let iovecs = unsafe { core::slice::from_raw_parts(iovec_addr, iovcnt) };
 
     let mut attached_handles = Vec::new();
     if msg.msg_control != 0 && msg.msg_controllen as usize >= size_of::<LinuxCmsghdr>() {
@@ -1516,20 +1551,10 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             .map(|f| ((f as i32) & O_NONBLOCK) != 0)
             .unwrap_or(false);
 
-    let msg_addr = match task.vm_manager.translate_to_kva(msg_ptr) {
-        Some(addr) => addr as *mut LinuxMsghdr,
-        None => {
-            crate::println!("[linux socket] recvmsg bad msg ptr {:x}", msg_ptr);
-            return errno::to_result(errno::EFAULT);
-        }
+    let mut msg = match read_linux_msghdr(&task, msg_ptr) {
+        Ok(msg) => msg,
+        Err(error) => return errno::to_result(error),
     };
-
-    if msg_addr.is_null() {
-        crate::println!("[linux socket] recvmsg null msg ptr");
-        return errno::to_result(errno::EFAULT);
-    }
-
-    let msg = unsafe { *msg_addr };
     // crate::println!(
     //     "[linux recvmsg] iov_ptr={:#x} iovlen={} control_ptr={:#x} controllen={}",
     //     msg.msg_iov,
@@ -1547,23 +1572,20 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return errno::to_result(errno::EINVAL);
     }
 
-    let iovec_addr = match task.vm_manager.translate_to_kva(msg.msg_iov as usize) {
-        Some(addr) => addr as *const IoVec,
-        None => {
-            crate::println!("[linux socket] recvmsg bad iov ptr {:x}", msg.msg_iov);
-            return errno::to_result(errno::EFAULT);
-        }
+    let iovecs = match read_linux_iovecs(&task, msg.msg_iov as usize, iovcnt) {
+        Ok(iovecs) => iovecs,
+        Err(error) => return errno::to_result(error),
     };
-
-    if iovec_addr.is_null() {
-        crate::println!("[linux socket] recvmsg null iov ptr");
-        return errno::to_result(errno::EFAULT);
-    }
-
-    let iovecs = unsafe { core::slice::from_raw_parts(iovec_addr, iovcnt) };
     // crate::println!("[linux recvmsg] iovcnt={}", iovecs.len());
     let mut total_read = 0usize;
-    let mut pending_fd: Option<i32> = None;
+    let mut pending_fds: Vec<i32> = Vec::new();
+    fn rollback_received_fds(abi: &mut LinuxAbi, task: &crate::task::Task, fds: &[i32]) {
+        for &fd in fds {
+            if let Some(handle) = abi.remove_fd(fd as usize) {
+                let _ = task.handle_table.remove(handle);
+            }
+        }
+    }
     let mut msg_controllen = 0usize;
     struct NonblockGuard<'a> {
         sel: Option<&'a dyn Selectable>,
@@ -1607,6 +1629,8 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
     let can_receive_handle = msg.msg_control != 0
         && (msg.msg_controllen as usize) >= size_of::<LinuxCmsghdr>() + size_of::<i32>();
+    let max_received_handles =
+        (msg.msg_controllen as usize).saturating_sub(size_of::<LinuxCmsghdr>()) / size_of::<i32>();
     let mut retried_atomic_after_stream_wake = false;
 
     'receive: loop {
@@ -1620,21 +1644,39 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             };
 
             if let Some(local_socket) = LocalSocket::from_socket_object(socket) {
-                match local_socket.recv_handle_and_data(total_buffer_size) {
-                    Ok((obj, metadata, data)) => {
-                        let new_handle = match task.handle_table.insert_with_metadata(obj, metadata)
-                        {
-                            Ok(h) => h,
-                            Err(_) => return errno::to_result(errno::EMFILE),
-                        };
-                        let new_fd = match abi.allocate_fd(new_handle) {
-                            Ok(fd) => fd,
-                            Err(_) => {
-                                let _ = task.handle_table.remove(new_handle);
-                                return errno::to_result(errno::EMFILE);
+                match local_socket
+                    .recv_handles_and_data_batch(total_buffer_size, max_received_handles)
+                {
+                    Ok((handles, data)) => {
+                        for (obj, metadata) in handles {
+                            let access_mode = metadata.access_mode;
+                            let new_handle =
+                                match task.handle_table.insert_with_metadata(obj, metadata) {
+                                    Ok(h) => h,
+                                    Err(_) => {
+                                        rollback_received_fds(abi, &task, &pending_fds);
+                                        return errno::to_result(errno::EMFILE);
+                                    }
+                                };
+                            let new_fd = match abi.allocate_fd(new_handle) {
+                                Ok(fd) => fd,
+                                Err(_) => {
+                                    let _ = task.handle_table.remove(new_handle);
+                                    rollback_received_fds(abi, &task, &pending_fds);
+                                    return errno::to_result(errno::EMFILE);
+                                }
+                            };
+                            let status_flags = match access_mode {
+                                crate::object::handle::AccessMode::ReadOnly => 0,
+                                crate::object::handle::AccessMode::WriteOnly => 1,
+                                crate::object::handle::AccessMode::ReadWrite => 2,
+                            };
+                            let _ = abi.set_file_status_flags(new_fd, status_flags);
+                            if flags & 0x4000_0000 != 0 {
+                                let _ = abi.set_fd_flags(new_fd, FD_CLOEXEC);
                             }
-                        };
-                        pending_fd = Some(new_fd as i32);
+                            pending_fds.push(new_fd as i32);
+                        }
                         atomic_data = Some(data);
                     }
                     Err(IpcError::ChannelEmpty) => {
@@ -1654,7 +1696,7 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         if let Some(ref data) = atomic_data {
             let mut data_offset = 0;
             let data_len = data.len();
-            for iovec in iovecs {
+            for iovec in &iovecs {
                 if data_offset >= data_len {
                     break;
                 }
@@ -1671,13 +1713,14 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 )
                 .is_err()
                 {
+                    rollback_received_fds(abi, &task, &pending_fds);
                     return errno::to_result(errno::EFAULT);
                 }
                 data_offset += to_copy;
                 total_read += to_copy;
             }
         } else {
-            for iovec in iovecs {
+            for iovec in &iovecs {
                 if iovec.iov_len == 0 {
                     continue;
                 }
@@ -1716,30 +1759,42 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         break 'receive;
     }
 
-    if let Some(fd_value) = pending_fd {
-        let cmsg_addr = match task.vm_manager.translate_to_kva(msg.msg_control as usize) {
-            Some(addr) => addr as *mut LinuxCmsghdr,
-            None => return errno::to_result(errno::EFAULT),
+    if !pending_fds.is_empty() {
+        msg_controllen = size_of::<LinuxCmsghdr>() + pending_fds.len() * size_of::<i32>();
+        let mut control = alloc::vec![0u8; msg_controllen];
+        let header = LinuxCmsghdr {
+            cmsg_len: msg_controllen,
+            cmsg_level: SOL_SOCKET,
+            cmsg_type: SCM_RIGHTS,
         };
-
-        if cmsg_addr.is_null() {
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                (&header as *const LinuxCmsghdr).cast::<u8>(),
+                control.as_mut_ptr(),
+                size_of::<LinuxCmsghdr>(),
+            );
+        }
+        for (index, fd) in pending_fds.iter().enumerate() {
+            let start = size_of::<LinuxCmsghdr>() + index * size_of::<i32>();
+            control[start..start + size_of::<i32>()].copy_from_slice(&fd.to_ne_bytes());
+        }
+        if copy_to_user(&task, msg.msg_control as usize, &control).is_err() {
+            rollback_received_fds(abi, &task, &pending_fds);
             return errno::to_result(errno::EFAULT);
         }
-
-        unsafe {
-            (*cmsg_addr).cmsg_len = size_of::<LinuxCmsghdr>() + size_of::<i32>();
-            (*cmsg_addr).cmsg_level = SOL_SOCKET;
-            (*cmsg_addr).cmsg_type = SCM_RIGHTS;
-            let data_ptr = cmsg_addr.add(1) as *mut i32;
-            *data_ptr = fd_value;
-        }
-
-        msg_controllen = size_of::<LinuxCmsghdr>() + size_of::<i32>();
     }
 
-    unsafe {
-        (*msg_addr).msg_flags = 0;
-        (*msg_addr).msg_controllen = msg_controllen as u64;
+    msg.msg_flags = 0;
+    msg.msg_controllen = msg_controllen as u64;
+    let message_bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&msg as *const LinuxMsghdr).cast::<u8>(),
+            size_of::<LinuxMsghdr>(),
+        )
+    };
+    if copy_to_user(&task, msg_ptr, message_bytes).is_err() {
+        rollback_received_fds(abi, &task, &pending_fds);
+        return errno::to_result(errno::EFAULT);
     }
 
     total_read
@@ -1793,20 +1848,25 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         None => return errno::to_result(errno::ENOTSOCK),
     };
 
-    // Translate buffer pointer
-    let buf_kaddr = match task.vm_manager.translate_to_kva(buf_ptr) {
-        Some(addr) => addr,
-        None => return errno::to_result(errno::EFAULT),
-    };
-
-    let data = unsafe { core::slice::from_raw_parts(buf_kaddr as *const u8, len) };
+    let mut data = Vec::new();
+    if data.try_reserve_exact(len).is_err() {
+        return errno::to_result(errno::ENOMEM);
+    }
+    data.resize(len, 0);
+    if copy_from_user(&task, buf_ptr, &mut data).is_err() {
+        return errno::to_result(errno::EFAULT);
+    }
 
     // Parse destination address if provided
     let dest_addr = if dest_addr_ptr != 0 && addrlen > 0 {
-        let addr_kaddr = match task.vm_manager.translate_to_kva(dest_addr_ptr) {
-            Some(addr) => addr,
-            None => return errno::to_result(errno::EFAULT),
-        };
+        let mut addr_bytes = [0u8; 128];
+        if addrlen < 2 || addrlen as usize > addr_bytes.len() {
+            return errno::to_result(errno::EINVAL);
+        }
+        if copy_from_user(&task, dest_addr_ptr, &mut addr_bytes[..addrlen as usize]).is_err() {
+            return errno::to_result(errno::EFAULT);
+        }
+        let addr_kaddr = addr_bytes.as_ptr() as usize;
 
         // Read address family
         let sa_family = unsafe { *(addr_kaddr as *const u16) };
@@ -1816,7 +1876,8 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 if addrlen < size_of::<SockaddrIn>() as u32 {
                     return errno::to_result(errno::EINVAL);
                 }
-                let sockaddr = unsafe { *(addr_kaddr as *const SockaddrIn) };
+                let sockaddr =
+                    unsafe { core::ptr::read_unaligned(addr_kaddr as *const SockaddrIn) };
                 let port = u16::from_be(sockaddr.sin_port);
                 let addr_bytes = sockaddr.sin_addr.to_be_bytes();
                 crate::network::SocketAddress::Inet(crate::network::Inet4SocketAddress::new(
@@ -1835,7 +1896,7 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Send data
-    let result = socket.sendto(data, &dest_addr, flags);
+    let result = socket.sendto(&data, &dest_addr, flags);
     if MOZC_IPC_TRACE_ENABLED && is_mozc_server_task(&task) {
         match &result {
             Ok(written) => crate::println!(
@@ -1914,13 +1975,11 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         None => return errno::to_result(errno::ENOTSOCK),
     };
 
-    // Translate buffer pointer
-    let buf_kaddr = match task.vm_manager.translate_to_kva(buf_ptr) {
-        Some(addr) => addr,
-        None => return errno::to_result(errno::EFAULT),
-    };
-
-    let buffer = unsafe { core::slice::from_raw_parts_mut(buf_kaddr as *mut u8, len) };
+    let mut buffer = Vec::new();
+    if buffer.try_reserve_exact(len).is_err() {
+        return errno::to_result(errno::ENOMEM);
+    }
+    buffer.resize(len, 0);
 
     // Check for non-blocking mode
     let nonblocking = (flags & (MSG_DONTWAIT as u32)) != 0
@@ -1937,7 +1996,7 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 
     // Receive data
-    let result = socket.recvfrom(buffer, flags);
+    let result = socket.recvfrom(&mut buffer, flags);
 
     // Restore blocking mode if we changed it
     if nonblocking {
@@ -1969,47 +2028,42 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     match result {
         Ok((n, src_addr)) => {
+            if copy_to_user(&task, buf_ptr, &buffer[..n]).is_err() {
+                return errno::to_result(errno::EFAULT);
+            }
             // Store source address if requested
             if src_addr_ptr != 0 && addrlen_ptr != 0 {
-                let addrlen_paddr = match task.vm_manager.translate_to_kva(addrlen_ptr) {
-                    Some(addr) => addr as *mut u32,
-                    None => return errno::to_result(errno::EFAULT),
-                };
-
-                let provided_len = unsafe { *addrlen_paddr };
+                let mut addrlen_bytes = [0u8; size_of::<u32>()];
+                if copy_from_user(&task, addrlen_ptr, &mut addrlen_bytes).is_err() {
+                    return errno::to_result(errno::EFAULT);
+                }
+                let provided_len = u32::from_ne_bytes(addrlen_bytes);
 
                 match src_addr {
                     crate::network::SocketAddress::Inet(inet) => {
                         if provided_len >= size_of::<SockaddrIn>() as u32 {
-                            let addr_paddr = match task.vm_manager.translate_to_kva(src_addr_ptr) {
-                                Some(addr) => addr as *mut SockaddrIn,
-                                None => return errno::to_result(errno::EFAULT),
-                            };
-
                             let sockaddr = SockaddrIn {
                                 sin_family: AF_INET as u16,
                                 sin_port: inet.port.to_be(),
                                 sin_addr: u32::from_be_bytes(inet.addr),
                                 sin_zero: [0; 8],
                             };
-                            unsafe {
-                                *addr_paddr = sockaddr;
-                                *addrlen_paddr = size_of::<SockaddrIn>() as u32;
+                            let sockaddr_bytes = unsafe {
+                                core::slice::from_raw_parts(
+                                    (&sockaddr as *const SockaddrIn).cast::<u8>(),
+                                    size_of::<SockaddrIn>(),
+                                )
+                            };
+                            if copy_to_user(&task, src_addr_ptr, sockaddr_bytes).is_err() {
+                                return errno::to_result(errno::EFAULT);
                             }
+                            addrlen_bytes = (size_of::<SockaddrIn>() as u32).to_ne_bytes();
                         }
                     }
-                    crate::network::SocketAddress::Local(_) => {
-                        // Unix domain socket - store sockaddr_un
-                        unsafe {
-                            *addrlen_paddr = 0;
-                        }
-                    }
-                    crate::network::SocketAddress::Unspecified => unsafe {
-                        *addrlen_paddr = 0;
-                    },
-                    _ => unsafe {
-                        *addrlen_paddr = 0;
-                    },
+                    _ => addrlen_bytes = 0u32.to_ne_bytes(),
+                }
+                if copy_to_user(&task, addrlen_ptr, &addrlen_bytes).is_err() {
+                    return errno::to_result(errno::EFAULT);
                 }
             }
             n
@@ -2060,10 +2114,12 @@ pub fn sys_socketpair(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let nonblocking = (flags & SOCK_NONBLOCK) != 0;
     let cloexec = (flags & SOCK_CLOEXEC) != 0;
 
-    // Validate socket type - we support SOCK_STREAM and SOCK_DGRAM
-    if base_type != SOCK_STREAM && base_type != SOCK_DGRAM {
-        return errno::to_result(errno::ESOCKTNOSUPPORT);
-    }
+    let local_type = match base_type {
+        SOCK_STREAM => SocketType::Stream,
+        SOCK_DGRAM => SocketType::Datagram,
+        SOCK_SEQPACKET => SocketType::SeqPacket,
+        _ => return errno::to_result(errno::ESOCKTNOSUPPORT),
+    };
 
     // Translate sv pointer (needs to write 2 i32 values)
     let sv_paddr = match task.vm_manager.translate_to_kva(sv_ptr) {
@@ -2072,7 +2128,8 @@ pub fn sys_socketpair(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Create connected socket pair
-    let (socket1, socket2) = LocalSocket::create_connected_pair(
+    let (socket1, socket2) = LocalSocket::create_connected_pair_with_type(
+        local_type,
         alloc::string::String::from("socketpair:0"),
         alloc::string::String::from("socketpair:1"),
     );

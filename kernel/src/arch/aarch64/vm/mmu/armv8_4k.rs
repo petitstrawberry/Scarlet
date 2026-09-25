@@ -1087,6 +1087,32 @@ impl PageTable {
         None
     }
 
+    /// Return the first address outside the missing page-table subtree that
+    /// contains `vaddr`. Sparse reservations often have no leaf page tables;
+    /// skipping that subtree avoids walking millions of absent 4 KiB leaves.
+    fn unmapped_span_end(&mut self, vaddr: usize) -> usize {
+        if !Self::is_canonical_48(vaddr) {
+            return vaddr.saturating_add(PAGE_SIZE);
+        }
+        let mut pagetable = self as *mut PageTable;
+        unsafe {
+            for level in (0..=MAX_PAGING_LEVEL).rev() {
+                let index = (vaddr >> (12 + 9 * level)) & 0x1ff;
+                let pte = &mut (*pagetable).entries[index];
+                if !pte.is_valid()
+                    || (level != 0 && !pte.is_leaf_for_level(level) && !pte.is_table())
+                {
+                    return (vaddr | (page_size_for_level(level) - 1)).saturating_add(1);
+                }
+                if level == 0 || pte.is_leaf_for_level(level) {
+                    return vaddr.saturating_add(PAGE_SIZE);
+                }
+                pagetable = phys_to_virt(pte.get_ppn() << 12) as *mut PageTable;
+            }
+        }
+        vaddr.saturating_add(PAGE_SIZE)
+    }
+
     /// Translate a virtual address to a physical address by walking the page table.
     ///
     /// # Arguments
@@ -1144,10 +1170,11 @@ impl PageTable {
         let mut changed = false;
         while vaddr <= vaddr_end {
             let Some((_, level)) = self.walk_leaf(vaddr) else {
-                match vaddr.checked_add(PAGE_SIZE) {
-                    Some(next) => vaddr = next,
-                    None => break,
+                let next = self.unmapped_span_end(vaddr);
+                if next <= vaddr {
+                    break;
                 }
+                vaddr = next;
                 continue;
             };
 

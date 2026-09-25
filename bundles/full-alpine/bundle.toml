@@ -1,0 +1,18 @@
+# AArch64 full image using the experimental Alpine Linux view.
+
+[[layers]]
+kind = "bundle"
+path = "../desktop/bundle.toml"
+
+[[layers]]
+kind = "bundle"
+source = { git = "https://github.com/petitstrawberry/scarlet-bundle-alpine.git", rev = "b3c55f9b4ccb360aa461fc1ec59ff73700d176b1" }
+subdir = "bundles/rootfs"
+
+[[layers]]
+kind = "bundle"
+path = "../experimental/bundle.toml"
+
+[[layers]]
+kind = "bundle"
+path = "../rust-toolchain/bundle.toml"

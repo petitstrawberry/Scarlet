@@ -4,8 +4,11 @@ pub mod errno;
 pub mod fs;
 pub mod futex;
 pub mod mm;
+mod mode;
 pub mod pipe;
 pub mod proc;
+mod proc_fd;
+mod proc_text;
 pub mod signal;
 pub mod socket;
 pub mod time;
@@ -107,6 +110,7 @@ pub struct LinuxAbi {
     pub signal_state: Arc<IrqSpinLock<signal::SignalState>>,
     pub thread_state: LinuxThreadState,
     posix_timers: Arc<IrqSpinLock<PosixTimerTable>>,
+    pub(crate) umask: u32,
 }
 
 impl Default for LinuxAbi {
@@ -119,6 +123,7 @@ impl Default for LinuxAbi {
             signal_state: Arc::new(IrqSpinLock::new(signal::SignalState::new())),
             thread_state: LinuxThreadState::default(),
             posix_timers: Arc::new(IrqSpinLock::new(PosixTimerTable::new())),
+            umask: 0o022,
         }
     }
 }
@@ -127,6 +132,7 @@ impl LinuxAbi {
     /// Prepare an independent fd table without closing any handle in the caller.
     pub fn prepare_exec_fds(&mut self, source: Option<&Self>, image: &crate::task::Task) {
         if let Some(source) = source {
+            self.umask = source.umask;
             let mut signals = source.signal_state.lock().clone();
             for (signal, action) in signals.handlers.iter_mut() {
                 if matches!(action, signal::SignalAction::Custom(_)) {
@@ -448,6 +454,7 @@ syscall_table! {
     Ioctl = 29 => fs::sys_ioctl,
     MkdirAt = 34 => fs::sys_mkdirat,
     UnlinkAt = 35 => fs::sys_unlinkat,
+    SymlinkAt = 36 => fs::sys_symlinkat,
     RenameAt = 38 => fs::sys_renameat,
     Mount = 40 => fs::sys_mount,
     Statfs = 43 => fs::sys_statfs,
@@ -459,6 +466,7 @@ syscall_table! {
     Chdir = 49 => fs::sys_chdir,
     Fchmod = 52 => fs::sys_fchmod,
     FchmodAt = 53 => fs::sys_fchmodat,
+    Fchown = 55 => fs::sys_fchown,
     OpenAt = 56 => fs::sys_openat,
     Close = 57 => fs::sys_close,
     Pipe2 = 59 => pipe::sys_pipe2,
@@ -476,6 +484,8 @@ syscall_table! {
     NewFstat = 80 => fs::sys_newfstat,
     ReadLinkAt = 78 => fs::sys_readlinkat,
     Fsync = 82 => fs::sys_fsync,
+    Fdatasync = 83 => fs::sys_fsync,
+    Capset = 91 => proc::sys_capset,
     TimerfdCreate = 85 => time::sys_timerfd_create,
     TimerfdSettime = 86 => time::sys_timerfd_settime,
     TimerfdGettime = 87 => time::sys_timerfd_gettime,
@@ -530,6 +540,7 @@ syscall_table! {
     Brk = 214 => proc::sys_brk,
     Munmap = 215 => mm::sys_munmap,
     Mremap = 216 => mm::sys_mremap,
+    Fadvise64 = 223 => fs::sys_fadvise64,
     Clone = 220 => proc::sys_clone,
     Execve = 221 => fs::sys_execve,
     Mmap = 222 => mm::sys_mmap,

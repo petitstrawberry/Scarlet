@@ -4,10 +4,17 @@
 //! memory, descriptors, ABI, filesystem context and Environment are unchanged.
 
 use super::environment::Environment;
-use crate::{arch::Trapframe, fs::VfsManager, object::KernelObject, task::Task};
+use crate::{
+    arch::Trapframe,
+    fs::{VfsManager, vfs_v2::PathResolutionOptions},
+    object::KernelObject,
+    task::Task,
+};
 use alloc::{
+    format,
     string::{String, ToString},
     sync::Arc,
+    vec::Vec,
 };
 use core::{fmt, sync::atomic::Ordering};
 
@@ -38,6 +45,43 @@ pub type ExecutorResult<T> = Result<T, ExecutorError>;
 
 fn failure(message: &str) -> ExecutorError {
     ExecutorError::ExecutionFailed(message.to_string())
+}
+
+/// Find a path inside a registered view by walking the VFS entries shared with
+/// the caller's view. The closest registered root wins when views are nested.
+fn path_in_environment_view(
+    vfs: &VfsManager,
+    path: &str,
+    environment: &Environment,
+) -> Option<(String, Arc<crate::fs::vfs_v2::manager::VfsView>, String)> {
+    let (entry, _) = vfs
+        .resolve_path_with_options(path, &PathResolutionOptions::no_follow())
+        .ok()?;
+    let mut best = None;
+    for (abi, view) in environment.roots() {
+        let root = view.mount_tree.root_mount.read().root.clone();
+        let mut current = entry.clone();
+        let mut components = Vec::new();
+        loop {
+            if Arc::ptr_eq(&current, &root) {
+                let depth = components.len();
+                components.reverse();
+                let relative = format!("/{}", components.join("/"));
+                if best
+                    .as_ref()
+                    .is_none_or(|(best_depth, _, _, _)| depth < *best_depth)
+                {
+                    best = Some((depth, abi, view, relative));
+                }
+                break;
+            }
+            let (name, parent) = current.location();
+            let Some(parent) = parent else { break };
+            components.push(name);
+            current = parent;
+        }
+    }
+    best.map(|(_, abi, view, relative)| (abi, view, relative))
 }
 
 /// Explicit Environment transitions inherit only these source → target handles.
@@ -85,11 +129,79 @@ impl TransparentExecutor {
         let vfs = task
             .get_vfs()
             .ok_or_else(|| failure("missing filesystem context"))?;
-        // Let VFS walk components, including symlinks and '..'; do not lexically
-        // normalize the path before opening it.
-        let file = vfs
-            .open(path, 0)
-            .map_err(|_| ExecutorError::OpenFailed(path.to_string()))?;
+        // Resolve the final entry without following it, then choose its
+        // registered Environment view. Absolute links are followed in that
+        // view, independent of where its tree is exposed to the caller.
+        let environment = task.execution_environment.read().clone();
+        let view_path = environment
+            .as_ref()
+            .and_then(|env| path_in_environment_view(&vfs, path, env));
+        let file = if let Some((_, view, relative)) = &view_path {
+            VfsManager::from_view(view.clone()).open(relative, 0)
+        } else {
+            vfs.open(path, 0)
+        }
+        .map_err(|_| ExecutorError::OpenFailed(path.to_string()))?;
+        if let Some(file_obj) = file.as_file() {
+            let mut header = [0u8; 256];
+            if let Ok(n) = file_obj.read_at(0, &mut header) {
+                if n >= 2 && &header[..2] == b"#!" {
+                    let end = header[..n]
+                        .iter()
+                        .position(|&byte| byte == b'\n')
+                        .unwrap_or(n);
+                    let line = core::str::from_utf8(&header[2..end])
+                        .map_err(|_| failure("invalid script interpreter"))?;
+                    let mut words = line.split_whitespace();
+                    let interpreter = words
+                        .next()
+                        .filter(|name| name.starts_with('/'))
+                        .ok_or_else(|| failure("invalid script interpreter"))?;
+                    let script_path = view_path
+                        .as_ref()
+                        .map(|(_, _, relative)| relative.clone())
+                        .unwrap_or_else(|| path.to_string());
+                    let interpreter_path = interpreter.to_string();
+                    let mut args = alloc::vec![interpreter_path.as_str()];
+                    if let Some(argument) = words.next() {
+                        args.push(argument);
+                    }
+                    args.push(script_path.as_str());
+                    args.extend(argv.iter().skip(1).copied());
+                    if let Some((_, view, _)) = &view_path {
+                        let environment = environment
+                            .clone()
+                            .ok_or_else(|| failure("process has no Environment"))?;
+                        let interpreter_file = VfsManager::from_view(view.clone())
+                            .open(interpreter, 0)
+                            .map_err(|_| ExecutorError::OpenFailed(interpreter.to_string()))?;
+                        let name = Self::detect_abi(&interpreter_file, interpreter)?;
+                        return Self::replace_image(
+                            &interpreter_file,
+                            interpreter,
+                            &args,
+                            envp,
+                            &name,
+                            Some(environment),
+                            None,
+                            None,
+                            task,
+                            task,
+                            trapframe,
+                        );
+                    }
+                    return Self::execute_path(
+                        &interpreter_path,
+                        &args,
+                        envp,
+                        explicit_abi,
+                        task,
+                        trapframe,
+                        depth + 1,
+                    );
+                }
+            }
+        }
         let name = match explicit_abi {
             Some(name) => name.to_string(),
             None => Self::detect_abi(&file, path)?,
@@ -111,11 +223,23 @@ impl TransparentExecutor {
                 depth + 1,
             );
         }
-        let environment = task.execution_environment.read().clone();
+        // Keep the executable identity valid after switching to its ABI view.
+        // Linux programs use /proc/self/exe to locate helpers for posix_spawn.
+        let view_identity = view_path
+            .as_ref()
+            .filter(|(view_name, _, _)| *view_name == name)
+            .map(|(_, _, relative)| relative.clone());
+        let identity = view_identity.as_deref().unwrap_or(path);
+        let mut view_argv = argv.to_vec();
+        if let Some(first) = view_argv.first_mut()
+            && *first == path
+        {
+            *first = identity;
+        }
         Self::replace_image(
             &file,
-            path,
-            argv,
+            identity,
+            &view_argv,
             envp,
             &name,
             environment,

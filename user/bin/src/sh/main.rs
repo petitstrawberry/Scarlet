@@ -181,10 +181,11 @@ fn find_executable_in_path(program: &str) -> Option<String> {
                     format!("{path_dir}/{program}")
                 };
 
-                // Check if file exists by trying to open it
-                match std::fs::File::open(&full_path) {
-                    Ok(_) => return Some(full_path),
-                    Err(_) => continue,
+                // A link may point into a different Environment view, where
+                // exec will resolve its absolute target.
+                if std::fs::File::open(&full_path).is_ok() || std::fs::read_link(&full_path).is_ok()
+                {
+                    return Some(full_path);
                 }
             }
             None

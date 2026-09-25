@@ -50,13 +50,11 @@ fn read_linux_timespec_timeout_ns(
     task: &crate::task::Task,
     userspace_address: usize,
 ) -> Result<u64, usize> {
-    let kernel_address = task
-        .vm_manager
-        .translate_to_kva(userspace_address)
-        .ok_or(errno::EFAULT)? as *const LinuxTimespec;
-    // SAFETY: The virtual-memory translation validated the userspace address;
-    // read_unaligned supports the Linux ABI's packed userspace representation.
-    let timespec = unsafe { core::ptr::read_unaligned(kernel_address) };
+    let mut bytes = [0u8; core::mem::size_of::<LinuxTimespec>()];
+    if copy_from_user_pagewise(&mut bytes, userspace_address, &task.vm_manager) != bytes.len() {
+        return Err(errno::EFAULT);
+    }
+    let timespec = unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const LinuxTimespec) };
     linux_timespec_timeout_ns(&timespec)
 }
 
@@ -658,6 +656,27 @@ fn write_linux_stat(
     }
 }
 
+fn write_linux_statx(
+    task: &crate::task::Task,
+    userspace_address: usize,
+    statistics: &LinuxStatx,
+) -> Result<(), usize> {
+    if userspace_address == 0 {
+        return Err(errno::EFAULT);
+    }
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            statistics as *const LinuxStatx as *const u8,
+            core::mem::size_of::<LinuxStatx>(),
+        )
+    };
+    if copy_to_user_pagewise(userspace_address, bytes, &task.vm_manager) == bytes.len() {
+        Ok(())
+    } else {
+        Err(errno::EFAULT)
+    }
+}
+
 fn statx_timestamp_from_secs(seconds: u64) -> LinuxStatxTimestamp {
     LinuxStatxTimestamp {
         tv_sec: seconds as i64,
@@ -775,6 +794,14 @@ pub fn sys_exec(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         },
         Err(_) => return usize::MAX, // Path parsing error
     };
+    let path_str = if let Some(selector) = proc_exe_selector(&path_str) {
+        match resolve_proc_exe_identity(&task, &path_str, selector) {
+            Ok(identity) => identity.path,
+            Err(error) => return errno::to_result(error),
+        }
+    } else {
+        path_str
+    };
 
     // Parse argv and envp
     let argv_strings =
@@ -860,6 +887,15 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Some(vfs) => vfs,
         None => return errno::to_result(errno::EIO),
     };
+
+    if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs, dirfd, &path_str) {
+        if super::proc_fd::is_self_fd_directory(&absolute) {
+            return super::proc_fd::open_self_fd_directory(abi, &task, flags);
+        }
+        if let Some(fd) = super::proc_text::open_proc_text_file(abi, &task, &absolute, flags) {
+            return fd;
+        }
+    }
 
     // Determine base directory (entry and mount) for path resolution
     use crate::fs::vfs_v2::core::VfsFileObject;
@@ -951,14 +987,10 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             if flags & O_CREAT != 0 {
                 // crate::println!("sys_openat: O_CREAT flag set, attempting to create file '{}'", path_str);
                 // Build absolute path for file creation before getting mutable VFS reference
-                let absolute_path = if mapped_path.starts_with('/') {
-                    mapped_path.to_string()
-                } else {
-                    // Construct absolute path by resolving relative to current working directory
-                    match to_absolute_path_v2(&task, &mapped_path) {
-                        Ok(p) => p,
-                        Err(_) => return errno::to_result(errno::ENOENT), // Path resolution failed
-                    }
+                let absolute_path = match path_at_to_absolute(abi, &task, &vfs, dirfd, &mapped_path)
+                {
+                    Ok(path) => path,
+                    Err(error) => return errno::to_result(error),
                 };
 
                 // Get mutable VFS reference for file creation
@@ -970,6 +1002,10 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 // Create the file (regular file type)
                 match vfs_mut.create_file(&absolute_path, FileType::RegularFile) {
                     Ok(_) => {
+                        if let Ok((entry, _)) = vfs_mut.resolve_path(&absolute_path) {
+                            let mode = (trapframe.get_arg(3) as u32 & !abi.umask) & 0o7777;
+                            super::mode::set(&entry.node(), mode);
+                        }
                         // File created successfully, now try to open it
                         // Get immutable VFS reference again for opening
                         let vfs = match task.get_vfs() {
@@ -1031,19 +1067,28 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         crate::abi::linux::device::tty::try_auto_acquire_controlling_tty(&kernel_obj);
     }
 
-    // Register the file with the task using HandleTable
-    let handle = task.handle_table.insert(kernel_obj);
+    // Preserve the open-file access mode for dup and SCM_RIGHTS transfers.
+    let mut handle_metadata = crate::object::handle::HandleMetadata::default();
+    handle_metadata.access_mode = match flags & 0x3 {
+        0 => crate::object::handle::AccessMode::ReadOnly,
+        1 => crate::object::handle::AccessMode::WriteOnly,
+        2 => crate::object::handle::AccessMode::ReadWrite,
+        _ => return errno::to_result(errno::EINVAL),
+    };
+    let handle = task
+        .handle_table
+        .insert_with_metadata(kernel_obj, handle_metadata);
     match handle {
         Ok(handle) => {
             match abi.allocate_fd(handle as u32) {
                 Ok(fd) => {
                     // crate::println!("sys_openat: allocated fd {} for '{}'", fd, path_str);
                     // Initialize file status flags (e.g., O_NONBLOCK) from open flags
-                    let mut status_flags: u32 = 0;
-                    if (flags & O_NONBLOCK) != 0 {
-                        status_flags |= O_NONBLOCK as u32;
-                    }
+                    let status_flags: u32 = (flags & (0x3 | O_NONBLOCK | O_APPEND)) as u32;
                     let _ = abi.set_file_status_flags(fd, status_flags);
+                    if flags & O_CLOEXEC != 0 {
+                        let _ = abi.set_fd_flags(fd, FD_CLOEXEC);
+                    }
 
                     // Propagate non-blocking to the underlying object Selectable if available
                     if let Some(obj) = task.handle_table.get(handle) {
@@ -1076,7 +1121,12 @@ pub fn sys_dup(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             match handle {
                 Ok(new_handle) => {
                     match abi.allocate_fd(new_handle as u32) {
-                        Ok(fd) => fd,
+                        Ok(new_fd) => {
+                            if let Some(flags) = abi.get_file_status_flags(fd) {
+                                let _ = abi.set_file_status_flags(new_fd, flags);
+                            }
+                            new_fd
+                        }
                         Err(_) => errno::to_result(errno::EMFILE), // Too many open files
                     }
                 }
@@ -1124,6 +1174,9 @@ pub fn sys_dup3(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     // Allocate specific fd
                     match abi.allocate_specific_fd(newfd, new_handle as u32) {
                         Ok(()) => {
+                            if let Some(status_flags) = abi.get_file_status_flags(oldfd) {
+                                let _ = abi.set_file_status_flags(newfd, status_flags);
+                            }
                             // Set flags if O_CLOEXEC is specified
                             if flags & (O_CLOEXEC as u32) != 0 {
                                 let _ = abi.set_fd_flags(newfd, FD_CLOEXEC);
@@ -1589,15 +1642,17 @@ pub fn sys_pwrite64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return 0;
     }
 
-    let buf_ptr = match task.vm_manager.translate_to_kva(buf_addr) {
-        Some(ptr) => ptr as *const u8,
-        None => {
-            trapframe.increment_pc_next(&task);
-            return errno::to_result(errno::EFAULT);
-        }
-    };
-
-    if buf_ptr.is_null() {
+    // A user range can span unrelated physical pages. A short pwrite is legal,
+    // so bound the kernel staging allocation while preserving its file offset.
+    const MAX_TRANSFER: usize = 1024 * 1024;
+    let transfer = count.min(MAX_TRANSFER);
+    let mut buffer = Vec::new();
+    if buffer.try_reserve_exact(transfer).is_err() {
+        trapframe.increment_pc_next(&task);
+        return errno::to_result(errno::ENOMEM);
+    }
+    buffer.resize(transfer, 0);
+    if copy_from_user_pagewise(&mut buffer, buf_addr, &task.vm_manager) != transfer {
         trapframe.increment_pc_next(&task);
         return errno::to_result(errno::EFAULT);
     }
@@ -1629,14 +1684,12 @@ pub fn sys_pwrite64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
-    let buffer = unsafe { core::slice::from_raw_parts(buf_ptr, count) };
-
     let nonblocking = abi
         .get_file_status_flags(fd)
         .map(|f| ((f as i32) & O_NONBLOCK) != 0)
         .unwrap_or(false);
 
-    match file.write_at(position as u64, buffer) {
+    match file.write_at(position as u64, &buffer) {
         Ok(n) => {
             trapframe.increment_pc_next(&task);
             n
@@ -1863,6 +1916,24 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     const AT_FDCWD: i32 = -100;
     const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
 
+    // /proc/self/task is intentionally synthetic within the Linux view.
+    let vfs_for_proc = match task.get_vfs() {
+        Some(vfs) => vfs,
+        None => return errno::to_result(errno::EIO),
+    };
+    if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs_for_proc, dirfd, &path_str)
+        && let Some(metadata) = super::proc_fd::self_task_metadata(&task, &absolute)
+    {
+        let Some(metadata) = metadata else {
+            return errno::to_result(errno::ENOENT);
+        };
+        let statistics = LinuxStat::from_metadata(&metadata);
+        return match write_linux_stat(&task, stat_ptr, &statistics) {
+            Ok(()) => 0,
+            Err(error) => errno::to_result(error),
+        };
+    }
+
     // Scarlet does not mount a synthetic procfs yet. Linux's lstat path for
     // `/proc/<pid>/exe` must nevertheless report a symlink before C++
     // `std::filesystem::read_symlink` will issue the subsequent readlinkat.
@@ -1929,16 +2000,26 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         )
     };
 
-    // Resolve the path from the base directory
-    let (entry, _mount_point) = match vfs.resolve_path_from(&base_entry, &base_mount, &path_str) {
-        Ok(resolved) => resolved,
-        Err(error) => return errno::to_result(errno::from_fs_error(&error)),
+    // Linux lstat must describe the link itself, including dangling links.
+    let options = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        crate::fs::vfs_v2::PathResolutionOptions::no_follow()
+    } else {
+        crate::fs::vfs_v2::PathResolutionOptions::default()
     };
-    let metadata = match entry.node().metadata() {
+    let (entry, _mount_point) =
+        match vfs.resolve_path_from_with_options(&base_entry, &base_mount, &path_str, &options) {
+            Ok(resolved) => resolved,
+            Err(error) => return errno::to_result(errno::from_fs_error(&error)),
+        };
+    let node = entry.node();
+    let metadata = match node.metadata() {
         Ok(metadata) => metadata,
         Err(error) => return errno::to_result(errno::from_fs_error(&error)),
     };
-    let statistics = LinuxStat::from_metadata(&metadata);
+    let mut statistics = LinuxStat::from_metadata(&metadata);
+    if let Some(mode) = super::mode::get(&node) {
+        statistics.st_mode = (statistics.st_mode & !0o7777) | mode;
+    }
     match write_linux_stat(&task, stat_ptr, &statistics) {
         Ok(()) => 0,
         Err(error) => errno::to_result(error),
@@ -1960,15 +2041,12 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let pathname_ptr = trapframe.get_arg(1);
     let flags = trapframe.get_arg(2) as u32;
     let mask = trapframe.get_arg(3) as u32;
-    let statx_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(4)) {
-        Some(ptr) => ptr as *mut LinuxStatx,
-        None => return errno::to_result(errno::EFAULT),
-    };
+    let statx_ptr = trapframe.get_arg(4);
 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
-    if statx_ptr.is_null() {
+    if statx_ptr == 0 {
         return errno::to_result(errno::EFAULT);
     }
 
@@ -2018,15 +2096,20 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 Ok(m) => m,
                 Err(e) => return errno::to_result(errno::from_fs_error(&e)),
             };
-            let stat = LinuxStat::from_metadata(&metadata);
-            let statx_ref = unsafe { &mut *statx_ptr };
-            fill_statx_from_stat(statx_ref, &stat, metadata.created_time, mask);
+            let mut stat = LinuxStat::from_metadata(&metadata);
+            if let Some(mode) = super::mode::get(&node) {
+                stat.st_mode = (stat.st_mode & !0o7777) | mode;
+            }
+            let mut statx = unsafe { core::mem::zeroed::<LinuxStatx>() };
+            fill_statx_from_stat(&mut statx, &stat, metadata.created_time, mask);
             // crate::println!(
             //     "sys_statx: empty_path name='{}' size={}",
             //     entry.name(),
             //     metadata.size
             // );
-            return 0;
+            return write_linux_statx(&task, statx_ptr, &statx)
+                .map(|_| 0)
+                .unwrap_or_else(errno::to_result);
         }
 
         let stat = LinuxStat {
@@ -2051,9 +2134,11 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             __unused4: 0,
             __unused5: 0,
         };
-        let statx_ref = unsafe { &mut *statx_ptr };
-        fill_statx_from_stat(statx_ref, &stat, 0, mask);
-        return 0;
+        let mut statx = unsafe { core::mem::zeroed::<LinuxStatx>() };
+        fill_statx_from_stat(&mut statx, &stat, 0, mask);
+        return write_linux_statx(&task, statx_ptr, &statx)
+            .map(|_| 0)
+            .unwrap_or_else(errno::to_result);
     }
 
     // Determine base directory (entry and mount) for path resolution
@@ -2087,13 +2172,16 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         )
     };
 
-    // TODO: Handle AT_SYMLINK_NOFOLLOW flag properly; for now, always follow.
-    let _follow_symlinks = (flags & AT_SYMLINK_NOFOLLOW) == 0;
-
-    let (entry, _mount_point) = match vfs.resolve_path_from(&base_entry, &base_mount, &path_str) {
-        Ok(v) => v,
-        Err(e) => return errno::to_result(errno::from_fs_error(&e)),
+    let options = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        crate::fs::vfs_v2::PathResolutionOptions::no_follow()
+    } else {
+        crate::fs::vfs_v2::PathResolutionOptions::default()
     };
+    let (entry, _mount_point) =
+        match vfs.resolve_path_from_with_options(&base_entry, &base_mount, &path_str, &options) {
+            Ok(v) => v,
+            Err(e) => return errno::to_result(errno::from_fs_error(&e)),
+        };
 
     let node = entry.node();
     let metadata = match node.metadata() {
@@ -2101,15 +2189,20 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Err(e) => return errno::to_result(errno::from_fs_error(&e)),
     };
 
-    let stat = LinuxStat::from_metadata(&metadata);
-    let statx_ref = unsafe { &mut *statx_ptr };
-    fill_statx_from_stat(statx_ref, &stat, metadata.created_time, mask);
+    let mut stat = LinuxStat::from_metadata(&metadata);
+    if let Some(mode) = super::mode::get(&node) {
+        stat.st_mode = (stat.st_mode & !0o7777) | mode;
+    }
+    let mut statx = unsafe { core::mem::zeroed::<LinuxStatx>() };
+    fill_statx_from_stat(&mut statx, &stat, metadata.created_time, mask);
     // crate::println!(
     //     "sys_statx: path='{}' size={}",
     //     path_str,
     //     metadata.size
     // );
-    0
+    write_linux_statx(&task, statx_ptr, &statx)
+        .map(|_| 0)
+        .unwrap_or_else(errno::to_result)
 }
 
 #[allow(dead_code)]
@@ -2204,6 +2297,39 @@ pub fn sys_linkat(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
     trapframe.increment_pc_next(&task);
     errno::to_result(errno::ENOSYS)
+}
+
+/// Create a symlink in the calling Linux filesystem view. The target is kept
+/// verbatim so relative targets retain the directory-relative Linux semantics.
+pub fn sys_symlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return errno::to_result(errno::EIO),
+    };
+    trapframe.increment_pc_next(&task);
+    let target = match parse_c_string_from_userspace(&task, trapframe.get_arg(0), MAX_PATH_LENGTH) {
+        Ok(target) => target,
+        Err(_) => return errno::to_result(errno::EFAULT),
+    };
+    let dirfd = trapframe.get_arg(1) as i32;
+    let link_path =
+        match parse_c_string_from_userspace(&task, trapframe.get_arg(2), MAX_PATH_LENGTH) {
+            Ok(path) if !path.is_empty() => path,
+            Ok(_) => return errno::to_result(errno::ENOENT),
+            Err(_) => return errno::to_result(errno::EFAULT),
+        };
+    let vfs = match task.get_vfs() {
+        Some(vfs) => vfs,
+        None => return errno::to_result(errno::EIO),
+    };
+    let path = match path_at_to_absolute(abi, &task, &vfs, dirfd, &link_path) {
+        Ok(path) => path,
+        Err(error) => return errno::to_result(error),
+    };
+    match vfs.create_symlink(&path, &target) {
+        Ok(()) => 0,
+        Err(error) => errno::to_result(errno::from_fs_error(&error)),
+    }
 }
 
 /// VFS v2 helper function for path absolutization using VfsManager
@@ -2443,6 +2569,14 @@ pub fn sys_execve(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         },
         Err(_) => return usize::MAX, // Path parsing error
     };
+    let path_str = if let Some(selector) = proc_exe_selector(&path_str) {
+        match resolve_proc_exe_identity(&task, &path_str, selector) {
+            Ok(identity) => identity.path,
+            Err(error) => return errno::to_result(error),
+        }
+    } else {
+        path_str
+    };
 
     // Parse argv
     let argv_strings =
@@ -2596,7 +2730,7 @@ pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
         }
         F_GETFL => {
-            if let Some(_handle) = abi.get_handle(fd) {
+            if abi.get_handle(fd).is_some() {
                 if let Some(flags) = abi.get_file_status_flags(fd) {
                     return flags as usize;
                 } else {
@@ -3240,6 +3374,53 @@ pub fn sys_fsync(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 }
 
+/// Ownership is currently fixed to root in the Linux view. Accept a root
+/// caller's fchown on an existing file so applications can prepare cache files.
+pub fn sys_fchown(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let Some(task) = mytask() else {
+        return errno::to_result(errno::EIO);
+    };
+    let fd = trapframe.get_arg(0);
+    trapframe.increment_pc_next(&task);
+    let Some(handle) = abi.get_handle(fd) else {
+        return errno::to_result(errno::EBADF);
+    };
+    if !task
+        .handle_table
+        .get(handle)
+        .is_some_and(|object| object.as_file().is_some())
+    {
+        return errno::to_result(errno::EBADF);
+    }
+    0
+}
+
+/// fadvise64 is advisory; validate its arguments and preserve the file.
+pub fn sys_fadvise64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let Some(task) = mytask() else {
+        return errno::to_result(errno::EIO);
+    };
+    let fd = trapframe.get_arg(0);
+    let offset = trapframe.get_arg(1) as i64;
+    let length = trapframe.get_arg(2) as i64;
+    let advice = trapframe.get_arg(3);
+    trapframe.increment_pc_next(&task);
+    if offset < 0 || length < 0 || advice > 5 {
+        return errno::to_result(errno::EINVAL);
+    }
+    let Some(handle) = abi.get_handle(fd) else {
+        return errno::to_result(errno::EBADF);
+    };
+    if !task
+        .handle_table
+        .get(handle)
+        .is_some_and(|object| object.as_file().is_some())
+    {
+        return errno::to_result(errno::EBADF);
+    }
+    0
+}
+
 /// Linux sys_ftruncate implementation
 ///
 /// Truncate a file to a specified length using a file descriptor.
@@ -3461,13 +3642,14 @@ pub fn sys_faccessat2(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 ///
 /// Currently supports only AT_FDCWD (current working directory) as dirfd.
 ///
-pub fn sys_mkdirat(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_mkdirat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return errno::to_result(errno::EIO),
     };
     trapframe.increment_pc_next(&task);
     let dirfd = trapframe.get_arg(0) as i32;
+    let mode = (trapframe.get_arg(2) as u32 & !abi.umask) & 0o7777;
     let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *const u8,
         None => return errno::to_result(errno::EFAULT),
@@ -3497,7 +3679,13 @@ pub fn sys_mkdirat(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return errno::to_result(errno::EEXIST);
     }
     match vfs.create_dir(&abs_path) {
-        Ok(_) => 0,
+        Ok(_) => match vfs.resolve_path(&abs_path) {
+            Ok((entry, _)) => {
+                super::mode::set(&entry.node(), mode);
+                0
+            }
+            Err(error) => errno::to_result(errno::from_fs_error(&error)),
+        },
         Err(error) => errno::to_result(errno::from_fs_error(&error)),
     }
 }
@@ -3639,16 +3827,13 @@ pub fn sys_newfstat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     let fd = trapframe.get_arg(0) as i32;
-    let stat_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
-        Some(ptr) => ptr as *mut u8,
-        None => return usize::MAX,
-    };
+    let stat_ptr = trapframe.get_arg(1);
 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
     // Validate arguments
-    if stat_ptr.is_null() {
+    if stat_ptr == 0 {
         return usize::MAX; // Return -1 if stat pointer is null
     }
 
@@ -3676,8 +3861,7 @@ pub fn sys_newfstat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Some(vfs_obj) => vfs_obj,
         None => {
             // For non-VFS files (like devices), create a basic stat with minimal info
-            let stat = unsafe { &mut *(stat_ptr as *mut LinuxStat) };
-            *stat = LinuxStat {
+            let stat = LinuxStat {
                 st_dev: 0,
                 st_ino: handle as u64,    // Use handle as inode
                 st_mode: S_IFCHR | 0o666, // Character device with rw-rw-rw- permissions
@@ -3699,7 +3883,9 @@ pub fn sys_newfstat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 __unused4: 0,
                 __unused5: 0,
             };
-            return 0; // Success
+            return write_linux_stat(&task, stat_ptr, &stat)
+                .map(|_| 0)
+                .unwrap_or_else(errno::to_result);
         }
     };
 
@@ -3709,15 +3895,19 @@ pub fn sys_newfstat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     match node.metadata() {
         Ok(metadata) => {
-            let stat = unsafe { &mut *(stat_ptr as *mut LinuxStat) };
-            *stat = LinuxStat::from_metadata(&metadata);
+            let mut stat = LinuxStat::from_metadata(&metadata);
+            if let Some(mode) = super::mode::get(&node) {
+                stat.st_mode = (stat.st_mode & !0o7777) | mode;
+            }
             // crate::println!(
             //     "sys_newfstat: fd={} name='{}' size={}",
             //     fd,
             //     entry.name(),
             //     metadata.size
             // );
-            0 // Success
+            write_linux_stat(&task, stat_ptr, &stat)
+                .map(|_| 0)
+                .unwrap_or_else(errno::to_result)
         }
         Err(_) => usize::MAX, // Error getting metadata
     }
@@ -3810,17 +4000,16 @@ pub fn sys_unlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Resolve the target path and perform the removal operation
-    match vfs.resolve_path_from(&base_entry, &base_mount, &path_str) {
+    match vfs.resolve_path_from_with_options(
+        &base_entry,
+        &base_mount,
+        &path_str,
+        &crate::fs::vfs_v2::PathResolutionOptions::no_follow(),
+    ) {
         Ok((entry, _mount_point)) => {
-            // Prepare absolute path before getting mutable VFS reference
-            let absolute_path = if path_str.starts_with('/') {
-                path_str.to_string()
-            } else {
-                // Construct absolute path by resolving relative to current working directory
-                match to_absolute_path_v2(&task, &path_str) {
-                    Ok(p) => p,
-                    Err(_) => return usize::MAX,
-                }
+            let absolute_path = match path_at_to_absolute(abi, &task, &vfs, dirfd, &path_str) {
+                Ok(path) => path,
+                Err(error) => return errno::to_result(error),
             };
 
             // Get mutable reference to VFS for removal operations
@@ -3838,24 +4027,30 @@ pub fn sys_unlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         if metadata.file_type == FileType::Directory {
                             // Try to remove the directory using VFS remove operation
                             match vfs_mut.remove(&absolute_path) {
-                                Ok(_) => 0,           // Success
-                                Err(_) => usize::MAX, // Error removing directory
+                                Ok(_) => {
+                                    super::mode::clear(&node);
+                                    0
+                                }
+                                Err(error) => errno::to_result(errno::from_fs_error(&error)),
                             }
                         } else {
-                            usize::MAX // Not a directory, cannot use AT_REMOVEDIR
+                            errno::to_result(errno::ENOTDIR)
                         }
                     }
-                    Err(_) => usize::MAX, // Cannot get metadata
+                    Err(error) => errno::to_result(errno::from_fs_error(&error)),
                 }
             } else {
                 // Remove file or directory (standard removal)
                 match vfs_mut.remove(&absolute_path) {
-                    Ok(_) => 0,           // Success
-                    Err(_) => usize::MAX, // Error removing file
+                    Ok(_) => {
+                        super::mode::clear(&entry.node());
+                        0
+                    }
+                    Err(error) => errno::to_result(errno::from_fs_error(&error)),
                 }
             }
         }
-        Err(_) => usize::MAX, // Path resolution failed
+        Err(error) => errno::to_result(errno::from_fs_error(&error)),
     }
 }
 
@@ -4099,16 +4294,25 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let mut in_write: u64 = 0;
     let mut in_except: u64 = 0;
     if readfds_ptr != 0 {
-        let kptr = task.vm_manager.translate_to_kva(readfds_ptr).unwrap() as *const u64;
-        unsafe { in_read = core::ptr::read_unaligned(kptr) };
+        let mut bytes = [0u8; 8];
+        if copy_from_user_pagewise(&mut bytes, readfds_ptr, &task.vm_manager) != bytes.len() {
+            return errno::to_result(errno::EFAULT);
+        }
+        in_read = u64::from_ne_bytes(bytes);
     }
     if writefds_ptr != 0 {
-        let kptr = task.vm_manager.translate_to_kva(writefds_ptr).unwrap() as *const u64;
-        unsafe { in_write = core::ptr::read_unaligned(kptr) };
+        let mut bytes = [0u8; 8];
+        if copy_from_user_pagewise(&mut bytes, writefds_ptr, &task.vm_manager) != bytes.len() {
+            return errno::to_result(errno::EFAULT);
+        }
+        in_write = u64::from_ne_bytes(bytes);
     }
     if exceptfds_ptr != 0 {
-        let kptr = task.vm_manager.translate_to_kva(exceptfds_ptr).unwrap() as *const u64;
-        unsafe { in_except = core::ptr::read_unaligned(kptr) };
+        let mut bytes = [0u8; 8];
+        if copy_from_user_pagewise(&mut bytes, exceptfds_ptr, &task.vm_manager) != bytes.len() {
+            return errno::to_result(errno::EFAULT);
+        }
+        in_except = u64::from_ne_bytes(bytes);
     }
 
     let mut timeout_ns: Option<u64> = None;
@@ -4347,16 +4551,19 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Write back fd_sets with results
     if readfds_ptr != 0 {
-        let kptr = task.vm_manager.translate_to_kva(readfds_ptr).unwrap() as *mut u64;
-        unsafe { core::ptr::write_unaligned(kptr, out_read) };
+        if copy_to_user_pagewise(readfds_ptr, &out_read.to_ne_bytes(), &task.vm_manager) != 8 {
+            return errno::to_result(errno::EFAULT);
+        }
     }
     if writefds_ptr != 0 {
-        let kptr = task.vm_manager.translate_to_kva(writefds_ptr).unwrap() as *mut u64;
-        unsafe { core::ptr::write_unaligned(kptr, out_write) };
+        if copy_to_user_pagewise(writefds_ptr, &out_write.to_ne_bytes(), &task.vm_manager) != 8 {
+            return errno::to_result(errno::EFAULT);
+        }
     }
     if exceptfds_ptr != 0 {
-        let kptr = task.vm_manager.translate_to_kva(exceptfds_ptr).unwrap() as *mut u64;
-        unsafe { core::ptr::write_unaligned(kptr, out_except) };
+        if copy_to_user_pagewise(exceptfds_ptr, &out_except.to_ne_bytes(), &task.vm_manager) != 8 {
+            return errno::to_result(errno::EFAULT);
+        }
     }
 
     // Return count of ready fds
@@ -4404,6 +4611,7 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     #[repr(C)]
+    #[derive(Clone, Copy)]
     struct PollFd {
         fd: i32,
         events: i16,
@@ -4445,16 +4653,32 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 
     if fds_ptr == 0 {
-        return usize::MAX;
+        return errno::to_result(errno::EFAULT);
     }
-    let kptr = match task.vm_manager.translate_to_kva(fds_ptr) {
-        Some(p) => p as *mut PollFd,
-        None => return usize::MAX,
-    };
-    if kptr.is_null() {
-        return usize::MAX;
+    if nfds > super::MAX_FDS {
+        return errno::to_result(errno::EINVAL);
     }
-    let fds: &mut [PollFd] = unsafe { core::slice::from_raw_parts_mut(kptr, nfds) };
+    let mut fds = Vec::new();
+    if fds.try_reserve_exact(nfds).is_err() {
+        return errno::to_result(errno::ENOMEM);
+    }
+    for index in 0..nfds {
+        let Some(ptr) = index
+            .checked_mul(core::mem::size_of::<PollFd>())
+            .and_then(|offset| fds_ptr.checked_add(offset))
+        else {
+            return errno::to_result(errno::EFAULT);
+        };
+        let mut bytes = [0u8; core::mem::size_of::<PollFd>()];
+        if copy_from_user_pagewise(&mut bytes, ptr, &task.vm_manager) != bytes.len() {
+            return errno::to_result(errno::EFAULT);
+        }
+        fds.push(PollFd {
+            fd: i32::from_ne_bytes(bytes[..4].try_into().unwrap()),
+            events: i16::from_ne_bytes(bytes[4..6].try_into().unwrap()),
+            revents: 0,
+        });
+    }
 
     struct EvalResult {
         ready: bool,
@@ -4694,9 +4918,18 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 
     let mut count = 0usize;
-    for pfd in fds.iter() {
+    for (index, pfd) in fds.iter().enumerate() {
         if pfd.revents != 0 {
             count += 1;
+        }
+        let Some(ptr) = index
+            .checked_mul(core::mem::size_of::<PollFd>())
+            .and_then(|offset| fds_ptr.checked_add(offset + 6))
+        else {
+            return errno::to_result(errno::EFAULT);
+        };
+        if copy_to_user_pagewise(ptr, &pfd.revents.to_ne_bytes(), &task.vm_manager) != 2 {
+            return errno::to_result(errno::EFAULT);
         }
     }
     count
@@ -4724,7 +4957,7 @@ pub fn sys_fchmod(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     let fd = trapframe.get_arg(0) as i32;
-    let _mode = trapframe.get_arg(1) as u32;
+    let mode = trapframe.get_arg(1) as u32;
 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
@@ -4735,26 +4968,23 @@ pub fn sys_fchmod(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Invalid file descriptor
     };
 
-    // Check if the handle exists in the handle table
-    match task.handle_table.get(handle) {
-        Some(_) => {
-            // File descriptor is valid, return success
-            // In a real implementation, we would change the file permissions here
-            0 // Success
-        }
-        None => usize::MAX, // Handle not found
-    }
+    let Some(object) = task.handle_table.get(handle) else {
+        return errno::to_result(errno::EBADF);
+    };
+    let Some(file) = object.as_file() else {
+        return errno::to_result(errno::EBADF);
+    };
+    let Some(vfs_file) = file
+        .as_any()
+        .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
+    else {
+        return errno::to_result(errno::EINVAL);
+    };
+    super::mode::set(&vfs_file.get_vfs_entry().node(), mode);
+    0
 }
 
-/// Linux sys_fchmodat implementation (compatibility stub)
-///
-/// Changes the permissions of a file relative to a directory file descriptor.
-/// VFS v2 does not currently persist Unix permission changes for every backing
-/// filesystem, so this validates that the path string is readable and accepts
-/// the request. This matches `sys_fchmod`'s current compatibility behavior and
-/// is sufficient for Linux programs that use `chmod` to adjust temporary lock
-/// file permissions.
-/// TODO: Persist mode changes when VFS permission mutation is implemented.
+/// Linux fchmodat records exact Unix mode bits in the Linux view.
 ///
 /// Arguments:
 /// - abi: LinuxAbi context
@@ -4767,33 +4997,40 @@ pub fn sys_fchmod(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 /// Returns:
 /// - 0 on success
 /// - usize::MAX (Linux -1) if the path pointer is invalid
-pub fn sys_fchmodat(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_fchmodat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
     };
 
-    let _dirfd = trapframe.get_arg(0) as i32;
+    let dirfd = trapframe.get_arg(0) as i32;
     trapframe.increment_pc_next(&task);
 
     let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
         Some(ptr) => ptr as *const u8,
         None => return usize::MAX,
     };
-    let _mode = trapframe.get_arg(2) as u32;
-    let _flags = trapframe.get_arg(3) as i32;
-
-    match get_path_str_v2(path_ptr) {
-        Ok(_) => 0,
-        Err(_) => usize::MAX,
-    }
+    let mode = trapframe.get_arg(2) as u32;
+    let path = match get_path_str_v2(path_ptr) {
+        Ok(path) => path,
+        Err(_) => return errno::to_result(errno::EFAULT),
+    };
+    let Some(vfs) = task.get_vfs() else {
+        return errno::to_result(errno::EIO);
+    };
+    let absolute = match path_at_to_absolute(abi, &task, &vfs, dirfd, &path) {
+        Ok(path) => path,
+        Err(error) => return errno::to_result(error),
+    };
+    let (entry, _) = match vfs.resolve_path(&absolute) {
+        Ok(entry) => entry,
+        Err(error) => return errno::to_result(errno::from_fs_error(&error)),
+    };
+    super::mode::set(&entry.node(), mode);
+    0
 }
 
-/// Linux sys_umask implementation (stub)
-///
-/// Sets the file mode creation mask (umask) and returns the previous value.
-/// This is a stub implementation that simply returns the provided mask
-/// without actually storing or using it for file creation permissions.
+/// Linux umask for subsequent file and directory creation.
 ///
 /// Arguments:
 /// - abi: LinuxAbi context
@@ -4802,7 +5039,7 @@ pub fn sys_fchmodat(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 ///
 /// Returns:
 /// - The provided mask value (simulating the previous umask)
-pub fn sys_umask(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_umask(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
@@ -4813,14 +5050,9 @@ pub fn sys_umask(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
-    // In a real implementation, we would:
-    // 1. Store the current umask value to return it
-    // 2. Set the new umask value for future file creation operations
-    // 3. Return the previous umask value
-    //
-    // For this stub implementation, we simply return the provided mask
-    // This satisfies most applications that just want to set a umask
-    mask as usize // Return the provided mask as if it was the previous value
+    let previous = abi.umask;
+    abi.umask = mask & 0o777;
+    previous as usize
 }
 
 /// Linux sys_readlinkat implementation
@@ -4904,6 +5136,20 @@ pub fn sys_readlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return copy_len;
     }
 
+    if let Some(target) = super::proc_fd::self_fd_link_target(abi, &task, &path_str) {
+        let target = match target {
+            Ok(target) => target,
+            Err(error) => return errno::to_result(error),
+        };
+        let copy_len = target.len().min(bufsiz);
+        if copy_to_user_pagewise(buf_ptr, &target.as_bytes()[..copy_len], &task.vm_manager)
+            != copy_len
+        {
+            return errno::to_result(errno::EFAULT);
+        }
+        return copy_len;
+    }
+
     // Acquire VFS
     let vfs = match task.vfs.read().clone() {
         Some(v) => v,
@@ -4944,7 +5190,12 @@ pub fn sys_readlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Resolve the path from the base (do not follow the final link)
-    let (entry, _mp) = match vfs.resolve_path_from(&base_entry, &base_mount, &path_str) {
+    let (entry, _mp) = match vfs.resolve_path_from_with_options(
+        &base_entry,
+        &base_mount,
+        &path_str,
+        &crate::fs::vfs_v2::manager::PathResolutionOptions::no_follow(),
+    ) {
         Ok(v) => v,
         Err(e) => return errno::to_result(errno::from_fs_error(&e)),
     };
@@ -4965,15 +5216,8 @@ pub fn sys_readlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let target_bytes = target.as_bytes();
     let copy_len = core::cmp::min(target_bytes.len(), bufsiz);
 
-    let user_buf = match task.vm_manager.translate_to_kva(buf_ptr) {
-        Some(addr) => addr as *mut u8,
-        None => return errno::to_result(errno::EFAULT),
-    };
-
-    if copy_len > 0 {
-        unsafe {
-            core::ptr::copy_nonoverlapping(target_bytes.as_ptr(), user_buf, copy_len);
-        }
+    if copy_to_user_pagewise(buf_ptr, &target_bytes[..copy_len], &task.vm_manager) != copy_len {
+        return errno::to_result(errno::EFAULT);
     }
 
     copy_len
@@ -5067,32 +5311,43 @@ pub fn sys_getrandom(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return 0;
     }
 
-    let user_buf = match task.vm_manager.translate_to_kva(buf_ptr) {
-        Some(addr) => addr as *mut u8,
-        None => return errno::to_result(errno::EFAULT),
-    };
-
-    if user_buf.is_null() {
-        return errno::to_result(errno::EFAULT);
-    }
-
-    let buffer = unsafe { core::slice::from_raw_parts_mut(user_buf, buflen) };
-    let bytes_read = crate::random::RandomManager::get_random_bytes(buffer);
-
-    if bytes_read == 0 {
-        if (flags & GRND_NONBLOCK) != 0 {
-            return errno::to_result(errno::EAGAIN);
+    let mut total = 0;
+    let mut page = [0u8; crate::environment::PAGE_SIZE];
+    while total < buflen {
+        let chunk = (buflen - total).min(page.len());
+        let buffer = &mut page[..chunk];
+        let mut bytes_read = crate::random::RandomManager::get_random_bytes(buffer);
+        if bytes_read == 0 && (flags & GRND_NONBLOCK) != 0 {
+            return if total == 0 {
+                errno::to_result(errno::EAGAIN)
+            } else {
+                total
+            };
         }
-        fill_pseudo_random(buffer);
-        return buflen;
+        if bytes_read < chunk && (flags & GRND_NONBLOCK) == 0 {
+            fill_pseudo_random(&mut buffer[bytes_read..]);
+            bytes_read = chunk;
+        }
+        let Some(dst) = buf_ptr.checked_add(total) else {
+            return if total == 0 {
+                errno::to_result(errno::EFAULT)
+            } else {
+                total
+            };
+        };
+        if copy_to_user_pagewise(dst, &buffer[..bytes_read], &task.vm_manager) != bytes_read {
+            return if total == 0 {
+                errno::to_result(errno::EFAULT)
+            } else {
+                total
+            };
+        }
+        total += bytes_read;
+        if bytes_read < chunk {
+            break;
+        }
     }
-
-    if bytes_read < buflen && (flags & GRND_NONBLOCK) == 0 {
-        fill_pseudo_random(&mut buffer[bytes_read..]);
-        return buflen;
-    }
-
-    bytes_read
+    total
 }
 
 /// Linux sys_getcwd system call implementation
@@ -5129,17 +5384,13 @@ pub fn sys_getcwd(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return usize::MAX; // ERANGE - buffer too small
     }
 
-    // Translate user buffer address
-    let user_buf = match task.vm_manager.translate_to_kva(buf_ptr) {
-        Some(addr) => addr as *mut u8,
-        None => return usize::MAX, // EFAULT - invalid buffer address
+    let Some(terminator) = buf_ptr.checked_add(cwd_bytes.len()) else {
+        return errno::to_result(errno::EFAULT);
     };
-
-    // Copy current working directory to user buffer
-    unsafe {
-        core::ptr::copy_nonoverlapping(cwd_bytes.as_ptr(), user_buf, cwd_bytes.len());
-        // Add null terminator
-        *user_buf.add(cwd_bytes.len()) = 0;
+    if copy_to_user_pagewise(buf_ptr, cwd_bytes, &task.vm_manager) != cwd_bytes.len()
+        || copy_to_user_pagewise(terminator, &[0], &task.vm_manager) != 1
+    {
+        return errno::to_result(errno::EFAULT);
     }
 
     // Return the number of bytes written (including null terminator)

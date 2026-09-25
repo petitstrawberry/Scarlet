@@ -27,6 +27,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     const MAP_ANONYMOUS: usize = 0x20;
     #[allow(dead_code)]
     const MAP_FIXED: usize = 0x10;
+    const MAP_FIXED_NOREPLACE: usize = 0x100000;
     #[allow(dead_code)]
     const MAP_SHARED: usize = 0x01;
 
@@ -86,7 +87,6 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Some(obj) => obj,
         None => return to_result(errno::EBADF),
     };
-
     // Special case: KVM vCPU mmap (shared kvm_run page).
     // kvmtool calls mmap(vcpu_fd, ...) to map the per-vCPU kvm_run structure.
     // This bypasses the generic MemoryMappingOps path because HypervisorVcpu
@@ -110,12 +110,13 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Decide sharing semantics from flags (MAP_SHARED controls sharing)
     let is_shared = (flags & MAP_SHARED) != 0;
-    let is_fixed = (flags & MAP_FIXED) != 0;
+    let is_fixed_noreplace = (flags & MAP_FIXED_NOREPLACE) != 0;
+    let is_fixed = (flags & MAP_FIXED) != 0 && !is_fixed_noreplace;
     const MAP_PRIVATE: usize = 0x02;
     let is_map_private_flag = (flags & MAP_PRIVATE) != 0;
 
     // Determine final address
-    let final_vaddr = if addr == 0 {
+    let final_vaddr = if addr == 0 && !is_fixed && !is_fixed_noreplace {
         match task
             .vm_manager
             .find_unmapped_area(aligned_length, PAGE_SIZE)
@@ -128,7 +129,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             return to_result(errno::EINVAL);
         }
 
-        if !is_fixed {
+        if !is_fixed && !is_fixed_noreplace {
             let requested_end = addr + aligned_length - 1;
             let has_overlap = task.vm_manager.with_memmaps(|mm| {
                 mm.values()
@@ -196,6 +197,11 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             task.vm_manager
                 .add_memory_map_fixed(vm_map)
                 .map_err(|_| to_result(errno::ENOMEM))
+        } else if is_fixed_noreplace {
+            task.vm_manager
+                .add_memory_map(vm_map)
+                .map(|_| Vec::new())
+                .map_err(|_| to_result(errno::EEXIST))
         } else {
             task.vm_manager
                 .add_memory_map(vm_map)
@@ -224,7 +230,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let mapping_info = loop {
         match memory_mappable.get_mapping_info_with(offset, ok_len, is_shared) {
             Ok(info) => break Some(info),
-            Err(_e) => {
+            Err(_) => {
                 if ok_len >= PAGE_SIZE {
                     ok_len -= PAGE_SIZE;
                 } else {
@@ -265,6 +271,8 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         task.vm_manager
             .add_memory_map_fixed(vm_map)
             .map(|removed| Some(removed))
+    } else if is_fixed_noreplace {
+        task.vm_manager.add_memory_map(vm_map).map(|_| None)
     } else {
         task.vm_manager.add_memory_map(vm_map).map(|_| None)
     };
@@ -289,6 +297,7 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
             final_vaddr
         }
+        Err(_) if is_fixed_noreplace => to_result(errno::EEXIST),
         Err(_) => to_result(errno::ENOMEM),
     }
 }
@@ -306,15 +315,17 @@ fn handle_anonymous_mapping(
     const PROT_WRITE: usize = 0x2;
     const PROT_EXEC: usize = 0x4;
     const MAP_FIXED: usize = 0x10;
+    const MAP_FIXED_NOREPLACE: usize = 0x100000;
 
     // For anonymous mappings, decide shareable based on flags
     const MAP_SHARED: usize = 0x01;
     let is_shared = (flags & MAP_SHARED) != 0;
     let is_map_fixed = (flags & MAP_FIXED) != 0;
+    let is_map_fixed_noreplace = (flags & MAP_FIXED_NOREPLACE) != 0;
 
     // Determine the final address. MAP_FIXED is authoritative; otherwise a
     // null address asks the kernel to choose a free range.
-    let final_vaddr = if is_map_fixed {
+    let final_vaddr = if is_map_fixed || is_map_fixed_noreplace {
         if vaddr % PAGE_SIZE != 0 {
             return to_result(errno::EINVAL);
         }
@@ -394,7 +405,12 @@ fn handle_anonymous_mapping(
         owner: Some(owner),
     };
 
-    let (mapped_vaddr, removed_mappings) = if is_map_fixed {
+    let (mapped_vaddr, removed_mappings) = if is_map_fixed_noreplace {
+        match task.vm_manager.add_memory_map(vm_map) {
+            Ok(()) => (final_vaddr, Vec::new()),
+            Err(_) => return to_result(errno::EEXIST),
+        }
+    } else if is_map_fixed {
         match task.vm_manager.add_memory_map_fixed(vm_map) {
             Ok(removed) => (final_vaddr, removed),
             Err(_) => return to_result(errno::ENOMEM),
@@ -425,14 +441,9 @@ fn handle_anonymous_mapping(
 }
 
 pub fn sys_mprotect(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    // Linux protection flags
-    const PROT_READ: usize = 0x1;
-    const PROT_WRITE: usize = 0x2;
-    const PROT_EXEC: usize = 0x4;
-
     let task = match mytask() {
         Some(task) => task,
-        None => return usize::MAX,
+        None => return to_result(errno::EIO),
     };
 
     let addr = trapframe.get_arg(0);
@@ -441,84 +452,84 @@ pub fn sys_mprotect(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     trapframe.increment_pc_next(&task);
 
-    // Input validation
-    if length == 0 || addr % PAGE_SIZE != 0 {
-        return usize::MAX; // -EINVAL
+    if length == 0 || !addr.is_multiple_of(PAGE_SIZE) || prot & !0x7 != 0 {
+        return to_result(errno::EINVAL);
     }
+    let Some(aligned_length) = length
+        .checked_add(PAGE_SIZE - 1)
+        .map(|rounded| rounded & !(PAGE_SIZE - 1))
+    else {
+        return to_result(errno::ENOMEM);
+    };
+    let Some(end) = addr.checked_add(aligned_length - 1) else {
+        return to_result(errno::ENOMEM);
+    };
 
-    // Round up length to page boundary
-    let aligned_length = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-    let num_pages = aligned_length / PAGE_SIZE;
-
-    // Check if all pages in the range are mapped
-    for i in 0..num_pages {
-        let page_addr = addr + i * PAGE_SIZE;
-        if task.vm_manager.translate_to_kva(page_addr).is_none() {
-            return usize::MAX; // -ENOMEM
-        }
+    match task
+        .vm_manager
+        .protect_linux_memory_map_range(MemoryArea::new(addr, end), prot)
+    {
+        Ok(()) => 0,
+        Err("Mapping does not support increasing permissions") => to_result(errno::EACCES),
+        Err(_) => to_result(errno::ENOMEM),
     }
-
-    // Convert Linux protection flags to kernel permissions
-    let mut new_permissions = 0;
-    if prot != 0 {
-        new_permissions |= 0x08; // Access from user space (only if not PROT_NONE)
-        if (prot & PROT_READ) != 0 {
-            new_permissions |= 0x1; // Readable
-        }
-        if (prot & PROT_WRITE) != 0 {
-            new_permissions |= 0x2; // Writable
-        }
-        if (prot & PROT_EXEC) != 0 {
-            new_permissions |= 0x4; // Executable
-        }
-    }
-
-    for i in 0..num_pages {
-        let page_addr = addr + i * PAGE_SIZE;
-        let original_mapping = match task.vm_manager.search_memory_map(page_addr) {
-            Some(map) => map,
-            None => return usize::MAX,
-        };
-
-        if let Some(owner) = &original_mapping.owner {
-            let offset = page_addr - original_mapping.vmarea.start;
-            if let Ok(info) = owner.get_mapping_info(offset, PAGE_SIZE) {
-                if (new_permissions & info.permissions) != (new_permissions & 0x7) {
-                    return usize::MAX;
-                }
-            }
-        }
-
-        let offset_in_mapping = page_addr - original_mapping.vmarea.start;
-        let new_paddr = original_mapping.pmarea.start + offset_in_mapping as u64;
-        let new_map = VirtualMemoryMap::new(
-            crate::vm::vmem::PhysicalMemoryArea::new(new_paddr, new_paddr + PAGE_SIZE as u64 - 1),
-            MemoryArea::new(page_addr, page_addr + PAGE_SIZE - 1),
-            new_permissions,
-            original_mapping.is_shared,
-            original_mapping.owner.clone(),
-        );
-
-        if task.vm_manager.add_memory_map_fixed(new_map).is_err() {
-            return usize::MAX;
-        }
-    }
-
-    0
 }
 
 pub fn sys_madvise(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
-        None => return usize::MAX,
+        None => return to_result(errno::EIO),
     };
 
-    let _addr = trapframe.get_arg(0);
-    let _length = trapframe.get_arg(1);
-    let _advice = trapframe.get_arg(2);
+    let addr = trapframe.get_arg(0);
+    let length = trapframe.get_arg(1);
+    let advice = trapframe.get_arg(2);
 
     trapframe.increment_pc_next(&task);
 
+    if length == 0 {
+        return 0;
+    }
+    if !addr.is_multiple_of(PAGE_SIZE) {
+        return to_result(errno::EINVAL);
+    }
+    let Some(end) = length
+        .checked_add(PAGE_SIZE - 1)
+        .map(|rounded| rounded & !(PAGE_SIZE - 1))
+        .and_then(|rounded| addr.checked_add(rounded))
+    else {
+        return to_result(errno::EINVAL);
+    };
+    for page in (addr..end).step_by(PAGE_SIZE) {
+        if task.vm_manager.search_memory_map(page).is_none() {
+            return to_result(errno::ENOMEM);
+        }
+    }
+
+    // PartitionAlloc decommits anonymous pages with MADV_DONTNEED. Returning
+    // success without clearing them leaves stale freelist pointers behind.
+    // Zero writable private pages in place; untouched pages fault in as zero.
+    const MADV_DONTNEED: usize = 4;
+    const MADV_FREE: usize = 8;
+    if advice == MADV_DONTNEED || advice == MADV_FREE {
+        for page in (addr..end).step_by(PAGE_SIZE) {
+            let Some(map) = task.vm_manager.search_memory_map(page) else {
+                return to_result(errno::ENOMEM);
+            };
+            if map.is_shared || map.permissions & 0x2 == 0 {
+                continue;
+            }
+            if map.owner.as_ref().is_some_and(|owner| {
+                !matches!(owner.mmap_owner_name().as_str(), "anonymous" | "fork-cow")
+            }) {
+                continue;
+            }
+            let Some(kva) = task.vm_manager.translate_to_kva_for_write(page) else {
+                return to_result(errno::EFAULT);
+            };
+            unsafe { core::ptr::write_bytes(kva as *mut u8, 0, PAGE_SIZE) };
+        }
+    }
     0
 }
 
@@ -719,10 +730,6 @@ pub fn sys_munmap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Remove the mapping range, splitting existing mappings if necessary
     let removed_maps = task.vm_manager.remove_memory_map_range(vaddr, length);
-
-    if removed_maps.is_empty() {
-        return usize::MAX; // No mappings found in the specified range
-    }
 
     // Notify the object owners and clean up page allocations
     for removed_map in &removed_maps {

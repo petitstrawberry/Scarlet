@@ -442,6 +442,26 @@ impl VirtualMemoryManager {
         vmarea: MemoryArea,
         prot: usize,
     ) -> Result<(), &'static str> {
+        self.protect_memory_map_range_inner(vmarea, prot, false)
+    }
+
+    /// Linux permits restoring access to private anonymous and file-backed
+    /// reservations after PROT_NONE. Apply the protection change as one VMA
+    /// transaction rather than splitting a large reservation page by page.
+    pub(crate) fn protect_linux_memory_map_range(
+        &self,
+        vmarea: MemoryArea,
+        prot: usize,
+    ) -> Result<(), &'static str> {
+        self.protect_memory_map_range_inner(vmarea, prot, true)
+    }
+
+    fn protect_memory_map_range_inner(
+        &self,
+        vmarea: MemoryArea,
+        prot: usize,
+        linux_private: bool,
+    ) -> Result<(), &'static str> {
         if vmarea.start > vmarea.end
             || vmarea.end >= USER_LOWER_CANONICAL_END
             || !vmarea.start.is_multiple_of(PAGE_SIZE)
@@ -466,17 +486,19 @@ impl VirtualMemoryManager {
             let start = map.vmarea.start.max(vmarea.start);
             let end = map.vmarea.end.min(vmarea.end);
             if start != covered_until
-                || !VirtualMemoryPermission::User.contained_in(map.permissions)
+                || (!VirtualMemoryPermission::User.contained_in(map.permissions)
+                    && !(linux_private && map.permissions == 0))
             {
                 return Err("Memory protection range is not fully user-mapped");
             }
             if prot & !map.permissions != 0
                 && (map.is_shared
                     || map.memory_attribute != MemoryAttribute::Normal
-                    || map
-                        .owner
-                        .as_ref()
-                        .is_some_and(|owner| !owner.supports_permission_changes()))
+                    || (!linux_private
+                        && map
+                            .owner
+                            .as_ref()
+                            .is_some_and(|owner| !owner.supports_permission_changes())))
             {
                 return Err("Mapping does not support increasing permissions");
             }

@@ -6,9 +6,8 @@
 use crate::environment::PAGE_SIZE;
 use crate::fs::{FileObject, SeekFrom};
 use crate::task::Task;
-use crate::vm::addr::{phys_to_virt, virt_to_phys};
-use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission, VirtualMemoryRegion};
-use alloc::boxed::Box;
+use crate::vm::addr::virt_to_phys;
+use crate::vm::vmem::{MemoryArea, VirtualMemoryMap, VirtualMemoryPermission};
 use alloc::string::{String, ToString};
 use alloc::{format, vec};
 use core::sync::atomic::Ordering;
@@ -909,25 +908,37 @@ fn load_program_headers_into_memory(
     let mut phdr_data = vec![0u8; phdr_table_size as usize];
     read_exact(file_obj, &mut phdr_data)?;
 
-    // Copy program headers to task memory
-    match task.vm_manager.translate_to_kva(phdr_vaddr as usize) {
-        Some(kaddr) => unsafe {
-            core::ptr::copy_nonoverlapping(
-                phdr_data.as_ptr(),
-                kaddr as *mut u8,
-                phdr_table_size as usize,
-            );
-        },
-        None => {
-            return Err(ElfLoaderError {
-                message: format!(
-                    "Failed to translate program headers virtual address {:#x}",
-                    phdr_vaddr
-                ),
-            });
-        }
-    }
+    copy_to_elf_mapping(task, phdr_vaddr as usize, &phdr_data, false)?;
     Ok(phdr_vaddr)
+}
+
+fn copy_to_elf_mapping(
+    task: &Task,
+    mut vaddr: usize,
+    mut data: &[u8],
+    executable: bool,
+) -> Result<(), ElfLoaderError> {
+    while !data.is_empty() {
+        let chunk = data.len().min(PAGE_SIZE - (vaddr & (PAGE_SIZE - 1)));
+        let kaddr = task
+            .vm_manager
+            .translate_to_kva(vaddr)
+            .ok_or_else(|| ElfLoaderError {
+                message: format!(
+                    "Failed to translate virtual address {:#x} for ELF loading",
+                    vaddr
+                ),
+            })?;
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr(), kaddr as *mut u8, chunk);
+        }
+        if executable {
+            crate::arch::sync_icache_for_execution(kaddr, chunk);
+        }
+        vaddr += chunk;
+        data = &data[chunk..];
+    }
+    Ok(())
 }
 
 fn map_elf_segment(
@@ -986,31 +997,42 @@ fn map_elf_segment(
         return Err("Memory area overlaps with existing mapping");
     }
 
-    let num_of_pages = size / PAGE_SIZE;
-    let page_alloc =
-        crate::mem::page::ContiguousPages::new(num_of_pages).ok_or("Failed to allocate memory")?;
-    let ptr = page_alloc.as_ptr() as *mut u8;
-    let pm_start = virt_to_phys(ptr as usize);
-    let pmarea = crate::vm::vmem::PhysicalMemoryArea {
-        start: pm_start,
-        end: pm_start + size as u64 - 1,
-    };
-
-    let map = VirtualMemoryMap {
-        vmarea,
-        pmarea,
-        vm_start: vmarea.start,
-        permissions,
-        is_shared: false,
-        memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
-        owner: None,
-    };
-
-    if let Err(e) = task.vm_manager.add_memory_map(map) {
-        return Err(e);
+    // A large PT_LOAD must not require one physically contiguous allocation.
+    // Re-executing Chromium can leave plenty of free memory but no single
+    // contiguous extent large enough for its text segment.
+    let mut remaining_pages = size / PAGE_SIZE;
+    let mut next_vaddr = vaddr;
+    let mut chunk_pages = remaining_pages.min(4096);
+    while remaining_pages != 0 {
+        chunk_pages = chunk_pages.min(remaining_pages);
+        let page_alloc = loop {
+            if let Some(alloc) = crate::mem::page::ContiguousPages::new(chunk_pages) {
+                break alloc;
+            }
+            if chunk_pages == 1 {
+                return Err("Failed to allocate memory");
+            }
+            chunk_pages = (chunk_pages / 2).max(1);
+        };
+        let chunk_size = chunk_pages * PAGE_SIZE;
+        let pm_start = virt_to_phys(page_alloc.as_ptr() as usize);
+        let map = VirtualMemoryMap {
+            vmarea: MemoryArea::new(next_vaddr, next_vaddr + chunk_size - 1),
+            pmarea: crate::vm::vmem::PhysicalMemoryArea::new(
+                pm_start,
+                pm_start + chunk_size as u64 - 1,
+            ),
+            vm_start: vmarea.start,
+            permissions,
+            is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
+            owner: None,
+        };
+        task.vm_manager.add_memory_map(map)?;
+        task.page_allocations.write().push(page_alloc);
+        next_vaddr += chunk_size;
+        remaining_pages -= chunk_pages;
     }
-
-    task.page_allocations.write().push(page_alloc);
 
     Ok(())
 }
@@ -1298,33 +1320,23 @@ fn load_elf_segment_at_address(
 
     // Copy file data to memory if there's any
     if ph.p_filesz > 0 {
-        let mut segment_data = vec![0u8; file_size];
         file_obj
             .seek(SeekFrom::Start(ph.p_offset))
             .map_err(|e| ElfLoaderError {
                 message: format!("Failed to seek to segment data: {:?}", e),
             })?;
-        read_exact(file_obj, &mut segment_data)?;
-
-        // Write data to task memory at the correct offset within the mapped region
-        let data_offset = segment - mapping_start;
-        let target_vaddr = mapping_start + data_offset;
-
-        match task.vm_manager.translate_to_kva(target_vaddr) {
-            Some(paddr) => unsafe {
-                core::ptr::copy_nonoverlapping(segment_data.as_ptr(), paddr as *mut u8, file_size);
-                if ph.p_flags & PF_X != 0 {
-                    crate::arch::sync_icache_for_execution(paddr, file_size);
-                }
-            },
-            None => {
-                return Err(ElfLoaderError {
-                    message: format!(
-                        "Failed to translate virtual address {:#x} for segment loading",
-                        target_vaddr
-                    ),
-                });
-            }
+        let mut buffer = vec![0u8; 64 * 1024];
+        let mut copied = 0usize;
+        while copied < file_size {
+            let chunk = (file_size - copied).min(buffer.len());
+            read_exact(file_obj, &mut buffer[..chunk])?;
+            copy_to_elf_mapping(
+                task,
+                segment + copied,
+                &buffer[..chunk],
+                ph.p_flags & PF_X != 0,
+            )?;
+            copied += chunk;
         }
     }
 
