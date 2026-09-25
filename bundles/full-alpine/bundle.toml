@@ -6,8 +6,13 @@ path = "../desktop/bundle.toml"
 
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/scarlet-bundle-alpine.git", rev = "b3c55f9b4ccb360aa461fc1ec59ff73700d176b1" }
+source = { git = "https://github.com/petitstrawberry/scarlet-bundle-alpine.git", rev = "51f973b8e4ee289cc328f636c5a66e384826ccf6" }
 subdir = "bundles/rootfs"
+
+[[layers]]
+kind = "bundle"
+source = { git = "https://github.com/petitstrawberry/scarlet-bundle-alpine.git", rev = "51f973b8e4ee289cc328f636c5a66e384826ccf6" }
+subdir = "bundles/mozc"
 
 [[layers]]
 kind = "bundle"
