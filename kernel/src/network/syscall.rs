@@ -1364,3 +1364,50 @@ pub fn sys_socket_sendto(tf: &mut Trapframe) -> usize {
         Err(error) => socket_error_result(error),
     }
 }
+
+/// Complete snapshot: null/zero probes the count; insufficient capacity writes
+/// nothing and returns the required count. No silently truncated enumeration.
+pub fn sys_network_list_links_v1(tf: &mut Trapframe) -> usize {
+    let Some(task) = mytask() else {
+        return usize::MAX;
+    };
+    tf.increment_pc_next(&task);
+    let ptr = tf.get_arg(0);
+    let capacity = tf.get_arg(1);
+    let records = NetworkManager::get_manager().link_snapshot();
+    if capacity < records.len() || capacity == 0 {
+        return records.len();
+    }
+    if ptr == 0 {
+        return usize::MAX;
+    }
+    // SAFETY: this ABI record has an explicit, fully initialized 64-byte layout.
+    let bytes =
+        unsafe { core::slice::from_raw_parts(records.as_ptr().cast::<u8>(), records.len() * 64) };
+    if copy_to_user(&task, ptr, bytes).is_err() {
+        return usize::MAX;
+    }
+    records.len()
+}
+
+pub fn sys_network_update_ipv4_v1(tf: &mut Trapframe) -> usize {
+    let Some(task) = mytask() else {
+        return usize::MAX;
+    };
+    tf.increment_pc_next(&task);
+    let mut request = scarlet_abi::network::NetworkUpdateIpv4V1::default();
+    // SAFETY: every bit pattern is valid for the integer/byte-array ABI record.
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(
+            (&mut request as *mut scarlet_abi::network::NetworkUpdateIpv4V1).cast::<u8>(),
+            40,
+        )
+    };
+    if copy_from_user(&task, tf.get_arg(0), bytes).is_err() {
+        return usize::MAX;
+    }
+    match NetworkManager::get_manager().update_link_ipv4(request) {
+        Ok(()) => 0,
+        Err(_) => usize::MAX,
+    }
+}

@@ -35,6 +35,7 @@ pub mod ethernet;
 pub mod ethernet_interface;
 pub mod icmp;
 pub mod ipv4;
+pub mod link;
 pub mod local;
 pub mod protocol_stack;
 pub mod socket;
@@ -127,6 +128,20 @@ pub trait NetworkInterface: Send + Sync {
     /// The current link-layer address.
     fn mac_address(&self) -> MacAddress;
 
+    /// Carrier usable for data traffic; unknown devices must opt in explicitly.
+    fn link_state(&self) -> u8 {
+        scarlet_abi::network::LINK_UNKNOWN
+    }
+    fn link_epoch(&self) -> u64 {
+        0
+    }
+    fn link_kind(&self) -> u8 {
+        scarlet_abi::network::LINK_KIND_ETHERNET
+    }
+    fn mtu(&self) -> u32 {
+        1500
+    }
+
     /// Get the configured primary IPv4 address.
     ///
     /// # Returns
@@ -207,6 +222,9 @@ pub struct NetworkManager {
     /// Registered network interfaces
     interfaces: IrqRwSpinLock<BTreeMap<String, Arc<dyn NetworkInterface>>>,
 
+    /// Serializes registration/removal and incarnation-checked configuration.
+    link_lifecycle: crate::sync::IrqSpinLock<link::LinkRegistry>,
+
     /// Default interface name
     default_interface: IrqRwSpinLock<Option<String>>,
 
@@ -230,6 +248,7 @@ impl NetworkManager {
             socket_handle_references: IrqRwSpinLock::new(BTreeMap::new()),
             next_socket_id: AtomicUsize::new(1),
             interfaces: IrqRwSpinLock::new(BTreeMap::new()),
+            link_lifecycle: crate::sync::IrqSpinLock::new(link::LinkRegistry::new()),
             default_interface: IrqRwSpinLock::new(None),
             arp_cache: IrqRwSpinLock::new(BTreeMap::new()),
             network_config: IrqRwSpinLock::new(NetworkConfig::default()),
@@ -285,6 +304,18 @@ impl NetworkManager {
         name: &str,
         interface: Arc<dyn NetworkInterface>,
     ) -> Result<(), &'static str> {
+        let mut links = self.link_lifecycle.lock();
+        if name.is_empty()
+            || name.len() >= 32
+            || name.as_bytes().contains(&0)
+            || name != interface.name()
+        {
+            return Err("Invalid network interface name");
+        }
+        if self.get_interface(name).is_some() {
+            return Err("Interface already registered");
+        }
+        links.register(name)?;
         let mut default = self.default_interface.write();
         if default.is_none() {
             *default = Some(String::from(name));
@@ -295,6 +326,7 @@ impl NetworkManager {
             .write()
             .insert(String::from(name), interface);
 
+        drop(default);
         self.configure_protocol_layers_with_interface(interface_clone);
 
         Ok(())
@@ -306,8 +338,8 @@ impl NetworkManager {
 
     /// Remove a registered network interface.
     ///
-    /// If the removed interface was the default, the lexicographically first
-    /// remaining interface becomes the new default.
+    /// Remove its IPv4 routes and ARP state. A configured interface with the
+    /// best remaining default route becomes the fallback, or no default remains.
     ///
     /// # Arguments
     ///
@@ -317,24 +349,22 @@ impl NetworkManager {
     ///
     /// The removed interface, or `None` when `name` was not registered.
     pub fn unregister_interface(&self, name: &str) -> Option<Arc<dyn NetworkInterface>> {
-        let mut default = self.default_interface.write();
-        let mut interfaces = self.interfaces.write();
-        let removed = interfaces.remove(name);
-        if default.as_deref() == Some(name) {
-            *default = interfaces.keys().next().cloned();
-        }
-        drop(interfaces);
-        drop(default);
-
-        if removed.is_some()
-            && let Some(ip_layer) = self.get_layer("ip")
-            && let Some(ipv4) = ip_layer
-                .as_any()
-                .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
+        let mut links = self.link_lifecycle.lock();
+        let interface = self.get_interface(name)?;
+        // Clear routing while the interface still exists, so default selection
+        // and compatibility configuration are updated together.
+        let _ = crate::network::config::clear_interface_ipv4(name);
+        self.interfaces.write().remove(name);
+        links.remove(name);
+        if let Some(layer) = self.get_layer("ethernet")
+            && let Some(ethernet) = layer.as_any().downcast_ref::<ethernet::EthernetLayer>()
         {
-            ipv4.remove_interface(name);
+            ethernet.unregister_interface(name);
         }
-        removed
+        if self.default_interface_name().as_deref() == Some(name) {
+            *self.default_interface.write() = None;
+        }
+        Some(interface)
     }
 
     pub fn get_default_interface(&self) -> Option<Arc<dyn NetworkInterface>> {

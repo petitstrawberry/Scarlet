@@ -218,6 +218,18 @@ pub trait NetworkDevice: Device {
     /// Check if the link is up
     fn is_link_up(&self) -> bool;
 
+    /// Driver-maintained epoch, incremented on every link loss/reassociation.
+    /// Returning zero provides polling-only detection; Wi-Fi drivers must retain
+    /// transitions here even when down/up occurs between management snapshots.
+    fn link_epoch(&self) -> u64 {
+        0
+    }
+
+    /// Link type for management. FullMAC devices override this with WIFI.
+    fn link_kind(&self) -> u8 {
+        scarlet_abi::network::LINK_KIND_ETHERNET
+    }
+
     /// Get network device statistics
     fn get_stats(&self) -> NetworkStats;
 }

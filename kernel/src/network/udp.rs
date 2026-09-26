@@ -169,6 +169,8 @@ impl UdpHeader {
 ///
 /// Implements SocketObject for UDP datagram communication.
 pub struct UdpSocket {
+    /// Serializes bind, connect autobind and first send with interface selection.
+    binding_lock: IrqSpinLock<()>,
     /// Local address
     local_addr: IrqRwSpinLock<Option<SocketAddress>>,
     /// Remote address (for connected sockets)
@@ -201,6 +203,7 @@ impl UdpSocket {
     /// Create a new UDP socket
     pub fn new(udp_layer: Arc<UdpLayer>) -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
+            binding_lock: IrqSpinLock::new(()),
             local_addr: IrqRwSpinLock::new(None),
             remote_addr: IrqRwSpinLock::new(None),
             bound_interface: IrqRwSpinLock::new(None),
@@ -237,8 +240,17 @@ impl UdpSocket {
     /// `Ok(())` if the interface exists, otherwise
     /// [`SocketError::AddressNotAvailable`].
     pub fn bind_interface(&self, interface: &str) -> Result<(), SocketError> {
+        let _binding = self.binding_lock.lock();
         if get_network_manager().get_interface(interface).is_none() {
             return Err(SocketError::AddressNotAvailable);
+        }
+        // The port registry includes interface scope. Keep it immutable once bound.
+        if self.local_addr.read().is_some() {
+            return if self.bound_interface.read().as_deref() == Some(interface) {
+                Ok(())
+            } else {
+                Err(SocketError::InvalidArgument)
+            };
         }
         *self.bound_interface.write() = Some(interface.into());
         Ok(())
@@ -282,13 +294,14 @@ impl UdpSocket {
     }
 
     fn bind_for_connected_peer(&self, destination: [u8; 4]) -> Result<(), SocketError> {
+        let _binding = self.binding_lock.lock();
         let current = self.local_addr.read().clone();
         let bound_address = match current {
             Some(SocketAddress::Inet(address)) => Some(address.addr),
             _ => None,
         };
         let requested_interface = self.bound_interface.read().clone();
-        let (source_address, selected_interface) =
+        let (source_address, _selected_interface) =
             select_local_endpoint(requested_interface.as_deref(), bound_address, destination);
         if source_address == [0; 4] {
             return Err(SocketError::NoRoute);
@@ -306,9 +319,6 @@ impl UdpSocket {
             source_address,
             port,
         )));
-        if requested_interface.is_none() {
-            *self.bound_interface.write() = selected_interface;
-        }
         Ok(())
     }
 }
@@ -441,6 +451,10 @@ impl SocketObject for UdpSocket {
 
 impl SocketControl for UdpSocket {
     fn bind(&self, address: &SocketAddress) -> Result<(), SocketError> {
+        let _binding = self.binding_lock.lock();
+        if self.local_addr.read().is_some() {
+            return Err(SocketError::InvalidArgument);
+        }
         match address {
             SocketAddress::Inet(inet) => {
                 let addr = inet.addr;
@@ -701,12 +715,15 @@ impl ControlOps for UdpSocket {
     }
 }
 
-/// UDP layer
-///
-/// Manages UDP port bindings and handles UDP datagrams.
+struct PortBinding {
+    socket: Weak<UdpSocket>,
+    interface: Option<String>,
+}
+
+/// UDP layer: interface-scoped port reservations and datagram delivery.
 pub struct UdpLayer {
     /// Port-to-socket mapping for receiving datagrams
-    port_map: IrqRwSpinLock<BTreeMap<u16, alloc::sync::Weak<UdpSocket>>>,
+    port_map: IrqRwSpinLock<BTreeMap<u16, Vec<PortBinding>>>,
     /// Port allocation (ephemeral ports start from 49152)
     next_ephemeral_port: IrqSpinLock<u16>,
     /// Statistics
@@ -792,34 +809,60 @@ impl UdpLayer {
         port: u16,
         socket: alloc::sync::Weak<UdpSocket>,
     ) -> Result<(), SocketError> {
+        let owner = socket.upgrade().ok_or(SocketError::InvalidArgument)?;
+        let scope = owner.bound_interface.read().clone();
         let mut map = self.port_map.write();
-        if let Some(existing) = map.get(&port) {
-            if existing.upgrade().is_some() && !existing.ptr_eq(&socket) {
+        let bindings = map.entry(port).or_default();
+        bindings.retain(|binding| binding.socket.strong_count() != 0);
+        for existing in bindings.iter() {
+            if existing.socket.ptr_eq(&socket) {
+                return Ok(());
+            }
+            // A wildcard reservation conflicts with every interface; two
+            // explicitly different NICs may both run DHCP on UDP port 68.
+            if scope.is_none() || existing.interface.is_none() || scope == existing.interface {
                 return Err(SocketError::AddressInUse);
             }
         }
-        map.insert(port, socket);
+        bindings.push(PortBinding {
+            socket,
+            interface: scope,
+        });
         Ok(())
     }
 
-    /// Unregister a specific socket from a port
-    ///
-    /// Only removes the port entry if the registered socket matches.
+    /// Release only this socket's reservation, preserving other NICs' bindings.
     pub fn unregister_socket(&self, port: u16, socket: &alloc::sync::Weak<UdpSocket>) {
         let mut map = self.port_map.write();
-        if let Some(existing) = map.get(&port) {
-            if existing.ptr_eq(socket) {
+        if let Some(bindings) = map.get_mut(&port) {
+            bindings.retain(|existing| {
+                !existing.socket.ptr_eq(socket) && existing.socket.strong_count() != 0
+            });
+            if bindings.is_empty() {
                 map.remove(&port);
             }
         }
     }
 
-    /// Find socket for a destination port
     pub fn find_socket(&self, port: u16) -> Option<Arc<UdpSocket>> {
+        self.find_socket_on_interface(port, None)
+    }
+
+    fn find_socket_on_interface(
+        &self,
+        port: u16,
+        interface: Option<&str>,
+    ) -> Option<Arc<UdpSocket>> {
+        // Never drop the last strong socket reference while holding port_map:
+        // its destructor unregisters from this same map.
         self.port_map
             .read()
-            .get(&port)
-            .and_then(|weak| weak.upgrade())
+            .get(&port)?
+            .iter()
+            .filter(|binding| {
+                binding.interface.is_none() || binding.interface.as_deref() == interface
+            })
+            .find_map(|binding| binding.socket.upgrade())
     }
 
     /// Configure a UDP socket (bind)
@@ -847,8 +890,10 @@ impl UdpLayer {
         dest_port: u16,
         data: Vec<u8>,
     ) -> Result<(), SocketError> {
+        let binding = socket.binding_lock.lock();
         let bound_interface = socket.bound_interface.read().clone();
-        let (bound_address, src_port) = match socket.local_addr.read().clone() {
+        let current = socket.local_addr.read().clone();
+        let (bound_address, src_port) = match current {
             Some(SocketAddress::Inet(inet)) => (Some(inet.addr), inet.port),
             _ => {
                 // Allocate ephemeral port for unbound socket
@@ -861,6 +906,7 @@ impl UdpLayer {
                 (None, port)
             }
         };
+        drop(binding);
         let (src_ip_bytes, selected_interface) =
             select_local_endpoint(bound_interface.as_deref(), bound_address, dest_ip);
 
@@ -974,7 +1020,7 @@ impl UdpLayer {
         stats.packets_received += 1;
         stats.bytes_received += (8 + data.len()) as u64;
 
-        if let Some(socket) = self.find_socket(dst_port)
+        if let Some(socket) = self.find_socket_on_interface(dst_port, interface)
             && socket.accepts_interface(interface)
         {
             socket.deliver_datagram(data);
@@ -1215,5 +1261,32 @@ mod tests {
             udp_layer.register_port(53000, socket2.self_weak.clone()),
             Err(SocketError::AddressInUse)
         );
+    }
+    #[test_case]
+    fn test_udp_dhcp_ports_are_scoped_to_interface() {
+        let layer = UdpLayer::new();
+        let wired = UdpSocket::new(layer.clone());
+        let wifi = UdpSocket::new(layer.clone());
+        let wildcard = UdpSocket::new(layer.clone());
+        *wired.bound_interface.write() = Some("eth0".into());
+        *wifi.bound_interface.write() = Some("wlan0".into());
+        layer.register_port(68, wired.self_weak.clone()).unwrap();
+        layer.register_port(68, wifi.self_weak.clone()).unwrap();
+        assert_eq!(
+            layer.register_port(68, wildcard.self_weak.clone()),
+            Err(SocketError::AddressInUse)
+        );
+        assert!(Arc::ptr_eq(
+            &layer.find_socket_on_interface(68, Some("eth0")).unwrap(),
+            &wired
+        ));
+        assert!(Arc::ptr_eq(
+            &layer.find_socket_on_interface(68, Some("wlan0")).unwrap(),
+            &wifi
+        ));
+        assert!(layer.find_socket_on_interface(68, None).is_none());
+        layer.unregister_socket(68, &wired.self_weak);
+        assert!(layer.find_socket_on_interface(68, Some("wlan0")).is_some());
+        assert!(layer.find_socket_on_interface(68, Some("eth0")).is_none());
     }
 }

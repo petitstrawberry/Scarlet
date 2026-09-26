@@ -302,6 +302,13 @@ pub fn clear_interface_ipv4(name: &str) -> Result<(), &'static str> {
 
     interface.clear_ip_address();
     ipv4.remove_interface(name);
+    if let Some(layer) = network_manager.get_layer("arp")
+        && let Some(arp) = layer
+            .as_any()
+            .downcast_ref::<crate::network::arp::ArpLayer>()
+    {
+        arp.clear_interface(name);
+    }
 
     if network_manager.default_interface_name().as_deref() == Some(name) {
         let replacement = ipv4
@@ -310,6 +317,8 @@ pub fn clear_interface_ipv4(name: &str) -> Result<(), &'static str> {
             .or_else(|| ipv4.first_configured_interface());
         if let Some(interface) = replacement.as_deref() {
             network_manager.set_default_interface(interface);
+        } else {
+            *network_manager.default_interface.write() = None;
         }
         let mut config = network_manager.get_config();
         config.subnet_mask = replacement

@@ -38,6 +38,25 @@ impl NetworkInterface for EthernetNetworkInterface {
         self.device.mac_address().unwrap_or(MacAddress::new([0; 6]))
     }
 
+    fn link_state(&self) -> u8 {
+        if self.device.is_link_up() {
+            scarlet_abi::network::LINK_UP
+        } else {
+            scarlet_abi::network::LINK_DOWN
+        }
+    }
+
+    fn link_epoch(&self) -> u64 {
+        self.device.link_epoch()
+    }
+    fn link_kind(&self) -> u8 {
+        self.device.link_kind()
+    }
+
+    fn mtu(&self) -> u32 {
+        self.device.get_mtu().unwrap_or(1500) as u32
+    }
+
     fn ip_address(&self) -> Option<Ipv4Address> {
         *self.ip_address.lock()
     }

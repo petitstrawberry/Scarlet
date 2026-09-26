@@ -98,8 +98,8 @@ use crate::ipc::syscall::{
 use crate::lsm::syscall::{sys_lsm_list, sys_lsm_load, sys_lsm_unload};
 use crate::network::syscall::{
     sys_network_clear_ipv4, sys_network_configure_ipv4, sys_network_list_interfaces,
-    sys_network_list_interfaces_v2, sys_network_set_gateway, sys_network_set_ipv4,
-    sys_network_set_netmask,
+    sys_network_list_interfaces_v2, sys_network_list_links_v1, sys_network_set_gateway,
+    sys_network_set_ipv4, sys_network_set_netmask, sys_network_update_ipv4_v1,
 };
 use crate::network::syscall::{
     sys_socket_accept, sys_socket_bind, sys_socket_bind_interface, sys_socket_connect,
@@ -411,6 +411,8 @@ syscall_table! {
     NetworkClearIpv4 = 917 => sys_network_clear_ipv4, // Clear one interface's IPv4 configuration
     SocketGetLocalAddress = 918 => sys_socket_get_local_address, // Query local IPv4 address
     SocketGetPeerAddress = 919 => sys_socket_get_peer_address, // Query peer IPv4 address
+    NetworkListLinksV1 = 920 => sys_network_list_links_v1,
+    NetworkUpdateIpv4V1 = 921 => sys_network_update_ipv4_v1,
 
     // === Task Event Operations ===
 

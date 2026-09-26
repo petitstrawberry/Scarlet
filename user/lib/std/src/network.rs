@@ -279,3 +279,7 @@ pub fn list_interfaces() -> Result<(NetworkStatus, Vec<NetworkInterfaceInfo>), H
 
     Ok((status, interface_list))
 }
+
+pub use scarlet_os::network::{
+    NetworkLinkInfoV1, NetworkUpdateIpv4V1, list_links, update_link_ipv4,
+};

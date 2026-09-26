@@ -164,3 +164,43 @@ pub fn list_interface_configs() -> Result<Vec<NetworkInterfaceConfig>, HandleErr
     let count = result.min(records.len());
     Ok(records[..count].to_vec())
 }
+
+pub use scarlet_abi::network::{NetworkLinkInfoV1, NetworkUpdateIpv4V1};
+
+/// Return a complete link snapshot, retrying if devices were added during sizing.
+pub fn list_links() -> Result<Vec<NetworkLinkInfoV1>, HandleError> {
+    let mut records = alloc::vec![NetworkLinkInfoV1::default(); 8];
+    for _ in 0..4 {
+        // SAFETY: records is exclusive output storage for the indicated count.
+        let result = unsafe {
+            syscall2(
+                Syscall::NetworkListLinksV1,
+                records.as_mut_ptr() as usize,
+                records.len(),
+            )
+        };
+        HandleError::from_syscall_result(result)?;
+        let count = result;
+        if count <= records.len() {
+            records.truncate(count);
+            return Ok(records);
+        }
+        if count > 4096 {
+            return Err(HandleError::InvalidParameter);
+        }
+        records.resize(count, NetworkLinkInfoV1::default());
+    }
+    Err(HandleError::InvalidParameter)
+}
+
+/// Apply or clear IPv4 configuration only if this link incarnation still exists.
+pub fn update_link_ipv4(request: &NetworkUpdateIpv4V1) -> Result<(), HandleError> {
+    // SAFETY: request is a fully initialized fixed-layout record borrowed until return.
+    let result = unsafe {
+        syscall1(
+            Syscall::NetworkUpdateIpv4V1,
+            request as *const NetworkUpdateIpv4V1 as usize,
+        )
+    };
+    HandleError::from_syscall_result(result).map(|_| ())
+}

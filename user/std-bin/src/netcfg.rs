@@ -72,6 +72,7 @@ fn list_configuration() -> u8 {
         return 0;
     }
 
+    let links = scarlet_os::network::list_links().unwrap_or_default();
     for interface in &interfaces {
         let name = interface.interface_name().unwrap_or("(invalid)");
         if interface.is_default != 0 {
@@ -88,6 +89,22 @@ fn list_configuration() -> u8 {
             interface.mac_address[4],
             interface.mac_address[5]
         );
+        if let Some(link) = links
+            .iter()
+            .find(|link| link.interface_name() == Some(name))
+        {
+            println!(
+                "  Link: {} (id {}, generation {}, MTU {})",
+                match link.state {
+                    1 => "down",
+                    2 => "up",
+                    _ => "unknown",
+                },
+                link.id,
+                link.generation,
+                link.mtu
+            );
+        }
         if interface.ip_set != 0 {
             println!(
                 "  IPv4: {}.{}.{}.{}/{}",

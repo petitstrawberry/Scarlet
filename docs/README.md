@@ -104,6 +104,8 @@ this is not a claim that every historical document or device was revalidated.
 
 - [Network architecture](network/architecture.md) - network layers, sockets, and
   VirtIO-net.
+- [Network management and Wi-Fi boundary](network/management.md) - link identity,
+  DHCP lifecycle, route/DNS ownership, and QEMU validation
 - [Socket/VFS integration](network/socket-vfs-integration.md) - local socket path
   model.
 - [Namespace isolation](container/namespace-isolation.md) and

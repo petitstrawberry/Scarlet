@@ -4940,6 +4940,7 @@ dependencies = [
  "sas-protocol",
  "sbus",
  "sbus-client",
+ "scarlet-abi",
  "scarlet-desktop-config",
  "scarlet-os",
  "scarlet-std",

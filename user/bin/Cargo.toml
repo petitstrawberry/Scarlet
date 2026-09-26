@@ -176,6 +176,7 @@ name = "sas"
 path = "src/sas/main.rs"
 
 [dependencies]
+scarlet-abi = { path = "../lib/scarlet-abi" }
 scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }
 framebuffer = { path = "../lib/framebuffer" }

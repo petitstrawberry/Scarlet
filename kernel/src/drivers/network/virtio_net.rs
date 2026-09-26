@@ -241,6 +241,7 @@ impl VirtioNetHdrBasic {
 
 /// VirtIO Network Device
 pub struct VirtioNetDevice {
+    link_epoch: IrqSpinLock<u64>,
     base_addr: usize,
     pci_transport: Option<VirtioPciTransport>,
     virtqueues: IrqSpinLock<[VirtQueue<'static>; 2]>, // RX queue (0) and TX queue (1)
@@ -282,6 +283,7 @@ impl VirtioNetDevice {
 
     fn new_with_transport(base_addr: usize, pci_transport: Option<VirtioPciTransport>) -> Self {
         let mut device = Self {
+            link_epoch: IrqSpinLock::new(0),
             base_addr,
             pci_transport,
             virtqueues: IrqSpinLock::new([VirtQueue::new(32), VirtQueue::new(32)]), // RX and TX queues
@@ -629,6 +631,12 @@ impl VirtioNetDevice {
 
         let isr = self.read32_register(Register::InterruptStatus);
         if isr != 0 {
+            if isr & 0x02 != 0 {
+                // Retain configuration notifications even if carrier has already
+                // returned by the daemon's next snapshot.
+                let mut epoch = self.link_epoch.lock();
+                *epoch = epoch.wrapping_add(1);
+            }
             self.write32_register(Register::InterruptAck, isr & 0x03);
         }
 
@@ -907,6 +915,10 @@ impl NetworkDevice for VirtioNetDevice {
         self.setup_rx_buffers()?;
 
         Ok(())
+    }
+
+    fn link_epoch(&self) -> u64 {
+        *self.link_epoch.lock()
     }
 
     fn is_link_up(&self) -> bool {

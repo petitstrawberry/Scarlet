@@ -365,6 +365,14 @@ impl ArpLayer {
         }
     }
 
+    /// Discard cached neighbors and queued packets when a link is lost/replaced.
+    pub fn clear_interface(&self, interface: &str) {
+        self.cache.write().retain(|(name, _), _| name != interface);
+        self.pending
+            .write()
+            .retain(|(name, _), _| name != interface);
+    }
+
     /// Remove entry from ARP cache for a specific interface
     pub fn remove_entry_on_interface(&self, interface: &str, ip_address: Ipv4Address) {
         let mut cache = self.cache.write();

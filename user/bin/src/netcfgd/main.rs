@@ -12,6 +12,7 @@ extern crate scarlet_std as std;
 
 mod config;
 mod dhcp;
+mod lifecycle;
 
 use core::cmp::Ordering;
 use core::time::Duration;
@@ -21,13 +22,15 @@ use scarlet_os::time::monotonic_time_ns;
 use std::{
     env, format,
     fs::OpenOptions,
-    io::{Read, Write},
+    io::Write,
     network::{
-        Ipv4Address, clear_interface_ipv4, configure_interface_ipv4, list_interface_configs,
+        Ipv4Address, NetworkLinkInfoV1, NetworkUpdateIpv4V1, list_interface_configs, list_links,
+        update_link_ipv4,
     },
     println,
     socket::Socket,
     string::{String, ToString},
+    sync::{Arc, Mutex},
     thread,
     vec::Vec,
 };
@@ -39,11 +42,13 @@ const READY_NOTIFY_ATTEMPTS: usize = 20;
 const READY_NOTIFY_DELAY_MS: u64 = 25;
 const LEASE_RETRY_INTERVAL_SECS: u64 = 30;
 const LEASE_POLL_INTERVAL_SECS: u64 = 1;
+use scarlet_abi::network::{IPV4_CLEAR, IPV4_HAS_GATEWAY, IPV4_MAKE_DEFAULT};
 
 #[derive(Clone, Debug)]
 struct AvailableInterface {
     name: String,
     mac_address: [u8; 6],
+    link: NetworkLinkInfoV1,
 }
 
 #[derive(Clone, Debug)]
@@ -66,36 +71,81 @@ impl RoutePreference {
 #[derive(Clone, Debug)]
 struct ResolverSource {
     interface_name: String,
+    link: NetworkLinkInfoV1,
     preference: RoutePreference,
     servers: Vec<Ipv4Address>,
     domain_name: Option<String>,
 }
 
-#[derive(Debug)]
-struct ManagedDhcpLease {
+struct ManagedInterface {
     interface: AvailableInterface,
     config: InterfaceConfig,
     preference: RoutePreference,
-    timeout_ms: u64,
-    attempts: u32,
     lease: Option<dhcp::DhcpLease>,
+    configured: bool,
     acquired_at_ns: u64,
     next_action_ns: u64,
 }
 
+struct DhcpCompletion {
+    result: Result<dhcp::DhcpLease, String>,
+    rejected: bool,
+    completed_at_ns: u64,
+}
+struct DhcpJob {
+    link: NetworkLinkInfoV1,
+    name: String,
+    output: Arc<Mutex<Option<DhcpCompletion>>>,
+    thread: thread::JoinHandle,
+}
+
 fn available_interfaces() -> Result<Vec<AvailableInterface>, &'static str> {
-    let records = list_interface_configs().map_err(|_| "failed to list network interfaces")?;
-    let mut interfaces = Vec::new();
-    for record in records {
-        let name = record
-            .interface_name()
-            .ok_or("kernel returned an invalid interface name")?;
-        interfaces.push(AvailableInterface {
-            name: name.to_string(),
-            mac_address: record.mac_address,
-        });
-    }
-    Ok(interfaces)
+    list_links()
+        .map_err(|_| "failed to list network links")?
+        .into_iter()
+        .map(|link| {
+            Ok(AvailableInterface {
+                name: link
+                    .interface_name()
+                    .ok_or("invalid link name")?
+                    .to_string(),
+                mac_address: link.mac_address,
+                link,
+            })
+        })
+        .collect()
+}
+
+fn apply_ipv4(
+    link: &NetworkLinkInfoV1,
+    address: Ipv4Address,
+    netmask: Ipv4Address,
+    gateway: Option<Ipv4Address>,
+    metric: u32,
+    make_default: bool,
+) -> Result<(), &'static str> {
+    update_link_ipv4(&NetworkUpdateIpv4V1 {
+        id: link.id,
+        generation: link.generation,
+        address: address.0,
+        netmask: netmask.0,
+        gateway: gateway.map_or([0; 4], |ip| ip.0),
+        metric,
+        flags: u32::from(gateway.is_some()) * IPV4_HAS_GATEWAY
+            | u32::from(make_default) * IPV4_MAKE_DEFAULT,
+        reserved: 0,
+    })
+    .map_err(|_| "link changed or IPv4 configuration failed")
+}
+
+fn clear_link(link: &NetworkLinkInfoV1) -> Result<(), &'static str> {
+    update_link_ipv4(&NetworkUpdateIpv4V1 {
+        id: link.id,
+        generation: link.generation,
+        flags: IPV4_CLEAR,
+        ..Default::default()
+    })
+    .map_err(|_| "link changed while clearing IPv4")
 }
 
 fn load_configuration(directory: &str) -> Result<NetworkConfig, String> {
@@ -128,8 +178,8 @@ fn configure_static_interface(
 ) -> Result<ResolverSource, &'static str> {
     let address = config.address.ok_or("static address is missing")?;
     let netmask = config.netmask.ok_or("static netmask is missing")?;
-    configure_interface_ipv4(
-        &interface.name,
+    apply_ipv4(
+        &interface.link,
         address,
         netmask,
         config.gateway,
@@ -155,6 +205,7 @@ fn configure_static_interface(
 
     Ok(ResolverSource {
         interface_name: interface.name.clone(),
+        link: interface.link,
         preference: RoutePreference {
             explicitly_default: config.default_route,
             metric: config.metric,
@@ -163,67 +214,6 @@ fn configure_static_interface(
         servers: config.dns_servers.clone(),
         domain_name: None,
     })
-}
-
-fn configure_dhcp_interface(
-    interface: &AvailableInterface,
-    config: &InterfaceConfig,
-    global: &NetworkConfig,
-    make_default: bool,
-) -> Result<(ResolverSource, dhcp::DhcpLease), String> {
-    let timeout_ms = config.dhcp_timeout_ms.unwrap_or(global.dhcp_timeout_ms);
-    let attempts = config.dhcp_attempts.unwrap_or(global.dhcp_attempts).max(1);
-    println!(
-        "netcfgd: {} requesting DHCP lease ({} attempt(s), {} ms timeout)",
-        interface.name, attempts, timeout_ms
-    );
-    let lease = dhcp::acquire(&interface.name, interface.mac_address, timeout_ms, attempts)?;
-
-    configure_interface_ipv4(
-        &interface.name,
-        lease.address,
-        lease.netmask,
-        lease.gateway,
-        config.metric,
-        make_default,
-    )
-    .map_err(|_| "kernel rejected DHCP IPv4 configuration".to_string())?;
-
-    println!(
-        "netcfgd: {} leased {} / {} from {} (lease {}s, T1 {}s, T2 {}s)",
-        interface.name,
-        format_ipv4(lease.address),
-        prefix_length(lease.netmask),
-        format_ipv4(lease.server_identifier),
-        lease.lease_time_secs,
-        lease.renewal_time_secs,
-        lease.rebinding_time_secs
-    );
-    if let Some(gateway) = lease.gateway {
-        println!(
-            "netcfgd: {} default route via {} metric {}",
-            interface.name,
-            format_ipv4(gateway),
-            config.metric
-        );
-    }
-
-    let servers = if config.dns_servers.is_empty() {
-        lease.dns_servers.clone()
-    } else {
-        config.dns_servers.clone()
-    };
-    let source = ResolverSource {
-        interface_name: interface.name.clone(),
-        preference: RoutePreference {
-            explicitly_default: config.default_route,
-            metric: config.metric,
-            order: 0,
-        },
-        servers,
-        domain_name: lease.domain_name.clone(),
-    };
-    Ok((source, lease))
 }
 
 fn write_resolver_configuration(
@@ -256,24 +246,39 @@ fn write_resolver_configuration(
 
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
+    let temporary = format!("{path}.netcfgd.tmp");
     let mut file = options
-        .open(path)
+        .open(temporary.as_str())
         .map_err(|_| "failed to open resolver configuration")?;
     if file.write_all(content.as_bytes()).is_err() || file.flush().is_err() {
         return Err("failed to write resolver configuration");
+    }
+    drop(file);
+    if std::fs::rename(temporary.as_str(), path).is_err() {
+        // Scarlet's initramfs overlay does not implement rename yet. Keep
+        // diskless distributions functional; the complete content is prepared
+        // before truncating the destination. This fallback is not atomic.
+        let mut destination = options
+            .open(path)
+            .map_err(|_| "failed to open resolver destination")?;
+        destination
+            .write_all(content.as_bytes())
+            .map_err(|_| "failed to publish resolver configuration")?;
+        let _ = std::fs::remove_file(temporary.as_str());
     }
     println!("netcfgd: Wrote {} DNS server(s) to {}", servers.len(), path);
     Ok(())
 }
 
 fn renewal_source(
-    interface_name: &str,
+    interface: &AvailableInterface,
     config: &InterfaceConfig,
     preference: &RoutePreference,
     lease: &dhcp::DhcpLease,
 ) -> ResolverSource {
     ResolverSource {
-        interface_name: interface_name.to_string(),
+        interface_name: interface.name.clone(),
+        link: interface.link,
         preference: preference.clone(),
         servers: if config.dns_servers.is_empty() {
             lease.dns_servers.clone()
@@ -305,30 +310,6 @@ fn schedule_renewal(acquired_at_ns: u64, lease: &dhcp::DhcpLease) -> u64 {
     ))
 }
 
-fn managed_dhcp_lease(
-    interface: &AvailableInterface,
-    config: &InterfaceConfig,
-    global: &NetworkConfig,
-    preference: RoutePreference,
-    lease: Option<dhcp::DhcpLease>,
-) -> ManagedDhcpLease {
-    let now = monotonic_time_ns();
-    let next_action_ns = lease.as_ref().map_or_else(
-        || now.saturating_add(seconds_to_nanoseconds(LEASE_RETRY_INTERVAL_SECS)),
-        |lease| schedule_renewal(now, lease),
-    );
-    ManagedDhcpLease {
-        interface: interface.clone(),
-        config: config.clone(),
-        preference,
-        timeout_ms: config.dhcp_timeout_ms.unwrap_or(global.dhcp_timeout_ms),
-        attempts: config.dhcp_attempts.unwrap_or(global.dhcp_attempts).max(1),
-        lease,
-        acquired_at_ns: now,
-        next_action_ns,
-    }
-}
-
 fn is_preferred_active_source(
     candidate: &RoutePreference,
     interface_name: &str,
@@ -357,8 +338,8 @@ fn prefer_best_configured_interface(sources: &[ResolverSource]) -> Result<(), &'
     if record.ip_set == 0 {
         return Err("preferred interface has no IPv4 address");
     }
-    configure_interface_ipv4(
-        &preferred.interface_name,
+    apply_ipv4(
+        &preferred.link,
         Ipv4Address(record.ip_address),
         Ipv4Address(record.netmask),
         (record.gateway_set != 0).then_some(Ipv4Address(record.gateway)),
@@ -369,7 +350,7 @@ fn prefer_best_configured_interface(sources: &[ResolverSource]) -> Result<(), &'
 }
 
 fn install_maintained_lease(
-    managed: &mut ManagedDhcpLease,
+    managed: &mut ManagedInterface,
     resolver_sources: &mut Vec<ResolverSource>,
     lease: dhcp::DhcpLease,
     now: u64,
@@ -379,8 +360,8 @@ fn install_maintained_lease(
         &managed.interface.name,
         resolver_sources,
     );
-    if configure_interface_ipv4(
-        &managed.interface.name,
+    if apply_ipv4(
+        &managed.interface.link,
         lease.address,
         lease.netmask,
         lease.gateway,
@@ -397,152 +378,339 @@ fn install_maintained_lease(
     replace_resolver_source(
         resolver_sources,
         renewal_source(
-            &managed.interface.name,
+            &managed.interface,
             &managed.config,
             &managed.preference,
             &lease,
         ),
     );
     managed.lease = Some(lease);
+    managed.configured = true;
     true
 }
 
-fn maintain_dhcp_leases(
-    resolv_conf: &str,
-    leases: &mut [ManagedDhcpLease],
-    resolver_sources: &mut Vec<ResolverSource>,
-) -> ! {
-    println!("netcfgd: Monitoring {} DHCP lease(s)", leases.len());
+/// Workers only exchange DHCP packets. The coordinator alone installs addresses,
+/// routes and DNS, after checking the link incarnation again in the kernel.
+fn start_dhcp_job(
+    managed: &ManagedInterface,
+    global: &NetworkConfig,
+) -> Result<DhcpJob, &'static str> {
+    let output = Arc::new(Mutex::new(None));
+    let result_slot = output.clone();
+    let interface = managed.interface.clone();
+    let timeout = managed
+        .config
+        .dhcp_timeout_ms
+        .unwrap_or(global.dhcp_timeout_ms);
+    let attempts = managed
+        .config
+        .dhcp_attempts
+        .unwrap_or(global.dhcp_attempts)
+        .max(1);
+    let lease = managed.lease.clone();
+    let elapsed = monotonic_time_ns().saturating_sub(managed.acquired_at_ns);
+    let thread = thread::Builder::new().spawn(move || {
+        let (result, rejected) = if let Some(lease) = lease {
+            let rebind = elapsed >= seconds_to_nanoseconds(u64::from(lease.rebinding_time_secs));
+            match dhcp::renew(
+                &interface.name,
+                interface.mac_address,
+                &lease,
+                timeout,
+                rebind,
+            ) {
+                Ok(lease) => (Ok(lease), false),
+                Err(error) => {
+                    let rejected = error.is_rejected();
+                    (Err(error.to_string()), rejected)
+                }
+            }
+        } else {
+            (
+                dhcp::acquire(&interface.name, interface.mac_address, timeout, attempts),
+                false,
+            )
+        };
+        *result_slot.lock() = Some(DhcpCompletion {
+            result,
+            rejected,
+            completed_at_ns: monotonic_time_ns(),
+        });
+    })?;
+    Ok(DhcpJob {
+        link: managed.interface.link,
+        name: managed.interface.name.clone(),
+        output,
+        thread,
+    })
+}
+
+fn maintain_interfaces(configuration: &NetworkConfig) -> ! {
+    let mut managed: Vec<ManagedInterface> = Vec::new();
+    let mut jobs: Vec<DhcpJob> = Vec::new();
+    let mut sources: Vec<ResolverSource> = Vec::new();
+    let mut ready = false;
+    let mut resolver_dirty = true;
+    let mut cleared_down: Vec<NetworkLinkInfoV1> = Vec::new();
+    println!("netcfgd: Monitoring link lifecycle");
     loop {
         let now = monotonic_time_ns();
-        let mut resolver_changed = false;
-
-        for managed in leases.iter_mut() {
-            if now < managed.next_action_ns {
+        let interfaces = match available_interfaces() {
+            Ok(interfaces) => interfaces,
+            Err(error) => {
+                // A failed query is not an empty snapshot: preserve state and retry.
+                println!("netcfgd: {}", error);
+                thread::sleep(Duration::from_secs(LEASE_POLL_INTERVAL_SECS));
                 continue;
             }
-
-            let Some(current_lease) = managed.lease.clone() else {
-                match dhcp::acquire(
-                    &managed.interface.name,
-                    managed.interface.mac_address,
-                    managed.timeout_ms,
-                    managed.attempts,
-                ) {
-                    Ok(lease) => {
-                        let address = lease.address;
-                        if install_maintained_lease(managed, resolver_sources, lease, now) {
-                            println!(
-                                "netcfgd: {} reacquired DHCP address {}",
-                                managed.interface.name,
-                                format_ipv4(address)
-                            );
-                            resolver_changed = true;
-                            continue;
-                        }
-                        println!(
-                            "netcfgd: {} reacquired a lease but kernel configuration failed",
-                            managed.interface.name
-                        );
-                    }
-                    Err(error) => println!(
-                        "netcfgd: {} DHCP reacquisition failed: {}",
-                        managed.interface.name, error
-                    ),
-                }
-                managed.next_action_ns =
+        };
+        let links: Vec<_> = interfaces.iter().map(|interface| interface.link).collect();
+        cleared_down.retain(|old| links.iter().any(|link| link.same_incarnation(old)));
+        for interface in &interfaces {
+            if !interface.link.is_up()
+                && config::select_interface_config(configuration, &interface.name)
+                    .is_some_and(|config| config.method != InterfaceMethod::Disabled)
+                && !cleared_down
+                    .iter()
+                    .any(|link| link.same_incarnation(&interface.link))
+                && clear_link(&interface.link).is_ok()
+            {
+                cleared_down.push(interface.link);
+            }
+        }
+        // Remove old generations before accepting any worker completion.
+        managed.retain(|item| {
+            if lifecycle::current_ready_link(&item.interface.link, &links) {
+                return true;
+            }
+            if let Some(current) = links.iter().find(|link| link.id == item.interface.link.id) {
+                if clear_link(current).is_err() {
+                    return true;
+                } // retry cleanup next poll
+            }
+            sources.retain(|source| source.interface_name != item.interface.name);
+            resolver_dirty = true;
+            println!(
+                "netcfgd: {} link lost/changed; cleared address, route and DNS",
+                item.interface.name
+            );
+            false
+        });
+        for (order, interface) in interfaces.iter().enumerate() {
+            if !interface.link.is_up()
+                || managed
+                    .iter()
+                    .any(|item| item.interface.link.id == interface.link.id)
+            {
+                continue;
+            }
+            let Some(config) = config::select_interface_config(configuration, &interface.name)
+            else {
+                continue;
+            };
+            if config.method == InterfaceMethod::Disabled {
+                continue;
+            }
+            // A fresh daemon also discards configuration left by a previous owner.
+            if clear_link(&interface.link).is_err() {
+                continue;
+            }
+            println!(
+                "netcfgd: {} link ready id={} generation={}",
+                interface.name, interface.link.id, interface.link.generation
+            );
+            managed.push(ManagedInterface {
+                interface: interface.clone(),
+                config: config.clone(),
+                preference: RoutePreference {
+                    explicitly_default: config.default_route,
+                    metric: config.metric,
+                    order,
+                },
+                lease: None,
+                configured: false,
+                acquired_at_ns: 0,
+                next_action_ns: now,
+            });
+        }
+        let mut index = 0;
+        while index < jobs.len() {
+            let finished = jobs[index].thread.try_join();
+            if matches!(finished, Ok(false)) {
+                index += 1;
+                continue;
+            }
+            let job = jobs.remove(index);
+            let completion = job.output.lock().take();
+            if !lifecycle::current_ready_link(&job.link, &links) {
+                continue;
+            }
+            let Some(item) = managed
+                .iter_mut()
+                .find(|item| item.interface.link.same_incarnation(&job.link))
+            else {
+                continue;
+            };
+            let Some(completion) = completion else {
+                item.next_action_ns =
                     now.saturating_add(seconds_to_nanoseconds(LEASE_RETRY_INTERVAL_SECS));
                 continue;
             };
-
-            let elapsed_ns = now.saturating_sub(managed.acquired_at_ns);
-            let expires_ns = seconds_to_nanoseconds(u64::from(current_lease.lease_time_secs));
-            if elapsed_ns >= expires_ns {
-                println!(
-                    "netcfgd: {} DHCP lease expired; removing its IPv4 configuration",
-                    managed.interface.name
-                );
-                let _ = clear_interface_ipv4(&managed.interface.name);
-                managed.lease = None;
-                managed.next_action_ns = now;
-                resolver_sources.retain(|source| source.interface_name != managed.interface.name);
-                if let Err(error) = prefer_best_configured_interface(resolver_sources) {
-                    println!("netcfgd: Failed to select fallback interface: {}", error);
-                }
-                resolver_changed = true;
-                continue;
-            }
-
-            let rebind_ns = seconds_to_nanoseconds(u64::from(current_lease.rebinding_time_secs));
-            let rebind = elapsed_ns >= rebind_ns;
-            match dhcp::renew(
-                &managed.interface.name,
-                managed.interface.mac_address,
-                &current_lease,
-                managed.timeout_ms,
-                rebind,
-            ) {
+            match completion.result {
                 Ok(lease) => {
-                    if install_maintained_lease(managed, resolver_sources, lease, now) {
+                    // Never install a lease that expired while its worker was descheduled.
+                    if now.saturating_sub(completion.completed_at_ns)
+                        < seconds_to_nanoseconds(u64::from(lease.lease_time_secs))
+                        && install_maintained_lease(
+                            item,
+                            &mut sources,
+                            lease,
+                            completion.completed_at_ns,
+                        )
+                    {
                         println!(
-                            "netcfgd: {} DHCP lease {}",
-                            managed.interface.name,
-                            if rebind { "rebound" } else { "renewed" }
+                            "netcfgd: {} DHCP configuration installed",
+                            item.interface.name
                         );
-                        resolver_changed = true;
+                        resolver_dirty = true;
                         continue;
                     }
-                    println!(
-                        "netcfgd: {} lease renewal could not be installed",
-                        managed.interface.name
-                    );
                 }
-                Err(error) if error.is_rejected() => {
-                    println!(
-                        "netcfgd: {} DHCP server rejected the lease; reacquiring",
-                        managed.interface.name
-                    );
-                    let _ = clear_interface_ipv4(&managed.interface.name);
-                    managed.lease = None;
-                    managed.next_action_ns = now;
-                    resolver_sources
-                        .retain(|source| source.interface_name != managed.interface.name);
-                    if let Err(error) = prefer_best_configured_interface(resolver_sources) {
-                        println!("netcfgd: Failed to select fallback interface: {}", error);
-                    }
-                    resolver_changed = true;
+                Err(error) => println!("netcfgd: {} DHCP failed: {}", item.interface.name, error),
+            }
+            if completion.rejected && clear_link(&item.interface.link).is_ok() {
+                item.lease = None;
+                item.configured = false;
+                sources.retain(|source| source.interface_name != item.interface.name);
+                resolver_dirty = true;
+            }
+            item.next_action_ns =
+                now.saturating_add(seconds_to_nanoseconds(LEASE_RETRY_INTERVAL_SECS));
+        }
+        for item in &mut managed {
+            if !lifecycle::current_ready_link(&item.interface.link, &links) {
+                continue;
+            }
+            if item.lease.as_ref().is_some_and(|lease| {
+                now.saturating_sub(item.acquired_at_ns)
+                    >= seconds_to_nanoseconds(u64::from(lease.lease_time_secs))
+            }) {
+                if clear_link(&item.interface.link).is_err() {
                     continue;
                 }
-                Err(error) => println!(
-                    "netcfgd: {} DHCP {} failed: {}",
-                    managed.interface.name,
-                    if rebind { "rebind" } else { "renewal" },
-                    error
-                ),
+                item.lease = None;
+                item.configured = false;
+                item.next_action_ns = now;
+                sources.retain(|source| source.interface_name != item.interface.name);
+                resolver_dirty = true;
+                // Invalidate a renewal still in flight by keeping its output detached.
+                for job in &mut jobs {
+                    if job.link.same_incarnation(&item.interface.link) {
+                        job.link.generation = 0;
+                    }
+                }
             }
-
-            let expiry_deadline = managed.acquired_at_ns.saturating_add(expires_ns);
-            let phase_deadline = if rebind {
-                expiry_deadline
-            } else {
-                managed.acquired_at_ns.saturating_add(rebind_ns)
-            };
-            managed.next_action_ns = now
-                .saturating_add(seconds_to_nanoseconds(LEASE_RETRY_INTERVAL_SECS))
-                .min(phase_deadline)
-                .min(expiry_deadline);
+            if now < item.next_action_ns {
+                continue;
+            }
+            match item.config.method {
+                InterfaceMethod::Static if !item.configured => {
+                    let default = is_preferred_active_source(
+                        &item.preference,
+                        &item.interface.name,
+                        &sources,
+                    );
+                    match configure_static_interface(&item.interface, &item.config, default) {
+                        Ok(mut source) => {
+                            source.preference = item.preference.clone();
+                            replace_resolver_source(&mut sources, source);
+                            item.configured = true;
+                            resolver_dirty = true;
+                        }
+                        Err(error) => println!("netcfgd: {}: {}", item.interface.name, error),
+                    }
+                    item.next_action_ns =
+                        now.saturating_add(seconds_to_nanoseconds(LEASE_RETRY_INTERVAL_SECS));
+                }
+                InterfaceMethod::Dhcp => {
+                    // Includes obsolete generations until their bounded worker exits:
+                    // never race two DHCP sockets on the same interface name.
+                    if jobs.iter().any(|job| job.name == item.interface.name) {
+                        continue;
+                    }
+                    match start_dhcp_job(item, configuration) {
+                        Ok(job) => jobs.push(job),
+                        Err(error) => println!("netcfgd: cannot start DHCP: {}", error),
+                    }
+                    item.next_action_ns =
+                        now.saturating_add(seconds_to_nanoseconds(LEASE_RETRY_INTERVAL_SECS));
+                }
+                _ => (),
+            }
         }
-
-        if resolver_changed
-            && let Err(error) = write_resolver_configuration(resolv_conf, resolver_sources)
+        if resolver_dirty {
+            // Drop preference/DNS for every down interface before selecting a fallback.
+            let preferred = prefer_best_configured_interface(&sources);
+            let resolver = write_resolver_configuration(&configuration.resolv_conf, &sources);
+            if let Err(error) = &preferred {
+                println!("netcfgd: {}", error);
+            }
+            if let Err(error) = &resolver {
+                println!("netcfgd: {}", error);
+            }
+            resolver_dirty = preferred.is_err() || resolver.is_err();
+        }
+        if !ready
+            && !resolver_dirty
+            && required_interfaces_ready(configuration, &interfaces, &managed)
         {
-            println!(
-                "netcfgd: Failed to refresh resolver configuration: {}",
-                error
-            );
+            notify_service_ready();
+            ready = true;
         }
         thread::sleep(Duration::from_secs(LEASE_POLL_INTERVAL_SECS));
     }
+}
+
+fn required_interfaces_ready(
+    configuration: &NetworkConfig,
+    interfaces: &[AvailableInterface],
+    managed: &[ManagedInterface],
+) -> bool {
+    // Explicit required names must exist, even before their first carrier-up.
+    for entry in &configuration.interfaces {
+        if entry.name != "*"
+            && config::select_interface_config(configuration, &entry.name).is_some_and(|selected| {
+                selected.required && selected.method != InterfaceMethod::Disabled
+            })
+            && !interfaces
+                .iter()
+                .any(|interface| interface.name == entry.name)
+        {
+            return false;
+        }
+    }
+    if interfaces.is_empty()
+        && configuration
+            .interfaces
+            .iter()
+            .rev()
+            .find(|entry| entry.name == "*")
+            .is_some_and(|entry| entry.required && entry.method != InterfaceMethod::Disabled)
+    {
+        return false;
+    }
+    interfaces.iter().all(|interface| {
+        let Some(entry) = config::select_interface_config(configuration, &interface.name) else {
+            return true;
+        };
+        !entry.required
+            || entry.method == InterfaceMethod::Disabled
+            || managed.iter().any(|item| {
+                item.configured
+                    && item.interface.link.same_incarnation(&interface.link)
+                    && interface.link.is_up()
+            })
+    })
 }
 
 fn notify_service_ready() {
@@ -557,9 +725,7 @@ fn notify_service_ready() {
             payload.extend_from_slice(&(service_name.len() as u32).to_le_bytes());
             payload.extend_from_slice(service_name);
             if stream.write_all(&payload).is_ok() {
-                // netcfgd is a one-shot service when it has no managed DHCP
-                // leases. Do not exit until stemd has latched the notification;
-                // otherwise PID 1 can reap us before its IPC worker records it.
+                // Wait until stemd has latched readiness before continuing.
                 let mut response = [0u8; 32];
                 if let Ok(length) = stream.read(&mut response)
                     && response[..length].starts_with(b"OK:")
@@ -588,151 +754,19 @@ fn should_make_default(candidate: &RoutePreference, current: Option<&RoutePrefer
     current.is_none_or(|current| candidate.compare(current) == Ordering::Less)
 }
 
-fn warn_unmatched_entries(config: &NetworkConfig, interfaces: &[AvailableInterface]) -> usize {
-    let mut required_missing = 0;
-    for (index, entry) in config.interfaces.iter().enumerate() {
-        if config.interfaces[index + 1..]
-            .iter()
-            .any(|later| later.name == entry.name)
-        {
-            continue;
-        }
-        let matched = if entry.name == "*" {
-            !interfaces.is_empty()
-        } else {
-            interfaces.iter().any(|item| item.name == entry.name)
-        };
-        if !matched {
-            println!(
-                "netcfgd: Warning: configured interface {} is not present",
-                entry.name
-            );
-            required_missing += usize::from(entry.required);
-        }
-    }
-    required_missing
-}
-
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("netcfgd: Network configuration starting");
     let arguments = env::args_vec();
-    let config_directory = arguments
+    let directory = arguments
         .get(1)
         .map(|value| value.as_str())
         .unwrap_or(DEFAULT_CONFIG_DIRECTORY);
-
-    let configuration = match load_configuration(config_directory) {
-        Ok(configuration) => configuration,
+    match load_configuration(directory) {
+        Ok(configuration) => maintain_interfaces(&configuration),
         Err(error) => {
             println!("netcfgd: Invalid configuration: {}", error);
-            return 1;
+            1
         }
-    };
-    let interfaces = match available_interfaces() {
-        Ok(interfaces) => interfaces,
-        Err(error) => {
-            println!("netcfgd: {}", error);
-            return 1;
-        }
-    };
-    let required_missing = warn_unmatched_entries(&configuration, &interfaces);
-
-    let mut configured_count = 0usize;
-    let mut failed_count = required_missing;
-    let mut required_failure = required_missing != 0;
-    let mut default_preference: Option<RoutePreference> = None;
-    let mut resolver_sources = Vec::new();
-    let mut managed_leases = Vec::new();
-
-    for (order, interface) in interfaces.iter().enumerate() {
-        let Some(interface_config) =
-            config::select_interface_config(&configuration, &interface.name)
-        else {
-            println!("netcfgd: {} has no matching configuration", interface.name);
-            continue;
-        };
-        if interface_config.method == InterfaceMethod::Disabled {
-            println!("netcfgd: {} is disabled by configuration", interface.name);
-            continue;
-        }
-
-        let preference = RoutePreference {
-            explicitly_default: interface_config.default_route,
-            metric: interface_config.metric,
-            order,
-        };
-        let make_default = should_make_default(&preference, default_preference.as_ref());
-        let result = match interface_config.method {
-            InterfaceMethod::Dhcp => {
-                configure_dhcp_interface(interface, &interface_config, &configuration, make_default)
-                    .map(|(source, lease)| (source, Some(lease)))
-            }
-            InterfaceMethod::Static => {
-                configure_static_interface(interface, &interface_config, make_default)
-                    .map_err(ToString::to_string)
-                    .map(|source| (source, None))
-            }
-            InterfaceMethod::Disabled => unreachable!(),
-        };
-
-        match result {
-            Ok((mut resolver_source, lease)) => {
-                resolver_source.preference = preference.clone();
-                resolver_sources.push(resolver_source);
-                configured_count += 1;
-                if make_default {
-                    default_preference = Some(preference.clone());
-                }
-                if let Some(lease) = lease {
-                    managed_leases.push(managed_dhcp_lease(
-                        interface,
-                        &interface_config,
-                        &configuration,
-                        preference,
-                        Some(lease),
-                    ));
-                }
-            }
-            Err(error) => {
-                println!("netcfgd: Failed to configure {}: {}", interface.name, error);
-                failed_count += 1;
-                required_failure |= interface_config.required;
-                if interface_config.method == InterfaceMethod::Dhcp {
-                    managed_leases.push(managed_dhcp_lease(
-                        interface,
-                        &interface_config,
-                        &configuration,
-                        preference,
-                        None,
-                    ));
-                }
-            }
-        }
-    }
-
-    if let Err(error) = write_resolver_configuration(&configuration.resolv_conf, &resolver_sources)
-    {
-        println!("netcfgd: {}", error);
-        return 1;
-    }
-    println!(
-        "netcfgd: Configuration complete: {} configured, {} failed",
-        configured_count, failed_count
-    );
-
-    if required_failure {
-        println!("netcfgd: A required interface failed; service is not ready");
-        return 1;
-    }
-    notify_service_ready();
-    if managed_leases.is_empty() {
-        0
-    } else {
-        maintain_dhcp_leases(
-            &configuration.resolv_conf,
-            &mut managed_leases,
-            &mut resolver_sources,
-        )
     }
 }

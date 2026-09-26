@@ -10,6 +10,7 @@ pub mod data_model;
 pub mod environment;
 pub mod fs;
 pub mod native_scalar;
+pub mod network;
 pub mod power_supply;
 pub mod shared_image;
 pub mod tls;
@@ -1021,6 +1022,8 @@ pub enum Syscall {
     NetworkConfigureIpv4 = 915,
     NetworkListInterfacesV2 = 916,
     NetworkClearIpv4 = 917,
+    NetworkListLinksV1 = 920,
+    NetworkUpdateIpv4V1 = 921,
     /// Write the socket's local IPv4 address to an eight-byte native address buffer.
     SocketGetLocalAddress = 918,
     /// Write the socket's peer IPv4 address to an eight-byte native address buffer.

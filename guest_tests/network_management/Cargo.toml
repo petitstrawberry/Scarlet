@@ -1,0 +1,14 @@
+[package]
+name = "network-management-qa"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scarlet-abi = { path = "../../user/lib/scarlet-abi" }
+
+[target.'cfg(target_os = "scarlet")'.dependencies]
+scarlet-std = { path = "../../user/lib/std" }
+scarlet-os = { path = "../../user/lib/scarlet-os" }
+
+[profile.release]
+panic = "abort"
