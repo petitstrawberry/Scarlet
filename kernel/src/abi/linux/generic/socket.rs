@@ -66,6 +66,8 @@ pub const SCM_CREDENTIALS: i32 = 2;
 pub const SO_PASSCRED: i32 = 16;
 pub const SO_PEERCRED: i32 = 17;
 pub const MSG_DONTWAIT: i32 = 0x40;
+pub const MSG_PEEK: u32 = 0x2;
+pub const MSG_TRUNC: u32 = 0x20;
 
 // Enable only while tracing Mozc's Linux IPC compatibility path.
 const MOZC_IPC_TRACE_ENABLED: bool = false;
@@ -2109,7 +2111,22 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     });
 
     // Receive data
-    let result = socket.recvfrom(&mut buffer, flags);
+    let result = if flags & MSG_PEEK != 0 {
+        match LocalSocket::from_socket_object(socket.as_ref()) {
+            Some(local) => local.peek_record(&mut buffer).map(|record_len| {
+                let count =
+                    if flags & MSG_TRUNC != 0 && socket.socket_type() == SocketType::SeqPacket {
+                        record_len
+                    } else {
+                        record_len.min(buffer.len())
+                    };
+                (count, crate::network::SocketAddress::Unspecified)
+            }),
+            None => Err(SocketError::NotSupported),
+        }
+    } else {
+        socket.recvfrom(&mut buffer, flags)
+    };
 
     if nonblocking && previous_nonblocking == Some(false) {
         if let Some(selectable) = socket.as_selectable() {
@@ -2140,7 +2157,8 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     match result {
         Ok((n, src_addr)) => {
-            if copy_to_user(&task, buf_ptr, &buffer[..n]).is_err() {
+            // MSG_TRUNC can report a record length larger than the copy buffer.
+            if copy_to_user(&task, buf_ptr, &buffer[..n.min(buffer.len())]).is_err() {
                 return errno::to_result(errno::EFAULT);
             }
             // Store source address if requested

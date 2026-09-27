@@ -48,6 +48,7 @@ const SYS_PIR_EL1: u32 = (3 << 14) | (10 << 7) | (2 << 3) | 3;
 const SYS_CLIDR_EL1: u32 = (3 << 14) | (1 << 11) | (0 << 7) | (0 << 3) | 1;
 const SYS_CCSIDR_EL1: u32 = (3 << 14) | (1 << 11) | (0 << 7) | (0 << 3) | 0;
 const SYS_CSSELR_EL1: u32 = (3 << 14) | (2 << 11) | (0 << 7) | (0 << 3) | 0;
+const SYS_ICC_SGI1R_EL1: u32 = (3 << 14) | (12 << 7) | (11 << 3) | 5;
 const SYS_CTR_EL0: u32 = (3 << 14) | (3 << 11) | (0 << 7) | (0 << 3) | 1;
 const TIMER_CTL_ENABLE: u64 = 1 << 0;
 const TIMER_CTL_ISTATUS: u64 = 1 << 2;
@@ -386,8 +387,15 @@ pub fn arch_guest_trap_handler(
             Some(VmExit::Wfi)
         }
         ESR_EC_HVC64 | ESR_EC_SMC64 => {
-            let epc = trapframe.elr;
-            trapframe.elr = trapframe.elr.wrapping_add(4);
+            // HVC's preferred return address is already the next instruction.
+            // An SMC trapped by HCR_EL2.TSC instead points at the SMC itself.
+            let epc = if ec == ESR_EC_HVC64 {
+                trapframe.elr.wrapping_sub(4)
+            } else {
+                let epc = trapframe.elr;
+                trapframe.elr = trapframe.elr.wrapping_add(4);
+                epc
+            };
             Some(VmExit::FirmwareCall { epc })
         }
         ESR_EC_SYS64 => {
@@ -395,6 +403,17 @@ pub fn arch_guest_trap_handler(
             let sysreg = esr_sys64_to_sysreg(iss) as u64;
             let reg = ((iss >> ESR_SYS64_ISS_RT_SHIFT) & ESR_SYS64_ISS_RT_MASK) as usize;
             let is_read = (iss & ESR_SYS64_ISS_DIR_READ) != 0;
+
+            if sysreg as u32 == SYS_ICC_SGI1R_EL1 && !is_read {
+                let value = if reg < 31 {
+                    trapframe.regs.reg[reg] as u64
+                } else {
+                    0
+                };
+                vm.send_sgi1r(guest.vcpu_id(), value);
+                trapframe.elr = trapframe.elr.wrapping_add(4);
+                return None;
+            }
 
             if emulate_el1_sysreg(trapframe, guest, sysreg as u32, reg, is_read) {
                 return None;

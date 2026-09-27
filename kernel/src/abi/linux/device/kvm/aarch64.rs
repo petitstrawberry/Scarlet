@@ -80,7 +80,6 @@ const PSCI_FN64_SYSTEM_OFF: u64 = 0xC4000008;
 const PSCI_FN64_SYSTEM_RESET: u64 = 0xC4000009;
 
 const SMCCC_RET_NOT_SUPPORTED: u64 = 0xFFFF_FFFF_FFFF_FFFF;
-static SMCCC_HELPER_RETURN_PC: AtomicU64 = AtomicU64::new(0);
 static KVM_ARM_PSCI_VERSION: AtomicU64 = AtomicU64::new(PSCI_VERSION_1_1);
 
 const KVM_REG_ARM_PSCI_VERSION: u64 = KVM_REG_ARM64 | KVM_REG_SIZE_U64 | KVM_REG_ARM_FW;
@@ -102,23 +101,6 @@ pub enum FirmwareCallResult {
     SystemReset,
     /// Not a PSCI call; forward to userspace as KVM_EXIT_MMIO or similar.
     ForwardToUserspace,
-}
-
-fn finish_smccc_function_call(vcpu: &dyn VcpuObject) {
-    let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
-    let helper_pc = SMCCC_HELPER_RETURN_PC.load(Ordering::Acquire);
-    let x8 = vcpu.get_reg(reg::X8).unwrap_or(0);
-
-    if helper_pc == 0 && x8 != 0 {
-        SMCCC_HELPER_RETURN_PC.store(pc, Ordering::Release);
-    }
-
-    if pc == SMCCC_HELPER_RETURN_PC.load(Ordering::Acquire) && x8 != 0 {
-        // Linux's arm64 SMCCC helper exits to KVM after the stack load and
-        // resumes at the result store. Preserve that PC and provide the result
-        // pointer through X4 so the helper can complete normally.
-        let _ = vcpu.set_reg(reg::X4, x8);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -473,19 +455,16 @@ pub fn handle_firmware_call_in_kernel(vcpu: &dyn VcpuObject) -> FirmwareCallResu
     match function_id {
         PSCI_FN_VERSION => {
             let _ = vcpu.set_reg(reg::X0, PSCI_VERSION_1_1);
-            finish_smccc_function_call(vcpu);
             FirmwareCallResult::Handled
         }
         PSCI_FN_CPU_OFF | PSCI_FN64_CPU_OFF => {
             // Single vCPU: refuse CPU_OFF
             let _ = vcpu.set_reg(reg::X0, PSCI_RET_DENIED);
-            finish_smccc_function_call(vcpu);
             FirmwareCallResult::Handled
         }
         PSCI_FN_CPU_ON | PSCI_FN64_CPU_ON => {
             // Multi-vCPU not yet supported
             let _ = vcpu.set_reg(reg::X0, PSCI_RET_NOT_SUPPORTED);
-            finish_smccc_function_call(vcpu);
             FirmwareCallResult::Handled
         }
         PSCI_FN_SYSTEM_OFF | PSCI_FN64_SYSTEM_OFF => FirmwareCallResult::SystemOff,
@@ -493,7 +472,6 @@ pub fn handle_firmware_call_in_kernel(vcpu: &dyn VcpuObject) -> FirmwareCallResu
         _ => {
             // Unknown PSCI / SMCCC function — return NOT_SUPPORTED
             let _ = vcpu.set_reg(reg::X0, SMCCC_RET_NOT_SUPPORTED);
-            finish_smccc_function_call(vcpu);
             FirmwareCallResult::Handled
         }
     }
@@ -512,16 +490,16 @@ pub fn write_firmware_exit(kvm_run: &mut KvmRun, exit: &VmExit, vcpu: &dyn VcpuO
             PSCI_FN_SYSTEM_OFF | PSCI_FN64_SYSTEM_OFF => {
                 kvm_run.exit_reason = KVM_EXIT_SYSTEM_EVENT;
                 let sys_event = unsafe { &mut kvm_run.exit_data.system_event };
-                // KVM_SYSTEM_EVENT_SHUTDOWN = 0
-                sys_event.event_type = 0;
+                // Linux UAPI: KVM_SYSTEM_EVENT_SHUTDOWN = 1.
+                sys_event.event_type = 1;
                 sys_event.ndata = 0;
                 sys_event.data = [0u64; 16];
             }
             PSCI_FN_SYSTEM_RESET | PSCI_FN64_SYSTEM_RESET => {
                 kvm_run.exit_reason = KVM_EXIT_SYSTEM_EVENT;
                 let sys_event = unsafe { &mut kvm_run.exit_data.system_event };
-                // KVM_SYSTEM_EVENT_RESET = 1
-                sys_event.event_type = 1;
+                // Linux UAPI: KVM_SYSTEM_EVENT_RESET = 2.
+                sys_event.event_type = 2;
                 sys_event.ndata = 0;
                 sys_event.data = [0u64; 16];
             }

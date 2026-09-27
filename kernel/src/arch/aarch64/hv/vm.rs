@@ -62,14 +62,40 @@ fn stage2_page_size(level: usize) -> u64 {
     1u64 << (12 + 9 * level)
 }
 
+fn sgi1r_targets_vcpu(value: u64, source: VcpuId, target: VcpuId) -> bool {
+    if value & (1 << 40) != 0 {
+        return source != target;
+    }
+    // The current virtual topology uses Aff0 = vCPU ID, Aff1..3 = 0.
+    let affinity = ((value >> 16) & 0xff) | ((value >> 32) & 0xff) | ((value >> 48) & 0xff);
+    let range = (value >> 44) & 0xf;
+    affinity == 0
+        && target < 256
+        && u64::from(target / 16) == range
+        && value & (1 << (target % 16)) != 0
+}
+
 #[cfg(test)]
 mod tests {
-    use super::cycles_to_timeout_ns;
+    use super::{cycles_to_timeout_ns, sgi1r_targets_vcpu};
 
     #[test_case]
     fn guest_timer_timeout_saturates() {
         assert_eq!(cycles_to_timeout_ns(1, 1), 1_000_000_000);
         assert_eq!(cycles_to_timeout_ns(u64::MAX, 1), u64::MAX);
+    }
+
+    #[test_case]
+    fn guest_sgi_targets_and_broadcast() {
+        assert!(sgi1r_targets_vcpu((5 << 24) | 1, 0, 0));
+        assert!(!sgi1r_targets_vcpu((5 << 24) | 1, 0, 1));
+        assert!(!sgi1r_targets_vcpu((1 << 16) | 1, 0, 0));
+        assert!(!sgi1r_targets_vcpu((1 << 32) | 1, 0, 0));
+        assert!(!sgi1r_targets_vcpu((1 << 48) | 1, 0, 0));
+        assert!(sgi1r_targets_vcpu((1 << 44) | 1, 0, 16));
+        assert!(!sgi1r_targets_vcpu((1 << 44) | 1, 0, 0));
+        assert!(!sgi1r_targets_vcpu(1 << 40, 0, 0));
+        assert!(sgi1r_targets_vcpu(1 << 40, 0, 1));
     }
 }
 
@@ -1002,6 +1028,23 @@ impl Aarch64VmObject {
             .iter()
             .find(|v| v.id() == vcpu_id)
             .cloned()
+    }
+
+    pub fn send_sgi1r(&self, source: VcpuId, value: u64) {
+        let interrupt = ((value >> 24) & 0xf) as u32;
+        let targets: Vec<_> = self
+            .state
+            .lock()
+            .vcpus
+            .iter()
+            .filter(|vcpu| sgi1r_targets_vcpu(value, source, vcpu.id()))
+            .cloned()
+            .collect();
+        // Queue through the existing edge IRQ path, retaining pending SGIs if
+        // all list registers are occupied. Never execute the host SGI register.
+        for target in targets {
+            target.trigger_irq(interrupt);
+        }
     }
 
     fn set_memory_region_impl(
