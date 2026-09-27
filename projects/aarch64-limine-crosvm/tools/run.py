@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Run an AArch64 crosvm guest under Scarlet in an isolated QEMU/TCG instance."""
+"""Run an AArch64 crosvm guest under Scarlet in an isolated QEMU instance."""
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -26,11 +27,14 @@ def main():
     parser.add_argument("--staging", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=120)
+    parser.add_argument("--accel", choices=("tcg", "hvf"), default=os.environ.get("SCARLET_QEMU_ACCEL", "tcg"))
     parser.add_argument("--success-marker", default="SCARLET_CROSVM_GUEST_OK",
                         help="exact guest serial line required for PASS")
     parser.add_argument("--gdb-socket", type=Path, help="optional private Unix GDB socket")
     parser.add_argument("--prepare-only", action="store_true", help="write images and commands without starting QEMU")
     args = parser.parse_args()
+    if args.accel not in ("tcg", "hvf"):
+        parser.error("SCARLET_QEMU_ACCEL must be tcg or hvf for this project")
     if args.timeout <= 0:
         parser.error("timeout must be positive")
     if not args.success_marker or any(c in args.success_marker for c in "\r\n"):
@@ -49,8 +53,13 @@ def main():
             parser.error(f"missing input: {path}")
     output.mkdir(parents=True, exist_ok=True)
     (output / "result.json").write_text('{"result":"PREPARING"}\n')
-    code = smoke.firmware(("SCARLET_EFI_CODE_ARM64_EL2", "SCARLET_EFI_CODE_ARM64"))
-    variables = smoke.firmware(("SCARLET_EFI_VARS_ARM64_EL2", "SCARLET_EFI_VARS_ARM64"))
+    code_names = ("SCARLET_EFI_CODE_ARM64_EL2", "SCARLET_EFI_CODE_ARM64")
+    vars_names = ("SCARLET_EFI_VARS_ARM64_EL2", "SCARLET_EFI_VARS_ARM64")
+    if args.accel == "hvf":
+        code_names = ("SCARLET_EFI_CODE_ARM64_HVF", *code_names)
+        vars_names = ("SCARLET_EFI_VARS_ARM64_HVF", *vars_names)
+    code = smoke.firmware(code_names)
+    variables = smoke.firmware(vars_names)
     build = None
     if args.boot_image:
         image, rootfs = args.boot_image.resolve(), args.rootfs_image.resolve()
@@ -85,7 +94,7 @@ def main():
     shutil.copyfile(variables, runtime_vars)
     runtime_vars.chmod(0o600)
     command = ["qemu-system-aarch64", "-machine", "virt,gic-version=3,acpi=off,virtualization=on",
-               "-cpu", "max", "-m", "2G", "-smp", "1", "-accel", "tcg", "-no-reboot",
+               "-cpu", "host" if args.accel == "hvf" else "max", "-m", "2G", "-smp", "1", "-accel", args.accel, "-no-reboot",
                "-display", "none", "-monitor", "none", "-serial", "stdio",
                "-drive", f"if=pflash,format=raw,unit=0,file={smoke.qemu_filename(code)},readonly=on",
                "-drive", f"if=pflash,format=raw,unit=1,file={smoke.qemu_filename(runtime_vars)}",
