@@ -242,7 +242,7 @@
           };
 
           qemu = pkgs.qemu.overrideAttrs (_finalAttrs: _prevAttrs: {
-            version = "11.0.91-scarlet";
+            version = "11.1.0-scarlet";
             src = qemu-scarlet;
             configureFlags = (_prevAttrs.configureFlags or [ ]) ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
               "--enable-cocoa"
