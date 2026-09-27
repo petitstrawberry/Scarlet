@@ -1,0 +1,44 @@
+schema_version = 2
+
+[project]
+name = "scarlet-aarch64-limine-crosvm"
+
+[bsp]
+path = "bsp"
+package = "scarlet"
+
+[bsp.kernel]
+source = { path = "../../kernel" }
+features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
+
+[images.initramfs]
+format = "newc"
+output = ".scarlet/images/initramfs.cpio"
+
+[[images.initramfs.layers]]
+kind = "copy"
+source = ".scarlet/active/boot"
+to = "/"
+
+[images.rootfs]
+format = "ext2"
+output = ".scarlet/images/rootfs.ext2"
+
+[[images.rootfs.layers]]
+kind = "copy"
+source = ".scarlet/active/staging"
+to = "/"
+
+[images.boot]
+format = "limine-uefi"
+output = ".scarlet/images/boot.img"
+cmdline = "console=ttyAMA0 init=/init"
+deps = ["initramfs"]
+
+[[images.boot.layers]]
+kind = "image"
+source = "initramfs"
+to = "/boot/initramfs"
+
+[runner]
+command = "tools/run_aarch64.sh"
