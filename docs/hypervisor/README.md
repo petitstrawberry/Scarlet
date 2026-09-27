@@ -98,6 +98,7 @@ loop {
 
 - [Type-2 Hypervisor Design](type2-design.md) - Architecture design
 - [Implementation Status](status.md) - Current implementation status
+- [Virtual Interrupt Events](irq-events.md) - Native counters, resampling, and KVM IRQFD
 
 ## Code Locations
 

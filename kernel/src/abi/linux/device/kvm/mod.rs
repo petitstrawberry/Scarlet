@@ -17,11 +17,12 @@ use crate::abi::linux::generic::LinuxAbi;
 use crate::device::manager::DeviceManager;
 use crate::device::{Device, DeviceType};
 use crate::fs::{FileMetadata, FilePermission, FileType};
+use crate::hypervisor::irq::{IrqRoute, VmInterruptTarget};
 use crate::hypervisor::memory::MemorySlotFlags;
 use crate::hypervisor::types::InterruptType;
 use crate::hypervisor::vm::VmObject;
 use crate::hypervisor::{VcpuObject, VmRef};
-use crate::ipc::counter::{CounterObject, CounterWriteListener};
+use crate::ipc::counter::CounterObject;
 use crate::object::KernelObject;
 use crate::object::capability::file::{FileObject, SeekFrom};
 use crate::object::capability::selectable::{ReadyInterest, SelectWaitOutcome, Selectable};
@@ -204,17 +205,52 @@ struct KvmIrqFd {
     pad: [u8; 16],
 }
 
-struct KvmIrqFdListener {
-    vm: VmRef,
-    vcpu_irq: u32,
+fn irqfd_route(gsi: u32) -> Result<IrqRoute, ()> {
+    #[cfg(target_arch = "aarch64")]
+    let interrupt = gsi.checked_add(32).filter(|irq| *irq < 256).ok_or(())?;
+    #[cfg(target_arch = "riscv64")]
+    let interrupt = arch::irqfd_route_to_vcpu_irq(gsi);
+    Ok(IrqRoute { vcpu: 0, interrupt })
 }
 
-impl CounterWriteListener for KvmIrqFdListener {
-    fn on_counter_write(&self, _value: u64) {
-        if let Some(vcpu) = self.vm.get_vcpu(0) {
-            vcpu.trigger_irq(self.vcpu_irq);
-        }
+fn configure_irqfd(vm: &VmRef, abi: &LinuxAbi, irqfd: &KvmIrqFd) -> Result<(), ()> {
+    const DEASSIGN: u32 = 1;
+    const RESAMPLE: u32 = 2;
+    if irqfd.flags & !(DEASSIGN | RESAMPLE) != 0 {
+        return Err(());
     }
+    let route = irqfd_route(irqfd.gsi)?;
+    let task = mytask().ok_or(())?;
+    let counter = |fd: u32| -> Result<Arc<dyn CounterObject>, ()> {
+        let handle = abi.get_handle(fd as usize).ok_or(())?;
+        match task.handle_table.get_arc_clone(handle).ok_or(())? {
+            KernelObject::Counter(counter) => Ok(counter),
+            _ => Err(()),
+        }
+    };
+    let trigger = counter(irqfd.fd)?;
+    if irqfd.flags & DEASSIGN != 0 {
+        // Linux identifies removal by the trigger eventfd and GSI, not by
+        // resamplefd (which may already have been closed).
+        vm.irq_events().unbind(route, trigger.as_ref());
+        return Ok(());
+    }
+    let resample = if irqfd.flags & RESAMPLE != 0 {
+        if !cfg!(target_arch = "aarch64") {
+            return Err(());
+        }
+        Some(counter(irqfd.resamplefd)?)
+    } else {
+        None
+    };
+    vm.irq_events()
+        .bind(
+            route,
+            Arc::new(VmInterruptTarget(Arc::downgrade(vm))),
+            trigger,
+            resample,
+        )
+        .map_err(|_| ())
 }
 
 #[repr(C)]
@@ -619,6 +655,7 @@ pub fn handle_system_ioctl(
             const KVM_CAP_ONE_REG: usize = 70;
             const KVM_CAP_MAX_VCPUS: usize = 66;
             const KVM_CAP_DEVICE_CTRL: usize = 89;
+            const KVM_CAP_IRQFD_RESAMPLE: usize = 82;
             let result = match arg {
                 KVM_CAP_IRQCHIP => Ok(Some(1)),
                 KVM_CAP_USER_MEMORY => Ok(Some(1)),
@@ -628,6 +665,7 @@ pub fn handle_system_ioctl(
                 KVM_CAP_MAX_VCPUS => Ok(Some(1)),
                 KVM_CAP_DEVICE_CTRL => Ok(Some(1)),
                 KVM_CAP_IRQFD => Ok(Some(1)),
+                KVM_CAP_IRQFD_RESAMPLE => Ok(Some(usize::from(cfg!(target_arch = "aarch64")))),
                 KVM_CAP_IOEVENTFD => Ok(Some(1)),
                 _ => match arch::check_extension(arg) {
                     Some(val) => Ok(Some(val)),
@@ -655,6 +693,7 @@ pub fn handle_vm_ioctl(
     abi: &mut LinuxAbi,
 ) -> Result<Option<usize>, ()> {
     match request {
+        KVM_CHECK_EXTENSION => handle_system_ioctl(request, arg, abi),
         KVM_CREATE_VCPU => {
             let vcpu_id = arg as u32;
             // crate::println!("[KVM] CREATE_VCPU(id={})", vcpu_id);
@@ -737,44 +776,13 @@ pub fn handle_vm_ioctl(
         KVM_REGISTER_COALESCED_MMIO | KVM_UNREGISTER_COALESCED_MMIO => Ok(Some(0)),
 
         KVM_IRQFD => {
-            const KVM_IRQFD_FLAG_DEASSIGN: u32 = 1 << 0;
-
-            if arg == 0 {
-                return Err(());
-            }
-
             let task = mytask().ok_or(())?;
-            let kva = task.vm_manager.translate_to_kva(arg).ok_or(())?;
-            // SAFETY: caller guarantees arg points to a valid KvmIrqFd.
-            let irqfd = unsafe { &*(kva as *const KvmIrqFd) };
-            if irqfd.flags & !KVM_IRQFD_FLAG_DEASSIGN != 0 {
-                crate::println!(
-                    "[KVM] IRQFD: unsupported flags={:#x} fd={} gsi={}",
-                    irqfd.flags,
-                    irqfd.fd,
-                    irqfd.gsi
-                );
-                return Err(());
-            }
-            // crate::println!(
-            //     "[KVM] IRQFD: fd={} gsi={} flags={:#x}",
-            //     irqfd.fd,
-            //     irqfd.gsi,
-            //     irqfd.flags
-            // );
-            if irqfd.flags & KVM_IRQFD_FLAG_DEASSIGN != 0 {
-                return Ok(Some(0));
-            }
-
-            let handle = abi.get_handle(irqfd.fd as usize).ok_or(())?;
-            let object = task.handle_table.get(handle).ok_or(())?;
-            let counter = object.as_counter().ok_or(())?;
-            let irqfd_route = irqfd.gsi;
-            let listener = Arc::new(KvmIrqFdListener {
-                vm: Arc::clone(vm),
-                vcpu_irq: arch::irqfd_route_to_vcpu_irq(irqfd_route),
-            });
-            counter.add_write_listener(listener);
+            let mut bytes = [0u8; core::mem::size_of::<KvmIrqFd>()];
+            crate::library::std::usercopy::copy_from_user(&task, arg, &mut bytes)
+                .map_err(|_| ())?;
+            // SAFETY: all bit patterns are valid for this integer-only C record.
+            let irqfd = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<KvmIrqFd>()) };
+            configure_irqfd(vm, abi, &irqfd)?;
             Ok(Some(0))
         }
 
@@ -1428,3 +1436,90 @@ fn register_kvm_device() {
 }
 
 crate::driver_initcall!(register_kvm_device);
+
+#[cfg(test)]
+mod irqfd_tests {
+    use super::*;
+    #[cfg(target_arch = "aarch64")]
+    use crate::ipc::counter::Counter;
+    #[cfg(target_arch = "aarch64")]
+    use crate::task::{Task, TaskType, clear_mock_current_task, set_mock_current_task};
+
+    #[test_case]
+    fn irqfd_resample_capability_is_architecture_specific() {
+        let mut abi = LinuxAbi::default();
+        assert_eq!(
+            handle_system_ioctl(KVM_CHECK_EXTENSION, 82, &mut abi),
+            Ok(Some(usize::from(cfg!(target_arch = "aarch64"))))
+        );
+        #[cfg(target_arch = "aarch64")]
+        {
+            assert_eq!(irqfd_route(0).unwrap().interrupt, 32);
+            assert_eq!(irqfd_route(223).unwrap().interrupt, 255);
+            assert!(irqfd_route(224).is_err());
+            assert!(irqfd_route(u32::MAX).is_err());
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test_case]
+    fn irqfd_resample_registration_validation_and_real_deassign() {
+        let task = Arc::new(Task::new("irqfd-test".into(), 1, TaskType::Kernel));
+        set_mock_current_task(task.clone());
+        let vm = Arc::new(crate::arch::hv::Vm::new(0, task.vm_manager.clone()).unwrap());
+        let mut abi = LinuxAbi::default();
+        let trigger = Arc::new(Counter::new(0, false));
+        let resample = Arc::new(Counter::new(0, false));
+        let trigger_handle = task
+            .handle_table
+            .insert(KernelObject::from_counter(trigger.clone()))
+            .unwrap();
+        let resample_handle = task
+            .handle_table
+            .insert(KernelObject::from_counter(resample.clone()))
+            .unwrap();
+        let fd = abi.allocate_fd(trigger_handle).unwrap() as u32;
+        let resamplefd = abi.allocate_fd(resample_handle).unwrap() as u32;
+        let mut request = KvmIrqFd {
+            fd,
+            gsi: 8,
+            flags: 2,
+            resamplefd,
+            pad: [0; 16],
+        };
+        assert!(configure_irqfd(&vm, &abi, &request).is_ok());
+        assert!(configure_irqfd(&vm, &abi, &request).is_err());
+        trigger.write(&1u64.to_ne_bytes()).unwrap();
+        let route = irqfd_route(8).unwrap();
+        let generation = vm.irq_events().delivery_generation(route);
+        assert_ne!(generation, 0);
+        vm.irq_events().complete(route, generation);
+        assert_eq!(resample.take_notifications(), 1);
+        assert_eq!(
+            handle_vm_ioctl(KVM_CHECK_EXTENSION, 82, &vm, &mut abi),
+            Ok(Some(1))
+        );
+
+        // DEASSIGN accepts the RESAMPLE bit but ignores the resample descriptor.
+        request.flags = 3;
+        request.resamplefd = u32::MAX;
+        assert!(configure_irqfd(&vm, &abi, &request).is_ok());
+        trigger.write(&1u64.to_ne_bytes()).unwrap();
+        assert_eq!(trigger.take_notifications(), 1);
+        assert_eq!(vm.irq_events().delivery_generation(route), 0);
+        assert_eq!(resample.take_notifications(), 0);
+        request.flags = 2;
+        assert!(configure_irqfd(&vm, &abi, &request).is_err());
+        request.resamplefd = fd;
+        assert!(configure_irqfd(&vm, &abi, &request).is_err());
+        request.resamplefd = resamplefd;
+        request.flags = 4;
+        assert!(configure_irqfd(&vm, &abi, &request).is_err());
+        request.flags = 2;
+        assert!(configure_irqfd(&vm, &abi, &request).is_ok());
+        drop(vm);
+        trigger.write(&1u64.to_ne_bytes()).unwrap();
+        assert_eq!(trigger.take_notifications(), 1);
+        clear_mock_current_task();
+    }
+}

@@ -362,6 +362,7 @@ pub struct Riscv64VmObject {
     /// a reference without locking.
     owner_mm: VirtualMemoryManager,
     state: IrqSpinLock<VmInternalState>,
+    irq_events: Arc<crate::hypervisor::irq::InterruptEvents>,
 }
 
 impl Drop for Riscv64VmObject {
@@ -379,6 +380,7 @@ impl Riscv64VmObject {
         Ok(Self {
             id,
             owner_mm,
+            irq_events: crate::hypervisor::irq::InterruptEvents::new(),
             state: IrqSpinLock::new(VmInternalState {
                 vcpus: Vec::new(),
                 memory_slots: MemorySlotManager::new(),
@@ -478,6 +480,9 @@ impl Riscv64VmObject {
 }
 
 impl VmObject for Riscv64VmObject {
+    fn irq_events(&self) -> &Arc<crate::hypervisor::irq::InterruptEvents> {
+        &self.irq_events
+    }
     fn id(&self) -> VmId {
         self.id
     }
@@ -497,6 +502,7 @@ impl VmObject for Riscv64VmObject {
         }
         let vcpu = Riscv64VcpuObject::new(vcpu_id, self);
         self.state.lock().vcpus.push(vcpu.clone());
+        self.irq_events.replay_levels(vcpu_id);
         Ok(vcpu)
     }
 
@@ -521,6 +527,10 @@ impl VmObject for Riscv64VmObject {
 impl ControlOps for Riscv64VmObject {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         match command {
+            scarlet_abi::hypervisor::VM_CREATE_IRQ_EVENT
+            | scarlet_abi::hypervisor::VM_REMOVE_IRQ_EVENT => {
+                crate::hypervisor::irq::native_control(self.id, command, arg)
+            }
             vm_ctl::SET_MEMORY_REGION => {
                 let target_ptr = self
                     .owner_mm
@@ -552,6 +562,14 @@ impl ControlOps for Riscv64VmObject {
 
     fn supported_control_commands(&self) -> Vec<(u32, &'static str)> {
         alloc::vec![
+            (
+                scarlet_abi::hypervisor::VM_CREATE_IRQ_EVENT,
+                "Create virtual interrupt event"
+            ),
+            (
+                scarlet_abi::hypervisor::VM_REMOVE_IRQ_EVENT,
+                "Disconnect virtual interrupt event"
+            ),
             (vm_ctl::SET_MEMORY_REGION, "Set memory region"),
             (vm_ctl::GET_VCPU_COUNT, "Get vCPU count"),
             (vm_ctl::SET_FAST_PATH, "Set fast path flags"),

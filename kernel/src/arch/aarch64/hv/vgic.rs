@@ -31,15 +31,19 @@ pub struct VgicState {
     pub hcr: u64,
     pub vmcr: u64,
     pub lr_shadow: [u64; 16],
+    pub resample_generation: [u64; 16],
 }
 
 impl VgicState {
     pub fn new(num_lrs: usize) -> Self {
         Self {
             num_lrs,
-            hcr: 0,
-            vmcr: 0,
+            // Start with initialized control state so the first entry restores
+            // pending shadow LRs instead of clearing them during hardware init.
+            hcr: guest_hcr(),
+            vmcr: guest_vmcr(),
             lr_shadow: [0; 16],
+            resample_generation: [0; 16],
         }
     }
 }
@@ -288,10 +292,21 @@ pub fn inject_shadow_virq(state: &mut VgicState, vintid: u32, priority: u8, grou
         lr_val |= ICH_LR_GROUP;
     }
 
-    for lr in state.lr_shadow.iter_mut().take(state.num_lrs.min(16)) {
+    for (index, lr) in state
+        .lr_shadow
+        .iter_mut()
+        .take(state.num_lrs.min(16))
+        .enumerate()
+    {
         if (*lr & ICH_LR_VINTID_MASK) == (vintid as u64)
             && (*lr & (3u64 << 62)) != ICH_LR_STATE_INVALID
         {
+            // A detached source may still have an active delivery. Keep its
+            // EOI bit and generation until deactivation; a newly bound source
+            // must wait rather than overwrite that delivery's completion token.
+            if state.resample_generation[index] != 0 {
+                return false;
+            }
             let old_state = *lr & (3u64 << 62);
             *lr = lr_val;
             if old_state == ICH_LR_STATE_ACTIVE || old_state == ICH_LR_STATE_PENDING_ACTIVE {
@@ -327,7 +342,12 @@ pub fn clear_virq(num_lrs: usize, vintid: u32) -> bool {
 }
 
 pub fn clear_shadow_virq(state: &mut VgicState, vintid: u32) -> bool {
-    for lr in state.lr_shadow.iter_mut().take(state.num_lrs.min(16)) {
+    for (index, lr) in state
+        .lr_shadow
+        .iter_mut()
+        .take(state.num_lrs.min(16))
+        .enumerate()
+    {
         if (*lr & ICH_LR_VINTID_MASK) == (vintid as u64) {
             let old_state = *lr & (3u64 << 62);
             match old_state {
@@ -336,12 +356,48 @@ pub fn clear_shadow_virq(state: &mut VgicState, vintid: u32) -> bool {
                 }
                 _ => {
                     *lr = 0;
+                    state.resample_generation[index] = 0;
                 }
             }
             return true;
         }
     }
     false
+}
+
+/// Request a maintenance interrupt when this software LR is deactivated.
+pub fn arm_resample(state: &mut VgicState, vintid: u32, generation: u64) {
+    if generation == 0 {
+        return;
+    }
+    for (index, lr) in state
+        .lr_shadow
+        .iter_mut()
+        .take(state.num_lrs.min(16))
+        .enumerate()
+    {
+        if *lr & ICH_LR_VINTID_MASK == u64::from(vintid) && *lr & (3u64 << 62) != 0 {
+            *lr |= ICH_LR_EOI;
+            state.resample_generation[index] = generation;
+            return;
+        }
+    }
+}
+
+/// Fold guest deactivation exactly once. An active LR (EOImode=1 before DIR)
+/// and a pending LR are not completions. Host cancellation clears the token.
+pub fn take_resample_completions(state: &mut VgicState) -> [(u32, u64); 16] {
+    let mut completed = [(0, 0); 16];
+    for index in 0..state.num_lrs.min(16) {
+        let lr = state.lr_shadow[index];
+        let generation = state.resample_generation[index];
+        if generation != 0 && lr & (ICH_LR_HW | (3u64 << 62)) == 0 && lr & ICH_LR_EOI != 0 {
+            completed[index] = ((lr & ICH_LR_VINTID_MASK) as u32, generation);
+            state.lr_shadow[index] = 0;
+            state.resample_generation[index] = 0;
+        }
+    }
+    completed
 }
 
 pub fn is_virq_pending(num_lrs: usize, vintid: u32) -> bool {
@@ -448,4 +504,60 @@ pub fn save_guest_state(state: &mut VgicState) {
     state.hcr = read_hcr();
     state.vmcr = read_vmcr();
     save_lrs(state.num_lrs, &mut state.lr_shadow);
+}
+
+#[cfg(test)]
+mod resample_tests {
+    use super::*;
+
+    #[test_case]
+    fn resample_requires_deactivation_and_is_consumed_once() {
+        let mut state = VgicState::new(1);
+        assert!(inject_shadow_virq(&mut state, 40, 0x80, true));
+        arm_resample(&mut state, 40, 7);
+        assert_ne!(state.lr_shadow[0] & ICH_LR_EOI, 0);
+        assert_eq!(take_resample_completions(&mut state), [(0, 0); 16]);
+        state.lr_shadow[0] = (state.lr_shadow[0] & !(3 << 62)) | ICH_LR_STATE_ACTIVE;
+        // EOImode=1's priority drop alone does not deactivate the IRQ.
+        assert_eq!(take_resample_completions(&mut state), [(0, 0); 16]);
+        state.lr_shadow[0] &= !(3 << 62);
+        assert_eq!(take_resample_completions(&mut state)[0], (40, 7));
+        assert_eq!(take_resample_completions(&mut state), [(0, 0); 16]);
+        assert_eq!(state.lr_shadow[0], 0);
+    }
+
+    #[test_case]
+    fn host_cancel_and_lr_exhaustion_do_not_report_guest_completion() {
+        let mut state = VgicState::new(1);
+        assert!(inject_shadow_virq(&mut state, 40, 0x80, true));
+        arm_resample(&mut state, 40, 3);
+        assert!(!inject_shadow_virq(&mut state, 41, 0x80, true));
+        arm_resample(&mut state, 41, 4);
+        assert_eq!(state.resample_generation[0], 3);
+        assert!(clear_shadow_virq(&mut state, 40));
+        assert_eq!(take_resample_completions(&mut state), [(0, 0); 16]);
+        assert_eq!(state.resample_generation[0], 0);
+        assert!(inject_shadow_virq(&mut state, 41, 0x80, true));
+        arm_resample(&mut state, 41, 4);
+        state.lr_shadow[0] &= !(3 << 62);
+        assert_eq!(take_resample_completions(&mut state)[0], (41, 4));
+    }
+
+    #[test_case]
+    fn rebind_waits_for_old_active_delivery_before_reusing_its_lr() {
+        let mut state = VgicState::new(1);
+        assert!(inject_shadow_virq(&mut state, 40, 0x80, true));
+        arm_resample(&mut state, 40, 3);
+        state.lr_shadow[0] = (state.lr_shadow[0] & !(3 << 62)) | ICH_LR_STATE_ACTIVE;
+        assert!(clear_shadow_virq(&mut state, 40));
+        assert!(!inject_shadow_virq(&mut state, 40, 0x80, true));
+        assert_eq!(state.resample_generation[0], 3);
+        assert_ne!(state.lr_shadow[0] & ICH_LR_EOI, 0);
+        state.lr_shadow[0] &= !(3 << 62);
+        assert_eq!(take_resample_completions(&mut state)[0], (40, 3));
+        assert!(inject_shadow_virq(&mut state, 40, 0x80, true));
+        arm_resample(&mut state, 40, 4);
+        state.lr_shadow[0] &= !(3 << 62);
+        assert_eq!(take_resample_completions(&mut state)[0], (40, 4));
+    }
 }

@@ -3,6 +3,7 @@
 pub mod arch;
 pub mod types;
 
+pub use scarlet_abi::hypervisor::{IRQ_EVENT_NONBLOCK, IRQ_EVENT_RESAMPLE, VmIrqEvent};
 pub use types::{MmioInfo, VcpuExit, VcpuExitReason};
 
 use scarlet_sys::{Syscall, syscall2, syscall3};
@@ -25,6 +26,49 @@ pub fn vcpu_create(vm_handle: u32, vcpu_id: u32) -> Result<u32, ()> {
     } else {
         Ok(ret as u32)
     }
+}
+
+/// Create counter handles connected to a virtual interrupt. `interrupt` is a
+/// controller-local ID (AArch64 SPI INTID), independent of any Linux GSI.
+///
+/// On success the caller owns `trigger` and, in RESAMPLE mode, `resample`.
+/// Adopt them with `Handle::from_raw`, write a u64 to trigger, and read/select
+/// the resample counter to re-evaluate device state after guest deactivation.
+/// Disconnect with `remove_irq_event` before closing the trigger handle.
+pub fn create_irq_event(
+    vm_handle: u32,
+    vcpu: u32,
+    interrupt: u32,
+    flags: u32,
+) -> Result<VmIrqEvent, ()> {
+    let mut event = VmIrqEvent {
+        vcpu,
+        interrupt,
+        flags,
+        ..Default::default()
+    };
+    // SAFETY: event is an exclusive, initialized native input/output record.
+    unsafe {
+        vm_control(
+            vm_handle,
+            scarlet_abi::hypervisor::VM_CREATE_IRQ_EVENT,
+            &mut event as *mut _ as usize,
+        )
+    }?;
+    Ok(event)
+}
+
+/// Disconnect the source; ownership of both counter handles stays with the caller.
+pub fn remove_irq_event(vm_handle: u32, event: &VmIrqEvent) -> Result<(), ()> {
+    // SAFETY: this command only reads the fixed native record.
+    unsafe {
+        vm_control(
+            vm_handle,
+            scarlet_abi::hypervisor::VM_REMOVE_IRQ_EVENT,
+            event as *const _ as usize,
+        )
+    }?;
+    Ok(())
 }
 
 pub fn vcpu_run(vcpu_handle: u32, exit: &mut VcpuExit) -> Result<(), ()> {

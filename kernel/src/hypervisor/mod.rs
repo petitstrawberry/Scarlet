@@ -52,6 +52,7 @@
 
 extern crate alloc;
 
+pub mod irq;
 pub mod memory;
 pub mod mmio;
 pub mod syscall;

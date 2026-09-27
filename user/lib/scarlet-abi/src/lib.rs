@@ -9,6 +9,7 @@
 pub mod data_model;
 pub mod environment;
 pub mod fs;
+pub mod hypervisor;
 pub mod native_scalar;
 pub mod network;
 pub mod power_supply;

@@ -33,6 +33,8 @@ const IRQ_BIT_TIMER: u64 = 1 << 1;
 const IRQ_BIT_EXTERNAL: u64 = 1 << 2;
 const IRQ_BIT_EXTERNAL_LINE: u64 = 1 << 3;
 const GUEST_TIMER_PPI: u32 = 27;
+// Maintenance PPI of the GICv3 platform used by Scarlet's AArch64 VMM.
+const VGIC_MAINTENANCE_PPI: u32 = 25;
 const GUEST_IRQ_PRIORITY: u8 = 0x80;
 const TIMER_CTL_ENABLE: u64 = 1 << 0;
 const TIMER_CTL_IMASK: u64 = 1 << 1;
@@ -138,6 +140,18 @@ fn enable_guest_timer_ppi_for_current_cpu() {
 
     match crate::arch::interrupt::enable_external_interrupt_line(GUEST_TIMER_PPI) {
         Ok(()) => {
+            // Software LRs with EOI set raise this PPI when deactivated. The
+            // world-switch exit saves their state and clears the live LRs
+            // before the normal host interrupt dispatcher acknowledges it.
+            if let Err(error) =
+                crate::arch::interrupt::enable_external_interrupt_line(VGIC_MAINTENANCE_PPI)
+            {
+                crate::println!(
+                    "[AARCH64-HV] failed to enable VGIC maintenance PPI: {}",
+                    error
+                );
+                return;
+            }
             GUEST_TIMER_PPI_ENABLED_CPUS.fetch_or(cpu_mask, Ordering::Release);
         }
         Err(e) => {
@@ -349,7 +363,24 @@ impl Aarch64VcpuObject {
             .fetch_or(IRQ_BIT_TIMER, Ordering::Release);
     }
 
-    fn sync_interrupts(&self, vgic: &VgicState) {
+    fn sync_interrupts(&self, vgic: &mut VgicState) {
+        if let Some(vm) = self.vm.upgrade() {
+            for (interrupt, generation) in super::vgic::take_resample_completions(vgic) {
+                if generation != 0 {
+                    let index = interrupt as usize / 64;
+                    if index < EXTERNAL_IRQ_BITMAP_WORDS {
+                        self.external_irqs_injected.lock()[index] &= !(1u64 << (interrupt % 64));
+                    }
+                    vm.irq_events.complete(
+                        crate::hypervisor::irq::IrqRoute {
+                            vcpu: self.id,
+                            interrupt,
+                        },
+                        generation,
+                    );
+                }
+            }
+        }
         let last_irq_state = self.last_irq_state.load(Ordering::Acquire);
         let timer_shadowed = last_irq_state & IRQ_BIT_TIMER;
         if timer_shadowed != 0 {
@@ -473,8 +504,29 @@ impl Aarch64VcpuObject {
             while bits != 0 {
                 let bit = bits.trailing_zeros() as usize;
                 let virq = (word_index * 64 + bit) as u32;
-                if super::vgic::inject_shadow_virq(vgic, virq, GUEST_IRQ_PRIORITY, true) {
-                    self.external_irqs_injected.lock()[word_index] |= 1u64 << bit;
+                if let Some(vm) = self.vm.upgrade() {
+                    vm.irq_events.with_delivery(
+                        crate::hypervisor::irq::IrqRoute {
+                            vcpu: self.id,
+                            interrupt: virq,
+                        },
+                        |generation| {
+                            // A disconnect may have invalidated our earlier
+                            // snapshot. Publish LR, token and injected bit
+                            // together before another registry update runs.
+                            if self.external_irqs_pending.lock()[word_index] & (1u64 << bit) != 0
+                                && super::vgic::inject_shadow_virq(
+                                    vgic,
+                                    virq,
+                                    GUEST_IRQ_PRIORITY,
+                                    true,
+                                )
+                            {
+                                self.external_irqs_injected.lock()[word_index] |= 1u64 << bit;
+                                super::vgic::arm_resample(vgic, virq, generation);
+                            }
+                        },
+                    );
                 }
                 bits &= !(1u64 << bit);
             }
@@ -670,7 +722,7 @@ impl VcpuObject for Aarch64VcpuObject {
         {
             let vcpu_state = &mut *vcpu;
             self.update_virtual_timer_irq(&mut vcpu_state.guest);
-            self.sync_interrupts(&vcpu_state.vgic);
+            self.sync_interrupts(&mut vcpu_state.vgic);
             self.inject_pending_interrupts(&mut vcpu_state.vgic);
         }
 
@@ -686,6 +738,9 @@ impl VcpuObject for Aarch64VcpuObject {
             vcpu.guest.save_fpu();
             self.save_guest_vgic_state(&mut vcpu.vgic);
             self.restore_host_vgic_state();
+            // Fold completions before returning WFI to userspace, otherwise
+            // the device waiting on resample could never wake the guest again.
+            self.sync_interrupts(&mut vcpu.vgic);
             vcpu.guest.save(&guest_tf);
 
             match arch_guest_trap_handler(&mut guest_tf, &vm, &mut vcpu.guest) {
@@ -704,7 +759,7 @@ impl VcpuObject for Aarch64VcpuObject {
                     {
                         let vcpu_state = &mut *vcpu;
                         self.update_virtual_timer_irq(&mut vcpu_state.guest);
-                        self.sync_interrupts(&vcpu_state.vgic);
+                        self.sync_interrupts(&mut vcpu_state.vgic);
                         self.inject_pending_interrupts(&mut vcpu_state.vgic);
                         self.setup_for_guest(
                             &task,
@@ -741,6 +796,7 @@ pub struct Aarch64VmObject {
     id: VmId,
     owner_mm: VirtualMemoryManager,
     state: IrqSpinLock<VmInternalState>,
+    irq_events: Arc<crate::hypervisor::irq::InterruptEvents>,
 }
 
 impl Drop for Aarch64VmObject {
@@ -758,6 +814,7 @@ impl Aarch64VmObject {
         Ok(Self {
             id,
             owner_mm,
+            irq_events: crate::hypervisor::irq::InterruptEvents::new(),
             state: IrqSpinLock::new(VmInternalState {
                 vcpus: Vec::new(),
                 memory_slots: MemorySlotManager::new(),
@@ -966,6 +1023,9 @@ impl Aarch64VmObject {
 }
 
 impl VmObject for Aarch64VmObject {
+    fn irq_events(&self) -> &Arc<crate::hypervisor::irq::InterruptEvents> {
+        &self.irq_events
+    }
     fn id(&self) -> VmId {
         self.id
     }
@@ -985,6 +1045,7 @@ impl VmObject for Aarch64VmObject {
         }
         let vcpu = Aarch64VcpuObject::new(vcpu_id, self);
         self.state.lock().vcpus.push(vcpu.clone());
+        self.irq_events.replay_levels(vcpu_id);
         Ok(vcpu)
     }
 
@@ -1009,6 +1070,10 @@ impl VmObject for Aarch64VmObject {
 impl ControlOps for Aarch64VmObject {
     fn control(&self, command: u32, arg: usize) -> Result<i32, &'static str> {
         match command {
+            scarlet_abi::hypervisor::VM_CREATE_IRQ_EVENT
+            | scarlet_abi::hypervisor::VM_REMOVE_IRQ_EVENT => {
+                crate::hypervisor::irq::native_control(self.id, command, arg)
+            }
             vm_ctl::SET_MEMORY_REGION => {
                 let target_ptr = self
                     .owner_mm
@@ -1040,6 +1105,14 @@ impl ControlOps for Aarch64VmObject {
 
     fn supported_control_commands(&self) -> Vec<(u32, &'static str)> {
         alloc::vec![
+            (
+                scarlet_abi::hypervisor::VM_CREATE_IRQ_EVENT,
+                "Create virtual interrupt event"
+            ),
+            (
+                scarlet_abi::hypervisor::VM_REMOVE_IRQ_EVENT,
+                "Disconnect virtual interrupt event"
+            ),
             (vm_ctl::SET_MEMORY_REGION, "Set memory region"),
             (vm_ctl::GET_VCPU_COUNT, "Get vCPU count"),
             (vm_ctl::SET_FAST_PATH, "Set fast path flags"),

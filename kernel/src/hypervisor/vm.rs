@@ -53,6 +53,8 @@ pub struct ScarletVmMemoryRegion {
 /// time and use it to resolve guest memory mappings independently of the
 /// currently-running task.
 pub trait VmObject: ControlOps + Send + Sync {
+    fn irq_events(&self) -> &Arc<super::irq::InterruptEvents>;
+
     /// Returns the VM's unique identifier.
     fn id(&self) -> VmId;
 

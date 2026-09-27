@@ -14,6 +14,8 @@ This document tracks the implementation status of the Scarlet Hypervisor (SHV).
 | CSR/sysreg management | ✅ Implemented | ✅ Implemented |
 | Timer virtualization | ✅ Implemented | ✅ Implemented |
 | Interrupt injection | ⚠️ Partial | ⚠️ Partial |
+| Native IRQ events / IRQFD disconnect | ✅ Implemented | ✅ Implemented |
+| IRQFD resample | ❌ No guest completion path | ⚠️ Implemented; guest integration pending |
 | Linux `/dev/kvm` compatibility | ✅ Implemented | ✅ Implemented |
 
 ## RISC-V 64-bit (H-extension)
@@ -167,6 +169,10 @@ VGIC/device-model coverage, but it is no longer stub-only.
 | Nested virtualization | Very Low | |
 
 ## API Stability
+
+The [virtual interrupt event API](irq-events.md) defines Scarlet-native trigger
+and resample counters, with Linux `KVM_IRQFD` layered on the same implementation.
+Routing remains limited to the current single-vCPU paths.
 
 The hypervisor API is **experimental** and subject to change. Breaking changes may occur without notice until the API stabilizes.
 

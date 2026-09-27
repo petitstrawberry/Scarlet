@@ -9,7 +9,13 @@
 //! - write(8 bytes): Adds value to counter
 
 use crate::sync::IrqSpinLock;
-use alloc::{string::String, string::ToString, sync::Arc, vec::Vec};
+use alloc::{
+    string::String,
+    string::ToString,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::object::KernelObject;
 use crate::object::capability::selectable::{
@@ -22,6 +28,21 @@ use crate::sync::waker::{WaitResult, Waker};
 /// Observer notified when a counter is written.
 pub trait CounterWriteListener: Send + Sync {
     fn on_counter_write(&self, value: u64);
+}
+
+/// Detaches a write observer on drop. A callback already copied by a writer
+/// may finish; consumers must invalidate their connection before dropping it.
+pub struct CounterSubscription {
+    data: Weak<SharedCounterData>,
+    id: usize,
+}
+
+impl Drop for CounterSubscription {
+    fn drop(&mut self) {
+        if let Some(data) = self.data.upgrade() {
+            data.write_listeners.lock().retain(|(id, _)| *id != self.id);
+        }
+    }
 }
 
 /// Internal state of a counter
@@ -41,7 +62,8 @@ struct SharedCounterData {
     /// Waker for tasks waiting to write
     write_waker: Waker,
     /// Listeners notified after successful writes
-    write_listeners: IrqSpinLock<Vec<Arc<dyn CounterWriteListener>>>,
+    write_listeners: IrqSpinLock<Vec<(usize, Arc<dyn CounterWriteListener>)>>,
+    next_listener: AtomicUsize,
 }
 
 impl SharedCounterData {
@@ -54,6 +76,7 @@ impl SharedCounterData {
             read_waker: Waker::new_interruptible("counter_read"),
             write_waker: Waker::new_interruptible("counter_write"),
             write_listeners: IrqSpinLock::new(Vec::new()),
+            next_listener: AtomicUsize::new(1),
         })
     }
 }
@@ -230,7 +253,7 @@ impl Counter {
 
             if add_value != 0 {
                 let listeners = self.data.write_listeners.lock().clone();
-                for listener in listeners {
+                for (_, listener) in listeners {
                     listener.on_counter_write(add_value);
                 }
             }
@@ -240,8 +263,13 @@ impl Counter {
     }
 
     /// Add an observer notified after successful writes.
-    pub fn add_write_listener(&self, listener: Arc<dyn CounterWriteListener>) {
-        self.data.write_listeners.lock().push(listener);
+    pub fn subscribe_write(&self, listener: Arc<dyn CounterWriteListener>) -> CounterSubscription {
+        let id = self.data.next_listener.fetch_add(1, Ordering::Relaxed);
+        self.data.write_listeners.lock().push((id, listener));
+        CounterSubscription {
+            data: Arc::downgrade(&self.data),
+            id,
+        }
     }
 }
 
@@ -367,8 +395,14 @@ pub trait CounterObject: StreamOps + Selectable + CloneOps {
     /// Check if this is a semaphore mode counter
     fn is_semaphore(&self) -> bool;
 
-    /// Add an observer notified after successful writes.
-    fn add_write_listener(&self, listener: Arc<dyn CounterWriteListener>);
+    /// Stable identity shared by duplicated counter handles.
+    fn identity(&self) -> usize;
+    /// Consume queued notifications without blocking (including semaphore mode).
+    fn take_notifications(&self) -> u64;
+    /// Post one kernel notification without sleeping; saturation coalesces it.
+    fn notify(&self);
+    /// Observe notifications until the returned subscription is dropped.
+    fn subscribe_write(&self, listener: Arc<dyn CounterWriteListener>) -> CounterSubscription;
 }
 
 impl CounterObject for Counter {
@@ -376,8 +410,32 @@ impl CounterObject for Counter {
         self.data.state.lock().semaphore
     }
 
-    fn add_write_listener(&self, listener: Arc<dyn CounterWriteListener>) {
-        self.add_write_listener(listener);
+    fn identity(&self) -> usize {
+        Arc::as_ptr(&self.data) as usize
+    }
+
+    fn take_notifications(&self) -> u64 {
+        let value = core::mem::replace(&mut self.data.state.lock().counter, 0);
+        if value != 0 {
+            self.data.write_waker.wake_all();
+        }
+        value
+    }
+
+    fn notify(&self) {
+        {
+            let mut state = self.data.state.lock();
+            state.counter = state.counter.saturating_add(1).min(u64::MAX - 1);
+        }
+        self.data.read_waker.wake_all();
+        let listeners = self.data.write_listeners.lock().clone();
+        for (_, listener) in listeners {
+            listener.on_counter_write(1);
+        }
+    }
+
+    fn subscribe_write(&self, listener: Arc<dyn CounterWriteListener>) -> CounterSubscription {
+        self.subscribe_write(listener)
     }
 }
 
@@ -481,5 +539,30 @@ mod tests {
         ));
         assert_eq!(counter.write(&1u64.to_ne_bytes()).unwrap(), 8);
         assert_eq!(counter.data.state.lock().counter, u64::MAX - 1);
+    }
+
+    #[test_case]
+    fn kernel_notifications_coalesce_at_saturation_and_subscriptions_detach() {
+        struct Listener(AtomicUsize);
+        impl CounterWriteListener for Listener {
+            fn on_counter_write(&self, _: u64) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        // Keep blocking mode: a kernel notification must never wait for space.
+        let counter = Counter::new(0, true);
+        counter.write(&(u64::MAX - 1).to_ne_bytes()).unwrap();
+        let listener = Arc::new(Listener(AtomicUsize::new(0)));
+        let subscription = counter.subscribe_write(listener.clone());
+        counter.notify();
+        assert!(counter.current_ready(ReadyInterest::read()).read);
+        assert_eq!(counter.take_notifications(), u64::MAX - 1);
+        assert_eq!(counter.take_notifications(), 0);
+        assert_eq!(listener.0.load(Ordering::Relaxed), 1);
+        drop(subscription);
+        counter.notify();
+        counter.write(&1u64.to_ne_bytes()).unwrap();
+        assert_eq!(listener.0.load(Ordering::Relaxed), 1);
+        assert_eq!(counter.take_notifications(), 2);
     }
 }

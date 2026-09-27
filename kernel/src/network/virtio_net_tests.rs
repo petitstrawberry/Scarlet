@@ -62,9 +62,18 @@ const TEST_TIMEOUT_MS: u64 = 5000;
 
 /// Initialize test network interfaces
 ///
-/// Creates VirtIO-net devices at known MMIO addresses and registers
-/// them with the network interface manager.
+/// Each physical NIC and its DMA queues must be initialized only once. Reuse
+/// the fixture across tests instead of resetting live hardware and attempting
+/// to register the same interface names again.
 fn init_test_interfaces()
+-> Result<(Arc<dyn NetworkInterface>, Arc<dyn NetworkInterface>), &'static str> {
+    type Interfaces = (Arc<dyn NetworkInterface>, Arc<dyn NetworkInterface>);
+    static INTERFACES: crate::sync::Once<Result<Interfaces, &'static str>> =
+        crate::sync::Once::new();
+    INTERFACES.call_once(create_test_interfaces).clone()
+}
+
+fn create_test_interfaces()
 -> Result<(Arc<dyn NetworkInterface>, Arc<dyn NetworkInterface>), &'static str> {
     // Create VirtIO network interfaces at known MMIO addresses (ioremap physical to virtual)
     let net0_vaddr = crate::vm::ioremap(NET0_MMIO_ADDR, crate::environment::PAGE_SIZE)
@@ -86,6 +95,23 @@ fn init_test_interfaces()
     net1_interface.set_ip_address(net1_ip());
 
     Ok((net0_interface, net1_interface))
+}
+
+#[test_case]
+fn test_repeated_initialization_reuses_registered_interfaces() {
+    let first = init_test_interfaces().expect("initial interface setup");
+    let second = init_test_interfaces().expect("repeated interface setup");
+    assert!(Arc::ptr_eq(&first.0, &second.0));
+    assert!(Arc::ptr_eq(&first.1, &second.1));
+    let manager = get_network_manager();
+    assert!(Arc::ptr_eq(
+        &first.0,
+        &manager.get_interface("eth0").unwrap()
+    ));
+    assert!(Arc::ptr_eq(
+        &first.1,
+        &manager.get_interface("eth1").unwrap()
+    ));
 }
 
 /// Test 1: ARP request/reply between two interfaces
