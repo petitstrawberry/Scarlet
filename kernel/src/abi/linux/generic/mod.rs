@@ -502,6 +502,8 @@ syscall_table! {
     Writev = 66 => fs::sys_writev,
     Pread64 = 67 => fs::sys_pread64,
     Pwrite64 = 68 => fs::sys_pwrite64,
+    Preadv = 69 => fs::sys_preadv,
+    Pwritev = 70 => fs::sys_pwritev,
     Pselect6 = 72 => fs::sys_pselect6,
     Ppoll = 73 => fs::sys_ppoll,
     Signalfd4 = 74 => signalfd::sys_signalfd4,

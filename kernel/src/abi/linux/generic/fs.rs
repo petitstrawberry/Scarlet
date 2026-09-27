@@ -1496,6 +1496,135 @@ pub fn sys_write(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 }
 
+pub fn sys_preadv(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    positional_vector_io(abi, trapframe, false)
+}
+
+pub fn sys_pwritev(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    positional_vector_io(abi, trapframe, true)
+}
+
+fn positional_vector_io(abi: &mut LinuxAbi, trapframe: &mut Trapframe, write: bool) -> usize {
+    use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+    let task = mytask().unwrap();
+    let fd = trapframe.get_arg(0);
+    let iov_addr = trapframe.get_arg(1);
+    let iov_count = trapframe.get_arg(2);
+    // Linux's pos_l/pos_h are machine words, not two fixed u32 halves.
+    #[cfg(target_pointer_width = "64")]
+    let position = trapframe.get_arg(3) as i64;
+    #[cfg(target_pointer_width = "32")]
+    let position = ((trapframe.get_arg(3) as u64) | ((trapframe.get_arg(4) as u64) << 32)) as i64;
+    let flags = abi.get_file_status_flags(fd).unwrap_or(0);
+    let result = (|| -> usize {
+        if position < 0 || iov_count > 1024 {
+            return errno::to_result(errno::EINVAL);
+        }
+        let Some(handle) = abi.get_handle(fd) else {
+            return errno::to_result(errno::EBADF);
+        };
+        let Some(object) = task.handle_table.get(handle) else {
+            return errno::to_result(errno::EBADF);
+        };
+        if (write && flags & 3 == 0) || (!write && flags & 3 == 1) {
+            return errno::to_result(errno::EBADF);
+        }
+        let Some(file) = object.as_file() else {
+            return errno::to_result(if object.as_stream().is_some() {
+                errno::ESPIPE
+            } else {
+                errno::EBADF
+            });
+        };
+        let mut raw = vec![0; iov_count * core::mem::size_of::<IoVec>()];
+        if copy_from_user(&task, iov_addr, &mut raw).is_err() {
+            return errno::to_result(errno::EFAULT);
+        }
+        let mut iovecs = Vec::with_capacity(iov_count);
+        let mut total = 0usize;
+        for bytes in raw.chunks_exact(core::mem::size_of::<IoVec>()) {
+            // IoVec contains only a pointer and usize; all bit patterns are valid.
+            let iov = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<IoVec>()) };
+            total = match total.checked_add(iov.iov_len) {
+                Some(n) if n <= isize::MAX as usize => n,
+                _ => return errno::to_result(errno::EINVAL),
+            };
+            iovecs.push(iov);
+        }
+        // Bound staging memory and issue one file operation, preserving the
+        // shared file position and gather/scatter ordering. A short I/O is legal.
+        let transfer = total.min(1024 * 1024);
+        if transfer == 0 {
+            return 0;
+        }
+        if position.checked_add(transfer as i64).is_none() {
+            return errno::to_result(errno::EINVAL);
+        }
+        let mut buffer = Vec::new();
+        if buffer.try_reserve_exact(transfer).is_err() {
+            return errno::to_result(errno::ENOMEM);
+        }
+        buffer.resize(transfer, 0);
+        if write {
+            let mut copied = 0;
+            for iov in &iovecs {
+                let count = iov.iov_len.min(transfer - copied);
+                if copy_from_user(
+                    &task,
+                    iov.iov_base as usize,
+                    &mut buffer[copied..copied + count],
+                )
+                .is_err()
+                {
+                    return errno::to_result(errno::EFAULT);
+                }
+                copied += count;
+                if copied == transfer {
+                    break;
+                }
+            }
+            match file.write_at(position as u64, &buffer) {
+                Ok(n) => n,
+                Err(error) => errno::to_result(stream_error_to_errno(error)),
+            }
+        } else {
+            let read = match file.read_at(position as u64, &mut buffer) {
+                Ok(n) => n,
+                Err(error) => return errno::to_result(stream_error_to_errno(error)),
+            };
+            let mut copied = 0;
+            for iov in &iovecs {
+                let count = iov.iov_len.min(read - copied);
+                if copy_to_user(
+                    &task,
+                    iov.iov_base as usize,
+                    &buffer[copied..copied + count],
+                )
+                .is_err()
+                {
+                    return if copied != 0 {
+                        copied
+                    } else {
+                        errno::to_result(errno::EFAULT)
+                    };
+                }
+                copied += count;
+                if copied == read {
+                    break;
+                }
+            }
+            copied
+        }
+    })();
+    if result == errno::to_result(errno::EAGAIN) && flags & O_NONBLOCK as u32 == 0 {
+        schedule(trapframe);
+        usize::MAX
+    } else {
+        trapframe.increment_pc_next(&task);
+        result
+    }
+}
+
 pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;

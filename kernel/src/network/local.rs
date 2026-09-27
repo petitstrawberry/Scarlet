@@ -124,6 +124,26 @@ impl SocketQueue {
         self.segments.is_empty()
     }
 
+    fn peek_record(&self, output: &mut [u8]) -> Option<usize> {
+        for segment in &self.segments {
+            match segment {
+                SocketSegment::Handle(_, _) => continue,
+                SocketSegment::Bytes { data, .. } => {
+                    for (out, byte) in output.iter_mut().zip(data.iter()) {
+                        *out = *byte;
+                    }
+                    return Some(data.len());
+                }
+                SocketSegment::HandleData { data, .. } => {
+                    let count = output.len().min(data.len());
+                    output[..count].copy_from_slice(&data[..count]);
+                    return Some(data.len());
+                }
+            }
+        }
+        None
+    }
+
     fn push_bytes(
         &mut self,
         data: &[u8],
@@ -918,6 +938,34 @@ impl LocalSocket {
 }
 
 impl LocalSocket {
+    /// Copy the next record's prefix without consuming bytes or handles, and
+    /// return its full payload length even when `output` is empty.
+    pub fn peek_record(&self, output: &mut [u8]) -> Result<usize, SocketError> {
+        loop {
+            if let Some(len) = self.read_buffer.read().queue.read().peek_record(output) {
+                return Ok(len);
+            }
+            let state = *self.state.read();
+            if state == SocketState::Closed || *self.read_buffer.read().closed.read() {
+                return Ok(0);
+            }
+            if state != SocketState::Connected {
+                return Err(SocketError::NotConnected);
+            }
+            if self
+                .upgrade_peer()
+                .is_none_or(|peer| *peer.state.read() == SocketState::Closed)
+            {
+                return Ok(0);
+            }
+            if *self.nonblocking.read() {
+                return Err(SocketError::WouldBlock);
+            }
+            let task = crate::task::mytask().ok_or(SocketError::WouldBlock)?;
+            self.read_waker.wait(task.get_id(), task.get_trapframe());
+        }
+    }
+
     /// Read bytes together with the process that wrote the first byte.
     pub fn read_with_sender(&self, buffer: &mut [u8]) -> Result<(usize, usize), StreamError> {
         use crate::task::mytask;
@@ -1611,6 +1659,46 @@ pub fn local_socket_factory(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn seqpacket_peek_preserves_payload_handles_and_next_record() {
+        use crate::ipc::SharedMemory;
+        let (sender, receiver) = LocalSocket::create_connected_pair_with_type(
+            SocketType::SeqPacket,
+            "peek-sender".to_string(),
+            "peek-receiver".to_string(),
+        );
+        receiver.set_nonblocking(true);
+        assert!(matches!(
+            receiver.peek_record(&mut []),
+            Err(SocketError::WouldBlock)
+        ));
+        let memory = SharedMemory::new(4096, 0x3).unwrap();
+        sender
+            .send_handles_and_data(
+                alloc::vec![(
+                    KernelObject::from_shared_memory_object(Arc::new(memory)),
+                    HandleMetadata::default()
+                )],
+                b"packet",
+            )
+            .unwrap();
+        sender.write(b"next").unwrap();
+        assert_eq!(receiver.peek_record(&mut []).unwrap(), 6);
+        let mut prefix = [0; 2];
+        assert_eq!(receiver.peek_record(&mut prefix).unwrap(), 6);
+        assert_eq!(&prefix, b"pa");
+        let (handles, data) = receiver.recv_handles_and_data_batch(6, 1).unwrap();
+        assert_eq!(handles.len(), 1);
+        assert_eq!(handles[0].0.as_shared_memory().unwrap().size(), 4096);
+        assert_eq!(data, b"packet");
+        assert_eq!(receiver.peek_record(&mut []).unwrap(), 4);
+        let mut next = [0; 4];
+        assert_eq!(receiver.read(&mut next).unwrap(), 4);
+        assert_eq!(&next, b"next");
+        sender.close_handle();
+        assert_eq!(receiver.peek_record(&mut []).unwrap(), 0);
+    }
 
     #[test_case]
     fn test_socket_creation() {
