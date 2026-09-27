@@ -1,6 +1,7 @@
 #[macro_use]
 mod macros;
 pub mod errno;
+pub(crate) mod exec;
 pub mod fs;
 pub mod futex;
 mod memfd;

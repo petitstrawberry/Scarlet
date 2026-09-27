@@ -2678,6 +2678,32 @@ pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Log the fcntl command to understand usage patterns
     match cmd {
+        1033 | 1034 => {
+            // F_ADD_SEALS / F_GET_SEALS apply to the underlying memfd, so
+            // duplicated descriptors observe and enforce the same seal set.
+            let Some(handle) = abi.get_handle(fd) else {
+                return errno::to_result(errno::EBADF);
+            };
+            let Some(object) = task.handle_table.get_arc_clone(handle) else {
+                return errno::to_result(errno::EBADF);
+            };
+            let Some(file) = object
+                .as_file()
+                .and_then(|file| file.as_any().downcast_ref::<super::memfd::MemfdFile>())
+            else {
+                return errno::to_result(errno::EINVAL);
+            };
+            if cmd == 1034 {
+                return file.seals() as usize;
+            }
+            if abi.get_file_status_flags(fd).unwrap_or(0) & 3 == 0 {
+                return errno::to_result(errno::EPERM);
+            }
+            return match file.add_seals(arg as u32) {
+                Ok(()) => 0,
+                Err(error) => errno::to_result(stream_error_to_errno(error)),
+            };
+        }
         F_DUPFD => {
             if LOG_FCNTL {
                 crate::println!(
@@ -3546,12 +3572,7 @@ pub fn sys_ftruncate(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     match file_obj.truncate(length as u64) {
         Ok(()) => 0,
-        Err(err) => {
-            if length > 0 {
-                let kind = kernel_obj.type_name();
-            }
-            errno::to_result(errno::EIO)
-        }
+        Err(err) => errno::to_result(stream_error_to_errno(err)),
     }
 }
 

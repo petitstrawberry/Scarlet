@@ -1087,7 +1087,7 @@ pub fn build_auxiliary_vector(load_result: &LoadElfResult) -> alloc::vec::Vec<Au
     auxv.push(AuxVec::new(AT_EGID, 0)); // Effective group ID
 
     // TODO: Add more auxiliary vector entries as needed:
-    // - AT_RANDOM: Random bytes for stack canaries
+    // AT_RANDOM storage is added by the Linux ABI's exec-stack builder.
     // - AT_PLATFORM: Platform string
 
     // Terminate auxiliary vector

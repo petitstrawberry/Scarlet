@@ -1769,7 +1769,7 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
         return errno::to_result(errno::EINVAL);
     }
 
-    let file = match super::memfd::MemfdFile::new() {
+    let file = match super::memfd::MemfdFile::new(flags & MFD_ALLOW_SEALING != 0) {
         Ok(file) => file,
         Err(e) => {
             crate::println!("[sys_memfd_create] Failed to create memfd: {:?}", e);

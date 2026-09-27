@@ -278,7 +278,8 @@ impl AbiModule for LinuxRiscv64Abi {
                         sp = sp & !0xF;
 
                         use crate::task::elf_loader::build_auxiliary_vector;
-                        let auxv = build_auxiliary_vector(&load_result);
+                        let mut auxv = build_auxiliary_vector(&load_result);
+                        generic::exec::add_random_auxv(task, &mut sp, &mut auxv)?;
 
                         let auxv_size = auxv.len() * 16;
                         let envp_size = (env_vaddrs.len() + 1) * 8;
