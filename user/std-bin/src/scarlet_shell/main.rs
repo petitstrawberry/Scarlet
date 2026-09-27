@@ -13,6 +13,8 @@ mod home_style;
 mod options;
 mod power;
 mod status;
+mod volume_osd;
+mod volume_policy;
 
 use alloc::collections::BTreeMap;
 use alloc::vec;
@@ -960,6 +962,8 @@ struct ShellApp {
     console_launch_error: State<Option<String>>,
     console_chrome_position: State<Option<i32>>,
     console_audio: State<(Option<u8>, Option<bool>)>,
+    volume_feedback: State<volume_osd::Feedback>,
+    volume_position: State<Option<(i32, i32)>>,
     clock: State<u32>,
     screen_width: State<f32>,
     screen_height: State<f32>,
@@ -1015,6 +1019,8 @@ impl ShellApp {
                     status_snapshot.audio_muted,
                 ),
             ),
+            volume_feedback: State::new(StateId::new(38), volume_osd::Feedback::default()),
+            volume_position: State::new(StateId::new(39), None),
             clock: State::new(StateId::new(2), 0),
             screen_width: State::new(StateId::new(3), 1920.0),
             screen_height: State::new(StateId::new(22), 1080.0),
@@ -2433,7 +2439,13 @@ fn maintain_home_filter(
 fn maintain_workspace_shell_role(
     state: State<Option<sws::WorkspaceState>>,
     commands: State<Vec<WorkspaceCommand>>,
+    audio_status: State<StatusProviderSnapshot>,
+    audio_slider: State<f32>,
+    console_audio: State<(Option<u8>, Option<bool>)>,
+    feedback: State<volume_osd::Feedback>,
 ) {
+    let mut audio_client = None;
+    let mut visibility = volume_osd::Visibility::default();
     let mut registration_warning_reported = false;
     loop {
         let Ok(connection) = sws::Connection::connect("/tmp/sws.sock") else {
@@ -2486,13 +2498,62 @@ fn maintain_workspace_shell_role(
             }
             if connection.dispatch().is_err() {
                 state.set(None);
+                dismiss_window(volume_osd::SCENE_KEY);
+                visibility = volume_osd::Visibility::default();
                 break;
             }
             while let Some(event) = connection.poll_event() {
-                if let sws::event::Event::WorkspaceStateChanged(updated) = event {
-                    snapshot = updated;
-                    state.set(Some(snapshot.clone()));
+                match event {
+                    sws::event::Event::WorkspaceStateChanged(updated) => {
+                        snapshot = updated;
+                        state.set(Some(snapshot.clone()));
+                    }
+                    sws::event::Event::Input(input)
+                        if input.surface_id == 0
+                            && input.type_ == 1
+                            && matches!(input.value, 1 | 2)
+                            && matches!(input.code, 0x72 | 0x73) =>
+                    {
+                        if audio_client.is_none() {
+                            audio_client = SasClient::connect().ok();
+                        }
+                        let result = audio_client.as_mut().and_then(|client| {
+                            let current = client.control_state().ok()?;
+                            let percent = ((current.master_volume_q16 as u64 * 100
+                                + (MASTER_VOLUME_UNITY_Q16 / 2) as u64)
+                                / MASTER_VOLUME_UNITY_Q16 as u64)
+                                .min(100) as u8;
+                            let percent = volume_osd::step_percent(percent, input.code == 0x73);
+                            let q16 = ((percent as u64 * MASTER_VOLUME_UNITY_Q16 as u64 + 50) / 100)
+                                as u32;
+                            let changed = client.set_master_volume_q16(q16).ok()?;
+                            if changed.flags & sas_protocol::CONTROL_FLAG_MUTED != 0 {
+                                client.set_master_muted(false).ok().or(Some(changed))
+                            } else {
+                                Some(changed)
+                            }
+                        });
+                        if let Some(current) = result {
+                            update_shared_audio_status(&audio_status, &audio_slider, current);
+                            let actual = audio_status.get();
+                            console_audio.set((actual.audio_volume_percent, actual.audio_muted));
+                            feedback.set(volume_osd::Feedback {
+                                percent: actual.audio_volume_percent,
+                                muted: actual.audio_muted.unwrap_or(false),
+                            });
+                        } else {
+                            audio_client = None;
+                            feedback.set(volume_osd::Feedback::default());
+                        }
+                        if visibility.show(std::time::Instant::now()) {
+                            open_window(volume_osd::SCENE_KEY);
+                        }
+                    }
+                    _ => {}
                 }
+            }
+            if visibility.expire(std::time::Instant::now()) {
+                dismiss_window(volume_osd::SCENE_KEY);
             }
             std::thread::sleep(Duration::from_millis(16));
         }
@@ -3096,6 +3157,13 @@ impl Application for ShellApp {
         &self,
         key: &scarlet_ui::scene::SceneWindowKey,
     ) -> Option<Vec<&dyn scarlet_ui::state::Listenable>> {
+        if key.as_str() == volume_osd::SCENE_KEY {
+            return Some(vec![
+                &self.volume_feedback,
+                &self.screen_width,
+                &self.screen_height,
+            ]);
+        }
         if self.mode.get() != ShellMode::Console
             || !matches!(key.as_str(), HOME_SCENE_KEY | CONSOLE_CHROME_SCENE_KEY)
         {
@@ -3138,7 +3206,9 @@ impl Application for ShellApp {
     }
 
     fn on_window_created(&mut self, ctx: &WindowContext, window: &mut dyn PlatformWindow) {
-        if ctx.scene_key.as_str() == CONSOLE_CHROME_SCENE_KEY {
+        if ctx.scene_key.as_str() == volume_osd::SCENE_KEY {
+            let _ = window.set_surface_regions(true, &[]);
+        } else if ctx.scene_key.as_str() == CONSOLE_CHROME_SCENE_KEY {
             let _ = window.set_surface_regions(
                 true,
                 &console::chrome_regions(self.console_snapshot(), self.console_state.clone()),
@@ -3203,6 +3273,18 @@ impl Application for ShellApp {
     }
 
     fn on_window_sync(&mut self, ctx: &WindowContext, window: &mut dyn PlatformWindow) {
+        if ctx.scene_key.as_str() == volume_osd::SCENE_KEY {
+            let (size, x, y) =
+                volume_osd::geometry(self.screen_width.get(), self.screen_height.get());
+            if status_bar_resize_needed(window.size(), size) {
+                let _ = window.resize(size.width as u32, size.height as u32);
+            }
+            if self.volume_position.get() != Some((x, y)) && window.move_window(x, y).is_ok() {
+                self.volume_position.set(Some((x, y)));
+            }
+            let _ = window.set_surface_regions(true, &[]);
+            return;
+        }
         if ctx.scene_key.as_str() == CONSOLE_CHROME_SCENE_KEY {
             let snapshot = self.console_snapshot();
             let layout = console::ConsoleLayout::resolve(&snapshot);
@@ -3402,99 +3484,119 @@ impl Application for ShellApp {
         .spacing(status_tokens.spacing)
         .alignment(Alignment::Center);
 
+        let (osd_size, osd_x, osd_y) = volume_osd::geometry(screen_width, screen_height);
         (
-            WindowGroup::new(
-                "main",
-                Window::new(
-                    "Scarlet Shell",
-                    hstack! {
-                        leading_controls,
-                        Spacer::new(),
-                        trailing_controls,
-                    }
-                    .spacing(status_tokens.spacing)
-                    .alignment(Alignment::Center)
-                    .padding(status_tokens.bar_padding),
-                )
-                .app_id("org.scarlet-os.desktop.shell")
-                .decorated(false)
-                .background_color(status_bar_background)
-                // The shell changes between an opaque workspace material and
-                // per-pixel transparency without recreating this surface.
-                // Keep alpha composition enabled from the first frame.
-                .opaque(false)
-                .window_type(scarlet_ui::views::window_type::TASKBAR)
-                .active_on_focus(false)
-                .resizable(false)
-                .movable(false)
-                .size(shell_layout.status_bar_window_size(screen_width)),
-            ),
-            Window::new(
-                "Control Center",
-                build_control_center_view(
-                    control_center_presentation,
-                    control_center_snapshot,
-                    self.control_center_volume.clone(),
-                    self.control_center_action.clone(),
-                    self.control_center_armed_power.clone(),
+            (
+                WindowGroup::new(
+                    "main",
+                    Window::new(
+                        "Scarlet Shell",
+                        hstack! {
+                            leading_controls,
+                            Spacer::new(),
+                            trailing_controls,
+                        }
+                        .spacing(status_tokens.spacing)
+                        .alignment(Alignment::Center)
+                        .padding(status_tokens.bar_padding),
+                    )
+                    .app_id("org.scarlet-os.desktop.shell")
+                    .decorated(false)
+                    .background_color(status_bar_background)
+                    // The shell changes between an opaque workspace material and
+                    // per-pixel transparency without recreating this surface.
+                    // Keep alpha composition enabled from the first frame.
+                    .opaque(false)
+                    .window_type(scarlet_ui::views::window_type::TASKBAR)
+                    .active_on_focus(false)
+                    .resizable(false)
+                    .movable(false)
+                    .size(shell_layout.status_bar_window_size(screen_width)),
                 ),
-            )
-            .scene_key(CONTROL_CENTER_SCENE_KEY)
-            .open_at_launch(false)
-            .app_id("org.scarlet-os.popup.control-center")
-            .decorated(false)
-            .background_color(scarlet_ui::color::Color::TRANSPARENT)
-            .opaque(false)
-            .corner_radius(ControlCenterMetrics::CORNER_RADIUS)
-            .shadow_elevation(ElevationRole::Floating)
-            .window_type(scarlet_ui::views::window_type::ALWAYS_ON_TOP)
-            .focus_on_create(true)
-            .active_on_focus(false)
-            .resizable(false)
-            .movable(false)
-            .placement(WindowPlacement::At {
-                x: control_center_body_x,
-                y: control_center_body_y,
-            })
-            .size(control_center_size),
-            Window::new("Home", self.home_content())
-                .scene_key(HOME_SCENE_KEY)
+                Window::new(
+                    "Control Center",
+                    build_control_center_view(
+                        control_center_presentation,
+                        control_center_snapshot,
+                        self.control_center_volume.clone(),
+                        self.control_center_action.clone(),
+                        self.control_center_armed_power.clone(),
+                    ),
+                )
+                .scene_key(CONTROL_CENTER_SCENE_KEY)
                 .open_at_launch(false)
-                .app_id(if self.mode.get() == ShellMode::Console {
-                    sws_protocol::workspace::CONSOLE_HOME_APP_ID
-                } else {
-                    "org.scarlet-os.desktop.shell.home"
-                })
+                .app_id("org.scarlet-os.popup.control-center")
                 .decorated(false)
                 .background_color(scarlet_ui::color::Color::TRANSPARENT)
                 .opaque(false)
-                .window_type(sws_protocol::window_types::SHELL_BACKGROUND)
+                .corner_radius(ControlCenterMetrics::CORNER_RADIUS)
+                .shadow_elevation(ElevationRole::Floating)
+                .window_type(scarlet_ui::views::window_type::ALWAYS_ON_TOP)
+                .focus_on_create(true)
+                .active_on_focus(false)
+                .resizable(false)
+                .movable(false)
+                .placement(WindowPlacement::At {
+                    x: control_center_body_x,
+                    y: control_center_body_y,
+                })
+                .size(control_center_size),
+                Window::new("Home", self.home_content())
+                    .scene_key(HOME_SCENE_KEY)
+                    .open_at_launch(false)
+                    .app_id(if self.mode.get() == ShellMode::Console {
+                        sws_protocol::workspace::CONSOLE_HOME_APP_ID
+                    } else {
+                        "org.scarlet-os.desktop.shell.home"
+                    })
+                    .decorated(false)
+                    .background_color(scarlet_ui::color::Color::TRANSPARENT)
+                    .opaque(false)
+                    .window_type(sws_protocol::window_types::SHELL_BACKGROUND)
+                    .focus_on_create(false)
+                    .active_on_focus(false)
+                    .resizable(false)
+                    .movable(false)
+                    .placement(WindowPlacement::At { x: 0, y: 0 })
+                    .size(Size::new(screen_width, screen_height)),
+                Window::new(
+                    "Console Controls",
+                    self.console_content(console::ConsolePart::Chrome),
+                )
+                .scene_key(CONSOLE_CHROME_SCENE_KEY)
+                .open_at_launch(false)
+                .app_id("org.scarlet-os.desktop.shell.console-chrome")
+                .decorated(false)
+                .background_color(Color::TRANSPARENT)
+                .opaque(false)
+                .window_type(sws_protocol::window_types::SHELL_PANEL)
                 .focus_on_create(false)
                 .active_on_focus(false)
                 .resizable(false)
                 .movable(false)
-                .placement(WindowPlacement::At { x: 0, y: 0 })
-                .size(Size::new(screen_width, screen_height)),
+                .placement(WindowPlacement::At {
+                    x: 0,
+                    y: console_layout.chrome_top() as i32,
+                })
+                .size(Size::new(screen_width, console_layout.chrome_height())),
+            ),
             Window::new(
-                "Console Controls",
-                self.console_content(console::ConsolePart::Chrome),
+                "Volume",
+                volume_osd::view(self.volume_feedback.get(), osd_size),
             )
-            .scene_key(CONSOLE_CHROME_SCENE_KEY)
+            .scene_key(volume_osd::SCENE_KEY)
             .open_at_launch(false)
-            .app_id("org.scarlet-os.desktop.shell.console-chrome")
+            .app_id("org.scarlet-os.desktop.shell.volume-osd")
             .decorated(false)
             .background_color(Color::TRANSPARENT)
             .opaque(false)
-            .window_type(sws_protocol::window_types::SHELL_PANEL)
+            .window_type(sws_protocol::window_types::ALWAYS_ON_TOP)
             .focus_on_create(false)
             .active_on_focus(false)
             .resizable(false)
             .movable(false)
-            .placement(WindowPlacement::At {
-                x: 0,
-                y: console_layout.chrome_top() as i32,
-            })
-            .size(Size::new(screen_width, console_layout.chrome_height())),
+            .placement(WindowPlacement::At { x: osd_x, y: osd_y })
+            .size(osd_size),
         )
     }
 
@@ -3534,8 +3636,19 @@ impl Application for ShellApp {
         });
         let workspace_state = self.workspace_state.clone();
         let workspace_commands = self.workspace_commands.clone();
+        let audio_status = self.status_snapshot.clone();
+        let audio_slider = self.control_center_volume.clone();
+        let console_audio = self.console_audio.clone();
+        let feedback = self.volume_feedback.clone();
         std::thread::spawn(move || {
-            maintain_workspace_shell_role(workspace_state, workspace_commands)
+            maintain_workspace_shell_role(
+                workspace_state,
+                workspace_commands,
+                audio_status,
+                audio_slider,
+                console_audio,
+                feedback,
+            )
         });
     }
 }

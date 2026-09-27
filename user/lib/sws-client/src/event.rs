@@ -3,7 +3,8 @@
 /// Input event from the server
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InputEvent {
-    /// Target surface/window id
+    /// Target surface/window id. Zero denotes a reserved system-volume event
+    /// on the registered system-shell connection, independent of app focus.
     pub surface_id: u32,
     /// Timestamp in microseconds
     pub time: u64,

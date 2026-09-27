@@ -96,6 +96,28 @@ SWS system policy maps a generic gesture to navigation.
 
 ## Seat routing and ownership
 
+### System volume keys
+
+SWS reserves `KEY_VOLUMEDOWN` (114) and `KEY_VOLUMEUP` (115) before app,
+IME and pointer-lock routing. It sends `INPUT_EVENT` with `surface_id = 0`
+only to the registered system-shell connection. Press and compositor-owned
+repeat change SAS master volume in 5 percentage-point steps, clamped to
+0–100%, and clear mute. Release and source loss stop repeat. Volume repeat
+has an independent target, so changing app focus does not interrupt it or
+replace normal keyboard repeat.
+
+Scarlet Shell shares this policy and a passive volume OSD between Desktop
+and Console. The OSD reports the confirmed SAS state, refreshes its 1.5 second
+deadline on each adjustment, and has neither keyboard focus nor a pointer or
+touch input region. A failed audio request displays “Audio unavailable”.
+
+`InputDeviceKind::Buttons` (8), exposed as `/dev/buttonsN`, uses the same
+EV_KEY/SYN_REPORT reader without advertising a typing keyboard. Ordinary
+keyboards emitting these key codes use the same volume path. USB input
+currently supports HID Boot keyboards; Consumer Control reports used by
+many media/Fn keys still require USB driver support. No Fn+F-key combination
+is assumed by SWS. Power and mute-key policies are outside this change.
+
 SWS maintains independent pointer, keyboard, touch, and scroll-transaction
 focus for each seat, plus a gamepad navigation target. A physical or virtual
 source belongs to one seat. Pointer

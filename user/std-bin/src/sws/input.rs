@@ -975,6 +975,13 @@ fn input_discovery_supervisor() {
             try_spawn_keyboard_reader(&active_paths, path, index);
         }
         for index in 0..DEVICE_INDEX_LIMIT {
+            try_spawn_keyboard_reader(
+                &active_paths,
+                std::format!("/dev/buttons{index}"),
+                DEVICE_INDEX_LIMIT + index,
+            );
+        }
+        for index in 0..DEVICE_INDEX_LIMIT {
             try_spawn_switch_reader(&active_paths, std::format!("/dev/switch{index}"), index);
         }
         for index in 0..DEVICE_INDEX_LIMIT {
@@ -1271,7 +1278,9 @@ fn keyboard_device_reader(device: InputDevice, path: std::string::String, index:
     let source = KeyboardSource::Local(index);
     let input_source = InputSourceId::new(InputSourceClass::Keyboard);
     println!("[KeyboardThread] Opened {}", path);
-    let _capability_registration = register_live_capabilities(environment_capabilities::KEYBOARD);
+    // System buttons share EV_KEY routing without changing desktop posture.
+    let _capability_registration = (device.kind() != Ok(InputDeviceKind::Buttons))
+        .then(|| register_live_capabilities(environment_capabilities::KEYBOARD));
     let mut desynced = false;
     let mut pending = Vec::new();
     loop {

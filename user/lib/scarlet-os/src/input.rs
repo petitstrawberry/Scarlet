@@ -101,6 +101,8 @@ pub enum InputDeviceKind {
     Switch = 6,
     /// Game controller with buttons and absolute stick or hat axes.
     Gamepad = 7,
+    /// System buttons without a text keyboard (for example volume keys).
+    Buttons = 8,
 }
 
 impl TryFrom<i32> for InputDeviceKind {
@@ -116,6 +118,7 @@ impl TryFrom<i32> for InputDeviceKind {
             5 => Ok(Self::Tablet),
             6 => Ok(Self::Switch),
             7 => Ok(Self::Gamepad),
+            8 => Ok(Self::Buttons),
             _ => Err(()),
         }
     }

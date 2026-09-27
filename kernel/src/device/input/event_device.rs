@@ -19,6 +19,7 @@ static TOUCHPAD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static TABLET_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static TOUCHSCREEN_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static SWITCH_COUNTER: AtomicUsize = AtomicUsize::new(0);
+static BUTTONS_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static GAMEPAD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static INPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -113,6 +114,8 @@ pub enum InputDeviceKind {
     Switch = 6,
     /// Game controller with buttons and absolute stick or hat axes.
     Gamepad = 7,
+    /// System buttons without a text keyboard (for example volume keys).
+    Buttons = 8,
 }
 
 impl InputDeviceKind {
@@ -125,6 +128,7 @@ impl InputDeviceKind {
             "tablet" => Self::Tablet,
             "switch" => Self::Switch,
             "gamepad" => Self::Gamepad,
+            "buttons" => Self::Buttons,
             _ => Self::Unknown,
         }
     }
@@ -324,6 +328,7 @@ impl EventDevice {
             "touchscreen" => TOUCHSCREEN_COUNTER.fetch_add(1, Ordering::SeqCst),
             "switch" => SWITCH_COUNTER.fetch_add(1, Ordering::SeqCst),
             "gamepad" => GAMEPAD_COUNTER.fetch_add(1, Ordering::SeqCst),
+            "buttons" => BUTTONS_COUNTER.fetch_add(1, Ordering::SeqCst),
             _ => INPUT_COUNTER.fetch_add(1, Ordering::SeqCst),
         };
 

@@ -660,3 +660,36 @@ mod tests {
         assert!(!is_initial_press(0));
     }
 }
+
+#[cfg(test)]
+mod system_volume_tests {
+    use super::*;
+    #[test]
+    fn system_repeat_uses_a_separate_target_and_releases_on_its_owner() {
+        let source = KeyboardSource::Local(8);
+        let mut volume = KeyRepeatState::default();
+        let mut app = KeyRepeatState::default();
+        volume.handle_key_event(0x73, 1, source, Some(0), 0);
+        app.handle_key_event(30, 1, KeyboardSource::Local(0), Some(17), 0);
+        app.cancel_if_focus_changed(Some(23));
+        assert!(app.take_due(KEY_REPEAT_DELAY_NS, Some(23)).is_none());
+        assert_eq!(
+            volume.take_due(KEY_REPEAT_DELAY_NS, Some(0)),
+            Some((source, 0x73))
+        );
+        volume.handle_key_event(
+            0x73,
+            0,
+            KeyboardSource::Remote(1),
+            Some(0),
+            KEY_REPEAT_DELAY_NS,
+        );
+        assert!(
+            volume
+                .take_due(KEY_REPEAT_DELAY_NS + KEY_REPEAT_INTERVAL_NS, Some(0))
+                .is_some()
+        );
+        volume.cancel_source(source);
+        assert!(volume.take_due(u64::MAX, Some(0)).is_none());
+    }
+}

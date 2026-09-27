@@ -2414,6 +2414,7 @@ pub struct Compositor {
     ime_toggle_bindings: Vec<KeyBinding>,
     ime_trigger_keys: ConsumedKeys,
     key_repeat: KeyRepeatState,
+    volume_repeat: KeyRepeatState,
     gesture_recognizer: GestureRecognizer,
     direct_touch_grabs: Vec<DirectTouchGrab>,
     next_touch_contact_id: u64,
@@ -2876,6 +2877,7 @@ impl Compositor {
             ime_toggle_bindings: sws_config.ime_toggle_bindings,
             ime_trigger_keys: ConsumedKeys::default(),
             key_repeat: KeyRepeatState::default(),
+            volume_repeat: KeyRepeatState::default(),
             gesture_recognizer,
             direct_touch_grabs: Vec::new(),
             next_touch_contact_id: 1,
@@ -2930,6 +2932,7 @@ impl Compositor {
             })?;
         }
         self.key_repeat.cancel_source(source);
+        self.volume_repeat.cancel_source(source);
         self.workspace_shortcut_keys.drain_source(source);
         self.ime_trigger_keys.drain_source(source);
         Ok(())
@@ -6543,7 +6546,13 @@ impl Compositor {
         {
             timeout = timeout.min(deadline.saturating_sub(now));
         }
-        if let Some(deadline) = self.key_repeat.next_deadline_ns() {
+        for deadline in [
+            self.key_repeat.next_deadline_ns(),
+            self.volume_repeat.next_deadline_ns(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             timeout = timeout.min(deadline.saturating_sub(now));
         }
         timeout as i64
@@ -6669,6 +6678,15 @@ impl Compositor {
     }
 
     fn process_pending_events(&mut self) -> Result<(), &'static str> {
+        if let Some((source, code)) = self.volume_repeat.take_due(monotonic_time_ns(), Some(0)) {
+            self.handle_input_event(CompositorInputEvent::Keyboard {
+                code,
+                value: 2,
+                source,
+                synthetic: true,
+            })?;
+        }
+
         if cursor_visible(self.pointer_lock) && !self.input_modality.cursor_hidden_by_touch {
             self.cursor.advance_animation(monotonic_time_ns());
         }
@@ -6731,6 +6749,15 @@ impl Compositor {
         let focused_id = self.window_manager.get_focused_window_id();
         self.key_repeat.cancel_if_focus_changed(focused_id);
         if let Some((source, code)) = self.key_repeat.take_due(monotonic_time_ns(), focused_id) {
+            self.handle_input_event(CompositorInputEvent::Keyboard {
+                code,
+                value: 2,
+                source,
+                synthetic: true,
+            })?;
+        }
+
+        if let Some((source, code)) = self.volume_repeat.take_due(monotonic_time_ns(), Some(0)) {
             self.handle_input_event(CompositorInputEvent::Keyboard {
                 code,
                 value: 2,
@@ -7641,16 +7668,35 @@ impl Compositor {
                             && let Some(replacement) = self.held_keys.source_for_code(code)
                         {
                             self.key_repeat.transfer_source(source, replacement, code);
+                            self.volume_repeat
+                                .transfer_source(source, replacement, code);
                         }
                         return Ok(false);
                     }
-                    self.key_repeat.handle_key_event(
-                        code,
-                        value,
-                        source,
-                        focused_id,
-                        monotonic_time_ns(),
-                    );
+                    if !matches!(code, key_codes::KEY_VOLUMEDOWN | key_codes::KEY_VOLUMEUP) {
+                        self.key_repeat.handle_key_event(
+                            code,
+                            value,
+                            source,
+                            focused_id,
+                            monotonic_time_ns(),
+                        );
+                    }
+                }
+                if matches!(code, key_codes::KEY_VOLUMEDOWN | key_codes::KEY_VOLUMEUP) {
+                    // System controls are independent of app focus, IME and pointer lock.
+                    self.key_repeat.cancel_key(source, code);
+                    if !synthetic {
+                        self.volume_repeat.handle_key_event(
+                            code,
+                            value,
+                            source,
+                            Some(0),
+                            monotonic_time_ns(),
+                        );
+                    }
+                    super::ipc::send_volume_key(code, value);
+                    return Ok(false);
                 }
                 if !pressed && self.workspace_shortcut_keys.release(source, code) {
                     return Ok(false);

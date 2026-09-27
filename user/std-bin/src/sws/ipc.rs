@@ -1076,6 +1076,22 @@ pub fn send_input_to_window(window_id: u32, time: u64, type_: u16, code: u16, va
     }
 }
 
+/// Reserved system volume keys go only to the registered shell connection.
+/// INPUT_EVENT with surface_id=0 is connection-scoped and never targets an app.
+pub(super) fn send_volume_key(code: u16, value: i32) {
+    let owner = *SYSTEM_SHELL_CLIENT
+        .lock()
+        .expect("SWS system-shell role mutex poisoned");
+    if let Some(client_id) = owner {
+        send_message_to_client(
+            client_id,
+            sws_protocol::server_msg::INPUT_EVENT,
+            sws_protocol::payload_input_event(0, 0, super::input::event_types::EV_KEY, code, value)
+                .to_vec(),
+        );
+    }
+}
+
 /// Pending extension input events: BTreeMap from (extension_id, external_client_id) to events
 static PENDING_EXTENSION_INPUT_EVENTS: Mutex<BTreeMap<(u32, u32), Vec<PendingInputEvent>>> =
     Mutex::new(BTreeMap::new());
