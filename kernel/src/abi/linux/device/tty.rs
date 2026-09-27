@@ -84,7 +84,7 @@ struct Winsize {
 
 /// Minimal Linux termios (asm-generic) layout for TCGETS.
 /// This mirrors asm-generic: 4x tcflag_t (u32), 1x cc line (u8),
-/// `c_cc: [u8; 19]`, and ispeed/ospeed (u32 each).
+/// `c_cc: [u8; 19]`. Speed fields belong to termios2, not TCGETS/TCSETS.
 #[repr(C)]
 struct LinuxTermios {
     c_iflag: u32,
@@ -93,8 +93,6 @@ struct LinuxTermios {
     c_lflag: u32,
     c_line: u8,
     c_cc: [u8; 19],
-    c_ispeed: u32,
-    c_ospeed: u32,
 }
 
 // Common termios cc index constants (asm-generic)
@@ -180,8 +178,6 @@ pub fn handle_ioctl(
                         c_lflag: 0,
                         c_line: 0,
                         c_cc: [0; 19],
-                        c_ispeed: 0,
-                        c_ospeed: 0,
                     };
                     let mut canonical = false;
                     let mut echo = true;
@@ -1064,6 +1060,12 @@ mod tests {
         let slave = devpts.open(&slave_node, 0).unwrap();
 
         (KernelObject::File(master), KernelObject::File(slave))
+    }
+
+    #[test_case]
+    fn tcgets_layout_matches_kernel_uapi_not_termios2() {
+        assert_eq!(core::mem::size_of::<LinuxTermios>(), 36);
+        assert_eq!(core::mem::offset_of!(LinuxTermios, c_cc), 17);
     }
 
     #[test_case]

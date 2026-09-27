@@ -353,7 +353,19 @@ mod tests {
 
     #[test_case]
     fn memfd_fcntl_duplicate_and_ftruncate_observe_shared_seals_and_errno() {
-        let task = Arc::new(Task::new("memfd-seals".into(), 1, TaskType::Kernel));
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        let task = Arc::new(Task::new("memfd-seals".into(), 1, TaskType::User));
+        let code = USER_STACK_END - PAGE_SIZE;
+        task.allocate_stack_pages(code, 1).unwrap();
+        // RISC-V's syscall return reads the instruction to advance PC.
+        for index in 0..8 {
+            crate::library::std::usercopy::copy_to_user(
+                &task,
+                code + index * 4,
+                &0x73u32.to_ne_bytes(),
+            )
+            .unwrap();
+        }
         set_mock_current_task(task.clone());
         let mut abi = LinuxAbi::default();
         let file = Arc::new(MemfdFile::new(true).unwrap());
@@ -362,6 +374,7 @@ mod tests {
         let fd = abi.allocate_fd(handle).unwrap();
         abi.set_file_status_flags(fd, 2).unwrap();
         let mut tf = Trapframe::new();
+        tf.set_pc(code as u64);
         tf.set_arg(0, fd);
         tf.set_arg(1, 0); // F_DUPFD
         tf.set_arg(2, 10);

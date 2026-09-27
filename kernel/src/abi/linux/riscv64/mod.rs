@@ -55,8 +55,11 @@ impl AbiModule for LinuxRiscv64Abi {
         trapframe: &mut crate::arch::Trapframe,
     ) -> Result<usize, &'static str> {
         let syscall_number = trapframe.get_syscall_number();
+        if let Some(task) = crate::task::mytask() {
+            self.0.bind_task_signals(&task);
+        }
         if syscall_number == 0 {
-            return Err("Invalid syscall number");
+            return Ok(generic::unsupported_syscall(trapframe));
         }
 
         if let Some(result) =
@@ -71,7 +74,7 @@ impl AbiModule for LinuxRiscv64Abi {
         }
 
         crate::println!("Invalid Syscall number: {}", syscall_number);
-        Err("Invalid syscall number")
+        Ok(generic::unsupported_syscall(trapframe))
     }
 
     fn handle_event(
@@ -98,7 +101,9 @@ impl AbiModule for LinuxRiscv64Abi {
         }
         if !_flags.is_set(crate::task::CloneFlagsDef::Thread) {
             self.0.reset_posix_timers();
+            self.0.fork_signal_state();
         }
+        self.0.bind_task_signals(_child_task);
 
         let clear_child_tid = if _flags.is_set(crate::task::CloneFlagsDef::ClearChildTid) {
             self.0.thread_state.clear_child_tid_ptr

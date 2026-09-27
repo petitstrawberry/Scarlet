@@ -234,7 +234,10 @@ unsafe fn write_ich_lr(index: usize, val: u64) {
 
 #[inline(always)]
 fn guest_hcr() -> u64 {
-    ICH_HCR_EN | ICH_HCR_VGRP0EIE | ICH_HCR_VGRP1EIE
+    // VGrp*EIE are level conditions, not notifications of an enable transition.
+    // With VENG0/VENG1 set they assert maintenance continuously and prevent the
+    // guest from executing. Software-LR EOI maintenance works with En alone.
+    ICH_HCR_EN
 }
 
 #[inline(always)]
@@ -513,6 +516,8 @@ mod resample_tests {
     #[test_case]
     fn resample_requires_deactivation_and_is_consumed_once() {
         let mut state = VgicState::new(1);
+        assert_eq!(state.hcr & (ICH_HCR_VGRP0EIE | ICH_HCR_VGRP1EIE), 0);
+        assert_ne!(state.hcr & ICH_HCR_EN, 0);
         assert!(inject_shadow_virq(&mut state, 40, 0x80, true));
         arm_resample(&mut state, 40, 7);
         assert_ne!(state.lr_shadow[0] & ICH_LR_EOI, 0);

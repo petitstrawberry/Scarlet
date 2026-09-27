@@ -222,7 +222,7 @@ impl SignalMask {
 }
 
 /// Signal handler state for a task
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SignalState {
     /// Signal handlers (signal number -> handler action)
     pub handlers: BTreeMap<LinuxSignal, SignalAction>,
@@ -230,6 +230,17 @@ pub struct SignalState {
     pub blocked: SignalMask,
     /// Pending signals that are blocked
     pub pending: SignalMask,
+    pub(crate) pending_waker: Arc<crate::sync::waker::Waker>,
+}
+
+impl core::fmt::Debug for SignalState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SignalState")
+            .field("handlers", &self.handlers)
+            .field("blocked", &self.blocked)
+            .field("pending", &self.pending)
+            .finish()
+    }
 }
 
 impl Default for SignalState {
@@ -246,6 +257,7 @@ impl Default for SignalState {
             handlers,
             blocked: SignalMask::new(),
             pending: SignalMask::new(),
+            pending_waker: Arc::new(crate::sync::waker::Waker::new_interruptible("linux_signal")),
         }
     }
 }
@@ -274,6 +286,7 @@ impl SignalState {
     /// Add pending signal
     pub fn add_pending(&mut self, signal: LinuxSignal) {
         self.pending.block_signal(signal);
+        self.pending_waker.wake_all();
     }
 
     /// Remove pending signal
@@ -288,7 +301,7 @@ impl SignalState {
 
     /// Get next deliverable signal (not blocked and pending)
     pub fn next_deliverable_signal(&self) -> Option<LinuxSignal> {
-        for signal_num in 1..=31 {
+        for signal_num in 1..=64 {
             if let Some(signal) = LinuxSignal::from_u32(signal_num) {
                 if self.is_pending(signal) && !self.blocked.is_blocked(signal) {
                     return Some(signal);
@@ -611,7 +624,14 @@ pub fn handle_event_for_task(
     );
 
     let action = {
-        let signal_state = abi.signal_state.lock();
+        let mut signal_state = abi.signal_state.lock();
+        if signal != LinuxSignal::SIGKILL
+            && signal != LinuxSignal::SIGSTOP
+            && signal_state.blocked.is_blocked(signal)
+        {
+            signal_state.add_pending(signal);
+            return Ok(EventProcessOutcome::Continue);
+        }
         signal_state.get_handler(signal)
     };
 
@@ -877,6 +897,21 @@ fn deliver_signal_to_self(abi: &LinuxAbi, task: &Task, signal: LinuxSignal) {
 /// * `target` - Task receiving the signal
 /// * `signal` - Signal to deliver
 fn deliver_signal_to_remote(target: &Task, signal: LinuxSignal) {
+    let state = target
+        .linux_signal_state
+        .lock()
+        .as_ref()
+        .and_then(|state| state.upgrade());
+    if let Some(state) = state {
+        let mut state = state.lock();
+        if signal != LinuxSignal::SIGKILL
+            && signal != LinuxSignal::SIGSTOP
+            && state.blocked.is_blocked(signal)
+        {
+            state.add_pending(signal);
+            return;
+        }
+    }
     match signal.default_action() {
         SignalAction::Terminate | SignalAction::ForceTerminate => {
             let status = signal_death_status(signal);
@@ -912,10 +947,11 @@ pub fn deliver_signal(abi: &LinuxAbi, current: &Task, target: &Task, signal: Lin
     let is_self = target.get_id() == current.get_id()
         || target.get_thread_group_id() == current.get_thread_group_id();
     if is_self {
-        if matches!(
-            abi.signal_state.lock().get_handler(signal),
-            SignalAction::Custom(_)
-        ) {
+        let state = abi.signal_state.lock();
+        let unsupported_handler = matches!(state.get_handler(signal), SignalAction::Custom(_))
+            && !state.blocked.is_blocked(signal);
+        drop(state);
+        if unsupported_handler {
             return errno::to_result(errno::ENOSYS);
         }
         deliver_signal_to_self(abi, current, signal);

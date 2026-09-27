@@ -533,6 +533,27 @@ fn read_vcpu_run_mmio_data(vcpu: &dyn VcpuObject) -> Option<(u8, u64)> {
     None
 }
 
+/// Read the userspace-owned flag without taking a Rust reference to shared data.
+fn run_immediate_exit(vcpu: &dyn VcpuObject, arg: usize) -> Result<bool, ()> {
+    if arg != 0 {
+        let task = mytask().ok_or(())?;
+        let flag = arg
+            .checked_add(core::mem::offset_of!(KvmRun, immediate_exit))
+            .ok_or(())?;
+        let address = task.vm_manager.translate_to_kva(flag).ok_or(())?;
+        // SAFETY: translation validates this single byte in the caller's image.
+        return Ok(unsafe { core::ptr::read_volatile(address as *const u8) } != 0);
+    }
+    let pages = get_run_pages().read();
+    let Some(entry) = pages.iter().find(|entry| entry.vcpu_key == vcpu_key(vcpu)) else {
+        return Err(());
+    };
+    refresh_run_page_from_poc(entry.page.vaddr);
+    let flag = entry.page.vaddr + core::mem::offset_of!(KvmRun, immediate_exit);
+    // SAFETY: the registry read guard keeps the mapped run page alive.
+    Ok(unsafe { core::ptr::read_volatile(flag as *const u8) } != 0)
+}
+
 fn mmio_data_mask(size: u8) -> u64 {
     match size {
         1 => 0xff,
@@ -656,6 +677,7 @@ pub fn handle_system_ioctl(
             const KVM_CAP_MAX_VCPUS: usize = 66;
             const KVM_CAP_DEVICE_CTRL: usize = 89;
             const KVM_CAP_IRQFD_RESAMPLE: usize = 82;
+            const KVM_CAP_IMMEDIATE_EXIT: usize = 136;
             let result = match arg {
                 KVM_CAP_IRQCHIP => Ok(Some(1)),
                 KVM_CAP_USER_MEMORY => Ok(Some(1)),
@@ -667,6 +689,7 @@ pub fn handle_system_ioctl(
                 KVM_CAP_IRQFD => Ok(Some(1)),
                 KVM_CAP_IRQFD_RESAMPLE => Ok(Some(usize::from(cfg!(target_arch = "aarch64")))),
                 KVM_CAP_IOEVENTFD => Ok(Some(1)),
+                KVM_CAP_IMMEDIATE_EXIT => Ok(Some(1)),
                 _ => match arch::check_extension(arg) {
                     Some(val) => Ok(Some(val)),
                     None => Ok(Some(0)),
@@ -1111,6 +1134,13 @@ pub fn handle_vcpu_ioctl(
                 MMIO_PENDING_VALID.store(false, Ordering::Release);
             }
 
+            // Complete an outstanding userspace MMIO read before honoring the
+            // entry flag, as Linux does when userspace drains a pending exit.
+            if run_immediate_exit(vcpu, arg)? {
+                return Ok(Some(crate::abi::linux::generic::errno::to_result(
+                    crate::abi::linux::generic::errno::EINTR,
+                )));
+            }
             let mut sbi_count = 0u32;
             loop {
                 let exit = vcpu.run().map_err(|_| ())?;
@@ -1444,6 +1474,57 @@ mod irqfd_tests {
     use crate::ipc::counter::Counter;
     #[cfg(target_arch = "aarch64")]
     use crate::task::{Task, TaskType, clear_mock_current_task, set_mock_current_task};
+
+    #[cfg(target_arch = "aarch64")]
+    #[test_case]
+    fn immediate_exit_returns_eintr_without_entering_guest() {
+        struct NoEntryVcpu;
+        impl ControlOps for NoEntryVcpu {}
+        impl VcpuObject for NoEntryVcpu {
+            fn id(&self) -> u32 {
+                0
+            }
+            fn inject_interrupt(&self, _: InterruptType) {}
+            fn clear_interrupt(&self, _: InterruptType) {}
+            fn get_reg(&self, _: usize) -> Result<u64, &'static str> {
+                Ok(0)
+            }
+            fn set_reg(&self, _: usize, _: u64) -> Result<(), &'static str> {
+                Ok(())
+            }
+            fn run(&self) -> Result<crate::hypervisor::VmExit, &'static str> {
+                panic!("immediate_exit must not enter the guest")
+            }
+        }
+        let task = Arc::new(Task::new("kvm-immediate-exit".into(), 1, TaskType::Kernel));
+        set_mock_current_task(task.clone());
+        let vm = Arc::new(crate::arch::hv::Vm::new(0, task.vm_manager.clone()).unwrap());
+        let vcpu = Arc::new(NoEntryVcpu);
+        let vm_ref: VmRef = vm;
+        register_vcpu_run_page(vcpu.as_ref(), &vm_ref).unwrap();
+        let mut abi = LinuxAbi::default();
+        assert_eq!(
+            handle_system_ioctl(KVM_CHECK_EXTENSION, 136, &mut abi),
+            Ok(Some(1))
+        );
+        assert!(!run_immediate_exit(vcpu.as_ref(), 0).unwrap());
+        let address = crate::vm::addr::phys_to_virt(get_vcpu_run_paddr(vcpu.as_ref()).unwrap());
+        // SAFETY: the registered run page is owned by this test vCPU.
+        unsafe {
+            core::ptr::write_volatile((address + 1) as *mut u8, 1);
+        }
+        clean_run_page_to_poc(address);
+        let mut tf = crate::arch::Trapframe::new();
+        assert_eq!(
+            handle_vcpu_ioctl(KVM_RUN, 0, vcpu.as_ref(), &mut tf),
+            Ok(Some(crate::abi::linux::generic::errno::to_result(
+                crate::abi::linux::generic::errno::EINTR
+            )))
+        );
+        assert!(run_immediate_exit(vcpu.as_ref(), 0).unwrap());
+        free_vcpu_run_page(vcpu.as_ref());
+        clear_mock_current_task();
+    }
 
     #[test_case]
     fn irqfd_resample_capability_is_architecture_specific() {

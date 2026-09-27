@@ -1274,6 +1274,28 @@ pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return usize::MAX;
     }
 
+    // A signal record may straddle a user page boundary. Splitting the read at
+    // that boundary would give the object a buffer smaller than its 128-byte
+    // record and incorrectly return EINVAL (or consume only part of a record).
+    if kernel_obj
+        .as_file()
+        .is_some_and(|file| file.as_any().is::<super::signalfd::SignalFd>())
+    {
+        let mut buffer = [0u8; crate::environment::PAGE_SIZE];
+        let length = count.min(buffer.len());
+        let result = match stream.read(&mut buffer[..length]) {
+            Ok(n) => {
+                match crate::library::std::usercopy::copy_to_user(&task, user_buf, &buffer[..n]) {
+                    Ok(()) => n,
+                    Err(_) => errno::to_result(errno::EFAULT),
+                }
+            }
+            Err(error) => errno::to_result(stream_error_to_errno(error)),
+        };
+        trapframe.increment_pc_next(&task);
+        return result;
+    }
+
     // Fast path: buffer fits within a single page
     let page_offset = user_buf & (crate::environment::PAGE_SIZE - 1);
     if page_offset + count <= crate::environment::PAGE_SIZE {

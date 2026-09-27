@@ -1,0 +1,12 @@
+[package]
+name = "crosvm-smoke-init"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+scarlet-std = { path = "../../../user/lib/std" }
+
+[profile.release]
+panic = "abort"

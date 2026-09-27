@@ -897,6 +897,11 @@ pub struct Task {
     deferred_exit_request: IrqSpinLock<Option<DeferredExitRequest>>,
     /// Linux CLONE_CHILD_CLEARTID state kept outside task-local ABI storage.
     clear_child_tid: IrqSpinLock<Option<usize>>,
+    /// Published Linux signal state, accessible without borrowing the active ABI.
+    /// File operations resolve the reader's state here (including inherited FDs).
+    pub(crate) linux_signal_state: IrqSpinLock<
+        Option<alloc::sync::Weak<IrqSpinLock<crate::abi::linux::generic::signal::SignalState>>>,
+    >,
     /// Handle table for kernel objects (already thread-safe internally)
     pub handle_table: HandleTable,
     /// Kernel stack window base (slot_index, base_vaddr)
@@ -1134,6 +1139,7 @@ impl Task {
             abi_zones: TaskLocal::new(BTreeMap::new()),
             deferred_exit_request: IrqSpinLock::new(None),
             clear_child_tid: IrqSpinLock::new(None),
+            linux_signal_state: IrqSpinLock::new(None),
             handle_table: HandleTable::new(),
             kernel_stack_window_base: IrqSpinLock::new(None),
             cpu_affinity_mask: AtomicUsize::new(usize::MAX),

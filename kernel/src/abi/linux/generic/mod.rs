@@ -12,6 +12,7 @@ pub mod proc;
 mod proc_fd;
 mod proc_text;
 pub mod signal;
+mod signalfd;
 pub mod socket;
 pub mod time;
 
@@ -131,6 +132,19 @@ impl Default for LinuxAbi {
 }
 
 impl LinuxAbi {
+    pub(crate) fn bind_task_signals(&self, task: &crate::task::Task) {
+        *task.linux_signal_state.lock() = Some(Arc::downgrade(&self.signal_state));
+    }
+
+    pub(crate) fn fork_signal_state(&mut self) {
+        let mut state = self.signal_state.lock().clone();
+        // fork inherits dispositions and the mask, but no pending signals or
+        // waiters. Threads retain Scarlet's existing shared signal model.
+        state.pending = signal::SignalMask::new();
+        state.pending_waker = Arc::new(crate::sync::waker::Waker::new_interruptible("linux_signal"));
+        self.signal_state = Arc::new(IrqSpinLock::new(state));
+    }
+
     /// Prepare an independent fd table without closing any handle in the caller.
     pub fn prepare_exec_fds(&mut self, source: Option<&Self>, image: &crate::task::Task) {
         if let Some(source) = source {
@@ -432,6 +446,14 @@ impl LinuxAbi {
     }
 }
 
+/// Linux libc probes newer syscalls and falls back only on ENOSYS.
+pub(crate) fn unsupported_syscall(trapframe: &mut Trapframe) -> usize {
+    if let Some(task) = crate::task::mytask() {
+        trapframe.increment_pc_next(&task);
+    }
+    errno::to_result(errno::ENOSYS)
+}
+
 pub(crate) fn close_kernel_object_for_linux(_object: &crate::object::KernelObject) {
     // Socket finalization is tied to KernelObject logical ownership rather
     // than Linux descriptor-table scans. Dropping the removed object releases
@@ -482,6 +504,7 @@ syscall_table! {
     Pwrite64 = 68 => fs::sys_pwrite64,
     Pselect6 = 72 => fs::sys_pselect6,
     Ppoll = 73 => fs::sys_ppoll,
+    Signalfd4 = 74 => signalfd::sys_signalfd4,
     NewFstAtAt = 79 => fs::sys_newfstatat,
     NewFstat = 80 => fs::sys_newfstat,
     ReadLinkAt = 78 => fs::sys_readlinkat,
