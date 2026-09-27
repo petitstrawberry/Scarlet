@@ -3153,7 +3153,9 @@ impl Task {
         });
     }
 
-    fn release_all_memory_maps_for_exit(&self) {
+    /// Release mappings after exit. The caller must be the sole exiting VM
+    /// owner, or the task reaper after every shared-VM task has stopped running.
+    pub(crate) fn release_all_memory_maps_for_exit(&self) {
         let map_count = self.vm_manager.memmap_len();
         self.trace_fork_exit_phase("exit-vm-begin", map_count);
         crate::breadcrumb::drop(

@@ -230,6 +230,16 @@ impl VirtualMemoryManager {
         Arc::strong_count(&self.inner) == 1
     }
 
+    /// Identify shared address spaces without relying on reusable ASIDs.
+    pub(crate) fn shares_address_space(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// Count manager instances, including non-Task owners and unpublished clones.
+    pub(crate) fn address_space_owner_count(&self) -> usize {
+        Arc::strong_count(&self.inner)
+    }
+
     /// Set the owner task ID if this manager does not already have one.
     ///
     /// # Arguments

@@ -811,6 +811,58 @@ impl TaskPool {
         reclaimed
     }
 
+    /// Release exited address spaces independently of wait/reaping the zombie.
+    /// All known VM owners must be terminal and off-CPU. Include retirement
+    /// entries and reject unknown manager owners (e.g. an unpublished clone).
+    /// Mapping callbacks run only in reaper task context, outside pool locks.
+    fn reap_exited_memory_maps(&self) -> bool {
+        let mut owners: Vec<Arc<Task>> = self
+            .tasks
+            .lock()
+            .tasks
+            .values()
+            .map(|entry| Arc::clone(&entry.task))
+            .collect();
+        {
+            let retired = self.retired_tasks.lock();
+            for entry in retired.iter() {
+                // A concurrent wait may have moved an entry between snapshots.
+                if !owners.iter().any(|owner| Arc::ptr_eq(owner, &entry.task)) {
+                    owners.push(Arc::clone(&entry.task));
+                }
+            }
+        }
+        let mut retry = false;
+        for task in &owners {
+            if !matches!(task.get_state(), TaskState::Zombie | TaskState::Terminated)
+                || task.vm_manager.memmap_len() == 0
+            {
+                continue;
+            }
+            let mut known = 0;
+            let mut live = false;
+            let mut running = false;
+            for owner in &owners {
+                if task.vm_manager.shares_address_space(&owner.vm_manager) {
+                    known += 1;
+                    live |= !matches!(owner.get_state(), TaskState::Zombie | TaskState::Terminated);
+                    running |= owner.running_cpu.load(Ordering::SeqCst) != NO_CPU;
+                }
+            }
+            if live {
+                // A live CLONE_VM owner still needs these mappings. Its later
+                // exit will wake this worker; no periodic polling is needed.
+                continue;
+            }
+            if running || task.vm_manager.address_space_owner_count() != known {
+                retry = true;
+                continue;
+            }
+            task.release_all_memory_maps_for_exit();
+        }
+        retry
+    }
+
     /// Drop reclaimable retired tasks immediately from normal task context.
     ///
     /// This is used by resource allocation slow paths that can recover by
@@ -882,11 +934,12 @@ fn task_reaper_worker_entry() {
     loop {
         let task_pool = get_task_pool();
         task_pool.reap_retired_tasks();
+        let pending_exit_memory = task_pool.reap_exited_memory_maps();
 
         let Some(task) = crate::task::mytask() else {
             crate::arch::instruction::idle();
         };
-        if task_pool.has_retired_tasks() {
+        if task_pool.has_retired_tasks() || pending_exit_memory {
             TASK_REAPER_WAKER.wait_with_timeout(
                 task.get_id(),
                 task.get_trapframe(),
@@ -4614,6 +4667,10 @@ pub fn unmark_blocked(task_id: usize) {
 }
 
 pub fn finalize_zombie(task_id: usize, parent_id: Option<usize>) {
+    // A zombie remains waitable, but must not retain mmap device ownership
+    // until its parent next calls wait. Teardown itself cannot run here:
+    // finalize may execute on the scheduler's interrupt/transition path.
+    TASK_REAPER_WAKER.wake_one();
     crate::breadcrumb::drop(
         crate::breadcrumb::ZOMBIE_FINALIZE,
         task_id as u64,
@@ -7162,6 +7219,77 @@ mod tests {
         drop(task);
         assert_eq!(get_task_pool().reap_retired_tasks_for_test(), 1);
         assert!(get_task_pool().retired_tasks.lock().is_empty());
+    }
+
+    #[test_case]
+    fn test_unreaped_zombie_releases_vm_without_consuming_exit_status() {
+        reset();
+        let mut task = crate::task::new_user_task("UnreapedVm".to_string(), 0);
+        task.init();
+        task.allocate_data_pages(0x4000, 1).unwrap();
+        let id = register_task(task);
+        let task = TaskPool::get_task(id).unwrap();
+        task.set_exit_status(73);
+        task.state.store(TaskState::Zombie, Ordering::SeqCst);
+        assert!(!get_task_pool().reap_exited_memory_maps());
+        assert_eq!(task.vm_manager.memmap_len(), 0);
+        assert_eq!(task.get_state(), TaskState::Zombie);
+        assert!(TaskPool::get_task(id).is_some());
+        assert_eq!(task.get_exit_status(), Some(73));
+    }
+
+    #[test_case]
+    fn test_unreaped_vm_waits_for_shared_owner_cpu_release() {
+        reset();
+        let mut leader = crate::task::new_user_task("UnreapedLeader".to_string(), 0);
+        leader.init();
+        leader.allocate_data_pages(0x4000, 1).unwrap();
+        let mut flags = crate::task::CloneFlags::new();
+        flags.set(crate::task::CloneFlagsDef::Vm);
+        flags.set(crate::task::CloneFlagsDef::Thread);
+        let worker = leader.clone_task(flags).unwrap();
+        let leader_id = register_task(leader);
+        let worker_id = register_task(worker);
+        let leader = TaskPool::get_task(leader_id).unwrap();
+        let worker = TaskPool::get_task(worker_id).unwrap();
+        leader.state.store(TaskState::Zombie, Ordering::SeqCst);
+        worker.state.store(TaskState::Terminated, Ordering::SeqCst);
+        worker.running_cpu.store(1, Ordering::SeqCst);
+        assert!(get_task_pool().reap_exited_memory_maps());
+        assert!(leader.vm_manager.memmap_len() > 0);
+        worker.running_cpu.store(NO_CPU, Ordering::SeqCst);
+        // A retained lookup must not defer VM cleanup until Task destruction.
+        assert!(get_task_pool().remove_task(worker_id));
+        assert!(!get_task_pool().reap_exited_memory_maps());
+        assert_eq!(leader.vm_manager.memmap_len(), 0);
+        assert_eq!(worker.vm_manager.memmap_len(), 0);
+    }
+
+    #[test_case]
+    fn test_unreaped_vm_preserves_live_and_non_task_owners() {
+        reset();
+        let mut leader = crate::task::new_user_task("SharedVmExit".to_string(), 0);
+        leader.init();
+        leader.allocate_data_pages(0x4000, 1).unwrap();
+        let mut flags = crate::task::CloneFlags::new();
+        flags.set(crate::task::CloneFlagsDef::Vm); // Deliberately another TGID.
+        let child = leader.clone_task(flags).unwrap();
+        let leader_id = register_task(leader);
+        let child_id = register_task(child);
+        let leader = TaskPool::get_task(leader_id).unwrap();
+        let child = TaskPool::get_task(child_id).unwrap();
+        leader.state.store(TaskState::Zombie, Ordering::SeqCst);
+        child.state.store(TaskState::Ready, Ordering::SeqCst);
+        assert!(!get_task_pool().reap_exited_memory_maps());
+        assert!(leader.vm_manager.memmap_len() > 0);
+        let external = leader.vm_manager.clone();
+        child.state.store(TaskState::Zombie, Ordering::SeqCst);
+        assert!(get_task_pool().reap_exited_memory_maps());
+        assert!(external.memmap_len() > 0);
+        drop(external);
+        assert!(!get_task_pool().reap_exited_memory_maps());
+        assert_eq!(leader.vm_manager.memmap_len(), 0);
+        assert_eq!(child.get_state(), TaskState::Zombie);
     }
 
     #[test_case]
