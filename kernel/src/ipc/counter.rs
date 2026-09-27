@@ -17,7 +17,7 @@ use crate::object::capability::selectable::{
 };
 use crate::object::capability::{CloneOps, StreamError, StreamOps};
 use crate::sched::scheduler::current_task_id;
-use crate::sync::waker::Waker;
+use crate::sync::waker::{WaitResult, Waker};
 
 /// Observer notified when a counter is written.
 pub trait CounterWriteListener: Send + Sync {
@@ -134,8 +134,21 @@ impl Counter {
                     return Err(StreamError::WouldBlock);
                 }
 
-                // For now, just return WouldBlock (TODO: implement proper blocking)
-                return Err(StreamError::WouldBlock);
+                // Register and recheck after dropping the state lock so a
+                // concurrent write cannot be lost between the query and sleep.
+                drop(state);
+                let task = crate::task::mytask().ok_or(StreamError::WouldBlock)?;
+                let result = self.data.read_waker.wait_with_condition(
+                    task.get_id(),
+                    task.get_trapframe(),
+                    None,
+                    0,
+                    || self.data.state.lock().counter != 0,
+                );
+                if result == WaitResult::Interrupted {
+                    return Err(StreamError::Interrupted);
+                }
+                continue;
             }
 
             // Read the value
@@ -189,8 +202,21 @@ impl Counter {
                     return Err(StreamError::WouldBlock);
                 }
 
-                // For now, just return WouldBlock (TODO: implement proper blocking)
-                return Err(StreamError::WouldBlock);
+                drop(state);
+                let task = crate::task::mytask().ok_or(StreamError::WouldBlock)?;
+                let result = self.data.write_waker.wait_with_condition(
+                    task.get_id(),
+                    task.get_trapframe(),
+                    None,
+                    0,
+                    // POLLOUT only promises space for 1. This write must wait
+                    // until the entire requested addition fits atomically.
+                    || self.data.state.lock().counter <= u64::MAX - add_value - 1,
+                );
+                if result == WaitResult::Interrupted {
+                    return Err(StreamError::Interrupted);
+                }
+                continue;
             }
 
             // Add to counter
@@ -352,5 +378,108 @@ impl CounterObject for Counter {
 
     fn add_write_listener(&self, listener: Arc<dyn CounterWriteListener>) {
         self.add_write_listener(listener);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::event::{Event, ProcessControlType};
+    use crate::sched::scheduler::{
+        add_task, get_task_by_id, register_online_cpu, remove_from_ready_queues, reset,
+        set_current_task_for_test,
+    };
+    use crate::task::{Task, TaskState, TaskType};
+    use core::sync::atomic::Ordering;
+
+    #[test_case]
+    fn blocking_counter_io_is_interruptible_and_preserves_state() {
+        reset();
+        let cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+        let id = add_task(
+            Task::new("counter-waiter".to_string(), 1, TaskType::Kernel),
+            cpu,
+        );
+        let task = get_task_by_id(id).unwrap();
+        crate::vm::setup_trampoline_for_task_kstack_window(&task).unwrap();
+        task.set_state(TaskState::Running);
+        task.running_cpu.store(cpu, Ordering::SeqCst);
+        set_current_task_for_test(cpu, Some(id));
+        remove_from_ready_queues(id);
+        task.event_queue
+            .lock()
+            .enqueue(Event::immediate_process_control(
+                id as u32,
+                ProcessControlType::Interrupt,
+            ));
+
+        let counter = Counter::new(0, false);
+        let mut bytes = [0x55; 8];
+        assert!(matches!(
+            counter.read(&mut bytes),
+            Err(StreamError::Interrupted)
+        ));
+        assert_eq!(bytes, [0x55; 8]);
+        assert_eq!(counter.data.state.lock().counter, 0);
+        assert_eq!(counter.data.read_waker.waiting_count(), 0);
+
+        // A previous wake must not turn a blocked operation into success or
+        // conceal a pending interruption on the next wait attempt.
+        counter.data.read_waker.wake_all();
+        assert!(matches!(
+            counter.read(&mut bytes),
+            Err(StreamError::Interrupted)
+        ));
+
+        // POLLOUT is true, but there is insufficient room for this addition.
+        counter.write(&(u64::MAX - 2).to_ne_bytes()).unwrap();
+        assert!(counter.current_ready(ReadyInterest::write()).write);
+        assert!(matches!(
+            counter.write(&2u64.to_ne_bytes()),
+            Err(StreamError::Interrupted)
+        ));
+        assert_eq!(counter.data.state.lock().counter, u64::MAX - 2);
+        assert_eq!(counter.data.write_waker.waiting_count(), 0);
+
+        counter.write(&1u64.to_ne_bytes()).unwrap();
+        assert!(!counter.current_ready(ReadyInterest::write()).write);
+        assert!(matches!(
+            counter.write(&1u64.to_ne_bytes()),
+            Err(StreamError::Interrupted)
+        ));
+        assert_eq!(counter.data.state.lock().counter, u64::MAX - 1);
+        assert_eq!(task.get_state(), TaskState::Running);
+
+        let _ = task.event_queue.lock().dequeue();
+        set_current_task_for_test(cpu, None);
+        task.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        drop(task);
+        reset();
+    }
+
+    #[test_case]
+    fn nonblocking_counter_io_and_semaphore_consumption() {
+        let counter = Counter::new(0, true);
+        counter.set_nonblocking(true);
+        let mut bytes = [0; 8];
+        assert!(matches!(
+            counter.read(&mut bytes),
+            Err(StreamError::WouldBlock)
+        ));
+        counter.write(&(u64::MAX - 1).to_ne_bytes()).unwrap();
+        assert!(matches!(
+            counter.write(&1u64.to_ne_bytes()),
+            Err(StreamError::WouldBlock)
+        ));
+        assert_eq!(counter.read(&mut bytes).unwrap(), 8);
+        assert_eq!(u64::from_ne_bytes(bytes), 1);
+        assert!(counter.current_ready(ReadyInterest::write()).write);
+        assert!(matches!(
+            counter.write(&2u64.to_ne_bytes()),
+            Err(StreamError::WouldBlock)
+        ));
+        assert_eq!(counter.write(&1u64.to_ne_bytes()).unwrap(), 8);
+        assert_eq!(counter.data.state.lock().counter, u64::MAX - 1);
     }
 }
