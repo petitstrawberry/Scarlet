@@ -51,17 +51,17 @@
     "qemu-scarlet": {
       "flake": false,
       "locked": {
-        "lastModified": 1789287539,
-        "narHash": "sha256-YcYc2DiyFkfG/RlGEUBfB1OJmsaHcXo6NUP0MZ7ZSUQ=",
+        "lastModified": 1790515991,
+        "narHash": "sha256-Is1nHJLz5sr96l8Mb39EvfP6IMnUuALLqir3KLxLuv0=",
         "ref": "refs/heads/master",
-        "rev": "922577606033eade699d231ba7cebcee0d6b92b6",
-        "revCount": 131589,
+        "rev": "d94a1407ab9ccd60559bfd80182a81bb4261fb84",
+        "revCount": 131687,
         "submodules": true,
         "type": "git",
         "url": "https://gitlab.com/petitstrawberry/qemu.git"
       },
       "original": {
-        "rev": "922577606033eade699d231ba7cebcee0d6b92b6",
+        "rev": "d94a1407ab9ccd60559bfd80182a81bb4261fb84",
         "submodules": true,
         "type": "git",
         "url": "https://gitlab.com/petitstrawberry/qemu.git"
