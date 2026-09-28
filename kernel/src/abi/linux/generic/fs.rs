@@ -126,6 +126,29 @@ fn is_epoll_handle(handle: u32) -> bool {
     (handle & 0xf000_0000) == EPOLL_HANDLE_BASE
 }
 
+// Epoll instances currently live in the ABI registry, not the kernel object
+// table. Duplicates must retain their registry identity instead of attempting
+// HandleTable::clone_for_dup (which would report EBADF).
+fn duplicate_epoll_fd(abi: &mut LinuxAbi, fd: usize, minimum: usize, cloexec: bool) -> usize {
+    let Some(handle) = abi.get_handle(fd) else {
+        return errno::to_result(errno::EBADF);
+    };
+    if minimum >= super::MAX_FDS {
+        return errno::to_result(errno::EINVAL);
+    }
+    let status = abi.get_file_status_flags(fd).unwrap_or(0);
+    for candidate in minimum..super::MAX_FDS {
+        // allocate_specific_fd holds the shared fd-table lock. Another thread
+        // taking this slot simply makes us try the next one.
+        if abi.allocate_specific_fd(candidate, handle).is_ok() {
+            let _ = abi.set_file_status_flags(candidate, status);
+            let _ = abi.set_fd_flags(candidate, if cloexec { FD_CLOEXEC } else { 0 });
+            return candidate;
+        }
+    }
+    errno::to_result(errno::EMFILE)
+}
+
 fn read_linux_epoll_event(task: &crate::task::Task, event_ptr: usize) -> Option<(u32, u64)> {
     if event_ptr == 0 {
         return None;
@@ -162,6 +185,41 @@ fn epoll_ready_events(abi: &LinuxAbi, task: &crate::task::Task, interest: EpollI
         return 0;
     };
     if handle != interest.watched_handle {
+        return 0;
+    }
+    if is_epoll_handle(handle) {
+        if interest.events & EPOLLIN == 0 {
+            return 0;
+        }
+        // Walk on the heap rather than recursing on the kernel stack. An
+        // epoll FD is readable when its own ready list is nonempty. Release
+        // the registry lock before consulting any watched kernel object.
+        let mut pending = vec![handle];
+        let mut visited = Vec::new();
+        while let Some(handle) = pending.pop() {
+            if visited.contains(&handle) {
+                continue;
+            }
+            visited.push(handle);
+            let children: Vec<_> = epoll_interests()
+                .read()
+                .iter()
+                .filter(|child| child.epoll_handle == handle)
+                .copied()
+                .collect();
+            for child in children {
+                if abi.get_handle(child.fd as usize) != Some(child.watched_handle) {
+                    continue;
+                }
+                if is_epoll_handle(child.watched_handle) {
+                    if child.events & EPOLLIN != 0 {
+                        pending.push(child.watched_handle);
+                    }
+                } else if epoll_ready_events(abi, task, child) != 0 {
+                    return EPOLLIN;
+                }
+            }
+        }
         return 0;
     }
     let Some(kobj) = task.handle_table.get(handle) else {
@@ -1117,6 +1175,9 @@ pub fn sys_dup(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Get handle from Linux fd
     if let Some(old_handle) = abi.get_handle(fd) {
+        if is_epoll_handle(old_handle) {
+            return duplicate_epoll_fd(abi, fd, 0, false);
+        }
         // Use clone_for_dup to get proper dup() semantics (increments Pipe reader/writer counts etc.)
         if let Some((kernel_obj, metadata)) = task.handle_table.clone_for_dup(old_handle) {
             let handle = task.handle_table.insert_with_metadata(kernel_obj, metadata);
@@ -1161,6 +1222,25 @@ pub fn sys_dup3(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Get handle from old fd
     if let Some(old_handle) = abi.get_handle(oldfd) {
+        if is_epoll_handle(old_handle) {
+            if newfd >= super::MAX_FDS {
+                return errno::to_result(errno::EBADF);
+            }
+            let status = abi.get_file_status_flags(oldfd).unwrap_or(0);
+            if let Some(replaced) = abi.remove_fd(newfd) {
+                if !is_epoll_handle(replaced) {
+                    if let Some(object) = task.handle_table.remove(replaced) {
+                        super::close_kernel_object_for_linux(&object);
+                    }
+                }
+            }
+            if abi.allocate_specific_fd(newfd, old_handle).is_err() {
+                return errno::to_result(errno::EBUSY);
+            }
+            let _ = abi.set_file_status_flags(newfd, status);
+            let _ = abi.set_fd_flags(newfd, if flags != 0 { FD_CLOEXEC } else { 0 });
+            return newfd;
+        }
         // Use clone_for_dup to get proper dup() semantics (increments Pipe reader/writer counts etc.)
         if let Some((kernel_obj, metadata)) = task.handle_table.clone_for_dup(old_handle) {
             let handle = task.handle_table.insert_with_metadata(kernel_obj, metadata);
@@ -2856,6 +2936,9 @@ pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             };
         }
         F_DUPFD => {
+            if abi.get_handle(fd).is_some_and(is_epoll_handle) {
+                return duplicate_epoll_fd(abi, fd, arg, false);
+            }
             if LOG_FCNTL {
                 crate::println!(
                     "[sys_fcntl] F_DUPFD: fd={}, arg={} - NOT IMPLEMENTED",
@@ -3065,6 +3148,9 @@ pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             // TODO: Implement F_NOTIFY
         }
         F_DUPFD_CLOEXEC => {
+            if abi.get_handle(fd).is_some_and(is_epoll_handle) {
+                return duplicate_epoll_fd(abi, fd, arg, true);
+            }
             if LOG_FCNTL {
                 crate::println!(
                     "[sys_fcntl] F_DUPFD_CLOEXEC: fd={}, arg={} - NOT IMPLEMENTED",
@@ -4351,7 +4437,32 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 return errno::to_result(errno::EBADF);
             };
 
+            if watched_handle == epoll_handle {
+                return errno::to_result(errno::EINVAL);
+            }
+
             let mut interests = epoll_interests().write();
+            if op == EPOLL_CTL_ADD && is_epoll_handle(watched_handle) {
+                let mut pending = vec![watched_handle];
+                let mut visited = Vec::new();
+                while let Some(handle) = pending.pop() {
+                    if handle == epoll_handle {
+                        return errno::to_result(errno::ELOOP);
+                    }
+                    if visited.contains(&handle) {
+                        continue;
+                    }
+                    visited.push(handle);
+                    for child in interests
+                        .iter()
+                        .filter(|child| child.epoll_handle == handle)
+                    {
+                        if is_epoll_handle(child.watched_handle) {
+                            pending.push(child.watched_handle);
+                        }
+                    }
+                }
+            }
             if let Some(existing) = interests.iter_mut().find(|interest| {
                 interest.epoll_handle == epoll_handle
                     && interest.fd == fd
