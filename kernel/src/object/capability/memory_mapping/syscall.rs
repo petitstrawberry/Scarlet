@@ -385,34 +385,31 @@ fn handle_anonymous_mapping(
         owner: Some(owner),
     };
 
-    let removed_mappings = if is_map_fixed {
-        match task.vm_manager.add_memory_map_fixed(vm_map) {
-            Ok(removed) => removed,
-            Err(_) => return usize::MAX,
+    install_anonymous_mapping(task, vm_map, is_map_fixed)
+}
+
+fn install_anonymous_mapping(
+    task: &crate::task::Task,
+    vm_map: VirtualMemoryMap,
+    is_map_fixed: bool,
+) -> usize {
+    let final_vaddr = vm_map.vmarea.start;
+    if !is_map_fixed {
+        if task.vm_manager.add_memory_map(vm_map.clone()).is_ok() {
+            return final_vaddr;
         }
-    } else {
-        match task.vm_manager.add_memory_map(vm_map.clone()) {
-            Ok(()) => Vec::new(),
-            Err(_) => {
-                let retry_vaddr = match task
-                    .vm_manager
-                    .find_unmapped_area(aligned_length, PAGE_SIZE)
-                {
-                    Some(addr) => addr,
-                    None => return usize::MAX,
-                };
-                let retry_vmarea = MemoryArea::new(retry_vaddr, retry_vaddr + aligned_length - 1);
-                let retry_map = VirtualMemoryMap {
-                    vmarea: retry_vmarea,
-                    vm_start: retry_vaddr,
-                    ..vm_map
-                };
-                match task.vm_manager.add_memory_map(retry_map) {
-                    Ok(()) => Vec::new(),
-                    Err(_) => return usize::MAX,
-                }
-            }
-        }
+        // A sibling sharing this VM can claim the chosen gap before insertion.
+        // Reserve the replacement under one VM lock and return that actual
+        // address, never the original candidate now owned by the sibling.
+        return task
+            .vm_manager
+            .add_memory_map_anywhere(vm_map)
+            .unwrap_or(usize::MAX);
+    }
+
+    let removed_mappings = match task.vm_manager.add_memory_map_fixed(vm_map) {
+        Ok(removed) => removed,
+        Err(_) => return usize::MAX,
     };
 
     for removed_map in &removed_mappings {
@@ -573,6 +570,64 @@ pub fn sys_memory_unmap(trapframe: &mut Trapframe) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn native_anonymous_mapping_collision_returns_its_own_reservation() {
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+
+        let task = crate::task::new_user_task("anonymous-mapping-collision".into(), 0);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let candidate = task
+            .vm_manager
+            .find_unmapped_area(PAGE_SIZE, PAGE_SIZE)
+            .unwrap();
+
+        // Model a sibling winning the gap after our address selection but
+        // before insertion. Its TLS/allocator data must remain untouched.
+        assert_eq!(
+            handle_anonymous_mapping(
+                &task,
+                candidate,
+                PAGE_SIZE,
+                1,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS,
+            ),
+            candidate
+        );
+        copy_to_user(&task, candidate, b"sibling TLS").unwrap();
+        let original_backing = task.vm_manager.translate_to_phys(candidate).unwrap();
+        let owner: Arc<dyn crate::object::capability::memory_mapping::MemoryMappingOps> =
+            Arc::new(AnonymousPageOwner::new());
+        let map = VirtualMemoryMap {
+            pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
+            vmarea: MemoryArea::new(candidate, candidate + PAGE_SIZE - 1),
+            vm_start: candidate,
+            permissions: 0x0b,
+            is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
+            owner: Some(owner.clone()),
+        };
+        let address = install_anonymous_mapping(&task, map, false);
+        assert_ne!(address, usize::MAX);
+        assert_ne!(address, candidate);
+        let installed = task.vm_manager.search_memory_map(address).unwrap();
+        assert_eq!(installed.vmarea.start, address);
+        assert_eq!(installed.vm_start, address);
+        assert!(Arc::ptr_eq(installed.owner.as_ref().unwrap(), &owner));
+        assert_eq!(
+            task.vm_manager.translate_to_phys(candidate),
+            Some(original_backing)
+        );
+
+        let mut bytes = [0; 11];
+        copy_from_user(&task, address, &mut bytes).unwrap();
+        assert_eq!(bytes, [0; 11]);
+        copy_to_user(&task, address, b"current TLS").unwrap();
+        copy_from_user(&task, candidate, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"sibling TLS");
+    }
 
     #[test_case]
     fn native_protect_preserves_anonymous_data_and_lazy_page_indices() {
