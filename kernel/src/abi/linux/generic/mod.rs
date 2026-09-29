@@ -15,6 +15,7 @@ pub mod signal;
 mod signalfd;
 pub mod socket;
 pub mod time;
+pub mod utimens;
 
 use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 
@@ -521,6 +522,7 @@ syscall_table! {
     ReadLinkAt = 78 => fs::sys_readlinkat,
     Fsync = 82 => fs::sys_fsync,
     Fdatasync = 83 => fs::sys_fsync,
+    UtimensAt = 88 => utimens::sys_utimensat,
     Capset = 91 => proc::sys_capset,
     TimerfdCreate = 85 => time::sys_timerfd_create,
     TimerfdSettime = 86 => time::sys_timerfd_settime,
