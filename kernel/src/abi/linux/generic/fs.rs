@@ -693,6 +693,81 @@ fn proc_exe_linux_stat(inode: u64, target_size: usize) -> LinuxStat {
     }
 }
 
+/// Descriptor metadata must also describe anonymous pipes, which expose
+/// StreamOps but intentionally do not implement FileObject.
+fn stat_from_object(
+    object: &crate::object::KernelObject,
+    handle: u32,
+) -> Result<(LinuxStat, u64), usize> {
+    use crate::fs::vfs_v2::core::VfsFileObject;
+
+    let pipe = object.as_pipe();
+    let mode = if pipe.is_some() {
+        S_IFIFO | 0o600
+    } else {
+        let file = object.as_file().ok_or(errno::EBADF)?;
+        if let Some(vfs_file) = file.as_any().downcast_ref::<VfsFileObject>() {
+            let node = vfs_file.get_vfs_entry().node();
+            let metadata = node
+                .metadata()
+                .map_err(|error| errno::from_fs_error(&error))?;
+            let mut stat = LinuxStat::from_metadata(&metadata);
+            if let Some(mode) = super::mode::get(&node) {
+                stat.st_mode = (stat.st_mode & !0o7777) | mode;
+            }
+            return Ok((stat, metadata.created_time));
+        }
+        if file.as_any().is::<super::memfd::MemfdFile>() {
+            let metadata = file.metadata().map_err(stream_error_to_errno)?;
+            return Ok((LinuxStat::from_metadata(&metadata), metadata.created_time));
+        }
+        S_IFCHR | 0o666
+    };
+
+    Ok((
+        LinuxStat {
+            // Keep anonymous pipe identities separate from VFS inode numbers.
+            st_dev: if pipe.is_some() { 1 } else { 0 },
+            st_ino: pipe
+                .and_then(|pipe| pipe.pipe_id())
+                .unwrap_or(handle as u64),
+            st_mode: mode,
+            st_nlink: 1,
+            st_uid: 0,
+            st_gid: 0,
+            st_rdev: if mode & S_IFMT == S_IFCHR {
+                handle as u64
+            } else {
+                0
+            },
+            __pad1: 0,
+            st_size: 0,
+            st_blksize: 4096,
+            __pad2: 0,
+            st_blocks: 0,
+            st_atime: 0,
+            st_atime_nsec: 0,
+            st_mtime: 0,
+            st_mtime_nsec: 0,
+            st_ctime: 0,
+            st_ctime_nsec: 0,
+            __unused4: 0,
+            __unused5: 0,
+        },
+        0,
+    ))
+}
+
+fn stat_from_fd(
+    abi: &LinuxAbi,
+    task: &crate::task::Task,
+    fd: usize,
+) -> Result<(LinuxStat, u64), usize> {
+    let handle = abi.get_handle(fd).ok_or(errno::EBADF)?;
+    let object = task.handle_table.get(handle).ok_or(errno::EBADF)?;
+    stat_from_object(&object, handle)
+}
+
 fn write_linux_stat(
     task: &crate::task::Task,
     userspace_address: usize,
@@ -1556,9 +1631,9 @@ pub fn sys_write(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     }
                     break;
                 }
-                Err(_) => {
+                Err(error) => {
                     if total_written == 0 {
-                        return usize::MAX;
+                        return errno::to_result(stream_error_to_errno(error));
                     }
                     break;
                 }
@@ -2154,6 +2229,22 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     const AT_FDCWD: i32 = -100;
     const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
 
+    const AT_EMPTY_PATH: i32 = 0x1000;
+    if path_str.is_empty() && (flags & AT_EMPTY_PATH) != 0 && dirfd != AT_FDCWD {
+        let (stat, _) = match stat_from_fd(abi, &task, dirfd as usize) {
+            Ok(stat) => stat,
+            Err(error) => return errno::to_result(error),
+        };
+        return write_linux_stat(&task, stat_ptr, &stat)
+            .map(|_| 0)
+            .unwrap_or_else(errno::to_result);
+    }
+    let path_str = if path_str.is_empty() && (flags & AT_EMPTY_PATH) != 0 {
+        ".".into()
+    } else {
+        path_str
+    };
+
     // /proc/self/task is intentionally synthetic within the Linux view.
     let vfs_for_proc = match task.get_vfs() {
         Some(vfs) => vfs,
@@ -2311,86 +2402,23 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         None => return errno::to_result(errno::EIO),
     };
 
-    // Support AT_EMPTY_PATH for stat-by-fd
-    if path_str.is_empty() && (flags & AT_EMPTY_PATH) != 0 {
-        let handle = match abi.get_handle(dirfd as usize) {
-            Some(h) => h,
-            None => return errno::to_result(errno::EBADF),
-        };
-        let kernel_obj = match task.handle_table.get(handle) {
-            Some(obj) => obj,
-            None => return errno::to_result(errno::EBADF),
-        };
-        let file_obj = match kernel_obj.as_file() {
-            Some(f) => f,
-            None => return errno::to_result(errno::EBADF),
-        };
-
-        use crate::fs::vfs_v2::core::VfsFileObject;
-        if let Some(vfs_file_obj) = file_obj.as_any().downcast_ref::<VfsFileObject>() {
-            let entry = vfs_file_obj.get_vfs_entry();
-            let node = entry.node();
-            let metadata = match node.metadata() {
-                Ok(m) => m,
-                Err(e) => return errno::to_result(errno::from_fs_error(&e)),
-            };
-            let mut stat = LinuxStat::from_metadata(&metadata);
-            if let Some(mode) = super::mode::get(&node) {
-                stat.st_mode = (stat.st_mode & !0o7777) | mode;
-            }
-            let mut statx = unsafe { core::mem::zeroed::<LinuxStatx>() };
-            fill_statx_from_stat(&mut statx, &stat, metadata.created_time, mask);
-            // crate::println!(
-            //     "sys_statx: empty_path name='{}' size={}",
-            //     entry.name(),
-            //     metadata.size
-            // );
-            return write_linux_statx(&task, statx_ptr, &statx)
-                .map(|_| 0)
-                .unwrap_or_else(errno::to_result);
-        }
-
-        if file_obj.as_any().is::<super::memfd::MemfdFile>() {
-            let metadata = match file_obj.metadata() {
-                Ok(metadata) => metadata,
-                Err(err) => return errno::to_result(stream_error_to_errno(err)),
-            };
-            let stat = LinuxStat::from_metadata(&metadata);
-            let mut statx = unsafe { core::mem::zeroed::<LinuxStatx>() };
-            fill_statx_from_stat(&mut statx, &stat, metadata.created_time, mask);
-            return write_linux_statx(&task, statx_ptr, &statx)
-                .map(|_| 0)
-                .unwrap_or_else(errno::to_result);
-        }
-
-        let stat = LinuxStat {
-            st_dev: 0,
-            st_ino: handle as u64,
-            st_mode: S_IFCHR | 0o666,
-            st_nlink: 1,
-            st_uid: 0,
-            st_gid: 0,
-            st_rdev: handle as u64,
-            __pad1: 0,
-            st_size: 0,
-            st_blksize: 4096,
-            __pad2: 0,
-            st_blocks: 0,
-            st_atime: 0,
-            st_atime_nsec: 0,
-            st_mtime: 0,
-            st_mtime_nsec: 0,
-            st_ctime: 0,
-            st_ctime_nsec: 0,
-            __unused4: 0,
-            __unused5: 0,
+    // The same descriptor metadata backs fstat and statx, including pipes.
+    if path_str.is_empty() && (flags & AT_EMPTY_PATH) != 0 && dirfd != AT_FDCWD {
+        let (stat, birthtime) = match stat_from_fd(abi, &task, dirfd as usize) {
+            Ok(stat) => stat,
+            Err(error) => return errno::to_result(error),
         };
         let mut statx = unsafe { core::mem::zeroed::<LinuxStatx>() };
-        fill_statx_from_stat(&mut statx, &stat, 0, mask);
+        fill_statx_from_stat(&mut statx, &stat, birthtime, mask);
         return write_linux_statx(&task, statx_ptr, &statx)
             .map(|_| 0)
             .unwrap_or_else(errno::to_result);
     }
+    let path_str = if path_str.is_empty() && (flags & AT_EMPTY_PATH) != 0 {
+        ".".into()
+    } else {
+        path_str
+    };
 
     // Determine base directory (entry and mount) for path resolution
     use crate::fs::vfs_v2::core::VfsFileObject;
@@ -4127,105 +4155,20 @@ pub fn sys_fstatfs(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 /// - usize::MAX (Linux -1) on error
 pub fn sys_newfstat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
-        Some(t) => t,
-        None => return usize::MAX,
+        Some(task) => task,
+        None => return errno::to_result(errno::EIO),
     };
-
-    let fd = trapframe.get_arg(0) as i32;
+    let fd = trapframe.get_arg(0) as i32 as usize;
     let stat_ptr = trapframe.get_arg(1);
-
-    // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
-    // Validate arguments
-    if stat_ptr == 0 {
-        return usize::MAX; // Return -1 if stat pointer is null
-    }
-
-    // Get handle from file descriptor
-    let handle = match abi.get_handle(fd as usize) {
-        Some(h) => h,
-        None => return usize::MAX, // Invalid file descriptor
+    let (stat, _) = match stat_from_fd(abi, &task, fd) {
+        Ok(stat) => stat,
+        Err(error) => return errno::to_result(error),
     };
-
-    // Get kernel object from handle
-    let kernel_obj = match task.handle_table.get(handle) {
-        Some(obj) => obj,
-        None => return usize::MAX, // Handle not found
-    };
-
-    // Get file object
-    let file_obj = match kernel_obj.as_file() {
-        Some(f) => f,
-        None => return usize::MAX, // Not a file object
-    };
-
-    // Get VFS file object to access metadata
-    use crate::fs::vfs_v2::core::VfsFileObject;
-    let vfs_file_obj = match file_obj.as_any().downcast_ref::<VfsFileObject>() {
-        Some(vfs_obj) => vfs_obj,
-        None => {
-            if file_obj.as_any().is::<super::memfd::MemfdFile>() {
-                let metadata = match file_obj.metadata() {
-                    Ok(metadata) => metadata,
-                    Err(err) => return errno::to_result(stream_error_to_errno(err)),
-                };
-                let stat = LinuxStat::from_metadata(&metadata);
-                return write_linux_stat(&task, stat_ptr, &stat)
-                    .map(|_| 0)
-                    .unwrap_or_else(errno::to_result);
-            }
-            // For non-VFS files (like devices), create a basic stat with minimal info
-            let stat = LinuxStat {
-                st_dev: 0,
-                st_ino: handle as u64,    // Use handle as inode
-                st_mode: S_IFCHR | 0o666, // Character device with rw-rw-rw- permissions
-                st_nlink: 1,
-                st_uid: 0,
-                st_gid: 0,
-                st_rdev: handle as u64,
-                __pad1: 0,
-                st_size: 0,
-                st_blksize: 4096,
-                __pad2: 0,
-                st_blocks: 0,
-                st_atime: 0,
-                st_atime_nsec: 0,
-                st_mtime: 0,
-                st_mtime_nsec: 0,
-                st_ctime: 0,
-                st_ctime_nsec: 0,
-                __unused4: 0,
-                __unused5: 0,
-            };
-            return write_linux_stat(&task, stat_ptr, &stat)
-                .map(|_| 0)
-                .unwrap_or_else(errno::to_result);
-        }
-    };
-
-    // Get VFS entry and metadata
-    let entry = vfs_file_obj.get_vfs_entry();
-    let node = entry.node();
-
-    match node.metadata() {
-        Ok(metadata) => {
-            let mut stat = LinuxStat::from_metadata(&metadata);
-            if let Some(mode) = super::mode::get(&node) {
-                stat.st_mode = (stat.st_mode & !0o7777) | mode;
-            }
-            // crate::println!(
-            //     "sys_newfstat: fd={} name='{}' size={}",
-            //     fd,
-            //     entry.name(),
-            //     metadata.size
-            // );
-            write_linux_stat(&task, stat_ptr, &stat)
-                .map(|_| 0)
-                .unwrap_or_else(errno::to_result)
-        }
-        Err(_) => usize::MAX, // Error getting metadata
-    }
+    write_linux_stat(&task, stat_ptr, &stat)
+        .map(|_| 0)
+        .unwrap_or_else(errno::to_result)
 }
 
 /// Linux sys_unlinkat implementation for Scarlet VFS v2
@@ -6011,6 +5954,49 @@ mod tests {
         proc_exe_linux_stat, proc_exe_selector,
     };
     use crate::abi::linux::generic::errno;
+
+    #[test_case]
+    fn pipe_descriptor_stat_identifies_both_ends_and_duplicates_as_one_fifo() {
+        use crate::abi::linux::generic::LinuxAbi;
+        use crate::ipc::UnidirectionalPipe;
+        use crate::task::{Task, TaskType};
+
+        let task = Task::new("linux-pipe-stat".into(), 0, TaskType::User);
+        let mut abi = LinuxAbi::default();
+        let (reader, writer) = UnidirectionalPipe::create_pair(4096);
+        let duplicate = reader.clone();
+        let mut identity = None;
+        for object in [reader, writer, duplicate] {
+            // Pipes have no FileObject capability; this was the EPERM path.
+            assert!(object.as_file().is_none());
+            let handle = task.handle_table.insert(object).unwrap();
+            let fd = abi.allocate_fd(handle).unwrap();
+            let (stat, birthtime) = super::stat_from_fd(&abi, &task, fd).unwrap();
+            assert_eq!(stat.st_mode & super::S_IFMT, super::S_IFIFO);
+            assert_eq!(stat.st_mode & 0o777, 0o600);
+            assert_eq!(stat.st_size, 0);
+            assert_eq!(stat.st_rdev, 0);
+            assert_eq!(stat.st_nlink, 1);
+            let current = (stat.st_dev, stat.st_ino);
+            if let Some(previous) = identity {
+                assert_eq!(current, previous);
+            }
+            identity = Some(current);
+            let mut statx = unsafe { core::mem::zeroed::<super::LinuxStatx>() };
+            super::fill_statx_from_stat(&mut statx, &stat, birthtime, super::STATX_BASIC_STATS);
+            assert_eq!(statx.stx_mode as u32 & super::S_IFMT, super::S_IFIFO);
+            assert_eq!(statx.stx_ino, stat.st_ino);
+            abi.remove_fd(fd);
+            task.handle_table.remove(handle);
+            assert!(matches!(
+                super::stat_from_fd(&abi, &task, fd),
+                Err(errno::EBADF)
+            ));
+        }
+        let (other, _) = UnidirectionalPipe::create_pair(4096);
+        let (stat, _) = super::stat_from_object(&other, 0).unwrap();
+        assert_ne!(Some((stat.st_dev, stat.st_ino)), identity);
+    }
 
     #[test_case]
     fn getdents_records_cross_noncontiguous_pages_and_reach_eof() {
