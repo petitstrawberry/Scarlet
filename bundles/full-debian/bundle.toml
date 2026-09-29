@@ -11,6 +11,12 @@ kind = "bundle"
 source = { git = "https://github.com/petitstrawberry/scarlet-bundle-debian.git", rev = "c7fb4a5462dac66d98d5484f735629dcffe2f501" }
 subdir = "bundles/rootfs-wine"
 
+# Runtime compatibility updates over the pinned Debian archive.
+[[layers]]
+kind = "copy"
+source = "fs"
+to = "/"
+
 [[layers]]
 kind = "bundle"
 path = "../experimental/bundle.toml"

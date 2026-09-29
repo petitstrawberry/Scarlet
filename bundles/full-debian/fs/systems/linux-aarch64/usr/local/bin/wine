@@ -1,0 +1,12 @@
+#!/bin/sh
+# Explicit Box64 entry point; no kernel binfmt_misc registration is required.
+export WINELOADER=/usr/lib/wine/wine64
+export WINESERVER=/usr/local/bin/wineserver
+export WINEARCH=win64
+export BOX64_LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu${BOX64_LD_LIBRARY_PATH:+:$BOX64_LD_LIBRARY_PATH}"
+# Keep these dependency ABIs in amd64: Box64 v0.4.4 wrappers lack the
+# OpenSSL BIO getters, OpenCL 1.2 platform lookup, OpenMP lock versions,
+# advanced Zstd stream constructors, and libssh private-key import used by
+# Debian trixie multimedia libraries.
+export BOX64_EMULATED_LIBS="libssl.so.3:libcrypto.so.3:libOpenCL.so.1:libgomp.so.1:libzstd.so.1:libssh.so.4${BOX64_EMULATED_LIBS:+:$BOX64_EMULATED_LIBS}"
+exec /usr/local/bin/box64 /usr/lib/wine/wine64 "$@"
