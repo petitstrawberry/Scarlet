@@ -32,16 +32,6 @@ impl Registry {
             next_name: 1,
         };
 
-        // Register default globals
-        registry.add_global("wl_compositor", 4);
-        registry.add_global("wl_shm", 1);
-        registry.add_global("wl_seat", 5);
-        registry.add_global("wl_output", 3);
-        registry.add_global("xdg_wm_base", 2);
-
-        // Clear and re-add with different order (seat first, version 7)
-        registry.globals.clear();
-        registry.next_name = 1;
         registry.add_global("wl_seat", 5);
         registry.add_global("wl_compositor", 4);
         registry.add_global("wl_data_device_manager", 3);
@@ -50,6 +40,17 @@ impl Registry {
         registry.add_global("xdg_wm_base", 2);
 
         registry
+    }
+
+    /// Advertise only capabilities implemented by the connected SWS instance.
+    pub fn set_surface_scenes(&mut self, enabled: bool) {
+        self.globals.retain(|_, global| {
+            global.interface != "wl_subcompositor" && global.interface != "wp_viewporter"
+        });
+        if enabled {
+            self.add_global("wl_subcompositor", 1);
+            self.add_global("wp_viewporter", 1);
+        }
     }
 
     /// Add a global interface

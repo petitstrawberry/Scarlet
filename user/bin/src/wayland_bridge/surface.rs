@@ -42,6 +42,7 @@ pub struct Surface {
 /// Surface role determines how the surface is displayed
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceRole {
+    Subsurface,
     /// XDG toplevel window (normal application window)
     XdgToplevel,
     /// XDG popup window

@@ -20,6 +20,8 @@ mod input;
 mod protocol;
 mod region;
 mod registry;
+mod scene;
+mod scene_bridge;
 mod shm;
 mod surface;
 mod xdg_shell;
@@ -29,7 +31,7 @@ use protocol::{MessageHeader, WaylandArg, WaylandMessage};
 use registry::Registry;
 use scarlet_os::time::monotonic_time_ns;
 use shm::ShmManager;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::handle::Handle;
 use std::io::{Read, Write};
@@ -360,6 +362,16 @@ struct WaylandBridge {
     registry: Registry,
     /// Surface manager
     surface_manager: SurfaceManager,
+    scene: scene::Scene,
+    subsurfaces: BTreeMap<u32, u32>,
+    viewports: BTreeMap<u32, u32>,
+    dirty_scenes: BTreeSet<u32>,
+    submitted_scenes: BTreeMap<u32, Vec<u32>>,
+    deferred_scene_destroys: BTreeSet<u32>,
+    deferred_scene_releases: BTreeSet<u32>,
+    pointer_surface: Option<u32>,
+    sws_busy_buffers: BTreeMap<u32, u64>,
+    pointer_buttons: BTreeSet<u16>,
     /// XDG Shell manager
     xdg_shell_manager: XdgShellManager,
     /// Shared memory manager for client SHM pools
@@ -441,6 +453,8 @@ struct WaylandBridge {
     /// Advertised via wl_output.scale so Wayland clients render at full
     /// physical resolution under HiDPI.
     output_scale: i32,
+    /// Mapped surfaces and their scene root on our single SWS output.
+    output_surfaces: BTreeMap<u32, u32>,
 }
 
 impl WaylandBridge {
@@ -472,6 +486,16 @@ impl WaylandBridge {
             sws_frame_done_count: 0,
             registry: Registry::new(),
             surface_manager: SurfaceManager::new(),
+            scene: scene::Scene::new(),
+            subsurfaces: BTreeMap::new(),
+            viewports: BTreeMap::new(),
+            dirty_scenes: BTreeSet::new(),
+            submitted_scenes: BTreeMap::new(),
+            deferred_scene_destroys: BTreeSet::new(),
+            deferred_scene_releases: BTreeSet::new(),
+            pointer_surface: None,
+            sws_busy_buffers: BTreeMap::new(),
+            pointer_buttons: BTreeSet::new(),
             xdg_shell_manager: XdgShellManager::new(),
             shm_manager: ShmManager::new(),
             region_manager: region::RegionManager::new(),
@@ -514,6 +538,7 @@ impl WaylandBridge {
             last_left_button_serial: None,
             last_left_button_time: None,
             output_scale: 1,
+            output_surfaces: BTreeMap::new(),
         })
     }
 
@@ -545,6 +570,7 @@ impl WaylandBridge {
         self.sws_connection = None;
         self.extension_id = None;
         self.output_scale = 1;
+        self.scene.set_output_scale(1);
         self.sws_rx_buffer.clear();
         self.sws_pending.clear();
         self.next_sws_request_id = 1;
@@ -628,6 +654,15 @@ impl WaylandBridge {
             );
         }
 
+        let request_id = self.send_sws_request(protocol_sws::client_msg::GET_CAPABILITIES, &[])?;
+        if let protocol_sws::ServerMessage::Capabilities { capabilities, .. } = self
+            .wait_for_sws_message(request_id, |msg| {
+                matches!(msg, protocol_sws::ServerMessage::Capabilities { .. })
+            })?
+        {
+            self.registry
+                .set_surface_scenes(capabilities & protocol_sws::capabilities::SURFACE_SCENES != 0);
+        }
         self.query_output_scale()?;
 
         bridge_info!(
@@ -665,6 +700,7 @@ impl WaylandBridge {
                 scale
             );
             self.output_scale = scale;
+            self.scene.set_output_scale(scale);
         }
 
         Ok(())
@@ -673,16 +709,33 @@ impl WaylandBridge {
     /// Convert SWS physical pixel coordinate to Wayland surface-local
     /// (logical) coordinate using the focused surface's buffer_scale.
     fn physical_to_logical_x(&self, x: i32) -> i32 {
+        if let (Some(root), Some(target)) = (self.focused_surface, self.pointer_surface)
+            && self.scene.enabled(root)
+            && let Some((x, _)) = self.scene.coordinates(root, target, x, self.pointer_y)
+        {
+            return x;
+        }
         let scale = self.focused_surface_scale();
         if scale > 0 { x / scale } else { x }
     }
 
     fn physical_to_logical_y(&self, y: i32) -> i32 {
+        if let (Some(root), Some(target)) = (self.focused_surface, self.pointer_surface)
+            && self.scene.enabled(root)
+            && let Some((_, y)) = self.scene.coordinates(root, target, self.pointer_x, y)
+        {
+            return y;
+        }
         let scale = self.focused_surface_scale();
         if scale > 0 { y / scale } else { y }
     }
 
     fn focused_surface_scale(&self) -> i32 {
+        if let Some(root) = self.focused_surface
+            && self.scene.enabled(root)
+        {
+            return self.scene.scale(root) as i32;
+        }
         self.focused_surface
             .and_then(|sid| self.surface_manager.get_surface(sid))
             .map(|s| s.buffer_scale.max(1))
@@ -704,6 +757,7 @@ impl WaylandBridge {
     }
 
     fn remove_object(&mut self, id: u32) {
+        self.output_surfaces.remove(&id);
         self.objects.remove(&id);
         self.object_versions.remove(&id);
         self.objects_for_input_thread.lock().remove(&id);
@@ -818,11 +872,14 @@ impl WaylandBridge {
             return;
         };
 
-        let scale = self
-            .surface_manager
-            .get_surface(wl_surface_id)
-            .map(|surface| surface.buffer_scale.max(1) as u32)
-            .unwrap_or(1);
+        let scale = if self.scene.enabled(wl_surface_id) {
+            self.output_scale.max(1) as u32
+        } else {
+            self.surface_manager
+                .get_surface(wl_surface_id)
+                .map(|surface| surface.buffer_scale.max(1) as u32)
+                .unwrap_or(1)
+        };
         let logical_width = width.div_ceil(scale).max(1);
         let logical_height = height.div_ceil(scale).max(1);
         let serial = self.allocate_serial();
@@ -879,11 +936,14 @@ impl WaylandBridge {
     }
 
     fn queue_pending_pointer_motion(&mut self) {
+        self.update_scene_pointer_focus();
         if !self.pending_pointer_motion {
             return;
         }
 
-        if let Some(pointer_id) = self.focused_pointer {
+        if let Some(pointer_id) = self.focused_pointer
+            && self.pointer_surface.is_some()
+        {
             let mut msg = WaylandMessage::new(pointer_id, input::pointer_event::MOTION);
             msg.add_arg(WaylandArg::Uint(self.pending_pointer_time));
             msg.add_arg(WaylandArg::Fixed(
@@ -933,12 +993,14 @@ impl WaylandBridge {
         }
 
         let old_surface = self.focused_surface;
+        let old_pointer_surface = self.pointer_surface;
+        self.pointer_surface = Some(surface_id);
         self.focused_surface = Some(surface_id);
 
         let mut messages = Vec::new();
 
         if let Some(pointer_id) = self.focused_pointer {
-            if let Some(old_id) = old_surface {
+            if let Some(old_id) = old_pointer_surface {
                 let serial = self.allocate_serial();
                 let mut leave = WaylandMessage::new(pointer_id, input::pointer_event::LEAVE);
                 leave.add_arg(WaylandArg::Uint(serial));
@@ -1021,6 +1083,9 @@ impl WaylandBridge {
                 } else if code == REL_WHEEL {
                     if let Some(pointer_id) = self.focused_pointer {
                         self.queue_pending_pointer_motion();
+                        if self.pointer_surface.is_none() {
+                            return;
+                        }
                         let mut msg = WaylandMessage::new(pointer_id, input::pointer_event::AXIS);
                         msg.add_arg(WaylandArg::Uint(time as u32));
                         msg.add_arg(WaylandArg::Uint(WL_POINTER_AXIS_VERTICAL_SCROLL));
@@ -1032,6 +1097,9 @@ impl WaylandBridge {
                 } else if code == REL_HWHEEL {
                     if let Some(pointer_id) = self.focused_pointer {
                         self.queue_pending_pointer_motion();
+                        if self.pointer_surface.is_none() {
+                            return;
+                        }
                         let mut msg = WaylandMessage::new(pointer_id, input::pointer_event::AXIS);
                         msg.add_arg(WaylandArg::Uint(time as u32));
                         msg.add_arg(WaylandArg::Uint(WL_POINTER_AXIS_HORIZONTAL_SCROLL));
@@ -1059,6 +1127,14 @@ impl WaylandBridge {
                     }
                     if let Some(pointer_id) = self.focused_pointer {
                         self.queue_pending_pointer_motion();
+                        if self.pointer_surface.is_none() {
+                            return;
+                        }
+                        if value != 0 {
+                            self.pointer_buttons.insert(code);
+                        } else {
+                            self.pointer_buttons.remove(&code);
+                        }
                         let serial = self.allocate_serial();
                         if code == BTN_LEFT && value != 0 {
                             self.last_left_button_serial = Some(serial);
@@ -1294,7 +1370,9 @@ impl WaylandBridge {
         }
         self.queue_input_messages(messages);
 
-        if !self.flush_pending_surface_commit(surface_id)? {
+        if self.dirty_scenes.remove(&surface_id) {
+            self.publish_scene(surface_id)?;
+        } else if !self.flush_pending_surface_commit(surface_id)? {
             // A pending buffer may have been forced to SWS before its
             // wl_buffer object was destroyed. Its callbacks still need the
             // next presentation token even though no queued commit remains.
@@ -1368,7 +1446,27 @@ impl WaylandBridge {
                 self.handle_sws_input_event(window_id, time, type_, code, value);
             }
             protocol_sws::ServerMessage::OutputScaleChanged { scale_milli } => {
-                self.output_scale = ((scale_milli + 500) / 1000).max(1) as i32;
+                let scale = (scale_milli.saturating_add(500) / 1000).max(1) as i32;
+                if scale != self.output_scale {
+                    self.output_scale = scale;
+                    self.scene.set_output_scale(scale);
+                    let mut messages = Vec::new();
+                    for (&id, interface) in &self.objects {
+                        if interface == "wl_output" {
+                            messages.extend(self.output_scale_events(id));
+                        }
+                    }
+                    self.queue_input_messages(messages);
+                    let roots: Vec<_> = self
+                        .surface_to_window
+                        .keys()
+                        .copied()
+                        .filter(|root| self.scene.enabled(*root))
+                        .collect();
+                    for root in roots {
+                        self.publish_scene(root)?;
+                    }
+                }
             }
             protocol_sws::ServerMessage::WindowStateChanged {
                 window_id,
@@ -1396,6 +1494,19 @@ impl WaylandBridge {
                         buffer_id,
                         commit_serial
                     );
+                }
+                if self
+                    .sws_busy_buffers
+                    .get(&buffer_id)
+                    .is_some_and(|latest| *latest > commit_serial)
+                {
+                    return Ok(());
+                }
+                self.sws_busy_buffers.remove(&buffer_id);
+                self.deferred_scene_releases.remove(&buffer_id);
+                if self.scene.references().contains(&buffer_id) {
+                    self.deferred_scene_releases.insert(buffer_id);
+                    return Ok(());
                 }
                 if let Some(wayland_buffer_id) = self
                     .shm_manager
@@ -2145,6 +2256,9 @@ impl WaylandBridge {
         )
         .map_err(|_| "Invalid reusable extension-buffer commit")?;
         self.send_sws_async_message(protocol_sws::client_msg::EXTENSION_COMMIT_BUFFER, &payload)?;
+        if buffer_changed && let Some(id) = sws_buffer_id {
+            self.sws_busy_buffers.insert(id, serial);
+        }
         self.sws_buffer_commit_count = self.sws_buffer_commit_count.saturating_add(1);
         if should_log_resource_count(self.sws_buffer_commit_count) {
             bridge_info!(
@@ -2292,11 +2406,22 @@ impl WaylandBridge {
                         take_message_handle(interface, header.opcode(), &mut received_handles);
 
                     // Handle the message
-                    let responses = self.handle_message(
+                    let responses = match self.handle_message(
                         &header,
                         &buffer[offset + 8..offset + msg_size],
                         attached_handle,
-                    )?;
+                    ) {
+                        Ok(responses) => responses,
+                        Err(error) => {
+                            let message = self.scene_protocol_error(header.object_id, error);
+                            write_all_nonblocking(
+                                &mut client,
+                                &message.encode(),
+                                "Failed to send Wayland protocol error",
+                            )?;
+                            return Err(error);
+                        }
+                    };
                     for response in responses {
                         let response_bytes = response.encode();
                         // Always log responses for debugging
@@ -2431,6 +2556,9 @@ impl WaylandBridge {
             "wl_registry" => self.handle_registry_message(object_id, opcode, payload),
             "wl_compositor" => self.handle_compositor_message(opcode, payload),
             "wl_surface" => self.handle_surface_message(object_id, opcode, payload),
+            "wl_subcompositor" | "wl_subsurface" | "wp_viewporter" | "wp_viewport" => {
+                self.handle_scene_message(object_id, &interface, opcode, payload)
+            }
             "wl_shm" => self.handle_shm_message(opcode, payload, attached_handle),
             "wl_shm_pool" => self.handle_shm_pool_message(object_id, opcode, payload),
             "wl_buffer" => self.handle_buffer_message(object_id, opcode, payload),
@@ -2545,6 +2673,9 @@ impl WaylandBridge {
                                 global.interface == interface_name
                             );
                             if global.interface == interface_name && new_id != 0 {
+                                if version == 0 || version > global.version {
+                                    return Err("Invalid registry bind version");
+                                }
                                 self.add_object(new_id, interface_name.clone());
                                 self.object_versions.insert(new_id, version);
                                 bridge_info!(
@@ -2628,14 +2759,15 @@ impl WaylandBridge {
                                     mode.add_arg(WaylandArg::Int(60000)); // refresh mHz
                                     msgs.push(mode);
 
-                                    let mut scale_msg =
-                                        WaylandMessage::new(new_id, protocol::output_event::SCALE);
-                                    scale_msg.add_arg(WaylandArg::Int(scale));
-                                    msgs.push(scale_msg);
-
-                                    let done =
-                                        WaylandMessage::new(new_id, protocol::output_event::DONE);
-                                    msgs.push(done);
+                                    msgs.extend(self.output_scale_events(new_id));
+                                    for &surface in self.output_surfaces.keys() {
+                                        let mut enter = WaylandMessage::new(
+                                            surface,
+                                            protocol::surface_event::ENTER,
+                                        );
+                                        enter.add_arg(WaylandArg::Object(new_id));
+                                        msgs.push(enter);
+                                    }
                                     return Ok(msgs);
                                 }
                             } else {
@@ -2674,6 +2806,7 @@ impl WaylandBridge {
                     bridge_log!("[Bridge] Created surface ID: {}", surface_id);
                     self.add_object(surface_id, String::from("wl_surface"));
                     self.surface_manager.create_surface(surface_id);
+                    self.scene.create(surface_id);
                     self.surface_count = self.surface_count.saturating_add(1);
                     if should_log_resource_count(self.surface_count) {
                         bridge_info!(
@@ -2714,13 +2847,40 @@ impl WaylandBridge {
         match opcode {
             protocol::surface_request::DESTROY => {
                 bridge_log!("[Bridge] wl_surface.destroy: {}", surface_id);
+                self.output_surfaces.remove(&surface_id);
+                self.update_surface_output(surface_id, Vec::new());
                 let mut messages = Vec::new();
                 if let Some(buffer_id) = self.discard_pending_surface_commit(surface_id) {
                     self.append_buffer_release(&mut messages, buffer_id);
                 }
                 self.cancel_surface_frame_request(surface_id);
                 self.submitted_surface_buffers.remove(&surface_id);
+                let before = self.scene.references();
+                let (root, callbacks) = self.scene.destroy(surface_id);
+                self.discard_callbacks(callbacks);
+                self.dirty_scenes.remove(&surface_id);
+                self.submitted_scenes.remove(&surface_id);
+                if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
+                    let callbacks = surface.take_pending_callbacks();
+                    self.discard_callbacks(callbacks);
+                }
                 self.surface_manager.destroy_surface(surface_id);
+                for target in self
+                    .viewports
+                    .values_mut()
+                    .chain(self.subsurfaces.values_mut())
+                {
+                    if *target == surface_id {
+                        *target = 0;
+                    }
+                }
+                if self.pointer_surface == Some(surface_id) {
+                    self.pointer_surface = None;
+                }
+                if let Some(root) = root {
+                    self.publish_scene(root)?;
+                }
+                self.collect_scene_buffers(before)?;
                 self.remove_object(surface_id);
                 // Remove from surface_to_window mapping
                 if let Some(window_id) = self.surface_to_window.remove(&surface_id) {
@@ -2824,6 +2984,45 @@ impl WaylandBridge {
                         frame_callbacks,
                     )
                 };
+                let before = self.scene.references();
+                let layered = self.scene.enabled(surface_id)
+                    && (should_update || surface_role == Some(surface::SurfaceRole::Subsurface));
+                let selection = if buffer_attached {
+                    Some(match buffer_id {
+                        Some(id) => {
+                            let buffer = self
+                                .shm_manager
+                                .get_buffer(id)
+                                .ok_or("Unknown attached buffer")?;
+                            Some(scene::Buffer {
+                                id: buffer.sws_buffer_id,
+                                width: buffer.width as u32,
+                                height: buffer.height as u32,
+                            })
+                        }
+                        None => None,
+                    })
+                } else {
+                    None
+                };
+                let changed_root = self.scene.commit(
+                    surface_id,
+                    selection,
+                    if layered {
+                        frame_callbacks.clone()
+                    } else {
+                        Vec::new()
+                    },
+                )?;
+                if layered {
+                    let msgs = self.scene_initial_configure(surface_id, buffer_id.is_none());
+                    if let Some(root) = changed_root {
+                        self.publish_scene(root)?;
+                    }
+                    self.collect_scene_buffers(before)?;
+                    return Ok(msgs);
+                }
+                self.collect_scene_buffers(Vec::new())?;
                 if should_log_resource_count(self.surface_commit_count) {
                     bridge_info!(
                         "[wayland-bridge] client={} surface={} commit={} role={:?} attach={} changed={} buffer={:?}",
@@ -2836,18 +3035,9 @@ impl WaylandBridge {
                         buffer_id
                     );
                 }
-                let surface_size = buffer_id
-                    .and_then(|buffer_id| self.shm_manager.get_buffer(buffer_id))
-                    .map(|buffer| (buffer.width as u32, buffer.height as u32));
-                let sws_buffer_id = match buffer_id {
-                    Some(buffer_id) => Some(
-                        self.shm_manager
-                            .get_buffer(buffer_id)
-                            .ok_or("Committed Wayland SHM buffer no longer exists")?
-                            .sws_buffer_id,
-                    ),
-                    None => None,
-                };
+                let selected = self.scene.buffer(surface_id);
+                let surface_size = selected.map(|buffer| (buffer.width, buffer.height));
+                let sws_buffer_id = selected.map(|buffer| buffer.id);
                 if let Some((width, height)) = surface_size
                     && let Some(surface) = self.surface_manager.get_surface_mut(surface_id)
                 {
@@ -2943,6 +3133,14 @@ impl WaylandBridge {
                             &mut msgs,
                         )?;
                     }
+                    self.update_surface_output(
+                        surface_id,
+                        if sws_buffer_id.is_some() {
+                            Vec::from([surface_id])
+                        } else {
+                            Vec::new()
+                        },
+                    );
                     if self.focused_surface.is_none() && mapped_window.is_some() {
                         self.queue_focus_events(surface_id);
                     }
@@ -2955,6 +3153,7 @@ impl WaylandBridge {
                     // Once the commit is consumed, the bridge has no remaining
                     // use for their pixels and must release the client buffer.
                     self.append_buffer_release(&mut msgs, buffer_id);
+                    self.scene.forget_buffer(surface_id);
                 }
                 if !frame_callbacks.is_empty() && mapped_window.is_none() {
                     // Cursor, role-less, and not-yet-mapped surfaces have no
@@ -3028,6 +3227,10 @@ impl WaylandBridge {
                     };
                     self.surface_manager
                         .set_input_region(surface_id, region_opt);
+                    self.scene.input(
+                        surface_id,
+                        region_opt.and_then(|id| self.region_manager.get_region(id).cloned()),
+                    );
                 }
                 Ok(Vec::new())
             }
@@ -3041,7 +3244,11 @@ impl WaylandBridge {
                         scale
                     );
                     if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
+                        if scale <= 0 {
+                            return Err("Invalid wl_surface buffer scale");
+                        }
                         surface.set_buffer_scale(scale);
+                        self.scene.view_mut(surface_id)?.scale = scale;
                     }
                 }
                 Ok(Vec::new())
@@ -3056,7 +3263,11 @@ impl WaylandBridge {
                         transform
                     );
                     if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
+                        if transform > 7 {
+                            return Err("Invalid wl_surface buffer transform");
+                        }
                         surface.set_buffer_transform(transform as i32);
+                        self.scene.view_mut(surface_id)?.transform = transform;
                     }
                 }
                 Ok(Vec::new())
@@ -3229,7 +3440,11 @@ impl WaylandBridge {
                 // reusable SWS resource so the compositor observes the same
                 // commit-before-destroy ordering as the Wayland stream.
                 self.flush_pending_surface_commits_using_buffer(sws_buffer_id)?;
-                self.destroy_extension_buffer(sws_buffer_id)?;
+                if self.scene.references().contains(&sws_buffer_id) {
+                    self.deferred_scene_destroys.insert(sws_buffer_id);
+                } else {
+                    self.destroy_extension_buffer(sws_buffer_id)?;
+                }
                 self.shm_manager.destroy_buffer(buffer_id);
                 self.remove_object(buffer_id);
                 Ok(Vec::new())
@@ -3260,6 +3475,13 @@ impl WaylandBridge {
                         xdg_surface_id,
                         wl_surface_id
                     );
+                    if self
+                        .surface_manager
+                        .get_surface(wl_surface_id)
+                        .is_none_or(|s| s.role.is_some())
+                    {
+                        return Err("xdg_surface requires a surface without another role");
+                    }
                     self.objects
                         .insert(xdg_surface_id, String::from("xdg_surface"));
                     self.xdg_shell_manager
@@ -3422,15 +3644,17 @@ impl WaylandBridge {
             }
             xdg_shell::xdg_toplevel_request::MOVE => {
                 let serial = Self::parse_u32(payload, 4).unwrap_or(0);
-                bridge_log!(
-                    "[Bridge] xdg_toplevel.move: toplevel={} serial={}",
+                bridge_info!(
+                    "[wayland-bridge] client={} move toplevel={} serial={} left_down={}",
+                    self.client_id,
                     xdg_toplevel_id,
-                    serial
+                    serial,
+                    self.left_button_down
                 );
                 let window_id = self.window_id_for_toplevel(xdg_toplevel_id);
                 if let Some(window_id) = window_id {
                     bridge_log!("[Bridge] xdg_toplevel.move mapped to window {}", window_id);
-                    let _ = self.send_request_move_window(window_id);
+                    self.send_request_move_window(window_id)?;
                 } else {
                     bridge_log!(
                         "[Bridge] xdg_toplevel.move missing window mapping for toplevel {}",
@@ -3683,12 +3907,15 @@ impl WaylandBridge {
                 if surface_id == 0 {
                     self.cursor_surface_id = None;
                 } else {
-                    if let Some(prev) = self.cursor_surface_id
-                        && prev != surface_id
-                        && let Some(surface) = self.surface_manager.get_surface_mut(prev)
-                        && surface.role == Some(surface::SurfaceRole::Cursor)
+                    if self
+                        .surface_manager
+                        .get_surface(surface_id)
+                        .is_none_or(|surface| {
+                            surface.role.is_some()
+                                && surface.role != Some(surface::SurfaceRole::Cursor)
+                        })
                     {
-                        surface.role = None;
+                        return Err("Cursor surface already has another role");
                     }
                     self.cursor_surface_id = Some(surface_id);
                     if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
@@ -3796,12 +4023,20 @@ impl WaylandBridge {
     /// Handle wl_output messages
     fn handle_output_message(
         &mut self,
-        _output_id: u32,
+        output_id: u32,
         opcode: u16,
-        _payload: &[u8],
+        payload: &[u8],
     ) -> Result<Vec<WaylandMessage>, &'static str> {
-        bridge_log!("[Bridge] wl_output opcode: {}", opcode);
-        Ok(Vec::new())
+        if opcode != 0
+            || !payload.is_empty()
+            || self.object_versions.get(&output_id).copied().unwrap_or(1) < 3
+        {
+            return Err("Invalid wl_output request");
+        }
+        self.remove_object(output_id);
+        let mut delete = WaylandMessage::new(1, protocol::display_event::DELETE_ID);
+        delete.add_arg(WaylandArg::Uint(output_id));
+        Ok(Vec::from([delete]))
     }
 
     /// Handle wl_region messages
@@ -4153,6 +4388,63 @@ mod tests {
     use super::{
         PendingSurfaceCommit, WaylandBridge, locally_releasable_buffer, shm, take_message_handle,
     };
+
+    #[test]
+    fn output_membership_tracks_map_unmap_without_duplicate_enter() {
+        let mut bridge = WaylandBridge::new_client(1).unwrap();
+        bridge.add_object(10, std::string::String::from("wl_output"));
+        bridge.object_versions.insert(10, 2);
+        bridge.update_surface_output(20, std::vec![20, 21]);
+        {
+            let mut queue = bridge.input_event_queue.lock();
+            assert_eq!(queue.len(), 2);
+            assert!(
+                queue
+                    .iter()
+                    .all(|m| m.header.opcode() == super::protocol::surface_event::ENTER)
+            );
+            queue.clear();
+        }
+        bridge.update_surface_output(20, std::vec![20, 21]);
+        assert!(bridge.input_event_queue.lock().is_empty());
+        bridge.update_surface_output(20, std::vec![20]);
+        {
+            let mut queue = bridge.input_event_queue.lock();
+            assert_eq!(queue.len(), 1);
+            assert_eq!(queue[0].header.object_id, 21);
+            assert_eq!(
+                queue[0].header.opcode(),
+                super::protocol::surface_event::LEAVE
+            );
+            queue.clear();
+        }
+        bridge
+            .handle_output_message(10, 0, &[])
+            .expect_err("v2 has no release");
+        bridge.object_versions.insert(10, 3);
+        bridge.handle_output_message(10, 0, &[]).unwrap();
+        bridge.update_surface_output(20, std::vec![]);
+        assert!(bridge.input_event_queue.lock().is_empty());
+    }
+
+    #[test]
+    fn output_v1_never_receives_scale_or_done() {
+        let mut bridge = WaylandBridge::new_client(1).unwrap();
+        bridge.object_versions.insert(10, 1);
+        assert!(bridge.output_scale_events(10).is_empty());
+        bridge.object_versions.insert(10, 2);
+        bridge.output_scale = 2;
+        let messages = bridge.output_scale_events(10);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0].header.opcode(),
+            super::protocol::output_event::SCALE
+        );
+        assert_eq!(
+            messages[1].header.opcode(),
+            super::protocol::output_event::DONE
+        );
+    }
 
     #[test]
     fn empty_wayland_damage_does_not_become_a_full_surface_upload() {
