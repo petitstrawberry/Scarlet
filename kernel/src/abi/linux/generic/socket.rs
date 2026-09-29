@@ -1588,6 +1588,13 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 schedule(trapframe);
                 return usize::MAX;
             }
+            Err(StreamError::Interrupted) => {
+                return if total_written == 0 {
+                    errno::to_result(errno::EINTR)
+                } else {
+                    total_written
+                };
+            }
             Err(_) => {
                 crate::println!("[linux socket] sendmsg write error");
                 return errno::to_result(errno::EIO);

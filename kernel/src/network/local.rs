@@ -41,7 +41,7 @@ use crate::object::capability::{
     ControlOps, ReadyInterest, ReadySet, SelectWaitOutcome, Selectable, StreamError, StreamOps,
 };
 use crate::object::{KernelObject, handle::HandleMetadata};
-use crate::sync::Waker;
+use crate::sync::{Waker, waker::WaitResult};
 
 const LOCALSOCKET_LOG: bool = false;
 
@@ -781,7 +781,15 @@ impl LocalSocket {
             }
 
             // No connection available, block the task
-            self.accept_waker.wait(task_id, trapframe);
+            if self
+                .accept_waker
+                .wait_with_condition(task_id, trapframe, None, 0, || {
+                    *self.state.read() != SocketState::Listening || !self.backlog.read().is_empty()
+                })
+                == WaitResult::Interrupted
+            {
+                return Err(SocketError::Interrupted);
+            }
 
             // When we reach here, task has been woken up
             // Check again if there's a connection
@@ -919,6 +927,8 @@ impl LocalSocket {
                     } else {
                         return Err(IpcError::PeerClosed);
                     }
+                } else {
+                    return Err(IpcError::PeerClosed);
                 }
             }
 
@@ -932,12 +942,45 @@ impl LocalSocket {
             }
 
             // No handle available, block the task
-            self.handle_waker.wait(task_id, trapframe);
+            if self
+                .handle_waker
+                .wait_with_condition(task_id, trapframe, None, 0, || self.receive_can_progress())
+                == WaitResult::Interrupted
+            {
+                return Err(StreamError::Interrupted.into());
+            }
         }
     }
 }
 
 impl LocalSocket {
+    // A readiness notification is only an edge, and another poll/read waiter
+    // can consume its pending credit. Recheck queue/EOF after registering the
+    // waiter so a queued Wine server reply cannot be stranded without a wake.
+    fn receive_can_progress(&self) -> bool {
+        if *self.state.read() != SocketState::Connected {
+            return true;
+        }
+        {
+            let buffer = self.read_buffer.read();
+            if !buffer.queue.read().is_empty() || *buffer.closed.read() {
+                return true;
+            }
+        }
+        self.upgrade_peer()
+            .is_none_or(|peer| *peer.state.read() == SocketState::Closed)
+    }
+
+    fn send_can_progress(&self) -> bool {
+        if *self.state.read() != SocketState::Connected || self.upgrade_peer().is_none() {
+            return true;
+        }
+        let buffer = self.peer_read_buffer.read();
+        buffer.as_ref().is_none_or(|buffer| {
+            *buffer.closed.read() || buffer.queue.read().stream_bytes < MAX_STREAM_BUFFER_SIZE
+        })
+    }
+
     /// Copy the next record's prefix without consuming bytes or handles, and
     /// return its full payload length even when `output` is empty.
     pub fn peek_record(&self, output: &mut [u8]) -> Result<usize, SocketError> {
@@ -962,7 +1005,16 @@ impl LocalSocket {
                 return Err(SocketError::WouldBlock);
             }
             let task = crate::task::mytask().ok_or(SocketError::WouldBlock)?;
-            self.read_waker.wait(task.get_id(), task.get_trapframe());
+            if self.read_waker.wait_with_condition(
+                task.get_id(),
+                task.get_trapframe(),
+                None,
+                0,
+                || self.receive_can_progress() || *self.nonblocking.read(),
+            ) == WaitResult::Interrupted
+            {
+                return Err(SocketError::Interrupted);
+            }
         }
     }
 
@@ -1011,6 +1063,9 @@ impl LocalSocket {
                 if my_state == SocketState::Closed {
                     return Ok((0, 0));
                 }
+                if my_state != SocketState::Connected {
+                    return Err(StreamError::InvalidArgument);
+                }
 
                 if my_state == SocketState::Connected {
                     let peer_closed = match self.peer_socket.read().as_ref() {
@@ -1035,7 +1090,16 @@ impl LocalSocket {
             }
 
             if let Some(task) = mytask() {
-                self.read_waker.wait(task.get_id(), task.get_trapframe());
+                if self.read_waker.wait_with_condition(
+                    task.get_id(),
+                    task.get_trapframe(),
+                    None,
+                    0,
+                    || self.receive_can_progress() || *self.nonblocking.read(),
+                ) == WaitResult::Interrupted
+                {
+                    return Err(StreamError::Interrupted);
+                }
             } else {
                 return Err(StreamError::WouldBlock);
             }
@@ -1110,7 +1174,16 @@ impl StreamOps for LocalSocket {
             }
 
             if let Some(task) = mytask() {
-                self.write_waker.wait(task.get_id(), task.get_trapframe());
+                if self.write_waker.wait_with_condition(
+                    task.get_id(),
+                    task.get_trapframe(),
+                    None,
+                    0,
+                    || self.send_can_progress() || *self.nonblocking.read(),
+                ) == WaitResult::Interrupted
+                {
+                    return Err(StreamError::Interrupted);
+                }
             } else {
                 return Err(StreamError::WouldBlock);
             }
@@ -1501,23 +1574,18 @@ impl Selectable for LocalSocket {
                 }
             }
             SocketState::Connected => {
-                // Connected sockets: readable when data available
+                // EOF and failed writes complete immediately too; they must
+                // wake pollers so the operation can report EOF/broken pipe.
                 if interest.read {
-                    let read_buffer = self.read_buffer.read();
-                    let queue = read_buffer.queue.read();
-                    let closed = *read_buffer.closed.read();
-                    ready.read = !queue.is_empty() || closed;
+                    ready.read = self.receive_can_progress();
                 }
-                // Connected sockets: writable when peer buffer not full
                 if interest.write {
-                    if let Some(peer_buffer) = self.peer_read_buffer.read().as_ref() {
-                        let queue = peer_buffer.queue.read();
-                        let closed = *peer_buffer.closed.read();
-                        ready.write = queue.stream_bytes < MAX_STREAM_BUFFER_SIZE && !closed;
-                    } else {
-                        ready.write = false;
-                    }
+                    ready.write = self.send_can_progress();
                 }
+            }
+            SocketState::Closed => {
+                ready.read = interest.read;
+                ready.write = interest.write;
             }
             _ => {
                 // Unconnected/Bound/other: not ready
@@ -1549,58 +1617,22 @@ impl Selectable for LocalSocket {
             current_task_id(cpu_id).unwrap_or(0)
         };
 
-        let woke = match state {
-            SocketState::Listening if interest.read => {
-                if min_wait_ticks > 0 {
-                    self.accept_waker.wait_with_min_timeout(
-                        task_id,
-                        trapframe,
-                        timeout_ticks,
-                        min_wait_ticks,
-                    )
-                } else {
-                    self.accept_waker
-                        .wait_with_timeout(task_id, trapframe, timeout_ticks)
-                }
-            }
-            SocketState::Connected if interest.read => {
-                if min_wait_ticks > 0 {
-                    self.read_waker.wait_with_min_timeout(
-                        task_id,
-                        trapframe,
-                        timeout_ticks,
-                        min_wait_ticks,
-                    )
-                } else {
-                    self.read_waker
-                        .wait_with_timeout(task_id, trapframe, timeout_ticks)
-                }
-            }
-            SocketState::Connected if interest.write => {
-                if min_wait_ticks > 0 {
-                    self.write_waker.wait_with_min_timeout(
-                        task_id,
-                        trapframe,
-                        timeout_ticks,
-                        min_wait_ticks,
-                    )
-                } else {
-                    self.write_waker
-                        .wait_with_timeout(task_id, trapframe, timeout_ticks)
-                }
-            }
-            _ => true,
+        let waker = match state {
+            SocketState::Listening if interest.read => &self.accept_waker,
+            SocketState::Connected if interest.read => &self.read_waker,
+            SocketState::Connected if interest.write => &self.write_waker,
+            _ => return SelectWaitOutcome::Ready,
         };
-
-        if timeout_ticks.is_some() && !woke {
-            let after = self.current_ready(interest);
-            let any_ready = (interest.read && after.read) || (interest.write && after.write);
-            if !any_ready {
-                return SelectWaitOutcome::TimedOut;
-            }
+        match waker.wait_with_condition(task_id, trapframe, timeout_ticks, min_wait_ticks, || {
+            let ready = self.current_ready(interest);
+            (interest.read && ready.read)
+                || (interest.write && ready.write)
+                || *self.state.read() != state
+        }) {
+            WaitResult::Interrupted => SelectWaitOutcome::Interrupted,
+            WaitResult::TimedOut => SelectWaitOutcome::TimedOut,
+            WaitResult::Woken => SelectWaitOutcome::Ready,
         }
-
-        SelectWaitOutcome::Ready
     }
 
     fn set_nonblocking(&self, enabled: bool) {
@@ -1758,11 +1790,94 @@ mod tests {
     }
 
     #[test_case]
+    fn test_pending_interrupt_escapes_socket_waits() {
+        use crate::arch::Trapframe;
+        use crate::ipc::event::{Event, ProcessControlType};
+        use crate::sched::scheduler::{
+            add_task, register_online_cpu, remove_from_ready_queues, reset,
+            set_current_task_for_test,
+        };
+        use crate::task::{Task, TaskState, TaskType};
+
+        reset();
+        let cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+        let id = add_task(
+            Task::new("socket-interrupt".into(), 1, TaskType::Kernel),
+            cpu,
+        );
+        let task = get_task_by_id(id).unwrap();
+        task.set_state(TaskState::Running);
+        task.running_cpu.store(cpu, Ordering::SeqCst);
+        set_current_task_for_test(cpu, Some(id));
+        remove_from_ready_queues(id);
+        task.event_queue
+            .lock()
+            .enqueue(Event::immediate_process_control(
+                id as u32,
+                ProcessControlType::Interrupt,
+            ));
+
+        let (client, server) = LocalSocket::create_connected_pair("client".into(), "server".into());
+        let mut frame = Trapframe::new();
+        let mut byte = [0];
+        assert!(matches!(
+            client.read(&mut byte),
+            Err(StreamError::Interrupted)
+        ));
+        assert_eq!(client.peek_record(&mut byte), Err(SocketError::Interrupted));
+        assert!(matches!(
+            client.recv_handle_blocking(id, &mut frame),
+            Err(crate::ipc::IpcError::StreamError(StreamError::Interrupted))
+        ));
+        assert_eq!(
+            client.wait_until_ready(ReadyInterest::read(), &mut frame, None, 0),
+            SelectWaitOutcome::Interrupted
+        );
+
+        // A full transmit buffer must return for the same signal as well.
+        let bytes = alloc::vec![0; MAX_STREAM_BUFFER_SIZE];
+        assert_eq!(client.write(&bytes).unwrap(), bytes.len());
+        assert!(matches!(client.write(&byte), Err(StreamError::Interrupted)));
+        assert_eq!(
+            client.wait_until_ready(ReadyInterest::write(), &mut frame, None, 0),
+            SelectWaitOutcome::Interrupted
+        );
+        let listener = LocalSocket::new(SocketType::Stream, SocketProtocol::Default);
+        *listener.state.write() = SocketState::Listening;
+        assert!(matches!(
+            listener.accept_blocking(id, &mut frame),
+            Err(SocketError::Interrupted)
+        ));
+        assert_eq!(task.get_state(), TaskState::Running);
+        assert_eq!(client.read_waker.waiting_count(), 0);
+        assert_eq!(client.write_waker.waiting_count(), 0);
+        assert_eq!(client.handle_waker.waiting_count(), 0);
+        assert_eq!(listener.accept_waker.waiting_count(), 0);
+
+        // No signal was consumed inside I/O: dispatch belongs to the ABI exit.
+        assert!(task.event_queue.lock().dequeue().is_some());
+        drop(listener);
+        drop(client);
+        drop(server);
+        set_current_task_for_test(cpu, None);
+        task.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        drop(task);
+        reset();
+    }
+
+    #[test_case]
     fn test_peer_observes_close_when_socket_is_dropped() {
         let (sock1, sock2) =
             LocalSocket::create_connected_pair("server".to_string(), "client".to_string());
 
         drop(sock1);
+
+        let ready = sock2.current_ready(ReadyInterest::rw());
+        assert!(
+            ready.read && ready.write,
+            "EOF/error must not leave poll asleep"
+        );
 
         let mut buffer = [0u8; 8];
         let read = sock2.read(&mut buffer).unwrap();
@@ -1788,14 +1903,14 @@ mod tests {
             "write should fail after SHUT_WR"
         );
         assert!(
-            !sock1
+            sock1
                 .current_ready(ReadyInterest {
                     read: false,
                     write: true,
                     except: false,
                 })
                 .write,
-            "socket should not report writable after SHUT_WR"
+            "poll must permit the write to report the SHUT_WR error without sleeping"
         );
     }
 
