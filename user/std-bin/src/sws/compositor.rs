@@ -2353,6 +2353,9 @@ enum ExtensionBufferBacking {
 struct ExtensionBuffer {
     backing: ExtensionBufferBacking,
     destroy_requested: bool,
+    // A shared buffer may be selected by several surfaces with different
+    // serials. Release the newest use even if an older window retires last.
+    last_commit_serial: u64,
 }
 
 /// Compositor - the main window server with proper layer compositing
@@ -2381,6 +2384,7 @@ pub struct Compositor {
     pending_frame_callbacks: Vec<PendingFrameCallback>,
     extension_shm_pools: BTreeMap<ExtensionResourceKey, ExtensionShmPool>,
     extension_buffers: BTreeMap<ExtensionResourceKey, ExtensionBuffer>,
+    extension_scenes: BTreeMap<u32, (usize, sws_protocol::surface_scene::Commit)>,
     next_frame_deadline_ns: Option<u64>,
     left_button_down: bool,
     overview_pointer_navigation: Option<OverviewPointerNavigation>,
@@ -2850,6 +2854,7 @@ impl Compositor {
             pending_frame_callbacks: Vec::new(),
             extension_shm_pools: BTreeMap::new(),
             extension_buffers: BTreeMap::new(),
+            extension_scenes: BTreeMap::new(),
             next_frame_deadline_ns: None,
             left_button_down: false,
             overview_pointer_navigation: None,
@@ -4224,6 +4229,7 @@ impl Compositor {
             if self.backend == SwsBackend::Auto {
                 println!("[Compositor] Using CPU fallback");
             }
+            self.render_extension_scenes_cpu()?;
             Ok(())
         }
     }
@@ -4285,12 +4291,25 @@ impl Compositor {
         let overview_shadows = self.overview_render_shadows();
         let overview_cards = self.overview_render_backplates();
         let overview_remove_buttons = self.overview_remove_buttons();
+        let scenes = self
+            .extension_scenes
+            .values()
+            .map(|(client, scene)| {
+                Self::extension_scene_view(
+                    *client,
+                    scene,
+                    &self.extension_buffers,
+                    &self.extension_shm_pools,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let Some(gpu_compositor) = self.gpu_compositor.as_mut() else {
             return Ok(GpuPresentResult::CpuFallback);
         };
         let result = gpu_compositor.compose_and_present(
             &self.display,
             self.window_manager.get_windows(),
+            &scenes,
             &self.cursor,
             self.bg_color,
             &overview_shadows,
@@ -4301,6 +4320,7 @@ impl Compositor {
             damage,
             &backdrops,
         );
+        drop(scenes);
         match result {
             Ok(releases) => {
                 super::trace::set_compositor_stage(super::trace::STAGE_GPU_NOTIFY_RELEASES);
@@ -4339,6 +4359,9 @@ impl Compositor {
                     if self.backend == SwsBackend::Auto {
                         println!("[Compositor] Using CPU fallback for this frame");
                     }
+                }
+                if self.gpu_compositor.is_some() {
+                    self.render_extension_scenes_cpu()?;
                 }
                 Ok(GpuPresentResult::CpuFallback)
             }
@@ -8206,6 +8229,7 @@ impl Compositor {
             ExtensionBuffer {
                 backing: ExtensionBufferBacking::Shm(view),
                 destroy_requested: false,
+                last_commit_serial: 0,
             },
         );
         if let Some(gpu_compositor) = self.gpu_compositor.as_mut() {
@@ -8236,6 +8260,15 @@ impl Compositor {
     }
 
     fn extension_buffer_is_selected(&self, client_id: usize, buffer_id: u32) -> bool {
+        if self.extension_scenes.values().any(|(owner, scene)| {
+            *owner == client_id
+                && scene
+                    .layers
+                    .iter()
+                    .any(|layer| layer.buffer_id == buffer_id)
+        }) {
+            return true;
+        }
         self.window_manager.get_windows().iter().any(|window| {
             window.owner_client_id == Some(client_id)
                 && window.external_buffer_id == Some(buffer_id)
@@ -8344,6 +8377,12 @@ impl Compositor {
         if self.extension_buffer_is_selected(client_id, buffer_id) {
             return;
         }
+        let commit_serial = self
+            .extension_buffers
+            .get(&(client_id, buffer_id))
+            .map_or(commit_serial, |buffer| {
+                commit_serial.max(buffer.last_commit_serial)
+            });
         let payload =
             sws_protocol::payload_extension_buffer_released(buffer_id, commit_serial).to_vec();
         send_message_to_client(
@@ -8352,6 +8391,188 @@ impl Compositor {
             payload,
         );
         self.reap_extension_buffer(client_id, buffer_id);
+    }
+
+    /// Publish one compound surface atomically. Validate every resource before
+    /// replacing the visible backing; registered buffers remain retained by the
+    /// scene until its next commit or window destruction.
+    /// Borrow live pool mappings for one frame; no pointer survives a pool
+    /// resize, buffer release or return to the IPC event loop.
+    fn extension_scene_view<'a>(
+        client_id: usize,
+        scene: &'a sws_protocol::surface_scene::Commit,
+        buffers: &'a BTreeMap<ExtensionResourceKey, ExtensionBuffer>,
+        pools: &'a BTreeMap<ExtensionResourceKey, ExtensionShmPool>,
+    ) -> Result<crate::surface_scene::SceneView<'a>, &'static str> {
+        let mut sources = Vec::with_capacity(scene.layers.len());
+        for layer in &scene.layers {
+            let buffer = buffers
+                .get(&(client_id, layer.buffer_id))
+                .ok_or("Unknown scene buffer")?;
+            let ExtensionBufferBacking::Shm(view) = buffer.backing;
+            let pool = pools
+                .get(&(client_id, view.pool_id))
+                .ok_or("Unknown scene pool")?;
+            if !Self::extension_shm_view_fits(pool.size, view)
+                || !layer.fits_buffer(view.width, view.height)
+            {
+                return Err("Invalid scene crop");
+            }
+            let len = (view.height as usize - 1) * view.stride as usize + view.width as usize * 4;
+            // SAFETY: validated extent within this mapped pool. The returned
+            // slice borrows the registry, preventing remapping/reaping until
+            // synchronous CPU rendering or SGFX submission completion.
+            let bytes = unsafe {
+                core::slice::from_raw_parts((pool.mapped_addr + view.offset) as *const u8, len)
+            };
+            sources.push(crate::surface_scene::Pixels {
+                bytes,
+                width: view.width,
+                height: view.height,
+                stride: view.stride as usize,
+                opaque: view.format == 1,
+            });
+        }
+        Ok(crate::surface_scene::SceneView { scene, sources })
+    }
+
+    /// Materialize only when the software backend needs a retained backing.
+    fn render_extension_scenes_cpu(&mut self) -> Result<(), &'static str> {
+        for (client, scene) in self.extension_scenes.values() {
+            if scene.layers.is_empty() {
+                continue;
+            }
+            let view = Self::extension_scene_view(
+                *client,
+                scene,
+                &self.extension_buffers,
+                &self.extension_shm_pools,
+            )?;
+            if let Some(window) = self.window_manager.get_window_mut(scene.window_id) {
+                let pixels = window.buffer.get_or_insert_with(Vec::new);
+                crate::surface_scene::render(&view, pixels)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn commit_extension_scene(
+        &mut self,
+        client_id: usize,
+        scene: sws_protocol::surface_scene::Commit,
+    ) -> Result<(), &'static str> {
+        scene.validate().map_err(|_| "Malformed scene")?;
+        let window = self
+            .window_manager
+            .get_window(scene.window_id)
+            .ok_or("Unknown scene window")?;
+        if window.owner_client_id != Some(client_id)
+            || window.extension_owner.map(|v| v.1) != Some(scene.external_client_id)
+        {
+            return Err("Scene ownership mismatch");
+        }
+        let old_rect = window.presentation_geometry();
+        let instance_rects: Vec<_> = window
+            .presentation_instances
+            .iter()
+            .map(|instance| {
+                let t = instance.transform;
+                (t.x, t.y, t.width, t.height)
+            })
+            .collect();
+        let old_origin = self
+            .extension_scenes
+            .get(&scene.window_id)
+            .map(|(_, s)| (s.origin_x, s.origin_y))
+            .unwrap_or((0, 0));
+        if self
+            .extension_scenes
+            .get(&scene.window_id)
+            .is_some_and(|(_, s)| scene.serial <= s.serial)
+        {
+            return Err("Stale scene commit");
+        }
+        for layer in &scene.layers {
+            let buffer = self
+                .extension_buffers
+                .get(&(client_id, layer.buffer_id))
+                .ok_or("Unknown scene buffer")?;
+            if buffer.destroy_requested
+                && !self.extension_buffer_is_selected(client_id, layer.buffer_id)
+            {
+                return Err("Destroyed scene buffer");
+            }
+        }
+        let view = Self::extension_scene_view(
+            client_id,
+            &scene,
+            &self.extension_buffers,
+            &self.extension_shm_pools,
+        )?;
+        let mut pixels = None;
+        if self.gpu_compositor.is_none() && !scene.layers.is_empty() {
+            let mut backing = Vec::new();
+            crate::surface_scene::render(&view, &mut backing)?;
+            pixels = Some(backing);
+        }
+        for layer in &scene.layers {
+            let buffer = self
+                .extension_buffers
+                .get_mut(&(client_id, layer.buffer_id))
+                .unwrap();
+            buffer.last_commit_serial = buffer.last_commit_serial.max(scene.serial);
+        }
+        let window = self.window_manager.get_window_mut(scene.window_id).unwrap();
+        let previous = window.detach_external_buffer();
+        // Keep the root surface anchored when children extend past its origin,
+        // including unmap/remap transitions.
+        window.x = window
+            .x
+            .saturating_add(scene.origin_x.saturating_sub(old_origin.0));
+        window.y = window
+            .y
+            .saturating_add(scene.origin_y.saturating_sub(old_origin.1));
+        if !scene.layers.is_empty() {
+            window.width = scene.width;
+            window.height = scene.height;
+            window.set_backing_extent(scene.width, scene.height);
+            window.buffer = pixels;
+            window.has_alpha_content = true;
+            window.presentation_content_ready = true;
+        }
+        let new_rect = window.presentation_geometry();
+        let window_id = scene.window_id;
+        let width = scene.width;
+        let height = scene.height;
+        let mapped = !scene.layers.is_empty();
+        let old = self.extension_scenes.insert(window_id, (client_id, scene));
+        self.add_pending_damage(old_rect);
+        self.add_pending_damage(new_rect);
+        // A scene update damages its window and Overview projections, not
+        // every pixel of the desktop. SGFX still rebuilds the scene texture.
+        for rect in instance_rects {
+            self.add_pending_damage(rect);
+        }
+        if let Some(gpu) = self.gpu_compositor.as_mut() {
+            gpu.mark_window_damage(window_id, 0, 0, width, height);
+        }
+        if mapped {
+            self.note_window_frame_submitted(window_id);
+        }
+        self.send_extension_buffer_released(client_id, previous);
+        if let Some((_, old)) = old {
+            let mut released = Vec::new();
+            for layer in old.layers {
+                if !released.contains(&layer.buffer_id) {
+                    self.send_extension_buffer_released(
+                        client_id,
+                        Some((layer.buffer_id, old.serial)),
+                    );
+                    released.push(layer.buffer_id);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn commit_extension_buffer(
@@ -8380,6 +8601,16 @@ impl Compositor {
             return;
         }
 
+        // Layered and single-buffer submissions are separate modes. The bridge
+        // keeps a surface tree in scene mode for its entire remaining lifetime.
+        if self.extension_scenes.contains_key(&window_id) {
+            self.send_extension_resource_error(
+                client_id,
+                0,
+                sws_protocol::error_codes::INVALID_EXTENSION_COMMIT,
+            );
+            return;
+        }
         let expected_buffer = (buffer_id != 0).then_some(buffer_id);
         let current_buffer = self
             .window_manager
@@ -8459,6 +8690,12 @@ impl Compositor {
                         return;
                     }
                 }
+            }
+        }
+
+        if buffer_changed && buffer_id != 0 {
+            if let Some(buffer) = self.extension_buffers.get_mut(&(client_id, buffer_id)) {
+                buffer.last_commit_serial = buffer.last_commit_serial.max(commit_serial);
             }
         }
 
@@ -8558,6 +8795,8 @@ impl Compositor {
     }
 
     fn cleanup_extension_resources_for_client(&mut self, client_id: usize) {
+        self.extension_scenes
+            .retain(|_, (owner, _)| *owner != client_id);
         let buffer_ids: Vec<u32> = self
             .extension_buffers
             .keys()
@@ -8667,6 +8906,18 @@ impl Compositor {
                 active_app_removed = true;
             }
 
+            if let Some((_, scene)) = self.extension_scenes.remove(window_id) {
+                for layer in scene.layers {
+                    if let Some((_, serial)) = retained_extension_buffers
+                        .iter_mut()
+                        .find(|(id, _)| *id == layer.buffer_id)
+                    {
+                        *serial = (*serial).max(scene.serial);
+                    } else {
+                        retained_extension_buffers.push((layer.buffer_id, scene.serial));
+                    }
+                }
+            }
             self.window_manager.close_window(*window_id);
             self.add_pending_damage(*rect);
         }
@@ -11884,6 +12135,16 @@ impl Compositor {
                 buffer_id,
             } => {
                 self.destroy_extension_buffer(client_id, buffer_id);
+            }
+            IpcEvent::ExtensionCommitScene { client_id, scene } => {
+                if let Err(error) = self.commit_extension_scene(client_id, scene) {
+                    println!("[Compositor] Invalid surface scene: {}", error);
+                    self.send_extension_resource_error(
+                        client_id,
+                        0,
+                        sws_protocol::error_codes::INVALID_EXTENSION_COMMIT,
+                    );
+                }
             }
             IpcEvent::ExtensionCommitBuffer {
                 client_id,

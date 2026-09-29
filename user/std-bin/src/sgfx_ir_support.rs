@@ -449,6 +449,14 @@ pub(crate) enum Quad {
         rect: SampledRect,
         offset: [f32; 2],
     },
+    /// Explicit normalized UV corners (TL, BL, BR, TR), including fractional
+    /// cropping and orthogonal transforms. Premultiplied inputs must tint RGB
+    /// as well as alpha when applying opacity.
+    SampledUv {
+        rect: SampledRect,
+        uv: [[f32; 2]; 4],
+        premultiplied: bool,
+    },
     Copy(CopiedRect),
 }
 
@@ -526,6 +534,7 @@ pub(crate) struct QuadRenderer {
     solid_pipeline: RenderPipelineId,
     rgba_pipeline: RenderPipelineId,
     opaque_pipeline: RenderPipelineId,
+    premultiplied_pipeline: RenderPipelineId,
     capacity: usize,
 }
 
@@ -560,14 +569,14 @@ impl QuadRenderer {
             ],
         )?;
         let raster = RasterState::new(ir::CullMode::None, ir::FrontFace::CounterClockwise);
-        let define_pipeline = |fragment| -> ir::Result<RenderPipelineId> {
+        let define_pipeline = |fragment, blend| -> ir::Result<RenderPipelineId> {
             Ok(resources
                 .define_render_pipeline(RenderPipelineDesc::new(
                     TextureFormat::Bgra8Unorm,
                     PrimitiveTopology::TriangleList,
                     layout.clone(),
                     fragment,
-                    BlendState::SOURCE_OVER_STRAIGHT_ALPHA,
+                    blend,
                     raster,
                 )?)?
                 .id())
@@ -575,11 +584,22 @@ impl QuadRenderer {
         Ok(Self {
             buffer,
             sampler,
-            solid_pipeline: define_pipeline(FragmentProgram::Solid)?,
-            rgba_pipeline: define_pipeline(FragmentProgram::Texture(TextureSampleMode::Rgba))?,
-            opaque_pipeline: define_pipeline(FragmentProgram::Texture(
-                TextureSampleMode::RgbIgnoreAlpha,
-            ))?,
+            solid_pipeline: define_pipeline(
+                FragmentProgram::Solid,
+                BlendState::SOURCE_OVER_STRAIGHT_ALPHA,
+            )?,
+            rgba_pipeline: define_pipeline(
+                FragmentProgram::Texture(TextureSampleMode::Rgba),
+                BlendState::SOURCE_OVER_STRAIGHT_ALPHA,
+            )?,
+            opaque_pipeline: define_pipeline(
+                FragmentProgram::Texture(TextureSampleMode::RgbIgnoreAlpha),
+                BlendState::SOURCE_OVER_STRAIGHT_ALPHA,
+            )?,
+            premultiplied_pipeline: define_pipeline(
+                FragmentProgram::Texture(TextureSampleMode::Rgba),
+                premultiplied_source_over(),
+            )?,
             capacity,
         })
     }
@@ -637,6 +657,30 @@ impl QuadRenderer {
         )
     }
 
+    #[cfg(target_os = "scarlet")]
+    pub(crate) fn submit_texture_with_uploads(
+        &self,
+        target: &mut MappedTarget,
+        texture: TextureId,
+        extent: (u32, u32),
+        uploads: &[TextureUpload<'_>],
+        operations: &[Quad],
+    ) -> Result<(), QuadSubmitError> {
+        let area =
+            PixelRect::new(0, 0, extent.0, extent.1).map_err(|_| "Invalid scene texture extent")?;
+        self.encode_region_with_uploads(
+            &mut target.session.executor(),
+            Rc::clone(&target.resources),
+            texture,
+            extent.0,
+            extent.1,
+            area,
+            LoadOp::Clear(ir::Color::rgba(0.0, 0.0, 0.0, 0.0).map_err(|_| "Invalid scene clear")?),
+            uploads,
+            operations,
+        )
+    }
+
     /// Queue the complete composition and observe it once before presentation.
     #[cfg(target_os = "scarlet")]
     pub(crate) fn submit_region_with_uploads_tracked(
@@ -648,13 +692,34 @@ impl QuadRenderer {
         operations: &[Quad],
         backdrops: &[BackdropPass<'_>],
     ) -> Result<(), QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>> {
+        let texture = target.texture;
+        let extent = (target.width, target.height);
+        self.submit_texture_with_uploads_tracked(
+            target, texture, extent, area, load, uploads, operations, backdrops,
+        )
+    }
+
+    /// Compose into a GPU-only retained scene texture, without CPU readback.
+    #[cfg(target_os = "scarlet")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn submit_texture_with_uploads_tracked(
+        &self,
+        target: &mut MappedTarget,
+        texture: TextureId,
+        extent: (u32, u32),
+        area: PixelRect,
+        load: LoadOp,
+        uploads: &[TextureUpload<'_>],
+        operations: &[Quad],
+        backdrops: &[BackdropPass<'_>],
+    ) -> Result<(), QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>> {
         let mut executor = FrameExecutor::new(target.session.executor());
         let encoded = self.encode_scene_with_uploads(
             &mut executor,
             Rc::clone(&target.resources),
-            target.texture,
-            target.width,
-            target.height,
+            texture,
+            extent.0,
+            extent.1,
             area,
             load,
             uploads,
@@ -910,6 +975,10 @@ impl QuadRenderer {
                     rect.texture_width,
                     rect.texture_height,
                 ),
+                Quad::SampledUv { rect, uv, .. } => {
+                    append_quad_uv(&mut vertices, rect.destination, width, height, *uv);
+                    continue;
+                }
                 Quad::Copy(_) => {
                     // Keep one fixed vertex slot per operation so later draw
                     // offsets remain stable across copy/render segmentation.
@@ -1096,7 +1165,9 @@ impl QuadRenderer {
             for operation in operations {
                 let clip = match operation {
                     Quad::Solid { clip, .. } => *clip,
-                    Quad::Sampled(rect) | Quad::SampledOffset { rect, .. } => rect.clip,
+                    Quad::Sampled(rect)
+                    | Quad::SampledOffset { rect, .. }
+                    | Quad::SampledUv { rect, .. } => rect.clip,
                     Quad::Copy(_) => return Err("SGFX copy leaked into a render segment"),
                 };
                 if clip.is_none() || intersect_pixel_rect(clip.unwrap(), area)?.is_some() {
@@ -1124,7 +1195,9 @@ impl QuadRenderer {
         for (local_index, operation) in operations.iter().enumerate() {
             let requested_clip = match operation {
                 Quad::Solid { clip, .. } => *clip,
-                Quad::Sampled(rect) | Quad::SampledOffset { rect, .. } => rect.clip,
+                Quad::Sampled(rect)
+                | Quad::SampledOffset { rect, .. }
+                | Quad::SampledUv { rect, .. } => rect.clip,
                 Quad::Copy(_) => return Err("SGFX copy leaked into a render segment"),
             };
             let effective_clip = match requested_clip {
@@ -1163,9 +1236,19 @@ impl QuadRenderer {
                     pass.set_scissor(effective_clip)
                         .map_err(|_| "Failed to set solid scissor")?;
                 }
-                Quad::Sampled(rect) | Quad::SampledOffset { rect, .. } => {
+                Quad::Sampled(rect)
+                | Quad::SampledOffset { rect, .. }
+                | Quad::SampledUv { rect, .. } => {
                     let pipeline = if rect.ignore_source_alpha {
                         self.opaque_pipeline
+                    } else if matches!(
+                        operation,
+                        Quad::SampledUv {
+                            premultiplied: true,
+                            ..
+                        }
+                    ) {
+                        self.premultiplied_pipeline
                     } else {
                         self.rgba_pipeline
                     };
@@ -1269,6 +1352,20 @@ fn intersect_pixel_rect(
         .map_err(|_| "Invalid SGFX composition intersection")
 }
 
+pub(crate) fn define_scene_texture(
+    resources: &ResourceTable,
+    width: u32,
+    height: u32,
+) -> ir::Result<TextureId> {
+    Ok(resources
+        .define_texture(TextureDesc::new(
+            TextureFormat::Bgra8Unorm,
+            Extent2D::new(width, height)?,
+            TextureUsage::SAMPLED | TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+        )?)?
+        .id())
+}
+
 pub(crate) fn define_bgra_texture(
     resources: &ResourceTable,
     width: u32,
@@ -1320,21 +1417,46 @@ fn append_quad(
     texture_height: u32,
     offset: [f32; 2],
 ) {
-    let left = destination.x() as f32 * 2.0 / target_width as f32 - 1.0;
-    let right = (destination.x() + destination.width()) as f32 * 2.0 / target_width as f32 - 1.0;
-    let top = 1.0 - destination.y() as f32 * 2.0 / target_height as f32;
-    let bottom = 1.0 - (destination.y() + destination.height()) as f32 * 2.0 / target_height as f32;
     let u0 = (source.x() as f32 + offset[0]) / texture_width as f32;
     let u1 = ((source.x() + source.width()) as f32 + offset[0]) / texture_width as f32;
     let v0 = (source.y() as f32 + offset[1]) / texture_height as f32;
     let v1 = ((source.y() + source.height()) as f32 + offset[1]) / texture_height as f32;
+    append_quad_uv(
+        bytes,
+        destination,
+        target_width,
+        target_height,
+        [[u0, v0], [u0, v1], [u1, v1], [u1, v0]],
+    );
+}
+
+fn premultiplied_source_over() -> BlendState {
+    let component = ir::BlendComponent::new(
+        ir::BlendFactor::One,
+        ir::BlendFactor::OneMinusSourceAlpha,
+        ir::BlendOp::Add,
+    );
+    BlendState::new(component, component)
+}
+
+fn append_quad_uv(
+    bytes: &mut Vec<u8>,
+    destination: PixelRect,
+    target_width: u32,
+    target_height: u32,
+    uv: [[f32; 2]; 4],
+) {
+    let left = destination.x() as f32 * 2.0 / target_width as f32 - 1.0;
+    let right = (destination.x() + destination.width()) as f32 * 2.0 / target_width as f32 - 1.0;
+    let top = 1.0 - destination.y() as f32 * 2.0 / target_height as f32;
+    let bottom = 1.0 - (destination.y() + destination.height()) as f32 * 2.0 / target_height as f32;
     for vertex in [
-        [left, top, 0.0, 1.0, u0, v0],
-        [left, bottom, 0.0, 1.0, u0, v1],
-        [right, bottom, 0.0, 1.0, u1, v1],
-        [left, top, 0.0, 1.0, u0, v0],
-        [right, bottom, 0.0, 1.0, u1, v1],
-        [right, top, 0.0, 1.0, u1, v0],
+        [left, top, 0.0, 1.0, uv[0][0], uv[0][1]],
+        [left, bottom, 0.0, 1.0, uv[1][0], uv[1][1]],
+        [right, bottom, 0.0, 1.0, uv[2][0], uv[2][1]],
+        [left, top, 0.0, 1.0, uv[0][0], uv[0][1]],
+        [right, bottom, 0.0, 1.0, uv[2][0], uv[2][1]],
+        [right, top, 0.0, 1.0, uv[3][0], uv[3][1]],
     ] {
         for component in vertex {
             bytes.extend_from_slice(&component.to_le_bytes());
@@ -1350,6 +1472,104 @@ mod tests {
         take_reusable_import,
     };
     use sgfx::ir::{Extent2D, ResourceTable, TextureDesc, TextureFormat, TextureUsage};
+
+    #[test]
+    fn scene_ir_selects_premultiplied_blending_and_preserves_uvs() {
+        use super::*;
+        struct Inspect {
+            resources: Rc<ResourceTable>,
+            blends: Vec<BlendState>,
+            vertices: Vec<u8>,
+        }
+        impl CommandExecutor for Inspect {
+            type Error = &'static str;
+            fn execute<'r, 'data>(
+                &mut self,
+                commands: &ir::CommandBuffer<'r, 'data>,
+            ) -> Result<(), Self::Error> {
+                for command in commands.commands() {
+                    match command {
+                        ir::Command::SetPipeline(pipeline) => self
+                            .blends
+                            .push(self.resources.render_pipeline(*pipeline).unwrap().blend()),
+                        ir::Command::WriteBuffer { data, .. } => {
+                            self.vertices.extend_from_slice(data)
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(())
+            }
+        }
+        let resources = Rc::new(ResourceTable::new());
+        let renderer = QuadRenderer::define(&resources, 2).unwrap();
+        let texture = define_bgra_texture(&resources, 8, 8).unwrap();
+        let target = define_scene_texture(&resources, 4, 4).unwrap();
+        let area = PixelRect::new(0, 0, 4, 4).unwrap();
+        let rect = SampledRect {
+            texture,
+            texture_width: 8,
+            texture_height: 8,
+            destination: area,
+            source: PixelRect::new(0, 0, 8, 8).unwrap(),
+            tint: ir::Color::rgba(0.5, 0.5, 0.5, 0.5).unwrap(),
+            ignore_source_alpha: false,
+            clip: None,
+        };
+        let uv = [
+            [0.875, 0.125],
+            [0.125, 0.125],
+            [0.125, 0.875],
+            [0.875, 0.875],
+        ];
+        let mut inspect = Inspect {
+            resources: resources.clone(),
+            blends: Vec::new(),
+            vertices: Vec::new(),
+        };
+        renderer
+            .encode_region_with_uploads(
+                &mut inspect,
+                resources,
+                target,
+                4,
+                4,
+                area,
+                LoadOp::Clear(ir::Color::rgba(0.0, 0.0, 0.0, 0.0).unwrap()),
+                &[],
+                &[
+                    Quad::SampledUv {
+                        rect,
+                        uv,
+                        premultiplied: true,
+                    },
+                    Quad::Sampled(rect),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            inspect.blends,
+            vec![
+                premultiplied_source_over(),
+                BlendState::SOURCE_OVER_STRAIGHT_ALPHA
+            ]
+        );
+        assert_eq!(
+            inspect.blends[0].color().source_factor(),
+            ir::BlendFactor::One
+        );
+        assert_eq!(
+            inspect.blends[0].alpha().destination_factor(),
+            ir::BlendFactor::OneMinusSourceAlpha
+        );
+        for (vertex, corner) in [0, 1, 2, 0, 2, 3].into_iter().enumerate() {
+            let offset = vertex * QUAD_VERTEX_STRIDE as usize + 16;
+            let u = f32::from_le_bytes(inspect.vertices[offset..offset + 4].try_into().unwrap());
+            let v =
+                f32::from_le_bytes(inspect.vertices[offset + 4..offset + 8].try_into().unwrap());
+            assert_eq!([u, v], uv[corner]);
+        }
+    }
 
     #[test]
     fn quad_batches_fit_the_portable_command_limit() {

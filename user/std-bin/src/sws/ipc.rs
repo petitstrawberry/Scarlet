@@ -693,7 +693,8 @@ fn sws_capabilities() -> u64 {
         | protocol::capabilities::SURFACE_REGIONS
         | protocol::capabilities::GAMEPAD_INPUT
         | protocol::capabilities::TOUCH_INPUT
-        | protocol::capabilities::INPUT_PANEL;
+        | protocol::capabilities::INPUT_PANEL
+        | protocol::capabilities::SURFACE_SCENES;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
         capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE;
     }
@@ -3755,6 +3756,25 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     buffer_id,
                 });
             }
+            Ok(ClientMessageRef::ExtensionCommitScene { payload }) => {
+                let scene =
+                    protocol::surface_scene::Commit::decode(payload).expect("validated scene");
+                if !is_extension_client
+                    || request_id != 0
+                    || header.flags != 0
+                    || !managed_windows.contains(&scene.window_id)
+                    || window_to_external_client.get(&scene.window_id)
+                        != Some(&scene.external_client_id)
+                {
+                    let _ = write_protocol_error(
+                        &mut stream_writer,
+                        request_id,
+                        protocol::error_codes::INVALID_EXTENSION_COMMIT,
+                    );
+                    continue;
+                }
+                push_ipc_event(IpcEvent::ExtensionCommitScene { client_id, scene });
+            }
             Ok(ClientMessageRef::ExtensionCommitBuffer {
                 external_client_id,
                 window_id,
@@ -4883,6 +4903,11 @@ pub enum IpcEvent {
     ExtensionDestroyBuffer {
         client_id: usize,
         buffer_id: u32,
+    },
+
+    ExtensionCommitScene {
+        client_id: usize,
+        scene: protocol::surface_scene::Commit,
     },
 
     /// Atomically select an extension buffer and publish its damage.

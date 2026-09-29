@@ -19,6 +19,7 @@ mod remote;
 #[path = "../sgfx_ir_support.rs"]
 mod sgfx_ir_support;
 mod status_backdrop;
+mod surface_scene;
 mod trace;
 mod window;
 mod workspace;

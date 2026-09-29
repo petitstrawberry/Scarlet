@@ -16,8 +16,10 @@ use std::vec::Vec;
 
 use crate::sgfx_ir_support::{
     BackdropPass, BackdropTextures, CopiedRect, MappedTarget, Quad, QuadRenderer, QuadSubmitError,
-    SampledRect, TextureUpload, define_bgra_texture, upload_bgra,
+    SampledRect, TextureUpload, define_bgra_texture, define_scene_texture, upload_bgra,
 };
+
+use super::surface_scene::{SceneView, source_uv};
 
 type DamageRect = (u32, u32, u32, u32);
 
@@ -204,6 +206,32 @@ struct ImportedShmTexture {
     pending_damage: Option<DamageRect>,
 }
 
+/// GPU-only retained scene plus reusable upload textures for its layers.
+/// Buffers remain leased by the compositor until replacement; these resources
+/// never own unbounded copies of the SHM data in the CPU heap.
+struct SceneTexture {
+    window_id: WindowId,
+    width: u32,
+    height: u32,
+    serial: Option<u64>,
+    texture: TextureId,
+    sources: Vec<(u32, u32, TextureId)>,
+}
+
+impl SceneTexture {
+    fn matches(&self, view: &SceneView<'_>) -> bool {
+        self.window_id == view.scene.window_id
+            && self.width == view.scene.width
+            && self.height == view.scene.height
+            && self.sources.len() == view.sources.len()
+            && self
+                .sources
+                .iter()
+                .zip(&view.sources)
+                .all(|(&(w, h, _), source)| w == source.width && h == source.height)
+    }
+}
+
 struct SharedWindowTexture {
     identity: SgfxBufferIdentity,
     width: u32,
@@ -233,6 +261,7 @@ pub(super) struct GpuCompositor {
     quad_renderer: QuadRenderer,
     cursor_images: Vec<CursorTextureSet>,
     textures: Vec<CachedWindowTexture>,
+    scene_textures: Vec<SceneTexture>,
     imported_shm_context: Option<ImportedShmContext>,
     imported_shm_textures: Vec<ImportedShmTexture>,
     shared_textures: Vec<SharedWindowTexture>,
@@ -281,6 +310,7 @@ impl GpuCompositor {
             quad_renderer,
             cursor_images,
             textures: Vec::new(),
+            scene_textures: Vec::new(),
             imported_shm_context,
             imported_shm_textures: Vec::new(),
             shared_textures: Vec::new(),
@@ -796,6 +826,11 @@ impl GpuCompositor {
             .iter()
             .any(|entry| entry.window_id == Some(window.id));
         let has_current_backing = window.pixels().is_ok();
+        let scene_texture = self
+            .scene_textures
+            .iter()
+            .find(|entry| entry.window_id == window.id)
+            .map(|entry| (entry.texture, entry.width, entry.height));
         let shared_texture = self.committed_shared_texture(window.id);
         let imported_shm_texture = self.imported_shm_texture(window);
         let directly_imported_shm = imported_shm_texture.is_some();
@@ -811,13 +846,14 @@ impl GpuCompositor {
             |instance| (window.opacity * instance.transform.opacity).clamp(0.0, 1.0),
         );
         let transformed = instance.is_some() || window.presentation_transform.is_some();
-        if shared_texture.is_some()
+        if scene_texture.is_some()
+            || shared_texture.is_some()
             || imported_shm_texture.is_some()
             || has_cached_texture
             || has_current_backing
         {
             let (texture, texture_width, texture_height) =
-                match shared_texture.or(imported_shm_texture) {
+                match scene_texture.or(shared_texture).or(imported_shm_texture) {
                     Some(texture) => texture,
                     None => {
                         let texture = self
@@ -860,7 +896,12 @@ impl GpuCompositor {
             if operation_clip.is_some_and(|clip| !pixel_rects_intersect(destination, clip)) {
                 return Ok(());
             }
-            if !directly_imported_shm && !scaled && opacity == 1.0 && !window.has_alpha_content {
+            if scene_texture.is_none()
+                && !directly_imported_shm
+                && !scaled
+                && opacity == 1.0
+                && !window.has_alpha_content
+            {
                 append_rounded_quad(
                     operations,
                     Quad::Copy(CopiedRect {
@@ -875,19 +916,37 @@ impl GpuCompositor {
                     self.target.height,
                 )?;
             } else {
+                let mut rect = SampledRect {
+                    texture,
+                    texture_width,
+                    texture_height,
+                    destination,
+                    source,
+                    tint: Color::rgba(1.0, 1.0, 1.0, opacity)
+                        .map_err(|_| "Invalid window opacity")?,
+                    ignore_source_alpha: !window.has_alpha_content,
+                    clip: None,
+                };
+                let operation = if scene_texture.is_some() {
+                    // Apply group opacity once, after composing all children.
+                    rect.ignore_source_alpha = false;
+                    rect.tint = Color::rgba(opacity, opacity, opacity, opacity)
+                        .map_err(|_| "Invalid scene opacity")?;
+                    let l = source.x() as f32 / texture_width as f32;
+                    let r = (source.x() + source.width()) as f32 / texture_width as f32;
+                    let t = source.y() as f32 / texture_height as f32;
+                    let b = (source.y() + source.height()) as f32 / texture_height as f32;
+                    Quad::SampledUv {
+                        rect,
+                        uv: [[l, t], [l, b], [r, b], [r, t]],
+                        premultiplied: true,
+                    }
+                } else {
+                    Quad::Sampled(rect)
+                };
                 append_rounded_quad(
                     operations,
-                    Quad::Sampled(SampledRect {
-                        texture,
-                        texture_width,
-                        texture_height,
-                        destination,
-                        source,
-                        tint: Color::rgba(1.0, 1.0, 1.0, opacity)
-                            .map_err(|_| "Invalid window opacity")?,
-                        ignore_source_alpha: !window.has_alpha_content,
-                        clip: None,
-                    }),
+                    operation,
                     rounded_clip,
                     operation_clip,
                     self.target.width,
@@ -930,6 +989,7 @@ impl GpuCompositor {
         &mut self,
         display: &DisplaySurface,
         windows: &[Window],
+        scenes: &[SceneView<'_>],
         cursor: &Cursor,
         background: [u8; 4],
         overview_shadows: &[((i32, i32, u32, u32), u32, [u8; 4])],
@@ -958,7 +1018,18 @@ impl GpuCompositor {
         {
             self.rebuild_pending = true;
         }
+        // Retire changed layouts with the same bounded resource-table rebuild
+        // policy used by window textures. A buffer swap at the same extent
+        // reuses the source texture; it does not allocate a new GPU resource.
+        if self
+            .scene_textures
+            .iter()
+            .any(|cached| !scenes.iter().any(|view| cached.matches(view)))
+        {
+            self.rebuild_pending = true;
+        }
         self.rebuild_if_needed(cursor, windows)?;
+        self.prepare_scene_textures(scenes, windows)?;
         self.transfer_visible_imported_shm(windows)?;
         let force_full_repaint = self.force_full_repaint;
         let damage = if force_full_repaint { None } else { damage };
@@ -972,6 +1043,7 @@ impl GpuCompositor {
             let has_current_backing = window.pixels().is_ok();
             let has_direct_shm_texture = self.imported_shm_texture(window).is_some();
             if window.is_presented()
+                && !scenes.iter().any(|view| view.scene.window_id == window.id)
                 && !self.has_committed_shared_buffer(window.id)
                 && !has_direct_shm_texture
                 && has_current_backing
@@ -1313,6 +1385,130 @@ impl GpuCompositor {
         }
     }
 
+    fn prepare_scene_textures(
+        &mut self,
+        scenes: &[SceneView<'_>],
+        windows: &[Window],
+    ) -> Result<(), GpuCompositionError> {
+        for view in scenes {
+            let scene = view.scene;
+            if scene.layers.is_empty()
+                || !windows
+                    .iter()
+                    .any(|w| w.id == scene.window_id && w.is_presented())
+            {
+                continue;
+            }
+            let index = match self
+                .scene_textures
+                .iter()
+                .position(|entry| entry.window_id == scene.window_id)
+            {
+                Some(index) => index,
+                None => {
+                    let texture = define_scene_texture(
+                        self.target.resources.as_ref(),
+                        scene.width,
+                        scene.height,
+                    )
+                    .map_err(|_| "Failed to allocate GPU scene target")?;
+                    let mut sources = Vec::with_capacity(view.sources.len());
+                    for source in &view.sources {
+                        let texture = define_bgra_texture(
+                            self.target.resources.as_ref(),
+                            source.width,
+                            source.height,
+                        )
+                        .map_err(|_| "Failed to allocate GPU scene source")?;
+                        sources.push((source.width, source.height, texture));
+                    }
+                    self.scene_textures.push(SceneTexture {
+                        window_id: scene.window_id,
+                        width: scene.width,
+                        height: scene.height,
+                        serial: None,
+                        texture,
+                        sources,
+                    });
+                    self.scene_textures.len() - 1
+                }
+            };
+            let entry = &self.scene_textures[index];
+            if entry.serial == Some(scene.serial) {
+                continue;
+            }
+            let mut uploads = Vec::with_capacity(view.sources.len());
+            let mut quads = Vec::with_capacity(view.sources.len());
+            let white = Color::rgba(1.0, 1.0, 1.0, 1.0).map_err(|_| "Invalid scene tint")?;
+            for ((layer, source), &(width, height, texture)) in
+                scene.layers.iter().zip(&view.sources).zip(&entry.sources)
+            {
+                let area = PixelRect::new(0, 0, width, height)
+                    .map_err(|_| "Invalid scene source extent")?;
+                uploads.push(TextureUpload {
+                    texture,
+                    destination: area,
+                    stride: source.stride as u32,
+                    bytes: source.bytes,
+                });
+                quads.push(Quad::SampledUv {
+                    rect: SampledRect {
+                        texture,
+                        texture_width: width,
+                        texture_height: height,
+                        destination: PixelRect::new(
+                            layer.x as u32,
+                            layer.y as u32,
+                            layer.width,
+                            layer.height,
+                        )
+                        .map_err(|_| "Invalid scene layer extent")?,
+                        source: area,
+                        tint: white,
+                        ignore_source_alpha: source.opaque,
+                        clip: None,
+                    },
+                    uv: source_uv(layer, width, height),
+                    premultiplied: true,
+                });
+            }
+            if self.target.supports_tracked_submission() {
+                let area = PixelRect::new(0, 0, scene.width, scene.height)
+                    .map_err(|_| "Invalid scene extent")?;
+                self.quad_renderer
+                    .submit_texture_with_uploads_tracked(
+                        &mut self.target,
+                        entry.texture,
+                        (scene.width, scene.height),
+                        area,
+                        LoadOp::Clear(
+                            Color::rgba(0.0, 0.0, 0.0, 0.0).map_err(|_| "Invalid scene clear")?,
+                        ),
+                        &uploads,
+                        &quads,
+                        &[],
+                    )
+                    .map_err(|error| match error {
+                        QuadSubmitError::Busy => GpuCompositionError::Busy,
+                        QuadSubmitError::Recording(error) => GpuCompositionError::Backend(error),
+                        QuadSubmitError::Execution(error) => {
+                            GpuCompositionError::TrackedExecution(error)
+                        }
+                    })?;
+            } else {
+                self.quad_renderer.submit_texture_with_uploads(
+                    &mut self.target,
+                    entry.texture,
+                    (scene.width, scene.height),
+                    &uploads,
+                    &quads,
+                )?;
+            }
+            self.scene_textures[index].serial = Some(scene.serial);
+        }
+        Ok(())
+    }
+
     fn prepare_window_texture_upload<'a>(
         &mut self,
         window: &'a Window,
@@ -1454,6 +1650,7 @@ impl GpuCompositor {
         self.backdrops.clear();
         self.cursor_images = cursor_images;
         self.textures.clear();
+        self.scene_textures.clear();
         for (imported, texture) in self
             .imported_shm_textures
             .iter_mut()
@@ -1726,6 +1923,18 @@ fn quad_with_clip(operation: Quad, clip: Option<PixelRect>) -> Quad {
         Quad::Copy(mut rect) => {
             rect.clip = clip;
             Quad::Copy(rect)
+        }
+        Quad::SampledUv {
+            mut rect,
+            uv,
+            premultiplied,
+        } => {
+            rect.clip = clip;
+            Quad::SampledUv {
+                rect,
+                uv,
+                premultiplied,
+            }
         }
         Quad::SampledOffset { mut rect, offset } => {
             rect.clip = clip;
