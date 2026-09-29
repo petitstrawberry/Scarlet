@@ -1726,9 +1726,12 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         .iter()
         .try_fold(0usize, |total, iovec| total.checked_add(iovec.iov_len))
     {
-        Some(total) => total,
-        None => return errno::to_result(errno::EINVAL),
+        Some(total) if total <= isize::MAX as usize => total,
+        _ => return errno::to_result(errno::EINVAL),
     };
+    if total_buffer_size == 0 {
+        return 0;
+    }
     let can_receive_handle = msg.msg_control != 0
         && (msg.msg_controllen as usize) >= size_of::<LinuxCmsghdr>() + size_of::<i32>();
     let max_received_handles =
@@ -1826,46 +1829,53 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 total_read += to_copy;
             }
         } else {
-            for iovec in &iovecs {
-                if iovec.iov_len == 0 {
-                    continue;
+            // One recvmsg is one stream receive, followed by scatter-copy.
+            // Filling the first iovec must not trigger a second blocking read:
+            // a Wine/Wayland peer can be waiting for our next request already.
+            let length = total_buffer_size.min(1024 * 1024);
+            let mut buffer = Vec::new();
+            if buffer.try_reserve_exact(length).is_err() {
+                return errno::to_result(errno::ENOMEM);
+            }
+            buffer.resize(length, 0);
+            let read_result = match local_socket {
+                Some(socket) => socket.read_with_sender(&mut buffer),
+                None => stream.read(&mut buffer).map(|count| (count, 0)),
+            };
+            let (amount, sender) = match read_result {
+                Ok(result) => result,
+                Err(StreamError::WouldBlock) => {
+                    if can_receive_handle && !retried_atomic_after_stream_wake {
+                        retried_atomic_after_stream_wake = true;
+                        continue 'receive;
+                    }
+                    return errno::to_result(errno::EAGAIN);
                 }
-
-                let mut buffer = Vec::new();
-                buffer.resize(iovec.iov_len, 0);
-
-                let read_result = match local_socket {
-                    Some(socket) => socket.read_with_sender(&mut buffer),
-                    None => stream.read(&mut buffer).map(|count| (count, 0)),
-                };
-                match read_result {
-                    Ok((n, sender)) => {
-                        if copy_to_user(&task, iovec.iov_base as usize, &buffer[..n]).is_err() {
-                            return errno::to_result(errno::EFAULT);
-                        }
-                        if n != 0 && sender_process_id.is_none() {
-                            sender_process_id = Some(sender);
-                        }
-                        total_read = total_read.saturating_add(n);
-                        if n < iovec.iov_len {
-                            break;
-                        }
-                    }
-                    Err(StreamError::WouldBlock) => {
-                        if total_read == 0
-                            && can_receive_handle
-                            && !retried_atomic_after_stream_wake
-                        {
-                            retried_atomic_after_stream_wake = true;
-                            continue 'receive;
-                        }
-                        return if total_read == 0 {
-                            errno::to_result(errno::EAGAIN)
-                        } else {
-                            total_read
-                        };
-                    }
-                    Err(_) => return errno::to_result(errno::EIO),
+                Err(StreamError::Interrupted) => return errno::to_result(errno::EINTR),
+                Err(StreamError::EndOfStream) => (0, 0),
+                Err(_) => return errno::to_result(errno::EIO),
+            };
+            if amount > buffer.len() {
+                return errno::to_result(errno::EIO);
+            }
+            if amount != 0 {
+                sender_process_id = Some(sender);
+            }
+            for iovec in &iovecs {
+                let part = iovec.iov_len.min(amount - total_read);
+                if part != 0
+                    && copy_to_user(
+                        &task,
+                        iovec.iov_base as usize,
+                        &buffer[total_read..total_read + part],
+                    )
+                    .is_err()
+                {
+                    return errno::to_result(errno::EFAULT);
+                }
+                total_read += part;
+                if total_read == amount {
+                    break;
                 }
             }
         }
@@ -2422,6 +2432,85 @@ pub fn sys_shutdown(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_arch = "aarch64")]
+    #[test_case]
+    fn socket_reply_does_not_wait_to_fill_pages_or_iovecs() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::object::capability::StreamOps;
+        use crate::sched::scheduler::{
+            add_task, get_task_by_id, register_online_cpu, remove_from_ready_queues, reset,
+            set_current_task_for_test,
+        };
+        use crate::task::{Task, TaskState, TaskType};
+        use core::sync::atomic::Ordering;
+
+        reset();
+        let cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+        let id = add_task(
+            Task::new("socket-short-reply".into(), 1, TaskType::User),
+            cpu,
+        );
+        let task = get_task_by_id(id).unwrap();
+        task.set_state(TaskState::Running);
+        task.running_cpu.store(cpu, Ordering::SeqCst);
+        set_current_task_for_test(cpu, Some(id));
+        remove_from_ready_queues(id);
+        let base = USER_STACK_END - 2 * PAGE_SIZE;
+        task.allocate_stack_pages(base, 2).unwrap();
+        let (client, server) = LocalSocket::create_connected_pair("client".into(), "server".into());
+        let handle = task
+            .handle_table
+            .insert(KernelObject::from_socket_object(client))
+            .unwrap();
+        let mut abi = LinuxAbi::default();
+        let fd = abi.allocate_fd(handle).unwrap();
+
+        // Keep the peer open and send exactly enough to fill the first page
+        // fragment. A second read waits forever: the peer expects our request.
+        let address = base + PAGE_SIZE - 16;
+        server.write(&[42; 16]).unwrap();
+        let mut frame = Trapframe::new();
+        frame.set_arg(0, fd);
+        frame.set_arg(1, address);
+        frame.set_arg(2, 64);
+        assert_eq!(super::super::fs::sys_read(&mut abi, &mut frame), 16);
+        let mut bytes = [0; 16];
+        copy_from_user(&task, address, &mut bytes).unwrap();
+        assert_eq!(bytes, [42; 16]);
+
+        // Native 64-bit iovec/msghdr wire layouts; the first iovec exactly
+        // fits one reply, and a larger reply must also scatter into the next.
+        let mut vectors = [0u8; 32];
+        vectors[..8].copy_from_slice(&(address as u64).to_ne_bytes());
+        vectors[8..16].copy_from_slice(&16u64.to_ne_bytes());
+        vectors[16..24].copy_from_slice(&((address + 16) as u64).to_ne_bytes());
+        vectors[24..32].copy_from_slice(&48u64.to_ne_bytes());
+        copy_to_user(&task, base + 128, &vectors).unwrap();
+        for length in [16usize, 40] {
+            let mut header = [0u8; size_of::<LinuxMsghdr>()];
+            header[16..24].copy_from_slice(&((base + 128) as u64).to_ne_bytes());
+            header[24..32].copy_from_slice(&2u64.to_ne_bytes());
+            copy_to_user(&task, base, &header).unwrap();
+            server.write(&[43; 40][..length]).unwrap();
+            frame.set_arg(0, fd);
+            frame.set_arg(1, base);
+            frame.set_arg(2, 0); // Blocking recvmsg, not MSG_DONTWAIT.
+            assert_eq!(sys_recvmsg(&mut abi, &mut frame), length);
+            let mut bytes = [0; 40];
+            copy_from_user(&task, address, &mut bytes[..length]).unwrap();
+            assert_eq!(&bytes[..length], &[43; 40][..length]);
+        }
+        assert_eq!(task.get_state(), TaskState::Running);
+        abi.remove_fd(fd);
+        task.handle_table.remove(handle).unwrap();
+        drop(server);
+        set_current_task_for_test(cpu, None);
+        task.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        drop(task);
+        reset();
+    }
 
     #[test_case]
     fn ipv4_sockaddr_preserves_network_order_octets() {

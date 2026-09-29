@@ -1400,6 +1400,49 @@ pub fn sys_close(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 }
 
+// A pipe read is one stream operation, even when the user buffer spans pages.
+// Splitting it into page-sized reads can consume the available reply on the
+// first page and then block waiting for more, while the peer awaits our reply.
+fn read_stream_to_user(
+    stream: &dyn crate::object::capability::StreamOps,
+    task: &crate::task::Task,
+    address: usize,
+    count: usize,
+) -> Result<usize, usize> {
+    use crate::object::capability::memory_mapping::AccessOp;
+    // As with readv, bound staging allocation; a short stream read is legal.
+    let length = count.min(1024 * 1024);
+    if length == 0 {
+        return Ok(0);
+    }
+    address.checked_add(length - 1).ok_or(errno::EFAULT)?;
+    let mut offset = 0;
+    while offset < length {
+        let cursor = address + offset;
+        task.vm_manager
+            .translate_to_phys_with_access(cursor, AccessOp::Store)
+            .ok_or(errno::EFAULT)?;
+        offset += (crate::environment::PAGE_SIZE - (cursor & (crate::environment::PAGE_SIZE - 1)))
+            .min(length - offset);
+    }
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(length)
+        .map_err(|_| errno::ENOMEM)?;
+    buffer.resize(length, 0);
+    let amount = match stream.read(&mut buffer) {
+        Ok(amount) => amount.min(length),
+        Err(StreamError::EndOfStream) => return Ok(0),
+        Err(error) => return Err(stream_error_to_errno(error)),
+    };
+    let copied = copy_to_user_pagewise(address, &buffer[..amount], &task.vm_manager);
+    if amount != 0 && copied == 0 {
+        Err(errno::EFAULT)
+    } else {
+        Ok(copied)
+    }
+}
+
 pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
@@ -1473,6 +1516,23 @@ pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         };
         trapframe.increment_pc_next(&task);
         return result;
+    }
+
+    // A pipe/socket read must not become a sequence of blocking reads merely
+    // because its destination straddles a page. Return the available reply;
+    // the peer may wait for our next request before it sends anything else.
+    if kernel_obj.as_pipe().is_some() || kernel_obj.as_socket().is_some() {
+        if count == 0 {
+            trapframe.increment_pc_next(&task);
+            return 0;
+        }
+        let page_remaining =
+            crate::environment::PAGE_SIZE - (user_buf & (crate::environment::PAGE_SIZE - 1));
+        if count > page_remaining {
+            trapframe.increment_pc_next(&task);
+            return read_stream_to_user(stream, &task, user_buf, count)
+                .unwrap_or_else(errno::to_result);
+        }
     }
 
     // Fast path: buffer fits within a single page
@@ -5992,6 +6052,31 @@ mod tests {
         proc_exe_linux_stat, proc_exe_selector,
     };
     use crate::abi::linux::generic::errno;
+
+    #[cfg(target_arch = "aarch64")]
+    #[test_case]
+    fn pipe_read_across_user_pages_returns_available_reply_without_second_wait() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::ipc::{UnidirectionalPipe, pipe::PipeObject};
+        use crate::object::capability::StreamOps;
+        use crate::task::{Task, TaskType};
+        let task = Task::new("pipe-read-pages".into(), 0, TaskType::User);
+        let base = USER_STACK_END - 2 * PAGE_SIZE;
+        task.allocate_stack_pages(base, 2).unwrap();
+        let address = base + PAGE_SIZE - 16;
+        let (reader, writer) = UnidirectionalPipe::create_pair_raw(4096);
+        writer.write(&[42; 16]).unwrap();
+        // Keep the writer open: reading again after the first 16 bytes would
+        // wait indefinitely. The destination has room for another 48 bytes.
+        assert_eq!(
+            super::read_stream_to_user(&reader, &task, address, 64).unwrap(),
+            16
+        );
+        let mut bytes = [0u8; 16];
+        crate::library::std::usercopy::copy_from_user(&task, address, &mut bytes).unwrap();
+        assert_eq!(bytes, [42; 16]);
+        assert_eq!(reader.available_bytes(), 0);
+    }
 
     #[test_case]
     fn device_stat_identity_matches_path_reopens_and_duplicates() {
