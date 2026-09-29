@@ -562,7 +562,10 @@ pub fn sys_kill(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     for target in targets {
-        deliver_signal(abi, &task, &target, signal);
+        let result = deliver_signal(abi, &task, &target, signal);
+        if result != 0 {
+            return result;
+        }
     }
 
     0

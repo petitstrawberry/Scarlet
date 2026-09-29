@@ -959,42 +959,72 @@ fn deliver_signal_to_self(abi: &LinuxAbi, task: &Task, signal: LinuxSignal) {
     }
 }
 
-/// Deliver a signal to another task using its default disposition.
-///
-/// The remote task's installed handler table is not reachable from the
-/// caller's syscall context, so the signal's default action is applied
-/// instead. Fatal defaults terminate the target thread group; custom
-/// handlers and ignored signals stay permissive to keep runtimes such as Go
-/// working until cross-task userspace signal frames are available.
-///
-/// # Arguments
-///
-/// * `target` - Task receiving the signal
-/// * `signal` - Signal to deliver
-fn deliver_signal_to_remote(target: &Task, signal: LinuxSignal) {
+/// Reverse the process-control mapping for delivery on the receiver's own
+/// user-return boundary. Never build a frame in a remotely running thread.
+fn signal_process_control(signal: LinuxSignal) -> Option<ProcessControlType> {
+    [
+        ProcessControlType::Terminate,
+        ProcessControlType::Kill,
+        ProcessControlType::Stop,
+        ProcessControlType::Continue,
+        ProcessControlType::Interrupt,
+        ProcessControlType::Quit,
+        ProcessControlType::TerminalStop,
+        ProcessControlType::TerminalInput,
+        ProcessControlType::TerminalOutput,
+        ProcessControlType::WindowChange,
+        ProcessControlType::Hangup,
+        ProcessControlType::ChildExit,
+        ProcessControlType::PipeBroken,
+        ProcessControlType::Alarm,
+        ProcessControlType::IoReady,
+    ]
+    .into_iter()
+    .find(|control| process_control_to_signal(*control) == Some(signal))
+    .or_else(|| ((signal as u32) >= 32).then(|| ProcessControlType::User(signal as u32 - 32)))
+}
+
+/// Honor the receiver's disposition. Wine registers SIGQUIT to terminate a
+/// Windows thread; applying SIGQUIT's default here killed its whole process.
+fn deliver_signal_to_remote(current: &Task, target: &Task, signal: LinuxSignal) -> usize {
     let state = target
         .linux_signal_state
         .lock()
         .as_ref()
         .and_then(|state| state.upgrade());
-    if let Some(state) = state {
+    let action = if let Some(state) = state {
         let mut state = state.lock();
         if signal != LinuxSignal::SIGKILL
             && signal != LinuxSignal::SIGSTOP
             && state.blocked.is_blocked(signal)
         {
             state.add_pending(signal);
-            return;
+            return 0;
         }
-    }
-    match signal.default_action() {
+        state.get_handler(signal)
+    } else {
+        signal.default_action()
+    };
+    match action {
+        SignalAction::Custom(_) => {
+            let Some(control) = signal_process_control(signal) else {
+                // Unsupported asynchronous signal delivery must not silently
+                // use the default fatal action or falsely report success.
+                return errno::to_result(errno::ENOSYS);
+            };
+            let mut event = Event::immediate_process_control(target.get_id() as u32, control);
+            event.metadata.sender = Some(current.get_id() as u32);
+            target.event_queue.lock().enqueue(event);
+            crate::sched::scheduler::wake_task(target.get_id());
+        }
         SignalAction::Terminate | SignalAction::ForceTerminate => {
             let status = signal_death_status(signal);
             crate::println!(
-                "[linux] signal {} terminating task {} (PID {}) with status {}",
+                "[linux] fatal signal={} sender={} target={} name={} status={}",
                 signal as u32,
+                current.get_id(),
                 target.get_id(),
-                target.try_get_namespace_id().unwrap_or(0),
+                target.name.read().as_str(),
                 status
             );
             target.mark_signal_termination(signal as u8);
@@ -1003,8 +1033,9 @@ fn deliver_signal_to_remote(target: &Task, signal: LinuxSignal) {
         }
         SignalAction::Stop => stop_target_for_signal(target),
         SignalAction::Continue => wake_target_for_signal(target),
-        SignalAction::Ignore | SignalAction::Custom(_) => {}
+        SignalAction::Ignore => {}
     }
+    0
 }
 
 /// Route signal delivery between the calling task and a remote target.
@@ -1016,23 +1047,29 @@ fn deliver_signal_to_remote(target: &Task, signal: LinuxSignal) {
 /// * `target` - Task the signal is addressed to
 /// * `signal` - Signal to deliver
 ///
-/// Returns a Linux syscall result. Custom userspace handler delivery is not
-/// implemented by this path. Reporting success would strand libc protocols
-/// such as musl's synchronous setxid broadcast waiting for a callback forever.
+/// Returns a Linux syscall result. Supported process-control signals are
+/// dispatched on the remote target; unsupported custom signals return ENOSYS.
+/// AArch64 self-signals are dispatched by its pending-handler return hook.
 pub fn deliver_signal(abi: &LinuxAbi, current: &Task, target: &Task, signal: LinuxSignal) -> usize {
-    let is_self = target.get_id() == current.get_id()
-        || target.get_thread_group_id() == current.get_thread_group_id();
+    // tgkill/tkill address a particular thread, even within our thread group.
+    let is_self = target.get_id() == current.get_id();
     if is_self {
         let state = abi.signal_state.lock();
         let unsupported_handler = matches!(state.get_handler(signal), SignalAction::Custom(_))
             && !state.blocked.is_blocked(signal);
         drop(state);
         if unsupported_handler {
+            #[cfg(target_arch = "aarch64")]
+            {
+                abi.signal_state.lock().add_pending(signal);
+                return 0; // aarch64's user-return hook installs the frame.
+            }
+            #[cfg(not(target_arch = "aarch64"))]
             return errno::to_result(errno::ENOSYS);
         }
         deliver_signal_to_self(abi, current, signal);
     } else {
-        deliver_signal_to_remote(target, signal);
+        return deliver_signal_to_remote(current, target, signal);
     }
     0
 }
@@ -1098,6 +1135,44 @@ pub fn deliver_pending_signals(abi: &mut LinuxAbi) {
 
 #[cfg(test)]
 mod tests {
+    #[test_case]
+    fn remote_quit_uses_registered_handler_and_preserves_ignored_signals() {
+        let sender = Task::new("signal-sender".into(), 0, TaskType::User);
+        let receiver = Task::new("signal-receiver".into(), 0, TaskType::User);
+        let abi = LinuxAbi::default();
+        abi.bind_task_signals(&receiver);
+        abi.signal_state
+            .lock()
+            .set_handler(LinuxSignal::SIGQUIT, SignalAction::Custom(0x400000));
+        assert_eq!(
+            deliver_signal_to_remote(&sender, &receiver, LinuxSignal::SIGQUIT),
+            0
+        );
+        assert_eq!(receiver.termination_signal(), None);
+        let event = receiver.event_queue.lock().dequeue().unwrap();
+        assert_eq!(event.metadata.sender, Some(sender.get_id() as u32));
+        assert_eq!(handle_event_to_signal(&event), Some(LinuxSignal::SIGQUIT));
+        abi.signal_state
+            .lock()
+            .set_handler(LinuxSignal::SIGTERM, SignalAction::Ignore);
+        assert_eq!(
+            deliver_signal_to_remote(&sender, &receiver, LinuxSignal::SIGTERM),
+            0
+        );
+        assert_eq!(receiver.termination_signal(), None);
+        assert!(receiver.event_queue.lock().dequeue().is_none());
+        abi.signal_state
+            .lock()
+            .blocked
+            .block_signal(LinuxSignal::SIGQUIT);
+        assert_eq!(
+            deliver_signal_to_remote(&sender, &receiver, LinuxSignal::SIGQUIT),
+            0
+        );
+        assert!(abi.signal_state.lock().is_pending(LinuxSignal::SIGQUIT));
+        assert!(receiver.event_queue.lock().dequeue().is_none());
+    }
+
     use super::*;
 
     #[test_case]
