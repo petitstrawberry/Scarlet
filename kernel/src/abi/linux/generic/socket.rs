@@ -48,6 +48,23 @@ impl SockaddrIn {
             sin_zero: [0; 8],
         }
     }
+
+    fn from_inet(address: &crate::network::Inet4SocketAddress) -> Self {
+        Self {
+            sin_family: AF_INET_U16,
+            sin_port: address.port.to_be(),
+            // sin_addr is an octet sequence in memory, not a host-order integer.
+            sin_addr: u32::from_ne_bytes(address.addr),
+            sin_zero: [0; 8],
+        }
+    }
+
+    fn to_inet(self) -> crate::network::Inet4SocketAddress {
+        crate::network::Inet4SocketAddress::new(
+            self.sin_addr.to_ne_bytes(),
+            u16::from_be(self.sin_port),
+        )
+    }
 }
 
 /// Linux socket types
@@ -61,6 +78,7 @@ pub const SOCK_TYPE_MASK: i32 = 0xF;
 
 pub const SOL_SOCKET: i32 = 1;
 pub const SO_TYPE: i32 = 3;
+pub const SO_ERROR: i32 = 4;
 pub const SCM_RIGHTS: i32 = 1;
 pub const SCM_CREDENTIALS: i32 = 2;
 pub const SO_PASSCRED: i32 = 16;
@@ -111,6 +129,29 @@ fn socket_error_to_errno(error: SocketError) -> usize {
         SocketError::NoRoute => errno::ENETUNREACH,
         SocketError::ProtocolNotSupported => errno::EPROTONOSUPPORT,
         SocketError::InvalidPacket | SocketError::Other(_) => errno::EIO,
+    }
+}
+
+fn inet_connect_error_to_errno(error: SocketError) -> usize {
+    match error {
+        SocketError::WouldBlock => errno::EINPROGRESS,
+        error => socket_error_to_errno(error),
+    }
+}
+
+fn socket_status_option(
+    socket: &dyn crate::network::SocketObject,
+    option: i32,
+) -> Result<i32, usize> {
+    match option {
+        SO_TYPE => Ok(match socket.socket_type() {
+            SocketType::Stream => SOCK_STREAM,
+            SocketType::Datagram => SOCK_DGRAM,
+            SocketType::Raw => SOCK_RAW,
+            SocketType::SeqPacket => SOCK_SEQPACKET,
+        }),
+        SO_ERROR => Ok(socket.take_pending_error().map(socket_error_to_errno).unwrap_or(0) as i32),
+        _ => Err(errno::ENOPROTOOPT),
     }
 }
 
@@ -183,10 +224,7 @@ fn write_socket_address_to_user(
                 }
 
                 let sockaddr = addr_paddr as *mut SockaddrIn;
-                (*sockaddr).sin_family = AF_INET_U16;
-                (*sockaddr).sin_port = u16::to_be(inet.port);
-                (*sockaddr).sin_addr = u32::from_be_bytes(inet.addr);
-                (*sockaddr).sin_zero = [0; 8];
+                core::ptr::write_unaligned(sockaddr, SockaddrIn::from_inet(&inet));
 
                 *(addrlen_paddr as *mut u32) = size_of::<SockaddrIn>() as u32;
                 Ok(())
@@ -611,12 +649,11 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 0 // Success
             }
             AF_INET_U16 => {
-                let addr_struct = &*(addr_paddr as *const SockaddrIn);
-                let port = u16::from_be(addr_struct.sin_port);
-                let addr_bytes = u32::to_be(addr_struct.sin_addr).to_be_bytes();
-                let socket_addr = crate::network::SocketAddress::Inet(
-                    crate::network::Inet4SocketAddress::new(addr_bytes, port),
-                );
+                if addrlen < size_of::<SockaddrIn>() as u32 {
+                    return errno::to_result(errno::EINVAL);
+                }
+                let addr_struct = core::ptr::read_unaligned(addr_paddr as *const SockaddrIn);
+                let socket_addr = crate::network::SocketAddress::Inet(addr_struct.to_inet());
 
                 if socket_arc.bind(&socket_addr).is_err() {
                     crate::println!("[linux socket] bind failed for INET address");
@@ -911,19 +948,18 @@ pub fn sys_connect(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 };
             }
             AF_INET_U16 => {
-                let addr_struct = &*(addr_paddr as *const SockaddrIn);
-                let port = u16::from_be(addr_struct.sin_port);
-                let addr_bytes = u32::to_be(addr_struct.sin_addr).to_be_bytes();
-                let socket_addr = crate::network::SocketAddress::Inet(
-                    crate::network::Inet4SocketAddress::new(addr_bytes, port),
-                );
+                if addrlen < size_of::<SockaddrIn>() as u32 {
+                    return errno::to_result(errno::EINVAL);
+                }
+                let addr_struct = core::ptr::read_unaligned(addr_paddr as *const SockaddrIn);
+                let socket_addr = crate::network::SocketAddress::Inet(addr_struct.to_inet());
 
                 if let Err(error) = socket_arc.connect(&socket_addr) {
                     crate::println!(
                         "[linux socket] connect failed for INET address: {:?}",
                         error
                     );
-                    return errno::to_result(socket_error_to_errno(error));
+                    return errno::to_result(inet_connect_error_to_errno(error));
                 }
             }
             _ => {
@@ -1116,7 +1152,7 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
     let optlen = u32::from_ne_bytes(optlen_bytes);
 
-    if level == SOL_SOCKET && optname == SO_TYPE {
+    if level == SOL_SOCKET && matches!(optname, SO_TYPE | SO_ERROR) {
         if optlen < size_of::<i32>() as u32 {
             return errno::to_result(errno::EINVAL);
         }
@@ -1132,13 +1168,11 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             Some(socket) => socket,
             None => return errno::to_result(errno::ENOTSOCK),
         };
-        let socket_type: i32 = match socket.socket_type() {
-            SocketType::Stream => SOCK_STREAM,
-            SocketType::Datagram => SOCK_DGRAM,
-            SocketType::Raw => SOCK_RAW,
-            SocketType::SeqPacket => SOCK_SEQPACKET,
+        let value = match socket_status_option(socket.as_ref(), optname) {
+            Ok(value) => value,
+            Err(error) => return errno::to_result(error),
         };
-        if copy_to_user(&task, optval_ptr, &socket_type.to_ne_bytes()).is_err()
+        if copy_to_user(&task, optval_ptr, &value.to_ne_bytes()).is_err()
             || copy_to_user(&task, optlen_ptr, &(size_of::<i32>() as u32).to_ne_bytes()).is_err()
         {
             return errno::to_result(errno::EFAULT);
@@ -1990,11 +2024,7 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 }
                 let sockaddr =
                     unsafe { core::ptr::read_unaligned(addr_kaddr as *const SockaddrIn) };
-                let port = u16::from_be(sockaddr.sin_port);
-                let addr_bytes = sockaddr.sin_addr.to_be_bytes();
-                crate::network::SocketAddress::Inet(crate::network::Inet4SocketAddress::new(
-                    addr_bytes, port,
-                ))
+                crate::network::SocketAddress::Inet(sockaddr.to_inet())
             }
             AF_UNIX_U16 => {
                 // Unix domain socket sendto - usually not used for stream sockets
@@ -2172,12 +2202,7 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 match src_addr {
                     crate::network::SocketAddress::Inet(inet) => {
                         if provided_len >= size_of::<SockaddrIn>() as u32 {
-                            let sockaddr = SockaddrIn {
-                                sin_family: AF_INET as u16,
-                                sin_port: inet.port.to_be(),
-                                sin_addr: u32::from_be_bytes(inet.addr),
-                                sin_zero: [0; 8],
-                            };
+                            let sockaddr = SockaddrIn::from_inet(&inet);
                             let sockaddr_bytes = unsafe {
                                 core::slice::from_raw_parts(
                                     (&sockaddr as *const SockaddrIn).cast::<u8>(),
