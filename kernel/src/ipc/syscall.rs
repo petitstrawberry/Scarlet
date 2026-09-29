@@ -19,6 +19,7 @@ use crate::{
 };
 use alloc::{string::ToString, sync::Arc, vec};
 
+const NATIVE_EINTR: usize = (-(4isize)) as usize;
 const NATIVE_EAGAIN: usize = (-(11isize)) as usize;
 const NATIVE_EMSGSIZE: usize = (-(90isize)) as usize;
 
@@ -26,7 +27,36 @@ fn socket_ipc_error_result(error: crate::ipc::IpcError) -> usize {
     match error {
         crate::ipc::IpcError::ChannelEmpty | crate::ipc::IpcError::ChannelFull => NATIVE_EAGAIN,
         crate::ipc::IpcError::BufferTooSmall { .. } => NATIVE_EMSGSIZE,
+        crate::ipc::IpcError::StreamError(crate::object::capability::StreamError::Interrupted) => {
+            NATIVE_EINTR
+        }
         _ => usize::MAX,
+    }
+}
+
+#[cfg(test)]
+mod socket_error_tests {
+    use super::{NATIVE_EAGAIN, NATIVE_EINTR, NATIVE_EMSGSIZE, socket_ipc_error_result};
+    use crate::ipc::IpcError;
+    use crate::object::capability::StreamError;
+
+    #[test_case]
+    fn handle_receive_preserves_interruption_at_the_native_abi_boundary() {
+        // recv_handle_blocking converts the stream interruption into IpcError.
+        // It must remain distinguishable from closure and invalid handles.
+        assert_eq!(
+            socket_ipc_error_result(StreamError::Interrupted.into()),
+            NATIVE_EINTR
+        );
+        assert_eq!(
+            socket_ipc_error_result(IpcError::ChannelEmpty),
+            NATIVE_EAGAIN
+        );
+        assert_eq!(
+            socket_ipc_error_result(IpcError::BufferTooSmall { required: 16 }),
+            NATIVE_EMSGSIZE
+        );
+        assert_eq!(socket_ipc_error_result(IpcError::PeerClosed), usize::MAX);
     }
 }
 
@@ -650,6 +680,7 @@ pub fn sys_socket_send_handle(trapframe: &mut Trapframe) -> usize {
 /// Returns:
 /// - Handle to the received kernel object on success
 /// - `-EAGAIN` if the socket is non-blocking and no handle is first in order
+/// - `-EINTR` if a process-control event interrupts the blocking receive
 /// - usize::MAX on error (no handle available or other error)
 pub fn sys_socket_recv_handle(trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
