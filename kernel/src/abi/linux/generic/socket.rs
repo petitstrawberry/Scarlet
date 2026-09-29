@@ -150,7 +150,10 @@ fn socket_status_option(
             SocketType::Raw => SOCK_RAW,
             SocketType::SeqPacket => SOCK_SEQPACKET,
         }),
-        SO_ERROR => Ok(socket.take_pending_error().map(socket_error_to_errno).unwrap_or(0) as i32),
+        SO_ERROR => Ok(socket
+            .take_pending_error()
+            .map(socket_error_to_errno)
+            .unwrap_or(0) as i32),
         _ => Err(errno::ENOPROTOOPT),
     }
 }

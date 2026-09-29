@@ -3248,14 +3248,20 @@ mod tests {
         SocketControl::connect(client.as_ref(), &address).unwrap();
         let server = SocketControl::accept(listener.as_ref()).unwrap();
 
-        assert_eq!(client.sendto(b"GET", &SocketAddress::Unspecified, 0x4000), Ok(3));
+        assert_eq!(
+            client.sendto(b"GET", &SocketAddress::Unspecified, 0x4000),
+            Ok(3)
+        );
         let mut buffer = [0u8; 3];
         assert_eq!(server.read(&mut buffer).unwrap(), 3);
         assert_eq!(&buffer, b"GET");
 
         let other = SocketAddress::Inet(Inet4SocketAddress::new([192, 0, 2, 1], 80));
         assert_eq!(client.sendto(b" / ", &other, 0), Ok(3));
-        assert_eq!(SocketControl::getpeername(client.as_ref()).unwrap(), address);
+        assert_eq!(
+            SocketControl::getpeername(client.as_ref()).unwrap(),
+            address
+        );
         assert_eq!(server.read(&mut buffer).unwrap(), 3);
         assert_eq!(&buffer, b" / ");
     }

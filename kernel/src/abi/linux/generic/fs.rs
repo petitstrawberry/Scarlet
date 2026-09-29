@@ -648,8 +648,8 @@ impl LinuxStat {
             st_ino: metadata.file_id,
             st_mode,
             st_nlink: metadata.link_count as u32,
-            st_uid: 0,  // Root user
-            st_gid: 0,  // Root group
+            st_uid: 0, // Root user
+            st_gid: 0, // Root group
             // Preserve Scarlet's device identity across pathname and fd stat.
             // Reporting zero for every device makes Wine mistake a terminal
             // for /dev/null and disable all debug channels.
