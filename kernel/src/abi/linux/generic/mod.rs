@@ -494,6 +494,7 @@ syscall_table! {
     LinkAt = 37 => fs::sys_linkat,
     FaccessAt = 48 => fs::sys_faccessat,
     Chdir = 49 => fs::sys_chdir,
+    Fchdir = 50 => fs::sys_fchdir,
     Fchmod = 52 => fs::sys_fchmod,
     FchmodAt = 53 => fs::sys_fchmodat,
     Fchown = 55 => fs::sys_fchown,

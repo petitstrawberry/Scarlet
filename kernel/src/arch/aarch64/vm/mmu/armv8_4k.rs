@@ -29,7 +29,10 @@ const SCARLET_MAIR_EL1: u64 = MAIR_NORMAL_WRITE_BACK
 // TCR_EL1.IPS=0b010 selects a 40-bit PA range; QEMU virt can place PCI ECAM above 36 bits.
 const SCARLET_TCR_EL1: u64 = 0x2_B510_3510;
 // UCT (bit 15) permits EL0 to read CTR_EL0 for cache-line sizing.
-const SCTLR_EL1_ENABLE_MASK: u64 = 1 | (1 << 2) | (1 << 12) | (1 << 15);
+// UCI (bit 26) permits EL0 cache maintenance by virtual address, including
+// DC CVAU and IC IVAU. JITs such as Box64 use these to synchronize generated
+// instructions before executing them; UCT alone only allows the CTR read.
+const SCTLR_EL1_ENABLE_MASK: u64 = 1 | (1 << 2) | (1 << 12) | (1 << 15) | (1 << 26);
 /// Bits we always clear in SCTLR_EL1 when (re)enabling the MMU.
 ///
 /// - bit 1 (A): Strict alignment check for all data accesses. We must keep

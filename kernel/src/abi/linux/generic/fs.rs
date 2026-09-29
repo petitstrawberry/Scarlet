@@ -650,7 +650,13 @@ impl LinuxStat {
             st_nlink: metadata.link_count as u32,
             st_uid: 0,  // Root user
             st_gid: 0,  // Root group
-            st_rdev: 0, // Not a special file by default
+            // Preserve Scarlet's device identity across pathname and fd stat.
+            // Reporting zero for every device makes Wine mistake a terminal
+            // for /dev/null and disable all debug channels.
+            st_rdev: match &metadata.file_type {
+                FileType::CharDevice(info) | FileType::BlockDevice(info) => info.device_id as u64,
+                _ => 0,
+            },
             __pad1: 0,
             st_size: metadata.size as i64,
             st_blksize: 4096, // Standard block size
@@ -720,6 +726,16 @@ fn stat_from_object(
         if file.as_any().is::<super::memfd::MemfdFile>() {
             let metadata = file.metadata().map_err(stream_error_to_errno)?;
             return Ok((LinuxStat::from_metadata(&metadata), metadata.created_time));
+        }
+        // DevFS objects are not necessarily wrapped in VfsFileObject. Their
+        // device identity must not change when opened again or duplicated.
+        if let Ok(metadata) = file.metadata() {
+            if matches!(
+                metadata.file_type,
+                FileType::CharDevice(_) | FileType::BlockDevice(_)
+            ) {
+                return Ok((LinuxStat::from_metadata(&metadata), metadata.created_time));
+            }
         }
         S_IFCHR | 0o666
     };
@@ -849,8 +865,10 @@ fn fill_statx_from_stat(
     statx.stx_btime = statx_timestamp_from_secs(created_time);
     statx.stx_ctime = statx_timestamp_from_secs(stat.st_ctime as u64);
     statx.stx_mtime = statx_timestamp_from_secs(stat.st_mtime as u64);
-    statx.stx_rdev_major = 0;
-    statx.stx_rdev_minor = 0;
+    // Linux/glibc's 64-bit dev_t encoding, also used by stat/fstat above.
+    statx.stx_rdev_major =
+        (((stat.st_rdev >> 8) & 0xfff) | ((stat.st_rdev >> 32) & 0xfffff000)) as u32;
+    statx.stx_rdev_minor = ((stat.st_rdev & 0xff) | ((stat.st_rdev >> 12) & 0xffffff00)) as u32;
     statx.stx_dev_major = 0;
     statx.stx_dev_minor = 0;
     statx.stx_mnt_id = 0;
@@ -5729,83 +5747,76 @@ pub fn sys_getcwd(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 ///
 /// Returns:
 /// - 0 on success
-/// - usize::MAX on error (path not found, not a directory, permission denied, etc.)
+/// - Negative Linux errno on failure.
 pub fn sys_chdir(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
-        Some(t) => t,
-        None => return usize::MAX,
+        Some(task) => task,
+        None => return errno::to_result(errno::EIO),
     };
-
-    let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(0)) {
-        Some(ptr) => ptr as *const u8,
-        None => return usize::MAX,
-    };
-
-    // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
-    // Parse path from user space
-    let path_str = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
-        Ok((path, _)) => path,
-        Err(_) => return usize::MAX, // Invalid UTF-8 or path too long
-    };
-
-    crate::println!("sys_chdir: Changing directory to '{}'", path_str);
-
-    // Convert to absolute path
-    let absolute_path = if path_str.starts_with('/') {
-        path_str
-    } else {
-        match to_absolute_path_v2(&task, &path_str) {
-            Ok(p) => p,
-            Err(_) => return usize::MAX,
+    let path = match parse_c_string_from_userspace(&task, trapframe.get_arg(0), MAX_PATH_LENGTH) {
+        Ok(path) => path,
+        Err(crate::library::std::string::StringConversionError::ExceedsMaxLength) => {
+            return errno::to_result(errno::ENAMETOOLONG);
         }
+        Err(_) => return errno::to_result(errno::EFAULT),
     };
-
-    let vfs = match task.vfs.read().clone() {
-        Some(v) => v,
-        None => return usize::MAX,
+    let vfs = match task.get_vfs() {
+        Some(vfs) => vfs,
+        None => return errno::to_result(errno::EIO),
     };
+    linux_chdir_path(&vfs, &path)
+        .map(|_| 0)
+        .unwrap_or_else(errno::to_result)
+}
 
-    // Check if the path exists and is a directory
-    match vfs.resolve_path(&absolute_path) {
-        Ok((entry, _mount_point)) => {
-            match entry.node().file_type() {
-                Ok(file_type) => {
-                    if file_type == FileType::Directory {
-                        // Update the current working directory via VfsManager
-                        match vfs.set_cwd_by_path(&absolute_path) {
-                            Ok(()) => {
-                                crate::println!(
-                                    "sys_chdir: Successfully changed directory to '{}'",
-                                    absolute_path
-                                );
-                                0 // Success
-                            }
-                            Err(_) => {
-                                crate::println!(
-                                    "sys_chdir: Failed to set working directory to '{}'",
-                                    absolute_path
-                                );
-                                usize::MAX // Failed to set cwd
-                            }
-                        }
-                    } else {
-                        crate::println!("sys_chdir: '{}' is not a directory", absolute_path);
-                        usize::MAX // Not a directory (ENOTDIR)
-                    }
-                }
-                Err(_) => {
-                    crate::println!("sys_chdir: Failed to get file type for '{}'", absolute_path);
-                    usize::MAX // Failed to get file type
-                }
-            }
-        }
-        Err(_) => {
-            crate::println!("sys_chdir: Path '{}' not found", absolute_path);
-            usize::MAX // Path not found (ENOENT)
-        }
+/// Linux `fchdir`: restore cwd from an open directory descriptor.
+pub fn sys_fchdir(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return errno::to_result(errno::EIO),
+    };
+    trapframe.increment_pc_next(&task);
+    linux_fchdir(abi, &task, trapframe.get_arg(0) as i32)
+        .map(|_| 0)
+        .unwrap_or_else(errno::to_result)
+}
+
+fn linux_fchdir(abi: &LinuxAbi, task: &crate::task::Task, fd: i32) -> Result<(), usize> {
+    if fd < 0 {
+        return Err(errno::EBADF);
     }
+    let handle = abi.get_handle(fd as usize).ok_or(errno::EBADF)?;
+    let object = task.handle_table.get(handle).ok_or(errno::EBADF)?;
+    let file = object.as_file().ok_or(errno::ENOTDIR)?;
+    let file = file
+        .as_any()
+        .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
+        .ok_or(errno::ENOTDIR)?;
+    let entry = file.get_vfs_entry();
+    if !entry
+        .node()
+        .is_directory()
+        .map_err(|error| errno::from_fs_error(&error))?
+    {
+        return Err(errno::ENOTDIR);
+    }
+    let vfs = task.get_vfs().ok_or(errno::EIO)?;
+    // Keep the open directory's identity, including its mount. Resolving the
+    // original pathname again would select the wrong object after a rename.
+    vfs.set_cwd(entry.clone(), file.get_mount_point().clone());
+    Ok(())
+}
+
+fn linux_chdir_path(vfs: &crate::fs::VfsManager, path: &str) -> Result<(), usize> {
+    if path.is_empty() {
+        return Err(errno::ENOENT);
+    }
+    // Preserve ENOENT: Wine uses it to create a missing prefix directory.
+    // Returning bare -1 would instead tell glibc that this is EPERM.
+    vfs.set_cwd_by_path(path)
+        .map_err(|error| errno::from_fs_error(&error))
 }
 
 /// Linux `renameat` system call implementation (syscall 38).
@@ -5981,6 +5992,51 @@ mod tests {
         proc_exe_linux_stat, proc_exe_selector,
     };
     use crate::abi::linux::generic::errno;
+
+    #[test_case]
+    fn device_stat_identity_matches_path_reopens_and_duplicates() {
+        use crate::device::{DeviceType, char::mockchar::MockCharDevice, manager::DeviceManager};
+        use crate::fs::vfs_v2::{core::VfsNode, drivers::devfs::DevNode};
+        use crate::fs::{DeviceFileInfo, FileType};
+        use crate::object::KernelObject;
+        use alloc::sync::Arc;
+
+        let manager = DeviceManager::new_for_test();
+        let mut identities = alloc::vec::Vec::new();
+        for name in ["null", "terminal"] {
+            let id = manager.register_device(Arc::new(MockCharDevice::new(name)));
+            let node = DevNode::new_device_file(
+                name.into(),
+                FileType::CharDevice(DeviceFileInfo {
+                    device_id: id,
+                    device_type: DeviceType::Char,
+                }),
+                id as u64,
+            );
+            node.set_device_manager(&manager);
+            let path_stat = super::LinuxStat::from_metadata(&node.metadata().unwrap());
+            let first = KernelObject::from_file_object(node.open().unwrap());
+            let reopened = KernelObject::from_file_object(node.open().unwrap());
+            for (handle, object) in [(0, first.clone()), (27, first), (91, reopened)] {
+                let (fd_stat, birthtime) = super::stat_from_object(&object, handle).unwrap();
+                assert_eq!(fd_stat.st_mode & super::S_IFMT, super::S_IFCHR);
+                assert_eq!(fd_stat.st_rdev, path_stat.st_rdev);
+                assert_eq!(fd_stat.st_rdev, id as u64);
+                let mut statx = unsafe { core::mem::zeroed::<super::LinuxStatx>() };
+                super::fill_statx_from_stat(
+                    &mut statx,
+                    &fd_stat,
+                    birthtime,
+                    super::STATX_BASIC_STATS,
+                );
+                assert_eq!(statx.stx_rdev_major, 0);
+                assert_eq!(statx.stx_rdev_minor, id as u32);
+            }
+            identities.push(path_stat.st_rdev);
+        }
+        // This is the device comparison Wine uses to suppress stderr logging.
+        assert_ne!(identities[0], identities[1]);
+    }
 
     #[test_case]
     fn socket_fionbio_updates_linux_status_flags_and_validates_user_pointer() {
@@ -6159,6 +6215,75 @@ mod tests {
             super::read_linux_dirents_to_user(&entries, &task.vm_manager, 0, 1024),
             Err(errno::EFAULT)
         );
+    }
+
+    #[test_case]
+    fn fchdir_uses_open_directory_identity_and_rejects_invalid_descriptors() {
+        use crate::abi::linux::generic::LinuxAbi;
+        use crate::task::{Task, TaskType};
+        use alloc::sync::Arc;
+
+        let task = Task::new("linux-fchdir".into(), 0, TaskType::User);
+        let vfs = Arc::new(crate::fs::VfsManager::new());
+        *task.vfs.write() = Some(vfs.clone());
+        vfs.create_dir("/prefix").unwrap();
+        vfs.create_dir("/server").unwrap();
+        vfs.create_file("/prefix/marker", crate::fs::FileType::RegularFile)
+            .unwrap();
+        let directory = vfs.open("/prefix", 0).unwrap();
+        let original_entry = directory
+            .as_file()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
+            .unwrap()
+            .get_vfs_entry()
+            .clone();
+        let directory_handle = task.handle_table.insert(directory).unwrap();
+        let mut abi = LinuxAbi::default();
+        let directory_fd = abi.allocate_fd(directory_handle).unwrap() as i32;
+        let file_handle = task
+            .handle_table
+            .insert(vfs.open("/prefix/marker", 0).unwrap())
+            .unwrap();
+        let file_fd = abi.allocate_fd(file_handle).unwrap() as i32;
+        vfs.set_cwd_by_path("/server").unwrap();
+
+        assert_eq!(super::linux_fchdir(&abi, &task, -1), Err(errno::EBADF));
+        assert_eq!(super::linux_fchdir(&abi, &task, 1000), Err(errno::EBADF));
+        assert_eq!(
+            super::linux_fchdir(&abi, &task, file_fd),
+            Err(errno::ENOTDIR)
+        );
+        assert_eq!(vfs.get_cwd_path(), "/server");
+
+        vfs.rename("/prefix", "/renamed").unwrap();
+        vfs.create_dir("/prefix").unwrap();
+        assert_eq!(super::linux_fchdir(&abi, &task, directory_fd), Ok(()));
+        let (cwd, _) = vfs.get_cwd().unwrap();
+        assert!(Arc::ptr_eq(&cwd, &original_entry));
+        assert!(vfs.resolve_path("marker").is_ok());
+    }
+
+    #[test_case]
+    fn chdir_preserves_missing_prefix_error_and_cwd_on_failure() {
+        let vfs = crate::fs::VfsManager::new();
+        vfs.create_dir("/root").unwrap();
+        vfs.set_cwd_by_path("/root").unwrap();
+        assert_eq!(super::linux_chdir_path(&vfs, ".wine"), Err(errno::ENOENT));
+        assert_eq!(vfs.get_cwd_path(), "/root");
+        // The first-run Wine sequence must be able to recover by mkdir.
+        vfs.create_dir("/root/.wine").unwrap();
+        assert_eq!(super::linux_chdir_path(&vfs, ".wine"), Ok(()));
+        assert_eq!(vfs.get_cwd_path(), "/root/.wine");
+        vfs.create_file("/root/file", crate::fs::FileType::RegularFile)
+            .unwrap();
+        assert_eq!(
+            super::linux_chdir_path(&vfs, "/root/file"),
+            Err(errno::ENOTDIR)
+        );
+        assert_eq!(super::linux_chdir_path(&vfs, ""), Err(errno::ENOENT));
+        assert_eq!(vfs.get_cwd_path(), "/root/.wine");
     }
 
     #[test_case]

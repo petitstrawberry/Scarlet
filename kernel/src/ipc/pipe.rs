@@ -16,7 +16,7 @@ use crate::object::capability::selectable::{
     ReadyInterest, ReadySet, SelectWaitOutcome, Selectable,
 };
 use crate::object::capability::{CloneOps, StreamError, StreamOps};
-use crate::sync::waker::Waker;
+use crate::sync::waker::{WaitResult, Waker};
 
 /// Pipe-specific operations
 ///
@@ -239,73 +239,91 @@ impl StreamOps for PipeEndpoint {
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        self.write_with_wait(buffer, |required_space| {
+            let task = crate::task::mytask().ok_or(StreamError::WouldBlock)?;
+            let outcome = self.data.write_waker.wait_with_condition(
+                task.get_id(),
+                task.get_trapframe(),
+                None,
+                0,
+                || {
+                    let state = self.data.state.lock();
+                    state.closed
+                        || state.reader_count == 0
+                        || self.nonblocking.load(Ordering::Relaxed)
+                        || state.max_size - state.buffer.len() >= required_space
+                },
+            );
+            if matches!(outcome, WaitResult::Interrupted) {
+                Err(StreamError::Interrupted)
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
+impl PipeEndpoint {
+    /// Complete a blocking write across reader wakeups. The waiter rechecks
+    /// capacity after registering, so a concurrent read cannot lose the wakeup.
+    fn write_with_wait(
+        &self,
+        buffer: &[u8],
+        mut wait: impl FnMut(usize) -> Result<(), StreamError>,
+    ) -> Result<usize, StreamError> {
         if !self.can_write {
             return Err(StreamError::NotSupported);
         }
+        if buffer.is_empty() {
+            return Ok(0);
+        }
 
-        loop {
+        let mut written = 0;
+        let error = loop {
             let mut state = self.data.state.lock();
-
             if state.closed {
-                return Err(StreamError::Closed);
+                break StreamError::Closed;
             }
-
             if state.reader_count == 0 {
-                return Err(StreamError::BrokenPipe);
+                break StreamError::BrokenPipe;
             }
 
+            let nonblocking = self.nonblocking.load(Ordering::Relaxed);
+            // Linux PIPE_BUF is 4096. Smaller internal pipes can only guarantee
+            // atomic writes up to their own capacity.
+            let atomic = buffer.len() <= state.max_size.min(4096);
+            let required_space = if atomic { buffer.len() } else { 1 };
             let available_space = state.max_size - state.buffer.len();
-            if available_space == 0 {
-                // No space available - block until space becomes available
-                // Block the current task using the pipe write waker
-                use crate::task::mytask;
-                if let Some(task) = mytask() {
-                    if self.nonblocking.load(core::sync::atomic::Ordering::Relaxed) {
-                        return Err(StreamError::WouldBlock);
-                    }
-                    // CRITICAL: Drop lock before wait() to avoid deadlock
-                    let task_id = task.get_id();
-                    let trapframe = task.get_trapframe();
-
-                    // Memory barrier BEFORE lock release to ensure all writes are visible
-                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-                    drop(state);
-
-                    // Memory barrier AFTER lock release to ensure lock release is visible
-                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-                    // Memory barrier BEFORE wait() to ensure wait() sees correct state
-                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-                    // Call wait() without holding any locks
-                    self.data.write_waker.wait(task_id, trapframe);
-
-                    // Memory barrier AFTER wait() to ensure subsequent operations are visible
-                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-                    // Loop back to retry write after waking up
-                    continue;
-                } else {
-                    // No current task context, return WouldBlock for non-blocking fallback
-                    return Err(StreamError::WouldBlock);
+            if available_space < required_space {
+                drop(state);
+                if nonblocking {
+                    break StreamError::WouldBlock;
                 }
+                if let Err(error) = wait(required_space) {
+                    break error;
+                }
+                continue;
             }
 
-            let bytes_to_write = buffer.len().min(available_space);
-            for &byte in &buffer[..bytes_to_write] {
-                state.buffer.push_back(byte);
-            }
-
-            // Release lock before waking readers
+            let amount = (buffer.len() - written).min(available_space);
+            state
+                .buffer
+                .extend(buffer[written..written + amount].iter().copied());
+            written += amount;
             drop(state);
+            self.data.read_waker.wake_all();
 
-            // Data was written, wake up any waiting readers
-            if bytes_to_write > 0 {
-                self.data.read_waker.wake_all();
+            if written == buffer.len() || nonblocking {
+                return Ok(written);
             }
+        };
 
-            return Ok(bytes_to_write);
+        // A signal, disconnect, or unavailable task context after progress
+        // must report the bytes already delivered instead of losing the count.
+        if written != 0 {
+            Ok(written)
+        } else {
+            Err(error)
         }
     }
 }
@@ -719,6 +737,96 @@ mod tests {
 
         let would_block = write_end.write(&[5]);
         assert!(matches!(would_block, Err(StreamError::WouldBlock)));
+    }
+
+    #[test_case]
+    fn blocking_write_larger_than_capacity_waits_and_preserves_all_bytes() {
+        let (reader, writer) = UnidirectionalPipe::create_pair_raw(4096);
+        let payload: Vec<u8> = (0..9128).map(|i| (i % 251) as u8).collect();
+        let mut received = Vec::new();
+        let mut waits = 0;
+        let result = writer.endpoint.write_with_wait(&payload, |_| {
+            waits += 1;
+            let mut chunk = [0; 4096];
+            let n = reader.read(&mut chunk)?;
+            received.extend_from_slice(&chunk[..n]);
+            Ok(())
+        });
+        assert_eq!(result.unwrap(), payload.len());
+        assert_eq!(waits, 2);
+        let mut tail = [0; 4096];
+        let n = reader.read(&mut tail).unwrap();
+        received.extend_from_slice(&tail[..n]);
+        assert_eq!(received, payload);
+    }
+
+    #[test_case]
+    fn small_blocking_write_waits_for_the_entire_record() {
+        let (reader, writer) = UnidirectionalPipe::create_pair_raw(4096);
+        assert_eq!(writer.write(&[1; 4000]).unwrap(), 4000);
+        let result = writer.endpoint.write_with_wait(&[2; 128], |required| {
+            assert_eq!(required, 128);
+            // No prefix of the second record may be visible while waiting.
+            assert_eq!(reader.available_bytes(), 4000);
+            let mut old = [0; 4000];
+            assert_eq!(reader.read(&mut old)?, old.len());
+            assert!(old.iter().all(|byte| *byte == 1));
+            Ok(())
+        });
+        assert_eq!(result.unwrap(), 128);
+        let mut record = [0; 128];
+        assert_eq!(reader.read(&mut record).unwrap(), 128);
+        assert_eq!(record, [2; 128]);
+    }
+
+    #[test_case]
+    fn nonblocking_write_preserves_small_records_and_allows_large_short_writes() {
+        let (reader, writer) = UnidirectionalPipe::create_pair_raw(4096);
+        writer.set_nonblocking(true);
+        assert_eq!(writer.write(&[1; 4000]).unwrap(), 4000);
+        assert!(matches!(
+            writer.write(&[2; 128]),
+            Err(StreamError::WouldBlock)
+        ));
+        assert_eq!(reader.available_bytes(), 4000);
+        assert_eq!(writer.write(&[3; 8192]).unwrap(), 96);
+        assert_eq!(reader.available_bytes(), 4096);
+        assert_eq!(writer.write(&[]).unwrap(), 0);
+    }
+
+    #[test_case]
+    fn interrupted_or_broken_blocking_write_returns_delivered_byte_count() {
+        let (reader, writer) = UnidirectionalPipe::create_pair_raw(4096);
+        let payload = [7; 8192];
+        assert_eq!(
+            writer
+                .endpoint
+                .write_with_wait(&payload, |_| Err(StreamError::Interrupted))
+                .unwrap(),
+            4096
+        );
+        // The same interruption before any progress must be EINTR instead.
+        assert!(matches!(
+            writer
+                .endpoint
+                .write_with_wait(&[8], |_| Err(StreamError::Interrupted)),
+            Err(StreamError::Interrupted)
+        ));
+        let mut chunk = [0; 4096];
+        assert_eq!(reader.read(&mut chunk).unwrap(), 4096);
+        assert_eq!(chunk, [7; 4096]);
+        let mut reader = Some(reader);
+        assert_eq!(
+            writer
+                .endpoint
+                .write_with_wait(&payload, |_| {
+                    drop(reader.take());
+                    Ok(())
+                })
+                .unwrap(),
+            4096
+        );
+        assert!(matches!(writer.write(&[9]), Err(StreamError::BrokenPipe)));
     }
 
     #[test_case]

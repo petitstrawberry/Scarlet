@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, string::ToString, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, string::ToString, sync::Arc};
 use core::sync::atomic::Ordering;
 
 use crate::abi::linux::generic;
@@ -235,6 +235,7 @@ impl AbiModule for LinuxRiscv64Abi {
                     },
                 ) {
                     Ok(load_result) => {
+                        task.vm_manager.set_mmap_base(generic::mm::LINUX_MMAP_BASE);
                         *task.name.write() =
                             argv.get(0).map_or("linux".to_string(), |s| s.to_string());
 
@@ -255,33 +256,11 @@ impl AbiModule for LinuxRiscv64Abi {
                             }
                         }
 
-                        let mut arg_vaddrs: Vec<u64> = Vec::new();
-                        for &arg in argv.iter() {
-                            let len = arg.len() + 1;
-                            sp -= len;
-                            let vaddr = sp;
-                            unsafe {
-                                let kaddr = task.vm_manager.translate_to_kva(vaddr).unwrap();
-                                let slice = core::slice::from_raw_parts_mut(kaddr as *mut u8, len);
-                                slice[..len - 1].copy_from_slice(arg.as_bytes());
-                                slice[len - 1] = 0;
-                            }
-                            arg_vaddrs.push(vaddr as u64);
-                        }
-
-                        let mut env_vaddrs: Vec<u64> = Vec::new();
-                        for &env in envp.iter() {
-                            let len = env.len() + 1;
-                            sp -= len;
-                            let vaddr = sp;
-                            unsafe {
-                                let kaddr = task.vm_manager.translate_to_kva(vaddr).unwrap();
-                                let slice = core::slice::from_raw_parts_mut(kaddr as *mut u8, len);
-                                slice[..len - 1].copy_from_slice(env.as_bytes());
-                                slice[len - 1] = 0;
-                            }
-                            env_vaddrs.push(vaddr as u64);
-                        }
+                        // Linux places argv strings before envp strings, both
+                        // in ascending address order. Push envp first because
+                        // the stack grows down.
+                        let env_vaddrs = generic::exec::push_string_vector(task, &mut sp, envp)?;
+                        let arg_vaddrs = generic::exec::push_string_vector(task, &mut sp, argv)?;
 
                         sp = sp & !0xF;
 

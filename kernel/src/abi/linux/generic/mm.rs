@@ -12,6 +12,33 @@ use crate::{
 };
 use alloc::vec::Vec;
 
+// Leave low addresses available for fixed executable images and Wine's PE
+// reservations. In particular, Wine's large virtual page table must not occupy
+// the low address range it subsequently probes in 64 KiB steps.
+pub(crate) const LINUX_MMAP_BASE: usize = crate::environment::USER_LOWER_CANONICAL_END / 2;
+
+fn checked_mmap_address(addr: usize, length: usize, flags: usize) -> Result<usize, usize> {
+    const FIXED_FLAGS: usize = 0x10 | 0x100000; // FIXED and FIXED_NOREPLACE
+    let fixed = flags & FIXED_FLAGS != 0;
+    if fixed && !addr.is_multiple_of(PAGE_SIZE) {
+        return Err(errno::EINVAL);
+    }
+    let address = addr & !(PAGE_SIZE - 1);
+    let valid = length != 0
+        && address
+            .checked_add(length)
+            .is_some_and(|end| end <= crate::environment::USER_LOWER_CANONICAL_END);
+    if valid {
+        Ok(address)
+    } else if fixed {
+        // ENOMEM, not EEXIST: Wine probes the host address-space limit with
+        // FIXED_NOREPLACE and interprets EEXIST as a valid, occupied address.
+        Err(errno::ENOMEM)
+    } else {
+        Ok(0) // An unusable non-fixed hint does not constrain placement.
+    }
+}
+
 /// Create a Linux-compatible virtual memory mapping.
 ///
 /// # Arguments
@@ -23,6 +50,15 @@ use alloc::vec::Vec;
 ///
 /// The mapped virtual address on success, or a negated Linux errno on failure.
 pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = match mytask() {
+        Some(task) => task,
+        None => return usize::MAX,
+    };
+    trapframe.increment_pc_next(&task);
+    mmap_for_task(abi, trapframe, &task)
+}
+
+fn mmap_for_task(abi: &mut LinuxAbi, trapframe: &Trapframe, task: &crate::task::Task) -> usize {
     // Linux mmap constants
     const MAP_ANONYMOUS: usize = 0x20;
     #[allow(dead_code)]
@@ -36,11 +72,6 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     const PROT_WRITE: usize = 0x2;
     const PROT_EXEC: usize = 0x4;
 
-    let task = match mytask() {
-        Some(task) => task,
-        None => return usize::MAX,
-    };
-
     let addr = trapframe.get_arg(0);
     let length = trapframe.get_arg(1);
     let prot = trapframe.get_arg(2);
@@ -48,10 +79,11 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let fd = trapframe.get_arg(4) as isize;
     let offset = trapframe.get_arg(5);
 
-    trapframe.increment_pc_next(&task);
-
     // Input validation
-    if length == 0 {
+    // Reject unaligned byte offsets before changing any mapping, including
+    // MAP_FIXED replacements. Wine relies on EINVAL here to load PE sections
+    // with sector-aligned raw offsets using anonymous memory and pread instead.
+    if length == 0 || !offset.is_multiple_of(PAGE_SIZE) {
         return to_result(errno::EINVAL);
     }
 
@@ -61,10 +93,16 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         None => return to_result(errno::EINVAL),
     };
 
+    let addr = match checked_mmap_address(addr, aligned_length, flags) {
+        Ok(addr) => addr,
+        Err(error) => return to_result(error),
+    };
+
     // Handle ANONYMOUS mappings specially
     if (flags & MAP_ANONYMOUS) != 0 {
-        // Linux ignores both fd and offset for anonymous mappings.  In
-        // particular, raw variadic syscall wrappers on 64-bit architectures
+        // After checking offset alignment, Linux ignores fd and the offset
+        // value for anonymous mappings. In particular, raw variadic syscall
+        // wrappers on 64-bit architectures
         // can pass an `int` -1 as 0x00000000ffffffff rather than a
         // sign-extended register value.  Requiring one exact representation
         // here rejects otherwise valid Linux binaries.
@@ -323,6 +361,10 @@ fn handle_anonymous_mapping(
     prot: usize,
     flags: usize,
 ) -> usize {
+    let vaddr = match checked_mmap_address(vaddr, aligned_length, flags) {
+        Ok(addr) => addr,
+        Err(error) => return to_result(error),
+    };
     // Linux protection flags
     const PROT_READ: usize = 0x1;
     const PROT_WRITE: usize = 0x2;
@@ -915,6 +957,115 @@ mod tests {
     use super::*;
     use crate::library::std::usercopy::{copy_from_user, copy_to_user};
     use crate::task::{Task, TaskType};
+
+    #[test_case]
+    fn mmap_unaligned_offset_preserves_fixed_mapping_and_aligned_offset_reads_file_page() {
+        let task = Task::new("mmap-file-offset".into(), 0, TaskType::User);
+        let vfs = alloc::sync::Arc::new(crate::fs::VfsManager::new());
+        *task.vfs.write() = Some(vfs.clone());
+        vfs.create_file("/image", crate::fs::FileType::RegularFile)
+            .unwrap();
+        let file = vfs.open("/image", 2).unwrap(); // O_RDWR
+        let mut contents = alloc::vec![0x11; 2 * PAGE_SIZE];
+        contents[PAGE_SIZE..].fill(0x22);
+        assert_eq!(
+            file.as_stream().unwrap().write(&contents).unwrap(),
+            contents.len()
+        );
+        let handle = task.handle_table.insert(file).unwrap();
+        let mut abi = LinuxAbi::default();
+        let fd = abi.allocate_fd(handle).unwrap();
+
+        let base = 0x4000_0000;
+        assert_eq!(
+            handle_anonymous_mapping(&task, base, PAGE_SIZE, 3, 0x32),
+            base
+        );
+        copy_to_user(&task, base, &[0xa5; 32]).unwrap();
+        let mut frame = Trapframe::new();
+        frame.set_arg(0, base);
+        frame.set_arg(1, PAGE_SIZE);
+        frame.set_arg(2, 3);
+        frame.set_arg(4, fd);
+        // File-backed and anonymous mappings both validate byte alignment.
+        // In particular a rejected MAP_FIXED must not discard existing data.
+        for flags in [0x12, 0x32] {
+            frame.set_arg(3, flags);
+            for offset in [1, 0x400, 0x21800, PAGE_SIZE - 1] {
+                frame.set_arg(5, offset);
+                assert_eq!(
+                    mmap_for_task(&mut abi, &frame, &task),
+                    to_result(errno::EINVAL)
+                );
+                let mut bytes = [0; 32];
+                copy_from_user(&task, base, &mut bytes).unwrap();
+                assert_eq!(bytes, [0xa5; 32]);
+            }
+        }
+        // A valid nonzero offset must map the requested file page, not page 0.
+        frame.set_arg(3, 0x12);
+        frame.set_arg(5, PAGE_SIZE);
+        assert_eq!(mmap_for_task(&mut abi, &frame, &task), base);
+        let mut bytes = [0; 32];
+        copy_from_user(&task, base, &mut bytes).unwrap();
+        assert_eq!(bytes, [0x22; 32]);
+    }
+
+    #[test_case]
+    fn mmap_rejects_out_of_range_fixed_reservations_before_insertion() {
+        let task = Task::new("mmap-user-limit".into(), 0, TaskType::User);
+        let limit = crate::environment::USER_LOWER_CANONICAL_END;
+        for flags in [0x32, 0x100022] {
+            for (address, length) in [
+                (1usize << (usize::BITS - 1), PAGE_SIZE),
+                (limit, PAGE_SIZE),
+                (limit - PAGE_SIZE, 2 * PAGE_SIZE),
+                (usize::MAX & !(PAGE_SIZE - 1), 2 * PAGE_SIZE),
+            ] {
+                assert_eq!(
+                    handle_anonymous_mapping(&task, address, length, 0, flags),
+                    to_result(errno::ENOMEM)
+                );
+                assert!(task.vm_manager.search_memory_map(address).is_none());
+            }
+        }
+        assert_eq!(checked_mmap_address(limit, PAGE_SIZE, 0x22), Ok(0));
+        assert_eq!(checked_mmap_address(0x12345, PAGE_SIZE, 0x22), Ok(0x12000));
+        assert_eq!(
+            checked_mmap_address(0x12345, PAGE_SIZE, 0x100022),
+            Err(errno::EINVAL)
+        );
+        assert_eq!(
+            handle_anonymous_mapping(&task, limit - PAGE_SIZE, PAGE_SIZE, 0, 0x100022),
+            limit - PAGE_SIZE
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test_case]
+    fn linux_large_mapping_leaves_wine_pe_base_available() {
+        let task = Task::new("mmap-wine-layout".into(), 0, TaskType::User);
+        task.vm_manager.set_mmap_base(LINUX_MMAP_BASE);
+        let size = 0x8_0020_0000;
+        assert_eq!(
+            handle_anonymous_mapping(&task, 0, size, 3, 0x22),
+            LINUX_MMAP_BASE
+        );
+        let pe_base = 0x1_4000_0000;
+        assert_eq!(
+            handle_anonymous_mapping(&task, pe_base, 0x89000, 7, 0x100022),
+            pe_base
+        );
+        // NOREPLACE must continue to reject real overlaps, preserving data.
+        copy_to_user(&task, pe_base, &[0xa5]).unwrap();
+        assert_eq!(
+            handle_anonymous_mapping(&task, pe_base, 0x89000, 7, 0x100022),
+            to_result(errno::EEXIST)
+        );
+        let mut byte = [0];
+        copy_from_user(&task, pe_base, &mut byte).unwrap();
+        assert_eq!(byte, [0xa5]);
+    }
 
     #[test_case]
     fn madvise_discards_dirty_pages_without_populating_unused_stack_pages() {
