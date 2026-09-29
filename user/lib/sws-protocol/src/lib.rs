@@ -24,6 +24,7 @@ use std::vec::Vec;
 
 pub mod input_panel;
 pub mod surface_regions;
+pub mod surface_scene;
 pub mod workspace;
 
 /// Maximum payload we accept from the socket.
@@ -32,7 +33,7 @@ pub mod workspace;
 pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024; // 1 MiB
 
 /// Current SWS capability-negotiation protocol version.
-pub const SWS_PROTOCOL_VERSION: u32 = 11;
+pub const SWS_PROTOCOL_VERSION: u32 = 12;
 
 /// Maximum damage rectangles carried by one shared SGFX frame commit.
 pub const SGFX_MAX_DAMAGE_RECTS: usize = 16;
@@ -72,6 +73,8 @@ pub mod capabilities {
     pub const TOUCH_INPUT: u64 = 1 << 13;
     /// A separate input panel may supply keys to the active TextInput context.
     pub const INPUT_PANEL: u64 = 1 << 14;
+    /// Extensions may atomically publish cropped, scaled, ordered surface layers.
+    pub const SURFACE_SCENES: u64 = 1 << 15;
 }
 
 pub mod gamepad;
@@ -373,6 +376,7 @@ pub mod client_msg {
     pub const EXTENSION_DESTROY_BUFFER: u32 = 108;
     /// Atomically select a registered buffer and publish damage (extension-only).
     pub const EXTENSION_COMMIT_BUFFER: u32 = 109;
+    pub const EXTENSION_COMMIT_SCENE: u32 = 110;
     pub const SET_WORKAREA: u32 = 22;
     pub const SET_WINDOW_RESIZABLE: u32 = 23;
     pub const GET_WINDOW_LIST: u32 = 24;
@@ -1416,6 +1420,11 @@ pub enum ClientMessageRef<'a> {
         buffer_changed: bool,
         commit_serial: u64,
         damage_rects: &'a [u8],
+    },
+
+    /// Complete ordered scene, validated and applied atomically by SWS.
+    ExtensionCommitScene {
+        payload: &'a [u8],
     },
 
     /// Set the workarea (usable screen area) for the window manager
@@ -2535,6 +2544,10 @@ pub fn parse_client_message<'a>(
                 return Err(ProtocolError::MalformedPayload);
             }
             Ok(ClientMessageRef::ExtensionDestroyBuffer { buffer_id })
+        }
+        client_msg::EXTENSION_COMMIT_SCENE => {
+            surface_scene::Commit::decode(payload)?;
+            Ok(ClientMessageRef::ExtensionCommitScene { payload })
         }
         client_msg::EXTENSION_COMMIT_BUFFER => {
             if payload.len() < 28 {

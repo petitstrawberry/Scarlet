@@ -1476,3 +1476,51 @@ The desktop bundle starts `/bin/soft-keyboard`. It opens for active editors on
 touch devices, supports QWERTY and numeric layouts, one-shot Shift, toggled Ctrl
 and Alt, cursor keys, and the existing IME toggle key. Hiding it keeps the editor
 active. ScarletUI requests it again when a touch activates a text editor.
+
+### Atomic extension surface scenes (protocol version 12)
+
+Capability `SURFACE_SCENES` (`1 << 15`) adds `EXTENSION_COMMIT_SCENE` (110).
+Only a registered extension may send it, with request ID and flags zero. The
+window must belong to that connection and external client. Layers are ordered
+bottom-to-top and published in one transaction; a zero-layer scene unmaps the
+window. A scene window stays in scene mode until destruction.
+
+The little-endian payload consists of:
+
+| Offset | Type | Field |
+| --- | --- | --- |
+| 0 | u32 | external client/root surface ID |
+| 4 | u32 | SWS window ID |
+| 8 | u64 | nonzero increasing commit serial |
+| 16 | i32 | scene origin X relative to root |
+| 20 | i32 | scene origin Y relative to root |
+| 24 | u32 | scene width in physical pixels |
+| 28 | u32 | scene height in physical pixels |
+| 32 | u32 | layer count, at most 256 |
+| 36 | 44 bytes × count | layer records |
+
+Each layer contains, in order, `surface_id: u32`, `buffer_id: u32`, `x: i32`,
+`y: i32`, `width: u32`, `height: u32`, `source_x: i32`, `source_y: i32`,
+`source_width: i32`, `source_height: i32`, and `transform: u32`. Destination
+rectangles must fit the scene. Source rectangles are positive 24.8 fixed-point
+coordinates in the transformed buffer, before destination scaling. Transform
+values 0–7 follow Wayland's orthogonal transform numbering. Surface IDs must be
+unique; multiple layers may select the same registered buffer.
+
+SWS validates the complete message and every connection-owned buffer/crop before
+publication. Scene dimensions are bounded by 16384 per axis and 16 Mi pixels in
+total. ARGB8888 sources are premultiplied; XRGB8888 sources ignore their alpha
+byte. The SGFX backend uploads the SHM layers and performs their ordered
+composition in a GPU render target, using fractional UV coordinates and
+premultiplied source-over blending. The retained scene texture preserves group
+opacity, window clipping and presentation transforms. No CPU-composited window
+image is allocated on the GPU path. The software backend/fallback composites
+into a CPU window backing and converts to its existing straight-alpha format.
+Scene input remains window-local, with the extension responsible for mapping it
+to its protocol's child surfaces.
+
+Selected buffers retain their pools until all selecting windows/scenes replace
+them or close. Destroy requests are deferred while selected. Retirement uses the
+existing `EXTENSION_BUFFER_RELEASED` event, with the newest retired use's serial
+when a buffer is shared by several scenes.
+Frame pacing uses the existing `REQUEST_FRAME`/`FRAME_DONE` protocol.
