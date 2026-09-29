@@ -1,0 +1,16 @@
+#!/bin/sh
+# Keep Wine services available for another application launched shortly after exit.
+idle_seconds=${SCARLET_WINESERVER_IDLE_SECONDS:-60}
+case "$idle_seconds" in
+    *[!0-9]*)
+        printf '%s\n' 'SCARLET_WINESERVER_IDLE_SECONDS must be an integer from 0 to 2147483647' >&2
+        exit 2
+        ;;
+esac
+if ! [ "$idle_seconds" -le 2147483647 ]; then
+    printf '%s\n' 'SCARLET_WINESERVER_IDLE_SECONDS must be an integer from 0 to 2147483647' >&2
+    exit 2
+fi
+export BOX64_LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu${BOX64_LD_LIBRARY_PATH:+:$BOX64_LD_LIBRARY_PATH}"
+# A caller's later -p option takes precedence over the idle-time default.
+exec /usr/local/bin/box64 /usr/lib/wine/wineserver64 "-p$idle_seconds" "$@"
