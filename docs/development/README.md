@@ -4,6 +4,8 @@ This guide covers the development environment and build/run tasks for this
 repository. The tasks are defined in the root [Makefile.toml](../../Makefile.toml).
 For SDK commands, project manifests, and image composition, see the separate
 [project tooling guide](../build-system/README.md).
+For the Debian AArch64 image's Windows userspace bring-up, see
+[Box64 and Wine](box64-wine.md).
 
 ## Development environment
 

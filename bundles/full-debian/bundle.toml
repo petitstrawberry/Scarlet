@@ -1,5 +1,6 @@
 # AArch64 full image using the experimental Debian trixie glibc Linux view.
-# The initial Debian release supplies a base rootfs without Mozc or Chromium.
+# Includes Box64 and Wine64 for initial 64-bit Windows console bring-up.
+# This Debian profile has no Mozc or Chromium overlay.
 
 [[layers]]
 kind = "bundle"
@@ -7,8 +8,8 @@ path = "../desktop/bundle.toml"
 
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/scarlet-bundle-debian.git", rev = "772cc7f7da2e838e28e42990943612b8b89d06a8" }
-subdir = "bundles/rootfs"
+source = { git = "https://github.com/petitstrawberry/scarlet-bundle-debian.git", rev = "c7fb4a5462dac66d98d5484f735629dcffe2f501" }
+subdir = "bundles/rootfs-wine"
 
 [[layers]]
 kind = "bundle"
