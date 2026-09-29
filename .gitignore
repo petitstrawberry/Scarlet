@@ -38,3 +38,5 @@ target/
 result
 test-media/
 .DS_Store
+
+artifacts
