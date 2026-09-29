@@ -2266,19 +2266,11 @@ impl SocketObject for TcpSocket {
         address: &SocketAddress,
         flags: u32,
     ) -> Result<usize, SocketError> {
-        let _ = flags;
-
-        match address {
-            SocketAddress::Inet(inet) => {
-                let addr = Ipv4Address::from_bytes(inet.addr);
-                let port = inet.port;
-                // Update remote address
-                *self.remote_ip.lock() = Some(addr);
-                self.remote_port.store(port, Ordering::SeqCst);
-                self.send_data(data)
-            }
-            _ => Err(SocketError::InvalidAddress),
-        }
+        // TCP always sends to its connected peer. Linux send() uses sendto
+        // with a null destination, represented here by Unspecified. An
+        // explicit destination must not retarget an established connection.
+        let _ = (address, flags);
+        self.send_data(data)
     }
 
     fn recvfrom(
@@ -3236,6 +3228,36 @@ mod tests {
             crate::object::capability::selectable::ReadyInterest::read(),
         );
         assert!(!ready_after_accept.read);
+    }
+
+    #[test_case]
+    fn sendto_uses_the_connected_tcp_peer_without_retargeting() {
+        use crate::network::socket::SocketObject;
+
+        let tcp_layer = TcpLayer::new();
+        let listener = TcpSocket::new(Arc::downgrade(&tcp_layer));
+        let client = TcpSocket::new(Arc::downgrade(&tcp_layer));
+        assert_eq!(
+            client.sendto(b"request", &SocketAddress::Unspecified, 0),
+            Err(SocketError::NotConnected)
+        );
+
+        let address = SocketAddress::Inet(Inet4SocketAddress::new([127, 0, 0, 1], 24_681));
+        SocketControl::bind(listener.as_ref(), &address).unwrap();
+        SocketControl::listen(listener.as_ref(), 1).unwrap();
+        SocketControl::connect(client.as_ref(), &address).unwrap();
+        let server = SocketControl::accept(listener.as_ref()).unwrap();
+
+        assert_eq!(client.sendto(b"GET", &SocketAddress::Unspecified, 0x4000), Ok(3));
+        let mut buffer = [0u8; 3];
+        assert_eq!(server.read(&mut buffer).unwrap(), 3);
+        assert_eq!(&buffer, b"GET");
+
+        let other = SocketAddress::Inet(Inet4SocketAddress::new([192, 0, 2, 1], 80));
+        assert_eq!(client.sendto(b" / ", &other, 0), Ok(3));
+        assert_eq!(SocketControl::getpeername(client.as_ref()).unwrap(), address);
+        assert_eq!(server.read(&mut buffer).unwrap(), 3);
+        assert_eq!(&buffer, b" / ");
     }
 
     #[test_case]
