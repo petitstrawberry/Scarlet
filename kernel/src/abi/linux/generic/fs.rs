@@ -1294,6 +1294,9 @@ pub fn sys_dup(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                             if let Some(flags) = abi.get_file_status_flags(fd) {
                                 let _ = abi.set_file_status_flags(new_fd, flags);
                             }
+                            // dup never inherits FD_CLOEXEC, including the
+                            // native handle metadata used by exec.
+                            let _ = abi.set_fd_flags(new_fd, 0);
                             new_fd
                         }
                         Err(_) => errno::to_result(errno::EMFILE), // Too many open files
@@ -1318,12 +1321,15 @@ pub fn sys_dup3(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // dup3 does not allow oldfd and newfd to be the same
     if oldfd == newfd {
-        return usize::MAX; // EINVAL
+        return errno::to_result(errno::EINVAL);
     }
 
     // Only O_CLOEXEC flag is valid for dup3
     if flags != 0 && flags != (O_CLOEXEC as u32) {
-        return usize::MAX; // EINVAL
+        return errno::to_result(errno::EINVAL);
+    }
+    if newfd >= super::MAX_FDS {
+        return errno::to_result(errno::EBADF);
     }
 
     // Get handle from old fd
@@ -1365,10 +1371,10 @@ pub fn sys_dup3(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                             if let Some(status_flags) = abi.get_file_status_flags(oldfd) {
                                 let _ = abi.set_file_status_flags(newfd, status_flags);
                             }
-                            // Set flags if O_CLOEXEC is specified
-                            if flags & (O_CLOEXEC as u32) != 0 {
-                                let _ = abi.set_fd_flags(newfd, FD_CLOEXEC);
-                            }
+                            // Clear inherited CloseOnExec metadata as well:
+                            // shells restore stdio from CLOEXEC saved fds.
+                            let _ =
+                                abi.set_fd_flags(newfd, if flags != 0 { FD_CLOEXEC } else { 0 });
                             newfd
                         }
                         Err(_) => usize::MAX, // Cannot allocate specific fd
@@ -1407,11 +1413,11 @@ pub fn sys_close(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 }
 
-// A pipe read is one stream operation, even when the user buffer spans pages.
-// Splitting it into page-sized reads can consume the available reply on the
-// first page and then block waiting for more, while the peer awaits our reply.
+// One read must remain one stream operation across user pages. In particular,
+// a terminal's WouldBlock is not EOF, and consuming one page must not wait for
+// another line merely because the destination crosses a page boundary.
 fn read_stream_to_user(
-    stream: &dyn crate::object::capability::StreamOps,
+    read: impl FnOnce(&mut [u8]) -> Result<usize, StreamError>,
     task: &crate::task::Task,
     address: usize,
     count: usize,
@@ -1437,7 +1443,7 @@ fn read_stream_to_user(
         .try_reserve_exact(length)
         .map_err(|_| errno::ENOMEM)?;
     buffer.resize(length, 0);
-    let amount = match stream.read(&mut buffer) {
+    let amount = match read(&mut buffer) {
         Ok(amount) => amount.min(length),
         Err(StreamError::EndOfStream) => return Ok(0),
         Err(error) => return Err(stream_error_to_errno(error)),
@@ -1450,191 +1456,109 @@ fn read_stream_to_user(
     }
 }
 
+/// Validate access on the handle, including descriptors inherited from the
+/// native ABI. Their Linux status flags may not describe the access mode.
+fn io_handle(
+    abi: &LinuxAbi,
+    task: &crate::task::Task,
+    fd: usize,
+    writing: bool,
+) -> Result<u32, usize> {
+    use crate::object::handle::AccessMode;
+    let handle = abi.get_handle(fd).ok_or(errno::EBADF)?;
+    let metadata = task.handle_table.get_metadata(handle).ok_or(errno::EBADF)?;
+    if matches!(
+        (metadata.access_mode, writing),
+        (AccessMode::ReadOnly, true) | (AccessMode::WriteOnly, false)
+    ) {
+        return Err(errno::EBADF);
+    }
+    Ok(handle)
+}
+
+// Objects may return WouldBlock even for a blocking descriptor. Retry after
+// readiness instead of inventing EOF or EPERM. Keep this shared by both the
+// single-page and staged read paths.
+fn read_stream_retry(
+    stream: &dyn crate::object::capability::StreamOps,
+    buffer: &mut [u8],
+    nonblocking: bool,
+    mut wait: impl FnMut() -> Result<(), StreamError>,
+) -> Result<usize, StreamError> {
+    loop {
+        match stream.read(buffer) {
+            Err(StreamError::WouldBlock) if !nonblocking => wait()?,
+            result => return result,
+        }
+    }
+}
+
 pub fn sys_read(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    use crate::object::capability::selectable::{ReadyInterest, SelectWaitOutcome};
     let task = mytask().unwrap();
-    let fd = trapframe.get_arg(0) as usize;
+    let fd = trapframe.get_arg(0);
     let user_buf = trapframe.get_arg(1);
-    let count = trapframe.get_arg(2) as usize;
+    let count = trapframe.get_arg(2);
+    trapframe.increment_pc_next(&task);
 
-    // Get handle from Linux fd
-    let handle = match abi.get_handle(fd) {
-        Some(h) => h,
-        None => {
-            trapframe.increment_pc_next(&task);
-            return usize::MAX;
-        }
+    let handle = match io_handle(abi, &task, fd, false) {
+        Ok(handle) => handle,
+        Err(error) => return errno::to_result(error),
     };
-
-    let kernel_obj = match task.handle_table.get(handle) {
-        Some(obj) => obj,
-        None => {
-            trapframe.increment_pc_next(&task);
-            return usize::MAX;
-        }
+    let Some(object) = task.handle_table.get(handle) else {
+        return errno::to_result(errno::EBADF);
     };
-
-    // Determine non-blocking mode
+    if object
+        .as_file()
+        .and_then(|file| file.metadata().ok())
+        .is_some_and(|metadata| matches!(metadata.file_type, FileType::Directory))
+    {
+        return errno::to_result(errno::EISDIR);
+    }
+    let Some(stream) = object.as_stream() else {
+        return errno::to_result(errno::EINVAL);
+    };
+    if count == 0 {
+        return 0;
+    }
+    let selectable = object.as_selectable();
+    // The open description may also be shared through an inherited/duplicated
+    // handle or SCM_RIGHTS. Its nonblocking state can outlive the local fd flags.
     let nonblocking = abi
         .get_file_status_flags(fd)
-        .map(|f| ((f as i32) & O_NONBLOCK) != 0)
-        .unwrap_or(false);
-
-    // Check if this is a directory by getting file metadata
-    let is_directory = if let Some(file_obj) = kernel_obj.as_file() {
-        if let Ok(metadata) = file_obj.metadata() {
-            matches!(metadata.file_type, FileType::Directory)
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    let stream = match kernel_obj.as_stream() {
-        Some(stream) => stream,
-        None => {
-            trapframe.increment_pc_next(&task);
-            return usize::MAX;
-        }
-    };
-
-    if is_directory {
-        trapframe.increment_pc_next(&task);
-        return usize::MAX;
-    }
-
-    // A signal record may straddle a user page boundary. Splitting the read at
-    // that boundary would give the object a buffer smaller than its 128-byte
-    // record and incorrectly return EINVAL (or consume only part of a record).
-    if kernel_obj
-        .as_file()
-        .is_some_and(|file| file.as_any().is::<super::signalfd::SignalFd>())
-    {
-        let mut buffer = [0u8; crate::environment::PAGE_SIZE];
-        let length = count.min(buffer.len());
-        let result = match stream.read(&mut buffer[..length]) {
-            Ok(n) => {
-                match crate::library::std::usercopy::copy_to_user(&task, user_buf, &buffer[..n]) {
-                    Ok(()) => n,
-                    Err(_) => errno::to_result(errno::EFAULT),
-                }
-            }
-            Err(error) => errno::to_result(stream_error_to_errno(error)),
-        };
-        trapframe.increment_pc_next(&task);
-        return result;
-    }
-
-    // A pipe/socket read must not become a sequence of blocking reads merely
-    // because its destination straddles a page. Return the available reply;
-    // the peer may wait for our next request before it sends anything else.
-    if kernel_obj.as_pipe().is_some() || kernel_obj.as_socket().is_some() {
-        if count == 0 {
-            trapframe.increment_pc_next(&task);
-            return 0;
-        }
-        let page_remaining =
-            crate::environment::PAGE_SIZE - (user_buf & (crate::environment::PAGE_SIZE - 1));
-        if count > page_remaining {
-            trapframe.increment_pc_next(&task);
-            return read_stream_to_user(stream, &task, user_buf, count)
-                .unwrap_or_else(errno::to_result);
-        }
-    }
-
-    // Fast path: buffer fits within a single page
-    let page_offset = user_buf & (crate::environment::PAGE_SIZE - 1);
-    if page_offset + count <= crate::environment::PAGE_SIZE {
-        let buf_ptr = match task.vm_manager.translate_to_kva_for_write(user_buf) {
-            Some(kva) => kva as *mut u8,
-            None => {
-                trapframe.increment_pc_next(&task);
-                return usize::MAX;
-            }
-        };
-        let mut buffer = unsafe { core::slice::from_raw_parts_mut(buf_ptr, count) };
-        match stream.read(&mut buffer) {
-            Ok(n) => {
-                trapframe.increment_pc_next(&task);
-                n
-            }
-            Err(e) => {
-                trapframe.increment_pc_next(&task);
-                match e {
-                    StreamError::EndOfStream => 0,
-                    StreamError::WouldBlock => {
-                        if nonblocking {
-                            return errno::to_result(errno::EAGAIN);
-                        } else {
-                            schedule(trapframe);
-                            usize::MAX
-                        }
-                    }
-                    error => errno::to_result(stream_error_to_errno(error)),
-                }
-            }
-        }
-    } else {
-        // Multi-page path: read in PAGE_SIZE chunks via kernel stack buffer
-        let mut page_buf = [0u8; crate::environment::PAGE_SIZE];
-        let mut total_read = 0usize;
-        let mut remaining = count;
-        let mut cur_user = user_buf;
-
-        while remaining > 0 {
-            let page_off = cur_user & (crate::environment::PAGE_SIZE - 1);
-            let chunk_size = core::cmp::min(crate::environment::PAGE_SIZE - page_off, remaining);
-            let mut chunk_buf = &mut page_buf[..chunk_size];
-
-            let n = match stream.read(&mut chunk_buf) {
-                Ok(n) => n,
-                Err(StreamError::EndOfStream) => break,
-                Err(StreamError::WouldBlock) => {
-                    if nonblocking {
-                        if total_read > 0 {
-                            break;
-                        }
-                        trapframe.increment_pc_next(&task);
-                        return errno::to_result(errno::EAGAIN);
-                    } else {
-                        break;
-                    }
-                }
-                Err(StreamError::Interrupted) => {
-                    if total_read == 0 {
-                        trapframe.increment_pc_next(&task);
-                        return errno::to_result(errno::EINTR);
-                    }
-                    break;
-                }
-                Err(_) => {
-                    if total_read == 0 {
-                        trapframe.increment_pc_next(&task);
-                        return usize::MAX;
-                    }
-                    break;
-                }
+        .is_some_and(|flags| flags as i32 & O_NONBLOCK != 0)
+        || selectable.is_some_and(|selectable| selectable.is_nonblocking());
+    let mut read = |buffer: &mut [u8]| {
+        read_stream_retry(stream, buffer, nonblocking, || {
+            let Some(selectable) = selectable else {
+                return Err(StreamError::WouldBlock);
             };
-
-            if n == 0 {
-                break;
+            if linux_poll_interrupted(abi, &task) {
+                return Err(StreamError::Interrupted);
             }
-
-            let copied = copy_to_user_pagewise(cur_user, &page_buf[..n], &task.vm_manager);
-            if copied != n {
-                break;
+            if selectable.wait_until_ready(ReadyInterest::read(), trapframe, None, 0)
+                == SelectWaitOutcome::Interrupted
+                || linux_poll_interrupted(abi, &task)
+            {
+                return Err(StreamError::Interrupted);
             }
-
-            total_read += n;
-            remaining -= n;
-            cur_user += n;
-            if n < chunk_size {
-                break;
-            }
+            Ok(())
+        })
+    };
+    let page_remaining =
+        crate::environment::PAGE_SIZE - (user_buf & (crate::environment::PAGE_SIZE - 1));
+    if count <= page_remaining {
+        let Some(address) = task.vm_manager.translate_to_kva_for_write(user_buf) else {
+            return errno::to_result(errno::EFAULT);
+        };
+        let buffer = unsafe { core::slice::from_raw_parts_mut(address as *mut u8, count) };
+        match read(buffer) {
+            Ok(amount) => amount,
+            Err(StreamError::EndOfStream) => 0,
+            Err(error) => errno::to_result(stream_error_to_errno(error)),
         }
-
-        trapframe.increment_pc_next(&task);
-        total_read
+    } else {
+        read_stream_to_user(read, &task, user_buf, count).unwrap_or_else(errno::to_result)
     }
 }
 
@@ -1646,9 +1570,9 @@ pub fn sys_write(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     trapframe.increment_pc_next(&task);
 
-    let handle = match abi.get_handle(fd) {
-        Some(h) => h,
-        None => return usize::MAX,
+    let handle = match io_handle(abi, &task, fd, true) {
+        Ok(h) => h,
+        Err(error) => return errno::to_result(error),
     };
 
     let kernel_obj = match task.handle_table.get(handle) {
@@ -1766,15 +1690,13 @@ fn positional_vector_io(abi: &mut LinuxAbi, trapframe: &mut Trapframe, write: bo
         if position < 0 || iov_count > 1024 {
             return errno::to_result(errno::EINVAL);
         }
-        let Some(handle) = abi.get_handle(fd) else {
-            return errno::to_result(errno::EBADF);
+        let handle = match io_handle(abi, &task, fd, write) {
+            Ok(handle) => handle,
+            Err(error) => return errno::to_result(error),
         };
         let Some(object) = task.handle_table.get(handle) else {
             return errno::to_result(errno::EBADF);
         };
-        if (write && flags & 3 == 0) || (!write && flags & 3 == 1) {
-            return errno::to_result(errno::EBADF);
-        }
         let Some(file) = object.as_file() else {
             return errno::to_result(if object.as_stream().is_some() {
                 errno::ESPIPE
@@ -1883,18 +1805,18 @@ pub fn sys_pread64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return errno::to_result(errno::EINVAL);
     }
 
+    let handle = match io_handle(abi, &task, fd, false) {
+        Ok(handle) => handle,
+        Err(error) => {
+            trapframe.increment_pc_next(&task);
+            return errno::to_result(error);
+        }
+    };
+
     if count == 0 {
         trapframe.increment_pc_next(&task);
         return 0;
     }
-
-    let handle = match abi.get_handle(fd) {
-        Some(h) => h,
-        None => {
-            trapframe.increment_pc_next(&task);
-            return errno::to_result(errno::EBADF);
-        }
-    };
 
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
@@ -2041,6 +1963,14 @@ pub fn sys_pwrite64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return errno::to_result(errno::EINVAL);
     }
 
+    let handle = match io_handle(abi, &task, fd, true) {
+        Ok(handle) => handle,
+        Err(error) => {
+            trapframe.increment_pc_next(&task);
+            return errno::to_result(error);
+        }
+    };
+
     if count == 0 {
         trapframe.increment_pc_next(&task);
         return 0;
@@ -2060,14 +1990,6 @@ pub fn sys_pwrite64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         trapframe.increment_pc_next(&task);
         return errno::to_result(errno::EFAULT);
     }
-
-    let handle = match abi.get_handle(fd) {
-        Some(h) => h,
-        None => {
-            trapframe.increment_pc_next(&task);
-            return errno::to_result(errno::EBADF);
-        }
-    };
 
     let kernel_obj = match task.handle_table.get(handle) {
         Some(obj) => obj,
@@ -3171,16 +3093,10 @@ pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             return new_fd;
         }
         F_GETFD => {
-            // Get file descriptor flags (IMPLEMENTED)
-            if let Some(_handle) = abi.get_handle(fd) {
-                if let Some(flags) = abi.get_fd_flags(fd) {
-                    return flags as usize; // Return the flags
-                } else {
-                    return usize::MAX; // Invalid file descriptor
-                }
-            } else {
-                return usize::MAX; // Invalid file descriptor
-            }
+            return abi
+                .get_fd_flags(fd)
+                .map(|flags| flags as usize)
+                .unwrap_or_else(|| errno::to_result(errno::EBADF));
         }
         F_SETFD => {
             // Set file descriptor flags (IMPLEMENTED)
@@ -3675,9 +3591,9 @@ fn sys_vectored_io(abi: &mut LinuxAbi, trapframe: &mut Trapframe, reading: bool)
     if count > IOV_MAX {
         return errno::to_result(errno::EINVAL);
     }
-    let handle = match abi.get_handle(fd) {
-        Some(handle) => handle,
-        None => return errno::to_result(errno::EBADF),
+    let handle = match io_handle(abi, &task, fd, !reading) {
+        Ok(handle) => handle,
+        Err(error) => return errno::to_result(error),
     };
     let object = match task.handle_table.get(handle) {
         Some(object) => object,
@@ -6193,6 +6109,75 @@ mod tests {
     };
     use crate::abi::linux::generic::errno;
 
+    #[test_case]
+    fn stream_read_retries_would_block_and_propagates_interruptions() {
+        use crate::object::capability::{StreamError, StreamOps};
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DelayedByte(AtomicUsize);
+        impl StreamOps for DelayedByte {
+            fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+                if self.0.fetch_add(1, Ordering::Relaxed) == 0 {
+                    return Err(StreamError::WouldBlock);
+                }
+                buffer[0] = 42;
+                Ok(1)
+            }
+            fn write(&self, _: &[u8]) -> Result<usize, StreamError> {
+                Err(StreamError::NotSupported)
+            }
+        }
+
+        let mut buffer = [0];
+        let stream = DelayedByte(AtomicUsize::new(0));
+        let mut waits = 0;
+        assert_eq!(
+            super::read_stream_retry(&stream, &mut buffer, false, || {
+                waits += 1;
+                Ok(())
+            })
+            .unwrap(),
+            1
+        );
+        assert_eq!(waits, 1);
+        assert_eq!(buffer, [42]);
+
+        let stream = DelayedByte(AtomicUsize::new(0));
+        assert!(matches!(
+            super::read_stream_retry(&stream, &mut buffer, true, || panic!("must not wait")),
+            Err(StreamError::WouldBlock)
+        ));
+        let stream = DelayedByte(AtomicUsize::new(0));
+        assert!(matches!(
+            super::read_stream_retry(&stream, &mut buffer, false, || Err(
+                StreamError::Interrupted
+            )),
+            Err(StreamError::Interrupted)
+        ));
+        assert_eq!(stream.0.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test_case]
+    fn cross_page_read_preserves_would_block_instead_of_eof() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::object::capability::StreamError;
+        use crate::task::{Task, TaskType};
+
+        let task = Task::new("read-would-block-pages".into(), 0, TaskType::User);
+        let base = USER_STACK_END - 2 * PAGE_SIZE;
+        task.allocate_stack_pages(base, 2).unwrap();
+        assert_eq!(
+            super::read_stream_to_user(
+                |_| Err(StreamError::WouldBlock),
+                &task,
+                base + 16,
+                PAGE_SIZE,
+            ),
+            Err(errno::EAGAIN)
+        );
+    }
+
     #[cfg(target_arch = "aarch64")]
     #[test_case]
     fn linux_poll_waits_return_to_dispatch_pending_interrupt_and_kill() {
@@ -6297,7 +6282,7 @@ mod tests {
         // Keep the writer open: reading again after the first 16 bytes would
         // wait indefinitely. The destination has room for another 48 bytes.
         assert_eq!(
-            super::read_stream_to_user(&reader, &task, address, 64).unwrap(),
+            super::read_stream_to_user(|buffer| reader.read(buffer), &task, address, 64).unwrap(),
             16
         );
         let mut bytes = [0u8; 16];

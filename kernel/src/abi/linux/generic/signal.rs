@@ -987,6 +987,15 @@ fn signal_process_control(signal: LinuxSignal) -> Option<ProcessControlType> {
 /// Honor the receiver's disposition. Wine registers SIGQUIT to terminate a
 /// Windows thread; applying SIGQUIT's default here killed its whole process.
 fn deliver_signal_to_remote(current: &Task, target: &Task, signal: LinuxSignal) -> usize {
+    // An unreaped task still exists for kill(), but cannot receive a signal.
+    // In particular, Wine's delayed SIGKILL after a process has exited must
+    // not replace the recorded cause of death observed by wait4()/waitid().
+    if matches!(
+        target.get_state(),
+        crate::task::TaskState::Zombie | crate::task::TaskState::Terminated
+    ) {
+        return 0;
+    }
     let state = target
         .linux_signal_state
         .lock()
@@ -1019,6 +1028,9 @@ fn deliver_signal_to_remote(current: &Task, target: &Task, signal: LinuxSignal) 
         }
         SignalAction::Terminate | SignalAction::ForceTerminate => {
             let status = signal_death_status(signal);
+            if !target.request_fatal_signal_exit_group(signal as u8, status) {
+                return 0;
+            }
             crate::println!(
                 "[linux] fatal signal={} sender={} target={} name={} status={}",
                 signal as u32,
@@ -1027,8 +1039,6 @@ fn deliver_signal_to_remote(current: &Task, target: &Task, signal: LinuxSignal) 
                 target.name.read().as_str(),
                 status
             );
-            target.mark_signal_termination(signal as u8);
-            target.request_deferred_exit_group(status);
             wake_target_for_signal(target);
         }
         SignalAction::Stop => stop_target_for_signal(target),
@@ -1136,9 +1146,52 @@ pub fn deliver_pending_signals(abi: &mut LinuxAbi) {
 #[cfg(test)]
 mod tests {
     #[test_case]
+    fn signals_to_exited_tasks_preserve_wait_status_and_state() {
+        use crate::task::TaskState;
+
+        let mut sender = Task::new("signal-sender".into(), 0, TaskType::User);
+        sender.set_id(usize::MAX);
+        for state in [TaskState::Zombie, TaskState::Terminated] {
+            for previous_signal in [None, Some(LinuxSignal::SIGINT)] {
+                let mut receiver = Task::new("exited-receiver".into(), 0, TaskType::User);
+                receiver.set_id(usize::MAX - 1);
+                let abi = LinuxAbi::default();
+                abi.bind_task_signals(&receiver);
+                abi.signal_state
+                    .lock()
+                    .set_handler(LinuxSignal::SIGQUIT, SignalAction::Custom(0x400000));
+                let status = previous_signal.map_or(7, signal_death_status);
+                if let Some(signal) = previous_signal {
+                    receiver.mark_signal_termination(signal as u8);
+                }
+                receiver.set_exit_status(status);
+                receiver.set_state(state);
+                for signal in [
+                    LinuxSignal::SIGKILL,
+                    LinuxSignal::SIGSTOP,
+                    LinuxSignal::SIGCONT,
+                    LinuxSignal::SIGQUIT,
+                ] {
+                    assert_eq!(deliver_signal_to_remote(&sender, &receiver, signal), 0);
+                    assert_eq!(receiver.get_exit_status(), Some(status));
+                    assert_eq!(
+                        receiver.termination_signal(),
+                        previous_signal.map(|signal| signal as u8)
+                    );
+                    assert_eq!(receiver.get_state(), state);
+                    assert!(receiver.event_queue.lock().dequeue().is_none());
+                }
+            }
+        }
+    }
+
+    #[test_case]
     fn remote_quit_uses_registered_handler_and_preserves_ignored_signals() {
-        let sender = Task::new("signal-sender".into(), 0, TaskType::User);
-        let receiver = Task::new("signal-receiver".into(), 0, TaskType::User);
+        // Unscheduled fixtures still need IDs for signal event metadata.
+        let mut sender = Task::new("signal-sender".into(), 0, TaskType::User);
+        sender.set_id(usize::MAX);
+        let mut receiver = Task::new("signal-receiver".into(), 0, TaskType::User);
+        receiver.set_id(usize::MAX - 1);
         let abi = LinuxAbi::default();
         abi.bind_task_signals(&receiver);
         abi.signal_state

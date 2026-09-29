@@ -415,8 +415,8 @@ impl PageCacheManager {
         let mut targets: alloc::vec::Vec<(PageIndex, PhysicalAddress)> = alloc::vec::Vec::new();
         {
             let map = self.entries.read();
-            for (&(cache_id, page_index), entry) in map.iter() {
-                if cache_id == id && entry.is_dirty() && entry.pin_count() == 0 {
+            for (&(_, page_index), entry) in map.range((id, 0)..=(id, PageIndex::MAX)) {
+                if entry.is_dirty() && entry.pin_count() == 0 {
                     targets.push((page_index, entry.paddr()));
                 }
             }
@@ -445,9 +445,9 @@ impl PageCacheManager {
     {
         let targets = {
             let map = self.entries.read();
-            map.iter()
-                .filter_map(|(&(cache_id, page_index), entry)| {
-                    (cache_id == id && entry.is_dirty() && entry.pin_count() == 0)
+            map.range((id, 0)..=(id, PageIndex::MAX))
+                .filter_map(|(&(_, page_index), entry)| {
+                    (entry.is_dirty() && entry.pin_count() == 0)
                         .then_some((page_index, entry.paddr()))
                 })
                 .collect::<alloc::vec::Vec<_>>()
@@ -468,10 +468,14 @@ impl PageCacheManager {
 
     /// Return whether an object still owns any dirty cache page.
     pub fn has_dirty_pages(&self, id: CacheId) -> bool {
+        // Closing one file must not scan every cached page with IRQs disabled.
+        // Prefix initialization can leave hundreds of thousands of unrelated
+        // pages in this global tree. Include the last index without incrementing
+        // CacheId, which would overflow for the maximum ID.
         self.entries
             .read()
-            .iter()
-            .any(|(&(cache_id, _), entry)| cache_id == id && entry.is_dirty())
+            .range((id, 0)..=(id, PageIndex::MAX))
+            .any(|(_, entry)| entry.is_dirty())
     }
 
     /// Persist retained dirty pages during a serialized truncate, including
@@ -605,10 +609,8 @@ impl PageCacheManager {
         let mut to_remove: alloc::vec::Vec<(CacheId, PageIndex)> = alloc::vec::Vec::new();
         {
             let map = self.entries.read();
-            for (&(cache_id, page_index), _entry) in map.iter() {
-                if cache_id == id {
-                    to_remove.push((cache_id, page_index));
-                }
+            for (&key, _) in map.range((id, 0)..=(id, PageIndex::MAX)) {
+                to_remove.push(key);
             }
         }
         if !to_remove.is_empty() {
@@ -677,6 +679,79 @@ pub static GLOBAL_PAGE_CACHE: PageCacheManager = PageCacheManager::new();
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn object_flush_and_invalidate_preserve_neighboring_cached_files() {
+        let cache = PageCacheManager::new();
+        let before = CacheId::new(u64::MAX - 2);
+        let target = CacheId::new(u64::MAX - 1);
+        let after = CacheId::new(u64::MAX);
+        // Boundary indexes and the maximum ID must not escape the object's
+        // range. A dirty page held by a reader must survive ordinary flushes.
+        for (id, index, pinned) in [
+            (before, 0, false),
+            (target, 0, false),
+            (target, 1, true),
+            (target, PageIndex::MAX, false),
+            (after, PageIndex::MAX, false),
+        ] {
+            cache.get_or_create_pinned(id, index, |_| Ok(())).unwrap();
+            cache.mark_dirty(id, index);
+            if !pinned {
+                cache.unpin(id, index);
+            }
+        }
+        assert!(!cache.has_dirty_pages(CacheId::new(0)));
+        assert_eq!(
+            cache.flush_batch(target, |pages| {
+                assert_eq!(
+                    pages.iter().map(|page| page.0).collect::<Vec<_>>(),
+                    [0, PageIndex::MAX]
+                );
+                Err("injected write error")
+            }),
+            Err("injected write error")
+        );
+        let mut written = Vec::new();
+        cache
+            .flush(target, |index, _| {
+                written.push(index);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(written, [0, PageIndex::MAX]);
+        assert!(cache.has_dirty_pages(target));
+        cache.unpin(target, 1);
+        cache
+            .flush_batch(target, |pages| {
+                assert_eq!(pages.len(), 1);
+                assert_eq!(pages[0].0, 1);
+                Ok(())
+            })
+            .unwrap();
+        assert!(!cache.has_dirty_pages(target));
+        cache.invalidate(target);
+        assert!(cache.entries.read().get(&(target, 0)).is_none());
+        assert!(
+            cache
+                .entries
+                .read()
+                .get(&(target, PageIndex::MAX))
+                .is_none()
+        );
+        assert!(cache.has_dirty_pages(before));
+        assert!(cache.has_dirty_pages(after));
+        cache
+            .flush_batch(after, |pages| {
+                assert_eq!(pages.len(), 1);
+                assert_eq!(pages[0].0, PageIndex::MAX);
+                Ok(())
+            })
+            .unwrap();
+        assert!(!cache.has_dirty_pages(after));
+        cache.invalidate(after);
+        assert!(cache.has_dirty_pages(before));
+    }
 
     #[test_case]
     fn retained_dirty_flush_releases_only_its_pins_on_error() {

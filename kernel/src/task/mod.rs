@@ -2622,6 +2622,21 @@ impl Task {
         *self.deferred_exit_request.lock() = Some(DeferredExitRequest::ExitGroup { status });
     }
 
+    /// Commit a remote fatal signal only before exit cleanup has started.
+    /// Serialize with begin_exit so a delayed kill cannot overwrite the cause
+    /// of death while file/VM cleanup runs, before Zombie is published.
+    pub(crate) fn request_fatal_signal_exit_group(&self, signal: u8, status: i32) -> bool {
+        let _children = self.children.write();
+        if self.exiting.load(Ordering::Acquire)
+            || matches!(self.get_state(), TaskState::Zombie | TaskState::Terminated)
+        {
+            return false;
+        }
+        self.mark_signal_termination(signal);
+        self.request_deferred_exit_group(status);
+        true
+    }
+
     /// Record the Linux clear-child-tid address for one exit cleanup.
     ///
     /// # Arguments
@@ -4294,6 +4309,32 @@ mod tests {
         assert!(matches!(
             task.take_deferred_exit_request(),
             Some(DeferredExitRequest::ExitGroup { status: 11 })
+        ));
+    }
+
+    #[test_case]
+    fn fatal_signal_during_exit_cleanup_preserves_exit_cause() {
+        let mut task = Task::new("ExitSignalRace".to_string(), 0, TaskType::User);
+        task.set_id(usize::MAX - 2);
+        task.set_exit_status(7);
+        task.begin_exit();
+        // Exit cleanup starts before the task's state becomes Zombie.
+        assert!(!matches!(
+            task.get_state(),
+            TaskState::Zombie | TaskState::Terminated
+        ));
+        assert!(!task.request_fatal_signal_exit_group(9, 137));
+        assert_eq!(task.termination_signal(), None);
+        assert_eq!(task.get_exit_status(), Some(7));
+        assert!(task.take_deferred_exit_request().is_none());
+
+        let mut live = Task::new("LiveSignalTarget".to_string(), 0, TaskType::User);
+        live.set_id(usize::MAX - 3);
+        assert!(live.request_fatal_signal_exit_group(9, 137));
+        assert_eq!(live.termination_signal(), Some(9));
+        assert!(matches!(
+            live.take_deferred_exit_request(),
+            Some(DeferredExitRequest::ExitGroup { status: 137 })
         ));
     }
 
