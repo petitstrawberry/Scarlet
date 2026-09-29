@@ -752,6 +752,40 @@ pub fn sys_timer_delete(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
     0
 }
 
+/// Linux gettimeofday uses two signed 64-bit fields on our LP64 ABIs.
+/// Unlike clock_gettime, its fractional field is in microseconds.
+pub fn sys_gettimeofday(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().expect("No current task found");
+    let timeval_ptr = trapframe.get_arg(0);
+    let timezone_ptr = trapframe.get_arg(1);
+    trapframe.increment_pc_next(&task);
+    let now = system_time_ns().unwrap_or_else(current_time_ns);
+    write_gettimeofday(&task, timeval_ptr, timezone_ptr, now)
+        .map(|()| 0)
+        .unwrap_or_else(errno::to_result)
+}
+
+fn write_gettimeofday(
+    task: &crate::task::Task,
+    timeval_ptr: usize,
+    timezone_ptr: usize,
+    now_ns: u64,
+) -> Result<(), usize> {
+    use crate::library::std::usercopy::copy_to_user;
+
+    if timeval_ptr != 0 {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&((now_ns / NSEC_PER_SEC_U64) as i64).to_ne_bytes());
+        bytes[8..].copy_from_slice(&(((now_ns % NSEC_PER_SEC_U64) / 1000) as i64).to_ne_bytes());
+        copy_to_user(task, timeval_ptr, &bytes).map_err(|_| errno::EFAULT)?;
+    }
+    if timezone_ptr != 0 {
+        // Scarlet keeps wall time in UTC; no legacy timezone/DST adjustment.
+        copy_to_user(task, timezone_ptr, &[0u8; 8]).map_err(|_| errno::EFAULT)?;
+    }
+    Ok(())
+}
+
 /// sys_clock_gettime - Get time from specified clock
 ///
 /// Arguments:
@@ -972,6 +1006,46 @@ pub fn sys_clock_getres(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn gettimeofday_writes_microseconds_across_user_pages() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+        use crate::task::{Task, TaskType};
+
+        let task = Task::new("linux-gettimeofday".into(), 0, TaskType::User);
+        let base = USER_STACK_END - 2 * PAGE_SIZE;
+        task.allocate_stack_pages(base, 2).unwrap();
+        let timeval = base + PAGE_SIZE - 8;
+        let timezone = base + 32;
+        copy_to_user(&task, timeval - 8, &[0xa5; 32]).unwrap();
+        copy_to_user(&task, timezone, &[0xa5; 8]).unwrap();
+        assert_eq!(
+            write_gettimeofday(&task, timeval, timezone, 12_987_654_999),
+            Ok(())
+        );
+        let mut bytes = [0; 32];
+        copy_from_user(&task, timeval - 8, &mut bytes).unwrap();
+        assert_eq!(&bytes[..8], &[0xa5; 8]);
+        assert_eq!(i64::from_ne_bytes(bytes[8..16].try_into().unwrap()), 12);
+        assert_eq!(
+            i64::from_ne_bytes(bytes[16..24].try_into().unwrap()),
+            987_654
+        );
+        assert_eq!(&bytes[24..], &[0xa5; 8]);
+        let mut tz = [0xa5; 8];
+        copy_from_user(&task, timezone, &mut tz).unwrap();
+        assert_eq!(tz, [0; 8]);
+        assert_eq!(write_gettimeofday(&task, 0, 0, 0), Ok(()));
+        assert_eq!(
+            write_gettimeofday(&task, USER_STACK_END, 0, 0),
+            Err(errno::EFAULT)
+        );
+        assert_eq!(
+            write_gettimeofday(&task, 0, USER_STACK_END, 0),
+            Err(errno::EFAULT)
+        );
+    }
 
     #[test_case]
     fn test_timespec_size() {

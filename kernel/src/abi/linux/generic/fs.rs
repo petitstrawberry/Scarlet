@@ -2699,8 +2699,6 @@ fn get_path_str_v2(ptr: *const u8) -> Result<String, ()> {
 /// - 0 or positive value on success
 /// - usize::MAX on error (-1 in Linux)
 pub fn sys_ioctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    const FIONBIO: u32 = 0x5421;
-
     let task = mytask().unwrap();
     let fd = trapframe.get_arg(0) as usize;
     let request = trapframe.get_arg(1) as u32;
@@ -2708,17 +2706,29 @@ pub fn sys_ioctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
+    ioctl_for_task(abi, trapframe, &task, fd, request, arg)
+}
+
+fn ioctl_for_task(
+    abi: &mut LinuxAbi,
+    trapframe: &mut Trapframe,
+    task: &crate::task::Task,
+    fd: usize,
+    request: u32,
+    arg: usize,
+) -> usize {
+    const FIONBIO: u32 = 0x5421;
 
     // Get handle from Linux fd
     let handle = match abi.get_handle(fd) {
         Some(h) => h,
-        None => return usize::MAX, // Invalid file descriptor
+        None => return errno::to_result(errno::EBADF),
     };
 
     // Get the kernel object from the handle table
     let kernel_object = match task.handle_table.get(handle) {
         Some(obj) => obj,
-        None => return usize::MAX, // Invalid handle
+        None => return errno::to_result(errno::EBADF),
     };
 
     // Dispatch hypervisor (KVM) ioctls before capability-based routing
@@ -2745,12 +2755,23 @@ pub fn sys_ioctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     if request == FIONBIO {
         if let Some(socket) = kernel_object.as_socket() {
-            let arg_paddr = match task.vm_manager.translate_to_kva(arg) {
-                Some(addr) => addr,
-                None => return errno::to_result(errno::EFAULT),
-            };
-            let enabled = unsafe { *(arg_paddr as *const i32) != 0 };
+            let mut bytes = [0u8; 4];
+            if crate::library::std::usercopy::copy_from_user(task, arg, &mut bytes).is_err() {
+                return errno::to_result(errno::EFAULT);
+            }
+            let enabled = i32::from_ne_bytes(bytes) != 0;
             if let Some(selectable) = socket.as_selectable() {
+                // read/write consult the Linux status flags when translating
+                // WouldBlock. Keep them in sync with the socket, as F_SETFL does.
+                let flags = abi.get_file_status_flags(fd).unwrap_or(0);
+                let flags = if enabled {
+                    flags | O_NONBLOCK as u32
+                } else {
+                    flags & !(O_NONBLOCK as u32)
+                };
+                if abi.set_file_status_flags(fd, flags).is_err() {
+                    return errno::to_result(errno::EBADF);
+                }
                 selectable.set_nonblocking(enabled);
                 return 0;
             }
@@ -5960,6 +5981,54 @@ mod tests {
         proc_exe_linux_stat, proc_exe_selector,
     };
     use crate::abi::linux::generic::errno;
+
+    #[test_case]
+    fn socket_fionbio_updates_linux_status_flags_and_validates_user_pointer() {
+        use crate::abi::linux::generic::LinuxAbi;
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::library::std::usercopy::copy_to_user;
+        use crate::object::KernelObject;
+        use crate::task::{Task, TaskType};
+
+        let task = Task::new("linux-fionbio".into(), 0, TaskType::User);
+        let base = USER_STACK_END - 2 * PAGE_SIZE;
+        task.allocate_stack_pages(base, 2).unwrap();
+        // Exercise an unaligned int spanning two user pages.
+        let arg = base + PAGE_SIZE - 2;
+        let socket = crate::network::tcp::TcpSocket::new(alloc::sync::Weak::new());
+        let object = KernelObject::from_socket_object(socket);
+        let selectable = object.as_selectable().unwrap();
+        let handle = task.handle_table.insert(object.clone()).unwrap();
+        let mut abi = LinuxAbi::default();
+        let fd = abi.allocate_fd(handle).unwrap();
+        abi.set_file_status_flags(fd, 2).unwrap(); // O_RDWR must survive.
+        let mut frame = crate::arch::Trapframe::new();
+        for enabled in [1i32, 0, -1] {
+            copy_to_user(&task, arg, &enabled.to_ne_bytes()).unwrap();
+            assert_eq!(
+                super::ioctl_for_task(&mut abi, &mut frame, &task, fd, 0x5421, arg),
+                0
+            );
+            assert_eq!(selectable.is_nonblocking(), enabled != 0);
+            assert_eq!(
+                abi.get_file_status_flags(fd),
+                Some(
+                    2 | if enabled != 0 {
+                        super::O_NONBLOCK as u32
+                    } else {
+                        0
+                    }
+                )
+            );
+        }
+        let flags = abi.get_file_status_flags(fd);
+        assert_eq!(
+            super::ioctl_for_task(&mut abi, &mut frame, &task, fd, 0x5421, 0),
+            errno::to_result(errno::EFAULT)
+        );
+        assert_eq!(abi.get_file_status_flags(fd), flags);
+        assert!(selectable.is_nonblocking());
+    }
 
     #[test_case]
     fn pipe_descriptor_stat_identifies_both_ends_and_duplicates_as_one_fifo() {

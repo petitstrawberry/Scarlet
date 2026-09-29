@@ -559,6 +559,7 @@ syscall_table! {
     Uname = 160 => proc::sys_uname,
     Umask = 166 => fs::sys_umask,
     Prctl = 167 => proc::sys_prctl,
+    Gettimeofday = 169 => time::sys_gettimeofday,
     GetPid = 172 => proc::sys_getpid,
     GetPpid = 173 => proc::sys_getppid,
     GetUid = 174 => proc::sys_getuid,

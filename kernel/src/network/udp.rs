@@ -374,7 +374,17 @@ impl SocketObject for UdpSocket {
         address: &SocketAddress,
         _flags: u32,
     ) -> Result<usize, SocketError> {
-        match address {
+        // send() on a connected UDP socket omits the destination. Resolve
+        // that omission to the peer selected by connect(), as TCP does.
+        let destination = match address {
+            SocketAddress::Unspecified => self
+                .remote_addr
+                .read()
+                .clone()
+                .ok_or(SocketError::NotConnected)?,
+            address => address.clone(),
+        };
+        match &destination {
             SocketAddress::Inet(inet) => {
                 let addr = inet.addr;
                 let port = inet.port;
@@ -386,7 +396,7 @@ impl SocketObject for UdpSocket {
                 }
 
                 // Update state
-                *self.remote_addr.write() = Some(address.clone());
+                *self.remote_addr.write() = Some(destination.clone());
                 *self.state.write() = SocketState::Connected;
 
                 // Try to send through UDP layer
@@ -1155,6 +1165,40 @@ impl UdpLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn connected_udp_can_send_without_a_destination() {
+        let layer = UdpLayer::new();
+        let client = UdpSocket::new(layer.clone());
+        let server = UdpSocket::new(layer.clone());
+        assert_eq!(
+            client.sendto(b"query", &SocketAddress::Unspecified, 0),
+            Err(SocketError::NotConnected)
+        );
+        for socket in [&client, &server] {
+            socket
+                .bind(&SocketAddress::Inet(Inet4SocketAddress::new(
+                    [127, 0, 0, 1],
+                    0,
+                )))
+                .unwrap();
+            socket.set_nonblocking(true);
+        }
+        let server_addr = server.getsockname().unwrap();
+        client.connect(&server_addr).unwrap();
+        assert_eq!(
+            client.sendto(b"query", &SocketAddress::Unspecified, 0),
+            Ok(5)
+        );
+        let mut buffer = [0u8; 16];
+        let (count, source) = server.recvfrom(&mut buffer, 0).unwrap();
+        assert_eq!(&buffer[..count], b"query");
+        assert_eq!(source, client.getsockname().unwrap());
+        assert_eq!(server.sendto(b"answer", &source, 0), Ok(6));
+        let (count, source) = client.recvfrom(&mut buffer, 0).unwrap();
+        assert_eq!(&buffer[..count], b"answer");
+        assert_eq!(source, server_addr);
+    }
 
     #[test_case]
     fn test_udp_header_creation() {
