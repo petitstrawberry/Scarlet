@@ -351,6 +351,7 @@ impl ScarletAbi {
                     ProcessControlType::Quit => 128 + 3,       // SIGQUIT-like
                     _ => 1,
                 };
+                task.mark_signal_termination((exit_code - 128) as u8);
                 Ok(EventProcessOutcome::Exited(exit_code))
             }
             ProcessControlType::Stop
@@ -405,6 +406,7 @@ impl ScarletAbi {
                     )
                 } else {
                     // Default: terminate with SIGINT-like exit code
+                    task.mark_signal_termination(2);
                     Ok(EventProcessOutcome::Exited(128 + 2))
                 }
             }

@@ -260,6 +260,7 @@ pub fn sys_rt_sigreturn(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) ->
         }
         Err(error) => {
             crate::println!("[linux] sigreturn failed: {}", error);
+            task.mark_signal_termination(11);
             task.request_deferred_exit_group(139);
             usize::MAX
         }
@@ -283,6 +284,7 @@ pub fn deliver_pending_handler(abi: &LinuxAbi, frame: &mut Trapframe, result: us
     if let Some((signal, handler)) = pending {
         if let Some(task) = mytask() {
             if setup_signal_handler(abi, &task, frame, handler, signal).is_err() {
+                task.mark_signal_termination(11);
                 task.request_deferred_exit_group(139);
             }
         }

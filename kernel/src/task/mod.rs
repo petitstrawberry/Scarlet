@@ -822,6 +822,8 @@ pub struct Task {
     pub text_size: AtomicUsize,
     /// Exit status (i32::MIN represents None)
     pub exit_status: AtomicI32,
+    /// Actual terminating signal, separate from a normal exit(128 + signal).
+    termination_signal: AtomicUsize,
     /// Published before an exit snapshots `children`.
     exiting: AtomicBool,
     /// Set when a process-control stop should be observable by waitpid.
@@ -1110,6 +1112,7 @@ impl Task {
             data_size: vm_manager.data_size_handle(),
             text_size: AtomicUsize::new(0),
             exit_status: AtomicI32::new(i32::MIN),
+            termination_signal: AtomicUsize::new(0),
             exiting: AtomicBool::new(false),
             process_control_stopped: AtomicBool::new(false),
             process_control_stop_reported: AtomicBool::new(false),
@@ -2547,6 +2550,19 @@ impl Task {
         }
     }
 
+    /// Record the cause before publishing an exit or deferred exit request.
+    /// Native wait keeps the historical shell-style status; Linux wait can
+    /// distinguish exit(137) from SIGKILL without guessing from that value.
+    pub(crate) fn mark_signal_termination(&self, signal: u8) {
+        self.termination_signal
+            .store(usize::from(signal), Ordering::SeqCst);
+    }
+
+    pub(crate) fn termination_signal(&self) -> Option<u8> {
+        let signal = self.termination_signal.load(Ordering::SeqCst);
+        (signal != 0).then_some(signal as u8)
+    }
+
     /// Request exit after the current ABI mutable borrow has been released.
     ///
     /// # Arguments
@@ -3343,6 +3359,9 @@ impl Task {
 
             if let Some(task) = get_task_by_id(task_id) {
                 if task.get_thread_group_id() == thread_group_id {
+                    if let Some(signal) = self.termination_signal() {
+                        task.mark_signal_termination(signal);
+                    }
                     if task_id == leader_id {
                         leader_finalized = true;
                         task.exit_non_current_thread_group_member(status, true);
@@ -3383,6 +3402,9 @@ impl Task {
                 TaskState::Zombie | TaskState::Terminated
             )
         {
+            if let Some(signal) = self.termination_signal() {
+                leader.mark_signal_termination(signal);
+            }
             leader.exit_non_current_thread_group_member(status, true);
         }
 
@@ -4973,9 +4995,11 @@ mod tests {
         let worker_id = add_task(worker, 0);
 
         let worker = get_task_by_id(worker_id).unwrap();
+        worker.mark_signal_termination(2);
         worker.exit_group(130);
 
         let leader = get_task_by_id(leader_id).unwrap();
+        assert_eq!(leader.termination_signal(), Some(2));
         assert_eq!(leader.get_state(), TaskState::Zombie);
         assert_eq!(worker.get_state(), TaskState::Terminated);
         assert!(get_task_by_id(worker_id).is_none());

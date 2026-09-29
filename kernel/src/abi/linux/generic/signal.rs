@@ -707,12 +707,21 @@ pub fn handle_event_for_task(
                 Ok(()) => EventProcessOutcome::UserHandlerArmed,
                 Err(error) => {
                     crate::println!("[linux] signal frame failed: {}", error);
+                    target_task.mark_signal_termination(LinuxSignal::SIGSEGV as u8);
                     EventProcessOutcome::Exited(128 + LinuxSignal::SIGSEGV as i32)
                 }
             }
         }
         SignalAction::Ignore => EventProcessOutcome::Continue,
         SignalAction::ForceTerminate | SignalAction::Terminate => {
+            crate::println!(
+                "[linux] fatal signal={} sender={:?} target={} name={}",
+                signal as u32,
+                event.metadata.sender,
+                target_task.get_id(),
+                target_task.name.read().as_str()
+            );
+            target_task.mark_signal_termination(signal as u8);
             let exit_code = 128 + (signal as i32);
             EventProcessOutcome::Exited(exit_code)
         }
@@ -832,6 +841,7 @@ pub fn handle_fatal_signal_immediately(signal: LinuxSignal) -> Result<(), &'stat
             exit_code
         );
 
+        task.mark_signal_termination(signal as u8);
         task.exit_group(exit_code);
         Ok(())
     } else {
@@ -849,8 +859,8 @@ pub fn is_fatal_signal(signal: LinuxSignal) -> bool {
 /// Linux wait status reported when a task is killed by `signal`.
 ///
 /// Scarlet currently stores shell-style process statuses, so signal deaths use
-/// `128 + signal`. Converting this to Linux's raw `wait(2)` bit layout belongs
-/// at the wait ABI boundary once normal exit statuses are encoded there too.
+/// `128 + signal`. Task records the signal separately, and the Linux wait ABI
+/// encodes it without confusing a normal exit(128 + signal) with signal death.
 ///
 /// # Arguments
 ///
@@ -941,6 +951,7 @@ fn deliver_signal_to_self(abi: &LinuxAbi, task: &Task, signal: LinuxSignal) {
                 task.try_get_namespace_id().unwrap_or(0),
                 status
             );
+            task.mark_signal_termination(signal as u8);
             task.request_deferred_exit_group(status);
         }
         SignalAction::Stop => stop_target_for_signal(task),
@@ -986,6 +997,7 @@ fn deliver_signal_to_remote(target: &Task, signal: LinuxSignal) {
                 target.try_get_namespace_id().unwrap_or(0),
                 status
             );
+            target.mark_signal_termination(signal as u8);
             target.request_deferred_exit_group(status);
             wake_target_for_signal(target);
         }
@@ -1071,6 +1083,7 @@ pub fn deliver_pending_signals(abi: &mut LinuxAbi) {
                     task.try_get_namespace_id().unwrap_or(0),
                     status
                 );
+                task.mark_signal_termination(signal as u8);
                 task.request_deferred_exit_group(status);
                 return;
             }

@@ -1424,6 +1424,21 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     result
 }
 
+/// Linux wait4's packed status is not Scarlet's shell-style exit status.
+fn linux_wait_status(status: i32, signal: Option<u8>) -> i32 {
+    match signal {
+        Some(signal) => i32::from(signal) & 0x7f,
+        None => (status & 0xff) << 8,
+    }
+}
+
+fn linux_waitid_status(status: i32, signal: Option<u8>) -> (i32, i32) {
+    match signal {
+        Some(signal) => (2, i32::from(signal)), // CLD_KILLED; no core was written.
+        None => (1, status & 0xff),             // CLD_EXITED
+    }
+}
+
 fn wait4_for_task(
     task: &Task,
     trapframe: &mut Trapframe,
@@ -1449,9 +1464,14 @@ fn wait4_for_task(
                 let Some(owner) = wait_owner_for_child(task, child_pid) else {
                     continue;
                 };
+                let child = get_task_by_id(child_pid);
                 match owner.wait(child_pid) {
                     Ok(status) => {
-                        // Child has exited, return the status
+                        // Child has exited, return the Linux-encoded status
+                        let status = linux_wait_status(
+                            status,
+                            child.as_ref().and_then(|child| child.termination_signal()),
+                        );
                         if wstatus != core::ptr::null_mut() {
                             if copy_to_user(task, wstatus as usize, &status.to_ne_bytes()).is_err()
                             {
@@ -1508,9 +1528,14 @@ fn wait4_for_task(
                 return errno::to_result(errno::ECHILD); // -ECHILD (not our child)
             };
 
+            let child = get_task_by_id(child_pid);
             match owner.wait(child_pid) {
                 Ok(status) => {
-                    // Child has exited, return the status
+                    // Child has exited, return the Linux-encoded status
+                    let status = linux_wait_status(
+                        status,
+                        child.as_ref().and_then(|child| child.termination_signal()),
+                    );
                     if wstatus != core::ptr::null_mut() {
                         if copy_to_user(task, wstatus as usize, &status.to_ne_bytes()).is_err() {
                             return errno::to_result(errno::EFAULT);
@@ -1559,6 +1584,7 @@ fn write_waitid_siginfo(
     infop: usize,
     pid: usize,
     status: i32,
+    signal: Option<u8>,
 ) -> Result<(), usize> {
     if infop == 0 {
         return Ok(());
@@ -1569,7 +1595,8 @@ fn write_waitid_siginfo(
     // si_uid @ 20, si_status @ 24.
     let mut siginfo = [0u8; 128];
     siginfo[0..4].copy_from_slice(&17i32.to_ne_bytes()); // SIGCHLD
-    siginfo[8..12].copy_from_slice(&1i32.to_ne_bytes()); // CLD_EXITED
+    let (code, status) = linux_waitid_status(status, signal);
+    siginfo[8..12].copy_from_slice(&code.to_ne_bytes());
     siginfo[16..20].copy_from_slice(&(pid as i32).to_ne_bytes());
     siginfo[24..28].copy_from_slice(&status.to_ne_bytes());
     copy_to_user(task, infop, &siginfo).map_err(|_| errno::to_result(errno::EFAULT))
@@ -1637,7 +1664,13 @@ pub fn sys_waitid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     };
 
                     let status = child_task.get_exit_status().unwrap_or(-1);
-                    if let Err(err) = write_waitid_siginfo(&task, infop, child_linux_pid, status) {
+                    if let Err(err) = write_waitid_siginfo(
+                        &task,
+                        infop,
+                        child_linux_pid,
+                        status,
+                        child_task.termination_signal(),
+                    ) {
                         trapframe.increment_pc_next(&task);
                         return err;
                     }
@@ -1688,7 +1721,13 @@ pub fn sys_waitid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
                 if child_task.get_state() == TaskState::Zombie {
                     let status = child_task.get_exit_status().unwrap_or(-1);
-                    if let Err(err) = write_waitid_siginfo(&task, infop, id, status) {
+                    if let Err(err) = write_waitid_siginfo(
+                        &task,
+                        infop,
+                        id,
+                        status,
+                        child_task.termination_signal(),
+                    ) {
                         trapframe.increment_pc_next(&task);
                         return err;
                     }
@@ -1850,6 +1889,16 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
 
 #[cfg(test)]
 mod tests {
+    #[test_case]
+    fn linux_wait_encoding_distinguishes_exit_codes_from_signals() {
+        assert_eq!(super::linux_wait_status(1, None), 0x100);
+        assert_eq!(super::linux_wait_status(137, None), 0x8900);
+        assert_eq!(super::linux_wait_status(137, Some(9)), 9);
+        assert_eq!(super::linux_wait_status(139, Some(11)), 11);
+        assert_eq!(super::linux_waitid_status(137, None), (1, 137));
+        assert_eq!(super::linux_waitid_status(137, Some(9)), (2, 9));
+    }
+
     use super::*;
 
     #[test_case]
