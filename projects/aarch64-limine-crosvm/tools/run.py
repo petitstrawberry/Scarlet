@@ -3,6 +3,7 @@
 import argparse
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -26,7 +27,10 @@ def main():
     parser.add_argument("--rootfs-image", type=Path, help="existing project root filesystem")
     parser.add_argument("--staging", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--timeout", type=float, default=120)
+    parser.add_argument("--timeout", type=float, default=120,
+                        help="time limit in seconds; 0 disables the time limit")
+    parser.add_argument("--memory", default=os.environ.get("SCARLET_QEMU_MEMORY", "8G"),
+                        help="Scarlet RAM (QEMU size syntax; default: 8G)")
     parser.add_argument("--accel", choices=("tcg", "hvf"), default=os.environ.get("SCARLET_QEMU_ACCEL", "tcg"))
     parser.add_argument("--success-marker", default="SCARLET_CROSVM_GUEST_OK",
                         help="exact guest serial line required for PASS")
@@ -35,8 +39,8 @@ def main():
     args = parser.parse_args()
     if args.accel not in ("tcg", "hvf"):
         parser.error("SCARLET_QEMU_ACCEL must be tcg or hvf for this project")
-    if args.timeout <= 0:
-        parser.error("timeout must be positive")
+    if not math.isfinite(args.timeout) or args.timeout < 0:
+        parser.error("timeout must be finite and nonnegative (0 means unlimited)")
     if not args.success_marker or any(c in args.success_marker for c in "\r\n"):
         parser.error("success marker must be one nonempty line")
     if bool(args.boot_image) != bool(args.rootfs_image):
@@ -94,7 +98,7 @@ def main():
     shutil.copyfile(variables, runtime_vars)
     runtime_vars.chmod(0o600)
     command = ["qemu-system-aarch64", "-machine", "virt,gic-version=3,acpi=off,virtualization=on",
-               "-cpu", "host" if args.accel == "hvf" else "max", "-m", "2G", "-smp", "1", "-accel", args.accel, "-no-reboot",
+               "-cpu", "host" if args.accel == "hvf" else "max", "-m", args.memory, "-smp", "1", "-accel", args.accel, "-no-reboot",
                "-display", "none", "-monitor", "none", "-serial", "stdio",
                "-drive", f"if=pflash,format=raw,unit=0,file={smoke.qemu_filename(code)},readonly=on",
                "-drive", f"if=pflash,format=raw,unit=1,file={smoke.qemu_filename(runtime_vars)}",

@@ -17,7 +17,10 @@ import time
 SUCCESS = re.compile(rb"\nSCARLET_CROSVM_GUEST_OK\r?\n")
 FAILURE = re.compile(rb"\nSCARLET_CROSVM_FAIL(?:[ :\r\n]|$)")
 INTERPRETER_ERROR = re.compile(rb"\nscarlet-ld: ")
-PANIC = re.compile(rb"panicked at|kernel panic|\[panic\]", re.IGNORECASE)
+# Android Rust HALs also log "panicked at". Their timestamped logcat records
+# are userspace crashes, not a reason to terminate the outer VM as a kernel panic.
+PANIC = re.compile(rb"\[Scarlet Kernel\]\s+panic:|kernel panic - not syncing|\[panic\]|"
+                   rb"\n(?:thread [^\r\n]* )?panicked at", re.IGNORECASE)
 
 
 def archive_entry(archive, name, mode, content, inode):
@@ -87,6 +90,7 @@ def activate_profile(profile):
 
 
 def run_guest(command, output, timeout):
+    """Watch serial output; timeout=0 removes only the overall time limit."""
     result = "QEMU exited before the success marker"
     started = time.monotonic()
     with (output / "serial.log").open("wb") as serial, subprocess.Popen(
@@ -103,7 +107,7 @@ def run_guest(command, output, timeout):
                     now = time.monotonic()
                     if failure_deadline is not None and now >= failure_deadline:
                         break
-                    remaining = timeout - (now - started)
+                    remaining = timeout - (now - started) if timeout else float("inf")
                     if remaining <= 0:
                         if failure_deadline is None:
                             result = "timeout waiting for the success marker"

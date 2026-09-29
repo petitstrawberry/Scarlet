@@ -1,0 +1,10 @@
+
+# Report real framework completion; reaching init or a shell is not success.
+service scarlet-diagnostics /system/bin/sh -c "exec >/dev/hvc1 2>&1; while true; do echo SCARLET_ANDROID_STATUS; echo boot_completed; getprop sys.boot_completed; echo surfaceflinger; getprop init.svc.surfaceflinger; echo sensors; getprop init.svc.vendor.sensors-hal-multihal; echo zygote; getprop init.svc.zygote; echo bootanim; getprop init.svc.bootanim; df /data; ls /dev/dri; sleep 60; done"
+    class main
+    user root
+    group root log readproc
+    seclabel u:r:shell:s0
+
+on property:sys.boot_completed=1
+    exec_background u:r:shell:s0 root root -- /system/bin/sh -c "echo SCARLET_ANDROID_BOOT_OK >/dev/hvc1"

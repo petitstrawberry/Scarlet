@@ -21,6 +21,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=PROJECT / ".scarlet/base")
     parser.add_argument("--source", type=Path, help="existing clean checkout at the pinned revision")
+    parser.add_argument("--gpu", action="store_true",
+                        help="include experimental virtio-gpu 2D support (no 3D renderer)")
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -41,7 +43,9 @@ def main():
         (staging / name).mkdir(parents=True, exist_ok=True)
     for name in ["usr/bin", "lib", "guest", "root", "tmp", "dev", "proc", "sys"]:
         (linux / name).mkdir(parents=True, exist_ok=True)
-    run("docker", "build", "--platform", "linux/arm64", "-t", "scarlet-crosvm-builder", SOURCE)
+    builder = "scarlet-crosvm-gpu-builder" if args.gpu else "scarlet-crosvm-builder"
+    run("docker", "build", "--platform", "linux/arm64", "--build-arg",
+        "CROSVM_GPU=" + ("1" if args.gpu else "0"), "-t", builder, SOURCE)
     export = r'''
 import pathlib, re, shutil, subprocess
 binary = pathlib.Path('/src/target/release/crosvm')
@@ -55,9 +59,9 @@ for path in re.findall(r'(?:=>\s+)?(/[^\s]+)', subprocess.check_output(['ldd', s
     run("docker", "run", "--rm", "--platform", "linux/arm64",
         "--mount", f"type=bind,source={source},target=/src",
         "--mount", f"type=bind,source={linux},target=/export",
-        "scarlet-crosvm-builder", "sh", "-c",
-        'cargo build --locked --release --no-default-features --features default-no-sandbox && python3 -c "$1"',
-        "export-crosvm", export)
+        builder, "sh", "-c",
+        'cargo build --locked --release --no-default-features --features "$2" && python3 -c "$1"',
+        "export-crosvm", export, "default-no-sandbox" + (",gpu" if args.gpu else ""))
     for manifest, target, binary in [(PROJECT / "init/Cargo.toml", "init", "crosvm-smoke-init"),
                                       (ROOT / "user/scarlet-ld/Cargo.toml", "loader", "scarlet-ld")]:
         run("cargo", "build", "--manifest-path", manifest, "--target", "aarch64-unknown-scarlet",

@@ -34,8 +34,8 @@ From the repository root:
 
 ```sh
 python3 projects/aarch64-limine-crosvm/tools/build.py
-cargo scarlet image --project projects/aarch64-limine-crosvm
-cargo scarlet run --project projects/aarch64-limine-crosvm --no-image
+cargo scarlet image --release --project projects/aarch64-limine-crosvm
+cargo scarlet run --release --project projects/aarch64-limine-crosvm --no-image
 ```
 
 `build.py`, `prepare-os.py` and `prepare-android.py` select their completed
@@ -47,8 +47,8 @@ it does not rebuild a second set of boot disks.
 For an isolated diagnostic run, `tools/run.py --kernel <ELF> --staging <tree>
 --output <directory>` can prepare a separate image pair. Supply
 `--gdb-socket /tmp/scarlet-crosvm-gdb.sock` there to debug. Kernel-only builds use
-`cargo scarlet build --project projects/aarch64-limine-crosvm`; the debug ELF is
-`bsp/target/aarch64-unknown-none-elf/debug/scarlet` under this project.
+`cargo scarlet build --release --project projects/aarch64-limine-crosvm`; the release ELF is
+`bsp/target/aarch64-unknown-none-elf/release/scarlet` under this project.
 
 `build.py --source /path/to/crosvm` reuses a clean checkout at the pinned
 revision, with its minijail submodule initialized. Otherwise it creates a new
@@ -60,7 +60,23 @@ is pinned, but Ubuntu packages are not a bit-for-bit toolchain snapshot.
 The native init mounts a private ext2 root disk and executes crosvm in Scarlet's
 Linux AArch64 environment. ext2 supplies mmap support for glibc and the guest
 image. QEMU uses TCG with EL2 virtualization enabled and a private firmware
-variable store. Host `/dev/kvm` is not required; normal boot bundles and root
+variable store by default. Select HVF explicitly on an Apple Silicon host
+with Hypervisor.framework EL2 support and QEMU 11.1:
+
+```sh
+SCARLET_QEMU_ACCEL=hvf SCARLET_CROSVM_SUCCESS_MARKER=SCARLET_CROSVM_LINUX_BLOCK_OK \
+  cargo scarlet run --release --project projects/aarch64-limine-crosvm --no-image
+```
+
+This example assumes the Linux block-check profile has been prepared and its
+images built. The private runner also accepts `--accel hvf`. It selects
+`-cpu host`, prefers the HVF firmware pair, and keeps `virtualization=on` and
+GICv3. Failure to initialize HVF is reported without a TCG fallback.
+The release Linux block-check image passes under TCG. Nested HVF execution
+remains unverified on the tested host; an EL2-capable firmware file alone does
+not make EL2 available through Hypervisor.framework. Treat the HVF command as
+a bring-up option, not a verified accelerated configuration.
+Host `/dev/kvm` is not required; normal boot bundles and root
 disk images are not modified.
 
 Outputs include `serial.log`, `result.json`, `commands.json`, boot/root disk
@@ -83,9 +99,9 @@ python3 projects/aarch64-limine-crosvm/tools/prepare-os.py \
   --output projects/aarch64-limine-crosvm/.scarlet/linux-verified \
   --image projects/aarch64-limine-crosvm/.scarlet/linux/guest/Image \
   --busybox projects/aarch64-limine-crosvm/.scarlet/linux/guest/busybox --block-check
-cargo scarlet image --project projects/aarch64-limine-crosvm
+cargo scarlet image --release --project projects/aarch64-limine-crosvm
 SCARLET_CROSVM_SUCCESS_MARKER=SCARLET_CROSVM_LINUX_BLOCK_OK \
-  cargo scarlet run --project projects/aarch64-limine-crosvm --no-image
+  cargo scarlet run --release --project projects/aarch64-limine-crosvm --no-image
 ```
 
 `build-linux-guest.sh` verifies the kernel tarball SHA-256 and records the
@@ -140,32 +156,157 @@ and retain its bundled notices. Preparation verifies the published SHA-1
 ```sh
 python3 projects/aarch64-limine-crosvm/tools/prepare-android.py \
   --sdk-zip /path/to/arm64-v8a-35_r02.zip --output projects/aarch64-limine-crosvm/.scarlet/android
-cargo scarlet image --project projects/aarch64-limine-crosvm
-SCARLET_CROSVM_TIMEOUT=360 SCARLET_CROSVM_SUCCESS_MARKER=SCARLET_ANDROID_BOOT_OK \
-  cargo scarlet run --project projects/aarch64-limine-crosvm --no-image
+cargo scarlet image --release --project projects/aarch64-limine-crosvm
+SCARLET_CROSVM_TIMEOUT=900 SCARLET_CROSVM_SUCCESS_MARKER=SCARLET_ANDROID_BOOT_OK \
+  cargo scarlet run --release --project projects/aarch64-limine-crosvm --no-image
 ```
 
-Preparation needs Python `lz4` and `mkfs.ext4`. Use a new output directory;
+Preparation needs Python `lz4`, `mkfs.ext4` and `debugfs`. Use a new output directory;
 the script refuses to recreate existing Android writable disks. It decompresses
 the kernel and concatenated legacy-LZ4 ramdisk, adjusts the metadata/data device
-paths for the four virtio disks, creates private writable metadata/userdata
-disks, and attaches the SDK system/vendor GPT images read-only. The boot-device
+paths in both the first-stage ramdisk and vendor's second-stage fstab for the
+four virtio disks (`/metadata` on `vdc`, `/data` on `vdd`), creates private writable
+metadata/userdata disks, and attaches the system/vendor GPT images read-only.
+The vendor fstab is patched in both `vendor.img` and the logical vendor inside
+`system.img`'s super partition. Only extracted copies are patched; fstab size,
+inode metadata and SELinux labels are preserved. Writable ext4 disks disable `orphan_file` for
+compatibility with Android's bundled e2fsprogs 1.46.6. Existing profiles need
+preparing again in a new directory, followed by image generation. The boot-device
 property names crosvm's `10000.pci` controller so Android can create partition
-symlinks. Logging uses virtio-console (`hvc0`), with MMIO UART early output.
-The fixture uses permissive SELinux for bring-up.
+symlinks. Kernel/console logging uses virtio-console (`hvc0`), with MMIO UART early
+output. A second virtio-console (`hvc1`) carries ranchu's `goldfish-logcat` output
+to the same host stdout/`serial.log`; it is not the kernel console and has no stdin.
+`androidboot.logcat=*:E` supplies the required `ro.boot.logcat` service argument;
+without it, Android init aborts argument expansion before executing logcat.
+Logcat forwards error/fatal messages from the main, system and crash buffers;
+kernel messages already arrive via `hvc0` and are not replayed on `hvc1`.
+The kernel uses `loglevel=4` without
+`ignore_loglevel`, keeping boot-info and permissive audit noise off the console
+so crash diagnostics are not delayed behind the boot log replay. SELinux remains
+permissive; this changes console verbosity, not access policy.
+Android is configured with 2 GiB RAM. The outer Scarlet runner defaults to 8 GiB; override it with
+`SCARLET_QEMU_MEMORY` or `run.py --memory`.
 
-**There is no Android boot-success marker yet.** The command deliberately will
-not report PASS merely because Android init starts or crosvm exits successfully
-after a guest reset. Inspect `serial.log` for the actual milestone and failure.
-The fixture has reached mounted system/vendor partitions, second-stage init,
-ueventd and completed apexd-bootstrap, activating runtime, i18n and tzdata APEX
-packages. On the observed nested TCG run, APEX bootstrap alone took about 152
-seconds. This does not establish Android boot completion. The SDK graphics/services assumptions still need adaptation; no Android UI has
-been demonstrated. The large SDK files are not installed into experimental.
+The fixture disables the Ranchu sensors sub-HAL by leaving its `hals.conf`
+empty: no sensor host transport is attached, so the multi-HAL should report zero
+sensors instead of aborting in the Ranchu library constructor. Use
+`--ranchu-sensors` only when providing that transport. Both vendor copies are
+patched, retaining their inode sizes and SELinux labels.
+
+`fixtures/android-diagnostics.rc` adds periodic service states, `/data` usage
+and DRM device names to `hvc1`. `SCARLET_ANDROID_BOOT_OK` is emitted only when
+Android sets `sys.boot_completed=1`. Reaching init or the console shell does not
+count as success. The boot-completion property also does not validate visible
+UI output or input delivery. Existing profiles need updating to gain this
+diagnostic service. Inspect `serial.log` for the actual milestone and failure.
+For manual runs, set `SCARLET_CROSVM_TIMEOUT=0` (or `run.py --timeout 0`) to
+disable the time limit and stop with Ctrl-C. Panic/failure detection and success
+markers still end the run; only the elapsed-time cutoff is disabled.
+The Android 15 fixture has reached second-stage init, activated APEX packages,
+and mounted writable userdata through device-mapper. Use a release Scarlet
+kernel; nested TCG boot remains slow. With the GPU option, the guest exposes
+`/dev/dri/card0` and `renderD128`, but SurfaceFlinger still aborts with
+`EGL_NOT_INITIALIZED`: the SDK's Ranchu graphics stack expects an OpenGL ES host
+service that this fixture does not provide. Full Android boot and UI output
+remain unverified. Use the separate Cuttlefish software-renderer profile below
+to avoid this dependency. Large SDK files stay in local build artifacts.
+
+An interrupted first boot can also produce `/data/data` encryption-policy
+mismatch messages on the next run. Android 15 vold has a recovery path for an
+empty directory left with the previous unsaved CE key. This message alone is
+not evidence that the whole userdata disk needs formatting. Preserve metadata
+and userdata together when copying a profile; do not regenerate either over
+an existing run's state.
+
+## Cuttlefish guest software renderer (experimental)
+
+`tools/prepare-cuttlefish.py` prepares a separate Android 17 profile using
+guest ANGLE, SwiftShader (`vulkan.pastel`), minigbm and the Ranchu composer in
+client-composition mode. This uses the Cuttlefish HALs bundled together in
+[build 16373615, aosp_cf_arm64_only_phone-userdebug](https://ci.android.com/builds/submitted/16373615/aosp_cf_arm64_only_phone-userdebug/latest).
+Download `aosp_cf_arm64_only_phone-img-16373615.zip` from that build. Its published
+MD5 is `46f44b3494d54d64c39af2df619f9df3`; preparation pins SHA-256
+`051caf8072ba9fb417e05999de2984752e44e13ce70b6c49c669f0a73db85c18`.
+This is a different image from the Android 15 SDK fixture above.
+
+Supply an existing **GPU-enabled** crosvm staging tree, for example from
+`build.py --gpu --output projects/aarch64-limine-crosvm/.scarlet/base-gpu`.
+Preparation requires
+Python `lz4`, `mkfs.ext4` and the Scarlet toolchain, but no Docker or privileged
+mounts. It refuses an existing output directory and leaves `.scarlet/active`
+unchanged (`prepare-os.py --no-activate` is also available independently).
+
+```sh
+python3 projects/aarch64-limine-crosvm/tools/prepare-cuttlefish.py \
+  --image-zip /path/to/aosp_cf_arm64_only_phone-img-16373615.zip \
+  --base-staging projects/aarch64-limine-crosvm/.scarlet/base-gpu/staging \
+  --output projects/aarch64-limine-crosvm/.scarlet/cuttlefish-swiftshader
+python3 projects/aarch64-limine-crosvm/tools/run.py \
+  --kernel projects/aarch64-limine-crosvm/bsp/target/aarch64-unknown-none-elf/release/scarlet \
+  --staging projects/aarch64-limine-crosvm/.scarlet/cuttlefish-swiftshader/staging \
+  --output projects/aarch64-limine-crosvm/.scarlet/cuttlefish-run \
+  --memory 8G --timeout 1800 --success-marker SCARLET_ANDROID_BOOT_OK
+```
+
+The guest has 2 GiB RAM, one vCPU and an 800×600 virtio-gpu 2D display. Fresh
+userdata is 1536 MiB, metadata is 64 MiB, and misc is 4 MiB. Preserve the writable
+GPT disk as one unit. Unused tail capacity is trimmed from the original 8 GiB
+super image, updating device/group sizes and SHA-256 checksums in all six LP
+metadata copies. Logical partition extents remain unchanged. Scarlet's current
+ext2 inode-size handling cannot serve the original 8 GiB file. Each staged disk is below 2 GiB to
+avoid the `mke2fs -d` copy overflow in the development environment's e2fsprogs
+1.47.3. Boot/init_boot/vendor_boot partitions are included for first-stage init.
+
+The first-stage fstab mounts logical partitions without AVB. SELinux is permissive.
+Two uncompressed vendor init-file payloads and the sensors sub-HAL list are
+patched at their original lengths, retaining EROFS metadata and SELinux labels.
+Sensors report an empty list. Bluetooth, UWB, Thread, NFC, lights, the modem/RIL
+and remote OEM-lock APEXes are excluded along with their VINTF declarations because no corresponding host
+control services are attached. The ramdisk includes a
+Linux bootconfig trailer and explicitly selects local KeyMint/Gatekeeper,
+camera and composer APEX implementations. This is a bring-up fixture, not a
+verified-boot image or a complete replacement for `launch_cvd`. The compact,
+read-only system disk is not suitable for OTA updates.
+
+`hvc0` carries the kernel/console, `hvc1` periodic framework service state and
+the real `sys.boot_completed=1` marker, and `hvc2` main/system/crash errors.
+Diagnostics also query the SurfaceFlinger GLES renderer. The completion hook
+attempts a PNG screen capture, encoded as base64 between `SCARLET_FRAME_BEGIN`
+and `SCARLET_FRAME_END`; a boot marker alone does not certify that capture.
+Timestamped Android Rust HAL `panicked at` records do not count as a kernel panic in the runner;
+Scarlet/Linux kernel panic markers still stop it. The outer
+QEMU remains headless; the crosvm stub display does **not** present frames in an
+SWS window. Framework boot, guest rendering and visible presentation are
+separate milestones. Use `--timeout 0` for a manual unlimited run. For subsequent
+runs, reuse the generated `boot.img` and `rootfs.ext2` with `--boot-image` and
+`--rootfs-image` instead of rebuilding them and resetting guest disk state.
+
+Host format/parser and panic-classification checks:
+`python3 -m unittest discover -s projects/aarch64-limine-crosvm/tests -v`.
+
+Release/TCG verification reached a stable SurfaceFlinger GLES context reporting
+**ANGLE / Vulkan 1.3.0 / SwiftShader Device (LLVM 16.0.0), OpenGL ES 3.1**.
+An uninterrupted normal TCG run also started SystemServer, but did not reach
+`sys.boot_completed=1` within 900 seconds. Android framework boot and a valid
+screen capture remain unverified. Earlier clock jumps occurred while the host
+was asleep and do not establish a Scarlet timer defect.
 
 ## Display integration
 
-The current crosvm binary has no GPU feature. A proposed accelerated path is:
+The default crosvm build has no GPU feature. `build.py --gpu` enables upstream's
+basic virtio-gpu 2D feature and exports its Wayland library dependencies. Pair
+that staging tree with `prepare-android.py --gpu-2d --base-staging <tree>` (or
+`prepare-os.py --gpu backend=2d,width=800,height=600`). This is an experimental
+guest DRM device using crosvm's stub display when no display server is attached;
+it supplies neither Android's GLES renderer nor an SWS window. Scarlet supports
+the duplicated epoll descriptors and nested readiness needed by this backend.
+
+A release/TCG run with the fix reached `/dev/dri/card0` and `renderD128`, and
+the sensor service remained running without the Ranchu transport abort. It
+still hit the SurfaceFlinger EGL abort described above; a 2D DRM device does
+not implement the SDK's OpenGL ES host service.
+
+A proposed accelerated path is:
 
 ```text
 Android guest GPU driver -> virtio-gpu -> gfxstream in crosvm
@@ -191,7 +332,7 @@ Guest OpenGL ES also needs a compatible path, such as guest ANGLE translating
 GLES to Vulkan; selecting host Vulkan does not automatically translate every
 guest graphics API.
 
-## Positional I/O and socket regression
+## Linux ABI regression probes
 
 `fixtures/positional-io.c` is an AArch64 Linux ABI integration probe. Compile it dynamically
 with the Docker builder's glibc and install it as `usr/bin/crosvm` in a **private
@@ -228,6 +369,9 @@ Do not replace the installed crosvm binary with this probe.
   `MSG_PEEK | MSG_TRUNC` reports the full next-record length for crosvm Tube.
 - `preadv`/`pwritev` provide bounded gather/scatter I/O without moving the shared
   file position, enabling crosvm's virtio-block disk backend.
+- Epoll descriptors can be duplicated with shared registration state and
+  independent descriptor flags. Nested epoll readiness supports crosvm's GPU
+  display wait context; self-registration and cycles are rejected.
 
 References: [Linux KVM API](https://docs.kernel.org/virt/kvm/api.html),
 [signalfd](https://man7.org/linux/man-pages/man2/signalfd.2.html), and

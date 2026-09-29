@@ -22,12 +22,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-staging", type=Path, default=PROJECT / ".scarlet/base/staging")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--no-activate", action="store_true",
+                        help="prepare a private profile without changing the project's active profile")
     parser.add_argument("--image", type=Path, required=True)
     ramdisk = parser.add_mutually_exclusive_group(required=True)
     ramdisk.add_argument("--initrd", type=Path)
     ramdisk.add_argument("--busybox", type=Path, help="static AArch64 BusyBox for the Linux fixture")
     parser.add_argument("--mem", type=int, default=512)
     parser.add_argument("--serial", action="append", help="crosvm serial configuration; may repeat")
+    parser.add_argument("--gpu", help="experimental crosvm GPU parameters; needs a GPU-enabled binary")
     parser.add_argument("--params", default="earlycon=uart8250,mmio,0x3f8 console=ttyS0 rdinit=/init nokaslr loglevel=7 panic=-1")
     parser.add_argument("--disk", type=Path, action="append", default=[], help="copy a writable guest disk; may repeat")
     parser.add_argument("--read-only-disk", type=Path, action="append", default=[],
@@ -86,6 +89,8 @@ def main():
         command += ["--serial", serial]
     for name, readonly in disk_names:
         command += ["--block", f"path=/guest/{name},ro={str(readonly).lower()},lock=false"]
+    if args.gpu:
+        command += ["--gpu", args.gpu]
     command += ["/guest/Image"]
     (output / "crosvm.args").write_text("\n".join(command) + "\n")
     environment = dict(os.environ, SCARLET_CROSVM_ARGS="\n".join(command))
@@ -98,7 +103,8 @@ def main():
         "busybox": str(args.busybox.resolve()) if args.busybox else None,
         "disks": [{"path": str(p.resolve()), "readonly": ro} for p, ro in disks],
         "argv": command}, indent=2) + "\n")
-    smoke.activate_profile(output)
+    if not args.no_activate:
+        smoke.activate_profile(output)
     print(staging)
 
 

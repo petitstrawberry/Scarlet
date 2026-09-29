@@ -1,0 +1,21 @@
+on early-init
+    setprop ro.sf.lcd_density 160
+    setprop ro.hardware.egl angle
+    setprop ro.hardware.gralloc minigbm
+    setprop ro.hardware.hwcomposer ranchu
+    setprop ro.vendor.hwcomposer.display_finder_mode drm
+    setprop ro.vendor.hwcomposer.display_framebuffer_format rgba
+    setprop ro.vendor.hwcomposer.mode client
+    setprop ro.hardware.vulkan pastel
+    setprop ro.cpuvulkan.version 4206592
+    setprop ro.opengles.version 196609
+    setprop debug.hwui.renderer skiagl
+    setprop ro.zygote.disable_gl_preload true
+
+service scarlet-status /system/bin/sh -c "exec >/dev/hvc1 2>&1; while true; do echo SCARLET_ANDROID_STATUS; getprop sys.boot_completed; getprop init.svc.surfaceflinger; getprop init.svc.zygote; ps -A -o PID,NAME,WCHAN|grep system_server; dumpsys SurfaceFlinger | grep GLES; sleep 60; done"
+    class main
+    user root
+    seclabel u:r:shell:s0
+
+on property:sys.boot_completed=1
+    exec_background u:r:shell:s0 root root -- /system/bin/sh -c "exec >/dev/hvc1 2>&1; dumpsys SurfaceFlinger | grep GLES; echo SCARLET_FRAME_BEGIN; screencap -p | base64; echo SCARLET_FRAME_END; echo SCARLET_ANDROID_BOOT_OK"
