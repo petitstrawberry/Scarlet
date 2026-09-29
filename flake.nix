@@ -12,7 +12,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     scarlet-rust-toolchain.url = "github:petitstrawberry/scarlet-rust-nix";
     scarlet-sdk = {
-      url = "github:petitstrawberry/scarlet-sdk/1676d5fd0f0143bfd71f8044141135bb7d8a5bb1";
+      url = "github:petitstrawberry/scarlet-sdk/7d908ba0c6e675b7d3ec25eadde1bda95a2d581f";
       flake = false;
     };
     macvdmtool-src = {
@@ -110,6 +110,13 @@
             src = scarlet-sdk;
             buildAndTestSubdir = "cargo-scarlet";
             cargoLock.lockFile = "${scarlet-sdk}/Cargo.lock";
+            nativeCheckInputs = [
+              pkgs.git
+              pkgs.curl
+              pkgs.coreutils
+              pkgs.e2fsprogs
+              pkgs.mtools
+            ];
           };
 
           cargo-scarlet-plugin-limine = pkgs.rustPlatform.buildRustPackage {
