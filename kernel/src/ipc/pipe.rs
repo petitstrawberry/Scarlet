@@ -168,74 +168,27 @@ impl PipeEndpoint {
 
 impl StreamOps for PipeEndpoint {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
-        if !self.can_read {
-            return Err(StreamError::NotSupported);
-        }
-
-        loop {
-            let mut state = self.data.state.lock();
-
-            if state.closed {
-                return Err(StreamError::Closed);
+        self.read_with_wait(buffer, || {
+            let task = crate::task::mytask().ok_or(StreamError::WouldBlock)?;
+            let outcome = self.data.read_waker.wait_with_condition(
+                task.get_id(),
+                task.get_trapframe(),
+                None,
+                0,
+                || {
+                    let state = self.data.state.lock();
+                    state.closed
+                        || state.writer_count == 0
+                        || !state.buffer.is_empty()
+                        || self.nonblocking.load(Ordering::Relaxed)
+                },
+            );
+            if outcome == WaitResult::Interrupted {
+                Err(StreamError::Interrupted)
+            } else {
+                Ok(())
             }
-
-            if state.buffer.is_empty() {
-                if state.writer_count == 0 {
-                    // No writers left, return EOF
-                    return Ok(0);
-                } else {
-                    // Writers exist but no data available - block until data becomes available
-                    // Block the current task using the pipe read waker
-                    use crate::task::mytask;
-                    if let Some(task) = mytask() {
-                        if self.nonblocking.load(core::sync::atomic::Ordering::Relaxed) {
-                            return Err(StreamError::WouldBlock);
-                        }
-                        // CRITICAL: Drop lock before wait() to avoid deadlock
-                        let task_id = task.get_id();
-                        let trapframe = task.get_trapframe();
-
-                        // Memory barrier BEFORE lock release to ensure all writes are visible
-                        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-                        drop(state);
-
-                        // Memory barrier AFTER lock release to ensure lock release is visible
-                        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-                        // Memory barrier BEFORE wait() to ensure wait() sees correct state
-                        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-                        // Call wait() without holding any locks
-                        self.data.read_waker.wait(task_id, trapframe);
-
-                        // Memory barrier AFTER wait() to ensure subsequent operations are visible
-                        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-                        // Loop back to retry read after waking up
-                        continue;
-                    } else {
-                        // No current task context, return WouldBlock for non-blocking fallback
-                        return Err(StreamError::WouldBlock);
-                    }
-                }
-            }
-
-            let bytes_to_read = buffer.len().min(state.buffer.len());
-            for i in 0..bytes_to_read {
-                buffer[i] = state.buffer.pop_front().unwrap();
-            }
-
-            // Release lock before waking writers
-            drop(state);
-
-            // Data was consumed, wake up any waiting writers
-            if bytes_to_read > 0 {
-                self.data.write_waker.wake_all();
-            }
-
-            return Ok(bytes_to_read);
-        }
+        })
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
@@ -264,6 +217,46 @@ impl StreamOps for PipeEndpoint {
 }
 
 impl PipeEndpoint {
+    /// Read available bytes once. Register/recheck in the waiter so data or
+    /// peer closure between inspection and sleep cannot strand the reader.
+    /// Interruption must escape this loop to reach ABI signal dispatch.
+    fn read_with_wait(
+        &self,
+        buffer: &mut [u8],
+        mut wait: impl FnMut() -> Result<(), StreamError>,
+    ) -> Result<usize, StreamError> {
+        if !self.can_read {
+            return Err(StreamError::NotSupported);
+        }
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let mut state = self.data.state.lock();
+            if state.closed {
+                return Err(StreamError::Closed);
+            }
+            if state.buffer.is_empty() {
+                if state.writer_count == 0 {
+                    return Ok(0);
+                }
+                if self.nonblocking.load(Ordering::Relaxed) {
+                    return Err(StreamError::WouldBlock);
+                }
+                drop(state);
+                wait()?;
+                continue;
+            }
+            let amount = buffer.len().min(state.buffer.len());
+            for byte in &mut buffer[..amount] {
+                *byte = state.buffer.pop_front().unwrap();
+            }
+            drop(state);
+            self.data.write_waker.wake_all();
+            return Ok(amount);
+        }
+    }
+
     /// Complete a blocking write across reader wakeups. The waiter rechecks
     /// capacity after registering, so a concurrent read cannot lose the wakeup.
     fn write_with_wait(
@@ -827,6 +820,52 @@ mod tests {
             4096
         );
         assert!(matches!(writer.write(&[9]), Err(StreamError::BrokenPipe)));
+    }
+
+    #[test_case]
+    fn blocking_pipe_read_propagates_interrupt_and_handles_peer_changes() {
+        let (reader, writer) = UnidirectionalPipe::create_pair_raw(4096);
+        let mut buffer = [0u8; 16];
+        let mut waits = 0;
+        assert!(matches!(
+            reader.endpoint.read_with_wait(&mut buffer, || {
+                waits += 1;
+                Err(StreamError::Interrupted)
+            }),
+            Err(StreamError::Interrupted)
+        ));
+        assert_eq!(waits, 1);
+        assert_eq!(
+            reader
+                .endpoint
+                .read_with_wait(&mut [], || panic!("zero read waited"))
+                .unwrap(),
+            0
+        );
+        // A producer becoming ready during the wait is retried, then the read
+        // returns available data without trying to fill the entire buffer.
+        assert_eq!(
+            reader
+                .endpoint
+                .read_with_wait(&mut buffer, || {
+                    writer.write(b"ready")?;
+                    Ok(())
+                })
+                .unwrap(),
+            5
+        );
+        assert_eq!(&buffer[..5], b"ready");
+        let mut writer = Some(writer);
+        assert_eq!(
+            reader
+                .endpoint
+                .read_with_wait(&mut buffer, || {
+                    drop(writer.take());
+                    Ok(())
+                })
+                .unwrap(),
+            0
+        );
     }
 
     #[test_case]
