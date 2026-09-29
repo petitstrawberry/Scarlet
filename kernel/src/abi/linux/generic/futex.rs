@@ -352,14 +352,14 @@ pub(crate) fn remove_task_waiter(task_id: usize) {
 ///
 /// # Arguments
 ///
-/// * `_abi` - Linux ABI state for the calling task.
+/// * `abi` - Linux ABI state for the calling task.
 /// * `trapframe` - Register state containing the Linux futex arguments.
 ///
 /// # Returns
 ///
 /// Zero after a successful wait, the number of woken tasks after a wake, or a
 /// negative Linux errno encoded as `usize`.
-pub fn sys_futex(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_futex(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match crate::task::mytask() {
         Some(t) => t,
         None => return super::errno::to_result(super::errno::EPERM),
@@ -424,16 +424,24 @@ pub fn sys_futex(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 if cur_val != val {
                     Some(super::errno::EAGAIN)
                 } else {
-                    task.set_state(crate::task::TaskState::Blocked(
-                        crate::task::BlockedType::Interruptible,
-                    ));
-                    crate::sched::scheduler::mark_blocked(tid);
-                    waiters.push_back(FutexWaiter {
-                        task_id: tid,
-                        bitset: wait_bitset,
-                        outcome: outcome.clone(),
-                    });
-                    None
+                    // Event delivery checks Blocked while holding this same
+                    // lock. A queued Ctrl-C must prevent sleeping; one arriving
+                    // after registration must see an interruptible waiter.
+                    let events = task.event_queue.lock();
+                    if events.has_pending_process_control() || abi.has_pending_signals() {
+                        Some(super::errno::EINTR)
+                    } else {
+                        task.set_state(crate::task::TaskState::Blocked(
+                            crate::task::BlockedType::Interruptible,
+                        ));
+                        crate::sched::scheduler::mark_blocked(tid);
+                        waiters.push_back(FutexWaiter {
+                            task_id: tid,
+                            bitset: wait_bitset,
+                            outcome: outcome.clone(),
+                        });
+                        None
+                    }
                 }
             };
             if let Some(error) = wait_error {
@@ -512,6 +520,60 @@ pub fn sys_futex(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn futex_wait_with_queued_interrupt_does_not_sleep_or_leave_a_waiter() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::ipc::event::{Event, ProcessControlType};
+        use crate::library::std::usercopy::copy_to_user;
+        use crate::task::{Task, TaskType, clear_mock_current_task, set_mock_current_task};
+
+        let task = Arc::new(Task::new("futex-interrupt".into(), 0, TaskType::User));
+        let address = USER_STACK_END - PAGE_SIZE;
+        task.allocate_stack_pages(address, 1).unwrap();
+        copy_to_user(&task, address, &7i32.to_ne_bytes()).unwrap();
+        set_mock_current_task(task.clone());
+        let mut abi = LinuxAbi::default();
+        let mut frame = Trapframe::new();
+        for pending_event in [true, false] {
+            if pending_event {
+                task.event_queue
+                    .lock()
+                    .enqueue(Event::immediate_process_control(
+                        task.get_id() as u32,
+                        ProcessControlType::Interrupt,
+                    ));
+            } else {
+                task.event_queue.lock().dequeue();
+                abi.signal_state
+                    .lock()
+                    .add_pending(super::super::signal::LinuxSignal::SIGINT);
+            }
+            for op in [FUTEX_WAIT, FUTEX_WAIT_BITSET] {
+                frame.set_arg(0, address);
+                frame.set_arg(1, (op | FUTEX_PRIVATE_FLAG) as usize);
+                frame.set_arg(2, 7);
+                frame.set_arg(3, 0); // Infinite wait: must return for the signal.
+                frame.set_arg(5, FUTEX_BITSET_MATCH_ANY as usize);
+                assert_eq!(
+                    sys_futex(&mut abi, &mut frame),
+                    super::super::errno::to_result(super::super::errno::EINTR)
+                );
+                assert_eq!(wake_task_address(&task, address, 1), 0);
+                assert!(!matches!(
+                    task.get_state(),
+                    crate::task::TaskState::Blocked(_)
+                ));
+                // A mismatched futex value still takes precedence over EINTR.
+                frame.set_arg(2, 8);
+                assert_eq!(
+                    sys_futex(&mut abi, &mut frame),
+                    super::super::errno::to_result(super::super::errno::EAGAIN)
+                );
+            }
+        }
+        clear_mock_current_task();
+    }
 
     #[test_case]
     fn private_futex_keys_are_isolated_by_thread_group() {
