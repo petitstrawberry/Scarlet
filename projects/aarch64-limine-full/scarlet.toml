@@ -34,7 +34,7 @@ output = ".scarlet/images/rootfs-aarch64-full.ext2"
 
 [[images.rootfs.layers]]
 kind = "bundle"
-path = "../../bundles/full-alpine/bundle.toml"
+path = "../../bundles/full-debian/bundle.toml"
 
 [[images.rootfs.layers]]
 kind = "copy"
