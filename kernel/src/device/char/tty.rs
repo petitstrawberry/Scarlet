@@ -1439,7 +1439,9 @@ impl TtyDevice {
             self.send_process_control_to_current_group(
                 crate::ipc::event::ProcessControlType::TerminalInput,
             );
-            return Ok(0);
+            // The signal must be handled before retrying; zero means EOF to
+            // callers such as shells and would make them exit instead.
+            return Err(StreamError::Interrupted);
         }
 
         // Fast path: non-blocking immediate return if policy requires 0 and no data
@@ -1491,7 +1493,12 @@ impl TtyDevice {
                     )
                 };
                 if has_newline {
-                    return Ok(copy_out(buffer, true));
+                    let count = copy_out(buffer, true);
+                    if count != 0 {
+                        return Ok(count);
+                    }
+                    // A competing reader consumed the record after the check.
+                    continue;
                 }
                 if has_eof {
                     self.canonical_eof_ready.store(false, Ordering::Relaxed);
@@ -1509,7 +1516,7 @@ impl TtyDevice {
                 }
                 // Wait for more input
                 if self.nonblocking.load(Ordering::Relaxed) {
-                    return Ok(0); // non-blocking: no data yet
+                    return Err(StreamError::WouldBlock);
                 }
                 if let Some(task) = mytask() {
                     if self
@@ -1520,8 +1527,7 @@ impl TtyDevice {
                         return Err(StreamError::Interrupted);
                     }
                 } else {
-                    // No task context; return nothing
-                    return Ok(0);
+                    return Err(StreamError::WouldBlock);
                 }
             }
         }
@@ -1562,7 +1568,7 @@ impl TtyDevice {
                 };
                 if need_pair && !have_pair {
                     if self.nonblocking.load(Ordering::Relaxed) {
-                        return Ok(0);
+                        return Err(StreamError::WouldBlock);
                     }
                     if let Some(task) = mytask() {
                         if self
@@ -1574,7 +1580,7 @@ impl TtyDevice {
                         }
                         continue;
                     } else {
-                        return Ok(0);
+                        return Err(StreamError::WouldBlock);
                     }
                 }
             }
@@ -1597,11 +1603,15 @@ impl TtyDevice {
                     }
                     drop(guard);
                 }
-                return Ok(copy_out(buffer, false));
+                let count = copy_out(buffer, false);
+                if count != 0 {
+                    return Ok(count);
+                }
+                continue;
             }
             // Not enough yet; block until new input arrives
             if self.nonblocking.load(Ordering::Relaxed) {
-                return Ok(0);
+                return Err(StreamError::WouldBlock);
             }
             if let Some(task) = mytask() {
                 if self
@@ -1612,7 +1622,7 @@ impl TtyDevice {
                     return Err(StreamError::Interrupted);
                 }
             } else {
-                return Ok(0);
+                return Err(StreamError::WouldBlock);
             }
         }
     }
@@ -1860,6 +1870,33 @@ mod tests {
     }
 
     #[test_case]
+    fn empty_nonblocking_tty_is_not_eof() {
+        let tty = test_tty();
+        tty.nonblocking.store(true, Ordering::Relaxed);
+        let mut buffer = [0u8; 1];
+        for canonical in [true, false] {
+            tty.set_canonical(canonical);
+            assert!(matches!(
+                tty.try_read(&mut buffer),
+                Err(StreamError::WouldBlock)
+            ));
+        }
+
+        // VMIN=0 explicitly permits a zero-byte raw read.
+        tty.read_min_ready_bytes.store(0, Ordering::Relaxed);
+        assert!(matches!(tty.try_read(&mut buffer), Ok(0)));
+
+        // A real canonical EOF must still be reported as EOF.
+        tty.set_canonical(true);
+        tty.handle_input_byte(tty.get_control_chars().eof);
+        assert!(matches!(tty.try_read(&mut buffer), Ok(0)));
+        assert!(matches!(
+            tty.try_read(&mut buffer),
+            Err(StreamError::WouldBlock)
+        ));
+    }
+
+    #[test_case]
     fn test_tty_crnl_input_can_be_disabled() {
         let tty = test_tty();
         tty.set_canonical(false);
@@ -1958,6 +1995,43 @@ mod tests {
 
         set_current_task_for_test(local_cpu, None);
         task.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        drop(task);
+        reset();
+    }
+
+    #[test_case]
+    fn background_tty_read_is_interrupted_and_foreground_can_resume() {
+        reset();
+        let cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+        let task = Task::new("tty-background-reader".to_string(), 1, TaskType::Kernel);
+        task.init();
+        let id = add_task(task, cpu);
+        let task = get_task_by_id(id).unwrap();
+        task.set_state(TaskState::Running);
+        task.running_cpu.store(cpu, Ordering::SeqCst);
+        set_current_task_for_test(cpu, Some(id));
+        remove_from_ready_queues(id);
+
+        let tty = Arc::new(test_tty());
+        tty.set_self_ref(Arc::downgrade(&tty));
+        task.set_controlling_tty(Some(Arc::downgrade(&tty)));
+        tty.set_canonical(false);
+        tty.set_foreground_task_group_id(id + 1);
+        let mut buffer = [0u8; 1];
+        assert!(matches!(
+            tty.try_read(&mut buffer),
+            Err(StreamError::Interrupted)
+        ));
+
+        tty.set_foreground_task_group_id(task.get_process_group_id());
+        tty.handle_input_byte(b'x');
+        assert!(matches!(tty.try_read(&mut buffer), Ok(1)));
+        assert_eq!(buffer[0], b'x');
+
+        set_current_task_for_test(cpu, None);
+        task.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        task.clear_controlling_tty();
         drop(task);
         reset();
     }

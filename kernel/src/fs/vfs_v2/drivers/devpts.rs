@@ -60,6 +60,16 @@ pub struct DevPtsFS {
 }
 
 impl DevPtsFS {
+    /// Find this filesystem's slave number by terminal identity, not by a
+    /// process's current stdin or a number from another DevPTS mount.
+    pub fn slave_number_for_tty(&self, tty: &Arc<TtyDevice>) -> Option<usize> {
+        self.state
+            .pairs
+            .read()
+            .iter()
+            .find_map(|(&number, pair)| Arc::ptr_eq(&pair.slave(), tty).then_some(number))
+    }
+
     /// Create a new DevPTS filesystem instance.
     ///
     /// # Returns

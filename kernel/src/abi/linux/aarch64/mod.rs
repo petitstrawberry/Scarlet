@@ -103,11 +103,12 @@ impl AbiModule for LinuxAarch64Abi {
             generic::dispatch_common_syscall(&mut self.0, trapframe, syscall_number)
         {
             generic::signal::deliver_pending_signals(&mut self.0);
-            return Ok(result);
+            return Ok(signal::deliver_pending_handler(&self.0, trapframe, result));
         }
 
         if let Some(result) = signal::dispatch_arch_syscall(self, trapframe, syscall_number) {
-            return Ok(result);
+            generic::signal::deliver_pending_signals(&mut self.0);
+            return Ok(signal::deliver_pending_handler(&self.0, trapframe, result));
         }
 
         crate::println!("Invalid Syscall number: {}", syscall_number);

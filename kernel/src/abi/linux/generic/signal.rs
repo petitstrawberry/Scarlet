@@ -226,6 +226,7 @@ impl SignalMask {
 pub struct SignalState {
     /// Signal handlers (signal number -> handler action)
     pub handlers: BTreeMap<LinuxSignal, SignalAction>,
+    actions: BTreeMap<LinuxSignal, Sigaction>,
     /// Blocked signals mask
     pub blocked: SignalMask,
     /// Pending signals that are blocked
@@ -255,6 +256,7 @@ impl Default for SignalState {
 
         Self {
             handlers,
+            actions: BTreeMap::new(),
             blocked: SignalMask::new(),
             pending: SignalMask::new(),
             pending_waker: Arc::new(crate::sync::waker::Waker::new_interruptible("linux_signal")),
@@ -272,6 +274,29 @@ impl SignalState {
         // SIGKILL and SIGSTOP cannot be caught or ignored
         if signal != LinuxSignal::SIGKILL && signal != LinuxSignal::SIGSTOP {
             self.handlers.insert(signal, action);
+            self.actions.remove(&signal);
+        }
+    }
+
+    pub fn get_sigaction(&self, signal: LinuxSignal) -> Sigaction {
+        self.actions
+            .get(&signal)
+            .copied()
+            .unwrap_or_else(|| sigaction_to_linux(self.get_handler(signal)))
+    }
+
+    fn install_sigaction(&mut self, signal: LinuxSignal, action: Sigaction) {
+        self.set_handler(signal, linux_to_sigaction(action, signal));
+        self.actions.insert(signal, action);
+    }
+
+    pub(crate) fn reset_caught_handlers(&mut self) {
+        for number in 1..=64 {
+            if let Some(signal) = LinuxSignal::from_u32(number) {
+                if matches!(self.get_handler(signal), SignalAction::Custom(_)) {
+                    self.set_handler(signal, signal.default_action());
+                }
+            }
         }
     }
 
@@ -321,6 +346,9 @@ pub struct Sigaction {
     pub handler: usize,
     /// Signal flags
     pub flags: u64,
+    /// AArch64's kernel sigaction includes a restorer slot; RISC-V does not.
+    #[cfg(target_arch = "aarch64")]
+    pub restorer: usize,
     /// Signal mask to apply during handler execution
     pub mask: u64,
 }
@@ -345,6 +373,9 @@ pub fn sys_sigaltstack(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     const SS_ONSTACK: u32 = 1;
     const SS_DISABLE: u32 = 2;
     const SS_AUTODISARM: u32 = 1 << 31;
+    #[cfg(target_arch = "aarch64")]
+    const MINSIGSTKSZ: usize = 5120;
+    #[cfg(not(target_arch = "aarch64"))]
     const MINSIGSTKSZ: usize = 2048;
 
     let task = match mytask() {
@@ -413,55 +444,46 @@ pub fn sys_sigaltstack(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 ///
 /// int rt_sigaction(int signum, const struct sigaction *act, struct sigaction *oldact, size_t sigsetsize);
 pub fn sys_rt_sigaction(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    use crate::library::std::usercopy::{copy_from_user, copy_to_user};
     let task = mytask().unwrap();
-
     let signum = trapframe.get_arg(0) as u32;
     let act_ptr = trapframe.get_arg(1);
     let oldact_ptr = trapframe.get_arg(2);
-    let _sigsetsize = trapframe.get_arg(3);
-
-    // Convert signal number to LinuxSignal
-    let signal = match LinuxSignal::from_u32(signum) {
-        Some(sig) => sig,
-        None => {
-            trapframe.set_return_value(!0usize); // -1 (EINVAL)
-            trapframe.increment_pc_next(&task);
-            return !0usize;
-        }
-    };
-
-    let mut signal_state = abi.signal_state.lock();
-
-    // Get old action if requested
-    if oldact_ptr != 0 {
-        let Some(paddr) = task.vm_manager.translate_to_kva(oldact_ptr) else {
-            // Invalid user pointer for oldact: return EFAULT
-            trapframe.set_return_value(!0usize);
-            trapframe.increment_pc_next(&task);
-            return !0usize; // -EFAULT
-        };
-        let old_action = signal_state.get_handler(signal);
-        let old_sigaction = sigaction_to_linux(old_action);
-        unsafe {
-            core::ptr::write(paddr as *mut Sigaction, old_sigaction);
-        }
-    }
-
-    // Set new action if provided
-    if act_ptr != 0 {
-        let Some(paddr) = task.vm_manager.translate_to_kva(act_ptr) else {
-            // Invalid user pointer for act: return EFAULT
-            trapframe.set_return_value(!0usize);
-            trapframe.increment_pc_next(&task);
-            return !0usize; // -EFAULT
-        };
-        let new_sigaction = unsafe { core::ptr::read(paddr as *const Sigaction) };
-        let new_action = linux_to_sigaction(new_sigaction, signal);
-        signal_state.set_handler(signal, new_action);
-    }
-
-    trapframe.set_return_value(0);
+    let sigsetsize = trapframe.get_arg(3);
     trapframe.increment_pc_next(&task);
+    let Some(signal) = LinuxSignal::from_u32(signum) else {
+        return errno::to_result(errno::EINVAL);
+    };
+    if sigsetsize != 8
+        || (act_ptr != 0 && matches!(signal, LinuxSignal::SIGKILL | LinuxSignal::SIGSTOP))
+    {
+        return errno::to_result(errno::EINVAL);
+    }
+    let new_action = if act_ptr != 0 {
+        let mut bytes = [0u8; core::mem::size_of::<Sigaction>()];
+        if copy_from_user(&task, act_ptr, &mut bytes).is_err() {
+            return errno::to_result(errno::EFAULT);
+        }
+        // All fields are integers; the copied buffer need not be aligned.
+        Some(unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<Sigaction>()) })
+    } else {
+        None
+    };
+    if oldact_ptr != 0 {
+        let old = abi.signal_state.lock().get_sigaction(signal);
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                (&old as *const Sigaction).cast::<u8>(),
+                core::mem::size_of::<Sigaction>(),
+            )
+        };
+        if copy_to_user(&task, oldact_ptr, bytes).is_err() {
+            return errno::to_result(errno::EFAULT);
+        }
+    }
+    if let Some(action) = new_action {
+        abi.signal_state.lock().install_sigaction(signal, action);
+    }
     0
 }
 
@@ -471,16 +493,22 @@ fn sigaction_to_linux(action: SignalAction) -> Sigaction {
         SignalAction::Ignore => Sigaction {
             handler: SIG_IGN,
             flags: 0,
+            #[cfg(target_arch = "aarch64")]
+            restorer: 0,
             mask: 0,
         },
         SignalAction::Custom(addr) => Sigaction {
             handler: addr,
             flags: 0,
+            #[cfg(target_arch = "aarch64")]
+            restorer: 0,
             mask: 0,
         },
         _ => Sigaction {
             handler: SIG_DFL,
             flags: 0,
+            #[cfg(target_arch = "aarch64")]
+            restorer: 0,
             mask: 0,
         },
     }
@@ -499,70 +527,41 @@ fn linux_to_sigaction(sigaction: Sigaction, signal: LinuxSignal) -> SignalAction
 ///
 /// int rt_sigprocmask(int how, const sigset_t *set, sigset_t *oldset, size_t sigsetsize);
 pub fn sys_rt_sigprocmask(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    use crate::library::std::usercopy::{copy_from_user, copy_to_user};
     let task = mytask().unwrap();
-
     let how = trapframe.get_arg(0);
     let set_ptr = trapframe.get_arg(1);
     let oldset_ptr = trapframe.get_arg(2);
-    let _sigsetsize = trapframe.get_arg(3);
-
-    let mut signal_state = abi.signal_state.lock();
-
-    // Save old mask if requested
-    if oldset_ptr != 0 {
-        let Some(paddr) = task.vm_manager.translate_to_kva(oldset_ptr) else {
-            // Invalid user pointer for oldset: return EFAULT
-            trapframe.set_return_value(!0usize);
-            trapframe.increment_pc_next(&task);
-            return !0usize; // -EFAULT
-        };
-        let old_mask = signal_state.blocked.raw();
-        unsafe {
-            core::ptr::write(paddr as *mut u64, old_mask);
-        }
-    }
-
-    // Modify mask if new set is provided
-    if set_ptr != 0 {
-        let Some(paddr) = task.vm_manager.translate_to_kva(set_ptr) else {
-            // Some compatibility workloads install signal masks while their
-            // userspace stack is being reshaped. Keep this permissive until the
-            // Linux ABI has copy_from_user semantics that can distinguish short
-            // reads from genuinely invalid pointers.
-            trapframe.set_return_value(0);
-            trapframe.increment_pc_next(&task);
-            return 0;
-        };
-        let new_mask = unsafe { core::ptr::read(paddr as *const u64) };
-        let mut new_signal_mask = SignalMask::new();
-        new_signal_mask.set_raw(new_mask);
-
-        // SIG_BLOCK = 0, SIG_UNBLOCK = 1, SIG_SETMASK = 2
-        match how {
-            0 => {
-                // SIG_BLOCK: Add new_mask to current blocked signals
-                let current = signal_state.blocked.raw();
-                signal_state.blocked.set_raw(current | new_mask);
-            }
-            1 => {
-                // SIG_UNBLOCK: Remove new_mask from current blocked signals
-                let current = signal_state.blocked.raw();
-                signal_state.blocked.set_raw(current & !new_mask);
-            }
-            2 => {
-                // SIG_SETMASK: Replace blocked signals with new_mask
-                signal_state.blocked = new_signal_mask;
-            }
-            _ => {
-                trapframe.set_return_value(!0usize); // -1 (EINVAL)
-                trapframe.increment_pc_next(&task);
-                return !0usize;
-            }
-        }
-    }
-
-    trapframe.set_return_value(0);
+    let sigsetsize = trapframe.get_arg(3);
     trapframe.increment_pc_next(&task);
+    if sigsetsize != 8 || (set_ptr != 0 && how > 2) {
+        return errno::to_result(errno::EINVAL);
+    }
+    // Read first: set and oldset may point to the same userspace object.
+    let new_mask = if set_ptr != 0 {
+        let mut bytes = [0u8; 8];
+        if copy_from_user(&task, set_ptr, &mut bytes).is_err() {
+            return errno::to_result(errno::EFAULT);
+        }
+        Some(u64::from_ne_bytes(bytes))
+    } else {
+        None
+    };
+    let old_mask = abi.signal_state.lock().blocked.raw();
+    // This must break COW after fork instead of writing the shared physical page.
+    if oldset_ptr != 0 && copy_to_user(&task, oldset_ptr, &old_mask.to_ne_bytes()).is_err() {
+        return errno::to_result(errno::EFAULT);
+    }
+    if let Some(new_mask) = new_mask {
+        let mask = match how {
+            0 => old_mask | new_mask,
+            1 => old_mask & !new_mask,
+            _ => new_mask,
+        };
+        let unmaskable = (1u64 << (LinuxSignal::SIGKILL as u32 - 1))
+            | (1u64 << (LinuxSignal::SIGSTOP as u32 - 1));
+        abi.signal_state.lock().blocked.set_raw(mask & !unmaskable);
+    }
     0
 }
 
@@ -613,7 +612,13 @@ pub fn handle_event_for_task(
     abi: &LinuxAbi,
     event: &Event,
     target_task_id: usize,
-    setup_signal_handler: fn(&mut Trapframe, usize, LinuxSignal),
+    setup_signal_handler: impl Fn(
+        &LinuxAbi,
+        &Task,
+        &mut Trapframe,
+        usize,
+        LinuxSignal,
+    ) -> Result<(), &'static str>,
 ) -> Result<EventProcessOutcome, &'static str> {
     let Some(signal) = handle_event_to_signal(event) else {
         return Ok(EventProcessOutcome::Continue);
@@ -644,8 +649,13 @@ pub fn handle_event_for_task(
     let outcome = match action {
         SignalAction::Custom(handler_addr) => {
             let trapframe = target_task.get_trapframe();
-            setup_signal_handler(trapframe, handler_addr, signal);
-            EventProcessOutcome::UserHandlerArmed
+            match setup_signal_handler(abi, &target_task, trapframe, handler_addr, signal) {
+                Ok(()) => EventProcessOutcome::UserHandlerArmed,
+                Err(error) => {
+                    crate::println!("[linux] signal frame failed: {}", error);
+                    EventProcessOutcome::Exited(128 + LinuxSignal::SIGSEGV as i32)
+                }
+            }
         }
         SignalAction::Ignore => EventProcessOutcome::Continue,
         SignalAction::ForceTerminate | SignalAction::Terminate => {
@@ -1022,6 +1032,39 @@ pub fn deliver_pending_signals(abi: &mut LinuxAbi) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn sigaction_keeps_flags_mask_and_fork_dispositions_separate() {
+        let mut parent = SignalState::new();
+        let action = Sigaction {
+            handler: 0x400000,
+            flags: 0x14000000,
+            #[cfg(target_arch = "aarch64")]
+            restorer: 0x410000,
+            mask: 0x102,
+        };
+        parent.install_sigaction(LinuxSignal::SIGINT, action);
+        let saved = parent.get_sigaction(LinuxSignal::SIGINT);
+        assert_eq!(saved.flags, action.flags);
+        assert_eq!(saved.mask, action.mask);
+        #[cfg(target_arch = "aarch64")]
+        {
+            assert_eq!(core::mem::size_of::<Sigaction>(), 32);
+            assert_eq!(core::mem::offset_of!(Sigaction, mask), 24);
+            assert_eq!(saved.restorer, action.restorer);
+        }
+        let mut child = parent.clone();
+        child.reset_caught_handlers();
+        assert_eq!(
+            child.get_handler(LinuxSignal::SIGINT),
+            LinuxSignal::SIGINT.default_action()
+        );
+        assert_eq!(child.get_sigaction(LinuxSignal::SIGINT).flags, 0);
+        assert_eq!(
+            parent.get_handler(LinuxSignal::SIGINT),
+            SignalAction::Custom(action.handler)
+        );
+    }
 
     #[test_case]
     fn test_sigstop_default_action_stops() {

@@ -37,6 +37,13 @@ enum EditorAction {
     HistoryNext, // Down arrow
 }
 
+#[derive(Debug)]
+pub enum ReadLineError {
+    Interrupted,
+    EndOfInput,
+    Io(std::io::Error),
+}
+
 /// Line editor with cursor support
 pub struct LineEditor {
     buffer: Vec<char>,
@@ -81,6 +88,10 @@ impl LineEditor {
 
         if let Some(ref handle) = self.stdin_handle {
             let terminal = Terminal::from_handle(handle);
+
+            if terminal.set_nonblocking(false).is_err() {
+                return Err(());
+            }
 
             if terminal.set_canonical(!enabled).is_err() {
                 return Err(());
@@ -127,7 +138,7 @@ impl LineEditor {
     }
 
     /// Read a line from the user
-    pub fn read_line(&mut self) -> Result<String, ()> {
+    pub fn read_line(&mut self) -> Result<String, ReadLineError> {
         // Clear buffer and reset cursor
         self.buffer.clear();
         self.cursor = 0;
@@ -160,7 +171,7 @@ impl LineEditor {
                     // Ctrl-C
                     print!("^C\n");
                     self.buffer.clear();
-                    return Err(());
+                    return Err(ReadLineError::Interrupted);
                 }
                 EditorAction::HistoryPrev | EditorAction::HistoryNext => {
                     // History navigation (handled externally)
@@ -174,7 +185,7 @@ impl LineEditor {
     pub fn read_line_with_history(
         &mut self,
         history: &mut crate::history::History,
-    ) -> Result<String, ()> {
+    ) -> Result<String, ReadLineError> {
         // Clear buffer and reset cursor
         self.buffer.clear();
         self.cursor = 0;
@@ -212,7 +223,7 @@ impl LineEditor {
                     print!("^C\n");
                     self.buffer.clear();
                     history.reset_navigation();
-                    return Err(());
+                    return Err(ReadLineError::Interrupted);
                 }
                 EditorAction::HistoryPrev => {
                     // Navigate to previous history entry
@@ -428,14 +439,14 @@ impl LineEditor {
         }
     }
 
-    fn read_input_byte(&self) -> Result<u8, ()> {
+    fn read_input_byte(&self) -> Result<u8, ReadLineError> {
         let mut buf = [0u8; 1];
         loop {
             match std::io::stdin().read(&mut buf) {
                 Ok(bytes_read) if bytes_read > 0 => return Ok(buf[0]),
-                Ok(_) => return Err(()),
+                Ok(_) => return Err(ReadLineError::EndOfInput),
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => return Err(()),
+                Err(error) => return Err(ReadLineError::Io(error)),
             }
         }
     }

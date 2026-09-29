@@ -397,6 +397,7 @@ fn execute_script_content(content: &str) -> i32 {
 fn restore_canonical_mode() {
     if let Ok(stdin_handle) = unsafe { Handle::from_raw(0) } {
         let terminal = Terminal::from_handle(&stdin_handle);
+        let _ = terminal.set_nonblocking(false);
         let _ = terminal.set_canonical(true);
         let _ = terminal.set_echo(true);
         let _ = terminal.set_signal_chars_enabled(true);
@@ -408,6 +409,9 @@ fn restore_canonical_mode() {
 fn restore_raw_mode() {
     if let Ok(stdin_handle) = unsafe { Handle::from_raw(0) } {
         let terminal = Terminal::from_handle(&stdin_handle);
+        // Children can change the shared stream's O_NONBLOCK state. The
+        // line editor requires a blocking read even when VMIN is restored.
+        let _ = terminal.set_nonblocking(false);
         let _ = terminal.set_canonical(false);
         let _ = terminal.set_echo(false);
         let _ = terminal.set_signal_chars_enabled(false);
@@ -893,16 +897,18 @@ fn interactive_shell() -> i32 {
         println!("Warning: Failed to enable raw mode, falling back to canonical mode");
     }
 
-    loop {
+    let exit_status = loop {
         // Clean up completed background jobs before showing prompt
         cleanup_jobs();
 
         // Read a line with history support
         let input = match editor.read_line_with_history(&mut history) {
             Ok(line) => line,
-            Err(_) => {
-                // Ctrl-C or error
-                continue;
+            Err(line_editor::ReadLineError::Interrupted) => continue,
+            Err(line_editor::ReadLineError::EndOfInput) => break 0,
+            Err(line_editor::ReadLineError::Io(error)) => {
+                println!("\nsh: stdin read failed: {}", error);
+                break 1;
             }
         };
 
@@ -932,14 +938,10 @@ fn interactive_shell() -> i32 {
 
         // Save history after each command
         let _ = history.save_to_file(&history_file);
-    }
+    };
 
-    // Save history before exiting (unreachable in practice due to exit command)
-    #[allow(unreachable_code)]
-    {
-        let _ = history.save_to_file(&history_file);
-        0
-    }
+    let _ = history.save_to_file(&history_file);
+    exit_status
 }
 
 fn print_motd() {

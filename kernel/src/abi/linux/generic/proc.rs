@@ -1653,7 +1653,13 @@ pub fn sys_waitid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     return 0;
                 }
 
-                get_parent_waitpid_waker(task.get_id()).wait_owned(task.get_id(), trapframe);
+                if get_parent_waitpid_waker(task.get_id())
+                    .wait_result_owned(task.get_id(), trapframe)
+                    == crate::sync::waker::WaitResult::Interrupted
+                {
+                    trapframe.increment_pc_next(&task);
+                    return errno::to_result(errno::EINTR);
+                }
             }
             P_PID => {
                 if id == 0 {
@@ -1696,7 +1702,12 @@ pub fn sys_waitid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     return 0;
                 }
 
-                get_waitpid_waker(child_pid).wait_owned(task.get_id(), trapframe);
+                if get_waitpid_waker(child_pid).wait_result_owned(task.get_id(), trapframe)
+                    == crate::sync::waker::WaitResult::Interrupted
+                {
+                    trapframe.increment_pc_next(&task);
+                    return errno::to_result(errno::EINTR);
+                }
             }
             _ => {
                 trapframe.increment_pc_next(&task);

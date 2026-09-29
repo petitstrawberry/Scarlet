@@ -114,6 +114,8 @@ pub struct LinuxAbi {
     pub thread_state: LinuxThreadState,
     posix_timers: Arc<IrqSpinLock<PosixTimerTable>>,
     pub(crate) umask: u32,
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) signal_restorer: Arc<IrqSpinLock<Option<usize>>>,
 }
 
 impl Default for LinuxAbi {
@@ -127,6 +129,8 @@ impl Default for LinuxAbi {
             thread_state: LinuxThreadState::default(),
             posix_timers: Arc::new(IrqSpinLock::new(PosixTimerTable::new())),
             umask: 0o022,
+            #[cfg(target_arch = "aarch64")]
+            signal_restorer: Arc::new(IrqSpinLock::new(None)),
         }
     }
 }
@@ -141,8 +145,14 @@ impl LinuxAbi {
         // fork inherits dispositions and the mask, but no pending signals or
         // waiters. Threads retain Scarlet's existing shared signal model.
         state.pending = signal::SignalMask::new();
-        state.pending_waker = Arc::new(crate::sync::waker::Waker::new_interruptible("linux_signal"));
+        state.pending_waker =
+            Arc::new(crate::sync::waker::Waker::new_interruptible("linux_signal"));
         self.signal_state = Arc::new(IrqSpinLock::new(state));
+        #[cfg(target_arch = "aarch64")]
+        {
+            let restorer = *self.signal_restorer.lock();
+            self.signal_restorer = Arc::new(IrqSpinLock::new(restorer));
+        }
     }
 
     /// Prepare an independent fd table without closing any handle in the caller.
@@ -150,11 +160,7 @@ impl LinuxAbi {
         if let Some(source) = source {
             self.umask = source.umask;
             let mut signals = source.signal_state.lock().clone();
-            for (signal, action) in signals.handlers.iter_mut() {
-                if matches!(action, signal::SignalAction::Custom(_)) {
-                    *action = signal.default_action();
-                }
-            }
+            signals.reset_caught_handlers();
             self.signal_state = Arc::new(IrqSpinLock::new(signals));
         }
         let mut table = source

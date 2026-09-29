@@ -86,7 +86,10 @@ impl AbiModule for LinuxRiscv64Abi {
             &self.0,
             &event,
             target_task_id,
-            signal::setup_signal_handler,
+            |_abi, _task, frame, handler, signal_number| {
+                signal::setup_signal_handler(frame, handler, signal_number);
+                Ok(())
+            },
         )
     }
 

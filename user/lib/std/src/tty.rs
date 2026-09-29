@@ -218,6 +218,14 @@ impl<'a> Terminal<'a> {
         self.control(SCTL_TTY_SET_WINSIZE, size.pack()).map(|_| ())
     }
 
+    /// Set the underlying stream's nonblocking mode.
+    /// This is separate from the terminal's VMIN-style read policy.
+    pub fn set_nonblocking(&self, enabled: bool) -> Result<()> {
+        const HCTL_SET_NONBLOCKING: u32 = 0x5353_0007;
+        self.control(HCTL_SET_NONBLOCKING, enabled as usize)
+            .map(|_| ())
+    }
+
     /// Return all native terminal settings.
     ///
     /// # Returns

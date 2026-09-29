@@ -3,6 +3,7 @@
 //! This module maps Linux ioctls (e.g., termios/keyboard subset) onto Scarlet
 //! TTY control ops exposed via ControlOps on Device-backed file objects.
 
+use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use alloc::sync::Arc;
 
 use crate::device::char::tty::{
@@ -232,17 +233,23 @@ pub fn handle_ioctl(
                     let vtime_tenths = core::cmp::min(((timeout_ms as u32 + 99) / 100) as usize, 255) as u8;
                     t.c_cc[VTIME] = vtime_tenths;
                     let task = mytask().ok_or(())?;
-                    let vaddr = arg as usize;
-                    if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
-                        unsafe { core::ptr::write(paddr as *mut LinuxTermios, t); }
-                        Ok(Some(0))
-                    } else { Err(()) }
+                    // LinuxTermios has no padding (four u32s and twenty bytes).
+                    // Use usercopy so a child's ioctl cannot overwrite a COW
+                    // page still shared with bash after fork.
+                    let bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            (&t as *const LinuxTermios).cast::<u8>(),
+                            core::mem::size_of::<LinuxTermios>(),
+                        )
+                    };
+                    copy_to_user(&task, arg, bytes).map_err(|_| ())?;
+                    Ok(Some(0))
                 }
                 _ => {
                     let task = mytask().ok_or(())?;
-                    let vaddr = arg as usize;
-                    if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
-                        let t = unsafe { core::ptr::read(paddr as *const LinuxTermios) };
+                    let mut bytes = [0u8; core::mem::size_of::<LinuxTermios>()];
+                    if copy_from_user(&task, arg, &mut bytes).is_ok() {
+                        let t = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<LinuxTermios>()) };
                         let icrnl_new = (t.c_iflag & IFLAG_ICRNL) != 0;
                         let opost_new = (t.c_oflag & OFLAG_OPOST) != 0;
                         let isig_new = (t.c_lflag & LFLAG_ISIG) != 0;
@@ -352,25 +359,11 @@ pub fn handle_ioctl(
         }
         TIOCSPGRP => {
             let task = mytask().ok_or(())?;
-            let vaddr = arg as usize;
-            if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
-                let pgid = unsafe { *(paddr as *const i32) };
+            if let Ok(pgid) = read_user_i32(arg) {
                 if pgid <= 0 {
                     return Err(());
                 }
-                let global_pgid =
-                    resolve_foreground_pgid_for_task(&task, pgid as usize).ok_or(())?;
-                with_tty_device(kernel_object, |tty| {
-                    if !task_controls_tty(&task, tty) {
-                        return Err(());
-                    }
-                    if tty.get_controlling_session_id() != Some(task.get_session_id()) {
-                        return Err(());
-                    }
-                    tty.set_foreground_task_group_id(global_pgid);
-                    Ok(())
-                })
-                .ok_or(())??;
+                set_foreground_pgid_for_task(&task, kernel_object, pgid as usize)?;
                 Ok(Some(0))
             } else {
                 Ok(Some((-14_isize) as usize))
@@ -953,23 +946,14 @@ fn with_tty_device<R>(kernel_object: &KernelObject, f: impl FnOnce(&TtyDevice) -
 
 fn write_user_i32(vaddr: usize, value: i32) -> Result<(), ()> {
     let task = mytask().ok_or(())?;
-    if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
-        unsafe {
-            *(paddr as *mut i32) = value;
-        }
-        Ok(())
-    } else {
-        Err(())
-    }
+    copy_to_user(&task, vaddr, &value.to_ne_bytes()).map_err(|_| ())
 }
 
 fn read_user_i32(vaddr: usize) -> Result<i32, ()> {
     let task = mytask().ok_or(())?;
-    if let Some(paddr) = task.vm_manager.translate_to_kva(vaddr) {
-        Ok(unsafe { *(paddr as *const i32) })
-    } else {
-        Err(())
-    }
+    let mut bytes = [0u8; 4];
+    copy_from_user(&task, vaddr, &mut bytes).map_err(|_| ())?;
+    Ok(i32::from_ne_bytes(bytes))
 }
 
 fn task_controls_tty(task: &crate::task::Task, tty: &TtyDevice) -> bool {
@@ -982,6 +966,33 @@ fn task_controls_tty(task: &crate::task::Task, tty: &TtyDevice) -> bool {
     Arc::ptr_eq(&current_tty, &this_tty)
 }
 
+/// Resolve /dev/tty to the calling process's actual controlling terminal.
+/// A PTY must not silently turn into the console at /dev/tty0.
+pub fn controlling_tty_path(
+    task: &crate::task::Task,
+    vfs: &crate::fs::vfs_v2::manager::VfsManager,
+) -> Option<alloc::string::String> {
+    let tty = task.get_controlling_tty()?;
+    let device: Arc<dyn crate::device::Device> = tty.clone();
+    for (name, _, candidate) in DeviceManager::get_manager().get_named_devices_with_ids() {
+        if Arc::ptr_eq(&device, &candidate) {
+            return Some(alloc::format!("/dev/{}", name));
+        }
+    }
+    let (entry, _) = vfs.resolve_path("/dev/pts").ok()?;
+    let filesystem = entry.node().filesystem()?.upgrade()?;
+    let devpts = filesystem
+        .as_any()
+        .downcast_ref::<crate::fs::vfs_v2::drivers::devpts::DevPtsFS>()?;
+    let number = devpts.slave_number_for_tty(&tty)?;
+    Some(alloc::format!("/dev/pts/{}", number))
+}
+
+/// Recheck identity after opening, including possible PTY number reuse.
+pub fn is_controlling_tty_object(task: &crate::task::Task, object: &KernelObject) -> bool {
+    with_tty_device(object, |tty| task_controls_tty(task, tty)).unwrap_or(false)
+}
+
 fn resolve_foreground_pgid_for_task(task: &crate::task::Task, user_pgid: usize) -> Option<usize> {
     let global_task_id = task.get_namespace().resolve_global_id(user_pgid)?;
     let group_leader = crate::sched::scheduler::get_task_by_id(global_task_id)?;
@@ -992,6 +1003,24 @@ fn resolve_foreground_pgid_for_task(task: &crate::task::Task, user_pgid: usize) 
         return None;
     }
     Some(global_task_id)
+}
+
+fn set_foreground_pgid_for_task(
+    task: &crate::task::Task,
+    object: &KernelObject,
+    user_pgid: usize,
+) -> Result<(), ()> {
+    let global_pgid = resolve_foreground_pgid_for_task(task, user_pgid).ok_or(())?;
+    with_tty_device(object, |tty| {
+        if !task_controls_tty(task, tty)
+            || tty.get_controlling_session_id() != Some(task.get_session_id())
+        {
+            return Err(());
+        }
+        tty.set_foreground_task_group_id(global_pgid);
+        Ok(())
+    })
+    .ok_or(())?
 }
 
 pub fn try_auto_acquire_controlling_tty(kernel_object: &KernelObject) {
@@ -1060,6 +1089,98 @@ mod tests {
         let slave = devpts.open(&slave_node, 0).unwrap();
 
         (KernelObject::File(master), KernelObject::File(slave))
+    }
+
+    #[test_case]
+    fn tcsetpgrp_requires_inherited_login_controlling_terminal() {
+        use crate::sched::scheduler::{add_task, get_task_by_id, register_online_cpu, reset};
+        use crate::task::{Task, TaskType};
+
+        reset();
+        let cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+        let register = |name: &str| {
+            let task = Task::new(name.into(), 1, TaskType::Kernel);
+            task.init();
+            let id = add_task(task, cpu);
+            get_task_by_id(id).unwrap()
+        };
+        let login = register("login-session");
+        let shell = register("bash-session");
+        let job = register("foreground-job");
+        shell.set_session_id(login.get_session_id());
+        job.set_session_id(login.get_session_id());
+        let (_master, slave) = devpts_master_slave_objects();
+        let tty = devpts_file_object(&slave).unwrap().tty_device().unwrap();
+        tty.set_foreground_task_group_id(shell.get_process_group_id());
+        let job_pgid = shell
+            .get_namespace()
+            .resolve_local_id(job.get_id())
+            .unwrap();
+
+        // Merely passing a TTY as stdio leaves tcsetpgrp unable to transfer
+        // foreground ownership; Ctrl-C continues targeting the parent shell.
+        assert!(set_foreground_pgid_for_task(&shell, &slave, job_pgid).is_err());
+        assert_eq!(tty.get_foreground_task_group_id(), Some(shell.get_id()));
+
+        // Login acquires it first; fork inherits both SID and this association.
+        login.set_controlling_tty(Some(Arc::downgrade(&tty)));
+        tty.set_controlling_session_id(login.get_session_id());
+        shell.set_controlling_tty(login.get_controlling_tty().as_ref().map(Arc::downgrade));
+        assert!(set_foreground_pgid_for_task(&shell, &slave, job_pgid).is_ok());
+        assert_eq!(tty.get_foreground_task_group_id(), Some(job.get_id()));
+
+        // A foreground handoff must still reject a different session.
+        job.set_session_id(login.get_session_id() + 1000);
+        assert!(set_foreground_pgid_for_task(&shell, &slave, job_pgid).is_err());
+        drop(job);
+        drop(shell);
+        drop(login);
+        reset();
+    }
+
+    #[test_case]
+    fn dev_tty_resolves_controlling_pty_without_standard_fds() {
+        let vfs = crate::fs::VfsManager::new();
+        vfs.create_dir("/dev").unwrap();
+        vfs.create_dir("/dev/pts").unwrap();
+        let devpts = DevPtsFS::new();
+        vfs.mount(devpts.clone(), "/dev/pts", 0).unwrap();
+        let root = devpts.root_node();
+        let ptmx = devpts.lookup(&root, &"ptmx".to_string()).unwrap();
+        let first = devpts.open(&ptmx, 0).unwrap();
+        let second = devpts.open(&ptmx, 0).unwrap();
+        let first = first.as_any().downcast_ref::<DevPtsFileObject>().unwrap();
+        let second = second.as_any().downcast_ref::<DevPtsFileObject>().unwrap();
+        second.set_pty_slave_locked(false);
+        let terminal = second.connected_tty_device();
+        let task = crate::task::new_user_task("dev-tty-test".into(), 1);
+        task.set_controlling_tty(Some(Arc::downgrade(&terminal)));
+        assert!(task.handle_table.active_handles().is_empty());
+
+        let path = controlling_tty_path(&task, &vfs).unwrap();
+        assert_eq!(path, "/dev/pts/1");
+        let opened = vfs.open(&path, 2).unwrap();
+        assert!(is_controlling_tty_object(&task, &opened));
+        first
+            .connected_tty_device()
+            .set_foreground_task_group_id(111);
+        with_tty_device(&opened, |tty| tty.set_foreground_task_group_id(222)).unwrap();
+        assert_eq!(terminal.get_foreground_task_group_id(), Some(222));
+        assert_eq!(
+            first.connected_tty_device().get_foreground_task_group_id(),
+            Some(111)
+        );
+
+        // The same slave number in a different DevPTS mount is not this tty.
+        let foreign = DevPtsFS::new();
+        let foreign_root = foreign.root_node();
+        let foreign_ptmx = foreign.lookup(&foreign_root, &"ptmx".to_string()).unwrap();
+        let _foreign_first = foreign.open(&foreign_ptmx, 0).unwrap();
+        let _foreign_second = foreign.open(&foreign_ptmx, 0).unwrap();
+        assert_eq!(foreign.slave_number_for_tty(&terminal), None);
+        task.clear_controlling_tty();
+        assert!(controlling_tty_path(&task, &vfs).is_none());
     }
 
     #[test_case]
