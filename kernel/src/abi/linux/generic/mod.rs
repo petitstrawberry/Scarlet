@@ -82,6 +82,7 @@ pub struct LinuxThreadState {
     /// `/proc/<pid>` from describing the same process with different numbers.
     pub tgid: usize,
     pub pending_clone_is_thread: bool,
+    pub pending_clone_share_sighand: bool,
 }
 
 #[derive(Clone)]
@@ -141,12 +142,13 @@ impl LinuxAbi {
     }
 
     pub(crate) fn fork_signal_state(&mut self) {
-        let mut state = self.signal_state.lock().clone();
-        // fork inherits dispositions and the mask, but no pending signals or
-        // waiters. Threads retain Scarlet's existing shared signal model.
-        state.pending = signal::SignalMask::new();
-        state.pending_waker =
-            Arc::new(crate::sync::waker::Waker::new_interruptible("linux_signal"));
+        self.clone_signal_state(false);
+    }
+
+    pub(crate) fn clone_signal_state(&mut self, share_handlers: bool) {
+        // Every child inherits a mask value, never the parent's mutable mask
+        // or pending queue. CLONE_SIGHAND shares only the disposition table.
+        let state = self.signal_state.lock().clone_for_child(share_handlers);
         self.signal_state = Arc::new(IrqSpinLock::new(state));
         #[cfg(target_arch = "aarch64")]
         {

@@ -104,6 +104,12 @@ impl AbiModule for LinuxRiscv64Abi {
         }
         if !_flags.is_set(crate::task::CloneFlagsDef::Thread) {
             self.0.reset_posix_timers();
+        }
+        if self.0.thread_state.pending_clone_share_sighand
+            || _flags.is_set(crate::task::CloneFlagsDef::Thread)
+        {
+            self.0.clone_signal_state(true);
+        } else {
             self.0.fork_signal_state();
         }
         self.0.bind_task_signals(_child_task);
@@ -128,6 +134,7 @@ impl AbiModule for LinuxRiscv64Abi {
         };
 
         ts.pending_clone_is_thread = false;
+        ts.pending_clone_share_sighand = false;
         self.0.thread_state = ts;
         _child_task.set_linux_clear_child_tid(clear_child_tid);
         Ok(())

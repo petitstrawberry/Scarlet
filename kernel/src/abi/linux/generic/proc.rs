@@ -1157,6 +1157,13 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let tls = trapframe.get_arg(3); //a3 (TLS)
     let child_tid_ptr = trapframe.get_arg(4) as *mut i32; // a4
 
+    if ((flags & CLONE_SIGHAND) != 0 && (flags & CLONE_VM) == 0)
+        || ((flags & CLONE_THREAD) != 0 && (flags & CLONE_SIGHAND) == 0)
+    {
+        trapframe.increment_pc_next(&parent_task);
+        return errno::to_result(errno::EINVAL);
+    }
+
     let parent_tid_opt = (!parent_tid_ptr.is_null()).then_some(parent_tid_ptr as usize);
     let child_tid_opt = (!child_tid_ptr.is_null()).then_some(child_tid_ptr as usize);
     let previous_clear_child_tid = abi.thread_state().clear_child_tid_ptr;
@@ -1177,8 +1184,6 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     const CLONE_FS: usize = 0x00000200;
     const CLONE_FILES: usize = 0x00000400;
     const CLONE_VFORK: usize = 0x00004000;
-    // Thread-related flags (accepted but not fully implemented yet)
-    #[allow(dead_code)]
     const CLONE_SIGHAND: usize = 0x00000800;
     const CLONE_THREAD: usize = 0x00010000;
     #[allow(dead_code)]
@@ -1191,12 +1196,11 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     #[allow(dead_code)]
     const CLONE_CHILD_CLEARTID: usize = 0x00200000;
 
-    // Accept CLONE_THREAD/CLONE_SIGHAND for minimal thread support.
-    // Note: signal handler sharing and full thread group semantics are partial.
-    // Stash CLONE_THREAD intent so on_task_cloned can initialize child's TGID.
+    // Carry Linux sharing semantics through the architecture clone hook.
     {
         let state = abi.thread_state_mut();
         state.pending_clone_is_thread = (flags & CLONE_THREAD) != 0;
+        state.pending_clone_share_sighand = (flags & CLONE_SIGHAND) != 0;
     }
 
     trapframe.increment_pc_next(&parent_task);
@@ -1262,6 +1266,7 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         error
                     );
                     abi.thread_state_mut().pending_clone_is_thread = false;
+                    abi.thread_state_mut().pending_clone_share_sighand = false;
                     abi.thread_state_mut().clear_child_tid_ptr = previous_clear_child_tid;
                     return usize::MAX;
                 }
@@ -1326,6 +1331,7 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Clear pending flag in parent after clone completes
     abi.thread_state_mut().pending_clone_is_thread = false;
+    abi.thread_state_mut().pending_clone_share_sighand = false;
     abi.thread_state_mut().clear_child_tid_ptr = previous_clear_child_tid;
     ret
 }

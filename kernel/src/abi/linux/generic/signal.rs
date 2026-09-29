@@ -221,12 +221,15 @@ impl SignalMask {
     }
 }
 
-/// Signal handler state for a task
 #[derive(Clone)]
-pub struct SignalState {
-    /// Signal handlers (signal number -> handler action)
-    pub handlers: BTreeMap<LinuxSignal, SignalAction>,
+struct SignalDispositions {
+    handlers: BTreeMap<LinuxSignal, SignalAction>,
     actions: BTreeMap<LinuxSignal, Sigaction>,
+}
+
+/// Per-thread mask and pending signals, with separately shareable dispositions.
+pub struct SignalState {
+    dispositions: Arc<crate::sync::IrqSpinLock<SignalDispositions>>,
     /// Blocked signals mask
     pub blocked: SignalMask,
     /// Pending signals that are blocked
@@ -234,10 +237,25 @@ pub struct SignalState {
     pub(crate) pending_waker: Arc<crate::sync::waker::Waker>,
 }
 
+// A snapshot (fork/exec) must not mutate the source's dispositions. Thread
+// creation explicitly opts into sharing them via clone_for_child().
+impl Clone for SignalState {
+    fn clone(&self) -> Self {
+        Self {
+            dispositions: Arc::new(crate::sync::IrqSpinLock::new(
+                self.dispositions.lock().clone(),
+            )),
+            blocked: self.blocked,
+            pending: self.pending,
+            pending_waker: self.pending_waker.clone(),
+        }
+    }
+}
+
 impl core::fmt::Debug for SignalState {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("SignalState")
-            .field("handlers", &self.handlers)
+            .field("handlers", &self.dispositions.lock().handlers)
             .field("blocked", &self.blocked)
             .field("pending", &self.pending)
             .finish()
@@ -255,8 +273,10 @@ impl Default for SignalState {
         }
 
         Self {
-            handlers,
-            actions: BTreeMap::new(),
+            dispositions: Arc::new(crate::sync::IrqSpinLock::new(SignalDispositions {
+                handlers,
+                actions: BTreeMap::new(),
+            })),
             blocked: SignalMask::new(),
             pending: SignalMask::new(),
             pending_waker: Arc::new(crate::sync::waker::Waker::new_interruptible("linux_signal")),
@@ -269,25 +289,57 @@ impl SignalState {
         Self::default()
     }
 
+    pub(crate) fn clone_for_child(&self, share_handlers: bool) -> Self {
+        let dispositions = if share_handlers {
+            self.dispositions.clone()
+        } else {
+            Arc::new(crate::sync::IrqSpinLock::new(
+                self.dispositions.lock().clone(),
+            ))
+        };
+        Self {
+            dispositions,
+            blocked: self.blocked,
+            pending: SignalMask::new(),
+            pending_waker: Arc::new(crate::sync::waker::Waker::new_interruptible("linux_signal")),
+        }
+    }
+
     /// Set signal handler
     pub fn set_handler(&mut self, signal: LinuxSignal, action: SignalAction) {
         // SIGKILL and SIGSTOP cannot be caught or ignored
         if signal != LinuxSignal::SIGKILL && signal != LinuxSignal::SIGSTOP {
-            self.handlers.insert(signal, action);
-            self.actions.remove(&signal);
+            let mut dispositions = self.dispositions.lock();
+            dispositions.handlers.insert(signal, action);
+            dispositions.actions.remove(&signal);
         }
     }
 
     pub fn get_sigaction(&self, signal: LinuxSignal) -> Sigaction {
-        self.actions
+        let dispositions = self.dispositions.lock();
+        dispositions
+            .actions
             .get(&signal)
             .copied()
-            .unwrap_or_else(|| sigaction_to_linux(self.get_handler(signal)))
+            .unwrap_or_else(|| {
+                sigaction_to_linux(
+                    dispositions
+                        .handlers
+                        .get(&signal)
+                        .copied()
+                        .unwrap_or(signal.default_action()),
+                )
+            })
     }
 
     fn install_sigaction(&mut self, signal: LinuxSignal, action: Sigaction) {
-        self.set_handler(signal, linux_to_sigaction(action, signal));
-        self.actions.insert(signal, action);
+        if !matches!(signal, LinuxSignal::SIGKILL | LinuxSignal::SIGSTOP) {
+            let mut dispositions = self.dispositions.lock();
+            dispositions
+                .handlers
+                .insert(signal, linux_to_sigaction(action, signal));
+            dispositions.actions.insert(signal, action);
+        }
     }
 
     pub(crate) fn reset_caught_handlers(&mut self) {
@@ -302,7 +354,9 @@ impl SignalState {
 
     /// Get signal handler
     pub fn get_handler(&self, signal: LinuxSignal) -> SignalAction {
-        self.handlers
+        self.dispositions
+            .lock()
+            .handlers
             .get(&signal)
             .copied()
             .unwrap_or(signal.default_action())
@@ -1032,6 +1086,79 @@ pub fn deliver_pending_signals(abi: &mut LinuxAbi) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn thread_server_call_masks_do_not_block_other_threads() {
+        let parent = LinuxAbi::default();
+        let action = Sigaction {
+            handler: 0x400000,
+            flags: 0x14000000,
+            #[cfg(target_arch = "aarch64")]
+            restorer: 0x410000,
+            mask: 1 << (LinuxSignal::SIGTERM as u32 - 1),
+        };
+        parent
+            .signal_state
+            .lock()
+            .install_sigaction(LinuxSignal::SIGINT, action);
+        parent
+            .signal_state
+            .lock()
+            .blocked
+            .block_signal(LinuxSignal::SIGCHLD);
+        parent.signal_state.lock().add_pending(LinuxSignal::SIGCHLD);
+        let mut worker = parent.clone();
+        worker.clone_signal_state(true);
+        {
+            let mut state = worker.signal_state.lock();
+            assert!(state.blocked.is_blocked(LinuxSignal::SIGCHLD));
+            assert!(!state.is_pending(LinuxSignal::SIGCHLD));
+            // Wine blocks SIGINT during a server call. Another thread must
+            // still be able to receive it while this worker awaits its reply.
+            state.blocked.block_signal(LinuxSignal::SIGINT);
+            state.add_pending(LinuxSignal::SIGINT);
+            assert_eq!(state.next_deliverable_signal(), None);
+        }
+        {
+            let mut state = parent.signal_state.lock();
+            assert!(!state.blocked.is_blocked(LinuxSignal::SIGINT));
+            assert!(!state.is_pending(LinuxSignal::SIGINT));
+            state.add_pending(LinuxSignal::SIGINT);
+            assert_eq!(state.next_deliverable_signal(), Some(LinuxSignal::SIGINT));
+            state.remove_pending(LinuxSignal::SIGINT);
+        }
+        assert!(worker.signal_state.lock().is_pending(LinuxSignal::SIGINT));
+        // Dispositions, including flags and handler masks, remain shared.
+        worker
+            .signal_state
+            .lock()
+            .install_sigaction(LinuxSignal::SIGTERM, action);
+        let shared = parent
+            .signal_state
+            .lock()
+            .get_sigaction(LinuxSignal::SIGTERM);
+        assert_eq!(shared.handler, action.handler);
+        assert_eq!(shared.flags, action.flags);
+        assert_eq!(shared.mask, action.mask);
+        let mut child = worker.clone();
+        child.fork_signal_state();
+        child
+            .signal_state
+            .lock()
+            .set_handler(LinuxSignal::SIGTERM, SignalAction::Ignore);
+        assert_eq!(
+            parent.signal_state.lock().get_handler(LinuxSignal::SIGTERM),
+            SignalAction::Custom(action.handler)
+        );
+        assert!(!child.signal_state.lock().is_pending(LinuxSignal::SIGINT));
+        assert!(
+            child
+                .signal_state
+                .lock()
+                .blocked
+                .is_blocked(LinuxSignal::SIGINT)
+        );
+    }
 
     #[test_case]
     fn sigaction_keeps_flags_mask_and_fork_dispositions_separate() {
