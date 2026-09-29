@@ -4,7 +4,15 @@
 //! providing file and directory objects that integrate with the VFS v2 architecture.
 
 use crate::sync::{IrqRwSpinLock, IrqSpinLock};
-use alloc::{boxed::Box, collections::BTreeMap, format, string::String, sync::Weak, vec, vec::Vec};
+use alloc::{
+    boxed::Box,
+    collections::BTreeMap,
+    format,
+    string::String,
+    sync::{Arc, Weak},
+    vec,
+    vec::Vec,
+};
 use core::{any::Any, fmt::Debug};
 
 use crate::object::capability::selectable::{
@@ -1301,7 +1309,7 @@ pub struct Ext2DirectoryObject {
     /// Weak reference to the filesystem
     filesystem: IrqRwSpinLock<Option<Weak<dyn FileSystemOperations>>>,
     /// Cached directory entries to avoid re-reading on every access
-    cached_entries: IrqSpinLock<Option<Vec<crate::fs::DirectoryEntryInternal>>>,
+    cached_entries: IrqSpinLock<Option<Arc<Vec<crate::fs::DirectoryEntryInternal>>>>,
     /// Cache generation (based on directory modification time) to detect stale cache
     cache_generation: IrqSpinLock<u32>,
 }
@@ -1336,7 +1344,9 @@ impl Ext2DirectoryObject {
     }
 
     /// Get cached directory entries or read them if not cached
-    fn get_cached_entries(&self) -> Result<Vec<crate::fs::DirectoryEntryInternal>, StreamError> {
+    fn get_cached_entries(
+        &self,
+    ) -> Result<Arc<Vec<crate::fs::DirectoryEntryInternal>>, StreamError> {
         let filesystem = self
             .filesystem
             .read()
@@ -1447,6 +1457,11 @@ impl Ext2DirectoryObject {
 
         // Sort entries by file_id for consistent ordering
         all_entries.sort_by_key(|entry| entry.file_id);
+
+        // Each stream read returns just one entry. Share an immutable snapshot
+        // instead of cloning every name under the IRQ-disabled cache lock for
+        // every read (quadratic allocation/copy work for a full getdents scan).
+        let all_entries = Arc::new(all_entries);
 
         // Cache the entries with current generation
         {
