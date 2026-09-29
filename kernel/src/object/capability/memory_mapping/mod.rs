@@ -203,6 +203,14 @@ pub trait MemoryMappingOps: Send + Sync {
         false
     }
 
+    /// Inspect backing-page residency without faulting in or allocating a page.
+    ///
+    /// `page_idx` is relative to the original mapping, as in `resolve_fault`.
+    /// Return `None` when the owner cannot answer without side effects.
+    fn is_page_resident(&self, _page_idx: usize) -> Option<bool> {
+        None
+    }
+
     /// Resolve the physical backing page for a fault on an owner-backed mapping.
     ///
     /// # Arguments

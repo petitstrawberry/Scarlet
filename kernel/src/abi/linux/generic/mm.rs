@@ -499,7 +499,10 @@ pub fn sys_madvise(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let advice = trapframe.get_arg(2);
 
     trapframe.increment_pc_next(&task);
+    madvise_for_task(&task, addr, length, advice)
+}
 
+fn madvise_for_task(task: &crate::task::Task, addr: usize, length: usize, advice: usize) -> usize {
     if length == 0 {
         return 0;
     }
@@ -532,10 +535,23 @@ pub fn sys_madvise(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             if map.is_shared || map.permissions & 0x2 == 0 {
                 continue;
             }
-            if map.owner.as_ref().is_some_and(|owner| {
-                !matches!(owner.mmap_owner_name().as_str(), "anonymous" | "fork-cow")
-            }) {
-                continue;
+            if let Some(owner) = &map.owner {
+                let name = owner.mmap_owner_name();
+                if !matches!(name.as_str(), "anonymous" | "fork-cow") {
+                    continue;
+                }
+                // A never-allocated anonymous page already reads as zero.
+                // In particular, glibc discards the unused part of every
+                // exiting thread's stack before waking pthread_join. Faulting
+                // that entire range in here turns cleanup into allocation/COW
+                // and page-table updates for thousands of untouched pages.
+                let page_idx = (page - map.vm_start) / PAGE_SIZE;
+                if name == "anonymous"
+                    && map.pmarea.start == 0
+                    && owner.is_page_resident(page_idx) == Some(false)
+                {
+                    continue;
+                }
             }
             let Some(kva) = task.vm_manager.translate_to_kva_for_write(page) else {
                 return to_result(errno::EFAULT);
@@ -891,6 +907,53 @@ fn handle_kvm_vcpu_mmap(
     match map_result {
         Ok(_removed_mappings_opt) => final_vaddr,
         Err(_) => to_result(errno::ENOMEM),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+    use crate::task::{Task, TaskType};
+
+    #[test_case]
+    fn madvise_discards_dirty_pages_without_populating_unused_stack_pages() {
+        let task = Task::new("madvise-sparse-stack".into(), 0, TaskType::User);
+        let base = 0x4000_0000;
+        assert_eq!(
+            handle_anonymous_mapping(&task, base, 4 * PAGE_SIZE, 3, 0x32),
+            base
+        );
+        let original_owner = task
+            .vm_manager
+            .search_memory_map(base)
+            .unwrap()
+            .owner
+            .unwrap();
+        // One dirty page within the discard range and one live stack page
+        // immediately above it. Other pages must remain demand-zero mappings.
+        copy_to_user(&task, base + PAGE_SIZE, &[0xa5; 32]).unwrap();
+        copy_to_user(&task, base + 3 * PAGE_SIZE, &[0x5a; 32]).unwrap();
+        for advice in [4, 8] {
+            assert_eq!(madvise_for_task(&task, base, 3 * PAGE_SIZE, advice), 0);
+            for index in [0, 2] {
+                let map = task
+                    .vm_manager
+                    .search_memory_map(base + index * PAGE_SIZE)
+                    .unwrap();
+                assert_eq!(map.pmarea.start, 0);
+                assert_eq!(original_owner.is_page_resident(index), Some(false));
+            }
+            let mut bytes = [0xff; 32];
+            copy_from_user(&task, base + PAGE_SIZE, &mut bytes).unwrap();
+            assert_eq!(bytes, [0; 32]);
+            copy_from_user(&task, base + 3 * PAGE_SIZE, &mut bytes).unwrap();
+            assert_eq!(bytes, [0x5a; 32]);
+        }
+        // First access to an untouched discarded page must still return zero.
+        let mut bytes = [0xff; 32];
+        copy_from_user(&task, base, &mut bytes).unwrap();
+        assert_eq!(bytes, [0; 32]);
     }
 }
 

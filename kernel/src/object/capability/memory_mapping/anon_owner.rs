@@ -61,6 +61,10 @@ impl MemoryMappingOps for AnonymousPageOwner {
         String::from("anonymous")
     }
 
+    fn is_page_resident(&self, page_idx: usize) -> Option<bool> {
+        Some(self.pages.read().contains_key(&page_idx))
+    }
+
     fn resolve_fault(
         &self,
         _access: &AccessKind,
