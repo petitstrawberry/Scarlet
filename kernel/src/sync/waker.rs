@@ -366,6 +366,16 @@ impl Waker {
     /// * `task_id` - ID of the current task to block
     /// * `trapframe` - Current task's saved execution state
     pub fn wait_owned(self: Arc<Self>, task_id: usize, trapframe: &mut Trapframe) {
+        let _ = self.wait_result_owned(task_id, trapframe);
+    }
+
+    /// Wait without retaining the owned waker on a suspended stack, and
+    /// report interruption so syscall callers can return to signal handlers.
+    pub fn wait_result_owned(
+        self: Arc<Self>,
+        task_id: usize,
+        trapframe: &mut Trapframe,
+    ) -> WaitResult {
         let outcome = Arc::new(WaitOutcome::new());
         let mut should_schedule = self.prepare_wait_registration(task_id, outcome.clone());
         if !outcome.is_pending() && self.cancel_prepared_wait_registration(task_id, Some(&outcome))
@@ -377,10 +387,11 @@ impl Waker {
         if should_schedule {
             schedule(trapframe);
         }
-        let _ = outcome.finish_after_resume();
+        let result = outcome.finish_after_resume();
         if let Some(waker) = weak_waker.upgrade() {
             let _ = waker.remove_wait_registration(task_id, &outcome);
         }
+        result
     }
 
     /// Block until woken or a timeout while dropping the owned waker before scheduling.

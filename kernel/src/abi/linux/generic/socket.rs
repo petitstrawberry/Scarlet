@@ -2415,3 +2415,44 @@ pub fn sys_shutdown(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Err(_) => errno::to_result(errno::EIO),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn ipv4_sockaddr_preserves_network_order_octets() {
+        let address = crate::network::Inet4SocketAddress::new([10, 0, 2, 15], 0x1234);
+        let sockaddr = SockaddrIn::from_inet(&address);
+        assert_eq!(sockaddr.sin_addr.to_ne_bytes(), [10, 0, 2, 15]);
+        assert_eq!(sockaddr.sin_port.to_ne_bytes(), [0x12, 0x34]);
+
+        let received = SockaddrIn {
+            sin_family: AF_INET_U16,
+            sin_port: u16::from_ne_bytes([0, 53]),
+            sin_addr: u32::from_ne_bytes([10, 0, 2, 3]),
+            sin_zero: [0; 8],
+        }
+        .to_inet();
+        assert_eq!(received.addr, [10, 0, 2, 3]);
+        assert_eq!(received.port, 53);
+    }
+
+    #[test_case]
+    fn socket_status_does_not_report_a_spurious_permission_error() {
+        let socket = crate::network::tcp::TcpSocket::new(alloc::sync::Weak::new());
+        assert_eq!(
+            socket_status_option(socket.as_ref(), SO_TYPE),
+            Ok(SOCK_STREAM)
+        );
+        assert_eq!(socket_status_option(socket.as_ref(), SO_ERROR), Ok(0));
+        assert_eq!(
+            inet_connect_error_to_errno(SocketError::WouldBlock),
+            errno::EINPROGRESS
+        );
+        assert_eq!(
+            socket_error_to_errno(SocketError::WouldBlock),
+            errno::EAGAIN
+        );
+    }
+}

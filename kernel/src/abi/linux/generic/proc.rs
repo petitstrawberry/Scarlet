@@ -1378,11 +1378,6 @@ pub fn sys_setuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     0
 }
 
-///
-/// Wait for process to change state (wait4 system call).
-/// This is a stub implementation that returns immediately.
-///
-/// Arguments:
 /// Wait for process to change state (wait4 system call).
 ///
 /// This is a Linux-compatible implementation that waits for child processes
@@ -1399,57 +1394,65 @@ pub fn sys_setuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 ///
 /// # Returns
 /// - On success: process ID of child that changed state
-/// - On error: negated error code (e.g., usize::MAX - 9 for -ECHILD)
+/// - On error: negated Linux errno
 ///
 /// # Errors
 /// - ECHILD: no child processes or specified child is not our child
 /// - EFAULT: invalid address for wstatus pointer
+/// - EINTR: interrupted while waiting for a child
 /// - ENOSYS: unsupported operation (process groups)
 /// - EPERM: no current task context
 pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    use crate::task::{WaitError, get_parent_waitpid_waker};
-
     let task = match mytask() {
         Some(t) => t,
-        None => return usize::MAX - 1, // -EPERM
+        None => return errno::to_result(errno::EPERM),
     };
 
     let pid = trapframe.get_arg(0) as isize;
     let wstatus = trapframe.get_arg(1) as *mut i32;
-    let _options = trapframe.get_arg(2); // TODO: Handle WNOHANG, WUNTRACED, etc.
+    let options = trapframe.get_arg(2);
     let _rusage = trapframe.get_arg(3); // TODO: Implement resource usage tracking
 
-    // Linux lets any thread in a thread group wait for children of the process.
-    let waitable_children = waitable_children_for_thread_group(&task);
-    if waitable_children.is_empty() {
-        trapframe.increment_pc_next(&task);
-        return usize::MAX - 9; // -ECHILD (no child processes)
-    }
+    let result = wait4_for_task(&task, trapframe, pid, wstatus, options);
+    trapframe.increment_pc_next(&task);
+    result
+}
 
-    // Minimal implementation; no verbose logging.
+fn wait4_for_task(
+    task: &Task,
+    trapframe: &mut Trapframe,
+    pid: isize,
+    wstatus: *mut i32,
+    options: usize,
+) -> usize {
+    use crate::sync::waker::WaitResult;
+    use crate::task::{WaitError, get_parent_waitpid_waker};
 
-    // Loop until a child exits or an error occurs
+    let nohang = options & 1 != 0;
+
     loop {
+        if waitable_children_for_thread_group(task).is_empty() {
+            return errno::to_result(errno::ECHILD);
+        }
         if pid == -1 {
             // Wait for any child process
-            for child_pid in waitable_children_for_thread_group(&task) {
+            for child_pid in waitable_children_for_thread_group(task) {
                 let Some(child_linux_pid) = task.get_namespace().resolve_local_id(child_pid) else {
                     continue;
                 };
-                let Some(owner) = wait_owner_for_child(&task, child_pid) else {
+                let Some(owner) = wait_owner_for_child(task, child_pid) else {
                     continue;
                 };
                 match owner.wait(child_pid) {
                     Ok(status) => {
                         // Child has exited, return the status
                         if wstatus != core::ptr::null_mut() {
-                            if copy_to_user(&task, wstatus as usize, &status.to_ne_bytes()).is_err()
+                            if copy_to_user(task, wstatus as usize, &status.to_ne_bytes()).is_err()
                             {
-                                trapframe.increment_pc_next(&task);
                                 return errno::to_result(errno::EFAULT);
                             }
                         }
-                        trapframe.increment_pc_next(&task);
+
                         return child_linux_pid;
                     }
                     Err(error) => {
@@ -1471,10 +1474,19 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 }
             }
 
+            if waitable_children_for_thread_group(task).is_empty() {
+                return errno::to_result(errno::ECHILD);
+            }
+            if nohang {
+                return 0;
+            }
+
             // No child has exited yet, block until one does
             // Use parent waker for waitpid(-1) semantics
             let parent_waker = get_parent_waitpid_waker(task.get_id());
-            parent_waker.wait_owned(task.get_id(), trapframe);
+            if parent_waker.wait_result_owned(task.get_id(), trapframe) == WaitResult::Interrupted {
+                return errno::to_result(errno::EINTR);
+            }
             // Woken by child exit; re-check children.
             // Continue the loop to re-check after waking up
             continue;
@@ -1482,43 +1494,45 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             // Wait for specific child process
             let child_linux_pid = pid as usize;
             let Some(child_pid) = task.get_namespace().resolve_global_id(child_linux_pid) else {
-                trapframe.increment_pc_next(&task);
                 return errno::to_result(errno::ECHILD);
             };
 
             // Check if this is actually our child
-            let Some(owner) = wait_owner_for_child(&task, child_pid) else {
-                trapframe.increment_pc_next(&task);
-                return usize::MAX - 9; // -ECHILD (not our child)
+            let Some(owner) = wait_owner_for_child(task, child_pid) else {
+                return errno::to_result(errno::ECHILD); // -ECHILD (not our child)
             };
 
             match owner.wait(child_pid) {
                 Ok(status) => {
                     // Child has exited, return the status
                     if wstatus != core::ptr::null_mut() {
-                        if copy_to_user(&task, wstatus as usize, &status.to_ne_bytes()).is_err() {
-                            trapframe.increment_pc_next(&task);
+                        if copy_to_user(task, wstatus as usize, &status.to_ne_bytes()).is_err() {
                             return errno::to_result(errno::EFAULT);
                         }
                     }
-                    trapframe.increment_pc_next(&task);
+
                     return child_linux_pid;
                 }
                 Err(error) => {
                     match error {
                         WaitError::NoSuchChild(_) => {
-                            trapframe.increment_pc_next(&task);
-                            return usize::MAX - 9; // -ECHILD
+                            return errno::to_result(errno::ECHILD); // -ECHILD
                         }
                         WaitError::ChildTaskNotFound(_) => {
-                            trapframe.increment_pc_next(&task);
-                            return usize::MAX - 9; // -ECHILD
+                            return errno::to_result(errno::ECHILD); // -ECHILD
                         }
                         WaitError::ChildNotExited(_) => {
+                            if nohang {
+                                return 0;
+                            }
                             // Child not exited yet, wait for it
                             use crate::task::get_waitpid_waker;
                             let child_waker = get_waitpid_waker(child_pid);
-                            child_waker.wait_owned(task.get_id(), trapframe);
+                            if child_waker.wait_result_owned(task.get_id(), trapframe)
+                                == WaitResult::Interrupted
+                            {
+                                return errno::to_result(errno::EINTR);
+                            }
                             // Woken by specific child exit; re-check.
                             // Continue the loop to re-check after waking up
                             continue;
@@ -1528,8 +1542,8 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             }
         } else {
             // pid <= 0 && pid != -1: wait for process group (not implemented)
-            trapframe.increment_pc_next(&task);
-            return usize::MAX - 37; // -ENOSYS (function not implemented)
+
+            return errno::to_result(errno::ENOSYS); // -ENOSYS (function not implemented)
         }
     }
 }
@@ -1820,6 +1834,77 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn wait4_honors_nohang_and_returns_to_pending_signal_handlers() {
+        use crate::sched::scheduler::{
+            add_task, register_online_cpu, remove_from_ready_queues, reset,
+            set_current_task_for_test,
+        };
+        use crate::task::TaskState;
+        use core::sync::atomic::Ordering;
+
+        reset();
+        let cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+        let parent = Task::new(String::from("wait4-parent"), 1, TaskType::Kernel);
+        parent.init();
+        let parent_id = add_task(parent, cpu);
+        let parent = get_task_by_id(parent_id).unwrap();
+        parent.set_state(TaskState::Running);
+        parent.running_cpu.store(cpu, Ordering::SeqCst);
+        set_current_task_for_test(cpu, Some(parent_id));
+        remove_from_ready_queues(parent_id);
+
+        let child = Task::new(String::from("wait4-child"), 1, TaskType::Kernel);
+        child.init();
+        let child_id = add_task(child, cpu);
+        let child = get_task_by_id(child_id).unwrap();
+        remove_from_ready_queues(child_id);
+        assert!(parent.adopt_registered_child(&child));
+        let child_pid = parent.get_namespace().resolve_local_id(child_id).unwrap();
+        let status = core::ptr::null_mut();
+
+        for pid in [-1, child_pid as isize] {
+            assert_eq!(
+                wait4_for_task(&parent, parent.get_trapframe(), pid, status, 1),
+                0
+            );
+            assert_eq!(parent.get_state(), TaskState::Running);
+        }
+
+        parent
+            .event_queue
+            .lock()
+            .enqueue(crate::ipc::event::Event::immediate_process_control(
+                parent_id as u32,
+                crate::ipc::event::ProcessControlType::Interrupt,
+            ));
+        for pid in [-1, child_pid as isize] {
+            assert_eq!(
+                wait4_for_task(&parent, parent.get_trapframe(), pid, status, 0),
+                errno::to_result(errno::EINTR)
+            );
+            assert_eq!(parent.get_state(), TaskState::Running);
+        }
+
+        child.set_exit_status(0);
+        child.set_state(TaskState::Zombie);
+        assert_eq!(
+            wait4_for_task(&parent, parent.get_trapframe(), -1, status, 1),
+            child_pid
+        );
+        assert_eq!(
+            wait4_for_task(&parent, parent.get_trapframe(), -1, status, 1),
+            errno::to_result(errno::ECHILD)
+        );
+
+        set_current_task_for_test(cpu, None);
+        parent.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        drop(child);
+        drop(parent);
+        reset();
+    }
 
     #[test_case]
     fn linux_cpu_mask_uses_native_word_layout() {

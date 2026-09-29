@@ -8,6 +8,7 @@ use crate::sync::IrqSpinLock;
 #[cfg(test)]
 use alloc::vec::Vec;
 use alloc::{collections::VecDeque, format, string::String, sync::Arc};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::{IpcError, StreamIpcOps};
 use crate::object::KernelObject;
@@ -21,6 +22,11 @@ use crate::sync::waker::Waker;
 ///
 /// This trait extends StreamIpcOps with pipe-specific functionality.
 pub trait PipeObject: StreamIpcOps + CloneOps {
+    /// Identity shared by both ends and clones of an anonymous pipe.
+    fn pipe_id(&self) -> Option<u64> {
+        None
+    }
+
     /// Check if there are readers on the other end
     fn has_readers(&self) -> bool;
 
@@ -92,6 +98,7 @@ struct PipeState {
 /// Shared pipe data including both state and wakers
 /// Wakers are kept outside the IRQ spin lock to avoid deadlock when calling wait()
 struct SharedPipeData {
+    id: u64,
     /// Main pipe state (protected by mutex)
     state: IrqSpinLock<PipeState>,
     /// Waker for tasks waiting to read (outside mutex to avoid deadlock)
@@ -102,7 +109,9 @@ struct SharedPipeData {
 
 impl SharedPipeData {
     fn new(buffer_size: usize) -> Arc<Self> {
+        static NEXT_PIPE_ID: AtomicU64 = AtomicU64::new(1);
         Arc::new(Self {
+            id: NEXT_PIPE_ID.fetch_add(1, Ordering::Relaxed),
             state: IrqSpinLock::new(PipeState {
                 buffer: VecDeque::with_capacity(buffer_size),
                 max_size: buffer_size,
@@ -344,6 +353,10 @@ impl CloneOps for PipeEndpoint {
 }
 
 impl PipeObject for PipeEndpoint {
+    fn pipe_id(&self) -> Option<u64> {
+        Some(self.data.id)
+    }
+
     fn has_readers(&self) -> bool {
         let state = self.data.state.lock();
         state.reader_count > 0
@@ -515,6 +528,10 @@ impl CloneOps for UnidirectionalPipe {
 }
 
 impl PipeObject for UnidirectionalPipe {
+    fn pipe_id(&self) -> Option<u64> {
+        self.endpoint.pipe_id()
+    }
+
     fn has_readers(&self) -> bool {
         self.endpoint.has_readers()
     }
