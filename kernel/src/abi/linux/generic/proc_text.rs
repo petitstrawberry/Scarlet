@@ -9,7 +9,9 @@ use crate::{
         fs::{FD_CLOEXEC, O_CLOEXEC, O_DIRECTORY},
     },
     arch::Trapframe,
-    fs::{FileMetadata, FilePermission, FileType, SeekFrom},
+    fs::{
+        DirectoryEntry, DirectoryEntryInternal, FileMetadata, FilePermission, FileType, SeekFrom,
+    },
     object::{
         KernelObject,
         capability::{
@@ -71,34 +73,96 @@ fn cpu_info() -> String {
     content
 }
 
+const CPU_DIRECTORY: &str = "/sys/devices/system/cpu";
+const CPU_FILES: &[&str] = &["online", "possible", "present"];
+
+fn text_content(path: &str) -> Option<String> {
+    #[cfg(target_arch = "aarch64")]
+    return Some(match path {
+        "/proc/cpuinfo" => cpu_info(),
+        // Use scheduler state, not a fixed count or the caller's affinity.
+        "/sys/devices/system/cpu/online"
+        | "/sys/devices/system/cpu/possible"
+        | "/sys/devices/system/cpu/present" => cpu_list(),
+        "/proc/sys/fs/inotify/max_user_watches" => String::from("8192\n"),
+        _ => return None,
+    });
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+fn is_cpu_directory(path: &str) -> bool {
+    cfg!(target_arch = "aarch64") && path.trim_end_matches('/') == CPU_DIRECTORY
+}
+
+fn metadata(path: &str, size: usize, directory: bool) -> FileMetadata {
+    // Stable across open/stat, distinct for each synthetic entry.
+    let file_id = path
+        .trim_end_matches('/')
+        .bytes()
+        .fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+    FileMetadata {
+        file_type: if directory {
+            FileType::Directory
+        } else {
+            FileType::RegularFile
+        },
+        size,
+        permissions: FilePermission {
+            read: true,
+            write: false,
+            execute: directory,
+        },
+        created_time: 0,
+        modified_time: 0,
+        accessed_time: 0,
+        file_id,
+        link_count: if directory { 2 } else { 1 },
+    }
+}
+
+pub(super) fn path_metadata(path: &str) -> Option<FileMetadata> {
+    if is_cpu_directory(path) {
+        Some(metadata(path, 0, true))
+    } else {
+        text_content(path).map(|content| metadata(path, content.len(), false))
+    }
+}
+
+/// Resolve relative openat/stat/access on the directory used by util-linux.
+pub(super) fn directory_path(file: &dyn FileObject) -> Option<&str> {
+    let file = file.as_any().downcast_ref::<ProcTextFile>()?;
+    file.directory.then_some(file.path.as_str())
+}
+
 pub(super) fn open_proc_text_file(
     abi: &mut LinuxAbi,
     task: &Task,
     path: &str,
     flags: i32,
 ) -> Option<usize> {
-    #[cfg(target_arch = "aarch64")]
-    let content = match path {
-        "/proc/cpuinfo" => cpu_info(),
-        "/sys/devices/system/cpu/possible" | "/sys/devices/system/cpu/present" => cpu_list(),
-        "/proc/sys/fs/inotify/max_user_watches" => String::from("8192\n"),
-        _ => return None,
+    let directory = is_cpu_directory(path);
+    let content = if directory {
+        String::new()
+    } else {
+        text_content(path)?
     };
-    #[cfg(not(target_arch = "aarch64"))]
-    let content: String = {
-        let _ = path;
-        return None;
-    };
-
     if flags & 3 != 0 {
         return Some(errno::to_result(errno::EACCES));
     }
-    if flags & O_DIRECTORY != 0 {
+    if flags & O_DIRECTORY != 0 && !directory {
         return Some(errno::to_result(errno::ENOTDIR));
     }
     let file = Arc::new(ProcTextFile {
         position: IrqRwSpinLock::new(0),
         content,
+        path: String::from(path.trim_end_matches('/')),
+        directory,
     });
     let handle = match task.handle_table.insert(KernelObject::File(file)) {
         Ok(handle) => handle,
@@ -120,11 +184,50 @@ pub(super) fn open_proc_text_file(
 struct ProcTextFile {
     position: IrqRwSpinLock<usize>,
     content: String,
+    path: String,
+    directory: bool,
 }
 
 impl StreamOps for ProcTextFile {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         let mut position = self.position.write();
+        if self.directory {
+            let name = match *position {
+                0 => ".",
+                1 => "..",
+                n => match CPU_FILES.get(n - 2) {
+                    Some(name) => name,
+                    None => return Ok(0),
+                },
+            };
+            let path = match name {
+                "." => self.path.clone(),
+                ".." => String::from("/sys/devices/system"),
+                _ => format!("{}/{}", self.path, name),
+            };
+            let entry = DirectoryEntry::from_internal(&DirectoryEntryInternal {
+                name: String::from(name),
+                file_type: if *position < 2 {
+                    FileType::Directory
+                } else {
+                    FileType::RegularFile
+                },
+                size: 0,
+                file_id: metadata(&path, 0, *position < 2).file_id,
+                metadata: None,
+            });
+            let size = core::mem::size_of::<DirectoryEntry>();
+            if buffer.len() < size {
+                return Err(StreamError::InvalidArgument);
+            }
+            // Same internal directory record consumed by read_linux_dirents_to_user.
+            let bytes = unsafe {
+                core::slice::from_raw_parts((&entry as *const DirectoryEntry).cast::<u8>(), size)
+            };
+            buffer[..size].copy_from_slice(bytes);
+            *position += 1;
+            return Ok(size);
+        }
         let n = self.read_at(*position as u64, buffer)?;
         *position += n;
         Ok(n)
@@ -168,7 +271,14 @@ impl FileObject for ProcTextFile {
         let next = match whence {
             SeekFrom::Start(offset) => offset as i128,
             SeekFrom::Current(offset) => *position as i128 + offset as i128,
-            SeekFrom::End(offset) => self.content.len() as i128 + offset as i128,
+            SeekFrom::End(offset) => {
+                let end = if self.directory {
+                    CPU_FILES.len() + 2
+                } else {
+                    self.content.len()
+                };
+                end as i128 + offset as i128
+            }
         };
         if next < 0 || next > usize::MAX as i128 {
             return Err(StreamError::InvalidArgument);
@@ -178,6 +288,9 @@ impl FileObject for ProcTextFile {
     }
 
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        if self.directory {
+            return Err(StreamError::InvalidArgument);
+        }
         let start = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
         let bytes = self.content.as_bytes();
         if start >= bytes.len() {
@@ -189,20 +302,7 @@ impl FileObject for ProcTextFile {
     }
 
     fn metadata(&self) -> Result<FileMetadata, StreamError> {
-        Ok(FileMetadata {
-            file_type: FileType::RegularFile,
-            size: self.content.len(),
-            permissions: FilePermission {
-                read: true,
-                write: false,
-                execute: false,
-            },
-            created_time: 0,
-            modified_time: 0,
-            accessed_time: 0,
-            file_id: 1,
-            link_count: 1,
-        })
+        Ok(metadata(&self.path, self.content.len(), self.directory))
     }
 
     fn as_any(&self) -> &dyn Any {

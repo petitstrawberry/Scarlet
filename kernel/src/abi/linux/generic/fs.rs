@@ -1041,6 +1041,15 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         None => return errno::to_result(errno::EIO),
     };
 
+    let (dirfd, path_str) = if proc_directory_path(abi, &task, dirfd).is_some() {
+        match path_at_to_absolute(abi, &task, &vfs, dirfd, &path_str) {
+            Ok(path) => (-100, path),
+            Err(error) => return errno::to_result(error),
+        }
+    } else {
+        (dirfd, path_str)
+    };
+
     if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs, dirfd, &path_str) {
         if super::proc_fd::is_self_fd_directory(&absolute) {
             return super::proc_fd::open_self_fd_directory(abi, &task, flags);
@@ -1054,7 +1063,7 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     use crate::fs::vfs_v2::core::VfsFileObject;
 
     const AT_FDCWD: i32 = -100;
-    let (base_entry, base_mount) = if dirfd == AT_FDCWD {
+    let (base_entry, base_mount) = if dirfd == AT_FDCWD || path_str.starts_with('/') {
         // Use current working directory as base
         vfs.get_cwd().unwrap_or_else(|| {
             let root_mount = vfs.mount_tree.root_mount.read().clone();
@@ -1074,11 +1083,9 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             Some(f) => f,
             None => return errno::to_result(errno::ENOTDIR), // Not a directory
         };
-        let vfs_file_obj = file_obj
-            .as_any()
-            .downcast_ref::<VfsFileObject>()
-            .ok_or(())
-            .unwrap();
+        let Some(vfs_file_obj) = file_obj.as_any().downcast_ref::<VfsFileObject>() else {
+            return errno::to_result(errno::ENOTDIR);
+        };
         (
             vfs_file_obj.get_vfs_entry().clone(),
             vfs_file_obj.get_mount_point().clone(),
@@ -2334,6 +2341,15 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Some(vfs) => vfs,
         None => return errno::to_result(errno::EIO),
     };
+    let (dirfd, path_str) = if proc_directory_path(abi, &task, dirfd).is_some() {
+        match path_at_to_absolute(abi, &task, &vfs_for_proc, dirfd, &path_str) {
+            Ok(path) => (-100, path),
+            Err(error) => return errno::to_result(error),
+        }
+    } else {
+        (dirfd, path_str)
+    };
+
     if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs_for_proc, dirfd, &path_str)
         && let Some(metadata) = super::proc_fd::self_task_metadata(&task, &absolute)
     {
@@ -2345,6 +2361,14 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             Ok(()) => 0,
             Err(error) => errno::to_result(error),
         };
+    }
+
+    if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs_for_proc, dirfd, &path_str)
+        && let Some(metadata) = super::proc_text::path_metadata(&absolute)
+    {
+        return write_linux_stat(&task, stat_ptr, &LinuxStat::from_metadata(&metadata))
+            .map(|_| 0)
+            .unwrap_or_else(errno::to_result);
     }
 
     // Scarlet does not mount a synthetic procfs yet. Linux's lstat path for
@@ -2383,7 +2407,7 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Determine base directory (entry and mount) for path resolution
     use crate::fs::vfs_v2::core::VfsFileObject;
 
-    let (base_entry, base_mount) = if dirfd == AT_FDCWD {
+    let (base_entry, base_mount) = if dirfd == AT_FDCWD || path_str.starts_with('/') {
         // Use current working directory as base
         vfs.get_cwd().unwrap_or_else(|| {
             let root_mount = vfs.mount_tree.root_mount.read().clone();
@@ -2504,10 +2528,29 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         path_str
     };
 
+    let (dirfd, path_str) = if proc_directory_path(abi, &task, dirfd).is_some() {
+        match path_at_to_absolute(abi, &task, &vfs, dirfd, &path_str) {
+            Ok(path) => (-100, path),
+            Err(error) => return errno::to_result(error),
+        }
+    } else {
+        (dirfd, path_str)
+    };
+
+    if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs, dirfd, &path_str)
+        && let Some(metadata) = super::proc_text::path_metadata(&absolute)
+    {
+        let mut statx = unsafe { core::mem::zeroed::<LinuxStatx>() };
+        fill_statx_from_stat(&mut statx, &LinuxStat::from_metadata(&metadata), 0, mask);
+        return write_linux_statx(&task, statx_ptr, &statx)
+            .map(|_| 0)
+            .unwrap_or_else(errno::to_result);
+    }
+
     // Determine base directory (entry and mount) for path resolution
     use crate::fs::vfs_v2::core::VfsFileObject;
 
-    let (base_entry, base_mount) = if dirfd == AT_FDCWD {
+    let (base_entry, base_mount) = if dirfd == AT_FDCWD || path_str.starts_with('/') {
         vfs.get_cwd().unwrap_or_else(|| {
             let root_mount = vfs.mount_tree.root_mount.read().clone();
             (root_mount.root.clone(), root_mount)
@@ -2705,6 +2748,12 @@ fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, (
     }
 }
 
+fn proc_directory_path(abi: &LinuxAbi, task: &crate::task::Task, dirfd: i32) -> Option<String> {
+    let handle = abi.get_handle(usize::try_from(dirfd).ok()?)?;
+    let object = task.handle_table.get(handle)?;
+    super::proc_text::directory_path(object.as_file()?).map(String::from)
+}
+
 fn path_at_to_absolute(
     abi: &LinuxAbi,
     task: &crate::task::Task,
@@ -2723,6 +2772,8 @@ fn path_at_to_absolute(
 
     let base_path = if dirfd == AT_FDCWD {
         vfs.get_cwd_path()
+    } else if let Some(path) = proc_directory_path(abi, task, dirfd) {
+        path
     } else {
         if dirfd < 0 {
             return Err(errno::EBADF);
@@ -3990,6 +4041,9 @@ fn linux_access_path(
     validate_access_arguments(mode, flags)?;
     if path.is_empty() {
         return Err(errno::ENOENT);
+    }
+    if let Some(metadata) = super::proc_text::path_metadata(path) {
+        return linux_access_metadata(&metadata, true, mode);
     }
     let options = crate::fs::vfs_v2::manager::PathResolutionOptions {
         no_follow: flags & ACCESS_AT_SYMLINK_NOFOLLOW != 0,
