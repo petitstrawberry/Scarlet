@@ -1442,6 +1442,28 @@ fn linux_waitid_status(status: i32, signal: Option<u8>) -> (i32, i32) {
     }
 }
 
+// These checks do not reap. They run after wait-queue registration to cover
+// an exit notification consumed by another waiter, or a child already reaped
+// (and its old waker removed) between the first check and registration.
+fn child_wait_can_complete(task: &Task, child_id: usize) -> bool {
+    let Some(child) = get_task_by_id(child_id) else {
+        return true;
+    };
+    wait_owner_for_child(task, child_id).is_none()
+        || matches!(
+            child.get_state(),
+            crate::task::TaskState::Zombie | crate::task::TaskState::Terminated
+        )
+}
+
+fn any_child_wait_can_complete(task: &Task) -> bool {
+    let children = waitable_children_for_thread_group(task);
+    children.is_empty()
+        || children
+            .into_iter()
+            .any(|id| child_wait_can_complete(task, id))
+}
+
 fn wait4_for_task(
     task: &Task,
     trapframe: &mut Trapframe,
@@ -1513,7 +1535,10 @@ fn wait4_for_task(
             // No child has exited yet, block until one does
             // Use parent waker for waitpid(-1) semantics
             let parent_waker = get_parent_waitpid_waker(task.get_id());
-            if parent_waker.wait_result_owned(task.get_id(), trapframe) == WaitResult::Interrupted {
+            if parent_waker.wait_result_until_owned(task.get_id(), trapframe, || {
+                any_child_wait_can_complete(task)
+            }) == WaitResult::Interrupted
+            {
                 return errno::to_result(errno::EINTR);
             }
             // Woken by child exit; re-check children.
@@ -1562,8 +1587,9 @@ fn wait4_for_task(
                             // Child not exited yet, wait for it
                             use crate::task::get_waitpid_waker;
                             let child_waker = get_waitpid_waker(child_pid);
-                            if child_waker.wait_result_owned(task.get_id(), trapframe)
-                                == WaitResult::Interrupted
+                            if child_waker.wait_result_until_owned(task.get_id(), trapframe, || {
+                                child_wait_can_complete(task, child_pid)
+                            }) == WaitResult::Interrupted
                             {
                                 return errno::to_result(errno::EINTR);
                             }
@@ -1695,9 +1721,11 @@ pub fn sys_waitid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     return 0;
                 }
 
-                if get_parent_waitpid_waker(task.get_id())
-                    .wait_result_owned(task.get_id(), trapframe)
-                    == crate::sync::waker::WaitResult::Interrupted
+                if get_parent_waitpid_waker(task.get_id()).wait_result_until_owned(
+                    task.get_id(),
+                    trapframe,
+                    || any_child_wait_can_complete(&task),
+                ) == crate::sync::waker::WaitResult::Interrupted
                 {
                     trapframe.increment_pc_next(&task);
                     return errno::to_result(errno::EINTR);
@@ -1750,8 +1778,11 @@ pub fn sys_waitid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     return 0;
                 }
 
-                if get_waitpid_waker(child_pid).wait_result_owned(task.get_id(), trapframe)
-                    == crate::sync::waker::WaitResult::Interrupted
+                if get_waitpid_waker(child_pid).wait_result_until_owned(
+                    task.get_id(),
+                    trapframe,
+                    || child_wait_can_complete(&task, child_pid),
+                ) == crate::sync::waker::WaitResult::Interrupted
                 {
                     trapframe.increment_pc_next(&task);
                     return errno::to_result(errno::EINTR);
@@ -1957,12 +1988,54 @@ mod tests {
             assert_eq!(parent.get_state(), TaskState::Running);
         }
 
+        parent.event_queue.lock().dequeue();
         child.set_exit_status(0);
         child.set_state(TaskState::Zombie);
+        // A second observer may already have consumed the coalesced exit
+        // notification. The child's state must still prevent a new wait.
+        let child_waker = crate::task::get_waitpid_waker(child_id);
+        child_waker.wake_all();
+        assert_eq!(
+            child_waker
+                .clone()
+                .wait_result_owned(parent_id, parent.get_trapframe()),
+            crate::sync::waker::WaitResult::Woken
+        );
+        assert_eq!(
+            child_waker
+                .clone()
+                .wait_result_until_owned(parent_id, parent.get_trapframe(), || {
+                    child_wait_can_complete(&parent, child_id)
+                }),
+            crate::sync::waker::WaitResult::Woken
+        );
+        assert_eq!(child_waker.waiting_count(), 0);
         assert_eq!(
             wait4_for_task(&parent, parent.get_trapframe(), -1, status, 1),
             child_pid
         );
+        // Reaping can remove the old waker before another waiter registers.
+        // A fresh queue has no wake credit, but the missing child is decisive.
+        crate::task::cleanup_task_waker(child_id);
+        let fresh = crate::task::get_waitpid_waker(child_id);
+        assert_eq!(
+            fresh
+                .clone()
+                .wait_result_until_owned(parent_id, parent.get_trapframe(), || {
+                    child_wait_can_complete(&parent, child_id)
+                }),
+            crate::sync::waker::WaitResult::Woken
+        );
+        assert_eq!(fresh.waiting_count(), 0);
+        let any = crate::task::get_parent_waitpid_waker(parent_id);
+        assert_eq!(
+            any.clone()
+                .wait_result_until_owned(parent_id, parent.get_trapframe(), || {
+                    any_child_wait_can_complete(&parent)
+                }),
+            crate::sync::waker::WaitResult::Woken
+        );
+        assert_eq!(any.waiting_count(), 0);
         assert_eq!(
             wait4_for_task(&parent, parent.get_trapframe(), -1, status, 1),
             errno::to_result(errno::ECHILD)

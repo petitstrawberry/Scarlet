@@ -376,8 +376,23 @@ impl Waker {
         task_id: usize,
         trapframe: &mut Trapframe,
     ) -> WaitResult {
+        self.wait_result_until_owned(task_id, trapframe, || false)
+    }
+
+    /// Register a wait, then recheck the condition before sleeping. The
+    /// condition is consumed before scheduling, so neither it nor the owned
+    /// waker keeps resources alive on an abandoned kernel stack.
+    pub fn wait_result_until_owned(
+        self: Arc<Self>,
+        task_id: usize,
+        trapframe: &mut Trapframe,
+        ready: impl FnOnce() -> bool,
+    ) -> WaitResult {
         let outcome = Arc::new(WaitOutcome::new());
         let mut should_schedule = self.prepare_wait_registration(task_id, outcome.clone());
+        if ready() {
+            outcome.claim_coalesced_event();
+        }
         if !outcome.is_pending() && self.cancel_prepared_wait_registration(task_id, Some(&outcome))
         {
             should_schedule = false;
