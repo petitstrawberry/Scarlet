@@ -821,7 +821,10 @@ impl Waker {
             .legacy_woken()
     }
 
-    fn wait_with_timeout_precision_result(
+    /// Wait with explicit timer precision while preserving interruption as a
+    /// separate result. Syscall callers must return to signal dispatch on
+    /// `Interrupted`, rather than treating it as readiness and retrying forever.
+    pub fn wait_with_timeout_precision_result(
         &self,
         task_id: usize,
         trapframe: &mut Trapframe,

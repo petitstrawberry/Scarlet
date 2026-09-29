@@ -2706,7 +2706,7 @@ impl crate::object::capability::Selectable for TcpSocket {
                 return crate::object::capability::selectable::SelectWaitOutcome::TimedOut;
             }
 
-            let woke = if interest.read {
+            let outcome = if interest.read {
                 let waker = if self.get_state() == TcpState::Listen {
                     let mut waker_lock = self.accept_waker.lock();
                     waker_lock
@@ -2726,7 +2726,7 @@ impl crate::object::capability::Selectable for TcpSocket {
                 if (interest.read && current.read) || (interest.write && current.write) {
                     return crate::object::capability::selectable::SelectWaitOutcome::Ready;
                 }
-                waker.wait_with_timeout(task_id, trapframe, remaining)
+                waker.wait_with_timeout_result(task_id, trapframe, remaining)
             } else if interest.write {
                 let waker = {
                     let mut waker_lock = self.send_waker.lock();
@@ -2740,12 +2740,17 @@ impl crate::object::capability::Selectable for TcpSocket {
                 if (interest.read && current.read) || (interest.write && current.write) {
                     return crate::object::capability::selectable::SelectWaitOutcome::Ready;
                 }
-                waker.wait_with_timeout(task_id, trapframe, remaining)
+                waker.wait_with_timeout_result(task_id, trapframe, remaining)
             } else {
-                true
+                // No read/write readiness source to sleep on. Let the caller
+                // rescan or handle pending process control.
+                return crate::object::capability::selectable::SelectWaitOutcome::Ready;
             };
 
-            if !woke {
+            if outcome == crate::sync::waker::WaitResult::Interrupted {
+                return crate::object::capability::selectable::SelectWaitOutcome::Interrupted;
+            }
+            if outcome == crate::sync::waker::WaitResult::TimedOut {
                 let after = self.current_ready(interest);
                 if !((interest.read && after.read) || (interest.write && after.write)) {
                     return crate::object::capability::selectable::SelectWaitOutcome::TimedOut;

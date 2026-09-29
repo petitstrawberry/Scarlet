@@ -3746,11 +3746,15 @@ fn sys_vectored_io(abi: &mut LinuxAbi, trapframe: &mut Trapframe, reading: bool)
                 } else {
                     ReadyInterest::write()
                 };
-                if abi.has_pending_signals() {
+                if linux_poll_interrupted(abi, &task) {
                     return errno::to_result(errno::EINTR);
                 }
-                let _ = selectable.wait_until_ready(interest, trapframe, None, 0);
-                if abi.has_pending_signals() {
+                if selectable.wait_until_ready(interest, trapframe, None, 0)
+                    == crate::object::capability::selectable::SelectWaitOutcome::Interrupted
+                {
+                    return errno::to_result(errno::EINTR);
+                }
+                if linux_poll_interrupted(abi, &task) {
                     return errno::to_result(errno::EINTR);
                 }
             }
@@ -4557,12 +4561,46 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 }
 
+// Interruptible Wakers stop sleeping when process control is queued. The
+// syscall must then return so user-return dispatch can actually deliver it;
+// re-entering the readiness loop would spin forever with that event pending.
+fn linux_poll_interrupted(abi: &LinuxAbi, task: &crate::task::Task) -> bool {
+    task.has_pending_process_control() || abi.has_pending_signals()
+}
+
+fn linux_poll_sleep(
+    task: &crate::task::Task,
+    trapframe: &mut Trapframe,
+    timeout_ns: Option<u64>,
+) -> Result<(), usize> {
+    // Native Task::sleep_with_precision deliberately retries early wakes to
+    // fulfil its full-duration contract. Linux poll/select must be interruptible,
+    // especially with no FDs and no deadline (pause-like callers).
+    let waker = crate::sync::Waker::new_interruptible("linux_poll_timeout");
+    match waker.wait_with_timeout_precision_result(
+        task.get_id(),
+        trapframe,
+        timeout_ns,
+        crate::timer::TimerPrecision::Exact,
+    ) {
+        crate::sync::waker::WaitResult::Interrupted => Err(errno::EINTR),
+        _ => Ok(()),
+    }
+}
+
 pub fn sys_epoll_wait(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
         None => return errno::to_result(errno::EIO),
     };
+    epoll_wait_for_task(abi, trapframe, &task)
+}
 
+fn epoll_wait_for_task(
+    abi: &mut LinuxAbi,
+    trapframe: &mut Trapframe,
+    task: &crate::task::Task,
+) -> usize {
     let epfd = trapframe.get_arg(0) as usize;
     let events_ptr = trapframe.get_arg(1);
     let maxevents = trapframe.get_arg(2) as usize;
@@ -4619,6 +4657,9 @@ pub fn sys_epoll_wait(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         {
             return 0;
         }
+        if linux_poll_interrupted(abi, task) {
+            return errno::to_result(errno::EINTR);
+        }
         let Some(recheck_delay_ns) =
             crate::object::capability::selectable::multi_readiness_recheck_delay(
                 deadline,
@@ -4627,18 +4668,14 @@ pub fn sys_epoll_wait(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         else {
             return 0;
         };
-        task.sleep_with_precision(
-            trapframe,
-            recheck_delay_ns,
-            crate::timer::TimerPrecision::Exact,
-        );
+        if let Err(error) = linux_poll_sleep(task, trapframe, Some(recheck_delay_ns)) {
+            return errno::to_result(error);
+        }
     }
 }
 
-/// Linux epoll_pwait implementation (stub)
-///
-/// Like epoll_wait but with signal mask. This is a stub implementation
-/// that immediately returns 0 (no events ready).
+/// Linux epoll_pwait shares epoll_wait's readiness and interruption handling.
+/// Temporary signal masks are not yet implemented.
 ///
 /// Arguments:
 /// - abi: LinuxAbi context
@@ -4674,12 +4711,21 @@ pub fn sys_epoll_pwait(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 ///
 /// Returns: number of ready descriptors, or -1 (usize::MAX) on error.
 pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    use crate::object::capability::selectable::{ReadyInterest, ReadySet};
-
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
     };
+    pselect6_for_task(abi, trapframe, &task)
+}
+
+fn pselect6_for_task(
+    abi: &mut LinuxAbi,
+    trapframe: &mut Trapframe,
+    task: &crate::task::Task,
+) -> usize {
+    use crate::object::capability::selectable::{ReadyInterest, ReadySet, SelectWaitOutcome};
+
+    trapframe.increment_pc_next(task);
 
     let nfds = trapframe.get_arg(0) as usize;
     let readfds_ptr = trapframe.get_arg(1);
@@ -4744,11 +4790,9 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
         // Resolve handle → KernelObject
         let Some(handle) = abi.get_handle(fd) else {
-            trapframe.increment_pc_next(&task);
             return errno::to_result(errno::EBADF);
         };
         let Some(kobj) = task.handle_table.get(handle) else {
-            trapframe.increment_pc_next(&task);
             return errno::to_result(errno::EBADF);
         };
 
@@ -4855,6 +4899,9 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     if !any_ready {
         let zero_poll = matches!(timeout_ns, Some(t) if t == 0);
         if !zero_poll {
+            if linux_poll_interrupted(abi, task) {
+                return errno::to_result(errno::EINTR);
+            }
             if selectable_count > 1 {
                 use crate::object::capability::selectable::multi_readiness_recheck_delay;
                 use crate::timer::get_time_ns;
@@ -4862,6 +4909,9 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 let deadline =
                     timeout_ns.map(|duration_ns| get_time_ns().saturating_add(duration_ns));
                 loop {
+                    if linux_poll_interrupted(abi, task) {
+                        return errno::to_result(errno::EINTR);
+                    }
                     let Some(recheck_delay_ns) =
                         multi_readiness_recheck_delay(deadline, get_time_ns())
                     else {
@@ -4876,7 +4926,7 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         && let Some(kobj) = task.handle_table.get(handle)
                         && let Some(sel) = kobj.as_selectable()
                     {
-                        let _ = sel.wait_until_ready(
+                        let outcome = sel.wait_until_ready(
                             ReadyInterest {
                                 read: (in_read & bit) != 0,
                                 write: (in_write & bit) != 0,
@@ -4886,14 +4936,17 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                             Some(recheck_delay_ns),
                             0,
                         );
+                        if outcome == SelectWaitOutcome::Interrupted {
+                            return errno::to_result(errno::EINTR);
+                        }
                         anchored = true;
                     }
                     if !anchored {
-                        task.sleep_with_precision(
-                            trapframe,
-                            recheck_delay_ns,
-                            crate::timer::TimerPrecision::Exact,
-                        );
+                        if let Err(error) =
+                            linux_poll_sleep(task, trapframe, Some(recheck_delay_ns))
+                        {
+                            return errno::to_result(error);
+                        }
                     }
 
                     (out_read, out_write, out_except, any_ready) =
@@ -4912,6 +4965,9 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 let deadline =
                     timeout_ns.map(|duration_ns| get_time_ns().saturating_add(duration_ns));
                 loop {
+                    if linux_poll_interrupted(abi, task) {
+                        return errno::to_result(errno::EINTR);
+                    }
                     let remaining_ns =
                         deadline.map(|deadline| deadline.saturating_sub(get_time_ns()));
                     if matches!(remaining_ns, Some(0)) {
@@ -4922,7 +4978,7 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         && let Some(kobj) = task.handle_table.get(handle)
                         && let Some(sel) = kobj.as_selectable()
                     {
-                        let _ = sel.wait_until_ready(
+                        let outcome = sel.wait_until_ready(
                             ReadyInterest {
                                 read: want_read,
                                 write: want_write,
@@ -4932,6 +4988,9 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                             remaining_ns,
                             0,
                         );
+                        if outcome == SelectWaitOutcome::Interrupted {
+                            return errno::to_result(errno::EINTR);
+                        }
                     }
 
                     (out_read, out_write, out_except, any_ready) =
@@ -4941,14 +5000,15 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     }
                 }
             } else {
-                let duration_ns = timeout_ns.unwrap_or(u64::MAX);
-                task.sleep_with_precision(
-                    trapframe,
-                    duration_ns,
-                    crate::timer::TimerPrecision::Exact,
-                );
+                if let Err(error) = linux_poll_sleep(task, trapframe, timeout_ns) {
+                    return errno::to_result(error);
+                }
             }
         }
+    }
+
+    if !any_ready && !matches!(timeout_ns, Some(0)) && linux_poll_interrupted(abi, task) {
+        return errno::to_result(errno::EINTR);
     }
 
     // Write back fd_sets with results
@@ -4990,7 +5050,6 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         );
     }
 
-    trapframe.increment_pc_next(&task);
     ready_count
 }
 
@@ -5005,12 +5064,19 @@ pub fn sys_pselect6(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 ///
 /// Returns: number of fds with non-zero revents, or -1 (usize::MAX) on error.
 pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    use crate::object::capability::selectable::{ReadyInterest, ReadySet, SelectWaitOutcome};
-
     let task = match mytask() {
         Some(t) => t,
         None => return usize::MAX,
     };
+    ppoll_for_task(abi, trapframe, &task)
+}
+
+fn ppoll_for_task(
+    abi: &mut LinuxAbi,
+    trapframe: &mut Trapframe,
+    task: &crate::task::Task,
+) -> usize {
+    use crate::object::capability::selectable::{ReadyInterest, ReadySet, SelectWaitOutcome};
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -5045,11 +5111,15 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     if nfds == 0 {
         if !matches!(timeout_ns, Some(0)) {
-            task.sleep_with_precision(
-                trapframe,
-                timeout_ns.unwrap_or(u64::MAX),
-                crate::timer::TimerPrecision::Exact,
-            );
+            if linux_poll_interrupted(abi, task) {
+                return errno::to_result(errno::EINTR);
+            }
+            if let Err(error) = linux_poll_sleep(task, trapframe, timeout_ns) {
+                return errno::to_result(error);
+            }
+            if linux_poll_interrupted(abi, task) {
+                return errno::to_result(errno::EINTR);
+            }
         }
         return 0;
     }
@@ -5185,6 +5255,9 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     if !any_ready {
         let zero_poll = matches!(timeout_ns, Some(t) if t == 0);
         if !zero_poll {
+            if linux_poll_interrupted(abi, task) {
+                return errno::to_result(errno::EINTR);
+            }
             if selectable_count > 1 {
                 use crate::object::capability::selectable::multi_readiness_recheck_delay;
                 use crate::timer::get_time_ns;
@@ -5192,6 +5265,9 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 let deadline =
                     timeout_ns.map(|duration_ns| get_time_ns().saturating_add(duration_ns));
                 loop {
+                    if linux_poll_interrupted(abi, task) {
+                        return errno::to_result(errno::EINTR);
+                    }
                     let Some(recheck_delay_ns) =
                         multi_readiness_recheck_delay(deadline, get_time_ns())
                     else {
@@ -5212,7 +5288,7 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                             && let Some(kobj) = task.handle_table.get(handle)
                             && let Some(sel) = kobj.as_selectable()
                         {
-                            let _ = sel.wait_until_ready(
+                            let outcome = sel.wait_until_ready(
                                 ReadyInterest {
                                     read: (pfd.events & POLLIN) != 0,
                                     write: (pfd.events & POLLOUT) != 0,
@@ -5222,15 +5298,18 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                                 Some(recheck_delay_ns),
                                 0,
                             );
+                            if outcome == SelectWaitOutcome::Interrupted {
+                                return errno::to_result(errno::EINTR);
+                            }
                             anchored = true;
                         }
                     }
                     if !anchored {
-                        task.sleep_with_precision(
-                            trapframe,
-                            recheck_delay_ns,
-                            crate::timer::TimerPrecision::Exact,
-                        );
+                        if let Err(error) =
+                            linux_poll_sleep(task, trapframe, Some(recheck_delay_ns))
+                        {
+                            return errno::to_result(error);
+                        }
                     }
 
                     any_ready = false;
@@ -5255,6 +5334,9 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 let deadline =
                     timeout_ns.map(|duration_ns| get_time_ns().saturating_add(duration_ns));
                 loop {
+                    if linux_poll_interrupted(abi, task) {
+                        return errno::to_result(errno::EINTR);
+                    }
                     let remaining_timeout = if let Some(deadline) = deadline {
                         let now = get_time_ns();
                         if now >= deadline {
@@ -5304,19 +5386,23 @@ pub fn sys_ppoll(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         }
                     }
 
+                    if !any_ready && wait_outcome == SelectWaitOutcome::Interrupted {
+                        return errno::to_result(errno::EINTR);
+                    }
                     if any_ready || wait_outcome == SelectWaitOutcome::TimedOut {
                         break;
                     }
                 }
             } else {
-                let duration_ns = timeout_ns.unwrap_or(u64::MAX);
-                task.sleep_with_precision(
-                    trapframe,
-                    duration_ns,
-                    crate::timer::TimerPrecision::Exact,
-                );
+                if let Err(error) = linux_poll_sleep(task, trapframe, timeout_ns) {
+                    return errno::to_result(error);
+                }
             }
         }
+    }
+
+    if !any_ready && !matches!(timeout_ns, Some(0)) && linux_poll_interrupted(abi, task) {
+        return errno::to_result(errno::EINTR);
     }
 
     let mut count = 0usize;
@@ -6052,6 +6138,94 @@ mod tests {
         proc_exe_linux_stat, proc_exe_selector,
     };
     use crate::abi::linux::generic::errno;
+
+    #[cfg(target_arch = "aarch64")]
+    #[test_case]
+    fn linux_poll_waits_return_to_dispatch_pending_interrupt_and_kill() {
+        use crate::abi::linux::generic::LinuxAbi;
+        use crate::arch::Trapframe;
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::ipc::{
+            UnidirectionalPipe,
+            event::{Event, ProcessControlType},
+        };
+        use crate::library::std::usercopy::copy_to_user;
+        use crate::task::{Task, TaskType};
+
+        let task = Task::new("linux-poll-interrupt".into(), 0, TaskType::User);
+        let base = USER_STACK_END - PAGE_SIZE;
+        task.allocate_stack_pages(base, 1).unwrap();
+        let mut abi = LinuxAbi::default();
+        let mut read_fds = alloc::vec::Vec::new();
+        for _ in 0..2 {
+            let (reader, writer) = UnidirectionalPipe::create_pair(4096);
+            let handle = task.handle_table.insert(reader).unwrap();
+            read_fds.push(abi.allocate_fd(handle).unwrap());
+            // Retain the writer: EOF would make the read end immediately ready.
+            task.handle_table.insert(writer).unwrap();
+        }
+        let epoll = super::EPOLL_HANDLE_BASE
+            | super::NEXT_EPOLL_HANDLE_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let epfd = abi.allocate_fd(epoll).unwrap();
+        copy_to_user(&task, base + 128, &[0u8; 16]).unwrap(); // zero timeout
+        for control in [ProcessControlType::Interrupt, ProcessControlType::Kill] {
+            task.event_queue
+                .lock()
+                .enqueue(Event::immediate_process_control(0, control));
+            for count in 0..=2 {
+                let mut records = alloc::vec::Vec::new();
+                let mut mask = 0u64;
+                for fd in read_fds.iter().take(count) {
+                    records.extend_from_slice(&(*fd as i32).to_ne_bytes());
+                    records.extend_from_slice(&1i16.to_ne_bytes()); // POLLIN
+                    records.extend_from_slice(&0i16.to_ne_bytes());
+                    mask |= 1u64 << *fd;
+                }
+                copy_to_user(&task, base, &records).unwrap();
+                for zero_timeout in [true, false] {
+                    let expected = if zero_timeout {
+                        0
+                    } else {
+                        errno::to_result(errno::EINTR)
+                    };
+                    let mut frame = Trapframe::new();
+                    frame.set_arg(0, base);
+                    frame.set_arg(1, count);
+                    frame.set_arg(2, if zero_timeout { base + 128 } else { 0 });
+                    assert_eq!(super::ppoll_for_task(&mut abi, &mut frame, &task), expected);
+                    copy_to_user(&task, base + 64, &mask.to_ne_bytes()).unwrap();
+                    let mut frame = Trapframe::new();
+                    frame.set_arg(
+                        0,
+                        if count == 0 {
+                            0
+                        } else {
+                            read_fds[count - 1] + 1
+                        },
+                    );
+                    frame.set_arg(1, base + 64);
+                    frame.set_arg(4, if zero_timeout { base + 128 } else { 0 });
+                    assert_eq!(
+                        super::pselect6_for_task(&mut abi, &mut frame, &task),
+                        expected
+                    );
+                    let mut frame = Trapframe::new();
+                    frame.set_arg(0, epfd);
+                    frame.set_arg(1, base + 192);
+                    frame.set_arg(2, 1);
+                    frame.set_arg(3, if zero_timeout { 0 } else { usize::MAX });
+                    assert_eq!(
+                        super::epoll_wait_for_task(&mut abi, &mut frame, &task),
+                        expected
+                    );
+                    // Poll must leave the event queued for ABI handler dispatch.
+                    assert!(task.has_pending_process_control());
+                }
+            }
+            task.event_queue.lock().dequeue();
+        }
+        abi.remove_fd(epfd);
+    }
 
     #[cfg(target_arch = "aarch64")]
     #[test_case]

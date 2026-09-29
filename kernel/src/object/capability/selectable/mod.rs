@@ -97,6 +97,8 @@ impl ReadySet {
 pub enum SelectWaitOutcome {
     Ready,
     TimedOut,
+    /// Return to the syscall boundary to dispatch pending process control.
+    Interrupted,
 }
 
 /// Objects that can be waited on by select/pselect.
@@ -125,7 +127,7 @@ pub trait Selectable {
     /// wait elapses, normal readiness-check + timeout semantics apply.
     ///
     /// Return `SelectWaitOutcome::TimedOut` if the timeout elapsed before
-    /// readiness, otherwise `SelectWaitOutcome::Ready`.
+    /// readiness, `Interrupted` for a signal wake, otherwise `Ready`.
     fn wait_until_ready(
         &self,
         interest: ReadyInterest,
