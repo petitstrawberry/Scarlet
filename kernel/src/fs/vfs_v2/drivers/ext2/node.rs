@@ -54,6 +54,7 @@ pub struct Ext2Node {
     file_id: u64,
     /// Weak reference to the filesystem
     filesystem: IrqRwSpinLock<Option<Weak<dyn FileSystemOperations>>>,
+    inode_guard: IrqSpinLock<Option<super::Ext2OpenGuard>>,
 }
 
 impl Ext2Node {
@@ -64,6 +65,7 @@ impl Ext2Node {
             file_type,
             file_id,
             filesystem: IrqRwSpinLock::new(None),
+            inode_guard: IrqSpinLock::new(None),
         }
     }
 
@@ -74,6 +76,14 @@ impl Ext2Node {
 
     /// Set the filesystem reference
     pub fn set_filesystem(&self, fs: Weak<dyn FileSystemOperations>) {
+        if let Some(filesystem) = fs.upgrade() {
+            if let Some(ext2) = filesystem.as_any().downcast_ref::<Ext2FileSystem>() {
+                let mut guard = self.inode_guard.lock();
+                if guard.is_none() {
+                    *guard = Some(ext2.pin_open_inode(self.inode_number));
+                }
+            }
+        }
         *self.filesystem.write() = Some(fs);
     }
 

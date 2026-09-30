@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="scarlet_sgfx">
+  <copyright>Copyright 2026 Scarlet contributors. MIT license.</copyright>
+  <interface name="wp_scarlet_sgfx_v1" version="1">
+    <description summary="Scarlet shared GPU images">
+      Private backing for normal wl_buffer attach, commit and release. The fd
+      is a Scarlet Linux descriptor containing a native SGFX image capability,
+      exported with LINUX_DUP_NATIVE_HANDLE. It is not a Linux dma-buf. The
+      compositor validates the image format and extent before accepting it.
+      Only single-layer BGRA8 UNORM images are supported in version 1.
+    </description>
+    <request name="destroy" type="destructor"/>
+    <request name="create_buffer">
+      <arg name="id" type="new_id" interface="wl_buffer"/>
+      <arg name="image" type="fd"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+    </request>
+  </interface>
+</protocol>

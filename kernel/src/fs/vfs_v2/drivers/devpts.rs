@@ -12,7 +12,10 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::any::Any;
+use core::{
+    any::Any,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use crate::{
     device::{
@@ -437,6 +440,7 @@ pub struct DevPtsFileObject {
     position: IrqRwSpinLock<u64>,
     pair: Arc<PtyPair>,
     release: Option<(Arc<DevPtsState>, usize)>,
+    nonblocking: AtomicBool,
 }
 
 impl DevPtsFileObject {
@@ -452,6 +456,7 @@ impl DevPtsFileObject {
             position: IrqRwSpinLock::new(0),
             pair,
             release: Some((state, number)),
+            nonblocking: AtomicBool::new(false),
         }
     }
 
@@ -463,6 +468,7 @@ impl DevPtsFileObject {
             position: IrqRwSpinLock::new(0),
             pair,
             release: None,
+            nonblocking: AtomicBool::new(false),
         }
     }
 
@@ -567,7 +573,9 @@ impl StreamOps for DevPtsFileObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         let count = match &self.endpoint {
             DevPtsEndpoint::Master(master) => master.try_read(buffer),
-            DevPtsEndpoint::Slave(slave) => slave.try_read(buffer),
+            DevPtsEndpoint::Slave(slave) => {
+                slave.read_with_mode(buffer, self.nonblocking.load(Ordering::Relaxed))
+            }
         }?;
         *self.position.write() += count as u64;
         Ok(count)
@@ -721,14 +729,14 @@ impl Selectable for DevPtsFileObject {
     fn set_nonblocking(&self, enabled: bool) {
         match &self.endpoint {
             DevPtsEndpoint::Master(master) => master.set_nonblocking(enabled),
-            DevPtsEndpoint::Slave(slave) => slave.set_nonblocking(enabled),
+            DevPtsEndpoint::Slave(_) => self.nonblocking.store(enabled, Ordering::Relaxed),
         }
     }
 
     fn is_nonblocking(&self) -> bool {
         match &self.endpoint {
             DevPtsEndpoint::Master(master) => master.is_nonblocking(),
-            DevPtsEndpoint::Slave(slave) => slave.is_nonblocking(),
+            DevPtsEndpoint::Slave(_) => self.nonblocking.load(Ordering::Relaxed),
         }
     }
 }
@@ -932,6 +940,40 @@ mod tests {
     use crate::device::char::TtyControl;
 
     use super::*;
+
+    #[test_case]
+    fn test_devpts_tty_open_modes_are_independent() {
+        let devpts = DevPtsFS::new();
+        let root = devpts.root_node();
+        let ptmx = devpts.lookup(&root, &"ptmx".to_string()).unwrap();
+        let master = devpts.open(&ptmx, 0).unwrap();
+        let endpoint = master.as_any().downcast_ref::<DevPtsFileObject>().unwrap();
+        assert!(endpoint.set_pty_slave_locked(false));
+        let node = devpts.lookup(&root, &endpoint.pty_number().unwrap().to_string()).unwrap();
+        let first = devpts.open(&node, 0).unwrap();
+        let second = devpts.open(&node, 0).unwrap();
+
+        first.set_nonblocking(true);
+        assert!(first.is_nonblocking());
+        assert!(!second.is_nonblocking());
+        assert!(!endpoint.connected_tty_device().is_nonblocking());
+        let alias = first.clone();
+        alias.set_nonblocking(false);
+        assert!(!first.is_nonblocking());
+        second.set_nonblocking(true);
+        assert!(!first.is_nonblocking());
+        assert!(second.is_nonblocking());
+
+        endpoint.connected_tty_device().set_echo(false);
+        master.write(b"hello\n").unwrap();
+        let mut buffer = [0; 6];
+        assert_eq!(first.read(&mut buffer).unwrap(), 6);
+        assert_eq!(&buffer, b"hello\n");
+        assert!(matches!(
+            second.read(&mut buffer),
+            Err(StreamError::WouldBlock)
+        ));
+    }
 
     #[test_case]
     fn test_devpts_ptmx_open_allocates_slave_node() {

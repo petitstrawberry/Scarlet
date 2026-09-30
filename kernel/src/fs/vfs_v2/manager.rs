@@ -956,6 +956,19 @@ impl VfsManager {
                 FileType::Socket(info) => Some(info.socket_id),
                 _ => None,
             });
+        // Persistent filesystems store a socket's inode type, but cannot store
+        // its live NetworkManager ID. Capture the current pathname owner before
+        // unlink so its later cleanup cannot remove a replacement registration.
+        #[cfg(feature = "network")]
+        let named_socket = socket_id
+            .filter(|id| *id == crate::fs::UNBOUND_SOCKET_ID)
+            .and_then(|_| {
+                let name = self.build_absolute_path(&entry_to_remove, &mount_point);
+                crate::network::NetworkManager::get_manager()
+                    .lookup_named_socket(&name)
+                    .ok()
+                    .map(|socket| (name, socket))
+            });
 
         // Check if the entry is involved in any mount, which would make it busy
         if self
@@ -1015,6 +1028,11 @@ impl VfsManager {
         #[cfg(feature = "network")]
         if let Some(socket_id) = socket_id {
             crate::network::NetworkManager::get_manager().unregister_socket_file(socket_id);
+        }
+        #[cfg(feature = "network")]
+        if let Some((name, socket)) = named_socket {
+            crate::network::NetworkManager::get_manager()
+                .unregister_named_socket(&name, socket.as_ref());
         }
 
         Ok(())
@@ -1430,9 +1448,25 @@ impl VfsManager {
         source_path: &str,
         target_path: &str,
     ) -> Result<(), FileSystemError> {
+        self.create_hardlink_with_options(
+            source_path,
+            target_path,
+            &PathResolutionOptions::default(),
+        )
+    }
+
+    /// Create a hard link with explicit final-source symlink handling.
+    /// Linux linkat does not follow the final symlink unless requested.
+    pub fn create_hardlink_with_options(
+        &self,
+        source_path: &str,
+        target_path: &str,
+        source_options: &PathResolutionOptions,
+    ) -> Result<(), FileSystemError> {
         let _namespace_guard = lock_namespace_mutations()?;
         // Resolve source file
-        let (source_entry, _source_mount) = self.resolve_path(source_path)?;
+        let (source_entry, _source_mount) =
+            self.resolve_path_with_options(source_path, source_options)?;
 
         let source_node = source_entry.node();
 

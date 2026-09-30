@@ -238,8 +238,10 @@ fn write_socket_address_to_user(
 }
 
 fn linux_local_sockaddr_from_user(
+    task: &crate::task::Task,
     path_start: *const u8,
     max_path_len: usize,
+    binding: bool,
 ) -> Result<(crate::network::SocketAddress, String, bool), usize> {
     if max_path_len == 0 {
         return Err(errno::EINVAL);
@@ -283,11 +285,35 @@ fn linux_local_sockaddr_from_user(
             crate::println!("[linux socket] socket path utf8 error");
             errno::EINVAL
         })?;
-        let addr =
-            crate::network::LocalSocketAddress::from_path(path).map_err(socket_error_to_errno)?;
+        // A relative pathname is scoped to the binding/connecting task's cwd.
+        // Wine binds "socket" in each prefix's private server directory; using
+        // that literal as a global registry key makes unrelated prefixes collide.
+        let vfs = task.vfs.read().clone().ok_or(errno::EINVAL)?;
+        let path = if binding {
+            match vfs.resolve_path_with_options(path, &crate::fs::vfs_v2::PathResolutionOptions::no_follow()) {
+                Ok(_) => return Err(errno::EADDRINUSE),
+                Err(error) if errno::from_fs_error(&error) == errno::ENOENT => {},
+                Err(error) => return Err(errno::from_fs_error(&error)),
+            }
+            let (parent, name) = path.rsplit_once('/').unwrap_or((".", path));
+            if name.is_empty() { return Err(errno::EINVAL); }
+            let (entry, mount) = vfs.resolve_path(if parent.is_empty() { "/" } else { parent })
+                .map_err(|error| errno::from_fs_error(&error))?;
+            if !entry.node().is_directory().map_err(|error| errno::from_fs_error(&error))? {
+                return Err(errno::ENOTDIR);
+            }
+            let parent = vfs.build_absolute_path(&entry, &mount);
+            if parent == "/" { alloc::format!("/{}", name) }
+            else { alloc::format!("{}/{}", parent, name) }
+        } else {
+            let (entry, mount) = vfs.resolve_path(path).map_err(|error| errno::from_fs_error(&error))?;
+            vfs.build_absolute_path(&entry, &mount)
+        };
+        let addr = crate::network::LocalSocketAddress::from_path(&path)
+            .map_err(socket_error_to_errno)?;
         Ok((
             crate::network::SocketAddress::Local(addr),
-            String::from(path),
+            path,
             false,
         ))
     }
@@ -305,6 +331,12 @@ struct LinuxMsghdr {
     msg_controllen: u64,
     msg_flags: u32,
     __pad2: u32,
+}
+
+#[repr(C)]
+struct LinuxMmsghdr {
+    msg_hdr: LinuxMsghdr,
+    msg_len: u32,
 }
 
 #[repr(C)]
@@ -582,15 +614,10 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 let max_path_len = (addrlen - 2) as usize;
 
                 let (socket_addr, registry_name, is_abstract) =
-                    match linux_local_sockaddr_from_user(path_start, max_path_len) {
+                    match linux_local_sockaddr_from_user(&task, path_start, max_path_len, true) {
                         Ok(addr) => addr,
                         Err(errno) => return errno::to_result(errno),
                     };
-
-                if socket_arc.bind(&socket_addr).is_err() {
-                    crate::println!("[linux socket] bind failed for AF_UNIX");
-                    return usize::MAX;
-                }
 
                 let log_name = registry_name
                     .strip_prefix('\0')
@@ -599,12 +626,14 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     crate::println!("[linux mozc-ipc] bind abstract '{}'", log_name);
                 }
 
-                if NetworkManager::get_manager()
+                if let Err(error) = NetworkManager::get_manager()
                     .register_named_socket(&registry_name, Arc::clone(socket_arc.as_arc()))
-                    .is_err()
                 {
-                    crate::println!("[linux socket] register_named_socket failed");
-                    return usize::MAX;
+                    return errno::to_result(socket_error_to_errno(error));
+                }
+                if let Err(error) = socket_arc.bind(&socket_addr) {
+                    NetworkManager::get_manager().unregister_named_socket(&registry_name, socket_arc.as_ref());
+                    return errno::to_result(socket_error_to_errno(error));
                 }
 
                 if is_abstract {
@@ -911,7 +940,7 @@ pub fn sys_connect(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 let path_start = (addr_paddr + 2) as *const u8;
                 let max_path_len = (addrlen - 2) as usize;
                 let (socket_addr, _, _) =
-                    match linux_local_sockaddr_from_user(path_start, max_path_len) {
+                    match linux_local_sockaddr_from_user(&task, path_start, max_path_len, false) {
                         Ok(addr) => addr,
                         Err(errno) => return errno::to_result(errno),
                     };
@@ -1364,6 +1393,17 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     trapframe.increment_pc_next(&task);
 
+    sendmsg_for_task(abi, trapframe, &task, sockfd, msg_ptr, flags)
+}
+
+fn sendmsg_for_task(
+    abi: &mut LinuxAbi,
+    trapframe: &mut Trapframe,
+    task: &crate::task::Task,
+    sockfd: usize,
+    msg_ptr: usize,
+    flags: i32,
+) -> usize {
     let handle = match abi.get_handle(sockfd) {
         Some(h) => h,
         None => {
@@ -1603,6 +1643,57 @@ pub fn sys_sendmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 
     total_written
+}
+
+/// Send a batch of messages, recording each successful message's byte count.
+/// glibc uses this for parallel A/AAAA DNS queries on a connected UDP socket.
+pub fn sys_sendmmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let sockfd = trapframe.get_arg(0);
+    let messages = trapframe.get_arg(1);
+    let count = (trapframe.get_arg(2) as u32 as usize).min(1024);
+    let flags = trapframe.get_arg(3) as i32;
+    trapframe.increment_pc_next(&task);
+
+    let Some(handle) = abi.get_handle(sockfd) else {
+        return errno::to_result(errno::EBADF);
+    };
+    if !task
+        .handle_table
+        .get(handle)
+        .is_some_and(|object| object.as_socket().is_some())
+    {
+        return errno::to_result(errno::ENOTSOCK);
+    }
+
+    for index in 0..count {
+        let Some(address) = messages.checked_add(index * size_of::<LinuxMmsghdr>()) else {
+            return if index == 0 {
+                errno::to_result(errno::EFAULT)
+            } else {
+                index
+            };
+        };
+        let written = sendmsg_for_task(abi, trapframe, &task, sockfd, address, flags);
+        if (written as isize) < 0 {
+            return if index == 0 { written } else { index };
+        }
+        let Some(length_address) = address.checked_add(size_of::<LinuxMsghdr>()) else {
+            return if index == 0 {
+                errno::to_result(errno::EFAULT)
+            } else {
+                index
+            };
+        };
+        if copy_to_user(&task, length_address, &(written as u32).to_ne_bytes()).is_err() {
+            return if index == 0 {
+                errno::to_result(errno::EFAULT)
+            } else {
+                index
+            };
+        }
+    }
+    count
 }
 
 /// Linux sys_recvmsg implementation (minimal)

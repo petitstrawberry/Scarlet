@@ -160,7 +160,7 @@ fn lock_object(object: &KernelObject, value: usize) -> Result<(), i32> {
     file.lock_owner().acquire(key, mode)
 }
 
-fn lock_handle(table: &HandleTable, handle: usize, value: usize) -> Result<(), i32> {
+pub(crate) fn lock_handle(table: &HandleTable, handle: usize, value: usize) -> Result<(), i32> {
     let object = u32::try_from(handle)
         .ok()
         .and_then(|handle| table.get_arc_clone(handle))

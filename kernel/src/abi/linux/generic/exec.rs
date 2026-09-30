@@ -1,9 +1,57 @@
 //! Linux process-entry data which needs storage in the new user stack.
 
-use crate::library::std::usercopy::copy_to_user;
+use crate::executor::executor::MAX_EXEC_STRINGS;
+use crate::library::std::string::{StringConversionError, parse_c_string_from_userspace};
+use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::task::Task;
 use crate::task::elf_loader::{AT_NULL, AT_RANDOM, AuxVec};
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
+
+/// Read an exec vector with the same count limit as the transactional loader.
+/// argv and envp share a byte budget, including each terminating NUL. Command
+/// arguments are not pathnames and may legitimately exceed the path limit.
+pub(crate) fn parse_exec_strings(
+    task: &Task,
+    address: usize,
+    remaining: &mut usize,
+) -> Result<Vec<String>, StringConversionError> {
+    let mut strings = Vec::new();
+    if address == 0 {
+        return Ok(strings);
+    }
+    loop {
+        let offset = strings
+            .len()
+            .checked_mul(core::mem::size_of::<usize>())
+            .and_then(|offset| address.checked_add(offset))
+            .ok_or(StringConversionError::TranslationError)?;
+        let mut pointer = [0u8; core::mem::size_of::<usize>()];
+        copy_from_user(task, offset, &mut pointer)
+            .map_err(|_| StringConversionError::TranslationError)?;
+        let pointer = usize::from_ne_bytes(pointer);
+        if pointer == 0 {
+            return Ok(strings);
+        }
+        if strings.len() == MAX_EXEC_STRINGS {
+            return Err(StringConversionError::TooManyStrings);
+        }
+        if *remaining == 0 {
+            return Err(StringConversionError::ExceedsMaxLength);
+        }
+        let string = parse_c_string_from_userspace(task, pointer, *remaining)?;
+        *remaining -= string.len() + 1;
+        strings.push(string);
+    }
+}
+
+pub(crate) fn conversion_errno(error: StringConversionError) -> usize {
+    match error {
+        StringConversionError::ExceedsMaxLength | StringConversionError::TooManyStrings => {
+            super::errno::E2BIG
+        }
+        _ => super::errno::EFAULT,
+    }
+}
 
 /// Place a string vector in ascending address order on the descending stack.
 /// Linux applications may rewrite argv in place, treating its strings as one

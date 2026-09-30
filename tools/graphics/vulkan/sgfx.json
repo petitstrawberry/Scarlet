@@ -1,0 +1,7 @@
+{
+  "file_format_version": "1.0.0",
+  "ICD": {
+    "library_path": "/usr/lib/aarch64-linux-gnu/libvulkan_sgfx.so",
+    "api_version": "1.0.0"
+  }
+}

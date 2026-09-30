@@ -590,9 +590,12 @@ impl Selectable for UnidirectionalPipe {
             set.read = !st.buffer.is_empty() || st.writer_count == 0;
         }
         if interest.write && self.endpoint.can_write {
-            // Writable if space available or no readers (will error but not block)
+            // Promise room for an atomic PIPE_BUF write. Reporting a few free
+            // bytes lets select succeed but a small nonblocking write return
+            // EAGAIN; APT treats that as a failed worker and waits forever for
+            // the still-live child. Larger writes may still be short writes.
             let available_space = st.max_size.saturating_sub(st.buffer.len());
-            set.write = available_space > 0 || st.reader_count == 0;
+            set.write = available_space >= st.max_size.min(4096) || st.reader_count == 0;
         }
         if interest.except {
             set.except = false;
@@ -609,65 +612,32 @@ impl Selectable for UnidirectionalPipe {
     ) -> SelectWaitOutcome {
         use crate::task::mytask;
 
-        if interest.read && self.endpoint.can_read {
-            let should_block = {
-                let st = self.endpoint.data.state.lock();
-                st.buffer.is_empty() && st.writer_count > 0
-            };
-
-            if should_block {
-                if let Some(task) = mytask() {
-                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-                    if min_wait_ticks > 0 {
-                        self.endpoint.data.read_waker.wait_with_min_timeout(
-                            task.get_id(),
-                            trapframe,
-                            timeout_ticks,
-                            min_wait_ticks,
-                        );
-                    } else {
-                        self.endpoint.data.read_waker.wait_with_timeout(
-                            task.get_id(),
-                            trapframe,
-                            timeout_ticks,
-                        );
-                    }
-
-                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-                }
-            }
+        let waker = if interest.read && self.endpoint.can_read {
+            &self.endpoint.data.read_waker
         } else if interest.write && self.endpoint.can_write {
-            let should_block = {
-                let st = self.endpoint.data.state.lock();
-                let space = st.max_size.saturating_sub(st.buffer.len());
-                space == 0 && st.reader_count > 0
-            };
-
-            if should_block {
-                if let Some(task) = mytask() {
-                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-                    if min_wait_ticks > 0 {
-                        self.endpoint.data.write_waker.wait_with_min_timeout(
-                            task.get_id(),
-                            trapframe,
-                            timeout_ticks,
-                            min_wait_ticks,
-                        );
-                    } else {
-                        self.endpoint.data.write_waker.wait_with_timeout(
-                            task.get_id(),
-                            trapframe,
-                            timeout_ticks,
-                        );
-                    }
-
-                    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-                }
-            }
+            &self.endpoint.data.write_waker
+        } else {
+            return SelectWaitOutcome::Ready;
+        };
+        let Some(task) = mytask() else {
+            return SelectWaitOutcome::Ready;
+        };
+        // Register and then recheck readiness, including peer closure, so a
+        // read/write between the initial check and sleeping cannot lose a wake.
+        match waker.wait_with_condition(
+            task.get_id(),
+            trapframe,
+            timeout_ticks,
+            min_wait_ticks,
+            || {
+                let ready = self.current_ready(interest);
+                ready.read || ready.write || ready.except
+            },
+        ) {
+            WaitResult::Woken => SelectWaitOutcome::Ready,
+            WaitResult::TimedOut => SelectWaitOutcome::TimedOut,
+            WaitResult::Interrupted => SelectWaitOutcome::Interrupted,
         }
-        SelectWaitOutcome::Ready
     }
 
     fn set_nonblocking(&self, enabled: bool) {

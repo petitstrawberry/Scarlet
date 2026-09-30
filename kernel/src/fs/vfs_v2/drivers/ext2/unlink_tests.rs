@@ -61,7 +61,7 @@ fn unlink_fixture(two_links: bool) -> Arc<Ext2FileSystem> {
 }
 
 #[test_case]
-fn ext2_last_link_stays_intact_until_final_open_description_drops() {
+fn ext2_unlink_detaches_name_and_preserves_all_live_descriptions_and_nodes() {
     let fs = unlink_fixture(false);
     let root = fs.root_node();
     let node = fs.lookup(&root, &"file".to_string()).unwrap();
@@ -70,20 +70,24 @@ fn ext2_last_link_stays_intact_until_final_open_description_drops() {
     let alias_node = fs.lookup(&root, &"file".to_string()).unwrap();
     let second = fs.open(&alias_node, 0).unwrap();
     let duplicate = first.clone();
-    for retained in [first, duplicate, second] {
-        assert_eq!(
-            fs.remove(&root, &"file".to_string()).unwrap_err().kind,
-            FileSystemErrorKind::Busy
-        );
-        assert_eq!(fs.lookup(&root, &"file".to_string()).unwrap().id(), 11);
-        assert_eq!(fs.read_inode(11).unwrap().get_links_count(), 1);
-        drop(retained);
-    }
     fs.remove(&root, &"file".to_string()).unwrap();
     assert_eq!(
         fs.lookup(&root, &"file".to_string()).unwrap_err().kind,
         FileSystemErrorKind::NotFound
     );
+    assert_eq!(fs.read_inode(11).unwrap().get_links_count(), 0);
+    for retained in [first, duplicate, second] {
+        assert_eq!(retained.metadata().unwrap().size, 64);
+        fs.reclaim_unlinked_inodes().unwrap();
+        assert_ne!(fs.read_inode(11).unwrap().get_mode(), 0);
+        drop(retained);
+    }
+    // Retained nodes, even without fds, also prevent inode reuse.
+    fs.reclaim_unlinked_inodes().unwrap();
+    assert_ne!(fs.read_inode(11).unwrap().get_mode(), 0);
+    drop(node);
+    drop(alias_node);
+    fs.reclaim_unlinked_inodes().unwrap();
     assert_eq!(fs.read_inode(11).unwrap().get_mode(), 0);
 }
 
@@ -100,12 +104,11 @@ fn ext2_unlink_preserves_other_hardlinks_and_live_descriptions() {
     );
     assert_eq!(fs.read_inode(11).unwrap().get_links_count(), 1);
     assert_eq!(opened.metadata().unwrap().size, 64);
-    assert_eq!(
-        fs.remove(&root, &"alias".to_string()).unwrap_err().kind,
-        FileSystemErrorKind::Busy
-    );
-    drop(opened);
     fs.remove(&root, &"alias".to_string()).unwrap();
+    assert_eq!(opened.metadata().unwrap().size, 64);
+    drop(opened);
+    drop(node);
+    fs.reclaim_unlinked_inodes().unwrap();
     assert_eq!(fs.read_inode(11).unwrap().get_mode(), 0);
 }
 
@@ -134,7 +137,7 @@ fn ext2_nonempty_directory_removal_preserves_directory_entry() {
 }
 
 #[test_case]
-fn ext2_empty_directory_removal_is_explicitly_unsupported_and_preserves_cwd() {
+fn ext2_removed_directory_retains_cwd_inode_until_namespace_releases_it() {
     let fs = unlink_fixture(false);
     let mut directory = fs.read_inode(11).unwrap();
     directory.mode = (EXT2_S_IFDIR | 0o755).to_le();
@@ -144,10 +147,7 @@ fn ext2_empty_directory_removal_is_explicitly_unsupported_and_preserves_cwd() {
     let original = crate::fs::vfs_v2::manager::VfsManager::new_with_root(fs.clone());
     let independent = crate::fs::vfs_v2::manager::VfsManager::new_with_root(fs.clone());
     independent.set_cwd_by_path("/file").unwrap();
-    assert_eq!(
-        original.remove_with_kind("/file", true).unwrap_err().kind,
-        FileSystemErrorKind::NotSupported
-    );
+    original.remove_with_kind("/file", true).unwrap();
     assert_eq!(independent.get_cwd_path(), "/file");
     assert!(
         independent
@@ -158,6 +158,81 @@ fn ext2_empty_directory_removal_is_explicitly_unsupported_and_preserves_cwd() {
             .is_directory()
             .unwrap()
     );
+    assert_eq!(fs.read_inode(11).unwrap().get_links_count(), 0);
+    assert_eq!(fs.read_inode(2).unwrap().get_links_count(), 1);
+    assert_eq!(
+        fs.lookup(&fs.root_node(), &"file".to_string())
+            .unwrap_err()
+            .kind,
+        FileSystemErrorKind::NotFound
+    );
+    fs.reclaim_unlinked_inodes().unwrap();
+    assert_ne!(fs.read_inode(11).unwrap().get_mode(), 0);
+    assert_eq!(
+        independent
+            .create_file("child", FileType::RegularFile)
+            .unwrap_err()
+            .kind,
+        FileSystemErrorKind::NotFound
+    );
+    drop(independent);
+    drop(original);
+    fs.reclaim_unlinked_inodes().unwrap();
+    assert_eq!(fs.read_inode(11).unwrap().get_mode(), 0);
+}
+
+#[test_case]
+fn ext2_new_hardlink_shares_inode_and_survives_source_unlink() {
+    let fs = unlink_fixture(false);
+    let root = fs.root_node();
+    let source = fs.lookup(&root, &"file".to_string()).unwrap();
+    let link = fs
+        .create_hardlink(&root, &"linked".to_string(), &source)
+        .unwrap();
+    assert_eq!(source.id(), link.id());
     assert_eq!(fs.read_inode(11).unwrap().get_links_count(), 2);
-    assert!(fs.lookup(&fs.root_node(), &"file".to_string()).is_ok());
+    assert_eq!(
+        fs.create_hardlink(&root, &"linked".to_string(), &source)
+            .unwrap_err()
+            .kind,
+        FileSystemErrorKind::FileExists
+    );
+    fs.rename(&root, &"file".to_string(), &root, &"linked".to_string())
+        .unwrap();
+    assert!(fs.lookup(&root, &"file".to_string()).is_ok());
+    assert_eq!(fs.read_inode(11).unwrap().get_links_count(), 2);
+    fs.remove(&root, &"file".to_string()).unwrap();
+    assert_eq!(fs.lookup(&root, &"linked".to_string()).unwrap().id(), 11);
+    assert_eq!(fs.read_inode(11).unwrap().get_links_count(), 1);
+}
+
+#[test_case]
+fn ext2_rename_replaces_open_destination_without_reusing_its_inode() {
+    let fs = unlink_fixture(false);
+    let root = fs.root_node();
+    let original = fs.lookup(&root, &"file".to_string()).unwrap();
+    let opened = fs.open(&original, 0).unwrap();
+    // This fixture has no allocator free-count metadata. Supply a second
+    // allocated inode directly so the test isolates rename and reclamation.
+    let mut inode = Ext2Inode::empty();
+    inode.mode = (EXT2_S_IFREG | 0o644).to_le();
+    inode.links_count = 1_u16.to_le();
+    fs.write_inode(12, &inode).unwrap();
+    fs.write_block_cached(301, &directory_block(&[(11, "file", 1), (12, "new", 1)]))
+        .unwrap();
+    let replacement = fs.lookup(&root, &"new".to_string()).unwrap();
+    fs.rename(&root, &"new".to_string(), &root, &"file".to_string())
+        .unwrap();
+    assert_eq!(opened.metadata().unwrap().size, 64);
+    assert_eq!(
+        fs.lookup(&root, &"file".to_string()).unwrap().id(),
+        replacement.id()
+    );
+    assert_ne!(replacement.id(), original.id());
+    fs.reclaim_unlinked_inodes().unwrap();
+    assert_ne!(fs.read_inode(11).unwrap().get_mode(), 0);
+    drop(opened);
+    drop(original);
+    fs.reclaim_unlinked_inodes().unwrap();
+    assert_eq!(fs.read_inode(11).unwrap().get_mode(), 0);
 }

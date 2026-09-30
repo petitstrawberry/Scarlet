@@ -410,8 +410,7 @@ impl WaylandBridge {
         let mut messages = Vec::new();
         for id in releases {
             self.deferred_scene_releases.remove(&id);
-            if let Some(buffer) = self.shm_manager.get_buffer_by_sws_id(id) {
-                let id = buffer.buffer_id;
+            if let Some(id) = self.wayland_buffer_for_resource(id) {
                 self.append_buffer_release(&mut messages, id);
             }
         }

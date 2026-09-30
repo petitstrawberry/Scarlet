@@ -1,0 +1,11 @@
+// Scarlet's Linux ABI currently has a single root identity. APT's default
+// _apt privilege switch requires setgroups/setresuid and a DAC model that
+// this environment does not implement. Keep repository signature checks on.
+APT::Sandbox::User "root";
+
+// mremap growth/relocation is not available yet. Use APT's realloc-based
+// allocator so the package cache can grow with any chosen repositories.
+APT::Cache-Fallback "true";
+
+// The current PTY master does not implement Linux terminal attribute ioctls.
+DPkg::Use-Pty "false";

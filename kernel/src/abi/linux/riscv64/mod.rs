@@ -104,6 +104,7 @@ impl AbiModule for LinuxRiscv64Abi {
         }
         if !_flags.is_set(crate::task::CloneFlagsDef::Thread) {
             self.0.reset_posix_timers();
+            self.0.reset_record_locks();
         }
         if self.0.thread_state.pending_clone_share_sighand
             || _flags.is_set(crate::task::CloneFlagsDef::Thread)
@@ -143,10 +144,16 @@ impl AbiModule for LinuxRiscv64Abi {
     fn on_task_exit(&mut self, task: &crate::task::Task) {
         task.clear_linux_child_tid_on_exit();
         self.0.release_posix_timers_on_task_exit();
+        self.0.reset_record_locks();
     }
 
     fn on_process_exit(&mut self, _task: &crate::task::Task) {
         self.0.cancel_posix_timers_on_process_exit();
+        self.0.clear_record_locks();
+    }
+
+    fn on_exec_commit(&mut self, _task: &crate::task::Task) {
+        self.0.commit_exec_record_locks();
     }
 
     fn get_task_namespace(&self) -> Arc<crate::task::namespace::TaskNamespace> {

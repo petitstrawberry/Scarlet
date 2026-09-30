@@ -46,8 +46,9 @@ handshake is retried, before the worker has created protocol resources. Follow
 the default sampled lifecycle records in `logd` to distinguish registry, seat,
 surface, SHM-pool, commit, window-creation, and later client failures.
 
-GPU-backed Wayland buffers should add another registration/import backing and
-reuse the existing generic commit, serial, frame, destroy, and release path.
+GPU-backed Wayland buffers use `wp_scarlet_sgfx_v1` and SWS protocol 13 image
+registration, retaining the same scene, serial, frame, destroy and release path.
+See `guest_tests/linux_vulkan` for standard Vulkan loader and Wine/Box64 checks.
 
 ## Compound surfaces and viewports
 

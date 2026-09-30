@@ -103,16 +103,19 @@ buffer and imported image before the pool mapping is dropped.
 The old `EXTENSION_ATTACH_BUFFER`/`EXTENSION_UPDATE_BUFFER` path remains in SWS
 for compatibility, but `wayland-bridge` no longer uses it.
 
-## GPU-Backed Wayland Plan
+## GPU-backed Wayland buffers
 
 The protocol boundary separates a logical external buffer from its backing:
 
-- Today, registration defines a single-plane SHM view. SWS can import that
+- SHM registration defines a single-plane CPU view. SWS can import that
   CPU-rendered view into SGFX, but it is still a `wl_shm` buffer rather than a
   client-rendered GPU image.
-- A future GPU path adds a registration/import message for an SGFX image or a
-  dma-buf-style plane set, including format/modifier metadata and explicit
-  acquire synchronization.
+- SWS protocol 13 adds `EXTENSION_GPU_BUFFERS` and a correlated
+  `EXTENSION_DEFINE_GPU_BUFFER` request. The bridge advertises
+  `wp_scarlet_sgfx_v1` only when the GPU backend provides this capability.
+  Its `create_buffer` takes one native SGFX image capability as a Linux fd
+  plus width/height and creates an ordinary `wl_buffer`. SWS validates BGRA8,
+  sampled usage and the actual extent before acknowledging registration.
 - `EXTENSION_COMMIT_BUFFER`, commit serials, damage, frame pacing, deferred
   destruction, and `EXTENSION_BUFFER_RELEASED` remain unchanged.
 - SWS owns import, composition, and release timing. The bridge translates
@@ -124,8 +127,23 @@ and display dependency has completed. Backend or compositor-epoch loss must
 reject/retire outstanding uses explicitly, following the existing shared SGFX
 buffer state machine rather than silently reusing stale imports.
 
-This permits Linux clients to gain zero-copy GPU presentation later without
-coupling the current SHM implementation to a particular graphics API.
+GPU image registration leaves window management and composition in SWS;
+the bridge handles the same Wayland surface state for both backing types.
+
+`libvulkan_sgfx` implements `VK_KHR_wayland_surface` using this backing. It
+duplicates the native image handle with `LINUX_DUP_NATIVE_HANDLE` before
+libwayland transfers it with SCM_RIGHTS. Each swapchain uses private proxy
+wrappers and an event queue: application proxy data and listeners are preserved.
+GPU images can participate in the same surface scenes as SHM parents and
+Wayland subsurfaces, including Wine's GPU child surface. SWS samples the imported
+GPU image into its retained scene texture without CPU readback or pixel upload.
+The producer completes Vulkan queue work before commit; FIFO waits for the
+previous frame callback and image reuse waits for `wl_buffer.release`. This
+version has no asynchronous acquire-fence or dma-buf import protocol.
+
+The protocol XML is [scarlet-sgfx.xml](../../tools/graphics/vulkan/scarlet-sgfx.xml).
+Build and guest verification are documented in
+[the Linux/Win64 Vulkan probes](../../guest_tests/linux_vulkan/README.md).
 
 ## Supported Protocols
 
@@ -136,6 +154,7 @@ The currently useful path includes:
 - `wl_seat`, `wl_pointer`, `wl_keyboard`
 - `wl_output`
 - `xdg_wm_base`, `xdg_surface`, and `xdg_toplevel`
+- `wp_scarlet_sgfx_v1` when SWS GPU scene imports are available
 
 `xdg_toplevel` maximize and fullscreen map to the corresponding independent
 SWS states. Configure dimensions are converted from SWS physical pixels to
@@ -143,7 +162,7 @@ Wayland logical units with the surface buffer scale.
 
 Important current gaps include `xdg_popup`, complete data-device behavior,
 touch, relative-pointer/pointer-constraints protocols, presentation feedback,
-and client-rendered GPU buffer import. Applications may also fail independently
+and general dma-buf/EGL buffer import. Applications may also fail independently
 of the bridge when the Linux rootfs lacks desktop runtime data such as D-Bus
 machine IDs, settings portals, MIME data, icon loaders, or GTK theme assets.
 
@@ -191,7 +210,8 @@ buffer rotation does not remap, recopy, or recreate the texture by itself.
 
 Linux SCM_RIGHTS descriptors are converted to Scarlet kernel handles by the
 compatibility layer. The bridge consumes ancillary handles in Wayland request
-order and accepts one only for `wl_shm.create_pool`. It then sends that
+order and accepts one only for `wl_shm.create_pool` or
+`wp_scarlet_sgfx_v1.create_buffer`. It then sends that
 capability in the correlated SWS pool-registration request. No global SHM name
 or path is used.
 

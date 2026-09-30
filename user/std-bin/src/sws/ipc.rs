@@ -696,7 +696,7 @@ fn sws_capabilities() -> u64 {
         | protocol::capabilities::INPUT_PANEL
         | protocol::capabilities::SURFACE_SCENES;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
-        capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE;
+        capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE | protocol::capabilities::EXTENSION_GPU_BUFFERS;
     }
     capabilities
 }
@@ -2862,6 +2862,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
             protocol::client_msg::REGISTER_SGFX_BUFFER
                 | protocol::client_msg::EXTENSION_ATTACH_BUFFER
                 | protocol::client_msg::EXTENSION_REGISTER_SHM_POOL
+                | protocol::client_msg::EXTENSION_DEFINE_GPU_BUFFER
         );
         if handle_required != received_handle.is_some() {
             let _ = write_protocol_error(
@@ -3741,6 +3742,21 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     stride,
                     format,
                 });
+            }
+            Ok(ClientMessageRef::ExtensionDefineGpuBuffer { buffer_id, compositor_epoch: epoch, width, height }) => {
+                let Some(handle) = received_handle else {
+                    let _ = write_protocol_error(&mut stream_writer, request_id,
+                        protocol::error_codes::INVALID_EXTENSION_BUFFER);
+                    continue;
+                };
+                if !is_extension_client || request_id == 0 || header.flags != 0
+                    || epoch != compositor_epoch() || !SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire)
+                {
+                    let _ = write_protocol_error(&mut stream_writer, request_id,
+                        protocol::error_codes::SGFX_UNAVAILABLE);
+                    continue;
+                }
+                push_ipc_event(IpcEvent::ExtensionDefineGpuBuffer { client_id, request_id, buffer_id, width, height, handle });
             }
             Ok(ClientMessageRef::ExtensionDestroyBuffer { buffer_id }) => {
                 if !is_extension_client || request_id != 0 || header.flags != 0 {
@@ -4900,6 +4916,15 @@ pub enum IpcEvent {
     },
 
     /// Mark one reusable extension buffer for destruction.
+    ExtensionDefineGpuBuffer {
+        client_id: usize,
+        request_id: u8,
+        buffer_id: u32,
+        width: u32,
+        height: u32,
+        handle: Handle,
+    },
+
     ExtensionDestroyBuffer {
         client_id: usize,
         buffer_id: u32,

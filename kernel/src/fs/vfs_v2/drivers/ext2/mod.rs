@@ -312,17 +312,20 @@ pub struct Ext2FileSystem {
     /// Per-inode locks serialize directory mutations and regular-file writes,
     /// size/timestamp publication, truncation, and writeback across open handles.
     inode_locks: IrqRwSpinLock<BTreeMap<u32, Arc<Mutex<()>>>>,
-    /// Live open descriptions, shared by all nodes and mount namespaces. The
-    /// last directory entry cannot be removed until these have been closed.
+    /// Live nodes and open descriptions across aliases and mount namespaces.
+    /// Their scalar guards prevent reuse of an unlinked inode while a fd, cwd,
+    /// mapping, or retained directory entry can still access it.
     open_inodes: Arc<IrqSpinLock<BTreeMap<u32, usize>>>,
+    unlinked_inodes: IrqSpinLock<BTreeMap<u32, ()>>,
+    reclaim_lock: Mutex<()>,
     #[cfg(test)]
     before_write_publish: IrqSpinLock<Option<fn(&Ext2FileSystem, u32, usize)>>,
     /// Global lock to serialize block allocation operations
     allocation_lock: Mutex<()>,
 }
 
-/// Counts one open description (dup shares the same object). Its final drop
-/// runs after Ext2FileObject's writeback, before a last-link unlink may proceed.
+/// Pins a node or open description (dup shares the same object). Drop performs
+/// no disk I/O: final reclamation runs before subsequent inode allocation.
 #[derive(Debug)]
 pub(super) struct Ext2OpenGuard {
     inode: u32,
@@ -636,6 +639,8 @@ impl Ext2FileSystem {
             block_cache: IrqRwSpinLock::new(BlockLruCache::new(8192)),
             inode_locks: IrqRwSpinLock::new(BTreeMap::new()),
             open_inodes: Arc::new(IrqSpinLock::new(BTreeMap::new())),
+            unlinked_inodes: IrqSpinLock::new(BTreeMap::new()),
+            reclaim_lock: Mutex::new(()),
             #[cfg(test)]
             before_write_publish: IrqSpinLock::new(None),
             allocation_lock: Mutex::new(()),
@@ -692,6 +697,34 @@ impl Ext2FileSystem {
             inode,
             counts: self.open_inodes.clone(),
         }
+    }
+
+    /// Reclaim detached inodes only after every node and open description is
+    /// gone. Run in an I/O-capable context, never from a guard's final drop.
+    fn reclaim_unlinked_inodes(&self) -> Result<(), FileSystemError> {
+        let _reclaim_guard = self.reclaim_lock.lock();
+        let pending: Vec<u32> = self.unlinked_inodes.lock().keys().copied().collect();
+        for inode_number in pending {
+            if self.open_inodes.lock().contains_key(&inode_number) {
+                continue;
+            }
+            let inode_lock = self.get_inode_lock(inode_number);
+            let _guard = inode_lock.lock();
+            if self.open_inodes.lock().contains_key(&inode_number) {
+                continue;
+            }
+            // A failed unlink publication must not reclaim a still-linked inode.
+            if self.read_inode(inode_number)?.get_links_count() != 0 {
+                continue;
+            }
+            use crate::fs::vfs_v2::cache::CacheId;
+            use crate::mem::page_cache::PageCacheManager;
+            let cache_id = CacheId::new((self.fs_id().get() << 32) | inode_number as u64);
+            PageCacheManager::global().invalidate(cache_id);
+            self.free_inode(inode_number)?;
+            self.unlinked_inodes.lock().remove(&inode_number);
+        }
+        Ok(())
     }
 
     fn get_inode_lock(&self, inode_num: u32) -> Arc<Mutex<()>> {
@@ -2511,6 +2544,8 @@ impl Ext2FileSystem {
     /// Allocate a new inode using proper bitmap management
     fn allocate_inode(&self) -> Result<u32, FileSystemError> {
         profile_scope!("ext2::allocate_inode");
+
+        self.reclaim_unlinked_inodes()?;
 
         self.with_allocation_lock(|| {
             // For now, allocate from Group 0
@@ -5243,6 +5278,16 @@ impl FileSystemOperations for Ext2FileSystem {
         }
 
         // Allocate an inode from the ext2 filesystem
+        if self
+            .read_inode(ext2_parent.inode_number())?
+            .get_links_count()
+            == 0
+        {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotFound,
+                "Parent directory was removed",
+            ));
+        }
         let new_inode_number = self.allocate_inode()?;
         let file_id = new_inode_number as u64;
 
@@ -5568,35 +5613,8 @@ impl FileSystemOperations for Ext2FileSystem {
                 "Directory not empty",
             ));
         }
-        // cwd and retained directory entries are not open descriptions, and
-        // separate mount namespaces can hold distinct nodes for this inode.
-        // Reject deletion until those references participate in inode lifetime;
-        // freeing it here would let a stale cwd access a subsequently reused inode.
-        if is_directory {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::NotSupported,
-                "Ext2 directory removal requires retained-node lifetime tracking",
-            ));
-        }
         let links = inode.get_links_count();
-        let reclaim = links <= 1;
-        // Until deferred deletion exists, reject last-link removal while any
-        // description still refers to the inode. This is shared across aliases
-        // and mount namespaces, so the inode cannot be reused under a live fd.
-        if reclaim
-            && self
-                .open_inodes
-                .lock()
-                .get(&inode_number)
-                .copied()
-                .unwrap_or(0)
-                != 0
-        {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::Busy,
-                "Open ext2 inode cannot be unlinked yet",
-            ));
-        }
+        let reclaim = is_directory || links <= 1;
 
         // Remove the directory entry from the parent directory
         self.remove_directory_entry(ext2_parent.inode_number(), name)?;
@@ -5607,20 +5625,115 @@ impl FileSystemOperations for Ext2FileSystem {
             self.write_inode(inode_number, &inode)?;
             return Ok(());
         }
-
-        // Free only the last link, after the open-description check above.
-        self.free_inode(inode_number)?;
-
-        // Invalidate page cache entries for this file to avoid stale data after delete/recreate
-        {
-            use crate::fs::vfs_v2::cache::CacheId;
-            use crate::mem::page_cache::PageCacheManager;
-            let fs_id = self.fs_id().get();
-            let cache_id = CacheId::new((fs_id << 32) | (inode_number as u64));
-            PageCacheManager::global().invalidate(cache_id);
+        if is_directory {
+            let mut parent_inode = self.read_inode(ext2_parent.inode_number())?;
+            parent_inode.links_count = parent_inode.get_links_count().saturating_sub(1).to_le();
+            self.write_inode(ext2_parent.inode_number(), &parent_inode)?;
         }
-
+        // Publish a detached inode without freeing its data. Existing fds,
+        // mappings and cwd nodes keep their guards; a later allocation reaps it
+        // once all references have disappeared. Drop itself does no disk I/O.
+        inode.links_count = 0;
+        self.write_inode(inode_number, &inode)?;
+        self.unlinked_inodes.lock().insert(inode_number, ());
         Ok(())
+    }
+
+    fn create_hardlink(
+        &self,
+        link_parent: &Arc<dyn VfsNode>,
+        link_name: &String,
+        target_node: &Arc<dyn VfsNode>,
+    ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        let parent = link_parent
+            .as_any()
+            .downcast_ref::<Ext2Node>()
+            .ok_or_else(|| {
+                FileSystemError::new(FileSystemErrorKind::CrossDevice, "Not an ext2 parent")
+            })?;
+        let target = target_node
+            .as_any()
+            .downcast_ref::<Ext2Node>()
+            .ok_or_else(|| {
+                FileSystemError::new(FileSystemErrorKind::CrossDevice, "Not an ext2 target")
+            })?;
+        if !parent.is_directory()? {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotADirectory,
+                "Link parent is not a directory",
+            ));
+        }
+        if target.is_directory()? {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidOperation,
+                "Cannot hard link a directory",
+            ));
+        }
+        if link_name.is_empty() || link_name.len() > 255 || link_name.contains('/') {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::InvalidPath,
+                "Invalid hard link name",
+            ));
+        }
+        for node in [parent, target] {
+            if node
+                .filesystem()
+                .and_then(|fs| fs.upgrade())
+                .is_none_or(|fs| fs.fs_id() != self.fs_id())
+            {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::CrossDevice,
+                    "Hard links require one filesystem",
+                ));
+            }
+        }
+        let parent_lock = self.get_inode_lock(parent.inode_number());
+        let _parent_guard = parent_lock.lock();
+        let target_lock = self.get_inode_lock(target.inode_number());
+        let _target_guard = target_lock.lock();
+        if self.read_inode(parent.inode_number())?.get_links_count() == 0 {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotFound,
+                "Link parent was removed",
+            ));
+        }
+        match self.lookup(link_parent, link_name) {
+            Ok(_) => {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::FileExists,
+                    "Link already exists",
+                ));
+            }
+            Err(error) if error.kind == FileSystemErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let mut inode = self.read_inode(target.inode_number())?;
+        let old_links = inode.get_links_count();
+        if old_links == 0 {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotFound,
+                "Link target was removed",
+            ));
+        }
+        let links = old_links.checked_add(1).ok_or_else(|| {
+            FileSystemError::new(
+                FileSystemErrorKind::ValueOverflow,
+                "Too many ext2 hard links",
+            )
+        })?;
+        inode.links_count = links.to_le();
+        self.write_inode(target.inode_number(), &inode)?;
+        if let Err(error) = self.add_directory_entry(
+            parent.inode_number(),
+            link_name,
+            target.inode_number(),
+            target.file_type()?,
+        ) {
+            inode.links_count = old_links.to_le();
+            self.write_inode(target.inode_number(), &inode)?;
+            return Err(error);
+        }
+        Ok(target_node.clone())
     }
 
     fn rename(
@@ -5708,6 +5821,11 @@ impl FileSystemOperations for Ext2FileSystem {
                     )
                 })?;
             let dst_is_dir = dst_ext2.file_type()? == FileType::Directory;
+            // Renaming one hardlink onto another name of the same inode is a
+            // no-op. Removing either entry here would change its link count.
+            if dst_ext2.inode_number() == src_inode_num {
+                return Ok(());
+            }
 
             if src_is_dir && !dst_is_dir {
                 return Err(FileSystemError::new(

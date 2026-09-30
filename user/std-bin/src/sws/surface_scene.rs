@@ -9,6 +9,8 @@ pub struct Pixels<'a> {
     pub height: u32,
     pub stride: usize,
     pub opaque: bool,
+    /// A registered shared GPU source; bytes are empty and never read on CPU.
+    pub gpu_buffer: Option<(usize, u32)>,
 }
 
 /// Borrowed only during one synchronous frame. The pool registry owns the
@@ -65,6 +67,7 @@ pub fn composite(
     width: u32,
     height: u32,
 ) -> Result<(), &'static str> {
+    if source.gpu_buffer.is_some() { return Err("GPU scene source cannot be rendered on CPU"); }
     let row = source.width as usize * 4;
     let required = (source.height as usize)
         .checked_sub(1)
@@ -185,6 +188,7 @@ mod tests {
                     height: 3,
                     stride: 8,
                     opaque: false,
+                    gpu_buffer: None,
                 },
                 &mut software,
                 w,
@@ -234,6 +238,7 @@ mod tests {
                 height: 1,
                 stride: 8,
                 opaque: false,
+                    gpu_buffer: None,
             },
             &mut dst,
             2,
@@ -260,6 +265,7 @@ mod tests {
                 height: 1,
                 stride: 12,
                 opaque: true,
+                    gpu_buffer: None,
             },
             &mut dst,
             1,

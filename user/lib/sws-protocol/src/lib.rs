@@ -33,7 +33,7 @@ pub mod workspace;
 pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024; // 1 MiB
 
 /// Current SWS capability-negotiation protocol version.
-pub const SWS_PROTOCOL_VERSION: u32 = 12;
+pub const SWS_PROTOCOL_VERSION: u32 = 13;
 
 /// Maximum damage rectangles carried by one shared SGFX frame commit.
 pub const SGFX_MAX_DAMAGE_RECTS: usize = 16;
@@ -75,6 +75,8 @@ pub mod capabilities {
     pub const INPUT_PANEL: u64 = 1 << 14;
     /// Extensions may atomically publish cropped, scaled, ordered surface layers.
     pub const SURFACE_SCENES: u64 = 1 << 15;
+    /// Extensions may define shared GPU images as reusable scene buffers.
+    pub const EXTENSION_GPU_BUFFERS: u64 = 1 << 16;
 }
 
 pub mod gamepad;
@@ -377,6 +379,8 @@ pub mod client_msg {
     /// Atomically select a registered buffer and publish damage (extension-only).
     pub const EXTENSION_COMMIT_BUFFER: u32 = 109;
     pub const EXTENSION_COMMIT_SCENE: u32 = 110;
+    /// Define a GPU-image capability transferred with this request.
+    pub const EXTENSION_DEFINE_GPU_BUFFER: u32 = 111;
     pub const SET_WORKAREA: u32 = 22;
     pub const SET_WINDOW_RESIZABLE: u32 = 23;
     pub const GET_WINDOW_LIST: u32 = 24;
@@ -481,6 +485,7 @@ pub mod server_msg {
     pub const EXTENSION_SHM_POOL_RESIZED: u32 = 103;
     /// Notification that SWS no longer samples an external buffer.
     pub const EXTENSION_BUFFER_RELEASED: u32 = 104;
+    pub const EXTENSION_GPU_BUFFER_DEFINED: u32 = 105;
     pub const SCREEN_SIZE: u32 = 16;
     pub const WINDOW_LIST: u32 = 17;
     pub const FOCUS_CHANGED: u32 = 18;
@@ -1407,6 +1412,14 @@ pub enum ClientMessageRef<'a> {
         format: u32,
     },
 
+    /// A producer-completed BGRA8 SGFX image, owned by this connection.
+    ExtensionDefineGpuBuffer {
+        buffer_id: u32,
+        compositor_epoch: u32,
+        width: u32,
+        height: u32,
+    },
+
     /// Request destruction of a reusable external buffer object.
     ExtensionDestroyBuffer {
         buffer_id: u32,
@@ -2000,6 +2013,7 @@ pub enum ServerMessage {
         buffer_id: u32,
         commit_serial: u64,
     },
+    ExtensionGpuBufferDefined { buffer_id: u32 },
 }
 
 /// Parse a client->server message from `(msg_type, payload)`.
@@ -2534,6 +2548,17 @@ pub fn parse_client_message<'a>(
                 stride,
                 format,
             })
+        }
+        client_msg::EXTENSION_DEFINE_GPU_BUFFER => {
+            if payload.len() != 16 { return Err(ProtocolError::MalformedPayload); }
+            let buffer_id = read_u32(payload, 0)?;
+            let compositor_epoch = read_u32(payload, 4)?;
+            let width = read_u32(payload, 8)?;
+            let height = read_u32(payload, 12)?;
+            if buffer_id == 0 || compositor_epoch == 0 || width == 0 || height == 0 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ClientMessageRef::ExtensionDefineGpuBuffer { buffer_id, compositor_epoch, width, height })
         }
         client_msg::EXTENSION_DESTROY_BUFFER => {
             if payload.len() != 4 {
@@ -3893,6 +3918,10 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
                 commit_serial: read_u64(payload, 4)?,
             })
         }
+        server_msg::EXTENSION_GPU_BUFFER_DEFINED => {
+            if payload.len() != 4 { return Err(ProtocolError::MalformedPayload); }
+            Ok(ServerMessage::ExtensionGpuBufferDefined { buffer_id: read_u32(payload, 0)? })
+        }
         server_msg::ACTIVE_APP => {
             // Payload: app_id_len (u32) + app_id (variable, max 128)
             //          + app_name_len (u32) + app_name (variable, max 128)
@@ -4381,6 +4410,16 @@ pub fn payload_extension_resize_shm_pool(pool_id: u32, size: u64) -> [u8; 12] {
 /// Fixed-width destruction payload.
 pub fn payload_extension_destroy_shm_pool(pool_id: u32) -> [u8; 4] {
     pool_id.to_le_bytes()
+}
+
+/// Build a GPU image registration payload. Its capability travels separately
+/// in the same IPC record; SWS validates the format, epoch and actual extent.
+pub fn payload_extension_define_gpu_buffer(buffer_id: u32, epoch: u32, width: u32, height: u32) -> [u8; 16] {
+    let mut payload = [0; 16];
+    for (slot, value) in payload.chunks_exact_mut(4).zip([buffer_id, epoch, width, height]) {
+        slot.copy_from_slice(&value.to_le_bytes());
+    }
+    payload
 }
 
 /// Build a reusable extension-buffer definition payload.
@@ -5885,6 +5924,20 @@ mod tests {
 
     #[test]
     fn extension_buffer_object_lifecycle_round_trips() {
+        let gpu = super::payload_extension_define_gpu_buffer(5, 7, 128, 96);
+        assert_eq!(parse_client_message(client_msg::EXTENSION_DEFINE_GPU_BUFFER, &gpu),
+            Ok(ClientMessageRef::ExtensionDefineGpuBuffer {
+                buffer_id: 5, compositor_epoch: 7, width: 128, height: 96,
+            }));
+        for invalid in [
+            super::payload_extension_define_gpu_buffer(0, 7, 128, 96),
+            super::payload_extension_define_gpu_buffer(5, 0, 128, 96),
+            super::payload_extension_define_gpu_buffer(5, 7, 0, 96),
+            super::payload_extension_define_gpu_buffer(5, 7, 128, 0),
+        ] {
+            assert!(parse_client_message(client_msg::EXTENSION_DEFINE_GPU_BUFFER, &invalid).is_err());
+        }
+        assert!(parse_client_message(client_msg::EXTENSION_DEFINE_GPU_BUFFER, &gpu[..15]).is_err());
         let register = payload_extension_register_shm_pool(7, 65_536);
         assert_eq!(
             parse_client_message(client_msg::EXTENSION_REGISTER_SHM_POOL, &register),

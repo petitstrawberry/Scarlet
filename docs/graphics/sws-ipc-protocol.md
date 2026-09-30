@@ -4,7 +4,7 @@ This document describes the wire protocol used between the Scarlet Window Server
 
 The canonical implementation is the `sws_protocol` crate located at `user/lib/sws-protocol`.
 
-The current protocol version is **10**. Clients discover the version and
+The current protocol version is **13**. Clients discover the version and
 optional feature bits with `GET_CAPABILITIES`; reusable extension buffers are
 advertised by `EXTENSION_BUFFER_OBJECTS` (`1 << 10`). Rounded input and backdrop
 regions are advertised by the optional `SURFACE_REGIONS` bit (`1 << 11`).
@@ -682,9 +682,36 @@ Defines a reusable single-plane SHM view. This request is asynchronous.
 
 The current SHM formats are Wayland `ARGB8888` (0) and `XRGB8888` (1). The
 stride must cover one BGRA row and the last pixel must fit within the registered
-pool. The logical buffer ID is deliberately independent of its backing; a
-future GPU/dma-buf definition message can create the same kind of logical
-object without changing commit or release messages.
+pool. The logical buffer ID is independent of its backing. Version 13 can
+define a shared SGFX image with the same commit, destroy and release lifecycle.
+
+#### `EXTENSION_DEFINE_GPU_BUFFER` (type = 111, protocol version 13)
+
+Capability `EXTENSION_GPU_BUFFERS` (`1 << 16`) allows a registered extension to
+transfer exactly one shared SGFX image capability in a correlated request.
+The header flags must be zero and the request ID nonzero.
+
+| Offset | Size | Field | Type |
+|--------|------|-------|------|
+| 0 | 4 | `buffer_id` | non-zero u32 |
+| 4 | 4 | `compositor_epoch` | current non-zero u32 |
+| 8 | 4 | `width` | non-zero u32 pixels |
+| 12 | 4 | `height` | non-zero u32 pixels |
+
+SWS validates the image's BGRA format, sampling capability and dimensions and
+retains an imported GPU texture and its capability. After successful import it
+replies with `EXTENSION_GPU_BUFFER_DEFINED` (server type 105), carrying the
+four-byte buffer ID and the matching request ID. Failure returns a correlated
+error. No SHM pool or CPU upload is involved.
+
+GPU buffers are selected only through `EXTENSION_COMMIT_SCENE` (110); the
+single-buffer compatibility request (109) rejects them. Rendering must finish
+before committing the scene. SWS samples the image into its retained scene
+texture before retiring the selected use, and sends the existing release
+event before the extension may reuse it. Destroy and disconnect release the
+imported texture before the retained capability. Software composition cannot
+import these buffers, so the capability is gated on shared-image GPU support.
+This protocol is specific to SGFX shared images; it does not implement dma-buf.
 
 #### `EXTENSION_DESTROY_BUFFER` (type = 108, protocol version 9)
 

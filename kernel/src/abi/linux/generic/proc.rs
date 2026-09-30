@@ -275,6 +275,23 @@ pub fn sys_sched_getaffinity(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> 
     LINUX_CPU_MASK_SIZE
 }
 
+/// Return the currently executing CPU and Scarlet's single NUMA node.
+/// Each output pointer is optional; Linux ignores the historical cache argument.
+pub fn sys_getcpu(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let cpu_ptr = trapframe.get_arg(0);
+    let node_ptr = trapframe.get_arg(1);
+    let cpu = crate::arch::get_cpu().get_cpuid() as u32;
+    trapframe.increment_pc_next(&task);
+    if cpu_ptr != 0 && copy_to_user(&task, cpu_ptr, &cpu.to_ne_bytes()).is_err() {
+        return errno::to_result(errno::EFAULT);
+    }
+    if node_ptr != 0 && copy_to_user(&task, node_ptr, &0u32.to_ne_bytes()).is_err() {
+        return errno::to_result(errno::EFAULT);
+    }
+    0
+}
+
 /// Set the nice value for Linux priority-selected tasks.
 ///
 /// # Arguments
@@ -853,7 +870,7 @@ pub fn sys_setsid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 pub fn sys_prlimit64(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let _pid = trapframe.get_arg(0) as i32;
-    let _resource = trapframe.get_arg(1);
+    let resource = trapframe.get_arg(1);
     let _new_rlim_ptr = trapframe.get_arg(2);
     let old_rlim_ptr = trapframe.get_arg(3);
 
@@ -862,9 +879,19 @@ pub fn sys_prlimit64(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Linux validates the output pointer for write access. Chromium also
     // relies on EFAULT here to verify that protected memory is read-only.
     if old_rlim_ptr != 0 {
+        // sysconf(_SC_OPEN_MAX) uses this value. APT's exec helper falls back
+        // to walking every descriptor below it when /proc/self/fd cannot be
+        // opened. Reporting the old generic 32-bit maximum made that walk
+        // run billions of fcntl calls despite our 1024-entry descriptor table.
+        const RLIMIT_NOFILE: usize = 7;
+        let limit = if resource == RLIMIT_NOFILE {
+            super::MAX_FDS as u64
+        } else {
+            0xFFFF_FFFFu64
+        };
         let mut rlimit = [0u8; 16];
-        rlimit[..8].copy_from_slice(&0xFFFF_FFFFu64.to_ne_bytes());
-        rlimit[8..].copy_from_slice(&0xFFFF_FFFFu64.to_ne_bytes());
+        rlimit[..8].copy_from_slice(&limit.to_ne_bytes());
+        rlimit[8..].copy_from_slice(&limit.to_ne_bytes());
         if copy_to_user(&task, old_rlim_ptr, &rlimit).is_err() {
             return errno::to_result(errno::EFAULT);
         }

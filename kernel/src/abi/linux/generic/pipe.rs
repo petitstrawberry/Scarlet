@@ -79,7 +79,12 @@ pub fn sys_pipe2(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         let _ = task.handle_table.remove(read_handle);
         return errno::to_result(errno::EMFILE);
     }
-    if abi.set_file_status_flags(write_fd, status_flags).is_err() {
+    // fdopen("w") checks F_GETFL's access mode before accepting a pipe.
+    // The write endpoint must advertise O_WRONLY, not the default O_RDONLY.
+    if abi
+        .set_file_status_flags(write_fd, status_flags | 1)
+        .is_err()
+    {
         let _ = abi.remove_fd(write_fd);
         let _ = abi.remove_fd(read_fd);
         let _ = task.handle_table.remove(write_handle);

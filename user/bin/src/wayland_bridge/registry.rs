@@ -53,6 +53,11 @@ impl Registry {
         }
     }
 
+    pub fn set_gpu_buffers(&mut self, enabled: bool) {
+        self.globals.retain(|_, global| global.interface != "wp_scarlet_sgfx_v1");
+        if enabled { self.add_global("wp_scarlet_sgfx_v1", 1); }
+    }
+
     /// Add a global interface
     fn add_global(&mut self, interface: &str, version: u32) -> u32 {
         let name = self.next_name;

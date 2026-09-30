@@ -145,6 +145,10 @@ pub trait AbiModule: Send + Sync + 'static {
     /// ABI modules that have no process-shared resources.
     fn on_process_exit(&mut self, _task: &crate::task::Task) {}
 
+    /// Complete ABI resource changes only after exec's loader has succeeded.
+    /// This hook runs in the commit section and must not allocate or perform I/O.
+    fn on_exec_commit(&mut self, _task: &crate::task::Task) {}
+
     /// Get the task namespace for this ABI.
     ///
     /// This allows each ABI to have its own namespace for task IDs.

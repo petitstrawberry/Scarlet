@@ -4,6 +4,7 @@ pub mod errno;
 pub(crate) mod exec;
 pub mod fs;
 pub mod futex;
+mod native_handle;
 mod memfd;
 pub mod mm;
 mod mode;
@@ -11,6 +12,7 @@ pub mod pipe;
 pub mod proc;
 mod proc_fd;
 mod proc_text;
+mod record_lock;
 pub mod signal;
 mod signalfd;
 pub mod socket;
@@ -115,6 +117,8 @@ pub struct LinuxAbi {
     pub signal_state: Arc<IrqSpinLock<signal::SignalState>>,
     pub thread_state: LinuxThreadState,
     posix_timers: Arc<IrqSpinLock<PosixTimerTable>>,
+    record_locks: Arc<record_lock::ProcessLocks>,
+    exec_unlocks: Vec<record_lock::FileKey>,
     pub(crate) umask: u32,
     #[cfg(target_arch = "aarch64")]
     pub(crate) signal_restorer: Arc<IrqSpinLock<Option<usize>>>,
@@ -130,6 +134,8 @@ impl Default for LinuxAbi {
             signal_state: Arc::new(IrqSpinLock::new(signal::SignalState::new())),
             thread_state: LinuxThreadState::default(),
             posix_timers: Arc::new(IrqSpinLock::new(PosixTimerTable::new())),
+            record_locks: Arc::new(record_lock::ProcessLocks::new()),
+            exec_unlocks: Vec::new(),
             umask: 0o022,
             #[cfg(target_arch = "aarch64")]
             signal_restorer: Arc::new(IrqSpinLock::new(None)),
@@ -162,6 +168,7 @@ impl LinuxAbi {
     pub fn prepare_exec_fds(&mut self, source: Option<&Self>, image: &crate::task::Task) {
         if let Some(source) = source {
             self.umask = source.umask;
+            self.record_locks = source.record_locks.clone();
             let mut signals = source.signal_state.lock().clone();
             signals.reset_caught_handlers();
             self.signal_state = Arc::new(IrqSpinLock::new(signals));
@@ -195,6 +202,16 @@ impl LinuxAbi {
                 if (source.is_some() && table.fd_flags[fd] & fs::FD_CLOEXEC != 0)
                     || !image.handle_table.is_valid_handle(handle)
                 {
+                    // Defer lock release until exec commits. A failed loader
+                    // must preserve both the descriptor and its POSIX locks.
+                    if source.is_some() {
+                        if let Some(key) = crate::task::mytask()
+                            .and_then(|task| task.handle_table.get(handle))
+                            .and_then(|object| record_lock::file_key(&object))
+                        {
+                            self.exec_unlocks.push(key);
+                        }
+                    }
                     drop(image.handle_table.remove(handle));
                     table.fd_to_handle[fd] = None;
                     table.fd_flags[fd] = 0;
@@ -212,6 +229,27 @@ impl LinuxAbi {
     }
     pub fn thread_state(&self) -> &LinuxThreadState {
         &self.thread_state
+    }
+
+    pub fn reset_record_locks(&mut self) {
+        self.record_locks = Arc::new(record_lock::ProcessLocks::new());
+        self.exec_unlocks.clear();
+    }
+
+    pub fn clear_record_locks(&self) {
+        self.record_locks.unlock_all();
+    }
+
+    pub fn commit_exec_record_locks(&mut self) {
+        for key in self.exec_unlocks.drain(..) {
+            self.record_locks.unlock_file(key);
+        }
+    }
+
+    pub(crate) fn release_record_locks_for_object(&self, object: &crate::object::KernelObject) {
+        if let Some(key) = record_lock::file_key(object) {
+            self.record_locks.unlock_file(key);
+        }
     }
     pub fn thread_state_mut(&mut self) -> &mut LinuxThreadState {
         &mut self.thread_state
@@ -469,8 +507,13 @@ pub(crate) fn close_kernel_object_for_linux(_object: &crate::object::KernelObjec
     // exactly one owning reference, including fork/dup and queued IPC rights.
 }
 
+pub fn dispatch_common_syscall(abi: &mut LinuxAbi, frame: &mut crate::arch::Trapframe, number: usize) -> Option<usize> {
+    if number == scarlet_abi::LINUX_DUP_NATIVE_HANDLE { Some(native_handle::duplicate(abi, frame)) }
+    else { dispatch_standard_common_syscall(abi, frame, number) }
+}
+
 syscall_table! {
-    dispatch_common_syscall,
+    dispatch_standard_common_syscall,
     Invalid = 0 => |_abi: &mut crate::abi::linux::generic::LinuxAbi, _trapframe: &mut crate::arch::Trapframe| {
         0
     },
@@ -500,6 +543,7 @@ syscall_table! {
     Fchdir = 50 => fs::sys_fchdir,
     Fchmod = 52 => fs::sys_fchmod,
     FchmodAt = 53 => fs::sys_fchmodat,
+    FchownAt = 54 => fs::sys_fchownat,
     Fchown = 55 => fs::sys_fchown,
     OpenAt = 56 => fs::sys_openat,
     Close = 57 => fs::sys_close,
@@ -564,6 +608,7 @@ syscall_table! {
     Uname = 160 => proc::sys_uname,
     Umask = 166 => fs::sys_umask,
     Prctl = 167 => proc::sys_prctl,
+    Getcpu = 168 => proc::sys_getcpu,
     Gettimeofday = 169 => time::sys_gettimeofday,
     GetPid = 172 => proc::sys_getpid,
     GetPpid = 173 => proc::sys_getppid,
@@ -612,6 +657,7 @@ syscall_table! {
     GetSockopt = 209 => socket::sys_getsockopt,
     Shutdown = 210 => socket::sys_shutdown,
     Sendmsg = 211 => socket::sys_sendmsg,
+    Sendmmsg = 269 => socket::sys_sendmmsg,
     Recvmsg = 212 => socket::sys_recvmsg,
     Statx = 291 => fs::sys_statx,
     RenameAt2 = 276 => fs::sys_renameat2,

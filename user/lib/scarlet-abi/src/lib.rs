@@ -785,6 +785,12 @@ pub struct RawFileMetadata {
 /// converts a native object handle into a Linux file descriptor.
 pub const NATIVE_CALL_BASE: usize = 0x5343_0000;
 
+/// Linux-ABI extension: duplicate an owned native handle into a Linux file
+/// descriptor for ordinary SCM_RIGHTS transport. Arguments are (handle,
+/// O_CLOEXEC or zero); returns an fd or Linux -errno. The source stays owned.
+/// Separate from native calls, whose results are never Linux descriptors.
+pub const LINUX_DUP_NATIVE_HANDLE: usize = 0x5344_0000;
+
 /// Recognize only the complete native-call namespace.
 pub const fn decode_native_call(number: usize) -> Option<usize> {
     if number & !0xffff == NATIVE_CALL_BASE {

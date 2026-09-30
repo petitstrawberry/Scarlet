@@ -33,7 +33,10 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::any::Any;
+use core::{
+    any::Any,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use crate::device::{Device, DeviceType, manager::DeviceManager};
 use crate::object::capability::{ControlOps, StreamError, StreamOps};
@@ -529,6 +532,7 @@ pub struct DevFileObject {
     device_type: DeviceType,
     /// Per-open device endpoint for device files
     device_open: Option<Arc<dyn Device>>,
+    tty_nonblocking: AtomicBool,
 }
 
 impl DevFileObject {
@@ -562,6 +566,7 @@ impl DevFileObject {
                     device_id,
                     device_type,
                     device_open: Some(device_open),
+                    tty_nonblocking: AtomicBool::new(false),
                 })
             }
             None => Err(FileSystemError::new(
@@ -569,6 +574,14 @@ impl DevFileObject {
                 format!("Device with ID {} not found in DeviceManager", device_id),
             )),
         }
+    }
+
+    fn tty_device(&self) -> Option<&crate::device::char::tty::TtyDevice> {
+        self.device_open
+            .as_ref()?
+            .as_char_device()?
+            .as_any()
+            .downcast_ref::<crate::device::char::tty::TtyDevice>()
     }
 
     #[cfg(test)]
@@ -591,7 +604,12 @@ impl DevFileObject {
                 DeviceType::Char => {
                     if let Some(char_device) = device_open_ref.as_char_device() {
                         // Use read_at for position-based read
-                        match char_device.try_read_at(position, buffer) {
+                        let result = if let Some(tty) = self.tty_device() {
+                            tty.read_with_mode(buffer, self.tty_nonblocking.load(Ordering::Relaxed))
+                        } else {
+                            char_device.try_read_at(position, buffer)
+                        };
+                        match result {
                             Ok(bytes_read) => {
                                 // Update position after successful read
                                 *self.position.write() += bytes_read as u64;
@@ -976,12 +994,19 @@ impl crate::object::capability::selectable::Selectable for DevFileObject {
     }
 
     fn set_nonblocking(&self, enabled: bool) {
+        if self.tty_device().is_some() {
+            self.tty_nonblocking.store(enabled, Ordering::Relaxed);
+            return;
+        }
         if let Some(ref device_open) = self.device_open {
             device_open.as_ref().set_nonblocking(enabled);
         }
     }
 
     fn is_nonblocking(&self) -> bool {
+        if self.tty_device().is_some() {
+            return self.tty_nonblocking.load(Ordering::Relaxed);
+        }
         if let Some(ref device_open) = self.device_open {
             return device_open.as_ref().is_nonblocking();
         }
@@ -1203,6 +1228,42 @@ mod tests {
     use super::*;
     use crate::device::{GenericDevice, manager::DeviceManager};
     use alloc::sync::Arc;
+
+    #[test_case]
+    fn test_devfs_tty_open_modes_are_independent() {
+        use crate::device::char::tty::{TtyDevice, tty_ctl::SCTL_TTY_SET_ECHO};
+        use crate::object::capability::selectable::Selectable;
+
+        let manager = DeviceManager::new_for_test();
+        let tty = Arc::new(TtyDevice::new("test_tty_open", 0));
+        manager.register_device_with_name("test_tty_open".to_string(), tty.clone());
+        let devfs = DevFS::new_with_device_manager(&manager);
+        let node = devfs.lookup(&devfs.root_node(), &"test_tty_open".to_string()).unwrap();
+        let first = devfs.open(&node, 0).unwrap();
+        let second = devfs.open(&node, 0).unwrap();
+
+        first.set_nonblocking(true);
+        assert!(first.is_nonblocking());
+        assert!(!second.is_nonblocking());
+        assert!(!tty.is_nonblocking());
+        let alias = first.clone();
+        alias.set_nonblocking(false);
+        assert!(!first.is_nonblocking());
+        second.set_nonblocking(true);
+        assert!(!first.is_nonblocking());
+        assert!(second.is_nonblocking());
+
+        first.control(SCTL_TTY_SET_ECHO, 0).unwrap();
+        tty.inject_input_byte(b'h');
+        tty.inject_input_byte(b'\n');
+        let mut buffer = [0; 2];
+        assert_eq!(second.read(&mut buffer).unwrap(), 2);
+        assert_eq!(&buffer, b"h\n");
+        assert!(matches!(
+            second.read(&mut buffer),
+            Err(StreamError::WouldBlock)
+        ));
+    }
 
     #[test_case]
     fn test_devfs_creation() {

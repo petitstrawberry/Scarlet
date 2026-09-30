@@ -18,12 +18,18 @@ use alloc::{
 };
 use core::{fmt, sync::atomic::Ordering};
 
+pub(crate) const MAX_EXEC_STRINGS: usize = 256;
+pub(crate) const MAX_EXEC_STRING_BYTES: usize = 128 * 1024;
+
 #[derive(Debug, Clone)]
 pub enum ExecutorError {
     UnknownBinaryFormat,
     UnsupportedAbi(String),
     AbiUnavailableInEnvironment(String),
-    OpenFailed(String),
+    OpenFailed {
+        path: String,
+        error: crate::fs::FileSystemError,
+    },
     ExecutionFailed(String),
 }
 
@@ -35,7 +41,9 @@ impl fmt::Display for ExecutorError {
             Self::AbiUnavailableInEnvironment(abi) => {
                 write!(f, "ABI unavailable in environment: {abi}")
             }
-            Self::OpenFailed(path) => write!(f, "Failed to open executable: {path}"),
+            Self::OpenFailed { path, error } => {
+                write!(f, "Failed to open executable {path}: {}", error.message)
+            }
             Self::ExecutionFailed(msg) => write!(f, "Execution failed: {msg}"),
         }
     }
@@ -141,7 +149,10 @@ impl TransparentExecutor {
         } else {
             vfs.open(path, 0)
         }
-        .map_err(|_| ExecutorError::OpenFailed(path.to_string()))?;
+        .map_err(|error| ExecutorError::OpenFailed {
+            path: path.to_string(),
+            error,
+        })?;
         if let Some(file_obj) = file.as_file() {
             let mut header = [0u8; 256];
             if let Ok(n) = file_obj.read_at(0, &mut header) {
@@ -174,7 +185,10 @@ impl TransparentExecutor {
                             .ok_or_else(|| failure("process has no Environment"))?;
                         let interpreter_file = VfsManager::from_view(view.clone())
                             .open(interpreter, 0)
-                            .map_err(|_| ExecutorError::OpenFailed(interpreter.to_string()))?;
+                            .map_err(|error| ExecutorError::OpenFailed {
+                                path: interpreter.to_string(),
+                                error,
+                            })?;
                         let name = Self::detect_abi(&interpreter_file, interpreter)?;
                         return Self::replace_image(
                             &interpreter_file,
@@ -338,13 +352,13 @@ impl TransparentExecutor {
                 "exec requires an exclusive single-threaded process",
             ));
         }
-        if argv.len() > 256
-            || envp.len() > 256
+        if argv.len() > MAX_EXEC_STRINGS
+            || envp.len() > MAX_EXEC_STRINGS
             || argv
                 .iter()
                 .chain(envp)
                 .try_fold(0usize, |n, s| n.checked_add(s.len() + 1))
-                .is_none_or(|n| n > 128 * 1024)
+                .is_none_or(|n| n > MAX_EXEC_STRING_BYTES)
         {
             return Err(failure("argument list too large"));
         }
@@ -434,6 +448,7 @@ impl TransparentExecutor {
             .store(image.stack_size.load(Ordering::Relaxed), Ordering::Relaxed);
         task.exchange_executable_path(&image);
         task.set_linux_clear_child_tid(None);
+        abi.on_exec_commit(task);
         task.install_exec_abi(abi);
         if explicit_transition {
             task.bootstrap_environment.store(false, Ordering::Release);

@@ -17,6 +17,7 @@
 extern crate scarlet_std as std;
 
 mod input;
+mod gpu;
 mod protocol;
 mod region;
 mod registry;
@@ -74,7 +75,8 @@ fn take_message_handle<T>(
     opcode: u16,
     pending_handles: &mut Vec<T>,
 ) -> Option<T> {
-    let expects_handle = interface == Some("wl_shm") && opcode == shm::shm_request::CREATE_POOL;
+    let expects_handle = (interface == Some("wl_shm") && opcode == shm::shm_request::CREATE_POOL)
+        || (interface == Some("wp_scarlet_sgfx_v1") && opcode == 1);
     if expects_handle && !pending_handles.is_empty() {
         Some(pending_handles.remove(0))
     } else {
@@ -376,6 +378,8 @@ struct WaylandBridge {
     xdg_shell_manager: XdgShellManager,
     /// Shared memory manager for client SHM pools
     shm_manager: ShmManager,
+    gpu_buffers: BTreeMap<u32, scene::Buffer>,
+    compositor_epoch: u32,
     /// Region manager
     region_manager: region::RegionManager,
     /// Input manager
@@ -498,6 +502,8 @@ impl WaylandBridge {
             pointer_buttons: BTreeSet::new(),
             xdg_shell_manager: XdgShellManager::new(),
             shm_manager: ShmManager::new(),
+            gpu_buffers: BTreeMap::new(),
+            compositor_epoch: 0,
             region_manager: region::RegionManager::new(),
             input_manager: InputManager::new(),
             sws_connection: None,
@@ -655,13 +661,15 @@ impl WaylandBridge {
         }
 
         let request_id = self.send_sws_request(protocol_sws::client_msg::GET_CAPABILITIES, &[])?;
-        if let protocol_sws::ServerMessage::Capabilities { capabilities, .. } = self
+        if let protocol_sws::ServerMessage::Capabilities { capabilities, compositor_epoch, .. } = self
             .wait_for_sws_message(request_id, |msg| {
                 matches!(msg, protocol_sws::ServerMessage::Capabilities { .. })
             })?
         {
             self.registry
                 .set_surface_scenes(capabilities & protocol_sws::capabilities::SURFACE_SCENES != 0);
+            self.compositor_epoch = compositor_epoch;
+            self.registry.set_gpu_buffers(capabilities & protocol_sws::capabilities::EXTENSION_GPU_BUFFERS != 0);
         }
         self.query_output_scale()?;
 
@@ -1509,9 +1517,7 @@ impl WaylandBridge {
                     return Ok(());
                 }
                 if let Some(wayland_buffer_id) = self
-                    .shm_manager
-                    .get_buffer_by_sws_id(buffer_id)
-                    .map(|buffer| buffer.buffer_id)
+                    .wayland_buffer_for_resource(buffer_id)
                     && self
                         .objects
                         .get(&wayland_buffer_id)
@@ -2546,7 +2552,8 @@ impl WaylandBridge {
         };
 
         if attached_handle.is_some()
-            && (interface.as_str() != "wl_shm" || opcode != shm::shm_request::CREATE_POOL)
+            && !((interface.as_str() == "wl_shm" && opcode == shm::shm_request::CREATE_POOL)
+                || (interface.as_str() == "wp_scarlet_sgfx_v1" && opcode == 1))
         {
             return Err("Unexpected handle attached to Wayland message");
         }
@@ -2560,6 +2567,7 @@ impl WaylandBridge {
                 self.handle_scene_message(object_id, &interface, opcode, payload)
             }
             "wl_shm" => self.handle_shm_message(opcode, payload, attached_handle),
+            "wp_scarlet_sgfx_v1" => self.handle_gpu_message(object_id, opcode, payload, attached_handle),
             "wl_shm_pool" => self.handle_shm_pool_message(object_id, opcode, payload),
             "wl_buffer" => self.handle_buffer_message(object_id, opcode, payload),
             "wl_seat" => self.handle_seat_message(object_id, opcode, payload),
@@ -2898,10 +2906,11 @@ impl WaylandBridge {
                     let _y = Self::parse_i32(payload, 8).unwrap_or(0);
                     let pending_buffer = (buffer_id != 0).then_some(buffer_id);
                     if let Some(buffer_id) = pending_buffer
-                        && self.shm_manager.get_buffer(buffer_id).is_none()
+                        && self.buffer_view(buffer_id).is_none()
                     {
-                        return Err("wl_surface.attach referenced an unknown SHM buffer");
+                        return Err("wl_surface.attach referenced an unknown buffer");
                     }
+                    if self.gpu_buffers.contains_key(&buffer_id) { self.scene.enable(surface_id); }
                     if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
                         surface.attach(pending_buffer);
                     }
@@ -2990,15 +2999,7 @@ impl WaylandBridge {
                 let selection = if buffer_attached {
                     Some(match buffer_id {
                         Some(id) => {
-                            let buffer = self
-                                .shm_manager
-                                .get_buffer(id)
-                                .ok_or("Unknown attached buffer")?;
-                            Some(scene::Buffer {
-                                id: buffer.sws_buffer_id,
-                                width: buffer.width as u32,
-                                height: buffer.height as u32,
-                            })
+                            Some(self.buffer_view(id).ok_or("Unknown attached buffer")?)
                         }
                         None => None,
                     })
@@ -3430,11 +3431,8 @@ impl WaylandBridge {
         match opcode {
             shm::buffer_request::DESTROY => {
                 bridge_log!("[Bridge] wl_buffer.destroy");
-                let sws_buffer_id = self
-                    .shm_manager
-                    .get_buffer(buffer_id)
-                    .ok_or("Wayland SHM buffer not found")?
-                    .sws_buffer_id;
+                let sws_buffer_id = self.buffer_view(buffer_id)
+                    .ok_or("Wayland buffer not found")?.id;
                 // A client may destroy the protocol object immediately after
                 // committing it. Publish any coalesced use before retiring the
                 // reusable SWS resource so the compositor observes the same
@@ -3446,6 +3444,7 @@ impl WaylandBridge {
                     self.destroy_extension_buffer(sws_buffer_id)?;
                 }
                 self.shm_manager.destroy_buffer(buffer_id);
+                self.gpu_buffers.remove(&buffer_id);
                 self.remove_object(buffer_id);
                 Ok(Vec::new())
             }

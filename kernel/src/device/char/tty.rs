@@ -1432,6 +1432,16 @@ impl Device for TtyDevice {
 
 impl TtyDevice {
     fn read_interruptible(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        self.read_with_mode(buffer, self.nonblocking.load(Ordering::Relaxed))
+    }
+
+    /// Read using the mode of the calling open description. Terminal settings
+    /// and input queues are shared, but O_NONBLOCK must not affect other opens.
+    pub(crate) fn read_with_mode(
+        &self,
+        buffer: &mut [u8],
+        nonblocking: bool,
+    ) -> Result<usize, StreamError> {
         if buffer.is_empty() {
             return Ok(0);
         }
@@ -1515,7 +1525,7 @@ impl TtyDevice {
                     return Ok(bytes);
                 }
                 // Wait for more input
-                if self.nonblocking.load(Ordering::Relaxed) {
+                if nonblocking {
                     return Err(StreamError::WouldBlock);
                 }
                 if let Some(task) = mytask() {
@@ -1567,7 +1577,7 @@ impl TtyDevice {
                     (head_is_e0 && buffer.len() >= 2, have)
                 };
                 if need_pair && !have_pair {
-                    if self.nonblocking.load(Ordering::Relaxed) {
+                    if nonblocking {
                         return Err(StreamError::WouldBlock);
                     }
                     if let Some(task) = mytask() {
@@ -1610,7 +1620,7 @@ impl TtyDevice {
                 continue;
             }
             // Not enough yet; block until new input arrives
-            if self.nonblocking.load(Ordering::Relaxed) {
+            if nonblocking {
                 return Err(StreamError::WouldBlock);
             }
             if let Some(task) = mytask() {

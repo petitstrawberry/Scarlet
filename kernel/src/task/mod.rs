@@ -351,7 +351,11 @@ pub(crate) fn get_thread_group_wait_owner(caller: &Task, child_id: usize) -> Opt
 /// Thread children are intentionally excluded from wait-any: their JoinHandle
 /// uses a specific PID and must not be consumed by an unrelated process reaper.
 pub(crate) fn get_waitable_process_children(caller: &Task) -> Vec<usize> {
-    get_all_task_ids()
+    // A child can temporarily be absent from every scheduler queue while
+    // another CPU dispatches or migrates it. Ownership is a property of the
+    // task registry, so a queue snapshot must not turn that gap into ECHILD.
+    crate::sched::scheduler::get_task_pool()
+        .task_ids_snapshot()
         .into_iter()
         .filter(|child_id| {
             let Some(child) = get_task_by_id(*child_id) else {
@@ -4855,6 +4859,31 @@ mod tests {
         let child_id = add_task(child, 0);
         let child = get_task_by_id(child_id).unwrap();
         assert_eq!(child.get_thread_group_id(), parent.get_thread_group_id());
+    }
+
+    #[test_case]
+    fn test_waitable_child_does_not_depend_on_scheduler_queue() {
+        use crate::sched::scheduler::register_task;
+
+        reset();
+        register_online_cpu(0);
+        let parent_id = register_task(super::new_user_task("WaitParent".to_string(), 0));
+        let parent = get_task_by_id(parent_id).unwrap();
+        let child_id = register_task(parent.clone_task(CloneFlags::default()).unwrap());
+        let child = get_task_by_id(child_id).unwrap();
+        assert!(parent.adopt_registered_process_child(&child));
+
+        // Model the dispatch gap: the child is registered and owned, but has
+        // not been put on a ready/blocked/zombie queue or current-CPU slot.
+        assert!(!crate::sched::scheduler::get_all_task_ids().contains(&child_id));
+        assert!(get_waitable_process_children(&parent).contains(&child_id));
+        assert_eq!(
+            get_thread_group_wait_owner(&parent, child_id).unwrap().get_id(),
+            parent_id
+        );
+        child.set_exit_status(0);
+        child.set_state(TaskState::Zombie);
+        assert!(matches!(parent.wait(child_id), Ok(0)));
     }
 
     #[test_case]
