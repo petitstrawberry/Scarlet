@@ -40,3 +40,5 @@ test-media/
 .DS_Store
 
 artifacts
+
+.scarlet-operation.lock
