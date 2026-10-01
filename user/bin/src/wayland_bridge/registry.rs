@@ -37,6 +37,7 @@ impl Registry {
         registry.add_global("wl_data_device_manager", 3);
         registry.add_global("wl_shm", 1);
         registry.add_global("wl_output", 3);
+        registry.add_global("zxdg_output_manager_v1", 3);
         registry.add_global("xdg_wm_base", 2);
 
         registry

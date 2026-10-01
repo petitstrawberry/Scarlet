@@ -23,6 +23,7 @@ mod region;
 mod registry;
 mod scene;
 mod scene_bridge;
+mod output;
 mod shm;
 mod surface;
 mod xdg_shell;
@@ -409,6 +410,8 @@ struct WaylandBridge {
     focused_surface: Option<u32>,
     /// Last focused keyboard (for sending leave events)
     focused_keyboard: Option<u32>,
+    pressed_keys: BTreeSet<u16>,
+    locked_modifiers: u32,
     /// Last focused pointer (for sending leave events)
     focused_pointer: Option<u32>,
     /// Incoming buffer for SWS frames
@@ -457,6 +460,10 @@ struct WaylandBridge {
     /// Advertised via wl_output.scale so Wayland clients render at full
     /// physical resolution under HiDPI.
     output_scale: i32,
+    /// Actual framebuffer dimensions in physical pixels.
+    output_size: (u32, u32),
+    /// xdg_output object -> associated wl_output object.
+    xdg_outputs: BTreeMap<u32, u32>,
     /// Mapped surfaces and their scene root on our single SWS output.
     output_surfaces: BTreeMap<u32, u32>,
 }
@@ -519,6 +526,8 @@ impl WaylandBridge {
             pointer_position_for_thread,
             focused_surface: None,
             focused_keyboard: None,
+            pressed_keys: BTreeSet::new(),
+            locked_modifiers: 0,
             focused_pointer: None,
             sws_rx_buffer: Vec::new(),
             sws_handle_record,
@@ -544,6 +553,8 @@ impl WaylandBridge {
             last_left_button_serial: None,
             last_left_button_time: None,
             output_scale: 1,
+            output_size: (800, 600),
+            xdg_outputs: BTreeMap::new(),
             output_surfaces: BTreeMap::new(),
         })
     }
@@ -672,6 +683,14 @@ impl WaylandBridge {
             self.registry.set_gpu_buffers(capabilities & protocol_sws::capabilities::EXTENSION_GPU_BUFFERS != 0);
         }
         self.query_output_scale()?;
+        let request_id = self.send_sws_request(protocol_sws::client_msg::GET_SCREEN_SIZE, &[])?;
+        if let protocol_sws::ServerMessage::ScreenSize { width, height } = self
+            .wait_for_sws_message(request_id, |msg| {
+                matches!(msg, protocol_sws::ServerMessage::ScreenSize { .. })
+            })?
+        {
+            self.output_size = (width.max(1), height.max(1));
+        }
 
         bridge_info!(
             "[wayland-bridge] client={} SWS extension={} output_scale={}",
@@ -765,6 +784,7 @@ impl WaylandBridge {
     }
 
     fn remove_object(&mut self, id: u32) {
+        self.xdg_outputs.remove(&id);
         self.output_surfaces.remove(&id);
         self.objects.remove(&id);
         self.object_versions.remove(&id);
@@ -1040,8 +1060,9 @@ impl WaylandBridge {
             let mut enter = WaylandMessage::new(keyboard_id, input::keyboard_event::ENTER);
             enter.add_arg(WaylandArg::Uint(serial));
             enter.add_arg(WaylandArg::Object(surface_id));
-            enter.add_arg(WaylandArg::Array(Vec::new()));
+            enter.add_arg(WaylandArg::Array(self.pressed_key_array()));
             messages.push(enter);
+            messages.push(self.keyboard_modifiers_event(keyboard_id));
         }
 
         self.queue_input_messages(messages);
@@ -1161,6 +1182,19 @@ impl WaylandBridge {
                         self.pending_pointer_id = Some(pointer_id);
                     }
                 } else if let Some(keyboard_id) = self.focused_keyboard {
+                    let was_pressed = self.pressed_keys.contains(&code);
+                    if value == 0 {
+                        self.pressed_keys.remove(&code);
+                    } else {
+                        self.pressed_keys.insert(code);
+                    }
+                    if value == 1 && !was_pressed {
+                        match code {
+                            58 => self.locked_modifiers ^= 1 << 1, // Caps Lock
+                            69 => self.locked_modifiers ^= 1 << 4, // Num Lock
+                            _ => {}
+                        }
+                    }
                     let mut msg = WaylandMessage::new(keyboard_id, input::keyboard_event::KEY);
                     msg.add_arg(WaylandArg::Uint(self.allocate_serial()));
                     msg.add_arg(WaylandArg::Uint(time as u32));
@@ -1168,6 +1202,7 @@ impl WaylandBridge {
                     msg.add_arg(WaylandArg::Uint(value as u32));
                     let mut messages = Vec::new();
                     messages.push(msg);
+                    messages.push(self.keyboard_modifiers_event(keyboard_id));
                     self.queue_input_messages(messages);
                 }
             }
@@ -1461,7 +1496,7 @@ impl WaylandBridge {
                     let mut messages = Vec::new();
                     for (&id, interface) in &self.objects {
                         if interface == "wl_output" {
-                            messages.extend(self.output_scale_events(id));
+                            messages.extend(self.output_update_events(id));
                         }
                     }
                     self.queue_input_messages(messages);
@@ -1474,6 +1509,19 @@ impl WaylandBridge {
                     for root in roots {
                         self.publish_scene(root)?;
                     }
+                }
+            }
+            protocol_sws::ServerMessage::ScreenSizeChanged { width, height } => {
+                let size = (width.max(1), height.max(1));
+                if self.output_size != size {
+                    self.output_size = size;
+                    let mut messages = Vec::new();
+                    for (&id, interface) in &self.objects {
+                        if interface == "wl_output" {
+                            messages.extend(self.output_update_events(id));
+                        }
+                    }
+                    self.queue_input_messages(messages);
                 }
             }
             protocol_sws::ServerMessage::WindowStateChanged {
@@ -1731,13 +1779,7 @@ impl WaylandBridge {
             return Ok(self.keymap_size);
         }
 
-        let keymap = b"xkb_keymap {\n\
-            xkb_keycodes \"(unnamed)\" { minimum = 8; maximum = 255; };\n\
-            xkb_types \"(unnamed)\" { type \"ONE_LEVEL\" { level_name[1] = \"Any\"; }; };\n\
-            xkb_compatibility \"(unnamed)\" { };\n\
-            xkb_symbols \"(unnamed)\" { };\n\
-            xkb_geometry \"(unnamed)\" { };\n\
-        };";
+        let keymap = include_bytes!("keymap/us.xkb");
         let size = keymap.len() + 1;
 
         let shm = SharedMemory::create(size, permissions::READ_WRITE)
@@ -1766,6 +1808,33 @@ impl WaylandBridge {
         self.keymap_size = size as u32;
         self.keymap_shm = Some(shm);
         Ok(self.keymap_size)
+    }
+
+    fn pressed_key_array(&self) -> Vec<u8> {
+        self.pressed_keys.iter().flat_map(|&key| (key as u32).to_ne_bytes()).collect()
+    }
+
+    fn keyboard_modifiers_event(&mut self, keyboard: u32) -> WaylandMessage {
+        // Core modifier indices of the serialized evdev/pc105 keymap.
+        let mut depressed = 0;
+        for &key in &self.pressed_keys {
+            depressed |= match key {
+                42 | 54 => 1 << 0, // Shift
+                58 => 1 << 1, // Lock
+                29 | 97 => 1 << 2, // Control
+                56 | 100 => 1 << 3, // Mod1 / Alt
+                69 => 1 << 4, // Mod2 / Num Lock
+                125 | 126 => 1 << 6, // Mod4 / Super
+                _ => 0,
+            };
+        }
+        let mut event = WaylandMessage::new(keyboard, input::keyboard_event::MODIFIERS);
+        event.add_arg(WaylandArg::Uint(self.allocate_serial()));
+        event.add_arg(WaylandArg::Uint(depressed));
+        event.add_arg(WaylandArg::Uint(0));
+        event.add_arg(WaylandArg::Uint(self.locked_modifiers));
+        event.add_arg(WaylandArg::Uint(0));
+        event
     }
 
     fn parse_u32(payload: &[u8], offset: usize) -> Option<u32> {
@@ -2574,6 +2643,9 @@ impl WaylandBridge {
             "wl_pointer" => self.handle_pointer_message(object_id, opcode, payload),
             "wl_keyboard" => self.handle_keyboard_message(object_id, opcode, payload),
             "wl_output" => self.handle_output_message(object_id, opcode, payload),
+            "zxdg_output_manager_v1" | "zxdg_output_v1" => {
+                self.handle_xdg_output_message(object_id, opcode, payload)
+            }
             "wl_data_device_manager" => self.handle_data_device_manager_message(opcode, payload),
             "wl_data_device" => self.handle_data_device_message(object_id, opcode, payload),
             "wl_data_source" => self.handle_data_source_message(object_id, opcode, payload),
@@ -2759,15 +2831,7 @@ impl WaylandBridge {
                                     geom.add_arg(WaylandArg::Int(0)); // transform
                                     msgs.push(geom);
 
-                                    let mut mode =
-                                        WaylandMessage::new(new_id, protocol::output_event::MODE);
-                                    mode.add_arg(WaylandArg::Uint(1)); // current
-                                    mode.add_arg(WaylandArg::Int(800 * scale)); // width (physical)
-                                    mode.add_arg(WaylandArg::Int(600 * scale)); // height (physical)
-                                    mode.add_arg(WaylandArg::Int(60000)); // refresh mHz
-                                    msgs.push(mode);
-
-                                    msgs.extend(self.output_scale_events(new_id));
+                                    msgs.extend(self.output_update_events(new_id));
                                     for &surface in self.output_surfaces.keys() {
                                         let mut enter = WaylandMessage::new(
                                             surface,
@@ -3852,18 +3916,11 @@ impl WaylandBridge {
                             WaylandMessage::new(keyboard_id, input::keyboard_event::ENTER);
                         enter_msg.add_arg(WaylandArg::Uint(serial));
                         enter_msg.add_arg(WaylandArg::Object(surface_id));
-                        enter_msg.add_arg(WaylandArg::Array(Vec::new())); // keys array
+                        enter_msg.add_arg(WaylandArg::Array(self.pressed_key_array()));
                         msgs.push(enter_msg);
 
                         // Send modifiers event
-                        let mut modifiers_msg =
-                            WaylandMessage::new(keyboard_id, input::keyboard_event::MODIFIERS);
-                        modifiers_msg.add_arg(WaylandArg::Uint(serial));
-                        modifiers_msg.add_arg(WaylandArg::Uint(0)); // mods_depressed
-                        modifiers_msg.add_arg(WaylandArg::Uint(0)); // mods_latched
-                        modifiers_msg.add_arg(WaylandArg::Uint(0)); // mods_locked
-                        modifiers_msg.add_arg(WaylandArg::Uint(0)); // group
-                        msgs.push(modifiers_msg);
+                        msgs.push(self.keyboard_modifiers_event(keyboard_id));
                     }
 
                     return Ok(msgs);
@@ -4443,6 +4500,55 @@ mod tests {
             messages[1].header.opcode(),
             super::protocol::output_event::DONE
         );
+    }
+
+    #[test]
+    fn xdg_output_reports_physical_mode_and_logical_hidpi_geometry() {
+        let mut bridge = WaylandBridge::new_client(1).unwrap();
+        bridge.add_object(10, std::string::String::from("wl_output"));
+        bridge.add_object(20, std::string::String::from("zxdg_output_manager_v1"));
+        bridge.object_versions.insert(10, 3);
+        bridge.object_versions.insert(20, 3);
+        bridge.output_scale = 2;
+        bridge.output_size = (1280, 800);
+        let payload = [30u32.to_ne_bytes(), 10u32.to_ne_bytes()].concat();
+        let events = bridge.handle_xdg_output_message(20, 1, &payload).unwrap();
+        assert!(matches!(events[1].args.as_slice(),
+            [super::WaylandArg::Int(640), super::WaylandArg::Int(400)]));
+        assert_eq!(events.last().unwrap().header.object_id, 10);
+        assert_eq!(events.last().unwrap().header.opcode(), super::protocol::output_event::DONE);
+        assert!(!events.iter().any(|event| event.header.object_id == 30 && event.header.opcode() == 2));
+        bridge.output_size = (1920, 1080);
+        let events = bridge.output_update_events(10);
+        assert!(matches!(events[0].args.as_slice(),
+            [super::WaylandArg::Uint(3), super::WaylandArg::Int(1920),
+             super::WaylandArg::Int(1080), super::WaylandArg::Int(60000)]));
+        assert!(matches!(events[2].args.as_slice(),
+            [super::WaylandArg::Int(960), super::WaylandArg::Int(540)]));
+        assert_eq!(events.last().unwrap().header.opcode(), super::protocol::output_event::DONE);
+        bridge.handle_xdg_output_message(20, 0, &[]).unwrap();
+        assert_eq!(bridge.xdg_outputs.get(&30), Some(&10));
+        bridge.handle_xdg_output_message(30, 0, &[]).unwrap();
+        assert!(bridge.xdg_outputs.is_empty());
+    }
+
+    #[test]
+    fn keyboard_modifiers_follow_press_release_and_lock_state() {
+        let mut bridge = WaylandBridge::new_client(1).unwrap();
+        bridge.focused_keyboard = Some(10);
+        bridge.handle_sws_input_event(0, 1, 1, 42, 1);
+        bridge.handle_sws_input_event(0, 2, 1, 29, 1);
+        let modifiers = bridge.keyboard_modifiers_event(10);
+        assert!(matches!(modifiers.args[1], super::WaylandArg::Uint(5)));
+        bridge.handle_sws_input_event(0, 3, 1, 42, 0);
+        let modifiers = bridge.keyboard_modifiers_event(10);
+        assert!(matches!(modifiers.args[1], super::WaylandArg::Uint(4)));
+        bridge.handle_sws_input_event(0, 4, 1, 58, 1);
+        bridge.handle_sws_input_event(0, 5, 1, 58, 1);
+        assert_eq!(bridge.locked_modifiers, 2);
+        bridge.handle_sws_input_event(0, 6, 1, 58, 0);
+        bridge.handle_sws_input_event(0, 7, 1, 58, 1);
+        assert_eq!(bridge.locked_modifiers, 0);
     }
 
     #[test]

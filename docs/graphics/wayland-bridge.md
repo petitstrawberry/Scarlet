@@ -30,10 +30,24 @@ user/bin/src/wayland_bridge/
 ├── xdg_shell.rs  - xdg_surface and xdg_toplevel state
 ├── shm.rs        - wl_shm pool and buffer objects
 ├── input.rs      - keyboard and pointer translation
+├── output.rs     - physical modes and xdg-output logical geometry
+├── keymap/       - self-contained evdev/pc105 US keyboard map and notices
 └── region.rs     - region objects
 ```
 
 ## Implemented Surface Model
+
+Output modes come from SWS's actual framebuffer dimensions. The bridge
+advertises `zxdg_output_manager_v1` versions 1–3 and reports logical dimensions
+as physical dimensions divided by the integer output scale. Logical geometry
+is updated when SWS reports a screen-size or output-scale change; v3 updates
+are delimited by `wl_output.done`. This avoids the old hardcoded 800×600 mode
+and gives Wine clients the logical output information they request.
+
+Keyboard clients receive a populated, self-contained US XKB keymap rather than
+an empty layout. Keycodes follow Linux evdev, with Shift, Control, Alt, Super,
+Caps Lock and Num Lock state in `wl_keyboard.modifiers`. Other physical
+keyboard layouts are not selectable yet.
 
 The bridge follows Wayland's double-buffered surface model:
 
@@ -152,7 +166,7 @@ The currently useful path includes:
 - `wl_display`, `wl_registry`, `wl_compositor`, `wl_surface`
 - `wl_shm`, `wl_shm_pool`, `wl_buffer`, `wl_callback`
 - `wl_seat`, `wl_pointer`, `wl_keyboard`
-- `wl_output`
+- `wl_output` and `zxdg_output_manager_v1` / `zxdg_output_v1`
 - `xdg_wm_base`, `xdg_surface`, and `xdg_toplevel`
 - `wp_scarlet_sgfx_v1` when SWS GPU scene imports are available
 
@@ -181,6 +195,10 @@ machine IDs, settings portals, MIME data, icon loaders, or GTK theme assets.
   awaiting a replacement buffer, the GPU compositor scales the retained
   contents to the requested presentation geometry instead of rejecting the
   smaller SHM range or drawing a placeholder.
+- Compound surface commits also keep fullscreen, maximized, and workspace
+  layout geometry independent from scene-buffer extents. An oversized retained
+  Wine scene is fitted to the managed destination rather than enlarging the
+  window beyond the output.
 - Inactive or otherwise suspended SWS scenes retain their newest surface state
   without continuously damaging the output.
 - Handle transfer occurs at pool registration, not in the pointer-hover or

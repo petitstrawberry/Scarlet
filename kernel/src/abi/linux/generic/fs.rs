@@ -599,12 +599,27 @@ pub const O_DSYNC: i32 = 0o10000; // Data sync
 #[allow(dead_code)]
 pub const O_ASYNC: i32 = 0o20000; // Asynchronous I/O
 #[allow(dead_code)]
+#[cfg(not(target_arch = "aarch64"))]
 pub const O_DIRECT: i32 = 0o40000; // Direct I/O
+#[cfg(target_arch = "aarch64")]
 #[allow(dead_code)]
+pub const O_DIRECT: i32 = 0o200000;
+#[allow(dead_code)]
+#[cfg(not(target_arch = "aarch64"))]
 pub const O_LARGEFILE: i32 = 0o100000; // Large file support
-pub const O_DIRECTORY: i32 = 0o200000; // Must be a directory
+#[cfg(target_arch = "aarch64")]
 #[allow(dead_code)]
+pub const O_LARGEFILE: i32 = 0o400000;
+#[cfg(not(target_arch = "aarch64"))]
+pub const O_DIRECTORY: i32 = 0o200000; // Must be a directory
+#[cfg(target_arch = "aarch64")]
+pub const O_DIRECTORY: i32 = 0o40000;
+#[allow(dead_code)]
+#[cfg(not(target_arch = "aarch64"))]
 pub const O_NOFOLLOW: i32 = 0o400000; // Don't follow symlinks
+#[cfg(target_arch = "aarch64")]
+#[allow(dead_code)]
+pub const O_NOFOLLOW: i32 = 0o100000;
 #[allow(dead_code)]
 pub const O_NOATIME: i32 = 0o1000000; // Don't update access time
 pub const O_CLOEXEC: i32 = 0o2000000; // Close-on-exec
@@ -727,12 +742,15 @@ fn stat_from_object(
             let metadata = file.metadata().map_err(stream_error_to_errno)?;
             return Ok((LinuxStat::from_metadata(&metadata), metadata.created_time));
         }
-        // DevFS objects are not necessarily wrapped in VfsFileObject. Their
-        // device identity must not change when opened again or duplicated.
+        // Synthetic proc files and DevFS objects need not be VfsFileObject.
+        // Preserve their type and identity when opened again or duplicated.
         if let Ok(metadata) = file.metadata() {
             if matches!(
                 metadata.file_type,
-                FileType::CharDevice(_) | FileType::BlockDevice(_)
+                FileType::RegularFile
+                    | FileType::Directory
+                    | FileType::CharDevice(_)
+                    | FileType::BlockDevice(_)
             ) {
                 return Ok((LinuxStat::from_metadata(&metadata), metadata.created_time));
             }

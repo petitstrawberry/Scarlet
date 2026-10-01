@@ -16,8 +16,8 @@ cross-page chmod paths, and last-link unlink while a descriptor remains open.
 Forked children check whole-file POSIX lock contention, `F_GETLK`'s owner PID,
 release on closing another alias, release on exit, retention across a real
 `execve` of `/usr/bin/sleep`, and release when exec closes a CLOEXEC alias.
-The probe intentionally expects `EOPNOTSUPP` for byte ranges and a contended
-sleeping lock request.
+An uncontended byte-range lock must succeed; a contended sleeping lock
+request still returns `EOPNOTSUPP`.
 
 Build from the repository root:
 

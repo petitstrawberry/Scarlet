@@ -8542,15 +8542,23 @@ impl Compositor {
         let previous = window.detach_external_buffer();
         // Keep the root surface anchored when children extend past its origin,
         // including unmap/remap transitions.
-        window.x = window
-            .x
-            .saturating_add(scene.origin_x.saturating_sub(old_origin.0));
-        window.y = window
-            .y
-            .saturating_add(scene.origin_y.saturating_sub(old_origin.1));
+        let managed = window.fullscreen || window.maximized || window.workspace_layout_managed;
+        if !managed {
+            window.x = window
+                .x
+                .saturating_add(scene.origin_x.saturating_sub(old_origin.0));
+            window.y = window
+                .y
+                .saturating_add(scene.origin_y.saturating_sub(old_origin.1));
+        }
         if !scene.layers.is_empty() {
-            window.width = scene.width;
-            window.height = scene.height;
+            // A Wayland client may retain a larger scene while responding to a
+            // fullscreen/maximize configure. Keep policy geometry independent
+            // from the sampled backing, just as for a single attached buffer.
+            if !managed {
+                window.width = scene.width;
+                window.height = scene.height;
+            }
             window.set_backing_extent(scene.width, scene.height);
             window.buffer = pixels;
             window.has_alpha_content = true;

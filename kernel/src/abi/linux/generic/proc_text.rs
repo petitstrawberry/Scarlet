@@ -76,7 +76,43 @@ fn cpu_info() -> String {
 const CPU_DIRECTORY: &str = "/sys/devices/system/cpu";
 const CPU_FILES: &[&str] = &["online", "possible", "present"];
 
+/// Report the calling address space, including native ELF loader mappings.
+/// Box64 uses these ranges before retrying a hinted mmap with MAP_FIXED.
+fn self_maps() -> Option<String> {
+    let task = crate::task::mytask()?;
+    let ranges = task.vm_manager.with_memmaps(|maps| {
+        maps.values()
+            .filter(|map| map.vmarea.start < crate::environment::USER_LOWER_CANONICAL_END)
+            .map(|map| {
+                (
+                    map.vmarea.start,
+                    map.vmarea.end,
+                    map.permissions,
+                    map.is_shared,
+                )
+            })
+            .collect::<alloc::vec::Vec<_>>()
+    });
+    let mut content = String::new();
+    for (start, end, permissions, shared) in ranges {
+        // VMA ends are inclusive internally; Linux maps uses exclusive ends.
+        // Backing file identities/offsets are not exposed by every map owner.
+        content.push_str(&format!(
+            "{start:08x}-{:08x} {}{}{}{} 00000000 00:00 0\n",
+            end + 1,
+            if permissions & 1 != 0 { 'r' } else { '-' },
+            if permissions & 2 != 0 { 'w' } else { '-' },
+            if permissions & 4 != 0 { 'x' } else { '-' },
+            if shared { 's' } else { 'p' },
+        ));
+    }
+    Some(content)
+}
+
 fn text_content(path: &str) -> Option<String> {
+    if matches!(path, "/proc/self/maps" | "/proc/thread-self/maps") {
+        return self_maps();
+    }
     #[cfg(target_arch = "aarch64")]
     return Some(match path {
         "/proc/cpuinfo" => cpu_info(),

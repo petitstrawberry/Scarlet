@@ -102,6 +102,12 @@ The following system calls are currently handled by the Linux ABI module.
 | `mincore` | ✅ Supported | |
 | `madvise` | ✅ Supported | |
 
+`/proc/self/maps` and `/proc/thread-self/maps` expose an open-time snapshot of
+user virtual-memory ranges and permissions, including the native ELF
+interpreter. This lets Box64 protect native mappings during Wine address
+reservation. File offsets, device/inode identifiers and backing paths are not
+reported; numeric `/proc/<pid>/maps` is not implemented.
+
 ### Time & Timers
 | Syscall | Status | Notes |
 |---------|--------|-------|
