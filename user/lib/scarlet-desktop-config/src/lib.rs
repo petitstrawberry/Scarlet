@@ -61,6 +61,9 @@ pub const DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD: &str = "OpenFile";
 /// Method used to open the File Manager in save-file picker mode.
 pub const DESKTOP_FILE_MANAGER_SAVE_FILE_METHOD: &str = "SaveFile";
 
+/// Returns supported picker capabilities as String arguments (no picker is opened).
+pub const DESKTOP_FILE_MANAGER_GET_PICKER_CAPABILITIES_METHOD: &str = "GetPickerCapabilities";
+
 /// Method used to show the normal File Manager window.
 pub const DESKTOP_FILE_MANAGER_SHOW_METHOD: &str = "Show";
 

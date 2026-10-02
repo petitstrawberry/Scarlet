@@ -6,6 +6,7 @@
 //! calling application.
 
 mod file_icons;
+mod picker_filter;
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::cmp::Ordering;
@@ -20,12 +21,12 @@ use std::time::{Duration, Instant};
 use sbus::{Argument, Message};
 use sbus_client::Connection as SbusConnection;
 use scarlet_desktop_config::{
-    DESKTOP_FILE_MANAGER_BUS_NAME, DESKTOP_FILE_MANAGER_INTERFACE,
-    DESKTOP_FILE_MANAGER_OBJECT_PATH, DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD,
-    DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL, DESKTOP_FILE_MANAGER_SAVE_FILE_METHOD,
-    DESKTOP_FILE_MANAGER_SHOW_METHOD, DESKTOP_FILES_APP_ID, DESKTOP_STEMD_BUS_NAME,
-    DESKTOP_STEMD_INTERFACE, DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD, DESKTOP_STEMD_OBJECT_PATH,
-    DESKTOP_STEMD_OPEN_PATH_METHOD,
+    DESKTOP_FILE_MANAGER_BUS_NAME, DESKTOP_FILE_MANAGER_GET_PICKER_CAPABILITIES_METHOD,
+    DESKTOP_FILE_MANAGER_INTERFACE, DESKTOP_FILE_MANAGER_OBJECT_PATH,
+    DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD, DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL,
+    DESKTOP_FILE_MANAGER_SAVE_FILE_METHOD, DESKTOP_FILE_MANAGER_SHOW_METHOD, DESKTOP_FILES_APP_ID,
+    DESKTOP_STEMD_BUS_NAME, DESKTOP_STEMD_INTERFACE, DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD,
+    DESKTOP_STEMD_OBJECT_PATH, DESKTOP_STEMD_OPEN_PATH_METHOD,
 };
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
@@ -848,6 +849,22 @@ impl FilerApp {
                 })
                 .unwrap_or_default()
         };
+        if accepted {
+            let name = Path::new(&path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if let Err(message) = picker_filter::validate_selection(
+                name,
+                Path::new(&path).is_dir(),
+                request.select_directories,
+                request.save_mode,
+                &request.filter,
+            ) {
+                self.picker_status.set(String::from(message));
+                return;
+            }
+        }
         let success = accepted && !path.is_empty();
 
         let request_id = request.id;
@@ -967,7 +984,7 @@ impl FilerApp {
         .spacing(10.0)
         .minimum_cell_width(FILE_CELL_WIDTH);
 
-        let title = if picker {
+        let mut title = if picker {
             self.picker_request
                 .get()
                 .as_ref()
@@ -976,6 +993,16 @@ impl FilerApp {
         } else {
             String::from("Files")
         };
+        if picker {
+            if let Some(request) = self.picker_request.get() {
+                if let Some(extensions) = request
+                    .filter
+                    .strip_prefix(picker_filter::EXTENSION_FILTER_PREFIX)
+                {
+                    title.push_str(&format!(" — .{}", extensions.replace(',', ", .")));
+                }
+            }
+        }
         let footer = if picker {
             let cancel_app = self.clone();
             let open_app = self.clone();
@@ -1627,6 +1654,9 @@ fn read_entries(path: &str, picker: Option<&PickerRequest>) -> std::io::Result<V
 }
 
 fn matches_filter(name: &str, filter: &str) -> bool {
+    if let Some(matches) = picker_filter::matches_extensions(name, filter) {
+        return matches;
+    }
     match filter {
         "" | "*" | "*/*" => true,
         "image/*" => is_image(name),
@@ -1773,6 +1803,15 @@ fn run_picker_service() {
             {
                 continue;
             }
+            if method == DESKTOP_FILE_MANAGER_GET_PICKER_CAPABILITIES_METHOD {
+                let _ = connection.send_method_return(
+                    0,
+                    vec![Argument::String(String::from(
+                        picker_filter::EXTENSION_FILTER_CAPABILITY,
+                    ))],
+                );
+                continue;
+            }
             if method == DESKTOP_FILE_MANAGER_SHOW_METHOD {
                 let _ = connection.send_method_return(0, Vec::new());
                 // The resident service owns no UI thread. The main Files
@@ -1828,6 +1867,14 @@ fn run_picker_service() {
                 },
             };
 
+            if !picker_filter::valid_filter(&request.filter) {
+                let _ = connection.send_method_error(
+                    0,
+                    "org.scarlet.desktop.FileManager.InvalidFilter",
+                    "Expected comma-separated literal extensions after extensions:",
+                );
+                continue;
+            }
             if let Some(request_id) = active_picker_request_id(&request) {
                 let _ = connection.send_method_return(0, vec![Argument::String(request_id)]);
                 continue;
