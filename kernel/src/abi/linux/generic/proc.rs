@@ -957,30 +957,26 @@ pub fn sys_sysinfo(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return errno::to_result(errno::EFAULT);
     }
 
-    let kva = match task.vm_manager.translate_to_kva(info_ptr) {
-        Some(kva) => kva,
-        None => return errno::to_result(errno::EFAULT),
-    };
-
-    let info = LinuxSysinfo {
-        uptime: (crate::timer::get_time_ns() / 1_000_000_000) as isize,
-        loads: [0; 3],
-        totalram: 0,
-        freeram: 0,
-        sharedram: 0,
-        bufferram: 0,
-        totalswap: 0,
-        freeswap: 0,
-        procs: 1,
-        pad: 0,
-        totalhigh: 0,
-        freehigh: 0,
-        mem_unit: 1,
-        _f: [],
-    };
-
-    unsafe {
-        core::ptr::write(kva as *mut LinuxSysinfo, info);
+    let (total_pages, free_pages) = crate::mem::pmm::stats();
+    // Serialize into zeroed storage so C layout padding cannot expose kernel
+    // bytes. Checked usercopy also handles page boundaries and read-only memory.
+    let mut info = [0u8; core::mem::size_of::<LinuxSysinfo>()];
+    macro_rules! field {
+        ($name:ident, $value:expr) => {{
+            let offset = core::mem::offset_of!(LinuxSysinfo, $name);
+            let bytes = $value.to_ne_bytes();
+            info[offset..offset + bytes.len()].copy_from_slice(&bytes);
+        }};
+    }
+    field!(uptime, (crate::timer::get_time_ns() / 1_000_000_000) as isize);
+    // Page units avoid overflowing the Linux unsigned-long fields on 32-bit
+    // targets. glibc applies mem_unit when computing _SC_PHYS_PAGES.
+    field!(totalram, total_pages);
+    field!(freeram, free_pages);
+    field!(mem_unit, crate::environment::PAGE_SIZE as u32);
+    field!(procs, get_all_task_ids().len().min(u16::MAX as usize) as u16);
+    if copy_to_user(&task, info_ptr, &info).is_err() {
+        return errno::to_result(errno::EFAULT);
     }
 
     0
