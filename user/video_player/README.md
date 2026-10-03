@@ -36,3 +36,37 @@ software H.264 support are therefore explicit opt-ins.
 Enabling a codec feature does not grant or provide any codec patent licenses.
 Distributors and users are responsible for supplying any licenses or permissions
 required in their jurisdiction.
+
+## Controls and fullscreen
+
+The overlay follows Scarlet's Normal/Tablet posture: compact 28px controls in
+Normal, 44px touch targets in Tablet, with the same centered 16px native icons.
+
+- Confirm toggles the focused action. Up/Down or Tab moves between playback,
+  loop, seek, and fullscreen. Left/Right seeks five seconds.
+- The lower-right button or F11 toggles fullscreen. Escape/Cancel first leaves
+  fullscreen; outside fullscreen it closes the player. Held Confirm/F11/Cancel
+  cannot repeatedly toggle or close immediately after leaving fullscreen.
+- Space/P toggles playback, L toggles loop, Home/End seeks to the ends, and D
+  toggles the existing diagnostics.
+- Pointer/touch dragging previews a seek and commits on release. Cancellation,
+  resizing, or posture changes discard the uncommitted seek. A first tap on
+  hidden controls reveals them.
+
+Fullscreen uses the window server's fullscreen API and confirmed state, hides
+the native decorations, and restores the preceding geometry on exit. Playback
+position, pause/loop state, and control focus remain intact.
+
+[Screenshots and validation](docs/controls.md)
+
+### Host control tests
+
+```sh
+python3 user/video_player/tests/run_controls.py
+```
+
+Run from the repository root with a compatible Rust toolchain. The script uses
+rustc's host target (or `--target`), the same pinned ScarletUI revision as the
+player, and a generated package under `target`/`CARGO_TARGET_DIR`. It extracts the
+production control/input helpers and tests them with platform I/O stubbed; media
+I/O and actual hardware decode require a running Scarlet system.
