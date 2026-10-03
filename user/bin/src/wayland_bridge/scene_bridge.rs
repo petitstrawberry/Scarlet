@@ -64,7 +64,13 @@ impl WaylandBridge {
             .iter()
             .find_map(|(&id, &surface)| (surface == object).then_some(id));
         let interface = self.objects.get(&object).map(String::as_str).unwrap_or("");
-        let (object, code) = if error == "Viewport source outside buffer" {
+        let (object, code) = if error == "Toplevel destroyed before decoration" {
+            (object, 2)
+        } else if error == "Toplevel already has a decoration" {
+            (object, 1)
+        } else if error == "Decoration constructed after mapping" {
+            (object, 0)
+        } else if error == "Viewport source outside buffer" {
             (viewport.unwrap_or(object), 2)
         } else if error == "Viewport destination must be integral" {
             (viewport.unwrap_or(object), 1)
@@ -92,7 +98,8 @@ impl WaylandBridge {
         if !self.scene.enabled(root) || !self.pointer_buttons.is_empty() {
             return;
         }
-        let target = self.scene.hit(root, self.pointer_x, self.pointer_y);
+        let (x, y) = self.scene_pointer_position(root, self.pointer_x, self.pointer_y);
+        let target = self.scene.hit(root, x, y);
         let next = target.map(|v| v.0);
         if self.pointer_surface == next {
             return;
@@ -345,6 +352,8 @@ impl WaylandBridge {
         }
         let serial = self.allocate_extension_commit_serial();
         let mut commit = self.scene.scene(root, 0, serial)?;
+        let surfaces = commit.layers.iter().map(|layer| layer.surface_id).collect();
+        self.decorate_scene(root, &mut commit)?;
         if !self.surface_to_window.contains_key(&root) {
             if commit.layers.is_empty() {
                 return Ok(());
@@ -357,10 +366,7 @@ impl WaylandBridge {
         for layer in &commit.layers {
             self.sws_busy_buffers.insert(layer.buffer_id, commit.serial);
         }
-        self.update_surface_output(
-            root,
-            commit.layers.iter().map(|layer| layer.surface_id).collect(),
-        );
+        self.update_surface_output(root, surfaces);
         self.submitted_scenes
             .insert(root, commit.layers.iter().map(|l| l.buffer_id).collect());
         self.submitted_surface_buffers.remove(&root);

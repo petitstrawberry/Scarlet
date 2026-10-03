@@ -4946,6 +4946,7 @@ dependencies = [
  "scarlet-std",
  "scarlet-sys",
  "scarlet-ui",
+ "scarlet-ui-core",
  "scarlet-ui-macros",
  "scpm",
  "serde",

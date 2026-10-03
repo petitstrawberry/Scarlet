@@ -13,6 +13,16 @@ export WAYLAND_DISPLAY=wayland-0
 weston-simple-shm
 ```
 
+For an isolated test instance, set `WAYLAND_DISPLAY=wayland-test` on both the
+bridge and the client. Relative display names are resolved under
+`XDG_RUNTIME_DIR` (default `/tmp`); absolute names are used as socket paths.
+This allows testing a new bridge binary without replacing the running service.
+
+`wl_shm_pool.resize` requires the client to grow its backing file first. The
+bridge updates the pool extent and asks SWS to remap its retained handle; it
+does not resize the client's file or require it to be a native SharedMemory
+object. Linux memfd and shm_open files use the same mappable-handle path.
+
 When started by `stemd`, normal bridge output is captured by `logd`:
 
 ```bash
@@ -49,6 +59,47 @@ surface, SHM-pool, commit, window-creation, and later client failures.
 GPU-backed Wayland buffers use `wp_scarlet_sgfx_v1` and SWS protocol 13 image
 registration, retaining the same scene, serial, frame, destroy and release path.
 See `guest_tests/linux_vulkan` for standard Vulkan loader and Wine/Box64 checks.
+
+## ScarletUI window decorations
+
+With `SURFACE_SCENES`, the bridge also advertises
+`zxdg_decoration_manager_v1` v1. The default negotiated mode is server-side;
+explicit client-side requests are honored. A mode changes only after its
+`xdg_surface.configure` is acknowledged and committed. Clients that do not
+create a decoration object retain the existing client-side surface behavior.
+
+Server-side decoration uses the pinned ScarletUI `Window` through
+`scarlet-ui-core`, including its titlebar, controls, border and rounded clip.
+The client image stays in its existing GPU/SHM resource. The bridge publishes
+immutable titlebar/edge strips above the client image and clips the image to
+ScarletUI's rounded outline; it never reads back the game image. Chrome is
+reused between game frames and redrawn only when the UI becomes dirty or its
+title, size or scale changes. SWS retires old chrome resources after scene use.
+
+Titlebar drag, minimize, maximize/restore and close actions use SWS window
+management. Close sends `xdg_toplevel.close` to the client. Configure sizes and
+pointer coordinates exclude the ScarletUI decoration insets. Initial SSD
+windows are centered using their outer size. Fullscreen suppresses the frame;
+client-side mode leaves drawing and clipping to the client. Window title and
+size limits are forwarded to SWS, adding frame dimensions for SSD.
+
+The normal build includes decorations. A minimal bridge build needs:
+
+```sh
+cd user/bin
+cargo build --release --no-default-features --features wayland-decoration \
+    --bin wayland-bridge --target ../targets/aarch64-unknown-scarlet-elf.json
+```
+
+Console-only builds can still use `--no-default-features` without UI crates.
+The live SHM fixture `guest_tests/linux_zink/wayland-decoration.c` uses the
+official generated xdg-shell and xdg-decoration client code. Each Enter key
+advances SSD, CSD, SSD, fullscreen and restored SSD, with a frame callback
+before each stage. It tests the bridge without an SDL/Vulkan dependency.
+
+This is bounded by SWS scene layer limits and a 16-million-pixel decoration
+limit. Interactive edge resize remains the existing SWS behavior. The fixture
+does not establish complete xdg-shell or toolkit conformance.
 
 ## Compound surfaces and viewports
 
