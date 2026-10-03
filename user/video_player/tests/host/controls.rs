@@ -2,6 +2,116 @@
 mod tests {
     use super::*;
     use scarlet_ui::event::KeyModifiers;
+    #[test]
+    fn streaming_accepts_the_switch_stateless_h264_build() {
+        assert_eq!(
+            streaming_hardware_codec_supported(VideoCodec::H264),
+            cfg!(feature = "h264-stateful-hw") || cfg!(feature = "h264-stateless-hw")
+        );
+        assert_eq!(
+            streaming_hardware_codec_supported(VideoCodec::Hevc),
+            cfg!(feature = "hevc-stateful-hw")
+        );
+        assert!(!streaming_hardware_codec_supported(VideoCodec::Vp9));
+        assert!(!streaming_hardware_codec_supported(VideoCodec::Av1));
+    }
+
+    #[test]
+    fn native_video_panel_matches_full_viewport_controls_and_hit_targets() {
+        let frame = VideoFrameData {
+            image: None,
+            pixels: Vec::new(),
+            width: 1920,
+            height: 1080,
+            current_frame: 60,
+            total_frames: 600,
+        };
+        for touch in [false, true] {
+            TOUCH_MODE.store(touch, Ordering::Relaxed);
+            for milli in [1000, 2000] {
+                graphics::set_current_scale_milli(milli);
+                let scale = UiScale::current();
+                let (width, height) = (1280, 720);
+                let c = ControlsOverlay::new(false);
+                c.update_canvas_size(width, height);
+                c.set_media_duration_us(60_000_000);
+                c.desired_position_us.store(6_000_000);
+                c.set_buffered_position_us(30_000_000);
+                c.control_focus_visible.store(true, Ordering::Release);
+                let mut panel = None;
+                for focus in 0..4 {
+                    c.control_focus.store(focus, Ordering::Release);
+                    render_controls_panel(&mut panel, width, height, &frame, &c);
+                    let panel = panel.as_ref().unwrap();
+                    assert_eq!(panel.logical_height(), controls_panel_height());
+                    let mut reference = Buffer::from_logical_dimensions(width, height);
+                    let (w, h) = (reference.width(), reference.height());
+                    reference.data_mut().fill(0);
+                    draw_seek_bar(
+                        reference.data_mut(),
+                        w,
+                        h,
+                        width,
+                        height,
+                        0,
+                        &frame,
+                        &c,
+                        scale,
+                    );
+                    let start = (h - panel.height()) as usize * w as usize * 4;
+                    assert_eq!(panel.data(), &reference.data()[start..]);
+                    let origin_y = height - panel.logical_height();
+                    for (target, (x, y)) in [
+                        (1, play_pause_button_origin(width, height).unwrap()),
+                        (2, loop_button_origin(width, height).unwrap()),
+                        (3, fullscreen_button_origin(width, height).unwrap()),
+                    ] {
+                        assert_eq!(pointer_control(&c, x as i32 + 1, y as i32 + 1), target);
+                        let mut bright = false;
+                        for row in scale.physical_pos(y - origin_y)
+                            ..scale.physical_pos(y - origin_y + control_button_size())
+                        {
+                            for col in
+                                scale.physical_pos(x)..scale.physical_pos(x + control_button_size())
+                            {
+                                let at = (row * panel.width() + col) as usize * 4;
+                                bright |= panel.data()[at..at + 3].iter().any(|&value| value > 100);
+                            }
+                        }
+                        assert!(
+                            bright,
+                            "missing icon for target {target}, touch={touch}, scale={milli}"
+                        );
+                    }
+                    assert_eq!(
+                        panel.data()[3],
+                        112,
+                        "panel background must remain translucent"
+                    );
+                }
+                c.hide();
+                render_controls_panel(&mut panel, width, height, &frame, &c);
+                assert!(panel.is_none());
+                c.show_for_activity();
+                render_controls_panel(&mut panel, 80, 60, &frame, &c);
+                assert!(panel.as_ref().unwrap().data().iter().all(|&byte| byte == 0));
+            }
+        }
+        graphics::set_current_scale_milli(1000);
+        TOUCH_MODE.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn overlays_blend_over_transparent_and_opaque_pixels() {
+        let mut transparent = [0; 4];
+        blend_pixel_bgra(&mut transparent, [90, 120, 180, 112], 112);
+        assert_eq!(transparent, [90, 120, 180, 112]);
+        blend_pixel_bgra(&mut transparent, [0, 0, 0, 96], 96);
+        assert_eq!(transparent[3], 166);
+        let mut opaque = [100, 150, 200, 255];
+        blend_pixel_bgra(&mut opaque, [0, 0, 0, 112], 112);
+        assert_eq!(opaque, [56, 84, 112, 255]);
+    }
     fn key(controls: &ControlsOverlay, keycode: KeyCode, down: bool) {
         let event = if down {
             KeyEvent::Pressed {

@@ -71,8 +71,11 @@ position, pause/loop state, and control focus remain intact.
 python3 user/video_player/tests/run_controls.py
 ```
 
-Run from the repository root with a compatible Rust toolchain. The script uses
+Run from the repository root with a compatible nightly Rust toolchain. The script uses
 rustc's host target (or `--target`), the same pinned ScarletUI revision as the
 player, and a generated package under `target`/`CARGO_TARGET_DIR`. It extracts the
-production control/input helpers and tests them with platform I/O stubbed; media
-I/O and actual hardware decode require a running Scarlet system.
+production control/input helpers and overlay renderer with platform I/O stubbed.
+It checks the native video panel against the full viewport at both pixel
+densities and tests the stream codec gate with stateful, Switch stateless, and
+disabled codec features. Media I/O and actual hardware decode require a running
+Scarlet system.

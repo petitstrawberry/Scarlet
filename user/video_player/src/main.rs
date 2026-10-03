@@ -3167,7 +3167,9 @@ impl VideoCodec {
 
 fn streaming_hardware_codec_supported(codec: VideoCodec) -> bool {
     match codec {
-        VideoCodec::H264 => cfg!(feature = "h264-stateful-hw"),
+        VideoCodec::H264 => {
+            cfg!(feature = "h264-stateful-hw") || cfg!(feature = "h264-stateless-hw")
+        }
         VideoCodec::Hevc => cfg!(feature = "hevc-stateful-hw"),
         VideoCodec::Vp9 | VideoCodec::Av1 => false,
     }
@@ -7518,6 +7520,7 @@ fn draw_video_frame(
             canvas_height,
             logical_canvas_width,
             logical_canvas_height,
+            0,
             &frame,
             controls,
             ui_scale,
@@ -7576,6 +7579,7 @@ fn draw_video_frame(
         canvas_height,
         logical_canvas_width,
         logical_canvas_height,
+        0,
         &frame,
         controls,
         ui_scale,
@@ -8141,6 +8145,7 @@ fn draw_seek_bar(
     canvas_height: u32,
     logical_canvas_width: u32,
     logical_canvas_height: u32,
+    logical_origin_y: u32,
     frame: &VideoFrameData,
     controls: &ControlsOverlay,
     ui_scale: UiScale,
@@ -8154,7 +8159,13 @@ fn draw_seek_bar(
     else {
         return;
     };
-    let panel_y = logical_canvas_height.saturating_sub(controls_panel_height());
+    // Layout and hit testing use the full viewport. Native video renders only
+    // the bottom strip, so translate drawing coordinates into that buffer.
+    let button_y = button_y.saturating_sub(logical_origin_y);
+    let local_height = logical_canvas_height.saturating_sub(logical_origin_y);
+    let panel_y = logical_canvas_height
+        .saturating_sub(controls_panel_height())
+        .saturating_sub(logical_origin_y);
 
     blend_rect_scaled(
         buffer,
@@ -8163,7 +8174,7 @@ fn draw_seek_bar(
         0,
         panel_y,
         logical_canvas_width,
-        logical_canvas_height - panel_y,
+        local_height - panel_y,
         [0, 0, 0, 112],
         ui_scale,
     );
@@ -8194,8 +8205,7 @@ fn draw_seek_bar(
             ),
             _ => (
                 12,
-                logical_canvas_height
-                    .saturating_sub(seek_track_bottom_inset() + seek_track_hit_inset()),
+                local_height.saturating_sub(seek_track_bottom_inset() + seek_track_hit_inset()),
                 logical_canvas_width.saturating_sub(24),
                 seek_track_hit_inset() * 2,
             ),
@@ -8221,6 +8231,7 @@ fn draw_seek_bar(
         }
     }
     if let Some((x, y)) = fullscreen_button_origin(logical_canvas_width, logical_canvas_height) {
+        let y = y.saturating_sub(logical_origin_y);
         blend_rect_scaled(
             buffer,
             canvas_width,
@@ -8313,7 +8324,7 @@ fn draw_seek_bar(
         .saturating_sub(track_x + right_inset)
         .max(1);
     let track_height = SEEK_TRACK_HEIGHT;
-    let track_y = logical_canvas_height.saturating_sub(seek_track_bottom_inset());
+    let track_y = local_height.saturating_sub(seek_track_bottom_inset());
     let duration_us = controls.media_duration_us();
     let (buffered_width, progress_width) = if duration_us != 0 {
         let buffered_us = controls.buffered_position_us.load().min(duration_us);
@@ -8391,7 +8402,7 @@ fn draw_seek_bar(
             canvas_width,
             canvas_height,
             loop_x,
-            loop_y,
+            loop_y.saturating_sub(logical_origin_y),
             controls.is_loop_enabled(),
             ui_scale,
         );
@@ -8505,11 +8516,7 @@ fn draw_native_control_icon(
             if offset + 4 > buffer.len() {
                 continue;
             }
-            for channel in 0..3 {
-                buffer[offset + channel] =
-                    blend_channel(buffer[offset + channel], color[channel], alpha, 255 - alpha);
-            }
-            buffer[offset + 3] = 255;
+            blend_pixel_bgra(&mut buffer[offset..offset + 4], color, alpha);
         }
     }
 }
@@ -8673,18 +8680,38 @@ fn blend_rect_bgra(
         return;
     }
 
-    let inv_alpha = 255 - alpha;
     let stride = canvas_width as usize * 4;
     for row in y..y_end {
         let row_start = row as usize * stride;
         for col in x..x_end {
             let offset = row_start + col as usize * 4;
-            buffer[offset] = blend_channel(buffer[offset], color[0], alpha, inv_alpha);
-            buffer[offset + 1] = blend_channel(buffer[offset + 1], color[1], alpha, inv_alpha);
-            buffer[offset + 2] = blend_channel(buffer[offset + 2], color[2], alpha, inv_alpha);
-            buffer[offset + 3] = 255;
+            blend_pixel_bgra(&mut buffer[offset..offset + 4], color, alpha);
         }
     }
+}
+
+// Straight-alpha source-over, matching ScarletUI's CPU canvas. The native
+// overlay starts transparent; forcing alpha to 255 would make it an opaque strip.
+fn blend_pixel_bgra(pixel: &mut [u8], color: [u8; 4], alpha: u32) {
+    let inverse = 255 - alpha;
+    let destination_alpha = u32::from(pixel[3]);
+    if destination_alpha == 255 {
+        for channel in 0..3 {
+            pixel[channel] = blend_channel(pixel[channel], color[channel], alpha, inverse);
+        }
+        return;
+    }
+    let weight = alpha * 255 + destination_alpha * inverse;
+    if weight == 0 {
+        return;
+    }
+    for channel in 0..3 {
+        pixel[channel] = ((u32::from(color[channel]) * alpha * 255
+            + u32::from(pixel[channel]) * destination_alpha * inverse
+            + weight / 2)
+            / weight) as u8;
+    }
+    pixel[3] = ((weight + 127) / 255) as u8;
 }
 
 fn blend_channel(dst: u8, src: u8, alpha: u32, inv_alpha: u32) -> u8 {

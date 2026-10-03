@@ -63,6 +63,35 @@ fn buffer(slot: &mut Option<Buffer>, width: u32, height: u32) -> &mut Buffer {
     }
     slot.as_mut().unwrap()
 }
+fn render_controls_panel(
+    panel: &mut Option<Buffer>,
+    viewport_width: u32,
+    viewport_height: u32,
+    frame: &VideoFrameData,
+    controls: &ControlsOverlay,
+) {
+    if !controls.is_visible() {
+        *panel = None;
+        return;
+    }
+    let panel_height = viewport_height.min(controls_panel_height());
+    let target = buffer(panel, viewport_width, panel_height);
+    let (w, h) = (target.width(), target.height());
+    let pixels = target.data_mut();
+    pixels.fill(0);
+    draw_seek_bar(
+        pixels,
+        w,
+        h,
+        viewport_width,
+        viewport_height,
+        viewport_height - panel_height,
+        frame,
+        controls,
+        UiScale::current(),
+    );
+}
+
 impl ElementRenderObject for VideoRender {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         let width = if constraints.max_width.is_finite() {
@@ -151,25 +180,7 @@ impl ElementRenderObject for VideoRender {
         }
         self.fallback = None;
         let data = self.view.frames.data.lock();
-        if self.view.controls.is_visible() {
-            let panel_height = height.min(controls_panel_height());
-            let target = buffer(&mut self.panel, width, panel_height);
-            let (w, h) = (target.width(), target.height());
-            let pixels = target.data_mut();
-            pixels.fill(0);
-            draw_seek_bar(
-                pixels,
-                w,
-                h,
-                width,
-                panel_height,
-                &data,
-                &self.view.controls,
-                UiScale::current(),
-            );
-        } else {
-            self.panel = None;
-        }
+        render_controls_panel(&mut self.panel, width, height, &data, &self.view.controls);
         if self.view.controls.is_debug_visible() {
             let (dw, dh) = (width.min(360), height.min(86));
             let target = buffer(&mut self.debug, dw, dh);

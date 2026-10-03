@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the production control/input helpers on the Rust host target.
+"""Run production controls, overlay rendering, and stream codec gates on the host.
 
 Scarlet syscalls and the decoder cannot run on the host. Extract the actual
 control items, with only platform I/O stubbed, into a disposable Cargo package.
@@ -34,10 +34,15 @@ def main():
         if any(line.startswith("const " + prefix) for prefix in prefixes)
     )
     shared = json.dumps(str(player / "src/shared_u64.rs"))
-    code = """#![allow(dead_code)]
+    code = """#![feature(portable_simd)]
+#![allow(dead_code)]
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 use std::thread;
+use std::sync::Arc;
+use std::simd::Simd;
+use scarlet_ui::{Buffer, Canvas, Color, ColorPalette};
+struct SharedVideoFrame;
 use scarlet_ui::{graphics, Event, MouseEvent, MouseButton, KeyEvent, KeyCode, InteractionMode};
 use scarlet_ui::event::{TouchChange, TouchPhase};
 struct Mutex<T>(std::sync::Mutex<T>);
@@ -57,13 +62,17 @@ impl PaintSignal { fn notify(&self) {} }
 """ + f"#[path={shared}] mod shared_u64;\nuse shared_u64::SharedU64;\n"
     code += constants + "\n"
     for start, end in (
+        ("struct VideoFrameData {", "impl VideoFrameStore {"),
         ("struct ControlsOverlay {", "struct PaintSignal {"),
         ("fn pointer_control(", "fn draw_debug_overlay("),
-        ("fn play_pause_button_origin(", "fn draw_loop_button("),
-        ("fn draw_native_control_icon(", "fn draw_loop_icon("),
-        ("fn blend_channel(", "fn fit_size("),
+        ("fn draw_debug_overlay(", "fn fit_size("),
+        ("fn fill_bgra(", '#[unsafe(no_mangle)]'),
+        ("enum VideoCodec {", "impl VideoCodec {"),
+        ("fn streaming_hardware_codec_supported(", "impl VideoSource {"),
     ):
         code += section(start, end)
+    video_view = (player / "src/video_view.rs").read_text()
+    code += video_view[video_view.index("fn buffer("):video_view.index("impl ElementRenderObject for VideoRender {")]
     code += (player / "tests/host/controls.rs").read_text()
     (output / "controls.rs").write_text(code)
     ui_line = next(line for line in (player / "Cargo.toml").read_text().splitlines()
@@ -77,6 +86,10 @@ edition = "2024"
 [workspace]
 [lib]
 path = "controls.rs"
+[features]
+h264-stateful-hw = []
+h264-stateless-hw = []
+hevc-stateful-hw = []
 [dependencies]
 scarlet-ui = { git = """ + json.dumps(url) + ", rev = " + json.dumps(revision) +
         ', default-features = false, features = ["std"] }\n')
@@ -85,10 +98,11 @@ scarlet-ui = { git = """ + json.dumps(url) + ", rev = " + json.dumps(revision) +
         version = subprocess.check_output(["rustc", "-vV"], text=True)
         host = next(line.split(": ", 1)[1] for line in version.splitlines()
                     if line.startswith("host: "))
-    subprocess.run([
-        "cargo", "test", "--manifest-path", str(output / "Cargo.toml"),
-        "--target", host, "--", "--test-threads=1",
-    ], check=True)
+    for features in ["h264-stateful-hw,hevc-stateful-hw", "h264-stateless-hw", ""]:
+        subprocess.run([
+            "cargo", "test", "--manifest-path", str(output / "Cargo.toml"),
+            "--target", host, "--features", features, "--", "--test-threads=1",
+        ], check=True)
 
 
 if __name__ == "__main__":
