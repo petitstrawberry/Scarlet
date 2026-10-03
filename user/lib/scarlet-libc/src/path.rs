@@ -4,6 +4,21 @@
 #[cfg(any(test, target_os = "scarlet"))]
 use std::ffi::{c_char, c_int};
 
+/// Change the native process working directory using Scarlet Rust std.
+/// # Safety
+/// `path` is a readable NUL-terminated pathname.
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chdir(path: *const c_char) -> c_int {
+    if path.is_null() { return crate::fail(scarlet_abi::fs::ERRNO_EFAULT); }
+    let path = unsafe { std::ffi::CStr::from_ptr(path) };
+    let Ok(path) = path.to_str() else { return crate::fail(scarlet_abi::ERRNO_EINVAL); };
+    match std::env::set_current_dir(path) {
+        Ok(()) => 0,
+        Err(error) => crate::fail(error.raw_os_error().unwrap_or(scarlet_abi::ERRNO_EIO)),
+    }
+}
+
 #[cfg(target_os = "scarlet")]
 unsafe fn remove_entry(path: *const c_char, directory: bool) -> c_int {
     if path.is_null() {

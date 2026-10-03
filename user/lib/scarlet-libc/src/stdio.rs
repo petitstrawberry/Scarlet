@@ -645,7 +645,8 @@ mod native {
             EOF
         }
     }
-    #[unsafe(no_mangle)]
+    #[cfg_attr(not(feature = "external-format"), unsafe(no_mangle))]
+    #[cfg_attr(feature = "external-format", unsafe(export_name = "__scarlet_integer_vfprintf"))]
     pub unsafe extern "C" fn vfprintf(
         stream: *mut File,
         format: *const c_char,
@@ -689,15 +690,18 @@ mod native {
             }
         }
     }
-    #[unsafe(no_mangle)]
+    #[cfg_attr(not(feature = "external-format"), unsafe(no_mangle))]
+    #[cfg_attr(feature = "external-format", unsafe(export_name = "__scarlet_integer_fprintf"))]
     pub unsafe extern "C" fn fprintf(stream: *mut File, format: *const c_char, args: ...) -> c_int {
         unsafe { vfprintf(stream, format, args) }
     }
-    #[unsafe(no_mangle)]
+    #[cfg_attr(not(feature = "external-format"), unsafe(no_mangle))]
+    #[cfg_attr(feature = "external-format", unsafe(export_name = "__scarlet_integer_vprintf"))]
     pub unsafe extern "C" fn vprintf(format: *const c_char, args: VaList<'_>) -> c_int {
         unsafe { vfprintf(stdout, format, args) }
     }
-    #[unsafe(no_mangle)]
+    #[cfg_attr(not(feature = "external-format"), unsafe(no_mangle))]
+    #[cfg_attr(feature = "external-format", unsafe(export_name = "__scarlet_integer_printf"))]
     pub unsafe extern "C" fn printf(format: *const c_char, args: ...) -> c_int {
         unsafe { vfprintf(stdout, format, args) }
     }

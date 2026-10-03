@@ -13,6 +13,7 @@
 #define _SC_PAGESIZE 30
 #define _SC_PAGE_SIZE _SC_PAGESIZE
 #define _SC_GETPW_R_SIZE_MAX 70
+#define _PC_PATH_MAX 4
 #define _POSIX_THREADS 200809L
 
 #ifndef SEEK_SET
@@ -25,12 +26,16 @@
 extern "C" {
 #endif
 int close(int);
+int isatty(int);
 ssize_t read(int, void *, size_t);
 ssize_t write(int, const void *, size_t);
 ssize_t pread(int, void *, size_t, off_t);
 ssize_t pwrite(int, const void *, size_t, off_t);
 int ftruncate(int, off_t);
+int truncate(const char *, off_t);
+int chdir(const char *);
 int unlink(const char *);
+int unlinkat(int, const char *, int);
 int rmdir(const char *);
 int symlink(const char *, const char *);
 int link(const char *, const char *);
@@ -50,6 +55,12 @@ uid_t geteuid(void);
 gid_t getgid(void);
 gid_t getegid(void);
 long sysconf(int);
+long pathconf(const char *, int);
+#ifdef __cplusplus
+[[noreturn]] void _exit(int);
+#else
+_Noreturn void _exit(int);
+#endif
 #ifdef __cplusplus
 }
 #endif

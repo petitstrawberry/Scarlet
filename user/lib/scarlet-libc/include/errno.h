@@ -13,6 +13,7 @@ int *__errno_location(void);
 #define ESRCH 3
 #define EINTR 4
 #define EIO 5
+#define E2BIG 7
 #define EBADF 9
 #define EAGAIN 11
 #define EWOULDBLOCK EAGAIN
@@ -35,9 +36,11 @@ int *__errno_location(void);
 #define EDEADLK 35
 #define ENAMETOOLONG 36
 #define ENOLCK 37
+#define ENOSYS 38
 #define ENOTEMPTY 39
 #define ELOOP 40
 #define EOVERFLOW 75
+#define EILSEQ 84
 #define ENOTSOCK 88
 #define EMSGSIZE 90
 #define EPROTONOSUPPORT 93

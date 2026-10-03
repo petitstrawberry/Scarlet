@@ -384,7 +384,8 @@ pub(crate) unsafe fn format(
 /// The format/argument contract is that of snprintf. If capacity is nonzero,
 /// destination must point to at least capacity writable bytes, disjoint from
 /// the format and every string argument read by this call.
-#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+#[cfg_attr(all(target_os = "scarlet", not(feature = "external-format")), unsafe(no_mangle))]
+#[cfg_attr(all(target_os = "scarlet", feature = "external-format"), unsafe(export_name = "__scarlet_integer_vsnprintf"))]
 pub unsafe extern "C" fn vsnprintf(
     destination: *mut c_char,
     capacity: usize,
@@ -434,7 +435,8 @@ pub unsafe extern "C" fn vsnprintf(
 
 /// # Safety
 /// Same buffer and format requirements as vsnprintf, with matching varargs.
-#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+#[cfg_attr(all(target_os = "scarlet", not(feature = "external-format")), unsafe(no_mangle))]
+#[cfg_attr(all(target_os = "scarlet", feature = "external-format"), unsafe(export_name = "__scarlet_integer_snprintf"))]
 pub unsafe extern "C" fn snprintf(
     destination: *mut c_char,
     capacity: usize,
@@ -448,7 +450,8 @@ pub unsafe extern "C" fn snprintf(
 /// # Safety
 /// Destination must have space for the complete output and a trailing NUL;
 /// all other requirements are those of vsnprintf.
-#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+#[cfg_attr(all(target_os = "scarlet", not(feature = "external-format")), unsafe(no_mangle))]
+#[cfg_attr(all(target_os = "scarlet", feature = "external-format"), unsafe(export_name = "__scarlet_integer_vsprintf"))]
 pub unsafe extern "C" fn vsprintf(
     destination: *mut c_char,
     format_string: *const c_char,
@@ -460,7 +463,8 @@ pub unsafe extern "C" fn vsprintf(
 
 /// # Safety
 /// Same buffer and format requirements as vsprintf, with matching varargs.
-#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+#[cfg_attr(all(target_os = "scarlet", not(feature = "external-format")), unsafe(no_mangle))]
+#[cfg_attr(all(target_os = "scarlet", feature = "external-format"), unsafe(export_name = "__scarlet_integer_sprintf"))]
 pub unsafe extern "C" fn sprintf(
     destination: *mut c_char,
     format_string: *const c_char,

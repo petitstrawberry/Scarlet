@@ -33,6 +33,19 @@ pub const F_SETLK: c_int = 6;
 pub const F_SETLKW: c_int = 7;
 pub const FD_CLOEXEC: c_int = 1;
 
+/// Probe the native terminal's neutral read-only echo control. Character
+/// devices such as /dev/null must not be reported as terminals.
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub extern "C" fn isatty(fd: c_int) -> c_int {
+    let mut metadata = crate::stat::Stat::default();
+    // SAFETY: metadata is writable; fstat validates the raw native descriptor.
+    if unsafe { crate::stat::fstat(fd, &mut metadata) } < 0 { return 0; }
+    // SAFETY: GET_ECHO has no pointer arguments and cannot modify the terminal.
+    let value = unsafe { scarlet_sys::syscall3(Syscall::HandleControl, fd as usize, 0x5354_0002, 0) };
+    if value == usize::MAX { crate::fail(25); 0 } else { 1 }
+}
+
 #[cfg(any(test, target_os = "scarlet"))]
 fn transfer_arguments(fd: c_int, null_buffer: bool, count: usize) -> Result<(), c_int> {
     if fd < 0 {
@@ -323,6 +336,33 @@ pub extern "C" fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
     match result(status) {
         Ok(_) if position <= i64::MAX as u64 => position as i64,
         Ok(_) => crate::fail(scarlet_abi::fs::ERRNO_EOVERFLOW) as i64,
+        Err(error) if error == scarlet_abi::fs::ERRNO_ESPIPE => {
+            // Some native file objects (notably the existing CPIO image) have
+            // legacy seek but do not implement the additive signed seek API.
+            // Restrict this compatibility path to regular files, calculate a
+            // checked absolute offset, then use the same syscall as Rust std.
+            let mut metadata = crate::stat::Stat::default();
+            if unsafe { crate::stat::fstat(fd, &mut metadata) } < 0 {
+                return -1;
+            }
+            if metadata.mode & 0o170000 != 0o100000 {
+                return crate::fail(error) as i64;
+            }
+            let base = match whence {
+                0 => 0,
+                1 => {
+                    let current = unsafe { scarlet_sys::syscall3(Syscall::FileSeek, fd as usize, 0, 1) };
+                    if current > i64::MAX as usize { return crate::fail(error) as i64; }
+                    current as i64
+                }
+                _ => metadata.size,
+            };
+            let Some(absolute) = base.checked_add(offset).filter(|p| *p >= 0) else {
+                return crate::fail(ERRNO_EINVAL) as i64;
+            };
+            let legacy = unsafe { scarlet_sys::syscall3(Syscall::FileSeek, fd as usize, absolute as usize, 0) };
+            if legacy > i64::MAX as usize { crate::fail(error) as i64 } else { legacy as i64 }
+        }
         Err(error) => crate::fail(error) as i64,
     }
 }

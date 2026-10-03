@@ -1,6 +1,6 @@
 //! C ABI for SWS window, input and shared-image clients.
 //! Ordinary Linux-ABI libraries use scarlet-sys' explicit native-call transport.
-//! The process must dynamically link one copy so every consumer shares the
+//! The process must link one copy (shared, or a native static executable) so every consumer shares the
 //! connection and no consumer steals another window's GPU lifecycle events.
 
 use std::{
@@ -65,6 +65,7 @@ struct Client {
     events: VecDeque<SwsEvent>,
     states: BTreeMap<u32, u32>,
     closed: BTreeSet<u32>,
+    closing: BTreeSet<u32>,
 }
 impl Client {
     fn dispatch(&mut self) -> Result<(), Error> {
@@ -85,7 +86,7 @@ impl Client {
                     width,
                     height,
                 } => {
-                    if !self.gpu_events.contains_key(&surface_id) {
+                    if !self.gpu_events.contains_key(&surface_id) || self.closing.contains(&surface_id) {
                         continue;
                     }
                     self.connection.resize_window(surface_id, width, height)?;
@@ -155,6 +156,7 @@ fn call(f: impl FnOnce(&mut Client) -> Result<i32, Error>) -> i32 {
             events: VecDeque::new(),
             states: BTreeMap::new(),
             closed: BTreeSet::new(),
+            closing: BTreeSet::new(),
         });
     }
     match f(slot.as_mut().unwrap()) {
@@ -197,7 +199,19 @@ pub unsafe extern "C" fn sws_window_create(
     height: u32,
     out: *mut u32,
 ) -> i32 {
-    if app_id.is_null() || title.is_null() || out.is_null() || width == 0 || height == 0 {
+    unsafe { sws_window_create_ex(app_id, title, width, height, 0, out) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sws_window_create_ex(
+    app_id: *const c_char,
+    title: *const c_char,
+    width: u32,
+    height: u32,
+    resizable: u32,
+    out: *mut u32,
+) -> i32 {
+    if app_id.is_null() || title.is_null() || out.is_null() || !valid_size(width, height) {
         return -1;
     }
     // SAFETY: the C caller supplies terminated strings valid for this call.
@@ -212,7 +226,7 @@ pub unsafe extern "C" fn sws_window_create(
             .app_id(app_id)
             .app_name(title)
             .size(width, height)
-            .resizable(false)
+            .resizable(resizable != 0)
             .build(&client.connection)?;
         client
             .gpu_events
@@ -224,15 +238,156 @@ pub unsafe extern "C" fn sws_window_create(
     })
 }
 
+fn valid_size(width: u32, height: u32) -> bool {
+    width != 0 && height != 0 && width <= 16384 && height <= 16384
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sws_window_title(id: u32, title: *const c_char) -> i32 {
+    if title.is_null() {
+        return -1;
+    }
+    let Ok(title) = (unsafe { CStr::from_ptr(title) }).to_str() else {
+        return -1;
+    };
+    call(|client| {
+        client.connection.set_window_title(id, title)?;
+        Ok(0)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn sws_window_action(id: u32, action: u32) -> i32 {
+    call(|client| {
+        if client.closed.contains(&id) || !client.gpu_events.contains_key(&id) {
+            return Err(Error::SurfaceNotFound);
+        }
+        match action {
+            1 | 5 => client.connection.restore_window(id)?,
+            2 => client.connection.minimize_window(id)?,
+            3 => client.connection.focus_window(id)?,
+            4 => client.connection.maximize_window(id)?,
+            _ => return Err(Error::InvalidRequest),
+        }
+        Ok(0)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sws_window_size(id: u32, width: *mut u32, height: *mut u32) -> i32 {
+    if width.is_null() || height.is_null() {
+        return -1;
+    }
+    call(|client| {
+        let (w, h) = client
+            .connection
+            .with_surface(id, |s| (s.width(), s.height()))
+            .ok_or(Error::SurfaceNotFound)?;
+        unsafe {
+            width.write(w);
+            height.write(h);
+        }
+        Ok(0)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn sws_window_resize(id: u32, width: u32, height: u32) -> i32 {
+    if !valid_size(width, height) {
+        return -1;
+    }
+    call(|client| {
+        if client.closed.contains(&id) {
+            return Err(Error::SurfaceNotFound);
+        }
+        client.connection.resize_window(id, width, height)?;
+        Ok(0)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sws_window_present(
+    id: u32,
+    pixels: *const std::ffi::c_void,
+    bytes: usize,
+    width: u32,
+    height: u32,
+    pitch: usize,
+) -> i32 {
+    if pixels.is_null() || !valid_size(width, height) {
+        return -1;
+    }
+    let row = width as usize * 4;
+    let Some(required) = (height as usize - 1)
+        .checked_mul(pitch)
+        .and_then(|n| n.checked_add(row))
+    else {
+        return -1;
+    };
+    if pitch < row || bytes < required || required > isize::MAX as usize {
+        return -1;
+    }
+    call(|client| {
+        if client.closed.contains(&id) {
+            return Err(Error::SurfaceNotFound);
+        }
+        client
+            .connection
+            .with_surface_mut(id, |surface| {
+                if surface.width() != width || surface.height() != height {
+                    return Err(Error::InvalidRequest);
+                }
+                // SAFETY: the C caller borrows a readable, non-overlapping frame for
+                // this call; bounds above cover every row. No pointer escapes.
+                let source = unsafe { std::slice::from_raw_parts(pixels.cast::<u8>(), required) };
+                for (y, target) in surface.buffer_mut().chunks_exact_mut(row).enumerate() {
+                    target.copy_from_slice(&source[y * pitch..y * pitch + row]);
+                }
+                Ok(())
+            })
+            .ok_or(Error::SurfaceNotFound)??;
+        client.connection.commit(id)?;
+        Ok(0)
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn sws_window_destroy(id: u32) -> i32 {
     call(|client| {
-        if !client.closed.contains(&id) {
+        if !client.closed.contains(&id) && !client.closing.contains(&id) {
             client.connection.destroy_surface(id)?;
         }
         client.gpu_events.remove(&id);
         client.states.remove(&id);
         client.closed.remove(&id);
+        client.closing.remove(&id);
+        client.events.retain(|event| event.window_id != id);
+        Ok(0)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn sws_window_destroy_sync(id: u32, timeout_ms: u32) -> i32 {
+    call(|client| {
+        client.dispatch()?;
+        if !client.gpu_events.contains_key(&id) { return Err(Error::SurfaceNotFound); }
+        if !client.closed.contains(&id) && !client.closing.contains(&id) {
+            client.connection.destroy_surface(id)?;
+            client.closing.insert(id);
+        }
+        let started = std::time::Instant::now();
+        while !client.closed.contains(&id) {
+            client.dispatch()?;
+            if client.closed.contains(&id) { break; }
+            if started.elapsed() >= std::time::Duration::from_millis(timeout_ms as u64) {
+                return Err(Error::TimedOut);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        client.gpu_events.remove(&id);
+        client.states.remove(&id);
+        client.closed.remove(&id);
+        client.closing.remove(&id);
         client.events.retain(|event| event.window_id != id);
         Ok(0)
     })

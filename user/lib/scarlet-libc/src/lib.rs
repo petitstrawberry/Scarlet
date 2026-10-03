@@ -49,6 +49,8 @@ pub mod pthread_sync;
 mod resolver;
 pub mod runtime;
 #[cfg(target_os = "scarlet")]
+mod math;
+#[cfg(target_os = "scarlet")]
 mod socket;
 #[cfg(any(test, target_os = "scarlet"))]
 mod stat;

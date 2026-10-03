@@ -2102,6 +2102,15 @@ impl Connection {
             .map_err(|_| Error::SendFailed)
     }
 
+    /// Update a live window's UTF-8 title.
+    pub fn set_window_title(&self, surface_id: u32, title: &str) -> Result<(), Error> {
+        if title.len() > 4096 || !mutex_lock(&self.surfaces).contains_key(&surface_id) {
+            return Err(Error::InvalidRequest);
+        }
+        let payload = protocol::payload_set_window_title(surface_id, title.as_bytes());
+        self.send_message(protocol::client_msg::SET_WINDOW_TITLE, &payload)
+    }
+
     /// Update menu titles for a window (format: "menu1|menu2|menu3").
     pub fn set_window_menu_titles(&self, surface_id: u32, menu_titles: &str) -> Result<(), Error> {
         if !mutex_lock(&self.surfaces).contains_key(&surface_id) {

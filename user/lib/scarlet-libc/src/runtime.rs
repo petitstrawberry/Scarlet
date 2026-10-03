@@ -515,6 +515,23 @@ pub extern "C" fn abort() -> ! {
     }
 }
 
+/// Immediate process-wide C termination: no stream flush or destructors.
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub extern "C" fn _Exit(status: c_int) -> ! {
+    loop {
+        // SAFETY: ExitGroup accepts a scalar status and terminates every thread.
+        unsafe { scarlet_sys::syscall1(Syscall::ExitGroup, status as usize) };
+        std::hint::spin_loop();
+    }
+}
+
+#[cfg(target_os = "scarlet")]
+#[unsafe(no_mangle)]
+pub extern "C" fn _exit(status: c_int) -> ! {
+    _Exit(status)
+}
+
 /// # Safety
 /// expression, file, and function must each be readable NUL-terminated strings.
 #[cfg(target_os = "scarlet")]
