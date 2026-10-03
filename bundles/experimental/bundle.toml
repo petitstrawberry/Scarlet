@@ -86,3 +86,12 @@ subdir = "apps/scarlet-browser"
 package = "blitz-scarlet-browser"
 bin = "blitz"
 to = "/bin/blitz"
+
+[[layers]]
+kind = "bundle"
+source = { git = "https://github.com/petitstrawberry/resonara", rev = "275dc0c941c9430600ff802813a2d238ae981422" }
+bundle = "platforms/scarlet/bundle.toml"
+
+[[layers]]
+kind = "bundle"
+source = { git = "https://github.com/petitstrawberry/easyrpg-player-scarlet.git", branch = "main" }
