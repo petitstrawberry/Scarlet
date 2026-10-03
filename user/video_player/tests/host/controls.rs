@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scarlet_ui::event::KeyModifiers;
     fn key(controls: &ControlsOverlay, keycode: KeyCode, down: bool) {
         let event = if down {
             KeyEvent::Pressed {
@@ -33,6 +34,249 @@ mod tests {
         };
         handle_canvas_event(&Event::Mouse(event), controls, &PaintSignal);
     }
+    fn touch(c: &ControlsOverlay, id: u64, phase: TouchPhase, x: i32, y: i32) {
+        touch_at(c, id, phase, x, y, 0);
+    }
+    fn touch_at(c: &ControlsOverlay, id: u64, phase: TouchPhase, x: i32, y: i32, time_ns: u64) {
+        handle_canvas_event(
+            &Event::Touch(TouchChange {
+                seat_id: 0,
+                serial: 1,
+                time_ns,
+                id,
+                phase,
+                x,
+                y,
+                pressure: None,
+                touch_major: None,
+            }),
+            c,
+            &PaintSignal,
+        );
+    }
+    fn idle_until_hidden(c: &ControlsOverlay, timer: &mut ControlsAutoHide) {
+        // First tick observes the latest input; the following ticks measure idle time.
+        timer.tick(c);
+        for _ in 0..CONTROLS_HIDE_IDLE_TICKS - 1 {
+            assert!(!timer.tick(c));
+            assert!(c.is_visible());
+        }
+        assert!(timer.tick(c));
+        assert!(!c.is_visible());
+    }
+    #[test]
+    fn controller_navigation_and_resume_do_not_pin_the_overlay() {
+        let c = ControlsOverlay::new(false);
+        let mut timer = ControlsAutoHide::new(&c);
+        key(&c, KeyCode::Down, true);
+        key(&c, KeyCode::Down, false);
+        idle_until_hidden(&c, &mut timer);
+        key(&c, KeyCode::Up, true);
+        key(&c, KeyCode::Enter, true);
+        key(&c, KeyCode::Enter, false);
+        assert!(c.is_paused());
+        for _ in 0..CONTROLS_HIDE_IDLE_TICKS * 2 {
+            assert!(!timer.tick(&c));
+        }
+        key(&c, KeyCode::Enter, true);
+        for _ in 0..CONTROLS_HIDE_IDLE_TICKS * 2 {
+            assert!(!timer.tick(&c));
+            assert!(c.is_visible());
+        }
+        key(&c, KeyCode::Enter, false);
+        assert!(!c.is_paused());
+        idle_until_hidden(&c, &mut timer);
+    }
+    #[test]
+    fn stationary_mouse_notifications_do_not_keep_the_overlay_visible() {
+        let c = ControlsOverlay::new(false);
+        let mut timer = ControlsAutoHide::new(&c);
+        let event = Event::Mouse(MouseEvent::Moved { x: 200, y: 100 });
+        handle_canvas_event(&event, &c, &PaintSignal);
+        timer.tick(&c);
+        for _ in 0..CONTROLS_HIDE_IDLE_TICKS {
+            handle_canvas_event(&event, &c, &PaintSignal);
+            timer.tick(&c);
+        }
+        assert!(!c.is_visible());
+        handle_canvas_event(&event, &c, &PaintSignal);
+        assert!(!c.is_visible());
+        handle_canvas_event(
+            &Event::Mouse(MouseEvent::Moved { x: 201, y: 100 }),
+            &c,
+            &PaintSignal,
+        );
+        assert!(c.is_visible());
+        idle_until_hidden(&c, &mut timer);
+    }
+    #[test]
+    fn native_touch_reveals_without_activation_and_blank_taps_toggle_visibility() {
+        // Native touch works even in Normal posture, without synthetic mouse motion.
+        TOUCH_MODE.store(false, Ordering::Relaxed);
+        let c = ControlsOverlay::new(false);
+        c.update_canvas_size(390, 844);
+        c.hide();
+        let (x, y) = play_pause_button_origin(390, 844).unwrap();
+        let (x, y) = (x as i32 + 5, y as i32 + 5);
+        touch(&c, 1, TouchPhase::Down, x, y);
+        touch(&c, 1, TouchPhase::Up, x, y);
+        assert!(c.is_visible());
+        assert!(!c.is_paused());
+        touch(&c, 2, TouchPhase::Down, 200, 100);
+        touch(&c, 2, TouchPhase::Up, 200, 100);
+        assert!(!c.is_visible());
+        touch(&c, 3, TouchPhase::Down, 200, 100);
+        touch(&c, 3, TouchPhase::Up, 200, 100);
+        assert!(c.is_visible());
+        touch(&c, 4, TouchPhase::Down, x, y);
+        touch(&c, 4, TouchPhase::Up, x, y);
+        assert!(c.is_paused());
+        touch(&c, 5, TouchPhase::Down, 200, 100);
+        touch(&c, 5, TouchPhase::Up, 200, 100);
+        assert!(!c.is_visible());
+        assert!(c.is_paused());
+    }
+    #[test]
+    fn touch_button_resume_and_release_restart_auto_hide() {
+        let c = ControlsOverlay::new(false);
+        c.update_canvas_size(640, 360);
+        c.paused.store(true, Ordering::Release);
+        let mut timer = ControlsAutoHide::new(&c);
+        let (x, y) = play_pause_button_origin(640, 360).unwrap();
+        touch(&c, 1, TouchPhase::Down, x as i32 + 5, y as i32 + 5);
+        for _ in 0..CONTROLS_HIDE_IDLE_TICKS * 2 {
+            assert!(!timer.tick(&c));
+        }
+        touch(&c, 1, TouchPhase::Up, x as i32 + 5, y as i32 + 5);
+        assert!(!c.is_paused());
+        idle_until_hidden(&c, &mut timer);
+    }
+    #[test]
+    fn touch_seek_holds_overlay_until_release_and_ignores_other_contacts() {
+        TOUCH_MODE.store(true, Ordering::Relaxed);
+        let c = ControlsOverlay::new(false);
+        c.update_canvas_size(768, 1024);
+        c.set_media_duration_us(60_000_000);
+        let mut timer = ControlsAutoHide::new(&c);
+        let y = (1024 - seek_track_bottom_inset()) as i32;
+        touch(&c, 1, TouchPhase::Down, 200, y);
+        touch(&c, 2, TouchPhase::Down, 100, 100);
+        touch(&c, 2, TouchPhase::Up, 100, 100);
+        assert!(c.is_scrubbing());
+        touch(&c, 1, TouchPhase::Move, 500, y);
+        let preview = c.desired_position_us.load();
+        assert!(preview > 30_000_000);
+        for _ in 0..CONTROLS_HIDE_IDLE_TICKS * 2 {
+            assert!(!timer.tick(&c));
+        }
+        touch(&c, 1, TouchPhase::Up, 500, y);
+        assert!(!c.is_scrubbing());
+        assert_eq!(c.current_seek_target_us(), preview);
+        idle_until_hidden(&c, &mut timer);
+        TOUCH_MODE.store(false, Ordering::Relaxed);
+    }
+    #[test]
+    fn touch_cancel_resize_and_swipe_do_not_activate_or_commit() {
+        let c = ControlsOverlay::new(false);
+        c.update_canvas_size(640, 360);
+        c.set_media_duration_us(60_000_000);
+        c.last_video_pts_us.store(7_000_000);
+        let mut timer = ControlsAutoHide::new(&c);
+        let y = (360 - seek_track_bottom_inset()) as i32;
+        touch(&c, 1, TouchPhase::Down, 200, y);
+        touch(&c, 1, TouchPhase::Move, 500, y);
+        touch(&c, 1, TouchPhase::Cancel, 500, y);
+        assert!(!c.is_scrubbing());
+        assert_eq!(c.desired_position_us.load(), 7_000_000);
+        assert_eq!(c.current_seek_epoch(), 0);
+        idle_until_hidden(&c, &mut timer);
+        c.show_for_activity();
+        touch(&c, 2, TouchPhase::Down, 200, y);
+        c.update_canvas_size(768, 1024);
+        touch(&c, 2, TouchPhase::Up, 500, y);
+        assert_eq!(c.current_seek_epoch(), 0);
+        let (x, y) = play_pause_button_origin(768, 1024).unwrap();
+        let (x, y) = (x as i32 + 5, y as i32 + 5);
+        touch(&c, 3, TouchPhase::Down, x, y);
+        touch(&c, 3, TouchPhase::Move, 200, 100);
+        touch(&c, 3, TouchPhase::Up, x, y);
+        assert!(!c.is_paused());
+        touch(&c, 4, TouchPhase::Down, 200, 100);
+        touch(&c, 4, TouchPhase::Move, 300, 100);
+        touch(&c, 4, TouchPhase::Up, 200, 100);
+        assert!(c.is_visible());
+    }
+    #[test]
+    fn redundant_fullscreen_confirmation_does_not_reveal_or_delay_overlay() {
+        let c = ControlsOverlay::new(false);
+        let mut timer = ControlsAutoHide::new(&c);
+        for _ in 0..CONTROLS_HIDE_IDLE_TICKS {
+            c.confirm_fullscreen(false);
+            timer.tick(&c);
+        }
+        assert!(!c.is_visible());
+        c.confirm_fullscreen(false);
+        assert!(!c.is_visible());
+        c.confirm_fullscreen(true);
+        assert!(c.is_visible());
+        idle_until_hidden(&c, &mut timer);
+    }
+    #[test]
+    fn mouse_in_tablet_posture_remains_mouse_input_and_resumes_idle_hiding() {
+        TOUCH_MODE.store(true, Ordering::Relaxed);
+        let c = ControlsOverlay::new(false);
+        c.update_canvas_size(640, 360);
+        let mut timer = ControlsAutoHide::new(&c);
+        pointer(&c, 200, 100, true);
+        pointer(&c, 200, 100, false);
+        assert!(c.is_visible());
+        idle_until_hidden(&c, &mut timer);
+        c.show_for_activity();
+        let (x, y) = play_pause_button_origin(640, 360).unwrap();
+        let (x, y) = (x as i32 + 5, y as i32 + 5);
+        pointer(&c, x, y, true);
+        pointer(&c, x, y, false);
+        assert!(c.is_paused());
+        pointer(&c, x, y, true);
+        pointer(&c, x, y, false);
+        assert!(!c.is_paused());
+        idle_until_hidden(&c, &mut timer);
+        TOUCH_MODE.store(false, Ordering::Relaxed);
+    }
+    #[test]
+    fn touch_long_press_and_unrelated_mouse_motion_do_not_activate_controls() {
+        let c = ControlsOverlay::new(false);
+        c.update_canvas_size(640, 360);
+        c.set_media_duration_us(60_000_000);
+        touch_at(&c, 1, TouchPhase::Down, 200, 100, 0);
+        touch_at(&c, 1, TouchPhase::Up, 200, 100, 700_000_000);
+        assert!(c.is_visible());
+        let (x, y) = play_pause_button_origin(640, 360).unwrap();
+        touch_at(&c, 2, TouchPhase::Down, x as i32 + 5, y as i32 + 5, 0);
+        touch_at(
+            &c,
+            2,
+            TouchPhase::Up,
+            x as i32 + 5,
+            y as i32 + 5,
+            700_000_000,
+        );
+        assert!(!c.is_paused());
+        let y = (360 - seek_track_bottom_inset()) as i32;
+        touch(&c, 3, TouchPhase::Down, 200, y);
+        let preview = c.desired_position_us.load();
+        handle_canvas_event(
+            &Event::Mouse(MouseEvent::Moved { x: 500, y }),
+            &c,
+            &PaintSignal,
+        );
+        pointer(&c, 500, y, false);
+        assert!(c.is_scrubbing());
+        assert_eq!(c.desired_position_us.load(), preview);
+        assert_eq!(c.current_seek_epoch(), 0);
+        touch(&c, 3, TouchPhase::Cancel, 200, y);
+        assert!(!c.is_scrubbing());
+    }
     #[test]
     fn confirm_has_one_action_per_press_and_navigation_has_visible_focus() {
         let c = ControlsOverlay::new(false);
@@ -49,7 +293,7 @@ mod tests {
         key(&c, KeyCode::Down, true);
         assert_eq!(c.control_focus.load(Ordering::Acquire), 1);
         assert!(c.is_visible());
-        assert!(c.controls_pinned.load(Ordering::Acquire));
+        assert!(c.control_focus_visible.load(Ordering::Acquire));
         key(&c, KeyCode::Enter, true);
         assert!(c.is_loop_enabled());
         key(&c, KeyCode::Enter, false);

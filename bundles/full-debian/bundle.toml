@@ -8,8 +8,8 @@ path = "../desktop/bundle.toml"
 
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/scarlet-bundle-debian.git", rev = "c7fb4a5462dac66d98d5484f735629dcffe2f501" }
-subdir = "bundles/rootfs-wine"
+source = { git = "https://github.com/petitstrawberry/scarlet-bundle-debian.git", rev = "0307627299daf05792fc7b16a1754ea34b665bda" }
+subdir = "bundles/rootfs"
 
 # Runtime compatibility updates over the pinned Debian archive.
 [[layers]]

@@ -46,6 +46,7 @@ use scarlet_desktop_config::{
     DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL, DESKTOP_FILES_APP_ID, DESKTOP_STEMD_BUS_NAME,
     DESKTOP_STEMD_INTERFACE, DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD, DESKTOP_STEMD_OBJECT_PATH,
 };
+use scarlet_ui::event::{TouchChange, TouchPhase};
 use scarlet_ui::{
     Application, ApplicationRunExt, Canvas, Color, ColorPalette, ComponentElement, Element, Event,
     InteractionMode, InvalidationKind, KeyCode, KeyEvent, Listenable, MenuBarModel, MenuEntry,
@@ -90,6 +91,7 @@ const DISPLAY_HEIGHT: u32 = 360;
 const FRAME_INTERVAL_MS: u64 = 33;
 const CONTROLS_HIDE_INTERVAL_MS: u64 = 250;
 const CONTROLS_HIDE_IDLE_TICKS: u32 = 16;
+const CONTROLS_DISMISS_TARGET: u32 = 5;
 const STREAM_POLL_INTERVAL_MS: u64 = 25;
 const STREAM_REORDER_HOLD_SAMPLES: usize = 8;
 const STREAM_DECODE_BATCH_SAMPLES: usize = 8;
@@ -308,8 +310,10 @@ impl VideoFrameStore {
 struct ControlsOverlay {
     visible: AtomicBool,
     control_focus: AtomicU32,
-    controls_pinned: AtomicBool,
+    control_focus_visible: AtomicBool,
     pointer_target: AtomicU32,
+    pointer_position: Mutex<Option<(i32, i32)>>,
+    touch_contact: Mutex<Option<TouchContact>>,
     confirm_held: AtomicBool,
     cancel_held: AtomicBool,
     fullscreen_key_held: AtomicBool,
@@ -382,8 +386,10 @@ impl ControlsOverlay {
         Self {
             visible: AtomicBool::new(true),
             control_focus: AtomicU32::new(0),
-            controls_pinned: AtomicBool::new(false),
+            control_focus_visible: AtomicBool::new(false),
             pointer_target: AtomicU32::new(0),
+            pointer_position: Mutex::new(None),
+            touch_contact: Mutex::new(None),
             confirm_held: AtomicBool::new(false),
             cancel_held: AtomicBool::new(false),
             fullscreen_key_held: AtomicBool::new(false),
@@ -418,10 +424,12 @@ impl ControlsOverlay {
     }
 
     fn reset_for_media(&self, loop_enabled: bool) {
-        self.visible.store(true, Ordering::Release);
+        self.show_for_activity();
         self.control_focus.store(0, Ordering::Release);
-        self.controls_pinned.store(false, Ordering::Release);
+        self.control_focus_visible.store(false, Ordering::Release);
         self.pointer_target.store(0, Ordering::Release);
+        *self.pointer_position.lock() = None;
+        *self.touch_contact.lock() = None;
         self.confirm_held.store(false, Ordering::Release);
         self.debug_visible.store(false, Ordering::Release);
         self.loop_enabled.store(loop_enabled, Ordering::Release);
@@ -457,7 +465,7 @@ impl ControlsOverlay {
             self.desired_position_us
                 .store(self.last_video_pts_us.load());
         }
-        self.show_for_mouse_activity();
+        self.show_for_activity();
     }
 
     fn toggle_fullscreen(&self) {
@@ -465,19 +473,21 @@ impl ControlsOverlay {
     }
 
     fn confirm_fullscreen(&self, fullscreen: bool) {
-        self.fullscreen.store(fullscreen, Ordering::Release);
+        let changed = self.fullscreen.swap(fullscreen, Ordering::AcqRel) != fullscreen;
         if !self.fullscreen_request_pending.load(Ordering::Acquire) {
             self.fullscreen_requested
                 .store(fullscreen, Ordering::Release);
         }
-        self.show_for_mouse_activity();
+        if changed {
+            self.show_for_activity();
+        }
     }
 
     fn is_visible(&self) -> bool {
         self.visible.load(Ordering::Acquire)
     }
 
-    fn show_for_mouse_activity(&self) -> bool {
+    fn show_for_activity(&self) -> bool {
         self.activity_epoch.fetch_add(1, Ordering::AcqRel);
         self.visible.swap(true, Ordering::AcqRel) != true
     }
@@ -505,7 +515,7 @@ impl ControlsOverlay {
     fn toggle_paused(&self) {
         let paused = !self.paused.load(Ordering::Acquire);
         self.paused.store(paused, Ordering::Release);
-        self.show_for_mouse_activity();
+        self.show_for_activity();
     }
 
     fn is_finished(&self) -> bool {
@@ -588,13 +598,13 @@ impl ControlsOverlay {
         self.paused.store(false, Ordering::Release);
         self.reset_fps_window();
         self.seek_epoch.fetch_add(1, Ordering::AcqRel);
-        self.show_for_mouse_activity();
+        self.show_for_activity();
     }
 
     fn preview_seek_to_us(&self, target_us: u64) {
         self.desired_position_us
             .store(self.clamp_seek_target_us(target_us));
-        self.show_for_mouse_activity();
+        self.show_for_activity();
     }
 
     fn clamp_seek_target_us(&self, target_us: u64) -> u64 {
@@ -633,13 +643,13 @@ impl ControlsOverlay {
     fn toggle_debug(&self) {
         let visible = !self.debug_visible.load(Ordering::Acquire);
         self.debug_visible.store(visible, Ordering::Release);
-        self.show_for_mouse_activity();
+        self.show_for_activity();
     }
 
     fn toggle_loop(&self) {
         let enabled = !self.loop_enabled.load(Ordering::Acquire);
         self.loop_enabled.store(enabled, Ordering::Release);
-        self.show_for_mouse_activity();
+        self.show_for_activity();
     }
 
     fn record_presented_frame(&self, presentation_time_us: u64, clock_time_us: Option<u64>) {
@@ -740,6 +750,51 @@ impl ControlsOverlay {
             && x < button_x + control_button_size()
             && y >= button_y
             && y < button_y + control_button_size()
+    }
+}
+
+struct TouchContact {
+    id: u64,
+    start: (i32, i32),
+    started_at_ns: u64,
+    moved: bool,
+}
+
+struct ControlsAutoHide {
+    last_epoch: u32,
+    idle_ticks: u32,
+}
+
+impl ControlsAutoHide {
+    fn new(controls: &ControlsOverlay) -> Self {
+        Self {
+            last_epoch: controls.activity_epoch(),
+            idle_ticks: 0,
+        }
+    }
+
+    fn tick(&mut self, controls: &ControlsOverlay) -> bool {
+        let epoch = controls.activity_epoch();
+        if epoch != self.last_epoch {
+            self.last_epoch = epoch;
+            self.idle_ticks = 0;
+            return false;
+        }
+        if controls.is_visible()
+            && !controls.is_paused()
+            && !controls.is_scrubbing()
+            && !controls.confirm_held.load(Ordering::Acquire)
+            && controls.touch_contact.lock().is_none()
+        {
+            self.idle_ticks = self.idle_ticks.saturating_add(1);
+            if self.idle_ticks >= CONTROLS_HIDE_IDLE_TICKS {
+                self.idle_ticks = 0;
+                return controls.hide();
+            }
+        } else {
+            self.idle_ticks = 0;
+        }
+        false
     }
 }
 
@@ -1759,35 +1814,15 @@ fn start_controls_thread(
     thread::Builder::new()
         .name("video-controls")
         .spawn(move || {
-            let mut last_epoch = controls.activity_epoch();
-            let mut idle_ticks = 0u32;
+            let mut auto_hide = ControlsAutoHide::new(&controls);
 
             loop {
                 if shutdown.load(Ordering::Acquire) {
                     return;
                 }
                 thread::sleep(Duration::from_millis(CONTROLS_HIDE_INTERVAL_MS));
-                let epoch = controls.activity_epoch();
-                if epoch != last_epoch {
-                    last_epoch = epoch;
-                    idle_ticks = 0;
-                    continue;
-                }
-
-                if controls.is_visible()
-                    && !controls.is_paused()
-                    && !controls.is_scrubbing()
-                    && !controls.controls_pinned.load(Ordering::Acquire)
-                {
-                    idle_ticks = idle_ticks.saturating_add(1);
-                    if idle_ticks >= CONTROLS_HIDE_IDLE_TICKS {
-                        idle_ticks = 0;
-                        if controls.hide() {
-                            paint_signal.notify();
-                        }
-                    }
-                } else {
-                    idle_ticks = 0;
+                if auto_hide.tick(&controls) {
+                    paint_signal.notify();
                 }
             }
         })
@@ -7599,53 +7634,159 @@ fn seek_track_bottom_inset() -> u32 {
 fn seek_track_hit_inset() -> u32 {
     if control_button_size() == 44 { 22 } else { 12 }
 }
+fn video_area_contains(controls: &ControlsOverlay, x: i32, y: i32) -> bool {
+    x >= 0
+        && y >= 0
+        && (x as u32) < controls.canvas_width.load(Ordering::Acquire)
+        && (y as u32)
+            < controls
+                .canvas_height
+                .load(Ordering::Acquire)
+                .saturating_sub(controls_panel_height())
+}
+
+fn begin_pointer_press(controls: &ControlsOverlay, x: i32, y: i32, touch: bool) {
+    // Choose the action before revealing controls: a reveal tap never activates one.
+    let visible = controls.is_visible();
+    let mut target = if visible {
+        pointer_control(controls, x, y)
+    } else {
+        0
+    };
+    if touch && visible && target == 0 && video_area_contains(controls, x, y) {
+        target = CONTROLS_DISMISS_TARGET;
+    }
+    controls.show_for_activity();
+    controls
+        .control_focus_visible
+        .store(false, Ordering::Release);
+    controls.pointer_target.store(target, Ordering::Release);
+    if target == 4 {
+        controls.set_scrubbing(true);
+        controls.preview_seek_to_us(seek_target_from_track_x(controls, x));
+    }
+}
+
+fn finish_pointer_press(controls: &ControlsOverlay, x: i32, y: i32, tap: bool) {
+    let target = controls.pointer_target.swap(0, Ordering::AcqRel);
+    controls.set_scrubbing(false);
+    if target == 4 {
+        controls.request_seek_to_us(seek_target_from_track_x(controls, x));
+    } else if tap && target == CONTROLS_DISMISS_TARGET && video_area_contains(controls, x, y) {
+        controls.hide();
+        return;
+    } else if tap && target != 0 && target == pointer_control(controls, x, y) {
+        match target {
+            1 => activate_play_pause(controls),
+            2 => controls.toggle_loop(),
+            3 => controls.toggle_fullscreen(),
+            _ => {}
+        }
+    }
+    controls.show_for_activity();
+}
+
+fn cancel_pointer_press(controls: &ControlsOverlay) {
+    controls.pointer_target.store(0, Ordering::Release);
+    controls.set_scrubbing(false);
+    controls
+        .desired_position_us
+        .store(controls.last_video_pts_us.load());
+    controls.show_for_activity();
+}
+
+fn handle_touch_event(
+    change: TouchChange,
+    controls: &ControlsOverlay,
+    paint_signal: &PaintSignal,
+) -> bool {
+    let mut contact = controls.touch_contact.lock();
+    if change.phase == TouchPhase::Down {
+        if contact.is_some() {
+            // A second finger must not replace the contact owning a seek/button.
+            return false;
+        }
+        *contact = Some(TouchContact {
+            id: change.id,
+            start: (change.x, change.y),
+            started_at_ns: change.time_ns,
+            moved: false,
+        });
+        begin_pointer_press(controls, change.x, change.y, true);
+    } else {
+        let Some(active) = contact.as_mut().filter(|active| active.id == change.id) else {
+            return false;
+        };
+        // Latch movement so dragging away and back cannot become a button tap.
+        active.moved |=
+            change.x.abs_diff(active.start.0) > 8 || change.y.abs_diff(active.start.1) > 8;
+        match change.phase {
+            TouchPhase::Move => {
+                if controls.is_scrubbing() {
+                    controls.preview_seek_to_us(seek_target_from_track_x(controls, change.x));
+                    controls.show_for_activity();
+                }
+            }
+            TouchPhase::Up => {
+                let tap = !active.moved
+                    && change.time_ns.saturating_sub(active.started_at_ns) < 600_000_000;
+                *contact = None;
+                finish_pointer_press(controls, change.x, change.y, tap);
+            }
+            TouchPhase::Cancel => {
+                *contact = None;
+                cancel_pointer_press(controls);
+            }
+            TouchPhase::Down => unreachable!(),
+        }
+    }
+    drop(contact);
+    paint_signal.notify();
+    true
+}
+
 fn handle_canvas_event(
     event: &Event,
     controls: &ControlsOverlay,
     paint_signal: &PaintSignal,
 ) -> bool {
     match event {
+        Event::Touch(change) => handle_touch_event(*change, controls, paint_signal),
+        Event::Mouse(_) if controls.touch_contact.lock().is_some() => false,
         Event::Mouse(MouseEvent::ButtonCancelled { .. }) => {
-            controls.pointer_target.store(0, Ordering::Release);
-            controls.set_scrubbing(false);
-            // Restore the displayed position after a cancelled touch drag.
-            controls
-                .desired_position_us
-                .store(controls.last_video_pts_us.load());
+            cancel_pointer_press(controls);
             paint_signal.notify();
             true
         }
-        Event::Mouse(MouseEvent::Entered { .. }) => controls.show_for_mouse_activity(),
-        Event::Mouse(MouseEvent::Moved { x, .. }) => {
-            controls.show_for_mouse_activity();
+        Event::Mouse(MouseEvent::Entered { x, y } | MouseEvent::Moved { x, y }) => {
+            let mut position = controls.pointer_position.lock();
+            if *position == Some((*x, *y)) {
+                return false;
+            }
+            *position = Some((*x, *y));
+            drop(position);
+            let focus_changed = controls.control_focus_visible.swap(false, Ordering::AcqRel);
+            let revealed = controls.show_for_activity();
             if controls.is_scrubbing() {
                 controls.preview_seek_to_us(seek_target_from_track_x(controls, *x));
                 paint_signal.notify();
                 true
             } else {
-                false
+                revealed || focus_changed
             }
         }
-        Event::Mouse(MouseEvent::Exited { .. }) => false,
+        Event::Mouse(MouseEvent::Exited { .. }) => {
+            *controls.pointer_position.lock() = None;
+            false
+        }
         Event::Mouse(MouseEvent::ButtonPressed {
             button: MouseButton::Left,
             x,
             y,
             ..
         }) => {
-            let visible = controls.is_visible();
-            controls.show_for_mouse_activity();
-            controls.controls_pinned.store(false, Ordering::Release);
-            let target = if visible {
-                pointer_control(controls, *x, *y)
-            } else {
-                0
-            };
-            controls.pointer_target.store(target, Ordering::Release);
-            if target == 4 {
-                controls.set_scrubbing(true);
-                controls.preview_seek_to_us(seek_target_from_track_x(controls, *x));
-            }
+            *controls.pointer_position.lock() = Some((*x, *y));
+            begin_pointer_press(controls, *x, *y, false);
             paint_signal.notify();
             true
         }
@@ -7655,19 +7796,7 @@ fn handle_canvas_event(
             y,
             ..
         }) => {
-            let target = controls.pointer_target.swap(0, Ordering::AcqRel);
-            controls.set_scrubbing(false);
-            if target == 4 {
-                controls.request_seek_to_us(seek_target_from_track_x(controls, *x));
-            } else if target != 0 && target == pointer_control(controls, *x, *y) {
-                match target {
-                    1 => activate_play_pause(controls),
-                    2 => controls.toggle_loop(),
-                    3 => controls.toggle_fullscreen(),
-                    _ => {}
-                }
-            }
-            controls.show_for_mouse_activity();
+            finish_pointer_press(controls, *x, *y, true);
             paint_signal.notify();
             true
         }
@@ -7685,7 +7814,10 @@ fn handle_key_event(
             keycode: KeyCode::Enter,
             ..
         } => {
-            controls.confirm_held.store(false, Ordering::Release);
+            if controls.confirm_held.swap(false, Ordering::AcqRel) {
+                controls.show_for_activity();
+                paint_signal.notify();
+            }
             true
         }
         KeyEvent::Pressed {
@@ -7695,8 +7827,10 @@ fn handle_key_event(
             if controls.confirm_held.swap(true, Ordering::AcqRel) {
                 return true;
             }
-            controls.controls_pinned.store(true, Ordering::Release);
-            controls.show_for_mouse_activity();
+            controls
+                .control_focus_visible
+                .store(true, Ordering::Release);
+            controls.show_for_activity();
             match controls.control_focus.load(Ordering::Acquire) {
                 0 => activate_play_pause(controls),
                 1 => controls.toggle_loop(),
@@ -7714,8 +7848,10 @@ fn handle_key_event(
                 .control_focus
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |f| Some((f + 1) % 4))
                 .ok();
-            controls.controls_pinned.store(true, Ordering::Release);
-            controls.show_for_mouse_activity();
+            controls
+                .control_focus_visible
+                .store(true, Ordering::Release);
+            controls.show_for_activity();
             paint_signal.notify();
             true
         }
@@ -7805,8 +7941,10 @@ fn handle_key_event(
                 .control_focus
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |f| Some((f + 1) % 4))
                 .ok();
-            controls.controls_pinned.store(true, Ordering::Release);
-            controls.show_for_mouse_activity();
+            controls
+                .control_focus_visible
+                .store(true, Ordering::Release);
+            controls.show_for_activity();
             paint_signal.notify();
             true
         }
@@ -7818,8 +7956,10 @@ fn handle_key_event(
                 .control_focus
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |f| Some((f + 3) % 4))
                 .ok();
-            controls.controls_pinned.store(true, Ordering::Release);
-            controls.show_for_mouse_activity();
+            controls
+                .control_focus_visible
+                .store(true, Ordering::Release);
+            controls.show_for_activity();
             paint_signal.notify();
             true
         }
@@ -8031,7 +8171,7 @@ fn draw_seek_bar(
     let focus = controls.control_focus.load(Ordering::Acquire);
     let accent = ColorPalette::default().primary();
     let focus_color = accent.to_bgra().to_le_bytes();
-    if controls.controls_pinned.load(Ordering::Acquire) {
+    if controls.control_focus_visible.load(Ordering::Acquire) {
         let (fx, fy, fw, fh) = match focus {
             0 => (
                 button_x.saturating_sub(2),
@@ -8126,7 +8266,7 @@ fn draw_seek_bar(
             Color::WHITE,
             ui_scale.physical_font(12.0),
         );
-        if logical_canvas_width >= 560 && controls.controls_pinned.load(Ordering::Acquire) {
+        if logical_canvas_width >= 560 && controls.control_focus_visible.load(Ordering::Acquire) {
             let x = (loop_button_left_inset() + control_button_size() + 16) as i32;
             canvas.draw_text_sized(
                 ui_scale.physical_i32(x),

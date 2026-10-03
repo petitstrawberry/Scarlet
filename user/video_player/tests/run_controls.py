@@ -39,7 +39,12 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 use std::thread;
 use scarlet_ui::{graphics, Event, MouseEvent, MouseButton, KeyEvent, KeyCode, InteractionMode};
-use scarlet_ui::event::KeyModifiers;
+use scarlet_ui::event::{TouchChange, TouchPhase};
+struct Mutex<T>(std::sync::Mutex<T>);
+impl<T> Mutex<T> {
+    fn new(value: T) -> Self { Self(std::sync::Mutex::new(value)) }
+    fn lock(&self) -> std::sync::MutexGuard<'_, T> { self.0.lock().unwrap() }
+}
 static TOUCH_MODE: AtomicBool = AtomicBool::new(false);
 fn current_input_environment() -> scarlet_ui::InputEnvironment {
     scarlet_ui::InputEnvironment::new(

@@ -51,7 +51,13 @@ Normal, 44px touch targets in Tablet, with the same centered 16px native icons.
   toggles the existing diagnostics.
 - Pointer/touch dragging previews a seek and commits on release. Cancellation,
   resizing, or posture changes discard the uncommitted seek. A first tap on
-  hidden controls reveals them.
+  hidden controls reveals them without activating a button. Tapping the video
+  area with touch toggles the overlay; swipes and cancelled contacts do not.
+- During playback the overlay hides after roughly four seconds without input,
+  including after keyboard/controller navigation. Stationary pointer updates
+  do not extend this delay. Pause, an active touch/seek, or held Confirm keeps
+  controls visible; release/cancellation starts a fresh delay. Touch can also
+  dismiss the overlay while paused.
 
 Fullscreen uses the window server's fullscreen API and confirmed state, hides
 the native decorations, and restores the preceding geometry on exit. Playback

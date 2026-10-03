@@ -24,7 +24,14 @@ pause/resume, seek, and geometry/focus restoration. VM input was injected throug
 RFB; physical gamepad/touch and sensor rotation were not available. Audio decoding
 was observed, but audible output and SGFX zero-copy presentation were not tested.
 
-The host suite has 13 tests, including existing SharedU64 tests. It exercises
+The host suite includes existing SharedU64 tests. It exercises
 held keys, repeated/coalesced seeks, cancellation and resize during dragging,
 control navigation, fullscreen request/confirmation/rejection, and centered
-native icon masks at density 1 and 2. Target release builds also passed.
+native icon masks at density 1 and 2. The original controls revision passed
+target release builds.
+
+OSD regression tests additionally cover idle hiding after controller input,
+stationary mouse notifications, redundant fullscreen confirmations, native
+touch reveal/dismiss and pause/resume, seek release/cancellation, resize during
+touch, and secondary contacts. These tests use production input and timer
+helpers with platform I/O stubbed; physical touch behavior remains unverified.
