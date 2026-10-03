@@ -13,14 +13,16 @@ native backend is not used in this run. ScarletUI draws the bridge's SSD.
 | SGFX | `petitstrawberry/sgfx:codex/openttd-zink-compatibility` | `8e661584a34c467745463c49069543805914fbd6` | `a1115c4201d0cdd8aa43bd29a8a9c1551d162d0a` |
 | SDL2 Linux | `petitstrawberry/SDL:codex/egl-legacy-context-2.30` | `fc96e4aff56cb40b738b80674fde36291d7a98aa` | upstream `release-2.30.0` |
 | Mesa | `petitstrawberry/mesa:codex/kopper-non-drm-fifo` | `a77e1dae360bd306ede96904fa9f42eb638bf406` | official GitLab `mesa-25.0.7`, `742a20f48c59e8649533c84c4d49dd95b403f5da` |
-| OpenTTD | `petitstrawberry/OpenTTD:codex/gl21-compatibility` | `75b543bc25192609092e8024928f37c4af95f712` | official 15.3, `14ec60f248547d4d062a1160f0fc26d742319888` |
+| OpenTTD | `petitstrawberry/OpenTTD:fix/gl21-compatibility` | `75b543bc25192609092e8024928f37c4af95f712` | official 15.3, `14ec60f248547d4d062a1160f0fc26d742319888` |
 
 Mesa's GitHub fork was created through a GitHub mirror; the correction branch
 was cloned from the official GitLab tag above. SDL also has the same fix on
 `codex/egl-legacy-context`, based on the existing Scarlet-native SDL 2.32.10
 branch. That forward-port preserves the native SWS backend but has not had a
-native OpenTTD gameplay run. These branches have no PRs and do not change the
-repositories' default branches.
+native OpenTTD gameplay run. Its EGL correction is now merged into the existing
+SDL `scarlet` branch. Scarlet and SGFX have companion integration PRs; the
+SDL/Mesa/OpenTTD default branches are unchanged. OpenTTD uses the official
+15.3 tag as its base and needs no separate `scarlet` baseline branch.
 
 SDL reads GL_VERSION instead of invalid pre-3.0 GL_MAJOR_VERSION. OpenTTD
 accepts either VAO extension and compares GLSL 1.50's minor against 50, not 5.
@@ -99,7 +101,8 @@ Publishing checks verified the SDL/Mesa/OpenTTD changed source bytes against
 the actual tested patches, rebuilt the native bridge, and checked shell syntax.
 The new fork-fetch container recipes were not rerun as a complete image/game
 build. SGFX portable/programmatic/Vulkan tests passed; strict Clippy still
-reports an existing codegen return-guard style lint. CI was not triggered via PR.
+reports an existing codegen return-guard style lint. Those local checks predate
+the companion PRs; their GitHub CI results must be assessed separately.
 
 **OpenTTD fullscreen still fails.** Its signed viewport extends outside a
 640x400 attachment (height -480), and the IR/native backend rejects it before
