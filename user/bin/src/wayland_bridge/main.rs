@@ -17,6 +17,7 @@
 extern crate scarlet_std as std;
 
 mod input;
+mod decoration_state;
 mod gpu;
 mod protocol;
 mod region;
@@ -322,6 +323,8 @@ fn create_server_socket(socket_path: &str) -> Result<Socket, &'static str> {
     Ok(server_socket)
 }
 
+mod decoration;
+
 /// Mapping of Wayland surface ID to SWS window ID
 #[derive(Debug, Clone, Copy)]
 struct SurfaceWindowMapping {
@@ -341,6 +344,9 @@ struct PendingSurfaceCommit {
 
 /// Wayland Bridge Server
 struct WaylandBridge {
+    decorations: BTreeMap<u32, decoration::Decoration>,
+    decoration_actions: Vec<(u32, scarlet_ui_core::event::WindowEvent)>,
+    decoration_updates: BTreeSet<u32>,
     /// Stable identifier used to correlate this Wayland connection in logs.
     client_id: u32,
     /// Number of Wayland surfaces created by this client.
@@ -485,6 +491,9 @@ impl WaylandBridge {
         );
 
         Ok(Self {
+            decorations: BTreeMap::new(),
+            decoration_actions: Vec::new(),
+            decoration_updates: BTreeSet::new(),
             client_id,
             surface_count: 0,
             display_sync_count: 0,
@@ -736,9 +745,11 @@ impl WaylandBridge {
     /// Convert SWS physical pixel coordinate to Wayland surface-local
     /// (logical) coordinate using the focused surface's buffer_scale.
     fn physical_to_logical_x(&self, x: i32) -> i32 {
+        let (x, y) = self.focused_surface.map(|root| self.scene_pointer_position(root, x, self.pointer_y))
+            .unwrap_or((x, self.pointer_y));
         if let (Some(root), Some(target)) = (self.focused_surface, self.pointer_surface)
             && self.scene.enabled(root)
-            && let Some((x, _)) = self.scene.coordinates(root, target, x, self.pointer_y)
+            && let Some((x, _)) = self.scene.coordinates(root, target, x, y)
         {
             return x;
         }
@@ -747,9 +758,11 @@ impl WaylandBridge {
     }
 
     fn physical_to_logical_y(&self, y: i32) -> i32 {
+        let (x, y) = self.focused_surface.map(|root| self.scene_pointer_position(root, self.pointer_x, y))
+            .unwrap_or((self.pointer_x, y));
         if let (Some(root), Some(target)) = (self.focused_surface, self.pointer_surface)
             && self.scene.enabled(root)
-            && let Some((_, y)) = self.scene.coordinates(root, target, self.pointer_x, y)
+            && let Some((_, y)) = self.scene.coordinates(root, target, x, y)
         {
             return y;
         }
@@ -908,8 +921,9 @@ impl WaylandBridge {
                 .map(|surface| surface.buffer_scale.max(1) as u32)
                 .unwrap_or(1)
         };
-        let logical_width = width.div_ceil(scale).max(1);
-        let logical_height = height.div_ceil(scale).max(1);
+        let (_, _, extra_width, extra_height) = self.decoration_insets(wl_surface_id);
+        let logical_width = width.saturating_sub(extra_width).div_ceil(scale).max(1);
+        let logical_height = height.saturating_sub(extra_height).div_ceil(scale).max(1);
         let serial = self.allocate_serial();
         if let Some(xdg_surface) = self.xdg_shell_manager.get_xdg_surface_mut(xdg_surface_id) {
             xdg_surface.last_configure_serial = Some(serial);
@@ -964,6 +978,7 @@ impl WaylandBridge {
     }
 
     fn queue_pending_pointer_motion(&mut self) {
+        if self.pending_pointer_motion { self.decoration_motion(); }
         self.update_scene_pointer_focus();
         if !self.pending_pointer_motion {
             return;
@@ -1154,8 +1169,9 @@ impl WaylandBridge {
                     if code == BTN_LEFT {
                         self.left_button_down = value != 0;
                     }
+                    self.queue_pending_pointer_motion();
+                    if self.decoration_button(code, value) { return; }
                     if let Some(pointer_id) = self.focused_pointer {
-                        self.queue_pending_pointer_motion();
                         if self.pointer_surface.is_none() {
                             return;
                         }
@@ -1683,8 +1699,10 @@ impl WaylandBridge {
             let payload = &self.sws_rx_buffer[protocol_sws::MessageHeader::SIZE..frame_len];
             let message = protocol_sws::parse_server_message(header.msg_type_u32(), payload)
                 .map_err(|_| "Invalid SWS frame")?;
-            self.route_sws_message(header, message, None)?;
+            // Routing a frame callback can publish a new scene and wait for
+            // SHM registration. Consume this record before that nested poll.
             self.sws_rx_buffer.drain(0..frame_len);
+            self.route_sws_message(header, message, None)?;
         }
 
         Ok(())
@@ -1928,7 +1946,16 @@ impl WaylandBridge {
             if let Some(surface) = self.surface_manager.get_surface_mut(wl_surface_id) {
                 surface.sws_window_id = Some(window_id);
             }
+            if self.decoration_visible(wl_surface_id) {
+                // Include the ScarletUI frame when placing the initial window.
+                // A fixed SWS origin can leave a wide client beyond the output.
+                let x = self.output_size.0.saturating_sub(width) / 2;
+                let y = self.output_size.1.saturating_sub(height) / 2;
+                let payload = protocol_sws::payload_move_window(window_id, x as i32, y as i32);
+                self.send_sws_async_message(protocol_sws::client_msg::MOVE_WINDOW, &payload)?;
+            }
             self.apply_xdg_toplevel_state_to_sws(wl_surface_id, window_id);
+            self.sync_toplevel_metadata(wl_surface_id)?;
         }
 
         Ok(())
@@ -2552,6 +2579,7 @@ impl WaylandBridge {
             // Losing this connection terminates only this client worker; the
             // server accept loop remains available for subsequent clients.
             self.poll_sws_messages()?;
+            self.process_decoration_updates()?;
             let mut input_events = Vec::new();
             {
                 let mut queue = self.input_event_queue.lock();
@@ -2628,6 +2656,8 @@ impl WaylandBridge {
         }
 
         match interface.as_str() {
+            "zxdg_decoration_manager_v1" | "zxdg_toplevel_decoration_v1" =>
+                self.handle_decoration_message(object_id, &interface, opcode, payload),
             "wl_display" => self.handle_display_message(opcode, payload),
             "wl_registry" => self.handle_registry_message(object_id, opcode, payload),
             "wl_compositor" => self.handle_compositor_message(opcode, payload),
@@ -2918,6 +2948,7 @@ impl WaylandBridge {
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             protocol::surface_request::DESTROY => {
+                self.remove_decoration(surface_id)?;
                 bridge_log!("[Bridge] wl_surface.destroy: {}", surface_id);
                 self.output_surfaces.remove(&surface_id);
                 self.update_surface_output(surface_id, Vec::new());
@@ -3021,6 +3052,7 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             protocol::surface_request::COMMIT => {
+                self.decoration_commit(surface_id)?;
                 if is_debug_enabled() {
                     bridge_log!("[Bridge] wl_surface.commit on surface {}", surface_id);
                 }
@@ -3625,6 +3657,7 @@ impl WaylandBridge {
                 if payload.len() >= 4 {
                     let serial =
                         u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    self.decoration_ack(xdg_surface_id, serial);
                     if let Some(surface) =
                         self.xdg_shell_manager.get_xdg_surface_mut(xdg_surface_id)
                     {
@@ -3649,6 +3682,11 @@ impl WaylandBridge {
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             xdg_shell::xdg_toplevel_request::DESTROY => {
+                if self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id)
+                    .map(|(_, root)| root).and_then(|root| self.decorations.get(&root))
+                    .is_some_and(|decoration| decoration.state.object.is_some()) {
+                    return Err("Toplevel destroyed before decoration");
+                }
                 bridge_log!("[Bridge] xdg_toplevel.destroy");
                 if let Some(wl_surface_id) = self.xdg_shell_manager.clear_toplevel(xdg_toplevel_id)
                     && let Some(surface) = self.surface_manager.get_surface_mut(wl_surface_id)
@@ -3664,12 +3702,11 @@ impl WaylandBridge {
                 Ok(Vec::new())
             }
             xdg_shell::xdg_toplevel_request::SET_TITLE => {
-                bridge_log!("[Bridge] xdg_toplevel.set_title");
                 if let Some((title, _)) = Self::parse_string(payload, 0)
-                    && let Some((toplevel, _)) =
-                        self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id)
-                {
+                    && let Some((toplevel, root)) = self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id) {
                     toplevel.title = Some(title);
+                    self.sync_toplevel_metadata(root)?;
+                    self.decoration_updates.insert(root);
                 }
                 Ok(Vec::new())
             }
@@ -3687,10 +3724,11 @@ impl WaylandBridge {
                 bridge_log!("[Bridge] xdg_toplevel.set_max_size");
                 let width = Self::parse_i32(payload, 0).unwrap_or(0);
                 let height = Self::parse_i32(payload, 4).unwrap_or(0);
-                if let Some((toplevel, _)) =
+                if let Some((toplevel, root)) =
                     self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id)
                 {
                     toplevel.max_size = Some((width, height));
+                    self.sync_toplevel_metadata(root)?;
                 }
                 Ok(Vec::new())
             }
@@ -3698,10 +3736,11 @@ impl WaylandBridge {
                 bridge_log!("[Bridge] xdg_toplevel.set_min_size");
                 let width = Self::parse_i32(payload, 0).unwrap_or(0);
                 let height = Self::parse_i32(payload, 4).unwrap_or(0);
-                if let Some((toplevel, _)) =
+                if let Some((toplevel, root)) =
                     self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id)
                 {
                     toplevel.min_size = Some((width, height));
+                    self.sync_toplevel_metadata(root)?;
                 }
                 Ok(Vec::new())
             }
@@ -4361,9 +4400,17 @@ impl WaylandBridge {
 fn main() -> i32 {
     bridge_info!("[wayland-bridge] starting");
 
-    let socket_path = "/tmp/wayland-0";
+    // Match libwayland's absolute/relative WAYLAND_DISPLAY convention so a
+    // dedicated compatibility test can use its own bridge instance.
+    let display = env::var("WAYLAND_DISPLAY").unwrap_or_else(|| String::from("wayland-0"));
+    let socket_path = if display.starts_with('/') {
+        display
+    } else {
+        let runtime = env::var("XDG_RUNTIME_DIR").unwrap_or_else(|| String::from("/tmp"));
+        std::format!("{}/{}", runtime.trim_end_matches('/'), display)
+    };
 
-    let server_socket = match create_server_socket(socket_path) {
+    let server_socket = match create_server_socket(&socket_path) {
         Ok(sock) => sock,
         Err(e) => {
             bridge_error!("[wayland-bridge] failed to initialize: {}", e);

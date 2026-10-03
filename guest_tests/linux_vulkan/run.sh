@@ -20,5 +20,21 @@ wine)
         if [[ $result != 0 ]]; then exit "$result"; fi
     done
     ;;
-*) echo "Usage: $0 [linux|wine]" >&2; exit 2 ;;
+zink-capabilities)
+    "$directory/zink-requirements"
+    exit $?
+    ;;
+zink-timeline)
+    "$directory/zink-timeline"
+    exit $?
+    ;;
+zink-viewport)
+    "$directory/zink-viewport"
+    exit $?
+    ;;
+zink)
+    "$directory/zink-run"
+    exit $?
+    ;;
+*) echo "Usage: $0 [linux|wine|zink-capabilities|zink-timeline|zink-viewport|zink]" >&2; exit 2 ;;
 esac

@@ -9,8 +9,9 @@ workspace = "../../.cargo"
 [features]
 # Keep the complete suite as the default. Console programs can be built without
 # pulling UI dependencies (or imposing their hardware requirements).
-default = ["ui"]
+default = ["ui", "wayland-decoration"]
 ui = ["dep:scarlet-ui", "dep:scarlet-ui-macros"]
+wayland-decoration = ["dep:scarlet-ui-core"]
 
 [[bin]]
 name = "init"
@@ -119,6 +120,7 @@ path = "src/ui_benchmark.rs"
 [[bin]]
 name = "wayland-bridge"
 path = "src/wayland_bridge/main.rs"
+required-features = ["wayland-decoration"]
 
 [[bin]]
 name = "event-demo"
@@ -176,6 +178,7 @@ name = "sas"
 path = "src/sas/main.rs"
 
 [dependencies]
+scarlet-ui-core = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "e6e00f11c95de371057899ec05b7a832d04adc7f", default-features = false, features = ["legacy-scarlet-std"] }
 scarlet-abi = { path = "../lib/scarlet-abi" }
 scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }

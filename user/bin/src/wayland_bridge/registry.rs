@@ -47,10 +47,12 @@ impl Registry {
     pub fn set_surface_scenes(&mut self, enabled: bool) {
         self.globals.retain(|_, global| {
             global.interface != "wl_subcompositor" && global.interface != "wp_viewporter"
+                && global.interface != "zxdg_decoration_manager_v1"
         });
         if enabled {
             self.add_global("wl_subcompositor", 1);
             self.add_global("wp_viewporter", 1);
+            self.add_global("zxdg_decoration_manager_v1", 1);
         }
     }
 

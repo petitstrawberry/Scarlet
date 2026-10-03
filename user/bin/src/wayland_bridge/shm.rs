@@ -219,13 +219,11 @@ impl ShmManager {
         if pool.destroyed || new_size <= 0 || new_size as usize <= pool.size {
             return Err("SHM pool resize must grow a live pool");
         }
-        if let Some(handle) = pool.handle.as_ref() {
-            let shm = handle
-                .as_shared_memory()
-                .map_err(|_| "Shared memory handle invalid")?;
-            shm.resize(new_size as usize)
-                .map_err(|_| "Shared memory resize failed")?;
-        }
+        // wl_shm_pool.resize changes the server's mapping, not the client's
+        // backing file. The client must grow that file before this request.
+        // In particular Linux memfd/shm_open handles are mappable file objects,
+        // not native SharedMemory objects. SWS retains the transferred handle
+        // and validates/remaps the new range via MemoryMappingOps below.
         pool.size = new_size as usize;
         Ok(())
     }
