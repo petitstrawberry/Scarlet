@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-task_root="$(cd "$(dirname "$0")/../.." && pwd)"
+task_root="$(cd "$(dirname "$0")/../../.." && pwd)"
 if [[ $# != 1 ]]; then
     echo "Usage: $0 <sgfx-source-directory>" >&2
     exit 2
@@ -21,7 +21,7 @@ mkdir -p "$destination/usr/lib/aarch64-linux-gnu" "$destination/usr/share/vulkan
 install -m 755 "$output/target-sgfx/aarch64-unknown-linux-gnu/release/libvulkan_sgfx.so" "$destination/usr/lib/aarch64-linux-gnu/"
 install -m 755 "$output/target-sws/aarch64-unknown-linux-gnu/release/libsws_client_c.so" "$destination/usr/lib/aarch64-linux-gnu/"
 install -m 644 "$recipe/sgfx.json" "$destination/usr/share/vulkan/icd.d/"
-for binary in vulkan-offscreen vulkan-offscreen.exe vulkan-present vulkan-present.exe vulkan-kernel-io; do
+for binary in vulkan-offscreen vulkan-offscreen.exe vulkan-present vulkan-present.exe vulkan-kernel-io zink-requirements zink-timeline zink-viewport; do
     install -m 755 "$output/$binary" "$destination/opt/sgfx-vulkan-tests/"
 done
 install -m 755 "$task_root/guest_tests/linux_vulkan/run.sh" "$destination/opt/sgfx-vulkan-tests/"
