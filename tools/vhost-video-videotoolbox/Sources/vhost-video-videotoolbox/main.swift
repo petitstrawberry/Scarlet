@@ -33,6 +33,10 @@ private let vhostUserVersion: UInt32 = 0x1
 private let vhostUserReply: UInt32 = 0x4
 private let vhostUserNeedReply: UInt32 = 0x8
 
+// Some macOS QEMU versions close pipe-backed kick notifiers during setup.
+// Poll shared rings only for those queues, with a bounded sleep between checks.
+private let kickPollingIntervalMs: Int32 = 1
+
 private let vhostUserFProtocolFeatures: UInt64 = 30
 private let virtioFVersion1: UInt64 = 32
 private let vhostUserProtocolFMq: UInt64 = 0
@@ -249,11 +253,28 @@ private final class VirtQueue {
     var availAddress: UInt64 = 0
     var lastAvailIndex: UInt16 = 0
     var kickFd: Int32?
+    var pollWithoutKick = false
     var callFd: Int32?
     var enabled = false
 
     init(index: Int) {
         self.index = index
+    }
+
+    func closeKickFd() {
+        if let fd = kickFd { close(fd) }
+        kickFd = nil
+        pollWithoutKick = false
+    }
+
+    func useKickPolling() {
+        closeKickFd()
+        pollWithoutKick = true
+        log("[vhost-video-vt] queue \(index) kick unavailable; checking ring every \(kickPollingIntervalMs)ms")
+    }
+
+    var isConfigured: Bool {
+        size > 0 && descAddress != 0 && usedAddress != 0 && availAddress != 0
     }
 
     deinit {
@@ -822,11 +843,29 @@ private final class VideoBackend {
 
     func processKick(queueIndex: Int) throws {
         let queue = try queue(queueIndex)
-        if let kickFd = queue.kickFd {
-            var buf: UInt64 = 0
-            _ = withUnsafeMutableBytes(of: &buf) { Darwin.read(kickFd, $0.baseAddress, 8) }
+        guard let kickFd = queue.kickFd else { return }
+        var buf: UInt64 = 0
+        while true {
+            let count = withUnsafeMutableBytes(of: &buf) {
+                Darwin.read(kickFd, $0.baseAddress, $0.count)
+            }
+            if count > 0 { break }
+            if count == 0 {
+                // macOS pipe EOF remains readable. Keeping it in poll would spin.
+                queue.useKickPolling()
+                return
+            }
+            if errno == EINTR { continue }
+            if errno == EAGAIN { return }
+            throw RuntimeError("kick read failed: \(String(cString: strerror(errno)))")
         }
 
+        try processAvailable(queueIndex: queueIndex)
+    }
+
+    func processAvailable(queueIndex: Int) throws {
+        let queue = try queue(queueIndex)
+        guard queue.isConfigured else { return }
         let availIndex = try memory.readU16User(queue.availAddress + 2)
         while queue.lastAvailIndex != availIndex {
             let ringOffset = UInt64(4 + 2 * (Int(queue.lastAvailIndex) % Int(queue.size)))
@@ -1258,25 +1297,46 @@ private func serve(socketPath: String, queues: Int) throws {
             }
         }
 
-        let rc = poll(&pollFds, nfds_t(pollFds.count), -1)
+        let pollingQueues = backend.queues.filter { $0.pollWithoutKick && $0.isConfigured }
+        let timeout: Int32 = pollingQueues.isEmpty ? -1 : kickPollingIntervalMs
+        let rc = poll(&pollFds, nfds_t(pollFds.count), timeout)
         if rc < 0 {
             if errno == EINTR { continue }
             throw RuntimeError("poll failed: \(String(cString: strerror(errno)))")
         }
 
-        for pollFd in pollFds where pollFd.revents & Int16(POLLIN) != 0 {
-            if pollFd.fd != conn {
-                if let queueIndex = kickMap[pollFd.fd] {
-                    try backend.processKick(queueIndex: queueIndex)
-                }
-                continue
-            }
-
+        let connectionEvents = pollFds[0].revents
+        if connectionEvents & Int16(POLLIN) != 0 {
             guard let message = try recvMessage(conn) else {
                 log("[vhost-video-vt] QEMU disconnected")
                 return
             }
             try handle(message: message, conn: conn, backend: backend, queues: queues)
+            // Control messages can replace/close kick FDs. Rebuild the poll set
+            // before using readiness information for the old descriptors.
+            continue
+        }
+        if connectionEvents & Int16(POLLHUP) != 0 {
+            log("[vhost-video-vt] QEMU disconnected")
+            return
+        }
+        if connectionEvents & Int16(POLLERR | POLLNVAL) != 0 {
+            throw RuntimeError("vhost-user connection poll error: \(connectionEvents)")
+        }
+
+        for pollFd in pollFds.dropFirst() where pollFd.revents != 0 {
+            guard let queueIndex = kickMap[pollFd.fd] else { continue }
+            let queue = try backend.queue(queueIndex)
+            if pollFd.revents & Int16(POLLIN) != 0 {
+                try backend.processKick(queueIndex: queueIndex)
+            }
+            if pollFd.revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0,
+               queue.kickFd != nil {
+                queue.useKickPolling()
+            }
+        }
+        for queue in backend.queues where queue.pollWithoutKick && queue.isConfigured {
+            try backend.processAvailable(queueIndex: queue.index)
         }
     }
 }
@@ -1329,6 +1389,7 @@ private func handle(message: VhostMessage, conn: Int32, backend: VideoBackend, q
     case vhostUserGetVringBase:
         let index = message.payload.count >= 4 ? Int(message.payload.u32(0)) : 0
         let queue = try backend.queue(index)
+        queue.closeKickFd()
         var payload = Data()
         appendU32(&payload, UInt32(index))
         appendU32(&payload, UInt32(queue.lastAvailIndex))
@@ -1337,12 +1398,12 @@ private func handle(message: VhostMessage, conn: Int32, backend: VideoBackend, q
     case vhostUserSetVringKick:
         let index = vringFileIndex(message.payload)
         let queue = try backend.queue(index)
-        if let old = queue.kickFd { close(old) }
+        queue.closeKickFd()
         if vringFileHasFd(message.payload) {
             queue.kickFd = message.fds.first
             closeFds(Array(message.fds.dropFirst()))
         } else {
-            queue.kickFd = nil
+            queue.useKickPolling()
             closeFds(message.fds)
         }
     case vhostUserSetVringCall:
@@ -1358,7 +1419,9 @@ private func handle(message: VhostMessage, conn: Int32, backend: VideoBackend, q
         }
     case vhostUserSetVringEnable:
         let index = Int(message.payload.u32(0))
-        try backend.queue(index).enabled = message.payload.u32(4) != 0
+        let queue = try backend.queue(index)
+        queue.enabled = message.payload.u32(4) != 0
+        queue.pollWithoutKick = queue.enabled && queue.kickFd == nil
         closeFds(message.fds)
     case vhostUserGetStatus:
         var payload = Data()
