@@ -1235,12 +1235,12 @@ kind = "archive"
 to = "/systems/linux-aarch64"
 format = "tar-zst"
 strip_components = 1
-hash = "sha256:86db9824ab395d20f47b6630cf8a9b3bad55de3eac19460d712b112dc565127e"
+hash = "sha256:55a133c3e3f03337f6e0baf6b59194bfe0eb19a340d72bc94224d387e498b62b"
 
 [sections.rootfs.layers.source]
 type = "archive"
-url = "https://github.com/petitstrawberry/scarlet-bundle-debian/releases/download/v0.2.0/rootfs-aarch64-wine-v0.2.0.tar.zst"
-sha256 = "sha256:86db9824ab395d20f47b6630cf8a9b3bad55de3eac19460d712b112dc565127e"
+url = "https://github.com/petitstrawberry/scarlet-bundle-debian/releases/download/v0.3.26/rootfs-aarch64-base-v0.3.26.tar.zst"
+sha256 = "sha256:55a133c3e3f03337f6e0baf6b59194bfe0eb19a340d72bc94224d387e498b62b"
 
 [[sections.rootfs.layers]]
 kind = "cargo"

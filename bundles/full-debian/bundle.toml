@@ -1,6 +1,6 @@
 # AArch64 full image using the experimental Debian trixie glibc Linux view.
-# Includes Box64 and Wine64 for initial 64-bit Windows console bring-up.
-# This Debian profile has no Mozc or Chromium overlay.
+# Includes shared Linux graphics/game dependencies and preinstalled Mozc.
+# Japanese conversion uses Scarlet's native Mozc launcher and SWS service.
 
 [[layers]]
 kind = "bundle"
@@ -8,7 +8,7 @@ path = "../desktop/bundle.toml"
 
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/scarlet-bundle-debian.git", rev = "0307627299daf05792fc7b16a1754ea34b665bda" }
+source = { git = "https://github.com/petitstrawberry/scarlet-bundle-debian.git", rev = "19fd5b615596573e4193c364b1995a4c3550c759" }
 subdir = "bundles/rootfs"
 
 # Runtime compatibility updates over the pinned Debian archive.
