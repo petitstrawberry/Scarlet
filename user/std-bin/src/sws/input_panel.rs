@@ -35,6 +35,13 @@ impl Panel {
         self.visible = false;
         true
     }
+    /// Window removal only releases the exact provider, not other windows of its client.
+    pub fn unregister_window(&mut self, client: usize, window: u32) -> bool {
+        if self.provider != Some((client, window)) {
+            return false;
+        }
+        self.unregister(client)
+    }
     pub fn update(&mut self, mut context: Context) -> bool {
         let new_activation = (context.context_id, context.window_id)
             != (self.context.context_id, self.context.window_id);
@@ -111,5 +118,23 @@ mod tests {
         assert!(!panel.visible);
         assert!(!panel.accepts(1, 3, generation));
         assert!(panel.register(2, 51));
+    }
+    #[test]
+    fn queued_registration_is_released_by_later_lifecycle_events() {
+        let mut panel = Panel::new();
+        // Register was queued before the IPC thread observed disconnect.
+        assert!(panel.register(1, 50));
+        panel.update(editor(3));
+        let context = panel.context;
+        panel.show(1, context.context_id, context.generation, true);
+        assert!(panel.unregister(1)); // compositor's later ClientDisconnected
+        assert!(!panel.visible);
+        assert!(!panel.accepts(1, context.context_id, context.generation));
+        assert!(panel.register(2, 60));
+        assert!(!panel.unregister_window(2, 61));
+        assert!(!panel.unregister_window(1, 60));
+        assert_eq!(panel.provider, Some((2, 60)));
+        assert!(panel.unregister_window(2, 60)); // later DestroyWindow
+        assert!(panel.register(3, 70));
     }
 }

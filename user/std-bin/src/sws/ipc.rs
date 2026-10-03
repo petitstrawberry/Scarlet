@@ -1400,11 +1400,21 @@ pub fn register_input_panel(client_id: usize, window_id: u32, request_id: u8, va
         push_ipc_event(IpcEvent::InputPanelChanged);
     }
 }
-fn unregister_input_panel(client_id: usize) {
+pub(super) fn unregister_input_panel(client_id: usize) {
     if INPUT_PANEL
         .lock()
         .expect("SWS input panel mutex poisoned")
         .unregister(client_id)
+    {
+        push_ipc_event(IpcEvent::InputPanelChanged);
+    }
+}
+
+pub(super) fn unregister_input_panel_window(client_id: usize, window_id: u32) {
+    if INPUT_PANEL
+        .lock()
+        .expect("SWS input panel mutex poisoned")
+        .unregister_window(client_id, window_id)
     {
         push_ipc_event(IpcEvent::InputPanelChanged);
     }
@@ -3114,9 +3124,6 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 }
 
                 // Remove from managed windows
-                if input_panel_state().provider == Some((client_id, window_id)) {
-                    unregister_input_panel(client_id);
-                }
                 managed_windows.retain(|&id| id != window_id);
 
                 push_ipc_event(IpcEvent::DestroyWindow {
@@ -4596,7 +4603,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
         .lock()
         .expect("SWS mutex poisoned")
         .remove(&client_id);
-    unregister_input_panel(client_id);
+    // Provider release is ordered with queued registrations by the compositor.
     cleanup_text_input_contexts_for_client(client_id);
     cleanup_input_methods_for_client(client_id);
 

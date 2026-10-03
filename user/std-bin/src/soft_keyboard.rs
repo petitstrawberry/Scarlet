@@ -2,6 +2,7 @@
 #[cfg(target_os = "scarlet")]
 mod panel {
     use scarlet_ui::element::{ComponentElement, Element};
+    use scarlet_ui::error::{Error as UiError, RenderFailureKind};
     use scarlet_ui::prelude::*;
     use scarlet_ui::views::containers::ViewTuple;
     use scarlet_ui::{
@@ -463,7 +464,24 @@ mod panel {
             .frame(size.width, size.height)
             .create_element()
     }
-    pub fn run() -> std::result::Result<(), String> {
+    pub enum RunError {
+        DuplicateProvider,
+        Failed(String),
+    }
+    impl From<String> for RunError {
+        fn from(message: String) -> Self {
+            Self::Failed(message)
+        }
+    }
+    impl std::fmt::Display for RunError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::DuplicateProvider => f.write_str("another input panel is already registered"),
+                Self::Failed(message) => f.write_str(message),
+            }
+        }
+    }
+    pub fn run() -> std::result::Result<(), RunError> {
         let probe =
             sws_client::Connection::connect_default().map_err(|error| format!("{error:?}"))?;
         let (width, height) = probe
@@ -495,7 +513,7 @@ mod panel {
             .register_input_panel(window.surface_id())
             .map_err(|error| format!("{error:?}"))?
         {
-            return Err("another input panel is already registered".into());
+            return Err(RunError::DuplicateProvider);
         }
         let mut environment = window
             .connection()
@@ -503,6 +521,9 @@ mod panel {
             .map_err(|error| format!("{error:?}"))?;
         let mut context = Context::default();
         let mut visible = false;
+        let mut retry_render = false;
+        let mut rebuild_after_failure = false;
+        let mut retried_rejection = false;
         let mut dismissed = None;
         let mut modifiers = 0;
         let mut shift_locked = false;
@@ -541,7 +562,7 @@ mod panel {
                 .connection()
                 .dispatch()
                 .map_err(|error| format!("{error:?}"))?;
-            let mut rebuild = false;
+            let mut rebuild = core::mem::take(&mut rebuild_after_failure);
             for event in receiver.drain_events() {
                 match event {
                     sws_client::Event::InputPanelContext(next) => {
@@ -594,7 +615,7 @@ mod panel {
                     rebuild = true;
                 }
                 if matches!(event, Event::Quit) {
-                    return Ok(());
+                    return Err("input-panel surface closed".to_string().into());
                 }
                 pipeline.handle_event(&event);
             }
@@ -679,31 +700,76 @@ mod panel {
                 pipeline.layout_initial();
                 pipeline.resize(window.size());
             }
-            if visible && pipeline.has_dirty() {
-                match pipeline
-                    .render_for_present()
-                    .map_err(|error| format!("{error:?}"))?
-                {
-                    PresentedFrame::Cpu { buffer, damage } => {
+            if visible && (pipeline.has_dirty() || retry_render) {
+                retry_render = false;
+                match pipeline.render_for_present() {
+                    Ok(PresentedFrame::Cpu { buffer, damage }) => {
+                        retried_rejection = false;
                         window.present_with_damage(buffer, damage);
                     }
-                    PresentedFrame::External | PresentedFrame::Idle => {}
+                    Ok(PresentedFrame::External | PresentedFrame::Idle) => {
+                        retried_rejection = false;
+                    }
+                    Err(UiError::RenderFailure(failure)) => match failure.kind {
+                        // Match ScarletUI's standard Application runner: transient
+                        // GPU backpressure must not terminate the input provider.
+                        RenderFailureKind::Busy => {
+                            // Recreate the view tree as well as paint caches:
+                            // a failed frame can cache pixels never presented.
+                            rebuild_after_failure = true;
+                            retry_render = true;
+                        }
+                        RenderFailureKind::Rejected => {
+                            rebuild_after_failure = true;
+                            // Repaint once from a fresh tree. Repeated rejection
+                            // waits for input instead of spinning on invalid work.
+                            retry_render = !retried_rejection;
+                            retried_rejection = true;
+                            eprintln!("soft-keyboard: discarded frame: {failure}");
+                        }
+                        // RecoveryRequired and future failure kinds need a new backend.
+                        _ => {
+                            return Err(format!("render: {failure}").into());
+                        }
+                    },
+                    Err(error) => return Err(format!("render: {error:?}").into()),
                 }
             }
             window
                 .connection()
-                .wait_for_window_events(if pipeline.has_active_animation() {
-                    Duration::from_millis(16)
-                } else {
-                    Duration::from_secs(30)
-                })
+                .wait_for_window_events(
+                    if (visible && retry_render) || pipeline.has_active_animation() {
+                        Duration::from_millis(16)
+                    } else {
+                        Duration::from_secs(30)
+                    },
+                )
                 .map_err(|error| format!("{error:?}"))?;
         }
     }
 }
 fn main() {
     #[cfg(target_os = "scarlet")]
-    if let Err(error) = panel::run() {
-        eprintln!("soft-keyboard: {error}");
+    {
+        // Keep the stemd-launched process alive across a lost SWS connection or
+        // a renderer that needs recreation. Bound repeated startup failures.
+        let mut failures = 0u32;
+        loop {
+            let started = std::time::Instant::now();
+            let error = match panel::run() {
+                Ok(()) => return,
+                Err(error) => error,
+            };
+            if started.elapsed() >= std::time::Duration::from_secs(30) {
+                failures = 0;
+            }
+            failures += 1;
+            eprintln!("soft-keyboard: {error} (attempt {failures}/5)");
+            if matches!(error, panel::RunError::DuplicateProvider) || failures >= 5 {
+                std::process::exit(1);
+            }
+            let delay_ms = 250u64 << (failures - 1);
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
     }
 }

@@ -10730,7 +10730,10 @@ impl Compositor {
                 let valid = self
                     .window_manager
                     .get_window(window_id)
-                    .is_some_and(|window| window.window_type == WindowType::InputPanel);
+                    .is_some_and(|window| {
+                        window.window_type == WindowType::InputPanel
+                            && window.owner_client_id == Some(client_id)
+                    });
                 super::ipc::register_input_panel(client_id, window_id, request_id, valid);
             }
             IpcEvent::InputPanelChanged => self.refresh_input_panel(),
@@ -11079,6 +11082,8 @@ impl Compositor {
                     client_id, window_id
                 );
 
+                // Registration and release must follow the same compositor queue.
+                super::ipc::unregister_input_panel_window(client_id, window_id);
                 if self.close_client_windows(client_id, &[window_id], true)? {
                     self.dump_memory_layout("after IPC DestroyWindow");
                     return Ok(true);
@@ -11094,6 +11099,9 @@ impl Compositor {
                     window_ids.len()
                 );
 
+                // The IPC thread may have disconnected before a queued Register ran.
+                // Release here, after earlier registrations, even with no remaining windows.
+                super::ipc::unregister_input_panel(client_id);
                 let windows_removed = self.close_client_windows(client_id, &window_ids, false)?;
                 self.cleanup_extension_resources_for_client(client_id);
                 if windows_removed {
