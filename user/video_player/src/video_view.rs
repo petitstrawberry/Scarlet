@@ -152,7 +152,7 @@ impl ElementRenderObject for VideoRender {
         self.fallback = None;
         let data = self.view.frames.data.lock();
         if self.view.controls.is_visible() {
-            let panel_height = height.min(CONTROLS_MIN_HEIGHT.max(CONTROLS_PANEL_HEIGHT));
+            let panel_height = height.min(controls_panel_height());
             let target = buffer(&mut self.panel, width, panel_height);
             let (w, h) = (target.width(), target.height());
             let pixels = target.data_mut();

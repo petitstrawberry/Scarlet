@@ -175,7 +175,7 @@ pub enum EventError {
 
 pub type EventResult<T> = core::result::Result<T, EventError>;
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(all(target_os = "scarlet", target_arch = "riscv64"))]
 core::arch::global_asm!(
     ".section .text.scarlet_event_return,\"ax\",@progbits",
     // The fixed-ABI trampoline may occur in a native C staticlib and a Rust
@@ -189,7 +189,7 @@ core::arch::global_asm!(
     ".size __scarlet_event_return_trampoline, .-__scarlet_event_return_trampoline",
 );
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_os = "scarlet", target_arch = "aarch64"))]
 core::arch::global_asm!(
     ".section .text.scarlet_event_return,\"ax\"",
     ".weak __scarlet_event_return_trampoline",
@@ -201,17 +201,26 @@ core::arch::global_asm!(
     ".size __scarlet_event_return_trampoline, .-__scarlet_event_return_trampoline",
 );
 
-#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
+#[cfg(all(
+    target_os = "scarlet",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
 unsafe extern "C" {
     fn __scarlet_event_return_trampoline();
 }
 
-#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
+#[cfg(all(
+    target_os = "scarlet",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
 fn event_return_trampoline() -> usize {
     __scarlet_event_return_trampoline as *const () as usize
 }
 
-#[cfg(not(any(target_arch = "riscv64", target_arch = "aarch64")))]
+#[cfg(not(all(
+    target_os = "scarlet",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+)))]
 fn event_return_trampoline() -> usize {
     0
 }

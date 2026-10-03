@@ -47,10 +47,10 @@ use scarlet_desktop_config::{
     DESKTOP_STEMD_INTERFACE, DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD, DESKTOP_STEMD_OBJECT_PATH,
 };
 use scarlet_ui::{
-    Application, ApplicationRunExt, Canvas, Color, ComponentElement, Element, Event,
-    InvalidationKind, KeyCode, KeyEvent, Listenable, MenuBarModel, MenuEntry, MenuItemModel,
-    MouseButton, MouseEvent, Scene, Size, SubscriptionId, View, ViewExt, Window, WindowGroup,
-    dismiss_window, graphics,
+    Application, ApplicationRunExt, Canvas, Color, ColorPalette, ComponentElement, Element, Event,
+    InteractionMode, InvalidationKind, KeyCode, KeyEvent, Listenable, MenuBarModel, MenuEntry,
+    MenuItemModel, MouseButton, MouseEvent, Scene, Size, SubscriptionId, View, ViewExt, Window,
+    WindowGroup, current_input_environment, dismiss_window, graphics,
 };
 use scarlet_video_client::{
     AUTOMATIC_TIMESTAMP, DecodedImage, DecodedOutput, DecoderOptions, OwnedDecodedFrame,
@@ -89,7 +89,7 @@ const DISPLAY_WIDTH: u32 = 640;
 const DISPLAY_HEIGHT: u32 = 360;
 const FRAME_INTERVAL_MS: u64 = 33;
 const CONTROLS_HIDE_INTERVAL_MS: u64 = 250;
-const CONTROLS_HIDE_IDLE_TICKS: u32 = 6;
+const CONTROLS_HIDE_IDLE_TICKS: u32 = 16;
 const STREAM_POLL_INTERVAL_MS: u64 = 25;
 const STREAM_REORDER_HOLD_SAMPLES: usize = 8;
 const STREAM_DECODE_BATCH_SAMPLES: usize = 8;
@@ -109,12 +109,9 @@ const SEEK_COALESCE_DELAY_MS: u64 = 35;
 const WORKER_SHUTDOWN_POLL_INTERVAL_MS: u64 = 10;
 const WORKER_SHUTDOWN_POLL_ATTEMPTS: usize = 50;
 const CONTROLS_MIN_WIDTH: u32 = 96;
-const CONTROLS_MIN_HEIGHT: u32 = 48;
-const CONTROLS_PANEL_HEIGHT: u32 = 34;
-const PLAY_BUTTON_SIZE: u32 = 22;
+const CONTROLS_MIN_HEIGHT: u32 = 120;
 const PLAY_BUTTON_LEFT_INSET: u32 = 10;
 const PLAY_BUTTON_TOP_INSET: u32 = 6;
-const LOOP_BUTTON_WIDTH: u32 = 24;
 
 /// Read-only media bytes backed either by a shared file mapping or by an
 /// owned buffer for genuinely streaming inputs.
@@ -196,15 +193,11 @@ impl Drop for MappedMediaFile {
         let _ = unsafe { munmap(self.address, self.length) };
     }
 }
-const LOOP_BUTTON_HEIGHT: u32 = 22;
-const LOOP_BUTTON_LEFT_INSET: u32 = 38;
-const SEEK_TRACK_LEFT_INSET: u32 = 74;
+const SEEK_TRACK_LEFT_INSET: u32 = 16;
 const SEEK_TRACK_RIGHT_INSET: u32 = 18;
-const SEEK_TRACK_BOTTOM_INSET: u32 = 16;
-const SEEK_TRACK_HEIGHT: u32 = 2;
-const SEEK_TRACK_HIT_INSET: u32 = 10;
-const SEEK_KNOB_WIDTH: u32 = 4;
-const SEEK_KNOB_HEIGHT: u32 = 8;
+const SEEK_TRACK_HEIGHT: u32 = 4;
+const SEEK_KNOB_WIDTH: u32 = 10;
+const SEEK_KNOB_HEIGHT: u32 = 18;
 const SCARLET_AV1_ACCESS_UNIT_MAGIC: &[u8; 4] = b"SVA1";
 // Software decode needs a large-core latency floor.  The hardware path only
 // copies/colour-converts completed frames, and pinning every decoder and
@@ -314,6 +307,15 @@ impl VideoFrameStore {
 
 struct ControlsOverlay {
     visible: AtomicBool,
+    control_focus: AtomicU32,
+    controls_pinned: AtomicBool,
+    pointer_target: AtomicU32,
+    confirm_held: AtomicBool,
+    cancel_held: AtomicBool,
+    fullscreen_key_held: AtomicBool,
+    fullscreen: AtomicBool,
+    fullscreen_requested: AtomicBool,
+    fullscreen_request_pending: AtomicBool,
     debug_visible: AtomicBool,
     loop_enabled: AtomicBool,
     activity_epoch: AtomicU32,
@@ -378,7 +380,16 @@ impl UiScale {
 impl ControlsOverlay {
     fn new(loop_enabled: bool) -> Self {
         Self {
-            visible: AtomicBool::new(false),
+            visible: AtomicBool::new(true),
+            control_focus: AtomicU32::new(0),
+            controls_pinned: AtomicBool::new(false),
+            pointer_target: AtomicU32::new(0),
+            confirm_held: AtomicBool::new(false),
+            cancel_held: AtomicBool::new(false),
+            fullscreen_key_held: AtomicBool::new(false),
+            fullscreen: AtomicBool::new(false),
+            fullscreen_requested: AtomicBool::new(false),
+            fullscreen_request_pending: AtomicBool::new(false),
             debug_visible: AtomicBool::new(false),
             loop_enabled: AtomicBool::new(loop_enabled),
             activity_epoch: AtomicU32::new(0),
@@ -407,7 +418,11 @@ impl ControlsOverlay {
     }
 
     fn reset_for_media(&self, loop_enabled: bool) {
-        self.visible.store(false, Ordering::Release);
+        self.visible.store(true, Ordering::Release);
+        self.control_focus.store(0, Ordering::Release);
+        self.controls_pinned.store(false, Ordering::Release);
+        self.pointer_target.store(0, Ordering::Release);
+        self.confirm_held.store(false, Ordering::Release);
         self.debug_visible.store(false, Ordering::Release);
         self.loop_enabled.store(loop_enabled, Ordering::Release);
         self.paused.store(false, Ordering::Release);
@@ -430,6 +445,32 @@ impl ControlsOverlay {
         self.last_clock_us.store(0);
         self.last_video_pts_us.store(0);
         self.last_lag_us.store(0);
+    }
+
+    fn request_fullscreen(&self, fullscreen: bool) {
+        self.fullscreen_requested
+            .store(fullscreen, Ordering::Release);
+        self.fullscreen_request_pending
+            .store(true, Ordering::Release);
+        self.pointer_target.store(0, Ordering::Release);
+        if self.scrubbing.swap(false, Ordering::AcqRel) {
+            self.desired_position_us
+                .store(self.last_video_pts_us.load());
+        }
+        self.show_for_mouse_activity();
+    }
+
+    fn toggle_fullscreen(&self) {
+        self.request_fullscreen(!self.fullscreen_requested.load(Ordering::Acquire));
+    }
+
+    fn confirm_fullscreen(&self, fullscreen: bool) {
+        self.fullscreen.store(fullscreen, Ordering::Release);
+        if !self.fullscreen_request_pending.load(Ordering::Acquire) {
+            self.fullscreen_requested
+                .store(fullscreen, Ordering::Release);
+        }
+        self.show_for_mouse_activity();
     }
 
     fn is_visible(&self) -> bool {
@@ -651,8 +692,16 @@ impl ControlsOverlay {
     }
 
     fn update_canvas_size(&self, width: u32, height: u32) {
-        self.canvas_width.store(width, Ordering::Release);
-        self.canvas_height.store(height, Ordering::Release);
+        let old_width = self.canvas_width.swap(width, Ordering::AcqRel);
+        let old_height = self.canvas_height.swap(height, Ordering::AcqRel);
+        if (old_width, old_height) != (width, height) {
+            self.pointer_target.store(0, Ordering::Release);
+            if self.is_scrubbing() {
+                self.set_scrubbing(false);
+                self.desired_position_us
+                    .store(self.last_video_pts_us.load());
+            }
+        }
     }
 
     fn play_pause_button_contains(&self, x: i32, y: i32) -> bool {
@@ -669,9 +718,9 @@ impl ControlsOverlay {
         };
 
         x >= button_x
-            && x < button_x + PLAY_BUTTON_SIZE
+            && x < button_x + control_button_size()
             && y >= button_y
-            && y < button_y + PLAY_BUTTON_SIZE
+            && y < button_y + control_button_size()
     }
 
     fn loop_button_contains(&self, x: i32, y: i32) -> bool {
@@ -688,9 +737,9 @@ impl ControlsOverlay {
         };
 
         x >= button_x
-            && x < button_x + LOOP_BUTTON_WIDTH
+            && x < button_x + control_button_size()
             && y >= button_y
-            && y < button_y + LOOP_BUTTON_HEIGHT
+            && y < button_y + control_button_size()
     }
 }
 
@@ -929,6 +978,8 @@ impl Drop for VideoPlayerRuntime {
 
 #[derive(Clone)]
 struct VideoPlayerApp {
+    window_id: u32,
+    fit_window: bool,
     window_title: Arc<Mutex<String>>,
     initial_request: Option<PlaybackRequest>,
     hardware_decode: bool,
@@ -990,6 +1041,8 @@ impl VideoPlayerApp {
             })
         };
         Self {
+            window_id: 0,
+            fit_window: true,
             window_title: Arc::new(Mutex::new(window_title.clone())),
             initial_request,
             hardware_decode,
@@ -1176,8 +1229,79 @@ impl Application for VideoPlayerApp {
                             })),
                     )]),
             ]))
-            .size(Size::new(DISPLAY_WIDTH as f32, DISPLAY_HEIGHT as f32)),
+            .decorated(!self.controls.fullscreen.load(Ordering::Acquire))
+            .shadow(false),
         )
+    }
+
+    fn on_window_created(
+        &mut self,
+        _: &scarlet_ui::WindowContext,
+        window: &mut dyn scarlet_ui::PlatformWindow,
+    ) {
+        self.window_id = window.surface_id();
+        let _ = window.set_gamepad_input(false, true);
+    }
+
+    fn on_window_sync(
+        &mut self,
+        _: &scarlet_ui::WindowContext,
+        window: &mut dyn scarlet_ui::PlatformWindow,
+    ) {
+        if self
+            .controls
+            .fullscreen_request_pending
+            .swap(false, Ordering::AcqRel)
+        {
+            let fullscreen = self.controls.fullscreen_requested.load(Ordering::Acquire);
+            if let Err(error) = window.set_fullscreen(fullscreen) {
+                println!("[{}] cannot change fullscreen: {:?}", APP_NAME, error);
+                self.controls
+                    .confirm_fullscreen(self.controls.fullscreen.load(Ordering::Acquire));
+                self.paint_signal.notify();
+            }
+        }
+        if !self.fit_window {
+            return;
+        }
+        self.fit_window = false;
+        if current_input_environment().windowing_mode() != Some(scarlet_ui::WindowingMode::Focused)
+            && let Ok((width, height)) = window.get_screen_size()
+        {
+            let decoration = scarlet_ui::views::WindowContentLayout::new(true).decoration_size();
+            let max_width = (width.saturating_sub(16) as f32 - decoration.width).max(1.0);
+            let max_height = (height.saturating_sub(48) as f32 - decoration.height).max(1.0);
+            let content_width = 800.0_f32.min(max_width).min(max_height * 16.0 / 9.0);
+            let _ = window.resize(
+                (content_width + decoration.width) as u32,
+                (content_width * 9.0 / 16.0 + decoration.height) as u32,
+            );
+        }
+    }
+    fn on_window_fullscreen_changed(&mut self, _: &scarlet_ui::WindowContext, fullscreen: bool) {
+        self.controls.confirm_fullscreen(fullscreen);
+        // Decorations change only after the compositor confirms the state.
+        self.title_signal.notify();
+        self.paint_signal.notify();
+    }
+
+    fn on_window_resize(&mut self, _: &scarlet_ui::WindowContext, _: u32, _: u32) {
+        // A configure also follows a refused SWS fullscreen request. Reconcile
+        // the requested state with the last confirmed state instead of hiding
+        // the titlebar or getting stuck in an optimistic fullscreen state.
+        self.controls
+            .confirm_fullscreen(self.controls.fullscreen.load(Ordering::Acquire));
+    }
+
+    fn on_input_environment_changed(&mut self, _: scarlet_ui::InputEnvironment) {
+        self.controls.pointer_target.store(0, Ordering::Release);
+        if self.controls.is_scrubbing() {
+            self.controls.set_scrubbing(false);
+            self.controls
+                .desired_position_us
+                .store(self.controls.last_video_pts_us.load());
+        }
+        self.paint_signal.notify();
     }
 
     fn init(&mut self) {
@@ -1213,6 +1337,21 @@ impl Application for VideoPlayerApp {
         if let Some(request) = self.initial_request.take() {
             self.playback.request(request);
         }
+    }
+
+    fn on_active_app_changed(&mut self, window_id: u32, _: &str, _: &str) {
+        // Entering fullscreen can re-announce our own focus. Retain held-key
+        // guards so the same Confirm press cannot immediately leave it again.
+        if window_id == self.window_id {
+            return;
+        }
+        self.controls.confirm_held.store(false, Ordering::Release);
+        self.controls.cancel_held.store(false, Ordering::Release);
+        self.controls
+            .fullscreen_key_held
+            .store(false, Ordering::Release);
+        self.controls.pointer_target.store(0, Ordering::Release);
+        self.controls.set_scrubbing(false);
     }
 
     fn on_shutdown(&mut self) {
@@ -1635,7 +1774,11 @@ fn start_controls_thread(
                     continue;
                 }
 
-                if controls.is_visible() {
+                if controls.is_visible()
+                    && !controls.is_paused()
+                    && !controls.is_scrubbing()
+                    && !controls.controls_pinned.load(Ordering::Acquire)
+                {
                     idle_ticks = idle_ticks.saturating_add(1);
                     if idle_ticks >= CONTROLS_HIDE_IDLE_TICKS {
                         idle_ticks = 0;
@@ -7414,41 +7557,97 @@ fn draw_video_frame(
     );
 }
 
+fn pointer_control(controls: &ControlsOverlay, x: i32, y: i32) -> u32 {
+    if controls.play_pause_button_contains(x, y) {
+        1
+    } else if controls.loop_button_contains(x, y) {
+        2
+    } else if fullscreen_button_origin(
+        controls.canvas_width.load(Ordering::Acquire),
+        controls.canvas_height.load(Ordering::Acquire),
+    )
+    .is_some_and(|(left, top)| {
+        x >= left as i32
+            && y >= top as i32
+            && x < (left + control_button_size()) as i32
+            && y < (top + control_button_size()) as i32
+    }) {
+        3
+    } else if seekbar_hit_region_contains(controls, x, y) {
+        4
+    } else {
+        0
+    }
+}
+// Keep desktop controls compact; only tablet posture enlarges targets.
+fn control_button_size() -> u32 {
+    if current_input_environment().interaction_mode() == InteractionMode::Touch {
+        44
+    } else {
+        28
+    }
+}
+fn controls_panel_height() -> u32 {
+    if control_button_size() == 44 { 112 } else { 72 }
+}
+fn loop_button_left_inset() -> u32 {
+    if control_button_size() == 44 { 70 } else { 50 }
+}
+fn seek_track_bottom_inset() -> u32 {
+    if control_button_size() == 44 { 28 } else { 18 }
+}
+fn seek_track_hit_inset() -> u32 {
+    if control_button_size() == 44 { 22 } else { 12 }
+}
 fn handle_canvas_event(
     event: &Event,
     controls: &ControlsOverlay,
     paint_signal: &PaintSignal,
 ) -> bool {
     match event {
+        Event::Mouse(MouseEvent::ButtonCancelled { .. }) => {
+            controls.pointer_target.store(0, Ordering::Release);
+            controls.set_scrubbing(false);
+            // Restore the displayed position after a cancelled touch drag.
+            controls
+                .desired_position_us
+                .store(controls.last_video_pts_us.load());
+            paint_signal.notify();
+            true
+        }
         Event::Mouse(MouseEvent::Entered { .. }) => controls.show_for_mouse_activity(),
-        Event::Mouse(MouseEvent::Moved { x, y }) => {
+        Event::Mouse(MouseEvent::Moved { x, .. }) => {
             controls.show_for_mouse_activity();
             if controls.is_scrubbing() {
-                let target_us = seek_target_from_track_x(controls, *x);
-                controls.preview_seek_to_us(target_us);
+                controls.preview_seek_to_us(seek_target_from_track_x(controls, *x));
                 paint_signal.notify();
-                return true;
+                true
+            } else {
+                false
             }
-            let _ = y;
-            false
         }
-        Event::Mouse(MouseEvent::Exited { .. }) => controls.hide(),
+        Event::Mouse(MouseEvent::Exited { .. }) => false,
         Event::Mouse(MouseEvent::ButtonPressed {
             button: MouseButton::Left,
             x,
             y,
             ..
         }) => {
+            let visible = controls.is_visible();
             controls.show_for_mouse_activity();
-            if seekbar_hit_region_contains(controls, *x, *y) {
-                controls.set_scrubbing(true);
-                let target_us = seek_target_from_track_x(controls, *x);
-                controls.preview_seek_to_us(target_us);
-                paint_signal.notify();
-                true
+            controls.controls_pinned.store(false, Ordering::Release);
+            let target = if visible {
+                pointer_control(controls, *x, *y)
             } else {
-                false
+                0
+            };
+            controls.pointer_target.store(target, Ordering::Release);
+            if target == 4 {
+                controls.set_scrubbing(true);
+                controls.preview_seek_to_us(seek_target_from_track_x(controls, *x));
             }
+            paint_signal.notify();
+            true
         }
         Event::Mouse(MouseEvent::ButtonReleased {
             button: MouseButton::Left,
@@ -7456,30 +7655,21 @@ fn handle_canvas_event(
             y,
             ..
         }) => {
-            controls.show_for_mouse_activity();
-            if controls.is_scrubbing() {
-                controls.set_scrubbing(false);
-                let target_us = seek_target_from_track_x(controls, *x);
-                controls.request_seek_to_us(target_us);
-                paint_signal.notify();
-                return true;
-            }
+            let target = controls.pointer_target.swap(0, Ordering::AcqRel);
             controls.set_scrubbing(false);
-            if controls.play_pause_button_contains(*x, *y) {
-                if controls.is_finished() {
-                    controls.request_replay();
-                } else {
-                    controls.toggle_paused();
+            if target == 4 {
+                controls.request_seek_to_us(seek_target_from_track_x(controls, *x));
+            } else if target != 0 && target == pointer_control(controls, *x, *y) {
+                match target {
+                    1 => activate_play_pause(controls),
+                    2 => controls.toggle_loop(),
+                    3 => controls.toggle_fullscreen(),
+                    _ => {}
                 }
-                paint_signal.notify();
-                true
-            } else if controls.loop_button_contains(*x, *y) {
-                controls.toggle_loop();
-                paint_signal.notify();
-                true
-            } else {
-                false
             }
+            controls.show_for_mouse_activity();
+            paint_signal.notify();
+            true
         }
         _ => false,
     }
@@ -7491,6 +7681,44 @@ fn handle_key_event(
     paint_signal: &PaintSignal,
 ) -> bool {
     match event {
+        KeyEvent::Released {
+            keycode: KeyCode::Enter,
+            ..
+        } => {
+            controls.confirm_held.store(false, Ordering::Release);
+            true
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::Enter,
+            ..
+        } => {
+            if controls.confirm_held.swap(true, Ordering::AcqRel) {
+                return true;
+            }
+            controls.controls_pinned.store(true, Ordering::Release);
+            controls.show_for_mouse_activity();
+            match controls.control_focus.load(Ordering::Acquire) {
+                0 => activate_play_pause(controls),
+                1 => controls.toggle_loop(),
+                3 => controls.toggle_fullscreen(),
+                _ => {}
+            }
+            paint_signal.notify();
+            true
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::Tab,
+            ..
+        } => {
+            controls
+                .control_focus
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |f| Some((f + 1) % 4))
+                .ok();
+            controls.controls_pinned.store(true, Ordering::Release);
+            controls.show_for_mouse_activity();
+            paint_signal.notify();
+            true
+        }
         KeyEvent::Pressed {
             keycode: KeyCode::Space,
             ..
@@ -7499,11 +7727,52 @@ fn handle_key_event(
             paint_signal.notify();
             true
         }
+        KeyEvent::Released {
+            keycode: KeyCode::F(11),
+            ..
+        } => {
+            controls.fullscreen_key_held.store(false, Ordering::Release);
+            true
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::F(11),
+            ..
+        } => {
+            if !controls.fullscreen_key_held.swap(true, Ordering::AcqRel) {
+                controls.toggle_fullscreen();
+                paint_signal.notify();
+            }
+            true
+        }
+        KeyEvent::Released {
+            keycode: KeyCode::Escape,
+            ..
+        } => {
+            controls.cancel_held.store(false, Ordering::Release);
+            true
+        }
         KeyEvent::Pressed {
             keycode: KeyCode::Escape,
             ..
+        } => {
+            if controls.cancel_held.swap(true, Ordering::AcqRel) {
+                return true;
+            }
+            if controls.fullscreen.load(Ordering::Acquire)
+                || controls.fullscreen_requested.load(Ordering::Acquire)
+            {
+                controls.request_fullscreen(false);
+                paint_signal.notify();
+            } else {
+                controls.pointer_target.store(0, Ordering::Release);
+                controls.set_scrubbing(false);
+                dismiss_window("main");
+            }
+            true
         }
-        | KeyEvent::Char { c: 'q' | 'Q' } => {
+        KeyEvent::Char { c: 'q' | 'Q' } => {
+            controls.pointer_target.store(0, Ordering::Release);
+            controls.set_scrubbing(false);
             dismiss_window("main");
             true
         }
@@ -7532,7 +7801,12 @@ fn handle_key_event(
             keycode: KeyCode::Down,
             ..
         } => {
-            controls.request_relative_seek_ms(-60_000);
+            controls
+                .control_focus
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |f| Some((f + 1) % 4))
+                .ok();
+            controls.controls_pinned.store(true, Ordering::Release);
+            controls.show_for_mouse_activity();
             paint_signal.notify();
             true
         }
@@ -7540,7 +7814,12 @@ fn handle_key_event(
             keycode: KeyCode::Up,
             ..
         } => {
-            controls.request_relative_seek_ms(60_000);
+            controls
+                .control_focus
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |f| Some((f + 3) % 4))
+                .ok();
+            controls.controls_pinned.store(true, Ordering::Release);
+            controls.show_for_mouse_activity();
             paint_signal.notify();
             true
         }
@@ -7597,13 +7876,13 @@ fn seekbar_hit_region_contains(controls: &ControlsOverlay, x: i32, y: i32) -> bo
     let track_x = SEEK_TRACK_LEFT_INSET;
     let right_inset = SEEK_TRACK_RIGHT_INSET.min(width / 8);
     let track_width = width.saturating_sub(track_x + right_inset).max(1);
-    let track_y = height.saturating_sub(SEEK_TRACK_BOTTOM_INSET);
-    let hit_x0 = track_x.saturating_sub(SEEK_TRACK_HIT_INSET);
+    let track_y = height.saturating_sub(seek_track_bottom_inset());
+    let hit_x0 = track_x.saturating_sub(seek_track_hit_inset());
     let hit_x1 = track_x
         .saturating_add(track_width)
-        .saturating_add(SEEK_TRACK_HIT_INSET);
-    let hit_y0 = track_y.saturating_sub(SEEK_TRACK_HIT_INSET.max(SEEK_KNOB_HEIGHT));
-    let hit_y1 = track_y.saturating_add(SEEK_TRACK_HIT_INSET.max(SEEK_KNOB_HEIGHT));
+        .saturating_add(seek_track_hit_inset());
+    let hit_y0 = track_y.saturating_sub(seek_track_hit_inset().max(SEEK_KNOB_HEIGHT));
+    let hit_y1 = track_y.saturating_add(seek_track_hit_inset().max(SEEK_KNOB_HEIGHT));
     x >= hit_x0 && x <= hit_x1 && y >= hit_y0 && y <= hit_y1
 }
 
@@ -7702,6 +7981,20 @@ fn draw_debug_overlay(
     );
 }
 
+fn media_time(time_us: u64) -> String {
+    let seconds = time_us / 1_000_000;
+    if seconds >= 3600 {
+        format!(
+            "{}:{:02}:{:02}",
+            seconds / 3600,
+            seconds / 60 % 60,
+            seconds % 60
+        )
+    } else {
+        format!("{}:{:02}", seconds / 60, seconds % 60)
+    }
+}
+
 fn draw_seek_bar(
     buffer: &mut [u8],
     canvas_width: u32,
@@ -7721,7 +8014,7 @@ fn draw_seek_bar(
     else {
         return;
     };
-    let panel_y = logical_canvas_height.saturating_sub(CONTROLS_PANEL_HEIGHT);
+    let panel_y = logical_canvas_height.saturating_sub(controls_panel_height());
 
     blend_rect_scaled(
         buffer,
@@ -7735,6 +8028,132 @@ fn draw_seek_bar(
         ui_scale,
     );
 
+    let focus = controls.control_focus.load(Ordering::Acquire);
+    let accent = ColorPalette::default().primary();
+    let focus_color = accent.to_bgra().to_le_bytes();
+    if controls.controls_pinned.load(Ordering::Acquire) {
+        let (fx, fy, fw, fh) = match focus {
+            0 => (
+                button_x.saturating_sub(2),
+                button_y.saturating_sub(2),
+                control_button_size() + 4,
+                control_button_size() + 4,
+            ),
+            1 => (
+                loop_button_left_inset() - 2,
+                button_y.saturating_sub(2),
+                control_button_size() + 4,
+                control_button_size() + 4,
+            ),
+            3 => (
+                logical_canvas_width
+                    .saturating_sub(PLAY_BUTTON_LEFT_INSET + control_button_size() + 2),
+                button_y.saturating_sub(2),
+                control_button_size() + 4,
+                control_button_size() + 4,
+            ),
+            _ => (
+                12,
+                logical_canvas_height
+                    .saturating_sub(seek_track_bottom_inset() + seek_track_hit_inset()),
+                logical_canvas_width.saturating_sub(24),
+                seek_track_hit_inset() * 2,
+            ),
+        };
+        // A focus ring must not recolor the button face or video beneath it.
+        for (x, y, w, h) in [
+            (fx, fy, fw, 2),
+            (fx, fy + fh - 2, fw, 2),
+            (fx, fy, 2, fh),
+            (fx + fw - 2, fy, 2, fh),
+        ] {
+            draw_rect_scaled(
+                buffer,
+                canvas_width,
+                canvas_height,
+                x,
+                y,
+                w,
+                h,
+                focus_color,
+                ui_scale,
+            );
+        }
+    }
+    if let Some((x, y)) = fullscreen_button_origin(logical_canvas_width, logical_canvas_height) {
+        blend_rect_scaled(
+            buffer,
+            canvas_width,
+            canvas_height,
+            x,
+            y,
+            control_button_size(),
+            control_button_size(),
+            [0, 0, 0, 96],
+            ui_scale,
+        );
+        draw_native_control_icon(
+            buffer,
+            canvas_width,
+            canvas_height,
+            x + (control_button_size() - 16) / 2,
+            y + (control_button_size() - 16) / 2,
+            if controls.fullscreen.load(Ordering::Acquire) {
+                scarlet_ui::Icon::ArrowsMinimize
+            } else {
+                scarlet_ui::Icon::ArrowsMaximize
+            },
+            [255; 4],
+            ui_scale,
+        );
+    }
+    if logical_canvas_width >= 300 {
+        let time = format!(
+            "{} / {}",
+            media_time(controls.desired_position_us.load()),
+            media_time(controls.media_duration_us())
+        );
+        let text_width = graphics::measure_text_sized(&time, 12.0).0;
+        let mut canvas = Canvas::new(buffer, canvas_width, canvas_height);
+        canvas.draw_text_sized(
+            ui_scale.physical_i32(
+                logical_canvas_width.saturating_sub(
+                    text_width + PLAY_BUTTON_LEFT_INSET + control_button_size() + 12,
+                ) as i32,
+            ),
+            ui_scale.physical_i32((button_y + (control_button_size() - 15) / 2) as i32),
+            &time,
+            Color::WHITE,
+            ui_scale.physical_font(12.0),
+        );
+        if logical_canvas_width >= 560 && controls.controls_pinned.load(Ordering::Acquire) {
+            let x = (loop_button_left_inset() + control_button_size() + 16) as i32;
+            canvas.draw_text_sized(
+                ui_scale.physical_i32(x),
+                ui_scale.physical_i32((panel_y + 8) as i32),
+                match controls.control_focus.load(Ordering::Acquire) {
+                    0 => "Confirm: play/pause",
+                    1 => "Confirm: toggle loop",
+                    3 if controls.fullscreen.load(Ordering::Acquire) => "Confirm: exit fullscreen",
+                    3 => "Confirm: fullscreen",
+                    _ => "←/→: seek",
+                },
+                Color::WHITE,
+                ui_scale.physical_font(12.0),
+            );
+            canvas.draw_text_sized(
+                ui_scale.physical_i32(x),
+                ui_scale.physical_i32((panel_y + 30) as i32),
+                if controls.fullscreen.load(Ordering::Acquire) {
+                    "←/→: 5s  ↑/↓: controls  Cancel: exit fullscreen"
+                } else {
+                    "←/→: 5s  ↑/↓: controls  Cancel: close"
+                },
+                Color::WHITE,
+                ui_scale.physical_font(12.0),
+            );
+        }
+    }
     if logical_canvas_width < 180 {
         draw_play_pause_button(
             buffer,
@@ -7754,7 +8173,7 @@ fn draw_seek_bar(
         .saturating_sub(track_x + right_inset)
         .max(1);
     let track_height = SEEK_TRACK_HEIGHT;
-    let track_y = logical_canvas_height.saturating_sub(SEEK_TRACK_BOTTOM_INSET);
+    let track_y = logical_canvas_height.saturating_sub(seek_track_bottom_inset());
     let duration_us = controls.media_duration_us();
     let (buffered_width, progress_width) = if duration_us != 0 {
         let buffered_us = controls.buffered_position_us.load().min(duration_us);
@@ -7844,22 +8263,29 @@ fn play_pause_button_origin(canvas_width: u32, canvas_height: u32) -> Option<(u3
         return None;
     }
 
-    let panel_y = canvas_height.saturating_sub(CONTROLS_PANEL_HEIGHT);
-    let button_x = PLAY_BUTTON_LEFT_INSET.min(canvas_width.saturating_sub(PLAY_BUTTON_SIZE));
+    let panel_y = canvas_height.saturating_sub(controls_panel_height());
+    let button_x = PLAY_BUTTON_LEFT_INSET.min(canvas_width.saturating_sub(control_button_size()));
     let button_y = panel_y + PLAY_BUTTON_TOP_INSET;
     Some((button_x, button_y))
 }
 
 fn loop_button_origin(canvas_width: u32, canvas_height: u32) -> Option<(u32, u32)> {
-    if canvas_width < CONTROLS_MIN_WIDTH + LOOP_BUTTON_WIDTH || canvas_height < CONTROLS_MIN_HEIGHT
+    if canvas_width < CONTROLS_MIN_WIDTH + control_button_size()
+        || canvas_height < CONTROLS_MIN_HEIGHT
     {
         return None;
     }
 
-    let panel_y = canvas_height.saturating_sub(CONTROLS_PANEL_HEIGHT);
-    let button_x = LOOP_BUTTON_LEFT_INSET.min(canvas_width.saturating_sub(LOOP_BUTTON_WIDTH));
+    let panel_y = canvas_height.saturating_sub(controls_panel_height());
+    let button_x = loop_button_left_inset().min(canvas_width.saturating_sub(control_button_size()));
     let button_y = panel_y + PLAY_BUTTON_TOP_INSET;
     Some((button_x, button_y))
+}
+
+fn fullscreen_button_origin(canvas_width: u32, canvas_height: u32) -> Option<(u32, u32)> {
+    let (_, y) = play_pause_button_origin(canvas_width, canvas_height)?;
+    let x = canvas_width.checked_sub(PLAY_BUTTON_LEFT_INSET + control_button_size())?;
+    (x >= loop_button_left_inset() + control_button_size() + 12).then_some((x, y))
 }
 
 fn draw_loop_button(
@@ -7872,7 +8298,10 @@ fn draw_loop_button(
     ui_scale: UiScale,
 ) {
     let fill = if enabled {
-        [52, 132, 220, 184]
+        {
+            let accent = ColorPalette::default().primary();
+            accent.with_opacity(184.0 / 255.0).to_bgra().to_le_bytes()
+        }
     } else {
         [0, 0, 0, 96]
     };
@@ -7882,8 +8311,8 @@ fn draw_loop_button(
         canvas_height,
         x,
         y,
-        LOOP_BUTTON_WIDTH,
-        LOOP_BUTTON_HEIGHT,
+        control_button_size(),
+        control_button_size(),
         fill,
         ui_scale,
     );
@@ -7898,11 +8327,51 @@ fn draw_loop_button(
         buffer,
         canvas_width,
         canvas_height,
-        x + 3,
-        y + 2,
+        x + (control_button_size() - 16) / 2,
+        y + (control_button_size() - 16) / 2,
         icon,
         ui_scale,
     );
+}
+
+// Use the same cached Tabler masks as ScarletUI IconView and Button.
+fn draw_native_control_icon(
+    buffer: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    x: u32,
+    y: u32,
+    icon: scarlet_ui::Icon,
+    color: [u8; 4],
+    ui_scale: UiScale,
+) {
+    let raster = scarlet_ui::icon::rasterize_icon(
+        icon,
+        ui_scale.physical_len(16) as u16,
+        scarlet_ui::IconStyle::default(),
+    );
+    let origin_x = ui_scale.physical_pos(x);
+    let origin_y = ui_scale.physical_pos(y);
+    for row in 0..raster.height.min(canvas_height.saturating_sub(origin_y)) {
+        for col in 0..raster.width.min(canvas_width.saturating_sub(origin_x)) {
+            let alpha = u32::from(raster.mask[(row * raster.width + col) as usize])
+                * u32::from(color[3])
+                / 255;
+            if alpha == 0 {
+                continue;
+            }
+            let offset =
+                ((origin_y + row) as usize * canvas_width as usize + (origin_x + col) as usize) * 4;
+            if offset + 4 > buffer.len() {
+                continue;
+            }
+            for channel in 0..3 {
+                buffer[offset + channel] =
+                    blend_channel(buffer[offset + channel], color[channel], alpha, 255 - alpha);
+            }
+            buffer[offset + 3] = 255;
+        }
+    }
 }
 
 fn draw_loop_icon(
@@ -7914,127 +8383,16 @@ fn draw_loop_icon(
     color: [u8; 4],
     ui_scale: UiScale,
 ) {
-    draw_rect_scaled(
+    draw_native_control_icon(
         buffer,
         canvas_width,
         canvas_height,
-        x + 3,
-        y + 4,
-        11,
-        2,
+        x,
+        y,
+        scarlet_ui::Icon::Repeat,
         color,
         ui_scale,
     );
-    draw_rect_scaled(
-        buffer,
-        canvas_width,
-        canvas_height,
-        x + 2,
-        y + 4,
-        2,
-        6,
-        color,
-        ui_scale,
-    );
-    draw_right_arrowhead_scaled(
-        buffer,
-        canvas_width,
-        canvas_height,
-        x + 13,
-        y + 1,
-        color,
-        ui_scale,
-    );
-
-    draw_rect_scaled(
-        buffer,
-        canvas_width,
-        canvas_height,
-        x + 5,
-        y + 14,
-        11,
-        2,
-        color,
-        ui_scale,
-    );
-    draw_rect_scaled(
-        buffer,
-        canvas_width,
-        canvas_height,
-        x + 16,
-        y + 10,
-        2,
-        6,
-        color,
-        ui_scale,
-    );
-    draw_left_arrowhead_scaled(
-        buffer,
-        canvas_width,
-        canvas_height,
-        x + 1,
-        y + 11,
-        color,
-        ui_scale,
-    );
-}
-
-fn draw_right_arrowhead_scaled(
-    buffer: &mut [u8],
-    canvas_width: u32,
-    canvas_height: u32,
-    x: u32,
-    y: u32,
-    color: [u8; 4],
-    ui_scale: UiScale,
-) {
-    const SIZE: u32 = 7;
-    const MID: u32 = SIZE / 2;
-
-    for row in 0..SIZE {
-        let distance = row.abs_diff(MID);
-        let width = (SIZE - distance * 2).max(1);
-        draw_rect_scaled(
-            buffer,
-            canvas_width,
-            canvas_height,
-            x,
-            y + row,
-            width,
-            1,
-            color,
-            ui_scale,
-        );
-    }
-}
-
-fn draw_left_arrowhead_scaled(
-    buffer: &mut [u8],
-    canvas_width: u32,
-    canvas_height: u32,
-    x: u32,
-    y: u32,
-    color: [u8; 4],
-    ui_scale: UiScale,
-) {
-    const SIZE: u32 = 7;
-    const MID: u32 = SIZE / 2;
-
-    for row in 0..SIZE {
-        let distance = row.abs_diff(MID);
-        let width = (SIZE - distance * 2).max(1);
-        draw_rect_scaled(
-            buffer,
-            canvas_width,
-            canvas_height,
-            x + SIZE - width,
-            y + row,
-            width,
-            1,
-            color,
-            ui_scale,
-        );
-    }
 }
 
 fn draw_play_pause_button(
@@ -8052,77 +8410,26 @@ fn draw_play_pause_button(
         canvas_height,
         x,
         y,
-        PLAY_BUTTON_SIZE,
-        PLAY_BUTTON_SIZE,
+        control_button_size(),
+        control_button_size(),
         [0, 0, 0, 96],
         ui_scale,
     );
 
-    if paused {
-        draw_play_triangle(
-            buffer,
-            canvas_width,
-            canvas_height,
-            x + 8,
-            y + 6,
-            [255, 255, 255, 255],
-            ui_scale,
-        );
-    } else {
-        draw_rect_scaled(
-            buffer,
-            canvas_width,
-            canvas_height,
-            x + 7,
-            y + 6,
-            2,
-            11,
-            [255, 255, 255, 255],
-            ui_scale,
-        );
-        draw_rect_scaled(
-            buffer,
-            canvas_width,
-            canvas_height,
-            x + 13,
-            y + 6,
-            2,
-            11,
-            [255, 255, 255, 255],
-            ui_scale,
-        );
-    }
-}
-
-fn draw_play_triangle(
-    buffer: &mut [u8],
-    canvas_width: u32,
-    canvas_height: u32,
-    x: u32,
-    y: u32,
-    color: [u8; 4],
-    ui_scale: UiScale,
-) {
-    const HEIGHT: u32 = 11;
-    const WIDTH: u32 = 10;
-    const MID: u32 = HEIGHT / 2;
-
-    for row in 0..HEIGHT {
-        let distance = row.abs_diff(MID);
-        let width = 1 + (WIDTH - 1) * (MID.saturating_sub(distance)) / MID;
-        let row_y = y + row;
-        draw_rect_scaled(
-            buffer,
-            canvas_width,
-            canvas_height,
-            x,
-            row_y,
-            width,
-            1,
-            color,
-            ui_scale,
-        );
-    }
+    draw_native_control_icon(
+        buffer,
+        canvas_width,
+        canvas_height,
+        x + (control_button_size() - 16) / 2,
+        y + (control_button_size() - 16) / 2,
+        if paused {
+            scarlet_ui::Icon::PlayerPlay
+        } else {
+            scarlet_ui::Icon::PlayerPause
+        },
+        [255, 255, 255, 255],
+        ui_scale,
+    );
 }
 
 fn draw_rect_scaled(
