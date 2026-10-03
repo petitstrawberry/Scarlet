@@ -1,0 +1,6 @@
+# Include before userspace Cargo layers. This prepares coordinated SGFX sources
+# and the shared Cargo configuration; ELF64 projects also install the driver.
+[[layers]]
+kind = "script"
+source = "../../tools/sgfx/install-driver.sh"
+to = "/system/lib/sgfx"

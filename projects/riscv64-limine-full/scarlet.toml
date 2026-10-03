@@ -14,11 +14,18 @@ features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
 [modules]
 "scarlet-module-prototype" = { git = "https://github.com/petitstrawberry/Scarlet", rev = "368c53e5f5ca970042bdb18eb86d8a70dd6554da", enabled = true }
 
+[userspace]
+cargo-config = ".scarlet/sgfx/userspace.toml"
+
 [images]
 
 [images.initramfs]
 format = "newc"
 output = ".scarlet/images/initramfs-riscv64-full.cpio"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/sgfx-native/bundle.toml"
 
 [[images.initramfs.layers]]
 kind = "bundle"
@@ -31,6 +38,10 @@ path = "../../bundles/cli-utils/bundle.toml"
 [images.rootfs]
 format = "ext2"
 output = ".scarlet/images/rootfs-riscv64-full.ext2"
+
+[[images.rootfs.layers]]
+kind = "bundle"
+path = "../../bundles/sgfx-native/bundle.toml"
 
 [[images.rootfs.layers]]
 kind = "bundle"

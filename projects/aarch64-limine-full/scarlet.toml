@@ -14,11 +14,18 @@ features = { network = true, user-fpu = true, user-vector = true, hypervisor = f
 [modules]
 "scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = true }
 
+[userspace]
+cargo-config = ".scarlet/sgfx/userspace.toml"
+
 [images]
 
 [images.initramfs]
 format = "newc"
 output = ".scarlet/images/initramfs-aarch64-full.cpio"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/sgfx-native/bundle.toml"
 
 [[images.initramfs.layers]]
 kind = "bundle"
@@ -33,6 +40,10 @@ format = "ext2"
 output = ".scarlet/images/rootfs-aarch64-full.ext2"
 # Leave room for Wine prefix initialization and installed Windows programs.
 min-size-mib = 8192
+
+[[images.rootfs.layers]]
+kind = "bundle"
+path = "../../bundles/sgfx-native/bundle.toml"
 
 [[images.rootfs.layers]]
 kind = "bundle"

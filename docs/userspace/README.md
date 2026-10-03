@@ -64,6 +64,14 @@ cargo check --manifest-path .cargo/Cargo.toml -p scarlet-std-bin --bins \
 To produce application binaries instead of only type-checking, use `cargo build`
 with the same manifest, package, and target arguments.
 
+Native ELF64 applications that use SGFX also need the project's driver and
+shared Cargo configuration. Prepare them with
+`python3 tools/sgfx-native-build.py --project projects/aarch64-limine-full`,
+then pass `--config projects/aarch64-limine-full/.scarlet/sgfx/userspace.toml`
+to Cargo. The native image projects prepare and select this configuration
+automatically. See [native SGFX drivers](../graphics/sgfx-dynamic-backends.md)
+for the local compiler setup, plugin installation and source coordination.
+
 These compile the std-based in-tree applications; they neither install the
 binaries into an image nor launch the desktop. For the latter, use the chosen
 project's `cargo scarlet image` / `run` workflow. During release staging,

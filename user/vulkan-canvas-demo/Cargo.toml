@@ -11,7 +11,7 @@ naga = { version = "24", features = ["wgsl-in", "spv-out"] }
 [target.'cfg(target_os = "scarlet")'.dependencies]
 ash = { version = "0.38", default-features = false, features = ["debug", "std"] }
 scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "e6e00f11c95de371057899ec05b7a832d04adc7f", default-features = false, features = ["std", "platform-sws"] }
-vulkan-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "49fa00da35a6ea416c99207b49ba7aee480d6985" }
+vulkan-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "c4e23364679dae613c3176f4f2277bc795455ac5" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("scarlet"))'] }

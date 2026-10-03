@@ -67,6 +67,7 @@ scarlet-rust-use-local() {
         echo "Rust fork directory does not exist: ${rust_dir}" >&2
         return 1
     fi
+    rust_dir="$(CDPATH= cd -- "${rust_dir}" && pwd -P)" || return 1
 
     stage1="$(_scarlet_rust_stage1_dir "${rust_dir}")"
     if [ ! -x "${stage1}/bin/rustc" ]; then
@@ -78,6 +79,12 @@ scarlet-rust-use-local() {
 
     if [ -n "${SCARLET_RUST_ACTIVE_BIN:-}" ]; then
         _scarlet_rust_path_remove "${SCARLET_RUST_ACTIVE_BIN}"
+    fi
+
+    # A local compiler build may not include Cargo or the auxiliary tools.
+    # Keep the packaged tools available behind the local compiler on PATH.
+    if [ -n "${SCARLET_CACHED_RUST_TOOLCHAIN:-}" ]; then
+        _scarlet_rust_path_prepend "${SCARLET_CACHED_RUST_TOOLCHAIN}/bin"
     fi
 
     SCARLET_RUST_LOCAL_DIR="${rust_dir}"

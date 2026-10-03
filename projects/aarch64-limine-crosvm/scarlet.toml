@@ -11,9 +11,16 @@ package = "scarlet"
 source = { path = "../../kernel" }
 features = ["network", "user-fpu", "user-vector", "hypervisor", "limine"]
 
+[userspace]
+cargo-config = ".scarlet/sgfx/userspace.toml"
+
 [images.initramfs]
 format = "newc"
 output = ".scarlet/images/initramfs.cpio"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/sgfx-native/bundle.toml"
 
 [[images.initramfs.layers]]
 kind = "copy"
@@ -23,6 +30,10 @@ to = "/"
 [images.rootfs]
 format = "ext2"
 output = ".scarlet/images/rootfs.ext2"
+
+[[images.rootfs.layers]]
+kind = "bundle"
+path = "../../bundles/sgfx-native/bundle.toml"
 
 [[images.rootfs.layers]]
 kind = "copy"

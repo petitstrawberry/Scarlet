@@ -19,6 +19,14 @@ fn main() -> ExitCode {
         }
     };
     println!("SGFX backend: {}", device.backend());
+    #[cfg(all(target_os = "scarlet", target_pointer_width = "64"))]
+    match device.backend_library() {
+        Some(path) => {
+            println!("  linkage: dynamic");
+            println!("  library: {}", path);
+        }
+        None => println!("  linkage: static"),
+    }
 
     let capabilities = device.capabilities();
     println!("GPU capabilities:");

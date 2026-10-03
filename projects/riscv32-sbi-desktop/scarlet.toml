@@ -14,9 +14,16 @@ features = ["linux-boot", "network", "user-fpu"]
 [modules]
 "scarlet-module-prototype" = { path = "../../modules/scarlet-module-prototype", enabled = true }
 
+[userspace]
+cargo-config = ".scarlet/sgfx/userspace.toml"
+
 [images.initramfs]
 format = "newc"
 output = ".scarlet/images/initramfs-riscv32-sbi-desktop.cpio"
+
+[[images.initramfs.layers]]
+kind = "bundle"
+path = "../../bundles/sgfx-native/bundle.toml"
 
 [[images.initramfs.layers]]
 kind = "bundle"
@@ -29,6 +36,10 @@ path = "../../bundles/cli-utils/bundle.toml"
 [images.rootfs]
 format = "ext2"
 output = ".scarlet/images/rootfs-riscv32-sbi-desktop.ext2"
+
+[[images.rootfs.layers]]
+kind = "bundle"
+path = "../../bundles/sgfx-native/bundle.toml"
 
 [[images.rootfs.layers]]
 kind = "bundle"
