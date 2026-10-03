@@ -1,5 +1,15 @@
 # SWS C client
 
+The experimental Scarlet-native build also produces `libsws_client_c.a`:
+`cargo build --target aarch64-unknown-scarlet --release --offline`. A native
+static executable links one copy, using the Scarlet CRT and native libc. This
+mode does not require musl or a Linux filesystem view. The native SDL2 prototype
+uses the pitched BGRA `sws_window_present` API, title/resize/window actions and
+the existing event queue. Frame memory is borrowed only during the copy; the
+library owns the compositor's shared mapping and handles configure remapping.
+Applications must pump events regularly. All widths/heights are limited to
+1..16384; invalid size/stride/buffer lengths return -1 before reading pixels.
+
 `libsws_client_c.so` exposes SWS windows, input and shared GPU-image registration
 through `include/sws_client.h`. All consumers in one process must dynamically
 link the same library; it owns one connection with independent input and GPU

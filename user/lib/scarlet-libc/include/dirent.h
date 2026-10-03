@@ -24,6 +24,7 @@ typedef struct __scarlet_DIR DIR;
 extern "C" {
 #endif
 DIR *opendir(const char *);
+DIR *fdopendir(int);
 struct dirent *readdir(DIR *);
 int closedir(DIR *);
 void rewinddir(DIR *);

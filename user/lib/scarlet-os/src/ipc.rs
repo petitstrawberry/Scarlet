@@ -178,7 +178,9 @@ pub type EventResult<T> = core::result::Result<T, EventError>;
 #[cfg(target_arch = "riscv64")]
 core::arch::global_asm!(
     ".section .text.scarlet_event_return,\"ax\",@progbits",
-    ".global __scarlet_event_return_trampoline",
+    // The fixed-ABI trampoline may occur in a native C staticlib and a Rust
+    // dependency in the same executable. Coalesce this identical syscall stub.
+    ".weak __scarlet_event_return_trampoline",
     ".type __scarlet_event_return_trampoline,@function",
     "__scarlet_event_return_trampoline:",
     "    addi a7, x0, 643",
@@ -190,7 +192,7 @@ core::arch::global_asm!(
 #[cfg(target_arch = "aarch64")]
 core::arch::global_asm!(
     ".section .text.scarlet_event_return,\"ax\"",
-    ".global __scarlet_event_return_trampoline",
+    ".weak __scarlet_event_return_trampoline",
     ".type __scarlet_event_return_trampoline,%function",
     "__scarlet_event_return_trampoline:",
     "    mov x8, #643",

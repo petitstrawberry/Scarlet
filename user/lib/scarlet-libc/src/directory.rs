@@ -111,6 +111,20 @@ pub unsafe extern "C" fn opendir(path: *const c_char) -> *mut DirStream {
     }))
 }
 
+/// Adopt a directory descriptor; ownership transfers only on success.
+/// # Safety
+/// The caller relinquishes exclusive ownership of `fd` on success.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdopendir(fd: c_int) -> *mut DirStream {
+    let mut metadata = crate::stat::Stat::default();
+    if unsafe { crate::stat::fstat(fd, &mut metadata) } < 0 { return std::ptr::null_mut(); }
+    if metadata.mode & 0o170000 != 0o040000 {
+        crate::fail(scarlet_abi::fs::ERRNO_ENOTDIR);
+        return std::ptr::null_mut();
+    }
+    Box::into_raw(Box::new(DirStream { fd, path: Vec::new(), current: Dirent::default(), position: 0 }))
+}
+
 /// # Safety
 /// `stream` is a live pointer returned by opendir, used without concurrent
 /// mutation. The returned pointer remains valid until the next readdir or
@@ -124,18 +138,23 @@ pub unsafe extern "C" fn readdir(stream: *mut DirStream) -> *mut Dirent {
     // SAFETY: the caller owns a live, exclusively accessible stream.
     let stream = unsafe { &mut *stream };
     let mut raw = RawDirEntry::default();
-    // SAFETY: raw has the Native fixed-size directory record layout.
+    // Directory enumeration uses the original native stream syscall, as Rust
+    // std does. StreamReadWithStatus intentionally rejects directory objects
+    // with EISDIR for POSIX read(2); routing readdir through C read lost entries.
+    // SAFETY: raw is a writable Native fixed-size directory record.
     let bytes = unsafe {
-        descriptor::read(
-            stream.fd,
-            (&raw mut raw as *mut RawDirEntry).cast::<c_void>(),
+        scarlet_sys::syscall3(
+            scarlet_abi::Syscall::StreamRead,
+            stream.fd as usize,
+            (&raw mut raw as *mut RawDirEntry).cast::<c_void>() as usize,
             size_of::<RawDirEntry>(),
         )
-    };
+    } as isize;
     if bytes == 0 {
         return std::ptr::null_mut();
     }
     if bytes < 0 {
+        crate::fail(if bytes == -1 { ERRNO_EIO } else { bytes.wrapping_neg() as c_int });
         return std::ptr::null_mut();
     }
     if bytes as usize != size_of::<RawDirEntry>() || raw.name_len as usize >= raw.name.len() {
@@ -190,6 +209,12 @@ pub unsafe extern "C" fn rewinddir(stream: *mut DirStream) {
     // SAFETY: the caller owns a live, exclusively accessible stream.
     let stream = unsafe { &mut *stream };
     // SAFETY: the saved path retains its NUL terminator.
+    if stream.path.is_empty() {
+        // A descriptor adopted by fdopendir has no pathname to reopen. Native
+        // directory objects may reject seeking; preserve that error honestly.
+        if crate::descriptor::lseek(stream.fd, 0, 0) >= 0 { stream.position = 0; }
+        return;
+    }
     let replacement = unsafe {
         descriptor::open_impl(
             stream.path.as_ptr().cast(),

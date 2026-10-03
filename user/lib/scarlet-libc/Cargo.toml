@@ -6,12 +6,18 @@ description = "Rust std-backed C runtime for the Scarlet Native ABI"
 
 [workspace]
 
+[features]
+# Let a freestanding external formatter provide printf-family symbols.
+# Default builds retain the built-in integer-only implementation.
+external-format = []
+
 [lib]
 name = "scarlet_c"
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 scarlet-abi = { path = "../scarlet-abi" }
+libm = "=0.2.16"
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
 scarlet-sys = { path = "../scarlet-sys" }

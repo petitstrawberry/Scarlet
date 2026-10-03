@@ -30,7 +30,7 @@ pub struct Stat {
     user: u32,
     group: u32,
     padding: u32,
-    size: i64,
+    pub(crate) size: i64,
     accessed: Timespec,
     modified: Timespec,
     changed: Timespec,

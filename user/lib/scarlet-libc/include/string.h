@@ -1,6 +1,7 @@
 #ifndef SCARLET_STRING_H
 #define SCARLET_STRING_H
 #include <stddef.h>
+#include <locale.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -13,6 +14,10 @@ size_t strlen(const char *);
 void *memchr(const void *, int, size_t);
 size_t strnlen(const char *, size_t);
 int strcmp(const char *, const char *);
+int strcoll(const char *, const char *);
+int strcoll_l(const char *, const char *, locale_t);
+size_t strxfrm(char *, const char *, size_t);
+size_t strxfrm_l(char *, const char *, size_t, locale_t);
 int strncmp(const char *, const char *, size_t);
 char *strcpy(char *, const char *);
 char *strncpy(char *, const char *, size_t);
@@ -29,6 +34,7 @@ char *strtok_r(char *, const char *, char **);
 char *strdup(const char *);
 char *strndup(const char *, size_t);
 char *strerror(int);
+int strerror_r(int, char *, size_t);
 #ifdef __cplusplus
 }
 #endif

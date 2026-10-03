@@ -147,6 +147,21 @@ pub extern "C" fn llabs(value: c_longlong) -> c_longlong {
     value.wrapping_abs()
 }
 
+#[repr(C)]
+pub struct Div { pub quot: c_int, pub rem: c_int }
+#[repr(C)]
+pub struct Ldiv { pub quot: c_long, pub rem: c_long }
+#[repr(C)]
+pub struct Lldiv { pub quot: c_longlong, pub rem: c_longlong }
+// C requires a nonzero denominator and a representable quotient. Rust and C
+// both truncate toward zero for valid signed integer divisions.
+#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+pub extern "C" fn div(n: c_int, d: c_int) -> Div { Div { quot: n / d, rem: n % d } }
+#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+pub extern "C" fn ldiv(n: c_long, d: c_long) -> Ldiv { Ldiv { quot: n / d, rem: n % d } }
+#[cfg_attr(target_os = "scarlet", unsafe(no_mangle))]
+pub extern "C" fn lldiv(n: c_longlong, d: c_longlong) -> Lldiv { Lldiv { quot: n / d, rem: n % d } }
+
 struct ByteSet([u64; 4]);
 
 impl ByteSet {

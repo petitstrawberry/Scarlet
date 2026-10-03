@@ -11,6 +11,9 @@
 #define S_IFCHR 0020000
 #define S_IFIFO 0010000
 #define S_ISREG(mode) (((mode) & S_IFMT) == S_IFREG)
+#define S_ISFIFO(mode) (((mode) & S_IFMT) == S_IFIFO)
+#define S_ISCHR(mode) (((mode) & S_IFMT) == S_IFCHR)
+#define S_ISBLK(mode) (((mode) & S_IFMT) == S_IFBLK)
 #define S_ISDIR(mode) (((mode) & S_IFMT) == S_IFDIR)
 #define S_ISLNK(mode) (((mode) & S_IFMT) == S_IFLNK)
 #define S_ISSOCK(mode) (((mode) & S_IFMT) == S_IFSOCK)
@@ -57,6 +60,7 @@ int lstat(const char *, struct stat *);
 int fstat(int, struct stat *);
 int mkdir(const char *, mode_t);
 int fchmod(int, mode_t);
+int fchmodat(int, const char *, mode_t, int);
 int chmod(const char *, mode_t);
 int fchown(int, uid_t, gid_t);
 #ifdef __cplusplus

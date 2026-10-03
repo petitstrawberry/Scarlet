@@ -1,6 +1,8 @@
 #ifndef SCARLET_TIME_H
 #define SCARLET_TIME_H
 #include <sys/types.h>
+#include <stddef.h>
+#include <locale.h>
 struct timespec { time_t tv_sec; long tv_nsec; };
 struct tm {
     int tm_sec;
@@ -34,6 +36,8 @@ struct tm *gmtime_r(const time_t *, struct tm *);
 struct tm *localtime_r(const time_t *, struct tm *);
 struct tm *gmtime(const time_t *);
 struct tm *localtime(const time_t *);
+size_t strftime(char *, size_t, const char *, const struct tm *);
+size_t strftime_l(char *, size_t, const char *, const struct tm *, locale_t);
 #ifdef __cplusplus
 }
 #endif
