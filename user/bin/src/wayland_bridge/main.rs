@@ -16,15 +16,15 @@
 
 extern crate scarlet_std as std;
 
-mod input;
 mod decoration_state;
 mod gpu;
+mod input;
+mod output;
 mod protocol;
 mod region;
 mod registry;
 mod scene;
 mod scene_bridge;
-mod output;
 mod shm;
 mod surface;
 mod xdg_shell;
@@ -681,15 +681,19 @@ impl WaylandBridge {
         }
 
         let request_id = self.send_sws_request(protocol_sws::client_msg::GET_CAPABILITIES, &[])?;
-        if let protocol_sws::ServerMessage::Capabilities { capabilities, compositor_epoch, .. } = self
-            .wait_for_sws_message(request_id, |msg| {
-                matches!(msg, protocol_sws::ServerMessage::Capabilities { .. })
-            })?
-        {
+        if let protocol_sws::ServerMessage::Capabilities {
+            capabilities,
+            compositor_epoch,
+            ..
+        } = self.wait_for_sws_message(request_id, |msg| {
+            matches!(msg, protocol_sws::ServerMessage::Capabilities { .. })
+        })? {
             self.registry
                 .set_surface_scenes(capabilities & protocol_sws::capabilities::SURFACE_SCENES != 0);
             self.compositor_epoch = compositor_epoch;
-            self.registry.set_gpu_buffers(capabilities & protocol_sws::capabilities::EXTENSION_GPU_BUFFERS != 0);
+            self.registry.set_gpu_buffers(
+                capabilities & protocol_sws::capabilities::EXTENSION_GPU_BUFFERS != 0,
+            );
         }
         self.query_output_scale()?;
         let request_id = self.send_sws_request(protocol_sws::client_msg::GET_SCREEN_SIZE, &[])?;
@@ -745,7 +749,9 @@ impl WaylandBridge {
     /// Convert SWS physical pixel coordinate to Wayland surface-local
     /// (logical) coordinate using the focused surface's buffer_scale.
     fn physical_to_logical_x(&self, x: i32) -> i32 {
-        let (x, y) = self.focused_surface.map(|root| self.scene_pointer_position(root, x, self.pointer_y))
+        let (x, y) = self
+            .focused_surface
+            .map(|root| self.scene_pointer_position(root, x, self.pointer_y))
             .unwrap_or((x, self.pointer_y));
         if let (Some(root), Some(target)) = (self.focused_surface, self.pointer_surface)
             && self.scene.enabled(root)
@@ -758,7 +764,9 @@ impl WaylandBridge {
     }
 
     fn physical_to_logical_y(&self, y: i32) -> i32 {
-        let (x, y) = self.focused_surface.map(|root| self.scene_pointer_position(root, self.pointer_x, y))
+        let (x, y) = self
+            .focused_surface
+            .map(|root| self.scene_pointer_position(root, self.pointer_x, y))
             .unwrap_or((self.pointer_x, y));
         if let (Some(root), Some(target)) = (self.focused_surface, self.pointer_surface)
             && self.scene.enabled(root)
@@ -978,7 +986,9 @@ impl WaylandBridge {
     }
 
     fn queue_pending_pointer_motion(&mut self) {
-        if self.pending_pointer_motion { self.decoration_motion(); }
+        if self.pending_pointer_motion {
+            self.decoration_motion();
+        }
         self.update_scene_pointer_focus();
         if !self.pending_pointer_motion {
             return;
@@ -1170,7 +1180,9 @@ impl WaylandBridge {
                         self.left_button_down = value != 0;
                     }
                     self.queue_pending_pointer_motion();
-                    if self.decoration_button(code, value) { return; }
+                    if self.decoration_button(code, value) {
+                        return;
+                    }
                     if let Some(pointer_id) = self.focused_pointer {
                         if self.pointer_surface.is_none() {
                             return;
@@ -1580,8 +1592,7 @@ impl WaylandBridge {
                     self.deferred_scene_releases.insert(buffer_id);
                     return Ok(());
                 }
-                if let Some(wayland_buffer_id) = self
-                    .wayland_buffer_for_resource(buffer_id)
+                if let Some(wayland_buffer_id) = self.wayland_buffer_for_resource(buffer_id)
                     && self
                         .objects
                         .get(&wayland_buffer_id)
@@ -1829,7 +1840,10 @@ impl WaylandBridge {
     }
 
     fn pressed_key_array(&self) -> Vec<u8> {
-        self.pressed_keys.iter().flat_map(|&key| (key as u32).to_ne_bytes()).collect()
+        self.pressed_keys
+            .iter()
+            .flat_map(|&key| (key as u32).to_ne_bytes())
+            .collect()
     }
 
     fn keyboard_modifiers_event(&mut self, keyboard: u32) -> WaylandMessage {
@@ -1837,11 +1851,11 @@ impl WaylandBridge {
         let mut depressed = 0;
         for &key in &self.pressed_keys {
             depressed |= match key {
-                42 | 54 => 1 << 0, // Shift
-                58 => 1 << 1, // Lock
-                29 | 97 => 1 << 2, // Control
-                56 | 100 => 1 << 3, // Mod1 / Alt
-                69 => 1 << 4, // Mod2 / Num Lock
+                42 | 54 => 1 << 0,   // Shift
+                58 => 1 << 1,        // Lock
+                29 | 97 => 1 << 2,   // Control
+                56 | 100 => 1 << 3,  // Mod1 / Alt
+                69 => 1 << 4,        // Mod2 / Num Lock
                 125 | 126 => 1 << 6, // Mod4 / Super
                 _ => 0,
             };
@@ -2656,8 +2670,9 @@ impl WaylandBridge {
         }
 
         match interface.as_str() {
-            "zxdg_decoration_manager_v1" | "zxdg_toplevel_decoration_v1" =>
-                self.handle_decoration_message(object_id, &interface, opcode, payload),
+            "zxdg_decoration_manager_v1" | "zxdg_toplevel_decoration_v1" => {
+                self.handle_decoration_message(object_id, &interface, opcode, payload)
+            }
             "wl_display" => self.handle_display_message(opcode, payload),
             "wl_registry" => self.handle_registry_message(object_id, opcode, payload),
             "wl_compositor" => self.handle_compositor_message(opcode, payload),
@@ -2666,7 +2681,9 @@ impl WaylandBridge {
                 self.handle_scene_message(object_id, &interface, opcode, payload)
             }
             "wl_shm" => self.handle_shm_message(opcode, payload, attached_handle),
-            "wp_scarlet_sgfx_v1" => self.handle_gpu_message(object_id, opcode, payload, attached_handle),
+            "wp_scarlet_sgfx_v1" => {
+                self.handle_gpu_message(object_id, opcode, payload, attached_handle)
+            }
             "wl_shm_pool" => self.handle_shm_pool_message(object_id, opcode, payload),
             "wl_buffer" => self.handle_buffer_message(object_id, opcode, payload),
             "wl_seat" => self.handle_seat_message(object_id, opcode, payload),
@@ -3005,7 +3022,9 @@ impl WaylandBridge {
                     {
                         return Err("wl_surface.attach referenced an unknown buffer");
                     }
-                    if self.gpu_buffers.contains_key(&buffer_id) { self.scene.enable(surface_id); }
+                    if self.gpu_buffers.contains_key(&buffer_id) {
+                        self.scene.enable(surface_id);
+                    }
                     if let Some(surface) = self.surface_manager.get_surface_mut(surface_id) {
                         surface.attach(pending_buffer);
                     }
@@ -3094,9 +3113,7 @@ impl WaylandBridge {
                     && (should_update || surface_role == Some(surface::SurfaceRole::Subsurface));
                 let selection = if buffer_attached {
                     Some(match buffer_id {
-                        Some(id) => {
-                            Some(self.buffer_view(id).ok_or("Unknown attached buffer")?)
-                        }
+                        Some(id) => Some(self.buffer_view(id).ok_or("Unknown attached buffer")?),
                         None => None,
                     })
                 } else {
@@ -3527,8 +3544,10 @@ impl WaylandBridge {
         match opcode {
             shm::buffer_request::DESTROY => {
                 bridge_log!("[Bridge] wl_buffer.destroy");
-                let sws_buffer_id = self.buffer_view(buffer_id)
-                    .ok_or("Wayland buffer not found")?.id;
+                let sws_buffer_id = self
+                    .buffer_view(buffer_id)
+                    .ok_or("Wayland buffer not found")?
+                    .id;
                 // A client may destroy the protocol object immediately after
                 // committing it. Publish any coalesced use before retiring the
                 // reusable SWS resource so the compositor observes the same
@@ -3682,9 +3701,13 @@ impl WaylandBridge {
     ) -> Result<Vec<WaylandMessage>, &'static str> {
         match opcode {
             xdg_shell::xdg_toplevel_request::DESTROY => {
-                if self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id)
-                    .map(|(_, root)| root).and_then(|root| self.decorations.get(&root))
-                    .is_some_and(|decoration| decoration.state.object.is_some()) {
+                if self
+                    .xdg_shell_manager
+                    .get_toplevel_mut(xdg_toplevel_id)
+                    .map(|(_, root)| root)
+                    .and_then(|root| self.decorations.get(&root))
+                    .is_some_and(|decoration| decoration.state.object.is_some())
+                {
                     return Err("Toplevel destroyed before decoration");
                 }
                 bridge_log!("[Bridge] xdg_toplevel.destroy");
@@ -3703,7 +3726,9 @@ impl WaylandBridge {
             }
             xdg_shell::xdg_toplevel_request::SET_TITLE => {
                 if let Some((title, _)) = Self::parse_string(payload, 0)
-                    && let Some((toplevel, root)) = self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id) {
+                    && let Some((toplevel, root)) =
+                        self.xdg_shell_manager.get_toplevel_mut(xdg_toplevel_id)
+                {
                     toplevel.title = Some(title);
                     self.sync_toplevel_metadata(root)?;
                     self.decoration_updates.insert(root);
@@ -4560,19 +4585,39 @@ mod tests {
         bridge.output_size = (1280, 800);
         let payload = [30u32.to_ne_bytes(), 10u32.to_ne_bytes()].concat();
         let events = bridge.handle_xdg_output_message(20, 1, &payload).unwrap();
-        assert!(matches!(events[1].args.as_slice(),
-            [super::WaylandArg::Int(640), super::WaylandArg::Int(400)]));
+        assert!(matches!(
+            events[1].args.as_slice(),
+            [super::WaylandArg::Int(640), super::WaylandArg::Int(400)]
+        ));
         assert_eq!(events.last().unwrap().header.object_id, 10);
-        assert_eq!(events.last().unwrap().header.opcode(), super::protocol::output_event::DONE);
-        assert!(!events.iter().any(|event| event.header.object_id == 30 && event.header.opcode() == 2));
+        assert_eq!(
+            events.last().unwrap().header.opcode(),
+            super::protocol::output_event::DONE
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.header.object_id == 30 && event.header.opcode() == 2)
+        );
         bridge.output_size = (1920, 1080);
         let events = bridge.output_update_events(10);
-        assert!(matches!(events[0].args.as_slice(),
-            [super::WaylandArg::Uint(3), super::WaylandArg::Int(1920),
-             super::WaylandArg::Int(1080), super::WaylandArg::Int(60000)]));
-        assert!(matches!(events[2].args.as_slice(),
-            [super::WaylandArg::Int(960), super::WaylandArg::Int(540)]));
-        assert_eq!(events.last().unwrap().header.opcode(), super::protocol::output_event::DONE);
+        assert!(matches!(
+            events[0].args.as_slice(),
+            [
+                super::WaylandArg::Uint(3),
+                super::WaylandArg::Int(1920),
+                super::WaylandArg::Int(1080),
+                super::WaylandArg::Int(60000)
+            ]
+        ));
+        assert!(matches!(
+            events[2].args.as_slice(),
+            [super::WaylandArg::Int(960), super::WaylandArg::Int(540)]
+        ));
+        assert_eq!(
+            events.last().unwrap().header.opcode(),
+            super::protocol::output_event::DONE
+        );
         bridge.handle_xdg_output_message(20, 0, &[]).unwrap();
         assert_eq!(bridge.xdg_outputs.get(&30), Some(&10));
         bridge.handle_xdg_output_message(30, 0, &[]).unwrap();

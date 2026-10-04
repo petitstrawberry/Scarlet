@@ -968,13 +968,19 @@ pub fn sys_sysinfo(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             info[offset..offset + bytes.len()].copy_from_slice(&bytes);
         }};
     }
-    field!(uptime, (crate::timer::get_time_ns() / 1_000_000_000) as isize);
+    field!(
+        uptime,
+        (crate::timer::get_time_ns() / 1_000_000_000) as isize
+    );
     // Page units avoid overflowing the Linux unsigned-long fields on 32-bit
     // targets. glibc applies mem_unit when computing _SC_PHYS_PAGES.
     field!(totalram, total_pages);
     field!(freeram, free_pages);
     field!(mem_unit, crate::environment::PAGE_SIZE as u32);
-    field!(procs, get_all_task_ids().len().min(u16::MAX as usize) as u16);
+    field!(
+        procs,
+        get_all_task_ids().len().min(u16::MAX as usize) as u16
+    );
     if copy_to_user(&task, info_ptr, &info).is_err() {
         return errno::to_result(errno::EFAULT);
     }

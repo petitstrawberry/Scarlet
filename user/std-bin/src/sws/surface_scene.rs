@@ -67,7 +67,9 @@ pub fn composite(
     width: u32,
     height: u32,
 ) -> Result<(), &'static str> {
-    if source.gpu_buffer.is_some() { return Err("GPU scene source cannot be rendered on CPU"); }
+    if source.gpu_buffer.is_some() {
+        return Err("GPU scene source cannot be rendered on CPU");
+    }
     let row = source.width as usize * 4;
     let required = (source.height as usize)
         .checked_sub(1)
@@ -238,7 +240,7 @@ mod tests {
                 height: 1,
                 stride: 8,
                 opaque: false,
-                    gpu_buffer: None,
+                gpu_buffer: None,
             },
             &mut dst,
             2,
@@ -265,7 +267,7 @@ mod tests {
                 height: 1,
                 stride: 12,
                 opaque: true,
-                    gpu_buffer: None,
+                gpu_buffer: None,
             },
             &mut dst,
             1,

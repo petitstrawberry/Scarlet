@@ -8146,7 +8146,9 @@ impl Compositor {
                 let buffer_id = window.external_buffer_id?;
                 let commit_serial = window.external_buffer_commit_serial?;
                 let buffer = self.extension_buffers.get(&(client_id, buffer_id))?;
-                let ExtensionBufferBacking::Shm(view) = buffer.backing else { return None; };
+                let ExtensionBufferBacking::Shm(view) = buffer.backing else {
+                    return None;
+                };
                 (view.pool_id == pool_id).then_some((window.id, buffer_id, commit_serial, view))
             })
             .collect();
@@ -8299,7 +8301,10 @@ impl Compositor {
         if !remove {
             return;
         }
-        let backing = self.extension_buffers.remove(&key).map(|buffer| buffer.backing);
+        let backing = self
+            .extension_buffers
+            .remove(&key)
+            .map(|buffer| buffer.backing);
         let pool_id = backing.and_then(|backing| match backing {
             ExtensionBufferBacking::Shm(view) => Some(view.pool_id),
             ExtensionBufferBacking::Gpu { .. } => None,
@@ -8417,10 +8422,18 @@ impl Compositor {
                 .get(&(client_id, layer.buffer_id))
                 .ok_or("Unknown scene buffer")?;
             let ExtensionBufferBacking::Shm(view) = buffer.backing else {
-                let ExtensionBufferBacking::Gpu { width, height } = buffer.backing else { unreachable!() };
-                if !layer.fits_buffer(width, height) { return Err("Invalid GPU scene crop"); }
+                let ExtensionBufferBacking::Gpu { width, height } = buffer.backing else {
+                    unreachable!()
+                };
+                if !layer.fits_buffer(width, height) {
+                    return Err("Invalid GPU scene crop");
+                }
                 sources.push(crate::surface_scene::Pixels {
-                    bytes: &[], width, height, stride: 0, opaque: false,
+                    bytes: &[],
+                    width,
+                    height,
+                    stride: 0,
+                    opaque: false,
                     gpu_buffer: Some((client_id, layer.buffer_id)),
                 });
                 continue;
@@ -8679,8 +8692,11 @@ impl Compositor {
                     return;
                 }
                 let ExtensionBufferBacking::Shm(view) = buffer.backing else {
-                    self.send_extension_resource_error(client_id, 0,
-                        sws_protocol::error_codes::INVALID_EXTENSION_COMMIT);
+                    self.send_extension_resource_error(
+                        client_id,
+                        0,
+                        sws_protocol::error_codes::INVALID_EXTENSION_COMMIT,
+                    );
                     return;
                 };
                 let Some(pool) = self.extension_shm_pools.get(&(client_id, view.pool_id)) else {
@@ -12144,24 +12160,52 @@ impl Compositor {
             IpcEvent::ExtensionDestroyShmPool { client_id, pool_id } => {
                 self.destroy_extension_shm_pool(client_id, pool_id);
             }
-            IpcEvent::ExtensionDefineGpuBuffer { client_id, request_id, buffer_id, width, height, handle } => {
+            IpcEvent::ExtensionDefineGpuBuffer {
+                client_id,
+                request_id,
+                buffer_id,
+                width,
+                height,
+                handle,
+            } => {
                 let key = (client_id, buffer_id);
                 let result = if self.extension_buffers.contains_key(&key) {
                     Err("Duplicate GPU buffer")
                 } else {
-                    self.gpu_compositor.as_mut().ok_or("GPU unavailable").and_then(|gpu|
-                        gpu.register_extension_gpu_buffer(client_id, buffer_id, width, height, handle))
+                    self.gpu_compositor
+                        .as_mut()
+                        .ok_or("GPU unavailable")
+                        .and_then(|gpu| {
+                            gpu.register_extension_gpu_buffer(
+                                client_id, buffer_id, width, height, handle,
+                            )
+                        })
                 };
                 if let Err(error) = result {
-                    println!("[Compositor] GPU scene buffer {}:{} failed: {}", client_id, buffer_id, error);
-                    self.send_extension_resource_error(client_id, request_id, sws_protocol::error_codes::SGFX_IMPORT_FAILED);
+                    println!(
+                        "[Compositor] GPU scene buffer {}:{} failed: {}",
+                        client_id, buffer_id, error
+                    );
+                    self.send_extension_resource_error(
+                        client_id,
+                        request_id,
+                        sws_protocol::error_codes::SGFX_IMPORT_FAILED,
+                    );
                 } else {
-                    self.extension_buffers.insert(key, ExtensionBuffer {
-                        backing: ExtensionBufferBacking::Gpu { width, height },
-                        destroy_requested: false, last_commit_serial: 0,
-                    });
-                    send_response_to_client(client_id, sws_protocol::server_msg::EXTENSION_GPU_BUFFER_DEFINED,
-                        request_id, buffer_id.to_le_bytes().to_vec());
+                    self.extension_buffers.insert(
+                        key,
+                        ExtensionBuffer {
+                            backing: ExtensionBufferBacking::Gpu { width, height },
+                            destroy_requested: false,
+                            last_commit_serial: 0,
+                        },
+                    );
+                    send_response_to_client(
+                        client_id,
+                        sws_protocol::server_msg::EXTENSION_GPU_BUFFER_DEFINED,
+                        request_id,
+                        buffer_id.to_le_bytes().to_vec(),
+                    );
                 }
             }
             IpcEvent::ExtensionDefineBuffer {

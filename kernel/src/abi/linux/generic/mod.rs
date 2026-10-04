@@ -4,10 +4,10 @@ pub mod errno;
 pub(crate) mod exec;
 pub mod fs;
 pub mod futex;
-mod native_handle;
 mod memfd;
 pub mod mm;
 mod mode;
+mod native_handle;
 pub mod pipe;
 pub mod proc;
 mod proc_fd;
@@ -507,9 +507,16 @@ pub(crate) fn close_kernel_object_for_linux(_object: &crate::object::KernelObjec
     // exactly one owning reference, including fork/dup and queued IPC rights.
 }
 
-pub fn dispatch_common_syscall(abi: &mut LinuxAbi, frame: &mut crate::arch::Trapframe, number: usize) -> Option<usize> {
-    if number == scarlet_abi::LINUX_DUP_NATIVE_HANDLE { Some(native_handle::duplicate(abi, frame)) }
-    else { dispatch_standard_common_syscall(abi, frame, number) }
+pub fn dispatch_common_syscall(
+    abi: &mut LinuxAbi,
+    frame: &mut crate::arch::Trapframe,
+    number: usize,
+) -> Option<usize> {
+    if number == scarlet_abi::LINUX_DUP_NATIVE_HANDLE {
+        Some(native_handle::duplicate(abi, frame))
+    } else {
+        dispatch_standard_common_syscall(abi, frame, number)
+    }
 }
 
 syscall_table! {

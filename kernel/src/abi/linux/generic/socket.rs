@@ -290,32 +290,43 @@ fn linux_local_sockaddr_from_user(
         // that literal as a global registry key makes unrelated prefixes collide.
         let vfs = task.vfs.read().clone().ok_or(errno::EINVAL)?;
         let path = if binding {
-            match vfs.resolve_path_with_options(path, &crate::fs::vfs_v2::PathResolutionOptions::no_follow()) {
+            match vfs.resolve_path_with_options(
+                path,
+                &crate::fs::vfs_v2::PathResolutionOptions::no_follow(),
+            ) {
                 Ok(_) => return Err(errno::EADDRINUSE),
-                Err(error) if errno::from_fs_error(&error) == errno::ENOENT => {},
+                Err(error) if errno::from_fs_error(&error) == errno::ENOENT => {}
                 Err(error) => return Err(errno::from_fs_error(&error)),
             }
             let (parent, name) = path.rsplit_once('/').unwrap_or((".", path));
-            if name.is_empty() { return Err(errno::EINVAL); }
-            let (entry, mount) = vfs.resolve_path(if parent.is_empty() { "/" } else { parent })
+            if name.is_empty() {
+                return Err(errno::EINVAL);
+            }
+            let (entry, mount) = vfs
+                .resolve_path(if parent.is_empty() { "/" } else { parent })
                 .map_err(|error| errno::from_fs_error(&error))?;
-            if !entry.node().is_directory().map_err(|error| errno::from_fs_error(&error))? {
+            if !entry
+                .node()
+                .is_directory()
+                .map_err(|error| errno::from_fs_error(&error))?
+            {
                 return Err(errno::ENOTDIR);
             }
             let parent = vfs.build_absolute_path(&entry, &mount);
-            if parent == "/" { alloc::format!("/{}", name) }
-            else { alloc::format!("{}/{}", parent, name) }
+            if parent == "/" {
+                alloc::format!("/{}", name)
+            } else {
+                alloc::format!("{}/{}", parent, name)
+            }
         } else {
-            let (entry, mount) = vfs.resolve_path(path).map_err(|error| errno::from_fs_error(&error))?;
+            let (entry, mount) = vfs
+                .resolve_path(path)
+                .map_err(|error| errno::from_fs_error(&error))?;
             vfs.build_absolute_path(&entry, &mount)
         };
-        let addr = crate::network::LocalSocketAddress::from_path(&path)
-            .map_err(socket_error_to_errno)?;
-        Ok((
-            crate::network::SocketAddress::Local(addr),
-            path,
-            false,
-        ))
+        let addr =
+            crate::network::LocalSocketAddress::from_path(&path).map_err(socket_error_to_errno)?;
+        Ok((crate::network::SocketAddress::Local(addr), path, false))
     }
 }
 
@@ -632,7 +643,8 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     return errno::to_result(socket_error_to_errno(error));
                 }
                 if let Err(error) = socket_arc.bind(&socket_addr) {
-                    NetworkManager::get_manager().unregister_named_socket(&registry_name, socket_arc.as_ref());
+                    NetworkManager::get_manager()
+                        .unregister_named_socket(&registry_name, socket_arc.as_ref());
                     return errno::to_result(socket_error_to_errno(error));
                 }
 

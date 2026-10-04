@@ -66,7 +66,8 @@ impl WaylandBridge {
         }
         let id = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
         let output = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
-        if id == 0 || self.objects.contains_key(&id)
+        if id == 0
+            || self.objects.contains_key(&id)
             || self.objects.get(&output).map(String::as_str) != Some("wl_output")
         {
             return Err("Invalid xdg-output object");

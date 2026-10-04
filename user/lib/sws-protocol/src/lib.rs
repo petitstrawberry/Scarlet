@@ -2013,7 +2013,9 @@ pub enum ServerMessage {
         buffer_id: u32,
         commit_serial: u64,
     },
-    ExtensionGpuBufferDefined { buffer_id: u32 },
+    ExtensionGpuBufferDefined {
+        buffer_id: u32,
+    },
 }
 
 /// Parse a client->server message from `(msg_type, payload)`.
@@ -2550,7 +2552,9 @@ pub fn parse_client_message<'a>(
             })
         }
         client_msg::EXTENSION_DEFINE_GPU_BUFFER => {
-            if payload.len() != 16 { return Err(ProtocolError::MalformedPayload); }
+            if payload.len() != 16 {
+                return Err(ProtocolError::MalformedPayload);
+            }
             let buffer_id = read_u32(payload, 0)?;
             let compositor_epoch = read_u32(payload, 4)?;
             let width = read_u32(payload, 8)?;
@@ -2558,7 +2562,12 @@ pub fn parse_client_message<'a>(
             if buffer_id == 0 || compositor_epoch == 0 || width == 0 || height == 0 {
                 return Err(ProtocolError::MalformedPayload);
             }
-            Ok(ClientMessageRef::ExtensionDefineGpuBuffer { buffer_id, compositor_epoch, width, height })
+            Ok(ClientMessageRef::ExtensionDefineGpuBuffer {
+                buffer_id,
+                compositor_epoch,
+                width,
+                height,
+            })
         }
         client_msg::EXTENSION_DESTROY_BUFFER => {
             if payload.len() != 4 {
@@ -3919,8 +3928,12 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             })
         }
         server_msg::EXTENSION_GPU_BUFFER_DEFINED => {
-            if payload.len() != 4 { return Err(ProtocolError::MalformedPayload); }
-            Ok(ServerMessage::ExtensionGpuBufferDefined { buffer_id: read_u32(payload, 0)? })
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::ExtensionGpuBufferDefined {
+                buffer_id: read_u32(payload, 0)?,
+            })
         }
         server_msg::ACTIVE_APP => {
             // Payload: app_id_len (u32) + app_id (variable, max 128)
@@ -4414,9 +4427,17 @@ pub fn payload_extension_destroy_shm_pool(pool_id: u32) -> [u8; 4] {
 
 /// Build a GPU image registration payload. Its capability travels separately
 /// in the same IPC record; SWS validates the format, epoch and actual extent.
-pub fn payload_extension_define_gpu_buffer(buffer_id: u32, epoch: u32, width: u32, height: u32) -> [u8; 16] {
+pub fn payload_extension_define_gpu_buffer(
+    buffer_id: u32,
+    epoch: u32,
+    width: u32,
+    height: u32,
+) -> [u8; 16] {
     let mut payload = [0; 16];
-    for (slot, value) in payload.chunks_exact_mut(4).zip([buffer_id, epoch, width, height]) {
+    for (slot, value) in payload
+        .chunks_exact_mut(4)
+        .zip([buffer_id, epoch, width, height])
+    {
         slot.copy_from_slice(&value.to_le_bytes());
     }
     payload
@@ -5925,17 +5946,24 @@ mod tests {
     #[test]
     fn extension_buffer_object_lifecycle_round_trips() {
         let gpu = super::payload_extension_define_gpu_buffer(5, 7, 128, 96);
-        assert_eq!(parse_client_message(client_msg::EXTENSION_DEFINE_GPU_BUFFER, &gpu),
+        assert_eq!(
+            parse_client_message(client_msg::EXTENSION_DEFINE_GPU_BUFFER, &gpu),
             Ok(ClientMessageRef::ExtensionDefineGpuBuffer {
-                buffer_id: 5, compositor_epoch: 7, width: 128, height: 96,
-            }));
+                buffer_id: 5,
+                compositor_epoch: 7,
+                width: 128,
+                height: 96,
+            })
+        );
         for invalid in [
             super::payload_extension_define_gpu_buffer(0, 7, 128, 96),
             super::payload_extension_define_gpu_buffer(5, 0, 128, 96),
             super::payload_extension_define_gpu_buffer(5, 7, 0, 96),
             super::payload_extension_define_gpu_buffer(5, 7, 128, 0),
         ] {
-            assert!(parse_client_message(client_msg::EXTENSION_DEFINE_GPU_BUFFER, &invalid).is_err());
+            assert!(
+                parse_client_message(client_msg::EXTENSION_DEFINE_GPU_BUFFER, &invalid).is_err()
+            );
         }
         assert!(parse_client_message(client_msg::EXTENSION_DEFINE_GPU_BUFFER, &gpu[..15]).is_err());
         let register = payload_extension_register_shm_pool(7, 65_536);

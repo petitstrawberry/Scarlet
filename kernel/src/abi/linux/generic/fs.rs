@@ -1524,11 +1524,7 @@ fn io_handle(
 // TTY status lives on the open file object, shared by dup/fork and native
 // handles. A descriptor's cached flags can become stale when an alias changes
 // O_NONBLOCK, including clearing it again.
-fn current_file_status_flags(
-    abi: &LinuxAbi,
-    task: &crate::task::Task,
-    fd: usize,
-) -> Option<u32> {
+fn current_file_status_flags(abi: &LinuxAbi, task: &crate::task::Task, fd: usize) -> Option<u32> {
     let mut flags = abi.get_file_status_flags(fd)?;
     let handle = abi.get_handle(fd)?;
     if let Some(object) = task.handle_table.get(handle) {

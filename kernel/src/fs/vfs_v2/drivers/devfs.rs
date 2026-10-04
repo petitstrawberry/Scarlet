@@ -1238,7 +1238,9 @@ mod tests {
         let tty = Arc::new(TtyDevice::new("test_tty_open", 0));
         manager.register_device_with_name("test_tty_open".to_string(), tty.clone());
         let devfs = DevFS::new_with_device_manager(&manager);
-        let node = devfs.lookup(&devfs.root_node(), &"test_tty_open".to_string()).unwrap();
+        let node = devfs
+            .lookup(&devfs.root_node(), &"test_tty_open".to_string())
+            .unwrap();
         let first = devfs.open(&node, 0).unwrap();
         let second = devfs.open(&node, 0).unwrap();
 

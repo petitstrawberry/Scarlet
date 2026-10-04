@@ -949,7 +949,9 @@ mod tests {
         let master = devpts.open(&ptmx, 0).unwrap();
         let endpoint = master.as_any().downcast_ref::<DevPtsFileObject>().unwrap();
         assert!(endpoint.set_pty_slave_locked(false));
-        let node = devpts.lookup(&root, &endpoint.pty_number().unwrap().to_string()).unwrap();
+        let node = devpts
+            .lookup(&root, &endpoint.pty_number().unwrap().to_string())
+            .unwrap();
         let first = devpts.open(&node, 0).unwrap();
         let second = devpts.open(&node, 0).unwrap();
 

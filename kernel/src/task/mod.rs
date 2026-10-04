@@ -4878,7 +4878,9 @@ mod tests {
         assert!(!crate::sched::scheduler::get_all_task_ids().contains(&child_id));
         assert!(get_waitable_process_children(&parent).contains(&child_id));
         assert_eq!(
-            get_thread_group_wait_owner(&parent, child_id).unwrap().get_id(),
+            get_thread_group_wait_owner(&parent, child_id)
+                .unwrap()
+                .get_id(),
             parent_id
         );
         child.set_exit_status(0);

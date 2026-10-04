@@ -237,8 +237,11 @@ impl SceneTexture {
                 .sources
                 .iter()
                 .zip(&view.sources)
-                .all(|(&(w, h, texture), source)| w == source.width && h == source.height
-                    && texture.is_none() == source.gpu_buffer.is_some())
+                .all(|(&(w, h, texture), source)| {
+                    w == source.width
+                        && h == source.height
+                        && texture.is_none() == source.gpu_buffer.is_some()
+                })
     }
 }
 
@@ -335,29 +338,57 @@ impl GpuCompositor {
     }
 
     /// Retain an image capability and import it once, including scene/subsurface use.
-    pub(super) fn register_extension_gpu_buffer(&mut self, client_id: usize,
-        buffer_id: u32, width: u32, height: u32, handle: Handle,
+    pub(super) fn register_extension_gpu_buffer(
+        &mut self,
+        client_id: usize,
+        buffer_id: u32,
+        width: u32,
+        height: u32,
+        handle: Handle,
     ) -> Result<(), &'static str> {
-        if width == 0 || height == 0 || self.extension_gpu_textures.iter()
-            .any(|entry| (entry.client_id, entry.buffer_id) == (client_id, buffer_id)) {
+        if width == 0
+            || height == 0
+            || self
+                .extension_gpu_textures
+                .iter()
+                .any(|entry| (entry.client_id, entry.buffer_id) == (client_id, buffer_id))
+        {
             return Err("Invalid or duplicate extension GPU image");
         }
-        let texture = self.target.import_shared_bgra_texture(width, height,
-            handle.duplicate().map_err(|_| "GPU image duplication failed")?)
+        let texture = self
+            .target
+            .import_shared_bgra_texture(
+                width,
+                height,
+                handle
+                    .duplicate()
+                    .map_err(|_| "GPU image duplication failed")?,
+            )
             .map_err(|_| "GPU image import failed")?;
         self.extension_gpu_textures.push(ExtensionGpuTexture {
-            client_id, buffer_id, width, height, texture, handle,
+            client_id,
+            buffer_id,
+            width,
+            height,
+            texture,
+            handle,
         });
         Ok(())
     }
 
-    pub(super) fn unregister_extension_gpu_buffer(&mut self, client_id: usize,
+    pub(super) fn unregister_extension_gpu_buffer(
+        &mut self,
+        client_id: usize,
         buffer_id: u32,
     ) -> Result<(), &'static str> {
-        if let Some(index) = self.extension_gpu_textures.iter()
-            .position(|entry| (entry.client_id, entry.buffer_id) == (client_id, buffer_id)) {
+        if let Some(index) = self
+            .extension_gpu_textures
+            .iter()
+            .position(|entry| (entry.client_id, entry.buffer_id) == (client_id, buffer_id))
+        {
             let entry = self.extension_gpu_textures.swap_remove(index);
-            self.target.release_imported_texture(entry.texture)
+            self.target
+                .release_imported_texture(entry.texture)
                 .map_err(|_| "GPU scene image retirement failed")?;
         }
         Ok(())
@@ -1455,12 +1486,18 @@ impl GpuCompositor {
                     .map_err(|_| "Failed to allocate GPU scene target")?;
                     let mut sources = Vec::with_capacity(view.sources.len());
                     for source in &view.sources {
-                        let texture = if source.gpu_buffer.is_some() { None } else { Some(define_bgra_texture(
-                            self.target.resources.as_ref(),
-                            source.width,
-                            source.height,
-                        )
-                        .map_err(|_| "Failed to allocate GPU scene source")?) };
+                        let texture = if source.gpu_buffer.is_some() {
+                            None
+                        } else {
+                            Some(
+                                define_bgra_texture(
+                                    self.target.resources.as_ref(),
+                                    source.width,
+                                    source.height,
+                                )
+                                .map_err(|_| "Failed to allocate GPU scene source")?,
+                            )
+                        };
                         sources.push((source.width, source.height, texture));
                     }
                     self.scene_textures.push(SceneTexture {
@@ -1487,17 +1524,25 @@ impl GpuCompositor {
                 let area = PixelRect::new(0, 0, width, height)
                     .map_err(|_| "Invalid scene source extent")?;
                 let texture = if let Some((client_id, buffer_id)) = source.gpu_buffer {
-                    self.extension_gpu_textures.iter().find(|image|
-                        (image.client_id, image.buffer_id, image.width, image.height) ==
-                        (client_id, buffer_id, width, height))
-                        .ok_or("GPU scene image is not registered")?.texture
-                } else { upload_texture.ok_or("Missing SHM scene texture")? };
-                if source.gpu_buffer.is_none() { uploads.push(TextureUpload {
-                    texture,
-                    destination: area,
-                    stride: source.stride as u32,
-                    bytes: source.bytes,
-                }); }
+                    self.extension_gpu_textures
+                        .iter()
+                        .find(|image| {
+                            (image.client_id, image.buffer_id, image.width, image.height)
+                                == (client_id, buffer_id, width, height)
+                        })
+                        .ok_or("GPU scene image is not registered")?
+                        .texture
+                } else {
+                    upload_texture.ok_or("Missing SHM scene texture")?
+                };
+                if source.gpu_buffer.is_none() {
+                    uploads.push(TextureUpload {
+                        texture,
+                        destination: area,
+                        stride: source.stride as u32,
+                        bytes: source.bytes,
+                    });
+                }
                 quads.push(Quad::SampledUv {
                     rect: SampledRect {
                         texture,
@@ -1660,9 +1705,18 @@ impl GpuCompositor {
         let cursor_images = create_cursor_images(&mut target, cursor)?;
         let mut extension_gpu_ids = Vec::with_capacity(self.extension_gpu_textures.len());
         for entry in &self.extension_gpu_textures {
-            extension_gpu_ids.push(target.import_shared_bgra_texture(entry.width, entry.height,
-                entry.handle.duplicate().map_err(|_| "GPU scene image duplication failed")?)
-                .map_err(|_| "GPU scene image reimport failed")?);
+            extension_gpu_ids.push(
+                target
+                    .import_shared_bgra_texture(
+                        entry.width,
+                        entry.height,
+                        entry
+                            .handle
+                            .duplicate()
+                            .map_err(|_| "GPU scene image duplication failed")?,
+                    )
+                    .map_err(|_| "GPU scene image reimport failed")?,
+            );
         }
         let mut imported_shm_texture_ids = Vec::new();
         imported_shm_texture_ids
@@ -1704,7 +1758,11 @@ impl GpuCompositor {
         self.cursor_images = cursor_images;
         self.textures.clear();
         self.scene_textures.clear();
-        for (entry, texture) in self.extension_gpu_textures.iter_mut().zip(extension_gpu_ids) {
+        for (entry, texture) in self
+            .extension_gpu_textures
+            .iter_mut()
+            .zip(extension_gpu_ids)
+        {
             entry.texture = texture;
         }
         for (imported, texture) in self
