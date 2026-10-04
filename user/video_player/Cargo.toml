@@ -33,8 +33,3 @@ scarlet-desktop-config = { path = "../lib/scarlet-desktop-config", default-featu
 rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "a559fe2545fd88def12146dcc06286475b53ead3", default-features = false, features = ["portable-simd"], optional = true }
 symphonia-core = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
 symphonia-codec-aac = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
-
-[target.'cfg(target_os = "scarlet")'.dependencies]
-# Shared NV12 image import is not yet exposed by the dynamic backend ABI.
-# Preserve the video's existing GPU import path with explicit compatibility.
-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "c4e23364679dae613c3176f4f2277bc795455ac5", default-features = false, features = ["legacy-scarlet-std", "backend-scarlet-virgl-static"] }

@@ -5,8 +5,9 @@ Native AArch64 and RISC-V64 images load VirGL from
 The adjacent `scarlet-virgl.sgfx-driver` manifest selects backend ABI 2.
 RISC-V32 retains its compatibility backend and only prepares the coordinated
 SGFX source configuration; no driver library or manifest is installed there.
-`video-player` explicitly selects static VirGL to preserve shared NV12 image
-imports, which are not yet supported by the dynamic backend ABI.
+Shared NV12/YCbCr image import is supported by the Maxwell backend. The VirGL
+backend does not implement that import path in either its static or dynamic
+form; selecting static VirGL does not add NV12 import support.
 
 Use a Scarlet compiler with native cdylib support, DSO-safe standard-library
 TLS, and the GNU ELF OSABI fix (`petitstrawberry/rust` commit `71dd0425890`).

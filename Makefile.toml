@@ -25,24 +25,26 @@ args = ["fmt", "--manifest-path", "user/lib/scarlet-abi/Cargo.toml", "--", "--ch
 
 [tasks.check-sgfx-riscv64]
 description = "Check all std binaries and the legacy UI demo against one SGFX core (RISC-V)"
-env = { SGFX_STD_TARGET = "riscv64gc-unknown-scarlet", SGFX_LEGACY_TARGET = "../targets/riscv64gc-unknown-scarlet-elf.json" }
+env = { SGFX_STD_TARGET = "riscv64gc-unknown-scarlet", SGFX_LEGACY_TARGET = "../targets/riscv64gc-unknown-scarlet-elf.json", SGFX_PROJECT = "projects/riscv64-limine-full" }
 run_task = "check-sgfx-integration"
 
 [tasks.check-sgfx-aarch64]
 description = "Check all std binaries and the legacy UI demo against one SGFX core (AArch64)"
-env = { SGFX_STD_TARGET = "aarch64-unknown-scarlet", SGFX_LEGACY_TARGET = "../targets/aarch64-unknown-scarlet-elf.json" }
+env = { SGFX_STD_TARGET = "aarch64-unknown-scarlet", SGFX_LEGACY_TARGET = "../targets/aarch64-unknown-scarlet-elf.json", SGFX_PROJECT = "projects/aarch64-limine-full" }
 run_task = "check-sgfx-integration"
 
 [tasks.check-sgfx-integration]
 private = true
 script = '''
 set -eu
+python3 tools/sgfx-native-build.py --project "${SGFX_PROJECT}"
+sgfx_config="$(pwd)/${SGFX_PROJECT}/.scarlet/sgfx/userspace.toml"
 cd user/std-bin
-cargo tree --locked --invert sgfx-core --target "${SGFX_STD_TARGET}"
-cargo check --locked --target "${SGFX_STD_TARGET}" --bins
+cargo --config "${sgfx_config}" tree --locked --invert sgfx-core --target "${SGFX_STD_TARGET}"
+cargo --config "${sgfx_config}" check --locked --target "${SGFX_STD_TARGET}" --bins
 cd ../bin
-cargo tree --locked --invert sgfx-core --target "${SGFX_LEGACY_TARGET}"
-cargo check --locked --target "${SGFX_LEGACY_TARGET}" --bin ui-demo
+cargo --config "${sgfx_config}" tree --locked --invert sgfx-core --target "${SGFX_LEGACY_TARGET}"
+cargo --config "${sgfx_config}" check --locked --target "${SGFX_LEGACY_TARGET}" --bin ui-demo
 '''
 
 [tasks.test-release-contracts]
