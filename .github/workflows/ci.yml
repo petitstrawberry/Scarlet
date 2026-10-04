@@ -195,7 +195,7 @@ jobs:
       run: nix develop .#default --command cargo make check-sgfx-riscv64
 
     - name: Build scarlet kernel (riscv64)
-      run: nix develop .#default --command cargo make build-riscv64
+      run: nix develop .#default --command python3 tools/ci-kernel-build.py --arch riscv64
 
     - name: Test scarlet kernel (riscv64)
       run: nix develop .#default --command cargo make test-riscv64
@@ -237,7 +237,7 @@ jobs:
       run: nix develop .#default --command cargo make check-sgfx-aarch64
 
     - name: Build scarlet kernel (aarch64)
-      run: nix develop .#default --command cargo make build-aarch64
+      run: nix develop .#default --command python3 tools/ci-kernel-build.py --arch aarch64
 
     - name: Test scarlet kernel (aarch64)
       run: nix develop .#default --command cargo make test-aarch64
