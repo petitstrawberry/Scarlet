@@ -6,6 +6,7 @@ enum EarlyUartKind {
     None = 0,
     Pl011 = 1,
     QcomGeni = 2,
+    Ns16550 = 3,
 }
 
 impl EarlyUartKind {
@@ -13,6 +14,7 @@ impl EarlyUartKind {
         match value {
             1 => Self::Pl011,
             2 => Self::QcomGeni,
+            3 => Self::Ns16550,
             _ => Self::None,
         }
     }
@@ -20,6 +22,8 @@ impl EarlyUartKind {
 
 static EARLY_UART_KIND: AtomicUsize = AtomicUsize::new(EarlyUartKind::None as usize);
 static EARLY_UART_VADDR: AtomicUsize = AtomicUsize::new(0);
+static NS16550_REG_SHIFT: AtomicUsize = AtomicUsize::new(0);
+static NS16550_IO_WIDTH: AtomicUsize = AtomicUsize::new(1);
 static BOOT_SELECTED_UART: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "limine")]
 static PENDING_QCOM_GENI_PADDR: AtomicUsize = AtomicUsize::new(0);
@@ -64,6 +68,14 @@ fn try_uart_putc(c: u8) -> bool {
         EarlyUartKind::QcomGeni => {
             return crate::drivers::uart::qcom_geni::early_write_byte(uart, c);
         }
+        EarlyUartKind::Ns16550 => {
+            return ns16550_write_byte(
+                uart,
+                NS16550_REG_SHIFT.load(Ordering::Relaxed),
+                NS16550_IO_WIDTH.load(Ordering::Relaxed),
+                c,
+            );
+        }
     }
 
     true
@@ -78,13 +90,91 @@ fn emergency_uart_putc(c: u8) {
 
     match kind {
         EarlyUartKind::None => {}
-        EarlyUartKind::Pl011 => {
+        EarlyUartKind::Pl011 | EarlyUartKind::Ns16550 => {
             let _ = try_uart_putc(c);
         }
         EarlyUartKind::QcomGeni => {
             let _ = crate::drivers::uart::qcom_geni::try_emergency_write_byte(uart, c);
         }
     }
+}
+
+fn ns16550_write_byte(uart: usize, reg_shift: usize, io_width: usize, c: u8) -> bool {
+    const LSR: usize = 5;
+    const LSR_THRE: u8 = 1 << 5;
+    // A missing or stalled device must not hang boot or emergency output.
+    const TX_POLL_LIMIT: usize = 100_000;
+
+    // SAFETY: boot registration validates the register layout and publishes
+    // this address only after its complete Device mapping is active.
+    unsafe {
+        for _ in 0..TX_POLL_LIMIT {
+            let lsr = uart + (LSR << reg_shift);
+            let status = if io_width == 4 {
+                (lsr as *const u32).read_volatile() as u8
+            } else {
+                (lsr as *const u8).read_volatile()
+            };
+            if status & LSR_THRE != 0 {
+                if io_width == 4 {
+                    (uart as *mut u32).write_volatile(c as u32);
+                } else {
+                    (uart as *mut u8).write_volatile(c);
+                }
+                return true;
+            }
+            core::hint::spin_loop();
+        }
+    }
+    false
+}
+
+/// Validated register geometry of an FDT-selected NS16550 UART.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Ns16550Layout {
+    reg_shift: usize,
+    io_width: usize,
+}
+
+impl Ns16550Layout {
+    pub(crate) fn new(reg_shift: usize, io_width: usize) -> Option<Self> {
+        // Support byte and little-endian word accesses with 1/2/4/8-byte
+        // register spacing. Word accesses must remain naturally aligned.
+        if reg_shift > 3 || !matches!(io_width, 1 | 4) || io_width > (1 << reg_shift) {
+            return None;
+        }
+        Some(Self {
+            reg_shift,
+            io_width,
+        })
+    }
+
+    pub(crate) fn required_size(self) -> usize {
+        (5 << self.reg_shift) + self.io_width
+    }
+
+    pub(crate) fn alignment(self) -> usize {
+        self.io_width
+    }
+}
+
+/// Activate an FDT-validated NS16550 after its Device mapping is installed.
+#[cfg(feature = "linux-boot")]
+pub(crate) fn register_linux_boot_ns16550(
+    paddr: usize,
+    layout: Ns16550Layout,
+    direct_map: crate::vm::direct_map::DirectMapWindow,
+) {
+    NS16550_REG_SHIFT.store(layout.reg_shift, Ordering::Relaxed);
+    NS16550_IO_WIDTH.store(layout.io_width, Ordering::Relaxed);
+    publish_uart(
+        EarlyUartKind::Ns16550,
+        direct_map
+            .phys_to_virt(crate::mem::address::PhysAddr::new(paddr as u64))
+            .expect("early UART is outside the direct map")
+            .as_usize(),
+    );
+    BOOT_SELECTED_UART.store(true, Ordering::Release);
 }
 
 /// Write one byte to the active early UART or framebuffer fallback.
@@ -219,7 +309,7 @@ pub fn early_console_write(s: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::EarlyUartKind;
+    use super::{EarlyUartKind, Ns16550Layout, ns16550_write_byte};
 
     #[test_case]
     fn unknown_uart_kind_is_safely_disabled() {
@@ -227,5 +317,35 @@ mod tests {
         assert_eq!(EarlyUartKind::from_raw(usize::MAX), EarlyUartKind::None);
         assert_eq!(EarlyUartKind::from_raw(1), EarlyUartKind::Pl011);
         assert_eq!(EarlyUartKind::from_raw(2), EarlyUartKind::QcomGeni);
+        assert_eq!(EarlyUartKind::from_raw(3), EarlyUartKind::Ns16550);
+    }
+
+    #[test_case]
+    fn ns16550_geometry_rejects_unsupported_and_unaligned_accesses() {
+        assert_eq!(Ns16550Layout::new(0, 1).unwrap().required_size(), 6);
+        assert_eq!(Ns16550Layout::new(2, 4).unwrap().required_size(), 24);
+        assert!(Ns16550Layout::new(0, 4).is_none());
+        assert!(Ns16550Layout::new(2, 2).is_none());
+        assert!(Ns16550Layout::new(usize::MAX, 1).is_none());
+    }
+
+    #[test_case]
+    fn ns16550_uses_the_declared_access_width_and_register_spacing() {
+        let mut bytes = [0u8; 8];
+        bytes[5] = 0x20;
+        assert!(ns16550_write_byte(bytes.as_mut_ptr() as usize, 0, 1, b'A'));
+        assert_eq!(bytes, [b'A', 0, 0, 0, 0, 0x20, 0, 0]);
+
+        let mut words = [0u32; 8];
+        words[5] = 0x20;
+        assert!(ns16550_write_byte(words.as_mut_ptr() as usize, 2, 4, b'B'));
+        assert_eq!(words, [b'B' as u32, 0, 0, 0, 0, 0x20, 0, 0]);
+    }
+
+    #[test_case]
+    fn ns16550_stalled_transmitter_returns_without_writing() {
+        let mut bytes = [0u8; 8];
+        assert!(!ns16550_write_byte(bytes.as_mut_ptr() as usize, 0, 1, b'A'));
+        assert_eq!(bytes, [0; 8]);
     }
 }
