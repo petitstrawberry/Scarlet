@@ -425,7 +425,9 @@ impl<'a> Drop for VirtQueue<'a> {
 /// This structure represents a descriptor in the descriptor table.
 /// It contains the address, length, flags, and next pointer.
 /// This structure is located in the physical memory directly.
-#[repr(C)]
+// A split virtqueue descriptor table must be 16-byte aligned, even on
+// architectures where the u64 fields themselves only require 8-byte alignment.
+#[repr(C, align(16))]
 pub struct Descriptor {
     pub addr: u64,
     pub len: u32,
@@ -743,6 +745,8 @@ mod tests {
         // Check the size of the allocated memory
         let allocated_size = virtqueue.get_raw_size();
         assert_eq!(allocated_size, total);
+        assert_eq!(virtqueue.layout.align(), 16);
+        assert_eq!(virtqueue.get_raw_ptr() as usize % 16, 0);
 
         // Check the next index of each descriptor
         for i in 0..queue_size {
