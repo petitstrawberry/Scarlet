@@ -20,7 +20,7 @@ use crate::{
 use alloc::sync::Arc;
 use core::{
     any::Any,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 const NONBLOCK: u32 = 0x800;
@@ -29,7 +29,7 @@ const UNMASKABLE: u64 = (1 << (9 - 1)) | (1 << (19 - 1));
 const RECORD_SIZE: usize = 128;
 
 pub(super) struct SignalFd {
-    mask: AtomicU64,
+    mask: IrqSpinLock<u64>,
     nonblocking: AtomicBool,
 }
 
@@ -40,19 +40,19 @@ fn reader_state() -> Option<Arc<IrqSpinLock<SignalState>>> {
 impl SignalFd {
     fn new(mask: u64, nonblocking: bool) -> Self {
         Self {
-            mask: AtomicU64::new(mask & !UNMASKABLE),
+            mask: IrqSpinLock::new(mask & !UNMASKABLE),
             nonblocking: AtomicBool::new(nonblocking),
         }
     }
 
     fn ready(&self, state: &SignalState) -> bool {
-        state.pending.raw() & self.mask.load(Ordering::Acquire) != 0
+        state.pending.raw() & *self.mask.lock() != 0
     }
 
     fn read_pending(&self, state: &mut SignalState, buffer: &mut [u8]) -> usize {
         let mut count = 0;
         for record in buffer.chunks_exact_mut(RECORD_SIZE) {
-            let pending = state.pending.raw() & self.mask.load(Ordering::Acquire);
+            let pending = state.pending.raw() & *self.mask.lock();
             if pending == 0 {
                 break;
             }
@@ -188,7 +188,7 @@ pub fn sys_signalfd4(abi: &mut LinuxAbi, tf: &mut Trapframe) -> usize {
         else {
             return errno::to_result(errno::EINVAL);
         };
-        file.mask.store(mask, Ordering::Release);
+        *file.mask.lock() = mask;
         // Updating a mask does not change the existing descriptor's flags.
         let waker = abi.signal_state.lock().pending_waker.clone();
         waker.wake_all();
@@ -243,14 +243,16 @@ mod tests {
         tf.set_arg(2, 10);
         let duplicate = super::super::fs::sys_fcntl(&mut abi, &mut tf);
         assert_eq!(duplicate, 10);
-        copy_to_user(&task, mask_address, &(1u64 << 16).to_ne_bytes()).unwrap();
+        // Updating a duplicated descriptor must preserve the mask's high bits
+        // even when the target has no native 64-bit atomics.
+        copy_to_user(&task, mask_address, &(1u64 << 63).to_ne_bytes()).unwrap();
         tf.set_arg(0, duplicate);
         tf.set_arg(1, mask_address);
         tf.set_arg(2, 8);
         tf.set_arg(3, 0);
         assert_eq!(sys_signalfd4(&mut abi, &mut tf), duplicate);
         abi.signal_state.lock().add_pending(LinuxSignal::SIGUSR1);
-        abi.signal_state.lock().add_pending(LinuxSignal::SIGCHLD);
+        abi.signal_state.lock().add_pending(LinuxSignal::SIGRT32);
         let buffer = USER_STACK_END - PAGE_SIZE - 7;
         copy_to_user(&task, buffer, &[0x55; 129]).unwrap();
         tf.set_arg(0, fd);
@@ -259,7 +261,7 @@ mod tests {
         assert_eq!(super::super::fs::sys_read(&mut abi, &mut tf), 128);
         let mut record = [0; 129];
         copy_from_user(&task, buffer, &mut record).unwrap();
-        assert_eq!(u32::from_ne_bytes(record[..4].try_into().unwrap()), 17);
+        assert_eq!(u32::from_ne_bytes(record[..4].try_into().unwrap()), 64);
         assert_eq!(record[128], 0x55);
         assert!(abi.signal_state.lock().is_pending(LinuxSignal::SIGUSR1));
         assert_eq!(
