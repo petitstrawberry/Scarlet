@@ -15,16 +15,14 @@ use crate::vm::vmem::PhysicalMemoryArea;
 
 const MAX_ORDER: usize = 22;
 const MAX_REGIONS: usize = 16;
-const MAX_TRACKED_ALIGNED_ALLOCATIONS: usize = 64;
 
 #[derive(Clone, Copy)]
-struct TrackedAlignedAllocation {
-    returned_paddr: u64,
-    base_paddr: u64,
-    backing_pages: usize,
+struct AlignedAllocation {
+    base_pfn: usize,
     requested_pages: usize,
 }
 
+#[derive(Clone, Copy)]
 struct ListHead {
     next: *mut ListHead,
     prev: *mut ListHead,
@@ -69,9 +67,19 @@ impl ListHead {
 }
 
 const PAGE_FLAG_BUDDY: u8 = 1 << 0;
+const PAGE_FLAG_ALIGNED: u8 = 1 << 1;
 
-struct Page {
+// An allocated page cannot be on a free list. Reuse its existing metadata so
+// aligned allocations need neither a fixed-capacity table nor heap allocation.
+union PageState {
     lru: ListHead,
+    aligned: AlignedAllocation,
+}
+
+// Free-list entries are cast back to Page, so their storage must be first.
+#[repr(C)]
+struct Page {
+    state: PageState,
     order: u8,
     flags: u8,
 }
@@ -81,7 +89,9 @@ unsafe impl Send for Page {}
 impl Page {
     const fn new() -> Self {
         Self {
-            lru: ListHead::new(),
+            state: PageState {
+                lru: ListHead::new(),
+            },
             order: 0,
             flags: 0,
         }
@@ -195,7 +205,7 @@ impl BuddyRegion {
         unsafe {
             for i in 0..self.page_count {
                 let page = self.pages.add(i);
-                (*page).lru.init();
+                (*page).state.lru.init();
                 (*page).order = 0;
                 (*page).flags = 0;
             }
@@ -246,13 +256,13 @@ impl BuddyRegion {
         (*page).flags |= PAGE_FLAG_BUDDY;
 
         let free_list = &mut self.free_area[order].free_list as *mut ListHead;
-        (*free_list).add(&mut (*page).lru as *mut ListHead);
+        (*free_list).add(&mut (*page).state.lru as *mut ListHead);
         self.free_area[order].nr_free += 1;
     }
 
     unsafe fn del_from_free_list(&mut self, page: *mut Page, order: usize) {
         let free_list = &mut self.free_area[order].free_list as *mut ListHead;
-        (*free_list).remove(&mut (*page).lru as *mut ListHead);
+        (*free_list).remove(&mut (*page).state.lru as *mut ListHead);
         (*page).flags &= !PAGE_FLAG_BUDDY;
         self.free_area[order].nr_free -= 1;
     }
@@ -455,14 +465,18 @@ impl BuddyRegion {
 
             for i in 0..self.page_count {
                 let page = self.pages.add(i);
-                (*page).lru.next = adjust_metadata_ptr(
-                    (*page).lru.next,
+                if (*page).flags & PAGE_FLAG_ALIGNED != 0 {
+                    // This union contains PFNs/counts, not direct-map pointers.
+                    continue;
+                }
+                (*page).state.lru.next = adjust_metadata_ptr(
+                    (*page).state.lru.next,
                     old_pages_start,
                     pages_bytes,
                     new_pages_start,
                 );
-                (*page).lru.prev = adjust_metadata_ptr(
-                    (*page).lru.prev,
+                (*page).state.lru.prev = adjust_metadata_ptr(
+                    (*page).state.lru.prev,
                     old_pages_start,
                     pages_bytes,
                     new_pages_start,
@@ -495,8 +509,6 @@ fn adjust_metadata_ptr(
 
 struct PmmInner {
     regions: [BuddyRegion; MAX_REGIONS],
-    tracked_aligned_allocations:
-        [Option<TrackedAlignedAllocation>; MAX_TRACKED_ALIGNED_ALLOCATIONS],
 }
 
 impl PmmInner {
@@ -520,7 +532,6 @@ impl PmmInner {
                 BuddyRegion::new(),
                 BuddyRegion::new(),
             ],
-            tracked_aligned_allocations: [None; MAX_TRACKED_ALIGNED_ALLOCATIONS],
         }
     }
 
@@ -531,30 +542,57 @@ impl PmmInner {
         backing_pages: usize,
         requested_pages: usize,
     ) -> Result<(), &'static str> {
-        for slot in &mut self.tracked_aligned_allocations {
-            if slot.is_none() {
-                *slot = Some(TrackedAlignedAllocation {
-                    returned_paddr,
-                    base_paddr,
-                    backing_pages,
-                    requested_pages,
-                });
+        for region in &mut self.regions {
+            if region.contains(returned_paddr) && region.contains(base_paddr) {
+                let returned_pfn = region.addr_to_pfn(returned_paddr).unwrap();
+                let base_pfn = region.addr_to_pfn(base_paddr).unwrap();
+                // SAFETY: Both addresses belong to this owned backing block.
+                // Its pages cannot be on any free list until free() takes this
+                // record and returns the original block to the buddy allocator.
+                unsafe {
+                    let page = &mut *region.pfn_to_page(returned_pfn);
+                    debug_assert_eq!(page.flags, 0);
+                    page.state.aligned = AlignedAllocation {
+                        base_pfn,
+                        requested_pages,
+                    };
+                    page.order = backing_pages.trailing_zeros() as u8;
+                    page.flags |= PAGE_FLAG_ALIGNED;
+                }
                 return Ok(());
             }
         }
-        Err("Too many tracked aligned PMM allocations")
+        Err("Aligned PMM allocation is outside its backing region")
     }
 
     fn take_tracked_aligned_allocation(
         &mut self,
         returned_paddr: u64,
-    ) -> Option<TrackedAlignedAllocation> {
-        for slot in &mut self.tracked_aligned_allocations {
-            if slot
-                .as_ref()
-                .is_some_and(|allocation| allocation.returned_paddr == returned_paddr)
-            {
-                return slot.take();
+    ) -> Option<(u64, usize, usize)> {
+        if returned_paddr % PAGE_SIZE as u64 != 0 {
+            return None;
+        }
+        for region in &mut self.regions {
+            if region.contains(returned_paddr) {
+                let pfn = region.addr_to_pfn(returned_paddr)?;
+                // SAFETY: The flag selects the active union member. Restore
+                // free-list storage before the backing block can be reused.
+                unsafe {
+                    let page = &mut *region.pfn_to_page(pfn);
+                    if page.flags & PAGE_FLAG_ALIGNED == 0 {
+                        return None;
+                    }
+                    let allocation = page.state.aligned;
+                    let backing_pages = 1usize << page.order;
+                    page.flags &= !PAGE_FLAG_ALIGNED;
+                    page.state.lru = ListHead::new();
+                    page.state.lru.init();
+                    return Some((
+                        region.pfn_to_addr(allocation.base_pfn),
+                        backing_pages,
+                        allocation.requested_pages,
+                    ));
+                }
             }
         }
         None
@@ -594,12 +632,69 @@ impl PmmInner {
         None
     }
 
+    fn alloc_aligned(&mut self, pages: usize, align_pages: usize) -> Option<u64> {
+        if align_pages == 0 || align_pages == 1 {
+            return self.alloc(pages);
+        }
+
+        let effective_align_pages = if align_pages.is_power_of_two() {
+            align_pages
+        } else {
+            align_pages.checked_next_power_of_two()?
+        };
+
+        let backing_order = aligned_allocation_backing_order(pages, effective_align_pages)?;
+        let backing_pages = 1usize.checked_shl(backing_order as u32)?;
+        let align_bytes = effective_align_pages.checked_mul(PAGE_SIZE)?;
+        let allocation_bytes = pages.checked_mul(PAGE_SIZE)?;
+        let backing_bytes = backing_pages.checked_mul(PAGE_SIZE)?;
+        let requested_buddy_pages = pages.checked_next_power_of_two()?;
+        let base_paddr = self.alloc_from_order(backing_order)?;
+        let returned_paddr = match base_paddr
+            .checked_add(align_bytes as u64 - 1)
+            .map(|addr| addr & !(align_bytes as u64 - 1))
+        {
+            Some(paddr) => paddr,
+            None => {
+                self.free(base_paddr, backing_pages);
+                return None;
+            }
+        };
+
+        let allocation_end = returned_paddr.checked_add(allocation_bytes as u64);
+        let backing_end = base_paddr.checked_add(backing_bytes as u64);
+        let (Some(allocation_end), Some(backing_end)) = (allocation_end, backing_end) else {
+            self.free(base_paddr, backing_pages);
+            return None;
+        };
+        if allocation_end > backing_end {
+            self.free(base_paddr, backing_pages);
+            return None;
+        }
+
+        if returned_paddr == base_paddr && backing_pages == requested_buddy_pages {
+            return Some(returned_paddr);
+        }
+
+        if self
+            .track_aligned_allocation(returned_paddr, base_paddr, backing_pages, pages)
+            .is_err()
+        {
+            self.free(base_paddr, backing_pages);
+            return None;
+        }
+
+        Some(returned_paddr)
+    }
+
     fn free(&mut self, paddr: u64, pages: usize) {
-        if let Some(allocation) = self.take_tracked_aligned_allocation(paddr) {
-            debug_assert_eq!(allocation.requested_pages, pages);
+        if let Some((base_paddr, backing_pages, requested_pages)) =
+            self.take_tracked_aligned_allocation(paddr)
+        {
+            debug_assert_eq!(requested_pages, pages);
             for region in &mut self.regions {
-                if region.contains(allocation.base_paddr) {
-                    region.free(allocation.base_paddr, allocation.backing_pages);
+                if region.contains(base_paddr) {
+                    region.free(base_paddr, backing_pages);
                     return;
                 }
             }
@@ -708,59 +803,7 @@ pub fn alloc_contiguous_pages(pages: usize) -> Option<u64> {
 /// if sizing, allocation, or aligned-allocation tracking fails. Release with
 /// [`free_contiguous_pages`] using the returned address and original `pages` count.
 pub fn alloc_contiguous_pages_aligned(pages: usize, align_pages: usize) -> Option<u64> {
-    if align_pages == 0 || align_pages == 1 {
-        return alloc_contiguous_pages(pages);
-    }
-
-    let effective_align_pages = if align_pages.is_power_of_two() {
-        align_pages
-    } else {
-        align_pages.checked_next_power_of_two()?
-    };
-
-    let backing_order = aligned_allocation_backing_order(pages, effective_align_pages)?;
-    let backing_pages = 1usize.checked_shl(backing_order as u32)?;
-    let align_bytes = effective_align_pages.checked_mul(PAGE_SIZE)?;
-    let allocation_bytes = pages.checked_mul(PAGE_SIZE)?;
-    let backing_bytes = backing_pages.checked_mul(PAGE_SIZE)?;
-    let requested_buddy_pages = pages.checked_next_power_of_two()?;
-    let base_paddr = PMM.lock().alloc_from_order(backing_order)?;
-    let returned_paddr = match base_paddr
-        .checked_add(align_bytes as u64 - 1)
-        .map(|addr| addr & !(align_bytes as u64 - 1))
-    {
-        Some(paddr) => paddr,
-        None => {
-            PMM.lock().free(base_paddr, backing_pages);
-            return None;
-        }
-    };
-
-    let allocation_end = returned_paddr.checked_add(allocation_bytes as u64);
-    let backing_end = base_paddr.checked_add(backing_bytes as u64);
-    let (Some(allocation_end), Some(backing_end)) = (allocation_end, backing_end) else {
-        PMM.lock().free(base_paddr, backing_pages);
-        return None;
-    };
-    if allocation_end > backing_end {
-        PMM.lock().free(base_paddr, backing_pages);
-        return None;
-    }
-
-    if returned_paddr == base_paddr && backing_pages == requested_buddy_pages {
-        return Some(returned_paddr);
-    }
-
-    let mut pmm = PMM.lock();
-    if pmm
-        .track_aligned_allocation(returned_paddr, base_paddr, backing_pages, pages)
-        .is_err()
-    {
-        pmm.free(base_paddr, backing_pages);
-        return None;
-    }
-
-    Some(returned_paddr)
+    PMM.lock().alloc_aligned(pages, align_pages)
 }
 
 fn aligned_allocation_backing_order(pages: usize, align_pages: usize) -> Option<usize> {
@@ -891,7 +934,7 @@ mod tests {
         // Keep both arrays and the free-list heads at stable addresses throughout.
         unsafe {
             for page in &mut old_pages {
-                page.lru.init();
+                page.state.lru.init();
             }
             for area in &mut region.free_area {
                 area.free_list.init();
@@ -910,14 +953,14 @@ mod tests {
         assert_eq!(region.pages, new_pages.as_mut_ptr());
         assert_eq!(
             region.free_area[0].free_list.next,
-            &raw mut new_pages[3].lru
+            &raw mut new_pages[3].state.lru
         );
         assert_eq!(
             region.free_area[0].free_list.prev,
-            &raw mut new_pages[0].lru
+            &raw mut new_pages[0].state.lru
         );
-        let self_link = &raw mut new_pages[1].lru;
-        assert_eq!(new_pages[1].lru.next, self_link);
+        let self_link = &raw mut new_pages[1].state.lru;
+        assert_eq!(unsafe { new_pages[1].state.lru.next }, self_link);
         // Removing entries exercises both directions and the unchanged head links.
         unsafe {
             region.del_from_free_list(&raw mut new_pages[3], 0);
@@ -967,6 +1010,100 @@ mod tests {
 
         let (_, free_after) = stats();
         assert_eq!(free_after, free_before);
+    }
+
+    #[test_case]
+    fn aligned_allocations_exceed_64_and_reclaim_offset_backing_blocks() {
+        let mut pages: Vec<Page> = (0..1027).map(|_| Page::new()).collect();
+        let mut pmm = PmmInner::new();
+        let region = &mut pmm.regions[0];
+        region.mem_start = 0x1_8000_0000;
+        region.mem_size = pages.len() * PAGE_SIZE;
+        region.page_count = pages.len();
+        region.first_usable_pfn = 3;
+        region.pages = pages.as_mut_ptr();
+        region.active = true;
+        region.seed_free_lists();
+        let free_before = pmm.stats().1;
+        let mut allocations = [0; 128];
+        for (index, addr) in allocations.iter_mut().enumerate() {
+            *addr = pmm.alloc_aligned(1, 4).unwrap_or_else(|| {
+                panic!(
+                    "aligned allocation {} failed with {} free pages",
+                    index + 1,
+                    pmm.stats().1
+                )
+            });
+            assert_eq!(*addr % (4 * PAGE_SIZE as u64), 0);
+        }
+        assert_eq!(pmm.stats().1, free_before - 128 * 4);
+        for addr in allocations.into_iter().rev() {
+            pmm.free(addr, 1);
+        }
+        assert_eq!(pmm.stats().1, free_before);
+        // All offset backing blocks must coalesce into the original extent.
+        let whole_extent = pmm.alloc(1024).expect("freed blocks did not coalesce");
+        assert_eq!(whole_extent, 0x1_8000_0000 + 3 * PAGE_SIZE as u64);
+        pmm.free(whole_extent, 1024);
+        let reused = pmm
+            .alloc_aligned(1, 4)
+            .expect("aligned metadata was not reusable");
+        pmm.free(reused, 1);
+        assert_eq!(pmm.stats().1, free_before);
+    }
+
+    #[test_case]
+    fn aligned_metadata_survives_direct_map_handoff_and_same_base_free() {
+        use crate::mem::address::{PhysAddr, VirtAddr};
+        use crate::vm::direct_map::DirectMapWindow;
+
+        // Keep the existing per-page metadata footprint; only its active
+        // interpretation changes while an aligned allocation owns the page.
+        assert_eq!(
+            core::mem::size_of::<Page>(),
+            3 * core::mem::size_of::<usize>()
+        );
+        let mut old_pages: Vec<Page> = (0..67).map(|_| Page::new()).collect();
+        let mut new_pages: Vec<Page> = (0..67).map(|_| Page::new()).collect();
+        let mut pmm = PmmInner::new();
+        let region = &mut pmm.regions[0];
+        region.mem_start = 0x1_8000_1000;
+        region.mem_size = old_pages.len() * PAGE_SIZE;
+        region.page_count = old_pages.len();
+        region.first_usable_pfn = 3;
+        region.pages = old_pages.as_mut_ptr();
+        region.active = true;
+        region.seed_free_lists();
+        let free_before = pmm.stats().1;
+        // This base is already aligned, but its four-page backing block must
+        // still be remembered when the caller releases only one requested page.
+        let one = pmm.alloc_aligned(1, 4).unwrap();
+        let three = pmm.alloc_aligned(3, 4).unwrap();
+        let ordinary = pmm.alloc(2).unwrap();
+        assert_eq!(one, 0x1_8000_4000);
+        let region = &mut pmm.regions[0];
+        let window = DirectMapWindow::new(
+            PhysAddr::new(region.mem_start),
+            VirtAddr::new(new_pages.as_mut_ptr() as usize),
+            core::mem::size_of_val(new_pages.as_slice()),
+        )
+        .unwrap();
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                old_pages.as_ptr(),
+                new_pages.as_mut_ptr(),
+                old_pages.len(),
+            );
+        }
+        region.relocate_direct_map_metadata(window);
+        // A non-page-aligned address must not consume a neighboring record.
+        pmm.free(one + 1, 1);
+        assert_eq!(pmm.stats().1, free_before - 4 - 8 - 2);
+        pmm.free(three, 3);
+        pmm.free(ordinary, 2);
+        pmm.free(one, 1);
+        assert_eq!(pmm.stats().1, free_before);
+        assert_eq!(pmm.alloc(64), Some(0x1_8000_4000));
     }
 
     #[test_case]
