@@ -534,6 +534,8 @@ mod tests {
         let address = USER_STACK_END - PAGE_SIZE;
         task.allocate_stack_pages(address, 1).unwrap();
         copy_to_user(&task, address, &7i32.to_ne_bytes()).unwrap();
+        // RISC-V advances the syscall PC by reading the instruction there.
+        copy_to_user(&task, address + 8, &0x00000073u32.to_ne_bytes()).unwrap();
         set_mock_current_task(task.clone());
         let mut abi = LinuxAbi::default();
         let mut frame = Trapframe::new();
@@ -557,6 +559,7 @@ mod tests {
                 frame.set_arg(2, 7);
                 frame.set_arg(3, 0); // Infinite wait: must return for the signal.
                 frame.set_arg(5, FUTEX_BITSET_MATCH_ANY as usize);
+                frame.set_pc((address + 8) as u64);
                 assert_eq!(
                     sys_futex(&mut abi, &mut frame),
                     super::super::errno::to_result(super::super::errno::EINTR)
@@ -568,6 +571,7 @@ mod tests {
                 ));
                 // A mismatched futex value still takes precedence over EINTR.
                 frame.set_arg(2, 8);
+                frame.set_pc((address + 8) as u64);
                 assert_eq!(
                     sys_futex(&mut abi, &mut frame),
                     super::super::errno::to_result(super::super::errno::EAGAIN)

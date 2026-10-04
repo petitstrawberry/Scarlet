@@ -1635,34 +1635,34 @@ fn test_ext2_virtio_blk_delete_operations() {
                                         }
                                     }
 
-                                    // Retained directory nodes do not yet take part in
-                                    // inode lifetime tracking. Refusal must preserve the
-                                    // path and inode instead of permitting stale cwd reuse.
+                                    // Nonempty parents cannot be removed. Detached
+                                    // directory nodes retain their inode until the last
+                                    // reference is released, even after unlink succeeds.
                                     let child_id = child_node.id();
                                     let parent_id = parent_node.id();
-                                    assert_eq!(
-                                        fs.remove(&parent_node, &child_dir).unwrap_err().kind,
-                                        FileSystemErrorKind::NotSupported
-                                    );
-                                    assert_eq!(
-                                        fs.lookup(&parent_node, &child_dir).unwrap().id(),
-                                        child_id
-                                    );
-                                    assert_eq!(
-                                        child_node.metadata().unwrap().file_type,
-                                        FileType::Directory
-                                    );
                                     assert_eq!(
                                         fs.remove(&root_node, &parent_dir).unwrap_err().kind,
                                         FileSystemErrorKind::DirectoryNotEmpty
                                     );
+                                    fs.remove(&parent_node, &child_dir).unwrap();
                                     assert_eq!(
-                                        fs.lookup(&root_node, &parent_dir).unwrap().id(),
-                                        parent_id
+                                        fs.lookup(&parent_node, &child_dir).unwrap_err().kind,
+                                        FileSystemErrorKind::NotFound
                                     );
+                                    assert_eq!(child_node.id(), child_id);
                                     assert_eq!(
-                                        fs.lookup(&parent_node, &child_dir).unwrap().id(),
-                                        child_id
+                                        child_node.metadata().unwrap().file_type,
+                                        FileType::Directory
+                                    );
+                                    fs.remove(&root_node, &parent_dir).unwrap();
+                                    assert_eq!(
+                                        fs.lookup(&root_node, &parent_dir).unwrap_err().kind,
+                                        FileSystemErrorKind::NotFound
+                                    );
+                                    assert_eq!(parent_node.id(), parent_id);
+                                    assert_eq!(
+                                        parent_node.metadata().unwrap().file_type,
+                                        FileType::Directory
                                     );
                                 }
                                 Err(e) => {
