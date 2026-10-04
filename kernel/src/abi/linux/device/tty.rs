@@ -1131,7 +1131,7 @@ mod tests {
         assert_eq!(tty.get_foreground_task_group_id(), Some(job.get_id()));
 
         // A foreground handoff must still reject a different session.
-        job.set_session_id(login.get_session_id() + 1000);
+        job.set_session_id(login.get_session_id().wrapping_add(1));
         assert!(set_foreground_pgid_for_task(&shell, &slave, job_pgid).is_err());
         drop(job);
         drop(shell);

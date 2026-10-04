@@ -961,6 +961,8 @@ mod tests {
     #[test_case]
     fn mmap_unaligned_offset_preserves_fixed_mapping_and_aligned_offset_reads_file_page() {
         let task = Task::new("mmap-file-offset".into(), 0, TaskType::User);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
         let vfs = alloc::sync::Arc::new(crate::fs::VfsManager::new());
         *task.vfs.write() = Some(vfs.clone());
         vfs.create_file("/image", crate::fs::FileType::RegularFile)
@@ -1045,6 +1047,8 @@ mod tests {
     #[test_case]
     fn linux_large_mapping_leaves_wine_pe_base_available() {
         let task = Task::new("mmap-wine-layout".into(), 0, TaskType::User);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
         task.vm_manager.set_mmap_base(LINUX_MMAP_BASE);
         let size = 0x8_0020_0000;
         assert_eq!(
@@ -1070,6 +1074,8 @@ mod tests {
     #[test_case]
     fn madvise_discards_dirty_pages_without_populating_unused_stack_pages() {
         let task = Task::new("madvise-sparse-stack".into(), 0, TaskType::User);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
         let base = 0x4000_0000;
         assert_eq!(
             handle_anonymous_mapping(&task, base, 4 * PAGE_SIZE, 3, 0x32),

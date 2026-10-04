@@ -528,7 +528,9 @@ mod tests {
         use crate::library::std::usercopy::copy_to_user;
         use crate::task::{Task, TaskType, clear_mock_current_task, set_mock_current_task};
 
-        let task = Arc::new(Task::new("futex-interrupt".into(), 0, TaskType::User));
+        let mut task = Task::new("futex-interrupt".into(), 0, TaskType::User);
+        task.set_id(1);
+        let task = Arc::new(task);
         let address = USER_STACK_END - PAGE_SIZE;
         task.allocate_stack_pages(address, 1).unwrap();
         copy_to_user(&task, address, &7i32.to_ne_bytes()).unwrap();

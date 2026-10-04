@@ -124,8 +124,8 @@ mod tests {
         copy_from_user(&task, sp, &mut bytes).unwrap();
         assert_eq!(bytes.as_slice(), expected);
         assert_eq!(args[0] as usize, sp);
-        assert_eq!(args[1] - args[0], 20);
-        assert_eq!(args[2] - args[1], 20);
+        assert_eq!(args[1] - args[0], 21);
+        assert_eq!(args[2] - args[1], 21);
         assert_eq!(env[0] - args[2], 10);
         assert_eq!(env[1] - env[0], 4);
 

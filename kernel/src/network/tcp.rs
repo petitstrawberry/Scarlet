@@ -3252,6 +3252,7 @@ mod tests {
         SocketControl::listen(listener.as_ref(), 1).unwrap();
         SocketControl::connect(client.as_ref(), &address).unwrap();
         let server = SocketControl::accept(listener.as_ref()).unwrap();
+        server.as_selectable().unwrap().set_nonblocking(true);
 
         assert_eq!(
             client.sendto(b"GET", &SocketAddress::Unspecified, 0x4000),

@@ -1802,10 +1802,9 @@ mod tests {
         reset();
         let cpu = crate::arch::get_cpu().get_cpuid();
         register_online_cpu(cpu);
-        let id = add_task(
-            Task::new("socket-interrupt".into(), 1, TaskType::Kernel),
-            cpu,
-        );
+        let fixture = Task::new("socket-interrupt".into(), 1, TaskType::Kernel);
+        fixture.init();
+        let id = add_task(fixture, cpu);
         let task = get_task_by_id(id).unwrap();
         task.set_state(TaskState::Running);
         task.running_cpu.store(cpu, Ordering::SeqCst);
