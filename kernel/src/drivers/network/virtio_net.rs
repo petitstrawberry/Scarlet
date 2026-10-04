@@ -469,8 +469,27 @@ impl VirtioNetDevice {
             core::ptr::write_volatile(rx_queue.used.flags, 0);
         }
         self.notify(0); // Notify RX queue
+        self.log_queue_state("RX initialized", rx_queue);
 
         Ok(())
+    }
+
+    fn log_queue_state(&self, label: &str, queue: &VirtQueue<'_>) {
+        let first = queue.desc.iter().find(|desc| desc.len != 0);
+        crate::println!(
+            "[virtio-net] {} status={:#x} isr={:#x} desc={:#x} avail={:#x}/{} used={:#x}/{} last={} buffer={:#x}/{}",
+            label,
+            self.read32_register(Register::Status),
+            self.read32_register(Register::InterruptStatus),
+            virt_to_phys(queue.get_raw_ptr() as usize),
+            virt_to_phys(queue.avail.flags as *const _ as usize),
+            unsafe { core::ptr::read_volatile(queue.avail.idx) },
+            virt_to_phys(queue.used.flags as *const _ as usize),
+            unsafe { core::ptr::read_volatile(queue.used.idx) },
+            queue.last_used_idx,
+            first.map_or(0, |desc| desc.addr),
+            first.map_or(0, |desc| desc.len),
+        );
     }
 
     /// Process a single packet transmission
@@ -523,7 +542,14 @@ impl VirtioNetDevice {
             self.notify(1); // Notify TX queue
 
             // Wait for transmission (polling)
-            while tx_queue.is_busy() {}
+            let mut polls = 0usize;
+            while tx_queue.is_busy() {
+                if polls == 1_000_000 {
+                    self.log_queue_state("TX completion stalled", tx_queue);
+                }
+                polls = polls.saturating_add(1);
+                core::hint::spin_loop();
+            }
 
             // Get completion
             let result = match tx_queue.pop() {
