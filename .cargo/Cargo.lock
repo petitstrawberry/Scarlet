@@ -5070,6 +5070,7 @@ dependencies = [
  "scpm",
  "serde",
  "serde-json-core",
+ "sgfx",
  "sha2",
  "ssh-key",
  "subtle",
@@ -5109,6 +5110,7 @@ dependencies = [
  "scarlet-std",
  "scarlet-ui 1.0.0 (git+https://github.com/petitstrawberry/scarlet-ui?rev=3f1ecb2470ebe72381fb8613ce3a8483ec6b78a8)",
  "scarlet-video-client",
+ "sgfx",
  "symphonia-codec-aac",
  "symphonia-core",
 ]
@@ -5135,6 +5137,7 @@ dependencies = [
  "ash",
  "naga",
  "scarlet-ui 1.0.0 (git+https://github.com/petitstrawberry/scarlet-ui?rev=e6e00f11c95de371057899ec05b7a832d04adc7f)",
+ "sgfx",
  "vulkan-sgfx",
 ]
 

@@ -37,7 +37,7 @@ run_task = "check-sgfx-integration"
 private = true
 script = '''
 set -eu
-python3 tools/sgfx-native-build.py --project "${SGFX_PROJECT}"
+python3 tools/sgfx-native-build.py --project "${SGFX_PROJECT}" --check-client-linkage
 sgfx_config="$(pwd)/${SGFX_PROJECT}/.scarlet/sgfx/userspace.toml"
 cd user/std-bin
 cargo --config "${sgfx_config}" tree --locked --invert sgfx-core --target "${SGFX_STD_TARGET}"

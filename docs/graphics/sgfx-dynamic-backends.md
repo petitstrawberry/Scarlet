@@ -5,6 +5,10 @@ Native AArch64 and RISC-V64 images load VirGL from
 The adjacent `scarlet-virgl.sgfx-driver` manifest selects backend ABI 2.
 RISC-V32 retains its compatibility backend and only prepares the coordinated
 SGFX source configuration; no driver library or manifest is installed there.
+Userspace dependencies explicitly enable `backend-dynamic`. Native 64-bit
+VirGL uses the installed DSO; Maxwell and Adreno remain built into the clients
+until their dynamic drivers are available. Integration CI rejects the static
+VirGL implementation anywhere in the userspace dependency graph.
 Shared NV12/YCbCr image import is supported by the Maxwell backend. The VirGL
 backend does not implement that import path in either its static or dynamic
 form; selecting static VirGL does not add NV12 import support.

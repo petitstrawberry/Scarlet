@@ -70,11 +70,23 @@ def audit_driver(path, arch):
     return report
 
 
+def audit_client_linkage(config, target):
+    graph = subprocess.check_output(
+        ["cargo", "--config", str(config), "tree", "--locked", "--workspace",
+         "--manifest-path", str(REPO / ".cargo/Cargo.toml"), "--target", target,
+         "--prefix", "none", "--edges", "normal,build"], text=True, cwd=REPO)
+    if any(line.startswith("sgfx-backend-scarlet-virgl v") for line in graph.splitlines()):
+        raise RuntimeError("native clients must load VirGL dynamically, not link its Rust backend")
+    print("Native client dependency audit: VirGL is dynamic; no static VirGL implementation")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", type=Path, default=Path.cwd())
     parser.add_argument("--sgfx-source", type=Path, help="use an existing checkout at the pinned revision")
     parser.add_argument("--install-dir", type=Path, help="also install the library and manifest into this directory")
+    parser.add_argument("--check-client-linkage", action="store_true",
+                        help="reject static VirGL in the native 64-bit userspace dependency graph")
     args = parser.parse_args()
     project = args.project.resolve()
     arch, target = project_target(project)
@@ -117,7 +129,10 @@ def main():
         if name == "sgfx-backend-scarlet-virgl-plugin":
             continue
         config += f"{json.dumps(name)} = {{ path = {json.dumps(str(package.parent))} }}\n"
-    (output / "userspace.toml").write_text(config)
+    config_path = output / "userspace.toml"
+    config_path.write_text(config)
+    if args.check_client_linkage and arch != "riscv32":
+        audit_client_linkage(config_path, target)
     if args.install_dir:
         args.install_dir.mkdir(parents=True, exist_ok=True)
         for path in install_files:
