@@ -13,7 +13,6 @@ pub use smp::secondary_image_entry;
 use core::arch::naked_asm;
 use core::mem::MaybeUninit;
 
-use crate::arch::aarch64::earlycon::Ns16550Layout;
 use crate::boot::fdt_memory::FdtMemory;
 use crate::device::fdt::{FdtManager, init_fdt, relocate_fdt};
 use crate::environment::{PAGE_SIZE, SCARLET_HHDM_BASE};
@@ -197,22 +196,8 @@ pub extern "C" fn linux_image_entry(dtb_paddr: usize) -> ! {
         original_initramfs,
     )
     .unwrap_or_else(|error| panic!("Linux boot page-table setup: {}", error));
-    if let Some(uart) = early_uart {
-        match uart.kind {
-            BootUartKind::Pl011 => {
-                crate::arch::aarch64::earlycon::register_linux_boot_pl011(
-                    uart.paddr,
-                    boot_direct_map,
-                );
-            }
-            BootUartKind::Ns16550(layout) => {
-                crate::arch::aarch64::earlycon::register_linux_boot_ns16550(
-                    uart.paddr,
-                    layout,
-                    boot_direct_map,
-                );
-            }
-        }
+    if let Some(uart_paddr) = early_uart {
+        crate::arch::aarch64::earlycon::register_linux_boot_pl011(uart_paddr, boot_direct_map);
     }
 
     init_boot_addressing(
@@ -326,7 +311,7 @@ fn prepare_boot_mappings(
     fdt: &fdt::Fdt<'_>,
     memory: &mut FdtMemory,
     framebuffer: Option<&framebuffer::BootFramebuffer>,
-) -> Result<Option<BootUart>, &'static str> {
+) -> Result<Option<usize>, &'static str> {
     if let Some(fb) = framebuffer {
         memory.reserve(fb.area)?;
         if memory
@@ -342,97 +327,28 @@ fn prepare_boot_mappings(
                 .insert(fb.area, MemoryAttribute::NonCacheable)?;
         }
     }
-    // fdt::Chosen::stdout does not strip the standard ":baud/parity/bits"
-    // options suffix before looking up the node. Resolve the path ourselves
-    // while retaining find_node's alias handling.
-    let stdout_path = fdt
-        .find_node("/chosen")
-        .and_then(|node| node.property("stdout-path"))
-        .and_then(|property| property.as_str());
-    let early_uart = match stdout_path {
-        Some(path) => fdt
-            .find_node(path.split_once(':').map_or(path, |(name, _)| name))
-            .and_then(|node| BootUart::parse(&node)),
-        None => fdt
-            .all_nodes()
-            .find(is_pl011)
-            .and_then(|node| BootUart::parse(&node)),
-    };
-    if let Some(uart) = &early_uart {
-        memory
-            .direct_map
-            .insert(uart.area, MemoryAttribute::Device)?;
+    let early_uart = fdt
+        .chosen()
+        .stdout()
+        .filter(is_pl011)
+        .and_then(|node| node.reg())
+        .and_then(|mut regs| regs.next())
+        .map(|region| region.starting_address as usize)
+        .or_else(|| {
+            fdt.all_nodes()
+                .find(is_pl011)
+                .and_then(|node| node.reg())
+                .and_then(|mut regs| regs.next())
+                .map(|region| region.starting_address as usize)
+        });
+    if let Some(paddr) = early_uart {
+        memory.direct_map.insert(
+            PhysicalMemoryArea::new(paddr as u64, paddr as u64 + PAGE_SIZE as u64 - 1),
+            MemoryAttribute::Device,
+        )?;
     }
 
     Ok(early_uart)
-}
-
-enum BootUartKind {
-    Pl011,
-    Ns16550(Ns16550Layout),
-}
-
-struct BootUart {
-    paddr: usize,
-    area: PhysicalMemoryArea,
-    kind: BootUartKind,
-}
-
-impl BootUart {
-    fn parse(node: &fdt::node::FdtNode<'_, '_>) -> Option<Self> {
-        if node
-            .property("status")
-            .is_some_and(|p| !matches!(p.as_str(), Some("okay" | "ok")))
-        {
-            return None;
-        }
-        let (kind, required_size, alignment) = if is_pl011(node) {
-            (BootUartKind::Pl011, 0x1c, 4)
-        } else if node
-            .compatible()?
-            .all()
-            .any(|c| matches!(c, "ns16550a" | "ns16550"))
-        {
-            // The early writer supports little-endian MMIO, not big-endian
-            // register windows or port I/O.
-            if node.property("big-endian").is_some() {
-                return None;
-            }
-            let layout = Ns16550Layout::new(
-                optional_u32(node, "reg-shift", 0)?,
-                optional_u32(node, "reg-io-width", 1)?,
-            )?;
-            (
-                BootUartKind::Ns16550(layout),
-                layout.required_size(),
-                layout.alignment(),
-            )
-        } else {
-            return None;
-        };
-        let reg = node.reg()?.next()?;
-        let offset = optional_u32(node, "reg-offset", 0)?;
-        if offset.checked_add(required_size)? > reg.size? {
-            return None;
-        }
-        let paddr = (reg.starting_address as usize).checked_add(offset)?;
-        if paddr == 0 || paddr % alignment != 0 {
-            return None;
-        }
-        let end = paddr.checked_add(required_size - 1)?;
-        Some(Self {
-            paddr,
-            area: PhysicalMemoryArea::new(paddr as u64, end as u64),
-            kind,
-        })
-    }
-}
-
-fn optional_u32(node: &fdt::node::FdtNode<'_, '_>, name: &str, default: usize) -> Option<usize> {
-    match node.property(name) {
-        Some(property) => Some(u32::from_be_bytes(property.value.try_into().ok()?) as usize),
-        None => Some(default),
-    }
 }
 
 fn linked_kernel_area() -> PhysicalMemoryArea {
