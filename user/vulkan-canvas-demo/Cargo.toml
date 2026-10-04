@@ -10,9 +10,9 @@ naga = { version = "24", features = ["wgsl-in", "spv-out"] }
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
 ash = { version = "0.38", default-features = false, features = ["debug", "std"] }
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "e6e00f11c95de371057899ec05b7a832d04adc7f", default-features = false, features = ["std", "platform-sws"] }
-vulkan-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "c4e23364679dae613c3176f4f2277bc795455ac5" }
-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "c4e23364679dae613c3176f4f2277bc795455ac5", default-features = false, features = ["std", "backend-dynamic"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "6dbc9d87563d7d1dba529f04e7fbdfc850ca6ab6", default-features = false, features = ["std", "platform-sws"] }
+vulkan-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "360523603f01c04cc8ff24cd882a8ba34d51414d" }
+sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "360523603f01c04cc8ff24cd882a8ba34d51414d", default-features = false, features = ["std", "backend-dynamic"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("scarlet"))'] }
