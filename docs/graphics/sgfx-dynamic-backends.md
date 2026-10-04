@@ -6,12 +6,13 @@ The adjacent `scarlet-virgl.sgfx-driver` manifest selects backend ABI 2.
 RISC-V32 retains its compatibility backend and only prepares the coordinated
 SGFX source configuration; no driver library or manifest is installed there.
 Userspace dependencies explicitly enable `backend-dynamic`. Native 64-bit
-VirGL uses the installed DSO; Maxwell and Adreno remain built into the clients
-until their dynamic drivers are available. Integration CI rejects the static
-VirGL implementation anywhere in the userspace dependency graph.
+VirGL and Maxwell use installed drivers. Adreno remains built into the clients
+until its dynamic driver is available. Integration CI rejects static VirGL and
+Maxwell implementations anywhere in the native 64-bit userspace dependency graph.
+The native 64-bit VirGL static feature has been removed; RISC-V32 continues
+to select its compatibility backend through `backend-scarlet-virgl`.
 Shared NV12/YCbCr image import is supported by the Maxwell backend. The VirGL
-backend does not implement that import path in either its static or dynamic
-form; selecting static VirGL does not add NV12 import support.
+backend does not implement that import path.
 
 Use a Scarlet compiler with native cdylib support, DSO-safe standard-library
 TLS, and the GNU ELF OSABI fix (`petitstrawberry/rust` commit `71dd0425890`).
@@ -36,9 +37,9 @@ Native projects include `bundles/sgfx-native` before their userspace packages.
 Its script builds the pinned SGFX plugin, verifies its ELF header, imports,
 exports and relocations, and installs the plugin and manifest. It also writes
 `.scarlet/sgfx/userspace.toml`, selected by the project's `userspace.cargo-config`.
-This config unifies external UI/backend dependencies onto one SGFX checkout
-and supplies the linker input needed for `scarlet-ld`'s `dlopen`, `dlsym` and
-`dlerror` imports. Driver discovery uses `dlopen`; applications have no
+Published UI/backend dependencies retain their shared SGFX core revision.
+This config supplies the linker input needed for `scarlet-ld`'s `dlopen`, `dlsym`
+and `dlerror` imports without replacing those Git dependencies with local paths. Driver discovery uses `dlopen`; applications have no
 `DT_NEEDED` dependency on the VirGL plugin.
 
 To prepare that configuration for an individual application build:

@@ -75,9 +75,11 @@ def audit_client_linkage(config, target):
         ["cargo", "--config", str(config), "tree", "--locked", "--workspace",
          "--manifest-path", str(REPO / ".cargo/Cargo.toml"), "--target", target,
          "--prefix", "none", "--edges", "normal,build"], text=True, cwd=REPO)
-    if any(line.startswith("sgfx-backend-scarlet-virgl v") for line in graph.splitlines()):
-        raise RuntimeError("native clients must load VirGL dynamically, not link its Rust backend")
-    print("Native client dependency audit: VirGL is dynamic; no static VirGL implementation")
+    for backend in ("virgl", "maxwell"):
+        package = f"sgfx-backend-scarlet-{backend}"
+        if any(line.startswith(f"{package} v") for line in graph.splitlines()):
+            raise RuntimeError(f"native clients must dynamically load {backend}; found {package}")
+    print("Native client dependency audit: no static VirGL or Maxwell implementation")
 
 
 def main():
@@ -86,7 +88,7 @@ def main():
     parser.add_argument("--sgfx-source", type=Path, help="use an existing checkout at the pinned revision")
     parser.add_argument("--install-dir", type=Path, help="also install the library and manifest into this directory")
     parser.add_argument("--check-client-linkage", action="store_true",
-                        help="reject static VirGL in the native 64-bit userspace dependency graph")
+                        help="reject static VirGL and Maxwell in the native 64-bit client graph")
     args = parser.parse_args()
     project = args.project.resolve()
     arch, target = project_target(project)
@@ -121,14 +123,10 @@ def main():
                  "-C", "link-arg=--dynamic-linker=/bin/scarlet-ld",
                  "-C", "link-arg=--as-needed", "-C", f"link-arg={library}",
                  "-C", "link-arg=--unresolved-symbols=ignore-all"]
-    config = f"[target.{target}]\nrustflags = {json.dumps(flags)}\n\n[patch.{json.dumps(SGFX_URL)}]\n"
-    # External native backends and UI clients still pin older coordinated core
-    # sources. All SGFX crates must resolve to this single checkout.
-    for package in sorted((source / "crates").glob("*/Cargo.toml")):
-        name = tomllib.loads(package.read_text())["package"]["name"]
-        if name == "sgfx-backend-scarlet-virgl-plugin":
-            continue
-        config += f"{json.dumps(name)} = {{ path = {json.dumps(str(package.parent))} }}\n"
+    # Published clients retain the shared core source pin. The driver has its
+    # own private Rust graph behind the C ABI; only native linker flags belong
+    # in this generated config, so --locked client builds keep their Git sources.
+    config = f"[target.{target}]\nrustflags = {json.dumps(flags)}\n"
     config_path = output / "userspace.toml"
     config_path.write_text(config)
     if args.check_client_linkage and arch != "riscv32":
