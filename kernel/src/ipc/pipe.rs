@@ -4,11 +4,11 @@
 //! - PipeEndpoint: Basic pipe endpoint with read/write capabilities
 //! - UnidirectionalPipe: Traditional unidirectional pipe (read-only or write-only)
 
-use crate::sync::IrqSpinLock;
+use crate::sync::{IrqSpinLock, sequence::IdSequence};
 #[cfg(test)]
 use alloc::vec::Vec;
 use alloc::{collections::VecDeque, format, string::String, sync::Arc};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 
 use super::{IpcError, StreamIpcOps};
 use crate::object::KernelObject;
@@ -109,9 +109,12 @@ struct SharedPipeData {
 
 impl SharedPipeData {
     fn new(buffer_size: usize) -> Arc<Self> {
-        static NEXT_PIPE_ID: AtomicU64 = AtomicU64::new(1);
+        static NEXT_PIPE_ID: IdSequence = IdSequence::new();
         Arc::new(Self {
-            id: NEXT_PIPE_ID.fetch_add(1, Ordering::Relaxed),
+            id: NEXT_PIPE_ID
+                .reserve()
+                .expect("Pipe identities exhausted")
+                .get(),
             state: IrqSpinLock::new(PipeState {
                 buffer: VecDeque::with_capacity(buffer_size),
                 max_size: buffer_size,
@@ -668,6 +671,12 @@ mod tests {
 
         assert!(read_end.has_writers());
         assert!(write_end.has_readers());
+
+        let id = read_end.pipe_id().unwrap();
+        assert_ne!(id, 0);
+        assert_eq!(write_end.pipe_id(), Some(id));
+        let (another_read, _) = UnidirectionalPipe::create_pair_raw(1024);
+        assert_ne!(another_read.pipe_id(), Some(id));
     }
 
     #[test_case]
