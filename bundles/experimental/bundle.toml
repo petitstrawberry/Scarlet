@@ -94,7 +94,7 @@ bundle = "platforms/scarlet/bundle.toml"
 
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/easyrpg-player-scarlet.git", branch = "main" }
+source = { git = "https://github.com/petitstrawberry/easyrpg-player-scarlet.git", rev = "51b264e6a04fd945525f4624e3f2fa29150b9983" }
 
 [[layers]]
 kind = "bundle"
