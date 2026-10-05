@@ -496,7 +496,9 @@ fn cube_frame(
     cube_texture: &Arc<SgfxTexture>,
 ) -> SgfxCanvasFrame {
     let phase = animation_seconds;
-    let mut frame = base_frame(frame_number);
+    // Canvas pipelines keep culling disabled for 2D meshes. Depth testing
+    // prevents later cube faces from overwriting the nearer visible faces.
+    let mut frame = base_frame(frame_number).depth_tested();
     let view_projection = matrix_mul(projection(), translation(0.0, 0.0, -5.0));
 
     // Follow kmscube's three-axis motion and use a real perspective
