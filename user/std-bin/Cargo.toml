@@ -31,7 +31,7 @@ clap = { version = "4.5.32", features = ["derive"] }
 csv = "1.3"
 framebuffer = { path = "../lib/framebuffer", default-features = false, features = ["std"] }
 # VirGL is loaded from the installed driver DSO; the other GPU backends remain built in.
-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "216a30a4aa2ba1ff072dd2d9d65e4256e6ce599d", default-features = false, features = ["std", "backend-dynamic", "backend-wgpu", "backend-scarlet-virgl", "backend-scarlet-adreno"] }
+sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "27f0ca95bf2406174a3c9915ca862e8f1179dd0b", default-features = false, features = ["std", "backend-dynamic", "backend-wgpu", "backend-scarlet-virgl", "backend-scarlet-adreno"] }
 httparse = "1.9"
 libm = "0.2"
 log-protocol = { path = "../lib/log-protocol" }
@@ -40,7 +40,7 @@ lyon_tessellation = "1.0"
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 scarlet-sys = { path = "../lib/scarlet-sys" }
 scarlet-abi = { path = "../lib/scarlet-abi" }
-scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "a9ec0b8b622456a698e6ffc7fc36cf82f862ce7a", package = "scarlet-ui-macros" }
+scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ce807d0f2dfc978c60d7f3b807026455ee101da4", package = "scarlet-ui-macros" }
 rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264.git", rev = "a559fe2545fd88def12146dcc06286475b53ead3", default-features = false, features = ["portable-simd"] }
 symphonia-core = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
 symphonia-codec-aac = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
@@ -65,16 +65,16 @@ sws-remote-protocol = { path = "../lib/sws-remote-protocol", default-features = 
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 getrandom = { version = "0.2.16", default-features = false, features = ["custom"] }
 gpu-raw = { path = "../lib/gpu-raw", default-features = false, features = ["std"] }
-scarlet-ui-renderer-sgfx = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "a9ec0b8b622456a698e6ffc7fc36cf82f862ce7a", package = "scarlet-ui-renderer-sgfx" }
+scarlet-ui-renderer-sgfx = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ce807d0f2dfc978c60d7f3b807026455ee101da4", package = "scarlet-ui-renderer-sgfx" }
 reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls-webpki-roots"] }
 scarlet-os = { path = "../lib/scarlet-os", default-features = false, features = ["std"] }
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "a9ec0b8b622456a698e6ffc7fc36cf82f862ce7a", package = "scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ce807d0f2dfc978c60d7f3b807026455ee101da4", package = "scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
 sas-protocol = { path = "../lib/sas-protocol", default-features = false, features = ["std"] }
 sas-client = { path = "../lib/sas-client", default-features = false, features = ["std"] }
 tokio = { version = "1.53.1", features = ["macros", "net", "rt", "time"] }
 
 [target.'cfg(not(target_os = "scarlet"))'.dependencies]
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "a9ec0b8b622456a698e6ffc7fc36cf82f862ce7a", package = "scarlet-ui", default-features = false, features = ["std", "platform-winit"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ce807d0f2dfc978c60d7f3b807026455ee101da4", package = "scarlet-ui", default-features = false, features = ["std", "platform-winit"] }
 
 [[bin]]
 name = "gpu-async-smoke"

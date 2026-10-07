@@ -878,8 +878,8 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/scarlet-ui"
-git_ref = "a9ec0b8b622456a698e6ffc7fc36cf82f862ce7a"
-resolved_rev = "a9ec0b8b622456a698e6ffc7fc36cf82f862ce7a"
+git_ref = "ce807d0f2dfc978c60d7f3b807026455ee101da4"
+resolved_rev = "ce807d0f2dfc978c60d7f3b807026455ee101da4"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
 subdir = "examples/widget-factory"
@@ -889,7 +889,7 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/scarlet-ui"
-rev = "a9ec0b8b622456a698e6ffc7fc36cf82f862ce7a"
+rev = "ce807d0f2dfc978c60d7f3b807026455ee101da4"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1152,8 +1152,8 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/carmine"
-git_ref = "5ed3e9270b4949e4ee27052e62d12443770d1884"
-resolved_rev = "5ed3e9270b4949e4ee27052e62d12443770d1884"
+git_ref = "d363b11d5360f91ea8216736bc49469aa94d2a6a"
+resolved_rev = "d363b11d5360f91ea8216736bc49469aa94d2a6a"
 package = "carmine"
 bin = "carmine"
 to = "/bin/carmine"
@@ -1162,13 +1162,13 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/carmine"
-rev = "5ed3e9270b4949e4ee27052e62d12443770d1884"
+rev = "d363b11d5360f91ea8216736bc49469aa94d2a6a"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/myrica"
-git_ref = "37a34c4195def793923cfb5868f41780aaded167"
-resolved_rev = "37a34c4195def793923cfb5868f41780aaded167"
+git_ref = "78bae5b4a9e1443f583723ac80389be6191aa813"
+resolved_rev = "78bae5b4a9e1443f583723ac80389be6191aa813"
 package = "myrica"
 bin = "myrica"
 to = "/bin/myrica"
@@ -1177,13 +1177,13 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/myrica"
-rev = "37a34c4195def793923cfb5868f41780aaded167"
+rev = "78bae5b4a9e1443f583723ac80389be6191aa813"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/vellum"
-git_ref = "98dfc25b60a0b179ad8f0b65738f0d2191f160ea"
-resolved_rev = "98dfc25b60a0b179ad8f0b65738f0d2191f160ea"
+git_ref = "d1260998467002cb7ea905a366c7e71e623fa955"
+resolved_rev = "d1260998467002cb7ea905a366c7e71e623fa955"
 package = "vellum"
 bin = "vellum"
 to = "/bin/vellum"
@@ -1192,13 +1192,13 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/vellum"
-rev = "98dfc25b60a0b179ad8f0b65738f0d2191f160ea"
+rev = "d1260998467002cb7ea905a366c7e71e623fa955"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/boxcraft"
-git_ref = "859bb7b41c0c8fa46bc3cd3e54a0b607fb26f90e"
-resolved_rev = "859bb7b41c0c8fa46bc3cd3e54a0b607fb26f90e"
+git_ref = "b71dfd53ca4f38ea39003c47080b0cc821fd2669"
+resolved_rev = "b71dfd53ca4f38ea39003c47080b0cc821fd2669"
 package = "boxcraft"
 bin = "boxcraft"
 to = "/bin/boxcraft"
@@ -1207,7 +1207,7 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/boxcraft"
-rev = "859bb7b41c0c8fa46bc3cd3e54a0b607fb26f90e"
+rev = "b71dfd53ca4f38ea39003c47080b0cc821fd2669"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1257,8 +1257,8 @@ sha256 = "sha256:727f20be6a009329e0be7c627f4dd07904588825077e4c431c943d9555499c2
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/moonlight-scarlet.git"
-git_ref = "d0e1ce9e661a9f76c18deacbdcc13357a3c350af"
-resolved_rev = "d0e1ce9e661a9f76c18deacbdcc13357a3c350af"
+git_ref = "5c112707db9dcece66181478231bb5635be3da5e"
+resolved_rev = "5c112707db9dcece66181478231bb5635be3da5e"
 package = "moonlight"
 bin = "moonlight"
 to = "/bin/moonlight"
@@ -1267,7 +1267,7 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/moonlight-scarlet.git"
-rev = "d0e1ce9e661a9f76c18deacbdcc13357a3c350af"
+rev = "5c112707db9dcece66181478231bb5635be3da5e"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1290,8 +1290,8 @@ path = "../../user/video_player"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/yt-for-scarlet"
-git_ref = "660b9d82dfa6dc5b434b9ac662de3e4e6009f6b8"
-resolved_rev = "660b9d82dfa6dc5b434b9ac662de3e4e6009f6b8"
+git_ref = "d5aa0a4e3b658f4c01ff7f7dafab8a8d3a2779e2"
+resolved_rev = "d5aa0a4e3b658f4c01ff7f7dafab8a8d3a2779e2"
 package = "yt"
 bin = "yt"
 to = "/bin/yt"
@@ -1300,13 +1300,13 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/yt-for-scarlet"
-rev = "660b9d82dfa6dc5b434b9ac662de3e4e6009f6b8"
+rev = "d5aa0a4e3b658f4c01ff7f7dafab8a8d3a2779e2"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/yt-for-scarlet"
-git_ref = "660b9d82dfa6dc5b434b9ac662de3e4e6009f6b8"
-resolved_rev = "660b9d82dfa6dc5b434b9ac662de3e4e6009f6b8"
+git_ref = "d5aa0a4e3b658f4c01ff7f7dafab8a8d3a2779e2"
+resolved_rev = "d5aa0a4e3b658f4c01ff7f7dafab8a8d3a2779e2"
 package = "yt-gui"
 bin = "yt-gui"
 to = "/bin/yt-gui"
@@ -1315,7 +1315,7 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/yt-for-scarlet"
-rev = "660b9d82dfa6dc5b434b9ac662de3e4e6009f6b8"
+rev = "d5aa0a4e3b658f4c01ff7f7dafab8a8d3a2779e2"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
