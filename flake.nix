@@ -12,7 +12,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     scarlet-rust-toolchain.url = "github:petitstrawberry/scarlet-rust-nix";
     scarlet-sdk = {
-      url = "github:petitstrawberry/scarlet-sdk/fb0deac7ddcad6f07b97482331662cc475f307a4";
+      url = "github:petitstrawberry/scarlet-sdk/9b3a257e02a5fddd37cf785912269a3e8702f10f";
       flake = false;
     };
     macvdmtool-src = {

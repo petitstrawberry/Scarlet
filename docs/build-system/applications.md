@@ -145,7 +145,7 @@ identity remains independent of the runtime discovery revision.
 | Dependency | Commit |
 | --- | --- |
 | sgfx | `20bb5b8cc19445520d08c31c3971ac06244bc1d9` |
-| sdk | `fb0deac7ddcad6f07b97482331662cc475f307a4` |
+| sdk | `9b3a257e02a5fddd37cf785912269a3e8702f10f` |
 | sgfx-core | `040dbb5cf42b75489504e1765183d37f6131f54c` |
 | scarlet-ui | `1b0f08aeb0a7057c9a6d0d7312554372411afff8` |
 | resonara | `ae33ff44e3a246c49351bc719944ce9f7c44a087` |
