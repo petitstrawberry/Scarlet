@@ -12,11 +12,16 @@ export CARGO_TARGET_DIR=/out/target-sws
 cargo build --release --target aarch64-unknown-linux-gnu --manifest-path "$sdk"
 export LD_LIBRARY_PATH=/out/target-sws/aarch64-unknown-linux-gnu/release
 export RUSTFLAGS="-Lnative=$LD_LIBRARY_PATH"
-export CARGO_TARGET_DIR=/out/target-sgfx
-cargo test --locked --release --target aarch64-unknown-linux-gnu \
-    -p vulkan-sgfx --lib --no-default-features --features scarlet-wsi
-cargo build --locked --release --target aarch64-unknown-linux-gnu \
-    -p vulkan-sgfx --lib --no-default-features --features scarlet-wsi
+set -- --output /out --sws-library "$LD_LIBRARY_PATH/libsws_client_c.so" --test
+if [ -n "${SGFX_MAXWELL_SOURCE:-}" ]; then
+    set -- "$@" --maxwell-source "$SGFX_MAXWELL_SOURCE"
+fi
+python3 /sgfx/scripts/build-linux-icd.py "$@"
+# Probe sources are optional in distribution revisions that do not ship them.
+if [ ! -f /scarlet/guest_tests/linux_vulkan/offscreen.c ] || [ ! -f /scarlet/guest_tests/linux_zink/requirements.c ]; then
+    echo "ICD and plugins built; this distribution has no Linux Vulkan/Zink probe sources."
+    exit 0
+fi
 mkdir -p /out/include
 cp -a /usr/include/vulkan /usr/include/vk_video /out/include/
 wayland-scanner client-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml /out/include/xdg-shell-client.h
