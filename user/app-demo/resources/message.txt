@@ -1,0 +1,2 @@
+Hello from App Demo!
+This message was loaded from the application's resources.

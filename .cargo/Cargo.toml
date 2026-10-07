@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "../user/app-demo",
     "../user/bin",
     "../user/std-bin",
     "../user/tonic-demo",

@@ -1,0 +1,18 @@
+[package]
+name = "scarlet-app-demo"
+version = "0.1.0"
+edition = "2024"
+workspace = "../../.cargo"
+
+[[bin]]
+name = "app-demo"
+path = "src/main.rs"
+
+[build-dependencies]
+toml = "0.8"
+
+[target.'cfg(target_os = "scarlet")'.dependencies]
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "1b0f08aeb0a7057c9a6d0d7312554372411afff8", default-features = false, features = ["std", "platform-sws"] }
+
+[target.'cfg(not(target_os = "scarlet"))'.dependencies]
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "1b0f08aeb0a7057c9a6d0d7312554372411afff8", default-features = false, features = ["std", "platform-winit"] }

@@ -1,0 +1,16 @@
+[app]
+id = "org.scarlet-os.app-demo"
+slug = "app-demo"
+name = "App Demo"
+exec = "bin/app-demo"
+icon = "resources/icon.svg"
+
+[build]
+kind = "cargo"
+source = "."
+package = "scarlet-app-demo"
+bin = "app-demo"
+
+[[resources]]
+source = "resources"
+to = "resources"

@@ -319,3 +319,10 @@ source = "../../user/std-bin"
 package = "scarlet-std-bin"
 bin = "soft-keyboard"
 to = "/bin/soft-keyboard"
+
+# Native app-format demo; source, metadata and resources live in user/app-demo.
+[[layers]]
+kind = "app"
+source = "../../user/app-demo/app.toml"
+to = "/applications/app-demo.app"
+architectures = ["aarch64", "riscv64"]
