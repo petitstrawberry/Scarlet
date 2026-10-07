@@ -62,7 +62,7 @@ objects stay pinned until process exit. RPATH/RUNPATH, TLS, versioned symbols, I
 relocations and RELR are outside this initial scope and must not be assumed to
 work. This is insufficient by itself to run an unmodified native rustc.
 
-See [the executable smoke test](../../tools/loader-smoke/README.md) for building
+See [the executable smoke test](../../tests/loader-smoke/README.md) for building
 fixtures and booting an isolated guest. Test success only establishes the
 behaviors exercised by the fixtures, not arbitrary ELF compatibility.
 

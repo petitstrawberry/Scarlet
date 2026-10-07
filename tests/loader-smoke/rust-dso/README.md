@@ -11,7 +11,7 @@ custom target using `-Zbuild-std`; no installed target, sysroot or compiler file
 is changed. Use a Scarlet nightly toolchain that includes Rust library sources.
 
 ```sh
-python3 tools/loader-smoke/build-rust-dso.py \
+python3 tests/loader-smoke/build-rust-dso.py \
   --toolchain /path/to/scarlet-toolchain \
   --arch aarch64 --offline --output target/loader-smoke/rust-aarch64
 ```

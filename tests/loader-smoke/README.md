@@ -16,15 +16,15 @@ Scarlet target standard library supplied by the development shell; a stock
 upstream Rust toolchain does not contain that target.
 
 ```sh
-tools/loader-smoke/build-kernel.sh --output target/loader-smoke/kernel
+tests/loader-smoke/build-kernel.sh --output target/loader-smoke/kernel
 cargo build --manifest-path user/scarlet-ld/Cargo.toml \
   --target aarch64-unknown-scarlet --release \
   --target-dir target/loader-smoke/loader
-python3 tools/loader-smoke/build-fixtures.py \
+python3 tests/loader-smoke/build-fixtures.py \
   --arch aarch64 --hash-style both \
   --loader target/loader-smoke/loader/aarch64-unknown-scarlet/release/scarlet-ld \
   --output target/loader-smoke/fixtures
-python3 tools/loader-smoke/run-qemu.py \
+python3 tests/loader-smoke/run-qemu.py \
   --kernel target/loader-smoke/kernel/target/aarch64-unknown-none-elf/debug/scarlet-loader-smoke-kernel \
   --staging target/loader-smoke/fixtures/staging \
   --output target/loader-smoke/qemu
@@ -39,15 +39,15 @@ built kernel so the native handoff and memory-protection ABI match the loader.
 For RISC-V64, use separate output directories:
 
 ```sh
-tools/loader-smoke/build-kernel.sh --arch riscv64 --output target/loader-smoke/kernel-riscv64
+tests/loader-smoke/build-kernel.sh --arch riscv64 --output target/loader-smoke/kernel-riscv64
 cargo build --manifest-path user/scarlet-ld/Cargo.toml \
   --target riscv64gc-unknown-scarlet --release \
   --target-dir target/loader-smoke/loader
-python3 tools/loader-smoke/build-fixtures.py \
+python3 tests/loader-smoke/build-fixtures.py \
   --arch riscv64 --hash-style both \
   --loader target/loader-smoke/loader/riscv64gc-unknown-scarlet/release/scarlet-ld \
   --output target/loader-smoke/fixtures-riscv64
-python3 tools/loader-smoke/run-qemu.py --arch riscv64 \
+python3 tests/loader-smoke/run-qemu.py --arch riscv64 \
   --kernel target/loader-smoke/kernel-riscv64/target/riscv64gc-unknown-none-elf/debug/scarlet-loader-smoke-kernel \
   --staging target/loader-smoke/fixtures-riscv64/staging \
   --output target/loader-smoke/qemu-riscv64
@@ -56,7 +56,7 @@ python3 tools/loader-smoke/run-qemu.py --arch riscv64 \
 To include a real Rust `no_std` shared object, first run:
 
 ```sh
-python3 tools/loader-smoke/build-rust-dso.py --arch riscv64 --offline \
+python3 tests/loader-smoke/build-rust-dso.py --arch riscv64 --offline \
   --output target/loader-smoke/rust-riscv64
 ```
 
