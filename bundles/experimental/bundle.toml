@@ -89,7 +89,7 @@ to = "/bin/blitz"
 
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/resonara", rev = "a5c5b3c5314bc5448a25fb317543f90d9c199cd1" }
+source = { git = "https://github.com/petitstrawberry/resonara", rev = "eb297b61f3cd70f04da654ee2301ca79dd3fc62a" }
 bundle = "platforms/scarlet/bundle.toml"
 
 [[layers]]
