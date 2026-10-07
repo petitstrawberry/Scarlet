@@ -15,6 +15,7 @@ use log_protocol::{
 use sbus_client as sbus;
 use scarlet_desktop_config::{
     DESKTOP_STEMD_LIST_APPLICATIONS_METHOD, DESKTOP_STEMD_LIST_APPLICATIONS_WITH_ARTWORK_METHOD,
+    DESKTOP_STEMD_RELOAD_APPLICATIONS_METHOD,
 };
 use scarlet_os::handle::capability::StreamOps;
 use scarlet_os::process::{ShutdownType, WAIT_NOHANG, shutdown, waitpid};
@@ -37,8 +38,8 @@ mod desktop;
 mod protocol;
 
 use desktop::{
-    DesktopEntry, expand_exec, list_apps, load_desktop_files, lookup_app, lookup_app_for_mime,
-    mime_type_for_path,
+    DesktopEntry, expand_exec, list_apps, lookup_app, lookup_app_for_mime, mime_type_for_path,
+    reload_applications,
 };
 use protocol::cmd;
 
@@ -811,7 +812,7 @@ fn launch_or_focus(app_id: &str, exec_path: Option<&str>) -> Result<(), &'static
     // Launch a new process.
     println!("stemd: Launching app '{}' with exec: {}", app_id, exec_path);
 
-    let argv: Vec<String> = exec_path.split_whitespace().map(String::from).collect();
+    let argv = expand_exec(&exec_path, &[])?;
     let pid = spawn_command(&argv, None, None, Some(app_id)).map_err(|error| {
         println!("stemd: Failed to launch app '{}': {}", app_id, error);
         error
@@ -1342,6 +1343,12 @@ fn handle_ipc_client(client: Socket) {
                     "ERROR: Incomplete SET_SYSTEM_TIME command\n"
                 };
                 let _ = stream.write(response.as_bytes());
+            } else if buffer[0] == cmd::RELOAD_APPLICATIONS {
+                let response = match reload_applications() {
+                    Ok(count) => format!("OK: {} applications loaded\n", count),
+                    Err(error) => format!("ERROR: {}\n", error),
+                };
+                let _ = stream.write(response.as_bytes());
             } else if buffer[0] == cmd::SHUTDOWN {
                 println!("stemd: Received SHUTDOWN command");
 
@@ -1532,6 +1539,39 @@ fn handle_sbus_message(
 
             // Handle the method call
             match method.as_str() {
+                DESKTOP_STEMD_RELOAD_APPLICATIONS_METHOD => {
+                    if !args.is_empty() {
+                        if let Some(conn) = conn_guard.as_mut() {
+                            let _ = conn.send_method_error(
+                                serial,
+                                "org.scarlet-os.stemd.InvalidArgs",
+                                "ReloadApplications takes no arguments",
+                            );
+                        }
+                    } else {
+                        match reload_applications() {
+                            Ok(count) => {
+                                if let Some(conn) = conn_guard.as_mut() {
+                                    let _ = conn.send_method_return(
+                                        serial,
+                                        vec![Argument::String(count.to_string())],
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                if let Some(conn) = conn_guard.as_mut() {
+                                    let _ = conn.send_method_error(
+                                        serial,
+                                        "org.scarlet-os.stemd.ReloadFailed",
+                                        error,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                }
+
                 "OpenPath" => {
                     let path = match args.first() {
                         Some(Argument::String(path)) if !path.is_empty() => path,
@@ -2081,28 +2121,9 @@ tty = "/dev/tty0"
 
     println!("stemd: All services launched");
 
-    // Load .desktop files for application definitions
-    println!("stemd: Loading application definitions...");
-    // Unified directory structure: /etc/stemd.d/apps/*.desktop
-    let desktop_dirs = ["/etc/stemd.d/apps"];
-    let mut total_apps = 0;
-    for dir in &desktop_dirs {
-        match load_desktop_files(dir) {
-            Ok(count) => {
-                if count > 0 {
-                    println!("stemd: Loaded {} applications from {}", count, dir);
-                    total_apps += count;
-                }
-            }
-            Err(_) => {
-                // Directory doesn't exist or couldn't be read, continue
-            }
-        }
-    }
-    if total_apps > 0 {
-        println!("stemd: Total {} applications loaded", total_apps);
-    } else {
-        println!("stemd: No application definitions found");
+    match reload_applications() {
+        Ok(count) => println!("stemd: Loaded {} applications", count),
+        Err(error) => println!("stemd: Application catalog reload failed: {}", error),
     }
 
     // The handler also reconnects an absent connection. Start it even when

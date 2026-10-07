@@ -21,7 +21,7 @@ def main():
     output = args.output.resolve()
     objects = output / "objects"
     staging = output / "staging"
-    libraries = staging / "system/lib"
+    libraries = staging / "lib"
     objects.mkdir(parents=True, exist_ok=True)
     libraries.mkdir(parents=True, exist_ok=True)
     target = "aarch64-unknown-none-elf" if args.arch == "aarch64" else "riscv64-unknown-none-elf"

@@ -63,7 +63,7 @@ def main():
     if len(data) < 64 or data[:7] != b"\x7fELF\x02\x01\x01" or struct.unpack_from("<HH", data, 16) != (3, expected_machine):
         raise RuntimeError("compiler output is not the expected little-endian ELF64 ET_DYN image")
     data[7] = 83  # ELFOSABI_SCARLET, matching the C smoke fixture packaging.
-    destination = output / "staging/system/lib" / soname
+    destination = output / "staging/lib" / soname
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(data)
     manifest = {

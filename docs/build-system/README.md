@@ -358,3 +358,5 @@ reference BSPs as the implementation guide. LSM scaffolding instead emits
 - [Userspace development](../userspace/README.md)
 - [Distribution model](../architecture/distro-model.md)
 - [LSM](../modules/lsm.md)
+
+See [native applications](applications.md) for app recipes, app image layers, catalog reload and the native filesystem layout.

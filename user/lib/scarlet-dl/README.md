@@ -10,13 +10,13 @@ The initial runtime intentionally supports only eager global loading:
 
 ```c
 #include "scarlet_dl.h"
-void *library = dlopen("/system/lib/plugin.so", RTLD_NOW | RTLD_GLOBAL);
+void *library = dlopen("/lib/plugin.so", RTLD_NOW | RTLD_GLOBAL);
 void *symbol = library ? dlsym(library, "plugin_entry") : 0;
 ```
 
 - A pathname containing `/` is opened directly. Bare dependency names search
-  the requesting object's directory, `/system/lib`, then `/lib`. Bare runtime
-  `dlopen` names search `/system/lib` then `/lib`. Environment search-path
+  the requesting object's directory, then `/lib`. Bare runtime
+  `dlopen` names search `/lib`. Environment search-path
   overrides and ELF RPATH/RUNPATH are not implemented.
 - `dlopen(NULL, RTLD_NOW | RTLD_GLOBAL)` returns a process handle whose scope includes subsequently loaded global objects.
   `dlsym(NULL, name)` searches the global namespace; an object handle searches
@@ -42,7 +42,7 @@ That shim enters native std startup. The runtime requires and consumes the kerne
 `AT_EXECFD` native file handle, seeks to the start, reads the exact executable,
 and closes the handle on both success and failure. `AT_EXECFN`, when present,
 is an optional verified origin path and is never reopened. Without a path, the main uses a synthetic identity and dependencies
-search only `/system/lib` and `/lib`. Adoption validates bounded load ranges,
+search only `/lib`. Adoption validates bounded load ranges,
 derives the bias from `PT_LOAD`, and checks every file-backed readable byte
 against the still-unrelocated kernel mapping. Unreadable file-backed main
 segments are rejected.
@@ -54,3 +54,5 @@ is required to build either target.
 
 This runtime is a bring-up layer. It does not supply a C library or LLVM's
 dependencies, stable Rust ABI, native ELF TLS, or a complete rustc host port.
+
+App `bin` to app `lib` resolution is not implemented; adjacent-requester lookup does not provide private app library search.

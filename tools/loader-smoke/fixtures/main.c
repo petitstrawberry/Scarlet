@@ -34,13 +34,13 @@ __attribute__((noreturn)) void _start(word argc, char **argv) {
     if (!argc || !argv || !argv[0] || argv[argc]) fail("startup arguments");
     if (answer() != 42) fail("startup dependency/constructors/weak relocation");
     print("SCARLET_LOADER_STARTUP_OK\n");
-    if (dlopen("/system/lib/libsmoke-plugin.so", 2) || !dlerror())
+    if (dlopen("/lib/libsmoke-plugin.so", 2) || !dlerror())
         fail("unsupported local scope accepted");
-    if (dlopen("/system/lib/missing-fixture.so", 0x102) || !dlerror())
+    if (dlopen("/lib/missing-fixture.so", 0x102) || !dlerror())
         fail("missing library");
     void *process = dlopen((const char *)0, 0x102);
     if (!process) fail("process handle");
-    void *handle = dlopen("/system/lib/libsmoke-plugin.so", 0x102);
+    void *handle = dlopen("/lib/libsmoke-plugin.so", 0x102);
     if (!handle) { char *error = dlerror(); fail(error ? error : "dlopen"); }
     int (*function)(void) = (int (*)(void))dlsym(handle, "plugin_answer");
     if (dlsym(process, "plugin_answer") != (void *)function)
@@ -48,7 +48,7 @@ __attribute__((noreturn)) void _start(word argc, char **argv) {
     if (!function || function() != 50) fail("runtime symbol scope/constructor");
     if (dlsym(handle, "definitely_missing_symbol")) fail("missing symbol resolved");
     if (!dlerror() || dlerror()) fail("dlerror consumption");
-    void *again = dlopen("/system/lib/libsmoke-plugin.so", 0x102);
+    void *again = dlopen("/lib/libsmoke-plugin.so", 0x102);
     if (!again || function() != 50) fail("duplicate constructor");
     if (dlclose(again) || dlclose(handle)) fail("dlclose");
     if (dlsym(handle, "plugin_answer") || !dlerror()) fail("closed handle resolved");
@@ -56,7 +56,7 @@ __attribute__((noreturn)) void _start(word argc, char **argv) {
     if (function() != 50) fail("closed object not pinned");
     if (dlclose(process)) fail("process handle close");
 #ifdef SCARLET_SMOKE_RUST_DSO
-    void *rust = dlopen("/system/lib/libsmoke-rust.so", 0x102);
+    void *rust = dlopen("/lib/libsmoke-rust.so", 0x102);
     if (!rust) { char *error = dlerror(); fail(error ? error : "Rust cdylib open"); }
     int (*rust_answer)(void) = (int (*)(void))dlsym(rust, "rust_answer");
     if (!rust_answer || rust_answer() != 42) fail("Rust cdylib call");

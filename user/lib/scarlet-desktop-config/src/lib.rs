@@ -82,6 +82,9 @@ pub const DESKTOP_STEMD_INTERFACE: &str = "org.scarlet-os.stemd";
 /// Method used to open a local filesystem path with its default application.
 pub const DESKTOP_STEMD_OPEN_PATH_METHOD: &str = "OpenPath";
 
+/// Explicitly reconcile /applications and legacy application descriptors.
+pub const DESKTOP_STEMD_RELOAD_APPLICATIONS_METHOD: &str = "ReloadApplications";
+
 /// Method used to list applications registered from desktop entries.
 pub const DESKTOP_STEMD_LIST_APPLICATIONS_METHOD: &str = "ListApplications";
 

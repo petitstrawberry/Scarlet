@@ -17,9 +17,9 @@ python3 tools/loader-smoke/build-rust-dso.py \
 ```
 
 Replace `aarch64` with `riscv64` to build RV64. The output is
-`<output>/staging/system/lib/libsmoke-rust.so`, with a generated target JSON and
+`<output>/staging/lib/libsmoke-rust.so`, with a generated target JSON and
 `build.json` recording compiler version, command and artifact checksum.
-Copy the shared object into the guest's `/system/lib`, call
+Copy the shared object into the guest's `/lib`, call
 `dlopen("libsmoke-rust.so", RTLD_NOW | RTLD_GLOBAL)`, resolve `rust_answer` through
 `dlsym`, and check that invoking it returns 42.
 

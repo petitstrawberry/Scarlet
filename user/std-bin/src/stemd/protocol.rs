@@ -50,6 +50,8 @@ pub mod cmd {
     pub const LAUNCH: u8 = 0x05;
     pub const SERVICE_READY: u8 = 0x06;
     pub const SET_SYSTEM_TIME: u8 = 0x07;
+    /// Reconcile app/legacy descriptors atomically; empty payload.
+    pub const RELOAD_APPLICATIONS: u8 = 0x08;
 }
 
 pub fn system_time_command(unix_ns: u64, monotonic_ns: u64) -> [u8; 17] {

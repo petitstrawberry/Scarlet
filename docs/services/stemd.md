@@ -171,3 +171,7 @@ When run from an interactive shell, stemd forks once and the parent exits immedi
 - Base services: [bundles/base/fs/etc/stemd.d/services](../../bundles/base/fs/etc/stemd.d/services)
 - Desktop services/apps: [bundles/desktop/fs/etc/stemd.d](../../bundles/desktop/fs/etc/stemd.d)
 - Build and init handoff: [userspace development](../userspace/README.md)
+
+## Native app directories
+
+stemd also discovers `/applications/*.app` at startup. `ReloadApplications` reconciles this catalog and `/etc/stemd.d/apps` atomically; removed entries disappear without terminating running applications. See [the native app format](../build-system/applications.md) for validation, duplicate handling and reload APIs.

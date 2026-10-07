@@ -31,7 +31,7 @@ python3 tools/loader-smoke/run-qemu.py \
 ```
 
 The generated staging root contains a native dynamically linked `/init`, the
-interpreter at `/bin/scarlet-ld`, and shared libraries under `/system/lib`.
+interpreter at `/bin/scarlet-ld`, and shared libraries under `/lib`.
 The kernel helper enables Limine, networking, and user floating-point/vector
 support, and omits the hypervisor and optional loadable modules. Use a freshly
 built kernel so the native handoff and memory-protection ABI match the loader.
@@ -61,7 +61,7 @@ python3 tools/loader-smoke/build-rust-dso.py --arch riscv64 --offline \
 ```
 
 Then add
-`--rust-library target/loader-smoke/rust-riscv64/staging/system/lib/libsmoke-rust.so`
+`--rust-library target/loader-smoke/rust-riscv64/staging/lib/libsmoke-rust.so`
 to `build-fixtures.py`. Use `aarch64` consistently for the AArch64 variant. The
 fixture additionally requires `SCARLET_LOADER_RUST_DSO_OK` before its final
 success marker. See [the Rust fixture documentation](rust-dso/README.md) for the

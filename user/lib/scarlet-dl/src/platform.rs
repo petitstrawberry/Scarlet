@@ -115,7 +115,6 @@ impl Platform for NativePlatform {
             {
                 candidates.push(parent.join(name));
             }
-            candidates.push(Path::new("/system/lib").join(name));
             candidates.push(Path::new("/lib").join(name));
         }
         let mut last_error = None;

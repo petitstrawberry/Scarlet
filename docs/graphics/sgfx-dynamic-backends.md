@@ -1,7 +1,7 @@
 # Native SGFX drivers
 
 Native AArch64 and RISC-V64 images load VirGL from
-`/system/lib/sgfx/libsgfx_scarlet_virgl.so` through `/bin/scarlet-ld`.
+`/lib/sgfx/libsgfx_scarlet_virgl.so` through `/bin/scarlet-ld`.
 The adjacent `scarlet-virgl.sgfx-driver` manifest selects backend ABI 2.
 RISC-V32 retains its compatibility backend and only prepares the coordinated
 SGFX source configuration; no driver library or manifest is installed there.

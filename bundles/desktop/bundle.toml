@@ -18,14 +18,14 @@ to = "/"
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "scarlet-desktop"
 to = "/bin/scarlet-desktop"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "desktop-settings"
 to = "/bin/desktop-settings"
 
@@ -53,7 +53,7 @@ to = "/bin/scarlet-shell"
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "terminal"
 to = "/bin/terminal"
 
@@ -67,7 +67,7 @@ to = "/bin/sws"
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "sas"
 to = "/bin/sas"
 
@@ -80,27 +80,27 @@ to = "/bin/sasctl"
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "mplayer"
 to = "/bin/mplayer"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "ui-demo"
 to = "/bin/ui-demo"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "ui-benchmark"
 to = "/bin/ui-benchmark"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ce807d0f2dfc978c60d7f3b807026455ee101da4" }
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "1b0f08aeb0a7057c9a6d0d7312554372411afff8" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
@@ -115,7 +115,7 @@ to = "/bin/ui-sgfx-showcase"
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "settings"
 to = "/bin/settings"
 
@@ -128,7 +128,7 @@ to = "/bin/task-manager"
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "scarlet-skk"
 to = "/bin/scarlet-skk"
 
@@ -141,7 +141,7 @@ to = "/share/skk/SKK-JISYO.L"
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "wayland-bridge"
 to = "/bin/wayland-bridge"
 
@@ -201,7 +201,7 @@ to = "/bin/httpd"
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "ushv"
 to = "/bin/ushv"
 
@@ -262,41 +262,41 @@ to = "/bin/mozc-server"
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "scarlet-mozc"
 to = "/bin/scarlet-mozc"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "dcp-flip-test"
 to = "/bin/dcp-flip-test"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/carmine", rev = "d363b11d5360f91ea8216736bc49469aa94d2a6a" }
+source = { git = "https://github.com/petitstrawberry/carmine", rev = "106809d9a6d5d0ec1a31a1b7b83e41e68878ee89" }
 package = "carmine"
 bin = "carmine"
 to = "/bin/carmine"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "78bae5b4a9e1443f583723ac80389be6191aa813" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "60b52e4c2eff17ea629c4df17ddc02fa00bacaa9" }
 package = "myrica"
 bin = "myrica"
 to = "/bin/myrica"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/vellum", rev = "d1260998467002cb7ea905a366c7e71e623fa955" }
+source = { git = "https://github.com/petitstrawberry/vellum", rev = "87a0f17173a7be09ead750f913b64b1fc5e0c785" }
 package = "vellum"
 bin = "vellum"
 to = "/bin/vellum"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/boxcraft", rev = "b71dfd53ca4f38ea39003c47080b0cc821fd2669" }
+source = { git = "https://github.com/petitstrawberry/boxcraft", rev = "a341f37b323572815871df1a95c8be812b9cdf86" }
 package = "boxcraft"
 bin = "boxcraft"
 to = "/bin/boxcraft"
@@ -306,6 +306,12 @@ kind = "cargo"
 source = "../../user/std-bin"
 bin = "remote-desktop"
 to = "/bin/remote-desktop"
+
+# Cadence owns its app recipe and preserves the PIC build and final ELF audit.
+[[layers]]
+kind = "bundle"
+source = { git = "https://github.com/petitstrawberry/cadence", rev = "318353de2e97733979001b4ad70879a7a6825d61" }
+subdir = "platforms/scarlet"
 
 [[layers]]
 kind = "cargo"

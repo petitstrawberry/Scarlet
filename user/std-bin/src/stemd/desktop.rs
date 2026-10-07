@@ -152,14 +152,6 @@ impl DesktopParser {
 // Thread-safe using Mutex
 static APP_REGISTRY: Mutex<Vec<DesktopEntry>> = Mutex::new(Vec::new());
 
-/// Add an application to the registry
-pub fn register_app(entry: DesktopEntry) {
-    let mut registry = APP_REGISTRY.lock().expect("stemd mutex poisoned");
-    // Remove existing entry with same app_id
-    registry.retain(|e| e.app_id != entry.app_id);
-    registry.push(entry);
-}
-
 /// Look up an application by app_id
 pub fn lookup_app(app_id: &str) -> Option<DesktopEntry> {
     println!("stemd: lookup_app called for app_id={}", app_id);
@@ -444,55 +436,245 @@ fn split_exec_words(exec: &str) -> Result<Vec<String>, &'static str> {
     Ok(words)
 }
 
-/// Load all .desktop files from a directory
-pub fn load_desktop_files(dir_path: &str) -> Result<usize, &'static str> {
-    let entries = fs::read_dir(dir_path).map_err(|_| "Failed to list directory")?;
-    let mut count = 0;
-
-    for entry in entries {
-        let entry = entry.map_err(|_| "Failed to read directory entry")?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name == "." || name == ".." {
-            continue;
-        }
-
-        let file_type = entry
-            .file_type()
-            .map_err(|_| "Failed to query directory entry")?;
-        if file_type.is_file() && name.ends_with(".desktop") {
-            let file_path = format!("{}/{}", dir_path, name);
-
-            match File::open(&file_path) {
-                Ok(mut file) => {
-                    let mut content = String::new();
-                    let mut buffer = [0u8; 4096];
-
-                    loop {
-                        match file.read(&mut buffer) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                if let Ok(s) = core::str::from_utf8(&buffer[..n]) {
-                                    content.push_str(s);
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-
-                    let parser = DesktopParser::new(content);
-                    if let Some(entry) = parser.parse(&name) {
-                        println!("stemd: Loaded app: {} ({})", entry.name, entry.app_id);
-                        register_app(entry);
-                        count += 1;
-                    }
-                }
-                Err(_) => {
-                    println!("stemd: Failed to read {}", file_path);
-                }
-            }
+/// Scarlet app format semantics are opt-in and only apply inside a .app.
+fn app_path(root: &str, relative: &str) -> Result<String, &'static str> {
+    if relative.is_empty()
+        || relative.split('/').any(|part| {
+            part.is_empty()
+                || part == "."
+                || part == ".."
+                || !part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        })
+    {
+        return Err("Invalid relative app path");
+    }
+    let mut path = std::path::PathBuf::from(root);
+    for part in relative.split('/') {
+        path.push(part);
+        let metadata = fs::symlink_metadata(&path).map_err(|_| "Missing app file")?;
+        if metadata.file_type().is_symlink() {
+            return Err("App symlinks are unsupported");
         }
     }
+    if !path.is_file() {
+        return Err("App path must name a file");
+    }
+    Ok(format!("{root}/{relative}"))
+}
 
+fn parse_app(root: &str, filename: &str, content: String) -> Result<DesktopEntry, &'static str> {
+    let mut in_entry = false;
+    let mut version = None;
+    let mut target = None;
+    let mut entry_type = None;
+    let mut raw_exec = None;
+    let mut keys = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_entry = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_entry || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (key, value) = line.split_once('=').ok_or("Invalid app descriptor")?;
+        if keys.contains(&key) {
+            return Err("Duplicate app descriptor key");
+        }
+        keys.push(key);
+        match key {
+            "X-Scarlet-AppFormat" => version = Some(value),
+            "X-Scarlet-Target" => target = Some(value),
+            "Type" => entry_type = Some(value),
+            "Exec" => raw_exec = Some(value),
+            _ => {}
+        }
+    }
+    if version != Some("1") || entry_type != Some("Application") {
+        return Err("Unsupported Scarlet app format");
+    }
+    #[cfg(target_os = "scarlet")]
+    let compatible = match target {
+        Some("aarch64-unknown-scarlet") => cfg!(target_arch = "aarch64"),
+        Some("riscv64gc-unknown-scarlet") => cfg!(target_arch = "riscv64"),
+        _ => false,
+    };
+    #[cfg(not(target_os = "scarlet"))]
+    let compatible = matches!(
+        target,
+        Some("aarch64-unknown-scarlet" | "riscv64gc-unknown-scarlet")
+    );
+    if !compatible {
+        return Err("Incompatible native app target");
+    }
+    let exec = raw_exec.ok_or("Missing app executable")?.to_string();
+    let target = target.unwrap().to_string();
+    let mut entry = DesktopParser::new(content)
+        .parse(filename)
+        .ok_or("Invalid app descriptor")?;
+    entry.exec = exec;
+    if entry.app_id.is_empty()
+        || !entry
+            .app_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        || matches!(entry.app_id.as_str(), "." | "..")
+    {
+        return Err("Invalid app ID");
+    }
+    let mut words = split_exec_words(&entry.exec)?;
+    if words.is_empty() {
+        return Err("Missing app executable");
+    }
+    words[0] = app_path(root, &words[0])?;
+    let mut executable = File::open(&words[0]).map_err(|_| "Missing app executable")?;
+    let mut header = [0u8; 20];
+    executable
+        .read_exact(&mut header)
+        .map_err(|_| "Invalid native app executable")?;
+    let machine = u16::from_le_bytes([header[18], header[19]]);
+    if &header[..8] != b"\x7fELF\x02\x01\x01\x53"
+        || !matches!(u16::from_le_bytes([header[16], header[17]]), 2 | 3)
+        || machine
+            != if target == "aarch64-unknown-scarlet" {
+                183
+            } else {
+                243
+            }
+    {
+        return Err("Incompatible native app executable");
+    }
+    // Keep the argv contract used by launch, MIME and shell activation.
+    entry.exec = words
+        .iter()
+        .map(|word| format!("\"{}\"", word.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if let Some(icon) = entry.icon.as_mut() {
+        if icon.contains('/') {
+            *icon = app_path(root, icon)?;
+        }
+    }
+    if let Some(background) = entry.background.as_mut() {
+        *background = app_path(root, background)?;
+    }
+    expand_exec(&entry.exec, &[])?;
+    Ok(entry)
+}
+
+fn directory(path: &str) -> Result<Vec<fs::DirEntry>, &'static str> {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err("Failed to list application directory"),
+    };
+    let mut entries = entries
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "Failed to read application directory")?;
+    entries.sort_by_key(|entry| entry.file_name());
+    Ok(entries)
+}
+
+fn collect_catalog(legacy: &str, applications: &str) -> Result<Vec<DesktopEntry>, &'static str> {
+    let mut catalog: Vec<DesktopEntry> = Vec::new();
+    for file in directory(legacy)? {
+        let filename = file.file_name().to_string_lossy().into_owned();
+        if !filename.ends_with(".desktop") {
+            continue;
+        }
+        if !file
+            .file_type()
+            .map_err(|_| "Failed to inspect legacy entry")?
+            .is_file()
+        {
+            continue;
+        }
+        let content =
+            fs::read_to_string(file.path()).map_err(|_| "Failed to read legacy descriptor")?;
+        let entry = DesktopParser::new(content)
+            .parse(&filename)
+            .ok_or("Invalid legacy descriptor")?;
+        if catalog.iter().any(|old| old.app_id == entry.app_id) {
+            return Err("Conflicting legacy app IDs");
+        }
+        catalog.push(entry);
+    }
+    if let Ok(metadata) = fs::symlink_metadata(applications) {
+        if metadata.file_type().is_symlink() {
+            return Err("Application root must be a real directory");
+        }
+    }
+    let mut app_ids = Vec::new();
+    for app in directory(applications)? {
+        let name = app.file_name().to_string_lossy().into_owned();
+        let Some(slug) = name.strip_suffix(".app") else {
+            continue;
+        };
+        if slug.is_empty()
+            || slug
+                .bytes()
+                .any(|b| !b.is_ascii_lowercase() && !b.is_ascii_digit() && !b"._-".contains(&b))
+            || matches!(slug, "." | "..")
+        {
+            return Err("Invalid app directory slug");
+        }
+        if !app
+            .file_type()
+            .map_err(|_| "Failed to inspect app directory")?
+            .is_dir()
+        {
+            return Err("App must be a real directory");
+        }
+        let root = format!("{applications}/{name}");
+        let descriptors: Vec<_> = directory(&root)?
+            .into_iter()
+            .filter(|file| file.file_name().to_string_lossy().ends_with(".desktop"))
+            .collect();
+        if descriptors.len() != 1 {
+            return Err("App requires exactly one desktop descriptor");
+        }
+        let file = &descriptors[0];
+        if !file
+            .file_type()
+            .map_err(|_| "Failed to inspect app descriptor")?
+            .is_file()
+        {
+            return Err("App descriptor must be a regular file");
+        }
+        let filename = file.file_name().to_string_lossy().into_owned();
+        let content =
+            fs::read_to_string(file.path()).map_err(|_| "Failed to read app descriptor")?;
+        let entry = parse_app(&root, &filename, content).map_err(|error| {
+            println!("stemd: {}: {}", root, error);
+            error
+        })?;
+        if app_ids.contains(&entry.app_id) {
+            println!("stemd: Conflicting app ID {} at {}", entry.app_id, root);
+            return Err("Conflicting app IDs in /applications");
+        }
+        app_ids.push(entry.app_id.clone());
+        catalog.retain(|old| old.app_id != entry.app_id);
+        catalog.push(entry);
+    }
+    catalog.sort_by(|left, right| left.app_id.cmp(&right.app_id));
+    Ok(catalog)
+}
+
+/// Build the next catalog off-lock, then replace it atomically. Running processes
+/// belong to a separate registry and are never killed by reconciliation.
+pub fn reload_applications() -> Result<usize, &'static str> {
+    reload_from("/etc/stemd.d/apps", "/applications")
+}
+
+fn reload_from(legacy: &str, applications: &str) -> Result<usize, &'static str> {
+    static RELOAD_LOCK: Mutex<()> = Mutex::new(());
+    let _reload = RELOAD_LOCK.lock().expect("stemd mutex poisoned");
+    let catalog = collect_catalog(legacy, applications)?;
+    let count = catalog.len();
+    *APP_REGISTRY.lock().expect("stemd mutex poisoned") = catalog;
     Ok(count)
 }
 
@@ -619,5 +801,164 @@ mod tests {
         assert_eq!(mime_type_for_path("sound.wav"), Some("audio/wav"));
         assert_eq!(mime_type_for_path("image.png"), Some("image/png"));
         assert_eq!(mime_type_for_path("unknown.bin"), None);
+    }
+}
+
+#[cfg(test)]
+mod app_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "stemd-app-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(root.join("legacy")).unwrap();
+            fs::create_dir_all(root.join("applications/renamed.app/bin")).unwrap();
+            fs::write(
+                root.join("applications/renamed.app/bin/player"),
+                Self::elf(),
+            )
+            .unwrap();
+            Self(root)
+        }
+        fn elf() -> [u8; 64] {
+            let mut elf = [0; 64];
+            elf[..8].copy_from_slice(b"\x7fELF\x02\x01\x01\x53");
+            elf[16..18].copy_from_slice(&2u16.to_le_bytes());
+            elf[18..20].copy_from_slice(&183u16.to_le_bytes());
+            elf
+        }
+        fn app(&self, exec: &str) -> String {
+            format!(
+                "[Desktop Entry]\nName=Player\nType=Application\nExec={exec} %F\nX-Scarlet-AppFormat=1\nX-Scarlet-Target=aarch64-unknown-scarlet\nMimeType=audio/wav;\n"
+            )
+        }
+        fn write_app(&self, exec: &str) {
+            fs::write(
+                self.0
+                    .join("applications/renamed.app/org.test.player.desktop"),
+                self.app(exec),
+            )
+            .unwrap();
+        }
+        fn scan(&self) -> Result<Vec<DesktopEntry>, &'static str> {
+            collect_catalog(
+                self.0.join("legacy").to_str().unwrap(),
+                self.0.join("applications").to_str().unwrap(),
+            )
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn app_overrides_legacy_and_uses_descriptor_id_after_directory_rename() {
+        let f = Fixture::new();
+        f.write_app("bin/player");
+        fs::write(
+            f.0.join("legacy/org.test.player.desktop"),
+            "[Desktop Entry]\nName=Legacy\nExec=/bin/old\n",
+        )
+        .unwrap();
+        let catalog = f.scan().unwrap();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].app_id, "org.test.player");
+        assert_eq!(catalog[0].name, "Player");
+        assert_eq!(
+            expand_exec(&catalog[0].exec, &[String::from("/tmp/a file.wav")]).unwrap(),
+            vec![
+                format!("{}/applications/renamed.app/bin/player", f.0.display()),
+                String::from("/tmp/a file.wav")
+            ]
+        );
+    }
+    #[test]
+    fn invalid_and_ambiguous_apps_reject_the_next_catalog() {
+        let f = Fixture::new();
+        for exec in [
+            "../player",
+            "/bin/player",
+            "bin/../../player",
+            "missing",
+            "bin/player %z",
+        ] {
+            f.write_app(exec);
+            assert!(f.scan().is_err(), "{exec}");
+        }
+        f.write_app("bin/player");
+        fs::write(
+            f.0.join("applications/renamed.app/second.desktop"),
+            f.app("bin/player"),
+        )
+        .unwrap();
+        assert!(f.scan().is_err());
+        fs::remove_file(f.0.join("applications/renamed.app/second.desktop")).unwrap();
+        fs::create_dir_all(f.0.join("applications/other.app/bin")).unwrap();
+        fs::write(
+            f.0.join("applications/other.app/bin/player"),
+            Fixture::elf(),
+        )
+        .unwrap();
+        fs::write(
+            f.0.join("applications/other.app/org.test.player.desktop"),
+            f.app("bin/player"),
+        )
+        .unwrap();
+        assert_eq!(
+            f.scan().unwrap_err(),
+            "Conflicting app IDs in /applications"
+        );
+    }
+    #[test]
+    fn reload_removes_entries_and_preserves_previous_catalog_on_conflict() {
+        let f = Fixture::new();
+        f.write_app("bin/player");
+        let legacy = f.0.join("legacy");
+        let apps = f.0.join("applications");
+        assert_eq!(
+            reload_from(legacy.to_str().unwrap(), apps.to_str().unwrap()).unwrap(),
+            1
+        );
+        f.write_app("../escape");
+        assert!(reload_from(legacy.to_str().unwrap(), apps.to_str().unwrap()).is_err());
+        assert_eq!(list_apps().len(), 1);
+        fs::remove_dir_all(apps.join("renamed.app")).unwrap();
+        assert_eq!(
+            reload_from(legacy.to_str().unwrap(), apps.to_str().unwrap()).unwrap(),
+            0
+        );
+        assert!(list_apps().is_empty());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_escape_and_resolves_artwork() {
+        let f = Fixture::new();
+        f.write_app("bin/player");
+        let path = f.0.join("applications/renamed.app/org.test.player.desktop");
+        fs::write(f.0.join("applications/renamed.app/cover.png"), "fixture").unwrap();
+        fs::write(
+            &path,
+            f.app("bin/player") + "Icon=cover.png\nX-Scarlet-Background=cover.png\n",
+        )
+        .unwrap();
+        assert!(
+            f.scan().unwrap()[0]
+                .background
+                .as_ref()
+                .unwrap()
+                .ends_with("/cover.png")
+        );
+        let executable = f.0.join("applications/renamed.app/bin/player");
+        fs::remove_file(&executable).unwrap();
+        std::os::unix::fs::symlink("/bin/sh", &executable).unwrap();
+        assert!(f.scan().is_err());
     }
 }

@@ -3,4 +3,4 @@
 [[layers]]
 kind = "script"
 source = "../../tools/sgfx/install-driver.sh"
-to = "/system/lib/sgfx"
+to = "/lib/sgfx"

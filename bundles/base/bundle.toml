@@ -26,21 +26,21 @@ to = "/bin/scarlet-ld"
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "init"
 to = "/init"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "sh"
 to = "/bin/sh"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "login"
 to = "/bin/login"
 
@@ -68,7 +68,7 @@ to = "/bin/logctl"
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "sbusd"
 to = "/bin/sbusd"
 
@@ -88,7 +88,7 @@ to = "/bin/kernel-info"
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "ps"
 to = "/bin/ps"
 
@@ -115,21 +115,21 @@ to = "/bin/kill"
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "scpm"
 to = "/bin/scpm"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "netcfgd"
 to = "/bin/netcfgd"
 
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "sshd"
 to = "/bin/sshd"
 

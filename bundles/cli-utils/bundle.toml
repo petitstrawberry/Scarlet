@@ -7,7 +7,7 @@ to = "/bin/cpufreqctl"
 [[layers]]
 kind = "cargo"
 source = "../../user/bin"
-package = "user-bin"
+package = "userprogram"
 bin = "storage-check"
 to = "/bin/storage-check"
 

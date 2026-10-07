@@ -13,6 +13,15 @@ hash = "sha256:239cb8b67be2017602b54da4a6b229797fab5423eaa72ef2a0d3651d1ffdfef6"
 
 [[sections.initramfs.layers]]
 kind = "script"
+to = "/lib/sgfx"
+hash = ""
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../tools/sgfx/install-driver.sh"
+
+[[sections.initramfs.layers]]
+kind = "script"
 to = "/etc/ssl/certs/ca-certificates.crt"
 hash = ""
 
@@ -33,7 +42,7 @@ path = "../../user/scarlet-ld"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "init"
 to = "/init"
 hash = "sha256:c21c1061cb72b24897247d9b46b5046c81fedc7fbf9076eca61e779f9f744466"
@@ -44,7 +53,7 @@ path = "../../user/bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "sh"
 to = "/bin/sh"
 hash = "sha256:034396cc46b6ee0406af6f8786d250d00e36f0380177ea7c6182cfdfff8afec5"
@@ -55,7 +64,7 @@ path = "../../user/bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "login"
 to = "/bin/login"
 hash = "sha256:44cde4b744849b83621451ed32ed71bef8a1c4c4e1694c9c5a3d5337097a448e"
@@ -99,7 +108,7 @@ path = "../../user/std-bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "sbusd"
 to = "/bin/sbusd"
 hash = "sha256:c8ee0c92f2cad1b28f741de2d4e4cc83f9cf4a71d78643e59c895154c2c8f2e7"
@@ -131,7 +140,7 @@ path = "../../user/std-bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "ps"
 to = "/bin/ps"
 hash = "sha256:44d3fec32ebf40f7fd58838a14ad6c18770c66ff0f7d0aa14d30196f0fa0bc73"
@@ -174,7 +183,7 @@ path = "../../user/std-bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "scpm"
 to = "/bin/scpm"
 hash = "sha256:2e4fa6809be2551e54580f08bccfdb7e07a5356231ccc424d097d05ec51e2c17"
@@ -185,7 +194,7 @@ path = "../../user/bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "netcfgd"
 to = "/bin/netcfgd"
 hash = "sha256:401fb7172b3a07d7e459cd2c9201ca92c4398d0d44f5fe1b3b6ddf4d2dfab6bb"
@@ -196,7 +205,7 @@ path = "../../user/bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "sshd"
 to = "/bin/sshd"
 hash = "sha256:ccf286d6a17d905648eb4d47d847311587698e9a560fa476bf31bf86bab3d35f"
@@ -237,7 +246,7 @@ path = "../../user/std-bin"
 
 [[sections.initramfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "storage-check"
 to = "/bin/storage-check"
 hash = "sha256:3c9539ae4a599ca862d0161567e14ccb8d18dec8cbfb0197a7460b1ebb6a4a71"
@@ -381,6 +390,15 @@ hash = "sha256:b68e0e4244600952c79a0d31a6dbc22d3eac2dd2922961fb9c5523f6c7df5fb1"
 
 [[sections.rootfs.layers]]
 kind = "script"
+to = "/lib/sgfx"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = "../../tools/sgfx/install-driver.sh"
+
+[[sections.rootfs.layers]]
+kind = "script"
 to = "/etc/ssl/certs/ca-certificates.crt"
 hash = ""
 
@@ -401,7 +419,7 @@ path = "../../user/scarlet-ld"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "init"
 to = "/init"
 hash = "sha256:c21c1061cb72b24897247d9b46b5046c81fedc7fbf9076eca61e779f9f744466"
@@ -412,7 +430,7 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "sh"
 to = "/bin/sh"
 hash = "sha256:034396cc46b6ee0406af6f8786d250d00e36f0380177ea7c6182cfdfff8afec5"
@@ -423,7 +441,7 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "login"
 to = "/bin/login"
 hash = "sha256:44cde4b744849b83621451ed32ed71bef8a1c4c4e1694c9c5a3d5337097a448e"
@@ -467,7 +485,7 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "sbusd"
 to = "/bin/sbusd"
 hash = "sha256:c8ee0c92f2cad1b28f741de2d4e4cc83f9cf4a71d78643e59c895154c2c8f2e7"
@@ -499,7 +517,7 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "ps"
 to = "/bin/ps"
 hash = "sha256:44d3fec32ebf40f7fd58838a14ad6c18770c66ff0f7d0aa14d30196f0fa0bc73"
@@ -542,7 +560,7 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "scpm"
 to = "/bin/scpm"
 hash = "sha256:2e4fa6809be2551e54580f08bccfdb7e07a5356231ccc424d097d05ec51e2c17"
@@ -553,7 +571,7 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "netcfgd"
 to = "/bin/netcfgd"
 hash = "sha256:401fb7172b3a07d7e459cd2c9201ca92c4398d0d44f5fe1b3b6ddf4d2dfab6bb"
@@ -564,7 +582,7 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "sshd"
 to = "/bin/sshd"
 hash = "sha256:ccf286d6a17d905648eb4d47d847311587698e9a560fa476bf31bf86bab3d35f"
@@ -605,7 +623,7 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "storage-check"
 to = "/bin/storage-check"
 hash = "sha256:3c9539ae4a599ca862d0161567e14ccb8d18dec8cbfb0197a7460b1ebb6a4a71"
@@ -746,7 +764,7 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "scarlet-desktop"
 to = "/bin/scarlet-desktop"
 hash = "sha256:c12a6d1270aa41c1555aa2de7b2e590c8c9c20736979adf54e23fcaec6e6d000"
@@ -757,7 +775,7 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "desktop-settings"
 to = "/bin/desktop-settings"
 hash = "sha256:bf524539fc91740c7dd2cd3935dfa42bf43eb54f40dabf65973e12f24880e3c8"
@@ -801,7 +819,7 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "terminal"
 to = "/bin/terminal"
 hash = "sha256:4ec7dca390104546ef4db50e386839536913e47f14b826fa3881971ae5251ff3"
@@ -823,7 +841,7 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "sas"
 to = "/bin/sas"
 hash = "sha256:fda7189de05b787a46c5584ba2f2963b2a04d22bde10ead0edee53d6853838f9"
@@ -844,7 +862,7 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "mplayer"
 to = "/bin/mplayer"
 hash = "sha256:9195db097e826794ade7c02c3eb6522dc97fd17565d006515733234a75ddf4a8"
@@ -855,7 +873,7 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "ui-demo"
 to = "/bin/ui-demo"
 hash = "sha256:739f39ab850645fd194b85cb073bfeae0988edebaf4378b65962aed411768fbf"
@@ -866,7 +884,7 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "ui-benchmark"
 to = "/bin/ui-benchmark"
 hash = "sha256:c2f1ce377562fdc4e8a33dc14ce56c27c2b5e9b16306a91336c00fc9267a66ab"
@@ -878,8 +896,8 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/scarlet-ui"
-git_ref = "ce807d0f2dfc978c60d7f3b807026455ee101da4"
-resolved_rev = "ce807d0f2dfc978c60d7f3b807026455ee101da4"
+git_ref = "1b0f08aeb0a7057c9a6d0d7312554372411afff8"
+resolved_rev = "1b0f08aeb0a7057c9a6d0d7312554372411afff8"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
 subdir = "examples/widget-factory"
@@ -889,7 +907,7 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/scarlet-ui"
-rev = "ce807d0f2dfc978c60d7f3b807026455ee101da4"
+rev = "1b0f08aeb0a7057c9a6d0d7312554372411afff8"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -903,7 +921,7 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "settings"
 to = "/bin/settings"
 hash = "sha256:0211cc569ab7e3f38ff1bda857afecb38ed900b6e5ba192cb2b55e182cbbf856"
@@ -924,7 +942,7 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "scarlet-skk"
 to = "/bin/scarlet-skk"
 hash = "sha256:982e44e8acdea5fceb3835d01ae10650284f70b8c5269eba95763b38f8fdbbac"
@@ -945,7 +963,7 @@ path = "../../bundles/desktop/tools/fetch_skk_dictionary.sh"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "wayland-bridge"
 to = "/bin/wayland-bridge"
 hash = "sha256:60d16c780f9a18421ea4173f685ac7fa8fd160a1412f1154bcb241688224d851"
@@ -966,14 +984,14 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "scarlet-std-bin"
 bin = "sgfx-probe"
 to = "/bin/sgfx-probe"
-hash = "sha256:7c9f3d3a3446f5786aa56ee0c53124aff2067ce1ee8a0f023a126417e2784bfa"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "path"
-path = "../../user/bin"
+path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1028,7 +1046,7 @@ path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "ushv"
 to = "/bin/ushv"
 hash = "sha256:46a2b4d1a5924cb3ec85891fae7fe787cd6f9d7d782da17365d1f4f60e07b09c"
@@ -1129,7 +1147,7 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "scarlet-mozc"
 to = "/bin/scarlet-mozc"
 hash = "sha256:e4e56174d191b43dc333da1b8f5e2f67c0466b73606cfd4f1ca91ee2c4135b42"
@@ -1140,7 +1158,7 @@ path = "../../user/bin"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
-package = "user-bin"
+package = "userprogram"
 bin = "dcp-flip-test"
 to = "/bin/dcp-flip-test"
 hash = "sha256:e2886ec1b1407a7828749a8428611989556230251acd535d3baa8b4b5ec388aa"
@@ -1152,8 +1170,8 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/carmine"
-git_ref = "d363b11d5360f91ea8216736bc49469aa94d2a6a"
-resolved_rev = "d363b11d5360f91ea8216736bc49469aa94d2a6a"
+git_ref = "106809d9a6d5d0ec1a31a1b7b83e41e68878ee89"
+resolved_rev = "106809d9a6d5d0ec1a31a1b7b83e41e68878ee89"
 package = "carmine"
 bin = "carmine"
 to = "/bin/carmine"
@@ -1162,13 +1180,13 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/carmine"
-rev = "d363b11d5360f91ea8216736bc49469aa94d2a6a"
+rev = "106809d9a6d5d0ec1a31a1b7b83e41e68878ee89"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/myrica"
-git_ref = "78bae5b4a9e1443f583723ac80389be6191aa813"
-resolved_rev = "78bae5b4a9e1443f583723ac80389be6191aa813"
+git_ref = "60b52e4c2eff17ea629c4df17ddc02fa00bacaa9"
+resolved_rev = "60b52e4c2eff17ea629c4df17ddc02fa00bacaa9"
 package = "myrica"
 bin = "myrica"
 to = "/bin/myrica"
@@ -1177,13 +1195,13 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/myrica"
-rev = "78bae5b4a9e1443f583723ac80389be6191aa813"
+rev = "60b52e4c2eff17ea629c4df17ddc02fa00bacaa9"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/vellum"
-git_ref = "d1260998467002cb7ea905a366c7e71e623fa955"
-resolved_rev = "d1260998467002cb7ea905a366c7e71e623fa955"
+git_ref = "87a0f17173a7be09ead750f913b64b1fc5e0c785"
+resolved_rev = "87a0f17173a7be09ead750f913b64b1fc5e0c785"
 package = "vellum"
 bin = "vellum"
 to = "/bin/vellum"
@@ -1192,13 +1210,13 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/vellum"
-rev = "d1260998467002cb7ea905a366c7e71e623fa955"
+rev = "87a0f17173a7be09ead750f913b64b1fc5e0c785"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/boxcraft"
-git_ref = "b71dfd53ca4f38ea39003c47080b0cc821fd2669"
-resolved_rev = "b71dfd53ca4f38ea39003c47080b0cc821fd2669"
+git_ref = "a341f37b323572815871df1a95c8be812b9cdf86"
+resolved_rev = "a341f37b323572815871df1a95c8be812b9cdf86"
 package = "boxcraft"
 bin = "boxcraft"
 to = "/bin/boxcraft"
@@ -1207,7 +1225,7 @@ hash = ""
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/boxcraft"
-rev = "b71dfd53ca4f38ea39003c47080b0cc821fd2669"
+rev = "a341f37b323572815871df1a95c8be812b9cdf86"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1218,6 +1236,12 @@ hash = "sha256:03a4e610c54aa818af5918a41e6cac8945b872d2e3db55cccdf885176b2f263e"
 [sections.rootfs.layers.source]
 type = "path"
 path = "../../user/std-bin"
+
+[[sections.rootfs.layers]]
+kind = "app"
+source = ".scarlet/cache/git/33c416af7493b416/platforms/scarlet/app.toml"
+to = "/applications/cadence.app"
+hash = ""
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1400,13 +1424,51 @@ url = "https://github.com/petitstrawberry/blitz"
 rev = "c26e20dfff971941486ca9f50c8dcd332ec404da"
 
 [[sections.rootfs.layers]]
+kind = "cargo"
+package = "resonara"
+bin = "resonara"
+to = "/bin/resonara"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = ".scarlet/cache/git/db99e5104faa6c7a"
+
+[[sections.rootfs.layers]]
+kind = "script"
+to = "/usr/lib/clap"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = ".scarlet/cache/git/db99e5104faa6c7a/scripts/scarlet-plugins-aarch64.sh"
+
+[[sections.rootfs.layers]]
+kind = "script"
+to = "/bin/easyrpg-player"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = ".scarlet/cache/git/1d707eff8bef4cad/bundle/build-aarch64.sh"
+
+[[sections.rootfs.layers]]
+kind = "script"
+to = "/"
+hash = ""
+
+[sections.rootfs.layers.source]
+type = "path"
+path = ".scarlet/cache/git/c0675f018fc6c70d/producer/build-openttd-bundle.sh"
+
+[[sections.rootfs.layers]]
 kind = "archive"
-to = "/opt/scarlet/toolchains/rust/v0.1.0-rc.1"
+to = "/opt/scarlet/toolchains/rust/v0.1.0-dev.825856ca4819"
 format = "tar-zst"
 strip_components = 1
-hash = "sha256:f3c2cd2a361eb36276c3052d547064b50aff7422d8616f903001c6c9067b444c"
+hash = "sha256:bcd6c090278c3ff8ce20be4f225a33cd0b0837cb90f37f1240444bc22b7dc320"
 
 [sections.rootfs.layers.source]
 type = "archive"
-url = "https://github.com/petitstrawberry/scarlet-rust-nix/releases/download/v0.1.0-rc.1/native-rust-aarch64-v0.1.0-rc.1.tar.zst"
-sha256 = "sha256:f3c2cd2a361eb36276c3052d547064b50aff7422d8616f903001c6c9067b444c"
+url = "https://github.com/petitstrawberry/scarlet-rust-nix/releases/download/v0.1.0-dev.825856ca4819/native-rust-aarch64-v0.1.0-dev.825856ca4819.tar.zst"
+sha256 = "sha256:bcd6c090278c3ff8ce20be4f225a33cd0b0837cb90f37f1240444bc22b7dc320"
