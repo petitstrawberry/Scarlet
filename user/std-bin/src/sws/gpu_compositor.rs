@@ -1070,6 +1070,7 @@ impl GpuCompositor {
         resize_outline: Option<(i32, i32, u32, u32)>,
         cursor_visible: bool,
         damage: Option<DamageRect>,
+        scene_damage: Option<&[(i32, i32, u32, u32)]>,
         backdrops: &[(WindowId, BackdropGeometry)],
     ) -> Result<Vec<SgfxCommitToken>, GpuCompositionError> {
         let profiling = super::trace::profile_enabled();
@@ -1103,6 +1104,23 @@ impl GpuCompositor {
         self.rebuild_if_needed(cursor, windows)?;
         self.prepare_scene_textures(scenes, windows)?;
         self.transfer_visible_imported_shm(windows)?;
+        // Propagate damage through overlapping sampling halos. Repairing an
+        // old swapchain image or moving the cursor does not change the clean
+        // scene captured by these materials.
+        let mut source_damage = scene_damage.map(<[_]>::to_vec);
+        if let Some(rects) = source_damage.as_mut() {
+            let geometries: Vec<_> = backdrops.iter().map(|(_, geometry)| *geometry).collect();
+            expand_damage(&geometries, rects);
+        }
+        for (_, geometry, textures) in &mut self.backdrops {
+            if self.force_full_repaint
+                || source_damage.as_ref().is_none_or(|rects| {
+                    rects.iter().any(|&rect| geometry.intersects_source(rect))
+                })
+            {
+                textures.valid = false;
+            }
+        }
         let force_full_repaint = self.force_full_repaint;
         let damage = if force_full_repaint { None } else { damage };
         let mut texture_uploads = Vec::new();
@@ -1163,6 +1181,7 @@ impl GpuCompositor {
                     self.target.resources.as_ref(),
                     geometry.source.2,
                     geometry.source.3,
+                    geometry.radius,
                 )
                 .map_err(|_| "Failed to define backdrop textures")?;
                 self.backdrops.push((id, geometry, textures));
@@ -1287,7 +1306,7 @@ impl GpuCompositor {
 
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_SUBMIT);
         let mut backdrop_passes = Vec::new();
-        for (index, split) in backdrop_splits {
+        for &(index, split) in &backdrop_splits {
             let (_, geometry, textures) = &self.backdrops[index];
             let source = geometry.source;
             let output = geometry.output;
@@ -1308,6 +1327,7 @@ impl GpuCompositor {
                 y = end;
             }
             backdrop_passes.push(BackdropPass {
+                refresh: !textures.valid,
                 textures,
                 split,
                 clips,
@@ -1372,18 +1392,25 @@ impl GpuCompositor {
             profile_submitted,
         ) {
             std::println!(
-                "[SWS_PROFILE] {}x{} damage={}x{} blur={} quads={} sync_us={} encode_us={} submit_us={} present_us={}",
+                "[SWS_PROFILE] {}x{} damage={}x{} blur={} blur_refresh={} quads={} sync_us={} encode_us={} submit_us={} present_us={}",
                 self.target.width,
                 self.target.height,
                 render_area.width(),
                 render_area.height(),
                 backdrop_passes.len(),
+                backdrop_passes.iter().filter(|pass| pass.refresh).count(),
                 operations.len(),
                 synced.duration_since(start).as_micros(),
                 encoded.duration_since(synced).as_micros(),
                 submitted.duration_since(encoded).as_micros(),
                 submitted.elapsed().as_micros(),
             );
+        }
+        // Only a successfully published frame certifies the clean capture and
+        // horizontal filter for cursor-only redraws. Failed submissions stay cold.
+        drop(backdrop_passes);
+        for (index, _) in backdrop_splits {
+            self.backdrops[index].2.valid = true;
         }
         self.force_full_repaint = false;
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_COLLECT_RELEASES);

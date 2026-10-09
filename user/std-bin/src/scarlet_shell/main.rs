@@ -3157,6 +3157,25 @@ impl Application for ShellApp {
         &self,
         key: &scarlet_ui::scene::SceneWindowKey,
     ) -> Option<Vec<&dyn scarlet_ui::state::Listenable>> {
+        if key.as_str() == "main" {
+            // Home selection/catalog state does not change the status bar.
+            // Subscribing this scene to every ShellApp state submits another
+            // GPU frame (and invalidates backdrop captures) on every arrow key.
+            return Some(vec![
+                &self.mode,
+                &self.clock,
+                &self.screen_width,
+                &self.screen_height,
+                &self.shell_layout,
+                &self.menu_bar,
+                &self.menu_tree,
+                &self.active_window_id,
+                &self.open_menu_index,
+                &self.workspace_state,
+                &self.status_snapshot,
+                &self.control_center_open,
+            ]);
+        }
         if key.as_str() == volume_osd::SCENE_KEY {
             return Some(vec![
                 &self.volume_feedback,

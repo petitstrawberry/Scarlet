@@ -672,7 +672,9 @@ impl ElementRenderObject for FloatingLayerLayout {
 
 #[derive(Clone)]
 struct ConsoleView {
-    snapshot: ConsoleSnapshot,
+    // Event modifiers clone their callbacks while reconciling. Share the
+    // catalog instead of copying every application's strings for every card.
+    snapshot: Arc<ConsoleSnapshot>,
     state: State<ConsoleState>,
     action: Arc<dyn Fn(ConsoleAction)>,
     part: ConsolePart,
@@ -1260,7 +1262,7 @@ pub fn build_console_part(
         state.set(next);
     }
     ConsoleView {
-        snapshot,
+        snapshot: Arc::new(snapshot),
         state,
         action: Arc::new(action),
         part,

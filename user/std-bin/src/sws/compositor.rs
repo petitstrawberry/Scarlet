@@ -4288,6 +4288,9 @@ impl Compositor {
     /// frame. The strict `sgfx` mode instead propagates a fatal error.
     fn composite_and_present_gpu(&mut self) -> Result<GpuPresentResult, &'static str> {
         let damage = self.gpu_present_damage();
+        // Keep source damage separate from cursor and swapchain repair damage.
+        // Materials only need a fresh capture when their sampling halo changes.
+        let scene_damage = (!self.full_redraw_needed).then_some(self.pending_damage.as_slice());
         let backdrops = self.window_backdrops();
         let overview_shadows = self.overview_render_shadows();
         let overview_cards = self.overview_render_backplates();
@@ -4319,6 +4322,7 @@ impl Compositor {
             self.resize_outline,
             cursor_visible(self.pointer_lock) && !self.input_modality.cursor_hidden_by_touch,
             damage,
+            scene_damage,
             &backdrops,
         );
         drop(scenes);

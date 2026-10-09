@@ -99,14 +99,20 @@ capped by the output width.
 
 The status bar and floating controls declare the same backdrop material through
 ScarletUI's surface-region API. SWS samples the composed content below each
-surface, blurs it, and draws the sharp UI on top. Both software and SGFX use
-three separable box filters with a three-radius sampling halo and the same
-rounded output mask. The software path reuses full-resolution buffers; SGFX
-uses cached textures, at most 2× downsampling, and paired linear taps, without
-GPU readback. Regions at the same layer capture their sources before any blur
-is composited, avoiding feedback where halos overlap. Damage in a source halo
-refreshes the complete required background before filtering. GPU passes retain
-the existing tracked-frame completion rules. Normal desktop and application
+surface, blurs it, and draws the sharp UI on top. Both paths use a three-radius
+sampling halo and the same rounded output mask. Software reuses full-resolution
+buffers for three separable box filters. For cursor-only GPU frames, SWS reuses
+its clean capture and horizontal filter; window damage, geometry changes, and
+resource replacement invalidate that cache. SGFX uses cached reduction textures,
+paired linear samples that cover the intervening source pixels, and a separable
+five-tap binomial filter at the reduced resolution. This avoids the displaced
+copies of text produced by widely spaced full-resolution taps. Render targets
+are copied into separate linear sampled textures for native Maxwell support;
+the filter does not read pixels back to the CPU. Regions at the same layer
+capture their sources before any blur is composited, avoiding feedback where
+halos overlap. Damage in a source halo refreshes the complete required background
+before filtering. The complete GPU composition graph uses one command stream
+and distinct vertex ranges, retaining the tracked-frame completion rules. Normal desktop and application
 status rendering keep their existing appearance.
 
 The full-screen root repaint boundary and nested ScrollView caches remain in
@@ -250,8 +256,15 @@ value uses `auto`.
 
 Files must be at most 8 MiB, 4096 pixels on either edge, and 4 megapixels total.
 PNG animations are not supported. Decoding and blur happen on the catalog
-worker; icons, thumbnails, and card crops are cached. Replacing an image at the
-same path refreshes it on the next catalog poll when its size or modification
+worker; icons, thumbnails, and card crops are cached. Symbolic fallback covers
+rasterize their heavily blurred icon at 80×45 before restoring the 320×180 mask;
+the final cover and reflected name strip are both cached across selection changes.
+Card descriptions retain their picture and label subtree until the application
+name, icon, color, artwork or width changes. Focus borders and click callbacks
+remain outside that subtree. Console callbacks share their catalog snapshot
+instead of duplicating all application strings during view reconciliation.
+Replacing an image at the same path refreshes it on the next catalog poll when
+its size or modification
 time changes. Restart stemd/the desktop session after editing `.desktop` fields,
 because the existing registry loads those entries at startup. There is currently
 no GUI editor or file picker for these per-application artwork fields.
@@ -276,16 +289,25 @@ mode on shell restarts. The console changes require the matching ScarletUI
 work for cached pictures, ScrollView reveal, independent texture uploads,
 aligned border bounds, surface regions, scene state dependencies, and local hover
 painting. During local development these changes are in the sibling ScarletUI
-working tree. This workspace's ignored
-`.scarlet/cache/cargo-home/config.toml` under the console project patches the UI
-and SWS crates to those local sources. A clean checkout needs the same local
+working tree. The ignored `.scarlet/cache/cargo-home/config.toml` under each
+of the console and full AArch64 projects patches the UI and SWS crates to those
+local sources. A clean checkout needs the same local
 patches until the published dependency revision includes these changes.
+
+The status scene subscribes only to its clock, status, menus, geometry and
+workspace state. Moving Home selection no longer rebuilds or submits the status
+surface. This matters even with cached artwork: an unnecessary status submission
+adds GPU waits and invalidates the material's background capture.
+SWS tracks clean scene damage separately from cursor and swapchain repair
+damage. A material's cached capture/filter is refreshed only when damage reaches
+its sampling halo, with propagation through overlapping halos. Geometry changes,
+full redraws and resource rebuilds still force a fresh capture.
 
 The temporary host verification harness is not part of the build or committed
 project layout. It compiles the production console view and checks navigation,
 pointer dispatch, asynchronous catalog loading, recent history, artwork fitting
 and caching, scroll reveal, warm-scroll composition, workspace policy, and
-software backdrop filtering. The latest run passed 80 checks, including renders
+software backdrop filtering. An earlier run passed 80 checks, including renders
 at landscape, square, ultrawide, and small logical sizes. The protocol suite
 passed 31 unit tests and 6 integration tests, including surface-region payload
 validation. ScarletUI core passed 338 tests and 23 doc tests, including scoped
@@ -299,7 +321,7 @@ initiate its panic. `cargo make image-aarch64-console` built the standard projec
 image successfully with the local dependency patches above. Artwork sources are recorded in
 [the prompts and provenance](../assets/app-artwork/PROMPTS.md).
 
-Native release validation uses the console project's bundles and service
+Earlier native release validation used the console project's bundles and service
 configuration in an isolated image. It covers the real 13-entry stemd catalog,
 12 registered covers, Files/Notepad/Settings launches, recent-use updates,
 Home/workspace switching, and Control Center. Pointer checks verify Power and

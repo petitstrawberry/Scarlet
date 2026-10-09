@@ -468,29 +468,70 @@ pub(crate) struct TextureUpload<'a> {
     pub(crate) bytes: &'a [u8],
 }
 
-/// Reusable linear capture for a backdrop filter. Native Maxwell presentation
-/// and render targets are block-linear; copying the composed source into this
-/// sampled-only texture keeps the blur path on the proven tiled-to-linear copy
-/// and linear-sampler paths.
+/// Clean linear captures and a cached paired-sample reduction pyramid. Render
+/// targets stay separate from sampled textures: native Maxwell uses tiled render
+/// targets and the proven tiled-to-linear copy path for subsequent sampling.
 pub(crate) struct BackdropTextures {
     levels: Vec<(TextureId, u32, u32)>,
+    reduction_targets: Vec<(TextureId, u32)>,
+    filter_target: TextureId,
+    filtered: TextureId,
+    pub(crate) valid: bool,
 }
 
 impl BackdropTextures {
-    pub(crate) fn define(resources: &ResourceTable, width: u32, height: u32) -> ir::Result<Self> {
-        let texture = resources
-            .define_texture(TextureDesc::new(
-                TextureFormat::Bgra8Unorm,
-                Extent2D::new(width, height)?,
-                TextureUsage::SAMPLED | TextureUsage::COPY_DST,
-            )?)?
-            .id();
-        let levels = vec![(texture, width, height)];
-        Ok(Self { levels })
+    pub(crate) fn define(
+        resources: &ResourceTable,
+        width: u32,
+        height: u32,
+        radius: u32,
+    ) -> ir::Result<Self> {
+        let sampled = |width, height| {
+            resources
+                .define_texture(TextureDesc::new(
+                    TextureFormat::Bgra8Unorm,
+                    Extent2D::new(width, height)?,
+                    TextureUsage::SAMPLED | TextureUsage::COPY_DST,
+                )?)
+                .map(|texture| texture.id())
+        };
+        let render_target = |width, height| {
+            resources
+                .define_texture(TextureDesc::new(
+                    TextureFormat::Bgra8Unorm,
+                    Extent2D::new(width, height)?,
+                    TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+                )?)
+                .map(|texture| texture.id())
+        };
+        let mut levels = vec![(sampled(width, height)?, width, height)];
+        let mut reduction_targets = Vec::new();
+        let (mut w, mut h, mut factor) = (width, height, 1u32);
+        while factor < radius.clamp(1, 64) && (w > 1 || h > 1) {
+            let reduction = if factor * 4 <= radius.clamp(1, 64) {
+                4
+            } else {
+                2
+            };
+            w = w.div_ceil(reduction);
+            h = h.div_ceil(reduction);
+            reduction_targets.push((render_target(w, h)?, reduction));
+            levels.push((sampled(w, h)?, w, h));
+            factor *= reduction;
+        }
+        Ok(Self {
+            levels,
+            reduction_targets,
+            filter_target: render_target(w, h)?,
+            filtered: sampled(w, h)?,
+            valid: false,
+        })
     }
 }
 
 pub(crate) struct BackdropPass<'a> {
+    /// Refresh only when the scene beneath the material changed.
+    pub(crate) refresh: bool,
     pub(crate) textures: &'a BackdropTextures,
     /// Draw the scene below the chrome first; filter it, then draw the rest.
     pub(crate) split: usize,
@@ -526,6 +567,15 @@ impl<E: fmt::Display> fmt::Display for QuadSubmitError<E> {
             Self::Execution(error) => write!(formatter, "SGFX execution failed: {error}"),
         }
     }
+}
+
+struct CompositionRegion {
+    texture: TextureId,
+    width: u32,
+    height: u32,
+    area: PixelRect,
+    load: LoadOp,
+    operations: Vec<Quad>,
 }
 
 pub(crate) struct QuadRenderer {
@@ -766,6 +816,18 @@ impl QuadRenderer {
             );
         }
         let white = ir::Color::rgba(1.0, 1.0, 1.0, 1.0).map_err(|_| "Invalid backdrop tint")?;
+        let mut regions = Vec::new();
+        let mut region = |texture, width, height, area, load, operations: &[Quad]| {
+            regions.push(CompositionRegion {
+                texture,
+                width,
+                height,
+                area,
+                load,
+                operations: operations.to_vec(),
+            });
+            Ok::<(), &'static str>(())
+        };
         let mut previous_split = 0;
         let mut first = 0;
         while first < backdrops.len() {
@@ -778,35 +840,32 @@ impl QuadRenderer {
                     .iter()
                     .take_while(|b| b.split == split)
                     .count();
-            self.encode_region_with_uploads(
-                executor,
-                Rc::clone(&resources),
+            region(
                 texture,
                 width,
                 height,
                 area,
                 if first == 0 { load } else { LoadOp::Load },
-                if first == 0 { uploads } else { &[] },
                 &operations[previous_split..split],
             )?;
 
             // Capture every material before writing any of them back to the
             // main target. Adjacent controls often have overlapping halos.
             for backdrop in &backdrops[first..end] {
-                if backdrop.textures.levels.len() != 1 {
+                if backdrop.textures.levels.is_empty() {
                     return Err("Invalid SGFX backdrop textures".into());
+                }
+                if !backdrop.refresh {
+                    continue;
                 }
                 let (capture, sw, sh) = backdrop.textures.levels[0];
                 let local = PixelRect::new(0, 0, sw, sh).map_err(|_| "Invalid backdrop source")?;
-                self.encode_region_with_uploads(
-                    executor,
-                    Rc::clone(&resources),
+                region(
                     capture,
                     sw,
                     sh,
                     local,
                     LoadOp::Load,
-                    &[],
                     &[Quad::Copy(CopiedRect {
                         texture,
                         source: backdrop.source,
@@ -818,34 +877,130 @@ impl QuadRenderer {
             for backdrop in &backdrops[first..end] {
                 let (capture, sw, sh) = backdrop.textures.levels[0];
                 let local = PixelRect::new(0, 0, sw, sh).map_err(|_| "Invalid backdrop source")?;
-                // A 5x5 binomial kernel approximates the three box passes used
-                // by the CPU compositor. SOURCE_OVER can form an exact weighted
-                // average when each successive alpha is weight/running_total;
-                // the first tap is opaque and replaces the unfiltered pixels.
+                if backdrop.refresh {
+                    // Two-to-one reductions use the linear sampler directly. Four-
+                    // to-one reductions average four paired linear samples, covering
+                    // the intervening texels instead of aliasing thin text.
+                    for (level, &(target, reduction)) in
+                        backdrop.textures.reduction_targets.iter().enumerate()
+                    {
+                        let (input, iw, ih) = backdrop.textures.levels[level];
+                        let (sampled, w, h) = backdrop.textures.levels[level + 1];
+                        let destination =
+                            PixelRect::new(0, 0, w, h).map_err(|_| "Invalid backdrop reduction")?;
+                        let offsets: &[[f32; 2]] = if reduction == 4 {
+                            &[[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0], [1.0, 1.0]]
+                        } else {
+                            &[[0.0, 0.0]]
+                        };
+                        let mut reductions = Vec::with_capacity(offsets.len());
+                        for (index, &offset) in offsets.iter().enumerate() {
+                            reductions.push(Quad::SampledOffset {
+                                rect: SampledRect {
+                                    texture: input,
+                                    texture_width: iw,
+                                    texture_height: ih,
+                                    destination,
+                                    source: PixelRect::new(0, 0, iw, ih)
+                                        .map_err(|_| "Invalid backdrop reduction source")?,
+                                    tint: ir::Color::rgba(1.0, 1.0, 1.0, 1.0 / (index + 1) as f32)
+                                        .map_err(|_| "Invalid backdrop reduction weight")?,
+                                    ignore_source_alpha: true,
+                                    clip: None,
+                                },
+                                offset,
+                            });
+                        }
+                        region(target, w, h, destination, LoadOp::Load, &reductions)?;
+                        region(
+                            sampled,
+                            w,
+                            h,
+                            destination,
+                            LoadOp::Load,
+                            &[Quad::Copy(CopiedRect {
+                                texture: target,
+                                source: destination,
+                                destination,
+                                clip: None,
+                            })],
+                        )?;
+                    }
+                }
+                let &(reduced, rw, rh) = backdrop
+                    .textures
+                    .levels
+                    .last()
+                    .ok_or("Invalid backdrop reduction levels")?;
+                let reduced_area =
+                    PixelRect::new(0, 0, rw, rh).map_err(|_| "Invalid reduced backdrop")?;
+                // The same binomial kernel is now separable, with neighboring
+                // low-resolution samples. SOURCE_OVER forms its weighted mean
+                // with alpha=weight/running_total; the first tap is opaque.
                 let positions = [-2.0f32, -1.0, 0.0, 1.0, 2.0];
                 let weights = [1.0f32, 4.0, 6.0, 4.0, 1.0];
-                let step = backdrop.radius.max(1) as f32;
-                let mut quads = Vec::with_capacity(25 + backdrop.clips.len() * 2);
-                let mut total = 0.0f32;
-                for (y, wy) in positions.into_iter().zip(weights) {
-                    for (x, wx) in positions.into_iter().zip(weights) {
-                        let weight = wx * wy;
+                let step_x = backdrop.radius as f32 * rw as f32 / sw as f32;
+                let step_y = backdrop.radius as f32 * rh as f32 / sh as f32;
+                if backdrop.refresh {
+                    let mut horizontal = Vec::with_capacity(5);
+                    let mut total = 0.0f32;
+                    for (x, weight) in positions.into_iter().zip(weights) {
                         total += weight;
-                        quads.push(Quad::SampledOffset {
+                        horizontal.push(Quad::SampledOffset {
                             rect: SampledRect {
-                                texture: capture,
-                                texture_width: sw,
-                                texture_height: sh,
-                                destination: backdrop.source,
-                                source: local,
+                                texture: reduced,
+                                texture_width: rw,
+                                texture_height: rh,
+                                destination: reduced_area,
+                                source: reduced_area,
                                 tint: ir::Color::rgba(1.0, 1.0, 1.0, weight / total)
                                     .map_err(|_| "Invalid backdrop sample weight")?,
                                 ignore_source_alpha: true,
-                                clip: Some(backdrop.output),
+                                clip: None,
                             },
-                            offset: [x * step, y * step],
+                            offset: [x * step_x, 0.0],
                         });
                     }
+                    region(
+                        backdrop.textures.filter_target,
+                        rw,
+                        rh,
+                        reduced_area,
+                        LoadOp::Load,
+                        &horizontal,
+                    )?;
+                    region(
+                        backdrop.textures.filtered,
+                        rw,
+                        rh,
+                        reduced_area,
+                        LoadOp::Load,
+                        &[Quad::Copy(CopiedRect {
+                            texture: backdrop.textures.filter_target,
+                            source: reduced_area,
+                            destination: reduced_area,
+                            clip: None,
+                        })],
+                    )?;
+                }
+                let mut quads = Vec::with_capacity(5 + backdrop.clips.len() * 2);
+                let mut total = 0.0;
+                for (y, weight) in positions.into_iter().zip(weights) {
+                    total += weight;
+                    quads.push(Quad::SampledOffset {
+                        rect: SampledRect {
+                            texture: backdrop.textures.filtered,
+                            texture_width: rw,
+                            texture_height: rh,
+                            destination: backdrop.source,
+                            source: reduced_area,
+                            tint: ir::Color::rgba(1.0, 1.0, 1.0, weight / total)
+                                .map_err(|_| "Invalid backdrop sample weight")?,
+                            ignore_source_alpha: true,
+                            clip: Some(backdrop.output),
+                        },
+                        offset: [0.0, y * step_y],
+                    });
                 }
 
                 // The kernel uses one rectangular scissor. Restore the small
@@ -900,32 +1055,104 @@ impl QuadRenderer {
                         }));
                     }
                 }
-                self.encode_region_with_uploads(
-                    executor,
-                    Rc::clone(&resources),
+                region(
                     texture,
                     width,
                     height,
                     backdrop.output,
                     LoadOp::Load,
-                    &[],
                     &quads,
                 )?;
             }
             previous_split = split;
             first = end;
         }
-        self.encode_region_with_uploads(
-            executor,
-            resources,
+        region(
             texture,
             width,
             height,
             area,
             LoadOp::Load,
-            &[],
             &operations[previous_split..],
-        )
+        )?;
+        self.encode_regions_with_uploads(executor, resources, uploads, &regions)
+    }
+
+    fn encode_regions_with_uploads<E: CommandExecutor>(
+        &self,
+        executor: &mut E,
+        resources: Rc<ResourceTable>,
+        uploads: &[TextureUpload<'_>],
+        regions: &[CompositionRegion],
+    ) -> Result<(), QuadSubmitError<E::Error>> {
+        let count = regions.iter().try_fold(0usize, |sum, region| {
+            sum.checked_add(region.operations.len())
+                .ok_or("SGFX scene size overflow")
+        })?;
+        if count > self.capacity {
+            return Err("SGFX composition operation capacity exceeded".into());
+        }
+        // Record captures, reductions, and filters in order in one stream. Each
+        // draw has its own vertex range; later uploads cannot overwrite vertices
+        // that an earlier asynchronous pass is still using.
+        let mut vertices = Vec::new();
+        for region in regions {
+            append_operation_vertices(
+                &mut vertices,
+                region.width,
+                region.height,
+                &region.operations,
+            )?;
+        }
+        let mut encoder = CommandEncoder::new(resources.as_ref());
+        for upload in uploads {
+            encoder
+                .write_texture(
+                    resources
+                        .texture_ref(upload.texture)
+                        .map_err(|_| "Invalid SGFX upload texture")?,
+                    TextureWrite::new(upload.destination, upload.stride, upload.bytes)
+                        .map_err(|_| "Invalid SGFX texture upload")?,
+                )
+                .map_err(|_| "Failed to record SGFX texture upload")?;
+        }
+        if !vertices.is_empty() {
+            encoder
+                .write_buffer(
+                    resources
+                        .buffer_ref(self.buffer)
+                        .map_err(|_| "Invalid quad buffer")?,
+                    0,
+                    &vertices,
+                )
+                .map_err(|_| "Failed to upload SGFX composition vertices")?;
+        }
+        let mut base_index = 0;
+        for region in regions {
+            self.record_operations(
+                &mut encoder,
+                resources.as_ref(),
+                region.texture,
+                region.area,
+                region.load,
+                &region.operations,
+                base_index,
+            )?;
+            base_index += region.operations.len();
+        }
+        let commands = encoder
+            .finish()
+            .map_err(|_| "Failed to finish SGFX composition commands")?;
+        if commands
+            .commands()
+            .iter()
+            .any(|command| !matches!(command, ir::Command::WriteBuffer { .. }))
+        {
+            executor
+                .execute(&commands)
+                .map_err(QuadSubmitError::Execution)?;
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -952,60 +1179,7 @@ impl QuadRenderer {
             ));
         }
         let mut vertices = Vec::new();
-        vertices
-            .try_reserve_exact(
-                operations
-                    .len()
-                    .checked_mul(QUAD_VERTEX_COUNT)
-                    .and_then(|count| count.checked_mul(QUAD_VERTEX_STRIDE as usize))
-                    .ok_or("SGFX composition vertex size overflow")?,
-            )
-            .map_err(|_| "Failed to reserve SGFX composition vertices")?;
-        for operation in operations {
-            let (destination, source, texture_width, texture_height) = match operation {
-                Quad::Solid { destination, .. } => (
-                    *destination,
-                    PixelRect::new(0, 0, 1, 1).map_err(|_| "Invalid solid quad")?,
-                    1,
-                    1,
-                ),
-                Quad::Sampled(rect) | Quad::SampledOffset { rect, .. } => (
-                    rect.destination,
-                    rect.source,
-                    rect.texture_width,
-                    rect.texture_height,
-                ),
-                Quad::SampledUv { rect, uv, .. } => {
-                    append_quad_uv(&mut vertices, rect.destination, width, height, *uv);
-                    continue;
-                }
-                Quad::Copy(_) => {
-                    // Keep one fixed vertex slot per operation so later draw
-                    // offsets remain stable across copy/render segmentation.
-                    vertices.resize(
-                        vertices
-                            .len()
-                            .checked_add(QUAD_VERTEX_COUNT * QUAD_VERTEX_STRIDE as usize)
-                            .ok_or("SGFX composition vertex size overflow")?,
-                        0,
-                    );
-                    continue;
-                }
-            };
-            append_quad(
-                &mut vertices,
-                destination,
-                source,
-                width,
-                height,
-                texture_width,
-                texture_height,
-                match operation {
-                    Quad::SampledOffset { offset, .. } => *offset,
-                    _ => [0.0, 0.0],
-                },
-            );
-        }
+        append_operation_vertices(&mut vertices, width, height, operations)?;
 
         let mut batch_start = 0usize;
         let mut first_batch = true;
@@ -1352,6 +1526,70 @@ fn intersect_pixel_rect(
         .map_err(|_| "Invalid SGFX composition intersection")
 }
 
+fn append_operation_vertices(
+    vertices: &mut Vec<u8>,
+    width: u32,
+    height: u32,
+    operations: &[Quad],
+) -> Result<(), &'static str> {
+    vertices
+        .try_reserve_exact(
+            operations
+                .len()
+                .checked_mul(QUAD_VERTEX_COUNT)
+                .and_then(|count| count.checked_mul(QUAD_VERTEX_STRIDE as usize))
+                .ok_or("SGFX composition vertex size overflow")?,
+        )
+        .map_err(|_| "Failed to reserve SGFX composition vertices")?;
+    for operation in operations {
+        let (destination, source, texture_width, texture_height) = match operation {
+            Quad::Solid { destination, .. } => (
+                *destination,
+                PixelRect::new(0, 0, 1, 1).map_err(|_| "Invalid solid quad")?,
+                1,
+                1,
+            ),
+            Quad::Sampled(rect) | Quad::SampledOffset { rect, .. } => (
+                rect.destination,
+                rect.source,
+                rect.texture_width,
+                rect.texture_height,
+            ),
+            Quad::SampledUv { rect, uv, .. } => {
+                append_quad_uv(vertices, rect.destination, width, height, *uv);
+                continue;
+            }
+            Quad::Copy(_) => {
+                // Keep one fixed vertex slot per operation so later draw
+                // offsets remain stable across copy/render segmentation.
+                vertices.resize(
+                    vertices
+                        .len()
+                        .checked_add(QUAD_VERTEX_COUNT * QUAD_VERTEX_STRIDE as usize)
+                        .ok_or("SGFX composition vertex size overflow")?,
+                    0,
+                );
+                continue;
+            }
+        };
+        append_quad(
+            vertices,
+            destination,
+            source,
+            width,
+            height,
+            texture_width,
+            texture_height,
+            match operation {
+                Quad::SampledOffset { offset, .. } => *offset,
+                _ => [0.0, 0.0],
+            },
+        );
+    }
+
+    Ok(())
+}
+
 pub(crate) fn define_scene_texture(
     resources: &ResourceTable,
     width: u32,
@@ -1472,6 +1710,202 @@ mod tests {
         take_reusable_import,
     };
     use sgfx::ir::{Extent2D, ResourceTable, TextureDesc, TextureFormat, TextureUsage};
+
+    #[test]
+    fn backdrop_graph_captures_overlapping_sources_before_filtering_in_one_stream() {
+        use super::*;
+        struct Inspect {
+            calls: usize,
+            uploads: usize,
+            copies: Vec<(TextureId, TextureId)>,
+            captures_before_first_filter: Option<usize>,
+            draws: usize,
+            scene: TextureId,
+        }
+        impl CommandExecutor for Inspect {
+            type Error = &'static str;
+            fn execute<'r, 'data>(
+                &mut self,
+                commands: &ir::CommandBuffer<'r, 'data>,
+            ) -> Result<(), Self::Error> {
+                self.calls += 1;
+                for command in commands.commands() {
+                    match command {
+                        ir::Command::WriteBuffer { .. } => self.uploads += 1,
+                        ir::Command::CopyTextureToTexture {
+                            source,
+                            destination,
+                            ..
+                        } => {
+                            self.copies.push((source.id(), destination.id()));
+                        }
+                        ir::Command::BeginRenderPass(pass) => {
+                            if pass.color_attachments().next().unwrap().target().id() != self.scene
+                            {
+                                self.captures_before_first_filter.get_or_insert(
+                                    self.copies
+                                        .iter()
+                                        .filter(|(source, _)| *source == self.scene)
+                                        .count(),
+                                );
+                            }
+                        }
+                        ir::Command::Draw { .. } => self.draws += 1,
+                        _ => {}
+                    }
+                }
+                Ok(())
+            }
+        }
+        let resources = Rc::new(ResourceTable::new());
+        let renderer = QuadRenderer::define(&resources, 128).unwrap();
+        let scene = define_scene_texture(&resources, 128, 128).unwrap();
+        let a = BackdropTextures::define(&resources, 64, 64, 16).unwrap();
+        let b = BackdropTextures::define(&resources, 64, 64, 16).unwrap();
+        let output_a = PixelRect::new(16, 16, 32, 32).unwrap();
+        let output_b = PixelRect::new(48, 48, 32, 32).unwrap();
+        let mut passes = [
+            BackdropPass {
+                refresh: true,
+                textures: &a,
+                split: 0,
+                source: PixelRect::new(0, 0, 64, 64).unwrap(),
+                output: output_a,
+                clips: vec![output_a],
+                radius: 16,
+            },
+            BackdropPass {
+                refresh: true,
+                textures: &b,
+                split: 0,
+                source: PixelRect::new(32, 32, 64, 64).unwrap(),
+                output: output_b,
+                clips: vec![output_b],
+                radius: 16,
+            },
+        ];
+        let mut inspect = Inspect {
+            calls: 0,
+            uploads: 0,
+            copies: Vec::new(),
+            captures_before_first_filter: None,
+            draws: 0,
+            scene,
+        };
+        renderer
+            .encode_scene_with_uploads(
+                &mut inspect,
+                resources.clone(),
+                scene,
+                128,
+                128,
+                PixelRect::new(0, 0, 128, 128).unwrap(),
+                LoadOp::Load,
+                &[],
+                &[],
+                &passes,
+            )
+            .unwrap();
+        assert_eq!(inspect.calls, 1);
+        assert_eq!(inspect.uploads, 1);
+        assert_eq!(inspect.captures_before_first_filter, Some(2));
+        assert_eq!(
+            &inspect.copies[..2],
+            &[(scene, a.levels[0].0), (scene, b.levels[0].0)]
+        );
+        assert_eq!(inspect.draws, 36);
+        assert!(
+            inspect
+                .copies
+                .iter()
+                .all(|(source, destination)| source != destination)
+        );
+        // Cursor-only replay samples the cached horizontal result and clean
+        // corner capture. It must issue no source captures or reduction passes.
+        for pass in &mut passes {
+            pass.refresh = false;
+        }
+        inspect.calls = 0;
+        inspect.uploads = 0;
+        inspect.copies.clear();
+        inspect.draws = 0;
+        renderer
+            .encode_scene_with_uploads(
+                &mut inspect,
+                resources.clone(),
+                scene,
+                128,
+                128,
+                PixelRect::new(0, 0, 128, 128).unwrap(),
+                LoadOp::Load,
+                &[],
+                &[],
+                &passes,
+            )
+            .unwrap();
+        assert_eq!(inspect.calls, 1);
+        assert_eq!(inspect.uploads, 1);
+        assert!(inspect.copies.is_empty());
+        assert_eq!(inspect.draws, 10, "only the two vertical kernels remain");
+        // A changed source refreshes that material while the other cache remains reusable.
+        passes[0].refresh = true;
+        inspect.copies.clear();
+        inspect.draws = 0;
+        renderer
+            .encode_scene_with_uploads(
+                &mut inspect,
+                resources.clone(),
+                scene,
+                128,
+                128,
+                PixelRect::new(0, 0, 128, 128).unwrap(),
+                LoadOp::Load,
+                &[],
+                &[],
+                &passes,
+            )
+            .unwrap();
+        assert_eq!(
+            inspect
+                .copies
+                .iter()
+                .filter(|(source, _)| *source == scene)
+                .count(),
+            1
+        );
+        assert_eq!(inspect.draws, 23);
+        for textures in [&a, &b] {
+            for &(sampled, _, _) in &textures.levels {
+                let usage = resources
+                    .texture(resources.texture_ref(sampled).unwrap())
+                    .unwrap()
+                    .usage();
+                assert!(!usage.contains(TextureUsage::RENDER_ATTACHMENT));
+            }
+        }
+    }
+
+    #[test]
+    fn backdrop_reductions_handle_small_odd_extents_and_radius_bounds() {
+        use super::*;
+        let resources = ResourceTable::new();
+        for radius in [0, 1, 2, 3, 4, 8, 16, 64, u32::MAX] {
+            let textures = BackdropTextures::define(&resources, 1, 1, radius).unwrap();
+            assert_eq!(textures.levels.len(), 1);
+            assert!(textures.reduction_targets.is_empty());
+            let odd = BackdropTextures::define(&resources, 65, 17, radius).unwrap();
+            assert_eq!(odd.levels[0].1, 65);
+            assert_eq!(odd.levels[0].2, 17);
+            for (index, &(_, reduction)) in odd.reduction_targets.iter().enumerate() {
+                let (_, before_w, before_h) = odd.levels[index];
+                let (_, after_w, after_h) = odd.levels[index + 1];
+                assert_eq!(after_w, before_w.div_ceil(reduction));
+                assert_eq!(after_h, before_h.div_ceil(reduction));
+                assert!(after_w > 0 && after_h > 0);
+            }
+            assert!(odd.levels.len() <= 7);
+        }
+    }
 
     #[test]
     fn scene_ir_selects_premultiplied_blending_and_preserves_uvs() {
