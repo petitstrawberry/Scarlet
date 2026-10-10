@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 use crate::device::network::DevicePacket;
 use crate::device::network::MacAddress;
 use crate::network::NetworkInterface;
+use crate::network::packet::PacketBuffer;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
 use crate::network::socket::SocketError;
 use crate::println;
@@ -366,6 +367,19 @@ impl NetworkLayer for EthernetLayer {
         context: &LayerContext,
         _next_layers: &[Arc<dyn NetworkLayer>],
     ) -> Result<(), SocketError> {
+        self.send_owned(
+            PacketBuffer::from_slice(packet, ETHERNET_HEADER_SIZE)?,
+            context,
+            _next_layers,
+        )
+    }
+
+    fn send_owned(
+        &self,
+        mut packet: PacketBuffer,
+        context: &LayerContext,
+        _next_layers: &[Arc<dyn NetworkLayer>],
+    ) -> Result<(), SocketError> {
         // Get interface from context, or use default
         let interface_name = context
             .get("interface")
@@ -409,7 +423,11 @@ impl NetworkLayer for EthernetLayer {
                                     ip_bytes[2],
                                     ip_bytes[3]
                                 );
-                                arp.queue_packet_on_interface(&interface_name, ip, packet.to_vec());
+                                arp.queue_owned_packet_on_interface(
+                                    &interface_name,
+                                    ip,
+                                    packet,
+                                );
                             }
                         }
                     }
@@ -437,16 +455,9 @@ impl NetworkLayer for EthernetLayer {
         let header = EthernetHeader::new(dest_mac, *src_mac.as_bytes(), ether_type);
         let total_size = ETHERNET_HEADER_SIZE + packet.len();
 
-        let mut frame = Vec::with_capacity(total_size.max(ETHERNET_MIN_SIZE.saturating_sub(4)));
-        frame.extend_from_slice(&header.to_bytes());
-        frame.extend_from_slice(packet);
-
-        // Pad to minimum frame size
-        let min_payload = ETHERNET_MIN_SIZE.saturating_sub(4);
-        if frame.len() < min_payload {
-            frame.resize(min_payload, 0);
-        }
-        let frame_len = frame.len();
+        packet.prepend(&header.to_bytes())?;
+        packet.pad_to(ETHERNET_MIN_SIZE.saturating_sub(4))?;
+        let frame_len = packet.len();
 
         // Send through device
         if let Some(device) = self.get_device(&interface_name) {
@@ -464,7 +475,7 @@ impl NetworkLayer for EthernetLayer {
                     ether_type
                 );
             }
-            let pkt = DevicePacket::with_data(frame);
+            let pkt = DevicePacket::with_data(packet.into_vec());
             device.send(pkt).map_err(|e| {
                 println!("[Ethernet] Send failed: {}", e);
                 SocketError::Other("send failed".into())
@@ -629,5 +640,65 @@ mod tests {
         context.set("ip_dst", &[255, 255, 255, 255]);
 
         assert_eq!(eth_layer.resolve_dest_mac(&context, "eth0"), Ok([0xff; 6]));
+    }
+}
+
+#[cfg(test)]
+mod owned_packet_tests {
+    use super::*;
+    use crate::sync::IrqSpinLock;
+
+    struct QueuedInterface(IrqSpinLock<Option<DevicePacket>>);
+    impl NetworkInterface for QueuedInterface {
+        fn name(&self) -> &str {
+            "owned-test"
+        }
+        fn mac_address(&self) -> MacAddress {
+            MacAddress::new([2, 1, 2, 3, 4, 5])
+        }
+        fn ip_address(&self) -> Option<crate::network::ipv4::Ipv4Address> {
+            None
+        }
+        fn set_ip_address(&self, _: crate::network::ipv4::Ipv4Address) {}
+        fn clear_ip_address(&self) {}
+        fn send(&self, packet: DevicePacket) -> Result<(), &'static str> {
+            *self.0.lock() = Some(packet);
+            Ok(())
+        }
+        fn poll(&self) -> Result<Vec<DevicePacket>, &'static str> {
+            Ok(Vec::new())
+        }
+        fn stats(&self) -> crate::network::InterfaceStats {
+            Default::default()
+        }
+    }
+
+    #[test_case]
+    fn ethernet_owned_send_keeps_allocation_in_device_queue() {
+        let eth = EthernetLayer::new();
+        let device = Arc::new(QueuedInterface(IrqSpinLock::new(None)));
+        eth.register_interface(device.name(), device.mac_address(), device.clone());
+        let mut context = LayerContext::new();
+        context.set("interface", device.name().as_bytes());
+        context.set("eth_dst_mac", &[2, 9, 8, 7, 6, 5]);
+        for size in [20, 1480] {
+            let original = alloc::vec![0xa5; size];
+            let packet = PacketBuffer::from_slice(&original, 14).unwrap();
+            let payload_address = packet.as_slice().as_ptr();
+            eth.send_owned(packet, &context, &[]).unwrap();
+            drop(original);
+            let packet = device.0.lock().take().unwrap();
+            assert_eq!(packet.as_slice()[14..].as_ptr(), payload_address);
+            assert_eq!(&packet.as_slice()[..6], &[2, 9, 8, 7, 6, 5]);
+            assert_eq!(&packet.as_slice()[6..12], device.mac_address().as_bytes());
+            assert_eq!(&packet.as_slice()[12..14], &[8, 0]);
+            assert!(
+                packet.as_slice()[14..14 + size]
+                    .iter()
+                    .all(|byte| *byte == 0xa5)
+            );
+            assert!(packet.as_slice()[14 + size..].iter().all(|byte| *byte == 0));
+            assert_eq!(packet.len, (14 + size).max(60));
+        }
     }
 }

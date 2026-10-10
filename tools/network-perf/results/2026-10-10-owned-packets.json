@@ -1,0 +1,1103 @@
+{
+  "description": "Exclusive transmit ownership across TCP, IPv4, Ethernet and ARP; 64 MiB HVF A/B/A, three pairs per image/backend.",
+  "changed_sources": [
+    "kernel/src/network/arp.rs",
+    "kernel/src/network/ethernet.rs",
+    "kernel/src/network/ipv4.rs",
+    "kernel/src/network/mod.rs",
+    "kernel/src/network/packet.rs",
+    "kernel/src/network/protocol_stack.rs",
+    "kernel/src/network/tcp.rs"
+  ],
+  "source_sha256": {
+    "kernel/src/network/arp.rs": "4beca4a0e352e2ab4a2885c288841250ce44a3d5157ace5f1f934cc66bacd341",
+    "kernel/src/network/ethernet.rs": "44a6b4e8d943624b036297e97ee58a56c67940193cd86e951eab081bc69a6c3e",
+    "kernel/src/network/ipv4.rs": "f34b7f741fef78ffb1a2fc3bba89c7e38d3e51af8d5b741d46772af6451f4ab6",
+    "kernel/src/network/mod.rs": "c43e2e4f852e913ef0c330c770a5d45a923a432d490e803367503c1f3a689df0",
+    "kernel/src/network/packet.rs": "20206916b5cf94ddb013325f92d1bc7c89b5d742f0583f06dab0db03f3e2bc4d",
+    "kernel/src/network/protocol_stack.rs": "0cc95fadb0d8105330ba6e33b149ee4105001eb52b8af51bc9cb072ba17200fe",
+    "kernel/src/network/tcp.rs": "13fa16ece8a626a8e134319f23d22da1acedf4cef52ca4fd8855bcd046097576"
+  },
+  "validation": [
+    {
+      "log": ".build/network-perf/kernel-tests-owned-arp-final.log",
+      "sha256": "d0284942259012962b6a48aea635008cb7ae624f881455d049f2b1d83af126f9",
+      "result": "All 1440 tests passed"
+    },
+    {
+      "log": ".build/network-perf/kernel-tests-owned-arp-riscv.log",
+      "sha256": "a1ea476b85a10f736cbe5fcaed002474aceda9f9b79ef71aed2798beef74afa5",
+      "result": "All 1456 tests passed"
+    }
+  ],
+  "host_validation": {
+    "source_sha256": {
+      "kernel/src/drivers/usb/cdc_ncm.rs": "c473d740a036306b6c26c04a602166f6ebe54079a642fd41df7ea461f67a77e9",
+      "kernel/src/drivers/usb/xhci/mod.rs": "48aa77351c3f34081c5cd0fced2c849440cf01c73e6ae2e44e47ad0e8e616b40",
+      "kernel/src/drivers/usb/xhci/ring.rs": "d6397d5bf586b7b01758d838e64a56ab520861492c63fc18798d238e629e4fd7",
+      "kernel/src/network/tcp.rs": "13fa16ece8a626a8e134319f23d22da1acedf4cef52ca4fd8855bcd046097576",
+      "kernel/src/network/ipv4.rs": "f34b7f741fef78ffb1a2fc3bba89c7e38d3e51af8d5b741d46772af6451f4ab6",
+      "kernel/src/network/protocol_stack.rs": "0cc95fadb0d8105330ba6e33b149ee4105001eb52b8af51bc9cb072ba17200fe",
+      "kernel/src/network/packet.rs": "20206916b5cf94ddb013325f92d1bc7c89b5d742f0583f06dab0db03f3e2bc4d"
+    },
+    "runs": [
+      {
+        "suite": "ncm",
+        "result": "ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "harness_sha256": "0a967a61740f6408b33330affe9e1da07e8ecb115ffc2ee1836646c7387fc1d8",
+        "extracted_sha256": "8db765ed7036586f603ec9bb8ab9d305f592db3c4e53ba22a0d560763ea83c48"
+      },
+      {
+        "suite": "ownership",
+        "result": "ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "harness_sha256": "b5ffa7b8a234a7c95f6b9a0a0f6169009ce3f6092fcd21d44308ebb37470627e",
+        "extracted_sha256": "7b561a35a112244d268259358105994ad15c3ce5aedd15306d7ef5926b7e4a7d"
+      },
+      {
+        "suite": "packet",
+        "result": "ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "harness_sha256": "08d46dd3296f35811336b4c5c9bcdd0a2d4a9e094b7ba49ec03f8c580d718833",
+        "extracted_sha256": "dd980ae06518c8c1d0159e99f795a6ca2c14e60f3e6a5bc4bab19921bbdbeba1"
+      },
+      {
+        "suite": "worker",
+        "result": "ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "harness_sha256": "f6df1db6b094fc1f20f521dd07ae73c1b323983d7469bcb9488f6dfbb7edf228",
+        "extracted_sha256": "30088a70a9a782c4f4fb61e2fa03a21a8fd70cc5ff70d8ee410874a290183bd8"
+      },
+      {
+        "suite": "drain",
+        "result": "ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s",
+        "harness_sha256": "01ca6641af9cf96ce722384cc8f3d029a3616ffccb09036fef140e701aeb6fa5",
+        "extracted_sha256": "273045a746f48d31a7b94e2e37c829158f553a7f0e1b9669c1fe4a720bb50c8b"
+      }
+    ],
+    "physical_tested": false,
+    "result": "pass",
+    "source_unchanged": true,
+    "temporary_binaries_removed": true
+  },
+  "runs": [
+    {
+      "label": "hvf-owned-packet-before",
+      "mode": "virtio",
+      "receipt": ".build/network-perf/hvf-owned-packet-before/virtio/receipt.json",
+      "receipt_sha256": "11c417cf8faf06af7e98b3e43de57537642f5119464b2298a91bc690d06284c6",
+      "kernel_sha256": "19785219c42ce60c521ccc6cbab01f7ace2a5f77340b76f0793fa1b102948bea",
+      "command": [
+        "/nix/store/jn7fp0fa737m2cv1l0va1c6q6f4a0f93-qemu-11.1.0-scarlet/bin/qemu-system-aarch64",
+        "-machine",
+        "virt,gic-version=3",
+        "-cpu",
+        "host",
+        "-accel",
+        "hvf",
+        "-m",
+        "2G",
+        "-smp",
+        "4",
+        "-display",
+        "none",
+        "-monitor",
+        "none",
+        "-serial",
+        "stdio",
+        "-no-reboot",
+        "-global",
+        "virtio-mmio.force-legacy=false",
+        "-kernel",
+        "/Users/petitstrawberry/Development/Rust/Scarlet/.build/network-perf/hvf-owned-packet-before/artifacts/Image",
+        "-initrd",
+        "/Users/petitstrawberry/Development/Rust/Scarlet/.build/network-perf/hvf-owned-packet-before/artifacts/initramfs.cpio",
+        "-append",
+        "maxcpus=4 init.exec=/bin/network-perf",
+        "-netdev",
+        "user,id=net0,hostfwd=tcp:127.0.0.1:18081-:8081",
+        "-device",
+        "virtio-net-device,netdev=net0,mac=52:54:00:12:34:56"
+      ],
+      "accelerator": "hvf",
+      "qemu_version": "QEMU emulator version 11.1.0\nCopyright (c) 2003-2026 Fabrice Bellard and the QEMU Project developers\n",
+      "runner_sha256": "2381faf54ea81533346f002b6a3170c8ccaa1f0e06535330da338550131f7da2",
+      "results": [
+        {
+          "index": 0,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1012291458,
+          "host_mbps": 530.35211129876,
+          "qemu_process_cpu_seconds": 1.87,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 27188,
+            "elapsed_ns": 1011388000,
+            "profile": 0,
+            "busy_ns": 1351429640,
+            "idle_ns": 2694265360
+          }
+        },
+        {
+          "index": 0,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1283838542,
+          "host_mbps": 418.1763472871342,
+          "qemu_process_cpu_seconds": 1.73,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1283101000,
+            "profile": 0,
+            "busy_ns": 945491182,
+            "idle_ns": 4187235818
+          }
+        },
+        {
+          "index": 1,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 988478250,
+          "host_mbps": 543.1287051586618,
+          "qemu_process_cpu_seconds": 1.8400000000000003,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 26552,
+            "elapsed_ns": 987759000,
+            "profile": 0,
+            "busy_ns": 1306784903,
+            "idle_ns": 2644340761
+          }
+        },
+        {
+          "index": 1,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1169151792,
+          "host_mbps": 459.1969286396988,
+          "qemu_process_cpu_seconds": 1.6799999999999997,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1168542000,
+            "profile": 0,
+            "busy_ns": 904452809,
+            "idle_ns": 3769793523
+          }
+        },
+        {
+          "index": 2,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1002032417,
+          "host_mbps": 535.7819795963746,
+          "qemu_process_cpu_seconds": 1.8800000000000008,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 27157,
+            "elapsed_ns": 1001248000,
+            "profile": 0,
+            "busy_ns": 1316983667,
+            "idle_ns": 2688100833
+          }
+        },
+        {
+          "index": 2,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1204265917,
+          "host_mbps": 445.80761144301323,
+          "qemu_process_cpu_seconds": 1.709999999999999,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1203628000,
+            "profile": 0,
+            "busy_ns": 901764092,
+            "idle_ns": 3912833576
+          }
+        }
+      ],
+      "medians": {
+        "rx": {
+          "mbps": 535.7819795963746,
+          "qemu_cpu_seconds": 1.87
+        },
+        "tx": {
+          "mbps": 445.80761144301323,
+          "qemu_cpu_seconds": 1.709999999999999
+        }
+      }
+    },
+    {
+      "label": "hvf-owned-packet-before",
+      "mode": "ncm",
+      "receipt": ".build/network-perf/hvf-owned-packet-before/ncm/receipt.json",
+      "receipt_sha256": "4bdfbc118b4ed552589b807c17fe5dc64c842d98139288c08cdb70d3da55599f",
+      "kernel_sha256": "19785219c42ce60c521ccc6cbab01f7ace2a5f77340b76f0793fa1b102948bea",
+      "command": [
+        "/nix/store/jn7fp0fa737m2cv1l0va1c6q6f4a0f93-qemu-11.1.0-scarlet/bin/qemu-system-aarch64",
+        "-machine",
+        "virt,gic-version=3",
+        "-cpu",
+        "host",
+        "-accel",
+        "hvf",
+        "-m",
+        "2G",
+        "-smp",
+        "4",
+        "-display",
+        "none",
+        "-monitor",
+        "none",
+        "-serial",
+        "stdio",
+        "-no-reboot",
+        "-global",
+        "virtio-mmio.force-legacy=false",
+        "-kernel",
+        "/Users/petitstrawberry/Development/Rust/Scarlet/.build/network-perf/hvf-owned-packet-before/artifacts/Image",
+        "-initrd",
+        "/Users/petitstrawberry/Development/Rust/Scarlet/.build/network-perf/hvf-owned-packet-before/artifacts/initramfs.cpio",
+        "-append",
+        "maxcpus=4 init.exec=/bin/network-perf",
+        "-netdev",
+        "user,id=net0,hostfwd=tcp:127.0.0.1:18081-:8081",
+        "-device",
+        "qemu-xhci,id=xhci,bus=pcie.0,addr=0x1",
+        "-device",
+        "usb-ncm,id=ncm0,bus=xhci.0,netdev=net0,mac=52:54:00:12:34:57"
+      ],
+      "accelerator": "hvf",
+      "qemu_version": "QEMU emulator version 11.1.0\nCopyright (c) 2003-2026 Fabrice Bellard and the QEMU Project developers\n",
+      "runner_sha256": "2381faf54ea81533346f002b6a3170c8ccaa1f0e06535330da338550131f7da2",
+      "results": [
+        {
+          "index": 0,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 672040833,
+          "host_mbps": 798.8665057797165,
+          "qemu_process_cpu_seconds": 1.7699999999999998,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 31783,
+            "elapsed_ns": 671445000,
+            "profile": 0,
+            "busy_ns": 1591933215,
+            "idle_ns": 1093943617
+          }
+        },
+        {
+          "index": 0,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1836377208,
+          "host_mbps": 292.3532864931963,
+          "qemu_process_cpu_seconds": 2.8900000000000006,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1835950000,
+            "profile": 0,
+            "busy_ns": 2856014920,
+            "idle_ns": 4487894580
+          }
+        },
+        {
+          "index": 1,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 690424000,
+          "host_mbps": 777.5959584255472,
+          "qemu_process_cpu_seconds": 1.7999999999999998,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 30460,
+            "elapsed_ns": 689633000,
+            "profile": 0,
+            "busy_ns": 1605834018,
+            "idle_ns": 1152794150
+          }
+        },
+        {
+          "index": 1,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1694246125,
+          "host_mbps": 316.87893752745043,
+          "qemu_process_cpu_seconds": 2.8199999999999994,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1693864000,
+            "profile": 0,
+            "busy_ns": 2623572268,
+            "idle_ns": 4151985068
+          }
+        },
+        {
+          "index": 2,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 763086959,
+          "host_mbps": 703.5514179190684,
+          "qemu_process_cpu_seconds": 1.8600000000000012,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 29444,
+            "elapsed_ns": 762425000,
+            "profile": 0,
+            "busy_ns": 1711665390,
+            "idle_ns": 1338130278
+          }
+        },
+        {
+          "index": 2,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1468891958,
+          "host_mbps": 365.4938057738349,
+          "qemu_process_cpu_seconds": 2.719999999999999,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1468786000,
+            "profile": 0,
+            "busy_ns": 2372721315,
+            "idle_ns": 3502655353
+          }
+        }
+      ],
+      "medians": {
+        "rx": {
+          "mbps": 777.5959584255472,
+          "qemu_cpu_seconds": 1.7999999999999998
+        },
+        "tx": {
+          "mbps": 316.87893752745043,
+          "qemu_cpu_seconds": 2.8199999999999994
+        }
+      }
+    },
+    {
+      "label": "hvf-owned-packet-after",
+      "mode": "virtio",
+      "receipt": ".build/network-perf/hvf-owned-packet-after/virtio/receipt.json",
+      "receipt_sha256": "c5587e6eb41bd089cba22e6439420d4cfe6bcbd7a882f0a6b0a82e1738951017",
+      "kernel_sha256": "cba2af024b7dfc76d8775618c38826ffbf767634aa0e0952e5e7d80eec1ab6a3",
+      "command": [
+        "/nix/store/jn7fp0fa737m2cv1l0va1c6q6f4a0f93-qemu-11.1.0-scarlet/bin/qemu-system-aarch64",
+        "-machine",
+        "virt,gic-version=3",
+        "-cpu",
+        "host",
+        "-accel",
+        "hvf",
+        "-m",
+        "2G",
+        "-smp",
+        "4",
+        "-display",
+        "none",
+        "-monitor",
+        "none",
+        "-serial",
+        "stdio",
+        "-no-reboot",
+        "-global",
+        "virtio-mmio.force-legacy=false",
+        "-kernel",
+        "/Users/petitstrawberry/Development/Rust/Scarlet/.build/network-perf/hvf-owned-packet-after/artifacts/Image",
+        "-initrd",
+        "/Users/petitstrawberry/Development/Rust/Scarlet/.build/network-perf/hvf-owned-packet-after/artifacts/initramfs.cpio",
+        "-append",
+        "maxcpus=4 init.exec=/bin/network-perf",
+        "-netdev",
+        "user,id=net0,hostfwd=tcp:127.0.0.1:18081-:8081",
+        "-device",
+        "virtio-net-device,netdev=net0,mac=52:54:00:12:34:56"
+      ],
+      "accelerator": "hvf",
+      "qemu_version": "QEMU emulator version 11.1.0\nCopyright (c) 2003-2026 Fabrice Bellard and the QEMU Project developers\n",
+      "runner_sha256": "2381faf54ea81533346f002b6a3170c8ccaa1f0e06535330da338550131f7da2",
+      "results": [
+        {
+          "index": 0,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1048560834,
+          "host_mbps": 512.0074053805447,
+          "qemu_process_cpu_seconds": 1.9300000000000002,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 27389,
+            "elapsed_ns": 1047856000,
+            "profile": 0,
+            "busy_ns": 1369439631,
+            "idle_ns": 2822101705
+          }
+        },
+        {
+          "index": 0,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1158970459,
+          "host_mbps": 463.23088550784195,
+          "qemu_process_cpu_seconds": 1.67,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1158590000,
+            "profile": 0,
+            "busy_ns": 939232460,
+            "idle_ns": 3695231372
+          }
+        },
+        {
+          "index": 1,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1050637959,
+          "host_mbps": 510.9951600368553,
+          "qemu_process_cpu_seconds": 1.8900000000000001,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 26395,
+            "elapsed_ns": 1049651000,
+            "profile": 0,
+            "busy_ns": 1363152597,
+            "idle_ns": 2835540403
+          }
+        },
+        {
+          "index": 1,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1132825625,
+          "host_mbps": 473.92193480792776,
+          "qemu_process_cpu_seconds": 1.6500000000000004,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1132317000,
+            "profile": 0,
+            "busy_ns": 950868648,
+            "idle_ns": 3578496520
+          }
+        },
+        {
+          "index": 2,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1034050541,
+          "host_mbps": 519.1921387912122,
+          "qemu_process_cpu_seconds": 1.9100000000000001,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 27315,
+            "elapsed_ns": 1033346000,
+            "profile": 0,
+            "busy_ns": 1362438253,
+            "idle_ns": 2771055911
+          }
+        },
+        {
+          "index": 2,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1140310375,
+          "host_mbps": 470.81121400829136,
+          "qemu_process_cpu_seconds": 1.67,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1139772000,
+            "profile": 0,
+            "busy_ns": 983574998,
+            "idle_ns": 3575614838
+          }
+        }
+      ],
+      "medians": {
+        "rx": {
+          "mbps": 512.0074053805447,
+          "qemu_cpu_seconds": 1.9100000000000001
+        },
+        "tx": {
+          "mbps": 470.81121400829136,
+          "qemu_cpu_seconds": 1.67
+        }
+      }
+    },
+    {
+      "label": "hvf-owned-packet-after",
+      "mode": "ncm",
+      "receipt": ".build/network-perf/hvf-owned-packet-after/ncm/receipt.json",
+      "receipt_sha256": "a2462d0753a289887530bbdb9d6847f4d4f24aec395f44fe323b21a8fc9097bd",
+      "kernel_sha256": "cba2af024b7dfc76d8775618c38826ffbf767634aa0e0952e5e7d80eec1ab6a3",
+      "command": [
+        "/nix/store/jn7fp0fa737m2cv1l0va1c6q6f4a0f93-qemu-11.1.0-scarlet/bin/qemu-system-aarch64",
+        "-machine",
+        "virt,gic-version=3",
+        "-cpu",
+        "host",
+        "-accel",
+        "hvf",
+        "-m",
+        "2G",
+        "-smp",
+        "4",
+        "-display",
+        "none",
+        "-monitor",
+        "none",
+        "-serial",
+        "stdio",
+        "-no-reboot",
+        "-global",
+        "virtio-mmio.force-legacy=false",
+        "-kernel",
+        "/Users/petitstrawberry/Development/Rust/Scarlet/.build/network-perf/hvf-owned-packet-after/artifacts/Image",
+        "-initrd",
+        "/Users/petitstrawberry/Development/Rust/Scarlet/.build/network-perf/hvf-owned-packet-after/artifacts/initramfs.cpio",
+        "-append",
+        "maxcpus=4 init.exec=/bin/network-perf",
+        "-netdev",
+        "user,id=net0,hostfwd=tcp:127.0.0.1:18081-:8081",
+        "-device",
+        "qemu-xhci,id=xhci,bus=pcie.0,addr=0x1",
+        "-device",
+        "usb-ncm,id=ncm0,bus=xhci.0,netdev=net0,mac=52:54:00:12:34:57"
+      ],
+      "accelerator": "hvf",
+      "qemu_version": "QEMU emulator version 11.1.0\nCopyright (c) 2003-2026 Fabrice Bellard and the QEMU Project developers\n",
+      "runner_sha256": "2381faf54ea81533346f002b6a3170c8ccaa1f0e06535330da338550131f7da2",
+      "results": [
+        {
+          "index": 0,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 756950667,
+          "host_mbps": 709.2548238681981,
+          "qemu_process_cpu_seconds": 1.96,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 35455,
+            "elapsed_ns": 756343000,
+            "profile": 0,
+            "busy_ns": 1813032726,
+            "idle_ns": 1212537774
+          }
+        },
+        {
+          "index": 0,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1443243709,
+          "host_mbps": 371.9890886425475,
+          "qemu_process_cpu_seconds": 2.83,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1443094000,
+            "profile": 0,
+            "busy_ns": 2449258371,
+            "idle_ns": 3323452297
+          }
+        },
+        {
+          "index": 1,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 835252625,
+          "host_mbps": 642.7647108561915,
+          "qemu_process_cpu_seconds": 1.9900000000000002,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 34305,
+            "elapsed_ns": 834753000,
+            "profile": 0,
+            "busy_ns": 1831752678,
+            "idle_ns": 1507418658
+          }
+        },
+        {
+          "index": 1,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1476742000,
+          "host_mbps": 363.5509195241958,
+          "qemu_process_cpu_seconds": 2.8499999999999996,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1476709000,
+            "profile": 0,
+            "busy_ns": 2481908773,
+            "idle_ns": 3425094059
+          }
+        },
+        {
+          "index": 2,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 762172834,
+          "host_mbps": 704.3952343229279,
+          "qemu_process_cpu_seconds": 1.9600000000000009,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 34858,
+            "elapsed_ns": 761815000,
+            "profile": 0,
+            "busy_ns": 1793557892,
+            "idle_ns": 1253889772
+          }
+        },
+        {
+          "index": 2,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1459295958,
+          "host_mbps": 367.89721033408085,
+          "qemu_process_cpu_seconds": 2.8199999999999985,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1459307000,
+            "profile": 0,
+            "busy_ns": 2455591460,
+            "idle_ns": 3381919876
+          }
+        }
+      ],
+      "medians": {
+        "rx": {
+          "mbps": 704.3952343229279,
+          "qemu_cpu_seconds": 1.9600000000000009
+        },
+        "tx": {
+          "mbps": 367.89721033408085,
+          "qemu_cpu_seconds": 2.83
+        }
+      }
+    },
+    {
+      "label": "hvf-owned-packet-before-recheck",
+      "mode": "virtio",
+      "receipt": ".build/network-perf/hvf-owned-packet-before-recheck/virtio/receipt.json",
+      "receipt_sha256": "e17b7c8d98502642690738534b69fbbc6eb836af834a0e0f32a6cc6384f8ed20",
+      "kernel_sha256": "19785219c42ce60c521ccc6cbab01f7ace2a5f77340b76f0793fa1b102948bea",
+      "command": [
+        "/nix/store/jn7fp0fa737m2cv1l0va1c6q6f4a0f93-qemu-11.1.0-scarlet/bin/qemu-system-aarch64",
+        "-machine",
+        "virt,gic-version=3",
+        "-cpu",
+        "host",
+        "-accel",
+        "hvf",
+        "-m",
+        "2G",
+        "-smp",
+        "4",
+        "-display",
+        "none",
+        "-monitor",
+        "none",
+        "-serial",
+        "stdio",
+        "-no-reboot",
+        "-global",
+        "virtio-mmio.force-legacy=false",
+        "-kernel",
+        "/Users/petitstrawberry/Development/Rust/Scarlet/.build/network-perf/hvf-owned-packet-before-recheck/artifacts/Image",
+        "-initrd",
+        "/Users/petitstrawberry/Development/Rust/Scarlet/.build/network-perf/hvf-owned-packet-before-recheck/artifacts/initramfs.cpio",
+        "-append",
+        "maxcpus=4 init.exec=/bin/network-perf",
+        "-netdev",
+        "user,id=net0,hostfwd=tcp:127.0.0.1:18081-:8081",
+        "-device",
+        "virtio-net-device,netdev=net0,mac=52:54:00:12:34:56"
+      ],
+      "accelerator": "hvf",
+      "qemu_version": "QEMU emulator version 11.1.0\nCopyright (c) 2003-2026 Fabrice Bellard and the QEMU Project developers\n",
+      "runner_sha256": "2381faf54ea81533346f002b6a3170c8ccaa1f0e06535330da338550131f7da2",
+      "results": [
+        {
+          "index": 0,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1071370250,
+          "host_mbps": 501.1067947798625,
+          "qemu_process_cpu_seconds": 1.8900000000000001,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 27047,
+            "elapsed_ns": 1070377000,
+            "profile": 0,
+            "busy_ns": 1379672325,
+            "idle_ns": 2902178675
+          }
+        },
+        {
+          "index": 0,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1165211416,
+          "host_mbps": 460.7497872300283,
+          "qemu_process_cpu_seconds": 1.6700000000000004,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1165254000,
+            "profile": 0,
+            "busy_ns": 992158543,
+            "idle_ns": 3668960293
+          }
+        },
+        {
+          "index": 1,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1034268625,
+          "host_mbps": 519.0826628817055,
+          "qemu_process_cpu_seconds": 1.88,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 26901,
+            "elapsed_ns": 1033519000,
+            "profile": 0,
+            "busy_ns": 1347572084,
+            "idle_ns": 2786623084
+          }
+        },
+        {
+          "index": 1,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1736895416,
+          "host_mbps": 309.09800731490907,
+          "qemu_process_cpu_seconds": 1.9100000000000001,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1736463000,
+            "profile": 0,
+            "busy_ns": 1145632310,
+            "idle_ns": 5800341190
+          }
+        },
+        {
+          "index": 2,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1063811333,
+          "host_mbps": 504.66741173549804,
+          "qemu_process_cpu_seconds": 1.8899999999999997,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 26323,
+            "elapsed_ns": 1063038000,
+            "profile": 0,
+            "busy_ns": 1362474870,
+            "idle_ns": 2889778798
+          }
+        },
+        {
+          "index": 2,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1144497000,
+          "host_mbps": 469.0889639728195,
+          "qemu_process_cpu_seconds": 1.67,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1143845000,
+            "profile": 0,
+            "busy_ns": 947647159,
+            "idle_ns": 3627834173
+          }
+        }
+      ],
+      "medians": {
+        "rx": {
+          "mbps": 504.66741173549804,
+          "qemu_cpu_seconds": 1.8899999999999997
+        },
+        "tx": {
+          "mbps": 460.7497872300283,
+          "qemu_cpu_seconds": 1.6700000000000004
+        }
+      }
+    },
+    {
+      "label": "hvf-owned-packet-before-recheck",
+      "mode": "ncm",
+      "receipt": ".build/network-perf/hvf-owned-packet-before-recheck/ncm/receipt.json",
+      "receipt_sha256": "05f1d6cc0613352e6e11c2765c0f6fac2dceea5a3ab03035d891e42f6f4638ce",
+      "kernel_sha256": "19785219c42ce60c521ccc6cbab01f7ace2a5f77340b76f0793fa1b102948bea",
+      "command": [
+        "/nix/store/jn7fp0fa737m2cv1l0va1c6q6f4a0f93-qemu-11.1.0-scarlet/bin/qemu-system-aarch64",
+        "-machine",
+        "virt,gic-version=3",
+        "-cpu",
+        "host",
+        "-accel",
+        "hvf",
+        "-m",
+        "2G",
+        "-smp",
+        "4",
+        "-display",
+        "none",
+        "-monitor",
+        "none",
+        "-serial",
+        "stdio",
+        "-no-reboot",
+        "-global",
+        "virtio-mmio.force-legacy=false",
+        "-kernel",
+        "/Users/petitstrawberry/Development/Rust/Scarlet/.build/network-perf/hvf-owned-packet-before-recheck/artifacts/Image",
+        "-initrd",
+        "/Users/petitstrawberry/Development/Rust/Scarlet/.build/network-perf/hvf-owned-packet-before-recheck/artifacts/initramfs.cpio",
+        "-append",
+        "maxcpus=4 init.exec=/bin/network-perf",
+        "-netdev",
+        "user,id=net0,hostfwd=tcp:127.0.0.1:18081-:8081",
+        "-device",
+        "qemu-xhci,id=xhci,bus=pcie.0,addr=0x1",
+        "-device",
+        "usb-ncm,id=ncm0,bus=xhci.0,netdev=net0,mac=52:54:00:12:34:57"
+      ],
+      "accelerator": "hvf",
+      "qemu_version": "QEMU emulator version 11.1.0\nCopyright (c) 2003-2026 Fabrice Bellard and the QEMU Project developers\n",
+      "runner_sha256": "2381faf54ea81533346f002b6a3170c8ccaa1f0e06535330da338550131f7da2",
+      "results": [
+        {
+          "index": 0,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 769775875,
+          "host_mbps": 697.4379549112266,
+          "qemu_process_cpu_seconds": 1.78,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 31490,
+            "elapsed_ns": 769162000,
+            "profile": 0,
+            "busy_ns": 1601633125,
+            "idle_ns": 1475112875
+          }
+        },
+        {
+          "index": 0,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1423214334,
+          "host_mbps": 377.2242164615523,
+          "qemu_process_cpu_seconds": 2.71,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1423198000,
+            "profile": 0,
+            "busy_ns": 2327103514,
+            "idle_ns": 3366001986
+          }
+        },
+        {
+          "index": 1,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 717188500,
+          "host_mbps": 748.5771341843881,
+          "qemu_process_cpu_seconds": 1.83,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 26845,
+            "elapsed_ns": 716848000,
+            "profile": 0,
+            "busy_ns": 1656523305,
+            "idle_ns": 1211411527
+          }
+        },
+        {
+          "index": 1,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1426645125,
+          "host_mbps": 376.31706903985673,
+          "qemu_process_cpu_seconds": 2.710000000000001,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1426177000,
+            "profile": 0,
+            "busy_ns": 2326578489,
+            "idle_ns": 3378316511
+          }
+        },
+        {
+          "index": 2,
+          "direction": "rx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 736240334,
+          "host_mbps": 729.206058411899,
+          "qemu_process_cpu_seconds": 1.83,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "rx",
+            "bytes": 67108864,
+            "calls": 31478,
+            "elapsed_ns": 736023000,
+            "profile": 0,
+            "busy_ns": 1642135779,
+            "idle_ns": 1302295889
+          }
+        },
+        {
+          "index": 2,
+          "direction": "tx",
+          "bytes": 67108864,
+          "host_elapsed_ns": 1425311333,
+          "host_mbps": 376.6692227655219,
+          "qemu_process_cpu_seconds": 2.719999999999999,
+          "payload_verified": true,
+          "profiling": false,
+          "guest": {
+            "direction": "tx",
+            "bytes": 67108864,
+            "calls": 1024,
+            "elapsed_ns": 1424936000,
+            "profile": 0,
+            "busy_ns": 2328208337,
+            "idle_ns": 3371639331
+          }
+        }
+      ],
+      "medians": {
+        "rx": {
+          "mbps": 729.206058411899,
+          "qemu_cpu_seconds": 1.83
+        },
+        "tx": {
+          "mbps": 376.6692227655219,
+          "qemu_cpu_seconds": 2.710000000000001
+        }
+      }
+    }
+  ],
+  "physical_tested": false,
+  "interpretation": "One packet allocation replaces three in normal TCP encapsulation; payload address remains stable. Throughput samples vary, including baseline rechecks. No reliable throughput gain established. Application, retransmission and driver DMA copies remain.",
+  "limitations": [
+    "Host Raycast and mobileassetd CPU activity was observed during the comparison; no user processes were terminated.",
+    "QEMU SLiRP plus content-validation fixture does not establish physical throughput or backend ceiling.",
+    "RISC-V printed virtio-blk missing headers after all tests passed; runner exited 0; cause not established."
+  ]
+}

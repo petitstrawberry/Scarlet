@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::network::ipv4::Ipv4Address;
+use crate::network::packet::PacketBuffer;
 use crate::network::protocol_stack::get_network_manager;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
 use crate::network::socket::SocketError;
@@ -218,7 +219,7 @@ struct ArpPendingEntry {
     /// Cache entry
     entry: ArpCacheEntry,
     /// Packets waiting for this ARP resolution
-    packet_queue: IrqSpinLock<Vec<Vec<u8>>>,
+    packet_queue: IrqSpinLock<Vec<PacketBuffer>>,
 }
 
 /// ARP cache key: (interface_name, IP as u32)
@@ -536,7 +537,7 @@ impl ArpLayer {
                             eth_context.set("eth_dst_mac", &arp_packet.sender_mac);
                             eth_context.set("eth_src_mac", &src_mac);
                             eth_context.set("interface", iface.as_bytes());
-                            let _ = eth_layer.send(&packet_bytes, &eth_context, &[]);
+                            let _ = eth_layer.send_owned(packet_bytes, &eth_context, &[]);
                         }
                     }
                 }
@@ -649,7 +650,7 @@ impl ArpLayer {
                                     packet_bytes.len(),
                                     iface
                                 );
-                                let _ = eth_layer.send(&packet_bytes, &eth_context, &[]);
+                                let _ = eth_layer.send_owned(packet_bytes, &eth_context, &[]);
                             }
                         }
                     }
@@ -687,6 +688,16 @@ impl ArpLayer {
         interface: &str,
         ip_address: Ipv4Address,
         packet: Vec<u8>,
+    ) {
+        self.queue_owned_packet_on_interface(interface, ip_address, PacketBuffer::from_vec(packet));
+    }
+
+    /// Keep header space and payload ownership intact until neighbor resolution.
+    pub fn queue_owned_packet_on_interface(
+        &self,
+        interface: &str,
+        ip_address: Ipv4Address,
+        packet: PacketBuffer,
     ) {
         let pending_key = (
             alloc::string::String::from(interface),
@@ -887,5 +898,27 @@ mod tests {
         assert_eq!(PTYPE_IPV4, 0x0800);
         assert_eq!(HLEN_ETHERNET, 6);
         assert_eq!(PLEN_IPV4, 4);
+    }
+    #[test_case]
+    fn arp_pending_packet_retains_headroom_and_payload_ownership() {
+        let arp = ArpLayer::new();
+        let ip = Ipv4Address::new(192, 168, 1, 1);
+        let original = alloc::vec![0xa5; 40];
+        let packet = PacketBuffer::from_slice(&original, 14).unwrap();
+        let address = packet.as_slice().as_ptr();
+        arp.queue_owned_packet_on_interface("owned-test", ip, packet);
+        drop(original);
+        let pending = arp
+            .pending
+            .write()
+            .remove(&("owned-test".into(), u32::from_be_bytes(ip.0)))
+            .unwrap();
+        let mut packet = pending.packet_queue.lock().pop().unwrap();
+        packet.prepend(&[0xee; 14]).unwrap();
+        packet.pad_to(60).unwrap();
+        let frame = packet.into_vec();
+        assert_eq!(frame[14..].as_ptr(), address);
+        assert_eq!(&frame[14..54], &[0xa5; 40]);
+        assert_eq!(&frame[54..], &[0; 6]);
     }
 }

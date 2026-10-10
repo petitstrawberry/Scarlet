@@ -77,6 +77,8 @@ def other_suites(c):
     packet = (HARNESS / 'network-packet-allocation-host-tests.rs').read_text()
     packet = packet.replace('/* BASELINE */', 'mod baseline {\n' + packet_code(baseline, False) + '\n}')
     packet = packet.replace('/* CANDIDATE */', 'mod candidate {\n' + packet_code(current, True) + '\n}')
+    owned = (c / 'kernel/src/network/packet.rs').read_text()
+    packet = packet.replace('/* OWNED_PACKET */', owned[:owned.index('#[cfg(test)]')].replace('//!', '//'))
     xhci = (c / 'kernel/src/drivers/usb/xhci/mod.rs').read_text()
     worker = re.search('^const XHCI_WORKER_PASS_BUDGET:.*;$', xhci, re.M).group(0) + '\n' + block(xhci, 'fn xhci_worker_entry()')
     tcp = current['tcp.rs']
@@ -96,6 +98,7 @@ def main():
     version = subprocess.check_output([rustc, '-vV'], text=True)
     host = re.search('^host: (.+)$', version, re.M)[1]
     paths = ['kernel/src/drivers/usb/cdc_ncm.rs', 'kernel/src/drivers/usb/xhci/mod.rs', 'kernel/src/drivers/usb/xhci/ring.rs'] + ['kernel/src/network/' + n for n in ['tcp.rs', 'ipv4.rs', 'protocol_stack.rs']]
+    paths.append('kernel/src/network/packet.rs')
     before = {n: sha(ROOT / n) for n in paths}
     receipt = {'source_sha256': before, 'runs': [], 'physical_tested': False}
     with tempfile.TemporaryDirectory(prefix='network-regression-') as temp:

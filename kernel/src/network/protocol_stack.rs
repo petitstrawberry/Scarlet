@@ -445,6 +445,18 @@ pub trait NetworkLayer: Send + Sync + core::any::Any {
         next_layers: &[Arc<dyn NetworkLayer>],
     ) -> Result<(), SocketError>;
 
+    /// Consume an owned packet. Encapsulating layers can prepend headers in
+    /// reserved headroom and forward the same allocation. Existing implementations
+    /// retain their borrowed-send behavior through this synchronous fallback.
+    fn send_owned(
+        &self,
+        packet: super::packet::PacketBuffer,
+        context: &LayerContext,
+        next_layers: &[Arc<dyn NetworkLayer>],
+    ) -> Result<(), SocketError> {
+        self.send(packet.as_slice(), context, next_layers)
+    }
+
     /// Receive and process a packet at this layer
     ///
     /// The layer parses its header, extracts the protocol number, and routes

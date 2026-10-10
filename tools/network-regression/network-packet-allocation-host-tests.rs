@@ -207,3 +207,80 @@ fn ipv4_serialization_and_checksum_match_without_heap() {
     let (_, allocs, reallocs) = counted(|| b.calculate_checksum());
     assert_eq!((allocs, reallocs), (0, 0));
 }
+
+
+mod socket {
+    #[derive(Debug, PartialEq)]
+    pub enum SocketError { InvalidPacket, Other(String) }
+}
+mod owned_packet {
+    /* OWNED_PACKET */
+}
+
+#[test]
+fn encapsulation_transfers_one_allocation_and_no_payload_moves() {
+    use owned_packet::PacketBuffer;
+    for size in [0, 1, 20, 1460, 65501] {
+        let payload = vec![0xa5; size];
+        let (frame, allocs, reallocs) = counted(|| {
+            let mut packet = PacketBuffer::from_slice(&payload, 34).unwrap();
+            let address = packet.as_slice().as_ptr();
+            packet.prepend(&[0x45; 20]).unwrap();
+            packet.prepend(&[0xee; 14]).unwrap();
+            packet.pad_to(60).unwrap();
+            assert_eq!(packet.as_slice()[34..].as_ptr(), address);
+            let frame = packet.into_vec();
+            assert_eq!(frame[34..].as_ptr(), address);
+            frame
+        });
+        assert_eq!((allocs, reallocs), (1, 0));
+        assert_eq!(&frame[34..34 + size], payload.as_slice());
+        assert!(frame[34 + size..].iter().all(|byte| *byte == 0));
+    }
+    println!("TCP/IP/Ethernet buffer: one allocation, zero reallocations, stable payload address");
+}
+
+#[test]
+fn owned_packet_remains_valid_after_producer_and_input_are_dropped() {
+    let input = vec![0x77; 1460];
+    let packet = owned_packet::PacketBuffer::from_slice(&input, 34).unwrap();
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(packet);
+    drop(input);
+    let mut packet = queue.pop_front().unwrap();
+    packet.prepend(&[1; 20]).unwrap();
+    packet.prepend(&[2; 14]).unwrap();
+    let frame = packet.into_vec();
+    assert_eq!(&frame[34..], &[0x77; 1460]);
+}
+
+#[test]
+fn tcp_options_and_layer_headers_share_the_payload_allocation() {
+    for option_len in [0, 4, 12, 40] {
+        for payload_len in [1, 1460] {
+            let payload: Vec<u8> = (0..payload_len).map(|n| n as u8).collect();
+            let options = vec![0x99; option_len];
+            let (frame, allocs, reallocs) = counted(|| {
+                let mut packet = owned_packet::PacketBuffer::from_slice(
+                    &payload, 34 + 20 + option_len,
+                ).unwrap();
+                let address = packet.as_slice().as_ptr();
+                packet.prepend(&options).unwrap();
+                packet.prepend(&[0x10; 20]).unwrap();
+                packet.prepend(&[0x45; 20]).unwrap();
+                packet.prepend(&[0xee; 14]).unwrap();
+                packet.pad_to(60).unwrap();
+                let frame = packet.into_vec();
+                assert_eq!(frame[54 + option_len..].as_ptr(), address);
+                frame
+            });
+            assert_eq!((allocs, reallocs), (1, 0));
+            assert_eq!(&frame[..14], &[0xee; 14]);
+            assert_eq!(&frame[14..34], &[0x45; 20]);
+            assert_eq!(&frame[34..54], &[0x10; 20]);
+            assert_eq!(&frame[54..54 + option_len], options.as_slice());
+            assert_eq!(&frame[54 + option_len..54 + option_len + payload_len], payload.as_slice());
+            assert!(frame[54 + option_len + payload_len..].iter().all(|b| *b == 0));
+        }
+    }
+}

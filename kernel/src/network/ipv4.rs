@@ -18,6 +18,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use crate::network::packet::{IPV4_ETHERNET_HEADROOM, PacketBuffer};
 use crate::network::protocol_stack::{
     LayerContext, NetworkLayer, NetworkLayerStats, get_network_manager,
 };
@@ -156,7 +157,9 @@ impl Ipv4Header {
         bytes
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> { self.to_array().to_vec() }
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.to_array().to_vec()
+    }
 
     /// Parse header from bytes
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -672,6 +675,19 @@ impl NetworkLayer for Ipv4Layer {
         context: &LayerContext,
         next_layers: &[alloc::sync::Arc<dyn NetworkLayer>],
     ) -> Result<(), SocketError> {
+        self.send_owned(
+            PacketBuffer::from_slice(packet, IPV4_ETHERNET_HEADROOM)?,
+            context,
+            next_layers,
+        )
+    }
+
+    fn send_owned(
+        &self,
+        mut packet: PacketBuffer,
+        context: &LayerContext,
+        next_layers: &[alloc::sync::Arc<dyn NetworkLayer>],
+    ) -> Result<(), SocketError> {
         // Get destination IP from context (required)
         let dest_ip_bytes = context
             .get("ip_dst")
@@ -731,32 +747,23 @@ impl NetworkLayer for Ipv4Layer {
         header.ttl = self.default_ttl;
 
         // Calculate total length (header + packet)
-        let total_length = (20 + packet.len()) as u16;
+        let total_length = packet
+            .len()
+            .checked_add(20)
+            .and_then(|length| u16::try_from(length).ok())
+            .ok_or(SocketError::InvalidPacket)?;
         header.total_length = total_length;
 
         // Calculate and set checksum
         header.checksum = header.calculate_checksum();
 
-        // Small control packets need no intermediate heap allocation. The
-        // lower layer still takes its own storage when queuing for DMA/ARP.
-        let mut inline_packet = [0u8; 128];
-        let mut large_packet = Vec::new();
-        let packet_size = 20 + packet.len();
-        let ip_packet: &[u8] = if packet_size <= inline_packet.len() {
-            inline_packet[..20].copy_from_slice(&header.to_array());
-            inline_packet[20..packet_size].copy_from_slice(packet);
-            &inline_packet[..packet_size]
-        } else {
-            large_packet.reserve_exact(packet_size);
-            large_packet.extend_from_slice(&header.to_array());
-            large_packet.extend_from_slice(packet);
-            &large_packet
-        };
+        packet.prepend(&header.to_array())?;
+        let packet_size = packet.len();
 
         if LOG_IPV4_PACKET_TRACE {
             println!(
                 "[IPv4] Send: {} bytes (src: {}.{}.{}.{}, dst: {}.{}.{}.{}, proto: {}, iface: {})",
-                ip_packet.len(),
+                packet_size,
                 src_ip_bytes[0],
                 src_ip_bytes[1],
                 src_ip_bytes[2],
@@ -788,15 +795,15 @@ impl NetworkLayer for Ipv4Layer {
 
         // Forward to Ethernet layer
         if !next_layers.is_empty() {
-            next_layers[0].send(ip_packet, &eth_context, &next_layers[1..])?;
+            next_layers[0].send_owned(packet, &eth_context, &next_layers[1..])?;
         } else if let Some(eth_layer) = get_network_manager().get_layer("ethernet") {
-            eth_layer.send(ip_packet, &eth_context, &[])?;
+            eth_layer.send_owned(packet, &eth_context, &[])?;
         }
 
         // Update statistics
         let mut stats = self.stats.write();
         stats.packets_sent += 1;
-        stats.bytes_sent += ip_packet.len() as u64;
+        stats.bytes_sent += packet_size as u64;
 
         Ok(())
     }
@@ -1364,5 +1371,74 @@ mod tests {
         assert_eq!(protocol::TCP, 6);
         assert_eq!(protocol::UDP, 17);
         assert_eq!(protocol::IPV6, 41);
+    }
+    struct OwnedCapture(crate::sync::IrqSpinLock<Option<PacketBuffer>>);
+
+    impl NetworkLayer for OwnedCapture {
+        fn register_protocol(&self, _: u16, _: alloc::sync::Arc<dyn NetworkLayer>) {}
+        fn send(
+            &self,
+            _: &[u8],
+            _: &LayerContext,
+            _: &[alloc::sync::Arc<dyn NetworkLayer>],
+        ) -> Result<(), SocketError> {
+            panic!("IPv4 must forward owned packets");
+        }
+        fn send_owned(
+            &self,
+            packet: PacketBuffer,
+            context: &LayerContext,
+            _: &[alloc::sync::Arc<dyn NetworkLayer>],
+        ) -> Result<(), SocketError> {
+            assert_eq!(context.get("eth_type"), Some(&[8, 0][..]));
+            assert_eq!(context.get("next_hop"), Some(&[192, 168, 1, 1][..]));
+            *self.0.lock() = Some(packet);
+            Ok(())
+        }
+        fn receive(&self, _: &[u8], _: Option<&LayerContext>) -> Result<(), SocketError> {
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "owned-capture"
+        }
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+    }
+
+    #[test_case]
+    fn ipv4_owned_send_preserves_payload_and_valid_header() {
+        let ip = Ipv4Layer::new();
+        ip.add_address(
+            "eth-test",
+            Ipv4AddressInfo {
+                address: Ipv4Address::new(192, 168, 1, 100),
+                netmask: Ipv4Address::new(255, 255, 255, 0),
+                broadcast: None,
+                is_primary: true,
+            },
+        );
+        let capture = alloc::sync::Arc::new(OwnedCapture(crate::sync::IrqSpinLock::new(None)));
+        let mut context = LayerContext::new();
+        context.set("ip_src", &[192, 168, 1, 100]);
+        context.set("ip_dst", &[192, 168, 1, 1]);
+        context.set("interface", b"eth-test");
+        let packet = PacketBuffer::from_slice(&[0xa5; 1460], IPV4_ETHERNET_HEADROOM).unwrap();
+        let payload_address = packet.as_slice().as_ptr();
+        ip.send_owned(packet, &context, &[capture.clone()]).unwrap();
+        let packet = capture.0.lock().take().unwrap();
+        assert_eq!(packet.as_slice()[20..].as_ptr(), payload_address);
+        assert_eq!(&packet.as_slice()[20..], &[0xa5; 1460]);
+        let header = Ipv4Header::from_bytes(packet.as_slice()).unwrap();
+        let total_length = header.total_length;
+        let checksum = header.checksum;
+        assert_eq!(total_length, 1480);
+        assert_eq!(checksum, checksum_from_bytes(&packet.as_slice()[..20]));
+        let oversized = PacketBuffer::new(65516, 34).unwrap();
+        assert_eq!(
+            ip.send_owned(oversized, &context, &[capture.clone()]),
+            Err(SocketError::InvalidPacket)
+        );
+        assert!(capture.0.lock().is_none());
     }
 }

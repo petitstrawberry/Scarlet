@@ -157,3 +157,111 @@ spans identify TCP receive/stack dispatch and queue waiting as more expensive
 than DMA copying; they include preemption and lock waits, overlap, and must not
 be added together or treated as CPU time. Further work should separate ACK
 processing, socket locks/wakes and send-side packet construction.
+
+### Owned transmit buffers
+
+TCP data segments now reserve IPv4/Ethernet header space in `PacketBuffer`.
+`NetworkLayer::send_owned` consumes this buffer; IPv4 and Ethernet prepend their
+headers without moving the existing payload. Ethernet transfers the final Vec
+allocation to `DevicePacket`. ARP pending queues retain the owned buffer and its
+headroom until resolution, including both request and reply flush paths.
+Borrowed `send` callers and layer implementations remain supported.
+
+The normal TCP data encapsulation path uses one packet allocation instead of
+separate TCP, IPv4 and Ethernet allocations. Host allocation checks verify one
+allocation, zero reallocations and unchanged payload addresses for small and
+large frames. Kernel integration tests exercise owned IPv4 forwarding, the
+Ethernet device queue, ARP deferral, checksums, padding and overflow rejection.
+The buffer contains initialized bytes, has private storage/range fields, and
+cannot be cloned into shared mutable ownership. Insufficient headroom uses an
+owned checked fallback; finalization with unused headroom compacts in place.
+
+This is zero-copy between these encapsulation layers, not end-to-end zero-copy.
+The application-to-kernel copy, TCP send/retransmission storage and the existing
+NIC DMA/USB NTB copy remain. Driver completion ownership and retransmission
+lifetimes are unchanged. Improving those boundaries requires a separate shared
+immutable-payload or scatter/gather interface with completion ownership.
+
+The owned-buffer comparison is preserved in
+`results/2026-10-10-owned-packets.json`: frozen before/after/before images, HVF,
+four vCPUs, three content-checked 64 MiB pairs per backend and image, with no
+profiling or packet capture. Only the seven network implementation files differ
+between the frozen kernel sources. Median Mbps:
+
+| Backend | Direction | Before | Owned buffer | Before recheck |
+|---|---|---:|---:|---:|
+| virtio | guest RX | 535.78 | 512.01 | 504.67 |
+| virtio | guest TX | 445.81 | 470.81 | 460.75 |
+| USB-NCM | guest RX | 777.60 | 704.40 | 729.21 |
+| USB-NCM | guest TX | 316.88 | 367.90 | 376.67 |
+
+The baseline itself varies substantially; Raycast/mobileassetd CPU activity was
+observed on the host. These samples do not establish a reliable throughput gain,
+and some candidate medians are lower. The allocation reduction and stable
+payload address are independently verified; they do not establish allocation
+as the dominant remaining throughput limit. No user processes were stopped.
+All transfer payloads passed validation.
+
+Validation: 1440 ARM64 kernel tests, 1456 RISC-V kernel tests, and 64 host-model
+tests passed. The RISC-V runner printed `virtio-blk missing headers` after all
+tests passed and exited 0; its cause is not established. Raw logs and frozen
+images remain under `.build/network-perf`; task-created build caches were removed.
+
+A second release-image A/B/A run is recorded in
+`results/2026-10-10-owned-release-repeat.json`. Both frozen images were reused;
+the candidate source hashes matched the implementation at measurement time, and the
+build harness uses `--release` for the kernel, init, guest and loader. The kernel
+build log reports `release [optimized]`. All 36 content-checked 64 MiB transfers
+passed, using HVF with four CPUs and no concurrent compilation/test QEMU.
+
+Pooling the six baseline samples before/after the three candidate samples gives
+514.45→518.96 Mbps virtio RX (+0.9%), 464.79→467.73 virtio TX (+0.6%),
+767.01→729.71 USB-NCM RX (−4.9%), and 373.16→367.30 USB-NCM TX (−1.6%).
+Every candidate NCM RX sample is below every baseline RX sample in this rerun;
+NCM TX has modest overlap. This rerun establishes no performance improvement
+from the owned-buffer change and gives evidence of an NCM RX regression under
+this fixture. It does not identify the cause or establish physical throughput.
+
+
+### Avoid payload initialization before overwrite
+
+`PacketBuffer::from_slice` now initializes only reserved prefix space and
+extends the payload directly. TCP reserves transport plus IP/Ethernet headers
+and prepends its header/options, avoiding a full-payload zero-fill followed by
+an overwrite. All transmitted bytes remain initialized; there is no unsafe
+uninitialized storage or shared mutable backing. Host tests cover TCP option
+lengths 0/4/12/40 with one allocation, no reallocations, stable payload addresses,
+correct header order and initialized padding. ARM64 passed all **1440 tests**;
+the host regression harness passed **65 tests**.
+
+`results/2026-10-10-owned-prefix.json` preserves four alternating old-owned/new
+runs and a final original-image NCM check: release, HVF, four CPUs, 64 MiB, three
+transfers per direction, profiling/pcap disabled. **All 54 transfers** passed
+content validation. The initramfs is identical across all images; only
+`packet.rs` and `tcp.rs` changed from the preceding owned-buffer image. Release
+build logs were copied into the final candidate's artifact directory before
+build-cache cleanup.
+
+There is no established large speedup. The first candidate virtio run was slow
+(TX median 130.40 Mbps), but its repeat returned to 465.27 Mbps. The preceding
+image also had NCM slow transfers, including 159.70 Mbps TX. A non-task rustc
+process and macOS background activity were observed during the measurements;
+their effect has not been isolated. No slow sample was discarded. The final
+separate NCM checks measured original RX/TX **763.77/352.66 Mbps** and candidate
+**813.24/352.64 Mbps**. These values do not isolate the zero-fill contribution.
+
+ACK processing still scans retained segments and replaces retransmission
+timers when the head changes. Slow transfers also show increased guest idle
+time, so queue/wake latency remains a candidate alongside packet processing
+cost. These are investigation targets, not established causes. A same-backend
+Linux guest reference is still needed before assigning this setup a throughput
+ceiling.
+
+
+Before committing, the Ethernet ARP-miss call site was corrected to call
+`queue_owned_packet_on_interface` directly, rather than compacting to a Vec
+before adopting it again. This preserves reserved headroom through the actual
+Ethernet-to-ARP path. The measurements above precede this final call-site fix;
+no throughput effect is claimed for it. The final ARM64 suite passed **1440
+tests** (`.build/network-perf/kernel-tests-owned-commit.log`), and the host
+harness passed **65 tests** (`.build/network-perf/owned-commit-host/receipt.json`).

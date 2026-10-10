@@ -1636,17 +1636,23 @@ impl TcpSocket {
         // ACK/SYN/FIN segments fit in the maximum TCP header. Keep control
         // traffic off the heap; data segments retain their owned storage.
         let mut control_segment = [0u8; 60];
-        let mut data_segment = Vec::new();
-        let segment: &[u8] = if data.is_empty() {
+        let mut data_segment = if data.is_empty() {
+            None
+        } else {
+            let mut packet = crate::network::packet::PacketBuffer::from_slice(
+                data,
+                crate::network::packet::IPV4_ETHERNET_HEADROOM + header.data_offset(),
+            )?;
+            packet.prepend(options)?;
+            packet.prepend(&header_bytes)?;
+            Some(packet)
+        };
+        let segment: &[u8] = if let Some(packet) = data_segment.as_ref() {
+            packet.as_slice()
+        } else {
             control_segment[..TCP_HEADER_SIZE].copy_from_slice(&header_bytes);
             control_segment[TCP_HEADER_SIZE..total_len].copy_from_slice(options);
             &control_segment[..total_len]
-        } else {
-            data_segment.reserve_exact(total_len);
-            data_segment.extend_from_slice(&header_bytes);
-            data_segment.extend_from_slice(options);
-            data_segment.extend_from_slice(data);
-            &data_segment
         };
 
         if dest_ip.0[0] == 127 {
@@ -1704,14 +1710,20 @@ impl TcpSocket {
         let ip_layer = get_network_manager()
             .get_layer("ip")
             .ok_or(SocketError::NoRoute)?;
-        match ip_layer.send(segment, &ip_context, &[]) {
+        let segment_len = segment.len();
+        let result = if let Some(packet) = data_segment.take() {
+            ip_layer.send_owned(packet, &ip_context, &[])
+        } else {
+            ip_layer.send(&control_segment[..total_len], &ip_context, &[])
+        };
+        match result {
             Ok(()) | Err(SocketError::WouldBlock) => {}
             Err(err) => return Err(err),
         }
 
         self.record_advertised_recv_window(&header);
 
-        self.bytes_sent.add(segment.len() as u64);
+        self.bytes_sent.add(segment_len as u64);
 
         if update_seq {
             let mut advance = data.len() as u32;
