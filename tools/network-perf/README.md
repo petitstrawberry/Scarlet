@@ -265,3 +265,40 @@ Ethernet-to-ARP path. The measurements above precede this final call-site fix;
 no throughput effect is claimed for it. The final ARM64 suite passed **1440
 tests** (`.build/network-perf/kernel-tests-owned-commit.log`), and the host
 harness passed **65 tests** (`.build/network-perf/owned-commit-host/receipt.json`).
+
+
+## Existing Switch kernel: physical TCP measurement (2026-10-11)
+
+`results/2026-10-11-switch-existing.json` records the running Switch kernel. Its
+exact commit is unknown; the user described it as slightly older than current.
+These results do not measure the newly pushed owned-buffer patch. A temporary
+release-built native benchmark used existing `usbnet0`, a reusable 64 KiB buffer
+and raw TCP port 8089. No timed payload used SSH encryption or disk I/O.
+
+64 MiB per transfer, three repetitions per direction; all six transfers passed
+byte-count and payload validation. Directions are from the Switch's perspective.
+
+| Direction | Run 1 | Run 2 | Run 3 | Median (Mbps) |
+| --- | ---: | ---: | ---: | ---: |
+| RX (Mac → Switch) | 157.82 | 174.34 | 173.09 | 173.09 |
+| TX (Switch → Mac) | 5.45 | 139.89 | 138.72 | 138.72 |
+
+The first TX took **98.55 seconds**; it is retained and its cause is unresolved.
+SSH process/journal diagnostics occurred during that transfer, and an earlier
+setup's blocking log reader was stopped. Later transfers took about 3–4 seconds.
+
+The host used wired `en6` at 2500Base-T full duplex; Switch MTU was 1500 and
+four CPUs were running at 1.0176 GHz. Desktop applications were left running.
+Aggregate four-CPU busy time was 86.3–86.4% in the later RX transfers and
+70.7–71.0% in the later TX transfers; a separate five-second idle capture
+measured 21.44%. These figures include background applications, rather than
+isolating network CPU cost. Profiling was disabled. The bounded helper exited
+and its remote temporary file was removed; kernel and network settings were
+unchanged. Raw logs, helper source, release binary and hashes are preserved in
+`.build/network-perf/physical-20261011/`; its temporary build cache was removed.
+
+The earliest successful physical raw-TCP record was **70.83/57.88 Mbps RX/TX**
+for one 8 MiB transfer per direction. Today's medians are **2.44×/2.40×** those
+observations. Different boots, helpers, transfer sizes and background loads
+prevent interpreting these ratios as a controlled estimate of patch speedup.
+The historical receipt identity and comparison values are retained in the JSON.

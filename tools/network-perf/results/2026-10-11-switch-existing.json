@@ -1,0 +1,319 @@
+{
+  "host": "192.168.0.35",
+  "physical": true,
+  "guest_kernel_commit": "unknown; user reports slightly older than current",
+  "main_repo_commit": "432561ebaa914230ef90bd53a7287f98a4314c6f",
+  "profiling": false,
+  "bytes_per_transfer": 67108864,
+  "repeats": 3,
+  "background_apps_not_stopped": true,
+  "server_path": "/tmp/codex-network-perf-20261011",
+  "server_sha256": "54afa6e38eec9b7d8ef0ffd15208b04422e57e52bfcb659f713a9dee0d5793e0",
+  "server_bytes": 101352,
+  "server_source_sha256": "240c85228af813dbd004e9854bd933027a9ad2a5dfb74f05ce7ec51f477908f8",
+  "kernel_unchanged": true,
+  "network_configuration_unchanged": true,
+  "results": [
+    {
+      "index": 0,
+      "direction": "rx",
+      "bytes": 67108864,
+      "host_elapsed_ns": 3401816250,
+      "host_mbps": 157.8189039457966,
+      "payload_verified": true,
+      "guest": {
+        "direction": "rx",
+        "bytes": 67108864,
+        "calls": 24208,
+        "elapsed_ns": 3400974000,
+        "profiling": false,
+        "busy_ns": 12879197744,
+        "idle_ns": 725305588,
+        "aggregate_busy_percent": 94.66863603690726
+      }
+    },
+    {
+      "index": 0,
+      "direction": "tx",
+      "bytes": 67108864,
+      "host_elapsed_ns": 98550103041,
+      "host_mbps": 5.447695085378495,
+      "payload_verified": true,
+      "guest": {
+        "direction": "tx",
+        "bytes": 67108864,
+        "calls": 1024,
+        "elapsed_ns": 98547307000,
+        "profiling": false,
+        "busy_ns": 158045126126,
+        "idle_ns": 236144624498,
+        "aggregate_busy_percent": 40.09366704127023
+      }
+    },
+    {
+      "index": 1,
+      "direction": "rx",
+      "bytes": 67108864,
+      "host_elapsed_ns": 3079433834,
+      "host_mbps": 174.3407850080795,
+      "payload_verified": true,
+      "guest": {
+        "direction": "rx",
+        "bytes": 67108864,
+        "calls": 25608,
+        "elapsed_ns": 3078692000,
+        "profiling": false,
+        "busy_ns": 10636499616,
+        "idle_ns": 1679671428,
+        "aggregate_busy_percent": 86.36206478458843
+      }
+    },
+    {
+      "index": 1,
+      "direction": "tx",
+      "bytes": 67108864,
+      "host_elapsed_ns": 3837857750,
+      "host_mbps": 139.88817381259116,
+      "payload_verified": true,
+      "guest": {
+        "direction": "tx",
+        "bytes": 67108864,
+        "calls": 1024,
+        "elapsed_ns": 3836857000,
+        "profiling": false,
+        "busy_ns": 10890125926,
+        "idle_ns": 4457874910,
+        "aggregate_busy_percent": 70.95468681794904
+      }
+    },
+    {
+      "index": 2,
+      "direction": "rx",
+      "bytes": 67108864,
+      "host_elapsed_ns": 3101744958,
+      "host_mbps": 173.086736424059,
+      "payload_verified": true,
+      "guest": {
+        "direction": "rx",
+        "bytes": 67108864,
+        "calls": 26109,
+        "elapsed_ns": 3100797000,
+        "profiling": false,
+        "busy_ns": 10700680596,
+        "idle_ns": 1704898364,
+        "aggregate_busy_percent": 86.25700284124426
+      }
+    },
+    {
+      "index": 2,
+      "direction": "tx",
+      "bytes": 67108864,
+      "host_elapsed_ns": 3870296917,
+      "host_mbps": 138.71569120235537,
+      "payload_verified": true,
+      "guest": {
+        "direction": "tx",
+        "bytes": 67108864,
+        "calls": 1024,
+        "elapsed_ns": 3869561000,
+        "profiling": false,
+        "busy_ns": 10938611483,
+        "idle_ns": 4540402057,
+        "aggregate_busy_percent": 70.66736814160058
+      }
+    }
+  ],
+  "idle_baseline": {
+    "host_elapsed_ns": 5135369750,
+    "busy_ns": 4403479086,
+    "idle_ns": 16134868519,
+    "aggregate_busy_percent": 21.44027927995525
+  },
+  "medians_mbps": {
+    "rx": 173.086736424059,
+    "tx": 138.71569120235537
+  },
+  "all_payloads_verified": true,
+  "notes": [
+    "Guest kernel commit unknown: these are existing-kernel measurements, not the pushed owned-buffer patch.",
+    "First TX took 98.55 seconds (5.45 Mbps); all slow samples retained. Later TX transfers were ~139 Mbps. Cause of initial delay is not established.",
+    "Mac route is wired en6, negotiated 2500Base-T full duplex; Switch link usbnet0 up, MTU 1500.",
+    "SSHD runs only control/startup/log transport; timed data uses raw TCP port 8089 and a bounded release server.",
+    "CPU busy accounting includes background applications, which were not stopped.",
+    "Read-only SSH ps/diagnostic requests occurred during the initial TX stall.",
+    "No reboot or kernel/network configuration replacement.",
+    "During the first TX stall an earlier benchmark-setup cat /dev/kmsg helper was stopped; it is absent from the after-run process snapshot."
+  ],
+  "remote_benchmark_removed": true,
+  "date": "2026-10-11",
+  "ssh_for_control_only": true,
+  "benchmark_build": {
+    "profile": "release",
+    "target": "aarch64-unknown-scarlet",
+    "completed_before_timed_transfers": true,
+    "command": "nix develop --command cargo build --manifest-path .build/network-perf/physical-20261011/guest/Cargo.toml --release --target aarch64-unknown-scarlet"
+  },
+  "benchmark_changes_from_main_fixture": [
+    "Removed configure_interface_ipv4; used existing usbnet0 configuration.",
+    "Bound to 192.168.0.35:8089; exited after six connections.",
+    "Reusable 64 KiB buffer; receiver verifies every byte and returns byte-count receipt."
+  ],
+  "environment": {
+    "kernel_version": "Scarlet 1.0.1 (aarch64-switch-none-elf)",
+    "cpus": 4,
+    "cpu_current_khz_before_after": [
+      1017600,
+      1017600
+    ],
+    "cpu_governor": "schedutil",
+    "interface": "usbnet0",
+    "mtu": 1500,
+    "mac_interface": "en6",
+    "mac_media": "2500Base-T full duplex",
+    "switch_negotiated_phy_speed_verified_this_run": false
+  },
+  "historical_comparison": {
+    "source_artifact": "/Users/petitstrawberry/Development/Rust/scarlet-project-switch/.cache/network-perf/physical-baseline-summary.json",
+    "source_sha256": "b44f1c63a97e3e96236de519547d51ac0560f9e2d614f1927382970789ef40f1",
+    "baseline_scope": "usb-pmu-candidate, not new network fix",
+    "baseline_bytes_per_transfer": 8388608,
+    "baseline_repeats": 1,
+    "baseline_raw_tcp_no_encryption_no_disk": true,
+    "baseline_apps_left_running": true,
+    "baseline_mbps": {
+      "rx": 70.83386031600776,
+      "tx": 57.883810209286054
+    },
+    "observed_ratios": {
+      "rx": 2.443559275915153,
+      "tx": 2.396450591293346
+    },
+    "limitations": "Historical observations across different boots, transfer sizes, helpers and background workloads; not a controlled estimate of patch speedup."
+  },
+  "local_artifacts": {
+    ".build/network-perf/physical-20261011/build.log": {
+      "bytes": 1044,
+      "sha256": "782eab8d7dcb8b3c9cb8eaec3cc411e79103e4d1e36b4ca3a72034a9ccd36510"
+    },
+    ".build/network-perf/physical-20261011/cleanup.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    ".build/network-perf/physical-20261011/cpufreq-after.log": {
+      "bytes": 229,
+      "sha256": "4d858056596352abf385868e326a2b05834434db87014e37a7f2417eb7341d11"
+    },
+    ".build/network-perf/physical-20261011/cpufreq.log": {
+      "bytes": 229,
+      "sha256": "4d858056596352abf385868e326a2b05834434db87014e37a7f2417eb7341d11"
+    },
+    ".build/network-perf/physical-20261011/cpuinfo-after.log": {
+      "bytes": 2318,
+      "sha256": "43738b8bc242b9fd9302df42ec838160f6e4eafce67629a6c1688506a2e8c1e7"
+    },
+    ".build/network-perf/physical-20261011/cpuinfo-before.log": {
+      "bytes": 2315,
+      "sha256": "60ea96a3ae0562505ba4905a36e6d574a0aaaa3a51b5cd72d83d33619c0f8865"
+    },
+    ".build/network-perf/physical-20261011/guest/Cargo.lock": {
+      "bytes": 2451,
+      "sha256": "5b32ce787ec1d9ab5e3ca6e0d8a7f4b5ea835f328f4ba7f6f234427802166e72"
+    },
+    ".build/network-perf/physical-20261011/guest/Cargo.toml": {
+      "bytes": 319,
+      "sha256": "0b655d20d2edcf7fd580cde4294887062d6f36f3ae1c32234143f99a92546a0d"
+    },
+    ".build/network-perf/physical-20261011/guest/src/main.rs": {
+      "bytes": 4381,
+      "sha256": "240c85228af813dbd004e9854bd933027a9ad2a5dfb74f05ce7ec51f477908f8"
+    },
+    ".build/network-perf/physical-20261011/idle-cpuinfo-end.log": {
+      "bytes": 2318,
+      "sha256": "affe3b49b1a6ff73c71abb8b6342c00422e30b0ae7e1199dcb77fbee23cf92c8"
+    },
+    ".build/network-perf/physical-20261011/idle-cpuinfo-start.log": {
+      "bytes": 2318,
+      "sha256": "2f368f788f1f6cbb512f26619e37d1980852ed69b9831b8689e697464e73c758"
+    },
+    ".build/network-perf/physical-20261011/interrupts-after.log": {
+      "bytes": 320,
+      "sha256": "7c443636ab6d18d547c50ea6ca856ae38a2dd984ba4f2fe00275cb7bdae350af"
+    },
+    ".build/network-perf/physical-20261011/interrupts-before.log": {
+      "bytes": 318,
+      "sha256": "2bbf25f9c74ba45616f684d5df092c323789e23a0ab3f99c72239b78678360df"
+    },
+    ".build/network-perf/physical-20261011/journal-during-tx.log": {
+      "bytes": 9006,
+      "sha256": "4b9849b2666a73b1bb178be1a5c78ce6bb54be6df74126e3e6d486fb99ce74f7"
+    },
+    ".build/network-perf/physical-20261011/kernel-info.log": {
+      "bytes": 41,
+      "sha256": "e26def1b662f6b7664d3b69a37bb82eedf258edfc697dad8814bdd92b5d8d131"
+    },
+    ".build/network-perf/physical-20261011/mac-interface.log": {
+      "bytes": 358,
+      "sha256": "d86e2edafef2659400bf80de118c983e6e23d0a12788ce370c753f004025da9a"
+    },
+    ".build/network-perf/physical-20261011/mac-route.log": {
+      "bytes": 288,
+      "sha256": "b50a16541599254094538b167ae4b943fc4d9de0465c5e9fe98bdce3df8e3051"
+    },
+    ".build/network-perf/physical-20261011/measure.log": {
+      "bytes": 842,
+      "sha256": "324625f4210f3ef687a85fe94da5f5b80bd27dae702f08e879381d6e68a4938e"
+    },
+    ".build/network-perf/physical-20261011/measure.py": {
+      "bytes": 3394,
+      "sha256": "a2603256ccbd2f59e49e43f71dca2d2d1a71922b1307bc14d75fd19231d48fe7"
+    },
+    ".build/network-perf/physical-20261011/metadata.json": {
+      "bytes": 665,
+      "sha256": "ed23cd056267a7540a6edb418cdf2112c5d963c11566288e519aad98bbdef016"
+    },
+    ".build/network-perf/physical-20261011/net-profile-after.log": {
+      "bytes": 855,
+      "sha256": "3f4d7db60f723bc92ec3cf1e56f4353d776d4192a126fbaf9b076be40bea741b"
+    },
+    ".build/network-perf/physical-20261011/net-profile-before.log": {
+      "bytes": 855,
+      "sha256": "b6d462dd53dd3a643d6f3caa2dfab3987c9b103f1c0dffb0abf1de9642e68be8"
+    },
+    ".build/network-perf/physical-20261011/netcfg.log": {
+      "bytes": 169,
+      "sha256": "d07a64bcc6d9b72a358a35d365fcffd9122a5f86351a0e0e3367a12d93837d15"
+    },
+    ".build/network-perf/physical-20261011/physical-network-perf": {
+      "bytes": 101352,
+      "sha256": "54afa6e38eec9b7d8ef0ffd15208b04422e57e52bfcb659f713a9dee0d5793e0"
+    },
+    ".build/network-perf/physical-20261011/ps-after-stall.log": {
+      "bytes": 7124,
+      "sha256": "ff4db5e9ef8e0b701c4f61e648acba3d3d6e5f3669894fd45dd5711bfdef1be0"
+    },
+    ".build/network-perf/physical-20261011/ps-after.log": {
+      "bytes": 7020,
+      "sha256": "9fd4514aa47152283c855993595aff48f1631d498da5f45e26f211512dbb7bff"
+    },
+    ".build/network-perf/physical-20261011/ps-before.log": {
+      "bytes": 7020,
+      "sha256": "393d6db66603b5bb971757b9ccca7f3e796595d61eb389803c74dbd6d7d2553e"
+    },
+    ".build/network-perf/physical-20261011/ps-during-tx.log": {
+      "bytes": 8319,
+      "sha256": "8f437d12b6218f6d60d0c8fea158b0a9d66be3fbd11e00e53e94f89a1267a073"
+    },
+    ".build/network-perf/physical-20261011/server.log": {
+      "bytes": 830,
+      "sha256": "e23cdd8ef2a631056b911de37b4f517827222f234271389ee39f4fd197ecb67a"
+    },
+    ".build/network-perf/physical-20261011/upload-interactive.log": {
+      "bytes": 9829,
+      "sha256": "31a66bcdbec6165060312c123e12f626ed5c31c4917f533902c4df293b05c266"
+    },
+    ".build/network-perf/physical-20261011/upload.log": {
+      "bytes": 128,
+      "sha256": "2f175d821e2dd9ac84e0309e76ec233bd372fc1ea3aaf125c1a3e53753f70b0c"
+    }
+  }
+}
