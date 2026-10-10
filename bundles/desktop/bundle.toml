@@ -302,7 +302,7 @@ to = "/bin/vellum"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/boxcraft", rev = "a341f37b323572815871df1a95c8be812b9cdf86" }
+source = { git = "https://github.com/petitstrawberry/boxcraft", rev = "c5cda1ac812354d9ea76ba72c305f61a3f3ac51e" }
 package = "boxcraft"
 bin = "boxcraft"
 to = "/bin/boxcraft"

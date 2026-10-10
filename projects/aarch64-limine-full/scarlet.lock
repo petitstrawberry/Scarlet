@@ -5,7 +5,7 @@ hash = "sha256:8c3908ac6d5a031fd1f10ce16ae5931abc96f89ad2dd1f5f2ec5fc2cb856deb6"
 layers = []
 
 [sections.disk]
-hash = "sha256:217693c50855a20f6cc96e2b6c836aebe114a94bf364d79fb2f34b26050f278b"
+hash = "sha256:5505d365917e2cdc46127560f90f7a840f58eb54a411493eddcb72272ab4e028"
 layers = []
 
 [sections.initramfs]
@@ -386,7 +386,7 @@ type = "path"
 path = "../../user/std-bin"
 
 [sections.rootfs]
-hash = "sha256:2dd9fad760a79d41aa100c2f295c39bfd45ad5fa98315a09f4bf6dbebe576bfd"
+hash = "sha256:c020bd584125dbc4424debba40727e80657eb0bc7a9f003a4fcc66edbc87595d"
 
 [[sections.rootfs.layers]]
 kind = "script"
@@ -811,7 +811,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "scarlet-shell"
 to = "/bin/scarlet-shell"
-hash = "sha256:96bfe3dcbc9660f341d1bbd440565cda7286ccb3572731d81ed94a3674405849"
+hash = "sha256:9292682ec2c00960d6cd40cc87074bd1047aaa50f5a3b06db78c5affe2a66b0e"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -833,7 +833,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "sws"
 to = "/bin/sws"
-hash = "sha256:e0240923454f817c18ed571494090918e1c6cefa1559cae6b2ddbc1382c1759e"
+hash = "sha256:cf27ff35acd78d1a5a3c1fab0155f613d6a46fe28a10b67f6961926c9534a125"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -997,7 +997,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "sgfx-cube"
 to = "/bin/sgfx-cube"
-hash = "sha256:baee99dc3551b8836bdcbaea15a7270cf809f41bf0d60b375781e154a761c725"
+hash = "sha256:583f381d12ba3b52f5e77d3b14cafe261a9b7738b55a4807364876c7280363e4"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -1007,7 +1007,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "sgfx-texture"
 to = "/bin/sgfx-texture"
-hash = "sha256:9681f4c6c586b80c07be01a4753e61c41948521b9cb97a6666c7168fd7f586e7"
+hash = "sha256:1315cdb6801b4f0ee5cc3e08bc0c76a42301cf64998e1e571e2075ffe402fe21"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -1017,7 +1017,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "sgfx-showcase"
 to = "/bin/sgfx-showcase"
-hash = "sha256:80fe4ec81c719784cf316c3056f3e8e4c7349696d6803ac163c66dc0e2ddeedd"
+hash = "sha256:2f9632f5df0281d07da6b09b6a00e46437d382eda6180fb545aaa9b1170acc55"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -1215,17 +1215,17 @@ rev = "87a0f17173a7be09ead750f913b64b1fc5e0c785"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/boxcraft"
-git_ref = "a341f37b323572815871df1a95c8be812b9cdf86"
-resolved_rev = "a341f37b323572815871df1a95c8be812b9cdf86"
+git_ref = "c5cda1ac812354d9ea76ba72c305f61a3f3ac51e"
+resolved_rev = "c5cda1ac812354d9ea76ba72c305f61a3f3ac51e"
 package = "boxcraft"
 bin = "boxcraft"
 to = "/bin/boxcraft"
-hash = "sha256:b522592c8ad8e66fcb1c33c0a7b4080c45e8817250dfb16dfbd5545a2bf4d8c7"
+hash = "sha256:d495eeb0cec219ec3b0953e915c8f51308b0f197ee66382a1d07be4c1aa800aa"
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/boxcraft"
-rev = "a341f37b323572815871df1a95c8be812b9cdf86"
+rev = "c5cda1ac812354d9ea76ba72c305f61a3f3ac51e"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1438,7 +1438,7 @@ path = ".scarlet/cache/git/1d707eff8bef4cad/bundle/build-aarch64.sh"
 [[sections.rootfs.layers]]
 kind = "script"
 to = "/"
-hash = "sha256:ad3cd5282b05095d46080b55af9f863eec4f2ad08ff3c93187f838bf896cb6b6"
+hash = "sha256:78f12dc10d49111f7db85d309e1075b79eef4f59436a944d97977cd14abb6ecc"
 
 [sections.rootfs.layers.source]
 type = "path"
