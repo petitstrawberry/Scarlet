@@ -148,6 +148,8 @@ pub struct ControlCenterSnapshot {
     pub power: super::power::PowerStatus,
     /// Audio state sourced from the StatusBar's shared sample.
     pub audio: AudioSnapshot,
+    /// Display backlight percentage, or `None` when unsupported/unavailable.
+    pub brightness_percent: Option<u8>,
     /// Read-only network state.
     pub network: NetworkSnapshot,
     /// CPU and task state sourced from the shared system sample.
@@ -170,6 +172,8 @@ pub enum ControlCenterSettingsLink {
 pub enum ControlCenterAction {
     /// Commit a master volume percentage.
     SetVolume(u8),
+    /// Commit a display backlight percentage through the display control IF.
+    SetBrightness(u8),
     /// Toggle master mute.
     ToggleMute,
     /// Select an available audio output by stable identifier.
@@ -205,7 +209,7 @@ pub struct ControlCenterMetrics {
     margin: u32,
     gap: u32,
     target_height: u32,
-    audio_height: u32,
+    controls_height: u32,
     details_height: u32,
 }
 
@@ -235,15 +239,15 @@ impl ControlCenterMetrics {
         } else {
             0
         };
-        let audio_height = (1 + output_rows) * target_height + output_rows * gap + 12;
-        let height = margin * 2 + audio_height + details_height + target_height + gap * 2;
+        let controls_height = (2 + output_rows) * target_height + (1 + output_rows) * gap + 12;
+        let height = margin * 2 + controls_height + details_height + target_height + gap * 2;
         Self {
             width,
             height,
             margin,
             gap,
             target_height,
-            audio_height,
+            controls_height,
             details_height,
         }
     }
@@ -266,6 +270,7 @@ impl ControlCenterMetrics {
 /// * `presentation` - Laptop popover or tablet sheet.
 /// * `snapshot` - Current provider snapshot.
 /// * `volume` - Shared standard Slider value state.
+/// * `brightness` - Shared display Slider value state, updated after readback.
 /// * `action` - Typed action queue consumed by the StatusBar service loop.
 /// * `armed_power` - Current two-step power confirmation state.
 ///
@@ -277,6 +282,7 @@ pub fn build_control_center_view(
     presentation: ControlCenterPresentation,
     snapshot: ControlCenterSnapshot,
     volume: State<f32>,
+    brightness: State<f32>,
     action: State<Option<ControlCenterAction>>,
     armed_power: State<Option<ArmedPowerAction>>,
 ) -> impl View + Clone {
@@ -346,9 +352,38 @@ pub fn build_control_center_view(
         }
     }
 
-    let audio = translucent_section(
+    let brightness_row = if let Some(percent) = snapshot.brightness_percent {
+        let brightness_action = action.clone();
+        boxed(
+            HStack::new(DynamicViews::new(vec![
+                boxed(Text::new(alloc::format!("Brightness {}%", percent)).font_size(detail_size)),
+                boxed(
+                    Slider::new(brightness)
+                        .min(0.0)
+                        .max(100.0)
+                        .on_change(move |value| {
+                            brightness_action.set(Some(ControlCenterAction::SetBrightness(
+                                value.clamp(0.0, 100.0).round() as u8,
+                            )));
+                        }),
+                ),
+            ]))
+            .spacing(metrics.gap as f32)
+            .alignment(Alignment::Center)
+            .frame(content_width - 12.0, target_height),
+        )
+    } else {
+        boxed(
+            Text::new("Brightness unavailable")
+                .font_size(detail_size)
+                .color(palette.text_secondary())
+                .frame(content_width - 12.0, target_height),
+        )
+    };
+    audio_rows.insert(0, brightness_row);
+    let controls = translucent_section(
         content_width,
-        metrics.audio_height as f32,
+        metrics.controls_height as f32,
         audio_rows,
         metrics.gap as f32,
     );
@@ -465,7 +500,7 @@ pub fn build_control_center_view(
     .frame(content_width, target_height);
 
     let content = VStack::new(DynamicViews::new(vec![
-        audio,
+        controls,
         boxed(details),
         boxed(footer),
     ]))
@@ -579,14 +614,92 @@ impl ViewTuple for DynamicViews {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scarlet_ui::element::RenderElement;
+    use scarlet_ui::state::StateId;
+    use scarlet_ui::views::SliderRenderObject;
+
+    fn brightness_slider(element: &dyn Element, id: StateId) -> Option<&Slider> {
+        if let Some(slider) = element
+            .as_any()
+            .downcast_ref::<RenderElement<Slider, SliderRenderObject>>()
+            && slider.view().get_value().id() == id
+        {
+            return Some(slider.view());
+        }
+        element
+            .children()
+            .iter()
+            .find_map(|child| brightness_slider(child.as_ref(), id))
+    }
 
     #[test]
-    fn laptop_and_tablet_use_the_same_approved_compact_metrics() {
+    fn brightness_control_emits_percentages_only_when_available() {
+        for (index, percent) in [None, Some(0), Some(59), Some(100)].into_iter().enumerate() {
+            let brightness = State::new(
+                StateId::new(2000 + index as u32),
+                percent.unwrap_or(0) as f32,
+            );
+            let action = State::new(StateId::new(2010 + index as u32), None);
+            let snapshot = ControlCenterSnapshot {
+                power: Default::default(),
+                audio: AudioSnapshot::unavailable(),
+                brightness_percent: percent,
+                network: NetworkSnapshot {
+                    available: false,
+                    interfaces: Vec::new(),
+                },
+                system: SystemSnapshot {
+                    cpu_percent: None,
+                    task_count: None,
+                },
+                input_environment: InputEnvironmentSnapshot {
+                    available: false,
+                    tablet_mode: None,
+                    touch_present: None,
+                    keyboard_present: None,
+                    pointer_present: None,
+                },
+            };
+            let view = build_control_center_view(
+                ControlCenterPresentation::LaptopPopover,
+                snapshot,
+                State::new(StateId::new(2020 + index as u32), 0.0),
+                brightness.clone(),
+                action.clone(),
+                State::new(StateId::new(2030 + index as u32), None),
+            );
+            let element = view.create_element();
+            let slider = brightness_slider(element.as_ref(), brightness.id());
+            assert_eq!(slider.is_some(), percent.is_some());
+            if let Some(slider) = slider {
+                assert_eq!(slider.get_value().get(), percent.unwrap() as f32);
+                for (value, expected) in [(-1.0, 0), (42.6, 43), (101.0, 100)] {
+                    slider.invoke_on_change(value);
+                    assert_eq!(
+                        action.get(),
+                        Some(ControlCenterAction::SetBrightness(expected))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn brightness_row_fits_pointer_and_touch_metrics() {
         let laptop = ControlCenterMetrics::resolve(ControlCenterPresentation::LaptopPopover, 1);
         let tablet = ControlCenterMetrics::resolve(ControlCenterPresentation::TabletSheet, 1);
         assert_eq!(laptop.width, 304);
-        assert!(laptop.height <= 270);
-        assert_eq!(tablet, laptop);
+        assert_eq!(
+            laptop.controls_height,
+            2 * laptop.target_height + laptop.gap + 12
+        );
+        assert!(laptop.height <= 320);
+        assert_eq!(tablet.width, 392);
+        assert_eq!(
+            tablet.controls_height,
+            2 * tablet.target_height + tablet.gap + 12
+        );
+        assert!(tablet.target_height > laptop.target_height);
     }
 
     #[test]

@@ -20,6 +20,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec;
 use core::sync::atomic::{AtomicU8, Ordering};
 use core::time::Duration;
+use framebuffer::DisplayControl;
 use sas_client::SasClient;
 use sas_protocol::{
     MASTER_VOLUME_UNITY_Q16, OUTPUT_ENTRY_FLAG_COMPATIBLE, OUTPUT_ENTRY_FLAG_CURRENT,
@@ -980,6 +981,8 @@ struct ShellApp {
     control_center_open: State<bool>,
     control_center_window_id: State<Option<u32>>,
     control_center_volume: State<f32>,
+    control_center_brightness: State<f32>,
+    display_brightness_percent: State<Option<u8>>,
     control_center_action: State<Option<ControlCenterAction>>,
     control_center_armed_power: State<Option<ArmedPowerAction>>,
     control_center_size: State<Size>,
@@ -1037,6 +1040,8 @@ impl ShellApp {
             control_center_open: State::new(StateId::new(16), false),
             control_center_window_id: State::new(StateId::new(17), None),
             control_center_volume: State::new(StateId::new(18), initial_volume),
+            control_center_brightness: State::new(StateId::new(40), 0.0),
+            display_brightness_percent: State::new(StateId::new(41), None),
             control_center_action: State::new(StateId::new(19), None),
             control_center_armed_power: State::new(StateId::new(20), None),
             control_center_size: State::new(StateId::new(21), initial_control_center.body_size()),
@@ -1372,9 +1377,13 @@ fn collect_input_environment_snapshot() -> InputEnvironmentSnapshot {
     }
 }
 
-fn collect_control_center_snapshot(status: StatusProviderSnapshot) -> ControlCenterSnapshot {
+fn collect_control_center_snapshot(
+    status: StatusProviderSnapshot,
+    brightness_percent: Option<u8>,
+) -> ControlCenterSnapshot {
     ControlCenterSnapshot {
         audio: collect_audio_snapshot(&status),
+        brightness_percent,
         power: status.power,
         network: collect_network_snapshot(),
         system: SystemSnapshot {
@@ -1405,9 +1414,41 @@ fn apply_control_center_action(
     audio_client: &mut Option<SasClient>,
     status: &State<StatusProviderSnapshot>,
     control_center_volume: &State<f32>,
+    display: &mut Option<DisplayControl>,
+    display_brightness_percent: &State<Option<u8>>,
+    control_center_brightness: &State<f32>,
     control_center_open: &State<bool>,
 ) {
     match action {
+        ControlCenterAction::SetBrightness(percent) => {
+            if display.is_none() {
+                *display = DisplayControl::open_primary().ok();
+            }
+            let result = display.as_ref().and_then(|display| {
+                display.set_brightness_percent(percent).ok()?;
+                display.get_brightness_percent().ok()
+            });
+            if let Some(applied) = result {
+                set_state_if_changed(display_brightness_percent, Some(applied));
+                set_state_if_changed(control_center_brightness, applied as f32);
+            } else {
+                println!(
+                    "[ControlCenter] failed to set display brightness to {}%",
+                    percent
+                );
+                // A rejected write must not leave the optimistic slider value
+                // on screen. Read the actual value, or mark it unavailable.
+                let actual = display
+                    .as_ref()
+                    .and_then(|display| display.get_brightness_percent().ok());
+                set_state_if_changed(display_brightness_percent, actual);
+                if let Some(actual) = actual {
+                    set_state_if_changed(control_center_brightness, actual as f32);
+                } else {
+                    *display = None;
+                }
+            }
+        }
         ControlCenterAction::SetVolume(percent) => {
             if audio_client.is_none() {
                 *audio_client = SasClient::connect().ok();
@@ -3433,11 +3474,15 @@ impl Application for ShellApp {
         }
 
         let control_center_snapshot = if self.control_center_open.get() {
-            collect_control_center_snapshot(status_snapshot.clone())
+            collect_control_center_snapshot(
+                status_snapshot.clone(),
+                self.display_brightness_percent.get(),
+            )
         } else {
             ControlCenterSnapshot {
                 power: status_snapshot.power,
                 audio: AudioSnapshot::unavailable(),
+                brightness_percent: self.display_brightness_percent.get(),
                 network: NetworkSnapshot {
                     available: false,
                     interfaces: Vec::new(),
@@ -3538,6 +3583,7 @@ impl Application for ShellApp {
                         control_center_presentation,
                         control_center_snapshot,
                         self.control_center_volume.clone(),
+                        self.control_center_brightness.clone(),
                         self.control_center_action.clone(),
                         self.control_center_armed_power.clone(),
                     ),
@@ -3721,6 +3767,8 @@ impl ShellApp {
         let control_center_status = self.status_snapshot.clone();
         let control_center_audio = self.console_audio.clone();
         let control_center_volume = self.control_center_volume.clone();
+        let control_center_brightness = self.control_center_brightness.clone();
+        let display_brightness_percent = self.display_brightness_percent.clone();
         let control_center_open = self.control_center_open.clone();
 
         std::thread::spawn(move || {
@@ -3741,21 +3789,50 @@ impl ShellApp {
 
         std::thread::spawn(move || {
             let mut audio_client: Option<SasClient> = None;
+            let mut display = None;
+            let mut next_display_poll = std::time::Instant::now();
             loop {
-                if let Some(action) = control_center_action.get() {
-                    control_center_action.set(None);
-                    apply_control_center_action(
-                        action,
-                        &mut audio_client,
-                        &control_center_status,
-                        &control_center_volume,
-                        &control_center_open,
-                    );
+                if control_center_action.get().is_some() {
+                    // Take under the State lock so a newer slider event cannot
+                    // be overwritten between reading and clearing the queue.
+                    let mut pending = None;
+                    control_center_action.update(|action| pending = action.take());
+                    if let Some(action) = pending {
+                        apply_control_center_action(
+                            action,
+                            &mut audio_client,
+                            &control_center_status,
+                            &control_center_volume,
+                            &mut display,
+                            &display_brightness_percent,
+                            &control_center_brightness,
+                            &control_center_open,
+                        );
+                    }
                     let status = control_center_status.get();
                     set_state_if_changed(
                         &control_center_audio,
                         (status.audio_volume_percent, status.audio_muted),
                     );
+                }
+                if std::time::Instant::now() >= next_display_poll {
+                    if display.is_none() {
+                        display = DisplayControl::open_primary().ok();
+                    }
+                    let actual = display
+                        .as_ref()
+                        .and_then(|display| display.get_brightness_percent().ok());
+                    // Only external changes reset the slider; its own pending
+                    // drag value should survive unchanged provider samples.
+                    if set_state_if_changed(&display_brightness_percent, actual) {
+                        if let Some(actual) = actual {
+                            set_state_if_changed(&control_center_brightness, actual as f32);
+                        }
+                    }
+                    if actual.is_none() {
+                        display = None;
+                    }
+                    next_display_poll = std::time::Instant::now() + Duration::from_secs(1);
                 }
                 std::thread::sleep(Duration::from_millis(16));
             }

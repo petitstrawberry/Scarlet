@@ -350,6 +350,9 @@ impl DisplayCharDevice {
             .as_graphics_device()
             .ok_or("Display source device is not graphics-capable")?
             .get_brightness_percent()?;
+        if brightness > 100 {
+            return Err("Display driver returned an invalid brightness percentage");
+        }
         Ok(i32::from(brightness))
     }
 
@@ -1010,13 +1013,26 @@ mod tests {
         let graphics = Arc::new(TestBrightnessGraphicsDevice::new(37));
         let display = display_for_test(&manager, graphics.clone());
 
-        assert_eq!(
-            display
-                .control(display_commands::DISPLAY_SET_BRIGHTNESS, 101)
-                .expect_err("brightness above 100 must be rejected"),
-            "Display brightness must be in the range 0..=100"
-        );
+        for percent in [101, 255, 256, usize::MAX] {
+            assert_eq!(
+                display
+                    .control(display_commands::DISPLAY_SET_BRIGHTNESS, percent)
+                    .expect_err("brightness above 100 must be rejected"),
+                "Display brightness must be in the range 0..=100"
+            );
+        }
         assert_eq!(graphics.brightness.load(Ordering::Relaxed), 37);
+    }
+
+    #[test_case]
+    fn display_brightness_control_rejects_invalid_driver_readback() {
+        let manager = DeviceManager::new_for_test();
+        let graphics = Arc::new(TestBrightnessGraphicsDevice::new(101));
+        let display = display_for_test(&manager, graphics);
+        assert_eq!(
+            display.control(display_commands::DISPLAY_GET_BRIGHTNESS, 0),
+            Err("Display driver returned an invalid brightness percentage")
+        );
     }
 
     #[test_case]

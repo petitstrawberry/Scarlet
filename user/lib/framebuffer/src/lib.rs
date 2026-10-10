@@ -548,13 +548,7 @@ impl DisplayControl {
             let Ok(file) = File::open(&path) else {
                 continue;
             };
-            // SAFETY: This fixed brightness control takes only a scalar value and borrows a live display handle.
-            if unsafe {
-                file.as_handle()
-                    .control(display_commands::DISPLAY_GET_BRIGHTNESS, 0)
-            }
-            .is_ok()
-            {
+            if get_brightness_percent(&file).is_ok() {
                 return Ok(Self { file });
             }
         }
