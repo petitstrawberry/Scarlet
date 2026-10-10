@@ -436,7 +436,7 @@ impl NetworkLayer for EthernetLayer {
         let header = EthernetHeader::new(dest_mac, *src_mac.as_bytes(), ether_type);
         let total_size = ETHERNET_HEADER_SIZE + packet.len();
 
-        let mut frame = Vec::with_capacity(total_size);
+        let mut frame = Vec::with_capacity(total_size.max(ETHERNET_MIN_SIZE.saturating_sub(4)));
         frame.extend_from_slice(&header.to_bytes());
         frame.extend_from_slice(packet);
 

@@ -206,6 +206,96 @@ impl DmaTrbRing {
         Ok(result)
     }
 
+    /// Enqueue a contiguous transfer descriptor and publish it as one unit.
+    ///
+    /// The first TRB keeps the inverse producer cycle until every TRB is DMA
+    /// visible. Only its control word is then updated to hand the entire TD to
+    /// xHCI. This matches Linux's `giveback_first_trb` publication rule and
+    /// prevents a running endpoint from fetching a partly constructed TD.
+    ///
+    /// All fallible validation happens before any ring entries are changed.
+    /// The producer lock covers padding, wrapping, and the complete TD, so
+    /// concurrent producers cannot interleave entries. The caller must ensure
+    /// previously submitted entries are retired before their space is reused.
+    ///
+    /// Returns the first and last TRB indexes of the contiguous TD.
+    pub fn enqueue_td(&self, trbs: &[Trb], padding: Trb) -> Result<(usize, usize), &'static str> {
+        if !self.linked {
+            return Err("Transfer descriptor requires a linked ring");
+        }
+        if trbs.is_empty() {
+            return Err("Transfer descriptor is empty");
+        }
+        let usable = self.usable_capacity();
+        if trbs.len() > usable {
+            return Err("Requested contiguous TRB span exceeds ring segment");
+        }
+
+        let mut index = self.producer_index.lock();
+        let mut cycle = self.cycle_state.lock();
+        if *index >= usable {
+            return Err("Invalid ring producer index");
+        }
+        let dma_addr = self.dma_address();
+        let wrap_before_td = usable - *index < trbs.len();
+        // The old-cycle padding and new-cycle TD must occupy disjoint
+        // entries; otherwise writing either span would overwrite the other.
+        if wrap_before_td && trbs.len() > *index {
+            return Err("Contiguous TD overlaps wrap padding");
+        }
+        let first = if wrap_before_td { 0 } else { *index };
+        let td_cycle = if wrap_before_td { !*cycle } else { *cycle };
+        let last = first + trbs.len() - 1;
+
+        // Stage the complete TD before making any padding/Link TRBs visible.
+        // In particular, the inverse first cycle must already be visible if
+        // padding lets the controller wrap into this TD's new segment cycle.
+        for (offset, trb) in trbs.iter().copied().enumerate() {
+            let entry = first + offset;
+            let mut trb = trb;
+            trb.set_cycle(if offset == 0 { !td_cycle } else { td_cycle });
+            unsafe {
+                core::ptr::write_volatile(self.trb_ptr(entry), trb);
+            }
+            self.sync_trb_for_device(entry);
+        }
+
+        if wrap_before_td {
+            for entry in *index..usable {
+                let mut trb = padding;
+                trb.set_cycle(*cycle);
+                unsafe {
+                    core::ptr::write_volatile(self.trb_ptr(entry), trb);
+                }
+                self.sync_trb_for_device(entry);
+            }
+            self.write_link_trb_validated(usable, *cycle, dma_addr);
+        }
+
+        *index = last + 1;
+        *cycle = td_cycle;
+        if *index == usable {
+            self.write_link_trb_validated(usable, td_cycle, dma_addr);
+            *index = 0;
+            *cycle = !td_cycle;
+        }
+
+        // Cache cleaning alone must not publish Setup before Data/Status.
+        // Order all staged entries before the single ownership-bit store,
+        // then complete its clean before the caller rings the doorbell.
+        crate::arch::io_wmb();
+        let mut first_control = trbs[0].control & !1;
+        first_control |= u32::from(td_cycle);
+        unsafe {
+            let control = (self.trb_ptr(first) as *mut u8).add(12) as *mut u32;
+            core::ptr::write_volatile(control, first_control);
+        }
+        self.sync_trb_for_device(first);
+        crate::arch::io_wmb();
+
+        Ok((first, last))
+    }
+
     /// Ensure the next TRBs can be enqueued before the segment Link TRB.
     ///
     /// Transfer TDs must not be split across the Link TRB unless the TD is
@@ -344,6 +434,11 @@ impl DmaTrbRing {
             return Err("Link TRB index out of bounds");
         }
 
+        self.write_link_trb_validated(index, cycle, target_paddr);
+        Ok(())
+    }
+
+    fn write_link_trb_validated(&self, index: usize, cycle: bool, target_paddr: u64) {
         let trb_ptr = unsafe { self.trb_ptr(index) };
         let mut link = Trb {
             parameter: target_paddr as u64,
@@ -356,8 +451,6 @@ impl DmaTrbRing {
             core::ptr::write_volatile(trb_ptr, link);
         }
         self.sync_trb_for_device(index);
-
-        Ok(())
     }
 
     fn sync_trb_for_device(&self, index: usize) {

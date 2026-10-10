@@ -131,7 +131,7 @@ impl Ipv4Header {
 
     /// Calculate checksum
     pub fn calculate_checksum(&self) -> u16 {
-        let mut bytes = self.to_bytes();
+        let mut bytes = self.to_array();
         if bytes.len() >= 12 {
             bytes[10] = 0;
             bytes[11] = 0;
@@ -140,20 +140,22 @@ impl Ipv4Header {
     }
 
     /// Serialize header to bytes
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(20);
-        bytes.push(self.version_ihl);
-        bytes.push(self.tos);
-        bytes.extend_from_slice(&self.total_length.to_be_bytes());
-        bytes.extend_from_slice(&self.identification.to_be_bytes());
-        bytes.extend_from_slice(&self.flags_fragment.to_be_bytes());
-        bytes.push(self.ttl);
-        bytes.push(self.protocol);
-        bytes.extend_from_slice(&self.checksum.to_be_bytes());
-        bytes.extend_from_slice(&self.source_ip);
-        bytes.extend_from_slice(&self.dest_ip);
+    fn to_array(&self) -> [u8; 20] {
+        let mut bytes = [0; 20];
+        bytes[0] = self.version_ihl;
+        bytes[1] = self.tos;
+        bytes[8] = self.ttl;
+        bytes[9] = self.protocol;
+        bytes[12..16].copy_from_slice(&self.source_ip);
+        bytes[16..20].copy_from_slice(&self.dest_ip);
+        bytes[2..4].copy_from_slice(&self.total_length.to_be_bytes());
+        bytes[4..6].copy_from_slice(&self.identification.to_be_bytes());
+        bytes[6..8].copy_from_slice(&self.flags_fragment.to_be_bytes());
+        bytes[10..12].copy_from_slice(&self.checksum.to_be_bytes());
         bytes
     }
+
+    pub fn to_bytes(&self) -> Vec<u8> { self.to_array().to_vec() }
 
     /// Parse header from bytes
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -735,7 +737,8 @@ impl NetworkLayer for Ipv4Layer {
         header.checksum = header.calculate_checksum();
 
         // Serialize header
-        let mut ip_packet = header.to_bytes();
+        let mut ip_packet = Vec::with_capacity(20 + packet.len());
+        ip_packet.extend_from_slice(&header.to_array());
 
         // Create IP packet: header + payload
         ip_packet.extend_from_slice(packet);

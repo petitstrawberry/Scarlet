@@ -19,6 +19,7 @@ use crate::device::block::{
 use crate::device::events::InterruptCapableDevice;
 use crate::device::iommu::{DmaContext, DmaMapping, IommuMapFlags};
 use crate::device::manager::{DeviceManager, DriverPriority};
+use crate::device::network::DevicePacket;
 use crate::device::network::MacAddress;
 use crate::device::pci::config::{self, PciConfig};
 use crate::device::pci::device::PciDeviceInfo;
@@ -30,8 +31,9 @@ use crate::device::usb::{
 };
 use crate::driver_initcall;
 use crate::drivers::usb::cdc_ncm::{
-    CdcNcmDevice, CdcNcmInterfaceConfig, CdcNcmParameters, CdcNcmTransport, ntb_input_size_payload,
-    parse_configuration as parse_cdc_ncm_configuration, parse_mac_address, validate_mac_address,
+    CdcNcmDevice, CdcNcmInterfaceConfig, CdcNcmParameters, CdcNcmTransport, Ntb16TxBatch,
+    ntb_input_size_payload, parse_configuration as parse_cdc_ncm_configuration, parse_mac_address,
+    validate_mac_address,
 };
 use crate::drivers::usb::core::descriptor::{
     ConfigurationDescriptor, DescriptorHeader, DeviceDescriptor, EndpointDescriptor,
@@ -54,6 +56,7 @@ use crate::interrupt::{
 };
 use crate::mem::address::PhysAddr;
 use crate::mem::page::ContiguousPages;
+use crate::network::profile as net_profile;
 use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps, Selectable};
 use crate::sync::diagnostic::{DiagnosticCounter, ReportInterval};
 use crate::sync::{IrqSpinLock, Mutex, Once};
@@ -135,6 +138,9 @@ const HCC_PARAMS1_CONTEXT_SIZE_64: u32 = 1 << 2;
 const USB_BULK_MAX_TRANSFER: usize = 64 * 1024;
 const XHCI_COMMAND_TIMEOUT_US: u64 = 5_000_000;
 const XHCI_TRANSFER_TIMEOUT_US: u64 = 5_000_000;
+const XHCI_COMPLETION_SPIN_US: u64 = 100;
+const XHCI_COMPLETION_SLEEP_US: u64 = 1_000;
+const USB_SET_ADDRESS_SETTLE_US: u64 = 10_000;
 const XHCI_PENDING_EVENT_WORK_BUDGET: usize = 64;
 const XHCI_CDC_NCM_TX_QUEUE_LIMIT: usize = 256;
 const XHCI_CDC_NCM_TX_WORK_BUDGET: usize = 32;
@@ -208,6 +214,97 @@ const USB_HUB_PORT_CHANGE_RESET: u16 = 1 << 4;
 const USB_HUB_PORT_CHANGE_BH_RESET: u16 = 1 << 5;
 const USB_HUB_PORT_CHANGE_LINK_STATE: u16 = 1 << 6;
 const USB_HUB_ROUTE_DEPTH_MAX: u8 = 5;
+
+fn completion_wait_duration_us(
+    started_us: u64,
+    now_us: u64,
+    deadline_us: Option<u64>,
+    may_sleep: bool,
+) -> Option<u64> {
+    if !may_sleep || now_us.saturating_sub(started_us) < XHCI_COMPLETION_SPIN_US {
+        return None;
+    }
+    let remaining_us = deadline_us.map_or(XHCI_COMPLETION_SLEEP_US, |deadline| {
+        deadline.saturating_sub(now_us)
+    });
+    let duration_us = remaining_us.min(XHCI_COMPLETION_SLEEP_US);
+    (duration_us != 0).then_some(duration_us)
+}
+
+/// Poll briefly for the common fast completion, then let other tasks run.
+///
+/// Call only after dropping ring/registry guards. The context checks retain
+/// polling during early boot and when a caller cannot enter the scheduler.
+/// The completion remains in the event ring/pending queue while asleep, so
+/// this timed poll cannot lose an IRQ arriving between the check and sleep.
+fn relax_completion_wait(started_us: u64, deadline_us: Option<u64>) {
+    let now_us = crate::time::current_time();
+    let may_sleep = crate::sync::preemptible() && crate::interrupt::are_interrupts_enabled();
+    if let Some(duration_us) =
+        completion_wait_duration_us(started_us, now_us, deadline_us, may_sleep)
+        && let Some(task) = crate::task::mytask()
+        && !crate::sched::scheduler::current_task_is_idle(crate::arch::get_cpu().get_cpuid())
+        && task.get_state() == crate::task::TaskState::Running
+    {
+        task.sleep_with_precision(
+            task.get_trapframe(),
+            duration_us * 1_000,
+            crate::timer::TimerPrecision::Exact,
+        );
+        return;
+    }
+    core::hint::spin_loop();
+}
+
+fn cooperative_delay_us(duration_us: u64) {
+    let started_us = crate::time::current_time();
+    let deadline_us = started_us.saturating_add(duration_us);
+    while crate::time::current_time() < deadline_us {
+        relax_completion_wait(started_us, Some(deadline_us));
+    }
+}
+
+struct RingDiagnosticSnapshot {
+    physical_address: u64,
+    dma_address: u64,
+    capacity: usize,
+    producer: usize,
+    cycle: bool,
+    trbs: [Option<(usize, Trb)>; 8],
+}
+
+impl RingDiagnosticSnapshot {
+    fn capture(ring: &DmaTrbRing) -> Self {
+        let capacity = ring.capacity();
+        let producer = ring.current_producer_index();
+        let mut trbs = [None; 8];
+        for (index, entry) in trbs.iter_mut().take(capacity.min(4)).enumerate() {
+            *entry = ring.peek(index).map(|trb| (index, trb));
+        }
+        for (entry, index) in trbs[4..]
+            .iter_mut()
+            .zip(producer.saturating_sub(4)..producer)
+        {
+            if index >= 4 && index < capacity {
+                *entry = ring.peek(index).map(|trb| (index, trb));
+            }
+        }
+        Self {
+            physical_address: ring.physical_address(),
+            dma_address: ring.dma_address(),
+            capacity,
+            producer,
+            cycle: ring.cycle_state(),
+            trbs,
+        }
+    }
+
+    fn log_trbs(&self, label: &str) {
+        for &(index, trb) in self.trbs.iter().flatten() {
+            XhciController::log_trb(label, index, trb);
+        }
+    }
+}
 
 #[inline]
 fn read_mmio64_lo_hi(addr: usize) -> u64 {
@@ -366,11 +463,6 @@ struct MassStorageRuntime {
     bulk_out: BulkEndpointRuntime,
 }
 
-struct QueuedCdcNcmTx {
-    ntb: Vec<u8>,
-    frame_len: usize,
-}
-
 struct CdcNcmDmaBuffer {
     // Keep the DMA mapping before its backing pages so it is unmapped first.
     mapping: DmaMapping,
@@ -382,10 +474,21 @@ struct InFlightCdcNcmRx {
     trb_dma: u64,
 }
 
+// Own the completed mapping and pages while preparing the next request outside
+// the controller-wide slot registry. The device Arc pins the runtime generation.
+struct CompletedCdcNcmRx {
+    request: InFlightCdcNcmRx,
+    device: Arc<CdcNcmDevice>,
+    slot_id: u8,
+    dci: u8,
+    transfer_size: usize,
+}
+
 struct InFlightCdcNcmTx {
     buffer: CdcNcmDmaBuffer,
     transfer_len: usize,
     frame_len: usize,
+    frame_count: usize,
     trb_dma: u64,
 }
 
@@ -399,7 +502,7 @@ struct CdcNcmRuntime {
     rx_transfer_size: usize,
     tx_available: Vec<CdcNcmDmaBuffer>,
     tx_transfer_size: usize,
-    tx_queue: VecDeque<QueuedCdcNcmTx>,
+    tx_queue: VecDeque<DevicePacket>,
     tx_preparing: usize,
     tx_in_flight: VecDeque<InFlightCdcNcmTx>,
     device: Arc<CdcNcmDevice>,
@@ -1073,6 +1176,10 @@ impl XhciController {
     /// 3. Wait for reset to complete
     /// 4. Configure max device slots
     pub fn init(&self) -> Result<(), &'static str> {
+        self.init_with_imod_interval(None)
+    }
+
+    fn init_with_imod_interval(&self, imod_interval: Option<u16>) -> Result<(), &'static str> {
         println!("[xHCI] Initializing controller...");
         println!(
             "[xHCI] DMA context: iommu={} additional_iommus={} mapping_granule={}",
@@ -1100,7 +1207,7 @@ impl XhciController {
 
         self.setup_dcbaa()?;
         self.setup_command_ring()?;
-        self.setup_event_ring()?;
+        self.setup_event_ring(imod_interval)?;
 
         println!("[xHCI] Configured for {} device slots", max_slots_en);
 
@@ -1398,7 +1505,7 @@ impl XhciController {
         Ok(())
     }
 
-    fn setup_event_ring(&self) -> Result<(), &'static str> {
+    fn setup_event_ring(&self, imod_interval: Option<u16>) -> Result<(), &'static str> {
         let ring = EventRing::new_aligned(EVENT_RING_TRBS, self.dma_alignment())
             .ok_or("Failed to allocate event ring")?;
         let ring_dma_addr =
@@ -1430,17 +1537,26 @@ impl XhciController {
                 self.regs.runtime_base + registers::runtime::IR0_ERDP,
                 ring.event_ring_dequeue_pointer() as u64 | ERDP_EVENT_HANDLER_BUSY,
             );
+            if let Some(interval) = imod_interval {
+                // xHCI IMODI uses 250 ns ticks; preserve the upper hardware counter.
+                let imod = self.read_runtime_u32(registers::runtime::IR0_IMOD);
+                write_volatile(
+                    (self.regs.runtime_base + registers::runtime::IR0_IMOD) as *mut u32,
+                    (imod & !0xffff) | u32::from(interval),
+                );
+            }
             write_volatile(
                 (self.regs.runtime_base + registers::runtime::IR0_IMAN) as *mut u32,
                 iman_write_value(true, true),
             );
         }
         println!(
-            "[xHCI] Event ring readback: ERSTSZ={:#x} ERSTBA={:#x} ERDP={:#x} IMAN={:#x}",
+            "[xHCI] Event ring readback: ERSTSZ={:#x} ERSTBA={:#x} ERDP={:#x} IMAN={:#x} IMOD={:#x}",
             self.read_runtime_u32(registers::runtime::IR0_ERSTSZ),
             self.read_runtime_u64(registers::runtime::IR0_ERSTBA),
             self.read_runtime_u64(registers::runtime::IR0_ERDP),
-            self.read_runtime_u32(registers::runtime::IR0_IMAN)
+            self.read_runtime_u32(registers::runtime::IR0_IMAN),
+            self.read_runtime_u32(registers::runtime::IR0_IMOD)
         );
         *self.event_ring.lock() = Some(ring);
         Ok(())
@@ -1682,16 +1798,8 @@ impl XhciController {
         &self,
         slot_id: u8,
         endpoint_address: u8,
-        ntb: Vec<u8>,
-        frame_len: usize,
+        packet: DevicePacket,
     ) -> Result<(), &'static str> {
-        if ntb.is_empty() {
-            return Err("CDC-NCM transmit NTB is empty");
-        }
-        if ntb.len() > USB_BULK_MAX_TRANSFER {
-            return Err("CDC-NCM transmit NTB is too large");
-        }
-
         {
             let mut slots = self.slot_runtime.lock();
             let slot = slots
@@ -1708,11 +1816,18 @@ impl XhciController {
             if ncm.bulk_out.endpoint_address != endpoint_address {
                 return Err("CDC-NCM bulk OUT endpoint mismatch");
             }
-            let outstanding = ncm.tx_queue.len() + ncm.tx_preparing + ncm.tx_in_flight.len();
+            if !ncm.device.tx_batch().accepts(&packet) {
+                return Err("Invalid CDC-NCM transmit frame");
+            }
+            // Queue limit counts owned frames. DMA batches are separately
+            // bounded by the existing transfer depth and batch frame limit.
+            let outstanding = ncm.tx_queue.len();
             if outstanding >= XHCI_CDC_NCM_TX_QUEUE_LIMIT {
+                net_profile::event(net_profile::Stage::TxQueueFull, packet.len, 0);
                 return Err("CDC-NCM transmit queue is full");
             }
-            ncm.tx_queue.push_back(QueuedCdcNcmTx { ntb, frame_len });
+            net_profile::event(net_profile::Stage::TxQueued, packet.len, 0);
+            ncm.tx_queue.push_back(packet);
         }
 
         self.queue_interrupt_work(false);
@@ -1721,7 +1836,7 @@ impl XhciController {
 
     fn take_pending_cdc_ncm_tx(
         &self,
-    ) -> Option<(u8, u8, Arc<CdcNcmDevice>, QueuedCdcNcmTx, CdcNcmDmaBuffer)> {
+    ) -> Option<(u8, u8, Arc<CdcNcmDevice>, Ntb16TxBatch, CdcNcmDmaBuffer)> {
         let mut slots = self.slot_runtime.lock();
         for slot in slots.iter_mut() {
             let Some(ncm) = slot.cdc_ncm.as_mut() else {
@@ -1733,9 +1848,18 @@ impl XhciController {
             {
                 continue;
             }
-            let Some(request) = ncm.tx_queue.pop_front() else {
+            if ncm.tx_queue.is_empty() {
                 continue;
-            };
+            }
+            let mut request = ncm.device.tx_batch();
+            while let Some(packet) = ncm.tx_queue.front() {
+                if !request.accepts(packet) {
+                    break;
+                }
+                request.push(ncm.tx_queue.pop_front().expect("missing queued NCM frame"));
+            }
+            // Every queue entry was validated against this same device config.
+            debug_assert!(request.count != 0);
             let buffer = ncm
                 .tx_available
                 .pop()
@@ -1752,13 +1876,20 @@ impl XhciController {
         None
     }
 
-    fn restore_cdc_ncm_tx_buffer(&self, slot_id: u8, dci: u8, buffer: CdcNcmDmaBuffer) {
+    fn restore_cdc_ncm_tx_buffer(
+        &self,
+        slot_id: u8,
+        dci: u8,
+        device: &Arc<CdcNcmDevice>,
+        buffer: CdcNcmDmaBuffer,
+    ) {
         let mut slots = self.slot_runtime.lock();
         if let Some(ncm) = slots
             .iter_mut()
             .find(|slot| slot.usb_device.slot_id() == slot_id)
             .and_then(|slot| slot.cdc_ncm.as_mut())
             && ncm.bulk_out.dci == dci
+            && Arc::ptr_eq(&ncm.device, device)
         {
             ncm.tx_preparing = ncm.tx_preparing.saturating_sub(1);
             ncm.tx_available.push(buffer);
@@ -1776,21 +1907,31 @@ impl XhciController {
             };
             processed += 1;
 
-            if request.ntb.len() > buffer.pages.len() * crate::environment::PAGE_SIZE {
-                self.restore_cdc_ncm_tx_buffer(slot_id, dci, buffer);
-                device.handle_transmit_error("CDC-NCM transmit request exceeds its DMA buffer");
+            let transfer_len = request.transfer_len();
+            let copy_profile = net_profile::begin(
+                net_profile::Stage::NcmTxBuild,
+                request.frame_bytes,
+                transfer_len,
+            );
+            // SAFETY: this buffer is taken from the idle pool, exclusively owned
+            // until publication below, and spans all allocated pages.
+            let output = unsafe {
+                core::slice::from_raw_parts_mut(
+                    buffer.pages.as_vaddr() as *mut u8,
+                    buffer.pages.len() * crate::environment::PAGE_SIZE,
+                )
+            };
+            let encoded = device.encode_tx_batch(&request, output);
+            drop(copy_profile);
+            if let Err(error) = encoded {
+                self.restore_cdc_ncm_tx_buffer(slot_id, dci, &device, buffer);
+                device.handle_transmit_error(error, request.count);
                 continue;
             }
-            // SAFETY: The DMA allocation was rounded up from the NTB length,
-            // so it contains the complete non-overlapping source slice.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    request.ntb.as_ptr(),
-                    buffer.pages.as_vaddr() as *mut u8,
-                    request.ntb.len(),
-                );
-            }
-            sync_pages_for_device(&buffer.pages);
+            let clean_profile =
+                net_profile::begin(net_profile::Stage::XhciTxClean, transfer_len, transfer_len);
+            crate::arch::clean_dcache_to_poc_range(buffer.pages.as_vaddr(), transfer_len);
+            drop(clean_profile);
 
             let submit_result = {
                 let mut slots = self.slot_runtime.lock();
@@ -1798,6 +1939,7 @@ impl XhciController {
                     .iter_mut()
                     .find(|slot| slot.usb_device.slot_id() == slot_id)
                     .and_then(|slot| slot.cdc_ncm.as_mut())
+                    .filter(|ncm| Arc::ptr_eq(&ncm.device, &device))
                     .ok_or("CDC-NCM runtime disappeared before transmit submission");
                 match ncm {
                     Ok(ncm) => {
@@ -1808,7 +1950,7 @@ impl XhciController {
                         } else if ncm.bulk_out.dci != dci {
                             ncm.tx_available.push(buffer);
                             Err("CDC-NCM bulk OUT DCI changed before transmit submission")
-                        } else if request.ntb.len() > ncm.tx_transfer_size {
+                        } else if transfer_len > ncm.tx_transfer_size {
                             ncm.tx_available.push(buffer);
                             Err("CDC-NCM transmit request exceeds the negotiated NTB size")
                         } else if ncm.tx_in_flight.len() >= XHCI_CDC_NCM_TX_TRANSFER_DEPTH {
@@ -1817,15 +1959,16 @@ impl XhciController {
                         } else {
                             match ncm.bulk_out.ring.enqueue(Trb::normal_transfer(
                                 buffer.mapping.dma_addr().as_u64(),
-                                request.ntb.len() as u32,
+                                transfer_len as u32,
                             )) {
                                 Ok(trb_index) => {
                                     let trb_dma = ncm.bulk_out.ring.dma_address()
                                         + (trb_index * size_of::<Trb>()) as u64;
                                     ncm.tx_in_flight.push_back(InFlightCdcNcmTx {
                                         buffer,
-                                        transfer_len: request.ntb.len(),
-                                        frame_len: request.frame_len,
+                                        transfer_len: transfer_len,
+                                        frame_len: request.frame_bytes,
+                                        frame_count: request.count,
                                         trb_dma,
                                     });
                                     Ok(())
@@ -1842,7 +1985,7 @@ impl XhciController {
             };
 
             if let Err(error) = submit_result {
-                device.handle_transmit_error(error);
+                device.handle_transmit_error(error, request.count);
                 continue;
             }
             if !doorbells[..doorbell_count].contains(&(slot_id, dci)) {
@@ -1905,66 +2048,70 @@ impl XhciController {
             self.read_runtime_u64(registers::runtime::IR0_ERDP)
         );
 
-        if let Some(cmd_ring) = self.cmd_ring.lock().as_ref() {
-            let capacity = cmd_ring.capacity();
-            let producer = cmd_ring.current_producer_index();
+        let command_snapshot = self
+            .cmd_ring
+            .lock()
+            .as_ref()
+            .map(RingDiagnosticSnapshot::capture);
+        if let Some(snapshot) = command_snapshot {
             println!(
                 "[xHCI] Command ring state: paddr={:#x} capacity={} producer={} cycle={}",
-                cmd_ring.physical_address(),
-                capacity,
-                producer,
-                cmd_ring.cycle_state()
+                snapshot.physical_address, snapshot.capacity, snapshot.producer, snapshot.cycle
             );
-            for index in 0..core::cmp::min(capacity, 4) {
-                if let Some(trb) = cmd_ring.peek(index) {
-                    Self::log_trb("cmd", index, trb);
-                }
-            }
-            let start = producer.saturating_sub(4);
-            for index in start..producer {
-                if index >= 4 && index < capacity {
-                    if let Some(trb) = cmd_ring.peek(index) {
-                        Self::log_trb("cmd", index, trb);
-                    }
-                }
-            }
+            snapshot.log_trbs("cmd");
         } else {
             println!("[xHCI] Command ring state: uninitialized");
         }
 
-        if let Some(event_ring) = self.event_ring.lock().as_ref() {
-            let capacity = event_ring.capacity();
-            let dequeue = event_ring.current_dequeue_index();
-            println!(
-                "[xHCI] Event ring state: paddr={:#x} capacity={} dequeue={} cycle={} erdp={:#x}",
-                event_ring.physical_address(),
-                capacity,
-                dequeue,
-                event_ring.current_cycle_state(),
-                event_ring.event_ring_dequeue_pointer()
-            );
-            for offset in 0..core::cmp::min(capacity, 4) {
-                let index = (dequeue + offset) % capacity;
-                if let Some(trb) = event_ring.peek(index) {
-                    Self::log_trb("event", index, trb);
-                }
-            }
-        } else {
-            println!("[xHCI] Event ring state: uninitialized");
-        }
+        self.log_event_ring_state();
 
         for port_id in 1..=self.max_ports {
             self.log_port_status(port_id, self.read_portsc(port_id));
         }
     }
 
+    fn log_event_ring_state(&self) {
+        let snapshot = {
+            let ring_guard = self.event_ring.lock();
+            ring_guard.as_ref().map(|event_ring| {
+                let capacity = event_ring.capacity();
+                let dequeue = event_ring.current_dequeue_index();
+                let mut trbs = [None; 4];
+                for (offset, entry) in trbs.iter_mut().take(capacity.min(4)).enumerate() {
+                    let index = (dequeue + offset) % capacity;
+                    *entry = event_ring.peek(index).map(|trb| (index, trb));
+                }
+                (
+                    event_ring.physical_address(),
+                    capacity,
+                    dequeue,
+                    event_ring.current_cycle_state(),
+                    event_ring.event_ring_dequeue_pointer(),
+                    trbs,
+                )
+            })
+        };
+        if let Some((physical_address, capacity, dequeue, cycle, erdp, trbs)) = snapshot {
+            println!(
+                "[xHCI] Event ring state: paddr={:#x} capacity={} dequeue={} cycle={} erdp={:#x}",
+                physical_address, capacity, dequeue, cycle, erdp
+            );
+            for (index, trb) in trbs.into_iter().flatten() {
+                Self::log_trb("event", index, trb);
+            }
+        } else {
+            println!("[xHCI] Event ring state: uninitialized");
+        }
+    }
+
     fn send_command(&self, trb: Trb) -> Result<Trb, &'static str> {
+        let started_us = crate::time::current_time();
         while self
             .command_in_flight
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            core::hint::spin_loop();
+            relax_completion_wait(started_us, None);
         }
         let result = self.send_command_serialized(trb);
         self.command_in_flight.store(false, Ordering::Release);
@@ -2011,7 +2158,8 @@ impl XhciController {
     }
 
     fn poll_command_completion(&self, command_trb_dma: u64) -> Result<Trb, &'static str> {
-        let deadline = crate::time::current_time() + XHCI_COMMAND_TIMEOUT_US;
+        let started_us = crate::time::current_time();
+        let deadline = started_us + XHCI_COMMAND_TIMEOUT_US;
         while crate::time::current_time() < deadline {
             if let Some(event) = self.take_pending_command_completion(command_trb_dma) {
                 if event.completion_code() == COMMAND_COMPLETION_SUCCESS {
@@ -2024,12 +2172,15 @@ impl XhciController {
                 return Err("xHCI command completion failed");
             }
 
-            let event_ring_guard = self.event_ring.lock();
-            let event_ring = event_ring_guard
-                .as_ref()
-                .ok_or("Event ring not initialized")?;
-            let event = event_ring.dequeue();
-            self.write_event_ring_dequeue_pointer(event_ring);
+            let event = {
+                let event_ring_guard = self.event_ring.lock();
+                let event_ring = event_ring_guard
+                    .as_ref()
+                    .ok_or("Event ring not initialized")?;
+                let event = event_ring.dequeue();
+                self.write_event_ring_dequeue_pointer(event_ring);
+                event
+            };
             if let Some(event) = event {
                 if command_completion_matches(event, command_trb_dma) {
                     if event.completion_code() == COMMAND_COMPLETION_SUCCESS {
@@ -2058,7 +2209,7 @@ impl XhciController {
                     }
                 }
             }
-            core::hint::spin_loop();
+            relax_completion_wait(started_us, Some(deadline));
         }
         self.log_command_timeout_state();
         Err("Timeout waiting for xHCI command completion")
@@ -2138,7 +2289,8 @@ impl XhciController {
         );
         self.write_portsc(port_id, reset_value);
 
-        let deadline = crate::time::current_time() + PORT_RESET_TIMEOUT_US;
+        let started_us = crate::time::current_time();
+        let deadline = started_us + PORT_RESET_TIMEOUT_US;
         let mut last_portsc = portsc;
         while crate::time::current_time() < deadline {
             let current_portsc = self.read_portsc(port_id);
@@ -2151,10 +2303,10 @@ impl XhciController {
             if !current.resetting && current.enabled {
                 self.log_port_status(port_id, current_portsc);
                 self.clear_port_change_bits(port_id, current_portsc);
-                crate::time::udelay(PORT_RESET_RECOVERY_US);
+                cooperative_delay_us(PORT_RESET_RECOVERY_US);
                 return Ok(current);
             }
-            core::hint::spin_loop();
+            relax_completion_wait(started_us, Some(deadline));
         }
 
         self.log_port_status(port_id, last_portsc);
@@ -2260,6 +2412,10 @@ impl XhciController {
         if event.slot_id() != slot_id {
             return Err("Address Device completion slot mismatch");
         }
+        // Address Device performs SET_ADDRESS. Like Linux, leave its 10 ms
+        // recovery interval before the first descriptor control request.
+        // Command/ring guards have been released before entering this delay.
+        cooperative_delay_us(USB_SET_ADDRESS_SETTLE_US);
         sync_pages_after_device_write(&device_context);
         let mut usb_device = UsbDevice::new(slot_id, root_port_id, speed);
         usb_device.set_state(UsbDeviceState::Default);
@@ -2367,6 +2523,11 @@ impl XhciController {
             "[xHCI] Recovered timed-out endpoint: slot={} dci={} dequeue={:#x}",
             slot_id, endpoint_id, dequeue_pointer
         );
+        if endpoint_id == EP0_DCI
+            && let Some(ep0) = self.ep0_runtime(slot_id)
+        {
+            self.log_ep0_context_state(&ep0, "timeout recovery");
+        }
         Ok(())
     }
 
@@ -2398,6 +2559,11 @@ impl XhciController {
             "[xHCI] Recovered failed endpoint: slot={} dci={} completion_code={} dequeue={:#x}",
             slot_id, endpoint_id, completion_code, dequeue_pointer
         );
+        if endpoint_id == EP0_DCI
+            && let Some(ep0) = self.ep0_runtime(slot_id)
+        {
+            self.log_ep0_context_state(&ep0, "error recovery");
+        }
         Ok(())
     }
 
@@ -2461,13 +2627,14 @@ impl XhciController {
         mut data: Option<&mut ContiguousPages>,
         length: u16,
     ) -> Result<usize, &'static str> {
+        let started_us = crate::time::current_time();
         while slot
             .ep0_in_flight
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
             while slot.ep0_in_flight.load(Ordering::Relaxed) {
-                core::hint::spin_loop();
+                relax_completion_wait(started_us, None);
             }
         }
         let _ep0_guard = Ep0TransferGuard {
@@ -2494,19 +2661,14 @@ impl XhciController {
             0
         };
         let required_trbs = if data.is_some() { 3 } else { 2 };
-        let _data_dma_mapping;
-        slot.ring
-            .ensure_contiguous_space(required_trbs, Trb::no_op_transfer())?;
-        let setup_trb_index = slot.ring.enqueue(Trb::setup_stage(
-            request_type,
-            request,
-            value,
-            index,
-            length,
-            transfer_type,
-        ))?;
-        let status_trb_index;
-        if let Some(buffer) = data.as_mut() {
+        let mut td = [
+            Trb::setup_stage(request_type, request, value, index, length, transfer_type),
+            Trb::status_stage(true, true),
+            Trb::default(),
+        ];
+        // Finish the fallible DMA mapping before any part of this TD becomes
+        // visible to the endpoint. Keep it alive through completion/recovery.
+        let _data_dma_mapping = if let Some(buffer) = data.as_mut() {
             let flags = if direction_in {
                 IommuMapFlags::WRITE | IommuMapFlags::COHERENT
             } else {
@@ -2518,17 +2680,15 @@ impl XhciController {
                 sync_pages_for_device(buffer);
             }
             let mapping = self.dma_map_owned_pages(buffer, flags)?;
-            slot.ring.enqueue(Trb::data_stage(
-                mapping.dma_addr().as_u64(),
-                length as u32,
-                direction_in,
-            ))?;
-            status_trb_index = slot.ring.enqueue(Trb::status_stage(!direction_in, true))?;
-            _data_dma_mapping = Some(mapping);
+            td[1] = Trb::data_stage(mapping.dma_addr().as_u64(), length as u32, direction_in);
+            td[2] = Trb::status_stage(!direction_in, true);
+            Some(mapping)
         } else {
-            status_trb_index = slot.ring.enqueue(Trb::status_stage(true, true))?;
-            _data_dma_mapping = None;
-        }
+            None
+        };
+        let (setup_trb_index, status_trb_index) = slot
+            .ring
+            .enqueue_td(&td[..required_trbs], Trb::no_op_transfer())?;
 
         let ring_dma = slot.ring.dma_address();
         let td_start_dma = ring_dma + (setup_trb_index * size_of::<Trb>()) as u64;
@@ -2604,6 +2764,7 @@ impl XhciController {
             return Err("Timeout waiting for transfer event");
         }
 
+        let started_us = crate::time::current_time();
         let mut short_packet_event = None;
         while crate::time::current_time() < deadline {
             let event = if let Some(event) = self.take_pending_transfer_event_for_td(
@@ -2655,7 +2816,7 @@ impl XhciController {
             };
 
             let Some(event) = event else {
-                core::hint::spin_loop();
+                relax_completion_wait(started_us, Some(deadline));
                 continue;
             };
             match classify_transfer_td_event(
@@ -2682,6 +2843,9 @@ impl XhciController {
                 }
                 TransferTdEventDisposition::Failed => {
                     Self::log_event("Transfer TD failed", event);
+                    if endpoint_id == EP0_DCI {
+                        self.log_ep0_failure_state(slot_id);
+                    }
                     let endpoint_state = failed_transfer_endpoint_state(event.completion_code());
                     if (endpoint_id == EP0_DCI
                         || endpoint_state == FailedTransferEndpointState::Halted)
@@ -2712,7 +2876,7 @@ impl XhciController {
                     self.queue_interrupt_work(false);
                 }
             }
-            core::hint::spin_loop();
+            relax_completion_wait(started_us, Some(deadline));
         }
         self.log_transfer_timeout_state(slot_id, endpoint_id);
         Err("Timeout waiting for transfer event")
@@ -2741,29 +2905,54 @@ impl XhciController {
             self.read_runtime_u64(registers::runtime::IR0_ERDP)
         );
 
-        if let Some(event_ring) = self.event_ring.lock().as_ref() {
-            let capacity = event_ring.capacity();
-            let dequeue = event_ring.current_dequeue_index();
-            println!(
-                "[xHCI] Event ring state: paddr={:#x} capacity={} dequeue={} cycle={} erdp={:#x}",
-                event_ring.physical_address(),
-                capacity,
-                dequeue,
-                event_ring.current_cycle_state(),
-                event_ring.event_ring_dequeue_pointer()
-            );
-            for offset in 0..core::cmp::min(capacity, 4) {
-                let index = (dequeue + offset) % capacity;
-                if let Some(trb) = event_ring.peek(index) {
-                    Self::log_trb("event", index, trb);
-                }
-            }
-        }
-        // The endpoint-specific dump below only knows the storage and CDC-NCM
-        // bulk runtimes; EP0 state is already covered by the generic dump.
-        if endpoint_id != EP0_DCI {
+        self.log_event_ring_state();
+        if endpoint_id == EP0_DCI {
+            self.log_ep0_failure_state(slot_id);
+        } else {
             self.log_bulk_endpoint_timeout_state(slot_id, endpoint_id);
         }
+    }
+
+    fn log_ep0_context_state(&self, ep0: &Ep0Runtime, phase: &str) {
+        sync_pages_after_device_write(&ep0.device_context);
+        let context = DeviceContextBuffer::new(ep0.device_context.as_vaddr(), self.context_size);
+        if let Ok(endpoint) = context.endpoint(EP0_DCI) {
+            let endpoint = unsafe { read_volatile(endpoint) };
+            let dequeue =
+                (u64::from(endpoint.tr_dequeue_high) << 32) | u64::from(endpoint.tr_dequeue_low);
+            println!(
+                "[xHCI] EP0 context slot={} phase={}: state={} max_packet={} dequeue={:#x} dcs={} d0={:#x} d1={:#x} d4={:#x}",
+                ep0.slot_id,
+                phase,
+                endpoint.dword0 & 7,
+                endpoint.dword1 >> 16,
+                dequeue & !0xf,
+                dequeue & 1,
+                endpoint.dword0,
+                endpoint.dword1,
+                endpoint.dword4
+            );
+        }
+    }
+
+    fn log_ep0_failure_state(&self, slot_id: u8) {
+        let Some(ep0) = self.ep0_runtime(slot_id) else {
+            return;
+        };
+        // Arc keeps both DMA allocations alive after the registry guard drops.
+        // The caller owns EP0 serialization, so the producer cannot advance
+        // while this bounded failure-only ring snapshot is collected.
+        self.log_ep0_context_state(&ep0, "failure");
+        let snapshot = RingDiagnosticSnapshot::capture(&ep0.ring);
+        println!(
+            "[xHCI] EP0 ring slot={}: paddr={:#x} dma={:#x} producer={} cycle={}",
+            slot_id,
+            snapshot.physical_address,
+            snapshot.dma_address,
+            snapshot.producer,
+            snapshot.cycle
+        );
+        snapshot.log_trbs("ep0");
     }
 
     fn log_bulk_endpoint_timeout_state(&self, slot_id: u8, endpoint_id: u8) {
@@ -2777,19 +2966,10 @@ impl XhciController {
         sync_pages_after_device_write(&slot.ep0.device_context);
         let context =
             DeviceContextBuffer::new(slot.ep0.device_context.as_vaddr(), self.context_size);
-        if let Ok(endpoint) = context.endpoint(endpoint_id) {
-            let endpoint = unsafe { read_volatile(endpoint) };
-            println!(
-                "[xHCI] Endpoint context slot={} dci={}: d0={:#x} d1={:#x} trdp={:#x}:{:#x} d4={:#x}",
-                slot_id,
-                endpoint_id,
-                endpoint.dword0,
-                endpoint.dword1,
-                endpoint.tr_dequeue_high,
-                endpoint.tr_dequeue_low,
-                endpoint.dword4
-            );
-        }
+        let endpoint_context = context
+            .endpoint(endpoint_id)
+            .ok()
+            .map(|endpoint| unsafe { read_volatile(endpoint) });
 
         let endpoint_and_label = slot
             .storage
@@ -2819,33 +2999,36 @@ impl XhciController {
         let Some((label, endpoint)) = endpoint_and_label else {
             return;
         };
-        let ring = &endpoint.ring;
+        let endpoint_address = endpoint.endpoint_address;
+        let dci = endpoint.dci;
+        let max_packet_size = endpoint.max_packet_size;
+        let snapshot = RingDiagnosticSnapshot::capture(&endpoint.ring);
+        drop(slots);
+        if let Some(endpoint) = endpoint_context {
+            println!(
+                "[xHCI] Endpoint context slot={} dci={}: d0={:#x} d1={:#x} trdp={:#x}:{:#x} d4={:#x}",
+                slot_id,
+                endpoint_id,
+                endpoint.dword0,
+                endpoint.dword1,
+                endpoint.tr_dequeue_high,
+                endpoint.tr_dequeue_low,
+                endpoint.dword4
+            );
+        }
         println!(
             "[xHCI] {} ring slot={} ep_addr={:#x} dci={} max_packet={} paddr={:#x} dma={:#x} producer={} cycle={}",
             label,
             slot_id,
-            endpoint.endpoint_address,
-            endpoint.dci,
-            endpoint.max_packet_size,
-            ring.physical_address(),
-            ring.dma_address(),
-            ring.current_producer_index(),
-            ring.cycle_state()
+            endpoint_address,
+            dci,
+            max_packet_size,
+            snapshot.physical_address,
+            snapshot.dma_address,
+            snapshot.producer,
+            snapshot.cycle
         );
-        for index in 0..core::cmp::min(ring.capacity(), 4) {
-            if let Some(trb) = ring.peek(index) {
-                Self::log_trb(label, index, trb);
-            }
-        }
-        let producer = ring.current_producer_index();
-        let start = producer.saturating_sub(4);
-        for index in start..producer {
-            if index >= 4 && index < ring.capacity() {
-                if let Some(trb) = ring.peek(index) {
-                    Self::log_trb(label, index, trb);
-                }
-            }
-        }
+        snapshot.log_trbs(label);
     }
 
     fn submit_interrupt_in_transfer(&self, slot_id: u8) -> Result<(), &'static str> {
@@ -4584,7 +4767,8 @@ impl XhciController {
             slot.hub.ok_or("Slot is not a hub")?.is_superspeed
         };
         self.hub_set_port_feature(slot_id, port, USB_HUB_FEATURE_PORT_RESET)?;
-        let deadline = crate::time::current_time() + USB_HUB_PORT_RESET_TIMEOUT_US;
+        let started_us = crate::time::current_time();
+        let deadline = started_us + USB_HUB_PORT_RESET_TIMEOUT_US;
         let mut last_status = self.hub_get_port_status(slot_id, port)?;
         while crate::time::current_time() < deadline {
             let status = self.hub_get_port_status(slot_id, port)?;
@@ -4600,10 +4784,10 @@ impl XhciController {
                         USB_HUB_FEATURE_C_PORT_LINK_STATE,
                     );
                 }
-                crate::time::udelay(PORT_RESET_RECOVERY_US);
+                cooperative_delay_us(PORT_RESET_RECOVERY_US);
                 return Ok(status);
             }
-            core::hint::spin_loop();
+            relax_completion_wait(started_us, Some(deadline));
         }
 
         self.log_hub_port_status(slot_id, port, last_status, is_superspeed);
@@ -4920,20 +5104,30 @@ impl XhciController {
     fn log_device_descriptor(&self, slot_id: u8, descriptor: &DeviceDescriptor) {
         let vendor_id = descriptor.vendor_id;
         let product_id = descriptor.product_id;
+        let device_version = descriptor.device_version;
         let device_class = descriptor.device_class;
         let device_subclass = descriptor.device_subclass;
         let device_protocol = descriptor.device_protocol;
         let max_packet_size0 = descriptor.max_packet_size0;
         let num_configurations = descriptor.num_configurations;
+        let ep0_max_packet_bytes = self
+            .slot_runtime
+            .lock()
+            .iter()
+            .find(|slot| slot.usb_device.slot_id() == slot_id)
+            .map(|slot| slot.ep0.ep0_max_packet_size.load(Ordering::Acquire))
+            .unwrap_or(0);
         println!(
-            "[xHCI] Slot {} device descriptor: vid={:#06x} pid={:#06x} class={:#04x} subclass={:#04x} protocol={:#04x} ep0_mps={} configs={}",
+            "[xHCI] Slot {} device descriptor: vid={:#06x} pid={:#06x} bcdDevice={:#06x} class={:#04x} subclass={:#04x} protocol={:#04x} ep0_mps_raw={} ep0_mps_bytes={} configs={}",
             slot_id,
             vendor_id,
             product_id,
+            device_version,
             device_class,
             device_subclass,
             device_protocol,
             max_packet_size0,
+            ep0_max_packet_bytes,
             num_configurations
         );
     }
@@ -5895,6 +6089,114 @@ impl XhciController {
         Ok(())
     }
 
+    fn complete_cdc_ncm_rx(&self, event: Trb, completed: CompletedCdcNcmRx) {
+        let CompletedCdcNcmRx {
+            request,
+            device,
+            slot_id,
+            dci,
+            transfer_size,
+        } = completed;
+        let successful = Self::transfer_successful(event);
+        let actual = if successful {
+            transfer_size.saturating_sub(event.transfer_length() as usize)
+        } else {
+            0
+        };
+        net_profile::event(net_profile::Stage::RxNtb, actual, transfer_size);
+        let packets = if actual != 0 {
+            let invalidate_profile = net_profile::begin(
+                net_profile::Stage::XhciRxInvalidate,
+                actual,
+                request.buffer.pages.len() * crate::environment::PAGE_SIZE,
+            );
+            sync_pages_after_device_write(&request.buffer.pages);
+            drop(invalidate_profile);
+            // SAFETY: the successful completed request owns the entire transfer
+            // range. Parsing produces owned frames before this buffer is reused.
+            let ntb = unsafe {
+                core::slice::from_raw_parts(request.buffer.pages.as_vaddr() as *const u8, actual)
+            };
+            Some(device.parse_received_ntb(ntb))
+        } else {
+            None
+        };
+        // Keep the existing full-buffer cache handoff before publishing a TRB.
+        // This span now also includes reacquiring the registry and publication;
+        // it still excludes the doorbell and packet dispatch below.
+        let requeue_profile = if device.is_attached() {
+            let profile = net_profile::begin(
+                net_profile::Stage::XhciRxRequeue,
+                transfer_size,
+                request.buffer.pages.len() * crate::environment::PAGE_SIZE,
+            );
+            sync_pages_before_device_write(&request.buffer.pages);
+            Some(profile)
+        } else {
+            None
+        };
+        // An obsolete generation retains its unpublished buffer locally until
+        // after releasing the registry, so unmap/free cannot run under it.
+        let mut request = Some(request);
+        let mut slots = self.slot_runtime.lock();
+        let current = slots
+            .iter_mut()
+            .find(|slot| slot.usb_device.slot_id() == slot_id)
+            .and_then(|slot| slot.cdc_ncm.as_mut())
+            .filter(|ncm| Arc::ptr_eq(&ncm.device, &device));
+        let resubmit = match current {
+            Some(ncm) if ncm.bulk_in.dci != dci || ncm.rx_transfer_size != transfer_size => {
+                Err("CDC-NCM receive runtime changed while preparing request")
+            }
+            Some(ncm) if device.is_attached() && requeue_profile.is_some() => {
+                let mut completed = request.take().expect("CDC-NCM completed request missing");
+                match ncm.bulk_in.ring.enqueue(Trb::normal_transfer_in(
+                    completed.buffer.mapping.dma_addr().as_u64(),
+                    transfer_size as u32,
+                )) {
+                    Ok(trb_index) => {
+                        completed.trb_dma =
+                            ncm.bulk_in.ring.dma_address() + (trb_index * size_of::<Trb>()) as u64;
+                        // Publication and its software owner stay serialized
+                        // with teardown under this same registry guard.
+                        ncm.rx_in_flight.push_back(completed);
+                        Ok(true)
+                    }
+                    Err(error) => {
+                        ncm.rx_available.push(completed.buffer);
+                        Err(error)
+                    }
+                }
+            }
+            Some(ncm) => {
+                ncm.rx_available.push(
+                    request
+                        .take()
+                        .expect("CDC-NCM completed request missing")
+                        .buffer,
+                );
+                Ok(false)
+            }
+            None => Ok(false),
+        };
+        drop(slots);
+        drop(requeue_profile);
+        drop(request);
+
+        match resubmit {
+            Ok(true) => self.ring_endpoint_doorbell(slot_id, dci),
+            Ok(false) => {}
+            Err(error) => device.handle_receive_error(error),
+        }
+        if !successful {
+            device.handle_receive_error("xHCI CDC-NCM bulk IN transfer failed");
+        } else if let Some(packets) = packets {
+            device.handle_received_packets(packets);
+        } else {
+            device.handle_receive_error("CDC-NCM bulk IN completed without data");
+        }
+    }
+
     fn handle_transfer_event(&self, event: Trb) -> bool {
         let slot_id = event.slot_id();
         let endpoint_id = event.endpoint_id();
@@ -5949,12 +6251,13 @@ impl XhciController {
             let has_queued = !ncm.tx_queue.is_empty();
             let successful = Self::transfer_successful(event) && event.transfer_length() == 0;
             let frame_len = completed.frame_len;
+            let frame_count = completed.frame_count;
             let transfer_len = completed.transfer_len;
             ncm.tx_available.push(completed.buffer);
             drop(slots);
 
             if successful {
-                device.handle_transmit_complete(frame_len);
+                device.handle_transmit_complete(frame_len, frame_count);
             } else if Self::transfer_successful(event) {
                 println!(
                     "[xHCI] Short CDC-NCM bulk OUT: slot={} dci={} code={} len={} residual={} trb={:#x}",
@@ -5965,7 +6268,7 @@ impl XhciController {
                     event.transfer_length(),
                     event.trb_pointer()
                 );
-                device.handle_transmit_error("Short CDC-NCM bulk OUT transfer");
+                device.handle_transmit_error("Short CDC-NCM bulk OUT transfer", frame_count);
             } else {
                 println!(
                     "[xHCI] Failed CDC-NCM bulk OUT: slot={} dci={} code={} len={} residual={} trb={:#x}",
@@ -5976,7 +6279,7 @@ impl XhciController {
                     event.transfer_length(),
                     event.trb_pointer()
                 );
-                device.handle_transmit_error("xHCI CDC-NCM bulk OUT transfer failed");
+                device.handle_transmit_error("xHCI CDC-NCM bulk OUT transfer failed", frame_count);
             }
             if XHCI_VERBOSE_TRACE {
                 println!(
@@ -6036,7 +6339,6 @@ impl XhciController {
         if let Some(ncm) = slot.cdc_ncm.as_mut()
             && ncm.bulk_in.dci == endpoint_id
         {
-            let device = ncm.device.clone();
             let completed_trb_dma = event.trb_pointer() & !0xf;
             let Some(completed_index) = ncm
                 .rx_in_flight
@@ -6058,68 +6360,18 @@ impl XhciController {
                 );
                 return true;
             };
-            let mut completed = ncm
-                .rx_in_flight
-                .remove(completed_index)
-                .expect("CDC-NCM receive request disappeared while completing it");
-
-            let successful = Self::transfer_successful(event);
-            let actual = if successful {
-                ncm.rx_transfer_size
-                    .saturating_sub(event.transfer_length() as usize)
-            } else {
-                0
-            };
-            let bytes = if actual != 0 {
-                sync_pages_after_device_write(&completed.buffer.pages);
-                // SAFETY: `actual` is bounded by `rx_transfer_size`, and this
-                // completed DMA buffer owns that complete transfer range.
-                Some(unsafe {
-                    core::slice::from_raw_parts(
-                        completed.buffer.pages.as_vaddr() as *const u8,
-                        actual,
-                    )
-                    .to_vec()
-                })
-            } else {
-                None
-            };
-            let dci = ncm.bulk_in.dci;
-            let resubmit = if device.is_attached() {
-                sync_pages_before_device_write(&completed.buffer.pages);
-                match ncm.bulk_in.ring.enqueue(Trb::normal_transfer_in(
-                    completed.buffer.mapping.dma_addr().as_u64(),
-                    ncm.rx_transfer_size as u32,
-                )) {
-                    Ok(trb_index) => {
-                        completed.trb_dma =
-                            ncm.bulk_in.ring.dma_address() + (trb_index * size_of::<Trb>()) as u64;
-                        ncm.rx_in_flight.push_back(completed);
-                        Ok(true)
-                    }
-                    Err(error) => {
-                        ncm.rx_available.push(completed.buffer);
-                        Err(error)
-                    }
-                }
-            } else {
-                ncm.rx_available.push(completed.buffer);
-                Ok(false)
+            let completed = CompletedCdcNcmRx {
+                request: ncm
+                    .rx_in_flight
+                    .remove(completed_index)
+                    .expect("CDC-NCM receive request disappeared while completing it"),
+                device: ncm.device.clone(),
+                slot_id,
+                dci: ncm.bulk_in.dci,
+                transfer_size: ncm.rx_transfer_size,
             };
             drop(slots);
-
-            match resubmit {
-                Ok(true) => self.ring_endpoint_doorbell(slot_id, dci),
-                Ok(false) => {}
-                Err(error) => device.handle_receive_error(error),
-            }
-            if !successful {
-                device.handle_receive_error("xHCI CDC-NCM bulk IN transfer failed");
-            } else if let Some(bytes) = bytes {
-                device.handle_received_ntb(&bytes);
-            } else {
-                device.handle_receive_error("CDC-NCM bulk IN completed without data");
-            }
+            self.complete_cdc_ncm_rx(event, completed);
             return true;
         }
 
@@ -6431,17 +6683,19 @@ impl XhciController {
             self.port_change_pending.store(true, Ordering::Release);
         }
 
-        if processed == EVENT_RING_TRBS {
-            self.interrupt_work_pending.store(true, Ordering::Release);
-            return true;
-        }
-
         // Submission is bounded work: enqueue a limited batch of ready NCM
         // transfers and return. Completion is consumed on a later Transfer
         // Event; this worker never waits for the device and therefore cannot
         // head-of-line block unrelated xHCI work when a function stops
-        // responding.
+        // responding. Serve TX before deferring another full RX pass so
+        // sustained ingress cannot starve queued responses or TCP ACKs.
         let _submitted_tx = self.process_pending_cdc_ncm_tx();
+
+        if processed == EVENT_RING_TRBS {
+            net_profile::event(net_profile::Stage::XhciFullEventBudget, 0, 0);
+            self.interrupt_work_pending.store(true, Ordering::Release);
+            return true;
+        }
 
         if !deferred_mode {
             self.deferred_interrupt_cause_seen
@@ -6664,12 +6918,12 @@ struct XhciCdcNcmTransport {
 }
 
 impl CdcNcmTransport for XhciCdcNcmTransport {
-    fn enqueue_ntb(&self, ntb: Vec<u8>, frame_len: usize) -> Result<(), &'static str> {
+    fn enqueue_frame(&self, packet: DevicePacket) -> Result<(), &'static str> {
         let controller = self
             .controller
             .upgrade()
             .ok_or("xHCI controller is no longer available")?;
-        controller.enqueue_cdc_ncm_tx(self.slot_id, self.bulk_out_endpoint, ntb, frame_len)
+        controller.enqueue_cdc_ncm_tx(self.slot_id, self.bulk_out_endpoint, packet)
     }
 
     fn set_packet_filter(&self, filter: u16) -> Result<(), &'static str> {
@@ -6735,13 +6989,14 @@ impl UsbMassStorageBlockDevice {
         // for that protocol serialization: a command includes DMA completion
         // waits and recovery delays, and masking local IRQs for that lifetime
         // can prevent the xHCI completion path and scheduler from progressing.
+        let started_us = crate::time::current_time();
         while self
             .command_in_flight
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
             while self.command_in_flight.load(Ordering::Relaxed) {
-                core::hint::spin_loop();
+                relax_completion_wait(started_us, None);
             }
         }
         UsbStorageCommandGuard {
@@ -7451,33 +7706,42 @@ fn xhci_worker_controllers() -> &'static IrqSpinLock<Vec<Weak<XhciController>>> 
     XHCI_WORKER_CONTROLLERS.call_once(|| IrqSpinLock::new(Vec::new()))
 }
 
+// Keep a bounded burst of IRQ/TX work on the worker before a voluntary yield.
+// Waiting when drained remains interrupt-driven; this is not an idle poll.
+const XHCI_WORKER_PASS_BUDGET: usize = 4;
+
 fn xhci_worker_entry() {
+    // Preserve allocation capacity across wakes. Strong controller references
+    // are still released before either sleeping or yielding.
+    let mut controllers = Vec::new();
+    let mut consecutive_passes = 0;
     loop {
-        let controllers = {
+        {
             let mut registered = xhci_worker_controllers().lock();
-            let mut live = Vec::with_capacity(registered.len());
             registered.retain(|weak| {
                 if let Some(controller) = weak.upgrade() {
-                    live.push(controller);
+                    controllers.push(controller);
                     true
                 } else {
                     false
                 }
             });
-            live
-        };
+        }
 
         let mut processed = false;
-        for controller in controllers {
+        for controller in &controllers {
             processed |= controller.process_deferred_interrupt_work();
         }
+        controllers.clear();
         if processed {
-            // A level-triggered controller can immediately assert another
-            // interrupt after its deferred token is completed. Yield between
-            // bounded event-ring passes so a continuously busy endpoint cannot
-            // monopolize the CPU that also runs its protocol and user tasks.
-            // `process_deferred_interrupt_work` has returned with every xHCI
-            // lock released, so this is a safe scheduling point.
+            consecutive_passes += 1;
+            if consecutive_passes < XHCI_WORKER_PASS_BUDGET {
+                continue;
+            }
+            // Event/TX batches are individually bounded. Cap consecutive
+            // passes too, so continuously active endpoints cannot starve
+            // protocol tasks. All controller/registry locks are released.
+            consecutive_passes = 0;
             let Some(task) = crate::task::mytask() else {
                 crate::arch::instruction::idle();
             };
@@ -7485,6 +7749,7 @@ fn xhci_worker_entry() {
             continue;
         }
 
+        consecutive_passes = 0;
         let Some(task) = crate::task::mytask() else {
             crate::arch::instruction::idle();
         };
@@ -7572,9 +7837,18 @@ impl InterruptCapableDevice for XhciController {
     }
 }
 
+fn imod_interval_ticks(interval_ns: u32) -> Result<u16, &'static str> {
+    // Round down like Linux's nanosecond setter, but reject unrepresentable values.
+    if interval_ns > u32::from(u16::MAX) * 250 {
+        return Err("xHCI interrupt moderation interval exceeds hardware range");
+    }
+    Ok((interval_ns / 250) as u16)
+}
+
 fn initialize_xhci_controller(
     mmio_vaddr: usize,
     dma_context: DmaContext,
+    imod_interval: Option<u16>,
 ) -> Result<Arc<XhciController>, &'static str> {
     println!("[xHCI] Binding platform xHCI at {:#x}", mmio_vaddr);
 
@@ -7588,7 +7862,7 @@ fn initialize_xhci_controller(
         .self_weak
         .get_or_init(|| Arc::downgrade(&controller));
 
-    controller.init()?;
+    controller.init_with_imod_interval(imod_interval)?;
     controller.start()?;
 
     match controller.enumerate_ports() {
@@ -7626,8 +7900,24 @@ pub fn bind_xhci_mmio(
     interrupt: Option<InterruptId>,
     dma_context: DmaContext,
 ) -> Result<(), &'static str> {
+    bind_xhci_mmio_with_imod_interval_ns(mmio_vaddr, interrupt, dma_context, None)
+}
+
+/// Bind a platform controller with an optional interrupt moderation interval.
+///
+/// `imod_interval_ns` uses nanoseconds, rounded down to 250 ns ticks. Values
+/// above 65535 ticks are rejected before accessing MMIO. `None` preserves the
+/// controller's reset policy, as does the existing generic/PCI binding.
+/// The override is applied after reset and before enabling interrupter 0.
+pub fn bind_xhci_mmio_with_imod_interval_ns(
+    mmio_vaddr: usize,
+    interrupt: Option<InterruptId>,
+    dma_context: DmaContext,
+    imod_interval_ns: Option<u32>,
+) -> Result<(), &'static str> {
     let interrupt_id = interrupt.ok_or("xHCI requires an interrupt source")?;
-    let controller = initialize_xhci_controller(mmio_vaddr, dma_context)?;
+    let imod_interval = imod_interval_ns.map(imod_interval_ticks).transpose()?;
+    let controller = initialize_xhci_controller(mmio_vaddr, dma_context, imod_interval)?;
 
     controller
         .deferred_interrupt_mode
@@ -7718,7 +8008,7 @@ fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
         return Err("xHCI requires usable PCI interrupt routing");
     };
 
-    let controller = initialize_xhci_controller(mmio_vaddr, DmaContext::direct())?;
+    let controller = initialize_xhci_controller(mmio_vaddr, DmaContext::direct(), None)?;
 
     controller.enable_interrupts(interrupt_id)?;
     let source = PciIntxInterruptSource::new(device, controller.clone())
@@ -7761,6 +8051,73 @@ driver_initcall!(register_driver);
 mod tests {
     use super::*;
     use crate::device::pci::PciAddress;
+
+    #[test_case]
+    fn completion_poll_preserves_fast_path_then_sleeps_in_bounded_steps() {
+        assert_eq!(completion_wait_duration_us(1_000, 1_099, None, true), None);
+        assert_eq!(
+            completion_wait_duration_us(1_000, 1_100, None, true),
+            Some(1_000)
+        );
+        assert_eq!(
+            completion_wait_duration_us(1_000, 50_000, None, true),
+            Some(1_000)
+        );
+    }
+
+    #[test_case]
+    fn completion_poll_clips_sleep_to_the_original_deadline() {
+        assert_eq!(
+            completion_wait_duration_us(1_000, 1_200, Some(1_273), true),
+            Some(73)
+        );
+        assert_eq!(
+            completion_wait_duration_us(1_000, 1_273, Some(1_273), true),
+            None
+        );
+        assert_eq!(
+            completion_wait_duration_us(1_000, 1_300, Some(1_273), true),
+            None
+        );
+        let started = 1_000;
+        let deadline = started + USB_SET_ADDRESS_SETTLE_US;
+        let mut now = started + XHCI_COMPLETION_SPIN_US;
+        while now < deadline {
+            now += completion_wait_duration_us(started, now, Some(deadline), true).unwrap();
+        }
+        assert_eq!(now, deadline);
+    }
+
+    #[test_case]
+    fn completion_poll_never_sleeps_in_atomic_context() {
+        assert_eq!(
+            completion_wait_duration_us(1_000, 50_000, None, false),
+            None
+        );
+        let ring_lock = IrqSpinLock::new(());
+        let guard = ring_lock.lock();
+        assert_eq!(
+            completion_wait_duration_us(
+                1_000,
+                50_000,
+                None,
+                crate::sync::preemptible() && crate::interrupt::are_interrupts_enabled()
+            ),
+            None
+        );
+        drop(guard);
+        crate::interrupt::with_interrupts_disabled(|| {
+            assert_eq!(
+                completion_wait_duration_us(
+                    1_000,
+                    50_000,
+                    None,
+                    crate::sync::preemptible() && crate::interrupt::are_interrupts_enabled()
+                ),
+                None
+            );
+        });
+    }
 
     fn sample_xhci_device() -> PciDeviceInfo {
         PciDeviceInfo::new(

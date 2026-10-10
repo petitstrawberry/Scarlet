@@ -4,6 +4,7 @@
 //! flow control, and retransmission.
 
 mod timing;
+use crate::network::profile as net_profile;
 use timing::RetransmissionTiming;
 
 use crate::sync::counter::SaturatingCounter;
@@ -22,6 +23,15 @@ use crate::network::socket::{
     Inet4SocketAddress, SocketAddress, SocketControl, SocketObject, SocketState,
 };
 use crate::sched::scheduler::current_task_id;
+
+/// Copy and consume a prefix without moving the unread deque contents.
+fn drain_recv_buffer(recv_buf: &mut VecDeque<u8>, buffer: &mut [u8], len: usize) {
+    let (first, second) = recv_buf.as_slices();
+    let first_len = len.min(first.len());
+    buffer[..first_len].copy_from_slice(&first[..first_len]);
+    buffer[first_len..len].copy_from_slice(&second[..len - first_len]);
+    drop(recv_buf.drain(..len));
+}
 
 /// TCP connection states
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,56 +186,55 @@ impl TcpHeader {
     }
 
     fn calculate_checksum_with_options(
-        &self,
-        src_ip: [u8; 4],
-        dst_ip: [u8; 4],
-        options: &[u8],
-        data: &[u8],
+        &self, src_ip: [u8; 4], dst_ip: [u8; 4], options: &[u8], data: &[u8],
     ) -> u16 {
         let tcp_len = (TCP_HEADER_SIZE + options.len() + data.len()) as u16;
-        let mut pseudo = Vec::with_capacity(12 + TCP_HEADER_SIZE + options.len() + data.len());
-        pseudo.extend_from_slice(&src_ip);
-        pseudo.extend_from_slice(&dst_ip);
-        pseudo.push(0);
-        pseudo.push(6); // TCP protocol number
-        pseudo.extend_from_slice(&tcp_len.to_be_bytes());
-
+        let mut pseudo = [0u8; 12];
+        pseudo[..4].copy_from_slice(&src_ip);
+        pseudo[4..8].copy_from_slice(&dst_ip);
+        pseudo[9] = 6;
+        pseudo[10..].copy_from_slice(&tcp_len.to_be_bytes());
         let mut header = *self;
         header.checksum = 0;
-        pseudo.extend_from_slice(&header.to_bytes());
-        pseudo.extend_from_slice(options);
-        pseudo.extend_from_slice(data);
-
-        let mut sum: u32 = 0;
-        for chunk in pseudo.chunks(2) {
-            if chunk.len() == 2 {
-                sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
-            } else {
-                sum += (chunk[0] as u32) << 8;
+        let bytes = header.to_array();
+        // Carry an odd byte across slice boundaries: padding each slice would
+        // change the wire checksum for an odd-sized options/data boundary.
+        let mut sum = 0u32;
+        let mut high = None;
+        for mut slice in [pseudo.as_slice(), bytes.as_slice(), options, data] {
+            if slice.is_empty() { continue; }
+            if let Some(first) = high.take() {
+                sum += u16::from_be_bytes([first, slice[0]]) as u32;
+                sum = (sum & 0xffff) + (sum >> 16);
+                slice = &slice[1..];
             }
-            sum = (sum & 0xFFFF) + (sum >> 16);
+            let mut pairs = slice.chunks_exact(2);
+            for pair in &mut pairs {
+                sum += u16::from_be_bytes([pair[0], pair[1]]) as u32;
+                sum = (sum & 0xffff) + (sum >> 16);
+            }
+            high = pairs.remainder().first().copied();
         }
-
-        while sum >> 16 != 0 {
-            sum = (sum & 0xFFFF) + (sum >> 16);
-        }
-
+        if let Some(byte) = high { sum += (byte as u32) << 8; }
+        while sum >> 16 != 0 { sum = (sum & 0xffff) + (sum >> 16); }
         !sum as u16
     }
 
     /// Serialize header to bytes
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(20);
-        bytes.extend_from_slice(&self.src_port.to_be_bytes());
-        bytes.extend_from_slice(&self.dst_port.to_be_bytes());
-        bytes.extend_from_slice(&self.seq_number.to_be_bytes());
-        bytes.extend_from_slice(&self.ack_number.to_be_bytes());
-        bytes.extend_from_slice(&self.data_offset_flags.to_be_bytes());
-        bytes.extend_from_slice(&self.window_size.to_be_bytes());
-        bytes.extend_from_slice(&self.checksum.to_be_bytes());
-        bytes.extend_from_slice(&self.urgent_pointer.to_be_bytes());
+    fn to_array(&self) -> [u8; 20] {
+        let mut bytes = [0; 20];
+        bytes[0..2].copy_from_slice(&self.src_port.to_be_bytes());
+        bytes[2..4].copy_from_slice(&self.dst_port.to_be_bytes());
+        bytes[4..8].copy_from_slice(&self.seq_number.to_be_bytes());
+        bytes[8..12].copy_from_slice(&self.ack_number.to_be_bytes());
+        bytes[12..14].copy_from_slice(&self.data_offset_flags.to_be_bytes());
+        bytes[14..16].copy_from_slice(&self.window_size.to_be_bytes());
+        bytes[16..18].copy_from_slice(&self.checksum.to_be_bytes());
+        bytes[18..20].copy_from_slice(&self.urgent_pointer.to_be_bytes());
         bytes
     }
+
+    pub fn to_bytes(&self) -> Vec<u8> { self.to_array().to_vec() }
 
     /// Parse header from bytes
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -1582,7 +1591,7 @@ impl TcpSocket {
             header.calculate_checksum_with_options(local_ip.0, dest_ip.0, options, data);
 
         // Serialize header
-        let header_bytes = header.to_bytes();
+        let header_bytes = header.to_array();
 
         // Combine header and data
         let mut segment = Vec::with_capacity(total_len);
@@ -1861,9 +1870,9 @@ impl TcpSocket {
             let mut recv_buf = self.recv_buffer.lock();
             let len = buffer.len().min(recv_buf.len());
 
-            for i in 0..len {
-                buffer[i] = recv_buf.pop_front().unwrap();
-            }
+            let drain_profile = net_profile::begin(net_profile::Stage::TcpDrain, len, 0);
+            drain_recv_buffer(&mut recv_buf, buffer, len);
+            drop(drain_profile);
 
             let send_window_update = self.update_recv_window_after_drain(recv_buf.len());
             (len, send_window_update)
@@ -1914,9 +1923,9 @@ impl TcpSocket {
                 let len = buffer.len().min(recv_buf.len());
 
                 if len > 0 {
-                    for i in 0..len {
-                        buffer[i] = recv_buf.pop_front().unwrap();
-                    }
+                    let drain_profile = net_profile::begin(net_profile::Stage::TcpDrain, len, 0);
+                    drain_recv_buffer(&mut recv_buf, buffer, len);
+                    drop(drain_profile);
 
                     let send_window_update = self.update_recv_window_after_drain(recv_buf.len());
                     drop(recv_buf);
@@ -2863,6 +2872,12 @@ impl TcpLayer {
 
     /// Register a socket for a specific port
     pub fn register_port(&self, port: u16, socket: Weak<TcpSocket>) {
+        // A successful Weak upgrade may become the last strong owner while
+        // another CPU closes the socket. Its destructor unregisters from this
+        // same map, so keep every upgrade alive until the map guard is gone.
+        // Declare these owners before the guard to cover early returns too.
+        let mut retained_sockets = Vec::new();
+        let candidate = socket.upgrade();
         let mut map = self.port_map.write();
         let entry = map.entry(port).or_default();
         if entry.iter().any(|existing| existing.ptr_eq(&socket)) {
@@ -2871,10 +2886,14 @@ impl TcpLayer {
         if entry.iter().any(|existing| {
             existing
                 .upgrade()
-                .map(|sock| sock.get_state() == TcpState::Listen)
+                .map(|sock| {
+                    let listening = sock.get_state() == TcpState::Listen;
+                    retained_sockets.push(sock);
+                    listening
+                })
                 .unwrap_or(false)
-                && socket
-                    .upgrade()
+                && candidate
+                    .as_ref()
                     .map(|sock| sock.get_state() == TcpState::Listen)
                     .unwrap_or(false)
         }) {
@@ -2897,6 +2916,10 @@ impl TcpLayer {
         }
     }
 
+    fn registered_sockets(&self, port: u16) -> Option<Vec<Weak<TcpSocket>>> {
+        self.port_map.read().get(&port).cloned()
+    }
+
     /// Find socket for a destination port
     pub fn find_socket(
         &self,
@@ -2904,10 +2927,12 @@ impl TcpLayer {
         src_ip: Ipv4Address,
         src_port: u16,
     ) -> Option<Arc<TcpSocket>> {
-        let map = self.port_map.read();
-        let sockets = map.get(&port)?;
+        // Snapshot only weak registrations under the map lock. An upgraded
+        // nonmatching socket can become the final owner and re-enter the map
+        // from Drop; neither inspection nor dropping may retain this guard.
+        let sockets = self.registered_sockets(port)?;
         let mut listening = None;
-        for weak in sockets {
+        for weak in &sockets {
             if let Some(socket) = weak.upgrade() {
                 if socket.matches_peer(src_ip, src_port) {
                     return Some(socket);
@@ -2921,9 +2946,8 @@ impl TcpLayer {
     }
 
     pub fn find_listening_socket(&self, port: u16) -> Option<Arc<TcpSocket>> {
-        let map = self.port_map.read();
-        let sockets = map.get(&port)?;
-        for weak in sockets {
+        let sockets = self.registered_sockets(port)?;
+        for weak in &sockets {
             if let Some(socket) = weak.upgrade() {
                 if socket.get_state() == TcpState::Listen {
                     return Some(socket);
@@ -2950,9 +2974,11 @@ impl TcpLayer {
         data: &[u8],
         advertised_mss: Option<u16>,
     ) {
-        let mut stats = self.stats.write();
-        stats.packets_received += 1;
-        stats.bytes_received += (header.data_offset() + data.len()) as u64;
+        {
+            let mut stats = self.stats.write();
+            stats.packets_received += 1;
+            stats.bytes_received += (header.data_offset() + data.len()) as u64;
+        }
 
         let src_port = unsafe { core::ptr::addr_of!(header.src_port).read_unaligned() };
         let dst_port = unsafe { core::ptr::addr_of!(header.dst_port).read_unaligned() };
@@ -3034,6 +3060,7 @@ impl TcpLayer {
         dst_ip: Ipv4Address,
         packet: &[u8],
     ) -> Result<(), SocketError> {
+        let _profile = net_profile::begin(net_profile::Stage::TcpReceive, packet.len(), 0);
         if packet.len() < 20 {
             return Err(SocketError::InvalidPacket);
         }
@@ -3061,6 +3088,48 @@ impl TcpLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn tcp_registry_snapshot_releases_guard_before_last_owner_drop() {
+        let layer = TcpLayer::new();
+        let socket = TcpSocket::new(Arc::downgrade(&layer));
+        socket.local_port.store(22, Ordering::SeqCst);
+        layer.register_port(22, Arc::downgrade(&socket));
+
+        let registrations = layer.registered_sockets(22).unwrap();
+        assert_eq!(Arc::strong_count(&socket), 1);
+        let temporary_owner = registrations[0].upgrade().unwrap();
+        drop(socket);
+        // Check before Drop so a regression fails instead of hanging a test.
+        let guard = layer.port_map.try_write();
+        if guard.is_none() {
+            core::mem::forget(temporary_owner);
+            panic!("TCP registry snapshot retained its map guard");
+        }
+        drop(guard);
+        drop(temporary_owner);
+        assert!(layer.registered_sockets(22).is_none());
+    }
+
+    #[test_case]
+    fn tcp_registry_keeps_duplicate_and_listener_exclusion() {
+        let layer = TcpLayer::new();
+        let first = TcpSocket::new(Arc::downgrade(&layer));
+        let second = TcpSocket::new(Arc::downgrade(&layer));
+        first.local_port.store(22, Ordering::SeqCst);
+        second.local_port.store(22, Ordering::SeqCst);
+        first.set_state(TcpState::Listen);
+        second.set_state(TcpState::Listen);
+
+        layer.register_port(22, Arc::downgrade(&first));
+        layer.register_port(22, Arc::downgrade(&first));
+        layer.register_port(22, Arc::downgrade(&second));
+        assert_eq!(layer.registered_sockets(22).unwrap().len(), 1);
+        assert!(Arc::ptr_eq(
+            &layer.find_listening_socket(22).unwrap(),
+            &first
+        ));
+    }
 
     #[test_case]
     fn test_tcp_header_creation() {

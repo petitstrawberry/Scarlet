@@ -70,6 +70,35 @@ pub struct ProtocolStackStats {
     pub active_connections: u64,
 }
 
+// Protocol-neutral inline metadata. Unusual keys/values and excess entries
+// retain dynamically sized storage; no protocol names are special-cased.
+const CONTEXT_INLINE_ENTRIES: usize = 8;
+const CONTEXT_INLINE_KEY: usize = 24;
+const CONTEXT_INLINE_VALUE: usize = 32;
+
+#[derive(Debug, Clone)]
+struct InlineContextEntry {
+    key: [u8; CONTEXT_INLINE_KEY],
+    key_len: u8,
+    value: [u8; CONTEXT_INLINE_VALUE],
+    value_len: u8,
+}
+
+impl InlineContextEntry {
+    fn new(key: &str, value: &[u8]) -> Self {
+        let mut entry = Self {
+            key: [0; CONTEXT_INLINE_KEY], key_len: key.len() as u8,
+            value: [0; CONTEXT_INLINE_VALUE], value_len: value.len() as u8,
+        };
+        entry.key[..key.len()].copy_from_slice(key.as_bytes());
+        entry.value[..value.len()].copy_from_slice(value);
+        entry
+    }
+    fn matches(&self, key: &str) -> bool {
+        &self.key[..self.key_len as usize] == key.as_bytes()
+    }
+}
+
 /// Context passed between network layers for routing decisions
 ///
 /// This structure carries routing information through the protocol stack,
@@ -104,39 +133,50 @@ pub struct ProtocolStackStats {
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct LayerContext {
-    /// Protocol-agnostic key-value store for routing information
-    /// Each layer can add/read arbitrary data needed for packet delivery
-    ///
-    /// Common keys (convention, not enforced):
-    /// - "ip_src", "ip_dst": IPv4/IPv6 addresses
-    /// - "tcp_src_port", "tcp_dst_port": TCP ports  
-    /// - "udp_src_port", "udp_dst_port": UDP ports
-    /// - "ip_protocol": Protocol number (6=TCP, 17=UDP)
-    /// - "ttl": Time-to-live
-    /// - "tos": Type of service
-    pub info: BTreeMap<String, Vec<u8>>,
+    inline: [Option<InlineContextEntry>; CONTEXT_INLINE_ENTRIES],
+    overflow: BTreeMap<String, Vec<u8>>,
 }
 
 impl LayerContext {
-    /// Create a new empty LayerContext
-    pub fn new() -> Self {
-        Self::default()
-    }
+    pub fn new() -> Self { Self::default() }
 
-    /// Set a value in the context
+    /// Own arbitrary routing metadata. Short, common-size entries never touch
+    /// the global heap, including when a layer clones or overwrites them.
     pub fn set(&mut self, key: &str, value: &[u8]) {
-        self.info.insert(String::from(key), value.to_vec());
+        if let Some(slot) = self.inline.iter_mut().find(|slot| {
+            slot.as_ref().is_some_and(|entry| entry.matches(key))
+        }) {
+            if value.len() <= CONTEXT_INLINE_VALUE {
+                let entry = slot.as_mut().unwrap();
+                entry.value[..value.len()].copy_from_slice(value);
+                entry.value_len = value.len() as u8;
+            } else {
+                self.overflow.insert(String::from(key), value.to_vec());
+                *slot = None;
+            }
+            return;
+        }
+        if let Some(existing) = self.overflow.get_mut(key) {
+            existing.clear();
+            existing.extend_from_slice(value);
+            return;
+        }
+        if key.len() <= CONTEXT_INLINE_KEY && value.len() <= CONTEXT_INLINE_VALUE {
+            if let Some(slot) = self.inline.iter_mut().find(|slot| slot.is_none()) {
+                *slot = Some(InlineContextEntry::new(key, value));
+                return;
+            }
+        }
+        self.overflow.insert(String::from(key), value.to_vec());
     }
 
-    /// Get a value from the context
     pub fn get(&self, key: &str) -> Option<&[u8]> {
-        self.info.get(key).map(|v| v.as_slice())
+        self.inline.iter().flatten().find(|entry| entry.matches(key))
+            .map(|entry| &entry.value[..entry.value_len as usize])
+            .or_else(|| self.overflow.get(key).map(Vec::as_slice))
     }
 
-    /// Check if a key exists
-    pub fn contains(&self, key: &str) -> bool {
-        self.info.contains_key(key)
-    }
+    pub fn contains(&self, key: &str) -> bool { self.get(key).is_some() }
 }
 
 /// Configuration for socket creation and layer binding

@@ -38,6 +38,7 @@ pub mod ipv4;
 pub mod link;
 pub mod local;
 pub mod protocol_stack;
+pub(crate) mod profile;
 pub mod socket;
 pub mod syscall;
 pub mod tcp;
@@ -570,6 +571,8 @@ impl NetworkManager {
     }
 
     pub fn handle_received_packet(&self, interface_name: &str, packet: &DevicePacket) {
+        // Includes IPv4/TCP processing and synchronous responses; TCP is nested.
+        let _profile = profile::begin(profile::Stage::StackDispatch, packet.len, 0);
         if packet.len < 14 {
             return;
         }

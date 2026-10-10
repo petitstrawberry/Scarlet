@@ -7,6 +7,7 @@
 
 extern crate alloc;
 
+use crate::network::profile as net_profile;
 use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -60,19 +61,10 @@ const DEFAULT_PACKET_FILTER: u16 =
 
 /// Host-controller operations required by a CDC-NCM network device.
 pub trait CdcNcmTransport: Send + Sync {
-    /// Queue one complete Network Transfer Block for the bulk OUT endpoint.
-    ///
-    /// # Arguments
-    ///
-    /// * `ntb` - Owned complete NTB16 payload to transfer.
-    /// * `frame_len` - Length of the Ethernet frame carried by the NTB.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` once the host controller accepts the request. Completion is
-    /// reported asynchronously through `CdcNcmDevice::handle_transmit_complete`
-    /// or `CdcNcmDevice::handle_transmit_error`.
-    fn enqueue_ntb(&self, ntb: Vec<u8>, frame_len: usize) -> Result<(), &'static str>;
+    /// Transfer ownership of an Ethernet frame to the bounded controller queue.
+    /// The controller batches already queued frames into its reusable DMA NTB.
+    /// No timer or extra wait is needed for an isolated frame.
+    fn enqueue_frame(&self, packet: DevicePacket) -> Result<(), &'static str>;
 
     /// Program the CDC Ethernet packet filter on the control interface.
     ///
@@ -447,6 +439,7 @@ struct Ntb16TxConfig {
     ndp_alignment: usize,
     max_segment_size: usize,
     output_max_packet_size: usize,
+    max_datagrams: usize,
 }
 
 impl Ntb16TxConfig {
@@ -477,6 +470,10 @@ impl Ntb16TxConfig {
             ndp_alignment: sanitize_alignment(parameters.ndp_out_alignment, max_size),
             max_segment_size,
             output_max_packet_size,
+            max_datagrams: match parameters.ntb_out_max_datagrams {
+                0 => NCM_TX_BATCH_LIMIT,
+                count => usize::from(count).min(NCM_TX_BATCH_LIMIT),
+            },
         })
     }
 }
@@ -495,6 +492,108 @@ fn align_to_remainder(offset: usize, divisor: usize, remainder: usize) -> usize 
     offset + delta
 }
 
+// Bound both the stack scratch array and work per USB transfer. Respect the
+// device's smaller wNtbOutMaxDatagrams; zero in that field means no device limit.
+pub(crate) const NCM_TX_BATCH_LIMIT: usize = 16;
+
+pub(crate) struct Ntb16TxBatch {
+    config: Ntb16TxConfig,
+    ndp_offset: usize,
+    end: usize,
+    pub(crate) count: usize,
+    pub(crate) frame_bytes: usize,
+    frames: [Option<DevicePacket>; NCM_TX_BATCH_LIMIT],
+    offsets: [usize; NCM_TX_BATCH_LIMIT],
+}
+
+impl Ntb16TxBatch {
+    fn new(config: Ntb16TxConfig) -> Self {
+        let ndp_offset = align_to_remainder(NTH16_LENGTH, config.ndp_alignment, 0);
+        Self {
+            config,
+            ndp_offset,
+            end: ndp_offset + 8 + 4 * (config.max_datagrams + 1),
+            count: 0,
+            frame_bytes: 0,
+            frames: core::array::from_fn(|_| None),
+            offsets: [0; NCM_TX_BATCH_LIMIT],
+        }
+    }
+
+    // Plan without removing the queue head: a non-fitting frame remains FIFO.
+    pub(crate) fn accepts(&self, packet: &DevicePacket) -> bool {
+        if self.count >= self.config.max_datagrams
+            || packet.len < ETHERNET_HEADER_LENGTH
+            || packet.len > self.config.max_segment_size
+            || packet.len > packet.data.len()
+        {
+            return false;
+        }
+        let offset = align_to_remainder(
+            self.end,
+            self.config.payload_divisor,
+            self.config.payload_remainder,
+        );
+        let Some(end) = offset.checked_add(packet.len) else {
+            return false;
+        };
+        let padded = end + usize::from(end % self.config.output_max_packet_size == 0);
+        padded <= self.config.max_size && padded <= NCM_MAX_NTB16_SIZE
+    }
+
+    pub(crate) fn push(&mut self, packet: DevicePacket) {
+        assert!(self.accepts(&packet));
+        let offset = align_to_remainder(
+            self.end,
+            self.config.payload_divisor,
+            self.config.payload_remainder,
+        );
+        self.offsets[self.count] = offset;
+        self.end = offset + packet.len;
+        self.frame_bytes += packet.len;
+        self.frames[self.count] = Some(packet);
+        self.count += 1;
+    }
+
+    pub(crate) fn transfer_len(&self) -> usize {
+        self.end + usize::from(self.end % self.config.output_max_packet_size == 0)
+    }
+
+    // One copy per frame, directly into the controller-owned DMA buffer.
+    // Initialize every transferred padding byte; nothing beyond this prefix
+    // is published to the device.
+    fn encode(&self, output: &mut [u8], sequence: u16) -> Result<usize, &'static str> {
+        let len = self.transfer_len();
+        if self.count == 0 || len > output.len() {
+            return Err("CDC-NCM transmit batch exceeds its DMA buffer");
+        }
+        let output = &mut output[..len];
+        output.fill(0);
+        write_u32(output, 0, NTH16_SIGNATURE)?;
+        write_u16(output, 4, NTH16_LENGTH as u16)?;
+        write_u16(output, 6, sequence)?;
+        write_u16(output, 8, len as u16)?;
+        write_u16(output, 10, self.ndp_offset as u16)?;
+        write_u32(output, self.ndp_offset, NDP16_NO_CRC_SIGNATURE)?;
+        write_u16(
+            output,
+            self.ndp_offset + 4,
+            (8 + 4 * (self.count + 1)) as u16,
+        )?;
+        for index in 0..self.count {
+            let frame = self.frames[index]
+                .as_ref()
+                .expect("missing NCM batch frame");
+            let offset = self.offsets[index];
+            write_u16(output, self.ndp_offset + 8 + index * 4, offset as u16)?;
+            write_u16(output, self.ndp_offset + 10 + index * 4, frame.len as u16)?;
+            output[offset..offset + frame.len].copy_from_slice(frame.as_slice());
+        }
+        Ok(len)
+    }
+}
+
+#[cfg(test)]
 fn build_ntb16(
     frame: &[u8],
     sequence: u16,
@@ -634,13 +733,15 @@ fn write_u32(bytes: &mut [u8], offset: usize, value: u32) -> Result<(), &'static
 }
 
 struct QueuedRxPacket {
-    interface_name: String,
+    interface_name: Arc<str>,
     packet: DevicePacket,
+    // Sampled from queue admission until dequeue, excluding stack dispatch.
+    profile_queue_wait: Option<net_profile::Span>,
 }
 
 static RX_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 static RX_PACKET_QUEUE: Lazy<IrqSpinLock<VecDeque<QueuedRxPacket>>> =
-    Lazy::new(|| IrqSpinLock::new(VecDeque::new()));
+    Lazy::new(|| IrqSpinLock::new(VecDeque::with_capacity(NCM_RX_QUEUE_LIMIT)));
 static RX_PACKET_WAKER: crate::sync::Waker = crate::sync::Waker::new_uninterruptible("cdc-ncm-rx");
 
 fn ensure_rx_worker_started() {
@@ -666,6 +767,7 @@ fn cdc_ncm_rx_worker_entry() {
             crate::arch::instruction::idle();
         };
         if processed == NCM_RX_WORK_BUDGET {
+            net_profile::event(net_profile::Stage::NcmFullRxBudget, 0, 0);
             // All queue locks are released by the bounded drain. Give the
             // consumer and unrelated tasks a chance to run under sustained RX.
             crate::sched::scheduler::schedule(task.get_trapframe());
@@ -690,26 +792,35 @@ fn drain_queued_rx_packets(
             let mut queue = queue.lock();
             queue.pop_front()
         };
-        let Some(queued) = queued else {
+        let Some(mut queued) = queued else {
             break;
         };
+        drop(queued.profile_queue_wait.take());
         handle(queued);
         processed += 1;
     }
     processed
 }
 
-fn enqueue_rx_packets(interface_name: &str, packets: Vec<DevicePacket>) -> usize {
+fn enqueue_rx_packets(interface_name: &Arc<str>, packets: Vec<DevicePacket>) -> usize {
     ensure_rx_worker_started();
     let mut enqueued = 0usize;
+    // Keep rejected frames and the NTB's packet list alive until after releasing
+    // the IRQ lock, so their heap frees cannot extend this critical section.
+    let mut packets = packets.into_iter();
     {
         let mut queue = RX_PACKET_QUEUE.lock();
-        for packet in packets {
-            if queue.len() >= NCM_RX_QUEUE_LIMIT {
+        while queue.len() < NCM_RX_QUEUE_LIMIT {
+            let Some(packet) = packets.next() else {
                 break;
-            }
+            };
             queue.push_back(QueuedRxPacket {
-                interface_name: interface_name.to_string(),
+                interface_name: Arc::clone(interface_name),
+                profile_queue_wait: net_profile::begin(
+                    net_profile::Stage::NcmQueueWait,
+                    packet.len,
+                    0,
+                ),
                 packet,
             });
             enqueued += 1;
@@ -730,7 +841,7 @@ pub struct CdcNcmDevice {
     tx_config: Ntb16TxConfig,
     tx_sequence: IrqSpinLock<u16>,
     stats: IrqSpinLock<NetworkStats>,
-    interface_name: String,
+    interface_name: Arc<str>,
     active: AtomicBool,
     link_up: AtomicBool,
     promiscuous: AtomicBool,
@@ -773,7 +884,7 @@ impl CdcNcmDevice {
             tx_config: Ntb16TxConfig::new(parameters, max_segment_size, output_max_packet_size)?,
             tx_sequence: IrqSpinLock::new(0),
             stats: IrqSpinLock::new(NetworkStats::default()),
-            interface_name,
+            interface_name: Arc::from(interface_name),
             active: AtomicBool::new(true),
             // CDC devices report the authoritative carrier state through the
             // notification endpoint. Start usable so devices that omit the
@@ -815,9 +926,21 @@ impl CdcNcmDevice {
     ///
     /// * `ntb` - Bytes completed by the bulk IN transfer.
     pub fn handle_received_ntb(&self, ntb: &[u8]) {
-        let packets = match parse_ntb16(ntb, self.max_segment_size) {
+        self.handle_received_packets(self.parse_received_ntb(ntb));
+    }
+
+    // Parse/copy frames while the completed DMA buffer is owned by the CPU.
+    // The returned packets own their data; no DMA borrow survives requeue.
+    pub(crate) fn parse_received_ntb(&self, ntb: &[u8]) -> Result<Vec<DevicePacket>, &'static str> {
+        let _profile = net_profile::begin(net_profile::Stage::NcmParse, ntb.len(), 0);
+        parse_ntb16(ntb, self.max_segment_size)
+    }
+
+    pub(crate) fn handle_received_packets(&self, packets: Result<Vec<DevicePacket>, &'static str>) {
+        let packets = match packets {
             Ok(packets) => packets,
             Err(error) => {
+                net_profile::event(net_profile::Stage::RxErrors, 0, 0);
                 self.stats.lock().rx_errors += 1;
                 crate::println!("[usb-ncm] Dropping invalid receive NTB: {}", error);
                 return;
@@ -831,8 +954,12 @@ impl CdcNcmDevice {
             stats.rx_packets += packet_count as u64;
             stats.rx_bytes += byte_count;
         }
+        let enqueue_profile =
+            net_profile::begin(net_profile::Stage::NcmEnqueue, byte_count as usize, 0);
         let enqueued = enqueue_rx_packets(&self.interface_name, packets);
+        drop(enqueue_profile);
         if enqueued < packet_count {
+            net_profile::event_count(net_profile::Stage::RxQueueDrops, packet_count - enqueued);
             self.stats.lock().dropped += (packet_count - enqueued) as u64;
         }
     }
@@ -843,18 +970,38 @@ impl CdcNcmDevice {
     ///
     /// * `error` - Static diagnostic supplied by the host-controller driver.
     pub(crate) fn handle_receive_error(&self, error: &'static str) {
+        net_profile::event(net_profile::Stage::RxErrors, 0, 0);
         self.stats.lock().rx_errors += 1;
         crate::println!("[usb-ncm] Receive transfer failed: {}", error);
+    }
+
+    pub(crate) fn tx_batch(&self) -> Ntb16TxBatch {
+        Ntb16TxBatch::new(self.tx_config)
+    }
+
+    pub(crate) fn encode_tx_batch(
+        &self,
+        batch: &Ntb16TxBatch,
+        output: &mut [u8],
+    ) -> Result<usize, &'static str> {
+        let sequence = {
+            let mut next = self.tx_sequence.lock();
+            let sequence = *next;
+            *next = next.wrapping_add(1);
+            sequence
+        };
+        batch.encode(output, sequence)
     }
 
     /// Account for a completed host-controller transmit request.
     ///
     /// # Arguments
     ///
-    /// * `frame_len` - Length of the Ethernet frame carried by the completed NTB.
-    pub(crate) fn handle_transmit_complete(&self, frame_len: usize) {
+    /// * `frame_len` - Total Ethernet bytes carried by the completed NTB.
+    /// * `frame_count` - Number of Ethernet frames carried by the NTB.
+    pub(crate) fn handle_transmit_complete(&self, frame_len: usize, frame_count: usize) {
         let mut stats = self.stats.lock();
-        stats.tx_packets += 1;
+        stats.tx_packets += frame_count as u64;
         stats.tx_bytes += frame_len as u64;
     }
 
@@ -863,8 +1010,8 @@ impl CdcNcmDevice {
     /// # Arguments
     ///
     /// * `error` - Static diagnostic supplied by the host-controller driver.
-    pub(crate) fn handle_transmit_error(&self, error: &'static str) {
-        self.stats.lock().tx_errors += 1;
+    pub(crate) fn handle_transmit_error(&self, error: &'static str, frame_count: usize) {
+        self.stats.lock().tx_errors += frame_count as u64;
         crate::println!(
             "[usb-ncm] Transmit failed on {}: {}",
             self.interface_name,
@@ -1017,14 +1164,10 @@ impl NetworkDevice for CdcNcmDevice {
             return Err("CDC-NCM packet length exceeds its buffer");
         }
 
-        let sequence = {
-            let mut next_sequence = self.tx_sequence.lock();
-            let sequence = *next_sequence;
-            *next_sequence = next_sequence.wrapping_add(1);
-            sequence
-        };
-        let ntb = build_ntb16(packet.as_slice(), sequence, self.tx_config)?;
-        let result = self.transport.enqueue_ntb(ntb, packet.len);
+        if !self.tx_batch().accepts(&packet) {
+            return Err("Ethernet frame does not fit in a CDC-NCM NTB16");
+        }
+        let result = self.transport.enqueue_frame(packet);
         if result.is_err() {
             let mut stats = self.stats.lock();
             stats.tx_errors += 1;
@@ -1210,8 +1353,9 @@ mod tests {
     fn usb_ncm_regression_releases_rx_queue_lock_before_dispatching_packet() {
         let queue = IrqSpinLock::new(VecDeque::new());
         queue.lock().push_back(QueuedRxPacket {
-            interface_name: String::from("usbnet-test"),
+            interface_name: Arc::from("usbnet-test"),
             packet: DevicePacket::with_data(vec![0; ETHERNET_HEADER_LENGTH]),
+            profile_queue_wait: None,
         });
 
         let mut dispatched = false;
@@ -1231,8 +1375,9 @@ mod tests {
         let queue = IrqSpinLock::new(VecDeque::new());
         for _ in 0..2 {
             queue.lock().push_back(QueuedRxPacket {
-                interface_name: String::from("usbnet-test"),
+                interface_name: Arc::from("usbnet-test"),
                 packet: DevicePacket::with_data(vec![0; ETHERNET_HEADER_LENGTH]),
+                profile_queue_wait: None,
             });
         }
 
