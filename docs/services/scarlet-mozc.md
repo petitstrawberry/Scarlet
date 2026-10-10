@@ -55,13 +55,13 @@ then deploy the staged overlay:
 ```sh
 ARCH=aarch64 \
 BUILDROOT_DIR=/opt/buildroot-aarch64 \
-PREBUILT_DIR="$PWD/bundles/linux/prebuilt" \
-WORKDIR="$PWD/bundles/linux/cache/work" \
-bash bundles/linux/tools/build_mozc_server.sh
+PREBUILT_DIR="$PWD/bundles/buildroot/prebuilt" \
+WORKDIR="$PWD/bundles/buildroot/cache/work" \
+bash bundles/buildroot/tools/build_mozc_server.sh
 
 ARCH=aarch64 \
-PREBUILT_DIR="$PWD/bundles/linux/prebuilt" \
-bash bundles/linux/tools/deploy_rootfs.sh
+PREBUILT_DIR="$PWD/bundles/buildroot/prebuilt" \
+bash bundles/buildroot/tools/deploy_rootfs.sh
 ```
 
 When using the existing Scarlet devcontainer, `BUILDROOT_DIR=/opt/buildroot-aarch64`
@@ -70,7 +70,7 @@ remains supported. Use the same `PREBUILT_DIR` for `build_buildroot.sh`,
 `rootfs.tar` and overlay artifacts.
 
 For an already deployed local rootfs, the staged binary can be copied into
-`bundles/linux/rootfs/systems/linux-aarch64/usr/lib/mozc/mozc_server`.
+`bundles/buildroot/rootfs/systems/linux-aarch64/usr/lib/mozc/mozc_server`.
 
 `build_mozc_server.sh` must be run on Linux. It intentionally does not import a
 distro `mozc_server`; the output is linked against the Buildroot musl sysroot so

@@ -5,9 +5,10 @@ artifacts into the Scarlet workspace.
 
 ## Overview
 
-`bundles/linux/tools/deploy_rootfs.sh` extracts a Buildroot `rootfs.tar` and overlays
-additional prebuilt programs into `bundles/linux/rootfs/systems/linux-$ARCH`,
-which is the tree included in the final Scarlet disk image.
+`bundles/buildroot/tools/deploy_rootfs.sh` extracts a Buildroot `rootfs.tar` and overlays
+additional prebuilt programs into `bundles/buildroot/rootfs/systems/linux-$ARCH`
+for local Buildroot artifact development. The Buildroot bundle consumes pinned
+release archives; the default `full` bundle selects Debian userspace instead.
 
 Buildroot generation should be done on Linux. Deployment itself only needs the
 staged artifacts and can use an injected `PREBUILT_DIR`.
@@ -23,12 +24,12 @@ See [Linux Userspace Artifacts](userspace-artifacts.md). For AArch64 with
 repository-local paths on a Linux host:
 
 ```bash
-export BUILDROOT_DIR="$PWD/bundles/linux/cache/buildroot-aarch64"
-export PREBUILT_DIR="$PWD/bundles/linux/prebuilt"
-export WORKDIR="$PWD/bundles/linux/cache/work"
+export BUILDROOT_DIR="$PWD/bundles/buildroot/cache/buildroot-aarch64"
+export PREBUILT_DIR="$PWD/bundles/buildroot/prebuilt"
+export WORKDIR="$PWD/bundles/buildroot/cache/work"
 
-ARCH=aarch64 bash bundles/linux/tools/build_buildroot.sh
-ARCH=aarch64 bash bundles/linux/tools/build_user_programs.sh
+ARCH=aarch64 bash bundles/buildroot/tools/build_buildroot.sh
+ARCH=aarch64 bash bundles/buildroot/tools/build_user_programs.sh
 ```
 
 The deployment script expects:
@@ -42,18 +43,18 @@ The deployment script expects:
 For RISC-V 64:
 
 ```bash
-bash bundles/linux/tools/deploy_rootfs.sh
+bash bundles/buildroot/tools/deploy_rootfs.sh
 ```
 
 For AArch64:
 
 ```bash
 ARCH=aarch64 \
-PREBUILT_DIR="$PWD/bundles/linux/prebuilt" \
-bash bundles/linux/tools/deploy_rootfs.sh
+PREBUILT_DIR="$PWD/bundles/buildroot/prebuilt" \
+bash bundles/buildroot/tools/deploy_rootfs.sh
 ```
 
-The script extracts to `bundles/linux/rootfs/systems/linux-$ARCH`, then copies staged
+The script extracts to `bundles/buildroot/rootfs/systems/linux-$ARCH`, then copies staged
 binaries into `usr/bin`, staged libraries into `usr/lib`, staged data into
 `usr/share`, and any staged root overlay into the extracted root.
 
@@ -68,8 +69,8 @@ deploying:
 TARGET_UID="$(id -u)" \
 TARGET_GID="$(id -g)" \
 ARCH=aarch64 \
-PREBUILT_DIR="$PWD/bundles/linux/prebuilt" \
-bash bundles/linux/tools/deploy_rootfs.sh
+PREBUILT_DIR="$PWD/bundles/buildroot/prebuilt" \
+bash bundles/buildroot/tools/deploy_rootfs.sh
 ```
 
 ## Final Image

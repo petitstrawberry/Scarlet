@@ -1,5 +1,5 @@
-# Scarlet Full Distribution Bundle
-# Complete system: desktop + Debian Linux userspace.
+# Scarlet Full Distribution Bundle with Buildroot Linux userspace.
+# Supports AArch64 and RISC-V 64.
 
 [[layers]]
 kind = "bundle"
@@ -7,7 +7,7 @@ path = "../desktop/bundle.toml"
 
 [[layers]]
 kind = "bundle"
-path = "../debian/bundle.toml"
+path = "../buildroot/bundle.toml"
 
 [[layers]]
 kind = "bundle"

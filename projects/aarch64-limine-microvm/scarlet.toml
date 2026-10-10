@@ -59,7 +59,7 @@ to = "/init"
 
 [[images.rootfs.layers]]
 kind = "bundle"
-path = "../../bundles/linux/bundle.toml"
+path = "../../bundles/buildroot/bundle.toml"
 
 [[images.rootfs.layers]]
 kind = "copy"

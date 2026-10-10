@@ -5,7 +5,7 @@ set -euo pipefail
 # Environment variables:
 #  ARCH - target architecture (riscv64 or aarch64), defaults to riscv64
 #  BUILDROOT_DIR - Buildroot tree; defaults to the Docker path for ARCH
-#  PREBUILT_DIR - artifact staging directory, defaults to bundles/linux/prebuilt
+#  PREBUILT_DIR - artifact staging directory, defaults to bundles/buildroot/prebuilt
 #  IMAGES_DIR - Buildroot images directory, defaults to output/images
 #  MAKE_JOBS - Buildroot parallelism, defaults to $(nproc)
 #  BUILDROOT_VERSION - Buildroot release to use when bootstrapping AArch64
@@ -30,8 +30,8 @@ toolchains should be produced in scarlet-dev, a Linux VM, or a Linux Nix shell.
 
 Example with repository-local paths:
   ARCH=${ARCH} \\
-  BUILDROOT_DIR="\$PWD/bundles/linux/cache/buildroot-${ARCH}" \\
-  PREBUILT_DIR="\$PWD/bundles/linux/prebuilt" \\
+  BUILDROOT_DIR="\$PWD/bundles/buildroot/cache/buildroot-${ARCH}" \\
+  PREBUILT_DIR="\$PWD/bundles/buildroot/prebuilt" \\
   bash "${SCRIPT_DIR}/build_buildroot.sh"
 EOF
     exit 1

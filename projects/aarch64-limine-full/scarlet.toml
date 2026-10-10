@@ -43,11 +43,7 @@ min-size-mib = 8192
 
 [[images.rootfs.layers]]
 kind = "bundle"
-path = "../../bundles/sgfx-native/bundle.toml"
-
-[[images.rootfs.layers]]
-kind = "bundle"
-path = "../../bundles/full-debian/bundle.toml"
+path = "../../bundles/full/bundle.toml"
 
 [[images.rootfs.layers]]
 kind = "copy"

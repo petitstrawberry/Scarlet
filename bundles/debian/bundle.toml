@@ -1,0 +1,17 @@
+# Debian trixie Linux userspace from scarlet-bundle-debian v0.3.26.
+# Producer manifest: 19fd5b615596573e4193c364b1995a4c3550c759.
+# Only AArch64 artifacts are published for this pinned release.
+
+[[layers]]
+kind = "archive"
+url = "https://github.com/petitstrawberry/scarlet-bundle-debian/releases/download/v0.3.26/rootfs-{arch}-base-v0.3.26.tar.zst"
+sha256 = { aarch64 = "sha256:55a133c3e3f03337f6e0baf6b59194bfe0eb19a340d72bc94224d387e498b62b" }
+format = "tar-zst"
+strip_components = 1
+to = "/systems/linux-{arch}"
+
+# Runtime compatibility updates over the pinned Debian archive.
+[[layers]]
+kind = "copy"
+source = "fs"
+to = "/"

@@ -1,6 +1,6 @@
 # Box64 and Wine on the AArch64 Linux ABI
 
-The `full-debian` image uses the `wine` profile from
+The `full` image uses the `wine` profile from
 [scarlet-bundle-debian](https://github.com/petitstrawberry/scarlet-bundle-debian).
 It contains native AArch64 Box64 and Debian's amd64 Wine64 packages in the
 `linux-aarch64` view. The initial target is 64-bit Windows console programs.

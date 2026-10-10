@@ -9,6 +9,12 @@ Linux userspace binaries. The demo environment includes a Buildroot-based root
 filesystem providing standard utilities via **BusyBox**, along with sample
 applications like `green`, `fbdoom`, and the `pdfview` launcher for zathura.
 
+The RISC-V full project selects `full-buildroot`, which includes
+`bundles/buildroot/bundle.toml` as its Linux userspace layer. The default `full`
+bundle selects Debian userspace instead. To use locally rebuilt artifacts,
+include the deployed `bundles/buildroot/rootfs` tree as a copy layer in a
+project-specific composition.
+
 ## Prerequisites
 
 - Buildroot/userland artifact generation must run on Linux, such as
@@ -24,13 +30,13 @@ commands on Linux:
 
 ```bash
 # Build the Buildroot rootfs
-bash bundles/linux/tools/build_buildroot.sh
+bash bundles/buildroot/tools/build_buildroot.sh
 
 # Build demo programs (zathura, green, fbdoom, kvmtool)
-bash bundles/linux/tools/build_user_programs.sh
+bash bundles/buildroot/tools/build_user_programs.sh
 ```
 
-These scripts place the necessary files in `bundles/linux/prebuilt` by default. See
+These scripts place the necessary files in `bundles/buildroot/prebuilt` by default. See
 [Linux Userspace Artifacts](userspace-artifacts.md) for AArch64 and
 repository-local path examples.
 
@@ -39,11 +45,11 @@ repository-local path examples.
 To run a Linux guest inside Scarlet using the built-in hypervisor, build the guest kernel and initramfs:
 
 ```bash
-bash bundles/linux/tools/build_guest_image.sh
+bash bundles/buildroot/tools/build_guest_image.sh
 ```
 
 This produces `guest-Image` and `guest-initramfs.cpio.gz` under
-`bundles/linux/prebuilt/$ARCH/bin`.
+`bundles/buildroot/prebuilt/$ARCH/bin`.
 
 ### 3. Deploy Artifacts to Scarlet Rootfs
 
@@ -51,8 +57,8 @@ The build scripts create artifacts, but they need to be deployed into Scarlet's 
 For detailed deployment options, see [Linux Rootfs Deployment](deployment.md).
 
 ```bash
-# Deploy the Linux rootfs and binaries to bundles/linux/rootfs/systems/linux-riscv64
-bash bundles/linux/tools/deploy_rootfs.sh
+# Deploy the Linux rootfs and binaries to bundles/buildroot/rootfs/systems/linux-riscv64
+bash bundles/buildroot/tools/deploy_rootfs.sh
 ```
 
 ### 4. Build and Run Scarlet

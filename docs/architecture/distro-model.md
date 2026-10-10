@@ -94,13 +94,18 @@ Scarlet/
       tools/
     experimental/
       bundle.toml
-    linux/
+    buildroot/
       bundle.toml
       rootfs/
+    debian/
+      bundle.toml
+      fs/
     rust-toolchain/
       bundle.toml
       fs/
     full/
+      bundle.toml
+    full-buildroot/
       bundle.toml
   projects/
     aarch64-limine-full/
@@ -239,11 +244,13 @@ The current reference distro uses these bundle roles:
 |---|---|
 | `base` | Minimal system files, core Scarlet services/commands, and the native ELF64 interpreter on supported architectures. |
 | `cli-utils` | Common command-line utilities. |
-| `desktop` | Desktop shell, UI demos, media, input, and desktop support files. |
-| `linux` | Architecture-specific Linux guest artifacts and config files. |
+| `desktop` | Native SGFX preparation/drivers, desktop shell, UI demos, media, input, and desktop support files. |
+| `buildroot` | Buildroot Linux userspace and guest-artifact helpers for AArch64 and RISC-V 64. |
+| `debian` | Pinned Debian Linux userspace and compatibility overlays (currently AArch64 only). |
 | `experimental` | External or experimental apps, including git sources. |
 | `rust-toolchain` | Published Scarlet-native rustc, target libraries, codegen backend, and linkers. |
-| `full` | Composes desktop, Linux, experimental, and Rust toolchain layers. |
+| `full` | Composes desktop, Debian, experimental, and Rust toolchain layers. |
+| `full-buildroot` | Composes desktop, Buildroot, experimental, and Rust toolchain layers for AArch64 and RISC-V 64. |
 
 ## Locking
 

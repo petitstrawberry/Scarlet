@@ -41,10 +41,6 @@ output = ".scarlet/images/rootfs-aarch64-console.ext2"
 
 [[images.rootfs.layers]]
 kind = "bundle"
-path = "../../bundles/sgfx-native/bundle.toml"
-
-[[images.rootfs.layers]]
-kind = "bundle"
 path = "../../bundles/full/bundle.toml"
 
 [[images.rootfs.layers]]

@@ -31,7 +31,10 @@ image tools, firmware paths, fontconfig, and the other tools described in
 Run these tasks from the Scarlet repository root in the Nix development shell:
 
 AArch64 currently receives more runtime validation and is the recommended
-starting point. RISC-V tasks remain available for that architecture.
+starting point. The default `full` bundle uses Debian userspace; its pinned
+release currently supports AArch64 only. The RISC-V full project selects
+`full-buildroot`, which combines the same desktop and applications with
+Buildroot userspace. `full-buildroot` supports both AArch64 and RISC-V 64.
 
 ```sh
 # Build kernel and core user components (image composition is separate).

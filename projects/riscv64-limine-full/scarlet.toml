@@ -41,11 +41,7 @@ output = ".scarlet/images/rootfs-riscv64-full.ext2"
 
 [[images.rootfs.layers]]
 kind = "bundle"
-path = "../../bundles/sgfx-native/bundle.toml"
-
-[[images.rootfs.layers]]
-kind = "bundle"
-path = "../../bundles/full/bundle.toml"
+path = "../../bundles/full-buildroot/bundle.toml"
 
 [[images.rootfs.layers]]
 kind = "copy"

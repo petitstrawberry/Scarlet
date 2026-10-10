@@ -10,7 +10,7 @@ set -euo pipefail
 # Environment variables:
 #  ARCH - target architecture (riscv64 or aarch64), defaults to aarch64
 #  BUILDROOT_DIR - Buildroot tree; defaults to /opt/buildroot-$ARCH
-#  PREBUILT_DIR - artifact staging directory, defaults to bundles/linux/prebuilt
+#  PREBUILT_DIR - artifact staging directory, defaults to bundles/buildroot/prebuilt
 #  WORKDIR - checkout/build working directory, defaults to /opt
 #  MOZC_REPO - Mozc source repository
 #  MOZC_REV - optional branch, tag, or commit to check out
@@ -57,9 +57,9 @@ Run this script on Linux, such as scarlet-dev, a Linux VM, or a Linux Nix shell.
 
 Example for AArch64 with repository-local paths:
   ARCH=aarch64 \\
-  BUILDROOT_DIR="\$PWD/bundles/linux/cache/buildroot-aarch64" \\
-  PREBUILT_DIR="\$PWD/bundles/linux/prebuilt" \\
-  WORKDIR="\$PWD/bundles/linux/cache/work" \\
+  BUILDROOT_DIR="\$PWD/bundles/buildroot/cache/buildroot-aarch64" \\
+  PREBUILT_DIR="\$PWD/bundles/buildroot/prebuilt" \\
+  WORKDIR="\$PWD/bundles/buildroot/cache/work" \\
   bash "${SCRIPT_DIR}/build_mozc_server.sh"
 EOF
     exit 1

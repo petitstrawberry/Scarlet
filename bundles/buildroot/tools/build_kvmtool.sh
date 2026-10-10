@@ -4,7 +4,7 @@ set -euo pipefail
 # Cross-compile kvmtool (lkvm-static) for RISC-V 64-bit or AArch64.
 #
 # Prerequisites:
-#   - Buildroot toolchain built (run bundles/linux/tools/build_buildroot.sh first)
+#   - Buildroot toolchain built (run bundles/buildroot/tools/build_buildroot.sh first)
 #   - git
 #
 # Produces:
@@ -14,7 +14,7 @@ set -euo pipefail
 #  ARCH          - target architecture (riscv64 or aarch64), defaults to riscv64
 #  BUILDROOT_DIR - Buildroot installation, defaults to /opt/buildroot (riscv64)
 #                  or /opt/buildroot-aarch64 (aarch64)
-#  PREBUILT_DIR  - output staging directory, defaults to bundles/linux/prebuilt
+#  PREBUILT_DIR  - output staging directory, defaults to bundles/buildroot/prebuilt
 #  WORKDIR       - working directory for clones, defaults to /opt
 #  KVMTOOL_REPO  - git URL for kvmtool, defaults to upstream
 #  DTC_REPO      - git URL for dtc (libfdt), defaults to upstream
@@ -42,9 +42,9 @@ Run this script on Linux, such as scarlet-dev, a Linux VM, or a Linux Nix shell.
 
 Example:
   ARCH=${ARCH} \\
-  BUILDROOT_DIR="\$PWD/bundles/linux/cache/buildroot-${ARCH}" \\
-  PREBUILT_DIR="\$PWD/bundles/linux/prebuilt" \\
-  WORKDIR="\$PWD/bundles/linux/cache/work" \\
+  BUILDROOT_DIR="\$PWD/bundles/buildroot/cache/buildroot-${ARCH}" \\
+  PREBUILT_DIR="\$PWD/bundles/buildroot/prebuilt" \\
+  WORKDIR="\$PWD/bundles/buildroot/cache/work" \\
   bash "${SCRIPT_DIR}/build_kvmtool.sh"
 EOF
     exit 1

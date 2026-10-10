@@ -39,10 +39,6 @@ output = ".scarlet/images/rootfs-riscv32-sbi-desktop.ext2"
 
 [[images.rootfs.layers]]
 kind = "bundle"
-path = "../../bundles/sgfx-native/bundle.toml"
-
-[[images.rootfs.layers]]
-kind = "bundle"
 path = "../../bundles/desktop/bundle.toml"
 
 [[images.rootfs.layers]]

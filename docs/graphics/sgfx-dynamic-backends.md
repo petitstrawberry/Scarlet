@@ -33,7 +33,11 @@ The local stage1 sysroot needs both the host libraries (including
 build tools continue to come from the development shell. Return to the
 packaged compiler with `scarlet-rust-use-cached`.
 
-Native projects include `bundles/sgfx-native` before their userspace packages.
+The `desktop` bundle includes `bundles/sgfx-native` as its first layer, before
+`base`, `cli-utils`, and desktop userspace packages. Projects selecting
+`desktop`, `full`, or `full-buildroot` receive it through that bundle in their
+rootfs. Initramfs compositions and projects without `desktop` include
+`bundles/sgfx-native` explicitly before their userspace packages.
 Its script builds the pinned SGFX plugin, verifies its ELF header, imports,
 exports and relocations, and installs the plugin and manifest. It also writes
 `.scarlet/sgfx/userspace.toml`, selected by the project's `userspace.cargo-config`.

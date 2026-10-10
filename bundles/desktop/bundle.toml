@@ -1,6 +1,12 @@
 # Scarlet Desktop Bundle
 # GUI and desktop environment components.
-# Composes base + cli-utils + desktop-specific packages.
+# Composes sgfx-native + base + cli-utils + desktop-specific packages.
+
+# Prepare SGFX sources, userspace Cargo configuration, and native drivers
+# before any userspace packages from this bundle are built.
+[[layers]]
+kind = "bundle"
+path = "../sgfx-native/bundle.toml"
 
 [[layers]]
 kind = "bundle"

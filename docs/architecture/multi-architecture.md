@@ -101,13 +101,13 @@ and [memory map](memory-map.md) for address and stack policy.
 
 Buildroot and optional Linux application artifacts are built on a Linux host
 for the selected architecture. Their helper scripts under
-[bundles/linux/tools](../../bundles/linux/tools) use `ARCH` (`riscv64` or
+[bundles/buildroot/tools](../../bundles/buildroot/tools) use `ARCH` (`riscv64` or
 `aarch64`), unlike project selection above. macOS execution is rejected by
 those artifact-building helpers.
 
 The [Linux userspace artifact guide](../abi/linux/userspace-artifacts.md) and
 [deployment guide](../abi/linux/deployment.md) describe toolchains and the
-`bundles/linux/rootfs/systems/linux-<arch>/` destinations. Building a Linux
+`bundles/buildroot/rootfs/systems/linux-<arch>/` destinations. Building a Linux
 binary does not establish that Scarlet implements every syscall it needs.
 
 ## Running and tests

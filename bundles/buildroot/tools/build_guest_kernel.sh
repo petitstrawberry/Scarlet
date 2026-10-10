@@ -4,7 +4,7 @@ set -euo pipefail
 # Cross-compile a minimal Linux guest kernel for kvmtool.
 #
 # Prerequisites:
-#   - Buildroot toolchain built (run bundles/linux/tools/build_buildroot.sh first)
+#   - Buildroot toolchain built (run bundles/buildroot/tools/build_buildroot.sh first)
 #   - git
 #
 # Produces:
@@ -14,7 +14,7 @@ set -euo pipefail
 #  ARCH          - target architecture (riscv64 or aarch64), defaults to riscv64
 #  BUILDROOT_DIR - Buildroot installation, defaults to /opt/buildroot (riscv64)
 #                  or /opt/buildroot-aarch64 (aarch64)
-#  PREBUILT_DIR  - output staging directory, defaults to bundles/linux/prebuilt
+#  PREBUILT_DIR  - output staging directory, defaults to bundles/buildroot/prebuilt
 #  WORKDIR       - working directory for clone, defaults to /opt
 #  KERNEL_REPO   - git URL for Linux kernel, defaults to stable
 #  KERNEL_BRANCH - branch/tag to checkout, defaults to v6.12
@@ -40,9 +40,9 @@ Run this script on Linux, such as scarlet-dev, a Linux VM, or a Linux Nix shell.
 
 Example:
   ARCH=${ARCH} \\
-  BUILDROOT_DIR="\$PWD/bundles/linux/cache/buildroot-${ARCH}" \\
-  PREBUILT_DIR="\$PWD/bundles/linux/prebuilt" \\
-  WORKDIR="\$PWD/bundles/linux/cache/work" \\
+  BUILDROOT_DIR="\$PWD/bundles/buildroot/cache/buildroot-${ARCH}" \\
+  PREBUILT_DIR="\$PWD/bundles/buildroot/prebuilt" \\
+  WORKDIR="\$PWD/bundles/buildroot/cache/work" \\
   bash "${SCRIPT_DIR}/build_guest_kernel.sh"
 EOF
     exit 1

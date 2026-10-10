@@ -4,7 +4,7 @@ set -euo pipefail
 # Build a bootable KVM guest image: guest kernel + guest initramfs.
 #
 # Prerequisites:
-#   - Buildroot built (run bundles/linux/tools/build_buildroot.sh first)
+#   - Buildroot built (run bundles/buildroot/tools/build_buildroot.sh first)
 #   - Buildroot toolchain available (for guest kernel cross-compilation)
 #
 # Produces:
@@ -14,7 +14,7 @@ set -euo pipefail
 # Environment variables:
 #  ARCH          - target architecture (riscv64 or aarch64), defaults to riscv64
 #  BUILDROOT_DIR - Buildroot installation (auto-detected if unset)
-#  PREBUILT_DIR  - output staging directory, defaults to bundles/linux/prebuilt
+#  PREBUILT_DIR  - output staging directory, defaults to bundles/buildroot/prebuilt
 #  WORKDIR       - working directory for clones, defaults to /opt
 #  KERNEL_REPO   - git URL for Linux kernel, defaults to stable
 #  KERNEL_BRANCH - branch/tag to checkout, defaults to v6.12
@@ -40,9 +40,9 @@ Run this script on Linux, such as scarlet-dev, a Linux VM, or a Linux Nix shell.
 
 Example:
   ARCH=${ARCH} \\
-  BUILDROOT_DIR="\$PWD/bundles/linux/cache/buildroot-${ARCH}" \\
-  PREBUILT_DIR="\$PWD/bundles/linux/prebuilt" \\
-  WORKDIR="\$PWD/bundles/linux/cache/work" \\
+  BUILDROOT_DIR="\$PWD/bundles/buildroot/cache/buildroot-${ARCH}" \\
+  PREBUILT_DIR="\$PWD/bundles/buildroot/prebuilt" \\
+  WORKDIR="\$PWD/bundles/buildroot/cache/work" \\
   bash "${SCRIPT_DIR}/build_guest_image.sh"
 EOF
     exit 1
