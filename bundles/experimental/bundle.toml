@@ -25,14 +25,14 @@ to = "/bin/video-player"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/yt-for-scarlet", rev = "d5aa0a4e3b658f4c01ff7f7dafab8a8d3a2779e2" }
+source = { git = "https://github.com/petitstrawberry/yt-for-scarlet", rev = "3f008c3bfc86072341d818364bc661360c2a05b1" }
 package = "yt"
 bin = "yt"
 to = "/bin/yt"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/yt-for-scarlet", rev = "d5aa0a4e3b658f4c01ff7f7dafab8a8d3a2779e2" }
+source = { git = "https://github.com/petitstrawberry/yt-for-scarlet", rev = "3f008c3bfc86072341d818364bc661360c2a05b1" }
 package = "yt-gui"
 bin = "yt-gui"
 to = "/bin/yt-gui"
@@ -94,7 +94,7 @@ bundle = "platforms/scarlet/bundle.toml"
 
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/easyrpg-player-scarlet.git", rev = "557a87e6e6fb3d97f90f2eaf61d8ba44119880ff" }
+source = { git = "https://github.com/petitstrawberry/easyrpg-player-scarlet.git", rev = "cd3b903f991c9c3d1094bf85b88b560d0ce3293f" }
 
 [[layers]]
 kind = "bundle"
