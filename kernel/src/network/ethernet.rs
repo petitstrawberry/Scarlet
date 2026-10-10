@@ -13,6 +13,7 @@
 //! This design supports multiple network interfaces (eth0, eth1, wlan0, etc.).
 
 use crate::sync::IrqRwSpinLock;
+use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -369,8 +370,8 @@ impl NetworkLayer for EthernetLayer {
         let interface_name = context
             .get("interface")
             .and_then(|b| core::str::from_utf8(b).ok())
-            .map(String::from)
-            .or_else(|| self.get_default_interface())
+            .map(Cow::Borrowed)
+            .or_else(|| self.get_default_interface().map(Cow::Owned))
             .ok_or(SocketError::NoRoute)?;
 
         // Get source MAC from interface

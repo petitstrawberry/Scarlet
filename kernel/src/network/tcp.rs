@@ -8,7 +8,7 @@ use crate::network::profile as net_profile;
 use timing::RetransmissionTiming;
 
 use crate::sync::counter::SaturatingCounter;
-use crate::sync::{IrqRwSpinLock, IrqSpinLock, WaitResult};
+use crate::sync::{IrqRwSpinLock, IrqSpinLock, SpinLock, WaitResult};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -119,6 +119,22 @@ const TCP_OPTION_MSS_LENGTH: u8 = 4;
 const WINDOW_UPDATE_THRESHOLD: u16 = 8192;
 const LOG_TCP_HTTPS: bool = false;
 const MAX_SOCKET_TIMEOUT_MS: usize = i32::MAX as usize;
+
+fn receive_window_update_needed(advertised_edge: Option<u32>, ack: u32, window: u16) -> bool {
+    let Some(previous) = advertised_edge else {
+        return false;
+    };
+    let edge = ack.wrapping_add(window as u32);
+    if !seq_after(edge, previous) {
+        return false;
+    }
+    // Compare with the window on the wire, not the last local drain. Otherwise
+    // many sub-threshold reads silently reopen the window and the sender must
+    // wait for a persist probe. Reopen a zero/sub-MSS window promptly as well.
+    edge.wrapping_sub(previous) >= WINDOW_UPDATE_THRESHOLD as u32
+        || seq_before_or_equal(previous, ack)
+        || (previous.wrapping_sub(ack) < TCP_LOCAL_MSS as u32 && window as usize >= TCP_LOCAL_MSS)
+}
 
 /// TCP header
 #[derive(Debug, Clone, Copy)]
@@ -382,6 +398,9 @@ pub struct TcpSocket {
     /// Window size
     send_window: AtomicU16,
     recv_window: AtomicU16,
+    /// Furthest receive-window edge actually offered to the peer. Reads may
+    /// reopen the window in increments smaller than the notification threshold.
+    advertised_recv_edge: IrqSpinLock<Option<u32>>,
     /// Maximum TCP payload accepted by the peer for this connection.
     peer_mss: AtomicU16,
 
@@ -389,7 +408,10 @@ pub struct TcpSocket {
     send_buffer: IrqSpinLock<VecDeque<u8>>,
     recv_buffer: IrqSpinLock<VecDeque<u8>>,
     /// Serializes payload writes so sequence numbers and rollback stay ordered.
-    transmit_lock: IrqSpinLock<()>,
+    // Serializes application writes, never acquired by ACK/RTO/IRQ paths.
+    // Leave interrupts enabled while encoding an entire application buffer;
+    // the individual shared socket/device structures retain their IRQ guards.
+    transmit_lock: SpinLock<()>,
 
     /// Reference to TCP layer
     tcp_layer: Weak<TcpLayer>,
@@ -520,10 +542,11 @@ impl TcpSocket {
             recv_ack: AtomicU32::new(0),
             send_window: AtomicU16::new(65535),
             recv_window: AtomicU16::new(65535),
+            advertised_recv_edge: IrqSpinLock::new(None),
             peer_mss: AtomicU16::new(TCP_IPV4_DEFAULT_MSS),
             send_buffer: IrqSpinLock::new(VecDeque::new()),
             recv_buffer: IrqSpinLock::new(VecDeque::new()),
-            transmit_lock: IrqSpinLock::new(()),
+            transmit_lock: SpinLock::new(()),
             tcp_layer,
             self_weak: weak.clone(),
             pending_accept: IrqSpinLock::new(VecDeque::new()),
@@ -1063,6 +1086,7 @@ impl TcpSocket {
         // Reset window sizes
         self.send_window.store(65535, Ordering::SeqCst);
         self.recv_window.store(65535, Ordering::SeqCst);
+        *self.advertised_recv_edge.lock() = None;
         self.peer_mss.store(TCP_IPV4_DEFAULT_MSS, Ordering::SeqCst);
 
         // Reset RTO state
@@ -1487,9 +1511,25 @@ impl TcpSocket {
     fn update_recv_window_after_drain(&self, buffered_len: usize) -> bool {
         let available = MAX_RECV_BUFFER_SIZE.saturating_sub(buffered_len);
         let new_window = available.min(65535) as u16;
-        let old_window = self.recv_window.swap(new_window, Ordering::SeqCst);
-        new_window > old_window
-            && (old_window == 0 || new_window.saturating_sub(old_window) >= WINDOW_UPDATE_THRESHOLD)
+        self.recv_window.store(new_window, Ordering::SeqCst);
+        receive_window_update_needed(
+            *self.advertised_recv_edge.lock(),
+            self.recv_ack.load(Ordering::SeqCst),
+            new_window,
+        )
+    }
+
+    fn record_advertised_recv_window(&self, header: &TcpHeader) {
+        if header.flags() & tcp_flags::ACK == 0 {
+            return;
+        }
+        let edge = header.ack_number.wrapping_add(header.window_size as u32);
+        let mut advertised = self.advertised_recv_edge.lock();
+        // Concurrent ACK publication may finish out of order. Never move the
+        // peer's known edge backwards, including across sequence-number wrap.
+        if advertised.is_none_or(|previous| seq_after(edge, previous)) {
+            *advertised = Some(edge);
+        }
     }
 
     fn send_window_update_ack(&self) {
@@ -1593,11 +1633,21 @@ impl TcpSocket {
         // Serialize header
         let header_bytes = header.to_array();
 
-        // Combine header and data
-        let mut segment = Vec::with_capacity(total_len);
-        segment.extend_from_slice(&header_bytes);
-        segment.extend_from_slice(options);
-        segment.extend_from_slice(data);
+        // ACK/SYN/FIN segments fit in the maximum TCP header. Keep control
+        // traffic off the heap; data segments retain their owned storage.
+        let mut control_segment = [0u8; 60];
+        let mut data_segment = Vec::new();
+        let segment: &[u8] = if data.is_empty() {
+            control_segment[..TCP_HEADER_SIZE].copy_from_slice(&header_bytes);
+            control_segment[TCP_HEADER_SIZE..total_len].copy_from_slice(options);
+            &control_segment[..total_len]
+        } else {
+            data_segment.reserve_exact(total_len);
+            data_segment.extend_from_slice(&header_bytes);
+            data_segment.extend_from_slice(options);
+            data_segment.extend_from_slice(data);
+            &data_segment
+        };
 
         if dest_ip.0[0] == 127 {
             self.bytes_sent.add(segment.len() as u64);
@@ -1629,7 +1679,8 @@ impl TcpSocket {
             }
 
             if let Some(tcp_layer) = self.tcp_layer.upgrade() {
-                let _ = tcp_layer.receive_packet(local_ip, dest_ip, &segment);
+                self.record_advertised_recv_window(&header);
+                let _ = tcp_layer.receive_packet(local_ip, dest_ip, segment);
             }
             return Ok(());
         }
@@ -1653,10 +1704,12 @@ impl TcpSocket {
         let ip_layer = get_network_manager()
             .get_layer("ip")
             .ok_or(SocketError::NoRoute)?;
-        match ip_layer.send(&segment, &ip_context, &[]) {
+        match ip_layer.send(segment, &ip_context, &[]) {
             Ok(()) | Err(SocketError::WouldBlock) => {}
             Err(err) => return Err(err),
         }
+
+        self.record_advertised_recv_window(&header);
 
         self.bytes_sent.add(segment.len() as u64);
 
@@ -2830,8 +2883,9 @@ impl Drop for TcpSocket {
 ///
 /// Manages TCP port bindings and routes packets to sockets.
 pub struct TcpLayer {
-    /// Port-to-socket mapping for receiving packets
-    port_map: IrqRwSpinLock<BTreeMap<u16, Vec<Weak<TcpSocket>>>>,
+    /// Immutable registration snapshots: receiving a packet clones only an
+    /// Arc. Registration/removal copy the list only while a reader retains it.
+    port_map: IrqRwSpinLock<BTreeMap<u16, Arc<Vec<Weak<TcpSocket>>>>>,
     /// Statistics
     stats: IrqRwSpinLock<NetworkLayerStats>,
     self_weak: Weak<TcpLayer>,
@@ -2899,7 +2953,7 @@ impl TcpLayer {
         }) {
             return;
         }
-        entry.push(socket);
+        Arc::make_mut(entry).push(socket);
     }
 
     /// Unregister a specific socket from a port
@@ -2909,14 +2963,14 @@ impl TcpLayer {
     pub fn unregister_socket(&self, port: u16, socket: &Weak<TcpSocket>) {
         let mut map = self.port_map.write();
         if let Some(sockets) = map.get_mut(&port) {
-            sockets.retain(|existing| !existing.ptr_eq(socket));
+            Arc::make_mut(sockets).retain(|existing| !existing.ptr_eq(socket));
             if sockets.is_empty() {
                 map.remove(&port);
             }
         }
     }
 
-    fn registered_sockets(&self, port: u16) -> Option<Vec<Weak<TcpSocket>>> {
+    fn registered_sockets(&self, port: u16) -> Option<Arc<Vec<Weak<TcpSocket>>>> {
         self.port_map.read().get(&port).cloned()
     }
 
@@ -2932,7 +2986,7 @@ impl TcpLayer {
         // from Drop; neither inspection nor dropping may retain this guard.
         let sockets = self.registered_sockets(port)?;
         let mut listening = None;
-        for weak in &sockets {
+        for weak in sockets.iter() {
             if let Some(socket) = weak.upgrade() {
                 if socket.matches_peer(src_ip, src_port) {
                     return Some(socket);
@@ -2947,7 +3001,7 @@ impl TcpLayer {
 
     pub fn find_listening_socket(&self, port: u16) -> Option<Arc<TcpSocket>> {
         let sockets = self.registered_sockets(port)?;
-        for weak in &sockets {
+        for weak in sockets.iter() {
             if let Some(socket) = weak.upgrade() {
                 if socket.get_state() == TcpState::Listen {
                     return Some(socket);
@@ -3088,6 +3142,81 @@ impl TcpLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn receive_window_accumulates_small_drains_since_the_last_advertisement() {
+        let socket = TcpSocket::new(Weak::new());
+        socket.recv_ack.store(50_000, Ordering::SeqCst);
+        let mut header = TcpHeader::new(8081, 1234);
+        header.set_flags(tcp_flags::ACK);
+        header.ack_number = 50_000;
+        header.window_size = 20_000;
+        socket.record_advertised_recv_window(&header);
+        for drain in 1..=8 {
+            assert_eq!(
+                socket.update_recv_window_after_drain(MAX_RECV_BUFFER_SIZE - 20_000 - drain * 1024),
+                drain == 8,
+            );
+        }
+        header.window_size = 28_192;
+        socket.record_advertised_recv_window(&header);
+        assert!(!socket.update_recv_window_after_drain(MAX_RECV_BUFFER_SIZE - 29_216));
+        // A stale concurrent ACK must not erase a newer advertised edge.
+        header.window_size = 20_000;
+        socket.record_advertised_recv_window(&header);
+        assert!(!socket.update_recv_window_after_drain(MAX_RECV_BUFFER_SIZE - 29_216));
+    }
+
+    #[test_case]
+    fn receive_window_reopens_zero_and_sub_mss_windows_across_sequence_wrap() {
+        assert!(receive_window_update_needed(Some(100), 100, 1));
+        assert!(!receive_window_update_needed(Some(100 + 512), 100, 1024));
+        assert!(receive_window_update_needed(
+            Some(100 + 512),
+            100,
+            TCP_LOCAL_MSS as u16
+        ));
+        let ack = u32::MAX - 1000;
+        assert!(receive_window_update_needed(
+            Some(ack),
+            ack,
+            TCP_LOCAL_MSS as u16
+        ));
+        assert!(receive_window_update_needed(
+            Some(ack.wrapping_add(20_000)),
+            ack,
+            28_192
+        ));
+        assert!(!receive_window_update_needed(
+            Some(ack.wrapping_add(28_192)),
+            ack,
+            20_000
+        ));
+    }
+
+    #[test_case]
+    fn tcp_registry_readers_share_storage_and_keep_stable_snapshots() {
+        let layer = TcpLayer::new();
+        let first = TcpSocket::new(Arc::downgrade(&layer));
+        let second = TcpSocket::new(Arc::downgrade(&layer));
+        first.local_port.store(22, Ordering::SeqCst);
+        second.local_port.store(22, Ordering::SeqCst);
+        layer.register_port(22, Arc::downgrade(&first));
+        let in_flight = layer.registered_sockets(22).unwrap();
+        let other_packet = layer.registered_sockets(22).unwrap();
+        assert!(Arc::ptr_eq(&in_flight, &other_packet));
+        // A new connection must not change a packet's existing snapshot.
+        layer.register_port(22, Arc::downgrade(&second));
+        let next = layer.registered_sockets(22).unwrap();
+        assert_eq!(in_flight.len(), 1);
+        assert_eq!(next.len(), 2);
+        drop(first);
+        let after_close = layer.registered_sockets(22).unwrap();
+        assert_eq!(after_close.len(), 1);
+        assert!(after_close[0].ptr_eq(&Arc::downgrade(&second)));
+        assert!(in_flight[0].upgrade().is_none());
+        assert_eq!(next.len(), 2);
+    }
 
     #[test_case]
     fn tcp_registry_snapshot_releases_guard_before_last_owner_drop() {

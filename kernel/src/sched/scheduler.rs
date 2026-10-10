@@ -5408,13 +5408,27 @@ pub fn wake_task(task_id: usize) -> bool {
     wake_task_on(task_id, target_cpu)
 }
 
+fn context_safe_wake_cpu(task: &Task, requested_cpu: usize, now_ns: u64) -> usize {
+    let owner = task.running_cpu.load(Ordering::SeqCst);
+    if owner != NO_CPU && task_can_run_on_cpu(task, owner, now_ns) {
+        owner
+    } else {
+        requested_cpu
+    }
+}
+
 pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
     let _irq_guard = IrqGuard::new();
     let Some(task) = TaskPool::get_task(task_id) else {
         return false;
     };
     let now_ns = get_time_ns();
-    let Some(target_cpu) = normalize_wake_cpu_for_task(&task, target_cpu, now_ns) else {
+    // A blocked task can still be saving its context on its old CPU. Sending
+    // its wake elsewhere lets that CPU consume the queue entry/IPI before the
+    // context is claimable. Keep this wake on the owner: it will either cancel
+    // the wait locally or observe the IPI after completing the switch to idle.
+    let requested_cpu = context_safe_wake_cpu(&task, target_cpu, now_ns);
+    let Some(target_cpu) = normalize_wake_cpu_for_task(&task, requested_cpu, now_ns) else {
         return false;
     };
 
@@ -7138,6 +7152,54 @@ mod tests {
         let stats = scheduler_migration_stats();
         assert_eq!(stats.total, 1);
         assert_eq!(stats.promotions, 1);
+    }
+
+    #[test_case]
+    fn wake_before_context_save_stays_on_the_owner_cpu() {
+        reset();
+        let owner = get_cpu().get_cpuid();
+        let remote = if owner == 0 { 1 } else { 0 };
+        register_online_cpu(owner);
+        register_online_cpu(remote);
+        let id = register_task(Task::new(
+            "WakeBeforeContextSave".to_string(),
+            1,
+            TaskType::Kernel,
+        ));
+        let task = TaskPool::get_task(id).unwrap();
+        task.state.store(
+            TaskState::Blocked(crate::task::BlockedType::Interruptible),
+            Ordering::SeqCst,
+        );
+        task.running_cpu.store(owner, Ordering::SeqCst);
+        mark_blocked(id);
+        assert!(wake_task_on(id, remote));
+        assert!(fair_queue(owner).lock().contains(&id));
+        assert!(!fair_queue(remote).lock().contains(&id));
+        assert_eq!(task.last_cpu.load(Ordering::SeqCst), owner);
+        assert!(!try_claim_ready_task(&task, remote));
+        // The saved context becomes claimable only after switch-out completes.
+        task.running_cpu.store(NO_CPU, Ordering::SeqCst);
+        assert_eq!(context_safe_wake_cpu(&task, remote, get_time_ns()), remote);
+        assert!(remove_ready_task_from_cpu(owner, id));
+        assert!(try_claim_ready_task(&task, owner));
+        task.running_cpu.store(NO_CPU, Ordering::SeqCst);
+        drop(task);
+        reset();
+    }
+
+    #[test_case]
+    fn context_owner_wakeup_respects_changed_affinity() {
+        reset();
+        let owner = get_cpu().get_cpuid();
+        let remote = if owner == 0 { 1 } else { 0 };
+        register_online_cpu(owner);
+        register_online_cpu(remote);
+        let task = Task::new("WakeAffinity".to_string(), 1, TaskType::Kernel);
+        task.running_cpu.store(owner, Ordering::SeqCst);
+        task.set_pinned_cpu(Some(remote));
+        assert_eq!(context_safe_wake_cpu(&task, remote, get_time_ns()), remote);
+        reset();
     }
 
     #[test_case]

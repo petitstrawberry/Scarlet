@@ -13,6 +13,7 @@
 //! This design supports multiple network interfaces with multiple IP addresses each.
 
 use crate::sync::IrqRwSpinLock;
+use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -699,12 +700,12 @@ impl NetworkLayer for Ipv4Layer {
                 let iface = context
                     .get("interface")
                     .and_then(|b| core::str::from_utf8(b).ok())
-                    .map(String::from)
-                    .or_else(|| self.interface_for_address(source_address))
+                    .map(Cow::Borrowed)
+                    .or_else(|| self.interface_for_address(source_address).map(Cow::Owned))
                     .or_else(|| {
                         get_network_manager()
                             .get_default_interface()
-                            .map(|i| String::from(i.name()))
+                            .map(|i| Cow::Owned(String::from(i.name())))
                     })
                     .ok_or(SocketError::NoRoute)?;
 
@@ -719,7 +720,7 @@ impl NetworkLayer for Ipv4Layer {
         } else {
             // Select source IP based on routing table
             let (iface, src_ip, gw) = self.select_source(dest_ip).ok_or(SocketError::NoRoute)?;
-            (iface, src_ip.0, gw)
+            (Cow::Owned(iface), src_ip.0, gw)
         };
 
         // Build IPv4 header
@@ -736,12 +737,21 @@ impl NetworkLayer for Ipv4Layer {
         // Calculate and set checksum
         header.checksum = header.calculate_checksum();
 
-        // Serialize header
-        let mut ip_packet = Vec::with_capacity(20 + packet.len());
-        ip_packet.extend_from_slice(&header.to_array());
-
-        // Create IP packet: header + payload
-        ip_packet.extend_from_slice(packet);
+        // Small control packets need no intermediate heap allocation. The
+        // lower layer still takes its own storage when queuing for DMA/ARP.
+        let mut inline_packet = [0u8; 128];
+        let mut large_packet = Vec::new();
+        let packet_size = 20 + packet.len();
+        let ip_packet: &[u8] = if packet_size <= inline_packet.len() {
+            inline_packet[..20].copy_from_slice(&header.to_array());
+            inline_packet[20..packet_size].copy_from_slice(packet);
+            &inline_packet[..packet_size]
+        } else {
+            large_packet.reserve_exact(packet_size);
+            large_packet.extend_from_slice(&header.to_array());
+            large_packet.extend_from_slice(packet);
+            &large_packet
+        };
 
         if LOG_IPV4_PACKET_TRACE {
             println!(
@@ -778,9 +788,9 @@ impl NetworkLayer for Ipv4Layer {
 
         // Forward to Ethernet layer
         if !next_layers.is_empty() {
-            next_layers[0].send(&ip_packet, &eth_context, &next_layers[1..])?;
+            next_layers[0].send(ip_packet, &eth_context, &next_layers[1..])?;
         } else if let Some(eth_layer) = get_network_manager().get_layer("ethernet") {
-            eth_layer.send(&ip_packet, &eth_context, &[])?;
+            eth_layer.send(ip_packet, &eth_context, &[])?;
         }
 
         // Update statistics

@@ -85,6 +85,126 @@ const VIRTIO_NET_S_ANNOUNCE: u16 = 2; // Gratuitous packets should be sent
 const DEFAULT_MTU: usize = 1500;
 const RX_WORKER_QUEUE_LIMIT: usize = 256;
 const RX_WORKER_BUDGET: usize = 64;
+const TX_PENDING_LIMIT: usize = 256;
+
+struct TxBuffer {
+    pages: ContiguousPages,
+    in_flight: bool,
+}
+
+/// One persistent DMA allocation per descriptor. A full hardware ring retains
+/// owned packets in a bounded FIFO; its completion interrupt resumes sending.
+/// The virtqueue guard must always be acquired before the TX state guard.
+struct TxState {
+    buffers: Vec<TxBuffer>,
+    pending: VecDeque<DevicePacket>,
+    header_size: usize,
+    buffer_size: usize,
+}
+
+impl TxState {
+    fn new(count: usize, header_size: usize, frame_size: usize) -> Result<Self, &'static str> {
+        let buffer_size = header_size
+            .checked_add(frame_size)
+            .ok_or("TX frame too large")?;
+        let pages = buffer_size.div_ceil(PAGE_SIZE);
+        let mut buffers = Vec::with_capacity(count);
+        for _ in 0..count {
+            buffers.push(TxBuffer {
+                pages: ContiguousPages::new(pages)
+                    .ok_or("Failed to allocate TX buffer from PMM")?,
+                in_flight: false,
+            });
+        }
+        Ok(Self {
+            buffers,
+            pending: VecDeque::with_capacity(TX_PENDING_LIMIT),
+            header_size,
+            buffer_size,
+        })
+    }
+
+    fn reclaim(&mut self, queue: &mut VirtQueue<'_>) -> Result<(), &'static str> {
+        while let Some((index, _)) = queue.pop_used() {
+            let buffer = self.buffers.get_mut(index).ok_or("Invalid TX completion")?;
+            if !buffer.in_flight {
+                return Err("Duplicate TX completion");
+            }
+            // Only the device's used-ring publication releases DMA ownership.
+            buffer.in_flight = false;
+            queue.free_desc(index);
+        }
+        Ok(())
+    }
+
+    fn publish(
+        &mut self,
+        queue: &mut VirtQueue<'_>,
+        index: usize,
+        packet: &DevicePacket,
+    ) -> Result<(), &'static str> {
+        let buffer = &mut self.buffers[index];
+        assert!(!buffer.in_flight);
+        // PMM zeroes these pages once. The no-offload VirtIO header stays zero;
+        // only the frame is copied for subsequent submissions.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                packet.data.as_ptr(),
+                (buffer.pages.as_ptr() as *mut u8).add(self.header_size),
+                packet.len,
+            );
+        }
+        queue.desc[index].addr = buffer.pages.as_paddr();
+        queue.desc[index].len = (self.header_size + packet.len) as u32;
+        queue.desc[index].flags = 0;
+        queue.desc[index].next = 0;
+        buffer.in_flight = true;
+        if let Err(error) = queue.push(index) {
+            buffer.in_flight = false;
+            queue.free_desc(index);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn drain_pending(&mut self, queue: &mut VirtQueue<'_>) -> Result<(), &'static str> {
+        while !self.pending.is_empty() {
+            let Some(index) = queue.alloc_desc() else {
+                break;
+            };
+            let packet = self.pending.pop_front().unwrap();
+            if let Err(error) = self.publish(queue, index, &packet) {
+                self.pending.push_front(packet);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn send(
+        &mut self,
+        queue: &mut VirtQueue<'_>,
+        packet: DevicePacket,
+    ) -> Result<(), &'static str> {
+        if packet.len > packet.data.len()
+            || packet.len > self.buffer_size.saturating_sub(self.header_size)
+        {
+            return Err("Invalid TX packet length");
+        }
+        self.reclaim(queue)?;
+        self.drain_pending(queue)?;
+        if self.pending.is_empty() {
+            if let Some(index) = queue.alloc_desc() {
+                return self.publish(queue, index, &packet);
+            }
+        }
+        if self.pending.len() >= TX_PENDING_LIMIT {
+            return Err("TX queue full");
+        }
+        self.pending.push_back(packet);
+        Ok(())
+    }
+}
 
 struct QueuedRxPacket {
     interface_name: String,
@@ -247,9 +367,12 @@ pub struct VirtioNetDevice {
     virtqueues: IrqSpinLock<[VirtQueue<'static>; 2]>, // RX queue (0) and TX queue (1)
     config: IrqRwSpinLock<Option<NetworkInterfaceConfig>>,
     features: IrqRwSpinLock<u64>,
+    carrier: AtomicBool,
+    header_size: usize,
     stats: IrqSpinLock<NetworkStats>,
     initialized: IrqSpinLock<bool>,
     rx_buffers: IrqSpinLock<Vec<ContiguousPages>>,
+    tx_state: IrqSpinLock<Option<TxState>>,
     interrupt_id: IrqSpinLock<Option<InterruptId>>,
     interface_name: IrqSpinLock<Option<String>>,
 }
@@ -289,9 +412,12 @@ impl VirtioNetDevice {
             virtqueues: IrqSpinLock::new([VirtQueue::new(32), VirtQueue::new(32)]), // RX and TX queues
             config: IrqRwSpinLock::new(None),
             features: IrqRwSpinLock::new(0),
+            carrier: AtomicBool::new(false),
+            header_size: mem::size_of::<VirtioNetHdrBasic>(),
             stats: IrqSpinLock::new(NetworkStats::default()),
             initialized: IrqSpinLock::new(false),
             rx_buffers: IrqSpinLock::new(Vec::new()),
+            tx_state: IrqSpinLock::new(None),
             interrupt_id: IrqSpinLock::new(None),
             interface_name: IrqSpinLock::new(None),
         };
@@ -371,6 +497,12 @@ impl VirtioNetDevice {
     fn read_device_config(&mut self, negotiated_features: u64) {
         // Store actually negotiated features
         *self.features.write() = negotiated_features;
+        self.header_size = if negotiated_features & (1u64 << VIRTIO_F_VERSION_1) != 0 {
+            mem::size_of::<VirtioNetHdr>()
+        } else {
+            mem::size_of::<VirtioNetHdrBasic>()
+        };
+        self.refresh_link_status();
 
         // Debug: Print negotiated features in test builds
         #[cfg(test)]
@@ -414,12 +546,7 @@ impl VirtioNetDevice {
 
     /// Get the appropriate header size based on device features
     fn get_header_size(&self) -> usize {
-        // Modern virtio includes num_buffers even without MRG_RXBUF.
-        if *self.features.read() & (1u64 << VIRTIO_F_VERSION_1) != 0 {
-            mem::size_of::<VirtioNetHdr>()
-        } else {
-            mem::size_of::<VirtioNetHdrBasic>()
-        }
+        self.header_size
     }
 
     /// Setup receive buffers in the RX queue
@@ -466,90 +593,61 @@ impl VirtioNetDevice {
         // Notify device about available RX buffers
         unsafe {
             core::ptr::write_volatile(rx_queue.avail.flags, 0);
-            core::ptr::write_volatile(rx_queue.used.flags, 0);
         }
         self.notify(0); // Notify RX queue
 
         Ok(())
     }
 
-    /// Process a single packet transmission
-    fn transmit_packet(&self, packet: &DevicePacket) -> Result<(), &'static str> {
-        // combine header and packet in single buffer like their send() function
-        let hdr_size = self.get_header_size();
-        let total_size = hdr_size + packet.len;
-
-        // Allocate from PMM for DMA
-        let pages_needed = (total_size + PAGE_SIZE - 1) / PAGE_SIZE;
-        let buffer_alloc =
-            ContiguousPages::new(pages_needed).ok_or("Failed to allocate TX buffer from PMM")?;
-        let buffer_ptr = buffer_alloc.as_ptr() as *mut u8;
-
-        // Fill header at the beginning
-        unsafe {
-            // No checksum/GSO offload; TX num_buffers is also zero.
-            core::ptr::write_bytes(buffer_ptr, 0, hdr_size);
-            // Copy packet data after header
-            core::ptr::copy_nonoverlapping(
-                packet.data.as_ptr(),
-                buffer_ptr.add(hdr_size),
-                packet.len,
-            );
-        }
-
+    /// Publish TX without waiting for hardware while holding the IRQ guard.
+    fn transmit_packet(&self, packet: DevicePacket) -> Result<(), &'static str> {
+        let packet_len = packet.len;
         let result = {
-            let mut virtqueues = self.virtqueues.lock();
-            let tx_queue = &mut virtqueues[1]; // TX queue is index 1
-
-            // Single descriptor for the combined buffer
-            let desc_idx = tx_queue
-                .alloc_desc()
-                .ok_or("Failed to allocate TX descriptor")?;
-
-            // Setup descriptor for the combined buffer (device readable)
-            let buffer_phys = buffer_alloc.as_paddr();
-            tx_queue.desc[desc_idx].addr = buffer_phys as u64;
-            tx_queue.desc[desc_idx].len = total_size as u32;
-            tx_queue.desc[desc_idx].flags = 0; // No flags, single descriptor
-            tx_queue.desc[desc_idx].next = 0; // No chaining
-
-            // Submit the request to the queue
-            if let Err(e) = tx_queue.push(desc_idx) {
-                tx_queue.free_desc(desc_idx);
-                return Err(e);
+            let mut queues = self.virtqueues.lock();
+            let queue = &mut queues[1];
+            let mut state = self.tx_state.lock();
+            let state = state.as_mut().ok_or("TX buffers not initialized")?;
+            let before = unsafe { core::ptr::read_volatile(queue.avail.idx) };
+            let result = state.send(queue, packet);
+            if unsafe { core::ptr::read_volatile(queue.avail.idx) } != before
+                && Self::notification_needed(queue)
+            {
+                self.notify(1);
             }
-
-            // Notify the device
-            self.notify(1); // Notify TX queue
-
-            // Wait for transmission (polling)
-            while tx_queue.is_busy() {}
-
-            // Get completion
-            let result = match tx_queue.pop() {
-                Some(_completed_desc) => Ok(()),
-                None => {
-                    tx_queue.free_desc(desc_idx);
-                    Err("No TX completion")
-                }
-            };
-
-            // Free descriptor after processing (responsibility of driver)
-            tx_queue.free_desc(desc_idx);
-
             result
         };
-
-        // buffer_alloc is automatically dropped here
-
-        // Update statistics if transmission succeeded
         if result.is_ok() {
             let mut stats = self.stats.lock();
             stats.tx_packets += 1;
-            stats.tx_bytes += packet.len as u64;
+            stats.tx_bytes += packet_len as u64;
         }
-
         result
+    }
+
+    fn complete_transmissions(&self) -> Result<(), &'static str> {
+        let mut queues = self.virtqueues.lock();
+        let queue = &mut queues[1];
+        let mut state = self.tx_state.lock();
+        let Some(state) = state.as_mut() else {
+            return Ok(());
+        };
+        state.reclaim(queue)?;
+        let before = unsafe { core::ptr::read_volatile(queue.avail.idx) };
+        state.drain_pending(queue)?;
+        if unsafe { core::ptr::read_volatile(queue.avail.idx) } != before
+            && Self::notification_needed(queue)
+        {
+            self.notify(1);
+        }
+        Ok(())
+    }
+
+    fn notification_needed(queue: &VirtQueue<'_>) -> bool {
+        // EVENT_IDX is not negotiated. The device owns used.flags and may
+        // suppress doorbells while it is already draining this queue. Order
+        // the check after publication so a concurrent drain cannot miss it.
+        crate::arch::io_mb();
+        unsafe { core::ptr::read_volatile(queue.used.flags) & 1 == 0 }
     }
 
     /// Process received packets from RX queue
@@ -593,13 +691,11 @@ impl VirtioNetDevice {
             }
         }
 
-        // Always notify device if we recycled any buffers, so it knows RX buffers are available
+        // Respect device-owned notification suppression when recycling RX.
         if buffers_recycled > 0 {
-            unsafe {
-                core::ptr::write_volatile(rx_queue.avail.flags, 0);
-                core::ptr::write_volatile(rx_queue.used.flags, 0);
+            if Self::notification_needed(rx_queue) {
+                self.notify(0);
             }
-            self.notify(0); // Notify RX queue
         }
 
         // Update statistics if we received packets
@@ -612,16 +708,17 @@ impl VirtioNetDevice {
         Ok(packets)
     }
 
-    /// Check link status from device configuration
-    fn check_link_status(&self) -> bool {
+    /// Refresh on configuration interrupts, rather than MMIO for every packet.
+    fn refresh_link_status(&self) {
         let features = *self.features.read();
         if features & (1u64 << VIRTIO_NET_F_STATUS) != 0 {
             // Read status from config space
             let status = self.read_config::<u16>(6); // Status at offset 6
-            (status & VIRTIO_NET_S_LINK_UP) != 0
+            self.carrier
+                .store((status & VIRTIO_NET_S_LINK_UP) != 0, Ordering::Release);
         } else {
             // Assume link is up if status feature is not supported
-            true
+            self.carrier.store(true, Ordering::Release);
         }
     }
 
@@ -639,6 +736,10 @@ impl VirtioNetDevice {
             }
             self.write32_register(Register::InterruptAck, isr & 0x03);
         }
+
+        // Sample after acknowledging startup notifications, so a change
+        // between the old sample and the acknowledgement is not lost.
+        self.refresh_link_status();
 
         Ok(())
     }
@@ -693,6 +794,23 @@ impl Device for VirtioNetDevice {
     }
 }
 
+impl Drop for VirtioNetDevice {
+    fn drop(&mut self) {
+        // Async TX (and posted RX) can still be owned by the device. Reset must
+        // complete before the field destructors release rings or DMA pages.
+        if self.reset().is_err() {
+            crate::println!("[virtio-net] reset failed; retaining device-owned DMA storage");
+            let queues = core::mem::replace(
+                &mut *self.virtqueues.lock(),
+                [VirtQueue::new(1), VirtQueue::new(1)],
+            );
+            core::mem::forget(queues);
+            core::mem::forget(core::mem::take(&mut *self.rx_buffers.lock()));
+            core::mem::forget(self.tx_state.lock().take());
+        }
+    }
+}
+
 impl ControlOps for VirtioNetDevice {
     // VirtIO network devices don't support control operations by default
     fn control(&self, _command: u32, _arg: usize) -> Result<i32, &'static str> {
@@ -718,6 +836,13 @@ impl InterruptCapableDevice for VirtioNetDevice {
         // crate::println!("[virtio-net] Interrupt received, ISR=0x{:x}", isr);
         self.write32_register(Register::InterruptAck, isr & 0x03);
 
+        if isr & 0x02 != 0 {
+            self.refresh_link_status();
+            let mut epoch = self.link_epoch.lock();
+            *epoch = epoch.wrapping_add(1);
+        }
+
+        let _ = self.complete_transmissions();
         let packets = self.process_received_packets().unwrap_or_default();
         if packets.is_empty() {
             return Ok(InterruptClaim::Handled);
@@ -885,7 +1010,7 @@ impl NetworkDevice for VirtioNetDevice {
             return Err("Link is down");
         }
 
-        self.transmit_packet(&packet)
+        self.transmit_packet(packet)
     }
 
     fn receive_packets(&self) -> Result<Vec<DevicePacket>, &'static str> {
@@ -893,6 +1018,8 @@ impl NetworkDevice for VirtioNetDevice {
             return Ok(Vec::new());
         }
 
+        // Keep the polling API usable before an IRQ line is registered too.
+        self.complete_transmissions()?;
         self.process_received_packets()
     }
 
@@ -904,15 +1031,23 @@ impl NetworkDevice for VirtioNetDevice {
 
     fn init_network(&mut self) -> Result<(), &'static str> {
         {
-            let mut initialized = self.initialized.lock();
+            let initialized = self.initialized.lock();
             if *initialized {
                 return Ok(());
             }
-            *initialized = true;
         }
 
-        // Setup RX buffers with separated descriptors for header and data
+        // Allocate before any TX publication. Include Ethernet/VLAN headroom
+        // and the negotiated MTU so jumbo-capable devices retain their range.
+        let count = self.virtqueues.lock()[1].get_queue_size();
+        let tx = TxState::new(
+            count,
+            self.get_header_size(),
+            self.get_mtu()?.max(DEFAULT_MTU) + 18,
+        )?;
+        *self.tx_state.lock() = Some(tx);
         self.setup_rx_buffers()?;
+        *self.initialized.lock() = true;
 
         Ok(())
     }
@@ -922,7 +1057,7 @@ impl NetworkDevice for VirtioNetDevice {
     }
 
     fn is_link_up(&self) -> bool {
-        self.check_link_status()
+        self.carrier.load(Ordering::Acquire)
     }
 
     fn get_stats(&self) -> NetworkStats {
@@ -933,6 +1068,167 @@ impl NetworkDevice for VirtioNetDevice {
 impl EthernetDevice for VirtioNetDevice {
     fn mac_address(&self) -> Result<MacAddress, &'static str> {
         self.get_mac_address()
+    }
+}
+
+#[cfg(test)]
+mod tx_tests {
+    use super::*;
+
+    #[test_case]
+    fn link_changes_refresh_on_configuration_interrupts() {
+        let registers = ContiguousPages::new(1).unwrap();
+        let device = VirtioNetDevice {
+            link_epoch: IrqSpinLock::new(0),
+            base_addr: registers.as_ptr() as usize,
+            pci_transport: None,
+            virtqueues: IrqSpinLock::new([VirtQueue::new(2), VirtQueue::new(2)]),
+            config: IrqRwSpinLock::new(None),
+            features: IrqRwSpinLock::new(1u64 << VIRTIO_NET_F_STATUS),
+            carrier: AtomicBool::new(false),
+            header_size: mem::size_of::<VirtioNetHdrBasic>(),
+            stats: IrqSpinLock::new(NetworkStats::default()),
+            initialized: IrqSpinLock::new(false),
+            rx_buffers: IrqSpinLock::new(Vec::new()),
+            tx_state: IrqSpinLock::new(None),
+            interrupt_id: IrqSpinLock::new(None),
+            interface_name: IrqSpinLock::new(None),
+        };
+        device.write_config::<u16>(6, VIRTIO_NET_S_LINK_UP);
+        device.refresh_link_status();
+        assert!(device.is_link_up());
+        device.write_config::<u16>(6, 0);
+        // No per-packet MMIO: cached state changes on the configuration IRQ.
+        assert!(device.is_link_up());
+        device.write32_register(Register::InterruptStatus, 2);
+        assert_eq!(device.claim_interrupt().unwrap(), InterruptClaim::Handled);
+        assert!(!device.is_link_up());
+        assert_eq!(device.link_epoch(), 1);
+        device.write_config::<u16>(6, VIRTIO_NET_S_LINK_UP);
+        device.claim_interrupt().unwrap();
+        assert!(device.is_link_up());
+        assert_eq!(device.link_epoch(), 2);
+        drop(device);
+    }
+
+    #[test_case]
+    fn tx_notifications_respect_device_owned_flags() {
+        let mut queue = VirtQueue::new(2);
+        queue.init();
+        assert!(VirtioNetDevice::notification_needed(&queue));
+        *queue.used.flags = 1;
+        assert!(!VirtioNetDevice::notification_needed(&queue));
+        // The driver never clears the device's suppression flag.
+        assert_eq!(*queue.used.flags, 1);
+    }
+
+    fn complete(queue: &mut VirtQueue<'_>, index: usize) {
+        let used = *queue.used.idx;
+        queue.used.ring[used as usize % queue.get_queue_size()].id = index as u32;
+        crate::arch::io_mb();
+        *queue.used.idx = used.wrapping_add(1);
+    }
+
+    fn payload(state: &TxState, index: usize) -> u8 {
+        unsafe { *((state.buffers[index].pages.as_ptr() as *const u8).add(state.header_size)) }
+    }
+
+    #[test_case]
+    fn tx_delayed_completion_retains_dma_and_drains_fifo() {
+        let mut queue = VirtQueue::new(2);
+        queue.init();
+        let mut state = TxState::new(2, 12, 1518).unwrap();
+        let addresses: Vec<_> = state.buffers.iter().map(|b| b.pages.as_paddr()).collect();
+        for byte in 1..=4 {
+            state
+                .send(&mut queue, DevicePacket::with_data(vec![byte; 60]))
+                .unwrap();
+        }
+        assert_eq!(state.pending.len(), 2);
+        assert_eq!(queue.free_descriptors.len(), 0);
+        let first = queue.avail.ring[0] as usize;
+        let second = queue.avail.ring[1] as usize;
+        assert_eq!(payload(&state, first), 1);
+        assert_eq!(payload(&state, second), 2);
+
+        // Hardware can complete out of order. Only its returned descriptor
+        // may be overwritten, and pending packets retain submission order.
+        complete(&mut queue, second);
+        state.reclaim(&mut queue).unwrap();
+        state.drain_pending(&mut queue).unwrap();
+        assert_eq!(payload(&state, first), 1);
+        assert_eq!(payload(&state, second), 3);
+        assert_eq!(state.pending.len(), 1);
+        complete(&mut queue, first);
+        state.reclaim(&mut queue).unwrap();
+        state.drain_pending(&mut queue).unwrap();
+        assert_eq!(payload(&state, first), 4);
+        assert!(state.pending.is_empty());
+        for (index, address) in addresses.iter().enumerate() {
+            assert_eq!(state.buffers[index].pages.as_paddr(), *address);
+        }
+        complete(&mut queue, second);
+        complete(&mut queue, first);
+        state.reclaim(&mut queue).unwrap();
+        assert_eq!(queue.free_descriptors.len(), 2);
+        assert!(state.buffers.iter().all(|b| !b.in_flight));
+    }
+
+    #[test_case]
+    fn tx_full_queue_and_bad_lengths_leave_owned_dma_unchanged() {
+        let mut queue = VirtQueue::new(1);
+        queue.init();
+        let mut state = TxState::new(1, 12, 1518).unwrap();
+        state
+            .send(&mut queue, DevicePacket::with_data(vec![1; 60]))
+            .unwrap();
+        for _ in 0..TX_PENDING_LIMIT {
+            state
+                .send(&mut queue, DevicePacket::with_data(vec![2; 60]))
+                .unwrap();
+        }
+        assert_eq!(
+            state.send(&mut queue, DevicePacket::with_data(vec![3; 60])),
+            Err("TX queue full")
+        );
+        assert_eq!(
+            state.send(
+                &mut queue,
+                DevicePacket {
+                    data: vec![0; 1],
+                    len: usize::MAX
+                }
+            ),
+            Err("Invalid TX packet length")
+        );
+        assert_eq!(
+            state.send(&mut queue, DevicePacket::with_data(vec![0; 1519])),
+            Err("Invalid TX packet length")
+        );
+        assert_eq!(payload(&state, 0), 1);
+        assert_eq!(state.pending.len(), TX_PENDING_LIMIT);
+        assert_eq!(*queue.avail.idx, 1);
+        assert_eq!(queue.free_descriptors.len(), 0);
+        complete(&mut queue, 0);
+        state.reclaim(&mut queue).unwrap();
+        state.drain_pending(&mut queue).unwrap();
+        assert_eq!(payload(&state, 0), 2);
+        assert_eq!(state.pending.len(), TX_PENDING_LIMIT - 1);
+    }
+
+    #[test_case]
+    fn tx_duplicate_completion_cannot_release_a_descriptor_twice() {
+        let mut queue = VirtQueue::new(1);
+        queue.init();
+        let mut state = TxState::new(1, 10, 1518).unwrap();
+        state
+            .send(&mut queue, DevicePacket::with_data(vec![1; 60]))
+            .unwrap();
+        complete(&mut queue, 0);
+        state.reclaim(&mut queue).unwrap();
+        complete(&mut queue, 0);
+        assert_eq!(state.reclaim(&mut queue), Err("Duplicate TX completion"));
+        assert_eq!(queue.free_descriptors.len(), 1);
     }
 }
 
@@ -962,6 +1258,7 @@ mod tests {
         // header includes num_buffers even without mergeable RX buffers.
         assert_ne!(*device.features.read() & (1u64 << VIRTIO_F_VERSION_1), 0);
         assert_eq!(device.get_header_size(), 12);
+        drop(device);
         crate::vm::iounmap(vaddr);
     }
 
@@ -1055,7 +1352,7 @@ mod tests {
         let packet = DevicePacket::with_data(test_data);
 
         // Test packet transmission - should not panic
-        let result = device.transmit_packet(&packet);
+        let result = device.transmit_packet(packet);
         // In test environment, TX may complete or timeout - both are acceptable
         // What matters is that we don't crash or leave device in broken state
         match result {
@@ -1080,7 +1377,7 @@ mod tests {
             test_data.push(i as u8); // Make each packet unique
             let packet = DevicePacket::with_data(test_data);
 
-            let result = device.transmit_packet(&packet);
+            let result = device.transmit_packet(packet);
             crate::println!(
                 "[virtio-net test] Packet {} TX result: {:?}",
                 i,
@@ -1112,9 +1409,9 @@ mod tests {
         let test_data = vec![0x45, 0x00, 0x00, 0x3c];
         let packet = DevicePacket::with_data(test_data);
 
-        let _result1 = device1.transmit_packet(&packet);
-        let _result2 = device2.transmit_packet(&packet);
-        let _result3 = device3.transmit_packet(&packet);
+        let _result1 = device1.transmit_packet(packet.clone());
+        let _result2 = device2.transmit_packet(packet.clone());
+        let _result3 = device3.transmit_packet(packet);
 
         crate::println!("[virtio-net test] Transmitted packets on all 3 devices");
     }
@@ -1151,7 +1448,7 @@ mod tests {
 
         // Test 1: Send packet from net1 to net2
         crate::println!("[virtio-net test] Sending packet from net1 to net2...");
-        let result1 = device_net1.transmit_packet(&packet_net1_to_net2);
+        let result1 = device_net1.transmit_packet(packet_net1_to_net2);
         crate::println!(
             "[virtio-net test] net1->net2 TX result: {:?}",
             result1.is_ok()
@@ -1159,7 +1456,7 @@ mod tests {
 
         // Test 2: Send packet from net2 to net1
         crate::println!("[virtio-net test] Sending packet from net2 to net1...");
-        let result2 = device_net2.transmit_packet(&packet_net2_to_net1);
+        let result2 = device_net2.transmit_packet(packet_net2_to_net1);
         crate::println!(
             "[virtio-net test] net2->net1 TX result: {:?}",
             result2.is_ok()
@@ -1276,7 +1573,7 @@ mod tests {
         let test_packet = DevicePacket::with_data(test_packet_data);
 
         crate::println!("[virtio-net test] Sending test packet from sender device...");
-        let tx_result = sender_mut.transmit_packet(&test_packet);
+        let tx_result = sender_mut.transmit_packet(test_packet);
         crate::println!("[virtio-net test] TX result: {:?}", tx_result.is_ok());
 
         // Poll for received packets with multiple attempts
