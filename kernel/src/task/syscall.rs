@@ -1963,11 +1963,11 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     match trapframe.get_arg(0) {
         0 => {
             crate::println!("[SHUTDOWN] Powering off...");
-            crate::arch::shutdown()
+            crate::system_power::transition(crate::system_power::Action::PowerOff)
         }
         1 => {
             crate::println!("[SHUTDOWN] Rebooting...");
-            crate::arch::reboot()
+            crate::system_power::transition(crate::system_power::Action::Restart)
         }
         _ => SYSCALL_ERROR,
     }

@@ -928,18 +928,9 @@ pub fn sync_icache_for_execution(start_vaddr: usize, len: usize) {
     }
 }
 
-/// Enter the platform's registered PMIC path, or firmware on platforms that
-/// implement PSCI SYSTEM_OFF. A registered handler owns poweroff; if it fails,
-/// do not fall through into firmware which may not implement this operation.
+/// Compatibility entry point for kernel callers; board policy lives in system_power.
 pub fn shutdown() -> ! {
-    if let Some(result) = crate::device::power::request_system_power_off() {
-        match result {
-            Ok(never) => match never {},
-            Err(error) => println!("[aarch64] Platform poweroff failed: {}", error),
-        }
-        park_after_power_failure();
-    }
-    firmware_system_power(psci::SYSTEM_OFF)
+    crate::system_power::transition(crate::system_power::Action::PowerOff)
 }
 
 pub fn shutdown_with_code(exit_code: u32) -> ! {
@@ -948,33 +939,31 @@ pub fn shutdown_with_code(exit_code: u32) -> ! {
 }
 
 pub fn reboot() -> ! {
-    firmware_system_power(psci::SYSTEM_RESET)
+    crate::system_power::transition(crate::system_power::Action::Restart)
 }
 
-fn firmware_system_power(function: u64) -> ! {
+/// Architecture default used only when no board controller is installed.
+pub(crate) fn firmware_system_power(
+    action: crate::system_power::Action,
+) -> crate::system_power::PowerResult {
+    let function = match action {
+        crate::system_power::Action::PowerOff => psci::SYSTEM_OFF,
+        crate::system_power::Action::Restart => psci::SYSTEM_RESET,
+    };
     let conduit = crate::device::fdt::FdtManager::get_manager()
         .get_fdt()
-        .and_then(psci::Conduit::from_fdt);
-    if let Some(conduit) = conduit {
-        println!(
-            "[aarch64] PSCI {:?} system request {:#x}",
-            conduit, function
-        );
-        let error = conduit.invoke(function, 0, 0, 0);
-        println!(
-            "[aarch64] PSCI system request unexpectedly returned: {}",
-            error
-        );
-    } else {
-        println!("[aarch64] No supported PSCI conduit for system power control");
-    }
-    park_after_power_failure()
-}
-
-fn park_after_power_failure() -> ! {
-    loop {
-        unsafe { asm!("wfi", options(nomem, nostack)) };
-    }
+        .and_then(psci::Conduit::from_fdt)
+        .ok_or("no supported PSCI conduit for system power control")?;
+    println!(
+        "[aarch64] PSCI {:?} system request {:#x}",
+        conduit, function
+    );
+    let error = conduit.invoke(function, 0, 0, 0);
+    println!(
+        "[aarch64] PSCI system request unexpectedly returned: {}",
+        error
+    );
+    Err("PSCI system power request returned")
 }
 
 pub struct ArchCpuState {

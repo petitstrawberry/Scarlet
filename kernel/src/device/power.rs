@@ -7,31 +7,6 @@ use alloc::sync::Arc;
 use crate::device::DeviceInfo;
 use crate::device::platform::PlatformDeviceInfo;
 
-/// A platform PMIC capable of powering off the complete machine.
-///
-/// Called in task context with peripheral workers still available. Successful
-/// poweroff does not return. The driver must bound hardware waits and report a
-/// failure if power remains on. No registry lock is held during the callback.
-pub trait SystemPowerOff: Send + Sync {
-    fn power_off(&self) -> Result<core::convert::Infallible, &'static str>;
-}
-
-static SYSTEM_POWER_OFF: crate::sync::Once<Arc<dyn SystemPowerOff>> = crate::sync::Once::new();
-
-/// Install the system PMIC after successful probing; only one owner is allowed.
-pub fn register_system_power_off(handler: Arc<dyn SystemPowerOff>) -> Result<(), &'static str> {
-    SYSTEM_POWER_OFF
-        .set(handler)
-        .map_err(|_| "system poweroff handler already registered")
-}
-
-/// `None` means firmware should handle poweroff; a registered driver's failure
-/// must not fall through to firmware that may not support SYSTEM_OFF.
-pub(crate) fn request_system_power_off() -> Option<Result<core::convert::Infallible, &'static str>>
-{
-    SYSTEM_POWER_OFF.get().map(|handler| handler.power_off())
-}
-
 /// Power-domain operations exposed by platform PM controllers.
 pub trait PowerDomain: Send + Sync {
     /// Enable the power domain.
