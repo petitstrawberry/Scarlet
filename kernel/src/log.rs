@@ -57,6 +57,14 @@ pub fn register_emergency_putc(putc: EmergencyPutc) {
     let _ = EMERGENCY_PUTC.compare_exchange(0, addr, Ordering::Release, Ordering::Relaxed);
 }
 
+/// Replace the fallback emitter when the boot-selected console becomes ready.
+/// Only console selection may override an earlier registration; unrelated
+/// device probes continue using `register_emergency_putc`. Both old and new
+/// callbacks must remain valid for the entire kernel lifetime.
+pub(crate) fn select_emergency_putc(putc: EmergencyPutc) {
+    EMERGENCY_PUTC.store(putc as usize, Ordering::Release);
+}
+
 /// Write a single byte through the registered emergency emitter.
 ///
 /// Before UART discovery, RISC-V can still use the firmware's byte console.

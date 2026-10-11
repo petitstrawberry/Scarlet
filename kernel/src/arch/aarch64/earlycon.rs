@@ -29,7 +29,7 @@ static PENDING_QCOM_GENI_PADDR: AtomicUsize = AtomicUsize::new(0);
 fn publish_uart(kind: EarlyUartKind, vaddr: usize) {
     EARLY_UART_VADDR.store(vaddr, Ordering::Relaxed);
     EARLY_UART_KIND.store(kind as usize, Ordering::Release);
-    crate::log::register_emergency_putc(emergency_uart_putc);
+    crate::log::select_emergency_putc(emergency_uart_putc);
 }
 
 /// Return whether the boot contract selected an early UART.
