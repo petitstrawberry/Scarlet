@@ -891,7 +891,14 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
             // process, so wait on the caller's key rather than one particular
             // child's current owner.
             let parent_waker = get_parent_waitpid_waker(task.get_id());
-            parent_waker.wait_owned(task.get_id(), trapframe);
+            if parent_waker.wait_result_owned(task.get_id(), trapframe)
+                == crate::sync::waker::WaitResult::Interrupted
+            {
+                // Return through the ABI's event-delivery hook. Re-waiting
+                // with a pending signal would spin in the kernel forever.
+                trapframe.increment_pc_next(&task);
+                return usize::MAX;
+            }
             // Continue the loop to re-check after waking up
             continue;
         }
@@ -969,7 +976,12 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
 
                         // Block until child exits
                         let child_waker = get_waitpid_waker(target_global);
-                        child_waker.wait_owned(task.get_id(), trapframe);
+                        if child_waker.wait_result_owned(task.get_id(), trapframe)
+                            == crate::sync::waker::WaitResult::Interrupted
+                        {
+                            trapframe.increment_pc_next(&task);
+                            return usize::MAX;
+                        }
                         assert_eq!(mytask().unwrap().get_id(), task.get_id());
                         // Continue the loop to re-check after waking up
                         continue;
