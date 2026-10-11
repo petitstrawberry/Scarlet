@@ -178,7 +178,7 @@ name = "sas"
 path = "src/sas/main.rs"
 
 [dependencies]
-scarlet-ui-core = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "4a140ae546086b497f0d0fa9575240e1791dde6a", default-features = false, features = ["legacy-scarlet-std"] }
+scarlet-ui-core = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "4c320e7cb7bfa0bcda96bfeb02b48b6992eaa67c", default-features = false, features = ["legacy-scarlet-std"] }
 scarlet-abi = { path = "../lib/scarlet-abi" }
 scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }
@@ -186,9 +186,9 @@ framebuffer = { path = "../lib/framebuffer" }
 sws-protocol = { path = "../lib/sws-protocol" }
 sws-client = { path = "../lib/sws-client" }
 scarlet-os = { path = "../lib/scarlet-os" }
-scarlet-ui = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "4a140ae546086b497f0d0fa9575240e1791dde6a", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
+scarlet-ui = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "4c320e7cb7bfa0bcda96bfeb02b48b6992eaa67c", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
 sgfx = { optional = true, git = "https://github.com/petitstrawberry/sgfx", rev = "1a27c83c11e543ea0675366ce30c5bf5ca3e857c", default-features = false, features = ["legacy-scarlet-std", "backend-dynamic"] }
-scarlet-ui-macros = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "4a140ae546086b497f0d0fa9575240e1791dde6a", package = "scarlet-ui-macros" }
+scarlet-ui-macros = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "4c320e7cb7bfa0bcda96bfeb02b48b6992eaa67c", package = "scarlet-ui-macros" }
 scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
 scarlet-sys = { path = "../lib/scarlet-sys" }
 sunset = { path = "../lib/sunset", default-features = false, features = ["larger", "mlkem", "openssh-key", "rsa"] }
