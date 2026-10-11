@@ -865,7 +865,7 @@ pub fn set_next_mode(mode: Mode) {
 }
 
 pub fn shutdown() -> ! {
-    sbi_system_reset(0, 0);
+    crate::system_power::transition(crate::system_power::Action::PowerOff)
 }
 
 pub fn shutdown_with_code(exit_code: u32) -> ! {
@@ -874,7 +874,24 @@ pub fn shutdown_with_code(exit_code: u32) -> ! {
 }
 
 pub fn reboot() -> ! {
-    sbi_system_reset(1, 0);
+    crate::system_power::transition(crate::system_power::Action::Restart)
+}
+
+/// Architecture default used only when no board controller is installed.
+pub(crate) fn firmware_system_power(
+    action: crate::system_power::Action,
+) -> crate::system_power::PowerResult {
+    use instruction::sbi::{Extension, sbi_call};
+    let reset_type = match action {
+        crate::system_power::Action::PowerOff => 0,
+        crate::system_power::Action::Restart => 1,
+    };
+    let result = sbi_call(Extension::Srst, 0, reset_type, 0);
+    crate::println!(
+        "[riscv] SBI system power request unexpectedly returned: {:?}",
+        result
+    );
+    Err("SBI system power request returned")
 }
 
 const _: () = {

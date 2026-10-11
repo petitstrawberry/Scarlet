@@ -13,6 +13,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = {
     "psci": "kernel/src/arch/aarch64/psci.rs",
+    "system_power": "kernel/src/system_power.rs",
     "power_request": "user/std-bin/src/power_request.rs",
     "stemd_power": "user/std-bin/src/stemd/power.rs",
 }
@@ -28,7 +29,17 @@ edition = "2024"
 fdt = "=0.1.5"
 [workspace]
 ''')
-    (project / "src/lib.rs").write_text("\n".join(
+    (project / "src/lib.rs").write_text('''
+extern crate alloc;
+pub use std::println;
+// Only platform plumbing is stubbed; policy tests import production dispatch.
+mod sync { pub type Once<T> = std::sync::OnceLock<T>; }
+mod arch {
+    pub fn firmware_system_power(_: crate::system_power::Action)
+        -> crate::system_power::PowerResult { panic!("host cannot call firmware") }
+    pub mod instruction { pub fn idle() -> ! { panic!("host cannot park CPU") } }
+}
+''' + "\n".join(
         f"#[path = {json.dumps(str(ROOT / relative))}]\nmod {name};"
         for name, relative in MODULES.items()) + "\n")
     subprocess.run(["cargo", "test", "--manifest-path", str(project / "Cargo.toml")],

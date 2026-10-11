@@ -311,6 +311,7 @@ pub mod sched;
 pub mod sync;
 pub mod syscall;
 pub mod system;
+pub mod system_power;
 pub mod task;
 pub mod time;
 pub mod timer;
