@@ -219,8 +219,7 @@ impl ArtworkCache {
         let dedicated_background = cover.is_some();
         let cover = cover.or_else(|| icon.as_ref().map(icon_cover));
         let blur = match blur {
-            BackgroundBlur::Auto if dedicated_background => BackgroundBlur::Label,
-            BackgroundBlur::Auto => BackgroundBlur::Full,
+            BackgroundBlur::Auto => BackgroundBlur::Label,
             value => value,
         };
         let blurred = cover
@@ -384,6 +383,11 @@ pub fn reflected_strip(image: &BitmapImage, rows: u32) -> BitmapImage {
         pixels.extend_from_slice(&image.pixels()[start..start + width]);
     }
     BitmapImage::from_bgra(pixels, image.width(), rows)
+}
+
+/// Keep the cover sharp while reflecting its blurred lower edge behind the name.
+pub fn blurred_reflected_strip(image: &BitmapImage, rows: u32) -> BitmapImage {
+    reflected_strip(&blur_image(image), rows)
 }
 
 fn tint_image(image: &BitmapImage, amount: f32) -> BitmapImage {
