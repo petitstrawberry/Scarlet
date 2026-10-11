@@ -140,6 +140,18 @@ impl InputEnvironment {
         self.capability_flags & sws_protocol::input_environment_capability_flags::KEYBOARD != 0
     }
 
+    /// Return whether an external keyboard is connected.
+    pub const fn has_external_keyboard(self) -> bool {
+        self.capability_flags & sws_protocol::input_environment_capability_flags::EXTERNAL_KEYBOARD != 0
+    }
+
+    /// Automatic input panels require tablet posture and no external keyboard.
+    pub const fn should_auto_show_input_panel(self) -> bool {
+        matches!(self.tablet_mode(), Some(true))
+            && self.has_direct_touch()
+            && !self.has_external_keyboard()
+    }
+
     /// Return whether a pen input device is present.
     ///
     /// # Returns
@@ -453,6 +465,27 @@ pub mod key_code {
 #[cfg(test)]
 mod tests {
     use super::InputEnvironment;
+
+    #[test]
+    fn input_panel_tracks_posture_and_external_keyboard_hotplug() {
+        use sws_protocol::{input_environment_capability_flags as caps,
+            input_environment_known_flags as known, input_environment_state_flags as state};
+        let mut environment = InputEnvironment {
+            generation: 1,
+            known_flags: known::TABLET_MODE,
+            state_flags: 0,
+            capability_flags: caps::DIRECT_TOUCH | caps::KEYBOARD,
+        };
+        assert!(!environment.should_auto_show_input_panel()); // touch laptop
+        environment.state_flags = state::TABLET_MODE;
+        assert!(environment.should_auto_show_input_panel()); // folded internal keyboard
+        environment.capability_flags |= caps::EXTERNAL_KEYBOARD;
+        assert!(!environment.should_auto_show_input_panel());
+        environment.capability_flags &= !caps::EXTERNAL_KEYBOARD;
+        assert!(environment.should_auto_show_input_panel()); // external keyboard detached
+        environment.known_flags = 0;
+        assert!(!environment.should_auto_show_input_panel()); // unknown posture
+    }
 
     #[test]
     fn input_environment_helpers_distinguish_unknown_state() {
