@@ -393,6 +393,8 @@ fn uart_probe(device_info: &PlatformDeviceInfo) -> Result<(), &'static str> {
     // Publish the UART base address for the emergency console and register it.
     EMERGENCY_UART_BASE.store(base_addr, AtomicOrdering::Release);
     crate::log::register_emergency_putc(emergency_putc);
+    #[cfg(target_arch = "aarch64")]
+    crate::arch::earlycon::register_runtime_ns16550(paddr, base_addr);
 
     Ok(())
 }

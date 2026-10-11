@@ -891,7 +891,14 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
             // process, so wait on the caller's key rather than one particular
             // child's current owner.
             let parent_waker = get_parent_waitpid_waker(task.get_id());
-            parent_waker.wait_owned(task.get_id(), trapframe);
+            if parent_waker.wait_result_owned(task.get_id(), trapframe)
+                == crate::sync::waker::WaitResult::Interrupted
+            {
+                // Return through the ABI's event-delivery hook. Re-waiting
+                // with a pending signal would spin in the kernel forever.
+                trapframe.increment_pc_next(&task);
+                return usize::MAX;
+            }
             // Continue the loop to re-check after waking up
             continue;
         }
@@ -969,7 +976,12 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
 
                         // Block until child exits
                         let child_waker = get_waitpid_waker(target_global);
-                        child_waker.wait_owned(task.get_id(), trapframe);
+                        if child_waker.wait_result_owned(task.get_id(), trapframe)
+                            == crate::sync::waker::WaitResult::Interrupted
+                        {
+                            trapframe.increment_pc_next(&task);
+                            return usize::MAX;
+                        }
                         assert_eq!(mytask().unwrap().get_id(), task.get_id());
                         // Continue the loop to re-check after waking up
                         continue;
@@ -1066,11 +1078,24 @@ pub fn sys_kill(trapframe: &mut Trapframe) -> usize {
         return usize::MAX;
     };
 
+    #[cfg(feature = "sync-debug")]
+    if caller.get_thread_group_id() == 1 {
+        crate::emergency_println!(
+            "[power-trace] init kill pid={} signal={} enter", local_pid, signal
+        );
+    }
     let event = Event::direct_process_control(event_target, control, EventPriority::Critical, true);
-    match EventManager::get_manager().send_event(event) {
+    let result = match EventManager::get_manager().send_event(event) {
         Ok(()) => 0,
         Err(_) => usize::MAX,
+    };
+    #[cfg(feature = "sync-debug")]
+    if caller.get_thread_group_id() == 1 {
+        crate::emergency_println!(
+            "[power-trace] init kill pid={} signal={} result={}", local_pid, signal, result
+        );
     }
+    result
 }
 
 /// Create a new session for the current task.
@@ -1618,11 +1643,15 @@ pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
     // Increment PC before sleeping to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
-    // Call the blocking sleep method - this will return when sleep completes
-    task.sleep(trapframe, nanosecs);
-
-    // Set return value to 0 for successful sleep
-    0
+    if task.sleep_interruptible_with_precision(
+        trapframe,
+        nanosecs,
+        crate::timer::TimerPrecision::Normal,
+    ) {
+        0
+    } else {
+        usize::MAX
+    }
 }
 
 /// Read the kernel monotonic clock.
@@ -1983,7 +2012,16 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
 pub fn sys_get_task_info_count(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(&task);
-    get_all_task_ids().len()
+    #[cfg(feature = "sync-debug")]
+    if task.get_thread_group_id() == 1 {
+        crate::emergency_println!("[power-trace] init task-count enter");
+    }
+    let count = get_all_task_ids().len();
+    #[cfg(feature = "sync-debug")]
+    if task.get_thread_group_id() == 1 {
+        crate::emergency_println!("[power-trace] init task-count result={}", count);
+    }
+    count
 }
 
 /// Populate a user-supplied buffer with [`crate::task::TaskInfo`] snapshots.
@@ -2008,10 +2046,22 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
     let buf_ptr = trapframe.get_arg(0);
     let capacity = trapframe.get_arg(1);
     let caller_namespace = task.get_namespace();
+    #[cfg(feature = "sync-debug")]
+    if task.get_thread_group_id() == 1 {
+        crate::emergency_println!("[power-trace] init task-list enter");
+    }
 
     let ids = get_all_task_ids();
     let count = core::cmp::min(capacity, ids.len());
     let now_ns = crate::time::current_time_ns();
+    #[cfg(feature = "sync-debug")]
+    let trace_active = {
+        static LAST_TRACE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        let previous = LAST_TRACE.load(Ordering::Relaxed);
+        task.get_thread_group_id() == 1
+            && now_ns.saturating_sub(previous) >= 500_000_000
+            && LAST_TRACE.compare_exchange(previous, now_ns, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    };
     let mut written = 0;
 
     for task_id in ids.iter().take(count) {
@@ -2076,6 +2126,19 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
             sched_deadline: target.sched_deadline(),
         };
 
+        #[cfg(feature = "sync-debug")]
+        if trace_active && task_type_u8 == 1 && tgid != 1 && !matches!(state_u8, 5 | 6) {
+            let execution = target.execution_debug_snapshot();
+            let length = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+            crate::emergency_println!(
+                "[power-trace] live now={} pid={} tgid={} state={} cpu={} syscall={} active={} pc={:#x} pending={} name={}",
+                now_ns, pid, tgid, state_u8, cpu_id,
+                execution.syscall_number, execution.syscall_active, execution.observed_pc,
+                target.has_pending_process_control(),
+                core::str::from_utf8(&name[..length]).unwrap_or("?")
+            );
+        }
+
         let info_bytes = unsafe {
             core::slice::from_raw_parts(
                 &info as *const TaskInfo as *const u8,
@@ -2089,6 +2152,10 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
         }
     }
 
+    #[cfg(feature = "sync-debug")]
+    if task.get_thread_group_id() == 1 {
+        crate::emergency_println!("[power-trace] init task-list result={}", written);
+    }
     written
 }
 
