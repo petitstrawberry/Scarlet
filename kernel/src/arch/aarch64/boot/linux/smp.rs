@@ -18,64 +18,7 @@ const MPIDR_AFFINITY_MASK: u64 = 0x0000_00ff_00ff_ffff;
 const PSCI_VERSION: u64 = 0x8400_0000;
 const PSCI_CPU_ON_64: u64 = 0xc400_0003;
 
-#[derive(Clone, Copy, Debug)]
-enum Conduit {
-    Smc,
-    Hvc,
-}
-
-impl Conduit {
-    fn from_fdt(fdt: &fdt::Fdt<'_>) -> Option<Self> {
-        let node = fdt.all_nodes().find(|node| {
-            enabled(node)
-                && node.compatible().is_some_and(|compatible| {
-                    compatible
-                        .all()
-                        .any(|value| matches!(value, "arm,psci-0.2" | "arm,psci-1.0"))
-                })
-        })?;
-        match node.property("method")?.as_str()? {
-            "smc" => Some(Self::Smc),
-            "hvc" => Some(Self::Hvc),
-            _ => None,
-        }
-    }
-
-    fn invoke(self, function: u64, arg0: u64, arg1: u64, arg2: u64) -> i64 {
-        let mut result = function;
-        // SAFETY: The enabled PSCI firmware node selected the conduit. Use
-        // the SMCCC register ABI, including caller-clobbered registers and
-        // a memory barrier in the compiler model (firmware starts a CPU).
-        unsafe {
-            match self {
-                Self::Smc => asm!(
-                    "smc #0",
-                    inout("x0") result,
-                    inout("x1") arg0 => _,
-                    inout("x2") arg1 => _,
-                    inout("x3") arg2 => _,
-                    in("x4") 0u64, in("x5") 0u64,
-                    in("x6") 0u64, in("x7") 0u64,
-                    clobber_abi("C"),
-                    options(nostack),
-                ),
-                Self::Hvc => asm!(
-                    "hvc #0",
-                    inout("x0") result,
-                    inout("x1") arg0 => _,
-                    inout("x2") arg1 => _,
-                    inout("x3") arg2 => _,
-                    in("x4") 0u64, in("x5") 0u64,
-                    in("x6") 0u64, in("x7") 0u64,
-                    clobber_abi("C"),
-                    options(nostack),
-                ),
-            }
-        }
-        // Error codes are signed 32-bit values, including for SMC64 calls.
-        result as i32 as i64
-    }
-}
+use crate::arch::aarch64::psci::Conduit;
 
 struct Configuration {
     conduit: Option<Conduit>,

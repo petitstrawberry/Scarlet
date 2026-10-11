@@ -31,6 +31,7 @@ pub(crate) mod iommu;
 pub mod kernel;
 pub mod lsm;
 pub mod mmio;
+mod psci;
 pub mod registers;
 pub mod switch;
 pub mod timer;
@@ -927,38 +928,18 @@ pub fn sync_icache_for_execution(start_vaddr: usize, len: usize) {
     }
 }
 
+/// Enter the platform's registered PMIC path, or firmware on platforms that
+/// implement PSCI SYSTEM_OFF. A registered handler owns poweroff; if it fails,
+/// do not fall through into firmware which may not implement this operation.
 pub fn shutdown() -> ! {
-    // Prefer PSCI to power off the machine. QEMU virt advertises PSCI and will
-    // terminate the emulator on SYSTEM_OFF.
-    const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
-
-    #[inline(always)]
-    unsafe fn psci_hvc(fid: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
-        let ret: u64;
-        unsafe {
-            asm!(
-                "hvc #0",
-                inout("x0") fid => ret,
-                in("x1") arg0,
-                in("x2") arg1,
-                in("x3") arg2,
-                options(nostack)
-            );
+    if let Some(result) = crate::device::power::request_system_power_off() {
+        match result {
+            Ok(never) => match never {},
+            Err(error) => println!("[aarch64] Platform poweroff failed: {}", error),
         }
-        ret
+        park_after_power_failure();
     }
-
-    println!("[aarch64] Shutdown requested (PSCI SYSTEM_OFF)");
-    unsafe {
-        let _ = psci_hvc(PSCI_SYSTEM_OFF, 0, 0, 0);
-    }
-
-    println!("[aarch64] Shutdown requested - entering infinite loop");
-    loop {
-        unsafe {
-            asm!("wfi");
-        }
-    }
+    firmware_system_power(psci::SYSTEM_OFF)
 }
 
 pub fn shutdown_with_code(exit_code: u32) -> ! {
@@ -967,34 +948,32 @@ pub fn shutdown_with_code(exit_code: u32) -> ! {
 }
 
 pub fn reboot() -> ! {
-    const PSCI_SYSTEM_RESET: u64 = 0x8400_0009;
+    firmware_system_power(psci::SYSTEM_RESET)
+}
 
-    #[inline(always)]
-    unsafe fn psci_hvc(fid: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
-        let ret: u64;
-        unsafe {
-            asm!(
-                "hvc #0",
-                inout("x0") fid => ret,
-                in("x1") arg0,
-                in("x2") arg1,
-                in("x3") arg2,
-                options(nostack)
-            );
-        }
-        ret
+fn firmware_system_power(function: u64) -> ! {
+    let conduit = crate::device::fdt::FdtManager::get_manager()
+        .get_fdt()
+        .and_then(psci::Conduit::from_fdt);
+    if let Some(conduit) = conduit {
+        println!(
+            "[aarch64] PSCI {:?} system request {:#x}",
+            conduit, function
+        );
+        let error = conduit.invoke(function, 0, 0, 0);
+        println!(
+            "[aarch64] PSCI system request unexpectedly returned: {}",
+            error
+        );
+    } else {
+        println!("[aarch64] No supported PSCI conduit for system power control");
     }
+    park_after_power_failure()
+}
 
-    println!("[aarch64] Reboot requested (PSCI SYSTEM_RESET)");
-    unsafe {
-        let _ = psci_hvc(PSCI_SYSTEM_RESET, 0, 0, 0);
-    }
-
-    println!("[aarch64] Reboot requested - entering infinite loop");
+fn park_after_power_failure() -> ! {
     loop {
-        unsafe {
-            asm!("wfi");
-        }
+        unsafe { asm!("wfi", options(nomem, nostack)) };
     }
 }
 
