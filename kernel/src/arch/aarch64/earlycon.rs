@@ -6,6 +6,7 @@ enum EarlyUartKind {
     None = 0,
     Pl011 = 1,
     QcomGeni = 2,
+    Ns16550 = 3,
 }
 
 impl EarlyUartKind {
@@ -13,6 +14,7 @@ impl EarlyUartKind {
         match value {
             1 => Self::Pl011,
             2 => Self::QcomGeni,
+            3 => Self::Ns16550,
             _ => Self::None,
         }
     }
@@ -61,6 +63,20 @@ fn try_uart_putc(c: u8) -> bool {
                 ((uart + UART_DR) as *mut u32).write_volatile(c as u32);
             }
         }
+        EarlyUartKind::Ns16550 => {
+            // Only byte-wide, unshifted register layouts are registered below.
+            // Bound emergency output even if the device stops accepting bytes.
+            for _ in 0..256 {
+                unsafe {
+                    if ((uart + 5) as *const u8).read_volatile() & 0x20 != 0 {
+                        (uart as *mut u8).write_volatile(c);
+                        return true;
+                    }
+                }
+                core::hint::spin_loop();
+            }
+            return false;
+        }
         EarlyUartKind::QcomGeni => {
             return crate::drivers::uart::qcom_geni::early_write_byte(uart, c);
         }
@@ -78,7 +94,7 @@ fn emergency_uart_putc(c: u8) {
 
     match kind {
         EarlyUartKind::None => {}
-        EarlyUartKind::Pl011 => {
+        EarlyUartKind::Pl011 | EarlyUartKind::Ns16550 => {
             let _ = try_uart_putc(c);
         }
         EarlyUartKind::QcomGeni => {
@@ -184,6 +200,30 @@ pub(crate) fn register_runtime_qcom_geni(vaddr: usize) {
     publish_uart(EarlyUartKind::QcomGeni, vaddr);
 }
 
+/// Activate a probed 16550 only when the boot contract selected that device.
+/// The runtime mapping remains valid for normal and emergency console output.
+pub(crate) fn register_runtime_ns16550(paddr: u64, vaddr: usize) {
+    let selected = crate::device::fdt::FdtManager::get_manager()
+        .get_fdt()
+        .and_then(|fdt| fdt.chosen().stdout())
+        .is_some_and(|node| {
+            let supported = node
+                .compatible()
+                .is_some_and(|c| c.all().any(|s| matches!(s, "ns16550a" | "ns16550")));
+            let shift = node.property("reg-shift").map_or(Some(0), |p| p.as_usize());
+            let width = node.property("reg-io-width").map_or(Some(1), |p| p.as_usize());
+            let address = node
+                .reg()
+                .and_then(|mut r| r.next())
+                .map(|r| r.starting_address as u64);
+            supported && shift == Some(0) && width == Some(1) && address == Some(paddr)
+        });
+    if selected {
+        publish_uart(EarlyUartKind::Ns16550, vaddr);
+        BOOT_SELECTED_UART.store(true, Ordering::Release);
+    }
+}
+
 /// Initialize the framebuffer fallback when no early UART is active.
 pub fn early_console_init() {
     if EarlyUartKind::from_raw(EARLY_UART_KIND.load(Ordering::Acquire)) != EarlyUartKind::None {
@@ -227,5 +267,6 @@ mod tests {
         assert_eq!(EarlyUartKind::from_raw(usize::MAX), EarlyUartKind::None);
         assert_eq!(EarlyUartKind::from_raw(1), EarlyUartKind::Pl011);
         assert_eq!(EarlyUartKind::from_raw(2), EarlyUartKind::QcomGeni);
+        assert_eq!(EarlyUartKind::from_raw(3), EarlyUartKind::Ns16550);
     }
 }

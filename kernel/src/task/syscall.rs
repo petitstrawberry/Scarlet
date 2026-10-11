@@ -1066,11 +1066,24 @@ pub fn sys_kill(trapframe: &mut Trapframe) -> usize {
         return usize::MAX;
     };
 
+    #[cfg(feature = "sync-debug")]
+    if caller.get_thread_group_id() == 1 {
+        crate::emergency_println!(
+            "[power-trace] init kill pid={} signal={} enter", local_pid, signal
+        );
+    }
     let event = Event::direct_process_control(event_target, control, EventPriority::Critical, true);
-    match EventManager::get_manager().send_event(event) {
+    let result = match EventManager::get_manager().send_event(event) {
         Ok(()) => 0,
         Err(_) => usize::MAX,
+    };
+    #[cfg(feature = "sync-debug")]
+    if caller.get_thread_group_id() == 1 {
+        crate::emergency_println!(
+            "[power-trace] init kill pid={} signal={} result={}", local_pid, signal, result
+        );
     }
+    result
 }
 
 /// Create a new session for the current task.
@@ -1983,7 +1996,16 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
 pub fn sys_get_task_info_count(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     trapframe.increment_pc_next(&task);
-    get_all_task_ids().len()
+    #[cfg(feature = "sync-debug")]
+    if task.get_thread_group_id() == 1 {
+        crate::emergency_println!("[power-trace] init task-count enter");
+    }
+    let count = get_all_task_ids().len();
+    #[cfg(feature = "sync-debug")]
+    if task.get_thread_group_id() == 1 {
+        crate::emergency_println!("[power-trace] init task-count result={}", count);
+    }
+    count
 }
 
 /// Populate a user-supplied buffer with [`crate::task::TaskInfo`] snapshots.
@@ -2008,6 +2030,10 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
     let buf_ptr = trapframe.get_arg(0);
     let capacity = trapframe.get_arg(1);
     let caller_namespace = task.get_namespace();
+    #[cfg(feature = "sync-debug")]
+    if task.get_thread_group_id() == 1 {
+        crate::emergency_println!("[power-trace] init task-list enter");
+    }
 
     let ids = get_all_task_ids();
     let count = core::cmp::min(capacity, ids.len());
@@ -2089,6 +2115,10 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
         }
     }
 
+    #[cfg(feature = "sync-debug")]
+    if task.get_thread_group_id() == 1 {
+        crate::emergency_println!("[power-trace] init task-list result={}", written);
+    }
     written
 }
 
