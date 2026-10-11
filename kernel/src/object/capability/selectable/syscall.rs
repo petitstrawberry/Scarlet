@@ -120,7 +120,11 @@ pub fn sys_poll(trapframe: &mut Trapframe) -> usize {
             } else {
                 options.timeout_ns as u64
             };
-            task.sleep_with_precision(trapframe, duration_ns, crate::timer::TimerPrecision::Exact);
+            if !task.sleep_interruptible_with_precision(
+                trapframe, duration_ns, crate::timer::TimerPrecision::Exact,
+            ) {
+                return usize::MAX;
+            }
         }
         return 0;
     }

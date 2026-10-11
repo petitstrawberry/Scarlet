@@ -3522,8 +3522,30 @@ impl Task {
         duration_ns: u64,
         precision: crate::timer::TimerPrecision,
     ) {
+        let _ = self.sleep_with_precision_inner(trapframe, duration_ns, precision, false);
+    }
+
+    /// Sleep to the monotonic deadline, returning false on process control.
+    /// Syscall callers must then return to ABI event delivery. Device delays
+    /// use sleep_with_precision instead and retain their minimum duration.
+    pub fn sleep_interruptible_with_precision(
+        &self,
+        trapframe: &mut Trapframe,
+        duration_ns: u64,
+        precision: crate::timer::TimerPrecision,
+    ) -> bool {
+        self.sleep_with_precision_inner(trapframe, duration_ns, precision, true)
+    }
+
+    fn sleep_with_precision_inner(
+        &self,
+        trapframe: &mut Trapframe,
+        duration_ns: u64,
+        precision: crate::timer::TimerPrecision,
+        interruptible: bool,
+    ) -> bool {
         if duration_ns == 0 {
-            return;
+            return true;
         }
 
         struct SleepWakerHandler {
@@ -3548,14 +3570,18 @@ impl Task {
         let wake_deadline_ns = get_time_ns().saturating_add(duration_ns);
         loop {
             if get_time_ns() >= wake_deadline_ns {
-                return;
+                return true;
             }
 
             // A sleep notification belongs to exactly one timer instance.
             // Reusing a task-wide Waker allows a late callback or interrupted
             // sleep to leave a pending notification that makes a later,
             // unrelated sleep return immediately.
-            let sleep_waker = Arc::new(Waker::new_interruptible("task_sleep_waker"));
+            let sleep_waker = Arc::new(if interruptible {
+                Waker::new_interruptible("task_sleep_waker")
+            } else {
+                Waker::new_uninterruptible("task_sleep_waker")
+            });
             let handler = Arc::new(SleepWakerHandler {
                 task_id: self.id,
                 timer_handle: IrqSpinLock::new(None),
@@ -3577,7 +3603,7 @@ impl Task {
             self.register_software_timer(timer_handle, handler_ref.clone());
             drop(handler_ref);
             drop(handler);
-            sleep_waker.wait_owned(self.get_id(), trapframe);
+            let outcome = sleep_waker.wait_result_owned(self.get_id(), trapframe);
             #[cfg(feature = "sync-debug")]
             crate::breadcrumb::drop(
                 crate::breadcrumb::SLEEP_RESUME,
@@ -3586,10 +3612,11 @@ impl Task {
             );
             self.finish_software_timer(timer_handle);
 
-            // Interruptible task events and wake-before-schedule races may
-            // resume this task without the sleep timer having expired. Native
-            // Sleep has no EINTR/remaining-time result, so it must not report
-            // success before the requested monotonic deadline.
+            if interruptible && outcome == crate::sync::waker::WaitResult::Interrupted {
+                return false;
+            }
+            // A stale notification must not report ordinary completion before
+            // the deadline. Only explicit process control may end it early.
         }
     }
 

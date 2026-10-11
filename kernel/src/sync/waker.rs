@@ -958,7 +958,7 @@ impl Waker {
     /// # Returns
     ///
     /// The readiness/event wake, timeout, or interruption which ended the wait
-    /// after the minimum interval.
+    /// after the minimum interval, or process-control interruption during it.
     pub fn wait_with_condition(
         &self,
         task_id: usize,
@@ -976,7 +976,11 @@ impl Waker {
             let Some(task) = get_task_by_id(task_id) else {
                 return WaitResult::Interrupted;
             };
-            task.sleep_with_precision(trapframe, minimum_ns, TimerPrecision::Normal);
+            if !task.sleep_interruptible_with_precision(
+                trapframe, minimum_ns, TimerPrecision::Normal,
+            ) {
+                return WaitResult::Interrupted;
+            }
         }
         if ready() {
             return WaitResult::Woken;
@@ -1040,7 +1044,11 @@ impl Waker {
             // minimum phase. Readiness notifications remain in its coalesced
             // pending latch, while this dedicated sleep cannot be driven into
             // a wake/re-wait loop by IPC traffic.
-            task.sleep_with_precision(trapframe, minimum_duration_ns, TimerPrecision::Normal);
+            if !task.sleep_interruptible_with_precision(
+                trapframe, minimum_duration_ns, TimerPrecision::Normal,
+            ) {
+                return true;
+            }
             drop(task);
         }
 

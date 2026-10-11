@@ -1643,22 +1643,14 @@ pub fn sys_sleep(trapframe: &mut Trapframe) -> usize {
     // Increment PC before sleeping to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
-    // Kernel/device sleeps retain their minimum-duration contract. A native
-    // syscall must instead return to ABI event delivery when interrupted;
-    // retrying with TERM pending can occupy this CPU for the entire duration.
-    let deadline = crate::timer::get_time_ns().saturating_add(nanosecs);
-    loop {
-        let remaining = deadline.saturating_sub(crate::timer::get_time_ns());
-        if remaining == 0 {
-            return 0;
-        }
-        // This private queue has no event producer. A non-timeout wake is an
-        // interruption, and the owned wait releases its timer before returning.
-        if alloc::sync::Arc::new(crate::sync::Waker::new_interruptible("native_sleep"))
-            .wait_with_timeout_owned(task.get_id(), trapframe, remaining)
-        {
-            return usize::MAX;
-        }
+    if task.sleep_interruptible_with_precision(
+        trapframe,
+        nanosecs,
+        crate::timer::TimerPrecision::Normal,
+    ) {
+        0
+    } else {
+        usize::MAX
     }
 }
 
