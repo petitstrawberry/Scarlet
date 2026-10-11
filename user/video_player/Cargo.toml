@@ -25,7 +25,7 @@ vp9-stateless-hw = ["scarlet-video-client/vp9-stateless-hw"]
 [dependencies]
 scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }
 scarlet-video-client = { path = "../lib/scarlet-video-client", default-features = false, features = ["legacy-scarlet-std"] }
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "a087a445b8f4e2bd291c2533cb6e52ea6a0c2102", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "4a140ae546086b497f0d0fa9575240e1791dde6a", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
 sas-client = { path = "../lib/sas-client", default-features = false, features = ["legacy-scarlet-std"] }
 sbus = { path = "../lib/sbus" }
 sbus-client = { path = "../lib/sbus-client", default-features = false, features = ["legacy-scarlet-std"] }
@@ -35,4 +35,4 @@ symphonia-core = { git = "https://github.com/petitstrawberry/Symphonia.git", rev
 symphonia-codec-aac = { git = "https://github.com/petitstrawberry/Symphonia.git", rev = "71f92f0bc0fdd9d4f2a77129a543ee6c99611009", default-features = false, optional = true }
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "3a8d90cfc0fae821e49159cb66869199ab69929e", default-features = false, features = ["legacy-scarlet-std", "backend-dynamic"] }
+sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "1a27c83c11e543ea0675366ce30c5bf5ca3e857c", default-features = false, features = ["legacy-scarlet-std", "backend-dynamic"] }
