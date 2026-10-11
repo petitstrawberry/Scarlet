@@ -57,7 +57,10 @@ fn waiter_for_key(key: FutexKey) -> Arc<Waker> {
     futex_waiters()
         .lock()
         .entry(key)
-        .or_insert_with(|| Arc::new(Waker::new_uninterruptible("futex_wait")))
+        // This is a userspace wait, not a kernel mutex critical section.
+        // TERM/KILL must wake it so the syscall can reach event dispatch.
+        // The event-queue handshake in Waker closes signal-before-sleep races.
+        .or_insert_with(|| Arc::new(Waker::new_interruptible("futex_wait")))
         .clone()
 }
 
