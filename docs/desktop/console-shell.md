@@ -159,7 +159,7 @@ All geometry is in logical pixels and is recomputed after output changes.
 
 The UI uses ScarletUI Surface, Button, Text, IconView, Image, stack, and
 ScrollView components. Application covers use optional app artwork, falling
-back to an enlarged and blurred launcher icon behind a crisp foreground icon.
+back to an enlarged launcher icon clipped to the cover frame without blur.
 There is no web view.
 Both shell modes prefer the bundled M PLUS UI font with the terminal font as a
 fallback; an explicit `SCARLET_UI_FONT_PATH` keeps ScarletUI's configured discovery.
@@ -244,7 +244,7 @@ wallpaper settings. The source entries live in
 | `none` | Keep both the picture and its reflected name background sharp |
 | `full` | Blur the picture and its reflected name background |
 | `label` | Keep the picture sharp; blur the reflection behind the separate name row |
-| omitted / `auto` | `label` with a dedicated background; `full` with an enlarged icon |
+| omitted / `auto` | `label` with either a dedicated background or an enlarged icon |
 
 The selected A treatment reflects only the lower edge of the fitted artwork
 downward into the name panel. It does not repeat the image from the top. The
@@ -257,7 +257,8 @@ value uses `auto`.
 Files must be at most 8 MiB, 4096 pixels on either edge, and 4 megapixels total.
 PNG animations are not supported. Decoding and blur happen on the catalog
 worker; icons, thumbnails, and card crops are cached. Symbolic fallback covers
-rasterize their heavily blurred icon at 80×45 before restoring the 320×180 mask;
+rasterize their enlarged, clipped icon directly at 320×180 without blur, then
+blur a separate copy for the reflected name background;
 the final cover and reflected name strip are both cached across selection changes.
 Card descriptions retain their picture and label subtree until the application
 name, icon, color, artwork or width changes. Focus borders and click callbacks
