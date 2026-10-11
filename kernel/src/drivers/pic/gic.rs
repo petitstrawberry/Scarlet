@@ -202,6 +202,15 @@ impl Gic {
         Err(InterruptError::HardwareError)
     }
 
+    /// CTLR bit 0 enables Group 1 through a Non-secure Security Extensions
+    /// view, but Group 0 on a GIC without Security Extensions. GICv2 still
+    /// implements IGROUPR without Security Extensions, so assigning Group 1
+    /// unconditionally leaves interrupts disabled on those controllers.
+    fn enabled_group_bits(&self) -> u32 {
+        let typer = unsafe { mmio::read32(self.dist_reg_addr(GICD_TYPER)) };
+        if typer & (1 << 10) != 0 { u32::MAX } else { 0 }
+    }
+
     /// Take cold ownership of the GIC distributor.
     fn init_distributor(&self) -> InterruptResult<()> {
         let interrupt_count = self.max_interrupts as usize + 1;
@@ -217,7 +226,7 @@ impl Gic {
             for intid in (32..interrupt_count).step_by(32) {
                 mmio::write32(
                     self.dist_reg_addr(GICD_IGROUPR + (intid / 32) * 4),
-                    u32::MAX,
+                    self.enabled_group_bits(),
                 );
                 mmio::write32(
                     self.dist_reg_addr(GICD_ICACTIVER + (intid / 32) * 4),
@@ -242,7 +251,7 @@ impl Gic {
                 );
             }
 
-            // Non-secure view: enable the single Group-1 delivery path.
+            // Enable the selected group through this controller's CTLR view.
             mmio::write32(self.dist_reg_addr(GICD_CTLR), 0x1);
         }
 
@@ -262,7 +271,7 @@ impl Gic {
 
         unsafe {
             mmio::write32(self.cpu_reg_addr(cpu_id, GICC_CTLR), 0);
-            mmio::write32(self.dist_reg_addr(GICD_IGROUPR), u32::MAX);
+            mmio::write32(self.dist_reg_addr(GICD_IGROUPR), self.enabled_group_bits());
             mmio::write32(self.dist_reg_addr(GICD_ICACTIVER), u32::MAX);
             mmio::write32(self.dist_reg_addr(GICD_ICENABLER), u32::MAX);
             for word in 0..8 {
@@ -333,14 +342,15 @@ impl ExternalInterruptController for Gic {
         self.validate_interrupt_id(interrupt_id)?;
         self.validate_cpu_id(cpu_id)?;
 
-        // Configure interrupt as Group 1
+        // Match the group selected by distributor/CPU-interface initialization.
         // GICD_IGROUPR: 1 bit per interrupt, 1=Group 1, 0=Group 0
         let word_offset = interrupt_id / 32;
         let bit_offset = interrupt_id % 32;
         let igroupr_addr = self.dist_reg_addr(GICD_IGROUPR + (word_offset as usize * 4));
         unsafe {
             let current = mmio::read32(igroupr_addr);
-            let new_value = current | (1u32 << bit_offset);
+            let bit = 1u32 << bit_offset;
+            let new_value = (current & !bit) | (self.enabled_group_bits() & bit);
             mmio::write32(igroupr_addr, new_value);
         }
 
