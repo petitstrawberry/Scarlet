@@ -2062,6 +2062,14 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
     let ids = get_all_task_ids();
     let count = core::cmp::min(capacity, ids.len());
     let now_ns = crate::time::current_time_ns();
+    #[cfg(feature = "sync-debug")]
+    let trace_active = {
+        static LAST_TRACE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        let previous = LAST_TRACE.load(Ordering::Relaxed);
+        task.get_thread_group_id() == 1
+            && now_ns.saturating_sub(previous) >= 500_000_000
+            && LAST_TRACE.compare_exchange(previous, now_ns, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    };
     let mut written = 0;
 
     for task_id in ids.iter().take(count) {
@@ -2125,6 +2133,19 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
             sched_vruntime: target.sched_vruntime(),
             sched_deadline: target.sched_deadline(),
         };
+
+        #[cfg(feature = "sync-debug")]
+        if trace_active && task_type_u8 == 1 && tgid != 1 && !matches!(state_u8, 5 | 6) {
+            let execution = target.execution_debug_snapshot();
+            let length = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+            crate::emergency_println!(
+                "[power-trace] live now={} pid={} tgid={} state={} cpu={} syscall={} active={} pc={:#x} pending={} name={}",
+                now_ns, pid, tgid, state_u8, cpu_id,
+                execution.syscall_number, execution.syscall_active, execution.observed_pc,
+                target.has_pending_process_control(),
+                core::str::from_utf8(&name[..length]).unwrap_or("?")
+            );
+        }
 
         let info_bytes = unsafe {
             core::slice::from_raw_parts(
