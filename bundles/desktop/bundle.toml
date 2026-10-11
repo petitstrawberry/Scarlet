@@ -106,7 +106,7 @@ to = "/bin/ui-benchmark"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "0307788d09f7e5a439706d00e05308d430767f39" }
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "62da5fd4fcb7dff3986712aaf704f044ca0ce931" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
@@ -302,7 +302,7 @@ to = "/bin/vellum"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/boxcraft", rev = "6a3c4da84519693774a6c6a3e43eedee9203be76" }
+source = { git = "https://github.com/petitstrawberry/boxcraft", rev = "493c50cab5f01a96b6b16fb5b6d0d1c941e23103" }
 package = "boxcraft"
 bin = "boxcraft"
 to = "/bin/boxcraft"
