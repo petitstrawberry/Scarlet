@@ -13,7 +13,7 @@ use crate::sync::{IrqSpinLock, Mutex};
 pub struct DeviceFrequencyOpp {
     /// Configured frequency of the operating point.
     pub freq_khz: u64,
-    /// Minimum safe rail voltage in microvolts for this policy's implementation.
+    /// Minimum safe rail voltage in microvolts; zero for firmware-managed OPPs.
     pub min_uv: u32,
 }
 
@@ -162,9 +162,37 @@ pub fn register(
     opps: &[DeviceFrequencyOpp],
     driver: Arc<dyn DeviceFrequencyDriver>,
 ) -> Result<(), &'static str> {
+    if opps.iter().any(|opp| opp.min_uv == 0) {
+        return Err("devfreq: invalid OPP voltage");
+    }
+    register_policy(name, opps, driver)
+}
+
+/// Register firmware-owned voltage/frequency pairs without inventing voltages.
+/// The provider must select only validated firmware OPPs and wait for its ACK.
+pub fn register_firmware_managed(
+    name: &'static str,
+    frequencies_khz: &[u64],
+    driver: Arc<dyn DeviceFrequencyDriver>,
+) -> Result<(), &'static str> {
+    let opps: Vec<_> = frequencies_khz
+        .iter()
+        .map(|&freq_khz| DeviceFrequencyOpp {
+            freq_khz,
+            min_uv: 0,
+        })
+        .collect();
+    register_policy(name, &opps, driver)
+}
+
+fn register_policy(
+    name: &'static str,
+    opps: &[DeviceFrequencyOpp],
+    driver: Arc<dyn DeviceFrequencyDriver>,
+) -> Result<(), &'static str> {
     if name.is_empty()
         || opps.is_empty()
-        || opps.iter().any(|opp| opp.freq_khz == 0 || opp.min_uv == 0)
+        || opps.iter().any(|opp| opp.freq_khz == 0)
         || opps
             .windows(2)
             .any(|pair| pair[0].freq_khz >= pair[1].freq_khz)

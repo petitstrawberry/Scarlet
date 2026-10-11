@@ -75,11 +75,11 @@ def audit_client_linkage(config, target):
         ["cargo", "--config", str(config), "tree", "--locked", "--workspace",
          "--manifest-path", str(REPO / ".cargo/Cargo.toml"), "--target", target,
          "--prefix", "none", "--edges", "normal,build"], text=True, cwd=REPO)
-    for backend in ("virgl", "maxwell"):
+    for backend in ("virgl", "maxwell", "adreno"):
         package = f"sgfx-backend-scarlet-{backend}"
         if any(line.startswith(f"{package} v") for line in graph.splitlines()):
             raise RuntimeError(f"native clients must dynamically load {backend}; found {package}")
-    print("Native client dependency audit: no static VirGL or Maxwell implementation")
+    print("Native client dependency audit: no static VirGL, Maxwell, or Adreno implementation")
 
 
 def main():
@@ -88,7 +88,7 @@ def main():
     parser.add_argument("--sgfx-source", type=Path, help="use an existing checkout at the pinned revision")
     parser.add_argument("--install-dir", type=Path, help="also install the library and manifest into this directory")
     parser.add_argument("--check-client-linkage", action="store_true",
-                        help="reject static VirGL and Maxwell in the native 64-bit client graph")
+                        help="reject static VirGL, Maxwell, and Adreno in the native 64-bit client graph")
     args = parser.parse_args()
     project = args.project.resolve()
     arch, target = project_target(project)
