@@ -45,7 +45,10 @@ pub fn waitpid(pid: i32, options: i32) -> (i32, i32) {
     (result as i32, status)
 }
 
-/// Request a platform shutdown.
+/// Request the final platform shutdown from the init thread group (TGID 1).
+///
+/// Applications must request shutdown through stemd. This syscall does not
+/// coordinate process exit or guarantee filesystem synchronization.
 ///
 /// # Arguments
 ///

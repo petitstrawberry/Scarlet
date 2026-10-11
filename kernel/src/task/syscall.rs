@@ -1947,125 +1947,30 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
 
 /// Request final platform poweroff or reboot from the init thread group.
 ///
-/// The current kernel fallback performs these steps:
-/// 1. Retire other tasks without waiting for application-level graceful cleanup
-/// 2. Enumerate mounted filesystems for diagnostics, without syncing their data
-/// 3. Skip unmounting (the shutdown unmount phase is not implemented)
-/// 4. Request platform shutdown via SBI (RISC-V) or PSCI (AArch64)
-///
-/// This is not a data-durability barrier. Userspace must coordinate orderly
-/// shutdown before the final request; logging filesystem names does not flush them.
-///
-/// # Arguments
-/// * `trapframe.get_arg(0)` - Shutdown type: 0 = poweroff, 1 = reboot
-///   (other values currently fall back to poweroff).
-///
-/// # Returns
-/// This function does not return on success (system shuts down)
-/// Returns `SYSCALL_ERROR` if the caller's thread-group ID is not 1.
-#[allow(unreachable_code)]
+/// This is the final hardware request, not a filesystem durability barrier.
+/// Peripheral and reaper workers must remain schedulable until the platform
+/// callback completes (a PMIC may require I2C). Removing live tasks from run
+/// queues neither terminates them nor closes their files, and can strand locks.
+/// Userspace is responsible for coordinating process cleanup before this call.
+/// Returns SYSCALL_ERROR for a non-init caller or an invalid operation.
 pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
-    use crate::arch::shutdown;
-
     let task = mytask().unwrap();
     trapframe.increment_pc_next(&task);
-
-    // Authorization: Only the init thread group id = 1 can shutdown
-    // This allows any thread in the init process (including IPC threads) to shutdown
-    let tgid = task.get_thread_group_id();
-    if tgid != 1 {
-        crate::println!("[SHUTDOWN] Rejected: tgid={}", tgid);
+    if task.get_thread_group_id() != 1 {
+        crate::println!("[SHUTDOWN] Rejected: tgid={}", task.get_thread_group_id());
         return SYSCALL_ERROR;
     }
-
-    let shutdown_type = trapframe.get_arg(0); // 0 = poweroff, 1 = reboot
-
-    crate::println!(
-        "[SHUTDOWN] Initiating graceful shutdown (type={})...",
-        shutdown_type
-    );
-
-    // TODO: In the future, this should be the FINAL step after stemd has:
-    // 1. Sent SIGTERM to all processes
-    // 2. Waited for processes to exit gracefully (with timeout)
-    // 3. Sent SIGKILL to remaining processes
-    // 4. Synced filesystems explicitly
-    // 5. Unmounted filesystems
-    // 6. Called sys_shutdown as the last resort
-    //
-    // Current implementation: Force kill all tasks immediately (simpler fallback)
-
-    // Step 1: Terminate all tasks except the current one.
-    crate::println!("[SHUTDOWN] Step 1: Terminating all tasks...");
-
-    let current_task_id = task.get_id();
-
-    crate::println!("[SHUTDOWN] Retiring all tasks...");
-    for task_id in crate::sched::scheduler::get_task_pool().task_ids_snapshot() {
-        if task_id == current_task_id {
-            continue;
-        }
-        remove_task_from_queues(task_id);
-        let task_pool = crate::sched::scheduler::get_task_pool();
-        let _ = task_pool.remove_task(task_id);
-    }
-
-    crate::println!("[SHUTDOWN] Step 2: Enumerating mounted filesystems (no sync support yet)...");
-
-    // Step 2: Enumerate all filesystems for logging/diagnostics.
-    // NOTE: Actual sync/flush-to-disk semantics are not yet implemented here.
-    //       This step does NOT guarantee that all pending data is durable.
-    // Enumerate filesystems from the global VFS manager first
-    if let Some(vfs) = crate::fs::manager::get_global_vfs_manager_safe() {
-        let mounted_fs = vfs.mounted_filesystems.read();
-        for fs in mounted_fs.iter() {
-            crate::println!("[SHUTDOWN] Global filesystem: {}", fs.name());
-        }
-    }
-
-    // Enumerate task-specific filesystems
-    if let Some(vfs) = task.get_vfs() {
-        let mounted_fs = vfs.mounted_filesystems.read();
-        for fs in mounted_fs.iter() {
-            crate::println!("[SHUTDOWN] Task filesystem: {}", fs.name());
-        }
-    }
-
-    crate::println!(
-        "[SHUTDOWN] Step 3: Filesystem unmount phase (not yet implemented, skipping)..."
-    );
-
-    // NOTE: Actual filesystem unmount logic is not yet implemented.
-    // The shutdown sequence currently enumerates all known filesystems
-    // (global and task-specific) but leaves the mounts in place. This is
-    // not a guarantee of clean filesystems or durable buffered writes;
-    // firmware/hypervisor teardown cannot replace filesystem synchronization.
-    // When shutdown-time unmount support is added, it should be
-    // invoked from here in a dependency-safe order (e.g. leaves first).
-
-    crate::println!("[SHUTDOWN] Step 4: Requesting platform shutdown...");
-
-    // Step 4: Platform shutdown
-    match shutdown_type {
+    match trapframe.get_arg(0) {
         0 => {
-            // Power off
             crate::println!("[SHUTDOWN] Powering off...");
-            shutdown();
+            crate::arch::shutdown()
         }
         1 => {
-            // Reboot
             crate::println!("[SHUTDOWN] Rebooting...");
-            crate::arch::reboot();
+            crate::arch::reboot()
         }
-        _ => {
-            crate::println!("[SHUTDOWN] Invalid shutdown type, defaulting to poweroff");
-            shutdown();
-        }
+        _ => SYSCALL_ERROR,
     }
-
-    // This line should never be reached if shutdown succeeds
-    crate::println!("[SHUTDOWN] ERROR: Shutdown did not complete!");
-    usize::MAX
 }
 
 /// Return the number of tasks currently visible to the caller.

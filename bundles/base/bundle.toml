@@ -102,6 +102,13 @@ to = "/bin/shutdown"
 kind = "cargo"
 source = "../../user/std-bin"
 package = "scarlet-std-bin"
+bin = "reboot"
+to = "/bin/reboot"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+package = "scarlet-std-bin"
 bin = "top"
 to = "/bin/top"
 

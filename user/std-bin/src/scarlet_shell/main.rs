@@ -12,6 +12,8 @@ mod control_center;
 mod home_style;
 mod options;
 mod power;
+#[path = "../power_request.rs"]
+mod power_request;
 mod status;
 mod volume_osd;
 mod volume_policy;
@@ -1508,13 +1510,25 @@ fn apply_control_center_action(
             control_center_open.set(false);
         }
         ControlCenterAction::ConfirmPowerOff => {
-            process::shutdown(process::ShutdownType::PowerOff);
+            request_system_power(power_request::PowerAction::PowerOff);
         }
         ControlCenterAction::ConfirmReboot => {
-            process::shutdown(process::ShutdownType::Reboot);
+            request_system_power(power_request::PowerAction::Reboot);
         }
         ControlCenterAction::ArmPowerOff | ControlCenterAction::ArmReboot => {}
     }
+}
+
+fn request_system_power(action: power_request::PowerAction) {
+    // The shell is not PID 1. Keep the UI responsive while stemd acknowledges
+    // the request; only its init thread group may call the final syscall.
+    let _ = std::thread::Builder::new()
+        .name("shell-power".into())
+        .spawn(move || {
+            if let Err(error) = power_request::request(action) {
+                eprintln!("[ScarletShell] Power request failed: {error}");
+            }
+        });
 }
 
 fn refresh_window_model(

@@ -175,3 +175,29 @@ When run from an interactive shell, stemd forks once and the parent exits immedi
 ## Native app directories
 
 stemd also discovers `/applications/*.app` at startup. `ReloadApplications` reconciles this catalog and `/etc/stemd.d/apps` atomically; removed entries disappear without terminating running applications. See [the native app format](../build-system/applications.md) for validation, duplicate handling and reload APIs.
+
+## System power requests
+
+`shutdown` requests poweroff; `reboot` and `shutdown -r` request a firmware
+restart. Both accept an optional `now`. Scarlet Shell's confirmed power actions
+use the same stemd socket instead of invoking the PID-1-only syscall directly.
+The existing binary command `0x04` remains poweroff; `0x09` is reboot. Text
+`shutdown` and `reboot` are also accepted. An `OK` reply acknowledges acceptance,
+not completed hardware power removal.
+
+stemd serializes power transitions with process creation. It signals all live
+user thread groups except its own with TERM, waits up to two seconds, then uses
+KILL and waits one more second. New descendants are included in subsequent
+snapshots. An unresponsive process or failed snapshot cancels the hardware
+request. Ordinary process exit closes user file handles; this does not implement
+a global filesystem sync/unmount or a storage-device cache durability barrier.
+Kernel I/O and reaper workers remain available throughout the final request.
+
+AArch64 uses the enabled PSCI node's `method` for both CPU startup and system
+restart. Platforms without firmware poweroff can register a `SystemPowerOff`
+PMIC driver; a registered handler takes precedence over PSCI SYSTEM_OFF.
+
+Host regression checks: `python3 tools/test-system-power.py`. These cover DT
+conduit selection, power command parsing, init/kernel task preservation,
+TERM/KILL deadlines and newly created descendants. Platform PMIC tests and
+hardware validation belong to the consuming board project.

@@ -793,14 +793,10 @@ pub enum ShutdownType {
 
 /// Request final platform poweroff or reboot.
 ///
-/// The current kernel fallback:
-/// 1. Retires other tasks without waiting for their graceful cleanup
-/// 2. Enumerates filesystems for diagnostics, without syncing their data
-/// 3. Skips the unimplemented shutdown-time unmount phase
-/// 4. Request platform shutdown
-///
-/// Only the init thread group (TGID 1) is authorized. This is the final operation
-/// after userspace coordinates shutdown, not a guarantee of flushed or durable data.
+/// Only the init thread group (TGID 1) is authorized. Userspace must coordinate
+/// process cleanup before this final hardware request. Peripheral workers remain
+/// schedulable until the platform completes the request. This is not a global
+/// filesystem sync/unmount or storage-device durability barrier.
 ///
 /// # Arguments
 /// * `shutdown_type` - Type of shutdown (PowerOff or Reboot)

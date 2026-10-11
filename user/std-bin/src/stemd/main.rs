@@ -35,13 +35,16 @@ use sws_client::Connection;
 
 // Import protocol and desktop modules
 mod desktop;
+mod power;
 mod protocol;
 
 use desktop::{
     DesktopEntry, expand_exec, list_apps, lookup_app, lookup_app_for_mime, mime_type_for_path,
     reload_applications,
 };
-use protocol::cmd;
+use protocol::{cmd, power::PowerAction};
+
+static POWER_TRANSITION: Mutex<bool> = Mutex::new(false);
 
 const ACTIVATION_TOKEN_ENV: &str = "SWS_ACTIVATION_TOKEN";
 const SWS_QUERY_TIMEOUT_MS: u64 = 1_000;
@@ -113,7 +116,12 @@ fn spawn_command(
         configure_command_stdio(&mut command, "/dev/null")?;
     }
 
+    let transition = POWER_TRANSITION.lock().expect("stemd mutex poisoned");
+    if *transition {
+        return Err("system power transition in progress");
+    }
     let mut child = command.spawn().map_err(|_| "Failed to spawn process")?;
+    drop(transition);
     let pid = child.id() as i32;
     if let Some(unit) = log_unit {
         if let Some(stdout) = child.stdout.take() {
@@ -1123,21 +1131,32 @@ fn resolve_dependencies(services: &[Service]) -> Vec<Service> {
     sorted
 }
 
-fn handle_shutdown() {
-    println!("stemd: Initiating system shutdown...");
-
-    // TODO: Implement proper shutdown sequence:
-    // 1. Stop all services in reverse dependency order
-    // 2. Send SIGTERM to all child processes
-    // 3. Wait for processes to exit gracefully (with timeout)
-    // 4. Send SIGKILL to remaining processes
-    // 5. Sync all filesystems (call sync() on all open files)
-    // 6. Unmount all filesystems
-    // 7. Finally call kernel shutdown syscall
-    //
-    // Currently: Directly call kernel shutdown (simpler fallback)
-
-    shutdown(ShutdownType::PowerOff);
+fn handle_shutdown(stream: &StreamOps<'_>, action: PowerAction) {
+    {
+        let mut transition = POWER_TRANSITION.lock().expect("stemd mutex poisoned");
+        if *transition {
+            let _ = stream.write(b"ERROR: Power transition already in progress\n");
+            return;
+        }
+        *transition = true;
+    }
+    let _ = stream.write(action.response().as_bytes());
+    println!(
+        "stemd: Initiating {:?}; waiting for user processes to exit",
+        action
+    );
+    if let Err(error) = power::stop_processes(&mut power::Native::new()) {
+        println!("stemd: {error}");
+        *POWER_TRANSITION.lock().expect("stemd mutex poisoned") = false;
+        return;
+    }
+    // All init threads retain TGID 1, including this IPC handler. Ordinary
+    // process exit has closed user file handles; this is not a global sync or
+    // unmount barrier for mappings or storage-device write caches.
+    shutdown(match action {
+        PowerAction::PowerOff => ShutdownType::PowerOff,
+        PowerAction::Reboot => ShutdownType::Reboot,
+    });
 }
 
 fn read_until(
@@ -1349,15 +1368,8 @@ fn handle_ipc_client(client: Socket) {
                     Err(error) => format!("ERROR: {}\n", error),
                 };
                 let _ = stream.write(response.as_bytes());
-            } else if buffer[0] == cmd::SHUTDOWN {
-                println!("stemd: Received SHUTDOWN command");
-
-                let response = "OK: Shutting down\n";
-                let _ = stream.write(response.as_bytes());
-
-                // Shutdown must be called from main thread (PID 1)
-                // to pass kernel authorization check
-                handle_shutdown();
+            } else if let Some(action) = PowerAction::from_command(buffer[0]) {
+                handle_shutdown(&stream, action);
             } else {
                 // Try to parse command as UTF-8 text
                 match core::str::from_utf8(&buffer[..n]) {
@@ -1367,11 +1379,10 @@ fn handle_ipc_client(client: Socket) {
                         // Process command (simplified)
                         let response = match cmd.trim() {
                             "status" => "stemd is running\n",
-                            "help" => "Commands: status, help, launch_or_focus, shutdown\n",
-                            "shutdown" => {
-                                // Handle text-based shutdown command too
-                                let _ = thread::spawn(handle_shutdown);
-                                "OK: Shutting down\n"
+                            "help" => "Commands: status, help, launch_or_focus, shutdown, reboot\n",
+                            "shutdown" | "reboot" => {
+                                handle_shutdown(&stream, PowerAction::from_text(cmd).unwrap());
+                                return;
                             }
                             _ => "Unknown command\n",
                         };

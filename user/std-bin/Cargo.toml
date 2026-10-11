@@ -225,6 +225,10 @@ name = "netcfg"
 path = "src/netcfg.rs"
 
 [[bin]]
+name = "reboot"
+path = "src/reboot.rs"
+
+[[bin]]
 name = "shutdown"
 path = "src/shutdown.rs"
 

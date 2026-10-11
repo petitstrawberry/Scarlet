@@ -40,13 +40,17 @@
 
 use std::vec::Vec;
 
+#[path = "../power_request.rs"]
+pub mod power;
+
 /// Command types for stemd IPC
 pub mod cmd {
     pub const STATUS: u8 = 0x00;
     pub const LAUNCH_OR_FOCUS: u8 = 0x01;
     pub const REGISTER_APP: u8 = 0x02;
     pub const UNREGISTER_APP: u8 = 0x03;
-    pub const SHUTDOWN: u8 = 0x04;
+    pub const SHUTDOWN: u8 = super::power::PowerAction::PowerOff.command();
+    pub const REBOOT: u8 = super::power::PowerAction::Reboot.command();
     pub const LAUNCH: u8 = 0x05;
     pub const SERVICE_READY: u8 = 0x06;
     pub const SET_SYSTEM_TIME: u8 = 0x07;
