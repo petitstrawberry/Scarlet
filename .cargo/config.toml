@@ -3,8 +3,3 @@
 # by the getrandom crate itself.
 [target.'cfg(target_os = "scarlet")']
 rustflags = ["--cfg", "getrandom_backend=\"custom\""]
-
-# The desktop bundle enables Myrica's native WebKit backend. Other packages
-# ignore this input; an explicit environment value can select another install.
-[env]
-MYRICA_WEBKIT_LINK_MANIFEST = { value = "../myrica/target/native-webkit/share/scarlet/ScarletWebView.link", relative = true }

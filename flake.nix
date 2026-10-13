@@ -341,6 +341,10 @@
             pkgs.file
             pkgs.patch
             pkgs.perl
+            pkgs.ruby
+            pkgs.gperf
+            pkgs.unifdef
+            pkgs.tcl
             pkgs.gnused
             pkgs.gnugrep
             pkgs.gawk

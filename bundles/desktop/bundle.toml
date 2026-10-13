@@ -288,20 +288,20 @@ to = "/bin/carmine"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "990b68019e678386dcafdff2749c8eb3d1b5f313" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "9e0f2c1f91f561d9cb946f3d311e3b5d40f9781d" }
 package = "myrica"
 bin = "myrica"
+architectures = ["riscv32", "riscv64"]
 to = "/bin/myrica"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "990b68019e678386dcafdff2749c8eb3d1b5f313" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "9e0f2c1f91f561d9cb946f3d311e3b5d40f9781d" }
 package = "myrica"
 bin = "myrica"
 features = ["backend-webkit"]
 default-features = false
 architectures = ["aarch64"]
-replace = true
 to = "/bin/myrica"
 
 [[layers]]
