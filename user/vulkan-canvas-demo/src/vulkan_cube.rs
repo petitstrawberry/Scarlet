@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::ffi::CStr;
 
-use ash::{Entry, vk};
+use ash::vk;
 
 pub const IMAGE_WIDTH: u32 = 512;
 pub const IMAGE_HEIGHT: u32 = 512;
@@ -14,7 +14,10 @@ type ExportImageFn = unsafe extern "system" fn(vk::Device, vk::Image, *mut i32) 
 
 pub struct VulkanCube {
     resources: Resources,
-    _entry: Entry,
+    #[cfg(target_arch = "aarch64")]
+    _loader: scarlet_vulkan::Loader,
+    #[cfg(not(target_arch = "aarch64"))]
+    _entry: ash::Entry,
     queue: vk::Queue,
     command_buffer: vk::CommandBuffer,
     fence: vk::Fence,
@@ -29,6 +32,11 @@ impl VulkanCube {
             shader_words(include_bytes!(concat!(env!("OUT_DIR"), "/cube.vert.spv")))?;
         let fragment_words =
             shader_words(include_bytes!(concat!(env!("OUT_DIR"), "/cube.frag.spv")))?;
+        #[cfg(target_arch = "aarch64")]
+        let loader = unsafe { scarlet_vulkan::Loader::load() }?;
+        #[cfg(target_arch = "aarch64")]
+        let entry = loader.entry();
+        #[cfg(not(target_arch = "aarch64"))]
         let entry = vulkan_sgfx::linked_entry();
 
         unsafe {
@@ -61,6 +69,9 @@ impl VulkanCube {
                 )
                 .map_err(|error| format!("vkCreateDevice failed: {error:?}"))?;
             resources.device = Some(device.clone());
+            if std::env::var_os("VULKAN_CANVAS_TRACE").is_some() {
+                println!("VULKAN_INIT step=device-created");
+            }
             let queue = device.get_device_queue(queue_family, 0);
             let memory_properties = instance.get_physical_device_memory_properties(physical_device);
             let extent = vk::Extent3D {
@@ -468,6 +479,9 @@ impl VulkanCube {
                 .queue_wait_idle(queue)
                 .map_err(|error| format!("texture upload vkQueueWaitIdle failed: {error:?}"))?;
             device.free_command_buffers(command_pool, &[upload_command]);
+            if std::env::var_os("VULKAN_CANVAS_TRACE").is_some() {
+                println!("VULKAN_INIT step=texture-uploaded");
+            }
             device.begin_command_buffer(command_buffer, &vk::CommandBufferBeginInfo::default())?;
             device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
             device.cmd_bind_descriptor_sets(
@@ -508,6 +522,9 @@ impl VulkanCube {
             let fence = device.create_fence(&vk::FenceCreateInfo::default(), None)?;
             resources.fences.push(fence);
 
+            if std::env::var_os("VULKAN_CANVAS_TRACE").is_some() {
+                println!("VULKAN_INIT step=recorded");
+            }
             // Export is deliberately the final initialization operation. The
             // application adopts this owning raw handle immediately.
             let export = instance
@@ -526,6 +543,9 @@ impl VulkanCube {
             Ok((
                 Self {
                     resources,
+                    #[cfg(target_arch = "aarch64")]
+                    _loader: loader,
+                    #[cfg(not(target_arch = "aarch64"))]
                     _entry: entry,
                     queue,
                     command_buffer,
@@ -1112,9 +1132,16 @@ impl Resources {
 
 impl Drop for Resources {
     fn drop(&mut self) {
+        let trace = std::env::var_os("VULKAN_CANVAS_TRACE").is_some();
         unsafe {
             if let Some(device) = &self.device {
+                if trace {
+                    println!("VULKAN_TEARDOWN step=wait-idle");
+                }
                 let _ = device.device_wait_idle();
+                if trace {
+                    println!("VULKAN_TEARDOWN step=destroy-resources");
+                }
                 for &fence in &self.fences {
                     device.destroy_fence(fence, None);
                 }
@@ -1157,9 +1184,18 @@ impl Drop for Resources {
                 for &memory in &self.memories {
                     device.free_memory(memory, None);
                 }
+                if trace {
+                    println!("VULKAN_TEARDOWN step=destroy-device");
+                }
                 device.destroy_device(None);
+                if trace {
+                    println!("VULKAN_TEARDOWN step=device-destroyed");
+                }
             }
             self.instance.destroy_instance(None);
+            if trace {
+                println!("VULKAN_TEARDOWN step=instance-destroyed");
+            }
         }
     }
 }

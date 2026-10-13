@@ -1,0 +1,19 @@
+# Native Vulkan package: SDK-managed Cargo artifacts and runtime resources.
+[[layers]]
+kind = "bundle"
+source = { git = "https://github.com/petitstrawberry/Vulkan-Loader", rev = "5e8a17e566e118efe755d3c4b86c10ecfcc62a75" }
+subdir = "native"
+
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/sgfx", rev = "fdb50cf2056040b974ff8faeedc2c0f7d0e3689f" }
+package = "vulkan-sgfx"
+lib = "vulkan_sgfx"
+default-features = false
+architectures = ["aarch64"]
+to = "/lib/libvulkan_sgfx.so"
+
+[[layers]]
+kind = "script"
+source = "install-runtime.sh"
+to = "/"

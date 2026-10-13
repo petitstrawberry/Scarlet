@@ -1,0 +1,12 @@
+[package]
+name = "scarlet-vulkan"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+ash = { version = "0.38", default-features = false, features = ["std"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("scarlet"))'] }

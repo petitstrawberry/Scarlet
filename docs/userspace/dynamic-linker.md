@@ -55,6 +55,13 @@ constructors run before their consumers. The executable's own startup remains
 responsible for its main initialization array.
 
 The interpreter supplies `dlopen`, `dlsym`, `dlclose` and `dlerror` symbols.
+It also exports the `environ` data symbol pointing at the inherited initial
+`envp`, before dependency constructors run. Native libc uses it as a weak
+fallback when a shared library’s independent Rust std has not initialized its
+own environment. This exposes the startup environment; it does not establish
+shared mutation of all per-library Rust environment maps. Native `getenv`
+keeps each variable’s returned storage stable across lookups of other variables.
+
 The initial API requires `RTLD_NOW | RTLD_GLOBAL` (`0x102`); it does not provide
 local scopes or lazy binding. Constructor reentry and concurrent loader calls
 return an explicit busy error. Closing a handle does not unmap its code: loaded

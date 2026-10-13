@@ -38,30 +38,77 @@ The `desktop` bundle includes `bundles/sgfx-native` as its first layer, before
 `desktop`, `full`, or `full-buildroot` receive it through that bundle in their
 rootfs. Initramfs compositions and projects without `desktop` include
 `bundles/sgfx-native` explicitly before their userspace packages.
-Its script builds the pinned SGFX plugin, verifies its ELF header, imports,
-exports and relocations, and installs the plugin and manifest. It also writes
+The source-owned SGFX recipe declares its driver as a Cargo cdylib layer.
+The SDK builds, hashes and stages it; SGFX's build.rs owns its native link flags.
+A small configuration/install step writes the driver manifest and
 `.scarlet/sgfx/userspace.toml`, selected by the project's `userspace.cargo-config`.
 Published UI/backend dependencies retain their shared SGFX core revision.
 This config supplies the linker input needed for `scarlet-ld`'s `dlopen`, `dlsym`
 and `dlerror` imports without replacing those Git dependencies with local paths. Driver discovery uses `dlopen`; applications have no
 `DT_NEEDED` dependency on the VirGL plugin.
 
-To prepare that configuration for an individual application build:
+Build through the SDK so all package outputs use the project cache:
 
 ```sh
-python3 tools/sgfx-native-build.py --project projects/aarch64-limine-full
-cargo --config projects/aarch64-limine-full/.scarlet/sgfx/userspace.toml \
-  build --manifest-path user/std-bin/Cargo.toml \
-  --target aarch64-unknown-scarlet --bin sgfx-probe
+nix develop --command cargo scarlet image \
+  --project projects/aarch64-limine-full --release
 ```
 
-Python comes from the Nix shell (3.11 or newer). `--sgfx-source /path/to/sgfx`
-can reuse an existing checkout at the pinned revision. The driver, Cargo
-configuration and ELF report are generated under the project's `.scarlet/sgfx`
-directory. The build uses the selected compiler; it does not rewrite an ELF
-header or change a packaged sysroot.
+The SDK owns source checkouts under the project's `.scarlet/cache/git`, Cargo
+outputs under `.scarlet/cache/target/<canonical-source-path-sha256-prefix>`, and
+Cargo's registry/Git dependency cache under `.scarlet/cache/cargo-home`.
+Image contents are assembled under `.scarlet/staging/<image-name>`, then written
+to the image output paths declared in `scarlet.toml`. These are generated data,
+not source editing locations. Build recipes and source changes remain in their
+repositories. No build output is required in the Scarlet repository's top-level
+`target`, `.cargo/target`, or an `artifacts` directory.
+
+Python comes from the Nix shell (3.11 or newer) for the configuration step.
+SDK Cargo output stays in the project package cache; the staged driver is the
+linker input for applications. The generated userspace configuration stays in
+`.scarlet/sgfx/userspace.toml`. No recipe computes cache hashes or performs Git
+checkout management. The build uses the selected compiler and does not rewrite
+an ELF header or change a packaged sysroot.
 
 Run `sgfx-probe` in the guest to see `linkage: dynamic` and the loaded library
 path. Missing or incompatible drivers fail device creation without falling
 back to static VirGL. `SGFX_DRIVER_PATH` overrides manifest search directories
 and `SGFX_BACKEND` selects a manifest name.
+
+## Native Vulkan
+
+`user/lib/scarlet-vulkan/bundle.toml` owns the Native Vulkan dependency and
+installation definitions and is included by the existing `sgfx-native` bundle.
+The SDK stages the AArch64 Khronos loader at
+`/lib/libvulkan.so.1`, the shared SGFX ICD at `/lib/libvulkan_sgfx.so`, and its
+manifest at `/share/vulkan/icd.d/sgfx.json`. Both libraries are Release Native
+ELFs with OSABI 83. The staged libraries were audited for ELF TLS, unexpected
+imports, unsupported relocations, and leaked CRT/Rust exports. Native loader calls use immediate
+binding and global scope, matching the resident `scarlet-ld` contract.
+
+The loader port lives on [Vulkan-Loader's Scarlet branch](https://github.com/petitstrawberry/Vulkan-Loader/tree/scarlet), pinned at
+`5e8a17e566e118efe755d3c4b86c10ecfcc62a75`. Headers are pinned to Vulkan-Headers
+1.4.365 (`c46850864f4661461b0f6cb9922c058ffea4915e`). The native driver/ICD package recipe is pinned at SGFX commit
+`fdb50cf2056040b974ff8faeedc2c0f7d0e3689f`; it adds native link/package definitions
+to core revision `20bb5b8cc19445520d08c31c3971ac06244bc1d9` without changing its IR.
+The Native std allocator-owner fix is published in
+[the Rust fork](https://github.com/petitstrawberry/rust/commit/26d00a8a3a8489d73f5ae3575880e9f915dfd0f2).
+The packaged toolchain records its separate Native std commit and exposes it in
+verbose compiler information so Cargo recompiles dependencies after a runtime
+update. The compiler commit itself remains unchanged.
+
+`vulkan-canvas-demo --probe` creates and destroys three complete GPU lifecycles.
+On 2026-10-13, the native Khronos loader discovered the SGFX ICD, uploaded the
+texture, executed GPU draws, read back two distinct frames (72,005 and 72,475
+foreground pixels, 1,240 colors each), and destroyed resources, device and
+instance successfully in all three cycles. `VK_DRIVER_FILES` selected the
+requested manifest; a nonexistent manifest produced a driver-detection error.
+These observations establish the exercised offscreen path, not Vulkan
+conformance or accelerated WebKit rendering.
+
+Myrica/WebKit still rasterizes through Cairo. The next work is to establish the
+formats, blending, stencil and synchronization capabilities needed by Skia
+Ganesh Vulkan, connect WebKit image buffers/compositing to Native GPU image
+sharing, and verify real pages. Video decoding/playback is not implemented by
+this loader milestone. The Native Vulkan loader is currently packaged only on
+AArch64; other demo targets retain their existing linked ICD path.

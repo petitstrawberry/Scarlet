@@ -1,6 +1,9 @@
-# Include before userspace Cargo layers. This prepares coordinated SGFX sources
-# and the shared Cargo configuration; ELF64 projects also install the driver.
+# Native graphics packages own their builds; the SDK owns retrieval and output.
 [[layers]]
-kind = "script"
-source = "../../tools/sgfx/install-driver.sh"
-to = "/lib/sgfx"
+kind = "bundle"
+source = { git = "https://github.com/petitstrawberry/sgfx", rev = "fdb50cf2056040b974ff8faeedc2c0f7d0e3689f" }
+subdir = "platforms/scarlet"
+
+[[layers]]
+kind = "bundle"
+path = "../../user/lib/scarlet-vulkan/bundle.toml"

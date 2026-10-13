@@ -9,16 +9,72 @@ hash = "sha256:3e0670c7f1e423cf25acf7af560eed4af947855fd6bf180386c7fa4e8dcf2441"
 layers = []
 
 [sections.initramfs]
-hash = "sha256:6ee75ef0435422553d523fc4abcda006be235c078a17a28dd7a71178029fe7f1"
+hash = "sha256:09f0eb37e90be4ad3ee4f72e564e5201b9d97010ea841f0129a7343bbbd121cf"
 
 [[sections.initramfs.layers]]
 kind = "script"
 to = "/lib/sgfx"
-hash = "sha256:c0507f85816bcda76b54324ddb5d316e005f4d202b88a9b090f27200a5134b1f"
+hash = "missing"
 
 [sections.initramfs.layers.source]
 type = "path"
-path = "../../tools/sgfx/install-driver.sh"
+path = ".scarlet/cache/git/a183dd29127f115f/platforms/scarlet/prepare-config.sh"
+
+[[sections.initramfs.layers]]
+kind = "cargo"
+package = "sgfx-backend-scarlet-virgl-plugin"
+lib = "sgfx_scarlet_virgl"
+to = "/lib/sgfx/libsgfx_scarlet_virgl.so"
+hash = "sha256:f59ce29dbae4e3a0c5bab3a53c954053b5e2457726d54811d337a687b7d3e158"
+
+[sections.initramfs.layers.source]
+type = "path"
+path = ".scarlet/cache/git/a183dd29127f115f"
+
+[[sections.initramfs.layers]]
+kind = "script"
+to = "/lib/sgfx"
+hash = "sha256:070c394f67308e569ce5e17b90908e85257a95f09f70baff8a8f2b6926d0f520"
+
+[sections.initramfs.layers.source]
+type = "path"
+path = ".scarlet/cache/git/a183dd29127f115f/platforms/scarlet/install-config.sh"
+
+[[sections.initramfs.layers]]
+kind = "cargo"
+package = "scarlet-vulkan-loader"
+lib = "vulkan"
+to = "/lib/libvulkan.so.1"
+hash = "sha256:03d14d3ed6fbff93bf2ab36fe470d438f6dc8e6614fc35e262bb424c4b6d2968"
+
+[sections.initramfs.layers.source]
+type = "path"
+path = ".scarlet/cache/git/36f2cc053c0f1c1b/native"
+
+[[sections.initramfs.layers]]
+kind = "cargo"
+git = "https://github.com/petitstrawberry/sgfx"
+git_ref = "fdb50cf2056040b974ff8faeedc2c0f7d0e3689f"
+resolved_rev = "fdb50cf2056040b974ff8faeedc2c0f7d0e3689f"
+package = "vulkan-sgfx"
+lib = "vulkan_sgfx"
+default-features = false
+to = "/lib/libvulkan_sgfx.so"
+hash = "sha256:97c8dedb2452667538484213b00964375cb20c2ec8fd4258cb01ff2c2850cb7e"
+
+[sections.initramfs.layers.source]
+type = "git"
+url = "https://github.com/petitstrawberry/sgfx"
+rev = "fdb50cf2056040b974ff8faeedc2c0f7d0e3689f"
+
+[[sections.initramfs.layers]]
+kind = "script"
+to = "/"
+hash = "sha256:8266b9badd86ef2d0828aa3b5762f3006200b52fa974d892c9a3acc30bd626a4"
+
+[sections.initramfs.layers.source]
+type = "path"
+path = "../../user/lib/scarlet-vulkan/install-runtime.sh"
 
 [[sections.initramfs.layers]]
 kind = "script"
@@ -34,7 +90,7 @@ kind = "cargo"
 package = "scarlet-ld"
 bin = "scarlet-ld"
 to = "/bin/scarlet-ld"
-hash = "sha256:01a961f31ea2d77cb5d1b34dabe8762db9dc525f3181fce969423557d537637f"
+hash = "sha256:17945aafb032d5797f3713911bd9c01193f5550340de72b7b002f2ca4aa8be22"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -45,7 +101,7 @@ kind = "cargo"
 package = "userprogram"
 bin = "init"
 to = "/init"
-hash = "sha256:cd34b8dbc6b44234b9b812724083a3b98dae936d334973ad261d6de775d9c47a"
+hash = "sha256:72bc5e3ef124b8032033b3460e249786b59a0a7b464477a37ba0c9d6d573a71c"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -56,7 +112,7 @@ kind = "cargo"
 package = "userprogram"
 bin = "sh"
 to = "/bin/sh"
-hash = "sha256:7280af96c3481015bd784c1cdb71f106e4f844c814ecf4ba2a1934dc9d152fed"
+hash = "sha256:d25246debd3384b8ba8ced01f2a35fdd8aaaa11b15a1c2d65e67c856c3c0c1c4"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -67,7 +123,7 @@ kind = "cargo"
 package = "userprogram"
 bin = "login"
 to = "/bin/login"
-hash = "sha256:c680c73241e2295ddc041da85a2d443aa8fa3d8a52605dcacc25b5eb259d7f41"
+hash = "sha256:71a8a6cf25ecae0a3addb3e92c238d2e4c6070edbe37f65fc3f6097a6ff89bd5"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -78,7 +134,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "stemd"
 to = "/bin/stemd"
-hash = "sha256:795824b04501f4732088932f8f281f4c851ace7524457c2faa560676697155ca"
+hash = "sha256:da75547cbd4866b5845db444004b843bb275f3b63fe2593833e1438f8013fbc8"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -89,7 +145,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "logd"
 to = "/bin/logd"
-hash = "sha256:0180d23a8746e9c541dec9a3da0836ebf63d088a7d2f26978c03c1659beb20d0"
+hash = "sha256:261a8e853e4a5757294a14425d0f22e8b723917cc4d42df52dfcbcc4f68b1327"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -100,7 +156,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "logctl"
 to = "/bin/logctl"
-hash = "sha256:615324a19dcc88462a0bb223e2962a280d4556112dd3e63890fcb8411d4d17ed"
+hash = "sha256:35c458ca0210ec71a9625b66eb310a134b2a3479b7407cfecdb3d6a518bfe38a"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -111,7 +167,7 @@ kind = "cargo"
 package = "userprogram"
 bin = "sbusd"
 to = "/bin/sbusd"
-hash = "sha256:170afeac0dbd79a3fb9517f70d0656aad8248b9cb1903d9b4de6abd5e3315ae2"
+hash = "sha256:b5ab22e3f22068167b8f809cf30c28badc5ccd1072eb50f59ca8a7c1e28e1cda"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -121,7 +177,7 @@ path = "../../user/bin"
 kind = "cargo"
 bin = "hello"
 to = "/bin/hello"
-hash = "sha256:59250dc6b304b0f1fb682777fa32aa3935d9e5d3753df6eb6a601db942f788df"
+hash = "sha256:a1e692a928ea3122558ed5314fbfd15f6a27b2e1e4fa476c336227029948090c"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -132,7 +188,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "kernel-info"
 to = "/bin/kernel-info"
-hash = "sha256:958d58a298bed3f361229b32c5130648a36e54f98ed29c7cc26581904a64e1f7"
+hash = "sha256:5286f94daaf75cca78247195e69f2ae8af9a4dff369d3bc167a5e26d1c54fcff"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -143,7 +199,7 @@ kind = "cargo"
 package = "userprogram"
 bin = "ps"
 to = "/bin/ps"
-hash = "sha256:d342e41511c89822e4cbd3397e17fe582fed158fd4806653cafe367e014bae76"
+hash = "sha256:949a5da2b9fb9406e1064536125043d129ae835ece75b1e3ff060962d165cfe9"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -153,7 +209,7 @@ path = "../../user/bin"
 kind = "cargo"
 bin = "shutdown"
 to = "/bin/shutdown"
-hash = "sha256:106482d60be0815abaf9554a170cf828b8591030b8ed47814bfe58fbf324a5a3"
+hash = "sha256:4e01311108d4a1ecc304322207a58921f3deaa860b8ae948b5575395f2f5de5d"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -164,7 +220,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "reboot"
 to = "/bin/reboot"
-hash = "sha256:d3a58c3ed475ca949bc18a679767490f3bbabe3ed4d81941e77e28665191d0d9"
+hash = "sha256:36e2ceaebd5dc3e75fb51fe339ac7e74e6306be188d16071b70de76f3e9cc2ab"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -175,7 +231,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "top"
 to = "/bin/top"
-hash = "sha256:7a207b94b9cca0b7ea900e4e7cce53590d8d90f84ec3eff5060139a11b255a50"
+hash = "sha256:516c1112a8cffa4058485dd53fdbae8aae0f0f8139e3c2574b37132200e94cdf"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -186,7 +242,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "kill"
 to = "/bin/kill"
-hash = "sha256:79d141edd07db0e7e971579bd1eb0f86231b7feb96319cd24b5dda1a8cdd0fd9"
+hash = "sha256:e6ed237a318117357324610b251446ab54268355a606f0f6d574b83542f5bf0d"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -197,7 +253,7 @@ kind = "cargo"
 package = "userprogram"
 bin = "scpm"
 to = "/bin/scpm"
-hash = "sha256:2eebd8859b5e0633c33559294015704ceae423abb385c53a9cfcfac5c69a713c"
+hash = "sha256:4a0e6e5a55523790afd37ab06eae654df740c222ee947d079c5cbcc96a0bf4f2"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -208,7 +264,7 @@ kind = "cargo"
 package = "userprogram"
 bin = "netcfgd"
 to = "/bin/netcfgd"
-hash = "sha256:320d1c95cdc51a3a79e3c1dafd6b55a4d00bb3a8e6a5b94600bbe06bc588c6e7"
+hash = "sha256:cac01ace50589ca16a1815e4a99db7b81b7bb61488c39b1e3a13f61f43d0578e"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -219,7 +275,7 @@ kind = "cargo"
 package = "userprogram"
 bin = "sshd"
 to = "/bin/sshd"
-hash = "sha256:6fbf998478c05920b9ceb85040fff50395b3be7f7c6b6178be68e5d1323d2d88"
+hash = "sha256:24b55dd54a223e23dc52cd3754f17282a200e7d33cfedce7fc1ebdd5966b3a7d"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -229,7 +285,7 @@ path = "../../user/bin"
 kind = "cargo"
 bin = "resolverd"
 to = "/bin/resolverd"
-hash = "sha256:71a8fe1e1df9d7e15d922c93fb9a1d157679bb83b029ac5f2d348d6437ad4ef3"
+hash = "sha256:41b03abd985e75832f4a18e5e1e7daffe2fb2044c27808e12cb71b1926c6110f"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -239,7 +295,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "ntpd"
 to = "/bin/ntpd"
-hash = "sha256:e626bfcf9cfb5f8fd661bc18a316e34ad935604a86f6824fabfedd08f24cf151"
+hash = "sha256:d505298d0c216c3f5282b746dcea7b2f4f5dd362ce78f21210e6c8e2c60a5c41"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -249,7 +305,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "cpufreqctl"
 to = "/bin/cpufreqctl"
-hash = "sha256:ceab062101505d521fc5e2820c49abb0977b3bbdbf39d8d55505fb747f7fc8e4"
+hash = "sha256:8bbb12c8406b17c82ca95ad418f14776bb25d587367b781b0e97b75f698762ba"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -260,7 +316,7 @@ kind = "cargo"
 package = "userprogram"
 bin = "storage-check"
 to = "/bin/storage-check"
-hash = "sha256:ad9f9b8851f3c907d4917e8a4dc78ca5ee9efc2608eecfed1885084b6de746f4"
+hash = "sha256:02dac031eccef162bca6d3ce5346ab7e968fe3861cd7f4d8f6e38d2152e15cb6"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -270,7 +326,7 @@ path = "../../user/bin"
 kind = "cargo"
 bin = "gpu-info"
 to = "/bin/gpu-info"
-hash = "sha256:5637d1a2784f4422a9cdddc6e0c349a18f29fd5ca1240ca644a9e2aa24e4d1be"
+hash = "sha256:a9187b65cef8ee9abb938d1505a240951d1f00d1a694630b5406f7cc94c790a6"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -280,7 +336,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "power-info"
 to = "/bin/power-info"
-hash = "sha256:94448c7feb2adae941812db480b7db1fa12e80f78903055673954f578fbff50e"
+hash = "sha256:6d64455a590242e04616f42269ed485ee8d873de2ced237774ce8049a513be13"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -290,7 +346,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "abi-run"
 to = "/bin/abi-run"
-hash = "sha256:1d5af3d5eafb4eb74d2458fde7b51662d4b7474b39cc22159c0ebf98fbe5d301"
+hash = "sha256:6a2bdda6dfd7d8ef9bcf4b1dd818a2209af6c9b13bd492660f56e7967de41629"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -300,7 +356,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "ls"
 to = "/bin/ls"
-hash = "sha256:ed1936535936008ce993321cac7d6432f5194b2521fcec7f4585473a92670096"
+hash = "sha256:00c33bce44cc6514ab6e987b0229fa05677d44530f9e87eb8acbfca567853a28"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -310,7 +366,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "cat"
 to = "/bin/cat"
-hash = "sha256:7303160d3ae257a69ceb5523a6d8fa9ffceffb2516c24206de7f9b5785be839d"
+hash = "sha256:10059fda7af2808127f6d1b1b5f2288859370904f2b877f817682bca282b7972"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -320,7 +376,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "rm"
 to = "/bin/rm"
-hash = "sha256:c02e15edd22e10f1a458736c44f325843ca6cbdacb689f5df2371c45e07c6694"
+hash = "sha256:804e22d8de244f21a990aaccaf4cde940855a355eae0f908869c259e1033cb8c"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -330,7 +386,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "resolve"
 to = "/bin/resolve"
-hash = "sha256:bc155a0abd2f8fc7c4140122ce6687897273f799990b52c5b331e52ac5509822"
+hash = "sha256:466ddf6615f741ce74439e19045e6546697bb71933f67c871c1f6d450acc4657"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -340,7 +396,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "nc"
 to = "/bin/nc"
-hash = "sha256:96096f1e3598c6005712b2542a569019a3ef09d8803063219976f36b35c704f0"
+hash = "sha256:ba595e4c5e429568160d8226d3db71bdefeb1f3bbb4e2273b659075eb2f205a8"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -350,7 +406,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "ping"
 to = "/bin/ping"
-hash = "sha256:439b417fe6645471c9b883f65280349b71b89c912488db8a8d45653f68293b65"
+hash = "sha256:826ef80d5ccc5e3c2ddb044f2fded744ce5de77292843946492d20db93f94ad7"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -360,7 +416,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "netcfg"
 to = "/bin/netcfg"
-hash = "sha256:15991881590a39ee2285fe4deb3757b97715a17f9fb4f4fda828ee6f564ba450"
+hash = "sha256:26bfd0a7b794f9b7ba37c4f0574ac1683005058fa83f490b00ef0c36495639d4"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -370,7 +426,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "watch"
 to = "/bin/watch"
-hash = "sha256:a194e514c4b9c9591f412a68deb2801479e499e58830bcd53b1037ddce64007e"
+hash = "sha256:3dca5442a650fc7bfc0a0b64fad99a3388c238cf5449a827945594ed4dc475b3"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -380,7 +436,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "date"
 to = "/bin/date"
-hash = "sha256:7a052fd46142aab3b2727171cff5dc03b321d431825bee418d92a0371e1fd854"
+hash = "sha256:edb764ab9e8eb736ae5f0e2f0ae121a2b4fa5265920db1d753c0f9d5685e7165"
 
 [sections.initramfs.layers.source]
 type = "path"
@@ -390,7 +446,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "fb-test"
 to = "/bin/fb-test"
-hash = "sha256:1918dd2edbe36cdc110980f6d60b7c09335d615205d87178adc78ad8bbab8cc3"
+hash = "sha256:28e51ffad6eaa1967b3643df3fb298accf40d5e4d486585f59bebce663f0904a"
 
 [sections.initramfs.layers.source]
 type = "path"
