@@ -6,6 +6,11 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 const RTLD_NOW: c_int = 2;
 const RTLD_GLOBAL: c_int = 0x100;
 
+// The kernel keeps the original envp and strings mapped for the process's life.
+// Publish the standard C environment pointer before dependency constructors.
+// Embedded Rust std copies in DSOs do not receive executable CRT initialization.
+static mut ENVIRON: *const *const c_char = std::ptr::null();
+
 struct Handle {
     object: Option<ObjectId>,
     open: bool,
@@ -99,6 +104,7 @@ pub unsafe fn initialize(initial_stack: usize) -> Result<usize, Error> {
     }
     // SAFETY: Forward the kernel initial stack guaranteed by the caller.
     let process = unsafe { Process::from_stack(initial_stack) }?;
+    unsafe { ENVIRON = process.envp as *const *const c_char; }
     #[cfg(target_arch = "aarch64")]
     let machine = Machine::Aarch64;
     #[cfg(target_arch = "riscv64")]
@@ -108,6 +114,7 @@ pub unsafe fn initialize(initial_stack: usize) -> Result<usize, Error> {
         unsafe { NativePlatform::new(&process.segments, process.path.clone(), process.bytes) };
     let mut loader = LoaderContext::new(platform, machine);
     for (name, address) in [
+        ("environ", std::ptr::addr_of_mut!(ENVIRON) as usize),
         ("dlopen", dlopen as *const () as usize),
         ("dlsym", dlsym as *const () as usize),
         ("dlclose", dlclose as *const () as usize),

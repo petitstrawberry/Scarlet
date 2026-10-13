@@ -9,6 +9,7 @@
 #![feature(thread_id_value)]
 #![feature(current_thread_id)]
 #![feature(allocator_api)]
+#![feature(linkage)]
 // These exports implement libc. LLVM must not infer builtin allocation
 // contracts for their Rust callers (e.g. fold overflowing calloc to non-null).
 #![no_builtins]
@@ -75,6 +76,33 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
+#[cfg(target_os = "scarlet")]
+unsafe extern "C" {
+    // Optional in static executables; scarlet-ld supplies it for loaded DSOs.
+    #[linkage = "extern_weak"]
+    static environ: *const *const c_char;
+}
+
+#[cfg(target_os = "scarlet")]
+unsafe fn inherited_environment_value(name: &str) -> Option<String> {
+    if std::ptr::addr_of!(environ).is_null() {
+        return None;
+    }
+    let mut cursor = unsafe { environ };
+    if cursor.is_null() {
+        return None;
+    }
+    // scarlet-ld publishes the validated, persistent initial envp array.
+    while !unsafe { *cursor }.is_null() {
+        let bytes = unsafe { std::ffi::CStr::from_ptr(*cursor) }.to_bytes();
+        if let Some(value) = bytes.strip_prefix(name.as_bytes()).and_then(|v| v.strip_prefix(b"=")) {
+            return std::str::from_utf8(value).ok().map(str::to_owned);
+        }
+        cursor = unsafe { cursor.add(1) };
+    }
+    None
+}
+
 /// # Safety
 /// `name` must be a NUL-terminated environment variable name. The returned
 /// pointer remains valid across getenv calls, until that variable changes or
@@ -89,7 +117,7 @@ pub unsafe extern "C" fn getenv(name: *const c_char) -> *mut c_char {
     let Ok(name) = unsafe { std::ffi::CStr::from_ptr(name) }.to_str() else {
         return std::ptr::null_mut();
     };
-    let Ok(value) = std::env::var(name) else {
+    let Some(value) = std::env::var(name).ok().or_else(|| unsafe { inherited_environment_value(name) }) else {
         return std::ptr::null_mut();
     };
     ENV_VALUES.with(|values| {
