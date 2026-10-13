@@ -15,8 +15,15 @@ userspace program.
 | [scarlet-os](../../user/lib/scarlet-os/Cargo.toml) | Typed native handles and OS operations for std and supported no_std consumers |
 | [scarlet-rt](../../user/lib/scarlet-rt/Cargo.toml) | Scarlet runtime integration, including the explicit legacy-no-std configuration |
 | [scarlet-std](../../user/lib/std/Cargo.toml) | Legacy no_std facade, often renamed to `std` by old programs; not the toolchain's Rust std |
-| scarlet-sdk | Separate repository supplying `cargo-scarlet` and image plugins; not a native user library |
+| [scarlet-sdk](https://github.com/petitstrawberry/scarlet-sdk/tree/feat/native-c-runtime) | Build CLI, image plugins, native libc/public C headers, and the C/C++ runtime package |
 | ScarletUI / SGFX | Separate Git repositories for UI and graphics execution, consumed by the in-tree apps |
+
+Native C/C++ consumers use the SDK-owned `scarlet-libc` package and runtime.
+Scarlet retains `scarlet-abi` and `scarlet-sys`; the SDK pins those dependencies
+instead of duplicating their definitions. `nix build .#scarlet-native-runtime
+--no-link` builds the SDK's AArch64 runtime into the Nix store. The development
+shell exposes its install prefix through `SCARLET_NATIVE_RUNTIME`; engine build
+helpers consume it without rebuilding libc or the C++ standard libraries.
 
 The [native API contract](../release/1.0-native-api-contract.md) records handle
 ownership, fallible operations, raw unsafe boundaries, mappings, and GPU/SWS

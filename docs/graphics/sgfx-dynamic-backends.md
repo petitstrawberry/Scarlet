@@ -87,7 +87,7 @@ imports, unsupported relocations, and leaked CRT/Rust exports. Native loader cal
 binding and global scope, matching the resident `scarlet-ld` contract.
 
 The loader port lives on [Vulkan-Loader's Scarlet branch](https://github.com/petitstrawberry/Vulkan-Loader/tree/scarlet), pinned at
-`5e8a17e566e118efe755d3c4b86c10ecfcc62a75`. Headers are pinned to Vulkan-Headers
+`cabc0232da5ee6bbd1814acdfd6188714a1a1e4d`. Headers are pinned to Vulkan-Headers
 1.4.365 (`c46850864f4661461b0f6cb9922c058ffea4915e`). The native driver/ICD package recipe is pinned at SGFX commit
 `fdb50cf2056040b974ff8faeedc2c0f7d0e3689f`; it adds native link/package definitions
 to core revision `20bb5b8cc19445520d08c31c3971ac06244bc1d9` without changing its IR.

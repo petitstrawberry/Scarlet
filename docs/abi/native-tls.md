@@ -3,8 +3,8 @@
 Scarlet's native CRT, Rust std, loader, and libc share a per-thread mapping at
 the architectural thread pointer: `TPIDR_EL0` on AArch64 and `tp` on RV64.
 The [layout definition](../../user/lib/scarlet-abi/src/tls.rs) and
-[C errno accessor](../../user/lib/scarlet-libc/src/errno.rs) implement this
-contract. See the [libc integration guide](../../user/lib/scarlet-libc/README.md)
+[C errno accessor](https://github.com/petitstrawberry/scarlet-sdk/blob/e393a33e576ca0d4be8cbb947748a4975405a91f/scarlet-libc/src/errno.rs) implement this
+contract. See the [libc integration guide](https://github.com/petitstrawberry/scarlet-sdk/blob/e393a33e576ca0d4be8cbb947748a4975405a91f/scarlet-libc/README.md)
 for the supported C surface and build workflow.
 
 This mapping is a native runtime ABI, not ELF TLS. It does not implement or

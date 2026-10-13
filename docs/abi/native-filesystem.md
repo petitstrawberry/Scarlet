@@ -41,6 +41,6 @@ both entry parents and mountpoint parents, retaining intervening directories
 for nested mounts. This same reconstruction is used by getcwd.
 
 These APIs provide the filesystem behavior used by the initial
-[`scarlet-libc`](../../user/lib/scarlet-libc/README.md) C adapters and the patched
+[`scarlet-libc`](https://github.com/petitstrawberry/scarlet-sdk/blob/e393a33e576ca0d4be8cbb947748a4975405a91f/scarlet-libc/README.md) C adapters and the patched
 Rust std. They do not introduce Linux syscall numbering into the Native ABI or
 declare the target to be `cfg(unix)`.

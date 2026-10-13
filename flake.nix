@@ -12,17 +12,15 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     scarlet-rust-toolchain.url = "github:petitstrawberry/scarlet-rust-nix/3c23906c35053e28d56f3aa9b1d29142535ffab7";
     scarlet-sdk = {
-      url = "github:petitstrawberry/scarlet-sdk/ad692dc3e466ff0a700399b05cbb85ab42a56327";
-      flake = false;
+      url = "github:petitstrawberry/scarlet-sdk/e393a33e576ca0d4be8cbb947748a4975405a91f";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.scarlet-rust-toolchain.follows = "scarlet-rust-toolchain";
     };
     vulkan-headers-src = {
       url = "github:KhronosGroup/Vulkan-Headers/c46850864f4661461b0f6cb9922c058ffea4915e";
       flake = false;
     };
-    llvm-libc-src = {
-      url = "github:petitstrawberry/llvm-project/5733bea91affcb26db1f9f4d7459b22c79756c13";
-      flake = false;
-    };
+    llvm-libc-src.follows = "scarlet-sdk/llvm-src";
     macvdmtool-src = {
       url = "github:AsahiLinux/macvdmtool";
       flake = false;
@@ -411,6 +409,7 @@
           TARGET_CC = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
             VULKAN_HEADERS_SOURCE_DIR = "${vulkan-headers-src}";
             SCARLET_LLVM_LIBC_SOURCE_DIR = "${llvm-libc-src}/libc";
+            SCARLET_NATIVE_RUNTIME = "${scarlet-sdk.packages.${system}.scarlet-native-runtime}";
             SCARLET_NATIVE_CC = "${pkgs.llvmPackages_21.clang-unwrapped}/bin/clang";
             SCARLET_NATIVE_CXX = "${pkgs.llvmPackages_21.clang-unwrapped}/bin/clang++";
             SCARLET_NATIVE_AR = "${pkgs.llvmPackages_21.llvm}/bin/llvm-ar";
@@ -512,6 +511,7 @@
 
           packages = {
             scarlet-ca-certificates = pkgs.cacert;
+            scarlet-native-runtime = scarlet-sdk.packages.${system}.scarlet-native-runtime;
           } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
             scarlet-dev-image = dockerImage;
             default = dockerImage;
@@ -523,5 +523,8 @@
         default = (mkSystem system).devShell;
       });
       packages = forAllSystems (system: (mkSystem system).packages);
+      checks = forAllSystems (system: {
+        scarlet-libc = scarlet-sdk.checks.${system}.scarlet-libc;
+      });
     };
 }

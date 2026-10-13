@@ -1,7 +1,7 @@
 # Native Vulkan package: SDK-managed Cargo artifacts and runtime resources.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/Vulkan-Loader", rev = "5e8a17e566e118efe755d3c4b86c10ecfcc62a75" }
+source = { git = "https://github.com/petitstrawberry/Vulkan-Loader", rev = "cabc0232da5ee6bbd1814acdfd6188714a1a1e4d" }
 subdir = "native"
 
 [[layers]]

@@ -20,7 +20,7 @@
         "type": "github"
       }
     },
-    "llvm-libc-src": {
+    "llvm-src": {
       "flake": false,
       "locked": {
         "lastModified": 1791893839,
@@ -122,7 +122,10 @@
     },
     "root": {
       "inputs": {
-        "llvm-libc-src": "llvm-libc-src",
+        "llvm-libc-src": [
+          "scarlet-sdk",
+          "llvm-src"
+        ],
         "macvdmtool-src": "macvdmtool-src",
         "nixpkgs": "nixpkgs",
         "qemu-scarlet": "qemu-scarlet",
@@ -174,6 +177,23 @@
         "type": "github"
       }
     },
+    "scarlet-abi-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1791904932,
+        "narHash": "sha256-tnyIaXkyGZorjZ+kMGj7vGuq7q/ezkSwyK0AH5orzsE=",
+        "owner": "petitstrawberry",
+        "repo": "Scarlet",
+        "rev": "c6a831d2120c49e3d68c2839e20374d412afd015",
+        "type": "github"
+      },
+      "original": {
+        "owner": "petitstrawberry",
+        "repo": "Scarlet",
+        "rev": "c6a831d2120c49e3d68c2839e20374d412afd015",
+        "type": "github"
+      }
+    },
     "scarlet-rust-toolchain": {
       "inputs": {
         "compiler-baseline": "compiler-baseline",
@@ -196,19 +216,28 @@
       }
     },
     "scarlet-sdk": {
-      "flake": false,
+      "inputs": {
+        "llvm-src": "llvm-src",
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "scarlet-abi-src": "scarlet-abi-src",
+        "scarlet-rust-toolchain": [
+          "scarlet-rust-toolchain"
+        ]
+      },
       "locked": {
-        "lastModified": 1791704268,
-        "narHash": "sha256-IWUUJJ4FEjgGoeHGXTJRhFlabXFdoIN0yQMFJFsFR10=",
+        "lastModified": 1791906320,
+        "narHash": "sha256-oX+qHX0JXmhvy6WMlzffa38HJumNh6i/7Enk7UtBTB8=",
         "owner": "petitstrawberry",
         "repo": "scarlet-sdk",
-        "rev": "ad692dc3e466ff0a700399b05cbb85ab42a56327",
+        "rev": "e393a33e576ca0d4be8cbb947748a4975405a91f",
         "type": "github"
       },
       "original": {
         "owner": "petitstrawberry",
         "repo": "scarlet-sdk",
-        "rev": "ad692dc3e466ff0a700399b05cbb85ab42a56327",
+        "rev": "e393a33e576ca0d4be8cbb947748a4975405a91f",
         "type": "github"
       }
     },
