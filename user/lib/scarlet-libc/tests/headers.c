@@ -34,6 +34,8 @@
 #include <dirent.h>
 #include <sys/param.h>
 #include <pwd.h>
+#include <uchar.h>
+#include <bits/types/mbstate_t.h>
 
 /* Reverse the order and repeat every header to exercise include guards. */
 #include <errno.h>
@@ -70,6 +72,8 @@
 #include <dirent.h>
 #include <sys/param.h>
 #include <pwd.h>
+#include <bits/types/mbstate_t.h>
+#include <uchar.h>
 
 #ifdef __cplusplus
 #define HEADER_ASSERT(condition) static_assert(condition, #condition)
@@ -99,6 +103,15 @@ HEADER_ASSERT(CHAR_MIN == -128 && CHAR_MAX == 127);
 /* The supported C ABI is LP64 on both AArch64 and RV64GC. */
 HEADER_ASSERT(sizeof(void *) == 8 && sizeof(int) == 4 && sizeof(long) == 8);
 HEADER_ASSERT(sizeof(size_t) == 8 && sizeof(ssize_t) == 8);
+HEADER_ASSERT(sizeof(char16_t) == 2 && sizeof(char32_t) == 4);
+HEADER_ASSERT(sizeof(mbstate_t) == 12 && HEADER_ALIGNOF(mbstate_t) == 4);
+#ifdef __cplusplus
+HEADER_ASSERT(!__is_same(char16_t, uint_least16_t));
+HEADER_ASSERT(!__is_same(char32_t, uint_least32_t));
+#else
+HEADER_ASSERT(_Generic((char16_t)0, uint_least16_t: 1, default: 0));
+HEADER_ASSERT(_Generic((char32_t)0, uint_least32_t: 1, default: 0));
+#endif
 HEADER_ASSERT(sizeof(mode_t) == 4);
 HEADER_ASSERT(sizeof(time_t) == 8 && sizeof(off_t) == 8);
 HEADER_ASSERT(sizeof(struct timespec) == 16);

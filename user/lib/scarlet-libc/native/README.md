@@ -95,6 +95,11 @@ and does not replace or suppress any callback.
 Floating-point printf remains outside this companion. The built-in formatter
 continues to report unsupported floating conversions explicitly.
 
+The public `uchar.h` supplies C `char16_t`/`char32_t` typedefs and uses C++'s
+native keywords. It exposes the existing reserved `mbstate_t` storage layout
+for header interoperability. Multibyte conversion functions are not supplied;
+ICU consumers use ICU's implemented Unicode conversion APIs.
+
 ## Acceptance
 
 `../tests/native-support.c` and `native-support-registers.S` exercise the
