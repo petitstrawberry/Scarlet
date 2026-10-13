@@ -36,7 +36,7 @@ const MAX_PENDING_EVENTS: usize = 1024;
 const EVENT_INFO_SIZE: usize = 40;
 
 /// Size of the saved AArch64 event/signal frame on the user stack.
-const SIGNAL_FRAME_SIZE: usize = 8 + 8 + 8 + (31 * 8) + 8 + 8;
+const SIGNAL_FRAME_SIZE: usize = 8 + 8 + 8 + (31 * 8) + 8 + 8 + 16; // NZCV + alignment
 
 /// Event handler function pointer type (user-space address)
 pub type EventHandler = usize;
@@ -450,6 +450,8 @@ impl ScarletAbi {
     /// ```text
     /// +--------------------------+  <- original SP
     /// |   EventInfo              |  (40 bytes)
+    /// |   padding (8 bytes)      |
+    /// |   saved NZCV (8 bytes)   |
     /// |   saved sp (8 bytes)     |
     /// |   saved elr (8 bytes)    |
     /// |   saved regs[0..30]      |  (31 × 8 = 248 bytes)
@@ -500,7 +502,7 @@ impl ScarletAbi {
 
         let mut sp = trapframe.sp as usize;
 
-        // trampoline(8) + subtype(8) + content_type(8) + regs(31×8) + elr(8) + sp(8) = 288
+        // trampoline(8) + subtype(8) + content_type(8) + regs(31×8) + elr(8) + sp(8) + NZCV(8) + padding(8) = 304
         sp -= SIGNAL_FRAME_SIZE + EVENT_INFO_SIZE;
         sp &= !0xF;
 
@@ -524,6 +526,7 @@ impl ScarletAbi {
         }
         frame[272..280].copy_from_slice(&trapframe.elr.to_ne_bytes());
         frame[280..288].copy_from_slice(&trapframe.sp.to_ne_bytes());
+        frame[288..296].copy_from_slice(&trapframe.spsr.to_ne_bytes());
         if copy_to_user(&task, frame_base, &frame).is_err() {
             return Err("Failed to write signal frame");
         }
@@ -550,6 +553,8 @@ impl ScarletAbi {
     ///   [sp + 24]:  saved regs[0..30] (248 bytes)
     ///   [sp + 272]: saved elr        (8 bytes)
     ///   [sp + 280]: saved sp         (8 bytes)
+    ///   [sp + 288]: saved NZCV       (8 bytes; only bits 31:28 restored)
+    ///   [sp + 296]: padding          (8 bytes)
     /// ```
     pub fn event_return(
         trapframe: &mut crate::arch::Trapframe,
@@ -574,6 +579,13 @@ impl ScarletAbi {
         let mut sp_bytes = [0u8; 8];
         sp_bytes.copy_from_slice(&frame[280..288]);
         trapframe.sp = u64::from_ne_bytes(sp_bytes);
+
+        // The signal frame is user-writable: restore only EL0 arithmetic flags,
+        // never execution level, interrupt masks, or other privileged state.
+        let mut pstate_bytes = [0u8; 8];
+        pstate_bytes.copy_from_slice(&frame[288..296]);
+        trapframe.spsr = (trapframe.spsr & !0xf000_0000)
+            | (u64::from_ne_bytes(pstate_bytes) & 0xf000_0000);
 
         Ok(())
     }

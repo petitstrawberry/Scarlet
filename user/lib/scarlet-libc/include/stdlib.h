@@ -4,6 +4,7 @@
 #define MB_CUR_MAX ((size_t)1)
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
+#define RAND_MAX 2147483647
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -26,6 +27,11 @@ _Noreturn void exit(int);
 #endif
 char *realpath(const char *, char *);
 char *getenv(const char *);
+int rand(void);
+void srand(unsigned int);
+char *mkdtemp(char *);
+int mkstemp(char *);
+int mkostemp(char *, int);
 void qsort(void *, size_t, size_t, int (*)(const void *, const void *));
 void *bsearch(const void *, const void *, size_t, size_t, int (*)(const void *, const void *));
 int abs(int);
@@ -37,7 +43,7 @@ typedef struct { long long quot, rem; } lldiv_t;
 div_t div(int, int);
 ldiv_t ldiv(long, long);
 lldiv_t lldiv(long long, long long);
-/* Provided by the companion native libscarlet_float archive. */
+/* Provided by the native libscarlet_cxx_support companion archive. */
 float strtof(const char *, char **);
 double strtod(const char *, char **);
 long double strtold(const char *, char **);

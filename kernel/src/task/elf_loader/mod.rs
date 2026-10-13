@@ -1000,6 +1000,7 @@ fn map_elf_segment(
     // A large PT_LOAD must not require one physically contiguous allocation.
     // Re-executing Chromium can leave plenty of free memory but no single
     // contiguous extent large enough for its text segment.
+    let mapping_origin = crate::vm::vmem::MappingOrigin::new();
     let mut remaining_pages = size / PAGE_SIZE;
     let mut next_vaddr = vaddr;
     let mut chunk_pages = remaining_pages.min(4096);
@@ -1023,6 +1024,7 @@ fn map_elf_segment(
                 pm_start + chunk_size as u64 - 1,
             ),
             vm_start: vmarea.start,
+            mapping_origin,
             permissions,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,

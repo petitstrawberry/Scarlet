@@ -943,6 +943,13 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
             return pid as usize;
         }
 
+        // Native Rust Thread::join cannot report EINTR. A wait for a thread in
+        // our own group must resume after a handled event; process waits keep
+        // their existing interruptible semantics.
+        let is_thread_join = get_task_by_id(target_global).is_some_and(|target| {
+            target.get_thread_group_id() == task.get_thread_group_id()
+        });
+
         match wait_owner.wait(target_global) {
             Ok(status) => {
                 // Child has exited, return the status
@@ -979,6 +986,15 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                         if child_waker.wait_result_owned(task.get_id(), trapframe)
                             == crate::sync::waker::WaitResult::Interrupted
                         {
+                            if is_thread_join {
+                                // Event return retries this wait with the
+                                // original argument 0. AArch64 ELR points after
+                                // SVC; RISC-V EPC still points at ECALL here.
+                                // Nothing was reaped by the interrupted wait.
+                                #[cfg(target_arch = "aarch64")]
+                                { trapframe.elr -= 4; }
+                                return pid as usize;
+                            }
                             trapframe.increment_pc_next(&task);
                             return usize::MAX;
                         }

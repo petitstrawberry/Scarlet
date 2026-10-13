@@ -8,9 +8,10 @@ extern "C" {
 #endif
 int remove(const char *);
 /* Opaque, internally synchronized streams with unbuffered I/O.
-   Default Rust formatting supports integers. The external-format feature
-   requires the native companion library for floating-point printf/scanf;
-   wide-character streams are not implemented. */
+   Default Rust printf formatting supports integers and byte strings.
+   The native CXXSupport companion supplies string sscanf/vsscanf including
+   float/double input. external-format leaves printf-family definitions to
+   a separately linked formatter; wide-character streams are not implemented. */
 typedef struct scarlet_FILE FILE;
 typedef off_t fpos_t;
 #define EOF (-1)
@@ -27,6 +28,7 @@ extern FILE *stdout;
 extern FILE *stderr;
 FILE *fopen(const char *, const char *);
 FILE *fdopen(int, const char *);
+FILE *tmpfile(void);
 int fclose(FILE *);
 int fflush(FILE *);
 int setvbuf(FILE *, char *, int, size_t);

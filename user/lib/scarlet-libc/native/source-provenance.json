@@ -1,0 +1,76 @@
+{
+  "sources": [
+    {
+      "source": "webcore-port/runtime/setjmp.cpp",
+      "sha256": "da53cd81ade1be7ea4e9e842f0d30db03afad983a55c78a396279086f6f085fc",
+      "product_source": "setjmp.cpp",
+      "byte_identical": true,
+      "product_sha256": "da53cd81ade1be7ea4e9e842f0d30db03afad983a55c78a396279086f6f085fc"
+    },
+    {
+      "source": "webcore-port/runtime/longjmp.cpp",
+      "sha256": "2f747ac4b03ccf0893ab8b126a3b1ba12b83e1d8c3453dcac2e915d7b2887beb",
+      "product_source": "longjmp.cpp",
+      "byte_identical": true,
+      "product_sha256": "2f747ac4b03ccf0893ab8b126a3b1ba12b83e1d8c3453dcac2e915d7b2887beb"
+    },
+    {
+      "source": "webcore-port/runtime/scanf.cpp",
+      "sha256": "554660f5d627c9e37a95831a7345cc5df2977d03b633d758bddcc3d41cc2ff50",
+      "product_source": "scanf.cpp",
+      "byte_identical": true,
+      "product_sha256": "554660f5d627c9e37a95831a7345cc5df2977d03b633d758bddcc3d41cc2ff50"
+    },
+    {
+      "source": "webcore-port/runtime/locale-perror.c",
+      "sha256": "6913ebba76beeb7df8487779b3b7f6e3a46f1cb19529113ead7ada1b7084bdaf",
+      "product_source": "locale-perror.c",
+      "byte_identical": true,
+      "product_sha256": "6913ebba76beeb7df8487779b3b7f6e3a46f1cb19529113ead7ada1b7084bdaf"
+    },
+    {
+      "source": "webcore-port/runtime/rand.c",
+      "sha256": "49b978e292119340bb577af70b066fa5c5243dcdd7cf30bae70d796eea681b83",
+      "product_source": "rand.c",
+      "byte_identical": true,
+      "product_sha256": "49b978e292119340bb577af70b066fa5c5243dcdd7cf30bae70d796eea681b83"
+    },
+    {
+      "source": "webcore-port/runtime/tmpfile.c",
+      "sha256": "1ef024e6b17335eef282fa47714ec7a4c05063b82a7f2e3f92959ee9259d4873",
+      "product_source": "tmpfile.c",
+      "byte_identical": false,
+      "product_sha256": "52cee90e1008c01470b592956c98effe750f09763bfa8a0ef1d4ec92a6f0edf4"
+    },
+    {
+      "source": "jsc-lab/fenv-aarch64.c",
+      "sha256": "85f565a284aaa8158026847fd74a0bc6b007116c3cfc68a9e4c00d5121f77ea1",
+      "product_source": "fenv-aarch64.c",
+      "byte_identical": true,
+      "product_sha256": "85f565a284aaa8158026847fd74a0bc6b007116c3cfc68a9e4c00d5121f77ea1"
+    },
+    {
+      "source": "webcore-port/runtime/math-round.c",
+      "sha256": "dd8bf61afea0a5757011615a9f89fcd3f9fcacb6a96fdc79888c78a9987a39dd",
+      "product_source": "math-round.c",
+      "product_sha256": "dd8bf61afea0a5757011615a9f89fcd3f9fcacb6a96fdc79888c78a9987a39dd",
+      "byte_identical": true
+    }
+  ],
+  "llvm_version": "21.1.8",
+  "note": "Original native sources were exercised in Scarlet; new integrated archive is verified separately. LLVM support headers are external build inputs, not copied into this module.",
+  "split_source": {
+    "source": "jsc-port/runtime.cpp",
+    "source_sha256": "69db7c8bff9597301401a53ebd41078bef8b6b55f9a056673e0ea1994b58ff03",
+    "product_sources": [
+      "exit.cpp",
+      "float-conversion.cpp",
+      "locale.c",
+      "temporary-files.c",
+      "path-extensions.c",
+      "lrint.c",
+      "startup.c"
+    ],
+    "note": "Functions moved into separate product translation units. Startup no longer embeds engine-specific GC statistics. Additional public float/long-double conversion wrappers and mkstemp use the same implementations."
+  }
+}

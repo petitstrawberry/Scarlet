@@ -1,10 +1,13 @@
 # Support and acceptance status
 
-The implementation will remain in Rust, using Scarlet Rust std as its backend.
+The core implementation remains in Rust, using Scarlet Rust std as its backend.
 The goal is broad C/POSIX compatibility and musl-level quality; `no_std` and
 removing std are not requirements. This is a direction, not a claim of present
 parity or POSIX conformance. The current archive adapts Scarlet Rust std and
 Native syscalls to a C ABI.
+The [native AArch64 companion](native/README.md) owns the additional C/C++
+facilities required by native engine consumers. It shares the Rust backend
+and is installed as a separate archive, with an opt-in startup adapter.
 
 ## Implemented surface
 
@@ -14,6 +17,8 @@ Native syscalls to a C ABI.
 | `aligned_alloc`, `posix_memalign`, `reallocarray` | Power-of-two aligned allocation; non-multiple sizes supported. `posix_memalign` also requires pointer-size alignment and preserves errno/output on failure. `reallocarray` checks multiplication and retains the old block on failure. All results support ordinary free/realloc. | Host boundary, zero-size, alignment and reuse tests; C guest checks; deterministic backend failure checks for all three APIs. |
 | `errno`, `__errno_location` | Per-thread writable `int` in the versioned [Native TLS header](../../../docs/abi/native-tls.md), prepared before constructors or thread entry. Access needs no allocation or syscall; std `last_os_error` reads the same slot. | Host isolation tests; AArch64 guest constructor, fresh-thread and TLS-destructor checks with heap allocation denied; C syscall-error checks. |
 | Plain C startup fixture | The matching CRT initializes native TLS and calls a C constructor and `main`; the directly linked static archive includes Rust std. | [Builder](tests/build_c_startup.py) audits inputs, symbols and ELF; AArch64/HVF guest executes [C fixture](tests/c_main.c) and exits 43, with persisted marker and exit-status validation. This is not installed SDK acceptance. |
+| AArch64 native companion | C-locale floating conversion, AAPCS64 setjmp/longjmp, byte string scanning, locale reporting, PRNG, temporary streams, integer-return rounding and C/C++ finalization. `Scarlet::CStartup` calls actual main, completes callbacks and returns to native CRT TLS cleanup. | Native archive and installed CMake package build/audit pass; public header checks pass. AArch64/HVF SMP1 and SMP2 passed [native support](tests/native-support.c) (68 checks), [rounding](tests/math-round.c) (176 checks/5632 calls) and [startup/finalization](tests/native-startup.cpp) (12 checks with exact callback order), all child exit 0. Fresh guest results are required for a release artifact. |
+| `mprotect` | Rust libc calls Native `MemoryProtect`, validates page alignment/nonzero length/protection bits, and reports kernel failure as `EINVAL` under its limited status contract. | Native Rust archive build and single-export check pass; full protection-fault and concurrent mapping acceptance remains outstanding. |
 | `realpath` | Existing UTF-8 paths; caller buffer or library allocation; VFS resolution follows symlinks before `..`. | C/Rust guest checks for missing, empty, dangling, cyclic, non-directory and trailing-slash paths; nested tmpfs mount paths. |
 | `futimens`, `utimensat` | Seconds precision; NOW/OMIT/null times; dirfd-relative paths; absolute paths ignore dirfd; final-link nofollow. | C guest flag/fd/time errors and resulting inode metadata; Rust checks updates after rename and ext2 overflow without partial updates. |
 | `fsync`, `fdatasync` | Native file sync; `fdatasync` currently uses the same full sync operation. | Guest file/data/timestamp checks and independent ext2 inode extraction after shutdown. Power-loss durability is not established by this test. |
@@ -63,8 +68,9 @@ Native syscalls to a C ABI.
   `F_SETFD`, `F_GETFL` and `F_SETFL`, with append as the only mutable status
   flag. Nonblocking whole-file `flock` is limited to regular ext2/tmpfs files;
   blocking acquisition and POSIX record locks remain absent. Stdio is unbuffered;
-  buffering controls, scanf, wide streams and the remaining stdio surface are
-  absent. Floating-point, wide, positional, grouping and `%n` output formats
+  buffering controls, stream scanf, wide streams and the remaining stdio surface are
+  absent. String `sscanf`/`vsscanf` belong to the native companion.
+  Floating-point, wide, positional, grouping and `%n` output formats
   report `ENOTSUP`; this is a supported subset, not printf conformance.
 - **Clock, entropy and termination contracts:** clocks are microsecond-quantized,
   with realtime availability required. Sleep has no EINTR/remainder behavior.

@@ -4,6 +4,26 @@
 use crate::object::capability::memory_mapping::MemoryMappingOps;
 use alloc::sync::Arc;
 use core::fmt;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+/// Identity of one logical mapping, retained when its descriptors are split.
+/// Virtual addresses may be reused while fragments of an old mapping survive,
+/// so `vm_start` alone cannot identify the allocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MappingOrigin(usize);
+
+impl MappingOrigin {
+    pub(crate) fn new() -> Self {
+        static NEXT_ORIGIN: AtomicUsize = AtomicUsize::new(1);
+        Self(
+            NEXT_ORIGIN
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                    next.checked_add(1)
+                })
+                .expect("Virtual mapping origin identities exhausted"),
+        )
+    }
+}
 
 /// Represents a mapping between physical and virtual memory areas.
 ///
@@ -17,6 +37,8 @@ use core::fmt;
 /// * `vm_start` - The original virtual address where this mapping was first created.
 ///   Preserved across split operations so that owner-based page fault resolution can
 ///   compute correct page indices even after partial unmapping.
+/// * `mapping_origin` - Stable logical allocation identity preserved by splits,
+///   protection changes, COW replacement, and address-space cloning.
 /// * `permissions` - The access permissions for this mapping
 /// * `is_shared` - Whether this mapping is shared between processes
 /// * `memory_attribute` - Cacheability/device attribute requested for this mapping
@@ -27,6 +49,7 @@ pub struct VirtualMemoryMap {
     pub pmarea: PhysicalMemoryArea,
     pub vmarea: MemoryArea,
     pub vm_start: usize,
+    pub mapping_origin: MappingOrigin,
     pub permissions: usize,
     pub is_shared: bool,
     pub memory_attribute: MemoryAttribute,
@@ -39,6 +62,7 @@ impl fmt::Debug for VirtualMemoryMap {
             .field("pmarea", &self.pmarea)
             .field("vmarea", &self.vmarea)
             .field("vm_start", &self.vm_start)
+            .field("mapping_origin", &self.mapping_origin)
             .field("permissions", &self.permissions)
             .field("is_shared", &self.is_shared)
             .field("memory_attribute", &self.memory_attribute)
@@ -53,6 +77,7 @@ impl Default for VirtualMemoryMap {
             pmarea: PhysicalMemoryArea::new(0, 0),
             vmarea: MemoryArea::new(0, 0),
             vm_start: 0,
+            mapping_origin: MappingOrigin::new(),
             permissions: 0,
             is_shared: false,
             memory_attribute: MemoryAttribute::Normal,
@@ -89,6 +114,7 @@ impl VirtualMemoryMap {
             pmarea,
             vmarea,
             vm_start: vmarea.start,
+            mapping_origin: MappingOrigin::new(),
             permissions,
             is_shared,
             memory_attribute: MemoryAttribute::Normal,

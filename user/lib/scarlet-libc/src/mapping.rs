@@ -80,3 +80,27 @@ pub unsafe extern "C" fn munmap(addr: *mut c_void, length: usize) -> c_int {
         0
     }
 }
+
+/// Change protections on an existing mapping. The kernel rounds `length` up
+/// to a page boundary.
+///
+/// # Safety
+/// `addr` and `length` must describe a live mapping. The caller must ensure
+/// that accesses to the region obey its new protections.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mprotect(addr: *mut c_void, length: usize, prot: c_int) -> c_int {
+    if (addr as usize) % PAGE_SIZE != 0 || length == 0 || prot & !0x7 != 0 {
+        return crate::fail(ERRNO_EINVAL);
+    }
+    // SAFETY: Scalar arguments are validated above. The kernel validates the
+    // mapping, range (including overflow), and supported protection changes.
+    let result = unsafe {
+        scarlet_sys::syscall3(Syscall::MemoryProtect, addr as usize, length, prot as usize)
+    };
+    // MemoryProtect exposes no specific error code, only success or failure.
+    if result != 0 {
+        crate::fail(ERRNO_EINVAL)
+    } else {
+        0
+    }
+}

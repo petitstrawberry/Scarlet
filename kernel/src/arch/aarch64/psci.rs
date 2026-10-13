@@ -100,7 +100,7 @@ mod tests {
         data.extend_from_slice(&[0; 16]); data.extend(nodes); data.extend(strings);
         data
     }
-    #[test]
+    #[test_case]
     fn firmware_method_selects_smc_and_hvc_for_supported_versions() {
         for compatible in ["arm,psci-0.2", "arm,psci-1.0"] {
             for (method, expected) in [("smc", Conduit::Smc), ("hvc", Conduit::Hvc)] {
@@ -111,7 +111,7 @@ mod tests {
             }
         }
     }
-    #[test]
+    #[test_case]
     fn missing_unknown_disabled_or_legacy_configuration_never_guesses_hvc() {
         for (method, status, compatible) in vec![
             (None, None, "arm,psci-1.0"),

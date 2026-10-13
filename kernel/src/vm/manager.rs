@@ -644,6 +644,7 @@ impl VirtualMemoryManager {
                     vmarea: MemoryArea::new(map.vmarea.start, overlap_start - 1),
                     pmarea: Self::subrange_pmarea(&map, map.vmarea.start, overlap_start - 1),
                     vm_start: map.vm_start,
+                    mapping_origin: map.mapping_origin,
                     permissions: map.permissions,
                     is_shared: map.is_shared,
                     memory_attribute: map.memory_attribute,
@@ -655,6 +656,7 @@ impl VirtualMemoryManager {
                 vmarea: MemoryArea::new(overlap_start, overlap_end),
                 pmarea: Self::subrange_pmarea(&map, overlap_start, overlap_end),
                 vm_start: map.vm_start,
+                mapping_origin: map.mapping_origin,
                 permissions: map.permissions,
                 is_shared: map.is_shared,
                 memory_attribute,
@@ -669,6 +671,7 @@ impl VirtualMemoryManager {
                     vmarea: MemoryArea::new(after_start, map.vmarea.end),
                     pmarea: Self::subrange_pmarea(&map, after_start, map.vmarea.end),
                     vm_start: map.vm_start,
+                    mapping_origin: map.mapping_origin,
                     permissions: map.permissions,
                     is_shared: map.is_shared,
                     memory_attribute: map.memory_attribute,
@@ -772,8 +775,9 @@ impl VirtualMemoryManager {
             .map(|(_, map)| map)
             .filter(|map| vaddr <= map.vmarea.end)
             .ok_or("Unmapped source range")?;
-        let (origin, permissions, shared, attribute) = (
+        let (origin, mapping_origin, permissions, shared, attribute) = (
             first.vm_start,
+            first.mapping_origin,
             first.permissions,
             first.is_shared,
             first.memory_attribute,
@@ -783,6 +787,7 @@ impl VirtualMemoryManager {
         for (_, map) in g.memmap.range(first.vmarea.start..) {
             if map.vmarea.start > next
                 || map.vm_start != origin
+                || map.mapping_origin != mapping_origin
                 || map.permissions != permissions
                 || map.is_shared != shared
                 || map.memory_attribute != attribute
@@ -857,6 +862,7 @@ impl VirtualMemoryManager {
                         },
                         pmarea: Self::subrange_pmarea(&existing_map, overlap_start, overlap_end),
                         vm_start: existing_map.vm_start,
+                        mapping_origin: existing_map.mapping_origin,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         memory_attribute: existing_map.memory_attribute,
@@ -884,6 +890,7 @@ impl VirtualMemoryManager {
                             remove_start - 1,
                         ),
                         vm_start: existing_map.vm_start,
+                        mapping_origin: existing_map.mapping_origin,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         memory_attribute: existing_map.memory_attribute,
@@ -901,6 +908,7 @@ impl VirtualMemoryManager {
                         },
                         pmarea: Self::subrange_pmarea(&existing_map, remove_end + 1, existing_end),
                         vm_start: existing_map.vm_start,
+                        mapping_origin: existing_map.mapping_origin,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         memory_attribute: existing_map.memory_attribute,
@@ -978,6 +986,35 @@ impl VirtualMemoryManager {
         self.unmap_all_from_mmu();
         drop(replaced_maps);
         Ok(())
+    }
+
+    /// Contiguous user region with one mapping origin and protection, including
+    /// private COW fragments. A touched page is not a whole stack boundary.
+    /// Hold one read lock so a concurrent split/unmap cannot produce mixed bounds.
+    pub fn user_mapping_bounds(&self, address: usize) -> Option<(usize, usize)> {
+        let g = self.inner.read();
+        let (_, first) = g.memmap.range(..=address).next_back()?;
+        if address > first.vmarea.end || first.permissions & 0x08 == 0 {
+            return None;
+        }
+        let same = |map: &VirtualMemoryMap| {
+            map.mapping_origin == first.mapping_origin
+                && map.vm_start == first.vm_start
+                && map.permissions == first.permissions
+                && map.is_shared == first.is_shared
+                && map.memory_attribute == first.memory_attribute
+        };
+        let mut start = first.vmarea.start;
+        let mut end = first.vmarea.end;
+        for (_, map) in g.memmap.range(..start).rev() {
+            if map.vmarea.end.checked_add(1) != Some(start) || !same(map) { break; }
+            start = map.vmarea.start;
+        }
+        for (_, map) in g.memmap.range((core::ops::Bound::Excluded(first.vmarea.start), core::ops::Bound::Unbounded)) {
+            if end.checked_add(1) != Some(map.vmarea.start) || !same(map) { break; }
+            end = map.vmarea.end;
+        }
+        Some((start, end.checked_add(1)?))
     }
 
     /// Searches for a memory map containing the given virtual address.
@@ -1119,6 +1156,7 @@ impl VirtualMemoryManager {
             None => return Ok(false),
         };
         if expected.is_shared
+            || replacement.mapping_origin != expected.mapping_origin
             || page_vaddr < expected.vmarea.start
             || page_end > expected.vmarea.end
         {
@@ -1139,6 +1177,7 @@ impl VirtualMemoryManager {
                     .is_some_and(|owner| Arc::ptr_eq(owner, expected_owner));
                 owner_matches
                     && !current.is_shared
+                    && current.mapping_origin == expected.mapping_origin
                     && current.vm_start == expected.vm_start
                     && current.permissions == expected.permissions
                     && current.memory_attribute == expected.memory_attribute
@@ -1160,6 +1199,7 @@ impl VirtualMemoryManager {
                 vmarea: MemoryArea::new(current.vmarea.start, page_vaddr - 1),
                 pmarea: Self::subrange_pmarea(&current, current.vmarea.start, page_vaddr - 1),
                 vm_start: current.vm_start,
+                mapping_origin: current.mapping_origin,
                 permissions: current.permissions,
                 is_shared: current.is_shared,
                 memory_attribute: current.memory_attribute,
@@ -1172,6 +1212,7 @@ impl VirtualMemoryManager {
                 vmarea: MemoryArea::new(page_end + 1, current.vmarea.end),
                 pmarea: Self::subrange_pmarea(&current, page_end + 1, current.vmarea.end),
                 vm_start: current.vm_start,
+                mapping_origin: current.mapping_origin,
                 permissions: current.permissions,
                 is_shared: current.is_shared,
                 memory_attribute: current.memory_attribute,
@@ -1264,6 +1305,7 @@ impl VirtualMemoryManager {
                             ),
                             vmarea: MemoryArea::new(page_vaddr, page_vaddr + PAGE_SIZE - 1),
                             vm_start: memory_map.vm_start,
+                            mapping_origin: memory_map.mapping_origin,
                             permissions: perms,
                             is_shared: false,
                             memory_attribute: memory_map.memory_attribute,
@@ -1786,6 +1828,7 @@ impl VirtualMemoryManager {
                         },
                         pmarea: Self::subrange_pmarea(&existing_map, overlap_start, overlap_end),
                         vm_start: existing_map.vm_start,
+                        mapping_origin: existing_map.mapping_origin,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         memory_attribute: existing_map.memory_attribute,
@@ -1810,6 +1853,7 @@ impl VirtualMemoryManager {
                         },
                         pmarea: Self::subrange_pmarea(&existing_map, existing_start, new_start - 1),
                         vm_start: existing_map.vm_start,
+                        mapping_origin: existing_map.mapping_origin,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         memory_attribute: existing_map.memory_attribute,
@@ -1827,6 +1871,7 @@ impl VirtualMemoryManager {
                         },
                         pmarea: Self::subrange_pmarea(&existing_map, new_end + 1, existing_end),
                         vm_start: existing_map.vm_start,
+                        mapping_origin: existing_map.mapping_origin,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         memory_attribute: existing_map.memory_attribute,
@@ -1914,6 +1959,7 @@ impl VirtualMemoryManager {
                             end: memory_map.pmarea.end,
                         },
                         vm_start: prev_memory_map.vm_start,
+                        mapping_origin: prev_memory_map.mapping_origin,
                         permissions: prev_memory_map.permissions, // Use permissions from first map
                         is_shared: prev_memory_map.is_shared,
                         memory_attribute: prev_memory_map.memory_attribute,
@@ -1962,11 +2008,17 @@ impl VirtualMemoryManager {
     /// # Returns
     /// true if memory maps can be safely merged
     fn can_merge_memory_maps(map1: &VirtualMemoryMap, map2: &VirtualMemoryMap) -> bool {
-        // Memory maps can be merged if:
-        // 1. They have the same permissions
-        // 2. They have the same sharing status
-        // 3. Physical addresses are also contiguous
-        map1.permissions == map2.permissions
+        let same_owner = match (&map1.owner, &map2.owner) {
+            (None, None) => true,
+            (Some(first), Some(second)) => Arc::ptr_eq(first, second),
+            _ => false,
+        };
+        // Coalescing descriptors must retain both allocation identity and
+        // owner page indexing, even when distinct mappings are adjacent.
+        map1.mapping_origin == map2.mapping_origin
+            && map1.vm_start == map2.vm_start
+            && same_owner
+            && map1.permissions == map2.permissions
             && map1.is_shared == map2.is_shared
             && map1.memory_attribute == map2.memory_attribute
             && map1.pmarea.end + 1 == map2.pmarea.start
@@ -2053,6 +2105,7 @@ mod tests {
             vmarea: vma,
             pmarea: crate::vm::vmem::PhysicalMemoryArea::new(vma.start as u64, vma.end as u64),
             vm_start: vma.start,
+            mapping_origin: crate::vm::vmem::MappingOrigin::new(),
             permissions: 0,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -2121,6 +2174,7 @@ mod tests {
             vmarea: vma,
             pmarea: crate::vm::vmem::PhysicalMemoryArea::new(vma.start as u64, vma.end as u64),
             vm_start: vma.start,
+            mapping_origin: crate::vm::vmem::MappingOrigin::new(),
             permissions: 0,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -2149,6 +2203,7 @@ mod tests {
             vmarea: vma1,
             pmarea: crate::vm::vmem::PhysicalMemoryArea::new(vma1.start as u64, vma1.end as u64),
             vm_start: vma1.start,
+            mapping_origin: crate::vm::vmem::MappingOrigin::new(),
             permissions: 0,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -2162,6 +2217,7 @@ mod tests {
             vmarea: vma2,
             pmarea: crate::vm::vmem::PhysicalMemoryArea::new(vma2.start as u64, vma2.end as u64),
             vm_start: vma2.start,
+            mapping_origin: crate::vm::vmem::MappingOrigin::new(),
             permissions: 0,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -2318,7 +2374,7 @@ mod tests {
         // Test memory map coalescing with adjacent compatible maps
         let manager = VirtualMemoryManager::new();
 
-        // Add two adjacent memory maps that can be merged
+        // Add two adjacent descriptors of the same logical mapping.
         let map1 = VirtualMemoryMap::new(
             crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x80000000,
@@ -2332,7 +2388,7 @@ mod tests {
             false,
             None,
         );
-        let map2 = VirtualMemoryMap::new(
+        let mut map2 = VirtualMemoryMap::new(
             crate::vm::vmem::PhysicalMemoryArea {
                 start: 0x80001000,
                 end: 0x80001fff,
@@ -2345,6 +2401,9 @@ mod tests {
             false, // Same sharing status
             None,
         );
+
+        map2.mapping_origin = map1.mapping_origin;
+        map2.vm_start = map1.vm_start;
 
         manager.add_memory_map(map1).unwrap();
         manager.add_memory_map(map2).unwrap();
@@ -2976,6 +3035,7 @@ mod tests {
             vmarea: vma,
             pmarea: pma,
             vm_start: vma.start,
+            mapping_origin: crate::vm::vmem::MappingOrigin::new(),
             permissions: 0o644,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -3016,6 +3076,7 @@ mod tests {
                 end: PAGE_SIZE as u64 - 1,
             },
             vm_start: 0x2000,
+            mapping_origin: crate::vm::vmem::MappingOrigin::new(),
             permissions: 0,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -3103,6 +3164,7 @@ mod tests {
             },
             pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
             vm_start: 0x4000,
+            mapping_origin: crate::vm::vmem::MappingOrigin::new(),
             permissions: 0o644,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -3120,6 +3182,7 @@ mod tests {
                 end: 0x8000_0fff,
             },
             vm_start: 0x5000,
+            mapping_origin: crate::vm::vmem::MappingOrigin::new(),
             permissions: 0o600,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -3163,6 +3226,7 @@ mod tests {
             },
             pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
             vm_start: 0x4000,
+            mapping_origin: crate::vm::vmem::MappingOrigin::new(),
             permissions: 0o603,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -3182,6 +3246,7 @@ mod tests {
                 end: 0x8000_0fff,
             },
             vm_start: 0x4000,
+            mapping_origin: first_snapshot.mapping_origin,
             permissions: 0o603,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -3203,6 +3268,7 @@ mod tests {
                 end: 0x9000_0fff,
             },
             vm_start: 0x4000,
+            mapping_origin: stale_snapshot.mapping_origin,
             permissions: 0o603,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -3233,6 +3299,141 @@ mod tests {
         );
     }
 
+    fn query_test_mapping() -> VirtualMemoryMap {
+        VirtualMemoryMap::new(
+            crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
+            MemoryArea::new(0x4000, 0x6fff),
+            0x0b,
+            false,
+            Some(Arc::new(AnonymousPageOwner::new())),
+        )
+    }
+
+    #[test_case]
+    fn mapping_query_stops_at_reused_origin_address() {
+        let manager = VirtualMemoryManager::new();
+        let original = query_test_mapping();
+        let mut prefix = query_test_mapping();
+        prefix.vmarea.end = 0x4fff;
+        // Reusing the same backing owner must not make this a fragment.
+        prefix.owner = original.owner.clone();
+        assert_ne!(prefix.mapping_origin, original.mapping_origin);
+        manager.add_memory_map(original).unwrap();
+        manager.remove_memory_map_range(0x4000, PAGE_SIZE);
+        manager.add_memory_map(prefix).unwrap();
+        assert_eq!(manager.user_mapping_bounds(0x4100), Some((0x4000, 0x5000)));
+        assert_eq!(manager.user_mapping_bounds(0x5100), Some((0x5000, 0x7000)));
+        assert_eq!(manager.coalesce_memory_maps(), 0);
+    }
+
+    #[test_case]
+    fn mapping_query_stops_at_fixed_replacement() {
+        let manager = VirtualMemoryManager::new();
+        let original = query_test_mapping();
+        let mut prefix = query_test_mapping();
+        prefix.vmarea.end = 0x4fff;
+        manager.add_memory_map(original.clone()).unwrap();
+        let removed = manager.add_memory_map_fixed(prefix).unwrap();
+        assert_eq!(removed[0].mapping_origin, original.mapping_origin);
+        assert_eq!(manager.user_mapping_bounds(0x4100), Some((0x4000, 0x5000)));
+        assert_eq!(manager.user_mapping_bounds(0x6100), Some((0x5000, 0x7000)));
+    }
+
+    #[test_case]
+    fn mapping_query_preserves_full_cow_stack_bounds() {
+        let manager = VirtualMemoryManager::new();
+        let source = query_test_mapping();
+        manager.add_memory_map(source.clone()).unwrap();
+        let replacement = VirtualMemoryMap {
+            vmarea: MemoryArea::new(0x5000, 0x5fff),
+            pmarea: crate::vm::vmem::PhysicalMemoryArea::new(0x8000_0000, 0x8000_0fff),
+            owner: None,
+            ..source.clone()
+        };
+        assert_eq!(
+            manager.commit_private_cow_page(&source, replacement),
+            Ok(true)
+        );
+        for address in [0x4100, 0x5100, 0x6100] {
+            assert_eq!(manager.user_mapping_bounds(address), Some((0x4000, 0x7000)));
+            assert_eq!(
+                manager.search_memory_map(address).unwrap().mapping_origin,
+                source.mapping_origin
+            );
+        }
+    }
+
+    #[test_case]
+    fn mapping_query_respects_protection_boundaries() {
+        let manager = VirtualMemoryManager::new();
+        let source = query_test_mapping();
+        manager.add_memory_map(source.clone()).unwrap();
+        manager
+            .protect_memory_map_range(MemoryArea::new(0x5000, 0x5fff), 1)
+            .unwrap();
+        assert_eq!(manager.user_mapping_bounds(0x4100), Some((0x4000, 0x5000)));
+        assert_eq!(manager.user_mapping_bounds(0x5100), Some((0x5000, 0x6000)));
+        assert_eq!(manager.user_mapping_bounds(0x6100), Some((0x6000, 0x7000)));
+        manager
+            .protect_memory_map_range(MemoryArea::new(0x5000, 0x5fff), 3)
+            .unwrap();
+        assert_eq!(manager.user_mapping_bounds(0x5100), Some((0x4000, 0x7000)));
+        assert_eq!(
+            manager.search_memory_map(0x5100).unwrap().mapping_origin,
+            source.mapping_origin
+        );
+    }
+
+    #[test_case]
+    fn coalescer_keeps_distinct_mapping_origins() {
+        let manager = VirtualMemoryManager::new();
+        let first = VirtualMemoryMap::new(
+            crate::vm::vmem::PhysicalMemoryArea::new(0x8000_0000, 0x8000_0fff),
+            MemoryArea::new(0x4000, 0x4fff),
+            0x0b,
+            false,
+            None,
+        );
+        let mut second = VirtualMemoryMap::new(
+            crate::vm::vmem::PhysicalMemoryArea::new(0x8000_1000, 0x8000_1fff),
+            MemoryArea::new(0x5000, 0x5fff),
+            0x0b,
+            false,
+            None,
+        );
+        // Model an old tail adjacent to a new allocation at its old base.
+        second.vm_start = first.vm_start;
+        manager.add_memory_map(first).unwrap();
+        manager.add_memory_map(second).unwrap();
+        assert_eq!(manager.coalesce_memory_maps(), 0);
+        assert_eq!(manager.memmap_len(), 2);
+        assert_eq!(manager.user_mapping_bounds(0x4100), Some((0x4000, 0x5000)));
+    }
+
+    #[test_case]
+    fn cow_commit_rejects_recreated_mapping_with_same_owner_and_address() {
+        let manager = VirtualMemoryManager::new();
+        let original = query_test_mapping();
+        manager.add_memory_map(original.clone()).unwrap();
+        let mut recreated = query_test_mapping();
+        recreated.owner = original.owner.clone();
+        manager.add_memory_map_fixed(recreated.clone()).unwrap();
+        let replacement = VirtualMemoryMap {
+            vmarea: MemoryArea::new(0x5000, 0x5fff),
+            pmarea: crate::vm::vmem::PhysicalMemoryArea::new(0x8000_0000, 0x8000_0fff),
+            owner: None,
+            ..original.clone()
+        };
+        assert_eq!(
+            manager.commit_private_cow_page(&original, replacement),
+            Ok(false)
+        );
+        assert_eq!(
+            manager.search_memory_map(0x5000).unwrap().mapping_origin,
+            recreated.mapping_origin
+        );
+    }
+
     #[test_case]
     fn test_anonymous_owner_fault_past_vma_does_not_extend_mapping() {
         let manager = VirtualMemoryManager::new();
@@ -3244,6 +3445,7 @@ mod tests {
             },
             pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
             vm_start: 0x4000,
+            mapping_origin: crate::vm::vmem::MappingOrigin::new(),
             permissions: 0x0b,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,

@@ -9,6 +9,13 @@ plus process-private pthread lifecycle and synchronization.
 The [support matrix and acceptance gates](STATUS.md) distinguish implemented
 behavior from the work needed for a complete C runtime.
 
+The [native C/C++ companion](native/README.md) supplies AArch64 numeric
+conversion, nonlocal jumps, string scanning, C/C++ finalizers and additional
+C facilities from sources owned by this repository. Its CMake package exports
+`Scarlet::CXXSupport` and the opt-in `Scarlet::CStartup` adapter for current
+native CRTs. Link them with the same Rust libc backend, rather than application
+specific runtime extension archives.
+
 The direction is to grow this Rust implementation using Scarlet Rust std as
 its backend, with musl-level completeness and robustness as a goal. Allocation
 and TLS can continue to use std; `no_std` is not a requirement. The public
