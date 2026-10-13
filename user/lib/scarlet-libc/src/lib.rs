@@ -80,15 +80,18 @@ thread_local! {
 unsafe extern "C" {
     // Optional in static executables; scarlet-ld supplies it for loaded DSOs.
     #[linkage = "extern_weak"]
-    static environ: *const *const c_char;
+    // Rust's extern_weak static contains the symbol's ADDRESS, not its data.
+    // The C data at that address is itself the char ** environment pointer.
+    static environ: *const *const *const c_char;
 }
 
 #[cfg(target_os = "scarlet")]
 unsafe fn inherited_environment_value(name: &str) -> Option<String> {
-    if std::ptr::addr_of!(environ).is_null() {
+    let address = unsafe { environ };
+    if address.is_null() {
         return None;
     }
-    let mut cursor = unsafe { environ };
+    let mut cursor = unsafe { *address };
     if cursor.is_null() {
         return None;
     }
