@@ -71,12 +71,14 @@ pub(crate) fn fail(errno: c_int) -> c_int {
 
 #[cfg(target_os = "scarlet")]
 thread_local! {
-    static ENV_VALUE: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    static ENV_VALUES: std::cell::RefCell<std::collections::HashMap<String, Vec<u8>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 /// # Safety
 /// `name` must be a NUL-terminated environment variable name. The returned
-/// pointer is valid until this thread next calls getenv.
+/// pointer remains valid across getenv calls, until that variable changes or
+/// this thread exits. Different variables own independent, stable buffers.
 #[cfg(target_os = "scarlet")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getenv(name: *const c_char) -> *mut c_char {
@@ -90,13 +92,44 @@ pub unsafe extern "C" fn getenv(name: *const c_char) -> *mut c_char {
     let Ok(value) = std::env::var(name) else {
         return std::ptr::null_mut();
     };
-    ENV_VALUE.with(|buffer| {
-        let mut buffer = buffer.borrow_mut();
+    ENV_VALUES.with(|values| {
+        let mut values = values.borrow_mut();
+        environment_value(&mut values, name, &value).cast::<c_char>()
+    })
+}
+
+#[cfg(any(test, target_os = "scarlet"))]
+fn environment_value(
+    values: &mut std::collections::HashMap<String, Vec<u8>>,
+    name: &str,
+    value: &str,
+) -> *mut u8 {
+    let buffer = values.entry(name.to_owned()).or_default();
+    if buffer.len() != value.len() + 1 || buffer[..value.len()] != *value.as_bytes() {
         buffer.clear();
         buffer.extend_from_slice(value.as_bytes());
         buffer.push(0);
-        buffer.as_mut_ptr().cast::<c_char>()
-    })
+    }
+    buffer.as_mut_ptr()
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::environment_value;
+    use std::{collections::HashMap, ffi::CStr};
+
+    #[test]
+    fn getenv_values_survive_other_lookups_and_map_growth() {
+        let mut values = HashMap::new();
+        let home = environment_value(&mut values, "HOME", "/home/user");
+        for index in 0..256 {
+            environment_value(&mut values, &format!("KEY_{index}"), "independent");
+        }
+        assert_eq!(unsafe { CStr::from_ptr(home.cast()) }.to_bytes(), b"/home/user");
+        assert_eq!(environment_value(&mut values, "HOME", "/home/user"), home);
+        let updated = environment_value(&mut values, "HOME", "/home/changed");
+        assert_eq!(unsafe { CStr::from_ptr(updated.cast()) }.to_bytes(), b"/home/changed");
+    }
 }
 
 #[cfg(target_os = "scarlet")]
