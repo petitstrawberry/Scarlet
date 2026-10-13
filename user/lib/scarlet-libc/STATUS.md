@@ -38,6 +38,15 @@ and is installed as a separate archive, with an opt-in startup adapter.
 
 ## Limits that callers must account for
 
+- **Binary128 math:** both native C targets use a 16-byte, 113-bit-mantissa
+  `long double`. `atan2l` is declared for libc++ header parsing only; there is
+  no native provider. Real calls fail at link time unless an ABI-compatible
+  implementation is explicitly linked. No binary64 narrowing substitute is
+  supplied. The [positive complex fixture](tests/native-complex.cpp) uses
+  actual float/double operations, and the
+  [negative link fixture](tests/native-atan2l-unprovided.cpp) requires rejection
+  of real long-double use.
+
 - **Runtime integration:** allocation and TLS use Rust std and its CRT by
   design. The toolchain must supply and initialize the matching backend.
   Keep this dependency one-way: the std primitives used by scarlet-libc must

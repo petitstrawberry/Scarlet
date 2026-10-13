@@ -2,6 +2,9 @@
 #define SCARLET_MATH_H
 #define INFINITY (__builtin_inff())
 #define NAN (__builtin_nanf(""))
+#define HUGE_VAL (__builtin_huge_val())
+#define HUGE_VALF (__builtin_huge_valf())
+#define HUGE_VALL (__builtin_huge_vall())
 #define M_PI 3.14159265358979323846
 #define M_PI_2 1.57079632679489661923
 #define M_PI_4 0.785398163397448309616
@@ -82,6 +85,10 @@ float rintf(float);
 long lrint(double);
 double atan2(double, double);
 float atan2f(float, float);
+/* Declaration needed to parse libc++'s unused long-double arg template.
+ * The native binary128 atan2l provider is not implemented: actual calls
+ * require an external ABI-compatible provider or fail at link time. */
+long double atan2l(long double, long double);
 double pow(double, double);
 float powf(float, float);
 double hypot(double, double);

@@ -87,6 +87,12 @@ valid digits on overflow, set `ERANGE` and preserve the required end pointer.
 continuation in Rust thread-local storage; `strtok_r` uses caller-owned state.
 Integer absolute-value functions and IEEE `fabs`/`fabsf` are available; this is
 not a general math library, and binary128 `long double` has no `fabsl` export.
+`atan2l` has a C17 declaration so libc++ can parse its otherwise unused
+long-double complex overload. Scarlet does not provide a binary128 `atan2l`
+implementation; calling that overload requires an ABI-compatible external
+provider or produces an unresolved-symbol link failure. Native
+`complex<float>` and `complex<double>` argument operations use the implemented
+`atan2f`/`atan2`; this does not establish support for every complex operation.
 
 `open`, `openat`, `creat`, `close`, `read`, `write`, `lseek` and `dup` use the
 kernel's status-preserving descriptor operations. Duplicates share offset and
