@@ -1028,6 +1028,31 @@ pub fn parameter_set_id(nal: &[u8]) -> Result<u32, String> {
         _ => Err(String::from("not an H.264 parameter set")),
     }
 }
+/// SPS identifier referenced by a PPS NAL, without decoding a picture.
+pub fn pps_sps_id(nal: &[u8]) -> Result<u32, String> {
+    if nal
+        .first()
+        .is_none_or(|header| header & 0x80 != 0 || header & 31 != 8)
+    {
+        return Err(String::from("not an H.264 PPS NAL"));
+    }
+    let mut reader = EbspBitReader::new(&nal[1..]);
+    read_u8_ue(&mut reader, "H.264 PPS id")?;
+    Ok(u32::from(read_u8_ue(&mut reader, "H.264 PPS SPS id")?))
+}
+/// PPS identifier referenced by a coded slice NAL.
+pub fn slice_pps_id(nal: &[u8]) -> Result<u32, String> {
+    if nal
+        .first()
+        .is_none_or(|header| header & 0x80 != 0 || !matches!(header & 31, 1 | 5))
+    {
+        return Err(String::from("not an H.264 slice NAL"));
+    }
+    let mut reader = EbspBitReader::new(&nal[1..]);
+    read_u32_ue(&mut reader, "H.264 first_mb_in_slice")?;
+    read_u32_ue(&mut reader, "H.264 slice_type")?;
+    Ok(u32::from(read_u8_ue(&mut reader, "H.264 slice PPS id")?))
+}
 fn parse_h264_sps(nal: &[u8], color: &mut H264ColorInfo) -> Result<ScarletVideoH264Sps, String> {
     parse_h264_sps_metadata(nal, color, None)
 }

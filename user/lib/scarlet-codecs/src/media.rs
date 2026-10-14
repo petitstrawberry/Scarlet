@@ -536,6 +536,9 @@ impl AvcConfiguration {
         if sps_count == 0 {
             return Err(MediaError::InvalidData("missing AVC SPS"));
         }
+        if sps_count != 1 {
+            return Err(MediaError::Unsupported("multiple AVC SPS configurations"));
+        }
         let mut parameter_sets = Vec::new();
         let mut info = None;
         for _ in 0..sps_count {
@@ -552,6 +555,9 @@ impl AvcConfiguration {
         if pps_count == 0 {
             return Err(MediaError::InvalidData("missing AVC PPS"));
         }
+        if pps_count != 1 {
+            return Err(MediaError::Unsupported("multiple AVC PPS configurations"));
+        }
         for _ in 0..pps_count {
             let bytes = read_avcc_parameter(data, &mut offset)?;
             if bytes[0] & 31 != 8 {
@@ -559,6 +565,11 @@ impl AvcConfiguration {
             }
             crate::h264::parameter_set_id(bytes).map_err(decode_err)?;
             parameter_sets.push(bytes.to_vec());
+        }
+        if crate::h264::pps_sps_id(&parameter_sets[1]).map_err(decode_err)?
+            != crate::h264::parameter_set_id(&parameter_sets[0]).map_err(decode_err)?
+        {
+            return Err(MediaError::InvalidData("AVC PPS references missing SPS"));
         }
         let (color, depth, width, height) = info.unwrap();
         Ok(Self {
@@ -599,9 +610,30 @@ impl AvcConfiguration {
             }
             if matches!(nal[0] & 31, 7 | 8) {
                 let id = crate::h264::parameter_set_id(nal).map_err(decode_err)?;
+                let known = self.parameter_sets.iter().any(|old| {
+                    old[0] & 31 == nal[0] & 31
+                        && crate::h264::parameter_set_id(old).ok() == Some(id)
+                });
+                if !known {
+                    return Err(MediaError::Unsupported(
+                        "multiple AVC parameter-set identifiers",
+                    ));
+                }
+                if nal[0] & 31 == 8
+                    && crate::h264::pps_sps_id(nal).map_err(decode_err)?
+                        != crate::h264::parameter_set_id(&self.parameter_sets[0])
+                            .map_err(decode_err)?
+                {
+                    return Err(MediaError::InvalidData("AVC PPS references missing SPS"));
+                }
                 replacements.push((nal[0] & 31, id, *nal));
             }
             if matches!(nal[0] & 31, 1 | 5) {
+                if crate::h264::slice_pps_id(nal).map_err(decode_err)?
+                    != crate::h264::parameter_set_id(&self.parameter_sets[1]).map_err(decode_err)?
+                {
+                    return Err(MediaError::InvalidData("AVC slice references missing PPS"));
+                }
                 let first = nal
                     .get(1)
                     .ok_or(MediaError::InvalidData("empty AVC slice"))?;
@@ -610,8 +642,10 @@ impl AvcConfiguration {
                 }
             }
         }
-        if pictures > 1 {
-            return Err(MediaError::Unsupported("multiple pictures per AVC sample"));
+        if pictures != 1 {
+            return Err(MediaError::InvalidData(
+                "AVC access unit requires one coded picture",
+            ));
         }
         // New parameter sets persist into later access units. Retaining an old
         // avcC prefix would otherwise overwrite the in-band configuration again.

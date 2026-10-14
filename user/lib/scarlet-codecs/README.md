@@ -31,7 +31,9 @@ parser for a new URL. The shared Symphonia ISO MP4 parser owns sample-table pars
 
 `AvcConfiguration` converts complete AVCC samples into validated Annex-B access
 units for a native decoder such as `/dev/video0`. It preserves SPS/PPS EBSP bytes,
-updates in-band parameter sets, and exposes dimensions, colour and reorder depth.
+updates same-ID in-band parameter sets, and exposes dimensions, colour and reorder
+depth. The native configuration currently requires one SPS and one PPS; additional
+parameter-set IDs are explicitly rejected to avoid ambiguous active-stream metadata.
 SPS changes are validated before submission. For a bounded output queue, Main/High
 streams must signal a reorder depth of at most two; Baseline without VUI has none.
 

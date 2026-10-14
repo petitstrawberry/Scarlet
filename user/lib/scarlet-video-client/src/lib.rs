@@ -702,12 +702,6 @@ pub struct ScarletVideoDecoder {
 }
 
 impl ScarletVideoDecoder {
-    /// Open the default Scarlet video decoder with backend-selected buffers.
-    ///
-    /// # Returns
-    ///
-    /// A decoder ready to be configured, or an error if `/dev/video0` cannot
-    /// be opened or initialized.
     /// Query the current `/dev/video0` backend without allocating a decoder
     /// session, mapped buffers, or decoded images. The device handle is closed
     /// before returning. Unsupported legacy capability queries are explicit.
@@ -719,6 +713,12 @@ impl ScarletVideoDecoder {
         Ok(DecoderCapabilities::from(caps))
     }
 
+    /// Open the default Scarlet video decoder with backend-selected buffers.
+    ///
+    /// # Returns
+    ///
+    /// A decoder ready to be configured, or an error if `/dev/video0` cannot
+    /// be opened or initialized.
     pub fn open() -> Result<Self, String> {
         Self::open_with_options(DecoderOptions::default())
     }

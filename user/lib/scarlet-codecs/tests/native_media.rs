@@ -141,6 +141,14 @@ fn native_config_rejects_truncated_and_oversized_inband_sps_before_submit() {
     let bytes = fixture.create("baseline", "0");
     let (mut track, samples) = parsed(&bytes);
     let mut config = AvcConfiguration::new(&track).unwrap();
+    let mut empty = samples[0].clone();
+    empty.data.clear();
+    assert!(matches!(
+        config.annex_b(&empty),
+        Err(MediaError::InvalidData(
+            "AVC access unit requires one coded picture"
+        ))
+    ));
     let mut truncated = samples[0].clone();
     truncated.data = vec![0, 0, 0, 8, 0x67];
     assert!(config.annex_b(&truncated).is_err());
@@ -183,4 +191,21 @@ fn native_config_rejects_truncated_and_oversized_inband_sps_before_submit() {
     assert_eq!((config.width(), config.height()), (64, 48)); // rejected update is transactional
     track.extradata.truncate(6);
     assert!(AvcConfiguration::new(&track).is_err());
+}
+
+#[test]
+fn multiple_sps_configuration_is_explicitly_unsupported() {
+    let fixture = Fixture::new();
+    let bytes = fixture.create("baseline", "0");
+    let (mut track, _) = parsed(&bytes);
+    let length = usize::from(u16::from_be_bytes(
+        track.extradata[6..8].try_into().unwrap(),
+    ));
+    let sps = track.extradata[6..8 + length].to_vec();
+    track.extradata[5] = (track.extradata[5] & 0xe0) | 2;
+    track.extradata.splice(8 + length..8 + length, sps);
+    assert!(matches!(
+        AvcConfiguration::new(&track),
+        Err(MediaError::Unsupported("multiple AVC SPS configurations"))
+    ));
 }
