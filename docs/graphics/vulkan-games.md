@@ -409,8 +409,9 @@ local patches. TGSI `FMA` lowers to GLSL `fma` only with GPUShader5 support.
 The translator and actual Apple GPU readback distinguished the fused result
 `-2^-46` from the unfused result `0`; `MAD` is not used as a substitute.
 
-This is a bounded native rendering profile, not Vulkan conformance or a video
-playback implementation. Media and WebGL/WebGPU remain unavailable.
+This earlier profile was a bounded native rendering profile, not Vulkan
+conformance or video playback. Media and WebGL/WebGPU were unavailable in that
+revision; native media bring-up is recorded below.
 
 The normal release guest also passed the WebCore page contract at Retina scale
 2: actual DOM/CSS text and rounded corners, JavaScript execution and clicks,
@@ -475,3 +476,61 @@ loaded its real title and produced 557,117 nonwhite GPU pixels, then joined its
 native owner without the previous image-copy errors. The HTTP transport now
 uses 2–4 bounded worker threads, with compressed entity decoding on a separate
 bounded blocking pool; WebCore and JavaScript retain their native owner.
+
+
+## Native media bring-up (2026-10-15)
+
+The previously verified release disk with Myrica `e2a8b203`, WebKit `cf35e35`, kernel
+`f7afdc393` and SGFX `7164492` uses `scarlet-video-client` for H.264 through
+`/dev/video0`. MP4/fMP4 demuxing and AAC remain in the shared codec library;
+the normal browser has no CPU H.264 decoder or software fallback. Decoded NV12
+planes are uploaded through Skia's YUV textures and converted on the GPU. The
+current mapped-plane handoff is not a zero-copy video-image import. Page
+presentation continues through shared BGRA8 GPU images without browser CPU
+framebuffer readback.
+
+On macOS, build the existing host producer with
+`cargo make build-vhost-video-videotoolbox`, then enable
+`SCARLET_VHOST_USER_VIDEO=1` and `SCARLET_QEMU_AUDIO=1` in the ordinary runner.
+The former adds the VideoToolbox-backed device; the latter supplies SAS audio.
+A missing or unsupported video device returns a media error.
+
+This release guest passed the four-thread TLS, three-cycle Ganesh and Retina
+WebCore contracts. Actual GPU readback checked 10,752 I420/NV12 pixels across
+BT.601/BT.709 full/limited range, with padded Y and chroma strides, RGB tolerance
+of two and opaque alpha. These checks exercise Skia's actual YUV texture path,
+not a CPU RGB conversion.
+
+The HTTP fixture additionally passed CSS/image loading, exact idle revision and
+paint-count stability (`2`, `2`), pointer movement, Retina resize, history, text
+editing, POST/reload, native scrolling, one damage paint, cookie/storage/blob
+iframe loading, frameset child pixels, and native owner shutdown. The queued
+image-load notification fix resolves the previously observed idle repaint
+without adding a settling delay.
+
+Native decoding produced actual NV12 frames for the self-generated video and
+YouTube's 320×240 stream. Continuous playback has not yet passed. Real
+`youtube.com` homepage loading reproduced a null dereference in
+`MediaPlayer::networkStateChanged`, called from the Scarlet backend destructor
+during media sniff/reload. This is tracked separately from GPU rendering and
+video decode.
+
+The subsequent normal release image uses Myrica `d634b193`, ScarletUI main
+`1c9c7b33`, WebKit `4969dc35`, SGFX `2bd22fd8`, and kernel `d6af352cf`.
+The actual initramfs and GPT root partition were independently inspected:
+SGFX plugin, Vulkan ICD, and Myrica bytes match staging and the SDK lock.
+The guest again passed all three Ganesh/YUV cycles and the Retina DOM/CSS/JS,
+input, immutable-image and backpressure contracts. YouTube's actual GUI
+still exits during loading; continuous playback remains an open validation
+item. No screenshot or visual-layout approval is claimed.
+
+ScarletUI main now consumes raw canvas mouse events without implicitly
+repainting; state changes still request painting. All native desktop UI
+consumers use this same revision. The kernel presentation path releases IRQ
+guards before waiting, and transfers image/device/request ownership into a
+driver registry before scheduling. Task death releases admission, completed
+leases retire outside IRQ guards, and failed DMA remains quarantined. The
+source audit, 28 production queue/control/registry regressions and native
+release plus kernel-test compilation passed. Guest mouse-performance and
+forced-exit stress validation are still pending. Myrica also restores the
+previous WebKit wheel direction.
