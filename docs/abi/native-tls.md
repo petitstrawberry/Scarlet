@@ -111,6 +111,10 @@ These host checks do not execute target TLS instructions; the Myrica Skia
 Vulkan probe additionally checks initialized C++ TLS and Rust namespace TLS
 across four native threads before drawing.
 
+The release probe passed this four-thread check on AArch64 with HVF and four
+guest CPUs. Each child observed the C++ initializer value 17, mutated its own
+TLS and errno, and left the parent's C++ value, Rust TLS value, and errno intact.
+
 
 The bounded AArch64 guest checks covered constructor access,
 new-thread isolation, destructor access, a controlled allocation-backend null

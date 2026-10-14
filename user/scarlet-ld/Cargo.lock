@@ -10,6 +10,7 @@ version = "1.0.0"
 name = "scarlet-dl"
 version = "0.1.0"
 dependencies = [
+ "scarlet-abi",
  "scarlet-loader-core",
  "scarlet-sys",
 ]
@@ -25,6 +26,9 @@ dependencies = [
 [[package]]
 name = "scarlet-loader-core"
 version = "0.1.0"
+dependencies = [
+ "scarlet-abi",
+]
 
 [[package]]
 name = "scarlet-sys"
