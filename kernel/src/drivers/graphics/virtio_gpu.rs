@@ -491,6 +491,7 @@ pub struct VirtioGpuDeviceCore {
     virtqueues: IrqSpinLock<VirtioGpuQueues>, // Control queue (0) and Cursor queue (1)
     async_submissions: asynchronous::AsyncSubmissions,
     async_enabled: bool,
+    present_waiters: usize,
     display_info: IrqRwSpinLock<Option<VirtioGpuRespDisplayInfo>>,
     framebuffer_addr: IrqRwSpinLock<Option<u64>>,
     framebuffer_alloc: IrqRwSpinLock<Option<ContiguousPages>>,
@@ -542,6 +543,7 @@ impl VirtioGpuDeviceCore {
             virtqueues: IrqSpinLock::new(VirtioGpuQueues::new()),
             async_submissions: asynchronous::AsyncSubmissions::default(),
             async_enabled: false,
+            present_waiters: 0,
             display_info: IrqRwSpinLock::new(None),
             framebuffer_addr: IrqRwSpinLock::new(None),
             framebuffer_alloc: IrqRwSpinLock::new(None),
@@ -1435,84 +1437,6 @@ impl VirtioGpuDeviceCore {
         *self.scanout_resource_id.write() = Some(resource_id);
         Ok(())
     }
-
-    fn flush_resource_region(
-        &self,
-        resource_id: u32,
-        rect: VirtioGpuRect,
-    ) -> Result<(), &'static str> {
-        let flush_cmd = VirtioGpuResourceFlush {
-            hdr: VirtioGpuCtrlHdr {
-                hdr_type: VIRTIO_GPU_CMD_RESOURCE_FLUSH,
-                flags: 0,
-                fence_id: 0,
-                ctx_id: 0,
-                padding: 0,
-            },
-            r: rect,
-            resource_id,
-            padding: 0,
-        };
-
-        self.send_control_command(&flush_cmd)
-    }
-
-    fn present_framebuffer_region(&self, region: DisplayRegion) -> Result<(), &'static str> {
-        let display_info = self.display_info.read();
-        let display_info = display_info.as_ref().ok_or("Device not initialized")?;
-        let primary = display_info.pmodes[0];
-        if primary.enabled == 0 {
-            return Err("Primary display not enabled");
-        }
-        let Some(rect) = Self::clamp_region_to_rect(region, primary.r.width, primary.r.height)
-        else {
-            return Ok(());
-        };
-
-        let resource_id = self
-            .current_resource_id
-            .read()
-            .ok_or("No framebuffer resource found")?;
-        self.set_primary_scanout(resource_id, primary.r.width, primary.r.height)?;
-
-        let offset = ((rect.y as u64 * primary.r.width as u64) + rect.x as u64) * 4;
-        let transfer_cmd = VirtioGpuTransferToHost2d {
-            hdr: VirtioGpuCtrlHdr {
-                hdr_type: VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D,
-                flags: 0,
-                fence_id: 0,
-                ctx_id: 0,
-                padding: 0,
-            },
-            r: rect,
-            offset,
-            resource_id,
-            padding: 0,
-        };
-
-        self.send_control_command(&transfer_cmd)?;
-        self.flush_resource_region(resource_id, rect)
-    }
-
-    fn present_gpu_resource_region(
-        &self,
-        resource: GpuDisplayResource,
-        region: DisplayRegion,
-    ) -> Result<(), &'static str> {
-        if resource.backend_cookie() != self.backend_cookie() {
-            return Err("GPU display resource belongs to a different VirtIO GPU device");
-        }
-        if resource.resource_id() == 0 || resource.width() == 0 || resource.height() == 0 {
-            return Err("GPU display resource is invalid");
-        }
-        let Some(rect) = Self::clamp_region_to_rect(region, resource.width(), resource.height())
-        else {
-            return Ok(());
-        };
-
-        self.set_primary_scanout(resource.resource_id(), resource.width(), resource.height())?;
-        self.flush_resource_region(resource.resource_id(), rect)
-    }
 }
 
 impl VirtioDevice for VirtioGpuDeviceCore {
@@ -1581,7 +1505,142 @@ pub struct VirtioGpuDevice {
     interrupt_state: Arc<asynchronous::InterruptState>,
 }
 
+/// Reserve admission while a presentation drains preceding GPU work. The
+/// reservation has no IRQ guard and is released on publication or any error.
+struct PresentReservation<'a> {
+    core: &'a Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
+}
+
+impl<'a> PresentReservation<'a> {
+    fn new(core: &'a Arc<IrqSpinLock<VirtioGpuDeviceCore>>) -> Self {
+        core.lock().present_waiters += 1;
+        Self { core }
+    }
+}
+
+impl Drop for PresentReservation<'_> {
+    fn drop(&mut self) {
+        self.core.lock().present_waiters -= 1;
+    }
+}
+
+fn presentation_requests(
+    resource_id: u32,
+    width: u32,
+    height: u32,
+    rect: VirtioGpuRect,
+    transfer: bool,
+) -> Result<Vec<Arc<ControlRequest>>, &'static str> {
+    fn header(hdr_type: u32) -> VirtioGpuCtrlHdr {
+        VirtioGpuCtrlHdr {
+            hdr_type,
+            flags: 0,
+            fence_id: 0,
+            ctx_id: 0,
+            padding: 0,
+        }
+    }
+    fn request<T>(command: &T) -> Result<Arc<ControlRequest>, &'static str> {
+        // SAFETY: callers supply initialized repr(C) VirtIO commands. New
+        // copies these bytes into owned DMA before the borrow ends.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(command as *const T as *const u8, core::mem::size_of::<T>())
+        };
+        ControlRequest::new(bytes, core::mem::size_of::<VirtioGpuCtrlHdr>())
+    }
+    let mut requests = Vec::with_capacity(if transfer { 3 } else { 2 });
+    requests.push(request(&VirtioGpuSetScanout {
+        hdr: header(VIRTIO_GPU_CMD_SET_SCANOUT),
+        r: VirtioGpuRect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        },
+        scanout_id: 0,
+        resource_id,
+    })?);
+    if transfer {
+        requests.push(request(&VirtioGpuTransferToHost2d {
+            hdr: header(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D),
+            r: rect,
+            offset: (u64::from(rect.y) * u64::from(width) + u64::from(rect.x)) * 4,
+            resource_id,
+            padding: 0,
+        })?);
+    }
+    requests.push(request(&VirtioGpuResourceFlush {
+        hdr: header(VIRTIO_GPU_CMD_RESOURCE_FLUSH),
+        r: rect,
+        resource_id,
+        padding: 0,
+    })?);
+    Ok(requests)
+}
+
 impl VirtioGpuDevice {
+    fn present_with_requests(
+        &self,
+        prepare: impl FnOnce(&VirtioGpuDeviceCore) -> Result<Vec<Arc<ControlRequest>>, &'static str>,
+    ) -> Result<(), &'static str> {
+        if crate::task::mytask().is_none() {
+            return Err("VirtIO GPU presentation requires a schedulable task");
+        }
+        if !asynchronous::register(&self.core) {
+            return Err("VirtIO GPU presentation completion worker is unavailable");
+        }
+        let reservation = PresentReservation::new(&self.core);
+        let mut prepare = Some(prepare);
+        let requests = loop {
+            let pending = {
+                let core = self.core.lock();
+                let mut queues = core.virtqueues.lock();
+                queues.control.check()?;
+                if let Some(pending) = queues.control.pending_request() {
+                    Some(pending)
+                } else {
+                    // Idle validation and publication share the outer guard:
+                    // no new submission can slip between the barrier and batch.
+                    drop(queues);
+                    let requests = prepare.take().expect("unpublished presentation")(&core)?;
+                    if requests.is_empty() {
+                        return Ok(());
+                    }
+                    let mut queues = core.virtqueues.lock();
+                    queues
+                        .control
+                        .enqueue_batch(&requests, crate::timer::get_time_ns())
+                        .map_err(|error| match error {
+                            ControlEnqueueError::Busy => "VirtIO GPU presentation queue is full",
+                            ControlEnqueueError::Failed(error) => error,
+                        })?;
+                    // Concurrent presentations can return in a different order.
+                    // Invalidate this legacy cache rather than publish a stale
+                    // scanout id when an earlier waiter resumes last.
+                    *core.scanout_resource_id.write() = None;
+                    core.notify(0);
+                    break requests;
+                }
+            };
+            // Both IRQ guards ended before waiting. The autonomous worker owns
+            // response reaping, including timeout/failure and DMA retention.
+            asynchronous::wake_worker();
+            pending.expect("pending barrier request").wait()?;
+        };
+        drop(reservation);
+        asynchronous::wake_worker();
+        for request in requests {
+            request.wait()?;
+            let mut bytes = [0; core::mem::size_of::<VirtioGpuCtrlHdr>()];
+            request.copy_response(&mut bytes)?;
+            // SAFETY: the returned owned response includes a complete header.
+            let response =
+                unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const VirtioGpuCtrlHdr) };
+            validate_execution_response(response, None)?;
+        }
+        Ok(())
+    }
+
     /// Create a new VirtIO GPU device
     ///
     /// # Arguments
@@ -2062,6 +2121,9 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
             return Err(GpuBackendEnqueueError::Busy(submission));
         };
         let core = &mut *guard;
+        if core.present_waiters != 0 {
+            return Err(GpuBackendEnqueueError::Busy(submission));
+        }
         if !self.async_enabled {
             return Err(GpuBackendEnqueueError::Rejected(
                 GpuBackendSubmitError::Unavailable("VirtIO GPU async progress is not available"),
@@ -2279,23 +2341,43 @@ impl GraphicsDevice for VirtioGpuDevice {
         physical_addr: u64,
         region: DisplayRegion,
     ) -> Result<(), &'static str> {
-        let core = self.core.lock();
-        let current_config = core.get_framebuffer_config()?;
-        let current_physical_addr = core.get_framebuffer_address()?;
-        if current_physical_addr != physical_addr {
-            return Err(
-                "Framebuffer physical address does not match current virtio-gpu framebuffer",
-            );
-        }
-        if current_config.width != config.width
-            || current_config.height != config.height
-            || current_config.format != config.format
-            || current_config.stride != config.stride
-        {
-            return Err("Framebuffer config does not match current virtio-gpu framebuffer");
-        }
+        self.present_with_requests(|core| {
+            let current_config = core.get_framebuffer_config()?;
+            let current_physical_addr = core.get_framebuffer_address()?;
+            if current_physical_addr != physical_addr {
+                return Err(
+                    "Framebuffer physical address does not match current virtio-gpu framebuffer",
+                );
+            }
+            if current_config.width != config.width
+                || current_config.height != config.height
+                || current_config.format != config.format
+                || current_config.stride != config.stride
+            {
+                return Err("Framebuffer config does not match current virtio-gpu framebuffer");
+            }
 
-        core.present_framebuffer_region(region)
+            let display_info = core.display_info.read();
+            let primary = display_info
+                .as_ref()
+                .ok_or("Device not initialized")?
+                .pmodes[0];
+            if primary.enabled == 0 {
+                return Err("Primary display not enabled");
+            }
+            let Some(rect) = VirtioGpuDeviceCore::clamp_region_to_rect(
+                region,
+                primary.r.width,
+                primary.r.height,
+            ) else {
+                return Ok(Vec::new());
+            };
+            let resource_id = core
+                .current_resource_id
+                .read()
+                .ok_or("No framebuffer resource found")?;
+            presentation_requests(resource_id, primary.r.width, primary.r.height, rect, true)
+        })
     }
 
     fn present_gpu_resource_region(
@@ -2303,9 +2385,28 @@ impl GraphicsDevice for VirtioGpuDevice {
         resource: GpuDisplayResource,
         region: DisplayRegion,
     ) -> Result<(), &'static str> {
-        self.core
-            .lock()
-            .present_gpu_resource_region(resource, region)
+        self.present_with_requests(|core| {
+            if resource.backend_cookie() != core.backend_cookie() {
+                return Err("GPU display resource belongs to a different VirtIO GPU device");
+            }
+            if resource.resource_id() == 0 || resource.width() == 0 || resource.height() == 0 {
+                return Err("GPU display resource is invalid");
+            }
+            let Some(rect) = VirtioGpuDeviceCore::clamp_region_to_rect(
+                region,
+                resource.width(),
+                resource.height(),
+            ) else {
+                return Ok(Vec::new());
+            };
+            presentation_requests(
+                resource.resource_id(),
+                resource.width(),
+                resource.height(),
+                rect,
+                false,
+            )
+        })
     }
 
     fn init_graphics(&self) -> Result<(), &'static str> {

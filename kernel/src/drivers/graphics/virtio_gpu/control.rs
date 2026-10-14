@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::drivers::virtio::queue::{DescriptorFlag, VirtQueue};
 use crate::mem::page::ContiguousPages;
-use crate::sync::IrqSpinLock;
+use crate::sync::{IrqSpinLock, Waker};
 
 use super::{
     VIRTIO_GPU_CONTROL_QUEUE_SIZE, VIRTIO_GPU_CONTROL_TIMEOUT_NS, VirtioGpuCtrlHdr,
@@ -37,6 +37,7 @@ pub(super) struct ControlRequest {
     expected_fence: Option<u64>,
     published: AtomicBool,
     status: IrqSpinLock<ControlStatus>,
+    completion_waker: Waker,
 }
 
 impl ControlRequest {
@@ -87,11 +88,38 @@ impl ControlRequest {
             expected_fence,
             published: AtomicBool::new(false),
             status: IrqSpinLock::new(ControlStatus::Pending),
+            completion_waker: Waker::new_uninterruptible("virtio-gpu-control"),
         }))
     }
 
     pub(super) fn status(&self) -> ControlStatus {
         *self.status.lock()
+    }
+
+    pub(super) fn wait(&self) -> Result<(), &'static str> {
+        let task = crate::task::mytask().ok_or("VirtIO GPU control wait requires a task")?;
+        loop {
+            match self.status() {
+                ControlStatus::Complete(_) => return Ok(()),
+                ControlStatus::Failed(error) => return Err(error),
+                ControlStatus::Pending => {
+                    // Register and recheck atomically with respect to wakeup.
+                    // No device/core/transport IRQ guard may cover this wait.
+                    self.completion_waker.wait_with_condition(
+                        task.get_id(),
+                        task.get_trapframe(),
+                        None,
+                        0,
+                        || self.status() != ControlStatus::Pending,
+                    );
+                }
+            }
+        }
+    }
+
+    fn finish(&self, status: ControlStatus) {
+        *self.status.lock() = status;
+        self.completion_waker.wake_all();
     }
 
     pub(super) fn copy_response(&self, destination: &mut [u8]) -> Result<u32, &'static str> {
@@ -180,6 +208,14 @@ impl ControlQueue {
         self.pending.iter().any(Option::is_some)
     }
 
+    pub(super) fn pending_request(&self) -> Option<Arc<ControlRequest>> {
+        self.pending
+            .iter()
+            .flatten()
+            .next()
+            .map(|pending| Arc::clone(&pending.request))
+    }
+
     pub(super) fn set_event_idx(&mut self, enabled: bool) {
         self.event_idx = enabled;
     }
@@ -225,7 +261,8 @@ impl ControlQueue {
     }
 
     /// Publish a command and its independent retirement checkpoint together.
-    /// The two-chain limit keeps pre-publication rollback bounded and leaves
+    /// The three-chain limit also fits SET_SCANOUT/TRANSFER/FLUSH presentation.
+    /// It keeps pre-publication rollback bounded and leaves
     /// no possibly accepted prefix when admission returns an error.
     pub(super) fn enqueue_batch(
         &mut self,
@@ -233,7 +270,7 @@ impl ControlQueue {
         now_ns: u64,
     ) -> Result<(), ControlEnqueueError> {
         self.check().map_err(ControlEnqueueError::Failed)?;
-        if requests.is_empty() || requests.len() > 2 {
+        if requests.is_empty() || requests.len() > 3 {
             return Err(ControlEnqueueError::Failed(
                 "Invalid VirtIO GPU control batch size",
             ));
@@ -251,7 +288,7 @@ impl ControlQueue {
                 ));
             }
         }
-        let mut heads = [0; 2];
+        let mut heads = [0; 3];
         for (index, request) in requests.iter().enumerate() {
             let command_desc = self.ring.alloc_desc().expect("reserved command descriptor");
             let response_desc = self
@@ -275,7 +312,7 @@ impl ControlQueue {
                 submitted_ns: now_ns,
             });
         }
-        // One available-index update publishes the whole pair in order.
+        // One available-index update publishes the whole batch in order.
         if let Err(error) = self.ring.push_many(&heads[..requests.len()]) {
             for head in &heads[..requests.len()] {
                 let pending = self.pending[*head].take().expect("unpublished request");
@@ -322,7 +359,7 @@ impl ControlQueue {
                 .expect("validated live control head");
             self.ring.free_desc(pending.response_desc);
             self.ring.free_desc(head);
-            *pending.request.status.lock() = ControlStatus::Complete(written);
+            pending.request.finish(ControlStatus::Complete(written));
         }
         if self.pending.iter().flatten().any(|pending| {
             now_ns.saturating_sub(pending.submitted_ns) >= VIRTIO_GPU_CONTROL_TIMEOUT_NS
@@ -335,7 +372,7 @@ impl ControlQueue {
     pub(super) fn fail(&mut self, error: &'static str) -> Result<(), &'static str> {
         let error = *self.failed.get_or_insert(error);
         for pending in self.pending.iter().flatten() {
-            *pending.request.status.lock() = ControlStatus::Failed(error);
+            pending.request.finish(ControlStatus::Failed(error));
         }
         // No reset/quiescence proof exists. Leave DMA and descriptors reserved.
         Err(error)
@@ -347,8 +384,9 @@ impl Drop for ControlQueue {
         let had_pending = self.has_pending();
         for pending in self.pending.iter_mut().filter_map(Option::take) {
             if pending.request.status() == ControlStatus::Pending {
-                *pending.request.status.lock() =
-                    ControlStatus::Failed("VirtIO GPU control queue was abandoned");
+                pending.request.finish(ControlStatus::Failed(
+                    "VirtIO GPU control queue was abandoned",
+                ));
             }
             core::mem::forget(pending);
         }
@@ -502,6 +540,122 @@ mod tests {
         assert_eq!(
             queue.ring.free_descriptors.len(),
             VIRTIO_GPU_CONTROL_QUEUE_SIZE
+        );
+    }
+
+    #[test_case]
+    fn presentation_batch_publishes_all_three_commands_and_reaps_out_of_order() {
+        use super::super::{
+            VIRTIO_GPU_CMD_RESOURCE_FLUSH, VIRTIO_GPU_CMD_SET_SCANOUT,
+            VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D, VirtioGpuCtrlHdr, VirtioGpuRect,
+            VirtioGpuTransferToHost2d, presentation_requests,
+        };
+        let rect = VirtioGpuRect {
+            x: 12,
+            y: 3,
+            width: 8,
+            height: 9,
+        };
+        let requests = presentation_requests(7, 40, 30, rect, true).expect("CPU presentation");
+        assert_eq!(requests.len(), 3);
+        let kinds: alloc::vec::Vec<_> = requests
+            .iter()
+            .map(|request| {
+                // SAFETY: owned request storage contains the initialized command.
+                unsafe { (*(request.command.as_ptr() as *const VirtioGpuCtrlHdr)).hdr_type }
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            alloc::vec![
+                VIRTIO_GPU_CMD_SET_SCANOUT,
+                VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D,
+                VIRTIO_GPU_CMD_RESOURCE_FLUSH
+            ]
+        );
+        // SAFETY: the second request is the real repr(C) TRANSFER command.
+        let transfer =
+            unsafe { &*(requests[1].command.as_ptr() as *const VirtioGpuTransferToHost2d) };
+        assert_eq!(transfer.offset, (3 * 40 + 12) * 4);
+        assert_eq!(transfer.resource_id, 7);
+        let mut queue = ControlQueue::new();
+        queue
+            .enqueue_batch(&requests, 0)
+            .expect("whole presentation fits");
+        assert_eq!(*queue.ring.avail.idx, 3);
+        let heads: alloc::vec::Vec<_> = (0..3).map(|i| queue.ring.avail.ring[i] as usize).collect();
+        for (index, head) in heads.iter().copied().enumerate() {
+            assert!(Arc::ptr_eq(
+                &queue.pending[head].as_ref().unwrap().request,
+                &requests[index]
+            ));
+        }
+        respond(&mut queue, heads[2], 24, 0);
+        queue.reap(1).expect("flush transport reply");
+        assert_eq!(requests[2].status(), ControlStatus::Complete(24));
+        assert_eq!(requests[0].status(), ControlStatus::Pending);
+        assert!(
+            queue.pending_request().is_some(),
+            "barrier still holds older requests"
+        );
+        respond(&mut queue, heads[0], 24, 0);
+        respond(&mut queue, heads[1], 24, 0);
+        queue.reap(2).expect("remaining presentation replies");
+        assert!(queue.pending_request().is_none());
+        assert_eq!(
+            queue.ring.free_descriptors.len(),
+            VIRTIO_GPU_CONTROL_QUEUE_SIZE
+        );
+        let gpu = presentation_requests(7, 40, 30, rect, false).expect("GPU presentation");
+        assert_eq!(gpu.len(), 2, "GPU scanout must not upload CPU pixels");
+    }
+
+    #[test_case]
+    fn three_command_admission_pressure_never_publishes_a_prefix() {
+        let mut queue = ControlQueue::new();
+        for _ in 0..VIRTIO_GPU_CONTROL_QUEUE_SIZE / 2 - 2 {
+            queue
+                .enqueue(&request(1), 0)
+                .expect("leave two chains free");
+        }
+        let requests = [request(2), request(3), request(4)];
+        let available = *queue.ring.avail.idx;
+        let free = queue.ring.free_descriptors.len();
+        assert_eq!(
+            queue.enqueue_batch(&requests, 1),
+            Err(ControlEnqueueError::Busy)
+        );
+        assert_eq!(*queue.ring.avail.idx, available);
+        assert_eq!(queue.ring.free_descriptors.len(), free);
+        for request in &requests {
+            assert!(!request.published.load(Ordering::Acquire));
+        }
+    }
+
+    #[test_case]
+    fn real_response_or_failure_notifies_control_waiters() {
+        let mut queue = ControlQueue::new();
+        let complete = request(1);
+        queue.enqueue(&complete, 0).expect("publish");
+        let head = last_head(&queue);
+        queue.reap(1).expect("still waiting for device");
+        assert_eq!(complete.completion_waker.pending_wake_count_for_test(), 0);
+        respond(&mut queue, head, 24, 0);
+        queue.reap(2).expect("real used-ring completion");
+        assert_eq!(complete.completion_waker.pending_wake_count_for_test(), 1);
+        let failed = request(2);
+        queue.enqueue(&failed, 3).expect("publish timeout case");
+        assert_eq!(
+            queue.reap(VIRTIO_GPU_CONTROL_TIMEOUT_NS + 3),
+            Err(CONTROL_TIMEOUT)
+        );
+        assert_eq!(failed.completion_waker.pending_wake_count_for_test(), 1);
+        assert_eq!(failed.status(), ControlStatus::Failed(CONTROL_TIMEOUT));
+        let weak = Arc::downgrade(&failed);
+        drop((queue, failed));
+        assert!(
+            weak.upgrade().is_some(),
+            "timeout cannot release device-owned DMA"
         );
     }
 

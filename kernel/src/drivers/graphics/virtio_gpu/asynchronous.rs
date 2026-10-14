@@ -286,7 +286,8 @@ fn process_device(core: &Arc<IrqSpinLock<VirtioGpuDeviceCore>>) -> bool {
             };
             (
                 retired,
-                core.async_submissions.active(),
+                core.async_submissions.active()
+                    || (queues.control.check().is_ok() && queues.control.has_pending()),
                 interrupt,
                 completion_count,
                 caught_up,
