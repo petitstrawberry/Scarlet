@@ -6,13 +6,13 @@
 
 extern crate alloc;
 
-use crate::sync::IrqRwSpinLock;
+use crate::sync::{IrqGuard, IrqRwSpinLock};
 use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::any::Any;
 
 use super::{
-    FramebufferConfig, GpuPresentOptions, PixelFormat, manager::FramebufferResource,
-    output::DisplayRegion,
+    FramebufferConfig, GpuPresentOptions, PixelFormat, PresentationOwners,
+    manager::FramebufferResource, output::DisplayRegion,
 };
 use crate::device::{Device, DeviceType, char::CharDevice, manager::DeviceManager};
 use crate::library::std::usercopy::copy_from_user;
@@ -526,67 +526,120 @@ impl DisplayCharDevice {
         if !full_frame && (request.width == 0 || request.height == 0) {
             return Err("Display image present region is empty");
         }
-        let image_owner = task
-            .handle_table
-            .get_arc_clone(request.image_handle)
-            .ok_or("Display image handle is invalid")?;
-        let image = image_owner
-            .as_gpu()
-            .and_then(crate::device::gpu::GpuObject::as_image)
-            .ok_or("Display image handle is not a GPU image")?;
-        let resource = image
-            .display_resource()
-            .ok_or("GPU image is not presentable")?;
-        let region = if full_frame {
-            resource.full_region()
-        } else {
-            if request.x >= resource.width() || request.y >= resource.height() {
-                return Err("Display image region lies outside the image");
+        let (completion, legacy) = {
+            // No scheduling boundary may split transfer of these owning refs.
+            let _handoff = IrqGuard::new();
+            let image_owner = task
+                .handle_table
+                .get_arc_clone(request.image_handle)
+                .ok_or("Display image handle is invalid")?;
+            let image = image_owner
+                .as_gpu()
+                .and_then(crate::device::gpu::GpuObject::as_image)
+                .ok_or("Display image handle is not a GPU image")?;
+            let resource = image
+                .display_resource()
+                .ok_or("GPU image is not presentable")?;
+            let region = if full_frame {
+                resource.full_region()
+            } else {
+                if request.x >= resource.width() || request.y >= resource.height() {
+                    return Err("Display image region lies outside the image");
+                }
+                DisplayRegion::new(
+                    request.x,
+                    request.y,
+                    request.width.min(resource.width() - request.x),
+                    request.height.min(resource.height() - request.y),
+                )
+            };
+            let device = self
+                .device_manager()
+                .get_device(self.fb_resource.source_device_id)
+                .ok_or("Display source device not found")?;
+            let graphics = device
+                .as_graphics_device()
+                .ok_or("Display source device is not graphics-capable")?;
+            // The backend operation retains the image until hardware returns it.
+            let options = if request.flags & DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER != 0 {
+                GpuPresentOptions::swapchain_buffer()
+            } else {
+                GpuPresentOptions::default()
+            };
+            let completion = graphics.begin_gpu_resource_present(
+                resource.clone(),
+                region,
+                options,
+                PresentationOwners::new((image_owner.clone(), Arc::clone(&device))),
+            )?;
+            if let Some(completion) = completion {
+                // The core operation now owns the image and device. The ticket
+                // retains only a weak backend identity and cannot pin their pages.
+                drop((image_owner, device, resource));
+                (Some(completion), None)
+            } else {
+                (None, Some((image_owner, device, resource, region, options)))
             }
-            DisplayRegion::new(
-                request.x,
-                request.y,
-                request.width.min(resource.width() - request.x),
-                request.height.min(resource.height() - request.y),
-            )
         };
-        let device = self
-            .device_manager()
-            .get_device(self.fb_resource.source_device_id)
-            .ok_or("Display source device not found")?;
-        let graphics = device
-            .as_graphics_device()
-            .ok_or("Display source device is not graphics-capable")?;
-        // `image_owner` remains live until this synchronous presentation returns.
-        let options = if request.flags & DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER != 0 {
-            GpuPresentOptions::swapchain_buffer()
+        if let Some(completion) = completion {
+            completion.wait()?;
         } else {
-            GpuPresentOptions::default()
-        };
-        graphics.present_gpu_resource_region_with_options(resource, region, options)?;
+            let (_image_owner, device, resource, region, options) =
+                legacy.expect("legacy presentation");
+            device
+                .as_graphics_device()
+                .ok_or("Display source device is not graphics-capable")?
+                .present_gpu_resource_region_with_options(resource, region, options)?;
+        }
         Ok(0)
     }
 
     fn present_region(&self, region: DisplayRegion) -> Result<(), &'static str> {
-        let device = self
-            .device_manager()
-            .get_device(self.fb_resource.source_device_id)
-            .ok_or("Display source device not found")?;
-        let graphics_device = device
-            .as_graphics_device()
-            .ok_or("Display source device is not graphics-capable")?;
-        let (config, physical_addr) = graphics_device.get_framebuffer_info()?;
-        if physical_addr == 0 {
-            return Err("Invalid display backing address");
-        }
+        let (completion, legacy, region) = {
+            // Ownership acquisition and transfer form one nonpreemptible step.
+            // The existing framebuffer snapshot is synchronous; the prepared
+            // presentation wait happens only after this guard is released.
+            let _handoff = IrqGuard::new();
+            let device = self
+                .device_manager()
+                .get_device(self.fb_resource.source_device_id)
+                .ok_or("Display source device not found")?;
+            let graphics_device = device
+                .as_graphics_device()
+                .ok_or("Display source device is not graphics-capable")?;
+            let (config, physical_addr) = graphics_device.get_framebuffer_info()?;
+            if physical_addr == 0 {
+                return Err("Invalid display backing address");
+            }
 
-        let region = DisplayRegion::new(
-            region.x.min(config.width),
-            region.y.min(config.height),
-            region.width.min(config.width.saturating_sub(region.x)),
-            region.height.min(config.height.saturating_sub(region.y)),
-        );
-        graphics_device.present_current_framebuffer_region(region)
+            let region = DisplayRegion::new(
+                region.x.min(config.width),
+                region.y.min(config.height),
+                region.width.min(config.width.saturating_sub(region.x)),
+                region.height.min(config.height.saturating_sub(region.y)),
+            );
+            let completion = graphics_device.begin_framebuffer_present(
+                config,
+                physical_addr,
+                region,
+                PresentationOwners::new(Arc::clone(&device)),
+            )?;
+            if let Some(completion) = completion {
+                drop(device);
+                (Some(completion), None, region)
+            } else {
+                (None, Some(device), region)
+            }
+        };
+        if let Some(completion) = completion {
+            completion.wait()
+        } else {
+            legacy
+                .expect("legacy framebuffer presentation")
+                .as_graphics_device()
+                .ok_or("Display source device is not graphics-capable")?
+                .present_current_framebuffer_region(region)
+        }
     }
 }
 

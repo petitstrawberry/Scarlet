@@ -3,7 +3,7 @@
 //! This module defines the interface for graphics devices in the kernel.
 //! It provides abstractions for framebuffer operations and graphics device management.
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
 
 use self::output::{DisplayOutput, DisplayRegion};
@@ -18,6 +18,26 @@ pub mod framebuffer_device;
 pub mod manager;
 pub mod output;
 pub mod shared_image;
+
+/// Retain the caller's image/device leases in the driver while presentation
+/// can block. Its destructor must run outside driver IRQ guards.
+pub struct PresentationOwners {
+    _owners: Box<dyn Send + Sync>,
+}
+
+impl PresentationOwners {
+    pub fn new(owners: impl Send + Sync + 'static) -> Self {
+        Self {
+            _owners: Box::new(owners),
+        }
+    }
+}
+
+/// A prepared presentation owns its leases in the driver, not on this ticket.
+/// Implementations consume/drop the ticket before scheduling a completion wait.
+pub trait PresentationWait {
+    fn wait(self: Box<Self>) -> Result<(), &'static str>;
+}
 
 #[cfg(test)]
 mod tests;
@@ -621,6 +641,18 @@ pub trait GraphicsDevice: Device {
         region: DisplayRegion,
     ) -> Result<(), &'static str>;
 
+    /// Prepare a nonblocking ownership handoff before a framebuffer wait.
+    /// None keeps the backend's existing synchronous presentation contract.
+    fn begin_framebuffer_present(
+        &self,
+        _config: FramebufferConfig,
+        _physical_addr: u64,
+        _region: DisplayRegion,
+        _owners: PresentationOwners,
+    ) -> Result<Option<Box<dyn PresentationWait>>, &'static str> {
+        Ok(None)
+    }
+
     /// Present the device's current framebuffer to the display pipeline.
     ///
     /// # Arguments
@@ -724,6 +756,17 @@ pub trait GraphicsDevice: Device {
         _region: DisplayRegion,
     ) -> Result<(), &'static str> {
         Err("GPU resource presentation is not supported")
+    }
+
+    /// Transfer source ownership before a backend's schedulable image wait.
+    fn begin_gpu_resource_present(
+        &self,
+        _resource: GpuDisplayResource,
+        _region: DisplayRegion,
+        _options: GpuPresentOptions,
+        _owners: PresentationOwners,
+    ) -> Result<Option<Box<dyn PresentationWait>>, &'static str> {
+        Ok(None)
     }
 
     /// Present a GPU resource with explicit producer lifetime guarantees.

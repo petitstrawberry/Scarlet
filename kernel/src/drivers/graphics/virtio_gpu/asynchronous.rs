@@ -256,8 +256,11 @@ pub(super) fn register(core: &Arc<IrqSpinLock<VirtioGpuDeviceCore>>) -> bool {
 }
 
 fn process_device(core: &Arc<IrqSpinLock<VirtioGpuDeviceCore>>) -> bool {
+    if !super::prune_abandoned_presentations(core) {
+        return true;
+    }
     for _ in 0..ASYNC_CAPACITY {
-        let (retired, active, interrupt, completion_count, caught_up) = {
+        let (retired, presentations, active, interrupt, completion_count, caught_up) = {
             let Some(mut guard) = core.try_lock() else {
                 return true;
             };
@@ -284,15 +287,24 @@ fn process_device(core: &Arc<IrqSpinLock<VirtioGpuDeviceCore>>) -> bool {
             } else {
                 queues.control.rearm_notifications()
             };
+            drop(queues);
+            let presentations = super::remove_presentations(&mut core.presentations, &[]);
             (
                 retired,
+                presentations,
                 core.async_submissions.active()
-                    || (queues.control.check().is_ok() && queues.control.has_pending()),
+                    || super::presentation_progress_needed(&core.presentations)
+                    || {
+                        let queues = core.virtqueues.lock();
+                        queues.control.check().is_ok() && queues.control.has_pending()
+                    },
                 interrupt,
                 completion_count,
                 caught_up,
             )
         };
+        // Leases may destroy images and re-enter this core; its guard is gone.
+        drop(presentations);
         let released = caught_up && interrupt.complete(completion_count);
         if let Some(retired) = retired {
             retired.retire();

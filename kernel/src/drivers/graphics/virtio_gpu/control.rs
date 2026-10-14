@@ -37,7 +37,7 @@ pub(super) struct ControlRequest {
     expected_fence: Option<u64>,
     published: AtomicBool,
     status: IrqSpinLock<ControlStatus>,
-    completion_waker: Waker,
+    completion_waker: Arc<Waker>,
 }
 
 impl ControlRequest {
@@ -88,7 +88,7 @@ impl ControlRequest {
             expected_fence,
             published: AtomicBool::new(false),
             status: IrqSpinLock::new(ControlStatus::Pending),
-            completion_waker: Waker::new_uninterruptible("virtio-gpu-control"),
+            completion_waker: Arc::new(Waker::new_uninterruptible("virtio-gpu-control")),
         }))
     }
 
@@ -96,22 +96,28 @@ impl ControlRequest {
         *self.status.lock()
     }
 
-    pub(super) fn wait(&self) -> Result<(), &'static str> {
+    pub(super) fn wait_owned(request: Arc<Self>) -> Result<(), &'static str> {
+        let weak = Arc::downgrade(&request);
+        drop(request);
         let task = crate::task::mytask().ok_or("VirtIO GPU control wait requires a task")?;
         loop {
-            match self.status() {
+            let (status, waker) = {
+                let request = weak
+                    .upgrade()
+                    .ok_or("VirtIO GPU control owner was abandoned")?;
+                (request.status(), Arc::clone(&request.completion_waker))
+            };
+            match status {
                 ControlStatus::Complete(_) => return Ok(()),
                 ControlStatus::Failed(error) => return Err(error),
                 ControlStatus::Pending => {
-                    // Register and recheck atomically with respect to wakeup.
-                    // No device/core/transport IRQ guard may cover this wait.
-                    self.completion_waker.wait_with_condition(
-                        task.get_id(),
-                        task.get_trapframe(),
-                        None,
-                        0,
-                        || self.status() != ControlStatus::Pending,
-                    );
+                    // The helper drops this owned Waker before scheduling.
+                    // No strong request/DMA reference lives on the suspended
+                    // stack; the core registry and transport own it instead.
+                    waker.wait_result_until_owned(task.get_id(), task.get_trapframe(), || {
+                        weak.upgrade()
+                            .is_none_or(|request| request.status() != ControlStatus::Pending)
+                    });
                 }
             }
         }
@@ -657,6 +663,264 @@ mod tests {
             weak.upgrade().is_some(),
             "timeout cannot release device-owned DMA"
         );
+    }
+
+    #[test_case]
+    fn exited_presentation_caller_releases_admission_and_barrier_ownership() {
+        use super::super::{PresentOperation, dead_presentations, remove_presentations};
+        use crate::task::{Task, TaskState, TaskType};
+        let owner = Arc::new(Task::new("present-owner".into(), 1, TaskType::Kernel));
+        let live_owner = Arc::new(Task::new("other-present-owner".into(), 1, TaskType::Kernel));
+        let barrier = request(1);
+        let weak = Arc::downgrade(&barrier);
+        let mut queue = ControlQueue::new();
+        queue.enqueue(&barrier, 0).expect("preceding GPU work");
+        let head = last_head(&queue);
+        let mut operations = alloc::vec![
+            PresentOperation {
+                id: 1,
+                owner: Arc::downgrade(&owner),
+                awaiting_admission: true,
+                caller_released: false,
+                target: None,
+                _owners: None,
+                barrier: Some(barrier),
+                requests: alloc::vec::Vec::new()
+            },
+            PresentOperation {
+                id: 2,
+                owner: Arc::downgrade(&live_owner),
+                awaiting_admission: true,
+                caller_released: false,
+                target: None,
+                _owners: None,
+                barrier: None,
+                requests: alloc::vec::Vec::new()
+            },
+        ];
+        owner.state.store(TaskState::Zombie, Ordering::SeqCst);
+        let owners: alloc::vec::Vec<_> = operations
+            .iter()
+            .map(|op| (op.id, op.owner.clone()))
+            .collect();
+        let dead = dead_presentations(&owners);
+        assert_eq!(dead, alloc::vec![1]);
+        remove_presentations(&mut operations, &dead);
+        assert_eq!(
+            operations.len(),
+            1,
+            "another live caller keeps its admission reservation"
+        );
+        assert_eq!(operations[0].id, 2);
+        assert_eq!(
+            weak.upgrade().map(|request| Arc::strong_count(&request)),
+            Some(2),
+            "only transport plus this temporary upgrade retain the dead caller's barrier"
+        );
+        respond(&mut queue, head, 24, 0);
+        queue.reap(1).expect("device returns preceding work");
+        assert!(
+            weak.upgrade().is_none(),
+            "barrier DMA is not stranded on a caller stack"
+        );
+        drop(live_owner);
+        let owners: alloc::vec::Vec<_> = operations
+            .iter()
+            .map(|op| (op.id, op.owner.clone()))
+            .collect();
+        remove_presentations(&mut operations, &dead_presentations(&owners));
+        assert!(
+            operations.is_empty(),
+            "an idle queue needs no completion to release a dead reservation"
+        );
+    }
+
+    #[test_case]
+    fn exited_published_caller_releases_receipts_only_after_transport_retirement() {
+        use super::super::{PresentOperation, dead_presentations, remove_presentations};
+        use crate::task::{Task, TaskState, TaskType};
+        let owner = Arc::new(Task::new(
+            "published-present-owner".into(),
+            1,
+            TaskType::Kernel,
+        ));
+        let requests = alloc::vec![request(1), request(2)];
+        let weak: alloc::vec::Vec<_> = requests.iter().map(Arc::downgrade).collect();
+        let mut queue = ControlQueue::new();
+        queue
+            .enqueue_batch(&requests, 0)
+            .expect("published GPU presentation");
+        let heads: alloc::vec::Vec<_> = (0..2)
+            .map(|index| queue.ring.avail.ring[index] as usize)
+            .collect();
+        let mut operations = alloc::vec![PresentOperation {
+            id: 1,
+            owner: Arc::downgrade(&owner),
+            awaiting_admission: false,
+            caller_released: false,
+            target: None,
+            _owners: None,
+            barrier: None,
+            requests,
+        }];
+        owner.state.store(TaskState::Terminated, Ordering::SeqCst);
+        remove_presentations(
+            &mut operations,
+            &dead_presentations(&[(1, Arc::downgrade(&owner))]),
+        );
+        assert_eq!(operations.len(), 1);
+        assert!(operations[0].caller_released);
+        assert!(
+            weak.iter().all(|request| request.upgrade().is_some()),
+            "live DMA belongs to the transport"
+        );
+        for head in heads {
+            respond(&mut queue, head, 24, 0);
+        }
+        queue.reap(1).expect("hardware returns all commands");
+        drop(remove_presentations(&mut operations, &[]));
+        assert!(operations.is_empty());
+        assert!(
+            weak.iter().all(|request| request.upgrade().is_none()),
+            "dead caller retains no receipt pages"
+        );
+    }
+
+    #[test_case]
+    fn exited_published_caller_cannot_release_quarantined_dma() {
+        use super::super::{PresentOperation, dead_presentations, remove_presentations};
+        use crate::task::{Task, TaskState, TaskType};
+        let owner = Arc::new(Task::new(
+            "failed-present-owner".into(),
+            1,
+            TaskType::Kernel,
+        ));
+        let request = request(1);
+        let weak = Arc::downgrade(&request);
+        let mut queue = ControlQueue::new();
+        queue.enqueue(&request, 0).expect("published presentation");
+        let mut operations = alloc::vec![PresentOperation {
+            id: 1,
+            owner: Arc::downgrade(&owner),
+            awaiting_admission: false,
+            caller_released: false,
+            target: None,
+            _owners: None,
+            barrier: None,
+            requests: alloc::vec![request],
+        }];
+        assert!(queue.reap(VIRTIO_GPU_CONTROL_TIMEOUT_NS).is_err());
+        owner.state.store(TaskState::Zombie, Ordering::SeqCst);
+        remove_presentations(
+            &mut operations,
+            &dead_presentations(&[(1, Arc::downgrade(&owner))]),
+        );
+        assert_eq!(operations.len(), 1);
+        assert!(!super::super::presentation_progress_needed(&operations));
+        drop(queue);
+        assert!(
+            weak.upgrade().is_some(),
+            "task exit is not a hardware DMA quiescence proof"
+        );
+    }
+
+    struct PresentationOwnerProbe {
+        registry: alloc::sync::Weak<
+            crate::sync::IrqSpinLock<alloc::vec::Vec<super::super::PresentOperation>>,
+        >,
+        drops: Arc<core::sync::atomic::AtomicUsize>,
+    }
+
+    impl Drop for PresentationOwnerProbe {
+        fn drop(&mut self) {
+            let registry = self.registry.upgrade().expect("live presentation registry");
+            let _guard = registry
+                .try_lock()
+                .expect("owner retires outside the GPU guard");
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test_case]
+    fn presentation_image_owner_retires_after_completion_outside_registry_guard() {
+        use super::super::{PresentOperation, remove_presentations};
+        use crate::{
+            device::graphics::PresentationOwners,
+            sync::IrqSpinLock,
+            task::{Task, TaskType},
+        };
+        let owner = Arc::new(Task::new("image-owner".into(), 1, TaskType::Kernel));
+        let registry = Arc::new(IrqSpinLock::new(alloc::vec::Vec::new()));
+        let drops = Arc::new(core::sync::atomic::AtomicUsize::new(0));
+        let request = request(1);
+        let mut queue = ControlQueue::new();
+        queue.enqueue(&request, 0).expect("published presentation");
+        let head = last_head(&queue);
+        registry.lock().push(PresentOperation {
+            id: 1,
+            owner: Arc::downgrade(&owner),
+            awaiting_admission: false,
+            caller_released: false,
+            target: None,
+            _owners: Some(PresentationOwners::new(PresentationOwnerProbe {
+                registry: Arc::downgrade(&registry),
+                drops: Arc::clone(&drops),
+            })),
+            barrier: None,
+            requests: alloc::vec![request],
+        });
+        let retired = remove_presentations(&mut registry.lock(), &[1]);
+        drop(retired);
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "image is still hardware-owned"
+        );
+        assert_eq!(registry.lock().len(), 1);
+        respond(&mut queue, head, 24, 0);
+        queue.reap(1).expect("real hardware return");
+        let retired = { remove_presentations(&mut registry.lock(), &[]) };
+        drop(retired);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(registry.lock().is_empty());
+    }
+
+    #[test_case]
+    fn presentation_image_owner_is_quarantined_without_periodic_poll_after_failure() {
+        use super::super::{PresentOperation, presentation_progress_needed, remove_presentations};
+        use crate::{
+            device::graphics::PresentationOwners,
+            sync::IrqSpinLock,
+            task::{Task, TaskType},
+        };
+        let owner = Arc::new(Task::new("failed-image-owner".into(), 1, TaskType::Kernel));
+        let registry = Arc::new(IrqSpinLock::new(alloc::vec::Vec::new()));
+        let drops = Arc::new(core::sync::atomic::AtomicUsize::new(0));
+        let request = request(1);
+        let mut queue = ControlQueue::new();
+        queue.enqueue(&request, 0).expect("published presentation");
+        registry.lock().push(PresentOperation {
+            id: 1,
+            owner: Arc::downgrade(&owner),
+            awaiting_admission: false,
+            caller_released: false,
+            target: None,
+            _owners: Some(PresentationOwners::new(PresentationOwnerProbe {
+                registry: Arc::downgrade(&registry),
+                drops: Arc::clone(&drops),
+            })),
+            barrier: None,
+            requests: alloc::vec![request],
+        });
+        assert!(queue.reap(VIRTIO_GPU_CONTROL_TIMEOUT_NS).is_err());
+        let retired = remove_presentations(&mut registry.lock(), &[1]);
+        drop(retired);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(registry.lock().len(), 1);
+        assert!(!presentation_progress_needed(&registry.lock()));
+        // No reset exists, so production retains this registry lease. Model
+        // that quarantine rather than deliberately freeing a device-owned image.
+        core::mem::forget(registry);
     }
 
     #[test_case]

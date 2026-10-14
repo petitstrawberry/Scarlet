@@ -7,7 +7,11 @@
 //! according to the VirtIO GPU specification.
 
 use crate::sync::{IrqRwSpinLock, IrqSpinLock};
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{
+    boxed::Box,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 
 use crate::{
     device::{
@@ -28,8 +32,8 @@ use crate::{
             GpuImageCreateInfo, GpuImageUploadInfo, GpuSubmission,
         },
         graphics::{
-            FramebufferConfig, GpuDisplayResource, GraphicsDevice, PixelFormat,
-            output::DisplayRegion,
+            FramebufferConfig, GpuDisplayResource, GpuPresentOptions, GraphicsDevice, PixelFormat,
+            PresentationOwners, PresentationWait, output::DisplayRegion,
         },
     },
     drivers::virtio::{device::VirtioDevice, pci::VirtioPciTransport, queue::VirtQueue},
@@ -491,7 +495,8 @@ pub struct VirtioGpuDeviceCore {
     virtqueues: IrqSpinLock<VirtioGpuQueues>, // Control queue (0) and Cursor queue (1)
     async_submissions: asynchronous::AsyncSubmissions,
     async_enabled: bool,
-    present_waiters: usize,
+    next_present_id: u64,
+    presentations: Vec<PresentOperation>,
     display_info: IrqRwSpinLock<Option<VirtioGpuRespDisplayInfo>>,
     framebuffer_addr: IrqRwSpinLock<Option<u64>>,
     framebuffer_alloc: IrqRwSpinLock<Option<ContiguousPages>>,
@@ -543,7 +548,8 @@ impl VirtioGpuDeviceCore {
             virtqueues: IrqSpinLock::new(VirtioGpuQueues::new()),
             async_submissions: asynchronous::AsyncSubmissions::default(),
             async_enabled: false,
-            present_waiters: 0,
+            next_present_id: 0,
+            presentations: Vec::new(),
             display_info: IrqRwSpinLock::new(None),
             framebuffer_addr: IrqRwSpinLock::new(None),
             framebuffer_alloc: IrqRwSpinLock::new(None),
@@ -1505,22 +1511,198 @@ pub struct VirtioGpuDevice {
     interrupt_state: Arc<asynchronous::InterruptState>,
 }
 
-/// Reserve admission while a presentation drains preceding GPU work. The
-/// reservation has no IRQ guard and is released on publication or any error.
-struct PresentReservation<'a> {
-    core: &'a Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
+/// DMA and admission ownership must survive forced task exit without relying
+/// on Rust destructors on a suspended syscall stack.
+struct PresentOperation {
+    id: u64,
+    owner: Weak<crate::task::Task>,
+    awaiting_admission: bool,
+    caller_released: bool,
+    target: Option<PresentTarget>,
+    _owners: Option<PresentationOwners>,
+    barrier: Option<Arc<ControlRequest>>,
+    requests: Vec<Arc<ControlRequest>>,
 }
 
-impl<'a> PresentReservation<'a> {
-    fn new(core: &'a Arc<IrqSpinLock<VirtioGpuDeviceCore>>) -> Self {
-        core.lock().present_waiters += 1;
-        Self { core }
+fn dead_presentations(owners: &[(u64, Weak<crate::task::Task>)]) -> Vec<u64> {
+    owners
+        .iter()
+        .filter_map(|(id, owner)| {
+            let live = owner.upgrade().is_some_and(|task| {
+                !matches!(
+                    task.get_state(),
+                    crate::task::TaskState::Zombie | crate::task::TaskState::Terminated
+                )
+            });
+            (!live).then_some(*id)
+        })
+        .collect()
+}
+
+enum PresentTarget {
+    Gpu {
+        resource: GpuDisplayResource,
+        region: DisplayRegion,
+    },
+    Framebuffer {
+        config: FramebufferConfig,
+        physical_addr: u64,
+        region: DisplayRegion,
+    },
+}
+
+fn remove_presentations(
+    operations: &mut Vec<PresentOperation>,
+    released: &[u64],
+) -> Vec<PresentOperation> {
+    let mut retired = Vec::new();
+    let mut index = 0;
+    while index < operations.len() {
+        let operation = &mut operations[index];
+        if released.contains(&operation.id) {
+            operation.caller_released = true;
+            operation.awaiting_admission = false;
+        }
+        // The caller's image/device leases cannot retire before the published
+        // commands return. A transport failure needs reset proof, so preserve
+        // those owners along with the quarantined ControlQueue allocations.
+        if operation.caller_released
+            && operation
+                .requests
+                .iter()
+                .all(|request| matches!(request.status(), control::ControlStatus::Complete(_)))
+        {
+            retired.push(operations.swap_remove(index));
+        } else {
+            index += 1;
+        }
+    }
+    retired
+}
+
+fn presentation_progress_needed(operations: &[PresentOperation]) -> bool {
+    operations.iter().any(|operation| {
+        !operation.caller_released
+            || operation
+                .requests
+                .iter()
+                .any(|request| matches!(request.status(), control::ControlStatus::Pending))
+    })
+}
+
+fn prune_abandoned_presentations(core: &Arc<IrqSpinLock<VirtioGpuDeviceCore>>) -> bool {
+    let owners: Vec<_> = {
+        let Some(core) = core.try_lock() else {
+            return false;
+        };
+        core.presentations
+            .iter()
+            .map(|operation| (operation.id, operation.owner.clone()))
+            .collect()
+    };
+    // Task destruction can release GPU handles; never upgrade/drop Task Arcs
+    // under the core IRQ guard. Weak identity also prevents task-id reuse.
+    let dead = dead_presentations(&owners);
+    let retired = {
+        let Some(mut core) = core.try_lock() else {
+            return false;
+        };
+        remove_presentations(&mut core.presentations, &dead)
+    };
+    // Image/device destructors may re-enter this GPU. Move out, unlock, drop.
+    drop(retired);
+    true
+}
+
+struct PresentTicket {
+    core: Weak<IrqSpinLock<VirtioGpuDeviceCore>>,
+    id: u64,
+    armed: bool,
+}
+
+impl Drop for PresentTicket {
+    fn drop(&mut self) {
+        if self.armed {
+            VirtioGpuDevice::release_present_operation(&self.core, self.id);
+        }
     }
 }
 
-impl Drop for PresentReservation<'_> {
-    fn drop(&mut self) {
-        self.core.lock().present_waiters -= 1;
+impl PresentationWait for PresentTicket {
+    fn wait(mut self: Box<Self>) -> Result<(), &'static str> {
+        let core = self.core.clone();
+        let id = self.id;
+        self.armed = false;
+        drop(self);
+        let result = VirtioGpuDevice::run_present_operation(&core, id);
+        VirtioGpuDevice::release_present_operation(&core, id);
+        result
+    }
+}
+
+fn prepare_present_target(
+    core: &VirtioGpuDeviceCore,
+    target: &PresentTarget,
+) -> Result<Vec<Arc<ControlRequest>>, &'static str> {
+    match target {
+        PresentTarget::Gpu { resource, region } => {
+            if resource.backend_cookie() != core.backend_cookie() {
+                return Err("GPU display resource belongs to a different VirtIO GPU device");
+            }
+            if resource.resource_id() == 0 || resource.width() == 0 || resource.height() == 0 {
+                return Err("GPU display resource is invalid");
+            }
+            let Some(rect) = VirtioGpuDeviceCore::clamp_region_to_rect(
+                *region,
+                resource.width(),
+                resource.height(),
+            ) else {
+                return Ok(Vec::new());
+            };
+            presentation_requests(
+                resource.resource_id(),
+                resource.width(),
+                resource.height(),
+                rect,
+                false,
+            )
+        }
+        PresentTarget::Framebuffer {
+            config,
+            physical_addr,
+            region,
+        } => {
+            let current_config = core.get_framebuffer_config()?;
+            if core.get_framebuffer_address()? != *physical_addr {
+                return Err(
+                    "Framebuffer physical address does not match current virtio-gpu framebuffer",
+                );
+            }
+            if current_config.width != config.width
+                || current_config.height != config.height
+                || current_config.format != config.format
+                || current_config.stride != config.stride
+            {
+                return Err("Framebuffer config does not match current virtio-gpu framebuffer");
+            }
+            let display = core.display_info.read();
+            let primary = display.as_ref().ok_or("Device not initialized")?.pmodes[0];
+            if primary.enabled == 0 {
+                return Err("Primary display not enabled");
+            }
+            let Some(rect) = VirtioGpuDeviceCore::clamp_region_to_rect(
+                *region,
+                primary.r.width,
+                primary.r.height,
+            ) else {
+                return Ok(Vec::new());
+            };
+            let resource_id = core
+                .current_resource_id
+                .read()
+                .ok_or("No framebuffer resource found")?;
+            presentation_requests(resource_id, primary.r.width, primary.r.height, rect, true)
+        }
     }
 }
 
@@ -1579,60 +1761,169 @@ fn presentation_requests(
 }
 
 impl VirtioGpuDevice {
-    fn present_with_requests(
+    fn begin_present(
         &self,
-        prepare: impl FnOnce(&VirtioGpuDeviceCore) -> Result<Vec<Arc<ControlRequest>>, &'static str>,
-    ) -> Result<(), &'static str> {
-        if crate::task::mytask().is_none() {
-            return Err("VirtIO GPU presentation requires a schedulable task");
-        }
+        target: PresentTarget,
+        owners: Option<PresentationOwners>,
+    ) -> Result<Box<dyn PresentationWait>, &'static str> {
+        let task_id = crate::task::mytask()
+            .ok_or("VirtIO GPU presentation requires a schedulable task")?
+            .get_id();
+        let owner = crate::sched::scheduler::get_task_by_id(task_id)
+            .map(|task| Arc::downgrade(&task))
+            .ok_or("VirtIO GPU presentation task is not registered")?;
         if !asynchronous::register(&self.core) {
             return Err("VirtIO GPU presentation completion worker is unavailable");
         }
-        let reservation = PresentReservation::new(&self.core);
-        let mut prepare = Some(prepare);
-        let requests = loop {
+        let id = {
+            let mut core = self.core.lock();
+            let id = core
+                .next_present_id
+                .checked_add(1)
+                .ok_or("VirtIO GPU presentation identity exhausted")?;
+            core.presentations
+                .try_reserve(1)
+                .map_err(|_| "VirtIO GPU presentation ownership allocation failed")?;
+            core.next_present_id = id;
+            core.presentations.push(PresentOperation {
+                id,
+                owner,
+                awaiting_admission: true,
+                caller_released: false,
+                target: Some(target),
+                _owners: owners,
+                barrier: None,
+                requests: Vec::new(),
+            });
+            // Publish ownership and wake progress before releasing the guard.
+            // Even an immediate forced exit is observed with an idle queue.
+            asynchronous::wake_worker();
+            id
+        };
+        Ok(Box::new(PresentTicket {
+            core: Arc::downgrade(&self.core),
+            id,
+            armed: true,
+        }))
+    }
+
+    fn release_present_operation(core: &Weak<IrqSpinLock<VirtioGpuDeviceCore>>, id: u64) {
+        let retired = {
+            let Some(core) = core.upgrade() else {
+                return;
+            };
+            let mut core = core.lock();
+            remove_presentations(&mut core.presentations, &[id])
+        };
+        drop(retired);
+        asynchronous::wake_worker();
+    }
+
+    fn run_present_operation(
+        weak_core: &Weak<IrqSpinLock<VirtioGpuDeviceCore>>,
+        id: u64,
+    ) -> Result<(), &'static str> {
+        let request_count = loop {
             let pending = {
-                let core = self.core.lock();
-                let mut queues = core.virtqueues.lock();
-                queues.control.check()?;
-                if let Some(pending) = queues.control.pending_request() {
-                    Some(pending)
+                let core = weak_core
+                    .upgrade()
+                    .ok_or("VirtIO GPU presentation device was abandoned")?;
+                let mut core = core.lock();
+                let pending = {
+                    let queues = core.virtqueues.lock();
+                    queues.control.check()?;
+                    queues.control.pending_request()
+                };
+                if let Some(pending) = pending {
+                    let weak = Arc::downgrade(&pending);
+                    let operation = core
+                        .presentations
+                        .iter_mut()
+                        .find(|operation| operation.id == id)
+                        .ok_or("VirtIO GPU presentation ownership was abandoned")?;
+                    operation.barrier = Some(pending);
+                    Some(weak)
                 } else {
                     // Idle validation and publication share the outer guard:
                     // no new submission can slip between the barrier and batch.
-                    drop(queues);
-                    let requests = prepare.take().expect("unpublished presentation")(&core)?;
+                    let target = core
+                        .presentations
+                        .iter()
+                        .find(|operation| operation.id == id)
+                        .and_then(|operation| operation.target.as_ref())
+                        .ok_or("VirtIO GPU presentation ownership was abandoned")?;
+                    let requests = prepare_present_target(&core, target)?;
                     if requests.is_empty() {
                         return Ok(());
                     }
-                    let mut queues = core.virtqueues.lock();
-                    queues
-                        .control
-                        .enqueue_batch(&requests, crate::timer::get_time_ns())
-                        .map_err(|error| match error {
-                            ControlEnqueueError::Busy => "VirtIO GPU presentation queue is full",
-                            ControlEnqueueError::Failed(error) => error,
-                        })?;
+                    {
+                        let mut queues = core.virtqueues.lock();
+                        queues
+                            .control
+                            .enqueue_batch(&requests, crate::timer::get_time_ns())
+                            .map_err(|error| match error {
+                                ControlEnqueueError::Busy => {
+                                    "VirtIO GPU presentation queue is full"
+                                }
+                                ControlEnqueueError::Failed(error) => error,
+                            })?;
+                    }
+                    let count = requests.len();
+                    let operation = core
+                        .presentations
+                        .iter_mut()
+                        .find(|operation| operation.id == id)
+                        .ok_or("VirtIO GPU presentation ownership was abandoned")?;
+                    operation.requests = requests;
+                    operation.barrier = None;
+                    operation.awaiting_admission = false;
                     // Concurrent presentations can return in a different order.
-                    // Invalidate this legacy cache rather than publish a stale
-                    // scanout id when an earlier waiter resumes last.
+                    // Do not publish a stale cached scanout from a resumed waiter.
                     *core.scanout_resource_id.write() = None;
                     core.notify(0);
-                    break requests;
+                    asynchronous::wake_worker();
+                    break count;
                 }
             };
-            // Both IRQ guards ended before waiting. The autonomous worker owns
-            // response reaping, including timeout/failure and DMA retention.
-            asynchronous::wake_worker();
-            pending.expect("pending barrier request").wait()?;
+            // Only a weak receipt crosses the scheduling boundary. The core
+            // registry owns the barrier until normal or forced-exit cleanup.
+            ControlRequest::wait_owned(
+                pending
+                    .expect("pending barrier request")
+                    .upgrade()
+                    .ok_or("VirtIO GPU presentation barrier was abandoned")?,
+            )?;
         };
-        drop(reservation);
-        asynchronous::wake_worker();
-        for request in requests {
-            request.wait()?;
+        for index in 0..request_count {
+            let weak = {
+                let core = weak_core
+                    .upgrade()
+                    .ok_or("VirtIO GPU presentation device was abandoned")?;
+                let core = core.lock();
+                let operation = core
+                    .presentations
+                    .iter()
+                    .find(|operation| operation.id == id)
+                    .ok_or("VirtIO GPU presentation ownership was abandoned")?;
+                Arc::downgrade(&operation.requests[index])
+            };
+            ControlRequest::wait_owned(
+                weak.upgrade()
+                    .ok_or("VirtIO GPU presentation receipt was abandoned")?,
+            )?;
             let mut bytes = [0; core::mem::size_of::<VirtioGpuCtrlHdr>()];
-            request.copy_response(&mut bytes)?;
+            {
+                let core = weak_core
+                    .upgrade()
+                    .ok_or("VirtIO GPU presentation device was abandoned")?;
+                let core = core.lock();
+                let operation = core
+                    .presentations
+                    .iter()
+                    .find(|operation| operation.id == id)
+                    .ok_or("VirtIO GPU presentation ownership was abandoned")?;
+                operation.requests[index].copy_response(&mut bytes)?;
+            }
             // SAFETY: the returned owned response includes a complete header.
             let response =
                 unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const VirtioGpuCtrlHdr) };
@@ -2121,7 +2412,11 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
             return Err(GpuBackendEnqueueError::Busy(submission));
         };
         let core = &mut *guard;
-        if core.present_waiters != 0 {
+        if core
+            .presentations
+            .iter()
+            .any(|operation| operation.awaiting_admission)
+        {
             return Err(GpuBackendEnqueueError::Busy(submission));
         }
         if !self.async_enabled {
@@ -2341,43 +2636,33 @@ impl GraphicsDevice for VirtioGpuDevice {
         physical_addr: u64,
         region: DisplayRegion,
     ) -> Result<(), &'static str> {
-        self.present_with_requests(|core| {
-            let current_config = core.get_framebuffer_config()?;
-            let current_physical_addr = core.get_framebuffer_address()?;
-            if current_physical_addr != physical_addr {
-                return Err(
-                    "Framebuffer physical address does not match current virtio-gpu framebuffer",
-                );
-            }
-            if current_config.width != config.width
-                || current_config.height != config.height
-                || current_config.format != config.format
-                || current_config.stride != config.stride
-            {
-                return Err("Framebuffer config does not match current virtio-gpu framebuffer");
-            }
-
-            let display_info = core.display_info.read();
-            let primary = display_info
-                .as_ref()
-                .ok_or("Device not initialized")?
-                .pmodes[0];
-            if primary.enabled == 0 {
-                return Err("Primary display not enabled");
-            }
-            let Some(rect) = VirtioGpuDeviceCore::clamp_region_to_rect(
+        self.begin_present(
+            PresentTarget::Framebuffer {
+                config: config.clone(),
+                physical_addr,
                 region,
-                primary.r.width,
-                primary.r.height,
-            ) else {
-                return Ok(Vec::new());
-            };
-            let resource_id = core
-                .current_resource_id
-                .read()
-                .ok_or("No framebuffer resource found")?;
-            presentation_requests(resource_id, primary.r.width, primary.r.height, rect, true)
-        })
+            },
+            None,
+        )?
+        .wait()
+    }
+
+    fn begin_framebuffer_present(
+        &self,
+        config: FramebufferConfig,
+        physical_addr: u64,
+        region: DisplayRegion,
+        owners: PresentationOwners,
+    ) -> Result<Option<Box<dyn PresentationWait>>, &'static str> {
+        self.begin_present(
+            PresentTarget::Framebuffer {
+                config,
+                physical_addr,
+                region,
+            },
+            Some(owners),
+        )
+        .map(Some)
     }
 
     fn present_gpu_resource_region(
@@ -2385,28 +2670,19 @@ impl GraphicsDevice for VirtioGpuDevice {
         resource: GpuDisplayResource,
         region: DisplayRegion,
     ) -> Result<(), &'static str> {
-        self.present_with_requests(|core| {
-            if resource.backend_cookie() != core.backend_cookie() {
-                return Err("GPU display resource belongs to a different VirtIO GPU device");
-            }
-            if resource.resource_id() == 0 || resource.width() == 0 || resource.height() == 0 {
-                return Err("GPU display resource is invalid");
-            }
-            let Some(rect) = VirtioGpuDeviceCore::clamp_region_to_rect(
-                region,
-                resource.width(),
-                resource.height(),
-            ) else {
-                return Ok(Vec::new());
-            };
-            presentation_requests(
-                resource.resource_id(),
-                resource.width(),
-                resource.height(),
-                rect,
-                false,
-            )
-        })
+        self.begin_present(PresentTarget::Gpu { resource, region }, None)?
+            .wait()
+    }
+
+    fn begin_gpu_resource_present(
+        &self,
+        resource: GpuDisplayResource,
+        region: DisplayRegion,
+        _options: GpuPresentOptions,
+        owners: PresentationOwners,
+    ) -> Result<Option<Box<dyn PresentationWait>>, &'static str> {
+        self.begin_present(PresentTarget::Gpu { resource, region }, Some(owners))
+            .map(Some)
     }
 
     fn init_graphics(&self) -> Result<(), &'static str> {
