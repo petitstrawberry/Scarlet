@@ -348,3 +348,43 @@ performance checks remain necessary.
 A618 consumers use the same pinned canonical IR revision, but arbitrary
 SPIR-V-to-A618 compilation is not implemented. Host validation and target
 compilation do not establish physical Chromebook Vulkan rendering.
+
+
+## Native WebKit Ganesh contract
+
+The normal AArch64 desktop bundle installs `/bin/myrica-vulkan-probe` through
+Myrica's ordinary Cargo producer. The app owns its WebKit source revision;
+Scarlet's flake supplies the common SDK runtime only. Build the normal disk
+with `cargo scarlet image --project projects/aarch64-limine-full --image disk
+--release --locked`, boot with HVF and `virtio-gpu-gl-pci`, then run
+`myrica-vulkan-probe` in the standard guest shell.
+
+On 2026-10-14 the release check passed initialized C++ ELF TLS, Rust TLS and
+errno isolation across four native threads. Skia Ganesh then drew white, red
+and blue regions into an exported BGRA Vulkan image through the installed
+native loader, SGFX ICD and VirGL backend. GPU readback matched the expected
+pixels in all three independent create/draw/readback/destroy cycles.
+
+The tested WebKit implementation is
+[`d05ff7a`](https://github.com/petitstrawberry/WebKit/blob/d05ff7a348a8110934792429b2a87e0aa93de18e/Source/WebCore/platform/graphics/scarlet/vulkan/ScarletSkiaVulkan.cpp),
+consumed by Myrica `29babea916b984d99a5fa672e44910271149219d`, with native ICD
+`7a62d766818b205fc21a69aae0d72792d4b374aa`. Its reusable context owns one
+Vulkan device and Ganesh context; owned surfaces keep that context alive.
+The probe holds 128x96 and 160x112 shared images simultaneously, submits both,
+duplicates and closes an exported capability, and destroys one image before
+submitting the other again. All three cycles passed with this implementation.
+Image publication waits for GPU completion. A future embedding must also
+wait for its consumer before reusing an image.
+
+The ICD fix accepts explicit same-family image/buffer barriers (`0 -> 0`).
+The previous check incorrectly required two `QUEUE_FAMILY_IGNORED` indices,
+rejecting Skia's first valid image transition and subsequently losing the
+asynchronous queue. All 80 release ICD unit tests and both real Metal GPU
+barrier/readback contracts passed. The existing native cube also passed three
+GPU readback cycles in the same Scarlet guest, and `myrica --help` exited
+normally. The probe's remaining ELF imports are the four ordinary `dl*`
+functions and weak `environ`.
+
+Browser page rendering still uses Cairo. This check verifies the native
+Ganesh/Vulkan driver path and reusable image ownership; WebCore Skia page
+painting and Myrica shared-image presentation are not yet connected.
