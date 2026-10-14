@@ -7,11 +7,11 @@
 #![no_std]
 
 extern crate alloc;
-#[cfg(feature = "software-media")]
+#[cfg(feature = "media-container-aac")]
 extern crate std;
 
 /// Bounded reusable ISO MP4 demux and software AVC/AAC decode.
-#[cfg(feature = "software-media")]
+#[cfg(feature = "media-container-aac")]
 pub mod media;
 
 /// H.264/AVC stateless request construction.

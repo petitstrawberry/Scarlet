@@ -3,6 +3,7 @@
 //! Network access, playback clocks, output queues and rendering belong to the
 //! caller. MP4 samples are pulled one at a time; fragment boundaries never reset
 //! their media timestamps. Only 8-bit 4:2:0 AVC and AAC-LC mono/stereo are supported.
+#[cfg(feature = "software-h264")]
 use rust_h264::{
     decoder::OrderedDecoder,
     nal::{self, NalUnit, NalUnitType},
@@ -184,12 +185,10 @@ impl Mp4Parser {
                         continue;
                     };
                     let keyframe = if track.codec == Codec::H264 {
-                        let config = nal::parse_avcc_config(&track.extradata)
-                            .map_err(MediaError::InvalidData)?;
-                        validate_avcc(&packet.data, config.length_size)?;
-                        nal::parse_avcc(&packet.data, config.length_size)
+                        let length_size = avcc_length_size(&track.extradata)?;
+                        avcc_nals(&packet.data, length_size)?
                             .iter()
-                            .any(|n| n.nal_unit_type == NalUnitType::SliceIdr)
+                            .any(|nal| nal[0] & 31 == 5)
                     } else {
                         true
                     };
@@ -514,6 +513,270 @@ pub struct ColorInfo {
     pub full_range: bool,
     pub chroma_location: u8,
 }
+/// Validated AVC configuration for native decoders. This converts MP4 framing
+/// only; it neither decodes pictures nor opens a platform video device.
+pub struct AvcConfiguration {
+    track_id: u32,
+    length_size: usize,
+    parameter_sets: Vec<Vec<u8>>,
+    color: ColorInfo,
+    max_reorder_frames: usize,
+    width: u32,
+    height: u32,
+}
+impl AvcConfiguration {
+    pub fn new(track: &Track) -> Result<Self> {
+        if track.codec != Codec::H264 {
+            return Err(MediaError::InvalidData("not an AVC track"));
+        }
+        let data = &track.extradata;
+        let length_size = avcc_length_size(data)?;
+        let mut offset = 6;
+        let sps_count = usize::from(data[5] & 31);
+        if sps_count == 0 {
+            return Err(MediaError::InvalidData("missing AVC SPS"));
+        }
+        let mut parameter_sets = Vec::new();
+        let mut info = None;
+        for _ in 0..sps_count {
+            let bytes = read_avcc_parameter(data, &mut offset)?;
+            info = Some(native_sps_info(bytes)?);
+            parameter_sets.push(bytes.to_vec());
+        }
+        let pps_count = usize::from(
+            *data
+                .get(offset)
+                .ok_or(MediaError::InvalidData("missing AVC PPS count"))?,
+        );
+        offset += 1;
+        if pps_count == 0 {
+            return Err(MediaError::InvalidData("missing AVC PPS"));
+        }
+        for _ in 0..pps_count {
+            let bytes = read_avcc_parameter(data, &mut offset)?;
+            if bytes[0] & 31 != 8 {
+                return Err(MediaError::InvalidData("invalid AVC PPS type"));
+            }
+            crate::h264::parameter_set_id(bytes).map_err(decode_err)?;
+            parameter_sets.push(bytes.to_vec());
+        }
+        let (color, depth, width, height) = info.unwrap();
+        Ok(Self {
+            track_id: track.id,
+            length_size,
+            parameter_sets,
+            color,
+            max_reorder_frames: depth,
+            width,
+            height,
+        })
+    }
+    pub fn color(&self) -> ColorInfo {
+        self.color
+    }
+    pub fn max_reorder_frames(&self) -> usize {
+        self.max_reorder_frames
+    }
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+    /// Prepend avcC parameter sets to a complete access unit, preserving raw
+    /// EBSP bytes. Validate in-band SPS before native decoder allocation.
+    pub fn annex_b(&mut self, sample: &Sample) -> Result<Vec<u8>> {
+        if sample.track_id != self.track_id {
+            return Err(MediaError::InvalidData("wrong AVC track"));
+        }
+        let nals = avcc_nals(&sample.data, self.length_size)?;
+        let mut info = None;
+        let mut replacements = Vec::new();
+        let mut pictures = 0;
+        for nal in &nals {
+            if nal[0] & 31 == 7 {
+                info = Some(native_sps_info(nal)?);
+            }
+            if matches!(nal[0] & 31, 7 | 8) {
+                let id = crate::h264::parameter_set_id(nal).map_err(decode_err)?;
+                replacements.push((nal[0] & 31, id, *nal));
+            }
+            if matches!(nal[0] & 31, 1 | 5) {
+                let first = nal
+                    .get(1)
+                    .ok_or(MediaError::InvalidData("empty AVC slice"))?;
+                if first & 0x80 != 0 {
+                    pictures += 1;
+                }
+            }
+        }
+        if pictures > 1 {
+            return Err(MediaError::Unsupported("multiple pictures per AVC sample"));
+        }
+        // New parameter sets persist into later access units. Retaining an old
+        // avcC prefix would otherwise overwrite the in-band configuration again.
+        let mut parameter_sets = self.parameter_sets.clone();
+        for (kind, id, nal) in replacements {
+            let existing = parameter_sets.iter().position(|old| {
+                old[0] & 31 == kind && crate::h264::parameter_set_id(old).ok() == Some(id)
+            });
+            if let Some(index) = existing {
+                parameter_sets[index] = nal.to_vec();
+            } else {
+                parameter_sets.push(nal.to_vec());
+            }
+        }
+        if parameter_sets.len() > 287 || parameter_sets.iter().map(Vec::len).sum::<usize>() > 65536
+        {
+            return Err(MediaError::Unsupported("oversized AVC configuration"));
+        }
+        let mut len = 0usize;
+        for n in parameter_sets
+            .iter()
+            .map(|n| n.as_slice())
+            .chain(nals.iter().copied())
+        {
+            len = len
+                .checked_add(4)
+                .and_then(|v| v.checked_add(n.len()))
+                .ok_or(MediaError::InvalidData("Annex B size overflow"))?;
+        }
+        // Config and length-prefix expansion are bounded separately from the
+        // input sample so a maximum-size valid AVCC sample remains accepted.
+        if len > MAX_SAMPLE_BYTES + 65536 + 4 * 256 {
+            return Err(MediaError::Unsupported("oversized Annex B access unit"));
+        }
+        let mut out = Vec::with_capacity(len);
+        for n in parameter_sets
+            .iter()
+            .map(|n| n.as_slice())
+            .chain(nals.iter().copied())
+        {
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(n);
+        }
+        self.parameter_sets = parameter_sets;
+        if let Some((color, depth, width, height)) = info {
+            self.color = color;
+            self.max_reorder_frames = depth;
+            self.width = width;
+            self.height = height;
+        }
+        Ok(out)
+    }
+}
+fn avcc_length_size(data: &[u8]) -> Result<usize> {
+    if data.len() < 7 || data.len() > 65536 || data[0] != 1 {
+        return Err(MediaError::InvalidData("invalid avcC configuration"));
+    }
+    let length = usize::from(data[4] & 3) + 1;
+    if !matches!(length, 1 | 2 | 4) {
+        return Err(MediaError::InvalidData("invalid AVC length size"));
+    }
+    Ok(length)
+}
+fn read_avcc_parameter<'a>(data: &'a [u8], offset: &mut usize) -> Result<&'a [u8]> {
+    let len = data
+        .get(*offset..*offset + 2)
+        .ok_or(MediaError::InvalidData("truncated avcC parameter length"))?;
+    let len = usize::from(u16::from_be_bytes(len.try_into().unwrap()));
+    *offset += 2;
+    let nal = data
+        .get(*offset..*offset + len)
+        .ok_or(MediaError::InvalidData("truncated avcC parameter"))?;
+    *offset += len;
+    if nal.is_empty() || nal[0] & 0x80 != 0 {
+        return Err(MediaError::InvalidData("invalid avcC parameter header"));
+    }
+    Ok(nal)
+}
+fn avcc_nals(mut data: &[u8], length_size: usize) -> Result<Vec<&[u8]>> {
+    validate_avcc(data, length_size)?;
+    let mut nals = Vec::new();
+    while !data.is_empty() {
+        let len = data[..length_size]
+            .iter()
+            .fold(0usize, |n, b| (n << 8) | usize::from(*b));
+        data = &data[length_size..];
+        nals.push(&data[..len]);
+        data = &data[len..];
+    }
+    Ok(nals)
+}
+fn native_sps_info(nal: &[u8]) -> Result<(ColorInfo, usize, u32, u32)> {
+    use crate::h264::{SCARLET_VIDEO_H264_SPS_FLAG_FRAME_MBS_ONLY, inspect_sps};
+    let info = inspect_sps(nal).map_err(decode_err)?;
+    let s = info.sps;
+    if !matches!(s.profile_idc, 66 | 77 | 100)
+        || s.chroma_format_idc != 1
+        || s.bit_depth_luma_minus8 != 0
+        || s.bit_depth_chroma_minus8 != 0
+        || s.flags & SCARLET_VIDEO_H264_SPS_FLAG_FRAME_MBS_ONLY == 0
+    {
+        return Err(MediaError::Unsupported(
+            "AVC requires progressive Baseline/Main/High 8-bit 4:2:0",
+        ));
+    }
+    let coded_width = (u32::from(s.pic_width_in_mbs_minus1) + 1)
+        .checked_mul(16)
+        .ok_or(MediaError::InvalidData("AVC width overflow"))?;
+    let coded_height = (u32::from(s.pic_height_in_map_units_minus1) + 1)
+        .checked_mul(16)
+        .ok_or(MediaError::InvalidData("AVC height overflow"))?;
+    let crop_x = s
+        .frame_crop_left_offset
+        .checked_add(s.frame_crop_right_offset)
+        .and_then(|v| v.checked_mul(2))
+        .ok_or(MediaError::InvalidData("AVC crop overflow"))?;
+    let crop_y = s
+        .frame_crop_top_offset
+        .checked_add(s.frame_crop_bottom_offset)
+        .and_then(|v| v.checked_mul(2))
+        .ok_or(MediaError::InvalidData("AVC crop overflow"))?;
+    let width = coded_width
+        .checked_sub(crop_x)
+        .ok_or(MediaError::InvalidData("invalid AVC crop"))?;
+    let height = coded_height
+        .checked_sub(crop_y)
+        .ok_or(MediaError::InvalidData("invalid AVC crop"))?;
+    let depth = match info.max_reorder_frames {
+        Some(depth) => depth,
+        None if s.profile_idc == 66 => 0,
+        None => {
+            return Err(MediaError::Unsupported(
+                "AVC reorder depth is not signalled",
+            ));
+        }
+    };
+    if width == 0
+        || height == 0
+        || coded_width > 3840
+        || coded_height > 2160
+        || coded_width
+            .checked_mul(coded_height)
+            .is_none_or(|v| v > 3840 * 2160)
+        || s.max_num_ref_frames > 8
+        || depth > 2
+    {
+        return Err(MediaError::Unsupported(
+            "AVC dimensions, references or reorder depth exceed bounds",
+        ));
+    }
+    let c = info.color;
+    Ok((
+        ColorInfo {
+            matrix: c.matrix,
+            primaries: c.primaries,
+            transfer: c.transfer,
+            full_range: c.full_range,
+            chroma_location: c.chroma_location as u8,
+        },
+        depth as usize,
+        width,
+        height,
+    ))
+}
+
 #[derive(Clone, Debug)]
 pub struct VideoFrame {
     pub width: u32,
@@ -527,17 +790,20 @@ pub struct VideoFrame {
     pub color: ColorInfo,
 }
 #[derive(Clone, Copy)]
+#[cfg(feature = "software-h264")]
 struct PictureMeta {
     pts_us: i64,
     duration_us: u64,
     color: ColorInfo,
 }
+#[cfg(feature = "software-h264")]
 pub struct VideoDecoder {
     decoder: OrderedDecoder<PictureMeta>,
     track: Track,
     length_size: usize,
     color: ColorInfo,
 }
+#[cfg(feature = "software-h264")]
 impl VideoDecoder {
     pub fn new(track: &Track) -> Result<Self> {
         if track.codec != Codec::H264 {
@@ -641,6 +907,7 @@ impl VideoDecoder {
             .collect())
     }
 }
+#[cfg(feature = "software-h264")]
 fn frame((f, meta): (rust_h264::decoder::Frame, PictureMeta)) -> VideoFrame {
     VideoFrame {
         width: f.width as u32,
@@ -658,6 +925,7 @@ fn frame((f, meta): (rust_h264::decoder::Frame, PictureMeta)) -> VideoFrame {
         color: meta.color,
     }
 }
+#[cfg(feature = "software-h264")]
 fn check_sps(n: &NalUnit<'_>) -> Result<ColorInfo> {
     let s = nal::parse_sps_info(n).map_err(MediaError::InvalidData)?;
     if !matches!(s.profile, 66 | 77 | 100)
@@ -694,6 +962,7 @@ fn check_sps(n: &NalUnit<'_>) -> Result<ColorInfo> {
         chroma_location: s.chroma_location as u8,
     })
 }
+#[cfg(feature = "software-h264")]
 fn first_mb_is_zero(rbsp: &[u8]) -> Result<bool> {
     let byte = rbsp
         .first()

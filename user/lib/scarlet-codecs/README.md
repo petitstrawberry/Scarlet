@@ -10,9 +10,12 @@ command streams.
 
 - `h264` is disabled by default.
 - `vp9` is disabled by default while the AVD path is still experimental.
-- `software-media` is disabled by default. It adds reusable MP4/fMP4 demuxing,
-  progressive 8-bit 4:2:0 AVC decode, and AAC-LC mono/stereo decode using the
-  standard library. AVC licensing opt-in applies to this feature too.
+- `media-container-aac` is disabled by default. It adds reusable MP4/fMP4 demux,
+  AAC-LC decode, and AVC framing/SPS inspection for native video decoders using
+  the standard library. It does not depend on a software video decoder.
+- `software-h264` explicitly enables the optional software AVC decoder.
+  `software-media` remains a compatible alias for the combined implementation.
+  AVC licensing opt-in applies to these media features too.
 
 H.264/AVC may be patent-encumbered in some jurisdictions. The `h264` feature is
 therefore an explicit opt-in.
@@ -26,7 +29,13 @@ timestamps are retained across separate MSE appends. `reset` discards incomplete
 append state while retaining a completed initialization segment; create a new
 parser for a new URL. The shared Symphonia ISO MP4 parser owns sample-table parsing.
 
-`VideoDecoder` accepts AVCC samples and returns timestamped I420 planes, strides,
+`AvcConfiguration` converts complete AVCC samples into validated Annex-B access
+units for a native decoder such as `/dev/video0`. It preserves SPS/PPS EBSP bytes,
+updates in-band parameter sets, and exposes dimensions, colour and reorder depth.
+SPS changes are validated before submission. For a bounded output queue, Main/High
+streams must signal a reorder depth of at most two; Baseline without VUI has none.
+
+With `software-h264`, `VideoDecoder` accepts AVCC samples and returns timestamped I420 planes, strides,
 and SPS colour metadata. `AudioDecoder` returns timestamped interleaved signed
 16-bit PCM. Decoder reset reinstalls configuration after a seek/discontinuity.
 Clocks, network input, audio devices, rendering and output queue scheduling belong

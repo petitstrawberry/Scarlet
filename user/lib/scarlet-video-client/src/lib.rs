@@ -708,6 +708,17 @@ impl ScarletVideoDecoder {
     ///
     /// A decoder ready to be configured, or an error if `/dev/video0` cannot
     /// be opened or initialized.
+    /// Query the current `/dev/video0` backend without allocating a decoder
+    /// session, mapped buffers, or decoded images. The device handle is closed
+    /// before returning. Unsupported legacy capability queries are explicit.
+    pub fn available_capabilities() -> Result<DecoderCapabilities, String> {
+        let device = Handle::open(VIDEO_DEVICE_PATH, 0x2)
+            .map_err(|_| format!("failed to open {VIDEO_DEVICE_PATH}"))?;
+        let caps = Self::query_capabilities(&device)
+            .ok_or_else(|| String::from("video backend capability query unsupported"))?;
+        Ok(DecoderCapabilities::from(caps))
+    }
+
     pub fn open() -> Result<Self, String> {
         Self::open_with_options(DecoderOptions::default())
     }

@@ -11,7 +11,9 @@ default = []
 h264 = []
 vp9 = []
 # Software AVC/AAC playback is opt-in, including the same AVC licensing policy.
-software-media = ["dep:rust_h264", "dep:symphonia-core", "dep:symphonia-codec-aac", "dep:symphonia-format-isomp4", "dep:symphonia-std"]
+media-container-aac = ["h264", "dep:symphonia-core", "dep:symphonia-codec-aac", "dep:symphonia-format-isomp4", "dep:symphonia-std"]
+software-h264 = ["media-container-aac", "dep:rust_h264"]
+software-media = ["software-h264"]
 
 [package.metadata.scarlet-codecs]
 h264_patent_notice = "The h264 feature is disabled by default because H.264/AVC may be patent-encumbered in some jurisdictions."

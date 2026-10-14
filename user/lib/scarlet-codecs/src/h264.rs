@@ -984,7 +984,58 @@ mod tests {
     }
 }
 
+/// Validated SPS metadata shared by stateful and stateless decoder clients.
+#[derive(Clone, Copy)]
+pub struct H264SpsInfo {
+    pub sps: ScarletVideoH264Sps,
+    pub color: H264ColorInfo,
+    pub max_reorder_frames: Option<u32>,
+}
+/// Inspect a complete SPS NAL (including its one-byte NAL header), without
+/// allocating pictures or requiring a software decoder.
+pub fn inspect_sps(nal: &[u8]) -> Result<H264SpsInfo, String> {
+    if nal
+        .first()
+        .is_none_or(|header| header & 0x80 != 0 || header & 31 != 7)
+    {
+        return Err(String::from("not an H.264 SPS NAL"));
+    }
+    let mut color = H264ColorInfo::default();
+    let mut max_reorder_frames = None;
+    let sps = parse_h264_sps_metadata(nal, &mut color, Some(&mut max_reorder_frames))?;
+    Ok(H264SpsInfo {
+        sps,
+        color,
+        max_reorder_frames,
+    })
+}
+/// Parameter-set identifier used to replace an in-band SPS/PPS configuration.
+pub fn parameter_set_id(nal: &[u8]) -> Result<u32, String> {
+    let header = *nal
+        .first()
+        .ok_or_else(|| String::from("empty H.264 parameter set"))?;
+    if header & 0x80 != 0 {
+        return Err(String::from("invalid H.264 NAL header"));
+    }
+    match header & 31 {
+        7 => Ok(u32::from(
+            parse_h264_sps(nal, &mut H264ColorInfo::default())?.seq_parameter_set_id,
+        )),
+        8 => Ok(u32::from(read_u8_ue(
+            &mut EbspBitReader::new(&nal[1..]),
+            "H.264 PPS id",
+        )?)),
+        _ => Err(String::from("not an H.264 parameter set")),
+    }
+}
 fn parse_h264_sps(nal: &[u8], color: &mut H264ColorInfo) -> Result<ScarletVideoH264Sps, String> {
+    parse_h264_sps_metadata(nal, color, None)
+}
+fn parse_h264_sps_metadata(
+    nal: &[u8],
+    color: &mut H264ColorInfo,
+    reorder: Option<&mut Option<u32>>,
+) -> Result<ScarletVideoH264Sps, String> {
     if nal.len() < 2 {
         return Err(String::from("H.264 SPS is truncated"));
     }
@@ -1142,6 +1193,37 @@ fn parse_h264_sps(nal: &[u8], color: &mut H264ColorInfo) -> Result<ScarletVideoH
             read_u32_ue(&mut reader, "H.264 chroma_sample_loc_type_bottom_field")?;
             if color.chroma_location > 5 {
                 return Err(String::from("H.264 chroma sample location invalid"));
+            }
+        }
+        if let Some(reorder) = reorder {
+            if read_bool(&mut reader, "H.264 timing_info_present_flag")? {
+                reader
+                    .read_bits(32)
+                    .ok_or_else(|| String::from("H.264 num_units_in_tick missing"))?;
+                reader
+                    .read_bits(32)
+                    .ok_or_else(|| String::from("H.264 time_scale missing"))?;
+                read_bool(&mut reader, "H.264 fixed_frame_rate_flag")?;
+            }
+            let nal_hrd = read_bool(&mut reader, "H.264 nal_hrd_parameters_present_flag")?;
+            if nal_hrd {
+                skip_hrd_metadata(&mut reader)?;
+            }
+            let vcl_hrd = read_bool(&mut reader, "H.264 vcl_hrd_parameters_present_flag")?;
+            if vcl_hrd {
+                skip_hrd_metadata(&mut reader)?;
+            }
+            if nal_hrd || vcl_hrd {
+                read_bool(&mut reader, "H.264 low_delay_hrd_flag")?;
+            }
+            read_bool(&mut reader, "H.264 pic_struct_present_flag")?;
+            if read_bool(&mut reader, "H.264 bitstream_restriction_flag")? {
+                read_bool(&mut reader, "H.264 motion_vectors_over_pic_boundaries_flag")?;
+                for _ in 0..4 {
+                    read_u32_ue(&mut reader, "H.264 bitstream restriction field")?;
+                }
+                *reorder = Some(read_u32_ue(&mut reader, "H.264 max_num_reorder_frames")?);
+                read_u32_ue(&mut reader, "H.264 max_dec_frame_buffering")?;
             }
         }
     }
@@ -2126,4 +2208,21 @@ fn is_h264_high_profile(profile_idc: u8) -> bool {
         profile_idc,
         100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
     )
+}
+
+fn skip_hrd_metadata(reader: &mut EbspBitReader<'_>) -> Result<(), String> {
+    let count = read_u32_ue(reader, "H.264 cpb_cnt_minus1")?;
+    if count > 31 {
+        return Err(String::from("H.264 invalid HRD CPB count"));
+    }
+    read_u8_bits(reader, 8, "H.264 HRD scales")?;
+    for _ in 0..=count {
+        read_u32_ue(reader, "H.264 bit_rate_value_minus1")?;
+        read_u32_ue(reader, "H.264 cpb_size_value_minus1")?;
+        read_bool(reader, "H.264 cbr_flag")?;
+    }
+    reader
+        .read_bits(20)
+        .ok_or_else(|| String::from("H.264 HRD delay lengths missing"))?;
+    Ok(())
 }
