@@ -299,6 +299,9 @@ QEMU_DISPLAY_ARGS=(-serial "${SCARLET_QEMU_SERIAL:-mon:stdio}" -display "$QEMU_D
 # Local automation uses a Unix QMP socket and an ephemeral disk overlay.
 # Defaults retain the interactive runner's existing behavior.
 QEMU_CONTROL_ARGS=()
+if [ -n "${SCARLET_QEMU_NAME:-}" ]; then
+    QEMU_CONTROL_ARGS+=(-name "$SCARLET_QEMU_NAME")
+fi
 if [ -n "${SCARLET_QEMU_QMP:-}" ]; then
     QEMU_CONTROL_ARGS+=(-qmp "unix:${SCARLET_QEMU_QMP},server=on,wait=off")
 fi

@@ -1820,6 +1820,26 @@ pub fn sys_exit_group(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     task.vcpu.lock().store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
+    // The native C/Rust runtime reports abort as exit status 134. Preserve
+    // its call site before deferred group teardown discards the user context.
+    #[cfg(target_arch = "aarch64")]
+    if exit_code == 134 {
+        crate::println!(
+            "[task-abort] task={} status=134 pc={:#x} lr={:#x} fp={:#x} sp={:#x}",
+            task.get_id(),
+            trapframe.elr,
+            trapframe.regs.reg[30],
+            trapframe.regs.reg[29],
+            trapframe.sp,
+        );
+        let mut stack = [0u8; 256];
+        if copy_from_user(&task, trapframe.sp as usize, &mut stack).is_ok() {
+            for (index, word) in stack.chunks_exact(8).enumerate() {
+                let value = u64::from_ne_bytes(word.try_into().unwrap());
+                crate::println!("[task-abort] stack+{:#x}={:#x}", index * 8, value);
+            }
+        }
+    }
     task.request_deferred_exit_group(exit_code);
     usize::MAX // -1 (If exit_group is successful, this will not be reached)
 }
