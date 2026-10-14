@@ -189,9 +189,16 @@ fn baseline_progressive_mp4_actual_decode() {
         "yuv420p",
         "-f",
         "rawvideo",
+        "-fps_mode",
+        "passthrough",
         "reference.yuv",
     ]);
     let reference = std::fs::read(fixtures.0.join("reference.yuv")).unwrap();
+    assert_eq!(
+        reference.len(),
+        16 * 4608,
+        "reference must preserve original presentation timestamps without CFR duplication"
+    );
     let mut actual = Vec::new();
     for frame in frames {
         actual.extend(frame.y);
@@ -233,9 +240,16 @@ fn main_b_frames_fragmented_incremental_decode_and_timestamps() {
         "yuv420p",
         "-f",
         "rawvideo",
+        "-fps_mode",
+        "passthrough",
         "reference.yuv",
     ]);
     let reference = std::fs::read(fixtures.0.join("reference.yuv")).unwrap();
+    assert_eq!(
+        reference.len(),
+        16 * 4608,
+        "reference must preserve original presentation timestamps without CFR duplication"
+    );
     let mut actual = Vec::new();
     for frame in frames {
         actual.extend(frame.y);
@@ -400,4 +414,152 @@ fn inband_sps_cannot_allocate_oversized_pictures() {
         decoder.push(&sample),
         Err(MediaError::Unsupported(_))
     ));
+}
+
+fn compare_b_frame_reference(fixtures: &Fixtures, data: &[u8], profile: u8) {
+    let (tracks, samples) = demux(data, 257);
+    let video = tracks.iter().find(|t| t.codec == Codec::H264).unwrap();
+    assert_eq!(
+        video.extradata[1], profile,
+        "fixture must encode the requested AVC profile"
+    );
+    let (frames, _, _) = decode_all(&tracks, &samples);
+    let mut expected_pts = samples
+        .iter()
+        .filter(|s| s.track_id == video.id)
+        .map(|s| s.pts_us)
+        .collect::<Vec<_>>();
+    assert_eq!(expected_pts.len(), 16);
+    assert!(
+        samples
+            .iter()
+            .any(|s| s.track_id == video.id && s.pts_us != s.dts_us),
+        "fixture must contain reordered pictures"
+    );
+    expected_pts.sort_unstable();
+    assert_eq!(
+        frames.iter().map(|f| f.pts_us).collect::<Vec<_>>(),
+        expected_pts,
+        "decoded pixels must retain their source packet PTS through reorder and IDR boundaries"
+    );
+    assert!(expected_pts.windows(2).all(|p| p[1] - p[0] == 125_000));
+    fixtures.ffmpeg(&[
+        "-i",
+        "movie.mp4",
+        "-an",
+        "-fps_mode",
+        "passthrough",
+        "-pix_fmt",
+        "yuv420p",
+        "-f",
+        "rawvideo",
+        "reference.yuv",
+    ]);
+    let reference = std::fs::read(fixtures.0.join("reference.yuv")).unwrap();
+    assert_eq!(
+        reference.len(),
+        16 * 4608,
+        "independent decoder must preserve all 16 source frames without CFR insertion"
+    );
+    for (i, (frame, expected)) in frames.iter().zip(reference.chunks_exact(4608)).enumerate() {
+        let actual = frame
+            .y
+            .iter()
+            .chain(&frame.u)
+            .chain(&frame.v)
+            .copied()
+            .collect::<Vec<_>>();
+        assert!(
+            actual == expected,
+            "AVC profile {profile} frame {i}: {} I420 byte differences, max error {}",
+            actual.iter().zip(expected).filter(|(a, b)| a != b).count(),
+            actual
+                .iter()
+                .zip(expected)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap()
+        );
+    }
+}
+
+#[test]
+fn high_b_frames_fragmented_pixels_and_pts_match_independent_decoder() {
+    let fixtures = Fixtures::new();
+    let data = fixtures.create("high", "2", true);
+    compare_b_frame_reference(&fixtures, &data, 100);
+}
+
+#[test]
+fn main_and_high_nonidentity_weighted_prediction_match_independent_decoder() {
+    for (profile_name, profile_id) in [("main", 77), ("high", 100)] {
+        let fixtures = Fixtures::new();
+        fixtures.ffmpeg(&[
+            "-f", "lavfi", "-i", "testsrc2=size=64x48:rate=8:duration=2,fade=t=out:st=0:d=2",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2",
+            "-c:v", "libx264", "-profile:v", profile_name, "-pix_fmt", "yuv420p", "-bf", "2", "-g", "8",
+            "-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709:weightp=2:weightb=1:b-adapt=0:b-pyramid=normal:ref=3",
+            "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+            "-c:a", "aac", "-ac", "2", "-movflags", "empty_moov+frag_keyframe+default_base_moof", "movie.mp4",
+        ]);
+        // Verify the encoded stream actually contains nonidentity explicit P
+        // weights and enables implicit B weighting; encoder settings alone do
+        // not guarantee that weighted prediction is exercised.
+        let ffmpeg =
+            std::env::var("FFMPEG").unwrap_or_else(|_| "/run/current-system/sw/bin/ffmpeg".into());
+        let trace = Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "info",
+                "-i",
+                "movie.mp4",
+                "-map",
+                "0:v:0",
+                "-c:v",
+                "copy",
+                "-bsf:v",
+                "trace_headers",
+                "-f",
+                "null",
+                "-",
+            ])
+            .current_dir(&fixtures.0)
+            .output()
+            .unwrap();
+        assert!(
+            trace.status.success(),
+            "trace_headers must inspect the generated stream"
+        );
+        let trace = String::from_utf8_lossy(&trace.stderr);
+        let mut denom = 0;
+        let mut nonidentity = false;
+        let mut implicit_b = false;
+        for line in trace.lines() {
+            let Some((field, value)) = line.rsplit_once('=') else {
+                continue;
+            };
+            let Ok(value) = value.trim().parse::<i32>() else {
+                continue;
+            };
+            if field.contains("luma_log2_weight_denom") {
+                denom = value;
+            }
+            if field.contains("luma_weight_l0[") && value != 1 << denom {
+                nonidentity = true;
+            }
+            if field.contains("luma_offset_l0[") && value != 0 {
+                nonidentity = true;
+            }
+            if field.contains("weighted_bipred_idc") && value == 2 {
+                implicit_b = true;
+            }
+        }
+        assert!(
+            nonidentity && implicit_b,
+            "fixture must encode active P weights and implicit B weighting"
+        );
+        let data = std::fs::read(fixtures.0.join("movie.mp4")).unwrap();
+        compare_b_frame_reference(&fixtures, &data, profile_id);
+    }
 }
