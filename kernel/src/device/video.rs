@@ -280,8 +280,13 @@ impl VideoBackendCapabilities {
 }
 
 /// Backend decode request for a mapped access unit.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct VideoBackendDecodeRequest {
+    /// Owns the allocation backing both input and output addresses.
+    ///
+    /// Asynchronous backends must retain this lease until all device accesses
+    /// and completion reads finish, including when session destruction fails.
+    pub buffer_lease: Option<Arc<ContiguousPages>>,
     /// Return an immutable shared image rather than writing the mapped output.
     pub shared_output: bool,
     /// Backend stream/session identifier.
@@ -307,7 +312,7 @@ pub struct VideoBackendDecodeRequest {
 }
 
 /// Backend request for stateless H.264 decode.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct VideoBackendH264StatelessRequest {
     /// Common mapped decode buffers.
     pub decode: VideoBackendDecodeRequest,
@@ -316,7 +321,7 @@ pub struct VideoBackendH264StatelessRequest {
 }
 
 /// Backend request for stateless VP9 decode.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct VideoBackendVp9StatelessRequest {
     /// Common mapped decode buffers.
     pub decode: VideoBackendDecodeRequest,
@@ -440,7 +445,11 @@ pub trait VideoDecodeBackend: Send + Sync {
     ///
     /// # Returns
     ///
-    /// `Ok(())` when the backend accepted the request.
+    /// `Ok(())` when the backend accepted the request. A backend that can still
+    /// access the buffers after returning must clone `request.buffer_lease`
+    /// before accepting, and retain it through completion or proven abort.
+    /// An error does not permit releasing the lease if the device already
+    /// accepted any part of the request.
     fn submit_decode(&self, request: &VideoBackendDecodeRequest) -> Result<(), &'static str>;
 
     /// Submit one stateless H.264 decode request.
@@ -501,7 +510,7 @@ const VIDEO_MAX_QUEUED_JOBS: usize = 16;
 const VIDEO_MAX_COMPLETED_FRAMES: usize = 16;
 const VIDEO_MAX_STREAM_ERRORS: usize = 16;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum VideoQueuedJob {
     Decode(VideoBackendDecodeRequest),
     H264Stateless(VideoBackendH264StatelessRequest),
@@ -687,7 +696,7 @@ struct ScarletVideoDevice {
     scheduler: IrqSpinLock<VideoSchedulerState>,
     completion_waker: Waker,
     max_inflight_decodes: usize,
-    mapped_buffer: IrqSpinLock<Option<ContiguousPages>>,
+    mapped_buffer: IrqSpinLock<Option<Arc<ContiguousPages>>>,
     last_error: IrqSpinLock<Option<&'static str>>,
     next_timestamp: IrqSpinLock<u64>,
 }
@@ -824,7 +833,8 @@ impl ScarletVideoDevice {
         let mut mapped_buffer = self.mapped_buffer.lock();
         if mapped_buffer.is_none() {
             let pages = layout.mmap_len.div_ceil(PAGE_SIZE);
-            *mapped_buffer = ContiguousPages::new_aligned(pages, VIDEO_MAPPED_BUFFER_ALIGN);
+            *mapped_buffer =
+                ContiguousPages::new_aligned(pages, VIDEO_MAPPED_BUFFER_ALIGN).map(Arc::new);
             if let Some(buffer) = mapped_buffer.as_ref() {
                 crate::println!(
                     "[scarlet-video] legacy mmap alloc pages={} len={} paddr={:#x}",
@@ -1040,12 +1050,13 @@ impl ScarletVideoDevice {
         }
 
         self.ensure_mapped_buffer(layout)?;
-        let (input_paddr, input_vaddr, output_paddr, output_vaddr) = {
+        let (buffer_lease, input_paddr, input_vaddr, output_paddr, output_vaddr) = {
             let mapped_buffer = self.mapped_buffer.lock();
             let buffer = mapped_buffer
                 .as_ref()
                 .ok_or("scarlet-video: mmap buffer missing")?;
             (
+                Arc::clone(buffer),
                 buffer.as_paddr(),
                 buffer.as_vaddr(),
                 buffer.as_paddr() + layout.output_offset as u64,
@@ -1058,6 +1069,7 @@ impl ScarletVideoDevice {
             timestamp
         };
         Ok(VideoBackendDecodeRequest {
+            buffer_lease: Some(buffer_lease),
             stream_id,
             coded_format,
             input_paddr,
@@ -1344,7 +1356,7 @@ struct ScarletVideoOpen {
     output_mode: IrqSpinLock<(u32, bool)>,
     device: Arc<ScarletVideoDevice>,
     buffer_layout: IrqSpinLock<Option<VideoBufferLayout>>,
-    mapped_buffer: IrqSpinLock<Option<ContiguousPages>>,
+    mapped_buffer: IrqSpinLock<Option<Arc<ContiguousPages>>>,
     last_error: IrqSpinLock<Option<&'static str>>,
     next_timestamp: IrqSpinLock<u64>,
     stream_id: IrqSpinLock<Option<u32>>,
@@ -1532,7 +1544,8 @@ impl ScarletVideoOpen {
         let mut mapped_buffer = self.mapped_buffer.lock();
         if mapped_buffer.is_none() {
             let pages = layout.mmap_len.div_ceil(PAGE_SIZE);
-            *mapped_buffer = ContiguousPages::new_aligned(pages, VIDEO_MAPPED_BUFFER_ALIGN);
+            *mapped_buffer =
+                ContiguousPages::new_aligned(pages, VIDEO_MAPPED_BUFFER_ALIGN).map(Arc::new);
             if let Some(buffer) = mapped_buffer.as_ref() {
                 crate::println!(
                     "[scarlet-video] mmap alloc open={:#x} stream={} pages={} len={} paddr={:#x}",
@@ -1582,12 +1595,13 @@ impl ScarletVideoOpen {
         }
 
         self.ensure_mapped_buffer(layout)?;
-        let (input_paddr, input_vaddr, output_paddr, output_vaddr) = {
+        let (buffer_lease, input_paddr, input_vaddr, output_paddr, output_vaddr) = {
             let mapped_buffer = self.mapped_buffer.lock();
             let buffer = mapped_buffer
                 .as_ref()
                 .ok_or("scarlet-video: mmap buffer missing")?;
             (
+                Arc::clone(buffer),
                 buffer.as_paddr(),
                 buffer.as_vaddr(),
                 buffer.as_paddr() + layout.output_offset as u64,
@@ -1605,6 +1619,7 @@ impl ScarletVideoOpen {
             state.0 == VIDEO_OUTPUT_SHARED_IMAGE
         };
         Ok(VideoBackendDecodeRequest {
+            buffer_lease: Some(buffer_lease),
             stream_id,
             coded_format,
             input_paddr,
@@ -3145,4 +3160,121 @@ pub mod avd_fw {
     pub const MSG_PP_DONE: u32 = 0x0000_1000;
     /// Unexpected IRQ vector.
     pub const MSG_UNKNOWN_IRQ: u32 = 0x0001_0000;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::AtomicBool;
+
+    struct DelayedDecodeBackend {
+        pending: IrqSpinLock<Option<Arc<ContiguousPages>>>,
+        destroy_timeout: AtomicBool,
+        destroy_calls: AtomicUsize,
+    }
+
+    impl DelayedDecodeBackend {
+        fn new(destroy_timeout: bool) -> Self {
+            Self {
+                pending: IrqSpinLock::new(None),
+                destroy_timeout: AtomicBool::new(destroy_timeout),
+                destroy_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl VideoDecodeBackend for DelayedDecodeBackend {
+        fn name(&self) -> &'static str {
+            "delayed-test"
+        }
+
+        fn capabilities(&self) -> VideoBackendCapabilities {
+            VideoBackendCapabilities {
+                max_sessions: 1,
+                max_inflight_decodes: 1,
+                mapped_input_len: PAGE_SIZE as u32,
+                mapped_output_len: PAGE_SIZE as u32,
+                supports_h264: true,
+                ..VideoBackendCapabilities::default()
+            }
+        }
+
+        fn create_session(&self, _coded_format: u32) -> Result<u32, &'static str> {
+            Ok(1)
+        }
+
+        fn destroy_session(&self, _stream_id: u32) -> Result<(), &'static str> {
+            self.destroy_calls.fetch_add(1, Ordering::SeqCst);
+            if self.destroy_timeout.load(Ordering::SeqCst) {
+                Err("test decode drain timed out")
+            } else {
+                self.pending.lock().take();
+                Ok(())
+            }
+        }
+
+        fn submit_decode(&self, request: &VideoBackendDecodeRequest) -> Result<(), &'static str> {
+            *self.pending.lock() = Some(Arc::clone(
+                request.buffer_lease.as_ref().ok_or("missing lease")?,
+            ));
+            Ok(())
+        }
+
+        fn dequeue_frame(
+            &self,
+            _stream_id: u32,
+        ) -> Result<Option<VideoBackendDecodedFrame>, &'static str> {
+            Ok(None)
+        }
+    }
+
+    #[test_case]
+    fn open_drop_retains_pending_allocation_after_destroy_timeout() {
+        let backend = Arc::new(DelayedDecodeBackend::new(true));
+        let device = Arc::new(ScarletVideoDevice::new(backend.clone()));
+        let open = ScarletVideoOpen::new(device).unwrap();
+        open.submit_mapped(SCARLET_VIDEO_FORMAT_H264, 4, 7).unwrap();
+        let allocation = Arc::downgrade(open.mapped_buffer.lock().as_ref().unwrap());
+        assert_eq!(allocation.strong_count(), 2); // Open and accepted backend job.
+
+        drop(open); // Destroy fails with the backend still owning device work.
+        assert_eq!(backend.destroy_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(allocation.strong_count(), 1);
+        assert!(allocation.upgrade().is_some());
+
+        backend.pending.lock().take(); // Model the eventual device completion.
+        assert!(allocation.upgrade().is_none());
+    }
+
+    #[test_case]
+    fn open_drop_releases_allocation_after_successful_destroy() {
+        let backend = Arc::new(DelayedDecodeBackend::new(false));
+        let device = Arc::new(ScarletVideoDevice::new(backend.clone()));
+        let open = ScarletVideoOpen::new(device).unwrap();
+        open.submit_mapped(SCARLET_VIDEO_FORMAT_H264, 4, 7).unwrap();
+        let allocation = Arc::downgrade(open.mapped_buffer.lock().as_ref().unwrap());
+        drop(open);
+        assert_eq!(backend.destroy_calls.load(Ordering::SeqCst), 1);
+        assert!(allocation.upgrade().is_none());
+        assert!(backend.pending.lock().is_none());
+    }
+
+    #[test_case]
+    fn queued_decode_owns_allocation_until_cancelled() {
+        let pages = Arc::new(ContiguousPages::new(1).unwrap());
+        let allocation = Arc::downgrade(&pages);
+        let mut scheduler = VideoSchedulerState::new(1);
+        scheduler
+            .queued
+            .push_back(VideoQueuedJob::Decode(VideoBackendDecodeRequest {
+                buffer_lease: Some(pages),
+                stream_id: 3,
+                ..VideoBackendDecodeRequest::default()
+            }));
+        assert!(allocation.upgrade().is_some());
+        scheduler.remove_stream_queues(99); // Another stream cannot drop this lease.
+        assert!(allocation.upgrade().is_some());
+        scheduler.remove_stream_queues(3);
+        assert!(allocation.upgrade().is_none());
+    }
 }
