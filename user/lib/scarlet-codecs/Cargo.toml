@@ -10,6 +10,8 @@ default = []
 # H.264/AVC can be patent-encumbered in some jurisdictions. Keep it opt-in.
 h264 = []
 vp9 = []
+# Software AVC/AAC playback is opt-in, including the same AVC licensing policy.
+software-media = ["dep:rust_h264", "dep:symphonia-core", "dep:symphonia-codec-aac", "dep:symphonia-format-isomp4", "dep:symphonia-std"]
 
 [package.metadata.scarlet-codecs]
 h264_patent_notice = "The h264 feature is disabled by default because H.264/AVC may be patent-encumbered in some jurisdictions."
@@ -17,3 +19,10 @@ h264_patent_notice = "The h264 feature is disabled by default because H.264/AVC 
 [lib]
 name = "scarlet_codecs"
 path = "src/lib.rs"
+
+[dependencies]
+rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264", rev = "ed481be3d733382529cc555b5393224adcc6acc0", optional = true, default-features = false, features = ["portable-simd"] }
+symphonia-core = { git = "https://github.com/petitstrawberry/Symphonia", rev = "a178babb44462f002ec855b57e26abd57e106c36", optional = true, default-features = false }
+symphonia-codec-aac = { git = "https://github.com/petitstrawberry/Symphonia", rev = "a178babb44462f002ec855b57e26abd57e106c36", optional = true, default-features = false }
+symphonia-format-isomp4 = { git = "https://github.com/petitstrawberry/Symphonia", rev = "a178babb44462f002ec855b57e26abd57e106c36", optional = true, default-features = false }
+symphonia-std = { git = "https://github.com/petitstrawberry/Symphonia", rev = "a178babb44462f002ec855b57e26abd57e106c36", optional = true, default-features = false, features = ["std"] }
