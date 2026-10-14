@@ -106,10 +106,13 @@
           };
 
           virglrenderer = pkgs.virglrenderer.overrideAttrs (_finalAttrs: prevAttrs: {
-            patches = (prevAttrs.patches or [ ]) ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-              ./nix/patches/virglrenderer-macos-kqueue-sync.patch
-              ./nix/patches/virglrenderer-macos-core-gl.patch
-            ];
+            src = pkgs.fetchFromGitHub {
+              owner = "petitstrawberry";
+              repo = "virglrenderer";
+              rev = "dfb43e3191adbc76547a1b33a9acdbf24787d085";
+              hash = "sha256-7RlUTQPjwXwV0krMiBfv1sEHgr9tNavYpBmzaN1ax28=";
+            };
+            patches = prevAttrs.patches or [ ];
           });
 
           cargo-scarlet = pkgs.rustPlatform.buildRustPackage {

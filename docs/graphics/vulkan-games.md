@@ -385,6 +385,93 @@ GPU readback cycles in the same Scarlet guest, and `myrica --help` exited
 normally. The probe's remaining ELF imports are the four ordinary `dl*`
 functions and weak `environ`.
 
-Browser page rendering still uses Cairo. This check verifies the native
-Ganesh/Vulkan driver path and reusable image ownership; WebCore Skia page
-painting and Myrica shared-image presentation are not yet connected.
+The AArch64 desktop recipe now selects `backend-webkit-vulkan` for the normal
+Myrica binary and the diagnostic probe. WebCore paints DOM/CSS/text into two
+shared BGRA Vulkan images, and ScarletUI imports them directly on its UI thread.
+Normal presentation has no CPU page readback or upload. Leased images are not
+reused until the UI completes sampling the replacement; two outstanding leases
+apply backpressure while input and engine polling continue.
+
+The SGFX implementation adds unsigned 16-bit glyph coordinates, fragment
+antialias derivatives, statically used push-constant member ranges, matrix
+inverse/determinant and color operations, and partial render-area preservation.
+Push-constant allocation retains the declared span, while validation excludes
+unused members and SPIR-V wrapper padding. Vector, matrix and array members
+still require their full declared range. These checks passed 89 native VirGL
+unit tests and 43 codegen tests in release mode (one existing ignored test).
+The partial-area contracts additionally passed 84 Vulkan unit tests and an
+actual Metal GPU readback of all 8x8 pixels.
+
+The host VirGL library is built from the
+[Scarlet fork](https://github.com/petitstrawberry/virglrenderer/tree/dfb43e3191adbc76547a1b33a9acdbf24787d085),
+which also contains the macOS core-GL and kqueue fixes previously carried as
+local patches. TGSI `FMA` lowers to GLSL `fma` only with GPUShader5 support.
+The translator and actual Apple GPU readback distinguished the fused result
+`-2^-46` from the unfused result `0`; `MAD` is not used as a substitute.
+
+This is a bounded native rendering profile, not Vulkan conformance or a video
+playback implementation. Media and WebGL/WebGPU remain unavailable.
+
+The normal release guest also passed the WebCore page contract at Retina scale
+2: actual DOM/CSS text and rounded corners, JavaScript execution and clicks,
+two-image backpressure, and unchanged readback of leased images after DOM
+mutation. This run used Myrica `95ba981c333ddbf4f1d9b507b878c2f139187936`,
+WebKit `93b7d1b288bdd230b33d59beb7b3e3340334443e` and SGFX
+`6620598472210a3981cef4053ed5e85c16c3b9ad` with HVF and Cocoa GL.
+It establishes the native page rendering contract; live-site compatibility
+needs separate checks.
+
+Live-site testing additionally exposed scalar `R32_SFLOAT` vertex input,
+per-instance vertex buffers, in-render-pass attachment clears and Skia's
+transparent-black decal samplers. SGFX
+[`d941683`](https://github.com/petitstrawberry/sgfx/commit/d9416831b946d9a4f83cdcac584d717d8c1d180d)
+implements their actual GPU transport. Instance fetch uses divisor one and
+advances the native buffer by `firstInstance * stride`; shader instance indices
+retain the existing first-instance correction. Vertex and instance bounds are
+checked independently, and existing per-vertex ABI words remain unchanged.
+Attachment clears preserve raster order and surrounding pixels through GPU
+partial passes. Sampler border color remains explicitly bounded to transparent
+black. Metal readback checked scalar/instance coverage at every pixel,
+overlapping clears and LOAD/STORE preservation, and both nearest/linear border
+sampling; the native VirGL packet and descriptor checks passed separately.
+
+The YouTube crash was independently traced in the release ELF to
+`GrVkSampler::Create`: a failed Vulkan sampler creation dereferenced a null
+YCbCr conversion during cleanup.
+[WebKit `bb36d8b`](https://github.com/petitstrawberry/WebKit/commit/bb36d8bc29ce36279da6eba9e02bdf6339d339e0)
+uses null-safe release without suppressing the Vulkan error. Native compilation
+and null/single-owner/cache-shared cleanup checks passed.
+
+The live-page probe, linked to the release GPU profile, separately verified
+loaded titles and nonblank actual GPU readback for `example.com`, `google.com`,
+`ichigo.dev`, `abehiroshi.la.coocan.jp` and `youtube.com`. Ichigo's
+`lastfm-placeholder` changed from its loading text to real track names through
+page JavaScript. Both live-page batches joined the native owner cleanly. These
+checks cover loading and pixels, not visual layout approval or video playback.
+
+Yahoo exposed `vkCmdCopyImage` calls during painting.
+[SGFX `7164492`](https://github.com/petitstrawberry/sgfx/commit/71644925bc45932d0fe1e7905cf421aa572f4616)
+lowers supported same-format, mip-zero, single-layer regions to the existing
+bit-exact GPU texture copy. Metal readback matched every byte of 384 source and
+destination pixels across BGRA, RGBA and sRGB, including premultiplied alpha and
+hidden RGB under zero alpha. Nonzero mips, self-images and aliased storage remain
+explicitly unsupported.
+
+The static HTTP fixture also identified one redundant post-layout paint: actual
+GPU bytes did not change and no further paints followed.
+[WebKit `91dab62`](https://github.com/petitstrawberry/WebKit/commit/91dab62b995a3d18a90a5c61b5b7add21d6957ab)
+removes full repaint from unchanged viewport observation. Resize, scroll
+and renderer invalidation retain their normal dirty paths. The smoke test
+requires both the generation and the actual paint counter to stay unchanged
+while idle; it does not add a settling delay or browser readback. The subsequent
+native fixture still observed a single unchanged repaint (`2 -> 3`), so this
+change alone has not resolved idle invalidation.
+
+The release disk with Myrica `c041dbde85b7565ca1680e69615dab005b10cf05`,
+WebKit `91dab62b995a3d18a90a5c61b5b7add21d6957ab` and SGFX
+`71644925bc45932d0fe1e7905cf421aa572f4616` passed the four-thread TLS,
+three-cycle Ganesh and Retina WebCore page contracts. Yahoo! JAPAN additionally
+loaded its real title and produced 557,117 nonwhite GPU pixels, then joined its
+native owner without the previous image-copy errors. The HTTP transport now
+uses 2–4 bounded worker threads, with compressed entity decoding on a separate
+bounded blocking pool; WebCore and JavaScript retain their native owner.
