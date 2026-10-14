@@ -43,6 +43,10 @@ use std::thread;
 use std::vec::Vec;
 use sws_protocol;
 
+#[path = "gpu_admission_retry.rs"]
+mod gpu_admission_retry;
+use gpu_admission_retry::GpuAdmissionRetry;
+
 pub(super) fn is_sws_debug_enabled() -> bool {
     static LOG_CACHE: AtomicU8 = AtomicU8::new(u8::MAX);
     let cached = LOG_CACHE.load(Ordering::Relaxed);
@@ -2387,6 +2391,7 @@ pub struct Compositor {
     extension_buffers: BTreeMap<ExtensionResourceKey, ExtensionBuffer>,
     extension_scenes: BTreeMap<u32, (usize, sws_protocol::surface_scene::Commit)>,
     next_frame_deadline_ns: Option<u64>,
+    gpu_admission_retry: GpuAdmissionRetry,
     left_button_down: bool,
     overview_pointer_navigation: Option<OverviewPointerNavigation>,
     overview_window_drag: Option<OverviewWindowDrag>,
@@ -2857,6 +2862,7 @@ impl Compositor {
             extension_buffers: BTreeMap::new(),
             extension_scenes: BTreeMap::new(),
             next_frame_deadline_ns: None,
+            gpu_admission_retry: GpuAdmissionRetry::default(),
             left_button_down: false,
             overview_pointer_navigation: None,
             overview_window_drag: None,
@@ -4220,6 +4226,7 @@ impl Compositor {
         strict_error: &'static str,
     ) -> Result<(), &'static str> {
         self.gpu_compositor = None;
+        self.gpu_admission_retry.clear();
         self.full_redraw_needed = true;
         self.pending_damage.clear();
         self.presented_damage.clear();
@@ -4328,6 +4335,7 @@ impl Compositor {
         drop(scenes);
         match result {
             Ok(releases) => {
+                self.gpu_admission_retry.clear();
                 super::trace::set_compositor_stage(super::trace::STAGE_GPU_NOTIFY_RELEASES);
                 for release in releases {
                     send_sgfx_buffer_released(release);
@@ -4343,7 +4351,8 @@ impl Compositor {
                 // published. Preserve client buffers and all upload damage;
                 // retry after the worker progresses without disabling GPU.
                 self.full_redraw_needed = true;
-                std::thread::yield_now();
+                self.gpu_admission_retry
+                    .defer(monotonic_time_ns(), FRAME_BATCH_INTERVAL_NS);
                 Ok(GpuPresentResult::Retry)
             }
             Err(error) => {
@@ -6568,6 +6577,9 @@ impl Compositor {
     fn event_wait_timeout_ns(&self) -> i64 {
         let now = monotonic_time_ns();
         let mut timeout = COMPOSITOR_IDLE_RECHECK_NS as u64;
+        if let Some(remaining) = self.gpu_admission_retry.remaining_ns(now) {
+            timeout = timeout.min(remaining);
+        }
         if cursor_visible(self.pointer_lock)
             && !self.input_modality.cursor_hidden_by_touch
             && let Some(deadline) = self.cursor.next_animation_deadline_ns()
@@ -6885,6 +6897,21 @@ impl Compositor {
         super::trace::set_compositor_stage(super::trace::STAGE_PROCESS_EVENTS);
         self.process_pending_events()?;
         super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
+        if self.gpu_compositor.is_some()
+            && self.has_pending_redraw()
+            && self
+                .gpu_admission_retry
+                .remaining_ns(monotonic_time_ns())
+                .is_some()
+        {
+            // Input/IPC wakes still reach process_pending_events above. They
+            // must not bypass admission backoff and encode the same frame
+            // again while the GPU worker is congested.
+            super::trace::set_compositor_stage(super::trace::STAGE_WAIT_SIGNAL);
+            self.wait_for_event_signal();
+            super::trace::set_compositor_stage(super::trace::STAGE_ACTIVE);
+            return Ok(());
+        }
         if self.backend == SwsBackend::Sgfx && self.gpu_compositor.is_none() {
             return Err("SWS_BACKEND=sgfx compositor is unavailable");
         }
