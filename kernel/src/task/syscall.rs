@@ -439,6 +439,12 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
 
             // Handle SetTls flag: set TLS pointer and tp register
             if clone_flags.is_set(CloneFlagsDef::SetTls) {
+                if child_task
+                    .with_default_abi(|abi| abi.initialize_tls_mapping(&child_task, tls_ptr))
+                    .is_err()
+                {
+                    return usize::MAX;
+                }
                 // Set TLS pointer in task's ABI state
                 // SAFETY: Child task is not yet visible to scheduler
                 unsafe {
@@ -601,6 +607,14 @@ pub fn sys_thread_detach(trapframe: &mut Trapframe) -> usize {
 pub fn sys_set_tls(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let tls_ptr = trapframe.get_arg(0);
+
+    if task
+        .with_default_abi(|abi| abi.initialize_tls_mapping(&task, tls_ptr))
+        .is_err()
+    {
+        trapframe.increment_pc_next(&task);
+        return usize::MAX;
+    }
 
     // Update ABI state
     // SAFETY: This is the currently executing task on this hart

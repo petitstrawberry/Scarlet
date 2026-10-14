@@ -96,6 +96,24 @@ impl NativePlatform {
 
 #[cfg(target_os = "scarlet")]
 impl Platform for NativePlatform {
+    fn initialize_static_tls(&mut self) -> Result<(), Error> {
+        // Refresh only during initial executable loading, before constructors.
+        let base = unsafe { scarlet_sys::syscall0(Syscall::GetTls) };
+        if base == 0 || unsafe { scarlet_sys::syscall1(Syscall::SetTls, base) } != 0 {
+            return Err(Error::Platform(
+                "native static TLS initialization failed".into(),
+            ));
+        }
+        Ok(())
+    }
+    fn static_tls_address(&self, offset: usize) -> Result<usize, Error> {
+        let base = unsafe { scarlet_sys::syscall0(Syscall::GetTls) };
+        if base == 0 || offset >= scarlet_abi::tls::NATIVE_TLS_CLEANUP_OFFSET {
+            return Err(Error::Platform("native static TLS is unavailable".into()));
+        }
+        base.checked_add(offset).ok_or(Error::Overflow)
+    }
+
     fn read_file(&mut self, requester: Option<&str>, name: &str) -> Result<File, Error> {
         if requester.is_none()
             && self

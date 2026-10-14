@@ -211,6 +211,9 @@ struct Fake {
     protections: Vec<(usize, usize, Permissions)>,
     unmaps: usize,
     fail_protect: bool,
+    tls_initializations: usize,
+    tls_relocated_value: u64,
+    tls_base: usize,
 }
 impl Fake {
     fn with(files: &[(&str, Vec<u8>)]) -> Self {
@@ -219,6 +222,7 @@ impl Fake {
                 .iter()
                 .map(|(name, bytes)| (name.to_string(), bytes.clone()))
                 .collect(),
+            tls_base: 0x800000,
             ..Self::default()
         }
     }
@@ -229,6 +233,14 @@ impl Fake {
     }
 }
 impl Platform for Fake {
+    fn initialize_static_tls(&mut self) -> Result<(), Error> {
+        self.tls_initializations += 1;
+        self.tls_relocated_value = self.word(0x201700);
+        Ok(())
+    }
+    fn static_tls_address(&self, offset: usize) -> Result<usize, Error> {
+        Ok(self.tls_base + offset)
+    }
     fn read_file(&mut self, _: Option<&str>, name: &str) -> Result<File, Error> {
         Ok(File {
             identity: name.to_string(),
@@ -584,7 +596,7 @@ fn tls_ifunc_unknown_relocations_and_bad_targets_fail() {
     put32(&mut tls, 176, 7);
     assert!(matches!(
         Parsed::parse(&tls, Machine::Aarch64),
-        Err(Error::Unsupported("PT_TLS"))
+        Ok(Parsed { tls: Some(_), .. })
     ));
     for kind in [6, 10] {
         let mut symbol = Definition::export("x", 0x210);
@@ -727,4 +739,90 @@ fn partial_trailing_relro_page_preserves_writable_data() {
             .iter()
             .any(|(a, _, p)| *a == 0x101000 && p.write)
     );
+}
+
+fn tls_fixture() -> Vec<u8> {
+    let mut symbol = Definition::export("thread_counter", 0);
+    symbol.kind = 6;
+    let mut bytes = Fixture {
+        symbols: vec![symbol],
+        relocations: vec![(0x1700, 0, 1027, 0x220)],
+        ..Fixture::default()
+    }
+    .bytes();
+    put16(&mut bytes, 56, 4);
+    ph(&mut bytes, 232, 7, 4, 0x1700, 0x1700, 8, 32, 16);
+    bytes
+}
+
+#[test]
+fn main_tls_is_initialized_after_relocations_and_lookup_uses_thread_pointer() {
+    let bytes = tls_fixture();
+    let dep = Fixture::default().bytes();
+    let mut platform = Fake::with(&[("main", bytes.clone()), ("later", dep)]);
+    let mut image = vec![0; 0x2000];
+    image[..bytes.len()].copy_from_slice(&bytes);
+    platform.mappings.insert(0x200000, image);
+    let mut loader = LoaderContext::new(platform, Machine::Aarch64);
+    let main = unsafe { loader.load_existing("main", 0x200000) }.unwrap();
+    assert_eq!(loader.platform().tls_initializations, 1);
+    assert_eq!(loader.platform().tls_relocated_value, 0x200220);
+    assert_eq!(
+        loader.lookup(main, "thread_counter").unwrap(),
+        Some(0x800010)
+    );
+    loader.platform_mut().tls_base = 0x900000;
+    assert_eq!(loader.lookup_global("thread_counter").unwrap(), Some(0x900010));
+    loader.load("later").unwrap();
+    assert_eq!(loader.platform().tls_initializations, 1);
+}
+
+#[test]
+fn dynamic_tls_and_invalid_static_layouts_are_rejected_before_mapping() {
+    let bytes = tls_fixture();
+    let mut loader = LoaderContext::new(Fake::with(&[("dso", bytes)]), Machine::Aarch64);
+    assert!(matches!(
+        loader.load("dso"),
+        Err(Error::Unsupported("dynamic shared-object TLS"))
+    ));
+    assert!(loader.platform().mappings.is_empty());
+    for (field, value) in [
+        (32, 33),
+        (40, 8177),
+        (48, 3),
+        (48, 8192),
+        (16, 0x1701),
+        (8, 0x1600),
+    ] {
+        let mut bytes = tls_fixture();
+        put64(&mut bytes, 232 + field, value);
+        let mut loader = LoaderContext::new(Fake::with(&[("main", bytes)]), Machine::Aarch64);
+        assert!(
+            unsafe { loader.load_existing("main", 0x200000) }.is_err(),
+            "field={field}, value={value}"
+        );
+        assert!(loader.platform().mappings.is_empty());
+        assert_eq!(loader.platform().tls_initializations, 0);
+    }
+    let mut bytes = tls_fixture();
+    // A TLS symbol cannot address bytes outside the per-thread template.
+    put64(&mut bytes, 0x400 + 24 + 8, 32);
+    put64(&mut bytes, 0x400 + 24 + 16, 1);
+    assert!(Parsed::parse(&bytes, Machine::Aarch64).is_err());
+    let mut bytes = tls_fixture();
+    put16(&mut bytes, 56, 5);
+    ph(&mut bytes, 288, 7, 4, 0x1700, 0x1700, 8, 32, 16);
+    assert!(Parsed::parse(&bytes, Machine::Aarch64).is_err());
+}
+
+#[test]
+fn ordinary_relocation_cannot_use_a_thread_local_address() {
+    let mut bytes = tls_fixture();
+    put64(&mut bytes, 0x608, (1u64 << 32) | 257);
+    let mut platform = Fake::with(&[("main", bytes)]);
+    platform.mappings.insert(0x200000, vec![42; 0x2000]);
+    let mut loader = LoaderContext::new(platform, Machine::Aarch64);
+    assert!(unsafe { loader.load_existing("main", 0x200000) }.is_err());
+    assert_eq!(loader.platform().mappings[&0x200000], vec![42; 0x2000]);
+    assert_eq!(loader.platform().tls_initializations, 0);
 }

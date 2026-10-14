@@ -29,8 +29,11 @@ void *symbol = library ? dlsym(library, "plugin_entry") : 0;
   exit. Previously returned symbols therefore retain their mappings. Unload
   and finalizers are not supported. Handles are never reused.
 - Only `RTLD_NOW | RTLD_GLOBAL` is accepted. Lazy/local loading, interposition
-  controls, `RTLD_NEXT`, ELF TLS, IFUNC, symbol versions, and unsupported
+  controls, `RTLD_NEXT`, dynamic DSO TLS and TLS relocations, IFUNC, symbol versions, and unsupported
   relocations fail explicitly. `dlerror` is per-thread and consumes each error.
+- AArch64 executable static ELF TLS is initialized before constructors and
+  independently for new native threads. TLS symbol lookup uses the calling
+  thread's mapping; see [the native TLS contract](../../../docs/abi/native-tls.md).
 - Native `MemoryMap` reserves zeroed writable, non-executable image pages;
   `MemoryProtect` (702) installs final permissions and synchronizes executable
   pages. Writable executable pages are rejected.
@@ -53,6 +56,6 @@ and RISC-V64 entry shims are provided; availability of a matching std sysroot
 is required to build either target.
 
 This runtime is a bring-up layer. It does not supply a C library or LLVM's
-dependencies, stable Rust ABI, native ELF TLS, or a complete rustc host port.
+dependencies, stable Rust ABI, dynamic ELF TLS modules, or a complete rustc host port.
 
 App `bin` to app `lib` resolution is not implemented; adjacent-requester lookup does not provide private app library search.

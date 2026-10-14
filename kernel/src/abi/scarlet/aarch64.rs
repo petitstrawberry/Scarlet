@@ -8,6 +8,7 @@ use alloc::{
     boxed::Box,
     collections::btree_map::BTreeMap,
     string::{String, ToString},
+    sync::Arc,
     vec::Vec,
 };
 use core::sync::atomic::Ordering;
@@ -151,8 +152,8 @@ impl EventMask {
 }
 
 /// Scarlet Native ABI state
-#[derive(Clone)]
 pub struct ScarletAbi {
+    elf_tls: crate::sync::RwSpinLock<Option<Arc<crate::task::elf_loader::ElfTlsImage>>>,
     /// TLS (Thread Local Storage) pointer for this task
     pub tls_pointer: Option<usize>,
     /// clear_child_tid pointer for thread exit notification (Linux-compatible)
@@ -167,9 +168,24 @@ pub struct ScarletAbi {
     pub pending_events: Vec<Event>,
 }
 
+impl Clone for ScarletAbi {
+    fn clone(&self) -> Self {
+        Self {
+            elf_tls: crate::sync::RwSpinLock::new(self.elf_tls.read().clone()),
+            tls_pointer: self.tls_pointer,
+            clear_child_tid_ptr: self.clear_child_tid_ptr,
+            event_handlers: self.event_handlers.clone(),
+            default_event_handler: self.default_event_handler.clone(),
+            event_mask: self.event_mask.clone(),
+            pending_events: self.pending_events.clone(),
+        }
+    }
+}
+
 impl Default for ScarletAbi {
     fn default() -> Self {
         Self {
+            elf_tls: crate::sync::RwSpinLock::new(None),
             tls_pointer: None,
             clear_child_tid_ptr: None,
             event_handlers: BTreeMap::new(),
@@ -816,6 +832,19 @@ impl AbiModule for ScarletAbi {
                 // Load and analyze the ELF file with Scarlet strategy
                 match analyze_and_load_elf_with_strategy(file_obj, task, &strategy) {
                     Ok(elf_result) => {
+                        if let Some(tls) = &elf_result.tls {
+                            if scarlet_abi::tls::aarch64_elf_tls_offset(
+                                tls.alignment,
+                                tls.memory_size,
+                            )
+                            .is_none()
+                                || !tls.address.is_multiple_of(tls.alignment)
+                            {
+                                return Err("Main ELF TLS exceeds the native mapping reserve");
+                            }
+                        }
+                        *self.elf_tls.write() = elf_result.tls.clone().map(Arc::new);
+
                         // Set the name from argv[0] or use default
                         *task.name.write() = argv
                             .get(0)
@@ -912,6 +941,28 @@ impl AbiModule for ScarletAbi {
     fn on_task_exit(&mut self, task: &crate::task::Task) {
         // Delegate to the implementation method
         self.on_task_exit(task);
+    }
+
+    fn initialize_tls_mapping(
+        &self,
+        task: &crate::task::Task,
+        ptr: usize,
+    ) -> Result<(), &'static str> {
+        let Some(tls) = self.elf_tls.read().clone() else {
+            return Ok(());
+        };
+        if ptr == 0 || !ptr.is_multiple_of(tls.alignment.max(16)) {
+            return Err("Invalid native ELF TLS pointer alignment");
+        }
+        let start = scarlet_abi::tls::aarch64_elf_tls_offset(tls.alignment, tls.memory_size)
+            .ok_or("Invalid ELF TLS layout")?;
+        let destination = ptr.checked_add(start).ok_or("TLS destination overflow")?;
+        let mut bytes = alloc::vec![0u8; tls.memory_size];
+        if tls.file_size != 0 {
+            copy_from_user(task, tls.address, &mut bytes[..tls.file_size])
+                .map_err(|_| "TLS template is not readable")?;
+        }
+        copy_to_user(task, destination, &bytes).map_err(|_| "TLS mapping is not writable")
     }
 
     fn set_tls_pointer(&mut self, ptr: usize) {

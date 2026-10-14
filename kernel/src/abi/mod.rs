@@ -386,6 +386,16 @@ pub trait AbiModule: Send + Sync + 'static {
         Ok(EventProcessOutcome::Continue)
     }
 
+    /// Initialize ABI-owned ELF data in a new native thread's TLS mapping.
+    /// Called before publishing the architectural pointer or scheduling a clone.
+    fn initialize_tls_mapping(
+        &self,
+        _task: &crate::task::Task,
+        _ptr: usize,
+    ) -> Result<(), &'static str> {
+        Ok(())
+    }
+
     /// Set the TLS (Thread Local Storage) pointer for this task
     ///
     /// Default implementation does nothing - ABIs that support TLS

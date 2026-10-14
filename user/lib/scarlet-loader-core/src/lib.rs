@@ -82,6 +82,16 @@ pub trait Platform {
         permissions: Permissions,
     ) -> Result<(), Error>;
     fn unmap(&mut self, address: usize, size: usize);
+    /// Refresh the current thread's main-executable TLS after relocation and
+    /// before constructors. Other threads receive the same relocated template
+    /// from the native thread-creation ABI.
+    fn initialize_static_tls(&mut self) -> Result<(), Error> {
+        Err(Error::Unsupported("platform static TLS initialization"))
+    }
+    /// Address a main-executable TLS symbol in the calling thread.
+    fn static_tls_address(&self, _offset: usize) -> Result<usize, Error> {
+        Err(Error::Unsupported("platform static TLS symbol lookup"))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,6 +216,12 @@ impl<P: Platform> LoaderContext<P> {
         for (address, value) in patches {
             self.platform.write(address, &value.to_le_bytes())?;
         }
+        if self.objects[start..]
+            .iter()
+            .any(|object| object.parsed.tls.is_some())
+        {
+            self.platform.initialize_static_tls()?;
+        }
         for i in start..self.objects.len() {
             if !self.objects[i].initialized {
                 self.constructors(ObjectId(i))?;
@@ -227,6 +243,19 @@ impl<P: Platform> LoaderContext<P> {
             return Err(Error::Unsupported("too many shared objects"));
         }
         let parsed = Parsed::parse(&file.bytes, self.machine)?;
+        if parsed.tls.is_some() && adopt.is_none() {
+            return Err(Error::Unsupported("dynamic shared-object TLS"));
+        }
+        if let Some(tls) = &parsed.tls {
+            if self.machine != Machine::Aarch64 {
+                return Err(Error::Unsupported("main static TLS requires AArch64"));
+            }
+            if scarlet_abi::tls::aarch64_elf_tls_offset(parsed.tls_alignment, tls.memory_size)
+                .is_none()
+            {
+                return Err(Error::Unsupported("main static TLS exceeds native reserve"));
+            }
+        }
         if parsed.executable && adopt.is_none() {
             return Err(Error::Unsupported("ET_EXEC requires load_existing"));
         }
@@ -318,7 +347,7 @@ impl<P: Platform> LoaderContext<P> {
         while cursor < scope.len() {
             let object = self.object(scope[cursor])?;
             if let Some(symbol) = object.parsed.export(name.as_bytes()) {
-                return Ok(Some(symbol_address(object, symbol)?));
+                return Ok(Some(self.symbol_address(object, symbol, true)?));
             }
             for dependency in &object.dependencies {
                 if !scope.contains(dependency) {
@@ -335,12 +364,12 @@ impl<P: Platform> LoaderContext<P> {
     }
     /// Search the complete process-wide interposition scope.
     pub fn lookup_global(&self, name: &str) -> Result<Option<usize>, Error> {
-        self.resolve_global(name.as_bytes())
+        self.resolve_global(name.as_bytes(), true)
     }
-    fn resolve_global(&self, name: &[u8]) -> Result<Option<usize>, Error> {
+    fn resolve_global(&self, name: &[u8], allow_tls: bool) -> Result<Option<usize>, Error> {
         for object in &self.objects {
             if let Some(symbol) = object.parsed.export(name) {
-                return Ok(Some(symbol_address(object, symbol)?));
+                return Ok(Some(self.symbol_address(object, symbol, allow_tls)?));
             }
         }
         Ok(self
@@ -348,6 +377,31 @@ impl<P: Platform> LoaderContext<P> {
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, a)| *a))
+    }
+    fn symbol_address(
+        &self,
+        object: &Object,
+        symbol: &Symbol,
+        allow_tls: bool,
+    ) -> Result<usize, Error> {
+        if !symbol.tls {
+            return symbol_address(object, symbol);
+        }
+        if !allow_tls {
+            return Err(Error::Unsupported("TLS symbol in a non-TLS relocation"));
+        }
+        let start = scarlet_abi::tls::aarch64_elf_tls_offset(
+            object.parsed.tls_alignment,
+            object
+                .parsed
+                .tls
+                .as_ref()
+                .ok_or(Error::Format("TLS symbol has no template"))?
+                .memory_size,
+        )
+        .ok_or(Error::Unsupported("main static TLS exceeds native reserve"))?;
+        self.platform
+            .static_tls_address(start.checked_add(symbol.value).ok_or(Error::Overflow)?)
     }
     fn resolve_symbol(&self, object: &Object, index: usize) -> Result<usize, Error> {
         if index == 0 {
@@ -359,13 +413,13 @@ impl<P: Platform> LoaderContext<P> {
             .get(index)
             .ok_or(Error::Format("relocation symbol index is out of bounds"))?;
         if symbol.defined && (symbol.binding == 0 || symbol.visibility != 0) {
-            return symbol_address(object, symbol);
+            return self.symbol_address(object, symbol, false);
         }
-        if let Some(address) = self.resolve_global(&symbol.name)? {
+        if let Some(address) = self.resolve_global(&symbol.name, false)? {
             return Ok(address);
         }
         if symbol.defined {
-            return symbol_address(object, symbol);
+            return self.symbol_address(object, symbol, false);
         }
         if symbol.binding == 2 {
             return Ok(0);

@@ -29,6 +29,7 @@ pub(crate) struct Symbol {
     pub visibility: u8,
     pub defined: bool,
     pub absolute: bool,
+    pub tls: bool,
 }
 pub(crate) struct Relocation {
     pub offset: usize,
@@ -38,6 +39,8 @@ pub(crate) struct Relocation {
 }
 pub(crate) struct Parsed {
     pub executable: bool,
+    pub tls: Option<Segment>,
+    pub tls_alignment: usize,
     pub entry: usize,
     pub segments: Vec<Segment>,
     pub min_vaddr: usize,
@@ -88,6 +91,8 @@ impl Parsed {
         range(bytes, phoff, phnum.checked_mul(56).ok_or(Error::Overflow)?)?;
         let mut parsed = Self {
             executable,
+            tls: None,
+            tls_alignment: 1,
             entry: address(bytes, 24)?,
             segments: Vec::new(),
             min_vaddr: usize::MAX,
@@ -112,8 +117,25 @@ impl Parsed {
             let file_size = address(bytes, ph + 32)?;
             let memory_size = address(bytes, ph + 40)?;
             let alignment = address(bytes, ph + 48)?;
-            if kind == 7 && memory_size != 0 {
-                return Err(Error::Unsupported("PT_TLS"));
+            if kind == 7 {
+                if parsed.tls.is_some()
+                    || file_size > memory_size
+                    || (alignment > 1 && !alignment.is_power_of_two())
+                {
+                    return Err(Error::Format("invalid or duplicate PT_TLS"));
+                }
+                range(bytes, offset, file_size)?;
+                if alignment > 4096 || vaddr % alignment.max(1) != 0 {
+                    return Err(Error::Unsupported("TLS template alignment or residue"));
+                }
+                parsed.tls_alignment = alignment.max(1);
+                parsed.tls = Some(Segment {
+                    offset,
+                    vaddr,
+                    file_size,
+                    memory_size,
+                    permissions: Permissions::default(),
+                });
             }
             if kind == 0x6474e551 && flags & 1 != 0 {
                 return Err(Error::Unsupported("executable stack"));
@@ -197,6 +219,13 @@ impl Parsed {
                 return Err(Error::Format("RELRO is outside a load segment"));
             }
             parsed.relro = Some((down(start), down(end)));
+        }
+        if let Some(tls) = &parsed.tls {
+            if tls.file_size != 0 && parsed.file_offset(tls.vaddr, tls.file_size)? != tls.offset {
+                return Err(Error::Format(
+                    "TLS template does not match file-backed PT_LOAD",
+                ));
+            }
         }
         if let Some((vaddr, offset, size)) = dynamic {
             if size < 16 || size % 16 != 0 {
@@ -370,13 +399,10 @@ impl Parsed {
                 let shndx = u16_at(bytes, offset + 6)?;
                 let value = address(bytes, offset + 8)?;
                 let symbol_size = address(bytes, offset + 16)?;
-                if kind == 6 {
-                    return Err(Error::Unsupported("TLS symbol"));
-                }
                 if kind == 10 {
                     return Err(Error::Unsupported("GNU IFUNC symbol"));
                 }
-                if ![0, 1, 2, 3, 4].contains(&kind) {
+                if ![0, 1, 2, 3, 4, 6].contains(&kind) {
                     return Err(Error::Unsupported("dynamic symbol type"));
                 }
                 if binding > 2 {
@@ -392,7 +418,21 @@ impl Parsed {
                 if shndx >= 0xff00 && shndx != 0xfff1 {
                     return Err(Error::Unsupported("reserved symbol section index"));
                 }
-                if shndx != 0
+                if kind == 6 && shndx != 0 {
+                    let tls = self
+                        .tls
+                        .as_ref()
+                        .ok_or(Error::Format("defined TLS symbol without PT_TLS"))?;
+                    if shndx == 0xfff1
+                        || value
+                            .checked_add(symbol_size)
+                            .is_none_or(|end| end > tls.memory_size)
+                    {
+                        return Err(Error::Format("TLS symbol is outside its template"));
+                    }
+                }
+                if kind != 6
+                    && shndx != 0
                     && shndx != 0xfff1
                     && !self.segments.iter().any(|s| s.contains(value, symbol_size))
                 {
@@ -416,6 +456,7 @@ impl Parsed {
                     visibility: other & 3,
                     defined: shndx != 0,
                     absolute: shndx == 0xfff1,
+                    tls: kind == 6,
                 });
             }
         } else if get(4).is_some() || get(0x6fff_fef5).is_some() || get(11).is_some() {
