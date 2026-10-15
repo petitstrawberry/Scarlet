@@ -1570,3 +1570,57 @@ removed after preserving results. No worktrees were created; the unrelated
 NVMe worktree and user Myrica `flake.lock`, BSP lock and `tools/wine/` changes
 were preserved. Disk assembly held an exclusive whole-file lock and ran only
 after the validation QEMU stopped.
+
+
+### 2026-10-16: large native window resizing and end-to-end damage
+
+Myrica `87c42ebf420a2b8fc66f6b8c7ce8ad509d25a66c` uses WebKit
+`634e4abf34c73cf37a692251acc284ed57f4b919` and ScarletUI main
+`961db59ee65502a899b2787ce5bdaae2e220fcc6`. SGFX/ICD and SDK revisions
+are unchanged. All are ordinary Release builds: WebKit's actual CMake cache
+has `-O3 -DNDEBUG`, JIT/DFG on, C-loop/FTL off.
+
+The reported window freeze occurs on large enlargement and repeatedly logs
+`resize WebCore ... status -1`. The old log omitted dimensions. Both embedding
+validation and the ICD bound image sides to 4096 physical pixels; a Retina
+window can exceed that while remaining a normal logical desktop size. The
+embedding now exposes its actual immutable GPU/embedding surface limit. The
+UI-side worker fits backing dimensions and DPR to that limit, preserving CSS
+viewport dimensions and native input mapping. Smaller windows retain native
+DPR; larger windows render at a reduced backing scale rather than repeatedly
+requesting an unsupported image. Resize errors now include width/height/scale.
+
+Previously the normal page output lost WebCore's damage before final window
+composition: changing ExternalGpuSurface's texture invalidated its full bounds.
+The native compositor now unions physical damage across completions skipped
+before acquisition, then associates the result with its immutable output lease.
+Myrica maps that damage into local UI coordinates and unions updates staged
+before presentation. A rejected stale epoch/viewport forces the next accepted
+output to refresh the whole surface. Initial/navigation/resize output is full.
+ScarletUI's additive SelfPaint invalidation connects ExternalGpuSurface's
+producer damage to its existing retained damage/scissor/SWS presentation path;
+geometry and full-redraw requests continue to invalidate the complete bounds.
+No page readback, DOM copy or video-decoder change was added.
+
+Fourteen actual worker-source tests passed, including a 5120x2880/DPR2 request
+fitted to 4096x2304 with the same 2560x1440 CSS viewport, fractional scale/portrait
+bounds, blocked-owner output and stale-output full-damage recovery. ScarletUI's
+90 renderer tests passed, including new producer bounds/clipping/full-damage
+coverage. Core tests passed 431, with one ignored and one expected-panic test
+filtered out: this custom host Rust toolchain aborts while initiating that
+expected panic (`failed to initiate panic, error 5`). The unfiltered suite
+failure is recorded rather than counted as a successful full-suite run.
+
+A temporary native-window probe was removed at the user's request before any
+commit. Its run failed SGFX OpenDevice initialization and supplied no valid
+window-resize result. Its temporary build/server/VM checkout were removed.
+The fixes above were made in the production sources, with WebKit authored
+through its GitHub fork and ScarletUI committed to existing main.
+
+Page-wide slow rendering and JS responsiveness remain under investigation.
+Full-window updates alone do not explain their severity. Ganesh image creation
+currently drains the shared Vulkan queue before an ICD image export that
+requires no outstanding work; surface destruction also submits synchronously.
+Those waits were identified in source and remain unchanged in this update.
+Baseline/DFG enabled at build time does not identify the tier or phase responsible
+for a particular long owner turn. No FTL or JIT-threshold change was made.
