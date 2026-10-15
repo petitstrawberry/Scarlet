@@ -1202,3 +1202,74 @@ variable live-page results do not establish sustained playback performance.
 Opt-in ICD phase diagnostics are being used to separate command resolution,
 backend submission and readback; later tests also have another independently
 launched GUI browser present and are not comparable throughput measurements.
+
+SGFX `c363a5c4` batches transient descriptor retirement before changing the
+logical table revision. Previously each group invalidated that revision and
+the next backend release serialized/imported the full table again. Native
+profiling measured 150-210ms/s in those releases; a corrected steady window
+used 526us for 29 releases. Release-resource tests passed 19 cases (two existing
+ignored cases), including a failure between successful releases, retry and
+immutable descriptor slot reuse. Nested diagnostics reuse the existing opt-in
+call profiler and add no clocks when disabled.
+
+With Myrica `192e292b`/WebKit `ff589ced` and the corrected ICD, single normal-GUI
+720p playback at 2196x1282 was sampled from media time 16 to 131 seconds.
+The 16-73 second interval presented 1473 frames in 56.78 seconds (25.94fps),
+with one-second samples ranging from 16.4 to 29fps, median 26.47fps. Later
+130-second samples presented about 29 frames/s. This used ordinary shared-GPU
+presentation without diagnostic framebuffer readback. It does not measure
+initial loading, arbitrary pages or simultaneous browsers.
+
+The normal release disk regenerated at 21:05 JST contains Myrica `8d9ee07b`,
+WebKit `0398ba32`, SGFX `c363a5c4` and ScarletUI main `bf024ea7`.
+HTTP/2 was omitted from the WebKit backend's reqwest feature selection; it is
+now enabled alongside the existing parallel HTTP executor and separate entity
+decompression workers. All 18 actual transport source tests passed, including
+parallel executor threads, separate decompression and cancellation races.
+The page's DOM, layout and JavaScript stay on its WebCore owner thread;
+painting workers, HTTP, demux, native decode and GPU queues are separate.
+
+Scarlet tile painting now passes WebKit's existing first-image asynchronous
+decode behavior. Previously a visible initial image could select synchronous
+decoding despite the decoder work-queue implementation being available. The
+existing explicit synchronous and painted-image/flicker guards still apply.
+The new native test loads ordinary images without HTMLImageElement.decode()
+and verifies their actual rendered pixels. It passed together with PNG/JPEG/
+WebP, transformed textures, asynchronous source changes, cached scrolling,
+storage/cookies/blob/iframe, framesets, view transitions, JS contracts and normal
+owner destruction. The installed full GPU probe also passed all color-space,
+resource-lifetime, damage, retained-scroll, filter and pending-resize checks.
+
+The installed Myrica SHA256 is
+`71dcddb67048d6023205e84afa1c5587d0a8350f5789f61481eb4d07d9a9382c`;
+the GPU probe is
+`7bf7172ca376022e6310547a80977d2e018518c08c719ebdaca800b4a48de74f`;
+the ICD is `2abd5caf3397d4e27b6536369bedd68abb235537e906c1abe253f9d304ec14a5`.
+
+The normal installed browser negotiated HTTP/2 with `www.youtube.com` and
+reported `[myrica:webkit] transport=http2`. Initial steady 720p windows presented
+27-29 frames/s with roughly 3ms/s of YUVA upload. The live page subsequently
+had loading/mode-change stalls and a non-advancing video clock; a short initial
+sample does not resolve the reported intermittent stopping or comment latency.
+
+WebKit `1ecc110b` separates compositor-only video/animation requests from Page
+rendering requests. The old bridge discarded CompositionReason and requested
+Page updates again after every sampled compositor animation. Composition-only
+ticks now commit retained scene state without unconditionally running Page's
+DOM rendering/finalization; genuine Page rendering updates retain their paired
+completion and normal layout/observer/animation-frame processing.
+
+Myrica `01dc8c3f` adds a real CSS transform-and-opacity animation fixture. Native
+GPU readback verified changing position and opacity over three seconds with
+tile raster delta zero. First-image decoding, the complete HTTP/DOM/JS fixture,
+the installed GPU probe and native video composition/reparent/theater/scroll/
+pause/resume also passed. Simple CSS animation still schedules Page updates
+(about 5ms/s in the normal GUI both before and after); no zero-main-thread-CPU
+or general CSS speedup is inferred from this test.
+
+The normal release disk regenerated at 21:17 JST uses these revisions with
+SGFX `c363a5c4` and ScarletUI `bf024ea7`. Installed Myrica SHA256 is
+`3bc61502dca580a6853c2059c2e887f02f77a8f677d6f405b8431680313cd208`;
+the installed probe is
+`46a542892d1cd6b65e9f01c3e79a22e26f87c0bddd136ddd349113c7c5b6a057`.
+The ICD hash is unchanged from the preceding normal release build.
