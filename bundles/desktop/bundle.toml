@@ -106,7 +106,7 @@ to = "/bin/ui-benchmark"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "fcea172bd85438e1b3477e78a1c53281b3179bd6" }
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "bf024ea72ca32f47d3ddce42a3c5b98cf680901a" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
@@ -288,7 +288,7 @@ to = "/bin/carmine"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "3b04bd7a36e6a7d95c8dbd079f60b3a06c840309" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "99a87e87f308623231e2a6b6e96c092a1186f4bd" }
 package = "myrica"
 bin = "myrica"
 architectures = ["riscv32", "riscv64"]
@@ -296,7 +296,7 @@ to = "/bin/myrica"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "3b04bd7a36e6a7d95c8dbd079f60b3a06c840309" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "99a87e87f308623231e2a6b6e96c092a1186f4bd" }
 package = "myrica"
 bin = "myrica"
 features = ["backend-webkit-vulkan"]
@@ -306,7 +306,7 @@ to = "/bin/myrica"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "3b04bd7a36e6a7d95c8dbd079f60b3a06c840309" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "99a87e87f308623231e2a6b6e96c092a1186f4bd" }
 package = "myrica"
 bin = "webkit-vulkan-probe"
 features = ["webkit-vulkan-probe", "backend-webkit-vulkan"]

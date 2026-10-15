@@ -714,3 +714,216 @@ changes is pending. Myrica `3b04bd7a` includes actual HTTP PNG/JPEG/WebP GPU-pix
 checks, an uncached 10,316px scroll, and pending-coverage cancellation/restoration
 checks; native compilation passed and guest execution is pending recovery of
 the validation VM.
+
+Scarlet `2a3c6196f` now bounds chain reclamation, clears retired descriptors and
+rejects duplicate pool insertion. `e9aa3a8c5` registers synchronous-command
+ownership before publication, retains device-owned pages after timeout, reserves
+session slots atomically, and retries orphan retirement after late completions
+under a single reaper claim. Per-session operations and teardown are serialized.
+The host daemon applies release/acquire ordering at the shared-ring indices.
+Actual-source queue regressions passed 13 tests and command/retirement state
+regressions passed three tests. Native AArch64 release lib and test compilation
+passed. Ten real VideoToolbox daemon tests passed, including 12 frames on each
+of two streams with pixel, dimensions and timestamp checks while teardown of
+one stream was interleaved between the other stream's output/input commands.
+These are driver/daemon checks; the updated whole guest has not yet run them.
+
+The updated normal release image booted under HVF with those video fixes and
+the frontend operation-lifetime guard (`3b0f8a268`). Actual GPU validation
+passed TLS, three Ganesh/YUV/feedback cycles, retained clipping/group opacity,
+immutable image leases, zero-raster cached scrolling, new raster after a
+10,316px scroll, and pending coverage removal/restoration. The HTTP image suite
+passed PNG/JPEG/WebP, downscaling, asynchronous load/decode, transformed image
+layers and cached scroll-return pixels. Cookie/blob/iframe/frameset checks also
+passed. The following View Transition assertion assumed compositor OFF;
+Myrica `bef7fb3` makes ON/OFF expectations explicit without weakening callback,
+Promise or GPU pixel assertions.
+
+The same YouTube watch page then decoded four native 854x480 NV12 frames with
+no RESOURCE_QUEUE error or kernel panic. Playback nevertheless stalled with
+three queued decoded frames, zero presented frames and media time zero.
+The owner showed long tick and GPU submission stalls. Diagnosis now targets
+the first-frame due-time/play-state/audio-clock gate; these results do not
+establish usable YouTube playback. Repeated running-HVF register dumps also
+blocked the QEMU monitor in `hmp_info_registers` -> `do_run_on_cpu`; this
+validation interruption is being investigated separately from the guest.
+
+After recovering the validation VM, SGFX `bbbe0989`'s real native
+`dynamic_smoke --copy-only` passed all 4,096 BGRA pixels for each of ten
+changing vertex-buffer updates at offset 96, including two passes, nonzero
+first vertex and reuse beyond all four upload arenas. This checks native VBO
+copy results through drawing; it does not read arbitrary packed source bytes
+directly. The earlier offset-64 fixture was rejected before submission because
+64 is not divisible by its 12-byte vertex stride. Consequently the Apple
+`gldCopyBufferSubData` warning alone does not justify a copy fallback patch.
+
+The updated video queue/session implementation subsequently passed all seven
+native HTTP video fixtures (normal, main/high profile, sniff/reload and both
+MSE sizes), audio pause/seek/resume/end checks and owner shutdown. Static
+retained video changed 12,288 pixels over seven compositions with zero new
+tile rasters. These small fixtures establish functional contracts, not watch
+page throughput. The YouTube reproduction still stalled or advanced to the
+next playlist item before presenting video. Fork `e5b0ff9e` adds opt-in DOM
+video state, parser/EOF lifecycle and separate run-loop/update/finalize/scene
+timings so that these cases can be distinguished on the actual page.
+
+Scarlet `153ba8611` and SGFX `b7a17c6e` add capability-gated native R8/RG8
+storage and typed uploads/readback, retaining BGRA emulation on older kernels.
+For the observed 854x480 NV12 frame, this removes expansion from 614,880 to
+2,049,600 bytes and reduces whole-row inline upload packets from 33 to 11.
+The old packets already shared one SGFX receipt; these counts are not separate
+Vulkan submits. Backend unit tests (102), native compilation and an independent
+ABI/format/stride/lifetime review passed. Native odd-width texture, sampling,
+blend and readback execution was the next validation step.
+
+The actual new-kernel guest exposed a fixed-function BGRA-only render-target
+guard after R8 upload/copy/sampling and mip checks had passed. SGFX `12c280bf`
+extends fixed pipeline lowering to narrow targets with the same missing-alpha
+and color-mask rules as programmable pipelines. Its 103 unit tests and native
+compilation passed. The corrected dynamic driver then passed the complete
+`--narrow-only` contract for both R8 and RG8: padded odd-width upload, every
+readback pixel, partial copy/clear, sampling/swizzle, mip linear blit and
+destination-alpha blending. The ten-update native vertex-copy contract also
+passed with this driver. The full native WebKit TLS/Ganesh/YUV/retained-scene
+contract passed on kernel `153ba8611`.
+
+With e5b0ff9e, native narrow storage and the corrected video queues, the real
+canonical YouTube watch page advanced ten seconds: 302 decoded frames, 268
+dropped, 31 presented, and 423,504 changed video-region GPU pixels. Its DOM
+buffered range grew to [0.033333,13.966666], with no media error. This establishes
+actual playback but exposes severe frame dropping; diagnostic GPU readback
+adds work compared with ordinary GUI presentation. Separate timing counters
+showed GPU submission/completion waits taking 0.6–0.87 seconds in several
+one-second intervals, alongside significant run-loop time. The synchronous
+Ganesh submit currently blocks the WebCore owner until GPU completion.
+
+The corresponding normal GUI (2196x1282, without diagnostic image readback)
+settled at 15–19 page submissions per second, then exited on a preserved
+ScarletUI diagnostic: `ImportExternalImage: Dynamic(Status(2))`. A subsequent
+application failed at the same import in three seconds, and another reported
+vertex-specialization device-memory errors. These are remaining failures.
+SGFX `a2a40098` fixes a separate source-confirmed lifetime defect: IR mapping
+created a distinct sampler view, but unmapping never destroyed that view.
+The fix retires the owned view after accepted work, preserves borrowed surface
+ownership and adds import-stage/physical-image failure diagnostics. Its 104
+unit tests and native compilation passed; long-running GUI validation is
+still required to determine whether other exhaustion paths remain.
+
+WebKit `13b6c00a` adds pending/ready/leased output states and Ganesh async
+completion polling on the owner. An incomplete image cannot be published or
+reused, and resize/navigation/teardown drain pending work. The native syntax
+checks and independent lifetime review passed. Myrica `d5e46103` adds genuine
+pending-image/resize/immutable-lease/destruction checks and initial EMPTY
+pumping to its GPU probes. Baseline JIT remains unvalidated at runtime: the
+native build exposed a DFG-disabled header dependency, fixed in `eda3071d`,
+and the embedding guard was updated with the async change. Full integration
+is being built through the ordinary release bundle producer.
+
+Independent review found that a partially failed sampler-view cleanup could
+leave the same session usable. SGFX `ffc70472` preserves the existing failed
+submission flag after backend retirement errors and rejects subsequent import,
+draw and repeated cleanup before GPU access. The prefix-applied failure
+regressions, 106 backend tests, native compilation and follow-up review passed.
+Baseline-only JSC also required direct jump-table definitions and an inline
+cache Variant that omits its DFG alternative when DFG is disabled. Fork
+`4dd13549` includes those fixes; all 52 native JavaScriptCoreJIT compile entries
+passed with actual generated PCHs in validation.
+
+The normal release disk subsequently booted Myrica `a0e536cc`, WebKit
+`ee71c5a0`, ScarletUI `bf024ea7` and SGFX `ffc70472` under HVF. The actual
+async GPU probe passed pending-image capacity/generation gating, immutable
+leases, pending resize/coverage/destruction drains, retained-scene scrolling,
+TLS, and all eight padded I420/NV12 color-conversion cases. The normal driver
+also passed both native narrow-format contracts and ten changing vertex-copy
+updates. JavaScriptCore generated baseline machine code for actual fixture
+functions; the full JavaScript semantics suite and interruption of an infinite
+script passed with JIT enabled. HTTP image/storage/frame/View Transition,
+idle/pointer retention, damage and resize checks passed after fixture
+`38af673` correctly awaited a fresh GPU revision and its expected pixels.
+
+The ordinary GUI watch page decoded approximately 30 frames per second and
+advanced past 76 seconds, but composed only 13–18 frames per second. Async
+submission cost was only a few milliseconds per one-second interval; reported
+completion latency includes delayed owner polling. Source inspection found
+that the worker charged the 16.667ms frame deadline both when starting an
+async image and when collecting it. Completion collection and submission
+pacing are being separated without increasing WebCore timer/layout polling.
+
+A user resize reproduced an exact import failure: existing physical BGRA
+image 807 (2196x1282) was reattached to the same GPU context while the new UI
+target was 1304x760. Sampling the old image during resize is valid. The UI
+retains the previous mapped session until SWS releases its committed frame,
+but the kernel rejected a second attachment of the same image capability.
+Context-local attachment reference counting and mapped-session teardown are
+being corrected together; dropping only the image handle does not release
+the context's retained attachment/backing reference.
+
+Scarlet `4b3d5f401` formally reference-counts repeated image attachments by
+backend image Arc identity. It preserves backend validation for distinct image
+objects, uses checked counts, detaches physically only on the last reference,
+and rolls back the newly acquired reference when publishing the ioctl response
+fails. Backend detach failures retain a retryable final reference. Eight
+actual-source host regressions, native AArch64 release library/tests compilation,
+and independent review passed. The normal BSP release build also succeeded.
+Myrica `abb45aa0` separates submission pacing from pending/ready GPU collection;
+its nine worker regressions passed, including delayed completion, lease
+backpressure, idle polling and old-viewport rejection during resize. WebKit
+`55ca4225` supplies a pure owner-thread state getter so collection cannot start
+a new paint accidentally. The normal release rootfs producer built this pair.
+
+A temporary guest execution of the newly produced ordinary Myrica binary
+(`abb45aa0` / `55ca4225`, no diagnostic image readback) on the still-running
+old kernel/driver improved steady 2196x1282 watch-page composition from about
+13–18 to 22–30 completions per second while native decoding remained about
+30 fps. The video clock advanced beyond 33 seconds. Some intervals still had
+approximately 0.4s of owner run-loop work, and initial cold page loading had
+multi-second JavaScript/layout stalls. This comparison validates the pacing
+change, while the attachment fix and complete session cleanup still require
+the replacement normal image and resize/long-run execution.
+
+SGFX `e36b4903` completes normal mapped-session teardown, including imports,
+private IR objects/textures/buffers/upload arenas, mapped target surfaces and
+backings, and each queue's private composition VBO. Accepted work is awaited
+before retirement; uncertain cleanup poisons the shared context and prevents
+subsequent unsafe cleanup/submission. Partial session construction shares the
+same cleanup path. Backend tests (107), real IR fixture tests (3), native
+release plugin/example/legacy compilation and independent review passed. The
+new `--import-overlap-only` fixture exercises six resize generations, accepted
+pending work across old-session Drop, new-session drawing, last-release
+reimport and producer destruction while a lease remains. Its real guest run
+is the next gate. The normal rootfs was rebuilt with this driver and Vulkan
+implementation. Both pacing comparison runs used two vCPUs; final replacement
+VM validation uses the runner's normal four-vCPU default with HVF.
+
+The replacement normal disk booted kernel `4b3d5f401`, Myrica `abb45aa0`,
+WebKit `55ca4225`, SGFX `e36b4903` and ScarletUI `bf024ea7` with four vCPUs.
+The real `--import-overlap-only` contract passed all six generations, including
+old accepted-work completion during Drop, new-session pixels after old Drop,
+last-release/reimport and an image lease surviving producer destruction:
+`SGFX_IMPORT_OVERLAP_ONLY_OK generations=6 old_drop_new_draw=6 producer_drop_lease=1`.
+
+Myrica `94c6828` additionally publishes completed images before a due owner
+JavaScript tick; a gated regression proves the UI mailbox already holds the
+completed image while the subsequent tick is deliberately blocked. All ten
+worker regressions passed. A separate strict media fixture exposed MP4 edit
+lists being parsed but ignored in Symphonia: MAIN/HIGH native packet timestamps
+were 250ms later than FFmpeg's edited timeline. Fork `95d109e5` applies the
+edit consistently to signed PTS/DTS, duration and seek, preserving encoded
+preroll. Six unit tests and actual MAIN/HIGH/leading-empty files (72 packets,
+12 seeks, independently compared with FFmpeg) passed. Scarlet `7ea687d91`
+pins the fix and Myrica `99a87e87` aligns its three native media dependencies
+on that source. Complex/non-unit edits are rejected; Scarlet Sample does not
+yet propagate packet trim metadata for arbitrary edit-window crop/padding.
+These additions are being built into the normal release bundle.
+
+The current normal driver also passed the complete `/bin/myrica-vulkan-probe`
+contract: TLS, three Ganesh lifecycles, all eight YUV variants, feedback,
+pending capacity/generation gating, immutable two-image leases, retained
+compositing/scrolling, resize/coverage and owner-destruction drains. Native
+Myrica `99a87e87` then passed all seven strict HTTP video fixtures, including
+MAIN/HIGH reordered original PTS, pause/seek/resume/end, sniff/reload and both
+MSE sizes. Retained video changed 12,288 pixels over seven compositions with
+zero tile rasters. The full HTTP/DOM/CSS/image/storage/frame/View Transition,
+JavaScript semantics and infinite-script interruption suite also passed,
+including clean owner destruction and join. Final ordinary GUI throughput
+and live resize remain the final image check.
