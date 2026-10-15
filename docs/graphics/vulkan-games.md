@@ -1273,3 +1273,87 @@ SGFX `c363a5c4` and ScarletUI `bf024ea7`. Installed Myrica SHA256 is
 the installed probe is
 `46a542892d1cd6b65e9f01c3e79a22e26f87c0bddd136ddd349113c7c5b6a057`.
 The ICD hash is unchanged from the preceding normal release build.
+
+Myrica `d58ab3ad` gives resource-completion batches a 4ms owner-turn budget,
+in addition to the existing count limit. Response completion can synchronously
+execute page JavaScript, so a burst must yield before the next response and
+re-wake its owner for any remaining work. Individual native callbacks still
+run to completion; this does not bound a single script or layout callback to
+4ms. The full native HTTP/DOM/JS/input/image/CSS fixture passed, including normal
+owner join and VM revocation.
+
+The optional `webkit-smoke --video-pages URL --youtube-comments` test now
+scrolls the actual site, requires nonempty comment DOM text, returns to the
+player and requires advancing media time and presented frames. With the normal
+`1ecc110b` engine and `d58ab3ad` backend, the real YouTube test passed video
+pixels, theater toggle/return, viewport resize/return and comment loading
+(197 UTF-8 bytes after 1057ms). On return the media clock advanced from
+25.56 to 27.66 seconds and presented frames from 54 to 58, followed by normal
+owner shutdown/join. This probe reads back GPU pixels and another independently
+launched GUI was present, so these counts are correctness evidence rather
+than playback throughput measurements. Comment or search responsiveness on
+other requests remains a separate performance concern.
+
+The first normal release rootfs with this completion budget used Myrica SHA256
+`03e9a25eff18ca333de3de793135ea450d8bfdefac8cb7820633985a8d06c812`.
+WebKit, SGFX and ScarletUI revisions are unchanged from the preceding disk.
+
+Myrica `9fa07d0c` / WebKit `feedfbb8` use Page's standard
+RenderingUpdateScheduler. The ChromeClient previously converted scheduling
+requests directly into an immediate owner-turn flag. It now lets WebKit
+coalesce and schedule them, and yields the event loop when the scheduled
+rendering trigger fires, as the standard coordinated renderer does. Retained
+layer changes request the LayerFlush rendering step. Paint invalidation alone
+does not run the Page lifecycle and animation-frame callbacks ahead of their
+scheduled update; pending layout still runs normally.
+
+This engine passed the native HTTP/image/input/CSS/DOM/JS fixture, including
+changing transform/opacity pixels without tile rasterization, view transitions,
+owner join and VM revocation. Its real YouTube run passed changing decoded
+video pixels, theater toggle/return, viewport resize/return, comment text
+(197 UTF-8 bytes after 611ms), continued playback after scrolling back, and
+native search suggestions. A search turn still took up to 429435us while
+input dispatch took up to 4282us. Initial-page diagnostics also recorded a
+961925us AnimationFrameCallbacks step and a 381906us pending-view-transition
+step. These are wall times including any nested work, not JavaScript-only CPU
+costs. The scheduling change does not establish a resolved responsiveness issue.
+Some longer live-page probes reached native shutdown and owner-body return
+without completing their final thread join before manual interruption; ordinary
+fixture joins passed. That intermittent shutdown path remains an open concern.
+
+The development-only `scarlet_cpu_sample` example uses the existing sync-debug
+kernel API, sampling thread PCs and CPU-time deltas every 20ms. A 20-second
+sample of the normal installed 720p GUI (Myrica ELF
+`88de4529399091a2ce569e5d86298c0a33f8111bdeba65b00e5403472362df09`)
+included dlmalloc::malloc (`0x370fd4c`), the condition-variable wait path
+(`0x3719784`), and JSC::LLInt::performLLIntGetByID (`0x4520390`). Shared-library
+PCs also appeared; their load biases were not captured. These last-observed
+PC samples guide investigation and must not be treated as exclusive per-function
+CPU percentages or as evidence that JIT is disabled. Baseline/DFG/Yarr JIT and
+concurrent JS remain enabled; FTL and sampling-profiler builds remain disabled.
+
+SGFX `88beb734` reuses the existing snapshot vector's capacity across metadata
+updates and one comparison scratch vector across rows in each import. It
+retains exact immutable-row comparisons and generation checks. A 64-buffer test
+with one retirement verifies zero allocations while re-encoding the snapshot,
+bounded import allocations (at most eight), retirement and intact remaining
+buffers. All 106 release sgfx-core tests passed, including malformed framing,
+foreign identities, R2/R3 compatibility, shader retirement and stale-resource
+rejection. No new metadata cache, pool or ABI format was introduced.
+
+The final normal release disk assembled at 22:12 JST contains Myrica
+`9fa07d0c`, WebKit `feedfbb8`, SGFX `88beb734` and ScarletUI main `bf024ea7`.
+The installed full Vulkan probe passed TLS, all eight I420/NV12 colour-space
+variants, video presentation feedback, three context lifetimes, immutable GPU
+leases, async completion/backpressure, CSS filters/masks/damage, retained
+scrolling, Retina and far-source shadows, hidden-cover return and pending-work
+owner destruction.
+
+Installed SHA256 values are Myrica
+`88de4529399091a2ce569e5d86298c0a33f8111bdeba65b00e5403472362df09`,
+GPU probe `1955057cfc7c3bf159c819c6ecb157ea025254ad60a49c6cc672158d893fd446`,
+ICD `c7732e87851f59b2442e034b6a7dee58dc70cb14565264bb2545256a14fe7301`,
+and VirGL `022f822c56acf6d59ff027aaffb9429defe4470aaaddd96631a014161ad5b90c`.
+The final installed libraries also passed the complete native HTTP/image/input/
+CSS/DOM/JS fixture, including owner join and VM revocation. ScarletUI remote
+main was rechecked at 22:14 JST and remains `bf024ea7`.
