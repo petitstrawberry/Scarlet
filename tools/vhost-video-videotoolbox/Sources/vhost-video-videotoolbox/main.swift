@@ -867,6 +867,9 @@ private final class VideoBackend {
         let queue = try queue(queueIndex)
         guard queue.isConfigured else { return }
         let availIndex = try memory.readU16User(queue.availAddress + 2)
+        // Acquire the guest's avail.idx publication before reading its ring,
+        // descriptors, or request pages on weakly ordered hosts.
+        OSMemoryBarrier()
         while queue.lastAvailIndex != availIndex {
             let ringOffset = UInt64(4 + 2 * (Int(queue.lastAvailIndex) % Int(queue.size)))
             let head = try memory.readU16User(queue.availAddress + ringOffset)
@@ -911,7 +914,11 @@ private final class VideoBackend {
         appendU32(&entry, length)
         let ringOffset = UInt64(4 + 8 * (Int(usedIndex) % Int(queue.size)))
         try memory.writeUser(queue.usedAddress + ringOffset, entry)
+        // Publish response bytes and the used entry before used.idx. A guest
+        // may reuse both descriptor chains as soon as it observes this index.
+        OSMemoryBarrier()
         try memory.writeU16User(queue.usedAddress + 2, usedIndex &+ 1)
+        OSMemoryBarrier()
         if let callFd = queue.callFd {
             var one: UInt64 = 1
             _ = withUnsafeBytes(of: &one) { Darwin.write(callFd, $0.baseAddress, 8) }
