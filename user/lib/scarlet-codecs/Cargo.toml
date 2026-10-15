@@ -24,7 +24,7 @@ path = "src/lib.rs"
 
 [dependencies]
 rust_h264 = { git = "https://github.com/petitstrawberry/rust_h264", rev = "ed481be3d733382529cc555b5393224adcc6acc0", optional = true, default-features = false, features = ["portable-simd"] }
-symphonia-core = { git = "https://github.com/petitstrawberry/Symphonia", rev = "a178babb44462f002ec855b57e26abd57e106c36", optional = true, default-features = false }
-symphonia-codec-aac = { git = "https://github.com/petitstrawberry/Symphonia", rev = "a178babb44462f002ec855b57e26abd57e106c36", optional = true, default-features = false }
-symphonia-format-isomp4 = { git = "https://github.com/petitstrawberry/Symphonia", rev = "a178babb44462f002ec855b57e26abd57e106c36", optional = true, default-features = false }
-symphonia-std = { git = "https://github.com/petitstrawberry/Symphonia", rev = "a178babb44462f002ec855b57e26abd57e106c36", optional = true, default-features = false, features = ["std"] }
+symphonia-core = { git = "https://github.com/petitstrawberry/Symphonia", rev = "95d109e554b25f1db3d506aeb24d251109936d89", optional = true, default-features = false }
+symphonia-codec-aac = { git = "https://github.com/petitstrawberry/Symphonia", rev = "95d109e554b25f1db3d506aeb24d251109936d89", optional = true, default-features = false }
+symphonia-format-isomp4 = { git = "https://github.com/petitstrawberry/Symphonia", rev = "95d109e554b25f1db3d506aeb24d251109936d89", optional = true, default-features = false }
+symphonia-std = { git = "https://github.com/petitstrawberry/Symphonia", rev = "95d109e554b25f1db3d506aeb24d251109936d89", optional = true, default-features = false, features = ["std"] }
