@@ -1473,3 +1473,100 @@ GPU probe `44fd59bce9e313803180a7f34deb1755bfaf0c8b6cfde2453481dc9bad3ca3fc`,
 ICD `d26e19778c0db2de367c305ad57bacc1f95329488b88f1cc70bc3974dbe1c1db`.
 The disk was rebuilt only while its QEMU instance was stopped, then booted
 through ordinary /init and stemd with HVF, Cocoa GL/Retina and native video.
+
+### 2026-10-16: independent native composition and video presentation
+
+Myrica `9112526452b41d347f774e47ce3d9c3577dd16c1` pins WebKit fork
+`scarlet` commit `3b3a90bfc431ee616d50cc2a914dae5a89abd6fc`. The normal
+release desktop bundle and aarch64 Limine disk now include this implementation.
+SGFX remains `7bb867e4`; ScarletUI remains latest remote main `bf024ea7`.
+SDK sources and root flake were unchanged.
+
+The owner-thread composition limitation recorded above is superseded:
+
+- Page, DOM, JavaScript, layout and scene commits remain on the WebCore owner.
+- A dedicated native compositor run loop owns the committed layer tree,
+  Ganesh context, GPU submissions, completion collection and animations.
+  Tile recording uses WebKit's painting workers. The commit handoff lock
+  transfers scene references; it does not cover GPU tile replay/upload.
+- Native video decode/audio workers feed a compositor-thread frame pump.
+  Clock-due frame acquisition, NV12/I420 texture upload and retained video-layer
+  updates continue without Page polling. Owner-only media/DOM callbacks receive
+  coalesced feedback. Paused reparenting retains the last decoded GPU image.
+- ScarletUI acquires completed image capabilities through a separate opaque
+  output endpoint. Its short mailbox lock covers metadata and capability
+  duplication, with no Page call, JS execution, GPU wait or readback. Two
+  immutable output allocations bound in-flight storage. Navigation epochs and
+  viewport checks reject stale output; lease return remains safe after Page
+  destruction. The ordinary browser path has no CPU framebuffer.
+
+Ganesh contexts are confined to their own threads and share Vulkan device/queue
+lifetime; Vulkan queue access is externally synchronized. Unchanged scenes do
+not publish redundant frames. Empty commits can settle while both outputs are
+leased, without drawing into leased storage; changed damage remains accumulated.
+Video-only flushes preserve pending DOM/tile damage. The owner-acquisition
+compatibility path also retires old-size completed images after resize and waits
+for the requested extent, instead of marking navigation failed.
+
+Compressed media lookahead is bounded by 512 packets per track and the existing
+aggregate 8 MiB limit; decoded video remains bounded at three frames. The old
+64-AAC-packet limit starved interleaved video after about 1.4 seconds of blocked
+JS. This change retains byte backpressure while covering the tested JS stall.
+Mapped decoded planes still require GPU texture upload; importing a decoded
+native image directly has not been implemented. JavaScript-driven MSE appends
+and new DOM/layout work still require their normal owner thread.
+
+Validation used HVF, four guest CPUs, 8 GiB RAM, Cocoa GL/Retina,
+`virtio-gpu-gl-pci`, ordinary /init and native `/dev/video0`:
+
+- Final WebKit revision: an actual three-second JS click handler ran while a
+  separate Rust thread acquired compositor output. The 8 fps H.264/AAC fixture
+  produced 24 output frames and 24 presentation advances during 3001 ms of JS,
+  with a maximum output gap of 151 ms. The CSS transform/opacity case produced
+  168 frames during 2999 ms of JS, maximum gap 23 ms. Both checks include first
+  and last gaps, require at least 18 frames and no gap above 300 ms, join the
+  owner, and poll the output endpoint after Page destruction.
+- The installed normal GPU probe passed TLS, three GPU-context lifetime cycles,
+  all eight I420/NV12 color-space/range cases, real presentation retry feedback,
+  bounded damage, asynchronous resize, two immutable leases/backpressure,
+  CSS filters/masks/opacity, zero-tile animation, scroll tile reuse, idle
+  quiescence, hidden pending-cover drainage and pending-work destruction.
+- The native compositor-video fixture passed with zero static tile repaint,
+  2560x1440/DPR2 theater layout, scroll away/return, inline restoration,
+  paused reparented decoded pixels, resumed presentation and actual owner join.
+- The complete native HTTP/image/input/JS fixture passed on the final engine,
+  including asynchronous PNG/JPEG/WebP textures, pointer retention, Retina
+  media queries, history/editing, native wheel input, cookies/blob/iframe,
+  framesets, view transitions, idle paint stability, owner join and VM revocation.
+- Thirteen worker tests passed, including output delivery while engine tick is
+  deliberately blocked and stale navigation/viewport rejection. Twenty-six
+  media/ABI host tests passed; two FFmpeg/native-fixture-dependent cases were
+  ignored in that host harness.
+
+The live YouTube probe passed decoded/changing video pixels, theater
+toggle/return, 1600x900 resize/return, 12 seconds of hover input, actual comment
+text/player return and native search suggestions. This 854x480 run observed
+a maximum owner turn of 162978 us and presentation gap of 203 ms during hover.
+Comments appeared after 407 ms; suggestions took 2482 ms with a 490475 us
+maximum tick. Readback and opt-in tracing affect these measurements; these
+numbers do not establish uninterrupted ordinary GUI playback. The live probe
+finished native shutdown but stalled in final thread join and was interrupted;
+the full local fixture and compositor-media fixture joined successfully.
+
+One normal GUI run reported dynamic backend status 4 / `ERROR_DEVICE_LOST`
+and exited with status 134. A subsequent normal GUI run continued native
+YouTube playback without reproducing that error while the full fixture ran
+alongside it. The underlying intermittent GPU failure remains unresolved.
+This observation is separate from the corrected asynchronous old-viewport
+compatibility error caught by the first live-site resize probe.
+
+Final installed release SHA256: Myrica
+`72316a9d81587ca8ed9d63f09db022bc4cc7f23df3768d174770adff3b1e5354`,
+GPU probe `df57ce844e01509fcfcf7bf8fbf61209d16c4f8eccebc7692f374e1e902d1fcb`,
+ICD `d26e19778c0db2de367c305ad57bacc1f95329488b88f1cc70bc3974dbe1c1db`,
+VirGL DSO `022f822c56acf6d59ff027aaffb9429defe4470aaaddd96631a014161ad5b90c`.
+Temporary validation servers and their temporary build/media directories were
+removed after preserving results. No worktrees were created; the unrelated
+NVMe worktree and user Myrica `flake.lock`, BSP lock and `tools/wine/` changes
+were preserved. Disk assembly held an exclusive whole-file lock and ran only
+after the validation QEMU stopped.
