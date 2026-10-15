@@ -2030,6 +2030,11 @@ impl GpuContext {
 
     /// Attach an image so this context's opaque commands may reference it.
     ///
+    /// Attaching the same image again, including through a duplicated handle,
+    /// returns the same context token and acquires another attachment reference.
+    /// Every successful attach requires a matching detach; only the last detach
+    /// removes the physical backend attachment.
+    ///
     /// # Arguments
     ///
     /// * `image` - Image capability to attach.
@@ -2064,7 +2069,8 @@ impl GpuContext {
     ///
     /// # Returns
     ///
-    /// Success after the backend detached the image, or a handle error.
+    /// Success after releasing one attachment reference, or a handle error.
+    /// The backend remains attached while other attachment references exist.
     pub fn detach_image(&self, image: &GpuImage) -> HandleResult<()> {
         let image_handle =
             u32::try_from(image.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;

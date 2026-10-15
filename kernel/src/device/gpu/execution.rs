@@ -44,6 +44,8 @@ pub(super) struct GpuAttachedBuffer {
 #[derive(Clone)]
 pub(super) struct GpuAttachedImage {
     backend_image: Arc<dyn GpuBackendImage>,
+    attachment_token: u64,
+    attachment_count: usize,
     _backing: Arc<super::resource::GpuImageBacking>,
 }
 
@@ -104,6 +106,10 @@ impl GpuContext {
     ///
     /// * `image` - Image capability authorized by the caller's handle table.
     ///
+    /// Repeated attachments of the same image capability (including duplicated
+    /// handles) share one backend attachment and each require a matching detach.
+    /// Identity is the backend image Arc, never its device-local resource token.
+    ///
     /// # Returns
     ///
     /// A non-zero opaque attachment token authorized only for this context. It
@@ -111,11 +117,15 @@ impl GpuContext {
     pub fn attach_image(&self, image: &GpuImage) -> Result<u64, &'static str> {
         let backend_image = image.backend_image();
         let mut attached_images = self.attached_images.lock();
-        if attached_images
-            .iter()
-            .any(|attached| Arc::ptr_eq(&attached.backend_image, &backend_image))
+        if let Some(attached) = attached_images
+            .iter_mut()
+            .find(|attached| Arc::ptr_eq(&attached.backend_image, &backend_image))
         {
-            return Err("GPU image is already attached to this context");
+            attached.attachment_count = attached
+                .attachment_count
+                .checked_add(1)
+                .ok_or("GPU image attachment count overflow")?;
+            return Ok(attached.attachment_token);
         }
         attached_images
             .try_reserve(1)
@@ -127,6 +137,8 @@ impl GpuContext {
         }
         attached_images.push(GpuAttachedImage {
             backend_image,
+            attachment_token: token,
+            attachment_count: 1,
             _backing: image.backing(),
         });
         Ok(token)
@@ -140,8 +152,9 @@ impl GpuContext {
     ///
     /// # Returns
     ///
-    /// Nothing after the backend detached the image and the context released its
-    /// matching retained image/backing pair.
+    /// Each successful call releases one attachment reference. Only the last
+    /// calls the backend and releases the retained image/backing pair. A backend
+    /// detach failure preserves that final reference so the caller can retry.
     pub fn detach_image(&self, image: &GpuImage) -> Result<(), &'static str> {
         let backend_image = image.backend_image();
         let mut attached_images = self.attached_images.lock();
@@ -149,9 +162,29 @@ impl GpuContext {
             .iter()
             .position(|attached| Arc::ptr_eq(&attached.backend_image, &backend_image))
             .ok_or("GPU image is not attached to this context")?;
+        if attached_images[index].attachment_count > 1 {
+            attached_images[index].attachment_count -= 1;
+            return Ok(());
+        }
         self.backend_context.detach_image(backend_image.as_ref())?;
         attached_images.swap_remove(index);
         Ok(())
+    }
+
+    /// Publish one acquired reference, rolling it back if no response is delivered.
+    /// A failed backend detach leaves the reference retained for safety.
+    fn attach_image_and_publish(
+        &self,
+        image: &GpuImage,
+        publish: impl FnOnce(Result<u64, &'static str>) -> Result<(), &'static str>,
+    ) -> Result<(), &'static str> {
+        let attachment = self.attach_image(image);
+        let acquired = attachment.is_ok();
+        let result = publish(attachment);
+        if result.is_err() && acquired {
+            let _ = self.detach_image(image);
+        }
+        result
     }
 
     /// Attach a buffer to this context and retain its backing for all derived queues.
@@ -307,11 +340,13 @@ impl GpuContext {
             .as_gpu()
             .and_then(GpuObject::as_image)
             .ok_or("GPU image handle changed while attaching")?;
-        match self.attach_image(image) {
-            Ok(token) => request.command_resource_token = token,
-            Err(_) => request.result = GPU_RESULT_INVALID_STATE,
-        }
-        write_user_value(arg, &request)?;
+        self.attach_image_and_publish(image, |attachment| {
+            match attachment {
+                Ok(token) => request.command_resource_token = token,
+                Err(_) => request.result = GPU_RESULT_INVALID_STATE,
+            }
+            write_user_value(arg, &request)
+        })?;
         Ok(0)
     }
 
@@ -858,6 +893,7 @@ fn copy_command_bytes(command_ptr: u64, command_size: u32) -> Result<Vec<u8>, &'
 #[cfg(test)]
 mod tests {
     mod asynchronous;
+    mod image_aliases;
     mod synchronous;
     use alloc::sync::Arc;
 
