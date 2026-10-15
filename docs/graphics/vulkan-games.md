@@ -927,3 +927,152 @@ zero tile rasters. The full HTTP/DOM/CSS/image/storage/frame/View Transition,
 JavaScript semantics and infinite-script interruption suite also passed,
 including clean owner destruction and join. Final ordinary GUI throughput
 and live resize remain the final image check.
+
+Final ordinary-GUI validation exposed a real performance regression in the new
+teardown path before sign-off: with four vCPUs and `e36b4903`, decoding stayed
+at 30 fps but page composition fell to 10–11 fps and recording rose to about
+15ms per frame. Public `Context::is_idle()` created a temporary queue, whose
+new correct Drop waited for shared GPU work, submitted unbinds and detached its
+private VBO. Driver resource synchronization/retirement calls this query on
+the hot path. SGFX `401082ac` instead directly polls the existing scheduler,
+with no temporary queue/VBO/allocation/GPU wait. It preserves real destruction
+and propagates scheduler or shared cleanup failure as DEVICE_LOST. Its 108
+backend tests, native release compilation and independent review passed. The
+normal driver/Vulkan bundle pins select this correction. The full normal
+release image, including kernel, was rebuilt and booted for the GUI checks below.
+
+The same `401082ac` disk was compared under two and four vCPUs. Both still
+spent roughly 13–15ms per steady video-frame recording, with 13–16 page
+compositions per second in measured intervals. CPU count is not the cause of
+that remaining recording cost. Source review found no additional per-frame
+native Queue/IRResources Drop; CPU core count, GPU completion wall time and
+recording cost must not be conflated. Fork `92aa6cbd` splits record time into
+FrameView flush, layer-tree flush and scene-paint counters, enabled only by
+the existing profiling switch. Myrica `08e93d94` pins this diagnostic. In the
+native GUI, 12 video compositions consumed about 214ms in recording: 0.36ms
+FrameView flush, 1.07ms tree flush, and 212ms scene paint. The scene accounts
+for almost all recording cost. Both the normal Cargo output and staged binary
+matched SHA256 `65ba96440310dcda0e1532e5da52b1acbf1ef63af260bcdebba4a1b51a956b4b`;
+the updated rootfs lock/stamp also matched. No SDK cache change was needed.
+WebKit `e568d1b0` / Myrica `102e0732` further separate scene transforms,
+damage collection, actual drawing and cleanup, and count intermediate/mask/
+filter surface allocation attempts. All counters remain opt-in.
+
+That native run measured five filter surfaces per initial page composition and
+seven during video (e.g. 11 paints, 77 filter surfaces, 196ms draw versus
+0.83ms transforms, 0.72ms damage collection and 0.11ms cleanup). Context
+preparation was only tens of microseconds per second. WebKit `387e4813`
+therefore defers Scarlet's intermediate/mask/filter early flushes to the
+existing final submission. Same-context snapshots retain their texture proxy
+and producer render-task dependencies; the final Ganesh flush executes the
+full dependency graph and retains the existing GPU finished callback. Other
+ports keep their original flushes. Myrica `6e408629` pins that change and adds
+actual GPU blur/drop-shadow source, shadow and Gaussian-fringe pixel checks.
+Native release compilation and independent render-task/lifetime review passed.
+The normal release disk was regenerated at 16:06 JST and booted with HVF,
+four vCPUs, Cocoa GL/Retina and native video. The staged ordinary Myrica
+(157391808 bytes) matches its generated lock hash
+`014bce1172917bd2927612de549110b0add9cefd3a86f7d2560a560772a6900a`.
+Installed `/bin/myrica --help` returned normally. Installed
+`/bin/myrica-vulkan-probe` passed all three Ganesh/YUV create/destroy cycles,
+video presentation feedback, async readiness and pending resize, immutable
+leases, actual blur/drop-shadow including Gaussian fringes, group opacity,
+rounded clip/mask, retained transform/scroll, pending cover, navigation and
+pending owner-destruction checks. No fixture expectations needed adjustment.
+
+The early-flush change reduced steady scene recording to roughly 0.5–0.8ms,
+but moved most remaining CPU work into final submission (about 12–15ms);
+ordinary video still showed about 10–18 page compositions/s in these runs.
+The following investigation did not count that timing shift as a throughput
+fix. Native cache counters then showed 95–99MB of budgeted resources against
+an 80MiB limit, with zero purgeable bytes during 720p Retina playback.
+WebKit `6a857d32` raises the Scarlet Ganesh cache limit to 256MiB; setLimit
+changes a ceiling without preallocating memory, and memory-pressure release
+behavior is preserved. Myrica `7b6420d4` pins it.
+
+SGFX `38a5556f` also removes caller-side round-trip waits from owned descriptor
+metadata updates. Existing recorded references are invalidated synchronously
+at the API call, before later binds can be recorded; metadata then enters the
+device worker FIFO before later submit/free/destroy operations. Tests cover
+both old-recording invalidation and update-before-new-bind preservation,
+owned input copies, metadata copies, pool/free ordering and failure poisoning.
+108 unit tests, two actual Runtime/Metal ordering/failure tests, two existing
+actual ICD/GPU descriptor contracts and the full native release ICD build
+passed. The diagnostic opt-in reads the loader's existing weak `environ` on
+Scarlet: Rust DSO-private std environment is uninitialized, and a direct
+strong `getenv` import is unavailable in the application's dynamic symbols.
+Final ELF inspection confirmed only weak `environ`, with no `getenv` import.
+The normal graphics and Vulkan pins select `38a5556f` together.
+
+A separate host-only failure occurred on QMP quit (PID 97282, Cocoa main
+thread): `qkbd_state_modifier_get(NULL)` after input teardown. Lifecycle guards
+were published without changing the existing checkout/worktrees or root flake:
+QEMU `cocoa-virgl` `c1f8ccdcd26541ddeed9b1d6d2bdbc598d5177f1`, `scarlet`
+`653c97ab0d8df25015e8674db03e444618be0b0d`, and the current 11.1 source branch
+`work/scarlet-11.1` `16ba12445775646ce80160bf11f58c5cf6909697`. All three full
+Cocoa Objective-C translation units passed syntax checks against their actual
+QAPI schemas before and after the patch; checkpatch passed. The running Nix
+QEMU binary remains the earlier build, so these are published source fixes,
+not a claim of an updated host binary or completed runtime shutdown test.
+
+The subsequent normal release image (`7b6420d4` Myrica, `6a857d32` WebKit,
+`38a5556f` SGFX, ScarletUI `bf024ea7`) passed the full installed GPU probe,
+including the new Gaussian-fringe checks. At Retina 2196x1282, ordinary 720p
+YouTube playback reached 27–30 page compositions/s in steady intervals;
+scene recording was approximately 0.7ms/composition and final submission
+approximately 2.5–3ms/composition. Live scrolling and theater changes still
+exposed failures, so these steady-playback figures do not characterize input
+latency or mode changes.
+
+The ordinary GUI journal identified a separate capacity leak: Vulkan pipeline
+and shader destruction removed Vulkan handles but left their bounded IR slots
+allocated. Repeated pipelines therefore exhausted the 256 shader slots and
+logged `vertex specialization: ERROR_OUT_OF_DEVICE_MEMORY`. Kernel abort
+records for two failed GUI runs resolve, using the actual staged executable,
+to `ScarletLayerTree::maxTextureSize()` and its non-abandoned-context assertion
+(return address `0x5838dd4`, assertion call at `0x5838dd0`). The subsequent Rust
+abort trap is secondary; it must not be used to identify the original failure.
+
+SGFX `696f409d` combines generational shader/compute/graphics slots, R2 snapshot
+compatibility, native physical-resource retirement after GPU completion, and
+Vulkan lifetime/failed-create rollback. Unused specializations of a still-live
+ShaderModule are evicted; modules referenced by live pipelines remain valid.
+Independent review also caught and corrected rollback while unrelated work is
+in flight. Actual Vulkan-to-Metal tests each ran 1024 lifecycles with exact
+pixel checks, including long-lived modules with unique specialization values.
+Backend Metal tests additionally retained an old completion receipt across
+300 generations. Native AArch64 release plugin and ICD builds passed. Normal
+bundle integration and native mode-change verification are in progress.
+
+The ordinary full release disk was regenerated at 17:07 JST with Myrica
+`78535472`, WebKit `61483b7d`, SGFX `696f409d`, and ScarletUI main `bf024ea7`.
+It boots through the standard init/stemd desktop under HVF. Installed Myrica
+SHA256 is `175a92e7166857a6989de454126e33e754c0ee4e699ca595eed19063f70b6f62`;
+the ICD is `fd82f8d48499dac078a6b55fbbbf3abb65f6e472e5ea3301f8d3acc439231c19`.
+The complete installed GPU probe passed. A native IR/ABI driver probe then
+passed 512 shader/pipeline generations with stale-ID rejection, an old
+completion receipt held across reuse, and unchanged old image pixels.
+Its source regression is SGFX `874fb8f1`.
+
+Myrica `2d68efdf` publishes a completed GPU image before an input-only command
+batch can block in a wheel handler. Navigation batches cancel first and the
+existing generation/viewport filters remain. The 12 worker tests and native
+release check passed; this change is included in the disk above. WebKit
+`61483b7d` also gives its runtime pipeline LRU a 64-entry budget, leaving room
+within the backend's 256 shader slots for two stages per cached pipeline,
+construction and command-buffer retention. This is headroom, not an unlimited
+live-resource guarantee.
+
+Using the same normal engine closure, Myrica regression `1b07294` passed
+actual YouTube playback, its genuine `t` theater shortcut and return, and
+1600x900/1280x720 viewport transitions. Every transition required advancing
+native presentation/time, fresh GPU revisions and changing video pixels.
+This readback-heavy diagnostic is not a GUI throughput measurement. After
+`shutdown-complete`, this successful-path diagnostic did not print its final
+owner-join marker and was interrupted; the post-shutdown wait is unresolved.
+All seven strict native HTTP media fixtures also passed. A new Retina
+reparent test then exposed an additional rendering bug rather than a crash:
+physical x=2040 was decoded red, but x=2048 was background, although the
+2496px-wide video fit the GPU's 4096px limit. WebCore's filter surface was
+clamped to half that limit. That correction and subsequent JIT/painting
+parallelization are being integrated separately from this validated disk.
