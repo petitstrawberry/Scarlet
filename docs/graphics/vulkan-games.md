@@ -1357,3 +1357,119 @@ and VirGL `022f822c56acf6d59ff027aaffb9429defe4470aaaddd96631a014161ad5b90c`.
 The final installed libraries also passed the complete native HTTP/image/input/
 CSS/DOM/JS fixture, including owner join and VM revocation. ScarletUI remote
 main was rechecked at 22:14 JST and remains `bf024ea7`.
+
+
+Further interaction stalls and response ownership (2026-10-15, 22:36 JST):
+The user reported that hover changes and comment loading interrupt video.
+The 22:12 normal GUI also logged repeated Vulkan buffer/image allocation
+failures (-2), followed by backend/device loss and process exit 134. The ICD
+has a 512 MiB logical allocation ceiling; a new failure diagnostic reports
+requested/live bytes, allocation/object counts and the largest allocations.
+The precise contents of that failed allocation epoch were not captured, so
+a leaked resource or exhausted headroom is still under investigation.
+
+SGFX `7bb867e4` removes an unused CPU mirror for GPU-only image allocations.
+The logical allocation extent and budget stay intact. Buffers materialize
+zeroed, eight-byte-aligned CPU storage before successful binding; explicit
+mapping also materializes it, preserves its address across reuse and reports
+failure without publishing a mapped pointer. Image drawing continues to use
+backend GPU storage. The new materialization/stable-address/overflow test and
+108 other release Vulkan unit tests passed (four native-GPU tests ignored).
+The Scarlet release ICD also passed the full installed Vulkan pixel/lifetime
+probe using the preceding `feedfbb8` engine.
+
+A controlled real GUI run with this ICD and the preceding engine recorded
+15 AllocateMemory calls with 204us total worker service, while the original
+image-heavy page load had recorded 79 calls with 238264us service. These are
+different live request bursts and do not establish a whole-page speedup.
+Steady 720p intervals still reached roughly 27-30 presented frames/s, with
+other intervals slower. A response completion still blocked its owner for
+1577085us, so eliminating the redundant image mirror leaves other stalls.
+
+WebKit `750116a3` makes ResponseData own a WTF byte vector and moves that
+allocation into SharedBuffer after policy checks. This removes the second
+whole-response copy on data delivery, preserving the ABI's initial ownership
+copy, response length, cancellation and callback lifetime. Myrica `ed9d7a11`
+pins it and adds opt-in slow-completion diagnostics with response bytes,
+content type and URL host/path (no query). Myrica `3d42a2a` additionally adds
+`--youtube-hover` to the diagnostic native-input probe. It reports maximum
+owner turn and observed presentation gap rather than treating mean frame
+rate as evidence of uninterrupted playback. Probe readback and owner
+observation are included in these gap metrics.
+
+The native layer tree still explicitly composites on the WebCore owner
+thread. HTTP and decompression workers, tile-recording workers and native
+video decode are separate, but long DOM/script callbacks can delay media
+polling, scene composition and presentation. Removing that dependency needs
+the compositor/scene ownership and GPU handoff connected to a separate
+compositing run loop; merely adding more HTTP workers does not address it.
+ScarletUI remote main was checked at 22:35 JST and remains `bf024ea7`.
+
+
+The 22:38 JST normal disk contains Myrica `ed9d7a11`, WebKit `750116a3`,
+SGFX `7bb867e4` and ScarletUI main `bf024ea7`. Its installed Vulkan probe
+passed the full GPU colour, composition, lease/backpressure, resize and
+pending-work destruction tests. Installed SHA256 values are Myrica
+`535b69daff24205f33d3b9ec7ca125cdfbe65bd136f4910b481e004899617e1f`,
+GPU probe `31dc1e2e602eb72d74c8351867ea655546e7246876cee7f8804b53e5c217f80b`,
+and ICD `d26e19778c0db2de367c305ad57bacc1f95329488b88f1cc70bc3974dbe1c1db`.
+The unchanged VirGL DSO remains
+`022f822c56acf6d59ff027aaffb9429defe4470aaaddd96631a014161ad5b90c`.
+
+The response-storage engine passed the full native HTTP/image/input/CSS/JS
+fixture, including owner join and VM revocation. Its actual YouTube run
+passed decoded/changing video pixels, theater mode and viewport resize/return.
+The 12-second hover probe observed a longest presentation gap of 222ms and a
+longest owner turn of 111600us. Comments were present 160ms after scrolling;
+they may have been prefetched, so that is not a cold network latency.
+Video advanced on scroll return. Native suggestions appeared after 1511ms,
+with input dispatch up to 4700us and a tick up to 78120us. The live-site probe
+again returned from its owner body but stalled in final thread join and was
+interrupted. The ordinary full fixture joined successfully.
+
+Mouse input had another direct `needsRenderingUpdate` assignment, bypassing
+Page's standard scheduler even after the earlier scheduler correction.
+WebKit `06ebd9be` removes that bypass and requests LayerFlush through Page
+after native mouse handling, retaining native hover/selection event dispatch
+and normal ChromeClient invalidation. Myrica `15cdad1c` pins this engine.
+Wheel direction, deltas and acceleration are unchanged.
+
+The scheduled-mouse engine passed the complete HTTP/image/input/CSS/JS
+fixture, including pointer pixel retention, native scroll, Retina/media-query
+resize, view transitions, owner join and VM revocation. A first live-site
+hover run encountered an ad-to-main-video switch: media duration changed from
+15.07 to 245.02 seconds and its clock/frame counters restarted. That invalidated
+the probe's initial cross-session advancement comparison, which reported a
+failure. It also recorded a 2808021us owner turn including probe readback.
+The diagnostic-only `2b24baa` probe resets its comparison epoch when the
+native media clock or presentation count restarts, requires another 12-second
+continuous epoch, bounds the complete probe to 60 seconds, and retains the
+maximum observed timing across epochs. This does not change normal playback.
+
+The corrected scheduled-mouse probe passed the real YouTube video, theater
+mode/return, 1600x900 resize/return, 12 seconds of native hover input, comment
+text and playback return, native search suggestions, and normal owner join.
+It observed zero media-epoch resets, a maximum owner turn of 73719us and a
+maximum presentation gap of 210ms. Video was 640x360 in this run, versus
+854x480 in the 222ms baseline, so these maxima cannot establish a comparable
+performance improvement. Comments were present after 156ms (197 bytes), and
+search suggestions appeared after 1587ms with a 4897us input maximum and
+98620us tick maximum. Diagnostic readback is included. Initial page loading
+also recorded a 905090us CSS response-completion callback. Long callbacks and
+the owner/compositor dependency remain unresolved responsiveness problems.
+
+All temporary validation servers, native probe outputs and their temporary
+build/dependency directories were removed after preserving these results.
+No task worktrees were created; the existing NVMe worktree was preserved.
+SDK and ScarletUI sources, root flake, user `tools/wine/` and user Myrica
+`flake.lock` edits were preserved.
+
+
+Final normal release disk assembled at 22:54 JST: Myrica `15cdad1c`,
+WebKit `06ebd9be`, SGFX `7bb867e4`, ScarletUI main `bf024ea7`.
+Installed SHA256: Myrica
+`ef5c4b0a21f0c72ccbe97eff486972cfa07f45cdf93086df2b928f3235cb8617`,
+GPU probe `44fd59bce9e313803180a7f34deb1755bfaf0c8b6cfde2453481dc9bad3ca3fc`,
+ICD `d26e19778c0db2de367c305ad57bacc1f95329488b88f1cc70bc3974dbe1c1db`.
+The disk was rebuilt only while its QEMU instance was stopped, then booted
+through ordinary /init and stemd with HVF, Cocoa GL/Retina and native video.
