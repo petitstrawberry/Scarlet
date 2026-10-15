@@ -534,3 +534,183 @@ source audit, 28 production queue/control/registry regressions and native
 release plus kernel-test compilation passed. Guest mouse-performance and
 forced-exit stress validation are still pending. Myrica also restores the
 previous WebKit wheel direction.
+
+
+The next HVF release run reproduced an abort on the supplied YouTube watch
+URL. Native exit-group diagnostics recorded task 138, status 134,
+PC `0x7134a60`, LR `0x3552a90`, and saved return addresses `0x55465ac`,
+`0x38e7558`, `0x38e732c`, `0x3d1716c`. Symbolization against the actual staged
+Myrica executable identified `WTFCrashWithInfo`, `GraphicsLayer::create`,
+`RenderLayerCompositor::ensureRootLayer`, `enableCompositingMode`, and
+`Document::setActiveViewTransition`. Myrica's main thread then encountered the Rust abort trap while shutting down
+after its engine owner exited. This capture identifies
+a View Transition compositing request, rather than a decoded NV12 frame fault.
+
+[WebKit `74b12ed`](https://github.com/petitstrawberry/WebKit/commit/74b12edd09065b36efaf753ef361d4302ef64f18)
+uses the existing View Transition skip algorithm when accelerated compositing
+is disabled: same-page update callbacks still run and their promises settle;
+cross-document transitions resolve to `SkipTransition`. The port currently
+rasterizes the page through Ganesh/Vulkan but has no composited graphics-layer
+factory. The change does not replace that missing compositor with dummy layers
+or change native video decoding. The Myrica regression fixture checks callback
+execution, promise outcomes, the cleared active transition, and actual GPU
+pixels after a DOM update. The HVF release guest passed this regression:
+callback asynchronous and exactly once, `ready` rejected with
+`InvalidStateError`, `updateCallbackDone` and `finished` fulfilled, active
+transition null, and actual GPU pixels/revision changed. All existing static
+HTTP fixture stages also passed, including unchanged idle counters (`2`, `2`)
+and pointer movement without a new paint. Live YouTube playback verification
+is in progress.
+
+
+After that fix, the watch-page probe reached the native decoder but reproduced
+a second status-134 abort. Its exact executable resolved the saved callers to
+`CanMakeCheckedPtrBase::crashDueToCheckedPtrToDeadObject`,
+`RunLoop::TimerBase::~TimerBase`, `MediaPlayerPrivateScarlet` destruction,
+`ThreadSafeWeakPtrControlBlock::strongDeref`, and the settled media sniff/reload
+promise. Inspection found that `RedBlackTree::remove` leaves child checked
+pointers in a detached timer node. Destroying another timer can leave those
+pointers referring to a zeroed dead object, and later destruction of the old
+node aborts. [WebKit `a10b7f5`](https://github.com/petitstrawberry/WebKit/commit/a10b7f5ed842d2fe72675c1725a0781c6bb0e25d)
+resets detached node links after balancing the tree. The tests cover one- and
+two-child nodes, destruction after former children, reinsertion and sorted
+iteration, with both ordinary and thread-safe checked pointers. The native
+Vulkan probe runs the actual thread-safe node lifetime regression before its
+GPU contracts. This watch-page run did not pass playback; verification of the
+new tree fix is in progress.
+
+
+With WebKit `b5cc24f1` (the timer fix plus the probe's private WTF include
+root), the release HVF guest passed the timer lifetime regression and all three
+native Ganesh/YUV cycles. The actual supplied YouTube watch URL then passed the
+video-page probe: 854×480 native video, `currentTime=10.06`, 39 decoded frames,
+38 presented frames, no reported drops, and 23,828 changed video-region pixels.
+This probe reads back GPU images for verification; its frame count measures the
+probe's sampled presentation, not normal GUI playback throughput. The diagnostic
+subsequently stalled during owner teardown and was interrupted through its own
+foreground process group. Normal GUI playback is visibly slow and remains the
+active performance issue.
+
+The next implementation removes the intermediate SgfxCanvas pass for completed
+WebKit GPU pages, preserves reusable external BGRA image imports while their
+application texture owners remain alive, and routes external-image state updates
+through paint invalidation. WebKit exposes a stable allocation identity separately
+from its frame lease generation. Myrica caches at most two imported texture
+owners; the cache never retains frame leases, and unused exported capabilities
+are closed. WebKit also tracks pending paint damage per GPU allocation so a
+reused image accumulates changes missed while leased. Resize and layout retain
+full-paint behavior. Native release compilation and two-image damage/readback
+verification of this revision are in progress.
+
+
+The two-image GPU contract passed on the release HVF guest using Myrica
+`68160392` / WebKit `3bcb35c5` / ScarletUI main `fcea172b`. Allocation IDs were
+A=1 and B=2. Holding both leases blocked production; after returning A its next
+frame reused A's ID, accumulated two distant DOM background changes, and kept
+leased B unchanged. That paint covered 15,360 physical pixels versus a 71,680
+pixel viewport. Released generations returned stale/zero identity, and resize
+allocated a new identity while preserving B. TLS and three native Ganesh/YUV
+cycles also passed. In the user's actual YouTube GUI trial, load and choppy
+playback persisted; these source changes alone did not meet the performance
+goal.
+
+Further changes decouple the native decode worker from an empty-display-queue
+requirement while retaining the three-frame bound. Playback keeps the newest
+due output and future frames; paused preview and acquired leases are preserved.
+Audio receives low-water priority and otherwise shares decode work fairly.
+Twenty-five tests against the real codec dependency and an independently
+encoded fMP4 fixture passed. The real supplied YouTube URL subsequently played
+with native `/dev/video0` NV12 output, but presentation still fell behind.
+
+WebKit `d27f72c8` uses linked AArch64 assembly LLInt with C-loop and
+JIT/DFG/FTL/Yarr JIT disabled. The producer explicitly selects C-loop OFF.
+The initial `385a97db` binary exposed a missing port diagnostic counter;
+`d27f72c8` fixes its real execution-entry instrumentation. Its release guest
+passed TLS, three Ganesh/YUV cycles, the two-image DOM/CSS/JS/input contract,
+and the full HTTP fixture including real call/arity/exception/Promise/timer/
+DOM/typed-array/allocation-root checks, infinite-script interruption, and owner
+shutdown. The ELF has only the expected dynamic-loader imports and weak
+`environ`.
+
+The same revision loaded the supplied YouTube watch URL, presented changing
+video pixels, reached 10.08 seconds (304 decoded, 226 dropped, 75 presented),
+and completed native owner shutdown. These are diagnostic readback results,
+not normal GUI FPS; performance remains inadequate. An actual `LINE_LIST`
+graphics-pipeline rejection also appeared and is being implemented in SGFX.
+
+SGFX `e4240625` changes Vulkan fence waits from 50-microsecond sleep polling to
+the existing completion condition variable. It preserves selected-fence
+all/any predicates, immediate/finite/infinite timeout behavior, and GPU
+completion synchronization; completion, acquire, failure, loss and destruction
+notify waiters. An independent lock-order/lost-wake audit passed, as did 104
+unit tests, eight real Metal draw/readback contracts, and native AArch64
+compilation. Its first normal rootfs build with Myrica `ddf5b427` and WebKit
+`1124361a` completed. Guest performance of this SGFX revision is pending the next normal image.
+The live validation image still contains the previous `2bd` driver.
+
+The flattened GPU page renderer still rebuilds page drawing on the CPU.
+WebKit `33dead0b` adds the retained `GraphicsLayerCoordinated` /
+`CoordinatedPlatformLayer` / `SkiaCompositingLayer` path using the same native
+Ganesh/Vulkan owner context. Native video supplies retained GPU images through
+the formal coordinated media proxy, with callbacks after successful submit.
+Actual tile-raster counters are separate from final page-image compositions.
+Native object compilation passed with the feature both ON and OFF; Myrica
+`889946de` selects ON for Vulkan through its ordinary producer and normal
+bundle. Full release compilation/link passed, including the teardown and
+submit-retry fixes. The callback regression remains above the standalone
+Skia/Vulkan library and uses the real GPU image/buffer implementation.
+Actual guest tile/video regression is pending the updated normal image.
+
+SGFX `125279dd` additionally supports one-pixel LINE_LIST and LINE_STRIP from
+Vulkan through IR to real native VirGL primitive tokens 1/3. Existing IR tags
+0/1/2 are unchanged; the new topologies use 3/4. Core 27, native VirGL 97, and
+Vulkan 104 release unit tests passed. Actual Metal readback checked all 64 RGBA
+pixels for nonindexed/indexed line lists and a nonindexed strip; indexed strips
+remain explicitly rejected on the WGPU adapter to preserve restart semantics.
+Native AArch64 release checking passed. The normal SGFX producer and ICD pins
+select this revision; real guest YouTube verification is next.
+
+The normal release image with Myrica `889946de` / WebKit `33dead0b` /
+ScarletUI main `fcea172b` / SGFX `125279dd` booted under HVF. Actual native
+GPU tests passed three device/YUV/callback-retry cycles and retained
+transform/opacity/rounded-clip/mask tests. The HTTP media suite passed all seven
+normal/MSE/seek variants. Its static-background video contract observed zero
+tile-raster delta, seven page compositions, six frame callbacks and 12,288
+changed video pixels. These functional contracts did not establish usable
+YouTube performance: the user's real page remained very heavy with a white
+video region and many missing thumbnails.
+
+The live GUI journal then revealed native decoder recreation approximately
+five times per second, with each instance mapping an 8MiB input and 16MiB output
+buffer. Myrica `142b721d` retains identical decoder configuration and queued
+samples across repeated init segments; a real fMP4 demux/ABI regression repeated
+the init 50 times without changing generation or accepted sample bytes. Actual
+recreation logs now identify session, track, generation and configure/flush/seek
+reason. Real-page diagnosis of that revision is in progress.
+
+WebKit `a169eb4e` also enables formal composited overflow scrolling, updates
+Scarlet's same-owner scroll geometry through ordinary setters, and cancels
+stale pending-tile flags for empty coverage. On the native guest the 16px cached
+scroll now has zero tile-raster delta. The old far-scroll test at 1100px also
+returned correct pixels without new raster; its prefetch boundary is being
+checked before moving the fixture genuinely outside existing coverage.
+
+The subsequent native `142b721d` / `a169eb4e` diagnostic reproduced a lower
+level video-queue failure on the user's watch page. Newly configured decoder
+sessions (generation 1, 854x480) failed with `virtio-video async RESOURCE_QUEUE
+failed`; the host reported input queued without an output resource. The guest
+then stopped in the kernel panic handler. Read-only QMP inspection and the
+matching release ELF located the allocation failure at
+`VirtioVideoDevice::complete_pending_used_descriptor` -> descriptor free-list
+growth. The free list contained 67,108,864 entries for a 256-descriptor queue;
+descriptor 0 retained NEXT with next=0. Its next growth attempted a 1 GiB
+allocation. This is a confirmed unbounded descriptor-reclamation failure,
+separate from the remaining page-rendering performance investigation.
+
+The video driver's synchronous completion ownership, timeout descriptor reuse,
+and session-slot reservation are being corrected together with bounded,
+allocation-aware descriptor reclamation. Native runtime validation of those
+changes is pending. Myrica `3b04bd7a` includes actual HTTP PNG/JPEG/WebP GPU-pixel
+checks, an uncached 10,316px scroll, and pending-coverage cancellation/restoration
+checks; native compilation passed and guest execution is pending recovery of
+the validation VM.
