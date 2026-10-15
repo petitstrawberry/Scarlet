@@ -196,6 +196,15 @@ impl<'a> VirtQueue<'a> {
     ///
     pub fn free_desc(&mut self, desc_idx: usize) {
         if desc_idx < self.desc.len() {
+            // A stale/duplicate used entry must not put the same descriptor in
+            // the pool twice. Duplicate entries can otherwise be allocated as
+            // both links of a later chain, creating a self-cycle.
+            if self.free_descriptors.contains(&desc_idx) {
+                return;
+            }
+            self.desc[desc_idx].addr = 0;
+            self.desc[desc_idx].len = 0;
+            self.desc[desc_idx].flags = 0;
             self.desc[desc_idx].next = 0;
             self.free_descriptors.push(desc_idx);
         } else {
@@ -249,8 +258,11 @@ impl<'a> VirtQueue<'a> {
     ///
     pub fn free_desc_chain(&mut self, desc_idx: usize) {
         let mut idx = desc_idx;
-        loop {
-            if idx >= self.desc.len() {
+        // A chain cannot contain more distinct descriptors than the queue.
+        // Bound traversal even if its links are malformed, and never follow
+        // stale links from a descriptor whose ownership already returned.
+        for _ in 0..self.desc.len() {
+            if idx >= self.desc.len() || self.free_descriptors.contains(&idx) {
                 break;
             }
             let next = self.desc[idx].next;
@@ -783,6 +795,70 @@ mod tests {
         // Free the chain of descriptors
         virtqueue.free_desc_chain(desc_idx);
         assert_eq!(virtqueue.free_descriptors.len(), 2);
+    }
+
+    #[test_case]
+    fn duplicate_descriptor_returns_do_not_duplicate_allocations() {
+        let mut queue = VirtQueue::new(4);
+        queue.init();
+        let head = queue.alloc_desc_chain(2).unwrap();
+        let tail = queue.desc[head].next as usize;
+        queue.free_desc_chain(head);
+        queue.free_desc_chain(head);
+        queue.free_desc(tail);
+        assert_eq!(queue.free_descriptors.len(), 4);
+        for index in [head, tail] {
+            assert_eq!(queue.desc[index].addr, 0);
+            assert_eq!(queue.desc[index].len, 0);
+            assert_eq!(queue.desc[index].flags, 0);
+            assert_eq!(queue.desc[index].next, 0);
+        }
+        let mut allocated = [false; 4];
+        while let Some(index) = queue.alloc_desc() {
+            assert!(!allocated[index], "descriptor allocated twice");
+            allocated[index] = true;
+        }
+        assert!(allocated.iter().all(|allocated| *allocated));
+    }
+
+    #[test_case]
+    fn descriptor_zero_self_cycle_cannot_grow_the_free_list() {
+        let mut queue = VirtQueue::new(1);
+        queue.init();
+        assert_eq!(queue.alloc_desc(), Some(0));
+        // This is the descriptor shape observed in the video OOM panic.
+        queue.desc[0].flags = DescriptorFlag::Next as u16;
+        queue.desc[0].next = 0;
+        queue.free_desc_chain(0);
+        queue.free_desc_chain(0);
+        assert_eq!(queue.free_descriptors.as_slice(), &[0]);
+        assert_eq!(queue.desc[0].flags, 0);
+        assert_eq!(queue.alloc_desc(), Some(0));
+        assert_eq!(queue.alloc_desc(), None);
+    }
+
+    #[test_case]
+    fn cyclic_and_out_of_range_chains_retire_only_owned_descriptors() {
+        let mut queue = VirtQueue::new(3);
+        queue.init();
+        let head = queue.alloc_desc_chain(2).unwrap();
+        let tail = queue.desc[head].next as usize;
+        queue.desc[tail].flags = DescriptorFlag::Next as u16;
+        queue.desc[tail].next = head as u16;
+        queue.free_desc_chain(head);
+        assert_eq!(queue.free_descriptors.len(), 3);
+        let head = queue.alloc_desc().unwrap();
+        queue.desc[head].flags = DescriptorFlag::Next as u16;
+        queue.desc[head].next = u16::MAX;
+        queue.free_desc_chain(head);
+        queue.free_desc_chain(usize::MAX);
+        assert_eq!(queue.free_descriptors.len(), 3);
+        let mut allocated = [false; 3];
+        while let Some(index) = queue.alloc_desc() {
+            assert!(!allocated[index]);
+            allocated[index] = true;
+        }
+        assert!(allocated.iter().all(|allocated| *allocated));
     }
 
     #[test_case]
