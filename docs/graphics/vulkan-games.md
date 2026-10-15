@@ -1076,3 +1076,129 @@ physical x=2040 was decoded red, but x=2048 was background, although the
 2496px-wide video fit the GPU's 4096px limit. WebCore's filter surface was
 clamped to half that limit. That correction and subsequent JIT/painting
 parallelization are being integrated separately from this validated disk.
+
+The JIT integration now uses WebKit's existing concurrent compiler worklist
+and DFG tier. DFG also requires Yarr JIT in this upstream revision; the port's
+forced Yarr-OFF setting was corrected in `b4704309`. FTL and WebAssembly stay
+disabled. The normal producer completed its rootfs build with these settings.
+Native standalone tests link only the new JSC/WTF/bmalloc, its 52 JIT objects,
+ICU and the ordinary runtime, with unresolved symbols treated as errors; they
+do not pull WebCore or Skia. No SDK or dedicated linker changes were needed.
+
+WebKit `6fd0e8f5` retires native GC thread records under the existing global
+suspend lock after ThreadGroup removal. The real native lifecycle test passed
+1024 thread create/join/exit cycles, 64 full collections with a stack-only live
+JS object, finalization after release, and ESRCH for exited threads. Actual
+suspend/resume totals were 202/202 and the process exited normally.
+
+The final JSC contract source is `f2246fe9`. The same native ELF passed once
+with `JSC_useDFGJIT=false` and `JSC_useRegExpJIT=false`, then with both true.
+Both runs passed type/overflow/prototype/exception semantics, actual compiled
+tier checks before and after Full GC, interruption of an infinite compiled
+loop, and three VM teardown cycles, followed by normal process exit. Tier
+proof uses `$vm.baselineJITTrue()`/`$vm.dfgTrue()` only in this isolated test
+process; compilation-count sentinels and lookbehind syntax are not treated as
+execution-path evidence. Production pages gain no restricted test globals.
+
+The new JIT engine also passed the strict native compositor-video fixture:
+unchanged static page tiles during playback, 2496px-wide DPR2 reparenting,
+theater scroll/return, inline restore, paused reparenting and resume. The
+owner-join and post-shutdown revocation checks now complete normally. With
+the tile worker integration `2b98e47a`, the HTTP image/CSS/input/storage/Blob/
+iframe/frameset/view-transition/JavaScript contracts and the same video
+transitions passed, followed by normal owner join and process exit.
+
+`NumberOfCores.cpp` previously lacked the Scarlet sysconf branch and selected
+its one-core fallback. WebKit `fd0f814c` connects the existing
+`sysconf(_SC_NPROCESSORS_ONLN)` implementation; no SDK change is involved.
+The actual patched WTF object in a strict native executable reported
+`sysconf=4 wtf=4 cached=4 pass=1` on the four-vCPU HVF guest without a CPU-count
+environment override. This lets WebKit size its existing JIT/GC/painting
+worker pools from the real CPU count.
+
+Myrica `eee2f7f3` adds a deterministic native painting-worker contract. Fresh
+1-, 2- and 4-worker processes each passed expected pixels for gradients,
+PNG/JPEG/WebP, rounded clipping, Japanese text, accelerated-requested Canvas
+images and patterns, followed by unchanged settled output and normal teardown.
+All three produced the identical complete 1600x1200 RGBA FNV-1a hash
+`fc218bc62af48a86`, with seven actual tile paints (2,189,568 tile pixels).
+These runs used the normal WebKit `41d9bcd7` engine closure. Canvas output is
+verified; the internal owner-replay fallback branch is not directly observed
+by this Web API fixture.
+
+The complete native GPU probe also passed with the `41d9bcd7` engine: 2496px
+DPR2 filter input crosses the former 2048px cutoff; multiple shadows/blur and
+ancestor clipping retain their expected pixels; a source more than 10,000
+physical pixels away still contributes its reverse-offset shadow. Pending
+cover transitions become `needs_paint=0`/EMPTY while hidden, then paint exposed
+tiles on return. Pending GPU work drains during real owner destruction.
+Subsequent filter-range review corrections cover checked numeric conversion,
+Skia's exact 3-sigma blur support and animation coverage semantics; their final
+integration is tracked separately below.
+
+The completed filter correction is `8d990e7c`: finite coordinates are ranked
+before balanced union through WebCore's existing Region implementation, then
+restored with outward rounding. This keeps disconnected input islands and
+L-shaped gaps while removing artificial overlapping-rectangle growth. Real
+production helpers linked with Region/IntRect/FastMalloc passed UBSan for
+15-stage horizontal, diagonal and mixed-blur shadows, huge coordinates and
+fractional bounds. Independent source review passed. A genuinely complex
+staircase still has many real components; this does not promise a constant
+cost for arbitrary filter geometry.
+
+A normal GUI run of Myrica `037db3e6` (WebKit `fd0f814c`) then exposed a
+remaining steady-playback bottleneck at 2196x1282: 720p video decoded about
+30 frames/s but presented about 11-15 frames/s. Owner RunLoop callbacks used
+about 0.5-0.6 seconds per second, while page recording and submission were
+much smaller. GPU completion timings include owner observation delay and are
+not pure GPU execution times. The ordinary shared-GPU GUI path performed no
+diagnostic framebuffer readback.
+
+WebKit's standard accelerated Canvas preference had not been enabled by the
+embedder. A page drawing GPU video into an unaccelerated 2D Canvas enters
+GraphicsContextSkia's synchronous makeRasterImage path. `442374be` connects
+the existing preference; explicit willReadFrequently and the standard area
+threshold remain. `0e91a1a2` adds opt-in, one-second media poll phase totals;
+`2774af1e` also reports successful GPU Canvas allocation once when profiling
+is enabled, without a snapshot or extra GPU operation. These diagnostics
+are disabled by default. Native compilation passed; real GUI comparison and
+GPU-Canvas regression results follow below.
+
+Fresh normal-GUI profiling reproduced the steady upload stall with the GPU
+frontend active. MapMemory's actual metadata service used under 1ms per
+one-second window, while roughly 0.6s was spent queued behind prior device
+queue work. The normal Skia YUVA path is already Budgeted::kYes, has a scratch
+key and no immutable-bitmap unique key; extra texture pooling is unnecessary.
+
+`ff589ced` corrects the custom Vulkan allocator's persistent-mapping contract.
+Skia requests its staging allocations mapped from creation until destruction,
+but the allocator previously unmapped them on every staging-buffer return.
+It now retains those mappings during reuse and performs the real unmap before
+final free, including failed-map cleanup. HostCoherent memory is required and
+the ICD snapshots current bytes while mapped. Native compilation and source
+review passed. No SDK, new pool, timer or frame-rate changes were needed.
+
+The normal release disk regenerated at 20:34 JST uses Myrica `192e292b`,
+WebKit `ff589ced`, SGFX `696f409d` and ScarletUI main `bf024ea7` (remote main
+rechecked at 20:24 JST). Its installed GPU probe passed all eight NV12/I420
+color-space variants across changing frames, immutable GPU leases, async
+completion, Retina filter bounds, far-source shadows, hidden-cover return and
+pending-work destruction. Myrica SHA256 is
+`f18752d62a692fa38473d65617db62eaafc8b95506e8848b7ea272b5768f3ef8`;
+the installed GPU probe is
+`b1d082c7166580230943cae7c6fda2d365d3672e8735fd6cf9107f9cda89ec3e`.
+
+With the installed `ff589ced` engine, real 256x256 accelerated Canvas creation
+reported `surface_gpu=1`. Fresh native painting tests with 1, 2 and 4 CPU
+recording workers each passed the expected colour, Japanese ink, opaque pixel,
+image, Canvas pattern and settled-idle checks. All three complete 1600x1200
+Retina frames retained FNV-1a `fc218bc62af48a86`, followed by normal owner join.
+
+In normal GUI playback, persistent mapping removed steady MapMemory/UnmapMemory
+requests and reduced YUVA upload time from roughly 600ms to 2-3ms per second.
+Some 720p intervals presented 27-28 frames/s, but other intervals still fell
+to 9 frames/s while queue worker service approached 900ms per second. These
+variable live-page results do not establish sustained playback performance.
+Opt-in ICD phase diagnostics are being used to separate command resolution,
+backend submission and readback; later tests also have another independently
+launched GUI browser present and are not comparable throughput measurements.
