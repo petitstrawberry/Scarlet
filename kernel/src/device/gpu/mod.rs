@@ -53,6 +53,11 @@ pub use abi::{
     GPU_COMPLETION_FAILURE_NONE, GPU_COMPLETION_PENDING, GPU_COMPLETION_QUERY, GpuCompletionInfo,
 };
 pub use abi::{
+    GPU_CONTEXT_READBACK_IMAGE, GPU_CONTEXT_UPLOAD_IMAGE, GPU_IMAGE_FORMAT_R8_UNORM,
+    GPU_IMAGE_FORMAT_RG8_UNORM, GpuContextReadbackImage, GpuContextUploadImage,
+    image_format_bytes_per_texel,
+};
+pub use abi::{
     GPU_CREATE_MIP_IMAGE, GPU_IMAGE_QUERY_MIP_LEVELS, GpuCreateMipImage, GpuImageMipLevels,
 };
 pub use abi::{
@@ -75,7 +80,10 @@ pub use backend::{
     GpuBackendSubmitError, GpuBufferCreateInfo, GpuDeviceInfo, GpuDeviceState, GpuImageBackingInfo,
     GpuImageCreateInfo, GpuImageUploadInfo,
 };
-pub use backend::{GPU_EXECUTION_SUPPORT_DEPTH_SAMPLING, GPU_EXECUTION_SUPPORT_TEXTURE_ARRAYS};
+pub use backend::{
+    GPU_EXECUTION_SUPPORT_DEPTH_SAMPLING, GPU_EXECUTION_SUPPORT_NATIVE_NARROW_COLOR,
+    GPU_EXECUTION_SUPPORT_TEXTURE_ARRAYS,
+};
 pub use backend::{GpuBackendCpuAccessGuard, GpuBackendEnqueueError};
 pub use completion::{
     GpuCompletion, GpuCompletionFailure, GpuCompletionSignal, GpuCompletionState,

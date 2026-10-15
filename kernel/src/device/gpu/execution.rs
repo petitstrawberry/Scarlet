@@ -426,7 +426,7 @@ impl GpuContext {
             .any(|attached| Arc::ptr_eq(&attached.backend_image, &backend_image))
     }
 
-    fn handle_upload_image_bgra(&self, arg: usize) -> Result<i32, &'static str> {
+    fn handle_upload_image(&self, arg: usize, native: bool) -> Result<i32, &'static str> {
         let mut request: GpuContextUploadImageBgra = read_user_value(arg)?;
         let reserved = request.reserved;
         let reserved2 = request.reserved2;
@@ -454,11 +454,12 @@ impl GpuContext {
             .as_gpu()
             .and_then(GpuObject::as_image)
             .ok_or("GPU image handle changed while uploading")?;
-        let layout = match super::resource::image_upload_layout(
-            &request,
-            image.query_info(),
-            image.layout(),
-        ) {
+        let validate = if native {
+            super::resource::image_upload_native_layout
+        } else {
+            super::resource::image_upload_layout
+        };
+        let layout = match validate(&request, image.query_info(), image.layout()) {
             Ok(layout) => layout,
             Err(_) => {
                 request.result = GPU_RESULT_INVALID_ARGUMENT;
@@ -480,7 +481,7 @@ impl GpuContext {
             return Ok(0);
         }
         if image
-            .upload_bgra_from_user(source_ptr, layout, self.backend_context.as_ref())
+            .upload_from_user(source_ptr, layout, self.backend_context.as_ref())
             .is_err()
         {
             request.result = GPU_RESULT_INVALID_STATE;
@@ -539,7 +540,7 @@ impl GpuContext {
         Ok(0)
     }
 
-    fn handle_readback_image_bgra(&self, arg: usize) -> Result<i32, &'static str> {
+    fn handle_readback_image(&self, arg: usize, native: bool) -> Result<i32, &'static str> {
         let mut request: GpuContextReadbackImageBgra = read_user_value(arg)?;
         let reserved = request.reserved;
         let reserved2 = request.reserved2;
@@ -568,11 +569,12 @@ impl GpuContext {
             .as_gpu()
             .and_then(GpuObject::as_image)
             .ok_or("GPU image handle changed while reading back")?;
-        let layout = match super::resource::image_readback_layout(
-            &request,
-            image.query_info(),
-            image.layout(),
-        ) {
+        let validate = if native {
+            super::resource::image_readback_native_layout
+        } else {
+            super::resource::image_readback_layout
+        };
+        let layout = match validate(&request, image.query_info(), image.layout()) {
             Ok(layout) => layout,
             Err(_) => {
                 request.result = GPU_RESULT_INVALID_ARGUMENT;
@@ -594,7 +596,7 @@ impl GpuContext {
             return Ok(0);
         }
         if image
-            .readback_bgra_to_user(destination_ptr, layout, self.backend_context.as_ref())
+            .readback_to_user(destination_ptr, layout, self.backend_context.as_ref())
             .is_err()
         {
             request.result = GPU_RESULT_INVALID_STATE;
@@ -613,11 +615,13 @@ impl ControlOps for GpuContext {
             GPU_CONTEXT_DETACH_IMAGE => self.handle_detach_image(arg),
             super::GPU_CONTEXT_ATTACH_BUFFER => self.handle_attach_buffer(arg),
             GPU_CONTEXT_DETACH_BUFFER => self.handle_detach_buffer(arg),
-            GPU_CONTEXT_UPLOAD_IMAGE_BGRA => self.handle_upload_image_bgra(arg),
+            GPU_CONTEXT_UPLOAD_IMAGE_BGRA => self.handle_upload_image(arg, false),
+            super::GPU_CONTEXT_UPLOAD_IMAGE => self.handle_upload_image(arg, true),
             GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA => {
                 self.handle_transfer_imported_image_bgra(arg)
             }
-            GPU_CONTEXT_READBACK_IMAGE_BGRA => self.handle_readback_image_bgra(arg),
+            GPU_CONTEXT_READBACK_IMAGE_BGRA => self.handle_readback_image(arg, false),
+            super::GPU_CONTEXT_READBACK_IMAGE => self.handle_readback_image(arg, true),
             _ => Err("Unsupported GPU context control command"),
         }
     }

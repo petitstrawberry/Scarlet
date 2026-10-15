@@ -36,6 +36,8 @@ pub const GPU_EXECUTION_SUPPORT_IMAGE_MIPS: u32 = 1 << 8;
 pub const GPU_EXECUTION_SUPPORT_TEXTURE_ARRAYS: u32 = 1 << 9;
 /// Depth textures can also be bound for shader sampling.
 pub const GPU_EXECUTION_SUPPORT_DEPTH_SAMPLING: u32 = 1 << 10;
+/// Native R8/RG8 color storage, sampling, rendering, mip/array allocation and typed transfers.
+pub const GPU_EXECUTION_SUPPORT_NATIVE_NARROW_COLOR: u32 = 1 << 11;
 
 /// Stable state of a GPU device.
 #[repr(u32)]
@@ -431,6 +433,17 @@ impl GpuBackendImageLayout {
         Self::linear_32bpp(create, row_pitch, 1)
     }
 
+    /// Build a tight single-plane layout using the immutable format's texel size.
+    pub fn tight_uncompressed(create: GpuImageCreateInfo) -> Result<Self, &'static str> {
+        let bytes = super::image_format_bytes_per_texel(create.format)
+            .ok_or("GPU image format has no single-plane texel size")?;
+        let pitch = create
+            .width
+            .checked_mul(bytes)
+            .ok_or("GPU image row pitch overflows")?;
+        Self::linear_uncompressed(create, pitch, 1, bytes)
+    }
+
     /// Build a one-plane linear 32-bit layout with backend-selected pitch.
     ///
     /// # Arguments
@@ -447,9 +460,18 @@ impl GpuBackendImageLayout {
         row_pitch: u32,
         alignment: u64,
     ) -> Result<Self, &'static str> {
+        Self::linear_uncompressed(create, row_pitch, alignment, 4)
+    }
+
+    fn linear_uncompressed(
+        create: GpuImageCreateInfo,
+        row_pitch: u32,
+        alignment: u64,
+        bytes_per_texel: u32,
+    ) -> Result<Self, &'static str> {
         let row_bytes = create
             .width
-            .checked_mul(4)
+            .checked_mul(bytes_per_texel)
             .ok_or("GPU image row size overflows")?;
         if create.width == 0
             || create.height == 0
@@ -472,7 +494,7 @@ impl GpuBackendImageLayout {
             array_pitch,
             block_width: 1,
             block_height: 1,
-            bytes_per_block: 4,
+            bytes_per_block: bytes_per_texel as u16,
         };
         Ok(Self {
             modifier: GPU_IMAGE_MODIFIER_LINEAR,
@@ -888,6 +910,30 @@ pub trait GpuBackendContext: Send + Sync {
         _upload: GpuImageUploadInfo,
     ) -> Result<(), &'static str> {
         Err("GPU backend context does not support image uploads")
+    }
+
+    /// Upload native single-plane color texels without expanding their channels.
+    fn upload_image(
+        &self,
+        image: &dyn GpuBackendImage,
+        upload: GpuImageUploadInfo,
+    ) -> Result<(), &'static str> {
+        if image.query_info().format != super::GPU_IMAGE_FORMAT_BGRA8_UNORM {
+            return Err("GPU backend context does not support native color image uploads");
+        }
+        self.upload_image_bgra(image, upload)
+    }
+
+    /// Read native single-plane color texels without converting their channels.
+    fn readback_image(
+        &self,
+        image: &dyn GpuBackendImage,
+        readback: GpuImageUploadInfo,
+    ) -> Result<(), &'static str> {
+        if image.query_info().format != super::GPU_IMAGE_FORMAT_BGRA8_UNORM {
+            return Err("GPU backend context does not support native color image readback");
+        }
+        self.readback_image_bgra(image, readback)
     }
 
     /// Transfer a rectangle from fixed imported image backing.

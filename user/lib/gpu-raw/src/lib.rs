@@ -51,6 +51,10 @@ impl File {
 
 /// GPU control command constants.
 pub mod commands {
+    /// Upload an uncompressed color image in its immutable native format.
+    pub const GPU_CONTEXT_UPLOAD_IMAGE: u32 = 0x4772;
+    /// Read an uncompressed color image in its immutable native format.
+    pub const GPU_CONTEXT_READBACK_IMAGE: u32 = 0x4773;
     /// Query generic GPU and backend information.
     pub const GPU_QUERY_INFO: u32 = 0x4750;
     /// Create a kernel-owned GPU buffer child handle.
@@ -145,6 +149,21 @@ pub const GPU_BUFFER_FLAGS_VALID: u32 = GPU_BUFFER_FLAG_CPU_VISIBLE;
 pub const GPU_IMAGE_FORMAT_BGRA8_UNORM: u32 = 1;
 /// Generic 32-bit floating-point depth image format.
 pub const GPU_IMAGE_FORMAT_DEPTH32_FLOAT: u32 = 2;
+/// Generic one-channel normalized unsigned 8-bit image format.
+pub const GPU_IMAGE_FORMAT_R8_UNORM: u32 = 4;
+/// Generic two-channel normalized unsigned 8-bit image format.
+pub const GPU_IMAGE_FORMAT_RG8_UNORM: u32 = 5;
+
+/// Byte size of one uncompressed single-plane texel, without conversion.
+pub const fn image_format_bytes_per_texel(format: u32) -> Option<u32> {
+    match format {
+        GPU_IMAGE_FORMAT_BGRA8_UNORM | GPU_IMAGE_FORMAT_DEPTH32_FLOAT => Some(4),
+        GPU_IMAGE_FORMAT_R8_UNORM => Some(1),
+        GPU_IMAGE_FORMAT_RG8_UNORM => Some(2),
+        _ => None,
+    }
+}
+
 /// Maximum number of image planes returned by the generic layout ABI.
 pub const GPU_IMAGE_MAX_PLANES: usize = 4;
 /// Modifier value for an uncompressed linear image.
@@ -208,6 +227,8 @@ pub const GPU_EXECUTION_SUPPORT_IMAGE_MIPS: u32 = 1 << 8;
 pub const GPU_EXECUTION_SUPPORT_TEXTURE_ARRAYS: u32 = 1 << 9;
 /// Depth textures can also be sampled.
 pub const GPU_EXECUTION_SUPPORT_DEPTH_SAMPLING: u32 = 1 << 10;
+/// Native R8/RG8 color storage, sampling, rendering, mip/array allocation and typed transfers.
+pub const GPU_EXECUTION_SUPPORT_NATIVE_NARROW_COLOR: u32 = 1 << 11;
 /// Allocate six square faces as a cube texture.
 pub const GPU_TEXTURE_CREATE_CUBE: u32 = 1;
 
@@ -902,7 +923,31 @@ impl GpuContextUploadImageBgra {
         source_stride: u32,
         rect: GpuImageBgraRect,
     ) -> HandleResult<Self> {
-        validate_bgra_upload_pixels(pixels, source_stride, rect)?;
+        Self::new_for_format(
+            image_handle,
+            pixels,
+            source_stride,
+            rect,
+            GPU_IMAGE_FORMAT_BGRA8_UNORM,
+        )
+    }
+
+    /// Build a native uncompressed color upload without channel conversion.
+    /// `format` must match the immutable image capability supplied to the call.
+    pub fn new_for_format(
+        image_handle: u32,
+        pixels: &[u8],
+        source_stride: u32,
+        rect: GpuImageRect,
+        format: u32,
+    ) -> HandleResult<Self> {
+        let bytes = match format {
+            GPU_IMAGE_FORMAT_BGRA8_UNORM => 4,
+            GPU_IMAGE_FORMAT_R8_UNORM => 1,
+            GPU_IMAGE_FORMAT_RG8_UNORM => 2,
+            _ => return Err(HandleError::InvalidParameter),
+        };
+        validate_upload_pixels(pixels, source_stride, rect, bytes)?;
         let source_length =
             u64::try_from(pixels.len()).map_err(|_| HandleError::InvalidParameter)?;
         Ok(Self {
@@ -2122,6 +2167,33 @@ impl GpuContext {
         result_to_handle_error(request.result)
     }
 
+    /// Upload native R8/RG8/BGRA texels without channel conversion.
+    pub fn upload_image(
+        &self,
+        image: &GpuImage,
+        pixels: &[u8],
+        source_stride: u32,
+        rect: GpuImageRect,
+    ) -> HandleResult<()> {
+        let image_handle =
+            u32::try_from(image.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
+        let mut request = GpuContextUploadImage::new_for_format(
+            image_handle,
+            pixels,
+            source_stride,
+            rect,
+            image.query()?.format,
+        )?;
+        // SAFETY: request is an exclusive ABI record and its nested pixels pointer refers to the borrowed input slice until return.
+        unsafe {
+            self.handle.control(
+                commands::GPU_CONTEXT_UPLOAD_IMAGE,
+                &mut request as *mut _ as usize,
+            )
+        }?;
+        result_to_handle_error(request.result)
+    }
+
     /// Transfer one rectangle from an imported image's fixed SharedMemory backing.
     ///
     /// # Arguments
@@ -2183,6 +2255,28 @@ impl GpuContext {
         unsafe {
             self.handle.control(
                 commands::GPU_CONTEXT_READBACK_IMAGE_BGRA,
+                &mut request as *mut _ as usize,
+            )
+        }?;
+        result_to_handle_error(request.result)
+    }
+
+    /// Read native R8/RG8/BGRA texels without channel conversion.
+    pub fn readback_image(
+        &self,
+        image: &GpuImage,
+        destination: &mut [u8],
+        destination_stride: u32,
+        rect: GpuImageRect,
+    ) -> HandleResult<()> {
+        let image_handle =
+            u32::try_from(image.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
+        let mut request =
+            GpuContextReadbackImage::new(image_handle, destination, destination_stride, rect)?;
+        // SAFETY: request and the referenced destination slice are disjoint exclusive output storage valid until readback returns.
+        unsafe {
+            self.handle.control(
+                commands::GPU_CONTEXT_READBACK_IMAGE,
                 &mut request as *mut _ as usize,
             )
         }?;
@@ -2714,17 +2808,18 @@ fn result_to_handle_error(result: u32) -> HandleResult<()> {
     }
 }
 
-fn validate_bgra_upload_pixels(
+fn validate_upload_pixels(
     pixels: &[u8],
     source_stride: u32,
-    rect: GpuImageBgraRect,
+    rect: GpuImageRect,
+    bytes_per_texel: u32,
 ) -> HandleResult<()> {
     if rect.width == 0 || rect.height == 0 {
         return Err(HandleError::InvalidParameter);
     }
     let row_bytes = rect
         .width
-        .checked_mul(4)
+        .checked_mul(bytes_per_texel)
         .ok_or(HandleError::InvalidParameter)?;
     if source_stride < row_bytes {
         return Err(HandleError::InvalidParameter);
@@ -2769,3 +2864,102 @@ const _: [(); 24] = [(); core::mem::size_of::<GpuContextDetachBuffer>()];
 const _: [(); 64] = [(); core::mem::size_of::<GpuContextUploadImageBgra>()];
 const _: [(); 40] = [(); core::mem::size_of::<GpuContextTransferImportedImageBgra>()];
 const _: [(); 64] = [(); core::mem::size_of::<GpuContextReadbackImageBgra>()];
+
+/// Format-aware single-plane upload record for `GPU_CONTEXT_UPLOAD_IMAGE`.
+/// The image capability determines texel format; no pixel conversion occurs.
+pub type GpuContextUploadImage = GpuContextUploadImageBgra;
+/// Format-aware single-plane readback record for `GPU_CONTEXT_READBACK_IMAGE`.
+pub type GpuContextReadbackImage = GpuContextReadbackImageBgra;
+
+/// Format-independent rectangle used by native single-plane image transfers.
+pub type GpuImageRect = GpuImageBgraRect;
+
+#[cfg(test)]
+mod native_color_tests {
+    use super::*;
+    #[test]
+    fn native_upload_records_accept_exact_odd_strides_without_bgra_expansion() {
+        assert_eq!(
+            (
+                GPU_IMAGE_FORMAT_R8_UNORM,
+                GPU_IMAGE_FORMAT_RG8_UNORM,
+                GPU_IMAGE_FORMAT_NV12
+            ),
+            (4, 5, 3)
+        );
+        assert_eq!(GPU_EXECUTION_SUPPORT_NATIVE_NARROW_COLOR, 1 << 11);
+        assert_eq!(
+            (
+                commands::GPU_CONTEXT_UPLOAD_IMAGE,
+                commands::GPU_CONTEXT_READBACK_IMAGE
+            ),
+            (0x4772, 0x4773)
+        );
+        assert_eq!(core::mem::size_of::<GpuContextUploadImage>(), 64);
+        assert_eq!(core::mem::size_of::<GpuContextReadbackImage>(), 64);
+        assert_eq!(image_format_bytes_per_texel(GPU_IMAGE_FORMAT_NV12), None);
+        for (format, bytes) in [
+            (GPU_IMAGE_FORMAT_R8_UNORM, 1usize),
+            (GPU_IMAGE_FORMAT_RG8_UNORM, 2),
+            (GPU_IMAGE_FORMAT_BGRA8_UNORM, 4),
+        ] {
+            let rect = GpuImageRect::new(2, 1, 3, 2);
+            let stride = 3 * bytes + 1;
+            let pixels = [0u8; 32];
+            let required = stride + 3 * bytes;
+            let record = GpuContextUploadImage::new_for_format(
+                7,
+                &pixels[..required],
+                stride as u32,
+                rect,
+                format,
+            )
+            .unwrap();
+            assert_eq!(record.source_length, required as u64);
+            assert_eq!(
+                (
+                    record.source_stride,
+                    record.dst_x,
+                    record.dst_y,
+                    record.width,
+                    record.height
+                ),
+                (stride as u32, 2, 1, 3, 2)
+            );
+            assert!(
+                GpuContextUploadImage::new_for_format(
+                    7,
+                    &pixels[..required - 1],
+                    stride as u32,
+                    rect,
+                    format
+                )
+                .is_err()
+            );
+            assert!(
+                GpuContextUploadImage::new_for_format(
+                    7,
+                    &pixels,
+                    (3 * bytes - 1) as u32,
+                    rect,
+                    format
+                )
+                .is_err()
+            );
+            assert_eq!(
+                GpuContextUploadImageBgra::new(7, &pixels[..required], stride as u32, rect).is_ok(),
+                bytes == 4
+            );
+        }
+        assert!(
+            GpuContextUploadImage::new_for_format(
+                7,
+                &[0; 32],
+                8,
+                GpuImageRect::new(0, 0, 2, 2),
+                GPU_IMAGE_FORMAT_NV12
+            )
+            .is_err()
+        );
+    }
+}

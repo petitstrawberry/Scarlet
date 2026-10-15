@@ -196,7 +196,7 @@ fn upload_retires_before_real_usercopy_and_retains_guard_through_transfer() {
     let request = GpuContextUploadImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
     let layout = image_upload_layout(&request, image.query_info(), image.layout()).unwrap();
     image
-        .upload_bgra_for_task(&task, address, layout, backend.as_ref())
+        .upload_for_task(&task, address, layout, backend.as_ref())
         .unwrap();
     assert_eq!(
         *backend.events.lock(),
@@ -211,7 +211,7 @@ fn rejected_upload_leaves_real_backing_unchanged() {
     let request = GpuContextUploadImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
     let layout = image_upload_layout(&request, image.query_info(), image.layout()).unwrap();
     assert_eq!(
-        image.upload_bgra_for_task(&task, address, layout, backend.as_ref()),
+        image.upload_for_task(&task, address, layout, backend.as_ref()),
         Err("retirement failed")
     );
     assert_eq!(backend.pixels(), [0x11; 16]);
@@ -226,7 +226,7 @@ fn usercopy_failure_releases_reservation_without_backend_transfer() {
     let layout = image_upload_layout(&request, image.query_info(), image.layout()).unwrap();
     assert!(
         image
-            .upload_bgra_for_task(&task, 0, layout, backend.as_ref())
+            .upload_for_task(&task, 0, layout, backend.as_ref())
             .is_err()
     );
     assert_eq!(*backend.events.lock(), [Event::Retired, Event::Released]);
@@ -239,7 +239,7 @@ fn failed_backend_transfer_releases_reservation() {
     let request = GpuContextUploadImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
     let layout = image_upload_layout(&request, image.query_info(), image.layout()).unwrap();
     assert_eq!(
-        image.upload_bgra_for_task(&task, address, layout, backend.as_ref()),
+        image.upload_for_task(&task, address, layout, backend.as_ref()),
         Err("upload transfer failed")
     );
     assert_eq!(
@@ -255,7 +255,7 @@ fn readback_copies_before_reservation_release_admits_later_gpu_write() {
     let request = GpuContextReadbackImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
     let layout = image_readback_layout(&request, image.query_info(), image.layout()).unwrap();
     image
-        .readback_bgra_for_task(&task, address, layout, backend.as_ref())
+        .readback_for_task(&task, address, layout, backend.as_ref())
         .unwrap();
     let mut pixels = [0; 16];
     copy_from_user(&task, address, &mut pixels).unwrap();
@@ -273,7 +273,7 @@ fn rejected_readback_preserves_backing_and_user_destination() {
     let request = GpuContextReadbackImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
     let layout = image_readback_layout(&request, image.query_info(), image.layout()).unwrap();
     assert_eq!(
-        image.readback_bgra_for_task(&task, address, layout, backend.as_ref()),
+        image.readback_for_task(&task, address, layout, backend.as_ref()),
         Err("retirement failed")
     );
     let mut pixels = [0; 16];

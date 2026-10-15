@@ -117,11 +117,13 @@ pub trait GpuObject: Send + Sync {
 /// `Depth32Float` image used as a depth attachment or sampled texture.
 pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
     (create.format == GPU_IMAGE_FORMAT_BGRA8_UNORM
-        || create.format == super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT)
+        || create.format == super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT
+        || create.format == super::GPU_IMAGE_FORMAT_R8_UNORM
+        || create.format == super::GPU_IMAGE_FORMAT_RG8_UNORM)
         && create.usage != 0
         && create.usage & !GPU_IMAGE_USAGE_VALID == 0
         && (create.usage & super::GPU_IMAGE_USAGE_DEPTH_COMPATIBLE == 0
-            || (create.format == GPU_IMAGE_FORMAT_BGRA8_UNORM
+            || (create.format != super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT
                 && create.usage & super::GPU_IMAGE_USAGE_RENDER_TARGET != 0))
         && create.width != 0
         && create.height != 0
@@ -129,7 +131,15 @@ pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
         && create.array_layers <= 2048
         && (!create.cube || (create.array_layers == 6 && create.width == create.height))
         && (create.array_layers == 1 || create.usage & super::GPU_IMAGE_USAGE_PRESENTABLE == 0)
-        && create.width <= u32::MAX / 4
+        && (create.format == GPU_IMAGE_FORMAT_BGRA8_UNORM
+            || create.usage & super::GPU_IMAGE_USAGE_PRESENTABLE == 0)
+        && create.width
+            <= u32::MAX
+                / match create.format {
+                    super::GPU_IMAGE_FORMAT_R8_UNORM => 1,
+                    super::GPU_IMAGE_FORMAT_RG8_UNORM => 2,
+                    _ => 4,
+                }
         && create.mip_levels != 0
         && create.mip_levels
             <= 32
@@ -335,11 +345,28 @@ pub(crate) fn image_upload_layout(
     image: super::GpuBackendImageInfo,
     layout: GpuBackendImageLayout,
 ) -> Result<GpuImageUploadLayout, &'static str> {
+    if image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM {
+        return Err("Legacy BGRA image upload requires BGRA8");
+    }
+    image_upload_native_layout(request, image, layout)
+}
+
+pub(crate) fn image_upload_native_layout(
+    request: &GpuContextUploadImageBgra,
+    image: super::GpuBackendImageInfo,
+    layout: GpuBackendImageLayout,
+) -> Result<GpuImageUploadLayout, &'static str> {
+    let bytes = match image.format {
+        GPU_IMAGE_FORMAT_BGRA8_UNORM => 4,
+        super::GPU_IMAGE_FORMAT_R8_UNORM => 1,
+        super::GPU_IMAGE_FORMAT_RG8_UNORM => 2,
+        _ => return Err("GPU image transfer format is unsupported"),
+    };
+
     if request.source_ptr == 0
         || request.source_length == 0
         || request.width == 0
         || request.height == 0
-        || image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM
         || image.array_layers != 1
         || image.cube
         || image.usage & GPU_IMAGE_USAGE_TRANSFER_DST == 0
@@ -348,17 +375,22 @@ pub(crate) fn image_upload_layout(
             super::GPU_IMAGE_MODIFIER_LINEAR
                 | super::GPU_IMAGE_MODIFIER_NVIDIA_BLOCK_LINEAR_16BX2_H4
         )
+        || (image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM
+            && layout.modifier != super::GPU_IMAGE_MODIFIER_LINEAR)
         || layout.plane_count != 1
     {
         return Err("GPU image upload request is invalid");
     }
     let plane = layout.planes[0];
-    if plane.block_width != 1 || plane.block_height != 1 || plane.bytes_per_block != 4 {
+    if plane.block_width != 1
+        || plane.block_height != 1
+        || u32::from(plane.bytes_per_block) != bytes
+    {
         return Err("GPU image upload layout is unsupported");
     }
     let image_row_bytes = image
         .width
-        .checked_mul(4)
+        .checked_mul(bytes)
         .ok_or("GPU image row width overflows")?;
     let image_layer_bytes = u64::from(image.height)
         .checked_sub(1)
@@ -374,7 +406,7 @@ pub(crate) fn image_upload_layout(
 
     let row_bytes = request
         .width
-        .checked_mul(4)
+        .checked_mul(bytes)
         .ok_or("GPU image upload row width overflows")?;
     if request.source_stride < row_bytes {
         return Err("GPU image upload source stride is too small");
@@ -422,7 +454,7 @@ pub(crate) fn image_upload_layout(
         .and_then(|offset| {
             usize::try_from(request.dst_x)
                 .ok()
-                .and_then(|x| x.checked_mul(4))
+                .and_then(|x| x.checked_mul(bytes as usize))
                 .and_then(|x_offset| offset.checked_add(x_offset))
         })
         .and_then(|offset| usize::try_from(plane.offset).ok()?.checked_add(offset))
@@ -495,11 +527,28 @@ pub(crate) fn image_readback_layout(
     image: super::GpuBackendImageInfo,
     layout: GpuBackendImageLayout,
 ) -> Result<GpuImageReadbackLayout, &'static str> {
+    if image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM {
+        return Err("Legacy BGRA image readback requires BGRA8");
+    }
+    image_readback_native_layout(request, image, layout)
+}
+
+pub(crate) fn image_readback_native_layout(
+    request: &GpuContextReadbackImageBgra,
+    image: super::GpuBackendImageInfo,
+    layout: GpuBackendImageLayout,
+) -> Result<GpuImageReadbackLayout, &'static str> {
+    let bytes = match image.format {
+        GPU_IMAGE_FORMAT_BGRA8_UNORM => 4,
+        super::GPU_IMAGE_FORMAT_R8_UNORM => 1,
+        super::GPU_IMAGE_FORMAT_RG8_UNORM => 2,
+        _ => return Err("GPU image transfer format is unsupported"),
+    };
+
     if request.destination_ptr == 0
         || request.destination_length == 0
         || request.width == 0
         || request.height == 0
-        || image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM
         || image.array_layers != 1
         || image.cube
         || image.usage & super::GPU_IMAGE_USAGE_TRANSFER_SRC == 0
@@ -508,17 +557,22 @@ pub(crate) fn image_readback_layout(
             super::GPU_IMAGE_MODIFIER_LINEAR
                 | super::GPU_IMAGE_MODIFIER_NVIDIA_BLOCK_LINEAR_16BX2_H4
         )
+        || (image.format != GPU_IMAGE_FORMAT_BGRA8_UNORM
+            && layout.modifier != super::GPU_IMAGE_MODIFIER_LINEAR)
         || layout.plane_count != 1
     {
         return Err("GPU image readback request is invalid");
     }
     let plane = layout.planes[0];
-    if plane.block_width != 1 || plane.block_height != 1 || plane.bytes_per_block != 4 {
+    if plane.block_width != 1
+        || plane.block_height != 1
+        || u32::from(plane.bytes_per_block) != bytes
+    {
         return Err("GPU image readback layout is unsupported");
     }
     let image_row_bytes = image
         .width
-        .checked_mul(4)
+        .checked_mul(bytes)
         .ok_or("GPU image readback row width overflows")?;
     let image_layer_bytes = u64::from(image.height)
         .checked_sub(1)
@@ -545,10 +599,10 @@ pub(crate) fn image_readback_layout(
     }
     let row_bytes = request
         .width
-        .checked_mul(4)
+        .checked_mul(bytes)
         .ok_or("GPU image readback row width overflows")?;
     let destination_row_end = src_x_end
-        .checked_mul(4)
+        .checked_mul(bytes)
         .ok_or("GPU image readback destination row overflows")?;
     if request.destination_stride < destination_row_end {
         return Err("GPU image readback destination stride is too small");
@@ -568,7 +622,7 @@ pub(crate) fn image_readback_layout(
         .and_then(|offset| {
             usize::try_from(request.src_x)
                 .ok()
-                .and_then(|x| x.checked_mul(4))
+                .and_then(|x| x.checked_mul(bytes as usize))
                 .and_then(|x_offset| offset.checked_add(x_offset))
         })
         .ok_or("GPU image readback destination offset overflows")?;
@@ -601,7 +655,7 @@ pub(crate) fn image_readback_layout(
         .and_then(|offset| {
             usize::try_from(request.src_x)
                 .ok()
-                .and_then(|x| x.checked_mul(4))
+                .and_then(|x| x.checked_mul(bytes as usize))
                 .and_then(|x_offset| offset.checked_add(x_offset))
         })
         .ok_or("GPU image readback source offset overflows")?;
@@ -1201,17 +1255,17 @@ impl GpuImage {
         Arc::clone(&self.backing)
     }
 
-    pub(crate) fn upload_bgra_from_user(
+    pub(crate) fn upload_from_user(
         &self,
         source_ptr: usize,
         layout: GpuImageUploadLayout,
         context: &dyn GpuBackendContext,
     ) -> Result<(), &'static str> {
         let task = crate::task::mytask().ok_or("No current task for GPU image upload")?;
-        self.upload_bgra_for_task(&task, source_ptr, layout, context)
+        self.upload_for_task(&task, source_ptr, layout, context)
     }
 
-    fn upload_bgra_for_task(
+    fn upload_for_task(
         &self,
         task: &crate::task::Task,
         source_ptr: usize,
@@ -1246,7 +1300,7 @@ impl GpuImage {
                 .ok_or("GPU image upload destination row offset overflows")?;
             backing.clean_range(destination_offset, layout.source_row_bytes)?;
         }
-        context.upload_image_bgra(self.backend_image.as_ref(), layout.transfer)
+        context.upload_image(self.backend_image.as_ref(), layout.transfer)
     }
 
     pub(crate) fn transfer_imported_bgra(
@@ -1270,17 +1324,17 @@ impl GpuImage {
         context.transfer_imported_image_bgra(self.backend_image.as_ref(), layout)
     }
 
-    pub(crate) fn readback_bgra_to_user(
+    pub(crate) fn readback_to_user(
         &self,
         destination_ptr: usize,
         layout: GpuImageReadbackLayout,
         context: &dyn GpuBackendContext,
     ) -> Result<(), &'static str> {
         let task = crate::task::mytask().ok_or("No current task for GPU image readback")?;
-        self.readback_bgra_for_task(&task, destination_ptr, layout, context)
+        self.readback_for_task(&task, destination_ptr, layout, context)
     }
 
-    fn readback_bgra_for_task(
+    fn readback_for_task(
         &self,
         task: &crate::task::Task,
         destination_ptr: usize,
@@ -1290,7 +1344,7 @@ impl GpuImage {
         let _upload_guard = self.upload_lock.lock();
         let backing = self.backing.private_backing()?;
         let _cpu_access = context.begin_image_cpu_access(self.backend_image.as_ref())?;
-        context.readback_image_bgra(self.backend_image.as_ref(), layout.transfer)?;
+        context.readback_image(self.backend_image.as_ref(), layout.transfer)?;
         for row in 0..layout.height {
             let source_offset = row
                 .checked_mul(layout.source_stride)
@@ -2028,3 +2082,90 @@ impl GpuObject for GpuTimelinePoint {
 #[cfg(test)]
 #[path = "resource/cpu_access_tests.rs"]
 mod cpu_access_tests;
+
+#[cfg(test)]
+mod native_color_tests {
+    use super::*;
+    use crate::device::gpu::*;
+
+    #[test_case]
+    fn narrow_native_strides_and_rectangles_preserve_bytes_and_legacy_bgra_rules() {
+        for (format, bytes) in [
+            (GPU_IMAGE_FORMAT_R8_UNORM, 1u32),
+            (GPU_IMAGE_FORMAT_RG8_UNORM, 2),
+            (GPU_IMAGE_FORMAT_BGRA8_UNORM, 4),
+        ] {
+            let create = GpuImageCreateInfo::new(
+                format,
+                GPU_IMAGE_USAGE_TRANSFER_SRC
+                    | GPU_IMAGE_USAGE_TRANSFER_DST
+                    | GPU_IMAGE_USAGE_RENDER_TARGET
+                    | GPU_IMAGE_USAGE_DEPTH_COMPATIBLE,
+                7,
+                5,
+            );
+            assert!(image_create_is_valid(create));
+            let layout = GpuBackendImageLayout::tight_uncompressed(create).unwrap();
+            assert_eq!(layout.planes[0].row_pitch, 7 * bytes);
+            assert_eq!(layout.total_size, u64::from(35 * bytes));
+            let image = GpuBackendImageInfo::new(create, 7, 4096);
+            let upload = GpuContextUploadImageBgra::new(
+                1,
+                1,
+                u64::from(3 * bytes + 1 + 3 * bytes),
+                3 * bytes + 1,
+                2,
+                1,
+                3,
+                2,
+            );
+            let copied = image_upload_native_layout(&upload, image, layout).unwrap();
+            assert_eq!(copied.source_row_bytes, (3 * bytes) as usize);
+            assert_eq!(copied.destination_offset, (9 * bytes) as usize);
+            assert_eq!(copied.transfer.backing_stride, 7 * bytes);
+            let mut bad = upload;
+            bad.source_length -= 1;
+            assert!(image_upload_native_layout(&bad, image, layout).is_err());
+            bad = upload;
+            bad.source_stride = 3 * bytes - 1;
+            assert!(image_upload_native_layout(&bad, image, layout).is_err());
+            bad = upload;
+            bad.dst_x = u32::MAX;
+            assert!(image_upload_native_layout(&bad, image, layout).is_err());
+            let readback = GpuContextReadbackImageBgra::new(
+                1,
+                1,
+                u64::from((7 * bytes + 1) * 2 + 5 * bytes),
+                7 * bytes + 1,
+                2,
+                1,
+                3,
+                2,
+            );
+            let copied = image_readback_native_layout(&readback, image, layout).unwrap();
+            assert_eq!(copied.source_offset, (9 * bytes) as usize);
+            assert_eq!(copied.destination_offset, (9 * bytes + 1) as usize);
+            assert_eq!(copied.destination_row_bytes, (3 * bytes) as usize);
+            let mut short = readback;
+            short.destination_length -= 1;
+            assert!(image_readback_native_layout(&short, image, layout).is_err());
+            assert_eq!(
+                image_upload_layout(&upload, image, layout).is_ok(),
+                bytes == 4
+            );
+            assert_eq!(
+                image_readback_layout(&readback, image, layout).is_ok(),
+                bytes == 4
+            );
+            let mut mismatched = layout;
+            mismatched.planes[0].bytes_per_block = if bytes == 4 { 1 } else { 4 };
+            assert!(image_upload_native_layout(&upload, image, mismatched).is_err());
+            assert!(image_readback_native_layout(&readback, image, mismatched).is_err());
+            if bytes != 4 {
+                let mut invalid = create;
+                invalid.usage |= GPU_IMAGE_USAGE_PRESENTABLE;
+                assert!(!image_create_is_valid(invalid));
+            }
+        }
+    }
+}

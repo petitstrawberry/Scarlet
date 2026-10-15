@@ -756,6 +756,7 @@ impl VirtioGpuDeviceCore {
                             | GPU_EXECUTION_SUPPORT_IMAGE_MIPS
                             | crate::device::gpu::GPU_EXECUTION_SUPPORT_TEXTURE_ARRAYS
                             | crate::device::gpu::GPU_EXECUTION_SUPPORT_DEPTH_SAMPLING
+                            | crate::device::gpu::GPU_EXECUTION_SUPPORT_NATIVE_NARROW_COLOR
                             | GPU_EXECUTION_SUPPORT_IMAGE_READBACK
                             | GPU_EXECUTION_SUPPORT_DEPTH
                             | GPU_EXECUTION_SUPPORT_QUEUE
@@ -2316,6 +2317,22 @@ impl GpuBackendContext for VirtioGpuBackendContext {
         self.transfer_image_bgra(image, upload)
     }
 
+    fn upload_image(
+        &self,
+        image: &dyn GpuBackendImage,
+        upload: GpuImageUploadInfo,
+    ) -> Result<(), &'static str> {
+        self.transfer_image_bgra(image, upload)
+    }
+
+    fn readback_image(
+        &self,
+        image: &dyn GpuBackendImage,
+        readback: GpuImageUploadInfo,
+    ) -> Result<(), &'static str> {
+        self.transfer_image_from_host_bgra(image, readback)
+    }
+
     fn transfer_imported_image_bgra(
         &self,
         image: &dyn GpuBackendImage,
@@ -2450,24 +2467,45 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
     }
 }
 
+fn virgl_image_format(format: u32) -> Result<u32, &'static str> {
+    match format {
+        GPU_IMAGE_FORMAT_BGRA8_UNORM => Ok(VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM),
+        GPU_IMAGE_FORMAT_DEPTH32_FLOAT => Ok(VIRGL_FORMAT_Z32_FLOAT),
+        crate::device::gpu::GPU_IMAGE_FORMAT_R8_UNORM => Ok(64), // VIRGL_FORMAT_R8_UNORM
+        crate::device::gpu::GPU_IMAGE_FORMAT_RG8_UNORM => Ok(65), // VIRGL_FORMAT_R8G8_UNORM
+        _ => Err("VirtIO GPU image format is unsupported"),
+    }
+}
+
+fn virgl_image_layout(
+    create: GpuImageCreateInfo,
+) -> Result<crate::device::gpu::GpuBackendImageLayout, &'static str> {
+    let mut layout = crate::device::gpu::GpuBackendImageLayout::tight_uncompressed(create)?;
+    let bytes = crate::device::gpu::image_format_bytes_per_texel(create.format)
+        .ok_or("VirtIO GPU image format is unsupported")?;
+    let mut total = 0u64;
+    for level in 0..create.mip_levels {
+        let width = (create.width >> level).max(1);
+        let height = (create.height >> level).max(1);
+        total = total
+            .checked_add(u64::from(width) * u64::from(height) * u64::from(bytes))
+            .ok_or("VirtIO GPU mip allocation overflows")?;
+    }
+    layout.total_size = total
+        .checked_mul(u64::from(create.array_layers))
+        .ok_or("VirtIO GPU array allocation overflows")?;
+    layout.planes[0].array_pitch =
+        u32::try_from(total).map_err(|_| "VirtIO GPU mip-chain stride exceeds ABI")?;
+    layout.planes[0].size = layout.total_size;
+    Ok(layout)
+}
+
 impl GpuBackend for VirtioGpuBackend {
     fn plan_image(
         &self,
         create: GpuImageCreateInfo,
     ) -> Result<crate::device::gpu::GpuBackendImageLayout, &'static str> {
-        let mut layout = crate::device::gpu::GpuBackendImageLayout::tight_32bpp(create)?;
-        let mut total = 0u64;
-        for level in 0..create.mip_levels {
-            let width = (create.width >> level).max(1);
-            let height = (create.height >> level).max(1);
-            total = total
-                .checked_add(u64::from(width) * u64::from(height) * 4)
-                .ok_or("VirtIO GPU mip allocation overflows")?;
-        }
-        layout.total_size = total
-            .checked_mul(u64::from(create.array_layers))
-            .ok_or("VirtIO GPU array allocation overflows")?;
-        Ok(layout)
+        virgl_image_layout(create)
     }
     fn query_info(&self) -> GpuBackendInfo {
         self.core.lock().gpu_backend_info()
@@ -2539,11 +2577,7 @@ impl GpuBackend for VirtioGpuBackend {
             } else {
                 PIPE_TEXTURE_2D
             },
-            format: match create.format {
-                GPU_IMAGE_FORMAT_BGRA8_UNORM => VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
-                GPU_IMAGE_FORMAT_DEPTH32_FLOAT => VIRGL_FORMAT_Z32_FLOAT,
-                _ => return Err("VirtIO GPU image format is unsupported"),
-            },
+            format: virgl_image_format(create.format)?,
             bind: virgl_image_bind(create.usage),
             width: create.width,
             height: create.height,
@@ -2714,6 +2748,41 @@ impl GraphicsDevice for VirtioGpuDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn native_color_mips_arrays_keep_their_physical_texel_size() {
+        for (format, bytes, pipe) in [
+            (crate::device::gpu::GPU_IMAGE_FORMAT_R8_UNORM, 1u64, 64),
+            (crate::device::gpu::GPU_IMAGE_FORMAT_RG8_UNORM, 2, 65),
+            (
+                GPU_IMAGE_FORMAT_BGRA8_UNORM,
+                4,
+                VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
+            ),
+        ] {
+            let mut create = GpuImageCreateInfo::new(
+                format,
+                GPU_IMAGE_USAGE_RENDER_TARGET
+                    | GPU_IMAGE_USAGE_SAMPLED
+                    | GPU_IMAGE_USAGE_TRANSFER_SRC
+                    | GPU_IMAGE_USAGE_TRANSFER_DST,
+                7,
+                5,
+            );
+            create.mip_levels = 3;
+            create.array_layers = 3;
+            let layout = virgl_image_layout(create).unwrap();
+            assert_eq!(virgl_image_format(format).unwrap(), pipe);
+            assert_eq!(layout.planes[0].bytes_per_block, bytes as u16);
+            assert_eq!(layout.planes[0].row_pitch, 7 * bytes as u32);
+            // Per layer: 7x5 + 3x2 + 1x1, then three array layers.
+            assert_eq!(layout.planes[0].array_pitch, 42 * bytes as u32);
+            assert_eq!(layout.total_size, 126 * bytes);
+            assert_eq!(layout.planes[0].size, layout.total_size);
+            assert!(layout.is_valid());
+        }
+        assert!(virgl_image_format(crate::device::gpu::GPU_IMAGE_FORMAT_NV12).is_err());
+    }
 
     #[test_case]
     fn virtio_gpu_cursor_queue_fits_qemu_limit() {

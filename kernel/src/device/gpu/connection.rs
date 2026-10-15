@@ -255,7 +255,11 @@ impl GpuConnection {
             return Ok(());
         }
         let support = self.backend.query_info().device.execution_support;
-        if (mip_levels > 1 && support & super::GPU_EXECUTION_SUPPORT_IMAGE_MIPS == 0)
+        if (matches!(
+            create.format,
+            super::GPU_IMAGE_FORMAT_R8_UNORM | super::GPU_IMAGE_FORMAT_RG8_UNORM
+        ) && support & super::GPU_EXECUTION_SUPPORT_NATIVE_NARROW_COLOR == 0)
+            || (mip_levels > 1 && support & super::GPU_EXECUTION_SUPPORT_IMAGE_MIPS == 0)
             || (array_layers > 1 && support & super::GPU_EXECUTION_SUPPORT_TEXTURE_ARRAYS == 0)
             || (create.format == super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT
                 && create.usage & super::GPU_IMAGE_USAGE_SAMPLED != 0
