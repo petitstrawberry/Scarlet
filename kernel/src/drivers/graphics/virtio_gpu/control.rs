@@ -214,6 +214,22 @@ impl ControlQueue {
         self.pending.iter().any(Option::is_some)
     }
 
+    /// Observe this request independently of older GPU retirement checkpoints.
+    /// Resource setup completes when its own response arrives; it does not
+    /// certify execution or release ownership of any preceding submission.
+    pub(super) fn request_complete(
+        &mut self,
+        request: &ControlRequest,
+        now_ns: u64,
+    ) -> Result<bool, &'static str> {
+        self.reap(now_ns)?;
+        match request.status() {
+            ControlStatus::Complete(_) => Ok(true),
+            ControlStatus::Pending => Ok(false),
+            ControlStatus::Failed(error) => Err(error),
+        }
+    }
+
     pub(super) fn pending_request(&self) -> Option<Arc<ControlRequest>> {
         self.pending
             .iter()
@@ -376,6 +392,9 @@ impl ControlQueue {
     }
 
     pub(super) fn fail(&mut self, error: &'static str) -> Result<(), &'static str> {
+        if self.failed.is_none() {
+            crate::println!("[VirtIO GPU] control transport failed: {}", error);
+        }
         let error = *self.failed.get_or_insert(error);
         for pending in self.pending.iter().flatten() {
             pending.request.finish(ControlStatus::Failed(error));
@@ -441,6 +460,39 @@ mod tests {
         queue.ring.used.ring[index].id = head as u32;
         queue.ring.used.ring[index].len = written;
         *queue.ring.used.idx = queue.ring.used.idx.wrapping_add(1);
+    }
+
+    #[test_case]
+    fn resource_setup_completes_without_retiring_older_gpu_work() {
+        let mut queue = ControlQueue::new();
+        let fence = ControlRequest::new_checkpoint(&[0; 32], 7).unwrap();
+        queue.enqueue(&fence, 0).unwrap();
+        let fence_head = last_head(&queue);
+        let setup = request(2);
+        queue.enqueue(&setup, 1).unwrap();
+        let setup_head = last_head(&queue);
+        assert!(!queue.request_complete(&setup, 2).unwrap());
+        respond(&mut queue, setup_head, 24, 9);
+        assert!(queue.request_complete(&setup, 3).unwrap());
+        assert!(queue.has_pending());
+        assert_eq!(fence.status(), ControlStatus::Pending);
+        assert!(queue.pending[fence_head].is_some());
+        assert_eq!(
+            queue.ring.free_descriptors.len(),
+            VIRTIO_GPU_CONTROL_QUEUE_SIZE - 2
+        );
+        queue.test_respond(
+            fence_head,
+            super::super::VirtioGpuCtrlHdr {
+                hdr_type: super::super::VIRTIO_GPU_RESP_OK_NODATA,
+                flags: super::super::VIRTIO_GPU_FLAG_FENCE,
+                fence_id: 7,
+                ctx_id: 0,
+                padding: 0,
+            },
+        );
+        assert!(queue.request_complete(&fence, 4).unwrap());
+        assert!(!queue.has_pending());
     }
 
     #[test_case]

@@ -1624,3 +1624,60 @@ requires no outstanding work; surface destruction also submits synchronously.
 Those waits were identified in source and remain unchanged in this update.
 Baseline/DFG enabled at build time does not identify the tier or phase responsible
 for a particular long owner turn. No FTL or JIT-threshold change was made.
+
+### 2026-10-16: isolate new resource setup from GPU retirement
+
+The subsequent ordinary YouTube run still stalled video during scrolling and
+terminated with dynamic backend status 4 / `ERROR_DEVICE_LOST`. The previous
+resize/damage changes did not resolve that failure. The CORS messages preceding
+it are not evidence of a GPU failure cause.
+
+The VirtIO GPU resource path drained the entire control queue before and after
+every new image/buffer/context creation, initial backing attachment and context
+attachment. Those waits included unrelated asynchronous rendering checkpoints,
+and ran while holding the device core lock. This unnecessarily coupled cold
+resource setup during scroll exposure to existing rendering and other contexts.
+These additive operations now wait for their own descriptor-keyed responses.
+Admission reaps responses and waits only for descriptor capacity if necessary.
+Destruction, detach, transfers, backing replacement and presentation retain
+their retirement requirements. Completion of setup does not certify an older
+submission or release any of its memory/descriptor ownership.
+
+The new regression leaves an older GPU checkpoint pending, returns the later
+setup response first, and verifies that setup completes while the checkpoint
+and its descriptors remain owned. All 1484 AArch64 kernel tests passed under
+the existing TCG/2D-GPU test configuration; the project Release kernel also
+built successfully. An independent HVF/Cocoa/virtio-gpu-gl boot using the new
+Release kernel, normal initramfs/rootfs and installed `myrica-vulkan-probe`
+passed all three native Ganesh create/draw/readback/destroy cycles, GPU I420/NV12
+color cases, actual DOM/CSS/JS/input, leased output/resize/backpressure, GPU
+filters, cached-tile scrolling/new exposure, navigation and owner destruction.
+This validates the rendering contracts; it does not measure ordinary YouTube
+scroll responsiveness. Host OpenGL emitted a one-time
+`gldCopyBufferSubData: NEEDS IMPLEMENTATION` warning during the passing run.
+
+SGFX `1c628e8e005bbc8f1bb418f3a1798323b88f23f4` reports terminal native
+submission/completion/poll failures without requiring opt-in tracing and logs
+the original error before collapsing it to ABI device-lost status. The kernel
+logs the first permanent control-queue failure and rejected asynchronous payload
+context/length/response type. These are failure-path diagnostics, not a fix for
+the unresolved intermittent device-lost failure. Both normal native SGFX/Vulkan
+bundle references use this revision. The WebKit/Myrica/ScarletUI source revisions
+remain as above; the SDK and scroll direction are unchanged.
+
+The ordinary Release GPT disk was assembled after the previous disk-owning
+QEMU exited, while holding an exclusive whole-file lock. Extracting
+`/boot/kernel` from the resulting ESP matched the newly built Release kernel:
+SHA256 `d6d7a00b17e74f731b3a3f38ce06ecd237b6623c2164fdae238dfcb999aec756`.
+Installed Myrica remains
+`c612d12e8c736497e372d48b9debd2d58ed10d820ad2e2eb5ca107d43e90ff27`;
+the diagnostic VirGL DSO is
+`56aeb3bd46d8192c6b0de10b7c45ae17e939977e4885698dea8389884d693c91`,
+and the ICD remains
+`d26e19778c0db2de367c305ad57bacc1f95329488b88f1cc70bc3974dbe1c1db`.
+The normal disk booted through init/stemd using HVF, 8 CPUs, 16 GiB,
+virtio-gpu-gl-pci and Cocoa GL/Retina; ordinary Myrica launched from the desktop.
+The video host logged its kick-fd fallback to 1 ms ring polling, alongside
+QEMU's vhost kick/start warning; video responsiveness needs separate observation.
+The temporary validation VM exited. No worktrees were created, and the unrelated
+NVMe worktree, user `tools/wine/` and Myrica `flake.lock` were preserved.

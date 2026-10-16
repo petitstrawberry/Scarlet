@@ -649,6 +649,27 @@ impl VirtioGpuDeviceCore {
         validate_execution_response(response, None)
     }
 
+    /// Set up a new resource without retiring unrelated GPU work. Callers
+    /// create a fresh object, attach its initial backing, or add a context
+    /// attachment. Destruction, transfers and backing replacement retain the
+    /// execution barrier in send_execution_command/send_execution_bytes.
+    fn send_resource_setup<T>(&self, command: &T) -> Result<(), &'static str> {
+        // SAFETY: callers pass initialized repr(C) VirtIO commands.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(command as *const T as *const u8, core::mem::size_of::<T>())
+        };
+        self.send_resource_setup_bytes(bytes)
+    }
+
+    fn send_resource_setup_bytes(&self, bytes: &[u8]) -> Result<(), &'static str> {
+        let mut response = [0; core::mem::size_of::<VirtioGpuCtrlHdr>()];
+        self.send_control_request(bytes, &mut response)?;
+        // SAFETY: the completed request supplied a complete, possibly unaligned header.
+        let response =
+            unsafe { core::ptr::read_unaligned(response.as_ptr() as *const VirtioGpuCtrlHdr) };
+        validate_execution_response(response, None)
+    }
+
     /// Send a command to the control queue, using a caller-provided response buffer.
     fn send_control_command_with_resp_buffer<T>(
         &self,
@@ -673,17 +694,41 @@ impl VirtioGpuDeviceCore {
         // control requests. Reaping only returns transport ownership; execution
         // owners validate fences and release GPU resources outside driver locks.
         self.wait_control_idle()?;
+        self.send_control_request(cmd_buffer, resp_buffer)
+    }
+
+    fn send_control_request(
+        &self,
+        cmd_buffer: &[u8],
+        resp_buffer: &mut [u8],
+    ) -> Result<(), &'static str> {
         let request = ControlRequest::new(cmd_buffer, resp_buffer.len())?;
-        self.virtqueues
-            .lock()
-            .control
-            .enqueue(&request, crate::timer::get_time_ns())
-            .map_err(|error| match error {
-                ControlEnqueueError::Busy => "VirtIO GPU control queue is full",
-                ControlEnqueueError::Failed(error) => error,
-            })?;
+        loop {
+            let mut queues = self.virtqueues.lock();
+            queues.control.reap(crate::timer::get_time_ns())?;
+            match queues
+                .control
+                .enqueue(&request, crate::timer::get_time_ns())
+            {
+                Ok(()) => break,
+                Err(ControlEnqueueError::Failed(error)) => return Err(error),
+                Err(ControlEnqueueError::Busy) => {}
+            }
+            drop(queues);
+            core::hint::spin_loop();
+        }
         self.notify(0);
-        self.wait_control_idle()?;
+        loop {
+            if self
+                .virtqueues
+                .lock()
+                .control
+                .request_complete(&request, crate::timer::get_time_ns())?
+            {
+                break;
+            }
+            core::hint::spin_loop();
+        }
         request.copy_response(resp_buffer)?;
         Ok(())
     }
@@ -875,7 +920,7 @@ impl VirtioGpuDeviceCore {
             context_init,
             debug_name: name,
         };
-        self.send_execution_command(&cmd)
+        self.send_resource_setup(&cmd)
     }
 
     fn destroy_acceleration_context(&self, context_id: u32) -> Result<(), &'static str> {
@@ -929,7 +974,7 @@ impl VirtioGpuDeviceCore {
             flags: description.flags,
             padding: 0,
         };
-        self.send_execution_command(&cmd)?;
+        self.send_resource_setup(&cmd)?;
         Ok(resource_id)
     }
 
@@ -976,7 +1021,7 @@ impl VirtioGpuDeviceCore {
             resource_id,
             padding: 0,
         };
-        self.send_execution_command(&cmd)
+        self.send_resource_setup(&cmd)
     }
 
     #[allow(dead_code)]
@@ -1205,7 +1250,7 @@ impl VirtioGpuDeviceCore {
         Ok(resource_id)
     }
 
-    /// Attach backing memory to a resource.
+    /// Attach initial backing memory to a newly created, unused resource.
     fn attach_backing_entries_to_resource(
         &self,
         resource_id: u32,
@@ -1251,7 +1296,7 @@ impl VirtioGpuDeviceCore {
             );
         }
 
-        self.send_execution_bytes(&cmd_buffer)
+        self.send_resource_setup_bytes(&cmd_buffer)
     }
 
     /// Attach one contiguous backing memory range to a resource.
