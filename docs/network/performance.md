@@ -115,3 +115,34 @@ The incremental C++ embedding and ordinary Myrica compiled successfully.
 The standalone C++ smoke target compiled but its CMake executable link lacks
 Scarlet CRT/linker setup on this Darwin host; it was not executed. The native
 observations above use the actual bundled Myrica process instead.
+
+## Shared GPU shader capacity and remaining playback failure (2026-10-17)
+
+A longer run after the previous short playback check accumulated 27,890
+`ERROR_OUT_OF_DEVICE_MEMORY` pipeline/specialization errors. Shader modules
+shared an accidental 256-slot limit with pipeline objects. Multiple Skia
+contexts can each retain 64 programs with two stages, exhausting that shared
+shader table before the pipeline limit. SGFX `07263cb` separates shader capacity
+(1,024 modules) from the unchanged 256 compute/256 graphics pipeline limits.
+ABI mirrors and generation retirement use the same category-specific limits.
+The 512 MiB resource budget and Skia's 64-program cache remain unchanged.
+
+Core/ABI tests passed; Vulkan unit tests passed 111 with four ignored. A real
+Metal-device regression retained 160 pipelines/320 live shader modules across
+350 iterations, verified draw/readback pixels and failed-create rollback.
+This host test does not establish native VirGL behavior.
+
+The first normal-bundle native YouTube run subsequently hit a distinct
+`SubmissionTooLarge` rejection followed by Vulkan `ERROR_DEVICE_LOST`.
+Another run also failed at a video transition. The exact limit responsible
+(packet, upload-arena, logical-stream or shader-source) remains unresolved.
+A subsequent retry using the normal bundled driver reached native 720p media time 208.53 s, with 6,253 decoded, 4,672
+presented and 260 decoder-output drops, without shader-slot OOM or another
+oversize rejection. Those counters cover different pipeline stages and do not
+sum. This retry is counter-based evidence without visual verification. The
+failures in the other runs remain evidence against playback stability; the
+precise rejection limit is still unresolved.
+
+The normal image includes the capacity and transport changes. The oversize
+submission failure and visible-frame performance remain follow-up work;
+transport success must not be interpreted as a playback stability result.
