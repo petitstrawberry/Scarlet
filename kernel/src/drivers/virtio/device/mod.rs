@@ -366,6 +366,13 @@ pub trait VirtioDevice {
             }
         };
 
+        // A driver may size its local rings from the negotiated transport's
+        // device limits before queue addresses are published.
+        if let Err(error) = self.prepare_queues() {
+            self.set_failed();
+            return Err(error);
+        }
+
         // Set up virtqueues
         for i in 0..self.get_virtqueue_count() {
             if !self.setup_queue(i, self.get_virtqueue_size(i)) {
@@ -572,6 +579,12 @@ pub trait VirtioDevice {
     /// # Returns
     ///
     /// Returns true if queue setup was successful, false otherwise
+    /// Allocate driver-owned rings after reset/features and before publication.
+    /// Existing fixed-size drivers need no additional preparation.
+    fn prepare_queues(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
     fn setup_queue(&mut self, queue_idx: usize, queue_size: usize) -> bool {
         if queue_idx >= self.get_virtqueue_count() {
             return false;
