@@ -288,7 +288,7 @@ to = "/bin/carmine"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "ef6cbad3224c374b0e0915ddc991c3b9861eef3c" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "4ae10a8c72d4add1ff874be22a2edb98e4e09acb" }
 package = "myrica"
 bin = "myrica"
 architectures = ["riscv32", "riscv64"]
@@ -296,7 +296,7 @@ to = "/bin/myrica"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "ef6cbad3224c374b0e0915ddc991c3b9861eef3c" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "4ae10a8c72d4add1ff874be22a2edb98e4e09acb" }
 package = "myrica"
 bin = "myrica"
 features = ["backend-webkit-vulkan"]
@@ -306,7 +306,7 @@ to = "/bin/myrica"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "ef6cbad3224c374b0e0915ddc991c3b9861eef3c" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "4ae10a8c72d4add1ff874be22a2edb98e4e09acb" }
 package = "myrica"
 bin = "webkit-vulkan-probe"
 features = ["webkit-vulkan-probe", "backend-webkit-vulkan"]

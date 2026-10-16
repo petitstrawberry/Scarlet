@@ -1,34 +1,74 @@
 # Network performance follow-up
 
-## Outstanding transport work (2026-10-16)
+## Transport implementation (2026-10-17)
 
-TCP window scaling remains unimplemented. `kernel/src/network/tcp.rs` stores
-`recv_window` as `AtomicU16`, caps the advertised window at 65,535 bytes and
-has a 128 KiB receive-buffer limit. Increasing that buffer alone does not
-increase the window on the wire. This work was explicitly deferred by the
-user on 2026-10-16; the HTTP streaming changes do not resolve it.
+The normal Release image now includes the previously deferred transport work:
 
-The next transport change must implement RFC 7323 negotiation on SYN/SYN-ACK,
-leave SYN window fields unscaled, preserve unscaled interoperability when the
-peer omits the option, and account for scaled bytes in advertised-window edge
-tracking and zero-window reopening. Test active/passive handshakes, shift 0,
-maximum shift, malformed options, retransmitted SYNs and sequence wrap.
+- TCP offers Window Scale 4 on active SYNs and negotiates it on passive opens
+  only when the peer offers the option. SYN/SYN-ACK window fields remain
+  unscaled; peers without the option retain the 65,535-byte wire limit.
+  Receive capacity is 1 MiB, allocated as bytes arrive. Scaled byte accounting
+  covers advertised edges, quantization, sequence wrap and window reopening.
+- Payload writes and writable readiness respect the peer's remaining send
+  credit. Partial writes resume on acknowledgements/window updates. A separate
+  bounded-backoff persist timer probes a zero window without consuming stream
+  sequence space or exhausting data retransmission retries. Combined read/write
+  waiters are notified by window-only updates.
+- A bare FIN received ahead of missing data waits for ordered reassembly before
+  reporting EOF.
+- VirtIO-net chooses power-of-two RX/TX rings within the device maximum,
+  preferring 256/128 entries. Every RX descriptor is posted. IRQ processing
+  consumes a bounded snapshot; the software RX queue holds up to 1,024 packets.
+- The resolver caches up to 256 validated positive answers for the minimum
+  relevant CNAME/A TTL (maximum one hour). Configuration changes clear the
+  cache. Eight workers and a 64-request queue replace a thread per request;
+  truncated UDP responses fall back to TCP. Configuration is still read for
+  each lookup to notice changes immediately.
 
-The sender also does not currently use the peer window to throttle payload
-transmission. Treat sender flow control and zero-window/persist behavior as
-separate correctness work; enlarging receive windows does not fix this.
-
-Other audit findings awaiting implementation/measurement:
-
-- VirtIO-net has a 32-entry RX ring but only 16 posted receive buffers;
-  increasing capacity must honor the device maximum and bound IRQ work.
-- Resolver queries reread configuration and perform uncached UDP lookups;
-  caching must honor DNS TTLs, aliases and configuration changes.
-- Separate transport throughput from callbacks running on WebCore's owner
-  thread. Whole-response buffering in Myrica delayed delivery until HTTP EOF;
-  incremental HTTP delivery is being handled in the Myrica/WebKit repositories.
+Kernel AArch64 QEMU tests: **1,495 passed**. Five host-side resolver tests cover
+TTL expiry, CNAME minimum TTL, response identity, malformed packets and
+configuration invalidation. DNS TCP fallback compiled into the native daemon;
+its fallback path has not yet been exercised against a deliberately truncated
+native response. TCP still has wider gaps such as congestion control, SACK and
+receive checksum validation; this work does not establish full TCP conformance.
 
 Reference: [RFC 7323 section 2](https://www.rfc-editor.org/rfc/rfc7323.html#section-2).
+
+## Native transport validation (2026-10-17)
+
+Normal AArch64 Release image, HVF/8 vCPUs/16 GiB, VirGL PCI, Cocoa GL/Retina,
+audio enabled and `/dev/video0`. Myrica `4ae10a8c72d4add1ff874be22a2edb98e4e09acb`,
+WebKit `7605d3c5779fcbcae4c503c37953dfaa7f145aa6`, SGFX initially
+`07263cb0061a0233b1f86387d80758374dcdf9da`.
+
+A QEMU network filter captured the actual guest packets. Three consecutive
+`resolve www.rfc-editor.org` calls returned the same addresses with **one**
+external DNS query. Guest SYNs offered Window Scale 4. This QEMU user-network
+peer did **not** offer scaling in its SYN-ACK, so the native run exercised the
+unscaled interoperability path. Negotiated scaled windows are covered by the
+kernel tests above, not established by this peer capture.
+
+A browser POST sent 4 MiB of `0x5a` while the host HTTP server deliberately
+stopped reading for ten seconds with a small receive buffer. The capture
+contained zero-window advertisements and repeated probes. Transfer resumed,
+returned HTTP 200 and the server received exactly 4,194,304 bytes with SHA-256
+`4656153f1921ea9f09001428d189084d3db94509dd71990a8a971cfa02998087`,
+matching the original bytes. Server elapsed time was 10.176 s; browser wall
+time was 11.144 s.
+
+Single-run HTTP observations on the same VM:
+
+| Response | Headers available | Entire body available |
+| --- | ---: | ---: |
+| 8 KiB | 9 ms | 9 ms |
+| 256 KiB | 8 ms | 23 ms |
+| 4 MiB | 15 ms | 113 ms |
+
+24 parallel 8 KiB requests completed in 74 ms with no failed requests. These
+are host-local browser observations, including embedding scheduling and QEMU
+user networking. They are not WAN throughput or controlled before/after
+measurements. The cross-origin Google 204 request is excluded because it
+fails CORS.
 
 ## Incremental delivery validation (2026-10-16)
 
