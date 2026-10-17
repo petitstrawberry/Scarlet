@@ -57,6 +57,7 @@ pub use abi::{
     GPU_IMAGE_FORMAT_RG8_UNORM, GpuContextReadbackImage, GpuContextUploadImage,
     image_format_bytes_per_texel,
 };
+pub use abi::{GPU_CONTEXT_UPLOAD_BUFFER, GPU_MAX_BUFFER_UPLOAD_SIZE, GpuContextUploadBuffer};
 pub use abi::{
     GPU_CREATE_MIP_IMAGE, GPU_IMAGE_QUERY_MIP_LEVELS, GpuCreateMipImage, GpuImageMipLevels,
 };
@@ -77,8 +78,8 @@ pub use backend::{
     GpuBackendContext, GpuBackendContextInfo, GpuBackendDialectDescriptor, GpuBackendDialectInfo,
     GpuBackendImage, GpuBackendImageInfo, GpuBackendImageLayout, GpuBackendImagePlaneLayout,
     GpuBackendInfo, GpuBackendLinearDisplayInfo, GpuBackendQueue, GpuBackendQueueInfo,
-    GpuBackendSubmitError, GpuBufferCreateInfo, GpuDeviceInfo, GpuDeviceState, GpuImageBackingInfo,
-    GpuImageCreateInfo, GpuImageUploadInfo,
+    GpuBackendSubmitError, GpuBufferCreateInfo, GpuBufferUploadInfo, GpuDeviceInfo, GpuDeviceState,
+    GpuImageBackingInfo, GpuImageCreateInfo, GpuImageUploadInfo,
 };
 pub use backend::{
     GPU_EXECUTION_SUPPORT_DEPTH_SAMPLING, GPU_EXECUTION_SUPPORT_NATIVE_NARROW_COLOR,

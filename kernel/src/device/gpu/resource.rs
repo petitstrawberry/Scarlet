@@ -1,6 +1,6 @@
 //! Kernel-owned GPU child capability objects.
 
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 
 use super::connection::{read_user_value, write_user_value};
 use super::{
@@ -18,7 +18,7 @@ use crate::device::graphics::GpuBackingSegment;
 use crate::environment::PAGE_SIZE;
 use crate::ipc::shared_memory::{SharedMemoryObject, SharedMemoryPin};
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
-use crate::mem::page::{ContiguousPages, Page, allocate_raw_pages, free_raw_pages};
+use crate::mem::page::ContiguousPages;
 use crate::object::capability::ControlOps;
 use crate::object::capability::memory_mapping::{
     AccessKind, AccessOp, MemoryMappingInfo, MemoryMappingOps, ResolveFaultError,
@@ -29,7 +29,77 @@ use crate::object::capability::selectable::{
 };
 use crate::sched::scheduler::current_task_id;
 use crate::sync::{IrqSpinLock, Mutex, waker::Waker};
-use crate::vm::addr::{phys_to_virt, virt_to_phys};
+use crate::vm::addr::phys_to_virt;
+
+/// Stack-owned lease; native inline reservations never construct a Box.
+enum CpuAccess<'a> {
+    Image {
+        context: &'a dyn GpuBackendContext,
+        image: &'a dyn GpuBackendImage,
+        token: core::num::NonZeroU64,
+    },
+    Buffer {
+        context: &'a dyn GpuBackendContext,
+        buffer: &'a dyn GpuBackendBuffer,
+        token: core::num::NonZeroU64,
+    },
+    Legacy {
+        _guard: Option<Box<dyn super::GpuBackendCpuAccessGuard + 'a>>,
+    },
+}
+
+impl<'a> CpuAccess<'a> {
+    fn image(
+        context: &'a dyn GpuBackendContext,
+        image: &'a dyn GpuBackendImage,
+    ) -> Result<Self, &'static str> {
+        match context.begin_image_cpu_access_inline(image)? {
+            Some(token) => Ok(Self::Image {
+                context,
+                image,
+                token: core::num::NonZeroU64::new(token)
+                    .ok_or("GPU backend returned an invalid inline image lease")?,
+            }),
+            None => Ok(Self::Legacy {
+                _guard: context.begin_image_cpu_access(image)?,
+            }),
+        }
+    }
+    fn buffer(
+        context: &'a dyn GpuBackendContext,
+        buffer: &'a dyn GpuBackendBuffer,
+    ) -> Result<Self, &'static str> {
+        match context.begin_buffer_cpu_access_inline(buffer)? {
+            Some(token) => Ok(Self::Buffer {
+                context,
+                buffer,
+                token: core::num::NonZeroU64::new(token)
+                    .ok_or("GPU backend returned an invalid inline buffer lease")?,
+            }),
+            None => Ok(Self::Legacy {
+                _guard: context.begin_buffer_cpu_access(buffer)?,
+            }),
+        }
+    }
+}
+
+impl Drop for CpuAccess<'_> {
+    fn drop(&mut self) {
+        match self {
+            Self::Image {
+                context,
+                image,
+                token,
+            } => context.end_image_cpu_access_inline(*image, token.get()),
+            Self::Buffer {
+                context,
+                buffer,
+                token,
+            } => context.end_buffer_cpu_access_inline(*buffer, token.get()),
+            Self::Legacy { .. } => {}
+        }
+    }
+}
 
 /// GPU capability object with explicitly optional kernel-object capabilities.
 ///
@@ -1292,7 +1362,7 @@ impl GpuImage {
     ) -> Result<(), &'static str> {
         let _upload_guard = self.upload_lock.lock();
         let backing = self.backing.private_backing()?;
-        let _cpu_access = context.begin_image_cpu_access(self.backend_image.as_ref())?;
+        let _cpu_access = CpuAccess::image(context, self.backend_image.as_ref())?;
         for row in 0..layout.height {
             let source_offset = row
                 .checked_mul(layout.source_stride)
@@ -1337,7 +1407,7 @@ impl GpuImage {
             width,
             height,
         )?;
-        let _cpu_access = context.begin_image_cpu_access(self.backend_image.as_ref())?;
+        let _cpu_access = CpuAccess::image(context, self.backend_image.as_ref())?;
         self.backing.clean_imported_transfer_range(layout)?;
         context.transfer_imported_image_bgra(self.backend_image.as_ref(), layout)
     }
@@ -1361,7 +1431,7 @@ impl GpuImage {
     ) -> Result<(), &'static str> {
         let _upload_guard = self.upload_lock.lock();
         let backing = self.backing.private_backing()?;
-        let _cpu_access = context.begin_image_cpu_access(self.backend_image.as_ref())?;
+        let _cpu_access = CpuAccess::image(context, self.backend_image.as_ref())?;
         context.readback_image(self.backend_image.as_ref(), layout.transfer)?;
         for row in 0..layout.height {
             let source_offset = row
@@ -1532,26 +1602,47 @@ impl GpuObject for GpuImage {
 
 /// Stable page-backed allocation retained by a GPU buffer and its attachments.
 pub(crate) struct GpuBufferBacking {
-    paddr: u64,
-    allocation_size: usize,
+    pages: ContiguousPages,
 }
 
-impl Drop for GpuBufferBacking {
-    fn drop(&mut self) {
-        let page_count = self.allocation_size / PAGE_SIZE;
-        if page_count != 0 {
-            let pages = phys_to_virt(self.paddr) as *mut Page;
-            // SAFETY: Buffers and in-flight attachments retain this backing
-            // owner; its final drop releases the original PMM allocation.
-            unsafe { free_raw_pages(pages, page_count) };
-        }
+impl GpuBufferBacking {
+    fn allocation_size(&self) -> usize {
+        self.pages.len() * PAGE_SIZE
     }
+
+    fn paddr(&self) -> u64 {
+        self.pages.as_paddr()
+    }
+}
+
+/// Validate the entire range before the access guard or any backing writes.
+pub(crate) fn validate_buffer_upload(
+    source: usize,
+    offset: usize,
+    size: usize,
+    allocation_size: usize,
+) -> Result<(), &'static str> {
+    if source == 0 || size == 0 || size > super::GPU_MAX_BUFFER_UPLOAD_SIZE as usize {
+        return Err("GPU buffer upload source or size is invalid");
+    }
+    source
+        .checked_add(size)
+        .ok_or("GPU buffer upload source range overflows")?;
+    let end = offset
+        .checked_add(size)
+        .ok_or("GPU buffer upload range overflows")?;
+    if end > allocation_size {
+        return Err("GPU buffer upload range exceeds allocation");
+    }
+    Ok(())
 }
 
 /// Kernel-owned, fixed-size GPU buffer.
 pub struct GpuBuffer {
-    backing: Arc<GpuBufferBacking>,
+    // Field order retires the backend mapping before its final page owner.
     backend_buffer: Arc<dyn GpuBackendBuffer>,
+    backing: Arc<GpuBufferBacking>,
+    upload_lock: Mutex<()>,
     flags: u32,
 }
 
@@ -1575,39 +1666,31 @@ impl GpuBuffer {
         if size_bytes == 0 {
             return Err("GPU buffer size must be non-zero");
         }
+        let alignment = backend.buffer_backing_alignment();
+        if alignment < PAGE_SIZE || !alignment.is_power_of_two() {
+            return Err("GPU backend buffer backing alignment is invalid");
+        }
         let allocation_size = size_bytes
-            .checked_add(PAGE_SIZE - 1)
-            .ok_or("GPU buffer size overflows page alignment")?
-            & !(PAGE_SIZE - 1);
-        let page_count = allocation_size / PAGE_SIZE;
-        let pages = allocate_raw_pages(page_count);
-        if pages.is_null() {
-            return Err("Failed to allocate GPU buffer pages");
-        }
-        // SAFETY: `pages` is a valid contiguous allocation of `allocation_size`
-        // bytes returned by `allocate_raw_pages`; zeroing initializes it before
-        // any userspace mapping can observe the buffer.
-        unsafe {
-            core::ptr::write_bytes(pages as *mut u8, 0, allocation_size);
-        }
-        let backing = Arc::new(GpuBufferBacking {
-            paddr: virt_to_phys(pages as usize),
-            allocation_size,
-        });
-        let backend_buffer = backend.create_buffer(GpuBufferCreateInfo::new(
-            backing.paddr,
-            u64::try_from(backing.allocation_size)
-                .map_err(|_| "GPU buffer allocation size does not fit backend metadata")?,
-        ))?;
+            .checked_add(alignment - 1)
+            .ok_or("GPU buffer size overflows backing alignment")?
+            & !(alignment - 1);
+        let backend_size = u64::try_from(allocation_size)
+            .map_err(|_| "GPU buffer allocation size does not fit backend metadata")?;
+        // The PMM owner zeroes the complete granule, including its padding.
+        let pages = ContiguousPages::new_aligned(allocation_size / PAGE_SIZE, alignment)
+            .ok_or("Failed to allocate GPU buffer pages")?;
+        let backing = Arc::new(GpuBufferBacking { pages });
+        let backend_buffer =
+            backend.create_buffer(GpuBufferCreateInfo::new(backing.paddr(), backend_size))?;
         let backend_info = backend_buffer.query_info();
-        if backend_info.command_resource_token == 0
-            || backend_info.allocation_size != backing.allocation_size as u64
+        if backend_info.command_resource_token == 0 || backend_info.allocation_size != backend_size
         {
             return Err("GPU backend buffer metadata is invalid");
         }
         Ok(Self {
             backing,
             backend_buffer,
+            upload_lock: Mutex::new(()),
             flags,
         })
     }
@@ -1621,13 +1704,13 @@ impl GpuBuffer {
         (self.flags & super::GPU_BUFFER_FLAG_CPU_VISIBLE) != 0
     }
 
-    /// Return the page-rounded backing allocation size.
+    /// Return the backing size rounded to the backend allocation granule.
     ///
     /// # Returns
     ///
     /// The stable contiguous allocation size in bytes.
     pub fn allocation_size(&self) -> usize {
-        self.backing.allocation_size
+        self.backing.allocation_size()
     }
 
     /// Return immutable backend-neutral buffer information.
@@ -1647,6 +1730,50 @@ impl GpuBuffer {
     /// Clone the page backing for a context lifetime reference.
     pub(crate) fn backing(&self) -> Arc<GpuBufferBacking> {
         Arc::clone(&self.backing)
+    }
+
+    /// Copy one validated user range directly into owned backing, without staging.
+    pub(crate) fn upload_for_task(
+        &self,
+        task: &crate::task::Task,
+        source: usize,
+        upload: super::GpuBufferUploadInfo,
+        context: &dyn GpuBackendContext,
+    ) -> Result<(), &'static str> {
+        let offset = usize::try_from(upload.offset).map_err(|_| "GPU buffer offset overflows")?;
+        let size =
+            usize::try_from(upload.size_bytes).map_err(|_| "GPU buffer upload size overflows")?;
+        validate_buffer_upload(source, offset, size, self.allocation_size())?;
+        // Serializes CPU writers even when the backend needs no access guard.
+        let _upload_guard = self.upload_lock.lock();
+        let _cpu_access = CpuAccess::buffer(context, self.backend_buffer.as_ref())?;
+        let destination = self
+            .backing
+            .pages
+            .as_vaddr()
+            .checked_add(offset)
+            .ok_or("GPU buffer upload address overflows")?;
+        // SAFETY: the validated range is inside this live PMM owner; the upload
+        // lock serializes generic writers and the backend guard excludes DMA.
+        let bytes = unsafe { core::slice::from_raw_parts_mut(destination as *mut u8, size) };
+        let backing_start = self.backing.pages.as_vaddr();
+        let copied = crate::library::std::usercopy::copy_from_user_disjoint(
+            task,
+            source,
+            bytes,
+            backing_start..backing_start + self.allocation_size(),
+        );
+        // A failed usercopy may already have written a prefix. Clean it before
+        // releasing the reservation too; failed uploads promise no rollback.
+        crate::arch::clean_dcache_to_poc_range(destination, size);
+        crate::arch::io_wmb();
+        copied.map_err(|error| match error {
+            crate::library::std::usercopy::UserCopyError::Aliasing => {
+                "GPU buffer upload source aliases destination backing"
+            }
+            _ => "Failed to copy GPU buffer bytes from user",
+        })?;
+        context.upload_buffer(self.backend_buffer.as_ref(), upload)
     }
 
     fn query_info(&self, info: &mut GpuBufferInfo) {
@@ -1691,7 +1818,7 @@ impl MemoryMappingOps for GpuBuffer {
         }
         let paddr = self
             .backing
-            .paddr
+            .paddr()
             .checked_add(offset as u64)
             .ok_or("GPU buffer physical address overflows")?;
         Ok(MemoryMappingInfo::new(paddr, 0x3, true))
@@ -1734,7 +1861,7 @@ impl MemoryMappingOps for GpuBuffer {
         Ok(ResolveFaultResult {
             paddr_page_base: self
                 .backing
-                .paddr
+                .paddr()
                 .checked_add(offset as u64)
                 .ok_or(ResolveFaultError::Invalid)?,
             is_tail: false,
@@ -2191,3 +2318,7 @@ mod native_color_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "resource/buffer_tests.rs"]
+mod buffer_tests;

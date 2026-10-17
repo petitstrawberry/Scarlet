@@ -51,6 +51,8 @@ impl File {
 
 /// GPU control command constants.
 pub mod commands {
+    /// Upload bytes into a buffer attached to an execution context.
+    pub const GPU_CONTEXT_UPLOAD_BUFFER: u32 = 0x4774;
     /// Upload an uncompressed color image in its immutable native format.
     pub const GPU_CONTEXT_UPLOAD_IMAGE: u32 = 0x4772;
     /// Read an uncompressed color image in its immutable native format.
@@ -1826,10 +1828,7 @@ impl Gpu {
             )
         }?;
         result_to_handle_error(request.result)?;
-        if request.image_handle == 0 {
-            return Err(HandleError::InvalidHandle);
-        }
-        GpuImage::from_handle(unsafe { Handle::from_raw(request.image_handle as i32) }?)
+        GpuImage::from_handle(adopt_child_handle(request.image_handle)?)
     }
 
     /// Create a sampled BGRA texture image backed by an existing SharedMemory object.
@@ -2967,5 +2966,160 @@ mod native_color_tests {
             )
             .is_err()
         );
+    }
+}
+
+/// Maximum byte count in one buffer upload.
+pub const GPU_MAX_BUFFER_UPLOAD_SIZE: u32 = 64 * 1024 * 1024;
+
+/// Synchronous upload into a buffer capability attached to this context.
+///
+/// The source pointer is borrowed only until return. Failure reports zero
+/// `uploaded_bytes`; a failed usercopy may have modified a prefix of backing.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuContextUploadBuffer {
+    /// Current GPU ABI version, echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` response.
+    pub result: u32,
+    /// Existing buffer capability attached to this context.
+    pub buffer_handle: u32,
+    /// Must be zero.
+    pub reserved: u32,
+    /// Destination byte offset in the buffer allocation.
+    pub buffer_offset: u64,
+    /// Borrowed userspace source address.
+    pub source_ptr: u64,
+    /// Non-zero source byte length, at most `GPU_MAX_BUFFER_UPLOAD_SIZE`.
+    pub size_bytes: u64,
+    /// Complete byte count on success; zero on every failure.
+    pub uploaded_bytes: u64,
+}
+
+impl GpuContextUploadBuffer {
+    /// Borrow a non-empty source slice for one synchronous upload.
+    pub fn new(buffer_handle: u32, buffer_offset: u64, bytes: &[u8]) -> HandleResult<Self> {
+        let size_bytes = u64::try_from(bytes.len()).map_err(|_| HandleError::InvalidParameter)?;
+        if bytes.is_empty()
+            || size_bytes > GPU_MAX_BUFFER_UPLOAD_SIZE as u64
+            || buffer_offset.checked_add(size_bytes).is_none()
+            || (bytes.as_ptr() as usize).checked_add(bytes.len()).is_none()
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+        Ok(Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            buffer_handle,
+            reserved: 0,
+            buffer_offset,
+            source_ptr: bytes.as_ptr() as usize as u64,
+            size_bytes,
+            uploaded_bytes: 0,
+        })
+    }
+
+    fn finish(&self, expected: &Self) -> HandleResult<()> {
+        if self.abi_version != expected.abi_version
+            || self.buffer_handle != expected.buffer_handle
+            || self.reserved != 0
+            || self.buffer_offset != expected.buffer_offset
+            || self.source_ptr != expected.source_ptr
+            || self.size_bytes != expected.size_bytes
+            || self.uploaded_bytes
+                != if self.result == GPU_RESULT_SUCCESS {
+                    expected.size_bytes
+                } else {
+                    0
+                }
+        {
+            return Err(HandleError::SystemError(-1));
+        }
+        result_to_handle_error(self.result)
+    }
+}
+
+impl GpuContext {
+    /// Upload bytes directly into an attached buffer's owned backing.
+    ///
+    /// The kernel reserves ordered CPU access, performs one user-to-backing
+    /// copy, cleans the written range to PoC, and completes the backend callback
+    /// before releasing the reservation. The source is never retained. An error
+    /// may leave a copied prefix; it does not guarantee rollback.
+    pub fn upload_buffer(&self, buffer: &GpuBuffer, offset: u64, bytes: &[u8]) -> HandleResult<()> {
+        let handle =
+            u32::try_from(buffer.handle.as_raw()).map_err(|_| HandleError::InvalidHandle)?;
+        let mut request = GpuContextUploadBuffer::new(handle, offset, bytes)?;
+        let expected = request;
+        // SAFETY: both request and its nested source slice remain live and
+        // exclusively borrowed for this synchronous fixed-width control call.
+        unsafe {
+            self.handle.control(
+                commands::GPU_CONTEXT_UPLOAD_BUFFER,
+                &mut request as *mut _ as usize,
+            )
+        }?;
+        request.finish(&expected)
+    }
+}
+
+const _: [(); 48] = [(); core::mem::size_of::<GpuContextUploadBuffer>()];
+
+#[cfg(test)]
+mod buffer_upload_tests {
+    use super::*;
+
+    #[test]
+    fn upload_buffer_layout_and_safe_source_borrow_are_exact() {
+        use core::mem::{offset_of, size_of};
+        assert_eq!(size_of::<GpuContextUploadBuffer>(), 48);
+        assert_eq!(offset_of!(GpuContextUploadBuffer, buffer_offset), 16);
+        assert_eq!(offset_of!(GpuContextUploadBuffer, source_ptr), 24);
+        assert_eq!(offset_of!(GpuContextUploadBuffer, size_bytes), 32);
+        assert_eq!(offset_of!(GpuContextUploadBuffer, uploaded_bytes), 40);
+        let bytes = [0x52; 16];
+        let request = GpuContextUploadBuffer::new(7, 0x100, &bytes).unwrap();
+        assert_eq!(request.source_ptr, bytes.as_ptr() as usize as u64);
+        assert_eq!(request.size_bytes, 16);
+        assert_eq!(request.buffer_offset, 0x100);
+        assert_eq!(request.uploaded_bytes, 0);
+        assert!(GpuContextUploadBuffer::new(7, 0, &[]).is_err());
+        let oversized = std::vec![0; GPU_MAX_BUFFER_UPLOAD_SIZE as usize + 1];
+        assert!(GpuContextUploadBuffer::new(7, 0, &oversized).is_err());
+        assert_eq!(
+            GpuContextUploadBuffer::new(0, 0, &bytes)
+                .unwrap()
+                .buffer_handle,
+            0
+        );
+        assert!(GpuContextUploadBuffer::new(7, u64::MAX - 7, &bytes).is_err());
+    }
+
+    #[test]
+    fn upload_buffer_response_rejects_short_success_and_every_changed_echo() {
+        let bytes = [1; 16];
+        let expected = GpuContextUploadBuffer::new(7, 0x100, &bytes).unwrap();
+        let mut response = expected;
+        assert!(response.finish(&expected).is_err());
+        response.uploaded_bytes = 16;
+        assert!(response.finish(&expected).is_ok());
+        for field in 0..8 {
+            let mut corrupt = response;
+            match field {
+                0 => corrupt.abi_version += 1,
+                1 => corrupt.buffer_handle += 1,
+                2 => corrupt.reserved = 1,
+                3 => corrupt.buffer_offset += 1,
+                4 => corrupt.source_ptr += 1,
+                5 => corrupt.size_bytes += 1,
+                6 => corrupt.uploaded_bytes -= 1,
+                _ => corrupt.result = GPU_RESULT_INVALID_STATE,
+            }
+            assert!(corrupt.finish(&expected).is_err());
+        }
+        response.result = GPU_RESULT_INVALID_STATE;
+        response.uploaded_bytes = 0;
+        assert!(response.finish(&expected).is_err());
     }
 }

@@ -261,7 +261,7 @@ pub struct GpuBackendQueueInfo {
 pub struct GpuBufferCreateInfo {
     /// Physical address of the stable contiguous backing allocation.
     pub paddr: u64,
-    /// Page-rounded allocation size in bytes.
+    /// Allocation size rounded to the backend backing granule, in bytes.
     pub allocation_size: u64,
 }
 
@@ -284,12 +284,21 @@ impl GpuBufferCreateInfo {
     }
 }
 
+/// Validated byte range already copied into a GPU buffer's physical backing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuBufferUploadInfo {
+    /// Byte offset in the stable buffer backing.
+    pub offset: u64,
+    /// Non-zero byte length, bounded by the generic upload limit.
+    pub size_bytes: u64,
+}
+
 /// Immutable metadata for a backend-owned GPU buffer resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpuBackendBufferInfo {
     /// Opaque backend token used only by opaque command bytes.
     pub command_resource_token: u64,
-    /// Page-rounded backing allocation size in bytes.
+    /// Backing allocation size rounded to the backend backing granule, in bytes.
     pub allocation_size: u64,
 }
 
@@ -546,7 +555,7 @@ impl GpuBackendImageLayout {
 pub struct GpuImageBackingInfo {
     /// Physical address of the first backing extent.
     pub paddr: u64,
-    /// Page-rounded allocation size in bytes.
+    /// Allocation size rounded to the backend backing granule, in bytes.
     pub allocation_size: u64,
     physical_segments: Arc<[GpuBackingSegment]>,
 }
@@ -864,6 +873,22 @@ pub trait GpuBackendContext: Send + Sync {
         Err("GPU backend context does not support image detachment")
     }
 
+    /// Reserve image CPU access without allocating a boxed guard.
+    ///
+    /// `Some(token)` must contain a non-zero context-owned lease with the same
+    /// ordering/exclusion contract as `begin_image_cpu_access`. Generic code
+    /// calls `end_image_cpu_access_inline` exactly once on every exit, after all
+    /// copying, cache maintenance and callbacks. `None` uses the boxed fallback.
+    fn begin_image_cpu_access_inline(
+        &self,
+        _image: &dyn GpuBackendImage,
+    ) -> Result<Option<u64>, &'static str> {
+        Ok(None)
+    }
+
+    /// Release a non-zero image lease returned by the inline begin hook.
+    fn end_image_cpu_access_inline(&self, _image: &dyn GpuBackendImage, _token: u64) {}
+
     /// Reserve ordered CPU access to an attached image's generic backing.
     ///
     /// This is called before upload writes, imported-backing cache maintenance,
@@ -988,6 +1013,49 @@ pub trait GpuBackendContext: Send + Sync {
     /// This token is not required to equal the buffer resource identity token.
     fn attach_buffer(&self, _buffer: &dyn GpuBackendBuffer) -> Result<u64, &'static str> {
         Err("GPU backend context does not support buffer attachment")
+    }
+
+    /// Reserve buffer CPU access without a heap allocation.
+    ///
+    /// A non-zero `Some(token)` bypasses the boxed hook and is released exactly
+    /// once after copy, PoC clean and callback (also on failure). `None` uses
+    /// `begin_buffer_cpu_access`. The same global exclusion contract applies.
+    fn begin_buffer_cpu_access_inline(
+        &self,
+        _buffer: &dyn GpuBackendBuffer,
+    ) -> Result<Option<u64>, &'static str> {
+        Ok(None)
+    }
+
+    /// Release a non-zero buffer lease returned by the inline begin hook.
+    fn end_buffer_cpu_access_inline(&self, _buffer: &dyn GpuBackendBuffer, _token: u64) {}
+
+    /// Reserve ordered CPU access before writing an attached buffer's backing.
+    ///
+    /// The guard spans the direct user copy, PoC clean and `upload_buffer`
+    /// callback, including error exits. Async backends must retire prior work
+    /// and exclude conflicting work from every context sharing this backing
+    /// until guard drop, as with `begin_image_cpu_access`. Callbacks must not
+    /// reacquire their own reservation. The default needs no reservation.
+    fn begin_buffer_cpu_access(
+        &self,
+        _buffer: &dyn GpuBackendBuffer,
+    ) -> Result<Option<Box<dyn GpuBackendCpuAccessGuard + '_>>, &'static str> {
+        Ok(None)
+    }
+
+    /// Finish a buffer upload after generic code copied and cleaned the range.
+    ///
+    /// `upload` identifies the byte range in the stable backing. The access
+    /// reservation is still live. Return only when the device can consume the
+    /// new bytes; unsupported backends return an error. An error may follow a
+    /// partial user copy and does not promise to restore the previous bytes.
+    fn upload_buffer(
+        &self,
+        _buffer: &dyn GpuBackendBuffer,
+        _upload: GpuBufferUploadInfo,
+    ) -> Result<(), &'static str> {
+        Err("GPU backend context does not support buffer uploads")
     }
 
     /// Detach a buffer previously attached to this context.
@@ -1221,6 +1289,16 @@ pub trait GpuBackend: Send + Sync {
         _color: scarlet_abi::shared_image::ImageColor,
     ) -> Result<(Arc<dyn GpuBackendImage>, GpuBackendImageLayout), &'static str> {
         Err("GPU backend does not support shared image import")
+    }
+
+    /// Physical alignment and complete allocation granule for buffer backing.
+    ///
+    /// Must be a power of two no smaller than the CPU page size. Generic code
+    /// validates this before allocation or `create_buffer`, aligns the physical
+    /// base, and rounds the entire zeroed allocation to this granule. Backends
+    /// with larger device pages must override this (for example, 16KiB UAT).
+    fn buffer_backing_alignment(&self) -> usize {
+        crate::environment::PAGE_SIZE
     }
 
     /// Create a backend-owned GPU buffer resource from generic page backing.

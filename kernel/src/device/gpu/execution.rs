@@ -322,7 +322,7 @@ impl GpuContext {
             write_user_value(arg, &request)?;
             return Ok(0);
         }
-        if request.flags != 0 || reserved != 0 || request.image_handle == 0 {
+        if request.flags != 0 || reserved != 0 {
             request.result = GPU_RESULT_INVALID_ARGUMENT;
             write_user_value(arg, &request)?;
             return Ok(0);
@@ -359,7 +359,7 @@ impl GpuContext {
             write_user_value(arg, &request)?;
             return Ok(0);
         }
-        if request.flags != 0 || reserved != 0 || request.buffer_handle == 0 {
+        if request.flags != 0 || reserved != 0 {
             request.result = GPU_RESULT_INVALID_ARGUMENT;
             write_user_value(arg, &request)?;
             return Ok(0);
@@ -394,7 +394,7 @@ impl GpuContext {
             write_user_value(arg, &request)?;
             return Ok(0);
         }
-        if request.flags != 0 || reserved != 0 || request.image_handle == 0 {
+        if request.flags != 0 || reserved != 0 {
             request.result = GPU_RESULT_INVALID_ARGUMENT;
             write_user_value(arg, &request)?;
             return Ok(0);
@@ -428,7 +428,7 @@ impl GpuContext {
             write_user_value(arg, &request)?;
             return Ok(0);
         }
-        if request.flags != 0 || reserved != 0 || request.buffer_handle == 0 {
+        if request.flags != 0 || reserved != 0 {
             request.result = GPU_RESULT_INVALID_ARGUMENT;
             write_user_value(arg, &request)?;
             return Ok(0);
@@ -453,6 +453,103 @@ impl GpuContext {
         Ok(0)
     }
 
+    fn buffer_upload_arguments_valid(request: &super::GpuContextUploadBuffer) -> bool {
+        request.reserved == 0
+            && request.source_ptr != 0
+            && request.size_bytes != 0
+            && request.size_bytes <= super::GPU_MAX_BUFFER_UPLOAD_SIZE as u64
+            && request.source_ptr.checked_add(request.size_bytes).is_some()
+            && usize::try_from(request.source_ptr).is_ok()
+            && usize::try_from(request.source_ptr + request.size_bytes).is_ok()
+            && request
+                .buffer_offset
+                .checked_add(request.size_bytes)
+                .is_some()
+    }
+
+    fn upload_buffer_for_task(
+        &self,
+        task: &crate::task::Task,
+        buffer: &GpuBuffer,
+        request: &mut super::GpuContextUploadBuffer,
+    ) {
+        request.clear_response();
+        if request.abi_version != GPU_ABI_VERSION {
+            request.result = GPU_RESULT_INVALID_ABI;
+            return;
+        }
+        if !Self::buffer_upload_arguments_valid(request)
+            || request
+                .buffer_offset
+                .checked_add(request.size_bytes)
+                .is_none_or(|end| end > buffer.allocation_size() as u64)
+        {
+            request.result = GPU_RESULT_INVALID_ARGUMENT;
+            return;
+        }
+        // Hold authority and its page owner through copy, clean and callback;
+        // a concurrent detach cannot invalidate the reservation underneath us.
+        let backend_buffer = buffer.backend_buffer();
+        let attached = self.attached_buffers.lock();
+        if !attached
+            .iter()
+            .any(|entry| Arc::ptr_eq(&entry._backend_buffer, &backend_buffer))
+        {
+            request.result = GPU_RESULT_INVALID_STATE;
+            return;
+        }
+        let upload = super::GpuBufferUploadInfo {
+            offset: request.buffer_offset,
+            size_bytes: request.size_bytes,
+        };
+        if buffer
+            .upload_for_task(
+                task,
+                request.source_ptr as usize,
+                upload,
+                self.backend_context.as_ref(),
+            )
+            .is_err()
+        {
+            request.result = GPU_RESULT_INVALID_STATE;
+            return;
+        }
+        request.uploaded_bytes = request.size_bytes;
+    }
+
+    fn upload_buffer_request_for_task(
+        &self,
+        task: &crate::task::Task,
+        request: &mut super::GpuContextUploadBuffer,
+    ) {
+        request.clear_response();
+        let owner = task.handle_table.get_arc_clone(request.buffer_handle);
+        if let Some(buffer) = owner
+            .as_ref()
+            .and_then(|object| object.as_gpu())
+            .and_then(GpuObject::as_buffer)
+        {
+            self.upload_buffer_for_task(task, buffer, request);
+        } else {
+            request.result = GPU_RESULT_INVALID_ARGUMENT;
+        }
+    }
+
+    fn handle_upload_buffer(&self, arg: usize) -> Result<i32, &'static str> {
+        let mut request: super::GpuContextUploadBuffer = read_user_value(arg)?;
+        request.clear_response();
+        if request.abi_version != GPU_ABI_VERSION {
+            request.result = GPU_RESULT_INVALID_ABI;
+        } else if !Self::buffer_upload_arguments_valid(&request) {
+            request.result = GPU_RESULT_INVALID_ARGUMENT;
+        } else {
+            let task = crate::task::mytask().ok_or("No current task for GPU buffer upload")?;
+            self.upload_buffer_request_for_task(&task, &mut request);
+        }
+        write_user_value(arg, &request)?;
+        Ok(0)
+    }
+
     fn image_is_attached(&self, image: &GpuImage) -> bool {
         let backend_image = image.backend_image();
         self.attached_images
@@ -471,7 +568,7 @@ impl GpuContext {
             write_user_value(arg, &request)?;
             return Ok(0);
         }
-        if reserved != 0 || reserved2 != 0 || request.image_handle == 0 {
+        if reserved != 0 || reserved2 != 0 {
             request.result = GPU_RESULT_INVALID_ARGUMENT;
             write_user_value(arg, &request)?;
             return Ok(0);
@@ -535,7 +632,7 @@ impl GpuContext {
             write_user_value(arg, &request)?;
             return Ok(0);
         }
-        if reserved != 0 || reserved2 != 0 || request.image_handle == 0 {
+        if reserved != 0 || reserved2 != 0 {
             request.result = GPU_RESULT_INVALID_ARGUMENT;
             write_user_value(arg, &request)?;
             return Ok(0);
@@ -586,7 +683,7 @@ impl GpuContext {
             write_user_value(arg, &request)?;
             return Ok(0);
         }
-        if reserved != 0 || reserved2 != 0 || reserved3 != 0 || request.image_handle == 0 {
+        if reserved != 0 || reserved2 != 0 || reserved3 != 0 {
             request.result = GPU_RESULT_INVALID_ARGUMENT;
             write_user_value(arg, &request)?;
             return Ok(0);
@@ -650,6 +747,7 @@ impl ControlOps for GpuContext {
             GPU_CONTEXT_DETACH_IMAGE => self.handle_detach_image(arg),
             super::GPU_CONTEXT_ATTACH_BUFFER => self.handle_attach_buffer(arg),
             GPU_CONTEXT_DETACH_BUFFER => self.handle_detach_buffer(arg),
+            super::GPU_CONTEXT_UPLOAD_BUFFER => self.handle_upload_buffer(arg),
             GPU_CONTEXT_UPLOAD_IMAGE_BGRA => self.handle_upload_image(arg, false),
             super::GPU_CONTEXT_UPLOAD_IMAGE => self.handle_upload_image(arg, true),
             GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA => {
@@ -893,6 +991,7 @@ fn copy_command_bytes(command_ptr: u64, command_size: u32) -> Result<Vec<u8>, &'
 #[cfg(test)]
 mod tests {
     mod asynchronous;
+    mod buffer_upload;
     mod image_aliases;
     mod synchronous;
     use alloc::sync::Arc;

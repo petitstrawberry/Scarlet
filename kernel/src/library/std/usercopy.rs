@@ -6,12 +6,38 @@ pub enum UserCopyError {
     NullPointer,
     AddressOverflow,
     TranslationError,
+    Aliasing,
 }
 
 pub fn copy_from_user(
     task: &crate::task::Task,
     user_addr: usize,
     dst: &mut [u8],
+) -> Result<(), UserCopyError> {
+    copy_from_user_inner::<false>(task, user_addr, dst, 0..0)
+}
+
+/// Copy directly into owned backing while rejecting aliases of its full range.
+///
+/// Each source chunk is resolved once, checked against `backing`, and copied
+/// from that same resolved pointer. There is no separate preflight/retranslation
+/// window. The copy primitive is overlap-safe as a defensive guarantee too.
+/// On an error a prefix may already have been written; callers must clean it
+/// and retain their device/CPU access reservation through that cleanup.
+pub(crate) fn copy_from_user_disjoint(
+    task: &crate::task::Task,
+    user_addr: usize,
+    dst: &mut [u8],
+    backing: core::ops::Range<usize>,
+) -> Result<(), UserCopyError> {
+    copy_from_user_inner::<true>(task, user_addr, dst, backing)
+}
+
+fn copy_from_user_inner<const DISJOINT: bool>(
+    task: &crate::task::Task,
+    user_addr: usize,
+    dst: &mut [u8],
+    backing: core::ops::Range<usize>,
 ) -> Result<(), UserCopyError> {
     if dst.is_empty() {
         return Ok(());
@@ -31,12 +57,27 @@ pub fn copy_from_user(
             .translate_to_kva(current_vaddr)
             .ok_or(UserCopyError::TranslationError)?;
 
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                kaddr as *const u8,
-                dst[copied..copied + chunk_len].as_mut_ptr(),
-                chunk_len,
-            );
+        if DISJOINT {
+            let source_end = kaddr
+                .checked_add(chunk_len)
+                .ok_or(UserCopyError::AddressOverflow)?;
+            if kaddr < backing.end && source_end > backing.start {
+                return Err(UserCopyError::Aliasing);
+            }
+            // SAFETY: the task translation supplies this readable chunk and the
+            // destination slice supplies writable storage. `copy` tolerates
+            // aliasing, unlike the ordinary usercopy fast path below.
+            unsafe { core::ptr::copy(kaddr as *const u8, dst[copied..].as_mut_ptr(), chunk_len) };
+        } else {
+            // SAFETY: ordinary usercopy callers provide kernel-owned disjoint
+            // destination storage and a translated readable user source chunk.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    kaddr as *const u8,
+                    dst[copied..].as_mut_ptr(),
+                    chunk_len,
+                )
+            };
         }
 
         copied += chunk_len;

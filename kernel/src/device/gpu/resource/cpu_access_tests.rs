@@ -31,17 +31,32 @@ struct RecordingBackend {
     reserved: AtomicBool,
     reject: bool,
     fail_transfer: bool,
+    inline: bool,
 }
 
 impl RecordingBackend {
-    fn new(reject: bool, fail_transfer: bool) -> Self {
+    fn new(reject: bool, fail_transfer: bool, inline: bool) -> Self {
         Self {
             backing: Mutex::new(None),
             events: Mutex::new(Vec::new()),
             reserved: AtomicBool::new(false),
             reject,
             fail_transfer,
+            inline,
         }
+    }
+
+    fn reserve(&self) -> Result<(), &'static str> {
+        // A queued GPU read still sees the old pixels when the hook is entered.
+        // This assertion fails if generic upload writes before retiring it.
+        assert_eq!(self.pixels(), [0x11; 16]);
+        if self.reject {
+            self.events.lock().push(Event::Rejected);
+            return Err("retirement failed");
+        }
+        assert!(!self.reserved.swap(true, Ordering::AcqRel));
+        self.events.lock().push(Event::Retired);
+        Ok(())
     }
 
     fn pixels(&self) -> [u8; 16] {
@@ -121,19 +136,27 @@ impl GpuBackendContext for RecordingBackend {
         Err("recording backend has no hardware queue")
     }
 
+    fn begin_image_cpu_access_inline(
+        &self,
+        _: &dyn GpuBackendImage,
+    ) -> Result<Option<u64>, &'static str> {
+        if !self.inline {
+            return Ok(None);
+        }
+        self.reserve()?;
+        Ok(Some(1))
+    }
+    fn end_image_cpu_access_inline(&self, _: &dyn GpuBackendImage, token: u64) {
+        assert_eq!(token, 1);
+        drop(AccessGuard(self));
+    }
+
     fn begin_image_cpu_access(
         &self,
         _image: &dyn GpuBackendImage,
     ) -> Result<Option<Box<dyn GpuBackendCpuAccessGuard + '_>>, &'static str> {
-        // A queued GPU read still sees the old pixels when the hook is entered.
-        // This assertion fails if generic upload writes before retiring it.
-        assert_eq!(self.pixels(), [0x11; 16]);
-        if self.reject {
-            self.events.lock().push(Event::Rejected);
-            return Err("retirement failed");
-        }
-        assert!(!self.reserved.swap(true, Ordering::AcqRel));
-        self.events.lock().push(Event::Retired);
+        assert!(!self.inline, "inline lease must bypass boxed guard");
+        self.reserve()?;
         Ok(Some(Box::new(AccessGuard(self))))
     }
 
@@ -169,8 +192,9 @@ impl GpuBackendContext for RecordingBackend {
 fn fixture(
     reject: bool,
     fail_transfer: bool,
+    inline: bool,
 ) -> (Arc<RecordingBackend>, GpuImage, crate::task::Task, usize) {
-    let backend = Arc::new(RecordingBackend::new(reject, fail_transfer));
+    let backend = Arc::new(RecordingBackend::new(reject, fail_transfer, inline));
     let image = GpuImage::new(
         backend.clone(),
         GpuImageCreateInfo::new(
@@ -192,93 +216,105 @@ fn fixture(
 
 #[test_case]
 fn upload_retires_before_real_usercopy_and_retains_guard_through_transfer() {
-    let (backend, image, task, address) = fixture(false, false);
-    let request = GpuContextUploadImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
-    let layout = image_upload_layout(&request, image.query_info(), image.layout()).unwrap();
-    image
-        .upload_for_task(&task, address, layout, backend.as_ref())
-        .unwrap();
-    assert_eq!(
-        *backend.events.lock(),
-        [Event::Retired, Event::Uploaded, Event::Released]
-    );
-    assert!(!backend.reserved.load(Ordering::Acquire));
+    for inline in [false, true] {
+        let (backend, image, task, address) = fixture(false, false, inline);
+        let request = GpuContextUploadImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
+        let layout = image_upload_layout(&request, image.query_info(), image.layout()).unwrap();
+        image
+            .upload_for_task(&task, address, layout, backend.as_ref())
+            .unwrap();
+        assert_eq!(
+            *backend.events.lock(),
+            [Event::Retired, Event::Uploaded, Event::Released]
+        );
+        assert!(!backend.reserved.load(Ordering::Acquire));
+    }
 }
 
 #[test_case]
 fn rejected_upload_leaves_real_backing_unchanged() {
-    let (backend, image, task, address) = fixture(true, false);
-    let request = GpuContextUploadImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
-    let layout = image_upload_layout(&request, image.query_info(), image.layout()).unwrap();
-    assert_eq!(
-        image.upload_for_task(&task, address, layout, backend.as_ref()),
-        Err("retirement failed")
-    );
-    assert_eq!(backend.pixels(), [0x11; 16]);
-    assert_eq!(*backend.events.lock(), [Event::Rejected]);
-    assert!(!backend.reserved.load(Ordering::Acquire));
+    for inline in [false, true] {
+        let (backend, image, task, address) = fixture(true, false, inline);
+        let request = GpuContextUploadImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
+        let layout = image_upload_layout(&request, image.query_info(), image.layout()).unwrap();
+        assert_eq!(
+            image.upload_for_task(&task, address, layout, backend.as_ref()),
+            Err("retirement failed")
+        );
+        assert_eq!(backend.pixels(), [0x11; 16]);
+        assert_eq!(*backend.events.lock(), [Event::Rejected]);
+        assert!(!backend.reserved.load(Ordering::Acquire));
+    }
 }
 
 #[test_case]
 fn usercopy_failure_releases_reservation_without_backend_transfer() {
-    let (backend, image, task, address) = fixture(false, false);
-    let request = GpuContextUploadImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
-    let layout = image_upload_layout(&request, image.query_info(), image.layout()).unwrap();
-    assert!(
-        image
-            .upload_for_task(&task, 0, layout, backend.as_ref())
-            .is_err()
-    );
-    assert_eq!(*backend.events.lock(), [Event::Retired, Event::Released]);
-    assert!(!backend.reserved.load(Ordering::Acquire));
+    for inline in [false, true] {
+        let (backend, image, task, address) = fixture(false, false, inline);
+        let request = GpuContextUploadImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
+        let layout = image_upload_layout(&request, image.query_info(), image.layout()).unwrap();
+        assert!(
+            image
+                .upload_for_task(&task, 0, layout, backend.as_ref())
+                .is_err()
+        );
+        assert_eq!(*backend.events.lock(), [Event::Retired, Event::Released]);
+        assert!(!backend.reserved.load(Ordering::Acquire));
+    }
 }
 
 #[test_case]
 fn failed_backend_transfer_releases_reservation() {
-    let (backend, image, task, address) = fixture(false, true);
-    let request = GpuContextUploadImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
-    let layout = image_upload_layout(&request, image.query_info(), image.layout()).unwrap();
-    assert_eq!(
-        image.upload_for_task(&task, address, layout, backend.as_ref()),
-        Err("upload transfer failed")
-    );
-    assert_eq!(
-        *backend.events.lock(),
-        [Event::Retired, Event::Uploaded, Event::Released]
-    );
-    assert!(!backend.reserved.load(Ordering::Acquire));
+    for inline in [false, true] {
+        let (backend, image, task, address) = fixture(false, true, inline);
+        let request = GpuContextUploadImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
+        let layout = image_upload_layout(&request, image.query_info(), image.layout()).unwrap();
+        assert_eq!(
+            image.upload_for_task(&task, address, layout, backend.as_ref()),
+            Err("upload transfer failed")
+        );
+        assert_eq!(
+            *backend.events.lock(),
+            [Event::Retired, Event::Uploaded, Event::Released]
+        );
+        assert!(!backend.reserved.load(Ordering::Acquire));
+    }
 }
 
 #[test_case]
 fn readback_copies_before_reservation_release_admits_later_gpu_write() {
-    let (backend, image, task, address) = fixture(false, false);
-    let request = GpuContextReadbackImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
-    let layout = image_readback_layout(&request, image.query_info(), image.layout()).unwrap();
-    image
-        .readback_for_task(&task, address, layout, backend.as_ref())
-        .unwrap();
-    let mut pixels = [0; 16];
-    copy_from_user(&task, address, &mut pixels).unwrap();
-    assert_eq!(pixels, [0x33; 16]);
-    assert_eq!(backend.pixels(), [0x99; 16]);
-    assert_eq!(
-        *backend.events.lock(),
-        [Event::Retired, Event::Readback, Event::Released]
-    );
+    for inline in [false, true] {
+        let (backend, image, task, address) = fixture(false, false, inline);
+        let request = GpuContextReadbackImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
+        let layout = image_readback_layout(&request, image.query_info(), image.layout()).unwrap();
+        image
+            .readback_for_task(&task, address, layout, backend.as_ref())
+            .unwrap();
+        let mut pixels = [0; 16];
+        copy_from_user(&task, address, &mut pixels).unwrap();
+        assert_eq!(pixels, [0x33; 16]);
+        assert_eq!(backend.pixels(), [0x99; 16]);
+        assert_eq!(
+            *backend.events.lock(),
+            [Event::Retired, Event::Readback, Event::Released]
+        );
+    }
 }
 
 #[test_case]
 fn rejected_readback_preserves_backing_and_user_destination() {
-    let (backend, image, task, address) = fixture(true, false);
-    let request = GpuContextReadbackImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
-    let layout = image_readback_layout(&request, image.query_info(), image.layout()).unwrap();
-    assert_eq!(
-        image.readback_for_task(&task, address, layout, backend.as_ref()),
-        Err("retirement failed")
-    );
-    let mut pixels = [0; 16];
-    copy_from_user(&task, address, &mut pixels).unwrap();
-    assert_eq!(pixels, [0x22; 16]);
-    assert_eq!(backend.pixels(), [0x11; 16]);
-    assert_eq!(*backend.events.lock(), [Event::Rejected]);
+    for inline in [false, true] {
+        let (backend, image, task, address) = fixture(true, false, inline);
+        let request = GpuContextReadbackImageBgra::new(1, address as u64, 16, 8, 0, 0, 2, 2);
+        let layout = image_readback_layout(&request, image.query_info(), image.layout()).unwrap();
+        assert_eq!(
+            image.readback_for_task(&task, address, layout, backend.as_ref()),
+            Err("retirement failed")
+        );
+        let mut pixels = [0; 16];
+        copy_from_user(&task, address, &mut pixels).unwrap();
+        assert_eq!(pixels, [0x22; 16]);
+        assert_eq!(backend.pixels(), [0x11; 16]);
+        assert_eq!(*backend.events.lock(), [Event::Rejected]);
+    }
 }
