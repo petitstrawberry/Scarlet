@@ -31,75 +31,56 @@ fn canvas_aspect() -> f32 {
     let content_height = WINDOW_HEIGHT - content_layout.decoration_size().height;
     content_width / (content_height - HUD_HEIGHT)
 }
-const STATS_INTERVAL_NS: u64 = 500_000_000;
+mod frame_rate;
 const PARTICLE_COUNT: usize = 72;
 const CUBE_WINDOW_KEY: &str = "cube";
 const GEARS_WINDOW_KEY: &str = "gears";
 const SWARM_WINDOW_KEY: &str = "swarm";
 
-#[derive(Debug)]
 struct FpsMeter {
     log_name: Option<&'static str>,
-    started_at: Instant,
-    last_paint_at: Instant,
-    frames: u64,
-    fps_milli: u64,
-    frame_us: u64,
+    clock: Instant,
+    rate: frame_rate::FrameRate,
+    reading: State<(u64, u64)>,
 }
 
 impl FpsMeter {
-    fn new(log_name: Option<&'static str>) -> Self {
-        let now = Instant::now();
+    fn new(log_name: Option<&'static str>, id: u32) -> Self {
         Self {
             log_name,
-            started_at: now,
-            last_paint_at: now,
-            frames: 0,
-            fps_milli: 0,
-            frame_us: 0,
+            clock: Instant::now(),
+            rate: frame_rate::FrameRate::default(),
+            reading: State::new(StateId::new(id), (0, 0)),
         }
     }
 
-    fn record_paint(&mut self) -> (u64, u64) {
-        let now = Instant::now();
-        let idle_ns =
-            u64::try_from(now.duration_since(self.last_paint_at).as_nanos()).unwrap_or(u64::MAX);
-        if idle_ns > STATS_INTERVAL_NS.saturating_mul(2) {
-            self.started_at = now;
-            self.frames = 0;
+    fn record_frame(&mut self) {
+        let now_ns = u64::try_from(self.clock.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.record_frame_at(now_ns);
+    }
+
+    fn record_frame_at(&mut self, now_ns: u64) {
+        let Some((fps_milli, frame_us)) = self.rate.record(now_ns) else {
+            return;
+        };
+        if self.reading.get() != (fps_milli, frame_us) {
+            self.reading.set((fps_milli, frame_us));
         }
-        self.last_paint_at = now;
-        self.frames = self.frames.saturating_add(1);
-        let elapsed_ns =
-            u64::try_from(now.duration_since(self.started_at).as_nanos()).unwrap_or(u64::MAX);
-        if elapsed_ns >= STATS_INTERVAL_NS {
-            self.fps_milli = self
-                .frames
-                .saturating_mul(1_000_000_000)
-                .saturating_mul(1_000)
-                / elapsed_ns.max(1);
-            self.frame_us = elapsed_ns / self.frames.max(1) / 1_000;
-            if let Some(name) = self.log_name {
-                println!(
-                    "[ui-sgfx-showcase] {name} paint_fps={}.{:03} frame_us={} frames={} elapsed_us={}",
-                    self.fps_milli / 1_000,
-                    self.fps_milli % 1_000,
-                    self.frame_us,
-                    self.frames,
-                    elapsed_ns / 1_000
-                );
-            }
-            self.started_at = now;
-            self.frames = 0;
+        if let Some(name) = self.log_name {
+            println!(
+                "[ui-sgfx-showcase] {name} submitted_fps={}.{:03} frame_us={}",
+                fps_milli / 1_000,
+                fps_milli % 1_000,
+                frame_us,
+            );
         }
-        (self.fps_milli, self.frame_us)
     }
 }
 
 #[derive(Clone)]
 struct FpsHud {
     title: &'static str,
-    meter: Rc<RefCell<FpsMeter>>,
+    reading: State<(u64, u64)>,
     draws: usize,
     triangles: usize,
 }
@@ -113,7 +94,7 @@ impl FpsHud {
     ) -> Self {
         Self {
             title,
-            meter,
+            reading: meter.borrow().reading.clone(),
             draws,
             triangles,
         }
@@ -126,12 +107,16 @@ impl View for FpsHud {
             self.clone(),
             FpsHudRenderObject {
                 title: self.title,
-                meter: Rc::clone(&self.meter),
+                reading: self.reading.clone(),
                 draws: self.draws,
                 triangles: self.triangles,
                 size: Size::new(1.0, HUD_HEIGHT),
             },
         ))
+    }
+
+    fn listenables(&self) -> Vec<&dyn scarlet_ui::state::Listenable> {
+        vec![&self.reading]
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -141,7 +126,7 @@ impl View for FpsHud {
 
 struct FpsHudRenderObject {
     title: &'static str,
-    meter: Rc<RefCell<FpsMeter>>,
+    reading: State<(u64, u64)>,
     draws: usize,
     triangles: usize,
     size: Size,
@@ -159,8 +144,12 @@ impl ElementRenderObject for FpsHudRenderObject {
 
     fn render(&mut self) {}
 
+    fn update_needs_layout(&self) -> bool {
+        false
+    }
+
     fn paint<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
-        let (fps_milli, frame_us) = self.meter.borrow_mut().record_paint();
+        let (fps_milli, frame_us) = self.reading.get();
         let text = format!(
             "{}   FPS {}.{:03}   frame {}.{:03} ms   draws {}   triangles {}",
             self.title,
@@ -193,10 +182,36 @@ impl ElementRenderObject for FpsHudRenderObject {
             return UpdateResult::Replaced;
         };
         self.title = hud.title;
-        self.meter = Rc::clone(&hud.meter);
+        self.reading = hud.reading.clone();
         self.draws = hud.draws;
         self.triangles = hud.triangles;
         UpdateResult::Updated
+    }
+}
+
+#[cfg(test)]
+mod fps_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn submitted_frames_invalidate_the_retained_hud_without_painting_it() {
+        let meter = Rc::new(RefCell::new(FpsMeter::new(None, 303)));
+        let hud = FpsHud::new("Cube", Rc::clone(&meter), 1, 12);
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&notifications);
+        let listenables = hud.listenables();
+        let subscription = listenables[0].subscribe_any(Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+        meter.borrow_mut().record_frame_at(0);
+        meter.borrow_mut().record_frame_at(500_000_000);
+        assert_eq!(hud.reading.get(), (2_000, 500_000));
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+        // A stable reading must not trigger extra HUD work each interval.
+        meter.borrow_mut().record_frame_at(1_000_000_000);
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+        listenables[0].unsubscribe(subscription);
     }
 }
 
@@ -242,9 +257,9 @@ impl SgfxShowcaseApp {
             cube_frame: State::new(StateId::new(300), Arc::new(initial_cube.clone())),
             gears_frame: State::new(StateId::new(301), Arc::new(initial_gears.clone())),
             swarm_frame: State::new(StateId::new(302), Arc::new(initial_swarm.clone())),
-            cube_meter: Rc::new(RefCell::new(FpsMeter::new(log_fps.then_some("cube")))),
-            gears_meter: Rc::new(RefCell::new(FpsMeter::new(log_fps.then_some("gears")))),
-            swarm_meter: Rc::new(RefCell::new(FpsMeter::new(log_fps.then_some("swarm")))),
+            cube_meter: Rc::new(RefCell::new(FpsMeter::new(log_fps.then_some("cube"), 303))),
+            gears_meter: Rc::new(RefCell::new(FpsMeter::new(log_fps.then_some("gears"), 304))),
+            swarm_meter: Rc::new(RefCell::new(FpsMeter::new(log_fps.then_some("swarm"), 305))),
             cube,
             cube_texture,
             gears,
@@ -430,6 +445,7 @@ impl Application for SgfxShowcaseApp {
             .unwrap_or(u64::MAX);
         let animation_seconds = elapsed_ns as f32 / 1_000_000_000.0;
         if scene == CUBE_WINDOW_KEY {
+            self.cube_meter.borrow_mut().record_frame();
             self.cube_frame.set(Arc::new(cube_frame(
                 self.frame_number,
                 animation_seconds,
@@ -438,6 +454,7 @@ impl Application for SgfxShowcaseApp {
             )));
         }
         if scene == GEARS_WINDOW_KEY {
+            self.gears_meter.borrow_mut().record_frame();
             self.gears_frame.set(Arc::new(gears_frame(
                 self.frame_number,
                 animation_seconds,
@@ -445,6 +462,7 @@ impl Application for SgfxShowcaseApp {
             )));
         }
         if scene == SWARM_WINDOW_KEY {
+            self.swarm_meter.borrow_mut().record_frame();
             self.swarm_frame.set(Arc::new(swarm_frame(
                 self.frame_number,
                 animation_seconds,

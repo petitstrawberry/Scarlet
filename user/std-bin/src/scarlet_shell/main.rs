@@ -860,24 +860,15 @@ fn status_bar_resize_needed(current: Size, desired: Size) -> bool {
 
 fn control_center_body_position(
     screen_width: f32,
-    screen_height: f32,
     popup_y: i32,
     body_size: Size,
-    presentation: ControlCenterPresentation,
 ) -> (i32, i32) {
     let outsets = ElevationRole::Floating.paint_outsets();
-    match presentation {
-        ControlCenterPresentation::LaptopPopover => (
-            (screen_width - body_size.width - CONTROL_CENTER_MARGIN as f32 - outsets.right).max(0.0)
-                as i32,
-            popup_y + CONTROL_CENTER_MARGIN + outsets.top as i32,
-        ),
-        ControlCenterPresentation::TabletSheet => (
-            ((screen_width - body_size.width) / 2.0).max(0.0) as i32,
-            (screen_height - body_size.height - 24.0 - outsets.bottom)
-                .max((popup_y + CONTROL_CENTER_MARGIN) as f32) as i32,
-        ),
-    }
+    (
+        (screen_width - body_size.width - CONTROL_CENTER_MARGIN as f32 - outsets.right).max(0.0)
+            as i32,
+        popup_y + CONTROL_CENTER_MARGIN + outsets.top as i32,
+    )
 }
 
 /// Apply one compositor input-environment snapshot to reactive shell state.
@@ -3527,10 +3518,8 @@ impl Application for ShellApp {
         set_state_if_changed(&self.control_center_size, control_center_size);
         let (control_center_body_x, control_center_body_y) = control_center_body_position(
             screen_width,
-            screen_height,
             shell_layout.popup_y(),
             control_center_size,
-            control_center_presentation,
         );
         let home_button =
             build_home_button(self.workspace_state.get(), self.workspace_commands.clone());
@@ -4652,15 +4641,22 @@ mod tests {
         let outsets = scarlet_ui::ElevationRole::Floating.paint_outsets();
         let (body_x, body_y) = control_center_body_position(
             1920.0,
-            1080.0,
             32,
             Size::new(304.0, 300.0),
-            ControlCenterPresentation::LaptopPopover,
         );
 
         assert_eq!(body_x as f32 - outsets.left, 1920.0 - 8.0 - 324.0);
         assert_eq!(body_x as f32 + 304.0 + outsets.right, 1920.0 - 8.0);
         assert_eq!(body_y as f32 - outsets.top, 32.0 + 8.0);
+    }
+
+    #[test]
+    fn tablet_control_center_stays_below_the_top_right_button() {
+        let outsets = scarlet_ui::ElevationRole::Floating.paint_outsets();
+        let body = Size::new(392.0, 420.0);
+        let (x, y) = control_center_body_position(1080.0, 40, body);
+        assert_eq!(x as f32 + body.width + outsets.right, 1080.0 - 8.0);
+        assert_eq!(y as f32 - outsets.top, 40.0 + 8.0);
     }
 
     #[test]

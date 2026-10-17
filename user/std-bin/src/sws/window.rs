@@ -1551,7 +1551,10 @@ impl WindowManager {
             workspace_restore_geometry: None,
             has_presented_frame: false,
             last_frame_submission_counter: None,
-            presentation_content_ready: true,
+            // The initial client SHM has no submitted pixels yet. Keep it out
+            // of composition while permitting focus and the bootstrap callback.
+            // Both CPU UPDATE_BUFFER and SGFX COMMIT_SGFX_FRAME open this gate.
+            presentation_content_ready: false,
             pending_maximize: false,
             initial_size_negotiated: false,
             saved_geometry: None,
@@ -2996,6 +2999,47 @@ mod tests {
         let window = manager.get_window(id).unwrap();
         assert_eq!((window.width, window.height), (1100, 800));
         assert_eq!(window.window_geometry(), (10, 42, 1080, 780));
+    }
+
+    #[test]
+    fn initial_client_shm_waits_for_a_commit_without_suspending_frame_requests() {
+        let mut manager = WindowManager::new();
+        let shm =
+            scarlet_os::ipc::SharedMemory::create(16, scarlet_os::ipc::permissions::READ_WRITE)
+                .expect("create initial client SHM");
+        let id = manager
+            .create_window_with_shm_from_event(1, 0, 0, 2, 2, shm, None, 16)
+            .unwrap();
+        let window = manager.get_window_mut(id).unwrap();
+
+        assert!(!window.has_presented_frame);
+        assert!(!window.presentation_content_ready);
+        assert!(
+            !window.is_presented(),
+            "unsubmitted SHM must not be composed"
+        );
+        assert!(window.is_logically_presented());
+        assert_eq!(
+            window.state_flags(),
+            0,
+            "the first frame must stay eligible"
+        );
+        assert!(super::super::frame_callback::frame_callback_is_ready(
+            window.is_logically_presented(),
+            window.has_presented_frame,
+            false,
+            0,
+            0,
+        ));
+
+        // The compositor applies these transitions for both CPU damage commits
+        // and accepted SGFX commits before exposing the first usable frame.
+        assert!(window.note_frame_submission(0));
+        assert!(window.validate_presentation_content());
+        assert!(window.is_presented());
+        assert_eq!(window.last_frame_submission_counter, Some(0));
+        assert!(!window.note_frame_submission(1));
+        assert!(!window.validate_presentation_content());
     }
 
     #[test]
