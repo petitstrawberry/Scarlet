@@ -10,7 +10,7 @@ naga = { version = "24", features = ["wgsl-in", "spv-out"] }
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
 ash = { version = "0.38", default-features = false, features = ["debug", "std"] }
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "bf024ea72ca32f47d3ddce42a3c5b98cf680901a", default-features = false, features = ["std", "platform-sws"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "961db59ee65502a899b2787ce5bdaae2e220fcc6", default-features = false, features = ["std", "platform-sws"] }
 sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "20bb5b8cc19445520d08c31c3971ac06244bc1d9", default-features = false, features = ["std", "backend-dynamic"] }
 
 [target.'cfg(all(target_os = "scarlet", target_arch = "aarch64"))'.dependencies]
