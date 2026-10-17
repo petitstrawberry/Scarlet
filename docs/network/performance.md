@@ -269,3 +269,72 @@ tests passed **115**, with **4 ignored**. No forced-OOM fault injection was used
 to exercise the new retry branch; the actual formerly failing scroll case
 completed without OOM. These checks resolve that reproduction, not every source
 of comment-loading latency or all possible GPU memory pressure.
+
+## Threaded asynchronous scrolling (2026-10-17)
+
+The previous Scarlet port disabled `ENABLE_ASYNC_SCROLLING` and
+`ENABLE_SCROLLING_THREAD`; wheel input always requested synchronous scrolling
+and blocking DOM dispatch on the Page owner. Independent composition therefore
+left wheel input waiting behind script and layout.
+
+WebKit `dbe7f6de1709d4461662d3725025afd28136fadc` connects
+`ThreadedScrollingCoordinator` and `ScrollingTreeCoordinated` through Scarlet's
+ChromeClient factory. Frame/overflow scrolling, hit testing, fixed/sticky nodes,
+event regions and scroll-position reconciliation use WebCore's existing classes.
+The native build enables async scrolling and the coordinated port's scrolling
+thread, kinetic-wheel and wheel-event-region capabilities.
+
+Myrica routes wheel events from the UI through an independently owned endpoint.
+Acceptance checks navigation generation and viewport dimensions/scale, with a
+256-event pending limit; rejected events retain the owner queue. WebKit chooses
+blocking or passive DOM dispatch. Endpoint invalidation clears owner callbacks
+before Page destruction. DOM routing temporarily retains the owner run loop
+under the live-state lock, then posts after releasing that lock to avoid a
+lock inversion with the UI mailbox's wake callback.
+
+The compositor supplies display ticks while scrolling is active. It consumes
+scroll-thread position writes under the scrolling-tree lock, keeping fixed and
+sticky positions together and leaving ordinary layout-position commits with
+the owner. A queued owner update is signalled to WebKit's standard rendering
+synchronization timeout, allowing composition while script is busy. Phase-less
+pixel wheels retain immediate pixel deltas and are excluded from kinetic
+history, since they have no gesture-end event to drain that history.
+
+Host verification: **77 Myrica tests passed**, including blocked-owner input,
+ordinary-input fallback, pending navigation and resize rejection. Syntax checks
+also passed for the embedding and standard scrolling implementation files.
+
+Native validation used the ordinary Release image with Myrica
+`3be1ca8` / WebKit `dbe7f6de1709d4461662d3725025afd28136fadc`, HVF,
+4 vCPUs, 8 GiB, Cocoa GL/Retina, audio and `/dev/video0`. The guest output was
+2560×1600. The startup log reports `compositor=threaded scrolling=async`.
+
+A real HTML timer blocked JavaScript for eight seconds; the recorded owner tick
+was **8,001,014 microseconds**. During that block, wheel input moved the retained
+page rows while the fixed header remained in place. The nested overflow region
+scrolled independently. Four non-passive wheel events updated their DOM counter
+to four and left the page stationary through `preventDefault()`. Maximize/restore,
+24 further wheel steps and ordinary window closure passed.
+
+The same image then opened the real YouTube watch page
+`https://www.youtube.com/watch?v=cxvXOVAVwjE`, decoding 1280×720 H.264 through
+Scarlet's NV12 device path. Six wheel steps partially exposed the comments while
+video presentation continued. Another 40 steps reached actual loaded comments;
+while offscreen, media time advanced from 56.88 to 57.90 seconds and decoded
+frames increased from 1,708 to 1,739 while presentation intentionally held at
+1,319. After 46 steps back, presentation advanced from 1,583 to 1,612 across
+media time 70.08 to 71.08 seconds.
+
+Fullscreen entry/Escape exit, theater mode and a twelve-event corner-drag resize
+passed. The backing extent changed from 2196×1282 to 2008×1094, and the browser
+remained usable. The 4:05 video reached its natural end, then autoplay started
+the next video. Both browser processes closed normally. Across this run there
+were **zero device-loss, GPU allocation-budget, queue-execution or WebCore resize
+failures**. The full native build passed.
+
+YouTube initial loading still included an owner tick of about **1.61 seconds**.
+The native tests establish independent scroll composition and the listed
+regressions; they do not measure all sources of loading latency or establish
+a general frame-rate benchmark. Remote-desktop capture adds readback work.
+Validation logs and captures use `/tmp/scarlet-async-scroll-*`; the implementation
+and bundle references are preserved in their repositories.
