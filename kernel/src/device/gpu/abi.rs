@@ -6,6 +6,10 @@ pub const GPU_ABI_VERSION: u32 = 1;
 pub const GPU_CONTEXT_UPLOAD_IMAGE: u32 = 0x4772;
 /// Read an uncompressed color image in its immutable native format.
 pub const GPU_CONTEXT_READBACK_IMAGE: u32 = 0x4773;
+/// Upload bytes into a buffer attached to a context, with ordered cache maintenance.
+pub const GPU_CONTEXT_UPLOAD_BUFFER: u32 = 0x4774;
+/// Maximum source byte count in one synchronous buffer upload.
+pub const GPU_MAX_BUFFER_UPLOAD_SIZE: u32 = 64 * 1024 * 1024;
 
 /// Control command that queries generic GPU and backend information.
 pub const GPU_QUERY_INFO: u32 = 0x4750;
@@ -1726,3 +1730,56 @@ pub use scarlet_abi::shared_image::{GPU_IMPORT_SHARED_IMAGE, GpuImportSharedImag
 pub type GpuContextUploadImage = GpuContextUploadImageBgra;
 /// Format-aware single-plane readback record for `GPU_CONTEXT_READBACK_IMAGE`.
 pub type GpuContextReadbackImage = GpuContextReadbackImageBgra;
+
+/// Synchronous upload into a buffer capability attached to this context.
+///
+/// The source pointer is borrowed only until return. Failure reports zero
+/// `uploaded_bytes`; a failed usercopy may have modified a prefix of backing.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct GpuContextUploadBuffer {
+    /// Current GPU ABI version, echoed by the kernel.
+    pub abi_version: u32,
+    /// Explicit `GPU_RESULT_*` response.
+    pub result: u32,
+    /// Existing buffer capability attached to this context.
+    pub buffer_handle: u32,
+    /// Must be zero.
+    pub reserved: u32,
+    /// Destination byte offset in the buffer allocation.
+    pub buffer_offset: u64,
+    /// Borrowed userspace source address.
+    pub source_ptr: u64,
+    /// Non-zero source byte length, at most `GPU_MAX_BUFFER_UPLOAD_SIZE`.
+    pub size_bytes: u64,
+    /// Complete byte count on success; zero on every failure.
+    pub uploaded_bytes: u64,
+}
+
+impl GpuContextUploadBuffer {
+    /// Build a request borrowing the supplied user range until control returns.
+    pub const fn new(
+        buffer_handle: u32,
+        buffer_offset: u64,
+        source_ptr: u64,
+        size_bytes: u64,
+    ) -> Self {
+        Self {
+            abi_version: GPU_ABI_VERSION,
+            result: GPU_RESULT_SUCCESS,
+            buffer_handle,
+            reserved: 0,
+            buffer_offset,
+            source_ptr,
+            size_bytes,
+            uploaded_bytes: 0,
+        }
+    }
+
+    pub(crate) fn clear_response(&mut self) {
+        self.result = GPU_RESULT_SUCCESS;
+        self.uploaded_bytes = 0;
+    }
+}
+
+const _: [(); 48] = [(); core::mem::size_of::<GpuContextUploadBuffer>()];
