@@ -7,7 +7,8 @@
 extern crate alloc;
 
 use crate::sync::{IrqRwSpinLock, IrqSpinLock};
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::device::video::{
     SCARLET_VIDEO_FORMAT_AV1, SCARLET_VIDEO_FORMAT_H264, SCARLET_VIDEO_FORMAT_HEVC,
@@ -103,7 +104,10 @@ struct MappedFrameInfo {
 }
 
 enum PendingDecodeBuffer {
-    ExternalMapped { output_paddr: u64 },
+    ExternalMapped {
+        output_paddr: u64,
+        buffer_lease: Arc<ContiguousPages>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -124,6 +128,20 @@ struct PendingDecode {
     timestamp: u64,
 }
 
+impl PendingDecode {
+    /// Consume one used chain while retaining the allocation until both return.
+    fn complete_descriptor(&mut self, used_desc: usize) -> Option<bool> {
+        if Some(used_desc) == self.output_req_desc {
+            self.output_req_desc = None;
+        } else if used_desc == self.input_req_desc && !self.input_done {
+            self.input_done = true;
+        } else {
+            return None;
+        }
+        Some(self.output_req_desc.is_none() && self.input_done)
+    }
+}
+
 struct CommandBuffers {
     req_alloc: ContiguousPages,
     resp_alloc: ContiguousPages,
@@ -135,6 +153,79 @@ impl CommandBuffers {
             req_alloc: ContiguousPages::new(1)?,
             resp_alloc: ContiguousPages::new(1)?,
         })
+    }
+}
+
+/// Ownership of the shared control-command pages and their published chain.
+/// All used-ring consumers must route this completion before asynchronous work.
+#[derive(Default)]
+struct SyncCommandState {
+    pending_desc: Option<usize>,
+    completed: bool,
+}
+
+impl SyncCommandState {
+    fn begin(&mut self, descriptor: usize) -> Result<(), &'static str> {
+        if self.pending_desc.is_some() {
+            return Err("VirtIO video previous command is still pending");
+        }
+        self.pending_desc = Some(descriptor);
+        self.completed = false;
+        Ok(())
+    }
+
+    fn complete_descriptor(&mut self, descriptor: usize) -> bool {
+        if self.pending_desc != Some(descriptor) {
+            return false;
+        }
+        self.pending_desc = None;
+        self.completed = true;
+        true
+    }
+}
+
+const SESSION_ACTIVE: u8 = 0;
+const SESSION_RETIRING: u8 = 1;
+const SESSION_REAPING: u8 = 2;
+
+/// Exactly one caller may clean up an ownerless session. Failed teardown
+/// returns to RETIRING without permitting allocation; success returns ACTIVE.
+struct SessionRetirement<'a> {
+    state: &'a AtomicU8,
+    finished: bool,
+}
+
+impl<'a> SessionRetirement<'a> {
+    fn claim(state: &'a AtomicU8, retry_only: bool) -> Result<Self, &'static str> {
+        let previous = state.load(Ordering::Acquire);
+        if previous == SESSION_REAPING || (retry_only && previous != SESSION_RETIRING) {
+            return Err("VirtIO video session retirement is already claimed");
+        }
+        state
+            .compare_exchange(
+                previous,
+                SESSION_REAPING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| "VirtIO video session retirement changed")?;
+        Ok(Self {
+            state,
+            finished: false,
+        })
+    }
+
+    fn finish(mut self) {
+        self.finished = true;
+        self.state.store(SESSION_ACTIVE, Ordering::Release);
+    }
+}
+
+impl Drop for SessionRetirement<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.state.store(SESSION_RETIRING, Ordering::Release);
+        }
     }
 }
 
@@ -154,6 +245,9 @@ impl DecodeCommandBuffers {
 
 struct VideoSession {
     stream_id: u32,
+    reserved: AtomicBool,
+    retirement: AtomicU8,
+    operation: IrqSpinLock<()>,
     stream_created: IrqRwSpinLock<bool>,
     stream_coded_format: IrqRwSpinLock<u32>,
     mapped_frame: IrqSpinLock<Option<MappedFrameInfo>>,
@@ -167,6 +261,10 @@ impl VideoSession {
     fn new(index: usize) -> Self {
         Self {
             stream_id: (index + 1) as u32,
+            // Stream zero in the userspace ABI addresses this legacy slot.
+            reserved: AtomicBool::new(index == 0),
+            retirement: AtomicU8::new(SESSION_ACTIVE),
+            operation: IrqSpinLock::new(()),
             stream_created: IrqRwSpinLock::new(false),
             stream_coded_format: IrqRwSpinLock::new(0),
             mapped_frame: IrqSpinLock::new(None),
@@ -189,6 +287,7 @@ pub struct VirtioVideoDevice {
     sessions: [VideoSession; MAX_VIDEO_SESSIONS],
     decoded_frame: IrqSpinLock<DecodedFrameState>,
     sync_command_buffers: IrqSpinLock<Option<CommandBuffers>>,
+    sync_command_state: IrqSpinLock<SyncCommandState>,
     next_session_index: IrqSpinLock<usize>,
     interrupt_id: IrqSpinLock<Option<InterruptId>>,
 }
@@ -234,6 +333,7 @@ impl VirtioVideoDevice {
                 last_error: None,
             }),
             sync_command_buffers: IrqSpinLock::new(CommandBuffers::new()),
+            sync_command_state: IrqSpinLock::new(SyncCommandState::default()),
             next_session_index: IrqSpinLock::new(0),
             interrupt_id: IrqSpinLock::new(None),
         };
@@ -323,12 +423,27 @@ impl VirtioVideoDevice {
 
     fn allocate_session(&self) -> Result<&VideoSession, &'static str> {
         let _ = self.try_complete_pending_decode();
+        // Failed create/drop can lose its userspace owner while a command is
+        // still device-owned. Once late completions return, retry its teardown
+        // outside the queue lock before considering the reserved slot reusable.
+        for session in &self.sessions {
+            if session.retirement.load(Ordering::Acquire) == SESSION_RETIRING
+                && session.pending_decode.lock().is_none()
+            {
+                let _ = self.release_session(session, true);
+            }
+        }
 
         let mut next = self.next_session_index.lock();
         for offset in 0..MAX_VIDEO_SESSIONS {
             let index = (*next + offset) % MAX_VIDEO_SESSIONS;
             let session = &self.sessions[index];
-            if !*session.stream_created.read() && session.pending_decode.lock().is_none() {
+            if session.pending_decode.lock().is_none()
+                && session
+                    .reserved
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            {
                 *next = index.wrapping_add(1);
                 return Ok(session);
             }
@@ -336,18 +451,26 @@ impl VirtioVideoDevice {
         Err("No free VirtIO video stream sessions")
     }
 
-    fn release_session(&self, session: &VideoSession) -> Result<(), &'static str> {
-        if session.pending_decode.lock().is_some() {
-            return Err("VirtIO video stream session has pending decode");
-        }
+    fn release_session(
+        &self,
+        session: &VideoSession,
+        retry_only: bool,
+    ) -> Result<(), &'static str> {
+        let retirement = SessionRetirement::claim(&session.retirement, retry_only)?;
+        let _operation = session.operation.lock();
+        self.drain_session_pending_decode(session)?;
 
-        let _ = self.resource_destroy_all(session.stream_id, VIRTIO_VIDEO_QUEUE_TYPE_INPUT);
-        let _ = self.resource_destroy_all(session.stream_id, VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT);
+        self.resource_destroy_all(session.stream_id, VIRTIO_VIDEO_QUEUE_TYPE_INPUT)?;
+        self.resource_destroy_all(session.stream_id, VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT)?;
         *session.mapped_resources.lock() = None;
         *session.mapped_frame.lock() = None;
         *session.stream_created.write() = false;
         *session.stream_coded_format.write() = 0;
         *session.next_timestamp.lock() = 1;
+        retirement.finish();
+        session
+            .reserved
+            .store(session.stream_id == DEFAULT_STREAM_ID, Ordering::Release);
         Ok(())
     }
 
@@ -439,6 +562,12 @@ impl VirtioVideoDevice {
         request: &VideoBackendDecodeRequest,
     ) -> Result<(), &'static str> {
         let session = self.session_by_stream_id(request.stream_id)?;
+        let _operation = session.operation.lock();
+        if !session.reserved.load(Ordering::Acquire)
+            || session.retirement.load(Ordering::Acquire) != SESSION_ACTIVE
+        {
+            return Err("VirtIO video stream session is retiring");
+        }
         let _ = self.try_complete_pending_decode()?;
         if session.pending_decode.lock().is_some() {
             return Err("VirtIO video decode already pending");
@@ -457,6 +586,12 @@ impl VirtioVideoDevice {
             return Err("VirtIO video output exceeds mapped video output buffer");
         }
 
+        let buffer_lease = Arc::clone(
+            request
+                .buffer_lease
+                .as_ref()
+                .ok_or("VirtIO video mapped buffer owner is missing")?,
+        );
         *session.mapped_frame.lock() = None;
         self.ensure_mapped_resources(session, request)?;
 
@@ -471,6 +606,7 @@ impl VirtioVideoDevice {
             request.input_len,
             PendingDecodeBuffer::ExternalMapped {
                 output_paddr: request.output_paddr,
+                buffer_lease,
             },
             request.output_len as usize,
             request.output_offset as usize,
@@ -677,6 +813,8 @@ impl VirtioVideoDevice {
             output_offset,
             timestamp,
         });
+        // push_many validates the entire batch before publishing avail.idx,
+        // so an error here leaves neither descriptor owned by the device.
         if let Err(error) = queue.push_many(&[output_req_desc, input_req_desc]) {
             *pending_guard = None;
             queue.free_desc_chain(input_req_desc);
@@ -733,6 +871,11 @@ impl VirtioVideoDevice {
         let command_buffers = sync_buffers
             .as_ref()
             .ok_or("VirtIO video command buffers are not available")?;
+        if self.sync_command_state.lock().pending_desc.is_some() {
+            // A prior timeout is not cancellation. Its chain and request page
+            // remain owned by the device until a used entry returns them.
+            return Err("VirtIO video previous command is still pending");
+        }
         // SAFETY: `request` and the allocated page are both valid for `req_len`
         // bytes, non-overlapping, and the destination page is writable.
         unsafe {
@@ -764,7 +907,13 @@ impl VirtioVideoDevice {
         queue.desc[resp_desc].flags = DescriptorFlag::Write as u16;
         queue.desc[resp_desc].next = 0;
 
+        if let Err(error) = self.sync_command_state.lock().begin(req_desc) {
+            queue.free_desc_chain(req_desc);
+            return Err(error);
+        }
         if let Err(e) = queue.push(req_desc) {
+            // Failed publication leaves the chain exclusively CPU-owned.
+            *self.sync_command_state.lock() = SyncCommandState::default();
             queue.free_desc_chain(req_desc);
             return Err(e);
         }
@@ -778,31 +927,28 @@ impl VirtioVideoDevice {
             let mut made_progress = false;
             while let Some((used_desc, _used_len)) = queue.pop_used() {
                 made_progress = true;
-                if used_desc == req_desc {
-                    queue.free_desc_chain(req_desc);
-                    drop(virtqueues);
-
-                    let mut out = alloc::vec![0u8; response_len];
-                    // SAFETY: `resp_alloc` points to a live page and `out` is valid for
-                    // `response_len` bytes. The buffers do not overlap.
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            command_buffers.resp_alloc.as_ptr() as *const u8,
-                            out.as_mut_ptr(),
-                            response_len,
-                        );
-                    }
-                    return Ok(out);
-                }
                 if !self.complete_pending_used_descriptor(queue, used_desc)? {
-                    queue.free_desc_chain(used_desc);
-                    queue.free_desc_chain(req_desc);
+                    // Do not free our still-published command on an unrelated
+                    // protocol failure; the device can still read its pages.
                     return Err("VirtIO video command response descriptor mismatch");
                 }
             }
 
+            if self.sync_command_state.lock().completed {
+                drop(virtqueues);
+                let mut out = alloc::vec![0u8; response_len];
+                // SAFETY: the used entry returned the command pages; the
+                // sync-buffer lock prevents a new request from overwriting them.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        command_buffers.resp_alloc.as_ptr() as *const u8,
+                        out.as_mut_ptr(),
+                        response_len,
+                    );
+                }
+                return Ok(out);
+            }
             if spins >= CONTROL_SPIN_LIMIT {
-                queue.free_desc_chain(req_desc);
                 return Err("VirtIO video command timed out");
             }
             if !made_progress {
@@ -818,7 +964,8 @@ impl VirtioVideoDevice {
         let mut completed_any = false;
         while let Some((used_desc, _used_len)) = queue.pop_used() {
             if !self.complete_pending_used_descriptor(queue, used_desc)? {
-                queue.free_desc_chain(used_desc);
+                // An unknown used entry does not establish our ownership of
+                // that chain; reclaiming it can free another in-flight request.
                 return Err("VirtIO video async response descriptor mismatch");
             }
             completed_any = true;
@@ -831,22 +978,25 @@ impl VirtioVideoDevice {
         queue: &mut VirtQueue<'static>,
         used_desc: usize,
     ) -> Result<bool, &'static str> {
+        if self
+            .sync_command_state
+            .lock()
+            .complete_descriptor(used_desc)
+        {
+            queue.free_desc_chain(used_desc);
+            return Ok(true);
+        }
         for session in &self.sessions {
             let mut pending_guard = session.pending_decode.lock();
             let Some(pending) = pending_guard.as_mut() else {
                 continue;
             };
-            if Some(used_desc) == pending.output_req_desc {
-                queue.free_desc_chain(used_desc);
-                pending.output_req_desc = None;
-            } else if used_desc == pending.input_req_desc {
-                queue.free_desc_chain(used_desc);
-                pending.input_done = true;
-            } else {
+            let Some(complete) = pending.complete_descriptor(used_desc) else {
                 continue;
-            }
+            };
+            queue.free_desc_chain(used_desc);
 
-            if pending.output_req_desc.is_none() && pending.input_done {
+            if complete {
                 let response = self.copy_async_response(session)?;
                 let pending = pending_guard
                     .take()
@@ -886,6 +1036,9 @@ impl VirtioVideoDevice {
         pending: PendingDecode,
         response: &[u8],
     ) -> Result<(), &'static str> {
+        if read_le32(&response, 4)? != session.stream_id {
+            return Err("VirtIO video async response stream mismatch");
+        }
         if read_le32(&response, 0)? != VIRTIO_VIDEO_RESP_OK_RESOURCE_QUEUE {
             return Err("virtio-video async RESOURCE_QUEUE failed");
         }
@@ -895,14 +1048,20 @@ impl VirtioVideoDevice {
         }
 
         match pending.buffer {
-            PendingDecodeBuffer::ExternalMapped { output_paddr } => {
-                let frame = self.read_external_frame_header(
+            PendingDecodeBuffer::ExternalMapped {
+                output_paddr,
+                buffer_lease,
+            } => {
+                let frame = Self::read_external_frame_header(
                     output_paddr,
                     decoded_size,
                     pending.output_len,
                     pending.output_offset,
                     pending.timestamp,
                 )?;
+                // Both descriptor chains have returned; the CPU header read
+                // above is the final access requiring the mapped allocation.
+                drop(buffer_lease);
                 *session.mapped_frame.lock() = Some(frame);
 
                 let mut state = self.decoded_frame.lock();
@@ -914,7 +1073,6 @@ impl VirtioVideoDevice {
     }
 
     fn read_external_frame_header(
-        &self,
         output_paddr: u64,
         decoded_size: usize,
         output_len: usize,
@@ -922,8 +1080,8 @@ impl VirtioVideoDevice {
         timestamp: u64,
     ) -> Result<MappedFrameInfo, &'static str> {
         let output_vaddr = phys_to_virt(output_paddr);
-        // SAFETY: The pending decode retained the output resource until
-        // completion and the device-reported size was checked against
+        // SAFETY: The caller retains the mapped allocation lease through this
+        // read after both device descriptors completed. Its size was checked against
         // `output_len` by the caller.
         let frame = unsafe { core::slice::from_raw_parts(output_vaddr as *const u8, decoded_size) };
         Self::parse_mapped_frame_header(frame, decoded_size, output_len, output_offset, timestamp)
@@ -1031,8 +1189,12 @@ impl VideoDecodeBackend for VirtioVideoDevice {
 
     fn create_session(&self, coded_format: u32) -> Result<u32, &'static str> {
         let session = self.allocate_session()?;
-        if let Err(e) = self.ensure_stream_format(session, coded_format) {
-            let _ = self.release_session(session);
+        let result = {
+            let _operation = session.operation.lock();
+            self.ensure_stream_format(session, coded_format)
+        };
+        if let Err(e) = result {
+            let _ = self.release_session(session, false);
             return Err(e);
         }
         Ok(session.stream_id)
@@ -1040,11 +1202,11 @@ impl VideoDecodeBackend for VirtioVideoDevice {
 
     fn destroy_session(&self, stream_id: u32) -> Result<(), &'static str> {
         let session = self.session_by_stream_id(stream_id)?;
-        if let Err(e) = self.drain_session_pending_decode(session) {
-            self.decoded_frame.lock().last_error = Some(e);
-            return Err(e);
+        if let Err(error) = self.release_session(session, false) {
+            self.decoded_frame.lock().last_error = Some(error);
+            return Err(error);
         }
-        self.release_session(session)
+        Ok(())
     }
 
     fn submit_decode(&self, request: &VideoBackendDecodeRequest) -> Result<(), &'static str> {
@@ -1157,5 +1319,145 @@ impl VirtioDevice for VirtioVideoDevice {
     fn get_supported_features(&self, device_features: u64) -> u64 {
         device_features
             & ((1u64 << VIRTIO_F_VERSION_1) | (1u64 << VIRTIO_VIDEO_F_RESOURCE_GUEST_PAGES))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn verify_pending_buffer_lifetime(input_first: bool) {
+        let pages = Arc::new(ContiguousPages::new(1).unwrap());
+        let allocation = Arc::downgrade(&pages);
+        // A 2x2 NV12 frame: 20-byte header followed by 6 bytes of pixels.
+        let mut frame = [0u8; SCARLET_VIDEO_FRAME_HEADER_LEN + 6];
+        frame[..4].copy_from_slice(SCARLET_VIDEO_FRAME_MAGIC);
+        frame[4..8].copy_from_slice(&2u32.to_le_bytes());
+        frame[8..12].copy_from_slice(&2u32.to_le_bytes());
+        frame[12..16].copy_from_slice(&SCARLET_VIDEO_PIXEL_FORMAT_NV12.to_le_bytes());
+        frame[16..20].copy_from_slice(&6u32.to_le_bytes());
+        // SAFETY: We exclusively own a live page and the frame fits in it.
+        unsafe {
+            core::ptr::copy_nonoverlapping(frame.as_ptr(), pages.as_ptr() as *mut u8, frame.len());
+        }
+        let mut pending = PendingDecode {
+            output_req_desc: Some(2),
+            input_req_desc: 4,
+            input_done: false,
+            buffer: PendingDecodeBuffer::ExternalMapped {
+                output_paddr: pages.as_paddr(),
+                buffer_lease: Arc::clone(&pages),
+            },
+            output_len: PAGE_SIZE,
+            output_offset: 0,
+            timestamp: 11,
+        };
+        drop(pages); // Frontend closes while the device still owns both chains.
+        assert_eq!(allocation.strong_count(), 1);
+        assert_eq!(pending.complete_descriptor(99), None);
+        let (first, second) = if input_first { (4, 2) } else { (2, 4) };
+        assert_eq!(pending.complete_descriptor(first), Some(false));
+        assert_eq!(pending.complete_descriptor(first), None);
+        assert!(allocation.upgrade().is_some()); // One returned chain is insufficient.
+        assert_eq!(pending.complete_descriptor(second), Some(true));
+        assert!(allocation.upgrade().is_some()); // CPU header read still needs the page.
+        let PendingDecodeBuffer::ExternalMapped { output_paddr, .. } = &pending.buffer;
+        let decoded = VirtioVideoDevice::read_external_frame_header(
+            *output_paddr,
+            frame.len(),
+            pending.output_len,
+            pending.output_offset,
+            pending.timestamp,
+        )
+        .unwrap();
+        assert_eq!(decoded.width, 2);
+        assert_eq!(decoded.height, 2);
+        assert_eq!(decoded.payload_len, 6);
+        assert_eq!(decoded.timestamp, 11);
+        drop(pending);
+        assert!(allocation.upgrade().is_none()); // Normal completion does not leak.
+    }
+
+    #[test_case]
+    fn sync_command_completion_can_be_claimed_by_another_used_ring_consumer() {
+        let mut sync = SyncCommandState::default();
+        sync.begin(6).unwrap();
+        assert!(!sync.complete_descriptor(2)); // Another stream's output.
+        assert_eq!(sync.pending_desc, Some(6));
+        assert!(sync.complete_descriptor(6)); // IRQ/dequeue beats sync waiter.
+        assert!(sync.completed);
+        assert_eq!(sync.pending_desc, None);
+        assert!(!sync.complete_descriptor(6)); // Never free twice.
+        sync.begin(8).unwrap();
+        assert!(!sync.completed);
+        assert!(sync.complete_descriptor(8));
+    }
+
+    #[test_case]
+    fn timed_out_sync_command_cannot_reuse_the_device_owned_chain_or_pages() {
+        let mut sync = SyncCommandState::default();
+        sync.begin(6).unwrap();
+        // A timeout leaves this ownership state intact. New commands cannot
+        // overwrite the shared request page, even if a different head is free.
+        assert!(sync.begin(8).is_err());
+        assert_eq!(sync.pending_desc, Some(6));
+        assert!(!sync.completed);
+        assert!(sync.complete_descriptor(6)); // Late used entry releases it.
+        sync.begin(8).unwrap();
+        assert!(sync.complete_descriptor(8));
+    }
+
+    #[test_case]
+    fn failed_session_retirement_has_one_retry_owner_until_acknowledged() {
+        let state = AtomicU8::new(SESSION_ACTIVE);
+        assert!(SessionRetirement::claim(&state, true).is_err());
+        let first = SessionRetirement::claim(&state, false).unwrap();
+        assert!(SessionRetirement::claim(&state, false).is_err());
+        assert!(SessionRetirement::claim(&state, true).is_err());
+        drop(first); // Timeout: retain the slot and request a later retry.
+        assert_eq!(state.load(Ordering::Acquire), SESSION_RETIRING);
+        let retry = SessionRetirement::claim(&state, true).unwrap();
+        assert!(SessionRetirement::claim(&state, true).is_err());
+        retry.finish();
+        assert_eq!(state.load(Ordering::Acquire), SESSION_ACTIVE);
+        // A stale reaper must not clean up a newly allocated active owner.
+        assert!(SessionRetirement::claim(&state, true).is_err());
+    }
+
+    #[test_case]
+    fn allocated_session_is_reserved_before_stream_create_completes() {
+        let session = VideoSession::new(1);
+        assert!(!*session.stream_created.read());
+        assert!(
+            session
+                .reserved
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        );
+        // A second opener must not select this still-uncreated stream.
+        assert!(
+            session
+                .reserved
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        );
+        session.reserved.store(false, Ordering::Release);
+        assert!(
+            session
+                .reserved
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        );
+        assert!(VideoSession::new(0).reserved.load(Ordering::Acquire));
+    }
+
+    #[test_case]
+    fn pending_decode_retains_pages_when_output_completes_first() {
+        verify_pending_buffer_lifetime(false);
+    }
+
+    #[test_case]
+    fn pending_decode_retains_pages_when_input_completes_first() {
+        verify_pending_buffer_lifetime(true);
     }
 }

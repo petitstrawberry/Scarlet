@@ -15,8 +15,15 @@ userspace program.
 | [scarlet-os](../../user/lib/scarlet-os/Cargo.toml) | Typed native handles and OS operations for std and supported no_std consumers |
 | [scarlet-rt](../../user/lib/scarlet-rt/Cargo.toml) | Scarlet runtime integration, including the explicit legacy-no-std configuration |
 | [scarlet-std](../../user/lib/std/Cargo.toml) | Legacy no_std facade, often renamed to `std` by old programs; not the toolchain's Rust std |
-| scarlet-sdk | Separate repository supplying `cargo-scarlet` and image plugins; not a native user library |
+| [scarlet-sdk](https://github.com/petitstrawberry/scarlet-sdk/tree/feat/native-c-runtime) | Build CLI, image plugins, native libc/public C headers, and the C/C++ runtime package |
 | ScarletUI / SGFX | Separate Git repositories for UI and graphics execution, consumed by the in-tree apps |
+
+Native C/C++ consumers use the SDK-owned `scarlet-libc` package and runtime.
+Scarlet retains `scarlet-abi` and `scarlet-sys`; the SDK pins those dependencies
+instead of duplicating their definitions. `nix build .#scarlet-native-runtime
+--no-link` builds the SDK's AArch64 runtime into the Nix store. The development
+shell exposes its install prefix through `SCARLET_NATIVE_RUNTIME`; engine build
+helpers consume it without rebuilding libc or the C++ standard libraries.
 
 The [native API contract](../release/1.0-native-api-contract.md) records handle
 ownership, fallible operations, raw unsafe boundaries, mappings, and GPU/SWS
@@ -65,11 +72,10 @@ To produce application binaries instead of only type-checking, use `cargo build`
 with the same manifest, package, and target arguments.
 
 Native ELF64 applications that use SGFX also need the project's driver and
-shared Cargo configuration. Prepare them with
-`python3 tools/sgfx-native-build.py --project projects/aarch64-limine-full`,
-then pass `--config projects/aarch64-limine-full/.scarlet/sgfx/userspace.toml`
-to Cargo. The native image projects prepare and select this configuration
-automatically. See [native SGFX drivers](../graphics/sgfx-dynamic-backends.md)
+shared Cargo configuration. The native image projects prepare and select this
+configuration through the source-owned SGFX package recipe. Build and install
+through `cargo scarlet image --project projects/aarch64-limine-full --release`;
+the SDK owns the package's output and dependency cache. See [native SGFX drivers](../graphics/sgfx-dynamic-backends.md)
 for the local compiler setup, plugin installation and source coordination.
 
 These compile the std-based in-tree applications; they neither install the

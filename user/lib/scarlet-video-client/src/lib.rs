@@ -702,6 +702,17 @@ pub struct ScarletVideoDecoder {
 }
 
 impl ScarletVideoDecoder {
+    /// Query the current `/dev/video0` backend without allocating a decoder
+    /// session, mapped buffers, or decoded images. The device handle is closed
+    /// before returning. Unsupported legacy capability queries are explicit.
+    pub fn available_capabilities() -> Result<DecoderCapabilities, String> {
+        let device = Handle::open(VIDEO_DEVICE_PATH, 0x2)
+            .map_err(|_| format!("failed to open {VIDEO_DEVICE_PATH}"))?;
+        let caps = Self::query_capabilities(&device)
+            .ok_or_else(|| String::from("video backend capability query unsupported"))?;
+        Ok(DecoderCapabilities::from(caps))
+    }
+
     /// Open the default Scarlet video decoder with backend-selected buffers.
     ///
     /// # Returns

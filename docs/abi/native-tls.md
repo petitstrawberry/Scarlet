@@ -3,12 +3,13 @@
 Scarlet's native CRT, Rust std, loader, and libc share a per-thread mapping at
 the architectural thread pointer: `TPIDR_EL0` on AArch64 and `tp` on RV64.
 The [layout definition](../../user/lib/scarlet-abi/src/tls.rs) and
-[C errno accessor](../../user/lib/scarlet-libc/src/errno.rs) implement this
-contract. See the [libc integration guide](../../user/lib/scarlet-libc/README.md)
+[C errno accessor](https://github.com/petitstrawberry/scarlet-sdk/blob/e393a33e576ca0d4be8cbb947748a4975405a91f/scarlet-libc/src/errno.rs) implement this
+contract. See the [libc integration guide](https://github.com/petitstrawberry/scarlet-sdk/blob/e393a33e576ca0d4be8cbb947748a4975405a91f/scarlet-libc/README.md)
 for the supported C surface and build workflow.
 
-This mapping is a native runtime ABI, not ELF TLS. It does not implement or
-replace ELF TLS relocation, module, or thread-pointer conventions.
+The header and cleanup area are the native runtime ABI. On AArch64, the
+space between them also holds a main executable's static ELF TLS block. This
+does not supply dynamic TLS modules, TLS relocations, or RV64 ELF TLS.
 
 ## Layout
 
@@ -31,6 +32,27 @@ The existing thread-exit cleanup area starts at
 On AArch64 and RV64 these are 8192 and 12288 bytes respectively. Adding the
 header does not move the cleanup area or change the mapping size. Code using
 the mapping must preserve the header and cleanup metadata.
+
+## AArch64 executable ELF TLS
+
+The header occupies the 16-byte AArch64 TCB. A main executable's `PT_TLS`
+block starts at `align_up(16, p_align)` and must end before the cleanup area
+at 8192. Alignment must be a power of two at most 4096, with zero virtual
+address alignment residue. The shared `aarch64_elf_tls_offset` helper checks
+this bounded layout. Initialized bytes must match a readable file-backed
+`PT_LOAD`; duplicate or malformed TLS headers are rejected.
+
+The kernel records the main's template and copies its initialized bytes,
+followed by zeroed `.tbss`, when `SetTls` publishes a mapping and when
+`Clone(SET_TLS)` creates a thread. Copies use checked userspace access. The
+loader refreshes the main mapping after relocation and before constructors,
+so pointers in `.tdata` use their relocated values. Later `dlopen` calls do
+not reinitialize the main's TLS. Startup preserves the existing mapping.
+
+AArch64 local-exec accesses relaxed by the linker therefore use independent
+per-thread storage. `dlsym` of a main-executable TLS symbol returns its address
+in the calling thread. TLS in dynamically loaded DSOs and all TLS relocation
+models remain explicitly unsupported.
 
 ## Initialization and lifetime
 
@@ -80,6 +102,19 @@ threads without its magic. Matching only the C library is insufficient, and
 replacing an initialized native TLS mapping is outside this contract.
 
 ## Bounded validation
+
+The static executable TLS changes pass 30 host ABI tests, 25 loader-core tests,
+and 10 dynamic-runtime tests in release mode. The new checks cover reserved
+mapping bounds, malformed templates and symbols, initialization after
+relocation, thread-relative symbol lookup, and rejection of dynamic DSO TLS.
+These host checks do not execute target TLS instructions; the Myrica Skia
+Vulkan probe additionally checks initialized C++ TLS and Rust namespace TLS
+across four native threads before drawing.
+
+The release probe passed this four-thread check on AArch64 with HVF and four
+guest CPUs. Each child observed the C++ initializer value 17, mutated its own
+TLS and errno, and left the parent's C++ value, Rust TLS value, and errno intact.
+
 
 The bounded AArch64 guest checks covered constructor access,
 new-thread isolation, destructor access, a controlled allocation-backend null

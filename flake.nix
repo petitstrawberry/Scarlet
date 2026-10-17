@@ -10,11 +10,17 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    scarlet-rust-toolchain.url = "github:petitstrawberry/scarlet-rust-nix";
+    scarlet-rust-toolchain.url = "github:petitstrawberry/scarlet-rust-nix/3c23906c35053e28d56f3aa9b1d29142535ffab7";
     scarlet-sdk = {
-      url = "github:petitstrawberry/scarlet-sdk/9b3a257e02a5fddd37cf785912269a3e8702f10f";
+      url = "github:petitstrawberry/scarlet-sdk/a071222231e8bbd96c1d54f38d99d1b27ec90805";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.scarlet-rust-toolchain.follows = "scarlet-rust-toolchain";
+    };
+    vulkan-headers-src = {
+      url = "github:KhronosGroup/Vulkan-Headers/c46850864f4661461b0f6cb9922c058ffea4915e";
       flake = false;
     };
+    llvm-libc-src.follows = "scarlet-sdk/llvm-src";
     macvdmtool-src = {
       url = "github:AsahiLinux/macvdmtool";
       flake = false;
@@ -31,6 +37,8 @@
       nixpkgs,
       scarlet-rust-toolchain,
       scarlet-sdk,
+      vulkan-headers-src,
+      llvm-libc-src,
       macvdmtool-src,
       qemu-scarlet,
     }:
@@ -98,10 +106,13 @@
           };
 
           virglrenderer = pkgs.virglrenderer.overrideAttrs (_finalAttrs: prevAttrs: {
-            patches = (prevAttrs.patches or [ ]) ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-              ./nix/patches/virglrenderer-macos-kqueue-sync.patch
-              ./nix/patches/virglrenderer-macos-core-gl.patch
-            ];
+            src = pkgs.fetchFromGitHub {
+              owner = "petitstrawberry";
+              repo = "virglrenderer";
+              rev = "dfb43e3191adbc76547a1b33a9acdbf24787d085";
+              hash = "sha256-7RlUTQPjwXwV0krMiBfv1sEHgr9tNavYpBmzaN1ax28=";
+            };
+            patches = prevAttrs.patches or [ ];
           });
 
           cargo-scarlet = pkgs.rustPlatform.buildRustPackage {
@@ -333,6 +344,10 @@
             pkgs.file
             pkgs.patch
             pkgs.perl
+            pkgs.ruby
+            pkgs.gperf
+            pkgs.unifdef
+            pkgs.tcl
             pkgs.gnused
             pkgs.gnugrep
             pkgs.gawk
@@ -399,6 +414,15 @@
             # .cargo/config.toml (for example, yt's cross GCC). Native builds
             # continue to use HOST_CC/CC and the Nix wrapper.
           TARGET_CC = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+            VULKAN_HEADERS_SOURCE_DIR = "${vulkan-headers-src}";
+            SCARLET_LLVM_LIBC_SOURCE_DIR = "${llvm-libc-src}/libc";
+            SCARLET_NATIVE_RUNTIME = "${scarlet-sdk.packages.${system}.scarlet-native-runtime}";
+            SCARLET_NATIVE_CC = "${pkgs.llvmPackages_21.clang-unwrapped}/bin/clang";
+            SCARLET_NATIVE_CXX = "${pkgs.llvmPackages_21.clang-unwrapped}/bin/clang++";
+            SCARLET_NATIVE_AR = "${pkgs.llvmPackages_21.llvm}/bin/llvm-ar";
+            SCARLET_NATIVE_RANLIB = "${pkgs.llvmPackages_21.llvm}/bin/llvm-ranlib";
+            SCARLET_NATIVE_NM = "${pkgs.llvmPackages_21.llvm}/bin/llvm-nm";
+            LIBCLANG_PATH = "${pkgs.llvmPackages_21.libclang.lib}/lib";
             SCARLET_PROBE_CC = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
             # cc-rs defaults RV32 C objects to soft-float; Scarlet GC uses ilp32d.
             CFLAGS_riscv32gc_unknown_scarlet = "-march=rv32gc -mabi=ilp32d";
@@ -494,6 +518,7 @@
 
           packages = {
             scarlet-ca-certificates = pkgs.cacert;
+            scarlet-native-runtime = scarlet-sdk.packages.${system}.scarlet-native-runtime;
           } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
             scarlet-dev-image = dockerImage;
             default = dockerImage;
@@ -505,5 +530,8 @@
         default = (mkSystem system).devShell;
       });
       packages = forAllSystems (system: (mkSystem system).packages);
+      checks = forAllSystems (system: {
+        scarlet-libc = scarlet-sdk.checks.${system}.scarlet-libc;
+      });
     };
 }

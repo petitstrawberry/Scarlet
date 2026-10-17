@@ -11,6 +11,7 @@ const AT_EXECFN: usize = 31;
 pub(crate) const PAGE_SIZE: usize = 4096;
 
 pub(crate) struct Process {
+    pub envp: usize,
     pub path: String,
     pub bytes: Vec<u8>,
     pub bias: usize,
@@ -292,6 +293,7 @@ impl Process {
             return Err(Error::Format("excessive argc"));
         }
         let mut cursor = argc + 2;
+        let envp = unsafe { words.add(cursor) } as usize;
         // SAFETY: argv has argc entries followed by its terminating null.
         if unsafe { *words.add(cursor - 1) } != 0 {
             return Err(Error::Format("unterminated argv"));
@@ -364,6 +366,7 @@ impl Process {
             unsafe { std::slice::from_raw_parts(address as *const u8, expected.len()) == expected }
         })?;
         Ok(Self {
+            envp,
             path,
             bytes,
             bias: layout.bias,

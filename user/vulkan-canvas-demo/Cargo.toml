@@ -10,9 +10,15 @@ naga = { version = "24", features = ["wgsl-in", "spv-out"] }
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
 ash = { version = "0.38", default-features = false, features = ["debug", "std"] }
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "1b0f08aeb0a7057c9a6d0d7312554372411afff8", default-features = false, features = ["std", "platform-sws"] }
-vulkan-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "20bb5b8cc19445520d08c31c3971ac06244bc1d9" }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "bf024ea72ca32f47d3ddce42a3c5b98cf680901a", default-features = false, features = ["std", "platform-sws"] }
 sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "20bb5b8cc19445520d08c31c3971ac06244bc1d9", default-features = false, features = ["std", "backend-dynamic"] }
+
+[target.'cfg(all(target_os = "scarlet", target_arch = "aarch64"))'.dependencies]
+scarlet-vulkan = { path = "../lib/scarlet-vulkan" }
+
+# Preserve existing targets until the installed native loader is ported there.
+[target.'cfg(all(target_os = "scarlet", not(target_arch = "aarch64")))'.dependencies]
+vulkan-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "20bb5b8cc19445520d08c31c3971ac06244bc1d9" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("scarlet"))'] }

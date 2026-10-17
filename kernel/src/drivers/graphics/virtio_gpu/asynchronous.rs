@@ -35,6 +35,8 @@ pub(super) const ASYNC_CAPACITY: u32 = 16;
 const PROGRESS_INTERVAL_NS: u64 = 1_000_000;
 
 struct PendingSubmission {
+    context_id: u32,
+    command_len: usize,
     payload: Option<Arc<ControlRequest>>,
     checkpoint: Arc<ControlRequest>,
     submission: GpuSubmission,
@@ -116,6 +118,7 @@ impl AsyncSubmissions {
             return Err(GpuBackendEnqueueError::Busy(submission));
         }
         let commands = submission.commands();
+        let command_len = commands.len();
         if !commands.len().is_multiple_of(4)
             || commands.len() > GPU_MAX_OPAQUE_COMMAND_SIZE as usize
         {
@@ -168,6 +171,8 @@ impl AsyncSubmissions {
         // Capacity is reserved and publication has no fallible successor. The
         // caller holds the core lock until this owner is visible to the worker.
         self.pending.push_back(PendingSubmission {
+            context_id,
+            command_len,
             payload,
             checkpoint,
             submission,
@@ -203,7 +208,18 @@ impl AsyncSubmissions {
             // be unaligned and remains live for this copy.
             let response =
                 unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const VirtioGpuCtrlHdr) };
-            validate_execution_response(response, None).is_err()
+            if let Err(error) = validate_execution_response(response, None) {
+                crate::println!(
+                    "[VirtIO GPU] submission rejected: context={} bytes={} response={:#x} error={}",
+                    pending.context_id,
+                    pending.command_len,
+                    response.hdr_type,
+                    error
+                );
+                true
+            } else {
+                false
+            }
         } else {
             false
         };
@@ -256,8 +272,11 @@ pub(super) fn register(core: &Arc<IrqSpinLock<VirtioGpuDeviceCore>>) -> bool {
 }
 
 fn process_device(core: &Arc<IrqSpinLock<VirtioGpuDeviceCore>>) -> bool {
+    if !super::prune_abandoned_presentations(core) {
+        return true;
+    }
     for _ in 0..ASYNC_CAPACITY {
-        let (retired, active, interrupt, completion_count, caught_up) = {
+        let (retired, presentations, active, interrupt, completion_count, caught_up) = {
             let Some(mut guard) = core.try_lock() else {
                 return true;
             };
@@ -284,14 +303,24 @@ fn process_device(core: &Arc<IrqSpinLock<VirtioGpuDeviceCore>>) -> bool {
             } else {
                 queues.control.rearm_notifications()
             };
+            drop(queues);
+            let presentations = super::remove_presentations(&mut core.presentations, &[]);
             (
                 retired,
-                core.async_submissions.active(),
+                presentations,
+                core.async_submissions.active()
+                    || super::presentation_progress_needed(&core.presentations)
+                    || {
+                        let queues = core.virtqueues.lock();
+                        queues.control.check().is_ok() && queues.control.has_pending()
+                    },
                 interrupt,
                 completion_count,
                 caught_up,
             )
         };
+        // Leases may destroy images and re-enter this core; its guard is gone.
+        drop(presentations);
         let released = caught_up && interrupt.complete(completion_count);
         if let Some(retired) = retired {
             retired.retire();

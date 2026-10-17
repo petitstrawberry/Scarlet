@@ -9,3 +9,6 @@ license = "MIT"
 path = "src/lib.rs"
 
 [workspace]
+
+[dependencies]
+scarlet-abi = { path = "../scarlet-abi" }

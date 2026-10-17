@@ -88,6 +88,16 @@ pub struct LoadElfResult {
     pub interpreter_base: Option<u64>,
     /// Program headers info (for auxiliary vector)
     pub program_headers: ProgramHeadersInfo,
+    pub tls: Option<ElfTlsImage>,
+}
+
+/// Main executable TLS template, read through its relocated user mapping.
+#[derive(Debug, Clone)]
+pub struct ElfTlsImage {
+    pub address: usize,
+    pub file_size: usize,
+    pub memory_size: usize,
+    pub alignment: usize,
 }
 
 /// Program headers information for auxiliary vector
@@ -593,6 +603,49 @@ pub fn analyze_and_load_elf_with_strategy(
         phdr_size: header.e_phentsize as u64,
         phdr_count: header.e_phnum as u64,
     };
+    let mut tls = None;
+    for_each_program_header(&header, file_obj, |_, ph| {
+        if ph.p_type == 7 {
+            if tls.is_some()
+                || ph.p_filesz > ph.p_memsz
+                || (ph.p_align > 1 && !ph.p_align.is_power_of_two())
+            {
+                return Err(elf_error("Invalid or duplicate PT_TLS"));
+            }
+            if ph.p_filesz != 0 {
+                let mut file_backed = false;
+                for_each_program_header(&header, file_obj, |_, load| {
+                    if load.p_type == 1 && load.p_flags & 4 != 0 {
+                        if let Some(offset) = ph.p_vaddr.checked_sub(load.p_vaddr) {
+                            file_backed |= offset
+                                .checked_add(ph.p_filesz)
+                                .is_some_and(|end| end <= load.p_filesz)
+                                && load.p_offset.checked_add(offset) == Some(ph.p_offset);
+                        }
+                    }
+                    Ok(!file_backed)
+                })?;
+                if !file_backed {
+                    return Err(elf_error(
+                        "PT_TLS template is outside readable file-backed PT_LOAD",
+                    ));
+                }
+            }
+            tls = Some(ElfTlsImage {
+                address: usize::try_from(
+                    base.checked_add(ph.p_vaddr)
+                        .ok_or_else(|| elf_error("TLS address overflow"))?,
+                )
+                .map_err(|_| elf_error("TLS address width"))?,
+                file_size: usize::try_from(ph.p_filesz).map_err(|_| elf_error("TLS size width"))?,
+                memory_size: usize::try_from(ph.p_memsz)
+                    .map_err(|_| elf_error("TLS size width"))?,
+                alignment: usize::try_from(ph.p_align.max(1))
+                    .map_err(|_| elf_error("TLS alignment width"))?,
+            });
+        }
+        Ok(true)
+    })?;
     if let Some(path) = interpreter {
         let (interpreter_entry, interpreter_base) = load_interpreter(&path, task)?;
         Ok(LoadElfResult {
@@ -604,6 +657,7 @@ pub fn analyze_and_load_elf_with_strategy(
             base_address: Some(base),
             interpreter_base: Some(interpreter_base),
             program_headers: phdr_info,
+            tls,
         })
     } else {
         Ok(LoadElfResult {
@@ -613,6 +667,7 @@ pub fn analyze_and_load_elf_with_strategy(
             base_address: needs_relocation.then_some(base),
             interpreter_base: None,
             program_headers: phdr_info,
+            tls,
         })
     }
 }
@@ -1000,6 +1055,7 @@ fn map_elf_segment(
     // A large PT_LOAD must not require one physically contiguous allocation.
     // Re-executing Chromium can leave plenty of free memory but no single
     // contiguous extent large enough for its text segment.
+    let mapping_origin = crate::vm::vmem::MappingOrigin::new();
     let mut remaining_pages = size / PAGE_SIZE;
     let mut next_vaddr = vaddr;
     let mut chunk_pages = remaining_pages.min(4096);
@@ -1023,6 +1079,7 @@ fn map_elf_segment(
                 pm_start + chunk_size as u64 - 1,
             ),
             vm_start: vmarea.start,
+            mapping_origin,
             permissions,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,

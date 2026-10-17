@@ -8,7 +8,7 @@ pub mod syscall;
 
 use crate::vm::vmem::MemoryAttribute;
 
-pub use syscall::{sys_memory_map, sys_memory_protect, sys_memory_unmap};
+pub use syscall::{sys_memory_map, sys_memory_protect, sys_memory_unmap, sys_memory_query};
 
 /// Information needed to map a region of an object into virtual memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

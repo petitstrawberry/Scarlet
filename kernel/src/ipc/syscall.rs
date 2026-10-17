@@ -399,6 +399,7 @@ pub fn sys_event_send_direct(trapframe: &mut Trapframe) -> usize {
             12 => ProcessControlType::TerminalInput,
             13 => ProcessControlType::TerminalOutput,
             14 => ProcessControlType::WindowChange,
+            256..=511 => ProcessControlType::User(kind - 256),
             _ => ProcessControlType::Terminate,
         };
         Event::direct_process_control(target, ptype, priority, reliable)

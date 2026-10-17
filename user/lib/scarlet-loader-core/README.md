@@ -1,6 +1,6 @@
 # scarlet-loader-core
 
-A dependency-free `no_std` + `alloc` ELF64 loader. `Platform` supplies files,
+A `no_std` + `alloc` ELF64 loader using the shared `scarlet-abi` layout. `Platform` supplies files,
 zero-filled mappings, checked memory access and page protection; the core owns
 ELF validation, breadth-first dependency loading, eager relocation, symbol
 interposition and constructor ordering. The same `LoaderContext` serves startup
@@ -19,9 +19,11 @@ Supported:
   execute once. The adopted main's startup owns its own initializers.
 - New mappings roll back on loading, symbol resolution, constructor validation or
   protection failure. Every patch is resolved before relocation writes begin.
+- AArch64 adopted-main static ELF TLS within the native mapping reserve; initialization
+  after relocation and thread-relative TLS symbol lookup through `Platform`.
 - A per-object export index avoids scanning all symbols for every relocation.
 
-Explicitly unsupported: TLS, symbol versions, GNU IFUNC/UNIQUE, COPY and instruction
+Explicitly unsupported: dynamic shared-object TLS and TLS relocations, symbol versions, GNU IFUNC/UNIQUE, COPY and instruction
 relocations, REL/RELR, executable stacks, text relocations, RPATH/RUNPATH,
 DT_SYMBOLIC, preinit arrays and architecture-specific symbol visibility. Runtime
 ABI functions can be registered with `add_symbol`. `lookup` searches a handle's

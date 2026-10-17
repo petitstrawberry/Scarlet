@@ -46,10 +46,10 @@ class EventLoopTests(unittest.TestCase):
 
         self.memory_file = tempfile.TemporaryFile(dir=self.temp.name)
         self.addCleanup(self.memory_file.close)
-        self.memory_file.truncate(65536)
-        self.memory = mmap.mmap(self.memory_file.fileno(), 65536)
+        self.memory_file.truncate(262144)
+        self.memory = mmap.mmap(self.memory_file.fileno(), 262144)
         self.addCleanup(self.memory.close)
-        self.send(5, struct.pack("<IIQQQQ", 1, 0, 0x1000, 65536, 0x1000, 0),
+        self.send(5, struct.pack("<IIQQQQ", 1, 0, 0x1000, 262144, 0x1000, 0),
                   self.memory_file.fileno())
         self.send(8, struct.pack("<II", 0, 8))
         self.send(9, struct.pack("<IIQQQQ", 0, 0, 0x1000, 0x1400, 0x1200, 0))
@@ -204,6 +204,116 @@ class EventLoopTests(unittest.TestCase):
         writer = self.kick_pipe()
         os.write(writer, struct.pack("<Q", 1))
         self.wait_used(1)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg required for H.264 fixture")
+    def test_pipelined_hardware_streams_keep_output_ownership_across_ring_reuse(self):
+        writer = self.kick_pipe()
+        self.close_writer(writer)
+        cursor = 0
+
+        def resource(stream, queue, resource_id, address, length):
+            request = bytearray(104)
+            struct.pack_into("<IIII", request, 0, 260, stream, queue, resource_id)
+            struct.pack_into("<I", request, 20, 1)
+            struct.pack_into("<I", request, 56, 1)
+            struct.pack_into("<QI", request, 88, address, length)
+            return request
+
+        def queue_resource(stream, queue, resource_id, timestamp, size=0):
+            request = bytearray(64)
+            struct.pack_into("<IIIIQ", request, 0, 261, stream, queue, resource_id, timestamp)
+            struct.pack_into("<II", request, 24, 1, size)
+            return request
+
+        def destroy(stream, queue):
+            return struct.pack("<IIII", 262, stream, queue, 0)
+
+        def control(request):
+            nonlocal cursor
+            self.queue_command(cursor, request)
+            cursor += 1
+            self.wait_used(cursor, 512)
+
+        def batch(commands):
+            nonlocal cursor
+            # Publish all four chains together, exactly like concurrent kernel
+            # output/input pairs. Reuse these heads only after every used entry.
+            for slot, (request, _response) in enumerate(commands):
+                req_offset = 0x800 + 0x100 * slot
+                resp_offset = 0xC00 + 0x80 * slot
+                self.memory[req_offset:req_offset + len(request)] = request
+                self.memory[resp_offset:resp_offset + 48] = bytes(48)
+                struct.pack_into("<QIHH", self.memory, 32 * slot,
+                                 0x1000 + req_offset, len(request), 1, 2 * slot + 1)
+                struct.pack_into("<QIHH", self.memory, 32 * slot + 16,
+                                 0x1000 + resp_offset, 48, 2, 0)
+                struct.pack_into("<H", self.memory, 0x204 + 2 * ((cursor + slot) % 8), 2 * slot)
+            cursor += len(commands)
+            struct.pack_into("<H", self.memory, 0x202, cursor)
+            deadline = time.monotonic() + 5
+            while struct.unpack_from("<H", self.memory, 0x402)[0] != cursor:
+                self.assertIsNone(self.process.poll(), "daemon exited during concurrent streams")
+                self.assertLess(time.monotonic(), deadline, "pipelined commands did not complete")
+                time.sleep(0.005)
+            for slot, (request, response) in enumerate(commands):
+                offset = 0xC00 + 0x80 * slot
+                self.assertEqual(struct.unpack_from("<II", self.memory, offset),
+                                 (response, struct.unpack_from("<I", request, 4)[0]))
+                if response == 514:
+                    self.assertEqual(struct.unpack_from("<Q", self.memory, offset + 8)[0],
+                                     struct.unpack_from("<Q", request, 16)[0])
+
+        streams = []
+        for stream, color, width, height, input_addr, output_addr, yuv in [
+            (2, "red", 128, 96, 0x5000, 0x9000, (81, 90, 240)),
+            (4, "blue", 160, 112, 0x19000, 0x21000, (41, 240, 110)),
+        ]:
+            encoded = subprocess.check_output([
+                "ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"color={color}:s={width}x{height}",
+                "-frames:v", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-tune", "zerolatency", "-f", "h264", "pipe:1",
+            ], timeout=10)
+            self.assertLess(len(encoded), 8192)
+            self.memory[input_addr - 0x1000:input_addr - 0x1000 + len(encoded)] = encoded
+            streams.append((stream, width, height, input_addr, output_addr, encoded, yuv))
+
+        def create(item):
+            stream, _w, _h, input_addr, output_addr, _encoded, _yuv = item
+            control(struct.pack("<IIIII", 257, stream, 0, 0, 4098) + bytes(68))
+            control(resource(stream, 256, 1, input_addr, 8192))
+            control(resource(stream, 257, 2, output_addr, 32768))
+
+        def pixels(item):
+            _stream, width, height, _input, address, _encoded, expected = item
+            offset = address - 0x1000
+            self.assertEqual(self.memory[offset:offset + 4], b"SVF1")
+            self.assertEqual(struct.unpack_from("<IIII", self.memory, offset + 4),
+                             (width, height, 0x34323076, width * height * 3 // 2))
+            for index, component in [(0, expected[0]), (width * height, expected[1]),
+                                     (width * height + 1, expected[2])]:
+                self.assertLessEqual(abs(self.memory[offset + 20 + index] - component), 3)
+
+        for item in streams:
+            create(item)
+        for frame in range(12):
+            commands = []
+            for stream, _w, _h, _input, _output, encoded, _yuv in streams:
+                commands += [(queue_resource(stream, 257, 2, frame + 1), 514),
+                             (queue_resource(stream, 256, 1, frame + 1, len(encoded)), 514)]
+            batch(commands)
+            for item in streams:
+                pixels(item)
+            if frame == 4:
+                # A control teardown for stream 2 is interleaved between the
+                # other stream's output/input commands. It must not consume or
+                # remove stream 4's queued output resource or decoder.
+                batch([(queue_resource(4, 257, 2, 99), 514),
+                       (destroy(2, 256), 512),
+                       (queue_resource(4, 256, 1, 99, len(streams[1][5])), 514),
+                       (destroy(2, 257), 512)])
+                pixels(streams[1])
+                create(streams[0])
+        self.assert_idle()
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg required for H.264 fixture")
     def test_hardware_h264_decode_after_kick_eof(self):

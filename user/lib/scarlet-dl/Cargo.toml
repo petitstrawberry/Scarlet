@@ -8,6 +8,7 @@ description = "Scarlet Native process-owned ELF dynamic loading runtime"
 
 [dependencies]
 scarlet-loader-core = { path = "../scarlet-loader-core" }
+scarlet-abi = { path = "../scarlet-abi" }
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
 scarlet-sys = { path = "../scarlet-sys" }

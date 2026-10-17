@@ -1006,6 +1006,8 @@ pub enum Syscall {
     MemoryUnmap = 701,
     /// Change page protections: (address, length, RWX bits 1/2/4), 0 or usize::MAX.
     MemoryProtect = 702,
+    /// Return caller virtual mapping start/end_exclusive into output: *mut [usize; 2].
+    MemoryQuery = 703,
 
     // Socket operations
     SocketCreate = 900,

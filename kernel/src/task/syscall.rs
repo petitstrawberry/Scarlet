@@ -439,6 +439,12 @@ pub fn sys_clone(trapframe: &mut Trapframe) -> usize {
 
             // Handle SetTls flag: set TLS pointer and tp register
             if clone_flags.is_set(CloneFlagsDef::SetTls) {
+                if child_task
+                    .with_default_abi(|abi| abi.initialize_tls_mapping(&child_task, tls_ptr))
+                    .is_err()
+                {
+                    return usize::MAX;
+                }
                 // Set TLS pointer in task's ABI state
                 // SAFETY: Child task is not yet visible to scheduler
                 unsafe {
@@ -601,6 +607,14 @@ pub fn sys_thread_detach(trapframe: &mut Trapframe) -> usize {
 pub fn sys_set_tls(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let tls_ptr = trapframe.get_arg(0);
+
+    if task
+        .with_default_abi(|abi| abi.initialize_tls_mapping(&task, tls_ptr))
+        .is_err()
+    {
+        trapframe.increment_pc_next(&task);
+        return usize::MAX;
+    }
 
     // Update ABI state
     // SAFETY: This is the currently executing task on this hart
@@ -943,6 +957,13 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
             return pid as usize;
         }
 
+        // Native Rust Thread::join cannot report EINTR. A wait for a thread in
+        // our own group must resume after a handled event; process waits keep
+        // their existing interruptible semantics.
+        let is_thread_join = get_task_by_id(target_global).is_some_and(|target| {
+            target.get_thread_group_id() == task.get_thread_group_id()
+        });
+
         match wait_owner.wait(target_global) {
             Ok(status) => {
                 // Child has exited, return the status
@@ -979,6 +1000,15 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                         if child_waker.wait_result_owned(task.get_id(), trapframe)
                             == crate::sync::waker::WaitResult::Interrupted
                         {
+                            if is_thread_join {
+                                // Event return retries this wait with the
+                                // original argument 0. AArch64 ELR points after
+                                // SVC; RISC-V EPC still points at ECALL here.
+                                // Nothing was reaped by the interrupted wait.
+                                #[cfg(target_arch = "aarch64")]
+                                { trapframe.elr -= 4; }
+                                return pid as usize;
+                            }
                             trapframe.increment_pc_next(&task);
                             return usize::MAX;
                         }
@@ -1790,6 +1820,26 @@ pub fn sys_exit_group(trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     task.vcpu.lock().store(trapframe);
     let exit_code = trapframe.get_arg(0) as i32;
+    // The native C/Rust runtime reports abort as exit status 134. Preserve
+    // its call site before deferred group teardown discards the user context.
+    #[cfg(target_arch = "aarch64")]
+    if exit_code == 134 {
+        crate::println!(
+            "[task-abort] task={} status=134 pc={:#x} lr={:#x} fp={:#x} sp={:#x}",
+            task.get_id(),
+            trapframe.elr,
+            trapframe.regs.reg[30],
+            trapframe.regs.reg[29],
+            trapframe.sp,
+        );
+        let mut stack = [0u8; 256];
+        if copy_from_user(&task, trapframe.sp as usize, &mut stack).is_ok() {
+            for (index, word) in stack.chunks_exact(8).enumerate() {
+                let value = u64::from_ne_bytes(word.try_into().unwrap());
+                crate::println!("[task-abort] stack+{:#x}={:#x}", index * 8, value);
+            }
+        }
+    }
     task.request_deferred_exit_group(exit_code);
     usize::MAX // -1 (If exit_group is successful, this will not be reached)
 }

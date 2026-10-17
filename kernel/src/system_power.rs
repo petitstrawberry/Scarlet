@@ -85,7 +85,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_case]
     fn board_owns_both_operations_and_failure_never_falls_through() {
         let board = Board(AtomicUsize::new(0));
         for (action, expected) in [(Action::PowerOff, 1), (Action::Restart, 2)] {
@@ -99,7 +99,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_case]
     fn missing_board_uses_firmware_with_the_requested_operation() {
         for action in [Action::PowerOff, Action::Restart] {
             let result = dispatch(action, None, |received| {

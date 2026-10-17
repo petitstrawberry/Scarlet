@@ -1,7 +1,17 @@
 use scarlet_os::socket::Socket;
 use std::fs;
-use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddrV4, TcpStream, UdpSocket};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::time::Instant;
+
+#[path = "resolverd/dns.rs"]
+mod dns;
+use dns::{Answer, Cache, ResolverConfig};
+
+static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
 use std::thread;
 use std::time::Duration;
 
@@ -10,11 +20,6 @@ const RESOLV_CONF: &str = "/etc/resolv.conf";
 const DNS_PORT: u16 = 53;
 const MAX_DNS_PACKET: usize = 512;
 const DNS_TIMEOUT: Duration = Duration::from_secs(5);
-
-struct ResolverConfig {
-    nameservers: Vec<Ipv4Addr>,
-    search_domains: Vec<String>,
-}
 
 fn main() -> ExitCode {
     println!("[resolverd] starting");
@@ -31,12 +36,35 @@ fn main() -> ExitCode {
         println!("[resolverd] bind {SOCKET_PATH} failed: {err:?}");
         return ExitCode::from(1);
     }
-    if let Err(err) = server.listen(16) {
+    if let Err(err) = server.listen(64) {
         println!("[resolverd] listen failed: {err:?}");
         return ExitCode::from(1);
     }
 
     println!("[resolverd] listening at {SOCKET_PATH}");
+
+    let (jobs, incoming) = mpsc::sync_channel::<Socket>(64);
+    let incoming = Arc::new(Mutex::new(incoming));
+    for index in 0..8 {
+        let incoming = Arc::clone(&incoming);
+        if let Err(error) = thread::Builder::new()
+            .name(format!("resolver-request-{index}"))
+            .spawn(move || {
+                loop {
+                    let client = incoming.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                    let Ok(client) = client else {
+                        break;
+                    };
+                    if let Err(error) = handle_client(client) {
+                        println!("[resolverd] request failed: {error}");
+                    }
+                }
+            })
+        {
+            println!("[resolverd] failed to start request worker: {error}");
+            return ExitCode::from(1);
+        }
+    }
 
     loop {
         let client = match server.accept() {
@@ -47,15 +75,8 @@ fn main() -> ExitCode {
             }
         };
 
-        let spawn_result = thread::Builder::new()
-            .name(String::from("resolver-request"))
-            .spawn(move || {
-                if let Err(err) = handle_client(client) {
-                    println!("[resolverd] request failed: {err}");
-                }
-            });
-        if let Err(err) = spawn_result {
-            println!("[resolverd] failed to start request worker: {err}");
+        if jobs.send(client).is_err() {
+            return ExitCode::from(1);
         }
     }
 }
@@ -135,10 +156,27 @@ fn lookup_a(host: &str) -> Result<Vec<Ipv4Addr>, String> {
 
     let mut last_error = String::from("all configured DNS servers failed");
     for candidate in candidates {
+        let cache = CACHE.get_or_init(|| Mutex::new(Cache::default()));
+        if let Some(addresses) =
+            cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&config, &candidate, Instant::now())
+        {
+            return Ok(addresses);
+        }
         let query = build_query(&candidate)?;
         for nameserver in &config.nameservers {
-            match query_nameserver(&query, *nameserver) {
-                Ok(addresses) if !addresses.is_empty() => return Ok(addresses),
+            match query_nameserver(&query, *nameserver, &candidate) {
+                Ok(answer) if !answer.addresses.is_empty() => {
+                    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(
+                        &config,
+                        &candidate,
+                        &answer,
+                        Instant::now(),
+                    );
+                    return Ok(answer.addresses);
+                }
                 Ok(_) => last_error = format!("no A records for {candidate}"),
                 Err(error) => last_error = error,
             }
@@ -147,21 +185,52 @@ fn lookup_a(host: &str) -> Result<Vec<Ipv4Addr>, String> {
     Err(last_error)
 }
 
-fn query_nameserver(query: &[u8], nameserver: Ipv4Addr) -> Result<Vec<Ipv4Addr>, String> {
+fn query_nameserver(query: &[u8], nameserver: Ipv4Addr, host: &str) -> Result<Answer, String> {
     let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
         .map_err(|err| format!("udp bind failed: {err}"))?;
     socket
         .set_read_timeout(Some(DNS_TIMEOUT))
         .map_err(|err| format!("failed to set DNS timeout: {err}"))?;
     socket
-        .send_to(query, SocketAddrV4::new(nameserver, DNS_PORT))
+        .connect(SocketAddrV4::new(nameserver, DNS_PORT))
+        .map_err(|err| format!("dns connect failed: {err}"))?;
+    socket
+        .send(query)
         .map_err(|err| format!("dns send to {nameserver} failed: {err}"))?;
 
     let mut response = [0; MAX_DNS_PACKET];
-    let (length, _) = socket
-        .recv_from(&mut response)
+    let length = socket
+        .recv(&mut response)
         .map_err(|err| format!("dns receive from {nameserver} failed: {err}"))?;
-    parse_a_response(&response[..length])
+    let id = u16::from_be_bytes([query[0], query[1]]);
+    if length >= 4 && response[2] & 2 != 0 {
+        // Classic UDP DNS has a 512-byte limit. Follow a truncated answer over
+        // TCP rather than caching a partial address/alias set.
+        let address = std::net::SocketAddr::V4(SocketAddrV4::new(nameserver, DNS_PORT));
+        let mut stream = TcpStream::connect_timeout(&address, DNS_TIMEOUT)
+            .map_err(|error| format!("DNS TCP connect failed: {error}"))?;
+        stream
+            .set_read_timeout(Some(DNS_TIMEOUT))
+            .map_err(|error| error.to_string())?;
+        stream
+            .set_write_timeout(Some(DNS_TIMEOUT))
+            .map_err(|error| error.to_string())?;
+        stream
+            .write_all(&(query.len() as u16).to_be_bytes())
+            .map_err(|error| error.to_string())?;
+        stream.write_all(query).map_err(|error| error.to_string())?;
+        let mut size = [0; 2];
+        stream
+            .read_exact(&mut size)
+            .map_err(|error| error.to_string())?;
+        let mut packet = vec![0; u16::from_be_bytes(size) as usize];
+        stream
+            .read_exact(&mut packet)
+            .map_err(|error| error.to_string())?;
+        dns::parse_a_response(&packet, host, id)
+    } else {
+        dns::parse_a_response(&response[..length], host, id)
+    }
 }
 
 fn read_resolver_config() -> Result<ResolverConfig, String> {
@@ -202,7 +271,8 @@ fn read_resolver_config() -> Result<ResolverConfig, String> {
 
 fn build_query(host: &str) -> Result<Vec<u8>, String> {
     let mut query = Vec::with_capacity(12 + host.len() + 6);
-    query.extend_from_slice(&0x5343u16.to_be_bytes());
+    static NEXT_ID: AtomicU16 = AtomicU16::new(0x5343);
+    query.extend_from_slice(&NEXT_ID.fetch_add(1, Ordering::Relaxed).to_be_bytes());
     query.extend_from_slice(&0x0100u16.to_be_bytes());
     query.extend_from_slice(&1u16.to_be_bytes());
     query.extend_from_slice(&0u16.to_be_bytes());
@@ -222,97 +292,6 @@ fn build_query(host: &str) -> Result<Vec<u8>, String> {
     query.extend_from_slice(&1u16.to_be_bytes());
 
     Ok(query)
-}
-
-fn parse_a_response(packet: &[u8]) -> Result<Vec<Ipv4Addr>, String> {
-    if packet.len() < 12 {
-        return Err("short DNS response".to_owned());
-    }
-    if u16::from_be_bytes([packet[0], packet[1]]) != 0x5343 {
-        return Err("DNS response id mismatch".to_owned());
-    }
-    let flags = u16::from_be_bytes([packet[2], packet[3]]);
-    if flags & 0x8000 == 0 {
-        return Err("not a DNS response".to_owned());
-    }
-    let rcode = flags & 0x000f;
-    if rcode != 0 {
-        return Err(format!("DNS error rcode={rcode}"));
-    }
-
-    let qdcount = read_u16(packet, 4)?;
-    let ancount = read_u16(packet, 6)?;
-    let mut offset = 12usize;
-
-    for _ in 0..qdcount {
-        offset = skip_name(packet, offset)?;
-        offset = offset.checked_add(4).ok_or("DNS offset overflow")?;
-        if offset > packet.len() {
-            return Err("truncated DNS question".to_owned());
-        }
-    }
-
-    let mut addrs = Vec::new();
-    for _ in 0..ancount {
-        offset = skip_name(packet, offset)?;
-        if offset + 10 > packet.len() {
-            return Err("truncated DNS answer".to_owned());
-        }
-
-        let record_type = read_u16(packet, offset)?;
-        let class = read_u16(packet, offset + 2)?;
-        let rdlen = read_u16(packet, offset + 8)? as usize;
-        offset += 10;
-
-        if offset + rdlen > packet.len() {
-            return Err("truncated DNS rdata".to_owned());
-        }
-
-        if record_type == 1 && class == 1 && rdlen == 4 {
-            addrs.push(Ipv4Addr::new(
-                packet[offset],
-                packet[offset + 1],
-                packet[offset + 2],
-                packet[offset + 3],
-            ));
-        }
-        offset += rdlen;
-    }
-
-    Ok(addrs)
-}
-
-fn skip_name(packet: &[u8], mut offset: usize) -> Result<usize, String> {
-    loop {
-        let Some(&len) = packet.get(offset) else {
-            return Err("truncated DNS name".to_owned());
-        };
-        if len & 0xc0 == 0xc0 {
-            if offset + 1 >= packet.len() {
-                return Err("truncated DNS compression pointer".to_owned());
-            }
-            return Ok(offset + 2);
-        }
-        if len == 0 {
-            return Ok(offset + 1);
-        }
-        if len & 0xc0 != 0 {
-            return Err("unsupported DNS label".to_owned());
-        }
-        offset = offset
-            .checked_add(1 + len as usize)
-            .ok_or_else(|| "DNS name offset overflow".to_owned())?;
-        if offset > packet.len() {
-            return Err("truncated DNS label".to_owned());
-        }
-    }
-}
-
-fn read_u16(packet: &[u8], offset: usize) -> Result<u16, String> {
-    if offset + 2 > packet.len() {
-        return Err("truncated DNS integer".to_owned());
-    }
-    Ok(u16::from_be_bytes([packet[offset], packet[offset + 1]]))
 }
 
 fn is_valid_hostname(host: &str) -> bool {

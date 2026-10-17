@@ -428,6 +428,7 @@ pub fn load_module(data: &[u8]) -> Result<u64, LsmError> {
                 end: base_vaddr + mapped_size - 1,
             },
             vm_start: base_vaddr,
+            mapping_origin: crate::vm::vmem::MappingOrigin::new(),
             permissions,
             is_shared: true,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,

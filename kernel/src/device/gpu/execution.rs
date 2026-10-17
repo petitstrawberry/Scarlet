@@ -44,6 +44,8 @@ pub(super) struct GpuAttachedBuffer {
 #[derive(Clone)]
 pub(super) struct GpuAttachedImage {
     backend_image: Arc<dyn GpuBackendImage>,
+    attachment_token: u64,
+    attachment_count: usize,
     _backing: Arc<super::resource::GpuImageBacking>,
 }
 
@@ -104,6 +106,10 @@ impl GpuContext {
     ///
     /// * `image` - Image capability authorized by the caller's handle table.
     ///
+    /// Repeated attachments of the same image capability (including duplicated
+    /// handles) share one backend attachment and each require a matching detach.
+    /// Identity is the backend image Arc, never its device-local resource token.
+    ///
     /// # Returns
     ///
     /// A non-zero opaque attachment token authorized only for this context. It
@@ -111,11 +117,15 @@ impl GpuContext {
     pub fn attach_image(&self, image: &GpuImage) -> Result<u64, &'static str> {
         let backend_image = image.backend_image();
         let mut attached_images = self.attached_images.lock();
-        if attached_images
-            .iter()
-            .any(|attached| Arc::ptr_eq(&attached.backend_image, &backend_image))
+        if let Some(attached) = attached_images
+            .iter_mut()
+            .find(|attached| Arc::ptr_eq(&attached.backend_image, &backend_image))
         {
-            return Err("GPU image is already attached to this context");
+            attached.attachment_count = attached
+                .attachment_count
+                .checked_add(1)
+                .ok_or("GPU image attachment count overflow")?;
+            return Ok(attached.attachment_token);
         }
         attached_images
             .try_reserve(1)
@@ -127,6 +137,8 @@ impl GpuContext {
         }
         attached_images.push(GpuAttachedImage {
             backend_image,
+            attachment_token: token,
+            attachment_count: 1,
             _backing: image.backing(),
         });
         Ok(token)
@@ -140,8 +152,9 @@ impl GpuContext {
     ///
     /// # Returns
     ///
-    /// Nothing after the backend detached the image and the context released its
-    /// matching retained image/backing pair.
+    /// Each successful call releases one attachment reference. Only the last
+    /// calls the backend and releases the retained image/backing pair. A backend
+    /// detach failure preserves that final reference so the caller can retry.
     pub fn detach_image(&self, image: &GpuImage) -> Result<(), &'static str> {
         let backend_image = image.backend_image();
         let mut attached_images = self.attached_images.lock();
@@ -149,9 +162,29 @@ impl GpuContext {
             .iter()
             .position(|attached| Arc::ptr_eq(&attached.backend_image, &backend_image))
             .ok_or("GPU image is not attached to this context")?;
+        if attached_images[index].attachment_count > 1 {
+            attached_images[index].attachment_count -= 1;
+            return Ok(());
+        }
         self.backend_context.detach_image(backend_image.as_ref())?;
         attached_images.swap_remove(index);
         Ok(())
+    }
+
+    /// Publish one acquired reference, rolling it back if no response is delivered.
+    /// A failed backend detach leaves the reference retained for safety.
+    fn attach_image_and_publish(
+        &self,
+        image: &GpuImage,
+        publish: impl FnOnce(Result<u64, &'static str>) -> Result<(), &'static str>,
+    ) -> Result<(), &'static str> {
+        let attachment = self.attach_image(image);
+        let acquired = attachment.is_ok();
+        let result = publish(attachment);
+        if result.is_err() && acquired {
+            let _ = self.detach_image(image);
+        }
+        result
     }
 
     /// Attach a buffer to this context and retain its backing for all derived queues.
@@ -307,11 +340,13 @@ impl GpuContext {
             .as_gpu()
             .and_then(GpuObject::as_image)
             .ok_or("GPU image handle changed while attaching")?;
-        match self.attach_image(image) {
-            Ok(token) => request.command_resource_token = token,
-            Err(_) => request.result = GPU_RESULT_INVALID_STATE,
-        }
-        write_user_value(arg, &request)?;
+        self.attach_image_and_publish(image, |attachment| {
+            match attachment {
+                Ok(token) => request.command_resource_token = token,
+                Err(_) => request.result = GPU_RESULT_INVALID_STATE,
+            }
+            write_user_value(arg, &request)
+        })?;
         Ok(0)
     }
 
@@ -426,7 +461,7 @@ impl GpuContext {
             .any(|attached| Arc::ptr_eq(&attached.backend_image, &backend_image))
     }
 
-    fn handle_upload_image_bgra(&self, arg: usize) -> Result<i32, &'static str> {
+    fn handle_upload_image(&self, arg: usize, native: bool) -> Result<i32, &'static str> {
         let mut request: GpuContextUploadImageBgra = read_user_value(arg)?;
         let reserved = request.reserved;
         let reserved2 = request.reserved2;
@@ -454,11 +489,12 @@ impl GpuContext {
             .as_gpu()
             .and_then(GpuObject::as_image)
             .ok_or("GPU image handle changed while uploading")?;
-        let layout = match super::resource::image_upload_layout(
-            &request,
-            image.query_info(),
-            image.layout(),
-        ) {
+        let validate = if native {
+            super::resource::image_upload_native_layout
+        } else {
+            super::resource::image_upload_layout
+        };
+        let layout = match validate(&request, image.query_info(), image.layout()) {
             Ok(layout) => layout,
             Err(_) => {
                 request.result = GPU_RESULT_INVALID_ARGUMENT;
@@ -480,7 +516,7 @@ impl GpuContext {
             return Ok(0);
         }
         if image
-            .upload_bgra_from_user(source_ptr, layout, self.backend_context.as_ref())
+            .upload_from_user(source_ptr, layout, self.backend_context.as_ref())
             .is_err()
         {
             request.result = GPU_RESULT_INVALID_STATE;
@@ -539,7 +575,7 @@ impl GpuContext {
         Ok(0)
     }
 
-    fn handle_readback_image_bgra(&self, arg: usize) -> Result<i32, &'static str> {
+    fn handle_readback_image(&self, arg: usize, native: bool) -> Result<i32, &'static str> {
         let mut request: GpuContextReadbackImageBgra = read_user_value(arg)?;
         let reserved = request.reserved;
         let reserved2 = request.reserved2;
@@ -568,11 +604,12 @@ impl GpuContext {
             .as_gpu()
             .and_then(GpuObject::as_image)
             .ok_or("GPU image handle changed while reading back")?;
-        let layout = match super::resource::image_readback_layout(
-            &request,
-            image.query_info(),
-            image.layout(),
-        ) {
+        let validate = if native {
+            super::resource::image_readback_native_layout
+        } else {
+            super::resource::image_readback_layout
+        };
+        let layout = match validate(&request, image.query_info(), image.layout()) {
             Ok(layout) => layout,
             Err(_) => {
                 request.result = GPU_RESULT_INVALID_ARGUMENT;
@@ -594,7 +631,7 @@ impl GpuContext {
             return Ok(0);
         }
         if image
-            .readback_bgra_to_user(destination_ptr, layout, self.backend_context.as_ref())
+            .readback_to_user(destination_ptr, layout, self.backend_context.as_ref())
             .is_err()
         {
             request.result = GPU_RESULT_INVALID_STATE;
@@ -613,11 +650,13 @@ impl ControlOps for GpuContext {
             GPU_CONTEXT_DETACH_IMAGE => self.handle_detach_image(arg),
             super::GPU_CONTEXT_ATTACH_BUFFER => self.handle_attach_buffer(arg),
             GPU_CONTEXT_DETACH_BUFFER => self.handle_detach_buffer(arg),
-            GPU_CONTEXT_UPLOAD_IMAGE_BGRA => self.handle_upload_image_bgra(arg),
+            GPU_CONTEXT_UPLOAD_IMAGE_BGRA => self.handle_upload_image(arg, false),
+            super::GPU_CONTEXT_UPLOAD_IMAGE => self.handle_upload_image(arg, true),
             GPU_CONTEXT_TRANSFER_IMPORTED_IMAGE_BGRA => {
                 self.handle_transfer_imported_image_bgra(arg)
             }
-            GPU_CONTEXT_READBACK_IMAGE_BGRA => self.handle_readback_image_bgra(arg),
+            GPU_CONTEXT_READBACK_IMAGE_BGRA => self.handle_readback_image(arg, false),
+            super::GPU_CONTEXT_READBACK_IMAGE => self.handle_readback_image(arg, true),
             _ => Err("Unsupported GPU context control command"),
         }
     }
@@ -854,6 +893,7 @@ fn copy_command_bytes(command_ptr: u64, command_size: u32) -> Result<Vec<u8>, &'
 #[cfg(test)]
 mod tests {
     mod asynchronous;
+    mod image_aliases;
     mod synchronous;
     use alloc::sync::Arc;
 

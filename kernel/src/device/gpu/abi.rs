@@ -2,6 +2,10 @@
 
 /// ABI version accepted by [`GpuQueryInfo`].
 pub const GPU_ABI_VERSION: u32 = 1;
+/// Upload an uncompressed color image in its immutable native format.
+pub const GPU_CONTEXT_UPLOAD_IMAGE: u32 = 0x4772;
+/// Read an uncompressed color image in its immutable native format.
+pub const GPU_CONTEXT_READBACK_IMAGE: u32 = 0x4773;
 
 /// Control command that queries generic GPU and backend information.
 pub const GPU_QUERY_INFO: u32 = 0x4750;
@@ -129,6 +133,21 @@ pub const GPU_QUEUE_SUBMIT_FLAGS_VALID: u32 = GPU_QUEUE_SUBMIT_FLAG_SIGNAL_TIMEL
 pub const GPU_IMAGE_FORMAT_BGRA8_UNORM: u32 = 1;
 /// Generic 32-bit floating-point depth image format.
 pub const GPU_IMAGE_FORMAT_DEPTH32_FLOAT: u32 = 2;
+/// Generic one-channel normalized unsigned 8-bit image format.
+pub const GPU_IMAGE_FORMAT_R8_UNORM: u32 = 4;
+/// Generic two-channel normalized unsigned 8-bit image format.
+pub const GPU_IMAGE_FORMAT_RG8_UNORM: u32 = 5;
+
+/// Byte size of one uncompressed single-plane texel, without conversion.
+pub const fn image_format_bytes_per_texel(format: u32) -> Option<u32> {
+    match format {
+        GPU_IMAGE_FORMAT_BGRA8_UNORM | GPU_IMAGE_FORMAT_DEPTH32_FLOAT => Some(4),
+        GPU_IMAGE_FORMAT_R8_UNORM => Some(1),
+        GPU_IMAGE_FORMAT_RG8_UNORM => Some(2),
+        _ => None,
+    }
+}
+
 /// Maximum number of image planes returned by the generic layout ABI.
 pub const GPU_IMAGE_MAX_PLANES: usize = 4;
 /// Modifier value for an uncompressed linear image.
@@ -1701,3 +1720,9 @@ impl GpuQueueSubmit {
 /// Sampled-only, two-plane 8-bit Y and interleaved CbCr image.
 pub const GPU_IMAGE_FORMAT_NV12: u32 = 3;
 pub use scarlet_abi::shared_image::{GPU_IMPORT_SHARED_IMAGE, GpuImportSharedImage};
+
+/// Format-aware single-plane upload record for `GPU_CONTEXT_UPLOAD_IMAGE`.
+/// The image capability determines texel format; no pixel conversion occurs.
+pub type GpuContextUploadImage = GpuContextUploadImageBgra;
+/// Format-aware single-plane readback record for `GPU_CONTEXT_READBACK_IMAGE`.
+pub type GpuContextReadbackImage = GpuContextReadbackImageBgra;

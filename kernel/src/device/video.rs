@@ -13,7 +13,7 @@ use alloc::{
     vec::Vec,
 };
 use core::any::Any;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::arch::Trapframe;
 use crate::device::graphics::shared_image::SharedImage;
@@ -280,8 +280,13 @@ impl VideoBackendCapabilities {
 }
 
 /// Backend decode request for a mapped access unit.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct VideoBackendDecodeRequest {
+    /// Owns the allocation backing both input and output addresses.
+    ///
+    /// Asynchronous backends must retain this lease until all device accesses
+    /// and completion reads finish, including when session destruction fails.
+    pub buffer_lease: Option<Arc<ContiguousPages>>,
     /// Return an immutable shared image rather than writing the mapped output.
     pub shared_output: bool,
     /// Backend stream/session identifier.
@@ -307,7 +312,7 @@ pub struct VideoBackendDecodeRequest {
 }
 
 /// Backend request for stateless H.264 decode.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct VideoBackendH264StatelessRequest {
     /// Common mapped decode buffers.
     pub decode: VideoBackendDecodeRequest,
@@ -316,7 +321,7 @@ pub struct VideoBackendH264StatelessRequest {
 }
 
 /// Backend request for stateless VP9 decode.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct VideoBackendVp9StatelessRequest {
     /// Common mapped decode buffers.
     pub decode: VideoBackendDecodeRequest,
@@ -440,7 +445,11 @@ pub trait VideoDecodeBackend: Send + Sync {
     ///
     /// # Returns
     ///
-    /// `Ok(())` when the backend accepted the request.
+    /// `Ok(())` when the backend accepted the request. A backend that can still
+    /// access the buffers after returning must clone `request.buffer_lease`
+    /// before accepting, and retain it through completion or proven abort.
+    /// An error does not permit releasing the lease if the device already
+    /// accepted any part of the request.
     fn submit_decode(&self, request: &VideoBackendDecodeRequest) -> Result<(), &'static str>;
 
     /// Submit one stateless H.264 decode request.
@@ -501,7 +510,7 @@ const VIDEO_MAX_QUEUED_JOBS: usize = 16;
 const VIDEO_MAX_COMPLETED_FRAMES: usize = 16;
 const VIDEO_MAX_STREAM_ERRORS: usize = 16;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum VideoQueuedJob {
     Decode(VideoBackendDecodeRequest),
     H264Stateless(VideoBackendH264StatelessRequest),
@@ -597,29 +606,102 @@ impl VideoSchedulerState {
     }
 }
 
+struct VideoStreamGate {
+    stream_id: u32,
+    calls: AtomicUsize,
+    destroyed: AtomicBool,
+    teardown_claimed: AtomicBool,
+    teardown_result: IrqSpinLock<Option<Result<(), &'static str>>>,
+    wake: Waker,
+}
+
+impl VideoStreamGate {
+    fn new(stream_id: u32) -> Self {
+        Self {
+            stream_id,
+            calls: AtomicUsize::new(0),
+            destroyed: AtomicBool::new(false),
+            teardown_claimed: AtomicBool::new(false),
+            teardown_result: IrqSpinLock::new(None),
+            wake: Waker::new_interruptible("video_stream_teardown"),
+        }
+    }
+
+    fn claim_teardown(&self) -> bool {
+        self.destroyed.load(Ordering::Acquire)
+            && self.calls.load(Ordering::Acquire) == 0
+            && self
+                .teardown_claimed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
+}
+
 struct VideoSchedulerLifecycle {
-    destroyed_streams: Vec<u32>,
+    streams: Vec<(u32, Arc<VideoStreamGate>)>,
 }
 
 impl VideoSchedulerLifecycle {
     fn new() -> Self {
         Self {
-            destroyed_streams: Vec::new(),
+            streams: Vec::with_capacity(VIDEO_MAX_INFLIGHT_DECODES),
         }
     }
 
+    fn gate(&mut self, stream_id: u32) -> Arc<VideoStreamGate> {
+        if let Some((_, gate)) = self.streams.iter().find(|(id, _)| *id == stream_id) {
+            return Arc::clone(gate);
+        }
+        let gate = Arc::new(VideoStreamGate::new(stream_id));
+        self.streams.push((stream_id, Arc::clone(&gate)));
+        gate
+    }
+
     fn is_destroyed_stream(&self, stream_id: u32) -> bool {
-        self.destroyed_streams.contains(&stream_id)
+        self.streams
+            .iter()
+            .any(|(id, gate)| *id == stream_id && gate.destroyed.load(Ordering::Acquire))
     }
 
     fn mark_stream_active(&mut self, stream_id: u32) {
-        self.destroyed_streams
-            .retain(|destroyed| *destroyed != stream_id);
+        // A reused backend identifier is a new lifetime. Old waiters retain
+        // their own gate and can never observe or retire the replacement.
+        self.streams.retain(|(id, _)| *id != stream_id);
+        self.streams
+            .push((stream_id, Arc::new(VideoStreamGate::new(stream_id))));
     }
 
-    fn mark_stream_destroyed(&mut self, stream_id: u32) {
-        if !self.is_destroyed_stream(stream_id) {
-            self.destroyed_streams.push(stream_id);
+    fn begin_call(&mut self, stream_id: u32) -> Option<Arc<VideoStreamGate>> {
+        let gate = self.gate(stream_id);
+        if gate.destroyed.load(Ordering::Acquire) {
+            return None;
+        }
+        gate.calls.fetch_add(1, Ordering::AcqRel);
+        Some(gate)
+    }
+
+    fn mark_stream_destroyed(&mut self, stream_id: u32) -> Arc<VideoStreamGate> {
+        let gate = self.gate(stream_id);
+        gate.destroyed.store(true, Ordering::Release);
+        gate
+    }
+}
+
+/// Pins the backend operation and its result publication. No scheduler lock is
+/// held while hardware runs. The IRQ/preemption guard prevents abandoning a
+/// claimed operation's kernel stack during a remote task retirement.
+struct VideoBackendCall<'a> {
+    device: &'a ScarletVideoDevice,
+    gate: Arc<VideoStreamGate>,
+    _irq_guard: IrqGuard,
+}
+
+impl Drop for VideoBackendCall<'_> {
+    fn drop(&mut self) {
+        if self.gate.calls.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // Destroy can wait, be interrupted, or lose its task entirely.
+            // The last real backend operation still owns deferred teardown.
+            self.device.finish_stream_teardown(&self.gate);
         }
     }
 }
@@ -687,7 +769,7 @@ struct ScarletVideoDevice {
     scheduler: IrqSpinLock<VideoSchedulerState>,
     completion_waker: Waker,
     max_inflight_decodes: usize,
-    mapped_buffer: IrqSpinLock<Option<ContiguousPages>>,
+    mapped_buffer: IrqSpinLock<Option<Arc<ContiguousPages>>>,
     last_error: IrqSpinLock<Option<&'static str>>,
     next_timestamp: IrqSpinLock<u64>,
 }
@@ -824,7 +906,8 @@ impl ScarletVideoDevice {
         let mut mapped_buffer = self.mapped_buffer.lock();
         if mapped_buffer.is_none() {
             let pages = layout.mmap_len.div_ceil(PAGE_SIZE);
-            *mapped_buffer = ContiguousPages::new_aligned(pages, VIDEO_MAPPED_BUFFER_ALIGN);
+            *mapped_buffer =
+                ContiguousPages::new_aligned(pages, VIDEO_MAPPED_BUFFER_ALIGN).map(Arc::new);
             if let Some(buffer) = mapped_buffer.as_ref() {
                 crate::println!(
                     "[scarlet-video] legacy mmap alloc pages={} len={} paddr={:#x}",
@@ -891,14 +974,16 @@ impl ScarletVideoDevice {
         loop {
             let mut made_progress = false;
             let mut current_index = 0;
-            while let Some(stream_id) = self.current_scheduled_stream(current_index) {
+            while let Some((stream_id, call)) = self.current_scheduled_stream(current_index) {
                 match self.backend.dequeue_frame(stream_id) {
                     Ok(Some(frame)) => {
                         {
-                            let _irq_guard = IrqGuard::new();
+                            let _lifecycle = self.scheduler_lifecycle.lock();
                             let mut scheduler = self.scheduler.lock();
-                            scheduler.clear_current_stream(stream_id);
-                            scheduler.push_completed(frame);
+                            if !call.gate.destroyed.load(Ordering::Acquire) {
+                                scheduler.clear_current_stream(stream_id);
+                                scheduler.push_completed(frame);
+                            }
                         }
                         self.completion_waker.wake_all();
                         made_progress = true;
@@ -907,10 +992,12 @@ impl ScarletVideoDevice {
                     Ok(None) => current_index += 1,
                     Err(error) => {
                         {
-                            let _irq_guard = IrqGuard::new();
+                            let _lifecycle = self.scheduler_lifecycle.lock();
                             let mut scheduler = self.scheduler.lock();
-                            scheduler.clear_current_stream(stream_id);
-                            scheduler.push_error(stream_id, error);
+                            if !call.gate.destroyed.load(Ordering::Acquire) {
+                                scheduler.clear_current_stream(stream_id);
+                                scheduler.push_error(stream_id, error);
+                            }
                         }
                         self.completion_waker.wake_all();
                         made_progress = true;
@@ -920,7 +1007,7 @@ impl ScarletVideoDevice {
             }
 
             let mut dispatched = false;
-            while let Some(job) = self.take_next_job() {
+            while let Some((job, call)) = self.take_next_job() {
                 let stream_id = job.stream_id();
                 let result = match job {
                     VideoQueuedJob::Decode(request) => self.backend.submit_decode(&request),
@@ -938,10 +1025,12 @@ impl ScarletVideoDevice {
                     }
                     Err(error) => {
                         {
-                            let _irq_guard = IrqGuard::new();
+                            let _lifecycle = self.scheduler_lifecycle.lock();
                             let mut scheduler = self.scheduler.lock();
-                            scheduler.clear_current_stream(stream_id);
-                            scheduler.push_error(stream_id, error);
+                            if !call.gate.destroyed.load(Ordering::Acquire) {
+                                scheduler.clear_current_stream(stream_id);
+                                scheduler.push_error(stream_id, error);
+                            }
                         }
                         self.completion_waker.wake_all();
                         made_progress = true;
@@ -955,20 +1044,44 @@ impl ScarletVideoDevice {
         }
     }
 
-    fn current_scheduled_stream(&self, index: usize) -> Option<u32> {
-        let _irq_guard = IrqGuard::new();
-        self.scheduler.lock().current_streams.get(index).copied()
+    fn current_scheduled_stream(&self, index: usize) -> Option<(u32, VideoBackendCall<'_>)> {
+        let irq_guard = IrqGuard::new();
+        let mut lifecycle = self.scheduler_lifecycle.lock();
+        let scheduler = self.scheduler.lock();
+        let stream_id = *scheduler.current_streams.get(index)?;
+        let gate = lifecycle.begin_call(stream_id)?;
+        Some((
+            stream_id,
+            VideoBackendCall {
+                device: self,
+                gate,
+                _irq_guard: irq_guard,
+            },
+        ))
     }
 
-    fn take_next_job(&self) -> Option<VideoQueuedJob> {
-        let _irq_guard = IrqGuard::new();
+    fn take_next_job(&self) -> Option<(VideoQueuedJob, VideoBackendCall<'_>)> {
+        let irq_guard = IrqGuard::new();
+        let mut lifecycle = self.scheduler_lifecycle.lock();
         let mut scheduler = self.scheduler.lock();
         if scheduler.current_streams.len() >= self.max_inflight_decodes {
             return None;
         }
-        let job = scheduler.queued.pop_front()?;
-        scheduler.current_streams.push(job.stream_id());
-        Some(job)
+        while let Some(job) = scheduler.queued.pop_front() {
+            let Some(gate) = lifecycle.begin_call(job.stream_id()) else {
+                continue;
+            };
+            scheduler.current_streams.push(job.stream_id());
+            return Some((
+                job,
+                VideoBackendCall {
+                    device: self,
+                    gate,
+                    _irq_guard: irq_guard,
+                },
+            ));
+        }
+        None
     }
 
     fn dequeue_scheduled_frame(
@@ -984,30 +1097,56 @@ impl ScarletVideoDevice {
         Ok(scheduler.remove_completed(stream_id))
     }
 
-    fn destroy_scheduled_stream(&self, stream_id: u32) -> Result<(), &'static str> {
-        {
-            // Publish destruction and remove every queued result as one
-            // bounded transition. No sleeping/backend work is allowed while
-            // either spin lock is held.
-            let mut lifecycle = self.scheduler_lifecycle.lock();
-            lifecycle.mark_stream_destroyed(stream_id);
-            let mut scheduler = self.scheduler.lock();
-            scheduler.remove_stream_queues(stream_id);
-            scheduler.clear_current_stream(stream_id);
+    fn finish_stream_teardown(&self, gate: &VideoStreamGate) {
+        if !gate.claim_teardown() {
+            return;
         }
-        let result = self.backend.destroy_session(stream_id);
-        {
-            // A scheduler pump racing the backend teardown may have observed
-            // the old active session. Sweep once more after teardown so no
-            // stale completion/error survives into a later open.
-            let mut scheduler = self.scheduler.lock();
-            scheduler.remove_stream_queues(stream_id);
-            scheduler.clear_current_stream(stream_id);
-        }
-        result?;
-        self.pump_scheduler();
+        let result = self.backend.destroy_session(gate.stream_id);
+        *gate.teardown_result.lock() = Some(result);
+        gate.wake.wake_all();
         self.completion_waker.wake_all();
-        Ok(())
+    }
+
+    fn destroy_scheduled_stream(&self, stream_id: u32) -> Result<(), &'static str> {
+        let gate = {
+            // Claim/count updates and cancellation share this bounded lock
+            // transition; a taken job can never fall between them.
+            let mut lifecycle = self.scheduler_lifecycle.lock();
+            let gate = lifecycle.mark_stream_destroyed(stream_id);
+            let mut scheduler = self.scheduler.lock();
+            scheduler.remove_stream_queues(stream_id);
+            scheduler.clear_current_stream(stream_id);
+            gate
+        };
+        self.finish_stream_teardown(&gate);
+        if let Some(result) = *gate.teardown_result.lock() {
+            return result;
+        }
+        if crate::sync::preemptible() {
+            if let Some(task) = mytask() {
+                let _ = gate.wake.wait_with_condition(
+                    task.get_id(),
+                    task.get_trapframe(),
+                    Some(5_000_000_000),
+                    0,
+                    || gate.teardown_result.lock().is_some(),
+                );
+                return gate
+                    .teardown_result
+                    .lock()
+                    .unwrap_or(Err("scarlet-video: backend teardown remains pending"));
+            }
+        }
+        // Final handle cleanup can run outside schedulable task context. Do
+        // not spin forever there: the final backend-call guard will finish
+        // teardown even if this caller cannot remain to receive its result.
+        for _ in 0..1_000_000 {
+            if let Some(result) = *gate.teardown_result.lock() {
+                return result;
+            }
+            core::hint::spin_loop();
+        }
+        Err("scarlet-video: backend teardown remains pending")
     }
 
     fn scheduler_ready(&self, interest: ReadyInterest) -> ReadySet {
@@ -1040,12 +1179,13 @@ impl ScarletVideoDevice {
         }
 
         self.ensure_mapped_buffer(layout)?;
-        let (input_paddr, input_vaddr, output_paddr, output_vaddr) = {
+        let (buffer_lease, input_paddr, input_vaddr, output_paddr, output_vaddr) = {
             let mapped_buffer = self.mapped_buffer.lock();
             let buffer = mapped_buffer
                 .as_ref()
                 .ok_or("scarlet-video: mmap buffer missing")?;
             (
+                Arc::clone(buffer),
                 buffer.as_paddr(),
                 buffer.as_vaddr(),
                 buffer.as_paddr() + layout.output_offset as u64,
@@ -1058,6 +1198,7 @@ impl ScarletVideoDevice {
             timestamp
         };
         Ok(VideoBackendDecodeRequest {
+            buffer_lease: Some(buffer_lease),
             stream_id,
             coded_format,
             input_paddr,
@@ -1344,7 +1485,7 @@ struct ScarletVideoOpen {
     output_mode: IrqSpinLock<(u32, bool)>,
     device: Arc<ScarletVideoDevice>,
     buffer_layout: IrqSpinLock<Option<VideoBufferLayout>>,
-    mapped_buffer: IrqSpinLock<Option<ContiguousPages>>,
+    mapped_buffer: IrqSpinLock<Option<Arc<ContiguousPages>>>,
     last_error: IrqSpinLock<Option<&'static str>>,
     next_timestamp: IrqSpinLock<u64>,
     stream_id: IrqSpinLock<Option<u32>>,
@@ -1532,7 +1673,8 @@ impl ScarletVideoOpen {
         let mut mapped_buffer = self.mapped_buffer.lock();
         if mapped_buffer.is_none() {
             let pages = layout.mmap_len.div_ceil(PAGE_SIZE);
-            *mapped_buffer = ContiguousPages::new_aligned(pages, VIDEO_MAPPED_BUFFER_ALIGN);
+            *mapped_buffer =
+                ContiguousPages::new_aligned(pages, VIDEO_MAPPED_BUFFER_ALIGN).map(Arc::new);
             if let Some(buffer) = mapped_buffer.as_ref() {
                 crate::println!(
                     "[scarlet-video] mmap alloc open={:#x} stream={} pages={} len={} paddr={:#x}",
@@ -1582,12 +1724,13 @@ impl ScarletVideoOpen {
         }
 
         self.ensure_mapped_buffer(layout)?;
-        let (input_paddr, input_vaddr, output_paddr, output_vaddr) = {
+        let (buffer_lease, input_paddr, input_vaddr, output_paddr, output_vaddr) = {
             let mapped_buffer = self.mapped_buffer.lock();
             let buffer = mapped_buffer
                 .as_ref()
                 .ok_or("scarlet-video: mmap buffer missing")?;
             (
+                Arc::clone(buffer),
                 buffer.as_paddr(),
                 buffer.as_vaddr(),
                 buffer.as_paddr() + layout.output_offset as u64,
@@ -1605,6 +1748,7 @@ impl ScarletVideoOpen {
             state.0 == VIDEO_OUTPUT_SHARED_IMAGE
         };
         Ok(VideoBackendDecodeRequest {
+            buffer_lease: Some(buffer_lease),
             stream_id,
             coded_format,
             input_paddr,
@@ -3145,4 +3289,221 @@ pub mod avd_fw {
     pub const MSG_PP_DONE: u32 = 0x0000_1000;
     /// Unexpected IRQ vector.
     pub const MSG_UNKNOWN_IRQ: u32 = 0x0001_0000;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::AtomicBool;
+
+    struct DelayedDecodeBackend {
+        pending: IrqSpinLock<Option<Arc<ContiguousPages>>>,
+        destroy_timeout: AtomicBool,
+        destroy_calls: AtomicUsize,
+    }
+
+    impl DelayedDecodeBackend {
+        fn new(destroy_timeout: bool) -> Self {
+            Self {
+                pending: IrqSpinLock::new(None),
+                destroy_timeout: AtomicBool::new(destroy_timeout),
+                destroy_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl VideoDecodeBackend for DelayedDecodeBackend {
+        fn name(&self) -> &'static str {
+            "delayed-test"
+        }
+
+        fn capabilities(&self) -> VideoBackendCapabilities {
+            VideoBackendCapabilities {
+                max_sessions: 1,
+                max_inflight_decodes: 1,
+                mapped_input_len: PAGE_SIZE as u32,
+                mapped_output_len: PAGE_SIZE as u32,
+                supports_h264: true,
+                ..VideoBackendCapabilities::default()
+            }
+        }
+
+        fn create_session(&self, _coded_format: u32) -> Result<u32, &'static str> {
+            Ok(1)
+        }
+
+        fn destroy_session(&self, _stream_id: u32) -> Result<(), &'static str> {
+            self.destroy_calls.fetch_add(1, Ordering::SeqCst);
+            if self.destroy_timeout.load(Ordering::SeqCst) {
+                Err("test decode drain timed out")
+            } else {
+                self.pending.lock().take();
+                Ok(())
+            }
+        }
+
+        fn submit_decode(&self, request: &VideoBackendDecodeRequest) -> Result<(), &'static str> {
+            *self.pending.lock() = Some(Arc::clone(
+                request.buffer_lease.as_ref().ok_or("missing lease")?,
+            ));
+            Ok(())
+        }
+
+        fn dequeue_frame(
+            &self,
+            _stream_id: u32,
+        ) -> Result<Option<VideoBackendDecodedFrame>, &'static str> {
+            Ok(None)
+        }
+    }
+
+    #[test_case]
+    fn open_drop_retains_pending_allocation_after_destroy_timeout() {
+        let backend = Arc::new(DelayedDecodeBackend::new(true));
+        let device = Arc::new(ScarletVideoDevice::new(backend.clone()));
+        let open = ScarletVideoOpen::new(device).unwrap();
+        open.submit_mapped(SCARLET_VIDEO_FORMAT_H264, 4, 7).unwrap();
+        let allocation = Arc::downgrade(open.mapped_buffer.lock().as_ref().unwrap());
+        assert_eq!(allocation.strong_count(), 2); // Open and accepted backend job.
+
+        drop(open); // Destroy fails with the backend still owning device work.
+        assert_eq!(backend.destroy_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(allocation.strong_count(), 1);
+        assert!(allocation.upgrade().is_some());
+
+        backend.pending.lock().take(); // Model the eventual device completion.
+        assert!(allocation.upgrade().is_none());
+    }
+
+    #[test_case]
+    fn open_drop_releases_allocation_after_successful_destroy() {
+        let backend = Arc::new(DelayedDecodeBackend::new(false));
+        let device = Arc::new(ScarletVideoDevice::new(backend.clone()));
+        let open = ScarletVideoOpen::new(device).unwrap();
+        open.submit_mapped(SCARLET_VIDEO_FORMAT_H264, 4, 7).unwrap();
+        let allocation = Arc::downgrade(open.mapped_buffer.lock().as_ref().unwrap());
+        drop(open);
+        assert_eq!(backend.destroy_calls.load(Ordering::SeqCst), 1);
+        assert!(allocation.upgrade().is_none());
+        assert!(backend.pending.lock().is_none());
+    }
+
+    #[test_case]
+    fn taken_decode_job_keeps_teardown_behind_its_actual_backend_call() {
+        let backend = Arc::new(DelayedDecodeBackend::new(false));
+        let device = Arc::new(ScarletVideoDevice::new(backend.clone()));
+        let stream_id = device
+            .create_scheduled_session(SCARLET_VIDEO_FORMAT_H264)
+            .unwrap();
+        let pages = Arc::new(ContiguousPages::new(1).unwrap());
+        let allocation = Arc::downgrade(&pages);
+        device
+            .scheduler
+            .lock()
+            .queued
+            .push_back(VideoQueuedJob::Decode(VideoBackendDecodeRequest {
+                stream_id,
+                buffer_lease: Some(pages),
+                ..VideoBackendDecodeRequest::default()
+            }));
+        // Stop exactly in the previously unprotected take -> submit window.
+        let (job, call) = device.take_next_job().unwrap();
+        let gate = {
+            let mut lifecycle = device.scheduler_lifecycle.lock();
+            let gate = lifecycle.mark_stream_destroyed(stream_id);
+            let mut scheduler = device.scheduler.lock();
+            scheduler.remove_stream_queues(stream_id);
+            scheduler.clear_current_stream(stream_id);
+            gate
+        };
+        device.finish_stream_teardown(&gate);
+        assert_eq!(backend.destroy_calls.load(Ordering::Acquire), 0);
+        assert!(
+            device
+                .scheduler_lifecycle
+                .lock()
+                .begin_call(stream_id)
+                .is_none()
+        );
+        let VideoQueuedJob::Decode(request) = &job else {
+            panic!("expected decode job");
+        };
+        device.backend.submit_decode(request).unwrap();
+        drop(job);
+        assert!(allocation.upgrade().is_some());
+        // The cancelled caller need not survive: the final call owns cleanup.
+        drop(call);
+        assert_eq!(backend.destroy_calls.load(Ordering::Acquire), 1);
+        assert_eq!(*gate.teardown_result.lock(), Some(Ok(())));
+        assert!(allocation.upgrade().is_none());
+        device.finish_stream_teardown(&gate);
+        assert_eq!(backend.destroy_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[test_case]
+    fn dequeue_claim_blocks_retirement_and_old_gate_cannot_sweep_reused_stream() {
+        let backend = Arc::new(DelayedDecodeBackend::new(false));
+        let device = Arc::new(ScarletVideoDevice::new(backend.clone()));
+        let stream_id = device
+            .create_scheduled_session(SCARLET_VIDEO_FORMAT_H264)
+            .unwrap();
+        device.scheduler.lock().current_streams.push(stream_id);
+        let (_, call) = device.current_scheduled_stream(0).unwrap();
+        let old = {
+            let mut lifecycle = device.scheduler_lifecycle.lock();
+            let gate = lifecycle.mark_stream_destroyed(stream_id);
+            device.scheduler.lock().clear_current_stream(stream_id);
+            gate
+        };
+        device.finish_stream_teardown(&old);
+        assert_eq!(backend.destroy_calls.load(Ordering::Acquire), 0);
+        assert!(call.gate.destroyed.load(Ordering::Acquire));
+        assert!(device.backend.dequeue_frame(stream_id).unwrap().is_none());
+        drop(call);
+        assert_eq!(*old.teardown_result.lock(), Some(Ok(())));
+        assert_eq!(backend.destroy_calls.load(Ordering::Acquire), 1);
+        assert_eq!(
+            device
+                .create_scheduled_session(SCARLET_VIDEO_FORMAT_H264)
+                .unwrap(),
+            stream_id
+        );
+        let replacement = device.scheduler_lifecycle.lock().gate(stream_id);
+        assert!(!Arc::ptr_eq(&old, &replacement));
+        assert!(!replacement.destroyed.load(Ordering::Acquire));
+        assert_eq!(*replacement.teardown_result.lock(), None);
+        device
+            .scheduler
+            .lock()
+            .queued
+            .push_back(VideoQueuedJob::Decode(VideoBackendDecodeRequest {
+                stream_id,
+                timestamp: 99,
+                ..VideoBackendDecodeRequest::default()
+            }));
+        device.finish_stream_teardown(&old); // A late old waiter is inert.
+        assert_eq!(backend.destroy_calls.load(Ordering::Acquire), 1);
+        assert_eq!(device.scheduler.lock().queued.len(), 1);
+        device.destroy_scheduled_stream(stream_id).unwrap();
+        assert_eq!(backend.destroy_calls.load(Ordering::Acquire), 2);
+    }
+
+    #[test_case]
+    fn queued_decode_owns_allocation_until_cancelled() {
+        let pages = Arc::new(ContiguousPages::new(1).unwrap());
+        let allocation = Arc::downgrade(&pages);
+        let mut scheduler = VideoSchedulerState::new(1);
+        scheduler
+            .queued
+            .push_back(VideoQueuedJob::Decode(VideoBackendDecodeRequest {
+                buffer_lease: Some(pages),
+                stream_id: 3,
+                ..VideoBackendDecodeRequest::default()
+            }));
+        assert!(allocation.upgrade().is_some());
+        scheduler.remove_stream_queues(99); // Another stream cannot drop this lease.
+        assert!(allocation.upgrade().is_some());
+        scheduler.remove_stream_queues(3);
+        assert!(allocation.upgrade().is_none());
+    }
 }

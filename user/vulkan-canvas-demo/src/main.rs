@@ -8,6 +8,28 @@ fn main() {
 
 #[cfg(target_os = "scarlet")]
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--probe") {
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            for cycle in 0..3 {
+                let (mut cube, raw_handle) = vulkan_cube::VulkanCube::new()?;
+                // Adopt and close the exported capability even without a window.
+                let handle = unsafe { sgfx::Handle::from_raw(raw_handle) };
+                cube.render(0.58)?;
+                cube.verify_readback()?;
+                cube.render(0.92)?;
+                cube.verify_readback()?;
+                drop(handle);
+                drop(cube);
+                println!("VULKAN_NATIVE_PROBE cycle={} result=PASS", cycle + 1);
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            eprintln!("VULKAN_NATIVE_PROBE result=FAIL error={error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Err(error) = scarlet_app::run() {
         eprintln!("vulkan-canvas-demo: {error}");
         std::process::exit(1);

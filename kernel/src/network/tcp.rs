@@ -1,8 +1,10 @@
-//! TCP protocol layer (Complete implementation)
+//! TCP protocol layer
 //!
-//! This module provides a full TCP implementation with 3-way handshake,
+//! This module implements the TCP 3-way handshake, window scaling,
 //! flow control, and retransmission.
 
+#[cfg(test)]
+mod flow_tests;
 mod timing;
 use crate::network::profile as net_profile;
 use timing::RetransmissionTiming;
@@ -13,7 +15,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicUsize, Ordering};
 
 use crate::network::ipv4::Ipv4Address;
 use crate::network::protocol_stack::get_network_manager;
@@ -105,7 +107,8 @@ pub mod tcp_flags {
 
 /// Buffer size limits (prevent memory exhaustion)
 const MAX_SEND_BUFFER_SIZE: usize = 65536; // 64KB
-const MAX_RECV_BUFFER_SIZE: usize = 128 * 1024; // Two advertised receive windows
+const MAX_RECV_BUFFER_SIZE: usize = 1024 * 1024; // Allocated on demand, at most 1 MiB per socket
+const TCP_LOCAL_WINDOW_SHIFT: u8 = 4;
 const MAX_UNACKED_SEGMENTS: usize = 256; // Limit unacked segment list
 const IPV4_HEADER_SIZE: usize = 20;
 const TCP_HEADER_SIZE: usize = 20;
@@ -116,15 +119,16 @@ const TCP_OPTION_END: u8 = 0;
 const TCP_OPTION_NOP: u8 = 1;
 const TCP_OPTION_MSS: u8 = 2;
 const TCP_OPTION_MSS_LENGTH: u8 = 4;
+const TCP_OPTION_WINDOW_SCALE: u8 = 3;
 const WINDOW_UPDATE_THRESHOLD: u16 = 8192;
 const LOG_TCP_HTTPS: bool = false;
 const MAX_SOCKET_TIMEOUT_MS: usize = i32::MAX as usize;
 
-fn receive_window_update_needed(advertised_edge: Option<u32>, ack: u32, window: u16) -> bool {
+fn receive_window_update_needed(advertised_edge: Option<u32>, ack: u32, window: u32) -> bool {
     let Some(previous) = advertised_edge else {
         return false;
     };
-    let edge = ack.wrapping_add(window as u32);
+    let edge = ack.wrapping_add(window);
     if !seq_after(edge, previous) {
         return false;
     }
@@ -202,7 +206,11 @@ impl TcpHeader {
     }
 
     fn calculate_checksum_with_options(
-        &self, src_ip: [u8; 4], dst_ip: [u8; 4], options: &[u8], data: &[u8],
+        &self,
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        options: &[u8],
+        data: &[u8],
     ) -> u16 {
         let tcp_len = (TCP_HEADER_SIZE + options.len() + data.len()) as u16;
         let mut pseudo = [0u8; 12];
@@ -218,7 +226,9 @@ impl TcpHeader {
         let mut sum = 0u32;
         let mut high = None;
         for mut slice in [pseudo.as_slice(), bytes.as_slice(), options, data] {
-            if slice.is_empty() { continue; }
+            if slice.is_empty() {
+                continue;
+            }
             if let Some(first) = high.take() {
                 sum += u16::from_be_bytes([first, slice[0]]) as u32;
                 sum = (sum & 0xffff) + (sum >> 16);
@@ -231,8 +241,12 @@ impl TcpHeader {
             }
             high = pairs.remainder().first().copied();
         }
-        if let Some(byte) = high { sum += (byte as u32) << 8; }
-        while sum >> 16 != 0 { sum = (sum & 0xffff) + (sum >> 16); }
+        if let Some(byte) = high {
+            sum += (byte as u32) << 8;
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
         !sum as u16
     }
 
@@ -250,7 +264,9 @@ impl TcpHeader {
         bytes
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> { self.to_array().to_vec() }
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.to_array().to_vec()
+    }
 
     /// Parse header from bytes
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -298,6 +314,40 @@ fn parse_tcp_mss_option(options: &[u8]) -> Option<u16> {
         }
     }
     None
+}
+
+// RFC 7323: negotiate only on SYN, including shift zero. Values above
+// fourteen are clamped; malformed lengths must never become a shift operand.
+fn parse_tcp_window_scale_option(options: &[u8]) -> Option<u8> {
+    let mut offset = 0;
+    while offset < options.len() {
+        match options[offset] {
+            TCP_OPTION_END => break,
+            TCP_OPTION_NOP => offset += 1,
+            kind => {
+                let length = usize::from(*options.get(offset + 1)?);
+                if length < 2 || offset + length > options.len() {
+                    return None;
+                }
+                if kind == TCP_OPTION_WINDOW_SCALE && length == 3 {
+                    return Some(options[offset + 2].min(14));
+                }
+                offset += length;
+            }
+        }
+    }
+    None
+}
+
+fn tcp_syn_options(scale: Option<u8>) -> ([u8; 8], usize) {
+    let mut options = [0; 8];
+    options[..4].copy_from_slice(&tcp_mss_option(TCP_LOCAL_MSS as u16));
+    if let Some(scale) = scale {
+        options[4..].copy_from_slice(&[TCP_OPTION_NOP, TCP_OPTION_WINDOW_SCALE, 3, scale]);
+        (options, 8)
+    } else {
+        (options, 4)
+    }
 }
 
 fn effective_tcp_mss(peer_mss: u16) -> usize {
@@ -374,6 +424,57 @@ struct ActiveRetransTimer {
     handler: Arc<dyn crate::timer::TimerHandler>,
 }
 
+struct PeerWindow {
+    bytes: u32,
+    update: Option<(u32, u32)>,
+}
+
+impl PeerWindow {
+    const fn new() -> Self {
+        Self {
+            bytes: 65535,
+            update: None,
+        }
+    }
+    fn update(&mut self, seq: u32, ack: u32, bytes: u32) -> bool {
+        if self.update.is_some_and(|(last_seq, last_ack)| {
+            seq_before(seq, last_seq) || (seq == last_seq && seq_before(ack, last_ack))
+        }) {
+            return false;
+        }
+        let changed = self.bytes != bytes;
+        self.bytes = bytes;
+        self.update = Some((seq, ack));
+        changed
+    }
+}
+
+struct PersistTimer {
+    socket: Weak<TcpSocket>,
+}
+impl crate::timer::TimerHandler for PersistTimer {
+    fn on_timer_expired(self: Arc<Self>, _: usize) {
+        if let Some(socket) = self.socket.upgrade() {
+            let handler: Arc<dyn crate::timer::TimerHandler> = self.clone();
+            let owns = {
+                let mut active = socket.persist_timer.lock();
+                if active
+                    .as_ref()
+                    .is_some_and(|timer| Arc::ptr_eq(&timer.handler, &handler))
+                {
+                    active.take();
+                    true
+                } else {
+                    false
+                }
+            };
+            if owns {
+                socket.probe_zero_window();
+            }
+        }
+    }
+}
+
 /// TCP socket (full implementation)
 pub struct TcpSocket {
     /// TCP connection state
@@ -396,8 +497,11 @@ pub struct TcpSocket {
     recv_ack: AtomicU32,
 
     /// Window size
-    send_window: AtomicU16,
-    recv_window: AtomicU16,
+    peer_window: IrqSpinLock<PeerWindow>,
+    recv_window: AtomicU32,
+    peer_window_shift: AtomicU8,
+    local_window_shift: AtomicU8,
+    window_scaling: AtomicBool,
     /// Furthest receive-window edge actually offered to the peer. Reads may
     /// reopen the window in increments smaller than the notification threshold.
     advertised_recv_edge: IrqSpinLock<Option<u32>>,
@@ -434,6 +538,8 @@ pub struct TcpSocket {
     retrans_count: AtomicU16,
     /// Active retransmission timer and its strongly retained callback.
     retrans_timer: IrqSpinLock<Option<ActiveRetransTimer>>,
+    persist_timer: IrqSpinLock<Option<ActiveRetransTimer>>,
+    persist_delay_ms: AtomicU32,
 
     /// List of unacknowledged segments for retransmission
     unacked_segments: IrqSpinLock<VecDeque<UnackedSegment>>,
@@ -540,8 +646,11 @@ impl TcpSocket {
             send_unacked: AtomicU32::new(0),
             recv_seq: AtomicU32::new(0),
             recv_ack: AtomicU32::new(0),
-            send_window: AtomicU16::new(65535),
-            recv_window: AtomicU16::new(65535),
+            peer_window: IrqSpinLock::new(PeerWindow::new()),
+            recv_window: AtomicU32::new(MAX_RECV_BUFFER_SIZE as u32),
+            peer_window_shift: AtomicU8::new(0),
+            local_window_shift: AtomicU8::new(0),
+            window_scaling: AtomicBool::new(false),
             advertised_recv_edge: IrqSpinLock::new(None),
             peer_mss: AtomicU16::new(TCP_IPV4_DEFAULT_MSS),
             send_buffer: IrqSpinLock::new(VecDeque::new()),
@@ -558,6 +667,8 @@ impl TcpSocket {
             timing: RetransmissionTiming::new(),
             retrans_count: AtomicU16::new(0),
             retrans_timer: IrqSpinLock::new(None),
+            persist_timer: IrqSpinLock::new(None),
+            persist_delay_ms: AtomicU32::new(0),
 
             // Unacked segments list
             unacked_segments: IrqSpinLock::new(VecDeque::new()),
@@ -622,22 +733,26 @@ impl TcpSocket {
             None => return Ok(None),
         };
 
-        {
+        let count = {
             let mut recv_buf = peer.recv_buffer.lock();
-            if recv_buf.len() + data.len() > MAX_RECV_BUFFER_SIZE {
+            let count = data
+                .len()
+                .min(MAX_RECV_BUFFER_SIZE.saturating_sub(recv_buf.len()));
+            if count == 0 && !data.is_empty() {
                 return Err(SocketError::WouldBlock);
             }
-            recv_buf.extend(data);
-        }
+            recv_buf.extend(&data[..count]);
+            count
+        };
 
-        peer.bytes_received.add(data.len() as u64);
-        self.bytes_sent.add(data.len() as u64);
+        peer.bytes_received.add(count as u64);
+        self.bytes_sent.add(count as u64);
 
         if let Some(waker) = peer.recv_waker.lock().as_ref() {
             waker.wake_one();
         }
 
-        Ok(Some(data.len()))
+        Ok(Some(count))
     }
 
     fn matches_peer(&self, src_ip: Ipv4Address, src_port: u16) -> bool {
@@ -855,6 +970,32 @@ impl TcpSocket {
         effective_tcp_mss(self.peer_mss.load(Ordering::SeqCst))
     }
 
+    fn negotiate_window_scaling(&self, peer: Option<u8>) {
+        self.peer_window_shift
+            .store(peer.unwrap_or(0).min(14), Ordering::SeqCst);
+        self.local_window_shift.store(
+            if peer.is_some() {
+                TCP_LOCAL_WINDOW_SHIFT
+            } else {
+                0
+            },
+            Ordering::SeqCst,
+        );
+        self.window_scaling.store(peer.is_some(), Ordering::SeqCst);
+    }
+
+    fn wire_receive_window(&self, syn: bool) -> u16 {
+        let available = self.recv_window.load(Ordering::SeqCst);
+        if syn {
+            return available.min(u16::MAX as u32) as u16;
+        }
+        let shift = self.local_window_shift.load(Ordering::SeqCst);
+        // Quantization can retract the current wire edge by less than one
+        // scale unit (RFC 7323 section 2.4). Keep the maximum offered edge
+        // separately and continue accepting its bytes within the real buffer.
+        (available >> shift).min(u16::MAX as u32) as u16
+    }
+
     /// Process incoming TCP segment
     ///
     /// # Arguments
@@ -871,6 +1012,7 @@ impl TcpSocket {
         header: TcpHeader,
         data: &[u8],
         advertised_mss: Option<u16>,
+        advertised_scale: Option<u8>,
     ) {
         let current_state = self.get_state();
         let src_port = header.src_port;
@@ -930,7 +1072,7 @@ impl TcpSocket {
 
                     child.local_port.store(local_port, Ordering::SeqCst);
                     *child.accept_listener.lock() = self.self_weak.clone();
-                    child.handle_syn_received(src_ip, header, advertised_mss);
+                    child.handle_syn_received(src_ip, header, advertised_mss, advertised_scale);
                     tcp_layer.register_port(local_port, child.self_weak.clone());
                     self.pending_syn.lock().push_back(Arc::clone(&child));
                 }
@@ -940,7 +1082,14 @@ impl TcpSocket {
                     == (tcp_flags::SYN | tcp_flags::ACK)
                 {
                     // Received SYN-ACK, move to ESTABLISHED
-                    self.handle_syn_ack_received(src_ip, header, advertised_mss);
+                    if header.ack_number == self.send_seq.load(Ordering::SeqCst) {
+                        self.handle_syn_ack_received(
+                            src_ip,
+                            header,
+                            advertised_mss,
+                            advertised_scale,
+                        );
+                    }
                 } else if header.flags() & tcp_flags::RST != 0 {
                     // Received RST, abort connection
                     self.handle_rst();
@@ -956,7 +1105,7 @@ impl TcpSocket {
                     let expected_ack = self.send_seq.load(Ordering::SeqCst);
                     let ack_number = header.ack_number;
                     if ack_number == expected_ack {
-                        self.update_send_window(ack_number);
+                        self.process_ack(&header, false);
                         self.set_state(TcpState::Established);
                         self.queue_established_accept();
 
@@ -996,6 +1145,7 @@ impl TcpSocket {
         src_ip: Ipv4Address,
         header: TcpHeader,
         advertised_mss: Option<u16>,
+        advertised_scale: Option<u8>,
     ) {
         // Store remote address
         *self.remote_ip.lock() = Some(src_ip);
@@ -1006,9 +1156,14 @@ impl TcpSocket {
         let next_recv = header.seq_number.wrapping_add(1);
         self.send_seq
             .store(initial_seq.wrapping_add(1), Ordering::SeqCst);
+        self.send_unacked.store(initial_seq, Ordering::SeqCst);
         self.recv_seq.store(next_recv, Ordering::SeqCst);
         self.recv_ack.store(next_recv, Ordering::SeqCst);
         self.set_peer_mss(advertised_mss);
+        self.negotiate_window_scaling(advertised_scale);
+        self.peer_window
+            .lock()
+            .update(header.seq_number, 0, header.window_size as u32);
         self.set_state(TcpState::SynReceived);
 
         // Send SYN-ACK
@@ -1018,8 +1173,9 @@ impl TcpSocket {
         syn_ack.seq_number = initial_seq;
         syn_ack.ack_number = next_recv;
         syn_ack.set_flags(tcp_flags::SYN | tcp_flags::ACK);
-        let options = tcp_mss_option(TCP_LOCAL_MSS as u16);
-        let _ = self.send_segment_with_options(src_ip, syn_ack, &options, &[], false, false);
+        let (options, length) = tcp_syn_options(advertised_scale.map(|_| TCP_LOCAL_WINDOW_SHIFT));
+        let _ =
+            self.send_segment_with_options(src_ip, syn_ack, &options[..length], &[], false, false);
     }
 
     /// Handle received SYN-ACK (move to ESTABLISHED)
@@ -1028,6 +1184,7 @@ impl TcpSocket {
         src_ip: Ipv4Address,
         header: TcpHeader,
         advertised_mss: Option<u16>,
+        advertised_scale: Option<u8>,
     ) {
         *self.remote_ip.lock() = Some(src_ip);
         self.remote_port.store(header.src_port, Ordering::SeqCst);
@@ -1036,13 +1193,11 @@ impl TcpSocket {
         self.recv_seq.store(next_recv, Ordering::SeqCst);
         self.recv_ack.store(next_recv, Ordering::SeqCst);
         self.set_peer_mss(advertised_mss);
+        self.negotiate_window_scaling(advertised_scale);
 
         // Advance our sequence number past the SYN we sent
         let acked = header.ack_number;
-        self.send_seq.store(acked, Ordering::SeqCst);
-        self.update_send_window(acked);
-        self.stop_rtt_measurement(acked);
-        self.remove_acked_segments(acked);
+        self.process_ack(&header, false);
 
         self.clear_pending_error();
         self.set_state(TcpState::Established);
@@ -1064,6 +1219,7 @@ impl TcpSocket {
 
         // Cancel retransmission timers
         self.cancel_retrans_timer();
+        self.cancel_persist_timer();
 
         // Clear send buffer
         self.send_buffer.lock().clear();
@@ -1084,8 +1240,11 @@ impl TcpSocket {
         self.recv_ack.store(0, Ordering::SeqCst);
 
         // Reset window sizes
-        self.send_window.store(65535, Ordering::SeqCst);
-        self.recv_window.store(65535, Ordering::SeqCst);
+        *self.peer_window.lock() = PeerWindow::new();
+        self.cancel_persist_timer();
+        self.recv_window
+            .store(MAX_RECV_BUFFER_SIZE as u32, Ordering::SeqCst);
+        self.negotiate_window_scaling(None);
         *self.advertised_recv_edge.lock() = None;
         self.peer_mss.store(TCP_IPV4_DEFAULT_MSS, Ordering::SeqCst);
 
@@ -1116,15 +1275,21 @@ impl TcpSocket {
             return;
         }
 
+        let expected = self.recv_seq.load(Ordering::SeqCst);
+        let available = self.recv_window.load(Ordering::SeqCst);
+        if header.flags() & tcp_flags::SYN != 0
+            || seq_before(header.seq_number, expected)
+            || (header.seq_number != expected
+                && header.seq_number.wrapping_sub(expected) >= available)
+        {
+            self.send_ack(src_ip, header.src_port, expected);
+            return;
+        }
+        if header.flags() & tcp_flags::ACK != 0 {
+            self.process_ack(&header, header.flags() == tcp_flags::ACK);
+        }
         if header.flags() & tcp_flags::FIN != 0 {
             self.handle_fin(src_ip, header);
-        }
-
-        if header.flags() & tcp_flags::ACK != 0 {
-            self.update_send_window(header.ack_number);
-            self.stop_rtt_measurement(header.ack_number);
-            self.remove_acked_segments(header.ack_number);
-            self.handle_close_ack(header.ack_number);
         }
     }
 
@@ -1233,10 +1398,7 @@ impl TcpSocket {
 
             // Process ACK if present
             if header.flags() & tcp_flags::ACK != 0 {
-                self.update_send_window(header.ack_number);
-                self.stop_rtt_measurement(header.ack_number);
-                self.remove_acked_segments(header.ack_number);
-                self.handle_close_ack(header.ack_number);
+                self.process_ack(&header, false);
             }
             return;
         }
@@ -1311,8 +1473,7 @@ impl TcpSocket {
 
             // Update receive window based on remaining buffer space
             let available = MAX_RECV_BUFFER_SIZE.saturating_sub(recv_buf.len());
-            self.recv_window
-                .store(available.min(65535) as u16, Ordering::SeqCst);
+            self.recv_window.store(available as u32, Ordering::SeqCst);
 
             self.recv_seq.store(next_seq, Ordering::SeqCst);
             self.recv_ack.store(next_seq, Ordering::SeqCst);
@@ -1345,16 +1506,30 @@ impl TcpSocket {
 
         // Process ACK if present
         if header.flags() & tcp_flags::ACK != 0 {
-            self.update_send_window(header.ack_number);
-            self.stop_rtt_measurement(header.ack_number);
-            self.remove_acked_segments(header.ack_number);
-            self.handle_close_ack(header.ack_number);
+            self.process_ack(&header, false);
         }
     }
 
     /// Handle FIN segment
     fn handle_fin(&self, src_ip: Ipv4Address, header: TcpHeader) {
         let current_state = self.get_state();
+        let expected = self.recv_seq.load(Ordering::SeqCst);
+        if header.seq_number != expected {
+            if seq_after(header.seq_number, expected) {
+                let mut pending = self.out_of_order.lock();
+                if pending.len() < 128 {
+                    pending
+                        .entry(header.seq_number)
+                        .or_insert_with(|| OutOfOrderSegment {
+                            seq: header.seq_number,
+                            data: Vec::new(),
+                            flags: header.flags(),
+                        });
+                }
+            }
+            self.send_ack(src_ip, header.src_port, expected);
+            return;
+        }
         let ack_seq = header.seq_number.wrapping_add(1);
         self.recv_seq.store(ack_seq, Ordering::SeqCst);
         self.recv_ack.store(ack_seq, Ordering::SeqCst);
@@ -1371,50 +1546,151 @@ impl TcpSocket {
         }
     }
 
-    /// Update send window based on acknowledgment
-    fn update_send_window(&self, ack_number: u32) {
-        let previous_unacked = self.send_unacked.load(Ordering::SeqCst);
-        let send_seq = self.send_seq.load(Ordering::SeqCst);
-        let mut acknowledged = if seq_after(ack_number, send_seq) {
-            send_seq
+    fn process_ack(&self, header: &TcpHeader, duplicate_candidate: bool) {
+        let ack = header.ack_number;
+        let previous = self.send_unacked.load(Ordering::SeqCst);
+        let next = self.send_seq.load(Ordering::SeqCst);
+        if seq_before(ack, previous) || seq_after(ack, next) {
+            return;
+        }
+        let shift = if header.flags() & tcp_flags::SYN != 0 {
+            0
         } else {
-            ack_number
+            self.peer_window_shift.load(Ordering::SeqCst)
         };
-        if seq_before(acknowledged, previous_unacked) {
-            acknowledged = previous_unacked;
+        let (changed, reopened) = {
+            let mut window = self.peer_window.lock();
+            let closed = window.bytes == 0;
+            let changed =
+                window.update(header.seq_number, ack, (header.window_size as u32) << shift);
+            (changed, closed && window.bytes != 0)
+        };
+        if seq_after(ack, previous) {
+            let mut buffer = self.send_buffer.lock();
+            let count = ack.wrapping_sub(previous) as usize;
+            let count = count.min(buffer.len());
+            drop(buffer.drain(..count));
+            self.send_unacked.store(ack, Ordering::SeqCst);
         }
-
-        if seq_after(acknowledged, previous_unacked) {
-            let acked_bytes = acknowledged.wrapping_sub(previous_unacked) as usize;
-            let mut send_buf = self.send_buffer.lock();
-            let drain_len = acked_bytes.min(send_buf.len());
-            drop(send_buf.drain(..drain_len));
-        }
-
-        // Track the latest acknowledged sequence number
-        self.send_unacked.store(acknowledged, Ordering::SeqCst);
-
-        // Fast Retransmit - duplicate ACK detection
-        let last_ack = self.last_ack_seq.load(Ordering::SeqCst);
-        if acknowledged == last_ack {
-            // Duplicate ACK - increment counter
-            let count = self.dup_ack_count.fetch_add(1, Ordering::SeqCst);
-
-            // If we've received 3 duplicate ACKs, trigger fast retransmit
-            if count >= 2 {
+        self.stop_rtt_measurement(ack);
+        self.remove_acked_segments(ack);
+        self.handle_close_ack(ack);
+        if duplicate_candidate
+            && !changed
+            && ack == self.last_ack_seq.load(Ordering::SeqCst)
+            && ack != next
+        {
+            if self.dup_ack_count.fetch_add(1, Ordering::SeqCst) >= 2 {
                 self.fast_retransmit();
                 self.dup_ack_count.store(0, Ordering::SeqCst);
             }
         } else {
-            // New ACK - reset duplicate counter
-            self.last_ack_seq.store(acknowledged, Ordering::SeqCst);
+            self.last_ack_seq.store(ack, Ordering::SeqCst);
             self.dup_ack_count.store(0, Ordering::SeqCst);
         }
-
-        // Wake up any blocking send() calls (buffer may have space now)
-        if let Some(waker) = self.send_waker.lock().as_ref() {
-            waker.wake_one();
+        if self.peer_window.lock().bytes != 0 {
+            self.cancel_persist_timer();
+            if reopened {
+                let head = self
+                    .unacked_segments
+                    .lock()
+                    .front()
+                    .map(|segment| segment.seq);
+                if let Some(seq) = head {
+                    self.schedule_retrans_timer(seq);
+                }
+            }
         }
+        self.notify_write_waiters();
+    }
+
+    fn notify_write_waiters(&self) {
+        if let Some(waker) = self.send_waker.lock().as_ref() {
+            waker.wake_all();
+        }
+        // A combined read/write poll sleeps on recv_waker. A window update
+        // must wake that registration even if no response bytes arrived.
+        if let Some(waker) = self.recv_waker.lock().as_ref() {
+            waker.wake_all();
+        }
+    }
+
+    fn peer_send_credit(&self) -> usize {
+        let window = self.peer_window.lock().bytes;
+        let unacked = self.send_unacked.load(Ordering::SeqCst);
+        let next = self.send_seq.load(Ordering::SeqCst);
+        window.saturating_sub(next.wrapping_sub(unacked)) as usize
+    }
+
+    fn writable_capacity(&self) -> usize {
+        if !tcp_send_side_open(self.get_state()) {
+            return 0;
+        }
+        if let Some(peer) = self.loopback_peer.lock().upgrade() {
+            return MAX_RECV_BUFFER_SIZE.saturating_sub(peer.recv_buffer.lock().len());
+        }
+        let local = MAX_SEND_BUFFER_SIZE.saturating_sub(self.send_buffer.lock().len());
+        let slots = MAX_UNACKED_SEGMENTS.saturating_sub(self.unacked_segments.lock().len());
+        local
+            .min(self.peer_send_credit())
+            .min(slots * self.effective_peer_mss())
+    }
+
+    fn cancel_persist_timer(&self) {
+        let active = self.persist_timer.lock().take();
+        self.persist_delay_ms.store(0, Ordering::SeqCst);
+        if let Some(active) = active {
+            crate::timer::cancel_timer(active.handle);
+        }
+    }
+
+    fn schedule_persist_timer(&self) {
+        if !tcp_send_side_open(self.get_state()) || self.peer_window.lock().bytes != 0 {
+            return;
+        }
+        let mut active = self.persist_timer.lock();
+        if active.is_some() {
+            return;
+        }
+        let mut delay = self.persist_delay_ms.load(Ordering::SeqCst);
+        if delay == 0 {
+            delay = (self.get_rto_ns() / crate::timer::NANOSECONDS_PER_MILLISECOND)
+                .clamp(200, 60_000) as u32;
+            self.persist_delay_ms.store(delay, Ordering::SeqCst);
+        }
+        let handler: Arc<dyn crate::timer::TimerHandler> = Arc::new(PersistTimer {
+            socket: self.self_weak.clone(),
+        });
+        let expires =
+            crate::timer::get_time_ns().saturating_add(crate::timer::ms_to_ns(delay as u64));
+        let handle =
+            crate::timer::add_timer(expires, crate::timer::TimerPrecision::Normal, &handler, 0);
+        *active = Some(ActiveRetransTimer { handle, handler });
+    }
+
+    fn probe_zero_window(&self) {
+        if !tcp_send_side_open(self.get_state()) || self.peer_window.lock().bytes != 0 {
+            return;
+        }
+        let remote = *self.remote_ip.lock();
+        if let Some(ip) = remote {
+            let mut header = TcpHeader::new(
+                self.local_port.load(Ordering::SeqCst),
+                self.remote_port.load(Ordering::SeqCst),
+            );
+            // An already acknowledged sequence elicits an ACK/window update;
+            // never advance SND.NXT or insert invented application bytes.
+            header.seq_number = self.send_unacked.load(Ordering::SeqCst).wrapping_sub(1);
+            header.ack_number = self.recv_ack.load(Ordering::SeqCst);
+            header.set_flags(tcp_flags::ACK);
+            let _ = self.send_segment(ip, header, &[0], false, true);
+        }
+        self.persist_delay_ms
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                Some(value.saturating_mul(2).min(60_000))
+            })
+            .ok();
+        self.schedule_persist_timer();
     }
 
     /// Fast Retransmit - immediately retransmit unacknowledged segments
@@ -1471,14 +1747,17 @@ impl TcpSocket {
 
         let initial_seq = 1000;
         self.send_seq.store(initial_seq, Ordering::SeqCst);
+        self.send_unacked.store(initial_seq, Ordering::SeqCst);
 
         let mut header = TcpHeader::new(local_port, dest_port);
         header.seq_number = initial_seq;
         header.set_flags(tcp_flags::SYN);
 
+        self.negotiate_window_scaling(None);
         self.set_state(TcpState::SynSent);
-        let options = tcp_mss_option(TCP_LOCAL_MSS as u16);
-        let _ = self.send_segment_with_options(dest_ip, header, &options, &[], true, false);
+        let (options, length) = tcp_syn_options(Some(TCP_LOCAL_WINDOW_SHIFT));
+        let _ =
+            self.send_segment_with_options(dest_ip, header, &options[..length], &[], true, false);
     }
 
     /// Send SYN-ACK packet
@@ -1490,8 +1769,13 @@ impl TcpSocket {
         header.ack_number = ack_seq;
         header.set_flags(tcp_flags::SYN | tcp_flags::ACK);
 
-        let options = tcp_mss_option(TCP_LOCAL_MSS as u16);
-        let _ = self.send_segment_with_options(dest_ip, header, &options, &[], false, false);
+        let (options, length) = tcp_syn_options(
+            self.window_scaling
+                .load(Ordering::SeqCst)
+                .then_some(TCP_LOCAL_WINDOW_SHIFT),
+        );
+        let _ =
+            self.send_segment_with_options(dest_ip, header, &options[..length], &[], false, false);
         self.set_state(TcpState::SynReceived);
     }
 
@@ -1510,8 +1794,9 @@ impl TcpSocket {
 
     fn update_recv_window_after_drain(&self, buffered_len: usize) -> bool {
         let available = MAX_RECV_BUFFER_SIZE.saturating_sub(buffered_len);
-        let new_window = available.min(65535) as u16;
-        self.recv_window.store(new_window, Ordering::SeqCst);
+        self.recv_window.store(available as u32, Ordering::SeqCst);
+        let new_window = (self.wire_receive_window(false) as u32)
+            << self.local_window_shift.load(Ordering::SeqCst);
         receive_window_update_needed(
             *self.advertised_recv_edge.lock(),
             self.recv_ack.load(Ordering::SeqCst),
@@ -1523,7 +1808,14 @@ impl TcpSocket {
         if header.flags() & tcp_flags::ACK == 0 {
             return;
         }
-        let edge = header.ack_number.wrapping_add(header.window_size as u32);
+        let shift = if header.flags() & tcp_flags::SYN != 0 {
+            0
+        } else {
+            self.local_window_shift.load(Ordering::SeqCst)
+        };
+        let edge = header
+            .ack_number
+            .wrapping_add((header.window_size as u32) << shift);
         let mut advertised = self.advertised_recv_edge.lock();
         // Concurrent ACK publication may finish out of order. Never move the
         // peer's known edge backwards, including across sequence-number wrap.
@@ -1624,7 +1916,7 @@ impl TcpSocket {
 
         header.set_data_offset(TCP_HEADER_SIZE + options.len());
         let total_len = header.data_offset() + data.len();
-        header.window_size = self.recv_window.load(Ordering::SeqCst);
+        header.window_size = self.wire_receive_window(header.flags() & tcp_flags::SYN != 0);
 
         // Calculate checksum
         header.checksum =
@@ -1765,21 +2057,35 @@ impl TcpSocket {
         let mut sent = 0;
         let peer_mss = self.effective_peer_mss();
 
-        for chunk in data.chunks(peer_mss) {
+        while sent < data.len() {
+            let slots = self.unacked_segments.lock().len() < MAX_UNACKED_SEGMENTS;
+            let count = if slots {
+                (data.len() - sent)
+                    .min(peer_mss)
+                    .min(self.peer_send_credit())
+            } else {
+                0
+            };
+            if count == 0 {
+                break;
+            }
+            let chunk = &data[sent..sent + count];
             let mut header = TcpHeader::new(local_port, dest_port);
             header.seq_number = self.send_seq.load(Ordering::SeqCst);
             header.ack_number = self.recv_ack.load(Ordering::SeqCst);
-            let is_last = sent + chunk.len() == data.len();
+            let is_last = sent + count == data.len();
             header.set_flags(tcp_flags::ACK | if is_last { tcp_flags::PSH } else { 0 });
-
             match self.send_segment(dest_ip, header, chunk, true, false) {
-                Ok(()) => sent += chunk.len(),
+                Ok(()) => sent += count,
                 Err(err) if sent == 0 => return Err(err),
-                Err(_) => return Ok(sent),
+                Err(_) => break,
             }
         }
-
-        Ok(sent)
+        if sent == 0 {
+            Err(SocketError::WouldBlock)
+        } else {
+            Ok(sent)
+        }
     }
 
     fn remove_unsent_buffer_tail(&self, unsent: usize) {
@@ -1813,11 +2119,13 @@ impl TcpSocket {
 
         let _transmit_guard = self.transmit_lock.lock();
 
-        // Check buffer size limit
-        let mut send_buf = self.send_buffer.lock();
-        if send_buf.len() + data.len() > MAX_SEND_BUFFER_SIZE {
+        let count = data.len().min(self.writable_capacity());
+        if count == 0 {
+            self.schedule_persist_timer();
             return Err(SocketError::WouldBlock);
         }
+        let data = &data[..count];
+        let mut send_buf = self.send_buffer.lock();
         send_buf.extend(data);
         drop(send_buf);
 
@@ -1839,92 +2147,31 @@ impl TcpSocket {
         task_id: usize,
         trapframe: &mut crate::arch::Trapframe,
     ) -> Result<usize, SocketError> {
-        if !tcp_send_side_open(self.get_state()) {
-            return Err(SocketError::NotConnected);
-        }
-        if data.is_empty() {
-            return Ok(0);
-        }
-
-        let dest_ip = self
-            .remote_ip
-            .lock()
-            .clone()
-            .ok_or(SocketError::NotConnected)?;
-        let dest_port = self.remote_port.load(Ordering::SeqCst);
         let nonblocking = !self.blocking_mode.load(Ordering::SeqCst);
-
+        let deadline = self
+            .write_timeout_ns()
+            .map(|timeout| crate::timer::get_time_ns().saturating_add(timeout));
         loop {
-            match self.deliver_loopback_data(data) {
-                Ok(Some(len)) => return Ok(len),
-                Ok(None) => {}
-                Err(SocketError::WouldBlock) if nonblocking => return Err(SocketError::WouldBlock),
-                Err(SocketError::WouldBlock) => {
-                    let waker = {
-                        let mut waker_lock = self.send_waker.lock();
-                        waker_lock
-                            .get_or_insert_with(|| {
-                                Arc::new(crate::sync::Waker::new_interruptible("tcp_send"))
-                            })
-                            .clone()
-                    };
-                    match waker.wait_with_timeout_result(
-                        task_id,
-                        trapframe,
-                        self.write_timeout_ns(),
-                    ) {
-                        WaitResult::Woken => {}
-                        WaitResult::TimedOut => return Err(SocketError::WouldBlock),
-                        WaitResult::Interrupted => return Err(SocketError::Interrupted),
-                    }
-                    continue;
-                }
-                Err(err) => return Err(err),
+            match self.send_data(data) {
+                Err(SocketError::WouldBlock) if !nonblocking => {}
+                result => return result,
             }
-
-            {
-                let _transmit_guard = self.transmit_lock.lock();
-                let mut send_buf = self.send_buffer.lock();
-                if send_buf.len() + data.len() <= MAX_SEND_BUFFER_SIZE {
-                    send_buf.extend(data);
-                    drop(send_buf);
-
-                    let sent = match self.send_payload_segments(dest_ip, dest_port, data) {
-                        Ok(sent) => sent,
-                        Err(err) => {
-                            self.remove_unsent_buffer_tail(data.len());
-                            return Err(err);
-                        }
-                    };
-                    self.remove_unsent_buffer_tail(data.len() - sent);
-                    return Ok(sent);
-                }
+            let waker = self
+                .send_waker
+                .lock()
+                .get_or_insert_with(|| Arc::new(crate::sync::Waker::new_interruptible("tcp_send")))
+                .clone();
+            if self.writable_capacity() > 0 || !tcp_send_side_open(self.get_state()) {
+                continue;
             }
-
-            if nonblocking {
+            let remaining = deadline.map(|end| end.saturating_sub(crate::timer::get_time_ns()));
+            if remaining == Some(0) {
                 return Err(SocketError::WouldBlock);
             }
-
-            {
-                let waker = {
-                    let mut waker_lock = self.send_waker.lock();
-                    waker_lock
-                        .get_or_insert_with(|| {
-                            Arc::new(crate::sync::Waker::new_interruptible("tcp_send"))
-                        })
-                        .clone()
-                };
-                {
-                    let send_buf = self.send_buffer.lock();
-                    if send_buf.len() + data.len() <= MAX_SEND_BUFFER_SIZE {
-                        continue;
-                    }
-                }
-                match waker.wait_with_timeout_result(task_id, trapframe, self.write_timeout_ns()) {
-                    WaitResult::Woken => {}
-                    WaitResult::TimedOut => return Err(SocketError::WouldBlock),
-                    WaitResult::Interrupted => return Err(SocketError::Interrupted),
-                }
+            match waker.wait_with_timeout_result(task_id, trapframe, remaining) {
+                WaitResult::Woken => {}
+                WaitResult::TimedOut => return Err(SocketError::WouldBlock),
+                WaitResult::Interrupted => return Err(SocketError::Interrupted),
             }
         }
     }
@@ -1944,6 +2191,9 @@ impl TcpSocket {
         };
 
         if len > 0 {
+            if let Some(peer) = self.loopback_peer.lock().upgrade() {
+                peer.notify_write_waiters();
+            }
             if send_window_update {
                 self.send_window_update_ack();
             }
@@ -1994,6 +2244,9 @@ impl TcpSocket {
 
                     let send_window_update = self.update_recv_window_after_drain(recv_buf.len());
                     drop(recv_buf);
+                    if let Some(peer) = self.loopback_peer.lock().upgrade() {
+                        peer.notify_write_waiters();
+                    }
                     if send_window_update {
                         self.send_window_update_ack();
                     }
@@ -2080,6 +2333,12 @@ impl TcpSocket {
         match state {
             TcpState::Closed | TcpState::Listen | TcpState::TimeWait => return,
             _ => {}
+        }
+
+        if tcp_send_side_open(state) && self.peer_window.lock().bytes == 0 {
+            self.cancel_retrans_timer();
+            self.schedule_persist_timer();
+            return;
         }
 
         let retransmit = {
@@ -2732,9 +2991,10 @@ impl crate::object::capability::Selectable for TcpSocket {
         }
 
         if interest.write {
-            let send_buf = self.send_buffer.lock();
-            ready.write = has_pending_error
-                || (tcp_send_side_open(self.get_state()) && send_buf.len() < MAX_SEND_BUFFER_SIZE);
+            ready.write = has_pending_error || self.writable_capacity() > 0;
+            if !ready.write {
+                self.schedule_persist_timer();
+            }
         }
 
         if interest.except {
@@ -2852,6 +3112,7 @@ impl Drop for TcpSocket {
     fn drop(&mut self) {
         // Cancel any pending retransmission timers
         self.cancel_retrans_timer();
+        self.cancel_persist_timer();
 
         // Send FIN if connection is still open
         let state = self.get_state();
@@ -3039,6 +3300,7 @@ impl TcpLayer {
         header: TcpHeader,
         data: &[u8],
         advertised_mss: Option<u16>,
+        advertised_scale: Option<u8>,
     ) {
         {
             let mut stats = self.stats.write();
@@ -3050,7 +3312,14 @@ impl TcpLayer {
         let dst_port = unsafe { core::ptr::addr_of!(header.dst_port).read_unaligned() };
 
         if let Some(socket) = self.find_socket(dst_port, src_ip, src_port) {
-            socket.process_segment(src_ip, dst_ip, header, data, advertised_mss);
+            socket.process_segment(
+                src_ip,
+                dst_ip,
+                header,
+                data,
+                advertised_mss,
+                advertised_scale,
+            );
         } else if should_log_tcp_https(src_port, dst_port) {
             let seq = header.seq_number;
             let ack = header.ack_number;
@@ -3145,7 +3414,19 @@ impl TcpLayer {
         };
         let data = &packet[data_offset..];
 
-        self.receive_segment(src_ip, dst_ip, header, data, advertised_mss);
+        let advertised_scale = if header.flags() & tcp_flags::SYN != 0 {
+            parse_tcp_window_scale_option(&packet[TCP_HEADER_SIZE..data_offset])
+        } else {
+            None
+        };
+        self.receive_segment(
+            src_ip,
+            dst_ip,
+            header,
+            data,
+            advertised_mss,
+            advertised_scale,
+        );
 
         Ok(())
     }
@@ -3186,13 +3467,13 @@ mod tests {
         assert!(receive_window_update_needed(
             Some(100 + 512),
             100,
-            TCP_LOCAL_MSS as u16
+            TCP_LOCAL_MSS as u32
         ));
         let ack = u32::MAX - 1000;
         assert!(receive_window_update_needed(
             Some(ack),
             ack,
-            TCP_LOCAL_MSS as u16
+            TCP_LOCAL_MSS as u32
         ));
         assert!(receive_window_update_needed(
             Some(ack.wrapping_add(20_000)),

@@ -200,6 +200,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
             pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
             vmarea: MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1),
             vm_start: final_vaddr,
+            mapping_origin: crate::vm::vmem::MappingOrigin::new(),
             permissions: prot_perm,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -379,6 +380,7 @@ fn handle_anonymous_mapping(
         pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
         vmarea,
         vm_start: final_vaddr,
+        mapping_origin: crate::vm::vmem::MappingOrigin::new(),
         permissions,
         is_shared,
         memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -604,6 +606,7 @@ mod tests {
             pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
             vmarea: MemoryArea::new(candidate, candidate + PAGE_SIZE - 1),
             vm_start: candidate,
+            mapping_origin: crate::vm::vmem::MappingOrigin::new(),
             permissions: 0x0b,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -745,6 +748,7 @@ mod tests {
                     pmarea: PhysicalMemoryArea::new(0, 0),
                     vmarea: MemoryArea::new(address, address + PAGE_SIZE - 1),
                     vm_start: address,
+                    mapping_origin: crate::vm::vmem::MappingOrigin::new(),
                     permissions: 0x0b,
                     is_shared: shared,
                     memory_attribute: attribute,
@@ -825,6 +829,37 @@ mod tests {
     fn physical_mapping_rejects_overflow() {
         assert_eq!(physical_area_for_mapping(u64::MAX, PAGE_SIZE), None);
     }
+
+    #[test_case]
+    fn native_mapping_query_payload_has_two_native_words() {
+        let start = 0x1122_3344usize;
+        let end = 0x5566_7788usize;
+        let result = super::mapping_bounds_payload(start, end);
+        let word_bytes = core::mem::size_of::<usize>();
+        assert_eq!(result.len(), 2 * word_bytes);
+        assert_eq!(&result[..word_bytes], start.to_ne_bytes().as_slice());
+        assert_eq!(&result[word_bytes..], end.to_ne_bytes().as_slice());
+    }
 }
 // - This change requires careful updates to trap handling and the Task-managed page
 //   bookkeeping; perform the work incrementally and add tests at each step.
+
+/// Native read-only address-space query for conservative GC stack bounds.
+/// (address, output: *mut [usize; 2] = [start, end_exclusive]); returns 0 or usize::MAX.
+/// It exposes only the caller's virtual mapping, no physical/kernel addresses.
+pub fn sys_memory_query(trapframe: &mut Trapframe) -> usize {
+    let Some(task) = mytask() else { return usize::MAX; };
+    let address = trapframe.get_arg(0);
+    let output = trapframe.get_arg(1);
+    trapframe.increment_pc_next(&task);
+    let Some((start, end)) = task.vm_manager.user_mapping_bounds(address) else { return usize::MAX; };
+    let result = mapping_bounds_payload(start, end);
+    if crate::library::std::usercopy::copy_to_user(&task, output, &result).is_err() { usize::MAX } else { 0 }
+}
+fn mapping_bounds_payload(start: usize, end: usize) -> [u8; 2 * core::mem::size_of::<usize>()] {
+    const WORD_BYTES: usize = core::mem::size_of::<usize>();
+    let mut result = [0u8; 2 * WORD_BYTES];
+    result[..WORD_BYTES].copy_from_slice(&start.to_ne_bytes());
+    result[WORD_BYTES..].copy_from_slice(&end.to_ne_bytes());
+    result
+}

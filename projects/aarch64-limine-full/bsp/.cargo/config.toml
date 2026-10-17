@@ -1,6 +1,12 @@
 [profile.dev]
 opt-level = 3
 
+# Talc scans every free-list bin on each debug allocation and free while
+# holding the IRQ-disabling heap lock. Keep other kernel debug checks and
+# retain the whole-heap allocator checks in the test profile.
+[profile.dev.package.talc]
+debug-assertions = false
+
 [profile.test]
 opt-level = 3
 

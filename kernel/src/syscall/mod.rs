@@ -108,7 +108,7 @@ use crate::network::syscall::{
 };
 use crate::object::capability::file::{sys_file_metadata, sys_file_seek, sys_file_truncate};
 use crate::object::capability::memory_mapping::{
-    sys_memory_map, sys_memory_protect, sys_memory_unmap,
+    sys_memory_map, sys_memory_protect, sys_memory_unmap, sys_memory_query,
 };
 use crate::object::capability::selectable::syscall::sys_poll;
 use crate::object::capability::stream::{sys_stream_read, sys_stream_write};
@@ -385,6 +385,7 @@ syscall_table! {
     // === Memory Mapping Operations ===
     MemoryMap = 700 => sys_memory_map,     // Memory map operation (mmap)
     MemoryUnmap = 701 => sys_memory_unmap, // Memory unmap operation (munmap)
+    MemoryQuery = 703 => sys_memory_query, // Caller virtual mapping bounds
     MemoryProtect = 702 => sys_memory_protect, // Change existing page protections
 
     // === Socket Operations (Scarlet Native) ===

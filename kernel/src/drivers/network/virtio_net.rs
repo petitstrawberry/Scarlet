@@ -83,7 +83,12 @@ const VIRTIO_NET_S_ANNOUNCE: u16 = 2; // Gratuitous packets should be sent
 
 // Default MTU if not specified
 const DEFAULT_MTU: usize = 1500;
-const RX_WORKER_QUEUE_LIMIT: usize = 256;
+fn network_queue_capacity(maximum: usize, preferred: usize) -> Option<usize> {
+    let limit = maximum.min(preferred);
+    (limit != 0).then(|| 1usize << (usize::BITS - 1 - limit.leading_zeros()))
+}
+
+const RX_WORKER_QUEUE_LIMIT: usize = 1024;
 const RX_WORKER_BUDGET: usize = 64;
 const TX_PENDING_LIMIT: usize = 256;
 
@@ -555,7 +560,7 @@ impl VirtioNetDevice {
         let rx_queue = &mut virtqueues[0]; // RX queue is index 0
 
         // Use standard single-buffer approach like Linux virtio-net
-        let buffer_count = 16; // Provide extra RX headroom
+        let buffer_count = rx_queue.get_queue_size();
 
         for _ in 0..buffer_count {
             let hdr_size = self.get_header_size();
@@ -658,8 +663,16 @@ impl VirtioNetDevice {
 
         let mut buffers_recycled = 0usize;
 
-        // Process all completed RX descriptors
-        while let Some((desc_idx, used_len)) = rx_queue.pop_used() {
+        // Snapshot the completion budget: descriptors are recycled during this
+        // loop and a busy host can refill them immediately. Do not let an
+        // endless RX stream keep this CPU inside an IRQ with interrupts masked.
+        crate::arch::io_mb();
+        let completed = unsafe { core::ptr::read_volatile(rx_queue.used.idx) }
+            .wrapping_sub(rx_queue.last_used_idx) as usize;
+        for _ in 0..completed.min(rx_queue.get_queue_size()) {
+            let Some((desc_idx, used_len)) = rx_queue.pop_used() else {
+                break;
+            };
             let buffer_addr = phys_to_virt(rx_queue.desc[desc_idx].addr) as *mut u8;
             let buffer_len = rx_queue.desc[desc_idx].len as usize;
             let used_len = core::cmp::min(used_len as usize, buffer_len);
@@ -876,6 +889,24 @@ impl VirtioDevice for VirtioNetDevice {
         2 // TX and RX queues
     }
 
+    fn prepare_queues(&mut self) -> Result<(), &'static str> {
+        for (index, preferred) in [256usize, 128usize].into_iter().enumerate() {
+            let maximum = if let Some(transport) = self.pci_transport {
+                unsafe {
+                    crate::arch::mmio::write16(transport.common_cfg + 0x16, index as u16);
+                    crate::arch::mmio::read16(transport.common_cfg + 0x18) as usize
+                }
+            } else {
+                self.write32_register(Register::QueueSel, index as u32);
+                self.read32_register(Register::QueueNumMax) as usize
+            };
+            let size =
+                network_queue_capacity(maximum, preferred).ok_or("Network queue unavailable")?;
+            self.virtqueues.lock()[index] = VirtQueue::new(size);
+        }
+        Ok(())
+    }
+
     fn get_virtqueue_size(&self, queue_idx: usize) -> usize {
         if queue_idx >= 2 {
             panic!(
@@ -1075,14 +1106,12 @@ impl EthernetDevice for VirtioNetDevice {
 mod tx_tests {
     use super::*;
 
-    #[test_case]
-    fn link_changes_refresh_on_configuration_interrupts() {
-        let registers = ContiguousPages::new(1).unwrap();
-        let device = VirtioNetDevice {
+    fn test_device(registers: &ContiguousPages, size: usize) -> VirtioNetDevice {
+        VirtioNetDevice {
             link_epoch: IrqSpinLock::new(0),
             base_addr: registers.as_ptr() as usize,
             pci_transport: None,
-            virtqueues: IrqSpinLock::new([VirtQueue::new(2), VirtQueue::new(2)]),
+            virtqueues: IrqSpinLock::new([VirtQueue::new(size), VirtQueue::new(size)]),
             config: IrqRwSpinLock::new(None),
             features: IrqRwSpinLock::new(1u64 << VIRTIO_NET_F_STATUS),
             carrier: AtomicBool::new(false),
@@ -1093,7 +1122,61 @@ mod tx_tests {
             tx_state: IrqSpinLock::new(None),
             interrupt_id: IrqSpinLock::new(None),
             interface_name: IrqSpinLock::new(None),
-        };
+        }
+    }
+
+    #[test_case]
+    fn network_rings_fit_device_limits() {
+        assert_eq!(network_queue_capacity(1024, 256), Some(256));
+        assert_eq!(network_queue_capacity(32, 256), Some(32));
+        assert_eq!(network_queue_capacity(100, 256), Some(64));
+        assert_eq!(network_queue_capacity(0, 256), None);
+    }
+
+    #[test_case]
+    fn every_rx_slot_is_posted_and_recycled_without_replacing_dma_storage() {
+        let registers = ContiguousPages::new(1).unwrap();
+        let device = test_device(&registers, 32);
+        device.virtqueues.lock()[0].init();
+        device.setup_rx_buffers().unwrap();
+        assert_eq!(device.rx_buffers.lock().len(), 32);
+        {
+            let mut queues = device.virtqueues.lock();
+            let queue = &mut queues[0];
+            assert_eq!(*queue.avail.idx, 32);
+            assert_eq!(queue.free_descriptors.len(), 0);
+            for slot in 0..32 {
+                let index = queue.avail.ring[slot] as usize;
+                queue.used.ring[slot].id = index as u32;
+                queue.used.ring[slot].len = (device.header_size + 60) as u32;
+            }
+            *queue.used.idx = 32;
+        }
+        let before: Vec<_> = device
+            .rx_buffers
+            .lock()
+            .iter()
+            .map(|pages| pages.as_paddr())
+            .collect();
+        let packets = device.process_received_packets().unwrap();
+        assert_eq!(packets.len(), 32);
+        assert!(packets.iter().all(|packet| packet.len == 60));
+        let after: Vec<_> = device
+            .rx_buffers
+            .lock()
+            .iter()
+            .map(|pages| pages.as_paddr())
+            .collect();
+        assert_eq!(before, after);
+        let queues = device.virtqueues.lock();
+        assert_eq!(*queues[0].avail.idx, 64);
+        assert_eq!(queues[0].last_used_idx, 32);
+    }
+
+    #[test_case]
+    fn link_changes_refresh_on_configuration_interrupts() {
+        let registers = ContiguousPages::new(1).unwrap();
+        let device = test_device(&registers, 2);
         device.write_config::<u16>(6, VIRTIO_NET_S_LINK_UP);
         device.refresh_link_status();
         assert!(device.is_link_up());
