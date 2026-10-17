@@ -407,7 +407,9 @@ pub struct GpuBackendImageLayout {
     pub modifier: u64,
     /// Exact bytes required by all image planes.
     pub total_size: u64,
-    /// Required physical backing alignment in bytes.
+    /// Required physical backing granularity in bytes (a nonzero power of two).
+    /// Each private backing extent starts and ends on this boundary, or on a
+    /// CPU page boundary if larger. Allocation padding is outside `total_size`.
     pub alignment: u64,
     /// Number of initialized entries in `planes`.
     pub plane_count: u32,

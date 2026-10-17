@@ -705,38 +705,59 @@ impl GpuPrivateImageBacking {
         }
         let image_size = usize::try_from(layout.total_size)
             .map_err(|_| "GPU image layout size does not fit kernel address size")?;
-        if layout.alignment > PAGE_SIZE as u64 {
-            return Err("GPU image backing alignment exceeds the generic allocator");
-        }
+        let alignment = usize::try_from(layout.alignment)
+            .map_err(|_| "GPU image backing alignment does not fit kernel address size")?
+            .max(PAGE_SIZE);
+        // Each physical extent must be mappable independently, including the
+        // final extent. AGX, for example, uses 16 KiB UAT pages on a 4 KiB CPU
+        // kernel. Pad the backing, not the immutable logical image layout.
         let allocation_size = image_size
-            .checked_add(PAGE_SIZE - 1)
-            .ok_or("GPU image backing size overflows page alignment")?
-            & !(PAGE_SIZE - 1);
+            .checked_add(alignment - 1)
+            .ok_or("GPU image backing size overflows alignment")?
+            & !(alignment - 1);
         let page_count = allocation_size / PAGE_SIZE;
-        if let Some(pages) = ContiguousPages::new(page_count) {
-            return Self::from_chunks(alloc::vec![pages], allocation_size);
-        }
+        let minimum_chunk_pages = alignment / PAGE_SIZE;
+        // The aligned PMM path may reserve an alignment prefix before the
+        // returned range. Leave room for it inside the preferred buddy block:
+        // e.g. 508 pages + at most 3 prefix pages fit in 512, whereas requesting
+        // 512 pages at 16 KiB alignment would reserve a 1024-page buddy block.
+        let maximum_chunk_pages = if minimum_chunk_pages < Self::MAX_CHUNK_PAGES {
+            (Self::MAX_CHUNK_PAGES - (minimum_chunk_pages - 1)) / minimum_chunk_pages
+                * minimum_chunk_pages
+        } else {
+            minimum_chunk_pages
+        };
+        // Segmented backends need a contiguous GPU address range, not one
+        // image-sized physical buddy block. Bound physical allocations rather
+        // than first rounding a large image up to a much larger buddy order.
         if !allow_segmented {
-            return Err("Failed to allocate contiguous GPU image pages");
+            let pages = ContiguousPages::new_aligned(page_count, alignment)
+                .ok_or("Failed to allocate contiguous GPU image pages")?;
+            return Self::from_chunks(alloc::vec![pages], allocation_size);
         }
 
         let mut chunks = Vec::new();
         chunks
-            .try_reserve(page_count.div_ceil(Self::MAX_CHUNK_PAGES))
+            .try_reserve(page_count.div_ceil(maximum_chunk_pages))
             .map_err(|_| "Failed to reserve segmented GPU image backing")?;
         let mut remaining_pages = page_count;
         while remaining_pages != 0 {
-            let mut chunk_pages = remaining_pages.min(Self::MAX_CHUNK_PAGES);
+            let mut chunk_pages = remaining_pages.min(maximum_chunk_pages);
             let chunk = loop {
-                if let Some(chunk) = ContiguousPages::new(chunk_pages) {
+                if let Some(chunk) = ContiguousPages::new_aligned(chunk_pages, alignment) {
                     break chunk;
                 }
-                if chunk_pages == 1 {
+                if chunk_pages == minimum_chunk_pages {
                     return Err("Failed to allocate segmented GPU image pages");
                 }
-                chunk_pages = (chunk_pages / 2).max(1);
+                chunk_pages = (chunk_pages / 2 / minimum_chunk_pages).max(1) * minimum_chunk_pages;
             };
             remaining_pages -= chunk.len();
+            // Fragmentation can require more chunks than initially reserved.
+            // Fail cleanly while all existing PMM owners still unwind normally.
+            chunks
+                .try_reserve(1)
+                .map_err(|_| "Failed to grow GPU image backing metadata")?;
             chunks.push(chunk);
         }
         Self::from_chunks(chunks, allocation_size)
@@ -756,11 +777,8 @@ impl GpuPrivateImageBacking {
                 .len()
                 .checked_mul(PAGE_SIZE)
                 .ok_or("GPU image segment length overflows")?;
-            // SAFETY: every chunk is an exclusive live allocation covering
-            // `length` bytes and is not visible to a backend yet.
-            unsafe {
-                core::ptr::write_bytes(chunk.as_vaddr() as *mut u8, 0, length);
-            }
+            // ContiguousPages::new_aligned already zeroes the complete range,
+            // including padding. Do not write every image byte a second time.
             total_size = total_size
                 .checked_add(length)
                 .ok_or("GPU image backing size overflows")?;
@@ -2082,6 +2100,10 @@ impl GpuObject for GpuTimelinePoint {
 #[cfg(test)]
 #[path = "resource/cpu_access_tests.rs"]
 mod cpu_access_tests;
+
+#[cfg(test)]
+#[path = "resource/backing_tests.rs"]
+mod backing_tests;
 
 #[cfg(test)]
 mod native_color_tests {
