@@ -263,6 +263,10 @@ pub struct GpuBufferCreateInfo {
     pub paddr: u64,
     /// Allocation size rounded to the backend backing granule, in bytes.
     pub allocation_size: u64,
+    /// Immutable generic creation flags, including CPU mapping visibility.
+    /// Backends must not treat CPU-visible backing as immutable shader code:
+    /// a persistent writable userspace mapping can bypass upload controls.
+    pub flags: u32,
 }
 
 impl GpuBufferCreateInfo {
@@ -277,10 +281,31 @@ impl GpuBufferCreateInfo {
     ///
     /// Backend-neutral buffer backing information.
     pub const fn new(paddr: u64, allocation_size: u64) -> Self {
+        Self::with_flags(paddr, allocation_size, 0)
+    }
+
+    /// Build backing metadata with the actual generic buffer creation flags.
+    ///
+    /// # Arguments
+    ///
+    /// * `paddr` - Physical address of the contiguous backing allocation.
+    /// * `allocation_size` - Non-zero backing allocation size in bytes.
+    /// * `flags` - Validated generic `GPU_BUFFER_FLAG_*` creation flags.
+    ///
+    /// # Returns
+    ///
+    /// Immutable allocation and CPU mapping policy for backend admission.
+    pub const fn with_flags(paddr: u64, allocation_size: u64, flags: u32) -> Self {
         Self {
             paddr,
             allocation_size,
+            flags,
         }
+    }
+
+    /// Whether this backing can have persistent writable userspace mappings.
+    pub const fn cpu_visible(&self) -> bool {
+        self.flags & super::GPU_BUFFER_FLAG_CPU_VISIBLE != 0
     }
 }
 

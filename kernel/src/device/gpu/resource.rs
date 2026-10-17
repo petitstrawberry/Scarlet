@@ -1680,8 +1680,11 @@ impl GpuBuffer {
         let pages = ContiguousPages::new_aligned(allocation_size / PAGE_SIZE, alignment)
             .ok_or("Failed to allocate GPU buffer pages")?;
         let backing = Arc::new(GpuBufferBacking { pages });
-        let backend_buffer =
-            backend.create_buffer(GpuBufferCreateInfo::new(backing.paddr(), backend_size))?;
+        let backend_buffer = backend.create_buffer(GpuBufferCreateInfo::with_flags(
+            backing.paddr(),
+            backend_size,
+            flags,
+        ))?;
         let backend_info = backend_buffer.query_info();
         if backend_info.command_resource_token == 0 || backend_info.allocation_size != backend_size
         {

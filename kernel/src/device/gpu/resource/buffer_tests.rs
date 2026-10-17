@@ -144,6 +144,25 @@ impl GpuBackend for DefaultBackend {
 }
 
 #[test_case]
+fn buffer_creation_flags_reach_backend_and_match_actual_mapping_policy() {
+    assert_eq!(GpuBufferCreateInfo::new(0x4000, 0x4000).flags, 0);
+    for flags in [0, super::super::GPU_BUFFER_FLAG_CPU_VISIBLE] {
+        let backend = Arc::new(Backend::new(16 * 1024));
+        let buffer = GpuBuffer::new(backend.clone(), 17, flags).unwrap();
+        let create = backend.state.lock().create.unwrap();
+        assert_eq!(create.flags, flags);
+        assert_eq!(create.cpu_visible(), buffer.cpu_visible());
+        assert_eq!(buffer.as_memory_mappable().is_some(), create.cpu_visible());
+        assert_eq!(
+            buffer.get_mapping_info(0, PAGE_SIZE).is_ok(),
+            create.cpu_visible()
+        );
+        assert_eq!(create.paddr, buffer.backing.paddr());
+        assert_eq!(create.allocation_size, buffer.allocation_size() as u64);
+    }
+}
+
+#[test_case]
 fn buffer_default_granule_preserves_cpu_page_allocation() {
     let backend = Arc::new(DefaultBackend(Backend::new(0)));
     let buffer = GpuBuffer::new(backend.clone(), PAGE_SIZE + 1, 0).unwrap();
