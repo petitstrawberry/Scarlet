@@ -146,3 +146,78 @@ precise rejection limit is still unresolved.
 The normal image includes the capacity and transport changes. The oversize
 submission failure and visible-frame performance remain follow-up work;
 transport success must not be interpreted as a playback stability result.
+
+## Native fullscreen and GPU transfer follow-up (2026-10-17)
+
+Myrica `345ee0641a5d341fd7482c8f654846ae5151dde6` uses WebKit
+`1f3a2f646fe4a0d80477acf100e964672ad4ea1d`. The ordinary Release profile enables
+the document Fullscreen API explicitly, including when reusing an older CMake
+cache. WebCore's element entry/exit callbacks now wait for the native window
+acknowledgement. Myrica hides its browser chrome and decoration in fullscreen;
+Escape uses WebCore's normal exit path. Stale native acknowledgements cannot
+complete a newer request.
+
+On the normal HVF/4-vCPU/8-GiB image with Cocoa GL/Retina, audio and `/dev/video0`,
+the actual YouTube watch page `cxvXOVAVwjE` entered fullscreen, returned with
+Escape and entered again. Native state acknowledgements and RFB screenshots
+confirmed the video occupying the complete 1280x800 output, hidden address bar
+and window decoration, and restored browser chrome on exit. The WebCore
+viewport changed from 2196x1282 to 1280x800 and back. Playback continued through
+these transitions. Myrica host tests passed **67**, including browser-chrome
+restoration. The C++ embedding and full normal Release image compiled.
+
+The cache policy previously gave **each** Ganesh context 256 MiB despite sharing
+one Vulkan device with a **512 MiB** allocation ceiling. WebKit now divides one
+device allowance (half the device-local heap, capped at 256 MiB) among live
+contexts, refreshing each limit on its owning thread. Idle contexts adopt a
+changed allowance on their next use; this is a cache policy, not a global hard
+allocator. The native run with two live contexts reported 128 MiB per context,
+instead of 256 MiB. The ICD's advertised heap now matches its existing 512 MiB
+allocation ceiling; the ceiling itself was not increased.
+
+The Scarlet layer host also now follows WebKit's `LayerTreeHost` native-image
+sharing: one `CoordinatedImageBackingStore` per native image identity, reused
+across layers. Owner-side updates eject entries whose only owner is this map,
+and teardown clears it before destroying the painting engine. The previous port
+created another store on each request instead of sharing an existing upload.
+
+Failure-only diagnostics identified the earlier `SubmissionTooLarge` precisely:
+the native logical stream exceeded **64 MiB**, after 32 approximately 2-MiB
+chunks. A subsequent comment-scroll reproduction contained **314 operations /
+176,979,520 texture source bytes**, no buffer uploads and no render passes
+or draws. This reproduced the rejection even after the shared cache correction,
+establishing a separate transfer-batching problem.
+
+SGFX `b6bb291cf9d0bf2fca2010e3de457a961d7b4749` validates texture-transfer-only
+recordings in full, then submits ordered batches of at most 8 MiB of source
+pixels. Large uploads split at row boundaries and preserve rectangle positions,
+mip levels, array layers and overwrite order. Texture barriers, image copies
+and mip blits remain in order between uploads; the mip-generation regression
+covers this actual recording pattern. Every receipt participates in
+fence completion/readback waits. Mixed draw/transfer recordings keep their
+existing path. Vulkan tests passed **115** with **4 ignored**; SGFX core tests
+passed **22**. Native validation of this batching change follows below.
+
+The shared cache change alone did not eliminate allocation pressure. A native
+fullscreen/comment-scroll run still reached 536,689,168 allocated bytes against
+the 536,870,912-byte ceiling, with 333 buffers and 401 images alive. The video
+session then failed around media time 46.4 s, followed by a queue OOM/device
+loss. The owner-context cache reported about 89 MiB, so its cache counter alone
+cannot account for the complete device. Live images, other contexts and
+unbudgeted/shared output allocations need further lifetime/accounting work.
+During comment loading, one owner tick reached 621 ms. Fullscreen API success
+does not resolve these remaining rendering-latency and playback-stability issues.
+
+The final normal image (Myrica `345ee06`, WebKit `1f3a2f646fe`, SGFX `b6bb291`)
+was built with `cargo scarlet image --project projects/aarch64-limine-full --release`.
+The populated WebKit source HEAD and CMake cache confirmed the pinned revision,
+`Release`, Fullscreen API, JIT, DFG and FTL enabled. Real YouTube playback entered
+native fullscreen and returned with Escape; screenshots confirmed the video,
+hidden chrome and restoration. A 155-wheel-step scroll into actual comments and
+155 steps back produced **zero** logical-stream rejection, device-loss or WebCore
+resize errors in this run. It still logged **21 allocation-budget failures**
+near 512 MiB, and the media session failed. Thus native-image sharing and transfer
+batching are included, but allocation-pressure recovery and comment-loading
+latency remain open. An earlier fullscreen-only retry reached media time
+176.64 s with 5,298 decoded / 4,924 presented / 166 decoder-output drops; that
+separate observation does not establish comment-scroll playback stability.
