@@ -221,3 +221,51 @@ batching are included, but allocation-pressure recovery and comment-loading
 latency remain open. An earlier fullscreen-only retry reached media time
 176.64 s with 5,298 decoded / 4,924 presented / 166 decoder-output drops; that
 separate observation does not establish comment-scroll playback stability.
+
+## Offscreen video upload lifetime correction (2026-10-17)
+
+Allocation-owner diagnostics in SGFX `22c0ce2` identified about **100 pending
+720p NV12 frames**: 99 R8 1280x720 images (91,238,400 bytes) and 100 RG8 640x360
+images (46,080,000 bytes), alongside 195,690,496 bytes in 257 transfer-source
+buffers. CPU mirrors alone occupied 195,972,864 bytes at the first reported
+failure. This was not just ordinary thumbnail storage or the budgeted Skia cache.
+
+The compositor video pump created textures for each decoded frame, but relied
+on a later page composition to flush/submit them. Scrolling the player offscreen
+made scene damage empty, so the compositor skipped that submit. Texture writes
+and their staging buffers accumulated while playback continued. A subsequent
+page paint could then send the large pending transfer burst. The pump also did
+not independently poll GPU completions.
+
+WebKit `4f02391e559fe75a5494a19a1ddd56c2fb430f7b`, consumed by Myrica
+`2ecd7f70f0263725a5bcf54155bf8e6641c0143a`, makes the pump flush/submit texture
+uploads asynchronously, including images that have never been drawn. Skia's
+finished callback supplies an owned completion flag; at most **three** uploads
+can be outstanding per pump. The compositor polls completions before acquiring
+another decoded frame, even when the page is unchanged. The decoder's bounded
+queue and audio clock continue independently when upload slots are occupied.
+Completion callbacks retain only their flag, not the media player/pump.
+
+The owner preview path also submits transfers without waiting for a later page
+paint and skips new GPU uploads for hidden pages. A genuine Skia-reported OOM
+on a valid decoded frame retires outstanding work, frees unused GPU resources
+and retries once. Continued temporary OOM preserves the last image and releases
+the frame lease for a later retry, instead of declaring decoder failure.
+Invalid frames and device loss remain errors. The **512 MiB limit is unchanged**.
+
+Validation used the ordinary rebuilt AArch64 Release image, HVF/4 vCPUs/8 GiB,
+Cocoa GL/Retina, audio and `/dev/video0`, with the same YouTube watch URL. After
+fullscreen entry/exit, 155 wheel steps moved into actual comments. The video
+remained offscreen for **141.5 seconds**: media time reached 191.51 s and 5,743
+frames were decoded, with **zero allocation-budget failures, stream rejections
+or device-loss errors**. After 155 steps back, visible playback resumed and
+fullscreen worked again. At media time 224.47 s, counters reached 6,732 decoded,
+1,588 presented and 171 decoder-output drops. Presentation stayed at 985 while
+the player was offscreen, then advanced on return; these are not full-run FPS
+measurements. Native screenshots confirmed the returned video image.
+
+C++ syntax validation and the full native Release build passed; Vulkan unit
+tests passed **115**, with **4 ignored**. No forced-OOM fault injection was used
+to exercise the new retry branch; the actual formerly failing scroll case
+completed without OOM. These checks resolve that reproduction, not every source
+of comment-loading latency or all possible GPU memory pressure.

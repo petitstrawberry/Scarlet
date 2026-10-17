@@ -1,7 +1,7 @@
 # Native graphics packages own their builds; the SDK owns retrieval and output.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/sgfx", rev = "b6bb291cf9d0bf2fca2010e3de457a961d7b4749" }
+source = { git = "https://github.com/petitstrawberry/sgfx", rev = "22c0ce20ae5d86869da7ac7c612028163c069010" }
 subdir = "platforms/scarlet"
 
 [[layers]]
