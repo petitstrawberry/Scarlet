@@ -1,6 +1,66 @@
 use super::*;
 
 #[test_case]
+fn unchanged_receive_acks_do_not_broadcast_write_or_poll_wakes() {
+    let socket = TcpSocket::new(Weak::new());
+    socket.set_state(TcpState::Established);
+    socket.send_unacked.store(1000, Ordering::SeqCst);
+    socket.send_seq.store(2000, Ordering::SeqCst);
+    let send = Arc::new(crate::sync::Waker::new_interruptible("tcp-test-send"));
+    let poll = Arc::new(crate::sync::Waker::new_interruptible("tcp-test-poll"));
+    *socket.send_waker.lock() = Some(send.clone());
+    *socket.recv_waker.lock() = Some(poll.clone());
+    let mut header = TcpHeader::new(80, 30000);
+    header.set_flags(tcp_flags::ACK);
+    header.ack_number = 1000;
+    for sequence in 1..=64 {
+        header.seq_number = sequence;
+        socket.process_ack(&header, false);
+    }
+    assert_eq!(send.pending_wake_count_for_test(), 0);
+    assert_eq!(poll.pending_wake_count_for_test(), 0);
+    // New outbound acknowledgement must still notify both kinds of waiter.
+    header.ack_number = 1500;
+    socket.process_ack(&header, false);
+    assert_eq!(socket.send_unacked.load(Ordering::SeqCst), 1500);
+    assert_eq!(send.pending_wake_count_for_test(), 1);
+    assert_eq!(poll.pending_wake_count_for_test(), 1);
+}
+
+#[test_case]
+fn window_only_and_close_ack_changes_still_wake_write_and_poll_waiters() {
+    for close in [false, true] {
+        let socket = TcpSocket::new(Weak::new());
+        socket.set_state(if close {
+            TcpState::LastAck
+        } else {
+            TcpState::Established
+        });
+        socket.send_unacked.store(1000, Ordering::SeqCst);
+        socket.send_seq.store(1000, Ordering::SeqCst);
+        let send = Arc::new(crate::sync::Waker::new_interruptible("tcp-test-send"));
+        let poll = Arc::new(crate::sync::Waker::new_interruptible("tcp-test-poll"));
+        *socket.send_waker.lock() = Some(send.clone());
+        *socket.recv_waker.lock() = Some(poll.clone());
+        if !close {
+            socket.peer_window.lock().update(0, 1000, 0);
+        }
+        let mut header = TcpHeader::new(80, 30000);
+        header.set_flags(tcp_flags::ACK);
+        header.ack_number = 1000;
+        header.seq_number = 1;
+        socket.process_ack(&header, false);
+        assert_eq!(send.pending_wake_count_for_test(), 1);
+        assert_eq!(poll.pending_wake_count_for_test(), 1);
+        if close {
+            assert_eq!(socket.get_state(), TcpState::Closed);
+        } else {
+            assert!(socket.peer_send_credit() > 0);
+        }
+    }
+}
+
+#[test_case]
 fn window_scale_options_handle_zero_limits_unknowns_and_truncation() {
     for shift in [0, 4, 14, 15, 255] {
         let bytes = [TCP_OPTION_NOP, 3, 3, shift, 0];

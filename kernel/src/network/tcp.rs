@@ -1294,18 +1294,19 @@ impl TcpSocket {
     }
 
     /// Handle ACKs that advance TCP close state.
-    fn handle_close_ack(&self, ack_number: u32) {
+    fn handle_close_ack(&self, ack_number: u32) -> bool {
         let send_seq = self.send_seq.load(Ordering::SeqCst);
         if !is_seq_acknowledged(send_seq, ack_number) {
-            return;
+            return false;
         }
 
         match self.get_state() {
             TcpState::FinWait1 => self.set_state(TcpState::FinWait2),
             TcpState::Closing => self.set_state(TcpState::TimeWait),
             TcpState::LastAck => self.set_state(TcpState::Closed),
-            _ => {}
+            _ => return false,
         }
+        true
     }
 
     /// Handle data segment
@@ -1574,7 +1575,7 @@ impl TcpSocket {
         }
         self.stop_rtt_measurement(ack);
         self.remove_acked_segments(ack);
-        self.handle_close_ack(ack);
+        let close_changed = self.handle_close_ack(ack);
         if duplicate_candidate
             && !changed
             && ack == self.last_ack_seq.load(Ordering::SeqCst)
@@ -1601,7 +1602,13 @@ impl TcpSocket {
                 }
             }
         }
-        self.notify_write_waiters();
+        // Bulk receives carry an ACK on nearly every data segment, often
+        // without acknowledging any new outbound bytes. Payload delivery has
+        // its own read wake. Only changes visible to write/poll readiness need
+        // this additional broadcast; duplicates still drive fast retransmit.
+        if seq_after(ack, previous) || changed || close_changed {
+            self.notify_write_waiters();
+        }
     }
 
     fn notify_write_waiters(&self) {

@@ -338,3 +338,27 @@ regressions; they do not measure all sources of loading latency or establish
 a general frame-rate benchmark. Remote-desktop capture adds readback work.
 Validation logs and captures use `/tmp/scarlet-async-scroll-*`; the implementation
 and bundle references are preserved in their repositories.
+
+## Redundant TCP ACK wakeups (2026-10-18)
+
+`TcpSocket::process_ack` previously broadcast both the send and receive/poll
+wakers for every valid ACK. Incoming bulk data normally carries an ACK even
+when no new outbound bytes are acknowledged and the peer window is unchanged.
+Payload delivery already wakes readers, so this added unnecessary scheduler
+work while downloading media and page assets.
+
+The additional broadcast now requires outbound ACK progress, a peer-window
+change, or an ACK-driven close-state transition. Duplicate ACK tracking and
+fast retransmit still execute. Window-only reopening still wakes the combined
+read/write poll registration. Receive capacity remains 1 MiB with the existing
+negotiated window scaling; this change does not alter TCP window sizes.
+
+All 1,521 AArch64 kernel tests pass. Added cases cover 64 unchanged receive ACKs
+without write/poll notification, acknowledgement of new outbound bytes,
+window-only reopening and close completion. Release boot-image preparation is
+separate from installing it into the active VM. Runtime improvement is pending.
+This removes one source of redundant work, not a diagnosis of every system-wide
+stall. VirtIO RX still allocates/copies packets in the IRQ handler before the
+bounded protocol worker runs, and TCP retransmission callbacks run from the
+timer IRQ; those remaining IRQ-context paths need further examination alongside
+GPU/video waits.
