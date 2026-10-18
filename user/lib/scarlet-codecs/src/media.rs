@@ -308,11 +308,10 @@ impl Mp4Parser {
         Ok(())
     }
     fn update_tracks(&mut self, r: &IsoMp4Reader<'_>) -> Result<()> {
-        for header in r.protection_headers() {
-            if !self.initialization_data.iter().any(|previous| previous.as_slice() == header.as_ref()) {
-                self.initialization_data.push(header.to_vec());
-                self.events.push_back(ParserEvent::InitializationData(header.to_vec()));
-            }
+        let headers: Vec<u8> = r.protection_headers().iter().flat_map(|header| header.iter().copied()).collect();
+        if !headers.is_empty() && !self.initialization_data.contains(&headers) {
+            self.initialization_data.push(headers.clone());
+            self.events.push_back(ParserEvent::InitializationData(headers));
         }
         if r.tracks().len() > 8 {
             return Err(MediaError::Unsupported("too many tracks"));
