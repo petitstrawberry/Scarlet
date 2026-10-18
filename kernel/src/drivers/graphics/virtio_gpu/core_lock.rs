@@ -5,14 +5,14 @@
 //! that entire host wait too. Completion/admission workers use try_lock.
 
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::sync::{IrqSpinLock, IrqSpinLockGuard, Waker};
 
 pub(super) struct CoreLock<T> {
     inner: IrqSpinLock<T>,
     released: AtomicUsize,
-    waiting: AtomicBool,
+    sleepers: AtomicUsize,
     wake: Waker,
 }
 
@@ -21,7 +21,7 @@ impl<T> CoreLock<T> {
         Self {
             inner: IrqSpinLock::new(value),
             released: AtomicUsize::new(0),
-            waiting: AtomicBool::new(false),
+            sleepers: AtomicUsize::new(0),
             wake: Waker::new_uninterruptible("virtio-gpu-core"),
         }
     }
@@ -46,8 +46,9 @@ impl<T> CoreLock<T> {
             if let Some(task) = crate::task::mytask() {
                 loop {
                     let released = self.released.load(Ordering::Acquire);
-                    self.waiting.store(true, Ordering::Release);
+                    self.sleepers.fetch_add(1, Ordering::AcqRel);
                     if let Some(guard) = self.try_lock() {
+                        self.sleepers.fetch_sub(1, Ordering::AcqRel);
                         return guard;
                     }
                     // The sequence closes release-before-registration races.
@@ -59,6 +60,7 @@ impl<T> CoreLock<T> {
                         0,
                         || self.released.load(Ordering::Acquire) != released,
                     );
+                    self.sleepers.fetch_sub(1, Ordering::AcqRel);
                 }
             }
         }
@@ -94,7 +96,7 @@ impl<T> Drop for CoreGuard<'_, T> {
         let _transition = crate::sync::IrqGuard::new();
         drop(self.guard.take());
         self.lock.released.fetch_add(1, Ordering::Release);
-        if self.lock.waiting.swap(false, Ordering::AcqRel) {
+        if self.lock.sleepers.load(Ordering::Acquire) != 0 {
             self.lock.wake.wake_all();
         }
     }
