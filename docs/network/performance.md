@@ -365,3 +365,36 @@ stall. VirtIO RX still allocates/copies packets in the IRQ handler before the
 bounded protocol worker runs, and TCP retransmission callbacks run from the
 timer IRQ; those remaining IRQ-context paths need further examination alongside
 GPU/video waits.
+
+## Kernel and host overhead reduction (2026-10-19)
+
+The AArch64 full project's normal kernel no longer enables `sync-debug`.
+Release optimization was already enabled; detailed synchronization diagnostics
+additionally searched/published guard records, sampled timestamps and captured
+call sites on lock acquisition. The lightweight spin-contention watchdog remains
+enabled. The console project retains detailed diagnostics for investigations.
+The built full-project kernel has no `PREEMPT_DEBUG_SLOTS` symbol and still
+contains the spin-contention reporter.
+
+VM free-address search now remembers the continuously mapped prefix beginning
+at `mmap_base`. Repeated allocations after a contiguous prefix start with an
+ordered lookup instead of rescanning every earlier VMA under the IRQ-protected
+VM lock. The hint never skips smaller holes encountered by larger/aligned
+requests. Unmap/shrink lower it; arbitrary map mutation, restore, clear and base
+changes invalidate it under the VM write lock. Shared readers may only advance
+it while their read guards exclude those invalidations. Placement remains
+first-fit with the existing size/alignment checks.
+
+Tests cover 1,024 consecutive allocations followed by hole reuse, a page
+occupancy reference model across 128 fixed-map/unmap changes and multiple sizes
+and alignments, and shrink/restore/clear/base changes. All 1,524 tests passed with
+the previous diagnostic/hypervisor feature set; all 1,508 tests passed with the
+normal full-project feature set. The normal Release boot image builds.
+
+The existing host VideoToolbox daemon now emits its per-frame queue/decode logs
+only when `SCARLET_VIDEO_TRACE_FRAMES=1`. Otherwise it skips both message
+formatting and the two per-frame stdout flushes. Lifecycle/error logging remains.
+Its Release binary builds and all 10 existing host event-loop tests pass.
+These artifacts are prepared for the next VM restart;
+the running VM retains its preceding kernel and daemon. Interactive performance
+of this set of changes is pending.

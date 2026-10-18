@@ -111,6 +111,10 @@ struct InnerVmm {
     memmap: BTreeMap<usize, VirtualMemoryMap>,
     asid: u16,
     mmap_base: usize,
+    // [mmap_base, mmap_occupied_until) is known to contain no holes. Readers
+    // may advance this hint under the VM read lock; writers lower it whenever
+    // they remove coverage. It never skips a gap too small for an earlier ask.
+    mmap_occupied_until: AtomicUsize,
     page_tables: Vec<Arc<PageTable>>,
     last_search_cache: Option<(usize, usize, usize)>,
     owner_task_id: Option<usize>,
@@ -187,6 +191,7 @@ impl VirtualMemoryManager {
             memmap: BTreeMap::new(),
             asid: 0,
             mmap_base: DEFAULT_USER_MMAP_BASE,
+            mmap_occupied_until: AtomicUsize::new(DEFAULT_USER_MMAP_BASE),
             page_tables: Vec::new(),
             last_search_cache: None,
             owner_task_id: None,
@@ -346,6 +351,9 @@ impl VirtualMemoryManager {
     ) -> R {
         let mut g = self.inner.write();
         self.record_inner_writer(WRITE_SITE_CLONE_MEMMAP);
+        g.mmap_occupied_until
+            .store(g.mmap_base, core::sync::atomic::Ordering::Relaxed);
+        g.last_search_cache = None;
         f(&mut g.memmap)
     }
 
@@ -706,6 +714,12 @@ impl VirtualMemoryManager {
             }
         }
         let removed_map = g.memmap.remove(&start_addr);
+        if let Some(map) = &removed_map {
+            g.mmap_occupied_until.fetch_min(
+                map.vmarea.start.max(g.mmap_base),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
         drop(g);
         if let Some(m) = removed_map {
             self.unmap_range_from_mmu(m.vmarea.start, m.vmarea.end);
@@ -924,6 +938,13 @@ impl VirtualMemoryManager {
             g.memmap.insert(map.vmarea.start, map);
         }
 
+        if !removed_maps.is_empty() {
+            g.mmap_occupied_until.fetch_min(
+                remove_start.max(g.mmap_base),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
+
         // Clear cache if it might be affected
         if let Some((_, _, cache_key)) = g.last_search_cache {
             if let Some(cached_map) = g.memmap.get(&cache_key) {
@@ -951,6 +972,8 @@ impl VirtualMemoryManager {
             let mut g = self.inner.write();
             self.record_inner_writer(WRITE_SITE_REMOVE_ALL);
             g.last_search_cache = None;
+            g.mmap_occupied_until
+                .store(g.mmap_base, core::sync::atomic::Ordering::Relaxed);
             core::mem::take(&mut g.memmap)
         };
 
@@ -980,6 +1003,8 @@ impl VirtualMemoryManager {
             let mut g = self.inner.write();
             self.record_inner_writer(WRITE_SITE_REMOVE_ALL);
             g.last_search_cache = None;
+            g.mmap_occupied_until
+                .store(g.mmap_base, core::sync::atomic::Ordering::Relaxed);
             core::mem::replace(&mut g.memmap, restored_maps)
         };
 
@@ -1683,6 +1708,9 @@ impl VirtualMemoryManager {
         let mut inner = self.inner.write();
         self.record_inner_writer(WRITE_SITE_MMAP_BASE);
         inner.mmap_base = base;
+        inner
+            .mmap_occupied_until
+            .store(base, core::sync::atomic::Ordering::Relaxed);
     }
 
     /// Find a suitable address for new memory mapping
@@ -1718,38 +1746,55 @@ impl VirtualMemoryManager {
     }
 
     fn find_unmapped_area_in(g: &InnerVmm, size: usize, alignment: usize) -> Option<usize> {
+        use core::sync::atomic::Ordering;
         let aligned_size = checked_align_up(size, alignment)?;
         if aligned_size == 0 {
             return None;
         }
 
-        let mut search_addr = checked_align_up(g.mmap_base, alignment)?;
+        let mut occupied_until = g
+            .mmap_occupied_until
+            .load(Ordering::Relaxed)
+            .max(g.mmap_base);
+        let result = (|| {
+            let mut search_addr = checked_align_up(occupied_until, alignment)?;
 
-        // If there is a mapping that starts before (or at) search_addr but still covers it,
-        // we must skip past it. This prevents returning an address inside an existing map.
-        if let Some((_, prev_map)) = g.memmap.range(..=search_addr).next_back() {
-            if prev_map.vmarea.end >= search_addr {
-                search_addr = checked_align_up(prev_map.vmarea.end.checked_add(1)?, alignment)?;
-            }
-        }
-
-        // Simple first-fit algorithm from the adjusted search address
-        for (_start, memory_map) in g.memmap.range(search_addr..) {
-            // Check if there's enough space before this memory map
-            let candidate_end = search_addr.checked_add(aligned_size)?;
-            if candidate_end <= memory_map.vmarea.start {
-                return (candidate_end <= USER_LOWER_CANONICAL_END).then_some(search_addr);
+            // Alignment may place the candidate inside a map that began before
+            // it. Only extend the hint if there is no gap before that map.
+            if let Some((_, prev_map)) = g.memmap.range(..=search_addr).next_back() {
+                if prev_map.vmarea.end >= search_addr {
+                    let end = prev_map.vmarea.end.checked_add(1)?;
+                    if prev_map.vmarea.start <= occupied_until {
+                        occupied_until = end;
+                    }
+                    search_addr = checked_align_up(end, alignment)?;
+                }
             }
 
-            // Move search point past this memory map
-            if memory_map.vmarea.end >= search_addr {
-                search_addr = checked_align_up(memory_map.vmarea.end.checked_add(1)?, alignment)?;
+            for (_, memory_map) in g.memmap.range(search_addr..) {
+                let candidate_end = search_addr.checked_add(aligned_size)?;
+                if candidate_end <= memory_map.vmarea.start {
+                    return (candidate_end <= USER_LOWER_CANONICAL_END).then_some(search_addr);
+                }
+
+                if memory_map.vmarea.end >= search_addr {
+                    let end = memory_map.vmarea.end.checked_add(1)?;
+                    if memory_map.vmarea.start <= occupied_until {
+                        occupied_until = end;
+                    }
+                    search_addr = checked_align_up(end, alignment)?;
+                }
             }
-        }
-        search_addr
-            .checked_add(aligned_size)
-            .filter(|end| *end <= USER_LOWER_CANONICAL_END)
-            .map(|_| search_addr)
+            search_addr
+                .checked_add(aligned_size)
+                .filter(|end| *end <= USER_LOWER_CANONICAL_END)
+                .map(|_| search_addr)
+        })();
+        // Shared readers can only publish covered prefixes while their read
+        // guards exclude removals. A slower reader must not regress the hint.
+        g.mmap_occupied_until
+            .fetch_max(occupied_until, Ordering::Relaxed);
+        result
     }
 
     /// Add a memory map at a fixed address, handling overlapping mappings by splitting them
@@ -2365,6 +2410,142 @@ mod tests {
 
         manager.set_mmap_base(usize::MAX - PAGE_SIZE + 1);
         assert!(manager.find_unmapped_area(PAGE_SIZE, PAGE_SIZE).is_none());
+    }
+
+    fn free_search_test_map(start: usize, pages: usize) -> VirtualMemoryMap {
+        VirtualMemoryMap::new(
+            crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
+            MemoryArea::new(start, start + pages * PAGE_SIZE - 1),
+            0o644,
+            false,
+            None,
+        )
+    }
+
+    #[test_case]
+    fn free_area_search_reuses_holes_after_long_contiguous_allocation() {
+        let manager = VirtualMemoryManager::new();
+        let base = 0x50000000;
+        manager.set_mmap_base(base);
+        for page in 0..1024 {
+            assert_eq!(
+                manager.add_memory_map_anywhere(free_search_test_map(0, 1)),
+                Ok(base + page * PAGE_SIZE)
+            );
+        }
+        assert_eq!(
+            manager.find_unmapped_area(PAGE_SIZE, PAGE_SIZE),
+            Some(base + 1024 * PAGE_SIZE)
+        );
+        manager
+            .remove_memory_map_by_addr(base + 3 * PAGE_SIZE)
+            .unwrap();
+        assert_eq!(
+            manager.find_unmapped_area(PAGE_SIZE, PAGE_SIZE),
+            Some(base + 3 * PAGE_SIZE)
+        );
+        // A large request skips this one-page hole, but must not hide it from
+        // a subsequent smaller request or change first-fit placement.
+        assert_eq!(
+            manager.find_unmapped_area(2 * PAGE_SIZE, PAGE_SIZE),
+            Some(base + 1024 * PAGE_SIZE)
+        );
+        assert_eq!(
+            manager.find_unmapped_area(PAGE_SIZE, PAGE_SIZE),
+            Some(base + 3 * PAGE_SIZE)
+        );
+        manager.remove_memory_map_range(base + 8 * PAGE_SIZE, 3 * PAGE_SIZE);
+        assert_eq!(
+            manager.find_unmapped_area(2 * PAGE_SIZE, PAGE_SIZE),
+            Some(base + 8 * PAGE_SIZE)
+        );
+    }
+
+    #[test_case]
+    fn free_area_search_matches_page_occupancy_after_fixed_maps_and_unmaps() {
+        let manager = VirtualMemoryManager::new();
+        let base = 0x50000000;
+        manager.set_mmap_base(base);
+        let mut occupied = [false; 64];
+        let mut seed = 0x12345678u32;
+        for step in 0..128 {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let page = (seed as usize >> 8) % occupied.len();
+            let pages = (1 + (seed as usize >> 24) % 4).min(occupied.len() - page);
+            let present = step % 3 != 0;
+            if present {
+                manager
+                    .add_memory_map_fixed(free_search_test_map(base + page * PAGE_SIZE, pages))
+                    .unwrap();
+            } else {
+                manager.remove_memory_map_range(base + page * PAGE_SIZE, pages * PAGE_SIZE);
+            }
+            occupied[page..page + pages].fill(present);
+            for size in [1, 3, 7] {
+                for alignment in [1, 4, 16] {
+                    let reserved = (size + alignment - 1) / alignment * alignment;
+                    let expected = (0..128)
+                        .find(|candidate| {
+                            candidate % alignment == 0
+                                && (*candidate..*candidate + reserved)
+                                    .all(|index| !occupied.get(index).copied().unwrap_or(false))
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        manager.find_unmapped_area(size * PAGE_SIZE, alignment * PAGE_SIZE),
+                        Some(base + expected * PAGE_SIZE),
+                        "step={} size={} alignment={}",
+                        step,
+                        size,
+                        alignment
+                    );
+                }
+            }
+        }
+    }
+
+    #[test_case]
+    fn free_area_search_tracks_shrink_restore_clear_and_base_changes() {
+        let manager = VirtualMemoryManager::new();
+        let base = 0x50000000;
+        manager.set_mmap_base(base);
+        manager
+            .add_memory_map(free_search_test_map(base, 8))
+            .unwrap();
+        assert_eq!(
+            manager.find_unmapped_area(PAGE_SIZE, PAGE_SIZE),
+            Some(base + 8 * PAGE_SIZE)
+        );
+        manager
+            .shrink_memory_map_range(base, 8 * PAGE_SIZE, 4 * PAGE_SIZE)
+            .unwrap();
+        assert_eq!(
+            manager.find_unmapped_area(PAGE_SIZE, PAGE_SIZE),
+            Some(base + 4 * PAGE_SIZE)
+        );
+        manager
+            .restore_memory_maps([free_search_test_map(base, 2)])
+            .unwrap();
+        assert_eq!(
+            manager.find_unmapped_area(PAGE_SIZE, PAGE_SIZE),
+            Some(base + 2 * PAGE_SIZE)
+        );
+        manager.with_memmaps_mut(|maps| maps.clear());
+        assert_eq!(manager.find_unmapped_area(PAGE_SIZE, PAGE_SIZE), Some(base));
+        manager
+            .add_memory_map(free_search_test_map(base, 4))
+            .unwrap();
+        assert_eq!(
+            manager.find_unmapped_area(PAGE_SIZE, PAGE_SIZE),
+            Some(base + 4 * PAGE_SIZE)
+        );
+        manager.remove_all_memory_maps().for_each(drop);
+        assert_eq!(manager.find_unmapped_area(PAGE_SIZE, PAGE_SIZE), Some(base));
+        manager.set_mmap_base(base - PAGE_SIZE);
+        assert_eq!(
+            manager.find_unmapped_area(PAGE_SIZE, PAGE_SIZE),
+            Some(base - PAGE_SIZE)
+        );
     }
 
     #[test_case]

@@ -140,6 +140,14 @@ private func log(_ message: String) {
     fflush(stdout)
 }
 
+private let frameTraceEnabled = ProcessInfo.processInfo.environment["SCARLET_VIDEO_TRACE_FRAMES"] == "1"
+
+private func traceFrame(_ message: @autoclosure () -> String) {
+    if frameTraceEnabled {
+        log(message())
+    }
+}
+
 private final class MemoryRegion {
     let guestAddress: UInt64
     let size: UInt64
@@ -1040,7 +1048,7 @@ private final class VideoBackend {
 
         if queueType == virtioVideoQueueTypeOutput {
             queuedOutputResources[streamId] = resourceId
-            log("[vhost-video-vt] RESOURCE_QUEUE stream_id=\(streamId) output resource=\(resourceId) timestamp=\(timestamp)")
+            traceFrame("[vhost-video-vt] RESOURCE_QUEUE stream_id=\(streamId) output resource=\(resourceId) timestamp=\(timestamp)")
             return resourceQueueResponse(streamId: streamId, timestamp: timestamp, flags: 0, size: 0)
         }
 
@@ -1075,7 +1083,7 @@ private final class VideoBackend {
         queuedOutputResources[streamId] = nil
 
         let formatName = codedFormat == virtioVideoFormatAV1 ? "AV1" : "H264"
-        log("[vhost-video-vt] decoded stream_id=\(streamId) \(formatName) timestamp=\(timestamp) \(frame.width)x\(frame.height) nv12=\(frame.nv12.count)")
+        traceFrame("[vhost-video-vt] decoded stream_id=\(streamId) \(formatName) timestamp=\(timestamp) \(frame.width)x\(frame.height) nv12=\(frame.nv12.count)")
         return resourceQueueResponse(streamId: streamId, timestamp: timestamp, flags: 0, size: UInt32(packed.count))
     }
 
