@@ -306,8 +306,15 @@ closed QEMU, the normal disk's boot partition was updated and the new kernel
 booted with HVF, VirGL, audio and the existing video backend. All desktop services
 started. The root partition SHA-256 was identical before and after replacement;
 the GPT was also unchanged. Interactive improvement from this change is pending.
-Automatic QMP CPU sampling also observed synchronous GPU response polling and
-repeated execution in VM free-address search; it did not isolate every reported
-brief freeze. Video control still retains IRQ-protected command/session guards
+QMP CPU snapshots observed synchronous GPU response polling and VM free-address
+search, but are not valid duration measurements: under browser load,
+`info registers -a` itself wedged QEMU's main loop in
+`cpu_dump_state -> do_run_on_cpu -> qemu_cond_wait_impl`. A host macOS `sample`
+captured that wait while HVF vCPU threads kept running. Closing the QMP client
+did not release it. Calling Hypervisor.framework's `hv_vcpus_exit` for the four
+existing vCPUs through LLDB returned success and restored QMP `query-status`
+without restarting the VM. Repeated register sampling was stopped. This induced
+full hang is distinct from the user's pre-existing brief freezes, whose causes
+remain under investigation. Video control still retains IRQ-protected command/session guards
 while polling, and GPU resource/transfer/destruction commands retain synchronous
 core ownership. These waits require further work beyond display snapshots.
