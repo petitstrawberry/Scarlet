@@ -301,9 +301,11 @@ replacement after acknowledgement. Actual resize handling and submission
 ordering remain unchanged.
 
 All 1,519 AArch64 kernel tests pass, including a snapshot with an outstanding
-unanswered GPU request and display-event acknowledgement/retry. The running
-interactive VM still uses the preceding kernel until its boot partition is
-updated and the VM restarts. Interactive improvement from this change is pending.
+unanswered GPU request and display-event acknowledgement/retry. After the user
+closed QEMU, the normal disk's boot partition was updated and the new kernel
+booted with HVF, VirGL, audio and the existing video backend. All desktop services
+started. The root partition SHA-256 was identical before and after replacement;
+the GPT was also unchanged. Interactive improvement from this change is pending.
 Automatic QMP CPU sampling also observed synchronous GPU response polling and
 repeated execution in VM free-address search; it did not isolate every reported
 brief freeze. Video control still retains IRQ-protected command/session guards
