@@ -96,7 +96,7 @@ checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 [[package]]
 name = "symphonia-codec-aac"
 version = "0.6.0"
-source = "git+https://github.com/petitstrawberry/Symphonia?rev=a178babb44462f002ec855b57e26abd57e106c36#a178babb44462f002ec855b57e26abd57e106c36"
+source = "git+https://github.com/petitstrawberry/Symphonia?rev=5865b5d0e5d170d1e0419684c04e8268847a9d2d#5865b5d0e5d170d1e0419684c04e8268847a9d2d"
 dependencies = [
  "lazy_static",
  "log",
@@ -108,7 +108,7 @@ dependencies = [
 [[package]]
 name = "symphonia-common"
 version = "0.6.0"
-source = "git+https://github.com/petitstrawberry/Symphonia?rev=a178babb44462f002ec855b57e26abd57e106c36#a178babb44462f002ec855b57e26abd57e106c36"
+source = "git+https://github.com/petitstrawberry/Symphonia?rev=5865b5d0e5d170d1e0419684c04e8268847a9d2d#5865b5d0e5d170d1e0419684c04e8268847a9d2d"
 dependencies = [
  "log",
  "symphonia-core",
@@ -118,7 +118,7 @@ dependencies = [
 [[package]]
 name = "symphonia-core"
 version = "0.6.0"
-source = "git+https://github.com/petitstrawberry/Symphonia?rev=a178babb44462f002ec855b57e26abd57e106c36#a178babb44462f002ec855b57e26abd57e106c36"
+source = "git+https://github.com/petitstrawberry/Symphonia?rev=5865b5d0e5d170d1e0419684c04e8268847a9d2d#5865b5d0e5d170d1e0419684c04e8268847a9d2d"
 dependencies = [
  "bitflags",
  "bytemuck",
@@ -132,7 +132,7 @@ dependencies = [
 [[package]]
 name = "symphonia-format-isomp4"
 version = "0.6.0"
-source = "git+https://github.com/petitstrawberry/Symphonia?rev=a178babb44462f002ec855b57e26abd57e106c36#a178babb44462f002ec855b57e26abd57e106c36"
+source = "git+https://github.com/petitstrawberry/Symphonia?rev=5865b5d0e5d170d1e0419684c04e8268847a9d2d#5865b5d0e5d170d1e0419684c04e8268847a9d2d"
 dependencies = [
  "log",
  "symphonia-common",
@@ -143,7 +143,7 @@ dependencies = [
 [[package]]
 name = "symphonia-metadata"
 version = "0.6.0"
-source = "git+https://github.com/petitstrawberry/Symphonia?rev=a178babb44462f002ec855b57e26abd57e106c36#a178babb44462f002ec855b57e26abd57e106c36"
+source = "git+https://github.com/petitstrawberry/Symphonia?rev=5865b5d0e5d170d1e0419684c04e8268847a9d2d#5865b5d0e5d170d1e0419684c04e8268847a9d2d"
 dependencies = [
  "lazy_static",
  "log",
@@ -155,7 +155,7 @@ dependencies = [
 [[package]]
 name = "symphonia-std"
 version = "0.6.0"
-source = "git+https://github.com/petitstrawberry/Symphonia?rev=a178babb44462f002ec855b57e26abd57e106c36#a178babb44462f002ec855b57e26abd57e106c36"
+source = "git+https://github.com/petitstrawberry/Symphonia?rev=5865b5d0e5d170d1e0419684c04e8268847a9d2d#5865b5d0e5d170d1e0419684c04e8268847a9d2d"
 dependencies = [
  "libm",
 ]

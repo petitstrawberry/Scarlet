@@ -23,6 +23,7 @@ use symphonia_core::{
     units::{Duration, TimeBase, Timestamp},
 };
 use symphonia_format_isomp4::IsoMp4Reader;
+pub use symphonia_format_isomp4::cenc::{SampleEncryption, SubsampleEncryption};
 
 pub const MAX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SAMPLE_BYTES: usize = 4 * 1024 * 1024;
@@ -66,6 +67,8 @@ pub struct Track {
 }
 #[derive(Clone, Debug)]
 pub struct Sample {
+    /// Present until the caller has decrypted this encoded payload.
+    pub encryption: Option<SampleEncryption>,
     pub track_id: u32,
     pub data: Vec<u8>,
     pub pts_us: i64,
@@ -75,6 +78,8 @@ pub struct Sample {
 }
 #[derive(Clone, Debug)]
 pub enum ParserEvent {
+    /// Complete PSSH boxes for the EME cenc initialization-data event.
+    InitializationData(Vec<u8>),
     Track(Track),
     Sample(Sample),
 }
@@ -115,6 +120,7 @@ pub struct Mp4Parser {
     fragment: Vec<u8>,
     tracks: Vec<(Track, TimeBase)>,
     events: VecDeque<ParserEvent>,
+    initialization_data: Vec<Vec<u8>>,
     active: Option<IsoMp4Reader<'static>>,
     active_bytes: usize,
     sample_count: usize,
@@ -184,7 +190,10 @@ impl Mp4Parser {
                     else {
                         continue;
                     };
-                    let keyframe = if track.codec == Codec::H264 {
+                    let encryption = active.packet_encryption().cloned();
+                    let keyframe = if encryption.is_some() {
+                        active.packet_is_sync()
+                    } else if track.codec == Codec::H264 {
                         let length_size = avcc_length_size(&track.extradata)?;
                         avcc_nals(&packet.data, length_size)?
                             .iter()
@@ -193,6 +202,7 @@ impl Mp4Parser {
                         true
                     };
                     return Ok(Some(ParserEvent::Sample(Sample {
+                        encryption,
                         track_id: track.id,
                         data: packet.data.into_vec(),
                         pts_us: signed_us(packet.pts.get(), *time)?,
@@ -248,6 +258,7 @@ impl Mp4Parser {
                     if self.have_moov {
                         self.init.clear();
                         self.tracks.clear();
+                        self.initialization_data.clear();
                     }
                     self.init.extend_from_slice(&bytes);
                     if bytes.len() > MAX_INIT_BYTES {
@@ -270,6 +281,7 @@ impl Mp4Parser {
                     self.have_moov = false;
                     self.init = bytes;
                     self.tracks.clear();
+                    self.initialization_data.clear();
                 }
                 _ => {
                     // Trailer indices are not part of the next fragment. Prefix
@@ -296,6 +308,12 @@ impl Mp4Parser {
         Ok(())
     }
     fn update_tracks(&mut self, r: &IsoMp4Reader<'_>) -> Result<()> {
+        for header in r.protection_headers() {
+            if !self.initialization_data.iter().any(|previous| previous.as_slice() == header.as_ref()) {
+                self.initialization_data.push(header.to_vec());
+                self.events.push_back(ParserEvent::InitializationData(header.to_vec()));
+            }
+        }
         if r.tracks().len() > 8 {
             return Err(MediaError::Unsupported("too many tracks"));
         }
@@ -597,6 +615,7 @@ impl AvcConfiguration {
     /// Prepend avcC parameter sets to a complete access unit, preserving raw
     /// EBSP bytes. Validate in-band SPS before native decoder allocation.
     pub fn annex_b(&mut self, sample: &Sample) -> Result<Vec<u8>> {
+        if sample.encryption.is_some() { return Err(MediaError::InvalidData("encrypted AVC sample requires decryption")); }
         if sample.track_id != self.track_id {
             return Err(MediaError::InvalidData("wrong AVC track"));
         }
@@ -1079,6 +1098,7 @@ impl AudioDecoder {
         Ok(())
     }
     pub fn decode(&mut self, sample: &Sample) -> Result<AudioFrame> {
+        if sample.encryption.is_some() { return Err(MediaError::InvalidData("encrypted AAC sample requires decryption")); }
         if sample.track_id != self.track.id || sample.data.len() > MAX_SAMPLE_BYTES {
             return Err(MediaError::InvalidData("invalid AAC sample"));
         }

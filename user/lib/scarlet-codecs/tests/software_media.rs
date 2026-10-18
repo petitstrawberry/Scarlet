@@ -94,6 +94,7 @@ fn demux(data: &[u8], chunk: usize) -> (Vec<Track>, Vec<Sample>) {
     let mut pull = |parser: &mut Mp4Parser| {
         while let Some(event) = parser.next_event().unwrap() {
             match event {
+                ParserEvent::InitializationData(_) => panic!("unexpected encrypted initialization"),
                 ParserEvent::Track(t) => tracks.push(t),
                 ParserEvent::Sample(s) => samples.push(s),
             }
@@ -340,6 +341,7 @@ fn fragment_abort_retains_initialization_and_large_free_padding_is_legal() {
         parser.push_bytes(bytes).unwrap();
         while let Some(event) = parser.next_event().unwrap() {
             match event {
+                ParserEvent::InitializationData(_) => panic!("unexpected encrypted initialization"),
                 ParserEvent::Track(_) => panic!("reset lost init configuration"),
                 ParserEvent::Sample(s) => samples.push(s),
             }
@@ -403,6 +405,7 @@ fn inband_sps_cannot_allocate_oversized_pictures() {
     avcc.extend(nal);
     let mut decoder = VideoDecoder::new(track).unwrap();
     let sample = Sample {
+        encryption: None,
         track_id: track.id,
         data: avcc,
         pts_us: 0,

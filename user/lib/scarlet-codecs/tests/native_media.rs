@@ -73,6 +73,7 @@ fn parsed(data: &[u8]) -> (Track, Vec<Sample>) {
         parser.push_bytes(bytes).unwrap();
         while let Some(event) = parser.next_event().unwrap() {
             match event {
+                ParserEvent::InitializationData(_) => panic!("unexpected encrypted initialization"),
                 ParserEvent::Track(t) => track = Some(t),
                 ParserEvent::Sample(s) => samples.push(s),
             }
@@ -85,6 +86,36 @@ fn parsed(data: &[u8]) -> (Track, Vec<Sample>) {
         }
     }
     (track.unwrap(), samples)
+}
+
+#[test]
+#[ignore = "requires SYMPHONIA_CENC_FIXTURE with the first four Shaka Sintel AVC fragments"]
+fn encrypted_mp4_incremental_metadata_and_decoder_boundary() {
+    let bytes = std::fs::read(std::env::var("SYMPHONIA_CENC_FIXTURE").unwrap()).unwrap();
+    let mut parser = Mp4Parser::new();
+    let (mut init, mut clear, mut encrypted, mut sync) = (0, 0, 0, 0);
+    let mut config = None;
+    for chunk in bytes.chunks(257) {
+        parser.push_bytes(chunk).unwrap();
+        while let Some(event) = parser.next_event().unwrap() {
+            match event {
+                ParserEvent::InitializationData(data) => { assert_eq!(&data[4..8], b"pssh"); init += 1; }
+                ParserEvent::Track(track) => config = Some(AvcConfiguration::new(&track).unwrap()),
+                ParserEvent::Sample(sample) => {
+                    if let Some(encryption) = &sample.encryption {
+                        assert_eq!(encryption.iv.len(), 8);
+                        assert!(config.as_mut().unwrap().annex_b(&sample).is_err());
+                        encrypted += 1;
+                        sync += usize::from(sample.keyframe);
+                    } else { clear += 1; }
+                }
+            }
+        }
+    }
+    parser.finish().unwrap();
+    assert!(parser.next_event().unwrap().is_none());
+    assert!(init > 0);
+    assert_eq!((clear, encrypted, sync), (288, 96, 1));
 }
 #[test]
 fn native_avcc_transport_preserves_ebsp_pixels_colour_and_reorder_metadata() {
