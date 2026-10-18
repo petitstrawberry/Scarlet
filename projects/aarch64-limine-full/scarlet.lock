@@ -5,7 +5,7 @@ hash = "sha256:639abecfe16c4ddcfcc4f7a1f4f07cbebb1acf3b7b5f9bf72aa93734e4e8166a"
 layers = []
 
 [sections.disk]
-hash = "sha256:c0014de25b7c972d3f1f7e975eadd152cec845876847f93326fc03c93a298fd0"
+hash = "sha256:6520c48184d979b38013aec3307bed1641c375a753733e3333348cc13665f185"
 layers = []
 
 [sections.initramfs]
@@ -463,7 +463,7 @@ type = "path"
 path = "../../user/std-bin"
 
 [sections.rootfs]
-hash = "sha256:e5b3797c8dbbe77a5c064e22902fce60e9361e15589ebba3f21a65b3d412ce2f"
+hash = "sha256:1403ce46335bf9f619d0055c4817b6cd371f82c90fa714149b9b39aa9f7f1c4a"
 
 [[sections.rootfs.layers]]
 kind = "script"
@@ -1339,25 +1339,25 @@ rev = "106809d9a6d5d0ec1a31a1b7b83e41e68878ee89"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/myrica"
-git_ref = "86c2c7f6124e45d4e2139a7e9806990e20846fc1"
-resolved_rev = "86c2c7f6124e45d4e2139a7e9806990e20846fc1"
+git_ref = "50abd84f10ecea12dd5eeb921babe712071b159f"
+resolved_rev = "50abd84f10ecea12dd5eeb921babe712071b159f"
 package = "myrica"
 bin = "myrica"
 features = ["backend-webkit-vulkan"]
 default-features = false
 to = "/bin/myrica"
-hash = "sha256:7ad42d1ddc54e8851a3f9bd14794f64a7c40cbd892bfbde91e994dd591c024a6"
+hash = "sha256:330b01b61c7167984cc0f0688d6460a7729eb7a693f40bbc3e0274e0d1efb3db"
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/myrica"
-rev = "86c2c7f6124e45d4e2139a7e9806990e20846fc1"
+rev = "50abd84f10ecea12dd5eeb921babe712071b159f"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/myrica"
-git_ref = "86c2c7f6124e45d4e2139a7e9806990e20846fc1"
-resolved_rev = "86c2c7f6124e45d4e2139a7e9806990e20846fc1"
+git_ref = "50abd84f10ecea12dd5eeb921babe712071b159f"
+resolved_rev = "50abd84f10ecea12dd5eeb921babe712071b159f"
 package = "myrica"
 bin = "webkit-vulkan-probe"
 features = [
@@ -1366,12 +1366,12 @@ features = [
 ]
 default-features = false
 to = "/bin/myrica-vulkan-probe"
-hash = "sha256:202f3d3288cf00a034606e8b62dcbbfe745c3d8f3ff620eee4efe3bbfc924b30"
+hash = "sha256:61e9124f7b3f34bd51b7a660a16272344d26360ea6e245b660b37ad867b0e037"
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/myrica"
-rev = "86c2c7f6124e45d4e2139a7e9806990e20846fc1"
+rev = "50abd84f10ecea12dd5eeb921babe712071b159f"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1614,7 +1614,7 @@ path = ".scarlet/cache/git/1d707eff8bef4cad/bundle/build-aarch64.sh"
 [[sections.rootfs.layers]]
 kind = "script"
 to = "/"
-hash = "sha256:a8c8c579edc54cc239131349401b511dfd67afb3b7a4032904116a6d206c40e1"
+hash = "sha256:5cb229726edcd604f50cb4314a441de1f0fe539591f16d4f9abbef60024b24ea"
 
 [sections.rootfs.layers.source]
 type = "path"
