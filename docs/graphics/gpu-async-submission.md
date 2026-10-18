@@ -284,3 +284,28 @@ failed GPU admission restoring IRQ guard depth and padded upload preservation.
 These tests do not measure interactive performance or exercise multicore parked
 GPU contention under a real host workload. The normal disk's boot partition was
 updated separately; the root partition SHA-256 was identical before and after.
+
+### Display snapshots under browser load (2026-10-18)
+
+Framebuffer metadata queries previously called `GET_DISPLAY_INFO` on every
+snapshot. Its legacy transport helper first drained all outstanding GPU work.
+Display presentation can request this snapshot inside its IRQ-protected handoff,
+so an unchanged display could still stall input and scheduling behind another
+application's GPU fences and a host display-info response.
+
+Snapshots now inspect `virtio_gpu_config.events_read` and retain the cached mode
+when `VIRTIO_GPU_EVENT_DISPLAY` is absent. A display event is acknowledged through
+`events_clear` before querying, so a second resize arriving during the query
+remains pending. A local retry bit preserves a failed query or framebuffer
+replacement after acknowledgement. Actual resize handling and submission
+ordering remain unchanged.
+
+All 1,519 AArch64 kernel tests pass, including a snapshot with an outstanding
+unanswered GPU request and display-event acknowledgement/retry. The running
+interactive VM still uses the preceding kernel until its boot partition is
+updated and the VM restarts. Interactive improvement from this change is pending.
+Automatic QMP CPU sampling also observed synchronous GPU response polling and
+repeated execution in VM free-address search; it did not isolate every reported
+brief freeze. Video control still retains IRQ-protected command/session guards
+while polling, and GPU resource/transfer/destruction commands retain synchronous
+core ownership. These waits require further work beyond display snapshots.

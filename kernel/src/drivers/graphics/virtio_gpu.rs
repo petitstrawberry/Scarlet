@@ -42,6 +42,7 @@ use crate::{
     vm::addr::virt_to_phys,
 };
 use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 mod asynchronous;
 mod control;
@@ -89,6 +90,9 @@ const VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER: u32 = 0x1205;
 // VirtIO GPU command flags
 const VIRTIO_GPU_FLAG_FENCE: u32 = 1;
 const VIRTIO_GPU_MAX_CONTEXT_NAME: usize = 64;
+const VIRTIO_GPU_CONFIG_EVENTS_READ_OFFSET: usize = 0;
+const VIRTIO_GPU_CONFIG_EVENTS_CLEAR_OFFSET: usize = 4;
+const VIRTIO_GPU_EVENT_DISPLAY: u32 = 1;
 const VIRTIO_GPU_CONFIG_NUM_CAPSETS_OFFSET: usize = 12;
 const VIRTIO_GPU_CONTROL_QUEUE_SIZE: usize = 64;
 const VIRTIO_GPU_CURSOR_QUEUE_SIZE: usize = 16;
@@ -501,6 +505,7 @@ pub struct VirtioGpuDeviceCore {
     next_present_id: u64,
     presentations: Vec<PresentOperation>,
     display_info: IrqRwSpinLock<Option<VirtioGpuRespDisplayInfo>>,
+    display_update_pending: AtomicBool,
     framebuffer_addr: IrqRwSpinLock<Option<u64>>,
     framebuffer_alloc: IrqRwSpinLock<Option<ContiguousPages>>,
     retired_framebuffer_allocs: IrqSpinLock<Vec<ContiguousPages>>,
@@ -554,6 +559,7 @@ impl VirtioGpuDeviceCore {
             next_present_id: 0,
             presentations: Vec::new(),
             display_info: IrqRwSpinLock::new(None),
+            display_update_pending: AtomicBool::new(false),
             framebuffer_addr: IrqRwSpinLock::new(None),
             framebuffer_alloc: IrqRwSpinLock::new(None),
             retired_framebuffer_allocs: IrqSpinLock::new(Vec::new()),
@@ -1375,6 +1381,9 @@ impl VirtioGpuDeviceCore {
     }
 
     fn poll_display_resize(&self) -> Result<(), &'static str> {
+        if !self.display_update_needed() {
+            return Ok(());
+        }
         let old_mode = {
             let display_info = self.display_info.read();
             display_info
@@ -1412,7 +1421,24 @@ impl VirtioGpuDeviceCore {
             }
         }
 
+        self.display_update_pending.store(false, Ordering::Release);
         Ok(())
+    }
+
+    fn display_update_needed(&self) -> bool {
+        let events = self.read_config_u32(VIRTIO_GPU_CONFIG_EVENTS_READ_OFFSET);
+        if events & VIRTIO_GPU_EVENT_DISPLAY != 0 {
+            // Clear before querying: a resize that arrives during the query
+            // remains set for the next snapshot. Retain a local retry bit if
+            // GET_DISPLAY_INFO or framebuffer replacement fails after the ack.
+            self.display_update_pending.store(true, Ordering::Release);
+            self.write_config(
+                VIRTIO_GPU_CONFIG_EVENTS_CLEAR_OFFSET,
+                VIRTIO_GPU_EVENT_DISPLAY,
+            );
+            crate::arch::io_mb();
+        }
+        self.display_update_pending.load(Ordering::Acquire)
     }
 
     fn get_display_name(&self) -> &'static str {
@@ -2920,6 +2946,52 @@ mod tests {
         assert_eq!(device.core.lock().next_resource_id(), 2);
         assert_eq!(device.core.lock().next_resource_id(), 3);
         crate::vm::iounmap(vaddr);
+    }
+
+    #[test_case]
+    fn unchanged_display_snapshot_does_not_wait_for_pending_gpu_work() {
+        // No hardware responds to this request. A snapshot without a display
+        // event must leave it pending rather than drain it with IRQs masked.
+        let mut registers = [0u32; 128];
+        let device = VirtioGpuDeviceCore::new(registers.as_mut_ptr() as usize);
+        let request = ControlRequest::new(
+            &[0; core::mem::size_of::<VirtioGpuCtrlHdr>()],
+            core::mem::size_of::<VirtioGpuCtrlHdr>(),
+        )
+        .unwrap();
+        device
+            .virtqueues
+            .lock()
+            .control
+            .enqueue(&request, crate::timer::get_time_ns())
+            .unwrap();
+        device.poll_display_resize().unwrap();
+        assert_eq!(request.status(), control::ControlStatus::Pending);
+        assert_eq!(*device.virtqueues.lock().control.ring.avail.idx, 1);
+    }
+
+    #[test_case]
+    fn display_change_ack_preserves_retry_and_unrelated_events() {
+        use crate::drivers::virtio::device::Register;
+        let mut registers = [0u32; 128];
+        let device = VirtioGpuDeviceCore::new(registers.as_mut_ptr() as usize);
+        let config = Register::DeviceConfig.offset() / 4;
+        registers[config + VIRTIO_GPU_CONFIG_EVENTS_READ_OFFSET / 4] = VIRTIO_GPU_EVENT_DISPLAY | 2;
+        assert!(device.display_update_needed());
+        assert_eq!(
+            registers[config + VIRTIO_GPU_CONFIG_EVENTS_CLEAR_OFFSET / 4],
+            VIRTIO_GPU_EVENT_DISPLAY
+        );
+        // Emulate the device acknowledging the display event. If the query
+        // fails, the driver must still retry despite the cleared device bit.
+        registers[config + VIRTIO_GPU_CONFIG_EVENTS_READ_OFFSET / 4] = 2;
+        assert!(device.display_update_needed());
+        device
+            .display_update_pending
+            .store(false, Ordering::Release);
+        assert!(!device.display_update_needed());
+        registers[config + VIRTIO_GPU_CONFIG_EVENTS_READ_OFFSET / 4] = VIRTIO_GPU_EVENT_DISPLAY;
+        assert!(device.display_update_needed());
     }
 
     #[test_case]
