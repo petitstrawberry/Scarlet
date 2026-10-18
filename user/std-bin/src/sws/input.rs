@@ -289,6 +289,7 @@ struct CapabilityRegistry {
     direct_touch: u32,
     fine_pointer: u32,
     keyboard: u32,
+    external_keyboard: u32,
     gamepad: u32,
 }
 
@@ -303,6 +304,9 @@ impl CapabilityRegistry {
         }
         if self.keyboard != 0 {
             flags |= environment_capabilities::KEYBOARD;
+        }
+        if self.external_keyboard != 0 {
+            flags |= environment_capabilities::EXTERNAL_KEYBOARD;
         }
         if self.gamepad != 0 {
             flags |= environment_capabilities::GAMEPAD;
@@ -320,6 +324,9 @@ impl CapabilityRegistry {
         }
         if flags & environment_capabilities::KEYBOARD != 0 {
             self.keyboard = self.keyboard.saturating_add(1);
+        }
+        if flags & environment_capabilities::EXTERNAL_KEYBOARD != 0 {
+            self.external_keyboard = self.external_keyboard.saturating_add(1);
         }
         if flags & environment_capabilities::GAMEPAD != 0 {
             self.gamepad = self.gamepad.saturating_add(1);
@@ -339,6 +346,9 @@ impl CapabilityRegistry {
         if flags & environment_capabilities::KEYBOARD != 0 {
             self.keyboard = self.keyboard.saturating_sub(1);
         }
+        if flags & environment_capabilities::EXTERNAL_KEYBOARD != 0 {
+            self.external_keyboard = self.external_keyboard.saturating_sub(1);
+        }
         if flags & environment_capabilities::GAMEPAD != 0 {
             self.gamepad = self.gamepad.saturating_sub(1);
         }
@@ -351,6 +361,7 @@ static LIVE_CAPABILITIES: Mutex<CapabilityRegistry> = Mutex::new(CapabilityRegis
     direct_touch: 0,
     fine_pointer: 0,
     keyboard: 0,
+    external_keyboard: 0,
     gamepad: 0,
 });
 
@@ -1274,13 +1285,27 @@ fn try_spawn_keyboard_reader(
     }
 }
 
+fn keyboard_environment_capabilities(kind: Option<InputDeviceKind>, capabilities: u32) -> u32 {
+    if kind == Some(InputDeviceKind::Buttons) {
+        return 0;
+    }
+    environment_capabilities::KEYBOARD
+        | if capabilities & INPUT_CAP_INTERNAL == 0 {
+            environment_capabilities::EXTERNAL_KEYBOARD
+        } else {
+            0
+        }
+}
+
 fn keyboard_device_reader(device: InputDevice, path: std::string::String, index: u8) {
     let source = KeyboardSource::Local(index);
     let input_source = InputSourceId::new(InputSourceClass::Keyboard);
     println!("[KeyboardThread] Opened {}", path);
     // System buttons share EV_KEY routing without changing desktop posture.
-    let _capability_registration = (device.kind() != Ok(InputDeviceKind::Buttons))
-        .then(|| register_live_capabilities(environment_capabilities::KEYBOARD));
+    let _capability_registration = register_live_capabilities(keyboard_environment_capabilities(
+        device.kind().ok(),
+        device.capabilities().unwrap_or(0),
+    ));
     let mut desynced = false;
     let mut pending = Vec::new();
     loop {
@@ -1605,6 +1630,22 @@ mod tests {
             }
         );
         assert_eq!(registry.aggregate().tablet_mode, Some(true));
+    }
+
+    #[test]
+    fn external_keyboard_presence_survives_until_last_disconnect() {
+        let internal = keyboard_environment_capabilities(Some(InputDeviceKind::Keyboard), INPUT_CAP_INTERNAL);
+        let external = keyboard_environment_capabilities(Some(InputDeviceKind::Keyboard), 0);
+        assert_eq!(internal, environment_capabilities::KEYBOARD);
+        assert_eq!(external, internal | environment_capabilities::EXTERNAL_KEYBOARD);
+        assert_eq!(keyboard_environment_capabilities(Some(InputDeviceKind::Buttons), 0), 0);
+        let mut registry = CapabilityRegistry::default();
+        registry.add(internal);
+        assert_eq!(registry.add(external), Some(external));
+        assert_eq!(registry.add(external), None);
+        assert_eq!(registry.remove(external), None);
+        assert_eq!(registry.remove(external), Some(internal));
+        assert_eq!(registry.remove(internal), Some(0));
     }
 
     #[test]

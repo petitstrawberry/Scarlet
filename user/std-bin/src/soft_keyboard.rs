@@ -584,10 +584,9 @@ mod panel {
                     _ => {}
                 }
             }
-            // On touch devices, activating an editor opens the panel. A physical
-            // desktop without touch keeps the provider dormant.
+            // Posture and keyboard hotplug updates also hide an already-open panel.
             let should_show = context.active()
-                && environment.has_direct_touch()
+                && environment.should_auto_show_input_panel()
                 && dismissed != Some(context.generation);
             if should_show != visible {
                 if context.active() {

@@ -175,6 +175,8 @@ pub mod input_environment_capability_flags {
     pub const PEN: u32 = 1 << 3;
     /// A gamepad input device is present.
     pub const GAMEPAD: u32 = 1 << 4;
+    /// A keyboard not integrated into the tablet chassis is present.
+    pub const EXTERNAL_KEYBOARD: u32 = 1 << 5;
 }
 
 /// Snapshot of the compositor's current input environment.
