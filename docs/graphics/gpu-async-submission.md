@@ -318,3 +318,33 @@ full hang is distinct from the user's pre-existing brief freezes, whose causes
 remain under investigation. Video control still retains IRQ-protected command/session guards
 while polling, and GPU resource/transfer/destruction commands retain synchronous
 core ownership. These waits require further work beyond display snapshots.
+
+## Vulkan upload ownership (2026-10-19)
+
+SGFX `42e54368d27c6da2ce62198445068df606c57a44` consumes resolved Vulkan
+recordings when constructing their final submission stream. Previously each
+`OwnedCommand` was cloned, including the complete texture/buffer upload vector
+already copied from application staging memory during resolution. These
+payloads now move into the stream. Positioned descriptors, barriers, readback
+boundaries and completion ownership retain their ordering. The used-buffer
+list and readback list also move; descriptor buffer references are collected
+and sorted/deduplicated once instead of searching a growing list per reference.
+
+The native ICD recipe pins this revision. Host validation: 117 unit tests pass
+(four GPU-only unit tests remain ignored), and 17 positive GPU integration
+tests pass using the rebuilt Release ICD on Metal/WGPU, including texture
+uploads, image copies, layered/mip sampling, vertex fetch, render areas,
+subpasses and buffer readback. The entire opt-in integration suite is not green:
+its destroyed-buffer and invalid-binding tests expect synchronous submit
+rejection, whereas the existing queue worker validates after acceptance; its
+empty-submit test expects immediate completion with a zero-timeout fence wait.
+Those assertions abort the dynamically loaded test process. They are excluded
+from the 17-test result; shader/resource-capacity stress tests are also outside
+that targeted run. Native VirGL playback and interactive improvement require
+the updated ICD to be loaded in the guest.
+
+The normal AArch64 Release boot/initramfs and rootfs images build successfully.
+Both lock sections select this ICD revision. The final ext2 rootfs contains
+the same 3,991,168-byte AArch64 ELF as initramfs staging, SHA-256
+`5cae94c4a5339aff93ae4d154fbecc9208c96806a9f08ae3570db053ba73b96a`.
+The running VM's persistent GPT disk has not been rewritten or restarted.
