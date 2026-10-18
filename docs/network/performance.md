@@ -355,8 +355,11 @@ negotiated window scaling; this change does not alter TCP window sizes.
 
 All 1,521 AArch64 kernel tests pass. Added cases cover 64 unchanged receive ACKs
 without write/poll notification, acknowledgement of new outbound bytes,
-window-only reopening and close completion. Release boot-image preparation is
-separate from installing it into the active VM. Runtime improvement is pending.
+window-only reopening and close completion. At the user's restart request, the
+Release boot image was installed into the normal disk's boot partition and
+booted with the existing HVF/VirGL/audio/video configuration. All desktop
+services started. The root partition SHA-256 matched before/after installation,
+and the GPT was unchanged. Interactive improvement is pending.
 This removes one source of redundant work, not a diagnosis of every system-wide
 stall. VirtIO RX still allocates/copies packets in the IRQ handler before the
 bounded protocol worker runs, and TCP retransmission callbacks run from the
