@@ -395,6 +395,8 @@ The existing host VideoToolbox daemon now emits its per-frame queue/decode logs
 only when `SCARLET_VIDEO_TRACE_FRAMES=1`. Otherwise it skips both message
 formatting and the two per-frame stdout flushes. Lifecycle/error logging remains.
 Its Release binary builds and all 10 existing host event-loop tests pass.
-These artifacts are prepared for the next VM restart;
-the running VM retains its preceding kernel and daemon. Interactive performance
-of this set of changes is pending.
+At the user's request, the normal disk's boot partition was updated and QEMU
+started with the new kernel and daemon, retaining HVF/VirGL/audio/video settings.
+All desktop services started, and the decoder completed its H.264 bootstrap.
+The root partition SHA-256 matched before/after installation and the GPT was
+unchanged. Interactive performance of this set of changes is pending.
