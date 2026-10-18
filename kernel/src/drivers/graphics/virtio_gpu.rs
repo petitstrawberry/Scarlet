@@ -45,6 +45,9 @@ use core::ptr;
 
 mod asynchronous;
 mod control;
+mod core_lock;
+
+use core_lock::CoreLock;
 
 use control::{ControlEnqueueError, ControlQueue, ControlRequest};
 
@@ -1553,7 +1556,7 @@ impl VirtioDevice for VirtioGpuDeviceCore {
 }
 
 pub struct VirtioGpuDevice {
-    core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
+    core: Arc<CoreLock<VirtioGpuDeviceCore>>,
     interrupt_state: Arc<asynchronous::InterruptState>,
 }
 
@@ -1636,7 +1639,7 @@ fn presentation_progress_needed(operations: &[PresentOperation]) -> bool {
     })
 }
 
-fn prune_abandoned_presentations(core: &Arc<IrqSpinLock<VirtioGpuDeviceCore>>) -> bool {
+fn prune_abandoned_presentations(core: &Arc<CoreLock<VirtioGpuDeviceCore>>) -> bool {
     let owners: Vec<_> = {
         let Some(core) = core.try_lock() else {
             return false;
@@ -1661,7 +1664,7 @@ fn prune_abandoned_presentations(core: &Arc<IrqSpinLock<VirtioGpuDeviceCore>>) -
 }
 
 struct PresentTicket {
-    core: Weak<IrqSpinLock<VirtioGpuDeviceCore>>,
+    core: Weak<CoreLock<VirtioGpuDeviceCore>>,
     id: u64,
     armed: bool,
 }
@@ -1853,7 +1856,7 @@ impl VirtioGpuDevice {
         }))
     }
 
-    fn release_present_operation(core: &Weak<IrqSpinLock<VirtioGpuDeviceCore>>, id: u64) {
+    fn release_present_operation(core: &Weak<CoreLock<VirtioGpuDeviceCore>>, id: u64) {
         let retired = {
             let Some(core) = core.upgrade() else {
                 return;
@@ -1866,7 +1869,7 @@ impl VirtioGpuDevice {
     }
 
     fn run_present_operation(
-        weak_core: &Weak<IrqSpinLock<VirtioGpuDeviceCore>>,
+        weak_core: &Weak<CoreLock<VirtioGpuDeviceCore>>,
         id: u64,
     ) -> Result<(), &'static str> {
         let request_count = loop {
@@ -1991,7 +1994,7 @@ impl VirtioGpuDevice {
         let core = VirtioGpuDeviceCore::new(base_addr);
         Self {
             interrupt_state: Arc::clone(&core.interrupt_state),
-            core: Arc::new(IrqSpinLock::new(core)),
+            core: Arc::new(CoreLock::new(core)),
         }
     }
 
@@ -2008,7 +2011,7 @@ impl VirtioGpuDevice {
         let core = VirtioGpuDeviceCore::new_pci(transport);
         Self {
             interrupt_state: Arc::clone(&core.interrupt_state),
-            core: Arc::new(IrqSpinLock::new(core)),
+            core: Arc::new(CoreLock::new(core)),
         }
     }
 }
@@ -2078,7 +2081,7 @@ impl Selectable for VirtioGpuDevice {
 
 /// VirtIO acceleration adapter for the backend-neutral GPU control interface.
 pub struct VirtioGpuBackend {
-    core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
+    core: Arc<CoreLock<VirtioGpuDeviceCore>>,
 }
 
 impl VirtioGpuBackend {
@@ -2132,7 +2135,7 @@ impl VirtioGpuBackend {
 
 /// Real VirtIO execution context retained by a backend-neutral GPU context.
 struct VirtioGpuBackendContext {
-    core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
+    core: Arc<CoreLock<VirtioGpuDeviceCore>>,
     context_id: u32,
     info: GpuBackendContextInfo,
     attached_resources: IrqSpinLock<Vec<u32>>,
@@ -2140,7 +2143,7 @@ struct VirtioGpuBackendContext {
 
 /// Real VirtIO image resource using generic kernel-owned backing when required.
 struct VirtioGpuBackendImage {
-    core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
+    core: Arc<CoreLock<VirtioGpuDeviceCore>>,
     resource_id: u32,
     create: GpuImageCreateInfo,
     allocation_size: u64,
@@ -2150,7 +2153,7 @@ struct VirtioGpuBackendImage {
 
 /// Real VirtIO buffer resource backed by a generic GPU buffer allocation.
 struct VirtioGpuBackendBuffer {
-    core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
+    core: Arc<CoreLock<VirtioGpuDeviceCore>>,
     resource_id: u32,
     allocation_size: u64,
     backend_cookie: u64,
@@ -2434,7 +2437,7 @@ impl GpuBackendContext for VirtioGpuBackendContext {
 
 /// Real VirtIO execution queue retained by a backend-neutral GPU queue.
 struct VirtioGpuBackendQueue {
-    core: Arc<IrqSpinLock<VirtioGpuDeviceCore>>,
+    core: Arc<CoreLock<VirtioGpuDeviceCore>>,
     context_id: u32,
     async_enabled: bool,
 }

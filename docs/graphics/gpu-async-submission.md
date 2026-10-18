@@ -261,3 +261,26 @@ A618 staging/fence retirement remains separate.
 Driver fault/reset and A618 hardware
 evidence remain required. Preserve the user's accepted current QEMU runtime
 baseline; the historical debug-build delay is not reopened here.
+
+### GPU control contention (2026-10-18)
+
+VirtIO GPU control admission now parks preemptible task callers when the device
+core is busy. Previously each competing CPU entered the IRQ spin lock while the
+owner waited for a host response. The release sequence is checked again during
+wait registration, and unlock plus wake publication remains non-preemptible.
+Completion workers retain nonblocking admission. Boot and callers already inside
+an IRQ guard retain the existing spin behavior. The owner still holds its IRQ
+guard through synchronous DMA retirement; this is not fully asynchronous control
+submission, and that remaining wait needs separate ownership/lifetime work.
+
+Packed full-width image uploads use one backing copy and cache-maintenance range
+instead of one per scanline. Padded uploads retain their row-wise path. VirtIO
+video synchronous response polling releases the shared virtqueue lock between
+polls so other completion paths can use it; request-buffer serialization and DMA
+timeout quarantine remain intact.
+
+The AArch64 release kernel builds and all 1,516 kernel tests pass, including
+failed GPU admission restoring IRQ guard depth and padded upload preservation.
+These tests do not measure interactive performance or exercise multicore parked
+GPU contention under a real host workload. The normal disk's boot partition was
+updated separately; the root partition SHA-256 was identical before and after.

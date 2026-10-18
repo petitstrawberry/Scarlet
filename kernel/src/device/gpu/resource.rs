@@ -1363,6 +1363,22 @@ impl GpuImage {
         let _upload_guard = self.upload_lock.lock();
         let backing = self.backing.private_backing()?;
         let _cpu_access = CpuAccess::image(context, self.backend_image.as_ref())?;
+        if layout.source_stride == layout.source_row_bytes
+            && layout.destination_stride == layout.source_row_bytes
+        {
+            // Full-width packed uploads need one traversal of the physical
+            // backing, not one traversal and cache barrier per scanline.
+            let length = layout
+                .source_row_bytes
+                .checked_mul(layout.height)
+                .ok_or("GPU image upload length overflows")?;
+            let copied = backing.copy_from_user(task, source_ptr, layout.destination_offset, length);
+            // A fault can leave a copied prefix. Finish cache maintenance while
+            // the CPU-access reservation still excludes device access.
+            backing.clean_range(layout.destination_offset, length)?;
+            copied?;
+            return context.upload_image(self.backend_image.as_ref(), layout.transfer);
+        }
         for row in 0..layout.height {
             let source_offset = row
                 .checked_mul(layout.source_stride)

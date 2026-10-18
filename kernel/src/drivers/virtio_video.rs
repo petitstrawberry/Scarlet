@@ -920,10 +920,10 @@ impl VirtioVideoDevice {
         drop(virtqueues);
         self.notify(QUEUE_COMMAND);
 
-        let mut virtqueues = self.virtqueues.lock();
-        let queue = &mut virtqueues[QUEUE_COMMAND];
         let mut spins = 0;
         loop {
+            let mut virtqueues = self.virtqueues.lock();
+            let queue = &mut virtqueues[QUEUE_COMMAND];
             let mut made_progress = false;
             while let Some((used_desc, _used_len)) = queue.pop_used() {
                 made_progress = true;
@@ -948,6 +948,10 @@ impl VirtioVideoDevice {
                 }
                 return Ok(out);
             }
+            // The command buffers serialize this synchronous request, but
+            // the queue is also used by interrupt completion and other video
+            // streams. Never retain its IRQ lock over the host-response wait.
+            drop(virtqueues);
             if spins >= CONTROL_SPIN_LIMIT {
                 return Err("VirtIO video command timed out");
             }

@@ -232,6 +232,23 @@ fn upload_retires_before_real_usercopy_and_retains_guard_through_transfer() {
 }
 
 #[test_case]
+fn padded_upload_source_does_not_copy_padding_into_the_next_row() {
+    let (backend, image, task, address) = fixture(false, false, true);
+    let mut pixels = [0x22; 20];
+    pixels[8..12].fill(0x77);
+    copy_to_user(&task, address, &pixels).unwrap();
+    let request = GpuContextUploadImageBgra::new(1, address as u64, 20, 12, 0, 0, 2, 2);
+    let layout = image_upload_layout(&request, image.query_info(), image.layout()).unwrap();
+    image
+        .upload_for_task(&task, address, layout, backend.as_ref())
+        .unwrap();
+    assert_eq!(
+        *backend.events.lock(),
+        [Event::Retired, Event::Uploaded, Event::Released]
+    );
+}
+
+#[test_case]
 fn rejected_upload_leaves_real_backing_unchanged() {
     for inline in [false, true] {
         let (backend, image, task, address) = fixture(true, false, inline);

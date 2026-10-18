@@ -23,6 +23,7 @@ use crate::drivers::virtio::{device::Register, pci::VirtioPciTransport};
 use crate::interrupt::{DeferredInterruptCompletion, InterruptClaim, InterruptId, InterruptResult};
 use crate::sync::{IrqSpinLock, Once, Waker};
 
+use super::core_lock::CoreLock;
 use super::control::{ControlEnqueueError, ControlQueue, ControlRequest, ControlStatus};
 use super::{
     VIRTIO_GPU_CMD_SUBMIT_3D, VIRTIO_GPU_FLAG_FENCE, VirtioGpuCmdSubmit3d, VirtioGpuCtrlHdr,
@@ -233,7 +234,7 @@ impl AsyncSubmissions {
     }
 }
 
-static DEVICES: Once<IrqSpinLock<Vec<Weak<IrqSpinLock<VirtioGpuDeviceCore>>>>> = Once::new();
+static DEVICES: Once<IrqSpinLock<Vec<Weak<CoreLock<VirtioGpuDeviceCore>>>>> = Once::new();
 static WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 static WORKER_WAKER: Waker = Waker::new_uninterruptible("virtio-gpu-completion");
 
@@ -241,7 +242,7 @@ pub(super) fn wake_worker() {
     WORKER_WAKER.wake_one();
 }
 
-pub(super) fn register(core: &Arc<IrqSpinLock<VirtioGpuDeviceCore>>) -> bool {
+pub(super) fn register(core: &Arc<CoreLock<VirtioGpuDeviceCore>>) -> bool {
     let weak = Arc::downgrade(core);
     {
         let mut devices = DEVICES.call_once(|| IrqSpinLock::new(Vec::new())).lock();
@@ -271,7 +272,7 @@ pub(super) fn register(core: &Arc<IrqSpinLock<VirtioGpuDeviceCore>>) -> bool {
     true
 }
 
-fn process_device(core: &Arc<IrqSpinLock<VirtioGpuDeviceCore>>) -> bool {
+fn process_device(core: &Arc<CoreLock<VirtioGpuDeviceCore>>) -> bool {
     if !super::prune_abandoned_presentations(core) {
         return true;
     }
