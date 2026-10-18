@@ -1,0 +1,16 @@
+{
+  "upstream": "https://github.com/google/fonts",
+  "revision": "8b0a1d0f5983c89bc2b93f1b5fb55f9e252744b5",
+  "files": [
+    {
+      "file": "NotoSansSymbols2-Regular.ttf",
+      "url": "https://raw.githubusercontent.com/google/fonts/8b0a1d0f5983c89bc2b93f1b5fb55f9e252744b5/ofl/notosanssymbols2/NotoSansSymbols2-Regular.ttf",
+      "sha256": "7d5fb73b7ca67a6798101741f5d280a3d016a56a197afcd4199dbb57b4b82a21"
+    },
+    {
+      "file": "NOTO_SANS_SYMBOLS2_OFL.txt",
+      "url": "https://raw.githubusercontent.com/google/fonts/8b0a1d0f5983c89bc2b93f1b5fb55f9e252744b5/ofl/notosanssymbols2/OFL.txt",
+      "sha256": "b118dd41337806a5d4797052c77caf3bd096aed783e5eb21b4d11154351e1ac0"
+    }
+  ]
+}

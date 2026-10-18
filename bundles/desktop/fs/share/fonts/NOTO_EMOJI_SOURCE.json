@@ -1,0 +1,16 @@
+{
+  "upstream": "https://github.com/google/fonts",
+  "revision": "8b0a1d0f5983c89bc2b93f1b5fb55f9e252744b5",
+  "files": [
+    {
+      "file": "NotoEmoji-Variable.ttf",
+      "url": "https://raw.githubusercontent.com/google/fonts/8b0a1d0f5983c89bc2b93f1b5fb55f9e252744b5/ofl/notoemoji/NotoEmoji%5Bwght%5D.ttf",
+      "sha256": "de6c18832938afc99caf132b39d6a30a19bac7f2e812e28db2535b4608d27551"
+    },
+    {
+      "file": "NOTO_EMOJI_OFL.txt",
+      "url": "https://raw.githubusercontent.com/google/fonts/8b0a1d0f5983c89bc2b93f1b5fb55f9e252744b5/ofl/notoemoji/OFL.txt",
+      "sha256": "500bb1ccf43df7bbb522112f9133a52b16e1c35e809632f5d8609b179152de5b"
+    }
+  ]
+}
