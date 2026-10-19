@@ -41,8 +41,15 @@ Coverage includes the Python postinst argument count, aggregate/pointer/env
 budget boundaries, per-string limits, large-stack allocation, invalid user
 pointers and an auxv pair crossing noncontiguous pages. The RISC-V Release
 kernel library also passes `cargo check` with the same feature set.
-The normal AArch64 Release boot image builds. Installation into the running
-VM's disk and retrying dpkg are pending shutdown of that VM.
+The normal AArch64 Release boot image builds. After the user closed QEMU, the
+boot partition was updated and the normal disk booted with HVF, eight vCPUs,
+16 GiB RAM, VirGL, audio and the existing video backend. All desktop services
+started. `dpkg --configure -a` in the Debian Linux view completed the previously
+failing Python postinst; `dpkg-query -s python3.13-minimal` reports
+`Status: install ok installed` for 3.13.5-2+deb13u5. The first serial invocation
+needed a corrected Linux root PATH including `/usr/sbin` and `/sbin` for dpkg's
+helper lookup. The root partition hash matched before/after the offline boot
+update, and the GPT was unchanged.
 
 ## System Call Support Matrix
 
