@@ -294,25 +294,12 @@ bin = "myrica"
 architectures = ["riscv32", "riscv64"]
 to = "/bin/myrica"
 
+# Myrica owns the WebKit browser and its Linux-view Widevine host recipe.
 [[layers]]
-kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "f17b71ff6aea81164b56320c792de0e906a5b2a8" }
-package = "myrica"
-bin = "myrica"
-features = ["backend-webkit-vulkan"]
-default-features = false
+kind = "bundle"
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "559450e207fd2879baa8dc4bf9eb4027be0a5768" }
+subdir = "platforms/scarlet"
 architectures = ["aarch64"]
-to = "/bin/myrica"
-
-[[layers]]
-kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "f17b71ff6aea81164b56320c792de0e906a5b2a8" }
-package = "myrica"
-bin = "webkit-vulkan-probe"
-features = ["webkit-vulkan-probe", "backend-webkit-vulkan"]
-default-features = false
-architectures = ["aarch64"]
-to = "/bin/myrica-vulkan-probe"
 
 [[layers]]
 kind = "cargo"

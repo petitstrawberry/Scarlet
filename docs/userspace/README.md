@@ -170,3 +170,23 @@ and lock set with results; a host test does not certify a native device path.
 
 See [Scarlet native dynamic linking](dynamic-linker.md) for the shared loader
 core, interpreter contract, runtime API, and executable smoke tests.
+
+### Myrica Widevine setup
+
+The aarch64 desktop bundle includes Myrica's **Widevine** setup screen, also
+available with `myrica --widevine-setup`. It checks CDM loading and initialization
+on a worker and shows installation instructions and **再確認** for missing files
+or dependencies, including Debian's `libnspr4`.
+
+Myrica owns the app and host recipe in `platforms/scarlet/bundle.toml` of its
+pinned source. The service is installed at `/usr/libexec/myrica/widevine-host`
+in the **linux-aarch64 view** (native image path
+`/systems/linux-aarch64/usr/libexec/myrica/widevine-host`). The user installs the
+CDM in Debian; its standard locations and the existing `/shared/widevine` CDM
+are discovered automatically. Explicit `MYRICA_WIDEVINE_*` overrides remain
+supported. See [Myrica's installation instructions](https://github.com/petitstrawberry/myrica/blob/559450e207fd2879baa8dc4bf9eb4027be0a5768/README.md#widevine-setup-on-scarlet).
+
+Validation on 2026-10-19: native Myrica started the bundled Linux host without
+path overrides, discovered CDM 4.10.2662.3, and reported successful initialization.
+The generated rootfs and the running normal disk contain the same Myrica and
+host SHA256 values recorded in `projects/aarch64-limine-full/scarlet.lock`.
