@@ -18,8 +18,27 @@ use alloc::{
 };
 use core::{fmt, sync::atomic::Ordering};
 
-pub(crate) const MAX_EXEC_STRINGS: usize = 256;
-pub(crate) const MAX_EXEC_STRING_BYTES: usize = 128 * 1024;
+// Linux's hard ceiling is 3/4 of _STK_LIM (8 MiB). Its currently reported
+// stack rlimit exceeds that ceiling. Include pointer slots in the aggregate
+// budget, and retain Linux's independent 32-page limit for each string.
+pub(crate) const MAX_EXEC_STRING_BYTES: usize = 6 * 1024 * 1024;
+pub(crate) const MAX_EXEC_STRING_LENGTH: usize = 32 * crate::environment::PAGE_SIZE;
+
+pub(crate) fn exec_string_storage_bytes(length: usize) -> Option<usize> {
+    if length >= MAX_EXEC_STRING_LENGTH {
+        return None;
+    }
+    length.checked_add(1 + core::mem::size_of::<usize>())
+}
+
+pub(crate) fn exec_argument_bytes(argv: &[&str], envp: &[&str]) -> Option<usize> {
+    argv.iter()
+        .chain(envp)
+        .try_fold(0usize, |bytes, string| {
+            bytes.checked_add(exec_string_storage_bytes(string.len())?)
+        })
+        .filter(|bytes| *bytes <= MAX_EXEC_STRING_BYTES)
+}
 
 #[derive(Debug, Clone)]
 pub enum ExecutorError {
@@ -352,14 +371,7 @@ impl TransparentExecutor {
                 "exec requires an exclusive single-threaded process",
             ));
         }
-        if argv.len() > MAX_EXEC_STRINGS
-            || envp.len() > MAX_EXEC_STRINGS
-            || argv
-                .iter()
-                .chain(envp)
-                .try_fold(0usize, |n, s| n.checked_add(s.len() + 1))
-                .is_none_or(|n| n > MAX_EXEC_STRING_BYTES)
-        {
+        if exec_argument_bytes(argv, envp).is_none() {
             return Err(failure("argument list too large"));
         }
         let explicit_transition = handles.is_some();

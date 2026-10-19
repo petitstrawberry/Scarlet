@@ -761,14 +761,32 @@ pub fn verify_task_kernel_stack_guard(task: &Task) -> bool {
     guard_ok && stack_ok
 }
 
+pub(crate) const DEFAULT_USER_STACK_BYTES: usize = 1024 * 1024;
+
 pub fn setup_user_stack(task: &Task) -> Result<(usize, usize), &'static str> {
-    /* User stack page */
-    let num_of_stack_page = 256; // 1MB user stack (4KB pages)
-    let stack_base = USER_STACK_END - num_of_stack_page * PAGE_SIZE;
+    setup_user_stack_with_size(task, DEFAULT_USER_STACK_BYTES)
+}
+
+pub(crate) fn setup_user_stack_with_size(
+    task: &Task,
+    minimum_bytes: usize,
+) -> Result<(usize, usize), &'static str> {
+    let size = minimum_bytes
+        .max(DEFAULT_USER_STACK_BYTES)
+        .checked_add(PAGE_SIZE - 1)
+        .ok_or("User stack size overflow")?
+        & !(PAGE_SIZE - 1);
+    let stack_base = USER_STACK_END
+        .checked_sub(size)
+        .ok_or("User stack base underflow")?;
+    let guard_base = stack_base
+        .checked_sub(PAGE_SIZE)
+        .ok_or("User stack guard underflow")?;
+    let num_of_stack_page = size / PAGE_SIZE;
     task.allocate_stack_pages(stack_base, num_of_stack_page)
         .map_err(|_| "Failed to allocate user stack pages")?;
     /* Guard page */
-    task.allocate_guard_pages(stack_base - PAGE_SIZE, 1)
+    task.allocate_guard_pages(guard_base, 1)
         .map_err(|_| "Failed to allocate guard page")?;
 
     Ok((stack_base, USER_STACK_END))

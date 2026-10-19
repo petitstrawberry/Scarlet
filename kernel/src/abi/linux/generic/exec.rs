@@ -1,15 +1,17 @@
 //! Linux process-entry data which needs storage in the new user stack.
 
-use crate::executor::executor::MAX_EXEC_STRINGS;
+use crate::executor::executor::{
+    MAX_EXEC_STRING_LENGTH, exec_argument_bytes, exec_string_storage_bytes,
+};
 use crate::library::std::string::{StringConversionError, parse_c_string_from_userspace};
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::task::Task;
 use crate::task::elf_loader::{AT_NULL, AT_RANDOM, AuxVec};
 use alloc::{string::String, vec::Vec};
 
-/// Read an exec vector with the same count limit as the transactional loader.
-/// argv and envp share a byte budget, including each terminating NUL. Command
-/// arguments are not pathnames and may legitimately exceed the path limit.
+/// Read an exec vector with the same storage limit as the transactional loader.
+/// argv and envp share a byte budget, including pointer slots and terminating
+/// NULs. Each string separately obeys Linux's MAX_ARG_STRLEN, not PATH_MAX.
 pub(crate) fn parse_exec_strings(
     task: &Task,
     address: usize,
@@ -32,16 +34,51 @@ pub(crate) fn parse_exec_strings(
         if pointer == 0 {
             return Ok(strings);
         }
-        if strings.len() == MAX_EXEC_STRINGS {
-            return Err(StringConversionError::TooManyStrings);
-        }
-        if *remaining == 0 {
+        let pointer_bytes = core::mem::size_of::<usize>();
+        if *remaining <= pointer_bytes {
             return Err(StringConversionError::ExceedsMaxLength);
         }
-        let string = parse_c_string_from_userspace(task, pointer, *remaining)?;
-        *remaining -= string.len() + 1;
+        let length_limit = (*remaining - pointer_bytes).min(MAX_EXEC_STRING_LENGTH);
+        let string = parse_c_string_from_userspace(task, pointer, length_limit)?;
+        *remaining -= exec_string_storage_bytes(string.len())
+            .ok_or(StringConversionError::ExceedsMaxLength)?;
         strings.push(string);
     }
+}
+
+/// Keep ordinary stacks small, but leave a full ordinary stack below large
+/// argv/envp data. The extra page covers auxv, alignment and loader scratch.
+pub(crate) fn setup_exec_stack(
+    task: &Task,
+    argv: &[&str],
+    envp: &[&str],
+) -> Result<(usize, usize), &'static str> {
+    let bytes = exec_argument_bytes(argv, envp).ok_or("argument list too large")?;
+    let minimum = if bytes + crate::environment::PAGE_SIZE <= crate::vm::DEFAULT_USER_STACK_BYTES {
+        crate::vm::DEFAULT_USER_STACK_BYTES
+    } else {
+        bytes + crate::vm::DEFAULT_USER_STACK_BYTES + crate::environment::PAGE_SIZE
+    };
+    crate::vm::setup_user_stack_with_size(task, minimum)
+}
+
+/// A 16-byte auxv pair can straddle noncontiguous physical stack pages.
+pub(crate) fn write_auxiliary_vector(
+    task: &Task,
+    address: usize,
+    auxv: &[AuxVec],
+) -> Result<(), &'static str> {
+    for (index, entry) in auxv.iter().enumerate() {
+        let mut bytes = [0; 16];
+        bytes[..8].copy_from_slice(&entry.a_type.to_ne_bytes());
+        bytes[8..].copy_from_slice(&entry.a_val.to_ne_bytes());
+        let address = index
+            .checked_mul(16)
+            .and_then(|offset| address.checked_add(offset))
+            .ok_or("Auxiliary vector address overflow")?;
+        copy_to_user(task, address, &bytes).map_err(|_| "Cannot populate auxiliary vector")?;
+    }
+    Ok(())
 }
 
 pub(crate) fn conversion_errno(error: StringConversionError) -> usize {
@@ -105,6 +142,161 @@ mod tests {
     use crate::environment::{PAGE_SIZE, USER_STACK_END};
     use crate::library::std::usercopy::copy_from_user;
     use crate::task::TaskType;
+
+    fn string_vector(task: &Task, sp: &mut usize, strings: &[&str]) -> usize {
+        let addresses = push_string_vector(task, sp, strings).unwrap();
+        let mut pointers = Vec::with_capacity((addresses.len() + 1) * 8);
+        for address in addresses {
+            pointers.extend_from_slice(&address.to_ne_bytes());
+        }
+        pointers.extend_from_slice(&0u64.to_ne_bytes());
+        *sp = (*sp - pointers.len()) & !15;
+        copy_to_user(task, *sp, &pointers).unwrap();
+        *sp
+    }
+
+    #[test_case]
+    fn linux_exec_accepts_python_postinst_argument_count() {
+        use crate::executor::executor::MAX_EXEC_STRING_BYTES;
+        let task = Task::new("python-postinst-argv".into(), 0, TaskType::User);
+        task.allocate_stack_pages(USER_STACK_END - 8 * PAGE_SIZE, 8)
+            .unwrap();
+        let mut sp = USER_STACK_END;
+        let mut args = alloc::vec!["/usr/lib/python3.13/collections/__init__.py"; 289];
+        args[..4].copy_from_slice(&[
+            "/usr/bin/python3.13",
+            "-E",
+            "-S",
+            "/usr/lib/python3.13/py_compile.py",
+        ]);
+        let env = ["DEBIAN_FRONTEND=noninteractive", "PATH=/usr/bin:/bin"];
+        let argv = string_vector(&task, &mut sp, &args);
+        let envp = string_vector(&task, &mut sp, &env);
+        let mut remaining = MAX_EXEC_STRING_BYTES;
+        assert_eq!(
+            parse_exec_strings(&task, argv, &mut remaining).unwrap(),
+            args
+        );
+        assert_eq!(
+            parse_exec_strings(&task, envp, &mut remaining).unwrap(),
+            env
+        );
+        assert_eq!(
+            MAX_EXEC_STRING_BYTES - remaining,
+            exec_argument_bytes(&args, &env).unwrap()
+        );
+    }
+
+    #[test_case]
+    fn linux_exec_limits_include_pointers_and_share_environment_budget() {
+        use crate::executor::executor::MAX_EXEC_STRING_BYTES;
+        let largest = "x".repeat(MAX_EXEC_STRING_LENGTH - 1);
+        let unit = exec_string_storage_bytes(largest.len()).unwrap();
+        let mut args = alloc::vec![largest.as_str(); 48];
+        let final_bytes = MAX_EXEC_STRING_BYTES - 47 * unit;
+        args[47] = &largest[..final_bytes - 1 - core::mem::size_of::<usize>()];
+        assert_eq!(exec_argument_bytes(&args, &[]), Some(MAX_EXEC_STRING_BYTES));
+        assert_eq!(exec_argument_bytes(&args, &[""]), None);
+        assert_eq!(
+            exec_argument_bytes(&alloc::vec![""; 4096], &[]),
+            Some(4096 * 9)
+        );
+        assert_eq!(exec_string_storage_bytes(MAX_EXEC_STRING_LENGTH), None);
+        assert_eq!(exec_string_storage_bytes(usize::MAX), None);
+
+        let task = Task::new("exec-byte-budget".into(), 0, TaskType::User);
+        task.allocate_stack_pages(USER_STACK_END - PAGE_SIZE, 1)
+            .unwrap();
+        let mut sp = USER_STACK_END;
+        let argv = string_vector(&task, &mut sp, &["a"]);
+        let envp = string_vector(&task, &mut sp, &[""]);
+        let mut remaining = 10;
+        assert_eq!(
+            parse_exec_strings(&task, argv, &mut remaining).unwrap(),
+            ["a"]
+        );
+        assert_eq!(remaining, 0);
+        assert_eq!(
+            parse_exec_strings(&task, envp, &mut remaining),
+            Err(StringConversionError::ExceedsMaxLength)
+        );
+        assert!(
+            parse_exec_strings(&task, 0, &mut remaining)
+                .unwrap()
+                .is_empty()
+        );
+        let mut remaining = 10;
+        assert_eq!(
+            parse_exec_strings(&task, usize::MAX, &mut remaining),
+            Err(StringConversionError::TranslationError)
+        );
+    }
+
+    #[test_case]
+    fn linux_exec_per_string_limit_and_large_stack_storage() {
+        use crate::executor::executor::MAX_EXEC_STRING_BYTES;
+        let task = Task::new("linux-large-argv".into(), 0, TaskType::User);
+        let string = "x".repeat(MAX_EXEC_STRING_LENGTH - 1);
+        let args = alloc::vec![string.as_str(); 48];
+        let mut accepted = args;
+        accepted[47] = "";
+        let storage = exec_argument_bytes(&accepted, &[]).unwrap();
+        let (base, top) = setup_exec_stack(&task, &accepted, &[]).unwrap();
+        assert!(top - base >= storage + crate::vm::DEFAULT_USER_STACK_BYTES);
+        let mut sp = top;
+        let argv = string_vector(&task, &mut sp, &[string.as_str()]);
+        let mut remaining = MAX_EXEC_STRING_BYTES;
+        assert_eq!(
+            parse_exec_strings(&task, argv, &mut remaining).unwrap(),
+            [string.as_str()]
+        );
+        let too_long = "x".repeat(MAX_EXEC_STRING_LENGTH);
+        let argv = string_vector(&task, &mut sp, &[too_long.as_str()]);
+        let mut remaining = MAX_EXEC_STRING_BYTES;
+        assert_eq!(
+            parse_exec_strings(&task, argv, &mut remaining),
+            Err(StringConversionError::ExceedsMaxLength)
+        );
+        assert_eq!(remaining, MAX_EXEC_STRING_BYTES);
+    }
+
+    #[test_case]
+    fn linux_exec_auxv_pair_crosses_noncontiguous_pages() {
+        use crate::mem::page::ContiguousPages;
+        use crate::vm::vmem::{
+            MemoryArea, PhysicalMemoryArea, VirtualMemoryMap, VirtualMemoryPermission,
+        };
+        let pages = ContiguousPages::new(3).unwrap();
+        let task = Task::new("linux-auxv-pages".into(), 0, TaskType::User);
+        let base = 0x20000;
+        for (virtual_page, physical_page) in [(0, 0), (1, 2)] {
+            let va = base + virtual_page * PAGE_SIZE;
+            let pa = pages.as_paddr() + (physical_page * PAGE_SIZE) as u64;
+            task.vm_manager
+                .add_memory_map(VirtualMemoryMap::new(
+                    PhysicalMemoryArea::new(pa, pa + PAGE_SIZE as u64 - 1),
+                    MemoryArea::new(va, va + PAGE_SIZE - 1),
+                    VirtualMemoryPermission::Read as usize
+                        | VirtualMemoryPermission::Write as usize
+                        | VirtualMemoryPermission::User as usize,
+                    false,
+                    None,
+                ))
+                .unwrap();
+        }
+        let auxv = [AuxVec::new(AT_RANDOM, 0x12345678), AuxVec::new(AT_NULL, 0)];
+        let address = base + PAGE_SIZE - 8;
+        write_auxiliary_vector(&task, address, &auxv).unwrap();
+        let mut bytes = [0; 32];
+        copy_from_user(&task, address, &mut bytes).unwrap();
+        assert_eq!(&bytes[..8], &AT_RANDOM.to_ne_bytes());
+        assert_eq!(&bytes[8..16], &0x12345678u64.to_ne_bytes());
+        assert_eq!(&bytes[16..], &[0; 16]);
+        let skipped = unsafe {
+            core::slice::from_raw_parts(pages.as_ptr().cast::<u8>().add(PAGE_SIZE), PAGE_SIZE)
+        };
+        assert!(skipped.iter().all(|b| *b == 0));
+    }
 
     #[test_case]
     fn linux_exec_strings_support_box64_argv_compaction() {

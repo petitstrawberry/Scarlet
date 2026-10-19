@@ -10,7 +10,6 @@ use crate::{
     task::elf_loader::{
         ExecutionMode, LoadStrategy, LoadTarget, analyze_and_load_elf_with_strategy,
     },
-    vm::setup_user_stack,
 };
 
 pub mod signal;
@@ -258,7 +257,7 @@ impl AbiModule for LinuxRiscv64Abi {
                         root_page_table.unmap_all_no_flush();
                         drop(root_page_table);
                         arch::vm::setup_trampoline_for_user(&task.vm_manager);
-                        let (_, stack_top) = setup_user_stack(task)?;
+                        let (_, stack_top) = generic::exec::setup_exec_stack(task, argv, envp)?;
                         let mut sp = stack_top as usize;
 
                         if let ExecutionMode::Dynamic { .. } = &load_result.mode {
@@ -326,15 +325,7 @@ impl AbiModule for LinuxRiscv64Abi {
                         }
                         current_pos += 8;
 
-                        for auxv_entry in auxv.iter() {
-                            unsafe {
-                                let paddr = task.vm_manager.translate_to_kva(current_pos).unwrap()
-                                    as *mut u64;
-                                *paddr = auxv_entry.a_type;
-                                *(paddr.add(1)) = auxv_entry.a_val;
-                            }
-                            current_pos += 16;
-                        }
+                        generic::exec::write_auxiliary_vector(task, current_pos, &auxv)?;
 
                         sp = final_sp;
 

@@ -13,6 +13,37 @@ captures the current scope, known gaps, and the recommended way to exercise it.
   userspace VMMs
 - **Demo**: See [demo.md](demo.md) for running instructions.
 
+### Exec argument limits (2026-10-19)
+
+Debian trixie's `python3.13-minimal` 3.13.5-2+deb13u5 postinst invokes
+`py_compile.py` with 285 library paths: 289 arguments and 11,190 string bytes
+including NULs, before environment storage. Scarlet previously rejected the
+invocation at its independent 256-string cap, leaving dpkg configuration
+incomplete with `E2BIG`.
+
+Exec now budgets argv and envp together, including string NULs and pointer
+slots. The aggregate ceiling is 6 MiB, Linux's 3/4-of-8-MiB hard ceiling; each
+string is limited to 32 pages (128 KiB on the supported 4-KiB-page targets),
+including its NUL. Numerous short or empty strings consume that same budget.
+The existing `prlimit64` stack-limit stub reports a value above the hard ceiling;
+lowering a per-process stack rlimit is not implemented by this change. Linux's
+usual 8-MiB stack soft limit would instead select a 2-MiB argument ceiling.
+See [Linux execve limits](https://man7.org/linux/man-pages/man2/execve.2.html).
+
+AArch64 and RISC-V Linux entry allocate larger initial stacks when argument
+storage would exhaust the ordinary 1-MiB stack, retaining ordinary stack space
+below the arguments and a guard page. Auxiliary-vector pairs are written with
+page-aware usercopy: many arguments can place a pair across physically
+noncontiguous stack pages. Exec remains transactional on preparation failure.
+
+All 1,512 AArch64 kernel tests pass with the normal full-project features.
+Coverage includes the Python postinst argument count, aggregate/pointer/env
+budget boundaries, per-string limits, large-stack allocation, invalid user
+pointers and an auxv pair crossing noncontiguous pages. The RISC-V Release
+kernel library also passes `cargo check` with the same feature set.
+The normal AArch64 Release boot image builds. Installation into the running
+VM's disk and retrying dpkg are pending shutdown of that VM.
+
 ## System Call Support Matrix
 
 The following system calls are currently handled by the Linux ABI module.
