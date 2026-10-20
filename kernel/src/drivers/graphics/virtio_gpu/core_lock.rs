@@ -1,8 +1,9 @@
 //! Sleep before entering a contended GPU control critical section.
 //!
-//! Synchronous control commands still retain their IRQ guard through DMA
-//! retirement. Other task-context callers must not mask IRQs and spin for
-//! that entire host wait too. Completion/admission workers use try_lock.
+//! Native resource and transfer calls use the shared control transport and
+//! wait outside this guard. Cold display configuration and boot can still poll
+//! synchronously; contended task callers park instead of masking IRQs through
+//! those waits. Completion/admission workers use try_lock.
 
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicUsize, Ordering};

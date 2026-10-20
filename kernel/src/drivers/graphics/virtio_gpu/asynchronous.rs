@@ -12,7 +12,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::device::events::InterruptCapableDevice;
 use crate::device::gpu::{
@@ -23,8 +23,8 @@ use crate::drivers::virtio::{device::Register, pci::VirtioPciTransport};
 use crate::interrupt::{DeferredInterruptCompletion, InterruptClaim, InterruptId, InterruptResult};
 use crate::sync::{IrqSpinLock, Once, Waker};
 
-use super::core_lock::CoreLock;
 use super::control::{ControlEnqueueError, ControlQueue, ControlRequest, ControlStatus};
+use super::core_lock::CoreLock;
 use super::{
     VIRTIO_GPU_CMD_SUBMIT_3D, VIRTIO_GPU_FLAG_FENCE, VirtioGpuCmdSubmit3d, VirtioGpuCtrlHdr,
     VirtioGpuDevice, VirtioGpuDeviceCore, append_pod_bytes, validate_execution_response,
@@ -236,6 +236,12 @@ impl AsyncSubmissions {
 
 static DEVICES: Once<IrqSpinLock<Vec<Weak<CoreLock<VirtioGpuDeviceCore>>>>> = Once::new();
 static WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+static WORKER_TASK: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+pub(super) fn in_worker() -> bool {
+    crate::sched::scheduler::current_task_id(crate::arch::get_cpu().get_cpuid())
+        == Some(WORKER_TASK.load(Ordering::Acquire))
+}
 static WORKER_WAKER: Waker = Waker::new_uninterruptible("virtio-gpu-completion");
 
 pub(super) fn wake_worker() {
@@ -273,6 +279,13 @@ pub(super) fn register(core: &Arc<CoreLock<VirtioGpuDeviceCore>>) -> bool {
 }
 
 fn process_device(core: &Arc<CoreLock<VirtioGpuDeviceCore>>) -> bool {
+    let control = {
+        let Some(core) = core.try_lock() else {
+            return true;
+        };
+        Arc::clone(&core.control)
+    };
+    control.synchronous.prune();
     if !super::prune_abandoned_presentations(core) {
         return true;
     }
@@ -284,7 +297,7 @@ fn process_device(core: &Arc<CoreLock<VirtioGpuDeviceCore>>) -> bool {
             let core = &mut *guard;
             let interrupt = Arc::clone(&core.interrupt_state);
             let completion_count = interrupt.completions.lock().len();
-            let mut queues = core.virtqueues.lock();
+            let mut queues = control.virtqueues.lock();
             if completion_count != 0 {
                 queues.control.suppress_notifications();
                 // Only the owner of a deferred delivery may clear ISR state.
@@ -310,6 +323,7 @@ fn process_device(core: &Arc<CoreLock<VirtioGpuDeviceCore>>) -> bool {
                 retired,
                 presentations,
                 core.async_submissions.active()
+                    || control.synchronous.active()
                     || super::presentation_progress_needed(&core.presentations)
                     || {
                         let queues = core.virtqueues.lock();
@@ -333,6 +347,9 @@ fn process_device(core: &Arc<CoreLock<VirtioGpuDeviceCore>>) -> bool {
 }
 
 fn worker_entry() {
+    if let Some(task) = crate::task::mytask() {
+        WORKER_TASK.store(task.get_id(), Ordering::Release);
+    }
     loop {
         let devices = {
             let mut devices = DEVICES.call_once(|| IrqSpinLock::new(Vec::new())).lock();
@@ -366,7 +383,7 @@ pub(super) struct InterruptState {
     base_addr: usize,
     pci_transport: Option<VirtioPciTransport>,
     id: IrqSpinLock<Option<InterruptId>>,
-    deferred_enabled: AtomicBool,
+    pub(super) deferred_enabled: AtomicBool,
     completions: IrqSpinLock<VecDeque<DeferredInterruptCompletion>>,
 }
 

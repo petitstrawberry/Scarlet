@@ -217,6 +217,7 @@ impl ControlQueue {
     /// Observe this request independently of older GPU retirement checkpoints.
     /// Resource setup completes when its own response arrives; it does not
     /// certify execution or release ownership of any preceding submission.
+    #[cfg(test)]
     pub(super) fn request_complete(
         &mut self,
         request: &ControlRequest,

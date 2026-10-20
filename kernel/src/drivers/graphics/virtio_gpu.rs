@@ -47,6 +47,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 mod asynchronous;
 mod control;
 mod core_lock;
+mod synchronous;
 
 use core_lock::CoreLock;
 
@@ -494,16 +495,30 @@ impl VirtioGpuQueues {
     }
 }
 
-/// VirtIO GPU Device Core
+/// Mutable submission and presentation state, held only for bounded admission.
 pub struct VirtioGpuDeviceCore {
-    base_addr: usize,
-    pci_transport: Option<VirtioPciTransport>,
-    interrupt_state: Arc<asynchronous::InterruptState>,
-    virtqueues: IrqSpinLock<VirtioGpuQueues>, // Control queue (0) and Cursor queue (1)
+    control: Arc<VirtioGpuControl>,
     async_submissions: asynchronous::AsyncSubmissions,
     async_enabled: bool,
     next_present_id: u64,
     presentations: Vec<PresentOperation>,
+}
+
+impl core::ops::Deref for VirtioGpuDeviceCore {
+    type Target = VirtioGpuControl;
+    fn deref(&self) -> &Self::Target {
+        &self.control
+    }
+}
+
+/// Shared transport. Synchronous callers never retain the submission-state
+/// guard while waiting for a host response. Each field has its own short guard.
+pub struct VirtioGpuControl {
+    base_addr: usize,
+    pci_transport: Option<VirtioPciTransport>,
+    interrupt_state: Arc<asynchronous::InterruptState>,
+    virtqueues: IrqSpinLock<VirtioGpuQueues>,
+    synchronous: synchronous::Operations,
     display_info: IrqRwSpinLock<Option<VirtioGpuRespDisplayInfo>>,
     display_update_pending: AtomicBool,
     framebuffer_addr: IrqRwSpinLock<Option<u64>>,
@@ -549,15 +564,27 @@ impl VirtioGpuDeviceCore {
     }
 
     fn new_with_transport(base_addr: usize, pci_transport: Option<VirtioPciTransport>) -> Self {
+        Self {
+            control: Arc::new(VirtioGpuControl::new_with_transport(
+                base_addr,
+                pci_transport,
+            )),
+            async_submissions: asynchronous::AsyncSubmissions::default(),
+            async_enabled: false,
+            next_present_id: 0,
+            presentations: Vec::new(),
+        }
+    }
+}
+
+impl VirtioGpuControl {
+    fn new_with_transport(base_addr: usize, pci_transport: Option<VirtioPciTransport>) -> Self {
         let mut device = Self {
             base_addr,
             pci_transport,
             interrupt_state: Arc::new(asynchronous::InterruptState::new(base_addr, pci_transport)),
             virtqueues: IrqSpinLock::new(VirtioGpuQueues::new()),
-            async_submissions: asynchronous::AsyncSubmissions::default(),
-            async_enabled: false,
-            next_present_id: 0,
-            presentations: Vec::new(),
+            synchronous: synchronous::Operations::new(),
             display_info: IrqRwSpinLock::new(None),
             display_update_pending: AtomicBool::new(false),
             framebuffer_addr: IrqRwSpinLock::new(None),
@@ -702,8 +729,8 @@ impl VirtioGpuDeviceCore {
         // Legacy operations remain synchronous and ordered after all preceding
         // control requests. Reaping only returns transport ownership; execution
         // owners validate fences and release GPU resources outside driver locks.
-        self.wait_control_idle()?;
-        self.send_control_request(cmd_buffer, resp_buffer)
+        self.synchronous
+            .execute(self, cmd_buffer, resp_buffer, true)
     }
 
     fn send_control_request(
@@ -711,50 +738,8 @@ impl VirtioGpuDeviceCore {
         cmd_buffer: &[u8],
         resp_buffer: &mut [u8],
     ) -> Result<(), &'static str> {
-        let request = ControlRequest::new(cmd_buffer, resp_buffer.len())?;
-        loop {
-            let mut queues = self.virtqueues.lock();
-            queues.control.reap(crate::timer::get_time_ns())?;
-            match queues
-                .control
-                .enqueue(&request, crate::timer::get_time_ns())
-            {
-                Ok(()) => break,
-                Err(ControlEnqueueError::Failed(error)) => return Err(error),
-                Err(ControlEnqueueError::Busy) => {}
-            }
-            drop(queues);
-            core::hint::spin_loop();
-        }
-        self.notify(0);
-        loop {
-            if self
-                .virtqueues
-                .lock()
-                .control
-                .request_complete(&request, crate::timer::get_time_ns())?
-            {
-                break;
-            }
-            core::hint::spin_loop();
-        }
-        request.copy_response(resp_buffer)?;
-        Ok(())
-    }
-
-    fn wait_control_idle(&self) -> Result<(), &'static str> {
-        loop {
-            {
-                let mut queues = self.virtqueues.lock();
-                queues.control.reap(crate::timer::get_time_ns())?;
-                if !queues.control.has_pending() {
-                    return Ok(());
-                }
-            }
-            // Never hold the transport lock while waiting for DMA. The async
-            // completion worker can reap independently of the synchronous caller.
-            core::hint::spin_loop();
-        }
+        self.synchronous
+            .execute(self, cmd_buffer, resp_buffer, false)
     }
 
     fn negotiated_feature_enabled(&self, feature: u32) -> bool {
@@ -1520,7 +1505,7 @@ impl VirtioGpuDeviceCore {
     }
 }
 
-impl VirtioDevice for VirtioGpuDeviceCore {
+impl VirtioDevice for VirtioGpuControl {
     fn pci_transport(&self) -> Option<VirtioPciTransport> {
         self.pci_transport
     }
@@ -1727,7 +1712,7 @@ fn prepare_present_target(
             if resource.resource_id() == 0 || resource.width() == 0 || resource.height() == 0 {
                 return Err("GPU display resource is invalid");
             }
-            let Some(rect) = VirtioGpuDeviceCore::clamp_region_to_rect(
+            let Some(rect) = VirtioGpuControl::clamp_region_to_rect(
                 *region,
                 resource.width(),
                 resource.height(),
@@ -1765,11 +1750,9 @@ fn prepare_present_target(
             if primary.enabled == 0 {
                 return Err("Primary display not enabled");
             }
-            let Some(rect) = VirtioGpuDeviceCore::clamp_region_to_rect(
-                *region,
-                primary.r.width,
-                primary.r.height,
-            ) else {
+            let Some(rect) =
+                VirtioGpuControl::clamp_region_to_rect(*region, primary.r.width, primary.r.height)
+            else {
                 return Ok(Vec::new());
             };
             let resource_id = core
@@ -2108,6 +2091,7 @@ impl Selectable for VirtioGpuDevice {
 /// VirtIO acceleration adapter for the backend-neutral GPU control interface.
 pub struct VirtioGpuBackend {
     core: Arc<CoreLock<VirtioGpuDeviceCore>>,
+    control: Arc<VirtioGpuControl>,
 }
 
 impl VirtioGpuBackend {
@@ -2126,6 +2110,7 @@ impl VirtioGpuBackend {
         device.core.lock().async_enabled = enabled;
         Self {
             core: Arc::clone(&device.core),
+            control: Arc::clone(&device.core.lock().control),
         }
     }
 
@@ -2134,7 +2119,7 @@ impl VirtioGpuBackend {
     }
 
     fn query_dialect_info(
-        core: &VirtioGpuDeviceCore,
+        core: &VirtioGpuControl,
         index: u32,
     ) -> Result<GpuBackendDialectInfo, &'static str> {
         let dialect = core.get_backend_dialect_info(index)?;
@@ -2162,6 +2147,7 @@ impl VirtioGpuBackend {
 /// Real VirtIO execution context retained by a backend-neutral GPU context.
 struct VirtioGpuBackendContext {
     core: Arc<CoreLock<VirtioGpuDeviceCore>>,
+    control: Arc<VirtioGpuControl>,
     context_id: u32,
     info: GpuBackendContextInfo,
     attached_resources: IrqSpinLock<Vec<u32>>,
@@ -2169,7 +2155,8 @@ struct VirtioGpuBackendContext {
 
 /// Real VirtIO image resource using generic kernel-owned backing when required.
 struct VirtioGpuBackendImage {
-    core: Arc<CoreLock<VirtioGpuDeviceCore>>,
+    _core: Arc<CoreLock<VirtioGpuDeviceCore>>,
+    control: Arc<VirtioGpuControl>,
     resource_id: u32,
     create: GpuImageCreateInfo,
     allocation_size: u64,
@@ -2179,7 +2166,8 @@ struct VirtioGpuBackendImage {
 
 /// Real VirtIO buffer resource backed by a generic GPU buffer allocation.
 struct VirtioGpuBackendBuffer {
-    core: Arc<CoreLock<VirtioGpuDeviceCore>>,
+    _core: Arc<CoreLock<VirtioGpuDeviceCore>>,
+    control: Arc<VirtioGpuControl>,
     resource_id: u32,
     allocation_size: u64,
     backend_cookie: u64,
@@ -2187,7 +2175,7 @@ struct VirtioGpuBackendBuffer {
 
 impl Drop for VirtioGpuBackendImage {
     fn drop(&mut self) {
-        let core = self.core.lock();
+        let core = self.control.as_ref();
         if self.has_attached_backing {
             let _ = core.detach_backing_from_resource(self.resource_id);
         }
@@ -2220,7 +2208,7 @@ impl GpuBackendImage for VirtioGpuBackendImage {
 
 impl Drop for VirtioGpuBackendBuffer {
     fn drop(&mut self) {
-        let core = self.core.lock();
+        let core = self.control.as_ref();
         let _ = core.detach_backing_from_resource(self.resource_id);
         let _ = core.unref_acceleration_resource(self.resource_id);
     }
@@ -2238,9 +2226,9 @@ impl GpuBackendBuffer for VirtioGpuBackendBuffer {
 
 impl Drop for VirtioGpuBackendContext {
     fn drop(&mut self) {
-        let core = self.core.lock();
-        let mut attached_resources = self.attached_resources.lock();
-        for resource_id in attached_resources.drain(..) {
+        let core = self.control.as_ref();
+        let attached_resources = core::mem::take(&mut *self.attached_resources.lock());
+        for resource_id in attached_resources {
             let _ = core.detach_acceleration_resource(self.context_id, resource_id);
         }
         let _ = core.destroy_acceleration_context(self.context_id);
@@ -2256,7 +2244,7 @@ impl VirtioGpuBackendContext {
         let info = image.query_info();
         let resource_id = u32::try_from(info.command_resource_token)
             .map_err(|_| "VirtIO GPU image token does not fit a resource ID")?;
-        let core = self.core.lock();
+        let core = self.control.as_ref();
         if resource_id == 0 || image.backend_cookie() != core.backend_cookie() {
             return Err("GPU image belongs to a different VirtIO GPU device");
         }
@@ -2294,7 +2282,7 @@ impl VirtioGpuBackendContext {
         let info = image.query_info();
         let resource_id = u32::try_from(info.command_resource_token)
             .map_err(|_| "VirtIO GPU image token does not fit a resource ID")?;
-        let core = self.core.lock();
+        let core = self.control.as_ref();
         if resource_id == 0
             || image.backend_cookie() != core.backend_cookie()
             || info.usage & GPU_IMAGE_USAGE_TRANSFER_SRC == 0
@@ -2336,6 +2324,7 @@ impl GpuBackendContext for VirtioGpuBackendContext {
     fn create_queue(&self) -> Result<Arc<dyn GpuBackendQueue>, &'static str> {
         Ok(Arc::new(VirtioGpuBackendQueue {
             core: Arc::clone(&self.core),
+            control: Arc::clone(&self.control),
             context_id: self.context_id,
             async_enabled: self.core.lock().async_enabled,
         }))
@@ -2345,19 +2334,22 @@ impl GpuBackendContext for VirtioGpuBackendContext {
         let info = image.query_info();
         let resource_id = u32::try_from(info.command_resource_token)
             .map_err(|_| "VirtIO GPU image token does not fit a resource ID")?;
-        let core = self.core.lock();
+        let core = self.control.as_ref();
         if resource_id == 0 || image.backend_cookie() != core.backend_cookie() {
             return Err("GPU image belongs to a different VirtIO GPU device");
         }
-        let mut attached_resources = self.attached_resources.lock();
-        if attached_resources
+        if self
+            .attached_resources
+            .lock()
             .iter()
             .any(|&attached_resource_id| attached_resource_id == resource_id)
         {
             return Err("VirtIO GPU image is already attached to this context");
         }
         core.attach_acceleration_resource(self.context_id, resource_id)?;
+        let mut attached_resources = self.attached_resources.lock();
         if attached_resources.try_reserve(1).is_err() {
+            drop(attached_resources);
             let _ = core.detach_acceleration_resource(self.context_id, resource_id);
             return Err("Failed to retain VirtIO GPU image attachment");
         }
@@ -2369,17 +2361,18 @@ impl GpuBackendContext for VirtioGpuBackendContext {
         let info = image.query_info();
         let resource_id = u32::try_from(info.command_resource_token)
             .map_err(|_| "VirtIO GPU image token does not fit a resource ID")?;
-        let core = self.core.lock();
+        let core = self.control.as_ref();
         if resource_id == 0 || image.backend_cookie() != core.backend_cookie() {
             return Err("GPU image belongs to a different VirtIO GPU device");
         }
-        let mut attached_resources = self.attached_resources.lock();
-        let index = attached_resources
-            .iter()
-            .position(|&attached_resource_id| attached_resource_id == resource_id)
-            .ok_or("VirtIO GPU image is not attached to this context")?;
+        if !self.attached_resources.lock().contains(&resource_id) {
+            return Err("VirtIO GPU image is not attached to this context");
+        }
         core.detach_acceleration_resource(self.context_id, resource_id)?;
-        attached_resources.swap_remove(index);
+        let mut attached_resources = self.attached_resources.lock();
+        if let Some(index) = attached_resources.iter().position(|&id| id == resource_id) {
+            attached_resources.swap_remove(index);
+        }
         Ok(())
     }
 
@@ -2427,13 +2420,14 @@ impl GpuBackendContext for VirtioGpuBackendContext {
         let info = buffer.query_info();
         let resource_id = u32::try_from(info.command_resource_token)
             .map_err(|_| "VirtIO GPU buffer token does not fit a resource ID")?;
-        if resource_id == 0 || buffer.backend_cookie() != self.core.lock().backend_cookie() {
+        if resource_id == 0 || buffer.backend_cookie() != self.control.backend_cookie() {
             return Err("GPU buffer belongs to a different VirtIO GPU device");
         }
-        let core = self.core.lock();
+        let core = self.control.as_ref();
         core.attach_acceleration_resource(self.context_id, resource_id)?;
         let mut attached_resources = self.attached_resources.lock();
         if attached_resources.try_reserve(1).is_err() {
+            drop(attached_resources);
             let _ = core.detach_acceleration_resource(self.context_id, resource_id);
             return Err("Failed to retain VirtIO GPU buffer attachment");
         }
@@ -2445,7 +2439,7 @@ impl GpuBackendContext for VirtioGpuBackendContext {
         let info = buffer.query_info();
         let resource_id = u32::try_from(info.command_resource_token)
             .map_err(|_| "VirtIO GPU buffer token does not fit a resource ID")?;
-        let core = self.core.lock();
+        let core = self.control.as_ref();
         if resource_id == 0 || buffer.backend_cookie() != core.backend_cookie() {
             return Err("GPU buffer belongs to a different VirtIO GPU device");
         }
@@ -2464,6 +2458,7 @@ impl GpuBackendContext for VirtioGpuBackendContext {
 /// Real VirtIO execution queue retained by a backend-neutral GPU queue.
 struct VirtioGpuBackendQueue {
     core: Arc<CoreLock<VirtioGpuDeviceCore>>,
+    control: Arc<VirtioGpuControl>,
     context_id: u32,
     async_enabled: bool,
 }
@@ -2474,7 +2469,7 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
     }
 
     fn submit(&self, commands: &[u8]) -> Result<(), GpuBackendSubmitError> {
-        let core = self.core.lock();
+        let core = self.control.as_ref();
         let fence_id = core
             .next_acceleration_fence_id()
             .map_err(GpuBackendSubmitError::Unavailable)?;
@@ -2503,6 +2498,13 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
             return Err(GpuBackendEnqueueError::Busy(submission));
         };
         let core = &mut *guard;
+        let control = Arc::clone(&core.control);
+        let Some(synchronous) = control.synchronous.try_admission() else {
+            return Err(GpuBackendEnqueueError::Busy(submission));
+        };
+        if synchronous.blocked() {
+            return Err(GpuBackendEnqueueError::Busy(submission));
+        }
         if core
             .presentations
             .iter()
@@ -2526,7 +2528,7 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
             }
         };
         {
-            let mut queues = core.virtqueues.lock();
+            let mut queues = control.virtqueues.lock();
             core.async_submissions.enqueue(
                 &mut queues.control,
                 self.context_id,
@@ -2582,11 +2584,11 @@ impl GpuBackend for VirtioGpuBackend {
         virgl_image_layout(create)
     }
     fn query_info(&self) -> GpuBackendInfo {
-        self.core.lock().gpu_backend_info()
+        self.control.gpu_backend_info()
     }
 
     fn query_dialect(&self, index: u32) -> Result<GpuBackendDialectInfo, &'static str> {
-        let core = self.core.lock();
+        let core = self.control.as_ref();
         Self::query_dialect_info(&core, index)
     }
 
@@ -2594,7 +2596,7 @@ impl GpuBackend for VirtioGpuBackend {
         &self,
         dialect: GpuBackendDialectDescriptor,
     ) -> Result<Arc<dyn GpuBackendContext>, &'static str> {
-        let core = self.core.lock();
+        let core = self.control.as_ref();
         core.require_virgl()?;
         let effective_index = if core.context_init_supported() {
             dialect.index
@@ -2618,6 +2620,7 @@ impl GpuBackend for VirtioGpuBackend {
         core.create_acceleration_context(context_id, "scarlet-gpu", context_init)?;
         Ok(Arc::new(VirtioGpuBackendContext {
             core: Arc::clone(&self.core),
+            control: Arc::clone(&self.control),
             context_id,
             info: GpuBackendContextInfo::new(effective_index, effective_token),
             attached_resources: IrqSpinLock::new(Vec::new()),
@@ -2640,7 +2643,7 @@ impl GpuBackend for VirtioGpuBackend {
                 | GPU_IMAGE_USAGE_TRANSFER_DST
                 | GPU_IMAGE_USAGE_TRANSFER_SRC)
             != 0;
-        let core = self.core.lock();
+        let core = self.control.as_ref();
         core.require_virgl()?;
         let resource_id = core.create_acceleration_resource(VirtioGpuAccelerationResource3d {
             resource_id: 0,
@@ -2669,7 +2672,8 @@ impl GpuBackend for VirtioGpuBackend {
             return Err(error);
         }
         Ok(Arc::new(VirtioGpuBackendImage {
-            core: Arc::clone(&self.core),
+            _core: Arc::clone(&self.core),
+            control: Arc::clone(&self.control),
             resource_id,
             create,
             allocation_size: backing.allocation_size,
@@ -2687,7 +2691,7 @@ impl GpuBackend for VirtioGpuBackend {
         }
         let backing_size = usize::try_from(create.allocation_size)
             .map_err(|_| "VirtIO GPU buffer allocation does not fit kernel address size")?;
-        let core = self.core.lock();
+        let core = self.control.as_ref();
         core.require_virgl()?;
         let resource_id = core.create_acceleration_resource(VirtioGpuAccelerationResource3d {
             resource_id: 0,
@@ -2709,7 +2713,8 @@ impl GpuBackend for VirtioGpuBackend {
             return Err(error);
         }
         Ok(Arc::new(VirtioGpuBackendBuffer {
-            core: Arc::clone(&self.core),
+            _core: Arc::clone(&self.core),
+            control: Arc::clone(&self.control),
             resource_id,
             allocation_size: create.allocation_size,
             backend_cookie: core.backend_cookie(),
