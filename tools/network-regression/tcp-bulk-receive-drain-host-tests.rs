@@ -95,14 +95,21 @@ impl Waker {
 struct TcpSocket {
     recv_buffer: Lock<VecDeque<u8>>,
     recv_waker: Lock<Option<Arc<Waker>>>,
+    loopback_peer: NoLoopbackPeer,
     blocking_mode: AtomicBool,
     state: Cell<TcpState>,
     window_update: Cell<bool>,
 }
+struct NoLoopbackPeer;
+impl NoLoopbackPeer {
+    fn lock(&self) -> &Self { self }
+    fn upgrade(&self) -> Option<Arc<TcpSocket>> { None }
+}
 impl TcpSocket {
     fn new(data: VecDeque<u8>, state: TcpState, blocking: bool, window: bool) -> Arc<Self> {
         Arc::new(Self { recv_buffer: Lock::new("recv_buffer", data),
-            recv_waker: Lock::new("recv_waker", None), blocking_mode: AtomicBool::new(blocking),
+            recv_waker: Lock::new("recv_waker", None), loopback_peer: NoLoopbackPeer,
+            blocking_mode: AtomicBool::new(blocking),
             state: Cell::new(state), window_update: Cell::new(window) })
     }
     fn get_state(&self) -> TcpState { assert!(!locked("recv_buffer")); self.state.get() }
@@ -112,6 +119,7 @@ impl TcpSocket {
     fn send_window_update_ack(&self) {
         assert!(HELD.with(|held| held.borrow().is_empty())); event("ack");
     }
+    fn notify_write_waiters(&self) {}
     fn read_timeout_ns(&self) -> Option<u64> { Some(123) }
     /* PRODUCTION_RECEIVE_METHODS */
 }

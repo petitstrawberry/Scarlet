@@ -1,6 +1,59 @@
 use super::*;
 
 #[test_case]
+fn deferred_receive_notifications_coalesce_until_batch_end() {
+    let socket = TcpSocket::new(Weak::new());
+    socket.set_state(TcpState::Established);
+    let peer = Ipv4Address::new(192, 0, 2, 1);
+    socket.recv_ack.store(100, Ordering::SeqCst);
+    let recv = Arc::new(crate::sync::Waker::new_interruptible("tcp-deferred-recv"));
+    *socket.recv_waker.lock() = Some(recv.clone());
+
+    begin_rx_batch();
+    socket.notify_received_data(peer, 80, 100);
+    socket.notify_received_data(peer, 80, 200);
+    assert_eq!(recv.pending_wake_count_for_test(), 0);
+    assert!(socket.rx_notify_pending.load(Ordering::SeqCst));
+
+    flush_rx_batch();
+    assert_eq!(recv.pending_wake_count_for_test(), 1);
+    assert!(!socket.rx_notify_pending.load(Ordering::SeqCst));
+    end_rx_batch();
+}
+
+#[test_case]
+fn advancing_acks_coalesce_inside_driver_rx_batch() {
+    let socket = TcpSocket::new(Weak::new());
+    socket.set_state(TcpState::Established);
+    socket.send_unacked.store(1000, Ordering::SeqCst);
+    socket.send_seq.store(3000, Ordering::SeqCst);
+    socket
+        .send_buffer
+        .lock()
+        .extend(core::iter::repeat(0x5a).take(2000));
+    let mut first = TcpHeader::new(80, 30000);
+    first.set_flags(tcp_flags::ACK);
+    first.ack_number = 1500;
+    first.seq_number = 1;
+    let mut second = first;
+    second.ack_number = 2500;
+    second.seq_number = 2;
+
+    begin_rx_batch();
+    socket.process_ack(&first, false);
+    socket.process_ack(&second, false);
+    assert_eq!(socket.send_unacked.load(Ordering::SeqCst), 1000);
+    assert_eq!(socket.send_buffer.lock().len(), 2000);
+    assert!(socket.ack_input_pending.load(Ordering::SeqCst));
+
+    flush_ack_input();
+    assert_eq!(socket.send_unacked.load(Ordering::SeqCst), 2500);
+    assert_eq!(socket.send_buffer.lock().len(), 500);
+    assert!(!socket.ack_input_pending.load(Ordering::SeqCst));
+    end_rx_batch();
+}
+
+#[test_case]
 fn unchanged_receive_acks_do_not_broadcast_write_or_poll_wakes() {
     let socket = TcpSocket::new(Weak::new());
     socket.set_state(TcpState::Established);

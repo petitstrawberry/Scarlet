@@ -759,9 +759,19 @@ fn ensure_rx_worker_started() {
 
 fn cdc_ncm_rx_worker_entry() {
     loop {
+        crate::network::tcp::begin_rx_batch();
+        let mut observed = 0usize;
         let processed = drain_queued_rx_packets(&RX_PACKET_QUEUE, NCM_RX_WORK_BUDGET, |queued| {
             get_network_manager().handle_received_packet(&queued.interface_name, &queued.packet);
+            observed += 1;
+            if observed.is_multiple_of(crate::network::tcp::TX_ACK_INPUT_BATCH_SIZE) {
+                crate::network::tcp::flush_ack_input();
+            }
+            if observed.is_multiple_of(crate::network::tcp::RX_NOTIFY_BATCH_SIZE) {
+                crate::network::tcp::flush_rx_batch();
+            }
         });
+        crate::network::tcp::end_rx_batch();
 
         let Some(task) = crate::task::mytask() else {
             crate::arch::instruction::idle();

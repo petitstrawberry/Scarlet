@@ -24,7 +24,7 @@
 //! with proper memory management for packet buffers.
 
 use crate::sync::{IrqRwSpinLock, IrqSpinLock, Lazy};
-use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, string::String, sync::Arc, vec, vec::Vec};
 use core::{
     mem,
     sync::atomic::{AtomicBool, Ordering},
@@ -212,7 +212,7 @@ impl TxState {
 }
 
 struct QueuedRxPacket {
-    interface_name: String,
+    interface_name: Arc<str>,
     packet: DevicePacket,
 }
 
@@ -265,6 +265,7 @@ fn virtio_net_rx_worker_entry() {
 
 fn drain_queued_rx_packets(budget: usize) -> usize {
     let manager = crate::network::get_network_manager();
+    crate::network::tcp::begin_rx_batch();
     let mut processed = 0usize;
     while processed < budget {
         let Some(queued) = pop_queued_rx_packet() else {
@@ -272,7 +273,14 @@ fn drain_queued_rx_packets(budget: usize) -> usize {
         };
         manager.handle_received_packet(&queued.interface_name, &queued.packet);
         processed += 1;
+        if processed.is_multiple_of(crate::network::tcp::TX_ACK_INPUT_BATCH_SIZE) {
+            crate::network::tcp::flush_ack_input();
+        }
+        if processed.is_multiple_of(crate::network::tcp::RX_NOTIFY_BATCH_SIZE) {
+            crate::network::tcp::flush_rx_batch();
+        }
     }
+    crate::network::tcp::end_rx_batch();
     processed
 }
 
@@ -280,7 +288,7 @@ fn pop_queued_rx_packet() -> Option<QueuedRxPacket> {
     RX_PACKET_QUEUE.lock().pop_front()
 }
 
-fn enqueue_rx_packets(interface_name: String, packets: Vec<DevicePacket>) -> usize {
+fn enqueue_rx_packets(interface_name: Arc<str>, packets: Vec<DevicePacket>) -> usize {
     if packets.is_empty() {
         return 0;
     }
@@ -607,6 +615,8 @@ impl VirtioNetDevice {
     /// Publish TX without waiting for hardware while holding the IRQ guard.
     fn transmit_packet(&self, packet: DevicePacket) -> Result<(), &'static str> {
         let packet_len = packet.len;
+        let profile =
+            crate::network::profile::begin(crate::network::profile::Stage::VirtioTx, packet_len, 0);
         let result = {
             let mut queues = self.virtqueues.lock();
             let queue = &mut queues[1];
@@ -621,6 +631,7 @@ impl VirtioNetDevice {
             }
             result
         };
+        drop(profile);
         if result.is_ok() {
             let mut stats = self.stats.lock();
             stats.tx_packets += 1;
@@ -863,7 +874,7 @@ impl InterruptCapableDevice for VirtioNetDevice {
 
         if let Some(name) = self.interface_name.lock().clone() {
             let received = packets.len();
-            let enqueued = enqueue_rx_packets(name, packets);
+            let enqueued = enqueue_rx_packets(Arc::from(name), packets);
             if enqueued < received {
                 let mut stats = self.stats.lock();
                 stats.dropped += (received - enqueued) as u64;

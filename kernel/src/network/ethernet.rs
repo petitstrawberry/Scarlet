@@ -23,6 +23,7 @@ use crate::device::network::DevicePacket;
 use crate::device::network::MacAddress;
 use crate::network::NetworkInterface;
 use crate::network::packet::PacketBuffer;
+use crate::network::profile;
 use crate::network::protocol_stack::{LayerContext, NetworkLayer, NetworkLayerStats};
 use crate::network::socket::SocketError;
 use crate::println;
@@ -460,6 +461,7 @@ impl NetworkLayer for EthernetLayer {
         let frame_len = packet.len();
 
         // Send through device
+        let _send_profile = profile::begin(profile::Stage::EthSend, frame_len, 0);
         if let Some(device) = self.get_device(&interface_name) {
             if LOG_ETHERNET_PACKET_TRACE {
                 println!(

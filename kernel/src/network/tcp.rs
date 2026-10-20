@@ -10,7 +10,7 @@ use crate::network::profile as net_profile;
 use timing::RetransmissionTiming;
 
 use crate::sync::counter::SaturatingCounter;
-use crate::sync::{IrqRwSpinLock, IrqSpinLock, SpinLock, WaitResult};
+use crate::sync::{IrqRwSpinLock, IrqSpinLock, Lazy, SpinLock, WaitResult};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -106,10 +106,10 @@ pub mod tcp_flags {
 }
 
 /// Buffer size limits (prevent memory exhaustion)
-const MAX_SEND_BUFFER_SIZE: usize = 65536; // 64KB
+const MAX_SEND_BUFFER_SIZE: usize = 1024 * 1024; // Allocated on demand, at most 1 MiB
 const MAX_RECV_BUFFER_SIZE: usize = 1024 * 1024; // Allocated on demand, at most 1 MiB per socket
 const TCP_LOCAL_WINDOW_SHIFT: u8 = 4;
-const MAX_UNACKED_SEGMENTS: usize = 256; // Limit unacked segment list
+const MAX_UNACKED_SEGMENTS: usize = 1024; // Enough for a full 1 MiB scaled window
 const IPV4_HEADER_SIZE: usize = 20;
 const TCP_HEADER_SIZE: usize = 20;
 const TCP_LOCAL_MSS: usize =
@@ -123,6 +123,114 @@ const TCP_OPTION_WINDOW_SCALE: u8 = 3;
 const WINDOW_UPDATE_THRESHOLD: u16 = 8192;
 const LOG_TCP_HTTPS: bool = false;
 const MAX_SOCKET_TIMEOUT_MS: usize = i32::MAX as usize;
+
+/// Send one ACK/reader wake per this many segments while a driver RX worker
+/// drains its bounded packet batch. A single segment still gets an immediate
+/// ACK because the batch ends as soon as the hardware queue is empty.
+pub(crate) const RX_NOTIFY_BATCH_SIZE: usize = 32;
+
+/// Retire outbound data from one cumulative ACK per this many segments. This
+/// runs more often than receive notification so a streaming writer can refill
+/// its send buffer without waiting for a full receive-notification interval.
+pub(crate) const TX_ACK_INPUT_BATCH_SIZE: usize = 8;
+
+static RX_BATCH_DEPTH: AtomicUsize = AtomicUsize::new(0);
+static DEFERRED_RX_SOCKETS: Lazy<IrqSpinLock<Vec<Weak<TcpSocket>>>> =
+    Lazy::new(|| IrqSpinLock::new(Vec::new()));
+static DEFERRED_ACK_SOCKETS: Lazy<IrqSpinLock<Vec<Weak<TcpSocket>>>> =
+    Lazy::new(|| IrqSpinLock::new(Vec::new()));
+
+fn flush_notification_sockets(sockets: Vec<Weak<TcpSocket>>) {
+    for socket in sockets {
+        if let Some(socket) = socket.upgrade() {
+            socket.flush_deferred_rx();
+        }
+    }
+}
+
+fn flush_ack_sockets(sockets: Vec<Arc<TcpSocket>>) {
+    for socket in sockets {
+        socket.flush_deferred_ack_input();
+    }
+}
+
+/// Detach the current registration set. Clearing each socket's registration
+/// bit while the list is still locked ensures a concurrent producer either
+/// joins this set or queues itself for the next one.
+fn take_deferred_sockets() -> Vec<Weak<TcpSocket>> {
+    let mut deferred = DEFERRED_RX_SOCKETS.lock();
+    let sockets = core::mem::take(&mut *deferred);
+    for socket in &sockets {
+        if let Some(socket) = socket.upgrade() {
+            socket
+                .deferred_notify_registered
+                .store(false, Ordering::SeqCst);
+        }
+    }
+    sockets
+}
+
+fn take_deferred_ack_sockets() -> Vec<Arc<TcpSocket>> {
+    let mut deferred = DEFERRED_ACK_SOCKETS.lock();
+    let sockets: Vec<_> = core::mem::take(&mut *deferred)
+        .into_iter()
+        .filter_map(|socket| socket.upgrade())
+        .collect();
+    for socket in &sockets {
+        socket
+            .ack_deferred_registered
+            .store(false, Ordering::SeqCst);
+    }
+    sockets
+}
+
+/// Start deferring receive notifications for one bounded driver RX batch.
+pub(crate) fn begin_rx_batch() {
+    RX_BATCH_DEPTH.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Deliver the ACK/wakeups accumulated so far without ending the batch.
+pub(crate) fn flush_rx_batch() {
+    flush_notification_sockets(take_deferred_sockets());
+}
+
+/// Retire cumulative outbound acknowledgements accumulated so far.
+pub(crate) fn flush_ack_input() {
+    flush_ack_sockets(take_deferred_ack_sockets());
+}
+
+/// End a driver RX batch. Notifications arriving after the last flush are
+/// drained under the same lock that disables deferral, so none can be lost.
+pub(crate) fn end_rx_batch() {
+    let acks = {
+        let mut deferred = DEFERRED_ACK_SOCKETS.lock();
+        RX_BATCH_DEPTH.fetch_sub(1, Ordering::SeqCst);
+        let sockets: Vec<_> = core::mem::take(&mut *deferred)
+            .into_iter()
+            .filter_map(|socket| socket.upgrade())
+            .collect();
+        for socket in &sockets {
+            socket
+                .ack_deferred_registered
+                .store(false, Ordering::SeqCst);
+        }
+        sockets
+    };
+    let notifications = {
+        let mut deferred = DEFERRED_RX_SOCKETS.lock();
+        let sockets = core::mem::take(&mut *deferred);
+        for socket in &sockets {
+            if let Some(socket) = socket.upgrade() {
+                socket
+                    .deferred_notify_registered
+                    .store(false, Ordering::SeqCst);
+            }
+        }
+        sockets
+    };
+    flush_ack_sockets(acks);
+    flush_notification_sockets(notifications);
+}
 
 fn receive_window_update_needed(advertised_edge: Option<u32>, ack: u32, window: u32) -> bool {
     let Some(previous) = advertised_edge else {
@@ -551,6 +659,13 @@ pub struct TcpSocket {
     accept_waker: IrqSpinLock<Option<Arc<crate::sync::Waker>>>,
     /// Waker for blocking recv() operations
     recv_waker: IrqSpinLock<Option<Arc<crate::sync::Waker>>>,
+    /// ACK and socket wake work deferred until the current driver RX batch ends.
+    rx_notify_pending: AtomicBool,
+    write_notify_pending: AtomicBool,
+    ack_input_pending: AtomicBool,
+    deferred_ack_header: IrqSpinLock<Option<TcpHeader>>,
+    ack_deferred_registered: AtomicBool,
+    deferred_notify_registered: AtomicBool,
     /// Waker for blocking send() operations
     send_waker: IrqSpinLock<Option<Arc<crate::sync::Waker>>>,
     /// Block mode: true for blocking, false for non-blocking
@@ -679,6 +794,12 @@ impl TcpSocket {
             // Blocking support
             accept_waker: IrqSpinLock::new(None),
             recv_waker: IrqSpinLock::new(None),
+            rx_notify_pending: AtomicBool::new(false),
+            write_notify_pending: AtomicBool::new(false),
+            ack_input_pending: AtomicBool::new(false),
+            deferred_ack_header: IrqSpinLock::new(None),
+            ack_deferred_registered: AtomicBool::new(false),
+            deferred_notify_registered: AtomicBool::new(false),
             send_waker: IrqSpinLock::new(None),
             blocking_mode: AtomicBool::new(true), // Default to blocking mode
             read_timeout_ms: AtomicU32::new(0),
@@ -1211,6 +1332,7 @@ impl TcpSocket {
     /// Handle RST (Reset) - properly cleanup connection
     fn handle_rst(&self) {
         let state = self.get_state();
+        self.rx_notify_pending.store(false, Ordering::SeqCst);
         match state {
             TcpState::Closed | TcpState::Listen => {}
             TcpState::SynSent => self.set_pending_error(SocketError::ConnectionRefused),
@@ -1489,16 +1611,12 @@ impl TcpSocket {
             }
             drop(recv_buf);
 
-            // Wake up any blocking recv() calls
-            if let Some(waker) = self.recv_waker.lock().as_ref() {
-                waker.wake_one();
-            }
-
             if (header.flags() & tcp_flags::FIN != 0) || reassembled_fin {
+                self.rx_notify_pending.store(false, Ordering::SeqCst);
                 self.finish_in_order_fin(src_ip, header, next_seq.wrapping_add(1));
             } else {
-                // Send ACK for the new next_seq (may acknowledge multiple segments)
-                self.send_ack(src_ip, header.src_port, next_seq);
+                // ACK and reader wake are coalesced by the driver RX batch.
+                self.notify_received_data(src_ip, header.src_port, next_seq);
             }
 
             // Update received bytes
@@ -1514,6 +1632,7 @@ impl TcpSocket {
     /// Handle FIN segment
     fn handle_fin(&self, src_ip: Ipv4Address, header: TcpHeader) {
         let current_state = self.get_state();
+        self.rx_notify_pending.store(false, Ordering::SeqCst);
         let expected = self.recv_seq.load(Ordering::SeqCst);
         if header.seq_number != expected {
             if seq_after(header.seq_number, expected) {
@@ -1554,18 +1673,52 @@ impl TcpSocket {
         if seq_before(ack, previous) || seq_after(ack, next) {
             return;
         }
+        let ack_pending = self.ack_input_pending.load(Ordering::SeqCst);
+        if RX_BATCH_DEPTH.load(Ordering::SeqCst) != 0
+            && tcp_send_side_open(self.get_state())
+            && (ack_pending || seq_after(ack, previous))
+            && header.flags() & (tcp_flags::SYN | tcp_flags::FIN | tcp_flags::RST) == 0
+        {
+            let mut deferred = DEFERRED_ACK_SOCKETS.lock();
+            if RX_BATCH_DEPTH.load(Ordering::SeqCst) != 0 {
+                let mut stored = self.deferred_ack_header.lock();
+                if stored
+                    .as_ref()
+                    .is_none_or(|old| seq_after(ack, old.ack_number))
+                {
+                    *stored = Some(*header);
+                }
+                drop(stored);
+                self.ack_input_pending.store(true, Ordering::SeqCst);
+                self.register_ack_deferred_locked(&mut deferred);
+                return;
+            }
+        }
+        self.process_ack_now(header, duplicate_candidate, true);
+    }
+
+    fn process_ack_now(&self, header: &TcpHeader, duplicate_candidate: bool, defer_wake: bool) {
+        let _profile = net_profile::begin(net_profile::Stage::TcpAckInput, 0, 0);
+        let ack = header.ack_number;
+        let previous = self.send_unacked.load(Ordering::SeqCst);
+        let next = self.send_seq.load(Ordering::SeqCst);
+        if seq_before(ack, previous) || seq_after(ack, next) {
+            return;
+        }
         let shift = if header.flags() & tcp_flags::SYN != 0 {
             0
         } else {
             self.peer_window_shift.load(Ordering::SeqCst)
         };
         let (changed, reopened) = {
+            let _profile = net_profile::begin(net_profile::Stage::TcpAckWindow, 0, 0);
             let mut window = self.peer_window.lock();
             let closed = window.bytes == 0;
             let changed =
                 window.update(header.seq_number, ack, (header.window_size as u32) << shift);
             (changed, closed && window.bytes != 0)
         };
+        let _drain_profile = net_profile::begin(net_profile::Stage::TcpAckDrain, 0, 0);
         if seq_after(ack, previous) {
             let mut buffer = self.send_buffer.lock();
             let count = ack.wrapping_sub(previous) as usize;
@@ -1573,9 +1726,12 @@ impl TcpSocket {
             drop(buffer.drain(..count));
             self.send_unacked.store(ack, Ordering::SeqCst);
         }
+        drop(_drain_profile);
+        let _segments_profile = net_profile::begin(net_profile::Stage::TcpAckSegments, 0, 0);
         self.stop_rtt_measurement(ack);
         self.remove_acked_segments(ack);
         let close_changed = self.handle_close_ack(ack);
+        drop(_segments_profile);
         if duplicate_candidate
             && !changed
             && ack == self.last_ack_seq.load(Ordering::SeqCst)
@@ -1607,11 +1763,16 @@ impl TcpSocket {
         // its own read wake. Only changes visible to write/poll readiness need
         // this additional broadcast; duplicates still drive fast retransmit.
         if seq_after(ack, previous) || changed || close_changed {
-            self.notify_write_waiters();
+            let _profile = net_profile::begin(net_profile::Stage::TcpAckNotify, 0, 0);
+            if defer_wake {
+                self.notify_write_waiters();
+            } else {
+                self.notify_write_waiters_now();
+            }
         }
     }
 
-    fn notify_write_waiters(&self) {
+    fn notify_write_waiters_now(&self) {
         if let Some(waker) = self.send_waker.lock().as_ref() {
             waker.wake_all();
         }
@@ -1619,6 +1780,82 @@ impl TcpSocket {
         // must wake that registration even if no response bytes arrived.
         if let Some(waker) = self.recv_waker.lock().as_ref() {
             waker.wake_all();
+        }
+    }
+
+    fn notify_write_waiters(&self) {
+        if RX_BATCH_DEPTH.load(Ordering::SeqCst) != 0 {
+            let mut deferred = DEFERRED_RX_SOCKETS.lock();
+            if RX_BATCH_DEPTH.load(Ordering::SeqCst) != 0 {
+                self.write_notify_pending.store(true, Ordering::SeqCst);
+                self.register_deferred_locked(&mut deferred);
+                return;
+            }
+        }
+        self.notify_write_waiters_now();
+    }
+
+    fn register_deferred_locked(&self, deferred: &mut Vec<Weak<TcpSocket>>) {
+        if !self.deferred_notify_registered.swap(true, Ordering::SeqCst) {
+            deferred.push(self.self_weak.clone());
+        }
+    }
+
+    fn register_ack_deferred_locked(&self, deferred: &mut Vec<Weak<TcpSocket>>) {
+        if !self.ack_deferred_registered.swap(true, Ordering::SeqCst) {
+            deferred.push(self.self_weak.clone());
+        }
+    }
+
+    fn wake_receive_waiter(&self) {
+        let _profile = net_profile::begin(net_profile::Stage::TcpWake, 0, 0);
+        if let Some(waker) = self.recv_waker.lock().as_ref() {
+            waker.wake_one();
+        }
+    }
+
+    /// Acknowledge delivered payload. Driver RX workers defer this per batch so
+    /// a stream of full-sized segments does not need one virtio doorbell and
+    /// scheduler wake per segment. Control and out-of-order paths still send
+    /// their ACKs immediately.
+    fn notify_received_data(&self, dest_ip: Ipv4Address, dest_port: u16, ack_seq: u32) {
+        if RX_BATCH_DEPTH.load(Ordering::SeqCst) != 0 {
+            let mut deferred = DEFERRED_RX_SOCKETS.lock();
+            if RX_BATCH_DEPTH.load(Ordering::SeqCst) != 0 {
+                self.rx_notify_pending.store(true, Ordering::SeqCst);
+                self.register_deferred_locked(&mut deferred);
+                return;
+            }
+        }
+        self.wake_receive_waiter();
+        self.send_ack(dest_ip, dest_port, ack_seq);
+    }
+
+    fn flush_deferred_rx(&self) {
+        let receive_pending = self.rx_notify_pending.swap(false, Ordering::SeqCst);
+        let write_pending = self.write_notify_pending.swap(false, Ordering::SeqCst);
+        if receive_pending {
+            self.wake_receive_waiter();
+            if let Some(dest_ip) = self.remote_ip.lock().clone() {
+                let dest_port = self.remote_port.load(Ordering::SeqCst);
+                if dest_port != 0 && tcp_receive_side_open(self.get_state()) {
+                    self.send_ack(dest_ip, dest_port, self.recv_ack.load(Ordering::SeqCst));
+                }
+            }
+        }
+        if write_pending {
+            self.notify_write_waiters_now();
+        }
+    }
+
+    fn flush_deferred_ack_input(&self) {
+        if !self.ack_input_pending.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        if let Some(header) = self.deferred_ack_header.lock().take() {
+            if tcp_send_side_open(self.get_state()) {
+                self.process_ack_now(&header, false, false);
+            }
         }
     }
 
@@ -1788,6 +2025,7 @@ impl TcpSocket {
 
     /// Send ACK packet
     fn send_ack(&self, dest_ip: Ipv4Address, dest_port: u16, ack_seq: u32) {
+        let _profile = net_profile::begin(net_profile::Stage::TcpAckSend, 0, 0);
         let local_port = self.local_port.load(Ordering::SeqCst);
         let send_seq = self.send_seq.load(Ordering::SeqCst);
 
@@ -1835,6 +2073,7 @@ impl TcpSocket {
         if !tcp_receive_side_open(self.get_state()) {
             return;
         }
+        self.rx_notify_pending.store(false, Ordering::SeqCst);
         let dest_ip = match self.remote_ip.lock().clone() {
             Some(ip) => ip,
             None => return,
@@ -1922,6 +2161,7 @@ impl TcpSocket {
         }
 
         header.set_data_offset(TCP_HEADER_SIZE + options.len());
+        let build_profile = net_profile::begin(net_profile::Stage::TcpTxBuild, data.len(), 0);
         let total_len = header.data_offset() + data.len();
         header.window_size = self.wire_receive_window(header.flags() & tcp_flags::SYN != 0);
 
@@ -1953,6 +2193,7 @@ impl TcpSocket {
             control_segment[TCP_HEADER_SIZE..total_len].copy_from_slice(options);
             &control_segment[..total_len]
         };
+        drop(build_profile);
 
         if dest_ip.0[0] == 127 {
             self.bytes_sent.add(segment.len() as u64);
@@ -2010,11 +2251,13 @@ impl TcpSocket {
             .get_layer("ip")
             .ok_or(SocketError::NoRoute)?;
         let segment_len = segment.len();
+        let ip_profile = net_profile::begin(net_profile::Stage::TcpTxIp, segment_len, 0);
         let result = if let Some(packet) = data_segment.take() {
             ip_layer.send_owned(packet, &ip_context, &[])
         } else {
             ip_layer.send(&control_segment[..total_len], &ip_context, &[])
         };
+        drop(ip_profile);
         match result {
             Ok(()) | Err(SocketError::WouldBlock) => {}
             Err(err) => return Err(err),
@@ -2508,12 +2751,16 @@ impl TcpSocket {
     fn remove_acked_segments(&self, ack_seq: u32) {
         let mut unacked = self.unacked_segments.lock();
         let previous_head = unacked.front().map(|segment| segment.seq);
-        // Remove all segments that are fully acknowledged
-        unacked.retain(|seg| {
-            let seg_end = seg.seq.wrapping_add(seg.data.len() as u32);
-            // Keep if not fully acknowledged
-            !is_seq_acknowledged(seg_end, ack_seq)
-        });
+        // ACKs are cumulative and the queue is ordered. Only a fully
+        // acknowledged front segment can be retired, so never rescan the
+        // entire outstanding window for each incoming ACK.
+        while let Some(segment) = unacked.front() {
+            let segment_end = segment.seq.wrapping_add(segment.data.len() as u32);
+            if !is_seq_acknowledged(segment_end, ack_seq) {
+                break;
+            }
+            unacked.pop_front();
+        }
 
         let next_head = unacked.front().map(|segment| segment.seq);
         drop(unacked);

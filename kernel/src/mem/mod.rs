@@ -46,9 +46,17 @@ impl Stack {
     }
 }
 
+/// Debug builds poison the boot stacks to catch overruns. Release builds
+/// leave them zeroed so they live in .bss instead of adding
+/// STACK_SIZE * MAX_NUM_CPUS bytes to every loaded image.
+#[cfg(debug_assertions)]
+const KERNEL_STACK_PATTERN: u32 = 0xdeadbeef;
+#[cfg(not(debug_assertions))]
+const KERNEL_STACK_PATTERN: u32 = 0;
+
 #[unsafe(no_mangle)]
 pub static mut KERNEL_STACK: Stack = Stack {
-    data: [0xdeadbeef; STACK_SIZE / 4 * MAX_NUM_CPUS],
+    data: [KERNEL_STACK_PATTERN; STACK_SIZE / 4 * MAX_NUM_CPUS],
 };
 
 /// Zero the linker-defined BSS during early boot.

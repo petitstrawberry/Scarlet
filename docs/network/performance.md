@@ -400,3 +400,86 @@ started with the new kernel and daemon, retaining HVF/VirGL/audio/video settings
 All desktop services started, and the decoder completed its H.264 bootstrap.
 The root partition SHA-256 matched before/after installation and the GPT was
 unchanged. Interactive performance of this set of changes is pending.
+
+## Batched receive acknowledgements (2026-10-20)
+
+Sampled `/dev/net_profile` timings on a 16 MiB virtio transfer (HVF, four
+vCPUs, host-local QEMU user networking) attributed about **45%** of TCP receive
+time to sending one ACK per full-sized segment. Each ACK traversed the IPv4,
+Ethernet and ARP paths and issued its own virtio transmit doorbell; the TCP
+segment handler itself accounted for roughly 96% of stack dispatch. ACKing
+every segment and waking the reader for every segment also divided the
+application's reads into 1.4 KiB calls.
+
+The virtio and USB-NCM receive workers now open a bounded receive batch.
+In-order payload delivery records the socket in a weak deferred set; one ACK
+and one reader wake are published per **32** segments and again when the batch
+ends. A batch containing a single segment ends immediately, so request/response
+traffic still receives an immediate ACK. Zero-window advertisements,
+out-of-order and duplicate segments, FIN/RST transitions and explicit receive
+window updates retain their immediate ACK paths. Registration and the deferred
+bit are maintained under the same list lock that detaches a batch, so a
+concurrent producer either joins the current batch or queues another one.
+The 32-segment receive cadence is a throughput choice for this local virtual
+backend and is more aggressive than the RFC 1122 guidance for bulk flows; it
+does not delay control, zero-window or out-of-order ACKs, and an isolated
+segment is acknowledged as soon as the hardware queue drains because the batch
+ends immediately.
+
+Uploads have a different optimal cadence: retiring outbound data is deferred
+for only **8** segments so a streaming writer can refill its send buffer
+without waiting for a full receive-notification interval. Only advancing ACKs
+are coalesced; duplicate ACK handling, close transitions and retransmission
+remain immediate. The two deferred sets are independent, so a short ACK batch
+does not make the receive side acknowledge every packet again.
+
+Three send-side costs found in the same profile are also corrected. Cumulative
+ACK processing previously used `retain` over every outstanding segment,
+rescanning up to the full window for each incoming ACK; it now retires fully
+acknowledged segments from the front of the ordered queue. The send buffer and
+unacked segment limit grow from 64 KiB / 256 to 1 MiB / 1,024, allocated on
+demand, so a scaled window is not artificially split by a shorthand send queue.
+The virtio RX queue now stores one `Arc<str>` interface name per interrupt batch
+instead of cloning a `String` for every received packet; an ACK-heavy upload no
+longer allocates one interface name per 60-byte frame.
+
+Batching virtio transmit doorbells across one application write was also tried
+and reverted: it serialized guest publication and host processing and measured
+about 555 Mbps, below the 591 Mbps unbatched result. Descriptor publication and
+doorbells remain per segment.
+
+TSO/GSO was investigated as the remaining upload lever. This QEMU user-network
+peer negotiated features `0x110010020`, which omits `VIRTIO_NET_F_CSUM` and
+`VIRTIO_NET_F_HOST_TSO4`, so the device will not accept segmented super-frames.
+No GSO path is enabled. The measured transmit ceiling is therefore dominated
+by one host ACK per 1460-byte frame and by slirp's per-packet work, not by the
+guest's TCP checksum or segmentation arithmetic.
+
+Same-size 16 MiB transfers, HVF/4 vCPU, payload verified:
+
+| Direction | Before (median) | After (median) |
+| --- | ---: | ---: |
+| Guest receive | 483.5, 536.6, 544.1 (536.6 Mbps) | 2,946.4, 3,069.5, 3,081.3, 3,195.8, 3,271.2 (3,069.5 Mbps) |
+| Guest transmit | 524.2, 524.9, 525.0 (524.9 Mbps) | 531.7, 564.7, 592.5, 592.9, 610.2 (592.9 Mbps) |
+
+Three 64 MiB transfers of the final kernel measured 3,671.2 / 3,735.0 /
+3,810.4 Mbps receive (median **3,735.0 Mbps**) and 626.2 / 642.1 / 648.3 Mbps
+transmit (median **642.1 Mbps**). The corresponding pre-change 64 MiB image
+was not rerun in this session, so the 16 MiB rows are the controlled
+comparison; larger transfers amortize the initial ramp and show the send-buffer
+effect. A longer sample set elsewhere in the session included host-load
+outliers, so only the quiet three-run set above is used for the summary.
+
+The USB-NCM path uses the same wrapper. Three 64 MiB NCM transfers measured
+722.1 / 725.9 / 742.5 Mbps receive and 338.5 / 377.6 / 383.8 Mbps transmit,
+so virtio remains the faster virtual backend.
+
+These are single-stream, host-local slirp measurements. They are not WAN
+throughput, do not establish a Linux comparison, and the occasional outlier
+shows that host load can dominate a single sample.
+
+All **1,529** AArch64 kernel tests passed, including deferred receive-notification
+and coalesced-ACK cases. The host network regression suites passed **65** tests
+(NCM 12, DMA ownership 21, packet 10, worker 5, TCP receive drain 17); the
+drain harness explicitly models the absent loopback peer instead of failing
+extraction. Receipts and logs are under `.build/network-perf/20261020-net-*`.
