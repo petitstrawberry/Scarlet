@@ -147,7 +147,7 @@ identity remains independent of the runtime discovery revision.
 | sgfx | `20bb5b8cc19445520d08c31c3971ac06244bc1d9` |
 | sdk | `9b3a257e02a5fddd37cf785912269a3e8702f10f` |
 | sgfx-core | `040dbb5cf42b75489504e1765183d37f6131f54c` |
-| scarlet-ui | `1b0f08aeb0a7057c9a6d0d7312554372411afff8` |
+| scarlet-ui | `879bedaaf34a10fe156f93449406396092da55f9` |
 | resonara | `ae33ff44e3a246c49351bc719944ce9f7c44a087` |
 | cadence | `318353de2e97733979001b4ad70879a7a6825d61` |
 | carmine | `106809d9a6d5d0ec1a31a1b7b83e41e68878ee89` |
