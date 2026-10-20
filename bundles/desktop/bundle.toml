@@ -297,7 +297,7 @@ to = "/bin/myrica"
 # Myrica owns the WebKit browser and its Linux-view Widevine host recipe.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "559450e207fd2879baa8dc4bf9eb4027be0a5768" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "bbd8f0e4d9a58b4ba3bf40eb6dab8b2d8da91f35" }
 subdir = "platforms/scarlet"
 architectures = ["aarch64"]
 

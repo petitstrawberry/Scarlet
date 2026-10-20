@@ -173,10 +173,13 @@ core, interpreter contract, runtime API, and executable smoke tests.
 
 ### Myrica Widevine setup
 
-The aarch64 desktop bundle includes Myrica's **Widevine** setup screen, also
-available with `myrica --widevine-setup`. It checks CDM loading and initialization
-on a worker and shows installation instructions and **再確認** for missing files
-or dependencies, including Debian's `libnspr4`.
+Myrica's **設定** button opens a separate settings window with category
+navigation. **メディア** contains the Widevine setup status, installation
+instructions, and **再確認** for missing files or dependencies, including
+Debian's `libnspr4`. Settings opens without starting a CDM check. Use
+`myrica --settings` to open it directly; `myrica --widevine-setup` also selects
+the media category and starts a check on a worker. The settings window has its
+own size, focus and presentation lifecycle, independent of the browser page.
 
 Myrica owns the app and host recipe in `platforms/scarlet/bundle.toml` of its
 pinned source. The service is installed at `/usr/libexec/myrica/widevine-host`
@@ -184,9 +187,14 @@ in the **linux-aarch64 view** (native image path
 `/systems/linux-aarch64/usr/libexec/myrica/widevine-host`). The user installs the
 CDM in Debian; its standard locations and the existing `/shared/widevine` CDM
 are discovered automatically. Explicit `MYRICA_WIDEVINE_*` overrides remain
-supported. See [Myrica's installation instructions](https://github.com/petitstrawberry/myrica/blob/559450e207fd2879baa8dc4bf9eb4027be0a5768/README.md#widevine-setup-on-scarlet).
+supported. See [Myrica's installation instructions](https://github.com/petitstrawberry/myrica/blob/bbd8f0e4d9a58b4ba3bf40eb6dab8b2d8da91f35/README.md#widevine-setup-on-scarlet).
 
 Validation on 2026-10-19: native Myrica started the bundled Linux host without
 path overrides, discovered CDM 4.10.2662.3, and reported successful initialization.
 The generated rootfs and the running normal disk contain the same Myrica and
 host SHA256 values recorded in `projects/aarch64-limine-full/scarlet.lock`.
+
+Validation on 2026-10-20: the separate settings scene and its navigation passed
+74 host tests, including page-image lease, fullscreen and viewport isolation.
+Both native windows started in QEMU; the media setup entry also initialized
+CDM 4.10.2662.3 successfully.

@@ -463,7 +463,7 @@ type = "path"
 path = "../../user/std-bin"
 
 [sections.rootfs]
-hash = "sha256:2f16c550e2f8e64d626f3a67aca9362346b3214d2357b188bc87ac70b54a546d"
+hash = "sha256:bece38e03d8691569a58acef62654395d429a36cb0ea60056b74d590f2c04c40"
 
 [[sections.rootfs.layers]]
 kind = "script"
@@ -1343,7 +1343,7 @@ bin = "myrica"
 features = ["backend-webkit-vulkan"]
 default-features = false
 to = "/bin/myrica"
-hash = "sha256:4d0200b1231f43121c6168ffabbe1a9411233b90084383a6170c03f09174318d"
+hash = "sha256:0f5c40cb4d72b2a5624448eb073adca3eddaaf6b7260901630ff9a4b6acd6571"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -1615,7 +1615,7 @@ path = ".scarlet/cache/git/1d707eff8bef4cad/bundle/build-aarch64.sh"
 [[sections.rootfs.layers]]
 kind = "script"
 to = "/"
-hash = "sha256:059a951e157d4c6afd2ffbfc2841abeb8b785383d9e1d4e41580880c7014b004"
+hash = "sha256:f53a82b2a516cde89a6213715a208e53138259d66584a8571e69635d882a60ba"
 
 [sections.rootfs.layers.source]
 type = "path"
