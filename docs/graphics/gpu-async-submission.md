@@ -348,3 +348,136 @@ Both lock sections select this ICD revision. The final ext2 rootfs contains
 the same 3,991,168-byte AArch64 ELF as initramfs staging, SHA-256
 `5cae94c4a5339aff93ae4d154fbecc9208c96806a9f08ae3570db053ba73b96a`.
 The running VM's persistent GPT disk has not been rewritten or restarted.
+
+### Synchronous control waits outside submission state (2026-10-21)
+
+The VirtIO backend now shares an independently locked control transport with
+its mutable submission/presentation state. Resource creation, context/image
+attachment, transfer, readback, synchronous submit and destruction no longer
+hold the device-core IRQ guard through a host response. Preemptible task callers
+sleep on the owned control request's existing completion event. Boot, cleanup
+already under an IRQ guard, and the completion worker itself still poll the
+ring directly; the completion worker must not sleep waiting for itself.
+
+An operation registry retains command/response DMA and the current admission
+barrier independently of the suspended caller. Ordered operations block new
+async admission while retiring earlier ring requests, then publish and kick
+under short guards. Later submissions can follow the published command without
+waiting for its response. Fresh resource setup remains independent of earlier
+GPU checkpoints. Dead callers release unpublished admission reservations;
+published DMA stays owned by the ring until a real response, or quarantined
+there after transport failure. Attachment metadata guards do not cross host
+waits. These driver-level ownership checks do not claim a general solution to
+abandoned syscall-stack ownership elsewhere in the kernel.
+
+Validation uses the normal AArch64 project feature set, with hypervisor off:
+
+```sh
+cd kernel
+CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER=tools/test_aarch64.sh \
+  cargo test --target targets/aarch64-unknown-none-elf.json \
+  --no-default-features --features network,user-fpu,user-vector,limine
+```
+
+All 1,520 tests pass, including six new regressions for independent setup,
+ordered admission, descriptor pressure, exited callers and failed DMA retirement.
+The normal project Release kernel builds. A separate copy-on-write disk boots
+it with HVF, four CPUs, 8 GiB and Cocoa/VirGL using the runner's HVF firmware.
+`sgfx-probe` loads the installed dynamic driver and creates a graphics context.
+`vulkan-canvas-demo --probe` passes all three create/draw/readback/destroy cycles,
+including its two 72,005/72,475-pixel, 1,240-color outputs per cycle.
+
+The installed `myrica-vulkan-probe` passes TLS, all eight I420/NV12 color-space
+cases, presentation-feedback checks and three Ganesh lifecycle cycles, then
+fails `two live frames did not apply backpressure`. The original persistent
+disk kernel (SHA-256
+`6e7db9c3292ee64dca6609f4f2974465381023e7b1fa60331a7ad953ffe4070b`),
+booted against the same copied root, fails at the same assertion. This is not
+a passing full WebCore GPU-page contract result. During shutdown the new run
+reaped SWS with status 132; the baseline reaped SWS with status 143 and another
+child with status 132. Shutdown stress and interactive latency are not
+established by these short runs.
+
+The final built kernel SHA-256 is
+`1ec824627498a4c778cdb16737c6c311ff49533bdd35a3295bdb1f0ac70a9364`.
+The normal persistent disk and installed userspace were not rewritten. The
+validation VMs exited and their copied disks/firmware were removed. No worktrees
+or dependency-cache copies were created. The unrelated `tools/wine/` directory
+was preserved.
+
+Separately, the sibling SGFX checkout reduces duplicate state settings in the
+shared IR recorder before dispatch to any backend. Its source changes, CPU
+workload and validation are recorded in `sgfx/docs/ir-recording-performance.md`.
+They are not part of the installed userspace tested above; consumer Git pins
+still need a coordinated update to select that shared core source identity.
+Frame handoff waits and the display-wide presentation barrier remain unchanged.
+
+
+### Integrated shared recorder and normal image (2026-10-21)
+
+The common SGFX recorder optimization is now selected by Scarlet's userspace
+manifests and the native driver/Vulkan bundles. Published immutable revisions:
+
+| Component | Revision |
+| --- | --- |
+| Shared SGFX core | `77e64a81115d78fab7c63671c2a6c16aac060c05` |
+| SGFX frontend, WGPU, VirGL and Vulkan runtime | `3ae35ccdcef154560f0dc384044f2d9b268f2dba` |
+| Adreno backend used by the frontend | `a3656c79cd24d4dd9c172489514c117f2abfc97f` |
+| ScarletUI | `ec25336241e70d2fcdad186b3b50f8aa449d303a` |
+| Native Myrica | `a9abcc555e978e2cb0e9dae8b96342c487b40434` |
+
+All Rust core consumers in the updated native frontend/UI dependency graph
+resolve to one source identity. Native GPU and Handle types also share Scarlet
+API revision `153ba86112ace49becf3d38a2ae34692b2149cb0`; a first image build
+caught the previous Adreno/UI API split before any persistent disk update.
+The unchanged backend C ABI remains compatible with existing dynamic drivers,
+including Maxwell. No physical Adreno/Maxwell performance result is claimed.
+
+Validation against the published dependencies passes 44 WGPU GPU tests,
+16 frontend tests, 90 serial ScarletUI renderer tests and the AArch64 native
+SWS platform check. Adreno host validation passes 16 code-generation,
+41 backend, 19 preparation and 26 submit-validation tests. The 94/114 core
+and 1,520 kernel results above cover the same implementation.
+
+The ordinary Release build completed with:
+
+```sh
+cargo scarlet image --project projects/aarch64-limine-full --release \
+  --image boot --image rootfs
+```
+
+This rebuilt the normal initramfs, ESP, rootfs, native Myrica, UI applications,
+SGFX driver and ICD, and refreshed the generated project lock. The kernel in
+the assembled ESP matches the Release output, SHA-256
+`d0929b8d2848314357e6dc51794f42465c12d2972d87409b1b0968d700df74b6`.
+
+Persistent disk integration starts from a copy of the existing disk, retaining
+its root filesystem and user files. It applies only the 82 changed package
+files relative to the previous SDK staging tree, verifies every updated file's
+hash and mode, checks ext2 with e2fsck, and replaces the ESP. A pre-existing
+unlinked inode/bitmap inconsistency was repaired in the copy before updating
+files. The resulting root partition hashes to
+`81c8db541a88a4acd8610dc7881402d373c6a2c9cebe552c3932ec5b9141f008`.
+An additional copy boots with HVF, four CPUs, 8 GiB and Cocoa/VirGL.
+`sgfx-probe` selects the rebuilt dynamic VirGL driver, and the rebuilt
+`vulkan-canvas-demo --probe` passes all three create/draw/readback/destroy cycles.
+The rebuilt Myrica probe again passes TLS, eight I420/NV12 color-space cases,
+presentation feedback and three Ganesh lifecycle cycles, then fails the same
+baseline backpressure assertion recorded above. The full Myrica GPU-page
+contract is therefore not a passing result.
+
+The rebuilt `ui-sgfx-showcase --cube --log-fps` also opens through the native
+SGFX backend and submits continuously. Its short logged sample is a functional
+check, not a paired frame-rate benchmark or an interactive-latency result.
+The validation guest shuts down and QEMU exits successfully; SWS is reaped
+with normal termination status 143 in this run.
+
+After validation, the persistent disk was checked against its original whole
+file hash under an exclusive lock, and atomically replaced by the verified
+candidate. The normal boot disk now has SHA-256
+`5aa6fdc4e2f2dfe963cc2aa2d25a285827aa20bce95aa1a1f0732d2d30f0082b`.
+This supersedes the earlier source-only/no-installed-userspace notes above.
+Existing user data is retained. Temporary VM disks, firmware, filesystem
+copies and integration worktrees were removed after preserving the results.
+Unrelated worktrees and user changes, including Myrica's working files,
+Chromebook/Switch platform work and `tools/wine/`, were preserved.

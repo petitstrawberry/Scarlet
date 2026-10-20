@@ -106,7 +106,7 @@ to = "/bin/ui-benchmark"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "879bedaaf34a10fe156f93449406396092da55f9" }
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ec25336241e70d2fcdad186b3b50f8aa449d303a" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
@@ -297,7 +297,7 @@ to = "/bin/myrica"
 # Myrica owns the WebKit browser and its Linux-view Widevine host recipe.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "bbd8f0e4d9a58b4ba3bf40eb6dab8b2d8da91f35" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "a9abcc555e978e2cb0e9dae8b96342c487b40434" }
 subdir = "platforms/scarlet"
 architectures = ["aarch64"]
 
