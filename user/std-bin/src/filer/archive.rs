@@ -1,6 +1,6 @@
 //! Bounded ZIP and TAR browsing/extraction. Extraction creates a new directory;
 //! archive paths, links and special files never select an external destination.
-use crate::filer_operations::native_fs as fs;
+use scarlet_fs as fs;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::filer_operations::{sync_file, validate_name};
+use crate::operations::validate_name;
 
 const MAX_ENTRIES: usize = 20_000;
 const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
@@ -184,7 +184,7 @@ pub fn extract(
     }
     budget.check().map_err(|e| e.to_string())?;
     let destination = directory.join(name);
-    fs::create_dir(&destination).map_err(|e| {
+    std::fs::create_dir(&destination).map_err(|e| {
         if e.kind() == io::ErrorKind::AlreadyExists {
             return format!(
                 "Destination already exists: {}. Choose a new folder name; existing items were kept.",
@@ -227,9 +227,9 @@ pub fn extract(
             }
         }
         for directory in directories.iter().rev() {
-            sync_file(&File::open(destination.join(directory))?)?;
+            File::open(destination.join(directory))?.sync_all()?;
         }
-        sync_file(&File::open(directory)?)?;
+        File::open(directory)?.sync_all()?;
         Ok::<_, io::Error>(())
     })();
     match result {
@@ -341,7 +341,7 @@ fn ensure_directory(root: &Path, relative: &Path) -> io::Result<PathBuf> {
             continue;
         };
         path.push(part);
-        match fs::create_dir(&path) {
+        match std::fs::create_dir(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 let metadata = fs::symlink_metadata(&path)?;
@@ -386,7 +386,7 @@ fn copy_exact(
     }
     if let Some(output) = writer {
         output.flush()?;
-        sync_file(output)?;
+        output.sync_all()?;
     }
     Ok(())
 }

@@ -1,8 +1,4 @@
 //! Bounded screenshot pixels, selection geometry and PNG export.
-#[path = "../desktop_utilities/fs_sync.rs"]
-mod fs_sync;
-#[path = "../desktop_utilities/native_fs.rs"]
-mod native_fs;
 #[cfg(test)]
 use std::fs;
 use std::io::{self, Write};
@@ -153,21 +149,21 @@ impl Pixels {
 }
 
 pub fn destination_exists(path: &Path) -> bool {
-    native_fs::symlink_metadata(path).is_ok()
+    scarlet_fs::symlink_metadata(path).is_ok()
 }
 
 /// Never replaces an existing path without explicit confirmation. Existing links
 /// and non-regular files are rejected even with confirmation.
 pub fn save_png(image: &Pixels, path: &Path, replace: bool) -> Result<(), String> {
     if !replace {
-        let mut file = native_fs::create_new(path).map_err(|e| e.to_string())?;
+        let mut file = scarlet_fs::create_new(path).map_err(|e| e.to_string())?;
         let result = image
             .encode_png(&mut file)
-            .and_then(|()| fs_sync::sync_file(&file).map_err(|e| e.to_string()));
+            .and_then(|()| file.sync_all().map_err(|e| e.to_string()));
         drop(file);
         return finish_or_cleanup(result, path);
     }
-    let metadata = native_fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    let metadata = scarlet_fs::symlink_metadata(path).map_err(|e| e.to_string())?;
     if !metadata.is_file() {
         return Err("Only an existing regular file can be replaced".into());
     }
@@ -182,19 +178,20 @@ pub fn save_png(image: &Pixels, path: &Path, replace: bool) -> Result<(), String
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        let mut file =
-            match native_fs::create_new_with_permissions(&temporary, Some(&metadata.permissions()))
-            {
-                Ok(f) => f,
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(e) => return Err(e.to_string()),
-            };
+        let mut file = match scarlet_fs::create_new_with_permissions(
+            &temporary,
+            Some(&metadata.permissions()),
+        ) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        };
         let result = image
             .encode_png(&mut file)
-            .and_then(|()| fs_sync::sync_file(&file).map_err(|e| e.to_string()));
+            .and_then(|()| file.sync_all().map_err(|e| e.to_string()));
         drop(file);
         let result =
-            result.and_then(|()| native_fs::rename(&temporary, path).map_err(|e| e.to_string()));
+            result.and_then(|()| std::fs::rename(&temporary, path).map_err(|e| e.to_string()));
         return finish_or_cleanup(result, &temporary);
     }
     Err("Could not reserve a temporary PNG file".into())
@@ -213,7 +210,7 @@ fn finish_or_cleanup(result: Result<(), String>, path: &Path) -> Result<(), Stri
     #[cfg(not(target_os = "scarlet"))]
     match result {
         Ok(()) => Ok(()),
-        Err(error) => match native_fs::remove_file(path) {
+        Err(error) => match std::fs::remove_file(path) {
             Ok(()) => Err(error),
             Err(cleanup) => Err(format!(
                 "{error}; partial output remains at {}: {cleanup}",

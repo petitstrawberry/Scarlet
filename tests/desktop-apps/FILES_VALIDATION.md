@@ -1,9 +1,9 @@
 # Files validation and supported behavior
 
-The production sources are `user/std-bin/src/filer.rs`, `filer_details.rs`,
-`filer_listing.rs`, `filer_operations.rs`, `filer_archive.rs`, `filer_usage.rs`,
-and `filer_workers.rs`.
-The shared filesystem adapter is `desktop_utilities/native_fs.rs`.
+The application entry point is `user/std-bin/src/filer/main.rs`. Its `archive`,
+`details`, `listing`, `operations`, `usage`, `workers`, `icons` and `picker_filter`
+modules live alongside it. Shared filesystem capabilities are supplied by the
+`scarlet-fs` library in `user/lib/scarlet-fs`; ordinary I/O uses `std::fs`.
 
 ## Blocking native extraction regression for Mac handoff
 
@@ -220,7 +220,7 @@ code. The median in this workspace was **162.352 ms before / 9.514 ms after
 latency measurement.
 
 ```sh
-rustc --test --edition 2024 -O user/std-bin/src/filer_listing.rs \
+rustc --test --edition 2024 -O user/std-bin/src/filer/listing.rs \
   -o /tmp/filer-listing-benchmark
 /tmp/filer-listing-benchmark --ignored --nocapture
 ```

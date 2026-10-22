@@ -6,15 +6,9 @@
 //! intact; no copy-and-delete fallback is permitted. Symbolic links are copied
 //! as links and never traversed by recursive work.
 
-#[path = "desktop_utilities/native_fs.rs"]
-pub(crate) mod native_fs;
-use native_fs as fs;
+use scarlet_fs as fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-
-#[path = "desktop_utilities/fs_sync.rs"]
-mod fs_sync;
-pub(crate) use fs_sync::sync_file;
 
 const MAX_ITEMS: usize = 100_000;
 const MAX_DEPTH: usize = 64;
@@ -72,7 +66,7 @@ pub fn execute(operation: &Operation) -> Result<String, String> {
         Operation::NewFolder { directory, name } => {
             validate_name(name)?;
             let path = directory.join(name);
-            fs::create_dir(&path)
+            std::fs::create_dir(&path)
                 .map_err(|error| format!("Cannot create {}: {error}", path.display()))?;
             Ok(format!("Created {name}"))
         }
@@ -146,9 +140,9 @@ fn transfer(source: &Path, destination: &Path, cut: bool) -> Result<(), String> 
     let metadata = fs::symlink_metadata(source)
         .map_err(|error| format!("Cannot read {}: {error}", source.display()))?;
     if metadata.is_dir() {
-        let canonical_source = fs::canonicalize(source).map_err(|error| error.to_string())?;
+        let canonical_source = std::fs::canonicalize(source).map_err(|error| error.to_string())?;
         let parent = destination.parent().ok_or("Invalid destination")?;
-        let canonical_parent = fs::canonicalize(parent).map_err(|error| error.to_string())?;
+        let canonical_parent = std::fs::canonicalize(parent).map_err(|error| error.to_string())?;
         if canonical_parent.starts_with(&canonical_source) {
             return Err("A folder cannot be copied or moved into itself".into());
         }
@@ -174,7 +168,7 @@ fn inspect_tree(path: &Path, depth: usize, count: &mut usize) -> io::Result<()> 
     check_budget(depth, count)?;
     let metadata = fs::symlink_metadata(path)?;
     if metadata.is_dir() {
-        for child in fs::read_dir(path)? {
+        for child in std::fs::read_dir(path)? {
             inspect_tree(&child?.path(), depth + 1, count)?;
         }
     } else if !metadata.is_file() && !metadata.file_type().is_symlink() {
@@ -191,9 +185,9 @@ fn copy_tree(source: &Path, destination: &Path, depth: usize, count: &mut usize)
     if metadata.file_type().is_symlink() {
         copy_symlink(source, destination)
     } else if metadata.is_dir() {
-        fs::create_dir(destination)?;
+        std::fs::create_dir(destination)?;
         let result = (|| {
-            for child in fs::read_dir(source)? {
+            for child in std::fs::read_dir(source)? {
                 let child = child?;
                 copy_tree(
                     &child.path(),
@@ -203,7 +197,7 @@ fn copy_tree(source: &Path, destination: &Path, depth: usize, count: &mut usize)
                 )?;
             }
             fs::set_permissions(destination, metadata.permissions())?;
-            sync_file(&fs::open_read_nofollow(destination)?)
+            fs::open_read_nofollow(destination)?.sync_all()
         })();
         match result {
             Err(error) => match remove_tree(destination) {
@@ -226,11 +220,11 @@ fn copy_tree(source: &Path, destination: &Path, depth: usize, count: &mut usize)
             io::copy(&mut input, &mut output)?;
             output.flush()?;
             fs::set_permissions(destination, metadata.permissions())?;
-            sync_file(&output)
+            output.sync_all()
         })();
         drop(output);
         match result {
-            Err(error) => match fs::remove_file(destination) {
+            Err(error) => match std::fs::remove_file(destination) {
                 Ok(()) => Err(error),
                 Err(cleanup) => Err(io::Error::other(format!(
                     "{error}. Partial copy remains at {}: {cleanup}",
@@ -248,13 +242,13 @@ fn copy_tree(source: &Path, destination: &Path, depth: usize, count: &mut usize)
 
 #[cfg(unix)]
 fn copy_symlink(source: &Path, destination: &Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(fs::read_link(source)?, destination)
+    std::os::unix::fs::symlink(std::fs::read_link(source)?, destination)
 }
 
 #[cfg(target_os = "scarlet")]
 fn copy_symlink(source: &Path, destination: &Path) -> io::Result<()> {
     use std::ffi::CString;
-    let target = fs::read_link(source)?;
+    let target = std::fs::read_link(source)?;
     let destination = CString::new(destination.as_os_str().as_encoded_bytes())
         .map_err(|_| io::Error::other("Invalid link path"))?;
     let target = CString::new(target.as_os_str().as_encoded_bytes())
@@ -291,7 +285,7 @@ fn remove_tree(path: &Path) -> io::Result<()> {
     if fs::symlink_metadata(path)?.is_dir() {
         fs::remove_dir_all(path)
     } else {
-        fs::remove_file(path)
+        std::fs::remove_file(path)
     }
 }
 

@@ -20,9 +20,6 @@
 //! `X-Scarlet-Background=/path/to/cover.jpg` and
 //! `X-Scarlet-BackgroundBlur=none|full|label`.
 
-#[path = "../desktop_utilities/native_fs.rs"]
-pub(crate) mod native_fs;
-
 use std::collections::BTreeSet;
 use std::format;
 use std::fs::{self, File};
@@ -457,12 +454,12 @@ fn app_path(root: &str, relative: &str) -> Result<String, &'static str> {
     let mut path = std::path::PathBuf::from(root);
     for part in relative.split('/') {
         path.push(part);
-        let metadata = native_fs::symlink_metadata(&path).map_err(|_| "Missing app file")?;
+        let metadata = scarlet_fs::symlink_metadata(&path).map_err(|_| "Missing app file")?;
         if metadata.file_type().is_symlink() {
             return Err("App symlinks are unsupported");
         }
     }
-    if !native_fs::symlink_metadata(&path)
+    if !scarlet_fs::symlink_metadata(&path)
         .map_err(|_| "Missing app file")?
         .is_file()
     {
@@ -543,7 +540,7 @@ fn parse_app(root: &str, filename: &str, content: String) -> Result<DesktopEntry
     }
     words[0] = app_path(root, &words[0])?;
     let mut executable =
-        native_fs::open_read_nofollow(&words[0]).map_err(|_| "Missing app executable")?;
+        scarlet_fs::open_read_nofollow(&words[0]).map_err(|_| "Missing app executable")?;
     let mut header = [0u8; 20];
     executable
         .read_exact(&mut header)
@@ -593,7 +590,7 @@ fn directory(path: &str) -> Result<Vec<fs::DirEntry>, &'static str> {
 
 /// Validate one finished app with the same descriptor and executable semantics
 /// used by catalog reload. The containing directory name is checked by callers.
-pub(crate) fn validate_app_directory(root: &str) -> Result<DesktopEntry, &'static str> {
+pub fn validate_app_directory(root: &str) -> Result<DesktopEntry, &'static str> {
     validate_app_directory_with_limit(root, 100_000)
 }
 
@@ -601,7 +598,7 @@ fn validate_app_directory_with_limit(
     root: &str,
     max_root_entries: usize,
 ) -> Result<DesktopEntry, &'static str> {
-    let metadata = native_fs::symlink_metadata(root).map_err(|_| "Missing app directory")?;
+    let metadata = scarlet_fs::symlink_metadata(root).map_err(|_| "Missing app directory")?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err("App must be a real directory");
     }
@@ -623,7 +620,7 @@ fn validate_app_directory_with_limit(
         }
     }
     let file = descriptor.ok_or("App requires exactly one desktop descriptor")?;
-    if !native_fs::symlink_metadata(file.path())
+    if !scarlet_fs::symlink_metadata(file.path())
         .map_err(|_| "Failed to inspect app descriptor")?
         .is_file()
     {
@@ -631,7 +628,7 @@ fn validate_app_directory_with_limit(
     }
     let filename = file.file_name().to_string_lossy().into_owned();
     let mut content = String::new();
-    native_fs::open_read_nofollow(file.path())
+    scarlet_fs::open_read_nofollow(file.path())
         .map_err(|_| "Failed to open app descriptor")?
         .take(1024 * 1024 + 1)
         .read_to_string(&mut content)
@@ -666,7 +663,7 @@ fn collect_catalog(legacy: &str, applications: &str) -> Result<Vec<DesktopEntry>
         }
         catalog.push(entry);
     }
-    if let Ok(metadata) = native_fs::symlink_metadata(applications) {
+    if let Ok(metadata) = scarlet_fs::symlink_metadata(applications) {
         if metadata.file_type().is_symlink() {
             return Err("Application root must be a real directory");
         }

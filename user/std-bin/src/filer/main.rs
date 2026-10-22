@@ -5,13 +5,13 @@
 //! switch into picker mode through sbus without embedding picker UI in the
 //! calling application.
 
-mod file_icons;
-mod filer_archive;
-mod filer_details;
-mod filer_listing;
-mod filer_operations;
-mod filer_usage;
-mod filer_workers;
+mod icons;
+mod archive;
+mod details;
+mod listing;
+mod operations;
+mod usage;
+mod workers;
 mod picker_filter;
 
 use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -46,8 +46,8 @@ use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
 
-use file_icons::{FileKind, icon_for_entry};
-use filer_operations::{History, Operation};
+use icons::{FileKind, icon_for_entry};
+use operations::{History, Operation};
 
 const APP_ID: &str = DESKTOP_FILES_APP_ID;
 const PICKER_WINDOW_KEY: &str = "picker";
@@ -79,7 +79,7 @@ static STANDALONE_PICKER: AtomicBool = AtomicBool::new(false);
 static PREVIEW_ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn move_supported() -> bool {
-    filer_operations::native_fs::require_noreplace_move().is_ok()
+    scarlet_fs::require_noreplace_move().is_ok()
 }
 
 #[derive(Clone)]
@@ -254,7 +254,7 @@ fn enqueue_directory_job(job: DirectoryJob) -> std::io::Result<()> {
     }
     // One worker and one pending request per browser, even while typing or
     // navigating quickly. Generation checks reject the obsolete in-flight read.
-    filer_workers::spawn("files-directory", || {
+    workers::spawn("files-directory", || {
         loop {
             let job = mutex_lock(&PENDING_DIRECTORY_JOBS).pop_front();
             match job {
@@ -378,7 +378,7 @@ fn ensure_thumbnail_worker() -> bool {
         return true;
     }
 
-    match filer_workers::spawn("files-thumbnails", || {
+    match workers::spawn("files-thumbnails", || {
         loop {
             let job = mutex_lock(&PENDING_THUMBNAIL_JOBS).pop_front();
             let Some(job) = job else {
@@ -587,13 +587,13 @@ struct FilerApp {
     details_destination: State<String>,
     details_name: State<String>,
     details_status: State<String>,
-    details_usage: State<Option<filer_usage::Usage>>,
+    details_usage: State<Option<usage::Usage>>,
     details_usage_rows: State<Vec<(String, u64)>>,
     details_width: State<f32>,
     browser_width: State<f32>,
     picker_width: State<f32>,
-    details_index: State<Option<Arc<filer_archive::Index>>>,
-    details_entries: State<Vec<filer_archive::Entry>>,
+    details_index: State<Option<Arc<archive::Index>>>,
+    details_entries: State<Vec<archive::Entry>>,
     details_selected: State<Option<usize>>,
     details_last_click: State<Option<(usize, Instant)>>,
     details_columns: State<usize>,
@@ -688,14 +688,14 @@ impl FilerApp {
 
     fn submit_location(&self) {
         self.location_focus.set(0);
-        match filer_operations::location_path(
+        match operations::location_path(
             Path::new(&self.current_path.get()),
             &self.location.get(),
             Path::new(&home_path()),
         ) {
             Ok(path) => {
-                let resolved = filer_operations::native_fs::canonicalize(&path).and_then(|path| {
-                    if filer_operations::native_fs::metadata(&path)?.is_dir() {
+                let resolved = std::fs::canonicalize(&path).and_then(|path| {
+                    if scarlet_fs::metadata(&path)?.is_dir() {
                         Ok(path)
                     } else {
                         Err(std::io::Error::other("Enter a folder path"))
@@ -838,7 +838,7 @@ impl FilerApp {
     }
 
     fn open_entry(&self, path: String) {
-        if filer_archive::supported(Path::new(&path)) {
+        if archive::supported(Path::new(&path)) {
             self.show_details_path(path, true);
             return;
         }
@@ -846,7 +846,7 @@ impl FilerApp {
         self.status.set(opening_status.clone());
 
         let status = self.status.clone();
-        if let Err(error) = filer_workers::spawn("files-open", move || {
+        if let Err(error) = workers::spawn("files-open", move || {
             let result = open_desktop_path(&path);
 
             if let Err(error) = result
@@ -878,7 +878,7 @@ impl FilerApp {
     }
 
     fn rename_selected(&self) {
-        if let Err(error) = filer_operations::native_fs::require_noreplace_move() {
+        if let Err(error) = scarlet_fs::require_noreplace_move() {
             self.status.set(error.to_string());
             return;
         }
@@ -910,7 +910,7 @@ impl FilerApp {
 
     fn copy_selected(&self, cut: bool) {
         if cut {
-            if let Err(error) = filer_operations::native_fs::require_noreplace_move() {
+            if let Err(error) = scarlet_fs::require_noreplace_move() {
                 self.status.set(error.to_string());
                 return;
             }
@@ -949,7 +949,7 @@ impl FilerApp {
         };
         let name = self.prompt_name.get();
         if !matches!(prompt, FilePrompt::Delete(_)) {
-            if let Err(error) = filer_operations::validate_name(&name) {
+            if let Err(error) = operations::validate_name(&name) {
                 self.prompt_error.set(error);
                 return;
             }
@@ -974,14 +974,14 @@ impl FilerApp {
         self.status.set(String::from("Working…"));
         let instance_id = self.directory_read_instance.get();
         let directory = self.current_path.get();
-        if let Err(error) = filer_workers::spawn("files-operation", move || {
+        if let Err(error) = workers::spawn("files-operation", move || {
             let cut_source = match &operation {
                 Operation::Transfer {
                     source, cut: true, ..
                 } => Some(source.clone()),
                 _ => None,
             };
-            let result = filer_operations::execute(&operation);
+            let result = operations::execute(&operation);
             mutex_lock(&PENDING_OPERATIONS).push(OperationResult {
                 instance_id,
                 directory,
@@ -1405,7 +1405,7 @@ impl FilerApp {
                 self.picker_status.set(String::from(message));
                 return;
             }
-            if request.save_mode && filer_operations::native_fs::symlink_metadata(&path).is_ok() {
+            if request.save_mode && scarlet_fs::symlink_metadata(&path).is_ok() {
                 if !replace_confirmed
                     || self.picker_overwrite.get().as_deref() != Some(path.as_str())
                 {
@@ -1874,7 +1874,7 @@ impl Application for FilerApp {
     fn on_window_close_requested(&mut self, context: &WindowContext) -> bool {
         if context.scene_key.as_str() == PICKER_WINDOW_KEY {
             self.complete_picker(false, false);
-        } else if context.scene_key.as_str() == filer_details::WINDOW_KEY {
+        } else if context.scene_key.as_str() == details::WINDOW_KEY {
             if self.details_busy.get() {
                 self.cancel_details(true);
                 return false;
@@ -1960,7 +1960,7 @@ impl Application for FilerApp {
             .open_at_launch(picker_open_at_launch);
 
         let details_window = Window::new("File Details", self.details_page())
-            .scene_key(filer_details::WINDOW_KEY)
+            .scene_key(details::WINDOW_KEY)
             .app_id(APP_ID)
             .size(Size::new(820.0, 620.0))
             .min_size(Size::new(680.0, 500.0))
@@ -2496,8 +2496,8 @@ fn read_entries_with_options(
     sort_index: usize,
 ) -> std::io::Result<Vec<FileEntry>> {
     let mut entries = Vec::new();
-    for entry in filer_listing::read_directory(path, query, show_hidden, sort_index)? {
-        let filer_listing::Entry {
+    for entry in listing::read_directory(path, query, show_hidden, sort_index)? {
+        let listing::Entry {
             name,
             path,
             is_directory,

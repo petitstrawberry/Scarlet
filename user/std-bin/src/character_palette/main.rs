@@ -1,5 +1,4 @@
 //! Searchable Unicode palette with real asynchronous desktop clipboard access.
-#[path = "character_palette/catalog.rs"]
 mod catalog;
 use catalog::{CATEGORIES, Entry, codepoints, search};
 use scarlet_ui::clipboard::{ClipboardHandle, TextClipboard};

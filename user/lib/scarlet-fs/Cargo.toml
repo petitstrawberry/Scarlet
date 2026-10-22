@@ -1,0 +1,9 @@
+[package]
+name = "scarlet-fs"
+version = "1.0.0"
+edition = "2024"
+description = "Filesystem capabilities extending the Scarlet standard library"
+
+[target.'cfg(target_os = "scarlet")'.dependencies]
+scarlet-abi = { path = "../scarlet-abi" }
+scarlet-sys = { path = "../scarlet-sys" }

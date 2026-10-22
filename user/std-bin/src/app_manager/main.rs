@@ -1,8 +1,4 @@
 //! Install and remove finished native Scarlet applications.
-#[allow(dead_code)]
-#[path = "stemd/desktop.rs"]
-mod desktop_catalog;
-#[path = "app_manager/model.rs"]
 mod model;
 
 use model::AppInfo;

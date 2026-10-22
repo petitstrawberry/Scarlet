@@ -25,7 +25,7 @@ stemd consists of these modules:
 |--------|------|----------------|
 | Main | `user/std-bin/src/stemd/main.rs` | Config parsing, service lifecycle, process reaping |
 | Protocol | `user/std-bin/src/stemd/protocol.rs` | IPC command definitions and payload builders |
-| Desktop | `user/std-bin/src/stemd/desktop.rs` | XDG .desktop file parser and app registry |
+| Desktop | `user/lib/scarlet-apps/src/lib.rs` | XDG .desktop file parser and app registry |
 | Log daemon | `user/std-bin/src/logd.rs` | Bounded journal, filtering, and live queries |
 | Log protocol | `user/lib/log-protocol/src/lib.rs` | Shared framed wire types and limits |
 
@@ -163,7 +163,7 @@ When run from an interactive shell, stemd forks once and the parent exits immedi
 
 - Main: `user/std-bin/src/stemd/main.rs`
 - Protocol: `user/std-bin/src/stemd/protocol.rs`
-- Desktop parser: `user/std-bin/src/stemd/desktop.rs`
+- Desktop parser: `user/lib/scarlet-apps/src/lib.rs`
 - Log daemon: `user/std-bin/src/logd.rs`
 - Log query tool: `user/std-bin/src/logctl.rs`
 - Log wire protocol: `user/lib/log-protocol/src/lib.rs`

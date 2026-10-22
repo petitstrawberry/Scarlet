@@ -7,6 +7,7 @@ publish = false
 [workspace]
 
 [dependencies]
+scarlet-fs = { path = "../../user/lib/scarlet-fs" }
 scarlet-abi = { path = "../../user/lib/scarlet-abi" }
 scarlet-sys = { path = "../../user/lib/scarlet-sys" }
 

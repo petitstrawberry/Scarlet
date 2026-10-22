@@ -37,6 +37,6 @@ The filter matcher and acceptance rules can be tested on a host without Scarlet
 IPC or graphics:
 
 ```sh
-rustc --edition 2024 --test user/std-bin/src/picker_filter.rs -o /tmp/picker-filter-tests
+rustc --edition 2024 --test user/std-bin/src/filer/picker_filter.rs -o /tmp/picker-filter-tests
 /tmp/picker-filter-tests
 ```

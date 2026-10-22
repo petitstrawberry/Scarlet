@@ -1,12 +1,12 @@
 //! Run only in a disposable Scarlet environment with a writable /tmp.
-#[path = "../../user/std-bin/src/filer_archive.rs"]
-mod filer_archive;
-#[path = "../../user/std-bin/src/filer_operations.rs"]
-mod filer_operations;
-#[path = "../../user/std-bin/src/filer_usage.rs"]
-mod filer_usage;
-#[path = "../../user/std-bin/src/filer_workers.rs"]
-mod filer_workers;
+#[path = "../../user/std-bin/src/filer/archive.rs"]
+mod archive;
+#[path = "../../user/std-bin/src/filer/operations.rs"]
+mod operations;
+#[path = "../../user/std-bin/src/filer/usage.rs"]
+mod usage;
+#[path = "../../user/std-bin/src/filer/workers.rs"]
+mod workers;
 
 use std::io::{self, Write};
 use std::sync::atomic::AtomicBool;
@@ -15,11 +15,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::temp_dir().join(format!("files-worker-smoke-{}", std::process::id()));
     std::fs::create_dir(&root)?;
     let archive = root.join("fixture.zip");
-    let mut output = filer_operations::native_fs::create_new(&archive)?;
+    let mut output = scarlet_fs::create_new(&archive)?;
     output.write_all(include_bytes!("fixture.zip"))?;
     drop(output);
-    let worker = filer_workers::spawn("files-smoke-archive", move || {
-        filer_archive::inspect(&archive, &AtomicBool::new(false))
+    let worker = workers::spawn("files-smoke-archive", move || {
+        archive::inspect(&archive, &AtomicBool::new(false))
     })?;
     let index = worker
         .join()
@@ -32,11 +32,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let folder = root.join("Documents");
     std::fs::create_dir(&folder)?;
-    let mut note = filer_operations::native_fs::create_new(folder.join("note.txt"))?;
+    let mut note = scarlet_fs::create_new(folder.join("note.txt"))?;
     note.write_all(b"fixture")?;
     drop(note);
-    let worker = filer_workers::spawn("files-smoke-usage", move || {
-        filer_usage::measure(&folder, &AtomicBool::new(false))
+    let worker = workers::spawn("files-smoke-usage", move || {
+        usage::measure(&folder, &AtomicBool::new(false))
     })?;
     let usage = worker
         .join()

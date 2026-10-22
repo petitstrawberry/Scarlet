@@ -91,7 +91,7 @@ fn compare_software_raster_and_sgfx_mesh_preparation() {
             software.as_secs_f64() * 1e6 / ITERATIONS as f64,
             sgfx.as_secs_f64() * 1e6 / ITERATIONS as f64,
             pixels.len(),
-            task_manager_graph::MAX_VERTICES * std::mem::size_of::<SgfxCanvasVertex>()
+            graph::MAX_VERTICES * std::mem::size_of::<SgfxCanvasVertex>()
         );
     }
 }

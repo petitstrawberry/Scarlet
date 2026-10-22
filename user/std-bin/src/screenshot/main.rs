@@ -1,13 +1,9 @@
 //! SWS one-shot screenshot capture, region selection and arrow annotation.
 #[cfg(target_os = "scarlet")]
-#[path = "screenshot/capture.rs"]
 mod capture;
-#[path = "screenshot/model.rs"]
 mod model;
-#[path = "screenshot/worker.rs"]
 mod worker;
 #[cfg(any(target_os = "scarlet", test))]
-#[path = "screenshot/transport.rs"]
 mod transport;
 use model::{Pixels, Region};
 use scarlet_ui::graphics::Canvas;

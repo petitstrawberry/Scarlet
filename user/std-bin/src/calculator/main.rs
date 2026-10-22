@@ -1,8 +1,8 @@
 //! Desktop calculator with an editable expression, reusable history and units.
 
-mod calculator_model;
+mod model;
 
-use calculator_model::{CATEGORIES, convert, evaluate, format_value, units};
+use model::{CATEGORIES, convert, evaluate, format_value, units};
 use scarlet_ui::clipboard::{ClipboardHandle, TextClipboard};
 use scarlet_ui::prelude::*;
 use scarlet_ui::views::Either;
@@ -173,7 +173,7 @@ impl CalculatorApp {
         let end = snapshot.selection.end().byte;
         if snapshot.text.get(start..end).is_none()
             || snapshot.text.len() - (end - start) + text.len()
-                > calculator_model::MAX_EXPRESSION_BYTES
+                > model::MAX_EXPRESSION_BYTES
         {
             self.notice
                 .set("Clipboard text exceeds the 512-byte input limit".into());
@@ -264,7 +264,7 @@ impl CalculatorApp {
         if !expression.is_char_boundary(start) || !expression.is_char_boundary(end) {
             return;
         }
-        if expression.len() - (end - start) + text.len() > calculator_model::MAX_EXPRESSION_BYTES {
+        if expression.len() - (end - start) + text.len() > model::MAX_EXPRESSION_BYTES {
             self.error
                 .set("Expression is too long (maximum 512 bytes)".into());
             return;
@@ -464,7 +464,7 @@ impl CalculatorApp {
             return;
         }
         let unsigned = text.strip_prefix("−(").and_then(|s| s.strip_suffix(')'));
-        if unsigned.is_none() && text.len() + "−()".len() > calculator_model::MAX_EXPRESSION_BYTES
+        if unsigned.is_none() && text.len() + "−()".len() > model::MAX_EXPRESSION_BYTES
         {
             self.error
                 .set("Expression is too long to change sign".into());
@@ -635,7 +635,7 @@ impl CalculatorApp {
         let end = selection.end().byte.min(text.len());
         if !text.is_char_boundary(start)
             || !text.is_char_boundary(end)
-            || text.len() - (end - start) + value.len() > calculator_model::MAX_EXPRESSION_BYTES
+            || text.len() - (end - start) + value.len() > model::MAX_EXPRESSION_BYTES
         {
             return;
         }
@@ -676,7 +676,7 @@ impl CalculatorApp {
                     text.strip_prefix("−(").and_then(|s| s.strip_suffix(')'))
                 {
                     value.to_owned()
-                } else if text.len() + "−()".len() <= calculator_model::MAX_EXPRESSION_BYTES {
+                } else if text.len() + "−()".len() <= model::MAX_EXPRESSION_BYTES {
                     format!("−({text})")
                 } else {
                     return;
@@ -1116,7 +1116,7 @@ mod tests {
         app.conversion_action("⌫");
         app.conversion_action("7");
         assert_eq!(app.amount.get(), "×2");
-        let full = "1".repeat(calculator_model::MAX_EXPRESSION_BYTES);
+        let full = "1".repeat(model::MAX_EXPRESSION_BYTES);
         app.amount.set(full.clone());
         app.amount_selection
             .set(TextSelection::collapsed(full.len()));
@@ -1128,21 +1128,21 @@ mod tests {
     #[test]
     fn sign_wrapper_accounts_for_utf8_bytes_at_expression_limit() {
         let app = CalculatorApp::new();
-        let text = "1".repeat(calculator_model::MAX_EXPRESSION_BYTES - 4);
+        let text = "1".repeat(model::MAX_EXPRESSION_BYTES - 4);
         app.set_expression(text.clone());
         app.toggle_sign();
         assert_eq!(app.expression.get(), text);
         assert!(!app.error.get().is_empty());
-        app.set_expression("1".repeat(calculator_model::MAX_EXPRESSION_BYTES - 5));
+        app.set_expression("1".repeat(model::MAX_EXPRESSION_BYTES - 5));
         app.toggle_sign();
         assert_eq!(
             app.expression.get().len(),
-            calculator_model::MAX_EXPRESSION_BYTES
+            model::MAX_EXPRESSION_BYTES
         );
         app.toggle_sign();
         assert_eq!(
             app.expression.get().len(),
-            calculator_model::MAX_EXPRESSION_BYTES - 5
+            model::MAX_EXPRESSION_BYTES - 5
         );
     }
     #[test]

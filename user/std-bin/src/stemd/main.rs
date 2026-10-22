@@ -34,7 +34,7 @@ use std::{
 use sws_client::Connection;
 
 // Import protocol and desktop modules
-mod desktop;
+use scarlet_apps as desktop;
 mod power;
 mod protocol;
 

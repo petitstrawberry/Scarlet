@@ -1,8 +1,4 @@
 //! Document transitions and filesystem operations, independent of the UI.
-#[path = "../desktop_utilities/fs_sync.rs"]
-mod fs_sync;
-#[path = "../desktop_utilities/native_fs.rs"]
-mod native_fs;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::ops::Range;
@@ -119,7 +115,7 @@ impl Session {
 /// Bound disk input before allocating the editor's expanded layout/index caches.
 pub const MAX_OPEN_BYTES: u64 = 16 * 1024 * 1024;
 pub fn read_document(path: &Path) -> io::Result<String> {
-    let metadata = native_fs::metadata(path)?;
+    let metadata = scarlet_fs::metadata(path)?;
     if !metadata.is_file() {
         return Err(io::Error::other("Only regular text files can be opened"));
     }
@@ -146,15 +142,15 @@ pub fn read_document(path: &Path) -> io::Result<String> {
 /// New files are visible while writing because native no-replace rename is unavailable.
 /// Existing symlinks keep their identity; save their resolved target instead.
 pub fn save_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let target = match native_fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => native_fs::canonicalize(path)?,
+    let target = match scarlet_fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(path)?,
         Ok(_) => path.to_path_buf(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => path.to_path_buf(),
         Err(e) => return Err(e),
     };
     save_staged(&target, |file| {
         file.write_all(contents)?;
-        fs_sync::sync_file(file)
+        file.sync_all()
     })
 }
 
@@ -164,7 +160,7 @@ fn save_staged(path: &Path, write: impl FnOnce(&mut fs::File) -> io::Result<()>)
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let metadata = match native_fs::metadata(path) {
+    let metadata = match scarlet_fs::metadata(path) {
         Ok(meta) if meta.is_file() => Some(meta),
         Ok(_) => {
             return Err(io::Error::new(
@@ -176,7 +172,7 @@ fn save_staged(path: &Path, write: impl FnOnce(&mut fs::File) -> io::Result<()>)
         Err(e) => return Err(e),
     };
     if metadata.is_none() {
-        let mut file = native_fs::create_new(path)?;
+        let mut file = scarlet_fs::create_new(path)?;
         let result = write(&mut file);
         drop(file);
         return finish_or_cleanup(result, path);
@@ -189,7 +185,7 @@ fn save_staged(path: &Path, write: impl FnOnce(&mut fs::File) -> io::Result<()>)
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let permissions = metadata.as_ref().map(|meta| meta.permissions());
-        match native_fs::create_new_with_permissions(&candidate, permissions.as_ref()) {
+        match scarlet_fs::create_new_with_permissions(&candidate, permissions.as_ref()) {
             Ok(file) => {
                 temporary = Some((candidate, file));
                 break;
@@ -207,7 +203,7 @@ fn save_staged(path: &Path, write: impl FnOnce(&mut fs::File) -> io::Result<()>)
     let result = (|| {
         write(&mut file)?;
         drop(file);
-        native_fs::rename(&temporary, path)
+        std::fs::rename(&temporary, path)
     })();
     finish_or_cleanup(result, &temporary)
 }
@@ -224,7 +220,7 @@ fn finish_or_cleanup(result: io::Result<()>, path: &Path) -> io::Result<()> {
     #[cfg(not(target_os = "scarlet"))]
     match result {
         Ok(()) => Ok(()),
-        Err(error) => match native_fs::remove_file(path) {
+        Err(error) => match std::fs::remove_file(path) {
             Ok(()) => Err(error),
             Err(cleanup) => Err(io::Error::other(format!(
                 "{error}; partial output remains at {}: {cleanup}",
@@ -449,7 +445,7 @@ mod tests {
         assert!(
             save_staged(&path, |file| {
                 assert_eq!(
-                    native_fs::create_new(&path).unwrap_err().kind(),
+                    scarlet_fs::create_new(&path).unwrap_err().kind(),
                     io::ErrorKind::AlreadyExists
                 );
                 file.write_all(b"partial")?;

@@ -41,7 +41,7 @@ path. Nothing automatically deletes stale recovery directories or a lock left
 after a crash. Closing is blocked while a transaction is active.
 
 The supported Scarlet Rust toolchain must include native std revision
-`26d00a8` or newer. The shared `desktop_utilities/native_fs.rs` supplies remaining
+`26d00a8` or newer. The `scarlet-fs` library in `user/lib/scarlet-fs` supplies remaining
 ABI capabilities such as no-follow opening, atomic exclusive file creation and
 richer permission metadata. Native permission preservation is limited to the
 reported read/write/execute capabilities; existing directory modes cannot be
@@ -75,10 +75,9 @@ removal rollback, ambiguous reload failures and operation locking. No test
 installs into the live `/applications` directory.
 
 The descriptor review harness is preserved at
-`user/std-bin/src/app_manager/benchmark.rs` and validates the actual shared
+`user/lib/scarlet-apps/examples/descriptor_benchmark.rs` and validates the actual shared
 production parser. Run it in the configured development shell with
-`rustc --edition=2024 -O user/std-bin/src/app_manager/benchmark.rs -o /tmp/app-descriptor-benchmark`
-and `/tmp/app-descriptor-benchmark`. After replacing linear duplicate-key scans with a set, one
+`cargo run --release --manifest-path user/lib/scarlet-apps/Cargo.toml --example descriptor_benchmark`. After replacing linear duplicate-key scans with a set, one
 optimized host run on 2026-10-22 measured:
 
 | Unknown unique keys | Descriptor bytes | Validation time |

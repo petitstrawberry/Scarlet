@@ -1833,6 +1833,13 @@ name = "scarlet-abi"
 version = "1.0.0"
 
 [[package]]
+name = "scarlet-apps"
+version = "1.0.0"
+dependencies = [
+ "scarlet-fs",
+]
+
+[[package]]
 name = "scarlet-desktop-app-checks"
 version = "0.1.0"
 dependencies = [
@@ -1844,7 +1851,9 @@ dependencies = [
  "sbus",
  "sbus-client",
  "scarlet-abi",
+ "scarlet-apps",
  "scarlet-desktop-config",
+ "scarlet-fs",
  "scarlet-os",
  "scarlet-sys",
  "scarlet-ui",
@@ -1858,6 +1867,14 @@ dependencies = [
 [[package]]
 name = "scarlet-desktop-config"
 version = "1.0.0"
+
+[[package]]
+name = "scarlet-fs"
+version = "1.0.0"
+dependencies = [
+ "scarlet-abi",
+ "scarlet-sys",
+]
 
 [[package]]
 name = "scarlet-os"

@@ -1,5 +1,5 @@
 //! Bounded, non-following folder size inspection for Files.
-use crate::filer_operations::native_fs as fs;
+use scarlet_fs as fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -31,7 +31,7 @@ pub fn measure(path: &Path, cancelled: &AtomicBool) -> Result<Usage, String> {
     };
     if metadata.is_dir() {
         walker.usage.folders = 1;
-        for entry in fs::read_dir(path).map_err(|error| error.to_string())? {
+        for entry in std::fs::read_dir(path).map_err(|error| error.to_string())? {
             if !walker.available(0) {
                 break;
             }
@@ -114,7 +114,7 @@ impl Walker<'_> {
             }
         } else if metadata.is_dir() {
             self.usage.folders += 1;
-            match fs::read_dir(path) {
+            match std::fs::read_dir(path) {
                 Ok(entries) => {
                     for entry in entries {
                         if !self.available(depth + 1) {

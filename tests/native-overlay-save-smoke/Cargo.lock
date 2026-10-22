@@ -7,10 +7,19 @@ name = "scarlet-abi"
 version = "1.0.0"
 
 [[package]]
+name = "scarlet-fs"
+version = "1.0.0"
+dependencies = [
+ "scarlet-abi",
+ "scarlet-sys",
+]
+
+[[package]]
 name = "scarlet-native-overlay-save-smoke"
 version = "0.1.0"
 dependencies = [
  "scarlet-abi",
+ "scarlet-fs",
  "scarlet-sys",
 ]
 

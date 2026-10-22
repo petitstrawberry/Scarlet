@@ -1,0 +1,8 @@
+[package]
+name = "scarlet-apps"
+version = "1.0.0"
+edition = "2024"
+description = "Scarlet application descriptors, package validation and catalog"
+
+[dependencies]
+scarlet-fs = { path = "../scarlet-fs" }

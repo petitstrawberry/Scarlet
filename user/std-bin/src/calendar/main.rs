@@ -7,16 +7,44 @@ use scarlet_ui::views::Either;
 use scarlet_ui::{KeyCode, hstack, vstack};
 use scarlet_ui_macros::View;
 
-#[path = "calendar/model.rs"]
 mod model;
-#[path = "desktop_utilities/time.rs"]
-#[allow(dead_code)]
-mod time;
+
+#[cfg(target_os = "scarlet")]
+use scarlet_os::time::{local_utc_offset_seconds, system_time_ns};
+
+#[cfg(not(target_os = "scarlet"))]
+fn system_time_ns() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
+}
+
+#[cfg(not(target_os = "scarlet"))]
+fn local_utc_offset_seconds() -> Option<i64> {
+    Some(0)
+}
+
+fn zone_label() -> &'static str {
+    #[cfg(target_os = "scarlet")]
+    {
+        if local_utc_offset_seconds().is_some() {
+            "Local time"
+        } else {
+            "UTC"
+        }
+    }
+    #[cfg(not(target_os = "scarlet"))]
+    {
+        "UTC (host preview)"
+    }
+}
+
 use model::{Date, days_in_month};
 
 fn today() -> Option<Date> {
-    let seconds = i64::try_from(time::system_time_ns()? / 1_000_000_000).ok()?;
-    Date::from_unix_seconds(seconds, time::local_utc_offset_seconds().unwrap_or(0))
+    let seconds = i64::try_from(system_time_ns()? / 1_000_000_000).ok()?;
+    Date::from_unix_seconds(seconds, local_utc_offset_seconds().unwrap_or(0))
 }
 
 #[derive(View, Clone)]
@@ -147,7 +175,7 @@ impl CalendarApp {
                 Text::new(selected.label()).font_size(15.0),
             }.spacing(6.0).alignment(Alignment::Leading).padding(14.0).frame_width(f32::INFINITY).background(palette.surface_variant()),
             Text::new("Arrows  day / week    PgUp / PgDn  month    T  today").font_size(10.0).color(palette.text_secondary()),
-            Text::new(if self.today.get().is_none() { "System date unavailable".into() } else { time::zone_label() }).font_size(10.0).color(palette.text_secondary()),
+            Text::new(if self.today.get().is_none() { "System date unavailable".into() } else { zone_label() }).font_size(10.0).color(palette.text_secondary()),
         }.spacing(12.0).padding(18.0)
             .frame(f32::INFINITY, f32::INFINITY)
             .focusable(self.focused.clone())
@@ -188,9 +216,9 @@ fn main() -> ExitCode {
     thread::spawn(move || {
         loop {
             // Also pick up wall-clock/timezone changes without redrawing every second.
-            let seconds = time::system_time_ns().map(|ns| (ns / 1_000_000_000) as i64);
+            let seconds = system_time_ns().map(|ns| (ns / 1_000_000_000) as i64);
             let delay = seconds.map_or(60, |seconds| {
-                let local = seconds + time::local_utc_offset_seconds().unwrap_or(0);
+                let local = seconds + local_utc_offset_seconds().unwrap_or(0);
                 (86400 - local.rem_euclid(86400)).min(60) as u64
             });
             thread::sleep(Duration::from_secs(delay));

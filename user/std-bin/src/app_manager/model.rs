@@ -1,17 +1,14 @@
 //! Finished `.app` inspection and transactional catalog changes.
 //!
-//! The shared stemd parser owns descriptor semantics. These extra checks cover
+//! The scarlet-apps library owns descriptor semantics. These extra checks cover
 //! the complete distribution tree, including resources and embedded ELF files.
 //! Transactions keep unpublished data outside `*.app`; a failed reload restores
 //! the old tree and reconciles again, including after ambiguous transport errors.
-use crate::desktop_catalog::native_fs as fs;
+use scarlet_fs as fs;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-
-#[path = "../desktop_utilities/fs_sync.rs"]
-mod fs_sync;
 
 const MAX_ITEMS: usize = 100_000;
 const MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
@@ -71,9 +68,9 @@ pub fn inspect(path: &Path) -> Result<AppInfo, String> {
 }
 fn inspect_contents(path: &Path) -> Result<AppInfo, String> {
     real_directory(path)?;
-    let entry = crate::desktop_catalog::validate_app_directory(text_path(path)?)
+    let entry = scarlet_apps::validate_app_directory(text_path(path)?)
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    let executable = crate::desktop_catalog::expand_exec(&entry.exec, &[])
+    let executable = scarlet_apps::expand_exec(&entry.exec, &[])
         .map_err(str::to_string)?
         .into_iter()
         .next()
@@ -119,7 +116,7 @@ impl Tree {
     }
 }
 fn children(path: &Path) -> Result<Vec<std::fs::DirEntry>, String> {
-    let mut entries = fs::read_dir(path)
+    let mut entries = std::fs::read_dir(path)
         .map_err(|e| format!("Cannot list {}: {e}", path.display()))?
         .take(MAX_ITEMS + 1)
         .collect::<Result<Vec<_>, _>>()
@@ -307,13 +304,13 @@ impl OperationLock {
     fn acquire(root: &Path) -> Result<Self, String> {
         real_directory(root)?;
         let lock = root.join(".applications-operation");
-        fs::create_dir(&lock).map_err(|e| format!("Cannot reserve {}: {e}. Another operation may be active; after a crash, inspect this directory before removing its lock.", lock.display()))?;
+        std::fs::create_dir(&lock).map_err(|e| format!("Cannot reserve {}: {e}. Another operation may be active; after a crash, inspect this directory before removing its lock.", lock.display()))?;
         Ok(Self(lock))
     }
 }
 impl Drop for OperationLock {
     fn drop(&mut self) {
-        let _ = fs::remove_dir(&self.0);
+        let _ = std::fs::remove_dir(&self.0);
     }
 }
 fn stage(root: &Path) -> Result<PathBuf, String> {
@@ -323,7 +320,7 @@ fn stage(root: &Path) -> Result<PathBuf, String> {
             std::process::id(),
             NEXT_STAGE.fetch_add(1, Ordering::Relaxed)
         ));
-        match fs::create_dir(&path) {
+        match std::fs::create_dir(&path) {
             Ok(()) => return Ok(path),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(format!("Cannot create staging directory: {e}")),
@@ -357,7 +354,7 @@ fn copy_tree(
         return Err("App acquired a symlink during copying".into());
     }
     if metadata.is_dir() {
-        fs::create_dir(destination).map_err(|e| e.to_string())?;
+        std::fs::create_dir(destination).map_err(|e| e.to_string())?;
         for child in children(source)? {
             copy_tree(
                 &child.path(),
@@ -388,7 +385,9 @@ fn copy_tree(
             return Err("App changed during copying; inspect it again".into());
         }
         output.flush().map_err(|e| e.to_string())?;
-        fs_sync::sync_file(&output).map_err(|e| format!("Cannot synchronize copied file: {e}"))?;
+        output
+            .sync_all()
+            .map_err(|e| format!("Cannot synchronize copied file: {e}"))?;
     } else {
         return Err("Unsupported app file type".into());
     }
@@ -442,7 +441,7 @@ pub fn install(
             return Err("The copied package differs from the inspected source".into());
         }
         absent(&destination)?;
-        fs::rename(&staged_app, &destination).map_err(|e| format!("Cannot publish app: {e}"))
+        std::fs::rename(&staged_app, &destination).map_err(|e| format!("Cannot publish app: {e}"))
     })();
     if let Err(error) = prepared {
         let cleanup = fs::remove_dir_all(&staging);
@@ -455,7 +454,7 @@ pub fn install(
         });
     }
     if let Err(error) = reload() {
-        if let Err(rollback) = fs::rename(&destination, &staged_app) {
+        if let Err(rollback) = std::fs::rename(&destination, &staged_app) {
             return Err(format!(
                 "Catalog reload failed ({error}); rollback failed ({rollback}). App remains at {}. Catalog state is unconfirmed; use Reload catalog",
                 destination.display()
@@ -471,7 +470,7 @@ pub fn install(
         }
         return Err(message);
     }
-    let _ = fs::remove_dir(&staging);
+    let _ = std::fs::remove_dir(&staging);
     Ok(format!(
         "Installed {}. Application catalog reloaded",
         current.name
@@ -500,20 +499,20 @@ pub fn remove(
             .file_name()
             .ok_or("Invalid selected app path")?,
     );
-    if let Err(error) = fs::rename(&selected.path, &removed_app) {
-        let _ = fs::remove_dir(&staging);
+    if let Err(error) = std::fs::rename(&selected.path, &removed_app) {
+        let _ = std::fs::remove_dir(&staging);
         return Err(format!("Cannot remove app: {error}"));
     }
     if let Err(error) = reload() {
         if let Err(rollback) = absent(&selected.path)
-            .and_then(|()| fs::rename(&removed_app, &selected.path).map_err(|e| e.to_string()))
+            .and_then(|()| std::fs::rename(&removed_app, &selected.path).map_err(|e| e.to_string()))
         {
             return Err(format!(
                 "Catalog reload failed ({error}); restore failed ({rollback}). Original files are retained at {}. Catalog state is unconfirmed",
                 removed_app.display()
             ));
         }
-        let _ = fs::remove_dir(&staging);
+        let _ = std::fs::remove_dir(&staging);
         return Err(reconcile_after_rollback(
             &mut reload,
             &format!("Removal cancelled: {error}"),
@@ -538,5 +537,4 @@ pub fn remove(
 }
 
 #[cfg(test)]
-#[path = "tests.rs"]
 mod tests;

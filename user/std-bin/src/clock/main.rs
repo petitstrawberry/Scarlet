@@ -13,10 +13,45 @@ use scarlet_ui::{
 };
 use scarlet_ui_macros::View;
 
-#[path = "clock/model.rs"]
 mod model;
-#[path = "desktop_utilities/time.rs"]
-mod time;
+
+#[cfg(target_os = "scarlet")]
+use scarlet_os::time::{local_utc_offset_seconds, monotonic_time, system_time_ns};
+
+#[cfg(not(target_os = "scarlet"))]
+fn monotonic_time() -> std::time::Duration {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    ORIGIN.get_or_init(std::time::Instant::now).elapsed()
+}
+
+#[cfg(not(target_os = "scarlet"))]
+fn system_time_ns() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
+}
+
+#[cfg(not(target_os = "scarlet"))]
+fn local_utc_offset_seconds() -> Option<i64> {
+    Some(0)
+}
+
+fn zone_label() -> &'static str {
+    #[cfg(target_os = "scarlet")]
+    {
+        if local_utc_offset_seconds().is_some() {
+            "Local time"
+        } else {
+            "UTC"
+        }
+    }
+    #[cfg(not(target_os = "scarlet"))]
+    {
+        "UTC (host preview)"
+    }
+}
+
 use model::{Stopwatch, Timer, TimerPhase, ceil_seconds, format_seconds, parse_duration};
 
 fn presets() -> [(Color, &'static str); 6] {
@@ -75,7 +110,7 @@ impl ClockApp {
     }
 
     fn timer_action(&self) {
-        let now = time::monotonic_time();
+        let now = monotonic_time();
         let phase = self.timer.get().phase(now);
         match phase {
             TimerPhase::Ready => match parse_duration(&self.duration_input.get()) {
@@ -118,7 +153,7 @@ impl ClockApp {
             }
             KeyCode::Space if self.mode.get() == 1 => self.timer_action(),
             KeyCode::Space if self.mode.get() == 2 => self.stopwatch.update(|watch| {
-                let now = time::monotonic_time();
+                let now = monotonic_time();
                 if watch.running() {
                     watch.pause(now);
                 } else {
@@ -138,7 +173,7 @@ impl ClockApp {
     }
 
     fn timer_content(&self) -> impl View + Clone + use<> {
-        let now = time::monotonic_time();
+        let now = monotonic_time();
         let timer = self.timer.get();
         let phase = timer.phase(now);
         let (status, action) = match phase {
@@ -208,7 +243,7 @@ impl ClockApp {
 
     fn stopwatch_content(&self) -> impl View + Clone + use<> {
         let stopwatch = self.stopwatch.get();
-        let elapsed = stopwatch.elapsed(time::monotonic_time());
+        let elapsed = stopwatch.elapsed(monotonic_time());
         let running = stopwatch.running();
         let status = if running {
             "Running"
@@ -234,7 +269,7 @@ impl ClockApp {
             Spacer::new().frame_height(20.0),
             hstack! {
                 Button::new(action).background_color(palette.primary()).text_color(palette.text_inverse()).on_click(move || action_state.update(|watch| {
-                    let now = time::monotonic_time();
+                    let now = monotonic_time();
                     if watch.running() { watch.pause(now); } else { watch.start(now); }
                 })).frame(128.0, 40.0),
                 Button::new("Reset").on_click(move || reset_state.update(Stopwatch::reset)).frame(100.0, 40.0),
@@ -246,7 +281,7 @@ impl ClockApp {
 
     fn clock_content(&self) -> impl View + Clone + use<> {
         let light = self.appearance.get() == 5;
-        let content = if time::system_time_ns().is_some() {
+        let content = if system_time_ns().is_some() {
             Either::A(
                 CanvasView::new(
                     300.0,
@@ -267,7 +302,7 @@ impl ClockApp {
         vstack! {
             content,
             hstack! {
-                Text::new(time::zone_label()).font_size(11.0).color(if light { Color::rgb(50, 50, 65) } else { Color::rgb(215, 215, 225) }),
+                Text::new(zone_label()).font_size(11.0).color(if light { Color::rgb(50, 50, 65) } else { Color::rgb(215, 215, 225) }),
                 Spacer::new(),
                 Button::new("Appearance").font_size(12.0).background_color(Color::TRANSPARENT)
                     .text_color(if light { Color::rgb(50, 50, 65) } else { Color::rgb(215, 215, 225) })
@@ -287,7 +322,7 @@ impl Application for ClockApp {
             2 => Either3::C(self.stopwatch_content()),
             _ => Either3::A(self.clock_content()),
         };
-        let timer_finished = self.timer.get().phase(time::monotonic_time()) == TimerPhase::Finished;
+        let timer_finished = self.timer.get().phase(monotonic_time()) == TimerPhase::Finished;
         let key_app = self.clone();
         scenes! {
             Window::new("Clock", vstack! {
@@ -360,8 +395,8 @@ fn draw_clock(canvas: &mut Canvas, w: u32, h: u32, light: bool) {
     // before drawing the current time.
     canvas.fill_rect(0, 0, w, h, Color::TRANSPARENT);
 
-    let utc_ns = time::system_time_ns().unwrap_or(0);
-    let offset = time::local_utc_offset_seconds().unwrap_or(0);
+    let utc_ns = system_time_ns().unwrap_or(0);
+    let offset = local_utc_offset_seconds().unwrap_or(0);
     let secs = (utc_ns / 1_000_000_000) as i64 + offset;
     let sod = (((secs % 86400) + 86400) % 86400) as u64;
     let hh = (sod / 3600) % 12;
@@ -460,14 +495,14 @@ fn start_updates(app: &ClockApp) {
     thread::spawn(move || {
         let mut previous = None;
         loop {
-            let now = time::monotonic_time();
+            let now = monotonic_time();
             let mode = mode.get();
             let timer = timer.get();
             let stopwatch = stopwatch.get();
             let phase = timer.phase(now);
             let remaining = timer.remaining(now);
             let elapsed = stopwatch.elapsed(now);
-            let wall = time::system_time_ns();
+            let wall = system_time_ns();
             let signature = (
                 mode,
                 if mode == 0 {
@@ -574,28 +609,16 @@ mod tests {
         assert!(shortcut(&app, KeyCode::Char('2')));
         app.duration_input.set("00:00:00".into());
         shortcut(&app, KeyCode::Space);
-        assert_eq!(
-            app.timer.get().phase(time::monotonic_time()),
-            TimerPhase::Ready
-        );
+        assert_eq!(app.timer.get().phase(monotonic_time()), TimerPhase::Ready);
         assert!(!app.error.get().is_empty());
         app.duration_input.set("00:05:00".into());
         shortcut(&app, KeyCode::Space);
-        assert_eq!(
-            app.timer.get().phase(time::monotonic_time()),
-            TimerPhase::Running
-        );
+        assert_eq!(app.timer.get().phase(monotonic_time()), TimerPhase::Running);
         assert!(app.error.get().is_empty());
         shortcut(&app, KeyCode::Space);
-        assert_eq!(
-            app.timer.get().phase(time::monotonic_time()),
-            TimerPhase::Paused
-        );
+        assert_eq!(app.timer.get().phase(monotonic_time()), TimerPhase::Paused);
         shortcut(&app, KeyCode::Char('r'));
-        assert_eq!(
-            app.timer.get().phase(time::monotonic_time()),
-            TimerPhase::Ready
-        );
+        assert_eq!(app.timer.get().phase(monotonic_time()), TimerPhase::Ready);
     }
 
     #[test]
@@ -607,16 +630,8 @@ mod tests {
         shortcut(&app, KeyCode::Space);
         assert!(!app.stopwatch.get().running());
         shortcut(&app, KeyCode::Char('r'));
-        assert!(
-            app.stopwatch
-                .get()
-                .elapsed(time::monotonic_time())
-                .is_zero()
-        );
-        assert_eq!(
-            app.timer.get().phase(time::monotonic_time()),
-            TimerPhase::Ready
-        );
+        assert!(app.stopwatch.get().elapsed(monotonic_time()).is_zero());
+        assert_eq!(app.timer.get().phase(monotonic_time()), TimerPhase::Ready);
         assert!(!app.handle_key(KeyEvent::Pressed {
             keycode: KeyCode::Char('r'),
             modifiers: KeyModifiers::default(),

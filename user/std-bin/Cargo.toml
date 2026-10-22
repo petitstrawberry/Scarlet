@@ -31,6 +31,8 @@ default = ["mp4-aac"]
 mp4-aac = ["dep:symphonia-core", "dep:symphonia-codec-aac"]
 
 [dependencies]
+scarlet-fs = { path = "../lib/scarlet-fs" }
+scarlet-apps = { path = "../lib/scarlet-apps" }
 zip = { version = "2.4.2", default-features = false, features = ["deflate-flate2", "flate2"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 clap = { version = "4.5.32", features = ["derive"] }
@@ -124,11 +126,11 @@ path = "src/sched_bench.rs"
 
 [[bin]]
 name = "task-manager"
-path = "src/task_manager.rs"
+path = "src/task_manager/main.rs"
 
 [[bin]]
 name = "files"
-path = "src/filer.rs"
+path = "src/filer/main.rs"
 
 [[bin]]
 name = "scarlet-shell"
@@ -136,7 +138,7 @@ path = "src/scarlet_shell/main.rs"
 
 [[bin]]
 name = "notepad"
-path = "src/notepad.rs"
+path = "src/notepad/main.rs"
 
 [[bin]]
 name = "date"
@@ -292,7 +294,7 @@ path = "src/json_demo.rs"
 
 [[bin]]
 name = "clock"
-path = "src/clock.rs"
+path = "src/clock/main.rs"
 
 [[bin]]
 name = "sgfx-cube"
@@ -352,24 +354,24 @@ path = "src/sgfx_probe.rs"
 
 [[bin]]
 name = "calculator"
-path = "src/calculator.rs"
+path = "src/calculator/main.rs"
 
 [[bin]]
 name = "calendar"
-path = "src/calendar.rs"
+path = "src/calendar/main.rs"
 
 [[bin]]
 name = "characters"
-path = "src/character_palette.rs"
+path = "src/character_palette/main.rs"
 
 [[bin]]
 name = "screenshot"
-path = "src/screenshot.rs"
+path = "src/screenshot/main.rs"
 
 [[bin]]
 name = "log-viewer"
-path = "src/log_viewer.rs"
+path = "src/log_viewer/main.rs"
 
 [[bin]]
 name = "applications"
-path = "src/app_manager.rs"
+path = "src/app_manager/main.rs"

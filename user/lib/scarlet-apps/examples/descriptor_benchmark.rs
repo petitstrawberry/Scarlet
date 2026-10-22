@@ -1,7 +1,5 @@
 //! Host benchmark for bounded shared package descriptor validation.
-#![allow(dead_code, unused_imports)]
-#[path = "../stemd/desktop.rs"]
-mod desktop;
+use scarlet_apps as desktop;
 
 fn main() {
     let root = std::env::temp_dir().join(format!("astra-app-descriptor-{}", std::process::id()));

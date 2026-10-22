@@ -12,6 +12,8 @@ publish = false
 native-desktop = []
 
 [dependencies]
+scarlet-fs = { path = "../../user/lib/scarlet-fs" }
+scarlet-apps = { path = "../../user/lib/scarlet-apps" }
 zip = { version = "2.4.2", default-features = false, features = ["deflate-flate2", "flate2"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 png = "0.18.1"
@@ -43,44 +45,44 @@ zune-jpeg = { version = "0.5.8", default-features = false }
 
 [[bin]]
 name = "notepad"
-path = "../../user/std-bin/src/notepad.rs"
+path = "../../user/std-bin/src/notepad/main.rs"
 
 [[bin]]
 name = "files"
-path = "../../user/std-bin/src/filer.rs"
+path = "../../user/std-bin/src/filer/main.rs"
 required-features = ["native-desktop"]
 
 [[bin]]
 name = "task-manager"
-path = "../../user/std-bin/src/task_manager.rs"
+path = "../../user/std-bin/src/task_manager/main.rs"
 
 [[bin]]
 name = "clock"
-path = "../../user/std-bin/src/clock.rs"
+path = "../../user/std-bin/src/clock/main.rs"
 
 [[bin]]
 name = "calendar"
-path = "../../user/std-bin/src/calendar.rs"
+path = "../../user/std-bin/src/calendar/main.rs"
 
 [[bin]]
 name = "screenshot"
-path = "../../user/std-bin/src/screenshot.rs"
+path = "../../user/std-bin/src/screenshot/main.rs"
 
 [[bin]]
 name = "log-viewer"
-path = "../../user/std-bin/src/log_viewer.rs"
+path = "../../user/std-bin/src/log_viewer/main.rs"
 
 [[bin]]
 name = "calculator"
-path = "../../user/std-bin/src/calculator.rs"
+path = "../../user/std-bin/src/calculator/main.rs"
 
 [[bin]]
 name = "characters"
-path = "../../user/std-bin/src/character_palette.rs"
+path = "../../user/std-bin/src/character_palette/main.rs"
 
 [[bin]]
 name = "applications"
-path = "../../user/std-bin/src/app_manager.rs"
+path = "../../user/std-bin/src/app_manager/main.rs"
 
 [patch."https://github.com/petitstrawberry/Scarlet"]
 scarlet-abi = { path = "../../user/lib/scarlet-abi" }

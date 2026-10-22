@@ -11,9 +11,7 @@ use scarlet_ui::views::Either;
 use scarlet_ui::{Event, KeyCode, ListView, ScrollView, hstack, vstack};
 use scarlet_ui_macros::View;
 
-#[path = "log_viewer/backend.rs"]
 mod backend;
-#[path = "log_viewer/model.rs"]
 mod model;
 use model::{Entry, Journal, MAX_RECORDS};
 

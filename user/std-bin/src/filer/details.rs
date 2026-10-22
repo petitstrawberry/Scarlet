@@ -10,8 +10,8 @@ struct DetailResult {
     output: std::result::Result<DetailOutput, String>,
 }
 enum DetailOutput {
-    Archive(filer_archive::Index),
-    Usage(filer_usage::Usage),
+    Archive(archive::Index),
+    Usage(usage::Usage),
     Extracted(PathBuf),
 }
 impl FilerApp {
@@ -20,7 +20,7 @@ impl FilerApp {
             .selected_entry()
             .map(|entry| entry.path)
             .unwrap_or_else(|| self.current_path.get());
-        let archive = filer_archive::supported(Path::new(&path));
+        let archive = archive::supported(Path::new(&path));
         self.show_details_path(path, archive);
     }
     pub(super) fn show_details_path(&self, path: String, archive: bool) {
@@ -39,7 +39,7 @@ impl FilerApp {
         self.details_usage.set(None);
         self.details_usage_rows.set(Vec::new());
         self.details_name
-            .set(filer_archive::suggested_folder(Path::new(&path)));
+            .set(archive::suggested_folder(Path::new(&path)));
         self.details_destination.set(
             Path::new(&path)
                 .parent()
@@ -58,11 +58,11 @@ impl FilerApp {
         self.details_close_requested.set(false);
         let (instance, generation, cancelled) = self.begin_details_task();
         open_window(WINDOW_KEY);
-        if let Err(error) = filer_workers::spawn("files-details", move || {
+        if let Err(error) = workers::spawn("files-details", move || {
             let output = if archive {
-                filer_archive::inspect(Path::new(&path), &cancelled).map(DetailOutput::Archive)
+                archive::inspect(Path::new(&path), &cancelled).map(DetailOutput::Archive)
             } else {
-                filer_usage::measure(Path::new(&path), &cancelled).map(DetailOutput::Usage)
+                usage::measure(Path::new(&path), &cancelled).map(DetailOutput::Usage)
             };
             mutex_lock(&RESULTS).push(DetailResult {
                 instance,
@@ -107,7 +107,7 @@ impl FilerApp {
             return;
         };
         let name = self.details_name.get();
-        if let Err(error) = filer_operations::validate_name(&name) {
+        if let Err(error) = operations::validate_name(&name) {
             self.details_status.set(error);
             return;
         }
@@ -116,11 +116,11 @@ impl FilerApp {
         let (instance, generation, cancelled) = self.begin_details_task();
         self.details_status
             .set("Validating and extracting into a new folder…".into());
-        if let Err(error) = filer_workers::spawn("files-extract", move || {
-            let output = filer_operations::native_fs::canonicalize(&directory)
+        if let Err(error) = workers::spawn("files-extract", move || {
+            let output = std::fs::canonicalize(&directory)
                 .map_err(|error| format!("Cannot open destination folder: {error}"))
                 .and_then(|directory| {
-                    filer_archive::extract(
+                    archive::extract(
                         Path::new(&archive),
                         &directory,
                         &name,
@@ -363,7 +363,7 @@ impl FilerApp {
         let extract = self.clone();
         let cells = self.clone();
         let columns = self.details_columns.clone();
-        let grid=GridView::new(self.details_entries.clone(),self.details_selected.clone(),5,110.0,move |index,entry:filer_archive::Entry,selected| {
+        let grid=GridView::new(self.details_entries.clone(),self.details_selected.clone(),5,110.0,move |index,entry:archive::Entry,selected| {
             let app=cells.clone();
             let name=Path::new(&entry.path).file_name().unwrap_or_default().to_string_lossy().into_owned();
             let background=if selected==Some(index) {ColorPalette::default().primary_light().with_opacity(0.2)} else {Color::CLEAR};

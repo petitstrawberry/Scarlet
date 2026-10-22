@@ -1,5 +1,4 @@
 //! Scarlet Desktop text editor with guarded document transitions and asynchronous I/O.
-#[path = "notepad/document.rs"]
 mod document;
 
 use document::{Operation, PendingAction, Session, Ticket};

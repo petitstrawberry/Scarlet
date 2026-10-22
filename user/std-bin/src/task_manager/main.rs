@@ -28,9 +28,9 @@ use scarlet_ui::{
 };
 use scarlet_ui_macros::View;
 
-mod task_manager_graph;
+mod graph;
 #[cfg(test)]
-mod task_manager_graph_bench;
+mod graph_bench;
 use std::process::ExitCode;
 
 const APP_ID: &str = "org.scarlet-os.desktop.task-manager";
@@ -55,7 +55,7 @@ const DEVICE_CARD_HEIGHT: f32 = 332.0;
 const THERMAL_CARD_HEIGHT: f32 = 160.0;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(750);
 const MAX_TASKS: usize = 8_192;
-const CPU_HISTORY_CAPACITY: usize = task_manager_graph::HISTORY_CAPACITY;
+const CPU_HISTORY_CAPACITY: usize = graph::HISTORY_CAPACITY;
 const SCHED_UTIL_SCALE: u32 = 1_024;
 
 const TASK_PID_COLUMN_WIDTH: f32 = 48.0;
@@ -1430,7 +1430,7 @@ impl ElementRenderObject for UsageGraphRenderObject {
                 };
             let mut vertices = Vec::with_capacity(vertex_count);
             let rgba = |color: Color| [color.r, color.g, color.b, color.a];
-            task_manager_graph::emit_vertices(
+            graph::emit_vertices(
                 &self.view.history,
                 size.width,
                 size.height,
@@ -1438,7 +1438,7 @@ impl ElementRenderObject for UsageGraphRenderObject {
                 rgba(self.view.line),
                 |position, color| vertices.push(SgfxCanvasVertex::new(position, color)),
             );
-            debug_assert!(vertices.len() <= task_manager_graph::MAX_VERTICES);
+            debug_assert!(vertices.len() <= graph::MAX_VERTICES);
             let mesh = SgfxMesh::with_handle(self.mesh_handle, self.revision, vertices);
             let frame = SgfxCanvasFrame::new(self.revision, self.view.background)
                 .reference_aspect(size.width / size.height)

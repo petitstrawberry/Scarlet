@@ -3546,6 +3546,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "scarlet-apps"
+version = "1.0.0"
+dependencies = [
+ "scarlet-fs",
+]
+
+[[package]]
 name = "scarlet-codecs"
 version = "1.0.0"
 
@@ -3562,6 +3569,14 @@ version = "1.0.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?rev=74b92fe8c43ba71467dd70083411c4574de01079#74b92fe8c43ba71467dd70083411c4574de01079"
 dependencies = [
  "scarlet-std",
+]
+
+[[package]]
+name = "scarlet-fs"
+version = "1.0.0"
+dependencies = [
+ "scarlet-abi",
+ "scarlet-sys",
 ]
 
 [[package]]
@@ -3631,7 +3646,9 @@ dependencies = [
  "sbus 1.0.0",
  "sbus-client 1.0.0",
  "scarlet-abi",
+ "scarlet-apps",
  "scarlet-desktop-config 1.0.0",
+ "scarlet-fs",
  "scarlet-os",
  "scarlet-sys",
  "scarlet-ui",

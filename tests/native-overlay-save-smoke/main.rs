@@ -2,8 +2,7 @@
 #![allow(dead_code)]
 #[path = "../../user/std-bin/src/notepad/document.rs"]
 mod document;
-#[path = "../../user/std-bin/src/desktop_utilities/native_fs.rs"]
-mod native_fs;
+use scarlet_fs as native_fs;
 
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};

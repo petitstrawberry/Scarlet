@@ -2,26 +2,32 @@
 //!
 //! Ordinary metadata/canonicalization/sync fixes belong to the supported Rust
 //! toolchain (Scarlet Rust 26d00a8 or newer), not application workarounds. This
-//! adapter retains richer permission metadata, atomic exclusive creation and
+//! library retains richer permission metadata, atomic exclusive creation and
 //! explicit policies for operations the native ABI cannot safely provide.
 //! Native metadata exposes only coarse R/W/X flags. File creation retains those
 //! capabilities for the owner; it cannot reproduce POSIX ownership, group bits,
 //! ACLs or extended attributes. Existing permissions cannot be changed.
 //! Native recursive deletion fails rather than simulate an anchored unlink
 //! primitive. Atomic no-replace rename requires native operation 419.
-#![allow(dead_code, unused_imports)]
-pub use std::fs::{
-    File, ReadDir, canonicalize, create_dir, read_dir, read_link, remove_dir, remove_file, rename,
-};
+//!
+//! Use `std::fs` directly for ordinary file I/O. This crate adds capabilities
+//! required by multiple applications without re-exporting the standard library.
+//! Host implementations support preview and validation builds; unsupported
+//! operations return `ErrorKind::Unsupported` instead of weakening the contract.
+#![deny(unsafe_op_in_unsafe_fn)]
+
+use std::fs::File;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 // The supported native toolchain maps filesystem errno to the same ErrorKind
 // values as the host. Older environment toolchains must not run these apps.
+#[cfg(any(target_os = "scarlet", test))]
 fn errno(error: i32) -> io::Error {
     io::Error::from_raw_os_error(error)
 }
 
+#[cfg(any(target_os = "scarlet", test))]
 fn checked(result: usize) -> io::Result<usize> {
     if (result as isize) < 0 {
         Err(errno(
@@ -38,10 +44,11 @@ fn checked(result: usize) -> io::Result<usize> {
 fn rename_unavailable() -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
-        "Atomic move and rename are unavailable on this system. The original was kept; use Copy instead.",
+        "Atomic no-replace rename is unavailable on this system",
     )
 }
 
+#[cfg(any(target_os = "scarlet", test))]
 fn rename_probe_supported(result: usize) -> bool {
     // New kernels reject the reserved flag before dereferencing either null
     // pathname. Old kernels return -1 for an unknown native operation. Neither
@@ -49,6 +56,7 @@ fn rename_probe_supported(result: usize) -> bool {
     result == (-22isize) as usize
 }
 
+#[cfg(any(target_os = "scarlet", test))]
 fn checked_rename(result: usize) -> io::Result<()> {
     if result == usize::MAX || result == (-38isize) as usize {
         return Err(rename_unavailable());
@@ -168,7 +176,7 @@ pub fn open_read_nofollow(path: impl AsRef<Path>) -> io::Result<File> {
 mod native {
     use super::*;
     use scarlet_abi::fs::*;
-    use scarlet_sys::{RawFileMetadata, Syscall, syscall1, syscall2, syscall3, syscall4};
+    use scarlet_sys::{RawFileMetadata, Syscall, syscall3, syscall4};
     use std::ffi::CString;
     use std::os::fd::FromRawFd;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -363,7 +371,7 @@ mod native {
         let path = path.as_ref();
         let metadata = symlink_metadata(path)?;
         if metadata.file_type().is_symlink() {
-            return remove_file(path);
+            return std::fs::remove_file(path);
         }
         if !metadata.is_dir() {
             return Err(io::Error::new(
@@ -371,10 +379,10 @@ mod native {
                 "Expected a folder",
             ));
         }
-        match remove_dir(path) {
+        match std::fs::remove_dir(path) {
             Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "Deleting nonempty folders is unavailable until Scarlet supports safe directory-relative removal; no contents were removed",
+                "Recursive removal requires directory-relative unlink support",
             )),
             result => result,
         }

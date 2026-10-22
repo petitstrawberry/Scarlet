@@ -1,8 +1,7 @@
 //! Native-only smoke fixture. Run in a booted Scarlet environment with writable
 //! /tmp and the ordinary /dev mount. All successful mutations use a unique /tmp
 //! directory; the cross-mount /dev destination is never created or removed.
-#[path = "../../user/std-bin/src/desktop_utilities/native_fs.rs"]
-mod native_fs;
+use scarlet_fs as native_fs;
 
 use scarlet_abi::fs::*;
 use scarlet_sys::{Syscall, syscall2, syscall3};
