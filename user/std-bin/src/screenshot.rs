@@ -4,6 +4,8 @@
 mod capture;
 #[path = "screenshot/model.rs"]
 mod model;
+#[path = "screenshot/worker.rs"]
+mod worker;
 #[cfg(any(target_os = "scarlet", test))]
 #[path = "screenshot/transport.rs"]
 mod transport;
@@ -29,6 +31,16 @@ struct Runtime {
     minimize: bool,
     restore: bool,
     viewport: (u32, u32),
+}
+
+fn finish_worker_start(
+    runtime: &Arc<Mutex<Runtime>>,
+    started: std::io::Result<std::thread::JoinHandle<()>>,
+    failed: impl FnOnce(String) -> ResultMessage,
+) {
+    if let Err(error) = started {
+        runtime.lock().unwrap().result = Some(failed(format!("Cannot start worker: {error}")));
+    }
 }
 #[derive(View, Clone)]
 struct ScreenshotApp {
@@ -127,13 +139,15 @@ impl ScreenshotApp {
         self.confirm.set(None);
         self.status.set("Saving PNG…".into());
         let runtime = self.runtime.get();
-        std::thread::spawn(move || {
+        let completed = runtime.clone();
+        let started = worker::spawn("screenshot-save", move || {
             let result = pixels
                 .crop(selected)
                 .and_then(|image| model::save_png(&image, Path::new(&path), replace))
                 .map(|()| format!("Saved {path}"));
-            runtime.lock().unwrap().result = Some(ResultMessage::Save(result));
+            completed.lock().unwrap().result = Some(ResultMessage::Save(result));
         });
+        finish_worker_start(&runtime, started, |error| ResultMessage::Save(Err(error)));
     }
     fn point(&self, x: i32, y: i32) -> Option<(u32, u32)> {
         let image = self.pixels.get()?;
@@ -433,11 +447,13 @@ impl Application for ScreenshotApp {
                     self.status.set(format!("Cannot hide capture window: {e}"));
                     return;
                 }
-                std::thread::spawn(move || {
+                let completed = shared.clone();
+                let started = worker::spawn("screenshot-capture", move || {
                     std::thread::sleep(std::time::Duration::from_millis(350));
                     let result = capture::capture();
-                    shared.lock().unwrap().result = Some(ResultMessage::Capture(result));
+                    completed.lock().unwrap().result = Some(ResultMessage::Capture(result));
                 });
+                finish_worker_start(&shared, started, |error| ResultMessage::Capture(Err(error)));
             }
             #[cfg(not(target_os = "scarlet"))]
             {
@@ -549,6 +565,72 @@ fn main() {
 mod tests {
     use super::*;
     use scarlet_ui::KeyCode;
+
+    fn spawn_failure() -> std::io::Result<std::thread::JoinHandle<()>> {
+        Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "thread limit"))
+    }
+
+    #[test]
+    fn failed_save_worker_start_releases_busy_and_keeps_unsaved_image() {
+        let mut app = ScreenshotApp::new();
+        app.install(Pixels::new(2, 1, vec![0; 8]).unwrap());
+        let pixels = app.pixels.get().unwrap();
+        let selection = app.selection.get();
+        app.guard.set(2);
+        app.busy.set(true);
+        finish_worker_start(&app.runtime.get(), spawn_failure(), |error| {
+            ResultMessage::Save(Err(error))
+        });
+        app.on_idle();
+        assert!(!app.busy.get());
+        assert!(app.dirty.get());
+        assert_eq!(app.guard.get(), 2);
+        assert!(Arc::ptr_eq(&pixels, &app.pixels.get().unwrap()));
+        assert_eq!(app.selection.get(), selection);
+        assert!(app.status.get().contains("Save failed: Cannot start worker"));
+    }
+
+    #[test]
+    fn save_worker_completes_png_and_only_then_clears_dirty_state() {
+        let mut app = ScreenshotApp::new();
+        let image = Pixels::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255]).unwrap();
+        app.install(image.clone());
+        let directory = std::env::temp_dir().join(format!("screenshot-worker-test-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("image.png");
+        app.save(false, path.to_string_lossy().into_owned());
+        assert!(app.busy.get());
+        assert!(app.dirty.get());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.busy.get() {
+            app.on_idle();
+            assert!(std::time::Instant::now() < deadline, "PNG worker timed out");
+            std::thread::yield_now();
+        }
+        assert!(!app.dirty.get());
+        assert_eq!(load_preview(path.to_str().unwrap()).unwrap(), image);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_capture_worker_start_restores_hidden_window_and_keeps_previous_image() {
+        let mut app = ScreenshotApp::new();
+        app.install(Pixels::new(2, 1, vec![0; 8]).unwrap());
+        let pixels = app.pixels.get().unwrap();
+        app.dirty.set(false);
+        app.start_capture();
+        app.runtime.get().lock().unwrap().minimize = false;
+        finish_worker_start(&app.runtime.get(), spawn_failure(), |error| {
+            ResultMessage::Capture(Err(error))
+        });
+        app.on_idle();
+        assert!(!app.busy.get());
+        assert!(app.runtime.get().lock().unwrap().restore);
+        assert!(Arc::ptr_eq(&pixels, &app.pixels.get().unwrap()));
+        assert!(!app.dirty.get());
+        assert!(app.status.get().contains("Cannot start worker"));
+    }
     #[test]
     fn capture_shortcut_reaches_app_from_focused_path_field() {
         use scarlet_ui::event::KeyModifiers;
