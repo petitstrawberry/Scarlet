@@ -2,6 +2,7 @@
 
 use super::super::tmpfs::TmpFS;
 use super::OverlayFS;
+use crate::fs::FileSystemErrorKind;
 use crate::fs::FileSystemOperations;
 use crate::fs::FileType;
 use crate::fs::SeekFrom;
@@ -59,6 +60,47 @@ fn rename_contents(fs: &dyn FileSystemOperations, node: &Arc<dyn crate::fs::VfsN
     let mut bytes = vec![0; node.metadata().unwrap().size];
     assert_eq!(file.read(&mut bytes).unwrap(), bytes.len());
     bytes
+}
+
+#[test_case]
+fn test_overlay_create_rejects_lower_collisions_without_copying_parents() {
+    let (upper, lower, overlay) = rename_fixture();
+    let parent = lower
+        .create(&lower.root_node(), &"home".into(), FileType::Directory, 0o755)
+        .unwrap();
+    let directory = lower
+        .create(&parent, &"extracted".into(), FileType::Directory, 0o755)
+        .unwrap();
+    let marker = rename_file(lower.as_ref(), &directory, "keep.txt", b"keep me");
+    let file = rename_file(lower.as_ref(), &parent, "existing.txt", b"original");
+    let home = overlay.lookup(&overlay.root_node(), &"home".into()).unwrap();
+    for name in ["extracted", "existing.txt"] {
+        for kind in [FileType::Directory, FileType::RegularFile] {
+            let result = overlay.create(&home, &name.into(), kind, 0o755);
+            assert!(matches!(result, Err(e) if e.kind == FileSystemErrorKind::AlreadyExists));
+            assert!(upper.readdir(&upper.root_node()).unwrap().is_empty());
+        }
+    }
+    assert_eq!(rename_contents(lower.as_ref(), &marker), b"keep me");
+    assert_eq!(rename_contents(lower.as_ref(), &file), b"original");
+    // A genuinely new sibling can still create the required upper parents.
+    overlay.create(&home, &"new".into(), FileType::Directory, 0o755).unwrap();
+    assert!(matches!(
+        overlay.create(&home, &"new".into(), FileType::Directory, 0o755),
+        Err(e) if e.kind == FileSystemErrorKind::AlreadyExists
+    ));
+}
+
+#[test_case]
+fn test_overlay_create_allows_whiteouted_lower_file() {
+    let (_, lower, overlay) = rename_fixture();
+    let original = rename_file(lower.as_ref(), &lower.root_node(), "hidden", b"original");
+    let root = overlay.root_node();
+    overlay.remove(&root, &"hidden".into()).unwrap();
+    assert!(overlay.lookup(&root, &"hidden".into()).is_err());
+    let replacement = rename_file(overlay.as_ref(), &root, "hidden", b"new");
+    assert_eq!(rename_contents(overlay.as_ref(), &replacement), b"new");
+    assert_eq!(rename_contents(lower.as_ref(), &original), b"original");
 }
 
 #[test_case]

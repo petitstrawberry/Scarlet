@@ -15,3 +15,7 @@ scarlet-sys = { path = "../../user/lib/scarlet-sys" }
 [[bin]]
 name = "files-worker-smoke"
 path = "main.rs"
+
+[[bin]]
+name = "archive-collision-smoke"
+path = "archive_collision.rs"

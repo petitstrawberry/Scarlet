@@ -1231,6 +1231,30 @@ impl FileSystemOperations for OverlayFS {
         } else {
             format!("{}/{}", overlay_parent.path, name)
         };
+        // Creation is exclusive in the merged namespace, not only in upper.
+        // In particular, mkdir must not shadow a packaged lower directory:
+        // callers such as archive extraction rely on AlreadyExists to preserve
+        // its contents. Check before copying parents or changing whiteouts.
+        if !self.is_whiteout(&child_path) {
+            for (mount, entry) in self.upper.iter().chain(self.lower_layers.iter()) {
+                match self.resolve_in_layer(mount, entry, &child_path) {
+                    Ok(_) => {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::AlreadyExists,
+                            "Entry already exists in overlay",
+                        ));
+                    }
+                    // A parent hidden by an upper directory can be a regular
+                    // file in a lower layer; it has no child to collide with.
+                    Err(error)
+                        if matches!(
+                            error.kind,
+                            FileSystemErrorKind::NotFound | FileSystemErrorKind::NotADirectory
+                        ) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
         // Ensure parent exists in upper layer (copy-up if needed)
         if self.file_exists_in_lower_only(&overlay_parent.path) {
             self.copy_up(&overlay_parent.path)?;
