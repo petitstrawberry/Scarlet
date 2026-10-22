@@ -109,18 +109,19 @@ exercise the native global File/Edit/View menu; a guest without it cannot verify
 the menu API even if the application window renders correctly.
 
 The fixture setup also logs write/sync/rename probes for tmpfs and the initramfs
-overlay root. At the initial validation revision, tmpfs replacement succeeds,
-while overlay replacement returns an error because that driver has no rename
-implementation. Notepad reports the failure, keeps the original document and
-retains the staged output path. This limitation must not be reported as a
-successful save or bypassed by truncating the original. tmpfs success proves the
-application path and syscall behavior, not persistence across reboot.
+overlay root. The initial kernel rejected overlay replacement; the subsequent
+bounded driver change supports same-parent regular files staged in the tmpfs
+upper layer, including replacement of a lower regular destination. The separate
+[overlay save fixture](../native-overlay-save-smoke/README.md) exercises repeated
+actual Notepad saves, retained handles and rejected operations. See the
+[scope and exclusions](OVERLAY_RENAME_AUDIT.md). Neither tmpfs nor this disposable
+overlay fixture proves persistence across reboot.
 
-The global shell's application label retains the initial title (`Untitled —
-Notepad`) after a file opens. In the current source, SWSPlatformWindow passes the
-initial window title as `app_name`, SWS stores that string in `AppSession`, and
-the shell uses the focus event's `app_name` directly to build its menu tree. That
-path does not consult the application catalog. The SWS platform's `set_title`
-method has no protocol implementation; the client-drawn window title updates
-independently. This existing platform limitation does not prevent File/Edit/View
-commands from being exported, displayed or invoked.
+The last captured native menu run retained the initial global label (`Untitled —
+Notepad`) after a file opened, while the client-drawn title updated. Its platform
+`set_title` implementation was a no-op and the shell used the initial focus label;
+the application catalog was not involved. A subsequent title-propagation fix
+uses the existing `SET_WINDOW_TITLE` message, but its final native GUI check was
+deferred at the requested Mac handoff. Rebuild both SWS/shell and the application
+with the matching UI revision before testing Open, Save As, New and focus changes.
+The existing capture verifies visible menus and File → New, not that later fix.

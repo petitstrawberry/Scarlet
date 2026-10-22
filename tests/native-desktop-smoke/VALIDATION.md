@@ -43,10 +43,11 @@ Untitled document and the `New document` status. The native menu path therefore
 was invoked, not merely drawn. Earlier screenshots with the temporary toolbar
 are superseded by this final menu capture.
 
-The minimal overlay root rejected replacing rename while tmpfs succeeded;
+The initial minimal overlay root rejected replacing rename while tmpfs succeeded;
 write and sync succeeded on both. See [the driver audit](OVERLAY_RENAME_AUDIT.md).
-On failure Notepad retained the original and reported the staging path. Existing
-global application-label behavior is documented in the README. The guest used a
+On failure Notepad retained the original and reported the staging path. The final
+guarded overlay fixture subsequently passed as recorded below. Captured global
+application-label behavior is documented in the README. The guest used a
 plain virtio GPU display; this run does not assert hardware acceleration, native
 scrolling performance, persistent-storage durability, or a full desktop image
 validation. TCG input processing sometimes lagged queued input; checks waited
@@ -69,3 +70,45 @@ Session artifacts were kept outside the repository under
 The parent review also uploaded the final menu image to the user's library.
 Rerunning the harness generates equivalent commands, hashes and screenshots at
 the operator's chosen output paths; screenshots are not committed as source.
+
+
+## Final overlay and PNG fixture results
+
+The new `tests/native-overlay-save-smoke` fixture failed as expected on the
+pre-overlay kernel at the first replacing rename (8.656 seconds). The final
+guarded kernel passed in 11.807 seconds with `SCARLET_OVERLAY_SAVE_SMOKE_OK` and
+QEMU exit status zero. This includes two production Notepad staged saves,
+retained source/replaced destination handles, reopened content and inode
+identity, no-replace collision preservation, and rejection of unsupported
+lower-backed sources, directories and whiteouts. The final source snapshot
+preceded a comments-only change in the driver; its functional mount-boundary
+guard was included. The independent kernel suite also passed all 1544 tests,
+including six new overlay regressions.
+
+The production Screenshot PNG worker fixture passed in 8.896 seconds with
+`SCARLET_PNG_WORKER_SMOKE_OK`, including encode/decode pixel checks, collision
+preservation and error paths on the explicit 2 MiB worker stack.
+
+| Final overlay input | SHA-256 |
+| --- | --- |
+| Kernel | `63abb4b7b3c5e30dcc0d04495a45931cad2492d1f53f23bba0349f9157b41878` |
+| Initramfs | `20a9807543011e0dca221d773e4b376757536855c2fe0701d21532d055703e1c` |
+| Native fixture ELF | `a1e47291386e1f46e6831f3ba8445ac8e43523bb0d640d069d4d53dc6bc387da` |
+
+Exact commands, serial output and result JSON remain in
+`/workspace/scratch/native-boot/overlay-save-final-qemu`; original failure logs
+are in `overlay-save-before-qemu`, and PNG results are in `png-qemu`.
+
+## Handoff boundary
+
+An isolated native SWS/shell/Notepad/Files release build completed in 1 minute
+32 seconds with the first title-propagation patch. Review subsequently tightened
+active-window routing and UTF-8 title clipping. The user requested Mac handoff
+before another build or GUI run. Final title commits are UI
+`ab114f399944d5a554a80a1b23c2c58615acafb6` and Scarlet
+`4ffda5fc10fadefe5e2e1b53e984030e3539fa43`, locally committed without pushing.
+Their protocol/model tests and native checks passed, but they have no final
+native visual verification here. Menu-triggered Open/Save/Find and title updates
+on Open, Save As, New, focus changes and same-app background menu/close activity
+remain the next native GUI checks. Earlier shortcut checks and menu-triggered
+New remain valid. No additional Task Manager live-metrics guest was launched.

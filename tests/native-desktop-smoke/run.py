@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import time
@@ -20,9 +21,13 @@ def main():
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--duration", type=int, default=300, help="total runtime, 15–900 seconds")
     parser.add_argument("--screenshot-after", type=int, default=60)
+    parser.add_argument("--program", default="/bin/prepare-desktop", help="absolute guest bootstrap program")
+    parser.add_argument("--expect-marker", help="console fixture success line; uses the existing loader smoke monitor")
     args = parser.parse_args()
-    if not 15 <= args.duration <= 900 or not 0 < args.screenshot_after < args.duration:
+    if not 15 <= args.duration <= 900 or (not args.expect_marker and not 0 < args.screenshot_after < args.duration):
         parser.error("duration must be 15–900 seconds and screenshot must precede its end")
+    if not args.program.startswith("/") or any(c.isspace() for c in args.program):
+        parser.error("program must be one absolute guest path without whitespace")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     # Lock before touching an old boot image or QMP socket. A concurrent run
@@ -39,7 +44,7 @@ def main():
     smoke.create_initramfs(args.staging.resolve(), archive)
     image_command = [str(args.limine_plugin.resolve()), "--arch", "aarch64", "--kernel", str(args.kernel.resolve()),
                      "--initramfs", str(archive), "--output", str(image), "--cache-dir", str(output / "limine-cache"),
-                     "--cmdline", "console=ttyAMA0 init=/init init.console=/dev/tty0 init.exec=/bin/prepare-desktop"]
+                     "--cmdline", f"console=ttyAMA0 init=/init init.console=/dev/tty0 init.exec={args.program}"]
     with (output / "image-build.log").open("wb") as log:
         subprocess.run(image_command, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=180)
     variables = output / "efi-vars.fd"
@@ -63,6 +68,16 @@ def main():
                 "initramfs_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
                 "duration_seconds": args.duration}
     (output / "commands.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    if args.expect_marker:
+        smoke.SUCCESS = re.compile(rb"\n" + re.escape(args.expect_marker.encode()) + rb"\r?\n")
+        smoke.FAILURE = re.compile(rb"\n" + re.escape(args.expect_marker.removesuffix("_OK").encode())
+                                   + rb"_FAIL(?:[ :\r\n]|$)")
+        result = smoke.run_guest(command, output, args.duration)
+        (output / "run-result.json").write_text(json.dumps(result, indent=2) + "\n")
+        print(json.dumps(result), flush=True)
+        if result["result"] != "PASS":
+            raise SystemExit(1)
+        return
     started = time.monotonic()
     with (output / "serial.log").open("wb") as serial, subprocess.Popen(
         command, stdin=subprocess.DEVNULL, stdout=serial, stderr=subprocess.STDOUT

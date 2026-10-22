@@ -1,0 +1,15 @@
+[package]
+name = "scarlet-native-overlay-save-smoke"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+scarlet-abi = { path = "../../user/lib/scarlet-abi" }
+scarlet-sys = { path = "../../user/lib/scarlet-sys" }
+
+[[bin]]
+name = "overlay-save-smoke"
+path = "main.rs"
