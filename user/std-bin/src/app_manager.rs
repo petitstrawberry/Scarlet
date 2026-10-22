@@ -31,6 +31,7 @@ struct Runtime {
 #[derive(Clone, View)]
 struct ApplicationsApp {
     apps: State<Vec<AppInfo>>,
+    fixture_catalog: State<bool>,
     selected: State<usize>,
     source: State<String>,
     inspected: State<Option<AppInfo>>,
@@ -143,8 +144,9 @@ impl ApplicationsApp {
         self.selected.set(selected);
     }
     fn content(&self) -> impl View + Clone {
-        let status = wrap_message(&self.status.get(), 680.0, 14.0);
-        let status_height = (status.lines().count().max(2) as f32 * 20.0).max(76.0);
+        let secondary = Color::rgb(88, 94, 104);
+        let status = wrap_message(&self.status.get(), 664.0, 14.0);
+        let status_height = status.lines().count().max(1) as f32 * 20.0;
         let apps = self.apps.get();
         let current = apps.get(self.selected.get());
         let busy = self.busy.get();
@@ -162,47 +164,85 @@ impl ApplicationsApp {
             .is_some_and(|app| app.path == Path::new(self.source.get().trim()));
         let confirmation = if let Some(app) = self.remove_confirmation.get() {
             Either::A(vstack! {
-                Text::new(format!("Remove {}?", app.name)).font_size(16.0),
-                Text::new(format!("{}\n{}", app.id, app.path.display())).font_size(14.0),
-                Text::new("The package leaves /applications; its files remain in a recovery folder.\nPersonal data, running instances and legacy launcher entries are kept.").font_size(14.0),
+                Text::new(format!("Remove {}?", app.name)).font_size(18.0),
+                Text::new(wrap_message(&format!("{}\n{}", app.id, app.path.display()), 632.0, 14.0)).font_size(14.0),
+                Text::new("The package leaves /applications; its files stay in a recovery folder.\nPersonal data, running apps and legacy launcher entries are kept.").font_size(14.0),
                 hstack! {
-                    Button::new("Remove package").enabled(!busy && native).on_click(move || confirm.remove()),
                     Button::new("Cancel").enabled(!busy).on_click(move || cancel.remove_confirmation.set(None)),
+                    Button::new("Remove package").enabled(!busy && native).on_click(move || confirm.remove()),
                 }.spacing(8.0),
-            }.spacing(6.0).alignment(Alignment::Leading))
+            }.spacing(8.0).alignment(Alignment::Leading).padding(12.0).background(Color::rgb(255, 245, 234)))
         } else {
             Either::B(Spacer::new().frame_height(0.0))
         };
+        let installed = if native || !apps.is_empty() {
+            Either::A(vstack! {
+                hstack! {
+                    Text::new(format!("Installed packages · {}", apps.len())).font_size(18.0), Spacer::new(),
+                    Button::new("Refresh").enabled(!busy && native).on_click(move || refresh.refresh(false)),
+                    Button::new("Reload catalog").enabled(!busy && native).on_click(move || reload.refresh(true)),
+                }.spacing(8.0),
+                Select::new(apps.iter().map(|app| format!("{} — {}", app.name, app.id)).collect(), self.selected.clone())
+                    .placeholder("No installed packages").width(648.0).enabled(!busy && !apps.is_empty()),
+                Text::new(current.map(|app| wrap_message(&format!("{}\n{}\n{} · {} files · {}", app.id, app.path.display(), app.target, app.files, format_bytes(app.bytes)), 648.0, 14.0)).unwrap_or_else(|| "Install a finished .app package below to get started.".into())).font_size(14.0).color(secondary),
+                Button::new("Remove package…").enabled(!busy && native && current.is_some()).on_click(move || remove.request_remove()),
+                confirmation,
+            }.spacing(10.0).alignment(Alignment::Leading).padding(16.0).frame_width(f32::INFINITY).background(Color::rgb(247, 248, 250)))
+        } else {
+            Either::B(vstack! {
+                Text::new("Package inspector").font_size(18.0),
+                Text::new("Inspect a Scarlet .app package on this host.\nInstallation and the live application catalog are available in Scarlet.").font_size(14.0).color(secondary),
+            }.spacing(6.0).alignment(Alignment::Leading).padding(16.0).frame_width(f32::INFINITY).background(Color::rgb(247, 248, 250)))
+        };
+        let result = if let Some(app) = inspected.filter(|_| inspected_matches) {
+            Either::A(vstack! {
+                Text::new(app.name).font_size(20.0),
+                Text::new(wrap_message(&app.id, 648.0, 14.0)).font_size(14.0).color(secondary),
+                Text::new(format!("{}   ·   {} files   ·   {}", app.target, app.files, format_bytes(app.bytes))).font_size(14.0),
+                hstack! {
+                    Text::new("Package structure checked").font_size(14.0).color(secondary), Spacer::new(),
+                    Button::new("Install package").enabled(!busy && native).on_click(move || install.install()),
+                }.spacing(8.0),
+            }.spacing(6.0).alignment(Alignment::Leading).padding(16.0).background(Color::rgb(239, 246, 244)))
+        } else {
+            Either::B(
+                Text::new(
+                    "Choose a finished .app directory to check its contents before installing.",
+                )
+                .font_size(14.0)
+                .color(secondary)
+                .padding(4.0),
+            )
+        };
+        let content_height = if native || !apps.is_empty() {
+            if inspected_matches { 740.0 } else { 580.0 }
+        } else if inspected_matches {
+            600.0
+        } else {
+            460.0
+        };
+        let content_height = content_height - 40.0
+            + status_height
+            + if self.remove_confirmation.get().is_some() {
+                240.0
+            } else {
+                0.0
+            };
         ScrollView::new(vstack! {
-            Text::new("Applications").font_size(24.0),
-            Text::new("Manage native application packages in /applications").font_size(14.0),
+            Text::new(if self.fixture_catalog.get() { "FIXTURE CATALOG · host preview · management disabled" } else if native { "Packages in /applications" } else { "Host preview · package inspection only" }).font_size(14.0).color(secondary),
+            installed,
             vstack! {
-            hstack! {
-                Text::new(if native { format!("Installed packages ({})", apps.len()) } else { "Installed packages (Scarlet only)".into() }).font_size(16.0), Spacer::new(),
-                Button::new("Refresh list").enabled(!busy && native).on_click(move || refresh.refresh(false)),
-                Button::new("Reload catalog").enabled(!busy && native).on_click(move || reload.refresh(true)),
-            }.spacing(8.0),
-            Select::new(apps.iter().map(|app| format!("{} — {}", app.name, app.id)).collect(), self.selected.clone())
-                .placeholder(if native { "No installed packages" } else { "Installed packages are available in Scarlet" }).width(680.0).enabled(!busy && !apps.is_empty()),
-            Text::new(current.map(|app| format!("{}\n{} · {} files · {}", app.path.display(), app.target, app.files, format_bytes(app.bytes))).unwrap_or_else(|| "Only finished .app packages are managed here. Legacy command entries are kept.".into())).font_size(14.0).frame_height(48.0),
-            Button::new("Remove package…").enabled(!busy && native && current.is_some()).on_click(move || remove.request_remove()),
-            confirmation,
-            }.spacing(10.0).alignment(Alignment::Leading),
+                Text::new(if native { "Install a package" } else { "Inspect a package" }).font_size(18.0),
+                hstack! {
+                    TextField::new(self.source.clone()).placeholder("/path/to/application.app").frame(f32::INFINITY, 34.0),
+                    Button::new(if busy { "Working…" } else { "Inspect" }).enabled(!busy && !self.source.get().trim().is_empty()).on_click(move || inspect.inspect()),
+                }.spacing(8.0),
+                result,
+            }.spacing(12.0).alignment(Alignment::Leading),
             Divider::new(),
-            vstack! {
-            Text::new("Install a package").font_size(18.0),
-            Text::new("Enter the path of a finished lowercase-name.app directory.").font_size(14.0),
-            hstack! {
-                TextField::new(self.source.clone()).placeholder("/path/to/application.app").frame(f32::INFINITY, 34.0),
-                Button::new("Inspect package").enabled(!busy && !self.source.get().trim().is_empty()).on_click(move || inspect.inspect()),
-            }.spacing(8.0),
-            Text::new(if inspected_matches { inspected.as_ref().map(|app| format!("{} · {}\n{} · {} files · {}", app.name, app.id, app.target, app.files, format_bytes(app.bytes))).unwrap_or_default() } else { "Inspect the package to check its descriptor, files and native target before installing.".into() }).font_size(14.0).frame_height(48.0),
-            Button::new("Install inspected package").enabled(!busy && native && inspected_matches).on_click(move || install.install()),
-            }.spacing(10.0).alignment(Alignment::Leading),
-            Spacer::new(),
             Text::new(status).font_size(14.0).frame_height(status_height),
-        }.spacing(10.0).alignment(Alignment::Leading).padding(20.0))
-            .content_size(0.0, if self.remove_confirmation.get().is_some() { 820.0 + status_height - 76.0 } else { 650.0 + status_height - 76.0 })
+        }.spacing(20.0).alignment(Alignment::Leading).padding(24.0))
+            .content_size(0.0, content_height)
             .frame(f32::INFINITY, f32::INFINITY)
     }
 }
@@ -289,7 +329,7 @@ impl Application for ApplicationsApp {
             "main",
             Window::new("Applications", self.content())
                 .app_id(APP_ID)
-                .size(Size::new(760.0, 660.0))
+                .size(Size::new(760.0, 560.0))
                 .min_size(Size::new(740.0, 520.0))
                 .resizable(true),
         )
@@ -342,8 +382,32 @@ impl Application for ApplicationsApp {
 }
 fn main() {
     let mut app = ApplicationsApp::new();
-    if let Some(path) = std::env::args().nth(1) {
-        app.source.set(path);
+    let args: Vec<String> = std::env::args().collect();
+    #[cfg(not(target_os = "scarlet"))]
+    if args.get(1).map(String::as_str) == Some("--preview-catalog") {
+        let root = args
+            .get(2)
+            .expect("--preview-catalog requires an explicit fixture directory");
+        match model::installed(Path::new(root)) {
+            Ok(apps) => {
+                app.update_apps(apps);
+                app.fixture_catalog.set(true);
+            }
+            Err(error) => {
+                eprintln!("Fixture catalog: {error}");
+                std::process::exit(1);
+            }
+        }
+        app.status.set("Fixture catalog loaded from the explicit path. Install, removal and catalog reload remain disabled.".into());
+        if let Some(path) = args.get(3) {
+            app.source.set(path.clone());
+        }
+    } else if let Some(path) = args.get(1) {
+        app.source.set(path.clone());
+    }
+    #[cfg(target_os = "scarlet")]
+    if let Some(path) = args.get(1) {
+        app.source.set(path.clone());
     }
     if let Err(error) = app.run() {
         eprintln!("Applications: {error}");
