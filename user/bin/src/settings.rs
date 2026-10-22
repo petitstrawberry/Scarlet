@@ -8,6 +8,9 @@
 extern crate scarlet_std as std;
 extern crate scarlet_ui_macros;
 
+mod settings_support;
+use settings_support::{Autosave, TimezoneCommitError, atomic_write, commit_timezone};
+
 use core::f32;
 use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
@@ -29,8 +32,7 @@ use scarlet_desktop_config::{
     DESKTOP_SETTINGS_SET_STATUS_PREFERENCES_METHOD, StatusItemId, StatusPreferences,
 };
 use scarlet_ui::{
-    HeaderBar, Icon, IconSize, IconView, NavigationLink, State, StateId, hstack, navigation,
-    prelude::*, vstack, zstack,
+    HeaderBar, NavigationLink, State, StateId, hstack, navigation, prelude::*, vstack,
 };
 use scarlet_ui_macros::View;
 use std::format;
@@ -56,7 +58,7 @@ const DEFAULT_BG_PREVIEW: [u8; 3] = [40, 40, 50];
 const DEFAULT_STYLE: BackgroundStyle = BackgroundStyle::GradientLines;
 const SWS_CONFIG_DIR: &str = "/etc/sws";
 const SWS_CONFIG_PATH: &str = "/etc/sws/config.toml";
-const SWS_CONFIG_TEMP_PATH: &str = "/tmp/sws-config.settings.tmp";
+const SWS_CONFIG_TEMP_PATH: &str = "/etc/sws/config.toml.settings.tmp";
 const CURSOR_THEME_ROOT: &str = "/share/cursors";
 const DEFAULT_CURSOR_THEME_PATH: &str = "/share/cursors/default";
 const MAX_SETTINGS_TEXT_BYTES: usize = 64 * 1024;
@@ -548,39 +550,26 @@ fn start_background_picker_request() {
 }
 
 fn start_background_autosave(app: &SettingsApp) {
-    let style = app.background_style.clone();
-    let red = app.red_value.clone();
-    let green = app.green_value.clone();
-    let blue = app.blue_value.clone();
-    let image = app.background_image.clone();
-
+    let app = app.clone();
+    // Capture before spawning so a quick first edit cannot become the baseline.
+    let mut autosave = Autosave::new(app.background_snapshot(), app.background_retry.get());
     thread::spawn(move || {
-        let mut last = (
-            style.get(),
-            [
-                red.get().max(0.0).min(255.0) as u8,
-                green.get().max(0.0).min(255.0) as u8,
-                blue.get().max(0.0).min(255.0) as u8,
-            ],
-            image.get(),
-        );
-
         loop {
-            let current = (
-                style.get(),
-                [
-                    red.get().max(0.0).min(255.0) as u8,
-                    green.get().max(0.0).min(255.0) as u8,
-                    blue.get().max(0.0).min(255.0) as u8,
-                ],
-                image.get(),
-            );
-            if current != last {
-                if save_background_via_service(current.1, current.0, current.2.as_deref()).is_ok() {
-                    last = current;
-                }
-            }
             thread::sleep(Duration::from_millis(100));
+            if let Some((style, color, image)) =
+                autosave.poll(app.background_snapshot(), app.background_retry.get())
+            {
+                app.background_status
+                    .set(String::from("Saving background…"));
+                let result = save_background_via_service(color, style, image.as_deref());
+                app.background_status.set(match result {
+                    Ok(()) => String::from("Background saved"),
+                    Err(error) => format!(
+                        "Background not saved: {:?}. Choose Save Again to retry.",
+                        error
+                    ),
+                });
+            }
         }
     });
 }
@@ -668,7 +657,7 @@ fn audio_output_labels(outputs: &[OutputInfo]) -> Vec<String> {
 
 fn read_limited_text(path: &str) -> core::result::Result<String, &'static str> {
     let mut file = fs::File::open(path).map_err(|_| "failed to open text file")?;
-    let mut content = String::new();
+    let mut content = Vec::new();
     let mut buffer = [0u8; 1024];
 
     loop {
@@ -681,12 +670,10 @@ fn read_limited_text(path: &str) -> core::result::Result<String, &'static str> {
         if content.len().saturating_add(bytes) > MAX_SETTINGS_TEXT_BYTES {
             return Err("text file exceeds settings limit");
         }
-        let chunk =
-            core::str::from_utf8(&buffer[..bytes]).map_err(|_| "text file is not valid UTF-8")?;
-        content.push_str(chunk);
+        content.extend_from_slice(&buffer[..bytes]);
     }
 
-    Ok(content)
+    String::from_utf8(content).map_err(|_| "text file is not valid UTF-8")
 }
 
 fn strip_toml_comment(line: &str) -> &str {
@@ -808,42 +795,42 @@ fn persist_sws_assignment(
     key: &str,
     value: &str,
 ) -> core::result::Result<(), &'static str> {
-    let content = read_limited_text(SWS_CONFIG_PATH).unwrap_or_default();
+    let content = match fs::File::open(SWS_CONFIG_PATH) {
+        Ok(_) => read_limited_text(SWS_CONFIG_PATH)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(_) => return Err("could not read SWS config"),
+    };
     let updated = update_toml_assignment(&content, section, key, value);
     let _ = fs::create_directory(SWS_CONFIG_DIR);
-    let mut file = fs::File::create(SWS_CONFIG_TEMP_PATH)
-        .map_err(|_| "failed to create temporary SWS config")?;
-    if file.write_all(updated.as_bytes()).is_err() || file.flush().is_err() {
-        let _ = fs::remove_file(SWS_CONFIG_TEMP_PATH);
-        return Err("failed to write temporary SWS config");
-    }
-    drop(file);
-    if fs::rename(SWS_CONFIG_TEMP_PATH, SWS_CONFIG_PATH).is_err() {
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        let mut final_file = match options.open(SWS_CONFIG_PATH) {
-            Ok(file) => file,
-            Err(_) => {
-                let _ = fs::remove_file(SWS_CONFIG_TEMP_PATH);
-                return Err("failed to open final SWS config");
-            }
-        };
-        if final_file.write_all(updated.as_bytes()).is_err() || final_file.flush().is_err() {
-            let _ = fs::remove_file(SWS_CONFIG_TEMP_PATH);
-            return Err("failed to replace SWS config");
-        }
-        drop(final_file);
-        let _ = fs::remove_file(SWS_CONFIG_TEMP_PATH);
-    }
-    Ok(())
+    atomic_write(SWS_CONFIG_PATH, SWS_CONFIG_TEMP_PATH, updated.as_bytes())
 }
 
-fn save_output_scale_config(scale_milli: u32) {
-    let value = if scale_milli == 1000 { "1.0" } else { "2.0" };
-    match persist_sws_assignment("output", "scale", value) {
-        Ok(()) => println!("[settings] Saved output scale: {}", scale_milli),
-        Err(error) => println!("[settings] SWS config error: {}", error),
-    }
+fn load_output_scale() -> (usize, String) {
+    let content = match read_limited_text(SWS_CONFIG_PATH) {
+        Ok(content) => content,
+        Err(error) => {
+            if let Err(open_error) = fs::File::open(SWS_CONFIG_PATH) {
+                if open_error.kind() == std::io::ErrorKind::NotFound {
+                    return (
+                        0,
+                        String::from(
+                            "Default scale: 100%. Changes apply after restarting the desktop.",
+                        ),
+                    );
+                }
+            }
+            return (usize::MAX, format!("Saved scale unavailable: {}", error));
+        }
+    };
+    let index = match parse_toml_string_setting(&content, "output", "scale").as_deref() {
+        Some("2") | Some("2.0") => 1,
+        None | Some("1") | Some("1.0") => 0,
+        _ => usize::MAX,
+    };
+    (
+        index,
+        String::from("Saved scale takes effect after restarting the desktop"),
+    )
 }
 
 fn cursor_theme_name(content: &str, fallback: &str) -> String {
@@ -943,6 +930,11 @@ fn enumerate_cities(region: &str) -> Vec<String> {
 }
 
 fn read_current_timezone() -> String {
+    if let Ok(target) = fs::read_link("/etc/localtime") {
+        if let Some(zone) = target.strip_prefix("/usr/share/zoneinfo/") {
+            return String::from(zone);
+        }
+    }
     match fs::File::open("/etc/timezone") {
         Ok(mut file) => {
             let mut buf = [0u8; 128];
@@ -963,22 +955,56 @@ fn read_current_timezone() -> String {
     }
 }
 
-fn save_timezone(zone: &str) {
+fn save_timezone(zone: &str) -> core::result::Result<(), TimezoneCommitError> {
     let target = format!("/usr/share/zoneinfo/{}", zone);
-    let _ = fs::remove_file("/etc/localtime");
-    match fs::create_symlink("/etc/localtime", &target) {
-        Ok(()) => {
-            if let Ok(mut file) = fs::File::create("/etc/timezone") {
-                let _ = file.write(zone.as_bytes());
-            }
-            println!("[settings] Timezone set to {}", zone);
-        }
-        Err(e) => println!("[settings] Failed to set timezone: {:?}", e),
+    let localtime_tmp = "/etc/localtime.settings.tmp";
+    let timezone_tmp = "/etc/timezone.settings.tmp";
+    // Stage a valid link and complete name before touching either working file.
+    if fs::File::open(&target).is_err() {
+        return Err(TimezoneCommitError::Unchanged);
     }
+    let _ = fs::remove_file(localtime_tmp);
+    if fs::create_symlink(localtime_tmp, &target).is_err() {
+        return Err(TimezoneCommitError::Unchanged);
+    }
+    let staged = (|| {
+        let mut file = fs::File::create(timezone_tmp).map_err(|_| ())?;
+        file.write_all(zone.as_bytes()).map_err(|_| ())?;
+        file.flush().map_err(|_| ())
+    })();
+    let result = if staged.is_ok() {
+        commit_timezone(
+            "/etc/localtime",
+            localtime_tmp,
+            "/etc/timezone",
+            timezone_tmp,
+            |source, target| fs::rename(source, target).is_ok(),
+        )
+    } else {
+        Err(TimezoneCommitError::Unchanged)
+    };
+    let _ = fs::remove_file(localtime_tmp);
+    let _ = fs::remove_file(timezone_tmp);
+    result
 }
 
 #[derive(View, Clone)]
 struct SettingsApp {
+    background_style_index: State<usize>,
+    background_preset_index: State<usize>,
+    background_status: State<String>,
+    background_retry: State<u64>,
+    output_scale_index: State<usize>,
+    output_scale_last_good: State<usize>,
+    output_scale_status: State<String>,
+    timezone_active: State<String>,
+    timezone_status: State<String>,
+    clock_format_index: State<usize>,
+    cpu_visible: State<bool>,
+    audio_visible: State<bool>,
+    audio_last_good: State<(f32, bool, usize)>,
+    input_status: State<String>,
+
     background_style: State<BackgroundStyle>,
     background_image: State<Option<String>>,
     background_image_label: State<String>,
@@ -1048,7 +1074,58 @@ impl SettingsApp {
             .map(|theme| format!("Active: {}", theme.name))
             .unwrap_or_else(|| String::from("No cursor themes installed"));
         let (status_preferences, status_preferences_status) = load_status_preferences();
+        let (output_scale_index, output_scale_status) = load_output_scale();
         let app = Self {
+            background_style_index: State::new(
+                StateId::new(27),
+                match style {
+                    BackgroundStyle::GradientLines => 0,
+                    BackgroundStyle::Gradient => 1,
+                    BackgroundStyle::Solid => 2,
+                },
+            ),
+            background_preset_index: State::new(
+                StateId::new(28),
+                PRESET_COLORS
+                    .iter()
+                    .position(|preset| preset.color == color)
+                    .unwrap_or(PRESET_COLORS.len()),
+            ),
+            background_status: State::new(
+                StateId::new(29),
+                String::from("Changes are saved automatically"),
+            ),
+            background_retry: State::new(StateId::new(30), 0),
+            output_scale_index: State::new(StateId::new(31), output_scale_index),
+            output_scale_last_good: State::new(StateId::new(32), output_scale_index),
+            output_scale_status: State::new(StateId::new(33), output_scale_status),
+            timezone_active: State::new(StateId::new(34), current_tz),
+            timezone_status: State::new(
+                StateId::new(35),
+                String::from("Choose a region and city, then apply the time zone"),
+            ),
+            clock_format_index: State::new(
+                StateId::new(36),
+                if status_preferences.clock_format == ClockFormat::TwelveHour {
+                    1
+                } else {
+                    0
+                },
+            ),
+            cpu_visible: State::new(
+                StateId::new(37),
+                status_preferences.is_visible(StatusItemId::Cpu),
+            ),
+            audio_visible: State::new(
+                StateId::new(38),
+                status_preferences.is_visible(StatusItemId::Audio),
+            ),
+            audio_last_good: State::new(
+                StateId::new(39),
+                (audio_volume, audio_muted, audio_output_index),
+            ),
+            input_status: State::new(StateId::new(40), String::new()),
+
             background_style: State::new(StateId::new(0), style),
             background_image: State::new(StateId::new(1), background_image),
             background_image_label: State::new(StateId::new(2), background_image_label),
@@ -1082,15 +1159,90 @@ impl SettingsApp {
         app
     }
 
+    fn background_snapshot(&self) -> (BackgroundStyle, [u8; 3], Option<String>) {
+        (
+            self.background_style.get(),
+            self.current_color(),
+            self.background_image.get(),
+        )
+    }
+
     fn save_config(&self) {
-        let color = self.current_color();
-        let style = self.background_style.get();
-        let image = self.background_image.get();
-        if let Err(error) = save_background_via_service(color, style, image.as_deref()) {
-            println!(
-                "[settings] failed to save background through settingsd: {:?}",
-                error
-            );
+        self.background_status
+            .set(String::from("Waiting to save background…"));
+        self.background_retry
+            .update(|retry| *retry = retry.wrapping_add(1));
+    }
+
+    fn sync_background_preset(&self) {
+        self.background_preset_index
+            .set(self.selected_preset_index().unwrap_or(PRESET_COLORS.len()));
+    }
+
+    fn sync_status_controls(&self) {
+        let preferences = self.status_preferences.get();
+        self.clock_format_index
+            .set(if preferences.clock_format == ClockFormat::TwelveHour {
+                1
+            } else {
+                0
+            });
+        self.cpu_visible
+            .set(preferences.is_visible(StatusItemId::Cpu));
+        self.audio_visible
+            .set(preferences.is_visible(StatusItemId::Audio));
+    }
+
+    fn set_output_scale(&self, index: usize) {
+        let value = match index {
+            0 => "1.0",
+            1 => "2.0",
+            _ => return,
+        };
+        match persist_sws_assignment("output", "scale", value) {
+            Ok(()) => {
+                self.output_scale_index.set(index);
+                self.output_scale_last_good.set(index);
+                self.output_scale_status.set(format!(
+                    "{}% saved. Restart the desktop to apply.",
+                    if index == 0 { 100 } else { 200 }
+                ));
+            }
+            Err(error) => {
+                self.output_scale_index
+                    .set(self.output_scale_last_good.get());
+                self.output_scale_status.set(format!(
+                    "Scale not saved: {}. Select a scale to retry.",
+                    error
+                ));
+            }
+        }
+    }
+
+    fn apply_timezone(&self) {
+        let regions = self.timezone_regions.get();
+        let cities = self.timezone_cities.get();
+        let (Some(region), Some(city)) = (
+            regions.get(self.timezone_region_index.get()),
+            cities.get(self.timezone_city_index.get()),
+        ) else {
+            self.timezone_status
+                .set(String::from("Choose a region and city first"));
+            return;
+        };
+        let zone = format!("{region}/{city}");
+        match save_timezone(&zone) {
+            Ok(()) => {
+                self.timezone_active.set(zone.clone());
+                self.timezone_status.set(format!("Time zone set to {zone}"));
+            }
+            Err(TimezoneCommitError::Unchanged) => self.timezone_status.set(String::from(
+                "Time zone was not changed. Check access and choose Apply Time Zone to retry.",
+            )),
+            Err(TimezoneCommitError::AppliedWithoutName) => {
+                self.timezone_active.set(zone.clone());
+                self.timezone_status.set(format!("{zone} is active, but its name could not be saved. Choose Apply Time Zone to retry."));
+            }
         }
     }
 
@@ -1111,6 +1263,7 @@ impl SettingsApp {
                 );
             }
         }
+        self.sync_status_controls();
     }
 
     fn save_status_preferences(&self, requested: StatusPreferences, action: &'static str) {
@@ -1129,6 +1282,7 @@ impl SettingsApp {
                 );
             }
         }
+        self.sync_status_controls();
     }
 
     fn set_status_item_visible(&self, item: StatusItemId, visible: bool) {
@@ -1174,6 +1328,7 @@ impl SettingsApp {
                 );
             }
         }
+        self.sync_status_controls();
     }
 
     fn current_color(&self) -> [u8; 3] {
@@ -1219,11 +1374,17 @@ impl SettingsApp {
                 }
                 PickerUiEvent::OpenFailed(error) => {
                     PICKER_REQUEST_IN_FLIGHT.store(false, AtomicOrdering::Release);
+                    self.background_status.set(format!(
+                        "Could not open image picker: {error}. Choose Image to retry."
+                    ));
                     println!("[settings] failed to open file picker: {error}");
                 }
                 PickerUiEvent::ServiceGone => {
                     PICKER_REQUEST_IN_FLIGHT.store(false, AtomicOrdering::Release);
                     self.picker_request_id.set(None);
+                    self.background_status.set(String::from(
+                        "The image picker closed unexpectedly. Choose Image to retry.",
+                    ));
                     println!("[settings] file manager service gone, cancelling picker");
                 }
                 PickerUiEvent::Response {
@@ -1263,28 +1424,30 @@ impl SettingsApp {
 
     fn select_input_method(&self, index: usize) {
         let methods = self.input_methods.get();
+        let previous = methods
+            .iter()
+            .position(|method| method.active)
+            .unwrap_or(usize::MAX);
         let Some(method) = methods.get(index) else {
-            println!("[settings] Invalid input method index: {}", index);
+            self.selected_ime_index.set(previous);
             return;
         };
-
-        match Connection::connect_default() {
-            Ok(connection) => match connection.set_active_input_method(method.ime_id) {
-                Ok(()) => {
-                    println!(
-                        "[settings] Selected input method: {} ({})",
-                        method.name, method.ime_id
-                    );
-                    self.selected_ime_index.set(index);
-                    self.input_methods.update(|input_methods| {
-                        for item in input_methods {
-                            item.active = item.ime_id == method.ime_id;
-                        }
-                    });
-                }
-                Err(e) => println!("[settings] Failed to select input method: {:?}", e),
-            },
-            Err(e) => println!("[settings] Failed to connect to SWS: {:?}", e),
+        match Connection::connect_default()
+            .and_then(|connection| connection.set_active_input_method(method.ime_id))
+        {
+            Ok(()) => {
+                self.input_methods.update(|methods| {
+                    for item in methods {
+                        item.active = item.ime_id == method.ime_id;
+                    }
+                });
+                self.input_status.set(format!("Active: {}", method.name));
+            }
+            Err(error) => {
+                self.selected_ime_index.set(previous);
+                self.input_status
+                    .set(format!("Input method not changed: {}", error.as_str()));
+            }
         }
     }
 
@@ -1293,6 +1456,11 @@ impl SettingsApp {
             .set(q16_to_percent(state.master_volume_q16).min(100) as f32);
         self.audio_muted.set(state.flags & CONTROL_FLAG_MUTED != 0);
         self.audio_status.set(audio_status_text(state));
+        self.audio_last_good.set((
+            self.audio_volume_percent.get(),
+            self.audio_muted.get(),
+            self.audio_output_index.get(),
+        ));
     }
 
     fn refresh_audio(&self) {
@@ -1302,23 +1470,34 @@ impl SettingsApp {
         self.audio_volume_percent.set(volume);
         self.audio_muted.set(muted);
         self.audio_status.set(status);
+        self.audio_last_good.set((volume, muted, output_index));
     }
 
     fn set_audio_muted(&self, muted: bool) {
         match with_sas_client(|client| client.set_master_muted(muted)) {
             Ok(state) => self.apply_audio_state(state),
-            Err(error) => self
-                .audio_status
-                .set(format!("Failed to set mute: {}", error.as_str())),
+            Err(error) => {
+                let (volume, muted, output) = self.audio_last_good.get();
+                self.audio_volume_percent.set(volume);
+                self.audio_muted.set(muted);
+                self.audio_output_index.set(output);
+                self.audio_status
+                    .set(format!("Failed to set mute: {}", error.as_str()));
+            }
         }
     }
 
     fn set_audio_volume_percent(&self, percent: u32) {
         match with_sas_client(|client| client.set_master_volume_q16(percent_to_q16(percent))) {
             Ok(state) => self.apply_audio_state(state),
-            Err(error) => self
-                .audio_status
-                .set(format!("Failed to set volume: {}", error.as_str())),
+            Err(error) => {
+                let (volume, muted, output) = self.audio_last_good.get();
+                self.audio_volume_percent.set(volume);
+                self.audio_muted.set(muted);
+                self.audio_output_index.set(output);
+                self.audio_status
+                    .set(format!("Failed to set volume: {}", error.as_str()));
+            }
         }
     }
 
@@ -1373,9 +1552,14 @@ impl SettingsApp {
                 self.apply_audio_state(state);
                 self.refresh_audio();
             }
-            Err(error) => self
-                .audio_status
-                .set(format!("Failed to switch output: {}", error.as_str())),
+            Err(error) => {
+                let (volume, muted, output) = self.audio_last_good.get();
+                self.audio_volume_percent.set(volume);
+                self.audio_muted.set(muted);
+                self.audio_output_index.set(output);
+                self.audio_status
+                    .set(format!("Failed to switch output: {}", error.as_str()));
+            }
         }
     }
 
@@ -1444,335 +1628,101 @@ fn input_method_labels(methods: &[InputMethodInfo]) -> Vec<String> {
     methods.iter().map(|method| method.name.clone()).collect()
 }
 
-fn appearance_page(
-    r0: State<f32>,
-    g0: State<f32>,
-    b0: State<f32>,
-    r1: State<f32>,
-    g1: State<f32>,
-    b1: State<f32>,
-    r2: State<f32>,
-    g2: State<f32>,
-    b2: State<f32>,
-    r3: State<f32>,
-    g3: State<f32>,
-    b3: State<f32>,
-    r4: State<f32>,
-    g4: State<f32>,
-    b4: State<f32>,
-    r5: State<f32>,
-    g5: State<f32>,
-    b5: State<f32>,
-    r6: State<f32>,
-    g6: State<f32>,
-    b6: State<f32>,
-    r7: State<f32>,
-    g7: State<f32>,
-    b7: State<f32>,
-    s0: State<BackgroundStyle>,
-    s1: State<BackgroundStyle>,
-    s2: State<BackgroundStyle>,
-    is0: bool,
-    is1: bool,
-    is2: bool,
-    is3: bool,
-    is4: bool,
-    is5: bool,
-    is6: bool,
-    is7: bool,
-    style_default: bool,
-    style_gradient: bool,
-    style_solid: bool,
-    highlight: Color,
-    _border: Color,
-    app: SettingsApp,
-) -> impl View {
-    vstack! {
-        hstack! {
-            vstack! {
-                Text::new("Style").font_size(14.0),
-                zstack! {
-                    Rectangle::new()
-                        .fill(Color::rgb(48, 48, 56))
-                        .frame(190.0, 60.0),
-                    zstack! {
-                        Rectangle::new()
-                            .fill(Color::CLEAR)
-                            .border(2.0, if style_default { highlight } else { Color::CLEAR })
-                            .frame(198.0, 68.0),
-                        Text::new("Gradient + Lines").font_size(12.0).color(Color::WHITE),
-                    },
-                }
-                .on_click(move || { s0.set(BackgroundStyle::GradientLines); }),
-                zstack! {
-                    Rectangle::new()
-                        .fill(Color::rgb(40, 40, 50))
-                        .frame(190.0, 60.0),
-                    zstack! {
-                        Rectangle::new()
-                            .fill(Color::CLEAR)
-                            .border(2.0, if style_gradient { highlight } else { Color::CLEAR })
-                            .frame(198.0, 68.0),
-                        Text::new("Gradient").font_size(12.0).color(Color::WHITE),
-                    },
-                }
-                .on_click(move || { s1.set(BackgroundStyle::Gradient); }),
-                zstack! {
-                    Rectangle::new()
-                        .fill(Color::rgb(26, 26, 30))
-                        .frame(190.0, 60.0),
-                    zstack! {
-                        Rectangle::new()
-                            .fill(Color::CLEAR)
-                            .border(2.0, if style_solid { highlight } else { Color::CLEAR })
-                            .frame(198.0, 68.0),
-                        Text::new("Solid").font_size(12.0).color(Color::WHITE),
-                    },
-                }
-                .on_click(move || { s2.set(BackgroundStyle::Solid); }),
-            }
-            .frame(220.0, f32::INFINITY),
-            vstack! {
-                Text::new("Color").font_size(14.0),
-                hstack! {
-                    zstack! {
-                        Rectangle::new()
-                            .fill(Color::rgb(PRESET_COLORS[0].color[0], PRESET_COLORS[0].color[1], PRESET_COLORS[0].color[2]))
-                            .frame(80.0, 80.0),
-                        Rectangle::new()
-                            .fill(Color::CLEAR)
-                            .border(2.0, if is0 { highlight } else { Color::CLEAR })
-                            .frame(88.0, 88.0),
-                    }
-                    .alignment(Alignment::Center)
-                    .on_click(move || {
-                        r0.set(PRESET_COLORS[0].color[0] as f32);
-                        g0.set(PRESET_COLORS[0].color[1] as f32);
-                        b0.set(PRESET_COLORS[0].color[2] as f32);
-                    }),
-                    Spacer::new().frame_width(10.0),
-                    zstack! {
-                        Rectangle::new()
-                            .fill(Color::rgb(PRESET_COLORS[1].color[0], PRESET_COLORS[1].color[1], PRESET_COLORS[1].color[2]))
-                            .frame(80.0, 80.0),
-                        Rectangle::new()
-                            .fill(Color::CLEAR)
-                            .border(2.0, if is1 { highlight } else { Color::CLEAR })
-                            .frame(88.0, 88.0),
-                    }
-                    .alignment(Alignment::Center)
-                    .on_click(move || {
-                        r1.set(PRESET_COLORS[1].color[0] as f32);
-                        g1.set(PRESET_COLORS[1].color[1] as f32);
-                        b1.set(PRESET_COLORS[1].color[2] as f32);
-                    }),
-                    Spacer::new().frame_width(10.0),
-                    zstack! {
-                        Rectangle::new()
-                            .fill(Color::rgb(PRESET_COLORS[2].color[0], PRESET_COLORS[2].color[1], PRESET_COLORS[2].color[2]))
-                            .frame(80.0, 80.0),
-                        Rectangle::new()
-                            .fill(Color::CLEAR)
-                            .border(2.0, if is2 { highlight } else { Color::CLEAR })
-                            .frame(88.0, 88.0),
-                    }
-                    .alignment(Alignment::Center)
-                    .on_click(move || {
-                        r2.set(PRESET_COLORS[2].color[0] as f32);
-                        g2.set(PRESET_COLORS[2].color[1] as f32);
-                        b2.set(PRESET_COLORS[2].color[2] as f32);
-                    }),
-                    Spacer::new().frame_width(10.0),
-                    zstack! {
-                        Rectangle::new()
-                            .fill(Color::rgb(PRESET_COLORS[3].color[0], PRESET_COLORS[3].color[1], PRESET_COLORS[3].color[2]))
-                            .frame(80.0, 80.0),
-                        Rectangle::new()
-                            .fill(Color::CLEAR)
-                            .border(2.0, if is3 { highlight } else { Color::CLEAR })
-                            .frame(88.0, 88.0),
-                    }
-                    .alignment(Alignment::Center)
-                    .on_click(move || {
-                        r3.set(PRESET_COLORS[3].color[0] as f32);
-                        g3.set(PRESET_COLORS[3].color[1] as f32);
-                        b3.set(PRESET_COLORS[3].color[2] as f32);
-                    }),
-                },
-                Spacer::new().frame_height(10.0),
-                hstack! {
-                    zstack! {
-                        Rectangle::new()
-                            .fill(Color::rgb(PRESET_COLORS[4].color[0], PRESET_COLORS[4].color[1], PRESET_COLORS[4].color[2]))
-                            .frame(80.0, 80.0),
-                        Rectangle::new()
-                            .fill(Color::CLEAR)
-                            .border(2.0, if is4 { highlight } else { Color::CLEAR })
-                            .frame(88.0, 88.0),
-                    }
-                    .alignment(Alignment::Center)
-                    .on_click(move || {
-                        r4.set(PRESET_COLORS[4].color[0] as f32);
-                        g4.set(PRESET_COLORS[4].color[1] as f32);
-                        b4.set(PRESET_COLORS[4].color[2] as f32);
-                    }),
-                    Spacer::new().frame_width(10.0),
-                    zstack! {
-                        Rectangle::new()
-                            .fill(Color::rgb(PRESET_COLORS[5].color[0], PRESET_COLORS[5].color[1], PRESET_COLORS[5].color[2]))
-                            .frame(80.0, 80.0),
-                        Rectangle::new()
-                            .fill(Color::CLEAR)
-                            .border(2.0, if is5 { highlight } else { Color::CLEAR })
-                            .frame(88.0, 88.0),
-                    }
-                    .alignment(Alignment::Center)
-                    .on_click(move || {
-                        r5.set(PRESET_COLORS[5].color[0] as f32);
-                        g5.set(PRESET_COLORS[5].color[1] as f32);
-                        b5.set(PRESET_COLORS[5].color[2] as f32);
-                    }),
-                    Spacer::new().frame_width(10.0),
-                    zstack! {
-                        Rectangle::new()
-                            .fill(Color::rgb(PRESET_COLORS[6].color[0], PRESET_COLORS[6].color[1], PRESET_COLORS[6].color[2]))
-                            .frame(80.0, 80.0),
-                        Rectangle::new()
-                            .fill(Color::CLEAR)
-                            .border(2.0, if is6 { highlight } else { Color::CLEAR })
-                            .frame(88.0, 88.0),
-                    }
-                    .alignment(Alignment::Center)
-                    .on_click(move || {
-                        r6.set(PRESET_COLORS[6].color[0] as f32);
-                        g6.set(PRESET_COLORS[6].color[1] as f32);
-                        b6.set(PRESET_COLORS[6].color[2] as f32);
-                    }),
-                    Spacer::new().frame_width(10.0),
-                    zstack! {
-                        Rectangle::new()
-                            .fill(Color::rgb(PRESET_COLORS[7].color[0], PRESET_COLORS[7].color[1], PRESET_COLORS[7].color[2]))
-                            .frame(80.0, 80.0),
-                        Rectangle::new()
-                            .fill(Color::CLEAR)
-                            .border(2.0, if is7 { highlight } else { Color::CLEAR })
-                            .frame(88.0, 88.0),
-                    }
-                    .alignment(Alignment::Center)
-                    .on_click(move || {
-                        r7.set(PRESET_COLORS[7].color[0] as f32);
-                        g7.set(PRESET_COLORS[7].color[1] as f32);
-                        b7.set(PRESET_COLORS[7].color[2] as f32);
-                    }),
-                },
-            },
-        }
-        .padding(10.0),
-
-        Divider::new(),
-
+fn appearance_page(app: SettingsApp) -> impl View {
+    let style_app = app.clone();
+    let preset_app = app.clone();
+    let red_app = app.clone();
+    let green_app = app.clone();
+    let blue_app = app.clone();
+    let mut presets = PRESET_COLORS
+        .iter()
+        .map(|preset| String::from(preset.name))
+        .collect::<Vec<_>>();
+    presets.push(String::from("Custom"));
+    let content = vstack! {
         vstack! {
-            Text::new("Custom Color").font_size(14.0),
-            hstack! {
-                Text::new("R").font_size(12.0).frame_width(20.0),
-                Slider::new(app.red_value.clone()).min(0.0).max(255.0).frame(280.0, 20.0),
-                Text::new(format!("{}", app.red_value.get().max(0.0).min(255.0) as u32)).font_size(12.0).frame_width(36.0),
-            },
-            hstack! {
-                Text::new("G").font_size(12.0).frame_width(20.0),
-                Slider::new(app.green_value.clone()).min(0.0).max(255.0).frame(280.0, 20.0),
-                Text::new(format!("{}", app.green_value.get().max(0.0).min(255.0) as u32)).font_size(12.0).frame_width(36.0),
-            },
-            hstack! {
-                Text::new("B").font_size(12.0).frame_width(20.0),
-                Slider::new(app.blue_value.clone()).min(0.0).max(255.0).frame(280.0, 20.0),
-                Text::new(format!("{}", app.blue_value.get().max(0.0).min(255.0) as u32)).font_size(12.0).frame_width(36.0),
-            },
-            Text::new("Preview").font_size(14.0),
-        Rectangle::new()
-                .fill(Color::rgb(
-                    app.current_color()[0],
-                    app.current_color()[1],
-                    app.current_color()[2],
-                ))
-                .frame(520.0, 70.0)
-                .clip_radius(10.0),
-        },
-
-        vstack! {
-            Text::new("Wallpaper Image").font_size(14.0),
-            hstack! {
-                IconView::new(Icon::Photo).size(IconSize::Large),
-                Text::from_state(app.background_image_label.clone()).font_size(12.0),
-                Spacer::new(),
-                Button::new("Choose…").on_click({
-                    let app = app.clone();
-                    move || app.open_background_picker()
-                }),
-                Button::new("Clear Image").on_click({
-                    let app = app.clone();
-                    move || app.clear_background_image()
-                }),
-            }
-            .padding(8.0),
-            Text::new("The standalone File Manager will open in image-picker mode.")
-                .font_size(11.0)
-                .color(ColorPalette::default().text_secondary()),
-        },
-
-        Divider::new(),
-
+        Text::new("Desktop Background").font_size(16.0),
         hstack! {
-            Spacer::new(),
-            Button::new("Apply").on_click({
-                let app = app.clone();
-                move || { app.save_config(); println!("[settings] Applied"); }
+            Text::new("Style").font_size(13.0).frame_width(100.0),
+            Select::new(vec![String::from("Gradient + Lines"), String::from("Gradient"), String::from("Solid")], app.background_style_index.clone())
+                .width(280.0)
+                .on_change(move |index| {
+                    style_app.background_style.set(match index { 1 => BackgroundStyle::Gradient, 2 => BackgroundStyle::Solid, _ => BackgroundStyle::GradientLines });
+                }),
+        }.padding(8.0),
+        hstack! {
+            Text::new("Color Preset").font_size(13.0).frame_width(100.0),
+            Select::new(presets, app.background_preset_index.clone()).width(280.0).on_change(move |index| {
+                if let Some(preset) = PRESET_COLORS.get(index) {
+                    preset_app.red_value.set(preset.color[0] as f32);
+                    preset_app.green_value.set(preset.color[1] as f32);
+                    preset_app.blue_value.set(preset.color[2] as f32);
+                }
             }),
-            Spacer::new().frame_width(12.0),
-            Button::new("Close").on_click(|| { println!("[settings] Close"); }),
-        }.padding(10.0)
-    }
-    .padding(10.0)
-    .frame(f32::INFINITY, f32::INFINITY)
-}
-
-#[allow(dead_code)]
-fn about_page() -> impl View {
-    vstack! {
-        vstack! {
-            Text::new("Scarlet Desktop").font_size(20.0),
-            Text::new("Version 0.1.0").font_size(14.0),
-            Text::new("").font_size(10.0),
-            Text::new("A modern desktop environment for Scarlet OS").font_size(13.0),
-            Text::new("Built with Rust and ScarletUI").font_size(13.0),
-        }
-        .padding(20.0),
-
+        }.padding(8.0),
+        },
         Divider::new(),
-
         vstack! {
-            Text::new("License").font_size(16.0),
-            Text::new("MIT License").font_size(13.0),
-            Text::new("").font_size(10.0),
-            Text::new("Copyright (c) 2025 Scarlet OS Project").font_size(13.0),
-        }
-        .padding(20.0),
-    }
-    .padding(10.0)
-    .frame(f32::INFINITY, f32::INFINITY)
+        Text::new("Custom Color").font_size(14.0),
+        hstack! {
+            Text::new("Red").font_size(12.0).frame_width(100.0),
+            Slider::new(app.red_value.clone()).min(0.0).max(255.0)
+                .on_change(move |_| red_app.sync_background_preset()).frame(280.0, 20.0),
+            Text::new(format!("{}", app.current_color()[0])).font_size(12.0).frame_width(36.0),
+        }.padding(8.0),
+        hstack! {
+            Text::new("Green").font_size(12.0).frame_width(100.0),
+            Slider::new(app.green_value.clone()).min(0.0).max(255.0)
+                .on_change(move |_| green_app.sync_background_preset()).frame(280.0, 20.0),
+            Text::new(format!("{}", app.current_color()[1])).font_size(12.0).frame_width(36.0),
+        }.padding(8.0),
+        hstack! {
+            Text::new("Blue").font_size(12.0).frame_width(100.0),
+            Slider::new(app.blue_value.clone()).min(0.0).max(255.0)
+                .on_change(move |_| blue_app.sync_background_preset()).frame(280.0, 20.0),
+            Text::new(format!("{}", app.current_color()[2])).font_size(12.0).frame_width(36.0),
+        }.padding(8.0),
+        Rectangle::new().fill(Color::rgb(app.current_color()[0], app.current_color()[1], app.current_color()[2])).corner_radius(8.0).frame(500.0, 44.0),
+        },
+        Divider::new(),
+        vstack! {
+        Text::new("Wallpaper Image").font_size(14.0),
+        Text::from_state(app.background_image_label.clone()).font_size(12.0),
+        hstack! {
+            Button::new("Choose Image…").on_click({ let app = app.clone(); move || app.open_background_picker() }),
+            Button::new("Clear Image").enabled(app.background_image.get().is_some()).on_click({ let app = app.clone(); move || app.clear_background_image() }),
+        }.padding(8.0),
+        Text::new("A selected image takes precedence over the generated style and color.")
+            .font_size(11.0).color(ColorPalette::default().text_secondary()),
+        },
+        Text::from_state(app.background_status.clone()).font_size(12.0),
+        Button::new("Save Again").on_click(move || app.save_config()),
+    }.padding(16.0).frame(f32::INFINITY, f32::INFINITY);
+    ScrollView::new(content)
+        .vertical()
+        .content_size(0.0, 700.0)
+        .frame(f32::INFINITY, f32::INFINITY)
 }
 
-#[allow(dead_code)]
-fn network_page() -> impl View {
+fn about_page() -> impl View {
+    let release = read_limited_text("/etc/os-release").unwrap_or_default();
+    let distribution = settings_support::release_value(&release, "PRETTY_NAME")
+        .or_else(|| settings_support::release_value(&release, "NAME"))
+        .unwrap_or_else(|| String::from("Distribution information unavailable"));
+    let version = settings_support::release_value(&release, "VERSION_ID")
+        .unwrap_or_else(|| String::from("Unavailable"));
+    let (kernel, target) = match scarlet_os::system::kernel_info() {
+        Ok(info) => (format!("{} {}", info.name, info.version), info.target),
+        Err(error) => (String::from(error), String::from("Unavailable")),
+    };
     vstack! {
-        vstack! {
-            Text::new("Coming Soon").font_size(20.0),
-            Text::new("Network configuration will be available here").font_size(13.0),
-        }
-        .padding(40.0),
-    }
-    .padding(10.0)
-    .frame(f32::INFINITY, f32::INFINITY)
+        Text::new("About This System").font_size(20.0),
+        Text::new(distribution).font_size(16.0),
+        Divider::new(),
+        hstack! { Text::new("OS Version").font_size(13.0).frame_width(130.0), Text::new(version).font_size(13.0) }.padding(8.0),
+        hstack! { Text::new("Running Kernel").font_size(13.0).frame_width(130.0), Text::new(kernel).font_size(13.0) }.padding(8.0),
+        hstack! { Text::new("Build Target").font_size(13.0).frame_width(130.0), Text::new(target).font_size(13.0) }.padding(8.0),
+    }.padding(20.0).frame(f32::INFINITY, f32::INFINITY)
 }
 
 fn display_page(app: SettingsApp) -> impl View {
@@ -1780,6 +1730,7 @@ fn display_page(app: SettingsApp) -> impl View {
     let brightness_label = f32_to_percent(app.display_brightness_percent.get());
     let brightness_status = app.display_brightness_status.get();
     let brightness_app = app.clone();
+    let scale_app = app.clone();
 
     vstack! {
         vstack! {
@@ -1806,11 +1757,12 @@ fn display_page(app: SettingsApp) -> impl View {
 
         vstack! {
             Text::new("Scaling").font_size(14.0),
+            Text::from_state(app.output_scale_status.clone()).font_size(12.0),
             hstack! {
                 Text::new("Scale").font_size(13.0).frame_width(80.0),
-                Button::new("x1.0").on_click(|| { save_output_scale_config(1000); }),
-                Spacer::new().frame_width(8.0),
-                Button::new("x2.0").on_click(|| { save_output_scale_config(2000); }),
+                Select::new(vec![String::from("100%"), String::from("200%")], app.output_scale_index.clone())
+                    .width(220.0).placeholder("Custom saved scale")
+                    .on_change(move |index| scale_app.set_output_scale(index)),
             }
             .padding(10.0),
         }
@@ -1862,11 +1814,12 @@ fn cursor_page(app: SettingsApp) -> impl View {
 fn audio_page(app: SettingsApp) -> impl View {
     let outputs = app.audio_outputs.get();
     let labels = audio_output_labels(&outputs);
+    let audio_available = !outputs.is_empty();
     let selected_output = app.audio_output_index.clone();
     let volume = app.audio_volume_percent.clone();
     let volume_label = f32_to_percent(app.audio_volume_percent.get());
     let status = app.audio_status.get();
-    let muted = app.audio_muted.get();
+    let muted = app.audio_muted.clone();
     let select_app = app.clone();
     let refresh_app = app.clone();
     let volume_app = app.clone();
@@ -1900,6 +1853,7 @@ fn audio_page(app: SettingsApp) -> impl View {
             hstack! {
                 Text::new("Volume").font_size(13.0).frame_width(100.0),
                 Slider::new(volume)
+                    .enabled(audio_available)
                     .min(0.0)
                     .max(100.0)
                     .on_changed(move |value| {
@@ -1911,9 +1865,7 @@ fn audio_page(app: SettingsApp) -> impl View {
             .padding(10.0),
             hstack! {
                 Text::new("Mute").font_size(13.0).frame_width(100.0),
-                Button::new(if muted { "Unmute" } else { "Mute" }).on_click(move || {
-                    mute_app.set_audio_muted(!muted);
-                }),
+                Toggle::new(muted).enabled(audio_available).on_change(move |muted| mute_app.set_audio_muted(muted)),
             }
             .padding(10.0),
         }
@@ -1950,6 +1902,7 @@ fn input_page(app: SettingsApp) -> impl View {
             .padding(10.0),
             Text::new(format!("Active: {} ({})", selected_name, selected_id)).font_size(12.0),
             Text::new(format!("Registered IMEs: {}", methods.len())).font_size(12.0),
+            Text::from_state(app.input_status.clone()).font_size(12.0),
         }
         .padding(10.0),
     }
@@ -1972,6 +1925,10 @@ fn status_item_row(
 ) -> impl View + Clone {
     let preferences = app.status_preferences.get();
     let visible = preferences.is_visible(item);
+    let visible_state = match item {
+        StatusItemId::Cpu => app.cpu_visible.clone(),
+        StatusItemId::Audio => app.audio_visible.clone(),
+    };
     let visibility_app = app.clone();
     let up_app = app.clone();
     let down_app = app;
@@ -1981,17 +1938,17 @@ fn status_item_row(
         Text::new(if visible { "Visible" } else { "Hidden" })
             .font_size(12.0)
             .frame_width(70.0),
-        Button::new(if visible { "Hide" } else { "Show" }).on_click(move || {
-            visibility_app.set_status_item_visible(item, !visible);
+        Toggle::new(visible_state).on_change(move |visible| {
+            visibility_app.set_status_item_visible(item, visible);
         }),
         Spacer::new().frame_width(8.0),
-        Button::new("Move Up").on_click(move || {
+        Button::new("Move Up").enabled(index > 0).on_click(move || {
             if index > 0 {
                 up_app.move_status_item(item, -1);
             }
         }),
         Spacer::new().frame_width(8.0),
-        Button::new("Move Down").on_click(move || {
+        Button::new("Move Down").enabled(index + 1 < item_count).on_click(move || {
             if index + 1 < item_count {
                 down_app.move_status_item(item, 1);
             }
@@ -2000,13 +1957,7 @@ fn status_item_row(
     .padding(8.0)
 }
 
-fn status_page(
-    app: SettingsApp,
-    regions: Vec<String>,
-    region_idx: State<usize>,
-    cities_state: State<Vec<String>>,
-    city_idx: State<usize>,
-) -> impl View {
+fn status_page(app: SettingsApp) -> impl View {
     let preferences = app.status_preferences.get();
     let first = preferences
         .order
@@ -2019,122 +1970,62 @@ fn status_page(
         .copied()
         .unwrap_or(StatusItemId::Audio);
     let item_count = preferences.order.len();
-    let clock_format = preferences.clock_format;
     let refresh_app = app.clone();
     let reset_app = app.clone();
-    let twenty_four_hour_app = app.clone();
-    let twelve_hour_app = app.clone();
-    let cities = cities_state.get();
-    let current_region = regions.get(region_idx.get()).cloned().unwrap_or_default();
-    let current_city = cities.get(city_idx.get()).cloned().unwrap_or_default();
-    let cities_state_for_region = cities_state.clone();
-    let city_idx_for_region = city_idx.clone();
-    let region_idx_for_city = region_idx.clone();
-    let cities_state_for_city = cities_state.clone();
-    let city_idx_for_city = city_idx.clone();
-    let regions_for_city = regions.clone();
-
-    vstack! {
+    let clock_app = app.clone();
+    let region_app = app.clone();
+    let timezone_app = app.clone();
+    let content = vstack! {
         vstack! {
-            Text::new("Optional Status Items").font_size(14.0),
-            Text::new("Choose which items appear and their left-to-right order before the clock.")
-                .font_size(11.0)
-                .color(ColorPalette::default().text_secondary()),
-            status_item_row(app.clone(), first, 0, item_count),
-            status_item_row(app.clone(), second, 1, item_count),
-        }
-        .padding(10.0),
-
+        Text::new("Status Items").font_size(14.0),
+        Text::new("Choose visible items and their order before the clock.").font_size(12.0),
+        status_item_row(app.clone(), first, 0, item_count),
+        status_item_row(app.clone(), second, 1, item_count),
+        },
         Divider::new(),
-
         vstack! {
-            Text::new("Date & Time").font_size(14.0),
-            hstack! {
-                Text::new("Region").font_size(13.0).frame_width(110.0),
-                Select::new(regions.clone(), region_idx.clone())
-                    .width(250.0)
-                    .on_change(move |index| {
-                        if let Some(region) = regions.get(index) {
-                            cities_state_for_region.set(enumerate_cities(region));
-                            city_idx_for_region.set(0);
-                        }
-                        region_idx.set(index);
-                    }),
-            }
-            .padding(8.0),
-            hstack! {
-                Text::new("City").font_size(13.0).frame_width(110.0),
-                Select::new(cities, city_idx_for_city.clone())
-                    .width(250.0)
-                    .on_change(move |index| {
-                        if let (Some(region), Some(city)) = (
-                            regions_for_city.get(region_idx_for_city.get()),
-                            cities_state_for_city.get().get(index),
-                        ) {
-                            save_timezone(&format!("{region}/{city}"));
-                        }
-                        city_idx_for_city.set(index);
-                    }),
-            }
-            .padding(8.0),
-            Text::new(format!("Current: {current_region}/{current_city}")).font_size(12.0),
-        }
-        .padding(10.0),
-
+        Text::new("Date & Time").font_size(14.0),
+        hstack! {
+            Text::new("Region").font_size(13.0).frame_width(110.0),
+            Select::new(app.timezone_regions.get(), app.timezone_region_index.clone()).width(250.0)
+                .placeholder("No time zones installed")
+                .on_change(move |index| {
+                    if let Some(region) = region_app.timezone_regions.get().get(index) {
+                        region_app.timezone_cities.set(enumerate_cities(region));
+                        region_app.timezone_city_index.set(usize::MAX);
+                    }
+                }),
+        }.padding(8.0),
+        hstack! {
+            Text::new("City").font_size(13.0).frame_width(110.0),
+            Select::new(app.timezone_cities.get(), app.timezone_city_index.clone()).width(250.0)
+                .placeholder("Choose a city"),
+        }.padding(8.0),
+        Text::new(format!("Active time zone: {}", app.timezone_active.get())).font_size(12.0),
+        Text::from_state(app.timezone_status.clone()).font_size(12.0),
+        Button::new("Apply Time Zone").on_click(move || timezone_app.apply_timezone()),
+        },
         Divider::new(),
-
         vstack! {
-            Text::new("Clock").font_size(14.0),
-            hstack! {
-                Text::new("Clock").font_size(13.0).frame_width(110.0),
-                Text::new("Always visible · Fixed at far right")
-                    .font_size(12.0)
-                    .color(ColorPalette::default().text_secondary()),
-            }
-            .padding(8.0),
-            hstack! {
-                Text::new("Format").font_size(13.0).frame_width(110.0),
-                Button::new(if clock_format == ClockFormat::TwentyFourHour {
-                    "24-hour (Selected)"
-                } else {
-                    "24-hour"
-                })
-                .on_click(move || {
-                    twenty_four_hour_app.set_status_clock_format(ClockFormat::TwentyFourHour);
+        hstack! {
+            Text::new("Clock Format").font_size(13.0).frame_width(110.0),
+            Select::new(vec![String::from("24-hour"), String::from("12-hour")], app.clock_format_index.clone())
+                .width(250.0).on_change(move |index| {
+                    clock_app.set_status_clock_format(if index == 1 { ClockFormat::TwelveHour } else { ClockFormat::TwentyFourHour });
                 }),
-                Spacer::new().frame_width(8.0),
-                Button::new(if clock_format == ClockFormat::TwelveHour {
-                    "12-hour (Selected)"
-                } else {
-                    "12-hour"
-                })
-                .on_click(move || {
-                    twelve_hour_app.set_status_clock_format(ClockFormat::TwelveHour);
-                }),
-            }
-            .padding(8.0),
-        }
-        .padding(10.0),
-
-        Divider::new(),
-
-        vstack! {
-            Text::new(app.status_preferences_status.get()).font_size(12.0),
-            hstack! {
-                Button::new("Refresh").on_click(move || {
-                    refresh_app.refresh_status_preferences();
-                }),
-                Spacer::new().frame_width(8.0),
-                Button::new("Reset to Defaults").on_click(move || {
-                    reset_app.reset_status_preferences();
-                }),
-            }
-            .padding(8.0),
-        }
-        .padding(10.0),
-    }
-    .padding(10.0)
-    .frame(f32::INFINITY, f32::INFINITY)
+        }.padding(8.0),
+        Text::new("The clock is always visible at the far right.").font_size(11.0),
+        Text::from_state(app.status_preferences_status.clone()).font_size(12.0),
+        hstack! {
+            Button::new("Refresh").on_click(move || refresh_app.refresh_status_preferences()),
+            Button::new("Reset to Defaults").on_click(move || reset_app.reset_status_preferences()),
+        }.padding(8.0),
+        },
+    }.padding(16.0).frame(f32::INFINITY, f32::INFINITY);
+    ScrollView::new(content)
+        .vertical()
+        .content_size(0.0, 700.0)
+        .frame(f32::INFINITY, f32::INFINITY)
 }
 
 impl Application for SettingsApp {
@@ -2150,77 +2041,13 @@ impl Application for SettingsApp {
         let cursor_app = self.clone();
         let status_app = self.clone();
         let navigation_title = self.navigation_title.clone();
-        let tz_regions = self.timezone_regions.get();
-        let tz_region_idx = self.timezone_region_index.clone();
-        let tz_cities = self.timezone_cities.clone();
-        let tz_city_idx = self.timezone_city_index.clone();
-        let r0 = self.red_value.clone();
-        let g0 = self.green_value.clone();
-        let b0 = self.blue_value.clone();
-        let r1 = self.red_value.clone();
-        let g1 = self.green_value.clone();
-        let b1 = self.blue_value.clone();
-        let r2 = self.red_value.clone();
-        let g2 = self.green_value.clone();
-        let b2 = self.blue_value.clone();
-        let r3 = self.red_value.clone();
-        let g3 = self.green_value.clone();
-        let b3 = self.blue_value.clone();
-        let r4 = self.red_value.clone();
-        let g4 = self.green_value.clone();
-        let b4 = self.blue_value.clone();
-        let r5 = self.red_value.clone();
-        let g5 = self.green_value.clone();
-        let b5 = self.blue_value.clone();
-        let r6 = self.red_value.clone();
-        let g6 = self.green_value.clone();
-        let b6 = self.blue_value.clone();
-        let r7 = self.red_value.clone();
-        let g7 = self.green_value.clone();
-        let b7 = self.blue_value.clone();
-        let s0 = self.background_style.clone();
-        let s1 = self.background_style.clone();
-        let s2 = self.background_style.clone();
-
-        let selected_idx = self.selected_preset_index();
-        let style = self.background_style.get();
-        let style_default = style == BackgroundStyle::GradientLines;
-        let style_gradient = style == BackgroundStyle::Gradient;
-        let style_solid = style == BackgroundStyle::Solid;
-
-        let is0 = selected_idx == Some(0);
-        let is1 = selected_idx == Some(1);
-        let is2 = selected_idx == Some(2);
-        let is3 = selected_idx == Some(3);
-        let is4 = selected_idx == Some(4);
-        let is5 = selected_idx == Some(5);
-        let is6 = selected_idx == Some(6);
-        let is7 = selected_idx == Some(7);
-
-        let highlight = ColorPalette::light().primary();
-        let border = ColorPalette::light().border();
-
         WindowGroup::new(
             "main",
             Window::new(
                 "Settings",
                 navigation! {
                     NavigationLink::new("Appearance", move || {
-                        appearance_page(
-                            r0.clone(), g0.clone(), b0.clone(),
-                            r1.clone(), g1.clone(), b1.clone(),
-                            r2.clone(), g2.clone(), b2.clone(),
-                            r3.clone(), g3.clone(), b3.clone(),
-                            r4.clone(), g4.clone(), b4.clone(),
-                            r5.clone(), g5.clone(), b5.clone(),
-                            r6.clone(), g6.clone(), b6.clone(),
-                            r7.clone(), g7.clone(), b7.clone(),
-                            s0.clone(), s1.clone(), s2.clone(),
-                            is0, is1, is2, is3, is4, is5, is6, is7,
-                            style_default, style_gradient, style_solid,
-                            highlight, border,
-                            app.clone()
-                        )
+                        appearance_page(app.clone())
                     })
                     .on_select({
                         let title = navigation_title.clone();
@@ -2243,13 +2070,7 @@ impl Application for SettingsApp {
                         move || title.set(String::from("Input"))
                     }),
                     NavigationLink::new("Shell & Status", move || {
-                        status_page(
-                            status_app.clone(),
-                            tz_regions.clone(),
-                            tz_region_idx.clone(),
-                            tz_cities.clone(),
-                            tz_city_idx.clone(),
-                        )
+                        status_page(status_app.clone())
                     }).on_select({
                         let title = navigation_title.clone();
                         let app = self.clone();
@@ -2257,6 +2078,10 @@ impl Application for SettingsApp {
                             app.refresh_status_preferences();
                             title.set(String::from("Shell & Status"));
                         }
+                    }),
+                    NavigationLink::new("About", about_page).on_select({
+                        let title = navigation_title.clone();
+                        move || title.set(String::from("About This System"))
                     }),
                 }
                 .header(move || {
