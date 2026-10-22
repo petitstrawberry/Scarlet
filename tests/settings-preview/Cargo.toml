@@ -1,0 +1,16 @@
+[package]
+name = "scarlet-settings-view-preview"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "3a05b0239fdc1052639d6d6c69a7fe0582b24506", default-features = false, features = ["std", "platform-winit"] }
+scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "3a05b0239fdc1052639d6d6c69a7fe0582b24506" }
+scarlet-desktop-config = { path = "../../user/lib/scarlet-desktop-config", default-features = false, features = ["std"] }
+
+[[bin]]
+name = "settings-preview"
+path = "main.rs"
