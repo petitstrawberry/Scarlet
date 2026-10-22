@@ -10,6 +10,10 @@
 
 extern crate scarlet_std as std;
 
+#[path = "../settings_support.rs"]
+mod settings_support;
+use settings_support::atomic_write;
+
 use sbus::{Argument, Message};
 use sbus_client::Connection;
 use scarlet_desktop_config::{
@@ -24,7 +28,6 @@ use scarlet_desktop_config::{
 };
 use std::format;
 use std::fs;
-use std::io::Write;
 use std::println;
 use std::string::String;
 use std::thread;
@@ -37,7 +40,7 @@ const DESKTOP_STATUS_CONFIG_TEMP_PATH: &str = "/etc/scarlet-desktop.d/status.tom
 
 fn parse_color(value: &str) -> Option<[u8; 3]> {
     let value = value.strip_prefix('#')?;
-    if value.len() != 6 {
+    if value.len() != 6 || !value.as_bytes().iter().all(u8::is_ascii_hexdigit) {
         return None;
     }
     Some([
@@ -82,11 +85,11 @@ fn write_background_config(
         ));
     }
 
-    let mut file = fs::File::create(DESKTOP_BACKGROUND_CONFIG_PATH)
-        .map_err(|_| "failed to create desktop background config")?;
-    file.write_all(content.as_bytes())
-        .map_err(|_| "failed to write desktop background config")?;
-    Ok(())
+    atomic_write(
+        DESKTOP_BACKGROUND_CONFIG_PATH,
+        "/etc/scarlet-desktop.d/background.toml.tmp",
+        content.as_bytes(),
+    )
 }
 
 fn emit_background_changed(connection: &mut Connection) {
@@ -161,21 +164,11 @@ fn load_status_preferences() -> StatusPreferences {
 fn write_status_preferences(preferences: &StatusPreferences) -> Result<(), &'static str> {
     let _ = fs::create_directory(DESKTOP_CONFIG_DIR);
     let content = preferences.to_toml_section();
-    let mut file = fs::File::create(DESKTOP_STATUS_CONFIG_TEMP_PATH)
-        .map_err(|_| "failed to create temporary desktop status config")?;
-
-    if file.write_all(content.as_bytes()).is_err() || file.flush().is_err() {
-        let _ = fs::remove_file(DESKTOP_STATUS_CONFIG_TEMP_PATH);
-        return Err("failed to write temporary desktop status config");
-    }
-    drop(file);
-
-    if fs::rename(DESKTOP_STATUS_CONFIG_TEMP_PATH, DESKTOP_STATUS_CONFIG_PATH).is_err() {
-        let _ = fs::remove_file(DESKTOP_STATUS_CONFIG_TEMP_PATH);
-        return Err("failed to replace desktop status config");
-    }
-
-    Ok(())
+    atomic_write(
+        DESKTOP_STATUS_CONFIG_PATH,
+        DESKTOP_STATUS_CONFIG_TEMP_PATH,
+        content.as_bytes(),
+    )
 }
 
 fn send_error(connection: &mut Connection, serial: u32, message: &'static str) {
@@ -203,6 +196,14 @@ fn handle_message(connection: &mut Connection, message: Message) {
 
     match method.as_str() {
         DESKTOP_SETTINGS_SET_BACKGROUND_METHOD => {
+            if args.len() != 3 || argument_string(&args, 2).is_none() {
+                send_error(
+                    connection,
+                    0,
+                    "background requires color, style, and image strings",
+                );
+                return;
+            }
             let Some(color) = argument_string(&args, 0).and_then(parse_color) else {
                 send_error(connection, 0, "background color must be #rrggbb");
                 return;
@@ -222,11 +223,15 @@ fn handle_message(connection: &mut Connection, message: Message) {
             }
         }
         DESKTOP_SETTINGS_RESET_BACKGROUND_METHOD => {
-            if fs::remove_file(DESKTOP_BACKGROUND_CONFIG_PATH).is_err()
-                && fs::File::open(DESKTOP_BACKGROUND_CONFIG_PATH).is_ok()
-            {
-                send_error(connection, 0, "failed to remove desktop background config");
+            if let Err(error) = require_no_arguments(&args) {
+                send_error(connection, 0, error);
                 return;
+            }
+            if let Err(error) = fs::remove_file(DESKTOP_BACKGROUND_CONFIG_PATH) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    send_error(connection, 0, "failed to remove desktop background config");
+                    return;
+                }
             }
             let _ = connection.send_method_return(0, Vec::new());
             emit_background_changed(connection);
@@ -277,12 +282,20 @@ fn handle_message(connection: &mut Connection, message: Message) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Argument, StatusPreferences, parse_status_preferences_arguments, require_no_arguments,
-        status_preferences_arguments,
+        Argument, StatusPreferences, parse_color, parse_status_preferences_arguments,
+        require_no_arguments, status_preferences_arguments,
     };
     use scarlet_desktop_config::{ClockFormat, StatusItemId};
     use std::string::String;
     use std::vec;
+
+    #[test]
+    fn color_parser_rejects_multibyte_and_non_hex_input_without_panicking() {
+        assert_eq!(parse_color("#007aff"), Some([0, 122, 255]));
+        for invalid in ["#éaaaa", "#界abc", "#zzzzzz", "#12345", "123456"] {
+            assert_eq!(parse_color(invalid), None);
+        }
+    }
 
     #[test]
     fn status_preferences_set_arguments_require_three_strings() {
