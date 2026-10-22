@@ -106,7 +106,7 @@ to = "/bin/ui-benchmark"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "3a05b0239fdc1052639d6d6c69a7fe0582b24506" }
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ab114f399944d5a554a80a1b23c2c58615acafb6" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
@@ -303,7 +303,7 @@ architectures = ["aarch64"]
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/vellum", rev = "21f0dc7735c6e32dd601d3d67f3c5b4b098cdf65" }
+source = { git = "https://github.com/petitstrawberry/vellum", rev = "4bf39900870b71db0cfec7f995943f34daa31806" }
 package = "vellum"
 bin = "vellum"
 to = "/bin/vellum"

@@ -1006,7 +1006,7 @@ dependencies = [
 [[package]]
 name = "scarlet-scroll-motion"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=3a05b0239fdc1052639d6d6c69a7fe0582b24506#3a05b0239fdc1052639d6d6c69a7fe0582b24506"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=ab114f399944d5a554a80a1b23c2c58615acafb6#ab114f399944d5a554a80a1b23c2c58615acafb6"
 dependencies = [
  "libm",
 ]
@@ -1021,7 +1021,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-core"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=3a05b0239fdc1052639d6d6c69a7fe0582b24506#3a05b0239fdc1052639d6d6c69a7fe0582b24506"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=ab114f399944d5a554a80a1b23c2c58615acafb6#ab114f399944d5a554a80a1b23c2c58615acafb6"
 dependencies = [
  "ab_glyph",
  "bitflags 2.13.2",
@@ -1039,7 +1039,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-icons-tabler"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=3a05b0239fdc1052639d6d6c69a7fe0582b24506#3a05b0239fdc1052639d6d6c69a7fe0582b24506"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=ab114f399944d5a554a80a1b23c2c58615acafb6#ab114f399944d5a554a80a1b23c2c58615acafb6"
 dependencies = [
  "svgtypes",
 ]
@@ -1047,7 +1047,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-macros"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=3a05b0239fdc1052639d6d6c69a7fe0582b24506#3a05b0239fdc1052639d6d6c69a7fe0582b24506"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=ab114f399944d5a554a80a1b23c2c58615acafb6#ab114f399944d5a554a80a1b23c2c58615acafb6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1057,7 +1057,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-renderer-sgfx"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=3a05b0239fdc1052639d6d6c69a7fe0582b24506#3a05b0239fdc1052639d6d6c69a7fe0582b24506"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=ab114f399944d5a554a80a1b23c2c58615acafb6#ab114f399944d5a554a80a1b23c2c58615acafb6"
 dependencies = [
  "libm",
  "scarlet-ui-core",
