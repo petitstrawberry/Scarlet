@@ -4,6 +4,7 @@ mod catalog;
 use catalog::{CATEGORIES, Entry, codepoints, search};
 use scarlet_ui::clipboard::{ClipboardHandle, TextClipboard};
 use scarlet_ui::prelude::*;
+use scarlet_ui::views::Either;
 use scarlet_ui::{
     Event, GridView, KeyCode, KeyEvent, PlatformWindow, Select, WindowContext, hstack, vstack,
 };
@@ -28,6 +29,7 @@ struct CharacterPalette {
     visible_rows: State<usize>,
     recent: State<Vec<Entry>>,
     recent_selection: State<Option<usize>>,
+    detail_width: State<u32>,
     runtime: State<Arc<Mutex<Runtime>>>,
 }
 impl CharacterPalette {
@@ -146,44 +148,80 @@ impl Application for CharacterPalette {
         let grid_keys = self.clone();
         let geometry = self.clone();
         let selected = self.selection();
+        let detail_width = self.detail_width.clone();
         let details = selected
             .as_ref()
-            .map(|entry| format!("{}\n{}", entry.name, codepoints(&entry.text)))
-            .unwrap_or_else(|| "No matching characters. Try a name or U+263A.".into());
+            .map(|entry| {
+                format!(
+                    "{}\n{}",
+                    wrap_name(&entry.name, self.detail_width.get().max(160)),
+                    codepoints(&entry.text)
+                )
+            })
+            .unwrap_or_else(|| "Choose a character to copy".into());
         let recent_app = self.clone();
-        WindowGroup::new("main", Window::new("Characters", vstack! {
-            Text::new("Characters").font_size(27.0),
-            Text::new("Browse common symbols, or find a Unicode code point.").font_size(13.0).color(colors.text_secondary()),
-            TextField::new(self.query.clone()).placeholder("Search names, symbols or U+1F600").autofocus(true)
-                .frame(f32::INFINITY, 40.0),
-            hstack! {
-                Select::new(CATEGORIES.iter().map(|name| (*name).into()).collect(), self.category.clone()).width(240.0).on_change(move |_| category.refilter()),
-                Spacer::new(), Text::new(format!("{} matches", self.entries.get().len())).font_size(12.0),
-            }.spacing(12.0),
-            GridView::new(self.entries.clone(), self.selected.clone(), 8, 86.0, move |index, entry, selected| {
+        let reset_search = self.clone();
+        let grid = if self.entries.get().is_empty() {
+            Either::A(vstack! {
+                Spacer::new(),
+                Text::new("No characters found").font_size(19.0),
+                Text::new("Try a name, a symbol or a code such as U+263A.").font_size(12.0).color(colors.text_secondary()),
+                Button::new("Clear filters").on_click(move || {
+                    reset_search.query.set(String::new()); reset_search.category.set(0); reset_search.refilter();
+                }),
+                Spacer::new(),
+            }.spacing(12.0).frame(f32::INFINITY, f32::INFINITY))
+        } else {
+            Either::B(GridView::new(self.entries.clone(), self.selected.clone(), 8, 86.0, move |index, entry, selected| {
                 let app = cells.clone();
                 let caption = format!("U+{:04X}{}", entry.text.chars().next().unwrap_or(' ') as u32, if entry.text.chars().count() > 1 { "+" } else { "" });
                 vstack! {
                     Button::new(entry.text).font_size(30.0).background_color(if selected == Some(index) { cell_colors.surface_variant() } else { cell_colors.surface() })
                         .on_click(move || app.selected.set(Some(index))).frame(f32::INFINITY, 58.0),
-                    Text::new(caption).font_size(10.0).color(cell_colors.text_secondary()).frame_height(16.0),
+                    Text::new(caption).font_size(11.0).color(cell_colors.text_secondary()).frame_height(16.0),
                 }.frame(f32::INFINITY, 76.0)
             }).spacing(8.0).minimum_cell_width(70.0).reveal_selection(true)
                 .on_geometry_change(|geometry| (((geometry.size().width + 8.0) / 78.0).floor().clamp(1.0, 8.0) as usize, (geometry.size().height / 86.0).floor().max(1.0) as usize),
                     move |(columns, rows)| { geometry.columns.set(columns); geometry.visible_rows.set(rows); })
-                .on_event_capture(move |event| grid_keys.grid_key(event)).frame(f32::INFINITY, f32::INFINITY),
-            Divider::new(),
+                .on_event_capture(move |event| grid_keys.grid_key(event)).frame(f32::INFINITY, f32::INFINITY))
+        };
+        let recent = if self.recent.get().is_empty() {
+            Either::A(Spacer::new().frame_height(0.0))
+        } else {
+            Either::B(vstack! {
+                Text::new("RECENT COPIES").font_size(10.0).color(colors.text_secondary()),
+                GridView::new(self.recent.clone(), self.recent_selection.clone(), 8, 38.0, move |_, entry, _| {
+                    let app = recent_app.clone();
+                    Button::new(entry.text.clone()).font_size(22.0).on_click(move || app.copy(entry.clone())).frame(f32::INFINITY, 36.0)
+                }).spacing(6.0).frame_height(38.0),
+            }.spacing(6.0).alignment(Alignment::Leading))
+        };
+        WindowGroup::new("main", Window::new("Characters", vstack! {
             hstack! {
-                Text::new(selected.as_ref().map(|entry| entry.text.clone()).unwrap_or_default()).font_size(36.0).frame(72.0, 64.0),
-                Text::new(details).font_size(13.0).frame_width(f32::INFINITY),
-                Button::new(if self.copying.get() { "Copying…" } else { "Copy" }).enabled(selected.is_some() && !self.copying.get()).on_click(move || copy.copy_selection()),
+                Text::new("Characters").font_size(22.0),
+                Spacer::new(),
+                Text::new(format!("{} matches", self.entries.get().len())).font_size(12.0).color(colors.text_secondary()),
+            }.frame_width(f32::INFINITY),
+            TextField::new(self.query.clone()).placeholder("Search names, symbols or U+1F600").autofocus(true)
+                .frame(f32::INFINITY, 38.0),
+            hstack! {
+                Select::new(CATEGORIES.iter().map(|name| (*name).into()).collect(), self.category.clone()).width(240.0).on_change(move |_| category.refilter()),
+                Spacer::new(), Text::new("Select to preview").font_size(11.0).color(colors.text_secondary()),
             }.spacing(12.0),
-            Text::new("Recent copies · click to copy again").font_size(12.0).color(colors.text_secondary()),
-            GridView::new(self.recent.clone(), self.recent_selection.clone(), 8, 38.0, move |_, entry, _| {
-                let app = recent_app.clone();
-                Button::new(entry.text.clone()).font_size(22.0).on_click(move || app.copy(entry.clone())).frame(f32::INFINITY, 36.0)
-            }).spacing(6.0).frame_height(38.0),
-            Text::new(self.status.get()).font_size(12.0).frame_height(32.0),
+            Divider::new(),
+            grid,
+            hstack! {
+                Text::new(selected.as_ref().map(|entry| entry.text.clone()).unwrap_or_default()).font_size(36.0).frame(52.0, 64.0),
+                Text::new(details).font_size(13.0).alignment(Alignment::Leading).frame(f32::INFINITY, 64.0)
+                    .on_geometry_change(|layout| layout.size().width.max(0.0) as u32, move |width| detail_width.set(width)),
+                Button::new(if self.copying.get() { "Copying…" } else { "Copy" }).font_size(13.0)
+                    .background_color(if selected.is_some() && !self.copying.get() { colors.primary() } else { colors.button_background() })
+                    .text_color(if selected.is_some() && !self.copying.get() { colors.text_inverse() } else { colors.text_secondary() })
+                    .enabled(selected.is_some() && !self.copying.get()).on_click(move || copy.copy_selection()).frame(80.0, 36.0),
+            }.spacing(12.0).padding(12.0).frame(f32::INFINITY, 88.0).background(colors.surface_variant()),
+            recent,
+            Text::new(if self.status.get().is_empty() { "Enter  copy selection    Ctrl+C  copy".into() } else { self.status.get() })
+                .font_size(11.0).color(colors.text_secondary()).alignment(Alignment::Leading).frame(f32::INFINITY, 26.0),
         }.spacing(10.0).padding(18.0).frame(f32::INFINITY, f32::INFINITY)
         .on_event_capture(move |event| match event {
             Event::Keyboard(KeyEvent::Pressed { keycode: KeyCode::Char('c' | 'C'), modifiers }) if modifiers.control || modifiers.super_key => { keys.copy_selection(); true }
@@ -202,6 +240,32 @@ impl Application for CharacterPalette {
     fn debug_logging(&self) -> bool {
         false
     }
+}
+fn wrap_name(name: &str, width: u32) -> String {
+    let mut lines = String::new();
+    let mut line = String::new();
+    for word in name.split_whitespace() {
+        let candidate = if line.is_empty() {
+            word.into()
+        } else {
+            format!("{line} {word}")
+        };
+        if !line.is_empty() && scarlet_ui::graphics::measure_text_sized(&candidate, 13.0).0 > width
+        {
+            if !lines.is_empty() {
+                lines.push('\n');
+            }
+            lines.push_str(&line);
+            line = word.into();
+        } else {
+            line = candidate;
+        }
+    }
+    if !lines.is_empty() {
+        lines.push('\n');
+    }
+    lines.push_str(&line);
+    lines
 }
 fn main() {
     if let Err(error) = CharacterPalette::new().run() {
