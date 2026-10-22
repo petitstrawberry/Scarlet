@@ -3,6 +3,7 @@
 mod document;
 
 use document::{Operation, PendingAction, Session, Ticket};
+use scarlet_ui::clipboard::{ClipboardError, ClipboardHandle, TextClipboard};
 use scarlet_ui::file_dialog::{FileDialog, FileDialogHandle, FileDialogMode, FileDialogOutcome};
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
@@ -35,7 +36,35 @@ struct Runtime {
     undo: VecDeque<Snapshot>,
     redo: VecDeque<Snapshot>,
     current: Snapshot,
-    clipboard: Option<String>,
+    clipboard: Option<TextClipboard>,
+    clipboard_error: Option<String>,
+    clipboard_job: Option<ClipboardJob>,
+}
+enum ClipboardJob {
+    Copy {
+        handle: ClipboardHandle<()>,
+        cut: bool,
+        identity: (u64, u64),
+        selection: TextSelection,
+    },
+    Paste {
+        handle: ClipboardHandle<Option<String>>,
+        identity: (u64, u64),
+        selection: TextSelection,
+    },
+}
+enum ClipboardCompletion {
+    Copy(
+        std::result::Result<(), ClipboardError>,
+        bool,
+        (u64, u64),
+        TextSelection,
+    ),
+    Paste(
+        std::result::Result<Option<String>, ClipboardError>,
+        (u64, u64),
+        TextSelection,
+    ),
 }
 enum IoResult {
     Open(Ticket, PathBuf, std::result::Result<String, String>),
@@ -406,29 +435,126 @@ impl NotepadApp {
         ));
         self.record_edit();
     }
+    fn clipboard_service(&self) -> Option<TextClipboard> {
+        let shared = self.runtime.get();
+        let runtime = shared.lock().unwrap();
+        if runtime.clipboard_job.is_some() {
+            self.status.set("A clipboard operation is pending".into());
+            return None;
+        }
+        match runtime.clipboard.clone() {
+            Some(service) => Some(service),
+            None => {
+                self.status.set(
+                    runtime
+                        .clipboard_error
+                        .clone()
+                        .unwrap_or_else(|| "Desktop clipboard unavailable".into()),
+                );
+                None
+            }
+        }
+    }
     fn copy(&self, cut: bool) {
-        let Some(range) = self.selection.get().normalized_range() else {
+        let selection = self.selection.get();
+        let Some(range) = selection.normalized_range() else {
             return;
         };
         let document = self.content.get();
         let text = document.as_str();
-        let Some(selected) = text.get(range.clone()) else {
+        let Some(selected) = text.get(range) else {
             return;
         };
-        self.runtime.get().lock().unwrap().clipboard = Some(selected.into());
-        if cut {
-            self.replace_range(range, "");
-        }
-        self.status
-            .set("Copied within Notepad (desktop clipboard unavailable)".into());
+        let Some(service) = self.clipboard_service() else {
+            return;
+        };
+        self.runtime.get().lock().unwrap().clipboard_job = Some(ClipboardJob::Copy {
+            handle: service.write_text(selected.into()),
+            cut,
+            identity: self.session.get().identity(),
+            selection,
+        });
+        self.status.set("Copying to desktop clipboard…".into());
     }
     fn paste(&self) {
-        let clipboard = self.runtime.get().lock().unwrap().clipboard.clone();
-        if let Some(text) = clipboard {
-            let s = self.selection.get();
-            self.replace_range(s.start().byte..s.end().byte, &text);
-        } else {
-            self.status.set("Notepad clipboard is empty".into());
+        let Some(service) = self.clipboard_service() else {
+            return;
+        };
+        self.runtime.get().lock().unwrap().clipboard_job = Some(ClipboardJob::Paste {
+            handle: service.read_text(),
+            identity: self.session.get().identity(),
+            selection: self.selection.get(),
+        });
+        self.status.set("Reading desktop clipboard…".into());
+    }
+    fn clipboard_target_unchanged(&self, identity: (u64, u64), selection: TextSelection) -> bool {
+        self.session.get().identity() == identity && self.selection.get() == selection
+    }
+    fn poll_clipboard(&self) {
+        let completion = {
+            let shared = self.runtime.get();
+            let mut runtime = shared.lock().unwrap();
+            let ready = match runtime.clipboard_job.as_ref() {
+                Some(ClipboardJob::Copy {
+                    handle,
+                    cut,
+                    identity,
+                    selection,
+                }) => handle
+                    .try_take()
+                    .map(|r| ClipboardCompletion::Copy(r, *cut, *identity, *selection)),
+                Some(ClipboardJob::Paste {
+                    handle,
+                    identity,
+                    selection,
+                }) => handle
+                    .try_take()
+                    .map(|r| ClipboardCompletion::Paste(r, *identity, *selection)),
+                None => None,
+            };
+            if ready.is_some() {
+                runtime.clipboard_job = None;
+            }
+            ready
+        };
+        match completion {
+            Some(ClipboardCompletion::Copy(Ok(()), cut, identity, selection)) => {
+                if cut {
+                    if !self.clipboard_target_unchanged(identity, selection) {
+                        self.status.set(
+                            "Copied; Cut cancelled because the document or selection changed"
+                                .into(),
+                        );
+                        return;
+                    }
+                    self.replace_range(selection.start().byte..selection.end().byte, "");
+                }
+                self.status.set(
+                    if cut {
+                        "Cut to desktop clipboard"
+                    } else {
+                        "Copied to desktop clipboard"
+                    }
+                    .into(),
+                );
+            }
+            Some(ClipboardCompletion::Paste(Ok(Some(text)), identity, selection)) => {
+                if !self.clipboard_target_unchanged(identity, selection) {
+                    self.status
+                        .set("Paste cancelled because the document or selection changed".into());
+                    return;
+                }
+                self.replace_range(selection.start().byte..selection.end().byte, &text);
+                self.status.set("Pasted from desktop clipboard".into());
+            }
+            Some(ClipboardCompletion::Paste(Ok(None), ..)) => {
+                self.status.set("Desktop clipboard is empty".into())
+            }
+            Some(
+                ClipboardCompletion::Copy(Err(error), ..)
+                | ClipboardCompletion::Paste(Err(error), ..),
+            ) => self.status.set(error.to_string()),
+            None => {}
         }
     }
     fn select_all(&self) {
@@ -665,9 +791,9 @@ impl NotepadApp {
                 self.menu_item("undo", "Undo", "Ctrl+Z", |a| a.restore_history(false)),
                 self.menu_item("redo", "Redo", "Ctrl+Shift+Z", |a| a.restore_history(true)),
                 MenuEntry::Separator,
-                self.menu_item("cut", "Cut (Notepad)", "Ctrl+X", |a| a.copy(true)),
-                self.menu_item("copy", "Copy (Notepad)", "Ctrl+C", |a| a.copy(false)),
-                self.menu_item("paste", "Paste (Notepad)", "Ctrl+V", |a| a.paste()),
+                self.menu_item("cut", "Cut", "Ctrl+X", |a| a.copy(true)),
+                self.menu_item("copy", "Copy", "Ctrl+C", |a| a.copy(false)),
+                self.menu_item("paste", "Paste", "Ctrl+V", |a| a.paste()),
                 self.menu_item("all", "Select All", "Ctrl+A", |a| a.select_all()),
                 MenuEntry::Separator,
                 self.menu_item("find", "Find / Replace…", "Ctrl+F", |a| a.show_find()),
@@ -728,9 +854,15 @@ impl Application for NotepadApp {
                 .open_at_launch(false).app_id(APP_ID).size(Size::new(500.0, 300.0)),
         }
     }
-    fn on_window_created(&mut self, ctx: &WindowContext, _: &mut dyn PlatformWindow) {
+    fn on_window_created(&mut self, ctx: &WindowContext, window: &mut dyn PlatformWindow) {
         if ctx.scene_key.as_str() == "main" {
-            self.runtime.get().lock().unwrap().owner = Some(ctx.window_id);
+            let shared = self.runtime.get();
+            let mut runtime = shared.lock().unwrap();
+            runtime.owner = Some(ctx.window_id);
+            match window.text_clipboard() {
+                Ok(service) => runtime.clipboard = Some(service),
+                Err(error) => runtime.clipboard_error = Some(error.to_string()),
+            }
         }
     }
     fn on_window_sync(&mut self, ctx: &WindowContext, window: &mut dyn PlatformWindow) {
@@ -759,6 +891,7 @@ impl Application for NotepadApp {
         }
     }
     fn on_idle(&mut self) {
+        self.poll_clipboard();
         self.poll_results();
         self.update_position();
     }
@@ -824,6 +957,81 @@ mod tests {
         assert_eq!(app.content.get().as_str(), "鳥🐈\nhello");
     }
 
+    struct TestClipboard {
+        fail: bool,
+    }
+    impl scarlet_ui::clipboard::ClipboardProvider for TestClipboard {
+        fn read_text(&self) -> std::result::Result<Option<String>, ClipboardError> {
+            Ok(Some("猫".into()))
+        }
+        fn write_text(&self, _: &str) -> std::result::Result<(), ClipboardError> {
+            if self.fail {
+                Err(ClipboardError::AccessDenied)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    fn finish_clipboard(app: &NotepadApp) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            app.poll_clipboard();
+            if app.runtime.get().lock().unwrap().clipboard_job.is_none() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "clipboard worker timed out"
+            );
+            std::thread::yield_now();
+        }
+    }
+    #[test]
+    fn failed_clipboard_write_preserves_cut_selection_and_document() {
+        let app = NotepadApp::new(None);
+        app.load_document(None, "猫 text".into());
+        app.select_all();
+        let selection = app.selection.get();
+        app.runtime.get().lock().unwrap().clipboard =
+            Some(TextClipboard::new(TestClipboard { fail: true }));
+        app.copy(true);
+        finish_clipboard(&app);
+        assert_eq!(app.content.get().as_str(), "猫 text");
+        assert_eq!(app.selection.get(), selection);
+        assert!(!app.session.get().dirty());
+        assert!(app.status.get().contains("Focus"));
+    }
+    #[test]
+    fn clipboard_cut_is_undoable_and_stale_paste_is_rejected() {
+        let app = NotepadApp::new(None);
+        app.load_document(None, "猫 text".into());
+        app.select_all();
+        app.runtime.get().lock().unwrap().clipboard =
+            Some(TextClipboard::new(TestClipboard { fail: false }));
+        app.copy(true);
+        finish_clipboard(&app);
+        assert_eq!(app.content.get().as_str(), "");
+        app.restore_history(false);
+        assert_eq!(app.content.get().as_str(), "猫 text");
+        app.paste();
+        app.replace_range(0..3, "犬");
+        finish_clipboard(&app);
+        assert_eq!(app.content.get().as_str(), "犬 text");
+        assert!(app.status.get().contains("Paste cancelled"));
+    }
+    #[test]
+    fn clipboard_target_guard_rejects_new_documents_and_moved_selections() {
+        let app = NotepadApp::new(None);
+        app.load_document(None, "first".into());
+        let identity = app.session.get().identity();
+        let selection = app.selection.get();
+        assert!(app.clipboard_target_unchanged(identity, selection));
+        app.selection.set(TextSelection::collapsed(2));
+        assert!(!app.clipboard_target_unchanged(identity, selection));
+        app.selection.set(selection);
+        app.load_document(None, "other".into());
+        assert!(!app.clipboard_target_unchanged(identity, selection));
+    }
     #[test]
     fn replace_all_is_one_undo_step_and_empty_query_is_safe() {
         let app = NotepadApp::new(None);

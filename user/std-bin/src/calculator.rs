@@ -3,10 +3,13 @@
 mod calculator_model;
 
 use calculator_model::{CATEGORIES, convert, evaluate, format_value, units};
+use scarlet_ui::clipboard::{ClipboardHandle, TextClipboard};
 use scarlet_ui::prelude::*;
 use scarlet_ui::views::Either;
 use scarlet_ui::{Event, KeyCode, KeyEvent, ListView, Select, hstack, vstack};
+use scarlet_ui::{PlatformWindow, WindowContext};
 use scarlet_ui_macros::View;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug)]
 struct Calculation {
@@ -14,8 +17,17 @@ struct Calculation {
     value: f64,
 }
 
+#[derive(Default)]
+struct ClipboardRuntime {
+    service: Option<TextClipboard>,
+    pending: Option<ClipboardHandle<()>>,
+    unavailable: Option<String>,
+}
+
 #[derive(View, Clone)]
 struct CalculatorApp {
+    clipboard: State<Arc<Mutex<ClipboardRuntime>>>,
+    notice: State<String>,
     expression: State<String>,
     selection: State<TextSelection>,
     answer: State<Option<f64>>,
@@ -38,6 +50,29 @@ impl CalculatorApp {
         app
     }
 
+    fn copy_result(&self) {
+        let Some(value) = self.answer.get() else {
+            return;
+        };
+        let shared = self.clipboard.get();
+        let mut runtime = shared.lock().unwrap();
+        if runtime.pending.is_some() {
+            self.notice.set("Copy is already pending".into());
+            return;
+        }
+        match runtime.service.as_ref() {
+            Some(service) => {
+                runtime.pending = Some(service.write_text(value.to_string()));
+                self.notice.set("Copying result…".into());
+            }
+            None => self.notice.set(
+                runtime
+                    .unavailable
+                    .clone()
+                    .unwrap_or_else(|| "Desktop clipboard unavailable".into()),
+            ),
+        }
+    }
     fn set_expression(&self, text: String) {
         self.selection.set(TextSelection::collapsed(text.len()));
         self.expression.set(text);
@@ -214,6 +249,7 @@ impl CalculatorApp {
         let edited = self.clone();
         let input_keys = self.clone();
         let reuse = self.clone();
+        let copy = self.clone();
         let history = self.clone();
         let clear_history = self.history.clone();
         let error = self.error.get();
@@ -227,7 +263,7 @@ impl CalculatorApp {
                 .frame(f32::INFINITY, 56.0),
             Text::new(self.answer.get().map(format_value).unwrap_or_else(|| "0".into()))
                 .font_size(30.0).frame_width(f32::INFINITY),
-            Text::new(if error.is_empty() { "Enter = calculate · Esc = clear · % divides by 100".into() } else { error.clone() })
+            Text::new(if error.is_empty() { if self.notice.get().is_empty() { "Enter = calculate · Esc = clear · % divides by 100".into() } else { self.notice.get() } } else { error.clone() })
                 .font_size(12.0).color(if error.is_empty() { palette.text_secondary() } else { palette.error() })
                 .frame_height(30.0),
             vstack! {
@@ -239,9 +275,13 @@ impl CalculatorApp {
             self.row(["√", "^", "%", "π"]),
             }.spacing(6.0),
             hstack! {
+                Button::new("Copy result").enabled(self.answer.get().is_some()).on_click(move || copy.copy_result()),
                 Button::new("Use result").on_click(move || { if let Some(value) = reuse.answer.get() { reuse.set_expression(value.to_string()); } }),
                 Spacer::new(),
+            }.spacing(8.0),
+            hstack! {
                 Text::new("History · last 32").font_size(12.0),
+                Spacer::new(),
                 Button::new("Clear history").on_click(move || clear_history.set(Vec::new())),
             }.spacing(8.0),
             ListView::new(self.history.clone(), self.history_selection.clone(), 35.0, move |_, calculation, _| {
@@ -321,6 +361,31 @@ impl Application for CalculatorApp {
     }
     fn debug_logging(&self) -> bool {
         false
+    }
+    fn on_window_created(&mut self, _: &WindowContext, window: &mut dyn PlatformWindow) {
+        let shared = self.clipboard.get();
+        let mut runtime = shared.lock().unwrap();
+        match window.text_clipboard() {
+            Ok(service) => runtime.service = Some(service),
+            Err(error) => runtime.unavailable = Some(error.to_string()),
+        }
+    }
+    fn on_idle(&mut self) {
+        let result = {
+            let shared = self.clipboard.get();
+            let mut runtime = shared.lock().unwrap();
+            let result = runtime.pending.as_ref().and_then(|job| job.try_take());
+            if result.is_some() {
+                runtime.pending = None;
+            }
+            result
+        };
+        if let Some(result) = result {
+            self.notice.set(match result {
+                Ok(()) => "Result copied to desktop clipboard".into(),
+                Err(error) => error.to_string(),
+            });
+        }
     }
 }
 
