@@ -3431,6 +3431,46 @@ impl Connection {
         }
     }
 
+    /// Read UTF-8 text from the session clipboard for a focused owned window.
+    /// An empty clipboard is distinct from a copied empty string. This bounded
+    /// IPC operation may block; GUI clients should call it off the event loop.
+    pub fn read_clipboard_text(&self, window_id: u32) -> Result<Option<String>, Error> {
+        use protocol::clipboard::{Request, OK, EMPTY, DENIED, BUSY};
+        let response = self.clipboard_request(Request::Get { window_id })?;
+        match response.message() {
+            ServerMessage::ClipboardText(header) if header.status == OK => {
+                let text = core::str::from_utf8(&response.payload()[8..]).map_err(|_| Error::InvalidResponse)?;
+                Ok(Some(String::from(text)))
+            }
+            ServerMessage::ClipboardText(header) if header.status == EMPTY => Ok(None),
+            ServerMessage::ClipboardText(header) if header.status == DENIED => Err(Error::ClipboardDenied),
+            ServerMessage::ClipboardText(header) if header.status == BUSY => Err(Error::ClipboardBusy),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    /// Replace session clipboard text only if this window is owned and focused.
+    /// A rejected write leaves the previous clipboard unchanged.
+    pub fn write_clipboard_text(&self, window_id: u32, text: &str) -> Result<(), Error> {
+        use protocol::clipboard::{Request, OK, DENIED, BUSY, MAX_TEXT_BYTES};
+        if text.len() > MAX_TEXT_BYTES { return Err(Error::ClipboardTooLarge); }
+        let response = self.clipboard_request(Request::Set { window_id, text })?;
+        match response.message() {
+            ServerMessage::ClipboardText(header) if header.status == OK && header.text_len == 0 => Ok(()),
+            ServerMessage::ClipboardText(header) if header.status == DENIED => Err(Error::ClipboardDenied),
+            ServerMessage::ClipboardText(header) if header.status == BUSY => Err(Error::ClipboardBusy),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    fn clipboard_request(&self, request: protocol::clipboard::Request<'_>) -> Result<Response, Error> {
+        if self.get_capabilities()?.capabilities & protocol::capabilities::TEXT_CLIPBOARD == 0 {
+            return Err(Error::ClipboardUnsupported);
+        }
+        let (kind, payload) = request.encode()?;
+        self.request(kind, &payload)
+    }
+
     /// Query the current input environment.
     ///
     /// # Returns

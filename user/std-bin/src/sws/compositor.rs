@@ -2369,6 +2369,7 @@ pub struct Compositor {
     backend: SwsBackend,
     gpu_compositor: Option<GpuCompositor>,
     window_manager: WindowManager,
+    text_clipboard: super::clipboard::Clipboard,
     ipc_server: IpcServer,
     remote_server: RemoteServer,
     capture_session: CaptureSession,
@@ -2840,6 +2841,7 @@ impl Compositor {
             backend,
             gpu_compositor,
             window_manager,
+            text_clipboard: super::clipboard::Clipboard::new(),
             ipc_server,
             remote_server,
             capture_session: CaptureSession::new(screen_width, screen_height),
@@ -12826,6 +12828,21 @@ impl Compositor {
                     "[Compositor] Sent OUTPUT_SCALE: {} to client {}",
                     self.output_scale_milli, client_id
                 );
+            }
+            IpcEvent::Clipboard { client_id, request_id, window_id, text } => {
+                // Authorize on the compositor thread against canonical focus,
+                // visibility/workspace/minimize state and window ownership.
+                let focused = self.window_manager.get_focused_window_id();
+                let window = self.window_manager.get_window(window_id);
+                let owner = window.and_then(|window| window.owner_client_id);
+                let presented = window.is_some_and(|window| window.is_presented());
+                let request = match &text {
+                    Some(text) => sws_protocol::clipboard::Request::Set { window_id, text },
+                    None => sws_protocol::clipboard::Request::Get { window_id },
+                };
+                let payload = self.text_clipboard.apply(request, focused, owner, client_id, presented);
+                super::ipc::finish_clipboard_request(client_id);
+                send_response_to_client(client_id, sws_protocol::server_msg::CLIPBOARD_TEXT, request_id, payload);
             }
             IpcEvent::GetWindowList {
                 client_id,

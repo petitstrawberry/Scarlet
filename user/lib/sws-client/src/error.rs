@@ -38,6 +38,14 @@ pub enum Error {
     SystemModeOverrideUnsupported,
     /// The connected server does not implement exclusive workspace-shell control.
     WorkspaceShellUnsupported,
+    /// The connected server does not provide a session text clipboard.
+    ClipboardUnsupported,
+    /// Clipboard access requires an owned window with current keyboard focus.
+    ClipboardDenied,
+    /// Clipboard text exceeds the transport limit; no text was written.
+    ClipboardTooLarge,
+    /// The server has reached its bounded pending clipboard request limit.
+    ClipboardBusy,
     /// Failed to receive shared memory handle
     ShmHandleFailed,
     /// Failed to map shared memory
@@ -74,6 +82,10 @@ impl Error {
             Error::InputEnvironmentUnsupported => "input environment is not supported",
             Error::SystemModeOverrideUnsupported => "system mode overrides are not supported",
             Error::WorkspaceShellUnsupported => "workspace shell control is not supported",
+            Error::ClipboardUnsupported => "text clipboard is not supported",
+            Error::ClipboardDenied => "clipboard access requires a focused owned window",
+            Error::ClipboardTooLarge => "clipboard text exceeds 256 KiB",
+            Error::ClipboardBusy => "clipboard request queue is busy",
             Error::ShmHandleFailed => "failed to receive shared memory handle",
             Error::ShmMapFailed => "failed to map shared memory",
             Error::SurfaceNotFound => "surface not found",

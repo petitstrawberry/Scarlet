@@ -48,7 +48,11 @@ fn request_routing_has_a_fixed_eight_byte_header() {
 
 #[test]
 fn capability_version_bits_and_payload_are_independent_of_package_version() {
-    assert_eq!(SWS_PROTOCOL_VERSION, 13);
+    assert_eq!(SWS_PROTOCOL_VERSION, 14);
+    assert_eq!(capabilities::TEXT_CLIPBOARD, 1 << 17);
+    assert_eq!(client_msg::GET_CLIPBOARD_TEXT, 57);
+    assert_eq!(client_msg::SET_CLIPBOARD_TEXT, 58);
+    assert_eq!(server_msg::CLIPBOARD_TEXT, 43);
     assert_eq!(client_msg::GET_CAPABILITIES, 32);
     assert_eq!(server_msg::CAPABILITIES, 25);
     assert_eq!(

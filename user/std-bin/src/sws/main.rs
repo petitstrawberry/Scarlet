@@ -13,6 +13,7 @@ mod input;
 mod input_environment;
 mod input_environment_sbus;
 mod input_panel;
+mod clipboard;
 mod ipc;
 mod pointer_lock;
 mod remote;

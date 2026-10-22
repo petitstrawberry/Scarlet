@@ -23,6 +23,7 @@ extern crate scarlet_std as std;
 use std::vec::Vec;
 
 pub mod input_panel;
+pub mod clipboard;
 pub mod surface_regions;
 pub mod surface_scene;
 pub mod workspace;
@@ -33,7 +34,7 @@ pub mod workspace;
 pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024; // 1 MiB
 
 /// Current SWS capability-negotiation protocol version.
-pub const SWS_PROTOCOL_VERSION: u32 = 13;
+pub const SWS_PROTOCOL_VERSION: u32 = 14;
 
 /// Maximum damage rectangles carried by one shared SGFX frame commit.
 pub const SGFX_MAX_DAMAGE_RECTS: usize = 16;
@@ -77,6 +78,8 @@ pub mod capabilities {
     pub const SURFACE_SCENES: u64 = 1 << 15;
     /// Extensions may define shared GPU images as reusable scene buffers.
     pub const EXTENSION_GPU_BUFFERS: u64 = 1 << 16;
+    /// Focused owned windows may read and replace session UTF-8 clipboard text.
+    pub const TEXT_CLIPBOARD: u64 = 1 << 17;
 }
 
 pub mod gamepad;
@@ -435,6 +438,8 @@ pub mod client_msg {
     pub const SET_SURFACE_REGIONS: u32 = 54;
     pub const SET_GAMEPAD_INPUT: u32 = 55;
     pub const SET_TOUCH_INPUT: u32 = 56;
+    pub const GET_CLIPBOARD_TEXT: u32 = 57;
+    pub const SET_CLIPBOARD_TEXT: u32 = 58;
 
     // Text input client API messages (200-219)
     pub const TEXT_INPUT_CREATE: u32 = 200;
@@ -521,6 +526,7 @@ pub mod server_msg {
     pub const FRAME_DONE: u32 = 38;
     pub const GAMEPAD_INPUT: u32 = 39;
     pub const TOUCH_FRAME: u32 = 40;
+    pub const CLIPBOARD_TEXT: u32 = 43;
 
     // Text input client events (200-219)
     pub const TEXT_INPUT_CREATED: u32 = 200;
@@ -1214,6 +1220,7 @@ pub struct InitialWindowConfiguration {
 /// Borrowed client->server messages (payload may be borrowed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientMessageRef<'a> {
+    Clipboard(clipboard::Request<'a>),
     InputPanel(input_panel::Request),
     CreateWindow {
         app_id: &'a [u8],
@@ -1687,6 +1694,7 @@ pub enum ClientMessageRef<'a> {
 /// Server->client messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerMessage {
+    ClipboardText(clipboard::Response),
     InputPanelRegistered {
         accepted: bool,
     },
@@ -2676,6 +2684,9 @@ pub fn parse_client_message<'a>(
             }
             Ok(ClientMessageRef::GetCapabilities {})
         }
+        client_msg::GET_CLIPBOARD_TEXT | client_msg::SET_CLIPBOARD_TEXT => {
+            clipboard::Request::parse(msg_type, payload).map(ClientMessageRef::Clipboard)
+        }
         client_msg::GET_INPUT_ENVIRONMENT => {
             if !payload.is_empty() {
                 return Err(ProtocolError::MalformedPayload);
@@ -3214,6 +3225,7 @@ fn parse_sgfx_buffer_identity(payload: &[u8]) -> Result<(u32, u32, u32, u32), Pr
 /// Parse a server->client message from `(msg_type, payload)`.
 pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessage, ProtocolError> {
     match msg_type {
+        server_msg::CLIPBOARD_TEXT => clipboard::Response::parse(payload).map(ServerMessage::ClipboardText),
         server_msg::WINDOW_CREATED => {
             if payload.len() != 12 && payload.len() != 20 {
                 return Err(ProtocolError::MalformedPayload);
