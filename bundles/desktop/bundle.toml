@@ -303,7 +303,7 @@ architectures = ["aarch64"]
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/vellum", rev = "87a0f17173a7be09ead750f913b64b1fc5e0c785" }
+source = { git = "https://github.com/petitstrawberry/vellum", rev = "a54677d7e326b96c490b61bc7313f963b9cb5d58" }
 package = "vellum"
 bin = "vellum"
 to = "/bin/vellum"
