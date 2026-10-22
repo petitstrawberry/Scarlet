@@ -4,20 +4,33 @@
 //! the kernel is sampled on a worker thread, the resulting snapshot is sent
 //! through one UI state, and the view only formats already-collected data.
 
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::fs;
-use std::rc::Rc;
 use std::sync::Arc;
+#[cfg(target_os = "scarlet")]
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(any(target_os = "scarlet", test))]
+use std::time::Instant;
 
+#[cfg(target_os = "scarlet")]
 use scarlet_sys::{Syscall, syscall0, syscall1, syscall2};
+use scarlet_ui::element::{
+    Element, ElementRenderObject, LayoutConstraints, RenderElement, UpdateResult,
+};
 use scarlet_ui::prelude::*;
+use scarlet_ui::renderer::PaintContext;
 use scarlet_ui::{
-    Canvas, CanvasView, Color, GridView, Icon, IconSize, IconView, LazyVStack, ProgressView,
-    ScrollView, TabItem, TabView, hstack, vstack,
+    Color, GridView, Icon, IconSize, IconView, LazyVStack, ProgressView, ScrollView, SgfxCanvas,
+    SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle,
+    TabItem, TabView, hstack, vstack,
 };
 use scarlet_ui_macros::View;
+
+mod task_manager_graph;
+#[cfg(test)]
+mod task_manager_graph_bench;
 use std::process::ExitCode;
 
 const APP_ID: &str = "org.scarlet-os.desktop.task-manager";
@@ -25,15 +38,13 @@ const APP_TITLE: &str = "Task Manager";
 
 const WINDOW_WIDTH: f32 = 980.0;
 const WINDOW_HEIGHT: f32 = 620.0;
-const HEADER_HEIGHT: f32 = 100.0;
-const PANEL_HEIGHT: f32 = 450.0;
+const MIN_WINDOW_WIDTH: f32 = 800.0;
+const MIN_WINDOW_HEIGHT: f32 = 560.0;
+const HEADER_HEIGHT: f32 = 140.0;
 const TAB_BAR_HEIGHT: f32 = 38.0;
-const TASK_LIST_HEIGHT: f32 = 348.0;
 const TASK_ROW_HEIGHT: f32 = 34.0;
 const TASK_TABLE_HEADER_HEIGHT: f32 = 28.0;
-const CPU_GRAPH_HEIGHT: f32 = 170.0;
 const CPU_SUMMARY_HEIGHT: f32 = 72.0;
-const CPU_GRID_HEIGHT: f32 = 302.0;
 const CPU_GRID_ROW_HEIGHT: f32 = 141.0;
 const CPU_GRID_SPACING: f32 = 10.0;
 const CPU_GRID_COLUMNS: usize = 4;
@@ -44,7 +55,7 @@ const DEVICE_CARD_HEIGHT: f32 = 332.0;
 const THERMAL_CARD_HEIGHT: f32 = 160.0;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(750);
 const MAX_TASKS: usize = 8_192;
-const CPU_HISTORY_CAPACITY: usize = 60;
+const CPU_HISTORY_CAPACITY: usize = task_manager_graph::HISTORY_CAPACITY;
 const SCHED_UTIL_SCALE: u32 = 1_024;
 
 const TASK_PID_COLUMN_WIDTH: f32 = 48.0;
@@ -54,7 +65,6 @@ const TASK_UTIL_COLUMN_WIDTH: f32 = 48.0;
 const TASK_STATE_COLUMN_WIDTH: f32 = 55.0;
 const TASK_TYPE_COLUMN_WIDTH: f32 = 50.0;
 const TASK_TIME_COLUMN_WIDTH: f32 = 78.0;
-const TASK_COMMAND_COLUMN_WIDTH: f32 = 245.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum TaskState {
@@ -352,7 +362,13 @@ impl TaskManagerApp {
 
 impl Application for TaskManagerApp {
     fn init(&mut self) {
+        #[cfg(target_os = "scarlet")]
         start_sampler(self.snapshot.clone(), self.cpu_cards.clone());
+        #[cfg(not(target_os = "scarlet"))]
+        self.snapshot.set(Arc::new(Snapshot {
+            status: String::from("Live kernel metrics are available on Scarlet."),
+            ..Snapshot::default()
+        }));
     }
 
     fn scenes(&self) -> impl Scene {
@@ -369,16 +385,14 @@ impl Application for TaskManagerApp {
             )
             .app_id(APP_ID)
             .size(Size::new(WINDOW_WIDTH, WINDOW_HEIGHT))
-            .size_limits(
-                Size::new(WINDOW_WIDTH, WINDOW_HEIGHT),
-                Size::new(WINDOW_WIDTH, WINDOW_HEIGHT),
-            )
-            .resizable(false)
+            .min_size(Size::new(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT))
+            .resizable(true)
             .background_color(ColorPalette::default().window_background()),
         )
     }
 }
 
+#[cfg(target_os = "scarlet")]
 fn start_sampler(snapshot: State<Arc<Snapshot>>, cpu_cards: State<Vec<CpuSnapshot>>) {
     thread::spawn(move || {
         let mut previous_tasks = read_tasks();
@@ -568,6 +582,7 @@ fn update_per_cpu_histories(
     histories: &mut BTreeMap<usize, Vec<u32>>,
     current_cpus: &mut [CpuSnapshot],
 ) {
+    histories.retain(|id, _| current_cpus.iter().any(|cpu| cpu.id == *id));
     for cpu in current_cpus {
         let history = histories
             .entry(cpu.id)
@@ -618,6 +633,7 @@ fn cpu_delta(previous: Option<RawCpuUsageInfo>, current: Option<RawCpuUsageInfo>
     )
 }
 
+#[cfg(target_os = "scarlet")]
 fn read_tasks() -> Vec<TaskInfo> {
     // SAFETY: This fixed query has no arguments or userspace memory effects.
     let count = unsafe { syscall0(Syscall::GetTaskInfoCount) };
@@ -643,6 +659,7 @@ fn read_tasks() -> Vec<TaskInfo> {
     raw.into_iter().map(TaskInfo::from_raw).collect()
 }
 
+#[cfg(target_os = "scarlet")]
 fn read_cpu_usage() -> Option<RawCpuUsageInfo> {
     let mut raw = RawCpuUsageInfo::default();
     // SAFETY: raw is an exclusive output record with the kernel's fixed CPU-usage layout.
@@ -769,8 +786,11 @@ fn update_device_histories(
     histories: &mut BTreeMap<String, Vec<u32>>,
     devices: &mut [DeviceFrequencySnapshot],
 ) {
+    histories.retain(|name, _| devices.iter().any(|device| device.name == *name));
     for device in devices {
-        let history = histories.entry(device.name.clone()).or_default();
+        let history = histories
+            .entry(device.name.clone())
+            .or_insert_with(|| Vec::with_capacity(CPU_HISTORY_CAPACITY));
         if let Some(utilization) = device.utilization_pct {
             push_cpu_history(history, utilization.min(100) * 10);
         }
@@ -900,12 +920,12 @@ fn task_manager_view(
             .tab_bar_height(TAB_BAR_HEIGHT)
             .tab_padding(18.0)
             .font_size(13.0)
-            .frame(f32::INFINITY, PANEL_HEIGHT)
+            .frame(f32::INFINITY, f32::INFINITY)
             .background(palette.surface())
             .clip_radius(12.0),
     }
     .padding(18.0)
-    .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+    .frame(f32::INFINITY, f32::INFINITY)
     .background(palette.window_background())
 }
 
@@ -942,7 +962,7 @@ fn overview_page(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
     }
     .spacing(10.0)
     .padding(14.0)
-    .frame(f32::INFINITY, PANEL_HEIGHT - TAB_BAR_HEIGHT)
+    .frame(f32::INFINITY, f32::INFINITY)
     .background(palette.surface())
 }
 
@@ -962,7 +982,7 @@ fn cpu_page(
     .spacing(CPU_GRID_SPACING)
     .row_spacing(CPU_GRID_SPACING)
     .minimum_cell_width(CPU_GRID_MINIMUM_CELL_WIDTH)
-    .frame(f32::INFINITY, CPU_GRID_HEIGHT);
+    .frame(f32::INFINITY, f32::INFINITY);
 
     vstack! {
         cpu_overall_summary(snapshot.as_ref()),
@@ -971,7 +991,7 @@ fn cpu_page(
     .spacing(CPU_GRID_SPACING)
     .alignment(Alignment::Leading)
     .padding(14.0)
-    .frame(f32::INFINITY, PANEL_HEIGHT - TAB_BAR_HEIGHT)
+    .frame(f32::INFINITY, f32::INFINITY)
     .background(palette.surface())
 }
 
@@ -983,7 +1003,7 @@ fn device_page(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
         DEVICE_CARD_HEIGHT,
         move |index| device_card(snapshot.devices.get(index).cloned()),
     ))
-    .frame(f32::INFINITY, 354.0);
+    .frame(f32::INFINITY, f32::INFINITY);
 
     vstack! {
         hstack! {
@@ -1000,7 +1020,7 @@ fn device_page(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
     .spacing(10.0)
     .alignment(Alignment::Leading)
     .padding(14.0)
-    .frame(f32::INFINITY, PANEL_HEIGHT - TAB_BAR_HEIGHT)
+    .frame(f32::INFINITY, f32::INFINITY)
     .background(palette.surface())
 }
 
@@ -1096,20 +1116,9 @@ fn device_card(device: Option<DeviceFrequencySnapshot>) -> impl View + Clone + u
 
 fn device_history_graph(history: Vec<u32>) -> impl View + Clone + use<> {
     let palette = ColorPalette::default();
-    let background = palette.background_secondary();
-    let grid = palette.border().with_opacity(0.32);
-    let line = palette.info();
-
-    CanvasView::new(
-        600.0,
-        DEVICE_GRAPH_HEIGHT,
-        Rc::new(move |buffer, width, height| {
-            let mut canvas = Canvas::new(buffer, width, height);
-            draw_usage_history(&mut canvas, width, height, &history, background, grid, line);
-        }),
-    )
-    .frame(f32::INFINITY, DEVICE_GRAPH_HEIGHT)
-    .clip_radius(5.0)
+    UsageGraph::new(history, palette.background_secondary(), palette.info())
+        .frame(f32::INFINITY, DEVICE_GRAPH_HEIGHT)
+        .clip_radius(5.0)
 }
 
 fn thermal_page(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
@@ -1120,7 +1129,7 @@ fn thermal_page(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
         THERMAL_CARD_HEIGHT,
         move |index| thermal_card(snapshot.thermal_zones.get(index).cloned()),
     ))
-    .frame(f32::INFINITY, 354.0);
+    .frame(f32::INFINITY, f32::INFINITY);
 
     vstack! {
         hstack! {
@@ -1137,7 +1146,7 @@ fn thermal_page(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
     .spacing(10.0)
     .alignment(Alignment::Leading)
     .padding(14.0)
-    .frame(f32::INFINITY, PANEL_HEIGHT - TAB_BAR_HEIGHT)
+    .frame(f32::INFINITY, f32::INFINITY)
     .background(palette.surface())
 }
 
@@ -1220,8 +1229,7 @@ fn cpu_overall_summary(snapshot: &Snapshot) -> impl View + Clone + use<> {
         .spacing(2.0)
         .frame_width(104.0),
         vstack! {
-            ProgressView::new(snapshot.cpu_busy_per_mille as f32 / 1_000.0)
-                .frame_width(520.0),
+            ProgressView::new(snapshot.cpu_busy_per_mille as f32 / 1_000.0),
             Text::new(format!(
                 "{} cores · {} runnable · {} s history",
                 snapshot.online_cpus,
@@ -1231,8 +1239,8 @@ fn cpu_overall_summary(snapshot: &Snapshot) -> impl View + Clone + use<> {
             .font_size(10.0)
             .color(palette.text_secondary()),
         }
-        .spacing(7.0),
-        Spacer::new(),
+        .spacing(7.0)
+        .frame_width(f32::INFINITY),
         vstack! {
             Text::new("PEAK")
                 .font_size(10.0)
@@ -1257,7 +1265,7 @@ fn task_page(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
     let task_list = ScrollView::new(LazyVStack::new(task_count, TASK_ROW_HEIGHT, move |index| {
         task_row(snapshot.tasks.get(index).cloned(), index)
     }))
-    .frame(f32::INFINITY, TASK_LIST_HEIGHT);
+    .frame(f32::INFINITY, f32::INFINITY);
 
     vstack! {
         task_table_header(),
@@ -1266,74 +1274,184 @@ fn task_page(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
     .spacing(8.0)
     .alignment(Alignment::Leading)
     .padding(14.0)
-    .frame(f32::INFINITY, PANEL_HEIGHT - TAB_BAR_HEIGHT)
+    .frame(f32::INFINITY, f32::INFINITY)
     .background(palette.surface())
 }
 
 fn cpu_history_graph(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
     let palette = ColorPalette::default();
-    let background = palette.surface_variant();
-    let grid = palette.border().with_opacity(0.45);
-    let line = palette.primary();
-
-    CanvasView::new(
-        600.0,
-        CPU_GRAPH_HEIGHT,
-        Rc::new(move |buffer, width, height| {
-            let mut canvas = Canvas::new(buffer, width, height);
-            draw_usage_history(
-                &mut canvas,
-                width,
-                height,
-                &snapshot.cpu_history,
-                background,
-                grid,
-                line,
-            );
-        }),
+    UsageGraph::new(
+        snapshot.cpu_history.clone(),
+        palette.surface_variant(),
+        palette.primary(),
     )
-    .frame(f32::INFINITY, CPU_GRAPH_HEIGHT)
+    .frame(f32::INFINITY, f32::INFINITY)
     .clip_radius(8.0)
 }
 
-fn draw_usage_history(
-    canvas: &mut Canvas<'_>,
-    width: u32,
-    height: u32,
-    history: &[u32],
+/// Keep SGFX identities in the retained element, including through model
+/// updates. A graph owns one canvas and one bounded, dynamically revised mesh.
+#[derive(Clone, PartialEq)]
+struct UsageGraph {
+    history: Vec<u32>,
     background: Color,
     grid: Color,
     line: Color,
-) {
-    canvas.fill_rect(0, 0, width, height, background);
+}
 
-    let right = width.saturating_sub(1) as i32;
-    let bottom = height.saturating_sub(1) as i32;
-    for division in 0..=4 {
-        let y = bottom.saturating_mul(division) / 4;
-        canvas.draw_line(0, y, right, y, grid);
-    }
-
-    if history.len() < 2 || width < 2 || height < 2 {
-        return;
-    }
-
-    let start = history.len().saturating_sub(width as usize);
-    let visible = &history[start..];
-    let span = visible.len().saturating_sub(1).max(1);
-    let graph_bottom = bottom.saturating_sub(6);
-    let graph_top = 6;
-    let graph_height = graph_bottom.saturating_sub(graph_top).max(1);
-    let mut previous = None;
-
-    for (index, sample) in visible.iter().copied().enumerate() {
-        let x = (index as u64 * right as u64 / span as u64) as i32;
-        let value = sample.min(1_000) as i32;
-        let y = graph_bottom - graph_height * value / 1_000;
-        if let Some((previous_x, previous_y)) = previous {
-            canvas.draw_line(previous_x, previous_y, x, y, line);
+impl UsageGraph {
+    fn new(mut history: Vec<u32>, background: Color, line: Color) -> Self {
+        if history.len() > CPU_HISTORY_CAPACITY {
+            history.drain(..history.len() - CPU_HISTORY_CAPACITY);
         }
-        previous = Some((x, y));
+        Self {
+            history,
+            background,
+            grid: ColorPalette::default().border().with_opacity(0.32),
+            line,
+        }
+    }
+}
+
+impl View for UsageGraph {
+    fn create_element(&self) -> Box<dyn Element> {
+        let handle = SgfxCanvasHandle::new();
+        let canvas = SgfxCanvas::new(
+            handle,
+            0.0,
+            0.0,
+            Arc::new(SgfxCanvasFrame::new(0, self.background)),
+        )
+        .placeholder(self.background)
+        .create_element();
+        Box::new(RenderElement::new(
+            self.clone(),
+            UsageGraphRenderObject {
+                view: self.clone(),
+                handle,
+                mesh_handle: SgfxMeshHandle::new(),
+                revision: 0,
+                size: Size::ZERO,
+                prepared_size: Size::ZERO,
+                dirty: true,
+                canvas,
+            },
+        ))
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+struct UsageGraphRenderObject {
+    view: UsageGraph,
+    handle: SgfxCanvasHandle,
+    mesh_handle: SgfxMeshHandle,
+    revision: u64,
+    size: Size,
+    prepared_size: Size,
+    dirty: bool,
+    // An inert paint delegate: all layout and invalidation belongs to this
+    // element. It has no state subscriptions or interactive children to mount.
+    canvas: Box<dyn Element>,
+}
+
+impl ElementRenderObject for UsageGraphRenderObject {
+    fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        // Stacks measure children more than once. Only remember the final
+        // viewport here; prepare its mesh after the entire layout pass.
+        let finite = |axis: f32| if axis.is_finite() { axis.max(0.0) } else { 0.0 };
+        let size = Size::new(
+            finite(constraints.max_width),
+            finite(constraints.max_height),
+        );
+        self.size = size;
+        size
+    }
+
+    fn flush_layout_notifications(&mut self) {
+        let size = self.size;
+        if (self.dirty || size != self.prepared_size) && size.width >= 1.0 && size.height >= 1.0 {
+            self.revision = self.revision.wrapping_add(1);
+            let samples = self.view.history.len();
+            let vertex_count = 30
+                + if samples == 1 {
+                    6
+                } else {
+                    samples.saturating_sub(1) * 24
+                };
+            let mut vertices = Vec::with_capacity(vertex_count);
+            let rgba = |color: Color| [color.r, color.g, color.b, color.a];
+            task_manager_graph::emit_vertices(
+                &self.view.history,
+                size.width,
+                size.height,
+                rgba(self.view.grid),
+                rgba(self.view.line),
+                |position, color| vertices.push(SgfxCanvasVertex::new(position, color)),
+            );
+            debug_assert!(vertices.len() <= task_manager_graph::MAX_VERTICES);
+            let mesh = SgfxMesh::with_handle(self.mesh_handle, self.revision, vertices);
+            let frame = SgfxCanvasFrame::new(self.revision, self.view.background)
+                .reference_aspect(size.width / size.height)
+                .draw(SgfxCanvasDraw::new(
+                    mesh,
+                    [
+                        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+                        1.0,
+                    ],
+                ));
+            self.canvas.update(
+                &SgfxCanvas::new(self.handle, size.width, size.height, Arc::new(frame))
+                    .placeholder(self.view.background),
+            );
+            self.dirty = false;
+            self.prepared_size = size;
+        }
+        self.canvas
+            .layout(LayoutConstraints::tight(size.width, size.height));
+    }
+
+    fn size(&self) -> Size {
+        self.size
+    }
+
+    fn render(&mut self) {}
+
+    fn paint<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
+        if self.size.width < 1.0 || self.size.height < 1.0 {
+            return true;
+        }
+        self.canvas.render_object().unwrap().paint(ctx, origin)
+    }
+
+    fn emits_paint_extension(&self) -> bool {
+        true
+    }
+
+    fn update_needs_layout(&self) -> bool {
+        true
+    }
+
+    fn update(&mut self, view: &dyn View) -> UpdateResult {
+        let Some(view) = view.as_any().downcast_ref::<UsageGraph>() else {
+            return UpdateResult::Replaced;
+        };
+        if self.view == *view {
+            return UpdateResult::NoChange;
+        }
+        self.view = view.clone();
+        self.dirty = true;
+        UpdateResult::Updated
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 
@@ -1355,8 +1473,9 @@ fn header_view(snapshot: &Snapshot) -> impl View + Clone + use<> {
                     .font_size(13.0)
                     .color(palette.text_secondary()),
             }
-            .spacing(3.0),
-            Spacer::new(),
+            .spacing(3.0)
+            .frame_width(f32::INFINITY)
+            .clip_radius(0.0),
             vstack! {
                 Text::new(format!("{}% CPU", cpu_percent))
                     .font_size(20.0)
@@ -1468,17 +1587,10 @@ fn cpu_card(cpu: CpuSnapshot) -> impl View + Clone + use<> {
 }
 
 fn cpu_card_history_graph(history: Vec<u32>, line: Color) -> impl View + Clone + use<> {
-    let palette = ColorPalette::default();
-    let background = palette.background_secondary();
-    let grid = palette.border().with_opacity(0.32);
-
-    CanvasView::new(
-        180.0,
-        CPU_CARD_GRAPH_HEIGHT,
-        Rc::new(move |buffer, width, height| {
-            let mut canvas = Canvas::new(buffer, width, height);
-            draw_usage_history(&mut canvas, width, height, &history, background, grid, line);
-        }),
+    UsageGraph::new(
+        history,
+        ColorPalette::default().background_secondary(),
+        line,
     )
     .frame(f32::INFINITY, CPU_CARD_GRAPH_HEIGHT)
     .clip_radius(5.0)
@@ -1494,7 +1606,7 @@ fn task_table_header() -> impl View + Clone + use<> {
         table_cell(String::from("STATE"), TASK_STATE_COLUMN_WIDTH, palette.text_secondary()),
         table_cell(String::from("TYPE"), TASK_TYPE_COLUMN_WIDTH, palette.text_secondary()),
         table_cell(String::from("TIME"), TASK_TIME_COLUMN_WIDTH, palette.text_secondary()),
-        table_cell(String::from("COMMAND"), TASK_COMMAND_COLUMN_WIDTH, palette.text_secondary()),
+        table_cell(String::from("COMMAND"), f32::INFINITY, palette.text_secondary()),
     }
     .padding(6.0)
     // Rows are full-width because LazyVStack gives them tight viewport
@@ -1516,7 +1628,7 @@ fn task_row(task: Option<TaskRow>, index: usize) -> impl View + Clone + use<> {
             task.state.label().to_string(),
             task.task_type.label().to_string(),
             format_duration(task.cpu_time_ns),
-            format!("{}  ({})", truncate(&task.name, 28), task.tgid),
+            format!("{}  ({})", task.name, task.tgid),
         ),
         None => (
             String::new(),
@@ -1543,7 +1655,7 @@ fn task_row(task: Option<TaskRow>, index: usize) -> impl View + Clone + use<> {
         table_cell(state, TASK_STATE_COLUMN_WIDTH, palette.text_primary()),
         table_cell(task_type, TASK_TYPE_COLUMN_WIDTH, palette.text_secondary()),
         table_cell(time, TASK_TIME_COLUMN_WIDTH, palette.text_secondary()),
-        table_cell(command, TASK_COMMAND_COLUMN_WIDTH, palette.text_primary()),
+        table_cell(command, f32::INFINITY, palette.text_primary()),
     }
     .padding(6.0)
     .frame(f32::INFINITY, TASK_ROW_HEIGHT)
@@ -1555,6 +1667,7 @@ fn table_cell(value: String, width: f32, color: Color) -> impl View + Clone + us
         .font_size(11.0)
         .color(color)
         .frame_width(width)
+        .clip_radius(0.0)
 }
 
 fn format_percent(per_mille: u32) -> String {
@@ -1614,6 +1727,223 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn graph_render(element: &dyn Element) -> &UsageGraphRenderObject {
+        element
+            .render_object()
+            .unwrap()
+            .as_any()
+            .downcast_ref()
+            .unwrap()
+    }
+
+    #[test]
+    fn graph_retains_resources_and_skips_unchanged_geometry() {
+        let graph = UsageGraph::new(vec![0, 500, 1_000], Color::BLACK, Color::WHITE);
+        let mut element = graph.create_element();
+        element.layout(LayoutConstraints::tight(600.0, 170.0));
+        element
+            .render_object_mut()
+            .unwrap()
+            .flush_layout_notifications();
+        let before = graph_render(element.as_ref());
+        let handle = before.handle;
+        let mesh_handle = before.mesh_handle;
+        let revision = before.revision;
+        assert!(revision > 0);
+        assert!(before.emits_paint_extension());
+
+        element.layout(LayoutConstraints::tight(600.0, 170.0));
+        element
+            .render_object_mut()
+            .unwrap()
+            .flush_layout_notifications();
+        assert_eq!(graph_render(element.as_ref()).revision, revision);
+        assert!(matches!(element.update(&graph), UpdateResult::NoChange));
+
+        let updated = UsageGraph::new(vec![0, 500, 750], Color::BLACK, Color::WHITE);
+        element.update(&updated);
+        element.layout(LayoutConstraints::tight(600.0, 170.0));
+        element
+            .render_object_mut()
+            .unwrap()
+            .flush_layout_notifications();
+        assert_eq!(graph_render(element.as_ref()).revision, revision + 1);
+        element.layout(LayoutConstraints::tight(1_200.0, 240.0));
+        element
+            .render_object_mut()
+            .unwrap()
+            .flush_layout_notifications();
+        let after = graph_render(element.as_ref());
+        assert_eq!(after.revision, revision + 2);
+        assert_eq!(after.handle, handle);
+        assert_eq!(after.mesh_handle, mesh_handle);
+        assert_eq!(after.size, Size::new(1_200.0, 240.0));
+        let mut paint = PaintContext::default();
+        assert!(after.paint(&mut paint, Point::ZERO));
+        assert!(paint.commands().iter().any(|command| matches!(
+            command,
+            scarlet_ui::renderer::PaintCommand::Extension { .. }
+        )));
+    }
+
+    #[test]
+    fn collapsed_graph_omits_the_sgfx_extension_and_recovers_its_resources() {
+        let graph = UsageGraph::new(vec![0, 1_000], Color::BLACK, Color::WHITE);
+        let mut element = graph.create_element();
+        let handle = graph_render(element.as_ref()).handle;
+        for (width, height) in [(0.0, 0.0), (400.0, 100.0), (0.0, 100.0), (400.0, 100.0)] {
+            element.layout(LayoutConstraints::tight(width, height));
+            let render = element.render_object_mut().unwrap();
+            render.flush_layout_notifications();
+            let mut paint = PaintContext::default();
+            assert!(render.paint(&mut paint, Point::ZERO));
+            assert_eq!(paint.commands().is_empty(), width == 0.0 || height == 0.0);
+            assert_eq!(graph_render(element.as_ref()).handle, handle);
+        }
+    }
+
+    fn find_graph(element: &dyn Element) -> Option<&UsageGraphRenderObject> {
+        element
+            .render_object()
+            .and_then(|render| render.as_any().downcast_ref())
+            .or_else(|| {
+                element
+                    .children()
+                    .iter()
+                    .find_map(|child| find_graph(child.as_ref()))
+            })
+    }
+
+    #[test]
+    fn pipeline_prepares_only_the_final_graph_size_after_layout_probes() {
+        let view = overview_page(Arc::new(Snapshot {
+            cpu_history: vec![0, 500, 1_000],
+            ..Snapshot::default()
+        }));
+        let mut pipeline = scarlet_ui::pipeline::RenderingPipeline::new();
+        pipeline.set_root(
+            Window::new("Graph layout", view)
+                .decorated(false)
+                .size(Size::new(800.0, 400.0))
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        let graph = find_graph(pipeline.element_tree().root().unwrap()).unwrap();
+        assert_eq!(
+            graph.revision, 1,
+            "intermediate stack probes must not prepare meshes"
+        );
+        assert_eq!(graph.size, graph.prepared_size);
+        let initial_size = graph.size;
+        let handle = graph.handle;
+
+        pipeline.resize(Size::new(1_200.0, 600.0));
+        pipeline.render_for_present().unwrap();
+        let graph = find_graph(pipeline.element_tree().root().unwrap()).unwrap();
+        assert_eq!(graph.revision, 2);
+        assert_eq!(graph.size, graph.prepared_size);
+        assert!(graph.size.width > initial_size.width);
+        assert!(graph.size.height > initial_size.height);
+        assert_eq!(graph.handle, handle);
+    }
+
+    /// Scroll content may extend outside its parent; the viewport itself and
+    /// all non-scrolling siblings must fit in their assigned parent bounds.
+    fn assert_layout_bounds(element: &dyn Element, parent: Option<Size>, label: &str) {
+        let size = element.render_object().map(|render| render.size());
+        if let Some(size) = size {
+            assert!(
+                size.width.is_finite() && size.height.is_finite(),
+                "{label}: {size:?}"
+            );
+            assert!(size.width >= 0.0 && size.height >= 0.0, "{label}: {size:?}");
+            if let Some(parent) = parent {
+                let position = element.position();
+                assert!(
+                    position.x >= -0.1 && position.y >= -0.1,
+                    "{label}: {position:?}"
+                );
+                assert!(
+                    position.x + size.width <= parent.width + 0.1,
+                    "{label}: horizontal overflow: {position:?} + {size:?} > {parent:?}"
+                );
+                assert!(
+                    position.y + size.height <= parent.height + 0.1,
+                    "{label}: vertical overflow: {position:?} + {size:?} > {parent:?}"
+                );
+            }
+        }
+        if element
+            .render_object()
+            .is_some_and(|render| render.owns_child_viewport())
+        {
+            // Virtual stacks intentionally retain a few offscreen rows.
+            return;
+        }
+        for child in element.children() {
+            assert_layout_bounds(child.as_ref(), size.or(parent), label);
+        }
+    }
+
+    #[test]
+    fn every_tab_fits_and_resizes_between_minimum_default_and_large_viewports() {
+        let cpus = (0..12)
+            .map(|id| CpuSnapshot {
+                id,
+                history: vec![0, 250, 750],
+                ..CpuSnapshot::default()
+            })
+            .collect::<Vec<_>>();
+        let snapshot = Arc::new(Snapshot {
+            cpus: cpus.clone(),
+            online_cpus: cpus.len(),
+            cpu_history: vec![0, 250, 750],
+            status: String::from(
+                "Sample 1234567 · updated every 750 ms · 12345 migrations · 0 zombies · 0 exited",
+            ),
+            ..Snapshot::default()
+        });
+        for tab in 0..5 {
+            let view = task_manager_view(
+                snapshot.clone(),
+                State::new(StateId::new(90_000 + tab as u32 * 3), tab),
+                State::new(StateId::new(90_001 + tab as u32 * 3), cpus.clone()),
+                State::new(StateId::new(90_002 + tab as u32 * 3), None),
+            );
+            let mut element = view.create_element();
+            for (width, height) in [
+                (798.0, 522.0),
+                (978.0, 582.0),
+                (1_598.0, 1_162.0),
+                (798.0, 522.0),
+            ] {
+                let size = element.layout(LayoutConstraints::tight(width, height));
+                assert_eq!(size, Size::new(width, height));
+                assert_layout_bounds(
+                    element.as_ref(),
+                    None,
+                    &format!("tab {tab} at {width}×{height}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn removed_devices_and_cpus_release_their_histories() {
+        let mut cpu_histories = BTreeMap::from([(0, vec![500]), (1, vec![750])]);
+        let mut cpus = vec![CpuSnapshot {
+            id: 1,
+            ..CpuSnapshot::default()
+        }];
+        update_per_cpu_histories(&mut cpu_histories, &mut cpus);
+        assert_eq!(cpu_histories.len(), 1);
+        assert!(cpu_histories.contains_key(&1));
+
+        let mut device_histories = BTreeMap::from([(String::from("removed"), vec![500])]);
+        update_device_histories(&mut device_histories, &mut []);
+        assert!(device_histories.is_empty());
+    }
 
     #[test]
     fn parses_multiple_device_policies_and_unavailable_measurements() {
