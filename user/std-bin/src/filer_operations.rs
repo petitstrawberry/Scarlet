@@ -33,7 +33,6 @@ pub fn validate_name(name: &str) -> Result<(), String> {
 }
 
 pub fn location_path(current: &Path, input: &str, home: &Path) -> Result<PathBuf, String> {
-    let input = input.trim();
     if input.is_empty() || input.contains('\0') {
         return Err("Enter a folder path".into());
     }
@@ -325,6 +324,7 @@ fn copy_tree(source: &Path, destination: &Path, depth: usize, count: &mut usize)
         }
     } else if metadata.is_file() {
         let mut input = fs::open_read_nofollow(source)?;
+        if !input.metadata()?.is_file() { return Err(io::Error::other("Source changed type before copying")); }
         let mut output =
             fs::create_new_with_permissions(destination, Some(&metadata.permissions()))?;
         let result = (|| {
@@ -459,6 +459,7 @@ mod tests {
             assert!(validate_name(name).is_err());
         }
         assert!(validate_name("メモ with spaces.txt").is_ok());
+        assert_eq!(location_path(Path::new("/a"), " folder ", Path::new("/home/u")).unwrap(), Path::new("/a/ folder "));
         assert_eq!(
             location_path(Path::new("/a/b"), "../c", Path::new("/home/u")).unwrap(),
             Path::new("/a/b/../c")
@@ -608,7 +609,10 @@ mod tests {
         fs::write(target.join("keep"), b"keep").unwrap();
         let link = fixture.0.join("link");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        execute(&Operation::Delete { source: link.clone() }).unwrap();
+        execute(&Operation::Delete {
+            source: link.clone(),
+        })
+        .unwrap();
         assert!(fs::symlink_metadata(&link).is_err());
         assert_eq!(fs::read(target.join("keep")).unwrap(), b"keep");
     }

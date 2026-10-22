@@ -44,6 +44,28 @@ pub use std::fs::{
 pub fn create_new(path: impl AsRef<Path>) -> io::Result<File> {
     create_new_with_permissions(path, None)
 }
+/// Exclusively create a file with owner-only permissions at creation time.
+/// Group, world and special permission bits are always stripped.
+#[cfg(not(target_os = "scarlet"))]
+pub fn create_new_with_owner_mode(path: impl AsRef<Path>, mode: u32) -> io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode & 0o700)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Owner permission creation is unavailable",
+        ))
+    }
+}
 #[cfg(not(target_os = "scarlet"))]
 pub fn create_new_with_permissions(
     path: impl AsRef<Path>,
@@ -223,6 +245,13 @@ mod native {
     }
     pub fn create_new(path: impl AsRef<Path>) -> io::Result<File> {
         create_new_with_permissions(path, None)
+    }
+    pub fn create_new_with_owner_mode(path: impl AsRef<Path>, mode: u32) -> io::Result<File> {
+        open(
+            path.as_ref(),
+            VFS_O_WRONLY | VFS_O_CREAT | VFS_O_EXCL | VFS_O_NOFOLLOW | VFS_O_CLOEXEC,
+            mode & 0o700,
+        )
     }
     pub fn create_new_with_permissions(
         path: impl AsRef<Path>,
