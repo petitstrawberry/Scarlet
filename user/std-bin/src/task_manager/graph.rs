@@ -3,10 +3,12 @@
 //! Kept independent of the renderer so edge cases can be tested on the host.
 
 pub const HISTORY_CAPACITY: usize = 60;
-pub const MAX_VERTICES: usize = 5 * 6 + (HISTORY_CAPACITY - 1) * 24;
+pub const MAX_VERTICES: usize = 5 * 6 + (HISTORY_CAPACITY - 1) * 12;
 
 /// Emit a triangle list in clip space. Work and storage depend on the number
 /// of samples, never the number of pixels in the graph.
+/// Each six vertices form a uniformly colored quad (0, 1, 2, 0, 2, 3), also
+/// consumed as one filled path by the renderer-independent paint fallback.
 pub fn emit_vertices(
     history: &[u32],
     width: f32,
@@ -75,8 +77,9 @@ pub fn emit_vertices(
         return;
     }
 
-    // Draw the translucent area first, then a solid stroke with a one-pixel
-    // alpha fringe. Stroke width stays constant when the window is resized.
+    // Draw the translucent area first, then the original one-pixel stroke.
+    // The former Canvas::draw_line had no alpha fringe; adding one here made
+    // the SGFX migration visibly heavier. Width stays fixed across resizes.
     let mut fill = line;
     fill[3] *= 0.12;
     for (index, pair) in history.windows(2).enumerate() {
@@ -84,8 +87,6 @@ pub fn emit_vertices(
         let b = point(index + 1, pair[1]);
         quad([a, b, [b[0], bottom], [a[0], bottom]], [fill; 4]);
     }
-    let mut transparent = line;
-    transparent[3] = 0.0;
     for (index, pair) in history.windows(2).enumerate() {
         let a = point(index, pair[0]);
         let b = point(index + 1, pair[1]);
@@ -97,30 +98,12 @@ pub fn emit_vertices(
             |p: [f32; 2], distance: f32| [p[0] + normal[0] * distance, p[1] + normal[1] * distance];
         quad(
             [
-                offset(a, -0.9),
-                offset(b, -0.9),
-                offset(b, 0.9),
-                offset(a, 0.9),
+                offset(a, -0.5),
+                offset(b, -0.5),
+                offset(b, 0.5),
+                offset(a, 0.5),
             ],
             [line; 4],
-        );
-        quad(
-            [
-                offset(a, -1.9),
-                offset(b, -1.9),
-                offset(b, -0.9),
-                offset(a, -0.9),
-            ],
-            [transparent, transparent, line, line],
-        );
-        quad(
-            [
-                offset(a, 0.9),
-                offset(b, 0.9),
-                offset(b, 1.9),
-                offset(a, 1.9),
-            ],
-            [line, line, transparent, transparent],
         );
     }
 }

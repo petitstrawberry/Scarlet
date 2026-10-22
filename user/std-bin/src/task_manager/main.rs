@@ -20,7 +20,7 @@ use scarlet_ui::element::{
     Element, ElementRenderObject, LayoutConstraints, RenderElement, UpdateResult,
 };
 use scarlet_ui::prelude::*;
-use scarlet_ui::renderer::PaintContext;
+use scarlet_ui::renderer::{DisplayList, PaintContext};
 use scarlet_ui::{
     Color, GridView, KeyCode, LazyVStack, ProgressView, ScrollView, SgfxCanvas, SgfxCanvasDraw,
     SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, TabItem,
@@ -965,7 +965,7 @@ fn overview_page(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
         scarlet_ui::if_view!(samples > 0, cpu_history_graph(graph_snapshot),
         vstack! {
             Spacer::new(),
-            Text::new("Waiting for CPU measurements").font_size(18.0).color(palette.text_primary()),
+            Text::new("Waiting for CPU measurements").font_size(13.0).color(palette.text_primary()),
             Text::new(snapshot.status.clone()).font_size(12.0).color(palette.text_secondary()),
             Spacer::new(),
         }.spacing(10.0).frame(f32::INFINITY, f32::INFINITY)
@@ -976,7 +976,7 @@ fn overview_page(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
         hstack! {
             vstack! {
                 Text::new("CPU utilization")
-                    .font_size(16.0)
+                    .font_size(14.0)
                     .color(palette.text_primary()),
                 Text::new(format!("{} samples · {} ms interval", samples, SAMPLE_INTERVAL.as_millis()))
                     .font_size(11.0)
@@ -1028,7 +1028,7 @@ fn cpu_page(
         scarlet_ui::if_view!(has_cpus, cpu_grid,
             vstack! {
                 Spacer::new(),
-                Text::new("No CPU measurements available").font_size(18.0).color(palette.text_primary()),
+                Text::new("No CPU measurements available").font_size(13.0).color(palette.text_primary()),
                 Text::new(snapshot.status.clone()).font_size(12.0).color(palette.text_secondary()),
                 Spacer::new(),
             }.spacing(10.0).frame(f32::INFINITY, f32::INFINITY)
@@ -1054,7 +1054,7 @@ fn device_page(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
     vstack! {
         hstack! {
             Text::new("Device frequency")
-                .font_size(16.0)
+                .font_size(14.0)
                 .color(palette.text_primary()),
             Spacer::new(),
             Text::new(format!("{} device(s) · {} ms interval", count, SAMPLE_INTERVAL.as_millis()))
@@ -1125,7 +1125,7 @@ fn device_card(device: Option<DeviceFrequencySnapshot>) -> impl View + Clone + u
         hstack! {
             vstack! {
                 Text::new(title)
-                    .font_size(16.0)
+                    .font_size(14.0)
                     .color(palette.text_primary()),
                 Text::new(governor)
                     .font_size(11.0)
@@ -1180,7 +1180,7 @@ fn thermal_page(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
     vstack! {
         hstack! {
             Text::new("Thermal zones")
-                .font_size(16.0)
+                .font_size(14.0)
                 .color(palette.text_primary()),
             Spacer::new(),
             Text::new(format!("{} zone(s) · applied cooling states", count))
@@ -1236,7 +1236,7 @@ fn thermal_card(zone: Option<ThermalZoneSnapshot>) -> impl View + Clone + use<> 
     vstack! {
         hstack! {
             Text::new(title)
-                .font_size(16.0)
+                .font_size(14.0)
                 .color(palette.text_primary()),
             Spacer::new(),
             Text::new(temperature)
@@ -1337,7 +1337,8 @@ fn cpu_history_graph(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
 }
 
 /// Keep SGFX identities in the retained element, including through model
-/// updates. A graph owns one canvas and one bounded, dynamically revised mesh.
+/// updates. A graph owns one canvas and one bounded, dynamically revised mesh,
+/// plus a retained vector recording for backends without the SGFX extension.
 #[derive(Clone, PartialEq)]
 struct UsageGraph {
     history: Vec<u32>,
@@ -1369,7 +1370,7 @@ impl View for UsageGraph {
             0.0,
             Arc::new(SgfxCanvasFrame::new(0, self.background)),
         )
-        .placeholder(self.background)
+        .placeholder(Color::CLEAR)
         .create_element();
         Box::new(RenderElement::new(
             self.clone(),
@@ -1381,6 +1382,7 @@ impl View for UsageGraph {
                 size: Size::ZERO,
                 prepared_size: Size::ZERO,
                 dirty: true,
+                fallback: None,
                 canvas,
             },
         ))
@@ -1399,6 +1401,7 @@ struct UsageGraphRenderObject {
     size: Size,
     prepared_size: Size,
     dirty: bool,
+    fallback: Option<Arc<DisplayList>>,
     // An inert paint delegate: all layout and invalidation belongs to this
     // element. It has no state subscriptions or interactive children to mount.
     canvas: Box<dyn Element>,
@@ -1426,9 +1429,13 @@ impl ElementRenderObject for UsageGraphRenderObject {
                 + if samples == 1 {
                     6
                 } else {
-                    samples.saturating_sub(1) * 24
+                    samples.saturating_sub(1) * 12
                 };
             let mut vertices = Vec::with_capacity(vertex_count);
+            let mut fallback = PaintContext::new();
+            fallback.fill_rect(Rect::new(Point::ZERO, size), self.view.background);
+            let mut quad = [Point::ZERO; 6];
+            let mut quad_vertex = 0;
             let rgba = |color: Color| [color.r, color.g, color.b, color.a];
             graph::emit_vertices(
                 &self.view.history,
@@ -1436,9 +1443,28 @@ impl ElementRenderObject for UsageGraphRenderObject {
                 size.height,
                 rgba(self.view.grid),
                 rgba(self.view.line),
-                |position, color| vertices.push(SgfxCanvasVertex::new(position, color)),
+                |position, color| {
+                    vertices.push(SgfxCanvasVertex::new(position, color));
+                    quad[quad_vertex] = Point::new(
+                        (position[0] + 1.0) * size.width * 0.5,
+                        (1.0 - position[1]) * size.height * 0.5,
+                    );
+                    quad_vertex += 1;
+                    if quad_vertex == 6 {
+                        // Each emitted quad is two uniformly colored triangles
+                        // (0, 1, 2, 0, 2, 3). Fill its perimeter once so the CPU
+                        // renderer cannot double-blend the shared diagonal.
+                        fallback.fill_path(
+                            vec![quad[0], quad[1], quad[2], quad[5]],
+                            Color::rgba_f32(color[0], color[1], color[2], color[3]),
+                        );
+                        quad_vertex = 0;
+                    }
+                },
             );
+            debug_assert_eq!(quad_vertex, 0);
             debug_assert!(vertices.len() <= graph::MAX_VERTICES);
+            self.fallback = Some(fallback.into_display_list());
             let mesh = SgfxMesh::with_handle(self.mesh_handle, self.revision, vertices);
             let frame = SgfxCanvasFrame::new(self.revision, self.view.background)
                 .reference_aspect(size.width / size.height)
@@ -1451,7 +1477,7 @@ impl ElementRenderObject for UsageGraphRenderObject {
                 ));
             self.canvas.update(
                 &SgfxCanvas::new(self.handle, size.width, size.height, Arc::new(frame))
-                    .placeholder(self.view.background),
+                    .placeholder(Color::CLEAR),
             );
             self.dirty = false;
             self.prepared_size = size;
@@ -1470,6 +1496,11 @@ impl ElementRenderObject for UsageGraphRenderObject {
         if self.size.width < 1.0 || self.size.height < 1.0 {
             return true;
         }
+        if let Some(fallback) = &self.fallback {
+            ctx.draw_display_list(origin, Arc::clone(fallback));
+        }
+        // Unsupported extensions leave these vectors visible. On SGFX, the
+        // canvas frame's opaque background and mesh cover the fallback.
         self.canvas.render_object().unwrap().paint(ctx, origin)
     }
 
@@ -1829,6 +1860,7 @@ mod tests {
         let handle = before.handle;
         let mesh_handle = before.mesh_handle;
         let revision = before.revision;
+        let fallback = Arc::clone(before.fallback.as_ref().unwrap());
         assert!(revision > 0);
         assert!(before.emits_paint_extension());
 
@@ -1838,6 +1870,10 @@ mod tests {
             .unwrap()
             .flush_layout_notifications();
         assert_eq!(graph_render(element.as_ref()).revision, revision);
+        assert!(Arc::ptr_eq(
+            graph_render(element.as_ref()).fallback.as_ref().unwrap(),
+            &fallback,
+        ));
         assert!(matches!(element.update(&graph), UpdateResult::NoChange));
 
         let updated = UsageGraph::new(vec![0, 500, 750], Color::BLACK, Color::WHITE);
@@ -1848,6 +1884,10 @@ mod tests {
             .unwrap()
             .flush_layout_notifications();
         assert_eq!(graph_render(element.as_ref()).revision, revision + 1);
+        let updated_fallback = Arc::clone(
+            graph_render(element.as_ref()).fallback.as_ref().unwrap(),
+        );
+        assert!(!Arc::ptr_eq(&fallback, &updated_fallback));
         element.layout(LayoutConstraints::tight(1_200.0, 240.0));
         element
             .render_object_mut()
@@ -1858,12 +1898,102 @@ mod tests {
         assert_eq!(after.handle, handle);
         assert_eq!(after.mesh_handle, mesh_handle);
         assert_eq!(after.size, Size::new(1_200.0, 240.0));
+        assert!(!Arc::ptr_eq(
+            after.fallback.as_ref().unwrap(),
+            &updated_fallback,
+        ));
         let mut paint = PaintContext::default();
         assert!(after.paint(&mut paint, Point::ZERO));
+        assert!(matches!(
+            paint.commands().first(),
+            Some(scarlet_ui::renderer::PaintCommand::DrawDisplayList { .. })
+        ));
         assert!(paint.commands().iter().any(|command| matches!(
             command,
             scarlet_ui::renderer::PaintCommand::Extension { .. }
         )));
+    }
+
+    #[test]
+    fn graph_cpu_renderer_paints_grid_stroke_and_area_before_unsupported_extension() {
+        use scarlet_ui::renderer::{CpuPaintRenderer, PaintCommand};
+
+        let outside = Color::rgb(8, 12, 16);
+        let graph = UsageGraph {
+            grid: Color::rgb(0, 240, 0).with_opacity(0.32),
+            ..UsageGraph::new(vec![250, 750], Color::BLACK, Color::rgb(240, 0, 0))
+        };
+        let mut element = graph.create_element();
+        element.layout(LayoutConstraints::tight(180.0, 62.0));
+        element
+            .render_object_mut()
+            .unwrap()
+            .flush_layout_notifications();
+        let render = graph_render(element.as_ref());
+        assert!(
+            render
+                .fallback
+                .as_ref()
+                .unwrap()
+                .context()
+                .buffers()
+                .is_empty()
+        );
+
+        let mut paint = PaintContext::new();
+        assert!(render.paint(&mut paint, Point::new(7.0, 9.0)));
+        assert!(matches!(
+            paint.commands().last(),
+            Some(PaintCommand::Extension { .. })
+        ));
+        let mut cpu = CpuPaintRenderer::new(Size::new(200.0, 90.0), 1_000, outside);
+        // Execute the full list, including the transparent placeholder and the
+        // extension ignored by this backend. A placeholder-only graph fails.
+        cpu.execute(&paint);
+        let pixels = cpu.buffer().as_slice();
+        let count = |test: fn(u8, u8, u8) -> bool| {
+            pixels
+                .iter()
+                .filter(|pixel| {
+                    let [b, g, r, _] = pixel.to_le_bytes();
+                    test(r, g, b)
+                })
+                .count()
+        };
+        assert!(
+            count(|r, g, b| r >= 200 && g == 0 && b == 0) > 100,
+            "missing stroke"
+        );
+        assert!(
+            count(|r, g, b| r == 0 && g > 0 && b == 0) > 100,
+            "missing grid"
+        );
+        assert!(
+            count(|r, g, b| r > 0 && r < 80 && g == 0 && b == 0) > 100,
+            "missing area"
+        );
+        assert_eq!(cpu.buffer().get_pixel(0, 0), Some(outside.to_bgra()));
+        assert_eq!(cpu.buffer().get_pixel(8, 10), Some(Color::BLACK.to_bgra()));
+        let before = pixels.to_vec();
+        drop(paint);
+
+        let updated = UsageGraph {
+            history: vec![750, 250],
+            ..graph
+        };
+        element.update(&updated);
+        element
+            .render_object_mut()
+            .unwrap()
+            .flush_layout_notifications();
+        let mut paint = PaintContext::new();
+        graph_render(element.as_ref()).paint(&mut paint, Point::new(7.0, 9.0));
+        cpu.execute(&paint);
+        assert_ne!(
+            cpu.buffer().as_slice(),
+            before.as_slice(),
+            "history did not repaint"
+        );
     }
 
     #[test]
