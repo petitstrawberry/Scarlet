@@ -463,7 +463,11 @@ mod tests {
             (2, io::ErrorKind::NotFound),
             (17, io::ErrorKind::AlreadyExists),
             (13, io::ErrorKind::PermissionDenied),
+            // from_raw_os_error uses the compilation target's errno ABI.
+            #[cfg(any(target_os = "scarlet", target_os = "linux", target_os = "android"))]
             (39, io::ErrorKind::DirectoryNotEmpty),
+            #[cfg(target_vendor = "apple")]
+            (66, io::ErrorKind::DirectoryNotEmpty),
         ] {
             assert_eq!(
                 checked((-(code as isize)) as usize).unwrap_err().kind(),
