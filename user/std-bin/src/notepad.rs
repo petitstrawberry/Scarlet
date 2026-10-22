@@ -80,6 +80,7 @@ struct NotepadApp {
     runtime: State<Arc<Mutex<Runtime>>>,
     status: State<String>,
     position: State<String>,
+    viewport_width: State<f32>,
     wrap: State<WrapMode>,
     line_numbers: State<bool>,
     font_size: State<f32>,
@@ -93,11 +94,11 @@ impl NotepadApp {
         let app = Self::default();
         app.status.set("Ready".into());
         app.position.set("Ln 1, Col 1".into());
+        app.viewport_width.set(900.0);
         app.wrap.set(WrapMode::Soft);
         app.line_numbers.set(true);
         app.font_size.set(15.0);
-        app.search_status
-            .set("Literal search · case-sensitive · wraps at the end".into());
+        app.search_status.set("Ready to search".into());
         if let Some(path) = initial_path {
             app.open_path(path);
         }
@@ -319,6 +320,10 @@ impl NotepadApp {
                     Ok(_) => {
                         self.cancel_pending();
                         self.status.set("File selection cancelled".into());
+                    }
+                    Err(scarlet_ui::file_dialog::FileDialogError::Unsupported(_)) => {
+                        self.status
+                            .set("File dialogs are unavailable on this platform".into());
                     }
                     Err(error) => {
                         self.status.set(format!("File selection failed: {error}"));
@@ -691,20 +696,28 @@ impl NotepadApp {
     fn content_view(&self) -> impl View + Clone + use<> {
         let edit = self.clone();
         let key = self.clone();
+        let palette = ColorPalette::default();
+        let position_width =
+            scarlet_ui::graphics::measure_text_sized(&self.position.get(), 11.0).0 as f32;
+        let status = fitted_status(
+            &self.status.get(),
+            (self.viewport_width.get() - position_width - 42.0).max(0.0),
+        );
         vstack! {
             TextView::with_document(self.content.clone(), self.selection.clone())
                 .autofocus(true)
                 .scroll_state(self.scroll.clone()).wrap_mode_state(self.wrap.clone())
                 .line_numbers(self.line_numbers.get()).current_line_highlight(true)
+                .border_color(palette.divider()).focused_border_color(palette.divider())
                 .reveal_selection_on_change(true)
                 .font_size(self.font_size.get()).padding(12.0)
                 .on_text_change(move |_| edit.record_edit())
                 .frame(f32::INFINITY, f32::INFINITY),
             hstack! {
-                Text::from_state(self.status.clone()).font_size(11.0),
+                Text::new(status).font_size(11.0),
                 Spacer::new(),
                 Text::from_state(self.position.clone()).font_size(11.0),
-            }.padding(8.0),
+            }.spacing(12.0).padding(8.0).background(palette.surface_variant()),
         }
         .on_event_capture(move |event| {
             // Remember selection before native TextView edits for faithful Undo.
@@ -721,18 +734,23 @@ impl NotepadApp {
         let save = self.clone();
         let discard = self.clone();
         let cancel = self.clone();
+        let palette = ColorPalette::default();
         vstack! {
-            Text::new("Save changes before continuing?").font_size(18.0),
-            Text::new("Your document has unsaved changes.").font_size(13.0),
-            Text::from_state(self.status.clone()).font_size(12.0),
+            Text::new("Save changes?").font_size(20.0),
+            Text::new("Your document has unsaved changes.").font_size(13.0).color(palette.text_secondary()),
+            Text::from_state(self.status.clone()).font_size(11.0).color(palette.text_secondary()),
+            Spacer::new(),
             hstack! {
-                Button::new("Save").on_click(move || save.save()),
-                Button::new("Discard").on_click(move || discard.discard_pending()),
-                Button::new("Cancel").on_click(move || cancel.cancel_pending()),
+                Button::new("Cancel").header_style().on_click(move || cancel.cancel_pending()),
+                Spacer::new(),
+                Button::new("Discard").header_style().on_click(move || discard.discard_pending()),
+                Button::new("Save").header_style().background_color(palette.surface_variant()).on_click(move || save.save()),
             }.spacing(10.0),
         }
-        .spacing(16.0)
-        .padding(20.0)
+        .alignment(Alignment::Leading)
+        .spacing(14.0)
+        .padding(24.0)
+        .frame(f32::INFINITY, f32::INFINITY)
     }
     fn find_view(&self) -> impl View + Clone + use<> {
         let submit = self.clone();
@@ -740,21 +758,49 @@ impl NotepadApp {
         let previous = self.clone();
         let replace = self.clone();
         let all = self.clone();
+        let palette = ColorPalette::default();
         vstack! {
-            TextField::new(self.query.clone()).autofocus(true).placeholder("Find text")
-                .on_submit(move || submit.find(false)).frame_width(440.0),
-            TextField::new(self.replacement.clone()).placeholder("Replace with").frame_width(440.0),
+            Text::new("Find & replace").font_size(20.0).color(palette.text_primary()),
+            Text::new("Case-sensitive · search wraps at the end").font_size(12.0).color(palette.text_secondary()),
+            vstack! {
+                Text::new("Find").font_size(12.0).color(palette.text_secondary()),
+                TextField::new(self.query.clone()).autofocus(true).placeholder("Text to find")
+                    .on_submit(move || submit.find(false)).frame_width(f32::INFINITY),
+                hstack! {
+                    Text::new("Enter finds the next match").font_size(11.0).color(palette.text_secondary()),
+                    Spacer::new(),
+                    Button::new("Previous").on_click(move || previous.find(true)),
+                    Button::new("Next").on_click(move || next.find(false)),
+                }.spacing(8.0),
+            }.alignment(Alignment::Leading).spacing(8.0).frame_width(f32::INFINITY),
+            vstack! {
+                Text::new("Replace with").font_size(12.0).color(palette.text_secondary()),
+                TextField::new(self.replacement.clone()).placeholder("Replacement text (can be empty)").frame_width(f32::INFINITY),
+                hstack! {
+                    Spacer::new(),
+                    Button::new("Replace").on_click(move || replace.replace_match()),
+                    Button::new("Replace All").on_click(move || all.replace_all()),
+                }.spacing(8.0),
+            }.alignment(Alignment::Leading).spacing(8.0).frame_width(f32::INFINITY),
+            Spacer::new(),
             hstack! {
-                Button::new("Previous").on_click(move || previous.find(true)),
-                Button::new("Next").on_click(move || next.find(false)),
-                Button::new("Replace").on_click(move || replace.replace_match()),
-                Button::new("Replace All").on_click(move || all.replace_all()),
+                Text::from_state(self.search_status.clone()).font_size(11.0).color(palette.text_secondary()),
+                Spacer::new(),
+                Button::new("Done").on_click(|| dismiss_window("find")),
             }.spacing(8.0),
-            Text::from_state(self.search_status.clone()).font_size(12.0),
-            Button::new("Done").on_click(|| dismiss_window("find")),
         }
-        .spacing(12.0)
-        .padding(20.0)
+        .alignment(Alignment::Leading)
+        .spacing(14.0)
+        .padding(24.0)
+        .frame(f32::INFINITY, f32::INFINITY)
+        .on_event_capture(|event| {
+            if matches!(event, Event::Keyboard(KeyEvent::Pressed { keycode: KeyCode::Escape, .. })) {
+                dismiss_window("find");
+                true
+            } else {
+                false
+            }
+        })
     }
     fn menu_item(
         &self,
@@ -847,15 +893,18 @@ impl Application for NotepadApp {
     fn scenes(&self) -> impl Scene {
         scenes! {
             Window::new(self.window_title(), self.content_view()).scene_key("main")
-                .app_id(APP_ID).menu_bar(self.menu_bar()).size(Size::new(900.0, 680.0)),
+                .app_id(APP_ID).menu_bar(self.menu_bar()).size(Size::new(900.0, 680.0))
+                .min_size(Size::new(560.0, 360.0)),
             Window::new("Unsaved Changes — Notepad", self.confirm_view()).scene_key("confirm")
                 .open_at_launch(false).app_id(APP_ID).size(Size::new(540.0, 220.0)),
             Window::new("Find / Replace — Notepad", self.find_view()).scene_key("find")
-                .open_at_launch(false).app_id(APP_ID).size(Size::new(500.0, 300.0)),
+                .open_at_launch(false).app_id(APP_ID).size(Size::new(560.0, 400.0))
+                .min_size(Size::new(560.0, 400.0)),
         }
     }
     fn on_window_created(&mut self, ctx: &WindowContext, window: &mut dyn PlatformWindow) {
         if ctx.scene_key.as_str() == "main" {
+            self.viewport_width.set(window.managed_size().width);
             let shared = self.runtime.get();
             let mut runtime = shared.lock().unwrap();
             runtime.owner = Some(ctx.window_id);
@@ -868,6 +917,10 @@ impl Application for NotepadApp {
     fn on_window_sync(&mut self, ctx: &WindowContext, window: &mut dyn PlatformWindow) {
         if ctx.scene_key.as_str() != "main" {
             return;
+        }
+        let width = window.managed_size().width;
+        if self.viewport_width.get() != width {
+            self.viewport_width.set(width);
         }
         let title = self.window_title();
         let shared = self.runtime.get();
@@ -910,6 +963,40 @@ fn home_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/root"))
 }
+fn fitted_status(message: &str, width: f32) -> String {
+    let message = message.replace(['\n', '\r', '\t'], " ");
+    let measure = |text: &str| scarlet_ui::graphics::measure_text_sized(text, 11.0).0 as f32;
+    if measure(&message) <= width {
+        return message;
+    }
+    if measure("…") > width {
+        return String::new();
+    }
+    let boundaries: Vec<_> = message.char_indices().map(|(byte, _)| byte).collect();
+    let (mut low, mut high) = (0, boundaries.len().saturating_sub(1));
+    while low < high {
+        let middle = (low + high + 1) / 2;
+        if measure(&format!("{}…", &message[..boundaries[middle]])) <= width {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    let mut end = boundaries.get(low).copied().unwrap_or(0);
+    loop {
+        let grapheme = TextPosition::new(end).clamp_to_grapheme(&message).byte;
+        if grapheme <= end {
+            end = grapheme;
+            break;
+        }
+        end = message[..end]
+            .char_indices()
+            .last()
+            .map_or(0, |(byte, _)| byte);
+    }
+    format!("{}…", &message[..end])
+}
+
 fn main() {
     let mut app = NotepadApp::new(std::env::args_os().nth(1).map(PathBuf::from));
     if let Err(error) = app.run() {
@@ -920,6 +1007,22 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_fits_available_width_and_keeps_unicode_clusters() {
+        let text = "Opened /a/very/long/path/日本語 cafe\u{301} 👩‍💻 document.txt";
+        for width in [0.0, 20.0, 80.0, 160.0, 380.0] {
+            let fitted = fitted_status(text, width);
+            assert!(scarlet_ui::graphics::measure_text_sized(&fitted, 11.0).0 as f32 <= width);
+            if let Some(prefix) = fitted.strip_suffix('…') {
+                assert_eq!(
+                    TextPosition::new(prefix.len()).clamp_to_grapheme(text).byte,
+                    prefix.len()
+                );
+            }
+        }
+        assert_eq!(fitted_status("Ready", 100.0), "Ready");
+    }
 
     #[test]
     fn cursor_position_updates_after_release_events() {

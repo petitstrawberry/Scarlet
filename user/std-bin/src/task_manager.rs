@@ -22,9 +22,9 @@ use scarlet_ui::element::{
 use scarlet_ui::prelude::*;
 use scarlet_ui::renderer::PaintContext;
 use scarlet_ui::{
-    Color, GridView, Icon, IconSize, IconView, LazyVStack, ProgressView, ScrollView, SgfxCanvas,
-    SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle,
-    TabItem, TabView, hstack, vstack,
+    Color, GridView, KeyCode, LazyVStack, ProgressView, ScrollView, SgfxCanvas, SgfxCanvasDraw,
+    SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, TabItem,
+    TabView, hstack, vstack,
 };
 use scarlet_ui_macros::View;
 
@@ -40,7 +40,7 @@ const WINDOW_WIDTH: f32 = 980.0;
 const WINDOW_HEIGHT: f32 = 620.0;
 const MIN_WINDOW_WIDTH: f32 = 800.0;
 const MIN_WINDOW_HEIGHT: f32 = 560.0;
-const HEADER_HEIGHT: f32 = 140.0;
+const HEADER_HEIGHT: f32 = 104.0;
 const TAB_BAR_HEIGHT: f32 = 38.0;
 const TASK_ROW_HEIGHT: f32 = 34.0;
 const TASK_TABLE_HEADER_HEIGHT: f32 = 28.0;
@@ -912,6 +912,9 @@ fn task_manager_view(
         TabItem::new("Thermal", move || thermal_page(thermal_snapshot.clone())),
         TabItem::new("Tasks", move || task_page(task_snapshot.clone())),
     ];
+    let tab_count = tabs.len();
+    let capture_tab = selected_tab.clone();
+    let bubble_tab = selected_tab.clone();
 
     vstack! {
         header_view(snapshot.as_ref()),
@@ -927,6 +930,30 @@ fn task_manager_view(
     .padding(18.0)
     .frame(f32::INFINITY, f32::INFINITY)
     .background(palette.window_background())
+    .on_event_capture(move |event| cycle_tab_shortcut(event, &capture_tab, tab_count))
+    .on_event(move |event| cycle_tab_shortcut(event, &bubble_tab, tab_count))
+}
+
+fn cycle_tab_shortcut(event: &Event, selected: &State<usize>, count: usize) -> bool {
+    let Event::Keyboard(KeyEvent::Pressed {
+        keycode: KeyCode::Tab,
+        modifiers,
+    }) = event
+    else {
+        return false;
+    };
+    if !modifiers.control || modifiers.alt || modifiers.super_key || count == 0 {
+        return false;
+    }
+    selected.update(|index| {
+        let current = *index % count;
+        *index = if modifiers.shift {
+            (current + count - 1) % count
+        } else {
+            (current + 1) % count
+        };
+    });
+    true
 }
 
 fn overview_page(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
@@ -934,6 +961,16 @@ fn overview_page(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
     let peak = snapshot.cpu_history.iter().copied().max().unwrap_or(0);
     let samples = snapshot.cpu_history.len();
     let graph_snapshot = snapshot.clone();
+    let graph =
+        scarlet_ui::if_view!(samples > 0, cpu_history_graph(graph_snapshot),
+        vstack! {
+            Spacer::new(),
+            Text::new("Waiting for CPU measurements").font_size(18.0).color(palette.text_primary()),
+            Text::new(snapshot.status.clone()).font_size(12.0).color(palette.text_secondary()),
+            Spacer::new(),
+        }.spacing(10.0).frame(f32::INFINITY, f32::INFINITY)
+            .background(palette.surface_variant()).clip_radius(8.0)
+    );
 
     vstack! {
         hstack! {
@@ -945,18 +982,19 @@ fn overview_page(snapshot: Arc<Snapshot>) -> impl View + Clone + use<> {
                     .font_size(11.0)
                     .color(palette.text_secondary()),
             }
+            .alignment(Alignment::Leading)
             .spacing(3.0),
             Spacer::new(),
-            Text::new(format!("{}% now", format_percent(snapshot.cpu_busy_per_mille)))
+            Text::new(if samples > 0 { format!("{}% now", format_percent(snapshot.cpu_busy_per_mille)) } else { "—".into() })
                 .font_size(17.0)
                 .color(palette.primary()),
         },
-        cpu_history_graph(graph_snapshot),
+        graph,
         hstack! {
-            summary_card("PEAK", format!("{}%", format_percent(peak)), palette.warning()),
-            summary_card("TASKS", snapshot.counts.total.to_string(), palette.info()),
-            summary_card("RUNNABLE", snapshot.scheduler.runnable.to_string(), palette.success()),
-            summary_card("ONLINE", snapshot.online_cpus.to_string(), palette.primary()),
+            Text::new(if samples > 0 { format!("Peak {}%", format_percent(peak)) } else { "No measurements yet".into() })
+                .font_size(12.0).color(palette.text_secondary()),
+            Spacer::new(),
+            Text::new("Recent CPU activity").font_size(12.0).color(palette.text_secondary()),
         }
         .spacing(8.0),
     }
@@ -972,6 +1010,7 @@ fn cpu_page(
     selected_cpu: State<Option<usize>>,
 ) -> impl View + Clone + use<> {
     let palette = ColorPalette::default();
+    let has_cpus = !snapshot.cpus.is_empty();
     let cpu_grid = GridView::new(
         cpu_cards,
         selected_cpu,
@@ -986,7 +1025,14 @@ fn cpu_page(
 
     vstack! {
         cpu_overall_summary(snapshot.as_ref()),
-        cpu_grid,
+        scarlet_ui::if_view!(has_cpus, cpu_grid,
+            vstack! {
+                Spacer::new(),
+                Text::new("No CPU measurements available").font_size(18.0).color(palette.text_primary()),
+                Text::new(snapshot.status.clone()).font_size(12.0).color(palette.text_secondary()),
+                Spacer::new(),
+            }.spacing(10.0).frame(f32::INFINITY, f32::INFINITY)
+        ),
     }
     .spacing(CPU_GRID_SPACING)
     .alignment(Alignment::Leading)
@@ -1213,6 +1259,7 @@ fn thermal_card(zone: Option<ThermalZoneSnapshot>) -> impl View + Clone + use<> 
 
 fn cpu_overall_summary(snapshot: &Snapshot) -> impl View + Clone + use<> {
     let palette = ColorPalette::default();
+    let measured = !snapshot.cpu_history.is_empty();
     let peak = snapshot.cpu_history.iter().copied().max().unwrap_or(0);
     let history_seconds =
         snapshot.cpu_history.len() as u64 * SAMPLE_INTERVAL.as_millis() as u64 / 1_000;
@@ -1222,7 +1269,7 @@ fn cpu_overall_summary(snapshot: &Snapshot) -> impl View + Clone + use<> {
             Text::new("OVERALL CPU")
                 .font_size(10.0)
                 .color(palette.text_secondary()),
-            Text::new(format!("{}%", format_percent(snapshot.cpu_busy_per_mille)))
+            Text::new(if measured { format!("{}%", format_percent(snapshot.cpu_busy_per_mille)) } else { "—".into() })
                 .font_size(22.0)
                 .color(palette.primary()),
         }
@@ -1230,12 +1277,12 @@ fn cpu_overall_summary(snapshot: &Snapshot) -> impl View + Clone + use<> {
         .frame_width(104.0),
         vstack! {
             ProgressView::new(snapshot.cpu_busy_per_mille as f32 / 1_000.0),
-            Text::new(format!(
+            Text::new(if measured { format!(
                 "{} cores · {} runnable · {} s history",
                 snapshot.online_cpus,
                 snapshot.scheduler.runnable,
                 history_seconds,
-            ))
+            ) } else { "Waiting for kernel measurements".into() })
             .font_size(10.0)
             .color(palette.text_secondary()),
         }
@@ -1245,7 +1292,7 @@ fn cpu_overall_summary(snapshot: &Snapshot) -> impl View + Clone + use<> {
             Text::new("PEAK")
                 .font_size(10.0)
                 .color(palette.text_secondary()),
-            Text::new(format!("{}%", format_percent(peak)))
+            Text::new(if measured { format!("{}%", format_percent(peak)) } else { "—".into() })
                 .font_size(16.0)
                 .color(palette.warning()),
         }
@@ -1457,50 +1504,38 @@ impl ElementRenderObject for UsageGraphRenderObject {
 
 fn header_view(snapshot: &Snapshot) -> impl View + Clone + use<> {
     let palette = ColorPalette::default();
-    let cpu_percent = format_percent(snapshot.cpu_busy_per_mille);
-    let task_count = snapshot.counts.total.to_string();
-    let running_count = snapshot.counts.running.to_string();
-    let sleeping_count = snapshot.counts.sleeping.to_string();
-    let core_count = snapshot.online_cpus.to_string();
+    let measured = !snapshot.cpu_history.is_empty();
+    let metric = |value: usize| {
+        if measured {
+            value.to_string()
+        } else {
+            "—".into()
+        }
+    };
 
     vstack! {
         hstack! {
-            IconView::new(Icon::ChartBar)
-                .size(IconSize::Large)
-                .color(palette.primary()),
-            vstack! {
-                Text::new(snapshot.status.clone())
-                    .font_size(13.0)
-                    .color(palette.text_secondary()),
-            }
-            .spacing(3.0)
-            .frame_width(f32::INFINITY)
-            .clip_radius(0.0),
-            vstack! {
-                Text::new(format!("{}% CPU", cpu_percent))
-                    .font_size(20.0)
-                    .color(palette.text_primary()),
-                ProgressView::new(snapshot.cpu_busy_per_mille as f32 / 1_000.0)
-                    .frame_width(150.0),
-            }
-            .spacing(6.0),
+            Text::new(snapshot.status.clone()).font_size(11.0).color(palette.text_secondary()),
+            Spacer::new(),
+            Text::new("Ctrl+Tab · switch views").font_size(11.0).color(palette.text_secondary()),
         }
         .spacing(12.0),
         hstack! {
-            summary_card("TASKS", task_count, palette.info()),
-            summary_card("RUNNING", running_count, palette.success()),
-            summary_card("SLEEPING", sleeping_count, palette.secondary()),
-            summary_card("ONLINE", core_count, palette.primary()),
+            summary_card("TASKS", metric(snapshot.counts.total), palette.text_primary()),
+            summary_card("RUNNING", metric(snapshot.counts.running), palette.text_primary()),
+            summary_card("SLEEPING", metric(snapshot.counts.sleeping), palette.text_primary()),
+            summary_card("ONLINE CPUS", metric(snapshot.online_cpus), palette.text_primary()),
             summary_card(
                 "RUNNABLE",
-                snapshot.scheduler.runnable.to_string(),
-                palette.warning(),
+                metric(snapshot.scheduler.runnable),
+                palette.text_primary(),
             ),
         }
         .spacing(8.0),
     }
-    .spacing(12.0)
-    .padding(14.0)
+    .alignment(Alignment::Leading)
+    .spacing(8.0)
+    .padding(12.0)
     .frame(f32::INFINITY, HEADER_HEIGHT)
     .background(palette.surface())
     .clip_radius(12.0)
@@ -1727,6 +1762,50 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_tab_routes_through_the_window_and_wraps_in_both_directions() {
+        use scarlet_ui::event::KeyModifiers;
+        use scarlet_ui::pipeline::RenderingPipeline;
+        let app = TaskManagerApp::new();
+        let view = task_manager_view(
+            app.snapshot.get(),
+            app.selected_tab.clone(),
+            app.cpu_cards.clone(),
+            app.selected_cpu.clone(),
+        );
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            Window::new("test", view)
+                .decorated(false)
+                .size(Size::new(800.0, 560.0))
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        let key = |control, shift| {
+            Event::Keyboard(KeyEvent::Pressed {
+                keycode: KeyCode::Tab,
+                modifiers: KeyModifiers {
+                    control,
+                    shift,
+                    ..KeyModifiers::empty()
+                },
+            })
+        };
+        pipeline.handle_event(&key(true, false));
+        assert_eq!(app.selected_tab.get(), 1);
+        app.selected_tab.set(4);
+        pipeline.handle_event(&key(true, false));
+        assert_eq!(app.selected_tab.get(), 0);
+        pipeline.handle_event(&key(true, true));
+        assert_eq!(app.selected_tab.get(), 4);
+        pipeline.handle_event(&key(false, true));
+        assert_eq!(
+            app.selected_tab.get(),
+            4,
+            "plain Tab remains focus navigation"
+        );
+    }
 
     fn graph_render(element: &dyn Element) -> &UsageGraphRenderObject {
         element
