@@ -71,13 +71,13 @@ The walk stops at 100,000 items, 64 levels or ten seconds and supports cancellat
 
 ## Repeatable checks
 
-From the supplied Nix environment, with the local UI patch config:
+From the repository root using the Scarlet toolchain (published dependency pins):
 
 ```sh
 cargo test --manifest-path tests/desktop-apps/Cargo.toml \
-  --config /workspace/scratch/desktop-ui.toml --test files_data
+  --test files_data
 cargo check --manifest-path tests/desktop-apps/Cargo.toml \
-  --config /workspace/scratch/desktop-ui.toml --features native-desktop \
+  --features native-desktop \
   --target aarch64-unknown-scarlet --bin files
 ```
 
