@@ -1,0 +1,17 @@
+[package]
+name = "scarlet-native-files-smoke"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+zip = { version = "2.4.2", default-features = false, features = ["deflate-flate2", "flate2"] }
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+scarlet-abi = { path = "../../user/lib/scarlet-abi" }
+scarlet-sys = { path = "../../user/lib/scarlet-sys" }
+
+[[bin]]
+name = "files-worker-smoke"
+path = "main.rs"

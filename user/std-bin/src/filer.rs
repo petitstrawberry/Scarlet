@@ -11,6 +11,7 @@ mod filer_details;
 mod filer_listing;
 mod filer_operations;
 mod filer_usage;
+mod filer_workers;
 mod picker_filter;
 
 use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -23,6 +24,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sbus::{Argument, Message};
+#[cfg(target_os = "scarlet")]
 use sbus_client::Connection as SbusConnection;
 use scarlet_desktop_config::{
     DESKTOP_FILE_MANAGER_BUS_NAME, DESKTOP_FILE_MANAGER_GET_PICKER_CAPABILITIES_METHOD,
@@ -73,6 +75,12 @@ const FILES_BINARY_PATH: &str = "/bin/files";
 /// window opens at launch, the response signal is sent synchronously on
 /// completion, and the process exits when the picker window closes.
 static STANDALONE_PICKER: AtomicBool = AtomicBool::new(false);
+#[cfg(not(target_os = "scarlet"))]
+static PREVIEW_ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn move_supported() -> bool {
+    filer_operations::native_fs::require_noreplace_move().is_ok()
+}
 
 #[derive(Clone)]
 struct FileEntry {
@@ -232,7 +240,7 @@ fn mutex_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn enqueue_directory_job(job: DirectoryJob) {
+fn enqueue_directory_job(job: DirectoryJob) -> std::io::Result<()> {
     {
         let mut pending = mutex_lock(&PENDING_DIRECTORY_JOBS);
         pending.retain(|existing| !existing.same_owner(&job));
@@ -242,11 +250,11 @@ fn enqueue_directory_job(job: DirectoryJob) {
         .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
         .is_err()
     {
-        return;
+        return Ok(());
     }
     // One worker and one pending request per browser, even while typing or
     // navigating quickly. Generation checks reject the obsolete in-flight read.
-    thread::spawn(|| {
+    filer_workers::spawn("files-directory", || {
         loop {
             let job = mutex_lock(&PENDING_DIRECTORY_JOBS).pop_front();
             match job {
@@ -287,7 +295,9 @@ fn enqueue_directory_job(job: DirectoryJob) {
                 None => thread::sleep(THUMBNAIL_WORKER_IDLE_DELAY),
             }
         }
-    });
+    })
+    .map(|_| ())
+    .inspect_err(|_| DIRECTORY_WORKER_STARTED.store(false, AtomicOrdering::Release))
 }
 
 fn thumbnail_context_has_same_owner(left: &ThumbnailContext, right: &ThumbnailContext) -> bool {
@@ -352,21 +362,23 @@ fn enqueue_thumbnail_jobs(context: ThumbnailContext, entries: &[FileEntry]) {
         return;
     }
 
-    ensure_thumbnail_worker();
+    if !ensure_thumbnail_worker() {
+        return;
+    }
     let mut pending = mutex_lock(&PENDING_THUMBNAIL_JOBS);
     pending.retain(|job| !thumbnail_context_has_same_owner(&job.context, &context));
     pending.extend(jobs);
 }
 
-fn ensure_thumbnail_worker() {
+fn ensure_thumbnail_worker() -> bool {
     if THUMBNAIL_WORKER_STARTED
         .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
         .is_err()
     {
-        return;
+        return true;
     }
 
-    thread::spawn(|| {
+    match filer_workers::spawn("files-thumbnails", || {
         loop {
             let job = mutex_lock(&PENDING_THUMBNAIL_JOBS).pop_front();
             let Some(job) = job else {
@@ -381,7 +393,14 @@ fn ensure_thumbnail_worker() {
                 thumbnail,
             });
         }
-    });
+    }) {
+        Ok(_) => true,
+        Err(error) => {
+            THUMBNAIL_WORKER_STARTED.store(false, AtomicOrdering::Release);
+            eprintln!("Files: thumbnails unavailable: {error}");
+            false
+        }
+    }
 }
 
 fn read_thumbnail_source(path: &str, file_size: u64) -> Option<Vec<u8>> {
@@ -568,7 +587,11 @@ struct FilerApp {
     details_destination: State<String>,
     details_name: State<String>,
     details_status: State<String>,
-    details_text: State<String>,
+    details_usage: State<Option<filer_usage::Usage>>,
+    details_usage_rows: State<Vec<(String, u64)>>,
+    details_width: State<f32>,
+    browser_width: State<f32>,
+    picker_width: State<f32>,
     details_index: State<Option<Arc<filer_archive::Index>>>,
     details_entries: State<Vec<filer_archive::Entry>>,
     details_selected: State<Option<usize>>,
@@ -615,12 +638,15 @@ impl FilerApp {
         self.applied_filters.set(filters.clone());
         self.filter_changed_at.set(None);
 
-        enqueue_directory_job(DirectoryJob::Main {
+        if let Err(error) = enqueue_directory_job(DirectoryJob::Main {
             instance_id,
             generation,
             path,
             filters,
-        });
+        }) {
+            self.status
+                .set(format!("Cannot start folder listing: {error}"));
+        }
     }
 
     fn navigate_to(&self, path: impl Into<String>) {
@@ -709,11 +735,14 @@ impl FilerApp {
         self.picker_last_click.set(None);
         self.picker_status.set(format!("Loading {path}"));
 
-        enqueue_directory_job(DirectoryJob::Picker {
+        if let Err(error) = enqueue_directory_job(DirectoryJob::Picker {
             generation,
             path,
             request,
-        });
+        }) {
+            self.picker_status
+                .set(format!("Cannot start folder listing: {error}"));
+        }
     }
 
     fn navigate_picker_to(&self, path: impl Into<String>) {
@@ -817,24 +846,18 @@ impl FilerApp {
         self.status.set(opening_status.clone());
 
         let status = self.status.clone();
-        thread::spawn(move || {
-            let result = SbusConnection::connect().and_then(|mut connection| {
-                connection.call_method_timeout(
-                    DESKTOP_STEMD_BUS_NAME,
-                    DESKTOP_STEMD_OBJECT_PATH,
-                    DESKTOP_STEMD_INTERFACE,
-                    DESKTOP_STEMD_OPEN_PATH_METHOD,
-                    vec![Argument::String(path.clone())],
-                    3_000,
-                )
-            });
+        if let Err(error) = filer_workers::spawn("files-open", move || {
+            let result = open_desktop_path(&path);
 
             if let Err(error) = result
                 && status.get() == opening_status
             {
                 status.set(format!("Cannot open {path}: {error:?}"));
             }
-        });
+        }) {
+            self.status
+                .set(format!("Cannot start opening the file: {error}"));
+        }
     }
 
     fn create_folder(&self) {
@@ -951,7 +974,7 @@ impl FilerApp {
         self.status.set(String::from("Working…"));
         let instance_id = self.directory_read_instance.get();
         let directory = self.current_path.get();
-        thread::spawn(move || {
+        if let Err(error) = filer_workers::spawn("files-operation", move || {
             let cut_source = match &operation {
                 Operation::Transfer {
                     source, cut: true, ..
@@ -965,7 +988,11 @@ impl FilerApp {
                 cut_source,
                 result,
             });
-        });
+        }) {
+            self.operation_busy.set(false);
+            self.status
+                .set(format!("Cannot start file operation: {error}"));
+        }
     }
 
     fn open_selected(&self, picker: bool) {
@@ -1189,10 +1216,9 @@ impl FilerApp {
                     );
                     let count = entries.len();
                     self.entries.set(entries);
-                    let message = self
-                        .refresh_message
-                        .get()
-                        .unwrap_or_else(|| format!("{count} item(s)"));
+                    let message = self.refresh_message.get().unwrap_or_else(|| {
+                        format!("{count} item{}", if count == 1 { "" } else { "s" })
+                    });
                     self.refresh_message.set(None);
                     self.status.set(message);
                 }
@@ -1449,16 +1475,10 @@ impl FilerApp {
         } else {
             format_size(entry.size)
         };
-        let file_name = if entry.is_directory {
-            Either::A(Text::new(entry.name).font_size(FILE_NAME_FONT_SIZE))
-        } else {
-            Either::B(
-                Text::new(file_name_label(&entry.name))
-                    .font_size(FILE_NAME_FONT_SIZE)
-                    .alignment(Alignment::Center)
-                    .frame(f32::INFINITY, FILE_NAME_HEIGHT),
-            )
-        };
+        let file_name = Text::new(file_name_label(&entry.name))
+            .font_size(FILE_NAME_FONT_SIZE)
+            .alignment(Alignment::Center)
+            .frame(f32::INFINITY, FILE_NAME_HEIGHT);
         let app = self.clone();
 
         vstack! {
@@ -1489,6 +1509,12 @@ impl FilerApp {
     }
 
     fn browser_page(&self, picker: bool) -> impl View + Clone + use<> {
+        let width_state = if picker {
+            self.picker_width.clone()
+        } else {
+            self.browser_width.clone()
+        };
+        let text_width = (width_state.get() - 36.0).max(300.0);
         let grid_app = self.clone();
         let entries = if picker {
             self.picker_entries.clone()
@@ -1502,6 +1528,10 @@ impl FilerApp {
         };
         let columns = self.grid_columns.clone();
         let key_app = self.clone();
+        let no_matches = !picker
+            && entries.is_empty()
+            && !self.search.get().is_empty()
+            && self.status.get().starts_with("0 item");
         let grid = GridView::new(
             entries,
             selected,
@@ -1528,6 +1558,19 @@ impl FilerApp {
             self.grid_focused.clone()
         })
         .on_key(move |event| key_app.handle_key(event, picker));
+        let clear_filter = self.clone();
+        let grid = if no_matches {
+            Either::A(vstack! {
+                Spacer::new(),
+                Text::new("No matching items").font_size(18.0),
+                Text::new("Try another filter or show all items in this folder.")
+                    .font_size(12.0).color(ColorPalette::default().text_secondary()),
+                Button::new("Clear Filter").on_click(move || clear_filter.search.set(String::new())),
+                Spacer::new(),
+            }.spacing(12.0).frame(f32::INFINITY, f32::INFINITY))
+        } else {
+            Either::B(grid)
+        };
 
         let mut title = if picker {
             self.picker_request
@@ -1536,7 +1579,11 @@ impl FilerApp {
                 .map(|request| request.title.clone())
                 .unwrap_or_else(|| String::from("Open File"))
         } else {
-            String::from("Files")
+            String::from(if cfg!(target_os = "scarlet") {
+                "Files"
+            } else {
+                "Files · Explicit host preview fixture"
+            })
         };
         if picker {
             if let Some(request) = self.picker_request.get() {
@@ -1596,7 +1643,7 @@ impl FilerApp {
             Either::A(vstack! {
                 Divider::new(),
                 replacement,
-                Text::from_state(self.picker_status.clone()).font_size(11.0),
+                Text::new(wrap_display_text(&self.picker_status.get(), text_width, 12.0)).font_size(12.0),
                 hstack! {
                     Spacer::new(),
                     file_name,
@@ -1609,15 +1656,15 @@ impl FilerApp {
         } else {
             Either::B(vstack! {
                 Divider::new(),
-                Text::from_state(self.status.clone()).font_size(11.0),
-                Text::new(if cfg!(target_os = "scarlet") {
+                Text::new(wrap_display_text(&self.status.get(), text_width, 12.0)).font_size(12.0),
+                Text::new(if !move_supported() {
                     "Enter: Open · Ctrl+C/V: Copy/Paste · Delete: Delete… · Ctrl+I: Details"
                 } else {
                     "Enter: Open · F2: Rename · Ctrl+C/X/V: Copy/Cut/Paste · Delete: Delete…"
-                }).font_size(10.0).color(ColorPalette::default().text_secondary()),
-                Text::new(if cfg!(target_os = "scarlet") { "Move and rename are not available on this system yet." } else { "" })
+                }).font_size(11.0).color(ColorPalette::default().text_secondary()),
+                Text::new(if !move_supported() { "Move and rename are not available on this system yet." } else { "" })
                     .font_size(10.0).color(ColorPalette::default().text_secondary()),
-            }.spacing(4.0).padding(8.0))
+            }.alignment(Alignment::Leading).spacing(6.0).padding(8.0))
         };
 
         let tools = if picker {
@@ -1645,6 +1692,10 @@ impl FilerApp {
         .alignment(Alignment::Leading)
         .padding(10.0)
         .frame(f32::INFINITY, f32::INFINITY)
+        .on_geometry_change(
+            |geometry| geometry.size().width,
+            move |width| width_state.set(width),
+        )
     }
 
     fn browser_tools(&self) -> impl View + Clone + use<> {
@@ -1669,9 +1720,9 @@ impl FilerApp {
             }.spacing(8.0),
             hstack! {
                 Button::new("New Folder…").on_click(move || new_app.create_folder()),
-                Button::new("Rename…").enabled(!cfg!(target_os = "scarlet")).on_click(move || rename_app.rename_selected()),
+                Button::new("Rename…").enabled(move_supported()).on_click(move || rename_app.rename_selected()),
                 Button::new("Copy").on_click(move || copy_app.copy_selected(false)),
-                Button::new("Cut").enabled(!cfg!(target_os = "scarlet")).on_click(move || cut_app.copy_selected(true)),
+                Button::new("Cut").enabled(move_supported()).on_click(move || cut_app.copy_selected(true)),
                 Button::new("Paste").on_click(move || paste_app.paste()),
                 Button::new("Details…").on_click(move || details_app.show_details()),
                 Spacer::new(),
@@ -1682,11 +1733,12 @@ impl FilerApp {
 
     fn prompt_view(&self) -> impl View + Clone + use<> {
         if let Some(prompt) = self.prompt.get() {
+            let text_width = (self.browser_width.get() - 48.0).max(300.0);
             let (title, target, action, needs_name) = match prompt {
                 FilePrompt::NewFolder(path) => ("Create a folder in", path, "Create", true),
                 FilePrompt::Rename(path) => ("Rename", path, "Rename", true),
                 FilePrompt::Delete(path) => (
-                    "Permanently delete? Folder contents are removed; links keep their targets. This cannot be undone.",
+                    "Delete permanently? This cannot be undone.",
                     path,
                     "Delete Permanently",
                     false,
@@ -1708,18 +1760,29 @@ impl FilerApp {
             } else {
                 Either::B(vstack! {})
             };
+            let deletion_note = if !needs_name {
+                if cfg!(target_os = "scarlet") {
+                    "Files and links are removed. Folders must be empty on this system."
+                } else {
+                    "Folder contents are also removed. Symbolic links keep their targets."
+                }
+            } else {
+                ""
+            };
             Either::A(
                 vstack! {
-                    Text::new(title).font_size(12.0),
-                    Text::new(target.to_string_lossy().into_owned()).font_size(12.0),
+                    Text::new(wrap_display_text(title, text_width, 14.0)).font_size(14.0),
+                    Text::new(wrap_display_text(&target.to_string_lossy(), text_width, 12.0)).font_size(12.0),
+                    Text::new(wrap_display_text(deletion_note, text_width, 12.0)).font_size(12.0),
                     name,
-                    Text::from_state(self.prompt_error.clone()).font_size(11.0),
+                    Text::new(wrap_display_text(&self.prompt_error.get(), text_width, 12.0)).font_size(12.0),
                     hstack! {
                         Spacer::new(),
                         Button::new("Cancel").on_click(move || cancel_app.prompt.set(None)),
                         Button::new(action).on_click(move || confirm_app.confirm_prompt()),
                     }.spacing(8.0),
                 }
+                .alignment(Alignment::Leading)
                 .spacing(4.0)
                 .padding(10.0)
                 .background(ColorPalette::default().surface_variant()),
@@ -1908,6 +1971,37 @@ impl Application for FilerApp {
     fn exit_when_all_windows_closed(&self) -> bool {
         true
     }
+}
+
+/// Text has explicit line breaks in this toolkit. Wrap status/path text to the
+/// measured viewport width so full error messages remain readable after resize.
+fn wrap_display_text(text: &str, width: f32, font_size: f32) -> String {
+    let mut output = String::new();
+    let mut line = String::new();
+    for character in text.chars() {
+        if character == '\n' {
+            output.push_str(&line);
+            output.push('\n');
+            line.clear();
+            continue;
+        }
+        let mut candidate = line.clone();
+        candidate.push(character);
+        if !line.is_empty() && measure_text_sized(&candidate, font_size).0 as f32 > width {
+            if let Some(split) = line.rfind(char::is_whitespace).filter(|index| *index > 0) {
+                output.push_str(line[..split].trim_end());
+                output.push('\n');
+                line = line[split..].trim_start().to_owned();
+            } else {
+                output.push_str(&line);
+                output.push('\n');
+                line.clear();
+            }
+        }
+        line.push(character);
+    }
+    output.push_str(&line);
+    output
 }
 
 fn file_name_label(name: &str) -> String {
@@ -2376,6 +2470,14 @@ fn initial_path() -> String {
 }
 
 fn home_path() -> String {
+    #[cfg(not(target_os = "scarlet"))]
+    {
+        return PREVIEW_ROOT
+            .get()
+            .cloned()
+            .unwrap_or_else(|| String::from("/__scarlet_files_preview_requires_fixture__"));
+    }
+    #[cfg(target_os = "scarlet")]
     std::env::var_os("HOME")
         .map(|path| path.to_string_lossy().into_owned())
         .filter(|path| !path.is_empty())
@@ -2536,6 +2638,7 @@ fn active_picker_request_id(request: &PickerRequest) -> Option<String> {
         .map(|active| active.request.id.clone())
 }
 
+#[cfg(target_os = "scarlet")]
 fn run_picker_service() {
     loop {
         let Ok(mut connection) = SbusConnection::connect() else {
@@ -2671,6 +2774,7 @@ fn run_picker_service() {
     }
 }
 
+#[cfg(target_os = "scarlet")]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--picker") {
@@ -2693,8 +2797,57 @@ fn main() {
     run_main_window();
 }
 
+/// Host visual verification uses the production views and an explicitly supplied
+/// temporary fixture. It does not provide Scarlet launch or picker IPC services.
+#[cfg(not(target_os = "scarlet"))]
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) != Some("--preview-fixture") {
+        eprintln!(
+            "Host Files requires --preview-fixture DIRECTORY; native services are unavailable."
+        );
+        return;
+    }
+    let Some(path) = args
+        .get(2)
+        .and_then(|path| fs::canonicalize(path).ok())
+        .filter(|path| path.is_dir())
+    else {
+        eprintln!("Preview fixture must be an existing directory.");
+        return;
+    };
+    let _ = PREVIEW_ROOT.set(path.to_string_lossy().into_owned());
+    run_main_window();
+}
+
+#[cfg(target_os = "scarlet")]
+fn open_desktop_path(path: &str) -> std::result::Result<(), String> {
+    SbusConnection::connect()
+        .and_then(|mut connection| {
+            connection.call_method_timeout(
+                DESKTOP_STEMD_BUS_NAME,
+                DESKTOP_STEMD_OBJECT_PATH,
+                DESKTOP_STEMD_INTERFACE,
+                DESKTOP_STEMD_OPEN_PATH_METHOD,
+                vec![Argument::String(path.into())],
+                3_000,
+            )
+        })
+        .map(|_| ())
+        .map_err(|error| format!("{error:?}"))
+}
+#[cfg(not(target_os = "scarlet"))]
+fn open_desktop_path(_path: &str) -> std::result::Result<(), String> {
+    Err("Opening external applications requires Scarlet; this is a host preview".into())
+}
+#[cfg(not(target_os = "scarlet"))]
+fn send_picker_response(_request_id: String, _success: bool, _path: String) {
+    eprintln!("File-picker IPC requires Scarlet; this is a host preview");
+}
+
 /// Resident FileManager sbus service. Serves OpenFile/SaveFile (spawning
 /// standalone picker children) and Show (delegating to stemd). Runs no UI.
+#[cfg(target_os = "scarlet")]
 fn run_file_manager_service_forever() {
     thread::spawn(run_picker_service);
     thread::spawn(picker_reaper);
@@ -2729,6 +2882,7 @@ fn run_standalone_picker(args: &[String]) {
 
 /// Send the picker response signal via sbus. In standalone mode this is called
 /// synchronously; in normal mode it runs on a spawned thread.
+#[cfg(target_os = "scarlet")]
 fn send_picker_response(request_id: String, success: bool, path: String) {
     match SbusConnection::connect().and_then(|mut connection| {
         connection.emit_signal(

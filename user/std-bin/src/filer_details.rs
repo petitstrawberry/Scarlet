@@ -1,6 +1,6 @@
 //! Worker-backed archive browser and folder-size details for Files.
 use super::*;
-use scarlet_ui::ScrollView;
+use scarlet_ui::ListView;
 
 pub(super) const WINDOW_KEY: &str = "details";
 static RESULTS: Mutex<Vec<DetailResult>> = Mutex::new(Vec::new());
@@ -36,7 +36,8 @@ impl FilerApp {
         self.details_entries.set(Vec::new());
         self.details_selected.set(None);
         self.details_last_click.set(None);
-        self.details_text.set(String::new());
+        self.details_usage.set(None);
+        self.details_usage_rows.set(Vec::new());
         self.details_name
             .set(filer_archive::suggested_folder(Path::new(&path)));
         self.details_destination.set(
@@ -57,7 +58,7 @@ impl FilerApp {
         self.details_close_requested.set(false);
         let (instance, generation, cancelled) = self.begin_details_task();
         open_window(WINDOW_KEY);
-        thread::spawn(move || {
+        if let Err(error) = filer_workers::spawn("files-details", move || {
             let output = if archive {
                 filer_archive::inspect(Path::new(&path), &cancelled).map(DetailOutput::Archive)
             } else {
@@ -68,7 +69,9 @@ impl FilerApp {
                 generation,
                 output,
             });
-        });
+        }) {
+            self.details_spawn_failed(error);
+        }
     }
     fn begin_details_task(&self) -> (u64, u64, Arc<AtomicBool>) {
         self.details_busy.set(true);
@@ -77,6 +80,12 @@ impl FilerApp {
         let generation = self.details_generation.get().wrapping_add(1);
         self.details_generation.set(generation);
         (self.directory_read_instance.get(), generation, cancelled)
+    }
+    fn details_spawn_failed(&self, error: std::io::Error) {
+        self.details_busy.set(false);
+        self.details_cancel.set(None);
+        self.details_status
+            .set(format!("Cannot start file details: {error}"));
     }
     pub(super) fn cancel_details(&self, close: bool) {
         if self.details_busy.get() {
@@ -107,7 +116,7 @@ impl FilerApp {
         let (instance, generation, cancelled) = self.begin_details_task();
         self.details_status
             .set("Validating and extracting into a new folder…".into());
-        thread::spawn(move || {
+        if let Err(error) = filer_workers::spawn("files-extract", move || {
             let output = filer_operations::native_fs::canonicalize(&directory)
                 .map_err(|error| format!("Cannot open destination folder: {error}"))
                 .and_then(|directory| {
@@ -125,7 +134,9 @@ impl FilerApp {
                 generation,
                 output,
             });
-        });
+        }) {
+            self.details_spawn_failed(error);
+        }
     }
     pub(super) fn process_details_results(&self) {
         let results: Vec<_> = mutex_lock(&RESULTS).drain(..).collect();
@@ -148,28 +159,16 @@ impl FilerApp {
                     self.details_index.set(Some(Arc::new(index)));
                 }
                 Ok(DetailOutput::Usage(usage)) => {
-                    let mut text = format!(
-                        "{} logical file bytes ({})\n{} files · {} folders · {} symbolic links\n\nLinks are not followed. Each file path contributes its logical size; this is not allocated disk space.\n",
-                        usage.bytes,
-                        format_size(usage.bytes),
-                        usage.files,
-                        usage.folders,
-                        usage.links
-                    );
-                    if !usage.largest.is_empty() {
-                        text.push_str("\nLargest immediate children\n");
-                        for (name, size) in &usage.largest {
-                            text.push_str(&format!("{}   {}\n", format_size(*size), name));
+                    self.details_status.set(
+                        if usage.incomplete.is_some() {
+                            "Partial calculation — some items could not be measured"
+                        } else {
+                            "Size calculation complete"
                         }
-                    }
-                    if let Some(reason) = usage.incomplete {
-                        text.push_str(&format!("\nPartial result: {reason}\n{} unreadable or unsupported items skipped.", usage.skipped));
-                        self.details_status
-                            .set("Partial size calculation — see details".into());
-                    } else {
-                        self.details_status.set("Size calculation complete".into());
-                    }
-                    self.details_text.set(text);
+                        .into(),
+                    );
+                    self.details_usage_rows.set(usage.largest.clone());
+                    self.details_usage.set(Some(usage));
                 }
                 Ok(DetailOutput::Extracted(path)) => {
                     let message = format!("Extracted to {}", path.display());
@@ -265,31 +264,98 @@ impl FilerApp {
         let close = self.clone();
         let cancel = self.clone();
         let key = self.clone();
+        let width_state = self.details_width.clone();
+        let width = (self.details_width.get() - 28.0).max(600.0);
+        let path = self.details_path.get();
+        let name = Path::new(&path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let palette = ColorPalette::default();
         let content = if self.details_archive.get() {
             Either::A(self.archive_page())
         } else {
-            Either::B(
-                ScrollView::new(
-                    Text::from_state(self.details_text.clone())
-                        .font_size(14.0)
-                        .padding(12.0),
-                )
-                .frame(f32::INFINITY, f32::INFINITY),
+            Either::B(self.usage_page())
+        };
+        let cancel_button = if self.details_busy.get() {
+            Either::A(
+                Button::new("Cancel Operation").on_click(move || cancel.cancel_details(false)),
             )
+        } else {
+            Either::B(Spacer::new().frame_width(0.0))
         };
         vstack! {
-            Text::from_state(self.details_path.clone()).font_size(14.0),
+            hstack! {
+                icon_for_entry(&name, !self.details_archive.get()).frame(38.0, 38.0),
+                vstack! {
+                    Text::new(if self.details_archive.get() { "Archive contents" } else { "Folder size" }).font_size(20.0),
+                    Text::new(wrap_display_text(&path, width - 50.0, 12.0)).font_size(12.0).color(palette.text_secondary()),
+                }.alignment(Alignment::Leading).spacing(4.0),
+                Spacer::new(),
+            }.spacing(12.0),
+            Divider::new(),
             content,
             Divider::new(),
-            Text::from_state(self.details_status.clone()).font_size(12.0),
             hstack! {
+                Text::new(wrap_display_text(&self.details_status.get(), width - 160.0, 12.0)).font_size(12.0),
                 Spacer::new(),
-                Button::new("Cancel Operation").enabled(self.details_busy.get()).on_click(move || cancel.cancel_details(false)),
+                cancel_button,
                 Button::new("Close").on_click(move || close.cancel_details(true)),
             }.spacing(8.0),
-        }.alignment(Alignment::Leading).spacing(10.0).padding(14.0)
-            .frame(f32::INFINITY,f32::INFINITY)
-            .on_key(move |event|key.details_key(event))
+        }.alignment(Alignment::Leading).spacing(12.0).padding(16.0)
+            .frame(f32::INFINITY, f32::INFINITY)
+            .on_geometry_change(|geometry| geometry.size().width, move |width| width_state.set(width))
+            .on_key(move |event| key.details_key(event))
+    }
+    fn usage_page(&self) -> impl View + Clone + use<> {
+        let palette = ColorPalette::default();
+        let width = (self.details_width.get() - 64.0).max(550.0);
+        if let Some(usage) = self.details_usage.get() {
+            let row_width = (width - 120.0).max(250.0);
+            let rows = ListView::new(
+                self.details_usage_rows.clone(),
+                self.details_selected.clone(),
+                48.0,
+                move |_, (name, size): (String, u64), _| {
+                    vstack! {
+                        hstack! {
+                            Text::new(wrap_display_text(&name, row_width, 13.0)).font_size(13.0).frame(f32::INFINITY, 38.0),
+                            Text::new(format_size(size)).font_size(13.0).frame_width(90.0),
+                        }.spacing(12.0),
+                        Divider::new(),
+                    }.alignment(Alignment::Leading).padding(4.0)
+                },
+            );
+            let partial = usage
+                .incomplete
+                .as_ref()
+                .map(|reason| format!("Partial result: {reason}. {} items skipped.", usage.skipped))
+                .unwrap_or_default();
+            Either::A(vstack! {
+                hstack! {
+                    vstack! {
+                        Text::new(format_size(usage.bytes)).font_size(30.0),
+                        Text::new(format!("{} bytes in files", usage.bytes)).font_size(12.0).color(palette.text_secondary()),
+                    }.alignment(Alignment::Leading).spacing(4.0),
+                    Spacer::new(),
+                    vstack! {
+                        Text::new(format!("{} file{} · {} folder{}", usage.files, if usage.files == 1 { "" } else { "s" }, usage.folders, if usage.folders == 1 { "" } else { "s" })).font_size(14.0),
+                        Text::new(format!("{} symbolic link{}", usage.links, if usage.links == 1 { "" } else { "s" })).font_size(12.0).color(palette.text_secondary()),
+                    }.alignment(Alignment::Leading).spacing(4.0),
+                }.padding(16.0).background(palette.surface_variant()).clip_radius(8.0),
+                Text::new("Largest items in this folder").font_size(15.0),
+                rows,
+                Text::new(wrap_display_text("Logical file sizes. Links are not followed; hard-linked paths are counted separately.", width, 12.0)).font_size(12.0).color(palette.text_secondary()),
+                Text::new(wrap_display_text(&partial, width, 12.0)).font_size(12.0),
+            }.alignment(Alignment::Leading).spacing(12.0).frame(f32::INFINITY, f32::INFINITY))
+        } else {
+            Either::B(vstack! {
+                Spacer::new(),
+                Text::new(if self.details_busy.get() { "Calculating folder size…" } else { "No size information available" }).font_size(16.0).color(palette.text_secondary()),
+                Spacer::new(),
+            }.frame(f32::INFINITY, f32::INFINITY))
+        }
     }
     fn archive_page(&self) -> impl View + Clone + use<> {
         let up = self.clone();
@@ -323,9 +389,12 @@ impl FilerApp {
                 Button::new("Archive Root").on_click(move ||root.details_navigate(String::new())),
                 Button::new("Up").enabled(!self.details_folder.get().is_empty()).on_click(move ||up.details_up()),
                 Text::new(format!("/{}",self.details_folder.get())).font_size(12.0),
+                Spacer::new(),
             }.spacing(8.0),
             grid,
-            Text::new("Extract into a new folder. Owner execute permissions are kept; ownership and special permissions are not.").font_size(12.0),
+            Divider::new(),
+            Text::new("Extract archive").font_size(15.0),
+            Text::new("Choose a new folder. Existing files are kept.").font_size(12.0).color(ColorPalette::default().text_secondary()),
             hstack! {
                 Text::new("Destination").font_size(12.0).frame_width(85.0),
                 TextField::new(self.details_destination.clone()).placeholder("Existing destination folder").frame(f32::INFINITY,34.0),
@@ -335,6 +404,6 @@ impl FilerApp {
                 TextField::new(self.details_name.clone()).placeholder("New folder name").frame(f32::INFINITY,34.0),
                 Button::new("Extract").enabled(self.details_index.get().is_some()&&!self.details_busy.get()).on_click(move ||extract.extract_details()),
             }.spacing(8.0),
-        }.spacing(8.0).frame(f32::INFINITY,f32::INFINITY)
+        }.alignment(Alignment::Leading).spacing(8.0).frame(f32::INFINITY,f32::INFINITY)
     }
 }

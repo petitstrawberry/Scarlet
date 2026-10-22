@@ -185,6 +185,12 @@ pub fn extract(
     budget.check().map_err(|e| e.to_string())?;
     let destination = directory.join(name);
     fs::create_dir(&destination).map_err(|e| {
+        if e.kind() == io::ErrorKind::AlreadyExists {
+            return format!(
+                "Destination already exists: {}. Choose a new folder name; existing items were kept.",
+                destination.display()
+            );
+        }
         format!(
             "Cannot create {}: {e}. Choose a new folder name; existing items are never replaced.",
             destination.display()
@@ -1095,7 +1101,9 @@ mod tests {
         let index = inspect(&path, &idle()).unwrap();
         fs::create_dir(fixture.0.join("existing")).unwrap();
         fs::write(fixture.0.join("existing/keep"), b"keep").unwrap();
-        assert!(extract(&path, &fixture.0, "existing", &index, &idle()).is_err());
+        let collision = extract(&path, &fixture.0, "existing", &index, &idle()).unwrap_err();
+        assert!(collision.starts_with("Destination already exists:"));
+        assert!(collision.ends_with("existing items were kept."));
         assert_eq!(fs::read(fixture.0.join("existing/keep")).unwrap(), b"keep");
         write_zip(&path, "changed", b"changed", true);
         assert!(extract(&path, &fixture.0, "new", &index, &idle()).is_err());
