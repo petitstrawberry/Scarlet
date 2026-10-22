@@ -1092,12 +1092,12 @@ impl ShellApp {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 struct MenuTree {
     items: Vec<TaskMenuItem>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct TaskMenuItem {
     id: String,
     title: String,
@@ -1106,7 +1106,7 @@ struct TaskMenuItem {
     children: Vec<TaskMenuEntry>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 enum TaskMenuEntry {
     Item(TaskMenuItem),
     Separator,
@@ -1786,17 +1786,6 @@ fn menu_bar_from_tree(tree: &MenuTree) -> MenuBarModel {
     MenuBarModel::new(items)
 }
 
-fn menu_height(entries: &[TaskMenuEntry], item_height: f32) -> f32 {
-    let mut total = 4.0;
-    for entry in entries {
-        total += match entry {
-            TaskMenuEntry::Separator => 1.0,
-            TaskMenuEntry::Item(_) => item_height,
-        };
-    }
-    total
-}
-
 fn parse_menu_tree_json(input: &str) -> Vec<TaskMenuItem> {
     let cleaned = sanitize_menu_json(input);
     let trimmed = cleaned.trim();
@@ -2010,21 +1999,61 @@ fn build_overview_button(
         })
 }
 
+fn submenu_at_path<'a>(mut menu: &'a TaskMenuItem, path: &[usize]) -> Option<&'a TaskMenuItem> {
+    for &index in path {
+        let TaskMenuEntry::Item(child) = menu.children.get(index)? else {
+            return None;
+        };
+        if !child.enabled || child.children.is_empty() {
+            return None;
+        }
+        menu = child;
+    }
+    Some(menu)
+}
+
 fn build_menu_items(
     entries: &[TaskMenuEntry],
     active_window_id: u32,
     open_menu_index: State<Option<usize>>,
-) -> (Vec<MenuItemContent>, f32) {
+    submenu_path: State<Vec<usize>>,
+) -> Vec<MenuItemContent> {
     let mut items = Vec::new();
-    for entry in entries {
+    let current_path = submenu_path.get();
+    if !current_path.is_empty() {
+        let back_state = submenu_path.clone();
+        let mut parent_path = current_path.clone();
+        parent_path.pop();
+        items.push(MenuItemContent::new("‹ Back").callback(move || {
+            back_state.set(parent_path.clone());
+        }));
+        items.push(MenuItemContent::separator());
+    }
+    for (index, entry) in entries.iter().enumerate() {
         match entry {
             TaskMenuEntry::Separator => {
                 items.push(MenuItemContent::separator());
             }
             TaskMenuEntry::Item(item) => {
-                let mut content = MenuItemContent::new(item.title.clone())
-                    .action(MenuAction::Submenu)
-                    .enabled(item.enabled);
+                let mut content = MenuItemContent::new(item.title.clone()).enabled(item.enabled);
+                if !item.children.is_empty() {
+                    let next_state = submenu_path.clone();
+                    let mut next_path = current_path.clone();
+                    next_path.push(index);
+                    // MenuRenderObject does not draw Submenu's chevron itself.
+                    // Keep any supplied shortcut and use its trailing column.
+                    let indicator = match &item.shortcut {
+                        Some(shortcut) => format!("{}  ›", shortcut),
+                        None => String::from("›"),
+                    };
+                    items.push(
+                        content
+                            .action(MenuAction::Submenu)
+                            .shortcut(indicator)
+                            .callback(move || next_state.set(next_path.clone())),
+                    );
+                    continue;
+                }
                 if let Some(ref shortcut) = item.shortcut {
                     content = content.shortcut(shortcut.clone());
                 }
@@ -2067,9 +2096,7 @@ fn build_menu_items(
             }
         }
     }
-    let item_height = 28.0;
-    let height = menu_height(entries, item_height);
-    (items, height)
+    items
 }
 
 fn overview_app_menu_indices(menu_tree: &MenuTree) -> Vec<usize> {
@@ -3932,6 +3959,12 @@ impl ShellApp {
             let mut popup_focus_observed = false;
             let mut popup_renderer: Option<ShellPopupRenderer> = None;
             let mut last_open_index: Option<usize> = None;
+            // A single popup displays one level at a time; callbacks only
+            // change this path. The popup loop owns surface replacement.
+            let submenu_path = State::new(StateId::new(44), Vec::<usize>::new());
+            let mut last_submenu_path = Vec::new();
+            let mut last_menu_tree = MenuTree::default();
+            let mut last_active_window_id = 0;
             let mut last_overview_windows: Vec<ShellWindow> = Vec::new();
             let mut last_overview_page = 0usize;
 
@@ -3945,8 +3978,18 @@ impl ShellApp {
             loop {
                 let open_index = open_menu_index_popup.get();
                 let menu_tree_value = menu_tree_popup.get();
+                let active_window_id = active_window_id_popup.get();
 
-                if open_index != last_open_index {
+                let menu_changed = open_index != last_open_index
+                    || active_window_id != last_active_window_id
+                    || menu_tree_value != last_menu_tree;
+                if menu_changed {
+                    submenu_path.set(Vec::new());
+                    last_active_window_id = active_window_id;
+                    last_menu_tree = menu_tree_value.clone();
+                }
+                let current_submenu_path = submenu_path.get();
+                if menu_changed || current_submenu_path != last_submenu_path {
                     if let Some(surface_id) = popup_surface_id.take() {
                         let _ = conn.destroy_surface(surface_id);
                     }
@@ -3954,7 +3997,9 @@ impl ShellApp {
                     popup_renderer = None;
                     pointer_pressed = false;
                     popup_touch_id = None;
+                    pending_move = false;
                     last_open_index = open_index;
+                    last_submenu_path = current_submenu_path.clone();
                 }
 
                 let current_overview_windows = windows_popup.get();
@@ -3974,7 +4019,11 @@ impl ShellApp {
 
                 if let Some(index) = open_index {
                     let overview_open = index == OVERVIEW_MENU_INDEX;
-                    let menu_entries = menu_tree_value.items.get(index).map(|item| &item.children);
+                    let menu_entries = menu_tree_value
+                        .items
+                        .get(index)
+                        .and_then(|item| submenu_at_path(item, &current_submenu_path))
+                        .map(|item| &item.children);
                     if overview_open || menu_entries.is_some_and(|entries| !entries.is_empty()) {
                         if popup_renderer.is_none() {
                             let layout = shell_layout_popup.get();
@@ -4005,10 +4054,10 @@ impl ShellApp {
                                 } else {
                                     build_menu_items(
                                         menu_entries.map_or(&[], Vec::as_slice),
-                                        active_window_id_popup.get(),
+                                        active_window_id,
                                         open_menu_index_popup.clone(),
+                                        submenu_path.clone(),
                                     )
-                                    .0
                                 };
                                 let menu_width = if overview_open {
                                     (screen_width_popup.get() - 16.0).clamp(220.0, 420.0)
@@ -4129,6 +4178,26 @@ impl ShellApp {
                                 continue;
                             }
                             match (input.type_, input.code) {
+                                (sws::event::event_type::EV_KEY, sws::event::key_code::KEY_ESC)
+                                    if input.value == 1 =>
+                                {
+                                    if submenu_path.get().is_empty() {
+                                        open_menu_index_popup.set(None);
+                                    } else {
+                                        submenu_path.update(|path| {
+                                            path.pop();
+                                        });
+                                    }
+                                }
+                                (
+                                    sws::event::event_type::EV_KEY,
+                                    sws::event::key_code::KEY_LEFT
+                                    | sws::event::key_code::KEY_BACKSPACE,
+                                ) if input.value == 1 => {
+                                    submenu_path.update(|path| {
+                                        path.pop();
+                                    });
+                                }
                                 (sws::event::event_type::EV_ABS, sws::event::abs_code::ABS_X) => {
                                     pointer_x = unscale_i32(input.value, scale_milli);
                                     pending_move = true;
