@@ -2252,7 +2252,10 @@ pub fn parse_client_message<'a>(
             let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             let title_len =
                 u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
-            if payload.len() != 8 + title_len {
+            if title_len > 4096
+                || payload.len() != 8 + title_len
+                || core::str::from_utf8(&payload[8..]).is_err()
+            {
                 return Err(ProtocolError::MalformedPayload);
             }
             Ok(ClientMessageRef::SetWindowTitle {
@@ -5856,7 +5859,11 @@ pub fn payload_focus_changed(
     payload.extend_from_slice(&(app_name_len as u32).to_le_bytes());
     payload.extend_from_slice(&app_name[..app_name_len]);
 
-    let title_len = title.len().min(256);
+    let title_limit = title.len().min(256);
+    // The notification has a fixed byte limit; preserve a complete UTF-8
+    // prefix when a long document name crosses that boundary.
+    let title_len = core::str::from_utf8(&title[..title_limit])
+        .map_or_else(|error| error.valid_up_to(), |_| title_limit);
     payload.extend_from_slice(&(title_len as u32).to_le_bytes());
     payload.extend_from_slice(&title[..title_len]);
 
@@ -5869,7 +5876,7 @@ pub fn payload_focus_changed(
 
 /// Build payload for server->client `ACTIVE_APP_CHANGED`.
 ///
-/// Broadcast when the active application changes (normal window gains focus).
+/// Broadcast when the active application changes or its window metadata changes.
 /// Payload format is the same as FOCUS_CHANGED:
 /// - window_id (u32)
 /// - app_id_len (u32)

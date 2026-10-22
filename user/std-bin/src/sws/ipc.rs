@@ -3929,6 +3929,14 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     geometry,
                 });
             }
+            Ok(ClientMessageRef::SetWindowTitle { window_id, title }) => {
+                push_ipc_event(IpcEvent::SetWindowTitle {
+                    client_id,
+                    request_id,
+                    window_id,
+                    title: title.to_vec(),
+                });
+            }
             Ok(ClientMessageRef::SetWindowMenuTitles {
                 window_id,
                 menu_titles,
@@ -5033,6 +5041,12 @@ pub enum IpcEvent {
         request_id: u8,
         window_id: u32,
         geometry: protocol::WindowGeometry,
+    },
+    SetWindowTitle {
+        client_id: usize,
+        request_id: u8,
+        window_id: u32,
+        title: Vec<u8>,
     },
     SetWindowMenuTitles {
         window_id: u32,

@@ -2410,6 +2410,8 @@ pub struct Compositor {
     workarea: Option<(i32, i32, u32, u32)>,
     /// Track the currently active application's app_id to avoid redundant ACTIVE_APP_CHANGED broadcasts
     active_app_id: Option<Vec<u8>>,
+    /// Exact active window, retained while shell menus temporarily own focus.
+    active_window: super::window_title::ActiveWindow,
     /// Track the last focused window ID to avoid redundant FOCUS_CHANGED broadcasts
     last_focused_window_id: Option<u32>,
     /// Last focused workspace scene, retained across shell-surface focus.
@@ -2879,6 +2881,7 @@ impl Compositor {
             resize_outline: None,
             workarea: None,
             active_app_id: None,
+            active_window: super::window_title::ActiveWindow::default(),
             last_focused_window_id: None,
             gamepad_routing: super::input::GamepadRouting::default(),
             last_workspace_focus: None,
@@ -5344,6 +5347,7 @@ impl Compositor {
                 window_id,
                 window.active_on_focus
             );
+            self.active_window.focus(window_id, window.active_on_focus);
             if window.active_on_focus {
                 let app_id_changed = match &self.active_app_id {
                     Some(current_app_id) => current_app_id != app_id_bytes,
@@ -5387,6 +5391,28 @@ impl Compositor {
                 window_id
             );
         }
+    }
+
+    /// Refresh shell metadata without changing focus or resetting input state.
+    fn broadcast_active_window_metadata(&self, window_id: u32) {
+        if !self.active_window.is_active(window_id) {
+            return;
+        }
+        let Some(window) = self.window_manager.get_window(window_id) else {
+            return;
+        };
+        let (app_name, menu_titles) = super::ipc::get_app_session_info(window_id);
+        let payload = sws_protocol::payload_active_app_changed(
+            window_id,
+            window.app_id.as_deref().unwrap_or(b""),
+            app_name.as_bytes(),
+            window.title.as_deref().unwrap_or(b""),
+            menu_titles.as_bytes(),
+        );
+        super::ipc::broadcast_message_to_all_clients(
+            sws_protocol::server_msg::ACTIVE_APP_CHANGED,
+            payload,
+        );
     }
 
     /// Check if cursor is within the bounds of a window
@@ -8974,9 +9000,7 @@ impl Compositor {
                 self.last_focused_window_id = None;
             }
 
-            if self.active_app_id.as_ref().map_or(false, |current_app_id| {
-                current_app_id.as_slice() == app_id.as_slice()
-            }) {
+            if self.active_window.remove(*window_id) {
                 println!(
                     "[Compositor] Active app window destroyed, resetting active_app_id (was={})",
                     core::str::from_utf8(app_id).unwrap_or("")
@@ -12692,6 +12716,26 @@ impl Compositor {
                     }
                 }
             }
+            IpcEvent::SetWindowTitle {
+                client_id,
+                request_id,
+                window_id,
+                title,
+            } => {
+                let target = self.window_manager.get_window_mut(window_id)
+                    .map(|window| (window.owner_client_id, &mut window.title));
+                match super::window_title::update(client_id, target, title) {
+                    Ok(true) => self.broadcast_active_window_metadata(window_id),
+                    Ok(false) => {},
+                    Err(()) => send_response_to_client(
+                        client_id,
+                        sws_protocol::server_msg::ERROR,
+                        request_id,
+                        sws_protocol::payload_error(sws_protocol::error_codes::WINDOW_NOT_OWNED)
+                            .to_vec(),
+                    ),
+                }
+            }
             IpcEvent::SetWindowMenuTitles {
                 window_id,
                 menu_titles,
@@ -12701,37 +12745,8 @@ impl Compositor {
                     window_id,
                     menu_titles.len()
                 );
-                let menu_titles_bytes = menu_titles.as_bytes().to_vec();
                 if super::ipc::set_app_session_menu_titles(window_id, menu_titles) {
-                    let is_focused = self.window_manager.get_focused_window_id() == Some(window_id);
-                    if is_focused {
-                        self.broadcast_focus_change(window_id);
-                    }
-
-                    if let Some(window) = self.window_manager.get_window(window_id) {
-                        let window_app_id = window.app_id.as_deref().unwrap_or(b"");
-                        let is_active_app = self
-                            .active_app_id
-                            .as_ref()
-                            .map_or(false, |id| id.as_slice() == window_app_id);
-
-                        if is_active_app || is_focused {
-                            let (app_name, _) = super::ipc::get_app_session_info(window_id);
-                            let app_name_bytes = app_name.as_bytes();
-                            let title_bytes = window.title.as_deref().unwrap_or(b"");
-                            let payload = sws_protocol::payload_active_app_changed(
-                                window_id,
-                                window_app_id,
-                                app_name_bytes,
-                                title_bytes,
-                                &menu_titles_bytes,
-                            );
-                            super::ipc::broadcast_message_to_all_clients(
-                                sws_protocol::server_msg::ACTIVE_APP_CHANGED,
-                                payload,
-                            );
-                        }
-                    }
+                    self.broadcast_active_window_metadata(window_id);
                 }
             }
             IpcEvent::ActivateMenuItem {
