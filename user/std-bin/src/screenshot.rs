@@ -33,6 +33,7 @@ struct Runtime {
 #[derive(View, Clone)]
 struct ScreenshotApp {
     pixels: State<Option<Arc<Pixels>>>,
+    fixture: State<bool>,
     original: State<Option<Arc<Pixels>>>,
     selection: State<Option<Region>>,
     drag: State<Option<(u32, u32)>>,
@@ -214,6 +215,8 @@ impl ScreenshotApp {
         true
     }
     fn content(&self) -> impl View + Clone {
+        let palette = ColorPalette::default();
+        let secondary = Color::rgb(88, 94, 104);
         let capture = self.clone();
         let keys = self.clone();
         let save = self.clone();
@@ -228,46 +231,93 @@ impl ScreenshotApp {
         let enabled = !self.busy.get();
         let has_image = self.pixels.get().is_some();
         let confirmation = if let Some(path) = self.confirm.get() {
-            Either::A(
+            Either::A(vstack! {
+                Text::new("Replace the existing PNG?").font_size(16.0),
+                Text::new(wrap_feedback(&path)).font_size(14.0),
                 hstack! {
-                    Text::new(format!("Replace {}?",abbreviate(&path))).font_size(12.0),
-                    Button::new("Replace").on_click(move||yes.save(true,path.clone())),
                     Button::new("Cancel").on_click(move||no.confirm.set(None)),
-                }
-                .spacing(8.0),
-            )
+                    Button::new("Replace PNG").enabled(enabled).on_click(move||yes.save(true,path.clone())),
+                }.spacing(8.0),
+            }.spacing(6.0).alignment(Alignment::Leading).padding(10.0).background(Color::rgb(255,245,234)))
         } else {
             Either::B(Spacer::new().frame_height(0.0))
         };
         let guard = if self.guard.get() != 0 {
-            Either::A(hstack!{
-            Text::new("This screenshot has unsaved changes.").font_size(12.0),
-            Button::new("Discard").enabled(enabled).on_click(move || discard.discard_guard()),
-                Button::new("Cancel").on_click(move||keep.guard.set(0)),
-        }.spacing(8.0))
+            Either::A(hstack! {
+                Text::new("Keep this screenshot's unsaved changes?").font_size(14.0), Spacer::new(),
+                Button::new("Keep editing").on_click(move||keep.guard.set(0)),
+                Button::new("Discard").enabled(enabled).on_click(move || discard.discard_guard()),
+            }.spacing(8.0).padding(10.0).background(Color::rgb(255,245,234)))
         } else {
             Either::B(Spacer::new().frame_height(0.0))
         };
-        vstack!{
-            hstack!{
-                Button::new("Capture screen").enabled(enabled).on_click(move||capture.request_capture()),
-                Select::new(vec!["Select region".into(),"Draw arrow".into()],self.tool.clone()).width(160.0).enabled(enabled&&has_image),
-                Button::new("Full screen").enabled(enabled&&has_image).on_click(move||{if let Some(p)=full.pixels.get(){full.selection.set(Some(p.full()));full.dirty.set(true);}}),
-                Button::new("Reset edits").enabled(enabled&&has_image).on_click(move||{if let Some(p)=reset.original.get(){reset.selection.set(Some(p.full()));reset.pixels.set(Some(p));reset.dirty.set(true);}}),
-            }.spacing(8.0),
-            CanvasView::new(760.0,440.0,Rc::new(move|bytes,w,h|paint.preview(bytes,w,h))).on_event(move|e|pointer.pointer(e)).focusable(self.canvas_focus.clone()).frame(f32::INFINITY,f32::INFINITY),
-            vstack!{
-                Text::new(self.selection.get().map(|r|format!("Region: {}, {} — {} × {} pixels",r.x,r.y,r.width,r.height)).unwrap_or_else(||"No capture yet".into())).font_size(12.0),
-                hstack!{Text::new("PNG path").font_size(12.0),TextField::new(self.path.clone()).frame(f32::INFINITY,32.0),Button::new("Save PNG").enabled(enabled&&has_image).on_click(move||save.save(false,save.path.get())),}.spacing(8.0),
-                confirmation,guard,
-                Text::new(self.status.get()).font_size(12.0).frame_height(36.0),
+        let preview = if has_image {
+            Either::A(
+                CanvasView::new(
+                    760.0,
+                    440.0,
+                    Rc::new(move |bytes, w, h| paint.preview(bytes, w, h)),
+                )
+                .on_event(move |e| pointer.pointer(e))
+                .focusable(self.canvas_focus.clone())
+                .frame(f32::INFINITY, f32::INFINITY)
+                .border(
+                    if self.canvas_focus.get() {
+                        palette.primary()
+                    } else {
+                        Color::rgb(220, 224, 229)
+                    },
+                    1.0,
+                ),
+            )
+        } else {
+            Either::B(vstack! {
+                Spacer::new(),
+                Text::new("Start with a screen capture").font_size(24.0),
+                Text::new(if cfg!(target_os = "scarlet") { "Capture screen hides this window briefly, then opens the image here." } else { "Live capture is available in Scarlet. This host can preview an explicit PNG fixture." }).font_size(14.0).color(secondary),
+                Text::new("Select a region, add arrows, and save a PNG.").font_size(14.0).color(secondary),
+                Spacer::new(),
+            }.spacing(10.0).padding(16.0).frame(f32::INFINITY,f32::INFINITY).background(Color::rgb(244,246,248)))
+        };
+        let feedback = wrap_feedback(&self.status.get());
+        let feedback_height = feedback.lines().count().max(1) as f32 * 19.0;
+        let provenance = if self.fixture.get() {
+            Either::A(
+                Text::new("PNG fixture preview · live capture is not in use")
+                    .font_size(14.0)
+                    .color(secondary),
+            )
+        } else {
+            Either::B(Spacer::new().frame_height(0.0))
+        };
+        vstack! {
+            vstack! {
+                hstack! {
+                    Button::new(if enabled { "Capture screen" } else { "Working…" }).enabled(enabled).on_click(move||capture.request_capture()),
+                    Select::new(vec!["Select region".into(),"Draw arrow".into()],self.tool.clone()).width(160.0).enabled(enabled&&has_image),
+                    Button::new("Select whole image").enabled(enabled&&has_image).on_click(move||{if let Some(p)=full.pixels.get(){full.selection.set(Some(p.full()));full.dirty.set(true);}}),
+                    Button::new("Reset edits").enabled(enabled&&has_image).on_click(move||{if let Some(p)=reset.original.get(){reset.selection.set(Some(p.full()));reset.pixels.set(Some(p));reset.dirty.set(true);}}),
+                    Spacer::new(),
+                    Text::new(self.selection.get().map(|r|format!("{} × {} px",r.width,r.height)).unwrap_or_default()).font_size(14.0).color(secondary),
+                }.spacing(8.0),
+                provenance,
+            }.spacing(6.0).alignment(Alignment::Leading),
+            preview,
+            vstack! {
+                hstack! {
+                    Text::new("Save as PNG").font_size(16.0), Spacer::new(),
+                    Text::new(self.selection.get().map(|r|format!("Selection at {}, {}",r.x,r.y)).unwrap_or_else(||"No image selected".into())).font_size(14.0).color(secondary),
+                },
+                hstack! { TextField::new(self.path.clone()).frame(f32::INFINITY,34.0), Button::new("Save PNG").enabled(enabled&&has_image).on_click(move||save.save(false,save.path.get())), }.spacing(8.0),
+                confirmation, guard,
+                Text::new(feedback).font_size(14.0).color(secondary).frame_height(feedback_height),
             }.spacing(8.0).alignment(Alignment::Leading),
-        }.spacing(12.0).padding(16.0).frame(f32::INFINITY,f32::INFINITY).on_event_capture(move |event| keys.shortcut(event))
+        }.spacing(14.0).padding(20.0).frame(f32::INFINITY,f32::INFINITY).on_event_capture(move |event| keys.shortcut(event))
     }
     fn preview(&self, bytes: &mut [u8], w: u32, h: u32) {
         self.runtime.get().lock().unwrap().viewport = (w, h);
         for pixel in bytes.chunks_exact_mut(4) {
-            pixel.copy_from_slice(&[236, 236, 236, 255]);
+            pixel.copy_from_slice(&[235, 230, 225, 255]);
         }
         let Some(image) = self.pixels.get() else {
             return;
@@ -295,7 +345,7 @@ impl ScreenshotApp {
                 (oy + r.y as f64 * scale) as i32,
                 (r.width as f64 * scale).max(1.0) as u32,
                 (r.height as f64 * scale).max(1.0) as u32,
-                Color::rgb(235, 45, 35),
+                Color::rgb(30, 105, 215),
             );
         }
     }
@@ -311,21 +361,46 @@ fn fit(iw: u32, ih: u32, w: u32, h: u32) -> Option<(f64, f64, f64)> {
         ((h as f64 - ih as f64 * scale) / 2.0).floor(),
     ))
 }
-fn abbreviate(text: &str) -> String {
-    if text.chars().count() > 65 {
-        format!(
-            "…{}",
-            text.chars()
-                .rev()
-                .take(64)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<String>()
-        )
-    } else {
-        text.into()
+// Preserve complete failure and destination text, including unbroken paths.
+fn wrap_feedback(text: &str) -> String {
+    let mut output = String::new();
+    let mut line = String::new();
+    for original in text.split('\n') {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        for word in original.split_whitespace() {
+            let candidate = if line.is_empty() {
+                word.to_string()
+            } else {
+                format!("{line} {word}")
+            };
+            if !line.is_empty() && scarlet_ui::measure_text_sized(&candidate, 14.0).0 as f32 > 690.0
+            {
+                output.push_str(&line);
+                output.push('\n');
+                line.clear();
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            for ch in word.chars() {
+                let mut candidate = line.clone();
+                candidate.push(ch);
+                if !line.is_empty()
+                    && scarlet_ui::measure_text_sized(&candidate, 14.0).0 as f32 > 690.0
+                {
+                    output.push_str(&line);
+                    output.push('\n');
+                    line.clear();
+                }
+                line.push(ch);
+            }
+        }
+        output.push_str(&line);
+        line.clear();
     }
+    output
 }
 impl Application for ScreenshotApp {
     fn scenes(&self) -> impl Scene {
@@ -366,7 +441,7 @@ impl Application for ScreenshotApp {
             }
             #[cfg(not(target_os = "scarlet"))]
             {
-                shared.lock().unwrap().result=Some(ResultMessage::Capture(Err("Screen capture requires the Scarlet SWS session. Host preview can inspect an explicit PNG fixture via --preview FILE.".into())));
+                shared.lock().unwrap().result=Some(ResultMessage::Capture(Err("Screen capture is available in Scarlet. On this host, open a PNG fixture with --preview FILE.".into())));
             }
         }
         if restore {
@@ -384,6 +459,7 @@ impl Application for ScreenshotApp {
                     match result {
                         Ok(image) => {
                             self.install(image);
+                            self.fixture.set(false);
                             self.status.set(
                                 "Captured. Select a region or annotate, then save PNG.".into(),
                             );
@@ -454,8 +530,9 @@ fn main() {
         {
             Ok(image) => {
                 app.install(image);
+                app.fixture.set(true);
                 app.status
-                    .set("Explicit PNG preview fixture — not a live screen capture".into());
+                    .set("Drag to select a region. Choose Draw arrow to annotate. Ctrl+S saves the selected region.".into());
             }
             Err(e) => {
                 eprintln!("Screenshot: {e}");
