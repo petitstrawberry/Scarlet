@@ -17,18 +17,14 @@ mod backend;
 mod model;
 use model::{Entry, Journal, MAX_RECORDS};
 
-fn summary_label(entry: &Entry) -> String {
-    // Keep the row readable at the minimum window width. Full original lines
-    // remain available in the horizontally scrollable detail pane.
-    let mut label = entry.summary();
-    const MAX_WIDTH: u32 = 592;
-    if scarlet_ui::graphics::measure_text_sized(&label, 12.0).0 <= MAX_WIDTH {
+fn fit_label(mut label: String, width: u32, size: f32) -> String {
+    if scarlet_ui::graphics::measure_text_sized(&label, size).0 <= width {
         return label;
     }
     while !label.is_empty() {
         label.pop();
         let shortened = format!("{label}…");
-        if scarlet_ui::graphics::measure_text_sized(&shortened, 12.0).0 <= MAX_WIDTH {
+        if scarlet_ui::graphics::measure_text_sized(&shortened, size).0 <= width {
             return shortened;
         }
     }
@@ -47,6 +43,7 @@ struct LogViewer {
     selected_row: State<Option<usize>>,
     focused: State<bool>,
     preview: State<bool>,
+    row_width: State<u32>,
 }
 
 impl LogViewer {
@@ -107,6 +104,8 @@ impl LogViewer {
         let refreshing = self.clone();
         let clearing = self.clone();
         let rows_app = self.clone();
+        let geometry = self.row_width.clone();
+        let row_width = self.row_width.get().max(480);
         let keys = self.clone();
         let status = if preview {
             "Static sample data — not system logs".to_owned()
@@ -122,58 +121,79 @@ impl LogViewer {
             "Paused — Refresh fetches once; Follow resumes updates".to_owned()
         };
         let list = if count == 0 {
-            Either::A(
-                Text::new(if journal.loading {
-                    "Loading logs…"
-                } else {
-                    "No matching records in this window."
-                })
-                .color(palette.text_secondary())
-                .alignment(Alignment::Center)
-                .frame(f32::INFINITY, f32::INFINITY),
-            )
+            Either::A(vstack! {
+                Spacer::new(),
+                Text::new(if journal.loading { "Loading logs…" } else if journal.error.is_some() { "Journal unavailable" }
+                    else if journal.entries.is_empty() { "No records to show" } else { "No matching records" }).font_size(19.0),
+                Text::new(if journal.error.is_some() { "Live system logs require a running Scarlet journal." }
+                    else if preview && journal.entries.is_empty() { "Sample records cleared. Reopen the preview to reload." }
+                    else if journal.entries.is_empty() { "New records appear here while Follow is enabled." }
+                    else { "Try a different search or choose All priorities." }).font_size(12.0).color(palette.text_secondary()),
+                Spacer::new(),
+            }.spacing(10.0).frame(f32::INFINITY, f32::INFINITY))
         } else {
             Either::B(
                 ListView::new(
                     self.visible.clone(),
                     self.selected_row.clone(),
-                    36.0,
+                    64.0,
                     move |index, entry: Entry, selected| {
                         let selection = rows_app.selected.clone();
                         let selected_row = rows_app.selected_row.clone();
                         let palette = ColorPalette::default();
-                        Button::new(summary_label(&entry))
-                            .font_size(12.0)
-                            .background_color(if selected == Some(index) {
-                                palette.primary()
-                            } else {
-                                palette.background()
-                            })
-                            .text_color(if selected == Some(index) {
-                                palette.text_inverse()
-                            } else if entry.priority <= 3 {
-                                palette.error()
-                            } else {
-                                palette.text()
-                            })
-                            .on_click(move || {
-                                selection.set(Some(entry.clone()));
-                                selected_row.set(Some(index));
-                            })
-                            .frame(f32::INFINITY, 32.0)
+                        let is_selected = selected == Some(index);
+                        let row = entry.clone();
+                        let choose = move || {
+                            selection.set(Some(entry.clone()));
+                            selected_row.set(Some(index));
+                        };
+                        let message = fit_label(row.message.split_whitespace().collect::<Vec<_>>().join(" "), row_width.saturating_sub(104), 12.0);
+                        hstack! {
+                            vstack! {
+                                hstack! {
+                                    Text::new(fit_label(format!("{} · PID {}", row.unit, row.pid), row_width.saturating_sub(255), 13.0)).font_size(13.0),
+                                    Spacer::new(),
+                                    Text::new(row.priority_name).font_size(11.0).color(if row.priority <= 3 { palette.error() } else { palette.text_secondary() }),
+                                    Text::new(format!("{}.{:03}s", row.monotonic_ns / 1_000_000_000, row.monotonic_ns / 1_000_000 % 1000)).font_size(11.0).color(palette.text_secondary()),
+                                }.spacing(12.0).frame_width(f32::INFINITY),
+                                Text::new(message).font_size(12.0).color(palette.text_secondary()),
+                            }.spacing(5.0).alignment(Alignment::Leading).frame_width(f32::INFINITY),
+                            Button::new(if is_selected { "Open" } else { "View" }).font_size(12.0)
+                                .background_color(if is_selected { palette.primary() } else { palette.surface_variant() })
+                                .text_color(if is_selected { palette.text_inverse() } else { palette.text() })
+                                .on_click(choose.clone()).frame(54.0, 30.0),
+                        }.spacing(12.0).padding(10.0).frame(f32::INFINITY, 60.0)
+                            .background(if is_selected { palette.surface_variant() } else { palette.background() })
+                            .on_click(choose)
                     },
                 )
                 .item_key(|entry| format!("{}:{}", entry.boot_id, entry.sequence).into())
-                .frame(f32::INFINITY, f32::INFINITY),
+                .frame(f32::INFINITY, f32::INFINITY)
+                .on_geometry_change(|layout| layout.size().width.max(0.0) as u32, move |width| geometry.set(width)),
             )
         };
-        let detail = self.selected.get().map_or_else(
-            || "Select a record to inspect its message.".into(),
-            |entry| entry.details(),
-        );
+        let detail = if let Some(entry) = self.selected.get() {
+            Either::A(vstack! {
+                Text::new("RECORD DETAILS").font_size(10.0).color(palette.text_secondary()),
+                ScrollView::new(Text::new(entry.details()).font_size(13.0)).both_axes().frame(f32::INFINITY, 124.0),
+            }.spacing(8.0).alignment(Alignment::Leading).padding(12.0).frame_width(f32::INFINITY).background(palette.surface_variant()))
+        } else {
+            Either::B(
+                Text::new("Choose a record to read its full message.")
+                    .font_size(12.0)
+                    .color(palette.text_secondary())
+                    .alignment(Alignment::Leading)
+                    .padding(12.0)
+                    .frame(f32::INFINITY, 42.0)
+                    .background(palette.surface_variant()),
+            )
+        };
         vstack! {
             hstack! {
-                Text::new("System Logs").font_size(22.0),
+                vstack! {
+                    Text::new("System Logs").font_size(22.0),
+                    Text::new(if preview { "SAMPLE PREVIEW" } else { "CURRENT BOOT" }).font_size(10.0).color(palette.text_secondary()),
+                }.spacing(2.0).alignment(Alignment::Leading),
                 Spacer::new(),
                 Text::new("Follow").font_size(13.0),
                 Toggle::new(self.follow.clone()).enabled(!preview),
@@ -184,11 +204,11 @@ impl LogViewer {
                 TextField::new(self.filter.clone()).placeholder("Filter unit, PID or message").frame_width(f32::INFINITY),
                 Select::new(vec!["All priorities".into(), "Warnings + errors".into(), "Errors".into()], self.priority.clone()).width(180.0),
             }.spacing(12.0),
-            Text::new(status).font_size(12.0).color(if journal.error.is_some() { palette.error() } else { palette.text_secondary() }),
-            list,
+            Text::new(status).font_size(12.0).color(if journal.error.is_some() { palette.error() } else { palette.text_secondary() })
+                .alignment(Alignment::Leading).frame(f32::INFINITY, 20.0),
             Divider::new(),
-            ScrollView::new(Text::new(detail).font_size(13.0).padding(8.0)).both_axes()
-                .frame(f32::INFINITY, 145.0),
+            list,
+            detail,
             Text::new(format!("{} matching / {} retained · latest {} records · newest first", count, journal.entries.len(), MAX_RECORDS))
                 .font_size(11.0).color(palette.text_secondary()),
             Text::new("Ctrl+Space: follow/pause   Ctrl+R: refresh   Ctrl+L: clear this window")
@@ -365,6 +385,7 @@ fn main() -> ExitCode {
         selected_row: State::new(StateId::new(7), None),
         focused: State::new(StateId::new(8), true),
         preview: State::new(StateId::new(9), preview),
+        row_width: State::new(StateId::new(10), 600),
     };
     start_updates(&app);
     match app.run() {
