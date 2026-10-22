@@ -82,6 +82,8 @@ impl CalendarApp {
                         .font_size(16.0)
                         .background_color(if selected {
                             palette.primary()
+                        } else if is_today {
+                            palette.surface_variant()
                         } else {
                             palette.background()
                         })
@@ -93,13 +95,13 @@ impl CalendarApp {
                         .border_color(if is_today {
                             palette.primary()
                         } else {
-                            palette.divider()
+                            Color::CLEAR
                         })
                         .on_click(move || state.set(date))
-                        .frame(f32::INFINITY, 36.0),
+                        .frame(f32::INFINITY, f32::INFINITY),
                 )
             }
-            None => Either::B(Spacer::new().frame(f32::INFINITY, 36.0)),
+            None => Either::B(Spacer::new().frame(f32::INFINITY, f32::INFINITY)),
         }
     }
 
@@ -109,7 +111,7 @@ impl CalendarApp {
             self.cell(dates[3]), self.cell(dates[4]), self.cell(dates[5]), self.cell(dates[6]),
         }
         .spacing(4.0)
-        .frame_width(f32::INFINITY)
+        .frame(f32::INFINITY, f32::INFINITY)
     }
 
     fn content(&self) -> impl View + Clone + use<> {
@@ -120,18 +122,17 @@ impl CalendarApp {
         let current = self.clone();
         let keys = self.clone();
         let palette = ColorPalette::default();
-        let today_label = match self.today.get() {
-            Some(date) => format!("Today: {}", date.label()),
-            None => "System date unavailable".to_owned(),
-        };
+        let is_today = self.today.get() == Some(selected);
         vstack! {
-            Text::new(selected.month_title()).font_size(24.0),
             hstack! {
-                Button::new("Previous").on_click(move || previous.move_month(-1)).frame_width(100.0),
-                Button::new("Today").on_click(move || current.go_today()).frame_width(100.0),
-                Button::new("Next").on_click(move || next.move_month(1)).frame_width(100.0),
-            }.spacing(12.0),
-            Text::new(today_label).font_size(12.0).color(palette.text_secondary()),
+                Text::new(selected.month_title()).font_size(24.0),
+                Spacer::new(),
+                Button::new("Today").font_size(12.0).enabled(self.today.get().is_some())
+                    .on_click(move || current.go_today()).frame(58.0, 34.0),
+                Button::new("‹").font_size(22.0).on_click(move || previous.move_month(-1)).frame(32.0, 34.0),
+                Button::new("›").font_size(22.0).on_click(move || next.move_month(1)).frame(32.0, 34.0),
+            }.spacing(6.0).frame_width(f32::INFINITY),
+            Divider::new(),
             hstack! {
                 weekday("Mon"), weekday("Tue"), weekday("Wed"), weekday("Thu"),
                 weekday("Fri"), weekday("Sat"), weekday("Sun"),
@@ -140,12 +141,14 @@ impl CalendarApp {
                 self.week(&cells[0..7]), self.week(&cells[7..14]),
                 self.week(&cells[14..21]), self.week(&cells[21..28]),
                 self.week(&cells[28..35]), self.week(&cells[35..42]),
-            }.spacing(4.0).frame_width(f32::INFINITY),
-            Text::new(format!("Selected: {}", selected.label())).font_size(14.0),
-            Spacer::new(),
-            Text::new("Arrows: day/week   PgUp/PgDn: month   T: today").font_size(11.0).color(palette.text_secondary()),
-            Text::new(format!("Shift+PgUp/PgDn: year   •   {}", time::zone_label())).font_size(11.0).color(palette.text_secondary()),
-        }.spacing(10.0).padding(18.0)
+            }.spacing(4.0).frame(f32::INFINITY, f32::INFINITY),
+            vstack! {
+                Text::new(if is_today { "TODAY" } else { "SELECTED DATE" }).font_size(10.0).color(palette.text_secondary()),
+                Text::new(selected.label()).font_size(15.0),
+            }.spacing(6.0).alignment(Alignment::Leading).padding(14.0).frame_width(f32::INFINITY).background(palette.surface_variant()),
+            Text::new("Arrows  day / week    PgUp / PgDn  month    T  today").font_size(10.0).color(palette.text_secondary()),
+            Text::new(if self.today.get().is_none() { "System date unavailable".into() } else { time::zone_label() }).font_size(10.0).color(palette.text_secondary()),
+        }.spacing(12.0).padding(18.0)
             .frame(f32::INFINITY, f32::INFINITY)
             .focusable(self.focused.clone())
             .on_key(move |event| keys.handle_key(event))
