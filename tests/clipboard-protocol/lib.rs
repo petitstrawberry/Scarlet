@@ -1,6 +1,8 @@
 //! Tests the production session store independently of compositor/GPU hardware.
 #[path = "../../user/std-bin/src/sws/clipboard.rs"]
 pub mod clipboard;
+#[path = "../../user/std-bin/src/sws/window_title.rs"]
+mod window_title;
 
 #[cfg(test)]
 mod tests {

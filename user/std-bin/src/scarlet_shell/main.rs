@@ -3250,7 +3250,7 @@ impl Application for ShellApp {
         ])
     }
 
-    fn on_focus_changed(&mut self, window_id: u32, app_name: &str, menu_titles: &str) {
+    fn on_focus_changed_with_title(&mut self, window_id: u32, app_name: &str, title: &str, menu_titles: &str) {
         status_bar_debug!(
             "[StatusBar] on_focus_changed: window_id={}, app_name={}, menu_titles={}",
             window_id,
@@ -3267,7 +3267,7 @@ impl Application for ShellApp {
             self.control_center_armed_power.set(None);
         }
         let (resolved_menu_titles, menu_changed) = self.resolve_menu_titles(window_id, menu_titles);
-        self.update_menu_for_app(window_id, app_name, &resolved_menu_titles, menu_changed);
+        self.update_menu_for_app(window_id, app_name, title, &resolved_menu_titles, menu_changed);
     }
 
     fn on_window_created(&mut self, ctx: &WindowContext, window: &mut dyn PlatformWindow) {
@@ -3300,7 +3300,7 @@ impl Application for ShellApp {
         true
     }
 
-    fn on_active_app_changed(&mut self, window_id: u32, app_name: &str, menu_titles: &str) {
+    fn on_active_app_changed_with_title(&mut self, window_id: u32, app_name: &str, title: &str, menu_titles: &str) {
         if let Some(window) = self
             .windows
             .get()
@@ -3322,7 +3322,7 @@ impl Application for ShellApp {
             menu_titles
         );
         let (resolved_menu_titles, menu_changed) = self.resolve_menu_titles(window_id, menu_titles);
-        self.update_menu_for_app(window_id, app_name, &resolved_menu_titles, menu_changed);
+        self.update_menu_for_app(window_id, app_name, title, &resolved_menu_titles, menu_changed);
     }
 
     fn on_window_resize(&mut self, ctx: &WindowContext, width: u32, height: u32) {
@@ -4243,6 +4243,7 @@ impl ShellApp {
         &mut self,
         window_id: u32,
         app_name: &str,
+        title: &str,
         menu_titles: &str,
         menu_changed: bool,
     ) {
@@ -4285,11 +4286,16 @@ impl ShellApp {
         // active application changes, ACTIVE_APP_CHANGED. The payloads are
         // intentionally equivalent for StatusBar, so rebuilding the full menu
         // tree twice only adds latency and an avoidable redraw.
-        if self.active_window_id.get() == window_id && !menu_changed {
+        let label = if title.is_empty() { app_name } else { title };
+        let displayed_label = menu_bar_label(label);
+        let same_label = self.menu_tree.get().items.iter()
+            .find(|item| item.id == "system_app")
+            .is_some_and(|item| item.title == displayed_label);
+        if self.active_window_id.get() == window_id && !menu_changed && same_label {
             return;
         }
 
-        let tree = build_menu_tree(app_name, menu_titles);
+        let tree = build_menu_tree(label, menu_titles);
         status_bar_debug!(
             "[StatusBar] Built menu tree with {} items",
             tree.items.len()
@@ -4353,6 +4359,29 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn live_document_titles_refresh_same_window_and_survive_focus_changes() {
+        use scarlet_ui::Application;
+        let mut app = super::ShellApp::new(super::ShellLayout::from_tablet_mode(Some(false)));
+        let app_label = |app: &super::ShellApp| app.menu_tree.get().items.into_iter()
+            .find(|item| item.id == "system_app").unwrap().title;
+        app.on_focus_changed_with_title(7, "Notepad", "Untitled — Notepad", "File|Edit");
+        for title in ["fixture.txt — Notepad", "saved.txt — Notepad", "Untitled — Notepad"] {
+            app.on_active_app_changed_with_title(7, "Notepad", title, "File|Edit");
+            assert_eq!(app_label(&app), super::menu_bar_label(title));
+        }
+        // Identical metadata must not close a currently open application menu.
+        app.open_menu_index.set(Some(2));
+        app.on_active_app_changed_with_title(7, "Notepad", "Untitled — Notepad", "File|Edit");
+        assert_eq!(app.open_menu_index.get(), Some(2));
+        app.on_focus_changed_with_title(8, "Files", "Documents", "File");
+        assert_eq!(app_label(&app), "Documents");
+        app.on_focus_changed_with_title(7, "Notepad", "saved.txt — Notepad", "File|Edit");
+        assert_eq!(app_label(&app), super::menu_bar_label("saved.txt — Notepad"));
+        app.on_active_app_changed_with_title(7, "Notepad", "", "File|Edit");
+        assert_eq!(app_label(&app), "Notepad");
+    }
+
     use super::{
         ControlCenterPresentation, HOME_BUTTON_WIDTH, HomeApplication, LEADING_CONTROLS_SPACING,
         MENU_BAR_OUTER_PADDING, MenuTree, OVERVIEW_NAVIGATION_ROWS, OVERVIEW_SEPARATOR_HEIGHT,

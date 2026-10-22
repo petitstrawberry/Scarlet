@@ -27,6 +27,62 @@ const COMMIT: [u8; 44] = [
 ];
 
 #[test]
+fn live_window_title_uses_existing_opcode_and_validated_utf8() {
+    assert_eq!(client_msg::SET_WINDOW_TITLE, 3);
+    let title = "日本語.txt — Notepad";
+    let payload = sws_protocol::payload_set_window_title(42, title.as_bytes());
+    assert_eq!(
+        parse_client_message(client_msg::SET_WINDOW_TITLE, &payload).unwrap(),
+        ClientMessageRef::SetWindowTitle { window_id: 42, title: title.as_bytes() }
+    );
+    for invalid in [
+        sws_protocol::payload_set_window_title(42, &[0xff]),
+        sws_protocol::payload_set_window_title(42, &vec![b'x'; 4097]),
+        vec![42, 0, 0, 0, 255, 255, 255, 255],
+    ] {
+        assert_eq!(
+            parse_client_message(client_msg::SET_WINDOW_TITLE, &invalid),
+            Err(ProtocolError::MalformedPayload)
+        );
+    }
+    assert!(parse_client_message(client_msg::SET_WINDOW_TITLE,
+        &sws_protocol::payload_set_window_title(42, &vec![b'x'; 4096])).is_ok());
+    assert!(parse_client_message(client_msg::SET_WINDOW_TITLE,
+        &sws_protocol::payload_set_window_title(42, b"")).is_ok());
+}
+
+#[test]
+fn active_window_metadata_preserves_application_name_and_updated_document_title() {
+    for title in ["fixture.txt — Notepad", "保存.txt — Notepad", "Untitled — Notepad"] {
+        let payload = sws_protocol::payload_active_app_changed(
+            42, b"org.scarlet-os.notepad", b"Notepad", title.as_bytes(), b"File|Edit"
+        );
+        let ServerMessage::ActiveAppChanged { window_id, app_name, app_name_len, title: parsed_title,
+            title_len, .. } = parse_server_message(server_msg::ACTIVE_APP_CHANGED, &payload).unwrap()
+        else { panic!("wrong metadata event") };
+        assert_eq!(window_id, 42);
+        assert_eq!(&app_name[..app_name_len as usize], b"Notepad");
+        assert_eq!(&parsed_title[..title_len as usize], title.as_bytes());
+    }
+}
+
+#[test]
+fn title_notifications_clip_long_unicode_at_complete_character_boundaries() {
+    let title = "日".repeat(100);
+    for kind in [server_msg::FOCUS_CHANGED, server_msg::ACTIVE_APP_CHANGED] {
+        let payload = sws_protocol::payload_focus_changed(42, b"editor", b"Editor", title.as_bytes(), b"File");
+        let parsed = parse_server_message(kind, &payload).unwrap();
+        let (bytes, len) = match parsed {
+            ServerMessage::FocusChanged { title, title_len, .. }
+            | ServerMessage::ActiveAppChanged { title, title_len, .. } => (title, title_len),
+            _ => panic!("wrong metadata event"),
+        };
+        assert_eq!(len, 255);
+        assert_eq!(core::str::from_utf8(&bytes[..len as usize]).unwrap(), "日".repeat(85));
+    }
+}
+
+#[test]
 fn request_routing_has_a_fixed_eight_byte_header() {
     assert_eq!(MessageHeader::SIZE, 8);
     assert_eq!(MessageHeader::FLAG_IS_RESPONSE, 1);
