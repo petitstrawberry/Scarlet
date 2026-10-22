@@ -71,37 +71,49 @@ pub fn initialize_fonts() {
 }
 
 pub fn icon(name: &str) -> Icon {
-    match name {
-        "apps" => Icon::Package,
-        "applications-development" | "code" => Icon::Code,
-        "file-description" => Icon::FileDescription,
-        "file-music" => Icon::FileMusic,
-        "folder" => Icon::Folder,
-        "image" => Icon::Photo,
-        "preferences-system" => Icon::Settings,
-        "preferences-system-time" => Icon::Clock,
-        "text-editor" => Icon::FileText,
-        "utilities-system-monitor" => Icon::ChartBar,
-        "utilities-terminal" => Icon::Terminal,
-        "video" | "multimedia-player" => Icon::Video,
-        _ => Icon::Apps,
-    }
+    icon_style(name).0
 }
 
 pub fn icon_tile_color(name: &str) -> Color {
+    icon_style(name).1
+}
+
+pub fn catalog_icon<'a>(app_id: &str, name: &'a str) -> &'a str {
+    // Older external bundles still advertise the generic launcher icon.
+    // Respect a real icon supplied by a newer bundle or by the user.
+    match (app_id, name) {
+        ("org.scarlet-os.moonlight", "apps" | "application-x-executable" | "") => "moonlight",
+        _ => name,
+    }
+}
+
+// Resolve the catalog's theme names to ScarletUI's native Tabler vectors.
+// Keep each glyph and accent together so launcher tiles and console covers
+// cannot disagree about an application's identity.
+fn icon_style(name: &str) -> (Icon, Color) {
     match name {
-        "apps" => Color::rgb(186, 95, 43),
-        "applications-development" | "code" => Color::rgb(47, 94, 174),
-        "file-description" => Color::rgb(28, 119, 126),
-        "file-music" => Color::rgb(152, 62, 161),
-        "folder" => Color::rgb(46, 112, 190),
-        "image" => Color::rgb(180, 62, 121),
-        "preferences-system" => Color::rgb(84, 96, 119),
-        "preferences-system-time" => Color::rgb(195, 76, 54),
-        "text-editor" => Color::rgb(31, 132, 103),
-        "utilities-system-monitor" => Color::rgb(25, 128, 139),
-        "utilities-terminal" => Color::rgb(68, 78, 96),
-        "video" | "multimedia-player" => Color::rgb(103, 70, 177),
-        _ => Color::rgb(184, 55, 79),
+        "accessories-calculator" => (Icon::Calculator, Color::rgb(182, 107, 32)),
+        "accessories-character-map" => (Icon::Language, Color::rgb(126, 79, 164)),
+        "application-x-executable" | "apps" => (Icon::Package, Color::rgb(186, 95, 43)),
+        "applications-development" | "code" => (Icon::Code, Color::rgb(47, 94, 174)),
+        "applications-games" => (Icon::Building, Color::rgb(73, 128, 71)),
+        "applications-graphics" => (Icon::Palette, Color::rgb(166, 72, 61)),
+        "camera-photo" => (Icon::Camera, Color::rgb(38, 122, 151)),
+        "file-description" | "text-x-generic" => (Icon::FileDescription, Color::rgb(28, 119, 126)),
+        "file-music" => (Icon::FileMusic, Color::rgb(152, 62, 161)),
+        "folder" => (Icon::Folder, Color::rgb(46, 112, 190)),
+        "games" => (Icon::Map, Color::rgb(64, 119, 83)),
+        "image" => (Icon::Photo, Color::rgb(180, 62, 121)),
+        "layout-grid" => (Icon::LayoutGrid, Color::rgb(68, 103, 167)),
+        "moonlight" => (Icon::Moon, Color::rgb(65, 91, 158)),
+        "preferences-system" => (Icon::Settings, Color::rgb(84, 96, 119)),
+        "preferences-system-time" => (Icon::Clock, Color::rgb(195, 76, 54)),
+        "text-editor" => (Icon::FileText, Color::rgb(31, 132, 103)),
+        "utilities-system-monitor" => (Icon::ChartBar, Color::rgb(25, 128, 139)),
+        "utilities-terminal" => (Icon::Terminal, Color::rgb(68, 78, 96)),
+        "video" | "multimedia-player" => (Icon::Video, Color::rgb(103, 70, 177)),
+        "web-browser" => (Icon::Network, Color::rgb(38, 113, 158)),
+        "x-office-calendar" => (Icon::Calendar, Color::rgb(174, 60, 81)),
+        _ => (Icon::Apps, Color::rgb(184, 55, 79)),
     }
 }

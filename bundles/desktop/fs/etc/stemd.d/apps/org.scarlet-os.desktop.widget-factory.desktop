@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Widget Factory
 Exec=/bin/widget-factory
-Icon=applications-development
+Icon=layout-grid
 X-Scarlet-Background=/share/app-art/widget-factory-cover.png
 X-Scarlet-BackgroundBlur=label
 Type=Application

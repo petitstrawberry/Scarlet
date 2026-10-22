@@ -92,11 +92,11 @@ const CONSOLE_CHROME_SCENE_KEY: &str = "console-chrome";
 const HOME_CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const HOME_CATALOG_TIMEOUT_MS: u64 = 3_000;
 const HOME_SEARCH_RESULT_ROW_HEIGHT: f32 = 64.0;
-const HOME_GRID_CELL_WIDTH: f32 = 116.0;
-const HOME_GRID_COLUMN_SPACING: f32 = 14.0;
+const HOME_GRID_CELL_WIDTH: f32 = 128.0;
+const HOME_GRID_COLUMN_SPACING: f32 = 20.0;
 const HOME_GRID_ICON_SIZE: u16 = 45;
 const HOME_GRID_ICON_PADDING: f32 = 12.5;
-const HOME_GRID_LABEL_SIZE: f32 = 16.0;
+const HOME_GRID_LABEL_SIZE: f32 = 13.0;
 const HOME_DRAWER_RESULTS_SPACING: f32 = 20.0;
 const HOME_BACKDROP_TINT: Color = Color::rgba_f32(0.30, 0.34, 0.41, 0.78);
 const STATUS_NAVIGATION_HOVER: Color = Color::rgba_f32(0.0, 0.0, 0.0, 0.24);
@@ -1983,7 +1983,7 @@ fn build_overview_button(
     overview_page: State<usize>,
 ) -> Button {
     Button::new(label)
-        .font_size(15.0)
+        .font_size(13.0)
         .padding(10.0)
         .on_click(move || {
             if open_menu_index.get() == Some(OVERVIEW_MENU_INDEX) {
@@ -2360,7 +2360,7 @@ fn load_home_applications(artwork_cache: &mut app_artwork::ArtworkCache) -> Vec<
         applications.push(HomeApplication {
             app_id: app_id.clone(),
             name: name.clone(),
-            icon: icon.clone(),
+            icon: home_style::catalog_icon(app_id, icon).to_owned(),
             artwork,
         });
     }
@@ -2427,10 +2427,14 @@ fn filter_home_applications(applications: &[HomeApplication], query: &str) -> Ve
         .collect()
 }
 
+fn home_drawer_padding(width: f32) -> f32 {
+    if width < 720.0 { 16.0 } else { 20.0 }
+}
+
 fn home_grid_columns(width: f32) -> usize {
-    let horizontal_padding = if width < 720.0 { 20.0 } else { 48.0 };
-    let drawer_padding = if width < 720.0 { 16.0 } else { 24.0 };
-    let available_width = (width - horizontal_padding * 2.0 - drawer_padding * 2.0).max(1.0);
+    // Use the same usable width as the rendered drawer. Extra invisible
+    // margins would unnecessarily drop a column on narrow displays.
+    let available_width = (width - home_drawer_padding(width) * 2.0).max(1.0);
     (((available_width + HOME_GRID_COLUMN_SPACING)
         / (HOME_GRID_CELL_WIDTH + HOME_GRID_COLUMN_SPACING)) as usize)
         .clamp(1, 6)
@@ -2868,7 +2872,7 @@ impl ShellApp {
         let icon_tile_size = HOME_GRID_ICON_SIZE as f32 + HOME_GRID_ICON_PADDING * 2.0;
         let label_height =
             graphics::measure_text_sized(&application.name, HOME_GRID_LABEL_SIZE).1 as f32;
-        let label_gap = 4.0;
+        let label_gap = 6.0;
         let outer_padding =
             ((row_height - icon_tile_size - label_gap - label_height) * 0.5).max(0.0);
         let hover_state = self.home_hovered.clone();
@@ -2927,10 +2931,10 @@ impl ShellApp {
             home_style::launcher_icon(&application.artwork, &application.icon, 26, 8.0, 11.0),
             hstack! {
                 Text::new(application.name)
-                    .font_size(15.0)
+                    .font_size(13.0)
                     .color(palette.text()),
                 Text::new(application.app_id)
-                    .font_size(13.0)
+                    .font_size(11.0)
                     .color(palette.text_secondary())
                     .padding_insets(EdgeInsets {
                         top: 0.0,
@@ -2942,10 +2946,10 @@ impl ShellApp {
             .spacing(8.0),
             Spacer::new(),
             Text::new("Application")
-                .font_size(13.0)
+                .font_size(11.0)
                 .color(palette.text_secondary()),
         }
-        .spacing(14.0)
+        .spacing(18.0)
         .alignment(Alignment::Center)
         .padding(12.0)
         .frame(f32::INFINITY, HOME_SEARCH_RESULT_ROW_HEIGHT)
@@ -2967,7 +2971,7 @@ impl ShellApp {
         let presentation = self.shell_presentation();
         let shell_state_ready = self.workspace_state.get().is_some();
         let shell_visible = shell_state_ready && presentation != sws::ShellPresentation::Workspace;
-        let drawer_padding = if width < 720.0 { 16.0 } else { 24.0 };
+        let drawer_padding = home_drawer_padding(width);
         let columns = home_grid_columns(width);
         let row_height = if height < 760.0 { 110.0 } else { 116.0 };
         let bar_height = shell_layout.status_bar_height() as f32;
@@ -3029,7 +3033,7 @@ impl ShellApp {
             },
         )
         .spacing(HOME_GRID_COLUMN_SPACING)
-        .row_spacing(14.0)
+        .row_spacing(18.0)
         .minimum_cell_width(96.0)
         .frame(app_grid_width, grid_height);
         let centered_grid = hstack! {
@@ -3086,7 +3090,7 @@ impl ShellApp {
             )
             .placeholder("Search applications")
             .blur_on_empty(true)
-            .font_size(14.0)
+            .font_size(13.0)
             .padding(8.0)
             .background_color(search_palette.window_background().with_opacity(0.86))
             .border_color(search_palette.divider().with_opacity(0.65))
@@ -3140,7 +3144,7 @@ impl ShellApp {
         let drawer_body = vstack! {
             hstack! {
                 Text::new("Applications")
-                    .font_size(16.0)
+                    .font_size(14.0)
                     .color(palette.text())
                     .alignment(Alignment::Leading)
                     .frame(drawer_header_side_width, drawer_header_height),

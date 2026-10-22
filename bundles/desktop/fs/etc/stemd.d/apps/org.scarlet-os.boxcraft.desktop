@@ -2,7 +2,7 @@
 Name=Boxcraft
 Comment=Explore and edit a voxel world
 Exec=/bin/boxcraft
-Icon=apps
+Icon=applications-games
 X-Scarlet-Background=/share/app-art/boxcraft-cover.png
 X-Scarlet-BackgroundBlur=label
 Type=Application

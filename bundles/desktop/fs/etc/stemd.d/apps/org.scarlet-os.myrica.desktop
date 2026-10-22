@@ -2,7 +2,7 @@
 Name=Myrica
 Comment=Browse the web
 Exec=/bin/myrica
-Icon=apps
+Icon=web-browser
 X-Scarlet-Background=/share/app-art/myrica-cover.png
 X-Scarlet-BackgroundBlur=label
 Type=Application
