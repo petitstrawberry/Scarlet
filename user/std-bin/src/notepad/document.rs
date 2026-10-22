@@ -4,7 +4,7 @@ mod fs_sync;
 #[path = "../desktop_utilities/native_fs.rs"]
 mod native_fs;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -116,6 +116,32 @@ impl Session {
     }
 }
 
+/// Bound disk input before allocating the editor's expanded layout/index caches.
+pub const MAX_OPEN_BYTES: u64 = 16 * 1024 * 1024;
+pub fn read_document(path: &Path) -> io::Result<String> {
+    let metadata = native_fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(io::Error::other("Only regular text files can be opened"));
+    }
+    if metadata.len() > MAX_OPEN_BYTES {
+        return Err(io::Error::other(
+            "Text files larger than 16 MiB are not supported",
+        ));
+    }
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_OPEN_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_OPEN_BYTES {
+        return Err(io::Error::other("Text file grew beyond the 16 MiB limit"));
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "The file is not valid UTF-8 text",
+        )
+    })
+}
+
 /// Stage replacements beside the destination; reserve new files exclusively.
 /// New files are visible while writing because native no-replace rename is unavailable.
 /// Existing symlinks keep their identity; save their resolved target instead.
@@ -186,6 +212,16 @@ fn save_staged(path: &Path, write: impl FnOnce(&mut fs::File) -> io::Result<()>)
     finish_or_cleanup(result, &temporary)
 }
 fn finish_or_cleanup(result: io::Result<()>, path: &Path) -> io::Result<()> {
+    #[cfg(target_os = "scarlet")]
+    {
+        return result.map_err(|error| {
+            io::Error::other(format!(
+                "{error}; partial output retained at {} (conditional unlink unavailable)",
+                path.display()
+            ))
+        });
+    }
+    #[cfg(not(target_os = "scarlet"))]
     match result {
         Ok(()) => Ok(()),
         Err(error) => match native_fs::remove_file(path) {
@@ -340,6 +376,29 @@ mod tests {
         );
         assert_eq!(replace_all(text, "", "x"), None);
         assert_eq!(replace_all(text, "absent", "x"), None);
+    }
+    #[test]
+    fn document_reads_reject_oversized_nonregular_and_invalid_utf8_inputs() {
+        let f = Fixture::new();
+        let path = f.0.join("read.txt");
+        fs::write(&path, "猫\ntext").unwrap();
+        assert_eq!(read_document(&path).unwrap(), "猫\ntext");
+        fs::write(&path, [0xff]).unwrap();
+        assert_eq!(
+            read_document(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_OPEN_BYTES + 1)
+            .unwrap();
+        assert!(
+            read_document(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("16 MiB")
+        );
+        assert!(read_document(&f.0).is_err());
     }
     #[test]
     fn staged_save_replaces_utf8_and_cleans_temporary() {
