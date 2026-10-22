@@ -3929,6 +3929,7 @@ impl ShellApp {
                 .is_ok_and(|capabilities| capabilities.supports_touch_input());
 
             let mut popup_surface_id: Option<u32> = None;
+            let mut popup_focus_observed = false;
             let mut popup_renderer: Option<ShellPopupRenderer> = None;
             let mut last_open_index: Option<usize> = None;
             let mut last_overview_windows: Vec<ShellWindow> = Vec::new();
@@ -4056,6 +4057,7 @@ impl ShellApp {
                                     ) {
                                         Ok(id) => {
                                             popup_surface_id = Some(id);
+                                            popup_focus_observed = false;
                                             popup_surface_id_popup.set(Some(id));
                                             if native_touch {
                                                 let _ = conn.set_touch_input(id, true);
@@ -4106,6 +4108,7 @@ impl ShellApp {
                             ..
                         } => {
                             if popup_surface_id_popup.get() == Some(window_id) {
+                                popup_focus_observed = true;
                                 continue;
                             }
                             if app_id == "org.scarlet-os.desktop.taskbar"
@@ -4114,7 +4117,12 @@ impl ShellApp {
                             {
                                 continue;
                             }
-                            open_menu_index_popup.set(None);
+                            // Destroying the previous popup queues a focus return
+                            // to its app. Do not let that older event close the
+                            // replacement before its own focus notification arrives.
+                            if popup_focus_observed {
+                                open_menu_index_popup.set(None);
+                            }
                         }
                         sws::event::Event::Input(input) => {
                             if Some(input.surface_id) != popup_surface_id {
