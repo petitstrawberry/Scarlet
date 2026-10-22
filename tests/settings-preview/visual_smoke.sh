@@ -20,8 +20,22 @@ done
 xdotool windowfocus --sync "$window"
 capture() {
     sleep .3
-    kill -0 "$app_pid"
-    timeout 10s import -window "$window" "$output/$1.png"
+    local candidate="$output/.$1.pending.png"
+    local deadline=$((SECONDS + 10))
+    # Winit can expose its X window before SGFX submits the first frame. Do not
+    # accept the uniform black startup surface as visual validation evidence.
+    while (( SECONDS < deadline )); do
+        kill -0 "$app_pid"
+        if timeout 2s import -window "$window" "$candidate" \
+            && [[ $(identify -format '%[fx:standard_deviation > 0]' "$candidate") == 1 ]]; then
+            mv "$candidate" "$output/$1.png"
+            return
+        fi
+        sleep .1
+    done
+    rm -f "$candidate"
+    echo "Timed out waiting for a rendered Settings frame: $1" >&2
+    return 1
 }
 capture appearance
 for item in 'display 95' 'cursor 135' 'audio 175' 'input 215' 'status 255' 'about 295'; do
