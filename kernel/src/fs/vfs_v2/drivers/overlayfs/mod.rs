@@ -37,8 +37,11 @@
 //!
 //! - Upper layer is required for write operations
 //! - Whiteout files follow the `.wh.filename` convention
+//! - Rename supports adjacent, single-link, pure-upper regular files on TmpFS.
+//!   Lower-backed sources, whiteouts, directory moves and backing mounts are
+//!   rejected; replacing a lower regular destination does not require copy-up.
 
-use crate::sync::IrqRwSpinLock;
+use crate::sync::{IrqRwSpinLock, Mutex, MutexGuard};
 use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::{
@@ -96,12 +99,41 @@ pub struct OverlayFS {
     /// Overlay inode identities are independent of backing filesystems and
     /// remain stable when a lower path is copied to the upper layer.
     inode_ids: Arc<IrqRwSpinLock<OverlayInodeIds>>,
+    /// Serialize backing namespace publication with overlay identity readers.
+    /// VFS's global NAMESPACE_MUTATIONS lock separately excludes mutations via
+    /// other aliases of the backing layers throughout the driver operation.
+    /// This must be sleepable: lower-layer lookup can perform I/O.
+    namespace: Arc<Mutex<()>>,
 }
 
 #[derive(Default)]
 struct OverlayInodeIds {
-    by_path: BTreeMap<String, u64>,
+    by_path: BTreeMap<String, Arc<OverlayInode>>,
     next_id: u64,
+}
+
+struct OverlayInode {
+    id: u64,
+    /// Regular files involved in rename retain their backing inode instead of
+    /// resolving their old pathname. All independently looked-up nodes share
+    /// this record; retired records die with their last retained node.
+    backing: IrqRwSpinLock<Option<OverlayBacking>>,
+}
+
+#[derive(Clone)]
+struct OverlayBacking {
+    node: Arc<dyn VfsNode>,
+    fs: Arc<dyn FileSystemOperations>,
+    writable: bool,
+}
+
+impl OverlayInode {
+    fn new(id: u64) -> Arc<Self> {
+        Arc::new(Self {
+            id,
+            backing: IrqRwSpinLock::new(None),
+        })
+    }
 }
 
 /// A composite node that represents a file/directory across overlay layers
@@ -112,10 +144,10 @@ struct OverlayInodeIds {
 ///
 /// ## Design
 ///
-/// Each OverlayNode represents a specific path in the overlay and delegates
-/// operations to the appropriate underlying filesystem layers. The node itself
-/// doesn't store file content but rather coordinates access to the real nodes
-/// in the upper and lower layers.
+/// Each OverlayNode initially resolves its path through the overlay layers.
+/// Regular files involved in rename share a retained backing-inode record, so
+/// their original path cannot redirect an old node to replacement content.
+/// Directories remain path-based and cannot be renamed by this driver.
 pub struct OverlayNode {
     /// Node name
     name: String,
@@ -126,17 +158,17 @@ pub struct OverlayNode {
     /// File type (resolved from layers)
     file_type: FileType,
     /// File ID
-    file_id: u64,
+    inode: Arc<OverlayInode>,
 }
 
 impl OverlayNode {
-    pub fn new(name: String, path: String, file_type: FileType, file_id: u64) -> Arc<Self> {
+    fn new(name: String, path: String, file_type: FileType, inode: Arc<OverlayInode>) -> Arc<Self> {
         Arc::new(Self {
             name,
             overlay_fs: IrqRwSpinLock::new(None),
             path,
             file_type,
-            file_id,
+            inode,
         })
     }
 
@@ -152,7 +184,7 @@ impl Clone for OverlayNode {
             overlay_fs: IrqRwSpinLock::new(None),
             path: self.path.clone(),
             file_type: self.file_type.clone(),
-            file_id: self.file_id,
+            inode: self.inode.clone(),
         };
 
         // Copy the overlay_fs reference if it exists
@@ -166,7 +198,7 @@ impl Clone for OverlayNode {
 
 impl VfsNode for OverlayNode {
     fn id(&self) -> u64 {
-        self.file_id
+        self.inode.id
     }
 
     fn filesystem(&self) -> Option<alloc::sync::Weak<dyn FileSystemOperations>> {
@@ -177,8 +209,17 @@ impl VfsNode for OverlayNode {
     }
 
     fn metadata(&self) -> Result<FileMetadata, FileSystemError> {
-        if let Some(ref fs) = *self.overlay_fs.read() {
-            fs.get_metadata_for_path(&self.path)
+        let fs = self.overlay_fs.read().clone();
+        if let Some(fs) = fs {
+            let _namespace = fs.lock_namespace()?;
+            let backing = self.inode.backing.read().clone();
+            if let Some(backing) = backing {
+                let mut metadata = backing.node.metadata()?;
+                metadata.file_id = self.inode.id;
+                Ok(metadata)
+            } else {
+                fs.get_metadata_for_path(&self.path)
+            }
         } else {
             Err(FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
@@ -188,8 +229,15 @@ impl VfsNode for OverlayNode {
     }
 
     fn read_link(&self) -> Result<String, FileSystemError> {
-        if let Some(ref fs) = *self.overlay_fs.read() {
-            fs.read_link_for_path(&self.path)
+        let fs = self.overlay_fs.read().clone();
+        if let Some(fs) = fs {
+            let _namespace = fs.lock_namespace()?;
+            let backing = self.inode.backing.read().clone();
+            if let Some(backing) = backing {
+                backing.node.read_link()
+            } else {
+                fs.read_link_for_path(&self.path)
+            }
         } else {
             Err(FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
@@ -233,7 +281,12 @@ impl OverlayFS {
         lower_layers: Vec<(Arc<MountPoint>, Arc<VfsEntry>)>,
         name: String,
     ) -> Result<Arc<Self>, FileSystemError> {
-        let root_node = OverlayNode::new("/".to_string(), "/".to_string(), FileType::Directory, 1);
+        let root_node = OverlayNode::new(
+            "/".to_string(),
+            "/".to_string(),
+            FileType::Directory,
+            OverlayInode::new(1),
+        );
         let overlay = Arc::new(Self {
             fs_id: FileSystemId::new(),
             upper,
@@ -244,26 +297,45 @@ impl OverlayFS {
                 by_path: BTreeMap::new(),
                 next_id: 2,
             })),
+            namespace: Arc::new(Mutex::new(())),
         });
         root_node.set_overlay_fs(overlay.clone());
         Ok(overlay)
     }
 
-    fn inode_for_path(&self, path: &str) -> u64 {
-        if path == "/" {
-            return 1;
+    fn lock_namespace(&self) -> Result<MutexGuard<'_, ()>, FileSystemError> {
+        if let Some(guard) = self.namespace.try_lock() {
+            return Ok(guard);
         }
-        if let Some(id) = self.inode_ids.read().by_path.get(path) {
-            return *id;
+        if !crate::sync::preemptible() {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::Busy,
+                "Overlay namespace operation would block with preemption disabled",
+            ));
+        }
+        Ok(self.namespace.lock())
+    }
+
+    fn inode_record(&self, path: &str) -> Arc<OverlayInode> {
+        if path == "/" {
+            return self.root_node.inode.clone();
+        }
+        if let Some(inode) = self.inode_ids.read().by_path.get(path) {
+            return inode.clone();
         }
         let mut ids = self.inode_ids.write();
-        if let Some(id) = ids.by_path.get(path) {
-            return *id;
+        if let Some(inode) = ids.by_path.get(path) {
+            return inode.clone();
         }
         let id = ids.next_id;
         ids.next_id = id.checked_add(1).expect("overlay inode IDs exhausted");
-        ids.by_path.insert(path.to_string(), id);
-        id
+        let inode = OverlayInode::new(id);
+        ids.by_path.insert(path.to_string(), inode.clone());
+        inode
+    }
+
+    fn inode_for_path(&self, path: &str) -> u64 {
+        self.inode_record(path).id
     }
 
     fn child_inode(&self, parent_path: &str, name: &str) -> u64 {
@@ -273,6 +345,170 @@ impl OverlayFS {
             format!("{}/{}", parent_path, name)
         };
         self.inode_for_path(&path)
+    }
+
+    fn check_directory(&self, node: &OverlayNode) -> Result<(), FileSystemError> {
+        if node.file_type != FileType::Directory {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotADirectory,
+                "Overlay parent is not a directory",
+            ));
+        }
+        if node.overlay_fs.read().as_ref().map(|fs| fs.fs_id) != Some(self.fs_id) {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::CrossDevice,
+                "Overlay parent belongs to another filesystem",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Publish an adjacent upper regular-file replacement. The callback is the
+    /// one backing rename; keeping it injectable also tests its error boundary.
+    fn rename_upper_regular(
+        &self,
+        old_parent: &Arc<dyn VfsNode>,
+        old_name: &String,
+        new_parent: &Arc<dyn VfsNode>,
+        new_name: &String,
+        publish: impl FnOnce(
+            &Arc<dyn FileSystemOperations>,
+            &Arc<dyn VfsNode>,
+            &String,
+            &String,
+        ) -> Result<(), FileSystemError>,
+    ) -> Result<(), FileSystemError> {
+        let _namespace = self.lock_namespace()?;
+        let unsupported = || {
+            FileSystemError::new(
+                FileSystemErrorKind::NotSupported,
+                "Overlay rename supports adjacent pure-upper regular files on tmpfs only",
+            )
+        };
+        let old = old_parent
+            .as_any()
+            .downcast_ref::<OverlayNode>()
+            .ok_or_else(unsupported)?;
+        let new = new_parent
+            .as_any()
+            .downcast_ref::<OverlayNode>()
+            .ok_or_else(unsupported)?;
+        self.check_directory(old)?;
+        self.check_directory(new)?;
+        for name in [old_name, new_name] {
+            if name.is_empty()
+                || name == "."
+                || name == ".."
+                || name.contains('/')
+                || name.contains('\0')
+                || name.starts_with(".wh.")
+            {
+                return Err(unsupported());
+            }
+        }
+        if old.path != new.path {
+            return Err(unsupported());
+        }
+        let (upper_mount, upper_root) = self.get_upper_layer()?;
+        let upper_fs = Self::fs_from_mount(&upper_mount)?;
+        // TmpFS replaces an entry under one parent-children lock. Other backing
+        // drivers and cross-parent moves need their own atomicity validation.
+        if !upper_fs.as_any().is::<super::tmpfs::TmpFS>() {
+            return Err(unsupported());
+        }
+        // Do not cross a backing mount, even a bind mount of the same TmpFS.
+        let mut upper_parent = upper_root.node();
+        for component in old.path.split('/').filter(|part| !part.is_empty()) {
+            upper_parent = upper_fs.lookup(&upper_parent, &component.to_string())?;
+            if upper_mount.children.read().contains_key(&upper_parent.id()) {
+                return Err(unsupported());
+            }
+        }
+        for name in [old_name, new_name] {
+            match upper_fs.lookup(&upper_parent, &format!(".wh.{name}")) {
+                Ok(_) => return Err(unsupported()),
+                Err(error) if error.kind == FileSystemErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let child_path = |name: &str| format!("{}/{}", old.path.trim_end_matches('/'), name);
+        let old_path = child_path(old_name);
+        let new_path = child_path(new_name);
+        let source = upper_fs.lookup(&upper_parent, old_name)?;
+        if upper_mount.children.read().contains_key(&source.id()) {
+            return Err(unsupported());
+        }
+        let source_metadata = source.metadata()?;
+        if source_metadata.file_type != FileType::RegularFile || source_metadata.link_count != 1 {
+            return Err(unsupported());
+        }
+        // Moving an upper override would expose its lower source. Whiteout
+        // publication is deliberately outside this bounded implementation.
+        for (mount, root) in &self.lower_layers {
+            match self.resolve_in_layer(mount, root, &old_path) {
+                Ok(_) => return Err(unsupported()),
+                Err(error) if error.kind == FileSystemErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if old_name == new_name {
+            return Ok(());
+        }
+        let mut destination = match upper_fs.lookup(&upper_parent, new_name) {
+            Ok(node) => Some(OverlayBacking {
+                node,
+                fs: upper_fs.clone(),
+                writable: true,
+            }),
+            Err(error) if error.kind == FileSystemErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if destination.is_none() {
+            for (mount, root) in &self.lower_layers {
+                match self.resolve_in_layer(mount, root, &new_path) {
+                    Ok(node) => {
+                        let fs = node
+                            .filesystem()
+                            .and_then(|fs| fs.upgrade())
+                            .ok_or_else(unsupported)?;
+                        destination = Some(OverlayBacking {
+                            node,
+                            fs,
+                            writable: false,
+                        });
+                        break;
+                    }
+                    Err(error) if error.kind == FileSystemErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        if let Some(backing) = &destination {
+            if backing.writable && upper_mount.children.read().contains_key(&backing.node.id()) {
+                return Err(unsupported());
+            }
+            let metadata = backing.node.metadata()?;
+            if metadata.file_type != FileType::RegularFile || metadata.link_count != 1 {
+                return Err(unsupported());
+            }
+        }
+        let source_inode = self.inode_record(&old_path);
+        let destination_inode = destination.as_ref().map(|_| self.inode_record(&new_path));
+        // No copy-up, whiteout, truncation, or overlay identity mutation precedes
+        // this publication. An error leaves both namespace entries untouched.
+        publish(&upper_fs, &upper_parent, old_name, new_name)?;
+        *source_inode.backing.write() = Some(OverlayBacking {
+            node: source,
+            fs: upper_fs,
+            writable: true,
+        });
+        if let (Some(inode), Some(backing)) = (destination_inode, destination) {
+            *inode.backing.write() = Some(backing);
+        }
+        let mut ids = self.inode_ids.write();
+        ids.by_path.remove(&old_path);
+        ids.by_path.insert(new_path, source_inode);
+        Ok(())
     }
 
     /// Create a new OverlayFS from VFS paths
@@ -796,6 +1032,7 @@ impl FileSystemOperations for OverlayFS {
         parent_node: &Arc<dyn VfsNode>,
         name: &String,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        let _namespace = self.lock_namespace()?;
         let overlay_parent = parent_node
             .as_any()
             .downcast_ref::<OverlayNode>()
@@ -806,6 +1043,7 @@ impl FileSystemOperations for OverlayFS {
                 )
             })?;
 
+        self.check_directory(overlay_parent)?;
         let child_path = if overlay_parent.path == "/" {
             format!("/{}", name)
         } else {
@@ -827,12 +1065,12 @@ impl FileSystemOperations for OverlayFS {
                 "/"
             };
             let parent_name = parent_path.split('/').last().unwrap_or("/");
-            let parent_file_id = self.inode_for_path(parent_path);
+            let parent_inode = self.inode_record(parent_path);
             let node = OverlayNode::new(
                 parent_name.to_string(),
                 parent_path.to_string(),
                 FileType::Directory,
-                parent_file_id,
+                parent_inode,
             );
             if let Some(ref fs) = *overlay_parent.overlay_fs.read() {
                 node.set_overlay_fs(Arc::clone(fs));
@@ -856,7 +1094,7 @@ impl FileSystemOperations for OverlayFS {
                     name.clone(),
                     child_path.clone(),
                     metadata.file_type,
-                    metadata.file_id,
+                    self.inode_record(&child_path),
                 );
                 if let Some(ref fs) = *overlay_parent.overlay_fs.read() {
                     node.set_overlay_fs(Arc::clone(fs));
@@ -873,7 +1111,7 @@ impl FileSystemOperations for OverlayFS {
                     name.clone(),
                     child_path.clone(),
                     metadata.file_type,
-                    metadata.file_id,
+                    self.inode_record(&child_path),
                 );
                 if let Some(ref fs) = *overlay_parent.overlay_fs.read() {
                     node.set_overlay_fs(Arc::clone(fs));
@@ -893,6 +1131,7 @@ impl FileSystemOperations for OverlayFS {
         overlay_node: &Arc<dyn VfsNode>,
         flags: u32,
     ) -> Result<Arc<dyn FileObject>, FileSystemError> {
+        let _namespace = self.lock_namespace()?;
         // Downcast to OverlayNode
         let overlay_node_ref = overlay_node
             .as_any()
@@ -903,6 +1142,17 @@ impl FileSystemOperations for OverlayFS {
                     "Invalid node type for OverlayFS",
                 )
             })?;
+
+        let backing = overlay_node_ref.inode.backing.read().clone();
+        if let Some(backing) = backing {
+            if !backing.writable && ((flags & 0x3) != 0 || (flags & 0x200) != 0) {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::PermissionDenied,
+                    "Cannot modify a replaced lower-layer inode",
+                ));
+            }
+            return backing.fs.open(&backing.node, flags);
+        }
 
         // Get metadata using path instead of node metadata to avoid filesystem reference issues
         let metadata = self.get_metadata_for_path(&overlay_node_ref.path)?;
@@ -963,6 +1213,7 @@ impl FileSystemOperations for OverlayFS {
         file_type: FileType,
         mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        let _namespace = self.lock_namespace()?;
         let upper = self.get_upper_layer()?;
         let upper_fs = Self::fs_from_mount(&upper.0)?;
         let overlay_parent = parent_node
@@ -974,6 +1225,7 @@ impl FileSystemOperations for OverlayFS {
                     "Invalid node type for OverlayFS",
                 )
             })?;
+        self.check_directory(overlay_parent)?;
         let child_path = if overlay_parent.path == "/" {
             format!("/{}", name)
         } else {
@@ -1019,8 +1271,8 @@ impl FileSystemOperations for OverlayFS {
 
         // Return overlay node
         let metadata = new_node.metadata()?;
-        let file_id = self.inode_for_path(&child_path);
-        let overlay_node = OverlayNode::new(name.clone(), child_path, metadata.file_type, file_id);
+        let inode = self.inode_record(&child_path);
+        let overlay_node = OverlayNode::new(name.clone(), child_path, metadata.file_type, inode);
         if let Some(ref fs) = *overlay_parent.overlay_fs.read() {
             overlay_node.set_overlay_fs(Arc::clone(fs));
         }
@@ -1028,6 +1280,7 @@ impl FileSystemOperations for OverlayFS {
     }
 
     fn remove(&self, parent_node: &Arc<dyn VfsNode>, name: &String) -> Result<(), FileSystemError> {
+        let _namespace = self.lock_namespace()?;
         let overlay_parent = parent_node
             .as_any()
             .downcast_ref::<OverlayNode>()
@@ -1037,6 +1290,7 @@ impl FileSystemOperations for OverlayFS {
                     "Invalid node type for OverlayFS",
                 )
             })?;
+        self.check_directory(overlay_parent)?;
 
         let child_path = if overlay_parent.path == "/" {
             format!("/{}", name)
@@ -1085,6 +1339,22 @@ impl FileSystemOperations for OverlayFS {
         ))
     }
 
+    fn rename(
+        &self,
+        old_parent: &Arc<dyn VfsNode>,
+        old_name: &String,
+        new_parent: &Arc<dyn VfsNode>,
+        new_name: &String,
+    ) -> Result<(), FileSystemError> {
+        self.rename_upper_regular(
+            old_parent,
+            old_name,
+            new_parent,
+            new_name,
+            |fs, parent, old, new| fs.rename(parent, old, parent, new),
+        )
+    }
+
     fn root_node(&self) -> Arc<dyn VfsNode> {
         Arc::clone(&self.root_node) as Arc<dyn VfsNode>
     }
@@ -1101,33 +1371,32 @@ impl FileSystemOperations for OverlayFS {
         &self,
         node: &Arc<dyn VfsNode>,
     ) -> Result<Vec<DirectoryEntryInternal>, FileSystemError> {
+        let _namespace = self.lock_namespace()?;
         let overlay_node = node.as_any().downcast_ref::<OverlayNode>().ok_or_else(|| {
             FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
                 "Invalid node type for OverlayFS",
             )
         })?;
+        self.check_directory(overlay_node)?;
 
         let mut entries = Vec::new();
         let mut seen_names = BTreeSet::new();
 
         // Get parent directory file_id for ".."
-        let parent_file_id = if overlay_node.path == "/" {
-            // Root directory's parent is itself
-            overlay_node.file_id
-        } else {
-            // Get parent by looking up ".." from current directory
-            match self.lookup(node, &"..".to_string()) {
-                Ok(parent_node) => parent_node.id(),
-                Err(_) => overlay_node.file_id, // Fallback to current if parent can't be resolved
-            }
-        };
+        let parent_path = overlay_node
+            .path
+            .rsplit_once('/')
+            .map(|(p, _)| p)
+            .filter(|p| !p.is_empty())
+            .unwrap_or("/");
+        let parent_file_id = self.inode_for_path(parent_path);
 
         // Add "." and ".." entries
         entries.push(DirectoryEntryInternal {
             name: ".".to_string(),
             file_type: FileType::Directory,
-            file_id: overlay_node.file_id,
+            file_id: overlay_node.inode.id,
         });
         entries.push(DirectoryEntryInternal {
             name: "..".to_string(),
@@ -1245,31 +1514,15 @@ impl OverlayDirectoryObject {
 
         let mut seen_names = BTreeSet::new();
 
-        // Get current directory node by resolving path components
-        let current_dir_node = {
-            let mut current = self.overlay_fs.root_node();
-            if self.path != "/" {
-                for component in self.path.trim_start_matches('/').split('/') {
-                    if !component.is_empty() {
-                        current = self.overlay_fs.lookup(&current, &component.to_string())?;
-                    }
-                }
-            }
-            current
-        };
-        let current_file_id = current_dir_node.id();
-
-        // Get parent directory file_id for ".."
-        let parent_file_id = if self.path == "/" {
-            // Root directory's parent is itself
-            current_file_id
-        } else {
-            // Get parent by looking up ".." from current directory
-            match self.overlay_fs.lookup(&current_dir_node, &"..".to_string()) {
-                Ok(parent_node) => parent_node.id(),
-                Err(_) => current_file_id, // Fallback to current if parent can't be resolved
-            }
-        };
+        // The caller holds the namespace lock; do not recursively call lookup.
+        let current_file_id = self.overlay_fs.get_metadata_for_path(&self.path)?.file_id;
+        let parent_path = self
+            .path
+            .rsplit_once('/')
+            .map(|(p, _)| p)
+            .filter(|p| !p.is_empty())
+            .unwrap_or("/");
+        let parent_file_id = self.overlay_fs.inode_for_path(parent_path);
 
         // Add "." and ".." entries first
         special_entries.push(crate::fs::DirectoryEntryInternal {
@@ -1390,6 +1643,10 @@ impl OverlayDirectoryObject {
 
 impl StreamOps for OverlayDirectoryObject {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        let _namespace = self
+            .overlay_fs
+            .lock_namespace()
+            .map_err(StreamError::from)?;
         // Collect all directory entries from all layers (simplified version)
         let all_entries = self
             .collect_directory_entries()
@@ -1481,6 +1738,10 @@ impl FileObject for OverlayDirectoryObject {
     }
 
     fn metadata(&self) -> Result<crate::fs::FileMetadata, StreamError> {
+        let _namespace = self
+            .overlay_fs
+            .lock_namespace()
+            .map_err(StreamError::from)?;
         // Get metadata for the directory path
         self.overlay_fs
             .get_metadata_for_path(&self.path)
