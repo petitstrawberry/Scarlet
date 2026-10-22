@@ -23,16 +23,18 @@ Clock has 8 tests, Calendar 7, and System Logs 9, including timer pause/resume,
 the full Gregorian 400-year cycle, bounded journal history, daemon restart,
 partial protocol reads, cancellation, timeouts and malformed frames. These
 passed on the host; all three apps also passed AArch64 Scarlet target checks
-with the available cached compiler. Its Scarlet standard library is older than
-the current repository; current-toolchain validation remains separate.
+with the current Scarlet Rust/standard-library 26d00a8 toolchain after the
+shared typography correction. System Logs' 9 tests were rerun on that toolchain.
 
 Host Winit CPU rendering was exercised with real controls: Clock mode selection,
 timer entry/start/pause/resume/finish/reset, stopwatch, Tab focus and minimum
 size; Calendar month/date/Today keyboard navigation and minimum size; System
 Logs static preview, filter, priority, details, clear and unavailable-backend
 states. The host clock uses real system time with an explicit UTC preview
-label. Live logd queries and timer/calendar behavior inside a booted Scarlet
-guest remain integration checks.
+label. The minimum-size smoke was repeated after the shared font-size correction;
+log summaries use measured ellipsis while details preserve journal line breaks.
+Live logd queries and timer/calendar behavior inside a booted Scarlet guest
+remain integration checks.
 
 ## Audio recorder prerequisite
 
