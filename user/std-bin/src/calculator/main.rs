@@ -235,8 +235,16 @@ impl CalculatorApp {
     fn set_expression(&self, text: String) {
         self.selection.set(TextSelection::collapsed(text.len()));
         self.expression.set(text);
+        self.expression_changed();
+    }
+
+    fn expression_changed(&self) {
         self.evaluated.set(false);
         self.error.set(String::new());
+        // Retain the last valid preview without making an incomplete edit copyable.
+        if let Ok(value) = evaluate(&self.expression.get()) {
+            self.answer.set(Some(value));
+        }
     }
 
     fn clear(&self) {
@@ -273,8 +281,7 @@ impl CalculatorApp {
         self.expression.set(expression);
         self.selection
             .set(TextSelection::collapsed(start + text.len()));
-        self.evaluated.set(false);
-        self.error.set(String::new());
+        self.expression_changed();
     }
 
     fn backspace(&self) {
@@ -296,8 +303,7 @@ impl CalculatorApp {
             expression.replace_range(start..end, "");
             self.expression.set(expression);
             self.selection.set(TextSelection::collapsed(start));
-            self.evaluated.set(false);
-            self.error.set(String::new());
+            self.expression_changed();
         }
     }
 
@@ -565,7 +571,6 @@ impl CalculatorApp {
         let (hidden_left, hidden_right) =
             expression_overflow(&expression, field_width, self.expression_scroll.get().x);
         let result = self.result_text();
-        let font = fitted_font(&result, 54.0, self.content_width() - 16.0);
         let display_width = self.content_width() - 16.0;
         let status = if self.error.get().is_empty() {
             self.notice.get()
@@ -586,17 +591,17 @@ impl CalculatorApp {
                     Text::new(if hidden_left { "‹" } else { "" }).font_size(14.0).color(palette.text_secondary()).frame_width(10.0),
                     TextView::new(self.expression.clone(), self.selection.clone())
                         .scroll_state(self.expression_scroll.clone())
-                        .wrap_mode(WrapMode::None).font_size(16.0).padding(6.0)
+                        .wrap_mode(WrapMode::None).font_size(16.0).padding(4.0)
                         .background(Color::CLEAR).border_color(Color::CLEAR)
                         .focused_border_color(Color::CLEAR).text_color(palette.text_secondary())
                         .placeholder("0").autofocus(true).reveal_selection_on_change(true)
-                        .on_text_change(move |_| { edited.evaluated.set(false); edited.error.set(String::new()); edited.notice.set(String::new()); })
+                        .on_text_change(move |_| { edited.expression_changed(); edited.notice.set(String::new()); })
                         .frame(field_width, 32.0)
                         .on_event_capture(move |event| editing.edit_expression(event)),
                     Text::new(if hidden_right { "›" } else { "" }).font_size(14.0).color(palette.text_secondary()).frame_width(10.0),
                 }.frame(display_width, 32.0),
-                right_aligned_text(&result, font, display_width, palette.text_primary()).frame_height(66.0),
-                right_aligned_text(&status, fitted_font(&status, 12.0, display_width), display_width,
+                right_aligned_text(&result, 44.0, display_width, palette.text_primary()).frame_height(66.0),
+                right_aligned_text(&status, 12.0, display_width,
                     if self.error.get().is_empty() { palette.text_secondary() } else { palette.error() }).frame_height(22.0),
             }.spacing(2.0).padding(8.0),
             hstack! {
@@ -750,7 +755,7 @@ impl CalculatorApp {
                 hstack! { Text::new("FROM").font_size(11.0).color(palette.text_secondary()), Spacer::new() },
                 hstack! {
                     TextView::new(self.amount.clone(), self.amount_selection.clone())
-                        .wrap_mode(WrapMode::None).font_size(30.0).padding(2.0)
+                        .wrap_mode(WrapMode::None).font_size(26.0).padding(2.0)
                         .background(Color::CLEAR).border_color(Color::CLEAR).focused_border_color(Color::CLEAR)
                         .placeholder("0").autofocus(true).reveal_selection_on_change(true)
                         .frame(value_width, 42.0)
@@ -760,13 +765,13 @@ impl CalculatorApp {
                 Divider::new(),
                 hstack! { Text::new("TO").font_size(11.0).color(palette.text_secondary()), Spacer::new(),
                     Button::new("Copy").header_style().font_size(11.0).padding(0.0).enabled(converted.is_ok()).on_click(move || copy.copy_result()),
-                }.frame_height(14.0),
+                }.frame_height(18.0),
                 hstack! {
-                    Text::new(output.clone()).font_size(fitted_font(&output, 32.0, value_width)).frame_width(value_width),
+                    right_aligned_text(&output, 28.0, value_width, palette.text_primary()),
                     Spacer::new(), Select::new(unit_names, self.to.clone()).width(unit_width),
                 }.spacing(6.0).frame_height(42.0),
             }.spacing(6.0).padding(12.0).frame_width(f32::INFINITY).background(palette.surface()).clip_radius(10.0),
-            Text::new(note.clone()).font_size(fitted_font(&note, 12.0, self.content_width())).color(palette.error()).frame_height(16.0),
+            right_aligned_text(&note, 12.0, self.content_width(), palette.error()).frame_height(18.0),
             vstack! {
                 self.conversion_row(["7", "8", "9", "⌫"]),
                 self.conversion_row(["4", "5", "6", "AC"]),
@@ -820,20 +825,15 @@ impl CalculatorApp {
     }
 }
 
-fn fitted_font(text: &str, preferred: f32, width: f32) -> f32 {
-    let measured = scarlet_ui::graphics::measure_text_sized(text, preferred).0 as f32;
-    if measured <= width || measured <= 0.0 {
-        preferred
-    } else {
-        (preferred * width / measured).max(9.0)
-    }
-}
-
 fn expression_overflow(text: &str, field_width: f32, scroll_x: f32) -> (bool, bool) {
     let text_width = scarlet_ui::graphics::measure_text_sized(text, 16.0).0 as f32;
+    let visible_width = (field_width - 8.0).max(0.0);
+    // The field grows with short input. Its previous scroll state can survive
+    // for one rebuild even though all glyphs now fit inside the new width.
+    let scroll_x = scroll_x.clamp(0.0, (text_width - visible_width).max(0.0));
     (
         scroll_x > 0.5,
-        text_width > scroll_x + (field_width - 12.0).max(0.0) + 0.5,
+        text_width > scroll_x + visible_width + 0.5,
     )
 }
 
@@ -843,15 +843,22 @@ fn right_aligned_text(
     width: f32,
     color: Color,
 ) -> impl View + Clone + use<> {
-    let text_width =
-        (scarlet_ui::graphics::measure_text_sized(text, font).0 as f32 + 1.0).min(width);
+    let (measured_width, measured_height) = scarlet_ui::graphics::measure_text_sized(text, font);
+    let text_width = measured_width as f32 + 1.0;
+    let content_width = text_width.max(width);
     // Finite leading space keeps full-width text from competing with a flex
     // spacer for the same available width in the native horizontal layout.
-    hstack! {
-        Text::new("").frame_width((width - text_width).max(0.0)),
+    let content = hstack! {
+        Text::new("").frame_width(content_width - text_width),
         Text::new(text.to_owned()).font_size(font).color(color).frame_width(text_width),
     }
-    .frame_width(width)
+    .frame_width(content_width);
+    // Keep glyphs the same size; reveal the right edge and allow scrolling to every digit.
+    ScrollView::new(content)
+        .horizontal()
+        .content_size(content_width, measured_height as f32)
+        .scroll_to_horizontal_range(content_width - 1.0, content_width)
+        .frame_width(width)
 }
 
 fn history_label(calculation: &Calculation, width: f32) -> String {
@@ -1014,10 +1021,11 @@ mod tests {
         assert_eq!(expression_overflow(&text, 200.0, 0.0), (false, true));
         assert_eq!(expression_overflow(&text, 200.0, 50.0), (true, true));
         assert_eq!(
-            expression_overflow(&text, 200.0, width - 188.0),
+            expression_overflow(&text, 200.0, width - 192.0),
             (true, false)
         );
         assert_eq!(expression_overflow("12+3", 200.0, 0.0), (false, false));
+        assert_eq!(expression_overflow("12+3", 200.0, 20.0), (false, false));
     }
     #[test]
     fn history_shortens_expression_without_losing_the_result() {
@@ -1238,6 +1246,146 @@ mod tests {
         assert!(app.handle_key(&Event::Keyboard(KeyEvent::Char { c: '+' })));
         assert_eq!(app.expression.get(), "7+");
         assert_eq!(app.current_value(), None);
+    }
+
+    #[test]
+    fn live_result_survives_incomplete_edits_until_clear() {
+        let app = CalculatorApp::new();
+        app.insert("12+3");
+        assert_eq!(app.result_text(), "15");
+        app.insert("×(");
+        assert_eq!(app.result_text(), "15");
+        assert_eq!(app.current_value(), None);
+        app.copy_result();
+        assert!(app.notice.get().is_empty());
+        app.insert("2)");
+        assert_eq!(app.result_text(), "18");
+        app.backspace();
+        assert_eq!(app.result_text(), "18");
+        assert_eq!(app.current_value(), None);
+        app.set_expression("7".into());
+        app.backspace();
+        assert_eq!(app.result_text(), "7");
+        assert!(app.history.get().is_empty());
+        assert!(!app.evaluated.get());
+        app.clear();
+        assert_eq!(app.result_text(), "0");
+        assert_eq!(app.current_value(), None);
+        app.insert("(");
+        assert_eq!(app.result_text(), "0");
+    }
+
+    #[test]
+    fn live_result_does_not_mask_errors_or_create_history() {
+        let app = CalculatorApp::new();
+        app.set_expression("2+3".into());
+        app.calculate();
+        app.set_expression("12".into());
+        app.insert("+");
+        assert_eq!(app.result_text(), "12");
+        app.calculate();
+        assert_eq!(app.result_text(), "—");
+        assert!(!app.error.get().is_empty());
+        assert_eq!(app.current_value(), None);
+        assert!(!app.evaluated.get());
+        app.insert("(");
+        assert!(app.error.get().is_empty());
+        assert_eq!(app.result_text(), "12");
+        assert_eq!(app.current_value(), None);
+        app.set_expression("1/0".into());
+        app.calculate();
+        assert_eq!(app.result_text(), "—");
+        app.backspace();
+        assert!(app.error.get().is_empty());
+        assert_eq!(app.result_text(), "12");
+        app.insert("2");
+        assert_eq!(app.result_text(), "0.5");
+        assert_eq!(app.current_value(), Some(0.5));
+        assert_eq!(app.history.get().len(), 1);
+        assert_eq!(app.history.get()[0].expression, "2+3");
+        app.calculate();
+        app.calculate();
+        assert_eq!(app.history.get().len(), 2);
+        assert_eq!(app.history.get()[0].value, 0.5);
+        app.clear();
+        assert_eq!(app.result_text(), "0");
+        assert_eq!(app.history.get().len(), 2);
+    }
+
+    #[test]
+    fn text_field_typing_retains_the_latest_live_result() {
+        use scarlet_ui::pipeline::RenderingPipeline;
+        let app = CalculatorApp::new();
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            Window::new("test", app.calculation_view())
+                .decorated(false)
+                .size(Size::new(380.0, 584.0))
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        for c in "12+3".chars() {
+            pipeline.handle_event(&Event::Keyboard(KeyEvent::Char { c }));
+        }
+        assert_eq!(app.expression.get(), "12+3");
+        assert_eq!(app.result_text(), "15");
+        pipeline.handle_event(&Event::Keyboard(KeyEvent::Char { c: '+' }));
+        assert_eq!(app.result_text(), "15");
+        assert_eq!(app.current_value(), None);
+        pipeline.handle_event(&Event::Keyboard(KeyEvent::Char { c: '2' }));
+        assert_eq!(app.result_text(), "17");
+        assert_eq!(app.current_value(), Some(17.0));
+        assert!(app.history.get().is_empty());
+    }
+
+    #[test]
+    fn result_fonts_stay_fixed_and_long_values_keep_all_digits_in_scroll_content() {
+        use scarlet_ui::element::{Element, LayoutConstraints, RenderElement};
+        use scarlet_ui::views::TextRenderObject;
+
+        fn find_text<'a>(
+            element: &'a dyn Element,
+            content: &str,
+        ) -> Option<&'a RenderElement<Text, TextRenderObject>> {
+            if let Some(text) = element
+                .as_any()
+                .downcast_ref::<RenderElement<Text, TextRenderObject>>()
+            {
+                if text.view().content() == content {
+                    return Some(text);
+                }
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|child| find_text(child.as_ref(), content))
+        }
+
+        let app = CalculatorApp::new();
+        app.viewport.set(Size::new(340.0, 536.0));
+        for expression in ["123", "123456789012", "1e-200", "-123456789.123"] {
+            app.set_expression(expression.into());
+            let result = app.result_text();
+            let mut view = app.calculation_view().create_element();
+            view.layout(LayoutConstraints::tight(340.0, 536.0));
+            let text = find_text(view.as_ref(), &result).expect("full result text");
+            assert_eq!(text.view().font_size_value(), 44.0);
+            let measured = scarlet_ui::graphics::measure_text_sized(&result, 44.0).0 as f32;
+            assert!(text.bounds().size.width >= measured);
+            assert_eq!(
+                app.current_value().map(format_value).as_ref(),
+                Some(&result)
+            );
+
+            app.amount.set(expression.into());
+            app.to.set(app.from.get());
+            let mut view = app.conversion_view().create_element();
+            view.layout(LayoutConstraints::tight(340.0, 536.0));
+            let text = find_text(view.as_ref(), &result).expect("full conversion result text");
+            assert_eq!(text.view().font_size_value(), 28.0);
+            let measured = scarlet_ui::graphics::measure_text_sized(&result, 28.0).0 as f32;
+            assert!(text.bounds().size.width >= measured);
+        }
     }
 
     #[test]
