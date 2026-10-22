@@ -38,6 +38,13 @@ fn filesystem_timestamp_record_layout() {
 }
 
 #[test]
+fn atomic_rename_extension_keeps_legacy_operation_number() {
+    assert_eq!(abi::Syscall::VfsRename as usize, 409);
+    assert_eq!(abi::Syscall::VfsRenameWithStatus as usize, 419);
+    assert_eq!(abi::fs::VFS_RENAME_NOREPLACE, 1);
+}
+
+#[test]
 fn environment_exec_record_layouts() {
     assert_layout!(abi::RawEnvironmentExec, 48, 8, {
         size: 0, flags: 4, argv: 8, envp: 16, cwd: 24,
@@ -242,7 +249,7 @@ fn native_syscall_numbers() {
         VfsCreateHardlink = 411, VfsSymlinkMetadata = 412,
         VfsCanonicalize = 413, VfsSetTimes = 414,
         VfsMetadataWithStatus = 415, VfsCreateDirectoryWithStatus = 416,
-        VfsOpenAt = 417, VfsRemoveWithStatus = 418,
+        VfsOpenAt = 417, VfsRemoveWithStatus = 418, VfsRenameWithStatus = 419,
         FsMount = 500, FsUmount = 501,
         FsPivotRoot = 502,
         VfsViewCreate = 520, VfsViewCurrent = 521, VfsViewClone = 522,

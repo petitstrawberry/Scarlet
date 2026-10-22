@@ -1215,3 +1215,46 @@ pub fn sys_vfs_rename(trapframe: &mut Trapframe) -> usize {
         Err(_) => usize::MAX,
     }
 }
+
+/// Errno-returning rename. Unknown flags are rejected before touching either
+/// pathname, allowing callers to probe this additive operation without mutation.
+/// The legacy `VfsRename` operation above retains its existing -1 contract.
+pub fn sys_vfs_rename_with_status(tf: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let (old_ptr, new_ptr, flags) = (tf.get_arg(0), tf.get_arg(1), tf.get_arg(2));
+    tf.increment_pc_next(&task);
+    if flags & !scarlet_abi::fs::VFS_RENAME_NOREPLACE != 0 {
+        return (-(scarlet_abi::ERRNO_EINVAL as isize)) as usize;
+    }
+    let old_path = match parse_c_string_from_userspace(&task, old_ptr, MAX_PATH_LENGTH) {
+        Ok(path) => path,
+        Err(error) => return pathname_errno(error),
+    };
+    let new_path = match parse_c_string_from_userspace(&task, new_ptr, MAX_PATH_LENGTH) {
+        Ok(path) => path,
+        Err(error) => return pathname_errno(error),
+    };
+    let Some(vfs) = task.get_vfs() else {
+        return (-(scarlet_abi::ERRNO_EIO as isize)) as usize;
+    };
+    rename_paths_with_status(&vfs, &old_path, &new_path, flags)
+}
+
+pub(crate) fn rename_paths_with_status(
+    vfs: &VfsManager,
+    old_path: &str,
+    new_path: &str,
+    flags: usize,
+) -> usize {
+    if flags & !scarlet_abi::fs::VFS_RENAME_NOREPLACE != 0 {
+        return (-(scarlet_abi::ERRNO_EINVAL as isize)) as usize;
+    }
+    match vfs.rename_with_no_replace(
+        old_path,
+        new_path,
+        flags & scarlet_abi::fs::VFS_RENAME_NOREPLACE != 0,
+    ) {
+        Ok(()) => 0,
+        Err(error) => fs_errno(error),
+    }
+}
