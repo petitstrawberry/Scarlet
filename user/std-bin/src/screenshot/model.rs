@@ -201,6 +201,16 @@ pub fn save_png(image: &Pixels, path: &Path, replace: bool) -> Result<(), String
 }
 
 fn finish_or_cleanup(result: Result<(), String>, path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "scarlet")]
+    {
+        return result.map_err(|error| {
+            format!(
+                "{error}; partial output retained at {} (conditional unlink unavailable)",
+                path.display()
+            )
+        });
+    }
+    #[cfg(not(target_os = "scarlet"))]
     match result {
         Ok(()) => Ok(()),
         Err(error) => match native_fs::remove_file(path) {

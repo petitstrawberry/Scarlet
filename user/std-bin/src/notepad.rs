@@ -206,7 +206,7 @@ impl NotepadApp {
         self.status.set(format!("Opening {}…", path.display()));
         let shared = self.runtime.get();
         thread::spawn(move || {
-            let result = std::fs::read_to_string(&path).map_err(|e| e.to_string());
+            let result = document::read_document(&path).map_err(|e| e.to_string());
             shared
                 .lock()
                 .unwrap()
