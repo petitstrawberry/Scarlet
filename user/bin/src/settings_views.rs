@@ -1,6 +1,8 @@
 //! Shared production Settings pages; platform services stay in the parent.
 use super::*;
 
+const SETTINGS_NOTE_FONT_SIZE: f32 = 12.0;
+
 fn wrap_settings_note(value: impl Into<String>) -> String {
     let value = value.into();
     let mut wrapped = String::new();
@@ -15,7 +17,9 @@ fn wrap_settings_note(value: impl Into<String>) -> String {
             } else {
                 format!("{} {}", line, word)
             };
-            if !line.is_empty() && scarlet_ui::measure_text_sized(&candidate, 14.0).0 > 540 {
+            if !line.is_empty()
+                && scarlet_ui::measure_text_sized(&candidate, SETTINGS_NOTE_FONT_SIZE).0 > 540
+            {
                 wrapped.push_str(&line);
                 wrapped.push('\n');
                 line.clear();
@@ -26,7 +30,9 @@ fn wrap_settings_note(value: impl Into<String>) -> String {
             for ch in word.chars() {
                 let mut candidate = line.clone();
                 candidate.push(ch);
-                if !line.is_empty() && scarlet_ui::measure_text_sized(&candidate, 14.0).0 > 540 {
+                if !line.is_empty()
+                    && scarlet_ui::measure_text_sized(&candidate, SETTINGS_NOTE_FONT_SIZE).0 > 540
+                {
                     wrapped.push_str(&line);
                     wrapped.push('\n');
                     line.clear();
@@ -40,15 +46,15 @@ fn wrap_settings_note(value: impl Into<String>) -> String {
 }
 fn settings_note(value: impl Into<String>) -> impl View + Clone {
     Text::new(wrap_settings_note(value))
-        .font_size(14.0)
+        .font_size(SETTINGS_NOTE_FONT_SIZE)
         .color(Color::rgb(88, 94, 104))
 }
 fn settings_row(content: impl View + Clone, label: &str) -> impl View + Clone {
-    hstack! { Text::new(label).font_size(14.0).frame_width(112.0), content, Spacer::new() }
+    hstack! { Text::new(label).font_size(13.0).frame_width(112.0), content, Spacer::new() }
         .spacing(12.0)
 }
-fn settings_section(content: impl View + Clone, title: &str) -> impl View + Clone {
-    vstack! { Text::new(title).font_size(18.0), content }
+fn settings_section(content: impl View + Clone, title: &str, title_size: f32) -> impl View + Clone {
+    vstack! { Text::new(title).font_size(title_size), content }
         .spacing(12.0)
         .alignment(Alignment::Leading)
         .padding(16.0)
@@ -66,7 +72,14 @@ fn long_settings_page(content: impl View + Clone, height: f32) -> impl View + Cl
         .frame(f32::INFINITY, f32::INFINITY)
 }
 fn extra_note_height(value: String) -> f32 {
-    wrap_settings_note(value).lines().count().saturating_sub(1) as f32 * 20.0
+    let wrapped = wrap_settings_note(value);
+    let height = scarlet_ui::measure_text_sized(&wrapped, SETTINGS_NOTE_FONT_SIZE).1;
+    let first_line_height = scarlet_ui::measure_text_sized(
+        wrapped.lines().next().unwrap_or_default(),
+        SETTINGS_NOTE_FONT_SIZE,
+    )
+    .1;
+    height.saturating_sub(first_line_height) as f32
 }
 
 pub(super) fn appearance_page(app: SettingsApp) -> impl View + Clone {
@@ -94,10 +107,10 @@ pub(super) fn appearance_page(app: SettingsApp) -> impl View + Clone {
                 }
             }), "Color preset"),
             Rectangle::new().fill(Color::rgb(color[0], color[1], color[2])).corner_radius(6.0).frame(f32::INFINITY, 64.0),
-            settings_row(hstack! { Slider::new(app.red_value.clone()).min(0.0).max(255.0).on_change(move |_| red_app.sync_background_preset()).frame(270.0, 24.0), Text::new(format!("{}", color[0])).font_size(14.0).frame_width(36.0) }.spacing(12.0), "Red"),
-            settings_row(hstack! { Slider::new(app.green_value.clone()).min(0.0).max(255.0).on_change(move |_| green_app.sync_background_preset()).frame(270.0, 24.0), Text::new(format!("{}", color[1])).font_size(14.0).frame_width(36.0) }.spacing(12.0), "Green"),
-            settings_row(hstack! { Slider::new(app.blue_value.clone()).min(0.0).max(255.0).on_change(move |_| blue_app.sync_background_preset()).frame(270.0, 24.0), Text::new(format!("{}", color[2])).font_size(14.0).frame_width(36.0) }.spacing(12.0), "Blue"),
-        }.spacing(12.0).alignment(Alignment::Leading), "Desktop background"),
+            settings_row(hstack! { Slider::new(app.red_value.clone()).min(0.0).max(255.0).on_change(move |_| red_app.sync_background_preset()).frame(270.0, 24.0), Text::new(format!("{}", color[0])).font_size(12.0).frame_width(36.0) }.spacing(12.0), "Red"),
+            settings_row(hstack! { Slider::new(app.green_value.clone()).min(0.0).max(255.0).on_change(move |_| green_app.sync_background_preset()).frame(270.0, 24.0), Text::new(format!("{}", color[1])).font_size(12.0).frame_width(36.0) }.spacing(12.0), "Green"),
+            settings_row(hstack! { Slider::new(app.blue_value.clone()).min(0.0).max(255.0).on_change(move |_| blue_app.sync_background_preset()).frame(270.0, 24.0), Text::new(format!("{}", color[2])).font_size(12.0).frame_width(36.0) }.spacing(12.0), "Blue"),
+        }.spacing(12.0).alignment(Alignment::Leading), "Desktop background", 16.0),
         settings_section(vstack! {
             settings_note(app.background_image_label.get()),
             hstack! {
@@ -105,7 +118,7 @@ pub(super) fn appearance_page(app: SettingsApp) -> impl View + Clone {
                 Button::new("Clear image").enabled(app.background_image.get().is_some()).on_click({ let app = app.clone(); move || app.clear_background_image() }),
             }.spacing(8.0),
             settings_note("An image replaces the generated background. Clear it to use your color and pattern."),
-        }.spacing(10.0).alignment(Alignment::Leading), "Wallpaper"),
+        }.spacing(10.0).alignment(Alignment::Leading), "Wallpaper", 14.0),
         settings_note(app.background_status.get()),
         Button::new("Save again").on_click(move || app.save_config()),
     }.spacing(18.0).alignment(Alignment::Leading), height)
@@ -114,13 +127,13 @@ pub(super) fn about_page() -> impl View + Clone {
     let (distribution, version, kernel, target) = system_description();
     settings_page(
         vstack! {
-            Text::new(distribution).font_size(24.0),
+            Text::new(distribution).font_size(16.0),
             settings_note("System information reported by the operating system"),
             settings_section(vstack! {
                 settings_row(settings_note(version), "OS version"),
                 settings_row(settings_note(kernel), "Kernel"),
                 settings_row(settings_note(target), "Build target"),
-            }.spacing(16.0).alignment(Alignment::Leading), "Software"),
+            }.spacing(16.0).alignment(Alignment::Leading), "Software", 14.0),
         }
         .spacing(18.0)
         .alignment(Alignment::Leading),
@@ -133,14 +146,14 @@ pub(super) fn display_page(app: SettingsApp) -> impl View + Clone {
         settings_section(vstack! {
             settings_row(hstack! {
                 Slider::new(app.display_brightness_percent.clone()).min(0.0).max(100.0).on_changed(move |value| brightness_app.set_display_brightness_percent(f32_to_percent(value))).frame(270.0, 24.0),
-                Text::new(format!("{}%", f32_to_percent(app.display_brightness_percent.get()))).font_size(14.0).frame_width(48.0),
+                Text::new(format!("{}%", f32_to_percent(app.display_brightness_percent.get()))).font_size(12.0).frame_width(48.0),
             }.spacing(12.0), "Brightness"),
             settings_note(app.display_brightness_status.get()),
-        }.spacing(12.0).alignment(Alignment::Leading), "Screen brightness"),
+        }.spacing(12.0).alignment(Alignment::Leading), "Screen brightness", 14.0),
         settings_section(vstack! {
             settings_row(Select::new(vec![String::from("100%"),String::from("200%")],app.output_scale_index.clone()).width(240.0).placeholder("Custom saved scale").on_change(move |index| scale_app.set_output_scale(index)), "Scale"),
             settings_note(app.output_scale_status.get()),
-        }.spacing(12.0).alignment(Alignment::Leading), "Text and interface size"),
+        }.spacing(12.0).alignment(Alignment::Leading), "Text and interface size", 14.0),
     }.spacing(18.0).alignment(Alignment::Leading))
 }
 pub(super) fn cursor_page(app: SettingsApp) -> impl View + Clone {
@@ -155,7 +168,7 @@ pub(super) fn cursor_page(app: SettingsApp) -> impl View + Clone {
         }.spacing(8.0), "Theme"),
         settings_note(app.cursor_theme_status.get()),
         settings_note("Cursor themes apply immediately. Installed themes are read from /share/cursors."),
-    }.spacing(12.0).alignment(Alignment::Leading), "Mouse pointer").frame_height(height), height + 48.0)
+    }.spacing(12.0).alignment(Alignment::Leading), "Mouse pointer", 14.0).frame_height(height), height + 48.0)
 }
 pub(super) fn audio_page(app: SettingsApp) -> impl View + Clone {
     let outputs = app.audio_outputs.get();
@@ -171,14 +184,14 @@ pub(super) fn audio_page(app: SettingsApp) -> impl View + Clone {
                 Button::new("Refresh").on_click(move ||refresh_app.refresh_audio()),
             }.spacing(8.0), "Device"),
             settings_note(app.audio_status.get()),
-        }.spacing(12.0).alignment(Alignment::Leading), "Sound output"),
+        }.spacing(12.0).alignment(Alignment::Leading), "Sound output", 14.0),
         settings_section(vstack! {
             settings_row(hstack! {
                 Slider::new(app.audio_volume_percent.clone()).enabled(available).min(0.0).max(100.0).on_changed(move |value|volume_app.set_audio_volume_percent(f32_to_percent(value))).frame(270.0,24.0),
-                Text::new(format!("{}%",f32_to_percent(app.audio_volume_percent.get()))).font_size(14.0).frame_width(48.0),
+                Text::new(format!("{}%",f32_to_percent(app.audio_volume_percent.get()))).font_size(12.0).frame_width(48.0),
             }.spacing(12.0), "Volume"),
             settings_row(Toggle::new(app.audio_muted.clone()).enabled(available).on_change(move |muted|mute_app.set_audio_muted(muted)), "Mute"),
-        }.spacing(18.0).alignment(Alignment::Leading), "Master volume"),
+        }.spacing(18.0).alignment(Alignment::Leading), "Master volume", 14.0),
     }.spacing(18.0).alignment(Alignment::Leading))
 }
 pub(super) fn input_page(app: SettingsApp) -> impl View + Clone {
@@ -193,7 +206,7 @@ pub(super) fn input_page(app: SettingsApp) -> impl View + Clone {
         settings_row(Select::new(input_method_labels(&methods),app.selected_ime_index.clone()).width(330.0).placeholder("No input methods registered").on_change(move |index|select_app.select_input_method(index)), "Input method"),
         settings_note(format!("Active: {} · {} registered methods",selected,methods.len())),
         settings_note(app.input_status.get()),
-    }.spacing(12.0).alignment(Alignment::Leading), "Typing").frame_height(height), height + 48.0)
+    }.spacing(12.0).alignment(Alignment::Leading), "Typing", 14.0).frame_height(height), height + 48.0)
 }
 fn status_item_label(item: StatusItemId) -> &'static str {
     match item {
@@ -245,7 +258,7 @@ pub(super) fn status_page(app: SettingsApp) -> impl View + Clone {
         settings_section(vstack! {
             settings_note("Show items in the status bar and choose their order."),
             status_item_row(app.clone(),first,0,count),status_item_row(app.clone(),second,1,count),
-        }.spacing(12.0).alignment(Alignment::Leading),"Status bar"),
+        }.spacing(12.0).alignment(Alignment::Leading),"Status bar", 14.0),
         settings_section(vstack! {
             settings_row(Select::new(app.timezone_regions.get(),app.timezone_region_index.clone()).width(300.0).placeholder("No time zones installed").on_change(move |index|{
                 if let Some(name)=region.timezone_regions.get().get(index){region.timezone_cities.set(enumerate_cities(name));region.timezone_city_index.set(usize::MAX);}
@@ -254,11 +267,11 @@ pub(super) fn status_page(app: SettingsApp) -> impl View + Clone {
             settings_note(format!("Active time zone: {}",app.timezone_active.get())),
             settings_note(app.timezone_status.get()),
             Button::new("Apply time zone").enabled(app.timezone_cities.get().get(app.timezone_city_index.get()).is_some()).on_click(move ||timezone.apply_timezone()),
-        }.spacing(12.0).alignment(Alignment::Leading),"Time zone"),
+        }.spacing(12.0).alignment(Alignment::Leading),"Time zone", 14.0),
         settings_section(vstack! {
             settings_row(Select::new(vec![String::from("24-hour"),String::from("12-hour")],app.clock_format_index.clone()).width(300.0).on_change(move |index|clock.set_status_clock_format(if index==1 {ClockFormat::TwelveHour}else{ClockFormat::TwentyFourHour})),"Clock format"),
             settings_note("The clock stays visible at the far right of the status bar."),
-        }.spacing(12.0).alignment(Alignment::Leading),"Clock"),
+        }.spacing(12.0).alignment(Alignment::Leading),"Clock", 14.0),
         settings_note(app.status_preferences_status.get()),
         hstack! { Button::new("Refresh").on_click(move||refresh.refresh_status_preferences()), Button::new("Reset to defaults").on_click(move||reset.reset_status_preferences()), }.spacing(8.0),
     }.spacing(18.0).alignment(Alignment::Leading), height)
@@ -314,7 +327,7 @@ pub(super) fn settings_navigation(original: SettingsApp) -> impl View + Clone {
     .header(move || {
         HeaderBar::new(
             hstack! {
-                Text::from_state(navigation_title.clone()).font_size(22.0),
+                Text::from_state(navigation_title.clone()).font_size(20.0),
                 Spacer::new(),
             }
             .alignment(Alignment::Center)
