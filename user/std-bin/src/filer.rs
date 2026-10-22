@@ -6,10 +6,11 @@
 //! calling application.
 
 mod file_icons;
+mod filer_listing;
+mod filer_operations;
 mod picker_filter;
 
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
-use std::cmp::Ordering;
+use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::collections::VecDeque;
 use std::fs;
 use std::io::Read;
@@ -30,9 +31,9 @@ use scarlet_desktop_config::{
 };
 use scarlet_ui::prelude::*;
 use scarlet_ui::{
-    Alignment, BitmapImage, Button, Color, ColorPalette, Divider, GridView, HeaderBar, Icon,
-    IconSize, IconView, Image, ImageFit, NavigationLink, Spacer, dismiss_window, hstack,
-    measure_text_sized, navigation, open_window, vstack,
+    Alignment, BitmapImage, Button, Color, ColorPalette, Divider, GridView, HeaderBar, Icon, Image,
+    ImageFit, KeyCode, NavigationLink, Spacer, dismiss_window, hstack, measure_text_sized,
+    navigation, open_window, vstack,
 };
 use scarlet_ui_macros::View;
 use zune_jpeg::JpegDecoder;
@@ -41,6 +42,7 @@ use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::options::DecoderOptions;
 
 use file_icons::{FileKind, icon_for_entry};
+use filer_operations::{History, Operation};
 
 const APP_ID: &str = DESKTOP_FILES_APP_ID;
 const PICKER_WINDOW_KEY: &str = "picker";
@@ -60,6 +62,7 @@ const JPEG_THUMBNAIL_FILE_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const THUMBNAIL_WORKER_IDLE_DELAY: Duration = Duration::from_millis(25);
 const SERVICE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+const FILTER_DELAY: Duration = Duration::from_millis(180);
 
 /// Path to the files binary, used to re-exec in standalone picker mode.
 const FILES_BINARY_PATH: &str = "/bin/files";
@@ -117,6 +120,59 @@ struct DirectoryReadResult {
 }
 
 #[derive(Clone)]
+struct FileClipboard {
+    source: PathBuf,
+    cut: bool,
+}
+
+#[derive(Clone)]
+enum FilePrompt {
+    NewFolder(PathBuf),
+    Rename(PathBuf),
+    Delete(PathBuf),
+}
+
+struct OperationResult {
+    instance_id: u64,
+    directory: String,
+    cut_source: Option<PathBuf>,
+    result: std::result::Result<String, String>,
+}
+
+enum DirectoryJob {
+    Main {
+        instance_id: u64,
+        generation: u32,
+        path: String,
+        filters: (String, bool, usize),
+    },
+    Picker {
+        generation: u32,
+        path: String,
+        request: PickerRequest,
+    },
+}
+
+impl DirectoryJob {
+    fn same_owner(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Main {
+                    instance_id: left, ..
+                },
+                Self::Main {
+                    instance_id: right, ..
+                },
+            ) => left == right,
+            (Self::Picker { request: left, .. }, Self::Picker { request: right, .. }) => {
+                left.id == right.id
+            }
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone)]
 enum ThumbnailContext {
     Main {
         instance_id: u64,
@@ -150,14 +206,15 @@ struct PickerChild {
 static NEXT_FILER_INSTANCE_ID: Mutex<u64> = Mutex::new(1);
 static NEXT_PICKER_REQUEST_ID: Mutex<u32> = Mutex::new(1);
 static PENDING_DIRECTORY_READS: Mutex<Vec<DirectoryReadResult>> = Mutex::new(Vec::new());
+static PENDING_OPERATIONS: Mutex<Vec<OperationResult>> = Mutex::new(Vec::new());
+static PENDING_DIRECTORY_JOBS: Mutex<VecDeque<DirectoryJob>> = Mutex::new(VecDeque::new());
+static DIRECTORY_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 static PENDING_PICKER_REQUESTS: Mutex<Vec<PickerRequest>> = Mutex::new(Vec::new());
 static PENDING_PICKER_READS: Mutex<Vec<PickerReadResult>> = Mutex::new(Vec::new());
 static PENDING_THUMBNAIL_JOBS: Mutex<VecDeque<ThumbnailJob>> = Mutex::new(VecDeque::new());
 static PENDING_THUMBNAIL_RESULTS: Mutex<Vec<ThumbnailResult>> = Mutex::new(Vec::new());
 static THUMBNAIL_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 static PICKER_WINDOW_CLOSING: AtomicBool = AtomicBool::new(false);
-// Diagnostic-only ticks may wrap; no identity or application state uses them.
-static IDLE_TICK_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Picker child processes spawned via `launch_picker_process`. The background
 /// reaper thread polls them with `try_wait` so the UI thread never blocks and
@@ -170,6 +227,64 @@ fn mutex_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn enqueue_directory_job(job: DirectoryJob) {
+    {
+        let mut pending = mutex_lock(&PENDING_DIRECTORY_JOBS);
+        pending.retain(|existing| !existing.same_owner(&job));
+        pending.push_back(job);
+    }
+    if DIRECTORY_WORKER_STARTED
+        .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    // One worker and one pending request per browser, even while typing or
+    // navigating quickly. Generation checks reject the obsolete in-flight read.
+    thread::spawn(|| {
+        loop {
+            let job = mutex_lock(&PENDING_DIRECTORY_JOBS).pop_front();
+            match job {
+                Some(DirectoryJob::Main {
+                    instance_id,
+                    generation,
+                    path,
+                    filters,
+                }) => {
+                    let result =
+                        read_entries_with_options(&path, None, &filters.0, filters.1, filters.2)
+                            .map_err(|error| error.to_string());
+                    let mut pending = mutex_lock(&PENDING_DIRECTORY_READS);
+                    pending.retain(|read| read.instance_id != instance_id);
+                    pending.push(DirectoryReadResult {
+                        instance_id,
+                        generation,
+                        path,
+                        result,
+                    });
+                }
+                Some(DirectoryJob::Picker {
+                    generation,
+                    path,
+                    request,
+                }) => {
+                    let result =
+                        read_entries(&path, Some(&request)).map_err(|error| error.to_string());
+                    let mut pending = mutex_lock(&PENDING_PICKER_READS);
+                    pending.retain(|read| read.request_id != request.id);
+                    pending.push(PickerReadResult {
+                        request_id: request.id,
+                        generation,
+                        path,
+                        result,
+                    });
+                }
+                None => thread::sleep(THUMBNAIL_WORKER_IDLE_DELAY),
+            }
+        }
+    });
 }
 
 fn thumbnail_context_has_same_owner(left: &ThumbnailContext, right: &ThumbnailContext) -> bool {
@@ -424,22 +539,41 @@ struct FilerApp {
     directory_read_instance: State<u64>,
     directory_read_generation: State<u32>,
     status: State<String>,
+    location: State<String>,
+    location_focus: State<u64>,
+    history: State<History>,
+    picker_history: State<History>,
+    search: State<String>,
+    search_focus: State<u64>,
+    show_hidden: State<bool>,
+    sort_index: State<usize>,
+    applied_filters: State<(String, bool, usize)>,
+    filter_changed_at: State<Option<Instant>>,
+    clipboard: State<Option<FileClipboard>>,
+    prompt: State<Option<FilePrompt>>,
+    prompt_name: State<String>,
+    prompt_error: State<String>,
+    operation_busy: State<bool>,
+    refresh_message: State<Option<String>>,
+    grid_columns: State<usize>,
+    grid_focused: State<bool>,
+    picker_grid_focused: State<bool>,
+    picker_overwrite: State<Option<String>>,
 }
 
 impl FilerApp {
     fn new() -> Self {
-        println!("[filer-dbg] FilerApp::new enter");
         let current_path = initial_path();
         let app = Self::default();
         app.directory_read_instance.set(next_filer_instance_id());
         app.current_path.set(current_path.clone());
+        app.location.set(current_path.clone());
+        app.grid_columns.set(GRID_COLUMNS);
         app.entries.set(Vec::new());
         app.picker_current_path.set(current_path);
         app.picker_entries.set(Vec::new());
         app.picker_status.set(String::from("Ready"));
-        println!("[filer-dbg] FilerApp::new before refresh");
         app.refresh();
-        println!("[filer-dbg] FilerApp::new after refresh");
         app
     }
 
@@ -453,23 +587,79 @@ impl FilerApp {
         self.selected.set(None);
         self.last_click.set(None);
         self.status.set(format!("Loading {path}"));
-        println!("[filer-dbg] refresh: spawning directory read for {path}");
+        let filters = (
+            self.search.get(),
+            self.show_hidden.get(),
+            self.sort_index.get(),
+        );
+        self.applied_filters.set(filters.clone());
+        self.filter_changed_at.set(None);
 
-        thread::spawn(move || {
-            let result = read_entries(&path, None).map_err(|error| error.to_string());
-            mutex_lock(&PENDING_DIRECTORY_READS).push(DirectoryReadResult {
-                instance_id,
-                generation,
-                path,
-                result,
-            });
+        enqueue_directory_job(DirectoryJob::Main {
+            instance_id,
+            generation,
+            path,
+            filters,
         });
     }
 
     fn navigate_to(&self, path: impl Into<String>) {
         let path = path.into();
-        self.current_path.set(path);
+        let mut history = self.history.get();
+        history.visit(&self.current_path.get(), &path);
+        self.history.set(history);
+        self.current_path.set(path.clone());
+        self.location.set(path);
+        self.refresh_message.set(None);
         self.refresh();
+    }
+
+    fn navigate_history(&self, forward: bool, picker: bool) {
+        let (history_state, path_state) = if picker {
+            (&self.picker_history, &self.picker_current_path)
+        } else {
+            (&self.history, &self.current_path)
+        };
+        let mut history = history_state.get();
+        let next = if forward {
+            history.forward(&path_state.get())
+        } else {
+            history.back(&path_state.get())
+        };
+        if let Some(path) = next {
+            history_state.set(history);
+            path_state.set(path.clone());
+            if picker {
+                self.picker_overwrite.set(None);
+                self.refresh_picker();
+            } else {
+                self.location.set(path);
+                self.refresh_message.set(None);
+                self.refresh();
+            }
+        }
+    }
+
+    fn submit_location(&self) {
+        self.location_focus.set(0);
+        match filer_operations::location_path(
+            Path::new(&self.current_path.get()),
+            &self.location.get(),
+            Path::new(&home_path()),
+        ) {
+            Ok(path) => {
+                let resolved = filer_operations::native_fs::canonicalize(&path)
+                    .and_then(|path| {
+                        if filer_operations::native_fs::metadata(&path)?.is_dir() { Ok(path) }
+                        else { Err(std::io::Error::other("Enter a folder path")) }
+                    });
+                match resolved {
+                    Ok(path) => self.navigate_to(path.to_string_lossy().into_owned()),
+                    Err(error) => self.status.set(format!("Cannot open {}: {error}", path.display())),
+                }
+            },
+            Err(error) => self.status.set(error),
+        }
     }
 
     fn navigate_up(&self) {
@@ -495,20 +685,20 @@ impl FilerApp {
         self.picker_last_click.set(None);
         self.picker_status.set(format!("Loading {path}"));
 
-        thread::spawn(move || {
-            let result = read_entries(&path, Some(&request)).map_err(|error| error.to_string());
-            mutex_lock(&PENDING_PICKER_READS).push(PickerReadResult {
-                request_id: request.id,
-                generation,
-                path,
-                result,
-            });
+        enqueue_directory_job(DirectoryJob::Picker {
+            generation,
+            path,
+            request,
         });
     }
 
     fn navigate_picker_to(&self, path: impl Into<String>) {
         let path = path.into();
+        let mut history = self.picker_history.get();
+        history.visit(&self.picker_current_path.get(), &path);
+        self.picker_history.set(history);
         self.picker_current_path.set(path);
+        self.picker_overwrite.set(None);
         self.refresh_picker();
     }
 
@@ -540,16 +730,10 @@ impl FilerApp {
             Some((index, now))
         });
 
-        let picker_selects_directories = self
-            .picker_request
-            .get()
-            .as_ref()
-            .is_some_and(|request| request.select_directories);
-
         self.selected.set(Some(index));
         self.status.set(entry.path.clone());
 
-        if !double_click || picker_selects_directories {
+        if !double_click {
             return;
         }
 
@@ -578,11 +762,6 @@ impl FilerApp {
             Some((index, now))
         });
 
-        let select_directories = self
-            .picker_request
-            .get()
-            .as_ref()
-            .is_some_and(|request| request.select_directories);
         let save_mode = self
             .picker_request
             .get()
@@ -599,9 +778,7 @@ impl FilerApp {
             return;
         }
         if entry.is_directory {
-            if !select_directories {
-                self.navigate_picker_to(entry.path);
-            }
+            self.navigate_picker_to(entry.path);
         } else {
             self.finish_picker(true);
         }
@@ -633,29 +810,267 @@ impl FilerApp {
     }
 
     fn create_folder(&self) {
-        let base = PathBuf::from(self.current_path.get());
-        for suffix in 0..100 {
-            let name = if suffix == 0 {
-                String::from("New Folder")
-            } else {
-                format!("New Folder {suffix}")
-            };
-            let path = base.join(name);
-            if path.exists() {
-                continue;
-            }
-            match fs::create_dir(&path) {
-                Ok(()) => {
-                    self.status
-                        .set(format!("Created {}", path.to_string_lossy()));
-                    self.refresh();
-                }
-                Err(error) => self.status.set(format!("Cannot create folder: {error}")),
-            }
+        if self.operation_busy.get() {
             return;
         }
-        self.status
-            .set(String::from("Cannot choose a name for the new folder"));
+        self.prompt_name.set(String::from("New Folder"));
+        self.prompt_error.set(String::new());
+        self.prompt.set(Some(FilePrompt::NewFolder(PathBuf::from(
+            self.current_path.get(),
+        ))));
+    }
+
+    fn selected_entry(&self) -> Option<FileEntry> {
+        self.selected
+            .get()
+            .and_then(|index| self.entries.get().get(index).cloned())
+    }
+
+    fn rename_selected(&self) {
+        if let Err(error) = filer_operations::native_fs::require_noreplace_move() {
+            self.status.set(error.to_string());
+            return;
+        }
+        if self.operation_busy.get() {
+            return;
+        }
+        if let Some(entry) = self.selected_entry() {
+            self.prompt_name.set(entry.name);
+            self.prompt_error.set(String::new());
+            self.prompt
+                .set(Some(FilePrompt::Rename(PathBuf::from(entry.path))));
+        } else {
+            self.status.set(String::from("Select an item to rename"));
+        }
+    }
+
+    fn delete_selected(&self) {
+        if self.operation_busy.get() {
+            return;
+        }
+        if let Some(entry) = self.selected_entry() {
+            self.prompt_error.set(String::new());
+            self.prompt
+                .set(Some(FilePrompt::Delete(PathBuf::from(entry.path))));
+        } else {
+            self.status.set(String::from("Select an item to delete"));
+        }
+    }
+
+    fn copy_selected(&self, cut: bool) {
+        if cut {
+            if let Err(error) = filer_operations::native_fs::require_noreplace_move() {
+                self.status.set(error.to_string());
+                return;
+            }
+        }
+        if let Some(entry) = self.selected_entry() {
+            self.clipboard.set(Some(FileClipboard {
+                source: PathBuf::from(&entry.path),
+                cut,
+            }));
+            self.status.set(format!(
+                "{} {} — choose a destination and Paste",
+                if cut { "Cut" } else { "Copied" },
+                entry.name
+            ));
+        } else {
+            self.status.set(String::from("Select an item first"));
+        }
+    }
+
+    fn paste(&self) {
+        let Some(clipboard) = self.clipboard.get() else {
+            self.status
+                .set(String::from("Copy or cut an item in Files first"));
+            return;
+        };
+        self.run_operation(Operation::Transfer {
+            source: clipboard.source,
+            directory: PathBuf::from(self.current_path.get()),
+            cut: clipboard.cut,
+        });
+    }
+
+    fn confirm_prompt(&self) {
+        let Some(prompt) = self.prompt.get() else {
+            return;
+        };
+        let name = self.prompt_name.get();
+        if !matches!(prompt, FilePrompt::Delete(_)) {
+            if let Err(error) = filer_operations::validate_name(&name) {
+                self.prompt_error.set(error);
+                return;
+            }
+        }
+        let operation = match prompt {
+            FilePrompt::NewFolder(directory) => Operation::NewFolder { directory, name },
+            FilePrompt::Rename(source) => Operation::Rename { source, name },
+            FilePrompt::Delete(source) => Operation::Delete { source },
+        };
+        self.prompt.set(None);
+        self.run_operation(operation);
+    }
+
+    fn run_operation(&self, operation: Operation) {
+        if self.operation_busy.get() {
+            self.status.set(String::from(
+                "Wait for the current file operation to finish",
+            ));
+            return;
+        }
+        self.operation_busy.set(true);
+        self.status.set(String::from("Working…"));
+        let instance_id = self.directory_read_instance.get();
+        let directory = self.current_path.get();
+        thread::spawn(move || {
+            let cut_source = match &operation {
+                Operation::Transfer {
+                    source, cut: true, ..
+                } => Some(source.clone()),
+                _ => None,
+            };
+            let result = filer_operations::execute(&operation);
+            mutex_lock(&PENDING_OPERATIONS).push(OperationResult {
+                instance_id,
+                directory,
+                cut_source,
+                result,
+            });
+        });
+    }
+
+    fn open_selected(&self, picker: bool) {
+        let entry = if picker {
+            self.picker_selected
+                .get()
+                .and_then(|index| self.picker_entries.get().get(index).cloned())
+        } else {
+            self.selected_entry()
+        };
+        if let Some(entry) = entry {
+            if entry.is_directory {
+                if picker {
+                    self.navigate_picker_to(entry.path);
+                } else {
+                    self.navigate_to(entry.path);
+                }
+            } else if picker {
+                self.picker_file_name.set(entry.name);
+                self.finish_picker(true);
+            } else {
+                self.open_entry(entry.path);
+            }
+        }
+    }
+
+    fn handle_key(&self, event: KeyEvent, picker: bool) -> bool {
+        let KeyEvent::Pressed { keycode, modifiers } = event else {
+            return false;
+        };
+        if keycode == KeyCode::Escape {
+            if picker {
+                self.picker_overwrite.set(None);
+            } else if self.prompt.get().is_some() {
+                self.prompt.set(None);
+            } else {
+                self.selected.set(None);
+            }
+            return true;
+        }
+        if modifiers.alt {
+            match keycode {
+                KeyCode::Left => self.navigate_history(false, picker),
+                KeyCode::Right => self.navigate_history(true, picker),
+                KeyCode::Up => {
+                    if picker {
+                        self.navigate_picker_up();
+                    } else {
+                        self.navigate_up();
+                    }
+                }
+                _ => return false,
+            }
+            return true;
+        }
+        if modifiers.primary() && !picker {
+            match keycode {
+                KeyCode::Char('l' | 'L') => {
+                    self.search_focus.set(0);
+                    self.location_focus
+                        .set(self.location_focus.get().wrapping_add(1).max(1));
+                }
+                KeyCode::Char('f' | 'F') => {
+                    self.location_focus.set(0);
+                    self.search_focus
+                        .set(self.search_focus.get().wrapping_add(1).max(1));
+                }
+                KeyCode::Char('c' | 'C')
+                    if self.grid_focused.get() && self.prompt.get().is_none() =>
+                {
+                    self.copy_selected(false)
+                }
+                KeyCode::Char('x' | 'X')
+                    if self.grid_focused.get() && self.prompt.get().is_none() =>
+                {
+                    self.copy_selected(true)
+                }
+                KeyCode::Char('v' | 'V')
+                    if self.grid_focused.get() && self.prompt.get().is_none() =>
+                {
+                    self.paste()
+                }
+                KeyCode::Char('h' | 'H') => self.show_hidden.set(!self.show_hidden.get()),
+                KeyCode::Char('n' | 'N') if modifiers.shift => self.create_folder(),
+                KeyCode::Char('r' | 'R') => self.refresh(),
+                _ => return false,
+            }
+            return true;
+        }
+        if self.prompt.get().is_some() {
+            return false;
+        }
+        match keycode {
+            KeyCode::Enter => self.open_selected(picker),
+            KeyCode::F(2) if !picker => self.rename_selected(),
+            KeyCode::F(5) => {
+                if picker {
+                    self.refresh_picker();
+                } else {
+                    self.refresh();
+                }
+            }
+            KeyCode::Delete if !picker => self.delete_selected(),
+            KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Home
+            | KeyCode::End => {
+                let (entries, selected) = if picker {
+                    (&self.picker_entries, &self.picker_selected)
+                } else {
+                    (&self.entries, &self.selected)
+                };
+                let count = entries.get().len();
+                if count == 0 {
+                    return true;
+                }
+                let index = selected.get().unwrap_or(0);
+                let columns = self.grid_columns.get().max(1);
+                let next = match keycode {
+                    KeyCode::Left => index.saturating_sub(1),
+                    KeyCode::Right => (index + 1).min(count - 1),
+                    KeyCode::Up => index.saturating_sub(columns),
+                    KeyCode::Down => (index + columns).min(count - 1),
+                    KeyCode::Home => 0,
+                    _ => count - 1,
+                };
+                selected.set(Some(next));
+            }
+            _ => return false,
+        }
+        true
     }
 
     fn configure_picker(&self, request: PickerRequest) {
@@ -670,6 +1085,8 @@ impl FilerApp {
             request.title.clone()
         };
         self.picker_file_name.set(request.suggested_name.clone());
+        self.picker_history.set(History::default());
+        self.picker_overwrite.set(None);
         self.picker_request.set(Some(request));
         self.picker_current_path.set(initial_folder);
         self.picker_entries.set(Vec::new());
@@ -683,6 +1100,44 @@ impl FilerApp {
     }
 
     fn process_pending_ui_work(&self) {
+        let filters = (
+            self.search.get(),
+            self.show_hidden.get(),
+            self.sort_index.get(),
+        );
+        if filters != self.applied_filters.get() {
+            match self.filter_changed_at.get() {
+                None => self.filter_changed_at.set(Some(Instant::now())),
+                Some(at) if at.elapsed() >= FILTER_DELAY => self.refresh(),
+                _ => {}
+            }
+        }
+        let operations: Vec<_> = mutex_lock(&PENDING_OPERATIONS).drain(..).collect();
+        for completed in operations {
+            if completed.instance_id != self.directory_read_instance.get() {
+                continue;
+            }
+            self.operation_busy.set(false);
+            let message =
+                match completed.result {
+                    Ok(message) => {
+                        if let Some(source) = completed.cut_source {
+                            if self.clipboard.get().is_some_and(|clipboard| {
+                                clipboard.cut && clipboard.source == source
+                            }) {
+                                self.clipboard.set(None);
+                            }
+                        }
+                        message
+                    }
+                    Err(error) => error,
+                };
+            self.status.set(message.clone());
+            if completed.directory == self.current_path.get() {
+                self.refresh_message.set(Some(message));
+                self.refresh();
+            }
+        }
         let directory_reads: Vec<_> = mutex_lock(&PENDING_DIRECTORY_READS).drain(..).collect();
         for read in directory_reads {
             let is_current = self.directory_read_instance.get() == read.instance_id
@@ -702,8 +1157,14 @@ impl FilerApp {
                         },
                         &entries,
                     );
+                    let count = entries.len();
                     self.entries.set(entries);
-                    self.status.set(String::from("Ready"));
+                    let message = self
+                        .refresh_message
+                        .get()
+                        .unwrap_or_else(|| format!("{count} item(s)"));
+                    self.refresh_message.set(None);
+                    self.status.set(message);
                 }
                 Err(error) => self
                     .status
@@ -756,7 +1217,17 @@ impl FilerApp {
                         &entries,
                     );
                     self.picker_entries.set(entries);
-                    self.picker_status.set(String::from("Ready"));
+                    self.picker_status.set(
+                        if self
+                            .picker_request
+                            .get()
+                            .is_some_and(|request| request.allow_multiple)
+                        {
+                            String::from("Only one item can be selected")
+                        } else {
+                            String::from("Ready")
+                        },
+                    );
                 }
                 Err(error) => self
                     .picker_status
@@ -824,6 +1295,10 @@ impl FilerApp {
     }
 
     fn complete_picker(&self, accepted: bool, dismiss: bool) {
+        self.complete_picker_selection(accepted, dismiss, false);
+    }
+
+    fn complete_picker_selection(&self, accepted: bool, dismiss: bool, replace_confirmed: bool) {
         let Some(request) = self.picker_request.get() else {
             return;
         };
@@ -847,13 +1322,23 @@ impl FilerApp {
                         .get(index)
                         .map(|entry| entry.path.clone())
                 })
-                .unwrap_or_default()
+                .unwrap_or_else(|| {
+                    if request.select_directories {
+                        self.picker_current_path.get()
+                    } else {
+                        String::new()
+                    }
+                })
         };
         if accepted {
             let name = Path::new(&path)
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or("");
+                .unwrap_or(if request.select_directories && path == ROOT_PATH {
+                    "root"
+                } else {
+                    ""
+                });
             if let Err(message) = picker_filter::validate_selection(
                 name,
                 Path::new(&path).is_dir(),
@@ -864,6 +1349,16 @@ impl FilerApp {
                 self.picker_status.set(String::from(message));
                 return;
             }
+            if request.save_mode && filer_operations::native_fs::symlink_metadata(&path).is_ok() {
+                if !replace_confirmed
+                    || self.picker_overwrite.get().as_deref() != Some(path.as_str())
+                {
+                    self.picker_overwrite.set(Some(path.clone()));
+                    self.picker_status
+                        .set(format!("{} already exists. Replace this file?", path));
+                    return;
+                }
+            }
         }
         let success = accepted && !path.is_empty();
 
@@ -871,6 +1366,7 @@ impl FilerApp {
         cancel_picker_thumbnail_jobs(&request_id);
         self.picker_request.set(None);
         self.picker_file_name.set(String::new());
+        self.picker_overwrite.set(None);
         PICKER_WINDOW_CLOSING.store(true, AtomicOrdering::Release);
         if dismiss {
             dismiss_window(PICKER_WINDOW_KEY);
@@ -974,6 +1470,8 @@ impl FilerApp {
         } else {
             self.selected.clone()
         };
+        let columns = self.grid_columns.clone();
+        let key_app = self.clone();
         let grid = GridView::new(
             entries,
             selected,
@@ -982,7 +1480,24 @@ impl FilerApp {
             move |index, entry, selected| grid_app.file_cell(index, entry, selected, picker),
         )
         .spacing(10.0)
-        .minimum_cell_width(FILE_CELL_WIDTH);
+        .minimum_cell_width(FILE_CELL_WIDTH)
+        .reveal_selection(true)
+        .item_key(|entry| entry.path.clone().into())
+        .on_geometry_change(
+            |geometry| {
+                (((geometry.size().width + 10.0) / (FILE_CELL_WIDTH + 10.0))
+                    .floor()
+                    .max(1.0) as usize)
+                    .min(GRID_COLUMNS)
+            },
+            move |count| columns.set(count),
+        )
+        .focusable(if picker {
+            self.picker_grid_focused.clone()
+        } else {
+            self.grid_focused.clone()
+        })
+        .on_key(move |event| key_app.handle_key(event, picker));
 
         let mut title = if picker {
             self.picker_request
@@ -1012,19 +1527,47 @@ impl FilerApp {
                 .as_ref()
                 .is_some_and(|request| request.save_mode);
             let file_name = if save_mode {
+                let submit_app = self.clone();
                 Either::A(
                     TextField::new(self.picker_file_name.clone())
                         .placeholder("File name")
+                        .on_submit(move || submit_app.finish_picker(true))
                         .frame_width(260.0),
                 )
             } else {
                 Either::B(Spacer::new().frame_width(0.0))
             };
-            let action_title = if save_mode { "Save" } else { "Open" };
+            let action_title = if save_mode {
+                "Save"
+            } else if self
+                .picker_request
+                .get()
+                .is_some_and(|request| request.select_directories)
+            {
+                "Select Folder"
+            } else {
+                "Open"
+            };
+            let replacement = if let Some(path) = self.picker_overwrite.get() {
+                let replace_app = self.clone();
+                let keep_app = self.clone();
+                Either::A(hstack! {
+                    Text::new(format!("Replace {}?", Path::new(&path).file_name().unwrap_or_default().to_string_lossy())).font_size(12.0),
+                    Spacer::new(),
+                    Button::new("Keep Existing").on_click(move || {
+                        keep_app.picker_overwrite.set(None);
+                        keep_app.picker_status.set(String::from("Choose a different name or folder"));
+                    }),
+                    Button::new("Replace").on_click(move || replace_app.complete_picker_selection(true, true, true)),
+                }.spacing(8.0).padding(8.0))
+            } else {
+                Either::B(vstack! {})
+            };
             Either::A(vstack! {
                 Divider::new(),
+                replacement,
+                Text::from_state(self.picker_status.clone()).font_size(11.0),
                 hstack! {
-                    Text::from_state(self.picker_status.clone()).font_size(11.0),
                     Spacer::new(),
                     file_name,
                     Button::new("Cancel").on_click(move || cancel_app.finish_picker(false)),
@@ -1034,18 +1577,119 @@ impl FilerApp {
                 .padding(8.0),
             })
         } else {
-            Either::B(vstack! {})
+            Either::B(vstack! {
+                Divider::new(),
+                Text::from_state(self.status.clone()).font_size(11.0),
+                Text::new("Enter: Open · F2: Rename · Ctrl+C/X/V: Copy/Cut/Paste · Delete: Delete…")
+                    .font_size(10.0).color(ColorPalette::default().text_secondary()),
+            }.spacing(4.0).padding(8.0))
         };
+
+        let tools = if picker {
+            Either::A(vstack! {})
+        } else {
+            Either::B(self.browser_tools())
+        };
+        let prompt = if picker {
+            Either::A(vstack! {})
+        } else {
+            Either::B(self.prompt_view())
+        };
+        let key_app = self.clone();
 
         vstack! {
             Text::new(title)
                 .font_size(12.0)
                 .color(ColorPalette::default().text_secondary()),
+            tools,
+            prompt,
             grid,
             footer,
         }
+        .on_key(move |event| key_app.handle_key(event, picker))
         .alignment(Alignment::Leading)
         .padding(10.0)
+        .frame(f32::INFINITY, f32::INFINITY)
+    }
+
+    fn browser_tools(&self) -> impl View + Clone + use<> {
+        let new_app = self.clone();
+        let rename_app = self.clone();
+        let delete_app = self.clone();
+        let copy_app = self.clone();
+        let cut_app = self.clone();
+        let paste_app = self.clone();
+        let cancel_search_app = self.clone();
+        vstack! {
+            hstack! {
+                TextField::new(self.search.clone()).placeholder("Filter this folder…")
+                    .autofocus(self.search_focus.get() > 0)
+                    .on_cancel(move || { cancel_search_app.search.set(String::new()); cancel_search_app.search_focus.set(0); })
+                    .key(format!("files-search-{}", self.search_focus.get()))
+                    .frame(f32::INFINITY, 34.0),
+                Select::new(vec![String::from("Name A–Z"), String::from("Name Z–A"), String::from("Size, largest first")], self.sort_index.clone()).width(170.0),
+                Text::new("Hidden").font_size(12.0),
+                Toggle::new(self.show_hidden.clone()),
+            }.spacing(8.0),
+            hstack! {
+                Button::new("New Folder…").on_click(move || new_app.create_folder()),
+                Button::new("Rename…").on_click(move || rename_app.rename_selected()),
+                Button::new("Copy").on_click(move || copy_app.copy_selected(false)),
+                Button::new("Cut").on_click(move || cut_app.copy_selected(true)),
+                Button::new("Paste").on_click(move || paste_app.paste()),
+                Spacer::new(),
+                Button::new("Delete…").on_click(move || delete_app.delete_selected()),
+            }.spacing(6.0),
+        }.spacing(8.0)
+    }
+
+    fn prompt_view(&self) -> impl View + Clone + use<> {
+        if let Some(prompt) = self.prompt.get() {
+            let (title, target, action, needs_name) = match prompt {
+                FilePrompt::NewFolder(path) => ("Create a folder in", path, "Create", true),
+                FilePrompt::Rename(path) => ("Rename", path, "Rename", true),
+                FilePrompt::Delete(path) => (
+                    "Permanently delete? Folder contents are removed; links keep their targets. This cannot be undone.",
+                    path,
+                    "Delete Permanently",
+                    false,
+                ),
+            };
+            let confirm_app = self.clone();
+            let cancel_app = self.clone();
+            let submit_app = self.clone();
+            let escape_app = self.clone();
+            let name = if needs_name {
+                Either::A(
+                    TextField::new(self.prompt_name.clone())
+                        .placeholder("Name")
+                        .autofocus(true)
+                        .on_submit(move || submit_app.confirm_prompt())
+                        .on_cancel(move || escape_app.prompt.set(None))
+                        .frame(f32::INFINITY, 34.0),
+                )
+            } else {
+                Either::B(vstack! {})
+            };
+            Either::A(
+                vstack! {
+                    Text::new(title).font_size(12.0),
+                    Text::new(target.to_string_lossy().into_owned()).font_size(12.0),
+                    name,
+                    Text::from_state(self.prompt_error.clone()).font_size(11.0),
+                    hstack! {
+                        Spacer::new(),
+                        Button::new("Cancel").on_click(move || cancel_app.prompt.set(None)),
+                        Button::new(action).on_click(move || confirm_app.confirm_prompt()),
+                    }.spacing(8.0),
+                }
+                .spacing(4.0)
+                .padding(10.0)
+                .background(ColorPalette::default().surface_variant()),
+            )
+        } else {
+            Either::B(vstack! {})
+        }
     }
 
     fn files_page(&self) -> impl View + Clone + use<> {
@@ -1061,25 +1705,40 @@ impl FilerApp {
 
     fn header_for(&self, picker: bool) -> impl View + Clone + use<> {
         let back_app = self.clone();
+        let forward_app = self.clone();
         let up_app = self.clone();
-        let create_app = self.clone();
         let refresh_app = self.clone();
+        let submit_app = self.clone();
+        let cancel_app = self.clone();
         let current_path = if picker {
-            self.picker_current_path.clone()
+            Either::A(
+                Text::from_state(self.picker_current_path.clone())
+                    .font_size(13.0)
+                    .frame(f32::INFINITY, 32.0),
+            )
         } else {
-            self.current_path.clone()
+            Either::B(
+                TextField::new(self.location.clone())
+                    .placeholder("Folder path (Enter to open)")
+                    .autofocus(self.location_focus.get() > 0)
+                    .blur_on_submit(true)
+                    .on_submit(move || submit_app.submit_location())
+                    .on_cancel(move || {
+                        cancel_app.location.set(cancel_app.current_path.get());
+                        cancel_app.location_focus.set(0);
+                    })
+                    .key(format!("files-location-{}", self.location_focus.get()))
+                    .frame(f32::INFINITY, 32.0),
+            )
         };
         HeaderBar::new(
             hstack! {
                 Button::icon_only(Icon::ChevronLeft)
                     .header_style()
-                    .on_click(move || {
-                        if picker {
-                            back_app.navigate_picker_up();
-                        } else {
-                            back_app.navigate_up();
-                        }
-                    }),
+                    .on_click(move || back_app.navigate_history(false, picker)),
+                Button::icon_only(Icon::ChevronRight)
+                    .header_style()
+                    .on_click(move || forward_app.navigate_history(true, picker)),
                 Button::icon_only(Icon::ArrowUp)
                     .header_style()
                     .on_click(move || {
@@ -1089,18 +1748,7 @@ impl FilerApp {
                             up_app.navigate_up();
                         }
                     }),
-                IconView::new(Icon::Folder)
-                    .size(IconSize::Medium)
-                    .filled(),
-                Text::from_state(current_path).font_size(14.0),
-                Spacer::new(),
-                Button::icon_only(Icon::FolderPlus)
-                    .header_style()
-                    .on_click(move || {
-                        if !picker {
-                            create_app.create_folder();
-                        }
-                    }),
+                current_path,
                 Button::icon_only(Icon::Refresh)
                     .header_style()
                     .on_click(move || {
@@ -1110,8 +1758,6 @@ impl FilerApp {
                             refresh_app.refresh();
                         }
                     }),
-                Button::icon_only(Icon::LayoutGrid).header_style(),
-                Button::icon_only(Icon::Menu2).header_style(),
             }
             .alignment(Alignment::Center)
             .padding(8.0),
@@ -1122,16 +1768,17 @@ impl FilerApp {
 
 impl Application for FilerApp {
     fn on_idle(&mut self) {
-        let tick = IDLE_TICK_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
-        if tick % 250 == 0 {
-            println!("[filer-dbg] idle tick {tick}");
-        }
         self.process_pending_ui_work();
     }
 
     fn on_window_close_requested(&mut self, context: &WindowContext) -> bool {
         if context.scene_key.as_str() == PICKER_WINDOW_KEY {
             self.complete_picker(false, false);
+        } else if self.operation_busy.get() {
+            self.status.set(String::from(
+                "A file operation is still running. Close Files when it has finished.",
+            ));
+            return false;
         }
         true
     }
@@ -1190,6 +1837,7 @@ impl Application for FilerApp {
         )
         .app_id(APP_ID)
         .size(Size::new(960.0, 640.0))
+        .min_size(Size::new(760.0, 520.0))
         .scene_key("main")
         .open_at_launch(!STANDALONE_PICKER.load(AtomicOrdering::Acquire));
 
@@ -1203,6 +1851,7 @@ impl Application for FilerApp {
             .scene_key(PICKER_WINDOW_KEY)
             .app_id(APP_ID)
             .size(Size::new(960.0, 640.0))
+            .min_size(Size::new(640.0, 440.0))
             .open_at_launch(picker_open_at_launch);
 
         (main_window, picker_window)
@@ -1336,15 +1985,89 @@ mod layout_tests {
     }
 
     #[test]
-    fn file_manager_windows_start_hidden() {
+    fn main_window_opens_and_picker_stays_hidden_until_requested() {
         let app = FilerApp::new();
         let mut builder = SceneBuilder::new();
         app.scenes().build(&mut builder);
         let declarations = builder.into_declarations();
 
         assert_eq!(declarations.len(), 2);
-        assert!(!declarations[0].opens_at_launch);
+        assert!(declarations[0].opens_at_launch);
         assert!(!declarations[1].opens_at_launch);
+    }
+
+    #[test]
+    fn picker_process_arguments_preserve_selection_modes_and_names() {
+        let request = PickerRequest {
+            id: "request-123".into(),
+            title: "Choose a folder".into(),
+            initial_folder: "/tmp/日本語 with spaces".into(),
+            filter: "extensions:txt,md".into(),
+            allow_multiple: true,
+            select_directories: true,
+            save_mode: true,
+            suggested_name: "メモ with spaces.txt".into(),
+        };
+        let parsed = super::parse_picker_args(&super::build_picker_argv(&request));
+        assert_eq!(parsed.id, request.id);
+        assert!(parsed.same_invocation(&request));
+    }
+
+    #[test]
+    fn delete_command_only_prepares_confirmation_and_freezes_the_target() {
+        let app = FilerApp::default();
+        app.entries.set(vec![FileEntry {
+            name: "keep.txt".into(),
+            path: "/tmp/keep.txt".into(),
+            is_directory: false,
+            size: 4,
+            kind: FileKind::from_path("keep.txt"),
+            thumbnail: None,
+        }]);
+        app.selected.set(Some(0));
+        app.delete_selected();
+        assert!(!app.operation_busy.get());
+        app.selected.set(None);
+        assert!(
+            matches!(app.prompt.get(), Some(super::FilePrompt::Delete(path)) if path == std::path::Path::new("/tmp/keep.txt"))
+        );
+        app.prompt.set(None);
+        assert!(!app.operation_busy.get());
+    }
+
+    #[test]
+    fn keyboard_navigation_respects_actual_grid_columns() {
+        let app = FilerApp::default();
+        app.grid_columns.set(3);
+        app.entries.set(
+            (0..10)
+                .map(|index| FileEntry {
+                    name: index.to_string(),
+                    path: format!("/tmp/{index}"),
+                    is_directory: true,
+                    size: 0,
+                    kind: FileKind::Folder,
+                    thumbnail: None,
+                })
+                .collect(),
+        );
+        app.selected.set(Some(1));
+        assert!(app.handle_key(
+            scarlet_ui::KeyEvent::Pressed {
+                keycode: scarlet_ui::KeyCode::Down,
+                modifiers: Default::default()
+            },
+            false
+        ));
+        assert_eq!(app.selected.get(), Some(4));
+        assert!(app.handle_key(
+            scarlet_ui::KeyEvent::Pressed {
+                keycode: scarlet_ui::KeyCode::End,
+                modifiers: Default::default()
+            },
+            false
+        ));
+        assert_eq!(app.selected.get(), Some(9));
     }
 
     #[test]
@@ -1611,23 +2334,30 @@ fn home_path() -> String {
 }
 
 fn read_entries(path: &str, picker: Option<&PickerRequest>) -> std::io::Result<Vec<FileEntry>> {
+    read_entries_with_options(path, picker, "", false, 0)
+}
+
+fn read_entries_with_options(
+    path: &str,
+    picker: Option<&PickerRequest>,
+    query: &str,
+    show_hidden: bool,
+    sort_index: usize,
+) -> std::io::Result<Vec<FileEntry>> {
     let mut entries = Vec::new();
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        let file_type = entry.file_type()?;
-        let is_directory = file_type.is_dir();
+    for entry in filer_listing::read_directory(path, query, show_hidden, sort_index)? {
+        let filer_listing::Entry {
+            name,
+            path,
+            is_directory,
+            size,
+        } = entry;
         if let Some(request) = picker
             && !is_directory
             && !matches_filter(&name, &request.filter)
         {
             continue;
         }
-        let size = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-        let path = entry.path().to_string_lossy().into_owned();
         let kind = if is_directory {
             FileKind::Folder
         } else {
@@ -1643,13 +2373,6 @@ fn read_entries(path: &str, picker: Option<&PickerRequest>) -> std::io::Result<V
         });
     }
 
-    entries.sort_by(
-        |left, right| match (left.is_directory, right.is_directory) {
-            (true, false) => Ordering::Less,
-            (false, true) => Ordering::Greater,
-            _ => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
-        },
-    );
     Ok(entries)
 }
 
@@ -1875,6 +2598,14 @@ fn run_picker_service() {
                 );
                 continue;
             }
+            if request.allow_multiple {
+                let _ = connection.send_method_error(
+                    0,
+                    "org.scarlet.desktop.FileManager.UnsupportedSelection",
+                    "This file picker supports selecting one item at a time",
+                );
+                continue;
+            }
             if let Some(request_id) = active_picker_request_id(&request) {
                 let _ = connection.send_method_return(0, vec![Argument::String(request_id)]);
                 continue;
@@ -1985,6 +2716,7 @@ fn launch_picker_process(request: &PickerRequest) {
         }
         Err(error) => {
             eprintln!("[filer] failed to spawn picker process: {error}");
+            send_picker_response(request.id.clone(), false, String::new());
         }
     }
 }
@@ -2042,6 +2774,8 @@ fn parse_picker_args(args: &[String]) -> PickerRequest {
             "--save" => {
                 request.save_mode = true;
             }
+            "--allow-multiple" => request.allow_multiple = true,
+            "--select-directories" => request.select_directories = true,
             "--suggested-name" => {
                 if let Some(val) = args.get(i + 1) {
                     request.suggested_name = val.clone();
@@ -2070,6 +2804,12 @@ fn build_picker_argv(request: &PickerRequest) -> Vec<String> {
         String::from("--filter"),
         request.filter.clone(),
     ];
+    if request.allow_multiple {
+        argv.push(String::from("--allow-multiple"));
+    }
+    if request.select_directories {
+        argv.push(String::from("--select-directories"));
+    }
     if request.save_mode {
         argv.push(String::from("--save"));
         if !request.suggested_name.is_empty() {
