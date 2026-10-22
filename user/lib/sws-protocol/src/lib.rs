@@ -33,6 +33,27 @@ pub mod workspace;
 /// This prevents unbounded allocations on malformed frames.
 pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024; // 1 MiB
 
+/// Maximum serialized application menu carried by focus/active-app messages.
+/// Menus are opaque bytes (including JSON) and must never be truncated.
+pub const MAX_MENU_TITLES_BYTES: usize = 64 * 1024;
+/// Maximum menu accepted by clients that have not opted into full menus.
+pub const LEGACY_MAX_MENU_TITLES_BYTES: usize = 2048;
+
+/// Select a complete menu supported by the receiver, or omit it entirely.
+/// Never return a partial JSON document or UTF-8 sequence.
+pub fn menu_titles_for_client(menu_titles: &[u8], full_app_menus: bool) -> &[u8] {
+    let limit = if full_app_menus {
+        MAX_MENU_TITLES_BYTES
+    } else {
+        LEGACY_MAX_MENU_TITLES_BYTES
+    };
+    if menu_titles.len() <= limit {
+        menu_titles
+    } else {
+        b""
+    }
+}
+
 /// Current SWS capability-negotiation protocol version.
 pub const SWS_PROTOCOL_VERSION: u32 = 14;
 
@@ -80,6 +101,9 @@ pub mod capabilities {
     pub const EXTENSION_GPU_BUFFERS: u64 = 1 << 16;
     /// Focused owned windows may read and replace session UTF-8 clipboard text.
     pub const TEXT_CLIPBOARD: u64 = 1 << 17;
+    /// Shell registration may opt into menus up to MAX_MENU_TITLES_BYTES.
+    /// Legacy registration and ordinary clients retain the 2048-byte limit.
+    pub const FULL_APP_MENUS: u64 = 1 << 18;
 }
 
 pub mod gamepad;
@@ -1013,6 +1037,25 @@ fn read_len_prefixed_bytes<'a>(
     Ok(&payload[start..])
 }
 
+/// Consume one bounded field without allocating or indexing an unchecked length.
+fn take_len_prefixed_bytes<'a>(
+    remaining: &mut &'a [u8],
+    max_len: usize,
+) -> Result<&'a [u8], ProtocolError> {
+    let len = read_u32(remaining, 0)? as usize;
+    if len > max_len {
+        return Err(ProtocolError::MalformedPayload);
+    }
+    let end = 4usize
+        .checked_add(len)
+        .ok_or(ProtocolError::MalformedPayload)?;
+    let bytes = remaining
+        .get(4..end)
+        .ok_or(ProtocolError::MalformedPayload)?;
+    *remaining = &remaining[end..];
+    Ok(bytes)
+}
+
 fn copy_bounded<const N: usize>(bytes: &[u8]) -> Result<([u8; N], u32), ProtocolError> {
     if bytes.len() > N {
         return Err(ProtocolError::MalformedPayload);
@@ -1502,7 +1545,10 @@ pub enum ClientMessageRef<'a> {
     },
 
     /// Claim the exclusive system-shell workspace-control role.
-    RegisterSystemShell {},
+    RegisterSystemShell {
+        /// Explicit opt-in; legacy empty registrations leave this false.
+        full_app_menus: bool,
+    },
 
     /// Query the current authoritative workspace snapshot.
     GetWorkspaceState {},
@@ -1692,7 +1738,7 @@ pub enum ClientMessageRef<'a> {
 }
 
 /// Server->client messages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerMessage {
     ClipboardText(clipboard::Response),
     InputPanelRegistered {
@@ -1956,7 +2002,7 @@ pub enum ServerMessage {
         app_name_len: u32,
         title: [u8; 256],
         title_len: u32,
-        menu_titles: [u8; 2048], // Format: "menu1|menu2|menu3"
+        menu_titles: Vec<u8>, // At most MAX_MENU_TITLES_BYTES; JSON or legacy delimited titles.
         menu_titles_len: u32,
     },
     /// Active application changed (normal window gained focus)
@@ -1969,7 +2015,7 @@ pub enum ServerMessage {
         app_name_len: u32,
         title: [u8; 256],
         title_len: u32,
-        menu_titles: [u8; 2048], // Format: "menu1|menu2|menu3"
+        menu_titles: Vec<u8>, // At most MAX_MENU_TITLES_BYTES; JSON or legacy delimited titles.
         menu_titles_len: u32,
     },
     /// Active application information (response to GET_ACTIVE_APP)
@@ -1978,7 +2024,7 @@ pub enum ServerMessage {
         app_id_len: u32,
         app_name: [u8; 128],
         app_name_len: u32,
-        menu_titles: [u8; 2048], // Format: "menu1|menu2|menu3"
+        menu_titles: Vec<u8>, // At most MAX_MENU_TITLES_BYTES; JSON or legacy delimited titles.
         menu_titles_len: u32,
     },
     MenuItemActivated {
@@ -2749,10 +2795,12 @@ pub fn parse_client_message<'a>(
             Ok(ClientMessageRef::SetWindowingModeOverride { windowing_mode })
         }
         client_msg::REGISTER_SYSTEM_SHELL => {
-            if !payload.is_empty() {
-                return Err(ProtocolError::MalformedPayload);
-            }
-            Ok(ClientMessageRef::RegisterSystemShell {})
+            let full_app_menus = match payload {
+                [] | [0, 0, 0, 0] => false,
+                [1, 0, 0, 0] => true,
+                _ => return Err(ProtocolError::MalformedPayload),
+            };
+            Ok(ClientMessageRef::RegisterSystemShell { full_app_menus })
         }
         client_msg::GET_WORKSPACE_STATE => {
             if !payload.is_empty() {
@@ -3678,201 +3726,43 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             }
             Ok(ServerMessage::WindowList)
         }
-        server_msg::FOCUS_CHANGED => {
-            // Payload: window_id (u32) + app_id_len (u32) + app_id (variable, max 128)
-            //          + app_name_len (u32) + app_name (variable, max 128)
-            //          + title_len (u32) + title (variable, max 256)
-            //          + menu_titles_len (u32) + menu_titles (variable, max 2048)
-            if payload.len() < 8 {
-                return Err(ProtocolError::MalformedPayload);
-            }
-            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-            let app_id_len =
-                u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+        server_msg::FOCUS_CHANGED | server_msg::ACTIVE_APP_CHANGED => {
+            // Both opcodes retain the same variable-length wire layout.
+            let window_id = read_u32(payload, 0)?;
+            let mut remaining = &payload[4..];
+            let (app_id, app_id_len) = copy_bounded(take_len_prefixed_bytes(&mut remaining, 128)?)?;
+            let (app_name, app_name_len) =
+                copy_bounded(take_len_prefixed_bytes(&mut remaining, 128)?)?;
+            let (title, title_len) = copy_bounded(take_len_prefixed_bytes(&mut remaining, 256)?)?;
+            let menu_bytes = read_len_prefixed_bytes(remaining, 0, MAX_MENU_TITLES_BYTES)?;
+            let menu_titles = menu_bytes.to_vec();
+            let menu_titles_len = menu_bytes.len() as u32;
 
-            let mut offset = 8 + app_id_len;
-            if payload.len() < offset + 4 {
-                return Err(ProtocolError::MalformedPayload);
-            }
-
-            let mut app_id = [0u8; 128];
-            if app_id_len > 0 {
-                app_id[..app_id_len].copy_from_slice(&payload[8..8 + app_id_len]);
-            }
-
-            let app_name_len = u32::from_le_bytes([
-                payload[offset],
-                payload[offset + 1],
-                payload[offset + 2],
-                payload[offset + 3],
-            ]) as usize;
-            offset += 4 + app_name_len;
-
-            if payload.len() < offset + 4 {
-                return Err(ProtocolError::MalformedPayload);
-            }
-
-            let mut app_name = [0u8; 128];
-            if app_name_len > 0 {
-                app_name[..app_name_len].copy_from_slice(&payload[offset - app_name_len..offset]);
-            }
-
-            let title_len = u32::from_le_bytes([
-                payload[offset],
-                payload[offset + 1],
-                payload[offset + 2],
-                payload[offset + 3],
-            ]) as usize;
-            offset += 4 + title_len;
-
-            if payload.len() < offset + 4 {
-                return Err(ProtocolError::MalformedPayload);
-            }
-
-            let mut title = [0u8; 256];
-            if title_len > 0 {
-                title[..title_len].copy_from_slice(&payload[offset - title_len..offset]);
-            }
-
-            let menu_titles_len = u32::from_le_bytes([
-                payload[offset],
-                payload[offset + 1],
-                payload[offset + 2],
-                payload[offset + 3],
-            ]) as usize;
-            offset += 4 + menu_titles_len;
-
-            if payload.len() < offset {
-                return Err(ProtocolError::MalformedPayload);
-            }
-
-            let mut menu_titles = [0u8; 2048];
-            if menu_titles_len > 0 {
-                menu_titles[..menu_titles_len]
-                    .copy_from_slice(&payload[offset - menu_titles_len..offset]);
-            }
-
-            Ok(ServerMessage::FocusChanged {
-                window_id,
-                app_id,
-                app_id_len: app_id_len as u32,
-                app_name,
-                app_name_len: app_name_len as u32,
-                title,
-                title_len: title_len as u32,
-                menu_titles,
-                menu_titles_len: menu_titles_len as u32,
-            })
-        }
-        server_msg::ACTIVE_APP_CHANGED => {
-            // Payload format is the same as FOCUS_CHANGED
-            if payload.len() < 4 {
-                return Err(ProtocolError::MalformedPayload);
-            }
-            let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-
-            let mut offset = 4;
-
-            let app_id_len = if offset + 4 <= payload.len() {
-                let len = u32::from_le_bytes([
-                    payload[offset],
-                    payload[offset + 1],
-                    payload[offset + 2],
-                    payload[offset + 3],
-                ]) as usize;
-                offset += 4;
-                len
+            if msg_type == server_msg::FOCUS_CHANGED {
+                Ok(ServerMessage::FocusChanged {
+                    window_id,
+                    app_id,
+                    app_id_len,
+                    app_name,
+                    app_name_len,
+                    title,
+                    title_len,
+                    menu_titles,
+                    menu_titles_len,
+                })
             } else {
-                return Err(ProtocolError::MalformedPayload);
-            };
-
-            if offset + app_id_len > payload.len() {
-                return Err(ProtocolError::MalformedPayload);
+                Ok(ServerMessage::ActiveAppChanged {
+                    window_id,
+                    app_id,
+                    app_id_len,
+                    app_name,
+                    app_name_len,
+                    title,
+                    title_len,
+                    menu_titles,
+                    menu_titles_len,
+                })
             }
-            let mut app_id = [0u8; 128];
-            if app_id_len > 0 {
-                app_id[..app_id_len].copy_from_slice(&payload[offset..offset + app_id_len]);
-            }
-            offset += app_id_len;
-
-            let app_name_len = if offset + 4 <= payload.len() {
-                let len = u32::from_le_bytes([
-                    payload[offset],
-                    payload[offset + 1],
-                    payload[offset + 2],
-                    payload[offset + 3],
-                ]) as usize;
-                offset += 4;
-                len
-            } else {
-                return Err(ProtocolError::MalformedPayload);
-            };
-
-            if offset + app_name_len > payload.len() {
-                return Err(ProtocolError::MalformedPayload);
-            }
-            let mut app_name = [0u8; 128];
-            if app_name_len > 0 {
-                app_name[..app_name_len].copy_from_slice(&payload[offset..offset + app_name_len]);
-            }
-            offset += app_name_len;
-
-            let title_len = if offset + 4 <= payload.len() {
-                let len = u32::from_le_bytes([
-                    payload[offset],
-                    payload[offset + 1],
-                    payload[offset + 2],
-                    payload[offset + 3],
-                ]) as usize;
-                offset += 4;
-                len
-            } else {
-                return Err(ProtocolError::MalformedPayload);
-            };
-
-            if offset + title_len > payload.len() {
-                return Err(ProtocolError::MalformedPayload);
-            }
-            let mut title = [0u8; 256];
-            if title_len > 0 {
-                title[..title_len].copy_from_slice(&payload[offset..offset + title_len]);
-            }
-            offset += title_len;
-
-            let menu_titles_len = if offset + 4 <= payload.len() {
-                let len = u32::from_le_bytes([
-                    payload[offset],
-                    payload[offset + 1],
-                    payload[offset + 2],
-                    payload[offset + 3],
-                ]) as usize;
-                offset += 4;
-                len
-            } else {
-                return Err(ProtocolError::MalformedPayload);
-            };
-
-            if offset + menu_titles_len > payload.len() {
-                return Err(ProtocolError::MalformedPayload);
-            }
-
-            let mut menu_titles = [0u8; 2048];
-            if menu_titles_len > 0 {
-                menu_titles[..menu_titles_len]
-                    .copy_from_slice(&payload[offset..offset + menu_titles_len]);
-            }
-
-            Ok(ServerMessage::ActiveAppChanged {
-                window_id,
-                app_id,
-                app_id_len: app_id_len as u32,
-                app_name,
-                app_name_len: app_name_len as u32,
-                title,
-                title_len: title_len as u32,
-                menu_titles,
-                menu_titles_len: menu_titles_len as u32,
-            })
         }
         server_msg::ERROR => {
             if payload.len() < 4 {
@@ -3953,67 +3843,18 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             })
         }
         server_msg::ACTIVE_APP => {
-            // Payload: app_id_len (u32) + app_id (variable, max 128)
-            //          + app_name_len (u32) + app_name (variable, max 128)
-            //          + menu_titles_len (u32) + menu_titles (variable, max 2048)
-            if payload.len() < 4 {
-                return Err(ProtocolError::MalformedPayload);
-            }
-            let app_id_len =
-                u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
-
-            if payload.len() < 4 + app_id_len + 4 {
-                return Err(ProtocolError::MalformedPayload);
-            }
-
-            let mut app_id = [0u8; 128];
-            if app_id_len > 0 {
-                app_id[..app_id_len].copy_from_slice(&payload[4..4 + app_id_len]);
-            }
-
-            let offset = 4 + app_id_len;
-            let app_name_len = u32::from_le_bytes([
-                payload[offset],
-                payload[offset + 1],
-                payload[offset + 2],
-                payload[offset + 3],
-            ]) as usize;
-
-            if payload.len() < offset + 4 + app_name_len + 4 {
-                return Err(ProtocolError::MalformedPayload);
-            }
-
-            let mut app_name = [0u8; 128];
-            if app_name_len > 0 {
-                app_name[..app_name_len]
-                    .copy_from_slice(&payload[offset + 4..offset + 4 + app_name_len]);
-            }
-
-            let offset2 = offset + 4 + app_name_len;
-            let menu_titles_len = u32::from_le_bytes([
-                payload[offset2],
-                payload[offset2 + 1],
-                payload[offset2 + 2],
-                payload[offset2 + 3],
-            ]) as usize;
-
-            if payload.len() < offset2 + 4 + menu_titles_len {
-                return Err(ProtocolError::MalformedPayload);
-            }
-
-            let mut menu_titles = [0u8; 2048];
-            if menu_titles_len > 0 {
-                menu_titles[..menu_titles_len]
-                    .copy_from_slice(&payload[offset2 + 4..offset2 + 4 + menu_titles_len]);
-            }
-
+            let mut remaining = payload;
+            let (app_id, app_id_len) = copy_bounded(take_len_prefixed_bytes(&mut remaining, 128)?)?;
+            let (app_name, app_name_len) =
+                copy_bounded(take_len_prefixed_bytes(&mut remaining, 128)?)?;
+            let menu_bytes = read_len_prefixed_bytes(remaining, 0, MAX_MENU_TITLES_BYTES)?;
             Ok(ServerMessage::ActiveApp {
                 app_id,
-                app_id_len: app_id_len as u32,
+                app_id_len,
                 app_name,
-                app_name_len: app_name_len as u32,
-                menu_titles,
-                menu_titles_len: menu_titles_len as u32,
+                app_name_len,
+                menu_titles: menu_bytes.to_vec(),
+                menu_titles_len: menu_bytes.len() as u32,
             })
         }
         server_msg::MENU_ITEM_ACTIVATED => {
@@ -5829,6 +5670,16 @@ pub fn payload_focus_window(window_id: u32) -> Vec<u8> {
     window_id.to_le_bytes().to_vec()
 }
 
+/// Build a shell registration, using the legacy empty payload unless opting in.
+/// Only request full menus after the server advertises [`capabilities::FULL_APP_MENUS`].
+pub fn payload_register_system_shell(full_app_menus: bool) -> Vec<u8> {
+    if full_app_menus {
+        1u32.to_le_bytes().to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
 /// Build payload for server->client `FOCUS_CHANGED`.
 ///
 /// Payload format:
@@ -5840,14 +5691,19 @@ pub fn payload_focus_window(window_id: u32) -> Vec<u8> {
 /// - title_len (u32)
 /// - title_bytes (variable, max 256)
 /// - menu_titles_len (u32)
-/// - menu_titles_bytes (variable, max 2048, format: "menu1|menu2|menu3")
+/// - menu_titles_bytes (variable, max [`MAX_MENU_TITLES_BYTES`], JSON or delimited titles)
+///
+/// Returns `MalformedPayload` for an oversized menu; never emits a partial menu.
 pub fn payload_focus_changed(
     window_id: u32,
     app_id: &[u8],
     app_name: &[u8],
     title: &[u8],
     menu_titles: &[u8],
-) -> Vec<u8> {
+) -> Result<Vec<u8>, ProtocolError> {
+    if menu_titles.len() > MAX_MENU_TITLES_BYTES {
+        return Err(ProtocolError::MalformedPayload);
+    }
     let mut payload = Vec::new();
     payload.extend_from_slice(&window_id.to_le_bytes());
 
@@ -5867,11 +5723,11 @@ pub fn payload_focus_changed(
     payload.extend_from_slice(&(title_len as u32).to_le_bytes());
     payload.extend_from_slice(&title[..title_len]);
 
-    let menu_titles_len = menu_titles.len().min(2048);
+    let menu_titles_len = menu_titles.len();
     payload.extend_from_slice(&(menu_titles_len as u32).to_le_bytes());
     payload.extend_from_slice(&menu_titles[..menu_titles_len]);
 
-    payload
+    Ok(payload)
 }
 
 /// Build payload for server->client `ACTIVE_APP_CHANGED`.
@@ -5886,15 +5742,41 @@ pub fn payload_focus_changed(
 /// - title_len (u32)
 /// - title_bytes (variable, max 256)
 /// - menu_titles_len (u32)
-/// - menu_titles_bytes (variable, max 2048, format: "menu1|menu2|menu3")
+/// - menu_titles_bytes (variable, max [`MAX_MENU_TITLES_BYTES`], JSON or delimited titles)
+///
+/// Returns `MalformedPayload` for an oversized menu; never emits a partial menu.
 pub fn payload_active_app_changed(
     window_id: u32,
     app_id: &[u8],
     app_name: &[u8],
     title: &[u8],
     menu_titles: &[u8],
-) -> Vec<u8> {
+) -> Result<Vec<u8>, ProtocolError> {
     payload_focus_changed(window_id, app_id, app_name, title, menu_titles)
+}
+
+/// Build payload for server->client `ACTIVE_APP` (response to `GET_ACTIVE_APP`).
+///
+/// The existing layout contains length-prefixed app ID, app name, and menu bytes.
+/// Returns `MalformedPayload` for a menu larger than [`MAX_MENU_TITLES_BYTES`].
+pub fn payload_active_app(
+    app_id: &[u8],
+    app_name: &[u8],
+    menu_titles: &[u8],
+) -> Result<Vec<u8>, ProtocolError> {
+    if menu_titles.len() > MAX_MENU_TITLES_BYTES {
+        return Err(ProtocolError::MalformedPayload);
+    }
+    let mut payload = Vec::new();
+    for bytes in [
+        &app_id[..app_id.len().min(128)],
+        &app_name[..app_name.len().min(128)],
+        menu_titles,
+    ] {
+        payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        payload.extend_from_slice(bytes);
+    }
+    Ok(payload)
 }
 
 /// Build payload for server->client `MENU_ITEM_ACTIVATED`.

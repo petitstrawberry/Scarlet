@@ -5307,15 +5307,6 @@ impl Compositor {
             self.last_focused_window_id = Some(window_id);
             super::ipc::set_focused_window(window_id);
 
-            // Broadcast FOCUS_CHANGED for all windows
-            let payload = sws_protocol::payload_focus_changed(
-                window_id,
-                app_id_bytes,
-                app_name_bytes,
-                title_bytes,
-                menu_titles_bytes,
-            );
-
             sws_debug!(
                 "[Compositor] ABOUT TO broadcast focus change: window_id={}, app_id_len={}, app_name_len={}, title_len={}, menu_titles_len={}, app_name={}, menu_titles={}",
                 window_id,
@@ -5327,9 +5318,14 @@ impl Compositor {
                 core::str::from_utf8(menu_titles_bytes).unwrap_or("")
             );
 
-            super::ipc::broadcast_message_to_all_clients(
+            // Broadcast FOCUS_CHANGED for all windows
+            Self::broadcast_app_metadata(
                 sws_protocol::server_msg::FOCUS_CHANGED,
-                payload,
+                window_id,
+                app_id_bytes,
+                app_name_bytes,
+                title_bytes,
+                menu_titles_bytes,
             );
 
             sws_debug!(
@@ -5366,17 +5362,13 @@ impl Compositor {
                     // Update active_app_id
                     self.active_app_id = Some(app_id_bytes.to_vec());
 
-                    let active_app_payload = sws_protocol::payload_active_app_changed(
+                    Self::broadcast_app_metadata(
+                        sws_protocol::server_msg::ACTIVE_APP_CHANGED,
                         window_id,
                         app_id_bytes,
                         app_name_bytes,
                         title_bytes,
                         menu_titles_bytes,
-                    );
-
-                    super::ipc::broadcast_message_to_all_clients(
-                        sws_protocol::server_msg::ACTIVE_APP_CHANGED,
-                        active_app_payload,
                     );
                 } else {
                     sws_debug!(
@@ -5393,6 +5385,47 @@ impl Compositor {
         }
     }
 
+    /// Keep focus metadata flowing even if an app supplies an oversized menu.
+    /// Reject the whole menu rather than sending truncated JSON/UTF-8.
+    fn notification_menu_titles(menu_titles: &[u8]) -> &[u8] {
+        if menu_titles.len() > sws_protocol::MAX_MENU_TITLES_BYTES {
+            println!(
+                "[Compositor] Menu exceeds {} bytes ({}); omitting the entire menu",
+                sws_protocol::MAX_MENU_TITLES_BYTES,
+                menu_titles.len(),
+            );
+            b""
+        } else {
+            menu_titles
+        }
+    }
+
+    fn broadcast_app_metadata(
+        msg_type: u32,
+        window_id: u32,
+        app_id: &[u8],
+        app_name: &[u8],
+        title: &[u8],
+        menu_titles: &[u8],
+    ) {
+        let menu_titles = Self::notification_menu_titles(menu_titles);
+        // These opcodes share the same layout. Only an explicitly opted-in
+        // shell receives the full menu; old binaries retain safe metadata.
+        let payload = sws_protocol::payload_focus_changed(
+            window_id, app_id, app_name, title, menu_titles,
+        )
+        .expect("notification menu size checked");
+        let legacy_payload = sws_protocol::payload_focus_changed(
+            window_id,
+            app_id,
+            app_name,
+            title,
+            sws_protocol::menu_titles_for_client(menu_titles, false),
+        )
+        .expect("legacy menu size checked");
+        super::ipc::broadcast_app_metadata(msg_type, payload, legacy_payload);
+    }
+
     /// Refresh shell metadata without changing focus or resetting input state.
     fn broadcast_active_window_metadata(&self, window_id: u32) {
         if !self.active_window.is_active(window_id) {
@@ -5402,16 +5435,13 @@ impl Compositor {
             return;
         };
         let (app_name, menu_titles) = super::ipc::get_app_session_info(window_id);
-        let payload = sws_protocol::payload_active_app_changed(
+        Self::broadcast_app_metadata(
+            sws_protocol::server_msg::ACTIVE_APP_CHANGED,
             window_id,
             window.app_id.as_deref().unwrap_or(b""),
             app_name.as_bytes(),
             window.title.as_deref().unwrap_or(b""),
             menu_titles.as_bytes(),
-        );
-        super::ipc::broadcast_message_to_all_clients(
-            sws_protocol::server_msg::ACTIVE_APP_CHANGED,
-            payload,
         );
     }
 
@@ -8008,7 +8038,8 @@ impl Compositor {
     }
 
     fn broadcast_empty_active_app_changed(&mut self) {
-        let empty_payload = sws_protocol::payload_active_app_changed(
+        Self::broadcast_app_metadata(
+            sws_protocol::server_msg::ACTIVE_APP_CHANGED,
             0,   // dummy window_id
             b"", // empty app_id
             b"", // empty app_name
@@ -8016,10 +8047,6 @@ impl Compositor {
             b"", // empty menu_titles
         );
         println!("[Compositor] Broadcasting empty ACTIVE_APP_CHANGED to clear TaskBar menu");
-        super::ipc::broadcast_message_to_all_clients(
-            sws_protocol::server_msg::ACTIVE_APP_CHANGED,
-            empty_payload,
-        );
     }
 
     fn clear_interaction_state_for_removed_windows(&mut self, window_ids: &[u32]) {
@@ -12859,6 +12886,36 @@ impl Compositor {
                 super::ipc::finish_clipboard_request(client_id);
                 send_response_to_client(client_id, sws_protocol::server_msg::CLIPBOARD_TEXT, request_id, payload);
             }
+            IpcEvent::GetActiveApp {
+                client_id,
+                request_id,
+            } => {
+                let active = self
+                    .window_manager
+                    .get_windows()
+                    .iter()
+                    .find(|window| self.active_window.is_active(window.id));
+                let payload = if let Some(window) = active {
+                    let (app_name, menu_titles) = super::ipc::get_app_session_info(window.id);
+                    sws_protocol::payload_active_app(
+                        window.app_id.as_deref().unwrap_or(b""),
+                        app_name.as_bytes(),
+                        sws_protocol::menu_titles_for_client(
+                            Self::notification_menu_titles(menu_titles.as_bytes()),
+                            super::ipc::client_accepts_full_app_menus(client_id),
+                        ),
+                    )
+                } else {
+                    sws_protocol::payload_active_app(b"", b"", b"")
+                }
+                .expect("response menu size checked");
+                send_response_to_client(
+                    client_id,
+                    sws_protocol::server_msg::ACTIVE_APP,
+                    request_id,
+                    payload,
+                );
+            }
             IpcEvent::GetWindowList {
                 client_id,
                 request_id,
@@ -12985,6 +13042,14 @@ impl Compositor {
                         request_id,
                         sws_protocol::workspace::encode_state(&self.workspace_manager.snapshot()),
                     );
+                    if let Some(window) = self
+                        .window_manager
+                        .get_windows()
+                        .iter()
+                        .find(|window| self.active_window.is_active(window.id))
+                    {
+                        self.broadcast_active_window_metadata(window.id);
+                    }
                 }
             }
             IpcEvent::GetWorkspaceState {

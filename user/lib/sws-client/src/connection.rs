@@ -526,7 +526,7 @@ impl Response {
     ///
     /// The parsed message corresponding to [`Self::payload`].
     pub fn message(&self) -> ServerMessage {
-        self.message
+        self.message.clone()
     }
 
     /// Return the exact response payload bytes.
@@ -803,7 +803,7 @@ impl TransportState {
         }
     }
 
-    fn response_requires_handle(message: ServerMessage) -> bool {
+    fn response_requires_handle(message: &ServerMessage) -> bool {
         matches!(
             message,
             ServerMessage::WindowCreated { .. } | ServerMessage::WindowResized { .. }
@@ -842,7 +842,7 @@ impl TransportState {
             .map_err(|_| Error::InvalidResponse)?;
 
         if header.is_response() {
-            if Self::response_requires_handle(message) != handle.is_some() {
+            if Self::response_requires_handle(&message) != handle.is_some() {
                 self.fail_pending(Error::ProtocolError);
                 return Err(Error::ProtocolError);
             }
@@ -3553,10 +3553,16 @@ impl Connection {
     ///
     /// The compositor's authoritative workspace snapshot at registration time.
     pub fn register_system_shell(&self) -> Result<protocol::workspace::WorkspaceState, Error> {
-        if !self.get_capabilities()?.supports_workspace_shell() {
+        let capabilities = self.get_capabilities()?;
+        if !capabilities.supports_workspace_shell() {
             return Err(Error::WorkspaceShellUnsupported);
         }
-        let response = self.request(protocol::client_msg::REGISTER_SYSTEM_SHELL, &[])?;
+        // Only this rebuilt parser can accept full menus. Older servers still
+        // receive the original empty registration payload.
+        let payload = protocol::payload_register_system_shell(
+            capabilities.capabilities & protocol::capabilities::FULL_APP_MENUS != 0,
+        );
+        let response = self.request(protocol::client_msg::REGISTER_SYSTEM_SHELL, &payload)?;
         decode_workspace_response(response, ServerMessage::SystemShellRegistered)
     }
 

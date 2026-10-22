@@ -56,7 +56,7 @@ fn active_window_metadata_preserves_application_name_and_updated_document_title(
     for title in ["fixture.txt — Notepad", "保存.txt — Notepad", "Untitled — Notepad"] {
         let payload = sws_protocol::payload_active_app_changed(
             42, b"org.scarlet-os.notepad", b"Notepad", title.as_bytes(), b"File|Edit"
-        );
+        ).unwrap();
         let ServerMessage::ActiveAppChanged { window_id, app_name, app_name_len, title: parsed_title,
             title_len, .. } = parse_server_message(server_msg::ACTIVE_APP_CHANGED, &payload).unwrap()
         else { panic!("wrong metadata event") };
@@ -70,7 +70,7 @@ fn active_window_metadata_preserves_application_name_and_updated_document_title(
 fn title_notifications_clip_long_unicode_at_complete_character_boundaries() {
     let title = "日".repeat(100);
     for kind in [server_msg::FOCUS_CHANGED, server_msg::ACTIVE_APP_CHANGED] {
-        let payload = sws_protocol::payload_focus_changed(42, b"editor", b"Editor", title.as_bytes(), b"File");
+        let payload = sws_protocol::payload_focus_changed(42, b"editor", b"Editor", title.as_bytes(), b"File").unwrap();
         let parsed = parse_server_message(kind, &payload).unwrap();
         let (bytes, len) = match parsed {
             ServerMessage::FocusChanged { title, title_len, .. }

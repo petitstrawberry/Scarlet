@@ -947,6 +947,17 @@ fn listen_for_input_environment_changes(
     }
 }
 
+/// Metadata received on the opted-in workspace connection, separate from the
+/// ScarletUI windows' legacy-compatible connections.
+#[derive(Clone)]
+struct AppMenuMetadata {
+    focused: bool,
+    window_id: u32,
+    app_name: String,
+    title: String,
+    menus: String,
+}
+
 /// Unified visual workspace shell application.
 #[derive(View, Clone)]
 struct ShellApp {
@@ -988,6 +999,8 @@ struct ShellApp {
     home_window_id: State<u32>,
     workspace_state: State<Option<sws::WorkspaceState>>,
     workspace_commands: State<Vec<WorkspaceCommand>>,
+    full_app_menus: State<bool>,
+    pending_app_menus: State<Vec<AppMenuMetadata>>,
 }
 
 impl ShellApp {
@@ -1047,6 +1060,8 @@ impl ShellApp {
             home_window_id: State::new(StateId::new(25), 0),
             workspace_state: State::new(StateId::new(26), None),
             workspace_commands: State::new(StateId::new(27), Vec::new()),
+            full_app_menus: State::new(StateId::new(42), false),
+            pending_app_menus: State::new(StateId::new(43), Vec::new()),
         }
     }
 
@@ -2493,6 +2508,8 @@ fn maintain_workspace_shell_role(
     audio_slider: State<f32>,
     console_audio: State<(Option<u8>, Option<bool>)>,
     feedback: State<volume_osd::Feedback>,
+    full_app_menus: State<bool>,
+    pending_app_menus: State<Vec<AppMenuMetadata>>,
 ) {
     let mut audio_client = None;
     let mut visibility = volume_osd::Visibility::default();
@@ -2517,6 +2534,9 @@ fn maintain_workspace_shell_role(
             }
         };
         registration_warning_reported = false;
+        let accepts_full_menus = connection.get_capabilities().is_ok_and(|caps|
+            caps.capabilities & sws_protocol::capabilities::FULL_APP_MENUS != 0);
+        full_app_menus.set(accepts_full_menus);
         println!(
             "[Shell] Registered workspace role at generation {}",
             snapshot.generation
@@ -2547,6 +2567,8 @@ fn maintain_workspace_shell_role(
                 });
             }
             if connection.dispatch().is_err() {
+                full_app_menus.set(false);
+                pending_app_menus.set(Vec::new());
                 state.set(None);
                 dismiss_window(volume_osd::SCENE_KEY);
                 visibility = volume_osd::Visibility::default();
@@ -2554,6 +2576,21 @@ fn maintain_workspace_shell_role(
             }
             while let Some(event) = connection.poll_event() {
                 match event {
+                    sws::event::Event::FocusChanged { window_id, app_name, title, menu_titles, .. }
+                        if accepts_full_menus => {
+                        pending_app_menus.update(|pending| {
+                            // Only a stalled UI can accumulate this many updates.
+                            if pending.len() == 64 { pending.remove(0); }
+                            pending.push(AppMenuMetadata { focused: true, window_id, app_name, title, menus: menu_titles });
+                        });
+                    }
+                    sws::event::Event::ActiveAppChanged { window_id, app_name, title, menu_titles, .. }
+                        if accepts_full_menus => {
+                        pending_app_menus.update(|pending| {
+                            if pending.len() == 64 { pending.remove(0); }
+                            pending.push(AppMenuMetadata { focused: false, window_id, app_name, title, menus: menu_titles });
+                        });
+                    }
                     sws::event::Event::WorkspaceStateChanged(updated) => {
                         snapshot = updated;
                         state.set(Some(snapshot.clone()));
@@ -3254,24 +3291,8 @@ impl Application for ShellApp {
         ])
     }
 
-    fn on_focus_changed_with_title(&mut self, window_id: u32, app_name: &str, title: &str, menu_titles: &str) {
-        status_bar_debug!(
-            "[StatusBar] on_focus_changed: window_id={}, app_name={}, menu_titles={}",
-            window_id,
-            app_name,
-            menu_titles
-        );
-        if self.control_center_window_id.get() == Some(window_id) {
-            return;
-        }
-        if self.control_center_open.get() && app_name != "TaskBar" && app_name != "Control Center" {
-            dismiss_window(CONTROL_CENTER_SCENE_KEY);
-            self.control_center_open.set(false);
-            self.control_center_window_id.set(None);
-            self.control_center_armed_power.set(None);
-        }
-        let (resolved_menu_titles, menu_changed) = self.resolve_menu_titles(window_id, menu_titles);
-        self.update_menu_for_app(window_id, app_name, title, &resolved_menu_titles, menu_changed);
+    fn on_focus_changed_with_title(&mut self, window_id: u32, app_name: &str, title: &str, menus: &str) {
+        if !self.full_app_menus.get() { self.apply_focus_metadata(window_id, app_name, title, menus); }
     }
 
     fn on_window_created(&mut self, ctx: &WindowContext, window: &mut dyn PlatformWindow) {
@@ -3304,29 +3325,21 @@ impl Application for ShellApp {
         true
     }
 
-    fn on_active_app_changed_with_title(&mut self, window_id: u32, app_name: &str, title: &str, menu_titles: &str) {
-        if let Some(window) = self
-            .windows
-            .get()
-            .iter()
-            .find(|window| window.window_id == window_id)
-            && self
-                .home_applications
-                .get()
-                .iter()
-                .any(|app| app.app_id == window.app_id)
-        {
-            self.recent_app_ids
-                .update(|recent| console::record_recent(recent, &window.app_id));
+    fn on_active_app_changed_with_title(&mut self, window_id: u32, app_name: &str, title: &str, menus: &str) {
+        if !self.full_app_menus.get() { self.apply_active_metadata(window_id, app_name, title, menus); }
+    }
+
+    fn on_idle(&mut self) {
+        if self.pending_app_menus.get().is_empty() { return; }
+        let mut updates = Vec::new();
+        self.pending_app_menus.update(|pending| updates = core::mem::take(pending));
+        for update in updates {
+            if update.focused {
+                self.apply_focus_metadata(update.window_id, &update.app_name, &update.title, &update.menus);
+            } else {
+                self.apply_active_metadata(update.window_id, &update.app_name, &update.title, &update.menus);
+            }
         }
-        status_bar_debug!(
-            "[StatusBar] on_active_app_changed: window_id={}, app_name={}, menu_titles={}",
-            window_id,
-            app_name,
-            menu_titles
-        );
-        let (resolved_menu_titles, menu_changed) = self.resolve_menu_titles(window_id, menu_titles);
-        self.update_menu_for_app(window_id, app_name, title, &resolved_menu_titles, menu_changed);
     }
 
     fn on_window_resize(&mut self, ctx: &WindowContext, width: u32, height: u32) {
@@ -3712,6 +3725,8 @@ impl Application for ShellApp {
         let audio_slider = self.control_center_volume.clone();
         let console_audio = self.console_audio.clone();
         let feedback = self.volume_feedback.clone();
+        let full_app_menus = self.full_app_menus.clone();
+        let pending_app_menus = self.pending_app_menus.clone();
         std::thread::spawn(move || {
             maintain_workspace_shell_role(
                 workspace_state,
@@ -3720,12 +3735,59 @@ impl Application for ShellApp {
                 audio_slider,
                 console_audio,
                 feedback,
+                full_app_menus,
+                pending_app_menus,
             )
         });
     }
 }
 
 impl ShellApp {
+    fn apply_focus_metadata(&mut self, window_id: u32, app_name: &str, title: &str, menu_titles: &str) {
+        status_bar_debug!(
+            "[StatusBar] on_focus_changed: window_id={}, app_name={}, menu_titles={}",
+            window_id,
+            app_name,
+            menu_titles
+        );
+        if self.control_center_window_id.get() == Some(window_id) {
+            return;
+        }
+        if self.control_center_open.get() && app_name != "TaskBar" && app_name != "Control Center" {
+            dismiss_window(CONTROL_CENTER_SCENE_KEY);
+            self.control_center_open.set(false);
+            self.control_center_window_id.set(None);
+            self.control_center_armed_power.set(None);
+        }
+        let (resolved_menu_titles, menu_changed) = self.resolve_menu_titles(window_id, menu_titles);
+        self.update_menu_for_app(window_id, app_name, title, &resolved_menu_titles, menu_changed);
+    }
+
+    fn apply_active_metadata(&mut self, window_id: u32, app_name: &str, title: &str, menu_titles: &str) {
+        if let Some(window) = self
+            .windows
+            .get()
+            .iter()
+            .find(|window| window.window_id == window_id)
+            && self
+                .home_applications
+                .get()
+                .iter()
+                .any(|app| app.app_id == window.app_id)
+        {
+            self.recent_app_ids
+                .update(|recent| console::record_recent(recent, &window.app_id));
+        }
+        status_bar_debug!(
+            "[StatusBar] on_active_app_changed: window_id={}, app_name={}, menu_titles={}",
+            window_id,
+            app_name,
+            menu_titles
+        );
+        let (resolved_menu_titles, menu_changed) = self.resolve_menu_titles(window_id, menu_titles);
+        self.update_menu_for_app(window_id, app_name, title, &resolved_menu_titles, menu_changed);
+    }
+
     fn update_workarea(&self, screen_width: u32, screen_height: u32, layout: ShellLayout) {
         if let Ok(conn) = sws::Connection::connect("/tmp/sws.sock") {
             let scale_milli = query_output_scale(&conn);
@@ -4363,6 +4425,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn full_menu_connection_updates_ui_and_ignores_legacy_window_notifications() {
+        use scarlet_ui::Application;
+        let mut app = super::ShellApp::new(super::ShellLayout::from_tablet_mode(Some(false)));
+        let children = (0..40).map(|id| format!(
+            r#"{{"id":"tool-{id}","title":"日本語の編集道具 {id}","enabled":true,"items":[]}}"#
+        )).collect::<Vec<_>>().join(",");
+        let menus = format!(r#"{{"items":[{{"id":"image","title":"Image","items":[{children}]}}]}}"#);
+        assert!(menus.len() > 2048);
+        app.full_app_menus.set(true);
+        app.pending_app_menus.set(vec![super::AppMenuMetadata {
+            focused: false, window_id: 7, app_name: "Vellum".into(),
+            title: "sample.png — Vellum".into(), menus,
+        }]);
+        app.on_idle();
+        let image_menu = app.menu_tree.get().items.into_iter().find(|item| item.id == "image").unwrap();
+        assert_eq!(image_menu.children.len(), 40);
+        app.open_menu_index.set(Some(2));
+        app.on_focus_changed_with_title(7, "Vellum", "sample.png — Vellum", "");
+        assert_eq!(app.open_menu_index.get(), Some(2));
+        assert!(app.pending_app_menus.get().is_empty());
+        assert!(app.menu_tree.get().items.iter().any(|item| item.id == "image" && item.children.len() == 40));
+    }
+
     #[test]
     fn live_document_titles_refresh_same_window_and_survive_focus_changes() {
         use scarlet_ui::Application;

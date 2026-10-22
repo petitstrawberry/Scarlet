@@ -700,7 +700,8 @@ fn sws_capabilities() -> u64 {
         | protocol::capabilities::TOUCH_INPUT
         | protocol::capabilities::INPUT_PANEL
         | protocol::capabilities::SURFACE_SCENES
-        | protocol::capabilities::TEXT_CLIPBOARD;
+        | protocol::capabilities::TEXT_CLIPBOARD
+        | protocol::capabilities::FULL_APP_MENUS;
     if SGFX_SHARED_IMAGES_AVAILABLE.load(Ordering::Acquire) {
         capabilities |= protocol::capabilities::SGFX_SHARED_IMAGE
             | protocol::capabilities::EXTENSION_GPU_BUFFERS;
@@ -862,34 +863,41 @@ static PENDING_CLIENT_RESPONSES: Mutex<BTreeMap<usize, Vec<PendingServerFrame>>>
 static INPUT_ENVIRONMENT_SUBSCRIBERS: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
 
 /// Connection holding the exclusive system-shell workspace-control role.
-static SYSTEM_SHELL_CLIENT: Mutex<Option<usize>> = Mutex::new(None);
+#[derive(Clone, Copy)]
+struct SystemShellClient {
+    client_id: usize,
+    full_app_menus: bool,
+}
 
-fn claim_system_shell(client_id: usize) -> bool {
+static SYSTEM_SHELL_CLIENT: Mutex<Option<SystemShellClient>> = Mutex::new(None);
+
+fn claim_system_shell(client_id: usize, full_app_menus: bool) -> bool {
     let mut owner = SYSTEM_SHELL_CLIENT
         .lock()
         .expect("SWS system-shell role mutex poisoned");
-    match *owner {
-        Some(existing) => existing == client_id,
-        None => {
-            *owner = Some(client_id);
-            true
-        }
+    if owner.is_some_and(|existing| existing.client_id != client_id) {
+        return false;
     }
+    *owner = Some(SystemShellClient {
+        client_id,
+        full_app_menus,
+    });
+    true
 }
 
 /// Return whether a live client owns the exclusive system-shell role.
 pub(super) fn is_system_shell_client(client_id: usize) -> bool {
-    *SYSTEM_SHELL_CLIENT
+    SYSTEM_SHELL_CLIENT
         .lock()
         .expect("SWS system-shell role mutex poisoned")
-        == Some(client_id)
+        .is_some_and(|owner| owner.client_id == client_id)
 }
 
 fn release_system_shell(client_id: usize) {
     let mut owner = SYSTEM_SHELL_CLIENT
         .lock()
         .expect("SWS system-shell role mutex poisoned");
-    if *owner == Some(client_id) {
+    if owner.is_some_and(|owner| owner.client_id == client_id) {
         *owner = None;
     }
 }
@@ -899,8 +907,12 @@ pub(super) fn publish_workspace_state(payload: Vec<u8>) {
     let client_id = *SYSTEM_SHELL_CLIENT
         .lock()
         .expect("SWS system-shell role mutex poisoned");
-    if let Some(client_id) = client_id {
-        send_message_to_client(client_id, protocol::server_msg::WORKSPACE_STATE, payload);
+    if let Some(owner) = client_id {
+        send_message_to_client(
+            owner.client_id,
+            protocol::server_msg::WORKSPACE_STATE,
+            payload,
+        );
     }
 }
 
@@ -1090,9 +1102,9 @@ pub(super) fn send_volume_key(code: u16, value: i32) {
     let owner = *SYSTEM_SHELL_CLIENT
         .lock()
         .expect("SWS system-shell role mutex poisoned");
-    if let Some(client_id) = owner {
+    if let Some(owner) = owner {
         send_message_to_client(
-            client_id,
+            owner.client_id,
             sws_protocol::server_msg::INPUT_EVENT,
             sws_protocol::payload_input_event(0, 0, super::input::event_types::EV_KEY, code, value)
                 .to_vec(),
@@ -1327,6 +1339,41 @@ pub fn broadcast_message_to_all_clients(msg_type: u32, payload: Vec<u8>) {
         let payload_clone = payload.clone();
         send_message_to_client(client_id, msg_type, payload_clone);
     }
+}
+
+/// Full menus are opt-in on the exclusive shell connection, never a broadcast
+/// to old parsers. All other clients still receive focus/application metadata.
+pub(super) fn broadcast_app_metadata(msg_type: u32, payload: Vec<u8>, legacy_payload: Vec<u8>) {
+    debug_assert!(matches!(
+        msg_type,
+        protocol::server_msg::FOCUS_CHANGED | protocol::server_msg::ACTIVE_APP_CHANGED
+    ));
+    let full_menu_client = SYSTEM_SHELL_CLIENT
+        .lock()
+        .expect("SWS system-shell role mutex poisoned")
+        .filter(|owner| owner.full_app_menus)
+        .map(|owner| owner.client_id);
+    let client_ids: Vec<usize> = PENDING_CLIENT_RESPONSES
+        .lock()
+        .expect("SWS mutex poisoned")
+        .keys()
+        .copied()
+        .collect();
+    for client_id in client_ids {
+        let bytes = if full_menu_client == Some(client_id) {
+            &payload
+        } else {
+            &legacy_payload
+        };
+        send_message_to_client(client_id, msg_type, bytes.clone());
+    }
+}
+
+pub(super) fn client_accepts_full_app_menus(client_id: usize) -> bool {
+    SYSTEM_SHELL_CLIENT
+        .lock()
+        .expect("SWS system-shell role mutex poisoned")
+        .is_some_and(|owner| owner.client_id == client_id && owner.full_app_menus)
 }
 
 fn input_environment_frame(snapshot: Snapshot) -> PendingServerFrame {
@@ -4021,6 +4068,12 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     request_id,
                 });
             }
+            Ok(ClientMessageRef::GetActiveApp {}) => {
+                push_ipc_event(IpcEvent::GetActiveApp {
+                    client_id,
+                    request_id,
+                });
+            }
             Ok(ClientMessageRef::GetWindowList {}) => {
                 println!(
                     "[ClientThread {}] GetWindowList: requesting window list",
@@ -4118,8 +4171,8 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     windowing_mode,
                 });
             }
-            Ok(ClientMessageRef::RegisterSystemShell {}) => {
-                if claim_system_shell(client_id) {
+            Ok(ClientMessageRef::RegisterSystemShell { full_app_menus }) => {
+                if claim_system_shell(client_id, full_app_menus) {
                     push_ipc_event(IpcEvent::RegisterSystemShell {
                         client_id,
                         request_id,
@@ -5109,6 +5162,12 @@ pub enum IpcEvent {
         client_id: usize,
         request_id: u8,
         windowing_mode: Option<protocol::WindowingMode>,
+    },
+
+    /// Query active application metadata, respecting the receiver's menu limit.
+    GetActiveApp {
+        client_id: usize,
+        request_id: u8,
     },
 
     /// A client claimed the exclusive system-shell role.
