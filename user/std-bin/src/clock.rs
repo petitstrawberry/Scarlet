@@ -44,6 +44,31 @@ struct ClockApp {
 }
 
 impl ClockApp {
+    fn mode_button(&self, index: usize, title: &str) -> impl View + Clone + use<> {
+        let palette = ColorPalette::default();
+        let selected = self.mode.get() == index;
+        let mode = self.mode.clone();
+        Button::new(title)
+            .font_size(13.0)
+            .background_color(if selected {
+                palette.surface_variant()
+            } else {
+                palette.background()
+            })
+            .text_color(if selected {
+                palette.primary()
+            } else {
+                palette.text_secondary()
+            })
+            .border_color(if selected {
+                palette.primary()
+            } else {
+                Color::CLEAR
+            })
+            .on_click(move || mode.set(index))
+            .frame(f32::INFINITY, 36.0)
+    }
+
     fn bg_color(&self) -> Color {
         let c = presets()[self.appearance.get().min(5)].0;
         Color::rgba_f32(c.r, c.g, c.b, self.alpha.get())
@@ -51,7 +76,8 @@ impl ClockApp {
 
     fn timer_action(&self) {
         let now = time::monotonic_time();
-        match self.timer.get().phase(now) {
+        let phase = self.timer.get().phase(now);
+        match phase {
             TimerPhase::Ready => match parse_duration(&self.duration_input.get()) {
                 Ok(duration) => self.timer.update(|timer| {
                     *timer = Timer::new(duration);
@@ -68,6 +94,11 @@ impl ClockApp {
             }
         }
         self.error.set(String::new());
+        if phase == TimerPhase::Ready {
+            // Starting replaces the duration editor. Keep keyboard commands
+            // owned by this window after that focused control disappears.
+            self.focused.set(true);
+        }
     }
 
     fn handle_key(&self, event: KeyEvent) -> bool {
@@ -83,6 +114,7 @@ impl ClockApp {
                     unreachable!()
                 };
                 self.mode.set((digit as u8 - b'1') as usize);
+                self.focused.set(true);
             }
             KeyCode::Space if self.mode.get() == 1 => self.timer_action(),
             KeyCode::Space if self.mode.get() == 2 => self.stopwatch.update(|watch| {
@@ -122,7 +154,7 @@ impl ClockApp {
         let editor = if phase == TimerPhase::Ready {
             Either::A(
                 vstack! {
-                    Text::new("Duration (hh:mm:ss)").font_size(13.0),
+                    Text::new("Duration · hh:mm:ss").font_size(12.0),
                     TextField::new(self.duration_input.clone())
                         .placeholder("00:05:00")
                         .on_submit(move || submit_app.timer_action())
@@ -131,31 +163,47 @@ impl ClockApp {
                 .spacing(6.0),
             )
         } else {
-            Either::B(Text::new("Reset to change the duration.").font_size(13.0))
+            Either::B(
+                Text::new("Reset to change duration")
+                    .font_size(12.0)
+                    .color(palette.text_secondary())
+                    .frame_height(58.0),
+            )
         };
         let remaining = if phase == TimerPhase::Ready {
             parse_duration(&self.duration_input.get()).unwrap_or_else(|_| timer.remaining(now))
         } else {
             timer.remaining(now)
         };
+        let error = if self.error.get().is_empty() {
+            Either::A(Spacer::new().frame_height(0.0))
+        } else {
+            Either::B(
+                Text::from_state(self.error.clone())
+                    .font_size(12.0)
+                    .color(palette.error()),
+            )
+        };
         vstack! {
             Spacer::new(),
-            Text::new(format_seconds(ceil_seconds(remaining))).font_size(42.0),
-            Text::new(status).font_size(16.0).color(if phase == TimerPhase::Finished { palette.primary() } else { palette.text_secondary() }),
-            Spacer::new().frame_height(12.0),
+            vstack! {
+                Text::new(status).font_size(13.0).color(if phase == TimerPhase::Finished { palette.primary() } else { palette.text_secondary() }),
+                Text::new(format_seconds(ceil_seconds(remaining))).font_size(44.0),
+            }.spacing(8.0).padding(8.0).frame_width(f32::INFINITY),
             editor,
-            Text::from_state(self.error.clone()).font_size(12.0).color(palette.error()),
+            error,
             hstack! {
-                Button::new(action).on_click(move || action_app.timer_action()).frame_width(110.0),
+                Button::new(action).background_color(palette.primary()).text_color(palette.text_inverse())
+                    .on_click(move || action_app.timer_action()).frame(128.0, 40.0),
                 Button::new("Reset").on_click(move || {
                     reset_app.timer.update(Timer::reset);
                     reset_app.error.set(String::new());
-                }).frame_width(110.0),
+                }).frame(100.0, 40.0),
             }.spacing(12.0),
             Spacer::new(),
-            Text::new("Keep Clock open while the timer is running.").font_size(11.0).color(palette.text_secondary()),
-            Text::new("Ctrl+Space: start/pause   Ctrl+R: reset").font_size(11.0).color(palette.text_secondary()),
-        }.spacing(8.0).padding(18.0).frame(f32::INFINITY, f32::INFINITY)
+            Text::new("Keep Clock open to finish the timer.").font_size(11.0).color(palette.text_secondary()),
+            Text::new("Ctrl+Space  start / pause    Ctrl+R  reset").font_size(10.0).color(palette.text_secondary()),
+        }.spacing(6.0).padding(14.0).frame(f32::INFINITY, f32::INFINITY)
     }
 
     fn stopwatch_content(&self) -> impl View + Clone + use<> {
@@ -178,20 +226,21 @@ impl ClockApp {
         };
         let action_state = self.stopwatch.clone();
         let reset_state = self.stopwatch.clone();
+        let palette = ColorPalette::default();
         vstack! {
             Spacer::new(),
+            Text::new(status).font_size(13.0).color(palette.text_secondary()),
             Text::new(format!("{}.{:01}", format_seconds(elapsed.as_secs()), elapsed.subsec_millis() / 100)).font_size(38.0),
-            Text::new(status).font_size(16.0).color(ColorPalette::default().text_secondary()),
             Spacer::new().frame_height(20.0),
             hstack! {
-                Button::new(action).on_click(move || action_state.update(|watch| {
+                Button::new(action).background_color(palette.primary()).text_color(palette.text_inverse()).on_click(move || action_state.update(|watch| {
                     let now = time::monotonic_time();
                     if watch.running() { watch.pause(now); } else { watch.start(now); }
-                })).frame_width(110.0),
-                Button::new("Reset").on_click(move || reset_state.update(Stopwatch::reset)).frame_width(110.0),
+                })).frame(128.0, 40.0),
+                Button::new("Reset").on_click(move || reset_state.update(Stopwatch::reset)).frame(100.0, 40.0),
             }.spacing(12.0),
             Spacer::new(),
-            Text::new("Ctrl+Space: start/pause   Ctrl+R: reset").font_size(11.0).color(ColorPalette::default().text_secondary()),
+            Text::new("Ctrl+Space  start / pause    Ctrl+R  reset").font_size(10.0).color(palette.text_secondary()),
         }.spacing(8.0).padding(18.0).frame(f32::INFINITY, f32::INFINITY)
     }
 
@@ -217,7 +266,13 @@ impl ClockApp {
         };
         vstack! {
             content,
-            Text::new(time::zone_label()).font_size(12.0).color(if light { Color::rgb(50, 50, 65) } else { Color::rgb(215, 215, 225) }).padding(8.0),
+            hstack! {
+                Text::new(time::zone_label()).font_size(11.0).color(if light { Color::rgb(50, 50, 65) } else { Color::rgb(215, 215, 225) }),
+                Spacer::new(),
+                Button::new("Appearance").font_size(12.0).background_color(Color::TRANSPARENT)
+                    .text_color(if light { Color::rgb(50, 50, 65) } else { Color::rgb(215, 215, 225) })
+                    .on_click(|| open_window("settings")).frame(94.0, 30.0),
+            }.spacing(8.0).padding(12.0).frame(f32::INFINITY, 54.0),
         }.frame(f32::INFINITY, f32::INFINITY)
     }
 }
@@ -238,11 +293,12 @@ impl Application for ClockApp {
             Window::new("Clock", vstack! {
                 vstack! {
                     hstack! {
-                        Text::new("Mode").font_size(13.0),
-                        Select::new(vec!["Clock".into(), "Timer".into(), "Stopwatch".into()], self.mode.clone()).width(200.0),
-                    }.spacing(12.0),
-                    Text::new(if timer_finished { "Timer finished" } else { "Ctrl+1 / 2 / 3: switch mode" }).font_size(11.0)
-                        .color(if timer_finished { palette.primary() } else { palette.text_secondary() }),
+                        self.mode_button(0, "Clock"),
+                        self.mode_button(1, "Timer"),
+                        self.mode_button(2, "Stopwatch"),
+                    }.spacing(4.0).frame_width(f32::INFINITY),
+                    Text::new(if timer_finished && mode != 1 { "Timer finished · open Timer" } else { "Ctrl+1  Clock    Ctrl+2  Timer    Ctrl+3  Stopwatch" }).font_size(10.0)
+                        .color(if timer_finished && mode != 1 { palette.primary() } else { palette.text_secondary() }),
                 }.spacing(4.0).padding(10.0).frame_width(f32::INFINITY).background(palette.background()),
                 content,
             }.frame(f32::INFINITY, f32::INFINITY)
@@ -278,13 +334,24 @@ fn settings_content(app: ClockApp) -> impl View + Clone {
     let current_alpha = app.alpha.get();
     vstack! {
         Text::new("Clock appearance").font_size(18.0),
-        Text::new("Background").font_size(13.0),
-        Select::new(presets().iter().map(|(_, label)| (*label).into()).collect(), app.appearance.clone()).width(220.0),
-        Rectangle::new().fill(app.bg_color()).frame(220.0, 40.0),
-        Text::new(format!("Opacity: {}%", (current_alpha * 100.0) as u32)).font_size(13.0),
-        Slider::new(app.alpha.clone()).min(0.0).max(1.0).frame_width(220.0),
-        Button::new("Done").on_click(|| dismiss_window("settings")),
-    }.spacing(12.0).padding(20.0).frame(f32::INFINITY, f32::INFINITY)
+        hstack! {
+            Text::new("Background").font_size(13.0),
+            Spacer::new(),
+            Select::new(presets().iter().map(|(_, label)| (*label).into()).collect(), app.appearance.clone()).width(150.0),
+        }.spacing(12.0).frame(f32::INFINITY, 34.0),
+        Rectangle::new().fill(app.bg_color()).frame(f32::INFINITY, 32.0),
+        hstack! {
+            Text::new("Opacity").font_size(13.0),
+            Spacer::new(),
+            Text::new(format!("{}%", (current_alpha * 100.0) as u32)).font_size(13.0).color(ColorPalette::default().text_secondary()),
+        }.frame(f32::INFINITY, 20.0),
+        Slider::new(app.alpha.clone()).min(0.0).max(1.0).frame(f32::INFINITY, 26.0),
+        Spacer::new(),
+        hstack! {
+            Spacer::new(),
+            Button::new("Done").on_click(|| dismiss_window("settings")).frame(80.0, 32.0),
+        }.frame(f32::INFINITY, 32.0),
+    }.spacing(10.0).alignment(Alignment::Leading).padding(16.0).frame(f32::INFINITY, f32::INFINITY)
 }
 
 fn draw_clock(canvas: &mut Canvas, w: u32, h: u32, light: bool) {
