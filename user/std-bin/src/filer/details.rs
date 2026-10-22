@@ -1,6 +1,6 @@
 //! Worker-backed archive browser and folder-size details for Files.
 use super::*;
-use scarlet_ui::ListView;
+use scarlet_ui::{ListView, MenuBarModel, MenuEntry, MenuItemModel};
 
 pub(super) const WINDOW_KEY: &str = "details";
 static RESULTS: Mutex<Vec<DetailResult>> = Mutex::new(Vec::new());
@@ -15,6 +15,68 @@ enum DetailOutput {
     Extracted(PathBuf),
 }
 impl FilerApp {
+    pub(super) fn details_menu_bar(&self) -> MenuBarModel {
+        let ready = self.details_archive.get()
+            && self.details_index.get().is_some()
+            && !self.details_busy.get()
+            && !self.operation_busy.get();
+        let mut file = vec![
+            self.menu_item(
+                "cancel-operation",
+                "Cancel Operation",
+                "",
+                self.details_busy.get(),
+                |a| a.cancel_details(false),
+            ),
+            self.menu_item("close-details", "Close", "Esc", true, |a| {
+                a.cancel_details(true)
+            }),
+        ];
+        if self.details_archive.get() {
+            file.splice(
+                0..0,
+                [
+                    self.menu_item(
+                        "open-archive-folder",
+                        "Open Folder",
+                        "Enter",
+                        ready
+                            && self
+                                .details_selected
+                                .get()
+                                .and_then(|index| self.details_entries.get().get(index).cloned())
+                                .is_some_and(|entry| entry.is_directory),
+                        |a| a.details_open_selected(),
+                    ),
+                    self.menu_item("extract-archive", "Extract Archive", "", ready, |a| {
+                        a.extract_details()
+                    }),
+                    MenuEntry::Separator,
+                ],
+            );
+        }
+        let mut menus = vec![MenuItemModel::new("file", "File").children(file)];
+        if self.details_archive.get() {
+            menus.push(MenuItemModel::new("go", "Go").children(vec![
+                self.menu_item(
+                    "archive-root",
+                    "Archive Root",
+                    "",
+                    ready && !self.details_folder.get().is_empty(),
+                    |a| a.details_navigate(String::new()),
+                ),
+                self.menu_item(
+                    "archive-up",
+                    "Enclosing Folder",
+                    "Alt+Up",
+                    ready && !self.details_folder.get().is_empty(),
+                    |a| a.details_up(),
+                ),
+            ]));
+        }
+        MenuBarModel::new(menus)
+    }
+
     pub(super) fn show_details(&self) {
         let path = self
             .selected_entry()
@@ -369,8 +431,8 @@ impl FilerApp {
             let background=if selected==Some(index) {ColorPalette::default().primary_light().with_opacity(0.2)} else {Color::CLEAR};
             vstack! {
                 icon_for_entry(&name,entry.is_directory).frame(64.0,48.0),
-                Text::new(file_name_label(&name)).font_size(12.0),
-                Text::new(if entry.is_directory {"Folder".into()} else {format_size(entry.size)}).font_size(10.0),
+                Text::new(file_name_label(&name)).font_size(13.0),
+                Text::new(if entry.is_directory {"Folder".into()} else {format_size(entry.size)}).font_size(11.0),
             }.alignment(Alignment::Center).padding(6.0).frame(f32::INFINITY,110.0)
                 .background(background).clip_radius(6.0)
                 .on_click(move || {

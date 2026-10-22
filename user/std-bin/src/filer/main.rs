@@ -9,6 +9,7 @@ mod icons;
 mod archive;
 mod details;
 mod listing;
+mod menus;
 mod operations;
 mod usage;
 mod workers;
@@ -1051,16 +1052,8 @@ impl FilerApp {
         if modifiers.primary() && !picker {
             match keycode {
                 KeyCode::Char('i' | 'I') => self.show_details(),
-                KeyCode::Char('l' | 'L') => {
-                    self.search_focus.set(0);
-                    self.location_focus
-                        .set(self.location_focus.get().wrapping_add(1).max(1));
-                }
-                KeyCode::Char('f' | 'F') => {
-                    self.location_focus.set(0);
-                    self.search_focus
-                        .set(self.search_focus.get().wrapping_add(1).max(1));
-                }
+                KeyCode::Char('l' | 'L') => self.focus_location(),
+                KeyCode::Char('f' | 'F') => self.focus_search(),
                 KeyCode::Char('c' | 'C')
                     if self.grid_focused.get() && self.prompt.get().is_none() =>
                 {
@@ -1485,7 +1478,7 @@ impl FilerApp {
             preview,
             file_name,
             Text::new(detail)
-                .font_size(10.0)
+                .font_size(11.0)
                 .color(palette.text_secondary()),
         }
         .alignment(Alignment::Center)
@@ -1572,29 +1565,27 @@ impl FilerApp {
             Either::B(grid)
         };
 
-        let mut title = if picker {
+        let filter_hint = if picker {
             self.picker_request
                 .get()
                 .as_ref()
-                .map(|request| request.title.clone())
-                .unwrap_or_else(|| String::from("Open File"))
+                .and_then(|request| {
+                    request.filter.strip_prefix(picker_filter::EXTENSION_FILTER_PREFIX)
+                })
+                .map(|extensions| format!("File types: .{}", extensions.replace(',', ", .")))
+                .unwrap_or_default()
         } else {
-            String::from(if cfg!(target_os = "scarlet") {
-                "Files"
-            } else {
-                "Files · Explicit host preview fixture"
-            })
+            String::new()
         };
-        if picker {
-            if let Some(request) = self.picker_request.get() {
-                if let Some(extensions) = request
-                    .filter
-                    .strip_prefix(picker_filter::EXTENSION_FILTER_PREFIX)
-                {
-                    title.push_str(&format!(" — .{}", extensions.replace(',', ", .")));
-                }
-            }
-        }
+        let filter_hint = if filter_hint.is_empty() {
+            Either::A(vstack! {})
+        } else {
+            Either::B(
+                Text::new(filter_hint)
+                    .font_size(12.0)
+                    .color(ColorPalette::default().text_secondary()),
+            )
+        };
         let footer = if picker {
             let cancel_app = self.clone();
             let open_app = self.clone();
@@ -1663,7 +1654,7 @@ impl FilerApp {
                     "Enter: Open · F2: Rename · Ctrl+C/X/V: Copy/Cut/Paste · Delete: Delete…"
                 }).font_size(11.0).color(ColorPalette::default().text_secondary()),
                 Text::new(if !move_supported() { "Move and rename are not available on this system yet." } else { "" })
-                    .font_size(10.0).color(ColorPalette::default().text_secondary()),
+                    .font_size(11.0).color(ColorPalette::default().text_secondary()),
             }.alignment(Alignment::Leading).spacing(6.0).padding(8.0))
         };
 
@@ -1680,9 +1671,7 @@ impl FilerApp {
         let key_app = self.clone();
 
         vstack! {
-            Text::new(title)
-                .font_size(12.0)
-                .color(ColorPalette::default().text_secondary()),
+            filter_hint,
             tools,
             prompt,
             grid,
@@ -1700,34 +1689,19 @@ impl FilerApp {
 
     fn browser_tools(&self) -> impl View + Clone + use<> {
         let new_app = self.clone();
-        let rename_app = self.clone();
-        let delete_app = self.clone();
         let copy_app = self.clone();
-        let cut_app = self.clone();
         let paste_app = self.clone();
-        let details_app = self.clone();
         let cancel_search_app = self.clone();
-        vstack! {
-            hstack! {
-                TextField::new(self.search.clone()).placeholder("Filter this folder…")
-                    .autofocus(self.search_focus.get() > 0)
-                    .on_cancel(move || { cancel_search_app.search.set(String::new()); cancel_search_app.search_focus.set(0); })
-                    .key(format!("files-search-{}", self.search_focus.get()))
-                    .frame(f32::INFINITY, 34.0),
-                Select::new(vec![String::from("Name A–Z"), String::from("Name Z–A"), String::from("Size, largest first")], self.sort_index.clone()).width(170.0),
-                Text::new("Hidden").font_size(12.0),
-                Toggle::new(self.show_hidden.clone()),
-            }.spacing(8.0),
-            hstack! {
-                Button::new("New Folder…").on_click(move || new_app.create_folder()),
-                Button::new("Rename…").enabled(move_supported()).on_click(move || rename_app.rename_selected()),
-                Button::new("Copy").on_click(move || copy_app.copy_selected(false)),
-                Button::new("Cut").enabled(move_supported()).on_click(move || cut_app.copy_selected(true)),
-                Button::new("Paste").on_click(move || paste_app.paste()),
-                Button::new("Details…").on_click(move || details_app.show_details()),
-                Spacer::new(),
-                Button::new("Delete…").on_click(move || delete_app.delete_selected()),
-            }.spacing(6.0),
+        let ready = self.browser_commands_ready();
+        hstack! {
+            TextField::new(self.search.clone()).placeholder("Filter this folder…")
+                .autofocus(self.search_focus.get() > 0)
+                .on_cancel(move || { cancel_search_app.search.set(String::new()); cancel_search_app.search_focus.set(0); })
+                .key(format!("files-search-{}", self.search_focus.get()))
+                .frame(f32::INFINITY, 34.0),
+            Button::new("New Folder…").font_size(13.0).enabled(ready).on_click(move || new_app.create_folder()),
+            Button::new("Copy").font_size(13.0).enabled(ready && self.selected_entry().is_some()).on_click(move || copy_app.copy_selected(false)),
+            Button::new("Paste").font_size(13.0).enabled(ready && self.clipboard.get().is_some_and(|item| !item.cut || move_supported())).on_click(move || paste_app.paste()),
         }.spacing(8.0)
     }
 
@@ -1941,6 +1915,7 @@ impl Application for FilerApp {
             .sidebar_width(170.0),
         )
         .app_id(APP_ID)
+        .menu_bar(self.browser_menu_bar())
         .size(Size::new(960.0, 640.0))
         .min_size(Size::new(760.0, 520.0))
         .scene_key("main")
@@ -1962,6 +1937,7 @@ impl Application for FilerApp {
         let details_window = Window::new("File Details", self.details_page())
             .scene_key(details::WINDOW_KEY)
             .app_id(APP_ID)
+            .menu_bar(self.details_menu_bar())
             .size(Size::new(820.0, 620.0))
             .min_size(Size::new(680.0, 500.0))
             .open_at_launch(false);
