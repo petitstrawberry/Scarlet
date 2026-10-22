@@ -6,8 +6,11 @@
 //! calling application.
 
 mod file_icons;
+mod filer_archive;
+mod filer_details;
 mod filer_listing;
 mod filer_operations;
+mod filer_usage;
 mod picker_filter;
 
 use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -15,7 +18,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -559,6 +562,23 @@ struct FilerApp {
     grid_focused: State<bool>,
     picker_grid_focused: State<bool>,
     picker_overwrite: State<Option<String>>,
+    details_archive: State<bool>,
+    details_path: State<String>,
+    details_folder: State<String>,
+    details_destination: State<String>,
+    details_name: State<String>,
+    details_status: State<String>,
+    details_text: State<String>,
+    details_index: State<Option<Arc<filer_archive::Index>>>,
+    details_entries: State<Vec<filer_archive::Entry>>,
+    details_selected: State<Option<usize>>,
+    details_last_click: State<Option<(usize, Instant)>>,
+    details_columns: State<usize>,
+    details_focused: State<bool>,
+    details_busy: State<bool>,
+    details_cancel: State<Option<Arc<AtomicBool>>>,
+    details_close_requested: State<bool>,
+    details_generation: State<u64>,
 }
 
 impl FilerApp {
@@ -648,16 +668,20 @@ impl FilerApp {
             Path::new(&home_path()),
         ) {
             Ok(path) => {
-                let resolved = filer_operations::native_fs::canonicalize(&path)
-                    .and_then(|path| {
-                        if filer_operations::native_fs::metadata(&path)?.is_dir() { Ok(path) }
-                        else { Err(std::io::Error::other("Enter a folder path")) }
-                    });
+                let resolved = filer_operations::native_fs::canonicalize(&path).and_then(|path| {
+                    if filer_operations::native_fs::metadata(&path)?.is_dir() {
+                        Ok(path)
+                    } else {
+                        Err(std::io::Error::other("Enter a folder path"))
+                    }
+                });
                 match resolved {
                     Ok(path) => self.navigate_to(path.to_string_lossy().into_owned()),
-                    Err(error) => self.status.set(format!("Cannot open {}: {error}", path.display())),
+                    Err(error) => self
+                        .status
+                        .set(format!("Cannot open {}: {error}", path.display())),
                 }
-            },
+            }
             Err(error) => self.status.set(error),
         }
     }
@@ -785,6 +809,10 @@ impl FilerApp {
     }
 
     fn open_entry(&self, path: String) {
+        if filer_archive::supported(Path::new(&path)) {
+            self.show_details_path(path, true);
+            return;
+        }
         let opening_status = format!("Opening {path}");
         self.status.set(opening_status.clone());
 
@@ -913,7 +941,7 @@ impl FilerApp {
     }
 
     fn run_operation(&self, operation: Operation) {
-        if self.operation_busy.get() {
+        if self.operation_busy.get() || self.details_busy.get() {
             self.status.set(String::from(
                 "Wait for the current file operation to finish",
             ));
@@ -995,6 +1023,7 @@ impl FilerApp {
         }
         if modifiers.primary() && !picker {
             match keycode {
+                KeyCode::Char('i' | 'I') => self.show_details(),
                 KeyCode::Char('l' | 'L') => {
                     self.search_focus.set(0);
                     self.location_focus
@@ -1100,6 +1129,7 @@ impl FilerApp {
     }
 
     fn process_pending_ui_work(&self) {
+        self.process_details_results();
         let filters = (
             self.search.get(),
             self.show_hidden.get(),
@@ -1580,7 +1610,12 @@ impl FilerApp {
             Either::B(vstack! {
                 Divider::new(),
                 Text::from_state(self.status.clone()).font_size(11.0),
-                Text::new("Enter: Open · F2: Rename · Ctrl+C/X/V: Copy/Cut/Paste · Delete: Delete…")
+                Text::new(if cfg!(target_os = "scarlet") {
+                    "Enter: Open · Ctrl+C/V: Copy/Paste · Delete: Delete… · Ctrl+I: Details"
+                } else {
+                    "Enter: Open · F2: Rename · Ctrl+C/X/V: Copy/Cut/Paste · Delete: Delete…"
+                }).font_size(10.0).color(ColorPalette::default().text_secondary()),
+                Text::new(if cfg!(target_os = "scarlet") { "Move and rename are not available on this system yet." } else { "" })
                     .font_size(10.0).color(ColorPalette::default().text_secondary()),
             }.spacing(4.0).padding(8.0))
         };
@@ -1619,6 +1654,7 @@ impl FilerApp {
         let copy_app = self.clone();
         let cut_app = self.clone();
         let paste_app = self.clone();
+        let details_app = self.clone();
         let cancel_search_app = self.clone();
         vstack! {
             hstack! {
@@ -1633,10 +1669,11 @@ impl FilerApp {
             }.spacing(8.0),
             hstack! {
                 Button::new("New Folder…").on_click(move || new_app.create_folder()),
-                Button::new("Rename…").on_click(move || rename_app.rename_selected()),
+                Button::new("Rename…").enabled(!cfg!(target_os = "scarlet")).on_click(move || rename_app.rename_selected()),
                 Button::new("Copy").on_click(move || copy_app.copy_selected(false)),
-                Button::new("Cut").on_click(move || cut_app.copy_selected(true)),
+                Button::new("Cut").enabled(!cfg!(target_os = "scarlet")).on_click(move || cut_app.copy_selected(true)),
                 Button::new("Paste").on_click(move || paste_app.paste()),
+                Button::new("Details…").on_click(move || details_app.show_details()),
                 Spacer::new(),
                 Button::new("Delete…").on_click(move || delete_app.delete_selected()),
             }.spacing(6.0),
@@ -1774,7 +1811,12 @@ impl Application for FilerApp {
     fn on_window_close_requested(&mut self, context: &WindowContext) -> bool {
         if context.scene_key.as_str() == PICKER_WINDOW_KEY {
             self.complete_picker(false, false);
-        } else if self.operation_busy.get() {
+        } else if context.scene_key.as_str() == filer_details::WINDOW_KEY {
+            if self.details_busy.get() {
+                self.cancel_details(true);
+                return false;
+            }
+        } else if self.operation_busy.get() || self.details_busy.get() {
             self.status.set(String::from(
                 "A file operation is still running. Close Files when it has finished.",
             ));
@@ -1854,7 +1896,13 @@ impl Application for FilerApp {
             .min_size(Size::new(640.0, 440.0))
             .open_at_launch(picker_open_at_launch);
 
-        (main_window, picker_window)
+        let details_window = Window::new("File Details", self.details_page())
+            .scene_key(filer_details::WINDOW_KEY)
+            .app_id(APP_ID)
+            .size(Size::new(820.0, 620.0))
+            .min_size(Size::new(680.0, 500.0))
+            .open_at_launch(false);
+        (main_window, picker_window, details_window)
     }
 
     fn exit_when_all_windows_closed(&self) -> bool {
@@ -1991,9 +2039,10 @@ mod layout_tests {
         app.scenes().build(&mut builder);
         let declarations = builder.into_declarations();
 
-        assert_eq!(declarations.len(), 2);
+        assert_eq!(declarations.len(), 3);
         assert!(declarations[0].opens_at_launch);
         assert!(!declarations[1].opens_at_launch);
+        assert!(!declarations[2].opens_at_launch);
     }
 
     #[test]
