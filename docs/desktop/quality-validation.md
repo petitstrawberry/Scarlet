@@ -46,6 +46,23 @@ honestly. Explicit preview fixtures are labeled. Host screenshots do not prove
 native compositor integration. No user applications, personal files or live
 machine settings were changed for testing.
 
+## Runtime verification matrix
+
+| Area | Actual host runtime exercised | Still requires Scarlet runtime |
+| --- | --- | --- |
+| Calculator | Keyboard evaluation, division error, history and converter | Cross-app clipboard |
+| Notepad | Open/save guards, search/replace, undo/redo, resize | Native file picker, IME and filesystem integration |
+| Clock / Calendar | Timer/stopwatch, date navigation, focus and minimum size | Native time service behavior |
+| Task Manager | Resize/minimum size; graph fixture separately labeled | Live metrics and SGFX hardware rendering |
+| Files | Temporary-fixture model/operation tests; no host GUI claim | GUI navigation and native filesystem operations |
+| Settings | Helper tests and native compilation; no host GUI claim | Real service persistence and system information |
+| Screenshot | Explicit preview fixture, region/arrow, PNG save and guards | Actual SWS capture and remote-session coexistence |
+| Logs | Explicit static preview, filter/details/follow controls | Live logd transport |
+| Applications | Fixture inspection, errors and minimum size | Native mutation, recovery and catalog refresh |
+| Characters | Search, keyboard selection and unsupported-backend errors | Native clipboard delivery |
+| Vellum | Transforms, annotation, history, dirty guards and PDF navigation | Native picker/export integration |
+| Typography | CPU/Softbuffer before/after at 100%, 125% and 200% | Native renderer/DPI and hardware comparison |
+
 ## Performance evidence
 
 ScarletUI `docs/text-scrolling-performance.md` records the scroll workloads and
