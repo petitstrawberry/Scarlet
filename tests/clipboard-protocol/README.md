@@ -5,7 +5,7 @@ hardware or unrelated networking/media application dependencies (the client is
 native-only and is checked by the cross-build below):
 
 ```sh
-/workspace/cloud-setup/bin/dev scarlet-ui cargo test --manifest-path /workspace/Scarlet/tests/clipboard-protocol/Cargo.toml
+cargo test --manifest-path tests/clipboard-protocol/Cargo.toml
 ```
 
 The native SWS service keeps one UTF-8 string (at most 256 KiB) in server memory
@@ -32,10 +32,10 @@ The optional `server` feature compiles the production SWS daemon source against
 its actual dependencies without unrelated media/networking application binaries:
 
 ```sh
-/workspace/cloud-setup/bin/dev scarlet-ui cargo check --manifest-path /workspace/Scarlet/tests/clipboard-protocol/Cargo.toml --config /workspace/scratch/desktop-ui.toml --target aarch64-unknown-scarlet --features server --bin sws
+cargo check --manifest-path tests/clipboard-protocol/Cargo.toml --target aarch64-unknown-scarlet --features server --bin sws
 ```
 
-The local configuration patches ScarletUI to the adjacent checkout. This is a
+These commands use the published dependency pins. This is a
 cross-compilation check; it does not boot SWS or prove cross-application clipboard
 delivery on a running Scarlet session.
 
@@ -46,5 +46,5 @@ The UI service's two worker regressions and two existing text clipboard callback
 tests passed with the following command (`/tmp/clipboard-core-final-tests.log`):
 
 ```sh
-/workspace/cloud-setup/bin/dev scarlet-ui cargo test -p scarlet-ui-core clipboard -- --test-threads=1
+cargo test -p scarlet-ui-core clipboard -- --test-threads=1
 ```

@@ -1,0 +1,49 @@
+[package]
+name = "scarlet-settings-app-checks"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "75786c4941ae407f2ae898d1942ca3a4b2c2f0df", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
+scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "75786c4941ae407f2ae898d1942ca3a4b2c2f0df" }
+scarlet-std = { path = "../../user/lib/std" }
+scarlet-os = { path = "../../user/lib/scarlet-os" }
+framebuffer = { path = "../../user/lib/framebuffer" }
+sbus = { path = "../../user/lib/sbus" }
+sbus-client = { path = "../../user/lib/sbus-client" }
+sws-client = { path = "../../user/lib/sws-client" }
+sws-protocol = { path = "../../user/lib/sws-protocol" }
+scarlet-desktop-config = { path = "../../user/lib/scarlet-desktop-config" }
+sas-client = { path = "../../user/lib/sas-client", default-features = false, features = ["legacy-scarlet-std"] }
+sas-protocol = { path = "../../user/lib/sas-protocol", default-features = false, features = ["legacy-scarlet-std"] }
+
+[[bin]]
+name = "settings"
+path = "../../user/bin/src/settings.rs"
+test = false
+
+[[bin]]
+name = "desktop-settings"
+path = "../../user/bin/src/scarlet_desktop/settingsd.rs"
+test = false
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[patch."https://github.com/petitstrawberry/Scarlet"]
+scarlet-abi = { path = "../../user/lib/scarlet-abi" }
+scarlet-os = { path = "../../user/lib/scarlet-os" }
+scarlet-rt = { path = "../../user/lib/scarlet-rt" }
+scarlet-std = { path = "../../user/lib/std" }
+scarlet-sys = { path = "../../user/lib/scarlet-sys" }
+gpu-raw = { path = "../../user/lib/gpu-raw" }
+sws-client = { path = "../../user/lib/sws-client" }
+sws-protocol = { path = "../../user/lib/sws-protocol" }
+sbus-client = { path = "../../user/lib/sbus-client" }
+scarlet-desktop-config = { path = "../../user/lib/scarlet-desktop-config" }

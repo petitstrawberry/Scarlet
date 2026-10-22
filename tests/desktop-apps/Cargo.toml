@@ -1,0 +1,89 @@
+[package]
+name = "scarlet-desktop-app-checks"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Compile the production app sources without unrelated networking/media bins.
+# This is a validation workspace, not an alternative image package.
+[workspace]
+
+[features]
+native-desktop = []
+
+[dependencies]
+zip = { version = "2.4.2", default-features = false, features = ["deflate-flate2", "flate2"] }
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+png = "0.18.1"
+log-protocol = { path = "../../user/lib/log-protocol" }
+sws-remote-protocol = { path = "../../user/lib/sws-remote-protocol", default-features = false, features = ["std"] }
+scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "75786c4941ae407f2ae898d1942ca3a4b2c2f0df" }
+
+[target.'cfg(not(target_os = "scarlet"))'.dependencies]
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "75786c4941ae407f2ae898d1942ca3a4b2c2f0df", default-features = false, features = ["std", "platform-winit"] }
+
+[target.'cfg(target_os = "scarlet")'.dependencies]
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "75786c4941ae407f2ae898d1942ca3a4b2c2f0df", default-features = false, features = ["std", "platform-sws"] }
+scarlet-os = { path = "../../user/lib/scarlet-os", default-features = false, features = ["std"] }
+scarlet-sys = { path = "../../user/lib/scarlet-sys" }
+scarlet-abi = { path = "../../user/lib/scarlet-abi" }
+sbus = { path = "../../user/lib/sbus" }
+sbus-client = { path = "../../user/lib/sbus-client", default-features = false, features = ["std"] }
+scarlet-desktop-config = { path = "../../user/lib/scarlet-desktop-config", default-features = false, features = ["std"] }
+lyon_path = "1.0"
+lyon_tessellation = "1.0"
+svgtypes = "0.15"
+zune-jpeg = { version = "0.5.8", default-features = false }
+
+[[bin]]
+name = "notepad"
+path = "../../user/std-bin/src/notepad.rs"
+
+[[bin]]
+name = "files"
+path = "../../user/std-bin/src/filer.rs"
+required-features = ["native-desktop"]
+
+[[bin]]
+name = "task-manager"
+path = "../../user/std-bin/src/task_manager.rs"
+
+[[bin]]
+name = "clock"
+path = "../../user/std-bin/src/clock.rs"
+
+[[bin]]
+name = "calendar"
+path = "../../user/std-bin/src/calendar.rs"
+
+[[bin]]
+name = "screenshot"
+path = "../../user/std-bin/src/screenshot.rs"
+
+[[bin]]
+name = "log-viewer"
+path = "../../user/std-bin/src/log_viewer.rs"
+
+[[bin]]
+name = "calculator"
+path = "../../user/std-bin/src/calculator.rs"
+
+[[bin]]
+name = "characters"
+path = "../../user/std-bin/src/character_palette.rs"
+
+[[bin]]
+name = "applications"
+path = "../../user/std-bin/src/app_manager.rs"
+
+[patch."https://github.com/petitstrawberry/Scarlet"]
+scarlet-abi = { path = "../../user/lib/scarlet-abi" }
+scarlet-os = { path = "../../user/lib/scarlet-os" }
+scarlet-rt = { path = "../../user/lib/scarlet-rt" }
+scarlet-std = { path = "../../user/lib/std" }
+scarlet-sys = { path = "../../user/lib/scarlet-sys" }
+gpu-raw = { path = "../../user/lib/gpu-raw" }
+sws-client = { path = "../../user/lib/sws-client" }
+sws-protocol = { path = "../../user/lib/sws-protocol" }
+sbus-client = { path = "../../user/lib/sbus-client" }
+scarlet-desktop-config = { path = "../../user/lib/scarlet-desktop-config" }
