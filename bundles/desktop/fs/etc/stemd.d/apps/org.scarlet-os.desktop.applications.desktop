@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Applications
+Exec=/bin/applications
+Icon=application-x-executable
+Type=Application
+Terminal=false

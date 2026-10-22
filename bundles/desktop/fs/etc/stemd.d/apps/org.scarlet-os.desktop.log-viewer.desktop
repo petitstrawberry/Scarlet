@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Logs
+Exec=/bin/log-viewer
+Icon=text-x-generic
+Type=Application
+Terminal=false
