@@ -1,405 +1,963 @@
-//! Scarlet Desktop text editor.
-//!
-//! Notepad deliberately keeps document editing in ScarletUI's `TextView` and
-//! uses the desktop File Manager service for file selection.  This keeps file
-//! dialog policy out of the editor while still making the application useful
-//! on a fresh Scarlet session.
+//! Scarlet Desktop text editor with guarded document transitions and asynchronous I/O.
+#[path = "notepad/document.rs"]
+mod document;
 
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::string::String;
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
-
-use sbus::{Argument, Message};
-use sbus_client::Connection as SbusConnection;
-use scarlet_desktop_config::{
-    DESKTOP_FILE_MANAGER_BUS_NAME, DESKTOP_FILE_MANAGER_INTERFACE,
-    DESKTOP_FILE_MANAGER_OBJECT_PATH, DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD,
-    DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL, DESKTOP_FILE_MANAGER_SAVE_FILE_METHOD,
-};
+use document::{Operation, PendingAction, Session, Ticket};
+use scarlet_ui::file_dialog::{FileDialog, FileDialogHandle, FileDialogMode, FileDialogOutcome};
 use scarlet_ui::prelude::*;
-use scarlet_ui::{KeyCode, MenuBarModel, MenuEntry, MenuItemModel, hstack, vstack};
+use scarlet_ui::{
+    Event, KeyCode, MenuBarModel, MenuEntry, MenuItemModel, PlatformWindow, WindowContext,
+    WindowId, hstack, scenes, vstack,
+};
 use scarlet_ui_macros::View;
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 const APP_ID: &str = "org.scarlet-os.desktop.notepad";
-const SERVICE_RETRY_DELAY: Duration = Duration::from_millis(100);
-const PICKER_RETRY_ATTEMPTS: usize = 20;
+const HISTORY_LIMIT: usize = 128;
+const HISTORY_BYTES: usize = 32 * 1024 * 1024;
 
-#[derive(Clone, Copy)]
-enum PickerAction {
-    Open,
-    SaveAs,
+#[derive(Clone, Default)]
+struct Snapshot {
+    document: TextDocument,
+    selection: TextSelection,
+    version: u64,
+}
+#[derive(Default)]
+struct Runtime {
+    owner: Option<WindowId>,
+    window_title: String,
+    position_key: Option<(TextSelection, u64, bool)>,
+    dialog: Option<(Ticket, Operation, FileDialogHandle)>,
+    results: VecDeque<IoResult>,
+    undo: VecDeque<Snapshot>,
+    redo: VecDeque<Snapshot>,
+    current: Snapshot,
+    clipboard: Option<String>,
+}
+enum IoResult {
+    Open(Ticket, PathBuf, std::result::Result<String, String>),
+    Save(Ticket, PathBuf, std::result::Result<(), String>),
 }
 
 #[derive(View, Clone)]
 struct NotepadApp {
-    content: State<String>,
+    content: State<TextDocument>,
     selection: State<TextSelection>,
     scroll: State<TextViewScroll>,
-    path: State<Option<String>>,
-    dirty: State<bool>,
+    session: State<Session>,
+    runtime: State<Arc<Mutex<Runtime>>>,
     status: State<String>,
-    picker_request_id: State<Option<String>>,
-    picker_action: State<Option<PickerAction>>,
+    position: State<String>,
+    wrap: State<WrapMode>,
+    line_numbers: State<bool>,
+    font_size: State<f32>,
+    query: State<String>,
+    replacement: State<String>,
+    search_status: State<String>,
 }
 
 impl NotepadApp {
-    fn new(initial_path: Option<String>) -> Self {
+    fn new(initial_path: Option<PathBuf>) -> Self {
         let app = Self::default();
-        app.status.set(String::from("Ready"));
+        app.status.set("Ready".into());
+        app.position.set("Ln 1, Col 1".into());
+        app.wrap.set(WrapMode::Soft);
+        app.line_numbers.set(true);
+        app.font_size.set(15.0);
+        app.search_status
+            .set("Literal search · case-sensitive · wraps at the end".into());
         if let Some(path) = initial_path {
             app.open_path(path);
         }
         app
     }
-
     fn window_title(&self) -> String {
-        let name = self
+        let session = self.session.get();
+        let name = session
             .path
-            .get()
-            .as_deref()
-            .and_then(|path| Path::new(path).file_name())
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| String::from("Untitled"));
-        if self.dirty.get() {
-            format!("{} — Notepad", name)
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Untitled".into());
+        format!(
+            "{}{} — Notepad",
+            if session.dirty() { "* " } else { "" },
+            name
+        )
+    }
+    fn request(&self, action: PendingAction) {
+        let mut session = self.session.get();
+        if !session.request(action) {
+            self.status
+                .set("Finish or cancel the current file operation first".into());
+            return;
+        }
+        let dirty = session.dirty();
+        self.session.set(session);
+        if dirty {
+            open_window("confirm");
         } else {
-            format!("{} - Notepad", name)
+            self.continue_pending();
         }
     }
-
-    fn new_document(&self) {
-        self.content.set(String::new());
+    fn continue_pending(&self) {
+        let mut session = self.session.get();
+        let action = session.take_ready_action();
+        self.session.set(session);
+        if let Some(action) = action {
+            self.perform(action);
+        }
+    }
+    fn perform(&self, action: PendingAction) {
+        dismiss_window("confirm");
+        match action {
+            PendingAction::New => {
+                self.load_document(None, String::new());
+                self.status.set("New document".into());
+            }
+            PendingAction::Open => self.show_picker(Operation::OpenPicker),
+            PendingAction::Close => {
+                dismiss_window("find");
+                dismiss_window("main");
+            }
+        }
+    }
+    fn cancel_pending(&self) {
+        // Never turn a cancelled Save-As into a later close/new/open.
+        self.session.update(|s| s.cancel());
+        dismiss_window("confirm");
+    }
+    fn discard_pending(&self) {
+        let mut session = self.session.get();
+        if session.operation.is_some() {
+            self.status
+                .set("Wait for the current operation to finish".into());
+            return;
+        }
+        let action = session.pending.take();
+        self.session.set(session);
+        if let Some(action) = action {
+            self.perform(action);
+        }
+    }
+    fn load_document(&self, path: Option<PathBuf>, text: String) {
+        let document = TextDocument::from_str(&text);
+        self.content.set(document.clone());
         self.selection.set(TextSelection::collapsed(0));
         self.scroll.set(TextViewScroll::default());
-        self.path.set(None);
-        self.dirty.set(false);
-        self.status.set(String::from("New document"));
+        self.session.update(|s| s.loaded(path));
+        let shared = self.runtime.get();
+        let mut rt = shared.lock().unwrap();
+        rt.undo.clear();
+        rt.redo.clear();
+        rt.current = Snapshot {
+            document,
+            ..Snapshot::default()
+        };
+        drop(rt);
+        self.update_position();
     }
-
-    fn open_path(&self, path: String) {
-        match std::fs::read_to_string(&path) {
-            Ok(content) => {
-                let length = content.len();
-                self.content.set(content);
-                self.selection.set(TextSelection::collapsed(0));
-                self.scroll.set(TextViewScroll::default());
-                self.path.set(Some(path.clone()));
-                self.dirty.set(false);
-                self.status
-                    .set(format!("Opened {} ({} bytes)", path, length));
-            }
-            Err(error) => self.status.set(format!("Cannot open {path}: {error}")),
+    fn begin(&self, operation: Operation) -> Option<Ticket> {
+        let mut session = self.session.get();
+        let ticket = session.begin(operation);
+        self.session.set(session);
+        if ticket.is_none() {
+            self.status
+                .set("A file operation is already in progress".into());
         }
+        ticket
     }
-
-    fn save_to_path(&self, path: String) {
-        let mut options = OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        let result = options
-            .open(&path)
-            .and_then(|mut file| file.write_all(self.content.get().as_bytes()));
-        match result {
-            Ok(()) => {
-                self.path.set(Some(path.clone()));
-                self.dirty.set(false);
-                self.status.set(format!("Saved {path}"));
-            }
-            Err(error) => self.status.set(format!("Cannot save {path}: {error}")),
-        }
+    fn open_path(&self, path: PathBuf) {
+        let Some(ticket) = self.begin(Operation::Read) else {
+            return;
+        };
+        self.status.set(format!("Opening {}…", path.display()));
+        let shared = self.runtime.get();
+        thread::spawn(move || {
+            let result = std::fs::read_to_string(&path).map_err(|e| e.to_string());
+            shared
+                .lock()
+                .unwrap()
+                .results
+                .push_back(IoResult::Open(ticket, path, result));
+        });
     }
-
+    fn save_to_path(&self, path: PathBuf) {
+        let Some(ticket) = self.begin(Operation::Save) else {
+            return;
+        };
+        let document = self.content.get();
+        self.status.set(format!("Saving {}…", path.display()));
+        let shared = self.runtime.get();
+        thread::spawn(move || {
+            let result = document::save_atomic(&path, document.as_str().as_bytes())
+                .map_err(|e| e.to_string());
+            shared
+                .lock()
+                .unwrap()
+                .results
+                .push_back(IoResult::Save(ticket, path, result));
+        });
+    }
     fn save(&self) {
-        if let Some(path) = self.path.get() {
+        if let Some(path) = self.session.get().path {
             self.save_to_path(path);
         } else {
-            self.save_as();
+            self.show_picker(Operation::SavePicker);
         }
     }
-
-    fn save_as(&self) {
-        let initial_folder = self
+    fn show_picker(&self, operation: Operation) {
+        let shared = self.runtime.get();
+        let owner = shared.lock().unwrap().owner;
+        let Some(owner) = owner else {
+            self.status
+                .set("Window is not ready for file selection".into());
+            return;
+        };
+        let Some(ticket) = self.begin(operation) else {
+            return;
+        };
+        let save = operation == Operation::SavePicker;
+        let session = self.session.get();
+        let mut dialog = FileDialog::new(if save {
+            FileDialogMode::Save
+        } else {
+            FileDialogMode::Open
+        });
+        dialog.title = if save {
+            "Save Document"
+        } else {
+            "Open Document"
+        }
+        .into();
+        let folder = session
             .path
-            .get()
-            .and_then(|path| PathBuf::from(path).parent().map(Path::to_path_buf))
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(PathBuf::from)
             .unwrap_or_else(home_path);
-        let suggested_name = self
-            .path
-            .get()
-            .and_then(|path| {
-                Path::new(&path)
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-            })
-            .unwrap_or_else(|| String::from("Untitled.txt"));
-        self.request_picker(
-            PickerAction::SaveAs,
-            DESKTOP_FILE_MANAGER_SAVE_FILE_METHOD,
-            vec![
-                Argument::String(String::from("Save Document")),
-                Argument::String(initial_folder.to_string_lossy().into_owned()),
-                Argument::String(suggested_name),
-                Argument::String(String::from("text/*")),
-            ],
-        );
+        if folder.is_absolute() {
+            dialog.initial_directory = Some(folder.into());
+        }
+        if save {
+            dialog.default_name = Some(
+                session
+                    .path
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "Untitled.txt".into()),
+            );
+        }
+        shared.lock().unwrap().dialog = Some((ticket, operation, dialog.show(owner)));
+        self.status.set("Waiting for file selection".into());
     }
-
-    fn open_picker(&self) {
-        self.request_picker(
-            PickerAction::Open,
-            DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD,
-            vec![
-                Argument::String(String::from("Open Document")),
-                Argument::String(home_path().to_string_lossy().into_owned()),
-                Argument::String(String::from("text/*")),
-                Argument::Boolean(false),
-                Argument::Boolean(false),
-            ],
-        );
-    }
-
-    fn request_picker(&self, action: PickerAction, method: &str, args: Vec<Argument>) {
-        self.picker_action.set(Some(action));
-        let mut last_error = None;
-        for _attempt in 0..PICKER_RETRY_ATTEMPTS {
-            let result = SbusConnection::connect().and_then(|mut connection| {
-                connection.call_method_timeout(
-                    DESKTOP_FILE_MANAGER_BUS_NAME,
-                    DESKTOP_FILE_MANAGER_OBJECT_PATH,
-                    DESKTOP_FILE_MANAGER_INTERFACE,
-                    method,
-                    args.clone(),
-                    2_000,
-                )
-            });
-
-            match result {
-                Ok(arguments) => match arguments.first() {
-                    Some(Argument::String(request_id)) => {
-                        self.picker_request_id.set(Some(request_id.clone()));
-                        self.status.set(String::from("Waiting for file selection"));
-                        return;
+    fn poll_results(&self) {
+        let shared = self.runtime.get();
+        let dialog_result = {
+            let mut rt = shared.lock().unwrap();
+            let result = rt
+                .dialog
+                .as_ref()
+                .and_then(|(t, op, h)| h.take_result().map(|r| (*t, *op, r)));
+            if result.is_some() {
+                rt.dialog = None;
+            }
+            result
+        };
+        if let Some((ticket, operation, result)) = dialog_result {
+            let mut session = self.session.get();
+            if session.finish(ticket) {
+                let unchanged = session.unchanged(ticket);
+                self.session.set(session);
+                match result {
+                    Ok(FileDialogOutcome::Selected(paths)) if !paths.is_empty() => {
+                        let path = paths[0].as_path().to_path_buf();
+                        if operation == Operation::OpenPicker && !unchanged {
+                            self.status.set(
+                                "Document changed during file selection; open it again when ready"
+                                    .into(),
+                            );
+                        } else if operation == Operation::OpenPicker {
+                            self.open_path(path);
+                        } else {
+                            self.save_to_path(path);
+                        }
                     }
-                    _ => {
-                        self.picker_action.set(None);
-                        self.status
-                            .set(String::from("File Manager returned no request id"));
-                        return;
+                    Ok(_) => {
+                        self.cancel_pending();
+                        self.status.set("File selection cancelled".into());
                     }
-                },
-                Err(error) => {
-                    last_error = Some(error);
-                    thread::sleep(SERVICE_RETRY_DELAY);
+                    Err(error) => {
+                        self.status.set(format!("File selection failed: {error}"));
+                    }
                 }
             }
         }
-        self.picker_request_id.set(None);
-        self.picker_action.set(None);
-        self.status
-            .set(format!("Cannot open file picker: {last_error:?}"));
+        let results: Vec<_> = shared.lock().unwrap().results.drain(..).collect();
+        for result in results {
+            match result {
+                IoResult::Open(ticket, path, result) => {
+                    let mut session = self.session.get();
+                    if !session.finish(ticket) {
+                        continue;
+                    }
+                    let unchanged = session.unchanged(ticket);
+                    self.session.set(session);
+                    match result {
+                        Ok(text) if unchanged => {
+                            self.load_document(Some(path.clone()), text);
+                            self.status.set(format!("Opened {}", path.display()));
+                        }
+                        Ok(_) => self
+                            .status
+                            .set("Document changed while loading; your edits were kept".into()),
+                        Err(error) => self
+                            .status
+                            .set(format!("Cannot open {}: {error}", path.display())),
+                    }
+                }
+                IoResult::Save(ticket, path, result) => {
+                    let mut session = self.session.get();
+                    if !session.finish(ticket) {
+                        continue;
+                    }
+                    if result.is_ok() {
+                        session.saved(ticket, path.clone());
+                    }
+                    let dirty = session.dirty();
+                    let pending = session.pending.is_some();
+                    self.session.set(session);
+                    self.update_position();
+                    match result {
+                        Ok(()) => {
+                            self.status.set(if dirty {
+                                "Saved earlier version; newer edits remain unsaved".into()
+                            } else {
+                                format!("Saved {}", path.display())
+                            });
+                            if dirty && pending {
+                                open_window("confirm");
+                            } else {
+                                self.continue_pending();
+                            }
+                        }
+                        Err(error) => self
+                            .status
+                            .set(format!("Cannot save {}: {error}", path.display())),
+                    }
+                }
+            }
+        }
     }
-
-    fn handle_picker_response(&self, accepted: bool, path: String) {
-        let action = self.picker_action.get();
-        self.picker_request_id.set(None);
-        self.picker_action.set(None);
-        if !accepted || path.is_empty() {
-            self.status.set(String::from("File selection cancelled"));
+    fn record_edit(&self) {
+        let shared = self.runtime.get();
+        let mut rt = shared.lock().unwrap();
+        let previous = rt.current.clone();
+        rt.undo.push_back(previous);
+        trim_history(&mut rt.undo);
+        rt.redo.clear();
+        self.session.update(|s| s.edited());
+        rt.current = Snapshot {
+            document: self.content.get(),
+            selection: self.selection.get(),
+            version: self.session.get().content_version,
+        };
+        drop(rt);
+        self.update_position();
+    }
+    fn restore_history(&self, redo: bool) {
+        let shared = self.runtime.get();
+        let mut rt = shared.lock().unwrap();
+        let snapshot = if redo {
+            rt.redo.pop_back()
+        } else {
+            rt.undo.pop_back()
+        };
+        let Some(snapshot) = snapshot else {
             return;
+        };
+        let current = Snapshot {
+            selection: self.selection.get(),
+            ..rt.current.clone()
+        };
+        if redo {
+            rt.undo.push_back(current);
+        } else {
+            rt.redo.push_back(current);
         }
-
-        match action {
-            Some(PickerAction::Open) => self.open_path(path),
-            Some(PickerAction::SaveAs) => self.save_to_path(path),
-            None => {}
+        rt.current = snapshot.clone();
+        drop(rt);
+        self.content.set(snapshot.document);
+        self.selection.set(snapshot.selection);
+        self.session.update(|s| s.restored(snapshot.version));
+        self.update_position();
+        self.status.set(if redo { "Redo" } else { "Undo" }.into());
+    }
+    fn replace_range(&self, range: std::ops::Range<usize>, text: &str) {
+        self.runtime.get().lock().unwrap().current.selection = self.selection.get();
+        let (document, delta) = self.content.get().replace(range, text);
+        self.content.set(document);
+        self.selection.set(TextSelection::collapsed(
+            delta.replaced_range.start + text.len(),
+        ));
+        self.record_edit();
+    }
+    fn copy(&self, cut: bool) {
+        let Some(range) = self.selection.get().normalized_range() else {
+            return;
+        };
+        let document = self.content.get();
+        let text = document.as_str();
+        let Some(selected) = text.get(range.clone()) else {
+            return;
+        };
+        self.runtime.get().lock().unwrap().clipboard = Some(selected.into());
+        if cut {
+            self.replace_range(range, "");
+        }
+        self.status
+            .set("Copied within Notepad (desktop clipboard unavailable)".into());
+    }
+    fn paste(&self) {
+        let clipboard = self.runtime.get().lock().unwrap().clipboard.clone();
+        if let Some(text) = clipboard {
+            let s = self.selection.get();
+            self.replace_range(s.start().byte..s.end().byte, &text);
+        } else {
+            self.status.set("Notepad clipboard is empty".into());
         }
     }
-
+    fn select_all(&self) {
+        self.selection.set(TextSelection {
+            anchor: TextPosition::new(0),
+            caret: TextPosition::new(self.content.get().len()),
+        });
+    }
+    fn show_find(&self) {
+        let doc = self.content.get();
+        if let Some(range) = self.selection.get().normalized_range() {
+            if let Some(text) = doc.as_str().get(range) {
+                if !text.contains('\n') {
+                    self.query.set(text.into());
+                }
+            }
+        }
+        open_window("find");
+    }
+    fn find(&self, backwards: bool) {
+        let doc = self.content.get();
+        let selection = self.selection.get();
+        let start = if backwards {
+            selection.start().byte
+        } else {
+            selection.end().byte
+        };
+        match document::find(&doc.as_str(), &self.query.get(), start, backwards) {
+            Some(range) => {
+                self.selection.set(TextSelection {
+                    anchor: TextPosition::new(range.start),
+                    caret: TextPosition::new(range.end),
+                });
+                self.search_status.set("Match selected in document".into());
+            }
+            None => self.search_status.set(
+                if self.query.get().is_empty() {
+                    "Enter text to find"
+                } else {
+                    "No matches"
+                }
+                .into(),
+            ),
+        }
+    }
+    fn replace_match(&self) {
+        let query = self.query.get();
+        if !query.is_empty() {
+            if let Some(range) = self.selection.get().normalized_range() {
+                if self.content.get().as_str().get(range.clone()) == Some(query.as_str()) {
+                    self.replace_range(range, &self.replacement.get());
+                }
+            }
+        }
+        self.find(false);
+    }
+    fn replace_all(&self) {
+        let document = self.content.get();
+        if let Some((text, count)) = document::replace_all(
+            &document.as_str(),
+            &self.query.get(),
+            &self.replacement.get(),
+        ) {
+            self.replace_range(0..document.len(), &text);
+            self.search_status
+                .set(format!("Replaced {count} matches (Undo restores all)"));
+        } else {
+            self.search_status
+                .set("No matches; document unchanged".into());
+        }
+    }
+    fn update_position(&self) {
+        let selection = self.selection.get();
+        let session = self.session.get();
+        let key = (selection, session.revision, session.dirty());
+        {
+            let shared = self.runtime.get();
+            let mut runtime = shared.lock().unwrap();
+            if runtime.position_key == Some(key) {
+                return;
+            }
+            runtime.position_key = Some(key);
+        }
+        let document = self.content.get();
+        let byte = selection.caret.byte.min(document.len());
+        let line = document.line_index_at_byte(byte);
+        let start = document.line_range(line).map_or(0, |r| r.start);
+        let column = document.line_text(line).map_or(1, |text| {
+            let end = (byte - start).min(text.len());
+            text.get(..end).map_or(1, |s| s.chars().count() + 1)
+        });
+        let label = format!(
+            "{}Ln {}, Col {}  ·  UTF-8",
+            if self.session.get().dirty() {
+                "Modified  ·  "
+            } else {
+                ""
+            },
+            line + 1,
+            column
+        );
+        if self.position.get() != label {
+            self.position.set(label);
+        }
+    }
     fn handle_key(&self, event: KeyEvent) -> bool {
-        match event {
-            KeyEvent::Pressed {
-                keycode: KeyCode::Char('n' | 'N'),
-                modifiers,
-            } if modifiers.primary() => {
-                self.new_document();
-                true
-            }
-            KeyEvent::Pressed {
-                keycode: KeyCode::Char('o' | 'O'),
-                modifiers,
-            } if modifiers.primary() => {
-                self.open_picker();
-                true
-            }
-            KeyEvent::Pressed {
-                keycode: KeyCode::Char('s' | 'S'),
-                modifiers,
-            } if modifiers.control && modifiers.shift => {
-                self.save_as();
-                true
-            }
-            KeyEvent::Pressed {
-                keycode: KeyCode::Char('s' | 'S'),
-                modifiers,
-            } if modifiers.control => {
-                self.save();
-                true
-            }
-            _ => false,
+        let KeyEvent::Pressed { keycode, modifiers } = event else {
+            return false;
+        };
+        if keycode == KeyCode::F(3) {
+            self.find(modifiers.shift);
+            return true;
         }
+        if !modifiers.primary() {
+            return false;
+        }
+        match keycode {
+            KeyCode::Char('n' | 'N') => self.request(PendingAction::New),
+            KeyCode::Char('o' | 'O') => self.request(PendingAction::Open),
+            KeyCode::Char('s' | 'S') if modifiers.shift => self.show_picker(Operation::SavePicker),
+            KeyCode::Char('s' | 'S') => self.save(),
+            KeyCode::Char('w' | 'W') => self.request(PendingAction::Close),
+            KeyCode::Char('z' | 'Z') => self.restore_history(modifiers.shift),
+            KeyCode::Char('y' | 'Y') => self.restore_history(true),
+            KeyCode::Char('f' | 'F' | 'h' | 'H') => self.show_find(),
+            KeyCode::Char('a' | 'A') => self.select_all(),
+            KeyCode::Char('c' | 'C') => self.copy(false),
+            KeyCode::Char('x' | 'X') => self.copy(true),
+            KeyCode::Char('v' | 'V') => self.paste(),
+            _ => return false,
+        }
+        true
     }
-
     fn content_view(&self) -> impl View + Clone + use<> {
-        let key_app = self.clone();
-
+        let edit = self.clone();
+        let key = self.clone();
         vstack! {
-            TextView::new(self.content.clone(), self.selection.clone())
-                .scroll_state(self.scroll.clone())
-                .wrap_mode(WrapMode::Soft)
-                .line_numbers(true)
-                .current_line_highlight(true)
-                .font_size(15.0)
-                .padding(12.0)
-                .on_text_change({
-                    let dirty = self.dirty.clone();
-                    move |_| dirty.set(true)
-                })
+            TextView::with_document(self.content.clone(), self.selection.clone())
+                .autofocus(true)
+                .scroll_state(self.scroll.clone()).wrap_mode_state(self.wrap.clone())
+                .line_numbers(self.line_numbers.get()).current_line_highlight(true)
+                .reveal_selection_on_change(true)
+                .font_size(self.font_size.get()).padding(12.0)
+                .on_text_change(move |_| edit.record_edit())
                 .frame(f32::INFINITY, f32::INFINITY),
             hstack! {
                 Text::from_state(self.status.clone()).font_size(11.0),
                 Spacer::new(),
-                Text::new("UTF-8").font_size(11.0),
-            }
-            .padding(8.0),
+                Text::from_state(self.position.clone()).font_size(11.0),
+            }.padding(8.0),
         }
-        .on_key(move |event| key_app.handle_key(event))
+        .on_event_capture(move |event| {
+            // Remember selection before native TextView edits for faithful Undo.
+            key.runtime.get().lock().unwrap().current.selection = key.selection.get();
+            if let Event::Keyboard(event) = event {
+                key.handle_key(event.clone())
+            } else {
+                false
+            }
+        })
         .frame(f32::INFINITY, f32::INFINITY)
     }
-
+    fn confirm_view(&self) -> impl View + Clone + use<> {
+        let save = self.clone();
+        let discard = self.clone();
+        let cancel = self.clone();
+        vstack! {
+            Text::new("Save changes before continuing?").font_size(18.0),
+            Text::new("Your document has unsaved changes.").font_size(13.0),
+            Text::from_state(self.status.clone()).font_size(12.0),
+            hstack! {
+                Button::new("Save").on_click(move || save.save()),
+                Button::new("Discard").on_click(move || discard.discard_pending()),
+                Button::new("Cancel").on_click(move || cancel.cancel_pending()),
+            }.spacing(10.0),
+        }
+        .spacing(16.0)
+        .padding(20.0)
+    }
+    fn find_view(&self) -> impl View + Clone + use<> {
+        let submit = self.clone();
+        let next = self.clone();
+        let previous = self.clone();
+        let replace = self.clone();
+        let all = self.clone();
+        vstack! {
+            TextField::new(self.query.clone()).autofocus(true).placeholder("Find text")
+                .on_submit(move || submit.find(false)).frame_width(440.0),
+            TextField::new(self.replacement.clone()).placeholder("Replace with").frame_width(440.0),
+            hstack! {
+                Button::new("Previous").on_click(move || previous.find(true)),
+                Button::new("Next").on_click(move || next.find(false)),
+                Button::new("Replace").on_click(move || replace.replace_match()),
+                Button::new("Replace All").on_click(move || all.replace_all()),
+            }.spacing(8.0),
+            Text::from_state(self.search_status.clone()).font_size(12.0),
+            Button::new("Done").on_click(|| dismiss_window("find")),
+        }
+        .spacing(12.0)
+        .padding(20.0)
+    }
+    fn menu_item(
+        &self,
+        id: &str,
+        title: &str,
+        shortcut: &str,
+        action: impl Fn(&Self) + Send + Sync + 'static,
+    ) -> MenuEntry {
+        let app = self.clone();
+        MenuEntry::Item(
+            MenuItemModel::new(id, title)
+                .shortcut(shortcut)
+                .on_activate(Arc::new(move || action(&app))),
+        )
+    }
     fn menu_bar(&self) -> MenuBarModel {
-        let new_app = self.clone();
-        let open_app = self.clone();
-        let save_app = self.clone();
-        let save_as_app = self.clone();
         MenuBarModel::new(vec![
-            MenuItemModel::new("file", "File")
-                .on_activate(Arc::new(|| {}))
-                .children(vec![
-                    MenuEntry::Item(
-                        MenuItemModel::new("new", "New")
-                            .shortcut("Ctrl+N")
-                            .on_activate(Arc::new(move || new_app.new_document())),
-                    ),
-                    MenuEntry::Item(
-                        MenuItemModel::new("open", "Open…")
-                            .shortcut("Ctrl+O")
-                            .on_activate(Arc::new(move || open_app.open_picker())),
-                    ),
-                    MenuEntry::Separator,
-                    MenuEntry::Item(
-                        MenuItemModel::new("save", "Save")
-                            .shortcut("Ctrl+S")
-                            .on_activate(Arc::new(move || save_app.save())),
-                    ),
-                    MenuEntry::Item(
-                        MenuItemModel::new("save-as", "Save As…")
-                            .shortcut("Ctrl+Shift+S")
-                            .on_activate(Arc::new(move || save_as_app.save_as())),
-                    ),
-                ]),
-            MenuItemModel::new("edit", "Edit").on_activate(Arc::new(|| {})),
-            MenuItemModel::new("view", "View").on_activate(Arc::new(|| {})),
+            MenuItemModel::new("file", "File").children(vec![
+                self.menu_item("new", "New", "Ctrl+N", |a| a.request(PendingAction::New)),
+                self.menu_item("open", "Open…", "Ctrl+O", |a| {
+                    a.request(PendingAction::Open)
+                }),
+                MenuEntry::Separator,
+                self.menu_item("save", "Save", "Ctrl+S", |a| a.save()),
+                self.menu_item("save-as", "Save As…", "Ctrl+Shift+S", |a| {
+                    a.show_picker(Operation::SavePicker)
+                }),
+                MenuEntry::Separator,
+                self.menu_item("close", "Close", "Ctrl+W", |a| {
+                    a.request(PendingAction::Close)
+                }),
+            ]),
+            MenuItemModel::new("edit", "Edit").children(vec![
+                self.menu_item("undo", "Undo", "Ctrl+Z", |a| a.restore_history(false)),
+                self.menu_item("redo", "Redo", "Ctrl+Shift+Z", |a| a.restore_history(true)),
+                MenuEntry::Separator,
+                self.menu_item("cut", "Cut (Notepad)", "Ctrl+X", |a| a.copy(true)),
+                self.menu_item("copy", "Copy (Notepad)", "Ctrl+C", |a| a.copy(false)),
+                self.menu_item("paste", "Paste (Notepad)", "Ctrl+V", |a| a.paste()),
+                self.menu_item("all", "Select All", "Ctrl+A", |a| a.select_all()),
+                MenuEntry::Separator,
+                self.menu_item("find", "Find / Replace…", "Ctrl+F", |a| a.show_find()),
+                self.menu_item("next", "Find Next", "F3", |a| a.find(false)),
+                self.menu_item("previous", "Find Previous", "Shift+F3", |a| a.find(true)),
+            ]),
+            MenuItemModel::new("view", "View").children(vec![
+                self.menu_item(
+                    "wrap",
+                    if self.wrap.get() == WrapMode::Soft {
+                        "Word Wrap: On"
+                    } else {
+                        "Word Wrap: Off"
+                    },
+                    "",
+                    |a| {
+                        a.wrap.update(|w| {
+                            *w = if *w == WrapMode::Soft {
+                                WrapMode::None
+                            } else {
+                                WrapMode::Soft
+                            }
+                        })
+                    },
+                ),
+                self.menu_item(
+                    "lines",
+                    if self.line_numbers.get() {
+                        "Line Numbers: On"
+                    } else {
+                        "Line Numbers: Off"
+                    },
+                    "",
+                    |a| a.line_numbers.update(|v| *v = !*v),
+                ),
+                MenuEntry::Separator,
+                self.menu_item("larger", "Larger Text", "", |a| {
+                    a.font_size.update(|v| *v = (*v + 1.0).min(32.0))
+                }),
+                self.menu_item("smaller", "Smaller Text", "", |a| {
+                    a.font_size.update(|v| *v = (*v - 1.0).max(10.0))
+                }),
+                self.menu_item("reset-zoom", "Reset Text Size", "", |a| {
+                    a.font_size.set(15.0)
+                }),
+            ]),
         ])
     }
 }
-
 impl Application for NotepadApp {
     fn scenes(&self) -> impl Scene {
-        WindowGroup::new(
-            "main",
-            Window::new(self.window_title(), self.content_view())
-                .app_id(APP_ID)
-                .menu_bar(self.menu_bar())
-                .size(Size::new(900.0, 680.0)),
-        )
-    }
-
-    fn init(&mut self) {
-        start_picker_listener(self);
-    }
-
-    fn debug_logging(&self) -> bool {
-        false
-    }
-}
-
-fn start_picker_listener(app: &NotepadApp) {
-    let app = app.clone();
-    thread::spawn(move || {
-        loop {
-            let Ok(mut connection) = SbusConnection::connect() else {
-                thread::sleep(SERVICE_RETRY_DELAY);
-                continue;
-            };
-
-            loop {
-                let message = match connection.receive_message() {
-                    Ok(message) => message,
-                    Err(_) => break,
-                };
-                let Message::Signal {
-                    sender,
-                    path,
-                    interface,
-                    signal,
-                    args,
-                } = message
-                else {
-                    continue;
-                };
-                if sender != DESKTOP_FILE_MANAGER_BUS_NAME
-                    || path != DESKTOP_FILE_MANAGER_OBJECT_PATH
-                    || interface != DESKTOP_FILE_MANAGER_INTERFACE
-                    || signal != DESKTOP_FILE_MANAGER_RESPONSE_SIGNAL
-                {
-                    continue;
-                }
-
-                let Some(Argument::String(response_id)) = args.first() else {
-                    continue;
-                };
-                if app.picker_request_id.get().as_deref() != Some(response_id.as_str()) {
-                    continue;
-                }
-                let accepted = matches!(args.get(1), Some(Argument::Boolean(true)));
-                let path = match args.get(2) {
-                    Some(Argument::String(path)) => path.clone(),
-                    _ => String::new(),
-                };
-                app.handle_picker_response(accepted, path);
-            }
-            thread::sleep(SERVICE_RETRY_DELAY);
+        scenes! {
+            Window::new(self.window_title(), self.content_view()).scene_key("main")
+                .app_id(APP_ID).menu_bar(self.menu_bar()).size(Size::new(900.0, 680.0)),
+            Window::new("Unsaved Changes — Notepad", self.confirm_view()).scene_key("confirm")
+                .open_at_launch(false).app_id(APP_ID).size(Size::new(540.0, 220.0)),
+            Window::new("Find / Replace — Notepad", self.find_view()).scene_key("find")
+                .open_at_launch(false).app_id(APP_ID).size(Size::new(500.0, 300.0)),
         }
-    });
+    }
+    fn on_window_created(&mut self, ctx: &WindowContext, _: &mut dyn PlatformWindow) {
+        if ctx.scene_key.as_str() == "main" {
+            self.runtime.get().lock().unwrap().owner = Some(ctx.window_id);
+        }
+    }
+    fn on_window_sync(&mut self, ctx: &WindowContext, window: &mut dyn PlatformWindow) {
+        if ctx.scene_key.as_str() != "main" {
+            return;
+        }
+        let title = self.window_title();
+        let shared = self.runtime.get();
+        let mut runtime = shared.lock().unwrap();
+        if runtime.window_title != title {
+            window.set_title(&title);
+            runtime.window_title = title;
+        }
+    }
+    fn on_window_close_requested(&mut self, ctx: &WindowContext) -> bool {
+        match ctx.scene_key.as_str() {
+            "main" => {
+                self.request(PendingAction::Close);
+                false
+            }
+            "confirm" => {
+                self.cancel_pending();
+                true
+            }
+            _ => true,
+        }
+    }
+    fn on_idle(&mut self) {
+        self.poll_results();
+        self.update_position();
+    }
 }
-
+fn trim_history(history: &mut VecDeque<Snapshot>) {
+    let mut bytes: usize = history.iter().map(|s| s.document.len()).sum();
+    while history.len() > HISTORY_LIMIT || (history.len() > 1 && bytes > HISTORY_BYTES) {
+        if let Some(old) = history.pop_front() {
+            bytes = bytes.saturating_sub(old.document.len());
+        }
+    }
+}
 fn home_path() -> PathBuf {
-    PathBuf::from(
-        std::env::var_os("HOME")
-            .map(|path| path.to_string_lossy().into_owned())
-            .filter(|path| !path.is_empty())
-            .unwrap_or_else(|| String::from("/root")),
-    )
+    std::env::var_os("HOME")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/root"))
 }
-
 fn main() {
-    println!("[notepad] starting");
-    let initial_path = std::env::args().skip(1).next();
-    let mut app = NotepadApp::new(initial_path);
+    let mut app = NotepadApp::new(std::env::args_os().nth(1).map(PathBuf::from));
     if let Err(error) = app.run() {
         eprintln!("[notepad] error: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_position_updates_after_release_events() {
+        let mut app = NotepadApp::new(None);
+        app.load_document(None, "猫\nhello".into());
+        let selection = TextSelection::collapsed(6);
+        app.selection.set(selection);
+        // Key-up can observe the new selection before the next idle callback.
+        app.runtime.get().lock().unwrap().current.selection = selection;
+        app.on_idle();
+        assert!(app.position.get().contains("Ln 2, Col 3"));
+    }
+
+    #[test]
+    fn unicode_edits_undo_redo_and_saved_state() {
+        let app = NotepadApp::new(None);
+        app.load_document(Some("notes.txt".into()), "猫🐈\nhello".into());
+        app.selection.set(TextSelection {
+            anchor: TextPosition::new(0),
+            caret: TextPosition::new(3),
+        });
+        app.replace_range(0..3, "犬");
+        assert_eq!(app.content.get().as_str(), "犬🐈\nhello");
+        assert!(app.session.get().dirty());
+        app.restore_history(false);
+        assert_eq!(app.content.get().as_str(), "猫🐈\nhello");
+        assert_eq!(app.selection.get().normalized_range(), Some(0..3));
+        assert!(!app.session.get().dirty());
+        app.restore_history(true);
+        assert_eq!(app.content.get().as_str(), "犬🐈\nhello");
+        assert!(app.session.get().dirty());
+        app.restore_history(false);
+        app.replace_range(0..3, "鳥");
+        app.restore_history(true);
+        assert_eq!(app.content.get().as_str(), "鳥🐈\nhello");
+    }
+
+    #[test]
+    fn replace_all_is_one_undo_step_and_empty_query_is_safe() {
+        let app = NotepadApp::new(None);
+        app.load_document(None, "猫 猫 🐈".into());
+        app.query.set("猫".into());
+        app.replacement.set("犬".into());
+        app.replace_all();
+        assert_eq!(app.content.get().as_str(), "犬 犬 🐈");
+        app.restore_history(false);
+        assert_eq!(app.content.get().as_str(), "猫 猫 🐈");
+        assert!(!app.session.get().dirty());
+        app.query.set(String::new());
+        app.replace_all();
+        assert_eq!(app.content.get().as_str(), "猫 猫 🐈");
+        assert!(!app.session.get().dirty());
+    }
+
+    #[test]
+    fn queued_save_never_clears_newer_edits_or_runs_pending_close() {
+        let app = NotepadApp::new(None);
+        app.replace_range(0..0, "first");
+        app.session.update(|s| {
+            s.request(PendingAction::Close);
+        });
+        let ticket = app.begin(Operation::Save).unwrap();
+        app.replace_range(5..5, " newer");
+        app.runtime
+            .get()
+            .lock()
+            .unwrap()
+            .results
+            .push_back(IoResult::Save(ticket, "note.txt".into(), Ok(())));
+        app.poll_results();
+        assert!(app.session.get().dirty());
+        assert_eq!(app.session.get().pending, Some(PendingAction::Close));
+        assert_eq!(app.content.get().as_str(), "first newer");
+    }
+
+    #[test]
+    fn cancelled_pending_action_stays_cancelled_after_save() {
+        let app = NotepadApp::new(None);
+        app.replace_range(0..0, "keep");
+        app.session.update(|s| {
+            s.request(PendingAction::New);
+        });
+        let ticket = app.begin(Operation::Save).unwrap();
+        app.cancel_pending();
+        app.runtime
+            .get()
+            .lock()
+            .unwrap()
+            .results
+            .push_back(IoResult::Save(ticket, "note.txt".into(), Ok(())));
+        app.poll_results();
+        assert_eq!(app.content.get().as_str(), "keep");
+        assert_eq!(app.session.get().pending, None);
+        assert!(!app.session.get().dirty());
+    }
+
+    #[test]
+    fn open_result_after_edit_or_newer_request_is_ignored() {
+        let app = NotepadApp::new(None);
+        let old = app.begin(Operation::Read).unwrap();
+        app.replace_range(0..0, "keep my edit");
+        app.runtime
+            .get()
+            .lock()
+            .unwrap()
+            .results
+            .push_back(IoResult::Open(
+                old,
+                "other.txt".into(),
+                Ok("replacement".into()),
+            ));
+        app.poll_results();
+        assert_eq!(app.content.get().as_str(), "keep my edit");
+        assert!(app.session.get().dirty());
+        assert_eq!(app.session.get().path, None);
+        let active = app.begin(Operation::Read).unwrap();
+        app.runtime
+            .get()
+            .lock()
+            .unwrap()
+            .results
+            .push_back(IoResult::Open(
+                old,
+                "other.txt".into(),
+                Ok("replacement".into()),
+            ));
+        app.poll_results();
+        assert_eq!(app.session.get().operation.unwrap().0, active);
+        assert_eq!(app.content.get().as_str(), "keep my edit");
+    }
+
+    #[test]
+    fn save_failure_keeps_document_path_dirty_and_pending_action() {
+        let app = NotepadApp::new(None);
+        app.load_document(Some("original.txt".into()), "old".into());
+        app.replace_range(0..3, "new");
+        app.session.update(|s| {
+            s.request(PendingAction::New);
+        });
+        let ticket = app.begin(Operation::Save).unwrap();
+        app.runtime
+            .get()
+            .lock()
+            .unwrap()
+            .results
+            .push_back(IoResult::Save(
+                ticket,
+                "different.txt".into(),
+                Err("disk full".into()),
+            ));
+        app.poll_results();
+        assert_eq!(app.content.get().as_str(), "new");
+        assert!(app.session.get().dirty());
+        assert_eq!(app.session.get().path, Some("original.txt".into()));
+        assert_eq!(app.session.get().pending, Some(PendingAction::New));
+        assert!(app.status.get().contains("disk full"));
+    }
+
+    #[test]
+    fn new_requires_explicit_discard_and_clears_history() {
+        let app = NotepadApp::new(None);
+        app.replace_range(0..0, "keep");
+        app.request(PendingAction::New);
+        assert_eq!(app.content.get().as_str(), "keep");
+        app.cancel_pending();
+        assert_eq!(app.content.get().as_str(), "keep");
+        app.request(PendingAction::New);
+        app.discard_pending();
+        assert!(app.content.get().is_empty());
+        assert!(!app.session.get().dirty());
+        app.restore_history(false);
+        assert!(app.content.get().is_empty());
     }
 }
