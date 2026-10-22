@@ -1,5 +1,7 @@
 # Overlay replacement boundary
 
+## Initial diagnosis
+
 The native fixture executed the same write, `File::sync_all`, and `std::fs::rename`
 sequence on the current kernel:
 
@@ -12,7 +14,7 @@ Notepad's real GUI also saved successfully to `/tmp/fixture.txt`. On the overlay
 path it reported the failure, kept the original and named the retained staging
 file. This is not a durability test for persistent storage.
 
-`OverlayFS` currently does not implement `FileSystemOperations::rename`; the
+At the initial revision, `OverlayFS` did not implement `FileSystemOperations::rename`; the
 trait's default returns `NotSupported`. The older replacing-rename syscall path
 reduces this to the generic error observed by native std. The new operation 419
 has richer errno reporting, but it cannot provide a missing driver operation.
@@ -54,5 +56,26 @@ after relocation, inode identity, same-path behavior, collisions, rejected
 whiteouts/lower sources/directories, and injected upper-rename failure preserving
 both original entries. The lower-only source case cannot be safely added through
 the existing separate `copy_up`, `create_whiteout` and `remove` operations: it
-requires a transactional publication design. No kernel changes or application
-truncate fallback were made as part of this bounded audit.
+requires a transactional publication design.
+
+
+## Implemented boundary
+
+The subsequent driver change implements same-parent rename of a regular source
+created solely in the tmpfs upper layer, with link count one. It supports an
+absent destination or replacement of an upper/lower regular destination. Shared
+backing records preserve retained node identity and open file objects; the
+existing VFS mutation lock coordinates publication. No copying or truncation is
+used as a rename fallback.
+
+Lower-backed sources, lower-only parents, whiteouts, directories, symlinks,
+cross-parent moves and upper backing mount boundaries are rejected. General
+overlay directory moves and transactional whiteouts remain outside this change.
+
+The native fixture failed on the original kernel at its first replacement
+(8.656 seconds), then passed on the final guarded implementation (11.807
+seconds). It invokes production Notepad saves twice, verifies reopened content
+and inode identities, checks retained source and old destination handles, and
+checks collision/rejection preservation. The separate kernel suite passed 1544
+tests, including six new overlay regressions. Exact native input hashes and
+artifact locations are recorded in [VALIDATION.md](VALIDATION.md).
