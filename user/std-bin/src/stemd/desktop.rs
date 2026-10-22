@@ -20,6 +20,10 @@
 //! `X-Scarlet-Background=/path/to/cover.jpg` and
 //! `X-Scarlet-BackgroundBlur=none|full|label`.
 
+#[path = "../desktop_utilities/native_fs.rs"]
+pub(crate) mod native_fs;
+
+use std::collections::BTreeSet;
 use std::format;
 use std::fs::{self, File};
 use std::io::Read;
@@ -453,12 +457,15 @@ fn app_path(root: &str, relative: &str) -> Result<String, &'static str> {
     let mut path = std::path::PathBuf::from(root);
     for part in relative.split('/') {
         path.push(part);
-        let metadata = fs::symlink_metadata(&path).map_err(|_| "Missing app file")?;
+        let metadata = native_fs::symlink_metadata(&path).map_err(|_| "Missing app file")?;
         if metadata.file_type().is_symlink() {
             return Err("App symlinks are unsupported");
         }
     }
-    if !path.is_file() {
+    if !native_fs::symlink_metadata(&path)
+        .map_err(|_| "Missing app file")?
+        .is_file()
+    {
         return Err("App path must name a file");
     }
     Ok(format!("{root}/{relative}"))
@@ -470,7 +477,7 @@ fn parse_app(root: &str, filename: &str, content: String) -> Result<DesktopEntry
     let mut target = None;
     let mut entry_type = None;
     let mut raw_exec = None;
-    let mut keys = Vec::new();
+    let mut keys = BTreeSet::new();
     for line in content.lines() {
         let line = line.trim();
         if line.starts_with('[') {
@@ -481,10 +488,15 @@ fn parse_app(root: &str, filename: &str, content: String) -> Result<DesktopEntry
             continue;
         }
         let (key, value) = line.split_once('=').ok_or("Invalid app descriptor")?;
-        if keys.contains(&key) {
+        // Match DesktopParser's whitespace semantics, including duplicate keys.
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() {
+            return Err("Invalid app descriptor key");
+        }
+        if !keys.insert(key) {
             return Err("Duplicate app descriptor key");
         }
-        keys.push(key);
         match key {
             "X-Scarlet-AppFormat" => version = Some(value),
             "X-Scarlet-Target" => target = Some(value),
@@ -530,7 +542,8 @@ fn parse_app(root: &str, filename: &str, content: String) -> Result<DesktopEntry
         return Err("Missing app executable");
     }
     words[0] = app_path(root, &words[0])?;
-    let mut executable = File::open(&words[0]).map_err(|_| "Missing app executable")?;
+    let mut executable =
+        native_fs::open_read_nofollow(&words[0]).map_err(|_| "Missing app executable")?;
     let mut header = [0u8; 20];
     executable
         .read_exact(&mut header)
@@ -578,6 +591,57 @@ fn directory(path: &str) -> Result<Vec<fs::DirEntry>, &'static str> {
     Ok(entries)
 }
 
+/// Validate one finished app with the same descriptor and executable semantics
+/// used by catalog reload. The containing directory name is checked by callers.
+pub(crate) fn validate_app_directory(root: &str) -> Result<DesktopEntry, &'static str> {
+    validate_app_directory_with_limit(root, 100_000)
+}
+
+fn validate_app_directory_with_limit(
+    root: &str,
+    max_root_entries: usize,
+) -> Result<DesktopEntry, &'static str> {
+    let metadata = native_fs::symlink_metadata(root).map_err(|_| "Missing app directory")?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("App must be a real directory");
+    }
+    // Root entries need no sorting: exactly one descriptor is allowed. Stream
+    // and retain only that entry so an untrusted directory cannot force a large
+    // Vec allocation before the package's item bound is checked.
+    let entries = fs::read_dir(root).map_err(|_| "Failed to list app directory")?;
+    let mut descriptor = None;
+    for (index, file) in entries.enumerate() {
+        if index >= max_root_entries {
+            return Err("App root exceeds 100,000 entries");
+        }
+        let file = file.map_err(|_| "Failed to read app directory")?;
+        if file.file_name().to_string_lossy().ends_with(".desktop") {
+            if descriptor.is_some() {
+                return Err("App requires exactly one desktop descriptor");
+            }
+            descriptor = Some(file);
+        }
+    }
+    let file = descriptor.ok_or("App requires exactly one desktop descriptor")?;
+    if !native_fs::symlink_metadata(file.path())
+        .map_err(|_| "Failed to inspect app descriptor")?
+        .is_file()
+    {
+        return Err("App descriptor must be a regular file");
+    }
+    let filename = file.file_name().to_string_lossy().into_owned();
+    let mut content = String::new();
+    native_fs::open_read_nofollow(file.path())
+        .map_err(|_| "Failed to open app descriptor")?
+        .take(1024 * 1024 + 1)
+        .read_to_string(&mut content)
+        .map_err(|_| "Failed to read app descriptor")?;
+    if content.len() > 1024 * 1024 {
+        return Err("App descriptor exceeds 1 MiB");
+    }
+    parse_app(root, &filename, content)
+}
+
 fn collect_catalog(legacy: &str, applications: &str) -> Result<Vec<DesktopEntry>, &'static str> {
     let mut catalog: Vec<DesktopEntry> = Vec::new();
     for file in directory(legacy)? {
@@ -602,7 +666,7 @@ fn collect_catalog(legacy: &str, applications: &str) -> Result<Vec<DesktopEntry>
         }
         catalog.push(entry);
     }
-    if let Ok(metadata) = fs::symlink_metadata(applications) {
+    if let Ok(metadata) = native_fs::symlink_metadata(applications) {
         if metadata.file_type().is_symlink() {
             return Err("Application root must be a real directory");
         }
@@ -629,25 +693,7 @@ fn collect_catalog(legacy: &str, applications: &str) -> Result<Vec<DesktopEntry>
             return Err("App must be a real directory");
         }
         let root = format!("{applications}/{name}");
-        let descriptors: Vec<_> = directory(&root)?
-            .into_iter()
-            .filter(|file| file.file_name().to_string_lossy().ends_with(".desktop"))
-            .collect();
-        if descriptors.len() != 1 {
-            return Err("App requires exactly one desktop descriptor");
-        }
-        let file = &descriptors[0];
-        if !file
-            .file_type()
-            .map_err(|_| "Failed to inspect app descriptor")?
-            .is_file()
-        {
-            return Err("App descriptor must be a regular file");
-        }
-        let filename = file.file_name().to_string_lossy().into_owned();
-        let content =
-            fs::read_to_string(file.path()).map_err(|_| "Failed to read app descriptor")?;
-        let entry = parse_app(&root, &filename, content).map_err(|error| {
+        let entry = validate_app_directory(&root).map_err(|error| {
             println!("stemd: {}: {}", root, error);
             error
         })?;
@@ -860,6 +906,44 @@ mod app_tests {
         }
     }
     #[test]
+    fn descriptor_key_validation_handles_large_unique_sets_and_late_duplicates() {
+        let f = Fixture::new();
+        let root = f.0.join("applications/renamed.app");
+        let path = root.join("org.test.player.desktop");
+        let mut content = f.app("bin/player");
+        for index in 0..50_000 {
+            content.push_str(&format!("X-{index:06}=x\n"));
+        }
+        fs::write(&path, &content).unwrap();
+        assert_eq!(
+            validate_app_directory(root.to_str().unwrap())
+                .unwrap()
+                .app_id,
+            "org.test.player"
+        );
+        content.push_str("X-049999 = duplicate\n");
+        fs::write(&path, content).unwrap();
+        assert_eq!(
+            validate_app_directory(root.to_str().unwrap()).unwrap_err(),
+            "Duplicate app descriptor key"
+        );
+    }
+    #[test]
+    fn app_root_scan_enforces_limit_before_collecting_entries() {
+        let f = Fixture::new();
+        f.write_app("bin/player");
+        let root = f.0.join("applications/renamed.app");
+        assert!(validate_app_directory_with_limit(root.to_str().unwrap(), 2).is_ok());
+        for index in 0..8 {
+            fs::write(root.join(format!("resource-{index}")), b"x").unwrap();
+        }
+        assert_eq!(
+            validate_app_directory_with_limit(root.to_str().unwrap(), 8).unwrap_err(),
+            "App root exceeds 100,000 entries"
+        );
+        assert!(validate_app_directory(root.to_str().unwrap()).is_ok());
+    }
+    #[test]
     fn app_overrides_legacy_and_uses_descriptor_id_after_directory_rename() {
         let f = Fixture::new();
         f.write_app("bin/player");
@@ -879,6 +963,10 @@ mod app_tests {
                 String::from("/tmp/a file.wav")
             ]
         );
+        fs::remove_dir_all(f.0.join("applications/renamed.app")).unwrap();
+        let fallback = f.scan().unwrap();
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].name, "Legacy");
     }
     #[test]
     fn invalid_and_ambiguous_apps_reject_the_next_catalog() {
