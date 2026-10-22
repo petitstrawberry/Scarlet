@@ -23,7 +23,16 @@ struct Calculation {
 struct ClipboardRuntime {
     service: Option<TextClipboard>,
     pending: Option<ClipboardHandle<()>>,
+    cut: Option<EditSnapshot>,
+    paste: Option<(ClipboardHandle<Option<String>>, EditSnapshot)>,
     unavailable: Option<String>,
+}
+
+#[derive(Clone, PartialEq)]
+struct EditSnapshot {
+    mode: usize,
+    text: String,
+    selection: TextSelection,
 }
 
 #[derive(View, Clone)]
@@ -32,6 +41,8 @@ struct CalculatorApp {
     notice: State<String>,
     expression: State<String>,
     selection: State<TextSelection>,
+    expression_scroll: State<TextViewScroll>,
+    shortcuts_focused: State<bool>,
     answer: State<Option<f64>>,
     error: State<String>,
     evaluated: State<bool>,
@@ -53,6 +64,7 @@ impl CalculatorApp {
         app.amount.set("1".into());
         app.viewport.set(Size::new(380.0, 584.0));
         app.to.set(1);
+        app.shortcuts_focused.set(true);
         app.amount_selection.set(TextSelection {
             anchor: TextPosition::new(0),
             caret: TextPosition::new(1),
@@ -61,19 +73,48 @@ impl CalculatorApp {
     }
 
     fn copy_result(&self) {
-        let Some(value) = self.current_value() else {
+        let value = if self.mode.get() == 1 {
+            evaluate(&self.amount.get()).ok().and_then(|value| {
+                convert(value, self.category.get(), self.from.get(), self.to.get()).ok()
+            })
+        } else {
+            self.current_value()
+        };
+        let Some(value) = value else {
             return;
         };
+        self.write_clipboard(format_value(value), None);
+    }
+
+    fn edit_snapshot(&self) -> EditSnapshot {
+        let mode = self.mode.get();
+        EditSnapshot {
+            mode,
+            text: if mode == 1 {
+                self.amount.get()
+            } else {
+                self.expression.get()
+            },
+            selection: if mode == 1 {
+                self.amount_selection.get()
+            } else {
+                self.selection.get()
+            },
+        }
+    }
+
+    fn write_clipboard(&self, text: String, cut: Option<EditSnapshot>) {
         let shared = self.clipboard.get();
         let mut runtime = shared.lock().unwrap();
-        if runtime.pending.is_some() {
-            self.notice.set("Copy is already pending".into());
+        if runtime.pending.is_some() || runtime.paste.is_some() {
+            self.notice.set("Clipboard operation is pending".into());
             return;
         }
         match runtime.service.as_ref() {
             Some(service) => {
-                runtime.pending = Some(service.write_text(value.to_string()));
-                self.notice.set("Copying result…".into());
+                runtime.pending = Some(service.write_text(text));
+                runtime.cut = cut;
+                self.notice.set("Copying…".into());
             }
             None => self.notice.set(
                 runtime
@@ -81,6 +122,114 @@ impl CalculatorApp {
                     .clone()
                     .unwrap_or_else(|| "Desktop clipboard unavailable".into()),
             ),
+        }
+    }
+
+    fn copy_selection(&self, cut: bool) {
+        let snapshot = self.edit_snapshot();
+        let Some(text) = snapshot
+            .text
+            .get(snapshot.selection.start().byte..snapshot.selection.end().byte)
+        else {
+            return;
+        };
+        if text.is_empty() {
+            if !cut {
+                self.copy_result();
+            }
+            return;
+        }
+        self.write_clipboard(text.to_owned(), cut.then_some(snapshot));
+    }
+
+    fn paste_selection(&self) {
+        self.evaluated.set(false);
+        let shared = self.clipboard.get();
+        let mut runtime = shared.lock().unwrap();
+        if runtime.pending.is_some() || runtime.paste.is_some() {
+            self.notice.set("Clipboard operation is pending".into());
+            return;
+        }
+        if let Some(service) = runtime.service.as_ref() {
+            runtime.paste = Some((service.read_text(), self.edit_snapshot()));
+            self.notice.set("Reading clipboard…".into());
+        } else {
+            self.notice.set(
+                runtime
+                    .unavailable
+                    .clone()
+                    .unwrap_or_else(|| "Desktop clipboard unavailable".into()),
+            );
+        }
+    }
+
+    fn apply_clipboard_edit(&self, snapshot: &EditSnapshot, text: &str) -> bool {
+        if self.edit_snapshot() != *snapshot {
+            self.notice
+                .set("Input changed; clipboard edit cancelled".into());
+            return false;
+        }
+        let start = snapshot.selection.start().byte;
+        let end = snapshot.selection.end().byte;
+        if snapshot.text.get(start..end).is_none()
+            || snapshot.text.len() - (end - start) + text.len()
+                > calculator_model::MAX_EXPRESSION_BYTES
+        {
+            self.notice
+                .set("Clipboard text exceeds the 512-byte input limit".into());
+            return false;
+        }
+        let text = text.replace(['\r', '\n', '\t'], " ");
+        self.evaluated.set(false);
+        if snapshot.mode == 1 {
+            self.insert_amount(&text);
+        } else {
+            self.insert(&text);
+        }
+        self.notice.set(String::new());
+        true
+    }
+
+    fn poll_clipboard(&self) {
+        let (write, read) = {
+            let shared = self.clipboard.get();
+            let mut runtime = shared.lock().unwrap();
+            let write = runtime
+                .pending
+                .as_ref()
+                .and_then(|job| job.try_take())
+                .map(|result| (result, runtime.cut.take()));
+            if write.is_some() {
+                runtime.pending = None;
+            }
+            let read = runtime.paste.as_ref().and_then(|(job, snapshot)| {
+                job.try_take().map(|result| (result, snapshot.clone()))
+            });
+            if read.is_some() {
+                runtime.paste = None;
+            }
+            (write, read)
+        };
+        if let Some((result, cut)) = write {
+            match result {
+                Ok(()) => {
+                    if let Some(snapshot) = cut {
+                        self.apply_clipboard_edit(&snapshot, "");
+                    } else {
+                        self.notice.set("Copied to desktop clipboard".into());
+                    }
+                }
+                Err(error) => self.notice.set(error.to_string()),
+            }
+        }
+        if let Some((result, snapshot)) = read {
+            match result {
+                Ok(Some(text)) => {
+                    self.apply_clipboard_edit(&snapshot, &text);
+                }
+                Ok(None) => self.notice.set("Clipboard has no text".into()),
+                Err(error) => self.notice.set(error.to_string()),
+            }
         }
     }
     fn set_expression(&self, text: String) {
@@ -210,6 +359,27 @@ impl CalculatorApp {
     }
 
     fn navigate_mode(&self, event: &Event) -> bool {
+        if self.mode.get() < 2 {
+            if let Event::Keyboard(KeyEvent::Pressed { keycode, modifiers }) = event {
+                if modifiers.primary() {
+                    match keycode {
+                        KeyCode::Char('c' | 'C') => {
+                            self.copy_selection(false);
+                            return true;
+                        }
+                        KeyCode::Char('x' | 'X') => {
+                            self.copy_selection(true);
+                            return true;
+                        }
+                        KeyCode::Char('v' | 'V') => {
+                            self.paste_selection();
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         if let Event::Keyboard(KeyEvent::Pressed {
             keycode: KeyCode::Tab,
             modifiers,
@@ -391,7 +561,9 @@ impl CalculatorApp {
         )
         .0 as f32
             + 18.0)
-            .clamp(44.0, self.content_width() - 16.0);
+            .clamp(44.0, self.content_width() - 36.0);
+        let (hidden_left, hidden_right) =
+            expression_overflow(&expression, field_width, self.expression_scroll.get().x);
         let result = self.result_text();
         let font = fitted_font(&result, 54.0, self.content_width() - 16.0);
         let display_width = self.content_width() - 16.0;
@@ -410,8 +582,10 @@ impl CalculatorApp {
         vstack! {
             vstack! {
                 hstack! {
-                    Text::new("").frame_width((display_width - field_width).max(0.0)),
+                    Text::new("").frame_width((display_width - field_width - 20.0).max(0.0)),
+                    Text::new(if hidden_left { "‹" } else { "" }).font_size(14.0).color(palette.text_secondary()).frame_width(10.0),
                     TextView::new(self.expression.clone(), self.selection.clone())
+                        .scroll_state(self.expression_scroll.clone())
                         .wrap_mode(WrapMode::None).font_size(16.0).padding(6.0)
                         .background(Color::CLEAR).border_color(Color::CLEAR)
                         .focused_border_color(Color::CLEAR).text_color(palette.text_secondary())
@@ -419,6 +593,7 @@ impl CalculatorApp {
                         .on_text_change(move |_| { edited.evaluated.set(false); edited.error.set(String::new()); edited.notice.set(String::new()); })
                         .frame(field_width, 32.0)
                         .on_event_capture(move |event| editing.edit_expression(event)),
+                    Text::new(if hidden_right { "›" } else { "" }).font_size(14.0).color(palette.text_secondary()).frame_width(10.0),
                 }.frame(display_width, 32.0),
                 right_aligned_text(&result, font, display_width, palette.text_primary()).frame_height(66.0),
                 right_aligned_text(&status, fitted_font(&status, 12.0, display_width), display_width,
@@ -551,6 +726,7 @@ impl CalculatorApp {
         let category = self.category.get();
         let unit_names: Vec<String> = units(category).iter().map(|u| u.name.into()).collect();
         let change = self.clone();
+        let copy = self.clone();
         let converted = evaluate(&self.amount.get())
             .map_err(|e| e.to_string())
             .and_then(|value| {
@@ -560,8 +736,8 @@ impl CalculatorApp {
             .as_ref()
             .map(|v| format_value(*v))
             .unwrap_or_else(|_| "—".into());
-        let note = if self.amount.get().trim().is_empty() {
-            String::new()
+        let note = if converted.is_ok() || self.amount.get().trim().is_empty() {
+            self.notice.get()
         } else {
             converted.as_ref().err().cloned().unwrap_or_default()
         };
@@ -577,11 +753,14 @@ impl CalculatorApp {
                         .wrap_mode(WrapMode::None).font_size(30.0).padding(2.0)
                         .background(Color::CLEAR).border_color(Color::CLEAR).focused_border_color(Color::CLEAR)
                         .placeholder("0").autofocus(true).reveal_selection_on_change(true)
-                        .frame(value_width, 42.0),
+                        .frame(value_width, 42.0)
+                        .on_event_capture(|event| matches!(event, Event::Keyboard(KeyEvent::Pressed { keycode: KeyCode::Enter, .. }))),
                     Spacer::new(), Select::new(unit_names.clone(), self.from.clone()).width(unit_width),
                 }.spacing(6.0),
                 Divider::new(),
-                hstack! { Text::new("TO").font_size(11.0).color(palette.text_secondary()), Spacer::new() },
+                hstack! { Text::new("TO").font_size(11.0).color(palette.text_secondary()), Spacer::new(),
+                    Button::new("Copy").header_style().font_size(11.0).padding(0.0).enabled(converted.is_ok()).on_click(move || copy.copy_result()),
+                }.frame_height(14.0),
                 hstack! {
                     Text::new(output.clone()).font_size(fitted_font(&output, 32.0, value_width)).frame_width(value_width),
                     Spacer::new(), Select::new(unit_names, self.to.clone()).width(unit_width),
@@ -650,6 +829,14 @@ fn fitted_font(text: &str, preferred: f32, width: f32) -> f32 {
     }
 }
 
+fn expression_overflow(text: &str, field_width: f32, scroll_x: f32) -> (bool, bool) {
+    let text_width = scarlet_ui::graphics::measure_text_sized(text, 16.0).0 as f32;
+    (
+        scroll_x > 0.5,
+        text_width > scroll_x + (field_width - 12.0).max(0.0) + 0.5,
+    )
+}
+
 fn right_aligned_text(
     text: &str,
     font: f32,
@@ -704,6 +891,7 @@ impl Application for CalculatorApp {
         .font_size(13.0)
         .frame(f32::INFINITY, f32::INFINITY)
         .on_geometry_change(|geometry| geometry.size(), move |size| viewport.set(size))
+        .focusable(self.shortcuts_focused.clone())
         .on_event_capture(move |event| navigation.navigate_mode(event))
         .on_event(move |event| app.fallback_key(event));
         WindowGroup::new(
@@ -728,21 +916,7 @@ impl Application for CalculatorApp {
         }
     }
     fn on_idle(&mut self) {
-        let result = {
-            let shared = self.clipboard.get();
-            let mut runtime = shared.lock().unwrap();
-            let result = runtime.pending.as_ref().and_then(|job| job.try_take());
-            if result.is_some() {
-                runtime.pending = None;
-            }
-            result
-        };
-        if let Some(result) = result {
-            self.notice.set(match result {
-                Ok(()) => "Result copied to desktop clipboard".into(),
-                Err(error) => error.to_string(),
-            });
-        }
+        self.poll_clipboard();
     }
 }
 
@@ -756,6 +930,95 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct TestClipboard {
+        fail: bool,
+    }
+    impl scarlet_ui::clipboard::ClipboardProvider for TestClipboard {
+        fn read_text(
+            &self,
+        ) -> std::result::Result<Option<String>, scarlet_ui::clipboard::ClipboardError> {
+            Ok(Some("π+2".into()))
+        }
+        fn write_text(
+            &self,
+            _: &str,
+        ) -> std::result::Result<(), scarlet_ui::clipboard::ClipboardError> {
+            if self.fail {
+                Err(scarlet_ui::clipboard::ClipboardError::AccessDenied)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    fn finish_clipboard(app: &CalculatorApp) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            app.poll_clipboard();
+            let shared = app.clipboard.get();
+            let runtime = shared.lock().unwrap();
+            if runtime.pending.is_none() && runtime.paste.is_none() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "clipboard worker timed out"
+            );
+            drop(runtime);
+            std::thread::yield_now();
+        }
+    }
+    #[test]
+    fn clipboard_cut_waits_for_success_and_paste_targets_original_selection() {
+        let app = CalculatorApp::new();
+        app.set_expression("12+3".into());
+        app.selection.set(TextSelection {
+            anchor: TextPosition::new(0),
+            caret: TextPosition::new(2),
+        });
+        app.clipboard.get().lock().unwrap().service =
+            Some(TextClipboard::new(TestClipboard { fail: true }));
+        app.copy_selection(true);
+        finish_clipboard(&app);
+        assert_eq!(app.expression.get(), "12+3");
+        app.clipboard.get().lock().unwrap().service =
+            Some(TextClipboard::new(TestClipboard { fail: false }));
+        app.copy_selection(true);
+        finish_clipboard(&app);
+        assert_eq!(app.expression.get(), "+3");
+        app.paste_selection();
+        finish_clipboard(&app);
+        assert_eq!(app.expression.get(), "π+2+3");
+        app.paste_selection();
+        app.mode.set(1);
+        finish_clipboard(&app);
+        assert_eq!(app.amount.get(), "1");
+        assert!(app.notice.get().contains("cancelled"));
+    }
+    #[test]
+    fn clipboard_rejects_moved_selection_and_oversized_text() {
+        let app = CalculatorApp::new();
+        app.mode.set(1);
+        let snapshot = app.edit_snapshot();
+        assert!(!app.apply_clipboard_edit(&snapshot, &"1".repeat(513)));
+        assert_eq!(app.amount.get(), "1");
+        app.amount_selection.set(TextSelection::collapsed(1));
+        assert!(!app.apply_clipboard_edit(&snapshot, "2"));
+        let snapshot = app.edit_snapshot();
+        assert!(app.apply_clipboard_edit(&snapshot, "+\n2"));
+        assert_eq!(app.amount.get(), "1+ 2");
+    }
+    #[test]
+    fn expression_overflow_indicators_follow_actual_horizontal_offset() {
+        let text = "12345+".repeat(20);
+        let width = scarlet_ui::graphics::measure_text_sized(&text, 16.0).0 as f32;
+        assert_eq!(expression_overflow(&text, 200.0, 0.0), (false, true));
+        assert_eq!(expression_overflow(&text, 200.0, 50.0), (true, true));
+        assert_eq!(
+            expression_overflow(&text, 200.0, width - 188.0),
+            (true, false)
+        );
+        assert_eq!(expression_overflow("12+3", 200.0, 0.0), (false, false));
+    }
     #[test]
     fn history_shortens_expression_without_losing_the_result() {
         let calculation = Calculation {
