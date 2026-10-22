@@ -106,7 +106,7 @@ to = "/bin/ui-benchmark"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "ec25336241e70d2fcdad186b3b50f8aa449d303a" }
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "75786c4941ae407f2ae898d1942ca3a4b2c2f0df" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
@@ -340,3 +340,40 @@ kind = "app"
 source = "../../user/app-demo/app.toml"
 to = "/applications/app-demo.app"
 architectures = ["aarch64", "riscv64"]
+
+# Everyday desktop utilities.
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "calculator"
+to = "/bin/calculator"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "calendar"
+to = "/bin/calendar"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "characters"
+to = "/bin/characters"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "screenshot"
+to = "/bin/screenshot"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "log-viewer"
+to = "/bin/log-viewer"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/std-bin"
+bin = "applications"
+to = "/bin/applications"

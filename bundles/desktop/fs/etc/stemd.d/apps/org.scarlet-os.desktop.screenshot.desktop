@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Screenshot
+Exec=/bin/screenshot
+Icon=camera-photo
+Type=Application
+Terminal=false

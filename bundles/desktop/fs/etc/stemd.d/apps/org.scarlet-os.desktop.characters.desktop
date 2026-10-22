@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Characters
+Exec=/bin/characters
+Icon=accessories-character-map
+Type=Application
+Terminal=false
