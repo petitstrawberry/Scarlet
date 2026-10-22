@@ -71,6 +71,15 @@ enum IoResult {
     Save(Ticket, PathBuf, std::result::Result<(), String>),
 }
 
+type IoTask = Box<dyn FnOnce() + Send>;
+
+fn spawn_io_worker(name: &str, task: IoTask) -> std::io::Result<()> {
+    thread::Builder::new()
+        .name(name.into())
+        .spawn(task)
+        .map(|_| ())
+}
+
 #[derive(View, Clone)]
 struct NotepadApp {
     content: State<TextDocument>,
@@ -201,36 +210,72 @@ impl NotepadApp {
         ticket
     }
     fn open_path(&self, path: PathBuf) {
+        self.open_path_with(path, spawn_io_worker);
+    }
+    fn open_path_with(
+        &self,
+        path: PathBuf,
+        spawn: impl FnOnce(&str, IoTask) -> std::io::Result<()>,
+    ) {
         let Some(ticket) = self.begin(Operation::Read) else {
             return;
         };
         self.status.set(format!("Opening {}…", path.display()));
         let shared = self.runtime.get();
-        thread::spawn(move || {
-            let result = document::read_document(&path).map_err(|e| e.to_string());
-            shared
-                .lock()
-                .unwrap()
-                .results
-                .push_back(IoResult::Open(ticket, path, result));
-        });
+        let failed_path = path.clone();
+        let output = shared.clone();
+        if let Err(error) = spawn(
+            "notepad-open",
+            Box::new(move || {
+                let result = document::read_document(&path).map_err(|e| e.to_string());
+                output
+                    .lock()
+                    .unwrap()
+                    .results
+                    .push_back(IoResult::Open(ticket, path, result));
+            }),
+        ) {
+            shared.lock().unwrap().results.push_back(IoResult::Open(
+                ticket,
+                failed_path,
+                Err(format!("Could not start file worker: {error}")),
+            ));
+        }
     }
     fn save_to_path(&self, path: PathBuf) {
+        self.save_to_path_with(path, spawn_io_worker);
+    }
+    fn save_to_path_with(
+        &self,
+        path: PathBuf,
+        spawn: impl FnOnce(&str, IoTask) -> std::io::Result<()>,
+    ) {
         let Some(ticket) = self.begin(Operation::Save) else {
             return;
         };
         let document = self.content.get();
         self.status.set(format!("Saving {}…", path.display()));
         let shared = self.runtime.get();
-        thread::spawn(move || {
-            let result = document::save_atomic(&path, document.as_str().as_bytes())
-                .map_err(|e| e.to_string());
-            shared
-                .lock()
-                .unwrap()
-                .results
-                .push_back(IoResult::Save(ticket, path, result));
-        });
+        let failed_path = path.clone();
+        let output = shared.clone();
+        if let Err(error) = spawn(
+            "notepad-save",
+            Box::new(move || {
+                let result = document::save_atomic(&path, document.as_str().as_bytes())
+                    .map_err(|e| e.to_string());
+                output
+                    .lock()
+                    .unwrap()
+                    .results
+                    .push_back(IoResult::Save(ticket, path, result));
+            }),
+        ) {
+            shared.lock().unwrap().results.push_back(IoResult::Save(
+                ticket,
+                failed_path,
+                Err(format!("Could not start file worker: {error}")),
+            ));
+        }
     }
     fn save(&self) {
         if let Some(path) = self.session.get().path {
@@ -1007,6 +1052,68 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reject_worker(_name: &str, _task: IoTask) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "worker capacity exhausted",
+        ))
+    }
+
+    #[test]
+    fn failed_open_worker_releases_busy_state_and_preserves_edits() {
+        let app = NotepadApp::new(None);
+        app.load_document(Some("original.txt".into()), "猫".into());
+        app.replace_range(3..3, " edited");
+        let selection = app.selection.get();
+        app.open_path_with("never-opened.txt".into(), reject_worker);
+        assert!(app.session.get().operation.is_some());
+        app.poll_results();
+        assert!(app.session.get().operation.is_none());
+        assert_eq!(app.session.get().path, Some("original.txt".into()));
+        assert!(app.session.get().dirty());
+        assert_eq!(app.content.get().as_str(), "猫 edited");
+        assert_eq!(app.selection.get(), selection);
+        assert!(app.status.get().contains("worker capacity exhausted"));
+        assert!(app.begin(Operation::Read).is_some());
+    }
+
+    #[test]
+    fn failed_save_worker_does_not_clear_dirty_or_continue_close() {
+        let app = NotepadApp::new(None);
+        app.load_document(Some("original.txt".into()), "keep".into());
+        app.replace_range(4..4, " this");
+        app.session.update(|session| {
+            session.request(PendingAction::Close);
+        });
+        app.save_to_path_with("never-created.txt".into(), reject_worker);
+        app.poll_results();
+        assert!(app.session.get().operation.is_none());
+        assert!(app.session.get().dirty());
+        assert_eq!(app.session.get().pending, Some(PendingAction::Close));
+        assert_eq!(app.session.get().path, Some("original.txt".into()));
+        assert_eq!(app.content.get().as_str(), "keep this");
+        assert!(app.status.get().contains("worker capacity exhausted"));
+        app.cancel_pending();
+        assert_eq!(app.session.get().pending, None);
+        assert!(app.begin(Operation::Save).is_some());
+    }
+
+    #[test]
+    fn stale_worker_start_error_cannot_affect_new_document_operation() {
+        let app = NotepadApp::new(None);
+        app.open_path_with("never-opened.txt".into(), reject_worker);
+        app.load_document(Some("new.txt".into()), "new".into());
+        let current = app.begin(Operation::Save).unwrap();
+        app.status.set("Current operation".into());
+        app.poll_results();
+        assert_eq!(
+            app.session.get().operation,
+            Some((current, Operation::Save))
+        );
+        assert_eq!(app.content.get().as_str(), "new");
+        assert_eq!(app.status.get(), "Current operation");
+    }
 
     #[test]
     fn status_fits_available_width_and_keeps_unicode_clusters() {
