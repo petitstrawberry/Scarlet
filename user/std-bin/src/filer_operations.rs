@@ -1,19 +1,16 @@
 //! Filesystem operations used by Files. No operation replaces an existing item.
 //!
-//! Transfers reserve each destination with create_new/create_dir. Moves use a
-//! complete copy before removing the source, including across filesystems.
-//! Symbolic links are copied as links and never traversed by recursive work.
-//! Until the platform exposes atomic no-replace rename, rename also uses this
-//! fallback: contents and permissions are preserved, but inode identity, hard
-//! links, timestamps and extended metadata are not. Copies are synchronized and
-//! compared byte-for-byte before a move removes its original.
+//! Copies reserve destinations with create_new/create_dir and synchronize bytes.
+//! Moves and renames use atomic no-replace rename, retaining inode identity,
+//! open handles and hard links. Cross-filesystem moves fail with the original
+//! intact; no copy-and-delete fallback is permitted. Symbolic links are copied
+//! as links and never traversed by recursive work.
 
 #[path = "desktop_utilities/native_fs.rs"]
 pub(crate) mod native_fs;
 use native_fs as fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 #[path = "desktop_utilities/fs_sync.rs"]
 mod fs_sync;
@@ -126,6 +123,15 @@ pub fn execute(operation: &Operation) -> Result<String, String> {
 fn transfer(source: &Path, destination: &Path, cut: bool) -> Result<(), String> {
     if cut {
         fs::require_noreplace_move().map_err(|error| error.to_string())?;
+        return fs::rename_noreplace(source, destination).map_err(|error| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                format!("{} already exists. Nothing was replaced and the original was kept.", destination.display())
+            } else if error.kind() == io::ErrorKind::CrossesDevices {
+                "Moving between filesystems is unavailable. The original was kept; use Copy instead.".into()
+            } else {
+                format!("Cannot move {} to {}: {error}.", source.display(), destination.display())
+            }
+        });
     }
     match fs::symlink_metadata(destination) {
         Ok(_) => {
@@ -149,121 +155,8 @@ fn transfer(source: &Path, destination: &Path, cut: bool) -> Result<(), String> 
     }
     inspect_tree(source, 0, &mut 0)
         .map_err(|error| format!("Cannot transfer {}: {error}", source.display()))?;
-    let original = if cut {
-        Some(tree_stamp(source).map_err(|error| format!("Cannot inspect source: {error}"))?)
-    } else {
-        None
-    };
     copy_tree(source, destination, 0, &mut 0)
         .map_err(|error| format!("Cannot copy to {}: {error}", destination.display()))?;
-    if cut {
-        // Do not depend on filesystem timestamp resolution (or support): compare
-        // every regular file with its complete destination before removing any.
-        verify_copy(source, destination, original.as_ref().unwrap()).map_err(|error| {
-            format!(
-                "Copy completed at {}, but verification failed: {error}. The original was kept.",
-                destination.display()
-            )
-        })?;
-        fs::open_read_nofollow(destination.parent().ok_or("Invalid destination")?)
-            .and_then(|directory| sync_file(&directory))
-            .map_err(|error| format!("Copy completed at {}, but it could not be synchronized: {error}. The original was kept.", destination.display()))?;
-        let current = tree_stamp(source).map_err(|error| format!("Copy completed at {}, but the original could not be verified: {error}. The original was kept.", destination.display()))?;
-        if original.as_ref() != Some(&current) {
-            return Err(format!(
-                "{} changed while copying. The original was kept; review the copy at {} before retrying.",
-                source.display(),
-                destination.display()
-            ));
-        }
-        remove_tree(source).map_err(|error| format!("Copy completed at {}, but the original could not be fully removed: {error}. Keep the destination copy.", destination.display()))?;
-    }
-    Ok(())
-}
-
-#[derive(PartialEq, Eq)]
-struct Stamp {
-    path: PathBuf,
-    size: u64,
-    modified: Option<SystemTime>,
-    is_directory: bool,
-    target: Option<PathBuf>,
-}
-
-fn tree_stamp(path: &Path) -> io::Result<Vec<Stamp>> {
-    fn collect(path: &Path, depth: usize, stamps: &mut Vec<Stamp>) -> io::Result<()> {
-        if depth > MAX_DEPTH || stamps.len() >= MAX_ITEMS {
-            return Err(io::Error::other(
-                "Folder changed beyond the operation limit",
-            ));
-        }
-        let metadata = fs::symlink_metadata(path)?;
-        stamps.push(Stamp {
-            path: path.to_path_buf(),
-            size: metadata.len(),
-            modified: metadata.modified().ok(),
-            is_directory: metadata.is_dir(),
-            target: if metadata.file_type().is_symlink() {
-                Some(fs::read_link(path)?)
-            } else {
-                None
-            },
-        });
-        if metadata.is_dir() {
-            for child in fs::read_dir(path)? {
-                collect(&child?.path(), depth + 1, stamps)?;
-            }
-        }
-        Ok(())
-    }
-    let mut stamps = Vec::new();
-    collect(path, 0, &mut stamps)?;
-    stamps.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(stamps)
-}
-
-fn verify_copy(source: &Path, destination: &Path, original: &[Stamp]) -> io::Result<()> {
-    let mut source_buffer = [0u8; 64 * 1024];
-    let mut copy_buffer = [0u8; 64 * 1024];
-    for stamp in original {
-        let relative = stamp.path.strip_prefix(source).map_err(io::Error::other)?;
-        let copied_path = if relative.as_os_str().is_empty() {
-            destination.to_path_buf()
-        } else {
-            destination.join(relative)
-        };
-        let copied = fs::symlink_metadata(&copied_path)?;
-        if stamp.is_directory {
-            if !copied.is_dir() {
-                return Err(io::Error::other("Copied folder changed"));
-            }
-        } else if let Some(target) = &stamp.target {
-            if !copied.file_type().is_symlink() || fs::read_link(&copied_path)? != *target {
-                return Err(io::Error::other("Copied symbolic link changed"));
-            }
-        } else {
-            if !copied.is_file() || copied.len() != stamp.size {
-                return Err(io::Error::other("Copied file changed"));
-            }
-            let mut input = fs::open_read_nofollow(&stamp.path)?;
-            let mut copy = fs::open_read_nofollow(&copied_path)?;
-            let mut remaining = stamp.size;
-            while remaining > 0 {
-                let length = remaining.min(source_buffer.len() as u64) as usize;
-                input.read_exact(&mut source_buffer[..length])?;
-                copy.read_exact(&mut copy_buffer[..length])?;
-                if source_buffer[..length] != copy_buffer[..length] {
-                    return Err(io::Error::other(
-                        "Original or copy changed while transferring",
-                    ));
-                }
-                remaining -= length as u64;
-            }
-            if input.read(&mut source_buffer[..1])? != 0 || copy.read(&mut copy_buffer[..1])? != 0 {
-                return Err(io::Error::other("Original or copy grew while transferring"));
-            }
-        }
-    }
     Ok(())
 }
 
@@ -324,7 +217,9 @@ fn copy_tree(source: &Path, destination: &Path, depth: usize, count: &mut usize)
         }
     } else if metadata.is_file() {
         let mut input = fs::open_read_nofollow(source)?;
-        if !input.metadata()?.is_file() { return Err(io::Error::other("Source changed type before copying")); }
+        if !input.metadata()?.is_file() {
+            return Err(io::Error::other("Source changed type before copying"));
+        }
         let mut output =
             fs::create_new_with_permissions(destination, Some(&metadata.permissions()))?;
         let result = (|| {
@@ -459,7 +354,10 @@ mod tests {
             assert!(validate_name(name).is_err());
         }
         assert!(validate_name("メモ with spaces.txt").is_ok());
-        assert_eq!(location_path(Path::new("/a"), " folder ", Path::new("/home/u")).unwrap(), Path::new("/a/ folder "));
+        assert_eq!(
+            location_path(Path::new("/a"), " folder ", Path::new("/home/u")).unwrap(),
+            Path::new("/a/ folder ")
+        );
         assert_eq!(
             location_path(Path::new("/a/b"), "../c", Path::new("/home/u")).unwrap(),
             Path::new("/a/b/../c")
@@ -574,30 +472,44 @@ mod tests {
         assert_eq!(fs::read(nested.join("keep")).unwrap(), b"keep");
     }
 
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
-    fn tree_change_detection_includes_new_children() {
-        let fixture = Fixture::new();
-        let before = tree_stamp(&fixture.0).unwrap();
-        fs::write(fixture.0.join("new.txt"), b"new").unwrap();
-        assert!(before != tree_stamp(&fixture.0).unwrap());
-    }
-
-    #[test]
-    fn verification_detects_same_length_edits_without_timestamps() {
+    fn atomic_move_preserves_inode_hard_links_and_live_open_handles() {
+        use std::os::unix::fs::MetadataExt;
         let fixture = Fixture::new();
         let source = fixture.0.join("source");
-        let destination = fixture.0.join("copy");
-        fs::write(&source, b"old content").unwrap();
-        let mut stamps = tree_stamp(&source).unwrap();
-        for stamp in &mut stamps {
-            stamp.modified = None;
-        }
-        copy_tree(&source, &destination, 0, &mut 0).unwrap();
-        verify_copy(&source, &destination, &stamps).unwrap();
-        fs::write(&source, b"new content").unwrap();
-        assert!(verify_copy(&source, &destination, &stamps).is_err());
-        assert_eq!(fs::read(&source).unwrap(), b"new content");
-        assert_eq!(fs::read(&destination).unwrap(), b"old content");
+        let destination = fixture.0.join("destination");
+        let alias = fixture.0.join("hard-link");
+        let mut open = fs::File::create(&source).unwrap();
+        open.write_all(b"before").unwrap();
+        fs::hard_link(&source, &alias).unwrap();
+        let identity = fs::metadata(&source).unwrap().ino();
+        transfer(&source, &destination, true).unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::metadata(&destination).unwrap().ino(), identity);
+        assert_eq!(fs::metadata(&alias).unwrap().ino(), identity);
+        open.write_all(b" after").unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"before after");
+        assert_eq!(fs::read(&alias).unwrap(), b"before after");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn atomic_move_rejects_dangling_targets_and_directory_cycles() {
+        let fixture = Fixture::new();
+        let source = fixture.0.join("source");
+        let destination = fixture.0.join("dangling");
+        fs::write(&source, b"keep").unwrap();
+        std::os::unix::fs::symlink("missing", &destination).unwrap();
+        assert!(transfer(&source, &destination, true).is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"keep");
+        assert_eq!(fs::read_link(&destination).unwrap(), Path::new("missing"));
+        let directory = fixture.0.join("directory");
+        fs::create_dir(&directory).unwrap();
+        fs::create_dir(directory.join("child")).unwrap();
+        assert!(transfer(&directory, &directory.join("child/cycle"), true).is_err());
+        assert!(directory.join("child").is_dir());
+        assert!(!directory.join("child/cycle").exists());
     }
 
     #[cfg(unix)]

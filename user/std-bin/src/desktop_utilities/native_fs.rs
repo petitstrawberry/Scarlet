@@ -7,8 +7,8 @@
 //! Native metadata exposes only coarse R/W/X flags. File creation retains those
 //! capabilities for the owner; it cannot reproduce POSIX ownership, group bits,
 //! ACLs or extended attributes. Existing permissions cannot be changed.
-//! Native recursive deletion and no-replace rename fail rather than simulate
-//! primitives the ABI does not expose.
+//! Native recursive deletion fails rather than simulate an anchored unlink
+//! primitive. Atomic no-replace rename requires native operation 419.
 #![allow(dead_code, unused_imports)]
 pub use std::fs::{
     File, ReadDir, canonicalize, create_dir, read_dir, read_link, remove_dir, remove_file, rename,
@@ -33,6 +33,66 @@ fn checked(result: usize) -> io::Result<usize> {
     } else {
         Ok(result)
     }
+}
+
+fn rename_unavailable() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Atomic move and rename are unavailable on this system. The original was kept; use Copy instead.",
+    )
+}
+
+fn rename_probe_supported(result: usize) -> bool {
+    // New kernels reject the reserved flag before dereferencing either null
+    // pathname. Old kernels return -1 for an unknown native operation. Neither
+    // zero nor any other error is evidence of the required contract.
+    result == (-22isize) as usize
+}
+
+fn checked_rename(result: usize) -> io::Result<()> {
+    if result == usize::MAX || result == (-38isize) as usize {
+        return Err(rename_unavailable());
+    }
+    match checked(result)? {
+        0 => Ok(()),
+        _ => Err(io::Error::other("Unexpected native rename result")),
+    }
+}
+
+/// Atomically move the source entry only if no destination entry exists.
+/// This retains open-file and hard-link identity. Cross-device moves fail;
+/// callers must never fall back to copying and deleting the source.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::ffi::{CString, c_char, c_int};
+    use std::os::unix::ffi::OsStrExt;
+    unsafe extern "C" {
+        fn renameat2(
+            olddirfd: c_int,
+            oldpath: *const c_char,
+            newdirfd: c_int,
+            newpath: *const c_char,
+            flags: u32,
+        ) -> c_int;
+    }
+    let path = |path: &Path| {
+        CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Path contains NUL"))
+    };
+    let source = path(source)?;
+    let destination = path(destination)?;
+    // SAFETY: both C strings remain live and immutable for the synchronous
+    // call. AT_FDCWD (-100) and RENAME_NOREPLACE (1) are Linux ABI constants.
+    if unsafe { renameat2(-100, source.as_ptr(), -100, destination.as_ptr(), 1) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "scarlet", target_os = "linux", target_os = "android")))]
+pub fn rename_noreplace(_source: &Path, _destination: &Path) -> io::Result<()> {
+    Err(rename_unavailable())
 }
 
 #[cfg(not(target_os = "scarlet"))]
@@ -123,6 +183,33 @@ mod native {
         }
         CString::new(bytes)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Path contains NUL"))
+    }
+    pub(super) fn require_noreplace_move() -> io::Result<()> {
+        static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *AVAILABLE.get_or_init(|| {
+            // SAFETY: reserved flags must be rejected before touching null
+            // paths. Old kernels reject operation 419 without touching them.
+            rename_probe_supported(unsafe { syscall3(Syscall::VfsRenameWithStatus, 0, 0, 2) })
+        }) {
+            Ok(())
+        } else {
+            Err(rename_unavailable())
+        }
+    }
+    pub fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+        require_noreplace_move()?;
+        let source = path_string(source)?;
+        let destination = path_string(destination)?;
+        // SAFETY: both NUL-terminated path buffers remain live and read-only;
+        // the operation retains no userspace pointer after it returns.
+        checked_rename(unsafe {
+            syscall3(
+                Syscall::VfsRenameWithStatus,
+                source.as_ptr() as usize,
+                destination.as_ptr() as usize,
+                VFS_RENAME_NOREPLACE,
+            )
+        })
     }
     #[derive(Clone, Debug)]
     pub struct Metadata {
@@ -327,25 +414,49 @@ pub fn is_executable(permissions: &Permissions) -> bool {
     permissions_mode(permissions) & 0o111 != 0
 }
 
-/// The native syscall only exposes replacing rename, so Files cannot use it
-/// for a move that promises to preserve an existing destination.
+/// Check support without touching any filesystem entry. Native results are
+/// cached so view rebuilding does not repeatedly invoke the capability probe.
 pub fn require_noreplace_move() -> io::Result<()> {
     #[cfg(target_os = "scarlet")]
     {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Move and rename are unavailable until Scarlet exposes atomic no-replace rename. The original was kept; use Copy instead.",
-        ))
+        native::require_noreplace_move()
     }
-    #[cfg(not(target_os = "scarlet"))]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         Ok(())
+    }
+    #[cfg(not(any(target_os = "scarlet", target_os = "linux", target_os = "android")))]
+    {
+        Err(rename_unavailable())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rename_capability_requires_the_exact_reserved_flag_rejection() {
+        assert!(rename_probe_supported((-22isize) as usize));
+        for result in [0, 1, usize::MAX, (-38isize) as usize, (-14isize) as usize] {
+            assert!(!rename_probe_supported(result));
+        }
+        assert!(checked_rename(0).is_ok());
+        for result in [usize::MAX, (-38isize) as usize] {
+            assert_eq!(
+                checked_rename(result).unwrap_err().kind(),
+                io::ErrorKind::Unsupported
+            );
+        }
+        assert_eq!(
+            checked_rename((-17isize) as usize).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            checked_rename((-2isize) as usize).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert!(checked_rename(1).is_err());
+    }
     #[test]
     fn filesystem_errors_have_actionable_kinds() {
         for (code, kind) in [
