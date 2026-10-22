@@ -26,6 +26,327 @@ fn make_mount_and_entry(fs: Arc<dyn FileSystemOperations>) -> (Arc<MountPoint>, 
     (mp, root_entry)
 }
 
+fn rename_fixture() -> (Arc<TmpFS>, Arc<TmpFS>, Arc<OverlayFS>) {
+    let upper = TmpFS::new(0);
+    let lower = TmpFS::new(0);
+    let overlay = OverlayFS::new(
+        Some(make_mount_and_entry(upper.clone())),
+        vec![make_mount_and_entry(lower.clone())],
+        "rename".to_string(),
+    )
+    .unwrap();
+    (upper, lower, overlay)
+}
+
+fn rename_file(
+    fs: &dyn FileSystemOperations,
+    parent: &Arc<dyn crate::fs::VfsNode>,
+    name: &str,
+    bytes: &[u8],
+) -> Arc<dyn crate::fs::VfsNode> {
+    let node = fs
+        .create(parent, &name.to_string(), FileType::RegularFile, 0o644)
+        .unwrap();
+    assert_eq!(
+        fs.open(&node, 2).unwrap().write(bytes).unwrap(),
+        bytes.len()
+    );
+    node
+}
+
+fn rename_contents(fs: &dyn FileSystemOperations, node: &Arc<dyn crate::fs::VfsNode>) -> Vec<u8> {
+    let file = fs.open(node, 0).unwrap();
+    let mut bytes = vec![0; node.metadata().unwrap().size];
+    assert_eq!(file.read(&mut bytes).unwrap(), bytes.len());
+    bytes
+}
+
+#[test_case]
+fn test_overlay_rename_retains_source_destination_nodes_and_open_files() {
+    let (_, _, overlay) = rename_fixture();
+    let root = overlay.root_node();
+    let source = rename_file(overlay.as_ref(), &root, "stage", b"replacement");
+    let source_again = overlay.lookup(&root, &"stage".to_string()).unwrap();
+    let old = rename_file(overlay.as_ref(), &root, "document", b"original");
+    let source_file = overlay.open(&source, 0).unwrap();
+    let old_file = overlay.open(&old, 2).unwrap();
+    overlay
+        .rename(&root, &"stage".to_string(), &root, &"document".to_string())
+        .unwrap();
+    for _ in 0..3 {
+        let current = overlay.lookup(&root, &"document".to_string()).unwrap();
+        assert_eq!(current.id(), source.id());
+        assert_eq!(current.metadata().unwrap().file_id, source.id());
+        assert_eq!(rename_contents(overlay.as_ref(), &current), b"replacement");
+        assert_eq!(
+            rename_contents(overlay.as_ref(), &source_again),
+            b"replacement"
+        );
+        assert_eq!(old.metadata().unwrap().file_id, old.id());
+        assert_eq!(rename_contents(overlay.as_ref(), &old), b"original");
+    }
+    let mut source_bytes = [0; 11];
+    assert_eq!(source_file.read(&mut source_bytes).unwrap(), 11);
+    assert_eq!(&source_bytes, b"replacement");
+    assert_eq!(old_file.write(b"detached").unwrap(), 8);
+    assert_eq!(rename_contents(overlay.as_ref(), &old), b"detached");
+    assert_eq!(rename_contents(overlay.as_ref(), &source), b"replacement");
+    let recreated = rename_file(overlay.as_ref(), &root, "stage", b"new-stage");
+    assert_ne!(recreated.id(), source.id());
+    overlay
+        .rename(&root, &"document".to_string(), &root, &"moved".to_string())
+        .unwrap();
+    assert_eq!(
+        rename_contents(overlay.as_ref(), &source_again),
+        b"replacement"
+    );
+    assert_eq!(
+        overlay.lookup(&root, &"moved".to_string()).unwrap().id(),
+        source.id()
+    );
+    assert!(overlay.lookup(&root, &"document".to_string()).is_err());
+    let entries = overlay.readdir(&root).unwrap();
+    assert_eq!(
+        entries.iter().find(|e| e.name == "moved").unwrap().file_id,
+        source.id()
+    );
+    // No global retired-inode table: only live paths remain registered.
+    assert_eq!(overlay.inode_ids.read().by_path.len(), 2);
+}
+
+#[test_case]
+fn test_overlay_rename_staging_replaces_lower_file_and_supports_second_save() {
+    let (upper, lower, overlay) = rename_fixture();
+    let lower_home = lower
+        .create(
+            &lower.root_node(),
+            &"home".to_string(),
+            FileType::Directory,
+            0o755,
+        )
+        .unwrap();
+    let original = rename_file(lower.as_ref(), &lower_home, "document", b"lower-original");
+    let root = overlay.root_node();
+    let home = overlay.lookup(&root, &"home".to_string()).unwrap();
+    let retained_lower = overlay.lookup(&home, &"document".to_string()).unwrap();
+    let lower_file = overlay.open(&retained_lower, 0).unwrap();
+    // Creating an adjacent stage copies up its parent directory only.
+    let first = rename_file(overlay.as_ref(), &home, "stage1", b"first");
+    overlay
+        .rename(&home, &"stage1".to_string(), &home, &"document".to_string())
+        .unwrap();
+    let second = rename_file(overlay.as_ref(), &home, "stage2", b"second");
+    overlay
+        .rename(&home, &"stage2".to_string(), &home, &"document".to_string())
+        .unwrap();
+    let current = overlay.lookup(&home, &"document".to_string()).unwrap();
+    assert_eq!(current.id(), second.id());
+    assert_eq!(rename_contents(overlay.as_ref(), &current), b"second");
+    assert_eq!(rename_contents(overlay.as_ref(), &first), b"first");
+    assert_eq!(
+        rename_contents(overlay.as_ref(), &retained_lower),
+        b"lower-original"
+    );
+    assert!(overlay.open(&retained_lower, 2).is_err());
+    assert_eq!(
+        rename_contents(lower.as_ref(), &original),
+        b"lower-original"
+    );
+    let mut bytes = [0; 14];
+    assert_eq!(lower_file.read(&mut bytes).unwrap(), 14);
+    assert_eq!(&bytes, b"lower-original");
+    let upper_home = upper
+        .lookup(&upper.root_node(), &"home".to_string())
+        .unwrap();
+    assert!(
+        upper
+            .lookup(&upper_home, &".wh.document".to_string())
+            .is_err()
+    );
+}
+
+#[test_case]
+fn test_overlay_rename_vfs_cache_no_replace_and_same_path() {
+    use crate::fs::{FileSystemErrorKind, VfsManager};
+    let (_, _, overlay) = rename_fixture();
+    let vfs = VfsManager::new_with_root(overlay.clone());
+    let root = overlay.root_node();
+    let source = rename_file(overlay.as_ref(), &root, "stage", b"saved");
+    rename_file(overlay.as_ref(), &root, "document", b"before");
+    // Populate both entry caches before replacement.
+    let retained = vfs.open("/stage", 0).unwrap();
+    let original = vfs.open("/document", 0).unwrap();
+    assert_eq!(
+        vfs.rename_with_no_replace("/stage", "/document", true)
+            .unwrap_err()
+            .kind,
+        FileSystemErrorKind::AlreadyExists
+    );
+    vfs.rename("/stage", "/stage").unwrap();
+    vfs.rename("/stage", "/document").unwrap();
+    for _ in 0..3 {
+        let file = vfs.open("/document", 0).unwrap();
+        assert_eq!(
+            file.as_file().unwrap().metadata().unwrap().file_id,
+            source.id()
+        );
+        let mut bytes = [0; 5];
+        assert_eq!(file.as_file().unwrap().read(&mut bytes).unwrap(), 5);
+        assert_eq!(&bytes, b"saved");
+    }
+    assert_eq!(
+        retained.as_file().unwrap().metadata().unwrap().file_id,
+        source.id()
+    );
+    let mut old = [0; 6];
+    assert_eq!(original.as_file().unwrap().read(&mut old).unwrap(), 6);
+    assert_eq!(&old, b"before");
+    assert!(vfs.open("/stage", 0).is_err());
+}
+
+#[test_case]
+fn test_overlay_rename_upper_failure_preserves_names_ids_and_retained_nodes() {
+    use crate::fs::{FileSystemError, FileSystemErrorKind};
+    let (_, _, overlay) = rename_fixture();
+    let root = overlay.root_node();
+    let source = rename_file(overlay.as_ref(), &root, "stage", b"new");
+    let dest = rename_file(overlay.as_ref(), &root, "document", b"old");
+    let error = overlay
+        .rename_upper_regular(
+            &root,
+            &"stage".to_string(),
+            &root,
+            &"document".to_string(),
+            |_, _, _, _| {
+                Err(FileSystemError::new(
+                    FileSystemErrorKind::NotSupported,
+                    "injected backing rename failure",
+                ))
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.kind, FileSystemErrorKind::NotSupported);
+    assert_eq!(
+        overlay.lookup(&root, &"stage".to_string()).unwrap().id(),
+        source.id()
+    );
+    assert_eq!(
+        overlay.lookup(&root, &"document".to_string()).unwrap().id(),
+        dest.id()
+    );
+    assert_eq!(rename_contents(overlay.as_ref(), &source), b"new");
+    assert_eq!(rename_contents(overlay.as_ref(), &dest), b"old");
+    for node in [&source, &dest] {
+        assert!(
+            node.as_any()
+                .downcast_ref::<super::OverlayNode>()
+                .unwrap()
+                .inode
+                .backing
+                .read()
+                .is_none()
+        );
+    }
+}
+
+#[test_case]
+fn test_overlay_rename_publication_excludes_readers_and_releases_on_error() {
+    use crate::fs::{FileSystemError, FileSystemErrorKind};
+    let (_, _, overlay) = rename_fixture();
+    let root = overlay.root_node();
+    let source = rename_file(overlay.as_ref(), &root, "stage", b"new");
+    let directory_file = overlay.open(&root, 0).unwrap();
+    let result = overlay.rename_upper_regular(&root, &"stage".to_string(), &root, &"new".to_string(),
+        |_, _, _, _| {
+            let _preempt = crate::sync::PreemptGuard::new();
+            assert!(matches!(overlay.lookup(&root, &"stage".to_string()), Err(e) if e.kind == FileSystemErrorKind::Busy));
+            assert!(matches!(overlay.open(&source, 0), Err(e) if e.kind == FileSystemErrorKind::Busy));
+            assert_eq!(source.metadata().unwrap_err().kind, FileSystemErrorKind::Busy);
+            assert_eq!(overlay.readdir(&root).unwrap_err().kind, FileSystemErrorKind::Busy);
+            assert!(directory_file.metadata().is_err());
+            assert!(directory_file.read(&mut [0; 256]).is_err());
+            Err(FileSystemError::new(FileSystemErrorKind::NotSupported, "injected failure"))
+        });
+    assert!(result.is_err());
+    assert_eq!(rename_contents(overlay.as_ref(), &source), b"new");
+    assert!(overlay.lookup(&root, &"new".to_string()).is_err());
+}
+
+#[test_case]
+fn test_overlay_rename_rejects_unsupported_cases_without_namespace_changes() {
+    let (upper, lower, overlay) = rename_fixture();
+    let root = overlay.root_node();
+    let upper_root = upper.root_node();
+    let lower_root = lower.root_node();
+    let stage = rename_file(overlay.as_ref(), &root, "stage", b"stage");
+    rename_file(lower.as_ref(), &lower_root, "lower", b"lower");
+    rename_file(lower.as_ref(), &lower_root, "override", b"lower-override");
+    rename_file(upper.as_ref(), &upper_root, "override", b"upper-override");
+    rename_file(upper.as_ref(), &upper_root, ".wh.hidden", b"");
+    rename_file(upper.as_ref(), &upper_root, ".wh.masked", b"");
+    rename_file(upper.as_ref(), &upper_root, "masked", b"masked");
+    overlay
+        .create(&root, &"dir".to_string(), FileType::Directory, 0o755)
+        .unwrap();
+    overlay
+        .create(
+            &root,
+            &"link".to_string(),
+            FileType::SymbolicLink("stage".to_string()),
+            0o777,
+        )
+        .unwrap();
+    let below = lower
+        .create(
+            &lower_root,
+            &"below".to_string(),
+            FileType::Directory,
+            0o755,
+        )
+        .unwrap();
+    rename_file(lower.as_ref(), &below, "only", b"below");
+    for (from, to) in [
+        ("lower", "new"),
+        ("override", "new"),
+        ("dir", "new"),
+        ("link", "new"),
+        ("stage", "dir"),
+        ("stage", "link"),
+        ("stage", "hidden"),
+        ("masked", "new"),
+        ("stage", ".wh.marker"),
+        ("missing", "new"),
+    ] {
+        assert!(
+            overlay
+                .rename(&root, &from.to_string(), &root, &to.to_string())
+                .is_err(),
+            "{from} -> {to}"
+        );
+    }
+    let dir = overlay.lookup(&root, &"dir".to_string()).unwrap();
+    assert!(
+        overlay
+            .rename(&root, &"stage".to_string(), &dir, &"new".to_string())
+            .is_err()
+    );
+    let below = overlay.lookup(&root, &"below".to_string()).unwrap();
+    assert!(
+        overlay
+            .rename(&below, &"only".to_string(), &below, &"new".to_string())
+            .is_err()
+    );
+    assert_eq!(rename_contents(overlay.as_ref(), &stage), b"stage");
+    assert_eq!(
+        overlay.lookup(&root, &"stage".to_string()).unwrap().id(),
+        stage.id()
+    );
+    assert!(upper.lookup(&upper_root, &"below".to_string()).is_err());
+    assert!(upper.lookup(&upper_root, &"new".to_string()).is_err());
+    assert!(upper.lookup(&upper_root, &".wh.hidden".to_string()).is_ok());
+    assert!(upper.lookup(&upper_root, &".wh.masked".to_string()).is_ok());
+}
+
 #[test_case]
 fn test_vfs_exclusive_create_checks_lower_layer_before_creating_upper() {
     use crate::fs::{FileSystemErrorKind, VfsManager};
