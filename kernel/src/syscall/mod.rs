@@ -346,6 +346,7 @@ syscall_table! {
     VfsCreateDirectoryWithStatus = 416 => crate::fs::vfs_v2::syscall::sys_vfs_create_directory_with_status,
     VfsOpenAt = 417 => crate::fs::vfs_v2::descriptor::sys_vfs_open_at,
     VfsRemoveWithStatus = 418 => crate::fs::vfs_v2::syscall::sys_vfs_remove_with_status,
+    VfsRenameWithStatus = 419 => crate::fs::vfs_v2::syscall::sys_vfs_rename_with_status,
 
     // === Filesystem Operations ===
     FsMount = 500 => sys_fs_mount,         // Mount filesystem

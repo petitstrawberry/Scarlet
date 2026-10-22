@@ -8,6 +8,12 @@ pub const PATH_MAX: usize = 1024;
 /// Use the current working directory for a relative VfsSetTimes pathname.
 pub const CURRENT_DIRECTORY: usize = usize::MAX;
 
+/// Reject every existing destination, including dangling symbolic links, under
+/// the same namespace lock as the rename. No copy/delete fallback is performed.
+/// `VfsRenameWithStatus` accepts zero or this flag; unknown bits return EINVAL
+/// before either pathname is accessed. Both pathnames are NUL-terminated.
+pub const VFS_RENAME_NOREPLACE: usize = 1;
+
 /// Open flags for `VfsOpenAt`. Unlisted flag bits are rejected.
 pub const VFS_O_RDONLY: u32 = 0;
 pub const VFS_O_WRONLY: u32 = 1;

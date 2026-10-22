@@ -972,6 +972,9 @@ pub enum Syscall {
     VfsOpenAt = 417,
     /// (path, flags): remove a file or directory, returning zero or -errno.
     VfsRemoveWithStatus = 418,
+    /// (old_path, new_path, flags): atomic rename, returning zero or -errno.
+    /// See `fs::VFS_RENAME_NOREPLACE`; syscall 409 keeps its legacy contract.
+    VfsRenameWithStatus = 419,
 
     // Filesystem operations
     FsMount = 500,

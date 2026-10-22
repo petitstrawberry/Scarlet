@@ -21,6 +21,7 @@ Every operation below returns a nonnegative success value or a negated errno.
 | 310 | `FileLock` | descriptor, operation | Zero |
 | 418 | `VfsRemoveWithStatus` | NUL-terminated path, directory flag (zero or one) | Zero |
 | 417 | `VfsOpenAt` | base, NUL-terminated path, flags, mode | New descriptor |
+| 419 | `VfsRenameWithStatus` | old NUL-terminated path, new NUL-terminated path, flags | Zero |
 
 The signed seek offset uses the existing Native fixed-width scalar convention:
 one argument word on 64-bit targets and two consecutive words on RV32. The
@@ -29,6 +30,26 @@ the beginning, one for the current position and two for EOF. The result must be
 between zero and `i64::MAX`; negative positions and invalid whence produce
 `EINVAL`, and overflow produces `EOVERFLOW`, without moving the position.
 Nonseekable objects produce `ESPIPE`.
+
+## Atomic rename
+
+Operation 419 accepts flags zero for replacing rename or
+`VFS_RENAME_NOREPLACE=1` to reject every existing destination, including dangling
+symbolic links and a second name for the same inode. The destination check and
+rename share the VFS namespace mutation lock. A successful rename preserves the
+source inode, hard links, open handles and retained directory entries. The final
+source symbolic link is moved as a link. Relative paths use the caller's cwd.
+Cross-mount moves return `EXDEV` and do not copy or remove either entry.
+
+Unknown flag bits return `EINVAL` before reading either pathname. Clients may
+probe with null pathnames and reserved flag 2: exactly `-EINVAL` establishes
+support. Older kernels return `-1` for the unknown operation; clients must fail
+without falling back to replacing operation 409 or copy/delete. Invalid pointers
+return `EFAULT`, overlong paths `ENAMETOOLONG`, empty or missing paths `ENOENT`,
+and an existing destination with no-replace `EEXIST`. Invalid directory cycles,
+dot entries and mount-root changes are rejected before mutation. This operation
+does not change operation 409's legacy return contract or provide recursive,
+directory-relative deletion.
 
 ## Opening and descriptor lifetime
 
