@@ -53,6 +53,8 @@ def main():
     missing = [str(path) for path in required if not path.is_file()]
     if not (args.assets / "cursors/default").is_dir():
         missing.append(str(args.assets / "cursors/default"))
+    if not (args.assets / "icons/default").is_dir():
+        missing.append(str(args.assets / "icons/default"))
     if missing:
         parser.error("Build or provide missing inputs first: " + ", ".join(missing))
     staging.mkdir(parents=True, exist_ok=False)
@@ -74,6 +76,7 @@ def main():
     for name in fonts:
         copy(args.assets / "fonts" / name, f"share/fonts/{name}")
     shutil.copytree(args.assets / "cursors" / "default", staging / "share/cursors/default")
+    shutil.copytree(args.assets / "icons" / "default", staging / "share/icons/default")
     (staging / "root/fixture.txt").write_text(
         "Native desktop smoke\n\nThis document is a temporary fixture.\n"
         "Text editing, selection, save and dialogs should remain responsive.\n"
