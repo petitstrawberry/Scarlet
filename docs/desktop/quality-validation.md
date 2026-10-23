@@ -293,3 +293,39 @@ including `selection-find-overlay-macos.png`, `native-refinement-final/` and
 `native-terminal-path-final/`. `selection-full-image-final.log` records the
 published-source image build. Owned QEMU staging/images were removed after
 preserving evidence; live host windows used by the user were retained.
+
+## Kureha workbench and Storage (2026-10-23)
+
+Kureha now offers right/down editor groups, Quick Open, Command Palette,
+line/column navigation, project search and buffered replace, Save All, indentation,
+line comments/move/copy, formatting and references. Same-document groups share
+history and transform selections through the engine's disjoint edits; closing
+or loading tabs preserves the other group's active file. Current-file rename is
+supported; cross-file rename is rejected atomically and is still pending.
+
+Published sources: Kureha `288fb58b0aa428b88d350bbc2e18a5ed65f060cb`, using
+ScarletUI `01bc36e6326b19f118cbf4dc1e56f3bcb6786631` (native macOS menus and themed
+TextField placeholders). Production bundles use the remote Kureha pin.
+
+The host library suite passed 93 tests; the final application suite passed 60.
+Two real rust-analyzer application tests additionally passed definition,
+completion, diagnostics, formatting, current-file rename and unopened-reference
+navigation. Native Scarlet runs verified both splits, independent scroll,
+workspace search, 113 replacements across three fixture files, Save All and saved
+file reopening. macOS verified native menu operation and splitting before the
+screen locked. Native LSP execution remains unverified without a native server.
+Final interaction regressions cover returning focus after Replace All and keeping
+queued Quick Open characters out of the previous document.
+
+Storage has its own std-bin main and a native `.app` recipe and icon. Ten model
+tests and the final script-built AArch64 package passed; native operations verified
+ranked sizes, drilldown/back and the system folder chooser. See utilities-validation.md.
+Evidence and screenshots are under `artifacts/kureha-workbench-20261023/` and
+`artifacts/storage-20261023/final-native/`. These checkpoints do not establish full
+VS Code parity: nested groups, multi-cursor editing, folding, Git/diff, debugging,
+extensions and workspace restoration remain outside the current implementation.
+
+`cargo scarlet image --project projects/aarch64-limine-full --release` completed
+successfully through the existing Nix development shell at the published Kureha
+288fb58 pin, producing `.scarlet/images/limine-aarch64-full.img`. The lock was
+regenerated from that build, including Storage and the updated Kureha app hashes.

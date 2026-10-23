@@ -343,6 +343,11 @@ architectures = ["aarch64", "riscv64"]
 
 # Everyday desktop utilities.
 [[layers]]
+kind = "app"
+source = "../../user/std-bin/src/storage/app.toml"
+to = "/applications/storage.app"
+
+[[layers]]
 kind = "cargo"
 source = "../../user/std-bin"
 bin = "calculator"
@@ -381,5 +386,5 @@ to = "/bin/applications"
 # Kureha Code owns its native app recipe and resources.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/kureha-code.git", rev = "b91abc8297bc373ce5e3617323cbd5cdef3d9403" }
+source = { git = "https://github.com/petitstrawberry/kureha-code.git", rev = "288fb58b0aa428b88d350bbc2e18a5ed65f060cb" }
 bundle = "platforms/scarlet/bundle.toml"
