@@ -7,7 +7,7 @@
 
 use crate::arch::Trapframe;
 use crate::environment::PAGE_SIZE;
-use crate::object::capability::memory_mapping::anon_owner::AnonymousPageOwner;
+use crate::object::capability::memory_mapping::anon_owner::{AnonymousPageOwner, AnonymousZeroPageOwner};
 use crate::task::mytask;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap};
 use alloc::sync::Arc;
@@ -372,8 +372,11 @@ fn handle_anonymous_mapping(
         permissions |= 0x4;
     }
 
-    let owner: Arc<dyn crate::object::capability::memory_mapping::MemoryMappingOps> =
-        Arc::new(AnonymousPageOwner::new());
+    let owner: Arc<dyn crate::object::capability::memory_mapping::MemoryMappingOps> = if is_shared {
+        Arc::new(AnonymousPageOwner::new())
+    } else {
+        Arc::new(AnonymousZeroPageOwner::new())
+    };
 
     let vmarea = MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1);
     let vm_map = VirtualMemoryMap {
@@ -630,6 +633,109 @@ mod tests {
         copy_to_user(&task, address, b"current TLS").unwrap();
         copy_from_user(&task, candidate, &mut bytes).unwrap();
         assert_eq!(&bytes, b"sibling TLS");
+    }
+
+    #[test_case]
+    fn private_anonymous_pages_reuse_zero_source_and_keep_fork_data_private() {
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+        use crate::object::capability::memory_mapping::{AccessKind, AccessOp};
+        let parent = crate::task::new_user_task("anonymous-zero-backing".into(), 0);
+        parent
+            .vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let address = handle_anonymous_mapping(
+            &parent,
+            0,
+            64 * PAGE_SIZE,
+            64,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+        );
+        assert_ne!(address, usize::MAX);
+        let map = parent.vm_manager.search_memory_map(address).unwrap();
+        let owner = map.owner.as_ref().unwrap();
+        assert_eq!(owner.is_page_resident(0), Some(false));
+        assert_eq!(owner.is_page_resident(63), Some(false));
+        copy_to_user(&parent, address, b"parent").unwrap();
+        copy_to_user(&parent, address + 2 * PAGE_SIZE, b"third!").unwrap();
+        // All private pages copy the same immutable source, rather than retaining
+        // one extra zero allocation per page. Written pages never alias it.
+        let access = AccessKind {
+            op: AccessOp::Load,
+            vaddr: address,
+            size: None,
+        };
+        let zero = owner
+            .resolve_fault(&access, 0, address)
+            .unwrap()
+            .paddr_page_base;
+        assert_eq!(
+            owner
+                .resolve_fault(&access, 2, address)
+                .unwrap()
+                .paddr_page_base,
+            zero
+        );
+        assert_ne!(parent.vm_manager.translate_to_phys(address), Some(zero));
+        assert_ne!(
+            parent.vm_manager.translate_to_phys(address + 2 * PAGE_SIZE),
+            Some(zero)
+        );
+        let zero_bytes = unsafe {
+            core::slice::from_raw_parts(crate::vm::addr::phys_to_virt(zero) as *const u8, PAGE_SIZE)
+        };
+        assert!(zero_bytes.iter().all(|byte| *byte == 0));
+        assert_eq!(owner.is_page_resident(63), Some(false));
+
+        // Legacy ioctl/event-frame writers request a raw alias. They must get
+        // private backing even if userspace has never touched the output buffer.
+        let output = parent
+            .vm_manager
+            .translate_to_kva(address + 4 * PAGE_SIZE)
+            .unwrap();
+        unsafe {
+            core::ptr::write_bytes(output as *mut u8, 0x5a, 16);
+        }
+        let mut sibling = [0xff; 16];
+        copy_from_user(&parent, address + 5 * PAGE_SIZE, &mut sibling).unwrap();
+        assert_eq!(sibling, [0; 16]);
+        assert!(zero_bytes.iter().all(|byte| *byte == 0));
+
+        protect_user_memory(&parent, address + PAGE_SIZE, PAGE_SIZE, PROT_READ).unwrap();
+        let child = parent
+            .clone_task(crate::task::CloneFlags::default())
+            .unwrap();
+        let child_output = child
+            .vm_manager
+            .translate_to_kva(address + 6 * PAGE_SIZE)
+            .unwrap();
+        unsafe {
+            core::ptr::write_bytes(child_output as *mut u8, 0x33, 16);
+        }
+        copy_from_user(&parent, address + 6 * PAGE_SIZE, &mut sibling).unwrap();
+        assert_eq!(sibling, [0; 16]);
+        let mut bytes = [0; 6];
+        copy_from_user(&child, address, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"parent");
+        copy_to_user(&child, address, b"child!").unwrap();
+        copy_from_user(&parent, address, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"parent");
+        copy_to_user(&parent, address + 2 * PAGE_SIZE, b"edited").unwrap();
+        copy_from_user(&child, address + 2 * PAGE_SIZE, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"third!");
+        // Forking an untouched range must share only zero backing, never writes.
+        copy_to_user(&parent, address + 63 * PAGE_SIZE, b"parent").unwrap();
+        copy_from_user(&child, address + 63 * PAGE_SIZE, &mut bytes).unwrap();
+        assert_eq!(bytes, [0; 6]);
+        let removed = parent
+            .vm_manager
+            .remove_memory_map_range(address + PAGE_SIZE, PAGE_SIZE);
+        reclaim_private_removed_mappings(&parent, &removed);
+        // An unmap of one zero-backed fragment cannot invalidate surviving ones.
+        copy_from_user(&parent, address + 3 * PAGE_SIZE, &mut bytes).unwrap();
+        assert_eq!(bytes, [0; 6]);
+        copy_from_user(&child, address, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"child!");
     }
 
     #[test_case]

@@ -9,6 +9,71 @@ use crate::vm::addr::{phys_to_virt, virt_to_phys};
 
 use super::{AccessKind, AccessOp, MemoryMappingOps, ResolveFaultError, ResolveFaultResult};
 
+/// Immutable zero backing for a private anonymous reservation. The VM's normal
+/// private-fault path copies it into the task's own page and validates the VMA
+/// before committing that page. Keep one zero page per reservation, not one
+/// otherwise-unused backing page for every private page the process touches.
+pub struct AnonymousZeroPageOwner {
+    page: IrqRwSpinLock<Option<ContiguousPages>>,
+}
+
+impl AnonymousZeroPageOwner {
+    pub fn new() -> Self {
+        Self {
+            page: IrqRwSpinLock::new(None),
+        }
+    }
+}
+
+impl MemoryMappingOps for AnonymousZeroPageOwner {
+    fn get_mapping_info(
+        &self,
+        _offset: usize,
+        _length: usize,
+    ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
+        Err("AnonymousZeroPageOwner does not support get_mapping_info")
+    }
+
+    fn supports_mmap(&self) -> bool {
+        false
+    }
+
+    fn supports_permission_changes(&self) -> bool {
+        true
+    }
+
+    fn mmap_owner_name(&self) -> String {
+        String::from("anonymous-zero")
+    }
+
+    fn is_page_resident(&self, _page_idx: usize) -> Option<bool> {
+        // The zero source is not a resident private page. Faulted private pages
+        // have their own physical VMA and no longer reference this owner.
+        Some(false)
+    }
+
+    fn resolve_fault(
+        &self,
+        _access: &AccessKind,
+        _page_idx: usize,
+        _vm_start: usize,
+    ) -> Result<ResolveFaultResult, ResolveFaultError> {
+        let mut page = self.page.write();
+        if page.is_none() {
+            *page = Some(ContiguousPages::new(1).ok_or(ResolveFaultError::Unmapped)?);
+        }
+        Ok(ResolveFaultResult {
+            paddr_page_base: page.as_ref().unwrap().as_paddr(),
+            is_tail: false,
+        })
+    }
+
+    // Default private_fault_requires_copy=true preserves the VM's private-page
+    // ownership and stale-fault validation. Default fork_clone=None shares only
+    // immutable zero backing. Partial unmap must not free it while other ranges
+    // or in-flight fault handlers retain this owner; its final drop releases it.
+}
+
 pub struct AnonymousPageOwner {
     pages: IrqRwSpinLock<BTreeMap<usize, u64>>,
 }

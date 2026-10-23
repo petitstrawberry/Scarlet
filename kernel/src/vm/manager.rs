@@ -1667,6 +1667,17 @@ impl VirtualMemoryManager {
                 vaddr,
                 size: Some(1),
             };
+            // Lazy private backing must materialize the same private page a
+            // userspace load would fault in. Legacy raw-alias output writers
+            // must never receive the shared zero source. Eager object mappings
+            // keep their physical fallback; fork-COW reads still remain shared.
+            if !map.is_shared
+                && map.pmarea.start == 0
+                && owner.private_fault_requires_copy(&access)
+            {
+                self.lazy_map_page_with(access).ok()?;
+                return self.translate_to_phys(vaddr);
+            }
             if let Ok(res) = owner.resolve_fault(&access, page_idx, map.vm_start) {
                 return Some(res.paddr_page_base + (vaddr & (PAGE_SIZE - 1)) as u64);
             }
@@ -3488,6 +3499,25 @@ mod tests {
             false,
             Some(Arc::new(AnonymousPageOwner::new())),
         )
+    }
+
+    #[test_case]
+    fn raw_translation_keeps_eager_owner_physical_fallback() {
+        use crate::object::capability::memory_mapping::{MemoryMappingInfo, MemoryMappingOps};
+        struct EagerOwner;
+        impl MemoryMappingOps for EagerOwner {
+            fn get_mapping_info(&self, _: usize, _: usize) -> Result<MemoryMappingInfo, &'static str> {
+                Err("eager backing only")
+            }
+        }
+        let manager = VirtualMemoryManager::new();
+        manager.add_memory_map(VirtualMemoryMap::new(
+            crate::vm::vmem::PhysicalMemoryArea::new(0x8000_0000, 0x8000_0fff),
+            MemoryArea::new(0x4000, 0x4fff), 0x0b, false, Some(Arc::new(EagerOwner)),
+        )).unwrap();
+        // A failed owner resolver must not enter an endless fault/translation
+        // retry when a directly supplied physical page is already available.
+        assert_eq!(manager.translate_to_phys(0x4017), Some(0x8000_0017));
     }
 
     #[test_case]
