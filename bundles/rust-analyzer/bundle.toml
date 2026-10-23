@@ -1,0 +1,9 @@
+# Native runtime acceptance currently covers AArch64 only.
+# Install after rust-toolchain v0.1.0-dev.79f356924d1a.
+[[layers]]
+kind = "archive"
+architectures = ["aarch64"]
+url = "https://github.com/petitstrawberry/rust/releases/download/scarlet-rust-analyzer-d12e1fb78b2/rust-analyzer-aarch64-unknown-scarlet-d12e1fb78b2.tar.gz"
+sha256 = "sha256:205c0dd6715ae92b90c54fa33d913b56ea429578f998efc36e0873284f2a2e6a"
+format = "tar-gz"
+to = "/"

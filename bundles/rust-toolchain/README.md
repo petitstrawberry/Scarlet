@@ -1,12 +1,12 @@
 # Scarlet-native Rust toolchain bundle
 
 This bundle installs the versioned Scarlet-native Rust release under
-`/opt/scarlet/toolchains/rust/v0.1.0-dev.825856ca4819` and selects it through the `current`
-symlink. The archive contains `rustc`, matching target libraries, the Cranelift
+`/opt/scarlet/toolchains/rust/v0.1.0-dev.79f356924d1a` and selects it through the `current`
+symlink. The archive contains `rustc`, Cargo, matching target libraries, the Cranelift
 backend, `wild`, and `rust-lld`.
 
 The bundle definition and `current` symlink are imported together from the
-[published toolchain bundle](https://github.com/petitstrawberry/scarlet-rust-nix/releases/tag/v0.1.0-dev.825856ca4819).
+[published toolchain bundle](https://github.com/petitstrawberry/scarlet-rust-nix/releases/tag/v0.1.0-dev.79f356924d1a).
 The selected version and both architecture checksums remain pinned until an
 explicit update.
 
@@ -21,9 +21,11 @@ commands available:
 
 ```sh
 rustc -Vv
+cargo -V
 wild --version
 rust-lld --version
 ```
 
-This release does not contain Cargo. Cargo, procedural macros, and compiler
-self-hosting remain separate acceptance milestones.
+This release includes native Cargo. Procedural macros and compiler self-hosting
+remain separate acceptance milestones. Published build artifacts alone do not
+establish guest execution; see [native LSP validation](../rust-analyzer/README.md) for the selected image.
