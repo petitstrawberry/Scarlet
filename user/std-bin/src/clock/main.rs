@@ -37,21 +37,6 @@ fn local_utc_offset_seconds() -> Option<i64> {
     Some(0)
 }
 
-fn zone_label() -> &'static str {
-    #[cfg(target_os = "scarlet")]
-    {
-        if local_utc_offset_seconds().is_some() {
-            "Local time"
-        } else {
-            "UTC"
-        }
-    }
-    #[cfg(not(target_os = "scarlet"))]
-    {
-        "UTC (host preview)"
-    }
-}
-
 use model::{Stopwatch, Timer, TimerPhase, ceil_seconds, format_seconds, parse_duration};
 
 fn presets() -> [(Color, &'static str); 6] {
@@ -378,13 +363,7 @@ impl ClockApp {
                     .frame(f32::INFINITY, f32::INFINITY),
             )
         };
-        vstack! {
-            content,
-            Text::new(zone_label()).font_size(13.0)
-                .color(if light { Color::rgb(50, 50, 65) } else { Color::rgb(215, 215, 225) })
-                .padding(8.0),
-        }
-        .frame(f32::INFINITY, f32::INFINITY)
+        content
     }
 }
 
