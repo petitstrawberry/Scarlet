@@ -9,6 +9,20 @@ use crate::task::mytask;
 
 const EAGAIN: i32 = 11;
 const EINTR: i32 = 4;
+const ENOMEM: i32 = 12;
+// Large userspace reads must not require an equally large contiguous kernel
+// allocation (e.g. rustc's shared library is over 100 MiB). Stream reads may
+// return a prefix; read_exact/read_to_end continue from the returned offset.
+const MAX_READ_BUFFER: usize = 64 * 1024;
+
+fn io_buffer(count: usize) -> Result<alloc::vec::Vec<u8>, usize> {
+    let mut buffer = alloc::vec::Vec::new();
+    buffer
+        .try_reserve_exact(count)
+        .map_err(|_| (-ENOMEM) as usize)?;
+    buffer.resize(count, 0);
+    Ok(buffer)
+}
 
 fn stream_error_result(error: super::StreamError) -> usize {
     match error {
@@ -55,7 +69,10 @@ pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
     };
 
     // Allocate kernel buffer and read into it
-    let mut kernel_buf = alloc::vec![0u8; count];
+    let mut kernel_buf = match io_buffer(count.min(MAX_READ_BUFFER)) {
+        Ok(buffer) => buffer,
+        Err(error) => return error,
+    };
     let bytes_read = match stream.read(&mut kernel_buf) {
         Ok(n) => n,
         Err(error) => return stream_error_result(error),
@@ -110,7 +127,12 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
 
     // Copy from user space before writing so buffers crossing page boundaries
     // are handled correctly.
-    let mut buffer = alloc::vec![0u8; count];
+    // Keep write boundaries intact for message-oriented streams. An oversized
+    // request can fail allocation, but must not abort the kernel.
+    let mut buffer = match io_buffer(count) {
+        Ok(buffer) => buffer,
+        Err(error) => return error,
+    };
     if copy_from_user(&task, buf_vaddr, &mut buffer).is_err() {
         return usize::MAX;
     }
@@ -123,7 +145,7 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{EAGAIN, EINTR, stream_error_result};
+    use super::{EAGAIN, EINTR, ENOMEM, io_buffer, stream_error_result};
     use crate::object::capability::StreamError;
 
     #[test_case]
@@ -137,5 +159,11 @@ mod tests {
             (-EINTR) as usize
         );
         assert_eq!(stream_error_result(StreamError::IoError), usize::MAX);
+    }
+
+    #[test_case]
+    fn oversized_io_allocation_returns_an_error() {
+        // A malformed count must fail without panicking or entering a device.
+        assert_eq!(io_buffer(usize::MAX), Err((-ENOMEM) as usize));
     }
 }
