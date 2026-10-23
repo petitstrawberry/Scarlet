@@ -5,7 +5,7 @@ hash = "sha256:95194df3f5e9a595b5b495d6deb7c66180ebc67c2e0d35824a8776c29e17270d"
 layers = []
 
 [sections.disk]
-hash = "sha256:5896efee152b2aacf86c43ee77d1dcd97a3b8d4775fb50ac6f7c7af34dd6f1fb"
+hash = "sha256:604af90687309df2285f4ec283b961e2fc5f2aaef29f941761fc2bfb15645c7b"
 layers = []
 
 [sections.initramfs]
@@ -463,7 +463,7 @@ type = "path"
 path = "../../user/std-bin"
 
 [sections.rootfs]
-hash = "sha256:f386b6fe518b4c98640163cbdacc740ef04b82ce96a50eda055c1193f6d66858"
+hash = "sha256:46891f83ae7edb05c8ca9c1c7d77007fe72c7fa5543229132606520e0aea6817"
 
 [[sections.rootfs.layers]]
 kind = "script"
@@ -1223,7 +1223,7 @@ path = "../../user/std-bin"
 kind = "cargo"
 bin = "clock"
 to = "/bin/clock"
-hash = "sha256:c0df7c02bc7b2430948bd2d0ce5b0fa55ce26974f56043a0c4e95c6db45f99cc"
+hash = "sha256:b0900f9c8a964648d63f443ba574fb5e1c8cbe7ed0dd4cd5c24aa780ccffa8d2"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -1498,6 +1498,12 @@ type = "path"
 path = "../../user/std-bin"
 
 [[sections.rootfs.layers]]
+kind = "app"
+source = ".scarlet/cache/git/be620600662a4ab7/app.toml"
+to = "/applications/kureha-code.app"
+hash = "sha256:8bd129c8fa890342c5839f90ab0eaea08f6eb66bea04ce3ac7ec031f0dfbe5b0"
+
+[[sections.rootfs.layers]]
 kind = "archive"
 to = "/systems/linux-aarch64"
 format = "tar-zst"
@@ -1655,9 +1661,20 @@ url = "https://github.com/petitstrawberry/blitz"
 rev = "c26e20dfff971941486ca9f50c8dcd332ec404da"
 
 [[sections.rootfs.layers]]
+kind = "cargo"
+package = "resonara"
+bin = "resonara"
+to = "/bin/resonara"
+hash = "sha256:a0a58a7c81d881da9d73a7c9fa5cf52fa33951ed51350df5b9270e508c802e30"
+
+[sections.rootfs.layers.source]
+type = "path"
+path = ".scarlet/cache/git/db99e5104faa6c7a"
+
+[[sections.rootfs.layers]]
 kind = "script"
 to = "/usr/lib/clap"
-hash = "sha256:6db66b54f652c0e59abb815835f3a0ce7e24cd39c1f222edb6fefa051de08198"
+hash = "sha256:662eaf3cf1f63dd82be2e77526af97b45b05526c1e47a9e5ce31e1c9ebfcd566"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -1675,7 +1692,7 @@ path = ".scarlet/cache/git/1d707eff8bef4cad/bundle/build-aarch64.sh"
 [[sections.rootfs.layers]]
 kind = "script"
 to = "/"
-hash = "sha256:0ef2ed311eac15ee27ed2b3eb2b39c45299c7c61384044d12b915e704b3eaf64"
+hash = "sha256:7093700b207e36b10813708e500f2a363921508b55164e1746aa622691252cc6"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -1692,29 +1709,3 @@ hash = "sha256:bcd6c090278c3ff8ce20be4f225a33cd0b0837cb90f37f1240444bc22b7dc320"
 type = "archive"
 url = "https://github.com/petitstrawberry/scarlet-rust-nix/releases/download/v0.1.0-dev.825856ca4819/native-rust-aarch64-v0.1.0-dev.825856ca4819.tar.zst"
 sha256 = "sha256:bcd6c090278c3ff8ce20be4f225a33cd0b0837cb90f37f1240444bc22b7dc320"
-
-[[sections.rootfs.layers]]
-kind = "cargo"
-package = "resonara"
-bin = "resonara"
-to = "/bin/resonara"
-hash = "sha256:a0a58a7c81d881da9d73a7c9fa5cf52fa33951ed51350df5b9270e508c802e30"
-
-[sections.rootfs.layers.source]
-type = "path"
-path = "../../../resonara"
-
-[[sections.rootfs.layers]]
-kind = "script"
-to = "/usr/lib/clap"
-hash = "sha256:0fac3897c3fd959d4dee2a66458e12d1de6962319a9450826d4867fd89a380c6"
-
-[sections.rootfs.layers.source]
-type = "path"
-path = "../../../resonara/scripts/scarlet-plugins-aarch64.sh"
-
-[[sections.rootfs.layers]]
-kind = "app"
-source = "../../../kureha-code/app.toml"
-to = "/applications/kureha-code.app"
-hash = "sha256:38375d68bdefcf7852dafa7960ae47160bae44920c980094beca56f5f57ed3d4"
