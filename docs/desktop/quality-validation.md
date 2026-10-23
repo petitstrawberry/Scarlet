@@ -263,3 +263,33 @@ tests passed, with native shell/SWS compilation. The final native GUI matrix is
 pending at the user's requested Mac handoff. The cloud checkout also preserves
 an uncommitted, incomplete TextDocument rewrite; it is not part of the published
 UI revision and has no after-benchmark or passing-build claim.
+
+
+## Kureha selection and workbench refinement — 2026-10-23
+
+The desktop bundle pins published Kureha `b91abc8297bc373ce5e3617323cbd5cdef3d9403`,
+which uses published ScarletUI `8fb4c6715379e18b7266764f748ff0ba14602dc6`.
+No sibling bundle override or local Cargo patch is needed.
+
+TextView now retains committed scroll offsets across intermediate parent
+measurements and suppresses hover requests during selection drags. The mounted
+Kureha test preserves document identity, geometry and scroll during selection,
+position-status updates, and Find opening/closing. macOS forward/reverse drags
+and Scarlet native selection around lines 132–146 retained their display position.
+Find overlays the document instead of reducing its height. The borderless editor,
+softened dark colors and compact fixed-density minimap use the same interface
+on both platforms.
+
+The host suite passed 56 library and 26 application tests; the optional real
+rust-analyzer application integration passed separately. That server ran on macOS;
+no language-server executable is bundled for Scarlet. Native QEMU interaction
+verified /bin/sh in a real PTY and plain `ls` with the service’s initially absent
+PATH. The backend supplies a default only when PATH is missing or empty.
+
+The native `.app` build and the user’s full command both completed successfully:
+`cargo scarlet image --project projects/aarch64-limine-full --release`.
+Actual screenshot/input/log evidence is in `artifacts/kureha-code-20261023/`,
+including `selection-find-overlay-macos.png`, `native-refinement-final/` and
+`native-terminal-path-final/`. `selection-full-image-final.log` records the
+published-source image build. Owned QEMU staging/images were removed after
+preserving evidence; live host windows used by the user were retained.
