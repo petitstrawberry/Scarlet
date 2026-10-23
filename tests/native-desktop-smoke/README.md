@@ -4,7 +4,10 @@ This harness runs the actual AArch64 kernel, bootstrap init, service manager,
 SBUS daemon, SWS, the actual global-menu shell, Files picker service and a desktop application under QEMU TCG.
 It uses a small initramfs and a 64 MiB Limine boot image; it does **not** build or
 validate the full desktop distribution image. The guest has 2 GiB RAM, two virtual
-CPUs, virtio keyboard/tablet/GPU and no network device. All documents are generated
+CPUs, virtio keyboard/tablet/GPU and no network device. Pass `--memory 4G` or
+`--memory 8G` explicitly for larger fixtures; the exact RAM setting is recorded
+in `commands.json`. Compiler acceptance uses 4 GiB because its diskless
+initramfs also retains the complete toolchain and source dependencies in RAM. All documents are generated
 fixtures. The default run lasts five minutes and shuts down its own QEMU process.
 
 Prerequisites: the supported Scarlet Rust toolchain (26d00a8 or newer), native

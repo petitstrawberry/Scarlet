@@ -20,6 +20,7 @@ def main():
     for name in ["kernel", "staging", "output", "limine-plugin", "qemu", "firmware-code", "firmware-vars"]:
         parser.add_argument(f"--{name}", type=Path, required=True)
     parser.add_argument("--duration", type=int, default=300, help="total runtime, 15–900 seconds")
+    parser.add_argument("--memory", choices=["2G", "4G", "8G"], default="2G", help="guest RAM; large compiler fixtures may need 4G")
     parser.add_argument("--screenshot-after", type=int, default=60)
     parser.add_argument("--program", default="/bin/prepare-desktop", help="absolute guest bootstrap program")
     parser.add_argument("--expect-marker", help="console fixture success line; uses the existing loader smoke monitor")
@@ -53,7 +54,7 @@ def main():
     control = output / "control.sock"
     control.unlink(missing_ok=True)
     command = [str(args.qemu.resolve()), "-machine", "virt,gic-version=3,acpi=off", "-cpu", "max",
-               "-m", "2G", "-accel", "tcg", "-smp", "2", "-no-reboot", "-display", "none",
+               "-m", args.memory, "-accel", "tcg", "-smp", "2", "-no-reboot", "-display", "none",
                "-monitor", "none", "-serial", "stdio",
                "-drive", f"if=pflash,format=raw,unit=0,file={args.firmware_code.resolve()},readonly=on",
                "-drive", f"if=pflash,format=raw,unit=1,file={variables}",
