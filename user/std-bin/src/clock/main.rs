@@ -79,29 +79,109 @@ struct ClockApp {
 }
 
 impl ClockApp {
-    fn mode_button(&self, index: usize, title: &str) -> impl View + Clone + use<> {
-        let palette = ColorPalette::default();
-        let selected = self.mode.get() == index;
-        let mode = self.mode.clone();
-        Button::new(title)
-            .font_size(13.0)
-            .background_color(if selected {
-                palette.surface_variant()
-            } else {
-                palette.background()
-            })
-            .text_color(if selected {
-                palette.primary()
-            } else {
-                palette.text_secondary()
-            })
-            .border_color(if selected {
-                palette.primary()
-            } else {
-                Color::CLEAR
-            })
-            .on_click(move || mode.set(index))
-            .frame(f32::INFINITY, 36.0)
+    fn select_mode(&self, index: usize) {
+        self.mode.set(index);
+        self.focused.set(true);
+    }
+
+    fn menu_item(
+        &self,
+        id: &str,
+        title: &str,
+        shortcut: &str,
+        enabled: bool,
+        action: impl Fn(&Self) + Send + Sync + 'static,
+    ) -> MenuEntry {
+        // Like Notepad and Files, callbacks only capture thread-safe app state.
+        // CanvasView's UI-thread Rc is constructed separately in clock_content.
+        let app = self.clone();
+        MenuEntry::Item(
+            MenuItemModel::new(id, title)
+                .shortcut(shortcut)
+                .enabled(enabled)
+                .on_activate(Arc::new(move || action(&app))),
+        )
+    }
+
+    fn timer_finished(&self) -> bool {
+        self.timer.get().phase(monotonic_time()) == TimerPhase::Finished
+    }
+
+    fn window_title(&self) -> &'static str {
+        if self.timer_finished() {
+            "Timer Finished — Clock"
+        } else {
+            "Clock"
+        }
+    }
+
+    fn menu_bar(&self) -> MenuBarModel {
+        let modes = [
+            ("clock", "Clock", "Ctrl+1"),
+            (
+                "timer",
+                if self.timer_finished() {
+                    "Timer (Finished)"
+                } else {
+                    "Timer"
+                },
+                "Ctrl+2",
+            ),
+            ("stopwatch", "Stopwatch", "Ctrl+3"),
+        ];
+        MenuBarModel::new(vec![
+            MenuItemModel::new("view", "View").children(
+                modes
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (id, title, shortcut))| {
+                        self.menu_item(id, title, shortcut, self.mode.get() != index, move |app| {
+                            app.select_mode(index);
+                        })
+                    })
+                    .collect(),
+            ),
+            MenuItemModel::new("display", "Display").children(vec![
+                MenuEntry::Item(
+                    MenuItemModel::new("background", "Background").children(
+                        presets()
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, (_, title))| {
+                                self.menu_item(
+                                    &format!("background-{index}"),
+                                    title,
+                                    "",
+                                    self.appearance.get() != index,
+                                    move |app| {
+                                        app.appearance.set(index);
+                                    },
+                                )
+                            })
+                            .collect(),
+                    ),
+                ),
+                MenuEntry::Item(
+                    MenuItemModel::new("opacity", "Opacity").children(
+                        [0, 25, 50, 75, 100]
+                            .into_iter()
+                            .map(|percent| {
+                                let alpha = percent as f32 / 100.0;
+                                self.menu_item(
+                                    &format!("opacity-{percent}"),
+                                    &format!("{percent}%"),
+                                    "",
+                                    self.alpha.get() != alpha,
+                                    move |app| {
+                                        app.alpha.set(alpha);
+                                    },
+                                )
+                            })
+                            .collect(),
+                    ),
+                ),
+            ]),
+        ])
     }
 
     fn bg_color(&self) -> Color {
@@ -148,8 +228,7 @@ impl ClockApp {
                 let KeyCode::Char(digit) = keycode else {
                     unreachable!()
                 };
-                self.mode.set((digit as u8 - b'1') as usize);
-                self.focused.set(true);
+                self.select_mode((digit as u8 - b'1') as usize);
             }
             KeyCode::Space if self.mode.get() == 1 => self.timer_action(),
             KeyCode::Space if self.mode.get() == 2 => self.stopwatch.update(|watch| {
@@ -189,8 +268,9 @@ impl ClockApp {
         let editor = if phase == TimerPhase::Ready {
             Either::A(
                 vstack! {
-                    Text::new("Duration · hh:mm:ss").font_size(12.0),
+                    Text::new("Duration · hh:mm:ss").font_size(13.0),
                     TextField::new(self.duration_input.clone())
+                        .font_size(13.0)
                         .placeholder("00:05:00")
                         .on_submit(move || submit_app.timer_action())
                         .frame_width(200.0),
@@ -200,7 +280,7 @@ impl ClockApp {
         } else {
             Either::B(
                 Text::new("Reset to change duration")
-                    .font_size(12.0)
+                    .font_size(13.0)
                     .color(palette.text_secondary())
                     .frame_height(58.0),
             )
@@ -215,7 +295,7 @@ impl ClockApp {
         } else {
             Either::B(
                 Text::from_state(self.error.clone())
-                    .font_size(12.0)
+                    .font_size(13.0)
                     .color(palette.error()),
             )
         };
@@ -228,16 +308,15 @@ impl ClockApp {
             editor,
             error,
             hstack! {
-                Button::new(action).background_color(palette.primary()).text_color(palette.text_inverse())
-                    .on_click(move || action_app.timer_action()).frame(128.0, 40.0),
-                Button::new("Reset").on_click(move || {
+                Button::new(action).font_size(13.0).background_color(palette.primary()).text_color(palette.text_inverse())
+                    .on_click(move || action_app.timer_action()).frame(88.0, 30.0),
+                Button::new("Reset").font_size(13.0).on_click(move || {
                     reset_app.timer.update(Timer::reset);
                     reset_app.error.set(String::new());
-                }).frame(100.0, 40.0),
-            }.spacing(12.0),
+                }).frame(72.0, 30.0),
+            }.spacing(8.0),
             Spacer::new(),
-            Text::new("Keep Clock open to finish the timer.").font_size(11.0).color(palette.text_secondary()),
-            Text::new("Ctrl+Space  start / pause    Ctrl+R  reset").font_size(10.0).color(palette.text_secondary()),
+            Text::new("Keep Clock open to finish the timer.").font_size(13.0).color(palette.text_secondary()),
         }.spacing(6.0).padding(14.0).frame(f32::INFINITY, f32::INFINITY)
     }
 
@@ -268,14 +347,13 @@ impl ClockApp {
             Text::new(format!("{}.{:01}", format_seconds(elapsed.as_secs()), elapsed.subsec_millis() / 100)).font_size(38.0),
             Spacer::new().frame_height(20.0),
             hstack! {
-                Button::new(action).background_color(palette.primary()).text_color(palette.text_inverse()).on_click(move || action_state.update(|watch| {
+                Button::new(action).font_size(13.0).background_color(palette.primary()).text_color(palette.text_inverse()).on_click(move || action_state.update(|watch| {
                     let now = monotonic_time();
                     if watch.running() { watch.pause(now); } else { watch.start(now); }
-                })).frame(128.0, 40.0),
-                Button::new("Reset").on_click(move || reset_state.update(Stopwatch::reset)).frame(100.0, 40.0),
-            }.spacing(12.0),
+                })).frame(88.0, 30.0),
+                Button::new("Reset").font_size(13.0).on_click(move || reset_state.update(Stopwatch::reset)).frame(72.0, 30.0),
+            }.spacing(8.0),
             Spacer::new(),
-            Text::new("Ctrl+Space  start / pause    Ctrl+R  reset").font_size(10.0).color(palette.text_secondary()),
         }.spacing(8.0).padding(18.0).frame(f32::INFINITY, f32::INFINITY)
     }
 
@@ -295,20 +373,18 @@ impl ClockApp {
         } else {
             Either::B(
                 Text::new("System time unavailable")
+                    .font_size(13.0)
                     .color(if light { Color::BLACK } else { Color::WHITE })
                     .frame(f32::INFINITY, f32::INFINITY),
             )
         };
         vstack! {
             content,
-            hstack! {
-                Text::new(zone_label()).font_size(11.0).color(if light { Color::rgb(50, 50, 65) } else { Color::rgb(215, 215, 225) }),
-                Spacer::new(),
-                Button::new("Appearance").font_size(12.0).background_color(Color::TRANSPARENT)
-                    .text_color(if light { Color::rgb(50, 50, 65) } else { Color::rgb(215, 215, 225) })
-                    .on_click(|| open_window("settings")).frame(94.0, 30.0),
-            }.spacing(8.0).padding(12.0).frame(f32::INFINITY, 54.0),
-        }.frame(f32::INFINITY, f32::INFINITY)
+            Text::new(zone_label()).font_size(13.0)
+                .color(if light { Color::rgb(50, 50, 65) } else { Color::rgb(215, 215, 225) })
+                .padding(8.0),
+        }
+        .frame(f32::INFINITY, f32::INFINITY)
     }
 }
 
@@ -322,21 +398,9 @@ impl Application for ClockApp {
             2 => Either3::C(self.stopwatch_content()),
             _ => Either3::A(self.clock_content()),
         };
-        let timer_finished = self.timer.get().phase(monotonic_time()) == TimerPhase::Finished;
         let key_app = self.clone();
         scenes! {
-            Window::new("Clock", vstack! {
-                vstack! {
-                    hstack! {
-                        self.mode_button(0, "Clock"),
-                        self.mode_button(1, "Timer"),
-                        self.mode_button(2, "Stopwatch"),
-                    }.spacing(4.0).frame_width(f32::INFINITY),
-                    Text::new(if timer_finished && mode != 1 { "Timer finished · open Timer" } else { "Ctrl+1  Clock    Ctrl+2  Timer    Ctrl+3  Stopwatch" }).font_size(10.0)
-                        .color(if timer_finished && mode != 1 { palette.primary() } else { palette.text_secondary() }),
-                }.spacing(4.0).padding(10.0).frame_width(f32::INFINITY).background(palette.background()),
-                content,
-            }.frame(f32::INFINITY, f32::INFINITY)
+            Window::new(self.window_title(), content.frame(f32::INFINITY, f32::INFINITY)
                 .focusable(self.focused.clone())
                 .on_event_capture(move |event| match event {
                     Event::Keyboard(key) => key_app.handle_key(*key),
@@ -345,48 +409,15 @@ impl Application for ClockApp {
                 .background_color(if mode == 0 { self.bg_color() } else { palette.background() })
                 .opaque(mode != 0)
                 .app_id("org.scarlet-os.desktop.clock")
-                .menu_bar(MenuBarModel::new(vec![MenuItemModel::app().children(vec![MenuEntry::Item(
-                    MenuItemModel::new("settings", "Settings...")
-                        .on_activate(Arc::new(|| open_window("settings"))),
-                )])]))
-                .size(Size::new(360.0, 450.0))
-                .min_size(Size::new(340.0, 420.0)),
-            Window::new("Clock Settings", settings_content(self.clone()))
-                .scene_key("settings")
-                .open_at_launch(false)
-                .app_id("org.scarlet-os.desktop.clock.settings")
-                .size(Size::new(320.0, 300.0))
-                .min_size(Size::new(300.0, 280.0)),
+                .menu_bar(self.menu_bar())
+                .size(Size::new(360.0, 380.0))
+                .min_size(Size::new(340.0, 320.0)),
         }
     }
 
     fn debug_logging(&self) -> bool {
         false
     }
-}
-
-fn settings_content(app: ClockApp) -> impl View + Clone {
-    let current_alpha = app.alpha.get();
-    vstack! {
-        Text::new("Clock appearance").font_size(18.0),
-        hstack! {
-            Text::new("Background").font_size(13.0),
-            Spacer::new(),
-            Select::new(presets().iter().map(|(_, label)| (*label).into()).collect(), app.appearance.clone()).width(150.0),
-        }.spacing(12.0).frame(f32::INFINITY, 34.0),
-        Rectangle::new().fill(app.bg_color()).frame(f32::INFINITY, 32.0),
-        hstack! {
-            Text::new("Opacity").font_size(13.0),
-            Spacer::new(),
-            Text::new(format!("{}%", (current_alpha * 100.0) as u32)).font_size(13.0).color(ColorPalette::default().text_secondary()),
-        }.frame(f32::INFINITY, 20.0),
-        Slider::new(app.alpha.clone()).min(0.0).max(1.0).frame(f32::INFINITY, 26.0),
-        Spacer::new(),
-        hstack! {
-            Spacer::new(),
-            Button::new("Done").on_click(|| dismiss_window("settings")).frame(80.0, 32.0),
-        }.frame(f32::INFINITY, 32.0),
-    }.spacing(10.0).alignment(Alignment::Leading).padding(16.0).frame(f32::INFINITY, f32::INFINITY)
 }
 
 fn draw_clock(canvas: &mut Canvas, w: u32, h: u32, light: bool) {
@@ -592,6 +623,143 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use scarlet_ui::event::KeyModifiers;
+
+    fn find_menu_item(items: &[MenuItemModel], id: &str) -> Option<MenuItemModel> {
+        for item in items {
+            if item.id() == id {
+                return Some(item.clone());
+            }
+            for entry in item.children_value() {
+                if let MenuEntry::Item(child) = entry {
+                    if let Some(found) = find_menu_item(std::slice::from_ref(child), id) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn native_menus_change_modes_and_display_without_resetting_utilities() {
+        use scarlet_ui::menu_model::{
+            invoke_menu_callback, register_menu_callbacks, unregister_menu_callbacks,
+        };
+        const WINDOW: u32 = 0xc10c;
+        struct Registration;
+        impl Drop for Registration {
+            fn drop(&mut self) {
+                unregister_menu_callbacks(WINDOW);
+            }
+        }
+        let _registration = Registration;
+        let app = ClockApp::default();
+        app.alpha.set(1.0);
+        app.duration_input.set("00:05:00".into());
+        app.timer_action();
+        app.stopwatch.update(|watch| watch.start(monotonic_time()));
+
+        let activate = |id: &str, changed: &dyn Fn() -> bool| {
+            let menu = app.menu_bar();
+            assert!(find_menu_item(menu.items(), id).unwrap().enabled_value());
+            register_menu_callbacks(WINDOW, &menu);
+            assert!(invoke_menu_callback(WINDOW, id));
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !changed() {
+                assert!(std::time::Instant::now() < deadline, "menu callback: {id}");
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                !find_menu_item(app.menu_bar().items(), id)
+                    .unwrap()
+                    .enabled_value()
+            );
+        };
+        app.focused.set(false);
+        activate("timer", &|| app.mode.get() == 1 && app.focused.get());
+        assert_eq!(
+            find_menu_item(app.menu_bar().items(), "timer")
+                .unwrap()
+                .shortcut_value(),
+            Some("Ctrl+2")
+        );
+        activate("background-5", &|| app.appearance.get() == 5);
+        activate("opacity-50", &|| app.alpha.get() == 0.5);
+        app.focused.set(false);
+        activate("stopwatch", &|| app.mode.get() == 2 && app.focused.get());
+        activate("clock", &|| app.mode.get() == 0);
+        assert_eq!(
+            app.bg_color(),
+            Color::rgba_f32(presets()[5].0.r, presets()[5].0.g, presets()[5].0.b, 0.5)
+        );
+        assert_eq!(app.timer.get().phase(monotonic_time()), TimerPhase::Running);
+        assert!(app.stopwatch.get().running());
+
+        app.timer.update(|timer| {
+            *timer = Timer::new(Duration::from_secs(1));
+            timer.start(Duration::ZERO);
+            timer.pause(Duration::from_secs(2));
+        });
+        assert_eq!(app.window_title(), "Timer Finished — Clock");
+        assert_eq!(
+            find_menu_item(app.menu_bar().items(), "timer")
+                .unwrap()
+                .title(),
+            "Timer (Finished)"
+        );
+        app.timer.update(Timer::reset);
+        assert_eq!(app.window_title(), "Clock");
+        assert_eq!(
+            find_menu_item(app.menu_bar().items(), "timer")
+                .unwrap()
+                .title(),
+            "Timer"
+        );
+    }
+
+    #[test]
+    fn single_window_keeps_only_primary_controls_at_compact_size() {
+        use scarlet_ui::SceneBuilder;
+        use scarlet_ui::element::{Element, LayoutConstraints, RenderElement};
+        use scarlet_ui::views::ButtonRenderObject;
+
+        fn buttons(element: &dyn Element, labels: &mut Vec<String>) {
+            if let Some(button) = element
+                .as_any()
+                .downcast_ref::<RenderElement<Button, ButtonRenderObject>>()
+            {
+                assert_eq!(button.view().get_font_size(), 13.0);
+                assert!(button.bounds().size.height <= 30.0);
+                labels.push(button.view().label().to_owned());
+            }
+            for child in element.children() {
+                buttons(child.as_ref(), labels);
+            }
+        }
+
+        let app = ClockApp::default();
+        app.duration_input.set("00:05:00".into());
+        for mode in 0..3 {
+            app.select_mode(mode);
+            let mut builder = SceneBuilder::new();
+            app.scenes().build(&mut builder);
+            let windows = builder.into_declarations();
+            assert_eq!(windows.len(), 1, "no secondary settings window");
+            assert!(windows[0].opens_at_launch);
+            let mut element = windows[0].view.create_element();
+            element.layout(LayoutConstraints::tight(340.0, 320.0));
+            let mut labels = Vec::new();
+            buttons(element.as_ref(), &mut labels);
+            assert_eq!(
+                labels,
+                if mode == 0 {
+                    Vec::<String>::new()
+                } else {
+                    vec!["Start".to_owned(), "Reset".to_owned()]
+                }
+            );
+        }
+    }
 
     fn shortcut(app: &ClockApp, keycode: KeyCode) -> bool {
         app.handle_key(KeyEvent::Pressed {
