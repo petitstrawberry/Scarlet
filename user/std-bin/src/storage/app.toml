@@ -1,0 +1,15 @@
+# Storage's native app recipe, owned alongside its main and resources.
+[app]
+id = "org.scarlet-os.desktop.storage"
+slug = "storage"
+name = "Storage"
+exec = "bin/storage"
+icon = "resources/icon.svg"
+
+[build]
+kind = "script"
+source = "install"
+
+[[resources]]
+source = "resources"
+to = "resources"

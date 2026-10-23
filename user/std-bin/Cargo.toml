@@ -133,6 +133,10 @@ name = "files"
 path = "src/filer/main.rs"
 
 [[bin]]
+name = "storage"
+path = "src/storage/main.rs"
+
+[[bin]]
 name = "scarlet-shell"
 path = "src/scarlet_shell/main.rs"
 

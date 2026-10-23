@@ -48,3 +48,20 @@ returns `None`, and `can_read` returns `false`.
 output controls, with a client-written PCM ring. The SAS client's `read_frames`
 is the playback-consumed counter, not captured samples. Kernel/driver capture,
 SAS protocol and client support are required before recorder implementation.
+
+## Storage — 2026-10-23
+
+Storage adds a read-only browser for recursive logical file sizes, with ranked
+bars, cached folder drilldown, cancellation and partial-scan reporting. Its own
+main lives at `user/std-bin/src/storage/main.rs`; the desktop bundle installs
+`/applications/storage.app` with a dedicated icon. The recipe and resources live
+beside the application, using the SDK's supported script packaging interface.
+It counts file lengths, not allocated blocks or free disk space, and offers no
+delete operation. Symlinks are listed without following their targets.
+
+Ten model tests cover scan bounds, cancellation, symlinks, logical sparse/hard-link
+sizes, stale results and navigation. A native AArch64 `.app` build passed. Actual
+Scarlet QEMU operations inspected a 326 KiB/14-file fixture, entered a 192 KiB/3-file
+subfolder, returned to its parent and used File → Choose Folder to inspect a
+128 KiB/4-file folder. Evidence is in `artifacts/kureha-workbench-20261023/storage-native/`;
+final script-package validation is in `artifacts/storage-20261023/`.

@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# cargo-scarlet's supported script recipe: TARGET OUTPUT_FILE (as in Cadence).
+set -euo pipefail
+if [ "$#" -ne 2 ]; then
+  printf 'Usage: %s TARGET OUTPUT_FILE\n' "$0" >&2
+  exit 2
+fi
+storage_target="$1"
+case "$storage_target" in
+  aarch64-unknown-scarlet|riscv64gc-unknown-scarlet) ;;
+  *) printf 'Unsupported Scarlet target: %s\n' "$storage_target" >&2; exit 2 ;;
+esac
+case "$2" in
+  /*) storage_destination="$2" ;;
+  *) storage_destination="$PWD/$2" ;;
+esac
+storage_recipe="$(cd "$(dirname "$0")" && pwd)"
+storage_package="$(cd "$storage_recipe/../.." && pwd)"
+storage_repo="$(cd "$storage_package/../.." && pwd)"
+# Reuse the userspace workspace's normal Cargo cache, without copying sources.
+storage_target_dir="${CARGO_TARGET_DIR:-$storage_repo/.cargo/target}"
+case "$storage_target_dir" in
+  /*) ;;
+  *) storage_target_dir="$PWD/$storage_target_dir" ;;
+esac
+cd "$storage_package"
+storage_seed="$storage_target_dir/storage-link/$storage_target/libstorage_link_seed.so"
+python3 "$storage_recipe/native-link.py" seed "$storage_target" "$storage_seed"
+# Script recipes receive no profile argument; like Cadence, package release builds.
+cargo rustc --locked --release --manifest-path "$storage_package/Cargo.toml" \
+  --package scarlet-std-bin --bin storage --target "$storage_target" \
+  --target-dir "$storage_target_dir" -- \
+  -C link-arg=-pie -C link-arg=--dynamic-linker=/bin/scarlet-ld \
+  -C link-arg=--export-dynamic -C link-arg=--as-needed \
+  -C "link-arg=$storage_seed" -C link-arg=--unresolved-symbols=ignore-all \
+  -C link-arg=-z -C link-arg=now
+python3 "$storage_recipe/native-link.py" audit "$storage_target" \
+  "$storage_target_dir/$storage_target/release/storage"
+mkdir -p "$(dirname "$storage_destination")"
+install -m 755 "$storage_target_dir/$storage_target/release/storage" "$storage_destination"
+python3 "$storage_recipe/native-link.py" audit "$storage_target" "$storage_destination"
+# The SDK validates the staged native ELF and publishes the complete .app atomically.
