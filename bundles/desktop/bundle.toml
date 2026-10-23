@@ -386,5 +386,5 @@ to = "/bin/applications"
 # Kureha Code owns its native app recipe and resources.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/kureha-code.git", rev = "6c6fc53e4137f4729fb6f6883efe44c27d2efc24" }
+source = { git = "https://github.com/petitstrawberry/kureha-code.git", rev = "2ba969589d5c9ada2f54056b331b2cb16cc87cfd" }
 bundle = "platforms/scarlet/bundle.toml"

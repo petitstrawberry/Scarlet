@@ -5,7 +5,7 @@ hash = "sha256:702bd4aeee5a17b9d5e743b9e6641d9b7c98cda46a6f39060d4512c48902494a"
 layers = []
 
 [sections.disk]
-hash = "sha256:185cfd7675b2e5067a50075d5d15d151e87114ba7fad43ff0334e33826e059ea"
+hash = "sha256:0b3b24a43ca685c3cf9622b0d17c8eba6ab578b690a0865bc6e71539842d35b2"
 layers = []
 
 [sections.initramfs]
@@ -463,7 +463,7 @@ type = "path"
 path = "../../user/std-bin"
 
 [sections.rootfs]
-hash = "sha256:5c7875cce6a03636c05d250290bfd202a870d4a74d5b2a37c9edd3976182f605"
+hash = "sha256:d5fb5eda8439b522e7c3dfdddc9ab32d0db3791e40c3de3589b85d7f5b00692f"
 
 [[sections.rootfs.layers]]
 kind = "script"
@@ -1507,7 +1507,7 @@ path = "../../user/std-bin"
 kind = "app"
 source = ".scarlet/cache/git/be620600662a4ab7/app.toml"
 to = "/applications/kureha-code.app"
-hash = "sha256:3b35e3df3335fec56597b0c0aae3377234103b0f5976820ca7fdffdf2690b02b"
+hash = "sha256:0275f7f17e560d5c9245e678d8cd9bbf4edfbcfd859e3cb78197181d9d3b7fb9"
 
 [[sections.rootfs.layers]]
 kind = "archive"
@@ -1698,7 +1698,7 @@ path = ".scarlet/cache/git/1d707eff8bef4cad/bundle/build-aarch64.sh"
 [[sections.rootfs.layers]]
 kind = "script"
 to = "/"
-hash = "sha256:00f974212909a6f03b88083be1ebdb21d10aca258e9d1263aef3affd85645678"
+hash = "sha256:e1d02afc11bced08961825704d9adc134eacb8a5c5b1fd2aea9c0abd3ecd735f"
 
 [sections.rootfs.layers.source]
 type = "path"
