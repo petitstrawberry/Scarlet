@@ -377,9 +377,11 @@ mod panel {
                 }
             }
             // Posture and keyboard hotplug updates also hide an already-open panel.
-            let should_show = context.active()
-                && environment.should_auto_show_input_panel()
-                && dismissed != Some(context.generation);
+            let should_show = super::keyboard_input::should_show(
+                context,
+                environment.should_auto_show_input_panel(),
+                dismissed,
+            );
             if should_show != visible {
                 if context.active() {
                     window

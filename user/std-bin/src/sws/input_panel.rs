@@ -1,10 +1,12 @@
 //! Input-panel ownership and activation lifetime, independent of IME selection.
 use sws_protocol::input_panel::Context;
+use sws_protocol::text_input_content_hints::NO_AUTO_SOFTWARE_KEYBOARD;
 #[derive(Clone, Copy, Debug)]
 pub struct Panel {
     pub provider: Option<(usize, u32)>,
     pub context: Context,
     pub visible: bool,
+    explicit_show: bool,
 }
 impl Panel {
     pub const fn new() -> Self {
@@ -18,6 +20,7 @@ impl Panel {
                 content_purpose: 0,
             },
             visible: false,
+            explicit_show: false,
         }
     }
     pub fn register(&mut self, client: usize, window: u32) -> bool {
@@ -44,7 +47,8 @@ impl Panel {
     }
     pub fn update(&mut self, mut context: Context) -> bool {
         let new_activation = (context.context_id, context.window_id)
-            != (self.context.context_id, self.context.window_id);
+            != (self.context.context_id, self.context.window_id)
+            || (context.content_hint ^ self.context.content_hint) & NO_AUTO_SOFTWARE_KEYBOARD != 0;
         context.generation = if new_activation {
             self.context.generation.wrapping_add(1)
         } else {
@@ -56,8 +60,28 @@ impl Panel {
         self.context = context;
         if new_activation {
             self.visible = false;
+            self.explicit_show = false;
         }
         true
+    }
+    /// Provider metadata includes an explicit-show override for this activation.
+    /// Raw `context` retains the editor's preference for IME and later focus.
+    pub fn provider_context(&self) -> Context {
+        let mut delivered = self.context;
+        if self.explicit_show {
+            delivered.content_hint &= !NO_AUTO_SOFTWARE_KEYBOARD;
+        }
+        delivered
+    }
+    /// The caller must authenticate the editor. Explicit requests override only
+    /// provider snapshots; context/window or auto-keyboard policy changes reset it.
+    pub fn request_show(&mut self, context_id: u32) -> Option<Context> {
+        if !self.context.active() || self.context.context_id != context_id {
+            return None;
+        }
+        self.context.generation = self.context.generation.wrapping_add(1);
+        self.explicit_show = true;
+        Some(self.provider_context())
     }
     pub fn accepts(&self, client: usize, context: u32, generation: u32) -> bool {
         self.provider.is_some_and(|owner| owner.0 == client)
@@ -264,6 +288,72 @@ mod tests {
             window_id: id + 10,
             ..Context::default()
         }
+    }
+    #[test]
+    fn automatic_keyboard_policy_changes_invalidate_keys_but_keep_text_context() {
+        let mut panel = Panel::new();
+        panel.register(1, 50);
+        panel.update(editor(3));
+        let initial = panel.context;
+        panel.show(1, 3, initial.generation, true);
+        let mut suppressed = editor(3);
+        suppressed.content_hint = NO_AUTO_SOFTWARE_KEYBOARD;
+        assert!(panel.update(suppressed));
+        assert!(!panel.visible);
+        assert!(panel.context.active());
+        assert_eq!(panel.context.context_id, initial.context_id);
+        assert!(!panel.accepts(1, 3, initial.generation));
+        let generation = panel.context.generation;
+        assert!(panel.accepts(1, 3, generation));
+        assert!(!panel.update(suppressed));
+        assert!(panel.update(editor(3)));
+        assert!(!panel.accepts(1, 3, generation));
+        assert_eq!(panel.context.content_hint, 0);
+    }
+
+    #[test]
+    fn explicit_keyboard_show_only_clears_the_delivered_suppression_hint() {
+        let mut panel = Panel::new();
+        panel.register(1, 50);
+        assert!(panel.request_show(0).is_none());
+        let mut suppressed = editor(3);
+        suppressed.content_hint = NO_AUTO_SOFTWARE_KEYBOARD
+            | sws_protocol::text_input_content_hints::SENSITIVE_DATA;
+        panel.update(suppressed);
+        let generation = panel.context.generation;
+        assert!(panel.request_show(4).is_none());
+        assert_eq!(panel.context.generation, generation);
+        let delivered = panel.request_show(3).unwrap();
+        assert_eq!(
+            delivered.content_hint,
+            sws_protocol::text_input_content_hints::SENSITIVE_DATA
+        );
+        assert_eq!(panel.context.content_hint, suppressed.content_hint);
+        assert!(!panel.accepts(1, 3, generation));
+        assert!(panel.show(1, 3, delivered.generation, true));
+        // Ordinary text commits do not immediately dismiss an explicitly opened panel.
+        assert!(!panel.update(suppressed));
+        assert!(panel.visible);
+        // Other metadata changes must retain the explicit override as well.
+        suppressed.content_purpose = sws_protocol::text_input_content_purpose::NUMBER;
+        assert!(panel.update(suppressed));
+        assert_eq!(
+            panel.provider_context().content_hint,
+            sws_protocol::text_input_content_hints::SENSITIVE_DATA
+        );
+        assert_eq!(panel.context.content_hint, suppressed.content_hint);
+        // Changing the per-field policy clears the override even on the same context.
+        let mut allowed = suppressed;
+        allowed.content_hint &= !NO_AUTO_SOFTWARE_KEYBOARD;
+        panel.update(allowed);
+        panel.update(suppressed);
+        assert_eq!(panel.provider_context().content_hint, suppressed.content_hint);
+        // The next focused editor still has its own original policy.
+        panel.update(editor(4));
+        panel.update(suppressed);
+        assert!(!panel.visible);
+        assert_eq!(panel.context.content_hint, suppressed.content_hint);
+        assert_eq!(panel.provider_context().content_hint, suppressed.content_hint);
     }
     #[test]
     fn exclusive_provider_and_stale_keys() {

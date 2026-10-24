@@ -590,6 +590,7 @@ impl CalculatorApp {
                     Text::new("").frame_width((display_width - field_width - 20.0).max(0.0)),
                     Text::new(if hidden_left { "‹" } else { "" }).font_size(14.0).color(palette.text_secondary()).frame_width(10.0),
                     TextView::new(self.expression.clone(), self.selection.clone())
+                        .automatic_software_keyboard(false)
                         .scroll_state(self.expression_scroll.clone())
                         .wrap_mode(WrapMode::None).font_size(16.0).padding(4.0)
                         .background(Color::CLEAR).border_color(Color::CLEAR)
@@ -1324,6 +1325,12 @@ mod tests {
                 .create_element(),
         );
         pipeline.layout_initial();
+        assert!(
+            !pipeline
+                .focused_text_input_state()
+                .expect("expression retains keyboard and IME focus")
+                .automatic_software_keyboard
+        );
         for c in "12+3".chars() {
             pipeline.handle_event(&Event::Keyboard(KeyEvent::Char { c }));
         }
@@ -1336,6 +1343,132 @@ mod tests {
         assert_eq!(app.result_text(), "17");
         assert_eq!(app.current_value(), Some(17.0));
         assert!(app.history.get().is_empty());
+    }
+
+    #[test]
+    fn expression_keyboard_opt_out_preserves_selection_and_ime_edits() {
+        use scarlet_ui::pipeline::RenderingPipeline;
+        let app = CalculatorApp::new();
+        app.set_expression("12+3".into());
+        app.selection.set(TextSelection {
+            anchor: TextPosition::new(3),
+            caret: TextPosition::new(4),
+        });
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            Window::new("test", app.calculation_view())
+                .decorated(false)
+                .size(Size::new(380.0, 584.0))
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        let input = pipeline.focused_text_input_state().unwrap();
+        assert!(!input.automatic_software_keyboard);
+        assert_eq!((input.anchor_byte, input.cursor_byte), (3, 4));
+        assert!(pipeline.handle_event(&Event::TextInputPreedit {
+            context_id: 1,
+            serial: 1,
+            cursor_byte: 1,
+            anchor_byte: 1,
+            text: "7".into(),
+            spans: vec![],
+        }));
+        assert_eq!(app.expression.get(), "12+3");
+        assert!(pipeline.handle_event(&Event::TextInputCommit {
+            context_id: 1,
+            serial: 2,
+            text: "7".into(),
+        }));
+        assert_eq!(app.expression.get(), "12+7");
+        assert_eq!(app.result_text(), "19");
+        assert!(
+            !pipeline
+                .focused_text_input_state()
+                .unwrap()
+                .automatic_software_keyboard
+        );
+    }
+
+    #[test]
+    fn touch_keypad_taps_survive_focus_sync_and_per_event_scene_rebuilds() {
+        touch_keypad_scene(0, 50);
+    }
+
+    #[test]
+    fn touch_keypad_retains_in_bounds_movement_and_long_release() {
+        for (drift, hold_ms) in [(12, 50), (0, 650), (12, 650)] {
+            touch_keypad_scene(drift, hold_ms);
+        }
+    }
+
+    fn touch_keypad_scene(drift: i32, hold_ms: u64) {
+        use scarlet_ui::element::{Element, RenderElement};
+        use scarlet_ui::event::{TouchChange, TouchFrame, TouchPhase};
+        use scarlet_ui::pipeline::RenderingPipeline;
+        use scarlet_ui::scene::SceneBuilder;
+        use scarlet_ui::views::ButtonRenderObject;
+
+        fn key_center(element: &dyn Element, origin: Point, label: &str) -> Option<Point> {
+            let bounds = element.bounds();
+            let origin = Point::new(origin.x + bounds.origin.x, origin.y + bounds.origin.y);
+            if let Some(button) = element
+                .as_any()
+                .downcast_ref::<RenderElement<Button, ButtonRenderObject>>()
+                && button.view().label() == label
+            {
+                return Some(Point::new(
+                    origin.x + bounds.size.width * 0.5,
+                    origin.y + bounds.size.height * 0.5,
+                ));
+            }
+            element.children().iter().find_map(|child| key_center(child.as_ref(), origin, label))
+        }
+
+        let app = CalculatorApp::new();
+        let mut scenes = SceneBuilder::new();
+        app.scenes().build(&mut scenes);
+        let root = scenes.into_declarations().remove(0).view.create_element();
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.handle_event(&Event::TabletPresentationChanged { active: true });
+        pipeline.render_for_present().unwrap();
+        assert!(!pipeline.focused_text_input_state().unwrap().automatic_software_keyboard);
+
+        for (index, (label, expected)) in [
+            ("7", "7"), ("+", "7+"), ("3", "7+3"), ("=", "7+3"),
+            ("AC", ""), ("2", "2"), ("2", "22"), ("⌫", "2"),
+        ].into_iter().enumerate() {
+            let point = key_center(pipeline.element_tree().root().unwrap(), Point::ZERO, label)
+                .expect("visible keypad key");
+            let before = app.expression.get();
+            for (phase, offset) in [(TouchPhase::Down, 0), (TouchPhase::Move, 20_000_000), (TouchPhase::Up, hold_ms * 1_000_000)] {
+                let time_ns = 1 + index as u64 * 1_000_000_000 + offset;
+                pipeline.handle_event(&Event::TouchFrame(TouchFrame {
+                    seat_id: 1,
+                    serial: time_ns,
+                    time_ns,
+                    changes: vec![TouchChange {
+                        seat_id: 1, serial: time_ns, time_ns, id: 7, phase,
+                        x: point.x as i32 + if phase == TouchPhase::Down { 0 } else { drift }, y: point.y as i32,
+                        pressure: None, touch_major: None,
+                    }],
+                }));
+                // The application syncs text input both after dispatch and after
+                // presentation. Focus changes may rebuild the actual TabView scene.
+                assert!(pipeline.focused_text_input_state().is_none(), "{label}: button takes focus");
+                pipeline.render_for_present().unwrap();
+                assert!(pipeline.focused_text_input_state().is_none(), "{label}: rebuild keeps button focus");
+                if phase != TouchPhase::Up {
+                    assert_eq!(app.expression.get(), before, "{label}: activation waits for Tap");
+                }
+            }
+            assert_eq!(app.expression.get(), expected, "{label}: exactly one Tap after Up");
+            if label == "=" {
+                assert_eq!(app.answer.get(), Some(10.0));
+                assert_eq!(app.history.get().len(), 1);
+            }
+        }
     }
 
     #[test]

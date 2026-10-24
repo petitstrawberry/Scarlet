@@ -1,6 +1,15 @@
 //! Held-key lifetime is independent of the render tree. No UI or OS dependency.
 use sws_protocol::input_panel::Context;
 
+/// Automatic visibility policy, independent of text-input/IME enablement.
+/// Explicit show requests arrive with only the suppression bit cleared.
+pub(super) fn should_show(context: Context, environment_allows: bool, dismissed: Option<u32>) -> bool {
+    context.active()
+        && context.content_hint & sws_protocol::text_input_content_hints::NO_AUTO_SOFTWARE_KEYBOARD == 0
+        && environment_allows
+        && dismissed != Some(context.generation)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Contact {
     pub seat: u32,
@@ -99,6 +108,30 @@ mod tests {
             code: 16,
             modifiers: 1,
         }
+    }
+    #[test]
+    fn keyboard_policy_follows_focus_and_explicit_show_without_disabling_context() {
+        let normal = stroke().context;
+        assert!(should_show(normal, true, None));
+        assert!(!should_show(normal, false, None));
+        assert!(!should_show(Context::default(), true, None));
+        assert!(!should_show(normal, true, Some(normal.generation)));
+        let suppressed = Context {
+            content_hint: sws_protocol::text_input_content_hints::NO_AUTO_SOFTWARE_KEYBOARD,
+            generation: normal.generation + 1,
+            ..normal
+        };
+        assert!(suppressed.active(), "suppression is not IME deactivation");
+        assert!(!should_show(suppressed, true, None));
+        let explicit = Context {
+            content_hint: 0,
+            generation: suppressed.generation + 1,
+            ..suppressed
+        };
+        assert!(should_show(explicit, true, Some(normal.generation)));
+        assert!(!should_show(explicit, true, Some(explicit.generation)));
+        assert!(!should_show(suppressed, true, None));
+        assert!(should_show(normal, true, None));
     }
     #[test]
     fn repeat_survives_view_rebuild_and_preserves_shift_for_the_held_stroke() {

@@ -1427,7 +1427,7 @@ fn update_input_panel_context(context: Option<&TextInputContext>) {
         send_message_to_client(
             client_id,
             protocol::server_msg::INPUT_PANEL_CONTEXT,
-            snapshot.context.encode(),
+            snapshot.provider_context().encode(),
         );
     }
     push_ipc_event(IpcEvent::InputPanelChanged);
@@ -1449,7 +1449,7 @@ pub fn register_input_panel(client_id: usize, window_id: u32, request_id: u8, va
         send_message_to_client(
             client_id,
             protocol::server_msg::INPUT_PANEL_CONTEXT,
-            snapshot.context.encode(),
+            snapshot.provider_context().encode(),
         );
         push_ipc_event(IpcEvent::InputPanelChanged);
     }
@@ -4490,20 +4490,19 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                             context.client_id == client_id && context.enabled
                         }) && input_panel_state().context.context_id == context_id
                         {
-                            let snapshot = {
+                            let (provider, delivered) = {
                                 let mut panel =
                                     INPUT_PANEL.lock().expect("SWS input panel mutex poisoned");
-                                if panel.context.context_id != context_id {
+                                let Some(delivered) = panel.request_show(context_id) else {
                                     continue;
-                                }
-                                panel.context.generation = panel.context.generation.wrapping_add(1);
-                                *panel
+                                };
+                                (panel.provider, delivered)
                             };
-                            if let Some((provider, _)) = snapshot.provider {
+                            if let Some((provider, _)) = provider {
                                 send_message_to_client(
                                     provider,
                                     protocol::server_msg::INPUT_PANEL_CONTEXT,
-                                    snapshot.context.encode(),
+                                    delivered.encode(),
                                 );
                             }
                         }
