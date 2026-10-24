@@ -1,6 +1,11 @@
 //! System input panel. Text editing and conversion remain in SWS/TextInput/IME.
+#[cfg(any(target_os = "scarlet", test))]
+#[path = "soft_keyboard/input.rs"]
+mod keyboard_input;
+
 #[cfg(target_os = "scarlet")]
 mod panel {
+    use super::keyboard_input::{Contact, HeldKeys, Stroke};
     use scarlet_ui::element::{ComponentElement, Element};
     use scarlet_ui::error::{Error as UiError, RenderFailureKind};
     use scarlet_ui::prelude::*;
@@ -10,7 +15,7 @@ mod panel {
         renderer::PresentedFrame,
     };
     use std::{
-        cell::RefCell,
+        cell::{Cell, RefCell},
         rc::Rc,
         time::{Duration, Instant},
     };
@@ -76,6 +81,7 @@ mod panel {
         context: Context,
         action: Action,
         time_ns: u64,
+        contact: Option<Contact>,
     }
     #[derive(Clone)]
     struct KeyboardKeyView {
@@ -88,15 +94,17 @@ mod panel {
         height: f32,
         font_size: f32,
         pending: Rc<RefCell<Vec<PendingAction>>>,
+        dispatch_contact: Rc<Cell<Option<Contact>>>,
         clock: Instant,
     }
     impl KeyboardKeyView {
         fn body(&self) -> Box<dyn View> {
             let pending = Rc::clone(&self.pending);
+            let dispatch_contact = Rc::clone(&self.dispatch_contact);
             let context = self.context;
             let action = self.action;
             let clock = self.clock;
-            let mut button = Button::new(self.label)
+            let button = Button::new(self.label)
                 .header_style()
                 .font_size(self.font_size)
                 .padding(2.0)
@@ -108,12 +116,15 @@ mod panel {
                         context,
                         action,
                         time_ns: time_ns.max(1),
+                        contact: dispatch_contact.get(),
                     });
-                });
-            if matches!(self.action, Action::Key(..)) {
-                button = button
-                    .repeat_while_pressed(Duration::from_millis(420), Duration::from_millis(55));
-            }
+                })
+                // All touch keys activate on DOWN. Utility actions must not
+                // depend on an UP routed through a tree replaced after painting.
+                // The pure keyboard tracker owns actual repeat timing; this
+                // Button option supplies press activation and suppresses the
+                // release tap without ever firing a UI-owned repeat.
+                .repeat_while_pressed(Duration::MAX, Duration::MAX);
             Box::new(button.frame(self.width, self.height))
         }
     }
@@ -342,13 +353,23 @@ mod panel {
         modifiers: u32,
         layer: Layer,
         pending: Rc<RefCell<Vec<PendingAction>>>,
+        dispatch_contact: Rc<Cell<Option<Contact>>>,
         clock: Instant,
     ) -> Box<dyn Element> {
         let numeric = matches!(
             context.content_purpose,
             purpose::DIGITS | purpose::NUMBER | purpose::PHONE | purpose::PIN
         );
-        keyboard_for_purpose(size, context, modifiers, layer, numeric, pending, clock)
+        keyboard_for_purpose(
+            size,
+            context,
+            modifiers,
+            layer,
+            numeric,
+            pending,
+            dispatch_contact,
+            clock,
+        )
     }
     fn keyboard_for_purpose(
         size: Size,
@@ -357,6 +378,7 @@ mod panel {
         layer: Layer,
         numeric: bool,
         pending: Rc<RefCell<Vec<PendingAction>>>,
+        dispatch_contact: Rc<Cell<Option<Contact>>>,
         clock: Instant,
     ) -> Box<dyn Element> {
         let layout = rows(numeric, layer);
@@ -441,6 +463,7 @@ mod panel {
                         height: row_height,
                         font_size,
                         pending: Rc::clone(&pending),
+                        dispatch_contact: Rc::clone(&dispatch_contact),
                         clock,
                     }) as Box<dyn View>
                 })
@@ -531,7 +554,8 @@ mod panel {
         let mut layer = Layer::Letters;
         let pending_actions = Rc::new(RefCell::new(Vec::<PendingAction>::new()));
         let action_clock = Instant::now();
-        let mut animation_tick = Instant::now();
+        let dispatch_contact = Rc::new(Cell::new(None));
+        let mut held_keys = HeldKeys::default();
         let mut pipeline = RenderingPipeline::new();
         let root = keyboard_for_context(
             window.size(),
@@ -539,6 +563,7 @@ mod panel {
             modifiers,
             layer,
             Rc::clone(&pending_actions),
+            Rc::clone(&dispatch_contact),
             action_clock,
         );
         pipeline.set_root(root);
@@ -552,12 +577,6 @@ mod panel {
             pipeline.set_paint_backend(paint_backend);
         }
         loop {
-            let now = Instant::now();
-            let elapsed = now.saturating_duration_since(animation_tick);
-            animation_tick = now;
-            if pipeline.has_active_animation() {
-                pipeline.advance_animations(elapsed);
-            }
             window
                 .connection()
                 .dispatch()
@@ -567,7 +586,9 @@ mod panel {
                 match event {
                     sws_client::Event::InputPanelContext(next) => {
                         if next != context {
-                            if next.generation != context.generation {
+                            if (next.context_id, next.window_id, next.generation)
+                                != (context.context_id, context.window_id, context.generation)
+                            {
                                 visible = false;
                                 modifiers = 0;
                                 shift_locked = false;
@@ -575,6 +596,10 @@ mod panel {
                                 layer = Layer::Letters;
                                 dismissed = None;
                                 pending_actions.borrow_mut().clear();
+                                held_keys.clear();
+                            }
+                            if next.content_purpose != context.content_purpose {
+                                held_keys.clear();
                             }
                             context = next;
                             rebuild = true;
@@ -596,10 +621,14 @@ mod panel {
                         .map_err(|error| format!("{error:?}"))?;
                 }
                 visible = should_show;
+                if !visible {
+                    held_keys.clear();
+                }
                 rebuild = true;
             }
             while let Some(event) = window.poll_event() {
                 if let Event::Resize { width, height } = &event {
+                    held_keys.clear();
                     // A configure changes layout geometry first; acknowledge it
                     // by replacing the backing surface before rendering at the
                     // new size, just as the standard Application runner does.
@@ -616,7 +645,41 @@ mod panel {
                 if matches!(event, Event::Quit) {
                     return Err("input-panel surface closed".to_string().into());
                 }
-                pipeline.handle_event(&event);
+                if matches!(
+                    event,
+                    Event::WindowSuspendedChanged { suspended: true }
+                        | Event::Focus(scarlet_ui::event::FocusEvent::Lost)
+                ) {
+                    held_keys.clear();
+                }
+                if let Event::TouchFrame(frame) = &event {
+                    use scarlet_ui::event::TouchPhase;
+                    // Dispatch one contact at a time so callbacks capture the
+                    // exact DOWN, including multiple keys in a single report.
+                    for change in &frame.changes {
+                        let contact = Contact {
+                            seat: change.seat_id,
+                            id: change.id,
+                            serial: change.serial,
+                        };
+                        match change.phase {
+                            TouchPhase::Down => held_keys.begin(contact, change.x, change.y),
+                            TouchPhase::Move => {
+                                held_keys.motion(contact.seat, contact.id, change.x, change.y)
+                            }
+                            TouchPhase::Up | TouchPhase::Cancel => {
+                                held_keys.end(contact.seat, contact.id)
+                            }
+                        }
+                        dispatch_contact.set((change.phase == TouchPhase::Down).then_some(contact));
+                        let mut single = frame.clone();
+                        single.changes = vec![*change];
+                        pipeline.handle_event(&Event::TouchFrame(single));
+                        dispatch_contact.set(None);
+                    }
+                } else {
+                    pipeline.handle_event(&event);
+                }
             }
             let pending: Vec<_> = pending_actions.borrow_mut().drain(..).collect();
             for pending_action in pending {
@@ -624,12 +687,22 @@ mod panel {
                 let action = pending_action.action;
                 if !visible
                     || activation.context_id != context.context_id
+                    || activation.window_id != context.window_id
                     || activation.generation != context.generation
                 {
                     continue;
                 }
                 match action {
                     Action::Key(code, required_modifiers) => {
+                        held_keys.arm(
+                            pending_action.contact,
+                            Stroke {
+                                context: activation,
+                                code,
+                                modifiers: modifiers | required_modifiers,
+                            },
+                            pending_action.time_ns,
+                        );
                         window
                             .connection()
                             .input_panel_key(context, code, modifiers | required_modifiers)
@@ -665,6 +738,7 @@ mod panel {
                         rebuild = true;
                     }
                     Action::SetLayer(next) => {
+                        held_keys.clear();
                         layer = next;
                         modifiers = 0;
                         shift_locked = false;
@@ -672,6 +746,7 @@ mod panel {
                         rebuild = true;
                     }
                     Action::Hide => {
+                        held_keys.clear();
                         window
                             .connection()
                             .set_input_panel_visible(context, false)
@@ -686,6 +761,24 @@ mod panel {
                     }
                 }
             }
+            // Process queued UP/CANCEL and context changes before repeat, so a
+            // late frame cannot type one extra key after a finger has lifted.
+            if visible {
+                let now_ns = action_clock.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+                for stroke in held_keys.due(now_ns) {
+                    if (
+                        stroke.context.context_id,
+                        stroke.context.window_id,
+                        stroke.context.generation,
+                    ) == (context.context_id, context.window_id, context.generation)
+                    {
+                        window
+                            .connection()
+                            .input_panel_key(context, stroke.code, stroke.modifiers)
+                            .map_err(|error| format!("{error:?}"))?;
+                    }
+                }
+            }
             if rebuild {
                 let root = keyboard_for_context(
                     window.size(),
@@ -693,6 +786,7 @@ mod panel {
                     modifiers,
                     layer,
                     Rc::clone(&pending_actions),
+                    Rc::clone(&dispatch_contact),
                     action_clock,
                 );
                 pipeline.set_root(root);
@@ -736,13 +830,11 @@ mod panel {
             }
             window
                 .connection()
-                .wait_for_window_events(
-                    if (visible && retry_render) || pipeline.has_active_animation() {
-                        Duration::from_millis(16)
-                    } else {
-                        Duration::from_secs(30)
-                    },
-                )
+                .wait_for_window_events(if visible && (retry_render || held_keys.active()) {
+                    Duration::from_millis(16)
+                } else {
+                    Duration::from_secs(30)
+                })
                 .map_err(|error| format!("{error:?}"))?;
         }
     }
