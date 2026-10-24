@@ -9712,8 +9712,6 @@ impl Compositor {
         }
         workspace_changed |= self.workspace_manager.settle_after_close(self.tablet_mode);
         if self.tablet_mode
-            && self.workspace_manager.presentation()
-                == sws_protocol::workspace::ShellPresentation::Overview
             && self
                 .workspace_manager
                 .snapshot()
