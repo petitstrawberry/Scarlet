@@ -281,14 +281,14 @@ to = "/bin/dcp-flip-test"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/carmine", rev = "106809d9a6d5d0ec1a31a1b7b83e41e68878ee89" }
+source = { git = "https://github.com/petitstrawberry/carmine", rev = "d101a7f2581bb19f8d83012bac228eb87a92b20b" }
 package = "carmine"
 bin = "carmine"
 to = "/bin/carmine"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "3be1ca823d9b2808298d37b014dc8b71907f1237" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "770262b09b5374686839cbcf500269d04670c295" }
 package = "myrica"
 bin = "myrica"
 architectures = ["riscv32", "riscv64"]
@@ -297,20 +297,20 @@ to = "/bin/myrica"
 # Myrica owns the WebKit browser and its Linux-view Widevine host recipe.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "a9abcc555e978e2cb0e9dae8b96342c487b40434" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "770262b09b5374686839cbcf500269d04670c295" }
 subdir = "platforms/scarlet"
 architectures = ["aarch64"]
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/vellum", rev = "4bec6230d40bbe452bf141439ec758f4053ce0c0" }
+source = { git = "https://github.com/petitstrawberry/vellum", rev = "783efe9f28a9d575aed927ae1e5dc132394bab27" }
 package = "vellum"
 bin = "vellum"
 to = "/bin/vellum"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/boxcraft", rev = "f6acc89274e39da6903d53a159a836ad91c8e87d" }
+source = { git = "https://github.com/petitstrawberry/boxcraft", rev = "029402c302f39a43d028a67667056ab5d54cec22" }
 package = "boxcraft"
 bin = "boxcraft"
 to = "/bin/boxcraft"
@@ -324,7 +324,7 @@ to = "/bin/remote-desktop"
 # Cadence owns its app recipe and preserves the PIC build and final ELF audit.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/cadence", rev = "318353de2e97733979001b4ad70879a7a6825d61" }
+source = { git = "https://github.com/petitstrawberry/cadence", rev = "1b5d0782a68bf2bd2fbc40502d3d576f57445d0e" }
 subdir = "platforms/scarlet"
 
 [[layers]]
@@ -386,5 +386,5 @@ to = "/bin/applications"
 # Kureha Code owns its native app recipe and resources.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/kureha-code.git", rev = "32e3094f78936e88aa065bebb8ddec36652c3f1c" }
+source = { git = "https://github.com/petitstrawberry/kureha-code.git", rev = "558d6fdfc7cefa8af8f643af397855d58f82cd4d" }
 bundle = "platforms/scarlet/bundle.toml"

@@ -8,7 +8,7 @@ to = "/"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/moonlight-scarlet.git", rev = "a5e72b55e28ac7b618d42f1ad5201b856c2f7b9c" }
+source = { git = "https://github.com/petitstrawberry/moonlight-scarlet.git", rev = "5e9670eefcc3875b2213b61008fd942cf5a9c18e" }
 package = "moonlight"
 bin = "moonlight"
 to = "/bin/moonlight"
@@ -25,14 +25,14 @@ to = "/bin/video-player"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/yt-for-scarlet", rev = "3f008c3bfc86072341d818364bc661360c2a05b1" }
+source = { git = "https://github.com/petitstrawberry/yt-for-scarlet", rev = "f537fde21374b90f817f40a077d3773e111621bb" }
 package = "yt"
 bin = "yt"
 to = "/bin/yt"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/yt-for-scarlet", rev = "3f008c3bfc86072341d818364bc661360c2a05b1" }
+source = { git = "https://github.com/petitstrawberry/yt-for-scarlet", rev = "f537fde21374b90f817f40a077d3773e111621bb" }
 package = "yt-gui"
 bin = "yt-gui"
 to = "/bin/yt-gui"
@@ -89,12 +89,12 @@ to = "/bin/blitz"
 
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/resonara", rev = "10c083babf2515e7c5d3714c9d9f2e73bce6fcb1" }
+source = { git = "https://github.com/petitstrawberry/resonara", rev = "0e5c33acc395ec271dbf106355eaedcb3cd03b73" }
 bundle = "platforms/scarlet/bundle.toml"
 
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/easyrpg-player-scarlet.git", rev = "cd3b903f991c9c3d1094bf85b88b560d0ce3293f" }
+source = { git = "https://github.com/petitstrawberry/easyrpg-player-scarlet.git", rev = "6473346bbd25cf2d35e8f34d840d424d16f8a165" }
 
 [[layers]]
 kind = "bundle"
