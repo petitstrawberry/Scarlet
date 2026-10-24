@@ -11,6 +11,8 @@ mod console;
 mod control_center;
 mod drawer;
 mod home_style;
+#[path = "../home_trace.rs"]
+mod home_trace;
 mod options;
 mod power;
 #[path = "../power_request.rs"]
@@ -2625,6 +2627,7 @@ fn maintain_workspace_shell_role(
                         });
                     }
                     sws::event::Event::WorkspaceStateChanged(updated) => {
+                        home_trace::record(0, format_args!("shell-state presentation={:?}", updated.presentation));
                         snapshot = updated;
                         state.set(Some(snapshot.clone()));
                     }
@@ -3091,6 +3094,10 @@ impl ShellApp {
         let palette = ColorPalette::dark();
         let search_palette = ColorPalette::light();
         let application_count = self.home_filtered_applications.get().len();
+        home_trace::record(1, format_args!(
+            "shell-build presentation={:?} ready={} screen={}x{} drawer_top={} drawer_height={} apps={}",
+            presentation, shell_state_ready, width, height, drawer_top, drawer_height, application_count,
+        ));
         let searching = !self.home_query.get().trim().is_empty();
         let app_grid_width = (columns as f32 * HOME_GRID_CELL_WIDTH
             + columns.saturating_sub(1) as f32 * HOME_GRID_COLUMN_SPACING)
@@ -3455,6 +3462,12 @@ impl Application for ShellApp {
         }
         if matches!(ctx.scene_key.as_str(), HOME_SCENE_KEY | HOME_BACKDROP_SCENE_KEY) {
             let desired = Size::new(self.screen_width.get(), self.screen_height.get());
+            if ctx.scene_key.as_str() == HOME_SCENE_KEY {
+                home_trace::record(9, format_args!(
+                    "shell-sync window_size={:?} desired={:?} presentation={:?}",
+                    window.size(), desired, self.shell_presentation(),
+                ));
+            }
             if status_bar_resize_needed(window.size(), desired)
                 && let Err(error) = window.resize(
                     desired.width.max(1.0) as u32,

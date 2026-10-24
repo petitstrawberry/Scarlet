@@ -4442,6 +4442,15 @@ impl Compositor {
         drop(scenes);
         match result {
             Ok(releases) => {
+                if super::home_trace::enabled()
+                    && let Some(home) = self.window_manager.get_windows().iter().find(|w| {
+                    w.title.as_deref() == Some(b"Home") && w.is_presented()
+                }) {
+                    super::home_trace::record(6, format_args!(
+                        "sws-present-complete window={} releases={} full={} damage={:?}",
+                        home.id, releases.len(), self.full_redraw_needed, self.pending_damage,
+                    ));
+                }
                 self.gpu_admission_retry.clear();
                 super::trace::set_compositor_stage(super::trace::STAGE_GPU_NOTIFY_RELEASES);
                 for release in releases {
@@ -10107,6 +10116,12 @@ impl Compositor {
                 waiting.push(callback);
                 continue;
             }
+            if window.title.as_deref() == Some(b"Home") {
+                super::home_trace::record(7, format_args!(
+                    "sws-frame-done window={} callback={} counter={} requested_after={}",
+                    window.id, callback.callback_id, self.event_counter, callback.requested_after_present,
+                ));
+            }
             let payload =
                 sws_protocol::payload_frame_done(callback.window_id, callback.callback_id, now_ns);
             send_message_to_client(
@@ -12246,6 +12261,13 @@ impl Compositor {
                     .window_manager
                     .get_window(window_id)
                     .is_some_and(|window| window.backing_extent() == (width, height));
+                let trace_home = self.window_manager.get_window(window_id)
+                    .is_some_and(|window| window.title.as_deref() == Some(b"Home"));
+                if trace_home {
+                    super::home_trace::record(3, format_args!(
+                        "sws-register-begin identity={:?} extent={}x{} matches={}", identity, width, height, extent_matches,
+                    ));
+                }
                 let result = if !extent_matches {
                     Err(SgfxBufferError::InvalidBuffer)
                 } else {
@@ -12254,6 +12276,9 @@ impl Compositor {
                         None => Err(SgfxBufferError::Unavailable),
                     }
                 };
+                if trace_home {
+                    super::home_trace::record(3, format_args!("sws-register-end identity={:?} result={:?}", identity, result));
+                }
                 match result {
                     Ok(()) => {
                         if let Some(window) = self.window_manager.get_window_mut(window_id) {
@@ -12316,10 +12341,22 @@ impl Compositor {
                     );
                     return Ok(false);
                 }
+                let trace_home = self.window_manager.get_window(window_id)
+                    .is_some_and(|window| window.title.as_deref() == Some(b"Home"));
+                if trace_home {
+                    super::home_trace::record(4, format_args!(
+                        "sws-commit-begin identity={:?} serial={} damage={:?}", identity, commit_serial, damage_rects,
+                    ));
+                }
                 let result = match self.gpu_compositor.as_mut() {
                     Some(gpu) => gpu.commit_shared_buffer(identity, commit_serial, &damage_rects),
                     None => Err(SgfxBufferError::Unavailable),
                 };
+                if trace_home {
+                    super::home_trace::record(4, format_args!(
+                        "sws-commit-end identity={:?} serial={} accepted={}", identity, commit_serial, result.is_ok(),
+                    ));
+                }
                 match result {
                     Ok(damage) => {
                         if let Some((geometry, presented, transform, instances)) =

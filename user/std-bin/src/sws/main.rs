@@ -23,6 +23,8 @@ mod sgfx_ir_support;
 mod status_backdrop;
 mod surface_scene;
 mod trace;
+#[path = "../home_trace.rs"]
+mod home_trace;
 mod window;
 mod workspace;
 
