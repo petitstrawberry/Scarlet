@@ -3,9 +3,17 @@
 #[path = "soft_keyboard/input.rs"]
 mod keyboard_input;
 
+#[cfg(any(target_os = "scarlet", test))]
+#[path = "soft_keyboard/layout.rs"]
+mod keyboard_layout;
+
 #[cfg(target_os = "scarlet")]
 mod panel {
     use super::keyboard_input::{Contact, HeldKeys, Stroke};
+    use super::keyboard_layout::{
+        Action, EDGE_UNITS, GAP_UNITS, GRID_UNITS, Layer, RowGeometry, Tone, VerticalGeometry,
+        panel_height, rows,
+    };
     use scarlet_ui::element::{ComponentElement, Element};
     use scarlet_ui::error::{Error as UiError, RenderFailureKind};
     use scarlet_ui::prelude::*;
@@ -38,43 +46,6 @@ mod panel {
                 out.extend(view.listenables());
             }
         }
-    }
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Layer {
-        Letters,
-        Symbols,
-    }
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Action {
-        Key(u16, u32),
-        Modifier(u32),
-        SetLayer(Layer),
-        Hide,
-    }
-    #[derive(Clone, Copy)]
-    enum Tone {
-        Character,
-        Utility,
-        Toolbar,
-    }
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum RowGeometry {
-        Ipad,
-        Fill,
-    }
-    #[derive(Clone)]
-    struct Key {
-        plain: &'static str,
-        shifted: &'static str,
-        action: Action,
-        weight: f32,
-        tone: Tone,
-    }
-    #[derive(Clone)]
-    struct KeyRow {
-        keys: Vec<Key>,
-        height: f32,
-        geometry: RowGeometry,
     }
     #[derive(Clone, Copy)]
     struct PendingAction {
@@ -143,210 +114,6 @@ mod panel {
             self
         }
     }
-    fn key(label: &'static str, shifted: &'static str, code: u16) -> Key {
-        Key {
-            plain: label,
-            shifted,
-            action: Action::Key(code, 0),
-            weight: 1.0,
-            tone: Tone::Character,
-        }
-    }
-    fn stroke(label: &'static str, code: u16, modifiers: u32) -> Key {
-        Key {
-            plain: label,
-            shifted: label,
-            action: Action::Key(code, modifiers),
-            weight: 1.0,
-            tone: Tone::Character,
-        }
-    }
-    fn control(label: &'static str, action: Action, weight: f32) -> Key {
-        Key {
-            plain: label,
-            shifted: label,
-            action,
-            weight,
-            tone: Tone::Utility,
-        }
-    }
-    fn toolbar(label: &'static str, action: Action) -> Key {
-        Key {
-            plain: label,
-            shifted: label,
-            action,
-            weight: 1.0,
-            tone: Tone::Toolbar,
-        }
-    }
-    fn row(keys: Vec<Key>) -> KeyRow {
-        KeyRow {
-            keys,
-            height: 1.0,
-            geometry: RowGeometry::Ipad,
-        }
-    }
-    fn fill_row(keys: Vec<Key>) -> KeyRow {
-        KeyRow {
-            keys,
-            height: 1.0,
-            geometry: RowGeometry::Fill,
-        }
-    }
-    fn terminal_row() -> KeyRow {
-        use Action::Key;
-        KeyRow {
-            keys: vec![
-                toolbar("esc", Key(1, 0)),
-                toolbar("tab", Key(15, 0)),
-                toolbar("home", Key(102, 0)),
-                toolbar("end", Key(107, 0)),
-                toolbar("pg up", Key(104, 0)),
-                toolbar("pg dn", Key(109, 0)),
-                toolbar("←", Key(105, 0)),
-                toolbar("↑", Key(103, 0)),
-                toolbar("↓", Key(108, 0)),
-                toolbar("→", Key(106, 0)),
-            ],
-            height: 0.73,
-            geometry: RowGeometry::Fill,
-        }
-    }
-    fn rows(numeric: bool, layer: Layer) -> Vec<KeyRow> {
-        use Action::*;
-        if numeric {
-            return vec![
-                terminal_row(),
-                fill_row(vec![
-                    key("7", "7", 8),
-                    key("8", "8", 9),
-                    key("9", "9", 10),
-                    control("delete", Key(14, 0), 1.25),
-                ]),
-                fill_row(vec![
-                    key("4", "4", 5),
-                    key("5", "5", 6),
-                    key("6", "6", 7),
-                    key("-", "-", 12),
-                ]),
-                fill_row(vec![
-                    key("1", "1", 2),
-                    key("2", "2", 3),
-                    key("3", "3", 4),
-                    key(".", ".", 52),
-                ]),
-                fill_row(vec![
-                    control("hide", Hide, 1.0),
-                    control("0", Key(11, 0), 2.0),
-                    control("return", Key(28, 0), 1.25),
-                ]),
-            ];
-        }
-        if layer == Layer::Symbols {
-            return vec![
-                terminal_row(),
-                row(vec![
-                    control("tab", Key(15, 0), 1.285),
-                    key("1", "1", 2),
-                    key("2", "2", 3),
-                    key("3", "3", 4),
-                    key("4", "4", 5),
-                    key("5", "5", 6),
-                    key("6", "6", 7),
-                    key("7", "7", 8),
-                    key("8", "8", 9),
-                    key("9", "9", 10),
-                    key("0", "0", 11),
-                    control("delete", Key(14, 0), 1.285),
-                ]),
-                row(vec![
-                    control("ctrl", Modifier(input_panel::CTRL), 1.70),
-                    stroke("!", 2, input_panel::SHIFT),
-                    stroke("@", 3, input_panel::SHIFT),
-                    stroke("#", 4, input_panel::SHIFT),
-                    stroke("$", 5, input_panel::SHIFT),
-                    stroke("%", 6, input_panel::SHIFT),
-                    stroke("^", 7, input_panel::SHIFT),
-                    stroke("&", 8, input_panel::SHIFT),
-                    stroke("*", 9, input_panel::SHIFT),
-                    stroke("(", 10, input_panel::SHIFT),
-                    control("return", Key(28, 0), 2.04),
-                ]),
-                row(vec![
-                    control("ABC", SetLayer(Layer::Letters), 2.22),
-                    stroke(")", 11, input_panel::SHIFT),
-                    key("-", "-", 12),
-                    stroke("_", 12, input_panel::SHIFT),
-                    key("=", "=", 13),
-                    stroke("+", 13, input_panel::SHIFT),
-                    key("[", "[", 26),
-                    key("]", "]", 27),
-                    key("/", "/", 53),
-                    stroke("?", 53, input_panel::SHIFT),
-                    control("ABC", SetLayer(Layer::Letters), 1.52),
-                ]),
-                row(vec![
-                    control("あ/A", Key(85, 0), 1.03),
-                    control("ABC", SetLayer(Layer::Letters), 1.04),
-                    control("alt", Modifier(input_panel::ALT), 1.04),
-                    control("space", Key(57, 0), 7.48),
-                    control("ABC", SetLayer(Layer::Letters), 1.51),
-                    control("hide", Hide, 1.49),
-                ]),
-            ];
-        }
-        vec![
-            terminal_row(),
-            row(vec![
-                control("tab", Key(15, 0), 1.285),
-                key("q", "Q", 16),
-                key("w", "W", 17),
-                key("e", "E", 18),
-                key("r", "R", 19),
-                key("t", "T", 20),
-                key("y", "Y", 21),
-                key("u", "U", 22),
-                key("i", "I", 23),
-                key("o", "O", 24),
-                key("p", "P", 25),
-                control("delete", Key(14, 0), 1.285),
-            ]),
-            row(vec![
-                control("ctrl", Modifier(input_panel::CTRL), 1.70),
-                key("a", "A", 30),
-                key("s", "S", 31),
-                key("d", "D", 32),
-                key("f", "F", 33),
-                key("g", "G", 34),
-                key("h", "H", 35),
-                key("j", "J", 36),
-                key("k", "K", 37),
-                key("l", "L", 38),
-                control("return", Key(28, 0), 2.04),
-            ]),
-            row(vec![
-                control("shift", Modifier(input_panel::SHIFT), 2.22),
-                key("z", "Z", 44),
-                key("x", "X", 45),
-                key("c", "C", 46),
-                key("v", "V", 47),
-                key("b", "B", 48),
-                key("n", "N", 49),
-                key("m", "M", 50),
-                key(",", "<", 51),
-                key(".", ">", 52),
-                control("shift", Modifier(input_panel::SHIFT), 1.52),
-            ]),
-            row(vec![
-                control("あ/A", Key(85, 0), 1.03),
-                control("123", SetLayer(Layer::Symbols), 1.04),
-                control("alt", Modifier(input_panel::ALT), 1.04),
-                control("space", Key(57, 0), 7.48),
-                control("123", SetLayer(Layer::Symbols), 1.51),
-                control("hide", Hide, 1.49),
-            ]),
-        ]
-    }
     fn keyboard_for_context(
         size: Size,
         context: Context,
@@ -382,47 +149,39 @@ mod panel {
         clock: Instant,
     ) -> Box<dyn Element> {
         let layout = rows(numeric, layer);
-        // Prompt's landscape iPad keyboard uses one shared horizontal grid:
-        // 0.17-unit outer insets and gaps, one-unit character keys, and wider
-        // edge controls. Keeping the unit global prevents Q/A/Z from changing
-        // width or drifting horizontally from one row to the next.
-        const IPAD_GRID_UNITS: f32 = 14.78;
-        const IPAD_EDGE_UNITS: f32 = 0.17;
-        const IPAD_GAP_UNITS: f32 = 0.17;
-        let ipad_layout = layout.iter().any(|row| row.geometry == RowGeometry::Ipad);
-        let ipad_unit = size.width / IPAD_GRID_UNITS;
-        let horizontal_padding = if ipad_layout {
-            ipad_unit * IPAD_EDGE_UNITS
+        // One shared unit keeps Q/A/Z widths consistent across staggered rows.
+        let tablet_layout = layout.iter().any(|row| row.geometry == RowGeometry::Tablet);
+        let tablet_unit = size.width / GRID_UNITS;
+        let horizontal_padding = if tablet_layout {
+            tablet_unit * EDGE_UNITS
         } else {
             10.0
         };
-        let ipad_gap = ipad_unit * IPAD_GAP_UNITS;
-        let fill_gap = if ipad_layout { ipad_gap } else { 7.0 };
-        let vertical_gap = if ipad_layout { ipad_gap } else { 7.0 };
-        let vertical_padding = if ipad_layout {
-            ipad_unit * IPAD_EDGE_UNITS
+        let tablet_gap = tablet_unit * GAP_UNITS;
+        let fill_gap = if tablet_layout { tablet_gap } else { 7.0 };
+        let vertical_gap = if tablet_layout { tablet_gap } else { 7.0 };
+        let vertical_padding = if tablet_layout {
+            tablet_unit * EDGE_UNITS
         } else {
             10.0
         };
         let content_width = (size.width - horizontal_padding * 2.0).max(1.0);
-        let available_height =
-            (size.height - vertical_padding * 2.0 - vertical_gap * (layout.len() - 1) as f32)
-                .max(1.0);
-        let total_height: f32 = layout.iter().map(|row| row.height).sum();
+        let vertical = VerticalGeometry::new(size.height, vertical_padding, vertical_gap, &layout);
         let mut views: Vec<Box<dyn View>> = Vec::new();
         for row in layout {
-            let row_height = available_height * row.height / total_height;
+            let row_height = vertical.row_unit * row.height;
             let weight: f32 = row.keys.iter().map(|key| key.weight).sum();
-            let gap = if row.geometry == RowGeometry::Ipad {
-                ipad_gap
+            let gap = if row.geometry == RowGeometry::Tablet {
+                tablet_gap
             } else {
                 fill_gap
             };
-            let unit = if row.geometry == RowGeometry::Ipad {
-                ipad_unit
+            let unit = if row.geometry == RowGeometry::Tablet {
+                tablet_unit
             } else {
                 ((content_width - gap * (row.keys.len() - 1) as f32) / weight).max(1.0)
             };
+            let inset = row.inset * unit;
             let keys = row
                 .keys
                 .into_iter()
@@ -471,7 +230,8 @@ mod panel {
             views.push(Box::new(
                 HStack::new(Views(keys))
                     .spacing(gap)
-                    .alignment(Alignment::TopLeading),
+                    .alignment(Alignment::TopLeading)
+                    .padding_insets(EdgeInsets::new(inset, 0.0, 0.0, 0.0)),
             ));
         }
         VStack::new(Views(views))
@@ -481,7 +241,7 @@ mod panel {
                 horizontal_padding,
                 vertical_padding,
                 horizontal_padding,
-                vertical_padding,
+                vertical.bottom_padding,
             ))
             .background(Color::rgba_f32(0.10, 0.10, 0.13, 0.96))
             .frame(size.width, size.height)
@@ -519,7 +279,7 @@ mod panel {
         let logical_screen_height = height as f32 / scale;
         let size = Size::new(
             logical_width,
-            (logical_width * 0.35).min(logical_screen_height * 0.62),
+            panel_height(logical_width, logical_screen_height),
         );
         let mut window = SWSPlatformWindow::create_with_type(
             "org.scarlet-os.input-panel",
