@@ -7567,6 +7567,7 @@ impl Compositor {
                 if self.workspace_manager.presentation()
                     == sws_protocol::workspace::ShellPresentation::Overview
                     && dx != 0
+                    && self.shell_navigation_captures_pointer_at(self.cursor.x, self.cursor.y)
                 {
                     return Ok(self.handle_overview_horizontal_scroll(dx));
                 }
@@ -7705,7 +7706,15 @@ impl Compositor {
                         return Ok(true);
                     }
                 }
-                if self.shell_navigation_captures_pointer_at(self.cursor.x, self.cursor.y) {
+                // A handle drag can end over compositor-owned workspace
+                // cards. The surface that received the press still owns its
+                // release, just as it owns motion during the implicit grab.
+                let captured_release = button == key_codes::BTN_LEFT
+                    && !pressed
+                    && self.pointer_grab_window_id.is_some();
+                if !captured_release
+                    && self.shell_navigation_captures_pointer_at(self.cursor.x, self.cursor.y)
+                {
                     self.pointer_grab_window_id = None;
                     self.clear_pointer_focus_for_shell_navigation();
                     self.refresh_cursor_icon();

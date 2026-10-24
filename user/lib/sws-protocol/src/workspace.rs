@@ -35,6 +35,9 @@ pub const COMPACT_WORKSPACE_RAIL_MAX_HEIGHT: u32 = 112;
 /// card/application balance without forking shell and compositor geometry.
 pub const TABLET_OVERVIEW_WORKSPACE_RATIO_MILLI: u32 = 660;
 
+/// Space for the handle, search header and one readable application row.
+pub const TABLET_OVERVIEW_DRAWER_MIN_HEIGHT: u32 = 240;
+
 /// Height of the exposed laptop drawer-sheet lip in logical pixels.
 pub const DRAWER_SHEET_LIP_HEIGHT: u32 = 36;
 
@@ -100,14 +103,16 @@ pub fn workspace_region_height(
     if work_height == 0 {
         return 0;
     }
+    let scale_milli = scale_milli.max(1) as u64;
     if tablet_mode && matches!(presentation, ShellPresentation::Overview) {
+        let drawer_height = (u64::from(TABLET_OVERVIEW_DRAWER_MIN_HEIGHT) * scale_milli / 1000)
+            .min(u64::from(u32::MAX)) as u32;
         return (((work_height as u64) * (TABLET_OVERVIEW_WORKSPACE_RATIO_MILLI as u64) / 1000)
             as u32)
             .max(1)
-            .min(work_height);
+            .min(work_height.saturating_sub(drawer_height).max(1));
     }
 
-    let scale_milli = scale_milli.max(1) as u64;
     let minimum = ((COMPACT_WORKSPACE_RAIL_MIN_HEIGHT as u64) * scale_milli / 1000)
         .max(1)
         .min(u32::MAX as u64) as u32;

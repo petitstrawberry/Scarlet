@@ -9,6 +9,7 @@ mod app_artwork;
 mod background;
 mod console;
 mod control_center;
+mod drawer;
 mod home_style;
 mod options;
 mod power;
@@ -3059,7 +3060,6 @@ impl ShellApp {
             sws::ShellPresentation::Home,
             1000,
         ) as f32;
-        let drawer_height = (work_height - compact_rail_height).max(1.0);
         let drawer_width = width;
         let drawer_content_width = (drawer_width - drawer_padding * 2.0).max(1.0);
         let drawer_lip_height = sws_protocol::workspace::DRAWER_SHEET_LIP_HEIGHT as f32;
@@ -3073,6 +3073,10 @@ impl ShellApp {
         } else {
             work_height - drawer_lip_height
         };
+        // The viewport must end at the screen edge, including the partly
+        // exposed tablet Overview sheet. A full-height viewport here hides
+        // rows below the root clip without giving ScrollView any overflow.
+        let drawer_height = drawer::visible_height(work_height, drawer_top, compact_rail_height);
         let drawer_header_height = 44.0;
         let drawer_body_height = (drawer_height - drawer_lip_height).max(1.0);
         let drawer_body_top_padding = if height < 760.0 { 6.0 } else { 10.0 };
@@ -3200,14 +3204,7 @@ impl ShellApp {
             Spacer::new(),
         }
         .alignment(Alignment::Center)
-        .frame(drawer_width, drawer_lip_height)
-        .on_click(move || {
-            if drawer_toggle_app.shell_presentation() == sws::ShellPresentation::Home {
-                drawer_toggle_app.lower_application_drawer();
-            } else {
-                drawer_toggle_app.show_application_drawer();
-            }
-        });
+        .frame(drawer_width, drawer_lip_height);
 
         let drawer_body = vstack! {
             hstack! {
@@ -3253,7 +3250,7 @@ impl ShellApp {
         .frame(width, work_height)
         .clip_radius(0.0);
 
-        drawer_layer
+        let content = drawer_layer
             .padding_insets(EdgeInsets {
                 top: bar_height,
                 left: 0.0,
@@ -3261,7 +3258,24 @@ impl ShellApp {
                 right: 0.0,
             })
             .frame(width, height)
-            .on_key(move |event| key_app.handle_home_key(event))
+            .on_key(move |event| key_app.handle_home_key(event));
+        drawer::Handle::new(
+            content,
+            presentation,
+            drawer::Geometry {
+                width,
+                bar_height,
+                top: drawer_top,
+                lip_height: drawer_lip_height,
+            },
+            move |open| {
+                if open {
+                    drawer_toggle_app.show_application_drawer();
+                } else {
+                    drawer_toggle_app.lower_application_drawer();
+                }
+            },
+        )
     }
 }
 
