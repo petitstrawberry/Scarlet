@@ -5,7 +5,7 @@ hash = "sha256:60daf600fad7fda3d8a6e516c4c2af4324e9fa5a37efacbf8ead2409ee7e2ff7"
 layers = []
 
 [sections.disk]
-hash = "sha256:8d990bd4b43fada5df21c3560b374f27f7f1c6227b26a096e83ac1efdf9dfb06"
+hash = "sha256:07e19204e6470ae9645b64ee0e3ad53b06edfeadd984f86672d3876dea3254c4"
 layers = []
 
 [sections.initramfs]
@@ -463,7 +463,7 @@ type = "path"
 path = "../../user/std-bin"
 
 [sections.rootfs]
-hash = "sha256:5eaf639e336b119a3448ff9eee28f91676432a3dd3dc4a5cceaaa11770100313"
+hash = "sha256:9eaf0e4428ac9daf9bb8ed20855062c68236f0122c63039d78efbff8fd39ac8d"
 
 [[sections.rootfs.layers]]
 kind = "script"
@@ -1324,17 +1324,17 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/carmine"
-git_ref = "106809d9a6d5d0ec1a31a1b7b83e41e68878ee89"
-resolved_rev = "106809d9a6d5d0ec1a31a1b7b83e41e68878ee89"
+git_ref = "d101a7f2581bb19f8d83012bac228eb87a92b20b"
+resolved_rev = "d101a7f2581bb19f8d83012bac228eb87a92b20b"
 package = "carmine"
 bin = "carmine"
 to = "/bin/carmine"
-hash = "sha256:2c8eab7ad70482b6c1c37edb23bb5673acaaee41734f522b2939a63077b610dd"
+hash = "sha256:de22fa4c8d04eabfb888f09122105e3a85c29618d1d1b1aec83da29c753500c7"
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/carmine"
-rev = "106809d9a6d5d0ec1a31a1b7b83e41e68878ee89"
+rev = "d101a7f2581bb19f8d83012bac228eb87a92b20b"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1343,7 +1343,7 @@ bin = "myrica"
 features = ["backend-webkit-vulkan"]
 default-features = false
 to = "/bin/myrica"
-hash = "sha256:396bf242194f370fdd739b74c7e1cc71a72ed410b55d7e26e59d34616c3af147"
+hash = "sha256:3d09a0055bfff66cb13e0bf0275cabdebf7ec9c2ff6025f2b087bc687ab1cd59"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -1359,7 +1359,7 @@ features = [
 ]
 default-features = false
 to = "/bin/myrica-vulkan-probe"
-hash = "sha256:3c49102f59d817ee59a675423b92cd2d552d91683990e9d0df799428d0e73cbd"
+hash = "sha256:87a0f6ba017b33112862c636cf2710fadbe3c9dfa91d91a615e44ca2f417e88d"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -1377,32 +1377,32 @@ path = ".scarlet/cache/git/d51a83490b0670c9/tools/widevine-host/build-host.sh"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/vellum"
-git_ref = "4bec6230d40bbe452bf141439ec758f4053ce0c0"
-resolved_rev = "4bec6230d40bbe452bf141439ec758f4053ce0c0"
+git_ref = "783efe9f28a9d575aed927ae1e5dc132394bab27"
+resolved_rev = "783efe9f28a9d575aed927ae1e5dc132394bab27"
 package = "vellum"
 bin = "vellum"
 to = "/bin/vellum"
-hash = "sha256:d617748b049cb68f2af2353181bbcb41b7dee1e6565eac754fec44c4a7bda0a5"
+hash = "sha256:4c7c986f65d9059bee4af51f409b6a71d9b1ebb2577c7720bf02d5a9ee2383ba"
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/vellum"
-rev = "4bec6230d40bbe452bf141439ec758f4053ce0c0"
+rev = "783efe9f28a9d575aed927ae1e5dc132394bab27"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/boxcraft"
-git_ref = "f6acc89274e39da6903d53a159a836ad91c8e87d"
-resolved_rev = "f6acc89274e39da6903d53a159a836ad91c8e87d"
+git_ref = "029402c302f39a43d028a67667056ab5d54cec22"
+resolved_rev = "029402c302f39a43d028a67667056ab5d54cec22"
 package = "boxcraft"
 bin = "boxcraft"
 to = "/bin/boxcraft"
-hash = "sha256:02f7ffb1a205c701372b03ee437eb8b75bed9fe550f9a6c7fe95376e3aa654ae"
+hash = "sha256:496251cd33c0d9132b794cff4d723c04b66161afc685e4beb7dcbb2766000d3b"
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/boxcraft"
-rev = "f6acc89274e39da6903d53a159a836ad91c8e87d"
+rev = "029402c302f39a43d028a67667056ab5d54cec22"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1418,7 +1418,7 @@ path = "../../user/std-bin"
 kind = "app"
 source = ".scarlet/cache/git/33c416af7493b416/platforms/scarlet/app.toml"
 to = "/applications/cadence.app"
-hash = "sha256:a1874be8a980bd0347478b23860cdfce03b37e246c5c336b5ad5ae3845c77877"
+hash = "sha256:a14b199a328cd47372745e548cbdbf52a544e430442c1b1815a49febe48a0b6c"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1507,7 +1507,7 @@ path = "../../user/std-bin"
 kind = "app"
 source = ".scarlet/cache/git/be620600662a4ab7/app.toml"
 to = "/applications/kureha-code.app"
-hash = "sha256:b04ae7691968601b1643bd137e13a21c2a4efc75775b45e51dff0e8617041c48"
+hash = "sha256:37e613e519eafc28f225a568ad92b5299c528bdc858d90f314f7a66c383d716f"
 
 [[sections.rootfs.layers]]
 kind = "archive"
@@ -1524,17 +1524,17 @@ sha256 = "sha256:55a133c3e3f03337f6e0baf6b59194bfe0eb19a340d72bc94224d387e498b62
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/moonlight-scarlet.git"
-git_ref = "a5e72b55e28ac7b618d42f1ad5201b856c2f7b9c"
-resolved_rev = "a5e72b55e28ac7b618d42f1ad5201b856c2f7b9c"
+git_ref = "5e9670eefcc3875b2213b61008fd942cf5a9c18e"
+resolved_rev = "5e9670eefcc3875b2213b61008fd942cf5a9c18e"
 package = "moonlight"
 bin = "moonlight"
 to = "/bin/moonlight"
-hash = "sha256:0e0aecfc67af727283efb2f33c64cd2e274ddfc393f7a087a8bbda383d3fcd58"
+hash = "sha256:e9f36f44fc953f87c8418406de13a05a0a4ce71c9402b90f081fc358a39178ef"
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/moonlight-scarlet.git"
-rev = "a5e72b55e28ac7b618d42f1ad5201b856c2f7b9c"
+rev = "5e9670eefcc3875b2213b61008fd942cf5a9c18e"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1557,32 +1557,32 @@ path = "../../user/video_player"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/yt-for-scarlet"
-git_ref = "3f008c3bfc86072341d818364bc661360c2a05b1"
-resolved_rev = "3f008c3bfc86072341d818364bc661360c2a05b1"
+git_ref = "f537fde21374b90f817f40a077d3773e111621bb"
+resolved_rev = "f537fde21374b90f817f40a077d3773e111621bb"
 package = "yt"
 bin = "yt"
 to = "/bin/yt"
-hash = "sha256:61f808826b6c026d06266b1eb21543d7f736a3845ffe16b65f1c4dc6f68a24bd"
+hash = "sha256:e33d093bd7afdc6cfd4205d34d6b655db99e2ff07715840136644563f8f16dd1"
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/yt-for-scarlet"
-rev = "3f008c3bfc86072341d818364bc661360c2a05b1"
+rev = "f537fde21374b90f817f40a077d3773e111621bb"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/yt-for-scarlet"
-git_ref = "3f008c3bfc86072341d818364bc661360c2a05b1"
-resolved_rev = "3f008c3bfc86072341d818364bc661360c2a05b1"
+git_ref = "f537fde21374b90f817f40a077d3773e111621bb"
+resolved_rev = "f537fde21374b90f817f40a077d3773e111621bb"
 package = "yt-gui"
 bin = "yt-gui"
 to = "/bin/yt-gui"
-hash = "sha256:c6fddc0720af582526ee17d5e114c4194e0a08c43f891a879557f319a4230d89"
+hash = "sha256:1cf07e98c5855f591fe5b89c9e2b1bea44aea59eb68317f5c897e7a7bc716734"
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/yt-for-scarlet"
-rev = "3f008c3bfc86072341d818364bc661360c2a05b1"
+rev = "f537fde21374b90f817f40a077d3773e111621bb"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1671,7 +1671,7 @@ kind = "cargo"
 package = "resonara"
 bin = "resonara"
 to = "/bin/resonara"
-hash = "sha256:a0a58a7c81d881da9d73a7c9fa5cf52fa33951ed51350df5b9270e508c802e30"
+hash = "sha256:95f87ef213840fa44412844010dae62e47684bd10126f40397042a8075dc56a0"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -1680,7 +1680,7 @@ path = ".scarlet/cache/git/db99e5104faa6c7a"
 [[sections.rootfs.layers]]
 kind = "script"
 to = "/usr/lib/clap"
-hash = "sha256:662eaf3cf1f63dd82be2e77526af97b45b05526c1e47a9e5ce31e1c9ebfcd566"
+hash = "sha256:be192190de9775c02b6cadeb442590e5a5e5a3ee84d4f1dcad07cb9ff6f649e1"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -1689,7 +1689,7 @@ path = ".scarlet/cache/git/db99e5104faa6c7a/scripts/scarlet-plugins-aarch64.sh"
 [[sections.rootfs.layers]]
 kind = "script"
 to = "/bin/easyrpg-player"
-hash = "sha256:ad6571a2a5eb73af0ad79814b1360ced8796985643f25c7b7adebee4c8b48c4b"
+hash = "sha256:41c6c1bb06e517f4652c681834a98735fba1c586530ef1caa4b685a58c03a497"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -1698,7 +1698,7 @@ path = ".scarlet/cache/git/1d707eff8bef4cad/bundle/build-aarch64.sh"
 [[sections.rootfs.layers]]
 kind = "script"
 to = "/"
-hash = "sha256:a4a5c8872b7d923912db54996e94b2c826b6c4d56940aad15cccfeed3e038ba6"
+hash = "sha256:50f5a4fa19d8f82ae9a5578a79d5f61131a90d6131d4eab9139d35af479d8e53"
 
 [sections.rootfs.layers.source]
 type = "path"
