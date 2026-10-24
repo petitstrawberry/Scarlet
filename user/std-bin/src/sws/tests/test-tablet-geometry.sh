@@ -11,6 +11,7 @@ rustc --edition=2024 --crate-type=rlib --crate-name scarlet_sys user/lib/scarlet
 rustc --edition=2024 --crate-type=rlib --crate-name scarlet_os --cfg 'feature="std"' user/lib/scarlet-os/src/lib.rs --extern scarlet_abi="$out/libscarlet_abi.rlib" --extern scarlet_sys="$out/libscarlet_sys.rlib" -L "$out" --out-dir "$out"
 rustc --edition=2024 --test user/std-bin/src/sws/tests/tablet_geometry.rs --extern sws_protocol="$out/libsws_protocol.rlib" --extern scarlet_os="$out/libscarlet_os.rlib" -L "$out" -A dead_code -o "$out/tests"
 "$out/tests" tablet_
+"$out/tests" frame_callback::tests::
 "$out/tests" window::rounded_geometry_tests::
 "$out/tests" input_panel::tests::
 "$out/tests" workspace_geometry::tests::

@@ -287,6 +287,19 @@ pub(super) struct GpuCompositor {
 }
 
 impl GpuCompositor {
+    pub(super) fn is_accelerated(&self) -> bool {
+        // A requested SWS/SGFX backend is not evidence of acceleration. Read
+        // the selected target, including after a session rebuild. Unknown
+        // dynamically installed backends must not opt into timed animation.
+        matches!(
+            self.target.backend,
+            sgfx::BackendKind::Wgpu
+                | sgfx::BackendKind::Metal
+                | sgfx::BackendKind::ScarletVirgl
+                | sgfx::BackendKind::ScarletAdreno
+        )
+    }
+
     /// Create the optional GPU compositor after confirming required capabilities.
     pub(super) fn new(width: u32, height: u32, cursor: &Cursor) -> Result<Self, &'static str> {
         let mut target = MappedTarget::open_swapchain(width, height)

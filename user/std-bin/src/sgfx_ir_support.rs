@@ -98,6 +98,8 @@ struct TargetSlot {
 
 #[cfg(target_os = "scarlet")]
 pub(crate) struct MappedTarget {
+    /// The device actually opened by SGFX, including automatic selection.
+    pub(crate) backend: sgfx::BackendKind,
     pub(crate) resources: Rc<ResourceTable>,
     pub(crate) texture: TextureId,
     pub(crate) width: u32,
@@ -140,6 +142,7 @@ impl MappedTarget {
     ) -> Result<Self, Error> {
         let instance = Instance::new()?;
         let device = instance.open_device("/dev/gpu0")?;
+        let backend = device.backend();
         println!("sgfx: selected backend {}", device.backend());
         let capabilities = device.capabilities();
         if !supports_mapped_target(
@@ -151,11 +154,12 @@ impl MappedTarget {
             return Err(Error::UnsupportedCapabilities);
         }
         let context = device.create_context()?;
-        Self::from_context(context, width, height, target_count)
+        Self::from_context(context, backend, width, height, target_count)
     }
 
     fn from_context(
         context: Context,
+        backend: sgfx::BackendKind,
         width: u32,
         height: u32,
         target_count: usize,
@@ -193,6 +197,7 @@ impl MappedTarget {
         let mut session = context.create_mapped_target_session(Rc::clone(&resources), &targets)?;
         let tracked_submission = session.executor().supports_async_submission();
         Ok(Self {
+            backend,
             resources,
             texture,
             width,

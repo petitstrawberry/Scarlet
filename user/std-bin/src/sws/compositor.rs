@@ -2292,6 +2292,7 @@ fn is_shell_app_id(app_id: &[u8]) -> bool {
         || app_id == b"org.scarlet-os.desktop.launcher"
         || app_id == b"org.scarlet-os.desktop.shell"
         || app_id == b"org.scarlet-os.desktop.shell.home"
+        || app_id == b"org.scarlet-os.desktop.shell.home-backdrop"
         || app_id == b"org.scarlet-os.desktop.shell.console-chrome"
         || app_id == sws_protocol::workspace::CONSOLE_HOME_APP_ID.as_bytes()
 }
@@ -2439,6 +2440,9 @@ pub struct Compositor {
     tablet_drag_origin: Option<sws_protocol::workspace::ShellPresentation>,
     tablet_navigation_source: Option<PointerSource>,
     tablet_motion: Option<tablet_motion::Motion>,
+    drawer_motion: Option<tablet_motion::Motion>,
+    /// Wait for the shell to submit its new Home content before revealing it.
+    drawer_open_pending: bool,
     direct_touch_grabs: Vec<DirectTouchGrab>,
     next_touch_contact_id: u64,
     next_seat_serial: u64,
@@ -2456,9 +2460,9 @@ pub struct Compositor {
     /// Parent assignment is a separate IPC request, so tablet launch policy is
     /// committed on the first submitted frame instead of at window creation.
     pending_workspace_scenes: Vec<u32>,
-    /// Apply geometry-changing startup policy only after the initial client
-    /// frame has been presented with its original buffer identity.
-    window_policy_after_present: bool,
+    /// Apply startup policy after accepting the initial buffer and classifying
+    /// the complete IPC batch, before any composition can expose that buffer.
+    window_policy_pending: bool,
     lid_closed: bool,
     ime_popup_windows: Vec<ImePopupWindow>,
     input_panel_window: Option<u32>,
@@ -2911,6 +2915,8 @@ impl Compositor {
             tablet_drag_origin: None,
             tablet_navigation_source: None,
             tablet_motion: None,
+            drawer_motion: None,
+            drawer_open_pending: false,
             direct_touch_grabs: Vec::new(),
             next_touch_contact_id: 1,
             next_seat_serial: 1,
@@ -2925,7 +2931,7 @@ impl Compositor {
             ),
             last_shell_presentation: sws_protocol::workspace::ShellPresentation::Workspace,
             pending_workspace_scenes: Vec::new(),
-            window_policy_after_present: false,
+            window_policy_pending: false,
             lid_closed: input_environment.lid_closed(),
             ime_popup_windows: Vec::new(),
             input_panel_window: None,
@@ -4247,6 +4253,18 @@ impl Compositor {
         strict_error: &'static str,
     ) -> Result<(), &'static str> {
         self.gpu_compositor = None;
+        let window_ids = self
+            .window_manager
+            .get_windows()
+            .iter()
+            .map(|window| window.id)
+            .collect::<Vec<_>>();
+        for window_id in window_ids {
+            if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                window.discard_native_sgfx_generation();
+            }
+        }
+        self.finish_unaccelerated_animations();
         self.gpu_admission_retry.clear();
         self.full_redraw_needed = true;
         self.pending_damage.clear();
@@ -6052,6 +6070,33 @@ impl Compositor {
         ))
     }
 
+    fn animations_enabled(&self) -> bool {
+        self.gpu_compositor
+            .as_ref()
+            .is_some_and(GpuCompositor::is_accelerated)
+    }
+
+    fn finish_unaccelerated_animations(&mut self) {
+        if self.animations_enabled() {
+            return;
+        }
+        // Keep user-driven dragging, but never continue a timed transition
+        // after losing acceleration (including automatic CPU fallback).
+        let settling = self
+            .tablet_motion
+            .as_ref()
+            .is_some_and(|motion| motion.started_ns.is_some());
+        if settling {
+            self.tablet_motion = None;
+        }
+        self.drawer_open_pending = false;
+        let drawer = self.drawer_motion.take().is_some();
+        if settling || drawer {
+            self.update_overview_transforms();
+            self.full_redraw_needed = true;
+        }
+    }
+
     fn tablet_scene_snapshot(&self) -> Vec<(u32, PresentationTransform)> {
         self.window_manager
             .get_windows()
@@ -6152,11 +6197,7 @@ impl Compositor {
                 self.workspace_manager
                     .set_presentation(sws_protocol::workspace::ShellPresentation::Overview);
                 self.commit_workspace_change();
-                self.tablet_motion = Some(tablet_motion::Motion {
-                    starts,
-                    progress: 0.0,
-                    started_ns: None,
-                });
+                self.tablet_motion = Some(tablet_motion::Motion::drag(starts));
             }
             Some(Update::Drag { progress }) => {
                 if let Some(motion) = self.tablet_motion.as_mut() {
@@ -6190,11 +6231,11 @@ impl Compositor {
                     }
                     self.commit_workspace_change();
                     self.tablet_drag_origin = None;
-                    self.tablet_motion = Some(tablet_motion::Motion {
+                    self.tablet_motion = tablet_motion::Motion::settle(
                         starts,
-                        progress: 0.0,
-                        started_ns: Some(monotonic_time_ns()),
-                    });
+                        monotonic_time_ns(),
+                        self.animations_enabled(),
+                    );
                 }
             }
             Some(Update::Cancel) => {
@@ -6204,11 +6245,11 @@ impl Compositor {
                     self.workspace_manager.set_presentation(origin);
                     self.commit_workspace_change();
                     self.tablet_drag_origin = None;
-                    self.tablet_motion = Some(tablet_motion::Motion {
+                    self.tablet_motion = tablet_motion::Motion::settle(
                         starts,
-                        progress: 0.0,
-                        started_ns: Some(monotonic_time_ns()),
-                    });
+                        monotonic_time_ns(),
+                        self.animations_enabled(),
+                    );
                 }
             }
             None => {}
@@ -6838,10 +6879,12 @@ impl Compositor {
     fn event_wait_timeout_ns(&self) -> i64 {
         let now = monotonic_time_ns();
         let mut timeout = COMPOSITOR_IDLE_RECHECK_NS as u64;
-        if self
-            .tablet_motion
-            .as_ref()
-            .is_some_and(|motion| motion.started_ns.is_some())
+        if self.animations_enabled()
+            && (self
+                .tablet_motion
+                .as_ref()
+                .is_some_and(|motion| motion.started_ns.is_some())
+                || self.drawer_motion.is_some())
         {
             timeout = timeout.min(FRAME_BATCH_INTERVAL_NS);
         }
@@ -7025,6 +7068,10 @@ impl Compositor {
         for window_id in ready_workspace_scenes {
             self.finalize_pending_workspace_scene(window_id);
         }
+        if self.window_policy_pending {
+            self.window_policy_pending = false;
+            self.apply_submitted_window_policy();
+        }
 
         // Remote capture and virtual input use a separate privileged protocol,
         // but converge on the same compositor thread and input pipeline.
@@ -7078,15 +7125,24 @@ impl Compositor {
             self.cursor.advance_animation(monotonic_time_ns());
         }
 
+        self.finish_unaccelerated_animations();
+        let mut motion_changed = false;
         if let Some(motion) = self.tablet_motion.as_mut() {
             let settling = motion.started_ns.is_some();
             if motion.advance(monotonic_time_ns()) {
                 self.tablet_motion = None;
             }
-            if settling {
-                self.update_overview_transforms();
-                self.full_redraw_needed = true;
+            motion_changed |= settling;
+        }
+        if let Some(motion) = self.drawer_motion.as_mut() {
+            if motion.advance(monotonic_time_ns()) {
+                self.drawer_motion = None;
             }
+            motion_changed = true;
+        }
+        if motion_changed {
+            self.update_overview_transforms();
+            self.full_redraw_needed = true;
         }
         self.refresh_input_panel_occlusion();
         Ok(())
@@ -7247,11 +7303,6 @@ impl Compositor {
             // policy applied below may expose a different scene, which must
             // first reach its own redraw before receiving callbacks.
             self.grant_pending_frame_callbacks();
-
-            if self.window_policy_after_present {
-                self.window_policy_after_present = false;
-                let _ = self.apply_post_present_window_policy();
-            }
         }
         if !presented {
             // A never-submitted surface needs one bootstrap callback before it
@@ -8908,7 +8959,7 @@ impl Compositor {
             gpu.mark_window_damage(window_id, 0, 0, width, height);
         }
         if mapped {
-            self.note_window_frame_submitted(window_id);
+            self.note_window_frame_submitted(window_id, None);
         }
         self.send_extension_buffer_released(client_id, previous);
         if let Some((_, old)) = old {
@@ -9147,7 +9198,7 @@ impl Compositor {
             }
         }
         if buffer_id != 0 && (buffer_changed || submitted_damage) {
-            self.note_window_frame_submitted(window_id);
+            self.note_window_frame_submitted(window_id, None);
         }
         self.send_extension_buffer_released(client_id, released);
     }
@@ -9836,28 +9887,65 @@ impl Compositor {
         true
     }
 
-    fn note_window_frame_submitted(&mut self, window_id: u32) {
+    fn note_window_frame_submitted(
+        &mut self,
+        window_id: u32,
+        sgfx_frame: Option<((u32, u32), (u32, u32))>,
+    ) {
         let focused = self.windowing_mode == sws_protocol::WindowingMode::Focused;
         let presentation_counter = self.event_counter;
         let Some((first_frame_needs_policy, presentation_content_became_ready)) =
             self.window_manager.get_window_mut(window_id).map(|window| {
                 let first = window.note_frame_submission(presentation_counter);
+                let (extent, generation) = sgfx_frame.map_or(
+                    (window.backing_extent(), None),
+                    |(extent, generation)| (extent, Some(generation)),
+                );
+                let policy_ready = window.complete_native_policy_frame(extent, generation);
+                let content_ready = window.validate_presentation_content();
                 (
                     first && (window.pending_maximize || focused),
-                    window.validate_presentation_content() && window.is_logically_presented(),
+                    (policy_ready || content_ready) && window.is_presented(),
                 )
             })
         else {
             return;
         };
         if first_frame_needs_policy {
-            self.window_policy_after_present = true;
+            self.window_policy_pending = true;
         }
         if presentation_content_became_ready {
             // Buffer damage was evaluated while the stale-content gate was
             // closed. Reveal the replacement atomically with a full redraw.
             self.full_redraw_needed = true;
+            self.sync_shell_presentation_focus();
             self.route_pointer_motion_at_cursor();
+        }
+        if self.drawer_open_pending
+            && self.animations_enabled()
+            && self.workspace_manager.presentation()
+                == sws_protocol::workspace::ShellPresentation::Home
+            && let Some(window) = self.window_manager.get_window(window_id)
+            && window.window_type == WindowType::ShellBackground
+            && window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home")
+        {
+            let (x, y, width, height) = window.surface_geometry();
+            self.drawer_motion = tablet_motion::Motion::drawer(
+                window_id,
+                PresentationTransform {
+                    x,
+                    y,
+                    width,
+                    height,
+                    opacity: 1.0,
+                },
+                self.output_scale_milli,
+                monotonic_time_ns(),
+                true,
+            );
+            self.drawer_open_pending = false;
+            self.update_overview_transforms();
+            self.full_redraw_needed = true;
         }
     }
 
@@ -9895,7 +9983,7 @@ impl Compositor {
         self.finish_policy_geometry_change(window_id, old_surface, old_state_flags, old_visible)
     }
 
-    fn apply_post_present_window_policy(&mut self) -> bool {
+    fn apply_submitted_window_policy(&mut self) -> bool {
         let pending_maximize: Vec<u32> = self
             .window_manager
             .get_windows()
@@ -10033,6 +10121,9 @@ impl Compositor {
             window.center_on_first_geometry = false;
             window.x = target_surface.0;
             window.y = target_surface.1;
+            if (window.width, window.height) != (target_surface.2, target_surface.3) {
+                window.require_native_policy_frame();
+            }
             window.width = target_surface.2;
             window.height = target_surface.3;
         }
@@ -10599,6 +10690,24 @@ impl Compositor {
             .get_windows()
             .iter()
             .map(|window| {
+                if let Some(motion) = self.drawer_motion.as_ref()
+                    && motion.contains(window.id)
+                {
+                    let (x, y, width, height) = window.surface_geometry();
+                    let transform = motion.project(
+                        window.id,
+                        PresentationTransform {
+                            x,
+                            y,
+                            width,
+                            height,
+                            opacity: 1.0,
+                        },
+                    );
+                    // Only the transparent drawer surface moves. Its separate
+                    // backdrop stays stationary throughout the reveal.
+                    return (window.id, Some(transform), Vec::new(), None, 0);
+                }
                 let root_id = self.top_level_window_id(window.id);
                 let workspace_id = self.workspace_manager.workspace_for_window(root_id);
                 let transform = if shell_presentation
@@ -10716,6 +10825,8 @@ impl Compositor {
                 .rev()
                 .find(|window| {
                     window.window_type == WindowType::ShellBackground
+                        && window.app_id.as_deref()
+                            != Some(b"org.scarlet-os.desktop.shell.home-backdrop")
                         && window.is_logically_presented()
                 })
                 .map(|window| window.id);
@@ -10781,7 +10892,13 @@ impl Compositor {
                 .workspace_manager
                 .set_presentation(sws_protocol::workspace::ShellPresentation::Home);
         let presentation = self.workspace_manager.presentation();
-        let transition_starts = (self.tablet_mode
+        if presentation != self.last_shell_presentation {
+            self.drawer_motion = None;
+            self.drawer_open_pending = self.animations_enabled()
+                && !self.console_shell_present()
+                && presentation == sws_protocol::workspace::ShellPresentation::Home;
+        }
+        let transition_starts = (self.animations_enabled()
             && self.tablet_drag_origin.is_none()
             && presentation != self.last_shell_presentation)
             .then(|| self.tablet_scene_snapshot());
@@ -10802,10 +10919,14 @@ impl Compositor {
             .collect::<Vec<_>>();
         let mut changed = normalized;
         let mut visibility_changed = Vec::new();
+        let mut decoration_configures = Vec::new();
 
         if withhold_shell_background {
             for window_id in &window_ids {
-                if let Some(window) = self.window_manager.get_window_mut(*window_id) {
+                if let Some(window) = self.window_manager.get_window_mut(*window_id)
+                    && window.app_id.as_deref()
+                        != Some(b"org.scarlet-os.desktop.shell.home-backdrop")
+                {
                     changed |= window.invalidate_presentation_content();
                 }
             }
@@ -10835,6 +10956,9 @@ impl Compositor {
                 // Publish decoration state before either entry or restoration
                 // sends a configure; equal-sized transitions still notify.
                 self.send_window_state_changed(*window_id);
+                if let Some(window) = self.window_manager.get_window(*window_id) {
+                    decoration_configures.push((*window_id, (window.width, window.height)));
+                }
                 changed = true;
             }
             if !scene_managed && !self.window_manager.is_fullscreen(*window_id) {
@@ -10880,12 +11004,22 @@ impl Compositor {
             }
         }
 
+        // A same-sized tablet transition still needs a replacement backing.
+        // Resized surfaces already received their configure from geometry policy.
+        for (window_id, previous_extent) in decoration_configures {
+            if self.window_manager.get_window(window_id).is_some_and(|window| {
+                (window.width, window.height) == previous_extent
+            }) {
+                self.send_current_window_configure(window_id);
+            }
+        }
+
         if let Some(starts) = transition_starts {
-            self.tablet_motion = Some(tablet_motion::Motion {
+            self.tablet_motion = tablet_motion::Motion::settle(
                 starts,
-                progress: 0.0,
-                started_ns: Some(monotonic_time_ns()),
-            });
+                monotonic_time_ns(),
+                self.animations_enabled(),
+            );
             changed |= self.update_overview_transforms();
         }
         if changed {
@@ -11518,7 +11652,7 @@ impl Compositor {
                         damage_height,
                     );
                 }
-                self.note_window_frame_submitted(window_id);
+                self.note_window_frame_submitted(window_id, None);
                 if !presented {
                     return Ok(false);
                 }
@@ -11609,6 +11743,9 @@ impl Compositor {
                 };
                 match result {
                     Ok(()) => {
+                        if let Some(window) = self.window_manager.get_window_mut(window_id) {
+                            window.note_native_sgfx_registration(compositor_epoch, generation);
+                        }
                         let payload = sws_protocol::payload_sgfx_buffer_identity(
                             window_id,
                             buffer_id,
@@ -11710,7 +11847,10 @@ impl Compositor {
                                 ));
                             }
                         }
-                        self.note_window_frame_submitted(window_id);
+                        self.note_window_frame_submitted(
+                            window_id,
+                            Some((damage.extent, (compositor_epoch, generation))),
+                        );
                     }
                     Err(error) => {
                         println!(
@@ -12701,7 +12841,7 @@ impl Compositor {
                             damage_height,
                         );
                     }
-                    self.note_window_frame_submitted(window_id);
+                    self.note_window_frame_submitted(window_id, None);
                 }
             }
             IpcEvent::ExtensionAttachBuffer {

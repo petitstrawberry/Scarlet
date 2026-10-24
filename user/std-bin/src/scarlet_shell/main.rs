@@ -88,6 +88,7 @@ const WINDOW_LIST_REFRESH_TICKS: u32 = 60;
 const OVERVIEW_MENU_INDEX: usize = usize::MAX;
 const CONTROL_CENTER_SCENE_KEY: &str = "control-center";
 const HOME_SCENE_KEY: &str = "home";
+const HOME_BACKDROP_SCENE_KEY: &str = "home-backdrop";
 const CONSOLE_CHROME_SCENE_KEY: &str = "console-chrome";
 const HOME_CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const HOME_CATALOG_TIMEOUT_MS: u64 = 3_000;
@@ -3034,7 +3035,6 @@ impl ShellApp {
         let shell_layout = self.shell_layout.get();
         let presentation = self.shell_presentation();
         let shell_state_ready = self.workspace_state.get().is_some();
-        let shell_visible = shell_state_ready && presentation != sws::ShellPresentation::Workspace;
         let drawer_padding = home_drawer_padding(width);
         let columns = home_grid_columns(width);
         let row_height = if height < 760.0 { 110.0 } else { 116.0 };
@@ -3257,11 +3257,6 @@ impl ShellApp {
                 right: 0.0,
             })
             .frame(width, height)
-            .background(if shell_visible {
-                HOME_BACKDROP_TINT
-            } else {
-                HOME_BACKDROP_TINT.with_opacity(0.0)
-            })
             .on_key(move |event| key_app.handle_home_key(event))
     }
 }
@@ -3271,6 +3266,24 @@ impl Application for ShellApp {
         &self,
         key: &scarlet_ui::scene::SceneWindowKey,
     ) -> Option<Vec<&dyn scarlet_ui::state::Listenable>> {
+        if key.as_str() == HOME_BACKDROP_SCENE_KEY {
+            return Some(vec![&self.screen_width, &self.screen_height]);
+        }
+        if key.as_str() == HOME_SCENE_KEY && self.mode.get() != ShellMode::Console {
+            // Clock, focus and menu updates must not submit stale drawer frames
+            // while the workspace-role connection delivers the opening state.
+            return Some(vec![
+                &self.screen_width,
+                &self.screen_height,
+                &self.shell_layout,
+                &self.workspace_state,
+                &self.home_filtered_applications,
+                &self.home_query,
+                &self.home_selected,
+                &self.home_hovered,
+                &self.home_search_focused,
+            ]);
+        }
         if key.as_str() == "main" {
             // Home selection/catalog state does not change the status bar.
             // Subscribing this scene to every ShellApp state submits another
@@ -3334,6 +3347,9 @@ impl Application for ShellApp {
             self.control_center_window_id
                 .set(Some(ctx.platform_window_id as u32));
             let _ = window.set_opaque(false);
+        } else if ctx.scene_key.as_str() == HOME_BACKDROP_SCENE_KEY {
+            let _ = window.set_opaque(false);
+            let _ = window.set_surface_regions(true, &[]);
         } else if ctx.scene_key.as_str() == HOME_SCENE_KEY {
             self.home_window_id.set(ctx.platform_window_id as u32);
             let _ = window.set_opaque(false);
@@ -3419,7 +3435,7 @@ impl Application for ShellApp {
             }
             return;
         }
-        if ctx.scene_key.as_str() == HOME_SCENE_KEY {
+        if matches!(ctx.scene_key.as_str(), HOME_SCENE_KEY | HOME_BACKDROP_SCENE_KEY) {
             let desired = Size::new(self.screen_width.get(), self.screen_height.get());
             if status_bar_resize_needed(window.size(), desired)
                 && let Err(error) = window.resize(
@@ -3653,24 +3669,43 @@ impl Application for ShellApp {
                     y: control_center_body_y,
                 })
                 .size(control_center_size),
-                Window::new("Home", self.home_content())
-                    .scene_key(HOME_SCENE_KEY)
-                    .open_at_launch(false)
-                    .app_id(if self.mode.get() == ShellMode::Console {
-                        sws_protocol::workspace::CONSOLE_HOME_APP_ID
-                    } else {
-                        "org.scarlet-os.desktop.shell.home"
-                    })
-                    .decorated(false)
-                    .background_color(scarlet_ui::color::Color::TRANSPARENT)
-                    .opaque(false)
-                    .window_type(sws_protocol::window_types::SHELL_BACKGROUND)
-                    .focus_on_create(false)
-                    .active_on_focus(false)
-                    .resizable(false)
-                    .movable(false)
-                    .placement(WindowPlacement::At { x: 0, y: 0 })
-                    .size(Size::new(screen_width, screen_height)),
+                (
+                    // Keep the dimmed desktop stationary when only the drawer moves.
+                    // SWS reveals this pre-rendered, non-interactive surface together
+                    // with the workspace cards; it never fades out on drawer entry.
+                    Window::new("Home Backdrop", Spacer::new())
+                        .scene_key(HOME_BACKDROP_SCENE_KEY)
+                        .open_at_launch(false)
+                        .app_id("org.scarlet-os.desktop.shell.home-backdrop")
+                        .decorated(false)
+                        .background_color(HOME_BACKDROP_TINT)
+                        .opaque(false)
+                        .window_type(sws_protocol::window_types::SHELL_BACKGROUND)
+                        .focus_on_create(false)
+                        .active_on_focus(false)
+                        .resizable(false)
+                        .movable(false)
+                        .placement(WindowPlacement::At { x: 0, y: 0 })
+                        .size(Size::new(screen_width, screen_height)),
+                    Window::new("Home", self.home_content())
+                        .scene_key(HOME_SCENE_KEY)
+                        .open_at_launch(false)
+                        .app_id(if self.mode.get() == ShellMode::Console {
+                            sws_protocol::workspace::CONSOLE_HOME_APP_ID
+                        } else {
+                            "org.scarlet-os.desktop.shell.home"
+                        })
+                        .decorated(false)
+                        .background_color(scarlet_ui::color::Color::TRANSPARENT)
+                        .opaque(false)
+                        .window_type(sws_protocol::window_types::SHELL_BACKGROUND)
+                        .focus_on_create(false)
+                        .active_on_focus(false)
+                        .resizable(false)
+                        .movable(false)
+                        .placement(WindowPlacement::At { x: 0, y: 0 })
+                        .size(Size::new(screen_width, screen_height)),
+                ),
                 Window::new(
                     "Console Controls",
                     self.console_content(console::ConsolePart::Chrome),
@@ -3722,6 +3757,9 @@ impl Application for ShellApp {
         // keeps it workspace-invisible until Home/Overview is selected, so the
         // first reveal is only a visibility change and never exposes a
         // create-then-move or create-then-resize frame.
+        if self.mode.get() != ShellMode::Console {
+            open_window(HOME_BACKDROP_SCENE_KEY);
+        }
         open_window(HOME_SCENE_KEY);
         if self.mode.get() == ShellMode::Console {
             open_window(CONSOLE_CHROME_SCENE_KEY);

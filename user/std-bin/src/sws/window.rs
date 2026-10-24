@@ -110,6 +110,14 @@ impl Default for WindowType {
 
 const FOCUSED_NORMAL_WINDOW_MARGIN: u32 = 10;
 
+/// A resize response is not a frame. Both the backing replacement and its
+/// subsequent commit must arrive before native tablet content can be sampled.
+#[derive(Debug, Clone, Copy)]
+struct NativePolicyFrame {
+    awaiting_resize: bool,
+    stale_sgfx_generation: Option<(u32, u32)>,
+}
+
 /// Compositor-only visual rectangle used by Overview and shell transitions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PresentationTransform {
@@ -248,6 +256,11 @@ pub struct Window {
     pub workspace_layout_managed: bool,
     /// Authoritative decoration policy, independent of actual geometry changes.
     pub tablet_managed: bool,
+    /// Native clients must replace their backing and commit after tablet policy
+    /// changes. Logical visibility stays independent so rendering can progress.
+    native_policy_frame: Option<NativePolicyFrame>,
+    /// Latest registered SGFX allocation, including buffers not yet committed.
+    native_sgfx_generation: Option<(u32, u32)>,
     /// Decoration outsets retained while tablet presentation requires zero outsets.
     tablet_restore_insets: Option<WindowGeometryInsets>,
     /// Ignore a queued tablet zero-inset report until normal geometry is reported.
@@ -639,6 +652,8 @@ impl Window {
             focused_mode_managed: false,
             workspace_layout_managed: false,
             tablet_managed: false,
+            native_policy_frame: None,
+            native_sgfx_generation: None,
             tablet_restore_insets: None,
             pending_desktop_geometry: false,
             workspace_restore_geometry: None,
@@ -710,6 +725,8 @@ impl Window {
             focused_mode_managed: false,
             workspace_layout_managed: false,
             tablet_managed: false,
+            native_policy_frame: None,
+            native_sgfx_generation: None,
             tablet_restore_insets: None,
             pending_desktop_geometry: false,
             workspace_restore_geometry: None,
@@ -809,6 +826,8 @@ impl Window {
             focused_mode_managed: false,
             workspace_layout_managed: false,
             tablet_managed: false,
+            native_policy_frame: None,
+            native_sgfx_generation: None,
             tablet_restore_insets: None,
             pending_desktop_geometry: false,
             workspace_restore_geometry: None,
@@ -868,7 +887,9 @@ impl Window {
     ///
     /// `true` when the retained surface may be sampled and receive pointer input.
     pub const fn is_presented(&self) -> bool {
-        self.is_logically_presented() && self.presentation_content_ready
+        self.is_logically_presented()
+            && self.presentation_content_ready
+            && self.native_policy_frame.is_none()
     }
 
     /// Return the compositor destination rectangle for this surface.
@@ -1100,6 +1121,74 @@ impl Window {
             self.pending_desktop_geometry = insets != WindowGeometryInsets::default();
         }
         self.tablet_managed = active;
+        if active {
+            self.require_native_policy_frame();
+        } else {
+            self.native_policy_frame = None;
+        }
+        true
+    }
+
+    /// Withhold native content until a configure has produced a new backing.
+    /// Extension clients have their own attach/configure lifecycle.
+    pub(super) fn require_native_policy_frame(&mut self) {
+        if self.owner_client_id.is_some() && self.tablet_managed {
+            self.native_policy_frame = Some(NativePolicyFrame {
+                awaiting_resize: true,
+                stale_sgfx_generation: self.native_sgfx_generation,
+            });
+        }
+    }
+
+    pub(super) fn note_native_sgfx_registration(&mut self, epoch: u32, generation: u32) {
+        self.native_sgfx_generation = Some((epoch, generation));
+    }
+
+    /// Backend loss discards every shared image. Preserve the resize/commit
+    /// barrier, but allow a freshly painted CPU backing to satisfy it.
+    pub(super) fn discard_native_sgfx_generation(&mut self) {
+        self.native_sgfx_generation = None;
+        if let Some(pending) = self.native_policy_frame.as_mut() {
+            pending.stale_sgfx_generation = None;
+        }
+    }
+
+    /// Called only after installing a matching SHM replacement. Do not reveal
+    /// it yet: allocation precedes painting, including for SGFX clients.
+    pub(super) fn note_native_backing_replaced(&mut self) {
+        if self.backing_extent() != (self.width, self.height) {
+            return;
+        }
+        if let Some(pending) = self.native_policy_frame.as_mut() {
+            pending.awaiting_resize = false;
+            pending.stale_sgfx_generation = self.native_sgfx_generation;
+        }
+    }
+
+    /// Validate the actual submitted backing, never the destination geometry.
+    /// SGFX must advance beyond every generation registered before the resize;
+    /// an old same-sized image is still stale even after a new SHM allocation.
+    pub(super) fn complete_native_policy_frame(
+        &mut self,
+        extent: (u32, u32),
+        sgfx_generation: Option<(u32, u32)>,
+    ) -> bool {
+        let Some(pending) = self.native_policy_frame else {
+            return false;
+        };
+        if pending.awaiting_resize || extent != (self.width, self.height) {
+            return false;
+        }
+        if let Some((old_epoch, old_generation)) = pending.stale_sgfx_generation {
+            let Some((epoch, generation)) = sgfx_generation else {
+                // CPU damage cannot validate an image still retained by SGFX.
+                return false;
+            };
+            if epoch == old_epoch && generation <= old_generation {
+                return false;
+            }
+        }
+        self.native_policy_frame = None;
         true
     }
 
@@ -1502,6 +1591,8 @@ impl WindowManager {
             focused_mode_managed: false,
             workspace_layout_managed: false,
             tablet_managed: false,
+            native_policy_frame: None,
+            native_sgfx_generation: None,
             tablet_restore_insets: None,
             pending_desktop_geometry: false,
             workspace_restore_geometry: None,
@@ -1593,6 +1684,8 @@ impl WindowManager {
             focused_mode_managed: false,
             workspace_layout_managed: false,
             tablet_managed: false,
+            native_policy_frame: None,
+            native_sgfx_generation: None,
             tablet_restore_insets: None,
             pending_desktop_geometry: false,
             workspace_restore_geometry: None,
@@ -2144,6 +2237,7 @@ impl WindowManager {
             w.shm_format = 0;
             w.external_buffer_id = None;
             w.external_buffer_commit_serial = None;
+            w.note_native_backing_replaced();
             true
         } else {
             false
@@ -2934,6 +3028,98 @@ mod tests {
     use std::vec::Vec;
 
     use super::{WindowManager, WindowType, rounded_rect_contains_point, rounded_rect_row_span};
+
+    fn native_tablet_window() -> super::Window {
+        let mut window = super::Window::new(1, 0, 0, 800, 600);
+        window.owner_client_id = Some(1);
+        window.note_frame_submission(0);
+        window.validate_presentation_content();
+        window
+    }
+
+    #[test]
+    fn tablet_launch_waits_for_resize_and_painted_cpu_backing() {
+        let mut window = native_tablet_window();
+        assert!(window.is_presented());
+        window.set_tablet_managed(true);
+        window.width = 1200;
+        window.height = 800;
+        assert!(!window.is_presented());
+        assert!(window.is_logically_presented());
+        assert_eq!(window.state_flags() & sws_protocol::window_state::SUSPENDED, 0);
+        assert!(!window.complete_native_policy_frame((800, 600), None));
+        // Destination dimensions alone cannot validate a stale submission.
+        assert!(!window.complete_native_policy_frame((1200, 800), None));
+        window.note_native_backing_replaced(); // old backing is still attached
+        assert!(!window.complete_native_policy_frame((1200, 800), None));
+        window.set_backing_extent(1200, 800);
+        window.note_native_backing_replaced();
+        assert!(!window.is_presented(), "allocation is not a painted frame");
+        assert!(!window.complete_native_policy_frame((800, 600), None));
+        assert!(window.complete_native_policy_frame((1200, 800), None));
+        assert!(window.is_presented());
+        assert!(!window.complete_native_policy_frame((1200, 800), None));
+    }
+
+    #[test]
+    fn tablet_same_extent_rejects_old_sgfx_generation_after_resize() {
+        let mut window = native_tablet_window();
+        window.note_native_sgfx_registration(1, 7);
+        window.set_tablet_managed(true);
+        assert!(!window.complete_native_policy_frame((800, 600), Some((1, 7))));
+        window.note_native_backing_replaced();
+        assert!(!window.is_presented());
+        assert!(!window.complete_native_policy_frame((800, 600), None));
+        assert!(!window.complete_native_policy_frame((800, 600), Some((1, 7))));
+        window.note_native_sgfx_registration(1, 8);
+        assert!(!window.is_presented(), "registration is not a frame");
+        assert!(!window.complete_native_policy_frame((640, 480), Some((1, 8))));
+        assert!(window.complete_native_policy_frame((800, 600), Some((1, 8))));
+        assert!(window.is_presented());
+    }
+
+    #[test]
+    fn tablet_gpu_fallback_keeps_resize_and_paint_barrier() {
+        for resized_before_loss in [false, true] {
+            let mut window = native_tablet_window();
+            window.note_native_sgfx_registration(1, 7);
+            window.set_tablet_managed(true);
+            if resized_before_loss {
+                window.note_native_backing_replaced();
+            }
+            window.discard_native_sgfx_generation();
+            assert!(!window.is_presented(), "backend loss is not a painted frame");
+            if !resized_before_loss {
+                assert!(!window.complete_native_policy_frame((800, 600), None));
+                window.note_native_backing_replaced();
+            }
+            assert!(!window.is_presented());
+            assert!(!window.complete_native_policy_frame((640, 480), None));
+            assert!(window.complete_native_policy_frame((800, 600), None));
+            assert!(window.is_presented());
+            // A later tablet configure must not resurrect the old GPU floor.
+            window.require_native_policy_frame();
+            window.note_native_backing_replaced();
+            assert!(window.complete_native_policy_frame((800, 600), None));
+        }
+    }
+
+    #[test]
+    fn tablet_new_policy_requires_another_backing_without_suspending_callbacks() {
+        let mut window = native_tablet_window();
+        window.set_tablet_managed(true);
+        window.note_native_backing_replaced();
+        window.require_native_policy_frame();
+        assert!(!window.complete_native_policy_frame((800, 600), None));
+        assert!(super::super::frame_callback::frame_callback_is_ready(
+            window.is_logically_presented(), true, false, 1, 0,
+        ));
+        window.set_tablet_managed(false);
+        assert!(window.is_presented(), "leaving tablet mode cancels the gate");
+        window.parent = Some(2);
+        assert!(!window.set_tablet_managed(true));
+        assert!(window.is_presented(), "transients must remain ungated");
+    }
 
     #[test]
     fn tablet_presentation_excludes_transients_popups_shell_and_fixed_windows() {
