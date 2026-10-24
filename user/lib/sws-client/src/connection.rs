@@ -1028,6 +1028,7 @@ impl TransportState {
             | Event::FrameDone { surface_id, .. }
             | Event::SurfaceDestroyed { surface_id } => Some(*surface_id),
             Event::MenuItemActivated { window_id, .. }
+            | Event::WindowCloseRequested { window_id }
             | Event::PointerLockChanged { window_id, .. }
             | Event::SgfxFrameRejected { window_id, .. }
             | Event::SgfxBufferReleased { window_id, .. } => Some(*window_id),
@@ -3086,6 +3087,10 @@ impl TransportState {
                 self.push_event(Event::SgfxBackendLost { compositor_epoch });
                 true
             }
+            ServerMessage::WindowCloseRequested { window_id } => {
+                self.push_event(window_close_requested_event(window_id));
+                true
+            }
             ServerMessage::WindowDestroyed { window_id } => {
                 self.push_event(Event::SurfaceDestroyed {
                     surface_id: window_id,
@@ -3235,6 +3240,10 @@ impl TransportState {
     }
 }
 
+fn window_close_requested_event(window_id: u32) -> Event {
+    Event::WindowCloseRequested { window_id }
+}
+
 fn pointer_lock_event(window_id: u32, locked: bool) -> Event {
     Event::PointerLockChanged { window_id, locked }
 }
@@ -3288,6 +3297,36 @@ fn decode_workspace_response(
 #[cfg(test)]
 mod pointer_lock_tests {
     use super::*;
+
+    #[test]
+    fn close_request_decodes_to_a_window_event_not_surface_destruction() {
+        let payload = protocol::payload_window_close_requested(27);
+        let message = protocol::parse_server_message(
+            protocol::server_msg::WINDOW_CLOSE_REQUESTED,
+            &payload,
+        )
+        .unwrap();
+        let ServerMessage::WindowCloseRequested { window_id } = message else {
+            panic!("expected a close request");
+        };
+        let event = window_close_requested_event(window_id);
+        assert_eq!(event, Event::WindowCloseRequested { window_id: 27 });
+        assert!(TransportState::event_matches(
+            EventFilter::Window(27),
+            Some(window_id),
+            &event,
+        ));
+        assert!(!TransportState::event_matches(
+            EventFilter::Window(28),
+            Some(window_id),
+            &event,
+        ));
+        assert!(!TransportState::event_matches(
+            EventFilter::Sgfx(27),
+            Some(window_id),
+            &event,
+        ));
+    }
 
     #[test]
     fn converts_pointer_lock_server_event() {

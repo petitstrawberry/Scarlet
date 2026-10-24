@@ -551,6 +551,9 @@ pub mod server_msg {
     pub const GAMEPAD_INPUT: u32 = 39;
     pub const TOUCH_FRAME: u32 = 40;
     pub const CLIPBOARD_TEXT: u32 = 43;
+    /// Ask the owning client to close a window, allowing confirmation or cancellation.
+    /// Payload: one little-endian u32 window ID. This does not destroy the window.
+    pub const WINDOW_CLOSE_REQUESTED: u32 = 44;
 
     // Text input client events (200-219)
     pub const TEXT_INPUT_CREATED: u32 = 200;
@@ -657,6 +660,9 @@ pub mod text_input_content_hints {
     pub const SENSITIVE_DATA: u32 = 1 << 7;
     pub const LATIN: u32 = 1 << 8;
     pub const MULTILINE: u32 = 1 << 9;
+    /// Suppress automatic software-keyboard presentation for this editor.
+    /// Hardware input and IME remain enabled; explicit panel requests are allowed.
+    pub const NO_AUTO_SOFTWARE_KEYBOARD: u32 = 1 << 10;
 }
 
 /// Text input content purposes.
@@ -1765,6 +1771,10 @@ pub enum ServerMessage {
         height: u32,
     },
     WindowDestroyed {
+        window_id: u32,
+    },
+    /// Compositor requests closure; the client decides whether to destroy the window.
+    WindowCloseRequested {
         window_id: u32,
     },
     /// Server acknowledged a resize and provides the new SHM size.
@@ -3316,6 +3326,14 @@ pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessa
             let window_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
             Ok(ServerMessage::WindowDestroyed { window_id })
         }
+        server_msg::WINDOW_CLOSE_REQUESTED => {
+            if payload.len() != 4 {
+                return Err(ProtocolError::MalformedPayload);
+            }
+            Ok(ServerMessage::WindowCloseRequested {
+                window_id: read_u32(payload, 0)?,
+            })
+        }
         server_msg::GAMEPAD_INPUT => {
             let (window_id, state) = gamepad::State::parse(payload)?;
             Ok(ServerMessage::GamepadInput { window_id, state })
@@ -4612,6 +4630,12 @@ pub fn payload_window_destroyed(window_id: u32) -> [u8; 4] {
     window_id.to_le_bytes()
 }
 
+/// Build payload for server->client `WINDOW_CLOSE_REQUESTED`.
+/// The window remains alive until the owning client accepts and destroys it.
+pub fn payload_window_close_requested(window_id: u32) -> [u8; 4] {
+    window_id.to_le_bytes()
+}
+
 /// Build payload for server->client `INPUT_EVENT`.
 pub fn payload_input_event(
     window_id: u32,
@@ -5850,6 +5874,65 @@ mod tests {
         payload_window_created_configured, payload_window_state_changed, server_msg,
         window_placement, window_state,
     };
+
+    #[test]
+    fn window_close_requested_frame_round_trips_without_destroying() {
+        let window_id = 0x1234_5678;
+        let payload = super::payload_window_close_requested(window_id);
+        assert_eq!(payload, [0x78, 0x56, 0x34, 0x12]);
+        assert_eq!(payload, super::payload_window_destroyed(window_id));
+        let frame = super::encode_frame(server_msg::WINDOW_CLOSE_REQUESTED, &payload);
+        let header = MessageHeader::from_le_bytes(frame[..MessageHeader::SIZE].try_into().unwrap());
+        assert_eq!(header.msg_type_u32(), 44);
+        assert_eq!(header.payload_size, 4);
+        assert_eq!(header.flags, 0);
+        assert_eq!(header.request_id, 0);
+        assert_eq!(
+            parse_server_message(header.msg_type_u32(), &frame[MessageHeader::SIZE..]),
+            Ok(ServerMessage::WindowCloseRequested { window_id }),
+        );
+        assert_eq!(
+            parse_server_message(server_msg::WINDOW_DESTROYED, &payload),
+            Ok(ServerMessage::WindowDestroyed { window_id }),
+        );
+    }
+
+    #[test]
+    fn window_close_requested_rejects_malformed_payloads() {
+        for len in [0, 1, 2, 3, 5, 8] {
+            assert_eq!(
+                parse_server_message(server_msg::WINDOW_CLOSE_REQUESTED, &vec![0; len]),
+                Err(ProtocolError::MalformedPayload),
+            );
+        }
+    }
+
+    #[test]
+    fn software_keyboard_policy_round_trips_with_other_content_hints() {
+        let hint = super::text_input_content_hints::NO_AUTO_SOFTWARE_KEYBOARD
+            | super::text_input_content_hints::MULTILINE;
+        let purpose = super::text_input_content_purpose::NORMAL;
+        let payload = super::payload_text_input_set_content_type(27, hint, purpose);
+        assert_eq!(
+            parse_client_message(client_msg::TEXT_INPUT_SET_CONTENT_TYPE, &payload),
+            Ok(ClientMessageRef::TextInputSetContentType {
+                context_id: 27,
+                hint,
+                purpose,
+            }),
+        );
+        let context = super::input_panel::Context {
+            context_id: 27,
+            window_id: 9,
+            generation: 3,
+            content_hint: hint,
+            content_purpose: purpose,
+        };
+        assert_eq!(
+            parse_server_message(server_msg::INPUT_PANEL_CONTEXT, &context.encode()),
+            Ok(ServerMessage::InputPanelContext(context)),
+        );
+    }
 
     #[test]
     fn extension_buffer_object_lifecycle_round_trips() {

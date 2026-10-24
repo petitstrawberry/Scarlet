@@ -321,6 +321,9 @@ pub enum Event {
     SgfxBackendLost { compositor_epoch: u32 },
     /// Window was destroyed by server
     SurfaceDestroyed { surface_id: u32 },
+    /// Compositor asks to close a window. The client may confirm or cancel;
+    /// receiving this event does not destroy the surface or disconnect the client.
+    WindowCloseRequested { window_id: u32 },
     /// Focus changed to a different window
     FocusChanged {
         window_id: u32,
