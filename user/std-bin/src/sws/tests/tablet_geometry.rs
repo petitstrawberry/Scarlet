@@ -1,7 +1,13 @@
 //! Host harness for production geometry/state code; no compositor or OS calls.
 //! Run test-tablet-geometry.sh through the Scarlet Nix environment on AArch64.
+#[path = "../config.rs"]
+mod config;
 #[path = "../frame_callback.rs"]
 mod frame_callback;
+#[path = "../input.rs"]
+mod input;
+#[path = "../input_environment.rs"]
+mod input_environment;
 #[path = "../input_panel.rs"]
 mod input_panel;
 #[path = "../tablet_motion.rs"]
@@ -12,6 +18,41 @@ mod tablet_navigation;
 mod window;
 #[path = "../workspace_geometry.rs"]
 mod workspace_geometry;
+// Input frame tests exercise production decoding without starting device readers
+// or the compositor. Fail if a test unexpectedly crosses that boundary.
+mod ipc {
+    pub fn broadcast_input_environment_changed(_: super::input_environment::Snapshot) {
+        panic!("input test attempted IPC");
+    }
+    pub fn wake_compositor() {
+        panic!("input test attempted compositor wake");
+    }
+}
+mod input_environment_sbus {
+    pub fn queue_state_changed(_: super::input_environment::Snapshot) {
+        panic!("input test attempted SBus");
+    }
+}
+mod trace {
+    pub fn input_loop() {
+        panic!("input test started device reader");
+    }
+    pub fn input_event() {
+        panic!("input test started device reader");
+    }
+    pub fn input_empty() {
+        panic!("input test started device reader");
+    }
+    pub fn keyboard_loop() {
+        panic!("input test started keyboard reader");
+    }
+    pub fn keyboard_event() {
+        panic!("input test started keyboard reader");
+    }
+    pub fn keyboard_short_read() {
+        panic!("input test started keyboard reader");
+    }
+}
 mod compositor {
     pub fn is_sws_debug_enabled() -> bool {
         false

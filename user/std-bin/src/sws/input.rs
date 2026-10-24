@@ -685,9 +685,15 @@ impl PointerFrame {
         event: InputEvent,
     ) -> Option<Vec<CompositorInputEvent>> {
         match event.type_ {
-            event_types::EV_REL if !metadata.multitouch() => match event.code {
-                rel_codes::REL_X => self.rel_x = self.rel_x.saturating_add(event.value),
-                rel_codes::REL_Y => self.rel_y = self.rel_y.saturating_add(event.value),
+            event_types::EV_REL => match event.code {
+                rel_codes::REL_X if !metadata.multitouch() => {
+                    self.rel_x = self.rel_x.saturating_add(event.value)
+                }
+                rel_codes::REL_Y if !metadata.multitouch() => {
+                    self.rel_y = self.rel_y.saturating_add(event.value)
+                }
+                // Multiplexed devices (including QEMU's multitouch handler)
+                // can carry a physical mouse's wheel independently of contacts.
                 rel_codes::REL_WHEEL => self.wheel_dy = self.wheel_dy.saturating_add(event.value),
                 rel_codes::REL_HWHEEL => self.wheel_dx = self.wheel_dx.saturating_add(event.value),
                 _ => {}
@@ -1703,6 +1709,35 @@ mod tests {
                 & environment_capabilities::PEN,
             0
         );
+    }
+
+    #[test]
+    fn multitouch_pointer_wheel_survives_without_synthesizing_motion_or_contacts() {
+        let metadata = multitouch_metadata(InputDeviceKind::Touchscreen);
+        let source = PointerSource::Local(0);
+        let mut frame = PointerFrame::default();
+        for (code, value) in [
+            (rel_codes::REL_X, 17),
+            (rel_codes::REL_Y, 23),
+            (rel_codes::REL_WHEEL, -1),
+            (rel_codes::REL_WHEEL, -2),
+            (rel_codes::REL_HWHEEL, 1),
+        ] {
+            assert!(
+                frame
+                    .consume(metadata, source, event(event_types::EV_REL, code, value))
+                    .is_none()
+            );
+        }
+        let report = event(event_types::EV_SYN, syn_codes::SYN_REPORT, 0);
+        assert_eq!(
+            frame.consume(metadata, source, report),
+            Some(std::vec![CompositorInputEvent::MouseWheel {
+                dx: 1,
+                dy: -3
+            }])
+        );
+        assert_eq!(frame.consume(metadata, source, report), Some(Vec::new()));
     }
 
     #[test]

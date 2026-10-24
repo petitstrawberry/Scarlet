@@ -16,5 +16,6 @@ rustc --edition=2024 --test user/std-bin/src/sws/tests/tablet_geometry.rs --exte
 "$out/tests" window::rounded_geometry_tests::
 "$out/tests" input_panel::tests::
 "$out/tests" workspace_geometry::tests::
+"$out/tests" input::tests::
 rustc --edition=2024 --test --crate-name sws_protocol --cfg 'feature="std"' user/lib/sws-protocol/src/lib.rs -o "$out/protocol-tests"
 "$out/protocol-tests"
