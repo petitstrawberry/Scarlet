@@ -3601,7 +3601,7 @@ dependencies = [
 [[package]]
 name = "scarlet-scroll-motion"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=4ef377870defdf725410a4f153d4fc0c5c469842#4ef377870defdf725410a4f153d4fc0c5c469842"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=eede18df956fa4599027f783266c5879d1afe564#eede18df956fa4599027f783266c5879d1afe564"
 dependencies = [
  "libm",
 ]
@@ -3693,7 +3693,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=4ef377870defdf725410a4f153d4fc0c5c469842#4ef377870defdf725410a4f153d4fc0c5c469842"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=eede18df956fa4599027f783266c5879d1afe564#eede18df956fa4599027f783266c5879d1afe564"
 dependencies = [
  "scarlet-ui-core",
  "scarlet-ui-platform-sws",
@@ -3703,7 +3703,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-core"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=4ef377870defdf725410a4f153d4fc0c5c469842#4ef377870defdf725410a4f153d4fc0c5c469842"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=eede18df956fa4599027f783266c5879d1afe564#eede18df956fa4599027f783266c5879d1afe564"
 dependencies = [
  "ab_glyph",
  "bitflags 2.13.2",
@@ -3723,7 +3723,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-icons-tabler"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=4ef377870defdf725410a4f153d4fc0c5c469842#4ef377870defdf725410a4f153d4fc0c5c469842"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=eede18df956fa4599027f783266c5879d1afe564#eede18df956fa4599027f783266c5879d1afe564"
 dependencies = [
  "svgtypes",
 ]
@@ -3731,7 +3731,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-macros"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=4ef377870defdf725410a4f153d4fc0c5c469842#4ef377870defdf725410a4f153d4fc0c5c469842"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=eede18df956fa4599027f783266c5879d1afe564#eede18df956fa4599027f783266c5879d1afe564"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3741,7 +3741,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-platform-sws"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=4ef377870defdf725410a4f153d4fc0c5c469842#4ef377870defdf725410a4f153d4fc0c5c469842"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=eede18df956fa4599027f783266c5879d1afe564#eede18df956fa4599027f783266c5879d1afe564"
 dependencies = [
  "sbus-client 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=74b92fe8c43ba71467dd70083411c4574de01079)",
  "scarlet-desktop-config 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=74b92fe8c43ba71467dd70083411c4574de01079)",
@@ -3756,7 +3756,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-platform-winit"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=4ef377870defdf725410a4f153d4fc0c5c469842#4ef377870defdf725410a4f153d4fc0c5c469842"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=eede18df956fa4599027f783266c5879d1afe564#eede18df956fa4599027f783266c5879d1afe564"
 dependencies = [
  "block2",
  "objc2 0.5.2",
@@ -3776,7 +3776,7 @@ dependencies = [
 [[package]]
 name = "scarlet-ui-renderer-sgfx"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=4ef377870defdf725410a4f153d4fc0c5c469842#4ef377870defdf725410a4f153d4fc0c5c469842"
+source = "git+https://github.com/petitstrawberry/scarlet-ui?rev=eede18df956fa4599027f783266c5879d1afe564#eede18df956fa4599027f783266c5879d1afe564"
 dependencies = [
  "libm",
  "scarlet-ui-core",
