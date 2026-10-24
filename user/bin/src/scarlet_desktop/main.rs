@@ -55,8 +55,17 @@ fn spawn_component(name: &str, args: &[&str]) -> i32 {
                 argv.push(argv0);
                 argv.extend_from_slice(args);
 
+                // Keep the normal empty child environment. Forward only this
+                // explicit diagnostic flag to the shell, including respawns.
+                let diagnostic_env: &[&str] = if name == "scarlet-shell"
+                    && std::env::var("SCARLET_HOME_TRACE").as_deref() == Some("1")
+                {
+                    &["SCARLET_HOME_TRACE=1"]
+                } else {
+                    &[]
+                };
                 // If exec succeeds, it never returns.
-                let rc = execve(argv0, &argv, &[]);
+                let rc = execve(argv0, &argv, diagnostic_env);
                 if rc == 0 {
                     break;
                 }

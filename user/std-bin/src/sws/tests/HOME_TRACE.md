@@ -5,6 +5,10 @@ For a diagnostic boot, set `SCARLET_HOME_TRACE=1` in **both** the `sws` and
 dependency revision changes are required. Capture service stdout to a file;
 synchronous UART output can alter the scheduling being measured.
 
+When using the normal supervised session, set the flag on `scarlet-desktop`:
+it forwards only `SCARLET_HOME_TRACE=1` to its shell child and respawns. Other
+environment variables and the desktop-settings child retain their normal policy.
+
 Each process emits at most 24 records per boundary: occurrences 1–16 and powers
 of two through 4096. Counts are independent for each boundary and reset on process
 restart. All records use the OS monotonic nanosecond clock, so shell and SWS
