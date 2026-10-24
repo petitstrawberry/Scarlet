@@ -29,39 +29,22 @@ pub(super) fn rounded_rect_contains_point(
     if width == 0 || height == 0 {
         return false;
     }
-    let right = x.saturating_add(width as i32);
-    let bottom = y.saturating_add(height as i32);
-    if px < x || px >= right || py < y || py >= bottom {
+    let local_x = i64::from(px) - i64::from(x);
+    let local_y = i64::from(py) - i64::from(y);
+    let width = i64::from(width);
+    let height = i64::from(height);
+    if local_x < 0 || local_x >= width || local_y < 0 || local_y >= height {
         return false;
     }
 
-    let radius = radius.min(width / 2).min(height / 2);
-    if radius == 0 {
-        return true;
-    }
-    let radius_i32 = radius as i32;
-    let inner_left = x.saturating_add(radius_i32);
-    let inner_right = right.saturating_sub(radius_i32);
-    let inner_top = y.saturating_add(radius_i32);
-    let inner_bottom = bottom.saturating_sub(radius_i32);
-    if (px >= inner_left && px < inner_right) || (py >= inner_top && py < inner_bottom) {
-        return true;
-    }
-
-    let center_x = if px < inner_left {
-        inner_left
-    } else {
-        inner_right.saturating_sub(1)
-    };
-    let center_y = if py < inner_top {
-        inner_top
-    } else {
-        inner_bottom.saturating_sub(1)
-    };
-    let dx = i64::from(px.saturating_sub(center_x));
-    let dy = i64::from(py.saturating_sub(center_y));
-    dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
-        <= i64::from(radius).saturating_mul(i64::from(radius))
+    // Sample pixel centers, with circle centers on the geometric rectangle.
+    // Doubled coordinates preserve half-pixel radii for odd-sized capsules.
+    let radius = (i64::from(radius) * 2).min(width).min(height);
+    let px = local_x * 2 + 1;
+    let py = local_y * 2 + 1;
+    let dx = (px - px.clamp(radius, width * 2 - radius)).unsigned_abs();
+    let dy = (py - py.clamp(radius, height * 2 - radius)).unsigned_abs();
+    dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy)) <= (radius as u64) * (radius as u64)
 }
 
 pub(super) fn rounded_rect_row_span(
@@ -70,15 +53,15 @@ pub(super) fn rounded_rect_row_span(
     row_y: i32,
 ) -> Option<(i32, i32)> {
     let (x, y, width, height) = rect;
-    let right = x.saturating_add(width as i32);
-    let bottom = y.saturating_add(height as i32);
+    let right = (i64::from(x) + i64::from(width)).min(i64::from(i32::MAX)) as i32;
+    let bottom = (i64::from(y) + i64::from(height)).min(i64::from(i32::MAX)) as i32;
     if width == 0 || height == 0 || row_y < y || row_y >= bottom {
         return None;
     }
-    let radius = radius.min(width / 2).min(height / 2);
+    let corner_rows = radius.min(width / 2).min(height / 2);
     if radius == 0
-        || (row_y >= y.saturating_add(radius as i32)
-            && row_y < bottom.saturating_sub(radius as i32))
+        || (row_y >= y.saturating_add(corner_rows as i32)
+            && row_y < bottom.saturating_sub(corner_rows as i32))
     {
         return Some((x, right));
     }
@@ -3107,7 +3090,7 @@ mod tests {
         assert!(rounded_rect_contains_point(rect, 12, 22, 20));
         assert!(rounded_rect_contains_point(rect, 12, 10, 32));
         assert!(rounded_rect_contains_point(rect, 12, 60, 50));
-        assert_eq!(rounded_rect_row_span(rect, 12, 20), Some((22, 98)));
+        assert_eq!(rounded_rect_row_span(rect, 12, 20), Some((19, 101)));
         assert_eq!(rounded_rect_row_span(rect, 12, 50), Some((10, 110)));
     }
 
@@ -3453,5 +3436,94 @@ mod tests {
         assert_eq!(manager.get_focused_window_id(), Some(fullscreen_id));
         manager.focus_window(transient_id);
         assert_eq!(manager.get_focused_window_id(), Some(transient_id));
+    }
+}
+
+#[cfg(test)]
+mod rounded_geometry_tests {
+    use super::{rounded_rect_contains_point, rounded_rect_row_span};
+
+    // Independent signed-distance reference, evaluated at physical pixel centers.
+    fn reference(rect: (i32, i32, u32, u32), radius: u32, x: i32, y: i32) -> bool {
+        let (left, top, width, height) = rect;
+        let x = f64::from(x) - f64::from(left) + 0.5;
+        let y = f64::from(y) - f64::from(top) + 0.5;
+        let w = f64::from(width);
+        let h = f64::from(height);
+        if x < 0.0 || x >= w || y < 0.0 || y >= h {
+            return false;
+        }
+        let r = f64::from(radius).min(w / 2.0).min(h / 2.0);
+        let dx = ((x - w / 2.0).abs() - (w / 2.0 - r)).max(0.0);
+        let dy = ((y - h / 2.0).abs() - (h / 2.0 - r)).max(0.0);
+        dx * dx + dy * dy <= r * r
+    }
+
+    #[test]
+    fn rounded_pixels_and_spans_match_reference() {
+        for width in 0..=19 {
+            for height in 0..=19 {
+                for radius in [0, 1, 2, 5, 12, u32::MAX] {
+                    let rect = (-7, 11, width, height);
+                    for y in 10..=11 + height as i32 {
+                        let mut first = None;
+                        let mut end = 0;
+                        for x in -8..=-7 + width as i32 {
+                            let expected = reference(rect, radius, x, y);
+                            assert_eq!(
+                                rounded_rect_contains_point(rect, radius, x, y),
+                                expected,
+                                "rect={rect:?} radius={radius} point=({x}, {y})"
+                            );
+                            if expected {
+                                first.get_or_insert(x);
+                                end = x + 1;
+                            }
+                        }
+                        assert_eq!(
+                            rounded_rect_row_span(rect, radius, y),
+                            first.map(|x| (x, end)),
+                            "rect={rect:?} radius={radius} row={y}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rounded_pixels_are_mirrored_and_translation_invariant() {
+        for (width, height, radius) in [(100, 60, 12), (9, 7, 99), (2, 2, 1)] {
+            for y in 0..height {
+                for x in 0..width {
+                    let expected = rounded_rect_contains_point(
+                        (0, 0, width, height),
+                        radius,
+                        x as i32,
+                        y as i32,
+                    );
+                    assert_eq!(
+                        expected,
+                        rounded_rect_contains_point(
+                            (0, 0, width, height),
+                            radius,
+                            (width - 1 - x) as i32,
+                            (height - 1 - y) as i32
+                        )
+                    );
+                    for offset in [i32::MIN, -123, i32::MAX - 100] {
+                        assert_eq!(
+                            expected,
+                            rounded_rect_contains_point(
+                                (offset, offset, width, height),
+                                radius,
+                                offset + x as i32,
+                                offset + y as i32
+                            )
+                        );
+                    }
+                }
+            }
+        }
     }
 }
