@@ -4,6 +4,10 @@
 mod frame_callback;
 #[path = "../input_panel.rs"]
 mod input_panel;
+#[path = "../tablet_motion.rs"]
+mod tablet_motion;
+#[path = "../tablet_navigation.rs"]
+mod tablet_navigation;
 #[path = "../window.rs"]
 mod window;
 #[path = "../workspace_geometry.rs"]

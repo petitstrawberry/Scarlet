@@ -48,6 +48,10 @@ mod gpu_admission_retry;
 #[path = "workspace_geometry.rs"]
 mod workspace_geometry;
 use gpu_admission_retry::GpuAdmissionRetry;
+#[path = "tablet_motion.rs"]
+mod tablet_motion;
+#[path = "tablet_navigation.rs"]
+mod tablet_navigation;
 
 pub(super) fn is_sws_debug_enabled() -> bool {
     static LOG_CACHE: AtomicU8 = AtomicU8::new(u8::MAX);
@@ -2431,6 +2435,10 @@ pub struct Compositor {
     key_repeat: KeyRepeatState,
     volume_repeat: KeyRepeatState,
     gesture_recognizer: GestureRecognizer,
+    tablet_navigation: Vec<(PointerSource, tablet_navigation::Navigation)>,
+    tablet_drag_origin: Option<sws_protocol::workspace::ShellPresentation>,
+    tablet_navigation_source: Option<PointerSource>,
+    tablet_motion: Option<tablet_motion::Motion>,
     direct_touch_grabs: Vec<DirectTouchGrab>,
     next_touch_contact_id: u64,
     next_seat_serial: u64,
@@ -2502,7 +2510,6 @@ fn direct_touch_legacy_primary_available(grabs: &[DirectTouchGrab]) -> bool {
 struct SystemTouchNavigation {
     source: PointerSource,
     tracking_id: i32,
-    start_time_ns: u64,
     start_x: i32,
     start_y: i32,
     current_x: i32,
@@ -2900,6 +2907,10 @@ impl Compositor {
             key_repeat: KeyRepeatState::default(),
             volume_repeat: KeyRepeatState::default(),
             gesture_recognizer,
+            tablet_navigation: Vec::new(),
+            tablet_drag_origin: None,
+            tablet_navigation_source: None,
+            tablet_motion: None,
             direct_touch_grabs: Vec::new(),
             next_touch_contact_id: 1,
             next_seat_serial: 1,
@@ -4324,6 +4335,7 @@ impl Compositor {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let navigation_indicator = self.tablet_navigation_indicator();
         let Some(gpu_compositor) = self.gpu_compositor.as_mut() else {
             return Ok(GpuPresentResult::CpuFallback);
         };
@@ -4337,6 +4349,7 @@ impl Compositor {
             &overview_cards,
             &overview_remove_buttons,
             self.resize_outline,
+            navigation_indicator,
             cursor_visible(self.pointer_lock) && !self.input_modality.cursor_hidden_by_touch,
             damage,
             scene_damage,
@@ -5038,6 +5051,7 @@ impl Compositor {
             }
         }
 
+        let navigation_indicator = self.tablet_navigation_indicator();
         // Mutate backbuffer within a limited scope so we can immutably borrow `self`
         // afterwards for validation/present.
         {
@@ -5183,6 +5197,19 @@ impl Compositor {
                 );
             }
 
+            if let Some(rect) = navigation_indicator {
+                Self::fill_rounded_rect_to_buffer(
+                    screen_width,
+                    screen_height,
+                    bytes_per_pixel,
+                    backbuffer,
+                    stride,
+                    rect,
+                    rect.3 / 2,
+                    [96, 96, 96, 210],
+                    clip,
+                );
+            }
             // Layer 3: Draw cursor unless an application owns pointer lock.
             if cursor_visible(self.pointer_lock) && !self.input_modality.cursor_hidden_by_touch {
                 let cursor = &self.cursor;
@@ -6009,10 +6036,193 @@ impl Compositor {
         self.apply_overview_navigation_change(changed)
     }
 
+    fn tablet_navigation_indicator(&self) -> Option<(i32, i32, u32, u32)> {
+        if !self.tablet_mode {
+            return None;
+        }
+        let scale = self.output_scale_milli.max(1);
+        let width = (100 * scale / 1000).min(self.screen_width / 3).max(1);
+        let height = (4 * scale / 1000).max(2);
+        let margin = (4 * scale / 1000).max(2);
+        Some((
+            (self.screen_width - width) as i32 / 2,
+            self.screen_height.saturating_sub(height + margin) as i32,
+            width,
+            height,
+        ))
+    }
+
+    fn tablet_scene_snapshot(&self) -> Vec<(u32, PresentationTransform)> {
+        self.window_manager
+            .get_windows()
+            .iter()
+            .filter_map(|window| {
+                let root = self.top_level_window_id(window.id);
+                if !window.is_logically_presented()
+                    || self.workspace_manager.workspace_for_window(root).is_none()
+                {
+                    return None;
+                }
+                let (x, y, width, height) = window.surface_geometry();
+                Some((
+                    window.id,
+                    window
+                        .presentation_transform
+                        .unwrap_or(PresentationTransform {
+                            x,
+                            y,
+                            width,
+                            height,
+                            opacity: 1.0,
+                        }),
+                ))
+            })
+            .collect()
+    }
+
+    fn handle_tablet_navigation(&mut self, frame: &TouchFrame) -> bool {
+        use tablet_navigation::{Destination, Update};
+        let index = self
+            .tablet_navigation
+            .iter()
+            .position(|(source, _)| *source == frame.source);
+        // Posture can change while an application already owns a finger.
+        // Do not steal that contact just because it is now near the edge.
+        if index.is_none()
+            && self.direct_touch_grabs.iter().any(|grab| grab.source == frame.source)
+        {
+            return false;
+        }
+        // A captured stream must drain even if posture changes mid-gesture.
+        if !self.tablet_mode
+            && index.is_none_or(|index| !self.tablet_navigation[index].1.is_captured())
+        {
+            return false;
+        }
+        let index = index.unwrap_or_else(|| {
+            self.tablet_navigation
+                .push((frame.source, tablet_navigation::Navigation::default()));
+            self.tablet_navigation.len() - 1
+        });
+        if !self.tablet_mode {
+            self.tablet_navigation[index].1.reset();
+        }
+        let contacts = frame
+            .contacts
+            .iter()
+            .map(|contact| {
+                (
+                    contact.tracking_id,
+                    normalized_touch_to_screen(contact.x, self.screen_width),
+                    normalized_touch_to_screen(contact.y, self.screen_height),
+                )
+            })
+            .collect::<Vec<_>>();
+        let was_captured = self.tablet_navigation[index].1.is_captured();
+        let step = self.tablet_navigation[index].1.process(
+            &contacts,
+            frame.cancelled,
+            frame.time_ns,
+            self.screen_width,
+            self.screen_height,
+            self.output_scale_milli,
+        );
+        if self.tablet_navigation_source.is_none() && step.consumed && !was_captured {
+            self.tablet_navigation_source = Some(frame.source);
+        }
+        let owns_navigation = self.tablet_navigation_source == Some(frame.source);
+        if step.consumed && !owns_navigation {
+            // A second device cannot join or take over a gesture in flight.
+            self.tablet_navigation[index].1.reset();
+        }
+        if frame.contacts.is_empty() {
+            if owns_navigation {
+                self.tablet_navigation_source = None;
+            }
+            self.tablet_navigation.remove(index);
+        }
+        if !self.tablet_mode || !owns_navigation {
+            return step.consumed;
+        }
+        match step.update {
+            Some(Update::Begin) => {
+                let starts = self.tablet_scene_snapshot();
+                self.tablet_motion = None;
+                self.tablet_drag_origin = Some(self.workspace_manager.presentation());
+                self.workspace_manager
+                    .set_presentation(sws_protocol::workspace::ShellPresentation::Overview);
+                self.commit_workspace_change();
+                self.tablet_motion = Some(tablet_motion::Motion {
+                    starts,
+                    progress: 0.0,
+                    started_ns: None,
+                });
+            }
+            Some(Update::Drag { progress }) => {
+                if let Some(motion) = self.tablet_motion.as_mut() {
+                    motion.progress = progress;
+                }
+            }
+            Some(Update::End { destination }) => {
+                if self.tablet_drag_origin.is_some() {
+                    let starts = self.tablet_scene_snapshot();
+                    self.tablet_motion = None;
+                    match destination {
+                        Destination::Home => {
+                            self.workspace_manager
+                                .set_presentation(sws_protocol::workspace::ShellPresentation::Home);
+                        }
+                        Destination::Overview => {
+                            self.workspace_manager.set_presentation(
+                                sws_protocol::workspace::ShellPresentation::Overview,
+                            );
+                        }
+                        Destination::Previous | Destination::Next => {
+                            self.workspace_manager.return_to_workspace();
+                            self.workspace_manager.cycle_workspace(
+                                if destination == Destination::Previous {
+                                    -1
+                                } else {
+                                    1
+                                },
+                            );
+                        }
+                    }
+                    self.commit_workspace_change();
+                    self.tablet_drag_origin = None;
+                    self.tablet_motion = Some(tablet_motion::Motion {
+                        starts,
+                        progress: 0.0,
+                        started_ns: Some(monotonic_time_ns()),
+                    });
+                }
+            }
+            Some(Update::Cancel) => {
+                if let Some(origin) = self.tablet_drag_origin {
+                    let starts = self.tablet_scene_snapshot();
+                    self.tablet_motion = None;
+                    self.workspace_manager.set_presentation(origin);
+                    self.commit_workspace_change();
+                    self.tablet_drag_origin = None;
+                    self.tablet_motion = Some(tablet_motion::Motion {
+                        starts,
+                        progress: 0.0,
+                        started_ns: Some(monotonic_time_ns()),
+                    });
+                }
+            }
+            None => {}
+        }
+        if step.update.is_some() {
+            self.update_overview_transforms();
+            self.full_redraw_needed = true;
+        }
+        step.consumed
+    }
+
     fn finish_system_touch_navigation(&mut self, navigation: SystemTouchNavigation) -> bool {
         let dx = navigation.current_x.saturating_sub(navigation.start_x);
         let dy = navigation.current_y.saturating_sub(navigation.start_y);
-        let duration_ns = monotonic_time_ns().saturating_sub(navigation.start_time_ns);
         let mut changed = false;
 
         if matches!(
@@ -6050,22 +6260,6 @@ impl Compositor {
                         None => false,
                     }
                 };
-            }
-        } else if dx.unsigned_abs() >= self.screen_width / 7
-            && dx.unsigned_abs() > dy.unsigned_abs()
-        {
-            changed = self
-                .workspace_manager
-                .cycle_workspace(if dx < 0 { 1 } else { -1 });
-        } else if dy <= -((self.screen_height / 9) as i32) {
-            if duration_ns >= 280_000_000 {
-                changed = self
-                    .workspace_manager
-                    .set_presentation(sws_protocol::workspace::ShellPresentation::Overview);
-            } else {
-                changed = self
-                    .workspace_manager
-                    .set_presentation(sws_protocol::workspace::ShellPresentation::Home);
             }
         }
 
@@ -6140,16 +6334,17 @@ impl Compositor {
         let contact = frame.contacts.first()?;
         let screen_x = normalized_touch_to_screen(contact.x, self.screen_width);
         let screen_y = normalized_touch_to_screen(contact.y, self.screen_height);
-        let edge_height = (self.screen_height / 24).clamp(24, 72);
+        // Bottom-edge gestures have their own exclusive, continuous arena.
+        // This older arena now only owns Overview cards and their drags.
+        if !shell_navigation {
+            return None;
+        }
         let in_workspace_region =
             shell_navigation && self.point_in_overview_workspace_region(screen_x, screen_y);
         let over_laptop_spread = overview
             && !self.tablet_mode
             && self.overview_window_at_point(screen_x, screen_y).is_some();
         if shell_navigation && !in_workspace_region && !over_laptop_spread {
-            return None;
-        }
-        if !shell_navigation && screen_y < self.screen_height.saturating_sub(edge_height) as i32 {
             return None;
         }
         let remove_workspace_id = overview
@@ -6166,7 +6361,6 @@ impl Compositor {
         self.system_touch_navigation = Some(SystemTouchNavigation {
             source: frame.source,
             tracking_id: contact.tracking_id,
-            start_time_ns: frame.time_ns,
             start_x: screen_x,
             start_y: screen_y,
             current_x: screen_x,
@@ -6179,6 +6373,9 @@ impl Compositor {
     }
 
     fn handle_direct_touch_frame(&mut self, frame: TouchFrame) -> bool {
+        if self.handle_tablet_navigation(&frame) {
+            return true;
+        }
         if let Some(redraw) = self.handle_system_touch_navigation(&frame) {
             return redraw;
         }
@@ -6640,6 +6837,13 @@ impl Compositor {
     fn event_wait_timeout_ns(&self) -> i64 {
         let now = monotonic_time_ns();
         let mut timeout = COMPOSITOR_IDLE_RECHECK_NS as u64;
+        if self
+            .tablet_motion
+            .as_ref()
+            .is_some_and(|motion| motion.started_ns.is_some())
+        {
+            timeout = timeout.min(FRAME_BATCH_INTERVAL_NS);
+        }
         if let Some(remaining) = self.gpu_admission_retry.remaining_ns(now) {
             timeout = timeout.min(remaining);
         }
@@ -6873,6 +7077,16 @@ impl Compositor {
             self.cursor.advance_animation(monotonic_time_ns());
         }
 
+        if let Some(motion) = self.tablet_motion.as_mut() {
+            let settling = motion.started_ns.is_some();
+            if motion.advance(monotonic_time_ns()) {
+                self.tablet_motion = None;
+            }
+            if settling {
+                self.update_overview_transforms();
+                self.full_redraw_needed = true;
+            }
+        }
         self.refresh_input_panel_occlusion();
         Ok(())
     }
@@ -7083,6 +7297,13 @@ impl Compositor {
         let mut redraw = false;
         if tablet_mode_changed {
             self.tablet_mode = tablet_mode;
+            self.tablet_motion = None;
+            if let Some(origin) = self.tablet_drag_origin.take() {
+                self.workspace_manager.set_presentation(origin);
+            }
+            for (_, navigation) in &mut self.tablet_navigation {
+                navigation.reset();
+            }
             for policy_event in self.gesture_recognizer.set_tablet_mode(tablet_mode) {
                 match policy_event {
                     TouchPolicyEvent::Pointer(CompositorInputEvent::MouseButton {
@@ -10387,23 +10608,45 @@ impl Compositor {
                 } else {
                     None
                 };
+                let animating = self.tablet_motion.as_ref().filter(|_| {
+                    workspace_id.is_some() && self.desired_workspace_visibility(window.id)
+                });
+                let transform = if let Some(motion) = animating {
+                    let (x, y, width, height) = window.surface_geometry();
+                    Some(motion.project(
+                        window.id,
+                        transform.unwrap_or(PresentationTransform {
+                            x,
+                            y,
+                            width,
+                            height,
+                            opacity: 1.0,
+                        }),
+                    ))
+                } else {
+                    transform
+                };
                 let dragging = self
                     .overview_window_drag
                     .is_some_and(|drag| drag.window_id == root_id);
-                let clip = (!dragging)
-                    .then_some(transform)
-                    .flatten()
-                    .and_then(|transform| {
-                        if self.uses_laptop_overview_spread(window.id) {
-                            Some((transform.x, transform.y, transform.width, transform.height))
-                        } else {
-                            workspace_id.and_then(|workspace_id| {
-                                cards.iter().find_map(|(candidate, rect)| {
-                                    (*candidate == workspace_id).then_some(*rect)
+                let clip = if animating.is_some() {
+                    transform.map(|rect| (rect.x, rect.y, rect.width, rect.height))
+                } else {
+                    (!dragging)
+                        .then_some(transform)
+                        .flatten()
+                        .and_then(|transform| {
+                            if self.uses_laptop_overview_spread(window.id) {
+                                Some((transform.x, transform.y, transform.width, transform.height))
+                            } else {
+                                workspace_id.and_then(|workspace_id| {
+                                    cards.iter().find_map(|(candidate, rect)| {
+                                        (*candidate == workspace_id).then_some(*rect)
+                                    })
                                 })
-                            })
-                        }
-                    });
+                            }
+                        })
+                };
                 let clip_radius = if clip.is_some() {
                     sws_protocol::workspace::OVERVIEW_CARD_CORNER_RADIUS
                 } else {
@@ -10537,6 +10780,13 @@ impl Compositor {
                 .workspace_manager
                 .set_presentation(sws_protocol::workspace::ShellPresentation::Home);
         let presentation = self.workspace_manager.presentation();
+        let transition_starts = (self.tablet_mode
+            && self.tablet_drag_origin.is_none()
+            && presentation != self.last_shell_presentation)
+            .then(|| self.tablet_scene_snapshot());
+        if transition_starts.is_some() {
+            self.tablet_motion = None;
+        }
         let withhold_shell_background =
             shell_background_must_be_withheld(self.last_shell_presentation, presentation);
         self.last_shell_presentation = presentation;
@@ -10629,6 +10879,14 @@ impl Compositor {
             }
         }
 
+        if let Some(starts) = transition_starts {
+            self.tablet_motion = Some(tablet_motion::Motion {
+                starts,
+                progress: 0.0,
+                started_ns: Some(monotonic_time_ns()),
+            });
+            changed |= self.update_overview_transforms();
+        }
         if changed {
             self.full_redraw_needed = true;
             self.route_pointer_motion_at_cursor();

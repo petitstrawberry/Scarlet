@@ -1068,6 +1068,7 @@ impl GpuCompositor {
         overview_cards: &[((i32, i32, u32, u32), bool, bool)],
         overview_remove_buttons: &[(u32, (i32, i32, u32, u32), bool)],
         resize_outline: Option<(i32, i32, u32, u32)>,
+        navigation_indicator: Option<(i32, i32, u32, u32)>,
         cursor_visible: bool,
         damage: Option<DamageRect>,
         scene_damage: Option<&[(i32, i32, u32, u32)]>,
@@ -1263,6 +1264,15 @@ impl GpuCompositor {
             append_outline(
                 &mut operations,
                 outline,
+                self.target.width,
+                self.target.height,
+                damage_clip,
+            )?;
+        }
+        if let Some(rect) = navigation_indicator {
+            append_overview_shadows(
+                &mut operations,
+                &[(rect, rect.3 / 2, [96, 96, 96, 210])],
                 self.target.width,
                 self.target.height,
                 damage_clip,

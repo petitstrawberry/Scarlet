@@ -882,3 +882,26 @@ changes a flag. A release candidate must demonstrate:
     merges.
 14. RISC-V and AArch64 builds, formatting, protocol tests, workspace model
     tests, and compositor policy tests pass.
+
+## Implemented tablet navigation (2026-10-24)
+
+The bottom 12 logical pixels, within the central 60% of the output, form an
+exclusive single-contact navigation arena. The compositor draws a persistent
+home indicator there; the software keyboard leaves at least 16 logical pixels
+of additional bottom padding. A contact that began in an application is never
+promoted to a system gesture just because it reaches the edge.
+
+An upward movement reveals the retained app scene shrinking toward its Overview
+card. Releasing after a quick swipe opens Home; pausing for 180 ms after a
+substantial upward movement opens Overview. A short, reversed, cancelled, or
+multitouch gesture restores the original presentation. Horizontal edge swipes
+select the adjacent workspace. Card activation expands its retained scene back
+to the app view. These transitions currently settle over 220 ms with cubic
+ease-out from the actual current visual rectangle. The spring/velocity and
+split-divider animation tokens above remain follow-up work.
+
+No intermediate client configure is emitted for the gesture: SWS changes only
+presentation transforms and clips. Only an active settle schedules animation
+frames; a stationary held gesture or idle scene does not spin the compositor.
+The scene's text-input context is dismissed when entering shell navigation and
+restored by the existing focus policy when its app is selected again.
