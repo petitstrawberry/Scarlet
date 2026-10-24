@@ -564,6 +564,8 @@ struct FilerApp {
     status: State<String>,
     location: State<String>,
     location_focus: State<u64>,
+    picker_location: State<String>,
+    picker_location_focus: State<u64>,
     history: State<History>,
     picker_history: State<History>,
     search: State<String>,
@@ -614,6 +616,7 @@ impl FilerApp {
         app.location.set(current_path.clone());
         app.grid_columns.set(GRID_COLUMNS);
         app.entries.set(Vec::new());
+        app.picker_location.set(current_path.clone());
         app.picker_current_path.set(current_path);
         app.picker_entries.set(Vec::new());
         app.picker_status.set(String::from("Ready"));
@@ -677,6 +680,7 @@ impl FilerApp {
             history_state.set(history);
             path_state.set(path.clone());
             if picker {
+                self.picker_location.set(path);
                 self.picker_overwrite.set(None);
                 self.refresh_picker();
             } else {
@@ -687,11 +691,26 @@ impl FilerApp {
         }
     }
 
-    fn submit_location(&self) {
-        self.location_focus.set(0);
+    fn submit_location(&self, picker: bool) {
+        let (current, location, focus, status) = if picker {
+            (
+                &self.picker_current_path,
+                &self.picker_location,
+                &self.picker_location_focus,
+                &self.picker_status,
+            )
+        } else {
+            (
+                &self.current_path,
+                &self.location,
+                &self.location_focus,
+                &self.status,
+            )
+        };
+        focus.set(0);
         match operations::location_path(
-            Path::new(&self.current_path.get()),
-            &self.location.get(),
+            Path::new(&current.get()),
+            &location.get(),
             Path::new(&home_path()),
         ) {
             Ok(path) => {
@@ -703,13 +722,18 @@ impl FilerApp {
                     }
                 });
                 match resolved {
-                    Ok(path) => self.navigate_to(path.to_string_lossy().into_owned()),
-                    Err(error) => self
-                        .status
-                        .set(format!("Cannot open {}: {error}", path.display())),
+                    Ok(path) => {
+                        let path = path.to_string_lossy().into_owned();
+                        if picker {
+                            self.navigate_picker_to(path);
+                        } else {
+                            self.navigate_to(path);
+                        }
+                    }
+                    Err(error) => status.set(format!("Cannot open {}: {error}", path.display())),
                 }
             }
-            Err(error) => self.status.set(error),
+            Err(error) => status.set(error),
         }
     }
 
@@ -751,6 +775,7 @@ impl FilerApp {
         let mut history = self.picker_history.get();
         history.visit(&self.picker_current_path.get(), &path);
         self.picker_history.set(history);
+        self.picker_location.set(path.clone());
         self.picker_current_path.set(path);
         self.picker_overwrite.set(None);
         self.refresh_picker();
@@ -1049,6 +1074,12 @@ impl FilerApp {
             }
             return true;
         }
+        if modifiers.primary() && picker && matches!(keycode, KeyCode::Char('l' | 'L')) {
+            self.picker_grid_focused.set(false);
+            self.picker_location_focus
+                .set(self.picker_location_focus.get().wrapping_add(1).max(1));
+            return true;
+        }
         if modifiers.primary() && !picker {
             match keycode {
                 KeyCode::Char('i' | 'I') => self.show_details(),
@@ -1137,6 +1168,8 @@ impl FilerApp {
         self.picker_history.set(History::default());
         self.picker_overwrite.set(None);
         self.picker_request.set(Some(request));
+        self.picker_location.set(initial_folder.clone());
+        self.picker_location_focus.set(0);
         self.picker_current_path.set(initial_folder);
         self.picker_entries.set(Vec::new());
         self.picker_status.set(status);
@@ -1783,28 +1816,35 @@ impl FilerApp {
         let up_app = self.clone();
         let refresh_app = self.clone();
         let submit_app = self.clone();
-        let cancel_app = self.clone();
-        let current_path = if picker {
-            Either::A(
-                Text::from_state(self.picker_current_path.clone())
-                    .font_size(13.0)
-                    .frame(f32::INFINITY, 32.0),
+        let (location, current, focus) = if picker {
+            (
+                self.picker_location.clone(),
+                self.picker_current_path.clone(),
+                self.picker_location_focus.clone(),
             )
         } else {
-            Either::B(
-                TextField::new(self.location.clone())
-                    .placeholder("Folder path (Enter to open)")
-                    .autofocus(self.location_focus.get() > 0)
-                    .blur_on_submit(true)
-                    .on_submit(move || submit_app.submit_location())
-                    .on_cancel(move || {
-                        cancel_app.location.set(cancel_app.current_path.get());
-                        cancel_app.location_focus.set(0);
-                    })
-                    .key(format!("files-location-{}", self.location_focus.get()))
-                    .frame(f32::INFINITY, 32.0),
+            (
+                self.location.clone(),
+                self.current_path.clone(),
+                self.location_focus.clone(),
             )
         };
+        let focus_generation = focus.get();
+        let current_path = TextField::new(location.clone())
+            .placeholder("Folder path (Enter to open)")
+            .autofocus(focus_generation > 0)
+            .blur_on_submit(true)
+            .on_submit(move || submit_app.submit_location(picker))
+            .on_cancel(move || {
+                location.set(current.get());
+                focus.set(0);
+            })
+            .key(format!(
+                "{}-location-{}",
+                if picker { "picker" } else { "files" },
+                focus_generation,
+            ))
+            .frame(f32::INFINITY, 32.0);
         HeaderBar::new(
             hstack! {
                 Button::icon_only(Icon::ChevronLeft)

@@ -1961,6 +1961,9 @@ fn build_home_button(
     } else {
         ColorPalette::light()
     };
+    // Preserve the full font line box inside the padded button's 14px content
+    // height, so centering uses the font's ascent/descent rather than a clipped box.
+    let text_height = graphics::measure_text_sized(&position, 12.0).1 as f32;
     hstack! {
         IconView::new(Icon::Apps)
             .size(IconSize::Small)
@@ -1968,6 +1971,7 @@ fn build_home_button(
         Text::new(position)
             .font_size(12.0)
             .color(palette.text())
+            .frame_height(text_height)
     }
     .spacing(4.0)
     .alignment(Alignment::Center)
