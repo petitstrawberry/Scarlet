@@ -1324,17 +1324,17 @@ path = "../../user/bin"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/carmine"
-git_ref = "0fb963e3f2cb1f9b7a0769a9df9ef5873ac0ae11"
-resolved_rev = "0fb963e3f2cb1f9b7a0769a9df9ef5873ac0ae11"
+git_ref = "57b0bf3139eb3f1b38db10fe7b2f0ae152c1205e"
+resolved_rev = "57b0bf3139eb3f1b38db10fe7b2f0ae152c1205e"
 package = "carmine"
 bin = "carmine"
 to = "/bin/carmine"
-hash = "sha256:b491ed19bc1f1a5ab1a3d9a47d2a684e099bdb6189b52df6ff5b3ac995605fd0"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/carmine"
-rev = "0fb963e3f2cb1f9b7a0769a9df9ef5873ac0ae11"
+rev = "57b0bf3139eb3f1b38db10fe7b2f0ae152c1205e"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1377,32 +1377,32 @@ path = ".scarlet/cache/git/d51a83490b0670c9/tools/widevine-host/build-host.sh"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/vellum"
-git_ref = "d731a98577460748e293c5d07f612e78cfa90741"
-resolved_rev = "d731a98577460748e293c5d07f612e78cfa90741"
+git_ref = "14ab7545750ac66d966c8a9b235b8aee95809e7e"
+resolved_rev = "14ab7545750ac66d966c8a9b235b8aee95809e7e"
 package = "vellum"
 bin = "vellum"
 to = "/bin/vellum"
-hash = "sha256:395afff84c38806a3c7fa1373099e83d1f9f8a2d09a739892a544ca66342d29a"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/vellum"
-rev = "d731a98577460748e293c5d07f612e78cfa90741"
+rev = "14ab7545750ac66d966c8a9b235b8aee95809e7e"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/boxcraft"
-git_ref = "33d01fefd0d898366a3917137262db1e054b7b6f"
-resolved_rev = "33d01fefd0d898366a3917137262db1e054b7b6f"
+git_ref = "6dda6608260c31064768c5d635690fe3e0aa8203"
+resolved_rev = "6dda6608260c31064768c5d635690fe3e0aa8203"
 package = "boxcraft"
 bin = "boxcraft"
 to = "/bin/boxcraft"
-hash = "sha256:89a11b69a6360e1d4bb6ae976b17408901de21cd0d28f61201064369e806d513"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/boxcraft"
-rev = "33d01fefd0d898366a3917137262db1e054b7b6f"
+rev = "6dda6608260c31064768c5d635690fe3e0aa8203"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1418,7 +1418,7 @@ path = "../../user/std-bin"
 kind = "app"
 source = ".scarlet/cache/git/33c416af7493b416/platforms/scarlet/app.toml"
 to = "/applications/cadence.app"
-hash = "sha256:38314a46a6ebb532d7101f9f4d198a708edfe7646d079ac6c86dfe52ea97df0e"
+hash = ""
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1435,13 +1435,13 @@ path = "../../user/std-bin"
 kind = "app"
 source = "../../user/app-demo/app.toml"
 to = "/applications/app-demo.app"
-hash = "sha256:f7542223b454ad79f94cdf853490d92c6e3f080a449b2d051a255ab8d43731d0"
+hash = ""
 
 [[sections.rootfs.layers]]
 kind = "app"
 source = "../../user/std-bin/src/storage/app.toml"
 to = "/applications/storage.app"
-hash = "sha256:79185d2103fcb65f0e57102d8e8777081ed064ceb3ba9200d1680050111db5f3"
+hash = ""
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1507,7 +1507,7 @@ path = "../../user/std-bin"
 kind = "app"
 source = ".scarlet/cache/git/be620600662a4ab7/app.toml"
 to = "/applications/kureha-code.app"
-hash = "sha256:613bd5923f556cdfd69ce8a06056b35a6e478318abd93e6e2cb2613ed29f0435"
+hash = ""
 
 [[sections.rootfs.layers]]
 kind = "archive"
@@ -1524,17 +1524,17 @@ sha256 = "sha256:55a133c3e3f03337f6e0baf6b59194bfe0eb19a340d72bc94224d387e498b62
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/moonlight-scarlet.git"
-git_ref = "95c9b9f1e2ce7cfffbbd600361378d985f22a7d7"
-resolved_rev = "95c9b9f1e2ce7cfffbbd600361378d985f22a7d7"
+git_ref = "575b7fdfee981e03bc0e0e7554e2405cb19dc722"
+resolved_rev = "575b7fdfee981e03bc0e0e7554e2405cb19dc722"
 package = "moonlight"
 bin = "moonlight"
 to = "/bin/moonlight"
-hash = "sha256:8a1846c22bbc2ed0d8b23cd784413a440072a709b3d898c5639cde74be089715"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/moonlight-scarlet.git"
-rev = "95c9b9f1e2ce7cfffbbd600361378d985f22a7d7"
+rev = "575b7fdfee981e03bc0e0e7554e2405cb19dc722"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
@@ -1557,32 +1557,32 @@ path = "../../user/video_player"
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/yt-for-scarlet"
-git_ref = "6c23dcc5869a1443093928ad4f856680d91a95d1"
-resolved_rev = "6c23dcc5869a1443093928ad4f856680d91a95d1"
+git_ref = "f4a1fa5b8d9ae0ec6ba528fb78fdad8df910a8dd"
+resolved_rev = "f4a1fa5b8d9ae0ec6ba528fb78fdad8df910a8dd"
 package = "yt"
 bin = "yt"
 to = "/bin/yt"
-hash = "sha256:e33d093bd7afdc6cfd4205d34d6b655db99e2ff07715840136644563f8f16dd1"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/yt-for-scarlet"
-rev = "6c23dcc5869a1443093928ad4f856680d91a95d1"
+rev = "f4a1fa5b8d9ae0ec6ba528fb78fdad8df910a8dd"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
 git = "https://github.com/petitstrawberry/yt-for-scarlet"
-git_ref = "6c23dcc5869a1443093928ad4f856680d91a95d1"
-resolved_rev = "6c23dcc5869a1443093928ad4f856680d91a95d1"
+git_ref = "f4a1fa5b8d9ae0ec6ba528fb78fdad8df910a8dd"
+resolved_rev = "f4a1fa5b8d9ae0ec6ba528fb78fdad8df910a8dd"
 package = "yt-gui"
 bin = "yt-gui"
 to = "/bin/yt-gui"
-hash = "sha256:7edfb58fc4998c89fe5f0c000b60a9a606f093da1ffbac5525454986301888ea"
+hash = ""
 
 [sections.rootfs.layers.source]
 type = "git"
 url = "https://github.com/petitstrawberry/yt-for-scarlet"
-rev = "6c23dcc5869a1443093928ad4f856680d91a95d1"
+rev = "f4a1fa5b8d9ae0ec6ba528fb78fdad8df910a8dd"
 
 [[sections.rootfs.layers]]
 kind = "cargo"
