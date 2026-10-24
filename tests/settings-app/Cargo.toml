@@ -7,8 +7,8 @@ publish = false
 [workspace]
 
 [dependencies]
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "7e67e92e717fa5d80c7b5f052975330496408a50", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
-scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "7e67e92e717fa5d80c7b5f052975330496408a50" }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "4ef377870defdf725410a4f153d4fc0c5c469842", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
+scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "4ef377870defdf725410a4f153d4fc0c5c469842" }
 scarlet-std = { path = "../../user/lib/std" }
 scarlet-os = { path = "../../user/lib/scarlet-os" }
 framebuffer = { path = "../../user/lib/framebuffer" }
