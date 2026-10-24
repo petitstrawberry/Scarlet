@@ -5,7 +5,7 @@ hash = "sha256:d5cae2fe936908fc6469c9b98ce533d37cf8e319995baa8ef76c1b7829a9d24f"
 layers = []
 
 [sections.disk]
-hash = "sha256:2487ac18eff32f185f66f8f39ef596a7faebb8a18740e9b587f9794074ca53d3"
+hash = "sha256:929c0bb527848ce558d00c1aaebf146d4f65d9dc522db56e3332c6dfe73b7ac1"
 layers = []
 
 [sections.initramfs]
@@ -463,7 +463,7 @@ type = "path"
 path = "../../user/std-bin"
 
 [sections.rootfs]
-hash = "sha256:ee9a8330f2f197eaa1093d48ba193405f55efe01616e5d0ca8d3eb9530422d35"
+hash = "sha256:e28ca5bd37d80883eb38ab4e8c1097d335d343290e551b38531f602cac1e192a"
 
 [[sections.rootfs.layers]]
 kind = "script"
@@ -987,7 +987,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "sws"
 to = "/bin/sws"
-hash = "sha256:69d699bd4d90da8ac63ec4f08add47a39fe807ca91dfbda914c33429778a82bb"
+hash = "sha256:18f8bf3a7ee5d58b196326ae0afcabc6053316b883bd7afef10e28dd5a43cb96"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -1698,7 +1698,7 @@ path = ".scarlet/cache/git/1d707eff8bef4cad/bundle/build-aarch64.sh"
 [[sections.rootfs.layers]]
 kind = "script"
 to = "/"
-hash = "sha256:498057d5d3fe34c27473c7c514873046ba1592411e59727bef3ed0ba871d843b"
+hash = "sha256:b46b81068b2271132d16921447cb5c5683146d567331ded198ff65792ee98a9c"
 
 [sections.rootfs.layers.source]
 type = "path"
