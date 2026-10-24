@@ -75,7 +75,14 @@ mod panel {
             let context = self.context;
             let action = self.action;
             let clock = self.clock;
-            let button = Button::new(self.label)
+            let button = if action == Action::Hide {
+                Button::icon_only(Icon::KeyboardHide)
+                    .icon_size(IconSize::Medium)
+                    .icon_color(self.text_color)
+            } else {
+                Button::new(self.label)
+            };
+            let button = button
                 .header_style()
                 .font_size(self.font_size)
                 .padding(2.0)

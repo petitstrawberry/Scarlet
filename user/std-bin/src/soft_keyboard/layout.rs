@@ -128,8 +128,9 @@ pub(super) fn rows(numeric: bool, layer: Layer) -> Vec<KeyRow> {
             control("あ/A", Key(85, 0), 1.3),
             control("ctrl", Modifier(input_panel::CTRL), 1.0),
             control("alt", Modifier(input_panel::ALT), 1.0),
-            control("space", Key(57, 0), 6.0),
-            control("hide", Hide, 1.5),
+            control("space", Key(57, 0), 5.2),
+            control("123", SetLayer(Layer::Symbols), 1.3),
+            control("hide", Hide, 0.85),
         ]);
         return layout;
     }
@@ -217,8 +218,8 @@ pub(super) fn rows(numeric: bool, layer: Layer) -> Vec<KeyRow> {
             ]
         };
         home.push(control("return", Key(28, 0), 2.2));
-        // Replace the two former ABC edge keys with one page switch and a
-        // character. ABC appears only on the shared bottom row.
+        // Keep symbol paging beside the symbols; alphabet switches belong on
+        // the shared bottom row, reachable from either hand.
         let mut lower = vec![
             control(
                 if more { "123" } else { "#+=" },
@@ -345,8 +346,9 @@ fn bottom_row(label: &'static str, layer: Layer) -> KeyRow {
         control(label, SetLayer(layer), 1.5),
         control("あ/A", Key(85, 0), 1.3),
         control("Fn", SetLayer(Layer::Function), 1.0),
-        control("space", Key(57, 0), 7.15),
-        control("hide", Hide, 1.5),
+        control("space", Key(57, 0), 6.35),
+        control(label, SetLayer(layer), 1.3),
+        control("hide", Hide, 0.85),
     ])
 }
 
@@ -355,7 +357,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn symbol_pages_have_one_bottom_abc_and_bidirectional_page_switches() {
+    fn symbol_pages_have_bottom_abc_shortcuts_and_bidirectional_page_switches() {
         for (layer, toggle, target) in [
             (Layer::Symbols, "#+=", Layer::MoreSymbols),
             (Layer::MoreSymbols, "123", Layer::Symbols),
@@ -363,9 +365,14 @@ mod tests {
             let layout = rows(false, layer);
             let keys: Vec<_> = layout.iter().flat_map(|row| &row.keys).collect();
             let abc: Vec<_> = keys.iter().filter(|key| key.plain == "ABC").collect();
-            assert_eq!(abc.len(), 1);
-            assert!(abc[0].action == Action::SetLayer(Layer::Letters));
+            assert_eq!(abc.len(), 2);
+            assert!(
+                abc.iter()
+                    .all(|key| key.action == Action::SetLayer(Layer::Letters))
+            );
             assert_eq!(layout.last().unwrap().keys[0].plain, "ABC");
+            let bottom = &layout.last().unwrap().keys;
+            assert_eq!(bottom[bottom.len() - 2].plain, "ABC");
             assert_eq!(layout[2].keys[0].plain, toggle);
             assert!(layout[2].keys[0].action == Action::SetLayer(target));
             assert_eq!(
