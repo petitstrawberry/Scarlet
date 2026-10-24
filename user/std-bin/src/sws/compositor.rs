@@ -6373,11 +6373,21 @@ impl Compositor {
     }
 
     fn handle_direct_touch_frame(&mut self, frame: TouchFrame) -> bool {
+        // An empty/cancel frame can be generated during device discovery,
+        // disconnect, or SYN_DROPPED recovery.  It must not hide an otherwise
+        // active mouse cursor.  Once a real direct contact occurs, keep the
+        // cursor hidden until the next indirect pointer action.
+        let mut redraw = if !frame.cancelled && !frame.contacts.is_empty() {
+            self.set_cursor_hidden_by_touch(true)
+        } else {
+            false
+        };
+
         if self.handle_tablet_navigation(&frame) {
             return true;
         }
-        if let Some(redraw) = self.handle_system_touch_navigation(&frame) {
-            return redraw;
+        if let Some(shell_redraw) = self.handle_system_touch_navigation(&frame) {
+            return redraw || shell_redraw;
         }
         let context = self.current_input_frame;
         debug_assert!(
@@ -6401,15 +6411,6 @@ impl Compositor {
             (0, serial, frame.time_ns)
         };
         let mut native_changes = BTreeMap::new();
-        // An empty/cancel frame can be generated during device discovery,
-        // disconnect, or SYN_DROPPED recovery.  It must not hide an otherwise
-        // active mouse cursor.  Once a real direct contact occurs, keep the
-        // cursor hidden until the next indirect pointer action.
-        let mut redraw = if !frame.cancelled && !frame.contacts.is_empty() {
-            self.set_cursor_hidden_by_touch(true)
-        } else {
-            false
-        };
 
         let mut index = 0;
         while index < self.direct_touch_grabs.len() {
