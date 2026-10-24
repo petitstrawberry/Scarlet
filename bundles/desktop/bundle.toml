@@ -106,7 +106,7 @@ to = "/bin/ui-benchmark"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "eede18df956fa4599027f783266c5879d1afe564" }
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "9c9067594f59e08b038b5dcc06b7f13c065cdba5" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
@@ -281,14 +281,14 @@ to = "/bin/dcp-flip-test"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/carmine", rev = "d101a7f2581bb19f8d83012bac228eb87a92b20b" }
+source = { git = "https://github.com/petitstrawberry/carmine", rev = "0fb963e3f2cb1f9b7a0769a9df9ef5873ac0ae11" }
 package = "carmine"
 bin = "carmine"
 to = "/bin/carmine"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "770262b09b5374686839cbcf500269d04670c295" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "359139b907e1f10d8d5d3adc6906bace271df32e" }
 package = "myrica"
 bin = "myrica"
 architectures = ["riscv32", "riscv64"]
@@ -297,20 +297,20 @@ to = "/bin/myrica"
 # Myrica owns the WebKit browser and its Linux-view Widevine host recipe.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/myrica", rev = "770262b09b5374686839cbcf500269d04670c295" }
+source = { git = "https://github.com/petitstrawberry/myrica", rev = "359139b907e1f10d8d5d3adc6906bace271df32e" }
 subdir = "platforms/scarlet"
 architectures = ["aarch64"]
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/vellum", rev = "783efe9f28a9d575aed927ae1e5dc132394bab27" }
+source = { git = "https://github.com/petitstrawberry/vellum", rev = "d731a98577460748e293c5d07f612e78cfa90741" }
 package = "vellum"
 bin = "vellum"
 to = "/bin/vellum"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/boxcraft", rev = "029402c302f39a43d028a67667056ab5d54cec22" }
+source = { git = "https://github.com/petitstrawberry/boxcraft", rev = "33d01fefd0d898366a3917137262db1e054b7b6f" }
 package = "boxcraft"
 bin = "boxcraft"
 to = "/bin/boxcraft"
@@ -324,7 +324,7 @@ to = "/bin/remote-desktop"
 # Cadence owns its app recipe and preserves the PIC build and final ELF audit.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/cadence", rev = "1b5d0782a68bf2bd2fbc40502d3d576f57445d0e" }
+source = { git = "https://github.com/petitstrawberry/cadence", rev = "53a66c14328b8cef97d547512b381bf8c82643b9" }
 subdir = "platforms/scarlet"
 
 [[layers]]
@@ -386,5 +386,5 @@ to = "/bin/applications"
 # Kureha Code owns its native app recipe and resources.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/kureha-code.git", rev = "558d6fdfc7cefa8af8f643af397855d58f82cd4d" }
+source = { git = "https://github.com/petitstrawberry/kureha-code.git", rev = "9e1af2911f89cf6eda567309378f3c089318a24b" }
 bundle = "platforms/scarlet/bundle.toml"
