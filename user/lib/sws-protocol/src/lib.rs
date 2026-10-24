@@ -731,6 +731,11 @@ pub mod window_state {
     pub const FULLSCREEN: u32 = 1 << 2;
     /// The compositor is not currently presenting this window.
     pub const SUSPENDED: u32 = 1 << 3;
+    /// A normal app scene root uses the compositor's focused/tablet allocation.
+    /// Clients suppress titlebar and frame while set, including in split layouts.
+    /// This is independent of FULLSCREEN and remains set while suspended. It is
+    /// never inferred from global tablet posture or inherited by transient children.
+    pub const TABLET_MANAGED: u32 = 1 << 4;
 }
 
 /// Initial placement hints understood by the SWS window manager.
@@ -6198,7 +6203,10 @@ mod tests {
 
     #[test]
     fn window_state_changed_preserves_flags() {
-        let flags = window_state::MAXIMIZED | window_state::FULLSCREEN | window_state::SUSPENDED;
+        let flags = window_state::MAXIMIZED
+            | window_state::FULLSCREEN
+            | window_state::SUSPENDED
+            | window_state::TABLET_MANAGED;
         let payload = payload_window_state_changed(77, flags);
         assert_eq!(
             parse_server_message(server_msg::WINDOW_STATE_CHANGED, &payload).unwrap(),

@@ -189,7 +189,10 @@ pub struct ImeContextState {
 pub enum Event {
     /// Active editor metadata for the input-panel provider (no surrounding text).
     InputPanelContext(sws_protocol::input_panel::Context),
-    /// Output-space area occupied by the input panel, zero-sized when hidden.
+    /// Keyboard intersection in the target surface's local physical pixels.
+    /// Zero-sized when hidden or disjoint; divide by surface scale for logical
+    /// coordinates. Refreshed when target geometry changes. No output origin
+    /// subtraction is needed.
     InputPanelOcclusion(sws_protocol::input_panel::Occlusion),
     /// Native direct-touch changes belonging to one target surface and seat frame.
     TouchFrame {

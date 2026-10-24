@@ -41,6 +41,14 @@ impl Context {
     }
 }
 
+/// Keyboard intersection with the addressed surface, in surface-local physical
+/// pixels (including any client decoration/shadow inset). Zero width or height
+/// clears the occlusion. Convert to UI logical units using the surface scale;
+/// subtract any content origin only when converting further to content coordinates.
+///
+/// SWS refreshes this event when the target surface moves/resizes, even if the
+/// keyboard itself is unchanged. The original unused output-space interpretation
+/// was corrected to surface-local coordinates without changing the wire layout.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Occlusion {
     pub window_id: u32,

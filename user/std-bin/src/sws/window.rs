@@ -263,7 +263,13 @@ pub struct Window {
     pub focused_mode_managed: bool,
     /// Whether tablet workspace layout currently owns this surface geometry.
     pub workspace_layout_managed: bool,
-    /// Freeform geometry retained while tablet workspace layout is active.
+    /// Authoritative decoration policy, independent of actual geometry changes.
+    pub tablet_managed: bool,
+    /// Decoration outsets retained while tablet presentation requires zero outsets.
+    tablet_restore_insets: Option<WindowGeometryInsets>,
+    /// Ignore a queued tablet zero-inset report until normal geometry is reported.
+    pending_desktop_geometry: bool,
+    /// Desktop window geometry (excluding shadow insets) retained during tablet layout.
     pub workspace_restore_geometry: Option<(i32, i32, u32, u32)>,
     /// Whether the client has successfully submitted at least one frame.
     ///
@@ -649,6 +655,9 @@ impl Window {
             maximized: false,
             focused_mode_managed: false,
             workspace_layout_managed: false,
+            tablet_managed: false,
+            tablet_restore_insets: None,
+            pending_desktop_geometry: false,
             workspace_restore_geometry: None,
             has_presented_frame: false,
             last_frame_submission_counter: None,
@@ -717,6 +726,9 @@ impl Window {
             maximized: false,
             focused_mode_managed: false,
             workspace_layout_managed: false,
+            tablet_managed: false,
+            tablet_restore_insets: None,
+            pending_desktop_geometry: false,
             workspace_restore_geometry: None,
             has_presented_frame: false,
             last_frame_submission_counter: None,
@@ -813,6 +825,9 @@ impl Window {
             maximized: false,
             focused_mode_managed: false,
             workspace_layout_managed: false,
+            tablet_managed: false,
+            tablet_restore_insets: None,
+            pending_desktop_geometry: false,
             workspace_restore_geometry: None,
             has_presented_frame: false,
             last_frame_submission_counter: None,
@@ -958,6 +973,12 @@ impl Window {
         if x < 0 || y < 0 || width == 0 || height == 0 {
             return Err("Window geometry must be non-empty and surface-local");
         }
+        // Reports queued before TABLET_MANAGED arrived can still contain the
+        // desktop frame/shadow geometry. They must not grow or move the slot,
+        // and must not generate another configure in response.
+        if self.tablet_managed {
+            return Ok(false);
+        }
         let left = x as u32;
         let top = y as u32;
         let right_edge = left
@@ -976,6 +997,10 @@ impl Window {
             right: self.width - right_edge,
             bottom: self.height - bottom_edge,
         };
+        if self.pending_desktop_geometry && next == WindowGeometryInsets::default() {
+            return Ok(false);
+        }
+        self.pending_desktop_geometry = false;
         let (next_x, next_y) = if self.fullscreen {
             // A configure response can carry the client's retained normal-mode
             // decoration geometry. Never let that asynchronous response move
@@ -1056,10 +1081,43 @@ impl Window {
         if self.maximized {
             flags |= sws_protocol::window_state::MAXIMIZED;
         }
+        if self.tablet_managed {
+            flags |= sws_protocol::window_state::TABLET_MANAGED;
+        }
         if !self.is_logically_presented() {
             flags |= sws_protocol::window_state::SUSPENDED;
         }
         flags
+    }
+
+    /// Change decoration policy independently of surface resizing. Capture the
+    /// desktop rectangle before clearing outsets, even for an already exact slot.
+    pub(super) fn set_tablet_managed(&mut self, active: bool) -> bool {
+        let active = active
+            && self.window_type == WindowType::Normal
+            && self.parent.is_none()
+            && self.resizable
+            && self.size_limits.max_width == 0
+            && self.size_limits.max_height == 0;
+        if self.tablet_managed == active {
+            return false;
+        }
+        if active {
+            if !self.workspace_layout_managed {
+                let desktop_geometry = self.window_geometry();
+                self.workspace_restore_geometry
+                    .get_or_insert(desktop_geometry);
+                self.workspace_layout_managed = true;
+            }
+            self.tablet_restore_insets = Some(self.window_geometry_insets);
+            self.window_geometry_insets = WindowGeometryInsets::default();
+            self.pending_desktop_geometry = false;
+        } else if let Some(insets) = self.tablet_restore_insets.take() {
+            self.window_geometry_insets = insets;
+            self.pending_desktop_geometry = insets != WindowGeometryInsets::default();
+        }
+        self.tablet_managed = active;
+        true
     }
 
     /// Return whether focused windowing may manage this as a full workarea window.
@@ -1460,6 +1518,9 @@ impl WindowManager {
             maximized: false,
             focused_mode_managed: false,
             workspace_layout_managed: false,
+            tablet_managed: false,
+            tablet_restore_insets: None,
+            pending_desktop_geometry: false,
             workspace_restore_geometry: None,
             has_presented_frame: false,
             last_frame_submission_counter: None,
@@ -1548,6 +1609,9 @@ impl WindowManager {
             maximized: false,
             focused_mode_managed: false,
             workspace_layout_managed: false,
+            tablet_managed: false,
+            tablet_restore_insets: None,
+            pending_desktop_geometry: false,
             workspace_restore_geometry: None,
             has_presented_frame: false,
             last_frame_submission_counter: None,
@@ -2887,6 +2951,122 @@ mod tests {
     use std::vec::Vec;
 
     use super::{WindowManager, WindowType, rounded_rect_contains_point, rounded_rect_row_span};
+
+    #[test]
+    fn tablet_presentation_excludes_transients_popups_shell_and_fixed_windows() {
+        let mut window = super::Window::new(1, 0, 32, 600, 400);
+        for role in [
+            WindowType::AlwaysOnTop,
+            WindowType::ImePopup,
+            WindowType::InputPanel,
+            WindowType::ShellPanel,
+            WindowType::ShellBackground,
+            WindowType::ShellChrome,
+            WindowType::Desktop,
+            WindowType::Taskbar,
+        ] {
+            window.window_type = role;
+            assert!(!window.set_tablet_managed(true));
+            assert_eq!(window.state_flags(), 0);
+        }
+        window.window_type = WindowType::Normal;
+        window.parent = Some(2);
+        assert!(!window.set_tablet_managed(true));
+        window.parent = None;
+        window.resizable = false;
+        assert!(!window.set_tablet_managed(true));
+        window.resizable = true;
+        window.size_limits.max_width = 600;
+        assert!(!window.set_tablet_managed(true));
+        window.size_limits.max_width = 0;
+        assert!(window.set_tablet_managed(true));
+        window.parent = Some(2);
+        assert!(window.set_tablet_managed(true));
+        assert_eq!(window.state_flags(), 0);
+    }
+
+    #[test]
+    fn tablet_entry_keeps_negotiated_desktop_size_until_scene_registration() {
+        let mut window = super::Window::new(1, 0, 32, 1200, 868);
+        let requested = (100, 100, 800, 600);
+        window.workspace_restore_geometry = Some(requested);
+        assert!(window.set_tablet_managed(true));
+        assert_eq!(window.workspace_restore_geometry, Some(requested));
+        assert!(window.set_tablet_managed(false));
+        assert_eq!(window.workspace_restore_geometry, Some(requested));
+    }
+
+    #[test]
+    fn tablet_same_geometry_transition_reports_state_and_ignores_stale_outsets() {
+        let mut window = super::Window::new(1, 0, 32, 1200, 868);
+        let desktop = window.surface_geometry();
+        assert!(window.set_tablet_managed(true));
+        assert!(!window.set_tablet_managed(true));
+        assert_eq!(window.surface_geometry(), desktop);
+        assert_eq!(window.workspace_restore_geometry, Some(desktop));
+        assert_eq!(
+            window.state_flags(),
+            sws_protocol::window_state::TABLET_MANAGED
+        );
+        window.workspace_visible = false;
+        assert_eq!(
+            window.state_flags(),
+            sws_protocol::window_state::TABLET_MANAGED | sws_protocol::window_state::SUSPENDED
+        );
+        assert_eq!(window.set_window_geometry(10, 10, 1180, 848), Ok(false));
+        assert_eq!(
+            window.window_geometry_insets,
+            super::WindowGeometryInsets::default()
+        );
+        assert_eq!(window.surface_geometry(), desktop);
+        assert!(window.set_tablet_managed(false));
+        assert_eq!(window.state_flags(), sws_protocol::window_state::SUSPENDED);
+    }
+
+    #[test]
+    fn tablet_restores_desktop_rectangle_and_insets_after_split() {
+        let mut manager = WindowManager::new();
+        let id = manager.create_window_no_buffer(100, 100, 820, 620);
+        let desktop;
+        let insets;
+        {
+            let window = manager.get_window_mut(id).unwrap();
+            window.set_window_geometry(10, 10, 800, 600).unwrap();
+            desktop = window.surface_geometry();
+            insets = window.window_geometry_insets;
+            assert!(window.set_tablet_managed(true));
+            assert_eq!(
+                window.surface_geometry_for_window_geometry(604, 32, 596, 868),
+                (604, 32, 596, 868)
+            );
+            window.x = 604;
+            window.y = 32;
+            window.width = 596;
+            window.height = 868;
+            // An old desktop report may exceed the new split size. Ignore it
+            // without an error/configure feedback cycle.
+            assert_eq!(window.set_window_geometry(10, 10, 800, 600), Ok(false));
+            assert!(window.set_tablet_managed(false));
+            assert_eq!(window.window_geometry_insets, insets);
+        }
+        let (x, y, width, height) = manager
+            .get_window(id)
+            .unwrap()
+            .workspace_restore_geometry
+            .unwrap();
+        manager.set_window_position(id, x, y);
+        manager.resize_window_geometry_in_place(id, width, height);
+        let window = manager.get_window_mut(id).unwrap();
+        assert_eq!(window.surface_geometry(), desktop);
+        // A queued tablet report cannot erase restored desktop outsets.
+        assert_eq!(
+            window.set_window_geometry(0, 0, window.width, window.height),
+            Ok(false)
+        );
+        assert_eq!(window.window_geometry_insets, insets);
+        window.set_window_geometry(10, 10, 800, 600).unwrap();
+        assert!(!window.pending_desktop_geometry);
+    }
 
     #[test]
     fn taskbar_routes_pointer_input_without_taking_keyboard_focus() {

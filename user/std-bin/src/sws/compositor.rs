@@ -45,6 +45,8 @@ use sws_protocol;
 
 #[path = "gpu_admission_retry.rs"]
 mod gpu_admission_retry;
+#[path = "workspace_geometry.rs"]
+mod workspace_geometry;
 use gpu_admission_retry::GpuAdmissionRetry;
 
 pub(super) fn is_sws_debug_enabled() -> bool {
@@ -2452,7 +2454,9 @@ pub struct Compositor {
     lid_closed: bool,
     ime_popup_windows: Vec<ImePopupWindow>,
     input_panel_window: Option<u32>,
+    // Internal keyboard bounds stay in output coordinates for IME placement.
     input_panel_occlusion: Option<sws_protocol::input_panel::Occlusion>,
+    input_panel_notifications: super::input_panel::OcclusionTracker,
     next_activation_token_serial: u64,
     activation_tokens: Vec<ActivationRecord>,
 }
@@ -2915,6 +2919,7 @@ impl Compositor {
             ime_popup_windows: Vec::new(),
             input_panel_window: None,
             input_panel_occlusion: None,
+            input_panel_notifications: super::input_panel::OcclusionTracker::default(),
             next_activation_token_serial: 1,
             activation_tokens: Vec::new(),
         })
@@ -6868,6 +6873,7 @@ impl Compositor {
             self.cursor.advance_animation(monotonic_time_ns());
         }
 
+        self.refresh_input_panel_occlusion();
         Ok(())
     }
 
@@ -9429,19 +9435,11 @@ impl Compositor {
         );
     }
 
-    fn input_workarea(&self) -> (i32, i32, u32, u32) {
-        let (x, y, width, height) =
-            self.workarea
-                .unwrap_or((0, 0, self.screen_width, self.screen_height));
-        let bottom = self
-            .input_panel_occlusion
-            .map_or(y.saturating_add(height as i32), |area| area.y);
-        (
-            x,
-            y,
-            width,
-            height.min(bottom.saturating_sub(y).max(1) as u32),
-        )
+    /// Shell reservations define app allocation. Keyboard occlusion is a separate
+    /// overlay and never changes maximized, single-scene, or split geometry.
+    fn app_workarea(&self) -> (i32, i32, u32, u32) {
+        self.workarea
+            .unwrap_or((0, 0, self.screen_width, self.screen_height))
     }
 
     fn refresh_input_panel(&mut self) {
@@ -9485,40 +9483,37 @@ impl Compositor {
             }
         }
         if next != self.input_panel_occlusion {
-            if let Some(old) = self.input_panel_occlusion {
-                let clear = sws_protocol::input_panel::Occlusion {
-                    window_id: old.window_id,
-                    ..Default::default()
-                };
-                super::ipc::send_message_to_window(
-                    old.window_id,
-                    sws_protocol::server_msg::INPUT_PANEL_OCCLUSION,
-                    clear.encode(),
-                );
-            }
             self.input_panel_occlusion = next;
-            if let Some(area) = next {
-                super::ipc::send_message_to_window(
-                    area.window_id,
-                    sws_protocol::server_msg::INPUT_PANEL_OCCLUSION,
-                    area.encode(),
-                );
-            }
-            // Existing configure/resize handling keeps focused and maximized apps above the panel.
-            self.reflow_maximized_windows_to_workarea();
-            if self.windowing_mode == sws_protocol::WindowingMode::Focused {
-                self.apply_windowing_mode_policy();
-            }
             self.position_all_ime_popup_windows();
         }
+        self.refresh_input_panel_occlusion();
         self.full_redraw_needed = true;
+    }
+
+    fn refresh_input_panel_occlusion(&mut self) {
+        let target = self.input_panel_occlusion.and_then(|area| {
+            self.window_manager
+                .get_window(area.window_id)
+                .map(|window| (area, window.surface_geometry(), self.output_scale_milli))
+        });
+        let updates = self.input_panel_notifications.update(target);
+        if !updates.is_empty() {
+            self.position_all_ime_popup_windows();
+        }
+        for area in updates {
+            super::ipc::send_message_to_window(
+                area.window_id,
+                sws_protocol::server_msg::INPUT_PANEL_OCCLUSION,
+                area.encode(),
+            );
+        }
     }
 
     fn maximized_geometry(&self, window_id: u32) -> Option<(i32, i32, u32, u32)> {
         let window = self.window_manager.get_window(window_id)?;
         Some(maximized_geometry_for(
             window.window_type,
-            Some(self.input_workarea()),
+            Some(self.app_workarea()),
             self.screen_width,
             self.screen_height,
         ))
@@ -9532,6 +9527,7 @@ impl Compositor {
             .filter(|window| {
                 window.maximized
                     && !window.fullscreen
+                    && !window.workspace_layout_managed
                     && window.window_type == super::window::WindowType::Normal
             })
             .map(|window| window.id)
@@ -9644,6 +9640,14 @@ impl Compositor {
     }
 
     fn maximize_window_from_client(&mut self, window_id: u32) -> bool {
+        if self
+            .window_manager
+            .get_window(window_id)
+            .is_some_and(|window| window.tablet_managed)
+        {
+            self.send_window_state_changed(window_id);
+            return self.apply_windowing_mode_policy();
+        }
         let Some((old_surface, old_state_flags, old_visible)) =
             self.window_manager.get_window(window_id).map(|window| {
                 (
@@ -9709,7 +9713,7 @@ impl Compositor {
         if let Some((x, y, width, height)) = restore_geometry {
             self.window_manager.set_window_position(window_id, x, y);
             self.window_manager
-                .resize_window_in_place(window_id, width, height);
+                .resize_window_geometry_in_place(window_id, width, height);
         }
         if let Some(window) = self.window_manager.get_window_mut(window_id) {
             window.workspace_layout_managed = false;
@@ -9737,59 +9741,12 @@ impl Compositor {
         let workspace_id = self
             .workspace_manager
             .workspace_for_window(self.top_level_window_id(window_id))?;
-        let (x, y, width, height) = self.input_workarea();
-        let divider = 8u32.min(width.saturating_sub(2));
-        match self.workspace_manager.tablet_layout(workspace_id) {
-            sws_protocol::workspace::TabletLayout::Empty => None,
-            sws_protocol::workspace::TabletLayout::Single {
-                window_id: presented,
-            } => (presented == window_id).then_some((x, y, width.max(1), height.max(1))),
-            sws_protocol::workspace::TabletLayout::Split {
-                axis,
-                first_window_id,
-                second_window_id,
-                ratio_milli,
-            } => match axis {
-                sws_protocol::workspace::SplitAxis::Horizontal => {
-                    let available = width.saturating_sub(divider).max(2);
-                    let first_width = ((u64::from(available) * u64::from(ratio_milli)) / 1000)
-                        .clamp(1, u64::from(available.saturating_sub(1)))
-                        as u32;
-                    let second_width = available.saturating_sub(first_width).max(1);
-                    if first_window_id == window_id {
-                        Some((x, y, first_width, height.max(1)))
-                    } else if second_window_id == window_id {
-                        Some((
-                            x.saturating_add(first_width.saturating_add(divider) as i32),
-                            y,
-                            second_width,
-                            height.max(1),
-                        ))
-                    } else {
-                        None
-                    }
-                }
-                sws_protocol::workspace::SplitAxis::Vertical => {
-                    let available = height.saturating_sub(divider).max(2);
-                    let first_height = ((u64::from(available) * u64::from(ratio_milli)) / 1000)
-                        .clamp(1, u64::from(available.saturating_sub(1)))
-                        as u32;
-                    let second_height = available.saturating_sub(first_height).max(1);
-                    if first_window_id == window_id {
-                        Some((x, y, width.max(1), first_height))
-                    } else if second_window_id == window_id {
-                        Some((
-                            x,
-                            y.saturating_add(first_height.saturating_add(divider) as i32),
-                            width.max(1),
-                            second_height,
-                        ))
-                    } else {
-                        None
-                    }
-                }
-            },
-        }
+        let (x, y, width, height) = self.app_workarea();
+        workspace_geometry::tablet_slot(
+            self.workspace_manager.tablet_layout(workspace_id),
+            window_id,
+            (x, y, width, height),
+        )
     }
 
     fn tablet_surface_geometry_for_window(
@@ -9798,6 +9755,9 @@ impl Compositor {
         slot: (i32, i32, u32, u32),
     ) -> Option<(i32, i32, u32, u32)> {
         let window = self.window_manager.get_window(window_id)?;
+        if window.tablet_managed {
+            return Some(slot);
+        }
         let geometry = window.window_geometry();
         let target = if window.supports_focused_windowing() {
             slot
@@ -9836,12 +9796,15 @@ impl Compositor {
         let target_surface = self
             .tablet_surface_geometry_for_window(window_id, slot)
             .unwrap_or(old_surface);
-        if old_surface == target_surface {
-            return false;
-        }
+        let geometry_changed = old_surface != target_surface;
+        let mut ownership_changed = false;
         if let Some(window) = self.window_manager.get_window_mut(window_id) {
             if !window.workspace_layout_managed {
-                window.workspace_restore_geometry = Some(old_surface);
+                let desktop_geometry = window.window_geometry();
+                window
+                    .workspace_restore_geometry
+                    .get_or_insert(desktop_geometry);
+                ownership_changed = true;
             }
             window.workspace_layout_managed = true;
             window.focused_mode_managed = false;
@@ -9850,6 +9813,9 @@ impl Compositor {
             window.y = target_surface.1;
             window.width = target_surface.2;
             window.height = target_surface.3;
+        }
+        if !geometry_changed {
+            return ownership_changed;
         }
         if old_visible {
             self.add_pending_damage(old_surface);
@@ -10594,8 +10560,33 @@ impl Compositor {
             }
         }
 
-        if self.windowing_mode == sws_protocol::WindowingMode::Freeform {
-            for window_id in &window_ids {
+        for window_id in &window_ids {
+            let scene_managed = self.windowing_mode == sws_protocol::WindowingMode::Focused
+                && self.is_workspace_scene_root(*window_id)
+                && self
+                    .workspace_manager
+                    .workspace_for_window(*window_id)
+                    .is_some();
+            let tablet_managed = scene_managed
+                && self
+                    .window_manager
+                    .get_window(*window_id)
+                    .is_some_and(|window| {
+                        window.resizable
+                            && window.size_limits.max_width == 0
+                            && window.size_limits.max_height == 0
+                    });
+            if self
+                .window_manager
+                .get_window_mut(*window_id)
+                .is_some_and(|window| window.set_tablet_managed(tablet_managed))
+            {
+                // Publish decoration state before either entry or restoration
+                // sends a configure; equal-sized transitions still notify.
+                self.send_window_state_changed(*window_id);
+                changed = true;
+            }
+            if !scene_managed && !self.window_manager.is_fullscreen(*window_id) {
                 changed |= self.restore_workspace_managed_window(*window_id);
             }
         }
@@ -10613,6 +10604,8 @@ impl Compositor {
 
         changed |= self.update_overview_transforms();
         changed |= self.sync_shell_presentation_focus();
+        visibility_changed.sort_unstable();
+        visibility_changed.dedup();
         for window_id in visibility_changed {
             self.send_window_state_changed(window_id);
         }
@@ -10623,7 +10616,11 @@ impl Compositor {
         {
             for window_id in window_ids {
                 let is_root = self.top_level_window_id(window_id) == window_id;
-                if !is_root || !self.desired_workspace_visibility(window_id) {
+                if !is_root
+                    || !self.is_workspace_scene_root(window_id)
+                    || !self.desired_workspace_visibility(window_id)
+                    || self.window_manager.is_fullscreen(window_id)
+                {
                     continue;
                 }
                 if let Some(slot) = self.tablet_slot_for_window(window_id) {
@@ -10636,6 +10633,7 @@ impl Compositor {
             self.full_redraw_needed = true;
             self.route_pointer_motion_at_cursor();
         }
+        self.refresh_input_panel_occlusion();
         changed
     }
 
@@ -11028,7 +11026,6 @@ impl Compositor {
 
                 self.register_new_workspace_scene_and_publish(window_id);
 
-                let mut negotiated_restore_geometry = None;
                 if let Some(configuration) = initial_configuration {
                     let limits = configuration.size_limits;
                     self.window_manager.set_window_size_limits(
@@ -11062,19 +11059,20 @@ impl Compositor {
                     if let Some(window) = self.window_manager.get_window_mut(window_id) {
                         window.initial_size_negotiated = true;
                         window.center_on_first_geometry = false;
-                        negotiated_restore_geometry =
-                            Some((window.x, window.y, restore_width, restore_height));
+                        if self.windowing_mode == sws_protocol::WindowingMode::Focused {
+                            let (x, y, _, _) = window.window_geometry();
+                            window.workspace_restore_geometry = Some((
+                                x,
+                                y,
+                                restore_width.saturating_sub(insets.horizontal()).max(1),
+                                restore_height.saturating_sub(insets.vertical()).max(1),
+                            ));
+                        }
                     }
                 }
 
                 if self.windowing_mode == sws_protocol::WindowingMode::Focused {
                     self.apply_focused_policy_to_window(window_id);
-                    if let Some(restore_geometry) = negotiated_restore_geometry
-                        && let Some(window) = self.window_manager.get_window_mut(window_id)
-                        && window.workspace_layout_managed
-                    {
-                        window.workspace_restore_geometry = Some(restore_geometry);
-                    }
                 }
 
                 // Focus is for input routing only; give focus to newly created windows.
@@ -11530,7 +11528,7 @@ impl Compositor {
                     || self
                         .window_manager
                         .get_window(window_id)
-                        .is_some_and(|window| window.focused_mode_managed)
+                        .is_some_and(|window| window.focused_mode_managed || window.tablet_managed)
                 {
                     sws_debug!(
                         "[Compositor] Ignoring move request for fullscreen window #{}",
@@ -11609,7 +11607,7 @@ impl Compositor {
                     || self
                         .window_manager
                         .get_window(window_id)
-                        .is_some_and(|window| window.focused_mode_managed)
+                        .is_some_and(|window| window.focused_mode_managed || window.tablet_managed)
                 {
                     println!(
                         "[Compositor] Ignoring explicit move for fullscreen window #{}",
@@ -11717,11 +11715,11 @@ impl Compositor {
                     window_id, width, height, shm_mapped_addr
                 );
                 if let Some(window) = self.window_manager.get_window(window_id)
-                    && window.fullscreen
+                    && (window.fullscreen || window.tablet_managed)
                     && (width != window.width || height != window.height)
                 {
                     println!(
-                        "[Compositor] Rejecting {}x{} backing for fullscreen window #{}; expected {}x{}",
+                        "[Compositor] Rejecting {}x{} backing for managed window #{}; expected {}x{}",
                         width, height, window_id, window.width, window.height
                     );
                     if let Some(address) = shm_mapped_addr
@@ -12004,6 +12002,7 @@ impl Compositor {
                     self.window_manager
                         .resize_window_geometry_in_place(window_id, width, height);
                 }
+                self.apply_windowing_mode_policy();
                 if let Some(rect) = old_rect {
                     self.add_pending_damage(rect);
                 }
@@ -12723,6 +12722,7 @@ impl Compositor {
                             {
                                 self.add_pending_damage(rect);
                             }
+                            self.apply_windowing_mode_policy();
                             self.route_pointer_motion_at_cursor();
                         }
                     }

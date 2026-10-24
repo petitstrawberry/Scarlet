@@ -74,9 +74,190 @@ impl Panel {
         changed
     }
 }
+/// Output-space panel bounds, target surface bounds, and physical/logical scale.
+/// Keep the geometry in the cache as well as the resulting local intersection:
+/// moves/resizes must refresh clients even when that intersection is identical.
+type OcclusionTarget = (
+    sws_protocol::input_panel::Occlusion,
+    (i32, i32, u32, u32),
+    u32,
+);
+
+#[derive(Default)]
+pub(super) struct OcclusionTracker {
+    target: Option<OcclusionTarget>,
+}
+
+impl OcclusionTracker {
+    pub(super) fn update(
+        &mut self,
+        target: Option<OcclusionTarget>,
+    ) -> Vec<sws_protocol::input_panel::Occlusion> {
+        use sws_protocol::input_panel::Occlusion;
+        if self.target == target {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        if let Some((old, _, _)) = self.target
+            && target.is_none_or(|(next, _, _)| next.window_id != old.window_id)
+        {
+            events.push(Occlusion {
+                window_id: old.window_id,
+                ..Default::default()
+            });
+        }
+        if let Some((panel, surface, _)) = target {
+            // i64 keeps signed origins plus unsigned extents from overflowing.
+            let left = i64::from(panel.x).max(i64::from(surface.0));
+            let top = i64::from(panel.y).max(i64::from(surface.1));
+            let right = (i64::from(panel.x) + i64::from(panel.width))
+                .min(i64::from(surface.0) + i64::from(surface.2));
+            let bottom = (i64::from(panel.y) + i64::from(panel.height))
+                .min(i64::from(surface.1) + i64::from(surface.3));
+            events.push(if left < right && top < bottom {
+                Occlusion {
+                    window_id: panel.window_id,
+                    x: (left - i64::from(surface.0)).min(i64::from(i32::MAX)) as i32,
+                    y: (top - i64::from(surface.1)).min(i64::from(i32::MAX)) as i32,
+                    width: (right - left) as u32,
+                    height: (bottom - top) as u32,
+                }
+            } else {
+                Occlusion {
+                    window_id: panel.window_id,
+                    ..Default::default()
+                }
+            });
+        }
+        self.target = target;
+        events
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sws_protocol::input_panel::Occlusion;
+
+    fn keyboard(window_id: u32) -> Occlusion {
+        Occlusion {
+            window_id,
+            x: 0,
+            y: 600,
+            width: 1200,
+            height: 300,
+        }
+    }
+
+    #[test]
+    fn occlusion_is_clipped_to_split_and_floating_surfaces() {
+        let mut tracker = OcclusionTracker::default();
+        assert_eq!(
+            tracker.update(Some((keyboard(1), (604, 32, 596, 868), 1000))),
+            vec![Occlusion {
+                window_id: 1,
+                x: 0,
+                y: 568,
+                width: 596,
+                height: 300
+            }]
+        );
+        assert_eq!(
+            tracker.update(Some((keyboard(1), (-20, 500, 400, 200), 1000))),
+            vec![Occlusion {
+                window_id: 1,
+                x: 20,
+                y: 100,
+                width: 380,
+                height: 100
+            }]
+        );
+    }
+
+    #[test]
+    fn disjoint_surface_gets_clear_and_geometry_changes_resend() {
+        let mut tracker = OcclusionTracker::default();
+        let clear = Occlusion {
+            window_id: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            tracker.update(Some((keyboard(1), (0, 32, 600, 400), 1000))),
+            vec![clear]
+        );
+        assert!(
+            tracker
+                .update(Some((keyboard(1), (0, 32, 600, 400), 1000)))
+                .is_empty()
+        );
+        assert_eq!(
+            tracker.update(Some((keyboard(1), (0, 40, 600, 400), 1000))),
+            vec![clear]
+        );
+        assert_eq!(
+            tracker.update(Some((keyboard(1), (0, 40, 600, 400), 2000))),
+            vec![clear]
+        );
+        assert_eq!(
+            tracker.update(Some((keyboard(1), (0, 40, 600, 700), 2000)))[0].height,
+            140
+        );
+    }
+
+    #[test]
+    fn target_handoff_clears_old_editor_before_new_editor_and_hide_clears_once() {
+        let mut tracker = OcclusionTracker::default();
+        tracker.update(Some((keyboard(1), (0, 32, 1200, 868), 1000)));
+        let events = tracker.update(Some((keyboard(2), (100, 550, 400, 200), 1000)));
+        assert_eq!(
+            events[0],
+            Occlusion {
+                window_id: 1,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            events[1],
+            Occlusion {
+                window_id: 2,
+                x: 0,
+                y: 50,
+                width: 400,
+                height: 150
+            }
+        );
+        assert_eq!(
+            tracker.update(None),
+            vec![Occlusion {
+                window_id: 2,
+                ..Default::default()
+            }]
+        );
+        assert!(tracker.update(None).is_empty());
+    }
+
+    #[test]
+    fn extreme_output_origins_do_not_wrap_the_intersection() {
+        let mut tracker = OcclusionTracker::default();
+        let panel = Occlusion {
+            window_id: 1,
+            x: i32::MAX - 10,
+            y: 0,
+            width: 100,
+            height: 20,
+        };
+        assert_eq!(
+            tracker.update(Some((panel, (i32::MAX - 5, 0, 10, 10), 1000))),
+            vec![Occlusion {
+                window_id: 1,
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10
+            }]
+        );
+    }
+
     fn editor(id: u32) -> Context {
         Context {
             context_id: id,

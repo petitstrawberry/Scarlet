@@ -106,7 +106,9 @@ The shell and compositor must preserve these invariants:
 8. Workspace membership, order, focus, layout, and presentation changes become
    visible atomically at a compositor frame boundary.
 9. Tablet presentation does not set the public maximized or fullscreen window
-   states.
+   states. Resizable app scene roots receive `TABLET_MANAGED` before configure;
+   ScarletUI suppresses their titlebar, frame, shadow and geometry insets.
+   Transient dialogs and fixed-size surfaces retain their own presentation.
 10. Leaving tablet presentation restores the retained freeform geometry rather
     than guessing a new desktop placement.
 11. Overview/application-catalog shell surfaces never become members of an
@@ -124,6 +126,12 @@ The shell and compositor must preserve these invariants:
 17. An idle shell does not continuously submit frames. Values derived while
     building a scene are written back to reactive state only when the value has
     actually changed, so scene construction cannot invalidate itself.
+18. The software keyboard overlays the shell workarea. Opening or hiding it
+    cannot change single-scene, split-scene or maximized allocations. SWS sends
+    the focused surface a surface-local physical occlusion rectangle instead;
+    ScarletUI scrolls the focused text viewport or its enclosing scroll view.
+    Fixed tablet forms may pan their content as a fallback without relayout.
+    The occlusion is cleared on dismissal or transfer to another surface.
 
 ## Output and Posture Model
 
