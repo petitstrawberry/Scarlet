@@ -106,7 +106,7 @@ to = "/bin/ui-benchmark"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "7adae8c4227687ffd4dff94046ea8b31f96a3398" }
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "24b3f572128e4142e45833edb6ee77afb21507bf" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"
@@ -303,7 +303,7 @@ architectures = ["aarch64"]
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/vellum", rev = "d808c297c2abca7b8876adc296779fc200190384" }
+source = { git = "https://github.com/petitstrawberry/vellum", rev = "622e6e9792cc983e5b6ec3a2ce31b72f5543740a" }
 package = "vellum"
 bin = "vellum"
 to = "/bin/vellum"
@@ -386,5 +386,5 @@ to = "/bin/applications"
 # Kureha Code owns its native app recipe and resources.
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/kureha-code.git", rev = "fdc4e2b0758c99017d5403891cfbc3ee4ba5a552" }
+source = { git = "https://github.com/petitstrawberry/kureha-code.git", rev = "d6eacec722de8971f5c9ca6ffa9d10365815ef9f" }
 bundle = "platforms/scarlet/bundle.toml"
