@@ -285,7 +285,8 @@ pub(super) fn rows(numeric: bool, layer: Layer) -> Vec<KeyRow> {
             control("return", Key(28, 0), 2.2),
         ]),
         row(vec![
-            control("shift", Modifier(input_panel::SHIFT), 1.55),
+            // Stagger Z between A and S while keeping full-size touch targets.
+            control("shift", Modifier(input_panel::SHIFT), 1.0),
             key("z", "Z", 44),
             key("x", "X", 45),
             key("c", "C", 46),
@@ -295,7 +296,7 @@ pub(super) fn rows(numeric: bool, layer: Layer) -> Vec<KeyRow> {
             key("m", "M", 50),
             key(",", "<", 51),
             key(".", ">", 52),
-            control("shift", Modifier(input_panel::SHIFT), 1.0),
+            control("shift", Modifier(input_panel::SHIFT), 1.55),
         ]),
         bottom_row("123", Layer::Symbols),
     ]

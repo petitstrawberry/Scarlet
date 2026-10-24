@@ -5,7 +5,7 @@ hash = "sha256:90c0f29af5dc1dae7af87ea39a508cf549e74ae05dc51a353fa1d61946b7b84c"
 layers = []
 
 [sections.disk]
-hash = "sha256:42a3bc004ff61ead434f243b92baef7178f2bc5f2a7a110082ad89f509f3b2dd"
+hash = "sha256:d048ef612f980cb12b78b59b3cc945f1f6c70496cdc6f470061fa31e444bef2c"
 layers = []
 
 [sections.initramfs]
@@ -463,7 +463,7 @@ type = "path"
 path = "../../user/std-bin"
 
 [sections.rootfs]
-hash = "sha256:c063600e5734e6cf4a0fb261b2050afbfec06d8540dc12905a3922ea75f5fc04"
+hash = "sha256:75bae83a22a172f77d67cd9d210385c0c06ca599d5c7d05b6585844f9a584a4a"
 
 [[sections.rootfs.layers]]
 kind = "script"
@@ -1425,7 +1425,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "soft-keyboard"
 to = "/bin/soft-keyboard"
-hash = "sha256:1e9d5f1872c1af396c70e6928e282c0cd39fb5737eac034f1930a48c516b10d7"
+hash = "sha256:53af24efa4f6be748e36bf46ff04a3a95b01f574c6741e0d349c3b504375c170"
 
 [sections.rootfs.layers.source]
 type = "path"
@@ -1698,7 +1698,7 @@ path = ".scarlet/cache/git/1d707eff8bef4cad/bundle/build-aarch64.sh"
 [[sections.rootfs.layers]]
 kind = "script"
 to = "/"
-hash = "sha256:537295a0badb1ff7b78151e72d4ff89169ca841424c0894c6c645b60d003b5f1"
+hash = "sha256:3960a808b071c7bbd610f328c970e8fe9b675a6df9710038c38aa2bfdb979175"
 
 [sections.rootfs.layers.source]
 type = "path"
