@@ -2479,8 +2479,8 @@ pub struct Compositor {
     tablet_navigation_source: Option<PointerSource>,
     tablet_motion: Option<tablet_motion::Motion>,
     overview_pan: f32,
-    overview_pan_settle: Option<(f32, u64)>,
-    pending_card_close: Option<(OverviewWindowDrag, u64)>,
+    overview_pan_settle: Option<tablet_motion::OverviewScroll>,
+    pending_card_close: Option<ClosingCard>,
     drawer_motion: Option<tablet_motion::Motion>,
     /// Wait for the shell to submit its new Home content before revealing it.
     drawer_open_pending: bool,
@@ -2582,6 +2582,16 @@ struct OverviewPointerNavigation {
     start_workspace_id: Option<u32>,
     start_add_workspace: bool,
     start_remove_workspace_id: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ClosingCard {
+    drag: OverviewWindowDrag,
+    started_ns: Option<u64>,
+    target_y: i32,
+    release_y: i32,
+    requested: bool,
+    opacity: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -5918,6 +5928,9 @@ impl Compositor {
             self.set_window_position_with_damage(drag.window_id, x, y);
         }
 
+        if changed && self.tablet_mode {
+            self.workspace_manager.settle_after_close(true);
+        }
         // Clearing the drag before recomputing presentation restores the
         // actor's card-relative transform or applies its destination card.
         self.overview_window_drag = None;
@@ -6071,7 +6084,10 @@ impl Compositor {
     }
 
     fn tablet_navigation_indicator(&self) -> Option<(i32, i32, u32, u32)> {
-        if !self.tablet_mode {
+        if !self.tablet_mode
+            || self.workspace_manager.presentation()
+                != sws_protocol::workspace::ShellPresentation::Workspace
+        {
             return None;
         }
         let scale = self.output_scale_milli.max(1);
@@ -6119,7 +6135,7 @@ impl Compositor {
             .iter()
             .filter_map(|window| {
                 let root = self.top_level_window_id(window.id);
-                if !window.is_logically_presented()
+                if !window.is_presented()
                     || self.workspace_manager.workspace_for_window(root).is_none()
                 {
                     return None;
@@ -6153,6 +6169,14 @@ impl Compositor {
                 .direct_touch_grabs
                 .iter()
                 .any(|grab| grab.source == frame.source)
+        {
+            return false;
+        }
+        // Home owns its catalog scrolling; the bottom navigation must not
+        // turn a Home scroll into another overview/home transition.
+        if self.workspace_manager.presentation() == sws_protocol::workspace::ShellPresentation::Home
+            && self.tablet_drag_origin.is_none()
+            && index.is_none_or(|i| !self.tablet_navigation[i].1.is_captured())
         {
             return false;
         }
@@ -6237,7 +6261,7 @@ impl Compositor {
                 horizontal,
                 overview_ready,
             }) => {
-                self.overview_pan = self.clamped_overview_pan(horizontal);
+                self.set_overview_pan(self.clamped_overview_pan(horizontal));
                 let horizontal_progress =
                     (horizontal.abs() / tablet_navigation::page_stride(self.screen_width)).min(1.0);
                 let mut direct = None;
@@ -6337,6 +6361,16 @@ impl Compositor {
         }
     }
 
+    fn set_overview_pan(&mut self, pan: f32) {
+        if self.overview_pan != pan {
+            self.overview_pan = pan;
+            // Reveal only cards entering the viewport. Offscreen applications
+            // keep their normal suspension/frame-callback policy while browsing.
+            self.apply_workspace_presentation_policy();
+            self.full_redraw_needed = true;
+        }
+    }
+
     fn clamped_overview_pan(&self, pan: f32) -> f32 {
         let state = self.workspace_manager.snapshot();
         let index = state
@@ -6354,7 +6388,7 @@ impl Compositor {
 
     fn settle_overview_pan(&mut self, velocity: f32) {
         let pitch = tablet_navigation::page_stride(self.screen_width);
-        let projected = self.overview_pan + (velocity * 0.12).clamp(-pitch, pitch);
+        let projected = self.overview_pan + (velocity * 0.18).clamp(-pitch, pitch);
         let steps = (-projected / pitch).round() as i32;
         let mut moved = 0i32;
         for _ in 0..steps.unsigned_abs().min(64) {
@@ -6370,7 +6404,7 @@ impl Compositor {
         self.overview_pan += moved as f32 * pitch;
         self.overview_pan_settle = self
             .animations_enabled()
-            .then_some((self.overview_pan, monotonic_time_ns()));
+            .then(|| tablet_motion::OverviewScroll::new(self.overview_pan, velocity, pitch));
         if self.overview_pan_settle.is_none() {
             self.overview_pan = 0.0;
         }
@@ -6410,9 +6444,7 @@ impl Compositor {
                 let pan =
                     self.clamped_overview_pan(navigation.pan_origin + navigation.contact.dx());
                 if self.overview_pan != pan {
-                    self.overview_pan = pan;
-                    self.update_overview_transforms();
-                    self.full_redraw_needed = true;
+                    self.set_overview_pan(pan);
                 }
             }
             Mode::Dismiss => {
@@ -6553,7 +6585,22 @@ impl Compositor {
                     .map_or(self.screen_height / 2, |t| t.height);
                 let close = navigation.contact.dismiss_committed(height);
                 if close && let Some(drag) = self.overview_window_drag {
-                    self.pending_card_close = Some((drag, monotonic_time_ns()));
+                    let card = self
+                        .overview_card_rects()
+                        .into_iter()
+                        .find_map(|(id, rect)| (id == drag.source_workspace_id).then_some(rect))
+                        .unwrap_or((0, 0, self.screen_width, self.screen_height));
+                    let target_y =
+                        i64::from(drag.start_y) - i64::from(card.1) - i64::from(card.3) - 32;
+                    self.overview_window_drag = None;
+                    self.pending_card_close = Some(ClosingCard {
+                        drag,
+                        started_ns: None,
+                        target_y: target_y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+                        release_y: drag.current_y,
+                        requested: false,
+                        opacity: 1.0,
+                    });
                 } else {
                     let starts = self.tablet_scene_snapshot();
                     self.cancel_overview_window_drag();
@@ -6589,7 +6636,10 @@ impl Compositor {
             return Some(true);
         }
 
-        if self.pending_card_close.is_some() {
+        if self
+            .pending_card_close
+            .is_some_and(|close| !close.requested)
+        {
             return Some(true);
         }
         let presentation = self.workspace_manager.presentation();
@@ -7150,7 +7200,11 @@ impl Compositor {
         {
             timeout = timeout.min(FRAME_BATCH_INTERVAL_NS);
         }
-        if self.pending_card_close.is_some() || self.overview_pan_settle.is_some() {
+        if self
+            .pending_card_close
+            .is_some_and(|close| !close.requested)
+            || self.overview_pan_settle.is_some()
+        {
             timeout = timeout.min(FRAME_BATCH_INTERVAL_NS);
         }
         for deadline in self
@@ -7416,34 +7470,44 @@ impl Compositor {
             self.system_touch_navigation = Some(navigation);
         }
         let mut motion_changed = false;
-        if let Some((drag, start)) = self.pending_card_close {
-            let t = if self.animations_enabled() {
-                (now.saturating_sub(start) as f32 / 140_000_000.0).clamp(0.0, 1.0)
-            } else {
+        if let Some(mut close) = self.pending_card_close.filter(|close| !close.requested) {
+            let t = if !self.animations_enabled() {
                 1.0
-            };
-            if t >= 1.0 {
-                self.pending_card_close = None;
-                self.cancel_overview_window_drag();
-                super::ipc::send_message_to_window(
-                    drag.window_id,
-                    sws_protocol::server_msg::WINDOW_CLOSE_REQUESTED,
-                    sws_protocol::payload_window_close_requested(drag.window_id).to_vec(),
-                );
             } else {
-                self.update_overview_window_drag(
-                    drag.current_x,
-                    drag.current_y
-                        - (self.screen_height as f32 * (1.0 - (1.0 - t).powi(3))).round() as i32,
+                close.started_ns.map_or(0.0, |start| {
+                    (now.saturating_sub(start) as f32 / 160_000_000.0).clamp(0.0, 1.0)
+                })
+            };
+            let eased = 1.0 - (1.0 - t).powi(3);
+            let release_y = close.release_y;
+            // `target_y` is a fixed offscreen endpoint. Preserve the release
+            // position separately through the remaining distance each frame.
+            close.drag.current_y = (release_y as f32
+                + (close.target_y as f32 - release_y as f32) * eased)
+                .round() as i32;
+            close.opacity = 1.0 - eased;
+            if t >= 1.0 {
+                close.requested = true;
+                close.opacity = 0.0;
+                super::ipc::send_message_to_window(
+                    close.drag.window_id,
+                    sws_protocol::server_msg::WINDOW_CLOSE_REQUESTED,
+                    sws_protocol::payload_window_close_requested(close.drag.window_id).to_vec(),
                 );
             }
+            // Keep the actor offscreen until destruction or an app response
+            // changes presentation (for example an unsaved-document dialog).
+            self.pending_card_close = Some(close);
             motion_changed = true;
         }
-        if let Some((from, start)) = self.overview_pan_settle {
-            let t = (now.saturating_sub(start) as f32 / 140_000_000.0).clamp(0.0, 1.0);
-            self.overview_pan = from * (1.0 - t).powi(3);
-            if t >= 1.0 || !self.animations_enabled() {
-                self.overview_pan = 0.0;
+        if let Some(scroll) = self.overview_pan_settle {
+            let (pan, finished) = scroll.sample(now);
+            self.set_overview_pan(if finished || !self.animations_enabled() {
+                0.0
+            } else {
+                pan
+            });
+            if finished || !self.animations_enabled() {
                 self.overview_pan_settle = None;
             }
             motion_changed = true;
@@ -7489,7 +7553,15 @@ impl Compositor {
     }
 
     fn note_frame_presented(&mut self) {
+        if let Some(scroll) = self.overview_pan_settle.as_mut() {
+            scroll.note_presented(monotonic_time_ns());
+        }
         let now = monotonic_time_ns();
+        if let Some(close) = self.pending_card_close.as_mut() {
+            if close.started_ns.is_none() {
+                close.started_ns = Some(now);
+            }
+        }
         if let Some(motion) = self.tablet_motion.as_mut() {
             motion.note_presented(now);
         }
@@ -7720,7 +7792,7 @@ impl Compositor {
                 }
             }
         }
-        let workspace_state_changed = match (previous_windowing_mode, windowing_mode) {
+        let mut workspace_state_changed = match (previous_windowing_mode, windowing_mode) {
             (sws_protocol::WindowingMode::Freeform, sws_protocol::WindowingMode::Focused) => self
                 .workspace_manager
                 .enter_tablet_experience(preferred_window_id),
@@ -7729,6 +7801,9 @@ impl Compositor {
             }
             _ => false,
         };
+        if tablet_mode_changed && tablet_mode {
+            workspace_state_changed |= self.workspace_manager.settle_after_close(true);
+        }
         if windowing_mode_changed {
             redraw |= self.apply_windowing_mode_policy();
         }
@@ -8707,7 +8782,7 @@ impl Compositor {
         }
         if self
             .pending_card_close
-            .is_some_and(|(drag, _)| Self::window_id_in(window_ids, drag.window_id))
+            .is_some_and(|close| Self::window_id_in(window_ids, close.drag.window_id))
         {
             self.pending_card_close = None;
         }
@@ -9635,9 +9710,7 @@ impl Compositor {
         for window_id in &removed_ids {
             workspace_changed |= self.workspace_manager.remove_window(*window_id);
         }
-        workspace_changed |= self
-            .workspace_manager
-            .settle_after_close(self.windowing_mode == sws_protocol::WindowingMode::Focused);
+        workspace_changed |= self.workspace_manager.settle_after_close(self.tablet_mode);
         if self.tablet_mode
             && self.workspace_manager.presentation()
                 == sws_protocol::workspace::ShellPresentation::Overview
@@ -10566,14 +10639,21 @@ impl Compositor {
             }
             sws_protocol::workspace::ShellPresentation::Home
             | sws_protocol::workspace::ShellPresentation::Overview => {
+                if self.tablet_drag_origin.is_some()
+                    && self
+                        .tablet_gesture_scene
+                        .as_ref()
+                        .is_some_and(|scene| scene.starts.iter().any(|(id, _)| *id == root_id))
+                {
+                    return true;
+                }
                 self.overview_card_rects().iter().any(|(candidate, rect)| {
                     *candidate == workspace_id
-                        && (self.tablet_mode
-                            || intersect_compositor_rects(
-                                *rect,
-                                (0, 0, self.screen_width, self.screen_height),
-                            )
-                            .is_some())
+                        && intersect_compositor_rects(
+                            *rect,
+                            (0, 0, self.screen_width, self.screen_height),
+                        )
+                        .is_some()
                 }) && (self.windowing_mode == sws_protocol::WindowingMode::Freeform
                     || self.tablet_slot_for_window(root_id).is_some())
             }
@@ -10782,6 +10862,22 @@ impl Compositor {
             })
     }
 
+    fn workspace_has_closing_card(&self, workspace_id: u32) -> bool {
+        self.pending_card_close.is_some_and(|close| {
+            close.drag.source_workspace_id == workspace_id
+                && self
+                    .workspace_manager
+                    .snapshot()
+                    .workspaces
+                    .iter()
+                    .any(|w| {
+                        w.id == workspace_id
+                            && w.window_ids.len() == 1
+                            && w.window_ids[0] == close.drag.window_id
+                    })
+        })
+    }
+
     fn overview_render_backplates(&self) -> Vec<((i32, i32, u32, u32), bool, bool)> {
         if !matches!(
             self.workspace_manager.presentation(),
@@ -10794,6 +10890,7 @@ impl Compositor {
         let mut backplates = self
             .overview_card_rects()
             .into_iter()
+            .filter(|(id, _)| !self.workspace_has_closing_card(*id))
             .map(|(workspace_id, rect)| {
                 (
                     rect,
@@ -10828,7 +10925,10 @@ impl Compositor {
             return Vec::new();
         }
         let mut layers = Vec::new();
-        for (_, rect) in self.overview_layout_rects() {
+        for (workspace_id, rect) in self.overview_layout_rects() {
+            if self.workspace_has_closing_card(workspace_id) {
+                continue;
+            }
             push_overview_shadow_layers(
                 &mut layers,
                 rect,
@@ -10911,10 +11011,15 @@ impl Compositor {
             ((u64::from(surface.2) * u64::from(card.2)) / u64::from(work_width.max(1))) as u32;
         let height =
             ((u64::from(surface.3) * u64::from(card.3)) / u64::from(work_height.max(1))) as u32;
+        let closing = self
+            .pending_card_close
+            .filter(|close| close.drag.window_id == root_id);
         let dragging = apply_drag
-            .then_some(self.overview_window_drag)
-            .flatten()
-            .filter(|drag| drag.window_id == root_id);
+            .then_some(closing.map(|close| close.drag).or_else(|| {
+                self.overview_window_drag
+                    .filter(|drag| drag.window_id == root_id)
+            }))
+            .flatten();
         if let Some(drag) = dragging {
             x = x.saturating_add(drag.current_x.saturating_sub(drag.start_x));
             y = y.saturating_add(drag.current_y.saturating_sub(drag.start_y));
@@ -10924,7 +11029,9 @@ impl Compositor {
             y,
             width: width.max(1),
             height: height.max(1),
-            opacity: if dragging.is_some() { 0.94 } else { 1.0 },
+            opacity: closing.map_or(if dragging.is_some() { 0.94 } else { 1.0 }, |close| {
+                close.opacity
+            }),
         })
     }
 
@@ -11138,7 +11245,10 @@ impl Compositor {
                 };
                 let dragging = self
                     .overview_window_drag
-                    .is_some_and(|drag| drag.window_id == root_id);
+                    .is_some_and(|drag| drag.window_id == root_id)
+                    || self
+                        .pending_card_close
+                        .is_some_and(|close| close.drag.window_id == root_id);
                 let clip = if animating.is_some() {
                     transform.map(|rect| (rect.x, rect.y, rect.width, rect.height))
                 } else {
@@ -11292,6 +11402,9 @@ impl Compositor {
                 .workspace_manager
                 .set_presentation(sws_protocol::workspace::ShellPresentation::Home);
         let presentation = self.workspace_manager.presentation();
+        if presentation != sws_protocol::workspace::ShellPresentation::Overview {
+            self.pending_card_close = None;
+        }
         if presentation != self.last_shell_presentation {
             self.drawer_motion = None;
             self.drawer_open_pending = self.animations_enabled()

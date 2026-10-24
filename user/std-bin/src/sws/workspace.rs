@@ -425,13 +425,57 @@ impl WorkspaceManager {
         changed
     }
 
-    /// Reconcile configured lifecycle policy after scene roots close.
+    /// Reconcile workspace lifecycle after a scene closes or moves away.
     ///
-    /// Manual mode deliberately permits the active workspace to remain empty
-    /// in both desktop and tablet presentations. Optional automatic removal
-    /// affects only unselected empty workspaces.
-    pub(super) fn settle_after_close(&mut self, _tablet_experience: bool) -> bool {
-        let changed = self.ensure_manual_workspace_invariants();
+    /// Tablet experience removes empty compositions, selecting the nearest
+    /// surviving predecessor (or the first successor) when necessary. When
+    /// every workspace is empty, the active workspace remains as a placeholder.
+    /// Desktop experience retains manually created empty workspaces.
+    pub(super) fn settle_after_close(&mut self, tablet_experience: bool) -> bool {
+        let mut changed = self.ensure_manual_workspace_invariants();
+        if tablet_experience {
+            changed |= prune_empty_workspaces(
+                &mut self.workspaces,
+                &mut self.active_workspace,
+                &mut self.normal_workspace,
+            );
+
+            // Keep original desktop groups while any of their scenes survive,
+            // even when the group's original tablet card has been removed.
+            // Empty saved groups must not resurrect pruned cards on mode exit.
+            if let Some(restore) = &mut self.desktop_restore {
+                for workspace in &mut restore.workspaces {
+                    workspace.window_ids.retain(|window_id| {
+                        self.workspaces
+                            .iter()
+                            .any(|current| current.window_ids.contains(window_id))
+                    });
+                    workspace.tablet_layout =
+                        retained_layout_for_members(workspace.tablet_layout, &workspace.window_ids);
+                }
+                if restore
+                    .workspaces
+                    .iter()
+                    .all(|workspace| workspace.window_ids.is_empty())
+                {
+                    restore.active_workspace = self.active_workspace;
+                    restore.workspaces = vec![
+                        self.workspaces
+                            .iter()
+                            .find(|workspace| workspace.id == self.active_workspace)
+                            .unwrap()
+                            .clone(),
+                    ];
+                } else {
+                    let mut normal_workspace = restore.active_workspace;
+                    prune_empty_workspaces(
+                        &mut restore.workspaces,
+                        &mut restore.active_workspace,
+                        &mut normal_workspace,
+                    );
+                }
+            }
+        }
 
         if changed {
             self.bump_generation();
@@ -1235,6 +1279,41 @@ impl WorkspaceManager {
     }
 }
 
+/// Remove empty cards while retaining stable selections and one placeholder.
+fn prune_empty_workspaces(
+    workspaces: &mut Vec<WorkspaceSnapshot>,
+    active_workspace: &mut WorkspaceId,
+    normal_workspace: &mut WorkspaceId,
+) -> bool {
+    let placeholder = *active_workspace;
+    let all_empty = workspaces
+        .iter()
+        .all(|workspace| workspace.window_ids.is_empty());
+    let destination = |selected| {
+        let index = workspaces
+            .iter()
+            .position(|workspace| workspace.id == selected)
+            .unwrap_or(0);
+        workspaces[..=index]
+            .iter()
+            .rev()
+            .find(|workspace| !workspace.window_ids.is_empty())
+            .or_else(|| {
+                workspaces
+                    .iter()
+                    .find(|workspace| !workspace.window_ids.is_empty())
+            })
+            .map_or(placeholder, |workspace| workspace.id)
+    };
+    *active_workspace = destination(*active_workspace);
+    *normal_workspace = destination(*normal_workspace);
+    let previous_len = workspaces.len();
+    workspaces.retain(|workspace| {
+        !workspace.window_ids.is_empty() || (all_empty && workspace.id == placeholder)
+    });
+    previous_len != workspaces.len()
+}
+
 fn repaired_layout(workspace: &WorkspaceSnapshot, removed_window_id: u32) -> TabletLayout {
     let fallback = || {
         workspace
@@ -1337,6 +1416,14 @@ fn same_members(workspaces: &[WorkspaceSnapshot], live_window_ids: &[u32]) -> bo
 mod tests {
     use super::*;
     use sws_protocol::workspace::{SplitAxis, TransitionKind, ValidationError};
+
+    fn assert_valid_state(manager: &WorkspaceManager) {
+        let state = manager.snapshot();
+        assert_eq!(
+            sws_protocol::workspace::decode_state(&sws_protocol::workspace::encode_state(&state)),
+            Ok(state)
+        );
+    }
 
     #[test]
     fn tablet_top_level_launches_create_separate_workspace_compositions() {
@@ -1622,7 +1709,7 @@ mod tests {
     }
 
     #[test]
-    fn moving_the_last_member_back_preserves_the_vacated_workspace() {
+    fn desktop_move_preserves_the_vacated_workspace() {
         let mut manager = WorkspaceManager::new();
         manager.add_window(10, false);
         manager.add_window(11, false);
@@ -1631,6 +1718,7 @@ mod tests {
         manager.move_window_to_adjacent_workspace(11, 1);
 
         assert!(manager.move_window_to_adjacent_workspace(11, -1));
+        assert!(!manager.settle_after_close(false));
         let state = manager.snapshot();
         assert_eq!(state.workspaces.len(), 2);
         assert_eq!(state.workspaces[0].window_ids, vec![10, 11]);
@@ -1653,6 +1741,7 @@ mod tests {
         manager.set_presentation(ShellPresentation::Overview);
 
         assert!(manager.move_window_to_workspace(12, first));
+        assert!(!manager.settle_after_close(false));
         let state = manager.snapshot();
         assert_eq!(state.workspaces[0].window_ids, vec![10, 12]);
         assert_eq!(state.workspaces[1].window_ids, vec![11]);
@@ -1697,6 +1786,12 @@ mod tests {
                 .iter()
                 .any(|workspace| workspace.id == second && workspace.window_ids.is_empty())
         );
+        assert!(manager.settle_after_close(true));
+        assert_eq!(manager.snapshot().workspaces.len(), 1);
+        assert_eq!(manager.active_workspace(), first);
+        assert_eq!(manager.normal_workspace(), first);
+        assert_eq!(manager.presentation(), ShellPresentation::Overview);
+        assert_valid_state(&manager);
     }
 
     #[test]
@@ -1737,37 +1832,229 @@ mod tests {
     }
 
     #[test]
-    fn closing_active_tablet_composition_preserves_its_empty_workspace() {
+    fn closing_active_tablet_composition_selects_previous_workspace() {
         let mut manager = WorkspaceManager::new();
         manager.add_window(10, true);
         let second = manager.create_workspace().unwrap();
         manager.add_window(11, true);
         assert_eq!(manager.active_workspace(), second);
         assert!(manager.remove_window(11));
-        assert!(!manager.settle_after_close(true));
+        let generation = manager.snapshot().generation;
+        assert!(manager.settle_after_close(true));
         assert_eq!(manager.presentation(), ShellPresentation::Workspace);
-        assert_eq!(manager.snapshot().workspaces.len(), 2);
-        assert_eq!(manager.active_workspace(), second);
-        assert!(
-            manager
-                .snapshot()
-                .workspaces
-                .iter()
-                .find(|workspace| workspace.id == second)
-                .unwrap()
-                .window_ids
-                .is_empty()
-        );
+        assert_eq!(manager.snapshot().workspaces.len(), 1);
+        assert_eq!(manager.active_workspace(), 1);
+        assert_eq!(manager.normal_workspace(), 1);
+        assert_eq!(manager.snapshot().generation, generation + 1);
+        let settled = manager.snapshot();
+        assert!(!manager.settle_after_close(true));
+        assert_eq!(manager.snapshot(), settled);
+        assert_valid_state(&manager);
     }
 
     #[test]
     fn desktop_close_preserves_empty_virtual_desktop() {
         let mut manager = WorkspaceManager::new();
         manager.add_window(10, false);
+        manager.create_workspace();
+        manager.create_workspace();
+        manager.add_window(11, false);
+        manager.remove_window(11);
         assert!(manager.remove_window(10));
+        let before = manager.snapshot();
         assert!(!manager.settle_after_close(false));
+        assert_eq!(manager.snapshot(), before);
         assert_eq!(manager.presentation(), ShellPresentation::Workspace);
+        assert_eq!(manager.snapshot().workspaces.len(), 3);
+        assert_valid_state(&manager);
+    }
+
+    #[test]
+    fn tablet_close_selects_nearest_surviving_predecessor_across_empty_cards() {
+        for presentation in [
+            ShellPresentation::Workspace,
+            ShellPresentation::Overview,
+            ShellPresentation::Home,
+        ] {
+            let mut manager = WorkspaceManager::new();
+            manager.add_scene_root(10, true, true);
+            manager.create_workspace();
+            manager.create_workspace();
+            let closing = manager.create_workspace().unwrap();
+            manager.add_scene_root(11, true, true);
+            let successor = manager.add_scene_root(12, true, true);
+            manager.activate_window(11, true);
+            manager.set_presentation(presentation);
+
+            assert!(manager.remove_window(11));
+            assert!(manager.settle_after_close(true));
+            let state = manager.snapshot();
+            assert_eq!(
+                state
+                    .workspaces
+                    .iter()
+                    .map(|workspace| workspace.id)
+                    .collect::<Vec<_>>(),
+                vec![1, successor]
+            );
+            assert_ne!(state.active_workspace, closing);
+            assert_eq!(state.active_workspace, 1);
+            assert_eq!(state.normal_workspace, 1);
+            assert_eq!(state.presentation, presentation);
+            assert_valid_state(&manager);
+        }
+    }
+
+    #[test]
+    fn tablet_close_at_first_workspace_selects_successor() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_scene_root(10, true, true);
+        let successor = manager.add_scene_root(11, true, true);
+        manager.activate_window(10, true);
+        manager.remove_window(10);
+
+        assert!(manager.settle_after_close(true));
+        assert_eq!(manager.active_workspace(), successor);
+        assert_eq!(manager.normal_workspace(), successor);
+        assert_valid_state(&manager);
+    }
+
+    #[test]
+    fn tablet_close_repairs_normal_destination_without_changing_live_selection() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_scene_root(10, true, true);
+        let successor = manager.add_scene_root(11, true, true);
+        let selected = manager.add_scene_root(12, true, true);
+        manager.set_presentation(ShellPresentation::Overview);
+        manager.normal_workspace = 1;
+        manager.remove_window(10);
+
+        assert!(manager.settle_after_close(true));
+        assert_eq!(manager.active_workspace(), selected);
+        assert_eq!(manager.normal_workspace(), successor);
+        assert_valid_state(&manager);
+        assert!(manager.return_to_workspace());
+        assert_eq!(manager.active_workspace(), successor);
+        assert_valid_state(&manager);
+    }
+
+    #[test]
+    fn tablet_move_prunes_source_and_preserves_selected_survivor() {
+        for move_kind in 0..3 {
+            let mut manager = WorkspaceManager::new();
+            manager.add_scene_root(10, true, true);
+            let second = manager.add_scene_root(11, true, true);
+            manager.set_presentation(ShellPresentation::Overview);
+            let selected = match move_kind {
+                0 => {
+                    assert!(manager.move_window_to_workspace(10, second));
+                    second
+                }
+                1 => {
+                    assert!(manager.move_window_to_adjacent_workspace(10, 1));
+                    second
+                }
+                2 => manager.move_window_to_new_workspace(10).unwrap(),
+                _ => unreachable!(),
+            };
+            assert!(manager.settle_after_close(true));
+            assert_eq!(manager.active_workspace(), selected);
+            assert_eq!(manager.normal_workspace(), selected);
+            assert!(
+                manager
+                    .snapshot()
+                    .workspaces
+                    .iter()
+                    .all(|workspace| !workspace.window_ids.is_empty())
+            );
+            assert_eq!(manager.workspace_for_window(10), Some(selected));
+            assert_valid_state(&manager);
+        }
+    }
+
+    #[test]
+    fn tablet_all_closed_retains_one_selected_placeholder_and_can_launch_again() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_window(10, false);
+        manager.create_workspace();
+        let selected = manager.create_workspace().unwrap();
+        manager.add_window(11, false);
+        manager.enter_tablet_experience(Some(11));
+        manager.remove_window(10);
+        manager.remove_window(11);
+
+        assert!(manager.settle_after_close(true));
+        let state = manager.snapshot();
+        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.active_workspace, selected);
+        assert_eq!(state.normal_workspace, selected);
+        assert_eq!(state.workspaces[0].tablet_layout, TabletLayout::Empty);
+        assert!(state.workspaces[0].window_ids.is_empty());
+        assert!(!manager.settle_after_close(true));
+        assert!(!manager.leave_tablet_experience());
+        assert_eq!(manager.snapshot(), state);
+        assert_eq!(manager.add_scene_root(12, true, true), selected);
         assert_eq!(manager.snapshot().workspaces.len(), 1);
+        assert_valid_state(&manager);
+    }
+
+    #[test]
+    fn tablet_close_does_not_resurrect_empty_desktop_groups() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_window(10, false);
+        manager.add_window(11, false);
+        let closing = manager.create_workspace().unwrap();
+        manager.add_window(12, false);
+        manager.create_workspace();
+        manager.enter_tablet_experience(Some(12));
+        manager.remove_window(12);
+
+        assert!(manager.settle_after_close(true));
+        manager.leave_tablet_experience();
+        assert_eq!(manager.snapshot().workspaces.len(), 1);
+        assert_eq!(manager.snapshot().workspaces[0].window_ids, vec![10, 11]);
+        assert_ne!(manager.active_workspace(), closing);
+        assert_valid_state(&manager);
+    }
+
+    #[test]
+    fn tablet_close_of_all_original_scenes_restores_only_live_new_apps() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_window(10, false);
+        manager.enter_tablet_experience(Some(10));
+        let launched = manager.add_scene_root(11, true, true);
+        manager.remove_window(10);
+
+        assert!(manager.settle_after_close(true));
+        let settled = manager.snapshot();
+        assert!(!manager.leave_tablet_experience());
+        assert_eq!(manager.snapshot(), settled);
+        assert_eq!(manager.workspace_for_window(11), Some(launched));
+        assert_eq!(manager.snapshot().workspaces.len(), 1);
+        assert_valid_state(&manager);
+    }
+
+    #[test]
+    fn tablet_close_preserves_desktop_group_when_original_card_was_pruned() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_window(10, false);
+        manager.add_window(11, false);
+        manager.add_window(12, false);
+        manager.enter_tablet_experience(Some(10));
+        manager.remove_window(10);
+
+        assert!(manager.settle_after_close(true));
+        assert!(
+            manager
+                .snapshot()
+                .workspaces
+                .iter()
+                .all(|workspace| workspace.id != 1)
+        );
+        assert!(manager.leave_tablet_experience());
+        assert_eq!(manager.snapshot().workspaces.len(), 1);
+        assert_eq!(manager.snapshot().workspaces[0].window_ids, vec![11, 12]);
+        assert_valid_state(&manager);
     }
 
     #[test]

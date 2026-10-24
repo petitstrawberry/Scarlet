@@ -18,6 +18,8 @@ mod tablet_cards;
 mod tablet_navigation;
 #[path = "../window.rs"]
 mod window;
+#[path = "../workspace.rs"]
+mod workspace;
 #[path = "../workspace_geometry.rs"]
 mod workspace_geometry;
 // Input frame tests exercise production decoding without starting device readers

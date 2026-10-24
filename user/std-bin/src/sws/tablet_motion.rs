@@ -231,3 +231,74 @@ mod tests {
         assert_eq!(motion.project(7, target), target);
     }
 }
+
+/// A critically damped card scroll: retain release velocity, then converge on
+/// the selected card without an instantaneous snap or oscillating spring.
+#[derive(Clone, Copy)]
+pub(super) struct OverviewScroll {
+    from: f32,
+    velocity: f32,
+    started_ns: Option<u64>,
+}
+
+impl OverviewScroll {
+    pub fn new(from: f32, velocity: f32, pitch: f32) -> Self {
+        Self {
+            from,
+            velocity: velocity.clamp(-pitch * 6.0, pitch * 6.0),
+            started_ns: None,
+        }
+    }
+
+    pub fn note_presented(&mut self, now: u64) {
+        self.started_ns.get_or_insert(now);
+    }
+
+    pub fn sample(&self, now: u64) -> (f32, bool) {
+        let Some(start) = self.started_ns else {
+            return (self.from, false);
+        };
+        let t = now.saturating_sub(start) as f32 / 1_000_000_000.0;
+        let omega = 16.0;
+        let b = self.velocity + omega * self.from;
+        let decay = (-omega * t).exp();
+        let position = (self.from + b * t) * decay;
+        let velocity = (self.velocity - omega * b * t) * decay;
+        let done = t >= 0.7 || position.abs() < 0.4 && velocity.abs() < 5.0;
+        (if done { 0.0 } else { position }, done)
+    }
+}
+
+#[cfg(test)]
+mod overview_scroll_tests {
+    use super::OverviewScroll;
+
+    #[test]
+    fn tablet_scroll_preserves_position_and_velocity_on_release() {
+        let mut scroll = OverviewScroll::new(-600.0, -1000.0, 1000.0);
+        assert_eq!(scroll.sample(900_000_000), (-600.0, false));
+        scroll.note_presented(900_000_000);
+        let (next, done) = scroll.sample(900_100_000);
+        assert!(!done);
+        assert!(next < -600.0, "continue in the finger's direction first");
+        assert!(((next + 600.0) / 0.0001 + 1000.0).abs() < 20.0);
+        assert_eq!(scroll.sample(1_600_000_000), (0.0, true));
+    }
+
+    #[test]
+    fn tablet_stationary_release_converges_without_reversing_or_jumping() {
+        let mut scroll = OverviewScroll::new(500.0, 0.0, 1000.0);
+        scroll.note_presented(0);
+        let mut previous = 500.0;
+        for ms in (0..=700).step_by(10) {
+            let (position, _) = scroll.sample(ms * 1_000_000);
+            assert!(position >= 0.0 && position <= previous);
+            previous = position;
+        }
+        assert_eq!(previous, 0.0);
+        assert!(
+            scroll.sample(140_000_000).0 > 100.0,
+            "avoid the previous 140ms snap"
+        );
+    }
+}
