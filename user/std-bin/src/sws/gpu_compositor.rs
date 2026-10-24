@@ -291,13 +291,7 @@ impl GpuCompositor {
         // A requested SWS/SGFX backend is not evidence of acceleration. Read
         // the selected target, including after a session rebuild. Unknown
         // dynamically installed backends must not opt into timed animation.
-        matches!(
-            self.target.backend,
-            sgfx::BackendKind::Wgpu
-                | sgfx::BackendKind::Metal
-                | sgfx::BackendKind::ScarletVirgl
-                | sgfx::BackendKind::ScarletAdreno
-        )
+        super::animation_policy::backend_is_accelerated(self.target.backend.as_str())
     }
 
     /// Create the optional GPU compositor after confirming required capabilities.
@@ -905,6 +899,15 @@ impl GpuCompositor {
         instance: Option<PresentationInstance>,
         damage_clip: Option<PixelRect>,
     ) -> Result<(), &'static str> {
+        let trace_home = window.title.as_deref() == Some(b"Home");
+        if trace_home {
+            super::home_trace::record(8, format_args!(
+                "sws-project window={} presented={} flags={} geometry={:?} transform={:?} clip={:?} opacity={} instance={:?} damage_clip={:?} retained={}",
+                window.id, window.is_presented(), window.state_flags(), window.presentation_geometry(),
+                window.presentation_transform, window.presentation_clip, window.presentation_opacity(),
+                instance, damage_clip, window.retains_native_transition_frame(),
+            ));
+        }
         let presentation_clip = instance
             .and_then(|instance| instance.clip)
             .or(window.presentation_clip);
@@ -947,6 +950,14 @@ impl GpuCompositor {
             .map(|entry| (entry.texture, entry.width, entry.height));
         let shared_texture = self.committed_shared_texture(window);
         let imported_shm_texture = self.imported_shm_texture(window);
+        if trace_home {
+            let state = self.shared_windows.iter().find(|state| state.window_id == window.id);
+            super::home_trace::record(5, format_args!(
+                "sws-source window={} scene={:?} shared={:?} shm={:?} pending={:?} presented={:?}",
+                window.id, scene_texture, shared_texture, imported_shm_texture,
+                state.and_then(|s| s.pending), state.and_then(|s| s.presented),
+            ));
+        }
         let directly_imported_shm = imported_shm_texture.is_some();
         let visual_geometry = instance.map_or_else(
             || window.presentation_geometry(),

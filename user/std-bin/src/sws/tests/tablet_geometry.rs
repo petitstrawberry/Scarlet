@@ -1,5 +1,7 @@
 //! Host harness for production geometry/state code; no compositor or OS calls.
 //! Run test-tablet-geometry.sh through the Scarlet Nix environment on AArch64.
+#[path = "../animation_policy.rs"]
+mod animation_policy;
 #[path = "../config.rs"]
 mod config;
 #[path = "../frame_callback.rs"]

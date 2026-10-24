@@ -3,6 +3,7 @@
 //! A compositing window server for Scarlet OS
 
 mod compositor;
+mod animation_policy;
 mod config;
 mod cursor;
 mod cursor_theme;
