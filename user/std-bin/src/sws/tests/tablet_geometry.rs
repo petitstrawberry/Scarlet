@@ -12,6 +12,8 @@ mod input_environment;
 mod input_panel;
 #[path = "../tablet_motion.rs"]
 mod tablet_motion;
+#[path = "../tablet_cards.rs"]
+mod tablet_cards;
 #[path = "../tablet_navigation.rs"]
 mod tablet_navigation;
 #[path = "../window.rs"]

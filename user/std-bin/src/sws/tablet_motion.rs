@@ -9,6 +9,7 @@ pub(super) struct Motion {
     pub progress: f32,
     pub started_ns: Option<u64>,
     duration_ns: u64,
+    first_frame_pending: bool,
 }
 
 impl Motion {
@@ -19,6 +20,7 @@ impl Motion {
             progress: 0.0,
             started_ns: None,
             duration_ns: SETTLE_DURATION_NS,
+            first_frame_pending: false,
         }
     }
 
@@ -29,6 +31,7 @@ impl Motion {
     ) -> Option<Self> {
         accelerated.then(|| Self {
             started_ns: Some(now),
+            first_frame_pending: true,
             ..Self::drag(starts)
         })
     }
@@ -59,7 +62,19 @@ impl Motion {
         self.starts.iter().any(|(candidate, _)| *candidate == id)
     }
 
+    /// Start elapsed animation time only once its first frame reached output.
+    /// A slow shell redraw or GPU submission must not consume the entire reveal.
+    pub fn note_presented(&mut self, now: u64) {
+        if self.first_frame_pending {
+            self.first_frame_pending = false;
+            self.started_ns = Some(now);
+        }
+    }
+
     pub fn advance(&mut self, now: u64) -> bool {
+        if self.first_frame_pending {
+            return false;
+        }
         let Some(start) = self.started_ns else {
             return false;
         };
@@ -172,12 +187,14 @@ mod tests {
             opacity: 1.0,
         };
         let mut opening = Motion::settle(vec![(1, full)], 100, true).unwrap();
+        opening.note_presented(100);
         assert!(!opening.advance(70_000_100));
         let halfway = opening.project(1, card);
         assert!(halfway.width < full.width && halfway.width > card.width);
         window.presentation_transform = Some(halfway);
         assert_eq!(window.surface_geometry(), geometry);
         let mut closing = Motion::settle(vec![(1, halfway)], 70_000_100, true).unwrap();
+        closing.note_presented(70_000_100);
         assert_eq!(closing.project(1, full), halfway);
         assert!(!closing.advance(210_000_099));
         assert!(closing.advance(210_000_100));
@@ -200,13 +217,17 @@ mod tests {
         let start = motion.project(7, target);
         assert_eq!(start.y, 48);
         assert_eq!(start.opacity, 0.0);
-        assert!(!motion.advance(60_001_000));
+        // Even a late first frame must start at the first visible position.
+        assert!(!motion.advance(500_001_000));
+        assert_eq!(motion.project(7, target), start);
+        motion.note_presented(500_001_000);
+        assert!(!motion.advance(560_001_000));
         let middle = motion.project(7, target);
         assert!(middle.y > 0 && middle.y < 48);
         assert!(middle.opacity > 0.0 && middle.opacity < 1.0);
         assert_eq!((middle.width, middle.height), (target.width, target.height));
-        assert!(!motion.advance(120_000_999));
-        assert!(motion.advance(120_001_000));
+        assert!(!motion.advance(620_000_999));
+        assert!(motion.advance(620_001_000));
         assert_eq!(motion.project(7, target), target);
     }
 }

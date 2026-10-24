@@ -29,14 +29,12 @@ pub const COMPACT_WORKSPACE_RAIL_MIN_HEIGHT: u32 = 96;
 /// Maximum compact workspace-rail height in logical pixels.
 pub const COMPACT_WORKSPACE_RAIL_MAX_HEIGHT: u32 = 112;
 
-/// Provisional tablet share of the combined Overview reserved for cards.
-///
-/// Keeping this as a shared token lets tablet interaction testing change the
-/// card/application balance without forking shell and compositor geometry.
-pub const TABLET_OVERVIEW_WORKSPACE_RATIO_MILLI: u32 = 660;
+/// Tablet Overview fills the work area except for the application drawer handle.
+/// Shell and compositor share this geometry at every output scale.
+pub const TABLET_OVERVIEW_WORKSPACE_RATIO_MILLI: u32 = 1000;
 
-/// Space for the handle, search header and one readable application row.
-pub const TABLET_OVERVIEW_DRAWER_MIN_HEIGHT: u32 = 240;
+/// Only the drawer handle is exposed while browsing running applications.
+pub const TABLET_OVERVIEW_DRAWER_MIN_HEIGHT: u32 = DRAWER_SHEET_LIP_HEIGHT;
 
 /// Height of the exposed laptop drawer-sheet lip in logical pixels.
 pub const DRAWER_SHEET_LIP_HEIGHT: u32 = 36;

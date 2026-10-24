@@ -48,6 +48,8 @@ mod gpu_admission_retry;
 #[path = "workspace_geometry.rs"]
 mod workspace_geometry;
 use gpu_admission_retry::GpuAdmissionRetry;
+#[path = "tablet_cards.rs"]
+mod tablet_cards;
 #[path = "tablet_motion.rs"]
 mod tablet_motion;
 #[path = "tablet_navigation.rs"]
@@ -254,6 +256,41 @@ fn layout_overview_cards(
             presentation,
             sws_protocol::workspace::ShellPresentation::Home
         );
+    if !compact {
+        let pitch = tablet_navigation::page_stride(region_width);
+        let active = workspace_ids
+            .iter()
+            .position(|id| *id == active_workspace)
+            .unwrap_or(0);
+        let width = (pitch * 0.92) as u32;
+        let height = (u64::from(width) * u64::from(work_height.max(1))
+            / u64::from(work_width.max(1))) as u32;
+        let (width, height) = fit_overview_rect(
+            (width, height),
+            (
+                region_width,
+                region_height.saturating_sub(scale_length(32)).max(1),
+            ),
+        );
+        return workspace_ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                (
+                    *id,
+                    (
+                        region_x
+                            + (region_width as f32 * 0.5 + (index as f32 - active as f32) * pitch
+                                - width as f32 * 0.5)
+                                .round() as i32,
+                        region_y + region_height.saturating_sub(height) as i32 / 2,
+                        width,
+                        height,
+                    ),
+                )
+            })
+            .collect();
+    }
     let target_width = scale_length(if compact { 170 } else { 320 });
     let active_index = workspace_ids
         .iter()
@@ -2438,8 +2475,12 @@ pub struct Compositor {
     gesture_recognizer: GestureRecognizer,
     tablet_navigation: Vec<(PointerSource, tablet_navigation::Navigation)>,
     tablet_drag_origin: Option<sws_protocol::workspace::ShellPresentation>,
+    tablet_gesture_scene: Option<TabletGestureScene>,
     tablet_navigation_source: Option<PointerSource>,
     tablet_motion: Option<tablet_motion::Motion>,
+    overview_pan: f32,
+    overview_pan_settle: Option<(f32, u64)>,
+    pending_card_close: Option<(OverviewWindowDrag, u64)>,
     drawer_motion: Option<tablet_motion::Motion>,
     /// Wait for the shell to submit its new Home content before revealing it.
     drawer_open_pending: bool,
@@ -2510,6 +2551,14 @@ fn direct_touch_legacy_primary_available(grabs: &[DirectTouchGrab]) -> bool {
     !grabs.iter().any(|grab| grab.legacy_primary)
 }
 
+struct TabletGestureScene {
+    starts: Vec<(u32, PresentationTransform)>,
+    manual_progress: f32,
+    hold: Option<(f32, f32)>,
+    retreat: Option<(f32, f32)>,
+    ready: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct SystemTouchNavigation {
     source: PointerSource,
@@ -2521,6 +2570,9 @@ struct SystemTouchNavigation {
     origin: sws_protocol::workspace::ShellPresentation,
     drag_window_id: Option<u32>,
     remove_workspace_id: Option<u32>,
+    contact: tablet_cards::Contact,
+    candidate_window_id: Option<u32>,
+    pan_origin: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2913,8 +2965,12 @@ impl Compositor {
             gesture_recognizer,
             tablet_navigation: Vec::new(),
             tablet_drag_origin: None,
+            tablet_gesture_scene: None,
             tablet_navigation_source: None,
             tablet_motion: None,
+            overview_pan: 0.0,
+            overview_pan_settle: None,
+            pending_card_close: None,
             drawer_motion: None,
             drawer_open_pending: false,
             direct_touch_grabs: Vec::new(),
@@ -5411,10 +5467,9 @@ impl Compositor {
         let menu_titles = Self::notification_menu_titles(menu_titles);
         // These opcodes share the same layout. Only an explicitly opted-in
         // shell receives the full menu; old binaries retain safe metadata.
-        let payload = sws_protocol::payload_focus_changed(
-            window_id, app_id, app_name, title, menu_titles,
-        )
-        .expect("notification menu size checked");
+        let payload =
+            sws_protocol::payload_focus_changed(window_id, app_id, app_name, title, menu_titles)
+                .expect("notification menu size checked");
         let legacy_payload = sws_protocol::payload_focus_changed(
             window_id,
             app_id,
@@ -5730,10 +5785,21 @@ impl Compositor {
         let Some(window_id) = self.overview_window_at_point(x, y) else {
             return false;
         };
+        self.begin_overview_window_drag_for(window_id, x, y)
+    }
+
+    fn begin_overview_window_drag_for(&mut self, window_id: u32, x: i32, y: i32) -> bool {
         let Some(source_workspace_id) = self.workspace_manager.workspace_for_window(window_id)
         else {
             return false;
         };
+        if !self
+            .window_manager
+            .get_window(window_id)
+            .is_some_and(|w| w.window_type == WindowType::Normal)
+        {
+            return false;
+        }
         self.raise_window_with_damage(window_id);
         self.overview_window_drag = Some(OverviewWindowDrag {
             window_id,
@@ -6076,7 +6142,6 @@ impl Compositor {
     }
 
     fn handle_tablet_navigation(&mut self, frame: &TouchFrame) -> bool {
-        use tablet_navigation::{Destination, Update};
         let index = self
             .tablet_navigation
             .iter()
@@ -6084,7 +6149,10 @@ impl Compositor {
         // Posture can change while an application already owns a finger.
         // Do not steal that contact just because it is now near the edge.
         if index.is_none()
-            && self.direct_touch_grabs.iter().any(|grab| grab.source == frame.source)
+            && self
+                .direct_touch_grabs
+                .iter()
+                .any(|grab| grab.source == frame.source)
         {
             return false;
         }
@@ -6139,19 +6207,78 @@ impl Compositor {
         if !self.tablet_mode || !owns_navigation {
             return step.consumed;
         }
-        match step.update {
+        self.apply_tablet_navigation_update(step.update);
+        step.consumed
+    }
+
+    fn apply_tablet_navigation_update(&mut self, update: Option<tablet_navigation::Update>) {
+        use tablet_navigation::{Destination, Update};
+        match update {
             Some(Update::Begin) => {
                 let starts = self.tablet_scene_snapshot();
+                self.overview_pan = 0.0;
+                self.overview_pan_settle = None;
                 self.tablet_motion = None;
                 self.tablet_drag_origin = Some(self.workspace_manager.presentation());
                 self.workspace_manager
                     .set_presentation(sws_protocol::workspace::ShellPresentation::Overview);
                 self.commit_workspace_change();
+                self.tablet_gesture_scene = Some(TabletGestureScene {
+                    starts: starts.clone(),
+                    manual_progress: 0.0,
+                    hold: None,
+                    retreat: None,
+                    ready: false,
+                });
                 self.tablet_motion = Some(tablet_motion::Motion::drag(starts));
             }
-            Some(Update::Drag { progress }) => {
-                if let Some(motion) = self.tablet_motion.as_mut() {
+            Some(Update::Drag {
+                progress,
+                horizontal,
+                overview_ready,
+            }) => {
+                self.overview_pan = self.clamped_overview_pan(horizontal);
+                let horizontal_progress =
+                    (horizontal.abs() / tablet_navigation::page_stride(self.screen_width)).min(1.0);
+                let mut direct = None;
+                let mut begin_hold = false;
+                if let Some(scene) = self.tablet_gesture_scene.as_mut() {
+                    let new_hold = overview_ready && !scene.ready;
+                    scene.ready = overview_ready;
+                    if new_hold {
+                        scene.hold = Some((progress, scene.manual_progress));
+                        scene.retreat = None;
+                        begin_hold = true;
+                    } else if let Some((finger_anchor, visual_start)) = scene.hold {
+                        if progress < finger_anchor - 0.01 || scene.retreat.is_some() {
+                            let visual_now = self
+                                .tablet_motion
+                                .as_ref()
+                                .filter(|m| m.started_ns.is_some())
+                                .map_or(1.0, |m| visual_start + (1.0 - visual_start) * m.progress);
+                            let (finger, visual) =
+                                *scene.retreat.get_or_insert((finger_anchor, visual_now));
+                            scene.manual_progress = (visual * progress / finger.max(0.01))
+                                .clamp(0.0, 1.0)
+                                .max(horizontal_progress);
+                            direct = Some((scene.starts.clone(), scene.manual_progress));
+                        }
+                    } else {
+                        scene.manual_progress = progress.max(horizontal_progress);
+                        direct = Some((scene.starts.clone(), scene.manual_progress));
+                    }
+                }
+                if begin_hold {
+                    let starts = self.tablet_scene_snapshot();
+                    self.tablet_motion = tablet_motion::Motion::settle(
+                        starts,
+                        monotonic_time_ns(),
+                        self.animations_enabled(),
+                    );
+                } else if let Some((starts, progress)) = direct {
+                    let mut motion = tablet_motion::Motion::drag(starts);
                     motion.progress = progress;
+                    self.tablet_motion = Some(motion);
                 }
             }
             Some(Update::End { destination }) => {
@@ -6168,19 +6295,17 @@ impl Compositor {
                                 sws_protocol::workspace::ShellPresentation::Overview,
                             );
                         }
-                        Destination::Previous | Destination::Next => {
+                        Destination::Switch(offset) => {
                             self.workspace_manager.return_to_workspace();
-                            self.workspace_manager.cycle_workspace(
-                                if destination == Destination::Previous {
-                                    -1
-                                } else {
-                                    1
-                                },
-                            );
+                            for _ in 0..offset.unsigned_abs().min(64) {
+                                self.workspace_manager.cycle_workspace(offset.signum());
+                            }
                         }
                     }
+                    self.overview_pan = 0.0;
                     self.commit_workspace_change();
                     self.tablet_drag_origin = None;
+                    self.tablet_gesture_scene = None;
                     self.tablet_motion = tablet_motion::Motion::settle(
                         starts,
                         monotonic_time_ns(),
@@ -6193,8 +6318,10 @@ impl Compositor {
                     let starts = self.tablet_scene_snapshot();
                     self.tablet_motion = None;
                     self.workspace_manager.set_presentation(origin);
+                    self.overview_pan = 0.0;
                     self.commit_workspace_change();
                     self.tablet_drag_origin = None;
+                    self.tablet_gesture_scene = None;
                     self.tablet_motion = tablet_motion::Motion::settle(
                         starts,
                         monotonic_time_ns(),
@@ -6204,11 +6331,113 @@ impl Compositor {
             }
             None => {}
         }
-        if step.update.is_some() {
+        if update.is_some() {
             self.update_overview_transforms();
             self.full_redraw_needed = true;
         }
-        step.consumed
+    }
+
+    fn clamped_overview_pan(&self, pan: f32) -> f32 {
+        let state = self.workspace_manager.snapshot();
+        let index = state
+            .workspaces
+            .iter()
+            .position(|w| w.id == state.active_workspace)
+            .unwrap_or(0);
+        let pitch = tablet_navigation::page_stride(self.screen_width);
+        let low = -((state.workspaces.len().saturating_sub(index + 1)) as f32) * pitch;
+        let high = index as f32 * pitch;
+        let bound = pan.clamp(low, high);
+        // Resist pulling past either end without abruptly freezing the finger.
+        bound + (pan - bound) * 0.18
+    }
+
+    fn settle_overview_pan(&mut self, velocity: f32) {
+        let pitch = tablet_navigation::page_stride(self.screen_width);
+        let projected = self.overview_pan + (velocity * 0.12).clamp(-pitch, pitch);
+        let steps = (-projected / pitch).round() as i32;
+        let mut moved = 0i32;
+        for _ in 0..steps.unsigned_abs().min(64) {
+            if self
+                .workspace_manager
+                .move_overview_selection(steps.signum())
+            {
+                moved += steps.signum();
+            } else {
+                break;
+            }
+        }
+        self.overview_pan += moved as f32 * pitch;
+        self.overview_pan_settle = self
+            .animations_enabled()
+            .then_some((self.overview_pan, monotonic_time_ns()));
+        if self.overview_pan_settle.is_none() {
+            self.overview_pan = 0.0;
+        }
+        self.apply_workspace_presentation_policy();
+        self.publish_workspace_state();
+        self.full_redraw_needed = true;
+    }
+
+    fn advance_system_touch_contact(&mut self, navigation: &mut SystemTouchNavigation, now: u64) {
+        use tablet_cards::Mode;
+        navigation.contact.tick(now);
+        if navigation.contact.is_cancelled() {
+            return;
+        }
+        match navigation.contact.mode() {
+            Mode::Move => {
+                if navigation.drag_window_id.is_none()
+                    && navigation.candidate_window_id.is_some_and(|id| {
+                        self.begin_overview_window_drag_for(
+                            id,
+                            navigation.start_x,
+                            navigation.start_y,
+                        )
+                    })
+                {
+                    navigation.drag_window_id = self.overview_window_drag.map(|d| d.window_id);
+                }
+                if navigation.drag_window_id.is_some() {
+                    self.update_overview_window_drag(navigation.current_x, navigation.current_y);
+                }
+            }
+            Mode::Scroll
+                if self.tablet_mode
+                    && navigation.origin
+                        == sws_protocol::workspace::ShellPresentation::Overview =>
+            {
+                let pan =
+                    self.clamped_overview_pan(navigation.pan_origin + navigation.contact.dx());
+                if self.overview_pan != pan {
+                    self.overview_pan = pan;
+                    self.update_overview_transforms();
+                    self.full_redraw_needed = true;
+                }
+            }
+            Mode::Dismiss => {
+                // Reuse the retained actor transform, but never treat this as
+                // workspace movement. Release either requests close or restores it.
+                if navigation.drag_window_id.is_none()
+                    && navigation.candidate_window_id.is_some_and(|id| {
+                        self.begin_overview_window_drag_for(
+                            id,
+                            navigation.start_x,
+                            navigation.start_y,
+                        )
+                    })
+                {
+                    navigation.drag_window_id = self.overview_window_drag.map(|d| d.window_id);
+                }
+                if navigation.drag_window_id.is_some() {
+                    self.update_overview_window_drag(
+                        navigation.start_x,
+                        navigation.current_y.min(navigation.start_y),
+                    );
+                }
+            }
+            _ => {}
+        }
     }
 
     fn finish_system_touch_navigation(&mut self, navigation: SystemTouchNavigation) -> bool {
@@ -6279,32 +6508,90 @@ impl Compositor {
             {
                 navigation.current_x = normalized_touch_to_screen(contact.x, self.screen_width);
                 navigation.current_y = normalized_touch_to_screen(contact.y, self.screen_height);
-                self.system_touch_navigation = Some(navigation);
-                if navigation.drag_window_id.is_some() {
-                    self.update_overview_window_drag(navigation.current_x, navigation.current_y);
+                if frame.contacts.len() != 1 {
+                    navigation.contact.cancel();
+                    self.cancel_overview_window_drag();
                 }
+                navigation.contact.update(
+                    navigation.current_x,
+                    navigation.current_y,
+                    frame.time_ns,
+                );
+                self.advance_system_touch_contact(&mut navigation, frame.time_ns);
+                self.system_touch_navigation = Some(navigation);
+                return Some(true);
+            }
+            navigation.contact.tick(frame.time_ns);
+            // Contact replacement/cancellation drains until all fingers lift.
+            if frame.cancelled || !frame.contacts.is_empty() {
+                navigation.contact.cancel();
+            }
+            if !frame.contacts.is_empty() {
+                self.cancel_overview_window_drag();
+                self.system_touch_navigation = Some(navigation);
                 return Some(true);
             }
             self.system_touch_navigation = None;
-            return Some(if navigation.drag_window_id.is_some() {
-                if frame.cancelled {
-                    self.cancel_overview_window_drag()
+            let cancelled = frame.cancelled || navigation.contact.is_cancelled();
+            if !cancelled && navigation.contact.mode() == tablet_cards::Mode::Move {
+                if navigation
+                    .contact
+                    .dx()
+                    .abs()
+                    .max(navigation.contact.dy().abs())
+                    < self.overview_window_drag_threshold() as f32
+                {
+                    self.cancel_overview_window_drag();
                 } else if let Some(drag) = self.overview_window_drag.take() {
-                    self.finish_overview_window_drag(OverviewWindowDrag {
-                        current_x: navigation.current_x,
-                        current_y: navigation.current_y,
-                        ..drag
-                    })
-                } else {
-                    false
+                    self.finish_overview_window_drag(drag);
                 }
-            } else if frame.cancelled {
-                self.apply_workspace_presentation_policy()
+            } else if !cancelled && navigation.contact.mode() == tablet_cards::Mode::Dismiss {
+                let height = self
+                    .overview_window_drag
+                    .and_then(|d| self.window_manager.get_window(d.window_id))
+                    .and_then(|w| w.presentation_transform)
+                    .map_or(self.screen_height / 2, |t| t.height);
+                let close = navigation.contact.dismiss_committed(height);
+                if close && let Some(drag) = self.overview_window_drag {
+                    self.pending_card_close = Some((drag, monotonic_time_ns()));
+                } else {
+                    let starts = self.tablet_scene_snapshot();
+                    self.cancel_overview_window_drag();
+                    self.tablet_motion = tablet_motion::Motion::settle(
+                        starts,
+                        monotonic_time_ns(),
+                        self.animations_enabled(),
+                    );
+                }
             } else {
-                self.finish_system_touch_navigation(navigation)
-            });
+                self.cancel_overview_window_drag();
+                if !cancelled
+                    && (navigation.contact.tap()
+                        || navigation.origin == sws_protocol::workspace::ShellPresentation::Home
+                            && navigation.contact.mode() == tablet_cards::Mode::Scroll)
+                {
+                    self.finish_system_touch_navigation(navigation);
+                }
+            }
+            if self.tablet_mode
+                && navigation.origin == sws_protocol::workspace::ShellPresentation::Overview
+                && (navigation.contact.mode() == tablet_cards::Mode::Scroll || cancelled)
+            {
+                self.settle_overview_pan(if cancelled {
+                    0.0
+                } else {
+                    navigation.contact.release_velocity(frame.time_ns)
+                });
+            } else {
+                self.update_overview_transforms();
+                self.full_redraw_needed = true;
+            }
+            return Some(true);
         }
 
+        if self.pending_card_close.is_some() {
+            return Some(true);
+        }
         let presentation = self.workspace_manager.presentation();
         let overview = presentation == sws_protocol::workspace::ShellPresentation::Overview;
         let shell_navigation = matches!(
@@ -6325,6 +6612,22 @@ impl Compositor {
         let contact = frame.contacts.first()?;
         let screen_x = normalized_touch_to_screen(contact.x, self.screen_width);
         let screen_y = normalized_touch_to_screen(contact.y, self.screen_height);
+        if self
+            .window_manager
+            .window_at_point(screen_x, screen_y)
+            .and_then(|id| self.window_manager.get_window(id))
+            .is_some_and(|w| {
+                matches!(
+                    w.window_type,
+                    WindowType::InputPanel
+                        | WindowType::ImePopup
+                        | WindowType::ShellPanel
+                        | WindowType::AlwaysOnTop
+                )
+            })
+        {
+            return None;
+        }
         // Bottom-edge gestures have their own exclusive, continuous arena.
         // This older arena now only owns Overview cards and their drags.
         if !shell_navigation {
@@ -6341,14 +6644,11 @@ impl Compositor {
         let remove_workspace_id = overview
             .then(|| self.overview_remove_workspace_at_point(screen_x, screen_y))
             .flatten();
-        let drag_window_id = if shell_navigation
-            && remove_workspace_id.is_none()
-            && self.begin_overview_window_drag(screen_x, screen_y)
-        {
-            self.overview_window_drag.map(|drag| drag.window_id)
-        } else {
-            None
-        };
+        if frame.contacts.len() != 1 {
+            return None;
+        }
+        let candidate_window_id = self.overview_window_at_point(screen_x, screen_y);
+        self.overview_pan_settle = None;
         self.system_touch_navigation = Some(SystemTouchNavigation {
             source: frame.source,
             tracking_id: contact.tracking_id,
@@ -6357,8 +6657,20 @@ impl Compositor {
             current_x: screen_x,
             current_y: screen_y,
             origin: self.workspace_manager.presentation(),
-            drag_window_id,
+            drag_window_id: None,
             remove_workspace_id,
+            candidate_window_id: if remove_workspace_id.is_none() {
+                candidate_window_id
+            } else {
+                None
+            },
+            contact: tablet_cards::Contact::new(
+                screen_x,
+                screen_y,
+                frame.time_ns,
+                self.output_scale_milli,
+            ),
+            pan_origin: self.overview_pan,
         });
         Some(true)
     }
@@ -6838,6 +7150,20 @@ impl Compositor {
         {
             timeout = timeout.min(FRAME_BATCH_INTERVAL_NS);
         }
+        if self.pending_card_close.is_some() || self.overview_pan_settle.is_some() {
+            timeout = timeout.min(FRAME_BATCH_INTERVAL_NS);
+        }
+        for deadline in self
+            .tablet_navigation
+            .iter()
+            .filter_map(|(_, nav)| nav.next_deadline_ns())
+            .chain(
+                self.system_touch_navigation
+                    .and_then(|n| n.contact.next_deadline_ns()),
+            )
+        {
+            timeout = timeout.min(deadline.saturating_sub(now));
+        }
         if let Some(remaining) = self.gpu_admission_retry.remaining_ns(now) {
             timeout = timeout.min(remaining);
         }
@@ -7076,7 +7402,52 @@ impl Compositor {
         }
 
         self.finish_unaccelerated_animations();
+        let now = monotonic_time_ns();
+        let update = self
+            .tablet_navigation
+            .iter_mut()
+            .find(|(source, _)| Some(*source) == self.tablet_navigation_source)
+            .and_then(|(_, nav)| nav.tick(now));
+        if update.is_some() {
+            self.apply_tablet_navigation_update(update);
+        }
+        if let Some(mut navigation) = self.system_touch_navigation {
+            self.advance_system_touch_contact(&mut navigation, now);
+            self.system_touch_navigation = Some(navigation);
+        }
         let mut motion_changed = false;
+        if let Some((drag, start)) = self.pending_card_close {
+            let t = if self.animations_enabled() {
+                (now.saturating_sub(start) as f32 / 140_000_000.0).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            if t >= 1.0 {
+                self.pending_card_close = None;
+                self.cancel_overview_window_drag();
+                super::ipc::send_message_to_window(
+                    drag.window_id,
+                    sws_protocol::server_msg::WINDOW_CLOSE_REQUESTED,
+                    sws_protocol::payload_window_close_requested(drag.window_id).to_vec(),
+                );
+            } else {
+                self.update_overview_window_drag(
+                    drag.current_x,
+                    drag.current_y
+                        - (self.screen_height as f32 * (1.0 - (1.0 - t).powi(3))).round() as i32,
+                );
+            }
+            motion_changed = true;
+        }
+        if let Some((from, start)) = self.overview_pan_settle {
+            let t = (now.saturating_sub(start) as f32 / 140_000_000.0).clamp(0.0, 1.0);
+            self.overview_pan = from * (1.0 - t).powi(3);
+            if t >= 1.0 || !self.animations_enabled() {
+                self.overview_pan = 0.0;
+                self.overview_pan_settle = None;
+            }
+            motion_changed = true;
+        }
         if let Some(motion) = self.tablet_motion.as_mut() {
             let settling = motion.started_ns.is_some();
             if motion.advance(monotonic_time_ns()) {
@@ -7118,6 +7489,13 @@ impl Compositor {
     }
 
     fn note_frame_presented(&mut self) {
+        let now = monotonic_time_ns();
+        if let Some(motion) = self.tablet_motion.as_mut() {
+            motion.note_presented(now);
+        }
+        if let Some(motion) = self.drawer_motion.as_mut() {
+            motion.note_presented(now);
+        }
         if self.display.has_swapchain() {
             self.next_frame_deadline_ns = None;
             return;
@@ -7299,6 +7677,14 @@ impl Compositor {
         let mut redraw = false;
         if tablet_mode_changed {
             self.tablet_mode = tablet_mode;
+            self.overview_pan = 0.0;
+            self.overview_pan_settle = None;
+            self.pending_card_close = None;
+            self.tablet_gesture_scene = None;
+            if let Some(ref mut nav) = self.system_touch_navigation {
+                nav.contact.cancel();
+            }
+            self.cancel_overview_window_drag();
             self.tablet_motion = None;
             if let Some(origin) = self.tablet_drag_origin.take() {
                 self.workspace_manager.set_presentation(origin);
@@ -8319,6 +8705,22 @@ impl Compositor {
                 self.overview_window_drag = None;
             }
         }
+        if self
+            .pending_card_close
+            .is_some_and(|(drag, _)| Self::window_id_in(window_ids, drag.window_id))
+        {
+            self.pending_card_close = None;
+        }
+        if let Some(ref mut navigation) = self.system_touch_navigation {
+            if navigation
+                .candidate_window_id
+                .is_some_and(|id| Self::window_id_in(window_ids, id))
+            {
+                navigation.contact.cancel();
+                navigation.candidate_window_id = None;
+                navigation.drag_window_id = None;
+            }
+        }
 
         if let Some(state) = self.resize_drag {
             if Self::window_id_in(window_ids, state.window_id) {
@@ -9236,6 +9638,20 @@ impl Compositor {
         workspace_changed |= self
             .workspace_manager
             .settle_after_close(self.windowing_mode == sws_protocol::WindowingMode::Focused);
+        if self.tablet_mode
+            && self.workspace_manager.presentation()
+                == sws_protocol::workspace::ShellPresentation::Overview
+            && self
+                .workspace_manager
+                .snapshot()
+                .workspaces
+                .iter()
+                .all(|w| w.window_ids.is_empty())
+        {
+            workspace_changed |= self
+                .workspace_manager
+                .set_presentation(sws_protocol::workspace::ShellPresentation::Home);
+        }
         self.clear_interaction_state_for_removed_windows(&removed_ids);
         self.remove_ime_popup_windows(&removed_ids);
         for window_id in &removed_ids {
@@ -9863,10 +10279,10 @@ impl Compositor {
         let Some((first_frame_needs_policy, presentation_content_became_ready)) =
             self.window_manager.get_window_mut(window_id).map(|window| {
                 let first = window.note_frame_submission(presentation_counter);
-                let (extent, generation) = sgfx_frame.map_or(
-                    (window.backing_extent(), None),
-                    |(extent, generation)| (extent, Some(generation)),
-                );
+                let (extent, generation) = sgfx_frame
+                    .map_or((window.backing_extent(), None), |(extent, generation)| {
+                        (extent, Some(generation))
+                    });
                 let policy_ready = window.complete_native_policy_frame(extent, generation);
                 let content_ready = window.validate_presentation_content();
                 (
@@ -10152,11 +10568,12 @@ impl Compositor {
             | sws_protocol::workspace::ShellPresentation::Overview => {
                 self.overview_card_rects().iter().any(|(candidate, rect)| {
                     *candidate == workspace_id
-                        && intersect_compositor_rects(
-                            *rect,
-                            (0, 0, self.screen_width, self.screen_height),
-                        )
-                        .is_some()
+                        && (self.tablet_mode
+                            || intersect_compositor_rects(
+                                *rect,
+                                (0, 0, self.screen_width, self.screen_height),
+                            )
+                            .is_some())
                 }) && (self.windowing_mode == sws_protocol::WindowingMode::Freeform
                     || self.tablet_slot_for_window(root_id).is_some())
             }
@@ -10269,6 +10686,18 @@ impl Compositor {
             &workspace_ids,
             state.active_workspace,
         )
+        .into_iter()
+        .map(|(id, (x, y, w, h))| {
+            let pan = if self.tablet_mode
+                && state.presentation == sws_protocol::workspace::ShellPresentation::Overview
+            {
+                self.overview_pan
+            } else {
+                0.0
+            };
+            (id, (x.saturating_add(pan.round() as i32), y, w, h))
+        })
+        .collect()
     }
 
     fn overview_card_rects(&self) -> Vec<(u32, (i32, i32, u32, u32))> {
@@ -10285,6 +10714,11 @@ impl Compositor {
     }
 
     fn overview_remove_buttons(&self) -> Vec<(u32, (i32, i32, u32, u32), bool)> {
+        // Touch cards close with an upward gesture. Workspace deletion is a
+        // separate operation and must not masquerade as an app close button.
+        if self.tablet_mode {
+            return Vec::new();
+        }
         if self.workspace_manager.presentation()
             != sws_protocol::workspace::ShellPresentation::Overview
         {
@@ -10973,9 +11407,11 @@ impl Compositor {
         // A same-sized tablet transition still needs a replacement backing.
         // Resized surfaces already received their configure from geometry policy.
         for (window_id, previous_extent) in decoration_configures {
-            if self.window_manager.get_window(window_id).is_some_and(|window| {
-                (window.width, window.height) == previous_extent
-            }) {
+            if self
+                .window_manager
+                .get_window(window_id)
+                .is_some_and(|window| (window.width, window.height) == previous_extent)
+            {
                 self.send_current_window_configure(window_id);
             }
         }
@@ -12080,7 +12516,9 @@ impl Compositor {
                     window_id, width, height, shm_mapped_addr
                 );
                 if let Some(window) = self.window_manager.get_window(window_id)
-                    && (window.fullscreen || window.tablet_managed || window.retains_native_transition_frame())
+                    && (window.fullscreen
+                        || window.tablet_managed
+                        || window.retains_native_transition_frame())
                     && (width != window.width || height != window.height)
                 {
                     println!(
