@@ -1,6 +1,6 @@
 # Scarlet Workspace Shell
 
-Status: workspace model and initial non-animated implementation accepted
+Status: workspace model accepted; tablet edge navigation and keyboard overlays implemented. See the dated implementation notes below for remaining animation work.
 
 This document defines the Scarlet desktop shell, workspace model, and the
 tablet-oriented navigation experience. It replaces the earlier focused-window
