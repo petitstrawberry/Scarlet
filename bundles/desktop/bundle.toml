@@ -106,7 +106,7 @@ to = "/bin/ui-benchmark"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "0403172ba3ea32d0b1830148beb6808411bfae0d" }
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "30fa0148c6bf21c9fbb25242c7f79d39975bce81" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"

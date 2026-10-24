@@ -19,7 +19,7 @@ flate2 = { version = "1.1.10", default-features = false, features = ["rust_backe
 png = "0.18.1"
 log-protocol = { path = "../../user/lib/log-protocol" }
 sws-remote-protocol = { path = "../../user/lib/sws-remote-protocol", default-features = false, features = ["std"] }
-scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "0403172ba3ea32d0b1830148beb6808411bfae0d" }
+scarlet-ui-macros = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "30fa0148c6bf21c9fbb25242c7f79d39975bce81" }
 
 [target.'cfg(not(target_os = "scarlet"))'.dependencies]
 sbus = { path = "../../user/lib/sbus" }
@@ -28,10 +28,10 @@ lyon_path = "1.0"
 lyon_tessellation = "1.0"
 svgtypes = "0.15"
 zune-jpeg = { version = "0.5.8", default-features = false }
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "0403172ba3ea32d0b1830148beb6808411bfae0d", default-features = false, features = ["std", "platform-winit"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "30fa0148c6bf21c9fbb25242c7f79d39975bce81", default-features = false, features = ["std", "platform-winit"] }
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
-scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "0403172ba3ea32d0b1830148beb6808411bfae0d", default-features = false, features = ["std", "platform-sws"] }
+scarlet-ui = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "30fa0148c6bf21c9fbb25242c7f79d39975bce81", default-features = false, features = ["std", "platform-sws"] }
 scarlet-os = { path = "../../user/lib/scarlet-os", default-features = false, features = ["std"] }
 scarlet-sys = { path = "../../user/lib/scarlet-sys" }
 scarlet-abi = { path = "../../user/lib/scarlet-abi" }

@@ -6,6 +6,7 @@
 extern crate alloc;
 extern crate scarlet_std as std;
 
+mod typography;
 mod vt;
 
 use alloc::boxed::Box;
@@ -36,8 +37,6 @@ use vt::VtScreen;
 
 const DEFAULT_WINDOW_WIDTH: u32 = 900;
 const DEFAULT_WINDOW_HEIGHT: u32 = 620;
-const DEFAULT_CELL_WIDTH: f32 = 9.0;
-const DEFAULT_CELL_HEIGHT: f32 = 18.0;
 const DEFAULT_FONT_SIZE: f32 = 16.0;
 const MIN_FONT_SIZE: f32 = 10.0;
 const MAX_FONT_SIZE: f32 = 28.0;
@@ -69,21 +68,21 @@ struct TerminalMetrics {
 
 impl TerminalMetrics {
     fn default() -> Self {
+        Self::with_font_size(DEFAULT_FONT_SIZE)
+    }
+
+    fn with_font_size(font_size: f32) -> Self {
+        let cell = typography::cell_size(font_size, typography::font_stack());
         Self {
-            cell_width: DEFAULT_CELL_WIDTH,
-            cell_height: DEFAULT_CELL_HEIGHT,
-            font_size: DEFAULT_FONT_SIZE,
+            cell_width: cell.width,
+            cell_height: cell.height,
+            font_size,
         }
     }
 
     fn with_font_delta(self, delta: f32) -> Self {
         let font_size = (self.font_size + delta).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
-        let scale = font_size / DEFAULT_FONT_SIZE;
-        Self {
-            cell_width: (DEFAULT_CELL_WIDTH * scale).max(1.0),
-            cell_height: (DEFAULT_CELL_HEIGHT * scale).max(1.0),
-            font_size,
-        }
+        Self::with_font_size(font_size)
     }
 }
 
@@ -330,11 +329,15 @@ impl Application for TerminalApp {
         let preedit = self.preedit.clone();
         let show_input_panel = self.show_input_panel.clone();
         let metrics = self.metrics.get();
+        let mut text_grid = TextGrid::new(self.grid.clone());
+        if let Some(font) = typography::font_stack() {
+            text_grid = text_grid.font_stack(font.clone());
+        }
         WindowGroup::new(
             "main",
             Window::new(
                 "Terminal",
-                TextGrid::new(self.grid.clone())
+                text_grid
                     .cell_size(metrics.cell_width, metrics.cell_height)
                     .font_size(metrics.font_size)
                     .background_color(Color::rgb(12, 14, 18))
