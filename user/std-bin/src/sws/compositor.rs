@@ -6133,6 +6133,7 @@ impl Compositor {
         self.drawer_open_pending = false;
         let drawer = self.drawer_motion.take().is_some();
         if settling || drawer {
+            self.apply_workspace_presentation_policy();
             self.update_overview_transforms();
             self.full_redraw_needed = true;
         }
@@ -6316,8 +6317,16 @@ impl Compositor {
             }
             Some(Update::End { destination }) => {
                 if self.tablet_drag_origin.is_some() {
-                    let starts = self.tablet_scene_snapshot();
+                    let mut starts = self.tablet_scene_snapshot();
+                    // Capture potential incoming card geometry before changing
+                    // active workspace or resetting the finger's pan offset.
+                    let card_starts = self.window_manager.get_windows().iter()
+                        .filter(|window| window.visible && !window.minimized && window.has_presented_frame)
+                        .filter_map(|window| self.overview_transform_for_window(window.id)
+                            .map(|transform| (window.id, transform)))
+                        .collect::<Vec<_>>();
                     self.tablet_motion = None;
+                    let mut switch_direction = None;
                     match destination {
                         Destination::Home => {
                             self.workspace_manager
@@ -6329,21 +6338,47 @@ impl Compositor {
                             );
                         }
                         Destination::Switch(offset) => {
-                            self.workspace_manager.return_to_workspace();
+                            let mut switched = false;
                             for _ in 0..offset.unsigned_abs().min(64) {
-                                self.workspace_manager.cycle_workspace(offset.signum());
+                                if !self.workspace_manager.cycle_workspace(offset.signum()) {
+                                    break;
+                                }
+                                switched = true;
+                            }
+                            if !switched {
+                                // A sideways component must not cancel a valid
+                                // upward navigation at the first/last task.
+                                self.workspace_manager.set_presentation(
+                                    sws_protocol::workspace::ShellPresentation::Overview,
+                                );
+                            } else {
+                                switch_direction = Some(offset.signum());
                             }
                         }
                     }
+                    self.tablet_motion = if let Some(direction) = switch_direction {
+                        let incoming = self.window_manager.get_windows().iter().filter_map(|window| {
+                            let root = self.top_level_window_id(window.id);
+                            (self.workspace_manager.workspace_for_window(root)
+                                == Some(self.workspace_manager.active_workspace()))
+                                .then_some(window.id)
+                        }).collect::<Vec<_>>();
+                        for (id, transform) in card_starts {
+                            if incoming.contains(&id) && !starts.iter().any(|(candidate, _)| *candidate == id) {
+                                starts.push((id, transform));
+                            }
+                        }
+                        tablet_motion::Motion::task_switch(starts, &incoming, direction,
+                            self.screen_width, monotonic_time_ns(), self.animations_enabled())
+                    } else {
+                        tablet_motion::Motion::settle(starts, monotonic_time_ns(), self.animations_enabled())
+                    };
                     self.overview_pan = 0.0;
+                    // Install the retained transition before visibility policy
+                    // hides outgoing windows or exposes the incoming full size.
                     self.commit_workspace_change();
                     self.tablet_drag_origin = None;
                     self.tablet_gesture_scene = None;
-                    self.tablet_motion = tablet_motion::Motion::settle(
-                        starts,
-                        monotonic_time_ns(),
-                        self.animations_enabled(),
-                    );
                 }
             }
             Some(Update::Cancel) => {
@@ -7521,12 +7556,18 @@ impl Compositor {
             }
             motion_changed = true;
         }
+        let mut motion_finished = false;
         if let Some(motion) = self.tablet_motion.as_mut() {
             let settling = motion.started_ns.is_some();
             if motion.advance(monotonic_time_ns()) {
                 self.tablet_motion = None;
+                motion_finished = true;
             }
             motion_changed |= settling;
+        }
+        if motion_finished {
+            // Retire outgoing cards in the same frame as their final fade.
+            self.apply_workspace_presentation_policy();
         }
         if let Some(motion) = self.drawer_motion.as_mut() {
             if motion.advance(monotonic_time_ns()) {
@@ -10644,6 +10685,9 @@ impl Compositor {
         };
         match self.workspace_manager.presentation() {
             sws_protocol::workspace::ShellPresentation::Workspace => {
+                if self.tablet_motion.as_ref().is_some_and(|motion| motion.exit_target(window_id).is_some()) {
+                    return true;
+                }
                 if workspace_id != self.workspace_manager.active_workspace() {
                     return false;
                 }
@@ -11245,7 +11289,7 @@ impl Compositor {
                     let (x, y, width, height) = window.surface_geometry();
                     Some(motion.project(
                         window.id,
-                        transform.unwrap_or(PresentationTransform {
+                        motion.exit_target(window.id).or(transform).unwrap_or(PresentationTransform {
                             x,
                             y,
                             width,
@@ -11294,13 +11338,17 @@ impl Compositor {
             .collect::<Vec<_>>();
         let mut changed = false;
         for (window_id, transform, instances, clip, clip_radius) in transforms {
+            let exiting = self.tablet_motion.as_ref()
+                .is_some_and(|motion| motion.exit_target(window_id).is_some());
             if let Some(window) = self.window_manager.get_window_mut(window_id)
                 && (window.presentation_transform != transform
+                    || window.presentation_exiting != exiting
                     || window.presentation_instances != instances
                     || window.presentation_clip != clip
                     || window.presentation_clip_radius != clip_radius)
             {
                 window.presentation_transform = transform;
+                window.presentation_exiting = exiting;
                 window.presentation_instances = instances;
                 window.presentation_clip = clip;
                 window.presentation_clip_radius = clip_radius;
@@ -11377,6 +11425,7 @@ impl Compositor {
                     .get_window(*window_id)
                     .is_some_and(|window| {
                         window.window_type == WindowType::Normal && window.is_presented()
+                            && !window.presentation_exiting
                     })
             })
             .or_else(|| {
@@ -11386,6 +11435,7 @@ impl Compositor {
                     .rev()
                     .find(|window| {
                         window.window_type == WindowType::Normal && window.is_presented()
+                            && !window.presentation_exiting
                     })
                     .map(|window| window.id)
             });

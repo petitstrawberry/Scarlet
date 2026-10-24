@@ -10,6 +10,7 @@ pub(super) struct Motion {
     pub started_ns: Option<u64>,
     duration_ns: u64,
     first_frame_pending: bool,
+    exit_targets: Vec<(u32, PresentationTransform)>,
 }
 
 impl Motion {
@@ -21,6 +22,7 @@ impl Motion {
             started_ns: None,
             duration_ns: SETTLE_DURATION_NS,
             first_frame_pending: false,
+            exit_targets: Vec::new(),
         }
     }
 
@@ -60,6 +62,30 @@ impl Motion {
 
     pub fn contains(&self, id: u32) -> bool {
         self.starts.iter().any(|(candidate, _)| *candidate == id)
+    }
+
+    /// Keep outgoing cards alive while the incoming card expands from the
+    /// last finger-controlled rectangle. No client geometry is animated.
+    pub fn task_switch(
+        starts: Vec<(u32, PresentationTransform)>,
+        incoming: &[u32],
+        direction: i32,
+        output_width: u32,
+        now: u64,
+        accelerated: bool,
+    ) -> Option<Self> {
+        let mut motion = Self::settle(starts, now, accelerated)?;
+        let shift = output_width.min(i32::MAX as u32) as i32 * direction.signum();
+        motion.exit_targets = motion.starts.iter().filter_map(|(id, from)| {
+            (!incoming.contains(id)).then_some((*id, PresentationTransform {
+                x: from.x.saturating_sub(shift), opacity: 0.0, ..*from
+            }))
+        }).collect();
+        Some(motion)
+    }
+
+    pub fn exit_target(&self, id: u32) -> Option<PresentationTransform> {
+        self.exit_targets.iter().find_map(|(candidate, target)| (*candidate == id).then_some(*target))
     }
 
     /// Start elapsed animation time only once its first frame reached output.
@@ -149,6 +175,35 @@ mod tests {
         motion.progress = 0.5;
         assert_eq!(motion.project(2, card).opacity, 0.5);
         assert_eq!(motion.project(2, card).width, card.width);
+    }
+
+    #[test]
+    fn tablet_task_switch_expands_neighbor_and_retires_outgoing_without_a_cut() {
+        let old = PresentationTransform { x: 80, y: 150, width: 500, height: 320, opacity: 1.0 };
+        let neighbor = PresentationTransform { x: 850, ..old };
+        let full = PresentationTransform { x: 0, y: 40, width: 1280, height: 760, opacity: 1.0 };
+        let mut motion = Motion::task_switch(vec![(1, old), (2, neighbor)], &[2], 1, 1280, 100, true).unwrap();
+        let exit = motion.exit_target(1).unwrap();
+        assert!(motion.exit_target(2).is_none());
+        assert_eq!(motion.project(1, exit), old);
+        assert_eq!(motion.project(2, full), neighbor);
+        assert!(!motion.advance(10_000_000_000), "first present starts the clock");
+        motion.note_presented(10_000_000_000);
+        assert!(!motion.advance(10_070_000_000));
+        let entering = motion.project(2, full);
+        assert!(entering.x < neighbor.x && entering.x > full.x);
+        assert!(entering.width > neighbor.width && entering.width < full.width);
+        assert_eq!(entering.opacity, 1.0, "expand the actual card, not a full-screen fade-in");
+        let leaving = motion.project(1, exit);
+        assert!(leaving.x < old.x && leaving.opacity < old.opacity);
+        let mut window = crate::window::Window::new(1, 0, 0, 1280, 800);
+        window.presentation_transform = Some(leaving);
+        window.presentation_exiting = true;
+        assert!(!window.contains_presentation_point(leaving.x + 1, leaving.y + 1));
+        assert!(motion.advance(10_140_000_000));
+        assert_eq!(motion.project(2, full), full);
+        assert_eq!(motion.project(1, exit).opacity, 0.0);
+        assert!(Motion::task_switch(vec![], &[], -1, 1280, 100, false).is_none());
     }
 
     #[test]

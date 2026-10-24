@@ -23,12 +23,13 @@
 //! movement samples alone do not prove a pause. Ticks use the latest known
 //! position; readiness already exposed by a tick remains latched above threshold.
 //!
-//! Release selects a workspace offset once horizontal travel exceeds 60
-//! logical pixels, without requiring horizontal dominance. Offsets use the
+//! Release selects a workspace offset once deliberate sideways travel exceeds
+//! 60 logical pixels: either a horizontal-dominant gesture or a sideways leg
+//! after moving up. Incidental diagonal drift does not switch tasks. Offsets use the
 //! nearest `page_stride`, with a minimum magnitude of one; finger left means
 //! positive. Otherwise, full progress (at least 40% of output height up)
-//! selects Home, even after a pause. An intermediate rise above 0.18 progress
-//! and at least 32 logical pixels up selects Overview, with or without a pause.
+//! selects Home, even after a pause. Any intermediate rise beyond the same
+//! 12-logical-pixel activation slop selects Overview, with or without a pause.
 //! Release destinations do not depend on duration or preview readiness.
 //! Below-threshold releases cancel. Returning inside the horizontal threshold
 //! reselects Home or Overview according to the final upward travel.
@@ -120,6 +121,8 @@ struct Gesture {
     start_y: f64,
     dx: f64,
     up: f64,
+    upward_anchor: f64,
+    sideways_origin_x: f64,
     motion_x: f64,
     motion_y: f64,
     last_motion_ns: u64,
@@ -138,6 +141,13 @@ impl Gesture {
         let (x, y) = (f64::from(x), f64::from(y));
         self.dx = x - self.start_x;
         self.up = self.start_y - y;
+        // Keep the horizontal leg separate from drift during an upward swipe.
+        // Unlike requiring total horizontal dominance, this still allows an
+        // up-then-sideways task switch without lifting or waiting for a hold.
+        if self.up > self.upward_anchor + self.geometry.logical(2.0) {
+            self.upward_anchor = self.up;
+            self.sideways_origin_x = x;
+        }
         if self.above_threshold() {
             self.above_since_ns.get_or_insert(now_ns);
         } else {
@@ -194,7 +204,12 @@ impl Gesture {
         if !self.begun {
             return None;
         }
-        if self.dx.abs() > self.geometry.logical(60.0) {
+        let sideways = self.start_x + self.dx - self.sideways_origin_x;
+        if self.dx.abs() > self.geometry.logical(60.0)
+            && (self.dx.abs() > self.up.max(0.0)
+                || (sideways.abs() > self.geometry.logical(60.0)
+                    && sideways.signum() == self.dx.signum()))
+        {
             let pages = (self.dx.abs() / f64::from(page_stride(self.geometry.width)))
                 .round()
                 .max(1.0) as i32;
@@ -206,7 +221,7 @@ impl Gesture {
         }
         if self.progress() >= 1.0 {
             Some(Destination::Home)
-        } else if self.above_threshold() {
+        } else if self.up > self.geometry.logical(12.0) {
             Some(Destination::Overview)
         } else {
             None
@@ -305,6 +320,8 @@ impl Navigation {
                             start_y: f64::from(y),
                             dx: 0.0,
                             up: 0.0,
+                            upward_anchor: 0.0,
+                            sideways_origin_x: f64::from(x),
                             motion_x: f64::from(x),
                             motion_y: f64::from(y),
                             last_motion_ns: now_ns,
@@ -424,6 +441,63 @@ mod tests {
     }
 
     #[test]
+    fn every_activated_upward_release_has_a_destination_at_all_scales() {
+        // Include the old gap (13..72 logical pixels), the overview range,
+        // and the exact Home boundary, after a tentative sideways start.
+        for scale in [1000, 1500, 2000] {
+            for height in [400, 720, 1200] {
+                let px = |logical: i32| logical * scale / 1000;
+                for up in 13..=height * 2 / 5 + 1 {
+                    for sideways in [-50, 0, 50] {
+                        let mut n = Navigation::default();
+                        let mut send = |contacts: &[(i32, i32, i32)], ms| {
+                            n.process(contacts, false, ms * MS, px(1000) as u32,
+                                px(height) as u32, scale as u32)
+                        };
+                        send(&[(7, px(500), px(height - 5))], 0);
+                        send(&[(7, px(500 + sideways), px(height - 5))], 10);
+                        send(&[(7, px(500 + sideways), px(height - 5 - up))], 20);
+                        let destination = if px(up) as f64 >= f64::from(px(height)) * 0.4 {
+                            Destination::Home
+                        } else {
+                            Destination::Overview
+                        };
+                        assert_eq!(send(&[], 30), end(destination),
+                            "scale={scale} height={height} up={up} sideways={sideways}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn diagonal_upward_swipes_do_not_become_task_switches() {
+        for sign in [-1, 1] {
+            for up in [80, 200, 399, 400] {
+                let mut n = Navigation::default();
+                finger(&mut n, 500, 995, 0);
+                finger(&mut n, 500 + sign * 30, 955, 20);
+                finger(&mut n, 500 + sign * 70, 995 - up, 40);
+                assert_eq!(frame(&mut n, &[], 50), end(if up >= 400 {
+                    Destination::Home
+                } else {
+                    Destination::Overview
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn sideways_retreat_preserves_vertical_overview_until_return_to_edge() {
+        let mut n = Navigation::default();
+        finger(&mut n, 500, 995, 0);
+        finger(&mut n, 500, 945, 20);
+        finger(&mut n, 600, 945, 40);
+        finger(&mut n, 540, 945, 60);
+        assert_eq!(frame(&mut n, &[], 80), end(Destination::Overview));
+    }
+
+    #[test]
     fn stationary_release_selects_overview_without_timer_events() {
         for release in [101, 199, 200, 60_000] {
             let mut n = Navigation::default();
@@ -474,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn overview_still_requires_32_logical_pixels_on_short_outputs() {
+    fn overview_pause_preview_has_32_pixel_floor_but_release_has_no_gap() {
         for scale in [1000, 1500, 2000] {
             let px = |logical: i32| logical * scale / 1000;
             for (up, ready) in [(30, false), (32, true)] {
@@ -519,11 +593,7 @@ mod tests {
                         px(400) as u32,
                         scale as u32
                     ),
-                    if ready {
-                        end(Destination::Overview)
-                    } else {
-                        Step::owned(Some(Update::Cancel))
-                    }
+                    end(Destination::Overview)
                 );
             }
         }
@@ -638,7 +708,7 @@ mod tests {
     }
 
     #[test]
-    fn full_swipe_boundary_and_horizontal_priority_ignore_pause_and_duration() {
+    fn full_swipe_boundary_ignores_diagonal_drift_pause_and_duration() {
         for paused in [false, true] {
             for time in [300, 10_000] {
                 for dx in [-61, -60, 0, 60, 61] {
@@ -653,9 +723,7 @@ mod tests {
                             finger(&mut n, 500 + dx, 995 - up, time).update,
                             drag((up as f32 / 400.0).min(1.0), dx as f32, paused)
                         );
-                        let destination = if dx.abs() > 60 {
-                            Destination::Switch(-dx.signum())
-                        } else if up >= 400 {
+                        let destination = if up >= 400 {
                             Destination::Home
                         } else {
                             Destination::Overview
@@ -904,7 +972,7 @@ mod tests {
 
     #[test]
     fn tap_and_short_swipes_cancel_even_after_begin() {
-        for y in [995, 990, 980, 924, 923] {
+        for y in [995, 990, 983] {
             for release in [100, 10_000] {
                 let mut n = Navigation::default();
                 finger(&mut n, 500, 995, 0);

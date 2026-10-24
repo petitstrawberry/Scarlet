@@ -227,6 +227,8 @@ pub struct Window {
     pub workspace_visible: bool,
     /// Optional compositor-only visual transform.
     pub presentation_transform: Option<PresentationTransform>,
+    /// A retained outgoing card may draw during task switching, but takes no input.
+    pub(super) presentation_exiting: bool,
     /// Additional compositor-only projections of the retained backing.
     pub presentation_instances: Vec<PresentationInstance>,
     /// Optional compositor-only clip for Overview workspace actors.
@@ -689,6 +691,7 @@ impl Window {
             visible: true,
             workspace_visible: true,
             presentation_transform: None,
+            presentation_exiting: false,
             presentation_instances: Vec::new(),
             presentation_clip: None,
             presentation_clip_radius: 0,
@@ -763,6 +766,7 @@ impl Window {
             visible: true,
             workspace_visible: true,
             presentation_transform: None,
+            presentation_exiting: false,
             presentation_instances: Vec::new(),
             presentation_clip: None,
             presentation_clip_radius: 0,
@@ -865,6 +869,7 @@ impl Window {
             visible: true,
             workspace_visible: true,
             presentation_transform: None,
+            presentation_exiting: false,
             presentation_instances: Vec::new(),
             presentation_clip: None,
             presentation_clip_radius: 0,
@@ -972,6 +977,9 @@ impl Window {
 
     /// Test a point against the compositor destination rectangle.
     pub fn contains_presentation_point(&self, px: i32, py: i32) -> bool {
+        if self.presentation_exiting {
+            return false;
+        }
         if let Some(clip) = self.presentation_clip
             && !rounded_rect_contains_point(clip, self.presentation_clip_radius, px, py)
         {
@@ -1635,6 +1643,7 @@ impl WindowManager {
             visible: true,
             workspace_visible: true,
             presentation_transform: None,
+            presentation_exiting: false,
             presentation_instances: Vec::new(),
             presentation_clip: None,
             presentation_clip_radius: 0,
@@ -1729,6 +1738,7 @@ impl WindowManager {
             visible: true,
             workspace_visible: true,
             presentation_transform: None,
+            presentation_exiting: false,
             presentation_instances: Vec::new(),
             presentation_clip: None,
             presentation_clip_radius: 0,
