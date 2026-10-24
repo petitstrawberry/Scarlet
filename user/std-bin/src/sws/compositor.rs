@@ -4725,48 +4725,13 @@ impl Compositor {
             || window.presentation_opacity(),
             |instance| (window.opacity * instance.transform.opacity).clamp(0.0, 1.0),
         );
-        // Check if window uses SHM or Vec buffer
-        if let Some(shm_addr) = window.shm_mapped_addr {
-            // SHM-backed window: read from mapped memory
-            let row_stride = if window.shm_stride != 0 {
-                window.shm_stride as usize
-            } else {
-                window.width as usize * 4
-            };
-            let buffer_size = if window.shm_size != 0 {
-                window.shm_size
-            } else {
-                window
-                    .shm_offset
-                    .saturating_add(row_stride.saturating_mul(window.height as usize))
-            };
-
-            // SAFETY: `shm_addr` is the live mapping retained by the window and
-            // `buffer_size` is its recorded mapped extent.
-            let window_buffer =
-                unsafe { core::slice::from_raw_parts(shm_addr as *const u8, buffer_size) };
-
+        if let Ok(pixels) = window.presentation_pixels() {
             Self::draw_window_from_buffer(
                 screen_width,
                 screen_height,
                 bytes_per_pixel,
                 window,
-                window_buffer,
-                buffer,
-                stride,
-                clip_rect,
-                rounded_clip,
-                visual_geometry,
-                presentation_opacity,
-            );
-        } else if let Some(ref window_buffer) = window.buffer {
-            // Legacy Vec-backed window
-            Self::draw_window_from_buffer(
-                screen_width,
-                screen_height,
-                bytes_per_pixel,
-                window,
-                window_buffer,
+                pixels,
                 buffer,
                 stride,
                 clip_rect,
@@ -4796,7 +4761,7 @@ impl Compositor {
         screen_height: u32,
         bytes_per_pixel: u32,
         window: &super::window::Window,
-        window_buffer: &[u8],
+        pixels: super::window::WindowPixels<'_>,
         screen_buffer: &mut [u8],
         stride: u32,
         clip_rect: Option<(i32, i32, u32, u32)>,
@@ -4834,26 +4799,11 @@ impl Compositor {
         // - window.has_alpha_content: pixel-level transparency (semi-transparent UI elements)
         let has_transparency = presentation_opacity < 1.0 || window.has_alpha_content;
 
-        let row_stride = if window.shm_mapped_addr.is_some() && window.shm_stride != 0 {
-            window.shm_stride as usize
-        } else {
-            window.width as usize * 4
-        };
-        let base_offset = if window.shm_mapped_addr.is_some() {
-            window.shm_offset
-        } else {
-            0
-        };
-        if row_stride == 0 || base_offset >= window_buffer.len() {
-            return;
-        }
-
-        let available_len = window_buffer.len().saturating_sub(base_offset);
-        let source_width = (row_stride / bytes_per_pixel as usize) as u32;
-        let source_height = (available_len / row_stride) as u32;
-        if source_width == 0 || source_height == 0 {
-            return;
-        }
+        let window_buffer = pixels.bytes();
+        let row_stride = pixels.stride() as usize;
+        let base_offset = 0usize;
+        let source_width = pixels.width();
+        let source_height = pixels.height();
 
         // Fast path for opaque windows: copy row by row
         if !has_transparency {
@@ -9708,6 +9658,13 @@ impl Compositor {
         );
     }
 
+    /// Fullscreen state and size form one client-side configure. Keep this
+    /// order for accepted, refused and redundant requests, even at equal size.
+    fn send_fullscreen_configure(&self, window_id: u32) {
+        self.send_window_state_changed(window_id);
+        self.send_current_window_configure(window_id);
+    }
+
     /// Shell reservations define app allocation. Keyboard occlusion is a separate
     /// overlay and never changes maximized, single-scene, or split geometry.
     fn app_workarea(&self) -> (i32, i32, u32, u32) {
@@ -12114,7 +12071,7 @@ impl Compositor {
                     window_id, width, height, shm_mapped_addr
                 );
                 if let Some(window) = self.window_manager.get_window(window_id)
-                    && (window.fullscreen || window.tablet_managed)
+                    && (window.fullscreen || window.tablet_managed || window.retains_native_transition_frame())
                     && (width != window.width || height != window.height)
                 {
                     println!(
@@ -12288,7 +12245,7 @@ impl Compositor {
                     return Ok(false);
                 }
                 if self.window_manager.is_fullscreen(window_id) {
-                    self.send_window_state_changed(window_id);
+                    self.send_fullscreen_configure(window_id);
                     return Ok(false);
                 }
                 if self
@@ -12297,8 +12254,7 @@ impl Compositor {
                     .iter()
                     .any(|window| window.fullscreen && window.id != window_id)
                 {
-                    self.send_window_state_changed(window_id);
-                    self.send_current_window_configure(window_id);
+                    self.send_fullscreen_configure(window_id);
                     super::ipc::send_message_to_client(
                         client_id,
                         sws_protocol::server_msg::ERROR,
@@ -12320,8 +12276,7 @@ impl Compositor {
                     self.screen_width,
                     self.screen_height,
                 ) {
-                    self.send_window_state_changed(window_id);
-                    self.send_current_window_configure(window_id);
+                    self.send_fullscreen_configure(window_id);
                     super::ipc::send_message_to_client(
                         client_id,
                         sws_protocol::server_msg::ERROR,
@@ -12351,7 +12306,7 @@ impl Compositor {
                 if let Some(rect) = old_rect {
                     self.add_pending_damage(rect);
                 }
-                self.send_window_state_changed(window_id);
+                self.send_fullscreen_configure(window_id);
                 if let Some((x, y, width, height)) = self
                     .window_manager
                     .get_window(window_id)
@@ -12359,12 +12314,6 @@ impl Compositor {
                 {
                     let rect = (x, y, width, height);
                     self.add_pending_damage(rect);
-                    let payload = sws_protocol::payload_window_configure(window_id, width, height);
-                    super::ipc::send_message_to_window(
-                        window_id,
-                        sws_protocol::server_msg::WINDOW_CONFIGURE,
-                        payload.to_vec(),
-                    );
                 }
                 self.full_redraw_needed = true;
             }
@@ -12391,6 +12340,7 @@ impl Compositor {
                     .get_window(window_id)
                     .is_some_and(|window| window.maximized);
                 if !self.window_manager.unset_fullscreen_window(window_id) {
+                    self.send_fullscreen_configure(window_id);
                     return Ok(false);
                 }
 
@@ -12405,7 +12355,7 @@ impl Compositor {
                 if let Some(rect) = old_rect {
                     self.add_pending_damage(rect);
                 }
-                self.send_window_state_changed(window_id);
+                self.send_fullscreen_configure(window_id);
                 if let Some((x, y, width, height)) = self
                     .window_manager
                     .get_window(window_id)
@@ -12413,12 +12363,6 @@ impl Compositor {
                 {
                     let rect = (x, y, width, height);
                     self.add_pending_damage(rect);
-                    let payload = sws_protocol::payload_window_configure(window_id, width, height);
-                    super::ipc::send_message_to_window(
-                        window_id,
-                        sws_protocol::server_msg::WINDOW_CONFIGURE,
-                        payload.to_vec(),
-                    );
                 }
                 self.full_redraw_needed = true;
             }
@@ -13148,11 +13092,13 @@ impl Compositor {
                 window_id,
                 title,
             } => {
-                let target = self.window_manager.get_window_mut(window_id)
+                let target = self
+                    .window_manager
+                    .get_window_mut(window_id)
                     .map(|window| (window.owner_client_id, &mut window.title));
                 match super::window_title::update(client_id, target, title) {
                     Ok(true) => self.broadcast_active_window_metadata(window_id),
-                    Ok(false) => {},
+                    Ok(false) => {}
                     Err(()) => send_response_to_client(
                         client_id,
                         sws_protocol::server_msg::ERROR,
@@ -13270,7 +13216,12 @@ impl Compositor {
                     self.output_scale_milli, client_id
                 );
             }
-            IpcEvent::Clipboard { client_id, request_id, window_id, text } => {
+            IpcEvent::Clipboard {
+                client_id,
+                request_id,
+                window_id,
+                text,
+            } => {
                 // Authorize on the compositor thread against canonical focus,
                 // visibility/workspace/minimize state and window ownership.
                 let focused = self.window_manager.get_focused_window_id();
@@ -13281,9 +13232,16 @@ impl Compositor {
                     Some(text) => sws_protocol::clipboard::Request::Set { window_id, text },
                     None => sws_protocol::clipboard::Request::Get { window_id },
                 };
-                let payload = self.text_clipboard.apply(request, focused, owner, client_id, presented);
+                let payload = self
+                    .text_clipboard
+                    .apply(request, focused, owner, client_id, presented);
                 super::ipc::finish_clipboard_request(client_id);
-                send_response_to_client(client_id, sws_protocol::server_msg::CLIPBOARD_TEXT, request_id, payload);
+                send_response_to_client(
+                    client_id,
+                    sws_protocol::server_msg::CLIPBOARD_TEXT,
+                    request_id,
+                    payload,
+                );
             }
             IpcEvent::GetActiveApp {
                 client_id,

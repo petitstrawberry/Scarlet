@@ -118,6 +118,18 @@ struct NativePolicyFrame {
     stale_sgfx_generation: Option<(u32, u32)>,
 }
 
+/// Last native frame retained at its original rectangle until a policy
+/// configure has produced a painted replacement. CPU pixels must survive SHM
+/// replacement too; SGFX keeps its presented image through the same barrier.
+#[derive(Debug)]
+struct NativeTransitionFrame {
+    geometry: (i32, i32, u32, u32),
+    pixels: Vec<u8>,
+    stride: u32,
+    width: u32,
+    height: u32,
+}
+
 /// Compositor-only visual rectangle used by Overview and shell transitions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PresentationTransform {
@@ -259,6 +271,7 @@ pub struct Window {
     /// Native clients must replace their backing and commit after tablet policy
     /// changes. Logical visibility stays independent so rendering can progress.
     native_policy_frame: Option<NativePolicyFrame>,
+    native_transition_frame: Option<NativeTransitionFrame>,
     /// Latest registered SGFX allocation, including buffers not yet committed.
     native_sgfx_generation: Option<(u32, u32)>,
     /// Decoration outsets retained while tablet presentation requires zero outsets.
@@ -490,6 +503,50 @@ impl Window {
         self.backing_height = height.max(1);
     }
 
+    /// Whether composition is retaining the frame preceding a native configure.
+    pub(super) fn retains_native_transition_frame(&self) -> bool {
+        self.native_transition_frame.is_some()
+    }
+
+    /// CPU composition and GPU uploads use the retained frame during a native
+    /// transition. Protocol validation must continue to use the actual backing.
+    pub(super) fn presentation_pixels(&self) -> Result<WindowPixels<'_>, &'static str> {
+        if let Some(frame) = &self.native_transition_frame {
+            return Ok(WindowPixels {
+                pixels: &frame.pixels,
+                stride: frame.stride,
+                width: frame.width,
+                height: frame.height,
+            });
+        }
+        self.pixels()
+    }
+
+    /// Begin a native policy transition before changing its destination. Keep
+    /// the previous frame at its original size, including across SHM replacement.
+    /// Hidden/bootstrap surfaces keep the existing freshness gate instead.
+    pub(super) fn begin_native_transition(&mut self) {
+        if self.owner_client_id.is_none() {
+            return;
+        }
+        if self.native_transition_frame.is_none() && self.is_presented() && self.has_presented_frame
+        {
+            if let Ok(pixels) = self.pixels() {
+                self.native_transition_frame = Some(NativeTransitionFrame {
+                    geometry: self.presentation_geometry(),
+                    pixels: pixels.bytes().to_vec(),
+                    stride: pixels.stride(),
+                    width: pixels.width(),
+                    height: pixels.height(),
+                });
+            }
+        }
+        self.native_policy_frame = Some(NativePolicyFrame {
+            awaiting_resize: true,
+            stale_sgfx_generation: self.native_sgfx_generation,
+        });
+    }
+
     /// Return whether this window currently has a CPU-readable pixel backing.
     pub fn has_pixel_buffer(&self) -> bool {
         self.shm_mapped_addr.is_some() || self.buffer.is_some()
@@ -653,6 +710,7 @@ impl Window {
             workspace_layout_managed: false,
             tablet_managed: false,
             native_policy_frame: None,
+            native_transition_frame: None,
             native_sgfx_generation: None,
             tablet_restore_insets: None,
             pending_desktop_geometry: false,
@@ -726,6 +784,7 @@ impl Window {
             workspace_layout_managed: false,
             tablet_managed: false,
             native_policy_frame: None,
+            native_transition_frame: None,
             native_sgfx_generation: None,
             tablet_restore_insets: None,
             pending_desktop_geometry: false,
@@ -827,6 +886,7 @@ impl Window {
             workspace_layout_managed: false,
             tablet_managed: false,
             native_policy_frame: None,
+            native_transition_frame: None,
             native_sgfx_generation: None,
             tablet_restore_insets: None,
             pending_desktop_geometry: false,
@@ -889,14 +949,17 @@ impl Window {
     pub const fn is_presented(&self) -> bool {
         self.is_logically_presented()
             && self.presentation_content_ready
-            && self.native_policy_frame.is_none()
+            && (self.native_policy_frame.is_none() || self.native_transition_frame.is_some())
     }
 
     /// Return the compositor destination rectangle for this surface.
     pub const fn presentation_geometry(&self) -> (i32, i32, u32, u32) {
         match self.presentation_transform {
             Some(transform) => (transform.x, transform.y, transform.width, transform.height),
-            None => self.surface_geometry(),
+            None => match &self.native_transition_frame {
+                Some(frame) => frame.geometry,
+                None => self.surface_geometry(),
+            },
         }
     }
 
@@ -1123,7 +1186,7 @@ impl Window {
         self.tablet_managed = active;
         if active {
             self.require_native_policy_frame();
-        } else {
+        } else if self.native_transition_frame.is_none() {
             self.native_policy_frame = None;
         }
         true
@@ -1189,6 +1252,7 @@ impl Window {
             }
         }
         self.native_policy_frame = None;
+        self.native_transition_frame = None;
         true
     }
 
@@ -1592,6 +1656,7 @@ impl WindowManager {
             workspace_layout_managed: false,
             tablet_managed: false,
             native_policy_frame: None,
+            native_transition_frame: None,
             native_sgfx_generation: None,
             tablet_restore_insets: None,
             pending_desktop_geometry: false,
@@ -1685,6 +1750,7 @@ impl WindowManager {
             workspace_layout_managed: false,
             tablet_managed: false,
             native_policy_frame: None,
+            native_transition_frame: None,
             native_sgfx_generation: None,
             tablet_restore_insets: None,
             pending_desktop_geometry: false,
@@ -2407,6 +2473,7 @@ impl WindowManager {
         // output. Expanding the surface by normal-mode shadow outsets makes an
         // undecorated fullscreen frame larger than the output and clips its
         // right and bottom edges.
+        window.begin_native_transition();
         window.x = 0;
         window.y = 0;
         window.width = screen_width.max(1);
@@ -2449,6 +2516,7 @@ impl WindowManager {
             return false;
         }
 
+        window.begin_native_transition();
         window.x = 0;
         window.y = 0;
         window.width = screen_width.max(1);
@@ -2477,6 +2545,7 @@ impl WindowManager {
         let Some((x, y, width, height)) = window.fullscreen_restore_geometry.take() else {
             return false;
         };
+        window.begin_native_transition();
         window.x = x;
         window.y = y;
         window.width = width.max(1);
@@ -3035,6 +3104,64 @@ mod tests {
         window.note_frame_submission(0);
         window.validate_presentation_content();
         window
+    }
+
+    #[test]
+    fn fullscreen_retains_old_rectangle_and_pixels_until_painted_replacement() {
+        let mut windows = WindowManager::new();
+        let id = windows.create_window(30, 40, 800, 600);
+        let window = windows.get_window_mut(id).unwrap();
+        window.owner_client_id = Some(1);
+        window.note_frame_submission(0);
+        window.buffer.as_mut().unwrap()[0] = 73;
+        let old = window.surface_geometry();
+        assert!(windows.set_fullscreen_window(id, 1920, 1200));
+        let window = windows.get_window_mut(id).unwrap();
+        assert_eq!(window.surface_geometry(), (0, 0, 1920, 1200));
+        assert_eq!(window.presentation_geometry(), old);
+        assert!(window.is_presented());
+        assert!(window.is_logically_presented());
+        assert!(!window.complete_native_policy_frame((1920, 1200), None));
+        window.set_backing_extent(1920, 1200);
+        window.buffer = Some(vec![0; 1920 * 1200 * 4]);
+        window.note_native_backing_replaced();
+        assert_eq!(window.presentation_pixels().unwrap().bytes()[0], 73);
+        assert_eq!(window.presentation_geometry(), old);
+        assert!(!window.complete_native_policy_frame((800, 600), None));
+        assert!(window.complete_native_policy_frame((1920, 1200), None));
+        assert_eq!(window.presentation_geometry(), (0, 0, 1920, 1200));
+        assert_eq!(window.presentation_pixels().unwrap().bytes()[0], 0);
+        assert!(windows.unset_fullscreen_window(id));
+        assert_eq!(
+            windows.get_window(id).unwrap().presentation_geometry(),
+            (0, 0, 1920, 1200)
+        );
+        let window = windows.get_window_mut(id).unwrap();
+        window.set_backing_extent(800, 600);
+        window.note_native_backing_replaced();
+        assert!(window.complete_native_policy_frame((800, 600), None));
+        assert_eq!(window.presentation_geometry(), old);
+    }
+
+    #[test]
+    fn fullscreen_same_extent_waits_for_new_generation_without_blocking_callbacks() {
+        let mut window = native_tablet_window();
+        window.buffer = Some(vec![0; 800 * 600 * 4]);
+        window.note_native_sgfx_registration(1, 7);
+        window.begin_native_transition();
+        window.fullscreen = true;
+        window.note_native_backing_replaced();
+        assert!(!window.complete_native_policy_frame((800, 600), Some((1, 7))));
+        assert!(window.retains_native_transition_frame());
+        assert!(super::super::frame_callback::frame_callback_is_ready(
+            window.is_logically_presented(),
+            true,
+            false,
+            1,
+            0,
+        ));
+        assert!(window.complete_native_policy_frame((800, 600), Some((1, 8))));
+        assert!(!window.retains_native_transition_frame());
     }
 
     #[test]

@@ -910,13 +910,13 @@ impl GpuCompositor {
             .textures
             .iter()
             .any(|entry| entry.window_id == Some(window.id));
-        let has_current_backing = window.pixels().is_ok();
+        let has_current_backing = window.presentation_pixels().is_ok();
         let scene_texture = self
             .scene_textures
             .iter()
             .find(|entry| entry.window_id == window.id)
             .map(|entry| (entry.texture, entry.width, entry.height));
-        let shared_texture = self.committed_shared_texture(window.id);
+        let shared_texture = self.committed_shared_texture(window);
         let imported_shm_texture = self.imported_shm_texture(window);
         let directly_imported_shm = imported_shm_texture.is_some();
         let visual_geometry = instance.map_or_else(
@@ -1128,9 +1128,9 @@ impl GpuCompositor {
         }
         for (_, geometry, textures) in &mut self.backdrops {
             if self.force_full_repaint
-                || source_damage.as_ref().is_none_or(|rects| {
-                    rects.iter().any(|&rect| geometry.intersects_source(rect))
-                })
+                || source_damage
+                    .as_ref()
+                    .is_none_or(|rects| rects.iter().any(|&rect| geometry.intersects_source(rect)))
             {
                 textures.valid = false;
             }
@@ -1144,7 +1144,7 @@ impl GpuCompositor {
             // CPU-backed texture extent changes are detected before this loop
             // and cause a fresh private resource table. Each active window is
             // therefore re-uploaded into that replacement table here.
-            let has_current_backing = window.pixels().is_ok();
+            let has_current_backing = window.presentation_pixels().is_ok();
             let has_direct_shm_texture = self.imported_shm_texture(window).is_some();
             if window.is_presented()
                 && !scenes.iter().any(|view| view.scene.window_id == window.id)
@@ -1437,7 +1437,7 @@ impl GpuCompositor {
         }
         self.force_full_repaint = false;
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_COLLECT_RELEASES);
-        Ok(self.take_presented_releases())
+        Ok(self.take_presented_releases(windows))
     }
 
     pub(super) fn has_committed_shared_buffer(&self, window_id: WindowId) -> bool {
@@ -1446,21 +1446,31 @@ impl GpuCompositor {
         })
     }
 
-    fn committed_shared_texture(&self, window_id: WindowId) -> Option<(TextureId, u32, u32)> {
+    fn committed_shared_texture(&self, window: &Window) -> Option<(TextureId, u32, u32)> {
         let state = self
             .shared_windows
             .iter()
-            .find(|state| state.window_id == window_id)?;
-        let identity = state.pending.or(state.presented)?.identity;
+            .find(|state| state.window_id == window.id)?;
+        let identity = if window.retains_native_transition_frame() {
+            state.presented.or(state.pending)
+        } else {
+            state.pending.or(state.presented)
+        }?
+        .identity;
         self.shared_textures
             .iter()
             .find(|entry| entry.identity == identity)
             .map(|entry| (entry.texture, entry.width, entry.height))
     }
 
-    fn take_presented_releases(&mut self) -> Vec<SgfxCommitToken> {
+    fn take_presented_releases(&mut self, windows: &[Window]) -> Vec<SgfxCommitToken> {
         let mut releases = Vec::new();
         for state in &mut self.shared_windows {
+            if windows.iter().any(|window| {
+                window.id == state.window_id && window.retains_native_transition_frame()
+            }) {
+                continue;
+            }
             releases.extend(promote_pending_shared_frame(state).into_iter().flatten());
         }
         // Once a shared image has reached the display, the CPU-upload cache
@@ -1655,7 +1665,7 @@ impl GpuCompositor {
         &mut self,
         window: &'a Window,
     ) -> Result<Option<(usize, TextureUpload<'a>)>, &'static str> {
-        let pixels = window.pixels().ok();
+        let pixels = window.presentation_pixels().ok();
         let pixels = pixels
             .as_ref()
             .ok_or("Window has no CPU-readable pixel backing")?;
@@ -1735,7 +1745,7 @@ impl GpuCompositor {
                 .iter()
                 .find(|window| window.id == window_id)
                 .is_some_and(|window| {
-                    window.pixels().ok().is_some_and(|pixels| {
+                    window.presentation_pixels().ok().is_some_and(|pixels| {
                         pixels.width() != texture.width || pixels.height() != texture.height
                     })
                 })
