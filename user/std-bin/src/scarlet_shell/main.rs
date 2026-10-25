@@ -2609,6 +2609,7 @@ fn maintain_workspace_shell_role(
                 visibility = volume_osd::Visibility::default();
                 break;
             }
+            let mut volume_batch = volume_policy::KeyBatch::default();
             while let Some(event) = connection.poll_event() {
                 match event {
                     sws::event::Event::FocusChanged {
@@ -2663,45 +2664,52 @@ fn maintain_workspace_shell_role(
                     sws::event::Event::Input(input)
                         if input.surface_id == 0
                             && input.type_ == 1
-                            && matches!(input.value, 1 | 2)
+                            && matches!(input.value, 0 | 1 | 2)
                             && matches!(input.code, 0x72 | 0x73) =>
                     {
-                        if audio_client.is_none() {
-                            audio_client = SasClient::connect().ok();
-                        }
-                        let result = audio_client.as_mut().and_then(|client| {
-                            let current = client.control_state().ok()?;
-                            let percent = ((current.master_volume_q16 as u64 * 100
-                                + (MASTER_VOLUME_UNITY_Q16 / 2) as u64)
-                                / MASTER_VOLUME_UNITY_Q16 as u64)
-                                .min(100) as u8;
-                            let percent = volume_osd::step_percent(percent, input.code == 0x73);
-                            let q16 = ((percent as u64 * MASTER_VOLUME_UNITY_Q16 as u64 + 50) / 100)
-                                as u32;
-                            let changed = client.set_master_volume_q16(q16).ok()?;
-                            if changed.flags & sas_protocol::CONTROL_FLAG_MUTED != 0 {
-                                client.set_master_muted(false).ok().or(Some(changed))
-                            } else {
-                                Some(changed)
-                            }
-                        });
-                        if let Some(current) = result {
-                            update_shared_audio_status(&audio_status, &audio_slider, current);
-                            let actual = audio_status.get();
-                            console_audio.set((actual.audio_volume_percent, actual.audio_muted));
-                            feedback.set(volume_osd::Feedback {
-                                percent: actual.audio_volume_percent,
-                                muted: actual.audio_muted.unwrap_or(false),
-                            });
-                        } else {
-                            audio_client = None;
-                            feedback.set(volume_osd::Feedback::default());
-                        }
-                        if visibility.show(std::time::Instant::now()) {
-                            open_window(volume_osd::SCENE_KEY);
-                        }
+                        volume_batch.push(
+                            input.code,
+                            input.value,
+                            input.time,
+                            scarlet_os::time::monotonic_time_ns() / 1000,
+                        );
                     }
                     _ => {}
+                }
+            }
+            if !volume_batch.is_empty() {
+                if audio_client.is_none() {
+                    audio_client = SasClient::connect().ok();
+                }
+                let result = audio_client.as_mut().and_then(|client| {
+                    let current = client.control_state().ok()?;
+                    let percent = ((current.master_volume_q16 as u64 * 100
+                        + (MASTER_VOLUME_UNITY_Q16 / 2) as u64)
+                        / MASTER_VOLUME_UNITY_Q16 as u64)
+                        .min(100) as u8;
+                    let percent = volume_batch.apply(percent);
+                    let q16 = ((percent as u64 * MASTER_VOLUME_UNITY_Q16 as u64 + 50) / 100) as u32;
+                    let changed = client.set_master_volume_q16(q16).ok()?;
+                    if changed.flags & sas_protocol::CONTROL_FLAG_MUTED != 0 {
+                        client.set_master_muted(false).ok().or(Some(changed))
+                    } else {
+                        Some(changed)
+                    }
+                });
+                if let Some(current) = result {
+                    update_shared_audio_status(&audio_status, &audio_slider, current);
+                    let actual = audio_status.get();
+                    console_audio.set((actual.audio_volume_percent, actual.audio_muted));
+                    feedback.set(volume_osd::Feedback {
+                        percent: actual.audio_volume_percent,
+                        muted: actual.audio_muted.unwrap_or(false),
+                    });
+                } else {
+                    audio_client = None;
+                    feedback.set(volume_osd::Feedback::default());
+                }
+                if visibility.show(std::time::Instant::now()) {
+                    open_window(volume_osd::SCENE_KEY);
                 }
             }
             if visibility.expire(std::time::Instant::now()) {
