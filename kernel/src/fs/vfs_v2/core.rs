@@ -302,6 +302,17 @@ pub trait FileSystemOperations: Send + Sync {
         flags: u32,
     ) -> Result<Arc<dyn FileObject>, FileSystemError>;
 
+    /// Whether opening a resolved node must remain serialized with namespace mutations.
+    ///
+    /// The default protects drivers whose node identity can be unlinked and reused,
+    /// or whose open performs path-based copy-up. A driver may return false only
+    /// when the retained node pins an immutable identity independently of names.
+    /// Its open callback then runs without the namespace lock and may reenter VFS
+    /// (for example, to load device firmware).
+    fn open_requires_namespace_lock(&self) -> bool {
+        true
+    }
+
     /// Create a new file in the specified directory
     fn create(
         &self,
