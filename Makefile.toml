@@ -44,8 +44,8 @@ export CARGO_HOME="${sgfx_project}/.scarlet/cache/cargo-home"
 export CARGO_TARGET_DIR="${sgfx_project}/.scarlet/cache/target/integration-check"
 sgfx_graph=$(cargo --config "${sgfx_config}" tree --locked --workspace --manifest-path .cargo/Cargo.toml --target "${SGFX_STD_TARGET}" --prefix none --edges normal,build)
 case "${sgfx_graph}" in
-    *'sgfx-backend-scarlet-virgl v'*|*'sgfx-backend-scarlet-maxwell v'*)
-        echo "Native clients must load VirGL and Maxwell dynamically" >&2
+    *'sgfx-backend-scarlet-virgl v'*|*'sgfx-backend-scarlet-adreno v'*|*'sgfx-backend-scarlet-maxwell v'*)
+        echo "Native clients must load VirGL, Adreno and Maxwell dynamically" >&2
         exit 1
         ;;
 esac
