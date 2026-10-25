@@ -33,6 +33,7 @@ impl View for VideoView {
                 view: self.clone(),
                 size: Size::new(DISPLAY_WIDTH as f32, DISPLAY_HEIGHT as f32),
                 fallback: None,
+                logged_nv12: false,
                 panel: None,
                 debug: None,
                 image: None,
@@ -48,6 +49,7 @@ struct VideoRender {
     view: VideoView,
     size: Size,
     fallback: Option<Buffer>,
+    logged_nv12: bool,
     panel: Option<Buffer>,
     debug: Option<Buffer>,
     image: Option<Arc<scarlet_ui::SgfxTexture>>,
@@ -155,7 +157,16 @@ impl ElementRenderObject for VideoRender {
                     frame.height,
                     frame.conversion,
                 ) {
-                    Ok(image) => Some(image),
+                    Ok(image) => {
+                        if !self.logged_nv12 {
+                            println!(
+                                "[{}] GPU shared NV12 rendering {}x{}",
+                                APP_NAME, frame.width, frame.height
+                            );
+                            self.logged_nv12 = true;
+                        }
+                        Some(image)
+                    }
                     Err(error) => {
                         println!("[{}] shared image adoption failed: {:?}", APP_NAME, error);
                         None

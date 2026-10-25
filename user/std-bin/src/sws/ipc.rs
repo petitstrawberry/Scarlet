@@ -1110,8 +1110,14 @@ pub(super) fn send_volume_key(code: u16, value: i32) {
         send_message_to_client(
             owner.client_id,
             sws_protocol::server_msg::INPUT_EVENT,
-            sws_protocol::payload_input_event(0, 0, super::input::event_types::EV_KEY, code, value)
-                .to_vec(),
+            sws_protocol::payload_input_event(
+                0,
+                scarlet_os::time::monotonic_time_ns() / 1000,
+                super::input::event_types::EV_KEY,
+                code,
+                value,
+            )
+            .to_vec(),
         );
     }
 }
