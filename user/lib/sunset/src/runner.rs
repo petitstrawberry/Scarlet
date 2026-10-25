@@ -15,6 +15,9 @@ use traffic::{TrafIn, TrafOut};
 
 use conn::{CliServ, Conn, DispatchEvent, Dispatched};
 
+// Leave room for an encrypted WINDOW_ADJUST while bulk data is queued.
+const CHANNEL_CONTROL_RESERVE: usize = 128;
+
 pub(crate) type ServRunner<'a> = Runner<'a, server::Server>;
 pub(crate) type CliRunner<'a> = Runner<'a, client::Client>;
 
@@ -192,6 +195,29 @@ impl<'a> Runner<'a, server::Server> {
         outbuf: &'a mut [u8],
     ) -> Runner<'a, server::Server> {
         Self::new(inbuf, outbuf)
+    }
+
+    /// Create a server with a receive window suitable for bulk transfers.
+    /// The maximum channel packet must fit `inbuf`, with 512 bytes of transport
+    /// headroom. The window limits outstanding stream bytes, not an allocation.
+    /// Existing constructors retain their small embedded defaults.
+    pub fn new_server_with_channel_limits(
+        inbuf: &'a mut [u8],
+        outbuf: &'a mut [u8],
+        receive_window: u32,
+        receive_max_packet: u32,
+    ) -> Result<Self> {
+        if receive_max_packet == 0
+            || receive_window < receive_max_packet
+            || inbuf.len().saturating_sub(512) < receive_max_packet as usize
+            || outbuf.len() < 512
+        {
+            return error::BadUsage.fail();
+        }
+        let mut runner = Self::new(inbuf, outbuf);
+        runner.conn.channels.receive_window = receive_window as usize;
+        runner.conn.channels.receive_max_packet = receive_max_packet as usize;
+        Ok(runner)
     }
 
     pub(crate) fn resume_servhostkeys(&mut self, keys: &[&SignKey]) -> Result<()> {
@@ -677,8 +703,11 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
 
         // minimum of buffer space and channel window available
         let payload_space = self.traf_out.send_allowed(&self.keys);
-        // subtract space for packet headers prior to data
-        let payload_space = payload_space.saturating_sub(dt.packet_offset());
+        // Reserve space for packet headers and a channel-control response.
+        // Reading inbound data can queue WINDOW_ADJUST before data is flushed;
+        // filling the output with bulk data must not prevent that response.
+        let payload_space = payload_space
+            .saturating_sub(dt.packet_offset() + CHANNEL_CONTROL_RESERVE);
         let r = Ok(self
             .conn
             .channels
@@ -935,5 +964,30 @@ impl core::fmt::Debug for ChanHandle {
 
 #[cfg(test)]
 mod tests {
-    // TODO: test send_allowed() limits
+    use super::*;
+    #[test]
+    fn bulk_server_limits_must_fit_the_transport_buffer() {
+        let mut input = [0; 4096];
+        let mut output = [0; 4096];
+        for (window, packet) in [(0, 0), (1024, 2048), (65536, 4096), (65536, u32::MAX)] {
+            assert!(Runner::new_server_with_channel_limits(
+                &mut input,
+                &mut output,
+                window,
+                packet
+            )
+            .is_err());
+        }
+        assert!(
+            Runner::new_server_with_channel_limits(&mut input, &mut output, 65536, 2048).is_ok()
+        );
+    }
+    #[test]
+    fn existing_constructor_retains_small_defaults() {
+        let mut input = [0; 4096];
+        let mut output = [0; 4096];
+        let runner = Runner::new_server(&mut input, &mut output);
+        assert_eq!(runner.conn.channels.receive_window, 1000);
+        assert_eq!(runner.conn.channels.receive_max_packet, 1000);
+    }
 }

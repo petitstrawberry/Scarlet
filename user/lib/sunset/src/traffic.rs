@@ -83,8 +83,10 @@ enum RxState {
         dt: ChanData,
         /// read index of channel data. should transition to Idle once `idx==len`
         idx: usize,
-        /// length of channel data
+        /// Absolute end of channel data in the decrypted packet buffer.
         len: usize,
+        /// Channel payload bytes credited once the packet is consumed.
+        data_len: usize,
     },
 }
 
@@ -240,7 +242,7 @@ impl<'a> TrafIn<'a> {
     /// Returns `(channel, dt, length)`
     pub fn read_channel_ready(&self) -> Option<(ChanNum, ChanData, usize)> {
         match self.state {
-            RxState::InChannelData { chan, dt, idx, len } => {
+            RxState::InChannelData { chan, dt, idx, len, .. } => {
                 debug_assert!(len > idx);
                 let rem = len - idx;
                 Some((chan, dt, rem))
@@ -262,6 +264,7 @@ impl<'a> TrafIn<'a> {
                     dt: di.dt,
                     idx,
                     len: idx + di.len.get(),
+                    data_len: di.len.get(),
                 };
                 Ok((di.num, di.dt))
             }
@@ -278,7 +281,7 @@ impl<'a> TrafIn<'a> {
         buf: &mut [u8],
     ) -> (usize, Option<usize>) {
         match self.state {
-            RxState::InChannelData { chan: c, dt: e, ref mut idx, len }
+            RxState::InChannelData { chan: c, dt: e, ref mut idx, len, data_len }
                 if (c, e) == (chan, dt) =>
             {
                 debug_assert!(len > *idx);
@@ -289,7 +292,7 @@ impl<'a> TrafIn<'a> {
                 if *idx == len {
                     // all done.
                     self.state = RxState::Idle;
-                    (wlen, Some(len))
+                    (wlen, Some(data_len))
                 } else {
                     (wlen, None)
                 }
@@ -305,7 +308,7 @@ impl<'a> TrafIn<'a> {
         buf: &mut [u8],
     ) -> (usize, Option<usize>, ChanData) {
         match self.state {
-            RxState::InChannelData { chan: c, dt, ref mut idx, len }
+            RxState::InChannelData { chan: c, dt, ref mut idx, len, data_len }
                 if c == chan =>
             {
                 debug_assert!(len > *idx);
@@ -317,7 +320,7 @@ impl<'a> TrafIn<'a> {
                 if *idx == len {
                     // all done.
                     self.state = RxState::Idle;
-                    (wlen, Some(len), dt)
+                    (wlen, Some(data_len), dt)
                 } else {
                     (wlen, None, dt)
                 }
@@ -329,9 +332,9 @@ impl<'a> TrafIn<'a> {
     /// Returns the length of data discarded
     pub fn discard_read_channel(&mut self, chan: ChanNum) -> usize {
         match self.state {
-            RxState::InChannelData { chan: c, len, .. } if c == chan => {
+            RxState::InChannelData { chan: c, data_len, .. } if c == chan => {
                 self.state = RxState::Idle;
-                len
+                data_len
             }
             _ => 0,
         }
@@ -489,5 +492,37 @@ impl<'s, 'a> TrafSend<'s, 'a> {
     /// Returns the current receive sequence number
     pub fn recv_seq(&self) -> u32 {
         self.keys.seq_decrypt.0
+    }
+}
+
+#[cfg(test)]
+mod receive_credit_tests {
+    use super::*;
+    #[test]
+    fn split_reads_and_discards_credit_only_channel_payload_bytes() {
+        for dt in [ChanData::Normal, ChanData::Stderr] {
+            let mut buffer = [0u8; 256];
+            let mut input = TrafIn::new(&mut buffer);
+            let start = SSH_PAYLOAD_START + dt.packet_offset();
+            input.state = RxState::InChannelData {
+                chan: ChanNum(0),
+                dt,
+                idx: start,
+                len: start + 100,
+                data_len: 100,
+            };
+            let mut bytes = [0u8; 64];
+            assert_eq!(input.read_channel(ChanNum(0), dt, &mut bytes), (64, None));
+            let (count, credit, _) = input.read_channel_either(ChanNum(0), &mut bytes);
+            assert_eq!((count, credit), (36, Some(100)));
+            input.state = RxState::InChannelData {
+                chan: ChanNum(0),
+                dt,
+                idx: start + 60,
+                len: start + 100,
+                data_len: 100,
+            };
+            assert_eq!(input.discard_read_channel(ChanNum(0)), 100);
+        }
     }
 }

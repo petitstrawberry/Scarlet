@@ -27,11 +27,18 @@ use traffic::TrafSend;
 pub(crate) struct Channels {
     ch: [Option<Channel>; config::MAX_CHANNELS],
     is_client: bool,
+    pub(crate) receive_window: usize,
+    pub(crate) receive_max_packet: usize,
 }
 
 impl Channels {
     pub fn new(is_client: bool) -> Self {
-        Channels { ch: Default::default(), is_client }
+        Channels {
+            ch: Default::default(),
+            is_client,
+            receive_window: config::DEFAULT_WINDOW,
+            receive_max_packet: config::DEFAULT_MAX_PACKET,
+        }
     }
 
     pub fn open<'b>(
@@ -40,7 +47,9 @@ impl Channels {
     ) -> Result<(ChanNum, Packet<'b>)> {
         let num = self.unused_chan()?;
 
-        let chan = Channel::new(num, (&ty).into());
+        let chan = Channel::new(
+            num, (&ty).into(), self.receive_window, self.receive_max_packet,
+        );
         let p = packets::ChannelOpen {
             sender_num: num.0,
             initial_window: chan.recv.window as u32,
@@ -146,7 +155,9 @@ impl Channels {
     /// Creates a new channel in InOpen state.
     fn reserve_chan(&mut self, co: &ChannelOpen) -> Result<&mut Channel> {
         let num = self.unused_chan()?;
-        let mut chan = Channel::new(num, (&co.ty).into());
+        let mut chan = Channel::new(
+            num, (&co.ty).into(), self.receive_window, self.receive_max_packet,
+        );
         chan.send = Some(ChanDir {
             num: co.sender_num,
             max_packet: co.max_packet as usize,
@@ -792,7 +803,10 @@ pub(crate) struct Channel {
 }
 
 impl Channel {
-    fn new(num: ChanNum, ty: ChanType) -> Self {
+    fn new(
+        num: ChanNum, ty: ChanType,
+        receive_window: usize, receive_max_packet: usize,
+    ) -> Self {
         Channel {
             ty,
             state: ChanState::Opening,
@@ -801,12 +815,12 @@ impl Channel {
             recv: ChanDir {
                 num: num.0,
                 // TODO these should depend on SSH rx buffer size minus overhead
-                max_packet: config::DEFAULT_MAX_PACKET,
-                window: config::DEFAULT_WINDOW,
+                max_packet: receive_max_packet,
+                window: receive_window,
             },
             send: None,
             pending_adjust: 0,
-            full_window: config::DEFAULT_WINDOW,
+            full_window: receive_window,
             app_done: false,
             read_waker: None,
             write_waker: None,
@@ -1263,5 +1277,29 @@ impl<'g> CliSessionExit<'g> {
             }) => Ok(Self::Signal(e.clone())),
             _ => Err(Error::bug()),
         }
+    }
+}
+
+#[cfg(test)]
+mod receive_limit_tests {
+    use super::*;
+    #[test]
+    fn incoming_open_advertises_configured_limits() {
+        let mut channels = Channels::new(false);
+        channels.receive_window = 1024 * 1024;
+        channels.receive_max_packet = 32768;
+        let request = ChannelOpen {
+            sender_num: 42,
+            initial_window: 2097152,
+            max_packet: 32768,
+            ty: ChannelOpenType::Session,
+        };
+        let channel = channels.reserve_chan(&request).unwrap();
+        let Packet::ChannelOpenConfirmation(reply) = channel.open_done().unwrap() else {
+            panic!("open confirmation");
+        };
+        assert_eq!(reply.initial_window, 1024 * 1024);
+        assert_eq!(reply.max_packet, 32768);
+        assert_eq!(reply.num, 42);
     }
 }
