@@ -131,6 +131,9 @@ pub type WorkspaceId = u32;
 /// to Home. Home itself omits the compositor's desktop workspace rail.
 pub const CONSOLE_HOME_APP_ID: &str = "org.scarlet-os.desktop.shell.console-home";
 
+/// The shell's small, presentation-independent Overview drawer handle surface.
+pub const OVERVIEW_DRAWER_APP_ID: &str = "org.scarlet-os.desktop.shell.overview-drawer";
+
 /// Shell-level output presentation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(u32)]

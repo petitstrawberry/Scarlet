@@ -12,10 +12,12 @@ mod input;
 mod input_environment;
 #[path = "../input_panel.rs"]
 mod input_panel;
-#[path = "../tablet_motion.rs"]
-mod tablet_motion;
+#[path = "../shell_presentation.rs"]
+mod shell_presentation;
 #[path = "../tablet_cards.rs"]
 mod tablet_cards;
+#[path = "../tablet_motion.rs"]
+mod tablet_motion;
 #[path = "../tablet_navigation.rs"]
 mod tablet_navigation;
 #[path = "../window.rs"]

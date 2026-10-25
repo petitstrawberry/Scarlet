@@ -92,6 +92,7 @@ const OVERVIEW_MENU_INDEX: usize = usize::MAX;
 const CONTROL_CENTER_SCENE_KEY: &str = "control-center";
 const HOME_SCENE_KEY: &str = "home";
 const HOME_BACKDROP_SCENE_KEY: &str = "home-backdrop";
+const OVERVIEW_DRAWER_SCENE_KEY: &str = "overview-drawer";
 const CONSOLE_CHROME_SCENE_KEY: &str = "console-chrome";
 const HOME_CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const HOME_CATALOG_TIMEOUT_MS: u64 = 3_000;
@@ -997,6 +998,7 @@ struct ShellApp {
     home_selected: State<Option<usize>>,
     home_hovered: State<Option<usize>>,
     home_window_id: State<u32>,
+    overview_drawer_position: State<Option<(i32, i32)>>,
     workspace_state: State<Option<sws::WorkspaceState>>,
     workspace_commands: State<Vec<WorkspaceCommand>>,
     full_app_menus: State<bool>,
@@ -1058,6 +1060,7 @@ impl ShellApp {
             home_selected: State::new(StateId::new(24), None),
             home_hovered: State::new(StateId::new(30), None),
             home_window_id: State::new(StateId::new(25), 0),
+            overview_drawer_position: State::new(StateId::new(45), None),
             workspace_state: State::new(StateId::new(26), None),
             workspace_commands: State::new(StateId::new(27), Vec::new()),
             full_app_menus: State::new(StateId::new(42), false),
@@ -3063,12 +3066,44 @@ impl ShellApp {
         .on_click(move || launch_app.launch_home_application(launch_application.clone()))
     }
 
+    fn overview_drawer_handle(&self) -> impl View + Clone + use<> {
+        let width = self.screen_width.get().max(1.0);
+        let lip = sws_protocol::workspace::DRAWER_SHEET_LIP_HEIGHT as f32;
+        let app = self.clone();
+        let key_app = self.clone();
+        let bar = hstack! {
+            Spacer::new(),
+            Spacer::new().frame(44.0, 4.0)
+                .background(ColorPalette::dark().text().with_opacity(0.52)).clip_radius(2.0),
+            Spacer::new(),
+        }
+        .alignment(Alignment::Center)
+        .frame(width, lip);
+        drawer::Handle::new(
+            bar,
+            sws::ShellPresentation::Overview,
+            drawer::Geometry {
+                width,
+                bar_height: 0.0,
+                top: 0.0,
+                lip_height: lip,
+            },
+            move |open| {
+                if open {
+                    app.show_application_drawer();
+                }
+            },
+        )
+        .on_key(move |event| key_app.handle_home_key(event))
+    }
+
     fn desktop_home_content(&self) -> impl View + Clone + use<> {
         let width = self.screen_width.get().max(320.0);
         let height = self.screen_height.get().max(320.0);
         let shell_layout = self.shell_layout.get();
-        let presentation = self.shell_presentation();
-        let shell_state_ready = self.workspace_state.get().is_some();
+        // This surface only belongs to Home. Its geometry never changes to
+        // Overview while a previous GPU image is still retained by SWS.
+        let presentation = sws::ShellPresentation::Home;
         let drawer_padding = home_drawer_padding(width);
         let columns = home_grid_columns(width);
         let row_height = if height < 760.0 { 110.0 } else { 116.0 };
@@ -3077,12 +3112,6 @@ impl ShellApp {
         // This surface is prepared while hidden. Keep its geometry identical
         // before and after the asynchronous workspace-state notification so
         // the first visible frame cannot expose the drawer moving into place.
-        let workspace_total_height = sws_protocol::workspace::workspace_region_height(
-            work_height as u32,
-            shell_layout.tablet_mode,
-            presentation,
-            1000,
-        ) as f32;
         let compact_rail_height = sws_protocol::workspace::workspace_region_height(
             work_height as u32,
             false,
@@ -3092,19 +3121,9 @@ impl ShellApp {
         let drawer_width = width;
         let drawer_content_width = (drawer_width - drawer_padding * 2.0).max(1.0);
         let drawer_lip_height = sws_protocol::workspace::DRAWER_SHEET_LIP_HEIGHT as f32;
-        let drawer_top = if !shell_state_ready || presentation == sws::ShellPresentation::Workspace
-        {
-            work_height
-        } else if presentation == sws::ShellPresentation::Home {
-            compact_rail_height
-        } else if shell_layout.tablet_mode {
-            workspace_total_height
-        } else {
-            work_height - drawer_lip_height
-        };
-        // The viewport must end at the screen edge, including the partly
-        // exposed tablet Overview sheet. A full-height viewport here hides
-        // rows below the root clip without giving ScrollView any overflow.
+        let drawer_top = compact_rail_height;
+        // End the viewport at the screen edge so rows below the root clip
+        // contribute to ScrollView overflow.
         let drawer_height = drawer::visible_height(work_height, drawer_top, compact_rail_height);
         let drawer_header_height = 44.0;
         let drawer_body_height = (drawer_height - drawer_lip_height).max(1.0);
@@ -3124,13 +3143,7 @@ impl ShellApp {
             1,
             format_args!(
                 "shell-build presentation={:?} ready={} screen={}x{} drawer_top={} drawer_height={} apps={}",
-                presentation,
-                shell_state_ready,
-                width,
-                height,
-                drawer_top,
-                drawer_height,
-                application_count,
+                presentation, true, width, height, drawer_top, drawer_height, application_count,
             ),
         );
         let searching = !self.home_query.get().trim().is_empty();
@@ -3326,7 +3339,10 @@ impl Application for ShellApp {
         &self,
         key: &scarlet_ui::scene::SceneWindowKey,
     ) -> Option<Vec<&dyn scarlet_ui::state::Listenable>> {
-        if key.as_str() == HOME_BACKDROP_SCENE_KEY {
+        if matches!(
+            key.as_str(),
+            HOME_BACKDROP_SCENE_KEY | OVERVIEW_DRAWER_SCENE_KEY
+        ) {
             return Some(vec![&self.screen_width, &self.screen_height]);
         }
         if key.as_str() == HOME_SCENE_KEY && self.mode.get() != ShellMode::Console {
@@ -3414,6 +3430,8 @@ impl Application for ShellApp {
         } else if ctx.scene_key.as_str() == CONTROL_CENTER_SCENE_KEY {
             self.control_center_window_id
                 .set(Some(ctx.platform_window_id as u32));
+            let _ = window.set_opaque(false);
+        } else if ctx.scene_key.as_str() == OVERVIEW_DRAWER_SCENE_KEY {
             let _ = window.set_opaque(false);
         } else if ctx.scene_key.as_str() == HOME_BACKDROP_SCENE_KEY {
             let _ = window.set_opaque(false);
@@ -3521,6 +3539,20 @@ impl Application for ShellApp {
             let desired = self.control_center_size.get();
             if status_bar_resize_needed(window.managed_size(), desired) {
                 let _ = window.resize_managed(desired.width as u32, desired.height as u32);
+            }
+            return;
+        }
+        if ctx.scene_key.as_str() == OVERVIEW_DRAWER_SCENE_KEY {
+            let lip = sws_protocol::workspace::DRAWER_SHEET_LIP_HEIGHT as f32;
+            let desired = Size::new(self.screen_width.get().max(1.0), lip);
+            if status_bar_resize_needed(window.size(), desired) {
+                let _ = window.resize(desired.width as u32, desired.height as u32);
+            }
+            let position = (0, (self.screen_height.get() - lip).max(0.0) as i32);
+            if self.overview_drawer_position.get() != Some(position)
+                && window.move_window(position.0, position.1).is_ok()
+            {
+                self.overview_drawer_position.set(Some(position));
             }
             return;
         }
@@ -3787,6 +3819,28 @@ impl Application for ShellApp {
                         .movable(false)
                         .placement(WindowPlacement::At { x: 0, y: 0 })
                         .size(Size::new(screen_width, screen_height)),
+                    Window::new("Overview Drawer", self.overview_drawer_handle())
+                        .scene_key(OVERVIEW_DRAWER_SCENE_KEY)
+                        .open_at_launch(false)
+                        .app_id(sws_protocol::workspace::OVERVIEW_DRAWER_APP_ID)
+                        .decorated(false)
+                        .background_color(Color::TRANSPARENT)
+                        .opaque(false)
+                        .window_type(sws_protocol::window_types::SHELL_BACKGROUND)
+                        .focus_on_create(false)
+                        .active_on_focus(false)
+                        .resizable(false)
+                        .movable(false)
+                        .placement(WindowPlacement::At {
+                            x: 0,
+                            y: (screen_height
+                                - sws_protocol::workspace::DRAWER_SHEET_LIP_HEIGHT as f32)
+                                .max(0.0) as i32,
+                        })
+                        .size(Size::new(
+                            screen_width,
+                            sws_protocol::workspace::DRAWER_SHEET_LIP_HEIGHT as f32,
+                        )),
                     Window::new("Home", self.home_content())
                         .scene_key(HOME_SCENE_KEY)
                         .open_at_launch(false)
@@ -3859,6 +3913,7 @@ impl Application for ShellApp {
         // create-then-move or create-then-resize frame.
         if self.mode.get() != ShellMode::Console {
             open_window(HOME_BACKDROP_SCENE_KEY);
+            open_window(OVERVIEW_DRAWER_SCENE_KEY);
         }
         open_window(HOME_SCENE_KEY);
         if self.mode.get() == ShellMode::Console {
@@ -4566,7 +4621,7 @@ impl ShellApp {
 
         if matches!(
             app_name,
-            "TaskBar" | "StatusBar" | "Scarlet Shell" | "Home" | "Menu"
+            "TaskBar" | "StatusBar" | "Scarlet Shell" | "Home" | "Overview Drawer" | "Menu"
         ) {
             status_bar_debug!("[StatusBar] Skipping menu update for {}", app_name);
             return;

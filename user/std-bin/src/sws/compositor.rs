@@ -770,13 +770,13 @@ mod touch_modality_tests {
     }
 
     #[test]
-    fn hidden_shell_content_is_withheld_but_visible_depths_keep_the_last_commit() {
+    fn different_shell_depths_withhold_the_previous_content() {
         use sws_protocol::workspace::ShellPresentation::{Home, Overview, Workspace};
 
         assert!(shell_background_must_be_withheld(Workspace, Overview));
         assert!(shell_background_must_be_withheld(Workspace, Home));
-        assert!(!shell_background_must_be_withheld(Home, Overview));
-        assert!(!shell_background_must_be_withheld(Overview, Home));
+        assert!(shell_background_must_be_withheld(Home, Overview));
+        assert!(shell_background_must_be_withheld(Overview, Home));
         assert!(!shell_background_must_be_withheld(Overview, Overview));
         assert!(!shell_background_must_be_withheld(Home, Workspace));
     }
@@ -2330,6 +2330,7 @@ fn is_shell_app_id(app_id: &[u8]) -> bool {
         || app_id == b"org.scarlet-os.desktop.shell"
         || app_id == b"org.scarlet-os.desktop.shell.home"
         || app_id == b"org.scarlet-os.desktop.shell.home-backdrop"
+        || app_id == sws_protocol::workspace::OVERVIEW_DRAWER_APP_ID.as_bytes()
         || app_id == b"org.scarlet-os.desktop.shell.console-chrome"
         || app_id == sws_protocol::workspace::CONSOLE_HOME_APP_ID.as_bytes()
 }
@@ -2343,21 +2344,7 @@ struct PendingFrameCallback {
     requested_after_present: u64,
 }
 
-fn shell_background_must_be_withheld(
-    previous: sws_protocol::workspace::ShellPresentation,
-    current: sws_protocol::workspace::ShellPresentation,
-) -> bool {
-    // A hidden surface may retain content from any earlier shell depth. Once
-    // it is visible, keep its last completed commit across depth changes until
-    // the client submits the replacement; this preserves client-owned chrome
-    // without teaching the compositor how that surface is internally drawn.
-    previous == sws_protocol::workspace::ShellPresentation::Workspace
-        && matches!(
-            current,
-            sws_protocol::workspace::ShellPresentation::Home
-                | sws_protocol::workspace::ShellPresentation::Overview
-        )
-}
+use super::shell_presentation::{fixed_depth_visibility, shell_background_must_be_withheld};
 
 type ExtensionResourceKey = (usize, u32);
 
@@ -10477,24 +10464,31 @@ impl Compositor {
             && window.window_type == WindowType::ShellBackground
             && window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home")
         {
-            let (x, y, width, height) = window.surface_geometry();
-            self.drawer_motion = tablet_motion::Motion::drawer(
-                window_id,
-                PresentationTransform {
-                    x,
-                    y,
-                    width,
-                    height,
-                    opacity: 1.0,
-                },
-                self.output_scale_milli,
-                monotonic_time_ns(),
-                true,
-            );
-            self.drawer_open_pending = false;
+            self.begin_home_drawer_motion(window_id);
             self.update_overview_transforms();
             self.full_redraw_needed = true;
         }
+    }
+
+    fn begin_home_drawer_motion(&mut self, window_id: u32) {
+        let Some(window) = self.window_manager.get_window(window_id) else {
+            return;
+        };
+        let (x, y, width, height) = window.surface_geometry();
+        self.drawer_motion = tablet_motion::Motion::drawer(
+            window_id,
+            PresentationTransform {
+                x,
+                y,
+                width,
+                height,
+                opacity: 1.0,
+            },
+            self.output_scale_milli,
+            monotonic_time_ns(),
+            self.animations_enabled(),
+        );
+        self.drawer_open_pending = false;
     }
 
     fn maximize_window_from_client(&mut self, window_id: u32) -> bool {
@@ -10692,6 +10686,12 @@ impl Compositor {
         let Some(window) = self.window_manager.get_window(window_id) else {
             return false;
         };
+        if let Some(visible) = fixed_depth_visibility(
+            window.app_id.as_deref(),
+            self.workspace_manager.presentation(),
+        ) {
+            return visible;
+        }
         if matches!(
             window.window_type,
             WindowType::ShellBackground | WindowType::ShellChrome | WindowType::ShellPanel
@@ -11549,6 +11549,7 @@ impl Compositor {
         if withhold_shell_background {
             for window_id in &window_ids {
                 if let Some(window) = self.window_manager.get_window_mut(*window_id)
+                    && fixed_depth_visibility(window.app_id.as_deref(), presentation).is_none()
                     && window.app_id.as_deref()
                         != Some(b"org.scarlet-os.desktop.shell.home-backdrop")
                 {
@@ -11602,6 +11603,25 @@ impl Compositor {
             }
         }
 
+        if self.drawer_open_pending {
+            let cached = self
+                .window_manager
+                .get_windows()
+                .iter()
+                .find(|window| {
+                    window.app_id.as_deref() == Some(b"org.scarlet-os.desktop.shell.home")
+                        && window.has_presented_frame
+                        && window.is_presented()
+                })
+                .map(|window| window.id);
+            if let Some(id) = cached {
+                // The fixed Home image is already usable. Animate before its
+                // first visible frame, rather than flash it and restart on a
+                // later catalog commit. Cold images still use the submit hook.
+                self.begin_home_drawer_motion(id);
+                changed = true;
+            }
+        }
         changed |= self.update_overview_transforms();
         changed |= self.sync_shell_presentation_focus();
         visibility_changed.sort_unstable();

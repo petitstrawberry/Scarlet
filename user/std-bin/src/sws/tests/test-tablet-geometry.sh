@@ -12,6 +12,7 @@ rustc --edition=2024 --crate-type=rlib --crate-name scarlet_os --cfg 'feature="s
 rustc --edition=2024 --test user/std-bin/src/sws/tests/tablet_geometry.rs --extern sws_protocol="$out/libsws_protocol.rlib" --extern scarlet_os="$out/libscarlet_os.rlib" -L "$out" -A dead_code -o "$out/tests"
 "$out/tests" tablet_
 "$out/tests" animation_policy::tests::
+"$out/tests" shell_presentation::tests::
 "$out/tests" fullscreen_
 "$out/tests" frame_callback::tests::
 "$out/tests" window::rounded_geometry_tests::
