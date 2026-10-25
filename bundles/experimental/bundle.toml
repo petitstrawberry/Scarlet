@@ -25,14 +25,14 @@ to = "/bin/video-player"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/yt-for-scarlet", rev = "b4f9d2d045846fee04e60f937675e4bc2f969c29" }
+source = { git = "https://github.com/petitstrawberry/yt-for-scarlet", rev = "be6c04b5e6cc173748d3fdb9aac8d16add52164b" }
 package = "yt"
 bin = "yt"
 to = "/bin/yt"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/yt-for-scarlet", rev = "b4f9d2d045846fee04e60f937675e4bc2f969c29" }
+source = { git = "https://github.com/petitstrawberry/yt-for-scarlet", rev = "be6c04b5e6cc173748d3fdb9aac8d16add52164b" }
 package = "yt-gui"
 bin = "yt-gui"
 to = "/bin/yt-gui"
