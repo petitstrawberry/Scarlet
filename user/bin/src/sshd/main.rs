@@ -2,12 +2,14 @@
 //!
 //! The transport and cryptography are provided by Sunset. Scarlet's native
 //! `GetRandom` syscall backs the Rust `getrandom` ecosystem, and authenticated
-//! SSH sessions are bridged to a Scarlet PTY running the system shell.
+//! shell sessions use a Scarlet PTY; the SFTP subsystem accesses files directly.
 
 #![no_std]
 #![no_main]
 
 extern crate scarlet_std as std;
+
+mod sftp;
 
 use core::{num::NonZeroU32, time::Duration};
 
@@ -197,6 +199,13 @@ impl Drop for ChildSession {
     }
 }
 
+struct SftpSession {
+    server: sftp::Server,
+    output: PendingBuffer,
+    finished: bool,
+    ssh_finished: bool,
+}
+
 struct TerminalSettings {
     term: Option<String>,
     columns: u16,
@@ -216,6 +225,7 @@ impl TerminalSettings {
 struct ConnectionState {
     channel: Option<ChanHandle>,
     child: Option<ChildSession>,
+    sftp: Option<SftpSession>,
     terminal: TerminalSettings,
     environment: Vec<(String, String)>,
     authorized_keys: Vec<[u8; 32]>,
@@ -226,6 +236,7 @@ impl ConnectionState {
         Self {
             channel: None,
             child: None,
+            sftp: None,
             terminal: TerminalSettings::new(),
             environment: Vec::new(),
             authorized_keys: load_authorized_keys(AUTHORIZED_KEYS_PATH),
@@ -393,7 +404,7 @@ fn serve_connection(mut socket: Socket, config: &ServerConfig) -> Result<(), Str
         if session_finished(&state) && finish_ssh_session(&mut runner, &mut state)? {
             progressed = true;
         }
-        if state.child.as_ref().is_some_and(|child| child.ssh_finished)
+        if (state.child.as_ref().is_some_and(|child| child.ssh_finished) || state.sftp.is_some())
             && state
                 .channel
                 .as_ref()
@@ -508,6 +519,7 @@ fn handle_server_event(
             let pty = request.pty();
             if channel_matches(state, request.channel())
                 && state.child.is_none()
+                && state.sftp.is_none()
                 && let Ok(pty) = pty
             {
                 state.terminal.term = Some(String::from(pty.term.as_str()));
@@ -546,6 +558,7 @@ fn handle_server_event(
                 (Ok(name), Ok(value))
                     if channel_matches(state, request.channel())
                         && state.child.is_none()
+                        && state.sftp.is_none()
                         && environment_allowed(&name, &value) =>
                 {
                     state.environment.retain(|(existing, _)| existing != &name);
@@ -565,7 +578,10 @@ fn handle_server_event(
             }
         }
         ServEvent::SessionShell(request) => {
-            if !channel_matches(state, request.channel()) || state.child.is_some() {
+            if !channel_matches(state, request.channel())
+                || state.child.is_some()
+                || state.sftp.is_some()
+            {
                 return request
                     .fail()
                     .map_err(|error| format!("failed to reject shell request: {:?}", error));
@@ -587,7 +603,10 @@ fn handle_server_event(
         }
         ServEvent::SessionExec(request) => {
             let command = request.command().map(String::from);
-            if !channel_matches(state, request.channel()) || state.child.is_some() {
+            if !channel_matches(state, request.channel())
+                || state.child.is_some()
+                || state.sftp.is_some()
+            {
                 return request
                     .fail()
                     .map_err(|error| format!("failed to reject exec request: {:?}", error));
@@ -620,9 +639,26 @@ fn handle_server_event(
                 }
             }
         }
-        ServEvent::SessionSubsystem(request) => request
-            .fail()
-            .map_err(|error| format!("failed to reject subsystem: {:?}", error)),
+        ServEvent::SessionSubsystem(request) => {
+            if !channel_matches(state, request.channel())
+                || state.child.is_some()
+                || state.sftp.is_some()
+                || request.command().ok() != Some("sftp")
+            {
+                return request
+                    .fail()
+                    .map_err(|error| format!("failed to reject subsystem: {:?}", error));
+            }
+            state.sftp = Some(SftpSession {
+                server: sftp::Server::new("/root"),
+                output: PendingBuffer::default(),
+                finished: false,
+                ssh_finished: false,
+            });
+            request
+                .succeed()
+                .map_err(|error| format!("failed to accept SFTP: {:?}", error))
+        }
         ServEvent::Defunct | ServEvent::PollAgain => Ok(()),
     }
 }
@@ -790,6 +826,9 @@ fn bridge_session(
     let Some(channel) = state.channel.as_ref() else {
         return Ok(false);
     };
+    if let Some(session) = state.sftp.as_mut() {
+        return bridge_sftp(runner, channel, session);
+    }
     let Some(child) = state.child.as_mut() else {
         return Ok(false);
     };
@@ -892,7 +931,52 @@ fn bridge_session(
     Ok(progressed)
 }
 
+/// Keep one bounded response pending, applying SSH flow control to pipelined
+/// requests rather than buffering an entire upload or running it through a PTY.
+fn bridge_sftp(
+    runner: &mut Runner<'_, Server>,
+    channel: &ChanHandle,
+    session: &mut SftpSession,
+) -> Result<bool, String> {
+    if session.ssh_finished {
+        return Ok(false);
+    }
+    let mut progressed = false;
+    if !session.output.is_empty() {
+        let n = runner
+            .write_channel(channel, ChanData::Normal, session.output.remaining())
+            .map_err(|e| format!("SFTP write: {:?}", e))?;
+        session.output.consume(n);
+        progressed |= n != 0;
+    }
+    if session.output.is_empty() {
+        if let Some(response) = session.server.next_response().map_err(String::from)? {
+            session.output.replace(&response);
+            progressed = true;
+        } else if let Some((number, ChanData::Normal, ready)) = runner.read_channel_ready()
+            && number == channel.num()
+        {
+            let mut bytes = [0u8; IO_BUFFER_SIZE];
+            let limit = ready.min(bytes.len());
+            let n = runner
+                .read_channel(channel, ChanData::Normal, &mut bytes[..limit])
+                .map_err(|e| format!("SFTP read: {:?}", e))?;
+            session.server.feed(&bytes[..n]).map_err(String::from)?;
+            progressed |= n != 0;
+        } else if runner.is_channel_eof(channel) {
+            if session.server.has_partial_request() {
+                return Err(String::from("Truncated SFTP request"));
+            }
+            session.finished = true;
+        }
+    }
+    Ok(progressed)
+}
+
 fn session_finished(state: &ConnectionState) -> bool {
+    if let Some(session) = state.sftp.as_ref() {
+        return session.finished;
+    }
     state.child.as_ref().is_some_and(|child| {
         child.child_exited
             && child.from_pty.is_empty()
@@ -907,6 +991,22 @@ fn finish_ssh_session(
     let Some(channel) = state.channel.as_ref() else {
         return Ok(false);
     };
+    if let Some(session) = state.sftp.as_mut() {
+        if session.ssh_finished {
+            return Ok(false);
+        }
+        runner
+            .send_channel_exit_status(channel, 0)
+            .map_err(|e| format!("SFTP exit status: {:?}", e))?;
+        runner
+            .send_channel_eof(channel)
+            .map_err(|e| format!("SFTP EOF: {:?}", e))?;
+        runner
+            .send_channel_close(channel)
+            .map_err(|e| format!("SFTP close: {:?}", e))?;
+        session.ssh_finished = true;
+        return Ok(true);
+    }
     let Some(child) = state.child.as_mut() else {
         return Ok(false);
     };
