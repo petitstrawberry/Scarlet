@@ -99,6 +99,8 @@ const CAPABILITY_VOLTAGE_1V8: u32 = 1 << 26;
 const COMMAND_TIMEOUT_US: u64 = 1_000_000;
 const RESET_TIMEOUT_US: u64 = 100_000;
 const CLOCK_TIMEOUT_US: u64 = 100_000;
+const TRANSFER_SPIN_US: u64 = 5_000;
+const TRANSFER_WAKE_MARGIN_US: u64 = 2_000;
 const DEFAULT_BASE_CLOCK_HZ: u32 = 50_000_000;
 const MMC_BLOCK_SIZE: usize = 512;
 
@@ -659,15 +661,20 @@ impl SdhciHost {
                 let _ = self.reset_lines(reset);
                 return Err(MmcError::Timeout);
             }
-            // Sleep until shortly before the bus time implied by the current
-            // clock and bus width, then poll the final status. Early
-            // identification still works before the scheduler/timer is ready.
+            // Short payloads finish in less time than a timer wake can add,
+            // so poll them. Longer transfers sleep only until a margin before
+            // the bus time implied by the clock and width, then poll the end.
+            // Early identification still works before the scheduler is ready.
             if may_sleep {
                 let sleep_us = if expected_us != 0 {
-                    expected_us
-                        .saturating_sub(elapsed)
-                        .saturating_sub(200)
-                        .min(20_000)
+                    if expected_us <= TRANSFER_SPIN_US {
+                        0
+                    } else {
+                        expected_us
+                            .saturating_sub(elapsed)
+                            .saturating_sub(TRANSFER_WAKE_MARGIN_US)
+                            .min(20_000)
+                    }
                 } else if elapsed >= 200 {
                     200
                 } else {
