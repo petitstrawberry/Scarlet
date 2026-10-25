@@ -787,7 +787,10 @@ impl SdhciHost {
         data_bytes: usize,
     ) -> MmcResult<u32> {
         let started = crate::time::current_time();
-        let may_block = self.completion.is_some()
+        // Command responses are short. Blocking and waking for every command
+        // costs more than polling the status latch until the data phase.
+        let may_block = data_bytes != 0
+            && self.completion.is_some()
             && crate::arch::interrupt::are_interrupts_enabled()
             && crate::sync::preempt::preempt_count() == 0
             && crate::sched::scheduler::scheduler_ready(crate::arch::get_cpu().get_cpuid());
