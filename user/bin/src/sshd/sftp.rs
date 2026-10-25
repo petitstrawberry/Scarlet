@@ -191,7 +191,7 @@ impl Server {
         }
     }
     pub fn feed(&mut self, bytes: &[u8]) -> core::result::Result<(), &'static str> {
-        if self.input.len().saturating_add(bytes.len()) > MAX_PACKET + 4 + 4096 {
+        if self.input.len().saturating_add(bytes.len()) > MAX_PACKET + 4 + 32 * 1024 {
             return Err("SFTP input limit exceeded");
         }
         self.input.extend_from_slice(bytes);

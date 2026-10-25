@@ -39,7 +39,10 @@ const ROOT_USER: &str = "root";
 const AUTHORIZED_KEYS_PATH: &str = "/root/.ssh/authorized_keys";
 const ED25519_HOST_KEY_PATH: &str = "/etc/ssh/ssh_host_ed25519_key";
 const RSA_HOST_KEY_PATH: &str = "/etc/ssh/ssh_host_rsa_key";
-const SSH_BUFFER_SIZE: usize = 8192;
+const SSH_BUFFER_SIZE: usize = 64 * 1024;
+const SSH_RECEIVE_WINDOW: u32 = 1024 * 1024;
+const SSH_MAX_CHANNEL_PACKET: u32 = 32 * 1024;
+const SFTP_READ_CHUNK: usize = 32 * 1024;
 const IO_BUFFER_SIZE: usize = 4096;
 const DEFAULT_COLUMNS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
@@ -335,9 +338,16 @@ fn serve_connection(mut socket: Socket, config: &ServerConfig) -> Result<(), Str
         .map_err(|error| format!("failed to set socket nonblocking: {:?}", error))?;
 
     let socket_handle = socket.as_raw();
-    let mut ssh_input = [0u8; SSH_BUFFER_SIZE];
-    let mut ssh_output = [0u8; SSH_BUFFER_SIZE];
-    let mut runner = Runner::new_server(&mut ssh_input, &mut ssh_output);
+    let mut ssh_input = vec![0u8; SSH_BUFFER_SIZE];
+    let mut ssh_output = vec![0u8; SSH_BUFFER_SIZE];
+    let mut runner = Runner::new_server_with_channel_limits(
+        &mut ssh_input,
+        &mut ssh_output,
+        SSH_RECEIVE_WINDOW,
+        SSH_MAX_CHANNEL_PACKET,
+    )
+    .map_err(|error| format!("SSH buffer configuration failed: {:?}", error))?;
+    let mut network_read = vec![0u8; SFTP_READ_CHUNK];
     let mut state = ConnectionState::new();
     let mut network_input = PendingBuffer::default();
     let mut socket_closed = false;
@@ -357,15 +367,14 @@ fn serve_connection(mut socket: Socket, config: &ServerConfig) -> Result<(), Str
         }
 
         if network_input.is_empty() && !socket_closed {
-            let mut buffer = [0u8; IO_BUFFER_SIZE];
-            match socket.read(&mut buffer) {
+            match socket.read(&mut network_read) {
                 Ok(0) => {
                     socket_closed = true;
                     runner.close_input();
                     progressed = true;
                 }
                 Ok(count) => {
-                    network_input.replace(&buffer[..count]);
+                    network_input.replace(&network_read[..count]);
                     progressed = true;
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {}
@@ -953,22 +962,26 @@ fn bridge_sftp(
         if let Some(response) = session.server.next_response().map_err(String::from)? {
             session.output.replace(&response);
             progressed = true;
-        } else if let Some((number, ChanData::Normal, ready)) = runner.read_channel_ready()
-            && number == channel.num()
-        {
-            let mut bytes = [0u8; IO_BUFFER_SIZE];
-            let limit = ready.min(bytes.len());
-            let n = runner
-                .read_channel(channel, ChanData::Normal, &mut bytes[..limit])
-                .map_err(|e| format!("SFTP read: {:?}", e))?;
-            session.server.feed(&bytes[..n]).map_err(String::from)?;
-            progressed |= n != 0;
-        } else if runner.is_channel_eof(channel) {
-            if session.server.has_partial_request() {
-                return Err(String::from("Truncated SFTP request"));
-            }
-            session.finished = true;
         }
+    }
+    // CHANNEL_DATA may precede the peer's WINDOW_ADJUST in the SSH stream.
+    // Drain requests into the bounded SFTP buffer even while a response waits
+    // for send credit, so the transport can reach that control message.
+    if let Some((number, ChanData::Normal, ready)) = runner.read_channel_ready()
+        && number == channel.num()
+    {
+        let mut bytes = [0u8; SFTP_READ_CHUNK];
+        let limit = ready.min(bytes.len());
+        let n = runner
+            .read_channel(channel, ChanData::Normal, &mut bytes[..limit])
+            .map_err(|e| format!("SFTP read: {:?}", e))?;
+        session.server.feed(&bytes[..n]).map_err(String::from)?;
+        progressed |= n != 0;
+    } else if session.output.is_empty() && runner.is_channel_eof(channel) {
+        if session.server.has_partial_request() {
+            return Err(String::from("Truncated SFTP request"));
+        }
+        session.finished = true;
     }
     Ok(progressed)
 }
