@@ -1647,54 +1647,8 @@ impl Ext2FileSystem {
         let group_number = (inode_number - 1) / inodes_per_group;
         let inode_index = (inode_number - 1) % inodes_per_group;
 
-        // Read the block group descriptor to get the inode table location
-        let bgd_block = if self.block_size == 1024 { 2 } else { 1 };
-        let bgd_sector = self.block_to_sector(bgd_block);
-        let bgd_request = Box::new(crate::device::block::request::BlockIORequest {
-            request_type: crate::device::block::request::BlockIORequestType::Read,
-            sector: bgd_sector as usize,
-            sector_count: (self.block_size / 512) as usize,
-            head: 0,
-            cylinder: 0,
-            buffer: vec![0u8; self.block_size as usize],
-        });
-
-        self.block_device.enqueue_request(bgd_request);
-        let bgd_results = self.block_device.process_requests();
-
-        let bgd_data = if let Some(result) = bgd_results.first() {
-            match &result.result {
-                Ok(_) => result.request.buffer.clone(),
-                Err(_) => {
-                    return Err(FileSystemError::new(
-                        FileSystemErrorKind::IoError,
-                        "Failed to read block group descriptors",
-                    ));
-                }
-            }
-        } else {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::IoError,
-                "No result from BGD read",
-            ));
-        };
-
-        // Parse the block group descriptor
-        let bgd_offset = (group_number as usize) * 32; // Each BGD is 32 bytes
-        if bgd_offset + 32 > bgd_data.len() {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::InvalidData,
-                "Block group descriptor offset out of bounds",
-            ));
-        }
-
-        // Extract inode table block from BGD
-        let inode_table_block = u32::from_le_bytes([
-            bgd_data[bgd_offset + 8],
-            bgd_data[bgd_offset + 9],
-            bgd_data[bgd_offset + 10],
-            bgd_data[bgd_offset + 11],
-        ]);
+        let bgd = self.read_group_descriptor(group_number)?;
+        let inode_table_block = bgd.get_inode_table();
 
         // Calculate the block and offset within that block for this inode
         let inode_size = self.superblock.get_inode_size() as u32;
@@ -2541,158 +2495,43 @@ impl Ext2FileSystem {
         })
     }
 
-    /// Allocate a new inode using proper bitmap management
+    /// Allocate an inode from any group, respecting reserved and final-group bounds.
     fn allocate_inode(&self) -> Result<u32, FileSystemError> {
         profile_scope!("ext2::allocate_inode");
-
         self.reclaim_unlinked_inodes()?;
-
         self.with_allocation_lock(|| {
-            // For now, allocate from Group 0
-            // Based on dumpe2fs: Group 0 free inodes: 30-2048
-            let group = 0;
-
-            // Read block group descriptor for group 0
-            let bgd_block = if self.block_size == 1024 { 2 } else { 1 }; // BGD in block 1 or 2
-            let bgd_block_sector = self.block_to_sector(bgd_block);
-
-            let request = Box::new(crate::device::block::request::BlockIORequest {
-                request_type: crate::device::block::request::BlockIORequestType::Read,
-                sector: bgd_block_sector,
-                sector_count: (self.block_size / 512) as usize,
-                head: 0,
-                cylinder: 0,
-                buffer: vec![0u8; self.block_size as usize],
-            });
-
-            self.block_device.enqueue_request(request);
-            let results = self.block_device.process_requests();
-
-            let bgd_data = if let Some(result) = results.first() {
-                match &result.result {
-                    Ok(_) => result.request.buffer.clone(),
-                    Err(_) => {
-                        return Err(FileSystemError::new(
-                            FileSystemErrorKind::IoError,
-                            "Failed to read block group descriptor",
-                        ));
-                    }
-                }
+            let per_group = self.superblock.get_inodes_per_group();
+            let total = self.superblock.get_inodes_count();
+            let first = if u32::from_le(self.superblock.rev_level) == 0 {
+                11
             } else {
-                return Err(FileSystemError::new(
-                    FileSystemErrorKind::IoError,
-                    "No result from block device read",
-                ));
+                u32::from_le(self.superblock.first_ino).max(11)
             };
-
-            let bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data)?;
-
-            // Check if there are free inodes
-            if bgd.free_inodes_count == 0 {
-                return Err(FileSystemError::new(
-                    FileSystemErrorKind::NoSpace,
-                    "No free inodes in group 0",
-                ));
-            }
-
-            // Read inode bitmap
-            let bitmap_sector = self.block_to_sector(bgd.inode_bitmap as u64);
-            let request = Box::new(crate::device::block::request::BlockIORequest {
-                request_type: crate::device::block::request::BlockIORequestType::Read,
-                sector: bitmap_sector as usize,
-                sector_count: (self.block_size / 512) as usize,
-                head: 0,
-                cylinder: 0,
-                buffer: vec![0u8; self.block_size as usize],
-            });
-
-            self.block_device.enqueue_request(request);
-            let results = self.block_device.process_requests();
-
-            let mut bitmap_data = if let Some(result) = results.first() {
-                match &result.result {
-                    Ok(_) => result.request.buffer.clone(),
-                    Err(_) => {
-                        return Err(FileSystemError::new(
-                            FileSystemErrorKind::IoError,
-                            "Failed to read inode bitmap",
-                        ));
-                    }
+            for group in 0..total.div_ceil(per_group) {
+                let mut bgd = self.read_group_descriptor(group)?;
+                if u16::from_le(bgd.free_inodes_count) == 0 {
+                    continue;
                 }
-            } else {
-                return Err(FileSystemError::new(
-                    FileSystemErrorKind::IoError,
-                    "No result from block device read",
-                ));
-            };
-
-            // Find first free inode in bitmap
-            // Start from inode 30 (which corresponds to bit 29 since inodes are 1-based but bitmap is 0-based)
-            let start_inode = 30;
-            let start_bit = start_inode - 1; // Convert to 0-based bit index
-
-            for bit in start_bit..self.superblock.inodes_per_group {
-                let byte_index = (bit / 8) as usize;
-                let bit_index = bit % 8;
-
-                if byte_index >= bitmap_data.len() {
-                    break;
-                }
-
-                // Check if bit is free (0)
-                if (bitmap_data[byte_index] & (1 << bit_index)) == 0 {
-                    // Mark inode as used (set bit to 1)
-                    bitmap_data[byte_index] |= 1 << bit_index;
-
-                    // Write back bitmap
-                    let request = Box::new(crate::device::block::request::BlockIORequest {
-                        request_type: crate::device::block::request::BlockIORequestType::Write,
-                        sector: bitmap_sector as usize,
-                        sector_count: (self.block_size / 512) as usize,
-                        head: 0,
-                        cylinder: 0,
-                        buffer: bitmap_data,
-                    });
-
-                    self.block_device.enqueue_request(request);
-                    let results = self.block_device.process_requests();
-
-                    if let Some(result) = results.first() {
-                        match &result.result {
-                            Ok(_) => {
-                                self.block_cache.write().remove(bgd.inode_bitmap as u64);
-
-                                // Update group descriptor to reflect one less free inode
-                                let mut bgd = Ext2BlockGroupDescriptor::from_bytes(&bgd_data)?;
-                                let current_free_inodes = u16::from_le(bgd.free_inodes_count);
-                                bgd.free_inodes_count =
-                                    (current_free_inodes.saturating_sub(1)).to_le();
-                                self.update_group_descriptor(group, &bgd)?;
-
-                                // Update superblock free inodes count
-                                self.update_superblock_counts(0, -1, 0)?;
-                            }
-                            Err(_) => {
-                                return Err(FileSystemError::new(
-                                    FileSystemErrorKind::IoError,
-                                    "Failed to write inode bitmap",
-                                ));
-                            }
-                        }
+                let bitmap_block = u64::from(bgd.get_inode_bitmap());
+                let mut bitmap = self.read_block_cached(bitmap_block)?;
+                let base = group * per_group;
+                let count = per_group.min(total - base).min((bitmap.len() * 8) as u32);
+                for bit in 0..count {
+                    let inode = base + bit + 1;
+                    if inode < first || bitmap[bit as usize / 8] & (1 << (bit % 8)) != 0 {
+                        continue;
                     }
-
-                    let allocated_inode = bit + 1; // Convert back to 1-based inode number
-
-                    // Debug: Allocated inode (disabled to reduce log noise)
-                    // crate::println!("EXT2: Allocated inode {} (bit {})", allocated_inode, bit);
-
-                    return Ok(allocated_inode);
+                    bitmap[bit as usize / 8] |= 1 << (bit % 8);
+                    self.write_block_cached(bitmap_block, &bitmap)?;
+                    bgd.free_inodes_count = (u16::from_le(bgd.free_inodes_count) - 1).to_le();
+                    self.update_group_descriptor(group, &bgd)?;
+                    self.update_superblock_counts(0, -1, 0)?;
+                    return Ok(inode);
                 }
             }
-
             Err(FileSystemError::new(
                 FileSystemErrorKind::NoSpace,
-                "No free inodes found",
+                "No free inodes available in any group",
             ))
         })
     }
@@ -4443,6 +4282,20 @@ impl Ext2FileSystem {
     }
 
     /// Update group descriptor on disk
+    /// Locate descriptors beyond the first descriptor-table block as well.
+    fn read_group_descriptor(
+        &self,
+        group: u32,
+    ) -> Result<Ext2BlockGroupDescriptor, FileSystemError> {
+        let offset = u64::from(group) * mem::size_of::<Ext2BlockGroupDescriptor>() as u64;
+        let start = if self.block_size == 1024 { 2 } else { 1 };
+        let block = start + offset / u64::from(self.block_size);
+        let data = self.read_blocks(&[block], false)?;
+        Ext2BlockGroupDescriptor::from_bytes(
+            &data[0][(offset % u64::from(self.block_size)) as usize..],
+        )
+    }
+
     fn update_group_descriptor(
         &self,
         group: u32,
@@ -5481,32 +5334,13 @@ impl FileSystemOperations for Ext2FileSystem {
             parent_inode.links_count = (u16::from_le(parent_inode.links_count) + 1).to_le();
             self.write_inode(ext2_parent.inode_number(), &parent_inode)?;
 
-            // Update group descriptor to reflect one more directory
-            let group = 0; // For now, we only use group 0
-            let bgd_block = if self.block_size == 1024 { 2 } else { 1 };
-            let bgd_block_sector = self.block_to_sector(bgd_block);
-
-            let request = Box::new(crate::device::block::request::BlockIORequest {
-                request_type: crate::device::block::request::BlockIORequestType::Read,
-                sector: bgd_block_sector,
-                sector_count: (self.block_size / 512) as usize,
-                head: 0,
-                cylinder: 0,
-                buffer: vec![0u8; self.block_size as usize],
-            });
-
-            self.block_device.enqueue_request(request);
-            let results = self.block_device.process_requests();
-
-            if let Some(result) = results.first() {
-                if let Ok(_) = &result.result {
-                    let bgd_data = &result.request.buffer;
-                    let mut bgd = Ext2BlockGroupDescriptor::from_bytes(bgd_data)?;
-                    let current_dirs = u16::from_le(bgd.used_dirs_count);
-                    bgd.used_dirs_count = (current_dirs + 1).to_le();
-                    self.update_group_descriptor(group, &bgd)?;
-                }
-            }
+            // The new inode can live in a different group from its parent.
+            self.with_allocation_lock(|| {
+                let group = (new_inode_number - 1) / self.superblock.get_inodes_per_group();
+                let mut bgd = self.read_group_descriptor(group)?;
+                bgd.used_dirs_count = u16::from_le(bgd.used_dirs_count).saturating_add(1).to_le();
+                self.update_group_descriptor(group, &bgd)
+            })?;
         }
 
         // Create new node
