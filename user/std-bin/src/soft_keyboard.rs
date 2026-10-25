@@ -14,7 +14,7 @@ mod panel {
         Action, EDGE_UNITS, GAP_UNITS, GRID_UNITS, Layer, RowGeometry, Tone, VerticalGeometry,
         panel_height, rows,
     };
-    use scarlet_ui::element::{ComponentElement, Element};
+    use scarlet_ui::element::{ComponentElement, Element, UpdateResult};
     use scarlet_ui::error::{Error as UiError, RenderFailureKind};
     use scarlet_ui::prelude::*;
     use scarlet_ui::views::containers::ViewTuple;
@@ -129,7 +129,7 @@ mod panel {
         pending: Rc<RefCell<Vec<PendingAction>>>,
         dispatch_contact: Rc<Cell<Option<Contact>>>,
         clock: Instant,
-    ) -> Box<dyn Element> {
+    ) -> Box<dyn View> {
         let numeric = matches!(
             context.content_purpose,
             purpose::DIGITS | purpose::NUMBER | purpose::PHONE | purpose::PIN
@@ -154,7 +154,7 @@ mod panel {
         pending: Rc<RefCell<Vec<PendingAction>>>,
         dispatch_contact: Rc<Cell<Option<Contact>>>,
         clock: Instant,
-    ) -> Box<dyn Element> {
+    ) -> Box<dyn View> {
         let layout = rows(numeric, layer);
         // One shared unit keeps Q/A/Z widths consistent across staggered rows.
         let tablet_layout = layout.iter().any(|row| row.geometry == RowGeometry::Tablet);
@@ -241,18 +241,19 @@ mod panel {
                     .padding_insets(EdgeInsets::new(inset, 0.0, 0.0, 0.0)),
             ));
         }
-        VStack::new(Views(views))
-            .spacing(vertical_gap)
-            .alignment(Alignment::TopLeading)
-            .padding_insets(EdgeInsets::new(
-                horizontal_padding,
-                vertical_padding,
-                horizontal_padding,
-                vertical.bottom_padding,
-            ))
-            .background(Color::rgba_f32(0.10, 0.10, 0.13, 0.96))
-            .frame(size.width, size.height)
-            .create_element()
+        Box::new(
+            VStack::new(Views(views))
+                .spacing(vertical_gap)
+                .alignment(Alignment::TopLeading)
+                .padding_insets(EdgeInsets::new(
+                    horizontal_padding,
+                    vertical_padding,
+                    horizontal_padding,
+                    vertical.bottom_padding,
+                ))
+                .background(Color::rgba_f32(0.10, 0.10, 0.13, 0.96))
+                .frame(size.width, size.height),
+        )
     }
     pub enum RunError {
         DuplicateProvider,
@@ -312,7 +313,6 @@ mod panel {
         let mut context = Context::default();
         let mut visible = false;
         let mut retry_render = false;
-        let mut rebuild_after_failure = false;
         let mut retried_rejection = false;
         let mut dismissed = None;
         let mut modifiers = 0;
@@ -333,7 +333,7 @@ mod panel {
             Rc::clone(&dispatch_contact),
             action_clock,
         );
-        pipeline.set_root(root);
+        pipeline.set_root(root.create_element());
         pipeline.layout_initial();
         pipeline.resize(window.size());
         pipeline.set_scale_milli(window.output_scale_milli());
@@ -348,7 +348,8 @@ mod panel {
                 .connection()
                 .dispatch()
                 .map_err(|error| format!("{error:?}"))?;
-            let mut rebuild = core::mem::take(&mut rebuild_after_failure);
+            let mut rebuild = false;
+            let mut replace_tree = false;
             for event in receiver.drain_events() {
                 match event {
                     sws_client::Event::InputPanelContext(next) => {
@@ -356,6 +357,7 @@ mod panel {
                             if (next.context_id, next.window_id, next.generation)
                                 != (context.context_id, context.window_id, context.generation)
                             {
+                                replace_tree = true;
                                 visible = false;
                                 modifiers = 0;
                                 shift_locked = false;
@@ -366,6 +368,7 @@ mod panel {
                                 held_keys.clear();
                             }
                             if next.content_purpose != context.content_purpose {
+                                replace_tree = true;
                                 held_keys.clear();
                             }
                             context = next;
@@ -383,6 +386,7 @@ mod panel {
                 dismissed,
             );
             if should_show != visible {
+                replace_tree = true;
                 if context.active() {
                     window
                         .connection()
@@ -397,6 +401,7 @@ mod panel {
             }
             while let Some(event) = window.poll_event() {
                 if let Event::Resize { width, height } = &event {
+                    replace_tree = true;
                     held_keys.clear();
                     // A configure changes layout geometry first; acknowledge it
                     // by replacing the backing surface before rendering at the
@@ -413,6 +418,10 @@ mod panel {
                 }
                 if matches!(event, Event::Quit) {
                     return Err("input-panel surface closed".to_string().into());
+                }
+                if matches!(event, Event::WindowSuspendedChanged { suspended: false }) {
+                    pipeline.request_redraw();
+                    retry_render = true;
                 }
                 if matches!(
                     event,
@@ -507,6 +516,7 @@ mod panel {
                         rebuild = true;
                     }
                     Action::SetLayer(next) => {
+                        replace_tree = true;
                         held_keys.clear();
                         layer = next;
                         modifiers = 0;
@@ -515,6 +525,7 @@ mod panel {
                         rebuild = true;
                     }
                     Action::Hide => {
+                        replace_tree = true;
                         held_keys.clear();
                         window
                             .connection()
@@ -558,9 +569,25 @@ mod panel {
                     Rc::clone(&dispatch_contact),
                     action_clock,
                 );
-                pipeline.set_root(root);
-                pipeline.layout_initial();
-                pipeline.resize(window.size());
+                // Shift changes labels after DOWN. Reconcile the same keys so
+                // their pressed state and touch routes survive that update.
+                let retained = !replace_tree
+                    && pipeline
+                        .element_tree_mut()
+                        .root_mut()
+                        .is_some_and(|element| {
+                            !matches!(element.update(root.as_ref()), UpdateResult::Replaced)
+                        });
+                if !retained {
+                    pipeline.set_root(root.create_element());
+                    pipeline.layout_initial();
+                    pipeline.resize(window.size());
+                } else if let Some(id) = pipeline.element_tree().root().map(|element| element.id())
+                {
+                    pipeline.pipeline_owner_mut().mark_needs_layout(id);
+                    pipeline.pipeline_owner_mut().mark_needs_paint(id);
+                    pipeline.request_redraw();
+                }
             }
             if visible && (pipeline.has_dirty() || retry_render) {
                 retry_render = false;
@@ -576,14 +603,15 @@ mod panel {
                         // Match ScarletUI's standard Application runner: transient
                         // GPU backpressure must not terminate the input provider.
                         RenderFailureKind::Busy => {
-                            // Recreate the view tree as well as paint caches:
-                            // a failed frame can cache pixels never presented.
-                            rebuild_after_failure = true;
+                            // Keep touch routes and pressed render objects.
+                            // Replacing the tree loses DOWN feedback even while
+                            // the independent key tracker continues typing.
+                            pipeline.request_redraw();
                             retry_render = true;
                         }
                         RenderFailureKind::Rejected => {
-                            rebuild_after_failure = true;
-                            // Repaint once from a fresh tree. Repeated rejection
+                            pipeline.request_redraw();
+                            // Repaint once from the retained tree. Repeated rejection
                             // waits for input instead of spinning on invalid work.
                             retry_render = !retried_rejection;
                             retried_rejection = true;
