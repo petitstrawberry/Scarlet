@@ -12,7 +12,7 @@ mod integration_tests {
         Device, DeviceType,
         char::CharDevice,
         graphics::{
-            FramebufferConfig, GenericGraphicsDevice, PixelFormat,
+            DisplayRegion, FramebufferConfig, GenericGraphicsDevice, PixelFormat,
             framebuffer_device::FramebufferCharDevice,
             manager::{FramebufferResource, GraphicsManager},
         },
@@ -597,7 +597,7 @@ mod integration_tests {
         graphics_manager
             .register_framebuffer_from_device_with_device_manager(
                 device_id,
-                shared_device,
+                shared_device.clone(),
                 &device_manager,
             )
             .unwrap();
@@ -655,10 +655,16 @@ mod integration_tests {
             use crate::device::graphics::framebuffer_device::framebuffer_commands::FBIO_FLUSH;
             use crate::object::capability::ControlOps;
             let result = fb_char_device.control(FBIO_FLUSH, 0);
-            assert!(
-                result.is_ok(),
-                "Failed to present framebuffer via control operation"
+            // This harness has no schedulable task; the asynchronous ioctl
+            // must reject it before publishing work. Still validate the real
+            // hardware presentation batch through the boot-test transport.
+            assert_eq!(
+                result,
+                Err("VirtIO GPU presentation requires a schedulable task")
             );
+            shared_device
+                .present_framebuffer_in_boot_test(DisplayRegion::full(&config))
+                .unwrap();
         }
 
         // Verify we've written the entire framebuffer

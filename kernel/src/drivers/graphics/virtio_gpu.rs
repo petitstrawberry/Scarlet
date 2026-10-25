@@ -2824,6 +2824,60 @@ impl GraphicsDevice for VirtioGpuDevice {
     }
 }
 
+// The kernel test harness runs before a schedulable task exists. Exercise the
+// real presentation command batch by polling its transport, while separately
+// checking that the public asynchronous API rejects that boot context.
+#[cfg(test)]
+impl VirtioGpuDevice {
+    pub(crate) fn present_framebuffer_in_boot_test(
+        &self,
+        region: DisplayRegion,
+    ) -> Result<(), &'static str> {
+        assert!(crate::task::mytask().is_none());
+        assert_eq!(
+            self.present_current_framebuffer_region(region),
+            Err("VirtIO GPU presentation requires a schedulable task")
+        );
+        let core = self.core.lock();
+        assert!(core.presentations.is_empty());
+        let target = PresentTarget::Framebuffer {
+            config: core.get_framebuffer_config()?,
+            physical_addr: core.get_framebuffer_address()?,
+            region,
+        };
+        let requests = prepare_present_target(&core, &target)?;
+        if requests.is_empty() {
+            return Ok(());
+        }
+        core.virtqueues
+            .lock()
+            .control
+            .enqueue_batch(&requests, crate::timer::get_time_ns())
+            .map_err(|_| "Boot test presentation enqueue failed")?;
+        core.notify(0);
+        for request in &requests {
+            loop {
+                core.virtqueues
+                    .lock()
+                    .control
+                    .reap(crate::timer::get_time_ns())?;
+                match request.status() {
+                    control::ControlStatus::Complete(_) => break,
+                    control::ControlStatus::Failed(error) => return Err(error),
+                    control::ControlStatus::Pending => core::hint::spin_loop(),
+                }
+            }
+            let mut bytes = [0; core::mem::size_of::<VirtioGpuCtrlHdr>()];
+            request.copy_response(&mut bytes)?;
+            // SAFETY: the complete transport response contains this header.
+            let response =
+                unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<VirtioGpuCtrlHdr>()) };
+            validate_execution_response(response, None)?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3075,7 +3129,7 @@ mod tests {
 
         // Present the entire framebuffer
         device
-            .present_current_framebuffer_region(DisplayRegion::full(&config))
+            .present_framebuffer_in_boot_test(DisplayRegion::full(&config))
             .unwrap();
 
         // Verify some pixels were written correctly
@@ -3140,7 +3194,7 @@ mod tests {
 
         // Present the changes
         device
-            .present_current_framebuffer_region(DisplayRegion::full(&config))
+            .present_framebuffer_in_boot_test(DisplayRegion::full(&config))
             .unwrap();
 
         // Verify some of the drawn pixels
@@ -3207,7 +3261,7 @@ mod tests {
 
         // Present changes
         device
-            .present_current_framebuffer_region(DisplayRegion::full(&config))
+            .present_framebuffer_in_boot_test(DisplayRegion::full(&config))
             .unwrap();
 
         // Verify the rectangles were drawn correctly
@@ -3312,7 +3366,7 @@ mod tests {
         draw_border(30, 30, 160, 110, 0xFFFF0000); // Blue inner border
 
         device
-            .present_current_framebuffer_region(DisplayRegion::full(&config))
+            .present_framebuffer_in_boot_test(DisplayRegion::full(&config))
             .unwrap();
 
         // Verify borders
@@ -3375,7 +3429,7 @@ mod tests {
             }
 
             device
-                .present_current_framebuffer_region(DisplayRegion::full(&config))
+                .present_framebuffer_in_boot_test(DisplayRegion::full(&config))
                 .unwrap();
 
             // Verify the colors were written correctly
@@ -3398,7 +3452,7 @@ mod tests {
             *fb_ptr.add(pixel_index) = semi_transparent_red;
 
             device
-                .present_current_framebuffer_region(DisplayRegion::new(100, 100, 1, 1))
+                .present_framebuffer_in_boot_test(DisplayRegion::new(100, 100, 1, 1))
                 .unwrap();
 
             let written_pixel = *fb_ptr.add(pixel_index);
@@ -3448,13 +3502,13 @@ mod tests {
 
         // Test presenting different regions
         device
-            .present_current_framebuffer_region(DisplayRegion::new(0, 0, 50, 50))
+            .present_framebuffer_in_boot_test(DisplayRegion::new(0, 0, 50, 50))
             .unwrap();
         device
-            .present_current_framebuffer_region(DisplayRegion::new(50, 50, 50, 50))
+            .present_framebuffer_in_boot_test(DisplayRegion::new(50, 50, 50, 50))
             .unwrap();
         device
-            .present_current_framebuffer_region(DisplayRegion::full(&config))
+            .present_framebuffer_in_boot_test(DisplayRegion::full(&config))
             .unwrap();
 
         crate::println!("[Test] VirtIO GPU command flow verification completed");
@@ -3489,7 +3543,7 @@ mod tests {
 
         // Present the diagonal region
         device
-            .present_current_framebuffer_region(DisplayRegion::new(
+            .present_framebuffer_in_boot_test(DisplayRegion::new(
                 0,
                 0,
                 config.width.min(500),
