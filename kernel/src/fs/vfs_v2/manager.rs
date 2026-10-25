@@ -34,7 +34,8 @@ const O_CLOEXEC: u32 = 0x80000;
 // lock covers VFS namespace mutations through opening the newly created node.
 // All opens participate so lookup and driver-open cannot straddle unlink and
 // inode reuse. Write-mode opens can additionally create OverlayFS entries.
-// Do not reacquire it from driver callbacks or from delegating VFS helpers.
+// Drivers that pin immutable node identities can release it before open callbacks.
+// Other driver callbacks and delegating helpers must not reacquire it.
 static NAMESPACE_MUTATIONS: Mutex<()> = Mutex::new(());
 
 fn lock_namespace_mutations() -> Result<MutexGuard<'static, ()>, FileSystemError> {
@@ -496,7 +497,7 @@ impl VfsManager {
         if flags & (O_CREAT | O_EXCL) == (O_CREAT | O_EXCL) {
             return self.create_new_and_open(path, flags);
         }
-        let _namespace_guard = lock_namespace_mutations()?;
+        let mut namespace_guard = Some(lock_namespace_mutations()?);
         // Use MountTreeV2 to resolve filesystem and relative path, then open
         let (entry, mount_point) = self.resolve_path(path)?;
         let node = entry.node();
@@ -505,6 +506,9 @@ impl VfsManager {
         })?;
 
         // Get the underlying FileSystem implementation
+        if !filesystem.open_requires_namespace_lock() {
+            drop(namespace_guard.take());
+        }
         let inner_file_obj = filesystem.open(&node, flags)?;
 
         // Wrap with VFS-layer information
@@ -553,7 +557,7 @@ impl VfsManager {
                 "NUL in pathname",
             ));
         }
-        let _namespace_guard = lock_namespace_mutations()?;
+        let mut namespace_guard = Some(lock_namespace_mutations()?);
         let (entry, mount_point) = self.resolve_open_at(base, path, flags, mode)?;
         let node = entry.node();
         let file_type = node.file_type()?;
@@ -572,6 +576,9 @@ impl VfsManager {
         let filesystem = node.filesystem().and_then(|w| w.upgrade()).ok_or_else(|| {
             vfs_error(FileSystemErrorKind::NotSupported, "No filesystem reference")
         })?;
+        if !filesystem.open_requires_namespace_lock() {
+            drop(namespace_guard.take());
+        }
         let inner = filesystem.open(&node, flags)?;
         if flags & O_APPEND != 0 && !inner.supports_append() {
             return Err(vfs_error(
@@ -734,7 +741,7 @@ impl VfsManager {
     }
 
     fn create_new_and_open(&self, path: &str, flags: u32) -> Result<KernelObject, FileSystemError> {
-        let _namespace_guard = lock_namespace_mutations()?;
+        let mut namespace_guard = Some(lock_namespace_mutations()?);
         if path.is_empty() || path.ends_with('/') {
             return Err(vfs_error(
                 FileSystemErrorKind::InvalidPath,
@@ -780,6 +787,9 @@ impl VfsManager {
 
         // Retain the created node; do not resolve the caller's path again.
         // The namespace guard also protects path-based overlay driver callbacks.
+        if !filesystem.open_requires_namespace_lock() {
+            drop(namespace_guard.take());
+        }
         let inner = filesystem.open(&node, flags)?;
         let file = super::core::VfsFileObject::new(inner, entry, mount_point, path.to_string());
         Ok(KernelObject::File(Arc::new(file)))
@@ -1807,12 +1817,15 @@ impl VfsManager {
         path: &str,
         flags: u32,
     ) -> Result<KernelObject, FileSystemError> {
-        let _namespace_guard = lock_namespace_mutations()?;
+        let mut namespace_guard = Some(lock_namespace_mutations()?);
         let (entry, mount_point) = self.resolve_path_from(base_entry, base_mount, path)?;
         let node = entry.node();
         let filesystem = node.filesystem().and_then(|w| w.upgrade()).ok_or_else(|| {
             FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference")
         })?;
+        if !filesystem.open_requires_namespace_lock() {
+            drop(namespace_guard.take());
+        }
         let inner_file_obj = filesystem.open(&node, flags)?;
         let vfs_file_obj =
             super::core::VfsFileObject::new(inner_file_obj, entry, mount_point, path.to_string());
@@ -2025,5 +2038,113 @@ mod exclusive_create_tests {
             assert!(original.resolve_path(path).is_err());
         }
         original.open("/new", CREATE_NEW).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod device_open_reentry_tests {
+    use super::*;
+    use crate::device::{Device, DeviceType, manager::DeviceManager};
+    use crate::object::capability::{ControlOps, MemoryMappingInfo, MemoryMappingOps, Selectable};
+    use alloc::sync::Weak;
+    use core::any::Any;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FirmwareDevice {
+        vfs: Weak<VfsManager>,
+        opens: AtomicUsize,
+    }
+
+    impl Device for FirmwareDevice {
+        fn open(self: Arc<Self>) -> Result<Arc<dyn Device>, &'static str> {
+            // Fail promptly on the regression instead of wedging the test runner.
+            let guard = NAMESPACE_MUTATIONS
+                .try_lock()
+                .ok_or("device open retained the namespace lock")?;
+            drop(guard);
+            let vfs = self.vfs.upgrade().ok_or("missing test VFS")?;
+            let firmware = vfs
+                .open("/firmware", 0)
+                .map_err(|_| "firmware open failed")?;
+            let mut bytes = [0; 4];
+            firmware.as_file().unwrap().read(&mut bytes).unwrap();
+            assert_eq!(&bytes, b"test");
+            self.opens.fetch_add(1, Ordering::Relaxed);
+            Ok(self)
+        }
+        fn device_type(&self) -> DeviceType {
+            DeviceType::Char
+        }
+        fn name(&self) -> &'static str {
+            "firmware-test"
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+    impl ControlOps for FirmwareDevice {
+        fn control(&self, _: u32, _: usize) -> Result<i32, &'static str> {
+            Err("unsupported")
+        }
+    }
+    impl MemoryMappingOps for FirmwareDevice {
+        fn get_mapping_info(&self, _: usize, _: usize) -> Result<MemoryMappingInfo, &'static str> {
+            Err("unsupported")
+        }
+        fn on_mapped(&self, _: usize, _: u64, _: usize, _: usize) {}
+        fn on_unmapped(&self, _: usize, _: usize) {}
+        fn supports_mmap(&self) -> bool {
+            false
+        }
+    }
+    impl Selectable for FirmwareDevice {
+        fn wait_until_ready(
+            &self,
+            _: crate::object::capability::selectable::ReadyInterest,
+            _: &mut crate::arch::Trapframe,
+            _: Option<u64>,
+            _: u64,
+        ) -> crate::object::capability::selectable::SelectWaitOutcome {
+            crate::object::capability::selectable::SelectWaitOutcome::Ready
+        }
+    }
+
+    #[test_case]
+    fn devfs_open_can_load_firmware_through_each_vfs_open_entrypoint() {
+        let manager = DeviceManager::new_for_test();
+        let vfs = Arc::new(VfsManager::new());
+        let device = Arc::new(FirmwareDevice {
+            vfs: Arc::downgrade(&vfs),
+            opens: AtomicUsize::new(0),
+        });
+        manager.register_device_with_name("firmware-test".to_string(), device.clone());
+        vfs.open("/firmware", 0x2 | O_CREAT | O_EXCL)
+            .unwrap()
+            .as_file()
+            .unwrap()
+            .write(b"test")
+            .unwrap();
+        vfs.create_dir("/dev").unwrap();
+        vfs.mount(
+            super::super::drivers::devfs::DevFS::new_with_device_manager(&manager),
+            "/dev",
+            0,
+        )
+        .unwrap();
+        vfs.create_symlink("/decoder", "/dev/firmware-test")
+            .unwrap();
+        let (base, mount) = vfs.resolve_path("/dev").unwrap();
+        drop(vfs.open("/dev/firmware-test", 0x2).unwrap());
+        drop(vfs.open("/decoder", 0).unwrap());
+        drop(vfs.open_at(None, "/dev/firmware-test", 0x2, 0).unwrap());
+        drop(
+            vfs.open_at(Some((&base, &mount)), "firmware-test", 0, 0)
+                .unwrap(),
+        );
+        drop(vfs.open_from(&base, &mount, "firmware-test", 0x2).unwrap());
+        assert_eq!(device.opens.load(Ordering::Relaxed), 5);
     }
 }

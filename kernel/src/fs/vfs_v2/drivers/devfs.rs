@@ -260,6 +260,13 @@ impl FileSystemOperations for DevFS {
         dev_node.open()
     }
 
+    fn open_requires_namespace_lock(&self) -> bool {
+        // DevNode retains its device ID, and DeviceManager never reuses IDs.
+        // Namespace unlink/replacement cannot retarget this retained node.
+        // Device::open may load firmware through VFS.
+        false
+    }
+
     fn is_read_only(&self) -> bool {
         true
     }
