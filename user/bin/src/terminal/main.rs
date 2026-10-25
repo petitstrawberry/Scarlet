@@ -7,6 +7,7 @@ extern crate alloc;
 extern crate scarlet_std as std;
 
 mod typography;
+mod viewport;
 mod vt;
 
 use alloc::boxed::Box;
@@ -21,7 +22,7 @@ use core::time::Duration;
 
 use scarlet_ui::{
     Application, ApplicationRunExt, Color, ComponentElement, Element, KeyCode, KeyEvent,
-    PlatformWindow, SWSPlatformWindow, Scene, Size, State, StateId, TextGrid, TextGridBuffer,
+    PlatformWindow, Rect, SWSPlatformWindow, Scene, Size, State, StateId, TextGrid, TextGridBuffer,
     TextGridCell, TextGridCursor, View, ViewExt, Window, WindowContentLayout, WindowContext,
     WindowGroup, text_grid_cell_width,
 };
@@ -91,6 +92,7 @@ struct TerminalApp {
     grid: State<TextGridBuffer>,
     cursor: State<TextGridCursor>,
     metrics: State<TerminalMetrics>,
+    keyboard_pan: State<f32>,
     screen: Arc<Mutex<VtScreen>>,
     master_writer: Arc<Mutex<Option<File>>>,
     window_size: Arc<Mutex<(u32, u32)>>,
@@ -113,6 +115,7 @@ impl TerminalApp {
             grid: State::new(StateId::new(0), grid),
             cursor: State::new(StateId::new(1), TextGridCursor::new(0, 1)),
             metrics: State::new(StateId::new(2), metrics),
+            keyboard_pan: State::new(StateId::new(3), 0.0),
             screen,
             master_writer: Arc::new(Mutex::new(None)),
             window_size: Arc::new(Mutex::new((DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT))),
@@ -209,7 +212,8 @@ impl TerminalApp {
         let metrics = self.metrics.get();
         let content_offset = WindowContentLayout::new(TERMINAL_WINDOW_DECORATED).offset();
         let x = (content_offset.x + cursor.column as f32 * metrics.cell_width) as i32;
-        let y = (content_offset.y + cursor.row as f32 * metrics.cell_height) as i32;
+        let y = (content_offset.y + cursor.row as f32 * metrics.cell_height
+            - self.keyboard_pan.get()) as i32;
         let width = metrics.cell_width.max(1.0) as u32;
         let height = metrics.cell_height.max(1.0) as u32;
         let cursor_rect = (x, y, width, height);
@@ -310,7 +314,7 @@ impl View for TerminalApp {
     }
 
     fn listenables(&self) -> alloc::vec::Vec<&dyn scarlet_ui::Listenable> {
-        vec![&self.grid, &self.cursor, &self.metrics]
+        vec![&self.grid, &self.cursor, &self.metrics, &self.keyboard_pan]
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -337,26 +341,37 @@ impl Application for TerminalApp {
             "main",
             Window::new(
                 "Terminal",
-                text_grid
-                    .cell_size(metrics.cell_width, metrics.cell_height)
-                    .font_size(metrics.font_size)
-                    .background_color(Color::rgb(12, 14, 18))
-                    .cursor(Some(self.cursor.get()))
-                    .cursor_color(Color::rgba_f32(0.85, 0.92, 1.0, 0.8))
-                    .on_key(move |event| {
-                        write_key_event(
-                            &writer,
-                            &screen,
-                            &grid,
-                            &cursor,
-                            &metrics_state,
-                            &window_size,
-                            &preedit,
-                            event,
+                viewport::TerminalViewport {
+                    caret: self.cursor.get().visible.then(|| {
+                        Rect::from_xywh(
+                            self.cursor.get().column as f32 * metrics.cell_width,
+                            self.cursor.get().row as f32 * metrics.cell_height,
+                            metrics.cell_width,
+                            metrics.cell_height,
                         )
-                    })
-                    .on_click(move || show_input_panel.store(true, Ordering::Release))
-                    .frame(f32::INFINITY, f32::INFINITY),
+                    }),
+                    pan: self.keyboard_pan.clone(),
+                    content: text_grid
+                        .cell_size(metrics.cell_width, metrics.cell_height)
+                        .font_size(metrics.font_size)
+                        .background_color(Color::rgb(12, 14, 18))
+                        .cursor(Some(self.cursor.get()))
+                        .cursor_color(Color::rgba_f32(0.85, 0.92, 1.0, 0.8))
+                        .on_key(move |event| {
+                            write_key_event(
+                                &writer,
+                                &screen,
+                                &grid,
+                                &cursor,
+                                &metrics_state,
+                                &window_size,
+                                &preedit,
+                                event,
+                            )
+                        })
+                        .on_click(move || show_input_panel.store(true, Ordering::Release))
+                        .frame(f32::INFINITY, f32::INFINITY),
+                },
             )
             .app_id("org.scarlet-os.desktop.terminal")
             .decorated(TERMINAL_WINDOW_DECORATED)
