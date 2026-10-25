@@ -249,6 +249,14 @@ pub enum MmcTiming {
     Legacy,
     /// SD High Speed: up to 50 MHz at 3.3 V with high-speed sampling.
     HighSpeed,
+    /// UHS-I SDR12, 25 MHz at 1.8 V.
+    Sdr12,
+    /// UHS-I SDR25, 50 MHz at 1.8 V.
+    Sdr25,
+    /// UHS-I SDR50, 100 MHz at 1.8 V.
+    Sdr50,
+    /// UHS-I SDR104, up to 208 MHz at 1.8 V with tuned sampling.
+    Sdr104,
 }
 
 /// Controller interface consumed by host-independent MMC card logic.
@@ -304,6 +312,23 @@ pub trait MmcHost: Send {
     ///
     /// `Ok(())` when the controller accepted the timing.
     fn set_timing(&mut self, _timing: MmcTiming) -> MmcResult<()> {
+        Err(MmcError::Unsupported)
+    }
+
+    /// Supported UHS-I function-group-one bits. A nonzero mask promises a
+    /// working 1.8 V switch and a reset that power-cycles the card to 3.3 V.
+    fn sd_uhs_modes(&self) -> u8 {
+        0
+    }
+
+    /// Complete CMD11's DAT-low, clock-stop, 1.8 V rail/pad transition,
+    /// clock restart and DAT-high checks. Called only after CMD11 succeeds.
+    fn switch_signal_voltage_1v8(&mut self) -> MmcResult<()> {
+        Err(MmcError::Unsupported)
+    }
+
+    /// Tune and validate the SD CMD19 reference pattern at the current clock.
+    fn execute_sd_tuning(&mut self) -> MmcResult<()> {
         Err(MmcError::Unsupported)
     }
 

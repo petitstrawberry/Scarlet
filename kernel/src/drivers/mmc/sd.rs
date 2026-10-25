@@ -1,7 +1,6 @@
 //! SD memory-card identification, shared by all MMC host controllers.
 //!
-//! Follows Linux drivers/mmc/core/{sd,sd_ops}.c: negotiate 3.3 V without
-//! requesting UHS, decode CSD/SCR, select the card and configure legacy SDR.
+//! Negotiate card/host timing and voltage capabilities before selecting SD speed.
 
 use super::core::{MmcCardInfo, check_r1, sd_card_info};
 use crate::device::mmc::{
@@ -10,8 +9,8 @@ use crate::device::mmc::{
 };
 
 const CMD_SWITCH_FUNC: u8 = 6;
-const SD_SWITCH_HIGH_SPEED: u32 = 0x00ff_fff1;
-const SD_SWITCH_DEFAULT_SPEED: u32 = 0x00ff_fff0;
+const SD_SWITCH_HIGH_SPEED: u32 = 0x80ff_fff1;
+const SD_SWITCH_DEFAULT_SPEED: u32 = 0x80ff_fff0;
 const SD_HIGH_SPEED_CLOCK_HZ: u32 = 50_000_000;
 const R1_SWITCH_ERROR: u32 = 1 << 7;
 
@@ -85,7 +84,53 @@ fn enable_high_speed(host: &mut dyn MmcHost) -> MmcResult<()> {
     Ok(())
 }
 
+fn enable_uhs(host: &mut dyn MmcHost) -> MmcResult<&'static str> {
+    let status = switch_status(host, 0x00ff_ffff)?;
+    let supported = status[13] & host.sd_uhs_modes();
+    let (function, timing, clock, name) = if supported & (1 << 3) != 0 {
+        (3, MmcTiming::Sdr104, 208_000_000, "sdr104")
+    } else if supported & (1 << 2) != 0 {
+        (2, MmcTiming::Sdr50, 100_000_000, "sdr50")
+    } else if supported & (1 << 1) != 0 {
+        (1, MmcTiming::Sdr25, 50_000_000, "sdr25")
+    } else if supported & 1 != 0 {
+        (0, MmcTiming::Sdr12, 25_000_000, "sdr12")
+    } else {
+        return Err(MmcError::Unsupported);
+    };
+    let selected = switch_status(host, 0x80ff_fff0 | function)?;
+    if selected[16] & 15 != function as u8 {
+        return Err(MmcError::Response);
+    }
+    host.set_timing(timing)?;
+    host.set_clock(clock)?;
+    // Platforms can skip tuning at fixed-feedback SDR50 rates when their
+    // hardware permits it. SDR104 always validates the CMD19 data pattern.
+    if timing == MmcTiming::Sdr104 || timing == MmcTiming::Sdr50 {
+        host.execute_sd_tuning()?;
+    }
+    Ok(name)
+}
+
 pub(super) fn initialize_sd(host: &mut dyn MmcHost, width: MmcBusWidth) -> MmcResult<MmcCardInfo> {
+    let uhs = host.sd_uhs_modes() != 0;
+    match initialize_sd_mode(host, width, uhs) {
+        Err(error) if uhs => {
+            crate::println!(
+                "[mmc] UHS initialization failed: {}; power-cycle and retry at 3.3 V",
+                error.as_str()
+            );
+            initialize_sd_mode(host, width, false)
+        }
+        result => result,
+    }
+}
+
+fn initialize_sd_mode(
+    host: &mut dyn MmcHost,
+    width: MmcBusWidth,
+    allow_uhs: bool,
+) -> MmcResult<MmcCardInfo> {
     if width == MmcBusWidth::Eight {
         return Err(MmcError::InvalidArgument);
     }
@@ -106,9 +151,11 @@ pub(super) fn initialize_sd(host: &mut dyn MmcHost, width: MmcBusWidth) -> MmcRe
         Err(error) => return Err(error),
     };
 
-    // Only the 3.2–3.4 V OCR window; never request an unimplemented 1.8 V
-    // switch, extra power, UHS timing or SD Express operation.
-    let requested = 0x0030_0000 | if version2 { 1 << 30 } else { 0 };
+    // Request S18R only when the platform can switch the rail and recover
+    // through a full card power cycle. No extra power or SD Express request.
+    let request_uhs = allow_uhs && version2 && width == MmcBusWidth::Four;
+    let requested =
+        0x0030_0000 | if version2 { 1 << 30 } else { 0 } | if request_uhs { 1 << 24 } else { 0 };
     let mut ocr = 0;
     for _ in 0..1000 {
         app_command(host, 0)?;
@@ -125,6 +172,11 @@ pub(super) fn initialize_sd(host: &mut dyn MmcHost, width: MmcBusWidth) -> MmcRe
         return Err(MmcError::Unsupported);
     }
     let high_capacity = version2 && ocr & (1 << 30) != 0;
+    let uhs = request_uhs && high_capacity && ocr & (1 << 24) != 0;
+    if uhs {
+        check_r1(command(host, 11, 0, MmcResponseType::R1)?.word(0))?;
+        host.switch_signal_voltage_1v8()?;
+    }
     command(host, 2, 0, MmcResponseType::R2)?;
     let response = command(host, 3, 0, MmcResponseType::R6)?.word(0);
     let rca = response & 0xffff_0000;
@@ -158,20 +210,24 @@ pub(super) fn initialize_sd(host: &mut dyn MmcHost, width: MmcBusWidth) -> MmcRe
         host.set_bus_width(MmcBusWidth::Four)?;
     }
     host.set_clock(25_000_000)?;
-    let timing = match enable_high_speed(host) {
-        Ok(()) => match host.set_clock(SD_HIGH_SPEED_CLOCK_HZ) {
-            Ok(()) => "high-speed",
+    let timing = if uhs {
+        enable_uhs(host)?
+    } else {
+        match enable_high_speed(host) {
+            Ok(()) => match host.set_clock(SD_HIGH_SPEED_CLOCK_HZ) {
+                Ok(()) => "high-speed",
+                Err(_) => {
+                    // The card is already in high-speed mode, which remains valid
+                    // at 25 MHz. Restore legacy host sampling for the fallback.
+                    let _ = host.set_timing(MmcTiming::Legacy);
+                    let _ = host.set_clock(25_000_000);
+                    "default"
+                }
+            },
             Err(_) => {
-                // The card is already in high-speed mode, which remains valid
-                // at 25 MHz. Restore legacy host sampling for the fallback.
                 let _ = host.set_timing(MmcTiming::Legacy);
-                let _ = host.set_clock(25_000_000);
                 "default"
             }
-        },
-        Err(_) => {
-            let _ = host.set_timing(MmcTiming::Legacy);
-            "default"
         }
     };
     crate::println!(
@@ -200,5 +256,91 @@ mod tests {
         status[16] = 0xf1;
         assert!(high_speed_selected(&status));
         assert!(!high_speed_selected(&[]));
+    }
+    struct TimingHost {
+        commands: alloc::vec::Vec<u32>,
+        timing: crate::device::mmc::MmcTiming,
+        clock: u32,
+        tuned: bool,
+        reject: bool,
+    }
+    impl super::MmcHost for TimingHost {
+        fn reset(&mut self) -> super::MmcResult<()> {
+            Ok(())
+        }
+        fn set_clock(&mut self, clock: u32) -> super::MmcResult<()> {
+            self.clock = clock;
+            Ok(())
+        }
+        fn set_bus_width(&mut self, _: super::MmcBusWidth) -> super::MmcResult<()> {
+            Ok(())
+        }
+        fn set_timing(&mut self, timing: super::MmcTiming) -> super::MmcResult<()> {
+            self.timing = timing;
+            Ok(())
+        }
+        fn card_present(&self) -> bool {
+            true
+        }
+        fn is_removable(&self) -> bool {
+            true
+        }
+        fn sd_uhs_modes(&self) -> u8 {
+            15
+        }
+        fn execute_sd_tuning(&mut self) -> super::MmcResult<()> {
+            self.tuned = true;
+            Ok(())
+        }
+        fn send_command(
+            &mut self,
+            command: super::MmcCommand,
+            data: Option<super::MmcData<'_>>,
+        ) -> super::MmcResult<super::MmcResponse> {
+            assert_eq!(command.index(), 6);
+            self.commands.push(command.argument());
+            if let Some(super::MmcData::Read(status)) = data {
+                status[13] = 15;
+                status[16] = if self.reject {
+                    15
+                } else {
+                    (command.argument() & 15) as u8
+                };
+            }
+            Ok(super::MmcResponse::new([0; 4]))
+        }
+    }
+    fn timing_host(reject: bool) -> TimingHost {
+        TimingHost {
+            commands: alloc::vec::Vec::new(),
+            timing: super::MmcTiming::Legacy,
+            clock: 25_000_000,
+            tuned: false,
+            reject,
+        }
+    }
+    #[test_case]
+    fn high_speed_cmd6_sets_switch_mode_bit() {
+        let mut host = timing_host(false);
+        super::enable_high_speed(&mut host).unwrap();
+        assert_eq!(host.commands.as_slice(), &[0x80ff_fff1]);
+        assert_eq!(host.timing, super::MmcTiming::HighSpeed);
+    }
+    #[test_case]
+    fn uhs_checks_support_then_switches_and_tunes() {
+        let mut host = timing_host(false);
+        assert_eq!(super::enable_uhs(&mut host), Ok("sdr104"));
+        assert_eq!(host.commands.as_slice(), &[0x00ff_ffff, 0x80ff_fff3]);
+        assert_eq!(host.timing, super::MmcTiming::Sdr104);
+        assert_eq!(host.clock, 208_000_000);
+        assert!(host.tuned);
+    }
+    #[test_case]
+    fn rejected_uhs_mode_does_not_raise_host_clock() {
+        let mut host = timing_host(true);
+        assert!(super::enable_uhs(&mut host).is_err());
+        assert_eq!(host.clock, 25_000_000);
+        assert_eq!(host.timing, super::MmcTiming::Legacy);
+        assert!(!host.tuned);
     }
 }

@@ -13,7 +13,20 @@ const ENOMEM: i32 = 12;
 // Large userspace reads must not require an equally large contiguous kernel
 // allocation (e.g. rustc's shared library is over 100 MiB). Stream reads may
 // return a prefix; read_exact/read_to_end continue from the returned offset.
-const MAX_READ_BUFFER: usize = 64 * 1024;
+// Match the block/page-cache batch while retaining a small allocation bound.
+const MAX_READ_BUFFER: usize = 256 * 1024;
+const FALLBACK_READ_BUFFER: usize = 64 * 1024;
+
+fn read_buffer(count: usize) -> Result<alloc::vec::Vec<u8>, usize> {
+    let size = count.min(MAX_READ_BUFFER);
+    io_buffer(size).or_else(|error| {
+        if size > FALLBACK_READ_BUFFER {
+            io_buffer(FALLBACK_READ_BUFFER)
+        } else {
+            Err(error)
+        }
+    })
+}
 
 fn io_buffer(count: usize) -> Result<alloc::vec::Vec<u8>, usize> {
     let mut buffer = alloc::vec::Vec::new();
@@ -69,7 +82,7 @@ pub fn sys_stream_read(trapframe: &mut Trapframe) -> usize {
     };
 
     // Allocate kernel buffer and read into it
-    let mut kernel_buf = match io_buffer(count.min(MAX_READ_BUFFER)) {
+    let mut kernel_buf = match read_buffer(count) {
         Ok(buffer) => buffer,
         Err(error) => return error,
     };
@@ -145,8 +158,15 @@ pub fn sys_stream_write(trapframe: &mut Trapframe) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{EAGAIN, EINTR, ENOMEM, io_buffer, stream_error_result};
+    use super::{EAGAIN, EINTR, ENOMEM, io_buffer, read_buffer, stream_error_result};
     use crate::object::capability::StreamError;
+
+    #[test_case]
+    fn large_reads_use_a_bounded_block_batch() {
+        assert_eq!(read_buffer(0).unwrap().len(), 0);
+        assert_eq!(read_buffer(4096).unwrap().len(), 4096);
+        assert_eq!(read_buffer(usize::MAX).unwrap().len(), 256 * 1024);
+    }
 
     #[test_case]
     fn stream_error_result_preserves_retryable_errors() {

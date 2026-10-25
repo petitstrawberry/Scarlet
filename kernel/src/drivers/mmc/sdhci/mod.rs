@@ -90,6 +90,17 @@ mod software_reset {
     pub const DATA: u8 = 1 << 2;
 }
 
+// Data errors can already be latched while waiting for COMMAND_COMPLETE.
+// Retire both state machines even when that wait is nominally command-only.
+fn recovery_reset_mask(has_data: bool, status: u32) -> u8 {
+    software_reset::COMMAND
+        | if has_data || status & 0x07f0_0000 != 0 {
+            software_reset::DATA
+        } else {
+            0
+        }
+}
+
 const HOST_CONTROL_DATA_WIDTH_4: u8 = 1 << 1;
 const HOST_CONTROL_HIGH_SPEED_ENABLE: u8 = 1 << 2;
 const HOST_CONTROL_DMA_SELECT_MASK: u8 = 0x18;
@@ -515,6 +526,15 @@ impl SdhciHost {
         Ok(())
     }
 
+    /// Update a platform clock source after disabling the SD bus clock.
+    pub fn set_base_clock_hz(&mut self, frequency_hz: u32) -> MmcResult<()> {
+        if frequency_hz == 0 || self.clock_hz != 0 {
+            return Err(MmcError::InvalidArgument);
+        }
+        self.base_clock_hz = frequency_hz;
+        Ok(())
+    }
+
     /// Return the source clock used to program the SDHCI divider.
     ///
     /// # Returns
@@ -809,11 +829,7 @@ impl SdhciHost {
                 if from_register {
                     self.write32(register::INTERRUPT_STATUS, status);
                 }
-                let reset = if data_phase {
-                    software_reset::COMMAND | software_reset::DATA
-                } else {
-                    software_reset::COMMAND
-                };
+                let reset = recovery_reset_mask(data_phase, status);
                 let _ = self.reset_lines(reset);
                 self.clear_interrupt_status();
                 return Err(if status & ((1 << 16) | (1 << 20)) != 0 {
@@ -829,11 +845,7 @@ impl SdhciHost {
             }
             let elapsed = crate::time::current_time().wrapping_sub(started);
             if elapsed >= COMMAND_TIMEOUT_US {
-                let reset = if data_phase {
-                    software_reset::COMMAND | software_reset::DATA
-                } else {
-                    software_reset::COMMAND
-                };
+                let reset = recovery_reset_mask(data_phase, 0);
                 let _ = self.reset_lines(reset);
                 self.clear_interrupt_status();
                 return Err(MmcError::Timeout);
@@ -1044,10 +1056,37 @@ impl MmcHost for SdhciHost {
 
     fn set_timing(&mut self, timing: MmcTiming) -> MmcResult<()> {
         let mut control = self.read8(register::HOST_CONTROL);
-        match timing {
-            MmcTiming::Legacy => control &= !HOST_CONTROL_HIGH_SPEED_ENABLE,
-            MmcTiming::HighSpeed => control |= HOST_CONTROL_HIGH_SPEED_ENABLE,
-        }
+        let mode = match timing {
+            MmcTiming::Legacy => {
+                control &= !HOST_CONTROL_HIGH_SPEED_ENABLE;
+                0
+            }
+            MmcTiming::HighSpeed => {
+                control |= HOST_CONTROL_HIGH_SPEED_ENABLE;
+                0
+            }
+            MmcTiming::Sdr12 => {
+                control &= !HOST_CONTROL_HIGH_SPEED_ENABLE;
+                0
+            }
+            MmcTiming::Sdr25 => {
+                control |= HOST_CONTROL_HIGH_SPEED_ENABLE;
+                1
+            }
+            MmcTiming::Sdr50 => {
+                control |= HOST_CONTROL_HIGH_SPEED_ENABLE;
+                2
+            }
+            MmcTiming::Sdr104 => {
+                control |= HOST_CONTROL_HIGH_SPEED_ENABLE;
+                3
+            }
+        };
+        let control2 = self.read16(register::HOST_CONTROL2);
+        self.write16(
+            register::HOST_CONTROL2,
+            (control2 & !HOST_CONTROL2_UHS_MODE_MASK) | mode,
+        );
         self.write8(register::HOST_CONTROL, control);
         Ok(())
     }
@@ -1204,7 +1243,7 @@ impl SdhciHost {
         self.adma_active = use_adma;
         self.write16(register::COMMAND, encoded_command);
 
-        let status = self.wait_for_interrupt(interrupt::COMMAND_COMPLETE, false)?;
+        let status = self.wait_for_interrupt(interrupt::COMMAND_COMPLETE, data_phase)?;
         self.write32(
             register::INTERRUPT_STATUS,
             status & interrupt::COMMAND_COMPLETE,
@@ -1275,6 +1314,19 @@ impl Drop for SdhciHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn data_crc_before_command_complete_resets_both_lines() {
+        assert_eq!(
+            recovery_reset_mask(false, 1 << 21),
+            software_reset::COMMAND | software_reset::DATA
+        );
+        assert_eq!(
+            recovery_reset_mask(true, 0),
+            software_reset::COMMAND | software_reset::DATA
+        );
+        assert_eq!(recovery_reset_mask(false, 1 << 17), software_reset::COMMAND);
+    }
 
     #[test_case]
     fn command_encoding_matches_sdhci_response_flags() {
