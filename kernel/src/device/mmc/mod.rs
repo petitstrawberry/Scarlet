@@ -242,6 +242,15 @@ pub enum MmcBusWidth {
     Eight,
 }
 
+/// Card-side signaling timing selected by the bus-width and clock steps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MmcTiming {
+    /// Default speed: up to 25 MHz with legacy sampling.
+    Legacy,
+    /// SD High Speed: up to 50 MHz at 3.3 V with high-speed sampling.
+    HighSpeed,
+}
+
 /// Controller interface consumed by host-independent MMC card logic.
 pub trait MmcHost: Send {
     /// Maximum sectors in one CMD18/CMD25 request. Hosts advertising more
@@ -280,6 +289,23 @@ pub trait MmcHost: Send {
     ///
     /// `Ok(())` when the controller accepted the width.
     fn set_bus_width(&mut self, width: MmcBusWidth) -> MmcResult<()>;
+
+    /// Select the host-side sampling timing used for the card bus.
+    ///
+    /// Controllers without a timing control report
+    /// [`MmcError::Unsupported`], allowing the card layer to stay at the
+    /// default-speed clock.
+    ///
+    /// # Arguments
+    ///
+    /// * `timing` - Card signaling timing to apply.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the controller accepted the timing.
+    fn set_timing(&mut self, _timing: MmcTiming) -> MmcResult<()> {
+        Err(MmcError::Unsupported)
+    }
 
     /// Report whether media is currently present.
     ///

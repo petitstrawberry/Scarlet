@@ -270,7 +270,9 @@ impl MmcBlockDevice {
             return Err(MmcError::MediaChanged.as_str());
         }
 
-        let max_blocks = host.max_blocks_per_transfer().clamp(1, 128);
+        // The host owns the transfer-size bound; ADMA2 hosts can cover the
+        // block layer's batched reads in one CMD18.
+        let max_blocks = host.max_blocks_per_transfer().clamp(1, u16::MAX as usize);
         let mut offset = 0;
         while offset < request.sector_count {
             if !host.card_present() {

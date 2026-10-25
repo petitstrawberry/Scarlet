@@ -6,7 +6,13 @@
 use super::core::{MmcCardInfo, check_r1, sd_card_info};
 use crate::device::mmc::{
     MmcBusWidth, MmcCommand, MmcData, MmcError, MmcHost, MmcResponse, MmcResponseType, MmcResult,
+    MmcTiming,
 };
+
+const CMD_SWITCH_FUNC: u8 = 6;
+const SD_SWITCH_HIGH_SPEED: u32 = 0x00ff_fff1;
+const SD_HIGH_SPEED_CLOCK_HZ: u32 = 50_000_000;
+const R1_SWITCH_ERROR: u32 = 1 << 7;
 
 fn command(
     host: &mut dyn MmcHost,
@@ -40,6 +46,40 @@ fn capacity(csd: MmcResponse, high_capacity: bool) -> MmcResult<u64> {
         }
         (1, true) => Ok((u64::from(csd.bits(48, 22)) + 1) * 1024),
         _ => Err(MmcError::Unsupported),
+    }
+}
+
+fn switch_status(host: &mut dyn MmcHost, argument: u32) -> MmcResult<[u8; 64]> {
+    let mut status = [0u8; 64];
+    let response = host.send_command(
+        MmcCommand::new(CMD_SWITCH_FUNC, argument, MmcResponseType::R1),
+        Some(MmcData::Read(&mut status)),
+    )?;
+    check_r1(response.word(0))?;
+    if response.word(0) & R1_SWITCH_ERROR != 0 {
+        return Err(MmcError::Response);
+    }
+    Ok(status)
+}
+
+fn high_speed_selected(status: &[u8]) -> bool {
+    status.get(16).is_some_and(|byte| byte & 0x0f == 1)
+}
+
+/// Select SD High Speed at 3.3 V.
+///
+/// Function group 1 reports the selected mode in bits 3:0 of byte 16. The
+/// card keeps default timing if the controller cannot set the host-side
+/// high-speed sampling mode, so the caller can still finish at 25 MHz.
+fn enable_high_speed(host: &mut dyn MmcHost) -> MmcResult<()> {
+    host.set_timing(MmcTiming::HighSpeed)?;
+    let status = switch_status(host, SD_SWITCH_HIGH_SPEED);
+    match status {
+        Ok(status) if high_speed_selected(&status) => Ok(()),
+        _ => {
+            let _ = host.set_timing(MmcTiming::Legacy);
+            Err(MmcError::Unsupported)
+        }
     }
 }
 
@@ -116,13 +156,47 @@ pub(super) fn initialize_sd(host: &mut dyn MmcHost, width: MmcBusWidth) -> MmcRe
         host.set_bus_width(MmcBusWidth::Four)?;
     }
     host.set_clock(25_000_000)?;
+    let timing = match enable_high_speed(host) {
+        Ok(()) => match host.set_clock(SD_HIGH_SPEED_CLOCK_HZ) {
+            Ok(()) => "high-speed",
+            Err(_) => {
+                // The card is already in high-speed mode, which remains valid
+                // at 25 MHz. Restore legacy host sampling for the fallback.
+                let _ = host.set_timing(MmcTiming::Legacy);
+                let _ = host.set_clock(25_000_000);
+                "default"
+            }
+        },
+        Err(_) => {
+            let _ = host.set_timing(MmcTiming::Legacy);
+            "default"
+        }
+    };
     crate::println!(
-        "[mmc] SD ready: rca={:#06x} sectors={} addressing={} width={:?} SCR={:02x?}",
+        "[mmc] SD ready: rca={:#06x} sectors={} addressing={} width={:?} timing={} SCR={:02x?}",
         rca >> 16,
         sectors,
         if high_capacity { "sector" } else { "byte" },
         width,
+        timing,
         scr,
     );
     Ok(sd_card_info(sectors, high_capacity))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::high_speed_selected;
+
+    #[test_case]
+    fn high_speed_status_requires_group_one_function_one() {
+        let mut status = [0u8; 64];
+        status[16] = 0x01;
+        assert!(high_speed_selected(&status));
+        status[16] = 0x02;
+        assert!(!high_speed_selected(&status));
+        status[16] = 0xf1;
+        assert!(high_speed_selected(&status));
+        assert!(!high_speed_selected(&[]));
+    }
 }

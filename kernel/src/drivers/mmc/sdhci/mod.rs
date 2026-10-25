@@ -5,6 +5,7 @@
 
 use crate::device::mmc::{
     MmcBusWidth, MmcCommand, MmcData, MmcError, MmcHost, MmcResponse, MmcResponseType, MmcResult,
+    MmcTiming,
 };
 
 mod adma;
@@ -101,6 +102,22 @@ const CLOCK_TIMEOUT_US: u64 = 100_000;
 const DEFAULT_BASE_CLOCK_HZ: u32 = 50_000_000;
 const MMC_BLOCK_SIZE: usize = 512;
 
+fn transfer_time_us(clock_hz: u32, width: MmcBusWidth, data_bytes: usize) -> u64 {
+    if clock_hz == 0 {
+        return 0;
+    }
+    let lanes = match width {
+        MmcBusWidth::One => 1u64,
+        MmcBusWidth::Four => 4,
+        MmcBusWidth::Eight => 8,
+    };
+    let bytes_per_us = (u64::from(clock_hz) * lanes / 8) / 1_000_000;
+    if bytes_per_us == 0 {
+        return 0;
+    }
+    (data_bytes as u64).div_ceil(bytes_per_us)
+}
+
 /// Platform-specific settings for a generic SDHCI host.
 ///
 /// All settings default to the standard SDHCI behavior, so PCI callers do
@@ -144,6 +161,8 @@ pub struct SdhciHost {
     mmio_base: usize,
     non_removable: bool,
     base_clock_hz: u32,
+    clock_hz: u32,
+    bus_width: MmcBusWidth,
     specification_version: u8,
     config: SdhciHostConfig,
     adma: Option<adma::Adma2>,
@@ -281,6 +300,8 @@ impl SdhciHost {
             mmio_base,
             non_removable,
             base_clock_hz: Self::normalize_base_clock_hz(base_clock_hz),
+            clock_hz: 0,
+            bus_width: MmcBusWidth::One,
             specification_version,
             config,
             adma: None,
@@ -316,11 +337,13 @@ impl SdhciHost {
         {
             return Err("SDHCI: ADMA2 requires a supported SDHCI 2.00/3.00/4.00 controller");
         }
-        self.adma = Some(adma::Adma2::new(
-            context,
-            capabilities & (1 << 28) != 0,
-            self.config.adma2_64bit_descriptor_16 || self.specification_version == 3,
-        )?);
+        let address_64 = capabilities & (1 << 28) != 0;
+        let padded_64 = self.config.adma2_64bit_descriptor_16 || self.specification_version == 3;
+        let adma =
+            adma::Adma2::new(context, address_64, padded_64, adma::MAX_TRANSFER).or_else(|_| {
+                adma::Adma2::new(context, address_64, padded_64, adma::FALLBACK_TRANSFER)
+            })?;
+        self.adma = Some(adma);
         Ok(())
     }
 
@@ -539,6 +562,24 @@ impl SdhciHost {
         }
     }
 
+    /// Decode the clock actually produced by an encoded SDHCI divider.
+    fn programmed_clock_hz(&self, frequency_hz: u32, divider: u16) -> u32 {
+        if divider == 0 || frequency_hz >= self.base_clock_hz {
+            return self.base_clock_hz;
+        }
+        let divisor = if self.specification_version >= 2 {
+            let value = u32::from(divider >> 8) | (u32::from((divider >> 6) & 0x3) << 8);
+            value.saturating_mul(2)
+        } else {
+            u32::from(divider >> 8).saturating_mul(2)
+        };
+        if divisor == 0 {
+            self.base_clock_hz
+        } else {
+            self.base_clock_hz / divisor
+        }
+    }
+
     fn wait_for_inhibit(&self, include_data: bool) -> MmcResult<()> {
         let mask = present_state::COMMAND_INHIBIT
             | if include_data {
@@ -551,12 +592,42 @@ impl SdhciHost {
         })
     }
 
+    /// Estimate how long the card needs to shift `data_bytes` over the bus.
+    ///
+    /// The result excludes command latency and host FIFO overhead. It only
+    /// selects a sleeping deadline, so a late completion falls back to
+    /// polling without changing the timeout.
+    fn expected_transfer_us(&self, data_bytes: usize) -> u64 {
+        transfer_time_us(self.clock_hz, self.bus_width, data_bytes)
+    }
+
     fn wait_for_interrupt(&self, wanted: u32, data_phase: bool) -> MmcResult<u32> {
+        self.wait_for_interrupt_with_data(wanted, data_phase, 0)
+    }
+
+    /// Wait for a command or data interrupt.
+    ///
+    /// `data_bytes` describes a payload whose end is being awaited. DMA
+    /// moves that payload at the programmed bus rate, so the loop sleeps once
+    /// for nearly the whole expected transfer instead of allocating a timer
+    /// every 100 microseconds. Command responses and short payloads keep
+    /// polling to avoid scheduler latency on the critical path.
+    fn wait_for_interrupt_with_data(
+        &self,
+        wanted: u32,
+        data_phase: bool,
+        data_bytes: usize,
+    ) -> MmcResult<u32> {
         let started = crate::time::current_time();
         let may_sleep = self.adma_active
             && crate::arch::interrupt::are_interrupts_enabled()
             && crate::sync::preempt::preempt_count() == 0
             && crate::sched::scheduler::scheduler_ready(crate::arch::get_cpu().get_cpuid());
+        let expected_us = if data_bytes == 0 {
+            0
+        } else {
+            self.expected_transfer_us(data_bytes)
+        };
         loop {
             let status = self.read32(register::INTERRUPT_STATUS);
             if status & interrupt::ERROR != 0 || status & interrupt::ERROR_MASK != 0 {
@@ -578,7 +649,8 @@ impl SdhciHost {
             if status & wanted != 0 {
                 return Ok(status);
             }
-            if crate::time::current_time().wrapping_sub(started) >= COMMAND_TIMEOUT_US {
+            let elapsed = crate::time::current_time().wrapping_sub(started);
+            if elapsed >= COMMAND_TIMEOUT_US {
                 let reset = if data_phase {
                     software_reset::COMMAND | software_reset::DATA
                 } else {
@@ -587,14 +659,28 @@ impl SdhciHost {
                 let _ = self.reset_lines(reset);
                 return Err(MmcError::Timeout);
             }
-            // DMA moves the payload independently. After a short command
-            // latency window, relinquish the CPU between status checks. Early
+            // Sleep until shortly before the bus time implied by the current
+            // clock and bus width, then poll the final status. Early
             // identification still works before the scheduler/timer is ready.
-            if may_sleep && crate::time::current_time().wrapping_sub(started) >= 50 {
+            if may_sleep {
+                let sleep_us = if expected_us != 0 {
+                    expected_us
+                        .saturating_sub(elapsed)
+                        .saturating_sub(200)
+                        .min(20_000)
+                } else if elapsed >= 200 {
+                    200
+                } else {
+                    0
+                };
+                if sleep_us == 0 {
+                    core::hint::spin_loop();
+                    continue;
+                }
                 if let Some(task) = crate::task::mytask() {
                     task.sleep_with_precision(
                         task.get_trapframe(),
-                        100_000,
+                        sleep_us * 1_000,
                         crate::timer::TimerPrecision::Exact,
                     );
                 }
@@ -665,9 +751,11 @@ impl SdhciHost {
 
 impl MmcHost for SdhciHost {
     fn max_blocks_per_transfer(&self) -> usize {
-        // Bound a polling request to 64 KiB. Larger block-layer requests are
-        // split by the card layer rather than monopolizing the host forever.
-        128
+        // Match the retained ADMA2 bounce buffer. PIO keeps the previous
+        // 64 KiB bound because it copies through the FIFO per block.
+        self.adma
+            .as_ref()
+            .map_or(128, |adma| adma.max_transfer() / MMC_BLOCK_SIZE)
     }
 
     fn reset(&mut self) -> MmcResult<()> {
@@ -675,6 +763,7 @@ impl MmcHost for SdhciHost {
             return Err(MmcError::Data);
         }
         let reset_plan = Self::reset_plan(self.preserves_power_control());
+        self.clock_hz = 0;
         let inherited_power_control = if reset_plan.write_power_control {
             None
         } else {
@@ -727,10 +816,12 @@ impl MmcHost for SdhciHost {
     fn set_clock(&mut self, frequency_hz: u32) -> MmcResult<()> {
         if frequency_hz == 0 {
             self.write16(register::CLOCK_CONTROL, 0);
+            self.clock_hz = 0;
             return Ok(());
         }
 
         let divider = self.clock_divider(frequency_hz);
+        self.clock_hz = self.programmed_clock_hz(frequency_hz, divider);
         self.write16(register::CLOCK_CONTROL, 0);
         self.write16(
             register::CLOCK_CONTROL,
@@ -753,6 +844,17 @@ impl MmcHost for SdhciHost {
             MmcBusWidth::One => {}
             MmcBusWidth::Four => control |= HOST_CONTROL_DATA_WIDTH_4,
             MmcBusWidth::Eight => control |= HOST_CONTROL_DATA_WIDTH_8,
+        }
+        self.write8(register::HOST_CONTROL, control);
+        self.bus_width = width;
+        Ok(())
+    }
+
+    fn set_timing(&mut self, timing: MmcTiming) -> MmcResult<()> {
+        let mut control = self.read8(register::HOST_CONTROL);
+        match timing {
+            MmcTiming::Legacy => control &= !HOST_CONTROL_HIGH_SPEED_ENABLE,
+            MmcTiming::HighSpeed => control |= HOST_CONTROL_HIGH_SPEED_ENABLE,
         }
         self.write8(register::HOST_CONTROL, control);
         Ok(())
@@ -828,8 +930,10 @@ impl SdhciHost {
         }
 
         let data_phase = data_len != 0;
-        let use_adma =
-            self.adma.is_some() && data_len >= MMC_BLOCK_SIZE && data_len <= adma::MAX_TRANSFER;
+        let use_adma = self
+            .adma
+            .as_ref()
+            .is_some_and(|adma| data_len >= MMC_BLOCK_SIZE && data_len <= adma.max_transfer());
         // CMD12 must be able to abort a data transfer with DATA_INHIBIT set.
         self.wait_for_inhibit(
             command.index() != 12
@@ -944,7 +1048,8 @@ impl SdhciHost {
         }
 
         if data_phase {
-            let status = self.wait_for_interrupt(interrupt::TRANSFER_COMPLETE, true)?;
+            let status =
+                self.wait_for_interrupt_with_data(interrupt::TRANSFER_COMPLETE, true, data_len)?;
             self.write32(
                 register::INTERRUPT_STATUS,
                 status & interrupt::TRANSFER_COMPLETE,
@@ -1066,5 +1171,19 @@ mod tests {
         assert!(!SdhciHost::is_supported_power_control(POWER_1V8));
         assert!(!SdhciHost::is_supported_power_control(POWER_ON));
         assert!(!SdhciHost::is_supported_power_control(0));
+    }
+
+    #[test_case]
+    fn transfer_estimate_tracks_negotiated_clock_and_width() {
+        assert_eq!(
+            transfer_time_us(24_000_000, MmcBusWidth::Four, 4 * 1024),
+            342
+        );
+        assert_eq!(
+            transfer_time_us(48_000_000, MmcBusWidth::Four, 256 * 1024),
+            10_923
+        );
+        assert_eq!(transfer_time_us(48_000_000, MmcBusWidth::One, 512), 86);
+        assert_eq!(transfer_time_us(0, MmcBusWidth::Four, 4096), 0);
     }
 }

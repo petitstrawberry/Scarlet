@@ -12,7 +12,11 @@ use crate::{
     vm::addr::PhysAddr,
 };
 
-pub(super) const MAX_TRANSFER: usize = 64 * 1024;
+/// One retained bounce buffer covers the ext2 page-cache read batch
+/// (64 pages). Larger block-layer requests are split by the card layer.
+pub(super) const MAX_TRANSFER: usize = 256 * 1024;
+/// Retained alternate used when the preferred contiguous allocation fails.
+pub(super) const FALLBACK_TRANSFER: usize = 64 * 1024;
 const SEGMENT_SIZE: usize = 32 * 1024;
 
 pub(super) struct Adma2 {
@@ -22,6 +26,7 @@ pub(super) struct Adma2 {
     buffer: ContiguousPages,
     address_64: bool,
     descriptor_size: usize,
+    max_transfer: usize,
 }
 
 impl Adma2 {
@@ -29,11 +34,12 @@ impl Adma2 {
         context: &DmaContext,
         address_64: bool,
         padded_64: bool,
+        max_transfer: usize,
     ) -> Result<Self, &'static str> {
         let granule = context.mapping_granule();
         let table = ContiguousPages::new_aligned(granule / PAGE_SIZE, granule)
             .ok_or("SDHCI: ADMA table allocation failed")?;
-        let buffer_len = MAX_TRANSFER.div_ceil(granule) * granule;
+        let buffer_len = max_transfer.div_ceil(granule) * granule;
         let buffer = ContiguousPages::new_aligned(buffer_len / PAGE_SIZE, granule)
             .ok_or("SDHCI: ADMA buffer allocation failed")?;
         let table_mapping = context
@@ -69,7 +75,12 @@ impl Adma2 {
             } else {
                 12
             },
+            max_transfer,
         })
+    }
+
+    pub(super) const fn max_transfer(&self) -> usize {
+        self.max_transfer
     }
 
     pub(super) fn host_control(&self) -> u8 {
@@ -81,7 +92,7 @@ impl Adma2 {
     }
 
     pub(super) fn prepare(&mut self, len: usize, write_data: Option<&[u8]>) {
-        debug_assert!(len != 0 && len <= MAX_TRANSFER);
+        debug_assert!(len != 0 && len <= self.max_transfer);
         let buffer = self.buffer.as_vaddr();
         if let Some(data) = write_data {
             // SAFETY: caller data is independent of our private, retained DMA
