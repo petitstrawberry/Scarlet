@@ -317,8 +317,8 @@ mod tests {
         panel.register(1, 50);
         assert!(panel.request_show(0).is_none());
         let mut suppressed = editor(3);
-        suppressed.content_hint = NO_AUTO_SOFTWARE_KEYBOARD
-            | sws_protocol::text_input_content_hints::SENSITIVE_DATA;
+        suppressed.content_hint =
+            NO_AUTO_SOFTWARE_KEYBOARD | sws_protocol::text_input_content_hints::SENSITIVE_DATA;
         panel.update(suppressed);
         let generation = panel.context.generation;
         assert!(panel.request_show(4).is_none());
@@ -347,13 +347,19 @@ mod tests {
         allowed.content_hint &= !NO_AUTO_SOFTWARE_KEYBOARD;
         panel.update(allowed);
         panel.update(suppressed);
-        assert_eq!(panel.provider_context().content_hint, suppressed.content_hint);
+        assert_eq!(
+            panel.provider_context().content_hint,
+            suppressed.content_hint
+        );
         // The next focused editor still has its own original policy.
         panel.update(editor(4));
         panel.update(suppressed);
         assert!(!panel.visible);
         assert_eq!(panel.context.content_hint, suppressed.content_hint);
-        assert_eq!(panel.provider_context().content_hint, suppressed.content_hint);
+        assert_eq!(
+            panel.provider_context().content_hint,
+            suppressed.content_hint
+        );
     }
     #[test]
     fn exclusive_provider_and_stale_keys() {

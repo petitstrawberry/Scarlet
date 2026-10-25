@@ -87,8 +87,10 @@ struct InlineContextEntry {
 impl InlineContextEntry {
     fn new(key: &str, value: &[u8]) -> Self {
         let mut entry = Self {
-            key: [0; CONTEXT_INLINE_KEY], key_len: key.len() as u8,
-            value: [0; CONTEXT_INLINE_VALUE], value_len: value.len() as u8,
+            key: [0; CONTEXT_INLINE_KEY],
+            key_len: key.len() as u8,
+            value: [0; CONTEXT_INLINE_VALUE],
+            value_len: value.len() as u8,
         };
         entry.key[..key.len()].copy_from_slice(key.as_bytes());
         entry.value[..value.len()].copy_from_slice(value);
@@ -138,14 +140,18 @@ pub struct LayerContext {
 }
 
 impl LayerContext {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Own arbitrary routing metadata. Short, common-size entries never touch
     /// the global heap, including when a layer clones or overwrites them.
     pub fn set(&mut self, key: &str, value: &[u8]) {
-        if let Some(slot) = self.inline.iter_mut().find(|slot| {
-            slot.as_ref().is_some_and(|entry| entry.matches(key))
-        }) {
+        if let Some(slot) = self
+            .inline
+            .iter_mut()
+            .find(|slot| slot.as_ref().is_some_and(|entry| entry.matches(key)))
+        {
             if value.len() <= CONTEXT_INLINE_VALUE {
                 let entry = slot.as_mut().unwrap();
                 entry.value[..value.len()].copy_from_slice(value);
@@ -171,12 +177,17 @@ impl LayerContext {
     }
 
     pub fn get(&self, key: &str) -> Option<&[u8]> {
-        self.inline.iter().flatten().find(|entry| entry.matches(key))
+        self.inline
+            .iter()
+            .flatten()
+            .find(|entry| entry.matches(key))
             .map(|entry| &entry.value[..entry.value_len as usize])
             .or_else(|| self.overflow.get(key).map(Vec::as_slice))
     }
 
-    pub fn contains(&self, key: &str) -> bool { self.get(key).is_some() }
+    pub fn contains(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
 }
 
 /// Configuration for socket creation and layer binding

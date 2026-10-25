@@ -5,15 +5,15 @@
 //! switch into picker mode through sbus without embedding picker UI in the
 //! calling application.
 
-mod icons;
 mod archive;
 mod details;
+mod icons;
 mod listing;
 mod menus;
 mod operations;
+mod picker_filter;
 mod usage;
 mod workers;
-mod picker_filter;
 
 use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::collections::VecDeque;
@@ -1603,7 +1603,9 @@ impl FilerApp {
                 .get()
                 .as_ref()
                 .and_then(|request| {
-                    request.filter.strip_prefix(picker_filter::EXTENSION_FILTER_PREFIX)
+                    request
+                        .filter
+                        .strip_prefix(picker_filter::EXTENSION_FILTER_PREFIX)
                 })
                 .map(|extensions| format!("File types: .{}", extensions.replace(',', ", .")))
                 .unwrap_or_default()

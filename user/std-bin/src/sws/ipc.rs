@@ -95,10 +95,14 @@ static APP_SESSIONS: Mutex<BTreeMap<u32, AppSession>> = Mutex::new(BTreeMap::new
 
 /// Currently focused window ID
 static FOCUSED_WINDOW_ID: Mutex<Option<u32>> = Mutex::new(None);
-static PENDING_CLIPBOARD_CLIENTS: Mutex<super::clipboard::PendingRequests> = Mutex::new(super::clipboard::PendingRequests::new());
+static PENDING_CLIPBOARD_CLIENTS: Mutex<super::clipboard::PendingRequests> =
+    Mutex::new(super::clipboard::PendingRequests::new());
 
 pub(super) fn finish_clipboard_request(client_id: usize) {
-    PENDING_CLIPBOARD_CLIENTS.lock().expect("SWS mutex poisoned").release(client_id);
+    PENDING_CLIPBOARD_CLIENTS
+        .lock()
+        .expect("SWS mutex poisoned")
+        .release(client_id);
 }
 
 #[derive(Debug, Clone)]
@@ -4119,20 +4123,37 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 // Bound queued clipboard payloads to 16 x 256 KiB globally,
                 // with at most one outstanding request per connection.
                 let reserved = {
-                    let mut pending = PENDING_CLIPBOARD_CLIENTS.lock().expect("SWS mutex poisoned");
+                    let mut pending = PENDING_CLIPBOARD_CLIENTS
+                        .lock()
+                        .expect("SWS mutex poisoned");
                     pending.reserve(client_id)
                 };
                 if reserved {
                     push_ipc_event(IpcEvent::Clipboard {
-                        client_id, request_id, window_id: request.window_id(),
+                        client_id,
+                        request_id,
+                        window_id: request.window_id(),
                         text: match request {
                             protocol::clipboard::Request::Get { .. } => None,
-                            protocol::clipboard::Request::Set { text, .. } => Some(text.to_string()),
+                            protocol::clipboard::Request::Set { text, .. } => {
+                                Some(text.to_string())
+                            }
                         },
                     });
                 } else {
-                    let payload = protocol::clipboard::Response::encode(protocol::clipboard::BUSY, "").expect("valid busy response");
-                    if write_frame_response(&mut stream_writer, protocol::server_msg::CLIPBOARD_TEXT, request_id, &payload).is_err() { break; }
+                    let payload =
+                        protocol::clipboard::Response::encode(protocol::clipboard::BUSY, "")
+                            .expect("valid busy response");
+                    if write_frame_response(
+                        &mut stream_writer,
+                        protocol::server_msg::CLIPBOARD_TEXT,
+                        request_id,
+                        &payload,
+                    )
+                    .is_err()
+                    {
+                        break;
+                    }
                 }
             }
             Ok(ClientMessageRef::GetInputEnvironment {}) => {
@@ -4735,7 +4756,12 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
 /// IPC Events that can be sent from clients
 #[derive(Debug)]
 pub enum IpcEvent {
-    Clipboard { client_id: usize, request_id: u8, window_id: u32, text: Option<String> },
+    Clipboard {
+        client_id: usize,
+        request_id: u8,
+        window_id: u32,
+        text: Option<String>,
+    },
     InputPanelRegister {
         client_id: usize,
         window_id: u32,

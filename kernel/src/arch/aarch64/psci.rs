@@ -76,28 +76,56 @@ mod tests {
     use alloc::vec::Vec;
 
     fn dtb(method: Option<&str>, status: Option<&str>, compatible: &str) -> Vec<u8> {
-        fn word(out: &mut Vec<u8>, value: u32) { out.extend_from_slice(&value.to_be_bytes()); }
+        fn word(out: &mut Vec<u8>, value: u32) {
+            out.extend_from_slice(&value.to_be_bytes());
+        }
         fn name(out: &mut Vec<u8>, value: &str) {
-            out.extend_from_slice(value.as_bytes()); out.push(0);
-            while out.len() % 4 != 0 { out.push(0); }
+            out.extend_from_slice(value.as_bytes());
+            out.push(0);
+            while out.len() % 4 != 0 {
+                out.push(0);
+            }
         }
         fn property(out: &mut Vec<u8>, offset: u32, value: &str) {
-            word(out, 3); word(out, value.len() as u32 + 1); word(out, offset); name(out, value);
+            word(out, 3);
+            word(out, value.len() as u32 + 1);
+            word(out, offset);
+            name(out, value);
         }
         let mut nodes = Vec::new();
-        word(&mut nodes, 1); name(&mut nodes, "");
-        word(&mut nodes, 1); name(&mut nodes, "psci");
+        word(&mut nodes, 1);
+        name(&mut nodes, "");
+        word(&mut nodes, 1);
+        name(&mut nodes, "psci");
         property(&mut nodes, 0, compatible);
-        if let Some(method) = method { property(&mut nodes, 11, method); }
-        if let Some(status) = status { property(&mut nodes, 18, status); }
-        for token in [2, 2, 9] { word(&mut nodes, token); }
+        if let Some(method) = method {
+            property(&mut nodes, 11, method);
+        }
+        if let Some(status) = status {
+            property(&mut nodes, 18, status);
+        }
+        for token in [2, 2, 9] {
+            word(&mut nodes, token);
+        }
         let strings = b"compatible\0method\0status\0";
         let mut data = Vec::new();
-        for value in [0xd00dfeed, (56 + nodes.len() + strings.len()) as u32, 56,
-            (56 + nodes.len()) as u32, 40, 17, 16, 0, strings.len() as u32, nodes.len() as u32] {
+        for value in [
+            0xd00dfeed,
+            (56 + nodes.len() + strings.len()) as u32,
+            56,
+            (56 + nodes.len()) as u32,
+            40,
+            17,
+            16,
+            0,
+            strings.len() as u32,
+            nodes.len() as u32,
+        ] {
             word(&mut data, value);
         }
-        data.extend_from_slice(&[0; 16]); data.extend(nodes); data.extend(strings);
+        data.extend_from_slice(&[0; 16]);
+        data.extend(nodes);
+        data.extend(strings);
         data
     }
     #[test_case]
@@ -106,7 +134,10 @@ mod tests {
             for (method, expected) in [("smc", Conduit::Smc), ("hvc", Conduit::Hvc)] {
                 for status in [None, Some("okay"), Some("ok")] {
                     let blob = dtb(Some(method), status, compatible);
-                    assert_eq!(Conduit::from_fdt(&fdt::Fdt::new(&blob).unwrap()), Some(expected));
+                    assert_eq!(
+                        Conduit::from_fdt(&fdt::Fdt::new(&blob).unwrap()),
+                        Some(expected)
+                    );
                 }
             }
         }

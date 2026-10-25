@@ -1884,9 +1884,8 @@ mod tests {
             .unwrap()
             .flush_layout_notifications();
         assert_eq!(graph_render(element.as_ref()).revision, revision + 1);
-        let updated_fallback = Arc::clone(
-            graph_render(element.as_ref()).fallback.as_ref().unwrap(),
-        );
+        let updated_fallback =
+            Arc::clone(graph_render(element.as_ref()).fallback.as_ref().unwrap());
         assert!(!Arc::ptr_eq(&fallback, &updated_fallback));
         element.layout(LayoutConstraints::tight(1_200.0, 240.0));
         element

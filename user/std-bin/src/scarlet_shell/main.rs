@@ -862,11 +862,7 @@ fn status_bar_resize_needed(current: Size, desired: Size) -> bool {
     current != desired
 }
 
-fn control_center_body_position(
-    screen_width: f32,
-    popup_y: i32,
-    body_size: Size,
-) -> (i32, i32) {
+fn control_center_body_position(screen_width: f32, popup_y: i32, body_size: Size) -> (i32, i32) {
     let outsets = ElevationRole::Floating.paint_outsets();
     (
         (screen_width - body_size.width - CONTROL_CENTER_MARGIN as f32 - outsets.right).max(0.0)
@@ -2569,8 +2565,9 @@ fn maintain_workspace_shell_role(
             }
         };
         registration_warning_reported = false;
-        let accepts_full_menus = connection.get_capabilities().is_ok_and(|caps|
-            caps.capabilities & sws_protocol::capabilities::FULL_APP_MENUS != 0);
+        let accepts_full_menus = connection
+            .get_capabilities()
+            .is_ok_and(|caps| caps.capabilities & sws_protocol::capabilities::FULL_APP_MENUS != 0);
         full_app_menus.set(accepts_full_menus);
         println!(
             "[Shell] Registered workspace role at generation {}",
@@ -2611,23 +2608,52 @@ fn maintain_workspace_shell_role(
             }
             while let Some(event) = connection.poll_event() {
                 match event {
-                    sws::event::Event::FocusChanged { window_id, app_name, title, menu_titles, .. }
-                        if accepts_full_menus => {
+                    sws::event::Event::FocusChanged {
+                        window_id,
+                        app_name,
+                        title,
+                        menu_titles,
+                        ..
+                    } if accepts_full_menus => {
                         pending_app_menus.update(|pending| {
                             // Only a stalled UI can accumulate this many updates.
-                            if pending.len() == 64 { pending.remove(0); }
-                            pending.push(AppMenuMetadata { focused: true, window_id, app_name, title, menus: menu_titles });
+                            if pending.len() == 64 {
+                                pending.remove(0);
+                            }
+                            pending.push(AppMenuMetadata {
+                                focused: true,
+                                window_id,
+                                app_name,
+                                title,
+                                menus: menu_titles,
+                            });
                         });
                     }
-                    sws::event::Event::ActiveAppChanged { window_id, app_name, title, menu_titles, .. }
-                        if accepts_full_menus => {
+                    sws::event::Event::ActiveAppChanged {
+                        window_id,
+                        app_name,
+                        title,
+                        menu_titles,
+                        ..
+                    } if accepts_full_menus => {
                         pending_app_menus.update(|pending| {
-                            if pending.len() == 64 { pending.remove(0); }
-                            pending.push(AppMenuMetadata { focused: false, window_id, app_name, title, menus: menu_titles });
+                            if pending.len() == 64 {
+                                pending.remove(0);
+                            }
+                            pending.push(AppMenuMetadata {
+                                focused: false,
+                                window_id,
+                                app_name,
+                                title,
+                                menus: menu_titles,
+                            });
                         });
                     }
                     sws::event::Event::WorkspaceStateChanged(updated) => {
-                        home_trace::record(0, format_args!("shell-state presentation={:?}", updated.presentation));
+                        home_trace::record(
+                            0,
+                            format_args!("shell-state presentation={:?}", updated.presentation),
+                        );
                         snapshot = updated;
                         state.set(Some(snapshot.clone()));
                     }
@@ -3094,10 +3120,19 @@ impl ShellApp {
         let palette = ColorPalette::dark();
         let search_palette = ColorPalette::light();
         let application_count = self.home_filtered_applications.get().len();
-        home_trace::record(1, format_args!(
-            "shell-build presentation={:?} ready={} screen={}x{} drawer_top={} drawer_height={} apps={}",
-            presentation, shell_state_ready, width, height, drawer_top, drawer_height, application_count,
-        ));
+        home_trace::record(
+            1,
+            format_args!(
+                "shell-build presentation={:?} ready={} screen={}x{} drawer_top={} drawer_height={} apps={}",
+                presentation,
+                shell_state_ready,
+                width,
+                height,
+                drawer_top,
+                drawer_height,
+                application_count,
+            ),
+        );
         let searching = !self.home_query.get().trim().is_empty();
         let app_grid_width = (columns as f32 * HOME_GRID_CELL_WIDTH
             + columns.saturating_sub(1) as f32 * HOME_GRID_COLUMN_SPACING)
@@ -3356,8 +3391,16 @@ impl Application for ShellApp {
         ])
     }
 
-    fn on_focus_changed_with_title(&mut self, window_id: u32, app_name: &str, title: &str, menus: &str) {
-        if !self.full_app_menus.get() { self.apply_focus_metadata(window_id, app_name, title, menus); }
+    fn on_focus_changed_with_title(
+        &mut self,
+        window_id: u32,
+        app_name: &str,
+        title: &str,
+        menus: &str,
+    ) {
+        if !self.full_app_menus.get() {
+            self.apply_focus_metadata(window_id, app_name, title, menus);
+        }
     }
 
     fn on_window_created(&mut self, ctx: &WindowContext, window: &mut dyn PlatformWindow) {
@@ -3393,19 +3436,40 @@ impl Application for ShellApp {
         true
     }
 
-    fn on_active_app_changed_with_title(&mut self, window_id: u32, app_name: &str, title: &str, menus: &str) {
-        if !self.full_app_menus.get() { self.apply_active_metadata(window_id, app_name, title, menus); }
+    fn on_active_app_changed_with_title(
+        &mut self,
+        window_id: u32,
+        app_name: &str,
+        title: &str,
+        menus: &str,
+    ) {
+        if !self.full_app_menus.get() {
+            self.apply_active_metadata(window_id, app_name, title, menus);
+        }
     }
 
     fn on_idle(&mut self) {
-        if self.pending_app_menus.get().is_empty() { return; }
+        if self.pending_app_menus.get().is_empty() {
+            return;
+        }
         let mut updates = Vec::new();
-        self.pending_app_menus.update(|pending| updates = core::mem::take(pending));
+        self.pending_app_menus
+            .update(|pending| updates = core::mem::take(pending));
         for update in updates {
             if update.focused {
-                self.apply_focus_metadata(update.window_id, &update.app_name, &update.title, &update.menus);
+                self.apply_focus_metadata(
+                    update.window_id,
+                    &update.app_name,
+                    &update.title,
+                    &update.menus,
+                );
             } else {
-                self.apply_active_metadata(update.window_id, &update.app_name, &update.title, &update.menus);
+                self.apply_active_metadata(
+                    update.window_id,
+                    &update.app_name,
+                    &update.title,
+                    &update.menus,
+                );
             }
         }
     }
@@ -3460,13 +3524,21 @@ impl Application for ShellApp {
             }
             return;
         }
-        if matches!(ctx.scene_key.as_str(), HOME_SCENE_KEY | HOME_BACKDROP_SCENE_KEY) {
+        if matches!(
+            ctx.scene_key.as_str(),
+            HOME_SCENE_KEY | HOME_BACKDROP_SCENE_KEY
+        ) {
             let desired = Size::new(self.screen_width.get(), self.screen_height.get());
             if ctx.scene_key.as_str() == HOME_SCENE_KEY {
-                home_trace::record(9, format_args!(
-                    "shell-sync window_size={:?} desired={:?} presentation={:?}",
-                    window.size(), desired, self.shell_presentation(),
-                ));
+                home_trace::record(
+                    9,
+                    format_args!(
+                        "shell-sync window_size={:?} desired={:?} presentation={:?}",
+                        window.size(),
+                        desired,
+                        self.shell_presentation(),
+                    ),
+                );
             }
             if status_bar_resize_needed(window.size(), desired)
                 && let Err(error) = window.resize(
@@ -3607,11 +3679,8 @@ impl Application for ShellApp {
         );
         let control_center_size = control_center_metrics.body_size();
         set_state_if_changed(&self.control_center_size, control_center_size);
-        let (control_center_body_x, control_center_body_y) = control_center_body_position(
-            screen_width,
-            shell_layout.popup_y(),
-            control_center_size,
-        );
+        let (control_center_body_x, control_center_body_y) =
+            control_center_body_position(screen_width, shell_layout.popup_y(), control_center_size);
         let home_button =
             build_home_button(self.workspace_state.get(), self.workspace_commands.clone());
         let visible_menu_items = status_bar_menu_items(&menu_tree, shell_presentation);
@@ -3839,7 +3908,13 @@ impl Application for ShellApp {
 }
 
 impl ShellApp {
-    fn apply_focus_metadata(&mut self, window_id: u32, app_name: &str, title: &str, menu_titles: &str) {
+    fn apply_focus_metadata(
+        &mut self,
+        window_id: u32,
+        app_name: &str,
+        title: &str,
+        menu_titles: &str,
+    ) {
         status_bar_debug!(
             "[StatusBar] on_focus_changed: window_id={}, app_name={}, menu_titles={}",
             window_id,
@@ -3856,10 +3931,22 @@ impl ShellApp {
             self.control_center_armed_power.set(None);
         }
         let (resolved_menu_titles, menu_changed) = self.resolve_menu_titles(window_id, menu_titles);
-        self.update_menu_for_app(window_id, app_name, title, &resolved_menu_titles, menu_changed);
+        self.update_menu_for_app(
+            window_id,
+            app_name,
+            title,
+            &resolved_menu_titles,
+            menu_changed,
+        );
     }
 
-    fn apply_active_metadata(&mut self, window_id: u32, app_name: &str, title: &str, menu_titles: &str) {
+    fn apply_active_metadata(
+        &mut self,
+        window_id: u32,
+        app_name: &str,
+        title: &str,
+        menu_titles: &str,
+    ) {
         if let Some(window) = self
             .windows
             .get()
@@ -3881,7 +3968,13 @@ impl ShellApp {
             menu_titles
         );
         let (resolved_menu_titles, menu_changed) = self.resolve_menu_titles(window_id, menu_titles);
-        self.update_menu_for_app(window_id, app_name, title, &resolved_menu_titles, menu_changed);
+        self.update_menu_for_app(
+            window_id,
+            app_name,
+            title,
+            &resolved_menu_titles,
+            menu_changed,
+        );
     }
 
     fn update_workarea(&self, screen_width: u32, screen_height: u32, layout: ShellLayout) {
@@ -4500,7 +4593,11 @@ impl ShellApp {
         // tree twice only adds latency and an avoidable redraw.
         let label = if title.is_empty() { app_name } else { title };
         let displayed_label = menu_bar_label(label);
-        let same_label = self.menu_tree.get().items.iter()
+        let same_label = self
+            .menu_tree
+            .get()
+            .items
+            .iter()
             .find(|item| item.id == "system_app")
             .is_some_and(|item| item.title == displayed_label);
         if self.active_window_id.get() == window_id && !menu_changed && same_label {
@@ -4578,31 +4675,58 @@ mod tests {
         let children = (0..40).map(|id| format!(
             r#"{{"id":"tool-{id}","title":"日本語の編集道具 {id}","enabled":true,"items":[]}}"#
         )).collect::<Vec<_>>().join(",");
-        let menus = format!(r#"{{"items":[{{"id":"image","title":"Image","items":[{children}]}}]}}"#);
+        let menus =
+            format!(r#"{{"items":[{{"id":"image","title":"Image","items":[{children}]}}]}}"#);
         assert!(menus.len() > 2048);
         app.full_app_menus.set(true);
         app.pending_app_menus.set(vec![super::AppMenuMetadata {
-            focused: false, window_id: 7, app_name: "Vellum".into(),
-            title: "sample.png — Vellum".into(), menus,
+            focused: false,
+            window_id: 7,
+            app_name: "Vellum".into(),
+            title: "sample.png — Vellum".into(),
+            menus,
         }]);
         app.on_idle();
-        let image_menu = app.menu_tree.get().items.into_iter().find(|item| item.id == "image").unwrap();
+        let image_menu = app
+            .menu_tree
+            .get()
+            .items
+            .into_iter()
+            .find(|item| item.id == "image")
+            .unwrap();
         assert_eq!(image_menu.children.len(), 40);
         app.open_menu_index.set(Some(2));
         app.on_focus_changed_with_title(7, "Vellum", "sample.png — Vellum", "");
         assert_eq!(app.open_menu_index.get(), Some(2));
         assert!(app.pending_app_menus.get().is_empty());
-        assert!(app.menu_tree.get().items.iter().any(|item| item.id == "image" && item.children.len() == 40));
+        assert!(
+            app.menu_tree
+                .get()
+                .items
+                .iter()
+                .any(|item| item.id == "image" && item.children.len() == 40)
+        );
     }
 
     #[test]
     fn live_document_titles_refresh_same_window_and_survive_focus_changes() {
         use scarlet_ui::Application;
         let mut app = super::ShellApp::new(super::ShellLayout::from_tablet_mode(Some(false)));
-        let app_label = |app: &super::ShellApp| app.menu_tree.get().items.into_iter()
-            .find(|item| item.id == "system_app").unwrap().title;
+        let app_label = |app: &super::ShellApp| {
+            app.menu_tree
+                .get()
+                .items
+                .into_iter()
+                .find(|item| item.id == "system_app")
+                .unwrap()
+                .title
+        };
         app.on_focus_changed_with_title(7, "Notepad", "Untitled — Notepad", "File|Edit");
-        for title in ["fixture.txt — Notepad", "saved.txt — Notepad", "Untitled — Notepad"] {
+        for title in [
+            "fixture.txt — Notepad",
+            "saved.txt — Notepad",
+            "Untitled — Notepad",
+        ] {
             app.on_active_app_changed_with_title(7, "Notepad", title, "File|Edit");
             assert_eq!(app_label(&app), super::menu_bar_label(title));
         }
@@ -4613,7 +4737,10 @@ mod tests {
         app.on_focus_changed_with_title(8, "Files", "Documents", "File");
         assert_eq!(app_label(&app), "Documents");
         app.on_focus_changed_with_title(7, "Notepad", "saved.txt — Notepad", "File|Edit");
-        assert_eq!(app_label(&app), super::menu_bar_label("saved.txt — Notepad"));
+        assert_eq!(
+            app_label(&app),
+            super::menu_bar_label("saved.txt — Notepad")
+        );
         app.on_active_app_changed_with_title(7, "Notepad", "", "File|Edit");
         assert_eq!(app_label(&app), "Notepad");
     }
@@ -4904,11 +5031,7 @@ mod tests {
     #[test]
     fn control_center_shadow_surface_keeps_the_requested_outer_margin() {
         let outsets = scarlet_ui::ElevationRole::Floating.paint_outsets();
-        let (body_x, body_y) = control_center_body_position(
-            1920.0,
-            32,
-            Size::new(304.0, 300.0),
-        );
+        let (body_x, body_y) = control_center_body_position(1920.0, 32, Size::new(304.0, 300.0));
 
         assert_eq!(body_x as f32 - outsets.left, 1920.0 - 8.0 - 324.0);
         assert_eq!(body_x as f32 + 304.0 + outsets.right, 1920.0 - 8.0);

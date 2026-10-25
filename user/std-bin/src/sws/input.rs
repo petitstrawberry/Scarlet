@@ -1640,11 +1640,18 @@ mod tests {
 
     #[test]
     fn external_keyboard_presence_survives_until_last_disconnect() {
-        let internal = keyboard_environment_capabilities(Some(InputDeviceKind::Keyboard), INPUT_CAP_INTERNAL);
+        let internal =
+            keyboard_environment_capabilities(Some(InputDeviceKind::Keyboard), INPUT_CAP_INTERNAL);
         let external = keyboard_environment_capabilities(Some(InputDeviceKind::Keyboard), 0);
         assert_eq!(internal, environment_capabilities::KEYBOARD);
-        assert_eq!(external, internal | environment_capabilities::EXTERNAL_KEYBOARD);
-        assert_eq!(keyboard_environment_capabilities(Some(InputDeviceKind::Buttons), 0), 0);
+        assert_eq!(
+            external,
+            internal | environment_capabilities::EXTERNAL_KEYBOARD
+        );
+        assert_eq!(
+            keyboard_environment_capabilities(Some(InputDeviceKind::Buttons), 0),
+            0
+        );
         let mut registry = CapabilityRegistry::default();
         registry.add(internal);
         assert_eq!(registry.add(external), Some(external));

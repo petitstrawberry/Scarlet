@@ -600,8 +600,8 @@ impl ScarletAbi {
         // never execution level, interrupt masks, or other privileged state.
         let mut pstate_bytes = [0u8; 8];
         pstate_bytes.copy_from_slice(&frame[288..296]);
-        trapframe.spsr = (trapframe.spsr & !0xf000_0000)
-            | (u64::from_ne_bytes(pstate_bytes) & 0xf000_0000);
+        trapframe.spsr =
+            (trapframe.spsr & !0xf000_0000) | (u64::from_ne_bytes(pstate_bytes) & 0xf000_0000);
 
         Ok(())
     }

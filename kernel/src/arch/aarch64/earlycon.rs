@@ -211,7 +211,9 @@ pub(crate) fn register_runtime_ns16550(paddr: u64, vaddr: usize) {
                 .compatible()
                 .is_some_and(|c| c.all().any(|s| matches!(s, "ns16550a" | "ns16550")));
             let shift = node.property("reg-shift").map_or(Some(0), |p| p.as_usize());
-            let width = node.property("reg-io-width").map_or(Some(1), |p| p.as_usize());
+            let width = node
+                .property("reg-io-width")
+                .map_or(Some(1), |p| p.as_usize());
             let address = node
                 .reg()
                 .and_then(|mut r| r.next())

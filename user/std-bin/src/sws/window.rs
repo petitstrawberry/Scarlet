@@ -3183,7 +3183,10 @@ mod tests {
         window.height = 800;
         assert!(!window.is_presented());
         assert!(window.is_logically_presented());
-        assert_eq!(window.state_flags() & sws_protocol::window_state::SUSPENDED, 0);
+        assert_eq!(
+            window.state_flags() & sws_protocol::window_state::SUSPENDED,
+            0
+        );
         assert!(!window.complete_native_policy_frame((800, 600), None));
         // Destination dimensions alone cannot validate a stale submission.
         assert!(!window.complete_native_policy_frame((1200, 800), None));
@@ -3225,7 +3228,10 @@ mod tests {
                 window.note_native_backing_replaced();
             }
             window.discard_native_sgfx_generation();
-            assert!(!window.is_presented(), "backend loss is not a painted frame");
+            assert!(
+                !window.is_presented(),
+                "backend loss is not a painted frame"
+            );
             if !resized_before_loss {
                 assert!(!window.complete_native_policy_frame((800, 600), None));
                 window.note_native_backing_replaced();
@@ -3249,10 +3255,17 @@ mod tests {
         window.require_native_policy_frame();
         assert!(!window.complete_native_policy_frame((800, 600), None));
         assert!(super::super::frame_callback::frame_callback_is_ready(
-            window.is_logically_presented(), true, false, 1, 0,
+            window.is_logically_presented(),
+            true,
+            false,
+            1,
+            0,
         ));
         window.set_tablet_managed(false);
-        assert!(window.is_presented(), "leaving tablet mode cancels the gate");
+        assert!(
+            window.is_presented(),
+            "leaving tablet mode cancels the gate"
+        );
         window.parent = Some(2);
         assert!(!window.set_tablet_managed(true));
         assert!(window.is_presented(), "transients must remain ungated");

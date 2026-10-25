@@ -3,9 +3,14 @@ use sws_protocol::input_panel::Context;
 
 /// Automatic visibility policy, independent of text-input/IME enablement.
 /// Explicit show requests arrive with only the suppression bit cleared.
-pub(super) fn should_show(context: Context, environment_allows: bool, dismissed: Option<u32>) -> bool {
+pub(super) fn should_show(
+    context: Context,
+    environment_allows: bool,
+    dismissed: Option<u32>,
+) -> bool {
     context.active()
-        && context.content_hint & sws_protocol::text_input_content_hints::NO_AUTO_SOFTWARE_KEYBOARD == 0
+        && context.content_hint & sws_protocol::text_input_content_hints::NO_AUTO_SOFTWARE_KEYBOARD
+            == 0
         && environment_allows
         && dismissed != Some(context.generation)
 }

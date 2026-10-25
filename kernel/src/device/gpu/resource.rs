@@ -1372,7 +1372,8 @@ impl GpuImage {
                 .source_row_bytes
                 .checked_mul(layout.height)
                 .ok_or("GPU image upload length overflows")?;
-            let copied = backing.copy_from_user(task, source_ptr, layout.destination_offset, length);
+            let copied =
+                backing.copy_from_user(task, source_ptr, layout.destination_offset, length);
             // A fault can leave a copied prefix. Finish cache maintenance while
             // the CPU-access reservation still excludes device access.
             backing.clean_range(layout.destination_offset, length)?;

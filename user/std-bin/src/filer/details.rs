@@ -182,13 +182,7 @@ impl FilerApp {
             let output = std::fs::canonicalize(&directory)
                 .map_err(|error| format!("Cannot open destination folder: {error}"))
                 .and_then(|directory| {
-                    archive::extract(
-                        Path::new(&archive),
-                        &directory,
-                        &name,
-                        &index,
-                        &cancelled,
-                    )
+                    archive::extract(Path::new(&archive), &directory, &name, &index, &cancelled)
                 })
                 .map(DetailOutput::Extracted);
             mutex_lock(&RESULTS).push(DetailResult {

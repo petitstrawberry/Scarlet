@@ -2,20 +2,21 @@
 //!
 //! A compositing window server for Scarlet OS
 
-mod compositor;
 mod animation_policy;
+mod clipboard;
+mod compositor;
 mod config;
 mod cursor;
 mod cursor_theme;
 mod damage;
 mod frame_callback;
 mod gpu_compositor;
+#[path = "../home_trace.rs"]
+mod home_trace;
 mod input;
 mod input_environment;
 mod input_environment_sbus;
 mod input_panel;
-mod clipboard;
-mod window_title;
 mod ipc;
 mod pointer_lock;
 mod remote;
@@ -24,9 +25,8 @@ mod sgfx_ir_support;
 mod status_backdrop;
 mod surface_scene;
 mod trace;
-#[path = "../home_trace.rs"]
-mod home_trace;
 mod window;
+mod window_title;
 mod workspace;
 
 use compositor::Compositor;

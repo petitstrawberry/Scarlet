@@ -4443,13 +4443,22 @@ impl Compositor {
         match result {
             Ok(releases) => {
                 if super::home_trace::enabled()
-                    && let Some(home) = self.window_manager.get_windows().iter().find(|w| {
-                    w.title.as_deref() == Some(b"Home") && w.is_presented()
-                }) {
-                    super::home_trace::record(6, format_args!(
-                        "sws-present-complete window={} releases={} full={} damage={:?}",
-                        home.id, releases.len(), self.full_redraw_needed, self.pending_damage,
-                    ));
+                    && let Some(home) = self
+                        .window_manager
+                        .get_windows()
+                        .iter()
+                        .find(|w| w.title.as_deref() == Some(b"Home") && w.is_presented())
+                {
+                    super::home_trace::record(
+                        6,
+                        format_args!(
+                            "sws-present-complete window={} releases={} full={} damage={:?}",
+                            home.id,
+                            releases.len(),
+                            self.full_redraw_needed,
+                            self.pending_damage,
+                        ),
+                    );
                 }
                 self.gpu_admission_retry.clear();
                 super::trace::set_compositor_stage(super::trace::STAGE_GPU_NOTIFY_RELEASES);
@@ -6320,10 +6329,17 @@ impl Compositor {
                     let mut starts = self.tablet_scene_snapshot();
                     // Capture potential incoming card geometry before changing
                     // active workspace or resetting the finger's pan offset.
-                    let card_starts = self.window_manager.get_windows().iter()
-                        .filter(|window| window.visible && !window.minimized && window.has_presented_frame)
-                        .filter_map(|window| self.overview_transform_for_window(window.id)
-                            .map(|transform| (window.id, transform)))
+                    let card_starts = self
+                        .window_manager
+                        .get_windows()
+                        .iter()
+                        .filter(|window| {
+                            window.visible && !window.minimized && window.has_presented_frame
+                        })
+                        .filter_map(|window| {
+                            self.overview_transform_for_window(window.id)
+                                .map(|transform| (window.id, transform))
+                        })
                         .collect::<Vec<_>>();
                     self.tablet_motion = None;
                     let mut switch_direction = None;
@@ -6357,21 +6373,38 @@ impl Compositor {
                         }
                     }
                     self.tablet_motion = if let Some(direction) = switch_direction {
-                        let incoming = self.window_manager.get_windows().iter().filter_map(|window| {
-                            let root = self.top_level_window_id(window.id);
-                            (self.workspace_manager.workspace_for_window(root)
-                                == Some(self.workspace_manager.active_workspace()))
+                        let incoming = self
+                            .window_manager
+                            .get_windows()
+                            .iter()
+                            .filter_map(|window| {
+                                let root = self.top_level_window_id(window.id);
+                                (self.workspace_manager.workspace_for_window(root)
+                                    == Some(self.workspace_manager.active_workspace()))
                                 .then_some(window.id)
-                        }).collect::<Vec<_>>();
+                            })
+                            .collect::<Vec<_>>();
                         for (id, transform) in card_starts {
-                            if incoming.contains(&id) && !starts.iter().any(|(candidate, _)| *candidate == id) {
+                            if incoming.contains(&id)
+                                && !starts.iter().any(|(candidate, _)| *candidate == id)
+                            {
                                 starts.push((id, transform));
                             }
                         }
-                        tablet_motion::Motion::task_switch(starts, &incoming, direction,
-                            self.screen_width, monotonic_time_ns(), self.animations_enabled())
+                        tablet_motion::Motion::task_switch(
+                            starts,
+                            &incoming,
+                            direction,
+                            self.screen_width,
+                            monotonic_time_ns(),
+                            self.animations_enabled(),
+                        )
                     } else {
-                        tablet_motion::Motion::settle(starts, monotonic_time_ns(), self.animations_enabled())
+                        tablet_motion::Motion::settle(
+                            starts,
+                            monotonic_time_ns(),
+                            self.animations_enabled(),
+                        )
                     };
                     self.overview_pan = 0.0;
                     // Install the retained transition before visibility policy
@@ -10158,10 +10191,16 @@ impl Compositor {
                 continue;
             }
             if window.title.as_deref() == Some(b"Home") {
-                super::home_trace::record(7, format_args!(
-                    "sws-frame-done window={} callback={} counter={} requested_after={}",
-                    window.id, callback.callback_id, self.event_counter, callback.requested_after_present,
-                ));
+                super::home_trace::record(
+                    7,
+                    format_args!(
+                        "sws-frame-done window={} callback={} counter={} requested_after={}",
+                        window.id,
+                        callback.callback_id,
+                        self.event_counter,
+                        callback.requested_after_present,
+                    ),
+                );
             }
             let payload =
                 sws_protocol::payload_frame_done(callback.window_id, callback.callback_id, now_ns);
@@ -10685,7 +10724,11 @@ impl Compositor {
         };
         match self.workspace_manager.presentation() {
             sws_protocol::workspace::ShellPresentation::Workspace => {
-                if self.tablet_motion.as_ref().is_some_and(|motion| motion.exit_target(window_id).is_some()) {
+                if self
+                    .tablet_motion
+                    .as_ref()
+                    .is_some_and(|motion| motion.exit_target(window_id).is_some())
+                {
                     return true;
                 }
                 if workspace_id != self.workspace_manager.active_workspace() {
@@ -11289,13 +11332,15 @@ impl Compositor {
                     let (x, y, width, height) = window.surface_geometry();
                     Some(motion.project(
                         window.id,
-                        motion.exit_target(window.id).or(transform).unwrap_or(PresentationTransform {
-                            x,
-                            y,
-                            width,
-                            height,
-                            opacity: 1.0,
-                        }),
+                        motion.exit_target(window.id).or(transform).unwrap_or(
+                            PresentationTransform {
+                                x,
+                                y,
+                                width,
+                                height,
+                                opacity: 1.0,
+                            },
+                        ),
                     ))
                 } else {
                     transform
@@ -11338,7 +11383,9 @@ impl Compositor {
             .collect::<Vec<_>>();
         let mut changed = false;
         for (window_id, transform, instances, clip, clip_radius) in transforms {
-            let exiting = self.tablet_motion.as_ref()
+            let exiting = self
+                .tablet_motion
+                .as_ref()
                 .is_some_and(|motion| motion.exit_target(window_id).is_some());
             if let Some(window) = self.window_manager.get_window_mut(window_id)
                 && (window.presentation_transform != transform
@@ -11424,7 +11471,8 @@ impl Compositor {
                 self.window_manager
                     .get_window(*window_id)
                     .is_some_and(|window| {
-                        window.window_type == WindowType::Normal && window.is_presented()
+                        window.window_type == WindowType::Normal
+                            && window.is_presented()
                             && !window.presentation_exiting
                     })
             })
@@ -11434,7 +11482,8 @@ impl Compositor {
                     .iter()
                     .rev()
                     .find(|window| {
-                        window.window_type == WindowType::Normal && window.is_presented()
+                        window.window_type == WindowType::Normal
+                            && window.is_presented()
                             && !window.presentation_exiting
                     })
                     .map(|window| window.id)
@@ -12311,12 +12360,18 @@ impl Compositor {
                     .window_manager
                     .get_window(window_id)
                     .is_some_and(|window| window.backing_extent() == (width, height));
-                let trace_home = self.window_manager.get_window(window_id)
+                let trace_home = self
+                    .window_manager
+                    .get_window(window_id)
                     .is_some_and(|window| window.title.as_deref() == Some(b"Home"));
                 if trace_home {
-                    super::home_trace::record(3, format_args!(
-                        "sws-register-begin identity={:?} extent={}x{} matches={}", identity, width, height, extent_matches,
-                    ));
+                    super::home_trace::record(
+                        3,
+                        format_args!(
+                            "sws-register-begin identity={:?} extent={}x{} matches={}",
+                            identity, width, height, extent_matches,
+                        ),
+                    );
                 }
                 let result = if !extent_matches {
                     Err(SgfxBufferError::InvalidBuffer)
@@ -12327,7 +12382,13 @@ impl Compositor {
                     }
                 };
                 if trace_home {
-                    super::home_trace::record(3, format_args!("sws-register-end identity={:?} result={:?}", identity, result));
+                    super::home_trace::record(
+                        3,
+                        format_args!(
+                            "sws-register-end identity={:?} result={:?}",
+                            identity, result
+                        ),
+                    );
                 }
                 match result {
                     Ok(()) => {
@@ -12391,21 +12452,33 @@ impl Compositor {
                     );
                     return Ok(false);
                 }
-                let trace_home = self.window_manager.get_window(window_id)
+                let trace_home = self
+                    .window_manager
+                    .get_window(window_id)
                     .is_some_and(|window| window.title.as_deref() == Some(b"Home"));
                 if trace_home {
-                    super::home_trace::record(4, format_args!(
-                        "sws-commit-begin identity={:?} serial={} damage={:?}", identity, commit_serial, damage_rects,
-                    ));
+                    super::home_trace::record(
+                        4,
+                        format_args!(
+                            "sws-commit-begin identity={:?} serial={} damage={:?}",
+                            identity, commit_serial, damage_rects,
+                        ),
+                    );
                 }
                 let result = match self.gpu_compositor.as_mut() {
                     Some(gpu) => gpu.commit_shared_buffer(identity, commit_serial, &damage_rects),
                     None => Err(SgfxBufferError::Unavailable),
                 };
                 if trace_home {
-                    super::home_trace::record(4, format_args!(
-                        "sws-commit-end identity={:?} serial={} accepted={}", identity, commit_serial, result.is_ok(),
-                    ));
+                    super::home_trace::record(
+                        4,
+                        format_args!(
+                            "sws-commit-end identity={:?} serial={} accepted={}",
+                            identity,
+                            commit_serial,
+                            result.is_ok(),
+                        ),
+                    );
                 }
                 match result {
                     Ok(damage) => {

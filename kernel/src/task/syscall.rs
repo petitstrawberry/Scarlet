@@ -960,9 +960,8 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
         // Native Rust Thread::join cannot report EINTR. A wait for a thread in
         // our own group must resume after a handled event; process waits keep
         // their existing interruptible semantics.
-        let is_thread_join = get_task_by_id(target_global).is_some_and(|target| {
-            target.get_thread_group_id() == task.get_thread_group_id()
-        });
+        let is_thread_join = get_task_by_id(target_global)
+            .is_some_and(|target| target.get_thread_group_id() == task.get_thread_group_id());
 
         match wait_owner.wait(target_global) {
             Ok(status) => {
@@ -1006,7 +1005,9 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                                 // SVC; RISC-V EPC still points at ECALL here.
                                 // Nothing was reaped by the interrupted wait.
                                 #[cfg(target_arch = "aarch64")]
-                                { trapframe.elr -= 4; }
+                                {
+                                    trapframe.elr -= 4;
+                                }
                                 return pid as usize;
                             }
                             trapframe.increment_pc_next(&task);
@@ -1111,7 +1112,9 @@ pub fn sys_kill(trapframe: &mut Trapframe) -> usize {
     #[cfg(feature = "sync-debug")]
     if caller.get_thread_group_id() == 1 {
         crate::emergency_println!(
-            "[power-trace] init kill pid={} signal={} enter", local_pid, signal
+            "[power-trace] init kill pid={} signal={} enter",
+            local_pid,
+            signal
         );
     }
     let event = Event::direct_process_control(event_target, control, EventPriority::Critical, true);
@@ -1122,7 +1125,10 @@ pub fn sys_kill(trapframe: &mut Trapframe) -> usize {
     #[cfg(feature = "sync-debug")]
     if caller.get_thread_group_id() == 1 {
         crate::emergency_println!(
-            "[power-trace] init kill pid={} signal={} result={}", local_pid, signal, result
+            "[power-trace] init kill pid={} signal={} result={}",
+            local_pid,
+            signal,
+            result
         );
     }
     result
@@ -2110,7 +2116,9 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
         let previous = LAST_TRACE.load(Ordering::Relaxed);
         task.get_thread_group_id() == 1
             && now_ns.saturating_sub(previous) >= 500_000_000
-            && LAST_TRACE.compare_exchange(previous, now_ns, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+            && LAST_TRACE
+                .compare_exchange(previous, now_ns, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
     };
     let mut written = 0;
 
@@ -2182,8 +2190,14 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
             let length = name.iter().position(|&b| b == 0).unwrap_or(name.len());
             crate::emergency_println!(
                 "[power-trace] live now={} pid={} tgid={} state={} cpu={} syscall={} active={} pc={:#x} pending={} name={}",
-                now_ns, pid, tgid, state_u8, cpu_id,
-                execution.syscall_number, execution.syscall_active, execution.observed_pc,
+                now_ns,
+                pid,
+                tgid,
+                state_u8,
+                cpu_id,
+                execution.syscall_number,
+                execution.syscall_active,
+                execution.observed_pc,
                 target.has_pending_process_control(),
                 core::str::from_utf8(&name[..length]).unwrap_or("?")
             );

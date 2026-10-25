@@ -2,9 +2,9 @@
 #[cfg(target_os = "scarlet")]
 mod capture;
 mod model;
-mod worker;
 #[cfg(any(target_os = "scarlet", test))]
 mod transport;
+mod worker;
 use model::{Pixels, Region};
 use scarlet_ui::graphics::Canvas;
 use scarlet_ui::platform::PlatformWindow;
@@ -563,7 +563,10 @@ mod tests {
     use scarlet_ui::KeyCode;
 
     fn spawn_failure() -> std::io::Result<std::thread::JoinHandle<()>> {
-        Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "thread limit"))
+        Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "thread limit",
+        ))
     }
 
     #[test]
@@ -583,7 +586,11 @@ mod tests {
         assert_eq!(app.guard.get(), 2);
         assert!(Arc::ptr_eq(&pixels, &app.pixels.get().unwrap()));
         assert_eq!(app.selection.get(), selection);
-        assert!(app.status.get().contains("Save failed: Cannot start worker"));
+        assert!(
+            app.status
+                .get()
+                .contains("Save failed: Cannot start worker")
+        );
     }
 
     #[test]
@@ -591,7 +598,8 @@ mod tests {
         let mut app = ScreenshotApp::new();
         let image = Pixels::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255]).unwrap();
         app.install(image.clone());
-        let directory = std::env::temp_dir().join(format!("screenshot-worker-test-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("screenshot-worker-test-{}", std::process::id()));
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join("image.png");
         app.save(false, path.to_string_lossy().into_owned());

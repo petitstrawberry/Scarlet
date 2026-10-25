@@ -66,14 +66,21 @@ fn rename_contents(fs: &dyn FileSystemOperations, node: &Arc<dyn crate::fs::VfsN
 fn test_overlay_create_rejects_lower_collisions_without_copying_parents() {
     let (upper, lower, overlay) = rename_fixture();
     let parent = lower
-        .create(&lower.root_node(), &"home".into(), FileType::Directory, 0o755)
+        .create(
+            &lower.root_node(),
+            &"home".into(),
+            FileType::Directory,
+            0o755,
+        )
         .unwrap();
     let directory = lower
         .create(&parent, &"extracted".into(), FileType::Directory, 0o755)
         .unwrap();
     let marker = rename_file(lower.as_ref(), &directory, "keep.txt", b"keep me");
     let file = rename_file(lower.as_ref(), &parent, "existing.txt", b"original");
-    let home = overlay.lookup(&overlay.root_node(), &"home".into()).unwrap();
+    let home = overlay
+        .lookup(&overlay.root_node(), &"home".into())
+        .unwrap();
     for name in ["extracted", "existing.txt"] {
         for kind in [FileType::Directory, FileType::RegularFile] {
             let result = overlay.create(&home, &name.into(), kind, 0o755);
@@ -84,7 +91,9 @@ fn test_overlay_create_rejects_lower_collisions_without_copying_parents() {
     assert_eq!(rename_contents(lower.as_ref(), &marker), b"keep me");
     assert_eq!(rename_contents(lower.as_ref(), &file), b"original");
     // A genuinely new sibling can still create the required upper parents.
-    overlay.create(&home, &"new".into(), FileType::Directory, 0o755).unwrap();
+    overlay
+        .create(&home, &"new".into(), FileType::Directory, 0o755)
+        .unwrap();
     assert!(matches!(
         overlay.create(&home, &"new".into(), FileType::Directory, 0o755),
         Err(e) if e.kind == FileSystemErrorKind::AlreadyExists

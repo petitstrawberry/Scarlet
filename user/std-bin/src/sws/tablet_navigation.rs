@@ -451,8 +451,14 @@ mod tests {
                     for sideways in [-50, 0, 50] {
                         let mut n = Navigation::default();
                         let mut send = |contacts: &[(i32, i32, i32)], ms| {
-                            n.process(contacts, false, ms * MS, px(1000) as u32,
-                                px(height) as u32, scale as u32)
+                            n.process(
+                                contacts,
+                                false,
+                                ms * MS,
+                                px(1000) as u32,
+                                px(height) as u32,
+                                scale as u32,
+                            )
                         };
                         send(&[(7, px(500), px(height - 5))], 0);
                         send(&[(7, px(500 + sideways), px(height - 5))], 10);
@@ -462,8 +468,11 @@ mod tests {
                         } else {
                             Destination::Overview
                         };
-                        assert_eq!(send(&[], 30), end(destination),
-                            "scale={scale} height={height} up={up} sideways={sideways}");
+                        assert_eq!(
+                            send(&[], 30),
+                            end(destination),
+                            "scale={scale} height={height} up={up} sideways={sideways}"
+                        );
                     }
                 }
             }
@@ -478,11 +487,14 @@ mod tests {
                 finger(&mut n, 500, 995, 0);
                 finger(&mut n, 500 + sign * 30, 955, 20);
                 finger(&mut n, 500 + sign * 70, 995 - up, 40);
-                assert_eq!(frame(&mut n, &[], 50), end(if up >= 400 {
-                    Destination::Home
-                } else {
-                    Destination::Overview
-                }));
+                assert_eq!(
+                    frame(&mut n, &[], 50),
+                    end(if up >= 400 {
+                        Destination::Home
+                    } else {
+                        Destination::Overview
+                    })
+                );
             }
         }
     }
