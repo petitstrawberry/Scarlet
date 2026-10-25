@@ -2112,13 +2112,11 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
     let now_ns = crate::time::current_time_ns();
     #[cfg(feature = "sync-debug")]
     let trace_active = {
-        static LAST_TRACE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-        let previous = LAST_TRACE.load(Ordering::Relaxed);
+        static LAST_TRACE: crate::sync::diagnostic::ReportInterval =
+            crate::sync::diagnostic::ReportInterval::new();
         task.get_thread_group_id() == 1
-            && now_ns.saturating_sub(previous) >= 500_000_000
-            && LAST_TRACE
-                .compare_exchange(previous, now_ns, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
+            && now_ns >= 500_000_000
+            && LAST_TRACE.try_claim(now_ns, 500_000_000)
     };
     let mut written = 0;
 

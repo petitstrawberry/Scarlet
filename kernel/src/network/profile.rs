@@ -1,13 +1,14 @@
 //! Opt-in cumulative network diagnostics for `/dev/net_profile`.
 //!
-//! Counters are relaxed atomics, not a coherent multi-field snapshot. They are
+//! Counters saturate at 64 bits and do not form a coherent multi-field snapshot. They are
 //! never reset. Disabling stops new observations; sampled spans already in
 //! flight can finish afterward. Timings sample every 16th enabled stage call.
 //! They measure elapsed wall time (including preemption and lock waits), not
 //! task CPU time. Nested/overlapping stages must not be added together.
 //! Profiling adds atomic/timer overhead; compare throughput disabled/enabled.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::sync::counter::SaturatingCounter;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) const SAMPLE_EVERY: u64 = 16;
 
@@ -81,35 +82,35 @@ pub(crate) const STAGE_NAMES: [&str; 30] = [
 
 #[repr(align(64))]
 struct Counter {
-    calls: AtomicU64,
-    bytes: AtomicU64,
-    capacity: AtomicU64,
-    timed_calls: AtomicU64,
-    timed_bytes: AtomicU64,
-    timed_capacity: AtomicU64,
-    timed_ns: AtomicU64,
+    calls: SaturatingCounter,
+    bytes: SaturatingCounter,
+    capacity: SaturatingCounter,
+    timed_calls: SaturatingCounter,
+    timed_bytes: SaturatingCounter,
+    timed_capacity: SaturatingCounter,
+    timed_ns: SaturatingCounter,
 }
 
 impl Counter {
     const fn new() -> Self {
         Self {
-            calls: AtomicU64::new(0),
-            bytes: AtomicU64::new(0),
-            capacity: AtomicU64::new(0),
-            timed_calls: AtomicU64::new(0),
-            timed_bytes: AtomicU64::new(0),
-            timed_capacity: AtomicU64::new(0),
-            timed_ns: AtomicU64::new(0),
+            calls: SaturatingCounter::new(0),
+            bytes: SaturatingCounter::new(0),
+            capacity: SaturatingCounter::new(0),
+            timed_calls: SaturatingCounter::new(0),
+            timed_bytes: SaturatingCounter::new(0),
+            timed_capacity: SaturatingCounter::new(0),
+            timed_ns: SaturatingCounter::new(0),
         }
     }
 
     fn observe(&self, calls: u64, bytes: u64, capacity: u64) -> u64 {
-        let ordinal = self.calls.fetch_add(calls, Ordering::Relaxed);
+        let ordinal = self.calls.add(calls).saturating_sub(calls);
         if bytes != 0 {
-            self.bytes.fetch_add(bytes, Ordering::Relaxed);
+            self.bytes.add(bytes);
         }
         if capacity != 0 {
-            self.capacity.fetch_add(capacity, Ordering::Relaxed);
+            self.capacity.add(capacity);
         }
         ordinal
     }
@@ -144,7 +145,8 @@ pub(crate) fn command(bytes: &[u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// A sampled wall-time span. No heap allocation, printing or profiling lock.
+/// A sampled wall-time span. No heap allocation or printing.
+/// Targets without 64-bit atomics use IRQ-safe counter updates.
 pub(crate) struct Span {
     counter: &'static Counter,
     start_ns: u64,
@@ -155,14 +157,10 @@ pub(crate) struct Span {
 impl Drop for Span {
     fn drop(&mut self) {
         let elapsed = crate::timer::get_time_ns().saturating_sub(self.start_ns);
-        self.counter.timed_ns.fetch_add(elapsed, Ordering::Relaxed);
-        self.counter
-            .timed_bytes
-            .fetch_add(self.bytes, Ordering::Relaxed);
-        self.counter
-            .timed_capacity
-            .fetch_add(self.capacity, Ordering::Relaxed);
-        self.counter.timed_calls.fetch_add(1, Ordering::Relaxed);
+        self.counter.timed_ns.add(elapsed);
+        self.counter.timed_bytes.add(self.bytes);
+        self.counter.timed_capacity.add(self.capacity);
+        self.counter.timed_calls.add(1);
     }
 }
 
@@ -195,7 +193,7 @@ pub(crate) fn event(stage: Stage, bytes: usize, capacity: usize) {
     COUNTERS[stage as usize].observe(1, bytes as u64, capacity as u64);
 }
 
-/// Count an already bounded batch of untimed events with one atomic update.
+/// Count an already bounded batch of untimed events with one counter update.
 #[inline]
 pub(crate) fn event_count(stage: Stage, calls: usize) {
     if !enabled() || calls == 0 {
@@ -208,13 +206,13 @@ pub(crate) fn snapshot() -> [Counts; STAGE_NAMES.len()] {
     core::array::from_fn(|index| {
         let counter = &COUNTERS[index];
         Counts {
-            calls: counter.calls.load(Ordering::Relaxed),
-            bytes: counter.bytes.load(Ordering::Relaxed),
-            capacity: counter.capacity.load(Ordering::Relaxed),
-            timed_calls: counter.timed_calls.load(Ordering::Relaxed),
-            timed_bytes: counter.timed_bytes.load(Ordering::Relaxed),
-            timed_capacity: counter.timed_capacity.load(Ordering::Relaxed),
-            timed_ns: counter.timed_ns.load(Ordering::Relaxed),
+            calls: counter.calls.snapshot(),
+            bytes: counter.bytes.snapshot(),
+            capacity: counter.capacity.snapshot(),
+            timed_calls: counter.timed_calls.snapshot(),
+            timed_bytes: counter.timed_bytes.snapshot(),
+            timed_capacity: counter.timed_capacity.snapshot(),
+            timed_ns: counter.timed_ns.snapshot(),
         }
     })
 }
