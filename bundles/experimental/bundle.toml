@@ -8,7 +8,7 @@ to = "/"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/moonlight-scarlet.git", rev = "575b7fdfee981e03bc0e0e7554e2405cb19dc722" }
+source = { git = "https://github.com/petitstrawberry/moonlight-scarlet.git", rev = "acca3a593c16bc31eecbec74d782ff819b7295bf" }
 package = "moonlight"
 bin = "moonlight"
 to = "/bin/moonlight"
@@ -89,12 +89,12 @@ to = "/bin/blitz"
 
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/resonara", rev = "339d1b626be4d70a32f7c193a1d224d09036dc6b" }
+source = { git = "https://github.com/petitstrawberry/resonara", rev = "088cc9d06cb7d4127727873eb4fb971a1c86b871" }
 bundle = "platforms/scarlet/bundle.toml"
 
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/easyrpg-player-scarlet.git", rev = "1b9b3c9e1a334f579ba883c9271cdbb12d3cb1c5" }
+source = { git = "https://github.com/petitstrawberry/easyrpg-player-scarlet.git", rev = "b32ebc83655d680e339759b340a089f628968aa4" }
 
 [[layers]]
 kind = "bundle"
