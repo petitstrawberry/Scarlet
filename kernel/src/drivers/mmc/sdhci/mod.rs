@@ -515,6 +515,15 @@ impl SdhciHost {
         Ok(())
     }
 
+    /// Update a platform clock source after disabling the SD bus clock.
+    pub fn set_base_clock_hz(&mut self, frequency_hz: u32) -> MmcResult<()> {
+        if frequency_hz == 0 || self.clock_hz != 0 {
+            return Err(MmcError::InvalidArgument);
+        }
+        self.base_clock_hz = frequency_hz;
+        Ok(())
+    }
+
     /// Return the source clock used to program the SDHCI divider.
     ///
     /// # Returns
@@ -1044,10 +1053,37 @@ impl MmcHost for SdhciHost {
 
     fn set_timing(&mut self, timing: MmcTiming) -> MmcResult<()> {
         let mut control = self.read8(register::HOST_CONTROL);
-        match timing {
-            MmcTiming::Legacy => control &= !HOST_CONTROL_HIGH_SPEED_ENABLE,
-            MmcTiming::HighSpeed => control |= HOST_CONTROL_HIGH_SPEED_ENABLE,
-        }
+        let mode = match timing {
+            MmcTiming::Legacy => {
+                control &= !HOST_CONTROL_HIGH_SPEED_ENABLE;
+                0
+            }
+            MmcTiming::HighSpeed => {
+                control |= HOST_CONTROL_HIGH_SPEED_ENABLE;
+                0
+            }
+            MmcTiming::Sdr12 => {
+                control &= !HOST_CONTROL_HIGH_SPEED_ENABLE;
+                0
+            }
+            MmcTiming::Sdr25 => {
+                control |= HOST_CONTROL_HIGH_SPEED_ENABLE;
+                1
+            }
+            MmcTiming::Sdr50 => {
+                control |= HOST_CONTROL_HIGH_SPEED_ENABLE;
+                2
+            }
+            MmcTiming::Sdr104 => {
+                control |= HOST_CONTROL_HIGH_SPEED_ENABLE;
+                3
+            }
+        };
+        let control2 = self.read16(register::HOST_CONTROL2);
+        self.write16(
+            register::HOST_CONTROL2,
+            (control2 & !HOST_CONTROL2_UHS_MODE_MASK) | mode,
+        );
         self.write8(register::HOST_CONTROL, control);
         Ok(())
     }
