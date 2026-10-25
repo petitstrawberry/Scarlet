@@ -65,6 +65,7 @@ mod command_flag {
     pub const CRC_CHECK: u16 = 1 << 3;
     pub const INDEX_CHECK: u16 = 1 << 4;
     pub const DATA_PRESENT: u16 = 1 << 5;
+    pub const TYPE_ABORT: u16 = 3 << 6;
 }
 
 mod interrupt {
@@ -944,6 +945,11 @@ impl SdhciHost {
         };
         ((u16::from(command.index()) & 0x3f) << 8)
             | response
+            | if command.index() == 12 {
+                command_flag::TYPE_ABORT
+            } else {
+                0
+            }
             | if has_data {
                 command_flag::DATA_PRESENT
             } else {
@@ -1110,9 +1116,10 @@ impl MmcHost for SdhciHost {
             return Err(MmcError::Data);
         }
         let result = self.issue_command(command, data);
-        if self.adma_active {
-            // Every failure after COMMAND publication must stop DMA before
-            // storage can be reused or freed, including command-phase errors.
+        if result.is_err() || self.adma_active {
+            // FIFO/inhibit waits can fail without an interrupt error latch.
+            // Retire PIO as well as DMA before another command (notably the
+            // next tuning phase) is allowed onto the bus.
             if self
                 .reset_lines(software_reset::COMMAND | software_reset::DATA)
                 .is_err()
@@ -1121,9 +1128,12 @@ impl MmcHost for SdhciHost {
                 // A broken controller may still fetch descriptors/data. Keep
                 // mappings and backing alive permanently rather than freeing
                 // memory that hardware can still access.
-                core::mem::forget(self.adma.take());
+                if self.adma_active {
+                    core::mem::forget(self.adma.take());
+                }
             }
             self.adma_active = false;
+            self.clear_interrupt_status();
         }
         result
     }
@@ -1348,6 +1358,46 @@ mod tests {
             SdhciHost::command_bits(command, false),
             (1 << 8) | command_flag::RESPONSE_48
         );
+    }
+
+    #[test_case]
+    fn stop_transmission_is_an_sdhci_abort_command() {
+        assert_eq!(
+            SdhciHost::command_bits(MmcCommand::new(12, 0, MmcResponseType::R1b), false),
+            0x0cdb,
+        );
+    }
+
+    #[test_case]
+    fn pio_inhibit_timeout_resets_data_and_quarantines_a_stuck_controller() {
+        // A register aperture whose reset bit never clears models a broken
+        // peripheral. No DMA backing exists, so this exercises PIO recovery.
+        let mut registers = alloc::vec![0_u32; 0x100 / 4];
+        registers[register::PRESENT_STATE / 4] = present_state::DATA_INHIBIT;
+        let mut host =
+            SdhciHost::new_with_base_clock(registers.as_mut_ptr() as usize, true, 100_000_000);
+        let mut pattern = [0; 64];
+        assert_eq!(
+            host.send_command(
+                MmcCommand::new(19, 0, MmcResponseType::R1),
+                Some(MmcData::Read(&mut pattern))
+            ),
+            Err(MmcError::Timeout),
+        );
+        assert_eq!(
+            host.read8(register::SOFTWARE_RESET),
+            software_reset::COMMAND | software_reset::DATA
+        );
+        assert!(host.poisoned);
+        registers[register::PRESENT_STATE / 4] = 0;
+        assert_eq!(
+            host.send_command(
+                MmcCommand::new(19, 0, MmcResponseType::R1),
+                Some(MmcData::Read(&mut pattern))
+            ),
+            Err(MmcError::Data),
+        );
+        assert_eq!(host.read16(register::COMMAND), 0);
     }
 
     #[test_case]
