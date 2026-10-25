@@ -267,6 +267,23 @@ impl SdhciCompletion {
         self.status.swap(0, Ordering::AcqRel)
     }
 
+    /// Collect status while the caller must poll instead of blocking.
+    ///
+    /// Early card identification runs before this CPU's external interrupts
+    /// are enabled, so the IRQ cannot populate the latch yet. Read and clear
+    /// the controller register under the same lock as the handler.
+    fn poll(&self) -> u32 {
+        let _guard = self.lock.lock();
+        let status =
+            unsafe { crate::arch::mmio::read32(self.mmio_base + register::INTERRUPT_STATUS) };
+        if status != 0 {
+            unsafe {
+                crate::arch::mmio::write32(self.mmio_base + register::INTERRUPT_STATUS, status);
+            }
+        }
+        self.status.swap(0, Ordering::AcqRel) | status
+    }
+
     fn wait(&self, timeout_ns: u64) -> bool {
         let Some(task) = crate::task::mytask() else {
             return false;
@@ -297,7 +314,10 @@ impl InterruptCapableDevice for SdhciCompletion {
             let status =
                 unsafe { crate::arch::mmio::read32(self.mmio_base + register::INTERRUPT_STATUS) };
             if status == 0 {
-                return Ok(InterruptClaim::NotMine);
+                // The dedicated line can remain pending after early polling
+                // cleared its status. Acknowledge the spurious edge instead
+                // of reporting an unclaimed interrupt.
+                return Ok(InterruptClaim::Handled);
             }
             unsafe {
                 crate::arch::mmio::write32(self.mmio_base + register::INTERRUPT_STATUS, status);
@@ -767,8 +787,7 @@ impl SdhciHost {
         data_bytes: usize,
     ) -> MmcResult<u32> {
         let started = crate::time::current_time();
-        let use_irq = self.completion.is_some();
-        let may_block = use_irq
+        let may_block = self.completion.is_some()
             && crate::arch::interrupt::are_interrupts_enabled()
             && crate::sync::preempt::preempt_count() == 0
             && crate::sched::scheduler::scheduler_ready(crate::arch::get_cpu().get_cpuid());
@@ -778,9 +797,10 @@ impl SdhciHost {
             self.expected_transfer_us(data_bytes)
         };
         loop {
-            let (status, from_register) = match (&self.completion, use_irq) {
-                (Some(completion), true) => (completion.take_status(), false),
-                _ => (self.read32(register::INTERRUPT_STATUS), true),
+            let (status, from_register) = match &self.completion {
+                Some(completion) if may_block => (completion.take_status(), false),
+                Some(completion) => (completion.poll(), false),
+                None => (self.read32(register::INTERRUPT_STATUS), true),
             };
             if status & interrupt::ERROR != 0 || status & interrupt::ERROR_MASK != 0 {
                 if from_register {
