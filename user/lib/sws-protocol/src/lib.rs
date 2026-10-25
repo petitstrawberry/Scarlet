@@ -22,8 +22,8 @@ extern crate scarlet_std as std;
 
 use std::vec::Vec;
 
-pub mod input_panel;
 pub mod clipboard;
+pub mod input_panel;
 pub mod surface_regions;
 pub mod surface_scene;
 pub mod workspace;
@@ -3291,7 +3291,9 @@ fn parse_sgfx_buffer_identity(payload: &[u8]) -> Result<(u32, u32, u32, u32), Pr
 /// Parse a server->client message from `(msg_type, payload)`.
 pub fn parse_server_message(msg_type: u32, payload: &[u8]) -> Result<ServerMessage, ProtocolError> {
     match msg_type {
-        server_msg::CLIPBOARD_TEXT => clipboard::Response::parse(payload).map(ServerMessage::ClipboardText),
+        server_msg::CLIPBOARD_TEXT => {
+            clipboard::Response::parse(payload).map(ServerMessage::ClipboardText)
+        }
         server_msg::WINDOW_CREATED => {
             if payload.len() != 12 && payload.len() != 20 {
                 return Err(ProtocolError::MalformedPayload);

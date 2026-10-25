@@ -162,10 +162,13 @@ impl ElementRenderObject for HandleRender {
             self.size = child.layout(constraints);
             child.set_position(Point::ZERO);
         }
-        super::home_trace::record(2, format_args!(
-            "shell-layout presentation={:?} drawer_top={} size={:?}",
-            self.presentation, self.geometry.top, self.size,
-        ));
+        super::home_trace::record(
+            2,
+            format_args!(
+                "shell-layout presentation={:?} drawer_top={} size={:?}",
+                self.presentation, self.geometry.top, self.size,
+            ),
+        );
         self.size
     }
     fn size(&self) -> Size {

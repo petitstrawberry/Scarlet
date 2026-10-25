@@ -178,7 +178,7 @@ name = "sas"
 path = "src/sas/main.rs"
 
 [dependencies]
-scarlet-ui-core = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "05365e399e5936cb1630880800a803f8760f9e03", default-features = false, features = ["legacy-scarlet-std"] }
+scarlet-ui-core = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "b6a7bec8bc33b2abbf8dda1397529ab836e91ead", default-features = false, features = ["legacy-scarlet-std"] }
 scarlet-abi = { path = "../lib/scarlet-abi" }
 scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }
 scpm = { path = "../lib/scpm" }
@@ -186,9 +186,9 @@ framebuffer = { path = "../lib/framebuffer" }
 sws-protocol = { path = "../lib/sws-protocol" }
 sws-client = { path = "../lib/sws-client" }
 scarlet-os = { path = "../lib/scarlet-os" }
-scarlet-ui = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "05365e399e5936cb1630880800a803f8760f9e03", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
-sgfx = { optional = true, git = "https://github.com/petitstrawberry/sgfx", rev = "5cb1fb27596af49d54cb33851e553249de8230a9", default-features = false, features = ["legacy-scarlet-std", "backend-dynamic"] }
-scarlet-ui-macros = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "05365e399e5936cb1630880800a803f8760f9e03", package = "scarlet-ui-macros" }
+scarlet-ui = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "b6a7bec8bc33b2abbf8dda1397529ab836e91ead", package = "scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
+sgfx = { optional = true, git = "https://github.com/petitstrawberry/sgfx", rev = "0ee6b41669904ced227f01cc435933c646a60c75", default-features = false, features = ["legacy-scarlet-std", "backend-dynamic"] }
+scarlet-ui-macros = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "b6a7bec8bc33b2abbf8dda1397529ab836e91ead", package = "scarlet-ui-macros" }
 scarlet-desktop-config = { path = "../lib/scarlet-desktop-config" }
 scarlet-sys = { path = "../lib/scarlet-sys" }
 sunset = { path = "../lib/sunset", default-features = false, features = ["larger", "mlkem", "openssh-key", "rsa"] }

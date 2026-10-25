@@ -108,7 +108,7 @@ use crate::network::syscall::{
 };
 use crate::object::capability::file::{sys_file_metadata, sys_file_seek, sys_file_truncate};
 use crate::object::capability::memory_mapping::{
-    sys_memory_map, sys_memory_protect, sys_memory_unmap, sys_memory_query,
+    sys_memory_map, sys_memory_protect, sys_memory_query, sys_memory_unmap,
 };
 use crate::object::capability::selectable::syscall::sys_poll;
 use crate::object::capability::stream::{sys_stream_read, sys_stream_write};

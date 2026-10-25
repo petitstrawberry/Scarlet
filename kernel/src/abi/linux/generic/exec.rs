@@ -145,11 +145,12 @@ mod tests {
 
     fn string_vector(task: &Task, sp: &mut usize, strings: &[&str]) -> usize {
         let addresses = push_string_vector(task, sp, strings).unwrap();
-        let mut pointers = Vec::with_capacity((addresses.len() + 1) * 8);
+        let mut pointers =
+            Vec::with_capacity((addresses.len() + 1) * core::mem::size_of::<usize>());
         for address in addresses {
-            pointers.extend_from_slice(&address.to_ne_bytes());
+            pointers.extend_from_slice(&(address as usize).to_ne_bytes());
         }
-        pointers.extend_from_slice(&0u64.to_ne_bytes());
+        pointers.extend_from_slice(&0usize.to_ne_bytes());
         *sp = (*sp - pointers.len()) & !15;
         copy_to_user(task, *sp, &pointers).unwrap();
         *sp
@@ -199,7 +200,7 @@ mod tests {
         assert_eq!(exec_argument_bytes(&args, &[""]), None);
         assert_eq!(
             exec_argument_bytes(&alloc::vec![""; 4096], &[]),
-            Some(4096 * 9)
+            Some(4096 * (1 + core::mem::size_of::<usize>()))
         );
         assert_eq!(exec_string_storage_bytes(MAX_EXEC_STRING_LENGTH), None);
         assert_eq!(exec_string_storage_bytes(usize::MAX), None);
@@ -210,7 +211,7 @@ mod tests {
         let mut sp = USER_STACK_END;
         let argv = string_vector(&task, &mut sp, &["a"]);
         let envp = string_vector(&task, &mut sp, &[""]);
-        let mut remaining = 10;
+        let mut remaining = 2 + core::mem::size_of::<usize>();
         assert_eq!(
             parse_exec_strings(&task, argv, &mut remaining).unwrap(),
             ["a"]
@@ -225,7 +226,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        let mut remaining = 10;
+        let mut remaining = 2 + core::mem::size_of::<usize>();
         assert_eq!(
             parse_exec_strings(&task, usize::MAX, &mut remaining),
             Err(StringConversionError::TranslationError)

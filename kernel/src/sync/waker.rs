@@ -977,7 +977,9 @@ impl Waker {
                 return WaitResult::Interrupted;
             };
             if !task.sleep_interruptible_with_precision(
-                trapframe, minimum_ns, TimerPrecision::Normal,
+                trapframe,
+                minimum_ns,
+                TimerPrecision::Normal,
             ) {
                 return WaitResult::Interrupted;
             }
@@ -1045,7 +1047,9 @@ impl Waker {
             // pending latch, while this dedicated sleep cannot be driven into
             // a wake/re-wait loop by IPC traffic.
             if !task.sleep_interruptible_with_precision(
-                trapframe, minimum_duration_ns, TimerPrecision::Normal,
+                trapframe,
+                minimum_duration_ns,
+                TimerPrecision::Normal,
             ) {
                 return true;
             }

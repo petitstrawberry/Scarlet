@@ -308,10 +308,15 @@ impl Mp4Parser {
         Ok(())
     }
     fn update_tracks(&mut self, r: &IsoMp4Reader<'_>) -> Result<()> {
-        let headers: Vec<u8> = r.protection_headers().iter().flat_map(|header| header.iter().copied()).collect();
+        let headers: Vec<u8> = r
+            .protection_headers()
+            .iter()
+            .flat_map(|header| header.iter().copied())
+            .collect();
         if !headers.is_empty() && !self.initialization_data.contains(&headers) {
             self.initialization_data.push(headers.clone());
-            self.events.push_back(ParserEvent::InitializationData(headers));
+            self.events
+                .push_back(ParserEvent::InitializationData(headers));
         }
         if r.tracks().len() > 8 {
             return Err(MediaError::Unsupported("too many tracks"));
@@ -614,7 +619,11 @@ impl AvcConfiguration {
     /// Prepend avcC parameter sets to a complete access unit, preserving raw
     /// EBSP bytes. Validate in-band SPS before native decoder allocation.
     pub fn annex_b(&mut self, sample: &Sample) -> Result<Vec<u8>> {
-        if sample.encryption.is_some() { return Err(MediaError::InvalidData("encrypted AVC sample requires decryption")); }
+        if sample.encryption.is_some() {
+            return Err(MediaError::InvalidData(
+                "encrypted AVC sample requires decryption",
+            ));
+        }
         if sample.track_id != self.track_id {
             return Err(MediaError::InvalidData("wrong AVC track"));
         }
@@ -1097,7 +1106,11 @@ impl AudioDecoder {
         Ok(())
     }
     pub fn decode(&mut self, sample: &Sample) -> Result<AudioFrame> {
-        if sample.encryption.is_some() { return Err(MediaError::InvalidData("encrypted AAC sample requires decryption")); }
+        if sample.encryption.is_some() {
+            return Err(MediaError::InvalidData(
+                "encrypted AAC sample requires decryption",
+            ));
+        }
         if sample.track_id != self.track.id || sample.data.len() > MAX_SAMPLE_BYTES {
             return Err(MediaError::InvalidData("invalid AAC sample"));
         }

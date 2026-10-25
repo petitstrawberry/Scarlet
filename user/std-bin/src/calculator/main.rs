@@ -172,8 +172,7 @@ impl CalculatorApp {
         let start = snapshot.selection.start().byte;
         let end = snapshot.selection.end().byte;
         if snapshot.text.get(start..end).is_none()
-            || snapshot.text.len() - (end - start) + text.len()
-                > model::MAX_EXPRESSION_BYTES
+            || snapshot.text.len() - (end - start) + text.len() > model::MAX_EXPRESSION_BYTES
         {
             self.notice
                 .set("Clipboard text exceeds the 512-byte input limit".into());
@@ -470,8 +469,7 @@ impl CalculatorApp {
             return;
         }
         let unsigned = text.strip_prefix("−(").and_then(|s| s.strip_suffix(')'));
-        if unsigned.is_none() && text.len() + "−()".len() > model::MAX_EXPRESSION_BYTES
-        {
+        if unsigned.is_none() && text.len() + "−()".len() > model::MAX_EXPRESSION_BYTES {
             self.error
                 .set("Expression is too long to change sign".into());
             return;
@@ -832,10 +830,7 @@ fn expression_overflow(text: &str, field_width: f32, scroll_x: f32) -> (bool, bo
     // The field grows with short input. Its previous scroll state can survive
     // for one rebuild even though all glyphs now fit inside the new width.
     let scroll_x = scroll_x.clamp(0.0, (text_width - visible_width).max(0.0));
-    (
-        scroll_x > 0.5,
-        text_width > scroll_x + visible_width + 0.5,
-    )
+    (scroll_x > 0.5, text_width > scroll_x + visible_width + 0.5)
 }
 
 fn right_aligned_text(
@@ -1144,15 +1139,9 @@ mod tests {
         assert!(!app.error.get().is_empty());
         app.set_expression("1".repeat(model::MAX_EXPRESSION_BYTES - 5));
         app.toggle_sign();
-        assert_eq!(
-            app.expression.get().len(),
-            model::MAX_EXPRESSION_BYTES
-        );
+        assert_eq!(app.expression.get().len(), model::MAX_EXPRESSION_BYTES);
         app.toggle_sign();
-        assert_eq!(
-            app.expression.get().len(),
-            model::MAX_EXPRESSION_BYTES - 5
-        );
+        assert_eq!(app.expression.get().len(), model::MAX_EXPRESSION_BYTES - 5);
     }
     #[test]
     fn enter_evaluates_even_when_keypad_button_has_focus() {
@@ -1421,7 +1410,10 @@ mod tests {
                     origin.y + bounds.size.height * 0.5,
                 ));
             }
-            element.children().iter().find_map(|child| key_center(child.as_ref(), origin, label))
+            element
+                .children()
+                .iter()
+                .find_map(|child| key_center(child.as_ref(), origin, label))
         }
 
         let app = CalculatorApp::new();
@@ -1433,37 +1425,75 @@ mod tests {
         pipeline.layout_initial();
         pipeline.handle_event(&Event::TabletPresentationChanged { active: true });
         pipeline.render_for_present().unwrap();
-        assert!(!pipeline.focused_text_input_state().unwrap().automatic_software_keyboard);
+        assert!(
+            !pipeline
+                .focused_text_input_state()
+                .unwrap()
+                .automatic_software_keyboard
+        );
 
         for (index, (label, expected)) in [
-            ("7", "7"), ("+", "7+"), ("3", "7+3"), ("=", "7+3"),
-            ("AC", ""), ("2", "2"), ("2", "22"), ("⌫", "2"),
-        ].into_iter().enumerate() {
+            ("7", "7"),
+            ("+", "7+"),
+            ("3", "7+3"),
+            ("=", "7+3"),
+            ("AC", ""),
+            ("2", "2"),
+            ("2", "22"),
+            ("⌫", "2"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let point = key_center(pipeline.element_tree().root().unwrap(), Point::ZERO, label)
                 .expect("visible keypad key");
             let before = app.expression.get();
-            for (phase, offset) in [(TouchPhase::Down, 0), (TouchPhase::Move, 20_000_000), (TouchPhase::Up, hold_ms * 1_000_000)] {
+            for (phase, offset) in [
+                (TouchPhase::Down, 0),
+                (TouchPhase::Move, 20_000_000),
+                (TouchPhase::Up, hold_ms * 1_000_000),
+            ] {
                 let time_ns = 1 + index as u64 * 1_000_000_000 + offset;
                 pipeline.handle_event(&Event::TouchFrame(TouchFrame {
                     seat_id: 1,
                     serial: time_ns,
                     time_ns,
                     changes: vec![TouchChange {
-                        seat_id: 1, serial: time_ns, time_ns, id: 7, phase,
-                        x: point.x as i32 + if phase == TouchPhase::Down { 0 } else { drift }, y: point.y as i32,
-                        pressure: None, touch_major: None,
+                        seat_id: 1,
+                        serial: time_ns,
+                        time_ns,
+                        id: 7,
+                        phase,
+                        x: point.x as i32 + if phase == TouchPhase::Down { 0 } else { drift },
+                        y: point.y as i32,
+                        pressure: None,
+                        touch_major: None,
                     }],
                 }));
                 // The application syncs text input both after dispatch and after
                 // presentation. Focus changes may rebuild the actual TabView scene.
-                assert!(pipeline.focused_text_input_state().is_none(), "{label}: button takes focus");
+                assert!(
+                    pipeline.focused_text_input_state().is_none(),
+                    "{label}: button takes focus"
+                );
                 pipeline.render_for_present().unwrap();
-                assert!(pipeline.focused_text_input_state().is_none(), "{label}: rebuild keeps button focus");
+                assert!(
+                    pipeline.focused_text_input_state().is_none(),
+                    "{label}: rebuild keeps button focus"
+                );
                 if phase != TouchPhase::Up {
-                    assert_eq!(app.expression.get(), before, "{label}: activation waits for Tap");
+                    assert_eq!(
+                        app.expression.get(),
+                        before,
+                        "{label}: activation waits for Tap"
+                    );
                 }
             }
-            assert_eq!(app.expression.get(), expected, "{label}: exactly one Tap after Up");
+            assert_eq!(
+                app.expression.get(),
+                expected,
+                "{label}: exactly one Tap after Up"
+            );
             if label == "=" {
                 assert_eq!(app.answer.get(), Some(10.0));
                 assert_eq!(app.history.get().len(), 1);

@@ -424,11 +424,7 @@ impl NetworkLayer for EthernetLayer {
                                     ip_bytes[2],
                                     ip_bytes[3]
                                 );
-                                arp.queue_owned_packet_on_interface(
-                                    &interface_name,
-                                    ip,
-                                    packet,
-                                );
+                                arp.queue_owned_packet_on_interface(&interface_name, ip, packet);
                             }
                         }
                     }

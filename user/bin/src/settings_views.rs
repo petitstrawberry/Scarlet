@@ -62,7 +62,9 @@ fn settings_section(content: impl View + Clone, title: &str, title_size: f32) ->
         .background(Color::rgb(247, 248, 250))
 }
 fn settings_page(content: impl View + Clone) -> impl View + Clone {
-    ScrollView::new(content.padding(24.0)).vertical().frame(f32::INFINITY, f32::INFINITY)
+    ScrollView::new(content.padding(24.0))
+        .vertical()
+        .frame(f32::INFINITY, f32::INFINITY)
 }
 
 fn long_settings_page(content: impl View + Clone, height: f32) -> impl View + Clone {

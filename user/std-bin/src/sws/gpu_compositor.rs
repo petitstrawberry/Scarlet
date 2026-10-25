@@ -901,12 +901,22 @@ impl GpuCompositor {
     ) -> Result<(), &'static str> {
         let trace_home = window.title.as_deref() == Some(b"Home");
         if trace_home {
-            super::home_trace::record(8, format_args!(
-                "sws-project window={} presented={} flags={} geometry={:?} transform={:?} clip={:?} opacity={} instance={:?} damage_clip={:?} retained={}",
-                window.id, window.is_presented(), window.state_flags(), window.presentation_geometry(),
-                window.presentation_transform, window.presentation_clip, window.presentation_opacity(),
-                instance, damage_clip, window.retains_native_transition_frame(),
-            ));
+            super::home_trace::record(
+                8,
+                format_args!(
+                    "sws-project window={} presented={} flags={} geometry={:?} transform={:?} clip={:?} opacity={} instance={:?} damage_clip={:?} retained={}",
+                    window.id,
+                    window.is_presented(),
+                    window.state_flags(),
+                    window.presentation_geometry(),
+                    window.presentation_transform,
+                    window.presentation_clip,
+                    window.presentation_opacity(),
+                    instance,
+                    damage_clip,
+                    window.retains_native_transition_frame(),
+                ),
+            );
         }
         let presentation_clip = instance
             .and_then(|instance| instance.clip)
@@ -951,12 +961,22 @@ impl GpuCompositor {
         let shared_texture = self.committed_shared_texture(window);
         let imported_shm_texture = self.imported_shm_texture(window);
         if trace_home {
-            let state = self.shared_windows.iter().find(|state| state.window_id == window.id);
-            super::home_trace::record(5, format_args!(
-                "sws-source window={} scene={:?} shared={:?} shm={:?} pending={:?} presented={:?}",
-                window.id, scene_texture, shared_texture, imported_shm_texture,
-                state.and_then(|s| s.pending), state.and_then(|s| s.presented),
-            ));
+            let state = self
+                .shared_windows
+                .iter()
+                .find(|state| state.window_id == window.id);
+            super::home_trace::record(
+                5,
+                format_args!(
+                    "sws-source window={} scene={:?} shared={:?} shm={:?} pending={:?} presented={:?}",
+                    window.id,
+                    scene_texture,
+                    shared_texture,
+                    imported_shm_texture,
+                    state.and_then(|s| s.pending),
+                    state.and_then(|s| s.presented),
+                ),
+            );
         }
         let directly_imported_shm = imported_shm_texture.is_some();
         let visual_geometry = instance.map_or_else(

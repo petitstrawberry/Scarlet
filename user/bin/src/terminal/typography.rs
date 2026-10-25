@@ -1,9 +1,9 @@
 //! Terminal-local fonts and cell metrics, shared by painting and PTY sizing.
 use alloc::{boxed::Box, vec::Vec};
 use scarlet_ui::{FontStack, Size, graphics};
-use std::{fs::File, sync::OnceLock};
 #[cfg(not(target_os = "scarlet"))]
 use std::io::Read;
+use std::{fs::File, sync::OnceLock};
 
 pub(super) fn font_stack() -> Option<&'static FontStack> {
     static FONT: OnceLock<Option<FontStack>> = OnceLock::new();

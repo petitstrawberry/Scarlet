@@ -17,15 +17,22 @@ pub(crate) fn record(stage: usize, details: Arguments<'_>) {
     if !enabled() {
         return;
     }
-    let Some(counter) = COUNTS.get(stage) else { return };
+    let Some(counter) = COUNTS.get(stage) else {
+        return;
+    };
     let Ok(previous) = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
         (n < 4096).then_some(n + 1)
-    }) else { return };
+    }) else {
+        return;
+    };
     let n = previous + 1;
     if n <= 16 || n.is_power_of_two() {
         std::println!(
             "[HOME_TRACE] ns={} stage={} n={} {}",
-            scarlet_os::time::monotonic_time_ns(), stage, n, details,
+            scarlet_os::time::monotonic_time_ns(),
+            stage,
+            n,
+            details,
         );
     }
 }

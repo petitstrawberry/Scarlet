@@ -99,7 +99,10 @@ fn encrypted_mp4_incremental_metadata_and_decoder_boundary() {
         parser.push_bytes(chunk).unwrap();
         while let Some(event) = parser.next_event().unwrap() {
             match event {
-                ParserEvent::InitializationData(data) => { assert_eq!(&data[4..8], b"pssh"); init += 1; }
+                ParserEvent::InitializationData(data) => {
+                    assert_eq!(&data[4..8], b"pssh");
+                    init += 1;
+                }
                 ParserEvent::Track(track) => config = Some(AvcConfiguration::new(&track).unwrap()),
                 ParserEvent::Sample(sample) => {
                     if let Some(encryption) = &sample.encryption {
@@ -107,7 +110,9 @@ fn encrypted_mp4_incremental_metadata_and_decoder_boundary() {
                         assert!(config.as_mut().unwrap().annex_b(&sample).is_err());
                         encrypted += 1;
                         sync += usize::from(sample.keyframe);
-                    } else { clear += 1; }
+                    } else {
+                        clear += 1;
+                    }
                 }
             }
         }

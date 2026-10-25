@@ -7,7 +7,9 @@
 
 use crate::arch::Trapframe;
 use crate::environment::PAGE_SIZE;
-use crate::object::capability::memory_mapping::anon_owner::{AnonymousPageOwner, AnonymousZeroPageOwner};
+use crate::object::capability::memory_mapping::anon_owner::{
+    AnonymousPageOwner, AnonymousZeroPageOwner,
+};
 use crate::task::mytask;
 use crate::vm::vmem::{MemoryArea, VirtualMemoryMap};
 use alloc::sync::Arc;
@@ -954,13 +956,21 @@ mod tests {
 /// (address, output: *mut [usize; 2] = [start, end_exclusive]); returns 0 or usize::MAX.
 /// It exposes only the caller's virtual mapping, no physical/kernel addresses.
 pub fn sys_memory_query(trapframe: &mut Trapframe) -> usize {
-    let Some(task) = mytask() else { return usize::MAX; };
+    let Some(task) = mytask() else {
+        return usize::MAX;
+    };
     let address = trapframe.get_arg(0);
     let output = trapframe.get_arg(1);
     trapframe.increment_pc_next(&task);
-    let Some((start, end)) = task.vm_manager.user_mapping_bounds(address) else { return usize::MAX; };
+    let Some((start, end)) = task.vm_manager.user_mapping_bounds(address) else {
+        return usize::MAX;
+    };
     let result = mapping_bounds_payload(start, end);
-    if crate::library::std::usercopy::copy_to_user(&task, output, &result).is_err() { usize::MAX } else { 0 }
+    if crate::library::std::usercopy::copy_to_user(&task, output, &result).is_err() {
+        usize::MAX
+    } else {
+        0
+    }
 }
 fn mapping_bounds_payload(start: usize, end: usize) -> [u8; 2 * core::mem::size_of::<usize>()] {
     const WORD_BYTES: usize = core::mem::size_of::<usize>();

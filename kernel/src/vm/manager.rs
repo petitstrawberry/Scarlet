@@ -1032,11 +1032,18 @@ impl VirtualMemoryManager {
         let mut start = first.vmarea.start;
         let mut end = first.vmarea.end;
         for (_, map) in g.memmap.range(..start).rev() {
-            if map.vmarea.end.checked_add(1) != Some(start) || !same(map) { break; }
+            if map.vmarea.end.checked_add(1) != Some(start) || !same(map) {
+                break;
+            }
             start = map.vmarea.start;
         }
-        for (_, map) in g.memmap.range((core::ops::Bound::Excluded(first.vmarea.start), core::ops::Bound::Unbounded)) {
-            if end.checked_add(1) != Some(map.vmarea.start) || !same(map) { break; }
+        for (_, map) in g.memmap.range((
+            core::ops::Bound::Excluded(first.vmarea.start),
+            core::ops::Bound::Unbounded,
+        )) {
+            if end.checked_add(1) != Some(map.vmarea.start) || !same(map) {
+                break;
+            }
             end = map.vmarea.end;
         }
         Some((start, end.checked_add(1)?))
@@ -1671,9 +1678,7 @@ impl VirtualMemoryManager {
             // userspace load would fault in. Legacy raw-alias output writers
             // must never receive the shared zero source. Eager object mappings
             // keep their physical fallback; fork-COW reads still remain shared.
-            if !map.is_shared
-                && map.pmarea.start == 0
-                && owner.private_fault_requires_copy(&access)
+            if !map.is_shared && map.pmarea.start == 0 && owner.private_fault_requires_copy(&access)
             {
                 self.lazy_map_page_with(access).ok()?;
                 return self.translate_to_phys(vaddr);
@@ -3506,15 +3511,24 @@ mod tests {
         use crate::object::capability::memory_mapping::{MemoryMappingInfo, MemoryMappingOps};
         struct EagerOwner;
         impl MemoryMappingOps for EagerOwner {
-            fn get_mapping_info(&self, _: usize, _: usize) -> Result<MemoryMappingInfo, &'static str> {
+            fn get_mapping_info(
+                &self,
+                _: usize,
+                _: usize,
+            ) -> Result<MemoryMappingInfo, &'static str> {
                 Err("eager backing only")
             }
         }
         let manager = VirtualMemoryManager::new();
-        manager.add_memory_map(VirtualMemoryMap::new(
-            crate::vm::vmem::PhysicalMemoryArea::new(0x8000_0000, 0x8000_0fff),
-            MemoryArea::new(0x4000, 0x4fff), 0x0b, false, Some(Arc::new(EagerOwner)),
-        )).unwrap();
+        manager
+            .add_memory_map(VirtualMemoryMap::new(
+                crate::vm::vmem::PhysicalMemoryArea::new(0x8000_0000, 0x8000_0fff),
+                MemoryArea::new(0x4000, 0x4fff),
+                0x0b,
+                false,
+                Some(Arc::new(EagerOwner)),
+            ))
+            .unwrap();
         // A failed owner resolver must not enter an endless fault/translation
         // retry when a directly supplied physical page is already available.
         assert_eq!(manager.translate_to_phys(0x4017), Some(0x8000_0017));
