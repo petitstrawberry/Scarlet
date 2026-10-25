@@ -9,11 +9,11 @@
 //! Subsequent `Drag`s report clamped 0..1 upward progress, raw horizontal output
 //! pixels from the original down (right positive), and Overview readiness.
 //!
-//! Progress reaches one at 40% of output height. Above 0.18 progress (7.2% of
-//! output height) and at least 32 logical pixels up, pausing for >=100 ms
+//! Visual progress reaches one at 40% of output height; it is not a Home
+//! threshold. After at least 32 logical pixels up, pausing for >=100 ms
 //! marks the Overview preview ready, allowing two logical pixels of sensor
-//! jitter. The hold affects preview readiness only. Readiness stays latched
-//! during motion above that threshold; retreating below it clears readiness
+//! jitter. Readiness stays latched while browsing sideways; a new upward leg
+//! of eight logical pixels or retreating below the threshold clears readiness
 //! and permits a new pause. Call `tick` on every compositor tick,
 //! using the same monotonic clock as `process`, to reveal a pause without
 //! waiting for a touch event.
@@ -27,10 +27,12 @@
 //! 60 logical pixels: either a horizontal-dominant gesture or a sideways leg
 //! after moving up. Incidental diagonal drift does not switch tasks. Offsets use the
 //! nearest `page_stride`, with a minimum magnitude of one; finger left means
-//! positive. Otherwise, full progress (at least 40% of output height up)
-//! selects Home, even after a pause. Any intermediate rise beyond the same
-//! 12-logical-pixel activation slop selects Overview, with or without a pause.
-//! Release destinations do not depend on duration or preview readiness.
+//! positive. A fresh upward flick (32 logical pixels, >=300 logical px/s over
+//! the last 100 ms, predominantly upward) selects Home. It can resume after a
+//! pause or sideways browsing. A stopped/slow release selects Overview even
+//! after a long rise. No destination depends on a percentage of screen height.
+//! Any rise beyond the 12-logical-pixel activation slop has a destination;
+//! only returning to that edge slop cancels vertical navigation.
 //! Below-threshold releases cancel. Returning inside the horizontal threshold
 //! reselects Home or Overview according to the final upward travel.
 //! Reversals never permanently cancel: only stream invalidation (cancel,
@@ -39,7 +41,18 @@
 //! single contact; fingers already observed elsewhere cannot enter the edge.
 
 const HOLD_NS: u64 = 100_000_000;
-const COMMIT_PROGRESS: f64 = 0.18;
+const VELOCITY_WINDOW_NS: u64 = 100_000_000;
+const FLICK_FRESH_NS: u64 = 60_000_000;
+const MIN_RISE: f64 = 32.0;
+const FLICK_SPEED: f64 = 300.0;
+const CANCEL_SLOP: f64 = 12.0;
+
+#[derive(Debug, Default, Clone, Copy)]
+struct MotionSample {
+    time_ns: u64,
+    x: f64,
+    up: f64,
+}
 
 /// Distance between workspace pages in output pixels, shared with rendering.
 /// The one-pixel floor keeps division defined even for zero/tiny widths;
@@ -129,6 +142,12 @@ struct Gesture {
     last_frame_ns: u64, // Touch-event ordering only; ticks never advance this.
     above_since_ns: Option<u64>,
     overview_ready: bool,
+    pause_up: f64,
+    pause_ns: u64,
+    last_upward_ns: u64,
+    upward_tail: bool,
+    samples: [MotionSample; 16],
+    sample_count: usize,
     begun: bool,
 }
 
@@ -139,8 +158,21 @@ impl Gesture {
 
     fn moved(&mut self, x: i32, y: i32, now_ns: u64) {
         let (x, y) = (f64::from(x), f64::from(y));
+        // A timer-confirmed stationary interval is a real velocity anchor.
+        // Never insert a wall tick ahead of an older queued touch report.
+        if self.overview_ready
+            && self.samples[self.sample_count - 1].time_ns < self.pause_ns
+            && self.pause_ns < now_ns
+        {
+            self.remember_motion(self.pause_ns, self.start_x + self.dx);
+        }
         self.dx = x - self.start_x;
         self.up = self.start_y - y;
+        self.remember_motion(now_ns, x);
+        if self.overview_ready && self.up - self.pause_up >= self.geometry.logical(8.0) {
+            self.overview_ready = false;
+            self.above_since_ns = Some(now_ns);
+        }
         // Keep the horizontal leg separate from drift during an upward swipe.
         // Unlike requiring total horizontal dominance, this still allows an
         // up-then-sideways task switch without lifting or waiting for a hold.
@@ -158,6 +190,16 @@ impl Gesture {
         // moves with significant motion, so repeated small steps accumulate.
         let (mx, my) = (x - self.motion_x, y - self.motion_y);
         let jitter = self.geometry.logical(2.0);
+        if self.motion_y - y > jitter {
+            self.last_upward_ns = now_ns;
+            self.upward_tail = true;
+        } else if y - self.motion_y > jitter {
+            self.upward_tail = false;
+        } else if mx.abs() > jitter {
+            // A sideways browse/retreat must not reuse the velocity of the
+            // preceding upward leg, even when net horizontal travel cancels.
+            self.upward_tail = false;
+        }
         if mx * mx + my * my > jitter * jitter {
             self.motion_x = x;
             self.motion_y = y;
@@ -171,7 +213,7 @@ impl Gesture {
     }
 
     fn above_threshold(self) -> bool {
-        self.progress() > COMMIT_PROGRESS && self.up >= self.geometry.logical(32.0)
+        self.up >= self.geometry.logical(MIN_RISE)
     }
 
     fn refresh_readiness(&mut self, now_ns: u64) {
@@ -180,7 +222,59 @@ impl Gesture {
             .is_some_and(|deadline| now_ns >= deadline)
         {
             self.overview_ready = true;
+            self.pause_up = self.up;
+            self.pause_ns = now_ns;
         }
+    }
+
+    fn remember_motion(&mut self, now_ns: u64, x: f64) {
+        let sample = MotionSample {
+            time_ns: now_ns,
+            x,
+            up: self.up,
+        };
+        if self.sample_count > 0 && self.samples[self.sample_count - 1].time_ns == now_ns {
+            self.samples[self.sample_count - 1] = sample;
+        } else if self.sample_count < self.samples.len() {
+            self.samples[self.sample_count] = sample;
+            self.sample_count += 1;
+        } else {
+            self.samples.rotate_left(1);
+            self.samples[self.samples.len() - 1] = sample;
+        }
+    }
+
+    fn release_velocity(self, now_ns: u64) -> (f64, f64) {
+        let samples = &self.samples[..self.sample_count];
+        let cutoff = now_ns.saturating_sub(VELOCITY_WINDOW_NS);
+        let mut from = samples[0];
+        // Interpolate the window boundary so sample frequency and a long
+        // earlier drag do not change the velocity of the final flick.
+        for pair in samples.windows(2) {
+            if pair[1].time_ns <= cutoff {
+                from = pair[1];
+            } else {
+                if from.time_ns < cutoff {
+                    let t = (cutoff - pair[0].time_ns) as f64
+                        / (pair[1].time_ns - pair[0].time_ns) as f64;
+                    from = MotionSample {
+                        time_ns: cutoff,
+                        x: pair[0].x + (pair[1].x - pair[0].x) * t,
+                        up: pair[0].up + (pair[1].up - pair[0].up) * t,
+                    };
+                }
+                break;
+            }
+        }
+        let elapsed = now_ns.saturating_sub(from.time_ns);
+        if elapsed < 8_000_000 {
+            return (0.0, 0.0);
+        }
+        let seconds = elapsed as f64 / 1_000_000_000.0;
+        (
+            (self.start_x + self.dx - from.x) / seconds,
+            (self.up - from.up) / seconds,
+        )
     }
 
     fn next_deadline_ns(self) -> Option<u64> {
@@ -200,9 +294,18 @@ impl Gesture {
         }
     }
 
-    fn destination(self) -> Option<Destination> {
+    fn destination(self, now_ns: u64) -> Option<Destination> {
         if !self.begun {
             return None;
+        }
+        let (vx, vy) = self.release_velocity(now_ns);
+        if self.up >= self.geometry.logical(MIN_RISE)
+            && self.upward_tail
+            && now_ns.saturating_sub(self.last_upward_ns) <= FLICK_FRESH_NS
+            && vy >= self.geometry.logical(FLICK_SPEED)
+            && vy > vx.abs()
+        {
+            return Some(Destination::Home);
         }
         let sideways = self.start_x + self.dx - self.sideways_origin_x;
         if self.dx.abs() > self.geometry.logical(60.0)
@@ -219,9 +322,7 @@ impl Gesture {
                 -pages
             }));
         }
-        if self.progress() >= 1.0 {
-            Some(Destination::Home)
-        } else if self.up > self.geometry.logical(12.0) {
+        if self.up > self.geometry.logical(CANCEL_SLOP) {
             Some(Destination::Overview)
         } else {
             None
@@ -328,6 +429,16 @@ impl Navigation {
                             last_frame_ns: now_ns,
                             above_since_ns: None,
                             overview_ready: false,
+                            pause_up: 0.0,
+                            pause_ns: now_ns,
+                            last_upward_ns: now_ns,
+                            upward_tail: false,
+                            samples: [MotionSample {
+                                time_ns: now_ns,
+                                x: f64::from(x),
+                                up: 0.0,
+                            }; 16],
+                            sample_count: 1,
                             begun: false,
                         });
                         return Step::owned(None);
@@ -353,7 +464,7 @@ impl Navigation {
                 if contacts.is_empty() {
                     gesture.refresh_readiness(now_ns);
                     self.state = State::Idle;
-                    return Step::owned(Some(match gesture.destination() {
+                    return Step::owned(Some(match gesture.destination(now_ns) {
                         Some(destination) => Update::End { destination },
                         None => Update::Cancel,
                     }));
@@ -361,7 +472,7 @@ impl Navigation {
                 let (_, x, y) = contacts[0];
                 gesture.moved(x, y, now_ns);
                 let update = if !gesture.begun {
-                    if gesture.up > geometry.logical(12.0)
+                    if gesture.up > geometry.logical(CANCEL_SLOP)
                         || gesture.dx.abs() > geometry.logical(20.0)
                     {
                         gesture.begun = true;
@@ -430,13 +541,154 @@ mod tests {
     }
 
     #[test]
-    fn intermediate_swipe_begins_once_drags_and_stays_in_overview() {
+    fn short_flick_and_same_distance_pause_work_across_scales_heights_and_sample_rates() {
+        for scale in [1000, 1500, 2000] {
+            for height in [480, 1000, 1600] {
+                for steps in [4, 8, 16] {
+                    for (paused, duration) in [(false, 60), (true, 60), (false, 100), (true, 100)] {
+                        let px = |value: i32| value * scale / 1000;
+                        let mut n = Navigation::default();
+                        let mut send = |contacts: &[(i32, i32, i32)], ms| {
+                            n.process(
+                                contacts,
+                                false,
+                                ms * MS,
+                                px(1000) as u32,
+                                px(height) as u32,
+                                scale as u32,
+                            )
+                        };
+                        send(&[(7, px(500), px(height - 5))], 0);
+                        // Forty logical pixels, far below the old 40%-height gate.
+                        for i in 1..=steps {
+                            send(
+                                &[(7, px(500), px(height - 5 - 40 * i / steps))],
+                                (duration * i / steps) as u64,
+                            );
+                        }
+                        assert_eq!(
+                            send(
+                                &[],
+                                if paused {
+                                    duration as u64 + 120
+                                } else {
+                                    duration as u64 + 5
+                                }
+                            ),
+                            end(if paused {
+                                Destination::Overview
+                            } else {
+                                Destination::Home
+                            }),
+                            "scale={scale} height={height} steps={steps} paused={paused}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn even_a_long_swipe_stays_overview_when_the_finger_stops() {
+        for up in [80, 400, 800] {
+            let mut n = Navigation::default();
+            finger(&mut n, 500, 995, 0);
+            finger(&mut n, 500, 995 - up, 100);
+            assert!(matches!(
+                n.tick(200 * MS),
+                Some(Update::Drag {
+                    overview_ready: true,
+                    ..
+                })
+            ));
+            assert_eq!(frame(&mut n, &[], 210), end(Destination::Overview));
+        }
+    }
+
+    #[test]
+    fn final_flick_can_leave_a_paused_overview_without_sparse_sample_dilution() {
+        let mut n = Navigation::default();
+        finger(&mut n, 500, 995, 0);
+        finger(&mut n, 500, 915, 100);
+        assert!(matches!(
+            n.tick(200 * MS),
+            Some(Update::Drag {
+                overview_ready: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            finger(&mut n, 500, 835, 260).update,
+            Some(Update::Drag {
+                overview_ready: false,
+                ..
+            })
+        ));
+        assert_eq!(frame(&mut n, &[], 265), end(Destination::Home));
+    }
+
+    #[test]
+    fn switch_retreat_pause_flick_and_edge_cancel_use_the_same_stream() {
+        for action in [0, 1, 2, 3] {
+            let mut n = Navigation::default();
+            finger(&mut n, 500, 995, 0);
+            finger(&mut n, 500, 915, 100);
+            finger(&mut n, 800, 915, 200); // Explicit sideways leg.
+            let (release, destination) = match action {
+                0 => (210, Some(Destination::Switch(-1))),
+                1 => {
+                    finger(&mut n, 540, 915, 300);
+                    (310, Some(Destination::Overview))
+                }
+                2 => {
+                    // Upward flick now wins over stale total horizontal travel.
+                    finger(&mut n, 800, 915, 300);
+                    finger(&mut n, 800, 835, 360);
+                    (365, Some(Destination::Home))
+                }
+                _ => {
+                    finger(&mut n, 500, 995, 300);
+                    (310, None)
+                }
+            };
+            assert_eq!(
+                frame(&mut n, &[], release),
+                Step::owned(Some(match destination {
+                    Some(destination) => Update::End { destination },
+                    None => Update::Cancel,
+                }))
+            );
+        }
+    }
+
+    #[test]
+    fn jitter_tiny_flick_and_stale_velocity_never_send_home() {
+        for (up, release, destination) in [
+            (12, 55, None),
+            (24, 55, Some(Destination::Overview)),
+            (40, 125, Some(Destination::Overview)),
+        ] {
+            let mut n = Navigation::default();
+            finger(&mut n, 500, 995, 0);
+            finger(&mut n, 500, 995 - up, 50);
+            assert_eq!(
+                frame(&mut n, &[], release),
+                Step::owned(Some(match destination {
+                    Some(destination) => Update::End { destination },
+                    None => Update::Cancel,
+                }))
+            );
+        }
+    }
+
+    #[test]
+    fn intermediate_flick_begins_once_and_returns_home_without_a_height_gate() {
         let mut n = Navigation::default();
         assert_eq!(finger(&mut n, 500, 995, 0), Step::owned(None));
         assert_eq!(finger(&mut n, 500, 983, 10), Step::owned(None));
         assert_eq!(finger(&mut n, 500, 982, 20).update, Some(Update::Begin));
         assert_eq!(finger(&mut n, 500, 795, 100).update, drag(0.5, 0.0, false));
-        assert_eq!(frame(&mut n, &[], 120), end(Destination::Overview));
+        assert_eq!(frame(&mut n, &[], 120), end(Destination::Home));
         assert_eq!(frame(&mut n, &[], 130), Step::default());
     }
 
@@ -463,14 +715,13 @@ mod tests {
                         send(&[(7, px(500), px(height - 5))], 0);
                         send(&[(7, px(500 + sideways), px(height - 5))], 10);
                         send(&[(7, px(500 + sideways), px(height - 5 - up))], 20);
-                        let destination = if px(up) as f64 >= f64::from(px(height)) * 0.4 {
-                            Destination::Home
-                        } else {
-                            Destination::Overview
-                        };
-                        assert_eq!(
-                            send(&[], 30),
-                            end(destination),
+                        assert!(
+                            matches!(
+                                send(&[], 30).update,
+                                Some(Update::End {
+                                    destination: Destination::Home | Destination::Overview
+                                })
+                            ),
                             "scale={scale} height={height} up={up} sideways={sideways}"
                         );
                     }
@@ -487,14 +738,7 @@ mod tests {
                 finger(&mut n, 500, 995, 0);
                 finger(&mut n, 500 + sign * 30, 955, 20);
                 finger(&mut n, 500 + sign * 70, 995 - up, 40);
-                assert_eq!(
-                    frame(&mut n, &[], 50),
-                    end(if up >= 400 {
-                        Destination::Home
-                    } else {
-                        Destination::Overview
-                    })
-                );
+                assert_eq!(frame(&mut n, &[], 50), end(Destination::Home));
             }
         }
     }
@@ -511,7 +755,7 @@ mod tests {
 
     #[test]
     fn stationary_release_selects_overview_without_timer_events() {
-        for release in [101, 199, 200, 60_000] {
+        for release in [199, 200, 60_000] {
             let mut n = Navigation::default();
             finger(&mut n, 500, 995, 0);
             finger(&mut n, 500, 895, 100);
@@ -540,7 +784,7 @@ mod tests {
             let mut n = Navigation::default();
             finger(&mut n, 500, 995, 0);
             finger(&mut n, 500, 975, 20);
-            // Eight percent of height qualifies for Overview; 100 ms readies its preview.
+            // The logical rise qualifies for Overview; 100 ms readies its preview.
             assert_eq!(finger(&mut n, 500, 915, 80).update, drag(0.2, 0.0, false));
             assert_eq!(n.next_deadline_ns(), Some(180 * MS));
             assert_eq!(n.tick(179 * MS), None);
@@ -690,15 +934,12 @@ mod tests {
         for with_preview in [false, true] {
             let mut n = Navigation::default();
             finger(&mut n, 500, 995, 0);
-            finger(&mut n, 500, 923, 100); // Exactly 0.18 is not enough.
+            finger(&mut n, 500, 964, 100); // One logical pixel below the pause threshold.
             assert_eq!(n.tick(500 * MS), None);
-            assert_eq!(
-                finger(&mut n, 500, 922, 510).update,
-                drag(0.1825, 0.0, false)
-            );
+            assert_eq!(finger(&mut n, 500, 963, 510).update, drag(0.08, 0.0, false));
             let release = if with_preview {
                 assert_eq!(n.tick(609 * MS), None);
-                assert_eq!(n.tick(610 * MS), drag(0.1825, 0.0, true));
+                assert_eq!(n.tick(610 * MS), drag(0.08, 0.0, true));
                 610
             } else {
                 510
@@ -720,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn full_swipe_boundary_ignores_diagonal_drift_pause_and_duration() {
+    fn long_rise_uses_final_velocity_rather_than_the_old_home_distance() {
         for paused in [false, true] {
             for time in [300, 10_000] {
                 for dx in [-61, -60, 0, 60, 61] {
@@ -733,9 +974,9 @@ mod tests {
                         }
                         assert_eq!(
                             finger(&mut n, 500 + dx, 995 - up, time).update,
-                            drag((up as f32 / 400.0).min(1.0), dx as f32, paused)
+                            drag((up as f32 / 400.0).min(1.0), dx as f32, false)
                         );
-                        let destination = if up >= 400 {
+                        let destination = if time == 300 {
                             Destination::Home
                         } else {
                             Destination::Overview
@@ -824,9 +1065,9 @@ mod tests {
         finger(&mut n, 500, 995, 0);
         assert_eq!(n.next_deadline_ns(), None);
         finger(&mut n, 500, 923, 50);
-        assert_eq!(n.next_deadline_ns(), None);
-        finger(&mut n, 500, 922, 100); // Crossing with only one pixel of jitter.
-        assert_eq!(n.next_deadline_ns(), Some(200 * MS));
+        assert_eq!(n.next_deadline_ns(), Some(150 * MS));
+        finger(&mut n, 500, 922, 100); // One pixel of jitter does not delay the pause.
+        assert_eq!(n.next_deadline_ns(), Some(150 * MS));
         finger(&mut n, 500, 795, 120);
         assert_eq!(n.next_deadline_ns(), Some(220 * MS));
         finger(&mut n, 501, 795, 200); // Jitter does not postpone the wakeup.
@@ -1000,7 +1241,7 @@ mod tests {
     #[test]
     fn reversal_keeps_capture_and_can_select_again() {
         for (far_x, far_y, back_x, back_y, destination) in [
-            (500, 795, 500, 990, Destination::Overview),
+            (500, 795, 500, 990, Destination::Home),
             (600, 995, 550, 995, Destination::Switch(-1)),
             (400, 995, 450, 995, Destination::Switch(1)),
             (600, 995, 350, 995, Destination::Switch(-1)),
@@ -1160,7 +1401,7 @@ mod tests {
                     px(1000) as u32,
                     scale as u32
                 ),
-                end(Destination::Overview)
+                end(Destination::Home)
             );
         }
     }
