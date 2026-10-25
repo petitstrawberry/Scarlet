@@ -64,6 +64,40 @@ fn hash(path: &str, limit: Option<u64>) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Read without hashing so storage bandwidth is not confused with SHA cost.
+fn read_bench(path: &str, mib: u64, kib: usize) -> Result<(), &'static str> {
+    if !(1..=4096).contains(&mib) || !(4..=1024).contains(&kib) || !kib.is_power_of_two() {
+        return Err("read-bench requires 1..4096 MiB and a power-of-two 4..1024 KiB buffer");
+    }
+    let mut file = File::open(path).map_err(|_| "cannot open input")?;
+    let mut buffer = vec![0; kib * 1024];
+    let total = mib * 1024 * 1024;
+    let mut bytes = 0u64;
+    let started = monotonic_time_ns();
+    while bytes < total {
+        let len = (total - bytes).min(buffer.len() as u64) as usize;
+        let n = file
+            .read(&mut buffer[..len])
+            .map_err(|_| "benchmark read failed")?;
+        if n == 0 {
+            return Err("unexpected EOF before requested byte count");
+        }
+        bytes += n as u64;
+    }
+    let ns = monotonic_time_ns().saturating_sub(started).max(1);
+    let rate = (u128::from(bytes) * 1_000_000 / u128::from(ns)) as u64;
+    println!(
+        "read-bench bytes={} buffer_kib={} elapsed_ms={} MB_s={}.{:03} path={}",
+        bytes,
+        kib,
+        ns / 1_000_000,
+        rate / 1000,
+        rate % 1000,
+        path
+    );
+    Ok(())
+}
+
 fn inspect(path: &str) -> Result<(), &'static str> {
     let mut file = File::open(path).map_err(|_| "cannot open disk")?;
     let mut mbr = [0u8; 512];
@@ -144,6 +178,15 @@ fn run() -> Result<(), &'static str> {
     let args = std::env::args_vec();
     match args.get(1).map(|s| s.as_str()) {
         Some("inspect") if args.len() == 3 => inspect(&args[2]),
+        Some("read-bench") if args.len() == 4 || args.len() == 5 => read_bench(
+            &args[2],
+            args[3].parse().map_err(|_| "bad MiB count")?,
+            args.get(4)
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|_| "bad KiB count")?
+                .unwrap_or(256),
+        ),
         Some("hash") if args.len() == 3 => hash(&args[2], None),
         Some("hash-prefix") if args.len() == 4 => {
             let mib = args[3].parse::<u64>().map_err(|_| "bad MiB count")?;
@@ -169,7 +212,7 @@ fn run() -> Result<(), &'static str> {
             fs::unmount(&args[2], 0).map_err(|_| "unmount failed")
         }
         _ => Err(
-            "usage: storage-check inspect DEVICE | hash FILE | hash-prefix FILE MiB | roundtrip NEW_FILE MiB | mount DEVICE DIR FSTYPE | unmount DIR",
+            "usage: storage-check inspect DEVICE | read-bench DEVICE MiB [KiB] | hash FILE | hash-prefix FILE MiB | roundtrip NEW_FILE MiB | mount DEVICE DIR FSTYPE | unmount DIR",
         ),
     }
 }

@@ -57,3 +57,78 @@ mod tests {
         assert_eq!(step_percent(0, false), 0);
     }
 }
+
+/// Collapse queued repeats before doing any blocking audio IPC. A release
+/// cancels repeats already waiting in the same batch; physical taps survive.
+#[derive(Default)]
+pub struct KeyBatch {
+    taps: Vec<bool>,
+    repeat: Option<(u16, bool)>,
+}
+impl KeyBatch {
+    pub fn push(&mut self, code: u16, value: i32, sent_us: u64, now_us: u64) {
+        if !matches!(code, 0x72 | 0x73) {
+            return;
+        }
+        if value == 0 {
+            if self.repeat.is_some_and(|(held, _)| held == code) {
+                self.repeat = None;
+            }
+            return;
+        }
+        // A slow consumer must not replay old presses after the user stops.
+        if sent_us != 0 && now_us.saturating_sub(sent_us) > 250_000 {
+            return;
+        }
+        match value {
+            1 => {
+                self.repeat = None;
+                if self.taps.len() == 32 {
+                    self.taps.remove(0);
+                }
+                self.taps.push(code == 0x73);
+            }
+            2 => self.repeat = Some((code, code == 0x73)),
+            _ => {}
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.taps.is_empty() && self.repeat.is_none()
+    }
+    pub fn apply(&self, percent: u8) -> u8 {
+        let mut value = percent;
+        for &up in &self.taps {
+            value = step_percent(value, up);
+        }
+        if let Some((_, up)) = self.repeat {
+            value = step_percent(value, up);
+        }
+        value
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+    #[test]
+    fn queued_repeats_do_not_replay_after_release() {
+        let mut batch = KeyBatch::default();
+        batch.push(0x73, 1, 1_000_000, 1_000_000);
+        for i in 0..100 {
+            batch.push(0x73, 2, 1_000_000 + i, 1_000_100);
+        }
+        assert_eq!(batch.apply(25), 35); // One tap and at most one repeat.
+        batch.push(0x73, 0, 1_000_101, 1_000_101);
+        assert_eq!(batch.apply(25), 30);
+    }
+    #[test]
+    fn stale_input_is_discarded_and_taps_preserve_saturation_order() {
+        let mut batch = KeyBatch::default();
+        batch.push(0x73, 2, 1, 1_000_000);
+        assert!(batch.is_empty());
+        batch.push(0x73, 1, 1_000_000, 1_000_000);
+        batch.push(0x72, 1, 1_000_001, 1_000_001);
+        assert_eq!(batch.apply(100), 95);
+        assert_eq!(batch.apply(0), 0);
+    }
+}

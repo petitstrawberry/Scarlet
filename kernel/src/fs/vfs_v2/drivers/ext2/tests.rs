@@ -2639,3 +2639,154 @@ mod unlink_tests;
 
 #[path = "truncate_tests.rs"]
 mod truncate_tests;
+
+/// Full first group and a free inode group, optionally beyond the first GDT block.
+fn inode_group_fixture(group: u32, partial: bool) -> (Arc<MockBlockDevice>, Arc<Ext2FileSystem>) {
+    let device = Arc::new(create_test_ext2_device());
+    let write = |block: usize, buffer: Vec<u8>| {
+        let results = device.submit_requests(vec![Box::new(BlockIORequest {
+            request_type: BlockIORequestType::Write,
+            sector: block * 2,
+            sector_count: 2,
+            head: 0,
+            cylinder: 0,
+            buffer,
+        })]);
+        assert!(results[0].result.is_ok());
+    };
+    let mut sb = vec![0; 1024];
+    let total = if partial { 32 * 32 + 2 } else { 33 * 32 };
+    for (offset, value) in [
+        (0, total),
+        (4, 33 * 128 + 1),
+        (12, 100),
+        (16, if partial { 2 } else { 32 }),
+        (20, 1),
+        (32, 128),
+        (40, 32),
+        (76, 1),
+        (84, 11),
+    ] {
+        sb[offset..offset + 4].copy_from_slice(&u32::to_le_bytes(value));
+    }
+    sb[56..58].copy_from_slice(&EXT2_SUPER_MAGIC.to_le_bytes());
+    sb[88..90].copy_from_slice(&128_u16.to_le_bytes());
+    write(1, sb);
+    let mut descriptors = vec![0; 2048];
+    for (g, bitmap, table, free_blocks, free_inodes, dirs) in [
+        (0, 7_u32, 10_u32, 100_u16, 0_u16, 1_u16),
+        (
+            group,
+            group * 128 + 3,
+            group * 128 + 4,
+            0,
+            if partial { 2 } else { 32 },
+            0,
+        ),
+    ] {
+        let offset = g as usize * 32;
+        descriptors[offset..offset + 4].copy_from_slice(&6_u32.to_le_bytes());
+        descriptors[offset + 4..offset + 8].copy_from_slice(&bitmap.to_le_bytes());
+        descriptors[offset + 8..offset + 12].copy_from_slice(&table.to_le_bytes());
+        descriptors[offset + 12..offset + 14].copy_from_slice(&free_blocks.to_le_bytes());
+        descriptors[offset + 14..offset + 16].copy_from_slice(&free_inodes.to_le_bytes());
+        descriptors[offset + 16..offset + 18].copy_from_slice(&dirs.to_le_bytes());
+    }
+    write(2, descriptors[..1024].to_vec());
+    write(3, descriptors[1024..].to_vec());
+    let mut bitmap = vec![0; 1024];
+    bitmap[..4].fill(0xff);
+    write(6, bitmap);
+    let fs = Ext2FileSystem::new(device.clone()).unwrap();
+    let mut root = Ext2Inode::empty();
+    root.mode = (EXT2_S_IFDIR | 0o755).to_le();
+    root.links_count = 2_u16.to_le();
+    root.size = 1024_u32.to_le();
+    root.blocks = 2_u32.to_le();
+    root.block[0] = 20_u32.to_le();
+    fs.write_inode(2, &root).unwrap();
+    let mut directory = vec![0; 1024];
+    for (offset, length, name) in [(0, 12_u16, "."), (12, 1012_u16, "..")] {
+        directory[offset..offset + 4].copy_from_slice(&2_u32.to_le_bytes());
+        directory[offset + 4..offset + 6].copy_from_slice(&length.to_le_bytes());
+        directory[offset + 6] = name.len() as u8;
+        directory[offset + 7] = 2;
+        directory[offset + 8..offset + 8 + name.len()].copy_from_slice(name.as_bytes());
+    }
+    fs.write_block_cached(20, &directory).unwrap();
+    (device, fs)
+}
+
+#[test_case]
+fn ext2_allocates_first_inode_of_next_group_and_persists_it() {
+    let (device, fs) = inode_group_fixture(1, false);
+    let inode_number = fs.allocate_inode().unwrap();
+    assert_eq!(inode_number, 33);
+    let mut inode = Ext2Inode::empty();
+    inode.mode = (EXT2_S_IFREG | 0o600).to_le();
+    inode.links_count = 1_u16.to_le();
+    fs.write_inode(inode_number, &inode).unwrap();
+    let remounted = Ext2FileSystem::new(device).unwrap();
+    assert_eq!(
+        remounted.read_inode(33).unwrap().get_mode(),
+        EXT2_S_IFREG | 0o600
+    );
+    let free = remounted
+        .read_group_descriptor(1)
+        .unwrap()
+        .free_inodes_count;
+    assert_eq!(u16::from_le(free), 31);
+    let free = remounted
+        .read_group_descriptor(0)
+        .unwrap()
+        .free_inodes_count;
+    assert_eq!(free, 0);
+}
+
+#[test_case]
+fn ext2_late_inode_group_respects_final_bounds_and_reuses_freed_inode() {
+    let (device, fs) = inode_group_fixture(32, true);
+    assert_eq!(fs.allocate_inode().unwrap(), 1025);
+    assert_eq!(fs.allocate_inode().unwrap(), 1026);
+    assert_eq!(
+        fs.allocate_inode().unwrap_err().kind,
+        FileSystemErrorKind::NoSpace
+    );
+    let mut inode = Ext2Inode::empty();
+    inode.mode = (EXT2_S_IFREG | 0o644).to_le();
+    inode.links_count = 1_u16.to_le();
+    fs.write_inode(1025, &inode).unwrap();
+    let remounted = Ext2FileSystem::new(device).unwrap();
+    assert_eq!(
+        remounted.read_inode(1025).unwrap().get_mode(),
+        EXT2_S_IFREG | 0o644
+    );
+    remounted.free_inode(1025).unwrap();
+    assert_eq!(remounted.allocate_inode().unwrap(), 1025);
+    assert_eq!(
+        remounted.allocate_inode().unwrap_err().kind,
+        FileSystemErrorKind::NoSpace
+    );
+}
+
+#[test_case]
+fn ext2_directory_creation_accounts_for_inode_group_beyond_first_gdt_block() {
+    let (device, fs) = inode_group_fixture(32, true);
+    fs.create(
+        &fs.root_node(),
+        &"late-dir".to_string(),
+        FileType::Directory,
+        0,
+    )
+    .unwrap();
+    let remounted = Ext2FileSystem::new(device).unwrap();
+    let dir = remounted
+        .lookup(&remounted.root_node(), &"late-dir".to_string())
+        .unwrap();
+    assert_eq!(dir.file_type().unwrap(), FileType::Directory);
+    assert_eq!(remounted.read_inode(1025).unwrap().get_links_count(), 2);
+    let count = remounted.read_group_descriptor(32).unwrap().used_dirs_count;
+    assert_eq!(u16::from_le(count), 1);
+    let count = remounted.read_group_descriptor(0).unwrap().used_dirs_count;
+    assert_eq!(u16::from_le(count), 1);
+}
