@@ -3,10 +3,16 @@
 //! This module implements the standard SDHCI register interface using PIO or
 //! owned ADMA2 transfers. Bus discovery and platform quirks live in bindings.
 
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use crate::device::events::InterruptCapableDevice;
 use crate::device::mmc::{
     MmcBusWidth, MmcCommand, MmcData, MmcError, MmcHost, MmcResponse, MmcResponseType, MmcResult,
     MmcTiming,
 };
+use crate::interrupt::{InterruptClaim, InterruptId, InterruptResult};
+use crate::sync::{IrqSpinLock, Waker};
 
 mod adma;
 pub mod pci;
@@ -170,6 +176,7 @@ pub struct SdhciHost {
     adma: Option<adma::Adma2>,
     adma_active: bool,
     poisoned: bool,
+    completion: Option<Arc<SdhciCompletion>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,6 +211,101 @@ impl ResetPlan {
         } else {
             None
         }
+    }
+}
+
+/// Interrupt completion shared by an SDHCI host and its platform IRQ.
+///
+/// The IRQ handler owns acknowledgement so a level-triggered controller line
+/// is cleared promptly. The waiting task consumes the accumulated status from
+/// this object instead of racing the handler on the controller register.
+pub struct SdhciCompletion {
+    mmio_base: usize,
+    status: AtomicU32,
+    enabled: core::sync::atomic::AtomicBool,
+    waker: Arc<Waker>,
+    interrupt_id: IrqSpinLock<Option<InterruptId>>,
+    // Serializes status acknowledgement with the next command's clear. The
+    // controller register is write-one-to-clear, so an old handler must not
+    // clear a status bit belonging to a newly issued command.
+    lock: IrqSpinLock<()>,
+}
+
+impl SdhciCompletion {
+    pub fn new(mmio_base: usize) -> Arc<Self> {
+        Arc::new(Self {
+            mmio_base,
+            status: AtomicU32::new(0),
+            enabled: core::sync::atomic::AtomicBool::new(true),
+            waker: Arc::new(Waker::new_uninterruptible("sdhci-completion")),
+            interrupt_id: IrqSpinLock::new(None),
+            lock: IrqSpinLock::new(()),
+        })
+    }
+
+    pub fn set_interrupt_id(&self, interrupt_id: InterruptId) {
+        *self.interrupt_id.lock() = Some(interrupt_id);
+    }
+
+    /// Stop acknowledging the controller after its MMIO window is retired.
+    pub fn disable(&self) {
+        self.enabled.store(false, Ordering::Release);
+        // Wait for an acknowledgement that already passed the enabled check.
+        let _guard = self.lock.lock();
+    }
+
+    /// Clear controller and captured status before a new command.
+    pub fn begin(&self) {
+        let _guard = self.lock.lock();
+        unsafe {
+            crate::arch::mmio::write32(self.mmio_base + register::INTERRUPT_STATUS, u32::MAX);
+        }
+        self.status.store(0, Ordering::Release);
+    }
+
+    fn take_status(&self) -> u32 {
+        self.status.swap(0, Ordering::AcqRel)
+    }
+
+    fn wait(&self, timeout_ns: u64) -> bool {
+        let Some(task) = crate::task::mytask() else {
+            return false;
+        };
+        self.waker
+            .clone()
+            .wait_with_timeout_owned(task.get_id(), task.get_trapframe(), timeout_ns)
+    }
+}
+
+impl InterruptCapableDevice for SdhciCompletion {
+    fn handle_interrupt(&self) -> InterruptResult<()> {
+        let _ = self.claim_interrupt()?;
+        Ok(())
+    }
+
+    fn interrupt_id(&self) -> Option<InterruptId> {
+        *self.interrupt_id.lock()
+    }
+
+    fn claim_interrupt(&self) -> InterruptResult<InterruptClaim> {
+        if !self.enabled.load(Ordering::Acquire) {
+            return Ok(InterruptClaim::NotMine);
+        }
+        // A level-triggered line must be cleared before returning from the IRQ.
+        {
+            let _guard = self.lock.lock();
+            let status =
+                unsafe { crate::arch::mmio::read32(self.mmio_base + register::INTERRUPT_STATUS) };
+            if status == 0 {
+                return Ok(InterruptClaim::NotMine);
+            }
+            unsafe {
+                crate::arch::mmio::write32(self.mmio_base + register::INTERRUPT_STATUS, status);
+            }
+            self.status.fetch_or(status, Ordering::AcqRel);
+        }
+        self.waker.wake_all();
+        Ok(InterruptClaim::Handled)
     }
 }
 
@@ -309,6 +411,7 @@ impl SdhciHost {
             adma: None,
             adma_active: false,
             poisoned: false,
+            completion: None,
         }
     }
 
@@ -319,6 +422,49 @@ impl SdhciHost {
     /// The MMIO base address supplied when this host was constructed.
     pub const fn mmio_base(&self) -> usize {
         self.mmio_base
+    }
+
+    /// Route completion status to a registered platform interrupt.
+    ///
+    /// Call after the binding has registered and enabled the IRQ. Without
+    /// this attachment the host keeps its polling path.
+    pub fn attach_interrupt(&mut self, completion: Arc<SdhciCompletion>) {
+        self.completion = Some(completion);
+        self.apply_interrupt_signals();
+    }
+
+    fn apply_interrupt_signals(&self) {
+        if self.completion.is_none() {
+            return;
+        }
+        self.write16(
+            register::NORMAL_SIGNAL_ENABLE,
+            (interrupt::COMMAND_COMPLETE
+                | interrupt::TRANSFER_COMPLETE
+                | interrupt::BUFFER_WRITE_READY
+                | interrupt::BUFFER_READ_READY
+                | interrupt::CARD_INSERTION
+                | interrupt::CARD_REMOVAL
+                | interrupt::ERROR) as u16,
+        );
+        self.write16(register::ERROR_SIGNAL_ENABLE, u16::MAX);
+    }
+
+    fn clear_interrupt_status(&self) {
+        match &self.completion {
+            Some(completion) => completion.begin(),
+            None => self.write32(register::INTERRUPT_STATUS, u32::MAX),
+        }
+    }
+
+    /// Quiesce completion interrupts before the binding unmaps MMIO.
+    pub fn disable_interrupt(&self) {
+        if let Some(completion) = &self.completion {
+            completion.disable();
+            self.write16(register::NORMAL_SIGNAL_ENABLE, 0);
+            self.write16(register::ERROR_SIGNAL_ENABLE, 0);
+            self.write32(register::INTERRUPT_STATUS, u32::MAX);
+        }
     }
 
     /// Enable ADMA2 after the binding has established a valid DMA context.
@@ -621,7 +767,8 @@ impl SdhciHost {
         data_bytes: usize,
     ) -> MmcResult<u32> {
         let started = crate::time::current_time();
-        let may_sleep = self.adma_active
+        let use_irq = self.completion.is_some();
+        let may_block = use_irq
             && crate::arch::interrupt::are_interrupts_enabled()
             && crate::sync::preempt::preempt_count() == 0
             && crate::sched::scheduler::scheduler_ready(crate::arch::get_cpu().get_cpuid());
@@ -631,15 +778,21 @@ impl SdhciHost {
             self.expected_transfer_us(data_bytes)
         };
         loop {
-            let status = self.read32(register::INTERRUPT_STATUS);
+            let (status, from_register) = match (&self.completion, use_irq) {
+                (Some(completion), true) => (completion.take_status(), false),
+                _ => (self.read32(register::INTERRUPT_STATUS), true),
+            };
             if status & interrupt::ERROR != 0 || status & interrupt::ERROR_MASK != 0 {
-                self.write32(register::INTERRUPT_STATUS, status);
+                if from_register {
+                    self.write32(register::INTERRUPT_STATUS, status);
+                }
                 let reset = if data_phase {
                     software_reset::COMMAND | software_reset::DATA
                 } else {
                     software_reset::COMMAND
                 };
                 let _ = self.reset_lines(reset);
+                self.clear_interrupt_status();
                 return Err(if status & ((1 << 16) | (1 << 20)) != 0 {
                     MmcError::Timeout
                 } else if data_phase {
@@ -659,13 +812,21 @@ impl SdhciHost {
                     software_reset::COMMAND
                 };
                 let _ = self.reset_lines(reset);
+                self.clear_interrupt_status();
                 return Err(MmcError::Timeout);
+            }
+            if may_block {
+                let remaining_us = COMMAND_TIMEOUT_US.saturating_sub(elapsed);
+                if let Some(completion) = &self.completion {
+                    let _ = completion.wait(remaining_us.saturating_mul(1_000));
+                }
+                continue;
             }
             // Short payloads finish in less time than a timer wake can add,
             // so poll them. Longer transfers sleep only until a margin before
             // the bus time implied by the clock and width, then poll the end.
             // Early identification still works before the scheduler is ready.
-            if may_sleep {
+            if self.adma_active {
                 let sleep_us = if expected_us != 0 {
                     if expected_us <= TRANSFER_SPIN_US {
                         0
@@ -803,7 +964,7 @@ impl MmcHost for SdhciHost {
             self.power_on()?;
         }
         self.write8(register::TIMEOUT_CONTROL, 0x0e);
-        self.write32(register::INTERRUPT_STATUS, u32::MAX);
+        self.clear_interrupt_status();
         self.write16(
             register::NORMAL_STATUS_ENABLE,
             (interrupt::COMMAND_COMPLETE
@@ -817,6 +978,7 @@ impl MmcHost for SdhciHost {
         self.write16(register::ERROR_STATUS_ENABLE, u16::MAX);
         self.write16(register::NORMAL_SIGNAL_ENABLE, 0);
         self.write16(register::ERROR_SIGNAL_ENABLE, 0);
+        self.apply_interrupt_signals();
         self.set_bus_width(MmcBusWidth::One)
     }
 
@@ -946,7 +1108,7 @@ impl SdhciHost {
             command.index() != 12
                 && (data_phase || matches!(command.response(), MmcResponseType::R1b)),
         )?;
-        self.write32(register::INTERRUPT_STATUS, u32::MAX);
+        self.clear_interrupt_status();
 
         let mut mode = 0u16;
         if data_phase {
