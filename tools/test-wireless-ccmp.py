@@ -125,8 +125,8 @@ def exercise(port,server,rekey=False):
                                 assert protected
                                 send(0,eth)
                 if server in readable:
-                    payload,address=server.recvfrom(2048);assert payload in (b'CCMP_GOOD1',b'CCMP_GOOD2',b'CCMP_GOOD3',b'CCMP_GOOD4',b'HOLD_BASE',b'HOLD_FRESH',b'HOLD_FINAL',b'DURING_GROUP1',b'DURING_GROUP2',b'AFTER_GROUP1',b'AFTER_GROUP2'),payload
-                    seen.append(payload.decode());server.sendto(payload,address)
+                    payload,address=server.recvfrom(2048);assert payload == bytes([0x5a])*1472 or payload in (b'CCMP_GOOD1',b'CCMP_GOOD2',b'CCMP_GOOD3',b'CCMP_GOOD4',b'HOLD_BASE',b'HOLD_FRESH',b'HOLD_FINAL',b'DURING_GROUP1',b'DURING_GROUP2',b'AFTER_GROUP1',b'AFTER_GROUP2'),payload
+                    seen.append('MTU1500' if len(payload)==1472 else payload.decode());server.sendto(payload,address)
                 if rekey:
                     def protected_eapol(pdu):
                         return wpa.STA+wpa.AP+b'\x88\x8e'+pdu
@@ -190,7 +190,7 @@ def exercise(port,server,rekey=False):
                     with Qmp(str(qmp_path)) as qmp:qmp.execute('set_link',{'name':'nic0','up':True})
                 if 'CCMP_QA PASS' in content:
                     process.wait(timeout=10);assert process.returncode==0
-                    expected=['CCMP_GOOD1','CCMP_GOOD2']+(['DURING_GROUP1','AFTER_GROUP1','DURING_GROUP2','AFTER_GROUP2'] if rekey else [])+['CCMP_GOOD3','CCMP_GOOD4','HOLD_BASE','HOLD_FRESH','HOLD_FINAL']
+                    expected=['CCMP_GOOD1','MTU1500','CCMP_GOOD2']+(['DURING_GROUP1','AFTER_GROUP1','DURING_GROUP2','AFTER_GROUP2'] if rekey else [])+['CCMP_GOOD3','CCMP_GOOD4','HOLD_BASE','HOLD_FRESH','HOLD_FINAL']
                     assert seen==expected,seen
                     assert len(cases)==(6 if rekey else 5) and all(c['tx_pns'] and (c.get('manual_keys') or (c['m2'] and c['m4'])) for c in cases.values())
                     assert len({cases[label]['tk_sha256'] for label in ('first','second','automatic')})==3

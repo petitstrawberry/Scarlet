@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 extern crate scarlet_std as std;
+mod status;
 use scarlet_os::wireless_service as api;
 use std::{env, fs::File, println, thread, time::Duration};
 use zeroize::Zeroizing;
@@ -66,11 +67,7 @@ fn main() -> i32 {
                 thread::sleep(Duration::from_millis(100));
                 if let Ok(text) = api::call(api::STATUS, &[], &[]) {
                     let ready = if op == api::CONNECT {
-                        text.contains("STATE Connected")
-                            && text.lines().any(|l| {
-                                l.starts_with("LINK wlan0 ")
-                                    && !l.starts_with("LINK wlan0 0.0.0.0 ")
-                            })
+                        status::connection_ready(&text)
                     } else if op == api::SCAN {
                         text.contains("STATE Choose a network")
                     } else {

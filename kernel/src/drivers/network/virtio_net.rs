@@ -83,6 +83,11 @@ const VIRTIO_NET_S_ANNOUNCE: u16 = 2; // Gratuitous packets should be sent
 
 // Default MTU if not specified
 const DEFAULT_MTU: usize = 1500;
+
+fn frame_buffer_capacity(mtu: usize) -> usize {
+    // Keep the logical IP MTU separate from raw encapsulation/DMA headroom.
+    (mtu.max(DEFAULT_MTU) + 18).max(2048)
+}
 fn network_queue_capacity(maximum: usize, preferred: usize) -> Option<usize> {
     let limit = maximum.min(preferred);
     (limit != 0).then(|| 1usize << (usize::BITS - 1 - limit.leading_zeros()))
@@ -572,6 +577,7 @@ impl VirtioNetDevice {
 
     /// Setup receive buffers in the RX queue
     fn setup_rx_buffers(&self) -> Result<(), &'static str> {
+        let packet_size = frame_buffer_capacity(self.get_mtu()?);
         let mut virtqueues = self.virtqueues.lock();
         let rx_queue = &mut virtqueues[0]; // RX queue is index 0
 
@@ -580,7 +586,6 @@ impl VirtioNetDevice {
 
         for _ in 0..buffer_count {
             let hdr_size = self.get_header_size();
-            let packet_size = 1514; // Standard Ethernet frame size
             let total_size = hdr_size + packet_size;
 
             // Allocate from PMM for DMA
@@ -1106,11 +1111,14 @@ impl NetworkDevice for VirtioNetDevice {
 
         // Allocate before any TX publication. Include Ethernet/VLAN headroom
         // and the negotiated MTU so jumbo-capable devices retain their range.
+        // A 2 KiB minimum also holds a full Ethernet frame inside the encrypted
+        // mock's MPDU envelope. This stays within the same DMA page allocation
+        // as a normal MTU frame and does not change the advertised IP MTU.
         let count = self.virtqueues.lock()[1].get_queue_size();
         let tx = TxState::new(
             count,
             self.get_header_size(),
-            self.get_mtu()?.max(DEFAULT_MTU) + 18,
+            frame_buffer_capacity(self.get_mtu()?),
         )?;
         *self.tx_state.lock() = Some(tx);
         self.setup_rx_buffers()?;

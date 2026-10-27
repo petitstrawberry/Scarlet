@@ -232,9 +232,11 @@ fn main() -> i32 {
         api::call(api::STATUS, &[], &[])
             .is_ok_and(|s| s.contains("STATE Choose a network\n") && s.contains("AP "))
     });
-    api::call(api::CONNECT, b"ScarletMock", &[]).unwrap();
+    let cli = start("/bin/wifictl", &["wifictl", "connect", "ScarletMock"]);
     associated(&mut observer, "service-reconnect");
     authenticated(&mut observer);
+    assert_eq!(std::task::waitpid(cli, 0), (cli, 0));
+    println!("WPA_QA CLI_RENAMED_INTERFACE PASS");
     echo(&socket, &to, b"GOOD5");
     let old = observer.identity().connection_id;
     println!("WPA_QA SERVICE_CARRIER_READY");

@@ -84,6 +84,7 @@ jobs:
           python3 tools/test-pci-config-host.py
           python3 tools/test-pci-probe-host.py
           python3 tools/test-wpa-supplicant-host.py
+          python3 tools/test-wireless-cli-host.py
           python3 tools/test-network-regression.py --suite packet --suite backpressure --suite drain --suite arp
           wireless_host=$(rustc -vV | sed -n "s/^host: //p")
           cargo test --locked --manifest-path tools/wireless-management/host/Cargo.toml --target "$wireless_host"

@@ -441,7 +441,8 @@ mod tests {
         let v: Vec<_> = line.split_whitespace().collect();
         (hex(v[1]), hex(v[2]))
     }
-    #[test]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn rfc3610_packet_vector_one() {
         let key = hex("c0c1c2c3c4c5c6c7c8c9cacbcccdcecf");
         let nonce: [u8; 13] = hex("00000003020100a0a1a2a3a4a5").try_into().unwrap();
@@ -457,7 +458,8 @@ mod tests {
             hex("588c979a61c663d2f066d0c2c0f989806d5f6b61dac38417e8d12cfdf926e0")
         );
     }
-    #[test]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn independent_ccmp_vectors_unicast_group_and_qos() {
         for name in ["rx", "rxq0", "rxq7", "group"] {
             let mut r = setup();
@@ -470,7 +472,8 @@ mod tests {
             assert_eq!(r.seal(scope(1), OWN, &eth, tid), Ok(mpdu));
         }
     }
-    #[test]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn replay_is_per_tid_and_non_qos_shares_priority_zero() {
         let mut shared = setup();
         let (_, q0) = vector("rxq0");
@@ -486,7 +489,8 @@ mod tests {
         assert_eq!(r.status().replay_dropped, 4);
         assert_eq!(r.status().rx_accepted, 4);
     }
-    #[test]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn bad_mic_does_not_poison_high_watermark_or_release_plaintext() {
         let mut r = setup();
         let (eth, p) = vector("rx");
@@ -497,7 +501,8 @@ mod tests {
         assert_eq!(r.open(scope(1), OWN, &p), Ok(eth));
         assert_eq!(r.status().integrity_dropped, 1);
     }
-    #[test]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn authenticated_addresses_and_restricted_header_forms() {
         let (_, p) = vector("rx");
         for (at, mask) in [(4, 2), (10, 2), (16, 2), (1, 4), (22, 1), (26, 1), (27, 1)] {
@@ -512,7 +517,8 @@ mod tests {
         bad[24] |= 0x80;
         assert_eq!(setup().open(scope(1), OWN, &bad), Err(Error::Invalid));
     }
-    #[test]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn reinstall_delete_and_retired_pairwise_material_cannot_reset_pn() {
         let mut r = setup();
         let (eth, _) = vector("tx");
@@ -535,7 +541,8 @@ mod tests {
         k.version = 1;
         assert_eq!(r.install(scope(2), &k), Err(Error::KeyReuse));
     }
-    #[test]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn gtk_reuse_after_reconnect_preserves_replay_floor() {
         let mut r = setup();
         let (_, p) = vector("group");
@@ -551,7 +558,8 @@ mod tests {
         r.install(scope(1), &gtk).unwrap();
         assert_eq!(r.open(scope(1), OWN, &p), Err(Error::Replay));
     }
-    #[test]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn old_scope_and_old_ciphertext_cannot_cross_fresh_key() {
         let mut r = setup();
         let (_, p) = vector("rx");
@@ -564,7 +572,8 @@ mod tests {
         assert_eq!(r.open(scope(2), OWN, &p), Err(Error::Integrity));
         assert_eq!(r.status().largest_rx_pn, 0);
     }
-    #[test]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn failed_submission_burns_pn_and_exhaustion_never_wraps() {
         let mut r = setup();
         let (eth, _) = vector("tx");
@@ -578,7 +587,8 @@ mod tests {
         assert_eq!(r.seal(scope(1), OWN, &eth, None), Err(Error::Exhausted));
         assert_eq!(r.status().tx_pn, MAX_PN);
     }
-    #[test]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn bounded_history_fails_closed_instead_of_forgetting_old_keys() {
         let mut r = KeyRing::default();
         for n in 0..HISTORY_LIMIT {
@@ -592,7 +602,8 @@ mod tests {
         assert_eq!(r.install(scope(999), &k), Err(Error::Capacity));
         assert_eq!(r.status().keys, 0);
     }
-    #[test]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn protected_eapol_is_unicast_ptk_only_and_control_preview_does_not_consume_data() {
         let mut r = setup();
         let (eth, p) = vector("eapol");
@@ -615,7 +626,8 @@ mod tests {
         assert!(r.seal(scope(1), OWN, &outbound, None).is_ok());
         assert_eq!(r.status().tx_pn, 1);
     }
-    #[test]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn atomic_group_cutover_retires_slots_and_preserves_ptk_and_replay_floors() {
         let mut r = setup();
         let (tx, _) = vector("tx");
@@ -649,7 +661,8 @@ mod tests {
         assert_eq!(r.status().keys, 2);
         assert_eq!(r.status().tx_pn, 2);
     }
-    #[test]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn failed_group_candidate_leaves_old_data_and_pn_intact() {
         let mut r = setup();
         let (tx, _) = vector("tx");
