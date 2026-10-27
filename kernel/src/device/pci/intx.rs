@@ -36,7 +36,7 @@ impl PciIntxInterruptSource {
     pub fn new(device: &PciDeviceInfo, handler: Arc<dyn InterruptCapableDevice>) -> Option<Self> {
         let interrupt_id = Self::interrupt_id_for_device(device)?;
         Some(Self {
-            config: PciConfig::new(device.ecam_vaddr()),
+            config: device.config(),
             address: device.address(),
             interrupt_id,
             handler,

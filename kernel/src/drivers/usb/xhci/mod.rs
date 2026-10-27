@@ -7942,7 +7942,7 @@ fn probe_xhci(device: &PciDeviceInfo) -> Result<(), &'static str> {
         device.device_id()
     );
 
-    let config = PciConfig::new(device.ecam_vaddr());
+    let config = device.config();
     let addr = device.address();
 
     // Enable bus mastering

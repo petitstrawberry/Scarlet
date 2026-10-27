@@ -20,7 +20,7 @@ pub enum InterfaceMethod {
 }
 
 /// Parsed configuration for one interface selector.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InterfaceConfig {
     /// Interface name or `*` wildcard.
     pub name: String,
@@ -71,7 +71,7 @@ impl InterfaceConfig {
 }
 
 /// Global `netcfgd` settings and interface selectors.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NetworkConfig {
     /// Resolver configuration generated after interfaces are configured.
     pub resolv_conf: String,
@@ -261,7 +261,7 @@ fn read_file(path: &str) -> Result<String, String> {
     String::from_utf8(content).map_err(|_| format!("{path}: configuration is not UTF-8"))
 }
 
-fn parse_config_fragment(
+pub(super) fn parse_config_fragment(
     content: &str,
     source: &str,
     config: &mut NetworkConfig,

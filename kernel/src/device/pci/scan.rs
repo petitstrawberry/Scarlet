@@ -107,7 +107,13 @@ impl<'a> PciScanner<'a> {
         None
     }
 
-    fn find_pci_host_node<'b>(fdt: &'b fdt::Fdt<'b>) -> Option<fdt::node::FdtNode<'b, 'b>> {
+    fn find_pci_host_node<'b>(
+        bus: &PciBus,
+        fdt: &'b fdt::Fdt<'b>,
+    ) -> Option<fdt::node::FdtNode<'b, 'b>> {
+        if let Some(path) = bus.host_path() {
+            return fdt.find_node(path);
+        }
         for parent_path in ["/soc", "/"] {
             let Some(parent) = fdt.find_node(parent_path) else {
                 continue;
@@ -120,9 +126,9 @@ impl<'a> PciScanner<'a> {
         None
     }
 
-    fn host_msi_parent_from_fdt() -> Option<u32> {
+    fn host_msi_parent_from_fdt(bus: &PciBus) -> Option<u32> {
         let fdt = crate::device::fdt::FdtManager::get_manager().get_fdt()?;
-        let pci_node = Self::find_pci_host_node(fdt)?;
+        let pci_node = Self::find_pci_host_node(bus, fdt)?;
         Self::get_u32_prop(&pci_node, "msi-parent")
     }
 
@@ -310,7 +316,7 @@ impl<'a> PciScanner<'a> {
         }
 
         let fdt = crate::device::fdt::FdtManager::get_manager().get_fdt()?;
-        let pci_node = Self::find_pci_host_node(fdt)?;
+        let pci_node = Self::find_pci_host_node(self.bus, fdt)?;
 
         let mask = pci_node.property("interrupt-map-mask")?.value;
         let map = pci_node.property("interrupt-map")?.value;
@@ -350,7 +356,7 @@ impl<'a> PciScanner<'a> {
 
     fn iommu_spec_for(&self, addr: &PciAddress) -> Option<IommuSpec> {
         let fdt = crate::device::fdt::FdtManager::get_manager().get_fdt()?;
-        let pci_node = Self::find_pci_host_node(fdt)?;
+        let pci_node = Self::find_pci_host_node(self.bus, fdt)?;
         let map = pci_node.property("iommu-map")?.value;
         let rid = Self::requester_id(addr);
 
@@ -366,11 +372,11 @@ impl<'a> PciScanner<'a> {
     ///
     /// * `bus` - Reference to the PCI bus manager
     pub fn new(bus: &'a PciBus) -> Result<Self, &'static str> {
-        let config = PciConfig::new(bus.ecam_vaddr()?);
+        let config = bus.config()?;
         Ok(Self {
             config,
             bus,
-            host_msi_parent: Self::host_msi_parent_from_fdt(),
+            host_msi_parent: Self::host_msi_parent_from_fdt(bus),
         })
     }
 
@@ -552,7 +558,7 @@ impl<'a> PciScanner<'a> {
 
         let device_info = PciDeviceInfo::new(
             addr,
-            self.bus.ecam_vaddr().ok()?,
+            0, // Replaced below with the host-owned accessor before publication.
             vendor_id,
             device_id,
             class_code,
@@ -565,6 +571,7 @@ impl<'a> PciScanner<'a> {
             name,
             *id_counter,
         )
+        .with_config(self.config.clone())
         .with_bars(bars);
         let device_info = device_info.with_interrupt_capabilities(interrupt_capabilities);
         let device_info = Self::inherit_host_msi_parent(device_info, self.host_msi_parent);

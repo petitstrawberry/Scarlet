@@ -44,8 +44,8 @@ use crate::object::capability::{MemoryMappingOps, Selectable};
 use crate::vm::addr::{phys_to_virt, virt_to_phys};
 use crate::{
     device::network::{
-        DevicePacket, EthernetDevice, MacAddress, NetworkDevice, NetworkInterfaceConfig,
-        NetworkStats,
+        DevicePacket, EthernetDevice, LinkObservation, MacAddress, NetworkDevice,
+        NetworkInterfaceConfig, NetworkStats,
     },
     drivers::virtio::{
         device::{Register, VirtioDevice},
@@ -288,19 +288,27 @@ fn pop_queued_rx_packet() -> Option<QueuedRxPacket> {
     RX_PACKET_QUEUE.lock().pop_front()
 }
 
-fn enqueue_rx_packets(interface_name: Arc<str>, packets: Vec<DevicePacket>) -> usize {
+fn enqueue_rx_packets(interface_name: Arc<str>, mut packets: Vec<DevicePacket>) -> usize {
     if packets.is_empty() {
         return 0;
     }
 
     ensure_rx_worker_started();
 
+    // Stamp at ingress observation, before the deferred RX queue. The interface
+    // may have been replaced by a controlled wireless facade in the test image.
+    let Some(interface) = get_network_manager().get_interface(&interface_name) else {
+        return 0;
+    };
+    packets.retain_mut(|packet| interface.prepare_receive(packet));
+
     let mut enqueued = 0usize;
     {
         let mut queue = RX_PACKET_QUEUE.lock();
         for packet in packets {
             if queue.len() >= RX_WORKER_QUEUE_LIMIT {
-                break;
+                interface.receive_dropped(&packet);
+                continue;
             }
 
             queue.push_back(QueuedRxPacket {
@@ -734,6 +742,11 @@ impl VirtioNetDevice {
 
     /// Refresh on configuration interrupts, rather than MMIO for every packet.
     fn refresh_link_status(&self) {
+        self.refresh_link_status_and_epoch(false);
+    }
+
+    fn refresh_link_status_and_epoch(&self, advance: bool) {
+        let mut epoch = self.link_epoch.lock();
         let features = *self.features.read();
         if features & (1u64 << VIRTIO_NET_F_STATUS) != 0 {
             // Read status from config space
@@ -744,6 +757,11 @@ impl VirtioNetDevice {
             // Assume link is up if status feature is not supported
             self.carrier.store(true, Ordering::Release);
         }
+        if advance {
+            *epoch = epoch.saturating_add(1);
+        }
+        drop(epoch);
+        crate::device::wireless::notify_transport_change();
     }
 
     /// Enable device-side interrupt state after the controller line has been registered.
@@ -752,18 +770,12 @@ impl VirtioNetDevice {
 
         let isr = self.read32_register(Register::InterruptStatus);
         if isr != 0 {
-            if isr & 0x02 != 0 {
-                // Retain configuration notifications even if carrier has already
-                // returned by the daemon's next snapshot.
-                let mut epoch = self.link_epoch.lock();
-                *epoch = epoch.wrapping_add(1);
-            }
             self.write32_register(Register::InterruptAck, isr & 0x03);
         }
 
         // Sample after acknowledging startup notifications, so a change
         // between the old sample and the acknowledgement is not lost.
-        self.refresh_link_status();
+        self.refresh_link_status_and_epoch(isr & 0x02 != 0);
 
         Ok(())
     }
@@ -861,13 +873,26 @@ impl InterruptCapableDevice for VirtioNetDevice {
         self.write32_register(Register::InterruptAck, isr & 0x03);
 
         if isr & 0x02 != 0 {
-            self.refresh_link_status();
-            let mut epoch = self.link_epoch.lock();
-            *epoch = epoch.wrapping_add(1);
+            self.refresh_link_status_and_epoch(true);
         }
 
+        // Observe the incarnation before draining hardware completions, so a
+        // concurrent reconnect cannot relabel this batch as new traffic.
+        let name = self.interface_name.lock().clone();
+        let admission = name
+            .as_deref()
+            .and_then(|name| get_network_manager().get_interface(name))
+            .map(|interface| interface.receive_token())
+            .unwrap_or(Ok(None));
+        if admission.is_err() {
+            let _ = <Self as NetworkDevice>::retire_packets(self);
+            return Ok(InterruptClaim::Handled);
+        }
         let _ = self.complete_transmissions();
-        let packets = self.process_received_packets().unwrap_or_default();
+        let mut packets = self.process_received_packets().unwrap_or_default();
+        for packet in &mut packets {
+            packet.link_token = admission.unwrap();
+        }
         if packets.is_empty() {
             return Ok(InterruptClaim::Handled);
         }
@@ -1102,6 +1127,40 @@ impl NetworkDevice for VirtioNetDevice {
         self.carrier.load(Ordering::Acquire)
     }
 
+    fn link_observation(&self) -> LinkObservation {
+        let epoch = self.link_epoch.lock();
+        LinkObservation {
+            mac: self.get_mac_address().unwrap_or(MacAddress::new([0; 6])),
+            state: if self.carrier.load(Ordering::Acquire) {
+                scarlet_abi::network::LINK_UP
+            } else {
+                scarlet_abi::network::LINK_DOWN
+            },
+            kind: self.link_kind(),
+            mtu: self.get_mtu().unwrap_or(DEFAULT_MTU) as u32,
+            epoch: *epoch,
+        }
+    }
+
+    fn supports_packet_retirement(&self) -> bool {
+        true
+    }
+    fn retire_packets(&self) -> Result<(), &'static str> {
+        {
+            // Same queue -> TX lock order as send/completion. Submitted DMA is
+            // retained; only the not-yet-published software FIFO is discarded.
+            let mut queues = self.virtqueues.lock();
+            let mut state = self.tx_state.lock();
+            if let Some(state) = state.as_mut() {
+                state.pending.clear();
+                state.reclaim(&mut queues[1])?;
+            }
+        }
+        let discarded = self.process_received_packets()?;
+        self.stats.lock().dropped += discarded.len() as u64;
+        Ok(())
+    }
+
     fn get_stats(&self) -> NetworkStats {
         self.stats.lock().clone()
     }
@@ -1289,6 +1348,7 @@ mod tx_tests {
             state.send(
                 &mut queue,
                 DevicePacket {
+                    link_token: None,
                     data: vec![0; 1],
                     len: usize::MAX
                 }

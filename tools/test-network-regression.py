@@ -86,11 +86,30 @@ def other_suites(c):
     predicates = '\n'.join((block(tcp, 'const fn ' + n + '(') for n in ['tcp_receive_side_open', 'tcp_receive_side_eof']))
     methods = '\n'.join((block(tcp, '    pub fn ' + n + '(') for n in ['recv_data', 'recv_blocking']))
     drain = drain.replace('/* PRODUCTION_STATE_PREDICATES */', predicates).replace('/* PRODUCTION_DRAIN_HELPER */', block(tcp, 'fn drain_recv_buffer(')).replace('    /* PRODUCTION_RECEIVE_METHODS */', methods)
-    return [('packet', packet, None, 'network-packet-allocation-host-tests.rs', ''), ('worker', worker, '/* PRODUCTION_WORKER */', 'xhci-worker-batching-host-tests.rs', ''), ('drain', drain, None, 'tcp-bulk-receive-drain-host-tests.rs', '')]
+    backpressure = (HARNESS / 'tcp-transmit-backpressure-host-tests.rs').read_text()
+    notifications = tcp[tcp.index('static TX_READY_SEQUENCE:'):tcp.index('fn flush_notification_sockets(')]
+    methods = '\n'.join(block(tcp, marker) for marker in ['    fn writable_capacity(', '    fn send_payload_segments(',
+        '    fn register_driver_backpressure(', '    fn remove_unsent_buffer_tail(', '    pub fn send_data('])
+    backpressure = backpressure.replace('/* PRODUCTION_TX_NOTIFY */', notifications).replace('    /* PRODUCTION_TX_METHODS */', methods)
+    return [('packet', packet, None, 'network-packet-allocation-host-tests.rs', ''),
+            ('backpressure', backpressure, None, 'tcp-transmit-backpressure-host-tests.rs', ''),
+            ('worker', worker, '/* PRODUCTION_WORKER */', 'xhci-worker-batching-host-tests.rs', ''), ('drain', drain, None, 'tcp-bulk-receive-drain-host-tests.rs', '')]
+
+def arp_suite(c):
+    arp = (c / 'kernel/src/network/arp.rs').read_text()
+    packet = (c / 'kernel/src/network/packet.rs').read_text().split('#[cfg(test)]')[0].replace('//!', '//')
+    types = '\n'.join(block(arp, marker) for marker in ('pub struct ArpCacheEntry {', 'pub enum ArpEntryState {', 'impl ArpCacheEntry {', 'struct ArpPendingEntry {'))
+    types = types.replace('pub struct ArpCacheEntry', '#[derive(Debug,Clone)] pub struct ArpCacheEntry').replace('pub enum ArpEntryState', '#[derive(Debug,Clone,Copy,PartialEq,Eq)] pub enum ArpEntryState')
+    types += '\ntype ArpCacheKey=(String,u32);type ArpPendingKey=(String,u32);'
+    methods = '\n'.join(block(arp, marker) for marker in ('pub fn lookup_on_interface(', 'pub fn add_entry_on_interface(', 'fn resolve_pending(', 'pub fn clear_interface(', 'pub fn pending_packet_count(', 'pub fn queue_owned_packet_on_interface(', 'fn get_timestamp('))
+    harness = (HARNESS / 'arp-resolution-host-tests.rs').read_text().replace('/* PRODUCTION_PACKET */', packet).replace('/* PRODUCTION_ARP_TYPES */',types).replace('/* PRODUCTION_ARP_METHODS */',methods)
+    return [('arp', harness, None, 'arp-resolution-host-tests.rs', '')]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, default=ROOT / '.cache/network-regression')
+    parser.add_argument('--suite', action='append', choices=['ncm', 'ownership', 'packet', 'worker', 'drain', 'arp', 'backpressure'],
+                        help='Run selected suites; default runs all suites')
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -98,11 +117,13 @@ def main():
     version = subprocess.check_output([rustc, '-vV'], text=True)
     host = re.search('^host: (.+)$', version, re.M)[1]
     paths = ['kernel/src/drivers/usb/cdc_ncm.rs', 'kernel/src/drivers/usb/xhci/mod.rs', 'kernel/src/drivers/usb/xhci/ring.rs'] + ['kernel/src/network/' + n for n in ['tcp.rs', 'ipv4.rs', 'protocol_stack.rs']]
-    paths.append('kernel/src/network/packet.rs')
+    paths.extend(['kernel/src/network/packet.rs', 'kernel/src/device/network/mod.rs', 'kernel/src/network/arp.rs'])
     before = {n: sha(ROOT / n) for n in paths}
-    receipt = {'source_sha256': before, 'runs': [], 'physical_tested': False}
+    receipt = {'compiler_version': version, 'source_sha256': before, 'runs': [], 'physical_tested': False}
     with tempfile.TemporaryDirectory(prefix='network-regression-') as temp:
-        for name, production, marker, harness, queue in ncm_suites(ROOT) + other_suites(ROOT):
+        for name, production, marker, harness, queue in ncm_suites(ROOT) + other_suites(ROOT) + arp_suite(ROOT):
+            if args.suite and name not in args.suite:
+                continue
             source = (HARNESS / harness).read_text().replace(marker, production) if marker else production
             source = source.replace('/* PRODUCTION_RX_QUEUE */', queue)
             path = output / (name + '.rs')

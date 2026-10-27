@@ -178,6 +178,7 @@ name = "sas"
 path = "src/sas/main.rs"
 
 [dependencies]
+zeroize = { version = "1.8", default-features = false, features = ["alloc"] }
 scarlet-ui-core = { optional = true, git = "https://github.com/petitstrawberry/scarlet-ui", rev = "b6a7bec8bc33b2abbf8dda1397529ab836e91ead", default-features = false, features = ["legacy-scarlet-std"] }
 scarlet-abi = { path = "../lib/scarlet-abi" }
 scarlet-std = { path = "../lib/std", features = ["alloc_debug"] }

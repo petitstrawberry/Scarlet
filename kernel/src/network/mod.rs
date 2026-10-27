@@ -75,6 +75,9 @@ use crate::object::KernelObject;
 use crate::println;
 
 const LOG_IPV4_PACKET_TRACE: bool = false;
+/// Temporary admission failure: the packet was not queued or submitted.
+/// Keep this distinct from link loss and deferred, already-queued ARP traffic.
+pub const TX_QUEUE_FULL: &str = "network: transmit queue full";
 
 /// Unique socket identifier
 pub type SocketId = usize;
@@ -142,6 +145,47 @@ pub trait NetworkInterface: Send + Sync {
     }
     fn mtu(&self) -> u32 {
         1500
+    }
+
+    fn link_observation(&self) -> crate::device::network::LinkObservation {
+        crate::device::network::LinkObservation {
+            mac: self.mac_address(),
+            state: self.link_state(),
+            kind: self.link_kind(),
+            mtu: self.mtu(),
+            epoch: self.link_epoch(),
+        }
+    }
+    /// None is an unversioned wired link; Err means the controlled port is shut.
+    fn packet_token(&self) -> Result<Option<(u64, u64)>, &'static str> {
+        Ok(None)
+    }
+    /// Ingress token may admit control frames while ordinary data is blocked.
+    /// The interface must classify and enforce again before stack delivery.
+    fn receive_token(&self) -> Result<Option<(u64, u64)>, &'static str> {
+        self.packet_token()
+    }
+    fn receive_dropped(&self, _packet: &DevicePacket) {}
+    fn prepare_receive(&self, _packet: &mut DevicePacket) -> bool {
+        true
+    }
+    fn receive_packet(&self, packet: &DevicePacket) {
+        if packet.link_token.is_none() {
+            get_network_manager().deliver_received_packet(self.name(), packet);
+        }
+    }
+    fn supports_packet_retirement(&self) -> bool {
+        false
+    }
+    fn retire_packets(&self) -> Result<(), &'static str> {
+        Err("Packet retirement unsupported")
+    }
+
+    /// Close ordinary data queues during a key change within one association.
+    /// Transports with a separate uncontrolled port may retain its EAPOL frames;
+    /// connection teardown must still use `retire_packets` to retire everything.
+    fn retire_data_packets(&self) -> Result<(), &'static str> {
+        self.retire_packets()
     }
 
     /// Get the configured primary IPv4 address.
@@ -572,9 +616,16 @@ impl NetworkManager {
     }
 
     pub fn handle_received_packet(&self, interface_name: &str, packet: &DevicePacket) {
+        if let Some(interface) = self.get_interface(interface_name) {
+            interface.receive_packet(packet);
+        }
+    }
+
+    /// Dispatch after the ingress interface has admitted this packet incarnation.
+    pub(crate) fn deliver_received_packet(&self, interface_name: &str, packet: &DevicePacket) {
         // Includes IPv4/TCP processing and synchronous responses; TCP is nested.
         let _profile = profile::begin(profile::Stage::StackDispatch, packet.len, 0);
-        if packet.len < 14 {
+        if packet.len < 14 || packet.len > packet.data.len() {
             return;
         }
 

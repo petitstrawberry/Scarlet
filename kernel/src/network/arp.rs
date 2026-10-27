@@ -359,6 +359,20 @@ impl ArpLayer {
         );
     }
 
+    fn resolve_pending(
+        &self,
+        interface: &str,
+        ip: Ipv4Address,
+        mac: [u8; 6],
+    ) -> Option<ArpPendingEntry> {
+        let mut pending = self.pending.write();
+        self.add_entry_on_interface(interface, ip, mac);
+        pending.remove(&(
+            alloc::string::String::from(interface),
+            u32::from_be_bytes(ip.0),
+        ))
+    }
+
     /// Add entry to ARP cache (uses default interface)
     pub fn add_entry(&self, ip_address: Ipv4Address, mac_address: [u8; 6]) {
         if let Some(interface) = self.get_default_interface() {
@@ -368,10 +382,19 @@ impl ArpLayer {
 
     /// Discard cached neighbors and queued packets when a link is lost/replaced.
     pub fn clear_interface(&self, interface: &str) {
+        // Same pending -> cache order as resolution and late TX admission.
+        let mut pending = self.pending.write();
         self.cache.write().retain(|(name, _), _| name != interface);
+        pending.retain(|(name, _), _| name != interface);
+    }
+
+    pub fn pending_packet_count(&self, interface: &str) -> usize {
         self.pending
-            .write()
-            .retain(|(name, _), _| name != interface);
+            .read()
+            .iter()
+            .filter(|((name, _), _)| name == interface)
+            .map(|(_, entry)| entry.packet_queue.lock().len())
+            .sum()
     }
 
     /// Remove entry from ARP cache for a specific interface
@@ -437,13 +460,16 @@ impl ArpLayer {
         // Add to pending list (interface-aware key)
         let pending_key = (interface.clone(), u32::from_be_bytes(target_ip.0));
         let mut pending = self.pending.write();
-        pending.insert(
-            pending_key,
-            ArpPendingEntry {
+        if self.lookup_on_interface(&interface, target_ip).is_some() {
+            return Ok(());
+        }
+        // Concurrent senders must not replace another sender's queued packets.
+        pending
+            .entry(pending_key)
+            .or_insert_with(|| ArpPendingEntry {
                 entry: ArpCacheEntry::pending(target_ip),
                 packet_queue: IrqSpinLock::new(Vec::new()),
-            },
-        );
+            });
         drop(pending);
 
         // Build Ethernet frame for ARP broadcast
@@ -520,11 +546,8 @@ impl ArpLayer {
         // Process ARP request
         if arp_packet.is_request() {
             // Cache sender information from the request (helps avoid extra ARP round-trips)
-            self.add_entry_on_interface(&iface, sender_ip, arp_packet.sender_mac);
-
-            // If we had queued packets for this sender, flush them now
-            let pending_key = (iface.clone(), u32::from_be_bytes(sender_ip.0));
-            let pending_entry = self.pending.write().remove(&pending_key);
+            // Publish the learned MAC and detach waiters atomically with TX admission.
+            let pending_entry = self.resolve_pending(&iface, sender_ip, arp_packet.sender_mac);
             if let Some(pending_entry) = pending_entry {
                 let queued_packets = {
                     let mut queue = pending_entry.packet_queue.lock();
@@ -591,13 +614,9 @@ impl ArpLayer {
 
             if !is_from_us {
                 // Check if we have a pending request for this IP on this interface
-                let pending_key = (iface.clone(), u32::from_be_bytes(sender_ip.0));
-                let pending_entry = self.pending.write().remove(&pending_key);
+                let pending_entry = self.resolve_pending(&iface, sender_ip, arp_packet.sender_mac);
 
                 if let Some(pending_entry) = pending_entry {
-                    // Update cache with resolved MAC
-                    self.add_entry_on_interface(&iface, sender_ip, arp_packet.sender_mac);
-
                     let sender_ip_bytes = sender_ip.0;
                     println!(
                         "[ARP] Received reply for {}.{}.{}.{} -> {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} on {}",
@@ -665,7 +684,6 @@ impl ArpLayer {
                         sender_ip_bytes[3],
                         iface
                     );
-                    self.add_entry_on_interface(&iface, sender_ip, arp_packet.sender_mac);
                 }
 
                 let mut stats = self.stats.write();
@@ -704,6 +722,42 @@ impl ArpLayer {
             u32::from_be_bytes(ip_address.0),
         );
         let mut pending = self.pending.write();
+        // Serialize admission with clear_interface's pending-map lock. A packet
+        // racing retirement cannot recreate an old-generation pending queue.
+        if let Some(token) = packet.link_token() {
+            if get_network_manager()
+                .get_interface(interface)
+                .and_then(|i| i.packet_token().ok())
+                .flatten()
+                != Some(token)
+            {
+                return;
+            }
+        }
+
+        // The reply may have arrived after resolve_dst_mac's initial miss.
+        // Resolution publishes under this same pending lock, so either this
+        // packet joins its waiter list or sees the learned MAC and sends now.
+        if let Some(mac) = self.lookup_on_interface(interface, ip_address) {
+            drop(pending);
+            if let (Some(eth), Some(src)) = (
+                get_network_manager().get_layer("ethernet"),
+                self.get_local_mac_for_interface(interface),
+            ) {
+                let mut context = LayerContext::new();
+                context.set("eth_dst_mac", &mac);
+                context.set("eth_src_mac", &src);
+                context.set("interface", interface.as_bytes());
+                context.set(
+                    "eth_type",
+                    &crate::network::ethernet::ether_type::IPV4.to_be_bytes(),
+                );
+                // send_owned retains the original incarnation token; a link
+                // retired after the lookup still rejects the old packet.
+                let _ = eth.send_owned(packet, &context, &[]);
+            }
+            return;
+        }
 
         if let Some(entry) = pending.get_mut(&pending_key) {
             entry.packet_queue.lock().push(packet);

@@ -1,0 +1,4 @@
+[service.wirelessd]
+exec = "/bin/wirelessd"
+depends = []
+after = ["logd", "netcfgd"]

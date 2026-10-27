@@ -308,6 +308,9 @@ pub enum SocketError {
     NoConnections,
     /// Operation would block
     WouldBlock,
+    /// Device software TX queue rejected this packet before ownership transfer.
+    /// Unlike ARP deferral, TCP must retain the unsent bytes for a later attempt.
+    TransmitBusy,
     /// Operation was interrupted by asynchronous task event delivery
     Interrupted,
     /// Operation timed out
@@ -338,7 +341,7 @@ pub(crate) fn socket_error_to_native_errno(error: &SocketError) -> i32 {
         SocketError::NotConnected => 107,
         SocketError::AlreadyConnected => 106,
         SocketError::InvalidOperation | SocketError::NotListening => 22,
-        SocketError::NoConnections | SocketError::WouldBlock => 11,
+        SocketError::NoConnections | SocketError::WouldBlock | SocketError::TransmitBusy => 11,
         SocketError::Interrupted => 4,
         SocketError::TimedOut => 110,
         SocketError::NotSupported => 95,

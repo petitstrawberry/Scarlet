@@ -33,15 +33,16 @@ def cpio(entries, output):
     output.write_bytes(data)
 
 
-def build():
+def build(*, wireless=False, wireless_data=False, wireless_auth=False, wireless_wpa=False, wireless_ccmp=False, extra_entries=()):
     fixture = OUT / 'kernel-fixture'
     (fixture / 'src').mkdir(parents=True, exist_ok=True)
+    extra_features = '"wireless-mock", ' if wireless or wireless_data or wireless_auth or wireless_wpa or wireless_ccmp else ""
     (fixture / 'Cargo.toml').write_text(f'''[package]
 name = "network-qa-kernel"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
-scarlet = {{ path = "{ROOT / 'kernel'}", default-features = false, features = ["linux-boot", "network", "user-fpu", "user-vector"] }}
+scarlet = {{ path = "{ROOT / 'kernel'}", default-features = false, features = [{extra_features}"linux-boot", "network", "user-fpu", "user-vector"] }}
 [profile.release]
 panic = "abort"
 ''')
@@ -54,7 +55,7 @@ static ENTRY: extern "C" fn() -> ! = scarlet::arch::aarch64::boot::linux::image_
     target.pop('pre-link-args', None)
     (fixture / 'aarch64-network-none.json').write_text(json.dumps(target))
     env = os.environ.copy()
-    env['RUSTFLAGS'] = f'-C link-arg=-T{ROOT / "guest_tests/network_management/kernel.ld"}'
+    env['RUSTFLAGS'] = f'-C link-arg=-T{ROOT / "tools/network-management/guest/kernel.ld"}'
     run(['cargo', 'build', '--manifest-path', str(fixture / 'Cargo.toml'), '--release',
          '--target', str(fixture / 'aarch64-network-none.json'), '-Z', 'build-std=core,alloc,compiler_builtins'],
         'kernel-build.log', env=env)
@@ -64,14 +65,24 @@ static ENTRY: extern "C" fn() -> ! = scarlet::arch::aarch64::boot::linux::image_
     env['CARGO_TARGET_DIR'] = str(OUT / 'userspace-target')
     run(['cargo', 'build', '--manifest-path', 'user/bin/Cargo.toml', '--no-default-features',
          '--bin', 'init', '--bin', 'netcfgd', '--release', '--target', 'aarch64-unknown-scarlet'], 'init-build.log', env=env)
-    run(['cargo', 'build', '--manifest-path', 'guest_tests/network_management/Cargo.toml',
-         '--release', '--target', 'aarch64-unknown-scarlet'], 'qa-build.log')
+    guest = 'tools/wireless-ccmp/guest' if wireless_ccmp else 'tools/wpa-supplicant/guest' if wireless_wpa else 'tools/wireless-auth/guest' if wireless_auth else 'tools/wireless-data/guest' if wireless_data else ('tools/wireless-management/guest' if wireless else 'tools/network-management/guest')
+    probe = 'wireless-ccmp-qa' if wireless_ccmp else 'wpa-supplicant-qa' if wireless_wpa else 'wireless-auth-qa' if wireless_auth else 'wireless-data-qa' if wireless_data else ('wireless-management-qa' if wireless else 'network-management-qa')
+    run(['cargo', 'build', '--manifest-path', f'{guest}/Cargo.toml',
+         '--release', '--target', 'aarch64-unknown-scarlet'], 'qa-build.log', env=env)
+    run(['cargo', 'build', '--manifest-path', 'user/scarlet-ld/Cargo.toml',
+         '--release', '--target', 'aarch64-unknown-scarlet'], 'loader-build.log', env=env)
+    if wireless_wpa or wireless_ccmp:
+        run(['cargo','build','--manifest-path','user/wpa-supplicant/Cargo.toml','--release','--target','aarch64-unknown-scarlet'], 'supplicant-build.log',env=env)
     entries = [(name, 0o40755, b'') for name in ['bin', 'dev', 'etc', 'etc/netcfgd.d', 'tmp', 'root', 'mnt', 'mnt/newroot']]
     for name, path in [
         ('init', OUT / 'userspace-target/aarch64-unknown-scarlet/release/init'),
         ('bin/netcfgd', OUT / 'userspace-target/aarch64-unknown-scarlet/release/netcfgd'),
-        ('bin/network-qa', ROOT / 'guest_tests/network_management/target/aarch64-unknown-scarlet/release/network-management-qa')]:
+        ('bin/scarlet-ld', OUT / 'userspace-target/aarch64-unknown-scarlet/release/scarlet-ld'),
+        ('bin/network-qa', OUT / f'userspace-target/aarch64-unknown-scarlet/release/{probe}')]:
         entries.append((name, 0o100755, path.read_bytes()))
+    if wireless_wpa or wireless_ccmp:
+        for name in ('wpa-supplicant', 'wirelessd'):
+            entries.append(('bin/' + name,0o100755,(OUT/f'userspace-target/aarch64-unknown-scarlet/release/{name}').read_bytes()))
     config = '''[network]
 dhcp_timeout_ms = 500
 dhcp_attempts = 3
@@ -85,7 +96,7 @@ method = "dhcp"
 metric = 100
 '''
     entries.append(('etc/netcfgd.d/10-test.toml', 0o100644, config.encode()))
-    cpio(entries, OUT / 'initramfs.cpio')
+    cpio(entries + list(extra_entries), OUT / 'initramfs.cpio')
 
 
 def exercise():
