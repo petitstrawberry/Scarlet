@@ -1215,6 +1215,11 @@ mod tx_tests {
     fn every_rx_slot_is_posted_and_recycled_without_replacing_dma_storage() {
         let registers = ContiguousPages::new(1).unwrap();
         let device = test_device(&registers, 32);
+        *device.config.write() = Some(NetworkInterfaceConfig::new(
+            MacAddress::new([0; 6]),
+            DEFAULT_MTU,
+            "virtio-net-test",
+        ));
         device.virtqueues.lock()[0].init();
         device.setup_rx_buffers().unwrap();
         assert_eq!(device.rx_buffers.lock().len(), 32);
@@ -1225,8 +1230,9 @@ mod tx_tests {
             assert_eq!(queue.free_descriptors.len(), 0);
             for slot in 0..32 {
                 let index = queue.avail.ring[slot] as usize;
+                assert!(queue.desc[index].len as usize >= device.header_size + 1562);
                 queue.used.ring[slot].id = index as u32;
-                queue.used.ring[slot].len = (device.header_size + 60) as u32;
+                queue.used.ring[slot].len = (device.header_size + 1562) as u32;
             }
             *queue.used.idx = 32;
         }
@@ -1238,7 +1244,7 @@ mod tx_tests {
             .collect();
         let packets = device.process_received_packets().unwrap();
         assert_eq!(packets.len(), 32);
-        assert!(packets.iter().all(|packet| packet.len == 60));
+        assert!(packets.iter().all(|packet| packet.len == 1562));
         let after: Vec<_> = device
             .rx_buffers
             .lock()
