@@ -52,6 +52,9 @@ jobs:
       CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
     steps:
     - uses: actions/checkout@v4
+      with:
+        # Packet allocation regressions compare against a pinned ancestor.
+        fetch-depth: 0
 
     - uses: cachix/install-nix-action@v31
       with:
