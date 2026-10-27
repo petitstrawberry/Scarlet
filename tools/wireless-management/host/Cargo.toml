@@ -1,0 +1,12 @@
+[package]
+name = "wireless-control-host-tests"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[dependencies]
+scarlet-abi = { path = "../../../user/lib/scarlet-abi" }
+
+aes = { version = "=0.9.3", default-features = false, features = ["zeroize"] }
+ccm = { version = "=0.6.1", default-features = false }
+sha2 = { version = "0.10.9", default-features = false, features = ["force-soft"] }
+zeroize = { version = "1.8", default-features = false, features = ["alloc"] }

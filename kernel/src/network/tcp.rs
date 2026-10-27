@@ -140,6 +140,29 @@ static DEFERRED_RX_SOCKETS: Lazy<IrqSpinLock<Vec<Weak<TcpSocket>>>> =
 static DEFERRED_ACK_SOCKETS: Lazy<IrqSpinLock<Vec<Weak<TcpSocket>>>> =
     Lazy::new(|| IrqSpinLock::new(Vec::new()));
 
+static TX_READY_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static TX_WAITERS_PENDING: AtomicBool = AtomicBool::new(false);
+static TX_WAITERS: Lazy<IrqSpinLock<Vec<Weak<TcpSocket>>>> =
+    Lazy::new(|| IrqSpinLock::new(Vec::new()));
+
+/// Called after a full transport queue gains capacity, or is retired. Wake
+/// only sockets that actually encountered local admission backpressure.
+pub fn notify_transmit_available() {
+    TX_READY_SEQUENCE.fetch_add(1, Ordering::Release);
+    if !TX_WAITERS_PENDING.load(Ordering::Acquire) {
+        return;
+    }
+    let waiters = {
+        let mut list = TX_WAITERS.lock();
+        TX_WAITERS_PENDING.store(false, Ordering::Release);
+        core::mem::take(&mut *list)
+    };
+    for socket in waiters.into_iter().filter_map(|weak| weak.upgrade()) {
+        socket.driver_tx_blocked.store(false, Ordering::Release);
+        socket.notify_write_waiters_now();
+    }
+}
+
 fn flush_notification_sockets(sockets: Vec<Weak<TcpSocket>>) {
     for socket in sockets {
         if let Some(socket) = socket.upgrade() {
@@ -624,6 +647,7 @@ pub struct TcpSocket {
     // Leave interrupts enabled while encoding an entire application buffer;
     // the individual shared socket/device structures retain their IRQ guards.
     transmit_lock: SpinLock<()>,
+    driver_tx_blocked: AtomicBool,
 
     /// Reference to TCP layer
     tcp_layer: Weak<TcpLayer>,
@@ -771,6 +795,7 @@ impl TcpSocket {
             send_buffer: IrqSpinLock::new(VecDeque::new()),
             recv_buffer: IrqSpinLock::new(VecDeque::new()),
             transmit_lock: SpinLock::new(()),
+            driver_tx_blocked: AtomicBool::new(false),
             tcp_layer,
             self_weak: weak.clone(),
             pending_accept: IrqSpinLock::new(VecDeque::new()),
@@ -1867,7 +1892,7 @@ impl TcpSocket {
     }
 
     fn writable_capacity(&self) -> usize {
-        if !tcp_send_side_open(self.get_state()) {
+        if self.driver_tx_blocked.load(Ordering::Acquire) || !tcp_send_side_open(self.get_state()) {
             return 0;
         }
         if let Some(peer) = self.loopback_peer.lock().upgrade() {
@@ -2325,8 +2350,13 @@ impl TcpSocket {
             header.ack_number = self.recv_ack.load(Ordering::SeqCst);
             let is_last = sent + count == data.len();
             header.set_flags(tcp_flags::ACK | if is_last { tcp_flags::PSH } else { 0 });
+            let sequence = TX_READY_SEQUENCE.load(Ordering::Acquire);
             match self.send_segment(dest_ip, header, chunk, true, false) {
                 Ok(()) => sent += count,
+                Err(SocketError::TransmitBusy) => {
+                    self.register_driver_backpressure(sequence);
+                    break;
+                }
                 Err(err) if sent == 0 => return Err(err),
                 Err(_) => break,
             }
@@ -2338,6 +2368,20 @@ impl TcpSocket {
         }
     }
 
+    fn register_driver_backpressure(&self, sequence: usize) {
+        {
+            let mut list = TX_WAITERS.lock();
+            if !self.driver_tx_blocked.swap(true, Ordering::AcqRel) {
+                list.retain(|weak| weak.strong_count() != 0);
+                list.push(self.self_weak.clone());
+            }
+            TX_WAITERS_PENDING.store(true, Ordering::Release);
+        }
+        // Capacity may have returned between rejection and registration.
+        if TX_READY_SEQUENCE.load(Ordering::Acquire) != sequence {
+            notify_transmit_available();
+        }
+    }
     fn remove_unsent_buffer_tail(&self, unsent: usize) {
         if unsent == 0 {
             return;
@@ -2418,7 +2462,9 @@ impl TcpSocket {
             if remaining == Some(0) {
                 return Err(SocketError::WouldBlock);
             }
-            match waker.wait_with_timeout_result(task_id, trapframe, remaining) {
+            match waker.wait_with_condition(task_id, trapframe, remaining, 0, || {
+                self.writable_capacity() > 0 || !tcp_send_side_open(self.get_state())
+            }) {
                 WaitResult::Woken => {}
                 WaitResult::TimedOut => return Err(SocketError::WouldBlock),
                 WaitResult::Interrupted => return Err(SocketError::Interrupted),
@@ -3314,7 +3360,10 @@ impl crate::object::capability::Selectable for TcpSocket {
                 if (interest.read && current.read) || (interest.write && current.write) {
                     return crate::object::capability::selectable::SelectWaitOutcome::Ready;
                 }
-                waker.wait_with_timeout_result(task_id, trapframe, remaining)
+                waker.wait_with_condition(task_id, trapframe, remaining, 0, || {
+                    let ready = self.current_ready(interest);
+                    ready.read || ready.write || ready.except
+                })
             } else if interest.write {
                 let waker = {
                     let mut waker_lock = self.send_waker.lock();
@@ -3328,7 +3377,10 @@ impl crate::object::capability::Selectable for TcpSocket {
                 if (interest.read && current.read) || (interest.write && current.write) {
                     return crate::object::capability::selectable::SelectWaitOutcome::Ready;
                 }
-                waker.wait_with_timeout_result(task_id, trapframe, remaining)
+                waker.wait_with_condition(task_id, trapframe, remaining, 0, || {
+                    let ready = self.current_ready(interest);
+                    ready.read || ready.write || ready.except
+                })
             } else {
                 // No read/write readiness source to sleep on. Let the caller
                 // rescan or handle pending process control.

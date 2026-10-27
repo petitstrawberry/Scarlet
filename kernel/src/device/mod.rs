@@ -38,6 +38,8 @@ pub mod thermal;
 pub mod usb;
 pub mod video;
 pub mod watchdog;
+#[cfg(feature = "network")]
+pub mod wireless;
 
 extern crate alloc;
 use alloc::{sync::Arc, vec::Vec};

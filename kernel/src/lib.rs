@@ -1020,6 +1020,11 @@ pub extern "C" fn start_kernel(boot_info: &BootInfo) -> ! {
         crate::hypervisor::init_hv_per_cpu(cpu_id);
     }
 
+    #[cfg(feature = "wireless-mock")]
+    if let Err(error) = crate::device::wireless::init_mocks(boot_info.get_cmdline()) {
+        println!("wireless mock initialization failed: {}", error);
+    }
+
     /* Set up init task */
     let task = get_task_by_id(init_task_id).expect("init task must be registered");
     *task.vfs.write() = Some(manager.clone());

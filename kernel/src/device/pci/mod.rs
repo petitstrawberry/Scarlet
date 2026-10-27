@@ -55,6 +55,7 @@ pub mod scan;
 extern crate alloc;
 
 use crate::sync::IrqSpinLock;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::println;
@@ -116,6 +117,8 @@ pub struct PciBus {
     ecam_size: usize,
     /// Virtual base of the mapped ECAM region
     ecam_vaddr: IrqSpinLock<Option<usize>>,
+    host_config: Option<config::PciConfig>,
+    host_path: Option<String>,
     /// List of discovered PCI devices
     devices: IrqSpinLock<Vec<device::PciDeviceInfo>>,
 }
@@ -136,8 +139,36 @@ impl PciBus {
             ecam_base,
             ecam_size,
             ecam_vaddr: IrqSpinLock::new(None),
+            host_config: None,
+            host_path: None,
             devices: IrqSpinLock::new(Vec::new()),
         }
+    }
+
+    /// A controller owns config-window access and its DT interrupt/IOMMU scope.
+    pub fn from_host(config: config::PciConfig, host_path: String) -> Self {
+        Self {
+            ecam_base: 0,
+            ecam_size: 0,
+            ecam_vaddr: IrqSpinLock::new(None),
+            host_config: Some(config),
+            host_path: Some(host_path),
+            devices: IrqSpinLock::new(Vec::new()),
+        }
+    }
+
+    pub fn config(&self) -> Result<config::PciConfig, &'static str> {
+        if let Some(config) = &self.host_config {
+            return Ok(config.clone());
+        }
+        Ok(config::PciConfig::bounded_ecam(
+            self.ecam_vaddr()?,
+            self.ecam_size,
+        ))
+    }
+
+    pub fn host_path(&self) -> Option<&str> {
+        self.host_path.as_deref()
     }
 
     /// Get the ECAM base address
@@ -151,6 +182,9 @@ impl PciBus {
     }
 
     pub fn ecam_vaddr(&self) -> Result<usize, &'static str> {
+        if self.host_config.is_some() {
+            return Err("PCI host has no ECAM mapping");
+        }
         if let Some(vaddr) = *self.ecam_vaddr.lock() {
             println!(
                 "[PCI] Reusing ECAM mapping {:#x} for paddr {:#x}",
@@ -170,6 +204,12 @@ impl PciBus {
 
     /// Check if a PCI address is within the ECAM region
     pub fn is_valid_address(&self, addr: &PciAddress) -> bool {
+        if let Some(config) = &self.host_config {
+            return config.is_valid_address(addr);
+        }
+        if addr.segment != 0 || addr.device >= 32 || addr.function >= 8 {
+            return false;
+        }
         let offset = addr.ecam_offset();
         offset + 0x1000 <= self.ecam_size // Each function needs 4KB
     }

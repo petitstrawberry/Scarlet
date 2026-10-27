@@ -16,6 +16,7 @@ pub mod power_supply;
 pub mod shared_image;
 pub mod tls;
 pub mod video_image;
+pub mod wireless;
 
 /// Raw kernel object handle value used at the Scarlet Native ABI boundary.
 pub type RawHandle = i32;

@@ -57,6 +57,16 @@ impl NetworkInterface for EthernetNetworkInterface {
         self.device.get_mtu().unwrap_or(1500) as u32
     }
 
+    fn link_observation(&self) -> crate::device::network::LinkObservation {
+        self.device.link_observation()
+    }
+    fn supports_packet_retirement(&self) -> bool {
+        self.device.supports_packet_retirement()
+    }
+    fn retire_packets(&self) -> Result<(), &'static str> {
+        self.device.retire_packets()
+    }
+
     fn ip_address(&self) -> Option<Ipv4Address> {
         *self.ip_address.lock()
     }

@@ -11,6 +11,9 @@ opencode.json
 scarlet.local.toml
 /tools/scpm-pack/target
 /.build
+/.cache/
+__pycache__/
+*.py[cod]
 /.scarlet/
 /drivers/*/target
 /drivers/*/*/target

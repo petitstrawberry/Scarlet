@@ -127,6 +127,11 @@ struct DeferredPlatformDevice {
     device: Arc<PlatformDeviceInfo>,
 }
 
+struct DeferredPciDevice {
+    device: Arc<dyn DeviceInfo + Send + Sync>,
+    driver: Arc<dyn DeviceDriver>,
+}
+
 struct OwnedClkSpec {
     phandle: u32,
     cells: Vec<u32>,
@@ -228,6 +233,9 @@ pub struct DeviceManager {
     deferred_platform_devices: IrqSpinLock<Vec<DeferredPlatformDevice>>,
     /* Discovered PCI devices awaiting driver probe */
     discovered_pci_devices: IrqSpinLock<Vec<Arc<dyn DeviceInfo + Send + Sync>>>,
+    /* PCI probes waiting for firmware or another dependency. */
+    deferred_pci_devices: IrqSpinLock<Vec<DeferredPciDevice>>,
+    bound_pci_devices: IrqSpinLock<Vec<Arc<dyn DeviceInfo + Send + Sync>>>,
     /* Bus controller registries (phandle → bus) */
     spi_buses: IrqSpinLock<BTreeMap<u32, Arc<dyn SpiBus>>>,
     i2c_buses: IrqSpinLock<BTreeMap<u32, Arc<dyn I2cBus>>>,
@@ -263,6 +271,8 @@ impl DeviceManager {
             drivers: IrqSpinLock::new(BTreeMap::new()),
             deferred_platform_devices: IrqSpinLock::new(Vec::new()),
             discovered_pci_devices: IrqSpinLock::new(Vec::new()),
+            deferred_pci_devices: IrqSpinLock::new(Vec::new()),
+            bound_pci_devices: IrqSpinLock::new(Vec::new()),
             spi_buses: IrqSpinLock::new(BTreeMap::new()),
             i2c_buses: IrqSpinLock::new(BTreeMap::new()),
             usb_hosts: IrqSpinLock::new(BTreeMap::new()),
@@ -3527,10 +3537,11 @@ impl DeviceManager {
         ProbeOutcome::NoMatch
     }
 
-    /// Retry queued platform probes after a new dependency becomes available.
+    /// Retry queued platform and PCI probes after a dependency becomes available.
     /// Already bound devices are not rescanned or probed again.
     pub fn retry_deferred_probes(&self) {
         self.retry_deferred_devices(DriverPriority::Late);
+        self.retry_deferred_pci_probes();
     }
 
     fn retry_deferred_devices(&self, max_priority: DriverPriority) {
@@ -3704,24 +3715,80 @@ impl DeviceManager {
                 .collect()
         };
 
-        for driver_list in drivers {
-            let mut claimed_ids: Vec<usize> = Vec::new();
-
-            for driver in driver_list {
-                for device in &discovered {
-                    if claimed_ids.contains(&device.id()) {
-                        continue;
-                    }
-
-                    if let Ok(()) = driver.probe(&**device) {
-                        claimed_ids.push(device.id());
-                        println!(
-                            "Successfully probed PCI device {} with driver {}",
-                            device.name(),
-                            driver.name()
-                        );
+        for device in discovered {
+            if self
+                .bound_pci_devices
+                .lock()
+                .iter()
+                .any(|bound| Arc::ptr_eq(bound, &device))
+                || self
+                    .deferred_pci_devices
+                    .lock()
+                    .iter()
+                    .any(|item| Arc::ptr_eq(&item.device, &device))
+            {
+                continue;
+            }
+            'matching: for driver_list in &drivers {
+                for driver in driver_list {
+                    match driver.probe(&*device) {
+                        Ok(()) => {
+                            self.bound_pci_devices.lock().push(device.clone());
+                            println!(
+                                "Successfully probed PCI device {} with driver {}",
+                                device.name(),
+                                driver.name()
+                            );
+                            break 'matching;
+                        }
+                        Err(error) if is_probe_defer(error) => {
+                            println!(
+                                "[probe] deferred PCI device {} with driver {}",
+                                device.name(),
+                                driver.name()
+                            );
+                            self.deferred_pci_devices.lock().push(DeferredPciDevice {
+                                device: device.clone(),
+                                driver: driver.clone(),
+                            });
+                            break 'matching;
+                        }
+                        Err(_) => {}
                     }
                 }
+            }
+        }
+    }
+
+    fn retry_deferred_pci_probes(&self) {
+        // Never hold registry locks across callbacks: probes may register
+        // devices/providers and take these locks themselves.
+        let pending = core::mem::take(&mut *self.deferred_pci_devices.lock());
+        for item in pending {
+            if self
+                .bound_pci_devices
+                .lock()
+                .iter()
+                .any(|bound| Arc::ptr_eq(bound, &item.device))
+            {
+                continue;
+            }
+            match item.driver.probe(&*item.device) {
+                Ok(()) => {
+                    println!(
+                        "Successfully probed deferred PCI device {} with driver {}",
+                        item.device.name(),
+                        item.driver.name()
+                    );
+                    self.bound_pci_devices.lock().push(item.device);
+                }
+                Err(error) if is_probe_defer(error) => self.deferred_pci_devices.lock().push(item),
+                Err(error) => println!(
+                    "Failed to probe deferred PCI device {} with driver {}: {}",
+                    item.device.name(),
+                    item.driver.name(),
+                    error
+                ),
             }
         }
     }
@@ -3743,6 +3810,8 @@ impl DeviceManager {
         name_to_id.clear();
         discovered.clear();
         deferred.clear();
+        self.deferred_pci_devices.lock().clear();
+        self.bound_pci_devices.lock().clear();
         self.spi_buses.lock().clear();
         self.i2c_buses.lock().clear();
         self.usb_hosts.lock().clear();

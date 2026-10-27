@@ -445,16 +445,33 @@ fn start_dhcp_job(
     })
 }
 
-fn maintain_interfaces(configuration: &NetworkConfig) -> ! {
+fn maintain_interfaces(mut configuration: NetworkConfig, directory: &str) -> ! {
     let mut managed: Vec<ManagedInterface> = Vec::new();
     let mut jobs: Vec<DhcpJob> = Vec::new();
     let mut sources: Vec<ResolverSource> = Vec::new();
     let mut ready = false;
     let mut resolver_dirty = true;
     let mut cleared_down: Vec<NetworkLinkInfoV1> = Vec::new();
+    let mut reload_error = None;
     println!("netcfgd: Monitoring link lifecycle");
     loop {
         let now = monotonic_time_ns();
+        match load_configuration(directory) {
+            Ok(updated) => {
+                if updated != configuration {
+                    configuration = updated;
+                    println!("netcfgd: Configuration reloaded");
+                    resolver_dirty = true;
+                }
+                reload_error = None;
+            }
+            Err(error) => {
+                if reload_error.as_ref() != Some(&error) {
+                    println!("netcfgd: Keeping previous configuration: {}", error);
+                }
+                reload_error = Some(error);
+            }
+        }
         let interfaces = match available_interfaces() {
             Ok(interfaces) => interfaces,
             Err(error) => {
@@ -468,7 +485,7 @@ fn maintain_interfaces(configuration: &NetworkConfig) -> ! {
         cleared_down.retain(|old| links.iter().any(|link| link.same_incarnation(old)));
         for interface in &interfaces {
             if !interface.link.is_up()
-                && config::select_interface_config(configuration, &interface.name)
+                && config::select_interface_config(&configuration, &interface.name)
                     .is_some_and(|config| config.method != InterfaceMethod::Disabled)
                 && !cleared_down
                     .iter()
@@ -480,7 +497,10 @@ fn maintain_interfaces(configuration: &NetworkConfig) -> ! {
         }
         // Remove old generations before accepting any worker completion.
         managed.retain(|item| {
-            if lifecycle::current_ready_link(&item.interface.link, &links) {
+            if lifecycle::current_ready_link(&item.interface.link, &links)
+                && config::select_interface_config(&configuration, &item.interface.name).as_ref()
+                    == Some(&item.config)
+            {
                 return true;
             }
             if let Some(current) = links.iter().find(|link| link.id == item.interface.link.id) {
@@ -489,6 +509,13 @@ fn maintain_interfaces(configuration: &NetworkConfig) -> ! {
                 } // retry cleanup next poll
             }
             sources.retain(|source| source.interface_name != item.interface.name);
+            // A policy change does not change the kernel link generation.
+            // Detach old DHCP results explicitly before creating a new policy.
+            for job in &mut jobs {
+                if job.name == item.interface.name {
+                    job.link.generation = 0;
+                }
+            }
             resolver_dirty = true;
             println!(
                 "netcfgd: {} link lost/changed; cleared address, route and DNS",
@@ -504,7 +531,7 @@ fn maintain_interfaces(configuration: &NetworkConfig) -> ! {
             {
                 continue;
             }
-            let Some(config) = config::select_interface_config(configuration, &interface.name)
+            let Some(config) = config::select_interface_config(&configuration, &interface.name)
             else {
                 continue;
             };
@@ -638,7 +665,7 @@ fn maintain_interfaces(configuration: &NetworkConfig) -> ! {
                     if jobs.iter().any(|job| job.name == item.interface.name) {
                         continue;
                     }
-                    match start_dhcp_job(item, configuration) {
+                    match start_dhcp_job(item, &configuration) {
                         Ok(job) => jobs.push(job),
                         Err(error) => println!("netcfgd: cannot start DHCP: {}", error),
                     }
@@ -662,7 +689,7 @@ fn maintain_interfaces(configuration: &NetworkConfig) -> ! {
         }
         if !ready
             && !resolver_dirty
-            && required_interfaces_ready(configuration, &interfaces, &managed)
+            && required_interfaces_ready(&configuration, &interfaces, &managed)
         {
             notify_service_ready();
             ready = true;
@@ -763,7 +790,7 @@ fn main() -> i32 {
         .map(|value| value.as_str())
         .unwrap_or(DEFAULT_CONFIG_DIRECTORY);
     match load_configuration(directory) {
-        Ok(configuration) => maintain_interfaces(&configuration),
+        Ok(configuration) => maintain_interfaces(configuration, directory),
         Err(error) => {
             println!("netcfgd: Invalid configuration: {}", error);
             1

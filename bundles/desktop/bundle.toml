@@ -2,6 +2,10 @@
 # GUI and desktop environment components.
 # Composes sgfx-native + base + cli-utils + desktop-specific packages.
 
+[[layers]]
+kind = "bundle"
+path = "../wireless/bundle.toml"
+
 # Prepare SGFX sources, userspace Cargo configuration, and native drivers
 # before any userspace packages from this bundle are built.
 [[layers]]

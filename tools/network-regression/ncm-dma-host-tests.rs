@@ -132,6 +132,7 @@ fn rejects_invalid_frame_or_undersized_dma_without_modifying_output() {
     assert!(!b.accepts(&packet(13, 0)));
     assert!(!b.accepts(&packet(1515, 0)));
     assert!(!b.accepts(&DevicePacket {
+        link_token: None,
         data: vec![0; 14],
         len: 15
     }));

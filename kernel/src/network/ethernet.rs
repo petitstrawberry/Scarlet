@@ -389,6 +389,17 @@ impl NetworkLayer for EthernetLayer {
             .or_else(|| self.get_default_interface().map(Cow::Owned))
             .ok_or(SocketError::NoRoute)?;
 
+        // Pin before ARP can defer the IP packet. A queued old packet must not
+        // be relabelled with the new connection when a neighbor reply arrives.
+        let interface = self
+            .get_device(&interface_name)
+            .ok_or(SocketError::NoRoute)?;
+        let token = interface.packet_token().map_err(|_| SocketError::NoRoute)?;
+        if packet.link_token().is_some() && packet.link_token() != token {
+            return Err(SocketError::NoRoute);
+        }
+        packet.set_link_token(token);
+
         // Get source MAC from interface
         let src_mac = self.get_mac(&interface_name).ok_or(SocketError::NoRoute)?;
 
@@ -458,7 +469,8 @@ impl NetworkLayer for EthernetLayer {
 
         // Send through device
         let _send_profile = profile::begin(profile::Stage::EthSend, frame_len, 0);
-        if let Some(device) = self.get_device(&interface_name) {
+        {
+            let device = interface;
             if LOG_ETHERNET_PACKET_TRACE {
                 println!(
                     "[Ethernet] Sending {} bytes via {} to {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} (type=0x{:04X})",
@@ -473,17 +485,19 @@ impl NetworkLayer for EthernetLayer {
                     ether_type
                 );
             }
-            let pkt = DevicePacket::with_data(packet.into_vec());
+            let token = packet.link_token();
+            let mut pkt = DevicePacket::with_data(packet.into_vec());
+            pkt.link_token = token;
             device.send(pkt).map_err(|e| {
+                if e == crate::network::TX_QUEUE_FULL {
+                    return SocketError::TransmitBusy;
+                }
                 println!("[Ethernet] Send failed: {}", e);
                 SocketError::Other("send failed".into())
             })?;
             if LOG_ETHERNET_PACKET_TRACE {
                 println!("[Ethernet] Send succeeded");
             }
-        } else {
-            println!("[Ethernet] No device for interface {}", interface_name);
-            return Err(SocketError::NoRoute);
         }
 
         let mut stats = self.stats.write();

@@ -5011,6 +5011,7 @@ dependencies = [
  "sws-client",
  "sws-protocol",
  "vm-fdt",
+ "zeroize",
 ]
 
 [[package]]

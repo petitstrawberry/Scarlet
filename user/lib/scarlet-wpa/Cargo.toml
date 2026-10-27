@@ -1,0 +1,17 @@
+[package]
+name = "scarlet-wpa"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[features]
+default = []
+native = ["dep:scarlet-os", "dep:scarlet-abi", "dep:scarlet-sys"]
+[dependencies]
+zeroize = { version = "1.8", default-features = false, features = ["alloc"] }
+scarlet-os = { path = "../scarlet-os", optional = true }
+scarlet-abi = { path = "../scarlet-abi", optional = true }
+scarlet-sys = { path = "../scarlet-sys", optional = true }
+[build-dependencies]
+cc = "1"
+[dev-dependencies]
+sha2 = { version = "0.10.9", default-features = false }

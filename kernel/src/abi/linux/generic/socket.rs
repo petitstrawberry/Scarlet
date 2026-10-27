@@ -122,7 +122,9 @@ fn socket_error_to_errno(error: SocketError) -> usize {
         SocketError::AlreadyConnected => errno::EISCONN,
         SocketError::InvalidOperation => errno::EINVAL,
         SocketError::NotListening => errno::EINVAL,
-        SocketError::NoConnections | SocketError::WouldBlock => errno::EAGAIN,
+        SocketError::NoConnections | SocketError::WouldBlock | SocketError::TransmitBusy => {
+            errno::EAGAIN
+        }
         SocketError::Interrupted => errno::EINTR,
         SocketError::TimedOut => errno::ETIMEDOUT,
         SocketError::NotSupported => errno::EOPNOTSUPP,

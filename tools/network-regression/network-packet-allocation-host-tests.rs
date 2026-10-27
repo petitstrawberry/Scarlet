@@ -208,10 +208,12 @@ fn ipv4_serialization_and_checksum_match_without_heap() {
     assert_eq!((allocs, reallocs), (0, 0));
 }
 
-
 mod socket {
     #[derive(Debug, PartialEq)]
-    pub enum SocketError { InvalidPacket, Other(String) }
+    pub enum SocketError {
+        InvalidPacket,
+        Other(String),
+    }
 }
 mod owned_packet {
     /* OWNED_PACKET */
@@ -261,9 +263,8 @@ fn tcp_options_and_layer_headers_share_the_payload_allocation() {
             let payload: Vec<u8> = (0..payload_len).map(|n| n as u8).collect();
             let options = vec![0x99; option_len];
             let (frame, allocs, reallocs) = counted(|| {
-                let mut packet = owned_packet::PacketBuffer::from_slice(
-                    &payload, 34 + 20 + option_len,
-                ).unwrap();
+                let mut packet =
+                    owned_packet::PacketBuffer::from_slice(&payload, 34 + 20 + option_len).unwrap();
                 let address = packet.as_slice().as_ptr();
                 packet.prepend(&options).unwrap();
                 packet.prepend(&[0x10; 20]).unwrap();
@@ -279,8 +280,28 @@ fn tcp_options_and_layer_headers_share_the_payload_allocation() {
             assert_eq!(&frame[14..34], &[0x45; 20]);
             assert_eq!(&frame[34..54], &[0x10; 20]);
             assert_eq!(&frame[54..54 + option_len], options.as_slice());
-            assert_eq!(&frame[54 + option_len..54 + option_len + payload_len], payload.as_slice());
-            assert!(frame[54 + option_len + payload_len..].iter().all(|b| *b == 0));
+            assert_eq!(
+                &frame[54 + option_len..54 + option_len + payload_len],
+                payload.as_slice()
+            );
+            assert!(
+                frame[54 + option_len + payload_len..]
+                    .iter()
+                    .all(|b| *b == 0)
+            );
         }
     }
+}
+
+#[test]
+fn owned_packet_retains_wireless_incarnation_through_header_fallback() {
+    let mut packet = owned_packet::PacketBuffer::from_vec(vec![1, 2, 3]);
+    assert_eq!(packet.link_token(), None);
+    packet.set_link_token(Some((42, 99)));
+    packet.prepend(&[0; 20]).unwrap();
+    assert_eq!(packet.link_token(), Some((42, 99)));
+    packet.prepend(&[0; 14]).unwrap();
+    packet.pad_to(60).unwrap();
+    assert_eq!(packet.link_token(), Some((42, 99)));
+    assert_eq!(&packet.into_vec()[34..37], &[1, 2, 3]);
 }

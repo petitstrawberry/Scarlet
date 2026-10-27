@@ -2,6 +2,7 @@
 use super::*;
 
 const SETTINGS_NOTE_FONT_SIZE: f32 = 12.0;
+static NETWORK_ENTRY_SELECTED: AtomicBool = AtomicBool::new(false);
 
 fn wrap_settings_note(value: impl Into<String>) -> String {
     let value = value.into();
@@ -96,7 +97,7 @@ pub(super) fn appearance_page(app: SettingsApp) -> impl View + Clone {
         .collect::<Vec<_>>();
     presets.push(String::from("Custom"));
     let color = app.current_color();
-    let height = 700.0
+    let height = 920.0
         + extra_note_height(app.background_image_label.get())
         + extra_note_height(app.background_status.get());
     long_settings_page(vstack! {
@@ -122,6 +123,7 @@ pub(super) fn appearance_page(app: SettingsApp) -> impl View + Clone {
             settings_note("An image replaces the generated background. Clear it to use your color and pattern."),
         }.spacing(10.0).alignment(Alignment::Leading), "Wallpaper", 14.0),
         settings_note(app.background_status.get()),
+        cursor_section(app.clone()),
         Button::new("Save again").on_click(move || app.save_config()),
     }.spacing(18.0).alignment(Alignment::Leading), height)
 }
@@ -158,19 +160,19 @@ pub(super) fn display_page(app: SettingsApp) -> impl View + Clone {
         }.spacing(12.0).alignment(Alignment::Leading), "Text and interface size", 14.0),
     }.spacing(18.0).alignment(Alignment::Leading))
 }
-pub(super) fn cursor_page(app: SettingsApp) -> impl View + Clone {
+fn cursor_section(app: SettingsApp) -> impl View + Clone {
     let themes = app.cursor_themes.get();
     let select_app = app.clone();
     let refresh_app = app.clone();
     let height = 180.0 + extra_note_height(app.cursor_theme_status.get());
-    long_settings_page(settings_section(vstack! {
+    settings_section(vstack! {
         settings_row(hstack! {
             Select::new(themes.iter().map(|theme|theme.name.clone()).collect(),app.cursor_theme_index.clone()).width(310.0).placeholder("No cursor themes installed").on_change(move |index|select_app.select_cursor_theme(index)),
             Button::new("Refresh").on_click(move ||refresh_app.refresh_cursor_themes()),
         }.spacing(8.0), "Theme"),
         settings_note(app.cursor_theme_status.get()),
         settings_note("Cursor themes apply immediately. Installed themes are read from /share/cursors."),
-    }.spacing(12.0).alignment(Alignment::Leading), "Mouse pointer", 14.0).frame_height(height), height + 48.0)
+    }.spacing(12.0).alignment(Alignment::Leading), "Mouse pointer", 14.0).frame_height(height)
 }
 pub(super) fn audio_page(app: SettingsApp) -> impl View + Clone {
     let outputs = app.audio_outputs.get();
@@ -280,14 +282,14 @@ pub(super) fn status_page(app: SettingsApp) -> impl View + Clone {
 }
 
 pub(super) fn settings_navigation(original: SettingsApp) -> impl View + Clone {
+    let network_app = original.clone();
     let app = original.clone();
     let display_app = original.clone();
     let audio_app = original.clone();
     let input_app = original.clone();
-    let cursor_app = original.clone();
     let status_app = original.clone();
     let navigation_title = original.navigation_title.clone();
-    navigation! {
+    let navigation = navigation! {
         NavigationLink::new("Appearance", move || {
             appearance_page(app.clone())
         })
@@ -299,13 +301,13 @@ pub(super) fn settings_navigation(original: SettingsApp) -> impl View + Clone {
             let title = navigation_title.clone();
             move || title.set(String::from("Display"))
         }),
-        NavigationLink::new("Mouse & Cursor", move || cursor_page(cursor_app.clone())).on_select({
-            let title = navigation_title.clone();
-            move || title.set(String::from("Mouse & Cursor"))
-        }),
         NavigationLink::new("Audio", move || audio_page(audio_app.clone())).on_select({
             let title = navigation_title.clone();
             move || title.set(String::from("Audio"))
+        }),
+        NavigationLink::new("Network", move || network_page(network_app.clone())).on_select({
+            let title = navigation_title.clone();
+            move || title.set(String::from("Network"))
         }),
         NavigationLink::new("Input", move || input_page(input_app.clone())).on_select({
             let title = navigation_title.clone();
@@ -325,20 +327,112 @@ pub(super) fn settings_navigation(original: SettingsApp) -> impl View + Clone {
             let title = navigation_title.clone();
             move || title.set(String::from("About This System"))
         }),
+    };
+    if std::env::args().any(|arg| arg == "--network")
+        && !NETWORK_ENTRY_SELECTED.swap(true, AtomicOrdering::AcqRel)
+    {
+        navigation.selected_index_state().set(3);
+        navigation_title.set(String::from("Network"));
     }
-    .header(move || {
-        HeaderBar::new(
+    navigation
+        .header(move || {
+            HeaderBar::new(
+                hstack! {
+                    Text::from_state(navigation_title.clone()).font_size(20.0),
+                    Spacer::new(),
+                }
+                .alignment(Alignment::Center)
+                .padding_insets(scarlet_ui::geometry::EdgeInsets::new(
+                    24.0, 10.0, 24.0, 10.0,
+                )),
+            )
+            .height(48.0)
+        })
+        .sidebar_width(160.0)
+        .frame(f32::INFINITY, f32::INFINITY)
+}
+
+pub(super) fn network_page(app: SettingsApp) -> impl View + Clone {
+    let scan = app.clone();
+    let connect = app.clone();
+    let disconnect = app.clone();
+    let forget = app.clone();
+    let select = app.clone();
+    let interface_select = app.clone();
+    let apply = app.clone();
+    let interfaces = app.network_interfaces.get();
+    let interface_labels = interfaces.iter().map(|i| i.label.clone()).collect();
+    let detail = interfaces
+        .get(app.network_index.get())
+        .map(|i| i.detail.clone())
+        .unwrap_or_else(|| String::from("No network interfaces detected"));
+    let networks = app.wifi_networks.get();
+    let labels = networks
+        .iter()
+        .map(|n| {
+            format!(
+                "{} · {} dBm · {} MHz",
+                String::from_utf8_lossy(&n.ssid),
+                n.signal / 100,
+                n.frequency
+            )
+        })
+        .collect();
+    let shown = app.wifi_show_password.get();
+    let mask = if shown {
+        String::new()
+    } else {
+        "•".repeat(app.wifi_password.get().chars().count().min(40))
+    };
+    let height = 1200.0
+        + extra_note_height(detail.clone())
+        + extra_note_height(app.wifi_status.get())
+        + extra_note_height(app.network_status.get())
+        + extra_note_height(app.network_routes.get());
+    let content=vstack! {
+        settings_section(vstack! {
+            vstack! {
+                settings_note(app.network_routes.get()),
+                settings_note("Matching local networks use their own interface. Other IPv4 destinations use the lowest route metric. Bound applications and existing connections keep their selected interface."),
+            }.spacing(10.0).alignment(Alignment::Leading),
+            settings_row(Select::new(interface_labels,app.network_index.clone()).width(360.0).placeholder("No interfaces").on_change(move|i|interface_select.select_network(i)),"Interface"),
+            settings_note(detail),
+            vstack! {
+                settings_row(Select::new(vec![String::from("Automatic (DHCP)"),String::from("Manual IPv4"),String::from("Disabled")],app.network_method.clone()).width(280.0),"IPv4 mode"),
+                settings_row(TextField::new(app.network_address.clone()).placeholder("192.168.1.20/24").frame(340.0,34.0),"IPv4 / prefix"),
+                settings_row(TextField::new(app.network_gateway.clone()).placeholder("Optional; Manual IPv4 only").frame(340.0,34.0),"Manual gateway"),
+                settings_row(TextField::new(app.network_dns.clone()).placeholder("Automatic if blank").frame(340.0,34.0),"DNS servers"),
+                settings_row(TextField::new(app.network_metric.clone()).placeholder("100").frame(340.0,34.0),"Route metric"),
+            }.spacing(14.0).alignment(Alignment::Leading),
+            settings_note("Lower metric is preferred when routes have the same prefix. For example, Ethernet 20 and Wi-Fi 50 prefer Ethernet for external IPv4 traffic."),
+            Button::new("Apply network settings").enabled(!interfaces.is_empty()).on_click(move||apply.apply_network()),
+            settings_note(app.network_status.get()),
+            settings_note("Settings apply to the selected Ethernet, USB Ethernet or Wi-Fi interface and are saved for the next boot. Applying changes can interrupt its connections."),
+        }.spacing(14.0).alignment(Alignment::Leading),"Network interfaces",16.0),
+        settings_section(vstack! {
+            settings_note(app.wifi_status.get()),
+            Button::new("Scan for networks").enabled(app.wifi_can_scan.get()).on_click(move||scan.wifi_action(scarlet_os::wireless_service::SCAN)),
+            settings_row(Select::new(labels,app.wifi_index.clone()).width(360.0).placeholder("No networks found").on_change(move|i|{
+                if let Some(network)=select.wifi_networks.get().get(i) {select.wifi_ssid.set(String::from_utf8_lossy(&network.ssid).into_owned());}
+            }),"Network"),
+            settings_row(TextField::new(app.wifi_ssid.clone()).placeholder("SSID").frame(340.0,34.0),"SSID"),
+            settings_row(ZStack::new((
+                TextField::new(app.wifi_password.clone()).placeholder("Use saved password if blank")
+                    .text_color(if shown {Color::rgb(30,30,35)}else{Color::TRANSPARENT}).frame(340.0,34.0),
+                Text::new(mask).font_size(13.0).padding(8.0),
+            )).alignment(Alignment::Leading).frame(340.0,34.0),"Password"),
+            settings_row(Toggle::new(app.wifi_show_password.clone()),"Show password"),
             hstack! {
-                Text::from_state(navigation_title.clone()).font_size(20.0),
-                Spacer::new(),
-            }
-            .alignment(Alignment::Center)
-            .padding_insets(scarlet_ui::geometry::EdgeInsets::new(
-                24.0, 10.0, 24.0, 10.0,
-            )),
-        )
-        .height(48.0)
-    })
-    .sidebar_width(160.0)
-    .frame(f32::INFINITY, f32::INFINITY)
+                Button::new("Connect").on_click(move||connect.wifi_action(scarlet_os::wireless_service::CONNECT)),
+                Button::new("Disconnect").on_click(move||disconnect.wifi_action(scarlet_os::wireless_service::DISCONNECT)),
+                Button::new("Forget network").on_click(move||forget.wifi_action(scarlet_os::wireless_service::FORGET)),
+            }.spacing(10.0),
+            settings_note("WPA2-Personal networks are supported. Disconnect before scanning. A successfully connected network is saved for automatic reconnection."),
+        }.spacing(14.0).alignment(Alignment::Leading),"Wi-Fi",16.0),
+    }.spacing(18.0).alignment(Alignment::Leading);
+    ScrollView::new(content.padding(24.0))
+        .vertical()
+        .content_size(0.0, height)
+        .scrollbar_visibility(scarlet_ui::ScrollbarVisibility::Always)
+        .frame(f32::INFINITY, f32::INFINITY)
 }

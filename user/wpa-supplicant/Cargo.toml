@@ -1,0 +1,21 @@
+[package]
+name = "scarlet-wpa-supplicant"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[[bin]]
+name = "wpa-supplicant"
+path = "src/main.rs"
+[[bin]]
+name = "wirelessd"
+path = "src/wirelessd.rs"
+[[bin]]
+name = "wifictl"
+path = "src/wifictl.rs"
+[dependencies]
+scarlet-wpa = { path = "../lib/scarlet-wpa", features = ["native"] }
+scarlet-std = { path = "../lib/std" }
+scarlet-os = { path = "../lib/scarlet-os" }
+zeroize = { version = "1.8", default-features = false, features = ["alloc"] }
+[profile.release]
+panic = "abort"

@@ -5,9 +5,11 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
 extern crate scarlet_std as std;
 extern crate scarlet_ui_macros;
 
+mod settings_network;
 mod settings_support;
 use settings_support::{Autosave, TimezoneCommitError, atomic_write, commit_timezone};
 
@@ -990,6 +992,23 @@ fn save_timezone(zone: &str) -> core::result::Result<(), TimezoneCommitError> {
 
 #[derive(View, Clone)]
 struct SettingsApp {
+    wifi_networks: State<Vec<scarlet_os::wireless_service::Network>>,
+    wifi_index: State<usize>,
+    wifi_ssid: State<String>,
+    wifi_password: State<String>,
+    wifi_status: State<String>,
+    wifi_show_password: State<bool>,
+    wifi_can_scan: State<bool>,
+    network_interfaces: State<Vec<settings_network::Interface>>,
+    network_index: State<usize>,
+    network_name: State<String>,
+    network_method: State<usize>,
+    network_address: State<String>,
+    network_gateway: State<String>,
+    network_dns: State<String>,
+    network_metric: State<String>,
+    network_status: State<String>,
+    network_routes: State<String>,
     background_style_index: State<usize>,
     background_preset_index: State<usize>,
     background_status: State<String>,
@@ -1076,6 +1095,23 @@ impl SettingsApp {
         let (status_preferences, status_preferences_status) = load_status_preferences();
         let (output_scale_index, output_scale_status) = load_output_scale();
         let app = Self {
+            wifi_networks: State::new(StateId::new(41), Vec::new()),
+            wifi_index: State::new(StateId::new(42), 0),
+            wifi_ssid: State::new(StateId::new(43), String::new()),
+            wifi_password: State::new(StateId::new(44), String::new()),
+            wifi_status: State::new(StateId::new(45), String::from("Checking network service…")),
+            wifi_show_password: State::new(StateId::new(46), false),
+            wifi_can_scan: State::new(StateId::new(47), false),
+            network_interfaces: State::new(StateId::new(48), Vec::new()),
+            network_index: State::new(StateId::new(49), 0),
+            network_name: State::new(StateId::new(50), String::new()),
+            network_method: State::new(StateId::new(51), 0),
+            network_address: State::new(StateId::new(52), String::new()),
+            network_gateway: State::new(StateId::new(53), String::new()),
+            network_dns: State::new(StateId::new(54), String::new()),
+            network_metric: State::new(StateId::new(55), String::from("100")),
+            network_status: State::new(StateId::new(56), String::new()),
+            network_routes: State::new(StateId::new(57), String::from("Checking active routes…")),
             background_style_index: State::new(
                 StateId::new(27),
                 match style {
@@ -1156,6 +1192,7 @@ impl SettingsApp {
         };
         start_picker_response_listener();
         start_background_autosave(&app);
+        settings_network::start_monitor(&app);
         app
     }
 

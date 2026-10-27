@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use super::PciAddress;
@@ -292,12 +293,33 @@ pub enum PciBarIssue {
     },
 }
 
+/// Host-owned configuration operations. A host serializes window selection
+/// with the actual access. Width is 1, 2 or 4; subword writes must not read and
+/// rewrite adjacent W1C status bits.
+pub trait PciConfigAccess: Send + Sync {
+    fn is_valid_address(&self, address: &PciAddress) -> bool;
+    fn read(&self, address: &PciAddress, offset: usize, width: usize) -> u32;
+    fn write(&self, address: &PciAddress, offset: usize, width: usize, value: u32);
+}
+
 /// PCI configuration space accessor
 ///
 /// Provides safe access to PCI configuration space through ECAM mapping.
+#[derive(Clone)]
 pub struct PciConfig {
     /// Base address of ECAM region
     ecam_base: usize,
+    ecam_size: usize,
+    host: Option<Arc<dyn PciConfigAccess>>,
+}
+
+impl core::fmt::Debug for PciConfig {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PciConfig")
+            .field("ecam_base", &self.ecam_base)
+            .field("host_owned", &self.host.is_some())
+            .finish()
+    }
 }
 
 impl PciConfig {
@@ -311,7 +333,47 @@ impl PciConfig {
     ///
     /// The caller must ensure that the ECAM base address is valid and mapped.
     pub const fn new(ecam_base: usize) -> Self {
-        Self { ecam_base }
+        Self {
+            ecam_base,
+            ecam_size: usize::MAX,
+            host: None,
+        }
+    }
+
+    pub const fn bounded_ecam(ecam_base: usize, ecam_size: usize) -> Self {
+        Self {
+            ecam_base,
+            ecam_size,
+            host: None,
+        }
+    }
+
+    pub fn from_host(host: Arc<dyn PciConfigAccess>) -> Self {
+        Self {
+            ecam_base: 0,
+            ecam_size: 0,
+            host: Some(host),
+        }
+    }
+
+    pub fn is_valid_address(&self, addr: &PciAddress) -> bool {
+        if addr.device >= 32 || addr.function >= 8 {
+            return false;
+        }
+        if let Some(host) = &self.host {
+            return host.is_valid_address(addr);
+        }
+        addr.segment == 0
+            && addr
+                .ecam_offset()
+                .checked_add(4096)
+                .is_some_and(|end| end <= self.ecam_size)
+    }
+
+    fn valid_register(&self, addr: &PciAddress, offset: usize, width: usize) -> bool {
+        self.is_valid_address(addr)
+            && offset.is_multiple_of(width)
+            && offset.checked_add(width).is_some_and(|end| end <= 4096)
     }
 
     /// Calculate the physical address for a configuration register
@@ -334,7 +396,13 @@ impl PciConfig {
     ///
     /// This performs a volatile MMIO read. The caller must ensure the address is valid.
     pub fn read_u32(&self, addr: &PciAddress, offset: usize) -> u32 {
-        let phys_addr = self.config_address(addr, offset & !0x3);
+        if !self.valid_register(addr, offset, 4) {
+            return u32::MAX;
+        }
+        if let Some(host) = &self.host {
+            return host.read(addr, offset, 4);
+        }
+        let phys_addr = self.config_address(addr, offset);
         // SAFETY: ECAM config space is mapped MMIO and DWORD accesses are aligned.
         unsafe { crate::arch::mmio::read32(phys_addr) }
     }
@@ -351,7 +419,14 @@ impl PciConfig {
     ///
     /// This performs a volatile MMIO write. The caller must ensure the address is valid.
     pub fn write_u32(&self, addr: &PciAddress, offset: usize, value: u32) {
-        let phys_addr = self.config_address(addr, offset & !0x3);
+        if !self.valid_register(addr, offset, 4) {
+            return;
+        }
+        if let Some(host) = &self.host {
+            host.write(addr, offset, 4, value);
+            return;
+        }
+        let phys_addr = self.config_address(addr, offset);
         // SAFETY: ECAM config space is mapped MMIO and DWORD accesses are aligned.
         unsafe { crate::arch::mmio::write32(phys_addr, value) }
     }
@@ -367,8 +442,13 @@ impl PciConfig {
     ///
     /// The 16-bit value read from configuration space
     pub fn read_u16(&self, addr: &PciAddress, offset: usize) -> u16 {
-        let shift = ((offset & 0x2) * 8) as u32;
-        ((self.read_u32(addr, offset) >> shift) & 0xffff) as u16
+        if !self.valid_register(addr, offset, 2) {
+            return u16::MAX;
+        }
+        if let Some(host) = &self.host {
+            return host.read(addr, offset, 2) as u16;
+        }
+        unsafe { crate::arch::mmio::read16(self.config_address(addr, offset)) }
     }
 
     /// Write a 16-bit value to PCI configuration space
@@ -379,14 +459,16 @@ impl PciConfig {
     /// * `offset` - Offset within configuration space (must be 2-byte aligned)
     /// * `value` - Value to write
     pub fn write_u16(&self, addr: &PciAddress, offset: usize, value: u16) {
-        let shift = ((offset & 0x2) * 8) as u32;
-        let mask = 0xffffu32 << shift;
-        let current = self.read_u32(addr, offset);
-        self.write_u32(
-            addr,
-            offset,
-            (current & !mask) | (u32::from(value) << shift),
-        );
+        if !self.valid_register(addr, offset, 2) {
+            return;
+        }
+        if let Some(host) = &self.host {
+            host.write(addr, offset, 2, value.into());
+            return;
+        }
+        unsafe {
+            crate::arch::mmio::write16(self.config_address(addr, offset), value);
+        }
     }
 
     /// Read an 8-bit value from PCI configuration space
@@ -400,8 +482,13 @@ impl PciConfig {
     ///
     /// The 8-bit value read from configuration space
     pub fn read_u8(&self, addr: &PciAddress, offset: usize) -> u8 {
-        let shift = ((offset & 0x3) * 8) as u32;
-        ((self.read_u32(addr, offset) >> shift) & 0xff) as u8
+        if !self.valid_register(addr, offset, 1) {
+            return u8::MAX;
+        }
+        if let Some(host) = &self.host {
+            return host.read(addr, offset, 1) as u8;
+        }
+        unsafe { crate::arch::mmio::read8(self.config_address(addr, offset)) }
     }
 
     /// Write an 8-bit value to PCI configuration space
@@ -412,14 +499,16 @@ impl PciConfig {
     /// * `offset` - Offset within configuration space
     /// * `value` - Value to write
     pub fn write_u8(&self, addr: &PciAddress, offset: usize, value: u8) {
-        let shift = ((offset & 0x3) * 8) as u32;
-        let mask = 0xffu32 << shift;
-        let current = self.read_u32(addr, offset);
-        self.write_u32(
-            addr,
-            offset,
-            (current & !mask) | (u32::from(value) << shift),
-        );
+        if !self.valid_register(addr, offset, 1) {
+            return;
+        }
+        if let Some(host) = &self.host {
+            host.write(addr, offset, 1, value.into());
+            return;
+        }
+        unsafe {
+            crate::arch::mmio::write8(self.config_address(addr, offset), value);
+        }
     }
 
     /// Read vendor ID

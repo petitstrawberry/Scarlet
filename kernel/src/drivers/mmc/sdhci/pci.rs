@@ -26,7 +26,7 @@ const PCI_CLASS_BASE_SUBCLASS_MASK: u32 = 0xffff00;
 static NEXT_MMC_DEVICE_INDEX: AtomicUsize = AtomicUsize::new(0);
 
 fn enable_controller(device: &PciDeviceInfo) {
-    let config = PciConfig::new(device.ecam_vaddr());
+    let config = device.config();
     let address = device.address();
     let current = config.read_u16(&address, config::offset::COMMAND);
     config.write_u16(

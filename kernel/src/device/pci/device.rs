@@ -96,7 +96,7 @@ pub struct PciDeviceInfo {
     /// PCI address (bus, device, function)
     address: PciAddress,
     /// Virtual base address of the mapped ECAM region used for config access
-    ecam_vaddr: usize,
+    config: super::config::PciConfig,
     /// Vendor ID
     vendor_id: u16,
     /// Device ID
@@ -162,7 +162,7 @@ impl PciDeviceInfo {
     ) -> Self {
         Self {
             address,
-            ecam_vaddr,
+            config: super::config::PciConfig::new(ecam_vaddr),
             vendor_id,
             device_id,
             class_code,
@@ -245,9 +245,14 @@ impl PciDeviceInfo {
         self.address
     }
 
-    /// Get the mapped ECAM virtual base address
-    pub fn ecam_vaddr(&self) -> usize {
-        self.ecam_vaddr
+    /// Keep the host alive and use its access protocol for every config access.
+    pub fn config(&self) -> super::config::PciConfig {
+        self.config.clone()
+    }
+
+    pub fn with_config(mut self, config: super::config::PciConfig) -> Self {
+        self.config = config;
+        self
     }
 
     /// Get the vendor ID

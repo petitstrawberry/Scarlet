@@ -106,6 +106,9 @@ this is not a claim that every historical document or device was revalidated.
   VirtIO-net.
 - [Network management and Wi-Fi boundary](network/management.md) - link identity,
   DHCP lifecycle, route/DNS ownership, and QEMU validation
+- [Native Wi-Fi control/data API](network/wireless.md) - common control sessions,
+  EAPOL, confirmed keys, upstream WPA2 supplicant, software CCMP/PN and controlled-port authorization,
+  bounded events, mock backends, and implementation milestones.
 - [Socket/VFS integration](network/socket-vfs-integration.md) - local socket path
   model.
 - [Namespace isolation](container/namespace-isolation.md) and

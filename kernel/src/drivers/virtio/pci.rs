@@ -379,7 +379,7 @@ fn probe_virtio_pci(device: &PciDeviceInfo) -> Result<(), &'static str> {
         device.device_id()
     );
 
-    let config = PciConfig::new(device.ecam_vaddr());
+    let config = device.config();
     enable_pci_device(&config, device);
 
     let transport = parse_virtio_pci_caps(&config, device)?;

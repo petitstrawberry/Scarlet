@@ -65,6 +65,17 @@ impl MacAddress {
     }
 }
 
+/// Coherent carrier observation. Wireless devices override the default sampling
+/// to read authorization and retained epoch under one lock.
+#[derive(Clone, Copy, Debug)]
+pub struct LinkObservation {
+    pub mac: MacAddress,
+    pub state: u8,
+    pub kind: u8,
+    pub mtu: u32,
+    pub epoch: u64,
+}
+
 /// Device-level network packet for raw data transmission
 #[derive(Debug, Clone)]
 pub struct DevicePacket {
@@ -72,6 +83,8 @@ pub struct DevicePacket {
     pub data: Vec<u8>,
     /// Length of valid data in the packet
     pub len: usize,
+    /// Kernel-only (link ID, connection epoch), retained through deferred I/O.
+    pub link_token: Option<(u64, u64)>,
 }
 
 impl DevicePacket {
@@ -80,13 +93,18 @@ impl DevicePacket {
         Self {
             data: Vec::new(),
             len: 0,
+            link_token: None,
         }
     }
 
     /// Create a new packet with the given data
     pub fn with_data(data: Vec<u8>) -> Self {
         let len = data.len();
-        Self { data, len }
+        Self {
+            data,
+            len,
+            link_token: None,
+        }
     }
 
     /// Create a new packet with the given capacity
@@ -94,6 +112,7 @@ impl DevicePacket {
         Self {
             data: Vec::with_capacity(capacity),
             len: 0,
+            link_token: None,
         }
     }
 
@@ -228,6 +247,29 @@ pub trait NetworkDevice: Device {
     /// Link type for management. FullMAC devices override this with WIFI.
     fn link_kind(&self) -> u8 {
         scarlet_abi::network::LINK_KIND_ETHERNET
+    }
+
+    fn link_observation(&self) -> LinkObservation {
+        LinkObservation {
+            mac: self.get_mac_address().unwrap_or(MacAddress::new([0; 6])),
+            state: if self.is_link_up() {
+                scarlet_abi::network::LINK_UP
+            } else {
+                scarlet_abi::network::LINK_DOWN
+            },
+            kind: self.link_kind(),
+            mtu: self.get_mtu().unwrap_or(1500) as u32,
+            epoch: self.link_epoch(),
+        }
+    }
+
+    /// Opt in only when unsubmitted TX and completed RX can be discarded while
+    /// retaining all storage still owned by hardware.
+    fn supports_packet_retirement(&self) -> bool {
+        false
+    }
+    fn retire_packets(&self) -> Result<(), &'static str> {
+        Err("Packet retirement unsupported")
     }
 
     /// Get network device statistics

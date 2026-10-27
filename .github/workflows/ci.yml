@@ -75,6 +75,19 @@ jobs:
     - name: Test native ABI and SWS wire contracts
       run: nix develop .#default --command cargo make test-release-contracts
 
+    - name: Test Native Wi-Fi and PCI host contracts
+      run: |
+        nix develop .#default --command bash -euc '
+          python3 tools/test-pci-config-host.py
+          python3 tools/test-pci-probe-host.py
+          python3 tools/test-wpa-supplicant-host.py
+          python3 tools/test-network-regression.py --suite packet --suite backpressure --suite drain --suite arp
+          wireless_host=$(rustc -vV | sed -n "s/^host: //p")
+          cargo test --locked --manifest-path tools/wireless-management/host/Cargo.toml --target "$wireless_host"
+          cargo fmt --manifest-path user/lib/scarlet-wpa/Cargo.toml -- --check
+          cargo fmt --manifest-path user/wpa-supplicant/Cargo.toml -- --check
+        '
+
     - name: Test native libc
       run: nix build .#checks.x86_64-linux.scarlet-libc --no-link
 
@@ -240,3 +253,29 @@ jobs:
     - name: Test scarlet kernel (aarch64)
       run: nix develop .#default --command cargo make test-aarch64
       timeout-minutes: 10
+
+  test-wireless:
+    needs: nix-cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [wireless-management, wpa-supplicant, wireless-rekey]
+    env:
+      CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: cachix/install-nix-action@v31
+      with:
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+        extra_nix_config: |
+          accept-flake-config = true
+          extra-substituters = https://scarlet-rust-toolchain.cachix.org
+          extra-trusted-public-keys = scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o=
+    - uses: cachix/cachix-action@v17
+      if: env.CACHIX_CACHE_NAME != ''
+      with:
+        name: ${{ env.CACHIX_CACHE_NAME }}
+    - name: Test Native Wi-Fi in QEMU
+      run: nix develop .#default --command python3 tools/test-${{ matrix.suite }}.py

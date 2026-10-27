@@ -55,6 +55,11 @@ pub mod time;
 /// Running-kernel identification APIs.
 pub mod system;
 
+/// Native Wi-Fi control sessions.
+pub mod wireless;
+/// Userspace wireless manager control, shared by Settings and the CLI.
+pub mod wireless_service;
+
 pub use handle::{Handle, RawHandle};
 pub use input::InputDevice;
 pub use ipc::SharedMemory;

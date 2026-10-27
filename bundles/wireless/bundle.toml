@@ -1,0 +1,26 @@
+# Native wireless management shared by desktop and headless systems.
+[[layers]]
+kind = "cargo"
+source = "../../user/wpa-supplicant"
+package = "scarlet-wpa-supplicant"
+bin = "wirelessd"
+to = "/bin/wirelessd"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/wpa-supplicant"
+package = "scarlet-wpa-supplicant"
+bin = "wifictl"
+to = "/bin/wifictl"
+
+[[layers]]
+kind = "cargo"
+source = "../../user/wpa-supplicant"
+package = "scarlet-wpa-supplicant"
+bin = "wpa-supplicant"
+to = "/bin/wpa-supplicant"
+
+[[layers]]
+kind = "copy"
+source = "fs"
+to = "/"

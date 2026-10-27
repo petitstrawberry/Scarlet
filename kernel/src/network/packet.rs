@@ -14,6 +14,7 @@ pub(crate) const IPV4_ETHERNET_HEADROOM: usize = 20 + 14;
 pub struct PacketBuffer {
     storage: Vec<u8>,
     start: usize,
+    link_token: Option<(u64, u64)>,
 }
 
 impl PacketBuffer {
@@ -31,6 +32,7 @@ impl PacketBuffer {
         Ok(Self {
             storage,
             start: headroom,
+            link_token: None,
         })
     }
 
@@ -50,12 +52,24 @@ impl PacketBuffer {
         Ok(Self {
             storage,
             start: headroom,
+            link_token: None,
         })
     }
 
     /// Adopt existing owned bytes. Headers can still use the checked fallback.
     pub fn from_vec(storage: Vec<u8>) -> Self {
-        Self { storage, start: 0 }
+        Self {
+            storage,
+            start: 0,
+            link_token: None,
+        }
+    }
+
+    pub fn link_token(&self) -> Option<(u64, u64)> {
+        self.link_token
+    }
+    pub fn set_link_token(&mut self, token: Option<(u64, u64)>) {
+        self.link_token = token;
     }
 
     pub fn len(&self) -> usize {
@@ -72,7 +86,9 @@ impl PacketBuffer {
     /// Arbitrary callers with insufficient headroom use a checked owned fallback.
     pub fn prepend(&mut self, header: &[u8]) -> Result<(), SocketError> {
         if header.len() > self.start {
+            let token = self.link_token;
             *self = Self::from_slice(self.as_slice(), header.len())?;
+            self.link_token = token;
         }
         self.start -= header.len();
         self.storage[self.start..self.start + header.len()].copy_from_slice(header);

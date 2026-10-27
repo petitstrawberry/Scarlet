@@ -38,16 +38,18 @@ impl LinkRegistry {
             let Some(interface) = manager.get_interface(name) else {
                 continue;
             };
-            let epoch = interface.link_epoch();
+            let observation = interface.link_observation();
+            let epoch = observation.epoch;
             let old_epoch = self.epochs.get_mut(name).expect("registered link epoch");
             let next = NetworkLinkInfoV1 {
-                mac_address: *interface.mac_address().as_bytes(),
-                state: interface.link_state(),
-                kind: interface.link_kind(),
-                mtu: interface.mtu(),
+                mac_address: *observation.mac.as_bytes(),
+                state: observation.state,
+                kind: observation.kind,
+                mtu: observation.mtu,
                 ..*record
             };
             if next != *record || *old_epoch != epoch {
+                crate::device::wireless::notify_transport_change();
                 *record = NetworkLinkInfoV1 {
                     generation: record.generation.saturating_add(1),
                     ..next
@@ -62,6 +64,19 @@ impl NetworkManager {
         let mut links = self.link_lifecycle.lock();
         links.refresh(self);
         links.records.values().copied().collect()
+    }
+
+    /// Retire configuration while a controlled port is closed. Synchronizes
+    /// against incarnation-checked DHCP installation; caller must not hold its
+    /// carrier observation lock while acquiring the lifecycle lock.
+    pub fn retire_link_ipv4(&self, name: &str, id: u64) -> Result<(), &'static str> {
+        let mut links = self.link_lifecycle.lock();
+        if links.records.get(name).is_none_or(|link| link.id != id) {
+            return Err("Link replaced");
+        }
+        super::config::clear_interface_ipv4(name)?;
+        links.refresh(self);
+        Ok(())
     }
 
     /// A stale DHCP/association completion must never configure a replacement NIC.
