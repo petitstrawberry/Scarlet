@@ -97,7 +97,7 @@ fn udp() -> Socket {
 }
 fn echo(socket: &Socket, to: &SocketAddress, message: &[u8]) {
     socket.sendto(message, to).unwrap();
-    let mut bytes = [0; 128];
+    let mut bytes = [0; 1500];
     wait("UDP echo", || match socket.recvfrom(&mut bytes) {
         Ok((n, _)) => {
             assert_eq!(&bytes[..n], message);
@@ -288,6 +288,8 @@ fn main() -> i32 {
     assert!(socket.sendto(b"BLOCKED_INITIAL", &to).is_err());
     authenticated(&mut observer);
     echo(&socket, &to, b"CCMP_GOOD1");
+    // A 1500-byte IP datagram must still fit after MPDU and mock-L2 wrapping.
+    echo(&socket, &to, &[0x5a; 1472]);
     println!("CCMP_QA INJECT");
     let mut bytes = [0; 128];
     for expected in [

@@ -110,6 +110,7 @@ def exercise(no_entropy,port,server):
                         assert 'WPA_QA MODE NORMAL' in content
                         assert seen==['GOOD1','GOOD2','GOOD3','GOOD4','GOOD5','GOOD6'],seen
                         assert 'WPA_QA SERVICE_EVENTS PASS' in content
+                        assert 'WPA_QA CLI_RENAMED_INTERFACE PASS' in content
                         for label in ('good','reconnect','automatic','service','service-reconnect','service-automatic'):assert cases[label]['m2_mic_valid'] and cases[label]['m4']
                         for label in ('bad-mic','wrong-password','timeout','stale-replay'):assert cases[label]['m2'] and not cases[label]['m4']
                         assert len({cases[label]['snonce_sha256'] for label in ('good','reconnect','automatic','service','service-reconnect','service-automatic')})==6

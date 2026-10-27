@@ -81,7 +81,7 @@ static ENTRY: extern "C" fn() -> ! = scarlet::arch::aarch64::boot::linux::image_
         ('bin/network-qa', OUT / f'userspace-target/aarch64-unknown-scarlet/release/{probe}')]:
         entries.append((name, 0o100755, path.read_bytes()))
     if wireless_wpa or wireless_ccmp:
-        for name in ('wpa-supplicant', 'wirelessd'):
+        for name in ('wpa-supplicant', 'wirelessd', 'wifictl'):
             entries.append(('bin/' + name,0o100755,(OUT/f'userspace-target/aarch64-unknown-scarlet/release/{name}').read_bytes()))
     config = '''[network]
 dhcp_timeout_ms = 500

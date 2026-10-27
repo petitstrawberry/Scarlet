@@ -24,6 +24,7 @@ struct Shared {
     aps: Vec<Bss>,
     ssid: Vec<u8>,
     can_scan: bool,
+    link_id: u64,
 }
 fn read_profile() -> Option<Profile> {
     let mut f = File::open(PROFILE).ok()?;
@@ -83,7 +84,17 @@ fn snapshot(shared: &Arc<Mutex<Shared>>) -> String {
             b.frequency_mhz
         ));
     }
+    let link_id = s.link_id;
     drop(s);
+    if let Some(link) = scarlet_os::network::list_links()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|link| link.id == link_id && link.is_up())
+    {
+        if let Some(name) = link.interface_name() {
+            text.push_str(&format!("INTERFACE {}\n", name));
+        }
+    }
     for c in scarlet_os::network::list_interface_configs().unwrap_or_default() {
         let ip = c.ip_address;
         let gw = c.gateway;
@@ -230,6 +241,7 @@ fn main() -> i32 {
         aps: Vec::new(),
         ssid: Vec::new(),
         can_scan: false,
+        link_id: 0,
     }));
     let ipc_shared = shared.clone();
     let events = Arc::new(events::Events::new());
@@ -362,7 +374,14 @@ fn main() -> i32 {
                 }
             }
         }
-        shared.lock().can_scan = engine.is_none() && !enabled;
+        let link_id = engine
+            .as_mut()
+            .map_or(0, |e| e.adapter_mut().session_mut().identity().link_id);
+        {
+            let mut state = shared.lock();
+            state.link_id = link_id;
+            state.can_scan = engine.is_none() && !enabled;
+        }
         if !shared.lock().queue.is_empty() {
             continue;
         }
