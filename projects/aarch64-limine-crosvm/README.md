@@ -84,7 +84,36 @@ images, and image preparation logs. For debugging, add
 `--gdb-socket /tmp/scarlet-crosvm-gdb.sock --timeout 300`. Non-test kernel
 diagnostics may be in Scarlet's kernel log ring rather than the serial console.
 
-## Linux guest
+## SHV diagnostics
+
+### SHV re-entry regression fixture
+
+`fixtures/shv-reentry.S` checks timer writes through XZR, signed 32-bit TVAL
+writes and zero-extended reads, and stage-2 read-to-write mapping updates. It
+then performs 10,000 trapped timer reads with a 64-page working set, reporting
+architected ticks and counter frequency before `SCARLET_SHV_REENTRY_OK`.
+Compile with `-DBENCH_ONLY=1` to compare kernels predating the timer fixes:
+
+```sh
+clang --target=aarch64-unknown-none-elf -c fixtures/shv-reentry.S -o guest.o
+ld.lld -Ttext=0x80080000 --oformat=binary guest.o -o Image
+```
+
+Run these commands from this project directory, place `Image` at
+`systems/linux-aarch64/guest/Image` in a **copy** of the minimal base staging
+tree, and use the private runner with `--success-marker SCARLET_SHV_REENTRY_OK`.
+Do not overwrite an Android profile's kernel or disks.
+
+The kernel now keeps VTTBR across internal traps while the host HCR has VM=0,
+clearing it before returning from `VcpuObject::run`. Initial KVM_RUN entry and
+stage-2 mapping changes still invalidate translations. This does not introduce
+a new VMID allocation/reuse policy or enable unverified hugepage mappings.
+On 2026-10-28, three alternating TCG runs per version measured median
+0.695957 s before and 0.554620 s after (about 20% less time). This is a small
+re-entry benchmark, not an Android boot-time speedup claim. The old kernel
+fails the XZR timer check; the revised kernel passes the complete fixture.
+
+## Linux guest boot
 
 Build the pinned Linux 6.12 source and a static AArch64 BusyBox in the same
 Docker builder, then prepare an isolated fixture:
