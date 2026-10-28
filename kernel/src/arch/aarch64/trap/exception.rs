@@ -252,7 +252,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
 
         // Data abort from lower EL
         ExceptionClass::DataAbortLowerEl => {
-            let far = trapframe.far_el1 as usize;
+            let far = user_data_fault_address(trapframe.far_el1);
             let is_write = (esr >> 6) & 1 == 1; // WnR bit
             handle_data_fault(trapframe, far, is_write);
         }
@@ -327,6 +327,41 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
                 unsafe { asm!("wfi") }
             }
         }
+    }
+}
+
+/// TBI0 applies to TTBR0 only. Retain bits 55:48 so invalid addresses cannot
+/// alias a valid user mapping, and leave TTBR1/kernel addresses unchanged.
+fn user_data_fault_address(address: u64) -> usize {
+    if address & (1 << 55) == 0 {
+        (address & 0x00ff_ffff_ffff_ffff) as usize
+    } else {
+        address as usize
+    }
+}
+
+#[cfg(test)]
+mod tagged_address_tests {
+    use super::user_data_fault_address;
+
+    #[test_case]
+    fn user_fault_tags_do_not_change_mapping_identity_or_hide_invalid_bits() {
+        assert_eq!(
+            user_data_fault_address(0x0200_4000_1234_5000),
+            0x4000_1234_5000
+        );
+        assert_eq!(
+            user_data_fault_address(0xff00_4000_1234_5000),
+            0x4000_1234_5000
+        );
+        assert_eq!(
+            user_data_fault_address(0x0201_4000_1234_5000),
+            0x0001_4000_1234_5000
+        );
+        assert_eq!(
+            user_data_fault_address(0xffff_8000_1234_5000),
+            0xffff_8000_1234_5000
+        );
     }
 }
 

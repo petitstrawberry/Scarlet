@@ -692,6 +692,8 @@ pub fn sys_gettid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
 const PR_SET_NAME: i32 = 15;
 const PR_GET_NAME: i32 = 16;
+const PR_SET_TAGGED_ADDR_CTRL: i32 = 55;
+const PR_GET_TAGGED_ADDR_CTRL: i32 = 56;
 const TASK_COMM_LEN: usize = 16;
 
 fn prctl_task_name(bytes: &[u8; TASK_COMM_LEN]) -> String {
@@ -705,8 +707,8 @@ fn prctl_task_name(bytes: &[u8; TASK_COMM_LEN]) -> String {
 
 /// Linux prctl system call (syscall 167).
 ///
-/// Implements thread-name access and accepts other operations as compatibility
-/// no-ops until their behavior is needed.
+/// Implements thread-name access and rejects unsupported tagged-address modes.
+/// Other operations currently remain compatibility no-ops.
 ///
 /// # Arguments
 ///
@@ -730,6 +732,10 @@ pub fn sys_prctl(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(&task);
 
     match option {
+        // AArch64 TBI permits userspace-only tagged accesses, but Scarlet does
+        // not accept tagged syscall pointers or implement MTE. Pretending SET
+        // succeeded makes Bionic pass tags into that unsupported syscall ABI.
+        PR_SET_TAGGED_ADDR_CTRL | PR_GET_TAGGED_ADDR_CTRL => errno::to_result(errno::EINVAL),
         PR_SET_NAME => {
             let mut name = [0u8; TASK_COMM_LEN];
             if copy_from_user(&task, arg2, &mut name).is_err() {
@@ -1963,6 +1969,35 @@ mod tests {
     }
 
     use super::*;
+
+    #[test_case]
+    fn prctl_does_not_advertise_unsupported_tagged_pointers() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::task::{clear_mock_current_task, set_mock_current_task};
+        let task = Arc::new(Task::new("tagged-address-prctl".into(), 1, TaskType::User));
+        let code = USER_STACK_END - PAGE_SIZE;
+        task.allocate_stack_pages(code, 1).unwrap();
+        for index in 0..4 {
+            copy_to_user(&task, code + index * 4, &0x73u32.to_ne_bytes()).unwrap();
+        }
+        set_mock_current_task(task);
+        let mut abi = LinuxAbi::default();
+        let mut frame = Trapframe::new();
+        frame.set_pc(code as u64);
+        for (operation, value) in [
+            (PR_SET_TAGGED_ADDR_CTRL, 1), // Bionic's tagged-heap feature probe.
+            (PR_SET_TAGGED_ADDR_CTRL, 0),
+            (PR_GET_TAGGED_ADDR_CTRL, 0),
+        ] {
+            frame.set_arg(0, operation as usize);
+            frame.set_arg(1, value);
+            assert_eq!(
+                sys_prctl(&mut abi, &mut frame),
+                errno::to_result(errno::EINVAL)
+            );
+        }
+        clear_mock_current_task();
+    }
 
     #[test_case]
     fn wait4_honors_nohang_and_returns_to_pending_signal_handlers() {
