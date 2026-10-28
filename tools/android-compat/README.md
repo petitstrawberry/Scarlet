@@ -7,7 +7,7 @@ neither fixture certifies general APK compatibility.
 |---|---|---|
 | Execution | APK → Android framework/ART → guest Linux → crosvm → Scarlet | Android ELF → Bionic/linker → Scarlet Android ABI (composes Linux ABI) |
 | Reused Android facilities | Guest Binder, Android init, framework and HALs | Real Bionic/linker and an initial Binder UAPI adapter |
-| Main work ahead | Finish framework boot, then connect display/input to SWS | Binder object references, ART/JNI, framework services and graphics integration |
+| Main work ahead | Finish framework boot, then connect display/input to SWS | Binder object references/services, broader ART/JNI coverage, framework and graphics integration |
 | Current rendering | Cuttlefish ANGLE/SwiftShader, headless virtio-gpu stub | No Android graphics stack yet |
 | Fixture | [Cuttlefish project](../../projects/aarch64-limine-crosvm/README.md) | This directory |
 
@@ -27,14 +27,14 @@ records and exit status zero. The host also requires the final suite marker.
 
 | Case | Static | Dynamic | Checks |
 |---|---|---|---|
-| libc | PASS | PASS | Constructors, TLS, auxv, malloc, proc-exe stat/lstat/statx, tagged memory accesses |
-| thread | PASS | PASS | pthread create/join, TLS isolation, mutex and shared address space |
+| libc | PASS | PASS | Constructors, TLS, auxv, malloc, proc-exe metadata, tagged access, main-thread stack attributes and resource limits |
+| thread | PASS | PASS | pthread create/join, TLS, mutex, futex compare/requeue/wake and timeout cleanup after requeue |
 | shared | PASS | PASS | memfd and coherent MAP_SHARED mappings |
-| signal | PASS | PASS | SIGUSR1 registration, delivery and handler return |
+| signal | PASS | PASS | Handler return, pending-signal consumption, sigwait wake, timed wait and unrelated-signal interruption |
 | dynamic | — | PASS | dlopen/dlsym/dlclose, DSO constructor and native ELF TLS |
 | exec | PASS | PASS | Sparse FD numbers, file flags, CLOEXEC and Android device dispatch survive exec |
 | xattr | PASS | PASS | All twelve path/fd/no-follow calls, binary values, limits, atomic flags, rename and unlink identity |
-| mremap | PASS | PASS | Fixed private relocation, lazy pages, protections, overwritten ranges and fork isolation |
+| mremap | PASS | PASS | Fixed relocation, in-place/moving growth, lazy pages, protection, fork isolation, zeroed regrowth and 512 Bionic atexit callbacks |
 | binder | PASS | PASS | Cross-process request/reply, read-only receive pages, buffer release, pending-call peer death and fork isolation |
 
 An additional static probe explicitly selects `linux-aarch64` and verifies that
@@ -254,21 +254,27 @@ comparison guards against partial output despite the generator's zero exit.
 `evidence.py --art --stock` additionally requires the ordered bootstrap records.
 `--linker-debug` enables Android linker diagnostics for startup investigations.
 
-Both bootstrap stages now pass on Scarlet. The CFI shadow relocation failure
-was fixed in the native VM, and a subsequent library loading failure exposed
-an Ext2 60-byte symlink bug, also fixed in the filesystem. Java execution is
-still unverified; see the local checkpoint below for the current stopping point.
-The local host tests pass 26 cases using the project's Nix Python. The final
-kernel passes all 1,596 AArch64 tests and a RISC-V release check. Both HVF and
-TCG pass all eighteen Bionic cases. The ordinary ART run times out after 180
-seconds without Java output; linker diagnostics confirm that `libart.so`'s
-constructors have completed. A separate instrumented run captures an untimed
-`FUTEX_WAIT_PRIVATE` (expected value 3) after ART startup. Its mutex owner and
-underlying cause are not yet known. The blocking `/dev/kmsg` reader failed to
-forward the later syscall tail; a delayed reopen captured it. These diagnostics
-use a temporary syscall patch and log sink, neither installed in the production
-kernel or launcher. Logs, exact launch/input hashes and validation
-excerpts are retained in [the local checkpoint](checkpoints/2026-10-28-local/verification.json).
+**Direct ART/Java now passes on Scarlet, with both outer QEMU HVF and TCG.**
+The ordinary stock-input runs initialize 216 properties, generate the exact
+reference linker configuration, print `SCARLET_ART_BEGIN`, `Scarlet ART: 42`
+and `SCARLET_ART_OK`, then exit zero and emit `SCARLET_ANDROID_ART_OK`.
+Neither successful run uses a diagnostic preload or a guest Linux kernel.
+This is a core-only, image-less `-Xint` Java checkpoint; Android framework,
+Activity/APK execution and graphics are still unverified.
+
+The earlier [local checkpoint](checkpoints/2026-10-28-local/verification.json)
+stalled after library constructors. Bionic's main-thread stack query needed
+`getrlimit(RLIMIT_STACK)` and `/proc/self/stat` field 28. Native entry-stack
+metadata resolved that path, exposing Bionic atexit-array growth, then ART's
+condition-variable requeue and Signal Catcher's synchronous signal wait.
+Those operations are now implemented. One intermediate diagnostic run printed
+the Java markers while Signal Catcher was aborting and exited 127; it remains
+classified as incomplete, not a successful Java completion.
+
+The current kernel passes all 1,607 AArch64 tests and a RISC-V release check;
+host checks pass 26 tests. Both HVF and TCG pass all eighteen expanded Bionic
+cases. Logs, launch/input hashes, the diagnostic logger source and validation
+excerpts are retained in [the ART/Java checkpoint](checkpoints/2026-10-28-art-java/verification.json).
 Cloud's earlier Nix download restriction does not apply to this local validation.
 
 ### ABI composition and native RPC boundary
@@ -322,8 +328,9 @@ not a binderfs implementation and are not yet represented by normal VFS nodes.
 **Not implemented:** object/FD transfer, strong/weak reference accounting,
 general death subscriptions, one-way and nested calls, automatic thread-pool
 growth, poll-based loopers, security-context records and SELinux policy.
-Unsupported transaction features return errors. This checkpoint does not yet
-run unmodified libbinder services, servicemanager, a complete ART/Java program, or a direct APK.
+Unsupported transaction features return errors. The Binder checkpoint does not
+yet run unmodified libbinder services or servicemanager. The separate minimal
+ART/Java fixture passes; direct APK execution remains unverified.
 
 ### Kernel fixes exercised
 
@@ -336,9 +343,30 @@ run unmodified libbinder services, servicemanager, a complete ART/Java program, 
   the operation through `mremap(MREMAP_MAYMOVE | MREMAP_FIXED)`. Resident pages,
   lazy owners, permissions and fork/COW page indices survive the move. Source
   and destination PTEs are invalidated before displaced backing is reclaimed;
-  fault publication revalidates its VMA snapshot. Growth, shared/file/device
+  fault publication revalidates its VMA snapshot. Shared/file/device
   owners, mixed source origins/protections, and a partial move whose rebased
   origin would underflow remain unsupported.
+- Grow private anonymous mappings in place when the following range is free,
+  or select and move into a free range when `MREMAP_MAYMOVE` is permitted.
+  Anonymous provenance survives faults and fork. The extension uses fresh zero
+  backing, including after shrink/regrowth; existing backing and COW indices
+  are preserved, and rejected growth retains the source. Fixed growth and
+  `MREMAP_DONTUNMAP` remain unsupported.
+- Keep the initial SP and fixed stack reservation in the native address space;
+  fork copies it, `CLONE_VM` shares it and committed exec replaces it. Linux
+  exposes the reservation through `getrlimit`/read-only `prlimit64` and stat
+  field 28. Only `RLIMIT_STACK` and `RLIMIT_NOFILE` queries are backed; other
+  limits and changes return an error. Stack auto-growth and full proc accounting
+  are not implemented; unavailable accounting fields are zero.
+- Implement Linux `FUTEX_REQUEUE` and `FUTEX_CMP_REQUEUE` on the existing Linux
+  wait queues, preserving bitsets and tracking the current queue for timeout,
+  interruption and task-exit cleanup.
+- Implement `rt_sigtimedwait` through existing Linux pending state and Scarlet's
+  interruptible Waker, with relative timeout, pending-signal consumption and
+  output validation. Like signalfd, this uses coalesced pending bits and reports
+  `SI_KERNEL` for unavailable sender metadata. Native signal records, realtime
+  queues and process/thread routing are tracked in
+  [discussion #613](https://github.com/petitstrawberry/Scarlet/issues/613).
 - Classify Ext2 inline symlinks by data-block allocation (excluding an external
   attribute block), rather than target length. This reads e2fsprogs' block-backed
   60-byte links and reclaims their blocks while retaining support for older
@@ -426,4 +454,4 @@ Kernel regression tests additionally cover auxv, unsupported prctl requests
 and tagged fault-address normalization, RPC cancellation/lifetime/bounds,
 Binder environment/device isolation, receive-buffer validation and Android ELF
 identification (including malformed/truncated inputs). The final AArch64 suite
-passes 1,587 tests; the RISC-V kernel library also compiles.
+passes 1,607 tests; the RISC-V kernel library also compiles.

@@ -1,0 +1,18 @@
+49 | const GICC_RPR: usize = 0x0014; // Running Priority Register
+    Finished `test` profile [optimized + debuginfo] target(s) in 42.77s
+     Running unittests src/lib.rs (target/aarch64-unknown-none-elf/debug/deps/scarlet-4154d16c0704c7a2)
+[Test Runner] Running 1607 tests
+[Test Runner] test name=scarlet::abi::linux::generic::futex::tests::requeue_compares_atomically_and_preserves_waiter_bitsets
+[Test Runner] test name=scarlet::abi::linux::generic::futex::tests::requeue_syscall_validates_counts_addresses_and_compared_value
+[Test Runner] test name=scarlet::abi::linux::generic::proc::tests::entry_stack_survives_clone_and_changes_only_on_committed_exec
+[Test Runner] test name=scarlet::abi::linux::generic::proc::tests::resource_queries_use_entry_reservation_and_validate_output
+[Test Runner] test name=scarlet::abi::linux::generic::proc_text::tests::stat_field_28_uses_initial_stack_pointer_and_preserves_comm_delimiters
+[Test Runner] test name=scarlet::abi::linux::generic::signal::tests::sigtimedwait_validates_inputs_zero_timeout_and_unmaskable_signals
+[Test Runner] test name=scarlet::abi::linux::generic::signal::tests::waited_signal_validates_output_before_consuming_and_reports_known_info
+[Test Runner] test name=scarlet::object::capability::memory_mapping::syscall::tests::anonymous_growth_moves_cow_fragments_without_changing_child_or_neighbor
+[Test Runner] test name=scarlet::object::capability::memory_mapping::syscall::tests::anonymous_growth_preserves_resident_pages_and_zeroes_discarded_tail
+[Test Runner] test name=scarlet::object::capability::memory_mapping::syscall::tests::rejected_anonymous_growth_preserves_mapping_and_provenance
+[Test Runner] test name=scarlet::sched::scheduler::tests::test_new_pin_forces_switch_and_pinned_requeue_target
+[Test Runner] All 1607 tests passed
+All tests passed
+    Finished `release` profile [optimized] target(s) in 8.81s

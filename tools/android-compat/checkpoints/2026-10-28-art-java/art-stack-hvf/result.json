@@ -1,0 +1,20 @@
+{
+  "result": "fixture failure marker",
+  "qemu_exit_code": 0,
+  "elapsed_seconds": 7.355,
+  "dynamic_runtime": true,
+  "art": {
+    "result": "INCOMPLETE",
+    "records": [
+      "SCARLET_ANDROID_STOCK_START properties",
+      "SCARLET_PROPERTY_SNAPSHOT_OK",
+      "SCARLET_ANDROID_STOCK_EXIT properties 0",
+      "SCARLET_ANDROID_STOCK_START linkerconfig",
+      "SCARLET_ANDROID_STOCK_EXIT linkerconfig 0",
+      "SCARLET_ANDROID_STOCK_OK",
+      "SCARLET_ANDROID_ART_START",
+      "SCARLET_ANDROID_ART_EXIT 127",
+      "SCARLET_ANDROID_ART_FAIL: ART wait or exit"
+    ]
+  }
+}

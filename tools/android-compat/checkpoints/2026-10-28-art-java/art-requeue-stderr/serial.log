@@ -1,0 +1,401 @@
+UEFI firmware (version edk2-stable202408-prebuilt.qemu.org built at 16:28:50 on Sep 12 2024)
+ArmTrngLib could not be correctly initialized.
+Error: Image at 000BFDB6000 start failed: 00000001
+Error: Image at 000BFD6D000 start failed: Not Found
+Error: Image at 000BFCBA000 start failed: Unsupported
+Error: Image at 000BFC3F000 start failed: Not Found
+Error: Image at 000BFB65000 start failed: Aborted
+Tpm2SubmitCommand - Tcg2 - Not Found
+Tpm2GetCapabilityPcrs fail!
+Tpm2SubmitCommand - Tcg2 - Not Found
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI Non-Block Boot Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,0000000A00000000)
+BdsDxe: starting Boot0001 "UEFI Non-Block Boot Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,0000000A00000000)
+ConvertPages: range BEB2D000 - BEB30FFF covers multiple entries
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+[01;01H[01;01H[01;01Hl[01;02Hi[01;03Hm[01;04Hi[01;05Hn[01;06He[01;07H:[01;08H [01;09HL[01;10Ho[01;11Ha[01;12Hd[01;13Hi[01;14Hn[01;15Hg[01;16H [01;17He[01;18Hx[01;19He[01;20Hc[01;21Hu[01;22Ht[01;23Ha[01;24Hb[01;25Hl[01;26He[01;27H [01;28H`[01;29Hb[01;30Ho[01;31Ho[01;32Ht[01;33H([01;34H)[01;35H:[01;36H/[01;37Hb[01;38Ho[01;39Ho[01;40Ht[01;41H/[01;42Hk[01;43He[01;44Hr[01;45Hn[01;46He[01;47Hl[01;48H`[01;49H.[01;50H.[01;51H.[01;52H[01;01H[02;01Hl[02;02Hi[02;03Hm[02;04Hi[02;05Hn[02;06He[02;07H:[02;08H [02;09HL[02;10Ho[02;11Ha[02;12Hd[02;13Hi[02;14Hn[02;15Hg[02;16H [02;17Hm[02;18Ho[02;19Hd[02;20Hu[02;21Hl[02;22He[02;23H [02;24H`[02;25Hb[02;26Ho[02;27Ho[02;28Ht[02;29H([02;30H)[02;31H:[02;32H/[02;33Hb[02;34Ho[02;35Ho[02;36Ht[02;37H/[02;38Hi[02;39Hn[02;40Hi[02;41Ht[02;42Hr[02;43Ha[02;44Hm[02;45Hf[02;46Hs[02;47H-[02;48Ha[02;49Ha[02;50Hr[02;51Hc[02;52Hh[02;53H6[02;54H4[02;55H.[02;56Hc[02;57Hp[02;58Hi[02;59Ho[02;60H`[02;61H.[02;62H.[02;63H.[02;64H[02;01H[03;01H[aarch64] CPU 0: Initializing core....
+FDT initialized
+No bootargs found
+Model: linux,dummy-virt
+FDT relocated to address: 0xffff000048000000
+[boot] Limine Date at Boot: timestamp = 1793192203 (0x6ae1f10b)
+[userctx] enabled: user-fpu=true user-vector=false
+[aarch64] BSP mpidr=0x0, 1 CPU(s) detected by Limine
+[aarch64] CPU topology: cpu=0 class=Balanced capacity=1024
+Current EL: EL1
+[Scarlet Kernel] Hello, I'm Scarlet kernel!
+[Scarlet Kernel] Boot on CPU 0
+[Scarlet Kernel] Detected 1 CPU(s)
+[Scarlet Kernel] Usable memory (PA) : 0x48101000 - 0xb8f7ffff
+[Scarlet Kernel] PMM usable regions : 6
+[Scarlet Kernel] Direct-map bounds   : 0x40000000 - 0xbea46fff (7 sparse regions)
+[Scarlet Kernel] Boot direct map    : PA 0x4000000 -> VA 0xffff000004000000
+[Scarlet Kernel] InitramFS (PA)    : 0xb9195000 - 0xb91ff1ff
+[Scarlet Kernel] Initializing PMM...
+[PMM] Initializing buddy system with region: 0x40000000 - 0x43ffffff
+[PMM] Buddy system initialized: 16288 pages (63 MB) available
+[PMM] Initializing buddy system with region: 0x44020000 - 0x47665fff
+[PMM] Buddy system initialized: 30100 pages (117 MB) available
+[PMM] Initializing buddy system with region: 0x48101000 - 0xb8f7ffff
+[PMM] Buddy system initialized: 489853 pages (1913 MB) available
+[PMM] Initializing buddy system with region: 0xb8f81000 - 0xb9076fff
+[PMM] Buddy system initialized: 490097 pages (1914 MB) available
+[PMM] Initializing buddy system with region: 0xba61a000 - 0xbc715fff
+[PMM] Buddy system initialized: 498491 pages (1947 MB) available
+[PMM] Initializing buddy system with region: 0xbcb47000 - 0xbea46fff
+[PMM] Buddy system initialized: 506380 pages (1978 MB) available
+[Scarlet Kernel] Allocating initial heap from PMM...
+[Scarlet Kernel] Building Scarlet boot page table...
+FDT initialized
+No bootargs found
+Model: linux,dummy-virt
+[Scarlet Kernel] Initializing heap...
+[Scarlet Kernel] Heap initialized at 0xffffd00000000000 - 0xffffd0001fffffff
+[Scarlet Kernel] Heap allocation test passed
+Running early initcalls... 
+Running driver initcalls... 
+[Scarlet Kernel] Initializing Virtual Memory...
+Kernel space mapped       : 0xffffffff80000000 - 0xffffffff80d6efff
+HHDM mapped               : 0xffff800040000000 - 0xffff800043ffffff (Normal)
+HHDM mapped               : 0xffff800044020000 - 0xffff800047665fff (Normal)
+HHDM mapped               : 0xffff800048000000 - 0xffff8000b8f7ffff (Normal)
+HHDM mapped               : 0xffff8000b8f81000 - 0xffff8000b9076fff (Normal)
+HHDM mapped               : 0xffff8000b9195000 - 0xffff8000b9f73fff (Normal)
+HHDM mapped               : 0xffff8000ba61a000 - 0xffff8000bc715fff (Normal)
+HHDM mapped               : 0xffff8000bcb47000 - 0xffff8000bea46fff (Normal)
+Kernel heap mapped        : 0xffffd00000000000 - 0xffffd0001fffffff
+IOREMAP region            : 0xffffc00000000000 - 0xffffc0003fffffff
+[lsm] symbol table: 0 symbol(s) registered (0 errors)
+[boot] Creating initial user task...
+[Scarlet Kernel] Populating devices...
+Populating devices from FDT...
+Populating devices with Critical Infrastructure drivers from FDT...
+[ioremap] paddr=0x8000000 -> vaddr=0xffffc00000000000 (size=0x10000)
+[ioremap] paddr=0x80a0000 -> vaddr=0xffffc00000010000 (size=0xf60000)
+[interrupt] GICv3 selected: dist=0xffffc00000000000 redist=0xffffc00000010000 max_intid=1023 max_cpus=16
+Successfully probed Critical Infrastructure device: intc@8000000
+[interrupt] ARM generic timer: using virt PPI 27 from firmware
+Successfully probed Critical Infrastructure device: timer
+[Scarlet Kernel] Initializing interrupt controllers...
+[interrupt] init: external controller...
+[interrupt] init_external_controller: calling controller.init()
+[interrupt] GICv3 init: dist=0xffffc00000000000 redist=0xffffc00000010000
+[interrupt] GICv3 dist cold-reset: SPIs=32..=1020 priority=0xc0 route_cpu=0
+[interrupt] init_external_controller: controller.init() returned
+[interrupt] re-enabled 0 external IRQs after controller init
+[interrupt] init: external controller done
+[interrupt] CPU 0: per-CPU controller init begin
+[interrupt] CPU 0: interrupts disabled
+[interrupt] CPU 0: controller registry locked
+[interrupt] CPU 0: timer controller init begin
+[interrupt] CPU 0: timer controller init done
+[interrupt] CPU 0: external controller per-CPU init begin
+[interrupt] CPU 0: external controller per-CPU init done
+[interrupt] CPU 0: per-CPU controller init done
+[NetworkManager] Initializing NetworkLayers...
+[Scarlet Kernel] Populating remaining devices...
+Populating devices from FDT...
+Populating devices with Core System drivers from FDT...
+Probing PL011 UART device: pl011@9000000
+PL011 paddr: 0x9000000, size: 0x1000
+[ioremap] paddr=0x9000000 -> vaddr=0xffffc00000f70000 (size=0x1000)
+PL011 base address (virt): 0xffffc00000f70000
+PL011 interrupt ID: 33
+PL011 interrupts enabled (ID: 33)
+PL011 interrupt device registered
+PL011 UART device registered with ID: 13
+Successfully probed Core System device: pl011@9000000
+Successfully probed Core System device: apb-pclk
+Populating devices with Standard Devices drivers from FDT...
+[ioremap] paddr=0xa000000 -> vaddr=0xffffc00000f71000 (size=0x200)
+[Virtio] Detected Virtio Block Device at 0xffffc00000f71000, registering as vblk0
+[virtio][feat] device_features=0x00000101:30006e54 driver_features=0x00000000:30006654
+[partition] Failed to scan vblk0 for partitions: Invalid MBR primary partition range or boot flag
+Successfully probed Standard Devices device: virtio_mmio@a000000
+[ioremap] paddr=0xa000200 -> vaddr=0xffffc00000f72200 (size=0x200)
+[Virtio] Detected Virtio Block Device at 0xffffc00000f72200, registering as vblk1
+[virtio][feat] device_features=0x00000101:30006e54 driver_features=0x00000000:30006654
+Successfully probed Standard Devices device: virtio_mmio@a000200
+[ioremap] paddr=0xa000400 -> vaddr=0xffffc00000f73400 (size=0x200)
+[Virtio] Detected Virtio RNG Device at 0xffffc00000f73400
+[virtio][feat] device_features=0x00000101:30000000 driver_features=0x00000000:00000000
+[VirtIO RNG] Device initialized with features: 0x0
+[Random] Registering entropy source: virtio-rng
+Successfully probed Standard Devices device: virtio_mmio@a000400
+[ioremap] paddr=0xa000600 -> vaddr=0xffffc00000f74600 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a000600: Unsupported device type
+[ioremap] paddr=0xa000800 -> vaddr=0xffffc00000f75800 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a000800: Unsupported device type
+[ioremap] paddr=0xa000a00 -> vaddr=0xffffc00000f76a00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a000a00: Unsupported device type
+[ioremap] paddr=0xa000c00 -> vaddr=0xffffc00000f77c00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a000c00: Unsupported device type
+[ioremap] paddr=0xa000e00 -> vaddr=0xffffc00000f78e00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a000e00: Unsupported device type
+[ioremap] paddr=0xa001000 -> vaddr=0xffffc00000f79000 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a001000: Unsupported device type
+[ioremap] paddr=0xa001200 -> vaddr=0xffffc00000f7a200 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a001200: Unsupported device type
+[ioremap] paddr=0xa001400 -> vaddr=0xffffc00000f7b400 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a001400: Unsupported device type
+[ioremap] paddr=0xa001600 -> vaddr=0xffffc00000f7c600 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a001600: Unsupported device type
+[ioremap] paddr=0xa001800 -> vaddr=0xffffc00000f7d800 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a001800: Unsupported device type
+[ioremap] paddr=0xa001a00 -> vaddr=0xffffc00000f7ea00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a001a00: Unsupported device type
+[ioremap] paddr=0xa001c00 -> vaddr=0xffffc00000f7fc00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a001c00: Unsupported device type
+[ioremap] paddr=0xa001e00 -> vaddr=0xffffc00000f80e00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a001e00: Unsupported device type
+[ioremap] paddr=0xa002000 -> vaddr=0xffffc00000f81000 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a002000: Unsupported device type
+[ioremap] paddr=0xa002200 -> vaddr=0xffffc00000f82200 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a002200: Unsupported device type
+[ioremap] paddr=0xa002400 -> vaddr=0xffffc00000f83400 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a002400: Unsupported device type
+[ioremap] paddr=0xa002600 -> vaddr=0xffffc00000f84600 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a002600: Unsupported device type
+[ioremap] paddr=0xa002800 -> vaddr=0xffffc00000f85800 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a002800: Unsupported device type
+[ioremap] paddr=0xa002a00 -> vaddr=0xffffc00000f86a00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a002a00: Unsupported device type
+[ioremap] paddr=0xa002c00 -> vaddr=0xffffc00000f87c00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a002c00: Unsupported device type
+[ioremap] paddr=0xa002e00 -> vaddr=0xffffc00000f88e00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a002e00: Unsupported device type
+[ioremap] paddr=0xa003000 -> vaddr=0xffffc00000f89000 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a003000: Unsupported device type
+[ioremap] paddr=0xa003200 -> vaddr=0xffffc00000f8a200 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a003200: Unsupported device type
+[ioremap] paddr=0xa003400 -> vaddr=0xffffc00000f8b400 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a003400: Unsupported device type
+[ioremap] paddr=0xa003600 -> vaddr=0xffffc00000f8c600 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a003600: Unsupported device type
+[ioremap] paddr=0xa003800 -> vaddr=0xffffc00000f8d800 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a003800: Unsupported device type
+[ioremap] paddr=0xa003a00 -> vaddr=0xffffc00000f8ea00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a003a00: Unsupported device type
+[ioremap] paddr=0xa003c00 -> vaddr=0xffffc00000f8fc00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a003c00: Unsupported device type
+[ioremap] paddr=0xa003e00 -> vaddr=0xffffc00000f90e00 (size=0x200)
+Failed to probe Standard Devices device virtio_mmio@a003e00: Unsupported device type
+Populating devices with Late Initialization drivers from FDT...
+[PCI] ECAM discovered from FDT paddr=0x4010000000 size=0x10000000
+[ioremap] paddr=0x4010000000 -> vaddr=0xffffc00000f91000 (size=0x10000000)
+[PCI] ECAM mapped paddr=0x4010000000 -> vaddr=0xffffc00000f91000 size=0x10000000
+Scanning PCI bus...
+pci 0000:00:00.0: [1b36:0008] type 00 class 0x060000
+PCI scan complete: found 1 devices
+Registering 1 PCI devices with DeviceManager
+  - pci_device (1b36:0008)
+Probing 1 discovered PCI devices...
+[Scarlet Kernel] Initializing graphics subsystem...
+[Scarlet Kernel] Found 15 devices before graphics initialization
+[boot] entering initcalls
+[initcall] Running initcalls...
+Registering ABI module: linux-aarch64
+Registering ABI module: android-aarch64
+Registering ABI module: scarlet
+TTY registered as UART event listener
+TTY subsystem initialized successfully
+[initcall] Initcalls completed
+[boot] leaving initcalls
+[boot] pre-init devices: count=16 tty0=true
+[boot] pre-init device: id=1 name=null type=Char capabilities=[]
+[boot] pre-init device: id=2 name=kmsg type=Char capabilities=[]
+[boot] pre-init device: id=3 name=kvm type=Char capabilities=[]
+[boot] pre-init device: id=4 name=interrupts type=Char capabilities=[]
+[boot] pre-init device: id=5 name=cpufreq type=Char capabilities=[]
+[boot] pre-init device: id=6 name=cpuinfo type=Char capabilities=[]
+[boot] pre-init device: id=7 name=devfreq type=Char capabilities=[]
+[boot] pre-init device: id=8 name=thermal type=Char capabilities=[]
+[boot] pre-init device: id=9 name=random type=Char capabilities=[]
+[boot] pre-init device: id=10 name=random type=Char capabilities=[]
+[boot] pre-init device: id=11 name=net_profile type=Char capabilities=[]
+[boot] pre-init device: id=12 name=power_supply type=Char capabilities=[]
+[boot] pre-init device: id=13 name=pl011-uart type=Char capabilities=[Serial]
+[boot] pre-init device: id=14 name=virtio-blk type=Block capabilities=[]
+[boot] pre-init device: id=15 name=virtio-blk type=Block capabilities=[]
+[boot] pre-init device: id=16 name=tty0 type=Char capabilities=[Tty]
+[Scarlet Kernel] Enabling CPU interrupts...
+[boot] Initializing timer...
+[boot] wall clock seeded from Limine Date at Boot
+[boot] Initializing scheduler...
+[boot] Initializing global VFS...
+[Scarlet Kernel] Initializing initramfs from BootInfo...
+[InitRamFS] Initializing initramfs
+[InitRamFS] Using initramfs at address: 0xffff8000b9195000, size: 434688 bytes
+[InitRamFS] Successfully mounted initramfs at root directory
+[boot] Retrying deferred devices after root filesystem initialization...
+[shv] EL2 not available, hypervisor disabled
+[aarch64] user HWCAP=0x2007fb, probed CPUs=0x1
+Loaded data segment at 0x10000 (size: 0xf000)
+Loaded text segment at 0x2eb90 (size: 0x10000)
+Loaded data segment at 0x4d728 (size: 0x1000)
+Loaded data segment at 0x5dd70 (size: 0x1000)
+Loaded data segment at 0x40000000 (size: 0xa000)
+Loaded text segment at 0x4000a304 (size: 0x20000)
+Loaded data segment at 0x4002a880 (size: 0x2000)
+Loaded data segment at 0x4002c758 (size: 0x3000)
+[Scarlet Kernel] Task memory map: 0x10000 - 0x1efff
+[Scarlet Kernel] Task memory map: 0x2e000 - 0x3dfff
+[Scarlet Kernel] Task memory map: 0x4d000 - 0x4dfff
+[Scarlet Kernel] Task memory map: 0x5d000 - 0x5dfff
+[Scarlet Kernel] Task memory map: 0x40000000 - 0x40009fff
+[Scarlet Kernel] Task memory map: 0x4000a000 - 0x40029fff
+[Scarlet Kernel] Task memory map: 0x4002a000 - 0x4002bfff
+[Scarlet Kernel] Task memory map: 0x4002c000 - 0x4002efff
+[Scarlet Kernel] Task memory map: 0x7fffffef0000 - 0x7ffffffeffff
+[Scarlet Kernel] Init ELF loaded with entry point at 0x4000a334
+[Scarlet Kernel] Successfully loaded init ELF into task
+[Scarlet Kernel] Adding init task to scheduler...
+[Scarlet Kernel] cpu_id for init task: 0
+[Scarlet Kernel] Init task added to scheduler
+[aarch64] CPU 0: First switch to user task PID 1 with kernel SP 0xfffffffffeef0000
+
+SCARLET_ANDROID_STOCK_START properties
+SCARLET_PROPERTY_SNAPSHOT_OK 216
+SCARLET_ANDROID_STOCK_EXIT properties 0
+
+SCARLET_ANDROID_STOCK_START linkerconfig
+SCARLET_ANDROID_STOCK_EXIT linkerconfig 0
+SCARLET_ANDROID_STOCK_OK
+
+SCARLET_ANDROID_ART_START
+ANDROID_LOG 6 cutils-trace: Error opening trace file: No such file or directory (2)
+ANDROID_LOG 6 cutils-trace: Error opening /proc/self/cmdline: No such file or directory (2)
+ANDROID_LOG 4 dalvikvm64: setting boot class path to /apex/com.android.art/javalib/core-oj.jar:/apex/com.android.art/javalib/core-libart.jar:/apex/com.android.i18n/javalib/core-icu4j.jar
+ANDROID_LOG 6 cutils-trace: Error opening /proc/self/cmdline: No such file or directory (2)
+ANDROID_LOG 6 dalvikvm64: Error reading named image component header for /system/nonexistent/boot.art, error: Unable to open file "/system/nonexistent/arm64/boot.art" for reading image header
+ANDROID_LOG 6 dalvikvm64: Could not create image space with image file '/system/nonexistent/boot.art'. Attempting to fall back to imageless running. Error was: Full boot image cannot be compiled because no profile is provided.
+ANDROID_LOG 3 dalvikvm64: I18n APEX ICU file found: /apex/com.android.i18n/etc/icu/icudt70l.dat
+ANDROID_LOG 5 ziparchive: Unable to open '/data/local/tmp/classes.dm': No such file or directory
+ANDROID_LOG 3 dalvikvm64: Received session metadata: 3696372074761785796
+ANDROID_LOG 7 dalvikvm64: sigwait failed: Function not implemented
+ANDROID_LOG 7 dalvikvm64: Runtime aborting...
+Dumping all threads without mutator lock held
+All threads:
+DALVIK THREADS (3):
+"Signal Catcher" prio=5 tid=3 Runnable
+  | group="" sCount=0 ucsCount=0 flags=0 obj=0x12cc0020 self=0x400175c0b6f0
+  | sysTid=9 nice=0 cgrp=default sched=0/0 handle=0x4002be10acb0
+  | state=? schedstat=( 0 0 0 ) utm=0 stm=0 core=0 HZ=0
+  | stack=0x4002be013000-0x4002be015000 stackSize=991KB
+  | held mutexes= "abort lock" "mutator lock"(shared held)
+  native: (backtrace::Unwind failed for thread 9: No map found)
+  (no managed stack frames)
+
+"Runtime worker thread 0" prio=5 tid=2 Native (still starting up)
+  | group="" sCount=1 ucsCount=0 flags=1 obj=0x0 self=0x400175c07f50
+  | sysTid=8 nice=0 cgrp=default sched=0/0 handle=0x40029b88fcb0
+  | state=? schedstat=( 0 0 0 ) utm=0 stm=0 core=0 HZ=0
+  | stack=0x40029b880000-0x40029b882000 stackSize=63KB
+  | held mutexes=
+  native: (backtrace::Unwind failed for thread 8: No map found)
+  (no managed stack frames)
+
+"main" prio=5 tid=1 Runnable
+  | group="" sCount=0 ucsCount=0 flags=0 obj=0x12c97db0 self=0x400175c06380
+  | sysTid=7 nice=0 cgrp=default sched=0/0 handle=0x10012d4f8
+  | state=? schedstat=( 0 0 0 ) utm=0 stm=0 core=0 HZ=0
+  | stack=0x7fffffef1000-0x7fffffef3000 stackSize=1020KB
+  | held mutexes= "mutator lock"(shared held)
+  native: (backtrace::Unwind failed for thread 7: No map found)
+  at libcore.util.NativeAllocationRegistry.createMalloced(NativeAllocationRegistry.java:140)
+  at com.android.icu.charset.NativeConverter.<clinit>(NativeConverter.java:22)
+  at com.android.icu.charset.NativeConverter.charsetForName(Native method)
+  at com.android.icu.charset.CharsetFactory.create(CharsetFactory.java:50)
+  at java.nio.charset.Charset.lookup2(Charset.java:511)
+  at java.nio.charset.Charset.lookup(Charset.java:497)
+  at java.nio.charset.Charset.forName(Charset.java:563)
+  at java.nio.charset.StandardCharsets.<clinit>(StandardCharsets.java:44)
+  at java.nio.charset.Charset.defaultCharset(Charset.java:661)
+  - locked <0x06b3fc9a> (a java.lang.Class<java.nio.charset.Charset>)
+  at sun.nio.cs.StreamEncoder.forOutputStreamWriter(StreamEncoder.java:56)
+  at java.io.OutputStreamWriter.<init>(OutputStreamWriter.java:111)
+  at java.io.PrintStream.getTextOut(PrintStream.java:436)
+  at java.io.PrintStream.write(PrintStream.java:628)
+  - locked <0x0ab5a9cb> (a java.io.PrintStream)
+  at java.io.PrintStream.print(PrintStream.java:772)
+  at java.io.PrintStream.println(PrintStream.java:909)
+  - locked <0x0ab5a9cb> (a java.io.PrintStream)
+  at ScarletArtHello.main(ScarletArtHello.java:4)
+
+"FinalizerWatchdogDaemon" prio=5 tid=4 Waiting
+  | group="" sCount=1 ucsCount=0 flags=1 obj=0x12c9db98 self=0x400175c14200
+  | sysTid=13 nice=0 cgrp=default sched=0/0 handle=0x4002c0532cb0
+  | state=? schedstat=( 0 0 0 ) utm=0 stm=0 core=0 HZ=0
+  | stack=0x4002c042f000-0x4002c0431000 stackSize=1039KB
+  | held mutexes=
+  native: (backtrace::Unwind failed for thread 13: No map found)
+  at java.lang.Object.wait(Native method)
+  - waiting on <0x01a5ad45> (a java.lang.Daemons$FinalizerWatchdogDaemon)
+  at java.lang.Object.wait(Object.java:442)
+  at java.lang.Object.wait(Object.java:568)
+  at java.lang.Daemons$FinalizerWatchdogDaemon.sleepUntilNeeded(Daemons.java:385)
+  - locked <0x01a5ad45> (a java.lang.Daemons$FinalizerWatchdogDaemon)
+  at java.lang.Daemons$FinalizerWatchdogDaemon.runInternal(Daemons.java:365)
+  at java.lang.Daemons$Daemon.run(Daemons.java:140)
+  at java.lang.Thread.run(Thread.java:1012)
+
+"FinalizerDaemon" prio=5 tid=5 Waiting
+  | group="" sCount=1 ucsCount=0 flags=1 obj=0x12c9db08 self=0x400175c12630
+  | sysTid=12 nice=0 cgrp=default sched=0/0 handle=0x4002c0428cb0
+  | state=? schedstat=( 0 0 0 ) utm=0 stm=0 core=0 HZ=0
+  | stack=0x4002c0325000-0x4002c0327000 stackSize=1039KB
+  | held mutexes=
+  native: (backtrace::Unwind failed for thread 12: No map found)
+  at java.lang.Object.wait(Native method)
+  - waiting on <0x071755a8> (a java.lang.Object)
+  at java.lang.Object.wait(Object.java:442)
+  at java.lang.ref.ReferenceQueue.remove(ReferenceQueue.java:203)
+  - locked <0x071755a8> (a java.lang.Object)
+  at java.lang.ref.ReferenceQueue.remove(ReferenceQueue.java:224)
+  at java.lang.Daemons$FinalizerDaemon.runInternal(Daemons.java:300)
+  at java.lang.Daemons$Daemon.run(Daemons.java:140)
+  at java.lang.Thread.run(Thread.java:1012)
+
+"ReferenceQueueDaemon" prio=5 tid=6 Waiting
+  | group="" sCount=1 ucsCount=0 flags=1 obj=0x12c9da78 self=0x400175c0ee90
+  | sysTid=11 nice=0 cgrp=default sched=0/0 handle=0x4002c031ecb0
+  | state=? schedstat=( 0 0 0 ) utm=0 stm=0 core=0 HZ=0
+  | stack=0x4002c021b000-0x4002c021d000 stackSize=1039KB
+  | held mutexes=
+  native: (backtrace::Unwind failed for thread 11: No map found)
+  at java.lang.Object.wait(Native method)
+  - waiting on <0x08f8d8c1> (a java.lang.Class<java.lang.ref.ReferenceQueue>)
+  at java.lang.Object.wait(Object.java:442)
+  at java.lang.Object.wait(Object.java:568)
+  at java.lang.Daemons$ReferenceQueueDaemon.runInternal(Daemons.java:232)
+  - locked <0x08f8d8c1> (a java.lang.Class<java.lang.ref.ReferenceQueue>)
+  at java.lang.Daemons$DaeSCARLET_ART_BEGIN
+Scarlet ART: 42
+SCARLET_ART_OK
+mon.run(Daemons.java:140)
+  at java.lang.Thread.run(Thread.java:1012)
+
+"HeapTaskDaemon" prio=5 tid=7 WaitingForTaskProcessor
+  | group="" sCount=1 ucsCount=0 flags=1 obj=0x12c9d9e8 self=0x400175c09b20
+  | sysTid=10 nice=0 cgrp=default sched=0/0 handle=0x4002c0214cb0
+  | state=? schedstat=( 0 0 0 ) utm=0 stm=0 core=0 HZ=0
+  | stack=0x4002c0111000-0x4002c0113000 stackSize=1039KB
+  | held mutexes=
+  native: (backtrace::Unwind failed for thread 10: No map found)
+  at dalvik.system.VMRuntime.runHeapTasks(Native method)
+  at java.lang.Daemons$HeapTaskDaemon.runInternal(Daemons.java:609)
+  at java.lang.Daemons$Daemon.run(Daemons.java:140)
+  at java.lang.Thread.run(Thread.java:1012)
+
+Aborting thread:
+"Signal Catcher" prio=5 tid=3 WaitingInMainSignalCatcherLoop
+  | group="" sCount=0 ucsCount=0 flags=0 obj=0x12cc0020 self=0x400175c0b6f0
+  | sysTid=9 nice=0 cgrp=default sched=0/0 handle=0x4002be10acb0
+  | state=? schedstat=( 0 0 0 ) utm=0 stm=0 core=0 HZ=0
+  | stack=0x4002be013000-0x4002be015000 stackSize=991KB
+  | held mutexes= "abort lock" "mutator lock"(shared held)
+  native: (backtrace::Unwind failed for thread 9: No map found)
+  (no managed stack frames)
+
+SCARLET_ANDROID_ART_EXIT 127
+SCARLET_ANDROID_ART_FAIL: ART wait or exit

@@ -1,0 +1,81 @@
+{
+  "date": "2026-10-28",
+  "branch": "feature/android-abi-module",
+  "source_commits": [
+    "165d6efcd5e43d57593edf72354b235e2e26078a feat(linux): wait for pending signals with timeout and interruption",
+    "d963f3339783d88b46f0b14aba51a77f9a82a8ea feat(linux): requeue futex waiters with cancellation-safe cleanup",
+    "cecb80942df79b72225a26a9beba7ef33895dfaf feat(vm): grow private anonymous mappings for Linux mremap",
+    "6c637b08843f55fb93168ce325e9223c422ad5a4 feat(task): retain entry stack metadata for Linux thread attribute queries"
+  ],
+  "kernel_sha256": "a7abbdcf74643c7e1529d30b919c0ef420fa2cc7e344f9bd84927feec2d1e142",
+  "build_lock_sha256": "406eed8a6e007644ad6ecb956eba0c56755d2cf9a28eca430637bb00006cd2bd",
+  "validation": {
+    "kernel": {
+      "exit_code": 0,
+      "full_log": ".build/android-art-next/sigwait-validation.log",
+      "sha256": "66368a51e28686c97d285973180dfbac013a3c8c43b92c955872aa4ad51a55ee",
+      "excerpt": "kernel-validation.log"
+    },
+    "build": {
+      "exit_code": 0,
+      "full_log": ".build/android-art-next/sigwait-build.log",
+      "sha256": "48d2665387035c756fe9da1c2621db495acbd376d43801470e4fb3ec6baba68a",
+      "excerpt": "build-validation.log"
+    },
+    "host": {
+      "exit_code": 0,
+      "full_log": ".build/android-art-next/growth-host-tests.log",
+      "sha256": "29980b5e9481eebf80388e272c886da6b675037df4bc20e852db47a50f576d55",
+      "excerpt": "host-validation.log"
+    }
+  },
+  "kernel_tests": 1607,
+  "riscv_release_check": "PASS",
+  "host_tests": 26,
+  "bionic": {
+    "hvf": "18/18 PASS",
+    "tcg": "18/18 PASS"
+  },
+  "art": {
+    "hvf": "PASS",
+    "tcg": "PASS",
+    "launch": "stock Android 13 ARM64 ART; image-less -Xint; no JIT; no LD_PRELOAD; no guest Linux kernel",
+    "required_evidence": [
+      "SCARLET_ANDROID_STOCK_OK",
+      "SCARLET_ART_BEGIN",
+      "Scarlet ART: 42",
+      "SCARLET_ART_OK",
+      "SCARLET_ANDROID_ART_EXIT 0",
+      "SCARLET_ANDROID_ART_OK"
+    ],
+    "stock_properties": 216,
+    "stock_linkerconfig": "full ART configuration equals stock host reference"
+  },
+  "resolved_blockers": [
+    "Bionic main-thread stack attributes required getrlimit and proc stat initial SP",
+    "Bionic atexit array required private anonymous mremap growth",
+    "ART condition-variable startup required futex requeue",
+    "ART Signal Catcher required synchronous signal waiting"
+  ],
+  "diagnostic_history": {
+    "art-stack-hvf": "exit 127: atexit growth unsupported",
+    "art-stderr-hvf": "exit 127: futex requeue ENOSYS",
+    "art-requeue-stderr": "exit 127: sigwait ENOSYS; Java markers interleaved with abort output, explicitly INCOMPLETE"
+  },
+  "diagnostic_logger": {
+    "source": "art-logger.c",
+    "sha256": "1512f31528ef4b6e35619a62554ce52862ba4ec6f395175ff76505822a2be468",
+    "scope": "interposes Android log sink via LD_PRELOAD only in the two retained stderr diagnostics; absent from passing runs"
+  },
+  "limitations": [
+    "No framework, Activity/APK or graphics success claimed.",
+    "Signal metadata uses SI_KERNEL; sender records, realtime queues and process-directed routing need further work.",
+    "Resource limit queries support fixed STACK and NOFILE only; updates and stack auto-growth unsupported.",
+    "Proc stat accounting fields unavailable from the native process interface are zero.",
+    "mremap fixed growth, shared/file/device growth and DONTUNMAP unsupported.",
+    "SELinux labels remain metadata only."
+  ],
+  "discussion": "https://github.com/petitstrawberry/Scarlet/issues/613",
+  "runner_note": "Existing local crosvm runner edits remove an unused serial-input option. The exact image and QEMU commands are retained; no serial input was supplied.",
+  "cleanup": "Temporary per-run boot/rootfs images, staged runtime copies and dependency targets are removed after preserving these records and the verified kernel locally."
+}
