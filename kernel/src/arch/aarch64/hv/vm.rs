@@ -257,6 +257,7 @@ impl Aarch64VcpuObject {
         vcpu: &mut GuestVcpu,
         vgic: &mut VgicState,
         vm: &Aarch64VmObject,
+        invalidate_stage2: bool,
     ) {
         // Step 1: Save host EL2 state
         enable_guest_timer_ppi_for_current_cpu();
@@ -331,7 +332,9 @@ impl Aarch64VcpuObject {
         });
 
         // Step 2: Set VTTBR_EL2 to guest stage-2 page table
-        vm.set_guest_root_pagetable();
+        if invalidate_stage2 {
+            vm.set_guest_root_pagetable();
+        }
 
         // Step 3: Restore guest VGIC state while still using the host VHE
         // translation regime. HCR_EL2 is switched only after this point so the
@@ -754,7 +757,13 @@ impl VcpuObject for Aarch64VcpuObject {
 
         {
             let vcpu_state = &mut *vcpu;
-            self.setup_for_guest(&task, &mut vcpu_state.guest, &mut vcpu_state.vgic, &vm);
+            self.setup_for_guest(
+                &task,
+                &mut vcpu_state.guest,
+                &mut vcpu_state.vgic,
+                &vm,
+                true,
+            );
         }
         vcpu.guest.restore_fpu();
         // SAFETY: the guest world switch restores host EL2 state before returning.
@@ -771,6 +780,10 @@ impl VcpuObject for Aarch64VcpuObject {
 
             match arch_guest_trap_handler(&mut guest_tf, &vm, &mut vcpu.guest) {
                 Some(exit) => {
+                    // Internal re-entry retains VTTBR while HCR disables stage-2
+                    // for host Rust code. Retire it before releasing the IRQ lock
+                    // and returning to a caller that can schedule or run another VM.
+                    super::trap::clear_guest_mode();
                     self.prepare_normal_task_and_save_guest(&task, &mut vcpu.guest, &mut guest_tf);
                     restore_host_user_fpu(&task);
                     return Ok(exit);
@@ -792,6 +805,11 @@ impl VcpuObject for Aarch64VcpuObject {
                             &mut vcpu_state.guest,
                             &mut vcpu_state.vgic,
                             &vm,
+                            // No scheduler switch is possible while the vCPU
+                            // IRQ lock is held. Stage-2 faults already invalidate
+                            // after updating their mappings. The world switch
+                            // retains VTTBR until this KVM_RUN returns.
+                            false,
                         );
                     }
                     vcpu.guest.restore_fpu();
@@ -997,7 +1015,7 @@ impl Aarch64VmObject {
         Err("Cannot replace existing stage2 page table with a leaf")
     }
 
-    pub fn set_guest_root_pagetable(&self) {
+    fn set_guest_root_pagetable(&self) {
         let state = self.state.lock();
         if let Some(root) = get_stage2_root(state.vmid) {
             // SAFETY: get_stage2_root returns a valid raw pointer to this VM's
