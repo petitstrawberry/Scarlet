@@ -1,0 +1,23 @@
+{
+  "openjdk": {
+    "version": "jdk-21.0.13+9",
+    "commit": "0717bf3566f846527897e2c4fe22a1340718b9a3",
+    "url": "https://codeload.github.com/petitstrawberry/jdk21u/tar.gz/0717bf3566f846527897e2c4fe22a1340718b9a3",
+    "sha256": "c909e243619ef742726e7b532f34978a4386bfa26a8260fde51bf4b0a81da073",
+    "directory": "jdk21u-0717bf3566f846527897e2c4fe22a1340718b9a3",
+    "ported": true,
+    "repository": "https://github.com/petitstrawberry/jdk21u",
+    "branch": "scarlet-21",
+    "upstream": {
+      "repository": "https://github.com/openjdk/jdk21u",
+      "tag": "jdk-21.0.13+9",
+      "commit": "ba94eace682733f66e623c089bcafcf4a1b8e39c"
+    }
+  },
+  "libffi": {
+    "version": "3.4.8",
+    "url": "https://github.com/libffi/libffi/releases/download/v3.4.8/libffi-3.4.8.tar.gz",
+    "sha256": "bc9842a18898bfacb0ed1252c4febcc7e78fa139fd27fdc7a3e30d9d9356119b",
+    "directory": "libffi-3.4.8"
+  }
+}

@@ -29,6 +29,8 @@ use crate::{
 
 use crate::abi::{AbiModule, EventProcessOutcome};
 
+mod fault;
+
 /// Maximum number of pending events that can be queued
 /// When this limit is reached, oldest events are dropped
 const MAX_PENDING_EVENTS: usize = 1024;
@@ -153,6 +155,7 @@ impl EventMask {
 
 /// Scarlet Native ABI state
 pub struct ScarletAbi {
+    fault: fault::FaultState,
     elf_tls: crate::sync::RwSpinLock<Option<Arc<crate::task::elf_loader::ElfTlsImage>>>,
     /// TLS (Thread Local Storage) pointer for this task
     pub tls_pointer: Option<usize>,
@@ -171,6 +174,7 @@ pub struct ScarletAbi {
 impl Clone for ScarletAbi {
     fn clone(&self) -> Self {
         Self {
+            fault: fault::FaultState::default(),
             elf_tls: crate::sync::RwSpinLock::new(self.elf_tls.read().clone()),
             tls_pointer: self.tls_pointer,
             clear_child_tid_ptr: self.clear_child_tid_ptr,
@@ -185,6 +189,7 @@ impl Clone for ScarletAbi {
 impl Default for ScarletAbi {
     fn default() -> Self {
         Self {
+            fault: fault::FaultState::default(),
             elf_tls: crate::sync::RwSpinLock::new(None),
             tls_pointer: None,
             clear_child_tid_ptr: None,
@@ -684,7 +689,26 @@ impl AbiModule for ScarletAbi {
     }
 
     fn handle_syscall(&mut self, trapframe: &mut Trapframe) -> Result<usize, &'static str> {
+        if let Some(result) =
+            super::fault::handle_syscall(self, trapframe, trapframe.get_syscall_number())
+        {
+            return Ok(result);
+        }
         syscall_handler(trapframe)
+    }
+
+    fn handle_user_exception(
+        &mut self,
+        task: &crate::task::Task,
+        trapframe: &mut Trapframe,
+        address: usize,
+        syndrome: u64,
+    ) -> bool {
+        self.deliver_fault(task, trapframe, address, syndrome)
+    }
+
+    fn on_exec_commit(&mut self, _task: &crate::task::Task) {
+        self.fault = fault::FaultState::default();
     }
 
     fn can_execute_binary(

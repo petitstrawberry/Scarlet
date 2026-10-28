@@ -3,7 +3,7 @@
 use std::{
     environment::{Environment, VfsView},
     format,
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     handle::Handle,
     println,
     time::Duration,
@@ -43,7 +43,13 @@ pub fn console_at(path: &str) -> Result<[Handle; 3], &'static str> {
         return Err("init.console must name an absolute device path");
     }
     devfs()?;
-    let input = File::open(path)
+    // Duplicated standard streams share the open description's access mode.
+    // Native C write() enforces it, so opening read-only makes stdout/stderr
+    // fail with EBADF even though the underlying TTY can write.
+    let input = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
         .map_err(|_| "cannot open console")?
         .into_handle();
     let output = input.duplicate().map_err(|_| "cannot duplicate console")?;

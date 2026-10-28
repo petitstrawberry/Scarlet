@@ -283,6 +283,7 @@ syscall_table! {
     FutexWake = 50 => sys_futex_wake,
     GetKernelInfo = 51 => crate::system::sys_get_kernel_info,
     SetSystemTime = 52 => crate::task::syscall::sys_set_system_time,
+    GetMemoryInfo = 53 => crate::system::sys_get_memory_info,
 
     // ABI Zone Management
     RegisterAbiZone = 90 => sys_register_abi_zone,
@@ -381,12 +382,15 @@ syscall_table! {
     EventMask = 642 => sys_event_mask,                                       // Set event mask (Scarlet Native)
     EventReturn = 643 => sys_event_return,                                   // Return from event handler (Scarlet Native)
     EventHandlerRegisterNativeWithRestorer = 644 => sys_event_handler_register_native_with_restorer, // Register handler with executable event-return restorer
+    NativeFaultRegister = 645 => crate::abi::scarlet::fault::sys_register,
+    NativeFaultReturn = 646 => crate::abi::scarlet::fault::sys_return,
 
 
     // === Memory Mapping Operations ===
     MemoryMap = 700 => sys_memory_map,     // Memory map operation (mmap)
     MemoryUnmap = 701 => sys_memory_unmap, // Memory unmap operation (munmap)
     MemoryQuery = 703 => sys_memory_query, // Caller virtual mapping bounds
+    MemoryReadWord = 704 => crate::system::sys_memory_read_word,
     MemoryProtect = 702 => sys_memory_protect, // Change existing page protections
 
     // === Socket Operations (Scarlet Native) ===
