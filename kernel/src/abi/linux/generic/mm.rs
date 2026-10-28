@@ -125,6 +125,19 @@ fn mmap_for_task(abi: &mut LinuxAbi, trapframe: &Trapframe, task: &crate::task::
         Some(obj) => obj,
         None => return to_result(errno::EBADF),
     };
+    if let Some(result) = abi.extensions.mmap(
+        task,
+        &kernel_obj,
+        crate::abi::linux::extensions::FileMapping {
+            address: addr,
+            length: aligned_length,
+            protection: prot,
+            flags,
+            offset,
+        },
+    ) {
+        return result;
+    }
     // Special case: KVM vCPU mmap (shared kvm_run page).
     // kvmtool calls mmap(vcpu_fd, ...) to map the per-vCPU kvm_run structure.
     // This bypasses the generic MemoryMappingOps path because HypervisorVcpu

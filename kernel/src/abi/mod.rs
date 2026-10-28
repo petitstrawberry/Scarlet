@@ -60,6 +60,13 @@ pub struct RuntimeConfig {
 /// share process-wide state through owned references where the ABI requires it.
 ///
 pub trait AbiModule: Send + Sync + 'static {
+    /// Implementation reused by a composed ABI. The outer module remains the
+    /// process ABI; this only exposes compatible state for transitions such as
+    /// exec. Implementations must return an owned component, never themselves.
+    fn base_abi(&self) -> Option<&dyn AbiModule> {
+        None
+    }
+
     /// Return the name used to register this concrete ABI implementation.
     ///
     /// # Arguments
@@ -480,6 +487,17 @@ pub trait AbiModule: Send + Sync + 'static {
 ///
 pub struct AbiRegistry {
     factories: HashMap<String, fn() -> Box<dyn AbiModule + Send + Sync>>,
+}
+
+/// Find an ABI implementation within a composition without depending on the
+/// concrete outer module. Used to preserve compatible descriptor state on exec.
+pub fn abi_component<T: AbiModule>(mut abi: &dyn AbiModule) -> Option<&T> {
+    loop {
+        if abi.get_name() == T::name() {
+            return abi.as_any().downcast_ref::<T>();
+        }
+        abi = abi.base_abi()?;
+    }
 }
 
 impl AbiRegistry {

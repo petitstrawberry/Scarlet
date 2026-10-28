@@ -112,6 +112,7 @@ impl Default for LinuxFdTable {
 
 #[derive(Clone)]
 pub struct LinuxAbi {
+    pub(super) extensions: &'static dyn super::extensions::LinuxAbiExtensions,
     pub namespace: Arc<crate::task::namespace::TaskNamespace>,
     fd_table: Arc<IrqRwSpinLock<LinuxFdTable>>,
     pub signal_state: Arc<IrqSpinLock<signal::SignalState>>,
@@ -129,6 +130,7 @@ impl Default for LinuxAbi {
         let namespace = crate::task::namespace::get_root_namespace().clone();
 
         Self {
+            extensions: &super::extensions::NoExtensions,
             namespace,
             fd_table: Arc::new(IrqRwSpinLock::new(LinuxFdTable::default())),
             signal_state: Arc::new(IrqSpinLock::new(signal::SignalState::new())),
@@ -144,6 +146,16 @@ impl Default for LinuxAbi {
 }
 
 impl LinuxAbi {
+    /// Compose the common Linux implementation with an ABI-specific policy.
+    /// Exec copies descriptor state separately, so extensions never migrate
+    /// from the source process into a plain Linux target ABI.
+    pub fn with_extensions(extensions: &'static dyn super::extensions::LinuxAbiExtensions) -> Self {
+        Self {
+            extensions,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn bind_task_signals(&self, task: &crate::task::Task) {
         *task.linux_signal_state.lock() = Some(Arc::downgrade(&self.signal_state));
     }

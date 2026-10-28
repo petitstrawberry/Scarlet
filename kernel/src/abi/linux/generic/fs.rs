@@ -1090,6 +1090,9 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs, dirfd, &path_str) {
+        if let Some(fd) = abi.extensions.open(abi, &task, &absolute, flags) {
+            return fd;
+        }
         if super::proc_fd::is_self_fd_directory(&absolute) {
             return super::proc_fd::open_self_fd_directory(abi, &task, flags);
         }
@@ -2864,6 +2867,12 @@ fn ioctl_for_task(
         None => return errno::to_result(errno::EBADF),
     };
 
+    if let Some(result) = abi
+        .extensions
+        .ioctl(abi, task, trapframe, &kernel_object, fd, request, arg)
+    {
+        return result;
+    }
     // Dispatch hypervisor (KVM) ioctls before capability-based routing
     #[cfg(feature = "hypervisor")]
     {

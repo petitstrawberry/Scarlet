@@ -390,9 +390,7 @@ impl AbiModule for LinuxAarch64Abi {
         source: Option<&dyn AbiModule>,
         image: &crate::task::Task,
     ) -> Result<(), &'static str> {
-        let old = source
-            .filter(|abi| abi.get_name() == self.get_name())
-            .and_then(|abi| abi.as_any().downcast_ref::<Self>());
+        let old = source.and_then(crate::abi::abi_component::<Self>);
         self.0.prepare_exec_fds(old.map(|abi| &abi.0), image);
         Ok(())
     }
