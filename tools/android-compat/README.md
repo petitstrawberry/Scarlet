@@ -35,7 +35,7 @@ records and exit status zero. The host also requires the final suite marker.
 | exec | PASS | PASS | Sparse FD numbers, file flags, CLOEXEC and Android device dispatch survive exec |
 | xattr | PASS | PASS | All twelve path/fd/no-follow calls, binary values, limits, atomic flags, rename and unlink identity |
 | mremap | PASS | PASS | Fixed relocation, in-place/moving growth, lazy pages, protection, fork isolation, zeroed regrowth and 512 Bionic atexit callbacks |
-| binder | PASS | PASS | Cross-process request/reply, read-only receive pages, buffer release, pending-call peer death and fork isolation |
+| binder | PASS | PASS | Cross-process request/reply, read-only receive pages, buffer release, peer death, fork isolation, poll timeout/interruption and epoll level readiness |
 
 An additional static probe explicitly selects `linux-aarch64` and verifies that
 none of the three Binder aliases is exposed. This is the eighteenth case.
@@ -296,11 +296,15 @@ those binaries. A generic Linux heuristic cannot tie with positive Android
 identification. The Android filesystem view lives at `/systems/android-aarch64`
 and must be registered in the execution Environment.
 
-`kernel/src/ipc/rpc.rs` owns ABI-neutral endpoints, bounded request queues and
-single-use reply capabilities. Dropping a caller cancels its request; closing
-an endpoint or dropping an unanswered request completes pending calls with an
-error. These are internal kernel objects; a public native handle/syscall API
-and transferable object references are not exposed yet.
+`kernel/src/ipc/rpc.rs` owns ABI-neutral endpoints, bounded request queues,
+single-use reply capabilities and transferable object capabilities. Messages
+carry up to 64 typed object references separately from serialized bytes. Each
+object has a unique endpoint-local dispatch key; copying a key alone grants no
+reference. Object references can be forwarded in requests or replies. They do
+not keep the serving endpoint alive. Dropping a caller cancels its request;
+closing an endpoint revokes object dispatch and completes outstanding calls.
+These are internal kernel objects; a public native handle/syscall API and
+Binder wire object translation are not exposed yet.
 
 `kernel/src/abi/android/binder/` translates the **64-bit** Binder UAPI.
 Only the Android ABI recognizes `/dev/binder`, `/dev/hwbinder` and `/dev/vndbinder`
@@ -313,7 +317,9 @@ attempting real adapter transactions across these boundaries.
 
 The initial adapter supports protocol version 8, context-manager registration,
 manual loopers, `BINDER_WRITE_READ`, byte-only synchronous transactions to handle
-0, replies, transaction completion, `BC_FREE_BUFFER`, and thread exit. A read-only
+0, replies, transaction completion, `BC_FREE_BUFFER`, thread exit and poll
+waits with timeout/interruption through native RPC Wakers. Existing Linux epoll
+readiness scans also observe Binder's level-triggered state. A read-only
 receive VMA owns only its backing, so closing the file still completes pending
 calls while the VMA remains mapped. Fork omits these process-specific mappings;
 threads sharing an address space retain them. User copies and waits execute
@@ -327,10 +333,25 @@ not a binderfs implementation and are not yet represented by normal VFS nodes.
 
 **Not implemented:** object/FD transfer, strong/weak reference accounting,
 general death subscriptions, one-way and nested calls, automatic thread-pool
-growth, poll-based loopers, security-context records and SELinux policy.
+growth, security-context records and SELinux policy.
 Unsupported transaction features return errors. The Binder checkpoint does not
 yet run unmodified libbinder services or servicemanager. The separate minimal
 ART/Java fixture passes; direct APK execution remains unverified.
+
+The [service checkpoint](checkpoints/2026-10-28-binder-services/verification.json)
+records the poll regression probes and native object transfer/lifetime tests.
+The unmodified SDK `servicemanager` reaches startup but exits with status 127;
+a separate diagnostic run redirecting Android logs to stderr identifies
+`selinux_status_open(true)` as the failing check. It does not reach a usable
+service manager. Binder object/handle translation and libbinder service tests
+come next; SELinux compatibility is a separate design task.
+
+`prepare-servicemanager.py` extracts the executable from the same pinned SDK
+archive as `prepare-art.py` and checks its library dependencies against the
+prepared runtime. `run-direct.py --program <executable> --runtime-root <runtime>
+--stock-inputs <stock> ...` launches it for diagnosis. This mode records exit or
+timeout and explicitly leaves service readiness untested; it cannot produce a
+service PASS merely because a daemon stays alive or exits zero.
 
 ### Kernel fixes exercised
 

@@ -1,0 +1,137 @@
+{
+  "result": "PASS",
+  "qemu_exit_code": 0,
+  "elapsed_seconds": 12.275,
+  "dynamic_runtime": true,
+  "probes": {
+    "result": "PASS",
+    "cases": [
+      {
+        "program": "/bin/bionic-static",
+        "case": "libc",
+        "began": true,
+        "passed": true,
+        "status": 0
+      },
+      {
+        "program": "/bin/bionic-static",
+        "case": "thread",
+        "began": true,
+        "passed": true,
+        "status": 0
+      },
+      {
+        "program": "/bin/bionic-static",
+        "case": "shared",
+        "began": true,
+        "passed": true,
+        "status": 0
+      },
+      {
+        "program": "/bin/bionic-static",
+        "case": "signal",
+        "began": true,
+        "passed": true,
+        "status": 0
+      },
+      {
+        "program": "/bin/bionic-static",
+        "case": "exec",
+        "began": true,
+        "passed": true,
+        "status": 0
+      },
+      {
+        "program": "/bin/bionic-static",
+        "case": "xattr",
+        "began": true,
+        "passed": true,
+        "status": 0
+      },
+      {
+        "program": "/bin/bionic-static",
+        "case": "mremap",
+        "began": true,
+        "passed": true,
+        "status": 0
+      },
+      {
+        "program": "/bin/bionic-static",
+        "case": "binder",
+        "began": true,
+        "passed": true,
+        "status": 0
+      },
+      {
+        "program": "/bin/bionic-dynamic",
+        "case": "libc",
+        "began": true,
+        "passed": true,
+        "status": 0
+      },
+      {
+        "program": "/bin/bionic-dynamic",
+        "case": "thread",
+        "began": true,
+        "passed": true,
+        "status": 0
+      },
+      {
+        "program": "/bin/bionic-dynamic",
+        "case": "shared",
+        "began": true,
+        "passed": true,
+        "status": 0
+      },
+      {
+        "program": "/bin/bionic-dynamic",
+        "case": "signal",
+        "began": true,
+        "passed": true,
+        "status": 0
+      },
+      {
+        "program": "/bin/bionic-dynamic",
+        "case": "dynamic",
+        "began": true,
+        "passed": true,
+        "status": 0
+      },
+      {
+        "program": "/bin/bionic-dynamic",
+        "case": "exec",
+        "began": true,
+        "passed": true,
+        "status": 0
+      },
+      {
+        "program": "/bin/bionic-dynamic",
+        "case": "xattr",
+        "began": true,
+        "passed": true,
+        "status": 0
+      },
+      {
+        "program": "/bin/bionic-dynamic",
+        "case": "mremap",
+        "began": true,
+        "passed": true,
+        "status": 0
+      },
+      {
+        "program": "/bin/bionic-dynamic",
+        "case": "binder",
+        "began": true,
+        "passed": true,
+        "status": 0
+      },
+      {
+        "program": "/bin/bionic-static",
+        "case": "binder-absent",
+        "began": true,
+        "passed": true,
+        "status": 0
+      }
+    ]
+  }
+}

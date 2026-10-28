@@ -1,0 +1,24 @@
+{
+  "argv": [
+    "/apex/com.android.art/bin/dalvikvm64",
+    "-Xint",
+    "-Xusejit:false",
+    "-Ximage:/system/nonexistent/boot.art",
+    "-Xnoimage-dex2oat",
+    "-Xbootclasspath:/apex/com.android.art/javalib/core-oj.jar:/apex/com.android.art/javalib/core-libart.jar:/apex/com.android.i18n/javalib/core-icu4j.jar",
+    "-Xms16m",
+    "-Xmx128m",
+    "-cp",
+    "/data/local/tmp/classes.dex",
+    "ScarletArtHello"
+  ],
+  "env": [
+    "PATH=/system/bin:/apex/com.android.art/bin",
+    "ANDROID_ROOT=/system",
+    "ANDROID_DATA=/data",
+    "ANDROID_ART_ROOT=/apex/com.android.art",
+    "ANDROID_I18N_ROOT=/apex/com.android.i18n",
+    "ANDROID_TZDATA_ROOT=/apex/com.android.tzdata",
+    "ANDROID_LOG_TAGS=*:v"
+  ]
+}
