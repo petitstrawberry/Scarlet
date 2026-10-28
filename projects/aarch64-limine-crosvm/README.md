@@ -84,6 +84,14 @@ images, and image preparation logs. For debugging, add
 `--gdb-socket /tmp/scarlet-crosvm-gdb.sock --timeout 300`. Non-test kernel
 diagnostics may be in Scarlet's kernel log ring rather than the serial console.
 
+For a diagnostic Cuttlefish profile, `prepare-cuttlefish.py --console-input`
+enables stdin on Android's hvc0 console. Create a private FIFO with `mkfifo`,
+pass it to `run.py --serial-input /absolute/path/to/fifo`, and write serial
+commands to that FIFO while the runner is active. Output remains in
+`serial.log`. Both options are opt-in; enabling the host FIFO alone cannot
+provide input to a profile compiled with `stdin=false`. Host FIFO delivery is
+unit-tested; Android console interaction through this path is not yet verified.
+
 ## SHV diagnostics
 
 ### SHV re-entry regression fixture
@@ -320,7 +328,34 @@ An uninterrupted normal TCG run also started SystemServer, but did not reach
 screen capture remain unverified. Earlier clock jumps occurred while the host
 was asleep and do not establish a Scarlet timer defect.
 
+The 2026-10-28 APK-profile run confirmed that GLES context and reached
+SystemServer bootstrap services, but also timed out after 1,800 seconds without
+`sys.boot_completed=1`. Activity service lookup was still failing in the serial
+log. The APK hook was therefore not reached and no PNG was captured. Logs and
+the private writable disk are retained for continued diagnosis; the latest
+kernel passes the separate minimal crosvm guest regression.
+
 ## Display integration
+
+### APK lifecycle, input and capture probe
+
+The [Android compatibility fixtures](../../tools/android-compat/README.md)
+include a dependency-free test APK and a separate direct-Bionic execution path.
+Pass `--smoke-apk /path/to/scarlet-compat.apk` to `prepare-cuttlefish.py` to add
+a read-only third guest disk without renumbering system/userdata. After Android
+sets `sys.boot_completed=1`, the hook installs and launches that APK, checks a
+per-run lifecycle event, injects a tap, verifies receipt, and exports a PNG.
+Run with `--success-marker SCARLET_ANDROID_APK_OK`, then validate the log with
+`tools/android-compat/evidence.py --apk --output <new-directory> <serial.log>`.
+The host validator requires boot, Activity, input and complete PNG evidence;
+an APK marker by itself does not establish successful capture or SWS display.
+
+`prepare-cuttlefish.py --kernel-log` (also supported by `prepare-os.py`) keeps
+a native parent forwarding `/dev/kmsg` while crosvm runs. This diagnoses host
+ABI failures before crosvm's logger starts. The default remains exec-only.
+The parent is diagnostic, and the external runner still controls termination.
+
+### Graphics backend
 
 The default crosvm build has no GPU feature. `build.py --gpu` enables upstream's
 basic virtio-gpu 2D feature and exports its Wayland library dependencies. Pair

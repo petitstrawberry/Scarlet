@@ -13,6 +13,33 @@ captures the current scope, known gaps, and the recommended way to exercise it.
   userspace VMMs
 - **Demo**: See [demo.md](demo.md) for running instructions.
 
+### Android Bionic and initial Binder checkpoint (2026-10-28)
+
+The [Android compatibility fixtures](../../../tools/android-compat/README.md)
+exercise real ARM64 Bionic through the separate `android-aarch64` ABI, which
+composes the Linux implementation, alongside the crosvm Android VM track.
+NDK r25b/API 33 probes with Android 13 runtime libraries pass
+fourteen cases under both QEMU HVF and TCG: libc startup and auxv,
+pthread/TLS, memfd shared mappings, signal delivery, dlopen/DSO initialization,
+exec descriptor state, and cross-process byte-only Binder request/reply. A
+plain Linux control process confirms the Android Binder aliases are absent.
+
+The loader now supplies `AT_SECURE=0`; proc-exe stat/statx follows the executable
+in its owner's filesystem view. AArch64 TBI0 supports userspace tagged memory
+accesses (including Scudo's internal header tags), while prctl rejects the
+unsupported tagged-pointer syscall ABI and MTE remains unadvertised. Bootstrap
+standard streams use a read/write console handle. All 1,587 AArch64 kernel tests
+pass after these fixes.
+
+The initial 64-bit Binder adapter lives in `kernel/src/abi/android/binder/`,
+not the Linux module. It uses ABI-neutral kernel RPC endpoints and
+read-only receive mappings. Context managers are isolated by execution
+environment and by binder/hwbinder/vndbinder device. Pending-call peer death,
+buffer release and fork isolation are exercised by real NDK probes. Object/FD
+transfer, reference accounting, general death subscriptions, one-way/nested
+calls and poll loopers remain unsupported. ART, Android framework services and
+direct APK execution are not implemented; see the fixture README for limits.
+
 ### Exec argument limits (2026-10-19)
 
 Debian trixie's `python3.13-minimal` 3.13.5-2+deb13u5 postinst invokes
