@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Bootstrap the native AArch64 Scarlet port inside the repository's Nix dev shell.
 
-Examples (Java 21 is needed for hotspot and java):
-  python3 tools/openjdk/build.py --boot-jdk /path/to/jdk-21 --configure-only
-  python3 tools/openjdk/build.py --boot-jdk /path/to/jdk-21 --target hotspot
-  python3 tools/openjdk/build.py --boot-jdk /path/to/jdk-21 --target java
+Examples (use the host JDK major selected by sources.json):
+  python3 tools/openjdk/build.py --boot-jdk /path/to/jdk-25 --configure-only
+  python3 tools/openjdk/build.py --boot-jdk /path/to/jdk-25 --target hotspot
+  python3 tools/openjdk/build.py --boot-jdk /path/to/jdk-25 --target java
   python3 tools/openjdk/build.py --target runtime-probe
   python3 tools/openjdk/build.py --target runtime-support-probe
 
 The java target links the native launcher and packages Scarlet java.base into
-image/bin/java and image/usr/lib/jvm/openjdk-21. The hotspot target builds only
+image/bin/java and image/usr/lib/jvm/openjdk-<major>. The hotspot target builds only
 the VM archive. Builds and ELF audits do not validate execution in the guest.
 The runtime probe targets compile and audit prerequisites; they never execute them.
 runtime-support-probe tests environment setup and C++ TLS destruction when run
@@ -376,18 +376,32 @@ def native_environment():
                  "crt": str(crt), "crt_sha256": sha256(crt)}
 
 
-def validate_boot_jdk(path, env):
+def validate_boot_jdk(path, env, major=21):
     path = path.expanduser().resolve()
     for name in ("java", "javac", "jar", "jmod", "jlink"):
         if not os.access(path / "bin" / name, os.X_OK):
-            raise BuildError(f"--boot-jdk must be a Java 21 JDK home; missing {path / 'bin' / name}")
+            raise BuildError(f"--boot-jdk must be a Java {major} JDK home; missing {path / 'bin' / name}")
     result = subprocess.run([str(path / "bin/java"), "-XshowSettings:properties", "-version"],
                             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=True)
-    if not re.search(r"^\s*java\.specification\.version\s*=\s*21\s*$", result.stdout, re.MULTILINE):
-        raise BuildError(f"--boot-jdk must be Java 21: {path}\n{result.stdout}")
+    if not re.search(rf"^\s*java\.specification\.version\s*=\s*{major}\s*$", result.stdout, re.MULTILINE):
+        raise BuildError(f"--boot-jdk must be Java {major}: {path}\n{result.stdout}")
     # Nix JDK homes may link release metadata into their immutable store.
     release = regular_file((path / "release").resolve())
     return path, {"home": str(path), "release_sha256": sha256(release)}
+
+
+def source_version(source):
+    """Read the upstream release numbers used by configure and image packaging."""
+    data = regular_file(source / "make/conf/version-numbers.conf").read_text()
+    parts = []
+    for name in ("FEATURE", "INTERIM", "UPDATE", "PATCH", "EXTRA1", "EXTRA2", "EXTRA3"):
+        match = re.search(rf"^DEFAULT_VERSION_{name}=([0-9]+)\s*$", data, re.MULTILINE)
+        if not match:
+            raise BuildError(f"Missing upstream DEFAULT_VERSION_{name}")
+        parts.append(int(match[1]))
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return parts[0], ".".join(map(str, parts))
 
 
 def compiler_drivers(work, data):
@@ -416,19 +430,21 @@ def build_libffi(source, work, cc, env, jobs):
     return prefix
 
 
-def configure_hotspot(source, build, boot_jdk, ffi, cc, cxx, env, logfile, variant="zero"):
+def configure_hotspot(source, build, boot_jdk, ffi, cc, cxx, env, logfile, variant="zero", major=21):
     vm = "zero" if variant == "zero" else "server"
     features = JVM_FEATURES if variant == "zero" else "compiler1,-compiler2," + JVM_FEATURES
     command = ["bash", source / "configure", f"--with-conf-name=scarlet-{variant}",
                "--openjdk-target=aarch64-unknown-scarlet", "--with-toolchain-type=clang",
                f"--with-boot-jdk={boot_jdk}", f"--with-build-jdk={boot_jdk}",
                "--with-freetype=bundled", f"--with-libffi={ffi}", f"--with-jvm-variants={vm}",
-               "--enable-static-build", "--enable-headless-only", "--disable-warnings-as-errors",
+               "--enable-headless-only", "--disable-warnings-as-errors",
                "--disable-precompiled-headers", "--with-debug-level=release",
                "--with-build-user=scarlet",
                "--with-native-debug-symbols=none", f"CC={cc}", f"CXX={cxx}",
                f"AR={env['SCARLET_NATIVE_AR']}", f"NM={env['SCARLET_NATIVE_NM']}",
                f"RANLIB={env['SCARLET_NATIVE_RANLIB']}", f"--with-jvm-features={features}"]
+    if major == 21:
+        command.append("--enable-static-build")
     run(command, build, logfile, env)
 
 
@@ -531,7 +547,7 @@ def build_java(source, jdk_build, boot_jdk, ffi, jvm, work, cc, cxx, env, jobs, 
         work, work / "logs/java-image.log", env)
     image_receipt = json.loads(regular_file(image_root / "image.json").read_text())
     artifact = regular_file(image_root / "bin/java")
-    java_home = image_root / "usr/lib/jvm/openjdk-21"
+    java_home = Path(image_receipt["java_home"])
     regular_file(java_home / "lib/modules")
     if sha256(artifact) != elf["sha256"] or image_receipt["java_sha256"] != elf["sha256"]:
         raise BuildError("Packaged java does not match the audited native launcher")
@@ -552,7 +568,11 @@ def build(args):
     boot_jdk, boot_identity, overlay = None, None, None
     patches = {}
     if args.target in ("hotspot", "java"):
-        boot_jdk, boot_identity = validate_boot_jdk(args.boot_jdk, env)
+        version = re.fullmatch(r"jdk-(21|25)\.[0-9.]+\+[0-9]+", sources["openjdk"]["version"])
+        if not version:
+            raise BuildError("Expected a supported JDK 21 or 25 release in sources.json")
+        major = int(version[1])
+        boot_jdk, boot_identity = validate_boot_jdk(args.boot_jdk, env, major)
         if not sources["openjdk"].get("ported", True):
             patches = snapshot_patches(HERE / "patches")
             overlay = snapshot_overlay(HERE / "overlay")
@@ -617,14 +637,17 @@ def build(args):
             stamp = work / "hotspot-configured.json"
             if not stamp.exists() or not (jdk_build / "spec.gmk").is_file():
                 configure_hotspot(trees["openjdk"], jdk_build, boot_jdk, ffi, cc, cxx, env,
-                                  work / "logs/hotspot-configure.log", args.jvm_variant)
+                                  work / "logs/hotspot-configure.log", args.jvm_variant, major)
                 write_json(stamp, {"configured": True})
             if args.configure_only:
                 receipt.update(scope="HotSpot configured only; not compiled", build_directory=str(jdk_build))
             else:
-                run(["make", "hotspot", f"JOBS={args.jobs}"], jdk_build, work / "logs/hotspot-build.log", env)
+                target = "hotspot-static-libs" if major >= 25 else "hotspot"
+                run(["make", target, f"JOBS={args.jobs}"], jdk_build, work / "logs/hotspot-build.log", env)
                 vm = "zero" if args.jvm_variant == "zero" else "server"
-                artifact = regular_file(jdk_build / f"support/modules_libs/java.base/{vm}/libjvm.a")
+                archive = (f"hotspot/variant-{vm}/libjvm/objs/static/libjvm.a" if major >= 25
+                           else f"support/modules_libs/java.base/{vm}/libjvm.a")
+                artifact = regular_file(jdk_build / archive)
                 if args.target == "java":
                     receipt.update(build_java(trees["openjdk"], jdk_build, boot_jdk, ffi, artifact,
                                               work, cc, cxx, env, args.jobs, probe_sources, helpers))
@@ -642,7 +665,7 @@ def build(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--boot-jdk", type=Path, help="Java 21 JDK home (required for hotspot/java; also used as build JDK)")
+    parser.add_argument("--boot-jdk", type=Path, help="Matching host JDK 21 or 25 home (required for hotspot/java; also used as build JDK)")
     parser.add_argument("--output", type=Path, default=ROOT / ".build/openjdk", help="Driver-owned output (default: %(default)s)")
     parser.add_argument("--target", choices=("hotspot", "java", "runtime-probe", "runtime-support-probe"), default="hotspot")
     parser.add_argument("--jvm-variant", choices=("c1", "zero"), default="c1",
@@ -653,7 +676,7 @@ def main(argv=None):
     if args.jobs < 1:
         parser.error("--jobs must be positive")
     if args.target in ("hotspot", "java") and args.boot_jdk is None:
-        parser.error("--boot-jdk is required for hotspot/java (Java 21)")
+        parser.error("--boot-jdk is required for hotspot/java (matching JDK major)")
     if args.configure_only and args.target != "hotspot":
         parser.error("--configure-only requires --target hotspot")
     try:

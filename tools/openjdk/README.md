@@ -1,27 +1,30 @@
 # Native OpenJDK on Scarlet
 
-This builds OpenJDK 21's actual HotSpot VM with an **AArch64 C1 JIT** and a `java.base` runtime for
+This builds OpenJDK 25's actual HotSpot VM with an **AArch64 C1 JIT** and a `java.base` runtime for
 native Scarlet AArch64. The executable uses the Scarlet SDK and native syscall
 ABI (ELF OSABI `0x53`). It does not require a Linux userspace or Linux ABI zone.
 
-The port is maintained in [petitstrawberry/jdk21u, branch scarlet-21](https://github.com/petitstrawberry/jdk21u/tree/scarlet-21),
-forked from `openjdk/jdk21u` at `jdk-21.0.13+9`. `sources.json` pins the port
+The port is maintained in [petitstrawberry/jdk25u, branch scarlet-25](https://github.com/petitstrawberry/jdk25u/tree/scarlet-25),
+forked from `openjdk/jdk25u` at `jdk-25.0.5+8`. `sources.json` pins the port
 commit and archive SHA-256, plus libffi 3.4.8. Change the OS port in that fork,
 push a commit, then update the commit, URL, directory and checksum here.
 There is no second local copy of the port or patch series to synchronize.
+The previous Java 21 port remains in [jdk21u/scarlet-21](https://github.com/petitstrawberry/jdk21u/tree/scarlet-21).
+The driver still accepts its pinned 21 manifest with a host JDK 21. JDK 25 uses
+the upstream `hotspot-static-libs` target instead of the removed configure-time
+static-build switch; packaging derives the runtime version from upstream sources.
 
 ## Build and run
 
-Use this repository's Nix development shell and a host **JDK 21**. The boot JDK
-must match the build host, not the Scarlet target. JDK 25 cannot bootstrap this
-version. On macOS a JDK home may be inside `Contents/Home`.
+Use this repository's Nix development shell and a host **JDK 25**. The boot JDK
+must match the build host and the selected source major version. On macOS a JDK home may be inside `Contents/Home`.
 
 ```sh
 nix develop
-python3 tools/openjdk/build.py --target java --boot-jdk /path/to/host-jdk-21
+python3 tools/openjdk/build.py --target java --boot-jdk /path/to/host-jdk-25
 python3 tools/openjdk/tests/validate.py \
   --build-receipt .build/openjdk/java.json \
-  --boot-jdk /path/to/host-jdk-21
+  --boot-jdk /path/to/host-jdk-25
 ```
 
 The validator builds a separate kernel and native init, compiles the Java test,
@@ -40,15 +43,15 @@ into the Scarlet root filesystem. The layout is:
 
 ```text
 /bin/java
-/usr/lib/jvm/openjdk-21/lib/modules
-/usr/lib/jvm/openjdk-21/release
+/usr/lib/jvm/openjdk-25/lib/modules
+/usr/lib/jvm/openjdk-25/release
 ```
 
-Compile application classes with a host JDK 21 and copy them into the guest,
+Compile application classes with a host JDK 25 and copy them into the guest,
 then run `java -cp /app Main`. The launcher supports a main class, VM options,
 `-cp`/`-classpath`/`--class-path`, and `-version`/`--version`. Its default class
 path is `.`; the default heap is 16 MiB initial / 64 MiB maximum. `JAVA_HOME`
-can override `/usr/lib/jvm/openjdk-21`.
+can override `/usr/lib/jvm/openjdk-25`.
 
 Builds are keyed by source, helper, toolchain and boot JDK identities. Downloads
 are checksum verified and edited source trees are rejected without resetting
@@ -88,7 +91,10 @@ Reserved-stack annotations are also unavailable (`StackReservedPages=0`). AWT, d
 JNI libraries, JVMTI/agents, JFR, process creation and the launcher's `-jar`/`-m`
 modes are unavailable. Networking, NIO and additional modules
 have not been validated; their native libraries are not part of this image.
-GC log timing fields can be blank because the current SDK C formatter lacks
+Process RSS and per-page residency queries are unavailable; detailed NMT
+residency is unsupported. Memory disclaim remains a reclamation hint; uncommit
+and release discard pages. HotSpot disables stack protection because the SDK
+has no stack-protector runtime. GC log timing fields can be blank because the current SDK C formatter lacks
 floating-point formatting. OpenJDK and its notices retain their upstream
 licenses; the build uses the separately licensed Scarlet SDK and libffi.
 
@@ -119,3 +125,30 @@ Host-side build-driver checks:
 python3 -m unittest discover -s tools/openjdk/tests -p 'test_*.py'
 cargo test --manifest-path user/lib/scarlet-abi/Cargo.toml --test native_contract
 ```
+
+## Minecraft target
+
+The client target is **Minecraft Java Edition 26.3**, using its experimental
+Vulkan renderer. Its [official metadata](https://piston-meta.mojang.com/v1/packages/5df1795e16eea19d75b923d66ecca9ce183353c5/26.3.json)
+requires Java 25 and LWJGL 3.4.3. The [26.3 release notes](https://www.minecraft.net/en-us/article/minecraft-java-edition-26-3)
+confirm SDL3 window/input support. This supersedes the earlier Java 21 / 1.21.11
+candidate, which would require an OpenGL path.
+
+The official client has SHA-1 `e877b6a07acd633fb3bb475002175cec036e7b87`
+and size 41,483,720 bytes. Downloaded files are local validation inputs, not
+repository content. `net.minecraft.client.main.Main` uses class-file version
+69 (Java 25). No account credentials are needed to retrieve the official files.
+
+The current runtime has not launched Minecraft. Remaining work includes
+JAR/reflection/NIO compatibility, dynamic JNI loading through `scarlet-ld`,
+additional JDK modules, and native LWJGL/SDL3/shaderc/audio bindings. Analysis of
+the client alone (without third-party libraries) requests `java.desktop`,
+`java.management`, `java.naming`, `java.net.http` and `jdk.jfr` in addition to
+`java.base`; this is a lower bound, not a complete dependency audit.
+
+Minecraft [documents Vulkan 1.2 plus dynamic rendering and push descriptors](https://www.minecraft.net/en-us/article/minecraft-java-edition-26-2).
+Scarlet's pinned SGFX ICD manifest currently advertises 1.1.0. Its existing
+loader/offscreen drawing tests do not establish Minecraft feature compatibility;
+the ICD needs a feature audit and implementation work before a client launch
+can succeed. Graphics initialization must report missing features instead of
+advertising support that the driver cannot execute.

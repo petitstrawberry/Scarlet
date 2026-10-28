@@ -16,6 +16,13 @@ spec.loader.exec_module(runtime_test)
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
+def compiled_method(log, owner, method):
+    # Multiple Java threads can interleave PrintCompilation and exclusion
+    # messages. Require the timestamp/id, blocking flag and byte count, but
+    # allow a real compilation record to follow another writer's line prefix.
+    return bool(re.search(r'(?<!\d)\d+[ \t]+\d+[ \t]+[^\r\n]*\bb[ \t]+'
+                          + re.escape(owner+'::'+method) + r' \(\d+ bytes\)', log))
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     for name in ('kernel', 'init', 'java', 'java-home', 'supervisor', 'classes', 'output'):
@@ -26,7 +33,10 @@ def main():
     p.add_argument('--jit', action='store_true', help='Require successful C1 compilation and exception recovery')
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=True)
-    entries = {n:(0o40755,b'') for n in ('bin','dev','etc','tmp','root','mnt','mnt/newroot','usr','usr/lib','usr/lib/jvm','usr/lib/jvm/openjdk-21','app')}
+    if not re.fullmatch(r'openjdk-(21|25)', a.java_home.name):
+        p.error('Java home must be an openjdk-21 or openjdk-25 image directory')
+    guest_home = 'usr/lib/jvm/' + a.java_home.name
+    entries = {n:(0o40755,b'') for n in ('bin','dev','etc','tmp','root','mnt','mnt/newroot','usr','usr/lib','usr/lib/jvm',guest_home,'app')}
     inputs = {}
     def file(path, name, executable=False):
         if path.is_symlink() or not path.is_file():
@@ -36,7 +46,7 @@ def main():
     file(a.init, 'init', True)
     file(a.java, 'bin/java', True)
     file(a.supervisor, 'bin/java-test', True)
-    for base, dest in ((a.java_home, 'usr/lib/jvm/openjdk-21'), (a.classes, 'app')):
+    for base, dest in ((a.java_home, guest_home), (a.classes, 'app')):
         if not base.is_dir(): raise ValueError('Missing directory: '+str(base))
         for path in sorted(base.rglob('*')):
             name = dest+'/'+path.relative_to(base).as_posix()
@@ -70,9 +80,9 @@ def main():
             and 'OPENJDK_JIT_STRESS PASS threads=4 gc=8 null=32 stack=4 roots=ok' in content
             and 'OPENJDK_GUEST JIT stress child exit=0' in content
             and len(re.findall(r'Pause Full \(System.gc\(\)\)', stress)) == 8
-            and all(re.search(r'^\d+\s+\d+\s+.*\bb\s+JitStress::'+name+r' \(', stress, re.M)
+            and all(compiled_method(stress, 'JitStress', name)
                     for name in ('round', 'field', 'recurse'))
-            and all(re.search(r'^\d+\s+\d+\s+.*\bb\s+Jit::'+name+r' \(', content, re.M)
+            and all(compiled_method(content, 'Jit', name)
                     for name in ('work', 'load', 'recurse')))
     receipt = dict(result='PASS' if passed else 'FAIL', scope='Native OpenJDK Java execution',
         command=command, timed_out=timed_out, qemu_exit=status, kernel_sha256=sha(a.kernel),

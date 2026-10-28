@@ -300,6 +300,29 @@ class BootstrapTests(unittest.TestCase):
         self.assertIn("--with-jvm-features=compiler1,-compiler2," + build.JVM_FEATURES, command)
         self.assertNotIn("--with-jvm-variants=zero", command)
 
+    def test_jdk25_uses_upstream_static_library_make_target(self):
+        env = {"SCARLET_NATIVE_" + name: "/sdk/" + name.lower() for name in ("AR", "NM", "RANLIB")}
+        with mock.patch.object(build, "run") as run:
+            build.configure_hotspot(self.root / "jdk", self.root / "build", self.root / "jdk25",
+                                    self.root / "ffi", self.root / "clang", self.root / "clang++",
+                                    env, self.root / "log", "c1", 25)
+        command = [str(arg) for arg in run.call_args.args[0]]
+        self.assertNotIn("--enable-static-build", command)
+        self.assertIn("--with-jvm-variants=server", command)
+
+    def test_image_version_comes_from_upstream_release_numbers(self):
+        config = self.root / "make/conf/version-numbers.conf"
+        config.parent.mkdir(parents=True)
+        names = ("FEATURE", "INTERIM", "UPDATE", "PATCH", "EXTRA1", "EXTRA2", "EXTRA3")
+        for parts, expected in (((21, 0, 13, 0, 0, 0, 0), (21, "21.0.13")),
+                                ((25, 0, 5, 0, 2, 0, 0), (25, "25.0.5.0.2"))):
+            config.write_text("".join(f"DEFAULT_VERSION_{key}={value}\n"
+                                      for key, value in zip(names, parts)))
+            self.assertEqual(build.source_version(self.root), expected)
+        config.write_text("DEFAULT_VERSION_FEATURE=25\n")
+        with self.assertRaises(build.BuildError):
+            build.source_version(self.root)
+
     @staticmethod
     def elf(osabi=0x53, interpreter=False):
         data = bytearray(256)

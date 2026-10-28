@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Package native Scarlet java and built java.base classes using a host JDK 21.
+"""Package native Scarlet java and built java.base classes using a matching host JDK.
 
 Normally invoked by build.py --target java. Standalone usage:
   python3 tools/openjdk/image.py --source /prepared/jdk --build /configured/build \
-      --boot-jdk /host/jdk-21 --java /native/java --output /new/image
+      --boot-jdk /host/jdk-25 --java /native/java --output /new/image
 
-The output contains bin/java, usr/lib/jvm/openjdk-21, app/, and image.json.
+The output contains bin/java, usr/lib/jvm/openjdk-<major>, app/, and image.json.
 The caller must ELF-audit the native launcher. This helper never runs it.
 The installed boot JDK and target class directory are read-only inputs. A
 temporary OperatingSystem enum patch lets host jlink recognize SCARLET while
@@ -26,8 +26,6 @@ import build as bootstrap
 
 
 OWNER = {"owner": "scarlet-openjdk-image", "format": 1}
-GUEST_HOME = Path("usr/lib/jvm/openjdk-21")
-MODULE_VERSION = "21.0.13"
 TARGET_PLATFORM = "scarlet-aarch64"
 OS_SOURCE = Path("src/java.base/share/classes/jdk/internal/util/OperatingSystem.java")
 OS_CLASS = Path("jdk/internal/util/OperatingSystem.class")
@@ -56,7 +54,9 @@ def package_image(source, jdk_build, boot_jdk, java, output, env):
     # Check before resolving the executable itself, so symlink launchers cannot
     # disguise an input/output overlap or a mutable external artifact.
     java = bootstrap.regular_file(java.expanduser().absolute()).resolve()
-    boot_jdk, boot_identity = bootstrap.validate_boot_jdk(boot_jdk, env)
+    major, module_version = bootstrap.source_version(source)
+    guest_home = Path(f"usr/lib/jvm/openjdk-{major}")
+    boot_jdk, boot_identity = bootstrap.validate_boot_jdk(boot_jdk, env, major)
     output = output.expanduser().absolute()
     canonical_output = output.resolve()
     for label, path in (("boot JDK", boot_jdk), ("source", source), ("build", jdk_build), ("java", java)):
@@ -78,7 +78,7 @@ def package_image(source, jdk_build, boot_jdk, java, output, env):
               "build_helper_sha256": bootstrap.sha256(Path(__file__).with_name("build.py")),
               "legal_sha256": bootstrap.tree_identity(legal),
               "notices": {name: bootstrap.sha256(bootstrap.regular_file(source / name)) for name in notices},
-              "module_version": MODULE_VERSION, "target_platform": TARGET_PLATFORM}
+              "module_version": module_version, "target_platform": TARGET_PLATFORM}
     with bootstrap.output_lock(output, OWNER):
         output = output.resolve()
         receipt_path = output / "image.json"
@@ -100,7 +100,7 @@ def package_image(source, jdk_build, boot_jdk, java, output, env):
             jmods = bootstrap.directory(stage / "jmods")
             bootstrap.run([boot_jdk / "bin/jmod", "create", "--class-path", classes,
                            "--legal-notices", legal,
-                           "--module-version", MODULE_VERSION, "--target-platform", TARGET_PLATFORM,
+                           "--module-version", module_version, "--target-platform", TARGET_PLATFORM,
                            jmods / "java.base.jmod"], stage, logs / "jmod.log", env)
             bootstrap.regular_file(jmods / "java.base.jmod")
 
@@ -119,7 +119,7 @@ def package_image(source, jdk_build, boot_jdk, java, output, env):
                 raise bootstrap.BuildError("Host patch must contain only OperatingSystem.class")
             bootstrap.regular_file(host_patch / OS_CLASS)
 
-            java_home = image / GUEST_HOME
+            java_home = image / guest_home
             java_home.parent.mkdir(parents=True)
             bootstrap.run([boot_jdk / "bin/jlink", f"-J--patch-module=java.base={host_patch}",
                            "--module-path", jmods, "--add-modules", "java.base", "--output", java_home,
@@ -142,8 +142,8 @@ def package_image(source, jdk_build, boot_jdk, java, output, env):
                 raise bootstrap.BuildError("Packaging inputs changed during image creation; image not published")
             receipt = {"inputs": inputs, "artifact": str(output / "bin/java"),
                        "java_sha256": inputs["java_sha256"], "modules_sha256": bootstrap.sha256(modules),
-                       "image_root": str(output), "java_home": str(output / GUEST_HOME),
-                       "guest_java_home": "/" + GUEST_HOME.as_posix(), "guest_class_path": ".",
+                       "image_root": str(output), "java_home": str(output / guest_home),
+                       "guest_java_home": "/" + guest_home.as_posix(), "guest_class_path": ".",
                        "payload_sha256": payload_identity(image),
                        "scope": "Native Java and Scarlet java.base packaged; not guest-tested"}
             # Publish only completed payloads. Never replace an existing tree;

@@ -1,17 +1,17 @@
 {
   "openjdk": {
-    "version": "jdk-21.0.13+9",
-    "commit": "0717bf3566f846527897e2c4fe22a1340718b9a3",
-    "url": "https://codeload.github.com/petitstrawberry/jdk21u/tar.gz/0717bf3566f846527897e2c4fe22a1340718b9a3",
-    "sha256": "c909e243619ef742726e7b532f34978a4386bfa26a8260fde51bf4b0a81da073",
-    "directory": "jdk21u-0717bf3566f846527897e2c4fe22a1340718b9a3",
+    "version": "jdk-25.0.5+8",
+    "commit": "f825e841bf2340e655130c76f38ce84bd57008b0",
+    "url": "https://codeload.github.com/petitstrawberry/jdk25u/tar.gz/f825e841bf2340e655130c76f38ce84bd57008b0",
+    "sha256": "bf59e94f2c07369199cd3f0f25ba01a9cf163b4e93b06a7d401878d5ad929631",
+    "directory": "jdk25u-f825e841bf2340e655130c76f38ce84bd57008b0",
     "ported": true,
-    "repository": "https://github.com/petitstrawberry/jdk21u",
-    "branch": "scarlet-21",
+    "repository": "https://github.com/petitstrawberry/jdk25u",
+    "branch": "scarlet-25",
     "upstream": {
-      "repository": "https://github.com/openjdk/jdk21u",
-      "tag": "jdk-21.0.13+9",
-      "commit": "ba94eace682733f66e623c089bcafcf4a1b8e39c"
+      "repository": "https://github.com/openjdk/jdk25u",
+      "tag": "jdk-25.0.5+8",
+      "commit": "fda231468e56663992785ec199a6efb8eca3cc7a"
     }
   },
   "libffi": {
