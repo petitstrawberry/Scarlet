@@ -68,6 +68,7 @@ const WRITE_SITE_ADD_FIXED: u64 = 0x4146;
 const WRITE_SITE_COALESCE: u64 = 0x434f;
 const WRITE_SITE_DROP: u64 = 0x4452;
 const WRITE_SITE_RETAG: u64 = 0x5254;
+const WRITE_SITE_RELOCATE: u64 = 0x524c;
 const WRITE_SITE_PROTECT: u64 = 0x5052;
 const DEBUG_VM_MAPPING_EXTEND_LOGGING: bool = false;
 use crate::environment::{DEFAULT_USER_MMAP_BASE, USER_LOWER_CANONICAL_END};
@@ -79,6 +80,14 @@ fn checked_align_up(value: usize, alignment: usize) -> Option<usize> {
     value
         .checked_add(alignment - 1)
         .map(|aligned| aligned & !(alignment - 1))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelocationError {
+    InvalidRange,
+    UnmappedSource,
+    UnsupportedMapping,
+    MissingPageTable,
 }
 
 #[derive(Clone)]
@@ -826,6 +835,120 @@ impl VirtualMemoryManager {
         Ok(removed)
     }
 
+    /// Move one covered private allocation to a disjoint user range of the
+    /// same size. The destination may replace private normal-memory mappings.
+    /// Resident physical pages and lazy/COW owners retain their identity; only
+    /// virtual metadata moves. Returned destination backing may be reclaimed
+    /// after both old page-table ranges have been invalidated.
+    pub(crate) fn relocate_private_memory_map_range(
+        &self,
+        source: usize,
+        destination: usize,
+        length: usize,
+    ) -> Result<Vec<VirtualMemoryMap>, RelocationError> {
+        let valid = |start: usize| {
+            start != 0
+                && start.is_multiple_of(PAGE_SIZE)
+                && length != 0
+                && length.is_multiple_of(PAGE_SIZE)
+                && start
+                    .checked_add(length - 1)
+                    .is_some_and(|end| end <= USER_LOWER_CANONICAL_END)
+        };
+        if !valid(source) || !valid(destination) {
+            return Err(RelocationError::InvalidRange);
+        }
+        let source_end = source + length - 1;
+        let destination_end = destination + length - 1;
+        if source <= destination_end && destination <= source_end {
+            return Err(RelocationError::InvalidRange);
+        }
+        // Page-table lock precedes VM metadata, as in fault publication below.
+        // This also excludes stale source/destination PTE installations until
+        // the metadata update and both TLB invalidations have completed.
+        let asid = self.get_asid();
+        let mut page_table = if asid != 0 && is_asid_used(asid) {
+            Some(get_root_pagetable(asid).ok_or(RelocationError::MissingPageTable)?)
+        } else {
+            None
+        };
+        let mut g = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_RELOCATE);
+        if g.asid != asid {
+            return Err(RelocationError::MissingPageTable);
+        }
+        let first = g
+            .memmap
+            .range(..=source)
+            .next_back()
+            .map(|(_, m)| m)
+            .filter(|m| source <= m.vmarea.end)
+            .ok_or(RelocationError::UnmappedSource)?;
+        let (origin, vm_start, permissions) =
+            (first.mapping_origin, first.vm_start, first.permissions);
+        let offset = source
+            .checked_sub(vm_start)
+            .ok_or(RelocationError::UnsupportedMapping)?;
+        let new_vm_start = destination
+            .checked_sub(offset)
+            .ok_or(RelocationError::UnsupportedMapping)?;
+        let movable = |map: &VirtualMemoryMap| {
+            !map.is_shared
+                && map.memory_attribute == MemoryAttribute::Normal
+                && (map.permissions == 0
+                    || map.permissions & (VirtualMemoryPermission::User as usize) != 0)
+                && map.owner.as_ref().map_or(map.pmarea.start != 0, |owner| {
+                    owner.supports_private_relocation()
+                })
+        };
+        let mut next = source;
+        for (_, map) in g.memmap.range(first.vmarea.start..=source_end) {
+            if map.vmarea.start > next {
+                return Err(RelocationError::UnmappedSource);
+            }
+            if map.mapping_origin != origin
+                || map.vm_start != vm_start
+                || map.permissions != permissions
+                || !movable(map)
+            {
+                return Err(RelocationError::UnsupportedMapping);
+            }
+            next = map.vmarea.end.min(source_end) + 1;
+        }
+        if next != source_end + 1 {
+            return Err(RelocationError::UnmappedSource);
+        }
+        // Device and object callbacks can depend on original virtual addresses.
+        // Reject those targets before changing either range.
+        let first_target = g
+            .memmap
+            .range(..=destination)
+            .next_back()
+            .map_or(destination, |(key, _)| *key);
+        if g.memmap
+            .range(first_target..=destination_end)
+            .any(|(_, m)| m.vmarea.end >= destination && !movable(m))
+        {
+            return Err(RelocationError::UnsupportedMapping);
+        }
+        let mut moved = Self::remove_memory_map_range_locked(&mut g, source, source_end);
+        let replaced = Self::remove_memory_map_range_locked(&mut g, destination, destination_end);
+        for map in &mut moved {
+            map.vmarea = MemoryArea::new(
+                destination + (map.vmarea.start - source),
+                destination + (map.vmarea.end - source),
+            );
+            map.vm_start = new_vm_start;
+            g.memmap.insert(map.vmarea.start, map.clone());
+        }
+        g.last_search_cache = None;
+        if let Some(table) = page_table.as_mut() {
+            table.unmap_range(source, source_end);
+            table.unmap_range(destination, destination_end);
+        }
+        Ok(replaced)
+    }
+
     fn remove_memory_map_range_locked(
         g: &mut InnerVmm,
         remove_start: usize,
@@ -1259,6 +1382,27 @@ impl VirtualMemoryManager {
         Ok(true)
     }
 
+    fn fault_snapshot_matches(inner: &InnerVmm, expected: &VirtualMemoryMap, page: usize) -> bool {
+        inner
+            .memmap
+            .range(..=page)
+            .next_back()
+            .is_some_and(|(_, current)| {
+                page + PAGE_SIZE - 1 <= current.vmarea.end
+                    && current.mapping_origin == expected.mapping_origin
+                    && current.vm_start == expected.vm_start
+                    && current.permissions == expected.permissions
+                    && current.is_shared == expected.is_shared
+                    && current.memory_attribute == expected.memory_attribute
+                    && Self::page_backing_at(current, page) == Self::page_backing_at(expected, page)
+                    && match (&current.owner, &expected.owner) {
+                        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                        (None, None) => true,
+                        _ => false,
+                    }
+            })
+    }
+
     /// Lazy map with access context (instruction/load/store and optional size)
     pub fn lazy_map_page_with(
         &self,
@@ -1343,7 +1487,7 @@ impl VirtualMemoryManager {
                             memory_attribute: memory_map.memory_attribute,
                             owner: None,
                         };
-                        if !self.commit_private_cow_page(&memory_map, cow_map)? {
+                        if !self.commit_private_cow_page(&memory_map, cow_map.clone())? {
                             drop(new_alloc);
                             return self.lazy_map_page_with(access);
                         }
@@ -1363,6 +1507,12 @@ impl VirtualMemoryManager {
                         let Some(mut root_pagetable) = self.get_root_page_table() else {
                             return Err("No root page table available for COW mapping");
                         };
+                        let current = self.inner.read();
+                        if !Self::fault_snapshot_matches(&current, &cow_map, page_vaddr) {
+                            drop(current);
+                            drop(root_pagetable);
+                            return self.lazy_map_page_with(access);
+                        }
                         crate::breadcrumb::drop(
                             crate::breadcrumb::PT_LOCK_DONE,
                             asid as u64,
@@ -1410,6 +1560,12 @@ impl VirtualMemoryManager {
             page_vaddr as u64,
         );
         if let Some(mut root_pagetable) = self.get_root_page_table() {
+            let current = self.inner.read();
+            if !Self::fault_snapshot_matches(&current, &memory_map, page_vaddr) {
+                drop(current);
+                drop(root_pagetable);
+                return self.lazy_map_page_with(access);
+            }
             crate::breadcrumb::drop(
                 crate::breadcrumb::PT_LOCK_DONE,
                 asid as u64,

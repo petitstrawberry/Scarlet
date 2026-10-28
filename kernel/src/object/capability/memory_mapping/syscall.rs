@@ -638,6 +638,215 @@ mod tests {
     }
 
     #[test_case]
+    fn relocate_private_pages_preserves_bytes_lazy_backing_and_protection() {
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+        let task = crate::task::new_user_task("relocate-private".into(), 0);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let allocate = |pages| {
+            handle_anonymous_mapping(
+                &task,
+                0,
+                pages * PAGE_SIZE,
+                pages,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS,
+            )
+        };
+        let source = allocate(4);
+        let target = allocate(6);
+        assert_ne!(source, usize::MAX);
+        assert_ne!(target, usize::MAX);
+        copy_to_user(&task, source, b"source").unwrap();
+        copy_to_user(&task, source + 2 * PAGE_SIZE, b"second").unwrap();
+        copy_to_user(&task, target, b"before").unwrap();
+        copy_to_user(&task, target + 2 * PAGE_SIZE, b"replace").unwrap();
+        copy_to_user(&task, target + 5 * PAGE_SIZE, b"after!").unwrap();
+        let physical = task.vm_manager.translate_to_phys(source).unwrap();
+        let lazy = task
+            .vm_manager
+            .search_memory_map(source + PAGE_SIZE)
+            .unwrap();
+        protect_user_memory(&task, source, 4 * PAGE_SIZE, PROT_READ).unwrap();
+        let destination = target + PAGE_SIZE;
+        let replaced = task
+            .vm_manager
+            .relocate_private_memory_map_range(source, destination, 4 * PAGE_SIZE)
+            .unwrap();
+        reclaim_private_removed_mappings(&task, &replaced);
+        assert!(task.vm_manager.search_memory_map(source).is_none());
+        let moved_lazy = task
+            .vm_manager
+            .search_memory_map(destination + PAGE_SIZE)
+            .unwrap();
+        assert_eq!(moved_lazy.vm_start, destination);
+        assert_eq!(moved_lazy.pmarea, lazy.pmarea);
+        assert!(Arc::ptr_eq(
+            moved_lazy.owner.as_ref().unwrap(),
+            lazy.owner.as_ref().unwrap()
+        ));
+        assert_eq!(
+            task.vm_manager.translate_to_phys(destination),
+            Some(physical)
+        );
+        let mut bytes = [0; 6];
+        for (address, expected) in [
+            (destination, *b"source"),
+            (destination + 2 * PAGE_SIZE, *b"second"),
+            (target, *b"before"),
+            (target + 5 * PAGE_SIZE, *b"after!"),
+        ] {
+            copy_from_user(&task, address, &mut bytes).unwrap();
+            assert_eq!(bytes, expected);
+        }
+        copy_from_user(&task, destination + PAGE_SIZE, &mut bytes).unwrap();
+        assert_eq!(bytes, [0; 6]);
+        assert!(copy_to_user(&task, destination, b"denied").is_err());
+        protect_user_memory(&task, destination, 4 * PAGE_SIZE, PROT_READ | PROT_WRITE).unwrap();
+        copy_to_user(&task, destination + 3 * PAGE_SIZE, b"fresh!").unwrap();
+        copy_from_user(&task, destination + 3 * PAGE_SIZE, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"fresh!");
+    }
+
+    #[test_case]
+    fn relocate_inaccessible_reservations_preserves_protection() {
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+        let task = crate::task::new_user_task("relocate-none".into(), 0);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let allocate = || {
+            handle_anonymous_mapping(
+                &task,
+                0,
+                PAGE_SIZE,
+                1,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS,
+            )
+        };
+        let source = allocate();
+        let target = allocate();
+        copy_to_user(&task, source, b"retained").unwrap();
+        protect_user_memory(&task, source, PAGE_SIZE, 0).unwrap();
+        protect_user_memory(&task, target, PAGE_SIZE, 0).unwrap();
+        let replaced = task
+            .vm_manager
+            .relocate_private_memory_map_range(source, target, PAGE_SIZE)
+            .unwrap();
+        reclaim_private_removed_mappings(&task, &replaced);
+        let mut bytes = [0; 8];
+        assert_eq!(
+            task.vm_manager.translate_to_phys_with_access(
+                target,
+                crate::object::capability::memory_mapping::AccessOp::Load,
+            ),
+            None
+        );
+        assert!(copy_to_user(&task, target, b"rejected").is_err());
+        assert!(task.vm_manager.search_memory_map(source).is_none());
+        protect_user_memory(&task, target, PAGE_SIZE, PROT_READ).unwrap();
+        copy_from_user(&task, target, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"retained");
+    }
+
+    #[test_case]
+    fn relocate_after_fork_preserves_cow_page_indices() {
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+        let parent = crate::task::new_user_task("relocate-cow".into(), 0);
+        parent
+            .vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let source = handle_anonymous_mapping(
+            &parent,
+            0,
+            3 * PAGE_SIZE,
+            3,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+        );
+        let target = handle_anonymous_mapping(
+            &parent,
+            0,
+            3 * PAGE_SIZE,
+            3,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+        );
+        copy_to_user(&parent, source + PAGE_SIZE, b"parent").unwrap();
+        let child = parent
+            .clone_task(crate::task::CloneFlags::default())
+            .unwrap();
+        // Move a middle page: the relocated origin must retain index one in
+        // the fork owner's backing, not treat the moved page as index zero.
+        let replaced = parent
+            .vm_manager
+            .relocate_private_memory_map_range(source + PAGE_SIZE, target + PAGE_SIZE, PAGE_SIZE)
+            .unwrap();
+        reclaim_private_removed_mappings(&parent, &replaced);
+        let mut bytes = [0; 6];
+        copy_from_user(&parent, target + PAGE_SIZE, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"parent");
+        copy_to_user(&child, source + PAGE_SIZE, b"child!").unwrap();
+        copy_from_user(&parent, target + PAGE_SIZE, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"parent");
+        copy_to_user(&parent, target + PAGE_SIZE, b"moved!").unwrap();
+        copy_from_user(&child, source + PAGE_SIZE, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"child!");
+        copy_from_user(&parent, source, &mut bytes).unwrap();
+        assert_eq!(bytes, [0; 6]);
+        assert!(
+            parent
+                .vm_manager
+                .search_memory_map(source + PAGE_SIZE)
+                .is_none()
+        );
+    }
+
+    #[test_case]
+    fn rejected_relocation_preserves_both_ranges() {
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+        let task = crate::task::new_user_task("relocate-reject".into(), 0);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let source = handle_anonymous_mapping(
+            &task,
+            0,
+            2 * PAGE_SIZE,
+            2,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+        );
+        let target = handle_anonymous_mapping(
+            &task,
+            0,
+            2 * PAGE_SIZE,
+            2,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED | MAP_ANONYMOUS,
+        );
+        copy_to_user(&task, source, b"source").unwrap();
+        copy_to_user(&task, target, b"target").unwrap();
+        for (from, to, len) in [
+            (source, source + PAGE_SIZE, 2 * PAGE_SIZE),
+            (source, target, PAGE_SIZE),
+            (target, source, PAGE_SIZE),
+            (source + 1, target, PAGE_SIZE),
+            (source, target, 0),
+        ] {
+            assert!(
+                task.vm_manager
+                    .relocate_private_memory_map_range(from, to, len)
+                    .is_err()
+            );
+        }
+        let mut bytes = [0; 6];
+        copy_from_user(&task, source, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"source");
+        copy_from_user(&task, target, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"target");
+    }
+
+    #[test_case]
     fn private_anonymous_pages_reuse_zero_source_and_keep_fork_data_private() {
         use crate::library::std::usercopy::{copy_from_user, copy_to_user};
         use crate::object::capability::memory_mapping::{AccessKind, AccessOp};

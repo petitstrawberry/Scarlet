@@ -26,6 +26,10 @@ impl AnonymousZeroPageOwner {
 }
 
 impl MemoryMappingOps for AnonymousZeroPageOwner {
+    fn supports_private_relocation(&self) -> bool {
+        true
+    }
+
     fn get_mapping_info(
         &self,
         _offset: usize,
@@ -106,6 +110,10 @@ impl Drop for AnonymousPageOwner {
 }
 
 impl MemoryMappingOps for AnonymousPageOwner {
+    fn supports_private_relocation(&self) -> bool {
+        true
+    }
+
     fn get_mapping_info(
         &self,
         _offset: usize,
@@ -220,6 +228,10 @@ impl ForkCowPageOwner {
 }
 
 impl MemoryMappingOps for ForkCowPageOwner {
+    fn supports_private_relocation(&self) -> bool {
+        true
+    }
+
     fn get_mapping_info(
         &self,
         _offset: usize,

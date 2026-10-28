@@ -828,7 +828,7 @@ pub fn sys_munmap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     0
 }
 
-/// Linux in-place mapping shrink. Relocation and growth remain unsupported;
+/// Linux in-place shrink and fixed same-size private mapping relocation.
 /// never report success while leaving the original range unchanged.
 pub fn sys_mremap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
@@ -839,6 +839,7 @@ pub fn sys_mremap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let old_size = trapframe.get_arg(1);
     let new_size = trapframe.get_arg(2);
     let flags = trapframe.get_arg(3);
+    let destination = trapframe.get_arg(4);
     trapframe.increment_pc_next(&task);
 
     const MREMAP_MAYMOVE: usize = 1;
@@ -872,6 +873,37 @@ pub fn sys_mremap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             .is_none_or(|end| end > crate::environment::USER_LOWER_CANONICAL_END)
     {
         return to_result(errno::EINVAL);
+    }
+    if flags == (MREMAP_MAYMOVE | MREMAP_FIXED) && new_len == old_len {
+        if destination == 0
+            || !destination.is_multiple_of(PAGE_SIZE)
+            || destination
+                .checked_add(new_len - 1)
+                .is_none_or(|end| end > crate::environment::USER_LOWER_CANONICAL_END)
+            || (address <= destination + new_len - 1 && destination <= address + old_len - 1)
+        {
+            return to_result(errno::EINVAL);
+        }
+        let replaced =
+            match task
+                .vm_manager
+                .relocate_private_memory_map_range(address, destination, old_len)
+            {
+                Ok(replaced) => replaced,
+                Err(error) => {
+                    use crate::vm::manager::RelocationError;
+                    return to_result(match error {
+                        RelocationError::InvalidRange => errno::EINVAL,
+                        RelocationError::UnmappedSource => errno::EFAULT,
+                        RelocationError::UnsupportedMapping => errno::EOPNOTSUPP,
+                        RelocationError::MissingPageTable => errno::ENOMEM,
+                    });
+                }
+            };
+        // Only the overwritten destination is unmapped. The source ownership
+        // moved intact; releasing it here would free the new mapping's pages.
+        reclaim_private_removed_mappings(&task, &replaced);
+        return destination;
     }
     if flags & (MREMAP_FIXED | MREMAP_DONTUNMAP) != 0 || new_len > old_len {
         return to_result(errno::EOPNOTSUPP);

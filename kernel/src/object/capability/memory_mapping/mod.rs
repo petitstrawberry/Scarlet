@@ -161,6 +161,12 @@ pub trait MemoryMappingOps: Send + Sync {
         false
     }
 
+    /// Whether private normal-memory backing can move while preserving page
+    /// indices. Owners opting in must not track the original virtual address.
+    fn supports_private_relocation(&self) -> bool {
+        false
+    }
+
     /// Return whether this object supports private copy-on-write mappings.
     ///
     /// Objects whose mappings must preserve shared device-memory semantics can
