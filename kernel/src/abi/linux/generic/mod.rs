@@ -638,6 +638,7 @@ syscall_table! {
     GetSid = 156 => proc::sys_getsid,
     SetSid = 157 => proc::sys_setsid,
     Uname = 160 => proc::sys_uname,
+    Getrlimit = 163 => proc::sys_getrlimit,
     Umask = 166 => fs::sys_umask,
     Prctl = 167 => proc::sys_prctl,
     Getcpu = 168 => proc::sys_getcpu,

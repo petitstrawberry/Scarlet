@@ -365,6 +365,7 @@ impl AbiModule for LinuxAarch64Abi {
                         generic::exec::write_auxiliary_vector(task, current_pos, &auxv)?;
 
                         sp = final_sp;
+                        task.vm_manager.record_process_entry_stack(sp)?;
 
                         task.set_entry_point(load_result.entry_point as usize);
                         task.vcpu.lock().iregs = IntRegisters::new();

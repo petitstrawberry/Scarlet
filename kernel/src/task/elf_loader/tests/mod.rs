@@ -324,6 +324,11 @@ fn native_interpreter_handoff_preserves_main_metadata_and_initial_stack() {
         .unwrap();
         assert_eq!(sp % 16, 0);
         assert_eq!(argv, sp + word);
+        let entry_stack = task.vm_manager.process_entry_stack().unwrap();
+        assert_eq!(
+            (entry_stack.base, entry_stack.top, entry_stack.initial_sp),
+            (top - PAGE_SIZE, top, sp)
+        );
         let mut stack = vec![0; top - sp];
         copy_from_user(&task, sp, &mut stack).unwrap();
         let read = |index| model.read_word(&stack, index * word).unwrap().unsigned();

@@ -3084,6 +3084,7 @@ impl Task {
         if !flags.is_set(CloneFlagsDef::Vm) {
             let parent_brk = self.brk.load(Ordering::SeqCst);
             child.brk.store(parent_brk, Ordering::SeqCst);
+            child.vm_manager.inherit_process_entry_stack(&self.vm_manager);
         }
 
         // POSIX job-control identity.  A fork/clone inherits SID, PGID, and

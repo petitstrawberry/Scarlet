@@ -873,37 +873,74 @@ pub fn sys_setsid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 }
 
+/// Read only limits backed by Scarlet's current fixed-capacity resources.
+/// Mutable Linux resource limits and automatic stack growth are not implemented.
+pub(super) fn resource_limit(task: &Task, resource: usize) -> Result<u64, usize> {
+    match resource {
+        3 => task
+            .vm_manager
+            .process_entry_stack()
+            .map(|stack| (stack.top - stack.base) as u64)
+            .ok_or(errno::EOPNOTSUPP),
+        7 => Ok(super::MAX_FDS as u64),
+        0..=15 => Err(errno::EOPNOTSUPP),
+        _ => Err(errno::EINVAL),
+    }
+}
+
+fn copy_resource_limit(task: &Task, resource: usize, output: usize) -> usize {
+    let limit = match resource_limit(task, resource) {
+        Ok(limit) => limit,
+        Err(error) => return errno::to_result(error),
+    };
+    let mut bytes = [0; 16];
+    bytes[..8].copy_from_slice(&limit.to_ne_bytes());
+    bytes[8..].copy_from_slice(&limit.to_ne_bytes());
+    if copy_to_user(task, output, &bytes).is_err() {
+        errno::to_result(errno::EFAULT)
+    } else {
+        0
+    }
+}
+
+pub fn sys_getrlimit(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let resource = trapframe.get_arg(0);
+    let output = trapframe.get_arg(1);
+    trapframe.increment_pc_next(&task);
+    copy_resource_limit(&task, resource, output)
+}
+
 pub fn sys_prlimit64(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
-    let _pid = trapframe.get_arg(0) as i32;
+    let pid = trapframe.get_arg(0) as i32;
     let resource = trapframe.get_arg(1);
-    let _new_rlim_ptr = trapframe.get_arg(2);
-    let old_rlim_ptr = trapframe.get_arg(3);
-
+    let new_limit = trapframe.get_arg(2);
+    let output = trapframe.get_arg(3);
     trapframe.increment_pc_next(&task);
 
-    // Linux validates the output pointer for write access. Chromium also
-    // relies on EFAULT here to verify that protected memory is read-only.
-    if old_rlim_ptr != 0 {
-        // sysconf(_SC_OPEN_MAX) uses this value. APT's exec helper falls back
-        // to walking every descriptor below it when /proc/self/fd cannot be
-        // opened. Reporting the old generic 32-bit maximum made that walk
-        // run billions of fcntl calls despite our 1024-entry descriptor table.
-        const RLIMIT_NOFILE: usize = 7;
-        let limit = if resource == RLIMIT_NOFILE {
-            super::MAX_FDS as u64
-        } else {
-            0xFFFF_FFFFu64
-        };
-        let mut rlimit = [0u8; 16];
-        rlimit[..8].copy_from_slice(&limit.to_ne_bytes());
-        rlimit[8..].copy_from_slice(&limit.to_ne_bytes());
-        if copy_to_user(&task, old_rlim_ptr, &rlimit).is_err() {
-            return errno::to_result(errno::EFAULT);
-        }
+    if pid < 0 || resource > 15 {
+        return errno::to_result(errno::EINVAL);
     }
-
-    0 // Always succeed
+    let pid = pid as usize;
+    let local_pid = task
+        .get_namespace()
+        .resolve_local_id(task.get_thread_group_id());
+    if pid != 0 && Some(pid) != local_pid && Some(pid) != task.try_get_namespace_id() {
+        return errno::to_result(if task.get_namespace().resolve_global_id(pid).is_some() {
+            errno::EOPNOTSUPP
+        } else {
+            errno::ESRCH
+        });
+    }
+    // Never report a successful limit update without changing enforcement.
+    if new_limit != 0 {
+        return errno::to_result(errno::EOPNOTSUPP);
+    }
+    if output == 0 {
+        return resource_limit(&task, resource).map_or_else(errno::to_result, |_| 0);
+    }
+    copy_resource_limit(&task, resource, output)
 }
 
 /// Accept a Linux capability drop in the view, which currently runs without
@@ -1958,6 +1995,87 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
 
 #[cfg(test)]
 mod tests {
+    #[test_case]
+    fn resource_queries_use_entry_reservation_and_validate_output() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        let task = crate::task::new_user_task("resource-query".into(), 0);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        assert_eq!(resource_limit(&task, 3), Err(errno::EOPNOTSUPP));
+        let base = USER_STACK_END - 4 * PAGE_SIZE;
+        task.allocate_stack_pages(base, 4).unwrap();
+        task.vm_manager
+            .record_process_entry_stack(USER_STACK_END - 128)
+            .unwrap();
+        assert_eq!(resource_limit(&task, 3), Ok((4 * PAGE_SIZE) as u64));
+        assert_eq!(resource_limit(&task, 7), Ok(super::super::MAX_FDS as u64));
+        assert_eq!(resource_limit(&task, 16), Err(errno::EINVAL));
+        assert_eq!(resource_limit(&task, 2), Err(errno::EOPNOTSUPP));
+        assert_eq!(copy_resource_limit(&task, 3, base), 0);
+        let mut bytes = [0; 16];
+        copy_from_user(&task, base, &mut bytes).unwrap();
+        assert_eq!(
+            u64::from_ne_bytes(bytes[..8].try_into().unwrap()),
+            (4 * PAGE_SIZE) as u64
+        );
+        assert_eq!(&bytes[..8], &bytes[8..]);
+        task.vm_manager
+            .protect_linux_memory_map_range(
+                crate::vm::vmem::MemoryArea::new(base, base + PAGE_SIZE - 1),
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            copy_resource_limit(&task, 3, base),
+            errno::to_result(errno::EFAULT)
+        );
+        assert_eq!(
+            copy_resource_limit(&task, 3, 0),
+            errno::to_result(errno::EFAULT)
+        );
+        assert_eq!(resource_limit(&task, 3), Ok((4 * PAGE_SIZE) as u64));
+    }
+
+    #[test_case]
+    fn entry_stack_survives_clone_and_changes_only_on_committed_exec() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::task::{CloneFlags, CloneFlagsDef};
+        let parent = crate::task::new_user_task("entry-stack".into(), 0);
+        parent
+            .vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        parent
+            .allocate_stack_pages(USER_STACK_END - 4 * PAGE_SIZE, 4)
+            .unwrap();
+        parent
+            .vm_manager
+            .record_process_entry_stack(USER_STACK_END - 128)
+            .unwrap();
+        let initial = parent.vm_manager.process_entry_stack().unwrap();
+        let fork = parent.clone_task(CloneFlags::default()).unwrap();
+        let mut flags = CloneFlags::default();
+        flags.set(CloneFlagsDef::Vm);
+        let sibling = parent.clone_task(flags).unwrap();
+        assert_eq!(fork.vm_manager.process_entry_stack(), Some(initial));
+        assert_eq!(sibling.vm_manager.process_entry_stack(), Some(initial));
+        let image = parent.new_exec_image();
+        assert!(image.vm_manager.process_entry_stack().is_none());
+        image
+            .allocate_stack_pages(USER_STACK_END - 8 * PAGE_SIZE, 8)
+            .unwrap();
+        image
+            .vm_manager
+            .record_process_entry_stack(USER_STACK_END - 256)
+            .unwrap();
+        let replacement = image.vm_manager.process_entry_stack();
+        assert_eq!(parent.vm_manager.process_entry_stack(), Some(initial));
+        drop(sibling);
+        parent.vm_manager.exchange_exec_image(&image.vm_manager);
+        assert_eq!(parent.vm_manager.process_entry_stack(), replacement);
+        assert_eq!(fork.vm_manager.process_entry_stack(), Some(initial));
+        assert_eq!(image.vm_manager.process_entry_stack(), Some(initial));
+    }
+
     #[test_case]
     fn linux_wait_encoding_distinguishes_exit_codes_from_signals() {
         assert_eq!(super::linux_wait_status(1, None), 0x100);

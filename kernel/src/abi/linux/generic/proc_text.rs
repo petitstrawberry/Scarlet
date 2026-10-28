@@ -109,7 +109,79 @@ fn self_maps() -> Option<String> {
     Some(content)
 }
 
+/// A fixed-shape Linux stat record. Identity, state, scheduling priority,
+/// virtual size and entry stack come from native state. Accounting fields not
+/// exposed by Scarlet's process interface are zero, not guessed from limits.
+fn task_stat(task: &Task, thread: bool) -> String {
+    use crate::task::TaskState;
+    let ns = task.get_namespace();
+    let pid = if thread {
+        task.get_id()
+    } else {
+        task.get_thread_group_id()
+    };
+    let id = |global| ns.resolve_local_id(global).unwrap_or(0);
+    let name = {
+        let name = task.name.read();
+        let name = name.rsplit('/').next().unwrap_or(&name);
+        let mut length = name.len().min(15);
+        while !name.is_char_boundary(length) {
+            length -= 1;
+        }
+        String::from(&name[..length])
+    };
+    let state = match task.get_state() {
+        TaskState::Ready | TaskState::Running | TaskState::NotInitialized => 'R',
+        TaskState::Blocked(_) => 'S',
+        TaskState::Zombie | TaskState::Terminated => 'Z',
+    };
+    let mut content = format!("{} ({name}) {state}", id(pid));
+    // Fields 4..52, following proc_pid_stat(5). Signed fields are formatted as
+    // signed values so a negative nice value does not wrap into an unsigned PID.
+    let mut fields = [0i128; 49];
+    fields[0] = task.get_parent_id().map_or(0, id) as i128;
+    fields[1] = id(task.get_process_group_id()) as i128;
+    fields[2] = id(task.get_session_id()) as i128;
+    let nice = task.sched_nice.load(core::sync::atomic::Ordering::Relaxed);
+    fields[18 - 4] = (20 + nice) as i128;
+    fields[19 - 4] = nice as i128;
+    fields[20 - 4] = crate::sched::scheduler::get_all_task_ids()
+        .into_iter()
+        .filter(|id| {
+            crate::sched::scheduler::get_task_by_id(*id).is_some_and(|other| {
+                other.get_thread_group_id() == task.get_thread_group_id()
+                    && !matches!(other.get_state(), TaskState::Zombie | TaskState::Terminated)
+            })
+        })
+        .count()
+        .max(1) as i128;
+    fields[23 - 4] = task.vm_manager.with_memmaps(|maps| {
+        maps.values()
+            .filter(|map| map.vmarea.end < crate::environment::USER_LOWER_CANONICAL_END)
+            .map(|map| map.vmarea.size() as i128)
+            .sum()
+    });
+    fields[25 - 4] = u64::MAX as i128;
+    fields[28 - 4] = task
+        .vm_manager
+        .process_entry_stack()
+        .map_or(0, |stack| stack.initial_sp) as i128;
+    for field in fields {
+        content.push_str(&format!(" {field}"));
+    }
+    content.push('\n');
+    content
+}
+
 fn text_content(path: &str) -> Option<String> {
+    if matches!(path, "/proc/self/stat" | "/proc/thread-self/stat") {
+        let caller = crate::task::mytask()?;
+        let thread = path == "/proc/thread-self/stat";
+        let leader = (!thread)
+            .then(|| crate::sched::scheduler::get_task_by_id(caller.get_thread_group_id()))
+            .flatten();
+        return Some(task_stat(leader.as_deref().unwrap_or(&caller), thread));
+    }
     if matches!(path, "/proc/self/maps" | "/proc/thread-self/maps") {
         return self_maps();
     }
@@ -343,5 +415,25 @@ impl FileObject for ProcTextFile {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test_case]
+    fn stat_field_28_uses_initial_stack_pointer_and_preserves_comm_delimiters() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        let task = crate::task::new_user_task("a (b) c".into(), 0);
+        task.allocate_stack_pages(USER_STACK_END - 2 * PAGE_SIZE, 2)
+            .unwrap();
+        let sp = USER_STACK_END - 256;
+        task.vm_manager.record_process_entry_stack(sp).unwrap();
+        let stat = super::task_stat(&task, false);
+        assert!(stat.contains(" (a (b) c) R "));
+        let end = stat.rfind(')').unwrap();
+        let fields: alloc::vec::Vec<&str> = stat[end + 1..].split_whitespace().collect();
+        assert_eq!(fields.len(), 50); // state (field 3) through exit_code (52)
+        assert_eq!(fields[28 - 3].parse::<usize>().unwrap(), sp);
+        assert_eq!(fields[23 - 3].parse::<usize>().unwrap(), 2 * PAGE_SIZE);
     }
 }

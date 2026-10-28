@@ -90,6 +90,16 @@ pub(crate) enum RelocationError {
     MissingPageTable,
 }
 
+/// Immutable process-entry stack identity, shared with the address space.
+/// The bounds describe the fixed reservation installed by the ELF loader;
+/// ordinary thread stacks and later mmap/mprotect calls do not replace it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProcessEntryStack {
+    pub base: usize,
+    pub top: usize,
+    pub initial_sp: usize,
+}
+
 #[derive(Clone)]
 pub struct VirtualMemoryManager {
     inner: Arc<IrqRwSpinLock<InnerVmm>>, // shared, internally synchronized
@@ -127,6 +137,7 @@ struct InnerVmm {
     page_tables: Vec<Arc<PageTable>>,
     last_search_cache: Option<(usize, usize, usize)>,
     owner_task_id: Option<usize>,
+    process_entry_stack: Option<ProcessEntryStack>,
 }
 
 impl VirtualMemoryManager {
@@ -204,6 +215,7 @@ impl VirtualMemoryManager {
             page_tables: Vec::new(),
             last_search_cache: None,
             owner_task_id: None,
+            process_entry_stack: None,
         };
         VirtualMemoryManager {
             inner: Arc::new(IrqRwSpinLock::new(inner)),
@@ -217,6 +229,28 @@ impl VirtualMemoryManager {
 
     pub(crate) fn page_allocations_handle(&self) -> Arc<IrqRwSpinLock<Vec<ContiguousPages>>> {
         Arc::clone(&self.page_allocations)
+    }
+
+    /// Called only while constructing an unpublished executable image.
+    pub(crate) fn record_process_entry_stack(&self, initial_sp: usize) -> Result<(), &'static str> {
+        let (base, top) = self
+            .user_mapping_bounds(initial_sp)
+            .ok_or("Process entry stack is not user-mapped")?;
+        self.inner.write().process_entry_stack = Some(ProcessEntryStack {
+            base,
+            top,
+            initial_sp,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn process_entry_stack(&self) -> Option<ProcessEntryStack> {
+        self.inner.read().process_entry_stack
+    }
+
+    pub(crate) fn inherit_process_entry_stack(&self, parent: &Self) {
+        let stack = parent.process_entry_stack();
+        self.inner.write().process_entry_stack = stack;
     }
 
     pub(crate) fn task_pages_handle(&self) -> Arc<IrqRwSpinLock<Vec<TaskPages>>> {

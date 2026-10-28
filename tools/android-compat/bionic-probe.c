@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/auxv.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/xattr.h>
 #include <sys/wait.h>
@@ -67,6 +68,29 @@ static int libc_case(const char *program) {
     tagged[4109] = 91;
     if (mapping[4109] != 91) return fail("libc", "tagged access alias", 0);
     if (munmap(mapping, 8192)) return fail("libc", "tagged access munmap", errno);
+    // Bionic's main-thread attribute query reads getrlimit, /proc/self/stat
+    // field 28, and /proc/self/maps. Exercise that exact path used by ART.
+    struct rlimit stack_limit, via_prlimit;
+    pthread_attr_t attr;
+    void *stack_base;
+    size_t stack_size;
+    if (getrlimit(RLIMIT_STACK, &stack_limit) ||
+        syscall(__NR_prlimit64, getpid(), RLIMIT_STACK, NULL, &via_prlimit) ||
+        pthread_getattr_np(pthread_self(), &attr) ||
+        pthread_attr_getstack(&attr, &stack_base, &stack_size))
+        return fail("libc", "main thread stack query", errno);
+    if (stack_limit.rlim_cur != via_prlimit.rlim_cur || stack_limit.rlim_cur != stack_size ||
+        stack_limit.rlim_max != stack_size || (uintptr_t)&attr < (uintptr_t)stack_base ||
+        (uintptr_t)&attr >= (uintptr_t)stack_base + stack_size)
+        return fail("libc", "stack reservation mismatch", 0);
+    pthread_attr_destroy(&attr);
+    struct rlimit nofile;
+    if (getrlimit(RLIMIT_NOFILE, &nofile) || nofile.rlim_cur != (rlim_t)sysconf(_SC_OPEN_MAX))
+        return fail("libc", "descriptor limit query", errno);
+    if (getrlimit(999, &nofile) != -1 || errno != EINVAL ||
+        syscall(__NR_getrlimit, RLIMIT_STACK, NULL) != -1 || errno != EFAULT ||
+        syscall(__NR_prlimit64, 0, RLIMIT_STACK, &stack_limit, NULL) != -1 || errno != EOPNOTSUPP)
+        return fail("libc", "resource limit validation", errno);
     return 0;
 }
 

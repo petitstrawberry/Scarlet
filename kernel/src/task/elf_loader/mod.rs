@@ -1238,7 +1238,12 @@ pub(crate) fn setup_native_exec_stack(
     } else {
         None
     };
-    let result = setup_native_stack(task, argv, envp, top, &auxv, execfn.as_deref());
+    let result = setup_native_stack(task, argv, envp, top, &auxv, execfn.as_deref()).and_then(
+        |(sp, argv)| {
+            task.vm_manager.record_process_entry_stack(sp)?;
+            Ok((sp, argv))
+        },
+    );
     if result.is_err() {
         if let Some(handle) = handle {
             drop(task.handle_table.remove(handle));
