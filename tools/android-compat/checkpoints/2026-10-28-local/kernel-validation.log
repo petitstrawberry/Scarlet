@@ -1,0 +1,16 @@
+[Test Runner] test name=scarlet::arch::aarch64::lsm::tests::branch_relocation_encodes_boundaries_and_preserves_opcode
+[Test Runner] test name=scarlet::arch::aarch64::lsm::tests::branch_relocation_rejects_out_of_range_offsets_without_writing
+[Test Runner] test name=scarlet::arch::aarch64::lsm::tests::branch_relocation_rejects_unaligned_offsets_without_writing
+[Test Runner] test name=scarlet::fs::vfs_v2::drivers::ext2::tests::unlink_tests::ext2_block_symlinks_at_inline_boundary_read_and_reclaim_data
+[Test Runner] test name=scarlet::fs::vfs_v2::drivers::ext2::tests::unlink_tests::ext2_inline_symlink_classification_accounts_for_external_attributes
+[Test Runner] test name=scarlet::fs::vfs_v2::drivers::tmpfs::tests::tests::test_xattr_bounds_and_binary_names
+[Test Runner] test name=scarlet::fs::vfs_v2::drivers::tmpfs::tests::tests::test_xattrs_are_inode_owned_and_atomic
+[Test Runner] test name=scarlet::fs::vfs_v2::drivers::tmpfs::tests::tests::test_xattrs_charge_tmpfs_quota_and_release_on_remove_and_drop
+[Test Runner] test name=scarlet::fs::vfs_v2::tests::test_rename_relocates_cwd_and_open_directory_entries
+[Test Runner] test name=scarlet::object::capability::memory_mapping::syscall::tests::rejected_relocation_preserves_both_ranges
+[Test Runner] test name=scarlet::object::capability::memory_mapping::syscall::tests::relocate_after_fork_preserves_cow_page_indices
+[Test Runner] test name=scarlet::object::capability::memory_mapping::syscall::tests::relocate_inaccessible_reservations_preserves_protection
+[Test Runner] test name=scarlet::object::capability::memory_mapping::syscall::tests::relocate_private_pages_preserves_bytes_lazy_backing_and_protection
+[Test Runner] test name=scarlet::task::elf_loader::tests::relocated_elf_preserves_header_addresses_and_main_program_break
+[Test Runner] All 1596 tests passed
+All tests passed

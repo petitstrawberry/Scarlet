@@ -18,7 +18,7 @@ Bionic → Binder client/server → ART/JNI → a minimal framework application.
 
 ## Direct Bionic execution
 
-Verified on 2026-10-28: **fourteen cases pass** with `--binder` on Scarlet/AArch64 with outer QEMU
+Verified on 2026-10-28: **eighteen cases pass** with `--binder` on Scarlet/AArch64 with outer QEMU
 HVF and TCG, Android NDK r25b targeting API 33, and an Android 13 ARM64 runtime APEX
 from the locally installed SDK image. No guest Linux kernel is involved.
 
@@ -33,10 +33,12 @@ records and exit status zero. The host also requires the final suite marker.
 | signal | PASS | PASS | SIGUSR1 registration, delivery and handler return |
 | dynamic | — | PASS | dlopen/dlsym/dlclose, DSO constructor and native ELF TLS |
 | exec | PASS | PASS | Sparse FD numbers, file flags, CLOEXEC and Android device dispatch survive exec |
+| xattr | PASS | PASS | All twelve path/fd/no-follow calls, binary values, limits, atomic flags, rename and unlink identity |
+| mremap | PASS | PASS | Fixed private relocation, lazy pages, protections, overwritten ranges and fork isolation |
 | binder | PASS | PASS | Cross-process request/reply, read-only receive pages, buffer release, pending-call peer death and fork isolation |
 
 An additional static probe explicitly selects `linux-aarch64` and verifies that
-none of the three Binder aliases is exposed. This is the fourteenth case.
+none of the three Binder aliases is exposed. This is the eighteenth case.
 
 From the repository root, inside `nix develop`:
 
@@ -230,12 +232,44 @@ The host test suite passes 25 tests, including rejection of partial linkerconfig
 output despite exit zero. Expected imageless-boot and missing tracefs/DEX
 metadata diagnostics remain visible in the ART log.
 
-These stock inputs are not yet integrated with `run-direct.py`: Scarlet's
-Android view currently binds a read-only DevFS at `/dev`, so property storage
-must be provisioned in its own view before bootstrap. The project Nix downloads
-are still blocked in the existing Cloud executor; native build/runtime
-verification and any resulting ABI fixes remain outstanding. The environment
-was not replaced and its network policy was not modified.
+The local Scarlet runner now accepts the same verified stock overlay:
+
+```sh
+python3 tools/android-compat/run-direct.py \
+  --kernel projects/aarch64-limine-crosvm/bsp/target/aarch64-unknown-none-elf/release/scarlet \
+  --runtime-root .build/android-compat/art-runtime \
+  --stock-inputs .build/android-compat/stock-inputs \
+  --art-dex .build/android-compat/dex/classes.dex \
+  --output .build/android-compat/stock-art-run --accel hvf --timeout 180
+```
+
+The fixture gives this Android Environment a private writable `/dev` overlay
+and binds TmpFS directly at `/dev/__properties__`. The real Bionic helper
+initializes 216 stock values, then the original Android linkerconfig generates
+its configuration on Scarlet. The entire generated ART configuration must
+match the passing host reference before ART starts. The reference is checked
+only; it is never installed as target policy. `LD_LIBRARY_PATH` is omitted.
+Local datagram/logd collection is still unavailable, so exact configuration
+comparison guards against partial output despite the generator's zero exit.
+`evidence.py --art --stock` additionally requires the ordered bootstrap records.
+`--linker-debug` enables Android linker diagnostics for startup investigations.
+
+Both bootstrap stages now pass on Scarlet. The CFI shadow relocation failure
+was fixed in the native VM, and a subsequent library loading failure exposed
+an Ext2 60-byte symlink bug, also fixed in the filesystem. Java execution is
+still unverified; see the local checkpoint below for the current stopping point.
+The local host tests pass 26 cases using the project's Nix Python. The final
+kernel passes all 1,596 AArch64 tests and a RISC-V release check. Both HVF and
+TCG pass all eighteen Bionic cases. The ordinary ART run times out after 180
+seconds without Java output; linker diagnostics confirm that `libart.so`'s
+constructors have completed. A separate instrumented run captures an untimed
+`FUTEX_WAIT_PRIVATE` (expected value 3) after ART startup. Its mutex owner and
+underlying cause are not yet known. The blocking `/dev/kmsg` reader failed to
+forward the later syscall tail; a delayed reopen captured it. These diagnostics
+use a temporary syscall patch and log sink, neither installed in the production
+kernel or launcher. Logs, exact launch/input hashes and validation
+excerpts are retained in [the local checkpoint](checkpoints/2026-10-28-local/verification.json).
+Cloud's earlier Nix download restriction does not apply to this local validation.
 
 ### ABI composition and native RPC boundary
 
@@ -289,9 +323,26 @@ not a binderfs implementation and are not yet represented by normal VFS nodes.
 general death subscriptions, one-way and nested calls, automatic thread-pool
 growth, poll-based loopers, security-context records and SELinux policy.
 Unsupported transaction features return errors. This checkpoint does not yet
-run unmodified libbinder services, servicemanager, ART, or a direct APK.
+run unmodified libbinder services, servicemanager, a complete ART/Java program, or a direct APK.
 
 ### Kernel fixes exercised
+
+- Store bounded generic xattrs on TmpFS inodes and translate Linux's twelve
+  xattr calls. Attributes retain inode identity through rename/unlink, and
+  their bytes count against TmpFS quota. `security.selinux` is opaque metadata;
+  SELinux access enforcement is not implemented. Other filesystems return
+  `EOPNOTSUPP` and read-only mutations return `EROFS`.
+- Relocate same-size private normal-memory ranges in the native VM and expose
+  the operation through `mremap(MREMAP_MAYMOVE | MREMAP_FIXED)`. Resident pages,
+  lazy owners, permissions and fork/COW page indices survive the move. Source
+  and destination PTEs are invalidated before displaced backing is reclaimed;
+  fault publication revalidates its VMA snapshot. Growth, shared/file/device
+  owners, mixed source origins/protections, and a partial move whose rebased
+  origin would underflow remain unsupported.
+- Classify Ext2 inline symlinks by data-block allocation (excluding an external
+  attribute block), rather than target length. This reads e2fsprogs' block-backed
+  60-byte links and reclaims their blocks while retaining support for older
+  Scarlet inline links. New 60-byte links use data blocks, matching e2fsprogs.
 
 - Provide `AT_SECURE=0` for executions with no privilege transition; Bionic
   treats a missing entry as a fatal startup error.

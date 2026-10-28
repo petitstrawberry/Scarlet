@@ -1,0 +1,22 @@
+{
+  "scarlet.elf": {
+    "sha256": "44ba888cc1e5a4f98dc720deb9b8cfdf9552dec43aba4605c23674d495c7b0e6",
+    "size": 6927992
+  },
+  "rootfs.ext2": {
+    "sha256": "01d8009f0b5e912b80e3e80a53349580e549a872a253e4d7a9a4104774cf61bc",
+    "size": 351409014
+  },
+  "boot.img": {
+    "sha256": "6b0d0c6dd8a5c884cd1ad7bcb6f99849695dc337eb294703807a8d8a1320e065",
+    "size": 67108864
+  },
+  "initramfs.cpio": {
+    "sha256": "4587834e7bea587475efca0322f4a1ac990f3ac12ad4123cf9cdf1504140c22c",
+    "size": 434688
+  },
+  "boot/init": {
+    "sha256": "9d373734db3e6e6546dc13de80a07b39b741ccb36e07729ca3602ff34e92429a",
+    "size": 168032
+  }
+}

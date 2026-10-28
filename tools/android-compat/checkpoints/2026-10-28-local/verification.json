@@ -1,0 +1,64 @@
+{
+  "date": "2026-10-28",
+  "branch": "feature/android-abi-module",
+  "source_commits": [
+    "1d6bd1a4fb536807650fbf4fa340e11c8e7f5819 test(android): bootstrap stock ART inputs on Scarlet and probe xattr mremap",
+    "df93dc6b46d3d68842c3abfdbbc7a05574c57639 fix(ext2): identify inline symlinks by allocated blocks",
+    "5098da3cc62eca28225c486633df59b4ad0829ac feat(vm): relocate private mappings for Linux fixed mremap",
+    "93c7d8de78156c98d3e1a951eb06d57df8561c3d feat(vfs): store bounded inode attributes and translate Linux xattr calls",
+    "b996dd86d967d2a3fc31bccbc79957726dc320d5 fix(android): prepare ART inputs on macOS hosts"
+  ],
+  "kernel_sha256": "44ba888cc1e5a4f98dc720deb9b8cfdf9552dec43aba4605c23674d495c7b0e6",
+  "validation": {
+    "kernel": {
+      "exit_code": 0,
+      "command": "nix develop --command sh -c 'cd kernel && CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER=tools/test_aarch64.sh cargo test --target targets/aarch64-unknown-none-elf.json'",
+      "full_log": ".build/android-art-local/final-kernel-tests-2.log",
+      "full_log_sha256": "1b882bb40eea5b06c4d96f5c757d0e8daf6247b89467694fe2409acb372a5c3e",
+      "excerpt": "kernel-validation.log"
+    },
+    "riscv": {
+      "exit_code": 0,
+      "command": "nix develop --command sh -c 'cd kernel && cargo check --release --lib --target targets/riscv64gc-unknown-none-elf.json'",
+      "full_log": ".build/android-art-local/final-riscv-check.log",
+      "full_log_sha256": "aa30c78887500365c0abe2565ae012a6b0d2dc4e28229fae7ffa192436c92bdd",
+      "excerpt": "riscv-validation.log"
+    },
+    "host": {
+      "exit_code": 0,
+      "command": "nix develop --command python3 -m unittest discover -s tools/android-compat -p 'test_*.py'",
+      "full_log": ".build/android-art-local/final-host-tests-nix.log",
+      "full_log_sha256": "f117bcacbbbd538703d5e3b1bdf8cc7cb14029c84f4b3cd6f0de29fd2d67d48b",
+      "excerpt": "host-validation.log"
+    }
+  },
+  "bionic": {
+    "hvf": "18/18 PASS",
+    "tcg": "18/18 PASS"
+  },
+  "art": {
+    "stock_properties": 216,
+    "stock_linkerconfig": "exit 0; full ART configuration equals stock host reference",
+    "cfi": "fixed same-size shadow relocation succeeds",
+    "ext2": "60-byte block-backed libdl_android symlink reads correctly",
+    "reached": "libart.so DT_INIT_ARRAY completed",
+    "result": "INCOMPLETE; ordinary run timed out at 180 seconds before Java output",
+    "debug_full_log_sha256": "fe292dbac33582f97bdf877dae5e32211dd19aed04a4909208c7178408d3fc70",
+    "logging_limit": "The blocking kmsg reader did not deliver later trace output; reopening it after a 10-second delay captured the ART syscall tail. UART diagnostic emitted no syscall records. Logging behavior requires separate investigation.",
+    "note": "The initial ordinary run attached the properties START marker to an unterminated firmware line. The launcher now prefixes bootstrap START records with a newline; subsequent diagnostic runs show a complete bootstrap sequence.",
+    "next_blocker": "A diagnostic snapshot 10 seconds after ART start ends in AArch64 syscall 98, FUTEX_WAIT_PRIVATE (0x80), expected value 3, no timeout. The ART mutex owner and originating failure remain undetermined.",
+    "diagnostic": {
+      "kernel_sha256": "2da9e26a7dfa7ddc5a4f4fa12d8e11f564daf1e2474dc0fd921306a9335828be",
+      "serial_sha256": "d2792f70ef812cb5a9845ce4724bd3aa46627ee385b96ea43e40bf2a360d7603",
+      "result": "40-second timeout; no Java output",
+      "instrumentation": "Temporary Android syscall tracing, delayed native kmsg snapshot, and an LD_PRELOAD library calling Android public __android_log_set_logger. Diagnostic changes are preserved as artifacts only, not present in the production kernel/launcher."
+    }
+  },
+  "limitations": [
+    "No direct APK or Java success claimed.",
+    "SELinux labels are metadata only; no SELinux enforcement.",
+    "mremap growth/shared/object-backed mappings are unsupported.",
+    "Local logd datagrams are not available."
+  ],
+  "cleanup": "Temporary run images, copied staging trees and dependency targets removed after retaining logs, manifests and hashes."
+}

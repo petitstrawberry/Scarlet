@@ -1,0 +1,32 @@
+{
+  "main_class": "ScarletArtHello",
+  "source_sha256": "3a62276e6893f4ecfc8871416495ee3b01d63d35008f6cbb1565ba398714b013",
+  "dex_sha256": "43a52ab6a834a56df36bf8ceca1930b243ac795e3727c9b1268a29bb02e6fe11",
+  "d8_sha256": "a26ee56252adcff6752c379ae255a0ad538ebec60189e078ec6855487107637d",
+  "java_version": "openjdk version \"17.0.14\" 2025-01-21\nOpenJDK Runtime Environment JBR-17.0.14+1-1367.22-nomod (build 17.0.14+1-b1367.22)\nOpenJDK 64-Bit Server VM JBR-17.0.14+1-1367.22-nomod (build 17.0.14+1-b1367.22, mixed mode, sharing)",
+  "javac_version": "javac 17.0.14",
+  "d8_version": "D8 9.2.4-dev (build 084a89126ae0596c599143df57a654646af28313 from go/r8bot (luci-r8-custom-ci-archive-0-4u1w))",
+  "commands": [
+    [
+      "/Users/petitstrawberry/Library/Java/JavaVirtualMachines/jbr-17.0.14/Contents/Home/bin/java",
+      "com.sun.tools.javac.Main",
+      "--release",
+      "8",
+      "-d",
+      "/Users/petitstrawberry/Development/Rust/Scarlet/.build/android-art-local/dex/classes",
+      "/Users/petitstrawberry/Development/Rust/Scarlet/tools/android-compat/art/ScarletArtHello.java"
+    ],
+    [
+      "/Users/petitstrawberry/Library/Java/JavaVirtualMachines/jbr-17.0.14/Contents/Home/bin/java",
+      "-cp",
+      "/Users/petitstrawberry/Library/Android/sdk/build-tools/37.0.0/lib/d8.jar",
+      "com.android.tools.r8.D8",
+      "--min-api",
+      "23",
+      "--output",
+      "/Users/petitstrawberry/Development/Rust/Scarlet/.build/android-art-local/dex",
+      "/Users/petitstrawberry/Development/Rust/Scarlet/.build/android-art-local/dex/classes/ScarletArtHello.class"
+    ]
+  ],
+  "execution": "not tested"
+}

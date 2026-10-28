@@ -1,0 +1,20 @@
+256: SCARLET_ANDROID_STOCK_START properties
+257: SCARLET_PROPERTY_SNAPSHOT_OK 216
+258: SCARLET_ANDROID_STOCK_EXIT properties 0
+259: SCARLET_ANDROID_STOCK_START linkerconfig
+260: SCARLET_ANDROID_STOCK_EXIT linkerconfig 0
+261: SCARLET_ANDROID_STOCK_OK
+47589: linker: name /system/lib64/libdl_android.so: allocated soinfo @ 0x4000010f83a0
+168778: linker: [ Done calling DT_INIT_ARRAY for '/apex/com.android.art/lib64/libart.so' ]
+191802: linker: SEARCH PaletteReportLockContention in /system/lib64/libm.so@0x4000013c1000 (gnu)
+191803: linker: NOT FOUND PaletteReportLockContention in /system/lib64/libm.so@0x4000013c1000
+191804: linker: SEARCH PaletteReportLockContention in /system/lib64/libdl.so@0x4000013a7000 (gnu)
+191805: linker: NOT FOUND PaletteReportLockContention in /system/lib64/libdl.so@0x4000013a7000
+191806: linker: SEARCH PaletteReportLockContention in /system/lib64/libcgrouprc.so@0x400001d42000 (gnu)
+191807: linker: NOT FOUND PaletteReportLockContention in /system/lib64/libcgrouprc.so@0x400001d42000
+191808: linker: SEARCH PaletteReportLockContention in /system/lib64/libpcre2.so@0x400299c2c000 (gnu)
+191809: linker: NOT FOUND PaletteReportLockContention in /system/lib64/libpcre2.so@0x400299c2c000
+191810: linker: SEARCH PaletteReportLockContention in /system/lib64/libpackagelistparser.so@0x400299bb3000 (gnu)
+191811: linker: NOT FOUND PaletteReportLockContention in /system/lib64/libpackagelistparser.so@0x400299bb3000
+191812: linker: SEARCH PaletteReportLockContention in /system/bin/linker64@0x0 (gnu)
+191813: linker: NOT FOUND PaletteReportLockContention in /system/bin/linker64@0x0

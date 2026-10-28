@@ -1,0 +1,17 @@
+{
+  "result": "timeout waiting for the success marker",
+  "qemu_exit_code": 0,
+  "elapsed_seconds": 180.012,
+  "dynamic_runtime": true,
+  "art": {
+    "result": "INCOMPLETE",
+    "records": [
+      "SCARLET_PROPERTY_SNAPSHOT_OK",
+      "SCARLET_ANDROID_STOCK_EXIT properties 0",
+      "SCARLET_ANDROID_STOCK_START linkerconfig",
+      "SCARLET_ANDROID_STOCK_EXIT linkerconfig 0",
+      "SCARLET_ANDROID_STOCK_OK",
+      "SCARLET_ANDROID_ART_START"
+    ]
+  }
+}

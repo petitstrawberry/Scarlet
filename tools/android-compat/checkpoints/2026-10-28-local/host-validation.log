@@ -1,0 +1,10 @@
+warning: Git tree '/Users/petitstrawberry/Development/Rust/Scarlet' is dirty
+..........................
+----------------------------------------------------------------------
+Ran 26 tests in 0.160s
+
+OK
+ART direct execution: missing or failed child evidence
+ART direct execution: PASS
+ART direct execution: missing or failed child evidence
+ART direct execution: PASS

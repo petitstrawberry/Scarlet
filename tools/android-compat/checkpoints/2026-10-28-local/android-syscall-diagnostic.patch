@@ -1,0 +1,18 @@
+diff --git a/kernel/src/abi/android/aarch64.rs b/kernel/src/abi/android/aarch64.rs
+index 0bbcf3142..34bbe6264 100644
+--- a/kernel/src/abi/android/aarch64.rs
++++ b/kernel/src/abi/android/aarch64.rs
+@@ -52,7 +52,12 @@ impl AbiModule for AndroidAarch64Abi {
+     }
+ 
+     fn handle_syscall(&mut self, tf: &mut Trapframe) -> Result<usize, &'static str> {
+-        self.linux.handle_syscall(tf)
++        let nr = tf.get_syscall_number();
++        let id = crate::task::mytask().map_or(0, |task| task.get_id());
++        crate::println!("[android-diag] enter pid={} nr={} args={:x},{:x},{:x},{:x},{:x},{:x}", id, nr, tf.get_arg(0), tf.get_arg(1), tf.get_arg(2), tf.get_arg(3), tf.get_arg(4), tf.get_arg(5));
++        let result = self.linux.handle_syscall(tf);
++        crate::println!("[android-diag] leave pid={} nr={} result={:?}", id, nr, result);
++        result
+     }
+     fn handle_event(
+         &mut self,

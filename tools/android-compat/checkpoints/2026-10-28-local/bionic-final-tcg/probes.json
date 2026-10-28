@@ -1,0 +1,54 @@
+{
+  "api": 33,
+  "ndk": "Pkg.Desc = Android NDK\nPkg.Revision = 25.1.8937393\n",
+  "commands": [
+    [
+      "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+      "-O2",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-fno-emulated-tls",
+      "-static",
+      "/Users/petitstrawberry/Development/Rust/Scarlet/tools/android-compat/bionic-probe.c",
+      "/Users/petitstrawberry/Development/Rust/Scarlet/tools/android-compat/binder-probe.c",
+      "-ldl",
+      "-o",
+      "/Users/petitstrawberry/Development/Rust/Scarlet/.build/android-art-local/probes-final/bionic-static"
+    ],
+    [
+      "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+      "-O2",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-fno-emulated-tls",
+      "/Users/petitstrawberry/Development/Rust/Scarlet/tools/android-compat/bionic-probe.c",
+      "/Users/petitstrawberry/Development/Rust/Scarlet/tools/android-compat/binder-probe.c",
+      "-ldl",
+      "-o",
+      "/Users/petitstrawberry/Development/Rust/Scarlet/.build/android-art-local/probes-final/bionic-dynamic"
+    ],
+    [
+      "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+      "-O2",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-fno-emulated-tls",
+      "-fPIC",
+      "-shared",
+      "/Users/petitstrawberry/Development/Rust/Scarlet/tools/android-compat/bionic-library.c",
+      "-o",
+      "/Users/petitstrawberry/Development/Rust/Scarlet/.build/android-art-local/probes-final/libbionic-probe.so"
+    ]
+  ],
+  "sha256": {
+    "bionic-static": "4c5552df7a373feff88f753967dc7a1942fe41ee62aac2b13136157e73dfb6b9",
+    "bionic-dynamic": "aab4e96c445c3d43ddb5651b75517ee6176247f6502e3e5881a5380085b97034",
+    "libbionic-probe.so": "b64cf304d4bad7860c21fe6393c574d177be58cff0ae575ecf68d967c99d839d"
+  }
+}
