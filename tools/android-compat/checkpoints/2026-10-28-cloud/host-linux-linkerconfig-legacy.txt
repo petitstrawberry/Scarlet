@@ -1,0 +1,37 @@
+dir.legacy = /system
+dir.legacy = /system_ext
+dir.legacy = /product
+dir.legacy = /vendor
+dir.legacy = /odm
+dir.legacy = /sbin
+dir.postinstall = /postinstall
+dir.legacy = /data
+[legacy]
+namespace.default.isolated = false
+namespace.default.visible = true
+namespace.default.search.paths = /system/${LIB}
+namespace.default.search.paths += /system_ext/${LIB}
+namespace.default.search.paths += /product/${LIB}
+namespace.default.search.paths += /vendor/${LIB}
+namespace.default.search.paths += /odm/${LIB}
+namespace.default.asan.search.paths = /data/asan/system/${LIB}
+namespace.default.asan.search.paths += /system/${LIB}
+namespace.default.asan.search.paths += /data/asan/system_ext/${LIB}
+namespace.default.asan.search.paths += /system_ext/${LIB}
+namespace.default.asan.search.paths += /data/asan/product/${LIB}
+namespace.default.asan.search.paths += /product/${LIB}
+namespace.default.asan.search.paths += /data/asan/vendor/${LIB}
+namespace.default.asan.search.paths += /vendor/${LIB}
+namespace.default.asan.search.paths += /data/asan/odm/${LIB}
+namespace.default.asan.search.paths += /odm/${LIB}
+[postinstall]
+namespace.default.isolated = false
+namespace.default.search.paths = /system/${LIB}
+namespace.default.search.paths += /system_ext/${LIB}
+namespace.default.search.paths += /product/${LIB}
+namespace.default.asan.search.paths = /data/asan/system/${LIB}
+namespace.default.asan.search.paths += /system/${LIB}
+namespace.default.asan.search.paths += /data/asan/system_ext/${LIB}
+namespace.default.asan.search.paths += /system_ext/${LIB}
+namespace.default.asan.search.paths += /data/asan/product/${LIB}
+namespace.default.asan.search.paths += /product/${LIB}

@@ -27,6 +27,49 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
             target: 2,
         },
     ];
+    if option_env!("SCARLET_ANDROID_ART") == Some("1") {
+        // Keep startup faults visible even when ART never reaches Java or exit.
+        // The host runner owns the timeout and the private QEMU process.
+        let _logger = std::thread::Builder::new()
+            .spawn(|| {
+                let Ok(mut log) = std::fs::File::open("/dev/kmsg") else {
+                    println!("SCARLET_ANDROID_ART_FAIL: kernel log open");
+                    return;
+                };
+                let mut bytes = [0; 8192];
+                while let Ok(count) = log.read(&mut bytes) {
+                    if count == 0 {
+                        break;
+                    }
+                    std::print!("{}", std::string::String::from_utf8_lossy(&bytes[..count]));
+                }
+            })
+            .map_err(|_| "kernel log thread")?;
+        let program = "/apex/com.android.art/bin/dalvikvm64";
+        let executable = android.open(program, 0).map_err(|_| "ART executable")?;
+        let argv: std::vec::Vec<&str> = option_env!("SCARLET_ART_ARGS")
+            .unwrap_or("")
+            .split('\u{1f}')
+            .collect();
+        let env: std::vec::Vec<&str> = option_env!("SCARLET_ART_ENV")
+            .unwrap_or("")
+            .split('\u{1f}')
+            .collect();
+        if argv.first().copied() != Some(program) || !argv.contains(&"-Xint") {
+            return Err("ART interpreter arguments");
+        }
+        println!("\nSCARLET_ANDROID_ART_START");
+        let pid = environment
+            .spawn(&executable, &argv, &env, "/", &handles)
+            .map_err(|_| "ART spawn")?;
+        let (waited, status) = std::task::waitpid(pid as i32, 0);
+        println!("SCARLET_ANDROID_ART_EXIT {}", status);
+        return if waited == pid as i32 && status == 0 {
+            Ok(())
+        } else {
+            Err("ART wait or exit")
+        };
+    }
     let mut failed = false;
     let programs: &[&str] = if option_env!("SCARLET_ANDROID_DYNAMIC") == Some("1") {
         &["/bin/bionic-static", "/bin/bionic-dynamic"]
@@ -105,18 +148,29 @@ fn main() -> i32 {
             std::thread::sleep(std::time::Duration::from_secs(1));
         },
     };
+    let art = option_env!("SCARLET_ANDROID_ART") == Some("1");
     match check(&stdio) {
-        Ok(()) => println!("SCARLET_ANDROID_DIRECT_OK"),
-        Err(error) => {
-            // Fault diagnostics normally remain in Scarlet's kernel log ring.
-            // One bounded read captures them before the host sees the final marker.
-            if let Ok(mut log) = std::fs::File::open("/dev/kmsg") {
-                let mut bytes = std::vec![0; 256 * 1024];
-                if let Ok(count) = log.read(&mut bytes) {
-                    println!("{}", std::string::String::from_utf8_lossy(&bytes[..count]));
-                }
+        Ok(()) => {
+            if art {
+                println!("SCARLET_ANDROID_ART_OK");
+            } else {
+                println!("SCARLET_ANDROID_DIRECT_OK");
             }
-            println!("SCARLET_ANDROID_DIRECT_FAIL: {}", error);
+        }
+        Err(error) => {
+            if art {
+                println!("SCARLET_ANDROID_ART_FAIL: {}", error);
+            } else {
+                // Fault diagnostics normally remain in Scarlet's kernel log ring.
+                // One bounded read captures them before the host sees the final marker.
+                if let Ok(mut log) = std::fs::File::open("/dev/kmsg") {
+                    let mut bytes = std::vec![0; 256 * 1024];
+                    if let Ok(count) = log.read(&mut bytes) {
+                        println!("{}", std::string::String::from_utf8_lossy(&bytes[..count]));
+                    }
+                }
+                println!("SCARLET_ANDROID_DIRECT_FAIL: {}", error);
+            }
         }
     }
     loop {

@@ -105,9 +105,14 @@ python3 tools/android-compat/prepare-art.py \
 python3 tools/android-compat/build-dex.py \
   --build-tools /path/to/sdk/build-tools/33.0.2 \
   --output .build/android-compat/dex
+python3 tools/android-compat/run-direct.py \
+  --kernel projects/aarch64-limine-crosvm/bsp/target/aarch64-unknown-none-elf/release/scarlet \
+  --runtime-root .build/android-compat/art-runtime \
+  --art-dex .build/android-compat/dex/classes.dex \
+  --output .build/android-compat/art-run --accel tcg --timeout 180
 ```
 
-Both commands require a fresh output directory. `art-runtime.json` records the
+All commands require a fresh output directory. `art-runtime.json` records the
 SDK URL/hash/build properties, package/APEX/payload hashes, every output hash,
 ELF dependencies, and the explicit library/boot-class search paths. `build.json`
 records the Java/compiler/D8 versions, commands, source hash and DEX hash. The
@@ -115,6 +120,18 @@ plain Java probe computes 42 and prints `SCARLET_ART_BEGIN`, `Scarlet ART: 42`
 and `SCARLET_ART_OK`, then returns normally. It has no Activity or framework
 dependencies. The runtime tree has no boot image or linker namespace config;
 these inputs target a core-only, image-less interpreter experiment.
+
+`--art-dex` replaces the Bionic suite and does not need `--probes` or the NDK.
+The host checks runtime hashes before and after staging, validates the DEX
+header/checksums, saves `art-launch.json`, and compiles those same arguments and
+environment entries into the native init. The child is launched with `-Xint`,
+JIT disabled, an intentionally absent boot image and `-Xnoimage-dex2oat`.
+A native logger thread forwards `/dev/kmsg` while the parent waits for the ART
+process, including startup failures and hangs. Success requires ordered Java
+BEGIN/output/OK records, native wait success, exit status zero and the final
+suite marker. `evidence.py --art` independently rechecks a serial log. These
+runner paths have host orchestration tests; the native launcher has only been
+syntax/format checked in Cloud, not built or executed there.
 
 Cloud checkpoint on 2026-10-28: input extraction and DEX compilation succeeded
 on x86_64 Linux, using OpenJDK `21.0.12.1` and D8 `3.3.20-dev+aosp5`. The DEX is
@@ -127,6 +144,24 @@ then failed to fetch `https://ftpmirror.gnu.org/bash/bash-5.3.tar.gz`.
 **No Cloud Scarlet build, ART startup, Java execution on Scarlet, or ABI fix
 has been verified at this checkpoint.** These host checks do not replace the
 earlier local Bionic or kernel tests.
+
+An additional **host Linux user-mode emulation diagnostic, not Scarlet**, used
+QEMU `10.0.13` to check the real `dalvikvm64` inputs. It first aborted because
+`/system/etc/public.libraries.txt` was missing. Preparation now preserves the
+image's original list and its preload dependencies (including Android `@`
+versioned library names). The resulting tree contains 267 hashed files and
+253 ELF dependency records, about 120 MiB. A second startup then aborted with
+`Failed to get system namespace for loading libandroid.so`; no Java marker
+was printed and the command exited 1. Both logs are retained in
+[the Cloud checkpoint](checkpoints/2026-10-28-cloud/verification.json).
+
+The image's unmodified static `linkerconfig` was also inspected and executed
+as a host diagnostic. With the fixture's absent property/APEX activation state,
+it generated only a legacy configuration with no ART/system exported namespace.
+No custom namespace config was installed. **Owner consultation is pending**
+before choosing a fixture-specific namespace/access policy versus reproducing
+stock Android property/APEX state and generated namespace configuration.
+The current ART runner is a startup diagnostic, not a passing Java fixture.
 
 ### ABI composition and native RPC boundary
 

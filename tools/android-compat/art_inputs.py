@@ -1,5 +1,6 @@
 """Read-only input preparation for the pinned Android 13 ARM64 ART fixture."""
 import hashlib
+import json
 from pathlib import Path
 import re
 import struct
@@ -132,8 +133,8 @@ def elf_needed(path):
         raise ValueError(f"not an ARM64 ELF: {path}")
     dynamic = subprocess.run(["readelf", "-d", str(path)], check=True, capture_output=True, text=True).stdout
     names = re.findall(r"\(NEEDED\).*Shared library: \[([^\]]+)\]", dynamic)
-    if any("/" in name or not re.fullmatch(r"[\w.+-]+", name) for name in names):
-        raise ValueError("unsupported ELF dependency name")
+    if any("/" in name or not re.fullmatch(r"[\w.+@-]+", name) for name in names):
+        raise ValueError(f"unsupported ELF dependency name in {path}: {names}")
     return names
 
 
@@ -146,3 +147,62 @@ def validate_dex(path):
     if hashlib.sha1(data[32:]).digest() != data[12:32] or zlib.adler32(data[12:]) != struct.unpack_from("<I", data, 8)[0]:
         raise ValueError("invalid DEX checksum")
     return sha256(path)
+
+
+def verify_art_runtime(root):
+    """Bind the launch to a complete, unchanged prepared runtime."""
+    root = Path(root).resolve()
+    metadata = json.loads((root / "art-runtime.json").read_text())
+    if metadata.get("result") != "PREPARED" or metadata.get("sdk", {}).get("sha256") != SDK_SHA256:
+        raise ValueError("ART runtime is not a completed pinned preparation")
+    files = metadata["files"]
+    required = ["apex/com.android.art/bin/dalvikvm64", "apex/com.android.art/lib64/libart.so",
+                "apex/com.android.runtime/bin/linker64", "system/etc/public.libraries.txt"]
+    for name in required:
+        if name not in files:
+            raise ValueError(f"missing ART runtime identity: {name}")
+    for name, digest in files.items():
+        path = root / name
+        if (not name or Path(name).is_absolute() or ".." in Path(name).parts or
+                not path.resolve().is_relative_to(root) or path.is_symlink()):
+            raise ValueError("invalid ART manifest path")
+        if sha256(path) != digest:
+            raise ValueError(f"ART runtime hash mismatch: {name}")
+    for path in root.rglob("*"):
+        name = str(path.relative_to(root))
+        if path.is_symlink() and name != "system/bin/linker64":
+            raise ValueError(f"unexpected ART runtime symlink: {name}")
+        if path.is_file() and not path.is_symlink() and name not in files and name not in (
+                "art-runtime.json", "data/local/tmp/classes.dex"):
+            raise ValueError(f"unrecorded ART runtime file: {name}")
+    linker = root / "system/bin/linker64"
+    if not linker.is_symlink() or linker.readlink() != Path("../../apex/com.android.runtime/bin/linker64"):
+        raise ValueError("unexpected ART linker alias")
+    for key in ("library_path", "boot_class_path"):
+        entries = metadata[key].split(":")
+        if not entries or any(not p.startswith("/") or ".." in Path(p).parts or
+                              any(c in p for c in "\n\r\0\x1f") for p in entries):
+            raise ValueError(f"invalid {key}")
+        for entry in entries:
+            path = root / entry.lstrip("/")
+            if not path.exists() or not path.resolve().is_relative_to(root):
+                raise ValueError(f"missing {key} entry: {entry}")
+            if key == "library_path" and not path.is_dir():
+                raise ValueError("library path entry is not a directory")
+            if key == "boot_class_path" and entry.lstrip("/") not in files:
+                raise ValueError("boot class path is not covered by runtime hashes")
+    return metadata
+
+
+def art_launch(metadata):
+    """Keep recorded and compiled launcher arguments identical."""
+    return {
+        "argv": ["/apex/com.android.art/bin/dalvikvm64", "-Xint", "-Xusejit:false",
+                 "-Ximage:/system/nonexistent/boot.art", "-Xnoimage-dex2oat",
+                 "-Xbootclasspath:" + metadata["boot_class_path"],
+                 "-Xms16m", "-Xmx128m", "-cp", "/data/local/tmp/classes.dex", "ScarletArtHello"],
+        "env": ["PATH=/system/bin:/apex/com.android.art/bin", "ANDROID_ROOT=/system",
+                "ANDROID_DATA=/data", "ANDROID_ART_ROOT=/apex/com.android.art",
+                "ANDROID_I18N_ROOT=/apex/com.android.i18n", "ANDROID_TZDATA_ROOT=/apex/com.android.tzdata",
+                "ANDROID_LOG_TAGS=*:v", "LD_LIBRARY_PATH=" + metadata["library_path"]],
+    }

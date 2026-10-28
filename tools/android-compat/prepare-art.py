@@ -63,6 +63,22 @@ def prepare(archive, output):
         queue = [output / "apex/com.android.art/bin/dalvikvm64",
                  output / "apex/com.android.runtime/bin/linker64"]
         queue += sorted(output.rglob("*.so"))
+        # libnativeloader requires the real public-library list and preloads its
+        # entries. Preserve the image policy instead of inventing an empty list.
+        public = output / "system/etc/public.libraries.txt"
+        system.dump("/system/etc/public.libraries.txt", public)
+        for line in public.read_text().splitlines():
+            fields = line.split("#", 1)[0].split()
+            if not fields or "nopreload" in fields or "32" in fields:
+                continue
+            name = fields[0]
+            if "/" in name or not name.endswith(".so"):
+                raise ValueError("unexpected public library name")
+            found = next((directory / name for directory in search if (directory / name).is_file()), None)
+            if found is None:
+                found = output / "system/lib64" / name
+                system.dump("/system/lib64/" + name, found)
+            queue.append(found)
         seen, dependencies = set(), {}
         while queue:
             binary = queue.pop(0)

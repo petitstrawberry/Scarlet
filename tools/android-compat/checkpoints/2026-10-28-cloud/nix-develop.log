@@ -1,0 +1,42 @@
+warning: unable to download 'https://cache.nixos.org/nix-cache-info': Failure when receiving data from the peer (56)
+warning: unable to download 'https://scarlet-rust-toolchain.cachix.org/nix-cache-info': Failure when receiving data from the peer (56)
+unpacking 'github:NixOS/nixpkgs/3e41b24abd260e8f71dbe2f5737d24122f972158?narHash=sha256-rxO%2Buc/KFbSJp%2BpgyXRuAX6QlG9hJdnt0BXpEQRXY%2BU%3D' into the Git cache...
+unpacking 'github:petitstrawberry/scarlet-rust-nix/3c23906c35053e28d56f3aa9b1d29142535ffab7?narHash=sha256-DmyF4/DNRjCY9jpm4rooFE%2Bui3OUMfbWws3P9vSmIjg%3D' into the Git cache...
+unpacking 'github:NixOS/nixpkgs/ffa10e26ae11d676b2db836259889f1f571cb14f?narHash=sha256-QfWfccTN%2B70ZQ4m2qlU9PiKfz2Yppq94058iJyARNwc%3D' into the Git cache...
+unpacking 'github:oxalica/rust-overlay/27b7e78c6935293ee868469cc4172e9b8b17823b?narHash=sha256-4%2B8gPeiPeud89mjo865RwpqmKwa1MThRsq2SvRxo7mg%3D' into the Git cache...
+unpacking 'github:petitstrawberry/scarlet-rust-nix/074b722ac3c0d69daa8d4560996e23474c373d7c?narHash=sha256-qyEXDtCr4HvSe8jFpvWhgSq2HUuSDoGvXQrf2FxLjN8%3D' into the Git cache...
+building '/nix/store/y84saga4qsmk7xrprd0qv8rgdqjk67g1-bash-5.3.tar.gz.drv'...
+error: builder for '/nix/store/y84saga4qsmk7xrprd0qv8rgdqjk67g1-bash-5.3.tar.gz.drv' failed with exit code 1;
+       last 4 log lines:
+       > error:
+       >        … writing file '/nix/store/kwm524zjlnnq4yfhhmb5r14f2wxf8a2j-bash-5.3.tar.gz'
+       >
+       >        error: unable to download 'https://ftpmirror.gnu.org/bash/bash-5.3.tar.gz': Failure when receiving data from the peer (56)
+       For full logs, run 'nix log /nix/store/y84saga4qsmk7xrprd0qv8rgdqjk67g1-bash-5.3.tar.gz.drv'.
+error: 1 dependencies of derivation '/nix/store/v8jl1cziqai2qqgn0axr9cv3masm5nb5-bash-5.3.drv' failed to build
+error: 1 dependencies of derivation '/nix/store/0a8p5fjb2va3jw6v84lisqsy0ygmfy8c-bash-5.3p9.drv' failed to build
+error: 1 dependencies of derivation '/nix/store/a79snlqv6f8b1vpgffljdnl9hv961wmd-bash-5.3p9.drv' failed to build
+error: 1 dependencies of derivation '/nix/store/ghj56d7dhjni37apnjxrl01wiba0zghg-bash-5.3p9.drv' failed to build
+error: 1 dependencies of derivation '/nix/store/nx5vjcba7q56d0xpr7dj0vy0nln5i64k-bash-5.3p9.drv' failed to build
+error: 1 dependencies of derivation '/nix/store/rdi2zjmbw7565gc4pa4fkzvzpgwpaaj3-bash-5.3p9.drv' failed to build
+error:
+       … while calling the 'derivationStrict' builtin
+         at <nix/derivation-internal.nix>:34:12:
+           33|
+           34|   strict = derivationStrict drvAttrs;
+             |            ^
+           35|
+
+       … while evaluating derivation 'nix-shell'
+         whose name attribute is located at /nix/store/j2r11kxv91yl5xqppy3vy84klwxjbz1i-source/pkgs/stdenv/generic/make-derivation.nix:651:11
+
+       … while evaluating attribute 'SCARLET_CACHED_RUST_TOOLCHAIN' of derivation 'nix-shell'
+         at /nix/store/6xgnbmb8xgmagcrnk0mlhdk6wmlmwxxz-source/flake.nix:440:13:
+          439|             SCARLET_RUST_TARGET_TRIPLES = "riscv32gc-unknown-scarlet riscv64gc-unknown-scarlet aarch64-unknown-scarlet";
+          440|             SCARLET_CACHED_RUST_TOOLCHAIN = "${rustToolchain}";
+             |             ^
+          441|             SCARLET_RUST_TOOLCHAIN = "${rustToolchain}";
+
+       (stack trace truncated; use '--show-trace' to show the full, detailed trace)
+
+       error: 1 dependencies of derivation '/nix/store/y5dl4zj8kv6p6zqwsrv61mig2nprcz4f-source.drv' failed to build

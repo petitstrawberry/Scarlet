@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Bionic directly on Scarlet's Android ABI in a private AArch64 QEMU image.
+"""Run Bionic or ART directly on Scarlet's Android ABI in a private AArch64 QEMU image.
 
 No Android/Linux guest kernel is involved. An optional runtime root must contain
 real Android runtime files (NDK .so files are link stubs, not runtime libraries).
@@ -16,7 +16,8 @@ import shutil
 import subprocess
 import sys
 
-from evidence import analyze_direct
+from evidence import analyze_art, analyze_direct
+from art_inputs import art_launch, validate_dex, verify_art_runtime
 
 sys.dont_write_bytecode = True
 SOURCE = Path(__file__).resolve().parent
@@ -29,24 +30,34 @@ spec.loader.exec_module(smoke)
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kernel", type=Path, required=True)
-    parser.add_argument("--probes", type=Path, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--probes", type=Path)
+    mode.add_argument("--art-dex", type=Path, help="run only dalvikvm64 -Xint with this classes.dex")
     parser.add_argument("--runtime-root", type=Path, help="Android /system and /apex runtime tree")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--accel", choices=("tcg", "hvf"), default="tcg")
     parser.add_argument("--binder", action="store_true", help="include two-process Binder RPC checks")
     args = parser.parse_args()
+    if args.art_dex and (not args.runtime_root or args.binder):
+        parser.error("--art-dex requires --runtime-root and cannot use --binder")
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("timeout must be finite and positive")
-    kernel, probes, output = [p.resolve() for p in (args.kernel, args.probes, args.output)]
+    kernel, output = args.kernel.resolve(), args.output.resolve()
+    probes = args.probes.resolve() if args.probes else None
     if output.exists():
         parser.error("use a new output directory to preserve earlier evidence")
-    for path in [kernel, *(probes / n for n in ["bionic-static", "bionic-dynamic", "libbionic-probe.so", "build.json"])]:
+    inputs = [kernel]
+    if probes:
+        inputs += [probes / n for n in ["bionic-static", "bionic-dynamic", "libbionic-probe.so", "build.json"]]
+    for path in inputs:
         if not path.is_file():
             parser.error(f"missing input: {path}")
     if args.runtime_root and not args.runtime_root.is_dir():
         parser.error("runtime root must be a directory")
     runtime_files = []
+    art = None
+    dex_hash = None
     if args.runtime_root:
         runtime_files = [args.runtime_root / name for name in (
             "system/bin/linker64", "apex/com.android.runtime/lib64/bionic/libc.so",
@@ -54,6 +65,11 @@ def main():
         for path in runtime_files:
             if not path.is_file():
                 parser.error(f"missing Android runtime file: {path}")
+    if args.art_dex:
+        dex_hash = validate_dex(args.art_dex)
+        metadata = verify_art_runtime(args.runtime_root)
+        art = art_launch(metadata)
+        runtime_files = [args.runtime_root / name for name in metadata["files"]]
     code = smoke.firmware(("SCARLET_EFI_CODE_ARM64_HVF", "SCARLET_EFI_CODE_ARM64")) if args.accel == "hvf" else smoke.firmware(("SCARLET_EFI_CODE_ARM64", "SCARLET_EFI_CODE_ARM64_EL2"))
     variables = smoke.firmware(("SCARLET_EFI_VARS_ARM64_HVF", "SCARLET_EFI_VARS_ARM64")) if args.accel == "hvf" else smoke.firmware(("SCARLET_EFI_VARS_ARM64", "SCARLET_EFI_VARS_ARM64_EL2"))
     output.mkdir(parents=True)
@@ -63,6 +79,7 @@ def main():
     kernel = output / "scarlet.elf"
     (output / "inputs.json").write_text(json.dumps({
         "kernel_sha256": hashlib.sha256(kernel.read_bytes()).hexdigest(),
+        "dex_sha256": dex_hash,
         "runtime_sha256": {str(p.relative_to(args.runtime_root)): hashlib.sha256(p.read_bytes()).hexdigest()
                            for p in runtime_files},
     }, indent=2) + "\n")
@@ -77,15 +94,28 @@ def main():
         (android / name).mkdir(parents=True, exist_ok=True)
     if args.runtime_root:
         shutil.copytree(args.runtime_root, android, dirs_exist_ok=True, symlinks=True)
-    for name in ["bionic-static", "bionic-dynamic"]:
-        shutil.copy2(probes / name, android / "bin" / name)
-    control = staging / "systems/linux-aarch64/bin"
-    control.mkdir(parents=True)
-    shutil.copy2(probes / "bionic-static", control / "bionic-static")
-    shutil.copy2(probes / "libbionic-probe.so", android / "lib/libbionic-probe.so")
-    shutil.copy2(probes / "build.json", output / "probes.json")
+    if art:
+        shutil.copy2(args.art_dex, android / "data/local/tmp/classes.dex")
+        if validate_dex(android / "data/local/tmp/classes.dex") != dex_hash:
+            raise ValueError("DEX changed during staging")
+        verify_art_runtime(android)
+        shutil.copy2(args.runtime_root / "art-runtime.json", output / "art-runtime.json")
+    else:
+        for name in ["bionic-static", "bionic-dynamic"]:
+            shutil.copy2(probes / name, android / "bin" / name)
+        control = staging / "systems/linux-aarch64/bin"
+        control.mkdir(parents=True)
+        shutil.copy2(probes / "bionic-static", control / "bionic-static")
+        shutil.copy2(probes / "libbionic-probe.so", android / "lib/libbionic-probe.so")
+        shutil.copy2(probes / "build.json", output / "probes.json")
     env = dict(os.environ, SCARLET_ANDROID_DYNAMIC="1" if args.runtime_root else "0",
-               SCARLET_ANDROID_BINDER="1" if args.binder else "0")
+               SCARLET_ANDROID_BINDER="1" if args.binder else "0",
+               SCARLET_ANDROID_ART="1" if art else "0",
+               SCARLET_ART_ARGS="\x1f".join(art["argv"]) if art else "",
+               SCARLET_ART_ENV="\x1f".join(art["env"]) if art else "")
+    # Preserve the exact launch even if native compilation or image creation fails.
+    if art:
+        (output / "art-launch.json").write_text(json.dumps(art, indent=2) + "\n")
     for manifest, binary, destination in [
         (SOURCE / "init/Cargo.toml", "android-direct-init", "init"),
         (ROOT / "user/scarlet-ld/Cargo.toml", "scarlet-ld", "bin/scarlet-ld"),
@@ -123,15 +153,18 @@ def main():
                "-device", "virtio-blk-device,drive=root,bus=virtio-mmio-bus.1",
                "-device", "virtio-rng-device,bus=virtio-mmio-bus.2", "-nic", "none"]
     (output / "commands.json").write_text(json.dumps({"image": build, "qemu": command}, indent=2) + "\n")
-    smoke.SUCCESS = re.compile(rb"\nSCARLET_ANDROID_DIRECT_OK\r*\n")
-    smoke.FAILURE = re.compile(rb"\nSCARLET_ANDROID_DIRECT_FAIL:")
+    prefix = b"SCARLET_ANDROID_ART" if art else b"SCARLET_ANDROID_DIRECT"
+    smoke.SUCCESS = re.compile(rb"\n" + prefix + rb"_OK\r*\n")
+    smoke.FAILURE = re.compile(rb"\n" + prefix + rb"_FAIL:")
     result = smoke.run_guest(command, output, args.timeout)
     result["dynamic_runtime"] = bool(args.runtime_root)
-    result["probes"] = analyze_direct((output / "serial.log").read_bytes(), dynamic=bool(args.runtime_root), binder=args.binder)
-    if result["result"] == "PASS" and result["probes"]["result"] != "PASS":
-        result["result"] = "missing or failed child probe evidence"
+    data = (output / "serial.log").read_bytes()
+    evidence = analyze_art(data) if art else analyze_direct(data, dynamic=bool(args.runtime_root), binder=args.binder)
+    result["art" if art else "probes"] = evidence
+    if result["result"] == "PASS" and evidence["result"] != "PASS":
+        result["result"] = "missing or failed child evidence"
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
-    print(f"Bionic direct execution: {result['result']}")
+    print(f"{'ART' if art else 'Bionic'} direct execution: {result['result']}")
     return 0 if result["result"] == "PASS" else 1
 
 

@@ -88,6 +88,20 @@ class ArtInputTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "ARM64"):
                 elf_needed(path)
 
+    def test_android_versioned_library_names_are_accepted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "arm64.so"
+            header = bytearray(64)
+            header[:6] = b"\x7fELF\x02\x01"
+            struct.pack_into("<H", header, 18, 183)
+            path.write_bytes(header)
+            with patch("art_inputs.subprocess.run") as run:
+                run.return_value.stdout = " (NEEDED) Shared library: [android.hardware.graphics.mapper@4.0.so]"
+                self.assertEqual(elf_needed(path), ["android.hardware.graphics.mapper@4.0.so"])
+                run.return_value.stdout = " (NEEDED) Shared library: [../outside.so]"
+                with self.assertRaisesRegex(ValueError, "unsupported"):
+                    elf_needed(path)
+
     def test_dex_checksum_detects_corruption(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "classes.dex"

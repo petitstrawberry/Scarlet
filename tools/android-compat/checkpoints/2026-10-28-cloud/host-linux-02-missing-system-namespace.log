@@ -1,0 +1,5 @@
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+Failed to get system namespace for loading libandroid.so
+libc: Fatal signal 6 (SIGABRT), code -1 (SI_QUEUE) in tid 1 (main), pid 1 (main)
+libc: failed to spawn debuggerd dispatch thread: Invalid argument
