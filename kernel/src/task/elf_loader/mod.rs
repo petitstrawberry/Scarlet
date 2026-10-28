@@ -128,6 +128,7 @@ pub const AT_EGID: u64 = 14; // Effective gid
 pub const AT_PLATFORM: u64 = 15; // String identifying platform
 pub const AT_HWCAP: u64 = 16; // Machine dependent hints about processor capabilities
 pub const AT_CLKTCK: u64 = 17; // Frequency of times()
+pub const AT_SECURE: u64 = 23; // Whether exec changed security credentials
 pub const AT_RANDOM: u64 = 25; // Address of 16 random bytes
 pub const AT_HWCAP2: u64 = 26; // Second hardware capability word
 pub const AT_EXECFN: u64 = 31; // Executable pathname in the process filesystem view
@@ -1142,6 +1143,10 @@ pub fn build_auxiliary_vector(load_result: &LoadElfResult) -> alloc::vec::Vec<Au
     auxv.push(AuxVec::new(AT_EUID, 0)); // Effective user ID
     auxv.push(AuxVec::new(AT_GID, 0)); // Real group ID
     auxv.push(AuxVec::new(AT_EGID, 0)); // Effective group ID
+    // Exec currently performs no set-ID/capability privilege transition. Bionic
+    // requires this entry to exist, even when its value is zero; omission makes
+    // libc abort before main. Revisit alongside credential-changing exec.
+    auxv.push(AuxVec::new(AT_SECURE, 0));
 
     // TODO: Add more auxiliary vector entries as needed:
     // AT_RANDOM storage is added by the Linux ABI's exec-stack builder.

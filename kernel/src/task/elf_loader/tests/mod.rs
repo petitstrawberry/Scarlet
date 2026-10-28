@@ -332,6 +332,7 @@ fn native_interpreter_handoff_preserves_main_metadata_and_initial_stack() {
         assert_eq!(read(5), 0); // envp terminator
         for (kind, expected) in [
             (AT_ENTRY, 0x11000),
+            (AT_SECURE, 0),
             (AT_BASE, bias),
             (AT_PHDR, result.program_headers.phdr_addr),
             (AT_PHENT, ph_size as u64),
