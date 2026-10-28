@@ -2829,6 +2829,9 @@ impl Task {
                 .vm_manager
                 .with_memmaps(|maps| maps.values().cloned().collect::<Vec<_>>());
             for mmap in memmaps {
+                if mmap.owner.as_ref().is_some_and(|owner| !owner.inherit_on_fork()) {
+                    continue;
+                }
                 let num_pages =
                     (mmap.vmarea.end - mmap.vmarea.start + 1 + PAGE_SIZE - 1) / PAGE_SIZE;
                 if num_pages == 0 {

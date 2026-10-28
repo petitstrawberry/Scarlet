@@ -67,6 +67,10 @@ impl MemoryMappingInfo {
 /// closing the originating handle does not by itself release that owner. These
 /// hooks supply backing/lifecycle behavior; they do not install PTEs themselves.
 pub trait MemoryMappingOps: Send + Sync {
+    /// Whether a process fork inherits this mapping. Process-specific receive
+    /// buffers can opt out; threads sharing the address space keep the mapping.
+    fn inherit_on_fork(&self) -> bool { true }
+
     /// Get mapping information for a region of the object
     ///
     /// Returns the physical address, permissions, sharing information, and
