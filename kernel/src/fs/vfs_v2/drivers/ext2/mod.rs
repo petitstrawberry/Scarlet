@@ -3399,7 +3399,7 @@ impl Ext2FileSystem {
     {
         let kind = inode.get_mode() & EXT2_S_IFMT;
         if !matches!(kind, EXT2_S_IFREG | EXT2_S_IFDIR | EXT2_S_IFLNK)
-            || (kind == EXT2_S_IFLNK && inode.get_size() <= 60)
+            || inode.is_fast_symlink(self.block_size)
         {
             return Ok(());
         }
@@ -3471,7 +3471,13 @@ impl Ext2FileSystem {
                 // For symlinks, we need to read the target path
                 let size = inode.get_size() as usize;
 
-                if size <= 60 {
+                if inode.is_fast_symlink(self.block_size) {
+                    if size > 60 {
+                        return Err(FileSystemError::new(
+                            FileSystemErrorKind::InvalidData,
+                            "Inline symlink target exceeds inode storage",
+                        ));
+                    }
                     // Fast symlink: target stored in inode.block array
                     // Use safe byte-level access to read the block data
                     let inode_bytes = unsafe {
@@ -5194,7 +5200,7 @@ impl FileSystemOperations for Ext2FileSystem {
             let target_bytes = target_path.as_bytes();
             new_inode.size = (target_bytes.len() as u32).to_le();
 
-            if target_bytes.len() <= 60 {
+            if target_bytes.len() < 60 {
                 // Fast symlink: store target path directly in inode.block array
                 // Clear the block array first
                 new_inode.block = [0u32; 15];

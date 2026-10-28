@@ -462,6 +462,19 @@ impl Ext2Inode {
         (self.get_mode() & EXT2_S_IFMT) == EXT2_S_IFLNK
     }
 
+    /// Inline symlinks have no data blocks. Size alone is insufficient:
+    /// e2fsprogs stores a 60-byte target in a block, while older Scarlet
+    /// images can contain an inline target of that size. An external xattr
+    /// block contributes to i_blocks but does not hold the link target.
+    pub fn is_fast_symlink(&self, block_size: u32) -> bool {
+        let attribute_sectors = if u32::from_le(self.file_acl) != 0 {
+            block_size / 512
+        } else {
+            0
+        };
+        self.is_symlink() && self.get_blocks() == attribute_sectors
+    }
+
     /// Check if this is a FIFO (pipe)
     pub fn is_fifo(&self) -> bool {
         (self.get_mode() & EXT2_S_IFMT) == EXT2_S_IFIFO
@@ -513,7 +526,13 @@ impl Ext2Inode {
 
         let size = self.get_size() as usize;
 
-        if size <= 60 {
+        if self.is_fast_symlink(filesystem.block_size) {
+            if size > 60 {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::InvalidData,
+                    "Inline symlink target exceeds inode storage",
+                ));
+            }
             // Fast symlink: target path is stored in inode.block array
             let inode_bytes = unsafe {
                 core::slice::from_raw_parts(
@@ -534,6 +553,12 @@ impl Ext2Inode {
             })
         } else {
             // Slow symlink: target path is stored in data blocks
+            if size >= filesystem.block_size as usize {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::InvalidData,
+                    "Symlink target exceeds one data block",
+                ));
+            }
             let first_block = u32::from_le(self.block[0]);
             if first_block == 0 {
                 return Err(FileSystemError::new(
