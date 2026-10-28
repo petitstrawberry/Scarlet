@@ -121,7 +121,7 @@ def main():
         return 0
     # Both Linux's UART console and Scarlet's tty may translate LF to CRLF.
     smoke.SUCCESS = re.compile(rb"\n" + re.escape(args.success_marker.encode()) + rb"\r*\n")
-    smoke.FAILURE = re.compile(rb"SCARLET_CROSVM_FAIL(?:[ :\r\n]|$)|exiting with error|error while loading shared libraries|stack smashing detected")
+    smoke.FAILURE = re.compile(rb"SCARLET_(?:CROSVM_FAIL|ANDROID_APK_FAIL)(?:[ :\r\n]|$)|exiting with error|error while loading shared libraries|stack smashing detected")
     result = smoke.run_guest(command, output, args.timeout, input_fifo=args.serial_input)
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     print(f"\ncrosvm smoke: {result['result']}")

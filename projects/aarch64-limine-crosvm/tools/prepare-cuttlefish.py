@@ -117,7 +117,7 @@ def logical_extent(image, name):
     raise ValueError(f"logical partition missing: {name}")
 
 
-def patch_vendor(super_image):
+def patch_vendor(super_image, apk_smoke=False):
     """Edit unique uncompressed EROFS payloads without rebuilding metadata/xattrs."""
     start, size = logical_extent(super_image, "vendor_a")
     with super_image.open("r+b") as f, mmap.mmap(f.fileno(), 0) as data:
@@ -131,6 +131,14 @@ def patch_vendor(super_image):
             raise ValueError("pinned graphics init payload not found uniquely")
         original = bytes(data[a:b + len(suffix)])
         replacement = (PROJECT / "fixtures/cuttlefish-graphics.rc").read_bytes()
+        if apk_smoke:
+            # Replace the ordinary boot capture hook so the new payload still
+            # fits the pinned EROFS inode. The APK script emits the boot marker.
+            replacement = replacement.split(b"\non property:sys.boot_completed=1\n")[0]
+            replacement += (b"\non property:sys.boot_completed=1\n"
+                            b"    mkdir /data/local/tmp/scarlet-apk 0755 root root\n"
+                            b"    mount ext4 /dev/block/vdc /data/local/tmp/scarlet-apk ro\n"
+                            b"    exec_background u:r:shell:s0 root root -- /system/bin/sh /data/local/tmp/scarlet-apk/run.sh\n")
         serial = (b"service seriallogging /system/bin/logcat -b all -v threadtime -f /dev/hvc2 *:V\n"
                   b"    class main\n    user logd\n    group root logd\n    seclabel u:r:logpersist:s0\n")
         # Kernel errors already arrive on hvc0; avoid replaying that buffer.
@@ -347,12 +355,18 @@ def main():
     parser.add_argument("--image-zip", type=Path, required=True)
     parser.add_argument("--base-staging", type=Path, required=True, help="GPU-2D enabled crosvm staging")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--smoke-apk", type=Path,
+                        help="optional dev.scarlet.compat probe APK; adds a read-only payload disk")
+    parser.add_argument("--kernel-log", action="store_true", help="forward Scarlet kernel diagnostics")
+    parser.add_argument("--console-input", action="store_true", help="enable stdin on Android hvc0 for diagnosis")
     args = parser.parse_args()
     output = args.output.resolve()
     if output.exists():
         parser.error("output already exists; use a new directory to preserve writable disks")
     if not shutil.which("mkfs.ext4"):
         parser.error("mkfs.ext4 is required")
+    if args.smoke_apk and not args.smoke_apk.is_file():
+        parser.error("smoke APK does not exist")
     if args.image_zip.stat().st_size != ARCHIVE_SIZE:
         parser.error("unexpected Cuttlefish archive size")
     with args.image_zip.open("rb") as f:
@@ -368,7 +382,7 @@ def main():
         with archive.open("super.img") as src:
             unsparse(src, assets / "super.raw")
     make_ramdisk(assets)
-    patch_vendor(assets / "super.raw")
+    patch_vendor(assets / "super.raw", apk_smoke=bool(args.smoke_apk))
     system_disk(assets)
     for name, size in [("metadata", 64), ("userdata", 1536), ("misc", 4)]:
         path = assets / f"{name}.img"
@@ -389,9 +403,22 @@ def main():
                "nokaslr loglevel=4 panic=-1 printk.devkmsg=on audit=0 8250.nr_uarts=1 "
                "binder.impl=rust cma=0 firmware_class.path=/vendor/etc/ loop.max_part=7",
                "--serial", "type=stdout,hardware=serial,num=1,console=false,stdin=false"]
+    if args.kernel_log:
+        command += ["--kernel-log"]
     for number in range(1, 4):
-        command += ["--serial", f"type=stdout,hardware=virtio-console,num={number},console={'true' if number == 1 else 'false'},stdin=false"]
+        command += ["--serial", f"type=stdout,hardware=virtio-console,num={number},console={'true' if number == 1 else 'false'},stdin={'true' if args.console_input and number == 1 else 'false'}"]
     command += ["--read-only-disk", str(assets / "system-gpt.img"), "--disk", str(assets / "writable-gpt.img")]
+    if args.smoke_apk:
+        payload = assets / "apk-payload"
+        payload.mkdir()
+        shutil.copy2(args.smoke_apk, payload / "probe.apk")
+        shutil.copy2(PROJECT / "fixtures/android-apk-smoke.sh", payload / "run.sh")
+        disk = assets / "apk.ext4"
+        with disk.open("xb") as f:
+            f.truncate(max(32 * MIB, args.smoke_apk.stat().st_size * 2 + 16 * MIB))
+        subprocess.run(["mkfs.ext4", "-F", "-O", "^orphan_file", "-d", str(payload), str(disk)], check=True)
+        # Keep vda=system and vdb=userdata; the read-only payload becomes vdc.
+        command += ["--trailing-read-only-disk", str(disk)]
     try:
         subprocess.run(command, check=True)
     finally:
@@ -399,7 +426,9 @@ def main():
     (output / "source.json").write_text(json.dumps({"build": BUILD, "target": TARGET,
         "archive_md5": ARCHIVE_MD5, "archive_sha256": ARCHIVE_SHA256,
         "android": 17, "renderer": "ANGLE + SwiftShader (pastel)",
-        "success_marker": "SCARLET_ANDROID_BOOT_OK", "verified_boot": False,
+        "console_input": args.console_input,
+        "success_marker": "SCARLET_ANDROID_APK_OK" if args.smoke_apk else "SCARLET_ANDROID_BOOT_OK", "verified_boot": False,
+        "smoke_apk_sha256": hashlib.sha256(args.smoke_apk.read_bytes()).hexdigest() if args.smoke_apk else None,
         "source": f"https://ci.android.com/builds/submitted/{BUILD}/{TARGET}/latest"}, indent=2) + "\n")
     print(f"Private Cuttlefish profile ready: {output}")
 
