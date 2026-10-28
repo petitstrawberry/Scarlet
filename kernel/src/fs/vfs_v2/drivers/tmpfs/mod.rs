@@ -4,6 +4,7 @@
 //! It implements FileSystemOperations directly and uses VfsNode for internal
 //! structure representation.
 
+use crate::fs::vfs_v2::xattr::{self, Error as XattrError, SetMode};
 use crate::sync::{IrqRwSpinLock, IrqSpinLock, Mutex};
 use alloc::{
     boxed::Box,
@@ -690,6 +691,8 @@ pub struct TmpNode {
     data_lock: Mutex<()>,
     /// File content (for symlinks)
     content: IrqRwSpinLock<Vec<u8>>,
+    /// Attributes follow the inode, including open-but-unlinked files.
+    xattrs: IrqRwSpinLock<BTreeMap<Vec<u8>, Vec<u8>>>,
     /// Child nodes (for directories)
     children: IrqRwSpinLock<BTreeMap<String, Arc<dyn VfsNode>>>,
     /// Parent node (weak reference to avoid cycles)
@@ -703,6 +706,17 @@ pub struct TmpNode {
 
 impl Drop for TmpNode {
     fn drop(&mut self) {
+        if let Some(filesystem) = self.filesystem().and_then(|weak| weak.upgrade()) {
+            if let Some(tmpfs) = filesystem.as_any().downcast_ref::<TmpFS>() {
+                tmpfs.subtract_memory_usage(
+                    self.xattrs
+                        .read()
+                        .iter()
+                        .map(|(k, v)| k.len() + v.len())
+                        .sum(),
+                );
+            }
+        }
         let metadata = self.metadata.read();
         if metadata.file_type == FileType::RegularFile {
             if let Some(cache_id) = *self.cache_id.read() {
@@ -759,6 +773,7 @@ impl TmpNode {
             }),
             data_lock: Mutex::new(()),
             content: IrqRwSpinLock::new(Vec::new()),
+            xattrs: IrqRwSpinLock::new(BTreeMap::new()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
@@ -788,6 +803,7 @@ impl TmpNode {
             }),
             data_lock: Mutex::new(()),
             content: IrqRwSpinLock::new(Vec::new()),
+            xattrs: IrqRwSpinLock::new(BTreeMap::new()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
@@ -817,6 +833,7 @@ impl TmpNode {
             }),
             data_lock: Mutex::new(()),
             content: IrqRwSpinLock::new(Vec::new()),
+            xattrs: IrqRwSpinLock::new(BTreeMap::new()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
@@ -847,6 +864,7 @@ impl TmpNode {
             data_lock: Mutex::new(()),
             // Store symlink target in content as UTF-8 bytes
             content: IrqRwSpinLock::new(target.into_bytes()),
+            xattrs: IrqRwSpinLock::new(BTreeMap::new()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
@@ -915,6 +933,71 @@ impl TmpNode {
 }
 
 impl VfsNode for TmpNode {
+    fn get_xattr(&self, name: &[u8]) -> Result<Vec<u8>, XattrError> {
+        xattr::validate_name(name)?;
+        self.xattrs
+            .read()
+            .get(name)
+            .cloned()
+            .ok_or(XattrError::Missing)
+    }
+
+    fn list_xattrs(&self) -> Result<Vec<Vec<u8>>, XattrError> {
+        Ok(self.xattrs.read().keys().cloned().collect())
+    }
+
+    fn set_xattr(&self, name: &[u8], value: &[u8], mode: SetMode) -> Result<(), XattrError> {
+        xattr::validate_name(name)?;
+        if value.len() > xattr::MAX_VALUE {
+            return Err(XattrError::TooLarge);
+        }
+        let mut attrs = self.xattrs.write();
+        let old = attrs.get(name);
+        match (mode, old.is_some()) {
+            (SetMode::Create, true) => return Err(XattrError::Exists),
+            (SetMode::Replace, false) => return Err(XattrError::Missing),
+            _ => (),
+        }
+        let old_size = old.map_or(0, |v| name.len() + v.len());
+        let new_size = name.len() + value.len();
+        let used: usize = attrs.iter().map(|(k, v)| k.len() + v.len()).sum();
+        if used - old_size + new_size > xattr::MAX_NODE_BYTES
+            || (old.is_none() && attrs.len() == xattr::MAX_NODE_ATTRIBUTES)
+        {
+            return Err(XattrError::NoSpace);
+        }
+        let fs = self
+            .filesystem()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(XattrError::Unsupported)?;
+        let tmpfs = fs
+            .as_any()
+            .downcast_ref::<TmpFS>()
+            .ok_or(XattrError::Unsupported)?;
+        tmpfs
+            .reserve_memory_usage(new_size.saturating_sub(old_size))
+            .map_err(|_| XattrError::NoSpace)?;
+        attrs.insert(name.to_vec(), value.to_vec());
+        tmpfs.subtract_memory_usage(old_size.saturating_sub(new_size));
+        Ok(())
+    }
+
+    fn remove_xattr(&self, name: &[u8]) -> Result<(), XattrError> {
+        xattr::validate_name(name)?;
+        let fs = self
+            .filesystem()
+            .and_then(|weak| weak.upgrade())
+            .ok_or(XattrError::Unsupported)?;
+        let tmpfs = fs
+            .as_any()
+            .downcast_ref::<TmpFS>()
+            .ok_or(XattrError::Unsupported)?;
+        let mut attrs = self.xattrs.write();
+        let value = attrs.remove(name).ok_or(XattrError::Missing)?;
+        tmpfs.subtract_memory_usage(name.len() + value.len());
+        Ok(())
+    }
+
     fn set_times(&self, times: crate::fs::FileTimeUpdate) -> Result<(), FileSystemError> {
         let mut metadata = self.metadata.write();
         if let Some(accessed) = times.accessed {

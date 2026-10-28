@@ -18,6 +18,7 @@ mod signalfd;
 pub mod socket;
 pub mod time;
 pub mod utimens;
+mod xattr;
 
 use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 
@@ -536,6 +537,18 @@ syscall_table! {
     Invalid = 0 => |_abi: &mut crate::abi::linux::generic::LinuxAbi, _trapframe: &mut crate::arch::Trapframe| {
         0
     },
+    Setxattr = 5 => xattr::sys_setxattr,
+    Lsetxattr = 6 => xattr::sys_lsetxattr,
+    Fsetxattr = 7 => xattr::sys_fsetxattr,
+    Getxattr = 8 => xattr::sys_getxattr,
+    Lgetxattr = 9 => xattr::sys_lgetxattr,
+    Fgetxattr = 10 => xattr::sys_fgetxattr,
+    Listxattr = 11 => xattr::sys_listxattr,
+    Llistxattr = 12 => xattr::sys_llistxattr,
+    Flistxattr = 13 => xattr::sys_flistxattr,
+    Removexattr = 14 => xattr::sys_removexattr,
+    Lremovexattr = 15 => xattr::sys_lremovexattr,
+    Fremovexattr = 16 => xattr::sys_fremovexattr,
     Getcwd = 17 => fs::sys_getcwd,
     Eventfd2 = 19 => fs::sys_eventfd2,
     EpollCtl = 21 => fs::sys_epoll_ctl,

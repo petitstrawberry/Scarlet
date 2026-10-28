@@ -17,6 +17,120 @@ mod tests {
         }
     }
 
+    #[test_case]
+    fn test_xattrs_are_inode_owned_and_atomic() {
+        use crate::fs::vfs_v2::{
+            core::FileSystemOperations,
+            xattr::{Error, SetMode},
+        };
+        let fs = TmpFS::new(0);
+        let root = fs.root_node();
+        let node = fs
+            .create(&root, &"a".to_string(), FileType::RegularFile, 0o644)
+            .unwrap();
+        assert_eq!(node.get_xattr(b"user.a"), Err(Error::Missing));
+        node.set_xattr(b"user.a", b"\0binary\xff", SetMode::Create)
+            .unwrap();
+        assert_eq!(
+            node.set_xattr(b"user.a", b"wrong", SetMode::Create),
+            Err(Error::Exists)
+        );
+        assert_eq!(
+            node.set_xattr(b"user.b", b"wrong", SetMode::Replace),
+            Err(Error::Missing)
+        );
+        assert_eq!(node.get_xattr(b"user.a").unwrap(), b"\0binary\xff");
+        node.set_xattr(b"user.a", b"", SetMode::Replace).unwrap();
+        assert_eq!(node.list_xattrs().unwrap(), alloc::vec![b"user.a".to_vec()]);
+        fs.remove(&root, &"a".to_string()).unwrap();
+        let replacement = fs
+            .create(&root, &"a".to_string(), FileType::RegularFile, 0o644)
+            .unwrap();
+        assert_eq!(replacement.get_xattr(b"user.a"), Err(Error::Missing));
+        assert_eq!(node.get_xattr(b"user.a").unwrap(), b"");
+        node.remove_xattr(b"user.a").unwrap();
+        assert_eq!(node.remove_xattr(b"user.a"), Err(Error::Missing));
+    }
+
+    #[test_case]
+    fn test_xattrs_charge_tmpfs_quota_and_release_on_remove_and_drop() {
+        use crate::fs::vfs_v2::{
+            core::FileSystemOperations,
+            xattr::{Error, SetMode},
+        };
+        let fs = TmpFS::new(16);
+        let root = fs.root_node();
+        let a = fs
+            .create(&root, &"a".to_string(), FileType::RegularFile, 0o644)
+            .unwrap();
+        let b = fs
+            .create(&root, &"b".to_string(), FileType::RegularFile, 0o644)
+            .unwrap();
+        a.set_xattr(b"user.a", b"1234567890", SetMode::Upsert)
+            .unwrap();
+        assert_eq!(
+            b.set_xattr(b"user.b", b"", SetMode::Upsert),
+            Err(Error::NoSpace)
+        );
+        assert_eq!(
+            a.set_xattr(b"user.a", b"12345678901", SetMode::Replace),
+            Err(Error::NoSpace)
+        );
+        assert_eq!(a.get_xattr(b"user.a").unwrap(), b"1234567890");
+        a.set_xattr(b"user.a", b"", SetMode::Replace).unwrap();
+        b.set_xattr(b"user.b", b"1234", SetMode::Create).unwrap();
+        b.remove_xattr(b"user.b").unwrap();
+        fs.remove(&root, &"a".to_string()).unwrap();
+        drop(a);
+        b.set_xattr(b"user.b", b"1234567890", SetMode::Create)
+            .unwrap();
+    }
+
+    #[test_case]
+    fn test_xattr_bounds_and_binary_names() {
+        use crate::fs::vfs_v2::{
+            core::FileSystemOperations,
+            xattr::{self, Error, SetMode},
+        };
+        let fs = TmpFS::new(0);
+        let node = fs.root_node();
+        for name in [b"".as_slice(), b"bad\0name", &alloc::vec![b'x'; 256]] {
+            assert_eq!(
+                node.set_xattr(name, b"", SetMode::Upsert),
+                Err(Error::InvalidName)
+            );
+        }
+        assert_eq!(
+            node.set_xattr(
+                b"user.a",
+                &alloc::vec![0; xattr::MAX_VALUE+1],
+                SetMode::Upsert
+            ),
+            Err(Error::TooLarge)
+        );
+        node.set_xattr(
+            b"user.\xff",
+            &alloc::vec![0; xattr::MAX_VALUE],
+            SetMode::Upsert,
+        )
+        .unwrap();
+        assert_eq!(
+            node.get_xattr(b"user.\xff").unwrap().len(),
+            xattr::MAX_VALUE
+        );
+        node.remove_xattr(b"user.\xff").unwrap();
+        for i in 0..xattr::MAX_NODE_ATTRIBUTES {
+            node.set_xattr(alloc::format!("user.{i}").as_bytes(), b"", SetMode::Create)
+                .unwrap();
+        }
+        assert_eq!(
+            node.set_xattr(b"user.extra", b"", SetMode::Create),
+            Err(Error::NoSpace)
+        );
+        node.set_xattr(b"user.0", b"replacement", SetMode::Replace)
+            .unwrap();
+    }
+
     /// Test tmpfs size option parsing.
     #[test_case]
     fn test_tmpfs_size_option_parsing() {

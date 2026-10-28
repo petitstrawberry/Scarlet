@@ -217,6 +217,25 @@ pub trait VfsNode: Send + Sync + Any {
         ))
     }
 
+    /// Opaque inode attributes, independent of ABI and pathname lifetime.
+    fn get_xattr(&self, _name: &[u8]) -> Result<Vec<u8>, super::xattr::Error> {
+        Err(super::xattr::Error::Unsupported)
+    }
+    fn set_xattr(
+        &self,
+        _name: &[u8],
+        _value: &[u8],
+        _mode: super::xattr::SetMode,
+    ) -> Result<(), super::xattr::Error> {
+        Err(super::xattr::Error::Unsupported)
+    }
+    fn list_xattrs(&self) -> Result<Vec<Vec<u8>>, super::xattr::Error> {
+        Err(super::xattr::Error::Unsupported)
+    }
+    fn remove_xattr(&self, _name: &[u8]) -> Result<(), super::xattr::Error> {
+        Err(super::xattr::Error::Unsupported)
+    }
+
     /// Get the file type of this node
     fn file_type(&self) -> Result<FileType, FileSystemError> {
         Ok(self.metadata()?.file_type)
