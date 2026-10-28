@@ -88,6 +88,7 @@ pub(crate) enum RelocationError {
     UnmappedSource,
     UnsupportedMapping,
     MissingPageTable,
+    NoSpace,
 }
 
 /// Immutable process-entry stack identity, shared with the address space.
@@ -869,6 +870,150 @@ impl VirtualMemoryManager {
         Ok(removed)
     }
 
+    fn movable_private(map: &VirtualMemoryMap) -> bool {
+        !map.is_shared
+            && map.memory_attribute == MemoryAttribute::Normal
+            && (map.permissions == 0
+                || map.permissions & (VirtualMemoryPermission::User as usize) != 0)
+            && map.owner.as_ref().map_or(map.pmarea.start != 0, |owner| {
+                owner.supports_private_relocation()
+            })
+    }
+
+    /// Validate one logical allocation, including resident and COW fragments.
+    /// The caller holds the VM lock through its subsequent metadata commit.
+    fn private_range(
+        g: &InnerVmm,
+        source: usize,
+        source_end: usize,
+    ) -> Result<VirtualMemoryMap, RelocationError> {
+        let first = g
+            .memmap
+            .range(..=source)
+            .next_back()
+            .map(|(_, m)| m)
+            .filter(|m| source <= m.vmarea.end)
+            .ok_or(RelocationError::UnmappedSource)?;
+        let mut next = source;
+        for (_, map) in g.memmap.range(first.vmarea.start..=source_end) {
+            if map.vmarea.start > next {
+                return Err(RelocationError::UnmappedSource);
+            }
+            if map.mapping_origin != first.mapping_origin
+                || map.vm_start != first.vm_start
+                || map.permissions != first.permissions
+                || !Self::movable_private(map)
+            {
+                return Err(RelocationError::UnsupportedMapping);
+            }
+            next = map.vmarea.end.min(source_end) + 1;
+        }
+        if next != source_end + 1 {
+            return Err(RelocationError::UnmappedSource);
+        }
+        Ok(first.clone())
+    }
+
+    /// Grow private anonymous memory, optionally moving to a free range.
+    /// Select the destination, validate and commit under one VM lock. Existing
+    /// backing is never copied/reclaimed here; new pages have fresh zero backing
+    /// rather than extending a finite COW owner or reviving a discarded page.
+    pub(crate) fn grow_private_anonymous_range(
+        &self,
+        source: usize,
+        old_len: usize,
+        new_len: usize,
+        may_move: bool,
+    ) -> Result<usize, RelocationError> {
+        if source == 0
+            || !source.is_multiple_of(PAGE_SIZE)
+            || old_len == 0
+            || !old_len.is_multiple_of(PAGE_SIZE)
+            || new_len <= old_len
+            || !new_len.is_multiple_of(PAGE_SIZE)
+            || source
+                .checked_add(old_len - 1)
+                .is_none_or(|end| end > USER_LOWER_CANONICAL_END)
+        {
+            return Err(RelocationError::InvalidRange);
+        }
+        let source_end = source + old_len - 1;
+        let asid = self.get_asid();
+        let mut page_table = if asid != 0 && is_asid_used(asid) {
+            Some(get_root_pagetable(asid).ok_or(RelocationError::MissingPageTable)?)
+        } else {
+            None
+        };
+        let mut g = self.inner.write();
+        self.record_inner_writer(WRITE_SITE_EXTEND);
+        if g.asid != asid {
+            return Err(RelocationError::MissingPageTable);
+        }
+        let first = Self::private_range(&g, source, source_end)?;
+        if !first.mapping_origin.is_anonymous() {
+            return Err(RelocationError::UnsupportedMapping);
+        }
+        let fits_in_place = source.checked_add(new_len - 1).is_some_and(|end| {
+            end <= USER_LOWER_CANONICAL_END
+                && !g
+                    .memmap
+                    .range(..=end)
+                    .next_back()
+                    .is_some_and(|(_, map)| map.vmarea.end > source_end)
+        });
+        let destination = if fits_in_place {
+            source
+        } else if may_move {
+            Self::find_unmapped_area_in(&g, new_len, PAGE_SIZE).ok_or(RelocationError::NoSpace)?
+        } else {
+            return Err(RelocationError::NoSpace);
+        };
+        let offset = source
+            .checked_sub(first.vm_start)
+            .ok_or(RelocationError::UnsupportedMapping)?;
+        let new_vm_start = destination
+            .checked_sub(offset)
+            .ok_or(RelocationError::UnsupportedMapping)?;
+        let destination_end = destination + new_len - 1;
+        let tail = VirtualMemoryMap {
+            vmarea: MemoryArea::new(destination + old_len, destination_end),
+            pmarea: PhysicalMemoryArea::new(0, 0),
+            vm_start: new_vm_start,
+            mapping_origin: first.mapping_origin,
+            permissions: first.permissions,
+            is_shared: false,
+            memory_attribute: MemoryAttribute::Normal,
+            owner: Some(Arc::new(
+                crate::object::capability::memory_mapping::anon_owner::AnonymousZeroPageOwner::new(
+                ),
+            )),
+        };
+        // No fallible operation remains. Preserve page indices for existing
+        // owners, and make both old and new fault snapshots stale on a move.
+        if destination != source {
+            let moved = Self::remove_memory_map_range_locked(&mut g, source, source_end);
+            for mut map in moved {
+                map.vmarea = MemoryArea::new(
+                    destination + (map.vmarea.start - source),
+                    destination + (map.vmarea.end - source),
+                );
+                map.vm_start = new_vm_start;
+                g.memmap.insert(map.vmarea.start, map);
+            }
+        }
+        g.memmap.insert(tail.vmarea.start, tail);
+        g.last_search_cache = None;
+        if let Some(table) = page_table.as_mut() {
+            if destination != source {
+                table.unmap_range(source, source_end);
+                table.unmap_range(destination, destination_end);
+            } else {
+                table.unmap_range(source + old_len, destination_end);
+            }
+        }
+        Ok(destination)
+    }
+
     /// Move one covered private allocation to a disjoint user range of the
     /// same size. The destination may replace private normal-memory mappings.
     /// Resident physical pages and lazy/COW owners retain their identity; only
@@ -911,47 +1056,13 @@ impl VirtualMemoryManager {
         if g.asid != asid {
             return Err(RelocationError::MissingPageTable);
         }
-        let first = g
-            .memmap
-            .range(..=source)
-            .next_back()
-            .map(|(_, m)| m)
-            .filter(|m| source <= m.vmarea.end)
-            .ok_or(RelocationError::UnmappedSource)?;
-        let (origin, vm_start, permissions) =
-            (first.mapping_origin, first.vm_start, first.permissions);
+        let first = Self::private_range(&g, source, source_end)?;
         let offset = source
-            .checked_sub(vm_start)
+            .checked_sub(first.vm_start)
             .ok_or(RelocationError::UnsupportedMapping)?;
         let new_vm_start = destination
             .checked_sub(offset)
             .ok_or(RelocationError::UnsupportedMapping)?;
-        let movable = |map: &VirtualMemoryMap| {
-            !map.is_shared
-                && map.memory_attribute == MemoryAttribute::Normal
-                && (map.permissions == 0
-                    || map.permissions & (VirtualMemoryPermission::User as usize) != 0)
-                && map.owner.as_ref().map_or(map.pmarea.start != 0, |owner| {
-                    owner.supports_private_relocation()
-                })
-        };
-        let mut next = source;
-        for (_, map) in g.memmap.range(first.vmarea.start..=source_end) {
-            if map.vmarea.start > next {
-                return Err(RelocationError::UnmappedSource);
-            }
-            if map.mapping_origin != origin
-                || map.vm_start != vm_start
-                || map.permissions != permissions
-                || !movable(map)
-            {
-                return Err(RelocationError::UnsupportedMapping);
-            }
-            next = map.vmarea.end.min(source_end) + 1;
-        }
-        if next != source_end + 1 {
-            return Err(RelocationError::UnmappedSource);
-        }
         // Device and object callbacks can depend on original virtual addresses.
         // Reject those targets before changing either range.
         let first_target = g
@@ -961,7 +1072,7 @@ impl VirtualMemoryManager {
             .map_or(destination, |(key, _)| *key);
         if g.memmap
             .range(first_target..=destination_end)
-            .any(|(_, m)| m.vmarea.end >= destination && !movable(m))
+            .any(|(_, m)| m.vmarea.end >= destination && !Self::movable_private(m))
         {
             return Err(RelocationError::UnsupportedMapping);
         }

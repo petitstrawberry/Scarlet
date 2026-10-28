@@ -10,18 +10,35 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 /// Virtual addresses may be reused while fragments of an old mapping survive,
 /// so `vm_start` alone cannot identify the allocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MappingOrigin(usize);
+pub struct MappingOrigin {
+    identity: usize,
+    anonymous: bool,
+}
 
 impl MappingOrigin {
     pub(crate) fn new() -> Self {
         static NEXT_ORIGIN: AtomicUsize = AtomicUsize::new(1);
-        Self(
-            NEXT_ORIGIN
+        Self {
+            identity: NEXT_ORIGIN
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                     next.checked_add(1)
                 })
                 .expect("Virtual mapping origin identities exhausted"),
-        )
+            anonymous: false,
+        }
+    }
+
+    /// Retain anonymous provenance even after faults replace every owner with
+    /// resident pages. A resident private file mapping must not become growable.
+    pub(crate) fn new_anonymous() -> Self {
+        Self {
+            anonymous: true,
+            ..Self::new()
+        }
+    }
+
+    pub(crate) fn is_anonymous(self) -> bool {
+        self.anonymous
     }
 }
 

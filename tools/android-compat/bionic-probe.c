@@ -184,6 +184,10 @@ static int exec_child_case(void) {
     return 0;
 }
 
+extern int __cxa_atexit(void (*function)(void *), void *argument, void *dso);
+extern void __cxa_finalize(void *dso);
+static void count_exit_handler(void *argument) { ++*(size_t *)argument; }
+
 static int mremap_case(void) {
     size_t page = (size_t)sysconf(_SC_PAGESIZE), size = page * 3;
     unsigned char *source = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -228,6 +232,33 @@ static int mremap_case(void) {
     MCHECK(destination[0] == 0);
     destination[0] = 88;
     MCHECK(munmap(destination, page) == 0);
+    // Reserve a known gap and neighbor so both in-place and moving growth are
+    // deterministic, independently of the process's other mappings.
+    reservation = mmap(NULL, 5 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    MCHECK(reservation != MAP_FAILED);
+    reservation[0] = 42; reservation[page] = 77; reservation[4 * page] = 99;
+    MCHECK(munmap(reservation + 2 * page, 2 * page) == 0);
+    MCHECK(mprotect(reservation, 2 * page, PROT_READ) == 0);
+    MCHECK(mremap(reservation, 2 * page, 3 * page, 0) == reservation);
+    MCHECK(reservation[0] == 42 && reservation[page] == 77 && reservation[2 * page] == 0);
+    MCHECK(mremap(reservation, 3 * page, 5 * page, 0) == MAP_FAILED && errno == ENOMEM);
+    destination = mremap(reservation, 3 * page, 5 * page, MREMAP_MAYMOVE);
+    MCHECK(destination != MAP_FAILED && destination != reservation);
+    MCHECK(destination[0] == 42 && destination[page] == 77 && destination[2 * page] == 0 &&
+           destination[3 * page] == 0 && destination[4 * page] == 0 && reservation[4 * page] == 99);
+    MCHECK(mprotect(destination, 5 * page, PROT_READ | PROT_WRITE) == 0);
+    destination[4 * page] = 88;
+    MCHECK(mremap(destination, 5 * page, 3 * page, 0) == destination);
+    MCHECK(mremap(destination, 3 * page, 5 * page, 0) == destination);
+    MCHECK(destination[4 * page] == 0);
+    MCHECK(munmap(destination, 5 * page) == 0 && munmap(reservation + 4 * page, page) == 0);
+    // Exercise Bionic's actual atexit array expansion and mprotect splits, the
+    // path used while libart and its dependencies register their destructors.
+    size_t calls = 0;
+    for (size_t i = 0; i < 512; ++i)
+        MCHECK(__cxa_atexit(count_exit_handler, &calls, &calls) == 0);
+    __cxa_finalize(&calls);
+    MCHECK(calls == 512);
 #undef MCHECK
     return 0;
 }

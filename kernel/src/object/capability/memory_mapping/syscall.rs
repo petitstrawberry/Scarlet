@@ -385,7 +385,7 @@ fn handle_anonymous_mapping(
         pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
         vmarea,
         vm_start: final_vaddr,
-        mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+        mapping_origin: crate::vm::vmem::MappingOrigin::new_anonymous(),
         permissions,
         is_shared,
         memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -635,6 +635,253 @@ mod tests {
         copy_to_user(&task, address, b"current TLS").unwrap();
         copy_from_user(&task, candidate, &mut bytes).unwrap();
         assert_eq!(&bytes, b"sibling TLS");
+    }
+
+    #[test_case]
+    fn anonymous_growth_preserves_resident_pages_and_zeroes_discarded_tail() {
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+        let task = crate::task::new_user_task("grow-private".into(), 0);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let source = handle_anonymous_mapping(
+            &task,
+            0,
+            2 * PAGE_SIZE,
+            2,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+        );
+        copy_to_user(&task, source, b"original").unwrap();
+        let physical = task.vm_manager.translate_to_phys(source).unwrap();
+        protect_user_memory(&task, source, 2 * PAGE_SIZE, PROT_READ).unwrap();
+        assert_eq!(
+            task.vm_manager.grow_private_anonymous_range(
+                source,
+                2 * PAGE_SIZE,
+                4 * PAGE_SIZE,
+                false
+            ),
+            Ok(source)
+        );
+        assert_eq!(task.vm_manager.translate_to_phys(source), Some(physical));
+        let mut bytes = [0xff; 8];
+        copy_from_user(&task, source, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"original");
+        copy_from_user(&task, source + 2 * PAGE_SIZE, &mut bytes).unwrap();
+        assert_eq!(bytes, [0; 8]);
+        assert!(copy_to_user(&task, source + 3 * PAGE_SIZE, b"rejected").is_err());
+        protect_user_memory(&task, source, 4 * PAGE_SIZE, PROT_READ | PROT_WRITE).unwrap();
+        copy_to_user(&task, source + 3 * PAGE_SIZE, b"discard!").unwrap();
+        let removed = task
+            .vm_manager
+            .shrink_memory_map_range(source, 4 * PAGE_SIZE, 2 * PAGE_SIZE)
+            .unwrap();
+        reclaim_private_removed_mappings(&task, &removed);
+        assert_eq!(
+            task.vm_manager.grow_private_anonymous_range(
+                source,
+                2 * PAGE_SIZE,
+                4 * PAGE_SIZE,
+                false
+            ),
+            Ok(source)
+        );
+        copy_from_user(&task, source + 3 * PAGE_SIZE, &mut bytes).unwrap();
+        assert_eq!(bytes, [0; 8]);
+        // Fresh tail descriptors still belong to the same logical mapping.
+        assert_eq!(
+            task.vm_manager.user_mapping_bounds(source),
+            Some((source, source + 4 * PAGE_SIZE))
+        );
+        protect_user_memory(&task, source, 4 * PAGE_SIZE, 0).unwrap();
+        assert_eq!(
+            task.vm_manager.grow_private_anonymous_range(
+                source,
+                4 * PAGE_SIZE,
+                5 * PAGE_SIZE,
+                false
+            ),
+            Ok(source)
+        );
+        assert_eq!(
+            task.vm_manager.translate_to_phys_with_access(
+                source + 4 * PAGE_SIZE,
+                crate::object::capability::memory_mapping::AccessOp::Load,
+            ),
+            None
+        );
+        protect_user_memory(&task, source, 5 * PAGE_SIZE, PROT_READ).unwrap();
+        copy_from_user(&task, source + 4 * PAGE_SIZE, &mut bytes).unwrap();
+        assert_eq!(bytes, [0; 8]);
+    }
+
+    #[test_case]
+    fn anonymous_growth_moves_cow_fragments_without_changing_child_or_neighbor() {
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+        use crate::vm::manager::RelocationError;
+        let parent = crate::task::new_user_task("grow-cow".into(), 0);
+        parent
+            .vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let source = handle_anonymous_mapping(
+            &parent,
+            0,
+            2 * PAGE_SIZE,
+            2,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+        );
+        let neighbor = handle_anonymous_mapping(
+            &parent,
+            source + 2 * PAGE_SIZE,
+            PAGE_SIZE,
+            1,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+        );
+        assert_eq!(neighbor, source + 2 * PAGE_SIZE);
+        copy_to_user(&parent, source + PAGE_SIZE, b"parent").unwrap();
+        copy_to_user(&parent, neighbor, b"nearby").unwrap();
+        let child = parent
+            .clone_task(crate::task::CloneFlags::default())
+            .unwrap();
+        assert_eq!(
+            parent.vm_manager.grow_private_anonymous_range(
+                source,
+                2 * PAGE_SIZE,
+                4 * PAGE_SIZE,
+                false
+            ),
+            Err(RelocationError::NoSpace)
+        );
+        let destination = parent
+            .vm_manager
+            .grow_private_anonymous_range(source, 2 * PAGE_SIZE, 4 * PAGE_SIZE, true)
+            .unwrap();
+        assert_ne!(destination, source);
+        assert!(parent.vm_manager.search_memory_map(source).is_none());
+        let mut bytes = [0xff; 6];
+        copy_from_user(&parent, destination + PAGE_SIZE, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"parent");
+        copy_to_user(&child, source + PAGE_SIZE, b"child!").unwrap();
+        copy_from_user(&parent, destination + PAGE_SIZE, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"parent");
+        copy_to_user(&parent, destination + PAGE_SIZE, b"moved!").unwrap();
+        copy_from_user(&child, source + PAGE_SIZE, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"child!");
+        for address in [
+            destination,
+            destination + 2 * PAGE_SIZE,
+            destination + 3 * PAGE_SIZE,
+        ] {
+            copy_from_user(&parent, address, &mut bytes).unwrap();
+            assert_eq!(bytes, [0; 6]);
+        }
+        copy_from_user(&parent, neighbor, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"nearby");
+        assert_eq!(
+            parent.vm_manager.user_mapping_bounds(destination),
+            Some((destination, destination + 4 * PAGE_SIZE))
+        );
+        // A second growth includes the fresh zero owner from the first growth.
+        assert_eq!(
+            parent.vm_manager.grow_private_anonymous_range(
+                destination,
+                4 * PAGE_SIZE,
+                5 * PAGE_SIZE,
+                false
+            ),
+            Ok(destination)
+        );
+    }
+
+    #[test_case]
+    fn rejected_anonymous_growth_preserves_mapping_and_provenance() {
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+        use crate::vm::manager::RelocationError;
+        let task = crate::task::new_user_task("grow-reject".into(), 0);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let source = handle_anonymous_mapping(
+            &task,
+            0,
+            2 * PAGE_SIZE,
+            2,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+        );
+        copy_to_user(&task, source, b"source").unwrap();
+        protect_user_memory(&task, source + PAGE_SIZE, PAGE_SIZE, PROT_READ).unwrap();
+        assert_eq!(
+            task.vm_manager.grow_private_anonymous_range(
+                source,
+                2 * PAGE_SIZE,
+                3 * PAGE_SIZE,
+                true
+            ),
+            Err(RelocationError::UnsupportedMapping)
+        );
+        protect_user_memory(&task, source + PAGE_SIZE, PAGE_SIZE, PROT_READ | PROT_WRITE).unwrap();
+        task.vm_manager
+            .set_mmap_base(crate::environment::USER_LOWER_CANONICAL_END);
+        assert_eq!(
+            task.vm_manager.grow_private_anonymous_range(
+                source,
+                2 * PAGE_SIZE,
+                usize::MAX & !(PAGE_SIZE - 1),
+                true
+            ),
+            Err(RelocationError::NoSpace)
+        );
+        assert_eq!(
+            task.vm_manager.grow_private_anonymous_range(
+                source + 1,
+                PAGE_SIZE,
+                2 * PAGE_SIZE,
+                true
+            ),
+            Err(RelocationError::InvalidRange)
+        );
+        assert_eq!(
+            task.vm_manager.grow_private_anonymous_range(
+                source + 10 * PAGE_SIZE,
+                PAGE_SIZE,
+                2 * PAGE_SIZE,
+                true
+            ),
+            Err(RelocationError::UnmappedSource)
+        );
+        // Model a resident file/private mapping: no owner remains after its
+        // private page fault, but its original non-anonymous identity survives.
+        let removed = task
+            .vm_manager
+            .remove_memory_map_range(source, 2 * PAGE_SIZE);
+        for mut map in removed {
+            map.mapping_origin = crate::vm::vmem::MappingOrigin::new();
+            task.vm_manager.add_memory_map(map).unwrap();
+        }
+        assert_eq!(
+            task.vm_manager
+                .grow_private_anonymous_range(source, PAGE_SIZE, 2 * PAGE_SIZE, true),
+            Err(RelocationError::UnsupportedMapping)
+        );
+        let mut bytes = [0; 6];
+        copy_from_user(&task, source, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"source");
+        let shared = handle_anonymous_mapping(
+            &task,
+            source + 10 * PAGE_SIZE,
+            PAGE_SIZE,
+            1,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED | MAP_ANONYMOUS,
+        );
+        assert_ne!(shared, usize::MAX);
+        assert_eq!(
+            task.vm_manager
+                .grow_private_anonymous_range(shared, PAGE_SIZE, 2 * PAGE_SIZE, true),
+            Err(RelocationError::UnsupportedMapping)
+        );
     }
 
     #[test_case]

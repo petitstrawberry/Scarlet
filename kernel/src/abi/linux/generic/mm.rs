@@ -468,7 +468,7 @@ fn handle_anonymous_mapping(
         pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
         vmarea,
         vm_start: final_vaddr,
-        mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+        mapping_origin: crate::vm::vmem::MappingOrigin::new_anonymous(),
         permissions,
         is_shared,
         memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -868,9 +868,6 @@ pub fn sys_mremap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     if address
         .checked_add(old_len - 1)
         .is_none_or(|end| end > crate::environment::USER_LOWER_CANONICAL_END)
-        || address
-            .checked_add(new_len - 1)
-            .is_none_or(|end| end > crate::environment::USER_LOWER_CANONICAL_END)
     {
         return to_result(errno::EINVAL);
     }
@@ -896,7 +893,9 @@ pub fn sys_mremap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         RelocationError::InvalidRange => errno::EINVAL,
                         RelocationError::UnmappedSource => errno::EFAULT,
                         RelocationError::UnsupportedMapping => errno::EOPNOTSUPP,
-                        RelocationError::MissingPageTable => errno::ENOMEM,
+                        RelocationError::MissingPageTable | RelocationError::NoSpace => {
+                            errno::ENOMEM
+                        }
                     });
                 }
             };
@@ -905,8 +904,22 @@ pub fn sys_mremap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         reclaim_private_removed_mappings(&task, &replaced);
         return destination;
     }
-    if flags & (MREMAP_FIXED | MREMAP_DONTUNMAP) != 0 || new_len > old_len {
+    if flags & (MREMAP_FIXED | MREMAP_DONTUNMAP) != 0 {
         return to_result(errno::EOPNOTSUPP);
+    }
+    if new_len > old_len {
+        return task
+            .vm_manager
+            .grow_private_anonymous_range(address, old_len, new_len, flags & MREMAP_MAYMOVE != 0)
+            .unwrap_or_else(|error| {
+                use crate::vm::manager::RelocationError;
+                to_result(match error {
+                    RelocationError::InvalidRange => errno::EINVAL,
+                    RelocationError::UnmappedSource => errno::EFAULT,
+                    RelocationError::UnsupportedMapping => errno::EOPNOTSUPP,
+                    RelocationError::MissingPageTable | RelocationError::NoSpace => errno::ENOMEM,
+                })
+            });
     }
     let removed = match task
         .vm_manager
