@@ -53,7 +53,12 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
         if option_env!("SCARLET_ANDROID_STOCK") == Some("1") {
             stock::prepare(&environment, &android, &handles)?;
         }
-        let program = "/apex/com.android.art/bin/dalvikvm64";
+        let diagnostic = option_env!("SCARLET_ANDROID_PROGRAM") == Some("1");
+        let program = if diagnostic {
+            "/system/bin/scarlet-program-probe"
+        } else {
+            "/apex/com.android.art/bin/dalvikvm64"
+        };
         let executable = android.open(program, 0).map_err(|_| "ART executable")?;
         let argv: std::vec::Vec<&str> = option_env!("SCARLET_ART_ARGS")
             .unwrap_or("")
@@ -63,15 +68,19 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
             .unwrap_or("")
             .split('\u{1f}')
             .collect();
-        if argv.first().copied() != Some(program) || !argv.contains(&"-Xint") {
+        if argv.first().copied() != Some(program) || (!diagnostic && !argv.contains(&"-Xint")) {
             return Err("ART interpreter arguments");
         }
-        println!("\nSCARLET_ANDROID_ART_START");
+        let label = if diagnostic { "PROGRAM" } else { "ART" };
+        println!("\nSCARLET_ANDROID_{}_START", label);
         let pid = environment
             .spawn(&executable, &argv, &env, "/", &handles)
             .map_err(|_| "ART spawn")?;
         let (waited, status) = std::task::waitpid(pid as i32, 0);
-        println!("SCARLET_ANDROID_ART_EXIT {}", status);
+        println!("SCARLET_ANDROID_{}_EXIT {}", label, status);
+        if diagnostic && waited == pid as i32 {
+            return Ok(());
+        }
         return if waited == pid as i32 && status == 0 {
             Ok(())
         } else {
@@ -157,16 +166,21 @@ fn main() -> i32 {
         },
     };
     let art = option_env!("SCARLET_ANDROID_ART") == Some("1");
+    let diagnostic = option_env!("SCARLET_ANDROID_PROGRAM") == Some("1");
     match check(&stdio) {
         Ok(()) => {
-            if art {
+            if diagnostic {
+                println!("SCARLET_ANDROID_PROGRAM_DONE");
+            } else if art {
                 println!("SCARLET_ANDROID_ART_OK");
             } else {
                 println!("SCARLET_ANDROID_DIRECT_OK");
             }
         }
         Err(error) => {
-            if art {
+            if diagnostic {
+                println!("SCARLET_ANDROID_PROGRAM_FAIL: {}", error);
+            } else if art {
                 println!("SCARLET_ANDROID_ART_FAIL: {}", error);
             } else {
                 // Fault diagnostics normally remain in Scarlet's kernel log ring.

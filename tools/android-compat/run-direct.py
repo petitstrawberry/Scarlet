@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Bionic or ART directly on Scarlet's Android ABI in a private AArch64 QEMU image.
+"""Run Bionic, ART, or diagnose a program directly on Scarlet's Android ABI.
 
 No Android/Linux guest kernel is involved. An optional runtime root must contain
 real Android runtime files (NDK .so files are link stubs, not runtime libraries).
@@ -35,20 +35,21 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--probes", type=Path)
     mode.add_argument("--art-dex", type=Path, help="run only dalvikvm64 -Xint with this classes.dex")
+    mode.add_argument("--program", type=Path, help="diagnose this Android executable (exit is not a service-readiness test)")
     parser.add_argument("--runtime-root", type=Path, help="Android /system and /apex runtime tree")
     parser.add_argument("--linker-debug", action="store_true", help="enable Android LD_DEBUG=3 for ART diagnosis")
-    parser.add_argument("--stock-inputs", type=Path, help="verified stock property/APEX overlay for ART")
+    parser.add_argument("--stock-inputs", type=Path, help="verified stock property/APEX overlay for ART or a program")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--accel", choices=("tcg", "hvf"), default="tcg")
     parser.add_argument("--binder", action="store_true", help="include two-process Binder RPC checks")
     args = parser.parse_args()
-    if args.art_dex and (not args.runtime_root or args.binder):
-        parser.error("--art-dex requires --runtime-root and cannot use --binder")
-    if args.linker_debug and not args.art_dex:
-        parser.error("--linker-debug requires --art-dex")
-    if args.stock_inputs and not args.art_dex:
-        parser.error("--stock-inputs requires --art-dex")
+    if (args.art_dex or args.program) and (not args.runtime_root or args.binder):
+        parser.error("--art-dex/--program requires --runtime-root and cannot use --binder")
+    if args.linker_debug and not (args.art_dex or args.program):
+        parser.error("--linker-debug requires --art-dex or --program")
+    if args.stock_inputs and not (args.art_dex or args.program):
+        parser.error("--stock-inputs requires --art-dex or --program")
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("timeout must be finite and positive")
     kernel, output = args.kernel.resolve(), args.output.resolve()
@@ -56,6 +57,8 @@ def main():
     if output.exists():
         parser.error("use a new output directory to preserve earlier evidence")
     inputs = [kernel]
+    if args.program:
+        inputs.append(args.program)
     if probes:
         inputs += [probes / n for n in ["bionic-static", "bionic-dynamic", "libbionic-probe.so", "build.json"]]
     for path in inputs:
@@ -73,10 +76,14 @@ def main():
         for path in runtime_files:
             if not path.is_file():
                 parser.error(f"missing Android runtime file: {path}")
-    if args.art_dex:
-        dex_hash = validate_dex(args.art_dex)
+    if args.art_dex or args.program:
+        if args.art_dex:
+            dex_hash = validate_dex(args.art_dex)
         metadata = verify_art_runtime(args.runtime_root)
-        art = art_launch(metadata)
+        art = art_launch(metadata) if args.art_dex else {
+            "argv": ["/system/bin/scarlet-program-probe"],
+            "env": ["ANDROID_LOG_TAGS=*:v", "LD_LIBRARY_PATH=" + metadata["library_path"]],
+        }
         if args.linker_debug:
             art["env"].append("LD_DEBUG=3")
         if args.stock_inputs:
@@ -93,6 +100,7 @@ def main():
     (output / "inputs.json").write_text(json.dumps({
         "kernel_sha256": hashlib.sha256(kernel.read_bytes()).hexdigest(),
         "dex_sha256": dex_hash,
+        "program_sha256": sha256(args.program) if args.program else None,
         "stock_reference_config_sha256": sha256(STOCK_CONFIG) if args.stock_inputs else None,
         "stock_manifest_sha256": sha256(args.stock_inputs / "stock-inputs.json") if args.stock_inputs else None,
         "runtime_sha256": {str(p.relative_to(args.runtime_root)): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -110,14 +118,23 @@ def main():
     if args.runtime_root:
         shutil.copytree(args.runtime_root, android, dirs_exist_ok=True, symlinks=True)
     if art:
-        shutil.copy2(args.art_dex, android / "data/local/tmp/classes.dex")
-        if validate_dex(android / "data/local/tmp/classes.dex") != dex_hash:
-            raise ValueError("DEX changed during staging")
+        if args.art_dex:
+            shutil.copy2(args.art_dex, android / "data/local/tmp/classes.dex")
+            if validate_dex(android / "data/local/tmp/classes.dex") != dex_hash:
+                raise ValueError("DEX changed during staging")
         verify_art_runtime(android)
         shutil.copy2(args.runtime_root / "art-runtime.json", output / "art-runtime.json")
         if args.stock_inputs:
             stage_stock_inputs(args.stock_inputs, args.runtime_root, android)
             shutil.copy2(args.stock_inputs / "stock-inputs.json", output / "stock-inputs.json")
+        if args.program:
+            target = android / art["argv"][0].lstrip("/")
+            if target.exists() or target.is_symlink():
+                raise ValueError("program path already exists in runtime")
+            shutil.copy2(args.program, target)
+            recorded = json.loads((output / "inputs.json").read_text())["program_sha256"]
+            if sha256(target) != recorded:
+                raise ValueError("program changed during staging")
     else:
         for name in ["bionic-static", "bionic-dynamic"]:
             shutil.copy2(probes / name, android / "bin" / name)
@@ -130,11 +147,12 @@ def main():
                SCARLET_ANDROID_BINDER="1" if args.binder else "0",
                SCARLET_ANDROID_STOCK="1" if args.stock_inputs else "0",
                SCARLET_ANDROID_ART="1" if art else "0",
+               SCARLET_ANDROID_PROGRAM="1" if args.program else "0",
                SCARLET_ART_ARGS="\x1f".join(art["argv"]) if art else "",
                SCARLET_ART_ENV="\x1f".join(art["env"]) if art else "")
     # Preserve the exact launch even if native compilation or image creation fails.
     if art:
-        (output / "art-launch.json").write_text(json.dumps(art, indent=2) + "\n")
+        (output / ("program-launch.json" if args.program else "art-launch.json")).write_text(json.dumps(art, indent=2) + "\n")
     for manifest, binary, destination in [
         (SOURCE / "init/Cargo.toml", "android-direct-init", "init"),
         (ROOT / "user/scarlet-ld/Cargo.toml", "scarlet-ld", "bin/scarlet-ld"),
@@ -172,12 +190,23 @@ def main():
                "-device", "virtio-blk-device,drive=root,bus=virtio-mmio-bus.1",
                "-device", "virtio-rng-device,bus=virtio-mmio-bus.2", "-nic", "none"]
     (output / "commands.json").write_text(json.dumps({"image": build, "qemu": command}, indent=2) + "\n")
-    prefix = b"SCARLET_ANDROID_ART" if art else b"SCARLET_ANDROID_DIRECT"
-    smoke.SUCCESS = re.compile(rb"\n" + prefix + rb"_OK\r*\n")
+    prefix = b"SCARLET_ANDROID_PROGRAM" if args.program else (b"SCARLET_ANDROID_ART" if art else b"SCARLET_ANDROID_DIRECT")
+    smoke.SUCCESS = re.compile(rb"\n" + prefix + (rb"_DONE\r*\n" if args.program else rb"_OK\r*\n"))
     smoke.FAILURE = re.compile(rb"\n" + prefix + rb"_FAIL:")
     result = smoke.run_guest(command, output, args.timeout)
     result["dynamic_runtime"] = bool(args.runtime_root)
     data = (output / "serial.log").read_bytes()
+    if args.program:
+        # A daemon exiting (even with status zero), or merely surviving until
+        # timeout, never proves that its service interface is usable.
+        exits = re.findall(rb"\nSCARLET_ANDROID_PROGRAM_EXIT (-?\d+)\r*\n", data)
+        result["program_exit_status"] = int(exits[0]) if len(exits) == 1 else None
+        result["service_readiness"] = "not tested"
+        if result["result"] == "PASS":
+            result["result"] = "EXITED" if len(exits) == 1 else "INCOMPLETE"
+        (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+        print(f"Android program diagnostic: {result['result']}; exit={result['program_exit_status']}")
+        return 0 if result["result"] == "EXITED" and result["program_exit_status"] == 0 else 1
     evidence = analyze_art(data, stock=bool(args.stock_inputs)) if art else analyze_direct(data, dynamic=bool(args.runtime_root), binder=args.binder)
     result["art" if art else "probes"] = evidence
     if result["result"] == "PASS" and evidence["result"] != "PASS":

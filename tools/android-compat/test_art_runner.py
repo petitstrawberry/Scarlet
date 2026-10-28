@@ -55,6 +55,44 @@ def stock_fixture(root, runtime):
 
 
 class ArtRunnerTest(unittest.TestCase):
+    def test_program_exit_or_timeout_does_not_certify_service_readiness(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            runtime = base / "runtime"
+            runtime.mkdir()
+            runtime_fixture(runtime)
+            kernel, program, firmware = [base / name for name in ("kernel", "program", "firmware")]
+            for path in (kernel, program, firmware):
+                path.write_bytes(path.name.encode())
+            for status in (0, 127, None):
+                output = base / f"run-{status}"
+                def build(command, **kwargs):
+                    if command[0] == "cargo":
+                        self.assertEqual(kwargs["env"]["SCARLET_ANDROID_PROGRAM"], "1")
+                        directory = output / "target/aarch64-unknown-scarlet/release"
+                        directory.mkdir(parents=True, exist_ok=True)
+                        for name in ("android-direct-init", "scarlet-ld"):
+                            (directory / name).write_bytes(b"simulated compiler output")
+                def guest(command, destination, timeout):
+                    data = "\nSCARLET_ANDROID_PROGRAM_START\n"
+                    if status is not None:
+                        data += f"SCARLET_ANDROID_PROGRAM_EXIT {status}\nSCARLET_ANDROID_PROGRAM_DONE\n"
+                    (destination / "serial.log").write_text(data)
+                    return {"result": "PASS" if status is not None else "timeout"}
+                args = ["run-direct.py", "--kernel", str(kernel), "--program", str(program),
+                        "--runtime-root", str(runtime), "--output", str(output)]
+                with patch("sys.argv", args), patch.object(runner.smoke, "firmware", return_value=firmware), \
+                        patch.object(runner.subprocess, "run", side_effect=build), \
+                        patch.object(runner.smoke, "run_guest", side_effect=guest):
+                    self.assertEqual(runner.main(), 0 if status == 0 else 1)
+                result = json.loads((output / "result.json").read_text())
+                self.assertEqual(result["result"], "EXITED" if status is not None else "timeout")
+                self.assertEqual(result["program_exit_status"], status)
+                self.assertEqual(result["service_readiness"], "not tested")
+                self.assertEqual((output / "staging/systems/android-aarch64/system/bin/scarlet-program-probe").read_bytes(), program.read_bytes())
+                self.assertEqual(json.loads((output / "inputs.json").read_text())["program_sha256"], sha256(program))
+                self.assertFalse((output / "art-launch.json").exists())
+
     def test_manifest_detects_changes_extras_and_escaping_symlinks(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
