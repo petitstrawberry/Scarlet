@@ -430,8 +430,26 @@ impl Waker {
         trapframe: &mut Trapframe,
         timeout_ns: u64,
     ) -> bool {
+        self.wait_with_timeout_result_until_owned(task_id, trapframe, timeout_ns, || false)
+            .legacy_woken()
+    }
+
+    /// Consume an owned Waker and readiness closure before scheduling, with
+    /// a relative timeout and distinct interruption result. Register first,
+    /// then recheck readiness so a concurrent producer cannot be missed.
+    pub fn wait_with_timeout_result_until_owned(
+        self: Arc<Self>,
+        task_id: usize,
+        trapframe: &mut Trapframe,
+        timeout_ns: u64,
+        ready: impl FnOnce() -> bool,
+    ) -> WaitResult {
         if timeout_ns == 0 {
-            return false;
+            return if ready() {
+                WaitResult::Woken
+            } else {
+                WaitResult::TimedOut
+            };
         }
 
         use crate::timer::{TimerHandle, TimerHandler, add_timer, get_time_ns};
@@ -468,7 +486,7 @@ impl Waker {
         }
 
         let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) else {
-            return false;
+            return WaitResult::TimedOut;
         };
         let outcome = Arc::new(WaitOutcome::new());
         let handler = Arc::new(OwnedTimeoutWake {
@@ -494,25 +512,32 @@ impl Waker {
             if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) {
                 let _ = task.finish_software_timer(timer_handle);
             }
-            return outcome.finish_after_resume().legacy_woken();
+            return outcome.finish_after_resume();
         }
 
         let mut should_schedule = self.prepare_wait_registration(task_id, outcome.clone());
+        if ready() {
+            outcome.claim_coalesced_event();
+        }
         if !outcome.is_pending() && self.cancel_prepared_wait_registration(task_id, Some(&outcome))
         {
             should_schedule = false;
         }
 
+        let weak_waker = Arc::downgrade(&self);
         drop(self);
         if should_schedule {
             schedule(trapframe);
         }
 
-        let event_won = outcome.finish_after_resume().legacy_woken();
+        let result = outcome.finish_after_resume();
+        if let Some(waker) = weak_waker.upgrade() {
+            let _ = waker.remove_wait_registration(task_id, &outcome);
+        }
         if let Some(task) = crate::sched::scheduler::get_task_by_id(task_id) {
             let _ = task.finish_software_timer(timer_handle);
         }
-        event_won
+        result
     }
 
     #[cfg(test)]
@@ -1531,6 +1556,28 @@ mod tests {
             assert_eq!(waker.waiting_count(), 0);
             assert!(!has_ready_tasks(local_cpu));
         }
+
+        // A ready condition after timed registration must remove both the
+        // wait entry and the timer's strong Waker reference, without sleeping.
+        let owned = Arc::new(Waker::new_interruptible("owned-level-recheck"));
+        let weak = Arc::downgrade(&owned);
+        assert_eq!(
+            owned.clone().wait_with_timeout_result_until_owned(
+                task_id,
+                &mut Trapframe::new(),
+                1_000 * crate::timer::NANOSECONDS_PER_MILLISECOND,
+                || {
+                    assert_eq!(owned.waiting_count(), 1);
+                    true
+                },
+            ),
+            WaitResult::Woken
+        );
+        assert_eq!(owned.waiting_count(), 0);
+        assert_eq!(Arc::strong_count(&owned), 1);
+        assert_eq!(task.get_state(), TaskState::Running);
+        drop(owned);
+        assert!(weak.upgrade().is_none());
 
         set_current_task_for_test(local_cpu, None);
         task.running_cpu.store(usize::MAX, Ordering::SeqCst);

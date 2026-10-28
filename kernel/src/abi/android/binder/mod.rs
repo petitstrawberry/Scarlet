@@ -575,13 +575,44 @@ impl Selectable for BinderFile {
     }
     fn wait_until_ready(
         &self,
-        _: ReadyInterest,
-        _: &mut Trapframe,
-        _: Option<u64>,
-        _: u64,
+        interest: ReadyInterest,
+        trapframe: &mut Trapframe,
+        timeout_ns: Option<u64>,
+        minimum_ns: u64,
     ) -> SelectWaitOutcome {
-        // Poll-based loopers are not yet supported; ioctl uses the RPC wakers.
-        SelectWaitOutcome::Interrupted
+        let Some(task) = crate::task::mytask() else {
+            return SelectWaitOutcome::Interrupted;
+        };
+        if self.check_owner(&task).is_err() {
+            return SelectWaitOutcome::Interrupted;
+        }
+        let tid = task.get_id();
+        let started = crate::timer::get_time_ns();
+        let minimum = timeout_ns.map_or(minimum_ns, |timeout| timeout.min(minimum_ns));
+        if minimum > 0
+            && !task.sleep_interruptible_with_precision(
+                trapframe,
+                minimum,
+                crate::timer::TimerPrecision::Normal,
+            )
+        {
+            return SelectWaitOutcome::Interrupted;
+        }
+        let ready = || interest.read && self.ready(tid);
+        let waker = self.waiter(tid);
+        let result = if let Some(timeout) = timeout_ns {
+            let remaining = started
+                .saturating_add(timeout)
+                .saturating_sub(crate::timer::get_time_ns());
+            waker.wait_with_timeout_result_until_owned(tid, trapframe, remaining, ready)
+        } else {
+            waker.wait_result_until_owned(tid, trapframe, ready)
+        };
+        match result {
+            WaitResult::Woken => SelectWaitOutcome::Ready,
+            WaitResult::TimedOut => SelectWaitOutcome::TimedOut,
+            WaitResult::Interrupted => SelectWaitOutcome::Interrupted,
+        }
     }
 }
 
