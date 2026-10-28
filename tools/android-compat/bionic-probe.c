@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/stat.h>
+#include <linux/futex.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -105,6 +106,54 @@ static void *worker(void *unused) {
     return (void *)(uintptr_t)rc;
 }
 
+struct futex_wait_args { uint32_t *word; struct timespec timeout; };
+static void *futex_worker(void *argument) {
+    struct futex_wait_args *args = argument;
+    long rc = syscall(__NR_futex, args->word, FUTEX_WAIT_PRIVATE, 0, &args->timeout, NULL, 0);
+    return (void *)(uintptr_t)(rc == 0 ? 0 : errno);
+}
+
+static int requeue_threads(void) {
+    uint32_t words[3] = {0};
+    struct futex_wait_args args = {&words[0], {5, 0}};
+    pthread_t threads[2];
+#define FCHECK(test) do { if (!(test)) return fail("thread", #test, errno); } while (0)
+    for (size_t i = 0; i < 2; ++i) FCHECK(pthread_create(&threads[i], NULL, futex_worker, &args) == 0);
+    int moved = 0;
+    for (int attempt = 0; moved < 2 && attempt < 3000; ++attempt) {
+        long rc = syscall(__NR_futex, &words[0], FUTEX_CMP_REQUEUE_PRIVATE, 0, 1, &words[1], 0);
+        FCHECK(rc == 0 || rc == 1);
+        moved += (int)rc;
+        if (moved < 2) usleep(1000);
+    }
+    FCHECK(moved == 2);
+    FCHECK(syscall(__NR_futex, &words[1], FUTEX_CMP_REQUEUE_PRIVATE, 1, 1, &words[2], 1) == -1 && errno == EAGAIN);
+    FCHECK(syscall(__NR_futex, &words[1], FUTEX_REQUEUE_PRIVATE, 1, 1, &words[2], 0) == 2);
+    FCHECK(syscall(__NR_futex, &words[0], FUTEX_WAKE_PRIVATE, 2, NULL, NULL, 0) == 0);
+    FCHECK(syscall(__NR_futex, &words[1], FUTEX_WAKE_PRIVATE, 2, NULL, NULL, 0) == 0);
+    FCHECK(syscall(__NR_futex, &words[2], FUTEX_WAKE_PRIVATE, 2, NULL, NULL, 0) == 1);
+    for (size_t i = 0; i < 2; ++i) {
+        void *result;
+        FCHECK(pthread_join(threads[i], &result) == 0 && result == NULL);
+    }
+    // The timer was armed against words[0]; after requeue it must remove the
+    // registration from words[2], without leaving a phantom wake there.
+    args.timeout = (struct timespec){0, 500000000};
+    FCHECK(pthread_create(&threads[0], NULL, futex_worker, &args) == 0);
+    moved = 0;
+    for (int attempt = 0; !moved && attempt < 300; ++attempt) {
+        moved = (int)syscall(__NR_futex, &words[0], FUTEX_REQUEUE_PRIVATE, 0, 1, &words[2], 0);
+        FCHECK(moved == 0 || moved == 1);
+        if (!moved) usleep(1000);
+    }
+    FCHECK(moved == 1);
+    void *result;
+    FCHECK(pthread_join(threads[0], &result) == 0 && (uintptr_t)result == ETIMEDOUT);
+    FCHECK(syscall(__NR_futex, &words[2], FUTEX_WAKE_PRIVATE, 2, NULL, NULL, 0) == 0);
+#undef FCHECK
+    return 0;
+}
+
 static int thread_case(void) {
     pthread_t thread;
     tls_value = 23;
@@ -115,7 +164,7 @@ static int thread_case(void) {
     if (rc || result) return fail("thread", "pthread_join/worker", rc ? rc : (int)(uintptr_t)result);
     if (tls_value != 23 || shared_value != 73)
         return fail("thread", "TLS isolation/shared address space", 0);
-    return 0;
+    return requeue_threads();
 }
 
 static void receive_signal(int number) { signal_seen = number; }
