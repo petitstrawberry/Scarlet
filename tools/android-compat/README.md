@@ -158,10 +158,84 @@ was printed and the command exited 1. Both logs are retained in
 The image's unmodified static `linkerconfig` was also inspected and executed
 as a host diagnostic. With the fixture's absent property/APEX activation state,
 it generated only a legacy configuration with no ART/system exported namespace.
-No custom namespace config was installed. **Owner consultation is pending**
-before choosing a fixture-specific namespace/access policy versus reproducing
-stock Android property/APEX state and generated namespace configuration.
-The current ART runner is a startup diagnostic, not a passing Java fixture.
+The owner subsequently approved reproducing stock Android property/APEX inputs
+and using Android's original configuration generator. No custom namespace
+policy was installed. The current Scarlet ART runner remains a startup
+diagnostic, not a passing Java fixture.
+
+### Stock property/APEX preparation and host diagnosis
+
+`build-properties.py` builds a static ARM64 bootstrap which calls the original
+AOSP property parser/serializer and Bionic property-area APIs. Sources are
+pinned by URL, tag and SHA-256 in `art/property-sources.json`: the Android 13
+`android-13.0.0_r75` serializer/parser and the unmodified Android 10
+`android-10.0.0_r47` libbase string utility used by that parser. NDK r25b static
+Bionic writes the areas; no NDK shared link stubs enter the runtime. This helper
+creates a one-time property snapshot, not a property service or Android init.
+It fails on property initialization errors and reads every added value back.
+
+```sh
+nix develop -c python3 tools/android-compat/build-properties.py \
+  --ndk /path/to/android-ndk-r25b \
+  --source-cache .build/android-property-sources --download \
+  --output .build/android-property-helper
+nix develop -c python3 tools/android-compat/prepare-stock-art.py \
+  --sdk-image /path/to/arm64-v8a-33_r02.zip \
+  --runtime-root .build/android-art-runtime \
+  --property-helper .build/android-property-helper \
+  --output .build/android-stock-inputs
+```
+
+The output is an **overlay of inputs**, tied by hashes to the prepared runtime.
+It contains the original system/vendor property contexts, 216 literal build
+properties from system/system_ext/vendor/product in init's precedence order,
+27 factory APEX manifests and their original linker protobufs, VNDK/sanitizer
+library lists, and the unmodified runtime APEX `linkerconfig`. Factory activation
+XML is derived from the original package manifests, without namespace rules.
+Library-directory and executable-directory presence is preserved because the
+generator examines it. Only the selected runtime APEXes' libraries are copied;
+metadata for other packages does not imply that their services can run. The
+preparation also preserves image library aliases and system/private APEX
+dependency copies required by isolated namespaces. Every added file and alias,
+the exact partition extents and source package hashes are recorded.
+
+An optional **host Linux diagnostic**, explicitly separate from Scarlet, uses
+Docker and a static host `qemu-aarch64`. Supply an already available image or use
+the script's pinned `nixos/nix` digest. Containers have networking disabled.
+
+```sh
+nix develop -c python3 tools/android-compat/diagnose-stock-art.py \
+  --runtime-root .build/android-art-runtime \
+  --stock-inputs .build/android-stock-inputs \
+  --dex .build/android-art-dex/classes.dex \
+  --qemu-user /path/to/static/qemu-aarch64 \
+  --output .build/android-art-host-diagnostic
+```
+
+This creates fresh property areas, invokes the original `linkerconfig --target
+/linkerconfig` as stock init does, and runs ART without `LD_LIBRARY_PATH`.
+It saves commands, exit/timeout status, stdout/stderr, decoded and raw logd
+messages, and generated-file hashes. **Do not add `--strict` to linkerconfig**
+for this fixture: the image's absent optional `libdexfiled.so` provider causes
+strict resolution to stop early while the program still exits zero. The
+diagnostic rejects generator ERROR/FATAL logs as well as nonzero exits.
+Java markers and normal exit produce `HOST_LINUX_PASS`, never a Scarlet pass.
+
+Cloud verification on 2026-10-28 reached `HOST_LINUX_PASS` with QEMU `10.0.13`:
+property initialization, stock linkerconfig and ART each exited zero, and Java
+printed all three expected lines. The added inputs contain 72 hashed files and
+12 bounded library aliases. The logs, commands, source identities and hashes
+are retained in [the stock ART checkpoint](checkpoints/2026-10-28-cloud/stock-art/verification.json).
+The host test suite passes 25 tests, including rejection of partial linkerconfig
+output despite exit zero. Expected imageless-boot and missing tracefs/DEX
+metadata diagnostics remain visible in the ART log.
+
+These stock inputs are not yet integrated with `run-direct.py`: Scarlet's
+Android view currently binds a read-only DevFS at `/dev`, so property storage
+must be provisioned in its own view before bootstrap. The project Nix downloads
+are still blocked in the existing Cloud executor; native build/runtime
+verification and any resulting ABI fixes remain outstanding. The environment
+was not replaced and its network policy was not modified.
 
 ### ABI composition and native RPC boundary
 

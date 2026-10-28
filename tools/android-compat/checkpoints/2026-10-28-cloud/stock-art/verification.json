@@ -1,0 +1,64 @@
+{
+  "recorded_utc": "2026-10-28T10:46:49.510717+00:00",
+  "platform": "Host Linux with ARM64 qemu-user; NOT Scarlet",
+  "outcome": "real ARM64 dalvikvm64 -Xint printed all three Java records and exited zero",
+  "scarlet_status": "Blocked before native build/runtime: existing executor Nix download proxy CONNECT 403",
+  "property_scope": "216 literal build properties, stock contexts/serializer/Bionic areas; no property service or full Android init",
+  "apex_scope": "27 unique factory module metadata records, executable/library directory presence, six selected runtime packages; no framework service boot",
+  "namespace_policy": "unmodified image linkerconfig using original manifests/protobuf/library lists; stock init arguments; no LD_LIBRARY_PATH override",
+  "expected_art_diagnostics": "Imageless boot logs missing boot.art; tracefs/classes.dm absent. Java output and normal exit still observed.",
+  "sources": {
+    "sdk": "https://dl.google.com/android/repository/sys-img/android/arm64-v8a-33_r02.zip",
+    "ndk": "https://dl.google.com/android/repository/android-ndk-r25b-linux.zip",
+    "property_init_reference": "https://github.com/aosp-mirror/platform_system_core/blob/android-13.0.0_r75/init/property_service.cpp",
+    "linkerconfig_inspection": {
+      "repository": "https://github.com/aosp-mirror-neo/platform_system_linkerconfig",
+      "tag": "android-13.0.0_r75",
+      "commit": "45d040fd8ba22330c0ca61d2b803bd4f6cea6b7b"
+    },
+    "environment_update_documentation": "https://developers.openai.com/codex/environments/cloud-environments"
+  },
+  "commands": [
+    "python3 tools/android-compat/build-properties.py --ndk .build/android-compat/sdk/android-ndk-r25b --source-cache .build/android-compat/stock-property-source --output .build/android-compat/property-helper-1",
+    "PATH=/workspace/android-host-tools/usr/sbin:$PATH LD_LIBRARY_PATH=/workspace/android-host-tools/usr/lib/x86_64-linux-gnu python3 tools/android-compat/prepare-stock-art.py --sdk-image .build/android-compat/downloads/arm64-v8a-33_r02.zip --runtime-root .build/android-compat/art-runtime-5 --property-helper .build/android-compat/property-helper-1 --output .build/android-compat/stock-inputs-3",
+    "python3 tools/android-compat/diagnose-stock-art.py --runtime-root .build/android-compat/art-runtime-5 --stock-inputs .build/android-compat/stock-inputs-3 --dex .build/android-compat/dex-3/classes.dex --qemu-user /workspace/android-host-tools/usr/bin/qemu-aarch64 --output .build/android-compat/host-stock-art-1",
+    "python3 -m unittest discover -s tools/android-compat -v"
+  ],
+  "tests": {
+    "android_host_tests": 25,
+    "result": "PASS",
+    "native_kernel_tests": "not run: Nix environment blocked"
+  },
+  "remaining": [
+    "Provide project Nix dependencies through an authorized working environment. Existing executor has no exposed supported live-refresh action; no replacement task created.",
+    "Integrate stock bootstrap into the Scarlet runner, provisioning /dev/__properties__ in the Android VFS view while preserving existing device bindings.",
+    "Build Scarlet, run these exact inputs, derive any actual ABI fixes from Scarlet logs and verify regressions."
+  ],
+  "artifacts": {
+    "art.json": "ebe216a896ef9865d96155d6c96c131588fa16bebeba51380bbcddb487ecad31",
+    "art.logd.log": "05cdffe7195002d869274a01f9bc227cbfd6cea7b1db1280fa2c121a06cb37d1",
+    "art.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "art.stdout.log": "364e5c9627499d4439d3ec91e2f7d23d22aa73d517d6acc093070cc787104f21",
+    "generated-art-ld.config.txt": "c25d43b66bee4af365174ac92570327ad9bca22e5d517361dfb8360b1d836bcb",
+    "host-result.json": "9c0ee0c80d8c679caa5fc0307c54e18ef9622f31f1a3635a0f70b16e24ec0789",
+    "linkerconfig-missing-lists.log": "34b35d83c8069e2a5dbf80741cc634dd4483d27724cfc00726ab6041d08c2c65",
+    "linkerconfig-strict-partial.log": "0297feab4f77962447e67edc95aa6a717525fb11875a64fbe50878ba1cd0e8d5",
+    "linkerconfig.json": "04aae6d9f880ab086c2e5daa8b639b34c723db9054bee33ef06668c805876ab3",
+    "linkerconfig.logd.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "linkerconfig.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "linkerconfig.stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "network.json": "e4895713e2e790f45ba55cf7e95b8fcc1d6041de3e7843f48bf75782b33d9575",
+    "properties.json": "ef1955d40940f0eebfbc88b7fe77d9f58902e7a0d5ee55e268dfb736efd55bb1",
+    "properties.logd.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "properties.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "properties.stdout.log": "92597b659c83a6bb50074e56b7926c025252e96ffc3f80a32e1bffee54e0c90b",
+    "property-build.json": "da8c7b1e82ee6ebe32365e1498a5a0600efd96d3e9179422d1c44371545d08a4",
+    "stock-inputs.json": "ae10c43b23641407e2ab6607098e4a3e635b04ec15b15536739b608263d56df8"
+  },
+  "fresh_source_rebuild": {
+    "command": "python3 tools/android-compat/build-properties.py --ndk .build/android-compat/sdk/android-ndk-r25b --source-cache .build/android-compat/property-pinned-fetch --download --output .build/android-compat/property-helper-2",
+    "all_source_hashes_verified": true,
+    "binary_sha256": "fa2c34d475e07cba2791077d5f38ded7f8cfe181517042864340c70e0b0edaaa",
+    "identical_binary": true
+  }
+}

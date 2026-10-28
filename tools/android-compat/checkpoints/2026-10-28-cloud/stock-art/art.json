@@ -1,0 +1,110 @@
+{
+  "platform": "host Linux qemu-user, NOT Scarlet",
+  "argv": [
+    "docker",
+    "run",
+    "--rm",
+    "--pull",
+    "never",
+    "--name",
+    "scarlet-art-diagnostic-357410c8e355",
+    "--network",
+    "none",
+    "--ulimit",
+    "core=0",
+    "--mount",
+    "type=bind,src=/workspace/android-host-tools/usr/bin/qemu-aarch64,dst=/emulator/qemu-aarch64,readonly",
+    "--mount",
+    "type=bind,src=/workspace/Scarlet/.build/android-compat/host-stock-art-1/sockets,dst=/dev/socket,readonly",
+    "--mount",
+    "type=bind,src=/workspace/Scarlet/.build/android-compat/host-stock-art-1/root/dev/__properties__,dst=/dev/__properties__,readonly",
+    "--mount",
+    "type=bind,src=/workspace/Scarlet/.build/android-compat/host-stock-art-1/root/system,dst=/system,readonly",
+    "--mount",
+    "type=bind,src=/workspace/Scarlet/.build/android-compat/host-stock-art-1/root/system_ext,dst=/system_ext,readonly",
+    "--mount",
+    "type=bind,src=/workspace/Scarlet/.build/android-compat/host-stock-art-1/root/vendor,dst=/vendor,readonly",
+    "--mount",
+    "type=bind,src=/workspace/Scarlet/.build/android-compat/host-stock-art-1/root/product,dst=/product,readonly",
+    "--mount",
+    "type=bind,src=/workspace/Scarlet/.build/android-compat/host-stock-art-1/root/apex,dst=/apex,readonly",
+    "--mount",
+    "type=bind,src=/workspace/Scarlet/.build/android-compat/host-stock-art-1/root/data,dst=/data",
+    "--mount",
+    "type=bind,src=/workspace/Scarlet/.build/android-compat/host-stock-art-1/root/linkerconfig,dst=/linkerconfig",
+    "-e",
+    "PATH=/system/bin:/apex/com.android.art/bin",
+    "-e",
+    "ANDROID_ROOT=/system",
+    "-e",
+    "ANDROID_DATA=/data",
+    "-e",
+    "ANDROID_ART_ROOT=/apex/com.android.art",
+    "-e",
+    "ANDROID_I18N_ROOT=/apex/com.android.i18n",
+    "-e",
+    "ANDROID_TZDATA_ROOT=/apex/com.android.tzdata",
+    "-e",
+    "ANDROID_LOG_TAGS=*:v",
+    "nixos/nix@sha256:4bfe741027f0bfbef745862cbf3b5f424ee99801c04138146c0000a28759636d",
+    "/emulator/qemu-aarch64",
+    "/apex/com.android.art/bin/dalvikvm64",
+    "-Xint",
+    "-Xusejit:false",
+    "-Ximage:/system/nonexistent/boot.art",
+    "-Xnoimage-dex2oat",
+    "-Xbootclasspath:/apex/com.android.art/javalib/core-oj.jar:/apex/com.android.art/javalib/core-libart.jar:/apex/com.android.i18n/javalib/core-icu4j.jar",
+    "-Xms16m",
+    "-Xmx128m",
+    "-cp",
+    "/data/local/tmp/classes.dex",
+    "ScarletArtHello"
+  ],
+  "returncode": 0,
+  "logd_packets_base64": [
+    "AAEA2NHhao8yfAEGY3V0aWxzLXRyYWNlAEVycm9yIG9wZW5pbmcgdHJhY2UgZmlsZTogTm8gc3VjaCBmaWxlIG9yIGRpcmVjdG9yeSAoMikA",
+    "AAEA2NHhaqVRdQUEZGFsdmlrdm02NABzZXR0aW5nIGJvb3QgY2xhc3MgcGF0aCB0byAvYXBleC9jb20uYW5kcm9pZC5hcnQvamF2YWxpYi9jb3JlLW9qLmphcjovYXBleC9jb20uYW5kcm9pZC5hcnQvamF2YWxpYi9jb3JlLWxpYmFydC5qYXI6L2FwZXgvY29tLmFuZHJvaWQuaTE4bi9qYXZhbGliL2NvcmUtaWN1NGouamFyAA==",
+    "AAEA2NHhaqqJ2AYGZGFsdmlrdm02NABFcnJvciByZWFkaW5nIG5hbWVkIGltYWdlIGNvbXBvbmVudCBoZWFkZXIgZm9yIC9zeXN0ZW0vbm9uZXhpc3RlbnQvYm9vdC5hcnQsIGVycm9yOiBVbmFibGUgdG8gb3BlbiBmaWxlICIvc3lzdGVtL25vbmV4aXN0ZW50L2FybTY0L2Jvb3QuYXJ0IiBmb3IgcmVhZGluZyBpbWFnZSBoZWFkZXIA",
+    "AAEA2NHhaqHP3gYGZGFsdmlrdm02NABDb3VsZCBub3QgY3JlYXRlIGltYWdlIHNwYWNlIHdpdGggaW1hZ2UgZmlsZSAnL3N5c3RlbS9ub25leGlzdGVudC9ib290LmFydCcuIEF0dGVtcHRpbmcgdG8gZmFsbCBiYWNrIHRvIGltYWdlbGVzcyBydW5uaW5nLiBFcnJvciB3YXM6IEZ1bGwgYm9vdCBpbWFnZSBjYW5ub3QgYmUgY29tcGlsZWQgYmVjYXVzZSBubyBwcm9maWxlIGlzIHByb3ZpZGVkLgA=",
+    "AAEA2NHhah1B5DMDZGFsdmlrdm02NABJMThuIEFQRVggSUNVIGZpbGUgZm91bmQ6IC9hcGV4L2NvbS5hbmRyb2lkLmkxOG4vZXRjL2ljdS9pY3VkdDcwbC5kYXQA",
+    "AAEA2dHhamygyQQFemlwYXJjaGl2ZQBVbmFibGUgdG8gb3BlbiAnL2RhdGEvbG9jYWwvdG1wL2NsYXNzZXMuZG0nOiBObyBzdWNoIGZpbGUgb3IgZGlyZWN0b3J5AA==",
+    "AAEA2dHharBZhQYDZGFsdmlrdm02NABSZWNlaXZlZCBzZXNzaW9uIG1ldGFkYXRhOiA1NzIwMDc2MzQzMzA3Mjk3NzA1AA=="
+  ],
+  "messages": [
+    {
+      "priority": 6,
+      "tag": "cutils-trace",
+      "message": "Error opening trace file: No such file or directory (2)"
+    },
+    {
+      "priority": 4,
+      "tag": "dalvikvm64",
+      "message": "setting boot class path to /apex/com.android.art/javalib/core-oj.jar:/apex/com.android.art/javalib/core-libart.jar:/apex/com.android.i18n/javalib/core-icu4j.jar"
+    },
+    {
+      "priority": 6,
+      "tag": "dalvikvm64",
+      "message": "Error reading named image component header for /system/nonexistent/boot.art, error: Unable to open file \"/system/nonexistent/arm64/boot.art\" for reading image header"
+    },
+    {
+      "priority": 6,
+      "tag": "dalvikvm64",
+      "message": "Could not create image space with image file '/system/nonexistent/boot.art'. Attempting to fall back to imageless running. Error was: Full boot image cannot be compiled because no profile is provided."
+    },
+    {
+      "priority": 3,
+      "tag": "dalvikvm64",
+      "message": "I18n APEX ICU file found: /apex/com.android.i18n/etc/icu/icudt70l.dat"
+    },
+    {
+      "priority": 5,
+      "tag": "ziparchive",
+      "message": "Unable to open '/data/local/tmp/classes.dm': No such file or directory"
+    },
+    {
+      "priority": 3,
+      "tag": "dalvikvm64",
+      "message": "Received session metadata: 5720076343307297705"
+    }
+  ]
+}

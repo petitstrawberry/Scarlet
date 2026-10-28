@@ -1,0 +1,74 @@
+{
+  "result": "BUILT",
+  "execution": "not tested",
+  "ndk": "Pkg.Desc = Android NDK\nPkg.Revision = 25.1.8937393\n",
+  "compiler": "Android (8490178, based on r450784d) clang version 14.0.6 (https://android.googlesource.com/toolchain/llvm-project 4c603efb0cca074e9238af8b4106c30add4418f6)\nTarget: aarch64-unknown-linux-android33\nThread model: posix\nInstalledDir: /workspace/Scarlet/.build/android-compat/sdk/android-ndk-r25b/toolchains/llvm/prebuilt/linux-x86_64/bin\n",
+  "argv": [
+    "/workspace/Scarlet/.build/android-compat/sdk/android-ndk-r25b/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang++",
+    "-std=c++17",
+    "-static",
+    "-O2",
+    "-I",
+    "/workspace/Scarlet/.build/android-compat/stock-property-source/include",
+    "/workspace/Scarlet/tools/android-compat/art/property-bootstrap.cpp",
+    "/workspace/Scarlet/.build/android-compat/stock-property-source/property_info_serializer.cpp",
+    "/workspace/Scarlet/.build/android-compat/stock-property-source/property_info_file.cpp",
+    "/workspace/Scarlet/.build/android-compat/stock-property-source/trie_builder.cpp",
+    "/workspace/Scarlet/.build/android-compat/stock-property-source/trie_serializer.cpp",
+    "/workspace/Scarlet/.build/android-compat/stock-property-source/strings.cpp",
+    "-o",
+    "/workspace/Scarlet/.build/android-compat/property-helper-1/property-bootstrap"
+  ],
+  "sources": {
+    "property_info_serializer.cpp": {
+      "url": "https://raw.githubusercontent.com/aosp-mirror/platform_system_core/android-13.0.0_r75/property_service/libpropertyinfoserializer/property_info_serializer.cpp",
+      "sha256": "437b15d25c3c0c67cc81b46619058e8ffdee3aa4d988d07a46fafe4313740377"
+    },
+    "property_info_file.cpp": {
+      "url": "https://raw.githubusercontent.com/aosp-mirror/platform_system_core/android-13.0.0_r75/property_service/libpropertyinfoserializer/property_info_file.cpp",
+      "sha256": "905b17cb2c243fc7d8c599b5f90a8afec665fc9d3f2faa00ad6a4456781163ec"
+    },
+    "trie_builder.cpp": {
+      "url": "https://raw.githubusercontent.com/aosp-mirror/platform_system_core/android-13.0.0_r75/property_service/libpropertyinfoserializer/trie_builder.cpp",
+      "sha256": "342e0988158416e7362c340afd7d7e178d4181824282ed9f3c4710f5aac4a757"
+    },
+    "trie_serializer.cpp": {
+      "url": "https://raw.githubusercontent.com/aosp-mirror/platform_system_core/android-13.0.0_r75/property_service/libpropertyinfoserializer/trie_serializer.cpp",
+      "sha256": "00c84cb6ec531f706e975c55cf981bcaee48d0d763521864031147c1e3e4ade3"
+    },
+    "trie_builder.h": {
+      "url": "https://raw.githubusercontent.com/aosp-mirror/platform_system_core/android-13.0.0_r75/property_service/libpropertyinfoserializer/trie_builder.h",
+      "sha256": "8427fa061c1e779d735e5a504a1afb0e28e93a5c4a9cf8ee97e016fa8740242b"
+    },
+    "trie_serializer.h": {
+      "url": "https://raw.githubusercontent.com/aosp-mirror/platform_system_core/android-13.0.0_r75/property_service/libpropertyinfoserializer/trie_serializer.h",
+      "sha256": "d48d020c2e10612b89de1433f31522bd15600e8f423ff7c79478d4fbe3671163"
+    },
+    "trie_node_arena.h": {
+      "url": "https://raw.githubusercontent.com/aosp-mirror/platform_system_core/android-13.0.0_r75/property_service/libpropertyinfoserializer/trie_node_arena.h",
+      "sha256": "fc01f6e90aca050a338f55e68cf769ae2fc94100473f0e635226e97640641652"
+    },
+    "space_tokenizer.h": {
+      "url": "https://raw.githubusercontent.com/aosp-mirror/platform_system_core/android-13.0.0_r75/property_service/libpropertyinfoserializer/space_tokenizer.h",
+      "sha256": "35df71cd6d9fbd21f37452768301d0a88d766ffd5ce1856310b6de9e2a64f224"
+    },
+    "include/property_info_serializer/property_info_serializer.h": {
+      "url": "https://raw.githubusercontent.com/aosp-mirror/platform_system_core/android-13.0.0_r75/property_service/libpropertyinfoserializer/include/property_info_serializer/property_info_serializer.h",
+      "sha256": "f15502eb3b884ab4a186e367e445001f295044961fadaef5145f2ad53f35b71b"
+    },
+    "include/property_info_parser/property_info_parser.h": {
+      "url": "https://raw.githubusercontent.com/aosp-mirror/platform_system_core/android-13.0.0_r75/property_service/libpropertyinfoparser/include/property_info_parser/property_info_parser.h",
+      "sha256": "7004945ccd825f308ff51b5d5256598b89db496ee2f743069e324bdc841f35ac"
+    },
+    "strings.cpp": {
+      "url": "https://raw.githubusercontent.com/aosp-mirror/platform_system_core/android-10.0.0_r47/base/strings.cpp",
+      "sha256": "bc32d3d00af4ca57ed71beba653b595ed0f96ea5425437b8fa397f2e2391e7ce"
+    },
+    "include/android-base/strings.h": {
+      "url": "https://raw.githubusercontent.com/aosp-mirror/platform_system_core/android-10.0.0_r47/base/include/android-base/strings.h",
+      "sha256": "f802c6c8f383b8515a0f2297bbc1fe7193a9f6448bfb8a8b6da00349bdff8c01"
+    }
+  },
+  "helper_source_sha256": "fede5ab812317f054568b0bfd05331ec2bd229c550a4d885f1d7b163dd407512",
+  "binary_sha256": "fa2c34d475e07cba2791077d5f38ded7f8cfe181517042864340c70e0b0edaaa"
+}
