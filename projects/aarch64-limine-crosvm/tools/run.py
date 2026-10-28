@@ -35,6 +35,7 @@ def main():
     parser.add_argument("--success-marker", default="SCARLET_CROSVM_GUEST_OK",
                         help="exact guest serial line required for PASS")
     parser.add_argument("--gdb-socket", type=Path, help="optional private Unix GDB socket")
+    parser.add_argument("--serial-input", type=Path, help="existing FIFO for guest console input")
     parser.add_argument("--prepare-only", action="store_true", help="write images and commands without starting QEMU")
     args = parser.parse_args()
     if args.accel not in ("tcg", "hvf"):
@@ -43,6 +44,8 @@ def main():
         parser.error("timeout must be finite and nonnegative (0 means unlimited)")
     if not args.success_marker or any(c in args.success_marker for c in "\r\n"):
         parser.error("success marker must be one nonempty line")
+    if args.serial_input and not args.serial_input.is_fifo():
+        parser.error("serial input must be an existing FIFO")
     if bool(args.boot_image) != bool(args.rootfs_image):
         parser.error("--boot-image and --rootfs-image must be supplied together")
     if bool(args.kernel) == bool(args.boot_image):
@@ -110,7 +113,8 @@ def main():
                "-device", "virtio-rng-device,bus=virtio-mmio-bus.2", "-nic", "none"]
     if args.gdb_socket:
         command += ["-gdb", f"unix:{args.gdb_socket},server=on,wait=off"]
-    (output / "commands.json").write_text(json.dumps({"image": build, "qemu": command}, indent=2) + "\n")
+    (output / "commands.json").write_text(json.dumps({"image": build, "qemu": command,
+        "serial_input": str(args.serial_input.resolve()) if args.serial_input else None}, indent=2) + "\n")
     if args.prepare_only:
         (output / "result.json").write_text('{"result":"PREPARED"}\n')
         print(f"Prepared crosvm artifacts: {output}")
@@ -118,7 +122,7 @@ def main():
     # Both Linux's UART console and Scarlet's tty may translate LF to CRLF.
     smoke.SUCCESS = re.compile(rb"\n" + re.escape(args.success_marker.encode()) + rb"\r*\n")
     smoke.FAILURE = re.compile(rb"SCARLET_CROSVM_FAIL(?:[ :\r\n]|$)|exiting with error|error while loading shared libraries|stack smashing detected")
-    result = smoke.run_guest(command, output, args.timeout)
+    result = smoke.run_guest(command, output, args.timeout, input_fifo=args.serial_input)
     (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     print(f"\ncrosvm smoke: {result['result']}")
     return 0 if result["result"] == "PASS" else 1
