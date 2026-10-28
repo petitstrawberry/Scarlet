@@ -1274,6 +1274,17 @@ impl VirtualMemoryManager {
 
         crate::breadcrumb::drop(crate::breadcrumb::LAZY_FOUND, vaddr as u64, 0);
 
+        // A protection fault cannot be repaired by reinstalling the same PTE.
+        // In particular, stack guards must reach the native fault handler.
+        let required = match access.op {
+            AccessOp::Load => VirtualMemoryPermission::Read,
+            AccessOp::Store => VirtualMemoryPermission::Write,
+            AccessOp::Instruction => VirtualMemoryPermission::Execute,
+        };
+        if !required.contained_in(memory_map.permissions) {
+            return Err("Access denied by virtual mapping permissions");
+        }
+
         let page_vaddr = vaddr & !(PAGE_SIZE - 1);
         let page_idx = (page_vaddr - memory_map.vm_start) / PAGE_SIZE;
         let mut perms = memory_map.permissions;
@@ -1299,6 +1310,9 @@ impl VirtualMemoryManager {
                     if res.is_tail {
                         perms &= !0x1;
                         perms &= !0x2;
+                    }
+                    if !required.contained_in(perms) {
+                        return Err("Access denied by resolved page permissions");
                     }
 
                     // COW: most private owner-based mappings allocate a private
@@ -1597,6 +1611,59 @@ impl VirtualMemoryManager {
             );
         };
         root_pagetable.unmap_all();
+    }
+
+    /// Fault-tolerant aligned scalar load from normal, readable user RAM.
+    /// Hold both mapping and page-table guards through the load: a concurrent
+    /// unmap/protect/COW operation cannot recycle the backing between validation
+    /// and access. Device mappings are rejected to avoid read side effects.
+    pub fn read_user_word(&self, vaddr: usize, width: usize) -> Option<usize> {
+        if vaddr == 0
+            || (width != 4 && width != core::mem::size_of::<usize>())
+            || !vaddr.is_multiple_of(width)
+        {
+            return None;
+        }
+        scarlet_abi::data_model::AbiDataModel::NATIVE
+            .user_address(vaddr as u64)
+            .ok()?
+            .check_range(width as u64)
+            .ok()?;
+        for attempt in 0..2 {
+            {
+                let inner = self.inner.read();
+                let (_, map) = inner.memmap.range(..=vaddr).next_back()?;
+                if vaddr.checked_add(width - 1)? > map.vmarea.end
+                    || !VirtualMemoryPermission::Read.contained_in(map.permissions)
+                    || !VirtualMemoryPermission::User.contained_in(map.permissions)
+                    || map.memory_attribute != MemoryAttribute::Normal
+                {
+                    return None;
+                }
+                let mut root = get_root_pagetable(inner.asid)?;
+                if let Some(paddr) = root.translate(vaddr) {
+                    let pointer = phys_to_virt(paddr);
+                    // SAFETY: the aligned scalar fits in one page and the
+                    // guards retain its readable, normal-memory mapping.
+                    return Some(unsafe {
+                        if width == 4 {
+                            core::ptr::read_volatile(pointer as *const u32) as usize
+                        } else {
+                            core::ptr::read_volatile(pointer as *const usize)
+                        }
+                    });
+                }
+            }
+            if attempt == 0 {
+                self.lazy_map_page_with(crate::object::capability::memory_mapping::AccessKind {
+                    op: AccessOp::Load,
+                    vaddr,
+                    size: Some(width),
+                })
+                .ok()?;
+            }
+        }
+        None
     }
 
     pub fn translate_to_kva(&self, vaddr: usize) -> Option<usize> {
@@ -3217,6 +3284,60 @@ mod tests {
     }
 
     #[test_case]
+    fn test_lazy_fault_rejects_protected_access_before_mapping() {
+        let manager = VirtualMemoryManager::new();
+        manager.set_asid(alloc_virtual_address_space());
+        let owner = Arc::new(AnonymousPageOwner::new());
+        let map = VirtualMemoryMap {
+            vmarea: MemoryArea::new(0x4000, 0x4fff),
+            pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
+            vm_start: 0x4000,
+            mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            permissions: 0x08, // User guard page, no permitted accesses.
+            is_shared: false,
+            memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
+            owner: Some(owner),
+        };
+        manager.add_memory_map(map.clone()).unwrap();
+        for op in [AccessOp::Load, AccessOp::Store, AccessOp::Instruction] {
+            assert_eq!(
+                manager.lazy_map_page_with(AccessKind {
+                    op,
+                    vaddr: 0x4000,
+                    size: None
+                }),
+                Err("Access denied by virtual mapping permissions")
+            );
+        }
+        // A readable page resolves, but a subsequent write must still fail.
+        manager
+            .add_memory_map_fixed(VirtualMemoryMap {
+                permissions: 0x09,
+                ..map.clone()
+            })
+            .unwrap();
+        assert!(manager.lazy_map_page(0x4000).is_ok());
+        assert_eq!(
+            manager.lazy_map_page_with(AccessKind {
+                op: AccessOp::Store,
+                vaddr: 0x4000,
+                size: None
+            }),
+            Err("Access denied by virtual mapping permissions")
+        );
+        assert_eq!(manager.read_user_word(0x4000, 4), Some(0));
+        // The guarded native load must also reject supervisor-only mappings.
+        manager
+            .add_memory_map_fixed(VirtualMemoryMap {
+                permissions: 0x01,
+                ..map
+            })
+            .unwrap();
+        assert!(manager.lazy_map_page(0x4000).is_ok());
+        assert_eq!(manager.read_user_word(0x4000, 4), None);
+    }
+
+    #[test_case]
     fn test_lazy_mapping_and_unmapping() {
         let manager = VirtualMemoryManager::new();
         let (dm_phys_start, _) = get_current_direct_map_phys_range();
@@ -3233,7 +3354,7 @@ mod tests {
             pmarea: pma,
             vm_start: vma.start,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
-            permissions: 0o644,
+            permissions: 0x0b, // Read | Write | User (VM bits, not file mode bits)
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: None,
