@@ -64,8 +64,14 @@ def main():
         and 'OPENJDK_GUEST PASS child exit=0' in content
         and 'Hello from OpenJDK on Scarlet!' in content)
     if a.jit:
+        stress = content.partition('OPENJDK_GUEST JIT stress start')[2]
         passed = (passed and 'OPENJDK_JIT PASS arithmetic=ok null=ok stack=ok' in content
             and 'OPENJDK_GUEST JIT child exit=0' in content
+            and 'OPENJDK_JIT_STRESS PASS threads=4 gc=8 null=32 stack=4 roots=ok' in content
+            and 'OPENJDK_GUEST JIT stress child exit=0' in content
+            and len(re.findall(r'Pause Full \(System.gc\(\)\)', stress)) == 8
+            and all(re.search(r'^\d+\s+\d+\s+.*\bb\s+JitStress::'+name+r' \(', stress, re.M)
+                    for name in ('round', 'field', 'recurse'))
             and all(re.search(r'^\d+\s+\d+\s+.*\bb\s+Jit::'+name+r' \(', content, re.M)
                     for name in ('work', 'load', 'recurse')))
     receipt = dict(result='PASS' if passed else 'FAIL', scope='Native OpenJDK Java execution',

@@ -76,6 +76,12 @@ a stack-guard StackOverflowError, then executes compiled code again. The native
 fault probe checks GPR/SIMD/NZCV preservation, invalid return contexts, and writes
 to PROT_NONE/read-only pages.
 
+A separate C1 stress process holds live objects and arrays in compiled frames
+on four platform threads while a controller requests eight full collections.
+Each worker recovers from eight null faults and one stack overflow. The runner
+requires compilation entries, eight GC log entries from that process, intact
+references after collection, and successful termination of all four workers.
+
 This is an initial headless `java.base` port, not a complete or TCK-certified
 JDK. C1 is implemented; C2 and virtual threads/continuations are unavailable.
 Reserved-stack annotations are also unavailable (`StackReservedPages=0`). AWT, dynamic

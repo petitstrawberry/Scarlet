@@ -47,6 +47,28 @@ fn main() {
                 report_crash();
             }
         }
+        println!("OPENJDK_GUEST JIT stress start");
+        let result = std::process::Command::new("/bin/java")
+            .args([
+                "-XX:ErrorFile=/tmp/openjdk-error.log",
+                "-Xcomp",
+                "-XX:-BackgroundCompilation",
+                "-XX:+PrintCompilation",
+                "-Xlog:gc",
+                "-XX:CompileCommand=compileonly,JitStress::*",
+                "-XX:CompileCommand=dontinline,JitStress::*",
+                "-cp",
+                "/app",
+                "JitStress",
+            ])
+            .status();
+        match result {
+            Ok(status) if status.success() => println!("OPENJDK_GUEST JIT stress child exit=0"),
+            other => {
+                println!("OPENJDK_GUEST FAIL JIT stress {other:?}");
+                report_crash();
+            }
+        }
     }
     // This disposable validation VM owns its lifecycle; the Java launcher does not.
     unsafe {

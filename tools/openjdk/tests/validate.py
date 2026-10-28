@@ -88,7 +88,8 @@ static ENTRY: extern "C" fn() -> ! = scarlet::arch::aarch64::boot::linux::image_
          '-C','target-feature=+crt-static','-C','relocation-model=static',
          '-C','link-arg=--no-dynamic-linker','-O',HERE/'supervisor.rs','-o',o/'supervisor']
         + (['--cfg','jit'] if a.jit else []),o/'supervisor-build.log',env)
-    run([a.boot_jdk.resolve()/'bin/javac','-encoding','UTF-8','-d',o/'classes',HERE/'Hello.java',HERE/'Jit.java'],o/'javac.log',env)
+    run([a.boot_jdk.resolve()/'bin/javac','-encoding','UTF-8','-d',o/'classes',
+         HERE/'Hello.java',HERE/'Jit.java',HERE/'JitStress.java'],o/'javac.log',env)
     run([sys.executable,HERE/'run-java.py','--kernel',o/'Image','--init',
          o/'userspace-target/aarch64-unknown-scarlet/release/init','--java',java,
          '--java-home',java_home,'--supervisor',o/'supervisor','--classes',o/'classes',
