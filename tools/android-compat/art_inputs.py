@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shutil
 import struct
 import subprocess
 import zipfile
@@ -132,7 +133,10 @@ def elf_needed(path):
         header = stream.read(64)
     if len(header) < 64 or header[:6] != b"\x7fELF\x02\x01" or struct.unpack_from("<H", header, 18)[0] != 183:
         raise ValueError(f"not an ARM64 ELF: {path}")
-    dynamic = subprocess.run(["readelf", "-d", str(path)], check=True, capture_output=True, text=True).stdout
+    reader = shutil.which("readelf") or shutil.which("llvm-readelf")
+    if reader is None:
+        raise ValueError("readelf or llvm-readelf is required; use nix develop")
+    dynamic = subprocess.run([reader, "-d", str(path)], check=True, capture_output=True, text=True).stdout
     names = re.findall(r"\(NEEDED\).*Shared library: \[([^\]]+)\]", dynamic)
     if any("/" in name or not re.fullmatch(r"[\w.+@-]+", name) for name in names):
         raise ValueError(f"unsupported ELF dependency name in {path}: {names}")

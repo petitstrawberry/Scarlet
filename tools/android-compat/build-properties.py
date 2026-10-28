@@ -8,6 +8,7 @@ installed in the ART runtime. This is a fixture bootstrap, not init/propertyd.
 import argparse
 import json
 from pathlib import Path
+import platform
 import shutil
 import subprocess
 import urllib.request
@@ -32,7 +33,10 @@ def build(ndk, cache, output, download=False):
         if not target.is_file() or sha256(target) != record["sha256"]:
             raise ValueError(f"missing or mismatched pinned source: {target}; use --download for missing files")
     output.mkdir(parents=True, exist_ok=False)
-    compiler = ndk / "toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android33-clang++"
+    host = {"Darwin": "darwin-x86_64", "Linux": "linux-x86_64"}.get(platform.system())
+    if host is None:
+        raise ValueError("property bootstrap requires a macOS or Linux NDK host")
+    compiler = ndk / "toolchains/llvm/prebuilt" / host / "bin/aarch64-linux-android33-clang++"
     binary = output / "property-bootstrap"
     command = [str(compiler), "-std=c++17", "-static", "-O2", "-I", str(cache / "include"),
                str(here / "art/property-bootstrap.cpp")]

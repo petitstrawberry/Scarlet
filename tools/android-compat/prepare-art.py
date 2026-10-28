@@ -116,9 +116,11 @@ def main():
     parser.add_argument("--sdk-image", type=Path, required=True, help="arm64-v8a-33_r02.zip (SHA-256 pinned)")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    for tool in ("debugfs", "readelf"):
+    for tool in ("debugfs",):
         if not shutil.which(tool):
             parser.error(f"{tool} is required; use nix develop")
+    if not (shutil.which("readelf") or shutil.which("llvm-readelf")):
+        parser.error("readelf or llvm-readelf is required; use nix develop")
     prepare(args.sdk_image.resolve(), args.output.resolve())
     print(args.output.resolve())
 
