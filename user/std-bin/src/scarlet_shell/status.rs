@@ -5,6 +5,7 @@
 //! [`StatusProvider`] to produce a normalized, ordered model suitable for
 //! compact laptop or touch-first shell-bar presentations.
 
+use super::network_status::NetworkStatus;
 use super::power::PowerStatus;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -155,6 +156,8 @@ pub struct StatusProviderSnapshot {
     pub audio_muted: Option<bool>,
     /// Latest battery and external-supply observation.
     pub power: PowerStatus,
+    /// Carrier and IPv4 state sampled for both shell presentations.
+    pub network: NetworkStatus,
 }
 
 impl StatusProviderSnapshot {
@@ -249,6 +252,7 @@ impl StatusProvider {
             audio_volume_percent,
             audio_muted,
             power: PowerStatus::default(),
+            network: NetworkStatus::default(),
         }
     }
 }
@@ -557,6 +561,7 @@ mod tests {
             audio_volume_percent: Some(35),
             audio_muted: Some(false),
             power: Default::default(),
+            network: Default::default(),
         };
         assert_eq!(snapshot.clone(), snapshot);
         assert_eq!(snapshot.clock_label(13, 7), "13:07");

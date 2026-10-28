@@ -13,6 +13,7 @@ mod drawer;
 mod home_style;
 #[path = "../home_trace.rs"]
 mod home_trace;
+mod network_status;
 mod options;
 mod power;
 #[path = "../power_request.rs"]
@@ -80,6 +81,7 @@ use control_center::{
     NetworkInterfaceState, NetworkSnapshot, SystemSnapshot, boxed, build_control_center_view,
 };
 use home_style::{icon as home_icon, icon_tile_color as home_icon_tile_color};
+use network_status::{ConnectionState, NetworkKind, NetworkStatus};
 use options::{Options, ShellMode};
 use power::{PowerIcon, PowerStatus};
 use status::{StatusPresentation, StatusProvider, StatusProviderSnapshot};
@@ -726,6 +728,23 @@ fn build_status_cluster(
             item.frame(tokens.logical_height, tokens.logical_height),
         ));
     }
+    if let Some(interface) = snapshot.network.default_route() {
+        let icon = match interface.kind {
+            NetworkKind::Wifi => Icon::Wifi,
+            NetworkKind::Ethernet => Icon::Network,
+        };
+        let open = control_center_open.clone();
+        let item = MenuItem::new("")
+            .icon(icon)
+            .icon_size(IconSize::Small)
+            .padding(tokens.horizontal_padding)
+            .selected(control_center_open.get())
+            .on_click(move || toggle_control_center(open.clone()));
+        items.push(boxed(
+            menu_item_with_foreground(item, foreground)
+                .frame(tokens.logical_height, tokens.logical_height),
+        ));
+    }
     if let Some(power_icon) = snapshot.power.icon() {
         let icon = match power_icon {
             PowerIcon::Empty => Icon::Battery,
@@ -1237,23 +1256,28 @@ fn poll_status_provider(
         power_poll_countdown -= 1;
         let mut sampled = provider.snapshot(&preferences, scheduler::cpu_usage(), audio_state);
         sampled.power = power;
+        sampled.network =
+            collect_network_status().unwrap_or_else(|| status_snapshot.get().network.unavailable());
         let current = status_snapshot.get();
         if (
             current.cpu_percent,
             current.audio_volume_percent,
             current.audio_muted,
             current.power,
+            &current.network,
         ) != (
             sampled.cpu_percent,
             sampled.audio_volume_percent,
             sampled.audio_muted,
             sampled.power,
+            &sampled.network,
         ) {
             status_snapshot.update(|current| {
                 current.cpu_percent = sampled.cpu_percent;
                 current.audio_volume_percent = sampled.audio_volume_percent;
                 current.audio_muted = sampled.audio_muted;
                 current.power = sampled.power;
+                current.network = sampled.network.clone();
             });
         }
         set_state_if_changed(
@@ -1326,41 +1350,52 @@ fn collect_audio_snapshot(status: &StatusProviderSnapshot) -> AudioSnapshot {
     snapshot
 }
 
-fn collect_network_snapshot() -> NetworkSnapshot {
-    let Ok(interfaces) = network::list_interface_configs() else {
-        return NetworkSnapshot {
-            available: false,
-            interfaces: Vec::new(),
-        };
-    };
+fn collect_network_status() -> Option<NetworkStatus> {
+    // Bracket the IP query with link snapshots so disconnect/reconnect cannot
+    // join an address with a different incarnation of a similarly named link.
+    for _ in 0..2 {
+        let before = network::list_links().ok()?;
+        let interfaces = network::list_interface_configs().ok()?;
+        let after = network::list_links().ok()?;
+        if before != after {
+            continue;
+        }
+        let addresses: Vec<_> = interfaces
+            .iter()
+            .filter(|interface| interface.ip_set != 0)
+            .filter_map(|interface| {
+                Some((
+                    String::from(interface.interface_name()?),
+                    interface.ip_address,
+                    interface.is_default != 0 && interface.gateway_set != 0,
+                ))
+            })
+            .collect();
+        return Some(NetworkStatus::from_links(&after, &addresses));
+    }
+    None
+}
+
+fn collect_network_snapshot(status: &NetworkStatus) -> NetworkSnapshot {
     NetworkSnapshot {
-        available: true,
-        interfaces: interfaces
-            .into_iter()
-            .map(|interface| {
-                let name = interface.interface_name().unwrap_or_default().to_string();
-                let connected = interface.ip_set != 0;
-                NetworkInterfaceSnapshot {
-                    name: if name.is_empty() {
-                        String::from("Network interface")
-                    } else {
-                        name
-                    },
-                    state: if connected {
-                        NetworkInterfaceState::Connected
-                    } else {
-                        NetworkInterfaceState::Disconnected
-                    },
-                    detail: connected.then(|| {
-                        format!(
-                            "{}.{}.{}.{}",
-                            interface.ip_address[0],
-                            interface.ip_address[1],
-                            interface.ip_address[2],
-                            interface.ip_address[3]
-                        )
-                    }),
-                }
+        available: status.available,
+        interfaces: status
+            .interfaces
+            .iter()
+            .map(|interface| NetworkInterfaceSnapshot {
+                name: interface.name.clone(),
+                state: match interface.state {
+                    ConnectionState::Connected => NetworkInterfaceState::Connected,
+                    ConnectionState::Configuring => NetworkInterfaceState::Configuring,
+                    ConnectionState::Disconnected => NetworkInterfaceState::Disconnected,
+                    ConnectionState::Unknown => NetworkInterfaceState::Unknown,
+                },
+                detail: interface.address.map(|address| {
+                    format!(
+                        "{}.{}.{}.{}",
+                        address[0], address[1], address[2], address[3]
+                    )
+                }),
             })
             .collect(),
     }
@@ -1396,7 +1431,7 @@ fn collect_control_center_snapshot(
         audio: collect_audio_snapshot(&status),
         brightness_percent,
         power: status.power,
-        network: collect_network_snapshot(),
+        network: collect_network_snapshot(&status.network),
         system: SystemSnapshot {
             cpu_percent: status.cpu_percent,
             task_count: process::task_count().map(|count| count.min(u32::MAX as usize) as u32),

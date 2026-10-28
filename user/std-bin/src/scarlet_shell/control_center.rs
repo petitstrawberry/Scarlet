@@ -91,6 +91,8 @@ impl AudioSnapshot {
 pub enum NetworkInterfaceState {
     /// The interface has an active connection.
     Connected,
+    /// Carrier/authentication is ready; IP configuration is still pending.
+    Configuring,
     /// The interface exists but has no active connection.
     Disconnected,
     /// The interface state could not be determined.
@@ -544,6 +546,7 @@ fn network_label(snapshot: &NetworkSnapshot) -> String {
     };
     let mut label = match interface.state {
         NetworkInterfaceState::Connected => String::from("Connected"),
+        NetworkInterfaceState::Configuring => String::from("Obtaining IP"),
         NetworkInterfaceState::Disconnected => String::from("Disconnected"),
         NetworkInterfaceState::Unknown => String::from("Unknown"),
     };
