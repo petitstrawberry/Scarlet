@@ -17,11 +17,13 @@ import subprocess
 import sys
 
 from evidence import analyze_art, analyze_direct
-from art_inputs import art_launch, validate_dex, verify_art_runtime
+from art_inputs import art_launch, validate_dex, verify_art_runtime, sha256
+from stock_art import stage_stock_inputs, verify_stock_inputs
 
 sys.dont_write_bytecode = True
 SOURCE = Path(__file__).resolve().parent
 ROOT = SOURCE.parents[1]
+STOCK_CONFIG = SOURCE / "checkpoints/2026-10-28-cloud/stock-art/generated-art-ld.config.txt"
 spec = importlib.util.spec_from_file_location("android_smoke", ROOT / "projects/aarch64-limine-crosvm/tools/fixture.py")
 smoke = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(smoke)
@@ -34,6 +36,8 @@ def main():
     mode.add_argument("--probes", type=Path)
     mode.add_argument("--art-dex", type=Path, help="run only dalvikvm64 -Xint with this classes.dex")
     parser.add_argument("--runtime-root", type=Path, help="Android /system and /apex runtime tree")
+    parser.add_argument("--linker-debug", action="store_true", help="enable Android LD_DEBUG=3 for ART diagnosis")
+    parser.add_argument("--stock-inputs", type=Path, help="verified stock property/APEX overlay for ART")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--accel", choices=("tcg", "hvf"), default="tcg")
@@ -41,6 +45,10 @@ def main():
     args = parser.parse_args()
     if args.art_dex and (not args.runtime_root or args.binder):
         parser.error("--art-dex requires --runtime-root and cannot use --binder")
+    if args.linker_debug and not args.art_dex:
+        parser.error("--linker-debug requires --art-dex")
+    if args.stock_inputs and not args.art_dex:
+        parser.error("--stock-inputs requires --art-dex")
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("timeout must be finite and positive")
     kernel, output = args.kernel.resolve(), args.output.resolve()
@@ -69,6 +77,11 @@ def main():
         dex_hash = validate_dex(args.art_dex)
         metadata = verify_art_runtime(args.runtime_root)
         art = art_launch(metadata)
+        if args.linker_debug:
+            art["env"].append("LD_DEBUG=3")
+        if args.stock_inputs:
+            verify_stock_inputs(args.stock_inputs, args.runtime_root)
+            art["env"] = [value for value in art["env"] if not value.startswith("LD_LIBRARY_PATH=")]
         runtime_files = [args.runtime_root / name for name in metadata["files"]]
     code = smoke.firmware(("SCARLET_EFI_CODE_ARM64_HVF", "SCARLET_EFI_CODE_ARM64")) if args.accel == "hvf" else smoke.firmware(("SCARLET_EFI_CODE_ARM64", "SCARLET_EFI_CODE_ARM64_EL2"))
     variables = smoke.firmware(("SCARLET_EFI_VARS_ARM64_HVF", "SCARLET_EFI_VARS_ARM64")) if args.accel == "hvf" else smoke.firmware(("SCARLET_EFI_VARS_ARM64", "SCARLET_EFI_VARS_ARM64_EL2"))
@@ -80,6 +93,8 @@ def main():
     (output / "inputs.json").write_text(json.dumps({
         "kernel_sha256": hashlib.sha256(kernel.read_bytes()).hexdigest(),
         "dex_sha256": dex_hash,
+        "stock_reference_config_sha256": sha256(STOCK_CONFIG) if args.stock_inputs else None,
+        "stock_manifest_sha256": sha256(args.stock_inputs / "stock-inputs.json") if args.stock_inputs else None,
         "runtime_sha256": {str(p.relative_to(args.runtime_root)): hashlib.sha256(p.read_bytes()).hexdigest()
                            for p in runtime_files},
     }, indent=2) + "\n")
@@ -100,6 +115,9 @@ def main():
             raise ValueError("DEX changed during staging")
         verify_art_runtime(android)
         shutil.copy2(args.runtime_root / "art-runtime.json", output / "art-runtime.json")
+        if args.stock_inputs:
+            stage_stock_inputs(args.stock_inputs, args.runtime_root, android)
+            shutil.copy2(args.stock_inputs / "stock-inputs.json", output / "stock-inputs.json")
     else:
         for name in ["bionic-static", "bionic-dynamic"]:
             shutil.copy2(probes / name, android / "bin" / name)
@@ -110,6 +128,7 @@ def main():
         shutil.copy2(probes / "build.json", output / "probes.json")
     env = dict(os.environ, SCARLET_ANDROID_DYNAMIC="1" if args.runtime_root else "0",
                SCARLET_ANDROID_BINDER="1" if args.binder else "0",
+               SCARLET_ANDROID_STOCK="1" if args.stock_inputs else "0",
                SCARLET_ANDROID_ART="1" if art else "0",
                SCARLET_ART_ARGS="\x1f".join(art["argv"]) if art else "",
                SCARLET_ART_ENV="\x1f".join(art["env"]) if art else "")
@@ -159,7 +178,7 @@ def main():
     result = smoke.run_guest(command, output, args.timeout)
     result["dynamic_runtime"] = bool(args.runtime_root)
     data = (output / "serial.log").read_bytes()
-    evidence = analyze_art(data) if art else analyze_direct(data, dynamic=bool(args.runtime_root), binder=args.binder)
+    evidence = analyze_art(data, stock=bool(args.stock_inputs)) if art else analyze_direct(data, dynamic=bool(args.runtime_root), binder=args.binder)
     result["art" if art else "probes"] = evidence
     if result["result"] == "PASS" and evidence["result"] != "PASS":
         result["result"] = "missing or failed child evidence"

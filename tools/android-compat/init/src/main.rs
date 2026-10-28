@@ -4,12 +4,17 @@
 extern crate scarlet_std as std;
 #[path = "../../../../user/bin/src/bootstrap.rs"]
 mod bootstrap;
+mod stock;
 
 use std::{environment::HandleMapping, println};
 
 fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
     let backing = bootstrap::backing("root=/dev/vblk1", true)?;
-    let (environment, _) = bootstrap::environment(backing)?;
+    let environment = if option_env!("SCARLET_ANDROID_STOCK") == Some("1") {
+        stock::environment(backing)?
+    } else {
+        bootstrap::environment(backing)?.0
+    };
     let android = environment
         .root("android-aarch64")
         .map_err(|_| "Android view")?;
@@ -45,6 +50,9 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
                 }
             })
             .map_err(|_| "kernel log thread")?;
+        if option_env!("SCARLET_ANDROID_STOCK") == Some("1") {
+            stock::prepare(&environment, &android, &handles)?;
+        }
         let program = "/apex/com.android.art/bin/dalvikvm64";
         let executable = android.open(program, 0).map_err(|_| "ART executable")?;
         let argv: std::vec::Vec<&str> = option_env!("SCARLET_ART_ARGS")
@@ -79,7 +87,7 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
     for program in programs {
         let executable = android.open(program, 0).map_err(|_| "probe executable")?;
         for case in [
-            "libc", "thread", "shared", "signal", "dynamic", "exec", "binder",
+            "libc", "thread", "shared", "signal", "dynamic", "exec", "xattr", "mremap", "binder",
         ] {
             if case == "binder" && option_env!("SCARLET_ANDROID_BINDER") != Some("1") {
                 continue;

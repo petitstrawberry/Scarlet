@@ -16,12 +16,12 @@ def png():
 class EvidenceTest(unittest.TestCase):
     def test_direct_exit_zero_without_child_output_is_not_success(self):
         lines = []
-        for case in ["libc", "thread", "shared", "signal", "exec", "binder-absent"]:
+        for case in ["libc", "thread", "shared", "signal", "exec", "xattr", "mremap", "binder-absent"]:
             lines += [f"SCARLET_ANDROID_DIRECT_CASE /bin/bionic-static {case}",
                       f"SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-static {case} 0"]
         lines += ["SCARLET_ANDROID_DIRECT_OK"]
         self.assertEqual(analyze_direct("\n".join(lines).encode())["result"], "INCOMPLETE")
-        for case in ["libc", "thread", "shared", "signal", "exec", "binder-absent"]:
+        for case in ["libc", "thread", "shared", "signal", "exec", "xattr", "mremap", "binder-absent"]:
             at = lines.index(f"SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-static {case} 0")
             lines[at:at] = [f"SCARLET_BIONIC_BEGIN {case}", f"SCARLET_BIONIC_OK {case}"]
         data = "\n".join(lines).encode()

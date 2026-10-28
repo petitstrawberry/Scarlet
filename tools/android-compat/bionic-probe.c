@@ -14,6 +14,8 @@
 #include <sys/auxv.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
+#include <sys/wait.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -158,6 +160,100 @@ static int exec_child_case(void) {
     return 0;
 }
 
+static int mremap_case(void) {
+    size_t page = (size_t)sysconf(_SC_PAGESIZE), size = page * 3;
+    unsigned char *source = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    unsigned char *reservation = mmap(NULL, page * 5, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#define MCHECK(test) do { if (!(test)) return fail("mremap", #test, errno); } while (0)
+    MCHECK(source != MAP_FAILED && reservation != MAP_FAILED);
+    source[0] = 42; source[page * 2] = 77;
+    reservation[0] = 11; reservation[page * 4] = 22;
+    reservation[page] = 99;
+    MCHECK(mprotect(source, size, PROT_READ) == 0);
+    int sync[2];
+    MCHECK(pipe(sync) == 0);
+    pid_t child = fork();
+    MCHECK(child >= 0);
+    if (child == 0) {
+        close(sync[1]);
+        char ready;
+        if (read(sync[0], &ready, 1) != 1 || source[0] != 42 || source[page] != 0 || source[2 * page] != 77)
+            _exit(31);
+        _exit(0);
+    }
+    close(sync[0]);
+    unsigned char *destination = reservation + page;
+    MCHECK(mremap(source, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, destination) == destination);
+    MCHECK(destination[0] == 42 && destination[page] == 0 && destination[2 * page] == 77);
+    MCHECK(reservation[0] == 11 && reservation[page * 4] == 22);
+    MCHECK(mremap(destination, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, destination + page) == MAP_FAILED && errno == EINVAL);
+    MCHECK(mprotect(destination, size, PROT_READ | PROT_WRITE) == 0);
+    destination[0] = 55;
+    MCHECK(mmap(source, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0) == source);
+    source[0] = 66;
+    MCHECK(destination[0] == 55);
+    MCHECK(write(sync[1], "x", 1) == 1 && close(sync[1]) == 0);
+    int status;
+    MCHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    MCHECK(munmap(source, size) == 0 && munmap(reservation, 5 * page) == 0);
+    source = mmap(NULL, page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    destination = mmap(NULL, page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    MCHECK(source != MAP_FAILED && destination != MAP_FAILED);
+    MCHECK(mremap(source, page, page, MREMAP_MAYMOVE | MREMAP_FIXED, destination) == destination);
+    MCHECK(mprotect(destination, page, PROT_READ | PROT_WRITE) == 0);
+    MCHECK(destination[0] == 0);
+    destination[0] = 88;
+    MCHECK(munmap(destination, page) == 0);
+#undef MCHECK
+    return 0;
+}
+
+static int xattr_case(void) {
+    char path[96], link[100], renamed[100], bytes[128];
+    snprintf(path, sizeof(path), "/tmp/bionic-xattr-%d", getpid());
+    snprintf(link, sizeof(link), "%s-ln", path);
+    snprintf(renamed, sizeof(renamed), "%s-new", path);
+    int fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
+    const char value[] = {0, 1, 127, (char)255};
+#define XCHECK(test) do { if (!(test)) return fail("xattr", #test, errno); } while (0)
+    XCHECK(fd >= 0);
+    XCHECK(fgetxattr(fd, "user.test", NULL, 0) == -1 && errno == ENODATA);
+    XCHECK(fsetxattr(fd, "user.test", value, sizeof(value), XATTR_CREATE) == 0);
+    XCHECK(fsetxattr(fd, "user.test", "wrong", 5, XATTR_CREATE) == -1 && errno == EEXIST);
+    XCHECK(fsetxattr(fd, "user.absent", "", 0, XATTR_REPLACE) == -1 && errno == ENODATA);
+    XCHECK(fsetxattr(fd, "user.test", "", 0, 3) == -1 && errno == EINVAL);
+    XCHECK(fsetxattr(fd, "user.test", (void *)1, 65537, 0) == -1 && errno == E2BIG);
+    XCHECK(fsetxattr(fd, "user.test", (void *)1, 4, 0) == -1 && errno == EFAULT);
+    XCHECK(getxattr(path, "user.test", NULL, 0) == sizeof(value));
+    memset(bytes, 'x', sizeof(bytes));
+    XCHECK(fgetxattr(fd, "user.test", bytes, 3) == -1 && errno == ERANGE && bytes[0] == 'x');
+    XCHECK(fgetxattr(fd, "user.test", bytes, sizeof(bytes)) == sizeof(value) && !memcmp(bytes, value, sizeof(value)));
+    XCHECK(flistxattr(fd, NULL, 0) == sizeof("user.test"));
+    XCHECK(listxattr(path, bytes, sizeof(bytes)) == sizeof("user.test") && !strcmp(bytes, "user.test"));
+    XCHECK(symlink(path, link) == 0);
+    XCHECK(getxattr(link, "user.test", bytes, sizeof(bytes)) == sizeof(value));
+    XCHECK(lgetxattr(link, "user.test", bytes, sizeof(bytes)) == -1 && errno == ENODATA);
+    XCHECK(lsetxattr(link, "user.test", "x", 1, 0) == -1 && errno == EPERM);
+    XCHECK(lsetxattr(link, "security.selinux", "label", 6, XATTR_CREATE) == 0);
+    XCHECK(lgetxattr(link, "security.selinux", bytes, sizeof(bytes)) == 6 && !strcmp(bytes, "label"));
+    XCHECK(llistxattr(link, bytes, sizeof(bytes)) == sizeof("security.selinux"));
+    XCHECK(lremovexattr(link, "security.selinux") == 0);
+    XCHECK(rename(path, renamed) == 0);
+    XCHECK(getxattr(renamed, "user.test", bytes, sizeof(bytes)) == sizeof(value));
+    XCHECK(unlink(renamed) == 0);
+    XCHECK(fgetxattr(fd, "user.test", bytes, sizeof(bytes)) == sizeof(value));
+    XCHECK(fsetxattr(fd, "user.test", "", 0, XATTR_REPLACE) == 0);
+    XCHECK(fgetxattr(fd, "user.test", NULL, 0) == 0);
+    XCHECK(fremovexattr(fd, "user.test") == 0);
+    XCHECK(flistxattr(fd, bytes, sizeof(bytes)) == 0);
+    XCHECK(fremovexattr(fd, "user.test") == -1 && errno == ENODATA);
+    XCHECK(fgetxattr(-1, "user.test", bytes, sizeof(bytes)) == -1 && errno == EBADF);
+    XCHECK(unlink(link) == 0 && close(fd) == 0);
+    XCHECK(getxattr("/bin/bionic-static", "user.test", NULL, 0) == -1 && errno == EOPNOTSUPP);
+#undef XCHECK
+    return 0;
+}
+
 static int binder_absent_case(void) {
     for (const char **path = (const char *[]){"/dev/binder", "/dev/hwbinder", "/dev/vndbinder", NULL};
          *path; ++path) {
@@ -179,6 +275,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "signal")) rc = signal_case();
     else if (!strcmp(argv[1], "shared")) rc = shared_case();
     else if (!strcmp(argv[1], "dynamic")) rc = dynamic_case();
+    else if (!strcmp(argv[1], "mremap")) rc = mremap_case();
+    else if (!strcmp(argv[1], "xattr")) rc = xattr_case();
     else if (!strcmp(argv[1], "binder")) rc = binder_case();
     else if (!strcmp(argv[1], "exec")) rc = exec_case(argv[0]);
     else if (!strcmp(argv[1], "exec-child")) rc = exec_child_case();

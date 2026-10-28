@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import posixpath
 import re
+import shutil
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -183,3 +184,24 @@ def decode_logd(packet):
 def linkerconfig_succeeded(returncode, messages):
     # Android 13 --strict can log ERROR and emit a partial file yet exit zero.
     return returncode == 0 and all(message["priority"] < 6 for message in messages)
+
+
+def stage_stock_inputs(stock, runtime, root):
+    """Add verified stock inputs to an already copied base runtime."""
+    metadata = verify_stock_inputs(stock, runtime)
+    for relative in metadata["directories"]:
+        (root / relative).mkdir(parents=True, exist_ok=True)
+    for relative, digest in metadata["files"].items():
+        destination = root / relative
+        if destination.is_symlink() or (destination.exists() and sha256(destination) != digest):
+            raise ValueError(f"stock input would replace a different base file: {relative}")
+        shutil.copy2(stock / relative, destination)
+        if sha256(destination) != digest:
+            raise ValueError(f"stock input changed during staging: {relative}")
+    for relative, target in metadata["symlinks"].items():
+        (root / relative).symlink_to(target)
+    for relative in metadata["symlinks"]:
+        path = root / relative
+        if not path.resolve().is_relative_to(root.resolve()) or not path.is_file():
+            raise ValueError(f"missing or escaping library alias target: {relative}")
+    return metadata

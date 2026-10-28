@@ -13,23 +13,30 @@ MAX_PNG = 16 * 1024 * 1024
 MAX_PIXELS = 16 * 1024 * 1024
 
 
-def analyze_art(data):
+def analyze_art(data, stock=False):
     """A Java marker alone, or a launcher exit alone, is not an ART pass."""
     expected = ["SCARLET_ANDROID_ART_START", "SCARLET_ART_BEGIN", "Scarlet ART: 42",
                 "SCARLET_ART_OK", "SCARLET_ANDROID_ART_EXIT 0", "SCARLET_ANDROID_ART_OK"]
     lines = data.replace(b"\r", b"").decode("utf-8", errors="replace").splitlines()
+    if stock:
+        expected = ["SCARLET_ANDROID_STOCK_START properties", "SCARLET_PROPERTY_SNAPSHOT_OK",
+                    "SCARLET_ANDROID_STOCK_EXIT properties 0", "SCARLET_ANDROID_STOCK_START linkerconfig",
+                    "SCARLET_ANDROID_STOCK_EXIT linkerconfig 0", "SCARLET_ANDROID_STOCK_OK"] + expected
     records = [line for line in lines if line.startswith(
-        ("SCARLET_ANDROID_ART_", "SCARLET_ART_", "Scarlet ART:"))]
+        ("SCARLET_ANDROID_ART_", "SCARLET_ART_", "Scarlet ART:") +
+        (("SCARLET_ANDROID_STOCK_", "SCARLET_PROPERTY_") if stock else ()))]
+    records = ["SCARLET_PROPERTY_SNAPSHOT_OK" if stock and
+               re.fullmatch(r"SCARLET_PROPERTY_SNAPSHOT_OK [1-9][0-9]*", line) else line for line in records]
     return {"result": "PASS" if records == expected else "INCOMPLETE", "records": records}
 
 
 def analyze_direct(data, dynamic=False, binder=False):
     """Require child evidence as well as native wait status and suite marker."""
-    expected = [("/bin/bionic-static", name) for name in ("libc", "thread", "shared", "signal", "exec")]
+    expected = [("/bin/bionic-static", name) for name in ("libc", "thread", "shared", "signal", "exec", "xattr", "mremap")]
     if binder:
         expected.append(("/bin/bionic-static", "binder"))
     if dynamic:
-        expected += [("/bin/bionic-dynamic", name) for name in ("libc", "thread", "shared", "signal", "dynamic", "exec")]
+        expected += [("/bin/bionic-dynamic", name) for name in ("libc", "thread", "shared", "signal", "dynamic", "exec", "xattr", "mremap")]
         if binder:
             expected.append(("/bin/bionic-dynamic", "binder"))
     expected.append(("/bin/bionic-static", "binder-absent"))
@@ -140,9 +147,12 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--apk", action="store_true")
     mode.add_argument("--art", action="store_true", help="require Java output and normal ART exit")
+    parser.add_argument("--stock", action="store_true", help="also require stock property/linkerconfig bootstrap")
     args = parser.parse_args()
+    if args.stock and not args.art:
+        parser.error("--stock requires --art")
     data = args.serial.read_bytes()
-    result, frame = (analyze_art(data), None) if args.art else analyze(data, apk=args.apk)
+    result, frame = (analyze_art(data, stock=args.stock), None) if args.art else analyze(data, apk=args.apk)
     args.output.mkdir(parents=True, exist_ok=False)
     if frame is not None:
         (args.output / "frame.png").write_bytes(frame)

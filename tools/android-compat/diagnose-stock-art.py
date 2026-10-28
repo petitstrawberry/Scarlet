@@ -16,7 +16,7 @@ import threading
 import uuid
 
 from art_inputs import art_launch, sha256, validate_dex, verify_art_runtime
-from stock_art import decode_logd, linkerconfig_succeeded, verify_stock_inputs
+from stock_art import decode_logd, linkerconfig_succeeded, verify_stock_inputs, stage_stock_inputs
 
 IMAGE = "nixos/nix@sha256:4bfe741027f0bfbef745862cbf3b5f424ee99801c04138146c0000a28759636d"
 
@@ -92,19 +92,7 @@ def diagnose(runtime, stock, dex, qemu, output, image=IMAGE, timeout=60):
     output.mkdir(parents=True, exist_ok=False)
     root = output / "root"
     shutil.copytree(runtime, root, symlinks=True)
-    for relative in metadata["directories"]:
-        (root / relative).mkdir(parents=True, exist_ok=True)
-    for relative in metadata["files"]:
-        destination = root / relative
-        if destination.exists() and sha256(destination) != metadata["files"][relative]:
-            raise ValueError(f"stock input would replace a different base file: {relative}")
-        shutil.copy2(stock / relative, destination)
-    for relative, target in metadata["symlinks"].items():
-        (root / relative).symlink_to(target)
-    for relative in metadata["symlinks"]:
-        path = root / relative
-        if not path.resolve().is_relative_to(root) or not path.is_file():
-            raise ValueError(f"missing or escaping library alias target: {relative}")
+    stage_stock_inputs(stock, runtime, root)
     shutil.copyfile(dex, root / "data/local/tmp/classes.dex")
     record = {"platform": "host Linux qemu-user, NOT Scarlet", "result": "INCOMPLETE",
               "base_manifest_sha256": sha256(runtime / "art-runtime.json"),

@@ -149,6 +149,19 @@ class ArtEvidenceTest(unittest.TestCase):
             self.assertEqual(self.result(self.records[:i] + self.records[i + 1:]), "INCOMPLETE")
         self.assertEqual(self.result(self.records[::-1]), "INCOMPLETE")
 
+    def test_stock_bootstrap_required_before_java(self):
+        boot = ["SCARLET_ANDROID_STOCK_START properties", "SCARLET_PROPERTY_SNAPSHOT_OK 216",
+                "SCARLET_ANDROID_STOCK_EXIT properties 0", "SCARLET_ANDROID_STOCK_START linkerconfig",
+                "SCARLET_ANDROID_STOCK_EXIT linkerconfig 0", "SCARLET_ANDROID_STOCK_OK"]
+        def result(records):
+            return analyze_art(("\n".join(records) + "\n").encode(), stock=True)["result"]
+        self.assertEqual(result(boot + self.records), "PASS")
+        self.assertEqual(result(self.records), "INCOMPLETE")
+        for i in range(len(boot)):
+            self.assertEqual(result(boot[:i] + boot[i + 1:] + self.records), "INCOMPLETE")
+        for bad in ("SCARLET_PROPERTY_SNAPSHOT_OK 0", "SCARLET_PROPERTY_SNAPSHOT_OK junk"):
+            self.assertEqual(result(boot[:1] + [bad] + boot[2:] + self.records), "INCOMPLETE")
+
     def test_crash_duplicate_or_failure_after_java_output_is_not_pass(self):
         records = list(self.records)
         records[-2] = "SCARLET_ANDROID_ART_EXIT 134"
