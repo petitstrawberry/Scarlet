@@ -247,7 +247,9 @@ impl AbiModule for LinuxAarch64Abi {
             }
         }
 
-        Some(confidence.min(100))
+        // Generic ELF/path/inheritance heuristics must not tie with a derived
+        // ABI's positive format identification (for example its interpreter).
+        Some(confidence.min(95))
     }
 
     fn execute_binary(

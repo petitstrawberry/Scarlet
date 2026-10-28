@@ -159,7 +159,7 @@ pub fn environment(native: VfsView) -> Result<(Environment, Vec<VfsView>), &'sta
     env.set_root("scarlet", &native)
         .map_err(|_| "cannot register Scarlet view")?;
     #[cfg(target_arch = "aarch64")]
-    const OTHER_ABIS: &[&str] = &["linux-aarch64"];
+    const OTHER_ABIS: &[&str] = &["linux-aarch64", "android-aarch64"];
     #[cfg(target_arch = "riscv64")]
     const OTHER_ABIS: &[&str] = &["linux-riscv64", "xv6-riscv64"];
     #[cfg(target_arch = "riscv32")]
