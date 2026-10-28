@@ -2332,32 +2332,19 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             .unwrap_or_else(errno::to_result);
     }
 
-    // Scarlet does not mount a synthetic procfs yet. Linux's lstat path for
-    // `/proc/<pid>/exe` must nevertheless report a symlink before C++
-    // `std::filesystem::read_symlink` will issue the subsequent readlinkat.
-    if (flags & AT_SYMLINK_NOFOLLOW) != 0
-        && let Some(selector) = proc_exe_selector(&path_str)
+    // Bionic's linker stats /proc/self/exe before loading the main image.
+    // lstat still describes the synthetic link itself.
+    if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs_for_proc, dirfd, &path_str)
+        && let Some(selector) = proc_exe_selector(&absolute)
     {
-        let identity = match resolve_proc_exe_identity(&task, &path_str, selector) {
-            Ok(identity) => identity,
-            Err(error) => return errno::to_result(error),
-        };
-        let statistics = proc_exe_linux_stat(identity.leader_id as u64, identity.path.len());
-        if let Err(error) = write_linux_stat(&task, stat_ptr, &statistics) {
-            return errno::to_result(error);
-        }
-        if MOZC_IPC_TRACE_ENABLED {
-            crate::println!(
-                "[linux proc-exe] lstat path='{}' caller_global={} caller_local={} target_global={} leader={} size={}",
-                path_str,
-                task.get_id(),
-                task.try_get_namespace_id().unwrap_or(0),
-                identity.target_id,
-                identity.leader_id,
-                identity.path.len()
-            );
-        }
-        return 0;
+        let (statistics, _) =
+            match proc_exe_stat(&task, &absolute, selector, flags & AT_SYMLINK_NOFOLLOW != 0) {
+                Ok(statistics) => statistics,
+                Err(error) => return errno::to_result(error),
+            };
+        return write_linux_stat(&task, stat_ptr, &statistics)
+            .map(|_| 0)
+            .unwrap_or_else(errno::to_result);
     }
 
     let vfs = match task.get_vfs() {
@@ -2503,6 +2490,21 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     {
         let mut statx = unsafe { core::mem::zeroed::<LinuxStatx>() };
         fill_statx_from_stat(&mut statx, &LinuxStat::from_metadata(&metadata), 0, mask);
+        return write_linux_statx(&task, statx_ptr, &statx)
+            .map(|_| 0)
+            .unwrap_or_else(errno::to_result);
+    }
+
+    if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs, dirfd, &path_str)
+        && let Some(selector) = proc_exe_selector(&absolute)
+    {
+        let (stat, birthtime) =
+            match proc_exe_stat(&task, &absolute, selector, flags & AT_SYMLINK_NOFOLLOW != 0) {
+                Ok(statistics) => statistics,
+                Err(error) => return errno::to_result(error),
+            };
+        let mut statx = unsafe { core::mem::zeroed::<LinuxStatx>() };
+        fill_statx_from_stat(&mut statx, &stat, birthtime, mask);
         return write_linux_statx(&task, statx_ptr, &statx)
             .map(|_| 0)
             .unwrap_or_else(errno::to_result);
@@ -5804,6 +5806,38 @@ struct ProcExeIdentity {
     path: String,
 }
 
+fn proc_exe_stat(
+    task: &crate::task::Task,
+    source_path: &str,
+    selector: &str,
+    nofollow: bool,
+) -> Result<(LinuxStat, u64), usize> {
+    let identity = resolve_proc_exe_identity(task, source_path, selector)?;
+    if nofollow {
+        return Ok((
+            proc_exe_linux_stat(identity.leader_id as u64, identity.path.len()),
+            0,
+        ));
+    }
+    // Resolve in the executable owner's view, not the caller's filesystem.
+    // Task currently retains the executable path rather than an open inode;
+    // deleted/replaced executables therefore retain that existing limitation.
+    let owner = get_task_by_id(identity.leader_id).ok_or(errno::ENOENT)?;
+    let vfs = owner.get_vfs().ok_or(errno::EIO)?;
+    let (entry, _) = vfs
+        .resolve_path(&identity.path)
+        .map_err(|error| errno::from_fs_error(&error))?;
+    let node = entry.node();
+    let metadata = node
+        .metadata()
+        .map_err(|error| errno::from_fs_error(&error))?;
+    let mut stat = LinuxStat::from_metadata(&metadata);
+    if let Some(mode) = super::mode::get(&node) {
+        stat.st_mode = (stat.st_mode & !0o7777) | mode;
+    }
+    Ok((stat, metadata.created_time))
+}
+
 fn resolve_proc_exe_identity(
     task: &crate::task::Task,
     source_path: &str,
@@ -6782,6 +6816,54 @@ mod tests {
         assert_eq!(proc_exe_selector("/proc/42/exe"), Some("42"));
         assert_eq!(proc_exe_selector("/proc/42/fd/1"), None);
         assert_eq!(proc_exe_selector("/proc//exe"), None);
+    }
+
+    #[test_case]
+    fn proc_exe_follow_uses_owner_view_and_nofollow_keeps_link_identity() {
+        use crate::sched::scheduler::{
+            add_task, register_online_cpu, remove_from_ready_queues, reset,
+        };
+        use crate::task::{Task, TaskType};
+        use alloc::sync::Arc;
+
+        reset();
+        let cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+        let caller = Task::new("proc-exe-caller".into(), 1, TaskType::Kernel);
+        caller.init();
+        let caller_id = add_task(caller, cpu);
+        remove_from_ready_queues(caller_id);
+        let caller = super::get_task_by_id(caller_id).unwrap();
+        let caller_vfs = Arc::new(crate::fs::VfsManager::new());
+        caller_vfs.create_dir("/program").unwrap();
+        *caller.vfs.write() = Some(caller_vfs);
+
+        let owner = Task::new("proc-exe-owner".into(), 1, TaskType::Kernel);
+        owner.init();
+        let owner_id = add_task(owner, cpu);
+        remove_from_ready_queues(owner_id);
+        let owner = super::get_task_by_id(owner_id).unwrap();
+        assert!(caller.adopt_registered_child(&owner));
+        let owner_vfs = Arc::new(crate::fs::VfsManager::new());
+        owner_vfs
+            .create_file("/program", crate::fs::FileType::RegularFile)
+            .unwrap();
+        *owner.vfs.write() = Some(owner_vfs);
+        owner.set_executable_path("/program");
+        *owner.name.write() = "renamed-thread".into();
+
+        let pid = caller.get_namespace().resolve_local_id(owner_id).unwrap();
+        let selector = alloc::format!("{pid}");
+        let path = alloc::format!("/proc/{pid}/exe");
+        let (file, _) = super::proc_exe_stat(&caller, &path, &selector, false).unwrap();
+        assert_eq!(file.st_mode & 0o170000, super::S_IFREG);
+        let (link, _) = super::proc_exe_stat(&caller, &path, &selector, true).unwrap();
+        assert_eq!(link.st_mode & 0o170000, super::S_IFLNK);
+        assert_eq!(link.st_size, "/program".len() as i64);
+        assert_eq!(link.st_ino, owner.get_thread_group_id() as u64);
+        drop(owner);
+        drop(caller);
+        reset();
     }
 
     #[test_case]
