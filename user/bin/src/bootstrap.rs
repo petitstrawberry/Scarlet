@@ -43,7 +43,10 @@ pub fn console_at(path: &str) -> Result<[Handle; 3], &'static str> {
         return Err("init.console must name an absolute device path");
     }
     devfs()?;
-    let input = File::open(path)
+    // The same open file description supplies stdin, stdout and stderr.
+    // Linux ABI writes honor its access mode, so a read-only open silently
+    // breaks libc/VMM diagnostics after the handles cross the ABI boundary.
+    let input = File::open_with_flags(path, 0x2) // O_RDWR
         .map_err(|_| "cannot open console")?
         .into_handle();
     let output = input.duplicate().map_err(|_| "cannot duplicate console")?;

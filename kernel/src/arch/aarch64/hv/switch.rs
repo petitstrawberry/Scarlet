@@ -522,7 +522,8 @@ pub extern "C" fn arch_guest_trap_exit() {
         "msr tpidr_el0, x13",
         "msr tpidrro_el0, x14",
         "msr cntkctl_el1, x15",
-        "msr vttbr_el2, xzr",
+        // HCR_EL2 has restored the host VHE regime (VM=0). Retain VTTBR
+        // across internal traps; run() clears it before returning to its caller.
         "isb",
         "msr daif, x7",
         "add sp, sp, #32",
