@@ -51,6 +51,7 @@ const SYS_CSSELR_EL1: u32 = (3 << 14) | (2 << 11) | (0 << 7) | (0 << 3) | 0;
 const SYS_ICC_SGI1R_EL1: u32 = (3 << 14) | (12 << 7) | (11 << 3) | 5;
 const SYS_CTR_EL0: u32 = (3 << 14) | (3 << 11) | (0 << 7) | (0 << 3) | 1;
 const TIMER_CTL_ENABLE: u64 = 1 << 0;
+const TIMER_CTL_IMASK: u64 = 1 << 1;
 const TIMER_CTL_ISTATUS: u64 = 1 << 2;
 
 const GIC_DIST_SIZE: u64 = 0x1_0000;
@@ -139,6 +140,12 @@ fn emulate_timer_sysreg(
 ) -> bool {
     let mut sysregs = guest.sysregs.clone();
     sysregs.take_pending_into();
+    // Rt == 31 names XZR in MSR/MRS, never SP or an absent write.
+    let source = if reg < 31 {
+        trapframe.regs.reg[reg] as u64
+    } else {
+        0
+    };
 
     match sysreg {
         SYS_CNTFRQ_EL0 if is_read => {
@@ -157,10 +164,7 @@ fn emulate_timer_sysreg(
             }
         }
         SYS_CNTP_CTL_EL0 | SYS_CNTV_CTL_EL0 => {
-            if reg < 31 {
-                sysregs.cntv_ctl_el0 =
-                    (trapframe.regs.reg[reg as usize] as u64) & !TIMER_CTL_ISTATUS;
-            }
+            sysregs.cntv_ctl_el0 = source & (TIMER_CTL_ENABLE | TIMER_CTL_IMASK);
         }
         SYS_CNTP_CVAL_EL0 | SYS_CNTV_CVAL_EL0 if is_read => {
             if reg < 31 {
@@ -168,23 +172,20 @@ fn emulate_timer_sysreg(
             }
         }
         SYS_CNTP_CVAL_EL0 | SYS_CNTV_CVAL_EL0 => {
-            if reg < 31 {
-                sysregs.cntv_cval_el0 = trapframe.regs.reg[reg as usize] as u64;
-            }
+            sysregs.cntv_cval_el0 = source;
         }
         SYS_CNTP_TVAL_EL0 | SYS_CNTV_TVAL_EL0 if is_read => {
             if reg < 31 {
                 trapframe.regs.reg[reg as usize] = sysregs
                     .cntv_cval_el0
                     .wrapping_sub(guest_virtual_count(&sysregs))
-                    as usize;
+                    as u32 as usize;
             }
         }
         SYS_CNTP_TVAL_EL0 | SYS_CNTV_TVAL_EL0 => {
-            if reg < 31 {
-                sysregs.cntv_cval_el0 = guest_virtual_count(&sysregs)
-                    .wrapping_add(trapframe.regs.reg[reg as usize] as u64);
-            }
+            // TVAL is signed 32-bit, including when the MSR source is 64-bit.
+            sysregs.cntv_cval_el0 =
+                guest_virtual_count(&sysregs).wrapping_add(source as u32 as i32 as i64 as u64);
         }
         _ => return false,
     }
@@ -246,8 +247,12 @@ fn emulate_el1_sysreg(
         if reg < 31 {
             trapframe.regs.reg[reg as usize] = *value as usize;
         }
-    } else if reg < 31 {
-        *value = trapframe.regs.reg[reg as usize] as u64;
+    } else {
+        *value = if reg < 31 {
+            trapframe.regs.reg[reg] as u64
+        } else {
+            0
+        };
     }
 
     guest.sysregs = sysregs;
