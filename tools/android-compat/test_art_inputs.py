@@ -73,6 +73,23 @@ class ArtInputTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "incomplete"):
                     image.dump("/file", target, 2)
 
+    def test_explicit_empty_ext4_file_is_distinct_from_failed_dump(self):
+        # Stock APEXes can contain a valid, empty linker.config.pb. Accept it
+        # only when its zero size was obtained from the directory listing.
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Ext4("unused.ext4")
+            target = Path(temporary) / "linker.config.pb"
+            with patch.object(image, "command", side_effect=lambda _: target.touch()):
+                image.dump("/etc/linker.config.pb", target, 0)
+            self.assertEqual(target.read_bytes(), b"")
+            target.unlink()
+            with patch.object(image, "command", return_value=""):
+                with self.assertRaisesRegex(ValueError, "missing or incomplete"):
+                    image.dump("/missing", target, 0)
+            with patch.object(image, "command", side_effect=lambda _: target.touch()):
+                with self.assertRaisesRegex(ValueError, "missing or incomplete"):
+                    image.dump("/unknown-size", target)
+
     def test_debugfs_quotes_paths_and_rejects_newline(self):
         self.assertEqual(quote_debugfs('a b"c\\d'), '"a b\\"c\\\\d"')
         with self.assertRaises(ValueError):

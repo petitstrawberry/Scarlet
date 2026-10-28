@@ -110,8 +110,9 @@ class Ext4:
             raise ValueError(f"refusing to overwrite {target}")
         self.command(f"dump {quote_debugfs(source)} {quote_debugfs(target)}")
         # debugfs can report success when the command failed.
-        if not target.is_file() or not target.stat().st_size or (size is not None and target.stat().st_size != size):
-            raise ValueError(f"missing or incomplete ext4 file: {source}")
+        if (not target.is_file() or (size is None and not target.stat().st_size) or
+                (size is not None and target.stat().st_size != size)):
+            raise ValueError(f"missing or incomplete ext4 file: {source} from {self.image}")
         target.chmod(0o755 if "/bin/" in str(source) else 0o644)
 
     def tree(self, source, target):
