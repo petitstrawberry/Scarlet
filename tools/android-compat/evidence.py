@@ -13,6 +13,16 @@ MAX_PNG = 16 * 1024 * 1024
 MAX_PIXELS = 16 * 1024 * 1024
 
 
+def analyze_art(data):
+    """A Java marker alone, or a launcher exit alone, is not an ART pass."""
+    expected = ["SCARLET_ANDROID_ART_START", "SCARLET_ART_BEGIN", "Scarlet ART: 42",
+                "SCARLET_ART_OK", "SCARLET_ANDROID_ART_EXIT 0", "SCARLET_ANDROID_ART_OK"]
+    lines = data.replace(b"\r", b"").decode("utf-8", errors="replace").splitlines()
+    records = [line for line in lines if line.startswith(
+        ("SCARLET_ANDROID_ART_", "SCARLET_ART_", "Scarlet ART:"))]
+    return {"result": "PASS" if records == expected else "INCOMPLETE", "records": records}
+
+
 def analyze_direct(data, dynamic=False, binder=False):
     """Require child evidence as well as native wait status and suite marker."""
     expected = [("/bin/bionic-static", name) for name in ("libc", "thread", "shared", "signal", "exec")]
@@ -127,9 +137,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("serial", type=Path)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--apk", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--apk", action="store_true")
+    mode.add_argument("--art", action="store_true", help="require Java output and normal ART exit")
     args = parser.parse_args()
-    result, frame = analyze(args.serial.read_bytes(), apk=args.apk)
+    data = args.serial.read_bytes()
+    result, frame = (analyze_art(data), None) if args.art else analyze(data, apk=args.apk)
     args.output.mkdir(parents=True, exist_ok=False)
     if frame is not None:
         (args.output / "frame.png").write_bytes(frame)

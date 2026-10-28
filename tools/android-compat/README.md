@@ -79,6 +79,55 @@ warning and uses its fallback namespace with the explicit library search path.
 It does not provide Android linker namespace isolation or framework services.
 Generated Android binaries and SDK images remain local artifacts.
 
+### Preparing the ART interpreter checkpoint
+
+`prepare-art.py` prepares **real ARM64 ART**, including Bionic, core DEX jars,
+ICU data, timezone data and the ELF dependency closure. It accepts exactly the
+Android 13/API 33 revision 2 SDK image below. Its SHA-256 pin fixes the GPT and
+liblp extent offsets used to extract the system ext4 partition. It is not a
+general Android disk parser. Extraction uses read-only `debugfs`; CAPEX packages
+are unpacked through `original_apex`, with no privileged mounts. No NDK shared
+libraries are used as runtime inputs.
+
+| Input | Source/version | SHA-256 |
+|---|---|---|
+| SDK system image | [ARM64 API 33 revision 2](https://dl.google.com/android/repository/sys-img/android/arm64-v8a-33_r02.zip), Android build `TE1A.220922.034` / `10940250` | `55ba9a20d473dd5351c77342016956342c40375f3e073b65a43dc9db13ccc5c6` |
+| D8 build tools | [Build Tools 33.0.2, Linux](https://dl.google.com/android/repository/build-tools_r33.0.2-linux.zip) | `ff19ccbe3a5098b5dd10722063ebcd40218a30d23b50133e386fc39ea5240e79` |
+| Bionic probe compiler | [NDK r25b, Linux](https://dl.google.com/android/repository/android-ndk-r25b-linux.zip), `25.1.8937393` | `403ac3e3020dd0db63a848dcaba6ceb2603bf64de90949d5c4361f848e44b005` |
+
+From `nix develop`, with a JDK installed (`JAVA_HOME`, including Java 8 release
+symbols) and SDK Build Tools unpacked:
+
+```sh
+python3 tools/android-compat/prepare-art.py \
+  --sdk-image /path/to/arm64-v8a-33_r02.zip \
+  --output .build/android-compat/art-runtime
+python3 tools/android-compat/build-dex.py \
+  --build-tools /path/to/sdk/build-tools/33.0.2 \
+  --output .build/android-compat/dex
+```
+
+Both commands require a fresh output directory. `art-runtime.json` records the
+SDK URL/hash/build properties, package/APEX/payload hashes, every output hash,
+ELF dependencies, and the explicit library/boot-class search paths. `build.json`
+records the Java/compiler/D8 versions, commands, source hash and DEX hash. The
+plain Java probe computes 42 and prints `SCARLET_ART_BEGIN`, `Scarlet ART: 42`
+and `SCARLET_ART_OK`, then returns normally. It has no Activity or framework
+dependencies. The runtime tree has no boot image or linker namespace config;
+these inputs target a core-only, image-less interpreter experiment.
+
+Cloud checkpoint on 2026-10-28: input extraction and DEX compilation succeeded
+on x86_64 Linux, using OpenJDK `21.0.12.1` and D8 `3.3.20-dev+aosp5`. The DEX is
+1,296 bytes, SHA-256 `aaba12744df03510040942b60e66af7959ee1ce1fbdc5124a4304f757d3be2d1`.
+Host preparation used `debugfs 1.47.2` and host Python because the project Nix
+environment was blocked. Nix `2.24.11` in `nixos/nix:2.24.11` could fetch flake
+sources after using the Cloud CA bundle, but `cache.nixos.org` and
+`scarlet-rust-toolchain.cachix.org` returned HTTP 403. Its source-build fallback
+then failed to fetch `https://ftpmirror.gnu.org/bash/bash-5.3.tar.gz`.
+**No Cloud Scarlet build, ART startup, Java execution on Scarlet, or ABI fix
+has been verified at this checkpoint.** These host checks do not replace the
+earlier local Bionic or kernel tests.
+
 ### ABI composition and native RPC boundary
 
 `kernel/src/abi/android/aarch64.rs` registers `android-aarch64` as an independent
