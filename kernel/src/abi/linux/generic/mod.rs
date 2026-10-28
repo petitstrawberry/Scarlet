@@ -627,6 +627,7 @@ syscall_table! {
     Sigaltstack = 132 => signal::sys_sigaltstack,
     RtSigaction = 134 => signal::sys_rt_sigaction,
     RtSigprocmask = 135 => signal::sys_rt_sigprocmask,
+    RtSigtimedwait = 137 => signal::sys_rt_sigtimedwait,
     Setpriority = 140 => proc::sys_setpriority,
     Getpriority = 141 => proc::sys_getpriority,
     SetGid = 144 => proc::sys_setgid,

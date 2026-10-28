@@ -169,6 +169,20 @@ static int thread_case(void) {
 
 static void receive_signal(int number) { signal_seen = number; }
 
+struct signal_wait_args { int ready; sigset_t mask; int interrupt; };
+static void *signal_wait_worker(void *argument) {
+    struct signal_wait_args *args = argument;
+    if (write(args->ready, "r", 1) != 1) return (void *)1;
+    int number = 0;
+    if (args->interrupt) {
+        struct timespec timeout = {2, 0};
+        int rc = sigtimedwait(&args->mask, NULL, &timeout);
+        return (void *)(uintptr_t)(rc == -1 && errno == EINTR ? 0 : 2);
+    }
+    int rc = sigwait(&args->mask, &number);
+    return (void *)(uintptr_t)(rc == 0 && number == SIGUSR1 ? 0 : 3);
+}
+
 static int signal_case(void) {
     struct sigaction action = {0};
     action.sa_handler = receive_signal;
@@ -177,6 +191,37 @@ static int signal_case(void) {
     int rc = raise(SIGUSR1);
     if (rc) return fail("signal", "raise", errno);
     if (signal_seen != SIGUSR1) return fail("signal", "handler was not called", 0);
+    sigset_t mask, original;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGUSR1);
+#define SCHECK(test) do { if (!(test)) return fail("signal", #test, errno); } while (0)
+    SCHECK(pthread_sigmask(SIG_BLOCK, &mask, &original) == 0);
+    signal_seen = 0;
+    SCHECK(raise(SIGUSR1) == 0);
+    siginfo_t info;
+    struct timespec zero = {0}, short_timeout = {0, 20000000};
+    SCHECK(sigtimedwait(&mask, &info, &zero) == SIGUSR1 && info.si_signo == SIGUSR1);
+    SCHECK(signal_seen == 0);
+    SCHECK(sigtimedwait(&mask, NULL, &zero) == -1 && errno == EAGAIN);
+    SCHECK(sigtimedwait(&mask, NULL, &short_timeout) == -1 && errno == EAGAIN);
+    SCHECK(sigaction(SIGINT, &action, NULL) == 0);
+    for (int interrupt = 0; interrupt < 2; ++interrupt) {
+        int pipefd[2];
+        SCHECK(pipe(pipefd) == 0);
+        struct signal_wait_args args = {pipefd[1], mask, interrupt};
+        pthread_t waiter;
+        SCHECK(pthread_create(&waiter, NULL, signal_wait_worker, &args) == 0);
+        char ready;
+        SCHECK(read(pipefd[0], &ready, 1) == 1);
+        usleep(20000);
+        SCHECK(pthread_kill(waiter, interrupt ? SIGINT : SIGUSR1) == 0);
+        void *result;
+        SCHECK(pthread_join(waiter, &result) == 0 && result == NULL);
+        SCHECK(close(pipefd[0]) == 0 && close(pipefd[1]) == 0);
+    }
+    SCHECK(signal_seen == SIGINT);
+    SCHECK(pthread_sigmask(SIG_SETMASK, &original, NULL) == 0);
+#undef SCHECK
     return 0;
 }
 

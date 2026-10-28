@@ -619,6 +619,104 @@ pub fn sys_rt_sigprocmask(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
     0
 }
 
+/// Consume one matching pending signal. Like signalfd, the current event model
+/// retains signal numbers but not sender/payload records or realtime queues.
+/// Report SI_KERNEL explicitly instead of fabricating a userspace sender.
+fn take_waited_signal(
+    task: &Task,
+    state: &mut SignalState,
+    mask: u64,
+    info: usize,
+) -> Result<Option<usize>, usize> {
+    let matching = state.pending.raw() & mask;
+    if matching == 0 {
+        return Ok(None);
+    }
+    let number = matching.trailing_zeros() + 1;
+    if info != 0 {
+        let mut record = [0; 128];
+        record[..4].copy_from_slice(&number.to_ne_bytes());
+        record[8..12].copy_from_slice(&128i32.to_ne_bytes()); // SI_KERNEL
+        crate::library::std::usercopy::copy_to_user(task, info, &record)
+            .map_err(|_| errno::EFAULT)?;
+    }
+    // A bad output pointer must not silently discard the pending signal.
+    state
+        .pending
+        .set_raw(state.pending.raw() & !(1u64 << (number - 1)));
+    Ok(Some(number as usize))
+}
+
+/// Wait for a signal in a userspace set, with a relative optional timeout.
+/// Standard signal coalescing and unavailable siginfo payloads follow the same
+/// existing SignalState contract as signalfd; realtime queuing is separate work.
+pub fn sys_rt_sigtimedwait(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    use crate::library::std::usercopy::copy_from_user;
+    use crate::sync::waker::WaitResult;
+    let Some(task) = mytask() else {
+        return errno::to_result(errno::ESRCH);
+    };
+    let mask_ptr = trapframe.get_arg(0);
+    let info = trapframe.get_arg(1);
+    let timeout = trapframe.get_arg(2);
+    let size = trapframe.get_arg(3);
+    trapframe.increment_pc_next(&task);
+    if size != 8 {
+        return errno::to_result(errno::EINVAL);
+    }
+    let mut bytes = [0; 8];
+    if copy_from_user(&task, mask_ptr, &mut bytes).is_err() {
+        return errno::to_result(errno::EFAULT);
+    }
+    let unmaskable =
+        (1u64 << (LinuxSignal::SIGKILL as u32 - 1)) | (1u64 << (LinuxSignal::SIGSTOP as u32 - 1));
+    let mask = u64::from_ne_bytes(bytes) & !unmaskable;
+    let deadline = if timeout != 0 {
+        let mut bytes = [0; 16];
+        if copy_from_user(&task, timeout, &mut bytes).is_err() {
+            return errno::to_result(errno::EFAULT);
+        }
+        let seconds = i64::from_ne_bytes(bytes[..8].try_into().unwrap());
+        let nanos = i64::from_ne_bytes(bytes[8..].try_into().unwrap());
+        if seconds < 0 || !(0..1_000_000_000).contains(&nanos) {
+            return errno::to_result(errno::EINVAL);
+        }
+        let duration =
+            (seconds as u128 * 1_000_000_000 + nanos as u128).min(u64::MAX as u128) as u64;
+        Some(crate::timer::get_time_ns().saturating_add(duration))
+    } else {
+        None
+    };
+    abi.bind_task_signals(&task);
+    let state = abi.signal_state.clone();
+    let waker = state.lock().pending_waker.clone();
+    let mut interrupted = false;
+    loop {
+        {
+            let mut state = state.lock();
+            match take_waited_signal(&task, &mut state, mask, info) {
+                Ok(Some(number)) => return number,
+                Err(error) => return errno::to_result(error),
+                Ok(None) => {}
+            }
+            if interrupted || state.next_deliverable_signal().is_some() {
+                return errno::to_result(errno::EINTR);
+            }
+        }
+        let remaining = deadline.map(|end| end.saturating_sub(crate::timer::get_time_ns()));
+        if remaining == Some(0) {
+            return errno::to_result(errno::EAGAIN);
+        }
+        // The native Waker checks readiness again after registration, closing
+        // the signal-arrives-before-sleep window without holding SignalState
+        // while scheduling. Spurious/unrelated wakes retain the original deadline.
+        interrupted = waker.wait_with_condition(task.get_id(), trapframe, remaining, 0, || {
+            let state = state.lock();
+            state.pending.raw() & mask != 0 || state.next_deliverable_signal().is_some()
+        }) == WaitResult::Interrupted;
+    }
+}
+
 /// Convert Scarlet ProcessControlType to Linux signal
 pub fn process_control_to_signal(control_type: ProcessControlType) -> Option<LinuxSignal> {
     match control_type {
@@ -1145,6 +1243,110 @@ pub fn deliver_pending_signals(abi: &mut LinuxAbi) {
 
 #[cfg(test)]
 mod tests {
+    #[test_case]
+    fn waited_signal_validates_output_before_consuming_and_reports_known_info() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::library::std::usercopy::copy_from_user;
+        let task = crate::task::new_user_task("waited-signal".into(), 0);
+        let info = USER_STACK_END - PAGE_SIZE;
+        task.allocate_stack_pages(info, 1).unwrap();
+        let mut state = SignalState::new();
+        state.add_pending(LinuxSignal::SIGUSR1);
+        state.add_pending(LinuxSignal::SIGUSR2);
+        let mask = 1u64 << (LinuxSignal::SIGUSR1 as u32 - 1);
+        task.vm_manager
+            .protect_linux_memory_map_range(
+                crate::vm::vmem::MemoryArea::new(info, USER_STACK_END - 1),
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            take_waited_signal(&task, &mut state, mask, info),
+            Err(errno::EFAULT)
+        );
+        assert!(state.is_pending(LinuxSignal::SIGUSR1));
+        task.vm_manager
+            .protect_linux_memory_map_range(
+                crate::vm::vmem::MemoryArea::new(info, USER_STACK_END - 1),
+                3,
+            )
+            .unwrap();
+        assert_eq!(
+            take_waited_signal(&task, &mut state, mask, info),
+            Ok(Some(10))
+        );
+        let mut record = [0xff; 128];
+        copy_from_user(&task, info, &mut record).unwrap();
+        assert_eq!(u32::from_ne_bytes(record[..4].try_into().unwrap()), 10);
+        assert_eq!(i32::from_ne_bytes(record[8..12].try_into().unwrap()), 128);
+        assert_eq!(&record[16..], &[0; 112]);
+        assert!(!state.is_pending(LinuxSignal::SIGUSR1));
+        assert!(state.is_pending(LinuxSignal::SIGUSR2));
+        assert_eq!(take_waited_signal(&task, &mut state, mask, 0), Ok(None));
+    }
+
+    #[test_case]
+    fn sigtimedwait_validates_inputs_zero_timeout_and_unmaskable_signals() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::library::std::usercopy::copy_to_user;
+        use crate::task::{clear_mock_current_task, set_mock_current_task};
+        let task = Arc::new(crate::task::new_user_task("sigtimedwait-input".into(), 0));
+        let base = USER_STACK_END - PAGE_SIZE;
+        task.allocate_stack_pages(base, 1).unwrap();
+        copy_to_user(&task, base, &0x73u32.to_ne_bytes()).unwrap();
+        let mask = base + 16;
+        let timeout = base + 32;
+        copy_to_user(
+            &task,
+            mask,
+            &((1u64 << 9) | (1u64 << 8) | (1u64 << 18)).to_ne_bytes(),
+        )
+        .unwrap();
+        set_mock_current_task(task.clone());
+        let mut abi = LinuxAbi::default();
+        abi.signal_state
+            .lock()
+            .blocked
+            .block_signal(LinuxSignal::SIGUSR1);
+        for (size, mask_ptr, seconds, nanos, expected) in [
+            (16, mask, 0, 0, errno::EINVAL),
+            (8, 0, 0, 0, errno::EFAULT),
+            (8, mask, -1, 0, errno::EINVAL),
+            (8, mask, 0, -1, errno::EINVAL),
+            (8, mask, 0, 1_000_000_000, errno::EINVAL),
+            (8, mask, 0, 0, errno::EAGAIN),
+        ] {
+            copy_to_user(&task, timeout, &(seconds as i64).to_ne_bytes()).unwrap();
+            copy_to_user(&task, timeout + 8, &(nanos as i64).to_ne_bytes()).unwrap();
+            let mut frame = Trapframe::new();
+            frame.set_pc(base as u64);
+            frame.set_arg(0, mask_ptr);
+            frame.set_arg(1, 0);
+            frame.set_arg(2, timeout);
+            frame.set_arg(3, size);
+            assert_eq!(
+                sys_rt_sigtimedwait(&mut abi, &mut frame),
+                errno::to_result(expected)
+            );
+        }
+        let mut frame = Trapframe::new();
+        frame.set_pc(base as u64);
+        frame.set_arg(0, mask);
+        frame.set_arg(1, 0);
+        frame.set_arg(2, timeout);
+        frame.set_arg(3, 8);
+        abi.signal_state.lock().add_pending(LinuxSignal::SIGUSR1);
+        assert_eq!(sys_rt_sigtimedwait(&mut abi, &mut frame), 10);
+        abi.signal_state.lock().add_pending(LinuxSignal::SIGKILL);
+        frame.set_pc(base as u64);
+        assert_eq!(
+            sys_rt_sigtimedwait(&mut abi, &mut frame),
+            errno::to_result(errno::EINTR)
+        );
+        assert!(abi.signal_state.lock().is_pending(LinuxSignal::SIGKILL));
+        clear_mock_current_task();
+    }
+
     #[test_case]
     fn signals_to_exited_tasks_preserve_wait_status_and_state() {
         use crate::task::TaskState;
