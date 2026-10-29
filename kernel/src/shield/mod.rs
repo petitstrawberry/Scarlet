@@ -15,7 +15,7 @@ use alloc::{
     vec::Vec,
 };
 
-pub const MAX_LABELS: usize = 256;
+pub const MAX_LABELS: usize = 512;
 pub const MAX_RULES: usize = 4096;
 pub const MAX_LABEL_BYTES: usize = 255;
 

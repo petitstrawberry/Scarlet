@@ -1,6 +1,6 @@
-//! Android service authorization over native immutable policies. This exposes
-//! the libselinux query protocol for service_manager; it does not load SELinux
-//! binary policies or implement filesystem MAC, transitions, MLS or permissive.
+//! Android service/property authorization over native immutable Shield policies.
+//! Exposes libselinux queries and explicitly delegated process/exec transitions.
+//! Does not load binary SELinux policies or implement filesystem MAC or MLS.
 use crate::{
     abi::linux::{
         extensions::FileMapping,
@@ -36,6 +36,8 @@ use alloc::{
 use core::any::Any;
 
 pub const SERVICE_MANAGER: u32 = 1;
+pub const PROPERTY_SERVICE: u32 = 2;
+pub const PROPERTY_SET: u64 = 1;
 pub const ADD: u64 = 1;
 pub const FIND: u64 = 2;
 pub const LIST: u64 = 4;
@@ -183,6 +185,10 @@ impl SecurityFs {
                 ("access", Content::Access),
                 ("context", Content::Context),
                 ("class", Content::Directory),
+                ("class/property_service", Content::Directory),
+                ("class/property_service/index", Content::Text(b"2\n".to_vec())),
+                ("class/property_service/perms", Content::Directory),
+                ("class/property_service/perms/set", Content::Text(b"1\n".to_vec())),
                 ("class/service_manager", Content::Directory),
                 (
                     "class/service_manager/index",
@@ -403,11 +409,12 @@ fn decision(policy: &Policy, input: &[u8]) -> Result<Vec<u8>, StreamError> {
         u32::from_str_radix(fields[3], 16).map_err(|_| StreamError::InvalidArgument)?;
     // Unknown classes/bits always deny. A decision carries all known grants,
     // matching the immutable AVC cache semantics of libselinux.
-    let allowed = if class == SERVICE_MANAGER {
-        policy.allowed(source, target, class) as u32 & SERVICE_PERMISSIONS
-    } else {
-        0
+    let mask = match class {
+        SERVICE_MANAGER => SERVICE_PERMISSIONS,
+        PROPERTY_SERVICE => PROPERTY_SET as u32,
+        _ => 0,
     };
+    let allowed = policy.allowed(source, target, class) as u32 & mask;
     Ok(format!("{allowed:x} ffffffff 0 ffffffff 1 0").into_bytes())
 }
 impl StreamOps for SecurityFile {
@@ -764,6 +771,19 @@ mod tests {
         ] {
             assert!(decision(&p, input).is_err());
         }
+    }
+    #[test_case]
+    fn android_property_grants_are_distinct_from_service_grants_and_unknown_bits_deny() {
+        let p = Policy::new(vec![
+            (1, "u:r:init:s0".into()), (2, "u:r:app:s0".into()),
+            (3, "u:object_r:boot_prop:s0".into()),
+        ], vec![Rule {source:1,target:3,class:PROPERTY_SERVICE,permissions:PROPERTY_SET | 0x80}]).unwrap();
+        assert_eq!(decision(&p, b"u:r:init:s0 u:object_r:boot_prop:s0 2 ff").unwrap(), b"1 ffffffff 0 ffffffff 1 0");
+        assert_eq!(decision(&p, b"u:r:app:s0 u:object_r:boot_prop:s0 2 1").unwrap(), b"0 ffffffff 0 ffffffff 1 0");
+        assert_eq!(decision(&p, b"u:r:init:s0 u:object_r:boot_prop:s0 1 1").unwrap(), b"0 ffffffff 0 ffffffff 1 0");
+        let fs = SecurityFs::new(p).unwrap();
+        assert!(matches!(&fs.nodes["class/property_service/index"].content, Content::Text(data) if data == b"2\n"));
+        assert!(matches!(&fs.nodes["class/property_service/perms/set"].content, Content::Text(data) if data == b"1\n"));
     }
     #[test_case]
     fn android_shield_fs_binds_a_policy_and_keeps_access_transactions_per_open() {

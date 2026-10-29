@@ -121,3 +121,9 @@ The bounded init diagnostic grants only init-to-vendor_init at principal zero;
 it is not a full Android MAC policy. Its writable-kmsg diagnostic redirect writes
 userspace messages to the inherited console; privileged kernel-log forwarding is
 disabled under the constraint.
+
+Android's query adapter also publishes `property_service:set` as class 2, bit 1.
+These grants remain separate from `service_manager` grants. Unknown classes and
+permission bits deny access; registering a property label grants no authority.
+The native policy label bound is 512 so a manager can register the pinned image's
+property contexts alongside process subjects without merging label identities.
