@@ -1,0 +1,3 @@
+warning: Git tree '/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet' is dirty
+error (ignored): SQLite database '/Users/petitstrawberry/.cache/nix/eval-cache-v6/4a29f79fe1537f96d7910ad85d322ab7351cd1662b459f32f029ef9dc174ad9b.sqlite' is busy
+/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-servicemanager/libbinder-v1

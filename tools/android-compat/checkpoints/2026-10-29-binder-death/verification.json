@@ -1,0 +1,58 @@
+{
+  "date": "2026-10-29",
+  "result": "PASS",
+  "revisions": {
+    "native_rpc": "1da1f92bb73dc0a5d54ac0e16a5731132c6f9386",
+    "binder_adapter": "ef16c673089a2cc1415d855130e17db3e477f2f6",
+    "probe_and_evidence": "53419083f2b80f8f05baa05012fa216bc36fb8c5"
+  },
+  "kernel_sha256": "4f472ec80acdeec418bc6465d754590f36b3ac181c1e299d46fa0c6281de302b",
+  "probe_sha256": "72df92be93811ca2aa9160069c675c6a4a571e63a339d7be48d1015c71e0a48e",
+  "validation": {
+    "acceleration": "HVF",
+    "kernel_tests": 1632,
+    "bionic_cases": 18,
+    "host_tests": 32,
+    "riscv_release_check": "PASS",
+    "stock_libbinder": "PASS"
+  },
+  "coverage": [
+    "Native object revoke, endpoint close/drop, late registration, weak server/waker ownership and cancelled observer pruning",
+    "Binder request/clear/DONE, queued or delivered death and clear ordering, duplicate and wrong-cookie rejection, bounded detached records, re-registration",
+    "Failed usercopy retry, short read capacity, thread-exit fallback, weak-only handles, handle-release cancellation and context-manager death",
+    "Unmodified Android 13 libbinder: unlink cancels callback; owner exits with a live service; active callback occurs once with matching Binder identity",
+    "BR_CLEAR_DEATH_NOTIFICATION_DONE restores the measured BpBinder weak count; post-death transact/linkToDeath return DEAD_OBJECT; subsequent poll stays quiet",
+    "Existing two stock libbinder service/reference lifetime cycles and static/dynamic Bionic three-process object probes pass"
+  ],
+  "limitations": [
+    "Custom BBinder probe, not stock servicemanager add/find or Android framework startup; SELinux authorization design remains pending",
+    "FD/buffer-object transfer, weak promotion, one-way/nested calls, automatic worker pools, security-context records and priority inheritance remain unsupported",
+    "Endpoint closure still follows the open-file description; foreign inherited references can delay death notification",
+    "ART was unchanged and not rerun in this checkpoint; no direct APK claim"
+  ],
+  "reproduction": {
+    "kernel_runner": "CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER=\"python3 <checkpoint>/run-kernel-hvf.py <repository>\" cargo test --target targets/aarch64-unknown-none-elf.json (from kernel/, inside nix develop)",
+    "riscv": "cargo check --release --lib --target targets/riscv64gc-unknown-none-elf.json (from kernel/, inside nix develop)",
+    "runtime": "Recorded HVF commands and input hashes are under libbinder-hvf/ and bionic-hvf/. Build uses the recorded BSP lock and stock Android runtime."
+  },
+  "sha256": {
+    "bionic-hvf/commands.json": "f261a40335fbf293d25a8711c7c554cfcf4fce9750a8ce252076307b09174a59",
+    "bionic-hvf/inputs.json": "6cca18ef814a5fe14b99bf45428529fa9f6e603480a08afcb25e27d55ba4f853",
+    "bionic-hvf/probes.json": "9742890417dbd16a0a157094c139157c6e1151d36a17cce04b0cc4f51c730460",
+    "bionic-hvf/result.json": "619821155cba272e011ba9d270f070e249fe5e7482a3071f287d96c84444cf35",
+    "bionic-hvf/serial.log": "3161676c98f38348feb0753c318a1fc2973bf32f919878ad2f1f429417da8888",
+    "bsp-build.Cargo.lock": "10482fa0f39758edcd7735c7dbf0ab3e1919b851a9e4a03cbf05302382d64770",
+    "build.log": "b8330c393ef143b01d86f6be1275defad8a678e5138f15711e576fb75ea17122",
+    "host-tests.log": "fff6fc2520ddc31a499c901de54f4fb70aa1459783d0cf39645dce3594be456a",
+    "kernel-tests-hvf.log": "57bcbf19c295a2630a1ed1112aec44e60c77649a5bfe50bc9ccf8b1dd74a55e8",
+    "libbinder-hvf/commands.json": "b1c6b11e6d74ff19b3efa9fb540c5399707ddaa329a3dc1390e4d4c0568de45a",
+    "libbinder-hvf/inputs.json": "9dfbcd561141b49045cb5dab4aa7b66cc79fea5fec028bf4ce6f419ec57d3cb3",
+    "libbinder-hvf/libbinder-build.json": "ba0ff24c1678becf7e846467c6efed493f02716f023f86499e4b9ac26097c310",
+    "libbinder-hvf/program-launch.json": "a1bbe1eff8e6e8f60ba27b31e820c758f4ed63c67e55303e7ddc3d860b1d7162",
+    "libbinder-hvf/result.json": "ca4f1e4f702df1566373f7fd82b20a07cad6ce791ffaaf3420224c0f678ffd1e",
+    "libbinder-hvf/serial.log": "07c3697bc058574f32e917c37ea796b2dbd05e373bef3cf814143ccf1c4dab28",
+    "probe-build.log": "67368c7610a995de86447496394391f25a43d04496d6fe6272b002755c80fc47",
+    "riscv-check.log": "5c356f15b974db3e9b46b918aff965b5f10a930f0dff69c6dd5a5a6bb071a987",
+    "run-kernel-hvf.py": "0e08ec864c22cb4048da8f8714812cb48d160bcd9f89bde7507b77e482f9539d"
+  }
+}

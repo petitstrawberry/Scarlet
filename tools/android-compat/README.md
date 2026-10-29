@@ -343,8 +343,20 @@ drain. An acquire delivered without its DONE cannot safely be undone; its
 userspace hold may remain until process exit. `TF_CLEAR_BUF` is preserved and
 freed receive slots are cleared.
 
+Death subscriptions use native RPC capability watches. The watches retain
+object identity without retaining its serving endpoint or the client's wait
+source. `BC_REQUEST_DEATH_NOTIFICATION`, `BC_CLEAR_DEATH_NOTIFICATION` and
+`BC_DEAD_BINDER_DONE` implement `BR_DEAD_BINDER` and
+`BR_CLEAR_DEATH_NOTIFICATION_DONE`. Clearing queued/delivered death work waits
+for its acknowledgement; clearing a live subscription cancels it. Failed
+record copies remain retryable. Handle release cancels attached work, while
+already detached clear work survives until delivery. Idle manual loopers
+receive process death work; clear acknowledgements requested by a looper stay
+on that thread, falling back to process work if it exits.
+
 Limits: 64 in-flight native calls per endpoint, 64 tracked threads per Binder
-open, 1,024 local/retired nodes and 1,024 imported handles, one incoming/outgoing
+open, 1,024 local/retired nodes, 1,024 imported handles and 1,024 death records
+(including pending clear acknowledgements), one incoming/outgoing
 call per thread, at most 64 flat objects per message, and a
 64 KiB–4 MiB receive VMA using 64 KiB slots. Partial unmap invalidates the arena.
 The native message limit includes a 24-byte adapter header, aligned payload and
@@ -354,7 +366,7 @@ Fixed-address mmap and remapping an arena are rejected. The device aliases are
 not a binderfs implementation and are not yet represented by normal VFS nodes.
 
 **Not implemented:** FD/buffer-object transfer, weak-to-strong promotion,
-general death subscriptions, one-way and nested calls, automatic thread-pool
+one-way and nested calls, automatic thread-pool
 growth, priority inheritance, security-context records and SELinux policy.
 Unsupported transaction features return errors. Stock libbinder serves a custom
 `BBinder` probe through this adapter; stock servicemanager is not yet usable.
@@ -398,6 +410,15 @@ reference is dropped. The server verifies the actual `BBinder` destructor and
 `RefBase` weak count: owner plus driver, then owner only after weak release.
 The client also resolves `ProcessState::self` with `dladdr` to check that the
 loaded implementation is `/system/lib64/libbinder.so`.
+
+The [death-notification checkpoint](checkpoints/2026-10-29-binder-death/verification.json)
+extends this probe with real `linkToDeath`/`unlinkToDeath` calls. After cancelling
+one subscription and registering another, the server exits with a live service.
+Only the active recipient receives a callback, exactly once; processing
+clear completion restores the proxy's measured weak-reference count. Further
+transactions and subscriptions return `DEAD_OBJECT`, and polling finds no
+duplicate notification. This covers the death-notification prerequisite for
+stock servicemanager's `addService`; its SELinux permission model remains open.
 
 The builder downloads AOSP Android 13 headers at fixed Git commits and verifies
 their complete regular-file content maps. It links the stock platform C++ ABI

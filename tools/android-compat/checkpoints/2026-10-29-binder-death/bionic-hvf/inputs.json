@@ -1,0 +1,14 @@
+{
+  "kernel_sha256": "4f472ec80acdeec418bc6465d754590f36b3ac181c1e299d46fa0c6281de302b",
+  "dex_sha256": null,
+  "program_sha256": null,
+  "libbinder_build_sha256": null,
+  "stock_reference_config_sha256": null,
+  "stock_manifest_sha256": null,
+  "runtime_sha256": {
+    "system/bin/linker64": "c59c62110ee459b99ca752b3cd775f3b0f7c370eed2b8cf506c567bb75db0e68",
+    "apex/com.android.runtime/lib64/bionic/libc.so": "dff5613612e87332742e181ba5eca08eb91d1a982cfe336ccfb32453e88a149b",
+    "apex/com.android.runtime/lib64/bionic/libdl.so": "146669c99fef6efa03f133e61a5479d82c46592aaaf1b8e6ceeb7a5e4b135d76",
+    "apex/com.android.runtime/lib64/bionic/libm.so": "d5348e97648de62112f1625a70e87a93771ba641d1ee0c3f61f47e0858dec1e8"
+  }
+}
