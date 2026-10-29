@@ -57,6 +57,9 @@ const BR_REPLY: u32 = 0x80407203;
 const BR_DEAD_REPLY: u32 = 0x7205;
 const BR_COMPLETE: u32 = 0x7206;
 const BR_NOOP: u32 = 0x720c;
+// Framework BinderProxy uses this userspace flag to request AppOps collection.
+// Transport it unchanged; collection itself belongs to the Java recipient.
+const FLAG_COLLECT_NOTED_APP_OPS: u32 = 0x2;
 const MAX_THREADS: usize = 64;
 const MAX_DATA: usize = crate::ipc::rpc::MAX_MESSAGE_SIZE - objects::HEADER;
 
@@ -337,7 +340,13 @@ impl BinderFile {
             }
             BC_TRANSACTION | BC_REPLY => {
                 let flags = u32_at(data, 20);
-                if flags & !(0x10 | 0x20 | if command == BC_REPLY { 8 } else { 1 }) != 0 {
+                if flags
+                    & !(FLAG_COLLECT_NOTED_APP_OPS
+                        | 0x10
+                        | 0x20
+                        | if command == BC_REPLY { 8 } else { 1 })
+                    != 0
+                {
                     return Err(errno::EOPNOTSUPP);
                 }
                 // target.handle is a u32 member of an 8-byte union. Its
@@ -1033,6 +1042,58 @@ mod tests {
         }
         assert!(server.objects.lock().oneway.is_empty());
         assert!(!call.ready());
+    }
+    #[test_case]
+    fn binder_transports_framework_appops_flag_without_accepting_unknown_flags() {
+        let environment = Environment::new();
+        let sender = task(&environment, 1);
+        let receiver = task(&environment, 2);
+        let client = file(&sender, &environment, 0);
+        let server = file(&receiver, &environment, 0);
+        let abi = LinuxAbi::default();
+        assert_eq!(
+            server.ioctl(
+                &receiver,
+                &abi,
+                &mut Trapframe::new(),
+                SET_CONTEXT,
+                0,
+                false
+            ),
+            0
+        );
+        let output = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
+        for (file, task) in [(&client, &sender), (&server, &receiver)] {
+            file.ensure_thread(task.get_id()).unwrap();
+            assert!(file.mmap(task, 0, 128 * 1024, 1, 2, 0) < usize::MAX - 4096);
+            task.allocate_stack_pages(output, 1).unwrap();
+        }
+        server
+            .command(&receiver, &abi, BC_ENTER_LOOPER, &[])
+            .unwrap();
+        let mut data = [0; 64];
+        data[20..24].copy_from_slice(&4u32.to_le_bytes());
+        assert_eq!(
+            client.command(&sender, &abi, BC_TRANSACTION, &data),
+            Err(errno::EOPNOTSUPP)
+        );
+        assert!(!server.ready(2));
+        data[20..24].copy_from_slice(&0x12u32.to_le_bytes());
+        client
+            .command(&sender, &abi, BC_TRANSACTION, &data)
+            .unwrap();
+        assert_eq!(server.read_record(&receiver, output, 68), Ok(68));
+        let record = read::<68>(&receiver, output).unwrap();
+        assert_eq!(u32_at(&record, 0), BR_TRANSACTION);
+        assert_eq!(u32_at(&record, 24), FLAG_COLLECT_NOTED_APP_OPS);
+        assert_eq!(u32_at(&record, 28), 1);
+        server.command(&receiver, &abi, BC_REPLY, &data).unwrap();
+        assert_eq!(client.read_record(&sender, output, 68), Ok(4));
+        assert_eq!(u32_at(&read::<4>(&sender, output).unwrap(), 0), BR_COMPLETE);
+        assert_eq!(client.read_record(&sender, output, 68), Ok(68));
+        let record = read::<68>(&sender, output).unwrap();
+        assert_eq!(u32_at(&record, 0), BR_REPLY);
+        assert_eq!(u32_at(&record, 24), FLAG_COLLECT_NOTED_APP_OPS);
     }
     #[test_case]
     fn binder_context_death_checks_wire_cookie_and_preserves_failed_usercopy() {

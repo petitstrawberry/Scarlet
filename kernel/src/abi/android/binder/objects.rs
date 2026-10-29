@@ -604,7 +604,9 @@ pub(super) fn prepare(task: &Task, abi: &LinuxAbi, data: &[u8]) -> Result<Prepar
         return Err(errno::E2BIG);
     }
     let mut bytes = vec![0; HEADER + aligned + offsets_len];
-    bytes[..4].copy_from_slice(&(u32_at(data, 20) & (1 | 8 | 0x20)).to_le_bytes());
+    bytes[..4].copy_from_slice(
+        &(u32_at(data, 20) & (1 | FLAG_COLLECT_NOTED_APP_OPS | 8 | 0x20)).to_le_bytes(),
+    );
     let sender = if u32_at(data, 20) & 1 != 0 {
         0
     } else {
