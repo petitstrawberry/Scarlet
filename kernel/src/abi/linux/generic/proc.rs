@@ -131,6 +131,7 @@ pub(crate) fn unshare_filesystem(task: &Task, flags: usize) -> Result<(), usize>
         return Err(errno::EOPNOTSUPP);
     }
     if flags & CLONE_NEWNS != 0 {
+        if !task.credentials.read().permits(crate::shield::identity::MANAGE_MOUNTS) { return Err(errno::EPERM); }
         let (namespace, fs) = task.prepare_mount_namespace().map_err(|_| errno::ENOMEM)?;
         task.install_mount_namespace(namespace, fs);
     } else if flags & CLONE_FS != 0 {
@@ -730,7 +731,7 @@ fn prctl_task_name(bytes: &[u8; TASK_COMM_LEN]) -> String {
 /// # Returns
 ///
 /// Zero on success or a negative Linux errno encoded as `usize`.
-pub fn sys_prctl(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_prctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
         None => return errno::to_result(errno::EIO),
@@ -748,6 +749,11 @@ pub fn sys_prctl(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         // not accept tagged syscall pointers or implement MTE. Pretending SET
         // succeeded makes Bionic pass tags into that unsupported syscall ABI.
         PR_SET_TAGGED_ADDR_CTRL | PR_GET_TAGGED_ADDR_CTRL => errno::to_result(errno::EINVAL),
+        7 => usize::from(abi.keep_caps), // PR_GET_KEEPCAPS
+        8 => { // PR_SET_KEEPCAPS: preserved across fork, reset on exec.
+            if trapframe.get_arg(1) > 1 { errno::to_result(errno::EINVAL) }
+            else { abi.keep_caps = trapframe.get_arg(1) == 1; 0 }
+        }
         PR_SET_NAME => {
             let mut name = [0u8; TASK_COMM_LEN];
             if copy_from_user(&task, arg2, &mut name).is_err() {
@@ -955,34 +961,6 @@ pub fn sys_prlimit64(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     copy_resource_limit(&task, resource, output)
 }
 
-/// Accept a Linux capability drop in the view, which currently runs without
-/// a separate capability model. Validate the v3 UAPI data before succeeding.
-pub fn sys_capset(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = match mytask() {
-        Some(task) => task,
-        None => return errno::to_result(errno::ESRCH),
-    };
-    let header_ptr = trapframe.get_arg(0);
-    let data_ptr = trapframe.get_arg(1);
-    trapframe.increment_pc_next(&task);
-
-    let mut header = [0u8; 8];
-    if copy_from_user(&task, header_ptr, &mut header).is_err() {
-        return errno::to_result(errno::EFAULT);
-    }
-    let version = u32::from_ne_bytes(header[..4].try_into().unwrap());
-    let data_len = match version {
-        0x1998_0330 => 12,
-        0x2007_1026 | 0x2008_0522 => 24,
-        _ => return errno::to_result(errno::EINVAL),
-    };
-    let mut data = [0u8; 24];
-    if copy_from_user(&task, data_ptr, &mut data[..data_len]).is_err() {
-        return errno::to_result(errno::EFAULT);
-    }
-    0
-}
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct LinuxSysinfo {
@@ -1041,82 +1019,6 @@ pub fn sys_sysinfo(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 
     0
-}
-
-pub fn sys_getuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    trapframe.increment_pc_next(&task);
-
-    0 // Return 0 for the root user (UID 0)
-}
-
-pub fn sys_geteuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    trapframe.increment_pc_next(&task);
-
-    0 // Return 0 for the root user (EUID 0)
-}
-
-pub fn sys_getresuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let ruid_ptr = trapframe.get_arg(0);
-    let euid_ptr = trapframe.get_arg(1);
-    let suid_ptr = trapframe.get_arg(2);
-
-    trapframe.increment_pc_next(&task);
-
-    for ptr in [ruid_ptr, euid_ptr, suid_ptr] {
-        if ptr == 0 {
-            continue;
-        }
-
-        let Some(kva) = task.vm_manager.translate_to_kva(ptr) else {
-            return errno::to_result(errno::EFAULT);
-        };
-        unsafe {
-            core::ptr::write(kva as *mut u32, 0);
-        }
-    }
-
-    0
-}
-
-pub fn sys_getgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    trapframe.increment_pc_next(&task);
-
-    0 // Return 0 for the root group (GID 0)
-}
-
-pub fn sys_getresgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let rgid_ptr = trapframe.get_arg(0);
-    let egid_ptr = trapframe.get_arg(1);
-    let sgid_ptr = trapframe.get_arg(2);
-
-    trapframe.increment_pc_next(&task);
-
-    for ptr in [rgid_ptr, egid_ptr, sgid_ptr] {
-        if ptr == 0 {
-            continue;
-        }
-
-        let Some(kva) = task.vm_manager.translate_to_kva(ptr) else {
-            return errno::to_result(errno::EFAULT);
-        };
-        unsafe {
-            core::ptr::write(kva as *mut u32, 0);
-        }
-    }
-
-    0
-}
-
-pub fn sys_getegid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    trapframe.increment_pc_next(&task);
-
-    0 // Return 0 for the root group (EGID 0)
 }
 
 /// Linux utsname structure for uname system call
@@ -1421,54 +1323,6 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     abi.thread_state_mut().pending_clone_share_sighand = false;
     abi.thread_state_mut().clear_child_tid_ptr = previous_clear_child_tid;
     ret
-}
-
-/// Linux sys_setgid implementation (syscall 144)
-///
-/// Set group ID. This is a stub implementation that always succeeds.
-///
-/// Arguments:
-/// - gid: group ID to set
-///
-/// Returns:
-/// - 0 on success
-pub fn sys_setgid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = match mytask() {
-        Some(t) => t,
-        None => return usize::MAX - 1, // -EPERM
-    };
-
-    let _gid = trapframe.get_arg(0);
-
-    // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(&task);
-
-    // Always succeed - group ID is ignored in this stub
-    0
-}
-
-/// Linux sys_setuid implementation (syscall 146)
-///
-/// Set user ID. This is a stub implementation that always succeeds.
-///
-/// Arguments:
-/// - uid: user ID to set
-///
-/// Returns:
-/// - 0 on success
-pub fn sys_setuid(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = match mytask() {
-        Some(t) => t,
-        None => return usize::MAX - 1, // -EPERM
-    };
-
-    let _uid = trapframe.get_arg(0);
-
-    // Increment PC to avoid infinite loop
-    trapframe.increment_pc_next(&task);
-
-    // Always succeed - user ID is ignored in this stub
-    0
 }
 
 /// Wait for process to change state (wait4 system call).

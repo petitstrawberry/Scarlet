@@ -1,3 +1,4 @@
+pub mod credentials;
 #[macro_use]
 mod macros;
 pub mod errno;
@@ -122,6 +123,7 @@ pub struct LinuxAbi {
     record_locks: Arc<record_lock::ProcessLocks>,
     exec_unlocks: Vec<record_lock::FileKey>,
     pub(crate) umask: u32,
+    pub(crate) keep_caps: bool,
     #[cfg(target_arch = "aarch64")]
     pub(crate) signal_restorer: Arc<IrqSpinLock<Option<usize>>>,
 }
@@ -140,6 +142,7 @@ impl Default for LinuxAbi {
             record_locks: Arc::new(record_lock::ProcessLocks::new()),
             exec_unlocks: Vec::new(),
             umask: 0o022,
+            keep_caps: false,
             #[cfg(target_arch = "aarch64")]
             signal_restorer: Arc::new(IrqSpinLock::new(None)),
         }
@@ -179,6 +182,8 @@ impl LinuxAbi {
 
     /// Prepare an independent fd table without closing any handle in the caller.
     pub fn prepare_exec_fds(&mut self, source: Option<&Self>, image: &crate::task::Task) {
+        credentials::prepare_exec(image);
+        self.keep_caps = false;
         if let Some(source) = source {
             self.umask = source.umask;
             self.record_locks = source.record_locks.clone();
@@ -602,7 +607,8 @@ syscall_table! {
     Fsync = 82 => fs::sys_fsync,
     Fdatasync = 83 => fs::sys_fsync,
     UtimensAt = 88 => utimens::sys_utimensat,
-    Capset = 91 => proc::sys_capset,
+    Capget = 90 => credentials::sys_capget,
+    Capset = 91 => credentials::sys_capset,
     TimerfdCreate = 85 => time::sys_timerfd_create,
     TimerfdSettime = 86 => time::sys_timerfd_settime,
     TimerfdGettime = 87 => time::sys_timerfd_gettime,
@@ -633,10 +639,14 @@ syscall_table! {
     RtSigtimedwait = 137 => signal::sys_rt_sigtimedwait,
     Setpriority = 140 => proc::sys_setpriority,
     Getpriority = 141 => proc::sys_getpriority,
-    SetGid = 144 => proc::sys_setgid,
-    SetUid = 146 => proc::sys_setuid,
-    GetResUid = 148 => proc::sys_getresuid,
-    GetResGid = 150 => proc::sys_getresgid,
+    SetRegid = 143 => credentials::sys_setregid,
+    SetGid = 144 => credentials::sys_setgid,
+    SetReuid = 145 => credentials::sys_setreuid,
+    SetUid = 146 => credentials::sys_setuid,
+    SetResUid = 147 => credentials::sys_setresuid,
+    GetResUid = 148 => credentials::sys_getresuid,
+    SetResGid = 149 => credentials::sys_setresgid,
+    GetResGid = 150 => credentials::sys_getresgid,
     SetPgid = 154 => proc::sys_setpgid,
     GetPgid = 155 => proc::sys_getpgid,
     GetSid = 156 => proc::sys_getsid,
@@ -644,15 +654,17 @@ syscall_table! {
     Uname = 160 => proc::sys_uname,
     Getrlimit = 163 => proc::sys_getrlimit,
     Umask = 166 => fs::sys_umask,
+    GetGroups = 158 => credentials::sys_getgroups,
+    SetGroups = 159 => credentials::sys_setgroups,
     Prctl = 167 => proc::sys_prctl,
     Getcpu = 168 => proc::sys_getcpu,
     Gettimeofday = 169 => time::sys_gettimeofday,
     GetPid = 172 => proc::sys_getpid,
     GetPpid = 173 => proc::sys_getppid,
-    GetUid = 174 => proc::sys_getuid,
-    GetEuid = 175 => proc::sys_geteuid,
-    GetGid = 176 => proc::sys_getgid,
-    GetEgid = 177 => proc::sys_getegid,
+    GetUid = 174 => credentials::sys_getuid,
+    GetEuid = 175 => credentials::sys_geteuid,
+    GetGid = 176 => credentials::sys_getgid,
+    GetEgid = 177 => credentials::sys_getegid,
     GetTid = 178 => proc::sys_gettid,
     Sysinfo = 179 => proc::sys_sysinfo,
     Kill = 129 => proc::sys_kill,

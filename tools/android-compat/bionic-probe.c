@@ -39,6 +39,8 @@ static int fail(const char *case_name, const char *operation, int error) {
     return 1;
 }
 
+extern int credentials_case(const char *program);
+extern int credentials_exec_case(void);
 static int libc_case(const char *program) {
     if (initialized != 42 || tls_value != 17)
         return fail("libc", "constructor/TLS initialization", 0);
@@ -92,7 +94,7 @@ static int libc_case(const char *program) {
         syscall(__NR_getrlimit, RLIMIT_STACK, NULL) != -1 || errno != EFAULT ||
         syscall(__NR_prlimit64, 0, RLIMIT_STACK, &stack_limit, NULL) != -1 || errno != EOPNOTSUPP)
         return fail("libc", "resource limit validation", errno);
-    return 0;
+    return credentials_case(program);
 }
 
 static void *worker(void *unused) {
@@ -415,6 +417,7 @@ static int binder_absent_case(void) {
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc == 2 && !strcmp(argv[1], "identity-exec")) return credentials_exec_case();
     if (argc != 2) return fail("arguments", "expected one case name", 0);
     const char *case_name = !strcmp(argv[1], "exec-child") ? "exec" : argv[1];
     if (printf("SCARLET_BIONIC_BEGIN %s\n", case_name) < 0 || fflush(stdout)) return 2;

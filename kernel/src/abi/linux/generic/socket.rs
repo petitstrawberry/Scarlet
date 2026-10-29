@@ -1275,18 +1275,15 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             Some(socket) => socket,
             None => return errno::to_result(errno::ENOPROTOOPT),
         };
-        let peer_process_id = match local_socket.peer_process_id() {
-            Some(process_id) => process_id,
+        let peer_credentials = match local_socket.peer_credentials() {
+            Some(credentials) => credentials,
             None => return errno::to_result(errno::ENOTCONN),
         };
-        let pid = match task.get_namespace().resolve_local_id(peer_process_id) {
-            Some(pid) => pid,
-            None => return errno::to_result(errno::ESRCH),
-        };
+        let pid = peer_credentials.pid_in(&task.get_namespace());
         let cred = LinuxUcred {
             pid: pid as i32,
-            uid: 0,
-            gid: 0,
+            uid: peer_credentials.identity.principal.0,
+            gid: peer_credentials.identity.group.0,
         };
         if MOZC_IPC_TRACE_ENABLED && is_mozc_server_task(&task) {
             crate::println!(
@@ -1952,7 +1949,7 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             buffer.resize(length, 0);
             let read_result = match local_socket {
                 Some(socket) => socket.read_with_sender(&mut buffer),
-                None => stream.read(&mut buffer).map(|count| (count, 0)),
+                None => stream.read(&mut buffer).map(|count| (count, crate::network::local::SocketCredentials::unknown())),
             };
             let (amount, sender) = match read_result {
                 Ok(result) => result,
@@ -1964,7 +1961,7 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     return errno::to_result(errno::EAGAIN);
                 }
                 Err(StreamError::Interrupted) => return errno::to_result(errno::EINTR),
-                Err(StreamError::EndOfStream) => (0, 0),
+                Err(StreamError::EndOfStream) => (0, crate::network::local::SocketCredentials::unknown()),
                 Err(_) => return errno::to_result(errno::EIO),
             };
             if amount > buffer.len() {
@@ -2028,9 +2025,9 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 cmsg_type: SCM_CREDENTIALS,
             };
             let cred = LinuxUcred {
-                pid: task.get_namespace().resolve_local_id(sender).unwrap_or(0) as i32,
-                uid: 0,
-                gid: 0,
+                pid: sender.pid_in(&task.get_namespace()) as i32,
+                uid: sender.identity.principal.0,
+                gid: sender.identity.group.0,
             };
             unsafe {
                 core::ptr::copy_nonoverlapping(

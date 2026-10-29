@@ -167,7 +167,7 @@ static int server(int ready) {
     REQUIRE(receive(peer.fd, BR_TRANSACTION, &tx) == 0);
     REQUIRE(poll_readable(peer.fd, 0, 0) == 0);
     REQUIRE(tx.target.ptr == node.binder && tx.cookie == node.cookie);
-    REQUIRE(tx.code == 42 && tx.sender_pid == getppid() && tx.sender_euid == geteuid());
+    REQUIRE(tx.code == 42 && tx.sender_pid == getppid() && tx.sender_euid == 10001);
     REQUIRE(tx.data_size == 5 && !memcmp((void *)(uintptr_t)tx.data.ptr.buffer, "ping", 5));
     REQUIRE(free_buffer(peer.fd, &tx) == 0);
     REQUIRE(free_buffer(peer.fd, &tx) == -1 && errno == EINVAL);
@@ -217,6 +217,7 @@ int binder_case(void) {
     tx.offsets_size = 8;
     REQUIRE(send_command(peer.fd, BC_TRANSACTION, &tx, sizeof(tx)) == -1 && errno == EFAULT);
     tx.offsets_size = 0;
+    REQUIRE(seteuid(10001) == 0);
     REQUIRE(send_command(peer.fd, BC_TRANSACTION, &tx, sizeof(tx)) == 0);
     REQUIRE(receive(peer.fd, BR_TRANSACTION_COMPLETE, NULL) == 0);
     REQUIRE(poll_readable(peer.fd, 2000, 1) == 0);
@@ -225,6 +226,7 @@ int binder_case(void) {
     REQUIRE(receive(peer.fd, BR_REPLY, &reply) == 0);
     REQUIRE(reply.code == 43 && reply.data_size == 5 && !memcmp((void *)(uintptr_t)reply.data.ptr.buffer, "pong", 5));
     REQUIRE(free_buffer(peer.fd, &reply) == 0);
+    REQUIRE(seteuid(0) == 0);
     REQUIRE(poll_readable(peer.fd, 20, 0) == 0);
     tx.code = 99;
     REQUIRE(send_command(peer.fd, BC_TRANSACTION, &tx, sizeof(tx)) == 0);

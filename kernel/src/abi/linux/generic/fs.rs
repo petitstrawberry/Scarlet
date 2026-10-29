@@ -1037,6 +1037,7 @@ pub fn sys_mount(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 }
 
 pub(crate) fn private_mount_propagation(task: &crate::task::Task, path: &str, flags: usize) -> Result<(), usize> {
+    if !task.credentials.read().permits(crate::shield::identity::MANAGE_MOUNTS) { return Err(errno::EPERM); }
     if path.is_empty() { return Err(errno::ENOENT); }
     const MS_REC: usize = 0x4000;
     const MS_PRIVATE: usize = 0x40000;

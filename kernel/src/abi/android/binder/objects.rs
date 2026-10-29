@@ -613,6 +613,7 @@ pub(super) fn prepare(task: &Task, abi: &LinuxAbi, data: &[u8]) -> Result<Prepar
         abi.visible_thread_group_id(task) as u32
     };
     bytes[4..8].copy_from_slice(&sender.to_le_bytes());
+    bytes[8..12].copy_from_slice(&task.credentials.read().principals().active.0.to_le_bytes());
     bytes[12..16].copy_from_slice(&(len as u32).to_le_bytes());
     bytes[16..20].copy_from_slice(&(offsets_len as u32).to_le_bytes());
     copy_from_user(task, u64_at(data, 48), &mut bytes[HEADER..HEADER + len])
