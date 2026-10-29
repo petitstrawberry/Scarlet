@@ -16,6 +16,9 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
     if option_env!("SCARLET_ANDROID_INIT_BOOTSTRAP") == Some("1") {
         std::shield::hide_kernel_addresses().map_err(|_| "Shield kernel address constraint")?;
         println!("SCARLET_SHIELD_KERNEL_ADDRESSES_HIDDEN");
+        let resource = std::resource_group::ResourceGroup::create_root().map_err(|_| "Android resource root")?;
+        resource.enter(0).map_err(|_| "Android resource membership")?;
+        println!("SCARLET_ANDROID_RESOURCE_ROOT");
     }
     let backing = bootstrap::backing("root=/dev/vblk1", true)?;
     let (environment, policy) = if option_env!("SCARLET_ANDROID_STOCK") == Some("1") {

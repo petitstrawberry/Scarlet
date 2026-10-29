@@ -30,6 +30,10 @@ pub fn environment(
     android
         .bind("/dev/__properties__", &upper, "/__properties__")
         .map_err(|_| "property storage bind")?;
+    if option_env!("SCARLET_ANDROID_INIT_BOOTSTRAP") == Some("1") {
+        devices.create_directory("/cgroup_info").map_err(|_| "resource map directory")?;
+        android.bind("/dev/cgroup_info", &upper, "/cgroup_info").map_err(|_| "resource map storage")?;
+    }
     android
         .bind("/dev/pts", &native, "/dev/pts")
         .map_err(|_| "Android ptys")?;

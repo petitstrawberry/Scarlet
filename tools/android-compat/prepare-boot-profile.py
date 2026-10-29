@@ -100,7 +100,7 @@ def prepare(archive, runtime, stock, profile_file, output):
                 continue
             system.dump(path, output / path[1:])
         queue = []
-        for name in ["init", "ueventd", "apexd", "servicemanager", "bootstrap/linker64", "bootstrap/linkerconfig"]:
+        for name in ["init", "ueventd", "apexd", "servicemanager", "boringssl_self_test64", "bootstrap/linker64", "bootstrap/linkerconfig"]:
             path = output / "system/bin" / name
             if name == "ueventd":
                 info = system.command('stat "/system/bin/ueventd"')
@@ -128,24 +128,7 @@ def prepare(archive, runtime, stock, profile_file, output):
                 if not target.exists():
                     system.dump("/" + relative, target)
                 queue.append(target)
-    (output / "scarlet/boot").mkdir(parents=True)
-    (output / POLICY).write_text(shield_policy(profile, [(stock / name).read_text() for name in contexts]))
-    # Stock init loads product properties last. Keep the original file separately
-    # and record the deliberate machine-profile replacement and exact old hash.
-    product = "product/etc/build.prop"
-    original = (stock / product).read_text()
-    (output / "scarlet/boot/product-build.prop.original").write_text(original)
-    (output / product).parent.mkdir(parents=True, exist_ok=True)
-    (output / product).write_text(original + "\n# Scarlet manager boot profile\n" + "".join(
-        f"{name}={value}\n" for name, value in sorted(profile["boot_properties"].items())))
-    metadata["replacements"][product] = base["files"][product]
-    (output / "proc").mkdir(exist_ok=True)
-    (output / "proc/bootconfig").write_text("".join(
-        f'{name} = "{value}"\n' for name, value in sorted(profile["bootconfig"].items())))
-    (output / "scarlet/boot/init.rc").write_text("# Explicit Scarlet device boot configuration\n" + "".join(
-        "import " + path + "\n" for path in profile["init_imports"]))
-    for name in ["apex", "linkerconfig", "data", "sys/fs/selinux", "system_ext/apex", "product/apex", "vendor/apex"]:
-        (output / name).mkdir(parents=True, exist_ok=True)
+    configure(output, stock, profile, contexts, metadata)
     metadata.update(result="PREPARED", activation="not executed", factory_apexes=payloads, needed=needed,
                     symlinks=aliases,
                     files={str(path.relative_to(output)): sha256(path) for path in sorted(output.rglob("*"))
@@ -156,12 +139,61 @@ def prepare(archive, runtime, stock, profile_file, output):
     print(f"Prepared {len(payloads)} flattened factory APEXes; stock init boot has not been tested")
 
 
+def configure(output, stock, profile, contexts, metadata):
+    (output / "scarlet/boot").mkdir(parents=True, exist_ok=True)
+    (output / POLICY).write_text(shield_policy(profile, [(stock / name).read_text() for name in contexts]))
+    # Stock init loads product properties last. Keep the original file separately
+    # and record the deliberate machine-profile replacement and exact old hash.
+    product = "product/etc/build.prop"
+    original = (stock / product).read_text()
+    (output / "scarlet/boot/product-build.prop.original").write_text(original)
+    (output / product).parent.mkdir(parents=True, exist_ok=True)
+    (output / product).write_text(original + "\n# Scarlet manager boot profile\n" + "".join(
+        f"{name}={value}\n" for name, value in sorted(profile["boot_properties"].items())))
+    metadata["replacements"][product] = json.loads((stock / "stock-inputs.json").read_text())["files"][product]
+    (output / "proc").mkdir(exist_ok=True)
+    (output / "proc/bootconfig").write_text("".join(
+        f'{name} = "{value}"\n' for name, value in sorted(profile["bootconfig"].items())))
+    (output / "scarlet/boot/init.rc").write_text("# Explicit Scarlet device boot configuration\n" + "".join(
+        "import " + path + "\n" for path in profile["init_imports"]))
+    for name in ["apex", "linkerconfig", "data", "sys/fs/selinux", "system_ext/apex", "product/apex", "vendor/apex"]:
+        (output / name).mkdir(parents=True, exist_ok=True)
+    if "resource_groups" in profile:
+        (output / "etc").mkdir(exist_ok=True)
+        (output / "etc/cgroups.json").write_text(json.dumps({"Cgroups": [], "Cgroups2": {
+            "Path": profile["resource_groups"]["cgroup2_root"], "Mode": "0755", "UID": "root", "GID": "root", "Controllers": [],
+        }}, indent=2) + "\n")
+        (output / "sys/fs/cgroup").mkdir(parents=True, exist_ok=True)
+
+
+def reconfigure(inputs, runtime, stock, profile_file, output):
+    metadata = verify_boot_inputs(inputs, runtime, stock)
+    profile = validate_profile(json.loads(profile_file.read_text()))
+    if any(profile[key] != metadata["profile"][key] for key in ("apex_modules", "init_imports")):
+        raise ValueError("changed payload or imports require preparation from the pinned image")
+    original_manifest = sha256(inputs / MANIFEST)
+    shutil.copytree(inputs, output)
+    metadata.update(profile=profile, profile_source_sha256=sha256(profile_file), reused_payload_manifest_sha256=original_manifest)
+    configure(output,stock,profile,metadata["property_context_files"],metadata)
+    metadata["files"] = {str(path.relative_to(output)):sha256(path) for path in sorted(output.rglob("*")) if path.is_file() and path.name != MANIFEST}
+    metadata["directories"] = [str(path.relative_to(output)) for path in sorted(output.rglob("*")) if path.is_dir()]
+    (output / MANIFEST).write_text(json.dumps(metadata,indent=2)+"\n")
+    verify_boot_inputs(output,runtime,stock)
+    print("Prepared new manager configuration using verified factory payloads; boot has not been tested")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for flag in ["sdk-image", "runtime-root", "stock-inputs", "profile", "output"]:
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--sdk-image", type=Path)
+    source.add_argument("--reuse-payloads", type=Path)
+    for flag in ["runtime-root", "stock-inputs", "profile", "output"]:
         parser.add_argument("--" + flag, type=Path, required=True)
     args = parser.parse_args()
-    prepare(args.sdk_image, args.runtime_root, args.stock_inputs, args.profile, args.output)
+    if args.reuse_payloads:
+        reconfigure(args.reuse_payloads, args.runtime_root, args.stock_inputs, args.profile, args.output)
+    else:
+        prepare(args.sdk_image, args.runtime_root, args.stock_inputs, args.profile, args.output)
 
 
 if __name__ == "__main__":

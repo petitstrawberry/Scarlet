@@ -47,7 +47,8 @@
     "u:r:ueventd:s0": 4,
     "u:r:servicemanager:s0": 5,
     "u:r:zygote:s0": 6,
-    "u:r:linkerconfig:s0": 7
+    "u:r:linkerconfig:s0": 7,
+    "u:r:boringssl_self_test:s0": 8
   },
   "transitions": [
     [
@@ -84,6 +85,8 @@
       "u:object_r:init_perf_lsm_hooks_prop:s0",
       "u:object_r:init_service_status_private_prop:s0",
       "u:object_r:init_service_status_prop:s0",
+      "u:object_r:init_svc_debug_prop:s0",
+      "u:object_r:last_boot_reason_prop:s0",
       "u:object_r:log_tag_prop:s0",
       "u:object_r:logd_prop:s0",
       "u:object_r:nnapi_ext_deny_product_prop:s0",
@@ -141,7 +144,9 @@
     "/system/bin/bootstrap/linkerconfig": "u:object_r:linkerconfig_exec:s0",
     "/system/apex/com.android.runtime/bin/linkerconfig": "u:object_r:linkerconfig_exec:s0",
     "/system/bin/apexd": "u:object_r:apexd_exec:s0",
-    "/system/bin/servicemanager": "u:object_r:servicemanager_exec:s0"
+    "/system/bin/servicemanager": "u:object_r:servicemanager_exec:s0",
+    "/system/bin/boringssl_self_test64": "u:object_r:boringssl_self_test_exec:s0",
+    "/system/apex/com.android.conscrypt/bin/boringssl_self_test64": "u:object_r:boringssl_self_test_exec:s0"
   },
   "exec_transitions": [
     [
@@ -161,6 +166,16 @@
       "u:object_r:servicemanager_exec:s0",
       "u:r:servicemanager:s0",
       1000
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:boringssl_self_test_exec:s0",
+      "u:r:boringssl_self_test:s0",
+      0
     ]
-  ]
+  ],
+  "resource_groups": {
+    "cgroup2_root": "/sys/fs/cgroup",
+    "controllers": []
+  }
 }

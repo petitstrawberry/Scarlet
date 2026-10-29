@@ -40,6 +40,7 @@ def validate_profile(profile):
               "subjects", "transitions", "property_grants", "init_imports"}
     if profile.get("version") == 2:
         fields |= {"file_labels", "exec_transitions"}
+        if "resource_groups" in profile: fields.add("resource_groups")
     if set(profile) != fields or profile.get("version") not in (1, 2):
         raise ValueError("unsupported boot profile")
     if not re.fullmatch(r"[a-z0-9-]+", profile["name"]):
@@ -56,6 +57,10 @@ def validate_profile(profile):
     for name, value in profile["bootconfig"].items():
         if not re.fullmatch(r"androidboot\.[A-Za-z0-9_.]+", name) or not re.fullmatch(r"[A-Za-z0-9_./-]+", value):
             raise ValueError("invalid bootconfig entry")
+    if "resource_groups" in profile:
+        resources = profile["resource_groups"]
+        if resources != {"cgroup2_root": "/sys/fs/cgroup", "controllers": []}:
+            raise ValueError("unsupported resource controller configuration")
     subjects = profile["subjects"]
     if len(subjects) > 64 or len(set(subjects.values())) != len(subjects) or any(
             not CONTEXT.fullmatch(label) or not label.startswith("u:r:") or
