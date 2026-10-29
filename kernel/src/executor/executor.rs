@@ -80,12 +80,14 @@ fn path_in_environment_view(
     vfs: &VfsManager,
     path: &str,
     environment: &Environment,
+    namespace: &crate::fs::vfs_v2::namespace::MountNamespace,
 ) -> Option<(String, Arc<crate::fs::vfs_v2::manager::VfsView>, String)> {
     let (entry, _) = vfs
         .resolve_path_with_options(path, &PathResolutionOptions::no_follow())
         .ok()?;
     let mut best = None;
     for (abi, view) in environment.roots() {
+        let view = namespace.resolve(&view);
         let root = view.mount_tree.root_mount.read().root.clone();
         let mut current = entry.clone();
         let mut components = Vec::new();
@@ -160,9 +162,10 @@ impl TransparentExecutor {
         // registered Environment view. Absolute links are followed in that
         // view, independent of where its tree is exposed to the caller.
         let environment = task.execution_environment.read().clone();
+        let mount_namespace = task.mount_namespace.read().clone();
         let view_path = environment
             .as_ref()
-            .and_then(|env| path_in_environment_view(&vfs, path, env));
+            .and_then(|env| path_in_environment_view(&vfs, path, env, &mount_namespace));
         let file = if let Some((_, view, relative)) = &view_path {
             VfsManager::from_view(view.clone()).open(relative, 0)
         } else {
@@ -375,6 +378,11 @@ impl TransparentExecutor {
             return Err(failure("argument list too large"));
         }
         let explicit_transition = handles.is_some();
+        let mount_namespace = if explicit_transition {
+            source.mount_namespace.read().clone()
+        } else {
+            task.mount_namespace.read().clone()
+        };
         let current_vfs = task.get_vfs();
         let current_abi = task.with_default_abi(|abi| abi.get_name());
         let vfs = match &environment {
@@ -385,6 +393,7 @@ impl TransparentExecutor {
                 let view = env.root(abi_name).map_err(|_| {
                     ExecutorError::AbiUnavailableInEnvironment(abi_name.to_string())
                 })?;
+                let view = mount_namespace.resolve(&view);
                 if !explicit_transition && current_abi == abi_name {
                     let fs = current_vfs.ok_or_else(|| failure("missing filesystem context"))?;
                     if !Arc::ptr_eq(&fs.view(), &view) {
@@ -410,6 +419,7 @@ impl TransparentExecutor {
 
         let mut image = task.new_exec_image();
         image.set_vfs(vfs);
+        *image.mount_namespace.write() = mount_namespace;
         *image.execution_environment.write() = environment;
         if let Some(handles) = handles {
             for mapping in handles {
@@ -450,6 +460,10 @@ impl TransparentExecutor {
         core::mem::swap(&mut *task.name.write(), &mut *image.name.write());
         core::mem::swap(&mut *task.vcpu.lock(), &mut *image.vcpu.lock());
         core::mem::swap(&mut *task.vfs.write(), &mut *image.vfs.write());
+        core::mem::swap(
+            &mut *task.mount_namespace.write(),
+            &mut *image.mount_namespace.write(),
+        );
         core::mem::swap(
             &mut *task.execution_environment.write(),
             &mut *image.execution_environment.write(),

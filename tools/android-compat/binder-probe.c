@@ -5,6 +5,8 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sched.h>
+#include <sys/mount.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -147,6 +149,10 @@ static int descriptor_flush(void) {
     return 0;
 }
 static int server(int ready) {
+    // A private mount namespace must keep the parent's Environment/Binder
+    // domain, including when the device is opened after the split.
+    REQUIRE(unshare(CLONE_NEWNS) == 0);
+    REQUIRE(mount("rootfs", "/", NULL, MS_SLAVE | MS_REC, NULL) == 0);
     struct peer peer;
     REQUIRE(open_peer(&peer) == 0);
     struct flat_binder_object node = {.hdr.type = BINDER_TYPE_BINDER, .binder = 0x123400, .cookie = 0x567800};

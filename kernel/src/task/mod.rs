@@ -873,6 +873,8 @@ pub struct Task {
     /// VfsManager is thread-safe and can be shared between tasks using Arc.
     /// All internal operations use `IrqRwSpinLock` for concurrent access protection.
     pub vfs: IrqRwSpinLock<Option<Arc<VfsManager>>>,
+    /// Namespace-local copies of views; Environment and Binder identity persist.
+    pub(crate) mount_namespace: IrqRwSpinLock<Arc<crate::fs::vfs_v2::namespace::MountNamespace>>,
     /// Ordinary processes belong to a sealed execution environment.
     pub execution_environment:
         IrqRwSpinLock<Option<Arc<crate::executor::environment::Environment>>>,
@@ -1131,6 +1133,7 @@ impl Task {
             page_allocations: vm_manager.page_allocations_handle(),
             task_pages: vm_manager.task_pages_handle(),
             vfs: IrqRwSpinLock::new(None),
+            mount_namespace: IrqRwSpinLock::new(crate::fs::vfs_v2::namespace::MountNamespace::new()),
             execution_environment: IrqRwSpinLock::new(None),
             bootstrap_environment: AtomicBool::new(false),
             security_subject: IrqRwSpinLock::new(None),
@@ -3143,6 +3146,7 @@ impl Task {
             *child.vfs.write() = Some(VfsManager::clone_with_shared_mount_namespace(&vfs));
         }
         *child.execution_environment.write() = self.execution_environment.read().clone();
+        *child.mount_namespace.write() = self.mount_namespace.read().clone();
         *child.security_subject.write() = self.security_subject.read().clone();
 
         // Ensure the cloned task has its own high-VA kernel stack window.

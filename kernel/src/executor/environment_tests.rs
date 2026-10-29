@@ -299,3 +299,147 @@ fn environment_clone_keeps_external_binds_and_isolates_mount_topology() {
     assert!(cloned.open("/shared/data", 0).is_err());
     assert!(fs.open("/shared/data", 0).is_ok());
 }
+
+#[test_case]
+fn mount_namespace_preserves_environment_through_fork_exec_and_failed_exec() {
+    let (task, original, environment, _) = fixture();
+    let backing = Arc::new(VfsManager::new());
+    backing
+        .create_file("/shared-data", FileType::RegularFile)
+        .unwrap();
+    original.create_dir("/mounted").unwrap();
+    original.bind_mount_from(&backing, "/", "/mounted").unwrap();
+    crate::abi::linux::generic::proc::unshare_filesystem(&task, 0x20000).unwrap();
+    let separated = task.get_vfs().unwrap();
+    let namespace = task.mount_namespace.read().clone();
+    assert!(!Arc::ptr_eq(&separated.view(), &original.view()));
+    assert!(Arc::ptr_eq(
+        task.execution_environment.read().as_ref().unwrap(),
+        &environment
+    ));
+    assert_eq!(separated.get_cwd_path(), "/work");
+    separated.unmount("/mounted").unwrap();
+    assert!(separated.open("/mounted/shared-data", 0).is_err());
+    assert!(original.open("/mounted/shared-data", 0).is_ok());
+    let child = task.clone_task(crate::task::CloneFlags::default()).unwrap();
+    assert!(Arc::ptr_eq(&namespace, &child.mount_namespace.read()));
+    assert!(Arc::ptr_eq(
+        &separated.view(),
+        &child.get_vfs().unwrap().view()
+    ));
+    let mut tf = Trapframe::new();
+    assert!(
+        TransparentExecutor::execute_with_abi(
+            "/txn-image",
+            &["/txn-image"],
+            &["FAIL=1"],
+            TestImageAbi::name(),
+            &task,
+            &mut tf
+        )
+        .is_err()
+    );
+    assert!(Arc::ptr_eq(&namespace, &task.mount_namespace.read()));
+    assert!(Arc::ptr_eq(&separated, &task.get_vfs().unwrap()));
+    TransparentExecutor::execute_with_abi(
+        "/txn-image",
+        &["/txn-image"],
+        &[],
+        TestImageAbi::name(),
+        &task,
+        &mut tf,
+    )
+    .unwrap();
+    task.finish_exec_dispatch();
+    assert!(Arc::ptr_eq(&namespace, &task.mount_namespace.read()));
+    assert!(Arc::ptr_eq(
+        &separated.view(),
+        &task.get_vfs().unwrap().view()
+    ));
+    assert!(Arc::ptr_eq(
+        task.execution_environment.read().as_ref().unwrap(),
+        &environment
+    ));
+    assert_eq!(task.get_vfs().unwrap().get_cwd_path(), "/work");
+    assert!(
+        task.get_vfs()
+            .unwrap()
+            .open("/mounted/shared-data", 0)
+            .is_err()
+    );
+    assert!(original.open("/mounted/shared-data", 0).is_ok());
+}
+
+#[test_case]
+fn mount_namespace_explicit_spawn_inherits_current_mappings_and_repeated_splits() {
+    let (source, original, env, _) = fixture();
+    let file = original.open("/txn-image", 0).unwrap();
+    let (namespace, fs) = source.prepare_mount_namespace().unwrap();
+    source.install_mount_namespace(namespace.clone(), fs.clone());
+    let child = new_user_task("namespace-spawn".into(), 0);
+    let mut tf = Trapframe::new();
+    TransparentExecutor::execute_in_environment(
+        env.clone(),
+        &file,
+        &["/txn-image"],
+        &[],
+        "/work",
+        &[],
+        &source,
+        &child,
+        &mut tf,
+    )
+    .unwrap();
+    child.finish_exec_dispatch();
+    assert!(Arc::ptr_eq(&namespace, &child.mount_namespace.read()));
+    assert!(Arc::ptr_eq(&fs.view(), &child.get_vfs().unwrap().view()));
+    assert!(Arc::ptr_eq(
+        child.execution_environment.read().as_ref().unwrap(),
+        &env
+    ));
+    let backing = Arc::new(VfsManager::new());
+    backing.create_file("/new", FileType::RegularFile).unwrap();
+    fs.create_dir("/private").unwrap();
+    fs.bind_mount_from(&backing, "/", "/private").unwrap();
+    let (next, second) = child.prepare_mount_namespace().unwrap();
+    child.install_mount_namespace(next, second.clone());
+    assert!(second.open("/private/new", 0).is_ok());
+    second.unmount("/private").unwrap();
+    assert!(fs.open("/private/new", 0).is_ok());
+    assert!(second.open("/private/new", 0).is_err());
+    assert!(original.open("/private/new", 0).is_err());
+}
+
+#[test_case]
+fn unshare_rejects_unknown_flags_without_changes_and_private_mounts_stay_private() {
+    use crate::abi::linux::generic::{
+        errno, fs::private_mount_propagation, proc::unshare_filesystem,
+    };
+    let (task, fs, _, _) = fixture();
+    let namespace = task.mount_namespace.read().clone();
+    assert_eq!(
+        unshare_filesystem(&task, 0x20000 | 0x40000000),
+        Err(errno::EOPNOTSUPP)
+    );
+    assert!(Arc::ptr_eq(&namespace, &task.mount_namespace.read()));
+    assert!(Arc::ptr_eq(&fs, &task.get_vfs().unwrap()));
+    unshare_filesystem(&task, 0x200).unwrap();
+    assert!(!Arc::ptr_eq(&fs, &task.get_vfs().unwrap()));
+    assert!(Arc::ptr_eq(&fs.view(), &task.get_vfs().unwrap().view()));
+    task.get_vfs().unwrap().set_cwd_by_path("/").unwrap();
+    assert_eq!(fs.get_cwd_path(), "/work");
+    assert_eq!(private_mount_propagation(&task, "/", 0x84000), Ok(()));
+    assert_eq!(private_mount_propagation(&task, "/", 0x40000), Ok(()));
+    assert_eq!(
+        private_mount_propagation(&task, "/", 0x100000),
+        Err(errno::EOPNOTSUPP)
+    );
+    assert_eq!(
+        private_mount_propagation(&task, "/work", 0x80000),
+        Err(errno::EINVAL)
+    );
+    assert_eq!(
+        private_mount_propagation(&task, "/absent", 0x80000),
+        Err(errno::ENOENT)
+    );
+}

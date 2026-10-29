@@ -40,6 +40,7 @@ pub mod drivers;
 pub mod file_lock;
 pub mod manager;
 pub mod mount_tree;
+pub mod namespace;
 pub mod syscall;
 pub mod xattr;
 

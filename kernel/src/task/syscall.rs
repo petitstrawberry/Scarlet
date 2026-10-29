@@ -1960,7 +1960,6 @@ const SYSCALL_ERROR: usize = usize::MAX;
 /// sys_create_namespace(NS_CREATE_TASK | NS_CREATE_VFS, "container1");
 /// ```
 pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
-    use crate::fs::VfsManager;
     use crate::task::namespace::TaskNamespace;
 
     let task = mytask().unwrap();
@@ -1989,26 +1988,10 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
     };
 
     let prepared_fs = if flags & NS_CREATE_VFS != 0 {
-        let Some(source) = task.get_vfs() else {
-            return SYSCALL_ERROR;
-        };
-        let Some(environment) = task.execution_environment.read().clone() else {
-            return SYSCALL_ERROR;
-        };
-        let cloned = match environment.clone_mount_namespaces() {
-            Ok(environment) => environment,
+        match task.prepare_mount_namespace() {
+            Ok(prepared) => Some(prepared),
             Err(_) => return SYSCALL_ERROR,
-        };
-        let abi = task.with_default_abi(|abi| abi.get_name());
-        let root = match cloned.root(&abi) {
-            Ok(root) => root,
-            Err(_) => return SYSCALL_ERROR,
-        };
-        let fs = VfsManager::from_view(root);
-        if fs.set_cwd_by_path(&source.get_cwd_path()).is_err() {
-            return SYSCALL_ERROR;
         }
-        Some((cloned, fs))
     } else {
         None
     };
@@ -2017,9 +2000,8 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
         let new_task_ns = TaskNamespace::new_child(task.get_namespace().clone(), name);
         task.set_namespace(new_task_ns);
     }
-    if let Some((environment, fs)) = prepared_fs {
-        *task.execution_environment.write() = Some(environment);
-        task.set_vfs(fs);
+    if let Some((namespace, fs)) = prepared_fs {
+        task.install_mount_namespace(namespace, fs);
     }
 
     0

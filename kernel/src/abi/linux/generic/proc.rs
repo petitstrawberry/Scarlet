@@ -121,11 +121,23 @@ pub fn sys_unshare(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     trapframe.increment_pc_next(&task);
 
-    if flags == 0 {
-        0
-    } else {
-        errno::to_result(errno::ENOSYS)
+    unshare_filesystem(&task, flags).map_or_else(errno::to_result, |_| 0)
+}
+
+pub(crate) fn unshare_filesystem(task: &Task, flags: usize) -> Result<(), usize> {
+    const CLONE_FS: usize = 0x200;
+    const CLONE_NEWNS: usize = 0x20000;
+    if flags & !(CLONE_FS | CLONE_NEWNS) != 0 {
+        return Err(errno::EOPNOTSUPP);
     }
+    if flags & CLONE_NEWNS != 0 {
+        let (namespace, fs) = task.prepare_mount_namespace().map_err(|_| errno::ENOMEM)?;
+        task.install_mount_namespace(namespace, fs);
+    } else if flags & CLONE_FS != 0 {
+        let fs = task.get_vfs().ok_or(errno::EIO)?;
+        task.set_vfs(crate::fs::VfsManager::clone_with_shared_mount_namespace(&fs));
+    }
+    Ok(())
 }
 
 const LINUX_CPU_MASK_SIZE: usize = core::mem::size_of::<usize>();

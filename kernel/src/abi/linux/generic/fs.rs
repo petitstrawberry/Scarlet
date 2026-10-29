@@ -1021,11 +1021,35 @@ enum OpenMode {
     Truncate = 0x400,
 }
 
-/// Linux mount namespaces are not implemented; do not claim successful isolation.
+/// Native views currently have private mounts only. Linux MS_SLAVE on a
+/// private mount remains private; neither operation creates propagation peers.
+/// Shared propagation and other mount operations require separate support.
 pub fn sys_mount(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
+    let target = trapframe.get_arg(1);
+    let flags = trapframe.get_arg(3);
     trapframe.increment_pc_next(&task);
-    errno::to_result(errno::ENOSYS)
+    let path = match parse_c_string_from_userspace(&task, target, MAX_PATH_LENGTH) {
+        Ok(path) => path,
+        Err(_) => return errno::to_result(errno::EFAULT),
+    };
+    private_mount_propagation(&task, &path, flags).map_or_else(errno::to_result, |_| 0)
+}
+
+pub(crate) fn private_mount_propagation(task: &crate::task::Task, path: &str, flags: usize) -> Result<(), usize> {
+    if path.is_empty() { return Err(errno::ENOENT); }
+    const MS_REC: usize = 0x4000;
+    const MS_PRIVATE: usize = 0x40000;
+    const MS_SLAVE: usize = 0x80000;
+    if !matches!(flags & !MS_REC, MS_PRIVATE | MS_SLAVE) {
+        return Err(errno::EOPNOTSUPP);
+    }
+    let fs = task.get_vfs().ok_or(errno::EIO)?;
+    let (entry, mount) = fs.resolve_path(path).map_err(|_| errno::ENOENT)?;
+    if !alloc::sync::Arc::ptr_eq(&entry, &mount.root) {
+        return Err(errno::EINVAL);
+    }
+    Ok(())
 }
 
 /// Linux sys_openat implementation for Scarlet VFS v2
