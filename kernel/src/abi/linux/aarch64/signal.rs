@@ -357,3 +357,27 @@ mod tests {
         }
     }
 }
+
+/// Synchronous seccomp SIGSYS: blocked/ignored faults terminate, caught faults
+/// carry the attempted call and may resume at the instruction following SVC.
+pub fn deliver_seccomp_trap(abi: &LinuxAbi, task: &Task, frame: &mut Trapframe,
+    detail: u32, number: usize, address: usize) -> Result<(), &'static str>
+{
+    let handler = {
+        let state = abi.signal_state.lock();
+        if state.blocked.raw() & (1 << 30) != 0 { return Err("SIGSYS blocked"); }
+        match state.get_handler(LinuxSignal::SIGSYS) {
+            SignalAction::Custom(handler) => handler,
+            _ => return Err("SIGSYS not caught"),
+        }
+    };
+    setup_signal_handler(abi, task, frame, handler, LinuxSignal::SIGSYS)?;
+    let mut info = [0u8;32];
+    put32(&mut info, 0, 31);
+    put32(&mut info, 4, detail);
+    put32(&mut info, 8, 1); // SYS_SECCOMP
+    put64(&mut info, 16, address as u64);
+    put32(&mut info, 24, number as u32);
+    put32(&mut info, 28, crate::abi::linux::generic::seccomp::AUDIT_ARCH);
+    copy_to_user(task, frame.regs.reg[1], &info).map_err(|_| "SIGSYS siginfo copy failed")
+}

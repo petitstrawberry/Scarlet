@@ -4,6 +4,7 @@
 //! Possession of a policy identity is distinct from authority to assign labels.
 pub mod syscall;
 pub mod identity;
+pub mod execution;
 
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 

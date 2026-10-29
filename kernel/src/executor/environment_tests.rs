@@ -303,6 +303,7 @@ fn environment_clone_keeps_external_binds_and_isolates_mount_topology() {
 #[test_case]
 fn mount_namespace_preserves_environment_through_fork_exec_and_failed_exec() {
     let (task, original, environment, _) = fixture();
+    seal_execution(&task);
     let backing = Arc::new(VfsManager::new());
     backing
         .create_file("/shared-data", FileType::RegularFile)
@@ -324,6 +325,7 @@ fn mount_namespace_preserves_environment_through_fork_exec_and_failed_exec() {
     task.credentials.write().set_principals(crate::shield::identity::Identities::all(
         crate::shield::identity::Principal(1234))).unwrap();
     let child = task.clone_task(crate::task::CloneFlags::default()).unwrap();
+    assert_execution_sealed(&child);
     assert_eq!(child.credentials.read().principals().active,
         crate::shield::identity::Principal(1234));
     assert!(Arc::ptr_eq(&namespace, &child.mount_namespace.read()));
@@ -343,6 +345,7 @@ fn mount_namespace_preserves_environment_through_fork_exec_and_failed_exec() {
         )
         .is_err()
     );
+    assert_execution_sealed(&task);
     assert!(Arc::ptr_eq(&namespace, &task.mount_namespace.read()));
     assert!(Arc::ptr_eq(&separated, &task.get_vfs().unwrap()));
     TransparentExecutor::execute_with_abi(
@@ -355,6 +358,7 @@ fn mount_namespace_preserves_environment_through_fork_exec_and_failed_exec() {
     )
     .unwrap();
     task.finish_exec_dispatch();
+    assert_execution_sealed(&task);
     assert!(Arc::ptr_eq(&namespace, &task.mount_namespace.read()));
     assert!(Arc::ptr_eq(
         &separated.view(),
@@ -377,6 +381,7 @@ fn mount_namespace_preserves_environment_through_fork_exec_and_failed_exec() {
 #[test_case]
 fn mount_namespace_explicit_spawn_inherits_current_mappings_and_repeated_splits() {
     let (source, original, env, _) = fixture();
+    seal_execution(&source);
     let file = original.open("/txn-image", 0).unwrap();
     let (namespace, fs) = source.prepare_mount_namespace().unwrap();
     source.install_mount_namespace(namespace.clone(), fs.clone());
@@ -397,6 +402,7 @@ fn mount_namespace_explicit_spawn_inherits_current_mappings_and_repeated_splits(
     )
     .unwrap();
     child.finish_exec_dispatch();
+    assert_execution_sealed(&child);
     assert_eq!(child.credentials.read().principals().active,
         crate::shield::identity::Principal(1234));
     assert!(Arc::ptr_eq(&namespace, &child.mount_namespace.read()));
@@ -450,4 +456,23 @@ fn unshare_rejects_unknown_flags_without_changes_and_private_mounts_stay_private
         private_mount_propagation(&task, "/absent", 0x80000),
         Err(errno::ENOENT)
     );
+}
+
+struct ExecutionTestRule;
+impl crate::shield::execution::CallConstraint for ExecutionTestRule {
+    fn evaluate(&self, _: &crate::shield::execution::Invocation) -> crate::shield::execution::Verdict {
+        crate::shield::execution::Verdict::ABORT
+    }
+}
+fn seal_execution(task: &Task) {
+    let mut state = task.execution_restrictions.write();
+    state.seal_authority();
+    state.append(Arc::new(ExecutionTestRule), 1).unwrap();
+}
+fn assert_execution_sealed(task: &Task) {
+    let state = task.execution_restrictions.read();
+    assert!(state.no_new_authority());
+    assert_eq!(state.evaluate(&crate::shield::execution::Invocation {
+        domain: "test", number: 0, instruction: 0, arguments: [0;6],
+    }), Some(crate::shield::execution::Denial::AbortProcess));
 }

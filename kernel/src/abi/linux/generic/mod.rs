@@ -1,4 +1,5 @@
 pub mod credentials;
+pub mod seccomp;
 #[macro_use]
 mod macros;
 pub mod errno;
@@ -657,6 +658,7 @@ syscall_table! {
     GetGroups = 158 => credentials::sys_getgroups,
     SetGroups = 159 => credentials::sys_setgroups,
     Prctl = 167 => proc::sys_prctl,
+    Seccomp = 277 => seccomp::sys_seccomp,
     Getcpu = 168 => proc::sys_getcpu,
     Gettimeofday = 169 => time::sys_gettimeofday,
     GetPid = 172 => proc::sys_getpid,

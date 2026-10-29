@@ -84,6 +84,11 @@ impl AbiModule for LinuxAarch64Abi {
         Box::new(self.clone())
     }
 
+    fn execution_domain(&self) -> &'static str { "linux-aarch64" }
+    fn handle_execution_denial(&mut self, denial: crate::shield::execution::Denial, frame: &mut crate::arch::Trapframe) -> Result<usize, &'static str> {
+        Ok(generic::seccomp::handle_denial(&mut self.0, denial, frame))
+    }
+
     fn handle_syscall(
         &mut self,
         trapframe: &mut crate::arch::Trapframe,

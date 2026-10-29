@@ -420,6 +420,7 @@ impl TransparentExecutor {
         let mut image = task.new_exec_image();
         if explicit_transition {
             *image.credentials.write() = source.credentials.read().clone();
+        *image.execution_restrictions.write() = source.execution_restrictions.read().clone();
         }
         image.set_vfs(vfs);
         *image.mount_namespace.write() = mount_namespace;
@@ -460,6 +461,7 @@ impl TransparentExecutor {
         let commit_guard = crate::sync::IrqGuard::new();
         task.vm_manager.exchange_exec_image(&image.vm_manager);
         core::mem::swap(&mut *task.credentials.write(), &mut *image.credentials.write());
+        core::mem::swap(&mut *task.execution_restrictions.write(), &mut *image.execution_restrictions.write());
         task.handle_table.exchange_exec_table(&image.handle_table);
         core::mem::swap(&mut *task.name.write(), &mut *image.name.write());
         core::mem::swap(&mut *task.vcpu.lock(), &mut *image.vcpu.lock());

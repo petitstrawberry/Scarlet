@@ -88,6 +88,19 @@ pub trait AbiModule: Send + Sync + 'static {
     /// An owned name corresponding to its registry entry.
     fn get_name(&self) -> String;
 
+    /// Call-number domain used by inherited Shield execution constraints.
+    /// Unknown adapters cannot impersonate another ABI's filtered calls.
+    fn execution_domain(&self) -> &'static str { "unknown" }
+    fn handle_execution_denial(
+        &mut self, _denial: crate::shield::execution::Denial, frame: &mut Trapframe,
+    ) -> Result<usize, &'static str> {
+        let task = mytask().ok_or("no current task")?;
+        frame.increment_pc_next(&task);
+        task.request_deferred_exit_group(1);
+        Ok(usize::MAX)
+    }
+
+
     /// Clone this ABI module into a boxed trait object
     ///
     /// This method enables cloning ABI modules as trait objects,
@@ -633,11 +646,18 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
 
     // 3. Resolve the appropriate ABI based on PC address and handle the syscall
     let res = if let Some(native_number) = scarlet_abi::decode_native_call(syscall_number) {
-        crate::syscall::syscall_handler_number(trapframe, native_number)
+        if let Some(denial) = execution_denial(&task, trapframe, "scarlet-native") {
+            task.with_default_abi_mut(|abi, _| abi.handle_execution_denial(denial, trapframe))
+        } else {
+            crate::syscall::syscall_handler_number(trapframe, native_number)
+        }
     } else {
         task.with_resolve_abi_mut(pc, |abi_module| {
-            // 4. Handle the system call with the resolved ABI
-            abi_module.handle_syscall(trapframe)
+            if let Some(denial) = execution_denial(&task, trapframe, abi_module.execution_domain()) {
+                abi_module.handle_execution_denial(denial, trapframe)
+            } else {
+                abi_module.handle_syscall(trapframe)
+            }
         })
     };
     crate::breadcrumb::drop(
@@ -650,4 +670,16 @@ pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static s
     task.record_syscall_exit();
     crate::breadcrumb::drop(crate::breadcrumb::SYSCALL_EXIT, syscall_number as u64, 0);
     res
+}
+
+fn execution_denial(task: &crate::task::Task, frame: &Trapframe, domain: &'static str)
+    -> Option<crate::shield::execution::Denial>
+{
+    let restrictions = task.execution_restrictions.read();
+    if !restrictions.is_constrained() { return None; }
+    restrictions.evaluate(&crate::shield::execution::Invocation {
+        domain, number: frame.get_syscall_number() as u64,
+        instruction: frame.get_current_pc() as u64,
+        arguments: core::array::from_fn(|i| frame.get_arg(i) as u64),
+    })
 }

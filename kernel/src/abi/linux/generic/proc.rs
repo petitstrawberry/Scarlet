@@ -754,6 +754,17 @@ pub fn sys_prctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             if trapframe.get_arg(1) > 1 { errno::to_result(errno::EINVAL) }
             else { abi.keep_caps = trapframe.get_arg(1) == 1; 0 }
         }
+        21 => super::seccomp::mode(&task), // PR_GET_SECCOMP
+        22 => super::seccomp::set_mode(&task, arg2, trapframe.get_arg(2)),
+        38 => { // PR_SET_NO_NEW_PRIVS: irreversible, inherited by all exec paths.
+            if arg2 != 1 || (2..5).any(|i| trapframe.get_arg(i) != 0) {
+                errno::to_result(errno::EINVAL)
+            } else { task.execution_restrictions.write().seal_authority(); 0 }
+        }
+        39 => {
+            if (1..5).any(|i| trapframe.get_arg(i) != 0) { errno::to_result(errno::EINVAL) }
+            else { usize::from(task.execution_restrictions.read().no_new_authority()) }
+        }
         PR_SET_NAME => {
             let mut name = [0u8; TASK_COMM_LEN];
             if copy_from_user(&task, arg2, &mut name).is_err() {
@@ -1974,8 +1985,8 @@ mod tests {
             (PR_SET_TAGGED_ADDR_CTRL, 0),
             (PR_GET_TAGGED_ADDR_CTRL, 0),
             (23, 64), // PR_CAPBSET_READ must terminate unsupported queries.
-            (38, 1), // PR_SET_NO_NEW_PRIVS is not implemented.
-            (22, 2), // PR_SET_SECCOMP is not implemented.
+            (38, 0), // PR_SET_NO_NEW_PRIVS cannot be cleared.
+            (22, 99), // Unsupported seccomp mode.
             (i32::MAX, 0),
         ] {
             frame.set_arg(0, operation as usize);

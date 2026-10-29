@@ -483,6 +483,7 @@ handler!(sys_environment_spawn, |task, tf| {
     );
     *child.security_subject.write() = task.security_subject.read().clone();
     *child.credentials.write() = task.credentials.read().clone();
+        *child.execution_restrictions.write() = task.execution_restrictions.read().clone();
     child.max_stack_size = task.max_stack_size;
     child.max_data_size = task.max_data_size;
     child.max_text_size = task.max_text_size;
