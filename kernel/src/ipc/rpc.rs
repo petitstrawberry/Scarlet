@@ -52,6 +52,10 @@ pub struct RpcObject {
     endpoint: Weak<RpcEndpoint>,
     key: u64,
     revoked: AtomicBool,
+    observers: IrqSpinLock<Vec<Weak<DeathObserver>>>,
+}
+struct DeathObserver {
+    waker: Weak<Waker>,
 }
 
 impl RpcObject {
@@ -76,7 +80,53 @@ impl RpcObject {
             if let Some(endpoint) = self.endpoint.upgrade() {
                 endpoint.revoke_object(self.key);
             }
+            let wakers: Vec<_> = self
+                .observers
+                .lock()
+                .iter()
+                .filter_map(Weak::upgrade)
+                .filter_map(|observer| observer.waker.upgrade())
+                .collect();
+            for waker in wakers {
+                waker.wake_all();
+            }
         }
+    }
+    /// Observe permanent loss of this capability without retaining its server.
+    /// Dropping the watch cancels registration; the readiness source is weak.
+    pub fn watch_death(self: &Arc<Self>, waker: &Arc<Waker>) -> RpcDeathWatch {
+        let observer = Arc::new(DeathObserver {
+            waker: Arc::downgrade(waker),
+        });
+        {
+            let mut observers = self.observers.lock();
+            observers.retain(|observer| observer.strong_count() != 0);
+            observers.push(Arc::downgrade(&observer));
+        }
+        let watch = RpcDeathWatch {
+            object: self.clone(),
+            _observer: observer,
+        };
+        // Register before checking: close/revoke cannot be missed in between.
+        if watch.ready() {
+            waker.wake_all();
+        }
+        watch
+    }
+}
+
+pub struct RpcDeathWatch {
+    object: Arc<RpcObject>,
+    _observer: Arc<DeathObserver>,
+}
+impl RpcDeathWatch {
+    pub fn ready(&self) -> bool {
+        self.object.revoked.load(Ordering::Acquire)
+            || self
+                .object
+                .endpoint
+                .upgrade()
+                .is_none_or(|endpoint| endpoint.state.lock().closed)
     }
 }
 
@@ -189,6 +239,7 @@ struct EndpointState {
     next_object_key: u64,
     queue: VecDeque<RpcRequest>,
     calls: Vec<Weak<CallState>>,
+    objects: Vec<Weak<RpcObject>>,
 }
 
 pub struct RpcEndpoint {
@@ -205,6 +256,7 @@ impl RpcEndpoint {
                 next_object_key: 1,
                 queue: VecDeque::new(),
                 calls: Vec::new(),
+                objects: Vec::new(),
             }),
             waker: Arc::new(Waker::new_interruptible("rpc_receive")),
             budget: Arc::new(AtomicUsize::new(0)),
@@ -220,11 +272,15 @@ impl RpcEndpoint {
         }
         let key = state.next_object_key;
         state.next_object_key = key.checked_add(1).ok_or(RpcError::Busy)?;
-        Ok(Arc::new(RpcObject {
+        let object = Arc::new(RpcObject {
             endpoint: Arc::downgrade(self),
             key,
             revoked: AtomicBool::new(false),
-        }))
+            observers: IrqSpinLock::new(Vec::new()),
+        });
+        state.objects.retain(|object| object.strong_count() != 0);
+        state.objects.push(Arc::downgrade(&object));
+        Ok(object)
     }
     fn send_to(
         &self,
@@ -311,12 +367,13 @@ impl RpcEndpoint {
         self.waker.wake_all();
     }
     pub fn close(&self) {
-        let (queue, calls) = {
+        let (queue, calls, objects) = {
             let mut state = self.state.lock();
             state.closed = true;
             (
                 core::mem::take(&mut state.queue),
                 core::mem::take(&mut state.calls),
+                core::mem::take(&mut state.objects),
             )
         };
         // Dropping reply capabilities wakes their callers outside the queue lock.
@@ -325,6 +382,9 @@ impl RpcEndpoint {
             if let Some(call) = call.upgrade() {
                 let _ = call.finish(Completion::Failed(RpcError::PeerClosed));
             }
+        }
+        for object in objects.into_iter().filter_map(|object| object.upgrade()) {
+            object.revoke();
         }
         self.waker.wake_all();
     }
@@ -339,6 +399,52 @@ impl Drop for RpcEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test_case]
+    fn rpc_death_watches_wake_on_revoke_close_drop_and_late_registration() {
+        for mode in 0..3 {
+            let endpoint = RpcEndpoint::new();
+            let weak_endpoint = Arc::downgrade(&endpoint);
+            let object = endpoint.create_object().unwrap();
+            let sibling = endpoint.create_object().unwrap();
+            let waker = Arc::new(Waker::new_interruptible("rpc-death-test"));
+            let watch = object.watch_death(&waker);
+            let sibling_watch = sibling.watch_death(&waker);
+            assert!(!watch.ready());
+            assert_eq!(Arc::strong_count(&endpoint), 1);
+            assert_eq!(Arc::strong_count(&waker), 1);
+            match mode {
+                0 => object.revoke(),
+                1 => endpoint.close(),
+                _ => drop(endpoint),
+            }
+            assert!(watch.ready());
+            assert_eq!(sibling_watch.ready(), mode != 0);
+            assert!(waker.pending_wake_count_for_test() > 0);
+            if mode == 2 {
+                assert!(weak_endpoint.upgrade().is_none());
+            }
+            let late_waker = Arc::new(Waker::new_interruptible("rpc-death-late"));
+            let late = object.watch_death(&late_waker);
+            assert!(late.ready());
+            assert!(late_waker.pending_wake_count_for_test() > 0);
+        }
+    }
+    #[test_case]
+    fn rpc_cancelled_death_watches_do_not_wake_or_accumulate() {
+        let endpoint = RpcEndpoint::new();
+        let object = endpoint.create_object().unwrap();
+        let waker = Arc::new(Waker::new_interruptible("rpc-death-cancel"));
+        for _ in 0..100 {
+            drop(object.watch_death(&waker));
+        }
+        assert_eq!(object.observers.lock().len(), 1);
+        object.revoke();
+        assert_eq!(waker.pending_wake_count_for_test(), 0);
+        for _ in 0..100 {
+            drop(endpoint.create_object().unwrap());
+        }
+        assert_eq!(endpoint.state.lock().objects.len(), 2);
+    }
     #[test_case]
     fn rpc_retained_resources_follow_cancelled_requests_and_consumed_replies() {
         let endpoint = RpcEndpoint::new();
