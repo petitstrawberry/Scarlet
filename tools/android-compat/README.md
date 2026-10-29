@@ -318,7 +318,7 @@ or after changing execution environment. Kernel tests exercise isolation by
 attempting real adapter transactions across these boundaries.
 
 The initial adapter supports protocol version 8, context-manager registration,
-manual loopers, `BINDER_WRITE_READ`, synchronous transactions to handle 0 or a
+manual loopers, `BINDER_WRITE_READ`, synchronous and one-way transactions to handle 0 or a
 transferred strong handle, replies, transaction completion, `BC_FREE_BUFFER`, thread exit and poll
 waits with timeout/interruption through native RPC Wakers. Existing Linux epoll
 readiness scans also observe Binder's level-triggered state. A read-only
@@ -354,7 +354,14 @@ already detached clear work survives until delivery. Idle manual loopers
 receive process death work; clear acknowledgements requested by a looper stay
 on that thread, falling back to process work if it exits.
 
-Limits: 64 in-flight native calls per endpoint, 64 tracked threads per Binder
+One-way calls complete at sender admission without creating a reply wait. Native
+RPC serializes them per dispatch object until the receiver releases its delivery;
+the Binder adapter retains that delivery through `BC_FREE_BUFFER`. Other objects
+and synchronous calls can proceed while that notification is in service.
+The queue bound includes both queued and delivered notifications. One-way
+callbacks are also allowed while a thread handles a synchronous request.
+
+Limits: 64 in-flight native calls/notifications per endpoint, 64 tracked threads per Binder
 open, 1,024 local/retired nodes, 1,024 imported handles and 1,024 death records
 (including pending clear acknowledgements), one incoming/outgoing
 call per thread, at most 64 flat objects per message, and a
@@ -366,10 +373,11 @@ Fixed-address mmap and remapping an arena are rejected. The device aliases are
 not a binderfs implementation and are not yet represented by normal VFS nodes.
 
 **Not implemented:** FD/buffer-object transfer, weak-to-strong promotion,
-one-way and nested calls, automatic thread-pool
+nested synchronous calls, automatic thread-pool
 growth, priority inheritance, security-context records and full SELinux policy.
 Unsupported transaction features return errors. Stock libbinder serves a custom
-`BBinder` probe through this adapter; stock servicemanager is not yet usable.
+`BBinder` probe through this adapter; stock servicemanager registration, lookup,
+authorization, notifications and service death are now tested below.
 The separate minimal ART/Java fixture passes; direct APK execution remains unverified.
 
 The [object checkpoint](checkpoints/2026-10-29-binder-objects/verification.json)
@@ -380,7 +388,7 @@ and reference-release markers; the earlier byte-only probe cannot satisfy it.
 
 The [service checkpoint](checkpoints/2026-10-28-binder-services/verification.json)
 records the poll regression probes and native object transfer/lifetime tests.
-The unmodified SDK `servicemanager` reaches startup but exits with status 127;
+The earlier unmodified SDK `servicemanager` diagnostic exited with status 127;
 a separate diagnostic run redirecting Android logs to stderr identifies
 `selinux_status_open(true)` as the failing check. It does not reach a usable
 service manager. Stock libbinder is now tested separately below; SELinux
@@ -579,8 +587,9 @@ unmodified Android 13 `libselinux.so`: real allowed and denied `service_manager`
 queries, unknown-label/class/permission rejection, refusal of permissive and
 process-label writes, an immutable mapped status page, and label inheritance
 through fork/exec. Query-only policy handles cannot assign a different label.
-This does not yet certify stock servicemanager registration/lookup or full
-SELinux policy enforcement.
+That initial checkpoint did not certify stock servicemanager registration/lookup
+or full SELinux policy enforcement. The service integration below now covers
+registration and lookup; full SELinux policy enforcement remains unsupported.
 
 From `nix develop`, using the same NDK, prepared runtime and stock overlay:
 
@@ -593,4 +602,40 @@ python3 tools/android-compat/run-direct.py \
   --runtime-root .build/android-compat/art-runtime \
   --stock-inputs .build/android-compat/stock-inputs \
   --output .build/android-compat/shield-run --accel hvf
+```
+
+### Stock servicemanager integration
+
+The userspace fixture now launches the unmodified Android 13 `servicemanager`
+with separate Shield identities for the manager, publisher, client and denied
+peer. A small explicit service-context file maps the test service names into
+that immutable policy. Environment/View/Namespace still have their existing
+roles; no Android process manager is embedded in the ABI module.
+
+The [service checkpoint](checkpoints/2026-10-29-services/verification.json)
+requires the real IServiceManager path to register a service, look it up from
+another process, call it, and list it. A differently labeled process is denied
+add/find/list. Stock registration notifications exercise a one-way callback
+while servicemanager handles a synchronous request. Three ordered one-way
+calls then reach the service. After the publisher exits, servicemanager's death
+recipient removes the entry, and the retained proxy returns `DEAD_OBJECT`.
+The fixture kills and reaps its own manager only after all peers succeed.
+
+All runtime checks use HVF. This checkpoint passes 1,643 kernel tests, 18 Bionic
+cases, 38 host checks, the stock libbinder lifetime/death regression and stock
+libselinux authorization checks; the RISC-V library compiles. No patched runtime
+DSO or logging preload is used by the service integration. This is not a full
+Android boot, Zygote/framework startup, or APK execution claim.
+
+From `nix develop`, after the documented runtime/stock/servicemanager preparation:
+
+```sh
+python3 tools/android-compat/build-libbinder-probe.py --servicemanager \
+  --ndk "$ANDROID_NDK_HOME" --runtime-root path/to/art-runtime \
+  --output .build/android-compat/service-probe
+python3 tools/android-compat/run-direct.py --kernel path/to/scarlet.elf \
+  --service-probe .build/android-compat/service-probe \
+  --service-inputs path/to/verified-service-inputs \
+  --runtime-root path/to/art-runtime --stock-inputs path/to/stock-inputs \
+  --output .build/android-compat/service-run --accel hvf
 ```

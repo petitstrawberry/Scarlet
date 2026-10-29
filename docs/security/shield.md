@@ -64,5 +64,7 @@ The protocol follows AOSP Android 13
 This is a service-authorization foundation, not a complete SELinux engine or
 system-wide sandbox. It does not consume Android binary policy, enforce VFS
 MAC, change Unix credentials, or attach policy semantics to `security.selinux`
-xattrs. The initial fixture tests unmodified libselinux; stock servicemanager
-service registration and lookup remain a subsequent integration milestone.
+xattrs. The initial fixture tests unmodified libselinux. The subsequent
+[service integration](../../tools/android-compat/README.md#stock-servicemanager-integration)
+uses distinct process labels and the unmodified stock servicemanager to verify
+allowed registration/lookup and denied add/find/list requests.

@@ -1,0 +1,31 @@
+{
+  "result": "PASS",
+  "qemu_exit_code": 0,
+  "elapsed_seconds": 7.486,
+  "dynamic_runtime": true,
+  "services": {
+    "result": "PASS",
+    "records": [
+      "SCARLET_SERVICES_CONFIGURED",
+      "SCARLET_SERVICES_SPAWN manager 6",
+      "SCARLET_SERVICES_SPAWN owner 7",
+      "SCARLET_SERVICES_SPAWN client 8",
+      "SCARLET_SERVICES_SPAWN denied 9",
+      "SCARLET_SERVICES_PEER denied",
+      "SCARLET_SERVICES_PEER owner",
+      "SCARLET_SERVICES_PEER client",
+      "SCARLET_SERVICES_REGISTERED",
+      "SCARLET_SERVICES_DENIED_ADD_FIND_LIST",
+      "SCARLET_SERVICES_NOTIFICATION_OK",
+      "SCARLET_SERVICES_ONEWAY_SEQUENCE_OK",
+      "SCARLET_SERVICES_LOOKUP_CALL_LIST_OK",
+      "SCARLET_SERVICES_OWNER_EXITING",
+      "SCARLET_SERVICES_EXIT owner 0",
+      "SCARLET_SERVICES_OWNER_DEATH_OK",
+      "SCARLET_SERVICES_EXIT client 0",
+      "SCARLET_SERVICES_EXIT denied 0",
+      "SCARLET_SERVICES_EXIT manager 137",
+      "SCARLET_SERVICES_OK"
+    ]
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "result": "BUILT",
+  "kind": "stock-service-probe-v1",
+  "api": 33,
+  "ndk": "Pkg.Desc = Android NDK\nPkg.Revision = 25.1.8937393\n",
+  "command": [
+    "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang++",
+    "-std=c++17",
+    "-O2",
+    "-g",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-fno-rtti",
+    "-fno-exceptions",
+    "-fno-emulated-tls",
+    "-D_LIBCPP_ABI_NAMESPACE=__1",
+    "-nostdlib++",
+    "-isystem",
+    "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/probe-v2/headers/base",
+    "-isystem",
+    "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/probe-v2/headers/binder",
+    "-isystem",
+    "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/probe-v2/headers/cutils",
+    "-isystem",
+    "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/probe-v2/headers/log",
+    "-isystem",
+    "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/probe-v2/headers/system",
+    "-isystem",
+    "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/probe-v2/headers/utils",
+    "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/probe-v2/service-probe.cpp",
+    "/Users/petitstrawberry/Development/Rust/Scarlet/.build/android-art-local/runtime/system/lib64/libbinder.so",
+    "/Users/petitstrawberry/Development/Rust/Scarlet/.build/android-art-local/runtime/system/lib64/libutils.so",
+    "/Users/petitstrawberry/Development/Rust/Scarlet/.build/android-art-local/runtime/system/lib64/liblog.so",
+    "/Users/petitstrawberry/Development/Rust/Scarlet/.build/android-art-local/runtime/apex/com.android.art/lib64/libc++.so",
+    "-o",
+    "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/probe-v2/service-probe"
+  ],
+  "headers": {
+    "release": "android-13.0.0_r2",
+    "archives": {
+      "binder": {
+        "repository": "platform/frameworks/native",
+        "revision": "2fe7eddf185ecb63223eeadc58804f9bf6cbd426",
+        "path": "libs/binder/include",
+        "tree_sha256": "3ab50078c9e13799514225bdfb7b25a0de3af4931bcdf654d6363332be655a43"
+      },
+      "utils": {
+        "repository": "platform/system/core",
+        "revision": "83366e7e7a1556ab6cff117673bb9f17b973de99",
+        "path": "libutils/include",
+        "tree_sha256": "17bd218f6d39635fcf9fecf3e6bf31e8112a5447f987a7bb781c25108f6f97a2"
+      },
+      "cutils": {
+        "repository": "platform/system/core",
+        "revision": "83366e7e7a1556ab6cff117673bb9f17b973de99",
+        "path": "libcutils/include",
+        "tree_sha256": "eb23414150a4691df1237c0d128035a9e50071476afbc6567bfa616186828e22"
+      },
+      "system": {
+        "repository": "platform/system/core",
+        "revision": "83366e7e7a1556ab6cff117673bb9f17b973de99",
+        "path": "libsystem/include",
+        "tree_sha256": "2bf3e0ae93962acf5a285534e987449a7959b3ec79b8aebe8d7e43cba259310c"
+      },
+      "log": {
+        "repository": "platform/system/logging",
+        "revision": "6bfb380b168c7127d79977a0e931d6e5e469d887",
+        "path": "liblog/include",
+        "tree_sha256": "4444db400ca4c9f56163758fe4bc08c8b6fb3207b1ddf561ae8fcb04f8306e32"
+      },
+      "base": {
+        "repository": "platform/system/libbase",
+        "revision": "c914dc8c167ac2212c470ad5d684d96ab7c20a0e",
+        "path": "include",
+        "tree_sha256": "2cfec304e00bc414e8aebebf473260fa4d7f1f9c507505cbcbcccc2e6171f0b8"
+      }
+    }
+  },
+  "headers_manifest_sha256": "eab7898439b4fe11c6b41174503089f7a3c1a5054a9c00f067f3985ceeb97a45",
+  "source_sha256": "3fee8fe9188150274c2b00cb9ee0a71dde821a844a1f50f5a3fb772b71b56d5f",
+  "runtime_manifest_sha256": "8490e2c89682565a1839b4ec45ae61648c7b56b0bed4b938821b5b8c7fcd1316",
+  "runtime_libraries": {
+    "system/lib64/libbinder.so": "12335fdbe5e53a16f8b84882a3421dafc3817169526bc0cca3a77678d2334ad6",
+    "system/lib64/libutils.so": "acb3e9a4371e162966bdf871c38cb769099e72f3837e83a2ba3b337ea28c9f46",
+    "system/lib64/liblog.so": "20af27adc3ad6ecc4b260de85be062becb8d101a3ad95da409aec5b930d76c8d",
+    "apex/com.android.art/lib64/libc++.so": "56c39cfbf535246ed3ce615132ebc069bfc3d415497543b35194b574c0fac408"
+  },
+  "needed": [
+    "libbinder.so",
+    "libutils.so",
+    "liblog.so",
+    "libc++.so",
+    "libm.so",
+    "libdl.so",
+    "libc.so"
+  ],
+  "binary_sha256": "faf8a866a4c6ab8c2c157ed7829f12011c98f5f3f8bd7fc4474647e2f33cf027"
+}
