@@ -1,0 +1,13 @@
+{
+  "source_sha256": "aea37d8e404d4b56f62c63188196a625a6b78b5b2d629ad95af87e1e99f18c18",
+  "binary_sha256": "d8c2115a451e94d09bc280676af45a9c6ecd2c2f4576481a3b57f11afb063a26",
+  "compiler": "NDK 25.1.8937393 aarch64-linux-android33-clang",
+  "arguments": [
+    "-std=c11",
+    "-O2",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-static"
+  ]
+}

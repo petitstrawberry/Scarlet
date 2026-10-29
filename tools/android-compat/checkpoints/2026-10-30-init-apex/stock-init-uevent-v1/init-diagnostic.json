@@ -1,0 +1,10 @@
+{
+  "kind": "bounded-stock-init-profile-v1",
+  "probe_build_sha256": "a948494c3cdb0d5fadf81b212a9cb2ab321b46e83283ad6b9e825a1b4920b6e9",
+  "runner_sha256": "39e6bd7d7b984428816b90cbce48ba8be845a9880f2ea0b48a6d7a685b7f833f",
+  "acceleration": "hvf",
+  "observation": "20 seconds or init exit, then close ProcessScope and verify zero live members",
+  "logging": "Diagnostic preload redirects userspace /dev/kmsg writes and child stdout/stderr to inherited console; no syscall-success bypass",
+  "service_readiness": "not asserted",
+  "apex_activation": "stock apexd must perform activation"
+}

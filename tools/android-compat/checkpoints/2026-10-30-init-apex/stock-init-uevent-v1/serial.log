@@ -1,0 +1,261 @@
+UEFI firmware (version edk2-stable202408-prebuilt.qemu.org built at 16:28:50 on Sep 12 2024)
+ArmTrngLib could not be correctly initialized.
+Error: Image at 000BFDB6000 start failed: 00000001
+Error: Image at 000BFD6D000 start failed: Not Found
+Error: Image at 000BFCBA000 start failed: Unsupported
+Error: Image at 000BFC3F000 start failed: Not Found
+Error: Image at 000BFB65000 start failed: Aborted
+Tpm2SubmitCommand - Tcg2 - Not Found
+Tpm2GetCapabilityPcrs fail!
+Tpm2SubmitCommand - Tcg2 - Not Found
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI Non-Block Boot Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,0000000A00000000)
+BdsDxe: starting Boot0001 "UEFI Non-Block Boot Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,0000000A00000000)
+ConvertPages: range BEB2D000 - BEB30FFF covers multiple entries
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+[01;01H[01;01H[01;01Hl[01;02Hi[01;03Hm[01;04Hi[01;05Hn[01;06He[01;07H:[01;08H [01;09HL[01;10Ho[01;11Ha[01;12Hd[01;13Hi[01;14Hn[01;15Hg[01;16H [01;17He[01;18Hx[01;19He[01;20Hc[01;21Hu[01;22Ht[01;23Ha[01;24Hb[01;25Hl[01;26He[01;27H [01;28H`[01;29Hb[01;30Ho[01;31Ho[01;32Ht[01;33H([01;34H)[01;35H:[01;36H/[01;37Hb[01;38Ho[01;39Ho[01;40Ht[01;41H/[01;42Hk[01;43He[01;44Hr[01;45Hn[01;46He[01;47Hl[01;48H`[01;49H.[01;50H.[01;51H.[01;52H[01;01H[02;01Hl[02;02Hi[02;03Hm[02;04Hi[02;05Hn[02;06He[02;07H:[02;08H [02;09HL[02;10Ho[02;11Ha[02;12Hd[02;13Hi[02;14Hn[02;15Hg[02;16H [02;17Hm[02;18Ho[02;19Hd[02;20Hu[02;21Hl[02;22He[02;23H [02;24H`[02;25Hb[02;26Ho[02;27Ho[02;28Ht[02;29H([02;30H)[02;31H:[02;32H/[02;33Hb[02;34Ho[02;35Ho[02;36Ht[02;37H/[02;38Hi[02;39Hn[02;40Hi[02;41Ht[02;42Hr[02;43Ha[02;44Hm[02;45Hf[02;46Hs[02;47H-[02;48Ha[02;49Ha[02;50Hr[02;51Hc[02;52Hh[02;53H6[02;54H4[02;55H.[02;56Hc[02;57Hp[02;58Hi[02;59Ho[02;60H`[02;61H.[02;62H.[02;63H.[02;64H[02;01H[03;01HSCARLET_SHIELD_KERNEL_ADDRESSES_HIDDEN
+SCARLET_ANDROID_RESOURCE_ROOT
+SCARLET_ANDROID_BOOT_FILES labels=6 exec_rules=4
+SCARLET_ANDROID_BOOT_POLICY labels=279 property_grants=66 transitions=2
+SCARLET_SHIELD_INIT_POLICY configured
+SCARLET_ANDROID_INIT_OWNS_BOOTSTRAP
+
+SCARLET_ANDROID_PROGRAM_START
+SCARLET_INIT_NAMESPACE_OUTER child=5
+SCARLET_INIT_NAMESPACE_INSIDE pid=1 ppid=0 tid=1
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+<6>init: init second stage started!
+<3>init: Unable to write -1000 to /proc/1/oom_score_adj: open() failed: No such file or directory
+<3>init: Failed to umount /debug_ramdisk: Operation not supported on transport endpoint
+SELinux: Loaded file_contexts
+SELinux: Could not set context for /dev/__properties__/property_info:  No data available
+<6>init: Using Android DT directory /proc/device-tree/firmware/android/
+<7>init: (Loading properties from /system/build.prop took 0ms.)
+<7>init: (Loading properties from /system_ext/etc/build.prop took 0ms.)
+<4>init: Couldn't load property file '/system_dlkm/etc/build.prop': open() failed: No such file or directory: No such file or directory
+<4>init: Couldn't load property file '/vendor/default.prop': open() failed: No such file or directory: No such file or directory
+<4>init: Overriding previous property 'ro.control_privapp_permissions':'disable' with new value 'enforce'
+<7>init: (Loading properties from /vendor/build.prop took 0ms.)
+<4>init: Couldn't load property file '/vendor_dlkm/etc/build.prop': open() failed: No such file or directory: No such file or directory
+<4>init: Couldn't load property file '/odm_dlkm/etc/build.prop': open() failed: No such file or directory: No such file or directory
+<4>init: Couldn't load property file '/odm/etc/build.prop': open() failed: No such file or directory: No such file or directory
+<4>init: Couldn't load property file '/odm/default.prop': open() failed: No such file or directory: No such file or directory
+<4>init: Couldn't load property file '/odm/build.prop': open() failed: No such file or directory: No such file or directory
+<4>init: Couldn't load property file '/odm/default.prop': open() failed: No such file or directory: No such file or directory
+<4>init: Couldn't load property file '/odm/build.prop': open() failed: No such file or directory: No such file or directory
+<4>init: Overriding previous property 'ro.config.notification_sound':'OnTheHunt.ogg' with new value 'pixiedust.ogg'
+<4>init: Overriding previous property 'ro.apex.updatable':'true' with new value 'false'
+<4>init: Overriding previous property 'ro.zygote':'zygote64_32' with new value 'zygote64'
+<7>init: (Loading properties from /product/etc/build.prop took 1ms.)
+<3>init: Could not set 'ro.hardware' to 'scarlet' while loading .prop filesRead-only property was already set
+<6>init: Setting product property ro.product.brand to 'Android' (from ro.product.product.brand)
+<6>init: Setting product property ro.product.device to 'emulator64_arm64' (from ro.product.product.device)
+<6>init: Setting product property ro.product.manufacturer to 'unknown' (from ro.product.product.manufacturer)
+<6>init: Setting product property ro.product.model to 'Android SDK built for arm64' (from ro.product.product.model)
+<6>init: Setting product property ro.product.name to 'sdk_phone64_arm64' (from ro.product.product.name)
+<6>init: Setting property 'ro.build.fingerprint' to 'Android/sdk_phone64_arm64/emulator64_arm64:13/TE1A.220922.034/10940250:userdebug/test-keys'
+<6>init: Setting property 'ro.product.cpu.abilist' to 'arm64-v8a'
+<6>init: Setting property 'ro.product.cpu.abilist32' to ''
+<6>init: Setting property 'ro.product.cpu.abilist64' to 'arm64-v8a'
+<3>init: Failed to umount /second_stage_resources: Operation not supported on transport endpoint
+<6>selinux: SELinux: Loaded file_contexts
+<6>selinux: 
+<6>init: Running restorecon...
+<3>selinux: SELinux: Could not set context for /dev:  Operation not supported on transport endpoint
+<3>selinux: 
+<3>selinux: SELinux: Could not set context for /dev/kmsg:  Operation not supported on transport endpoint
+<3>selinux: 
+<3>selinux: SELinux: Could not set context for /dev/null:  Operation not supported on transport endpoint
+<3>selinux: 
+<3>selinux: SELinux: Could not set context for /dev/ptmx:  Operation not supported on transport endpoint
+<3>selinux: 
+<3>selinux: SELinux: Could not set context for /dev/socket:  Operation not supported on transport endpoint
+<3>selinux: 
+<3>selinux: SELinux: Could not set context for /dev/random:  Operation not supported on transport endpoint
+<3>selinux: 
+<3>selinux: SELinux: Could not set context for /dev/urandom:  Operation not supported on transport endpoint
+<3>selinux: 
+<3>selinux: SELinux: Could not set context for /dev/__properties__:  No data available
+<3>selinux: 
+<3>selinux: SELinux:  Could not stat /dev/block: No such file or directory.
+<3>selinux: 
+<3>selinux: SELinux:  Could not stat /dev/dm-user: No such file or directory.
+<3>selinux: 
+<3>selinux: SELinux: Could not set context for /apex:  No data available
+<3>selinux: 
+<3>selinux: SELinux: Could not set context for /linkerconfig:  No data available
+<3>selinux: 
+<3>selinux: SELinux: Could not get canonical path for /metadata/ota/rollback-indicator restorecon: No such file or directory.
+<3>selinux: 
+<3>selinux: SELinux: Could not get canonical path for /metadata/gsi restorecon: No such file or directory.
+<3>selinux: 
+<4>init: CAP_SYS_BOOT is not supported: Operation not permitted
+<6>init: Created socket '/dev/socket/property_service', mode 666, user 0, group 0
+<6>init: SetupMountNamespaces done
+<6>init: Forked subcontext for 'u:r:vendor_init:s0' with pid 3
+<6>init: Parsing file /scarlet/boot/init.rc...
+<6>init: Added '/system/etc/init/hw/init.rc' to import list
+<6>init: Added '/system/etc/init/apexd.rc' to import list
+<6>init: Added '/system/etc/init/servicemanager.rc' to import list
+<6>init: Parsing file /system/etc/init/hw/init.rc...
+<6>init: Added '/init.environ.rc' to import list
+<6>init: Added '/system/etc/init/hw/init.usb.rc' to import list
+<6>init: Added '/init.scarlet.rc' to import list
+<6>init: Added '/vendor/etc/init/hw/init.scarlet.rc' to import list
+<6>init: Added '/system/etc/init/hw/init.usb.configfs.rc' to import list
+<6>init: Added '/system/etc/init/hw/init.zygote64.rc' to import list
+<6>init: Parsing file /init.environ.rc...
+<6>init: Unable to read config file '/init.environ.rc': open() failed: No such file or directory
+<6>init: Parsing file /system/etc/init/hw/init.usb.rc...
+<7>init: (Parsing /system/etc/init/hw/init.usb.rc took 0ms.)
+<6>init: Parsing file /init.scarlet.rc...
+<6>init: Unable to read config file '/init.scarlet.rc': open() failed: No such file or directory
+<6>init: Parsing file /vendor/etc/init/hw/init.scarlet.rc...
+<6>init: Unable to read config file '/vendor/etc/init/hw/init.scarlet.rc': open() failed: No such file or directory
+<6>init: Parsing file /system/etc/init/hw/init.usb.configfs.rc...
+<7>init: (Parsing /system/etc/init/hw/init.usb.configfs.rc took 0ms.)
+<6>init: Parsing file /system/etc/init/hw/init.zygote64.rc...
+<7>init: (Parsing /system/etc/init/hw/init.zygote64.rc took 0ms.)
+<7>init: (Parsing /system/etc/init/hw/init.rc took 11ms.)
+<6>init: Parsing file /system/etc/init/apexd.rc...
+<7>init: (Parsing /system/etc/init/apexd.rc took 5ms.)
+<6>init: Parsing file /system/etc/init/servicemanager.rc...
+<7>init: (Parsing /system/etc/init/servicemanager.rc took 0ms.)
+<7>init: (Parsing /scarlet/boot/init.rc took 20ms.)
+SELinux: Loaded file_contexts
+<6>init: processing action (SetupCgroups) from (<Builtin Action>:0)
+<6>libprocessgroup: Mounting memcg with memory_recursiveprot failed. Retrying without.
+<6>init: Command 'SetupCgroups' action=SetupCgroups (<Builtin Action>:0) took 2ms and succeeded
+<6>init: processing action (SetKptrRestrict) from (<Builtin Action>:0)
+<6>init: Command 'SetKptrRestrict' action=SetKptrRestrict (<Builtin Action>:0) took 0ms and succeeded
+<6>init: processing action (TestPerfEventSelinux) from (<Builtin Action>:0)
+<3>init: Unexpected perf_event_open error: Function not implemented
+<6>init: Command 'TestPerfEventSelinux' action=TestPerfEventSelinux (<Builtin Action>:0) took 0ms and succeeded
+<6>init: processing action (ConnectEarlyStageSnapuserd) from (<Builtin Action>:0)
+<6>init: Command 'ConnectEarlyStageSnapuserd' action=ConnectEarlyStageSnapuserd (<Builtin Action>:0) took 0ms and succeeded
+<6>init: processing action (early-init) from (/system/etc/init/hw/init.rc:15)
+<6>init: Command 'write /proc/sys/kernel/sysrq 0' action=early-init (/system/etc/init/hw/init.rc:17) took 0ms and failed: Unable to write to file '/proc/sys/kernel/sysrq': open() failed: No such file or directory
+<6>init: Command 'write /proc/sys/kernel/modprobe 
+<6>init: ' action=early-init (/system/etc/init/hw/init.rc:22) took 0ms and failed: Unable to write to file '/proc/sys/kernel/modprobe': open() failed: No such file or directory
+<6>init: Command 'restorecon /adb_keys' action=early-init (/system/etc/init/hw/init.rc:25) took 0ms and failed: selinux_android_restorecon() failed: No such file or directory
+<6>init: Command 'restorecon /postinstall' action=early-init (/system/etc/init/hw/init.rc:28) took 0ms and failed: selinux_android_restorecon() failed: No such file or directory
+<6>init: Command 'mkdir /acct/uid' action=early-init (/system/etc/init/hw/init.rc:30) took 0ms and failed: mkdir() failed on /acct/uid: No such file or directory
+<6>init: Command 'chown root system /dev/memcg/memory.pressure_level' action=early-init (/system/etc/init/hw/init.rc:33) took 0ms and failed: lchown() failed: No such file or directory
+<6>init: Command 'chmod 0040 /dev/memcg/memory.pressure_level' action=early-init (/system/etc/init/hw/init.rc:34) took 0ms and failed: fchmodat() failed: No such file or directory
+<6>init: Command 'mkdir /dev/memcg/apps/ 0755 system system' action=early-init (/system/etc/init/hw/init.rc:36) took 0ms and failed: mkdir() failed on /dev/memcg/apps/: No such file or directory
+<6>init: Command 'mkdir /dev/memcg/system 0550 system system' action=early-init (/system/etc/init/hw/init.rc:38) took 0ms and failed: mkdir() failed on /dev/memcg/system: No such file or directory
+<6>init: Command 'mkdir /dev/net 0755 root root' action=early-init (/system/etc/init/hw/init.rc:41) took 0ms and succeeded
+<6>init: Command 'symlink ../tun /dev/net/tun' action=early-init (/system/etc/init/hw/init.rc:42) took 0ms and succeeded
+<6>init: Command 'setrlimit nice 40 40' action=early-init (/system/etc/init/hw/init.rc:45) took 0ms and failed: setrlimit failed: Function not implemented
+<6>init: Command 'setrlimit nofile 32768 32768' action=early-init (/system/etc/init/hw/init.rc:48) took 0ms and failed: setrlimit failed: Function not implemented
+<6>init: Command 'mkdir /linkerconfig/bootstrap 0755' action=early-init (/system/etc/init/hw/init.rc:51) took 0ms and succeeded
+<6>init: Command 'mkdir /linkerconfig/default 0755' action=early-init (/system/etc/init/hw/init.rc:52) took 0ms and succeeded
+<6>init: Command 'write /sys/module/dm_verity/parameters/prefetch_cluster 0' action=early-init (/system/etc/init/hw/init.rc:56) took 0ms and failed: Unable to write to file '/sys/module/dm_verity/parameters/prefetch_cluster': open() failed: No such file or directory
+<6>init: starting service 'exec 1 (/system/bin/bootstrap/linkerconfig --target /linkerconfig/bootstrap)'...
+<6>init: SVC_EXEC service 'exec 1 (/system/bin/bootstrap/linkerconfig --target /linkerconfig/bootstrap)' pid 4 (uid 0 gid 0+0 context default) started; waiting...
+<6>init: Command 'exec -- /system/bin/bootstrap/linkerconfig --target /linkerconfig/bootstrap' action=early-init (/system/etc/init/hw/init.rc:59) took 4ms and succeeded
+<3>init: cpuset cgroup controller is not mounted!
+<6>init: Service 'exec 1 (/system/bin/bootstrap/linkerconfig --target /linkerconfig/bootstrap)' (pid 4) exited with status 0 waiting took 0.013000 seconds
+<6>init: Sending signal 9 to service 'exec 1 (/system/bin/bootstrap/linkerconfig --target /linkerconfig/bootstrap)' (pid 4) process group...
+<7>libprocessgroup: Killing process group -4 in uid 0 as part of process cgroup 4
+<6>libprocessgroup: Successfully killed process cgroup uid 0 pid 4 in 0ms
+<6>init: Command 'chmod 644 /linkerconfig/bootstrap/ld.config.txt' action=early-init (/system/etc/init/hw/init.rc:60) took 0ms and succeeded
+<6>init: Command 'copy /linkerconfig/bootstrap/ld.config.txt /linkerconfig/default/ld.config.txt' action=early-init (/system/etc/init/hw/init.rc:61) took 0ms and succeeded
+<6>init: Command 'chmod 644 /linkerconfig/default/ld.config.txt' action=early-init (/system/etc/init/hw/init.rc:62) took 0ms and succeeded
+<6>init: Command 'mount none /linkerconfig/bootstrap /linkerconfig bind rec' action=early-init (/system/etc/init/hw/init.rc:65) took 0ms and succeeded
+<6>init: starting service 'ueventd'...
+<3>init: cpuset cgroup controller is not mounted!
+<6>init: Command 'start ueventd' action=early-init (/system/etc/init/hw/init.rc:67) took 13ms and succeeded
+<6>init: starting service 'apexd-bootstrap'...
+<3>init: cpuset cgroup controller is not mounted!
+<6>ueventd: ueventd started!
+<6>selinux: SELinux: Loaded file_contexts
+<6>selinux: 
+<6>ueventd: Parsing file /system/etc/ueventd.rc...
+<6>ueventd: Added '/vendor/etc/ueventd.rc' to import list
+<6>ueventd: Added '/odm/etc/ueventd.rc' to import list
+<6>ueventd: Parsing file /vendor/etc/ueventd.rc...
+<6>ueventd: Unable to read config file '/vendor/etc/ueventd.rc': open() failed: No such file or directory
+<6>ueventd: Parsing file /odm/etc/ueventd.rc...
+<6>ueventd: Unable to read config file '/odm/etc/ueventd.rc': open() failed: No such file or directory
+<7>ueventd: (Parsing /system/etc/ueventd.rc took 1ms.)
+<6>ueventd: [libfs_mgr]ReadDefaultFstab(): failed to find device default fstab
+<6>init: SVC_EXEC service 'apexd-bootstrap' pid 6 (uid 0 gid 1000+0 context default) started; waiting...
+<6>init: Command 'exec_start apexd-bootstrap' action=early-init (/system/etc/init/hw/init.rc:72) took 35ms and succeeded
+<3>ueventd: Cannot get SELinux label on '/dev/cpufreq' device: Operation not supported on transport endpoint
+<3>ueventd: Cannot get SELinux label on '/dev/cpuinfo' device: Operation not supported on transport endpoint
+<3>selinux: SELinux: Could not set context for /sys:  Operation not supported on transport endpoint
+<3>selinux: 
+<3>ueventd: Cannot get SELinux label on '/dev/devfreq' device: Operation not supported on transport endpoint
+<3>ueventd: Cannot get SELinux label on '/dev/interrupts' device: Operation not supported on transport endpoint
+<3>ueventd: Cannot get SELinux label on '/dev/kmsg' device: Operation not supported on transport endpoint
+<3>ueventd: Cannot get SELinux label on '/dev/kvm' device: Operation not supported on transport endpoint
+<3>ueventd: Cannot chown /dev/kvm 1000 4294967295: Operation not supported on transport endpoint
+<3>ueventd: Cannot get SELinux label on '/dev/net_profile' device: Operation not supported on transport endpoint
+<3>ueventd: Cannot get SELinux label on '/dev/null' device: Operation not supported on transport endpoint
+<3>ueventd: Cannot get SELinux label on '/dev/power_supply' device: Operation not supported on transport endpoint
+<3>ueventd: Cannot get SELinux label on '/dev/random' device: Operation not supported on transport endpoint
+<3>ueventd: Cannot get SELinux label on '/dev/thermal' device: Operation not supported on transport endpoint
+<3>ueventd: Cannot get SELinux label on '/dev/tty0' device: Operation not supported on transport endpoint
+<3>ueventd: Cannot get SELinux label on '/dev/urandom' device: Operation not supported on transport endpoint
+<6>ueventd: Coldboot took 0.145 seconds
+<6>apexd: Bootstrap subcommand detected
+<6>apexd: ActivateFlattenedApex
+<6>apexd: Scanning /system/apex
+<6>apexd: Bind mounting /system/apex/com.android.adbd onto /apex/com.android.adbd
+<6>apexd: Bind mounting /system/apex/com.android.adservices onto /apex/com.android.adservices
+<6>apexd: Bind mounting /system/apex/com.android.apex.cts.shim onto /apex/com.android.apex.cts.shim
+<6>apexd: Bind mounting /system/apex/com.android.appsearch onto /apex/com.android.appsearch
+<6>apexd: Bind mounting /system/apex/com.android.art onto /apex/com.android.art
+<6>apexd: Bind mounting /system/apex/com.android.btservices onto /apex/com.android.btservices
+<6>apexd: Bind mounting /system/apex/com.android.cellbroadcast onto /apex/com.android.cellbroadcast
+<6>apexd: Bind mounting /system/apex/com.android.conscrypt onto /apex/com.android.conscrypt
+<6>apexd: Bind mounting /system/apex/com.android.extservices onto /apex/com.android.extservices
+<6>apexd: Bind mounting /system/apex/com.android.i18n onto /apex/com.android.i18n
+<6>apexd: Bind mounting /system/apex/com.android.ipsec onto /apex/com.android.ipsec
+<6>apexd: Bind mounting /system/apex/com.android.media onto /apex/com.android.media
+<6>apexd: Bind mounting /system/apex/com.android.media.swcodec onto /apex/com.android.media.swcodec
+<6>apexd: Bind mounting /system/apex/com.android.mediaprovider onto /apex/com.android.mediaprovider
+<6>apexd: Bind mounting /system/apex/com.android.neuralnetworks onto /apex/com.android.neuralnetworks
+<6>apexd: Bind mounting /system/apex/com.android.ondevicepersonalization onto /apex/com.android.ondevicepersonalization
+<6>apexd: Bind mounting /system/apex/com.android.os.statsd onto /apex/com.android.os.statsd
+<6>apexd: Bind mounting /system/apex/com.android.permission onto /apex/com.android.permission
+<6>apexd: Bind mounting /system/apex/com.android.resolv onto /apex/com.android.resolv
+<6>apexd: Bind mounting /system/apex/com.android.runtime onto /apex/com.android.runtime
+<6>apexd: Bind mounting /system/apex/com.android.scheduling onto /apex/com.android.scheduling
+<6>apexd: Bind mounting /system/apex/com.android.sdkext onto /apex/com.android.sdkext
+<6>apexd: Bind mounting /system/apex/com.android.tethering onto /apex/com.android.tethering
+<6>apexd: Bind mounting /system/apex/com.android.tzdata onto /apex/com.android.tzdata
+<6>apexd: Bind mounting /system/apex/com.android.uwb onto /apex/com.android.uwb
+<6>apexd: Bind mounting /system/apex/com.android.vndk.v33 onto /apex/com.android.vndk.v33
+<6>apexd: Bind mounting /system/apex/com.android.wifi onto /apex/com.android.wifi
+<6>apexd: Scanning /system_ext/apex
+<6>apexd: Scanning /product/apex
+<6>apexd: Scanning /vendor/apex
+SELinux: Loaded file_contexts
+SELinux: Could not set context for /apex/apex-info-list.xml:  No data available
+<3>apexd: Failed to restorecon /apex/apex-info-list.xml : Failed to restorecon /apex/apex-info-list.xml: Success
+<6>init: Service 'apexd-bootstrap' (pid 6) exited with status 1 waiting took 0.247000 seconds
+<6>init: Sending signal 9 to service 'apexd-bootstrap' (pid 6) process group...
+<7>libprocessgroup: Killing process group -6 in uid 0 as part of process cgroup 6
+<6>libprocessgroup: Successfully killed process cgroup uid 0 pid 6 in 0ms
+<3>init: Service with 'reboot_on_failure' option failed, shutting down system.
+<6>init: Got shutdown_command 'reboot,bootloader,bootstrap-apexd-failed' Calling HandlePowerctlMessage()
+<6>init: [libfs_mgr]ReadDefaultFstab(): failed to find device default fstab
+<3>init: reboot-bootloader: Error writing bootloader_message: failed to read default fstab
+<6>init: Clear action queue and start shutdown trigger
+<6>init: Entering shutdown mode
+<6>init: processing action (shutdown_done) from (<Builtin Action>:0)
+<6>init: Reboot start, reason: reboot,bootloader,bootstrap-apexd-failed, reboot_target: bootloader,bootstrap-apexd-failed
+<6>init: Shutdown timeout: 6000 ms
+<6>init: Create reboot monitor thread.
+<6>init: shutdown_timeout_timespec.tv_sec: 311
+<3>init: Could not open '/metadata/bootstat/persist.sys.boot.reason' to persist reboot reason: No such file or directory
+<6>init: Reboot ending, jumping to kernel
+<4>init: CAP_SYS_BOOT is not supported: Operation not permitted
+<3>init: reboot call returned: Function not implemented
+SCARLET_INIT_NAMESPACE_REAP 5 32512
+SCARLET_ANDROID_PROGRAM_EXIT 0
+SCARLET_ANDROID_PROGRAM_FAIL: ART wait or exit
+SCARLET_INIT_SCOPE_CLOSED live=0 members=2
