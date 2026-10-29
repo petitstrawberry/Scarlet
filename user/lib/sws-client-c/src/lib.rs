@@ -1,7 +1,10 @@
 //! C ABI for SWS window, input and shared-image clients.
-//! Ordinary Linux-ABI libraries use scarlet-sys' explicit native-call transport.
-//! The process must link one copy (shared, or a native static executable) so every consumer shares the
-//! connection and no consumer steals another window's GPU lifecycle events.
+//! Native and Linux-ABI consumers share one connection per process.
+//! The process must link one copy so consumers cannot steal each other's GPU events.
+
+// Startup symbols belong to this DSO's Rust runtime and must not interpose.
+#[cfg(target_os = "scarlet")]
+core::arch::global_asm!(".hidden __scarlet_getauxval", ".hidden __scarlet_start");
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
