@@ -119,6 +119,7 @@ class FrameworkTest(unittest.TestCase):
             stage_stock_inputs(stock, runtime, tree)
             original = sha256(stock / "data/local/tmp/property-values.prop")
             evidence = stage_framework_inputs(root, runtime, stock, tree)
+            self.assertEqual((tree / "etc").readlink(), Path("system/etc"))
             self.assertEqual(evidence["original_properties_sha256"], original)
             self.assertEqual(evidence["fixture_overrides"]["dalvik.vm.usejit"], {"original": "true", "value": "false"})
             self.assertEqual(sha256(stock / "data/local/tmp/property-values.prop"), original)

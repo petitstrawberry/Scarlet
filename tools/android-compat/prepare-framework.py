@@ -31,6 +31,9 @@ def prepare(archive, runtime, stock, output):
         system.dump("/" + PROGRAM, output / PROGRAM)
         system.dump("/system/framework/framework-res.apk", output / "system/framework/framework-res.apk")
         system.dump("/system/etc/classpaths/bootclasspath.pb", output / "system/etc/classpaths/bootclasspath.pb")
+        system.dump("/system/etc/task_profiles.json", output / "system/etc/task_profiles.json")
+        if "task_profiles" in {name for name, _, _ in system.entries("/system/etc")}:
+            system.tree("/system/etc/task_profiles", output / "system/etc/task_profiles")
         apexes = []
         known = {record["name"]: record for record in stock_metadata["factory_apexes"]}
         for filename, mode, size in system.entries("/system/apex"):

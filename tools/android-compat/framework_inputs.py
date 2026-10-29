@@ -151,6 +151,15 @@ def stage_framework_inputs(root, runtime, stock, tree):
         shutil.copy2(root / name, destination)
         if sha256(destination) != digest:
             raise ValueError("framework input changed during staging: " + name)
+    # Android's root /etc aliases its system configuration, including libprocessgroup profiles.
+    etc = tree / "etc"
+    if etc.is_symlink():
+        if str(etc.readlink()) != "system/etc":
+            raise ValueError("conflicting Android /etc alias")
+    elif etc.exists():
+        raise ValueError("conflicting Android /etc node")
+    else:
+        etc.symlink_to("system/etc")
     # AndroidRuntime appends its property-driven JIT option after argv options.
     # Explicit interpreter-only fixture policy; never alter stock image inputs.
     properties = tree / "data/local/tmp/property-values.prop"
