@@ -1,12 +1,21 @@
 # Native Vulkan package: SDK-managed Cargo artifacts and runtime resources.
+# GLFW and the ICD must share this SWS client connection.
+[[layers]]
+kind = "cargo"
+source = "../sws-client-c"
+package = "sws-client-c"
+lib = "sws_client_c"
+architectures = ["aarch64"]
+to = "/lib/libsws_client_c.so"
+
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/Vulkan-Loader", rev = "cabc0232da5ee6bbd1814acdfd6188714a1a1e4d" }
+source = { git = "https://github.com/petitstrawberry/Vulkan-Loader", rev = "83f0038b735f08e9a8282ef37b74e1eab1fbf896" }
 subdir = "native"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/sgfx", rev = "0ee6b41669904ced227f01cc435933c646a60c75" }
+source = { git = "https://github.com/petitstrawberry/sgfx", rev = "2c75f8ef1b9e48d8d9ab088117e2978cc592f45b" }
 package = "vulkan-sgfx"
 lib = "vulkan_sgfx"
 default-features = false
