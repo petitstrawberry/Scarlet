@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <grp.h>
 #include <linux/capability.h>
+#include <linux/seccomp.h>
 #include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -84,6 +85,10 @@ static int drop_capabilities(void) {
     return 0;
 }
 int credentials_case(const char *program) {
+    CHECK(prctl(0x7fffffff,0,0,0,0)==-1 && errno==EINVAL);
+    CHECK(prctl(PR_CAPBSET_READ,64,0,0,0)==-1 && errno==EINVAL);
+    CHECK(prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0)==-1 && errno==EINVAL);
+    CHECK(prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,0,0,0)==-1 && errno==EINVAL);
     int sockets[2], enabled=1, status;
     CHECK(socketpair(AF_UNIX,SOCK_STREAM,0,sockets)==0);
     CHECK(setsockopt(sockets[0],SOL_SOCKET,SO_PASSCRED,&enabled,sizeof(enabled))==0);

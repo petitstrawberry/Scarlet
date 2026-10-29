@@ -773,7 +773,8 @@ pub fn sys_prctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 0
             }
         }
-        _ => 0,
+        // Never acknowledge an unimplemented process-security operation.
+        _ => errno::to_result(errno::EINVAL),
     }
 }
 
@@ -1955,13 +1956,13 @@ mod tests {
     use super::*;
 
     #[test_case]
-    fn prctl_does_not_advertise_unsupported_tagged_pointers() {
+    fn prctl_rejects_unimplemented_tagged_pointer_and_security_operations() {
         use crate::environment::{PAGE_SIZE, USER_STACK_END};
         use crate::task::{clear_mock_current_task, set_mock_current_task};
         let task = Arc::new(Task::new("tagged-address-prctl".into(), 1, TaskType::User));
         let code = USER_STACK_END - PAGE_SIZE;
         task.allocate_stack_pages(code, 1).unwrap();
-        for index in 0..4 {
+        for index in 0..8 {
             copy_to_user(&task, code + index * 4, &0x73u32.to_ne_bytes()).unwrap();
         }
         set_mock_current_task(task);
@@ -1972,6 +1973,10 @@ mod tests {
             (PR_SET_TAGGED_ADDR_CTRL, 1), // Bionic's tagged-heap feature probe.
             (PR_SET_TAGGED_ADDR_CTRL, 0),
             (PR_GET_TAGGED_ADDR_CTRL, 0),
+            (23, 64), // PR_CAPBSET_READ must terminate unsupported queries.
+            (38, 1), // PR_SET_NO_NEW_PRIVS is not implemented.
+            (22, 2), // PR_SET_SECCOMP is not implemented.
+            (i32::MAX, 0),
         ] {
             frame.set_arg(0, operation as usize);
             frame.set_arg(1, value);
