@@ -626,3 +626,5 @@ impl MemoryMappingOps for GenericDevice {
         false
     }
 }
+
+pub mod lifecycle;

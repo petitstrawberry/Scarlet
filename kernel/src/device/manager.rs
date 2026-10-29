@@ -221,6 +221,7 @@ static MANAGER: DeviceManager = DeviceManager::new();
 /// - `drivers`: A mutex-protected map of device drivers organized by priority.
 /// - `next_device_id`: Atomic counter for generating unique device IDs.
 pub struct DeviceManager {
+    pub lifecycle: super::lifecycle::Journal,
     /* Devices stored by ID */
     devices: IrqSpinLock<BTreeMap<usize, SharedDevice>>,
     /* Devices stored by name */
@@ -265,6 +266,7 @@ pub struct DeviceManager {
 impl DeviceManager {
     const fn new() -> Self {
         DeviceManager {
+            lifecycle: super::lifecycle::Journal::new(),
             devices: IrqSpinLock::new(BTreeMap::new()),
             device_by_name: IrqSpinLock::new(BTreeMap::new()),
             name_to_id: IrqSpinLock::new(BTreeMap::new()),
@@ -1191,8 +1193,19 @@ impl DeviceManager {
 
             devices.insert(id, device.clone());
             device_by_name.insert(name.clone(), device);
-            name_to_id.insert(name, id);
+            if let Some(previous)=name_to_id.insert(name.clone(), id) {
+                if let Some(device)=devices.get(&previous) {
+                    self.lifecycle.publish(super::lifecycle::Action::Removed,super::lifecycle::Endpoint {
+                        id:previous,name:name.clone(),kind:device.device_type(),
+                    });
+                }
+            }
+            self.lifecycle.publish(super::lifecycle::Action::Added, super::lifecycle::Endpoint {
+                id, name, kind: scan_device.device_type(),
+            });
         }
+
+        self.lifecycle.changed.wake_all();
 
         if crate::device::block::partition::is_partition_device(scan_device.as_ref()) {
             return id;
@@ -1244,9 +1257,30 @@ impl DeviceManager {
         if let Some(name) = name {
             name_to_id.remove(&name);
             device_by_name.remove(&name);
+            self.lifecycle.publish(super::lifecycle::Action::Removed, super::lifecycle::Endpoint {
+                id, name, kind: device.device_type(),
+            });
         }
-
+        drop(name_to_id); drop(device_by_name); drop(devices);
+        self.lifecycle.changed.wake_all();
         Some(device)
+    }
+
+    /// Coherent native endpoint snapshot and the cursor immediately following it.
+    pub fn endpoint_snapshot(&self) -> (Vec<super::lifecycle::Endpoint>, u64) {
+        let devices=self.devices.lock();
+        let names=self.name_to_id.lock();
+        let endpoints=names.iter().filter_map(|(name,id)| devices.get(id).map(|device|
+            super::lifecycle::Endpoint {id:*id,name:name.clone(),kind:device.device_type()})).collect();
+        (endpoints,self.lifecycle.cursor())
+    }
+    /// Re-observe a currently registered endpoint, for consumer resynchronization.
+    pub fn observe_endpoint(&self,id:usize) -> Result<(), &'static str> {
+        let devices=self.devices.lock();let names=self.name_to_id.lock();
+        let device=devices.get(&id).ok_or("device removed")?;
+        let name=names.iter().find_map(|(name,other)| (*other==id).then(||name.clone())).ok_or("unnamed device")?;
+        self.lifecycle.publish(super::lifecycle::Action::Observed,super::lifecycle::Endpoint {id,name,kind:device.device_type()});
+        drop(names);drop(devices);self.lifecycle.changed.wake_all();Ok(())
     }
 
     /// Get a device by ID
@@ -3901,6 +3935,24 @@ mod tests {
             vec![],
             None,
         ))
+    }
+
+    #[test_case]
+    fn named_endpoint_registration_and_removal_publish_native_observations() {
+        let manager=DeviceManager::new();let listener=manager.lifecycle.subscribe();
+        let device:SharedDevice=Arc::new(GenericDevice::new("lifecycle"));
+        let id=manager.register_device_with_name("lifecycle".into(),device.clone());
+        let added=listener.next().unwrap().unwrap();assert_eq!(added.action,super::super::lifecycle::Action::Added);
+        assert_eq!(added.endpoint.id,id);assert_eq!(added.endpoint.name,"lifecycle");
+        let (snapshot,cursor)=manager.endpoint_snapshot();assert!(cursor>added.sequence);assert_eq!(snapshot,alloc::vec![added.endpoint.clone()]);
+        manager.observe_endpoint(id).unwrap();assert_eq!(listener.next().unwrap().unwrap().action,super::super::lifecycle::Action::Observed);
+        let replacement=manager.register_device_with_name("lifecycle".into(),device.clone());
+        assert_eq!(listener.next().unwrap().unwrap().action,super::super::lifecycle::Action::Removed);
+        assert_eq!(listener.next().unwrap().unwrap().endpoint.id,replacement);
+        manager.unregister_device(replacement).unwrap();listener.next().unwrap().unwrap();
+        let removed=manager.unregister_device(id).unwrap();assert!(Arc::ptr_eq(&removed,&device));
+        assert!(listener.next().unwrap().is_none());
+        assert!(manager.observe_endpoint(id).is_err());assert!(manager.endpoint_snapshot().0.is_empty());assert!(!listener.pending());
     }
 
     #[test_case]
