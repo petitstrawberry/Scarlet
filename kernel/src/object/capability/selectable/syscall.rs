@@ -38,6 +38,7 @@ fn eval_poll_handle(pfd: &mut PollHandle, task: &crate::task::Task) -> (bool, bo
     let mut selectable = false;
 
     if let Some(sel) = kobj.as_selectable() {
+        if sel.is_hung_up() { pfd.revents |= POLLHUP; }
         selectable = want_read || want_write || want_except;
         let rs = sel.current_ready(ReadyInterest {
             read: want_read,

@@ -40,6 +40,7 @@ struct PtyCore {
     master_input: IrqSpinLock<VecDeque<u8>>,
     master_waker: Waker,
     slave_open_count: AtomicUsize,
+    slave_was_opened: AtomicBool,
 }
 
 impl PtyCore {
@@ -48,6 +49,7 @@ impl PtyCore {
             master_input: IrqSpinLock::new(VecDeque::new()),
             master_waker: Waker::new_interruptible("pty_master_input"),
             slave_open_count: AtomicUsize::new(0),
+            slave_was_opened: AtomicBool::new(false),
         }
     }
 
@@ -83,6 +85,7 @@ impl PtyCore {
 
     fn open_slave(&self) {
         self.slave_open_count.fetch_add(1, Ordering::AcqRel);
+        self.slave_was_opened.store(true, Ordering::Release);
     }
 
     fn close_slave(&self) {
@@ -107,6 +110,10 @@ impl PtyCore {
                 Err(actual) => current = actual,
             }
         }
+    }
+
+    fn slave_hung_up(&self) -> bool {
+        self.slave_was_opened.load(Ordering::Acquire) && !self.has_slave_open()
     }
 
     fn has_slave_open(&self) -> bool {
@@ -346,7 +353,7 @@ impl CharDevice for PtyMasterDevice {
     }
 
     fn can_read(&self) -> bool {
-        self.core.master_input_len() != 0 || !self.core.has_slave_open()
+        self.core.master_input_len() != 0 || self.core.slave_hung_up()
     }
 
     fn can_write(&self) -> bool {
@@ -355,6 +362,10 @@ impl CharDevice for PtyMasterDevice {
 }
 
 impl Selectable for PtyMasterDevice {
+    fn is_hung_up(&self) -> bool {
+        self.core.slave_hung_up()
+    }
+
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
         let mut set = ReadySet::none();
         if interest.read {
@@ -469,6 +480,29 @@ mod tests {
             Err(StreamError::WouldBlock)
         ));
 
+        pair.close_slave_endpoint();
+    }
+
+    #[test_case]
+    fn test_pty_hangup_tracks_last_slave_and_preserves_buffered_output() {
+        let pair = PtyPair::new(8);
+        let master = pair.master();
+        assert!(!master.is_hung_up());
+        assert!(!master.can_read());
+        pair.open_slave_endpoint();
+        pair.open_slave_endpoint();
+        pair.slave().write(b"x").unwrap();
+        pair.close_slave_endpoint();
+        assert!(!master.is_hung_up());
+        pair.close_slave_endpoint();
+        assert!(master.is_hung_up());
+        assert!(master.can_read());
+        let mut byte = [0];
+        assert_eq!(master.try_read(&mut byte).unwrap(), 1);
+        assert_eq!(byte, [b'x']);
+        assert_eq!(master.try_read(&mut byte).unwrap(), 0);
+        pair.open_slave_endpoint();
+        assert!(!master.is_hung_up());
         pair.close_slave_endpoint();
     }
 

@@ -8,6 +8,8 @@
 #include <linux/stat.h>
 #include <linux/futex.h>
 #include <pthread.h>
+#include <poll.h>
+#include <sys/ioctl.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -295,6 +297,24 @@ static int signal_case(void) {
     SCHECK(read(signal_fd,&child_info,sizeof(child_info))==-1 && errno==EAGAIN);
     SCHECK(close(signal_fd)==0 && close(poll_fd)==0);
     printf("SCARLET_CHILD_EXIT_SIGNALFD_OK epoll waitpid\n");
+    int master=posix_openpt(O_RDWR|O_NOCTTY|O_CLOEXEC);
+    SCHECK(master>=0 && grantpt(master)==0 && unlockpt(master)==0);
+    char slave_path[128];SCHECK(ptsname_r(master,slave_path,sizeof(slave_path))==0);
+    int slave=open(slave_path,O_RDWR|O_NOCTTY|O_CLOEXEC);SCHECK(slave>=0);
+    struct pollfd terminal={.fd=master,.events=POLLIN};
+    SCHECK(poll(&terminal,1,0)==0);
+    SCHECK(write(slave,"x",1)==1);
+    SCHECK(close(slave)==0);
+    SCHECK(poll(&terminal,1,1000)==1 && (terminal.revents&POLLHUP));
+    char byte;SCHECK(read(master,&byte,1)==1 && byte=='x');
+    terminal.events=0;SCHECK(poll(&terminal,1,0)==1 && (terminal.revents&POLLHUP));
+    int terminal_epoll=epoll_create1(EPOLL_CLOEXEC);SCHECK(terminal_epoll>=0);
+    event.events=EPOLLIN;event.data.u64=18;
+    SCHECK(epoll_ctl(terminal_epoll,EPOLL_CTL_ADD,master,&event)==0);
+    SCHECK(epoll_wait(terminal_epoll,&event,1,1000)==1 && (event.events&EPOLLHUP));
+    SCHECK(close(terminal_epoll)==0 && close(master)==0);
+    printf("SCARLET_PTY_HANGUP_OK poll epoll buffered-output\n");
+
     SCHECK(pthread_sigmask(SIG_SETMASK, &original, NULL) == 0);
 #undef SCHECK
     return 0;

@@ -103,6 +103,11 @@ pub enum SelectWaitOutcome {
 
 /// Objects that can be waited on by select/pselect.
 pub trait Selectable {
+    /// Whether the peer endpoint has disconnected, independent of requested readiness.
+    fn is_hung_up(&self) -> bool {
+        false
+    }
+
     /// Return current readiness for the given interest set.
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
         // Default: treat as always-ready for read/write interests, except is false

@@ -232,6 +232,7 @@ fn epoll_ready_events(abi: &LinuxAbi, task: &crate::task::Task, interest: EpollI
     let want_except = (interest.events & EPOLLPRI) != 0;
 
     if let Some(sel) = kobj.as_selectable() {
+        if sel.is_hung_up() { ready |= 0x10; }
         let rs = sel.current_ready(crate::object::capability::selectable::ReadyInterest {
             read: want_read,
             write: want_write,
@@ -5410,6 +5411,7 @@ fn ppoll_for_task(
         let mut selectable = false;
 
         if let Some(sel) = kobj.as_selectable() {
+            if sel.is_hung_up() { pfd.revents |= POLLHUP; }
             selectable = want_read || want_write || want_except;
             let rs: ReadySet = sel.current_ready(ReadyInterest {
                 read: want_read,

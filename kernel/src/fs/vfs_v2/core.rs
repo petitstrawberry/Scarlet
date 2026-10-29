@@ -692,6 +692,10 @@ impl FileObject for VfsFileObject {
 }
 
 impl Selectable for VfsFileObject {
+    fn is_hung_up(&self) -> bool {
+        self.inner.is_hung_up()
+    }
+
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
         self.inner.current_ready(interest)
     }
