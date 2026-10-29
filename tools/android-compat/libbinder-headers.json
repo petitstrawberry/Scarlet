@@ -1,0 +1,41 @@
+{
+  "release": "android-13.0.0_r2",
+  "archives": {
+    "binder": {
+      "repository": "platform/frameworks/native",
+      "revision": "2fe7eddf185ecb63223eeadc58804f9bf6cbd426",
+      "path": "libs/binder/include",
+      "tree_sha256": "3ab50078c9e13799514225bdfb7b25a0de3af4931bcdf654d6363332be655a43"
+    },
+    "utils": {
+      "repository": "platform/system/core",
+      "revision": "83366e7e7a1556ab6cff117673bb9f17b973de99",
+      "path": "libutils/include",
+      "tree_sha256": "17bd218f6d39635fcf9fecf3e6bf31e8112a5447f987a7bb781c25108f6f97a2"
+    },
+    "cutils": {
+      "repository": "platform/system/core",
+      "revision": "83366e7e7a1556ab6cff117673bb9f17b973de99",
+      "path": "libcutils/include",
+      "tree_sha256": "eb23414150a4691df1237c0d128035a9e50071476afbc6567bfa616186828e22"
+    },
+    "system": {
+      "repository": "platform/system/core",
+      "revision": "83366e7e7a1556ab6cff117673bb9f17b973de99",
+      "path": "libsystem/include",
+      "tree_sha256": "2bf3e0ae93962acf5a285534e987449a7959b3ec79b8aebe8d7e43cba259310c"
+    },
+    "log": {
+      "repository": "platform/system/logging",
+      "revision": "6bfb380b168c7127d79977a0e931d6e5e469d887",
+      "path": "liblog/include",
+      "tree_sha256": "4444db400ca4c9f56163758fe4bc08c8b6fb3207b1ddf561ae8fcb04f8306e32"
+    },
+    "base": {
+      "repository": "platform/system/libbase",
+      "revision": "c914dc8c167ac2212c470ad5d684d96ab7c20a0e",
+      "path": "include",
+      "tree_sha256": "2cfec304e00bc414e8aebebf473260fa4d7f1f9c507505cbcbcccc2e6171f0b8"
+    }
+  }
+}
