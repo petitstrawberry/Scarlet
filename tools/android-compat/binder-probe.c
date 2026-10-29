@@ -168,7 +168,7 @@ int binder_case(void) {
     binder_uintptr_t bad = (uintptr_t)peer.pool + 15 * 65536;
     REQUIRE(send_command(peer.fd, BC_FREE_BUFFER, &bad, sizeof(bad)) == -1 && errno == EINVAL);
     tx.offsets_size = 8;
-    REQUIRE(send_command(peer.fd, BC_TRANSACTION, &tx, sizeof(tx)) == -1 && errno == EOPNOTSUPP);
+    REQUIRE(send_command(peer.fd, BC_TRANSACTION, &tx, sizeof(tx)) == -1 && errno == EFAULT);
     tx.offsets_size = 0;
     REQUIRE(send_command(peer.fd, BC_TRANSACTION, &tx, sizeof(tx)) == 0);
     REQUIRE(receive(peer.fd, BR_TRANSACTION_COMPLETE, NULL) == 0);
@@ -187,5 +187,6 @@ int binder_case(void) {
     REQUIRE(waitpid(child, &status, 0) == child && status == 0);
     REQUIRE(munmap(peer.pool, POOL_SIZE) == 0 && close(peer.fd) == 0);
     printf("SCARLET_BINDER_RPC_OK request reply buffer-free peer-death fork-isolation poll-timeout poll-interrupt epoll-level\n");
-    return 0;
+    extern int binder_objects_case(void);
+    return binder_objects_case();
 }

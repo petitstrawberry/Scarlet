@@ -42,7 +42,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--accel", choices=("tcg", "hvf"), default="tcg")
-    parser.add_argument("--binder", action="store_true", help="include two-process Binder RPC checks")
+    parser.add_argument("--binder", action="store_true", help="include Binder RPC and three-process object lifetime checks")
     args = parser.parse_args()
     if (args.art_dex or args.program) and (not args.runtime_root or args.binder):
         parser.error("--art-dex/--program requires --runtime-root and cannot use --binder")

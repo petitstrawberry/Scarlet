@@ -14,6 +14,22 @@ def png():
 
 
 class EvidenceTest(unittest.TestCase):
+    def test_binder_requires_object_transfer_and_reference_lifetime_evidence(self):
+        lines = []
+        for case in ["libc", "thread", "shared", "signal", "exec", "xattr", "mremap", "binder", "binder-absent"]:
+            lines += [f"SCARLET_ANDROID_DIRECT_CASE /bin/bionic-static {case}",
+                      f"SCARLET_BIONIC_BEGIN {case}", f"SCARLET_BIONIC_OK {case}",
+                      f"SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-static {case} 0"]
+        lines.append("SCARLET_ANDROID_DIRECT_OK")
+        self.assertEqual(analyze_direct("\n".join(lines).encode(), binder=True)["result"], "INCOMPLETE")
+        at = lines.index("SCARLET_BIONIC_OK binder")
+        steps = ["BEGIN", "REJECT_OK details", "TRANSFER_OK details", "REFS strong-zero weak-live",
+                 "REFS balanced-before-close", "OK details"]
+        lines[at:at] = ["SCARLET_BINDER_OBJECTS_" + step for step in steps]
+        self.assertEqual(analyze_direct("\n".join(lines).encode(), binder=True)["result"], "PASS")
+        lines[at + 3], lines[at + 4] = lines[at + 4], lines[at + 3]
+        self.assertEqual(analyze_direct("\n".join(lines).encode(), binder=True)["result"], "INCOMPLETE")
+
     def test_direct_exit_zero_without_child_output_is_not_success(self):
         lines = []
         for case in ["libc", "thread", "shared", "signal", "exec", "xattr", "mremap", "binder-absent"]:

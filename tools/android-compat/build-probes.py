@@ -25,9 +25,11 @@ def main():
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     flags = [str(compiler), "-O2", "-g", "-Wall", "-Wextra", "-Werror", "-fno-emulated-tls"]
+    probe_sources = [str(SOURCE / name) for name in
+                     ("bionic-probe.c", "binder-probe.c", "binder-object-probe.c")]
     commands = [
-        flags + ["-static", str(SOURCE / "bionic-probe.c"), str(SOURCE / "binder-probe.c"), "-ldl", "-o", str(output / "bionic-static")],
-        flags + [str(SOURCE / "bionic-probe.c"), str(SOURCE / "binder-probe.c"), "-ldl", "-o", str(output / "bionic-dynamic")],
+        flags + ["-static"] + probe_sources + ["-ldl", "-o", str(output / "bionic-static")],
+        flags + probe_sources + ["-ldl", "-o", str(output / "bionic-dynamic")],
         flags + ["-fPIC", "-shared", str(SOURCE / "bionic-library.c"), "-o", str(output / "libbionic-probe.so")],
     ]
     for command in commands:

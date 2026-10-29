@@ -32,6 +32,8 @@ def analyze_art(data, stock=False):
 
 def analyze_direct(data, dynamic=False, binder=False):
     """Require child evidence as well as native wait status and suite marker."""
+    object_steps = ["BEGIN", "REJECT_OK", "TRANSFER_OK", "REFS strong-zero weak-live",
+                    "REFS balanced-before-close", "OK"]
     expected = [("/bin/bionic-static", name) for name in ("libc", "thread", "shared", "signal", "exec", "xattr", "mremap")]
     if binder:
         expected.append(("/bin/bionic-static", "binder"))
@@ -45,12 +47,17 @@ def analyze_direct(data, dynamic=False, binder=False):
         match = re.fullmatch(r"SCARLET_ANDROID_DIRECT_CASE (\S+) (\S+)", line)
         if match:
             current = {"program": match[1], "case": match[2], "began": False, "passed": False, "status": None}
+            if current["case"] == "binder":
+                current["object_steps"] = []
             cases.append(current)
         elif current is not None:
             if line == "SCARLET_BIONIC_BEGIN " + current["case"]:
                 current["began"] = True
             elif line == "SCARLET_BIONIC_OK " + current["case"]:
                 current["passed"] = current["began"]
+            elif current["case"] == "binder" and line.startswith("SCARLET_BINDER_OBJECTS_"):
+                step = line.removeprefix("SCARLET_BINDER_OBJECTS_")
+                current["object_steps"].append(step if step.startswith("REFS ") else step.split()[0])
             else:
                 match = re.fullmatch(r"SCARLET_ANDROID_DIRECT_EXIT (\S+) (\S+) (-?\d+)", line)
                 if match and (match[1], match[2]) == (current["program"], current["case"]):
@@ -59,7 +66,8 @@ def analyze_direct(data, dynamic=False, binder=False):
         if line == "SCARLET_ANDROID_DIRECT_OK":
             complete = True
     passed = (complete and [(c["program"], c["case"]) for c in cases] == expected and
-              all(c["passed"] and c["status"] == 0 for c in cases))
+              all(c["passed"] and c["status"] == 0 and
+                  (c["case"] != "binder" or c["object_steps"] == object_steps) for c in cases))
     return {"result": "PASS" if passed else "INCOMPLETE", "cases": cases}
 
 
