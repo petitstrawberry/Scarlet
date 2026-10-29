@@ -6,6 +6,7 @@ pub mod aarch64;
 pub mod binder;
 #[cfg(target_arch = "aarch64")]
 mod detect;
+mod security;
 
 use crate::{
     abi::linux::{
@@ -21,7 +22,14 @@ struct AndroidExtensions;
 
 impl LinuxAbiExtensions for AndroidExtensions {
     fn open(&self, abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> Option<usize> {
-        binder::open(abi, task, path, flags)
+        security::open(abi, task, path, flags).or_else(|| binder::open(abi, task, path, flags))
+    }
+
+    fn filesystem_type(
+        &self,
+        filesystem: &dyn crate::fs::vfs_v2::core::FileSystemOperations,
+    ) -> Option<i64> {
+        security::filesystem_type(filesystem)
     }
 
     fn ioctl(
@@ -43,6 +51,9 @@ impl LinuxAbiExtensions for AndroidExtensions {
     }
 
     fn mmap(&self, task: &Task, object: &KernelObject, mapping: FileMapping) -> Option<usize> {
+        if let Some(result) = security::mmap(object, &mapping) {
+            return Some(result);
+        }
         let file = object
             .as_file()?
             .as_any()

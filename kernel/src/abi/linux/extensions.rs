@@ -15,6 +15,13 @@ pub struct FileMapping {
 }
 
 pub trait LinuxAbiExtensions: Send + Sync {
+    /// An outer ABI may translate its filesystem's native identity.
+    fn filesystem_type(
+        &self,
+        _filesystem: &dyn crate::fs::vfs_v2::core::FileSystemOperations,
+    ) -> Option<i64> {
+        None
+    }
     fn open(&self, _abi: &mut LinuxAbi, _task: &Task, _path: &str, _flags: i32) -> Option<usize> {
         None
     }

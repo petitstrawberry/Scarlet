@@ -76,9 +76,27 @@ fn write(task: &Task, ptr: usize, b: &[u8]) -> Result<(), usize> {
     copy_to_user(task, ptr, b).map_err(|_| errno::EFAULT)
 }
 
+// A service manager may inspect peer labels only inside its Shield policy.
+// This is domain confinement; service permissions are checked by libselinux.
+fn same_policy(a: Option<&crate::shield::Subject>, b: Option<&crate::shield::Subject>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Arc::ptr_eq(a.policy(), b.policy()),
+        _ => false,
+    }
+}
+fn same_subject(a: Option<&crate::shield::Subject>, b: Option<&crate::shield::Subject>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.same_identity(b),
+        _ => false,
+    }
+}
+
 struct Context {
     endpoint: Weak<RpcEndpoint>,
     object: Arc<crate::ipc::rpc::RpcObject>,
+    subject: Option<crate::shield::Subject>,
 }
 struct Domain {
     // Retain the environment so pointer identity cannot be reused while open.
@@ -129,6 +147,7 @@ struct State {
 }
 pub(crate) struct BinderFile {
     owner: usize,
+    subject: Option<crate::shield::Subject>,
     domain: Arc<Domain>,
     endpoint: Arc<RpcEndpoint>,
     state: IrqSpinLock<State>,
@@ -160,6 +179,7 @@ pub(crate) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> O
             .ok_or(errno::ENODEV)?;
         let file = Arc::new(BinderFile {
             owner: task.get_thread_group_id(),
+            subject: task.security_subject.read().clone(),
             domain: domain(environment, device),
             endpoint: RpcEndpoint::new(),
             send_gate: IrqSpinLock::new(()),
@@ -193,6 +213,7 @@ pub(crate) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> O
 impl BinderFile {
     fn check_owner(&self, task: &Task) -> Result<(), usize> {
         if task.get_thread_group_id() == self.owner
+            && same_subject(self.subject.as_ref(), task.security_subject.read().as_ref())
             && task
                 .execution_environment
                 .read()
@@ -259,6 +280,7 @@ impl BinderFile {
                     *context = Some(Context {
                         endpoint: Arc::downgrade(&self.endpoint),
                         object: self.endpoint.create_object().map_err(|_| errno::ENOMEM)?,
+                        subject: self.subject.clone(),
                     });
                     Ok(())
                 }
@@ -328,14 +350,21 @@ impl BinderFile {
                     None
                 };
                 let capability = target.as_ref().map(|lease| lease.node.object.clone());
+                if target.as_ref().is_some_and(|target| {
+                    !same_policy(self.subject.as_ref(), target.node.subject.as_ref())
+                }) {
+                    return Err(errno::EACCES);
+                }
                 let (message, acquisitions) = self.encode(task, data, prepared, target)?;
                 if command == BC_TRANSACTION {
                     let context = if number == 0 {
-                        self.domain
-                            .context
-                            .lock()
-                            .as_ref()
-                            .and_then(|c| c.endpoint.upgrade())
+                        let context = self.domain.context.lock();
+                        if context.as_ref().is_some_and(|c| {
+                            !same_policy(self.subject.as_ref(), c.subject.as_ref())
+                        }) {
+                            return Err(errno::EACCES);
+                        }
+                        context.as_ref().and_then(|c| c.endpoint.upgrade())
                     } else {
                         None
                     };
@@ -807,6 +836,7 @@ mod tests {
     fn file(task: &Task, environment: &Arc<Environment>, device: u8) -> BinderFile {
         BinderFile {
             owner: task.get_thread_group_id(),
+            subject: task.security_subject.read().clone(),
             domain: domain(environment.clone(), device),
             endpoint: RpcEndpoint::new(),
             send_gate: IrqSpinLock::new(()),
@@ -848,6 +878,51 @@ mod tests {
             .command(&task, &abi, BC_DECREFS, &0u32.to_le_bytes())
             .unwrap();
         assert!(!client.ready(1));
+    }
+    #[test_case]
+    fn binder_shield_domain_and_relabel_cannot_reuse_foreign_authority() {
+        let environment = Environment::new();
+        let policy =
+            crate::shield::Policy::new(vec![(1, "server".into()), (2, "client".into())], vec![])
+                .unwrap();
+        let server_task = task(&environment, 1);
+        *server_task.security_subject.write() = Some(policy.subject(1).unwrap());
+        let server = file(&server_task, &environment, 0);
+        let client_task = task(&environment, 2);
+        *client_task.security_subject.write() = Some(policy.subject(2).unwrap());
+        let client = file(&client_task, &environment, 0);
+        let foreign_task = task(&environment, 3);
+        let foreign = file(&foreign_task, &environment, 0);
+        let abi = LinuxAbi::default();
+        let mut tf = Trapframe::new();
+        assert_eq!(
+            server.ioctl(&server_task, &abi, &mut tf, SET_CONTEXT, 0, false),
+            0
+        );
+        for (file, task) in [(&client, &client_task), (&foreign, &foreign_task)] {
+            file.ensure_thread(task.get_id()).unwrap();
+        }
+        assert_eq!(
+            foreign.command(&foreign_task, &abi, BC_TRANSACTION, &[0; 64]),
+            Err(errno::EACCES)
+        );
+        foreign
+            .command(&foreign_task, &abi, BC_INCREFS, &0u32.to_le_bytes())
+            .unwrap();
+        assert_eq!(
+            foreign.command(&foreign_task, &abi, BC_REQUEST_DEATH_NOTIFICATION, &[0; 12]),
+            Err(errno::EACCES)
+        );
+        assert!(
+            client
+                .command(&client_task, &abi, BC_TRANSACTION, &[0; 64])
+                .is_ok()
+        );
+        assert!(server.endpoint.receive().unwrap().is_some());
+        *client_task.security_subject.write() = Some(policy.subject(1).unwrap());
+        assert_eq!(client.check_owner(&client_task), Err(errno::EINVAL));
+        *client_task.security_subject.write() = None;
+        assert_eq!(client.check_owner(&client_task), Err(errno::EINVAL));
     }
     #[test_case]
     fn binder_routes_only_within_the_same_environment_and_device() {

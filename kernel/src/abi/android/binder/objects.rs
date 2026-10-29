@@ -87,6 +87,7 @@ impl References {
 }
 
 pub(super) struct Node {
+    pub subject: Option<crate::shield::Subject>,
     pub object: Arc<RpcObject>,
     pub pointer: usize,
     pub cookie: usize,
@@ -276,6 +277,7 @@ impl Objects {
         }
         let object = file.endpoint.create_object().map_err(|_| errno::ENOMEM)?;
         let node = Arc::new(Node {
+            subject: file.subject.clone(),
             object,
             pointer,
             cookie,
@@ -309,13 +311,12 @@ impl Objects {
             if self.context_strong == 0 && self.context_weak == 0 {
                 return Err(errno::EINVAL);
             }
-            file.domain
-                .context
-                .lock()
-                .as_ref()
-                .ok_or(errno::EINVAL)?
-                .object
-                .clone()
+            let context = file.domain.context.lock();
+            let context = context.as_ref().ok_or(errno::EINVAL)?;
+            if !same_policy(file.subject.as_ref(), context.subject.as_ref()) {
+                return Err(errno::EACCES);
+            }
+            context.object.clone()
         } else {
             self.handles
                 .get(&number)
@@ -766,6 +767,7 @@ mod tests {
     use super::*;
     fn file(domain: Arc<Domain>) -> BinderFile {
         BinderFile {
+            subject: None,
             owner: 1,
             domain,
             endpoint: RpcEndpoint::new(),

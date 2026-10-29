@@ -4252,12 +4252,19 @@ fn write_linux_statfs(
     }
 }
 
-fn linux_statfs_for_entry(entry: &crate::fs::vfs_v2::core::VfsEntry) -> LinuxStatFs {
+fn linux_statfs_for_entry(abi: &LinuxAbi, entry: &crate::fs::vfs_v2::core::VfsEntry) -> LinuxStatFs {
     let node = entry.node();
     let filesystem = node
         .filesystem()
         .and_then(|filesystem| filesystem.upgrade());
-    LinuxStatFs::for_filesystem(filesystem.as_deref())
+    let mut result = LinuxStatFs::for_filesystem(filesystem.as_deref());
+    if let Some(kind) = filesystem
+        .as_deref()
+        .and_then(|fs| abi.extensions.filesystem_type(fs))
+    {
+        result.f_type = kind;
+    }
+    result
 }
 
 /// Linux `statfs` implementation for Scarlet VFS paths.
@@ -4270,7 +4277,7 @@ fn linux_statfs_for_entry(entry: &crate::fs::vfs_v2::core::VfsEntry) -> LinuxSta
 /// # Returns
 ///
 /// Zero on success or a negative Linux errno encoded as `usize`.
-pub fn sys_statfs(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+pub fn sys_statfs(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(task) => task,
         None => return errno::to_result(errno::EIO),
@@ -4292,7 +4299,7 @@ pub fn sys_statfs(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Ok(resolved) => resolved,
         Err(error) => return errno::to_result(errno::from_fs_error(&error)),
     };
-    let statistics = linux_statfs_for_entry(entry.as_ref());
+    let statistics = linux_statfs_for_entry(abi, entry.as_ref());
     match write_linux_statfs(&task, output_address, &statistics) {
         Ok(()) => 0,
         Err(error) => errno::to_result(error),
@@ -4337,7 +4344,7 @@ pub fn sys_fstatfs(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             file.as_any()
                 .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()
         })
-        .map(|file| linux_statfs_for_entry(file.get_vfs_entry().as_ref()))
+        .map(|file| linux_statfs_for_entry(abi, file.get_vfs_entry().as_ref()))
         .unwrap_or_else(|| LinuxStatFs::for_filesystem(None));
     match write_linux_statfs(&task, output_address, &statistics) {
         Ok(()) => 0,
