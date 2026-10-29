@@ -1161,6 +1161,10 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     let flags = trapframe.get_arg(0);
+    if !matches!(flags & 0xff,0|17) {
+        trapframe.increment_pc_next(&parent_task);
+        return errno::to_result(errno::EOPNOTSUPP);
+    }
     let child_stack = trapframe.get_arg(1);
     let parent_tid_ptr = trapframe.get_arg(2) as *mut i32; // a2
     let tls = trapframe.get_arg(3); //a3 (TLS)
@@ -1238,6 +1242,7 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     let ret = match parent_task.clone_task(cflags) {
         Ok(mut child_task) => {
+            child_task.parent_exit_event.store(flags & 0xff == 17,core::sync::atomic::Ordering::Release);
             child_task.vcpu.lock().set_return_value(0);
             // If child_stack is provided, set child's user SP
             if child_stack != 0 {

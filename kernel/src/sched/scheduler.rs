@@ -4704,6 +4704,24 @@ pub fn finalize_zombie(task_id: usize, parent_id: Option<usize>) {
     }
     wake_task_waiters(task_id);
     if let Some(parent_id) = parent_id {
+        // Publish the native child-completion event, in addition to waitpid
+        // wakeups. ABI translation runs on the parent's own return boundary.
+        // Reparented zombies notify their new owner once as well.
+        if let (Some(child), Some(parent)) = (get_task_by_id(task_id), get_task_by_id(parent_id)) {
+            if child.get_state() == TaskState::Zombie
+                && child.get_thread_group_id() == task_id
+                && child.parent_exit_event.load(Ordering::Acquire)
+                && child.exit_event_parent.swap(parent_id, Ordering::AcqRel) != parent_id
+            {
+                if let Ok(target) = u32::try_from(parent_id) {
+                    let event = crate::ipc::event::Event::immediate_process_control(
+                        target, crate::ipc::event::ProcessControlType::ChildExit,
+                    );
+                    parent.event_queue.lock().enqueue(event);
+                    wake_task(parent_id);
+                }
+            }
+        }
         wake_parent_waiters(parent_id);
         let parent_thread_group = get_task_by_id(parent_id)
             .map(|parent| parent.get_thread_group_id())
@@ -6582,6 +6600,24 @@ mod tests {
         assert_eq!(FAIR_QUEUES[0].lock().len(), 1);
     }
 
+    #[test_case]
+    fn child_completion_event_is_queued_once_and_respects_notification_suppression() {
+        use crate::ipc::event::{EventContent,ProcessControlType};
+        reset();
+        let parent_id=register_task(Task::new("parent".into(),1,TaskType::User));
+        let child_id=register_task(Task::new("child".into(),1,TaskType::User));
+        let parent=get_task_by_id(parent_id).unwrap();let child=get_task_by_id(child_id).unwrap();
+        assert!(parent.adopt_registered_child(&child));child.set_state(TaskState::Zombie);
+        finalize_zombie(child_id,Some(parent_id));finalize_zombie(child_id,Some(parent_id));
+        let event=parent.event_queue.lock().dequeue().unwrap();
+        assert!(matches!(event.content,EventContent::ProcessControl(ProcessControlType::ChildExit)));
+        assert!(parent.event_queue.lock().dequeue().is_none());
+        let quiet_id=register_task(Task::new("quiet-child".into(),1,TaskType::User));
+        let quiet=get_task_by_id(quiet_id).unwrap();assert!(parent.adopt_registered_child(&quiet));
+        quiet.parent_exit_event.store(false,Ordering::Release);quiet.set_state(TaskState::Zombie);
+        finalize_zombie(quiet_id,Some(parent_id));assert!(parent.event_queue.lock().dequeue().is_none());
+        drop(child);drop(quiet);drop(parent);reset();
+    }
     #[test_case]
     fn test_finalize_zombie_wakes_parent_thread_when_parent_is_missing() {
         reset();

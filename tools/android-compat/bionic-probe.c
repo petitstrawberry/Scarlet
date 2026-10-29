@@ -16,6 +16,8 @@
 #include <sys/auxv.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/signalfd.h>
+#include <sys/epoll.h>
 #include <sys/stat.h>
 #include <sys/xattr.h>
 #include <sys/wait.h>
@@ -278,6 +280,21 @@ static int signal_case(void) {
         SCHECK(close(pipefd[0]) == 0 && close(pipefd[1]) == 0);
     }
     SCHECK(signal_seen == SIGINT);
+    sigset_t children;sigemptyset(&children);sigaddset(&children,SIGCHLD);
+    SCHECK(pthread_sigmask(SIG_BLOCK,&children,NULL)==0);
+    int signal_fd=signalfd(-1,&children,SFD_NONBLOCK|SFD_CLOEXEC), poll_fd=epoll_create1(EPOLL_CLOEXEC);
+    SCHECK(signal_fd>=0 && poll_fd>=0);
+    struct epoll_event event={.events=EPOLLIN,.data.u64=17};
+    SCHECK(epoll_ctl(poll_fd,EPOLL_CTL_ADD,signal_fd,&event)==0);
+    pid_t child=fork();SCHECK(child>=0);if(!child)_exit(23);
+    int ready;do {ready=epoll_wait(poll_fd,&event,1,2000);}while(ready<0 && errno==EINTR);
+    SCHECK(ready==1 && event.data.u64==17 && (event.events&EPOLLIN));
+    struct signalfd_siginfo child_info;
+    SCHECK(read(signal_fd,&child_info,sizeof(child_info))==sizeof(child_info) && child_info.ssi_signo==SIGCHLD);
+    int child_status;SCHECK(waitpid(child,&child_status,0)==child && WIFEXITED(child_status) && WEXITSTATUS(child_status)==23);
+    SCHECK(read(signal_fd,&child_info,sizeof(child_info))==-1 && errno==EAGAIN);
+    SCHECK(close(signal_fd)==0 && close(poll_fd)==0);
+    printf("SCARLET_CHILD_EXIT_SIGNALFD_OK epoll waitpid\n");
     SCHECK(pthread_sigmask(SIG_SETMASK, &original, NULL) == 0);
 #undef SCHECK
     return 0;

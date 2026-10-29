@@ -828,6 +828,8 @@ pub struct Task {
     pub text_size: AtomicUsize,
     /// Exit status (i32::MIN represents None)
     pub exit_status: AtomicI32,
+    pub(crate) parent_exit_event: AtomicBool,
+    pub(crate) exit_event_parent: AtomicUsize,
     /// Actual terminating signal, separate from a normal exit(128 + signal).
     termination_signal: AtomicUsize,
     /// Published before an exit snapshots `children`.
@@ -1127,6 +1129,8 @@ impl Task {
             data_size: vm_manager.data_size_handle(),
             text_size: AtomicUsize::new(0),
             exit_status: AtomicI32::new(i32::MIN),
+            parent_exit_event: AtomicBool::new(true),
+            exit_event_parent: AtomicUsize::new(0),
             termination_signal: AtomicUsize::new(0),
             exiting: AtomicBool::new(false),
             process_control_stopped: AtomicBool::new(false),
