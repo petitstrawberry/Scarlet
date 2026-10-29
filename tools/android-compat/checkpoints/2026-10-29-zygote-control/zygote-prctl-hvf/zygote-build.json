@@ -1,0 +1,18 @@
+{
+  "kind": "stock-zygote-control-v1",
+  "command": [
+    "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+    "-O2",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-I",
+    "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/zygote-control-v2-build",
+    "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/zygote-probe.c",
+    "-o",
+    "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/zygote-control-v2-build/zygote-probe"
+  ],
+  "source_sha256": "44b99c211cf74697c4d5a843cfdcc43770ddcd8c4b58f3ceb1c182deb96153a5",
+  "framework_sha256": "d21bd0339a88490ee3db6aecac09ee4d0b740736d12abe3c5e3e2e80cb7d2c40",
+  "program_sha256": "2675c1c488ab62a8e916938cfa2adb6e8edd7b1ddbf37295bdc713d14465fa70"
+}

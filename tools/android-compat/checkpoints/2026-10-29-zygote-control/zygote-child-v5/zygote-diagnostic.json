@@ -1,0 +1,17 @@
+{
+  "original_properties_sha256": "62e21526dc835051bbef179a671219c47731157835fb6ffaf442a92007543ab6",
+  "staged_properties_sha256": "2c6f0edc7240509b8a240200af9813f619b602b48562777f43b034d76e229b43",
+  "fixture_overrides": {
+    "dalvik.vm.usejit": {
+      "original": "true",
+      "value": "false"
+    }
+  },
+  "diagnostic_preload_sha256": "d84be5d7e369665596e68f7edce762173d96668819c038e2239463af4bce385c",
+  "framework_manifest_sha256": "d21bd0339a88490ee3db6aecac09ee4d0b740736d12abe3c5e3e2e80cb7d2c40",
+  "bootstrap_sources": {
+    "zygote-child-probe.c": "bd7fcc20ff05039b82c403e4d36d1ee0f39b979372ec46bba190fa0291ff01b2",
+    "zygote-child-config.h": "e02951f5e1b839fef8ff5ecce57ff880e3e7d2a749907bfbbb353b7fe31a1e32",
+    "diagnose-zygote-child.py": "8e3fbca22cba859ed8f96e69d565fc5b52ddc6f0bc57852eccd67605c87ce3b2"
+  }
+}
