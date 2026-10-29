@@ -16,6 +16,7 @@ def main():
     parser.add_argument("--ndk", type=Path, required=True)
     parser.add_argument("--runtime-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--servicemanager", action="store_true", help="build the stock servicemanager integration client")
     args = parser.parse_args()
     runtime, output = args.runtime_root.resolve(), args.output.resolve()
     verify_art_runtime(runtime)
@@ -28,7 +29,8 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     manifest = output / "build.json"
     manifest.write_text('{"result":"PREPARING"}\n')
-    source, headers = output / "libbinder-probe.cpp", output / "libbinder-headers.json"
+    stem = "service-probe" if args.servicemanager else "libbinder-probe"
+    source, headers = output / (stem + ".cpp"), output / "libbinder-headers.json"
     shutil.copyfile(SOURCE / source.name, source)
     shutil.copyfile(SOURCE / headers.name, headers)
     pins = prepare_headers(output / "headers", json.loads(headers.read_text()))
@@ -39,7 +41,7 @@ def main():
                "-D_LIBCPP_ABI_NAMESPACE=__1", "-nostdlib++"]
     for name in sorted(pins["archives"]):
         command += ["-isystem", str(output / "headers" / name)]
-    binary = output / "libbinder-probe"
+    binary = output / stem
     command += [str(source)]
     command += [str(runtime / name) for name in LIBRARIES]
     command += ["-o", str(binary)]
@@ -51,7 +53,7 @@ def main():
     if libraries != {name: sha256(runtime / name) for name in LIBRARIES} or \
             runtime_identity != sha256(runtime / "art-runtime.json"):
         raise ValueError("runtime changed during compilation")
-    metadata = {"result": "BUILT", "kind": "stock-libbinder-probe-v1", "api": 33,
+    metadata = {"result": "BUILT", "kind": "stock-service-probe-v1" if args.servicemanager else "stock-libbinder-probe-v1", "api": 33,
                 "ndk": (args.ndk / "source.properties").read_text(), "command": command,
                 "headers": pins, "headers_manifest_sha256": sha256(headers),
                 "source_sha256": sha256(source),

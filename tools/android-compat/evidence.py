@@ -13,6 +13,37 @@ MAX_PNG = 16 * 1024 * 1024
 MAX_PIXELS = 16 * 1024 * 1024
 
 
+def analyze_services(data):
+    lines = data.replace(b"\r", b"").decode("utf-8", errors="replace").splitlines()
+    records = [line for line in lines if line.startswith("SCARLET_SERVICES_")]
+    expected = ["CONFIGURED", "REGISTERED", "LOOKUP_CALL_LIST_OK", "DENIED_ADD_FIND_LIST",
+                "OWNER_EXITING", "OWNER_DEATH_OK", "EXIT owner 0", "EXIT client 0", "EXIT denied 0", "OK"]
+    required = ["SCARLET_SERVICES_" + item for item in expected]
+    valid = all(records.count(item) == 1 for item in required)
+    pids = []
+    for mode in ("manager", "owner", "client", "denied"):
+        matches = [re.fullmatch("SCARLET_SERVICES_SPAWN " + mode + r" ([1-9][0-9]*)", r) for r in records]
+        pids += [m.group(1) for m in matches if m]
+        valid &= sum(bool(m) for m in matches) == 1
+    valid &= len(set(pids)) == 4
+    for mode in ("owner", "client", "denied"):
+        valid &= records.count("SCARLET_SERVICES_PEER " + mode) == 1
+    stopped = [r for r in records if re.fullmatch(r"SCARLET_SERVICES_EXIT manager (-9|137)", r)]
+    valid &= len(stopped) == 1 and len(records) == len(required) + 8
+    valid &= not any("_FAIL" in line for line in lines)
+    stock = [line for line in lines if line.startswith(("SCARLET_ANDROID_STOCK_", "SCARLET_PROPERTY_"))]
+    stock = ["SCARLET_PROPERTY_SNAPSHOT_OK" if re.fullmatch(r"SCARLET_PROPERTY_SNAPSHOT_OK [1-9][0-9]*", line) else line for line in stock]
+    valid &= stock == ["SCARLET_ANDROID_STOCK_START properties", "SCARLET_PROPERTY_SNAPSHOT_OK",
+                       "SCARLET_ANDROID_STOCK_EXIT properties 0", "SCARLET_ANDROID_STOCK_START linkerconfig",
+                       "SCARLET_ANDROID_STOCK_EXIT linkerconfig 0", "SCARLET_ANDROID_STOCK_OK"]
+    if valid:
+        position = lambda event: lines.index("SCARLET_SERVICES_" + event)
+        valid &= position("CONFIGURED") < lines.index("SCARLET_ANDROID_STOCK_OK") < position("REGISTERED") < position("LOOKUP_CALL_LIST_OK") < position("OWNER_EXITING") < position("OWNER_DEATH_OK") < position("EXIT client 0") < position("OK")
+        valid &= position("REGISTERED") < position("DENIED_ADD_FIND_LIST") < position("OWNER_EXITING")
+        valid &= all(position("EXIT " + mode + " 0") < lines.index(stopped[0]) < position("OK") for mode in ("owner", "client", "denied"))
+    return {"result": "PASS" if valid else "INCOMPLETE", "records": records}
+
+
 def analyze_selinux(data):
     expected = ["SCARLET_SHIELD_CONFIGURED",
                 "SCARLET_ANDROID_STOCK_START properties", "SCARLET_PROPERTY_SNAPSHOT_OK",

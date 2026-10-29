@@ -16,10 +16,11 @@ import shutil
 import subprocess
 import sys
 
-from evidence import analyze_art, analyze_direct, analyze_libbinder, analyze_selinux
+from evidence import analyze_art, analyze_direct, analyze_libbinder, analyze_selinux, analyze_services
 from art_inputs import art_launch, validate_dex, verify_art_runtime, sha256
 from libbinder_inputs import verify_libbinder_build
 from selinux_inputs import verify_selinux_build
+from service_inputs import verify_service_inputs, stage_service_inputs, CONTEXTS
 from stock_art import stage_stock_inputs, verify_stock_inputs
 
 sys.dont_write_bytecode = True
@@ -40,6 +41,8 @@ def main():
     mode.add_argument("--program", type=Path, help="diagnose this Android executable (exit is not a service-readiness test)")
     mode.add_argument("--libbinder-probe", type=Path, help="build directory from build-libbinder-probe.py; verify stock-library RPC and lifetime")
     mode.add_argument("--selinux-probe", type=Path, help="build directory from build-selinux-probe.py; verify Shield allow/deny through stock libselinux")
+    mode.add_argument("--service-probe", type=Path, help="stock servicemanager integration probe build")
+    parser.add_argument("--service-inputs", type=Path, help="verified stock servicemanager from prepare-servicemanager.py")
     parser.add_argument("--runtime-root", type=Path, help="Android /system and /apex runtime tree")
     parser.add_argument("--linker-debug", action="store_true", help="enable Android LD_DEBUG=3 for ART diagnosis")
     parser.add_argument("--stock-inputs", type=Path, help="verified stock property/APEX overlay for ART or a program")
@@ -48,6 +51,13 @@ def main():
     parser.add_argument("--accel", choices=("tcg", "hvf"), default="tcg")
     parser.add_argument("--binder", action="store_true", help="include Binder RPC and three-process object lifetime checks")
     args = parser.parse_args()
+    if args.service_probe:
+        if not args.runtime_root or not args.stock_inputs or not args.service_inputs:
+            parser.error("--service-probe requires --runtime-root, --stock-inputs and --service-inputs")
+        args.program = verify_libbinder_build(args.service_probe, args.runtime_root, service=True)
+        verify_service_inputs(args.service_inputs, args.runtime_root)
+    elif args.service_inputs:
+        parser.error("--service-inputs requires --service-probe")
     if args.selinux_probe:
         if not args.runtime_root or not args.stock_inputs:
             parser.error("--selinux-probe requires --runtime-root and --stock-inputs")
@@ -114,6 +124,10 @@ def main():
         "dex_sha256": dex_hash,
         "program_sha256": sha256(args.program) if args.program else None,
         "libbinder_build_sha256": sha256(args.libbinder_probe / "build.json") if args.libbinder_probe else None,
+        "service_build_sha256": sha256(args.service_probe / "build.json") if args.service_probe else None,
+        "service_manifest_sha256": sha256(args.service_inputs / "service-inputs.json") if args.service_probe else None,
+        "service_fixture_sha256": sha256(SOURCE / "init/src/services.rs") if args.service_probe else None,
+        "service_contexts_sha256": hashlib.sha256(CONTEXTS.encode()).hexdigest() if args.service_probe else None,
         "selinux_build_sha256": sha256(args.selinux_probe / "build.json") if args.selinux_probe else None,
         "shield_fixture_sha256": sha256(SOURCE / "init/src/shield.rs") if args.selinux_probe else None,
         "stock_reference_config_sha256": sha256(STOCK_CONFIG) if args.stock_inputs else None,
@@ -121,6 +135,9 @@ def main():
         "runtime_sha256": {str(p.relative_to(args.runtime_root)): hashlib.sha256(p.read_bytes()).hexdigest()
                            for p in runtime_files},
     }, indent=2) + "\n")
+    if args.service_probe:
+        shutil.copy2(args.service_probe / "build.json", output / "service-build.json")
+        shutil.copy2(args.service_inputs / "service-inputs.json", output / "service-inputs.json")
     if args.libbinder_probe:
         shutil.copy2(args.libbinder_probe / "build.json", output / "libbinder-build.json")
     if args.selinux_probe:
@@ -134,7 +151,7 @@ def main():
             (tree / name).mkdir(parents=True, exist_ok=True)
     for name in ["bin", "lib", "system/bin", "dev", "proc", "sys", "tmp", "root"]:
         (android / name).mkdir(parents=True, exist_ok=True)
-    if args.selinux_probe:
+    if args.selinux_probe or args.service_probe:
         (android / "sys/fs/selinux").mkdir(parents=True, exist_ok=True)
     if args.runtime_root:
         shutil.copytree(args.runtime_root, android, dirs_exist_ok=True, symlinks=True)
@@ -148,6 +165,8 @@ def main():
         if args.stock_inputs:
             stage_stock_inputs(args.stock_inputs, args.runtime_root, android)
             shutil.copy2(args.stock_inputs / "stock-inputs.json", output / "stock-inputs.json")
+        if args.service_probe:
+            stage_service_inputs(args.service_inputs, args.runtime_root, android)
         if args.program:
             target = android / art["argv"][0].lstrip("/")
             if target.exists() or target.is_symlink():
@@ -167,6 +186,7 @@ def main():
     env = dict(os.environ, SCARLET_ANDROID_DYNAMIC="1" if args.runtime_root else "0",
                SCARLET_ANDROID_BINDER="1" if args.binder else "0",
                SCARLET_ANDROID_STOCK="1" if args.stock_inputs else "0",
+               SCARLET_ANDROID_SERVICES="1" if args.service_probe else "0",
                SCARLET_ANDROID_SHIELD="1" if args.selinux_probe else "0",
                SCARLET_ANDROID_ART="1" if art else "0",
                SCARLET_ANDROID_PROGRAM="1" if args.program else "0",
@@ -213,11 +233,20 @@ def main():
                "-device", "virtio-rng-device,bus=virtio-mmio-bus.2", "-nic", "none"]
     (output / "commands.json").write_text(json.dumps({"image": build, "qemu": command}, indent=2) + "\n")
     prefix = b"SCARLET_ANDROID_PROGRAM" if args.program else (b"SCARLET_ANDROID_ART" if art else b"SCARLET_ANDROID_DIRECT")
-    smoke.SUCCESS = re.compile(rb"\n" + prefix + (rb"_DONE\r*\n" if args.program else rb"_OK\r*\n"))
+    if args.service_probe:
+        prefix = b"SCARLET_SERVICES"
+    smoke.SUCCESS = re.compile(rb"\n" + prefix + (rb"_DONE\r*\n" if args.program and not args.service_probe else rb"_OK\r*\n"))
     smoke.FAILURE = re.compile(rb"\n" + prefix + rb"_FAIL:")
     result = smoke.run_guest(command, output, args.timeout)
     result["dynamic_runtime"] = bool(args.runtime_root)
     data = (output / "serial.log").read_bytes()
+    if args.service_probe:
+        result["services"] = analyze_services(data)
+        if result["result"] == "PASS" and result["services"]["result"] != "PASS":
+            result["result"] = "missing or failed service integration evidence"
+        (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+        print(f"Stock servicemanager integration: {result['result']}")
+        return 0 if result["result"] == "PASS" else 1
     if args.program:
         # A daemon exiting (even with status zero), or merely surviving until
         # timeout, never proves that its service interface is usable.

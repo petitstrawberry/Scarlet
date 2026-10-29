@@ -4,7 +4,9 @@ use std::{
     println,
 };
 
-pub fn environment(native: VfsView) -> Result<Environment, &'static str> {
+pub fn environment(
+    native: VfsView,
+) -> Result<(Environment, Option<std::shield::Policy>), &'static str> {
     let android = native
         .rooted_at("/systems/android-aarch64")
         .map_err(|_| "stock Android view")?;
@@ -37,13 +39,18 @@ pub fn environment(native: VfsView) -> Result<Environment, &'static str> {
     if option_env!("SCARLET_ANDROID_SHIELD") == Some("1") {
         super::shield::configure(&android)?;
     }
+    let policy = if option_env!("SCARLET_ANDROID_SERVICES") == Some("1") {
+        Some(super::services::configure(&android)?)
+    } else {
+        None
+    };
     let env = Environment::create().map_err(|_| "stock Environment")?;
     env.set_root("scarlet", &native)
         .map_err(|_| "native view")?;
     env.set_root("android-aarch64", &android)
         .map_err(|_| "Android view")?;
     env.seal().map_err(|_| "seal stock Environment")?;
-    Ok(env)
+    Ok((env, policy))
 }
 
 fn run(

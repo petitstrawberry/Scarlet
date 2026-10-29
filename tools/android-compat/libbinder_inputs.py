@@ -57,20 +57,22 @@ def prepare_headers(output, pins):
     return pins
 
 
-def verify_libbinder_build(directory, runtime):
+def verify_libbinder_build(directory, runtime, *, service=False):
+    stem = "service-probe" if service else "libbinder-probe"
+    kind = "stock-service-probe-v1" if service else "stock-libbinder-probe-v1"
     metadata = json.loads((directory / "build.json").read_text())
     verify_art_runtime(runtime)
-    if metadata.get("result") != "BUILT" or metadata.get("kind") != "stock-libbinder-probe-v1":
+    if metadata.get("result") != "BUILT" or metadata.get("kind") != kind:
         raise ValueError("not a completed libbinder probe build")
     if metadata.get("runtime_manifest_sha256") != sha256(runtime / "art-runtime.json"):
         raise ValueError("libbinder build/runtime manifest mismatch")
     expected = {name: sha256(runtime / name) for name in LIBRARIES}
     if metadata.get("runtime_libraries") != expected:
         raise ValueError("libbinder runtime libraries changed since linking")
-    if metadata.get("source_sha256") != sha256(SOURCE / "libbinder-probe.cpp") or \
+    if metadata.get("source_sha256") != sha256(SOURCE / (stem + ".cpp")) or \
             metadata.get("headers_manifest_sha256") != sha256(SOURCE / "libbinder-headers.json"):
         raise ValueError("libbinder probe source or header pins changed; rebuild")
-    binary = directory / "libbinder-probe"
+    binary = directory / stem
     if metadata.get("binary_sha256") != sha256(binary):
         raise ValueError("libbinder probe binary changed since build")
     needed = metadata.get("needed", [])

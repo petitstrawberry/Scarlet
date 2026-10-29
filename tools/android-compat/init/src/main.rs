@@ -4,17 +4,18 @@
 extern crate scarlet_std as std;
 #[path = "../../../../user/bin/src/bootstrap.rs"]
 mod bootstrap;
-mod stock;
+mod services;
 mod shield;
+mod stock;
 
 use std::{environment::HandleMapping, println};
 
 fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
     let backing = bootstrap::backing("root=/dev/vblk1", true)?;
-    let environment = if option_env!("SCARLET_ANDROID_STOCK") == Some("1") {
+    let (environment, policy) = if option_env!("SCARLET_ANDROID_STOCK") == Some("1") {
         stock::environment(backing)?
     } else {
-        bootstrap::environment(backing)?.0
+        (bootstrap::environment(backing)?.0, None)
     };
     let android = environment
         .root("android-aarch64")
@@ -33,6 +34,10 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
             target: 2,
         },
     ];
+    if let Some(policy) = policy {
+        stock::prepare(&environment, &android, &handles)?;
+        return services::run(&environment, &android, &handles, policy);
+    }
     if option_env!("SCARLET_ANDROID_ART") == Some("1") {
         // Keep startup faults visible even when ART never reaches Java or exit.
         // The host runner owns the timeout and the private QEMU process.
