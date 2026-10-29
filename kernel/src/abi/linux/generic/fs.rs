@@ -407,6 +407,7 @@ impl LinuxStatFs {
 
         let filesystem_type = match name {
             "ext2" => 0xef53,
+            "cgroup2" => 0x6367_7270,
             "fat32" => 0x4d44,
             "tmpfs_v2" | "devfs" => 0x0102_1994,
             "devpts" => 0x1cd1,
@@ -714,6 +715,10 @@ pub(super) fn proc_exe_linux_stat(inode: u64, target_size: usize) -> LinuxStat {
     }
 }
 
+fn apply_node_owner(stat: &mut LinuxStat, node: &dyn crate::fs::vfs_v2::core::VfsNode) {
+    if let Some(owner) = node.owner_identity() { stat.st_uid = owner.principal.0; stat.st_gid = owner.group.0; }
+}
+
 /// Descriptor metadata must also describe anonymous pipes, which expose
 /// StreamOps but intentionally do not implement FileObject.
 fn stat_from_object(
@@ -747,6 +752,7 @@ fn stat_from_object(
                 .metadata()
                 .map_err(|error| errno::from_fs_error(&error))?;
             let mut stat = LinuxStat::from_metadata(&metadata);
+            apply_node_owner(&mut stat,node.as_ref());
             if let Some(mode) = super::mode::get(&node) {
                 stat.st_mode = (stat.st_mode & !0o7777) | mode;
             }
@@ -1097,6 +1103,7 @@ pub fn sys_mount(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             Ok(value) => value, Err(_) => return errno::to_result(errno::EFAULT),
         }
     };
+    if fstype == "cgroup2" { return super::cgroup::mount(&task,&path,flags,&options).map_or_else(errno::to_result, |_| 0); }
     mount_tmpfs(&task, &path, &fstype, flags, &options).map_or_else(errno::to_result, |_| 0)
 }
 
@@ -2542,6 +2549,7 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Err(error) => return errno::to_result(errno::from_fs_error(&error)),
     };
     let mut statistics = LinuxStat::from_metadata(&metadata);
+    apply_node_owner(&mut statistics,node.as_ref());
     if let Some(mode) = super::mode::get(&node) {
         statistics.st_mode = (statistics.st_mode & !0o7777) | mode;
     }
@@ -2705,6 +2713,7 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     let mut stat = LinuxStat::from_metadata(&metadata);
+    apply_node_owner(&mut stat,node.as_ref());
     if let Some(mode) = super::mode::get(&node) {
         stat.st_mode = (stat.st_mode & !0o7777) | mode;
     }
@@ -3996,91 +4005,51 @@ pub fn sys_fsync(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 }
 
-/// Ownership is currently fixed to root in the Linux view. Accept a root
-/// caller's fchown on an existing file so applications can prepare cache files.
+fn set_node_owner(node: &dyn crate::fs::vfs_v2::core::VfsNode, owner: usize, group: usize) -> Result<(), usize> {
+    use crate::shield::identity::{Principal,Group};
+    if node.owner_identity().is_some() {
+        node.set_owner_identity((owner as u32 != u32::MAX).then_some(Principal(owner as u32)),
+            (group as u32 != u32::MAX).then_some(Group(group as u32))).map_err(|error| errno::from_fs_error(&error))
+    } else { fixed_root_ownership(owner,group) }
+}
+/// Backends without native ownership storage retain their root-only view.
 fn fixed_root_ownership(owner: usize, group: usize) -> Result<(), usize> {
-    if [owner as u32, group as u32]
-        .iter()
-        .all(|id| *id == 0 || *id == u32::MAX)
-    {
-        Ok(())
-    } else {
-        Err(errno::EOPNOTSUPP)
-    }
+    if [owner as u32,group as u32].iter().all(|id| *id == 0 || *id == u32::MAX) { Ok(()) } else { Err(errno::EOPNOTSUPP) }
 }
-
-/// Validate a root-only ownership request, including dirfd and no-follow paths.
-pub fn sys_fchownat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let Some(task) = mytask() else {
-        return errno::to_result(errno::EIO);
-    };
-    trapframe.increment_pc_next(&task);
-    const AT_SYMLINK_NOFOLLOW: usize = 0x100;
-    const AT_EMPTY_PATH: usize = 0x1000;
-    let dirfd = trapframe.get_arg(0) as i32;
-    let flags = trapframe.get_arg(4);
-    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
-        return errno::to_result(errno::EINVAL);
-    }
-    let path = match parse_c_string_from_userspace(&task, trapframe.get_arg(1), MAX_PATH_LENGTH) {
-        Ok(path) => path,
-        Err(_) => return errno::to_result(errno::EFAULT),
-    };
-    let Some(vfs) = task.get_vfs() else {
-        return errno::to_result(errno::EIO);
-    };
-    if path.is_empty() && flags & AT_EMPTY_PATH != 0 && dirfd != -100 {
-        let Some(object) = abi
-            .get_handle(dirfd as usize)
-            .and_then(|handle| task.handle_table.get(handle))
-        else {
-            return errno::to_result(errno::EBADF);
-        };
-        if object.as_file().is_none() {
-            return errno::to_result(errno::EINVAL);
-        }
-    } else {
-        let path = if path.is_empty() && flags & AT_EMPTY_PATH != 0 {
-            vfs.get_cwd_path()
-        } else {
-            match path_at_to_absolute(abi, &task, &vfs, dirfd, &path) {
-                Ok(path) => path,
-                Err(error) => return errno::to_result(error),
-            }
-        };
-        let options = if flags & AT_SYMLINK_NOFOLLOW != 0 {
-            crate::fs::vfs_v2::PathResolutionOptions::no_follow()
-        } else {
-            crate::fs::vfs_v2::PathResolutionOptions::default()
-        };
-        if let Err(error) = vfs.resolve_path_with_options(&path, &options) {
-            return errno::to_result(errno::from_fs_error(&error));
-        }
-    }
-    fixed_root_ownership(trapframe.get_arg(2), trapframe.get_arg(3))
-        .map(|_| 0)
-        .unwrap_or_else(errno::to_result)
+fn owner_node_from_fd(task: &crate::task::Task, abi: &LinuxAbi, fd: usize) -> Result<Option<alloc::sync::Arc<dyn crate::fs::vfs_v2::core::VfsNode>>,usize> {
+    let object = abi.get_handle(fd).and_then(|handle| task.handle_table.get(handle)).ok_or(errno::EBADF)?;
+    let file = object.as_file().ok_or(errno::EINVAL)?;
+    Ok(file.as_any().downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>().map(|file| file.get_vfs_entry().node()))
 }
-
-pub fn sys_fchown(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let Some(task) = mytask() else {
-        return errno::to_result(errno::EIO);
-    };
-    let fd = trapframe.get_arg(0);
-    trapframe.increment_pc_next(&task);
-    let Some(handle) = abi.get_handle(fd) else {
-        return errno::to_result(errno::EBADF);
-    };
-    if !task
-        .handle_table
-        .get(handle)
-        .is_some_and(|object| object.as_file().is_some())
-    {
-        return errno::to_result(errno::EBADF);
-    }
-    fixed_root_ownership(trapframe.get_arg(1), trapframe.get_arg(2))
-        .map(|_| 0)
-        .unwrap_or_else(errno::to_result)
+pub fn sys_fchownat(abi: &mut LinuxAbi, tf: &mut Trapframe) -> usize {
+    let Some(task) = mytask() else { return errno::to_result(errno::EIO); };
+    let [dirfd, address, owner, group, flags] = [tf.get_arg(0),tf.get_arg(1),tf.get_arg(2),tf.get_arg(3),tf.get_arg(4)];
+    tf.increment_pc_next(&task);
+    (|| {
+        if flags & !(0x100 | 0x1000) != 0 { return Err(errno::EINVAL); }
+        let path = parse_c_string_from_userspace(&task,address,MAX_PATH_LENGTH).map_err(|_| errno::EFAULT)?;
+        let vfs = task.get_vfs().ok_or(errno::EIO)?;
+        let node = if path.is_empty() && flags & 0x1000 != 0 && dirfd as i32 != -100 {
+            owner_node_from_fd(&task,abi,dirfd)?.ok_or(errno::EOPNOTSUPP)?
+        } else {
+            let path = if path.is_empty() && flags & 0x1000 != 0 { vfs.get_cwd_path() }
+                else { path_at_to_absolute(abi,&task,&vfs,dirfd as i32,&path)? };
+            vfs.resolve_path_with_options(&path,&crate::fs::vfs_v2::PathResolutionOptions {no_follow: flags & 0x100 != 0})
+                .map_err(|error| errno::from_fs_error(&error))?.0.node()
+        };
+        set_node_owner(node.as_ref(),owner,group).map(|_| 0)
+    })().unwrap_or_else(errno::to_result)
+}
+pub fn sys_fchown(abi: &mut LinuxAbi, tf: &mut Trapframe) -> usize {
+    let Some(task) = mytask() else { return errno::to_result(errno::EIO); };
+    let fd = tf.get_arg(0); let owner = tf.get_arg(1); let group = tf.get_arg(2);
+    tf.increment_pc_next(&task);
+    (|| {
+        match owner_node_from_fd(&task,abi,fd)? {
+            Some(node) => set_node_owner(node.as_ref(),owner,group),
+            None => fixed_root_ownership(owner,group),
+        }.map(|_| 0)
+    })().unwrap_or_else(errno::to_result)
 }
 
 /// fadvise64 is advisory; validate its arguments and preserve the file.
@@ -6000,6 +5969,7 @@ fn proc_exe_stat(
         .metadata()
         .map_err(|error| errno::from_fs_error(&error))?;
     let mut stat = LinuxStat::from_metadata(&metadata);
+    apply_node_owner(&mut stat,node.as_ref());
     if let Some(mode) = super::mode::get(&node) {
         stat.st_mode = (stat.st_mode & !0o7777) | mode;
     }

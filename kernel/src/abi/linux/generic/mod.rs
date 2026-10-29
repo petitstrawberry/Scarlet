@@ -1,4 +1,5 @@
 pub mod credentials;
+pub mod cgroup;
 pub mod seccomp;
 #[macro_use]
 mod macros;

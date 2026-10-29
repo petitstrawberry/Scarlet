@@ -693,6 +693,7 @@ pub struct TmpNode {
     content: IrqRwSpinLock<Vec<u8>>,
     /// Attributes follow the inode, including open-but-unlinked files.
     xattrs: IrqRwSpinLock<BTreeMap<Vec<u8>, Vec<u8>>>,
+    owner: IrqRwSpinLock<crate::shield::identity::ActiveIdentity>,
     /// Child nodes (for directories)
     children: IrqRwSpinLock<BTreeMap<String, Arc<dyn VfsNode>>>,
     /// Parent node (weak reference to avoid cycles)
@@ -774,6 +775,7 @@ impl TmpNode {
             data_lock: Mutex::new(()),
             content: IrqRwSpinLock::new(Vec::new()),
             xattrs: IrqRwSpinLock::new(BTreeMap::new()),
+            owner: IrqRwSpinLock::new(initial_owner()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
@@ -804,6 +806,7 @@ impl TmpNode {
             data_lock: Mutex::new(()),
             content: IrqRwSpinLock::new(Vec::new()),
             xattrs: IrqRwSpinLock::new(BTreeMap::new()),
+            owner: IrqRwSpinLock::new(initial_owner()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
@@ -834,6 +837,7 @@ impl TmpNode {
             data_lock: Mutex::new(()),
             content: IrqRwSpinLock::new(Vec::new()),
             xattrs: IrqRwSpinLock::new(BTreeMap::new()),
+            owner: IrqRwSpinLock::new(initial_owner()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
@@ -865,6 +869,7 @@ impl TmpNode {
             // Store symlink target in content as UTF-8 bytes
             content: IrqRwSpinLock::new(target.into_bytes()),
             xattrs: IrqRwSpinLock::new(BTreeMap::new()),
+            owner: IrqRwSpinLock::new(initial_owner()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
             parent: IrqRwSpinLock::new(None), // No parent initially
             filesystem: IrqRwSpinLock::new(None),
@@ -932,7 +937,31 @@ impl TmpNode {
     }
 }
 
+fn initial_owner() -> crate::shield::identity::ActiveIdentity {
+    crate::task::mytask().map(|task| task.credentials.read().identity()).unwrap_or(crate::shield::identity::ActiveIdentity {
+        principal:crate::shield::identity::Principal(0),group:crate::shield::identity::Group(0),
+    })
+}
+
 impl VfsNode for TmpNode {
+    fn owner_identity(&self) -> Option<crate::shield::identity::ActiveIdentity> { Some(*self.owner.read()) }
+    fn set_owner_identity(&self, principal:Option<crate::shield::identity::Principal>, group:Option<crate::shield::identity::Group>) -> Result<(),FileSystemError> {
+        use crate::shield::identity::MANAGE_OWNERS;
+        let task = crate::task::mytask().ok_or_else(|| FileSystemError::new(FileSystemErrorKind::PermissionDenied,"Owner authority required"))?;
+        let credentials = task.credentials.read();
+        let mut current = self.owner.write();
+        if !credentials.permits(MANAGE_OWNERS) {
+            let ids = credentials.groups();
+            if credentials.identity().principal != current.principal || principal.is_some_and(|next| next != current.principal)
+                || group.is_some_and(|next| !ids.contains(next) && !credentials.supplementary().contains(&next)) {
+                return Err(FileSystemError::new(FileSystemErrorKind::PermissionDenied,"Owner authority required"));
+            }
+        }
+        if let Some(principal) = principal { current.principal = principal; }
+        if let Some(group) = group { current.group = group; }
+        Ok(())
+    }
+
     fn get_xattr(&self, name: &[u8]) -> Result<Vec<u8>, XattrError> {
         xattr::validate_name(name)?;
         self.xattrs

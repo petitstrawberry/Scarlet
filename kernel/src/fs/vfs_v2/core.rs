@@ -209,6 +209,13 @@ pub trait VfsNode: Send + Sync + Any {
     /// Get metadata for this node
     fn metadata(&self) -> Result<FileMetadata, FileSystemError>;
 
+    /// Optional native ownership metadata. Backends that expose delegation may
+    /// store it and enforce changes; unsupported backends retain their current model.
+    fn owner_identity(&self) -> Option<crate::shield::identity::ActiveIdentity> { None }
+    fn set_owner_identity(&self, _principal: Option<crate::shield::identity::Principal>, _group: Option<crate::shield::identity::Group>) -> Result<(), FileSystemError> {
+        Err(FileSystemError::new(FileSystemErrorKind::NotSupported,"Owner metadata unsupported"))
+    }
+
     /// Update only selected timestamps. Unsupported filesystems must fail.
     fn set_times(&self, _times: crate::fs::FileTimeUpdate) -> Result<(), FileSystemError> {
         Err(FileSystemError::new(
