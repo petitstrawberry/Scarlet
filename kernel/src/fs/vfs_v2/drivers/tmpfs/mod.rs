@@ -2034,7 +2034,16 @@ impl FileSystemDriver for TmpFSDriver {
         options: &str,
     ) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
         // Parse tmpfs options (e.g., "size=64M")
-        let memory_limit = parse_tmpfs_size_option(options).unwrap_or(64 * 1024 * 1024); // Default 64MB
+        let mut memory_limit = 64 * 1024 * 1024;
+        for option in options.split(',').filter(|part| !part.is_empty()) {
+            memory_limit = if option.starts_with("size=") {
+                parse_tmpfs_size_option(option)
+            } else if let Some(value) = option.strip_prefix("mem=") {
+                value.parse::<usize>().ok()
+            } else { None }.ok_or_else(|| FileSystemError::new(
+                FileSystemErrorKind::InvalidOperation, "Invalid or unsupported tmpfs option"))?;
+            if memory_limit == 0 { return Err(FileSystemError::new(FileSystemErrorKind::InvalidOperation, "Empty tmpfs size")); }
+        }
         Ok(TmpFS::new(memory_limit))
     }
 
@@ -2067,7 +2076,7 @@ fn parse_tmpfs_size_option(options: &str) -> Option<usize> {
             };
 
             if let Ok(number) = number_part.parse::<usize>() {
-                return Some(number * multiplier);
+                return number.checked_mul(multiplier);
             }
         }
     }

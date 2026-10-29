@@ -71,6 +71,9 @@ pub trait MemoryMappingOps: Send + Sync {
     /// buffers can opt out; threads sharing the address space keep the mapping.
     fn inherit_on_fork(&self) -> bool { true }
 
+    /// Permanent permission ceiling, including subsequent protection changes.
+    fn maximum_mapping_permissions(&self) -> usize { usize::MAX }
+
     /// Get mapping information for a region of the object
     ///
     /// Returns the physical address, permissions, sharing information, and

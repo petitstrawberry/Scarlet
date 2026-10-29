@@ -176,6 +176,7 @@ impl TransparentExecutor {
             error,
         })?;
         if let Some(file_obj) = file.as_file() {
+            if !file_obj.allows_execution() { return Err(failure("execution disabled on mount")); }
             let mut header = [0u8; 256];
             if let Ok(n) = file_obj.read_at(0, &mut header) {
                 if n >= 2 && &header[..2] == b"#!" {
@@ -367,6 +368,9 @@ impl TransparentExecutor {
         task: &Task,
         trapframe: &mut Trapframe,
     ) -> ExecutorResult<()> {
+        if file.as_file().is_some_and(|f| !f.allows_execution()) {
+            return Err(failure("execution disabled on mount"));
+        }
         // Replacing a shared address space, shared descriptor table, or a live
         // thread group needs coordinated thread retirement, not partial exec.
         if !task.can_replace_exec_image() {
@@ -451,9 +455,22 @@ impl TransparentExecutor {
             task.with_default_abi(|old| abi.prepare_exec_handles(Some(old), &image))
                 .map_err(failure)?;
         }
+        let no_file_grants = file.as_file().is_some_and(|f| !f.allows_execution_privilege_gain());
+        let inherited_credentials = no_file_grants.then(|| image.credentials.read().clone());
+        let inherited_subject = image.security_subject.read().clone();
         let mut next_trapframe = trapframe.clone();
         abi.execute_binary(file, argv, envp, &image, &mut next_trapframe)
             .map_err(failure)?;
+        if let Some(inherited) = inherited_credentials {
+            let subject_unchanged = match (&inherited_subject, &*image.security_subject.read()) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.same_identity(b),
+                _ => false,
+            };
+            if *image.credentials.read() != inherited || !subject_unchanged {
+                return Err(failure("file-derived privilege changes disabled on mount"));
+            }
+        }
         image.set_executable_path(identity);
 
         // All fallible operations are complete. Locks here only exchange owned

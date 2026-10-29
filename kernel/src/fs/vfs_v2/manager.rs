@@ -14,7 +14,7 @@ use crate::object::KernelObject;
 
 use super::{
     core::{DirectoryEntryInternal, FileSystemOperations, VfsEntry},
-    mount_tree::{MountOptionsV2, MountPoint, MountTree, VfsEntryRef, VfsManagerId, VfsResult},
+    mount_tree::{MountPoint, MountTree, VfsEntryRef, VfsManagerId, VfsResult},
 };
 
 /// Filesystem ID type
@@ -185,6 +185,7 @@ impl VfsManager {
         mount_point_str: &str,
         flags: u32,
     ) -> Result<(), FileSystemError> {
+        let restrictions = super::mount_tree::MountRestrictions::from_bits(flags)?;
         if mount_point_str == "/" {
             // Remove the existing root FS from the list
             let old_root_fs = self
@@ -205,19 +206,21 @@ impl VfsManager {
             let new_root_node = filesystem.root_node();
             let new_root_entry = VfsEntry::new(None, "/".to_string(), new_root_node);
             let new_root_mount =
-                MountPoint::new_regular("/".to_string(), new_root_entry, filesystem.clone());
+                MountPoint::new_regular_restricted("/".to_string(), new_root_entry, filesystem.clone(), restrictions);
             self.mount_tree.replace_root(new_root_mount);
             // Push the new FS
             self.mounted_filesystems.write().push(filesystem.clone());
             return Ok(());
         }
-        let _mount_options = MountOptionsV2 {
-            readonly: (flags & 0x01) != 0,
-            flags,
-        };
         let (target_entry, target_mount_point) = self.resolve_path(mount_point_str)?;
+        if !target_entry.node().is_directory()? {
+            return Err(vfs_error(FileSystemErrorKind::NotADirectory, "Mount target must be a directory"));
+        }
+        if Arc::ptr_eq(&target_entry, &target_mount_point.root) {
+            return Err(vfs_error(FileSystemErrorKind::Busy, "Target already mounted"));
+        }
         self.mount_tree
-            .mount(target_entry, target_mount_point, filesystem.clone())?;
+            .mount(target_entry, target_mount_point, filesystem.clone(), restrictions)?;
         self.mounted_filesystems.write().push(filesystem);
         Ok(())
     }
@@ -379,6 +382,7 @@ impl VfsManager {
             }
             let new = Arc::new(MountPoint {
                 id: super::mount_tree::MountId::new(),
+                restrictions: old.restrictions,
                 mount_type: old.mount_type.clone(),
                 path: IrqRwSpinLock::new(old.path.read().clone()),
                 root: old.root.clone(),
@@ -413,7 +417,7 @@ impl VfsManager {
         source: &Arc<VfsManager>,
         path: &str,
     ) -> Result<Arc<VfsManager>, FileSystemError> {
-        let (entry, _) = source.resolve_path(path)?;
+        let (entry, mount) = source.resolve_path(path)?;
         if entry.node().metadata()?.file_type != FileType::Directory {
             return Err(vfs_error(
                 FileSystemErrorKind::NotADirectory,
@@ -422,7 +426,7 @@ impl VfsManager {
         }
         let new = Arc::new(Self::new());
         new.mount_tree
-            .replace_root(MountPoint::new_bind("/".to_string(), entry));
+            .replace_root(MountPoint::new_bind("/".to_string(), entry, mount.restrictions));
         *new.mounted_filesystems.write() = source.mounted_filesystems.read().clone();
         new.set_cwd_by_path("/")?;
         Ok(new)
@@ -437,7 +441,7 @@ impl VfsManager {
         target_mount_point: Arc<MountPoint>,
     ) -> Result<(), FileSystemError> {
         // Create a new MountPoint for the bind mount
-        let bind_mount = MountPoint::new_bind(target_entry.name(), source_entry);
+        let bind_mount = MountPoint::new_bind(target_entry.name(), source_entry, source_mount_point.restrictions);
         // Set parent/parent_entry
         *bind_mount.parent.write() = Some(Arc::downgrade(&target_mount_point));
         *bind_mount.parent_entry.write() = Some(target_entry.clone());
@@ -464,6 +468,14 @@ impl VfsManager {
             .children
             .write()
             .insert(target_entry.node().id(), bind_mount);
+        Ok(())
+    }
+
+    pub(crate) fn check_device_open(mount: &MountPoint, file_type: &FileType) -> Result<(), FileSystemError> {
+        if !mount.restrictions.allows_devices()
+            && matches!(file_type, FileType::CharDevice(_) | FileType::BlockDevice(_)) {
+            return Err(vfs_error(FileSystemErrorKind::PermissionDenied, "Devices disabled on mount"));
+        }
         Ok(())
     }
 
@@ -501,6 +513,7 @@ impl VfsManager {
         // Use MountTreeV2 to resolve filesystem and relative path, then open
         let (entry, mount_point) = self.resolve_path(path)?;
         let node = entry.node();
+        Self::check_device_open(&mount_point, &node.file_type()?)?;
         let filesystem = node.filesystem().and_then(|w| w.upgrade()).ok_or_else(|| {
             FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference")
         })?;
@@ -561,6 +574,7 @@ impl VfsManager {
         let (entry, mount_point) = self.resolve_open_at(base, path, flags, mode)?;
         let node = entry.node();
         let file_type = node.file_type()?;
+        Self::check_device_open(&mount_point, &file_type)?;
         if flags & O_DIRECTORY != 0 && file_type != FileType::Directory {
             return Err(vfs_error(
                 FileSystemErrorKind::NotADirectory,
@@ -1820,6 +1834,7 @@ impl VfsManager {
         let mut namespace_guard = Some(lock_namespace_mutations()?);
         let (entry, mount_point) = self.resolve_path_from(base_entry, base_mount, path)?;
         let node = entry.node();
+        Self::check_device_open(&mount_point, &node.file_type()?)?;
         let filesystem = node.filesystem().and_then(|w| w.upgrade()).ok_or_else(|| {
             FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference")
         })?;

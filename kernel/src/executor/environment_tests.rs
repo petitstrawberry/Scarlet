@@ -65,6 +65,10 @@ impl AbiModule for TestImageAbi {
         image.text_size.store(4096, Ordering::Relaxed);
         image.vcpu.lock().set_pc(0x40_0000);
         tf.set_pc(0x40_0000);
+        if envp.contains(&"GAIN=1") {
+            image.credentials.write().set_principals(crate::shield::identity::Identities::all(
+                crate::shield::identity::Principal(42))).unwrap();
+        }
         if envp.contains(&"FAIL=1") {
             return Err("deliberate failure after mapping");
         }
@@ -475,4 +479,45 @@ fn assert_execution_sealed(task: &Task) {
     assert_eq!(state.evaluate(&crate::shield::execution::Invocation {
         domain: "test", number: 0, instruction: 0, arguments: [0;6],
     }), Some(crate::shield::execution::Denial::AbortProcess));
+}
+
+#[test_case]
+fn mount_restrictions_gate_exec_scripts_and_file_derived_identity_changes() {
+    use crate::fs::{drivers::tmpfs::TmpFS, vfs_v2::mount_tree::MountRestrictions as R};
+    let (task, fs, _, _) = fixture();
+    fs.create_dir("/restricted").unwrap();
+    fs.mount(TmpFS::new(0), "/restricted", R::NO_EXECUTE).unwrap();
+    fs.create_file("/restricted/script", FileType::RegularFile).unwrap();
+    let file = fs.open("/restricted/script", 2).unwrap();
+    file.as_stream().unwrap().write(b"#!/txn-image\n").unwrap();
+    let mut tf = Trapframe::new();
+    assert!(matches!(TransparentExecutor::execute_binary("/restricted/script", &["script"], &[], &task, &mut tf),
+        Err(ExecutorError::ExecutionFailed(message)) if message == "execution disabled on mount"));
+    fs.unmount("/restricted").unwrap();
+    fs.mount(TmpFS::new(0), "/restricted", R::NO_PRIVILEGE_GAIN).unwrap();
+    fs.create_file("/restricted/image", FileType::RegularFile).unwrap();
+    let credentials = task.credentials.read().clone();
+    assert!(TransparentExecutor::execute_with_abi("/restricted/image", &["image"], &["GAIN=1"],
+        TestImageAbi::name(), &task, &mut tf).is_err());
+    assert_eq!(*task.credentials.read(), credentials);
+    assert_eq!(task.vm_manager.memmap_len(), 0);
+    TransparentExecutor::execute_with_abi("/restricted/image", &["image"], &[],
+        TestImageAbi::name(), &task, &mut tf).unwrap();
+    assert_eq!(*task.credentials.read(), credentials);
+}
+
+#[test_case]
+fn linux_tmpfs_mount_enforces_flags_options_and_native_mount_authority() {
+    use crate::abi::linux::generic::{fs::mount_tmpfs, errno};
+    let (task, fs, _, _) = fixture();
+    fs.create_dir("/apex").unwrap();
+    assert_eq!(mount_tmpfs(&task, "/apex", "tmpfs", 14, "mode=0755,uid=0,gid=0,size=1M"), Ok(()));
+    assert_eq!(fs.resolve_path("/apex").unwrap().1.restrictions.bits(), 14);
+    for (flags, options, error) in [(15, "", errno::EOPNOTSUPP), (14, "unknown=1", errno::EOPNOTSUPP),
+        (14, "uid=1000", errno::EOPNOTSUPP), (14, "mode=xyz", errno::EINVAL), (14, "size=invalid", errno::EINVAL)] {
+        assert_eq!(mount_tmpfs(&task, "/apex", "tmpfs", flags, options), Err(error));
+        assert_eq!(fs.resolve_path("/apex").unwrap().1.restrictions.bits(), 14);
+    }
+    task.credentials.write().set_authority(0, 0).unwrap();
+    assert_eq!(mount_tmpfs(&task, "/apex", "tmpfs", 14, ""), Err(errno::EPERM));
 }

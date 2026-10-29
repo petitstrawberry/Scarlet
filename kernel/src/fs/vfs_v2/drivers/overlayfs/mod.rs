@@ -125,6 +125,7 @@ struct OverlayBacking {
     node: Arc<dyn VfsNode>,
     fs: Arc<dyn FileSystemOperations>,
     writable: bool,
+    mount: Arc<MountPoint>,
 }
 
 impl OverlayInode {
@@ -459,14 +460,15 @@ impl OverlayFS {
                 node,
                 fs: upper_fs.clone(),
                 writable: true,
+                mount: upper_mount.clone(),
             }),
             Err(error) if error.kind == FileSystemErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
         if destination.is_none() {
             for (mount, root) in &self.lower_layers {
-                match self.resolve_in_layer(mount, root, &new_path) {
-                    Ok(node) => {
+                match self.resolve_in_layer_with_mount(mount, root, &new_path) {
+                    Ok((node, resolved_mount)) => {
                         let fs = node
                             .filesystem()
                             .and_then(|fs| fs.upgrade())
@@ -475,6 +477,7 @@ impl OverlayFS {
                             node,
                             fs,
                             writable: false,
+                            mount: resolved_mount,
                         });
                         break;
                     }
@@ -501,6 +504,7 @@ impl OverlayFS {
             node: source,
             fs: upper_fs,
             writable: true,
+            mount: upper_mount.clone(),
         });
         if let (Some(inode), Some(backing)) = (destination_inode, destination) {
             *inode.backing.write() = Some(backing);
@@ -753,6 +757,11 @@ impl OverlayFS {
         entry: &Arc<VfsEntry>,
         path: &str,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        self.resolve_in_layer_with_mount(mount, entry, path).map(|(node, _)| node)
+    }
+
+    fn resolve_in_layer_with_mount(&self, mount: &Arc<MountPoint>, entry: &Arc<VfsEntry>, path: &str)
+        -> Result<(Arc<dyn VfsNode>, Arc<MountPoint>), FileSystemError> {
         let mut current_mount = mount.clone();
         let mut current_node = entry.node();
 
@@ -762,7 +771,7 @@ impl OverlayFS {
             .filter(|s| !s.is_empty())
             .collect();
         if parts.is_empty() {
-            return Ok(current_node);
+            return Ok((current_node, current_mount));
         }
 
         for part in parts {
@@ -788,7 +797,17 @@ impl OverlayFS {
             }
         }
 
-        Ok(current_node)
+        Ok((current_node, current_mount))
+    }
+
+    fn open_backing(node: Arc<dyn VfsNode>, mount: Arc<MountPoint>, flags: u32)
+        -> Result<Arc<dyn FileObject>, FileSystemError> {
+        VfsManager::check_device_open(&mount, &node.file_type()?)?;
+        let fs = node.filesystem().and_then(|f| f.upgrade()).ok_or_else(||
+            FileSystemError::new(FileSystemErrorKind::NotSupported, "Missing backing filesystem"))?;
+        let inner = fs.open(&node, flags)?;
+        let entry = VfsEntry::new(None, "overlay-backing".to_string(), node);
+        Ok(Arc::new(crate::fs::vfs_v2::core::VfsFileObject::new(inner, entry, mount, "overlay-backing".to_string())))
     }
 
     /// Check if a file is hidden by a whiteout file
@@ -1151,7 +1170,7 @@ impl FileSystemOperations for OverlayFS {
                     "Cannot modify a replaced lower-layer inode",
                 ));
             }
-            return backing.fs.open(&backing.node, flags);
+            return Self::open_backing(backing.node, backing.mount, flags);
         }
 
         // Get metadata using path instead of node metadata to avoid filesystem reference issues
@@ -1173,13 +1192,10 @@ impl FileSystemOperations for OverlayFS {
         }
         // Try upper layer first
         if let Some((ref upper_mount, ref upper_node)) = self.upper {
-            if let Ok(upper_node) =
-                self.resolve_in_layer(upper_mount, upper_node, &overlay_node_ref.path)
+            if let Ok((node, mount)) =
+                self.resolve_in_layer_with_mount(upper_mount, upper_node, &overlay_node_ref.path)
             {
-                let fs = Self::fs_from_mount(upper_mount)?;
-                if let Ok(file) = fs.open(&upper_node, flags) {
-                    return Ok(file);
-                }
+                return Self::open_backing(node, mount, flags);
             }
         }
         // For write operations, we need an upper layer
@@ -1191,13 +1207,10 @@ impl FileSystemOperations for OverlayFS {
         }
         // Try lower layers for read operations
         for (lower_mount, lower_node) in &self.lower_layers {
-            if let Ok(lower_node) =
-                self.resolve_in_layer(lower_mount, lower_node, &overlay_node_ref.path)
+            if let Ok((node, mount)) =
+                self.resolve_in_layer_with_mount(lower_mount, lower_node, &overlay_node_ref.path)
             {
-                let fs = Self::fs_from_mount(lower_mount)?;
-                if let Ok(file) = fs.open(&lower_node, flags) {
-                    return Ok(file);
-                }
+                return Self::open_backing(node, mount, flags);
             }
         }
         Err(FileSystemError::new(

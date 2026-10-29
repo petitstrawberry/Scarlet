@@ -125,6 +125,9 @@ fn mmap_for_task(abi: &mut LinuxAbi, trapframe: &Trapframe, task: &crate::task::
         Some(obj) => obj,
         None => return to_result(errno::EBADF),
     };
+    if kernel_obj.as_memory_mappable().is_some_and(|object| prot & !object.maximum_mapping_permissions() != 0) {
+        return to_result(errno::EACCES);
+    }
     if let Some(result) = abi.extensions.mmap(
         task,
         &kernel_obj,
@@ -239,6 +242,7 @@ fn mmap_for_task(abi: &mut LinuxAbi, trapframe: &Trapframe, task: &crate::task::
             vmarea: MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1),
             vm_start: final_vaddr,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions: memory_mappable.maximum_mapping_permissions(),
             permissions: final_permissions,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -469,6 +473,7 @@ fn handle_anonymous_mapping(
         vmarea,
         vm_start: final_vaddr,
         mapping_origin: crate::vm::vmem::MappingOrigin::new_anonymous(),
+        maximum_permissions: usize::MAX,
         permissions,
         is_shared,
         memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -540,7 +545,7 @@ pub fn sys_mprotect(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         .protect_linux_memory_map_range(MemoryArea::new(addr, end), prot)
     {
         Ok(()) => 0,
-        Err("Mapping does not support increasing permissions") => to_result(errno::EACCES),
+        Err("Mapping does not support increasing permissions" | "Mapping permission ceiling exceeded") => to_result(errno::EACCES),
         Err(_) => to_result(errno::ENOMEM),
     }
 }
@@ -1017,6 +1022,54 @@ mod tests {
     use super::*;
     use crate::library::std::usercopy::{copy_from_user, copy_to_user};
     use crate::task::{Task, TaskType};
+
+    #[test_case]
+    fn noexec_file_mapping_ceiling_survives_fault_close_fork_and_split() {
+        use crate::fs::{drivers::tmpfs::TmpFS, FileType};
+        let task = crate::task::new_user_task("mmap-noexec".into(), 0);
+        task.vm_manager.set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let fs = alloc::sync::Arc::new(crate::fs::VfsManager::new());
+        task.set_vfs(fs.clone());
+        fs.create_dir("/noexec").unwrap();
+        fs.mount(TmpFS::new(0), "/noexec", 8).unwrap();
+        fs.create_file("/noexec/image", FileType::RegularFile).unwrap();
+        let object = fs.open("/noexec/image", 2).unwrap();
+        object.as_stream().unwrap().write(&alloc::vec![0x5a; 3 * PAGE_SIZE]).unwrap();
+        let handle = task.handle_table.insert(object).unwrap();
+        let mut abi = LinuxAbi::default();
+        let fd = abi.allocate_fd(handle).unwrap();
+        let base = 0x40000000;
+        let mut frame = Trapframe::new();
+        frame.set_arg(0, base);
+        frame.set_arg(1, 3 * PAGE_SIZE);
+        frame.set_arg(2, 5);
+        frame.set_arg(3, 0x12);
+        frame.set_arg(4, fd);
+        assert_eq!(mmap_for_task(&mut abi, &frame, &task), to_result(errno::EACCES));
+        assert_eq!(task.vm_manager.memmap_len(), 0);
+        frame.set_arg(2, 3);
+        assert_eq!(mmap_for_task(&mut abi, &frame, &task), base);
+        copy_to_user(&task, base, &[0xa5]).unwrap(); // private COW
+        task.handle_table.remove(handle);
+        let child = task.clone_task(crate::task::CloneFlags::default()).unwrap();
+        let middle = MemoryArea::new(base + PAGE_SIZE, base + 2 * PAGE_SIZE - 1);
+        for process in [&task, &child] {
+            process.vm_manager.protect_linux_memory_map_range(middle, 1).unwrap();
+            assert!(process.vm_manager.protect_linux_memory_map_range(middle, 5).is_err());
+            for page in 0..3 {
+                assert_eq!(process.vm_manager.search_memory_map(base + page * PAGE_SIZE).unwrap().maximum_permissions & 4, 0);
+            }
+            let mut byte = [0];
+            copy_from_user(process, base, &mut byte).unwrap();
+            assert_eq!(byte, [0xa5]);
+        }
+        let adjacent = base + 3 * PAGE_SIZE;
+        assert_eq!(handle_anonymous_mapping(&task, adjacent, PAGE_SIZE, 3, 0x32), adjacent);
+        let mixed = MemoryArea::new(base + 2 * PAGE_SIZE, adjacent + PAGE_SIZE - 1);
+        assert!(task.vm_manager.protect_linux_memory_map_range(mixed, 5).is_err());
+        assert_eq!(task.vm_manager.search_memory_map(adjacent).unwrap().permissions & 7, 3);
+        assert!(task.vm_manager.protect_linux_memory_map_range(MemoryArea::new(adjacent, adjacent + PAGE_SIZE - 1), 5).is_ok());
+    }
 
     #[test_case]
     fn mmap_unaligned_offset_preserves_fixed_mapping_and_aligned_offset_reads_file_page() {

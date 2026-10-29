@@ -95,6 +95,7 @@ pub(crate) fn retag_direct_map_memory_attribute(
         pmarea: physical_area,
         vm_start: hhdm_area.start,
         mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+        maximum_permissions: usize::MAX,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize,
         is_shared: true,
@@ -185,6 +186,7 @@ pub fn kernel_vm_init(
         pmarea: kernel_phys_area,
         vm_start: kernel_area.start,
         mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+        maximum_permissions: usize::MAX,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize
             | VirtualMemoryPermission::Execute as usize,
@@ -211,6 +213,7 @@ pub fn kernel_vm_init(
             pmarea: physical_area,
             vm_start: hhdm_area.start,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions: usize::MAX,
             permissions: VirtualMemoryPermission::Read as usize
                 | VirtualMemoryPermission::Write as usize,
             is_shared: true,
@@ -227,6 +230,7 @@ pub fn kernel_vm_init(
         pmarea: heap_phys_area,
         vm_start: kernel_heap_area.start,
         mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+        maximum_permissions: usize::MAX,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize,
         is_shared: true,
@@ -252,6 +256,7 @@ pub fn kernel_vm_init(
             pmarea: initramfs_phys_area,
             vm_start: initramfs_hhdm_area.start,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions: usize::MAX,
             permissions: VirtualMemoryPermission::Read as usize
                 | VirtualMemoryPermission::Write as usize,
             is_shared: true,
@@ -292,6 +297,7 @@ pub fn kernel_vm_init(
             pmarea: physical_area,
             vm_start: hhdm_area.start,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions: usize::MAX,
             permissions: VirtualMemoryPermission::Read as usize
                 | VirtualMemoryPermission::Write as usize,
             is_shared: true,
@@ -416,6 +422,7 @@ pub fn user_kernel_vm_init(task: &Task) {
         ),
         vm_start: kernel_area.start,
         mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+        maximum_permissions: usize::MAX,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize
             | VirtualMemoryPermission::Execute as usize,
@@ -445,6 +452,7 @@ pub fn user_kernel_vm_init(task: &Task) {
                 pmarea: physical_area,
                 vm_start: hhdm_area.start,
                 mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+                maximum_permissions: usize::MAX,
                 permissions: VirtualMemoryPermission::Read as usize
                     | VirtualMemoryPermission::Write as usize,
                 is_shared: true,
@@ -459,6 +467,7 @@ pub fn user_kernel_vm_init(task: &Task) {
         pmarea: kernel_heap_phys_area,
         vm_start: kernel_heap_area.start,
         mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+        maximum_permissions: usize::MAX,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize,
         is_shared: true,
@@ -495,6 +504,7 @@ pub fn user_kernel_vm_init(task: &Task) {
                     pmarea: physical_area,
                     vm_start: hhdm_area.start,
                     mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+                    maximum_permissions: usize::MAX,
                     permissions: VirtualMemoryPermission::Read as usize
                         | VirtualMemoryPermission::Write as usize,
                     is_shared: true,
@@ -626,6 +636,7 @@ pub fn setup_trampoline_for_task_kstack_window(task: &Task) -> Result<(), &'stat
             },
             vm_start: vaddr_start,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions: usize::MAX,
             permissions: VirtualMemoryPermission::Read as usize
                 | VirtualMemoryPermission::Write as usize,
             is_shared: true,

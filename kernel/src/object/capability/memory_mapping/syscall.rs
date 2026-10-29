@@ -149,6 +149,9 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Object doesn't support memory mapping operations
     };
 
+    if prot & !memory_mappable.maximum_mapping_permissions() != 0 {
+        return usize::MAX;
+    }
     // Check if the object supports mmap
     if !memory_mappable.supports_mmap() {
         return usize::MAX;
@@ -203,6 +206,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
             vmarea: MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1),
             vm_start: final_vaddr,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions: memory_mappable.maximum_mapping_permissions(),
             permissions: prot_perm,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -386,6 +390,7 @@ fn handle_anonymous_mapping(
         vmarea,
         vm_start: final_vaddr,
         mapping_origin: crate::vm::vmem::MappingOrigin::new_anonymous(),
+        maximum_permissions: usize::MAX,
         permissions,
         is_shared,
         memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -612,6 +617,7 @@ mod tests {
             vmarea: MemoryArea::new(candidate, candidate + PAGE_SIZE - 1),
             vm_start: candidate,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions: usize::MAX,
             permissions: 0x0b,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -1313,6 +1319,7 @@ mod tests {
                     vmarea: MemoryArea::new(address, address + PAGE_SIZE - 1),
                     vm_start: address,
                     mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+                    maximum_permissions: usize::MAX,
                     permissions: 0x0b,
                     is_shared: shared,
                     memory_attribute: attribute,

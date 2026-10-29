@@ -460,6 +460,9 @@ impl VirtualMemoryManager {
     }
 
     fn validate_memory_map(map: &VirtualMemoryMap) -> Result<(), &'static str> {
+        if map.permissions & !map.maximum_permissions != 0 {
+            return Err("Mapping permission ceiling exceeded");
+        }
         if map.vmarea.start % PAGE_SIZE != 0 || map.vmarea.size() % PAGE_SIZE != 0 {
             return Err("Address or size is not aligned to PAGE_SIZE");
         }
@@ -552,6 +555,9 @@ impl VirtualMemoryManager {
                     && !(linux_private && map.permissions == 0))
             {
                 return Err("Memory protection range is not fully user-mapped");
+            }
+            if prot & !map.maximum_permissions != 0 {
+                return Err("Mapping permission ceiling exceeded");
             }
             if prot & !map.permissions != 0
                 && (map.is_shared
@@ -697,6 +703,7 @@ impl VirtualMemoryManager {
                     pmarea: Self::subrange_pmarea(&map, map.vmarea.start, overlap_start - 1),
                     vm_start: map.vm_start,
                     mapping_origin: map.mapping_origin,
+                    maximum_permissions: map.maximum_permissions,
                     permissions: map.permissions,
                     is_shared: map.is_shared,
                     memory_attribute: map.memory_attribute,
@@ -709,6 +716,7 @@ impl VirtualMemoryManager {
                 pmarea: Self::subrange_pmarea(&map, overlap_start, overlap_end),
                 vm_start: map.vm_start,
                 mapping_origin: map.mapping_origin,
+                maximum_permissions: map.maximum_permissions,
                 permissions: map.permissions,
                 is_shared: map.is_shared,
                 memory_attribute,
@@ -724,6 +732,7 @@ impl VirtualMemoryManager {
                     pmarea: Self::subrange_pmarea(&map, after_start, map.vmarea.end),
                     vm_start: map.vm_start,
                     mapping_origin: map.mapping_origin,
+                    maximum_permissions: map.maximum_permissions,
                     permissions: map.permissions,
                     is_shared: map.is_shared,
                     memory_attribute: map.memory_attribute,
@@ -901,6 +910,7 @@ impl VirtualMemoryManager {
             }
             if map.mapping_origin != first.mapping_origin
                 || map.vm_start != first.vm_start
+                || map.maximum_permissions != first.maximum_permissions
                 || map.permissions != first.permissions
                 || !Self::movable_private(map)
             {
@@ -980,6 +990,7 @@ impl VirtualMemoryManager {
             pmarea: PhysicalMemoryArea::new(0, 0),
             vm_start: new_vm_start,
             mapping_origin: first.mapping_origin,
+            maximum_permissions: first.maximum_permissions,
             permissions: first.permissions,
             is_shared: false,
             memory_attribute: MemoryAttribute::Normal,
@@ -1145,6 +1156,7 @@ impl VirtualMemoryManager {
                         pmarea: Self::subrange_pmarea(&existing_map, overlap_start, overlap_end),
                         vm_start: existing_map.vm_start,
                         mapping_origin: existing_map.mapping_origin,
+                        maximum_permissions: existing_map.maximum_permissions,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         memory_attribute: existing_map.memory_attribute,
@@ -1173,6 +1185,7 @@ impl VirtualMemoryManager {
                         ),
                         vm_start: existing_map.vm_start,
                         mapping_origin: existing_map.mapping_origin,
+                        maximum_permissions: existing_map.maximum_permissions,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         memory_attribute: existing_map.memory_attribute,
@@ -1191,6 +1204,7 @@ impl VirtualMemoryManager {
                         pmarea: Self::subrange_pmarea(&existing_map, remove_end + 1, existing_end),
                         vm_start: existing_map.vm_start,
                         mapping_origin: existing_map.mapping_origin,
+                        maximum_permissions: existing_map.maximum_permissions,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         memory_attribute: existing_map.memory_attribute,
@@ -1293,6 +1307,7 @@ impl VirtualMemoryManager {
         let same = |map: &VirtualMemoryMap| {
             map.mapping_origin == first.mapping_origin
                 && map.vm_start == first.vm_start
+                && map.maximum_permissions == first.maximum_permissions
                 && map.permissions == first.permissions
                 && map.is_shared == first.is_shared
                 && map.memory_attribute == first.memory_attribute
@@ -1457,6 +1472,7 @@ impl VirtualMemoryManager {
         };
         if expected.is_shared
             || replacement.mapping_origin != expected.mapping_origin
+            || replacement.maximum_permissions != expected.maximum_permissions
             || page_vaddr < expected.vmarea.start
             || page_end > expected.vmarea.end
         {
@@ -1479,6 +1495,7 @@ impl VirtualMemoryManager {
                     && !current.is_shared
                     && current.mapping_origin == expected.mapping_origin
                     && current.vm_start == expected.vm_start
+                    && current.maximum_permissions == expected.maximum_permissions
                     && current.permissions == expected.permissions
                     && current.memory_attribute == expected.memory_attribute
                     && Self::page_backing_at(current, page_vaddr)
@@ -1500,6 +1517,7 @@ impl VirtualMemoryManager {
                 pmarea: Self::subrange_pmarea(&current, current.vmarea.start, page_vaddr - 1),
                 vm_start: current.vm_start,
                 mapping_origin: current.mapping_origin,
+                maximum_permissions: current.maximum_permissions,
                 permissions: current.permissions,
                 is_shared: current.is_shared,
                 memory_attribute: current.memory_attribute,
@@ -1513,6 +1531,7 @@ impl VirtualMemoryManager {
                 pmarea: Self::subrange_pmarea(&current, page_end + 1, current.vmarea.end),
                 vm_start: current.vm_start,
                 mapping_origin: current.mapping_origin,
+                maximum_permissions: current.maximum_permissions,
                 permissions: current.permissions,
                 is_shared: current.is_shared,
                 memory_attribute: current.memory_attribute,
@@ -1536,6 +1555,7 @@ impl VirtualMemoryManager {
                 page + PAGE_SIZE - 1 <= current.vmarea.end
                     && current.mapping_origin == expected.mapping_origin
                     && current.vm_start == expected.vm_start
+                    && current.maximum_permissions == expected.maximum_permissions
                     && current.permissions == expected.permissions
                     && current.is_shared == expected.is_shared
                     && current.memory_attribute == expected.memory_attribute
@@ -1584,7 +1604,7 @@ impl VirtualMemoryManager {
                         res.paddr_page_base as u64,
                         0,
                     );
-                    perms = owner.fault_page_permissions(&access, perms);
+                    perms = owner.fault_page_permissions(&access, perms) & memory_map.maximum_permissions;
                     if res.is_tail {
                         perms &= !0x1;
                         perms &= !0x2;
@@ -1627,6 +1647,7 @@ impl VirtualMemoryManager {
                             vmarea: MemoryArea::new(page_vaddr, page_vaddr + PAGE_SIZE - 1),
                             vm_start: memory_map.vm_start,
                             mapping_origin: memory_map.mapping_origin,
+                            maximum_permissions: memory_map.maximum_permissions,
                             permissions: perms,
                             is_shared: false,
                             memory_attribute: memory_map.memory_attribute,
@@ -1817,7 +1838,7 @@ impl VirtualMemoryManager {
                 match owner.resolve_fault(&test_access, page_idx, vm_start) {
                     Ok(res) => {
                         let permissions =
-                            owner.fault_page_permissions(&test_access, map_permissions);
+                            owner.fault_page_permissions(&test_access, map_permissions) & map_permissions;
                         if let Some(map) = g.memmap.get_mut(&key) {
                             if DEBUG_VM_MAPPING_EXTEND_LOGGING {
                                 crate::println!(
@@ -2142,6 +2163,9 @@ impl VirtualMemoryManager {
         map: VirtualMemoryMap,
     ) -> Result<Vec<VirtualMemoryMap>, &'static str> {
         // Validate alignment like the regular add_memory_map
+        if map.permissions & !map.maximum_permissions != 0 {
+            return Err("Mapping permission ceiling exceeded");
+        }
         if map.vmarea.start % PAGE_SIZE != 0 || map.vmarea.size() % PAGE_SIZE != 0 {
             return Err("Address or size is not aligned to PAGE_SIZE");
         }
@@ -2191,6 +2215,7 @@ impl VirtualMemoryManager {
                         pmarea: Self::subrange_pmarea(&existing_map, overlap_start, overlap_end),
                         vm_start: existing_map.vm_start,
                         mapping_origin: existing_map.mapping_origin,
+                        maximum_permissions: existing_map.maximum_permissions,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         memory_attribute: existing_map.memory_attribute,
@@ -2216,6 +2241,7 @@ impl VirtualMemoryManager {
                         pmarea: Self::subrange_pmarea(&existing_map, existing_start, new_start - 1),
                         vm_start: existing_map.vm_start,
                         mapping_origin: existing_map.mapping_origin,
+                        maximum_permissions: existing_map.maximum_permissions,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         memory_attribute: existing_map.memory_attribute,
@@ -2234,6 +2260,7 @@ impl VirtualMemoryManager {
                         pmarea: Self::subrange_pmarea(&existing_map, new_end + 1, existing_end),
                         vm_start: existing_map.vm_start,
                         mapping_origin: existing_map.mapping_origin,
+                        maximum_permissions: existing_map.maximum_permissions,
                         permissions: existing_map.permissions,
                         is_shared: existing_map.is_shared,
                         memory_attribute: existing_map.memory_attribute,
@@ -2322,6 +2349,7 @@ impl VirtualMemoryManager {
                         },
                         vm_start: prev_memory_map.vm_start,
                         mapping_origin: prev_memory_map.mapping_origin,
+                        maximum_permissions: prev_memory_map.maximum_permissions,
                         permissions: prev_memory_map.permissions, // Use permissions from first map
                         is_shared: prev_memory_map.is_shared,
                         memory_attribute: prev_memory_map.memory_attribute,
@@ -2380,6 +2408,7 @@ impl VirtualMemoryManager {
         map1.mapping_origin == map2.mapping_origin
             && map1.vm_start == map2.vm_start
             && same_owner
+            && map1.maximum_permissions == map2.maximum_permissions
             && map1.permissions == map2.permissions
             && map1.is_shared == map2.is_shared
             && map1.memory_attribute == map2.memory_attribute
@@ -2468,6 +2497,7 @@ mod tests {
             pmarea: crate::vm::vmem::PhysicalMemoryArea::new(vma.start as u64, vma.end as u64),
             vm_start: vma.start,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions: usize::MAX,
             permissions: 0,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -2537,6 +2567,7 @@ mod tests {
             pmarea: crate::vm::vmem::PhysicalMemoryArea::new(vma.start as u64, vma.end as u64),
             vm_start: vma.start,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions: usize::MAX,
             permissions: 0,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -2566,6 +2597,7 @@ mod tests {
             pmarea: crate::vm::vmem::PhysicalMemoryArea::new(vma1.start as u64, vma1.end as u64),
             vm_start: vma1.start,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions: usize::MAX,
             permissions: 0,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -2580,6 +2612,7 @@ mod tests {
             pmarea: crate::vm::vmem::PhysicalMemoryArea::new(vma2.start as u64, vma2.end as u64),
             vm_start: vma2.start,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions: usize::MAX,
             permissions: 0,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -3534,6 +3567,7 @@ mod tests {
             pmarea: pma,
             vm_start: vma.start,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions: usize::MAX,
             permissions: 0o644,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -3575,6 +3609,7 @@ mod tests {
             },
             vm_start: 0x2000,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions: usize::MAX,
             permissions: 0,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -3663,6 +3698,7 @@ mod tests {
             pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
             vm_start: 0x4000,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions: usize::MAX,
             permissions: 0o644,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -3681,6 +3717,7 @@ mod tests {
             },
             vm_start: 0x5000,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions: usize::MAX,
             permissions: 0o600,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -3725,6 +3762,7 @@ mod tests {
             pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
             vm_start: 0x4000,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions: usize::MAX,
             permissions: 0o603,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -3745,6 +3783,7 @@ mod tests {
             },
             vm_start: 0x4000,
             mapping_origin: first_snapshot.mapping_origin,
+            maximum_permissions: first_snapshot.maximum_permissions,
             permissions: 0o603,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -3767,6 +3806,7 @@ mod tests {
             },
             vm_start: 0x4000,
             mapping_origin: stale_snapshot.mapping_origin,
+            maximum_permissions: stale_snapshot.maximum_permissions,
             permissions: 0o603,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -3972,6 +4012,7 @@ mod tests {
             pmarea: crate::vm::vmem::PhysicalMemoryArea { start: 0, end: 0 },
             vm_start: 0x4000,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+            maximum_permissions: usize::MAX,
             permissions: 0x0b,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -3994,4 +4035,26 @@ mod tests {
         assert_eq!(map.vmarea.end, 0x4fff);
         assert!(manager.search_memory_map(fault_addr).is_none());
     }
+    #[test_case]
+    fn permission_ceiling_survives_relocation_growth_and_prevents_coalescing() {
+        use crate::object::capability::memory_mapping::anon_owner::AnonymousZeroPageOwner;
+        let manager = VirtualMemoryManager::new();
+        let base = 0x50000000;
+        let mut map = VirtualMemoryMap::new(crate::vm::vmem::PhysicalMemoryArea::new(0, 0),
+            MemoryArea::new(base, base + PAGE_SIZE - 1), 11, false,
+            Some(Arc::new(AnonymousZeroPageOwner::new())));
+        map.mapping_origin = crate::vm::vmem::MappingOrigin::new_anonymous();
+        map.maximum_permissions = !4;
+        manager.add_memory_map(map).unwrap();
+        let moved = base + 4 * PAGE_SIZE;
+        manager.relocate_private_memory_map_range(base, moved, PAGE_SIZE).unwrap();
+        assert_eq!(manager.grow_private_anonymous_range(moved, PAGE_SIZE, 2 * PAGE_SIZE, false), Ok(moved));
+        assert!(manager.protect_linux_memory_map_range(MemoryArea::new(moved, moved + 2 * PAGE_SIZE - 1), 5).is_err());
+        for page in 0..2 { assert_eq!(manager.search_memory_map(moved + page * PAGE_SIZE).unwrap().maximum_permissions & 4, 0); }
+        let first = manager.search_memory_map(moved).unwrap();
+        let mut second = first.clone();
+        second.maximum_permissions = usize::MAX;
+        assert!(!VirtualMemoryManager::can_merge_memory_maps(&first, &second));
+    }
+
 }

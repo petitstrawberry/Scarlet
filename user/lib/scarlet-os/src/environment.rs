@@ -17,7 +17,7 @@ use crate::{
 use alloc::vec::Vec;
 use core::convert::Infallible;
 use scarlet_abi::{RawEnvironmentExec, RawEnvironmentHandleMapping};
-use scarlet_sys::{Syscall, syscall0, syscall1, syscall2, syscall3, syscall4};
+use scarlet_sys::{Syscall, syscall0, syscall1, syscall2, syscall3, syscall4, syscall5};
 
 fn cstring(value: &str) -> HandleResult<Vec<u8>> {
     str_to_cstr_bytes(value).map_err(|_| HandleError::InvalidParameter)
@@ -153,6 +153,17 @@ impl VfsView {
         })
         .map(|_| ())
     }
+    /// Mount with immutable VFS_MOUNT_* restrictions. Unknown bits are rejected.
+    pub fn mount_restricted(&self, target: &str, fstype: &str, options: &str, restrictions: u32) -> HandleResult<()> {
+        let target = cstring(target)?;
+        let fstype = cstring(fstype)?;
+        let options = cstring(options)?;
+        // SAFETY: capability and strings remain live throughout the call.
+        result(unsafe { syscall5(Syscall::VfsViewMountRestricted, self.raw(),
+            target.as_ptr() as usize, fstype.as_ptr() as usize, options.as_ptr() as usize,
+            restrictions as usize) }).map(|_| ())
+    }
+
     /// Non-recursive bind. Shared submounts must be bound explicitly.
     pub fn bind(&self, target: &str, source: &Self, source_path: &str) -> HandleResult<()> {
         let target = cstring(target)?;

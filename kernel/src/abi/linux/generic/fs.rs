@@ -1032,19 +1032,73 @@ enum OpenMode {
     Truncate = 0x400,
 }
 
-/// Native views currently have private mounts only. Linux MS_SLAVE on a
-/// private mount remains private; neither operation creates propagation peers.
-/// Shared propagation and other mount operations require separate support.
+/// Translate Linux mount requests to immutable native mount restrictions.
+/// Propagation-only operations retain the private namespace model.
 pub fn sys_mount(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let target = trapframe.get_arg(1);
     let flags = trapframe.get_arg(3);
+    let fstype = trapframe.get_arg(2);
+    let data = trapframe.get_arg(4);
     trapframe.increment_pc_next(&task);
     let path = match parse_c_string_from_userspace(&task, target, MAX_PATH_LENGTH) {
         Ok(path) => path,
         Err(_) => return errno::to_result(errno::EFAULT),
     };
-    private_mount_propagation(&task, &path, flags).map_or_else(errno::to_result, |_| 0)
+    if flags & (0x40000 | 0x80000) != 0 {
+        return private_mount_propagation(&task, &path, flags).map_or_else(errno::to_result, |_| 0);
+    }
+    if !task.credentials.read().permits(crate::shield::identity::MANAGE_MOUNTS) {
+        return errno::to_result(errno::EPERM);
+    }
+    let fstype = match parse_c_string_from_userspace(&task, fstype, MAX_PATH_LENGTH) {
+        Ok(value) => value, Err(_) => return errno::to_result(errno::EFAULT),
+    };
+    let options = if data == 0 { String::new() } else {
+        match parse_c_string_from_userspace(&task, data, MAX_PATH_LENGTH) {
+            Ok(value) => value, Err(_) => return errno::to_result(errno::EFAULT),
+        }
+    };
+    mount_tmpfs(&task, &path, &fstype, flags, &options).map_or_else(errno::to_result, |_| 0)
+}
+
+pub(crate) fn mount_tmpfs(task: &crate::task::Task, path: &str, fstype: &str, flags: usize, options: &str) -> Result<(), usize> {
+    use crate::fs::vfs_v2::mount_tree::MountRestrictions;
+    if !task.credentials.read().permits(crate::shield::identity::MANAGE_MOUNTS) { return Err(errno::EPERM); }
+    if path.is_empty() { return Err(errno::ENOENT); }
+    // MS_NOSUID, MS_NODEV, MS_NOEXEC. Read-only, bind, remount and other
+    // filesystems require their actual native operations before acceptance.
+    if flags & !0xe != 0 || fstype != "tmpfs" { return Err(errno::EOPNOTSUPP); }
+    let mut restrictions = 0;
+    if flags & 2 != 0 { restrictions |= MountRestrictions::NO_PRIVILEGE_GAIN; }
+    if flags & 4 != 0 { restrictions |= MountRestrictions::NO_DEVICES; }
+    if flags & 8 != 0 { restrictions |= MountRestrictions::NO_EXECUTE; }
+    let mut mode = 0o1777;
+    let mut driver_options = String::new();
+    for option in options.split(',').filter(|part| !part.is_empty()) {
+        if let Some(value) = option.strip_prefix("mode=") {
+            mode = u32::from_str_radix(value, 8).map_err(|_| errno::EINVAL)?;
+            if mode & !0o7777 != 0 { return Err(errno::EINVAL); }
+        } else if let Some(value) = option.strip_prefix("uid=").or_else(|| option.strip_prefix("gid=")) {
+            let id = value.parse::<u32>().map_err(|_| errno::EINVAL)?;
+            // Current VFS metadata represents the default owner only.
+            if id != 0 { return Err(errno::EOPNOTSUPP); }
+        } else if option.starts_with("size=") {
+            if !driver_options.is_empty() { driver_options.push(','); }
+            driver_options.push_str(option);
+        } else { return Err(errno::EOPNOTSUPP); }
+    }
+    let fs = task.get_vfs().ok_or(errno::EIO)?;
+    let _composition = crate::executor::syscall::lock_composition();
+    if crate::executor::syscall::is_root_path(&fs, path) { return Err(errno::EBUSY); }
+    let filesystem = crate::fs::get_fs_driver_manager()
+        .create_from_option_string("tmpfs", &driver_options).map_err(|e| match e.kind {
+            crate::fs::FileSystemErrorKind::InvalidOperation => errno::EINVAL,
+            crate::fs::FileSystemErrorKind::NotSupported => errno::EOPNOTSUPP,
+            _ => errno::from_fs_error(&e),
+        })?;
+    super::mode::set(&filesystem.root_node(), mode);
+    fs.mount(filesystem, path, restrictions).map_err(|e| errno::from_fs_error(&e))
 }
 
 pub(crate) fn private_mount_propagation(task: &crate::task::Task, path: &str, flags: usize) -> Result<(), usize> {
@@ -3117,6 +3171,7 @@ pub fn sys_execve(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Err(crate::executor::executor::ExecutorError::ExecutionFailed(reason)) => {
             errno::to_result(match reason.as_str() {
                 "argument list too large" => errno::E2BIG,
+                "execution disabled on mount" | "file-derived privilege changes disabled on mount" => errno::EACCES,
                 "runtime delegation loop" => errno::ELOOP,
                 "exec requires an exclusive single-threaded process" => errno::EBUSY,
                 _ => errno::ENOEXEC,

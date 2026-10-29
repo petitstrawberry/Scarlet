@@ -825,6 +825,7 @@ pub enum Syscall {
     VfsViewUnmount = 527,
     VfsViewCreateDirectory = 528,
     VfsViewRoot = 529,
+    VfsViewMountRestricted = 530,
     ProcessScopeCreate = 1320,
     ProcessScopeEnter = 1321,
     ProcessScopeSetReaper = 1322,

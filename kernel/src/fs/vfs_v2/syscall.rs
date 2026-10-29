@@ -563,10 +563,12 @@ pub fn sys_fs_mount(trapframe: &mut Trapframe) -> usize {
     let source_ptr = trapframe.get_arg(0);
     let target_ptr = trapframe.get_arg(1);
     let fstype_ptr = trapframe.get_arg(2);
-    let flags = trapframe.get_arg(3) as u32;
+    let flags_raw = trapframe.get_arg(3);
     let data_ptr = trapframe.get_arg(4);
 
     trapframe.increment_pc_next(&task);
+    let flags = match u32::try_from(flags_raw) { Ok(flags) => flags, Err(_) => return usize::MAX };
+    if super::mount_tree::MountRestrictions::from_bits(flags).is_err() { return usize::MAX; }
 
     let source_str = match parse_c_string_from_userspace(&task, source_ptr, MAX_PATH_LENGTH) {
         Ok(s) => s,
@@ -612,7 +614,7 @@ pub fn sys_fs_mount(trapframe: &mut Trapframe) -> usize {
     match fstype_str.as_str() {
         "bind" => {
             // Handle bind mount - this is a special case handled by VFS
-            let _read_only = (flags & 1) != 0; // MS_RDONLY
+            if flags != 0 { return usize::MAX; }
             match vfs.bind_mount(&source_str, &target_str) {
                 Ok(_) => 0,
                 Err(_) => usize::MAX,
@@ -621,7 +623,7 @@ pub fn sys_fs_mount(trapframe: &mut Trapframe) -> usize {
         _ => {
             // Handle filesystem creation using drivers
             let options = data_str.unwrap_or_default();
-            match create_filesystem_and_mount(&vfs, &fstype_str, &target_str, &options) {
+            match create_filesystem_and_mount(&vfs, &fstype_str, &target_str, &options, flags as u32) {
                 Ok(_) => 0,
                 Err(_) => usize::MAX,
             }
@@ -663,12 +665,13 @@ fn create_filesystem_and_mount(
     fstype: &str,
     target: &str,
     options: &str,
+    flags: u32,
 ) -> Result<(), crate::fs::FileSystemError> {
     use crate::fs::get_fs_driver_manager;
     let driver_manager = get_fs_driver_manager();
     // v2: directly create FS as Arc and mount it
     let filesystem = driver_manager.create_from_option_string(fstype, options)?;
-    vfs.mount(filesystem, target, 0)?;
+    vfs.mount(filesystem, target, flags)?;
     Ok(())
 }
 

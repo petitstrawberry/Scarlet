@@ -566,6 +566,12 @@ impl ControlOps for VfsFileObject {
 }
 
 impl MemoryMappingOps for VfsFileObject {
+    fn maximum_mapping_permissions(&self) -> usize {
+        self.inner.maximum_mapping_permissions() & if self.mount_point.restrictions.allows_execution() {
+            usize::MAX
+        } else { !(crate::vm::vmem::VirtualMemoryPermission::Execute as usize) }
+    }
+
     fn get_mapping_info(
         &self,
         offset: usize,
@@ -613,6 +619,13 @@ impl MemoryMappingOps for VfsFileObject {
 }
 
 impl FileObject for VfsFileObject {
+    fn allows_execution(&self) -> bool {
+        self.mount_point.restrictions.allows_execution() && self.inner.allows_execution()
+    }
+    fn allows_execution_privilege_gain(&self) -> bool {
+        self.mount_point.restrictions.allows_privilege_gain() && self.inner.allows_execution_privilege_gain()
+    }
+
     fn supports_append(&self) -> bool {
         self.inner.supports_append()
     }

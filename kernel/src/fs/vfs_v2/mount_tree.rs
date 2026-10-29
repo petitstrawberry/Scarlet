@@ -76,11 +76,31 @@ pub struct MountOptionsV2 {
     pub flags: u32,
 }
 
+/// Immutable, per-mount restrictions. Unknown bits are rejected before publication.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MountRestrictions(u32);
+impl MountRestrictions {
+    pub const NO_PRIVILEGE_GAIN: u32 = 2;
+    pub const NO_DEVICES: u32 = 4;
+    pub const NO_EXECUTE: u32 = 8;
+    pub fn from_bits(bits: u32) -> VfsResult<Self> {
+        if bits & !(Self::NO_PRIVILEGE_GAIN | Self::NO_DEVICES | Self::NO_EXECUTE) != 0 {
+            return Err(vfs_error(FileSystemErrorKind::NotSupported, "Unsupported mount restrictions"));
+        }
+        Ok(Self(bits))
+    }
+    pub fn bits(self) -> u32 { self.0 }
+    pub fn allows_execution(self) -> bool { self.0 & Self::NO_EXECUTE == 0 }
+    pub fn allows_devices(self) -> bool { self.0 & Self::NO_DEVICES == 0 }
+    pub fn allows_privilege_gain(self) -> bool { self.0 & Self::NO_PRIVILEGE_GAIN == 0 }
+}
+
 /// Mount point information
 #[derive(Debug)]
 pub struct MountPoint {
     /// Unique mount ID
     pub id: MountId,
+    pub restrictions: MountRestrictions,
     /// Type of mount
     pub mount_type: MountType,
     /// Mount path (relative to parent mount)
@@ -104,8 +124,14 @@ impl MountPoint {
         root: VfsEntryRef,
         filesystem: Arc<dyn FileSystemOperations>,
     ) -> Arc<Self> {
+        Self::new_regular_restricted(path, root, filesystem, MountRestrictions::default())
+    }
+
+    pub fn new_regular_restricted(path: String, root: VfsEntryRef,
+        filesystem: Arc<dyn FileSystemOperations>, restrictions: MountRestrictions) -> Arc<Self> {
         Arc::new(Self {
             id: MountId::new(),
+            restrictions,
             mount_type: MountType::Regular,
             path: IrqRwSpinLock::new(path),
             root,
@@ -117,9 +143,10 @@ impl MountPoint {
     }
 
     /// Create a new bind mount point
-    pub fn new_bind(path: String, source: VfsEntryRef) -> Arc<Self> {
+    pub fn new_bind(path: String, source: VfsEntryRef, restrictions: MountRestrictions) -> Arc<Self> {
         Arc::new(Self {
             id: MountId::new(),
+            restrictions,
             mount_type: MountType::Bind,
             path: IrqRwSpinLock::new(path),
             root: source,
@@ -144,6 +171,7 @@ impl MountPoint {
 
         Ok(Arc::new(Self {
             id: MountId::new(),
+            restrictions: MountRestrictions::default(),
             mount_type: MountType::Overlay {
                 layers: layers.clone(),
             },
@@ -248,11 +276,12 @@ impl MountTree {
     pub fn bind_mount(
         &self,
         source_entry: VfsEntryRef,
+        source_mount: Arc<MountPoint>,
         target_entry: VfsEntryRef,
         target_mount_point: Arc<MountPoint>,
     ) -> VfsResult<MountId> {
         // Create a new bind mount point. The name of the mount point is the name of the target entry.
-        let bind_mount = MountPoint::new_bind(target_entry.name(), source_entry);
+        let bind_mount = MountPoint::new_bind(target_entry.name(), source_entry, source_mount.restrictions);
         let mount_id = bind_mount.id;
 
         // Add the new mount as a child of the target's containing mount point, attached to the target entry.
@@ -267,6 +296,7 @@ impl MountTree {
         target_entry: VfsEntryRef,
         target_mount_point: Arc<MountPoint>,
         filesystem: Arc<dyn FileSystemOperations>,
+        restrictions: MountRestrictions,
     ) -> VfsResult<MountId> {
         // The root of the new filesystem.
         let new_fs_root_node = filesystem.root_node();
@@ -276,7 +306,7 @@ impl MountTree {
 
         // Create a new mount point for the filesystem.
         let new_mount =
-            MountPoint::new_regular(target_entry.name(), new_fs_root_entry, filesystem.clone());
+            MountPoint::new_regular_restricted(target_entry.name(), new_fs_root_entry, filesystem.clone(), restrictions);
         let mount_id = new_mount.id;
 
         // Add the new mount as a child to the target's mount point.

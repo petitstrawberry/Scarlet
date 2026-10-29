@@ -595,6 +595,7 @@ fn setup_trampoline_at_end(manager: &VirtualMemoryManager, trampoline_vaddr_end:
         },
         vm_start: trampoline_vaddr_start,
         mapping_origin: crate::vm::vmem::MappingOrigin::new(),
+        maximum_permissions: usize::MAX,
         permissions: VirtualMemoryPermission::Read as usize
             | VirtualMemoryPermission::Write as usize
             | VirtualMemoryPermission::Execute as usize,

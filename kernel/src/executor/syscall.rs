@@ -280,7 +280,10 @@ handler!(sys_vfs_view_mkdir, |task, tf| {
         .map_err(|_| "create directory failed")?;
     Ok(0)
 });
-handler!(sys_vfs_view_mount, |task, tf| {
+handler!(sys_vfs_view_mount, |task, tf| { mount_view(&task, tf, 0) });
+handler!(sys_vfs_view_mount_restricted, |task, tf| { mount_view(&task, tf, u32::try_from(tf.get_arg(4)).map_err(|_| "invalid mount restrictions")?) });
+fn mount_view(task: &Task, tf: &crate::arch::Trapframe, restrictions: u32) -> Result<usize> {
+    crate::fs::vfs_v2::mount_tree::MountRestrictions::from_bits(restrictions).map_err(|_| "unsupported mount restrictions")?;
     let fs = view(&task, tf.get_arg(0), true)?;
     let path = text_arg(&task, tf.get_arg(1))?;
     let fstype = text_arg(&task, tf.get_arg(2))?;
@@ -296,10 +299,10 @@ handler!(sys_vfs_view_mount, |task, tf| {
     let filesystem = crate::fs::get_fs_driver_manager()
         .create_from_option_string(&fstype, &options)
         .map_err(|_| "filesystem creation failed")?;
-    fs.mount(filesystem, &path, 0)
+    fs.mount(filesystem, &path, restrictions)
         .map_err(|_| "view mount failed")?;
     Ok(0)
-});
+}
 handler!(sys_vfs_view_bind, |task, tf| {
     let target = view(&task, tf.get_arg(0), true)?;
     let target_path = text_arg(&task, tf.get_arg(1))?;

@@ -33,13 +33,14 @@ pub enum SeekFrom {
 /// Individual operations may be unsupported. Directory reading is handled
 /// through normal `read()` operations.
 pub trait FileObject: StreamOps + ControlOps + MemoryMappingOps + Selectable {
-    /// Seek to a position in the file stream
-    ///
-    /// # Arguments
-    /// * `whence` - Absolute position or signed displacement relative to the cursor or EOF.
-    ///
-    /// # Returns
-    /// The resulting absolute byte position, or an error if seeking fails or is unsupported.
+    /// Executable authority retained by this open description, independent of its pathname.
+    fn allows_execution(&self) -> bool { true }
+
+    /// Whether execution may derive privileges from this file. Current loaders
+    /// preserve credentials; future file-derived grants must honor this gate.
+    fn allows_execution_privilege_gain(&self) -> bool { true }
+
+    /// Seek to an absolute position or a displacement relative to the cursor or EOF.
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError>;
 
     /// Seek using a signed POSIX offset, rejecting negative or overflowing

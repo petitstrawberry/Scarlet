@@ -349,7 +349,9 @@ impl AbiModule for LinuxRiscv64Abi {
                     }
                     Err(e) => {
                         crate::println!("Failed to load Linux ELF binary: {:?}", e);
-                        Err("Failed to load Linux ELF binary")
+                        if e.message == "interpreter execution disabled on mount" || e.message == "execution disabled on mount" {
+                            Err("execution disabled on mount")
+                        } else { Err("Failed to load Linux ELF binary") }
                     }
                 }
             }
