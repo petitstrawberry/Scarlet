@@ -89,8 +89,8 @@ class ZygoteRunnerTest(unittest.TestCase):
         from unittest.mock import patch
         from test_framework import fixture
         from test_art_runner import runner
-        for variant in ("control", "diagnostic", "child"):
-            diagnostic, child = variant == "diagnostic", variant == "child"
+        for variant in ("control", "diagnostic", "child", "init"):
+            diagnostic, child = variant in ("diagnostic", "init"), variant == "child"
             with self.subTest(variant=variant), tempfile.TemporaryDirectory() as temporary:
                 base = Path(temporary)
                 runtime, stock, framework, build = fixture(base)
@@ -111,6 +111,7 @@ class ZygoteRunnerTest(unittest.TestCase):
                 def compile(command, **kwargs):
                     if command[0] == "cargo":
                         self.assertEqual(kwargs["env"]["SCARLET_ANDROID_SHIELD"], "1")
+                        self.assertEqual(kwargs["env"]["SCARLET_ANDROID_INIT_BOOTSTRAP"], "1" if variant == "init" else "0")
                         self.assertEqual(kwargs["env"]["SCARLET_ANDROID_ZYGOTE_POLICY"], "0" if diagnostic else "1")
                         target = output / "target/aarch64-unknown-scarlet/release"
                         target.mkdir(parents=True, exist_ok=True)
@@ -135,6 +136,8 @@ class ZygoteRunnerTest(unittest.TestCase):
                     return {"result": "PASS"}
                 mode = ["--program", str(binary), "--shield-fixture"] if diagnostic else [
                     "--zygote-probe", str(build), "--framework-inputs", str(framework)]
+                if variant == "init":
+                    mode.append("--init-bootstrap")
                 args = ["run-direct.py", "--kernel", str(kernel), *mode, "--runtime-root", str(runtime),
                     "--stock-inputs", str(stock), "--accel", "hvf", "--output", str(output)]
                 with patch("sys.argv", args), patch.object(runner.smoke, "firmware", return_value=firmware), \
@@ -144,6 +147,8 @@ class ZygoteRunnerTest(unittest.TestCase):
                 inputs = json.loads((output / "inputs.json").read_text())
                 self.assertEqual(inputs["shield_fixture_sha256"], sha256(SOURCE / "init/src/shield.rs"))
                 self.assertIsNone(inputs["selinux_build_sha256"])
+                self.assertEqual(inputs["stock_init_owns_bootstrap"], variant == "init")
+                self.assertEqual(inputs["stock_bootstrap_source_sha256"], sha256(SOURCE / "init/src/stock.rs"))
                 self.assertEqual(inputs["zygote_transition_policy"], not diagnostic)
                 if child:
                     # Resolve the fixture through the actual staged Android view.

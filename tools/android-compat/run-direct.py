@@ -56,6 +56,7 @@ def main():
     parser.add_argument("--runtime-root", type=Path, help="Android /system and /apex runtime tree")
     parser.add_argument("--linker-debug", action="store_true", help="enable Android LD_DEBUG=3 for ART diagnosis")
     parser.add_argument("--stock-inputs", type=Path, help="verified stock property/APEX overlay for ART or a program")
+    parser.add_argument("--init-bootstrap", action="store_true", help="program diagnostic: let stock init initialize properties and linker configuration")
     parser.add_argument("--zygote-policy", action="store_true", help="apply the bounded Zygote/app transition fixture to a stock program diagnostic")
     parser.add_argument("--shield-fixture", action="store_true", help="apply the existing Shield test policy to a stock program diagnostic")
     parser.add_argument("--output", type=Path, required=True)
@@ -63,6 +64,8 @@ def main():
     parser.add_argument("--accel", choices=("tcg", "hvf"), default="tcg")
     parser.add_argument("--binder", action="store_true", help="include Binder RPC and three-process object lifetime checks")
     args = parser.parse_args()
+    if args.init_bootstrap and (not args.program or not args.stock_inputs):
+        parser.error("--init-bootstrap requires --program and --stock-inputs")
     if args.label_transition_probe:
         args.selinux_probe = args.label_transition_probe
         args.zygote_policy = True
@@ -188,6 +191,8 @@ def main():
         "service_contexts_sha256": hashlib.sha256(CONTEXTS.encode()).hexdigest() if args.service_inputs else None,
         "selinux_build_sha256": sha256(args.selinux_probe / "build.json") if args.selinux_probe else None,
         "zygote_transition_policy": bool(args.zygote_probe or args.zygote_policy),
+        "stock_init_owns_bootstrap": args.init_bootstrap,
+        "stock_bootstrap_source_sha256": sha256(SOURCE / "init/src/stock.rs") if args.stock_inputs else None,
         "shield_fixture_sha256": sha256(SOURCE / "init/src/shield.rs") if shield_fixture else None,
         "stock_reference_config_sha256": sha256(STOCK_CONFIG) if args.stock_inputs else None,
         "stock_manifest_sha256": sha256(args.stock_inputs / "stock-inputs.json") if args.stock_inputs else None,
@@ -263,6 +268,7 @@ def main():
     env = dict(os.environ, SCARLET_ANDROID_DYNAMIC="1" if args.runtime_root else "0",
                SCARLET_ANDROID_BINDER="1" if args.binder else "0",
                SCARLET_ANDROID_STOCK="1" if args.stock_inputs else "0",
+               SCARLET_ANDROID_INIT_BOOTSTRAP="1" if args.init_bootstrap else "0",
                SCARLET_ANDROID_SERVICES="1" if args.service_probe else "0",
                SCARLET_ANDROID_ZYGOTE_POLICY="1" if args.zygote_probe or args.zygote_policy else "0",
                SCARLET_ANDROID_SHIELD="1" if shield_fixture else "0",

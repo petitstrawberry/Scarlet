@@ -87,6 +87,11 @@ pub fn prepare(
     view: &VfsView,
     handles: &[HandleMapping<'_>],
 ) -> Result<(), &'static str> {
+    if option_env!("SCARLET_ANDROID_INIT_BOOTSTRAP") == Some("1") {
+        // Stock init creates its own property areas and linker configuration.
+        std::println!("SCARLET_ANDROID_INIT_OWNS_BOOTSTRAP");
+        return Ok(());
+    }
     run(
         env,
         view,
