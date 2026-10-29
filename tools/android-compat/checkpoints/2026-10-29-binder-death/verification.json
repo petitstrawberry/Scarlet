@@ -11,7 +11,7 @@
   "validation": {
     "acceleration": "HVF",
     "kernel_tests": 1632,
-    "bionic_cases": 18,
+    "bionic_cases": 16,
     "host_tests": 32,
     "riscv_release_check": "PASS",
     "stock_libbinder": "PASS"
@@ -22,7 +22,7 @@
     "Failed usercopy retry, short read capacity, thread-exit fallback, weak-only handles, handle-release cancellation and context-manager death",
     "Unmodified Android 13 libbinder: unlink cancels callback; owner exits with a live service; active callback occurs once with matching Binder identity",
     "BR_CLEAR_DEATH_NOTIFICATION_DONE restores the measured BpBinder weak count; post-death transact/linkToDeath return DEAD_OBJECT; subsequent poll stays quiet",
-    "Existing two stock libbinder service/reference lifetime cycles and static/dynamic Bionic three-process object probes pass"
+    "Existing two stock libbinder service/reference lifetime cycles and 16 Bionic cases pass; this run omitted --binder"
   ],
   "limitations": [
     "Custom BBinder probe, not stock servicemanager add/find or Android framework startup; SELinux authorization design remains pending",
@@ -54,5 +54,6 @@
     "probe-build.log": "67368c7610a995de86447496394391f25a43d04496d6fe6272b002755c80fc47",
     "riscv-check.log": "5c356f15b974db3e9b46b918aff965b5f10a930f0dff69c6dd5a5a6bb071a987",
     "run-kernel-hvf.py": "0e08ec864c22cb4048da8f8714812cb48d160bcd9f89bde7507b77e482f9539d"
-  }
+  },
+  "correction": "Bionic case count corrected from 18 to 16 by recounting preserved result.json; the new Shield checkpoint explicitly runs --binder."
 }
