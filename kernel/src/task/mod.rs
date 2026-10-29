@@ -884,6 +884,7 @@ pub struct Task {
     /// ABI-neutral identity, inherited across clone/spawn/exec; assignment requires authority.
     pub(crate) process_scope: IrqRwSpinLock<Option<Arc<process_scope::ProcessScope>>>,
     pub(crate) security_subject: IrqRwSpinLock<Option<crate::shield::Subject>>,
+    pub(crate) pending_exec_transition: IrqRwSpinLock<Option<crate::shield::exec_transition::PendingExecTransition>>,
     pub(crate) credentials: IrqRwSpinLock<crate::shield::identity::Credentials>,
     pub(crate) execution_restrictions: IrqRwSpinLock<crate::shield::execution::Restrictions>,
     /// Keep the dispatched ABI alive until its syscall handler has returned.
@@ -1142,6 +1143,7 @@ impl Task {
             bootstrap_environment: AtomicBool::new(false),
             process_scope: IrqRwSpinLock::new(None),
             security_subject: IrqRwSpinLock::new(None),
+            pending_exec_transition: IrqRwSpinLock::new(None),
             credentials: IrqRwSpinLock::new(crate::shield::identity::Credentials::bootstrap()),
             execution_restrictions: IrqRwSpinLock::new(crate::shield::execution::Restrictions::default()),
             retired_exec_abi: TaskLocal::new(None),
@@ -3156,6 +3158,7 @@ impl Task {
         *child.mount_namespace.write() = self.mount_namespace.read().clone();
         *child.process_scope.write() = self.process_scope.read().clone();
         *child.security_subject.write() = self.security_subject.read().clone();
+        *child.pending_exec_transition.write() = self.pending_exec_transition.read().clone();
         *child.credentials.write() = self.credentials.read().clone();
         *child.execution_restrictions.write() = self.execution_restrictions.read().clone();
 

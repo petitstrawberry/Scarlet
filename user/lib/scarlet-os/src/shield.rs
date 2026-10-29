@@ -9,7 +9,7 @@ use crate::{
 use alloc::vec::Vec;
 use scarlet_abi::shield::{RawLabel, RawRule};
 pub use scarlet_abi::shield::{RawRule as Rule, RawTransition as Transition};
-use scarlet_sys::{Syscall, syscall0, syscall2, syscall4, syscall6};
+use scarlet_sys::{Syscall, syscall0, syscall1, syscall2, syscall4, syscall6};
 
 pub struct Policy(Handle);
 impl Policy {
@@ -87,6 +87,12 @@ impl Policy {
             Err(HandleError::InvalidParameter)
         }
     }
+    /// Reserve an explicitly delegated transition for the next successful exec.
+    pub fn reserve_exec(&self, label: u32) -> HandleResult<()> {
+        // SAFETY: the kernel checks the policy, current subject and native identities.
+        if unsafe { syscall2(Syscall::ShieldReserveExec, self.0.as_raw() as usize, label as usize) } == 0 { Ok(()) }
+        else { Err(HandleError::InvalidParameter) }
+    }
     /// Returns query authority only; arbitrary assignment remains forbidden.
     pub fn current() -> HandleResult<Self> {
         // SAFETY: no pointer arguments.
@@ -126,4 +132,19 @@ impl Policy {
             Err(HandleError::InvalidParameter)
         }
     }
+}
+
+/// Cancel this task's reserved exec transition without consuming an exec.
+pub fn clear_exec_transition() -> HandleResult<()> {
+    // SAFETY: scalar operation restricted to the current task.
+    if unsafe { syscall0(Syscall::ShieldClearExec) } == 0 { Ok(()) } else { Err(HandleError::InvalidParameter) }
+}
+/// Monotonically suppress privileged address introspection. Fork/spawn/exec inherit it.
+pub fn hide_kernel_addresses() -> HandleResult<()> {
+    // SAFETY: tightening this caller's information constraint requires no pointer.
+    if unsafe { syscall1(Syscall::ShieldConstrainInformation, 1) } == 0 { Ok(()) } else { Err(HandleError::InvalidParameter) }
+}
+pub fn kernel_addresses_hidden() -> bool {
+    // SAFETY: scalar query of this caller's inherited restrictions.
+    unsafe { syscall0(Syscall::ShieldInformation) & 1 != 0 }
 }

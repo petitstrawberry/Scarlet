@@ -2303,7 +2303,7 @@ pub fn sys_get_task_debug_info(trapframe: &mut Trapframe) -> usize {
                 flags |= TASK_DEBUG_FLAG_SOFTWARE_TIMER_ARMED;
             }
 
-            let info = TaskDebugInfo {
+            let mut info = TaskDebugInfo {
                 size: core::mem::size_of::<TaskDebugInfo>() as u32,
                 version: TASK_DEBUG_INFO_VERSION_V1,
                 state: target.state.load(Ordering::Acquire).to_u8(),
@@ -2320,6 +2320,9 @@ pub fn sys_get_task_debug_info(trapframe: &mut Trapframe) -> usize {
                 syscall_pc: execution.syscall_pc,
                 cpu_time_ns: target.cpu_time_snapshot_ns(now_ns),
             };
+            if caller.execution_restrictions.read().kernel_addresses_hidden() {
+                crate::shield::information::redact_task(&mut info);
+            }
             let Some(offset) = written.checked_mul(entry_size) else {
                 return usize::MAX;
             };
@@ -2419,7 +2422,7 @@ pub fn sys_get_cpu_debug_info(trapframe: &mut Trapframe) -> usize {
             flags |= CPU_DEBUG_FLAG_TIMER_ARMED;
         }
 
-        let info = CpuDebugInfo {
+        let mut info = CpuDebugInfo {
             size: core::mem::size_of::<CpuDebugInfo>() as u32,
             version: CPU_DEBUG_INFO_VERSION_V1,
             flags,
@@ -2432,6 +2435,9 @@ pub fn sys_get_cpu_debug_info(trapframe: &mut Trapframe) -> usize {
             breadcrumb_aux2: breadcrumb.aux2,
             timer_deadline_ns,
         };
+        if caller.execution_restrictions.read().kernel_addresses_hidden() {
+            crate::shield::information::redact_cpu(&mut info);
+        }
         let bytes = unsafe {
             core::slice::from_raw_parts(
                 &info as *const CpuDebugInfo as *const u8,

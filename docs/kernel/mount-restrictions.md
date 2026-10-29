@@ -35,8 +35,9 @@ unknown options, read-only/bind/remount operations, and unsupported filesystems
 return errors. Linux mount authority comes from native `MANAGE_MOUNTS`, not
 numeric UID zero. Existing private/slave propagation requests remain private.
 
-This does not implement general Unix DAC, SELinux mount contexts, shared mount
-propagation, set-ID execution, or read-only mount enforcement.
+This does not implement general Unix DAC, SELinux mount contexts, set-ID
+execution, or read-only mount enforcement. Native [mount propagation](mount-propagation.md)
+and [retained namespaces](mount-namespaces.md) are separate VFS primitives.
 
 The Linux adapter returns `EPERM` for an executable mmap on a no-execute mount
 and `EACCES` for a later protection change that exceeds the ceiling, matching

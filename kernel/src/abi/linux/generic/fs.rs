@@ -1764,6 +1764,7 @@ pub fn sys_write(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
+    if count == 0 { return stream.write_empty().unwrap_or_else(|error| errno::to_result(stream_error_to_errno(error))); }
     let nonblocking = current_file_status_flags(abi, &task, fd)
         .map(|f| ((f as i32) & O_NONBLOCK) != 0)
         .unwrap_or(false)

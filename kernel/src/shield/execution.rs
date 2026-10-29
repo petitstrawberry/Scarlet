@@ -38,10 +38,13 @@ pub trait CallConstraint: Send + Sync {
 #[derive(Clone, Default)]
 pub struct Restrictions {
     no_new_authority: bool,
+    kernel_addresses_hidden: bool,
     rules: Vec<Arc<dyn CallConstraint>>,
     cost: usize,
 }
 impl Restrictions {
+    pub fn kernel_addresses_hidden(&self) -> bool { self.kernel_addresses_hidden }
+    pub fn hide_kernel_addresses(&mut self) { self.kernel_addresses_hidden = true; }
     pub fn no_new_authority(&self) -> bool {
         self.no_new_authority
     }

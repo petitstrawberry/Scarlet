@@ -546,6 +546,8 @@ impl VfsFileObject {
 }
 
 impl StreamOps for VfsFileObject {
+    fn write_empty(&self) -> Result<usize, StreamError> { self.inner.write_empty() }
+
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         self.inner.read(buffer)
     }

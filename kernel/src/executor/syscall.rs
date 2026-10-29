@@ -503,6 +503,7 @@ handler!(sys_environment_spawn, |task, tf| {
     );
     *child.process_scope.write() = task.process_scope.read().clone();
     *child.security_subject.write() = task.security_subject.read().clone();
+    *child.pending_exec_transition.write() = task.pending_exec_transition.read().clone();
     *child.credentials.write() = task.credentials.read().clone();
     *child.execution_restrictions.write() = task.execution_restrictions.read().clone();
     child.max_stack_size = task.max_stack_size;

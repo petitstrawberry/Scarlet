@@ -172,7 +172,9 @@ fn native_wide_scalars_preserve_signed_offsets_and_full_results() {
 #[cfg(feature = "profiler")]
 fn sys_profiler_dump(tf: &mut Trapframe) -> usize {
     use crate::task::mytask;
-    tf.increment_pc_next(&mytask().unwrap());
+    let caller = mytask().unwrap();
+    tf.increment_pc_next(&caller);
+    if caller.execution_restrictions.read().kernel_addresses_hidden() { return usize::MAX; }
     crate::profiler::print_profiling_results();
     0
 }
@@ -237,6 +239,10 @@ syscall_table! {
     ShieldApply = 1312 => crate::shield::syscall::sys_shield_apply,
     ShieldPolicyCreateWithTransitions = 1313 => crate::shield::syscall::sys_shield_policy_create_with_transitions,
     ShieldTransition = 1314 => crate::shield::syscall::sys_shield_transition,
+    ShieldReserveExec = 1315 => crate::shield::syscall::sys_shield_reserve_exec,
+    ShieldClearExec = 1316 => crate::shield::syscall::sys_shield_clear_exec,
+    ShieldConstrainInformation = 1318 => crate::shield::syscall::sys_shield_constrain_information,
+    ShieldInformation = 1319 => crate::shield::syscall::sys_shield_information,
     EnvironmentCreate = 1300 => crate::executor::syscall::sys_environment_create,
     EnvironmentSetRoot = 1301 => crate::executor::syscall::sys_environment_set_root,
     EnvironmentRemoveRoot = 1302 => crate::executor::syscall::sys_environment_remove_root,

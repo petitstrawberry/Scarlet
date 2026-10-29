@@ -179,6 +179,27 @@ pub fn transition(task: &Task, policy: &Arc<Policy>, target: u32) -> Result<(), 
     Ok(())
 }
 
+pub fn sys_shield_reserve_exec(tf: &mut Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap(); tf.increment_pc_next(&task);
+    (|| -> Result<(), &'static str> {
+        let policy = policy_handle(&task, tf.get_arg(0), false)?;
+        crate::shield::exec_transition::reserve(&task, &policy, u32::try_from(tf.get_arg(1)).map_err(|_| "invalid label")?)
+    })().map_or(usize::MAX, |_| 0)
+}
+pub fn sys_shield_clear_exec(tf: &mut Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap(); tf.increment_pc_next(&task);
+    crate::shield::exec_transition::cancel(&task).map_or(usize::MAX, |_| 0)
+}
+pub fn sys_shield_constrain_information(tf: &mut Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap(); tf.increment_pc_next(&task);
+    let Ok(flags) = u32::try_from(tf.get_arg(0)) else { return usize::MAX };
+    crate::shield::information::constrain(&task, flags).map_or(usize::MAX, |_| 0)
+}
+pub fn sys_shield_information(tf: &mut Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap(); tf.increment_pc_next(&task);
+    crate::shield::information::constraints(&task) as usize
+}
+
 pub fn sys_shield_transition(tf: &mut Trapframe) -> usize {
     let task = crate::task::mytask().unwrap();
     let handle = tf.get_arg(0);

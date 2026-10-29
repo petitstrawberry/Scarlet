@@ -83,3 +83,41 @@ dispatch, including attempts to escape through native syscalls. The initial fixt
 [service integration](../../tools/android-compat/README.md#stock-servicemanager-integration)
 uses distinct process labels and the unmodified stock servicemanager to verify
 allowed registration/lookup and denied add/find/list requests.
+
+
+## Reserved exec transitions
+
+`ShieldReserveExec` (1315) reserves a transition delegated by the immutable
+policy for the current source label and all native principal slots. Both the
+policy/source identity and the resulting image's principal are rechecked before
+exec commit. A successful image replacement commits the new subject and consumes
+the reservation; failed exec retains it. Fork/spawn inherit a reservation by
+value, so a child's exec does not consume its parent's reservation.
+`ShieldClearExec` (1316) cancels the current task's reservation without a grant.
+An explicit delegated transition is distinct from file-derived privileges on a
+no-privilege-gain mount.
+
+Android maps `/proc/self/attr/exec` to this primitive, including stock
+libselinux's zero-byte `write(fd, NULL, 0)` cancellation. Descriptors retain their
+original owner; inherited/transferred descriptors cannot mutate another task's
+reservation. Native and Linux stream writes dispatch explicit zero-byte control
+operations without dereferencing a user pointer. Ordinary streams remain no-ops.
+
+## Information constraints
+
+`ShieldConstrainInformation` (1318) monotonically suppresses kernel-address
+introspection; `ShieldInformation` (1319) queries it. Fork/spawn/exec retain the
+constraint independently of numeric identity, subject labels or syscall filters.
+It redacts privileged PC samples and opaque CPU breadcrumb context, blocks raw
+kernel-log reads even through an already-open descriptor, and rejects profiler
+dumps that could disclose addresses. User instruction addresses remain available.
+
+The Android manager fixture installs this constraint before creating threads or
+launching init. Linux `kptr_restrict` reports that native state and accepts `2`
+only when already enforced. Requests to loosen it, or fabricate a global setting
+without an installed constraint, are rejected. This adapter does not implement
+host-global Linux sysctl mutation or the intermediate privilege-dependent level.
+The bounded init diagnostic grants only init-to-vendor_init at principal zero;
+it is not a full Android MAC policy. Its writable-kmsg diagnostic redirect writes
+userspace messages to the inherited console; privileged kernel-log forwarding is
+disabled under the constraint.

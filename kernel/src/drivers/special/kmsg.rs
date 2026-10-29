@@ -16,12 +16,15 @@ use crate::{
 };
 
 pub struct KmsgDevice;
+fn disclosure_denied() -> bool {
+    mytask().is_some_and(|task| task.execution_restrictions.read().kernel_addresses_hidden())
+}
 
 impl Selectable for KmsgDevice {
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
         let mut set = ReadySet::none();
         if interest.read {
-            set.read = !crate::log::is_empty();
+            set.read = disclosure_denied() || !crate::log::is_empty();
         }
         set
     }
@@ -33,6 +36,7 @@ impl Selectable for KmsgDevice {
         _timeout_ticks: Option<u64>,
         _min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
+        if disclosure_denied() { return SelectWaitOutcome::Ready; }
         if interest.read && crate::log::is_empty() {
             if let Some(task) = mytask() {
                 if crate::log::READER_WAKER.wait_result(task.get_id(), trapframe)
@@ -73,6 +77,7 @@ impl Device for KmsgDevice {
 
 impl CharDevice for KmsgDevice {
     fn read_byte(&self) -> Option<u8> {
+        if disclosure_denied() { return None; }
         while crate::log::is_empty() {
             if let Some(task) = mytask() {
                 if crate::log::READER_WAKER.wait_result(task.get_id(), task.get_trapframe())
@@ -101,7 +106,7 @@ impl CharDevice for KmsgDevice {
     }
 
     fn can_read(&self) -> bool {
-        !crate::log::is_empty()
+        disclosure_denied() || !crate::log::is_empty()
     }
 
     fn can_write(&self) -> bool {
@@ -109,6 +114,7 @@ impl CharDevice for KmsgDevice {
     }
 
     fn read_at(&self, position: u64, buffer: &mut [u8]) -> Result<usize, &'static str> {
+        if disclosure_denied() { return Err("kernel log disclosure denied"); }
         let pos = position as usize;
         while pos >= crate::log::head() {
             if let Some(task) = mytask() {
@@ -128,6 +134,8 @@ impl CharDevice for KmsgDevice {
         if buffer.is_empty() {
             return Ok(0);
         }
+
+        if disclosure_denied() { return Err(StreamError::PermissionDenied); }
 
         let pos = position as usize;
         while pos >= crate::log::head() {

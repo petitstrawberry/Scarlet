@@ -210,6 +210,10 @@ fn mounts_content(fs: &crate::fs::VfsManager) -> String {
 }
 
 fn text_content(path: &str) -> Option<String> {
+    if path == "/proc/sys/kernel/kptr_restrict" {
+        let caller = crate::task::mytask()?;
+        return Some(String::from(if caller.execution_restrictions.read().kernel_addresses_hidden() { "2\n" } else { "0\n" }));
+    }
     if matches!(path, "/proc/mounts" | "/proc/self/mounts" | "/proc/thread-self/mounts") {
         let fs = crate::task::mytask()?.get_vfs()?;
         return Some(mounts_content(&fs));
@@ -300,7 +304,7 @@ pub(super) fn open_proc_text_file(
     } else {
         text_content(path)?
     };
-    if flags & 3 != 0 {
+    if flags & 3 == 3 || (flags & 3 != 0 && path != "/proc/sys/kernel/kptr_restrict") {
         return Some(errno::to_result(errno::EACCES));
     }
     if flags & O_DIRECTORY != 0 && !directory {
@@ -311,6 +315,7 @@ pub(super) fn open_proc_text_file(
         content,
         path: String::from(path.trim_end_matches('/')),
         directory,
+        access: flags & 3,
     });
     let handle = match task.handle_table.insert(KernelObject::File(file)) {
         Ok(handle) => handle,
@@ -334,6 +339,7 @@ struct ProcTextFile {
     content: String,
     path: String,
     directory: bool,
+    access: i32,
 }
 
 impl StreamOps for ProcTextFile {
@@ -381,8 +387,16 @@ impl StreamOps for ProcTextFile {
         Ok(n)
     }
 
-    fn write(&self, _buffer: &[u8]) -> Result<usize, StreamError> {
-        Err(StreamError::PermissionDenied)
+    fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
+        if self.access == 0 || self.path != "/proc/sys/kernel/kptr_restrict" { return Err(StreamError::PermissionDenied); }
+        let caller = crate::task::mytask().ok_or(StreamError::PermissionDenied)?;
+        let value = core::str::from_utf8(buffer).map_err(|_| StreamError::InvalidArgument)?.trim();
+        if !matches!(value, "0" | "1" | "2") { return Err(StreamError::InvalidArgument); }
+        // The manager installs the inherited constraint before launching Android.
+        // A proc write may confirm it, but cannot impersonate a global kernel
+        // policy change or loosen a stronger native restriction.
+        if value != "2" || !caller.execution_restrictions.read().kernel_addresses_hidden() { return Err(StreamError::PermissionDenied); }
+        Ok(buffer.len())
     }
 }
 
@@ -436,11 +450,15 @@ impl FileObject for ProcTextFile {
     }
 
     fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, StreamError> {
+        if self.access == 1 { return Err(StreamError::PermissionDenied); }
         if self.directory {
             return Err(StreamError::InvalidArgument);
         }
         let start = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
-        let bytes = self.content.as_bytes();
+        let bytes = if self.path == "/proc/sys/kernel/kptr_restrict" {
+            if crate::task::mytask().is_some_and(|task| task.execution_restrictions.read().kernel_addresses_hidden()) { b"2\n".as_slice() }
+            else { b"0\n".as_slice() }
+        } else { self.content.as_bytes() };
         if start >= bytes.len() {
             return Ok(0);
         }
@@ -460,6 +478,22 @@ impl FileObject for ProcTextFile {
 
 #[cfg(test)]
 mod tests {
+    #[test_case]
+    fn kptr_control_confirms_a_real_inherited_constraint_and_never_loosens_it() {
+        use super::*;
+        let task = Arc::new(crate::task::new_user_task("kptr-control".into(), 0));
+        crate::task::set_mock_current_task(task.clone());
+        let file = ProcTextFile { position: IrqRwSpinLock::new(0), content: String::from("0\n"),
+            path: String::from("/proc/sys/kernel/kptr_restrict"), directory: false, access: 2 };
+        assert!(file.write(b"2").is_err()); // Cannot fabricate a global policy setting.
+        crate::shield::information::constrain(&task, 1).unwrap();
+        assert_eq!(file.write(b"2\n").unwrap(), 2);
+        assert!(file.write(b"0").is_err()); assert!(file.write(b"1").is_err());
+        assert!(file.write(b"invalid").is_err());
+        let mut value = [0; 2]; assert_eq!(file.read(&mut value).unwrap(), 2); assert_eq!(&value, b"2\n");
+        crate::task::clear_mock_current_task();
+    }
+
     #[test_case]
     fn proc_mounts_reports_only_selected_view_and_escapes_paths_with_real_restrictions() {
         use alloc::sync::Arc;

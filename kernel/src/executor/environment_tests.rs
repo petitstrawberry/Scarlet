@@ -620,3 +620,66 @@ fn mount_namespace_join_rejects_live_clone_fs_but_accepts_an_unshared_context() 
     drop(parent);
     reset();
 }
+
+fn exec_transition_policy(task: &Task) -> Arc<crate::shield::Policy> {
+    let policy = crate::shield::Policy::with_transitions(alloc::vec![
+        (1, "source".into()), (2, "target".into()), (3, "other".into()),
+    ], alloc::vec![], alloc::vec![crate::shield::TransitionRule {
+        source: 1, target: 2, principal: crate::shield::identity::Principal(0),
+    }]).unwrap();
+    *task.security_subject.write() = Some(policy.subject(1).unwrap());
+    policy
+}
+#[test_case]
+fn exec_transition_is_consumed_only_on_success_and_commits_the_subject_transactionally() {
+    let (task, _, _, _) = fixture(); let policy = exec_transition_policy(&task);
+    crate::shield::exec_transition::reserve(&task, &policy, 2).unwrap();
+    let mut frame = Trapframe::new();
+    assert!(TransparentExecutor::execute_with_abi("/txn-image", &["image"], &["FAIL=1"], TestImageAbi::name(), &task, &mut frame).is_err());
+    assert_eq!(task.security_subject.read().as_ref().unwrap().label(), 1);
+    assert!(task.pending_exec_transition.read().is_some());
+    assert_eq!(task.vm_manager.memmap_len(), 0);
+    TransparentExecutor::execute_with_abi("/txn-image", &["image"], &[], TestImageAbi::name(), &task, &mut frame).unwrap();
+    assert_eq!(task.security_subject.read().as_ref().unwrap().label(), 2);
+    assert!(task.pending_exec_transition.read().is_none());
+}
+#[test_case]
+fn exec_transition_rechecks_principal_source_and_policy_after_reservation() {
+    use crate::shield::identity::{Identities, Principal};
+    let (task, _, _, _) = fixture(); let policy = exec_transition_policy(&task);
+    crate::shield::exec_transition::reserve(&task, &policy, 2).unwrap();
+    task.credentials.write().set_principals(Identities::all(Principal(42))).unwrap();
+    let mut frame = Trapframe::new();
+    assert!(TransparentExecutor::execute_with_abi("/txn-image", &["image"], &[], TestImageAbi::name(), &task, &mut frame).is_err());
+    assert!(task.pending_exec_transition.read().is_some());
+    task.credentials.write().set_principals(Identities::all(Principal(0))).unwrap();
+    assert!(TransparentExecutor::execute_with_abi("/txn-image", &["image"], &["GAIN=1"], TestImageAbi::name(), &task, &mut frame).is_err());
+    assert_eq!(task.credentials.read().principals(), Identities::all(Principal(0)));
+    *task.security_subject.write() = Some(policy.subject(3).unwrap());
+    assert!(TransparentExecutor::execute_with_abi("/txn-image", &["image"], &[], TestImageAbi::name(), &task, &mut frame).is_err());
+    let foreign = crate::shield::Policy::new(alloc::vec![(1, "source".into())], alloc::vec![]).unwrap();
+    *task.security_subject.write() = Some(foreign.subject(1).unwrap());
+    assert!(TransparentExecutor::execute_with_abi("/txn-image", &["image"], &[], TestImageAbi::name(), &task, &mut frame).is_err());
+    crate::shield::exec_transition::cancel(&task).unwrap();
+    assert!(task.pending_exec_transition.read().is_none());
+    TransparentExecutor::execute_with_abi("/txn-image", &["image"], &[], TestImageAbi::name(), &task, &mut frame).unwrap();
+    assert!(task.security_subject.read().as_ref().unwrap().same_identity(&foreign.subject(1).unwrap()));
+}
+#[test_case]
+fn fork_and_explicit_nosuid_exec_keep_delegated_transition_separate_from_file_grants() {
+    let (task, fs, _, _) = fixture(); let policy = exec_transition_policy(&task);
+    fs.create_dir("/no-grants").unwrap();
+    fs.mount(crate::fs::drivers::tmpfs::TmpFS::new(0), "/no-grants", 2).unwrap();
+    fs.create_file("/no-grants/image", FileType::RegularFile).unwrap();
+    crate::shield::information::constrain(&task, 1).unwrap();
+    crate::shield::exec_transition::reserve(&task, &policy, 2).unwrap();
+    let child = task.clone_task(crate::task::CloneFlags::default()).unwrap();
+    assert!(child.pending_exec_transition.read().is_some());
+    let mut frame = Trapframe::new();
+    TransparentExecutor::execute_with_abi("/no-grants/image", &["image"], &[], TestImageAbi::name(), &child, &mut frame).unwrap();
+    assert_eq!(child.security_subject.read().as_ref().unwrap().label(), 2);
+    assert!(child.pending_exec_transition.read().is_none());
+    assert!(task.pending_exec_transition.read().is_some());
+    assert_eq!(crate::shield::information::constraints(&child), 1);
+    assert!(!child.execution_restrictions.read().is_constrained());
+}

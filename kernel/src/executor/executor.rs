@@ -421,8 +421,10 @@ impl TransparentExecutor {
                 .map_err(|_| failure("invalid target working directory"))?;
         }
 
+        let pending_transition = source.pending_exec_transition.read().clone();
         let mut image = task.new_exec_image();
         if explicit_transition {
+            *image.security_subject.write() = source.security_subject.read().clone();
             *image.credentials.write() = source.credentials.read().clone();
             *image.execution_restrictions.write() = source.execution_restrictions.read().clone();
         }
@@ -471,12 +473,21 @@ impl TransparentExecutor {
                 return Err(failure("file-derived privilege changes disabled on mount"));
             }
         }
+        if let Some(pending) = pending_transition {
+            let source_subject = source.security_subject.read().clone().ok_or_else(|| failure("exec transition source lost"))?;
+            let prepared_subject = image.security_subject.read().clone().ok_or_else(|| failure("exec transition source lost"))?;
+            if !source_subject.same_identity(&prepared_subject) { return Err(failure("exec transition source changed")); }
+            let target = pending.resolve(&source_subject, &image.credentials.read()).map_err(failure)?;
+            *image.security_subject.write() = Some(target);
+        }
         image.set_executable_path(identity);
 
         // All fallible operations are complete. Locks here only exchange owned
         // state; no filesystem I/O, loader callbacks, or allocation occurs.
         let commit_guard = crate::sync::IrqGuard::new();
         task.vm_manager.exchange_exec_image(&image.vm_manager);
+        core::mem::swap(&mut *task.security_subject.write(), &mut *image.security_subject.write());
+        *task.pending_exec_transition.write() = None;
         core::mem::swap(&mut *task.credentials.write(), &mut *image.credentials.write());
         core::mem::swap(&mut *task.execution_restrictions.write(), &mut *image.execution_restrictions.write());
         task.handle_table.exchange_exec_table(&image.handle_table);

@@ -110,6 +110,7 @@ enum Content {
     Access,
     Context,
     Current(Weak<Task>),
+    Exec(Weak<Task>),
 }
 struct Node {
     id: u64,
@@ -410,6 +411,22 @@ fn decision(policy: &Policy, input: &[u8]) -> Result<Vec<u8>, StreamError> {
     Ok(format!("{allowed:x} ffffffff 0 ffffffff 1 0").into_bytes())
 }
 impl StreamOps for SecurityFile {
+    fn write_empty(&self) -> Result<usize, StreamError> {
+        if !self.writable { return Err(StreamError::PermissionDenied); }
+        if matches!(self.content, Content::Current(_)) { return Err(StreamError::InvalidArgument); }
+        if let Content::Exec(owner) = &self.content {
+            if !self.writable { return Err(StreamError::PermissionDenied); }
+            let caller = crate::task::mytask().ok_or(StreamError::PermissionDenied)?;
+            let owner = owner.upgrade().ok_or(StreamError::PermissionDenied)?;
+            if !core::ptr::eq(&*caller, &*owner) { return Err(StreamError::PermissionDenied); }
+            let mut state = self.state.lock();
+            if state.written || state.position != 0 { return Err(StreamError::InvalidArgument); }
+            crate::shield::exec_transition::cancel(&caller).map_err(|_| StreamError::PermissionDenied)?;
+            state.written = true;
+        }
+        Ok(0)
+    }
+
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         if !self.readable {
             return Err(StreamError::PermissionDenied);
@@ -458,7 +475,7 @@ impl StreamOps for SecurityFile {
         if buffer.is_empty() || buffer.len() > 4095 {
             return Err(StreamError::InvalidArgument);
         }
-        if let Content::Current(owner) = &self.content {
+        if let Content::Current(owner) | Content::Exec(owner) = &self.content {
             let caller = crate::task::mytask().ok_or(StreamError::PermissionDenied)?;
             let owner = owner.upgrade().ok_or(StreamError::PermissionDenied)?;
             if !core::ptr::eq(&*caller, &*owner) {
@@ -474,8 +491,11 @@ impl StreamOps for SecurityFile {
             if state.written || state.position != 0 {
                 return Err(StreamError::InvalidArgument);
             }
-            crate::shield::syscall::transition(&caller, &self.policy, target)
-                .map_err(|_| StreamError::PermissionDenied)?;
+            if matches!(&self.content, Content::Exec(_)) {
+                crate::shield::exec_transition::reserve(&caller, &self.policy, target)
+            } else {
+                crate::shield::syscall::transition(&caller, &self.policy, target)
+            }.map_err(|_| StreamError::PermissionDenied)?;
             state.written = true;
             return Ok(buffer.len());
         }
@@ -613,7 +633,9 @@ pub(super) fn mmap(object: &KernelObject, mapping: &FileMapping) -> Option<usize
 }
 
 pub(super) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> Option<usize> {
-    let pid = path.strip_prefix("/proc/")?.strip_suffix("/attr/current")?;
+    let proc_path = path.strip_prefix("/proc/")?;
+    let (pid, exec) = if let Some(pid) = proc_path.strip_suffix("/attr/current") { (pid, false) }
+        else { (proc_path.strip_suffix("/attr/exec")?, true) };
     let result = (|| -> Result<usize, usize> {
         if flags & 3 == 3 || flags & !(0x80000 | 0x800 | 0x20000 | 3) != 0 {
             return Err(errno::EACCES);
@@ -648,9 +670,12 @@ pub(super) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> O
         if !Arc::ptr_eq(caller.policy(), subject.policy()) {
             return Err(errno::EACCES);
         }
-        let bytes = format!("{}\0", subject.name()).into_bytes();
+        let bytes = if exec {
+            target.as_deref().unwrap_or(task).pending_exec_transition.read().as_ref()
+                .map(|pending| format!("{}\0", pending.target().name()).into_bytes()).unwrap_or_default()
+        } else { format!("{}\0", subject.name()).into_bytes() };
         let content = if writable {
-            if !core::ptr::eq(target.as_deref().unwrap_or(task), task) || !caller.can_transition() {
+            if !core::ptr::eq(target.as_deref().unwrap_or(task), task) || (!exec && !caller.can_transition()) {
                 return Err(errno::EACCES);
             }
             let current = crate::task::mytask().ok_or(errno::ESRCH)?;
@@ -659,7 +684,7 @@ pub(super) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> O
             }
             let owner = crate::sched::scheduler::get_task_by_id(current.get_id()).ok_or(errno::ESRCH)?;
             if !core::ptr::eq(owner.as_ref(), task) { return Err(errno::ESRCH); }
-            Content::Current(Arc::downgrade(&owner))
+            if exec { Content::Exec(Arc::downgrade(&owner)) } else { Content::Current(Arc::downgrade(&owner)) }
         } else {
             Content::Text(bytes.clone())
         };
@@ -911,4 +936,39 @@ mod tests {
         );
         clear_mock_current_task();
     }
+    #[test_case]
+    fn android_setexeccon_reserves_without_relabeling_and_zero_write_clears_with_live_owner_check() {
+        use crate::shield::{TransitionRule, identity::Principal};
+        use crate::task::{TaskType, set_mock_current_task, clear_mock_current_task};
+        let policy = Policy::with_transitions(vec![(1, "u:r:init:s0".into()), (2, "u:r:vendor_init:s0".into())],
+            vec![], vec![TransitionRule { source: 1, target: 2, principal: Principal(0) }]).unwrap();
+        let task = Arc::new(Task::new("exec-transition".into(), 0, TaskType::User));
+        *task.security_subject.write() = Some(policy.subject(1).unwrap());
+        set_mock_current_task(task.clone());
+        let make_file = || Arc::new(SecurityFile {
+            content: Content::Exec(Arc::downgrade(&task)), policy: policy.clone(), status: None,
+            metadata: metadata(1, 0, false, true), entries: Vec::new(), readable: false, writable: true,
+            state: IrqSpinLock::new(FileState { bytes: Vec::new(), position: 0, written: false }),
+        });
+        let file = make_file();
+        file.write(b"u:r:vendor_init:s0\0").unwrap();
+        assert_eq!(task.security_subject.read().as_ref().unwrap().label(), 1);
+        assert_eq!(task.pending_exec_transition.read().as_ref().unwrap().target().label(), 2);
+        let child = Arc::new(task.clone_task(crate::task::CloneFlags::default()).unwrap());
+        set_mock_current_task(child.clone());
+        assert!(make_file().write_empty().is_err());
+        assert!(child.pending_exec_transition.read().is_some());
+        set_mock_current_task(task.clone());
+        let clear = make_file();
+        let handle = task.handle_table.insert(KernelObject::File(clear)).unwrap();
+        let mut abi = LinuxAbi::default(); let fd = abi.allocate_fd(handle).unwrap();
+        abi.set_file_status_flags(fd, 2).unwrap();
+        let mut frame = crate::arch::Trapframe::new(); frame.set_arg(0, fd);
+        // libselinux uses write(fd, NULL, 0) to cancel, so no user buffer exists.
+        assert_eq!(crate::abi::linux::generic::fs::sys_write(&mut abi, &mut frame), 0);
+        assert!(task.pending_exec_transition.read().is_none());
+        assert!(child.pending_exec_transition.read().is_some());
+        clear_mock_current_task();
+    }
+
 }
