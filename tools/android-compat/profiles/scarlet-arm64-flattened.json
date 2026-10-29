@@ -133,6 +133,9 @@
       "u:object_r:vndk_prop:s0",
       "u:object_r:vold_config_prop:s0",
       "u:object_r:zram_control_prop:s0"
+    ],
+    "u:r:ueventd:s0": [
+      "u:object_r:cold_boot_done_prop:s0"
     ]
   },
   "init_imports": [

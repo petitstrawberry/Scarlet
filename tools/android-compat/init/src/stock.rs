@@ -41,6 +41,8 @@ pub fn environment(
         .bind("/tmp", &native, "/tmp")
         .map_err(|_| "Android tmp")?;
     if option_env!("SCARLET_ANDROID_INIT_BOOTSTRAP") == Some("1") {
+        let discovery=VfsView::create("linux-device-tree", "").map_err(|_| "native device discovery")?;
+        android.bind("/sys/devices", &discovery, "/").map_err(|_| "Android device discovery")?;
         super::shield::configure_init(&android)?;
     } else if option_env!("SCARLET_ANDROID_SHIELD") == Some("1") {
         super::shield::configure(&android)?;

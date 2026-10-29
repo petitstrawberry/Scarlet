@@ -99,6 +99,8 @@ def prepare(archive, runtime, stock, profile_file, output):
             if path.startswith("/system/etc/init/hw/"):
                 continue
             system.dump(path, output / path[1:])
+        for path in ["/system/etc/ueventd.rc", "/system/etc/selinux/plat_file_contexts"]:
+            system.dump(path, output / path[1:])
         queue = []
         for name in ["init", "ueventd", "apexd", "servicemanager", "boringssl_self_test64", "bootstrap/linker64", "bootstrap/linkerconfig"]:
             path = output / "system/bin" / name
@@ -156,7 +158,7 @@ def configure(output, stock, profile, contexts, metadata):
         f'{name} = "{value}"\n' for name, value in sorted(profile["bootconfig"].items())))
     (output / "scarlet/boot/init.rc").write_text("# Explicit Scarlet device boot configuration\n" + "".join(
         "import " + path + "\n" for path in profile["init_imports"]))
-    for name in ["apex", "linkerconfig", "data", "sys/fs/selinux", "system_ext/apex", "product/apex", "vendor/apex"]:
+    for name in ["apex", "linkerconfig", "data", "sys/devices", "sys/fs/selinux", "system_ext/apex", "product/apex", "vendor/apex"]:
         (output / name).mkdir(parents=True, exist_ok=True)
     if "resource_groups" in profile:
         (output / "etc").mkdir(exist_ok=True)
