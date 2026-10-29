@@ -7,7 +7,7 @@ neither fixture certifies general APK compatibility.
 |---|---|---|
 | Execution | APK → Android framework/ART → guest Linux → crosvm → Scarlet | Android ELF → Bionic/linker → Scarlet Android ABI (composes Linux ABI) |
 | Reused Android facilities | Guest Binder, Android init, framework and HALs | Real Bionic/linker and an initial Binder UAPI adapter |
-| Main work ahead | Finish framework boot, then connect display/input to SWS | Binder object references/services, broader ART/JNI coverage, framework and graphics integration |
+| Main work ahead | Finish framework boot, then connect display/input to SWS | Unmodified libbinder services, broader ART/JNI coverage, framework and graphics integration |
 | Current rendering | Cuttlefish ANGLE/SwiftShader, headless virtio-gpu stub | No Android graphics stack yet |
 | Fixture | [Cuttlefish project](../../projects/aarch64-limine-crosvm/README.md) | This directory |
 
@@ -18,8 +18,8 @@ Bionic → Binder client/server → ART/JNI → a minimal framework application.
 
 ## Direct Bionic execution
 
-Verified on 2026-10-28: **eighteen cases pass** with `--binder` on Scarlet/AArch64 with outer QEMU
-HVF and TCG, Android NDK r25b targeting API 33, and an Android 13 ARM64 runtime APEX
+Verified on 2026-10-29: **eighteen cases pass** with `--binder` on Scarlet/AArch64 with outer QEMU
+HVF, Android NDK r25b targeting API 33, and an Android 13 ARM64 runtime APEX
 from the locally installed SDK image. No guest Linux kernel is involved.
 
 Each case runs in a fresh process and must produce both child `BEGIN`/`OK`
@@ -35,7 +35,7 @@ records and exit status zero. The host also requires the final suite marker.
 | exec | PASS | PASS | Sparse FD numbers, file flags, CLOEXEC and Android device dispatch survive exec |
 | xattr | PASS | PASS | All twelve path/fd/no-follow calls, binary values, limits, atomic flags, rename and unlink identity |
 | mremap | PASS | PASS | Fixed relocation, in-place/moving growth, lazy pages, protection, fork isolation, zeroed regrowth and 512 Bionic atexit callbacks |
-| binder | PASS | PASS | Cross-process request/reply, read-only receive pages, buffer release, peer death, fork isolation, poll timeout/interruption and epoll level readiness |
+| binder | PASS | PASS | Three-process object forwarding, owner roundtrip, strong/weak reference lifetimes, malformed objects, 64-object boundaries, cleared buffers, peer closure, fork isolation, poll and epoll readiness |
 
 An additional static probe explicitly selects `linux-aarch64` and verifies that
 none of the three Binder aliases is exposed. This is the eighteenth case.
@@ -303,8 +303,10 @@ object has a unique endpoint-local dispatch key; copying a key alone grants no
 reference. Object references can be forwarded in requests or replies. They do
 not keep the serving endpoint alive. Dropping a caller cancels its request;
 closing an endpoint revokes object dispatch and completes outstanding calls.
-These are internal kernel objects; a public native handle/syscall API and
-Binder wire object translation are not exposed yet.
+Individual objects can also be revoked without closing sibling objects. Opaque
+adapter leases travel with messages, and weak completion notifiers let callers
+share an adapter's readiness source. A public native handle/syscall API is not
+exposed yet.
 
 `kernel/src/abi/android/binder/` translates the **64-bit** Binder UAPI.
 Only the Android ABI recognizes `/dev/binder`, `/dev/hwbinder` and `/dev/vndbinder`
@@ -316,35 +318,61 @@ or after changing execution environment. Kernel tests exercise isolation by
 attempting real adapter transactions across these boundaries.
 
 The initial adapter supports protocol version 8, context-manager registration,
-manual loopers, `BINDER_WRITE_READ`, byte-only synchronous transactions to handle
-0, replies, transaction completion, `BC_FREE_BUFFER`, thread exit and poll
+manual loopers, `BINDER_WRITE_READ`, synchronous transactions to handle 0 or a
+transferred strong handle, replies, transaction completion, `BC_FREE_BUFFER`, thread exit and poll
 waits with timeout/interruption through native RPC Wakers. Existing Linux epoll
 readiness scans also observe Binder's level-triggered state. A read-only
 receive VMA owns only its backing, so closing the file still completes pending
 calls while the VMA remains mapped. Fork omits these process-specific mappings;
 threads sharing an address space retain them. User copies and waits execute
 without holding the adapter's IRQ lock.
+Endpoint lifetime follows the open-file description: an inherited description
+can delay closure even though a foreign process cannot operate it.
+
+Flat strong/weak Binder objects and handles are translated through native RPC
+capabilities. Handles retain identity when forwarded to a third process and
+translate back to the original pointer/cookie when returned to their owner.
+Receive buffers hold temporary references; `BC_INCREFS`/`BC_ACQUIRE` retain
+explicit references beyond buffer release, and `BC_RELEASE`/`BC_DECREFS`
+release them. Owner notifications and their DONE acknowledgements guard the
+userspace object's lifetime. Completion waits for every locally exported
+object's acquisition, including acquisitions begun by another thread. Local
+payload delivery waits while acquisitions are pending. If that thread exits,
+affected objects are revoked and acknowledged holds are released after leases
+drain. An acquire delivered without its DONE cannot safely be undone; its
+userspace hold may remain until process exit. `TF_CLEAR_BUF` is preserved and
+freed receive slots are cleared.
 
 Limits: 64 in-flight native calls per endpoint, 64 tracked threads per Binder
-open, one incoming/outgoing call per thread, payloads up to 65,524 bytes, and a
+open, 1,024 local/retired nodes and 1,024 imported handles, one incoming/outgoing
+call per thread, at most 64 flat objects per message, and a
 64 KiB–4 MiB receive VMA using 64 KiB slots. Partial unmap invalidates the arena.
+The native message limit includes a 24-byte adapter header, aligned payload and
+offsets; a byte-only payload can contain up to 65,512 bytes. Handle numbers are
+not reused within an open file.
 Fixed-address mmap and remapping an arena are rejected. The device aliases are
 not a binderfs implementation and are not yet represented by normal VFS nodes.
 
-**Not implemented:** object/FD transfer, strong/weak reference accounting,
+**Not implemented:** FD/buffer-object transfer, weak-to-strong promotion,
 general death subscriptions, one-way and nested calls, automatic thread-pool
-growth, security-context records and SELinux policy.
+growth, priority inheritance, security-context records and SELinux policy.
 Unsupported transaction features return errors. The Binder checkpoint does not
 yet run unmodified libbinder services or servicemanager. The separate minimal
 ART/Java fixture passes; direct APK execution remains unverified.
+
+The [object checkpoint](checkpoints/2026-10-29-binder-objects/verification.json)
+records the three-process NDK UAPI probes in both static and dynamic Bionic,
+the full 1,623-test kernel suite on HVF, and stock image-less ART `-Xint` Java
+execution on the same release kernel. The host requires ordered object-transfer
+and reference-release markers; the earlier byte-only probe cannot satisfy it.
 
 The [service checkpoint](checkpoints/2026-10-28-binder-services/verification.json)
 records the poll regression probes and native object transfer/lifetime tests.
 The unmodified SDK `servicemanager` reaches startup but exits with status 127;
 a separate diagnostic run redirecting Android logs to stderr identifies
 `selinux_status_open(true)` as the failing check. It does not reach a usable
-service manager. Binder object/handle translation and libbinder service tests
-come next; SELinux compatibility is a separate design task.
+service manager. Unmodified libbinder service tests come next; SELinux
+compatibility is a separate design task.
 
 `prepare-servicemanager.py` extracts the executable from the same pinned SDK
 archive as `prepare-art.py` and checks its library dependencies against the
@@ -475,4 +503,4 @@ Kernel regression tests additionally cover auxv, unsupported prctl requests
 and tagged fault-address normalization, RPC cancellation/lifetime/bounds,
 Binder environment/device isolation, receive-buffer validation and Android ELF
 identification (including malformed/truncated inputs). The final AArch64 suite
-passes 1,607 tests; the RISC-V kernel library also compiles.
+passes 1,623 tests on HVF; the RISC-V kernel library also compiles.

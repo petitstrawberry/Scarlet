@@ -1,0 +1,12 @@
+............................
+----------------------------------------------------------------------
+Ran 28 tests in 0.137s
+
+OK
+ART direct execution: missing or failed child evidence
+ART direct execution: PASS
+ART direct execution: missing or failed child evidence
+ART direct execution: PASS
+Android program diagnostic: EXITED; exit=0
+Android program diagnostic: EXITED; exit=127
+Android program diagnostic: timeout; exit=None

@@ -1,0 +1,55 @@
+{
+  "date": "2026-10-29",
+  "revisions": {
+    "native_rpc": "bf25b0dd546c807856c4e5999a7a806fe03ce84c",
+    "binder_adapter": "f4bc420e67400d5dba7e04cf7a0abbff24c504a1",
+    "probes": "23b5bfb7ef0126a5f6ca64270f2e8c516c19482c"
+  },
+  "kernel_sha256": "e53def5070e622fbdb69a5917b492d7d88cd6983a50914c32ce0fcc355813e73",
+  "validation": {
+    "acceleration": "HVF",
+    "kernel_tests": 1623,
+    "bionic_cases": 18,
+    "art": "stock Android 13 image-less -Xint Java, no preload; exit 0",
+    "host_tests": 28,
+    "riscv_release_check": "PASS"
+  },
+  "coverage": [
+    "Strong and weak flat objects and handles, third-process forwarding, owner roundtrip, nonzero target handles, unused union padding",
+    "Buffer and explicit-reference lifetime, strong-zero/weak-live and balanced owner notifications before close, endpoint closure",
+    "Malformed offsets, unsupported FD objects and flags, unknown handles, 64-object boundary, failed encode rollback",
+    "Concurrent exporters share acquisition dependencies; local pointer delivery waits for acknowledgement; abandoned acquisition revokes only its node and releases known holds",
+    "Individual native capability revocation, queued and delivered requests, retained-message resources, shared caller/receiver wake broadcast",
+    "TF_CLEAR_BUF propagation and zeroed buffers after release"
+  ],
+  "limitations": [
+    "NDK Binder UAPI probe, not an unmodified libbinder service or usable servicemanager",
+    "FD/buffer-object transfer, weak promotion, one-way/nested calls, death subscriptions, priority inheritance and SELinux remain unsupported",
+    "An acquire delivered without DONE cannot safely be undone; its userspace hold may persist until process exit",
+    "Inherited open-file descriptions may defer endpoint closure despite rejected foreign-process operations",
+    "No direct APK or graphics claim"
+  ],
+  "reproduction": {
+    "kernel_runner": "CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER=\"python3 <checkpoint>/run-kernel-hvf.py <repository>\" cargo test --target targets/aarch64-unknown-none-elf.json (from kernel/, inside nix develop)",
+    "runtime": "Recorded commands and input hashes are in bionic-hvf/ and art-hvf/. The kernel runner selects -cpu host -accel hvf and the flake-provided HVF firmware."
+  },
+  "sha256": {
+    "art-hvf/art-launch.json": "e350fff01786b4cd43d80ea9640f1ff12a0ff483dd49025fa7acf749647cf7af",
+    "art-hvf/commands.json": "dbf9ce1d9de3b21d0083b621d6ee3d7a5353d0522d8cb2f0e3e9800b35645b73",
+    "art-hvf/inputs.json": "c2aa22509ed984a2d4a27bbca8d06b8951085b874c172dcf9c7a1caa9b2f9c37",
+    "art-hvf/result.json": "236433e40f5c9e191fafbbd7e81c0c4e3d8e25f24bb466a7e424b10254068959",
+    "art-hvf/serial.log": "7dff0687f8e3d80e837d4e40c9c429a78cedd6044ca2ca2bb563c9d044ba010e",
+    "bionic-hvf/commands.json": "8c50d5427068683dcca56aeb510d86f1bc4c5564eb8c6bf7bb093b12b3ae9d4c",
+    "bionic-hvf/inputs.json": "129984518a934b0647b200991baffd924bd9de8aacf4c4f02bfb30d73752f41f",
+    "bionic-hvf/probes.json": "9742890417dbd16a0a157094c139157c6e1151d36a17cce04b0cc4f51c730460",
+    "bionic-hvf/result.json": "be4114eac8b19f4a07b075e156cb88252d44a872db7c702d33400f612c864917",
+    "bionic-hvf/serial.log": "ff312fd654258e37c065646505b51ef6283494b74f934eb6883926caaefa76fd",
+    "bsp-build.Cargo.lock": "10482fa0f39758edcd7735c7dbf0ab3e1919b851a9e4a03cbf05302382d64770",
+    "build.log": "a15e27a8ef9698ab7ace78296459593ae61d047505dcaac4163a3781f639b04f",
+    "host-tests.log": "11c1198e1962c3de39ef0a3f49519f0f367366a599508d49ee456f18cab2c948",
+    "kernel-tests-hvf.log": "ba87a918eeed295c9e5a1e90373c0f324643b09de1baa42c7f721721c9159b10",
+    "probes-build.json": "9742890417dbd16a0a157094c139157c6e1151d36a17cce04b0cc4f51c730460",
+    "riscv.log": "ab5a57b7bdbbe34e13402a15e70d4b80e4d478842d8cd60dfd3b321bf409f5d4",
+    "run-kernel-hvf.py": "0e08ec864c22cb4048da8f8714812cb48d160bcd9f89bde7507b77e482f9539d"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "result": "PASS",
+  "qemu_exit_code": 0,
+  "elapsed_seconds": 13.865,
+  "dynamic_runtime": true,
+  "art": {
+    "result": "PASS",
+    "records": [
+      "SCARLET_ANDROID_STOCK_START properties",
+      "SCARLET_PROPERTY_SNAPSHOT_OK",
+      "SCARLET_ANDROID_STOCK_EXIT properties 0",
+      "SCARLET_ANDROID_STOCK_START linkerconfig",
+      "SCARLET_ANDROID_STOCK_EXIT linkerconfig 0",
+      "SCARLET_ANDROID_STOCK_OK",
+      "SCARLET_ANDROID_ART_START",
+      "SCARLET_ART_BEGIN",
+      "Scarlet ART: 42",
+      "SCARLET_ART_OK",
+      "SCARLET_ANDROID_ART_EXIT 0",
+      "SCARLET_ANDROID_ART_OK"
+    ]
+  }
+}
