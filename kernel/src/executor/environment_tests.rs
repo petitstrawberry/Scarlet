@@ -538,3 +538,85 @@ fn shared_mount_accepts_null_filesystem_type_and_creates_native_peer_group() {
     crate::task::clear_mock_current_task();
     assert_eq!(result, 0);
 }
+
+#[test_case]
+fn mount_namespace_capability_restores_view_without_replacing_environment_or_identity() {
+    let (task, fs, environment, _) = fixture();
+    fs.create_dir("/mounted").unwrap();
+    let original = task.capture_mount_namespace().unwrap();
+    assert_eq!(task.capture_mount_namespace().unwrap().id(), original.id());
+    let (private, local) = task.prepare_mount_namespace().unwrap();
+    assert_ne!(private.id(), original.id());
+    task.install_mount_namespace(private.clone(), local.clone());
+    local.mount(crate::fs::drivers::tmpfs::TmpFS::new(0), "/mounted", 14).unwrap();
+    local.create_file("/mounted/private", FileType::RegularFile).unwrap();
+    let saved = task.capture_mount_namespace().unwrap();
+    let credentials = task.credentials.read().clone();
+    task.join_mount_namespace(original.clone()).unwrap();
+    assert_eq!(task.mount_namespace.read().id(), original.id());
+    assert!(Arc::ptr_eq(&task.execution_environment.read().clone().unwrap(), &environment));
+    assert!(Arc::ptr_eq(&task.get_vfs().unwrap().view(), &fs.view()));
+    assert!(task.get_vfs().unwrap().resolve_path("/mounted/private").is_err());
+    task.join_mount_namespace(saved).unwrap();
+    assert!(task.get_vfs().unwrap().resolve_path("/mounted/private").is_ok());
+    assert_eq!(*task.credentials.read(), credentials);
+}
+
+#[test_case]
+fn mount_namespace_join_rejects_foreign_environment_and_missing_cwd_transactionally() {
+    use crate::fs::vfs_v2::namespace::JoinError;
+    let (task, fs, _, _) = fixture();
+    let original = task.capture_mount_namespace().unwrap();
+    let other = new_user_task("foreign-namespace".into(), 0);
+    other.set_vfs(Arc::new(VfsManager::new()));
+    let foreign = other.capture_mount_namespace().unwrap();
+    assert_eq!(task.join_mount_namespace(foreign), Err(JoinError::IncompatibleView));
+    assert!(Arc::ptr_eq(&fs, &task.get_vfs().unwrap()));
+    let (private, local) = task.prepare_mount_namespace().unwrap();
+    task.install_mount_namespace(private.clone(), local.clone());
+    local.mount(crate::fs::drivers::tmpfs::TmpFS::new(0), "/work", 0).unwrap();
+    local.create_dir("/work/only-here").unwrap();
+    local.set_cwd_by_path("/work/only-here").unwrap();
+    assert_eq!(task.join_mount_namespace(original), Err(JoinError::WorkingDirectory));
+    assert!(Arc::ptr_eq(&local, &task.get_vfs().unwrap()));
+    assert_eq!(task.mount_namespace.read().id(), private.id());
+}
+
+#[test_case]
+fn mount_namespace_capture_and_native_handle_duplication_do_not_grant_join_authority() {
+    use crate::{fs::vfs_v2::namespace::JoinError, object::introspection::KernelObjectType};
+    let (task, fs, _, _) = fixture();
+    task.credentials.write().set_authority(0, 0).unwrap();
+    let namespace = task.capture_mount_namespace().unwrap();
+    let handle = task.handle_table.insert(KernelObject::MountNamespace(namespace.clone())).unwrap();
+    assert_eq!(task.handle_table.get_object_info(handle).unwrap().object_type, KernelObjectType::MountNamespace);
+    let duplicated = task.handle_table.clone_for_dup(handle).unwrap().0;
+    let KernelObject::MountNamespace(copy) = duplicated else { panic!("namespace type lost") };
+    assert_eq!(copy.id(), namespace.id());
+    assert!(task.handle_table.get(handle).unwrap().as_file().is_none());
+    assert_eq!(task.join_mount_namespace(copy), Err(JoinError::Authority));
+    assert!(Arc::ptr_eq(&fs, &task.get_vfs().unwrap()));
+}
+
+#[test_case]
+fn mount_namespace_join_rejects_live_clone_fs_but_accepts_an_unshared_context() {
+    use crate::sched::scheduler::{register_task, get_task_by_id, reset};
+    use crate::task::{CloneFlags, CloneFlagsDef};
+    use crate::fs::vfs_v2::namespace::JoinError;
+    reset();
+    let mut parent = new_user_task("namespace-parent".into(), 0); parent.init();
+    parent.set_vfs(Arc::new(VfsManager::new()));
+    let parent = get_task_by_id(register_task(parent)).unwrap();
+    let saved = parent.capture_mount_namespace().unwrap();
+    let mut flags = CloneFlags::default(); flags.set(CloneFlagsDef::Fs);
+    let child = parent.clone_task(flags).unwrap();
+    let child = get_task_by_id(register_task(child)).unwrap();
+    assert_eq!(parent.join_mount_namespace(saved.clone()), Err(JoinError::SharedContext));
+    let context = VfsManager::clone_with_shared_mount_namespace(&parent.get_vfs().unwrap());
+    parent.set_vfs(context);
+    parent.join_mount_namespace(saved).unwrap();
+    assert!(child.get_vfs().is_some());
+    drop(child);
+    drop(parent);
+    reset();
+}

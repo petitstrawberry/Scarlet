@@ -14,6 +14,7 @@ pub mod pipe;
 pub mod proc;
 mod proc_fd;
 mod proc_text;
+mod mount_namespace;
 mod record_lock;
 pub mod signal;
 mod signalfd;
@@ -617,6 +618,7 @@ syscall_table! {
     ExitGroup = 94 => proc::sys_exit_group,
     SetTidAddress = 96 => proc::sys_set_tid_address,
     Waitid = 95 => proc::sys_waitid,
+    Setns = 268 => mount_namespace::sys_setns,
     Unshare = 97 => proc::sys_unshare,
     Futex = 98 => futex::sys_futex,
     SetRobustList = 99 => proc::sys_set_robust_list,

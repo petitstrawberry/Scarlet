@@ -689,7 +689,7 @@ impl LinuxStat {
     }
 }
 
-fn proc_exe_linux_stat(inode: u64, target_size: usize) -> LinuxStat {
+pub(super) fn proc_exe_linux_stat(inode: u64, target_size: usize) -> LinuxStat {
     LinuxStat {
         st_dev: 0,
         st_ino: inode,
@@ -722,6 +722,9 @@ fn stat_from_object(
 ) -> Result<(LinuxStat, u64), usize> {
     use crate::fs::vfs_v2::core::VfsFileObject;
 
+    if let crate::object::KernelObject::MountNamespace(namespace) = object {
+        return Ok((super::mount_namespace::object_stat(namespace), 0));
+    }
     #[cfg(feature = "network")]
     if let crate::object::KernelObject::Socket(socket) = object {
         let (identity, owner) = crate::network::NetworkManager::get_manager()
@@ -1204,6 +1207,7 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         if super::proc_fd::is_self_fd_directory(&absolute) {
             return super::proc_fd::open_self_fd_directory(abi, &task, flags);
         }
+        if let Some(fd) = super::mount_namespace::open(abi, &task, &absolute, flags) { return fd; }
         if let Some(fd) = super::proc_text::open_proc_text_file(abi, &task, &absolute, flags) {
             return fd;
         }
@@ -2421,6 +2425,10 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs_for_proc, dirfd, &path_str)
+        && let Some(stat) = super::mount_namespace::path_stat(&task, &absolute, flags & AT_SYMLINK_NOFOLLOW != 0) {
+        return write_linux_stat(&task, stat_ptr, &stat).map(|_| 0).unwrap_or_else(errno::to_result);
+    }
+    if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs_for_proc, dirfd, &path_str)
         && let Some(metadata) = super::proc_fd::self_task_metadata(&task, &absolute)
     {
         let Some(metadata) = metadata else {
@@ -2594,6 +2602,12 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         (dirfd, path_str)
     };
 
+    if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs, dirfd, &path_str)
+        && let Some(stat) = super::mount_namespace::path_stat(&task, &absolute, flags & AT_SYMLINK_NOFOLLOW != 0) {
+        let mut statx = unsafe { core::mem::zeroed::<LinuxStatx>() };
+        fill_statx_from_stat(&mut statx, &stat, 0, mask);
+        return write_linux_statx(&task, statx_ptr, &statx).map(|_| 0).unwrap_or_else(errno::to_result);
+    }
     if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs, dirfd, &path_str)
         && let Some(metadata) = super::proc_text::path_metadata(&absolute)
     {
@@ -2973,6 +2987,9 @@ fn ioctl_for_task(
         None => return errno::to_result(errno::EBADF),
     };
 
+    if matches!(kernel_object, crate::object::KernelObject::MountNamespace(_)) {
+        return if request == 0xb703 { 0x20000 } else { errno::to_result(errno::ENOTTY) };
+    }
     if let Some(result) = abi
         .extensions
         .ioctl(abi, task, trapframe, &kernel_object, fd, request, arg)
@@ -5831,6 +5848,11 @@ pub fn sys_readlinkat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return copy_len;
     }
 
+    if let Some(target) = super::mount_namespace::link(&task, &path_str) {
+        let size = target.len().min(bufsiz);
+        return if copy_to_user_pagewise(buf_ptr, &target.as_bytes()[..size], &task.vm_manager) == size { size }
+            else { errno::to_result(errno::EFAULT) };
+    }
     if let Some(target) = super::proc_fd::self_fd_link_target(abi, &task, &path_str) {
         let target = match target {
             Ok(target) => target,

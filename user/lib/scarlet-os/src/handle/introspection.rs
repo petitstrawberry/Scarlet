@@ -58,6 +58,7 @@ pub enum KernelObjectType {
     VfsView = 13,
     ShieldPolicy = 14,
     ProcessScope = 15,
+    MountNamespace = 16,
     /// Unknown or unsupported type
     Unknown = 0,
 }

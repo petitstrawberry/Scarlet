@@ -148,6 +148,9 @@ pub(super) fn self_fd_link_target(
     let Some(object) = task.handle_table.get(handle) else {
         return Some(Err(errno::ENOENT));
     };
+    if let KernelObject::MountNamespace(namespace) = &object {
+        return Some(Ok(format!("mnt:[{}]", namespace.id())));
+    }
     #[cfg(feature = "network")]
     if let KernelObject::Socket(socket) = &object {
         let Some((identity, _)) = crate::network::NetworkManager::get_manager()

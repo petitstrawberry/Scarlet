@@ -31,6 +31,7 @@ use crate::hypervisor;
 /// trait objects that may not implement Debug. Use introspection methods instead.
 pub enum KernelObject {
     ProcessScope(Arc<crate::task::process_scope::ProcessScope>),
+    MountNamespace(Arc<crate::fs::vfs_v2::namespace::MountNamespace>),
     ShieldPolicy(crate::shield::PolicyHandle),
     Environment(crate::executor::environment::EnvironmentHandle),
     VfsView(crate::executor::environment::ViewHandle),
@@ -291,6 +292,7 @@ impl<'a> KernelObjectRef<'a> {
             KernelObject::SharedMemory(_) => "SharedMemory",
             KernelObject::Gpu(_) => "Gpu",
             KernelObject::ProcessScope(_) => "ProcessScope",
+            KernelObject::MountNamespace(_) => "MountNamespace",
             KernelObject::ShieldPolicy(_) => "ShieldPolicy",
             KernelObject::Environment(_) => "Environment",
             KernelObject::VfsView(_) => "VfsView",
@@ -488,6 +490,7 @@ impl KernelObject {
             KernelObject::SharedMemory(_) => "SharedMemory",
             KernelObject::Gpu(_) => "Gpu",
             KernelObject::ProcessScope(_) => "ProcessScope",
+            KernelObject::MountNamespace(_) => "MountNamespace",
             KernelObject::ShieldPolicy(_) => "ShieldPolicy",
             KernelObject::Environment(_) => "Environment",
             KernelObject::VfsView(_) => "VfsView",
@@ -641,6 +644,7 @@ impl KernelObject {
             }
             KernelObject::Gpu(_) => None,
             KernelObject::ProcessScope(_)
+            | KernelObject::MountNamespace(_)
             | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
@@ -688,6 +692,7 @@ impl KernelObject {
             }
             KernelObject::Gpu(_) => None,
             KernelObject::ProcessScope(_)
+            | KernelObject::MountNamespace(_)
             | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
@@ -734,6 +739,7 @@ impl KernelObject {
             }
             KernelObject::Gpu(_) => None,
             KernelObject::ProcessScope(_)
+            | KernelObject::MountNamespace(_)
             | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
@@ -779,6 +785,7 @@ impl KernelObject {
             }
             KernelObject::Gpu(_) => None,
             KernelObject::ProcessScope(_)
+            | KernelObject::MountNamespace(_)
             | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
@@ -862,6 +869,7 @@ impl KernelObject {
             }
             KernelObject::Gpu(_) => None,
             KernelObject::ProcessScope(_)
+            | KernelObject::MountNamespace(_)
             | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
@@ -908,6 +916,7 @@ impl KernelObject {
             }
             KernelObject::Gpu(gpu) => gpu.as_control_ops(),
             KernelObject::ProcessScope(_)
+            | KernelObject::MountNamespace(_)
             | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
@@ -961,6 +970,7 @@ impl KernelObject {
             }
             KernelObject::Gpu(gpu) => gpu.as_memory_mappable(),
             KernelObject::ProcessScope(_)
+            | KernelObject::MountNamespace(_)
             | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
@@ -1010,6 +1020,7 @@ impl KernelObject {
             }
             KernelObject::Gpu(_) => None,
             KernelObject::ProcessScope(_)
+            | KernelObject::MountNamespace(_)
             | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
@@ -1037,6 +1048,7 @@ impl KernelObject {
                 Some(Arc::clone(shared_memory) as Arc<dyn MemoryMappingOps>)
             }
             KernelObject::ProcessScope(_)
+            | KernelObject::MountNamespace(_)
             | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
@@ -1121,6 +1133,7 @@ impl KernelObject {
             KernelObject::SharedMemory(_) => None,
             KernelObject::Gpu(gpu) => gpu.as_selectable(),
             KernelObject::ProcessScope(_)
+            | KernelObject::MountNamespace(_)
             | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
@@ -1159,6 +1172,7 @@ impl KernelObject {
             }
             KernelObject::Gpu(gpu) => KernelObject::Gpu(Arc::clone(gpu)),
             KernelObject::ProcessScope(scope) => KernelObject::ProcessScope(scope.clone()),
+            KernelObject::MountNamespace(namespace) => KernelObject::MountNamespace(namespace.clone()),
             KernelObject::ShieldPolicy(cap) => KernelObject::ShieldPolicy(cap.clone()),
             KernelObject::Environment(env) => KernelObject::Environment(env.clone()),
             KernelObject::VfsView(view) => KernelObject::VfsView(view.clone()),
@@ -1195,6 +1209,7 @@ impl Clone for KernelObject {
                 }
                 KernelObject::Gpu(gpu) => KernelObject::Gpu(Arc::clone(gpu)),
                 KernelObject::ProcessScope(scope) => KernelObject::ProcessScope(scope.clone()),
+            KernelObject::MountNamespace(namespace) => KernelObject::MountNamespace(namespace.clone()),
                 KernelObject::ShieldPolicy(cap) => KernelObject::ShieldPolicy(cap.clone()),
                 KernelObject::Environment(env) => KernelObject::Environment(env.clone()),
                 KernelObject::VfsView(view) => KernelObject::VfsView(view.clone()),

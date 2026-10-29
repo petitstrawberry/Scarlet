@@ -40,6 +40,36 @@ fn handle(value: usize) -> HandleResult<Handle> {
     unsafe { Handle::from_raw(raw) }
 }
 
+/// A retained mount-namespace capability. Capture does not grant mount authority.
+#[derive(Debug)]
+pub struct MountNamespace(Handle);
+impl MountNamespace {
+    pub fn current() -> HandleResult<Self> {
+        // SAFETY: no pointer arguments; returns a new close-on-exec capability.
+        handle(unsafe { syscall0(Syscall::MountNamespaceCurrent) }).map(Self)
+    }
+    pub fn from_handle(handle: Handle) -> HandleResult<Self> {
+        if handle.object_info().object_type != crate::handle::introspection::KernelObjectType::MountNamespace {
+            return Err(HandleError::InvalidParameter);
+        }
+        Ok(Self(handle))
+    }
+    pub fn as_handle(&self) -> &Handle { &self.0 }
+    /// Re-resolve cwd in the selected destination View. Requires native mount
+    /// authority and a filesystem context not shared with another live task.
+    pub fn join(&self) -> HandleResult<()> {
+        // SAFETY: the kernel validates the borrowed capability and current Environment.
+        result(unsafe { syscall1(Syscall::MountNamespaceJoin, self.0.as_raw() as usize) }).map(|_| ())
+    }
+    pub fn identity(&self) -> HandleResult<u64> {
+        let mut id = 0u64;
+        // SAFETY: fixed eight-byte output remains writable throughout the call.
+        result(unsafe { syscall2(Syscall::MountNamespaceIdentity, self.0.as_raw() as usize,
+            &mut id as *mut u64 as usize) })?;
+        Ok(u64::from_le(id))
+    }
+}
+
 /// A filesystem root and mount topology, without a working directory.
 #[derive(Debug)]
 pub struct VfsView(Handle);
