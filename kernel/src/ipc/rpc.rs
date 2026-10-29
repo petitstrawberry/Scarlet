@@ -1,6 +1,7 @@
-//! ABI-neutral, bounded request/reply objects. A reply capability is single-use;
-//! dropping it completes the caller with PeerClosed. Adapters own wire formats,
-//! peer discovery, credentials and userspace handles; this module owns delivery.
+//! ABI-neutral, bounded calls and one-way notifications. Reply capabilities are
+//! single-use; dropping one completes its caller with PeerClosed. One-way
+//! deliveries serialize per dispatch object until the receiver releases them.
+//! Adapters own wire formats, peer discovery, credentials and userspace handles.
 
 use crate::sync::{IrqSpinLock, waker::Waker};
 use alloc::{
@@ -53,6 +54,7 @@ pub struct RpcObject {
     key: u64,
     revoked: AtomicBool,
     observers: IrqSpinLock<Vec<Weak<DeathObserver>>>,
+    async_gate: Arc<AsyncGate>,
 }
 struct DeathObserver {
     waker: Weak<Waker>,
@@ -71,7 +73,17 @@ impl RpcObject {
         self.endpoint
             .upgrade()
             .ok_or(RpcError::PeerClosed)?
-            .send_to(Some(self), message)
+            .send_to(Some(self), message, false)
+            .map(|state| RpcCall { state })
+    }
+    /// Admit a bounded notification without a reply capability. Notifications
+    /// to this object are serialized until the receiver drops its delivery.
+    pub fn send_oneway(&self, message: RpcMessage) -> Result<(), RpcError> {
+        self.endpoint
+            .upgrade()
+            .ok_or(RpcError::PeerClosed)?
+            .send_to(Some(self), message, true)
+            .map(|_| ())
     }
     /// Revoke only this dispatch capability, including queued and received
     /// unanswered calls. Other objects served by the endpoint remain usable.
@@ -135,6 +147,19 @@ enum Completion {
     Reply(RpcMessage),
     Failed(RpcError),
     Consumed,
+}
+
+struct AsyncGate {
+    active: AtomicBool,
+    waker: Weak<Waker>,
+}
+impl AsyncGate {
+    fn new(waker: &Arc<Waker>) -> Arc<Self> {
+        Arc::new(Self {
+            active: AtomicBool::new(false),
+            waker: Arc::downgrade(waker),
+        })
+    }
 }
 
 struct CallState {
@@ -213,12 +238,20 @@ pub struct RpcRequest {
     pub message: RpcMessage,
     object_key: Option<u64>,
     reply: Arc<CallState>,
+    async_gate: Option<Arc<AsyncGate>>,
+    delivered: bool,
 }
 
 impl RpcRequest {
     pub fn reply(self, message: RpcMessage) -> Result<(), RpcError> {
+        if self.is_oneway() {
+            return Err(RpcError::Cancelled);
+        }
         message.validate()?;
         self.reply.finish(Completion::Reply(message))
+    }
+    pub fn is_oneway(&self) -> bool {
+        self.async_gate.is_some()
     }
     pub fn object_key(&self) -> Option<u64> {
         self.object_key
@@ -230,6 +263,14 @@ impl RpcRequest {
 
 impl Drop for RpcRequest {
     fn drop(&mut self) {
+        if self.delivered {
+            if let Some(gate) = &self.async_gate {
+                gate.active.store(false, Ordering::Release);
+                if let Some(waker) = gate.waker.upgrade() {
+                    waker.wake_all();
+                }
+            }
+        }
         let _ = self.reply.finish(Completion::Failed(RpcError::PeerClosed));
     }
 }
@@ -243,6 +284,7 @@ struct EndpointState {
 }
 
 pub struct RpcEndpoint {
+    async_gate: Arc<AsyncGate>,
     state: IrqSpinLock<EndpointState>,
     waker: Arc<Waker>,
     budget: Arc<AtomicUsize>,
@@ -250,7 +292,9 @@ pub struct RpcEndpoint {
 
 impl RpcEndpoint {
     pub fn new() -> Arc<Self> {
+        let waker = Arc::new(Waker::new_interruptible("rpc_receive"));
         Arc::new(Self {
+            async_gate: AsyncGate::new(&waker),
             state: IrqSpinLock::new(EndpointState {
                 closed: false,
                 next_object_key: 1,
@@ -258,12 +302,16 @@ impl RpcEndpoint {
                 calls: Vec::new(),
                 objects: Vec::new(),
             }),
-            waker: Arc::new(Waker::new_interruptible("rpc_receive")),
+            waker,
             budget: Arc::new(AtomicUsize::new(0)),
         })
     }
     pub fn send(&self, message: RpcMessage) -> Result<RpcCall, RpcError> {
-        self.send_to(None, message)
+        self.send_to(None, message, false)
+            .map(|state| RpcCall { state })
+    }
+    pub fn send_oneway(&self, message: RpcMessage) -> Result<(), RpcError> {
+        self.send_to(None, message, true).map(|_| ())
     }
     pub fn create_object(self: &Arc<Self>) -> Result<Arc<RpcObject>, RpcError> {
         let mut state = self.state.lock();
@@ -277,6 +325,7 @@ impl RpcEndpoint {
             key,
             revoked: AtomicBool::new(false),
             observers: IrqSpinLock::new(Vec::new()),
+            async_gate: AsyncGate::new(&self.waker),
         });
         state.objects.retain(|object| object.strong_count() != 0);
         state.objects.push(Arc::downgrade(&object));
@@ -286,7 +335,8 @@ impl RpcEndpoint {
         &self,
         object: Option<&RpcObject>,
         message: RpcMessage,
-    ) -> Result<RpcCall, RpcError> {
+        oneway: bool,
+    ) -> Result<Arc<CallState>, RpcError> {
         message.validate()?;
         let mut state = self.state.lock();
         if state.closed || object.is_some_and(|object| object.revoked.load(Ordering::Acquire)) {
@@ -311,20 +361,32 @@ impl RpcEndpoint {
             message,
             object_key,
             reply: call.clone(),
+            async_gate: oneway
+                .then(|| object.map_or_else(|| self.async_gate.clone(), |o| o.async_gate.clone())),
+            delivered: false,
         });
         state.calls.push(Arc::downgrade(&call));
         drop(state);
         // Adapters can multiplex idle receivers and outstanding callers on
         // this source. A wake must reach every distinct readiness predicate.
         self.waker.wake_all();
-        Ok(RpcCall { state: call })
+        Ok(call)
     }
     pub fn receive(&self) -> Result<Option<RpcRequest>, RpcError> {
         let mut state = self.state.lock();
-        while let Some(request) = state.queue.pop_front() {
-            if !request.cancelled() {
-                return Ok(Some(request));
+        state.queue.retain(|request| !request.cancelled());
+        if let Some(index) = state.queue.iter().position(|request| {
+            request
+                .async_gate
+                .as_ref()
+                .is_none_or(|gate| !gate.active.load(Ordering::Acquire))
+        }) {
+            let mut request = state.queue.remove(index).unwrap();
+            if let Some(gate) = &request.async_gate {
+                gate.active.store(true, Ordering::Release);
             }
+            request.delivered = true;
+            return Ok(Some(request));
         }
         if state.closed {
             Err(RpcError::PeerClosed)
@@ -334,7 +396,14 @@ impl RpcEndpoint {
     }
     pub fn ready(&self) -> bool {
         let state = self.state.lock();
-        state.closed || !state.queue.is_empty()
+        state.closed
+            || state.queue.iter().any(|request| {
+                !request.cancelled()
+                    && request
+                        .async_gate
+                        .as_ref()
+                        .is_none_or(|gate| !gate.active.load(Ordering::Acquire))
+            })
     }
     pub fn waker(&self) -> Arc<Waker> {
         self.waker.clone()
@@ -399,6 +468,79 @@ impl Drop for RpcEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test_case]
+    fn rpc_oneway_serializes_each_object_until_delivery_is_released() {
+        let endpoint = RpcEndpoint::new();
+        let a = endpoint.create_object().unwrap();
+        let b = endpoint.create_object().unwrap();
+        a.send_oneway(message(1)).unwrap();
+        a.send_oneway(message(2)).unwrap();
+        b.send_oneway(message(3)).unwrap();
+        let first = endpoint.receive().unwrap().unwrap();
+        assert!(first.is_oneway());
+        assert_eq!(first.message.opcode, 1);
+        let independent = endpoint.receive().unwrap().unwrap();
+        assert_eq!(independent.message.opcode, 3);
+        assert!(!endpoint.ready());
+        assert!(endpoint.receive().unwrap().is_none());
+        // A synchronous call need not wait for the notification stream.
+        let sync = a.send(message(4)).unwrap();
+        let request = endpoint.receive().unwrap().unwrap();
+        assert_eq!(request.message.opcode, 4);
+        assert!(!request.is_oneway());
+        request.reply(message(5)).unwrap();
+        assert_eq!(sync.take_reply().unwrap().unwrap().opcode, 5);
+        drop(first);
+        assert!(endpoint.ready());
+        let second = endpoint.receive().unwrap().unwrap();
+        assert_eq!(second.message.opcode, 2);
+        assert_eq!(second.reply(message(6)), Err(RpcError::Cancelled));
+        drop(independent);
+        drop(sync);
+        assert_eq!(endpoint.budget.load(Ordering::Acquire), 0);
+    }
+    #[test_case]
+    fn rpc_oneway_bounds_include_delivered_notifications_and_close_reclaims_queue() {
+        let endpoint = RpcEndpoint::new();
+        for n in 0..MAX_IN_FLIGHT {
+            endpoint.send_oneway(message(n as u32)).unwrap();
+        }
+        let request = endpoint.receive().unwrap().unwrap();
+        assert_eq!(endpoint.send_oneway(message(100)), Err(RpcError::Busy));
+        assert!(!endpoint.ready());
+        drop(request);
+        endpoint.send_oneway(message(100)).unwrap();
+        let request = endpoint.receive().unwrap().unwrap();
+        assert_eq!(request.message.opcode, 1);
+        endpoint.close();
+        assert!(request.cancelled());
+        assert_eq!(endpoint.budget.load(Ordering::Acquire), 1);
+        assert_eq!(
+            endpoint.send_oneway(message(101)),
+            Err(RpcError::PeerClosed)
+        );
+        drop(request);
+        assert_eq!(endpoint.budget.load(Ordering::Acquire), 0);
+    }
+    #[test_case]
+    fn rpc_oneway_revoke_and_endpoint_drop_preserve_only_delivered_resources() {
+        let endpoint = RpcEndpoint::new();
+        let object = endpoint.create_object().unwrap();
+        let retained = Arc::new(9usize);
+        let mut msg = message(1);
+        msg.retained = Some(retained.clone());
+        object.send_oneway(msg.clone()).unwrap();
+        object.send_oneway(msg).unwrap();
+        let received = endpoint.receive().unwrap().unwrap();
+        object.revoke();
+        assert!(received.cancelled());
+        assert!(endpoint.receive().unwrap().is_none());
+        assert_eq!(Arc::strong_count(&retained), 2);
+        assert_eq!(object.send_oneway(message(2)), Err(RpcError::PeerClosed));
+        drop(endpoint);
+        drop(received);
+        assert_eq!(Arc::strong_count(&retained), 1);
+    }
     #[test_case]
     fn rpc_death_watches_wake_on_revoke_close_drop_and_late_registration() {
         for mode in 0..3 {
