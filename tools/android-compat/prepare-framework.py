@@ -32,6 +32,7 @@ def prepare(archive, runtime, stock, output):
         system.dump("/system/framework/framework-res.apk", output / "system/framework/framework-res.apk")
         system.dump("/system/etc/classpaths/bootclasspath.pb", output / "system/etc/classpaths/bootclasspath.pb")
         system.dump("/system/etc/task_profiles.json", output / "system/etc/task_profiles.json")
+        system.dump("/system/etc/selinux/plat_seapp_contexts", output / "system/etc/selinux/plat_seapp_contexts")
         if "task_profiles" in {name for name, _, _ in system.entries("/system/etc")}:
             system.tree("/system/etc/task_profiles", output / "system/etc/task_profiles")
         apexes = []

@@ -91,3 +91,49 @@ class SelinuxTest(unittest.TestCase):
                 self.assertEqual((output/'selinux-build.json').read_bytes(),(build/'build.json').read_bytes())
 
 if __name__=='__main__':unittest.main()
+
+
+class LabelTransitionTest(unittest.TestCase):
+    def test_exact_transition_evidence_rejects_missing_wrong_uid_and_aborted_runs(self):
+        from evidence import analyze_label_transitions
+        lines = ["SCARLET_SHIELD_CONFIGURED", "SCARLET_ANDROID_STOCK_OK",
+            "SCARLET_LABEL_TRANSITION_BEGIN", "SCARLET_LABEL_TRANSITION_PARENT_DENIED",
+            "SCARLET_LABEL_TRANSITION_EXEC_OK 10001", "SCARLET_LABEL_TRANSITION_CHILD_OK 10001",
+            "SCARLET_LABEL_TRANSITION_EXEC_OK 10002", "SCARLET_LABEL_TRANSITION_CHILD_OK 10002",
+            "SCARLET_LABEL_TRANSITION_OK", "SCARLET_ANDROID_PROGRAM_EXIT 0", "SCARLET_ANDROID_PROGRAM_DONE"]
+        good = "\n".join(lines).encode()
+        self.assertEqual(analyze_label_transitions(good)["result"], "PASS")
+        for line in lines:
+            self.assertEqual(analyze_label_transitions(good.replace(line.encode(),b""))["result"],"INCOMPLETE")
+        for broken in [good.replace(b"10002",b"10001"),good.replace(b"PROGRAM_EXIT 0",b"PROGRAM_EXIT 1"),
+                       good+b"\nSCARLET_LABEL_TRANSITION_OK"]:
+            self.assertEqual(analyze_label_transitions(broken)["result"],"INCOMPLETE")
+
+    def test_runner_binds_transition_source_and_enables_only_the_delegated_policy(self):
+        from evidence import analyze_label_transitions
+        with tempfile.TemporaryDirectory() as temporary:
+            base=Path(temporary);runtime,build,info=build_fixture(base)
+            info.update(kind="stock-label-transition-v1",source_sha256=sha256(SOURCE/"label-transition-probe.c"))
+            (build/"build.json").write_text(json.dumps(info))
+            stock=base/"stock";stock_fixture(stock,runtime)
+            kernel,firmware,output=base/"kernel",base/"firmware",base/"run"
+            kernel.write_bytes(b"kernel");firmware.write_bytes(b"firmware")
+            def compile(command,**kwargs):
+                if command[0]=="cargo":
+                    self.assertEqual(kwargs["env"]["SCARLET_ANDROID_SHIELD"],"1")
+                    self.assertEqual(kwargs["env"]["SCARLET_ANDROID_ZYGOTE_POLICY"],"1")
+                    target=output/"target/aarch64-unknown-scarlet/release";target.mkdir(parents=True,exist_ok=True)
+                    for name in ("android-direct-init","scarlet-ld"):(target/name).write_bytes(b"launcher")
+            def guest(command,destination,timeout):
+                # A bare zero exit must not certify any transition behavior.
+                (destination/"serial.log").write_text("\nSCARLET_ANDROID_PROGRAM_EXIT 0\nSCARLET_ANDROID_PROGRAM_DONE\n")
+                return {"result":"PASS"}
+            args=["run-direct.py","--kernel",str(kernel),"--label-transition-probe",str(build),
+                  "--runtime-root",str(runtime),"--stock-inputs",str(stock),"--accel","hvf","--output",str(output)]
+            with patch("sys.argv",args),patch.object(runner.smoke,"firmware",return_value=firmware), \
+                    patch.object(runner.subprocess,"run",side_effect=compile),patch.object(runner.smoke,"run_guest",side_effect=guest):
+                self.assertEqual(runner.main(),1)
+            self.assertTrue(json.loads((output/"inputs.json").read_text())["zygote_transition_policy"])
+            self.assertEqual(json.loads((output/"result.json").read_text())["selinux"]["result"],"INCOMPLETE")
+            with self.assertRaises(ValueError):verify_selinux_build(build,runtime)
+            self.assertEqual(verify_selinux_build(build,runtime,transitions=True),build/"selinux-probe")

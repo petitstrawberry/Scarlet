@@ -312,3 +312,16 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def analyze_label_transitions(data):
+    lines = data.decode("utf-8", "replace").replace("\r", "").splitlines()
+    records = [line for line in lines if line.startswith("SCARLET_LABEL_TRANSITION_")]
+    expected = ["SCARLET_LABEL_TRANSITION_BEGIN", "SCARLET_LABEL_TRANSITION_PARENT_DENIED",
+                "SCARLET_LABEL_TRANSITION_EXEC_OK 10001", "SCARLET_LABEL_TRANSITION_CHILD_OK 10001",
+                "SCARLET_LABEL_TRANSITION_EXEC_OK 10002", "SCARLET_LABEL_TRANSITION_CHILD_OK 10002",
+                "SCARLET_LABEL_TRANSITION_OK"]
+    passed = records == expected and all(lines.count(line) == 1 for line in [
+        "SCARLET_SHIELD_CONFIGURED", "SCARLET_ANDROID_STOCK_OK", "SCARLET_ANDROID_PROGRAM_EXIT 0",
+        "SCARLET_ANDROID_PROGRAM_DONE"])
+    return {"result": "PASS" if passed else "INCOMPLETE", "records": records}

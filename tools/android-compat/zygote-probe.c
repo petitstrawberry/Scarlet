@@ -63,7 +63,7 @@ int main(void) {
     }
     char label_path[64];snprintf(label_path,sizeof(label_path),"/proc/%d/attr/current",child);
     if(check_text("/sys/fs/selinux/enforce","1\n",2) ||
-       check_text(label_path,"u:r:scarlet_probe:s0",sizeof("u:r:scarlet_probe:s0"))) {
+       check_text(label_path,"u:r:zygote:s0",sizeof("u:r:zygote:s0"))) {
         puts("SCARLET_ZYGOTE_PROBE_FAIL shield");passed=0;
     } else puts("SCARLET_ZYGOTE_PROBE_SHIELD_OK");
     int status;

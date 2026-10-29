@@ -21,6 +21,7 @@ from zygote_inputs import verify_build as verify_zygote_build, analyze as analyz
 from apk_inputs import verify_apk_probe, stage_apk_probe
 from art_inputs import art_launch, validate_dex, verify_art_runtime, sha256
 from libbinder_inputs import verify_libbinder_build
+from evidence import analyze_label_transitions
 from selinux_inputs import verify_selinux_build
 from service_inputs import verify_service_inputs, stage_service_inputs, CONTEXTS
 from stock_art import stage_stock_inputs, verify_stock_inputs
@@ -44,6 +45,7 @@ def main():
     mode.add_argument("--zygote-probe", type=Path, help="verified stock Zygote control-socket fixture")
     mode.add_argument("--program", type=Path, help="diagnose this Android executable (exit is not a service-readiness test)")
     mode.add_argument("--libbinder-probe", type=Path, help="build directory from build-libbinder-probe.py; verify stock-library RPC and lifetime")
+    mode.add_argument("--label-transition-probe", type=Path, help="stock libselinux conditional label transition checks")
     mode.add_argument("--selinux-probe", type=Path, help="build directory from build-selinux-probe.py; verify Shield allow/deny through stock libselinux")
     mode.add_argument("--service-probe", type=Path, help="stock servicemanager integration probe build")
     mode.add_argument("--framework-probe", type=Path, help="build-dex.py --framework-sdk output; verify stock app_process framework/JNI")
@@ -54,12 +56,18 @@ def main():
     parser.add_argument("--runtime-root", type=Path, help="Android /system and /apex runtime tree")
     parser.add_argument("--linker-debug", action="store_true", help="enable Android LD_DEBUG=3 for ART diagnosis")
     parser.add_argument("--stock-inputs", type=Path, help="verified stock property/APEX overlay for ART or a program")
+    parser.add_argument("--zygote-policy", action="store_true", help="apply the bounded Zygote/app transition fixture to a stock program diagnostic")
     parser.add_argument("--shield-fixture", action="store_true", help="apply the existing Shield test policy to a stock program diagnostic")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--accel", choices=("tcg", "hvf"), default="tcg")
     parser.add_argument("--binder", action="store_true", help="include Binder RPC and three-process object lifetime checks")
     args = parser.parse_args()
+    if args.label_transition_probe:
+        args.selinux_probe = args.label_transition_probe
+        args.zygote_policy = True
+    if args.zygote_policy and ((not args.program and not args.label_transition_probe) or not args.stock_inputs or args.shield_fixture):
+        parser.error("--zygote-policy requires --program, --stock-inputs, and no --shield-fixture")
     if args.shield_fixture and (not args.program or not args.stock_inputs):
         parser.error("--shield-fixture requires --program and --stock-inputs")
     if args.framework_services:
@@ -74,7 +82,7 @@ def main():
             parser.error("--zygote-probe requires --framework-inputs, --runtime-root and --stock-inputs")
         zygote = verify_framework_inputs(args.framework_inputs, args.runtime_root, args.stock_inputs)
         args.program = verify_zygote_build(args.zygote_probe, zygote, args.framework_inputs)
-    shield_fixture = bool(args.selinux_probe or args.zygote_probe or args.shield_fixture)
+    shield_fixture = bool(args.selinux_probe or args.zygote_probe or args.shield_fixture or args.zygote_policy)
     framework = None
     apk = None
     if args.framework_probe:
@@ -100,7 +108,7 @@ def main():
     if args.selinux_probe:
         if not args.runtime_root or not args.stock_inputs:
             parser.error("--selinux-probe requires --runtime-root and --stock-inputs")
-        args.program = verify_selinux_build(args.selinux_probe, args.runtime_root)
+        args.program = verify_selinux_build(args.selinux_probe, args.runtime_root, transitions=bool(args.label_transition_probe))
     if args.libbinder_probe:
         if not args.runtime_root or not args.stock_inputs:
             parser.error("--libbinder-probe requires --runtime-root and --stock-inputs")
@@ -177,6 +185,7 @@ def main():
         "service_fixture_sha256": sha256(SOURCE / "init/src/services.rs") if args.service_probe else None,
         "service_contexts_sha256": hashlib.sha256(CONTEXTS.encode()).hexdigest() if args.service_inputs else None,
         "selinux_build_sha256": sha256(args.selinux_probe / "build.json") if args.selinux_probe else None,
+        "zygote_transition_policy": bool(args.zygote_probe or args.zygote_policy),
         "shield_fixture_sha256": sha256(SOURCE / "init/src/shield.rs") if shield_fixture else None,
         "stock_reference_config_sha256": sha256(STOCK_CONFIG) if args.stock_inputs else None,
         "stock_manifest_sha256": sha256(args.stock_inputs / "stock-inputs.json") if args.stock_inputs else None,
@@ -248,6 +257,7 @@ def main():
                SCARLET_ANDROID_BINDER="1" if args.binder else "0",
                SCARLET_ANDROID_STOCK="1" if args.stock_inputs else "0",
                SCARLET_ANDROID_SERVICES="1" if args.service_probe else "0",
+               SCARLET_ANDROID_ZYGOTE_POLICY="1" if args.zygote_probe or args.zygote_policy else "0",
                SCARLET_ANDROID_SHIELD="1" if shield_fixture else "0",
                SCARLET_ANDROID_ART="1" if art else "0",
                SCARLET_ANDROID_PROGRAM="1" if args.program else "0",
@@ -350,7 +360,7 @@ def main():
             print(f"Stock app_process framework/JNI probe: {result['result']}")
             return 0 if result["result"] == "PASS" else 1
         if args.selinux_probe:
-            result["selinux"] = analyze_selinux(data)
+            result["selinux"] = analyze_label_transitions(data) if args.label_transition_probe else analyze_selinux(data)
             if result["result"] == "PASS" and result["selinux"]["result"] != "PASS":
                 result["result"] = "missing or failed Shield evidence"
             result["servicemanager"] = "not tested"
