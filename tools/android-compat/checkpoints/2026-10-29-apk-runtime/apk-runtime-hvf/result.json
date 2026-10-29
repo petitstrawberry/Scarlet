@@ -1,0 +1,32 @@
+{
+  "result": "PASS",
+  "qemu_exit_code": 0,
+  "elapsed_seconds": 9.627,
+  "dynamic_runtime": true,
+  "program_exit_status": 0,
+  "apk_runtime": {
+    "result": "PASS",
+    "records": [
+      "SCARLET_ANDROID_STOCK_START properties",
+      "SCARLET_PROPERTY_SNAPSHOT_OK",
+      "SCARLET_ANDROID_STOCK_EXIT properties 0",
+      "SCARLET_ANDROID_STOCK_START linkerconfig",
+      "SCARLET_ANDROID_STOCK_EXIT linkerconfig 0",
+      "SCARLET_ANDROID_STOCK_OK",
+      "SCARLET_ANDROID_PROGRAM_START",
+      "SCARLET_APK_RUNTIME_BEGIN",
+      "SCARLET_APK_RUNTIME_PACKAGE_LITE_OK",
+      "SCARLET_APK_RUNTIME_SIGNATURE_OK",
+      "SCARLET_APK_RUNTIME_TAMPER_REJECTED",
+      "SCARLET_APK_RUNTIME_RESOURCES_OK",
+      "SCARLET_APK_RUNTIME_DEX_OK",
+      "SCARLET_APK_RUNTIME_OK",
+      "SCARLET_ANDROID_PROGRAM_EXIT 0",
+      "SCARLET_ANDROID_PROGRAM_DONE"
+    ],
+    "activity_launch": "not tested",
+    "graphics": "not tested"
+  },
+  "apk_execution": "payload DEX only",
+  "activity_launch": "not tested"
+}

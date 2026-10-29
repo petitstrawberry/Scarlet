@@ -1,0 +1,72 @@
+{
+  "date": "2026-10-29",
+  "result": "PASS",
+  "revisions": {
+    "inputs": "ec436c3bd",
+    "apk_runtime": "d724cf25d",
+    "kernel": "4099be569"
+  },
+  "kernel_sha256": "41036b50ec71c2e359383eead85781b72c53206a97415476683e808eba62dec4",
+  "validation": {
+    "acceleration": "HVF",
+    "host_tests": 48,
+    "apk_runtime": "PASS",
+    "host_apksigner_positive_and_tampered": "PASS",
+    "kernel_regression": "unchanged kernel from 2026-10-29-java-binder checkpoint (1645 tests)"
+  },
+  "coverage": [
+    "Stock Android 13 app_process64, PackageParser.parseApkLite, ApkSignatureVerifier, Conscrypt, AssetManager, Resources and DexClassLoader on Scarlet Android ABI",
+    "Real compiled APK manifest reports expected package/minimum SDK/target SDK; resource XML supplies Activity declaration and application label",
+    "APK Signature Scheme v3 signed fixture verifies; changing a byte of signed asset data produces INSTALL_PARSE_FAILED_NO_CERTIFICATES (-103) through stock full signature verification",
+    "Framework and APK resources, a string/integer table and asset bytes load through stock resource JNI",
+    "A distinct DexClassLoader loads the APK payload, which reads Resources and performs a Bundle/Parcel round trip; Activity subclass linkage also succeeds",
+    "Java main returns normally and app_process exits zero; no LD_PRELOAD or Android runtime patches in passing run"
+  ],
+  "limitations": [
+    "No Activity lifecycle, app installation, system_server, PackageManager/PermissionManager services, graphics or general Android environment manager",
+    "Full legacy PackageParser.parsePackage reaches a missing PermissionManager service; the checkpoint uses Android archive inspection APIs and full cryptographic verification with forParsingWithoutPlatformCompat",
+    "The Android fixture remains interpreter-only with explicit dalvik.vm.usejit=false property override",
+    "UID/GID remain existing root-only Linux ABI stubs; no application identity or permission-isolation claim",
+    "Diagnostic earlier APK runs remain failures; their logs do not count toward the passing result"
+  ],
+  "sha256": {
+    "apk-build.json": "99b47aa61f102502713d86af97978f9f86faf2a29be84af1c1c16d8aa61f69f7",
+    "apk-runtime-hvf/art-runtime.json": "8490e2c89682565a1839b4ec45ae61648c7b56b0bed4b938821b5b8c7fcd1316",
+    "apk-runtime-hvf/commands.json": "210e931612c11d1528f0ad14ca5d51d1faafcbfb491e685b64ea11f86c96b0a8",
+    "apk-runtime-hvf/framework-bootstrap.json": "4d6675c4332a31575b44f9db4c4e5cb250e9f34137caa4b360a75cc4db85c1e2",
+    "apk-runtime-hvf/framework-build.json": "99b47aa61f102502713d86af97978f9f86faf2a29be84af1c1c16d8aa61f69f7",
+    "apk-runtime-hvf/framework-inputs.json": "d21bd0339a88490ee3db6aecac09ee4d0b740736d12abe3c5e3e2e80cb7d2c40",
+    "apk-runtime-hvf/image-build.log": "7a3bf88998d30cbb05e26b612d418cf6c7c11830e7b142ea4675537b136e890e",
+    "apk-runtime-hvf/inputs.json": "8815d0f8ae6ad884854a7f38f8dc5f76798c9ba4bae951148e3fe68f7ac5b3fc",
+    "apk-runtime-hvf/program-launch.json": "fbe57e8365f984c117de7b7e6c6878fac7ab5ecc133f62a7ab2a44c8ce7a5f70",
+    "apk-runtime-hvf/result.json": "faaf5d8237f7c2b23b8aea7f0e5a909f3f51da7046efe8bd82ea6f3bde4df93c",
+    "apk-runtime-hvf/rootfs-build.log": "385765596f6e7006e37e7ec407dc1f20a984d55d77a7208076b4b1f7a956bf36",
+    "apk-runtime-hvf/serial.log": "8f21aa387ed9ce9223eda861b1bb05669d017028128a4e506fce9c2a21cc7f13",
+    "apk-runtime-hvf/stock-inputs.json": "c0515f687079ec0320e73fece6d7d7ca9f539c708d7bfd4e936b85532834c34d",
+    "build-apk.log": "95c2f190dd46346ea4bf98f2a3a9d934cfb84271a5511a11c807bc383f715df5",
+    "diagnostics/apk-runtime-v1/framework-build.json": "39d50c0cb345836f79da5717d03d50b8ccaec00ffb330659ebc71e2c03b1c32d",
+    "diagnostics/apk-runtime-v1/inputs.json": "cf9a7a3d796e45eac58c0fb183961398c4df38e67b1d664ba9b71c86342acfcf",
+    "diagnostics/apk-runtime-v1/program-launch.json": "fbe57e8365f984c117de7b7e6c6878fac7ab5ecc133f62a7ab2a44c8ce7a5f70",
+    "diagnostics/apk-runtime-v1/result.json": "1f84d3a68d2a5990c70dee9a6bd4686b9aff4dc1a05bf380a8e8636f1f14d55f",
+    "diagnostics/apk-runtime-v1/serial.log": "2e5f051834b65510bb66761c579afc5e672498f1fc355d4d085194101a326959",
+    "diagnostics/apk-runtime-v2/framework-build.json": "39d50c0cb345836f79da5717d03d50b8ccaec00ffb330659ebc71e2c03b1c32d",
+    "diagnostics/apk-runtime-v2/inputs.json": "a63c9a7068330184907ee54eae15a612263add4e088726f73254dd014d2db065",
+    "diagnostics/apk-runtime-v2/program-launch.json": "fbe57e8365f984c117de7b7e6c6878fac7ab5ecc133f62a7ab2a44c8ce7a5f70",
+    "diagnostics/apk-runtime-v2/result.json": "3c3f2652035fd472a623de8f49ccfcc52f2ea67d6d0732f98bc1dff20e289a7a",
+    "diagnostics/apk-runtime-v2/serial.log": "0019e94accc7a604764725450d06fce984906c1e4addc8c1fdc4713330a98999",
+    "diagnostics/apk-runtime-v3/framework-build.json": "d24c18eb2b84dd95bcad082cd1bab448d96cb22519a90e1cc41f971df48057db",
+    "diagnostics/apk-runtime-v3/inputs.json": "34eca65082dbf6df51c79e9318955001469ba2139d5bc861764df10e603e6848",
+    "diagnostics/apk-runtime-v3/program-launch.json": "fbe57e8365f984c117de7b7e6c6878fac7ab5ecc133f62a7ab2a44c8ce7a5f70",
+    "diagnostics/apk-runtime-v3/result.json": "1d01cfea5fff1c625388363d77f23153df8126b73db0fa2c65ac12f2476e6799",
+    "diagnostics/apk-runtime-v3/serial.log": "57324888aead2aae6df0e3d3c522e183377a35d852f8787ec31ab951e98c5472",
+    "fixture/apk/AndroidManifest.xml": "8c2e0bd15c93cd0ff9cb76524b0a305287dce3e95e0ba47358508ed21b1d721d",
+    "fixture/apk/MainActivity.java": "594db9fce3cc5856b9bec2f99cba49c235f3e0a88627b8580db15a82bf03a762",
+    "fixture/apk/RuntimePayload.java": "8007246beedb7c21ce1e79dd8de484394d9f8d23a5d657e477d17bba285158cd",
+    "fixture/apk/assets/probe.txt": "1009ae7c1590741de75624c07027e865a3133d87ae1d8e2bfa9936a31e204447",
+    "fixture/apk/res/values/strings.xml": "1e964cf96429229020a0653538db8d5a8690df35d51f3d083dffeff5539c0c2b",
+    "fixture/framework/ScarletApkProbe.java": "3d83a9ced09ddd981c776a74842359bf64a1e30ab8706d66eda8496920f246ea",
+    "host-signatures.json": "be5a411eb45acc7cb516967d00e39c1a323f7128e609a2fd13b04c4e865a1155",
+    "host-tests.log": "3cc6cc6e9189c21e6619b910ab8979192fa1f68478d47ee488909d0be5bf4c40",
+    "prepare-framework.log": "4f37ec316b5d93506a1c08f609592de78602a61315e480d70cfba669d5c20d64"
+  }
+}

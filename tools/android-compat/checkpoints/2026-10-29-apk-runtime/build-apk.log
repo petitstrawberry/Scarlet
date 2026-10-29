@@ -1,0 +1,24 @@
+warning: Git tree '/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet' is dirty
+警告: [options] ソース値8は廃止されていて、今後のリリースで削除される予定です
+警告: [options] ターゲット値8は廃止されていて、今後のリリースで削除される予定です
+警告: [options] 廃止されたオプションについての警告を表示しないようにするには、-Xlint:オプションを使用します。
+警告3個
+3,650日間有効な3072-ビット RSAのキー・ペアと自己署名型証明書(SHA384withRSA)を生成しています
+	ディレクトリ名: CN=Scarlet compatibility test
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::loadLibrary has been called by org.conscrypt.NativeLibraryUtil in an unnamed module (file:/Users/petitstrawberry/Library/Android/sdk/build-tools/37.0.0/lib/apksigner.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::loadLibrary has been called by org.conscrypt.NativeLibraryUtil in an unnamed module (file:/Users/petitstrawberry/Library/Android/sdk/build-tools/37.0.0/lib/apksigner.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+警告: [options] ソース値8は廃止されていて、今後のリリースで削除される予定です
+警告: [options] ターゲット値8は廃止されていて、今後のリリースで削除される予定です
+警告: [options] 廃止されたオプションについての警告を表示しないようにするには、-Xlint:オプションを使用します。
+ノート: /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/framework/ScarletApkProbe.javaは推奨されないAPIを使用またはオーバーライドしています。
+ノート: 詳細は、-Xlint:deprecationオプションを指定して再コンパイルしてください。
+警告3個
+/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/apk-probe-final/scarlet-compat.apk

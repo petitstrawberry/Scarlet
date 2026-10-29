@@ -719,3 +719,33 @@ remains the receiving framework's job. This checkpoint does not establish an
 AppOps service, Android system boot or APK/Activity launch. HVF validation also
 passes 1,645 kernel tests and the C++ service lifecycle regression, alongside
 45 host tests and the RISC-V release library check.
+
+
+### APK archive and payload checkpoint
+
+`checkpoints/2026-10-29-apk-runtime/verification.json` records stock Android 13
+APK basic parsing, full signature verification, resources and DEX loading on
+Scarlet. The signed fixture uses APK Signature Scheme v3. Both the guest verifier
+and host `apksigner` accept it and reject a copy with one changed signed asset
+byte. Stock resource JNI reads the compiled manifest, framework and application
+resources, and assets. A separate DexClassLoader loads the APK's RuntimePayload,
+which uses Resources and Bundle/Parcel, and links its Activity subclass. Java
+returns normally and app_process exits zero.
+
+```sh
+python3 tools/android-compat/build-apk.py --sdk "$ANDROID_SDK_ROOT" \
+  --runtime-probe --output "$APK_PROBE"
+python3 tools/android-compat/run-direct.py \
+  --kernel "$SCARLET_KERNEL" --apk-probe "$APK_PROBE" \
+  --framework-inputs "$FRAMEWORK_INPUTS" --runtime-root "$ART_RUNTIME" \
+  --stock-inputs "$STOCK_INPUTS" --accel hvf --output "$APK_RUNTIME_RUN"
+```
+
+Regenerate framework inputs with `prepare-framework.py` to include the image's
+framework-res.apk and Conscrypt JNI libraries. The probe uses stock archive
+inspection APIs, including `forParsingWithoutPlatformCompat` and the full
+`ApkSignatureVerifier.verify` path. Full package parsing requires Android's
+PermissionManager service, as retained in the diagnostic logs. Activity launch,
+installation, application identity isolation and graphics remain untested.
+The result explicitly reports `apk_execution: payload DEX only` and
+`activity_launch: not tested`. Host validation covers 48 tests.

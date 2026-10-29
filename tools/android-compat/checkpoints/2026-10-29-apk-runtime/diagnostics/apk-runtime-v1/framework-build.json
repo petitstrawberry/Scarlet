@@ -1,0 +1,17 @@
+{
+  "platform": "android-32",
+  "build_tools": "37.0.0",
+  "package": "dev.scarlet.compat",
+  "sha256": "5994c6e3af179c83a9e1527a24ba25546fbde0c5c9c0db3247c507c5f06099d6",
+  "framework_sdk_sha256": "173d24a7b972769008d3c789073c21b3be6a8ecdbf946bacb9ef261b70fdfa54",
+  "sources": {
+    "apk/AndroidManifest.xml": "8c2e0bd15c93cd0ff9cb76524b0a305287dce3e95e0ba47358508ed21b1d721d",
+    "apk/MainActivity.java": "594db9fce3cc5856b9bec2f99cba49c235f3e0a88627b8580db15a82bf03a762",
+    "apk/RuntimePayload.java": "8007246beedb7c21ce1e79dd8de484394d9f8d23a5d657e477d17bba285158cd",
+    "apk/assets/probe.txt": "1009ae7c1590741de75624c07027e865a3133d87ae1d8e2bfa9936a31e204447",
+    "apk/res/values/strings.xml": "1e964cf96429229020a0653538db8d5a8690df35d51f3d083dffeff5539c0c2b"
+  },
+  "main_class": "ScarletApkProbe",
+  "source_sha256": "72d2421460fd7dd7bbca920832f7a47cf23e99faf727f4f1452b1421240c120f",
+  "dex_sha256": "eeafbe13d4297fb143bd786fedf26c49722b4065a85afbf894e14d77d0f672e8"
+}

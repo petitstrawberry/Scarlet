@@ -1,0 +1,27 @@
+{
+  "result": "PASS",
+  "checks": {
+    "scarlet-compat.apk": {
+      "command": [
+        "/Users/petitstrawberry/Library/Android/sdk/build-tools/37.0.0/apksigner",
+        "verify",
+        "--verbose",
+        ".build/android-services/apk-probe-final/scarlet-compat.apk"
+      ],
+      "exit_code": 0,
+      "stdout": "Verifies\nVerified using v1 scheme (JAR signing): false\nVerified using v2 scheme (APK Signature Scheme v2): false\nVerified using v3 scheme (APK Signature Scheme v3): true\nVerified using v3.1 scheme (APK Signature Scheme v3.1): false\nVerified using v3.2 scheme (APK Signature Scheme v3.2): false\nVerified using v4 scheme (APK Signature Scheme v4): false\nVerified for SourceStamp: false\nNumber of signers: 1\n",
+      "stderr": "WARNING: A restricted method in java.lang.System has been called\nWARNING: java.lang.System::loadLibrary has been called by org.conscrypt.NativeLibraryUtil in an unnamed module (file:/Users/petitstrawberry/Library/Android/sdk/build-tools/37.0.0/lib/apksigner.jar)\nWARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module\nWARNING: Restricted methods will be blocked in a future release unless native access is enabled\n\n"
+    },
+    "scarlet-tampered.apk": {
+      "command": [
+        "/Users/petitstrawberry/Library/Android/sdk/build-tools/37.0.0/apksigner",
+        "verify",
+        "--verbose",
+        ".build/android-services/apk-probe-final/scarlet-tampered.apk"
+      ],
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "WARNING: A restricted method in java.lang.System has been called\nWARNING: java.lang.System::loadLibrary has been called by org.conscrypt.NativeLibraryUtil in an unnamed module (file:/Users/petitstrawberry/Library/Android/sdk/build-tools/37.0.0/lib/apksigner.jar)\nWARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module\nWARNING: Restricted methods will be blocked in a future release unless native access is enabled\n\nDOES NOT VERIFY\nERROR: APK Signature Scheme v3 signer #1: APK integrity check failed. CHUNKED_SHA256 digest mismatch. Expected: <ee5911c3e303727dce7f86acb960675b9ef37d0bf7c9427db0f507dadfbca80f>, actual: <bf6b08514964a6bb86fae3bf82ccffee8f61c08f834e2210f3b9e8c4ca4beaf1>\n"
+    }
+  }
+}
