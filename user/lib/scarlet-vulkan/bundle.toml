@@ -8,6 +8,15 @@ lib = "sws_client_c"
 architectures = ["aarch64"]
 to = "/lib/libsws_client_c.so"
 
+# Standard Window chrome for native hosts with externally rendered content.
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "409b91758b67a0084f411b133c885a88e54b1461" }
+package = "scarlet-ui-window-c"
+lib = "scarlet_ui_window"
+architectures = ["aarch64"]
+to = "/lib/libscarlet_ui_window.so"
+
 [[layers]]
 kind = "bundle"
 source = { git = "https://github.com/petitstrawberry/Vulkan-Loader", rev = "83f0038b735f08e9a8282ef37b74e1eab1fbf896" }

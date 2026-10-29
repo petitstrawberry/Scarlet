@@ -1039,6 +1039,7 @@ impl TransportState {
             | Event::SgfxBackendLost { .. }
             | Event::FocusChanged { .. }
             | Event::ActiveAppChanged { .. }
+            | Event::SceneBufferReleased { .. }
             | Event::Error { .. } => None,
         }
     }
@@ -1052,6 +1053,7 @@ impl TransportState {
                         Event::SgfxFrameRejected { .. }
                             | Event::SgfxBufferReleased { .. }
                             | Event::SgfxBackendLost { .. }
+                            | Event::SceneBufferReleased { .. }
                     )
             }
             EventFilter::Sgfx(window_id) => match event {
@@ -1944,6 +1946,31 @@ impl Connection {
         Ok(surface_id)
     }
 
+    /// Create a compound-scene surface on an already registered extension connection.
+    /// `external_id` is a nonzero connection-scoped owner identifier. The returned
+    /// surface participates in the ordinary resize, state and lifetime APIs.
+    pub fn create_scene_surface(
+        &self,
+        external_id: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<u32, Error> {
+        if external_id == 0 || width == 0 || height == 0 || width > 16384 || height > 16384 {
+            return Err(Error::InvalidRequest);
+        }
+        let payload = protocol::payload_extension_create_window(external_id, width, height);
+        let mut response = self.request(protocol::client_msg::EXTENSION_CREATE_WINDOW, &payload)?;
+        let id = match response.message() {
+            ServerMessage::WindowCreated { window_id, .. } => window_id,
+            ServerMessage::Error { code } => return Err(Error::ServerError(code)),
+            _ => return Err(Error::InvalidResponse),
+        };
+        let handle = response.take_handle().ok_or(Error::ShmHandleFailed)?;
+        let shm = SharedMemory::from_handle(handle).map_err(|_| Error::ShmHandleFailed)?;
+        mutex_lock(&self.surfaces).insert(id, Surface::new(id, width, height, shm)?);
+        Ok(id)
+    }
+
     /// Create a surface after SWS atomically applies initial policy and limits.
     ///
     /// The returned dimensions are authoritative and back the first shared
@@ -2821,7 +2848,15 @@ impl Connection {
 impl TransportState {
     fn queue_async_message(&mut self, message: ServerMessage, payload: &[u8]) -> bool {
         match message {
-            ServerMessage::InputEvent {
+            ServerMessage::ExtensionInputEvent {
+                window_id,
+                time,
+                type_,
+                code,
+                value,
+                ..
+            }
+            | ServerMessage::InputEvent {
                 window_id,
                 time,
                 type_,
@@ -2835,6 +2870,16 @@ impl TransportState {
                     code,
                     value,
                 }));
+                true
+            }
+            ServerMessage::ExtensionBufferReleased {
+                buffer_id,
+                commit_serial,
+            } => {
+                self.push_event(Event::SceneBufferReleased {
+                    buffer_id,
+                    commit_serial,
+                });
                 true
             }
             ServerMessage::GamepadInput { window_id, state } => {
@@ -3297,6 +3342,13 @@ fn decode_workspace_response(
 #[cfg(test)]
 mod pointer_lock_tests {
     use super::*;
+
+    #[test]
+    fn scene_releases_remain_available_to_the_resource_owner() {
+        let event = Event::SceneBufferReleased { buffer_id: 7, commit_serial: 11 };
+        assert!(!TransportState::event_matches(EventFilter::Window(27), None, &event));
+        assert!(!TransportState::event_matches(EventFilter::Sgfx(27), None, &event));
+    }
 
     #[test]
     fn close_request_decodes_to_a_window_event_not_surface_destruction() {

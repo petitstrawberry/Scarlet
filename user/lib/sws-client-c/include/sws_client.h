@@ -23,7 +23,7 @@ typedef struct SwsEvent {
     uint32_t width, height;
 } SwsEvent;
 enum { SWS_EVENT_INPUT = 1, SWS_EVENT_CONFIGURE = 2,
-       SWS_EVENT_DESTROYED = 3, SWS_EVENT_FOCUS = 4 };
+       SWS_EVENT_DESTROYED = 3, SWS_EVENT_FOCUS = 4, SWS_EVENT_SCALE = 5, SWS_EVENT_STATE = 6, SWS_EVENT_CLOSE_REQUESTED = 7 };
 /* SWS_EVENT_FOCUS.value is 1 when this window gains focus and 0 when it loses it. */
 typedef struct SwsBuffer {
     uint32_t window_id, buffer_id, generation, compositor_epoch;
@@ -45,7 +45,7 @@ int32_t sws_window_size(uint32_t window_id, uint32_t *width, uint32_t *height);
 int32_t sws_window_resize(uint32_t window_id, uint32_t width, uint32_t height);
 int32_t sws_window_title(uint32_t window_id, const char *title);
 enum { SWS_WINDOW_SHOW=1, SWS_WINDOW_HIDE=2, SWS_WINDOW_RAISE=3,
-       SWS_WINDOW_MAXIMIZE=4, SWS_WINDOW_RESTORE=5 };
+       SWS_WINDOW_MAXIMIZE=4, SWS_WINDOW_RESTORE=5, SWS_WINDOW_MOVE=6 };
 int32_t sws_window_action(uint32_t window_id, uint32_t action);
 /* Copy a complete little-endian BGRA frame into the server's shared buffer.
  * Memory remains caller-owned and is borrowed only for this call. Pitched rows
@@ -68,6 +68,33 @@ int32_t sws_gpu_commit(SwsBuffer buffer, uint64_t commit_serial,
                        uint32_t width, uint32_t height);
 int32_t sws_gpu_destroy(SwsBuffer buffer);
 int32_t sws_gpu_poll(uint32_t window_id, SwsGpuEvent *event);
+
+/* Compound scene windows use physical pixels throughout. size/resize and GPU
+ * commits refer to the content area; input events remain outer-surface local.
+ * STATE.value uses minimized=1, maximized=2, fullscreen=4, tablet-managed=16. SCALE.value is milli.
+ * A frame is borrowed and copied before returning. Published pixels are immutable;
+ * GPU content is composed by SWS, with no CPU readback. All consumers retain the
+ * same shared connection and existing GPU identity/release serial contract. */
+typedef struct SwsRect { uint32_t x,y,width,height; } SwsRect;
+typedef struct SwsInsets { uint32_t left,top,right,bottom; } SwsInsets;
+typedef struct SwsSceneGeometry {
+    uint32_t width,height,scale_milli,state;
+    SwsRect content;
+} SwsSceneGeometry;
+typedef struct SwsSceneFrame {
+    uint32_t width,height,stride;
+    SwsInsets insets;
+    const void *pixels; size_t bytes;
+    const SwsRect *clip; size_t clip_count;
+} SwsSceneFrame;
+int32_t sws_get_output_scale(uint32_t *scale_milli);
+int32_t sws_scene_create(const char *title, uint32_t outer_width, uint32_t outer_height,
+                         uint32_t resizable, uint32_t *window_id);
+/* Resize the complete outer surface, for a host changing its frame insets. */
+int32_t sws_scene_resize(uint32_t window_id, uint32_t outer_width, uint32_t outer_height);
+int32_t sws_scene_geometry(uint32_t window_id, SwsSceneGeometry *geometry);
+int32_t sws_scene_frame(uint32_t window_id, const SwsSceneFrame *frame);
+int32_t sws_window_resizable(uint32_t window_id, uint32_t enabled);
 
 #ifdef __cplusplus
 }

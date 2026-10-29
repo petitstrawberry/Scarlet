@@ -204,6 +204,8 @@ pub enum Event {
         surface_id: u32,
         state: sws_protocol::gamepad::State,
     },
+    /// One extension-scene buffer is no longer selected or in flight.
+    SceneBufferReleased { buffer_id: u32, commit_serial: u64 },
     /// Input event (keyboard, mouse, etc.)
     Input(InputEvent),
     /// IME preedit text for a text-input context.
