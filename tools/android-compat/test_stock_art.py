@@ -5,11 +5,29 @@ import unittest
 import xml.etree.ElementTree as ET
 
 from art_inputs import SDK_SHA256, sha256
-from stock_art import BIONIC_ALIASES, activation_xml, apex_identity, bounded_alias, decode_logd, linkerconfig_succeeded, merge_properties, verify_stock_inputs
+from stock_art import derive_cpu_abi_properties, BIONIC_ALIASES, activation_xml, apex_identity, bounded_alias, decode_logd, linkerconfig_succeeded, merge_properties, verify_stock_inputs
 from test_art_runner import runtime_fixture
 
 
 class StockArtTest(unittest.TestCase):
+    def test_cpu_abi_bootstrap_uses_image_priority_and_preserves_readonly_values(self):
+        source = {"ro.vendor.product.cpu.abilist64": "arm64-v8a", "ro.vendor.product.cpu.abilist32": "",
+                  "ro.system.product.cpu.abilist64": "ignored"}
+        derived = derive_cpu_abi_properties(source)
+        self.assertEqual(derived["ro.product.cpu.abilist"], "arm64-v8a")
+        self.assertEqual(derived["ro.product.cpu.abilist32"], "")
+        self.assertNotIn("ro.product.cpu.abilist", source)
+        source.update({"ro.product.product.cpu.abilist64": "x86_64", "ro.product.product.cpu.abilist32": "x86"})
+        self.assertEqual(derive_cpu_abi_properties(source)["ro.product.cpu.abilist"], "x86_64,x86")
+        source["ro.product.cpu.abilist"] = "explicit"
+        self.assertEqual(derive_cpu_abi_properties(source), source)
+        source["ro.product.cpu.abilist"] = ""
+        source["ro.product.cpu.abilist64"] = "already-published"
+        partial = derive_cpu_abi_properties(source)
+        self.assertEqual(partial["ro.product.cpu.abilist"], "")
+        self.assertEqual(partial["ro.product.cpu.abilist64"], "already-published")
+        self.assertEqual(derive_cpu_abi_properties({})["ro.product.cpu.abilist"], "")
+
     def test_original_apex_identity_and_activation(self):
         data = b"\x0a\x0fcom.android.art\x10\x7b\x2a\x03one\x3a\x05a.so!"
         self.assertEqual(apex_identity(data), ("com.android.art", 123, "one"))

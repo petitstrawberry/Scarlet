@@ -136,6 +136,29 @@ def merge_properties(paths):
     return "".join(f"{key}={value}\n" for key, value in sorted(properties.items()))
 
 
+def derive_cpu_abi_properties(properties):
+    """Android 13 init/property_service.cpp property_initialize_ro_cpu_abilist.
+
+    This is explicit userspace bootstrap, separate from literal image merging.
+    Preserve already-published ro.* values, including empty values: Android's
+    PropertySet cannot replace them. No host CPU or guessed ABI is introduced.
+    """
+    result = dict(properties)
+    prefix = "ro.product.cpu.abilist"
+    if result.get(prefix, ""):
+        return result
+    narrow, wide = "", ""
+    for partition in ("product", "odm", "vendor", "system"):
+        base = "ro." + partition + ".product.cpu.abilist"
+        narrow, wide = result.get(base + "32", ""), result.get(base + "64", "")
+        if narrow or wide:
+            break
+    result.setdefault(prefix, ",".join(part for part in (wide, narrow) if part))
+    result.setdefault(prefix + "32", narrow)
+    result.setdefault(prefix + "64", wide)
+    return result
+
+
 def verify_stock_inputs(stock, runtime):
     """Check the complete overlay and its binding to the original runtime."""
     verify_art_runtime(runtime)

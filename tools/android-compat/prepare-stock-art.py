@@ -14,7 +14,7 @@ import shutil
 import tempfile
 
 from art_inputs import Ext4, elf_needed, sha256, unpack_apex, verify_art_runtime
-from stock_art import BIONIC_ALIASES, activation_xml, apex_identity, bounded_alias, extract_partitions, merge_properties
+from stock_art import BIONIC_ALIASES, activation_xml, apex_identity, bounded_alias, derive_cpu_abi_properties, extract_partitions, merge_properties
 
 
 def stock_libraries(image, source, target, output, runtime, links):
@@ -174,7 +174,15 @@ def prepare(archive, runtime, helper, output):
                     queue.append(target)
         bootstrap = output / "data/local/tmp"
         bootstrap.mkdir(parents=True)
-        (bootstrap / "property-values.prop").write_text(merge_properties(props))
+        literal = dict(line.split("=", 1) for line in merge_properties(props).splitlines())
+        initialized = derive_cpu_abi_properties(literal)
+        metadata["derived_boot_properties"] = {
+            "algorithm": "android-13-init-cpu-abilist",
+            "source": "https://android.googlesource.com/platform/system/core/+/83366e7e7a1556ab6cff117673bb9f17b973de99/init/property_service.cpp",
+            "values": {key: value for key, value in initialized.items() if key not in literal},
+        }
+        (bootstrap / "property-values.prop").write_text(
+            "".join(f"{key}={value}\n" for key, value in sorted(initialized.items())))
         (bootstrap / "property-contexts.list").write_text("\n".join(contexts) + "\n")
         shutil.copy2(helper / "property-bootstrap", bootstrap / "property-bootstrap")
     (output / "dev/__properties__").mkdir(parents=True)
