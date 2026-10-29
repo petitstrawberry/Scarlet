@@ -1,0 +1,22 @@
+warning: Git tree '/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet' is dirty
+警告: [options] ソース値8は廃止されていて、今後のリリースで削除される予定です
+警告: [options] ターゲット値8は廃止されていて、今後のリリースで削除される予定です
+警告: [options] 廃止されたオプションについての警告を表示しないようにするには、-Xlint:オプションを使用します。
+/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/framework/ScarletZygoteChild.java:30: エラー: シンボルを見つけられません
+        Os._exit(0);
+          ^
+  シンボル:   メソッド _exit(int)
+  場所: クラス Os
+エラー1個
+警告3個
+Traceback (most recent call last):
+  File "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/build-zygote-probe.py", line 57, in <module>
+    main()
+    ~~~~^^
+  File "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/build-zygote-probe.py", line 47, in main
+    subprocess.run(compile_command, check=True)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/ygxqin6ydzjfawywqpp5pal8wv6sf5bh-python3-3.13.13/lib/python3.13/subprocess.py", line 577, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['java', 'com.sun.tools.javac.Main', '--release', '8', '-classpath', '/Users/petitstrawberry/Library/Android/sdk/platforms/android-32/android.jar', '-d', '/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/zygote-child-formal-build/classes', '/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/framework/ScarletZygoteChild.java']' returned non-zero exit status 1.

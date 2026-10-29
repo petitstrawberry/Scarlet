@@ -23,6 +23,13 @@ authority and an exclusive, single-threaded process. It assigns one of that
 policy's labels to the current process. The `scarlet_os::shield::Policy` wrapper
 owns these capabilities.
 
+`ShieldPolicyCreateWithTransitions` (1313) additionally accepts at most 4,096
+unique `(source label, target label, principal)` transitions. A transition requires
+all base, active and retained principal IDs to equal the authorized principal.
+`ShieldTransition` (1314) checks the live subject and credentials in an exclusive,
+single-threaded process. Query authority is enough for an explicitly delegated
+transition; it cannot create grants or perform an arbitrary `ShieldApply`.
+
 Clone and Environment spawn inherit the subject. Exec, including an ABI or
 Environment change, preserves it; failed exec leaves it unchanged. Assignment
 is explicit: executable names and filesystem xattrs cannot grant a process
@@ -41,11 +48,16 @@ Only tasks in the mounted policy can open its query files. Android
 knowledge to the Linux ABI implementation.
 
 For this adapter, native class **1** means `service_manager`; bits **1**, **2**
-and **4** mean `add`, `find` and `list`. Labels are exact four-component SELinux
-context strings with `s0`; MLS categories and transitions are unsupported.
+and **4** mean `add`, `find` and `list`. Labels use exact SELinux
+context strings at `s0`, optionally followed by canonical, strictly increasing
+`c0` through `c1023` categories. These suffixes are opaque labels: there is no
+MLS dominance relation, category range expansion, or implicit grant.
 The status page reports enforcing operation for these queries and cannot be
-mapped writable or made writable with `mprotect`. Policy loading, permissive
-mode and relabeling through procfs are rejected. Because policies are immutable,
+mapped writable or made writable with `mprotect`. Policy loading and permissive
+mode are rejected. Writing `/proc/self/attr/current` translates a delegated
+Shield transition. Each writable descriptor is bound to the original task, and
+the live policy, source label and credentials are rechecked when writing.
+Inherited descriptors cannot relabel their original owner or their new holder. Because policies are immutable,
 libselinux may cache decisions without a policy-update notification channel.
 
 `/proc/self/attr/current`, `/proc/thread-self/attr/current`, and PID-based reads
@@ -63,8 +75,11 @@ The protocol follows AOSP Android 13
 
 This is a service-authorization foundation, not a complete SELinux engine or
 system-wide sandbox. It does not consume Android binary policy, enforce VFS
-MAC, change Unix credentials, or attach policy semantics to `security.selinux`
-xattrs. The initial fixture tests unmodified libselinux. The subsequent
+MAC or attach policy semantics to `security.selinux` xattrs. Native Shield
+credentials separately hold principal/group identities and change authority;
+Linux and Android translate these to UID/GID and supported capability operations.
+Inherited Shield execution constraints enforce Linux seccomp filters before ABI
+dispatch, including attempts to escape through native syscalls. The initial fixture tests unmodified libselinux. The subsequent
 [service integration](../../tools/android-compat/README.md#stock-servicemanager-integration)
 uses distinct process labels and the unmodified stock servicemanager to verify
 allowed registration/lookup and denied add/find/list requests.
