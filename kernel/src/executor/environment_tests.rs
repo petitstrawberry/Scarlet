@@ -521,3 +521,19 @@ fn linux_tmpfs_mount_enforces_flags_options_and_native_mount_authority() {
     task.credentials.write().set_authority(0, 0).unwrap();
     assert_eq!(mount_tmpfs(&task, "/apex", "tmpfs", 14, ""), Err(errno::EPERM));
 }
+
+#[test_case]
+fn unsupported_shared_mount_reports_operation_error_with_null_filesystem_type() {
+    use crate::abi::linux::generic::{fs::sys_mount, errno, LinuxAbi};
+    let task = Arc::new(new_user_task("shared-mount-request".into(), 0));
+    let path = 0x20000000;
+    task.allocate_stack_pages(path, 1).unwrap();
+    crate::library::std::usercopy::copy_to_user(&task, path, b"/\0").unwrap();
+    let mut frame = Trapframe::new();
+    frame.set_arg(1, path);
+    frame.set_arg(3, 0x104000); // MS_SHARED | MS_REC; type/source/data are NULL.
+    crate::task::set_mock_current_task(task);
+    let result = sys_mount(&mut LinuxAbi::default(), &mut frame);
+    crate::task::clear_mock_current_task();
+    assert_eq!(result, errno::to_result(errno::EOPNOTSUPP));
+}

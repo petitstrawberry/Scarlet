@@ -1051,6 +1051,9 @@ pub fn sys_mount(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     if !task.credentials.read().permits(crate::shield::identity::MANAGE_MOUNTS) {
         return errno::to_result(errno::EPERM);
     }
+    // Propagation/remount requests do not carry a filesystem type. Reject
+    // unsupported operations before interpreting their intentionally null pointers.
+    if flags & !0xe != 0 { return errno::to_result(errno::EOPNOTSUPP); }
     let fstype = match parse_c_string_from_userspace(&task, fstype, MAX_PATH_LENGTH) {
         Ok(value) => value, Err(_) => return errno::to_result(errno::EFAULT),
     };

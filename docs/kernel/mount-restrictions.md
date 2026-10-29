@@ -37,3 +37,10 @@ numeric UID zero. Existing private/slave propagation requests remain private.
 
 This does not implement general Unix DAC, SELinux mount contexts, shared mount
 propagation, set-ID execution, or read-only mount enforcement.
+
+The Linux adapter returns `EPERM` for an executable mmap on a no-execute mount
+and `EACCES` for a later protection change that exceeds the ceiling, matching
+[Linux's file mapping check](https://github.com/torvalds/linux/blob/v6.1/mm/mmap.c#L1281-L1288).
+The mount table at `/proc/mounts` and the self/thread-self aliases is generated
+from the caller's VFS view, with mntent path escaping and actual native mount
+restrictions. It does not enumerate the outer manager's mounts.

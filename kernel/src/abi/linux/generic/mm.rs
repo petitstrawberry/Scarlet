@@ -126,7 +126,11 @@ fn mmap_for_task(abi: &mut LinuxAbi, trapframe: &Trapframe, task: &crate::task::
         None => return to_result(errno::EBADF),
     };
     if kernel_obj.as_memory_mappable().is_some_and(|object| prot & !object.maximum_mapping_permissions() != 0) {
-        return to_result(errno::EACCES);
+        // Linux do_mmap distinguishes a noexec mount (EPERM) from other
+        // permission failures; mprotect reports a ceiling violation as EACCES.
+        let noexec = prot & PROT_EXEC != 0
+            && kernel_obj.as_file().is_some_and(|file| !file.allows_execution());
+        return to_result(if noexec { errno::EPERM } else { errno::EACCES });
     }
     if let Some(result) = abi.extensions.mmap(
         task,
@@ -1045,7 +1049,7 @@ mod tests {
         frame.set_arg(2, 5);
         frame.set_arg(3, 0x12);
         frame.set_arg(4, fd);
-        assert_eq!(mmap_for_task(&mut abi, &frame, &task), to_result(errno::EACCES));
+        assert_eq!(mmap_for_task(&mut abi, &frame, &task), to_result(errno::EPERM));
         assert_eq!(task.vm_manager.memmap_len(), 0);
         frame.set_arg(2, 3);
         assert_eq!(mmap_for_task(&mut abi, &frame, &task), base);
