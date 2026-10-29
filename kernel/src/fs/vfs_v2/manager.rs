@@ -225,6 +225,20 @@ impl VfsManager {
         Ok(())
     }
 
+    /// Enumerate only this view's mount tree, retaining mount identities and
+    /// restrictions for an ABI adapter to format. Filesystem data is not read.
+    pub fn mounted_paths(&self) -> Vec<(String, Arc<MountPoint>)> {
+        let mut pending = alloc::vec![self.mount_tree.root_mount.read().clone()];
+        let mut mounts = Vec::new();
+        while let Some(mount) = pending.pop() {
+            let children: Vec<_> = mount.children.read().values().cloned().collect();
+            pending.extend(children);
+            mounts.push((self.mount_tree.get_mount_absolute_path(&mount), mount));
+        }
+        mounts.sort_by(|a, b| a.0.cmp(&b.0));
+        mounts
+    }
+
     /// Unmount a mount point at the specified path
     ///
     /// This will remove the mount point from the mount tree and clean up any

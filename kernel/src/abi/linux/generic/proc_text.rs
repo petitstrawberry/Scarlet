@@ -173,7 +173,47 @@ fn task_stat(task: &Task, thread: bool) -> String {
     content
 }
 
+/// mntent escapes must preserve whitespace and backslashes in mount paths.
+fn mount_field(value: &str) -> String {
+    let mut escaped = String::new();
+    for character in value.chars() {
+        match character {
+            ' ' => escaped.push_str("\\040"),
+            '\t' => escaped.push_str("\\011"),
+            '\n' => escaped.push_str("\\012"),
+            '\\' => escaped.push_str("\\134"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+fn mounts_content(fs: &crate::fs::VfsManager) -> String {
+    use crate::fs::vfs_v2::drivers::{tmpfs::TmpFS, overlayfs::OverlayFS, devfs::DevFS, cpiofs::CpioFS};
+    let mut content = String::new();
+    for (path, mount) in fs.mounted_paths() {
+        let filesystem = mount.filesystem.clone().or_else(|| mount.root.node().filesystem().and_then(|fs| fs.upgrade()));
+        let Some(filesystem) = filesystem else { continue };
+        let kind = if filesystem.as_any().is::<TmpFS>() { "tmpfs" }
+            else if filesystem.as_any().is::<OverlayFS>() { "overlay" }
+            else if filesystem.as_any().is::<DevFS>() { "devfs" }
+            else if filesystem.as_any().is::<CpioFS>() { "cpiofs" }
+            else { filesystem.name() };
+        let restrictions = mount.restrictions;
+        let mut options = String::from("rw");
+        if !restrictions.allows_privilege_gain() { options.push_str(",nosuid"); }
+        if !restrictions.allows_devices() { options.push_str(",nodev"); }
+        if !restrictions.allows_execution() { options.push_str(",noexec"); }
+        content.push_str(&format!("none {} {} {options} 0 0\n", mount_field(&path), mount_field(kind)));
+    }
+    content
+}
+
 fn text_content(path: &str) -> Option<String> {
+    if matches!(path, "/proc/mounts" | "/proc/self/mounts" | "/proc/thread-self/mounts") {
+        let fs = crate::task::mytask()?.get_vfs()?;
+        return Some(mounts_content(&fs));
+    }
     if matches!(path, "/proc/self/stat" | "/proc/thread-self/stat") {
         let caller = crate::task::mytask()?;
         let thread = path == "/proc/thread-self/stat";
@@ -420,6 +460,25 @@ impl FileObject for ProcTextFile {
 
 #[cfg(test)]
 mod tests {
+    #[test_case]
+    fn proc_mounts_reports_only_selected_view_and_escapes_paths_with_real_restrictions() {
+        use alloc::sync::Arc;
+        use crate::fs::{VfsManager, drivers::tmpfs::TmpFS};
+        let host = Arc::new(VfsManager::new());
+        host.create_dir("/host-only").unwrap();
+        host.mount(TmpFS::new(0), "/host-only", 8).unwrap();
+        let private = VfsManager::view_rooted_at(&host, "/host-only").unwrap();
+        private.create_dir("/space path\tback\\slash").unwrap();
+        private.mount(TmpFS::new(0), "/space path\tback\\slash", 14).unwrap();
+        let content = super::mounts_content(&private);
+        assert!(content.contains("none / tmpfs rw,noexec 0 0\n"));
+        assert!(content.contains("/space\\040path\\011back\\134slash tmpfs rw,nosuid,nodev,noexec 0 0\n"));
+        assert!(!content.contains("/host-only"));
+        assert_eq!(content.lines().count(), 2);
+        private.unmount("/space path\tback\\slash").unwrap();
+        assert_eq!(super::mounts_content(&private).lines().count(), 1);
+    }
+
     #[test_case]
     fn stat_field_28_uses_initial_stack_pointer_and_preserves_comm_delimiters() {
         use crate::environment::{PAGE_SIZE, USER_STACK_END};
