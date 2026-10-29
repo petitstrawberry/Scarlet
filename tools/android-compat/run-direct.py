@@ -16,12 +16,13 @@ import shutil
 import subprocess
 import sys
 
-from evidence import analyze_art, analyze_direct, analyze_libbinder, analyze_selinux, analyze_services
+from evidence import analyze_art, analyze_direct, analyze_libbinder, analyze_selinux, analyze_services, analyze_framework
 from art_inputs import art_launch, validate_dex, verify_art_runtime, sha256
 from libbinder_inputs import verify_libbinder_build
 from selinux_inputs import verify_selinux_build
 from service_inputs import verify_service_inputs, stage_service_inputs, CONTEXTS
 from stock_art import stage_stock_inputs, verify_stock_inputs
+from framework_inputs import verify_framework_inputs, verify_framework_probe, framework_launch, stage_framework_inputs, PROGRAM
 
 sys.dont_write_bytecode = True
 SOURCE = Path(__file__).resolve().parent
@@ -42,6 +43,8 @@ def main():
     mode.add_argument("--libbinder-probe", type=Path, help="build directory from build-libbinder-probe.py; verify stock-library RPC and lifetime")
     mode.add_argument("--selinux-probe", type=Path, help="build directory from build-selinux-probe.py; verify Shield allow/deny through stock libselinux")
     mode.add_argument("--service-probe", type=Path, help="stock servicemanager integration probe build")
+    mode.add_argument("--framework-probe", type=Path, help="build-dex.py --framework-sdk output; verify stock app_process framework/JNI")
+    parser.add_argument("--framework-inputs", type=Path, help="prepare-framework.py output")
     parser.add_argument("--service-inputs", type=Path, help="verified stock servicemanager from prepare-servicemanager.py")
     parser.add_argument("--runtime-root", type=Path, help="Android /system and /apex runtime tree")
     parser.add_argument("--linker-debug", action="store_true", help="enable Android LD_DEBUG=3 for ART diagnosis")
@@ -51,6 +54,15 @@ def main():
     parser.add_argument("--accel", choices=("tcg", "hvf"), default="tcg")
     parser.add_argument("--binder", action="store_true", help="include Binder RPC and three-process object lifetime checks")
     args = parser.parse_args()
+    framework = None
+    if args.framework_probe:
+        if not args.runtime_root or not args.stock_inputs or not args.framework_inputs:
+            parser.error("--framework-probe requires --runtime-root, --stock-inputs and --framework-inputs")
+        verify_framework_probe(args.framework_probe)
+        framework = verify_framework_inputs(args.framework_inputs, args.runtime_root, args.stock_inputs)
+        args.program = args.framework_inputs / PROGRAM
+    elif args.framework_inputs:
+        parser.error("--framework-inputs requires --framework-probe")
     if args.service_probe:
         if not args.runtime_root or not args.stock_inputs or not args.service_inputs:
             parser.error("--service-probe requires --runtime-root, --stock-inputs and --service-inputs")
@@ -106,6 +118,9 @@ def main():
             "argv": ["/system/bin/scarlet-program-probe"],
             "env": ["ANDROID_LOG_TAGS=*:v", "LD_LIBRARY_PATH=" + metadata["library_path"]],
         }
+        if framework:
+            art = framework_launch(framework)
+            dex_hash = validate_dex(args.framework_probe / "classes.dex")
         if args.linker_debug:
             art["env"].append("LD_DEBUG=3")
         if args.stock_inputs:
@@ -122,6 +137,9 @@ def main():
     (output / "inputs.json").write_text(json.dumps({
         "kernel_sha256": hashlib.sha256(kernel.read_bytes()).hexdigest(),
         "dex_sha256": dex_hash,
+        "framework_manifest_sha256": sha256(args.framework_inputs / "framework-inputs.json") if framework else None,
+        "framework_build_sha256": sha256(args.framework_probe / "build.json") if framework else None,
+        "framework_fixture_sha256": {name: sha256(SOURCE / "init/src" / name) for name in ("main.rs", "stock.rs")} if framework else None,
         "program_sha256": sha256(args.program) if args.program else None,
         "libbinder_build_sha256": sha256(args.libbinder_probe / "build.json") if args.libbinder_probe else None,
         "service_build_sha256": sha256(args.service_probe / "build.json") if args.service_probe else None,
@@ -135,6 +153,9 @@ def main():
         "runtime_sha256": {str(p.relative_to(args.runtime_root)): hashlib.sha256(p.read_bytes()).hexdigest()
                            for p in runtime_files},
     }, indent=2) + "\n")
+    if framework:
+        shutil.copy2(args.framework_probe / "build.json", output / "framework-build.json")
+        shutil.copy2(args.framework_inputs / "framework-inputs.json", output / "framework-inputs.json")
     if args.service_probe:
         shutil.copy2(args.service_probe / "build.json", output / "service-build.json")
         shutil.copy2(args.service_inputs / "service-inputs.json", output / "service-inputs.json")
@@ -156,8 +177,8 @@ def main():
     if args.runtime_root:
         shutil.copytree(args.runtime_root, android, dirs_exist_ok=True, symlinks=True)
     if art:
-        if args.art_dex:
-            shutil.copy2(args.art_dex, android / "data/local/tmp/classes.dex")
+        if args.art_dex or framework:
+            shutil.copy2(args.art_dex or args.framework_probe / "classes.dex", android / "data/local/tmp/classes.dex")
             if validate_dex(android / "data/local/tmp/classes.dex") != dex_hash:
                 raise ValueError("DEX changed during staging")
         verify_art_runtime(android)
@@ -167,7 +188,10 @@ def main():
             shutil.copy2(args.stock_inputs / "stock-inputs.json", output / "stock-inputs.json")
         if args.service_probe:
             stage_service_inputs(args.service_inputs, args.runtime_root, android)
-        if args.program:
+        if framework:
+            bootstrap = stage_framework_inputs(args.framework_inputs, args.runtime_root, args.stock_inputs, android)
+            (output / "framework-bootstrap.json").write_text(json.dumps(bootstrap, indent=2) + "\n")
+        if args.program and not framework:
             target = android / art["argv"][0].lstrip("/")
             if target.exists() or target.is_symlink():
                 raise ValueError("program path already exists in runtime")
@@ -190,6 +214,7 @@ def main():
                SCARLET_ANDROID_SHIELD="1" if args.selinux_probe else "0",
                SCARLET_ANDROID_ART="1" if art else "0",
                SCARLET_ANDROID_PROGRAM="1" if args.program else "0",
+               SCARLET_ANDROID_FRAMEWORK="1" if framework else "0",
                SCARLET_ART_ARGS="\x1f".join(art["argv"]) if art else "",
                SCARLET_ART_ENV="\x1f".join(art["env"]) if art else "")
     # Preserve the exact launch even if native compilation or image creation fails.
@@ -252,6 +277,14 @@ def main():
         # timeout, never proves that its service interface is usable.
         exits = re.findall(rb"\nSCARLET_ANDROID_PROGRAM_EXIT (-?\d+)\r*\n", data)
         result["program_exit_status"] = int(exits[0]) if len(exits) == 1 else None
+        if framework:
+            result["framework"] = analyze_framework(data)
+            if result["result"] == "PASS" and result["framework"]["result"] != "PASS":
+                result["result"] = "missing or failed framework evidence"
+            result["apk_execution"] = "not tested"
+            (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+            print(f"Stock app_process framework/JNI probe: {result['result']}")
+            return 0 if result["result"] == "PASS" else 1
         if args.selinux_probe:
             result["selinux"] = analyze_selinux(data)
             if result["result"] == "PASS" and result["selinux"]["result"] != "PASS":

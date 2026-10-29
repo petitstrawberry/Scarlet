@@ -22,6 +22,7 @@ class EvidenceTest(unittest.TestCase):
                       f"SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-static {case} 0"]
         lines.append("SCARLET_ANDROID_DIRECT_OK")
         self.assertEqual(analyze_direct("\n".join(lines).encode(), binder=True)["result"], "INCOMPLETE")
+        lines.insert(lines.index("SCARLET_BIONIC_OK binder"), "SCARLET_BINDER_FLUSH_OK close dup3 duplicate-live")
         at = lines.index("SCARLET_BIONIC_OK binder")
         steps = ["BEGIN", "REJECT_OK details", "TRANSFER_OK details", "REFS strong-zero weak-live",
                  "REFS balanced-before-close", "OK details"]

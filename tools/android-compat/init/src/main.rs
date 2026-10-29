@@ -60,7 +60,9 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
             stock::prepare(&environment, &android, &handles)?;
         }
         let diagnostic = option_env!("SCARLET_ANDROID_PROGRAM") == Some("1");
-        let program = if diagnostic {
+        let program = if option_env!("SCARLET_ANDROID_FRAMEWORK") == Some("1") {
+            "/system/bin/app_process64"
+        } else if diagnostic {
             "/system/bin/scarlet-program-probe"
         } else {
             "/apex/com.android.art/bin/dalvikvm64"

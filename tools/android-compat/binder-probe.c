@@ -106,6 +106,46 @@ static int poll_interruption(int fd) {
     REQUIRE(poll_readable(fd, 20, 0) == 0);
     return 0;
 }
+struct flush_waiter { int fd; int ready; };
+static void *wait_for_flush(void *opaque) {
+    struct flush_waiter *waiter = opaque;
+    if (send_command(waiter->fd, BC_ENTER_LOOPER, NULL, 0) || write(waiter->ready, "R", 1) != 1)
+        return (void *)1;
+    if (receive(waiter->fd, BR_NOOP, NULL)) return (void *)2;
+    if (fcntl(waiter->fd, F_SETFL, O_NONBLOCK) != 0) return (void *)3;
+    uint32_t command = 0;
+    struct binder_write_read bwr = {.read_size = sizeof(command), .read_buffer = (uintptr_t)&command};
+    if (ioctl(waiter->fd, BINDER_WRITE_READ, &bwr) != -1 || errno != EAGAIN) return (void *)4;
+    return NULL;
+}
+static int descriptor_flush(void) {
+    for (int replace = 0; replace != 2; ++replace) {
+        struct peer peer;
+        REQUIRE(open_peer(&peer) == 0);
+        int duplicate = dup(peer.fd), ready[2];
+        REQUIRE(duplicate >= 0 && pipe(ready) == 0);
+        struct flush_waiter waiter = {.fd = peer.fd, .ready = ready[1]};
+        pthread_t worker;
+        REQUIRE(pthread_create(&worker, NULL, wait_for_flush, &waiter) == 0);
+        char registered;
+        REQUIRE(read(ready[0], &registered, 1) == 1 && registered == 'R');
+        if (replace) {
+            int other = open("/dev/null", O_RDWR | O_CLOEXEC);
+            REQUIRE(other >= 0 && dup3(other, duplicate, O_CLOEXEC) == duplicate);
+            REQUIRE(close(other) == 0 && close(duplicate) == 0);
+        } else {
+            REQUIRE(close(duplicate) == 0);
+        }
+        void *result = NULL;
+        REQUIRE(pthread_join(worker, &result) == 0 && result == NULL);
+        struct binder_version version = {0};
+        REQUIRE(ioctl(peer.fd, BINDER_VERSION, &version) == 0 && version.protocol_version == 8);
+        REQUIRE(close(ready[0]) == 0 && close(ready[1]) == 0);
+        REQUIRE(close(peer.fd) == 0 && munmap(peer.pool, POOL_SIZE) == 0);
+    }
+    printf("SCARLET_BINDER_FLUSH_OK close dup3 duplicate-live\n");
+    return 0;
+}
 static int server(int ready) {
     struct peer peer;
     REQUIRE(open_peer(&peer) == 0);
@@ -139,6 +179,7 @@ static int server(int ready) {
     return 0;
 }
 int binder_case(void) {
+    REQUIRE(descriptor_flush() == 0);
     int pipefd[2];
     REQUIRE(pipe(pipefd) == 0);
     pid_t child = fork();

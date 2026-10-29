@@ -13,6 +13,21 @@ MAX_PNG = 16 * 1024 * 1024
 MAX_PIXELS = 16 * 1024 * 1024
 
 
+def analyze_framework(data):
+    expected = ["SCARLET_ANDROID_STOCK_START properties", "SCARLET_PROPERTY_SNAPSHOT_OK",
+                "SCARLET_ANDROID_STOCK_EXIT properties 0", "SCARLET_ANDROID_STOCK_START linkerconfig",
+                "SCARLET_ANDROID_STOCK_EXIT linkerconfig 0", "SCARLET_ANDROID_STOCK_OK",
+                "SCARLET_ANDROID_PROGRAM_START", "SCARLET_FRAMEWORK_BEGIN",
+                "SCARLET_FRAMEWORK_PARCEL_BINDER_OK", "SCARLET_FRAMEWORK_LOOPER_OK", "SCARLET_FRAMEWORK_OK",
+                "SCARLET_ANDROID_PROGRAM_EXIT 0", "SCARLET_ANDROID_PROGRAM_DONE"]
+    lines = data.replace(b"\r", b"").decode("utf-8", errors="replace").splitlines()
+    records = [line for line in lines if line.startswith(
+        ("SCARLET_FRAMEWORK_", "SCARLET_ANDROID_PROGRAM_", "SCARLET_ANDROID_STOCK_", "SCARLET_PROPERTY_"))]
+    records = ["SCARLET_PROPERTY_SNAPSHOT_OK" if
+               re.fullmatch(r"SCARLET_PROPERTY_SNAPSHOT_OK [1-9][0-9]*", line) else line for line in records]
+    return {"result": "PASS" if records == expected else "INCOMPLETE", "records": records}
+
+
 def analyze_services(data):
     lines = data.replace(b"\r", b"").decode("utf-8", errors="replace").splitlines()
     records = [line for line in lines if line.startswith("SCARLET_SERVICES_")]
@@ -124,12 +139,15 @@ def analyze_direct(data, dynamic=False, binder=False):
             current = {"program": match[1], "case": match[2], "began": False, "passed": False, "status": None}
             if current["case"] == "binder":
                 current["object_steps"] = []
+                current["flush_checks"] = 0
             cases.append(current)
         elif current is not None:
             if line == "SCARLET_BIONIC_BEGIN " + current["case"]:
                 current["began"] = True
             elif line == "SCARLET_BIONIC_OK " + current["case"]:
                 current["passed"] = current["began"]
+            elif current["case"] == "binder" and line == "SCARLET_BINDER_FLUSH_OK close dup3 duplicate-live":
+                current["flush_checks"] += 1
             elif current["case"] == "binder" and line.startswith("SCARLET_BINDER_OBJECTS_"):
                 step = line.removeprefix("SCARLET_BINDER_OBJECTS_")
                 current["object_steps"].append(step if step.startswith("REFS ") else step.split()[0])
@@ -142,7 +160,7 @@ def analyze_direct(data, dynamic=False, binder=False):
             complete = True
     passed = (complete and [(c["program"], c["case"]) for c in cases] == expected and
               all(c["passed"] and c["status"] == 0 and
-                  (c["case"] != "binder" or c["object_steps"] == object_steps) for c in cases))
+                  (c["case"] != "binder" or (c["object_steps"] == object_steps and c["flush_checks"] == 1)) for c in cases))
     return {"result": "PASS" if passed else "INCOMPLETE", "cases": cases}
 
 
