@@ -504,6 +504,22 @@ impl MountTree {
         }
     }
 
+    /// Mounts covering another mount root are children of that root. Keeping
+    /// the covered mount in the tree preserves open descriptors, propagation
+    /// channels, nested mounts and the exact topology to uncover on detach.
+    fn follow_mounts(mut entry: VfsEntryRef, mut mount: Arc<MountPoint>, stop_before_last: bool)
+        -> VfsResult<(VfsEntryRef, Arc<MountPoint>)> {
+        for _ in 0..256 {
+            let Some(child) = mount.get_child(&entry) else { return Ok((entry, mount)); };
+            if stop_before_last && child.get_child(&child.root).is_none() {
+                return Ok((entry, mount));
+            }
+            mount = child;
+            entry = mount.root.clone();
+        }
+        Err(vfs_error(FileSystemErrorKind::InvalidPath, "Mount stack too deep"))
+    }
+
     fn resolve_path_internal(
         &self,
         path: &str,
@@ -581,29 +597,21 @@ impl MountTree {
                 let is_at_mount_root = current_entry.node().id() == current_mount.root.node().id();
 
                 if is_at_mount_root {
-                    let parent_info = current_mount
-                        .get_parent()
-                        .zip(current_mount.parent_entry.read().clone());
-                    match parent_info {
-                        Some((parent_mount, parent_entry)) => {
-                            current_mount = parent_mount;
-                            current_entry = self.resolve_component(parent_entry, &"..")?;
-                        }
-                        None => {
-                            // No parent mount - stay at current mount root
-                        }
+                    loop {
+                        let parent_info = current_mount.get_parent().zip(current_mount.parent_entry.read().clone());
+                        let Some((parent_mount, parent_entry)) = parent_info else { break; };
+                        let covered_root = Arc::ptr_eq(&parent_entry, &parent_mount.root);
+                        current_mount = parent_mount;
+                        current_entry = parent_entry;
+                        if !covered_root { break; }
+                    }
+                    if !Arc::ptr_eq(&current_entry, &current_mount.root) {
+                        current_entry = self.resolve_component(current_entry, "..")?;
                     }
                 } else {
-                    current_entry = self.resolve_component(current_entry, &component)?;
+                    current_entry = self.resolve_component(current_entry, component)?;
                 }
-
-                // After '..' resolution, check if we landed on a child mount point
-                if !is_final_component || !resolve_mount {
-                    if let Some(child_mount) = current_mount.get_child(&current_entry) {
-                        current_mount = child_mount;
-                        current_entry = current_mount.root.clone();
-                    }
-                }
+                (current_entry, current_mount) = Self::follow_mounts(current_entry, current_mount, resolve_mount && is_final_component)?;
             } else {
                 // Regular path traversal with symlink handling based on options
                 let should_follow_symlinks = if is_final_component {
@@ -662,17 +670,7 @@ impl MountTree {
                     current_entry = self.resolve_component_no_symlink(current_entry, &component)?;
                 }
 
-                // Handle mount points (same as original implementation)
-                if resolve_mount && is_final_component {
-                    if let Some(_child_mount) = current_mount.get_child(&current_entry) {
-                        return Ok((current_entry, current_mount));
-                    }
-                } else {
-                    if let Some(child_mount) = current_mount.get_child(&current_entry) {
-                        current_mount = child_mount;
-                        current_entry = current_mount.root.clone();
-                    }
-                }
+                (current_entry, current_mount) = Self::follow_mounts(current_entry, current_mount, resolve_mount && is_final_component)?;
             }
         }
 

@@ -29,3 +29,10 @@ Native View builders use `set_propagation` (syscall 531) and `bind_recursive`
 (532). Linux translates `MS_PRIVATE`, `MS_SHARED`, `MS_SLAVE`, and `MS_REC` to
 these operations and supports directory `MS_BIND` with optional recursion.
 Unsupported flags and stacking over an already mounted target remain errors.
+
+A mount may cover the root of an existing non-root mount. The covering mount is
+attached as a child of that root, retaining the covered tree and its channels.
+Path lookup follows the stack; parent traversal crosses covered roots without
+leaking the bind source's parent. Namespace copies retain each layer, and detach
+uncovers one layer. Linux `umount2(MNT_DETACH)` maps to this native detach
+operation. Ordinary busy-checked unmount, force and expiry modes remain unsupported.

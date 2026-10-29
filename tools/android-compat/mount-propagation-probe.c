@@ -23,10 +23,33 @@ static int marker(const char *path) {
     if (fd < 0) return -1;
     return close(fd);
 }
+static int stacking(const char *target) {
+    char covered[256], source[256], lower[256], config[256], visible[256];
+    snprintf(covered, sizeof(covered), "%s/cover", target);
+    snprintf(source, sizeof(source), "%s/cover/bootstrap", target);
+    snprintf(lower, sizeof(lower), "%s/cover/lower", target);
+    snprintf(config, sizeof(config), "%s/cover/bootstrap/config", target);
+    snprintf(visible, sizeof(visible), "%s/cover/config", target);
+    if (mkdir(covered, 0755) || mount("tmpfs", covered, "tmpfs", MS_NOEXEC | MS_NODEV | MS_NOSUID, "size=1M")) return fail("cover base");
+    if (marker(lower) || mkdir(source, 0755) || marker(config)) return fail("cover data");
+    int fd = open(lower, O_RDONLY); struct stat before, after;
+    if (fd < 0 || fstat(fd, &before) || mount(source, covered, NULL, MS_BIND | MS_REC, NULL)) return fail("cover bind");
+    if (stat(visible, &after) || stat(lower, &after) != -1 || errno != ENOENT ||
+        fstat(fd, &after) || before.st_ino != after.st_ino) return fail("cover visibility or retained fd");
+    errno = 0;
+    if (umount2(covered, MNT_FORCE) != -1 || errno != EOPNOTSUPP) return fail("unsupported force unmount");
+    if (umount2(covered, MNT_DETACH) || stat(lower, &after) || stat(config, &after)) return fail("uncover lower");
+    if (mount("tmpfs", covered, "tmpfs", MS_NODEV, "size=1M")) return fail("regular overmount");
+    if (stat(lower, &after) != -1 || errno != ENOENT || umount2(covered, MNT_DETACH) || stat(lower, &after)) return fail("regular uncover");
+    if (close(fd) || umount2(covered, MNT_DETACH)) return fail("cover cleanup");
+    printf("SCARLET_MOUNT_STACK_OK bind regular retained-fd lazy-unmount\n");
+    return 0;
+}
 static int inner(const char *target) {
     /* The outer controller's View is never connected to these test groups. */
     if (unshare(CLONE_NEWNS) || mount(NULL, "/", NULL, MS_PRIVATE | MS_REC, NULL)) return fail("isolate view");
     if (mount("tmpfs", target, "tmpfs", MS_NOEXEC | MS_NODEV | MS_NOSUID, "mode=0755,size=8M")) return fail("mount base");
+    if (stacking(target)) return 1;
     char up[256], local[256], source[256], alias[256], nested[256], deep[256], seed[256];
     snprintf(up, sizeof(up), "%s/up", target); snprintf(local, sizeof(local), "%s/local", target);
     snprintf(source, sizeof(source), "%s/source", target); snprintf(alias, sizeof(alias), "%s/alias", target);

@@ -218,8 +218,8 @@ impl VfsManager {
         if !target_entry.node().is_directory()? {
             return Err(vfs_error(FileSystemErrorKind::NotADirectory, "Mount target must be a directory"));
         }
-        if Arc::ptr_eq(&target_entry, &target_mount_point.root) {
-            return Err(vfs_error(FileSystemErrorKind::Busy, "Target already mounted"));
+        if Arc::ptr_eq(&target_entry, &target_mount_point.root) && target_mount_point.is_root_mount() {
+            return Err(vfs_error(FileSystemErrorKind::NotSupported, "Cannot cover the View root through this operation"));
         }
         let entry = VfsEntry::new(None, "/".to_string(), filesystem.root_node());
         let mount = MountPoint::new_regular_restricted(target_entry.name(), entry, filesystem.clone(), restrictions);
@@ -304,7 +304,7 @@ impl VfsManager {
     /// * `target_path` - The path where the source directory should be mounted.
     ///
     /// # Errors
-    /// Returns an error if the source is not a directory, the target is already a mount point,
+    /// Returns an error if the source is not a directory, the target is the View root,
     /// or if the source is not a valid directory.
     ///
     pub fn bind_mount(&self, source_path: &str, target_path: &str) -> Result<(), FileSystemError> {
@@ -321,16 +321,6 @@ impl VfsManager {
             return Err(vfs_error(
                 FileSystemErrorKind::NotADirectory,
                 "Source path must be a directory",
-            ));
-        }
-        // Check if target is not already a mount point
-        if self
-            .mount_tree
-            .is_mount_point(&target_entry, &target_mount_point)
-        {
-            return Err(vfs_error(
-                FileSystemErrorKind::InvalidPath,
-                "Target path is already a mount point",
             ));
         }
         // Check if source is a directory (bind mounts only support directories)
@@ -363,7 +353,7 @@ impl VfsManager {
     /// VFS.
     ///
     /// # Errors
-    /// Returns an error if the source path does not exist, the target is already a mount point,
+    /// Returns an error if the source path does not exist, the target is the View root,
     /// or if the source is not a valid directory.
     ///
     pub fn bind_mount_from(
@@ -459,8 +449,8 @@ impl VfsManager {
         if !source_entry.node().is_directory()? || !target_entry.node().is_directory()? {
             return Err(vfs_error(FileSystemErrorKind::NotADirectory, "Bind requires directories"));
         }
-        if Arc::ptr_eq(&target_entry, &target_mount_point.root) {
-            return Err(vfs_error(FileSystemErrorKind::Busy, "Target already mounted"));
+        if Arc::ptr_eq(&target_entry, &target_mount_point.root) && target_mount_point.is_root_mount() {
+            return Err(vfs_error(FileSystemErrorKind::NotSupported, "Cannot cover the View root through this operation"));
         }
         let bind_mount = MountPoint::new_bind(target_entry.name(), source_entry.clone(), source_mount_point.restrictions);
         if recursive {

@@ -1035,6 +1035,28 @@ enum OpenMode {
     Truncate = 0x400,
 }
 
+/// Native unmount is a detach operation: existing files and mappings retain
+/// their mount. Only Linux MNT_DETACH has these semantics. Normal busy-checked
+/// unmount and force/expiry modes require separate native support.
+pub fn sys_umount2(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+    let task = mytask().unwrap();
+    let address = trapframe.get_arg(0);
+    let flags = trapframe.get_arg(1);
+    trapframe.increment_pc_next(&task);
+    if !task.credentials.read().permits(crate::shield::identity::MANAGE_MOUNTS) {
+        return errno::to_result(errno::EPERM);
+    }
+    if flags != 2 { return errno::to_result(errno::EOPNOTSUPP); }
+    let path = match parse_c_string_from_userspace(&task, address, MAX_PATH_LENGTH) {
+        Ok(path) => path, Err(_) => return errno::to_result(errno::EFAULT),
+    };
+    if path.is_empty() { return errno::to_result(errno::ENOENT); }
+    let Some(fs) = task.get_vfs() else { return errno::to_result(errno::EIO); };
+    let _composition = crate::executor::syscall::lock_composition();
+    if crate::executor::syscall::is_root_path(&fs, &path) { return errno::to_result(errno::EBUSY); }
+    fs.unmount(&path).map_or_else(|error| errno::to_result(errno::from_fs_error(&error)), |_| 0)
+}
+
 /// Translate Linux mount requests to immutable native mount restrictions.
 /// Propagation requests use native peer groups and downstream channels.
 pub fn sys_mount(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {

@@ -574,6 +574,7 @@ syscall_table! {
     UnlinkAt = 35 => fs::sys_unlinkat,
     SymlinkAt = 36 => fs::sys_symlinkat,
     RenameAt = 38 => fs::sys_renameat,
+    Umount2 = 39 => fs::sys_umount2,
     Mount = 40 => fs::sys_mount,
     Statfs = 43 => fs::sys_statfs,
     Fstatfs = 44 => fs::sys_fstatfs,

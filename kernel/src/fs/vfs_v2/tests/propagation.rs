@@ -160,3 +160,71 @@ fn shared_self_bind_does_not_receive_its_own_unpublished_attachment() {
     assert!(bound.children.read().is_empty());
     assert_eq!(info(&fs, "/dest").peer_group, info(&fs, "/").peer_group);
 }
+
+#[test_case]
+fn bind_over_mounted_directory_unmounts_one_layer_and_preserves_covered_files() {
+    let fs = base();
+    fs.mount(TmpFS::new(0), "/m", 14).unwrap();
+    mark(&fs, "/m/covered");
+    fs.create_dir("/m/bootstrap").unwrap();
+    mark(&fs, "/m/bootstrap/config");
+    let retained = fs.open("/m/covered", 0).unwrap();
+    let covered = fs.resolve_path("/m").unwrap().1;
+    fs.bind_mount_recursive("/m/bootstrap", "/m", true).unwrap();
+    assert!(fs.resolve_path("/m/config").is_ok());
+    assert!(fs.resolve_path("/m/covered").is_err());
+    assert!(retained.as_file().unwrap().metadata().is_ok());
+    assert!(!retained.as_file().unwrap().allows_execution());
+    let top = fs.resolve_path("/m").unwrap().1;
+    assert!(Arc::ptr_eq(&top.get_parent().unwrap(), &covered));
+    assert_eq!(fs.canonicalize("/m/..").unwrap(), "/");
+    assert_eq!(fs.mount_tree.get_mount_absolute_path(&top), "/m");
+    fs.unmount("/m").unwrap();
+    assert!(Arc::ptr_eq(&fs.resolve_path("/m").unwrap().1, &covered));
+    assert!(fs.resolve_path("/m/covered").is_ok());
+    assert!(fs.resolve_path("/m/bootstrap/config").is_ok());
+    fs.unmount("/m").unwrap();
+    assert!(fs.resolve_path("/m/covered").is_err());
+}
+
+#[test_case]
+fn multiple_mount_layers_and_nested_mounts_survive_namespace_copy_and_uncover() {
+    let fs = base();
+    fs.mount(TmpFS::new(0), "/m", 8).unwrap();
+    mark(&fs, "/m/bottom");
+    fs.create_dir("/m/nested").unwrap();
+    fs.mount(TmpFS::new(0), "/m/nested", 14).unwrap();
+    mark(&fs, "/m/nested/hidden");
+    fs.mount(TmpFS::new(0), "/m", 4).unwrap(); mark(&fs, "/m/middle");
+    fs.mount(TmpFS::new(0), "/m", 2).unwrap(); mark(&fs, "/m/top");
+    let clone = VfsManager::clone_mount_namespace_deep(&fs).unwrap();
+    assert_eq!(clone.resolve_path("/m").unwrap().1.restrictions.bits(), 2);
+    clone.unmount("/m").unwrap();
+    assert!(clone.resolve_path("/m/middle").is_ok());
+    assert_eq!(clone.resolve_path("/m").unwrap().1.restrictions.bits(), 4);
+    clone.unmount("/m").unwrap();
+    assert!(clone.resolve_path("/m/bottom").is_ok());
+    assert!(clone.resolve_path("/m/nested/hidden").is_ok());
+    assert_eq!(clone.resolve_path("/m").unwrap().1.restrictions.bits(), 8);
+    assert!(fs.resolve_path("/m/top").is_ok());
+}
+
+#[test_case]
+fn propagated_cover_and_uncover_preserves_lower_peer_channels() {
+    let a = base(); shared(&a);
+    a.mount(TmpFS::new(0), "/m", 8).unwrap(); mark(&a, "/m/lower");
+    let b = VfsManager::clone_mount_namespace_deep(&a).unwrap();
+    let c = downstream(&a, true);
+    a.mount(TmpFS::new(0), "/m", 14).unwrap(); mark(&a, "/m/upper");
+    for fs in [&b, &c] {
+        assert!(fs.resolve_path("/m/upper").is_ok());
+        assert!(fs.resolve_path("/m/lower").is_err());
+    }
+    b.unmount("/m").unwrap();
+    for fs in [&a, &b, &c] {
+        assert!(fs.resolve_path("/m/lower").is_ok());
+        assert!(fs.resolve_path("/m/upper").is_err());
+    }
+    a.mount(TmpFS::new(0), "/m", 0).unwrap(); mark(&a, "/m/again");
+    for fs in [&b, &c] { assert!(fs.resolve_path("/m/again").is_ok()); }
+}
