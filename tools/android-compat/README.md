@@ -7,7 +7,7 @@ neither fixture certifies general APK compatibility.
 |---|---|---|
 | Execution | APK → Android framework/ART → guest Linux → crosvm → Scarlet | Android ELF → Bionic/linker → Scarlet Android ABI (composes Linux ABI) |
 | Reused Android facilities | Guest Binder, Android init, framework and HALs | Stock Bionic/linker and libbinder on Scarlet's Binder adapter |
-| Main work ahead | Finish framework boot, then connect display/input to SWS | Service manager integration, broader ART/JNI coverage, framework and graphics integration |
+| Main work ahead | Finish framework boot, then connect display/input to SWS | Java service integration, Android lifecycle management, and graphics integration |
 | Current rendering | Cuttlefish ANGLE/SwiftShader, headless virtio-gpu stub | No Android graphics stack yet |
 | Fixture | [Cuttlefish project](../../projects/aarch64-limine-crosvm/README.md) | This directory |
 
@@ -639,3 +639,55 @@ python3 tools/android-compat/run-direct.py --kernel path/to/scarlet.elf \
   --runtime-root path/to/art-runtime --stock-inputs path/to/stock-inputs \
   --output .build/android-compat/service-run --accel hvf
 ```
+
+
+### Stock app_process framework/JNI checkpoint
+
+The [2026-10-29 framework checkpoint](checkpoints/2026-10-29-framework/verification.json)
+passes on HVF with stock `app_process64`, `AndroidRuntime`/`RuntimeInit`, platform
+and APEX boot JARs, and the tethering JNI library used by `TrafficStats`.
+`ScarletFrameworkHello` checks native process identity, a Bundle/Parcel round
+trip, local Java Binder dispatch, and a HandlerThread's immediate/delayed
+callbacks, wakeup and joined shutdown. It returns from `main`; the process exits
+zero without `System.exit`, diagnostic preloads or changes to stock Android DSOs.
+
+This exposed a Binder close bug: a pool thread retained the driver file while
+blocked in `BINDER_WRITE_READ`, so final object destruction could not wake it.
+The Android adapter now implements per-descriptor flush, returning `BR_NOOP` to
+registered threads on close or dup3 replacement while preserving other open
+references. The Linux composition interface supplies the close hook. Failed
+usercopy preserves the notification. Native tests and static/dynamic Bionic
+probes also cover the behavior.
+
+Prepare new stock inputs with `prepare-stock-art.py` to include Android init's
+image-derived CPU ABI properties, then run inside `nix develop`:
+
+```sh
+python3 tools/android-compat/prepare-framework.py \
+  --sdk-image "$SDK_IMAGE" --runtime-root "$ART_RUNTIME" \
+  --stock-inputs "$STOCK_INPUTS" --output "$FRAMEWORK_INPUTS"
+python3 tools/android-compat/build-dex.py \
+  --build-tools "$ANDROID_SDK_ROOT/build-tools/37.0.0" \
+  --framework-sdk "$ANDROID_SDK_ROOT/platforms/android-32/android.jar" \
+  --output "$FRAMEWORK_PROBE"
+python3 tools/android-compat/run-direct.py \
+  --kernel "$SCARLET_KERNEL" --framework-probe "$FRAMEWORK_PROBE" \
+  --framework-inputs "$FRAMEWORK_INPUTS" --runtime-root "$ART_RUNTIME" \
+  --stock-inputs "$STOCK_INPUTS" --accel hvf --output "$FRAMEWORK_RUN"
+```
+
+The extractor preserves classpath order from the pinned image's protobuf
+fragments (ART, system, then sorted remaining APEXes) and checks release API
+bounds. Manifests bind every staged JAR, executable, JNI library and probe DEX.
+The runner records its explicit `dalvik.vm.usejit=false` fixture override;
+AndroidRuntime otherwise appends the stock `true` value after the command-line
+`-Xint` options. Source image properties remain unchanged. Console evidence uses
+the inherited stdout descriptor because application-mode RuntimeInit redirects
+`System.out` to logd.
+
+This proves a framework Java process and JNI APIs, not Android system boot,
+zygote/system_server, cross-process Java Binder, an Activity or an APK. The
+checkpoint includes the previous timeout with completed Java markers, the thread
+dump identifying the waiting Binder pool thread, and passing regressions: 1,644
+kernel tests, 18 Bionic cases, stock service/libbinder/libselinux checks, 43 host
+tests and the RISC-V release library check.

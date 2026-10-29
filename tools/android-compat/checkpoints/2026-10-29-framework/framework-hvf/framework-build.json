@@ -1,0 +1,38 @@
+{
+  "main_class": "ScarletFrameworkHello",
+  "source_sha256": "50a516bc12376fd2dd4d20927e75f05995b8bc5f9a6a480631b31f95e2b3b733",
+  "framework_sdk_sha256": "173d24a7b972769008d3c789073c21b3be6a8ecdbf946bacb9ef261b70fdfa54",
+  "dex_sha256": "15f7e21e476deb12246b1ebb4f2f0d222f5d3d729d169b3d500bba7142608185",
+  "d8_sha256": "a26ee56252adcff6752c379ae255a0ad538ebec60189e078ec6855487107637d",
+  "java_version": "openjdk version \"25.0.3\" 2026-04-21 LTS\nOpenJDK Runtime Environment Zulu25.34+17-CA (build 25.0.3+9-LTS)\nOpenJDK 64-Bit Server VM Zulu25.34+17-CA (build 25.0.3+9-LTS, mixed mode, sharing)",
+  "javac_version": "javac 25.0.3",
+  "d8_version": "D8 9.2.4-dev (build 084a89126ae0596c599143df57a654646af28313 from go/r8bot (luci-r8-custom-ci-archive-0-4u1w))",
+  "commands": [
+    [
+      "java",
+      "com.sun.tools.javac.Main",
+      "--release",
+      "8",
+      "-d",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/framework-dex/classes",
+      "-classpath",
+      "/Users/petitstrawberry/Library/Android/sdk/platforms/android-32/android.jar",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/framework/ScarletFrameworkHello.java"
+    ],
+    [
+      "java",
+      "-cp",
+      "/Users/petitstrawberry/Library/Android/sdk/build-tools/37.0.0/lib/d8.jar",
+      "com.android.tools.r8.D8",
+      "--min-api",
+      "23",
+      "--output",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/framework-dex",
+      "--lib",
+      "/Users/petitstrawberry/Library/Android/sdk/platforms/android-32/android.jar",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/framework-dex/classes/ScarletFrameworkHello$1.class",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/framework-dex/classes/ScarletFrameworkHello.class"
+    ]
+  ],
+  "execution": "not tested"
+}
