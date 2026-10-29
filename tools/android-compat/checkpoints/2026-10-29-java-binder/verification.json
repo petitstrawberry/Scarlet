@@ -1,0 +1,73 @@
+{
+  "date": "2026-10-29",
+  "result": "PASS",
+  "revisions": {
+    "binder_flag": "4099be569",
+    "java_fixture": "6aea36dcc"
+  },
+  "kernel_sha256": "41036b50ec71c2e359383eead85781b72c53206a97415476683e808eba62dec4",
+  "validation": {
+    "acceleration": "HVF",
+    "kernel_tests": 1645,
+    "host_tests": 45,
+    "riscv_release_check": "PASS",
+    "java_services": "PASS",
+    "cpp_services_regression": "PASS"
+  },
+  "coverage": [
+    "Unmodified Android 13 app_process64, framework JARs, libbinder, libselinux and servicemanager; no diagnostic preload or guest Linux kernel",
+    "Three Java peers carry separate Shield process labels; real IServiceManager registers and returns a Java Binder, remote synchronous JNI transact returns 42 and validates calling PID",
+    "Four ordered one-way Java calls transfer callback Binder objects and return ordered Bundle payloads through JNI in both directions",
+    "Shield denies service lookup and registration for the denied Java peer",
+    "Java DeathRecipient, DeadObjectException, dead-service removal, normal Java main return and status-zero reap of all three Java processes",
+    "Transport preserves Java FLAG_COLLECT_NOTED_APP_OPS; native tests cover forward and reply delivery and rejection of unsupported bits"
+  ],
+  "limitations": [
+    "No init, zygote, system_server, Activity/APK, graphics or general Android environment manager",
+    "Interpreter-only fixture and explicit JIT property override; no complete AppOps service or Android permissions model",
+    "Binder FD/buffer transfer, nested synchronous calls, weak promotion and automatic pool growth remain unsupported",
+    "AArch64 release build preceded formatting-only cleanup; behavior is unchanged"
+  ],
+  "sha256": {
+    "before-fix/framework-build.json": "da81cde84f502e9e7762ac286bae66cbfae4f16ee6ab9b584652ba6d80586f88",
+    "before-fix/inputs.json": "bdd2ab11240e87c078e6148c2eae7415cdc61b0c414f8ce15159d45e8b4f5d17",
+    "before-fix/program-launch.json": "2f9c8e74063f26de788bca1113831c7cc580b37a71842827f6a24f69013ade9c",
+    "before-fix/result.json": "8eae8b8ff19554ba5469b0cbf22b4ba447f045d6f6cbb3db3cb31aea81945848",
+    "before-fix/serial.log": "64583986ce65d411cb0bfe0720d13de10a778aac9312ce6a9fe4075eabab19f0",
+    "bsp-build.Cargo.lock": "10482fa0f39758edcd7735c7dbf0ab3e1919b851a9e4a03cbf05302382d64770",
+    "build.log": "80729aa445bc97a83e7a8bf91857ce42a057b37eae26995ae3d859c66cce96a1",
+    "cpp-services-hvf/art-runtime.json": "8490e2c89682565a1839b4ec45ae61648c7b56b0bed4b938821b5b8c7fcd1316",
+    "cpp-services-hvf/commands.json": "647dcff65efc41139a8358d658f3ad67f0bb09a7e8394745a39e3d55590012ef",
+    "cpp-services-hvf/image-build.log": "112e67ec14f3c1474092449fd2f535d9da2e124104b2ce6605a1796c83daaf19",
+    "cpp-services-hvf/inputs.json": "c9f62c33cb021613b1724699839e0635545245eff86b35e62bb674cf0ba1d5ba",
+    "cpp-services-hvf/program-launch.json": "a1bbe1eff8e6e8f60ba27b31e820c758f4ed63c67e55303e7ddc3d860b1d7162",
+    "cpp-services-hvf/result.json": "d6f3b5c968ad6bedd79ac207188f01050e84a1e38b98e781797d590fce5b6af3",
+    "cpp-services-hvf/rootfs-build.log": "55e67151bb655b9852039e6466ed046ff47c83e225cfbf7ce63aa1d239442b5f",
+    "cpp-services-hvf/serial.log": "a7cae1df6dac88d001842685519f738ac3f1db8cc9271b4e148a23a51a312173",
+    "cpp-services-hvf/service-build.json": "8398ff09068411cfa1de732b74a1f885622ccbbf98795e8ec60831a8d0e101e6",
+    "cpp-services-hvf/service-inputs.json": "ff47cd80358c8193d04f231296495d563062c27c3d38172398339d9ab9fdd067",
+    "cpp-services-hvf/stock-inputs.json": "c0515f687079ec0320e73fece6d7d7ca9f539c708d7bfd4e936b85532834c34d",
+    "fixture/ScarletFrameworkService.java": "c0978f4fda0a448a49e063f4c2a60d53a484dce09b2d1be922183b2529502977",
+    "fixture/framework_services.rs": "02ecad1397f64162eb1734253b2140723732b9378f14d5d57cad2dc54b414be3",
+    "fixture/main.rs": "ceef23df35cee726cd12cdf63081dd9a4d9237ead2c9a662b470ad3d11bb46c4",
+    "fixture/services.rs": "f86fa58b87b759282a1fdde056da03714b7ea99cc9946ca0309ad5749f2dacfc",
+    "fixture/stock.rs": "d45146ae64d564b2d4f9a5ed1d7adec6d1202abd179d67932d9a0ce77c289e5d",
+    "host-tests.log": "5cf3e608d47dfcc52a6cd18107d191d49fc9c8bbe0fb9ab7e243727ed8ad555e",
+    "java-services-hvf/art-runtime.json": "8490e2c89682565a1839b4ec45ae61648c7b56b0bed4b938821b5b8c7fcd1316",
+    "java-services-hvf/commands.json": "1718e1a0e0cb92e0097e1bbe678f3e1c3e42db373d0cc09c9e79e61f3a1f4faf",
+    "java-services-hvf/framework-bootstrap.json": "4d6675c4332a31575b44f9db4c4e5cb250e9f34137caa4b360a75cc4db85c1e2",
+    "java-services-hvf/framework-build.json": "a36d7cb024196acfb6d9c463161f269341682e447bfeb1c7a29910a24893bc23",
+    "java-services-hvf/framework-inputs.json": "8367311ab52972905f90623ac317519adee5ac24fa9441ca6457e5263a32d76e",
+    "java-services-hvf/image-build.log": "5c272a8b8c46fddb4ee1810c8700f8925bfd4076516ab63c4356cf06ace9afe9",
+    "java-services-hvf/inputs.json": "eedab039b0da7b998f9d820bc95d029cc850598eca66713d001b9a15f5a73d5a",
+    "java-services-hvf/program-launch.json": "2f9c8e74063f26de788bca1113831c7cc580b37a71842827f6a24f69013ade9c",
+    "java-services-hvf/result.json": "dac88378130ba1219ce1ce9d0bac1d114ffd1e0330b7de5995182d6f24e9eb14",
+    "java-services-hvf/rootfs-build.log": "0014abbadab00971323d557b63a415211a9ee2a962ea07eb7afba52b447f1863",
+    "java-services-hvf/serial.log": "cf9213fb6f67770eb4bba9337b431a3d596de0598669022a8a8d3c1dffebb45d",
+    "java-services-hvf/service-inputs.json": "ff47cd80358c8193d04f231296495d563062c27c3d38172398339d9ab9fdd067",
+    "java-services-hvf/stock-inputs.json": "c0515f687079ec0320e73fece6d7d7ca9f539c708d7bfd4e936b85532834c34d",
+    "kernel-tests-hvf.log": "88ebc17de6d29c2adf4df9d845b9969ac86d60ffbaaa5ebb7abdb86662f2cc67",
+    "probe-build.log": "f85d3bcf2f21a9495cee1806f2ed1a137459d940af66a076d3d98761c66552d1",
+    "riscv-check.log": "0611316f73a3ce6f9f40c1bfb056c300afe46706b0ad27925bbdb85021ef1c45"
+  }
+}

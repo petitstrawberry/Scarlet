@@ -1,0 +1,26 @@
+{
+  "result": "fixture failure marker",
+  "qemu_exit_code": 0,
+  "elapsed_seconds": 25.692,
+  "dynamic_runtime": true,
+  "framework_services": {
+    "result": "INCOMPLETE",
+    "records": [
+      "SCARLET_FRAMEWORK_SERVICES_SPAWN manager 6",
+      "SCARLET_FRAMEWORK_SERVICES_SPAWN owner 7",
+      "SCARLET_FRAMEWORK_SERVICES_SPAWN client 8",
+      "SCARLET_FRAMEWORK_SERVICES_SPAWN denied 9",
+      "SCARLET_FRAMEWORK_SERVICES_PEER ownerSCARLET_FRAMEWORK_SERVICES_PEER denied",
+      "SCARLET_FRAMEWORK_SERVICES_PEER client",
+      "SCARLET_FRAMEWORK_SERVICES_FAIL owner",
+      "SCARLET_FRAMEWORK_SERVICES_EXIT owner 137",
+      "SCARLET_FRAMEWORK_SERVICES_FAIL denied",
+      "SCARLET_FRAMEWORK_SERVICES_FAIL client",
+      "SCARLET_FRAMEWORK_SERVICES_EXIT client 137",
+      "SCARLET_FRAMEWORK_SERVICES_EXIT denied 137",
+      "SCARLET_FRAMEWORK_SERVICES_EXIT manager 137",
+      "SCARLET_FRAMEWORK_SERVICES_FAIL: Java service integration or shutdown"
+    ]
+  },
+  "apk_execution": "not tested"
+}

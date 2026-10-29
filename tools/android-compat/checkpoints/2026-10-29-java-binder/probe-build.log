@@ -1,0 +1,6 @@
+warning: Git tree '/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet' is dirty
+警告: [options] ソース値8は廃止されていて、今後のリリースで削除される予定です
+警告: [options] ターゲット値8は廃止されていて、今後のリリースで削除される予定です
+警告: [options] 廃止されたオプションについての警告を表示しないようにするには、-Xlint:オプションを使用します。
+警告3個
+/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/framework-services-dex-v5/classes.dex

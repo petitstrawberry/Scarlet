@@ -691,3 +691,31 @@ checkpoint includes the previous timeout with completed Java markers, the thread
 dump identifying the waiting Binder pool thread, and passing regressions: 1,644
 kernel tests, 18 Bionic cases, stock service/libbinder/libselinux checks, 43 host
 tests and the RISC-V release library check.
+
+
+### Java Binder services checkpoint
+
+`checkpoints/2026-10-29-java-binder/verification.json` extends the framework
+checkpoint to three separate Java processes and stock servicemanager. The
+publisher registers a Java Binder, the client calls it through JNI, and Shield
+rejects the denied peer's lookup and registration. Four ordered one-way calls
+transfer Java callback objects and return Bundle payloads. Owner shutdown
+triggers a Java DeathRecipient, DeadObjectException, and stock manager cleanup;
+all three Java main methods return normally and are reaped with status zero.
+
+```sh
+python3 tools/android-compat/run-direct.py \
+  --kernel "$SCARLET_KERNEL" --framework-services "$FRAMEWORK_PROBE" \
+  --framework-inputs "$FRAMEWORK_INPUTS" --service-inputs "$SERVICE_INPUTS" \
+  --runtime-root "$ART_RUNTIME" --stock-inputs "$STOCK_INPUTS" \
+  --accel hvf --output "$JAVA_SERVICES_RUN"
+```
+
+Rebuild the framework probe with `build-dex.py --framework-sdk` before using
+this mode. Source/DEX, framework, manager, service-context and native launcher
+hashes are bound into the result. The kernel transports the framework's AppOps
+collection flag instead of rejecting Java calls with EOPNOTSUPP; collection
+remains the receiving framework's job. This checkpoint does not establish an
+AppOps service, Android system boot or APK/Activity launch. HVF validation also
+passes 1,645 kernel tests and the C++ service lifecycle regression, alongside
+45 host tests and the RISC-V release library check.
