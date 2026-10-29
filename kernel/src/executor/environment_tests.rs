@@ -321,7 +321,11 @@ fn mount_namespace_preserves_environment_through_fork_exec_and_failed_exec() {
     separated.unmount("/mounted").unwrap();
     assert!(separated.open("/mounted/shared-data", 0).is_err());
     assert!(original.open("/mounted/shared-data", 0).is_ok());
+    task.credentials.write().set_principals(crate::shield::identity::Identities::all(
+        crate::shield::identity::Principal(1234))).unwrap();
     let child = task.clone_task(crate::task::CloneFlags::default()).unwrap();
+    assert_eq!(child.credentials.read().principals().active,
+        crate::shield::identity::Principal(1234));
     assert!(Arc::ptr_eq(&namespace, &child.mount_namespace.read()));
     assert!(Arc::ptr_eq(
         &separated.view(),
@@ -376,6 +380,8 @@ fn mount_namespace_explicit_spawn_inherits_current_mappings_and_repeated_splits(
     let file = original.open("/txn-image", 0).unwrap();
     let (namespace, fs) = source.prepare_mount_namespace().unwrap();
     source.install_mount_namespace(namespace.clone(), fs.clone());
+    source.credentials.write().set_principals(crate::shield::identity::Identities::all(
+        crate::shield::identity::Principal(1234))).unwrap();
     let child = new_user_task("namespace-spawn".into(), 0);
     let mut tf = Trapframe::new();
     TransparentExecutor::execute_in_environment(
@@ -391,6 +397,8 @@ fn mount_namespace_explicit_spawn_inherits_current_mappings_and_repeated_splits(
     )
     .unwrap();
     child.finish_exec_dispatch();
+    assert_eq!(child.credentials.read().principals().active,
+        crate::shield::identity::Principal(1234));
     assert!(Arc::ptr_eq(&namespace, &child.mount_namespace.read()));
     assert!(Arc::ptr_eq(&fs.view(), &child.get_vfs().unwrap().view()));
     assert!(Arc::ptr_eq(

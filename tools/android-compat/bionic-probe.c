@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <linux/stat.h>
 #include <linux/futex.h>
@@ -156,6 +157,45 @@ static int requeue_threads(void) {
     return 0;
 }
 
+struct thread_directory_wait { int ready; int release; };
+static void *directory_worker(void *argument) {
+    struct thread_directory_wait *fds = argument;
+    pid_t tid = gettid(); char byte;
+    return (void *)(uintptr_t)(write(fds->ready, &tid, sizeof(tid)) != sizeof(tid) || read(fds->release, &byte, 1) != 1);
+}
+static int thread_directory_count(pid_t expected_peer) {
+    DIR *dir = opendir("/proc/self/task");
+    if (!dir) return fail("thread", "task directory open", errno);
+    int own = 0, peer = 0, bad = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir))) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        pid_t tid = (pid_t)strtol(entry->d_name, NULL, 10);
+        if (tid == gettid()) ++own;
+        else if (expected_peer && tid == expected_peer) ++peer;
+        else bad = 1;
+        if (entry->d_type != DT_DIR) bad = 1;
+    }
+    closedir(dir);
+    if (bad || own != 1 || peer != !!expected_peer) return fail("thread", "live thread enumeration", 0);
+    return 0;
+}
+static int thread_directory_case(void) {
+    int ready[2], release[2]; pthread_t thread;
+    if (pipe(ready) || pipe(release)) return fail("thread", "task directory pipes", errno);
+    struct thread_directory_wait args = {ready[1], release[0]};
+    int rc = pthread_create(&thread, NULL, directory_worker, &args);
+    if (rc) return fail("thread", "task directory worker", rc);
+    pid_t tid;
+    if (read(ready[0], &tid, sizeof(tid)) != sizeof(tid)) return fail("thread", "task directory ready", errno);
+    int result = thread_directory_count(tid);
+    if (write(release[1], "x", 1) != 1) return fail("thread", "task directory release", errno);
+    void *status; rc = pthread_join(thread, &status);
+    close(ready[0]); close(ready[1]); close(release[0]); close(release[1]);
+    if (result || rc || status) return fail("thread", "task directory join", rc);
+    return thread_directory_count(0);
+}
+
 static int thread_case(void) {
     pthread_t thread;
     tls_value = 23;
@@ -166,6 +206,7 @@ static int thread_case(void) {
     if (rc || result) return fail("thread", "pthread_join/worker", rc ? rc : (int)(uintptr_t)result);
     if (tls_value != 23 || shared_value != 73)
         return fail("thread", "TLS isolation/shared address space", 0);
+    if (thread_directory_case()) return 1;
     return requeue_threads();
 }
 

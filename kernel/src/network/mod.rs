@@ -239,6 +239,12 @@ pub trait NetworkInterface: Send + Sync {
     fn stats(&self) -> InterfaceStats;
 }
 
+struct SocketReferences {
+    count: usize,
+    identity: u64,
+    owner: crate::shield::identity::ActiveIdentity,
+}
+
 /// Network Manager - Global socket and connection manager
 pub struct NetworkManager {
     /// Socket factories per domain (registered by ABI modules)
@@ -260,7 +266,7 @@ pub struct NetworkManager {
     socket_to_id: IrqRwSpinLock<BTreeMap<usize, SocketId>>,
 
     /// Logical owning references carried by socket kernel objects.
-    socket_handle_references: IrqRwSpinLock<BTreeMap<usize, usize>>,
+    socket_handle_references: IrqRwSpinLock<BTreeMap<usize, SocketReferences>>,
 
     /// Next socket ID counter
     next_socket_id: AtomicUsize,
@@ -867,10 +873,25 @@ impl NetworkManager {
     pub(crate) fn retain_socket_handle_reference(&self, socket: &Arc<dyn SocketObject>) {
         let socket_ptr = Arc::as_ptr(socket) as *const () as usize;
         let mut references = self.socket_handle_references.write();
-        let count = references.entry(socket_ptr).or_insert(0);
-        *count = count
+        let entry = references.entry(socket_ptr).or_insert_with(|| SocketReferences {
+            count: 0,
+            identity: self.next_socket_id.fetch_add(1, Ordering::Relaxed) as u64,
+            owner: crate::task::mytask().map(|task| task.credentials.read().identity())
+                .unwrap_or(crate::shield::identity::ActiveIdentity {
+                    principal: crate::shield::identity::Principal(u32::MAX),
+                    group: crate::shield::identity::Group(u32::MAX),
+                }),
+        });
+        entry.count = entry.count
             .checked_add(1)
             .expect("socket handle reference count overflow");
+    }
+
+    /// Stable native identity and creator, shared by dup/fork/IPC owners.
+    pub(crate) fn socket_handle_identity(&self, socket: &Arc<dyn SocketObject>)
+        -> Option<(u64, crate::shield::identity::ActiveIdentity)> {
+        let key = Arc::as_ptr(socket) as *const () as usize;
+        self.socket_handle_references.read().get(&key).map(|entry| (entry.identity, entry.owner))
     }
 
     /// Release one logical owning reference and close the final socket owner.
@@ -889,8 +910,8 @@ impl NetworkManager {
                 debug_assert!(false, "untracked socket handle reference released");
                 return;
             };
-            if *count > 1 {
-                *count -= 1;
+            if count.count > 1 {
+                count.count -= 1;
                 false
             } else {
                 references.remove(&socket_ptr);

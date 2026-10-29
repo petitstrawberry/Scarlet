@@ -722,6 +722,17 @@ fn stat_from_object(
 ) -> Result<(LinuxStat, u64), usize> {
     use crate::fs::vfs_v2::core::VfsFileObject;
 
+    #[cfg(feature = "network")]
+    if let crate::object::KernelObject::Socket(socket) = object {
+        let (identity, owner) = crate::network::NetworkManager::get_manager()
+            .socket_handle_identity(socket.as_arc()).ok_or(errno::EBADF)?;
+        let mut stat = proc_exe_linux_stat(identity, 0);
+        stat.st_dev = 2;
+        stat.st_mode = S_IFSOCK | 0o777;
+        stat.st_uid = owner.principal.0;
+        stat.st_gid = owner.group.0;
+        return Ok((stat, 0));
+    }
     let pipe = object.as_pipe();
     let mode = if pipe.is_some() {
         S_IFIFO | 0o600
@@ -1117,6 +1128,9 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs, dirfd, &path_str) {
         if let Some(fd) = abi.extensions.open(abi, &task, &absolute, flags) {
             return fd;
+        }
+        if absolute.trim_end_matches('/') == "/proc/self/task" {
+            return super::proc_fd::open_self_task_directory(abi, &task, flags);
         }
         if super::proc_fd::is_self_fd_directory(&absolute) {
             return super::proc_fd::open_self_fd_directory(abi, &task, flags);

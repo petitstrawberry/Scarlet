@@ -11,6 +11,7 @@
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -53,7 +54,17 @@ static int child_identity(const char *program, int socket) {
     struct msghdr msg={.msg_iov=&iov,.msg_iovlen=1,.msg_control=control.data,.msg_controllen=sizeof(control)};
     struct cmsghdr *c=CMSG_FIRSTHDR(&msg);c->cmsg_level=SOL_SOCKET;c->cmsg_type=SCM_RIGHTS;c->cmsg_len=CMSG_LEN(0);
     CHECK(sendmsg(socket,&msg,MSG_NOSIGNAL)==1);
-    close(socket);
+    struct stat inherited, a, b, separate;
+    CHECK(fstat(socket,&inherited)==0 && S_ISSOCK(inherited.st_mode) && inherited.st_uid==0 && inherited.st_gid==0);
+    int pair[2];CHECK(socketpair(AF_UNIX,SOCK_STREAM,0,pair)==0);
+    int copy=dup(pair[0]);CHECK(copy>=0);
+    CHECK(fstat(pair[0],&a)==0 && fstat(copy,&b)==0 && fstat(pair[1],&separate)==0);
+    CHECK(S_ISSOCK(a.st_mode) && a.st_uid==10001 && a.st_gid==2000);
+    CHECK(a.st_dev==b.st_dev && a.st_ino==b.st_ino && a.st_ino!=separate.st_ino);
+    char path[64],target[64];snprintf(path,sizeof(path),"/proc/self/fd/%d",copy);
+    ssize_t n=readlink(path,target,sizeof(target)-1);CHECK(n>0);target[n]=0;
+    snprintf(path,sizeof(path),"socket:[%llu]",(unsigned long long)a.st_ino);CHECK(!strcmp(path,target));
+    close(pair[0]);close(pair[1]);close(copy);close(socket);
     CHECK(prctl(PR_SET_KEEPCAPS,1,0,0,0)==0);
     execl(program,program,"identity-exec",NULL);
     CHECK(0);

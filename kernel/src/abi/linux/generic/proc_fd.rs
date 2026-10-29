@@ -1,4 +1,4 @@
-//! Linux `/proc/self/fd` directory backed by the calling process's descriptors.
+//! Linux proc directories backed by the calling process's descriptors and threads.
 
 use alloc::{format, string::String, vec::Vec};
 use core::{any::Any, mem::size_of};
@@ -23,12 +23,8 @@ use crate::{
     task::{Task, TaskState},
 };
 
-/// Metadata for the proc task directory used by Chromium's thread checks.
-/// It is visible only through Linux ABI stat calls, never mounted in VFS.
-pub(super) fn self_task_metadata(task: &Task, path: &str) -> Option<Option<FileMetadata>> {
-    let path = path.trim_end_matches('/');
-    let suffix = path.strip_prefix("/proc/self/task")?;
-    let threads: Vec<usize> = crate::sched::scheduler::get_all_task_ids()
+fn live_threads(task: &Task) -> Vec<usize> {
+    crate::sched::scheduler::get_all_task_ids()
         .into_iter()
         .filter(|id| {
             crate::sched::scheduler::get_task_by_id(*id).is_some_and(|candidate| {
@@ -39,7 +35,23 @@ pub(super) fn self_task_metadata(task: &Task, path: &str) -> Option<Option<FileM
                     )
             })
         })
+        .collect()
+}
+
+pub(super) fn open_self_task_directory(abi: &mut LinuxAbi, task: &Task, flags: i32) -> usize {
+    let ids = live_threads(task)
+        .into_iter()
+        .filter_map(|id| task.get_namespace().resolve_local_id(id))
         .collect();
+    open_directory(abi, task, flags, Some(ids))
+}
+
+/// Metadata for the proc task directory used by Chromium's thread checks.
+/// It is visible only through Linux ABI stat calls, never mounted in VFS.
+pub(super) fn self_task_metadata(task: &Task, path: &str) -> Option<Option<FileMetadata>> {
+    let path = path.trim_end_matches('/');
+    let suffix = path.strip_prefix("/proc/self/task")?;
+    let threads = live_threads(task);
     let link_count = if suffix.is_empty() {
         2 + threads.len()
     } else {
@@ -81,10 +93,20 @@ pub(super) fn is_self_fd_directory(path: &str) -> bool {
 }
 
 pub(super) fn open_self_fd_directory(abi: &mut LinuxAbi, task: &Task, flags: i32) -> usize {
+    open_directory(abi, task, flags, None)
+}
+
+fn open_directory(
+    abi: &mut LinuxAbi,
+    task: &Task,
+    flags: i32,
+    threads: Option<Vec<usize>>,
+) -> usize {
     if flags & 3 != 0 {
         return errno::to_result(errno::EISDIR);
     }
-    let directory = alloc::sync::Arc::new(ProcFdDirectory {
+    let directory = alloc::sync::Arc::new(ProcIdDirectory {
+        thread_entries: threads.is_some(),
         position: IrqRwSpinLock::new(0),
         descriptors: IrqRwSpinLock::new(Vec::new()),
     });
@@ -105,7 +127,7 @@ pub(super) fn open_self_fd_directory(abi: &mut LinuxAbi, task: &Task, flags: i32
     if flags & O_CLOEXEC != 0 {
         let _ = abi.set_fd_flags(fd, FD_CLOEXEC);
     }
-    *directory.descriptors.write() = abi.allocated_fds();
+    *directory.descriptors.write() = threads.unwrap_or_else(|| abi.allocated_fds());
     fd
 }
 
@@ -126,6 +148,12 @@ pub(super) fn self_fd_link_target(
     let Some(object) = task.handle_table.get(handle) else {
         return Some(Err(errno::ENOENT));
     };
+    #[cfg(feature = "network")]
+    if let KernelObject::Socket(socket) = &object {
+        let Some((identity, _)) = crate::network::NetworkManager::get_manager()
+            .socket_handle_identity(socket.as_arc()) else { return Some(Err(errno::ENOENT)); };
+        return Some(Ok(format!("socket:[{identity}]")));
+    }
     let path = object
         .as_file()
         .and_then(|file| {
@@ -137,12 +165,13 @@ pub(super) fn self_fd_link_target(
     Some(Ok(path))
 }
 
-struct ProcFdDirectory {
+struct ProcIdDirectory {
+    thread_entries: bool,
     position: IrqRwSpinLock<usize>,
     descriptors: IrqRwSpinLock<Vec<usize>>,
 }
 
-impl StreamOps for ProcFdDirectory {
+impl StreamOps for ProcIdDirectory {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         let mut position = self.position.write();
         let descriptors = self.descriptors.read();
@@ -156,7 +185,7 @@ impl StreamOps for ProcFdDirectory {
         };
         let entry = DirectoryEntry::from_internal(&DirectoryEntryInternal {
             name,
-            file_type: if *position < 2 {
+            file_type: if *position < 2 || self.thread_entries {
                 FileType::Directory
             } else {
                 FileType::SymbolicLink(String::new())
@@ -184,15 +213,15 @@ impl StreamOps for ProcFdDirectory {
     }
 }
 
-impl ControlOps for ProcFdDirectory {}
+impl ControlOps for ProcIdDirectory {}
 
-impl MemoryMappingOps for ProcFdDirectory {
+impl MemoryMappingOps for ProcIdDirectory {
     fn get_mapping_info(
         &self,
         _offset: usize,
         _length: usize,
     ) -> Result<MemoryMappingInfo, &'static str> {
-        Err("cannot map /proc/self/fd")
+        Err("cannot map a proc directory")
     }
 
     fn supports_mmap(&self) -> bool {
@@ -200,7 +229,7 @@ impl MemoryMappingOps for ProcFdDirectory {
     }
 }
 
-impl Selectable for ProcFdDirectory {
+impl Selectable for ProcIdDirectory {
     fn wait_until_ready(
         &self,
         _interest: ReadyInterest,
@@ -212,7 +241,7 @@ impl Selectable for ProcFdDirectory {
     }
 }
 
-impl FileObject for ProcFdDirectory {
+impl FileObject for ProcIdDirectory {
     fn seek(&self, whence: SeekFrom) -> Result<u64, StreamError> {
         let end = self.descriptors.read().len().saturating_add(2);
         let mut position = self.position.write();
@@ -241,7 +270,11 @@ impl FileObject for ProcFdDirectory {
             modified_time: 0,
             accessed_time: 0,
             file_id: 1,
-            link_count: 2,
+            link_count: if self.thread_entries {
+                2 + self.descriptors.read().len() as u32
+            } else {
+                2
+            },
         })
     }
 
