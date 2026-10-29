@@ -22,11 +22,23 @@ static bool exists(const char* path) {return access(path,F_OK)==0;}
 static int mark(const char* path) {int fd=open(path,O_CREAT|O_WRONLY|O_EXCL|O_CLOEXEC,0600);CHECK(fd>=0);CHECK(close(fd)==0);return 0;}
 static int await(const char* path) {for(int i=0;i<500;++i){if(exists(path))return 0;usleep(10000);}CHECK(false);}
 class Service:public BBinder {
+    int received = 0;
  public: const String16& getInterfaceDescriptor() const override {return descriptor;}
  protected:status_t onTransact(uint32_t code,const Parcel& data,Parcel* reply,uint32_t flags) override {
-    if(code!=IBinder::FIRST_CALL_TRANSACTION)return BBinder::onTransact(code,data,reply,flags);
+    if(code!=IBinder::FIRST_CALL_TRANSACTION && code!=IBinder::FIRST_CALL_TRANSACTION+1)
+        return BBinder::onTransact(code,data,reply,flags);
     if(!data.enforceInterface(descriptor))return PERMISSION_DENIED;
     int32_t value=0;if(data.readInt32(&value)!=OK || data.dataAvail()!=0)return BAD_VALUE;
+    if(code==IBinder::FIRST_CALL_TRANSACTION+1) {
+        if(!(flags & IBinder::FLAG_ONEWAY) || value!=received+1) return BAD_VALUE;
+        ++received;
+        if(received==3) {
+            dprintf(1,"SCARLET_SERVICES_ONEWAY_SEQUENCE_OK\n");
+            if(mark("/tmp/service-oneway-done"))return BAD_VALUE;
+        }
+        return OK;
+    }
+    if(received!=3)return BAD_VALUE;
     return reply->writeInt32(value+1);
  }
 };
@@ -48,9 +60,36 @@ static int owner(const sp<IServiceManager>& sm) {
     }
     CHECK(false);
 }
+class Notification: public IServiceManager::LocalRegistrationCallback {
+ public:
+    int calls=0;
+    bool matched=false;
+    void onServiceRegistration(const String16& name,const sp<IBinder>& object) override {
+        ++calls;
+        matched=name==service && object!=nullptr && object->remoteBinder()!=nullptr &&
+                IPCThreadState::self()->getCallingPid()==0;
+    }
+};
 static int client(const sp<IServiceManager>& sm) {
     CHECK(await("/tmp/service-ready")==0);
+    int fd=-1;CHECK(IPCThreadState::self()->setupPolling(&fd)==OK);
+    auto callback=sp<Notification>::make();
+    CHECK(sm->registerForNotifications(service,callback)==OK);
+    for(int i=0;i<100 && callback->calls==0;++i) {
+        pollfd event={fd,POLLIN,0};int n=poll(&event,1,50);
+        if(n<0 && errno==EINTR)continue;
+        CHECK(n>=0 && !(event.revents&(POLLHUP|POLLERR|POLLNVAL)));
+        if(n)CHECK(IPCThreadState::self()->handlePolledCommands()==OK);
+    }
+    CHECK(callback->calls==1 && callback->matched);
+    CHECK(sm->unregisterForNotifications(service,callback)==OK);
+    dprintf(1,"SCARLET_SERVICES_NOTIFICATION_OK\n");
     auto object=sm->checkService(service);CHECK(object!=nullptr && object->remoteBinder()!=nullptr);
+    for(int sequence=1;sequence<=3;++sequence) {
+        Parcel data;CHECK(data.writeInterfaceToken(descriptor)==OK && data.writeInt32(sequence)==OK);
+        CHECK(object->transact(IBinder::FIRST_CALL_TRANSACTION+1,data,nullptr,IBinder::FLAG_ONEWAY)==OK);
+    }
+    CHECK(await("/tmp/service-oneway-done")==0);
     Parcel data,reply;CHECK(data.writeInterfaceToken(descriptor)==OK && data.writeInt32(41)==OK);
     CHECK(object->transact(IBinder::FIRST_CALL_TRANSACTION,data,&reply)==OK);
     CHECK(reply.readInt32()==42 && reply.dataAvail()==0);
@@ -80,6 +119,12 @@ int main(int argc,char** argv) {
     CHECK(argc==2);
     __android_log_set_logger(__android_log_stderr_logger);
     Dl_info library={};CHECK(dladdr((void*)defaultServiceManager,&library) && strcmp(library.dli_fname,"/system/lib64/libbinder.so")==0);
+    void* selinux=dlopen("/system/lib64/libselinux.so",RTLD_NOW|RTLD_LOCAL);CHECK(selinux);
+    int (*getcon)(char**)=reinterpret_cast<int (*)(char**)>(dlsym(selinux,"getcon"));
+    void (*freecon)(char*)=reinterpret_cast<void (*)(char*)>(dlsym(selinux,"freecon"));CHECK(getcon && freecon);
+    const char* label=!strcmp(argv[1],"owner")?"u:r:scarlet_publisher:s0":
+                      !strcmp(argv[1],"client")?"u:r:scarlet_client:s0":"u:r:scarlet_denied:s0";
+    char* context=nullptr;CHECK(getcon(&context)==0 && context && !strcmp(context,label));freecon(context);
     auto process=ProcessState::self();CHECK(process->setThreadPoolMaxThreadCount(0)==OK);
     auto sm=defaultServiceManager();CHECK(sm!=nullptr);
     dprintf(1,"SCARLET_SERVICES_PEER %s\n",argv[1]);

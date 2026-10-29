@@ -16,7 +16,7 @@ MAX_PIXELS = 16 * 1024 * 1024
 def analyze_services(data):
     lines = data.replace(b"\r", b"").decode("utf-8", errors="replace").splitlines()
     records = [line for line in lines if line.startswith("SCARLET_SERVICES_")]
-    expected = ["CONFIGURED", "REGISTERED", "LOOKUP_CALL_LIST_OK", "DENIED_ADD_FIND_LIST",
+    expected = ["CONFIGURED", "REGISTERED", "NOTIFICATION_OK", "ONEWAY_SEQUENCE_OK", "LOOKUP_CALL_LIST_OK", "DENIED_ADD_FIND_LIST",
                 "OWNER_EXITING", "OWNER_DEATH_OK", "EXIT owner 0", "EXIT client 0", "EXIT denied 0", "OK"]
     required = ["SCARLET_SERVICES_" + item for item in expected]
     valid = all(records.count(item) == 1 for item in required)
@@ -38,7 +38,7 @@ def analyze_services(data):
                        "SCARLET_ANDROID_STOCK_EXIT linkerconfig 0", "SCARLET_ANDROID_STOCK_OK"]
     if valid:
         position = lambda event: lines.index("SCARLET_SERVICES_" + event)
-        valid &= position("CONFIGURED") < lines.index("SCARLET_ANDROID_STOCK_OK") < position("REGISTERED") < position("LOOKUP_CALL_LIST_OK") < position("OWNER_EXITING") < position("OWNER_DEATH_OK") < position("EXIT client 0") < position("OK")
+        valid &= position("CONFIGURED") < lines.index("SCARLET_ANDROID_STOCK_OK") < position("REGISTERED") < position("NOTIFICATION_OK") < position("ONEWAY_SEQUENCE_OK") < position("LOOKUP_CALL_LIST_OK") < position("OWNER_EXITING") < position("OWNER_DEATH_OK") < position("EXIT client 0") < position("OK")
         valid &= position("REGISTERED") < position("DENIED_ADD_FIND_LIST") < position("OWNER_EXITING")
         valid &= all(position("EXIT " + mode + " 0") < lines.index(stopped[0]) < position("OK") for mode in ("owner", "client", "denied"))
     return {"result": "PASS" if valid else "INCOMPLETE", "records": records}
