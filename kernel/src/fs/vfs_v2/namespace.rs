@@ -92,6 +92,13 @@ impl crate::task::Task {
     pub(crate) fn prepare_mount_namespace(
         &self,
     ) -> Result<(Arc<MountNamespace>, Arc<VfsManager>), &'static str> {
+        if !self
+            .credentials
+            .read()
+            .permits(crate::shield::identity::MANAGE_MOUNTS)
+        {
+            return Err("mount namespace authority required");
+        }
         let source = self.get_vfs().ok_or("missing filesystem context")?;
         let mut roots = self
             .execution_environment
