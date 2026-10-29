@@ -29,6 +29,7 @@ def prepare(archive, runtime, stock, output):
         metadata["sdk"] = extract_system(archive, image)
         system = Ext4(image)
         system.dump("/" + PROGRAM, output / PROGRAM)
+        system.dump("/system/framework/framework-res.apk", output / "system/framework/framework-res.apk")
         system.dump("/system/etc/classpaths/bootclasspath.pb", output / "system/etc/classpaths/bootclasspath.pb")
         apexes = []
         known = {record["name"]: record for record in stock_metadata["factory_apexes"]}
@@ -58,8 +59,9 @@ def prepare(archive, runtime, stock, output):
                         if node_mode & 0o170000 != 0o100000:
                             raise ValueError("boot JAR must be a regular image file")
                         apex.dump("/javalib/" + name, target / "javalib" / name, node_size)
-            # RuntimeInit.commonInit loads TrafficStats' stock JNI implementation.
-            if module == "com.android.tethering":
+            # RuntimeInit loads TrafficStats JNI; APK resources/signatures load
+            # the image's Conscrypt provider through the same stock linker config.
+            if module in {"com.android.tethering", "com.android.conscrypt"}:
                 for name, node_mode, node_size in apex.entries("/lib64"):
                     if name.endswith(".so"):
                         if node_mode & 0o170000 != 0o100000:

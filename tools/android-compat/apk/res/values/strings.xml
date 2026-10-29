@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Scarlet compatibility probe</string>
+    <string name="probe_message">Android resources on Scarlet</string>
+    <integer name="probe_answer">42</integer>
+</resources>
