@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "name": "scarlet-arm64-flattened",
   "apex_modules": [
     "com.android.adbd",
@@ -46,7 +46,8 @@
     "u:r:apexd:s0": 3,
     "u:r:ueventd:s0": 4,
     "u:r:servicemanager:s0": 5,
-    "u:r:zygote:s0": 6
+    "u:r:zygote:s0": 6,
+    "u:r:linkerconfig:s0": 7
   },
   "transitions": [
     [
@@ -56,22 +57,7 @@
     ],
     [
       "u:r:init:s0",
-      "u:r:apexd:s0",
-      0
-    ],
-    [
-      "u:r:init:s0",
       "u:r:ueventd:s0",
-      0
-    ],
-    [
-      "u:r:init:s0",
-      "u:r:servicemanager:s0",
-      1000
-    ],
-    [
-      "u:r:init:s0",
-      "u:r:zygote:s0",
       0
     ]
   ],
@@ -150,5 +136,31 @@
     "/system/etc/init/hw/init.rc",
     "/system/etc/init/apexd.rc",
     "/system/etc/init/servicemanager.rc"
+  ],
+  "file_labels": {
+    "/system/bin/bootstrap/linkerconfig": "u:object_r:linkerconfig_exec:s0",
+    "/system/apex/com.android.runtime/bin/linkerconfig": "u:object_r:linkerconfig_exec:s0",
+    "/system/bin/apexd": "u:object_r:apexd_exec:s0",
+    "/system/bin/servicemanager": "u:object_r:servicemanager_exec:s0"
+  },
+  "exec_transitions": [
+    [
+      "u:r:init:s0",
+      "u:object_r:linkerconfig_exec:s0",
+      "u:r:linkerconfig:s0",
+      0
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:apexd_exec:s0",
+      "u:r:apexd:s0",
+      0
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:servicemanager_exec:s0",
+      "u:r:servicemanager:s0",
+      1000
+    ]
   ]
 }

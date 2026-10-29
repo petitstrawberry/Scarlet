@@ -19,7 +19,7 @@ CONTEXT = re.compile(r"u:(?:r|object_r):[A-Za-z0-9_]+:s0")
 
 def relative_path(name):
     if (not isinstance(name, str) or not name or name.startswith("/") or
-            posixpath.normpath(name) != name or name == ".." or name.startswith("../") or
+            posixpath.normpath(name) != name or name in (".", "..") or name.startswith("../") or
             not re.fullmatch(r"[A-Za-z0-9_./+@-]+", name)):
         raise ValueError("invalid boot input path")
     return name
@@ -36,8 +36,11 @@ def guest_alias(source, target):
 
 
 def validate_profile(profile):
-    if set(profile) != {"version", "name", "apex_modules", "boot_properties", "bootconfig",
-                        "subjects", "transitions", "property_grants", "init_imports"} or profile["version"] != 1:
+    fields = {"version", "name", "apex_modules", "boot_properties", "bootconfig",
+              "subjects", "transitions", "property_grants", "init_imports"}
+    if profile.get("version") == 2:
+        fields |= {"file_labels", "exec_transitions"}
+    if set(profile) != fields or profile.get("version") not in (1, 2):
         raise ValueError("unsupported boot profile")
     if not re.fullmatch(r"[a-z0-9-]+", profile["name"]):
         raise ValueError("invalid profile name")
@@ -72,6 +75,17 @@ def validate_profile(profile):
         if subject not in subjects or len(set(targets)) != len(targets) or any(
                 not CONTEXT.fullmatch(label) or not label.startswith("u:object_r:") for label in targets):
             raise ValueError("invalid property grant")
+    resource_labels = set(profile.get("file_labels", {}).values())
+    for path, label in profile.get("file_labels", {}).items():
+        if not path.startswith(("/system/", "/apex/")) or not CONTEXT.fullmatch(label) or not label.startswith("u:object_r:"):
+            raise ValueError("invalid file-label binding")
+        relative_path(path[1:])
+    seen_exec = set()
+    for source, resource, target, principal in profile.get("exec_transitions", []):
+        key = (source, resource, principal)
+        if source not in subjects or target not in subjects or resource not in resource_labels or type(principal) is not int or not 0 <= principal <= 0xffffffff or key in seen_exec:
+            raise ValueError("invalid file exec transition")
+        seen_exec.add(key)
     for path in profile["init_imports"]:
         if not path.startswith("/") or not relative_path(path[1:]).endswith(".rc"):
             raise ValueError("invalid init import")
@@ -92,16 +106,20 @@ def shield_policy(profile, contexts):
     grants = profile["property_grants"]
     if any(target not in labels for targets in grants.values() for target in targets):
         raise ValueError("property grant is absent from verified contexts")
-    if len(labels) + len(profile["subjects"]) > 512:
+    if len(labels | set(profile.get("file_labels", {}).values())) + len(profile["subjects"]) > 512:
         raise ValueError("profile exceeds native label bound")
+    labels |= set(profile.get("file_labels", {}).values())
     identifiers = dict(profile["subjects"])
     identifiers.update((label, index) for index, label in enumerate(sorted(labels), 100))
-    lines = ["scarlet-android-boot-policy-v1"]
+    lines = ["scarlet-android-boot-policy-v" + str(profile["version"])]
     lines += [f"label {identifier} {label}" for label, identifier in sorted(identifiers.items(), key=lambda item: item[1])]
     lines += [f"transition {identifiers[source]} {identifiers[target]} {principal}"
               for source, target, principal in profile["transitions"]]
     lines += [f"property-set {identifiers[source]} {identifiers[target]}"
               for source, targets in sorted(grants.items()) for target in sorted(targets)]
+    lines += [f"file-exec {identifiers[source]} {identifiers[resource]} {identifiers[target]} {principal}"
+              for source, resource, target, principal in profile.get("exec_transitions", [])]
+    lines += [f"file-label {identifiers[label]} {path}" for path, label in sorted(profile.get("file_labels", {}).items())]
     return "\n".join(lines) + "\n"
 
 
