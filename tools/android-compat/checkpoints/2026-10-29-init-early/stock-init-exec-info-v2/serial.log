@@ -1,0 +1,358 @@
+UEFI firmware (version edk2-stable202408-prebuilt.qemu.org built at 16:28:50 on Sep 12 2024)
+ArmTrngLib could not be correctly initialized.
+Error: Image at 000BFDB6000 start failed: 00000001
+Error: Image at 000BFD6D000 start failed: Not Found
+Error: Image at 000BFCBA000 start failed: Unsupported
+Error: Image at 000BFC3F000 start failed: Not Found
+Error: Image at 000BFB65000 start failed: Aborted
+Tpm2SubmitCommand - Tcg2 - Not Found
+Tpm2GetCapabilityPcrs fail!
+Tpm2SubmitCommand - Tcg2 - Not Found
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI Non-Block Boot Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,0000000A00000000)
+BdsDxe: starting Boot0001 "UEFI Non-Block Boot Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,0000000A00000000)
+ConvertPages: range BEB2D000 - BEB30FFF covers multiple entries
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+[01;01H[01;01H[01;01Hl[01;02Hi[01;03Hm[01;04Hi[01;05Hn[01;06He[01;07H:[01;08H [01;09HL[01;10Ho[01;11Ha[01;12Hd[01;13Hi[01;14Hn[01;15Hg[01;16H [01;17He[01;18Hx[01;19He[01;20Hc[01;21Hu[01;22Ht[01;23Ha[01;24Hb[01;25Hl[01;26He[01;27H [01;28H`[01;29Hb[01;30Ho[01;31Ho[01;32Ht[01;33H([01;34H)[01;35H:[01;36H/[01;37Hb[01;38Ho[01;39Ho[01;40Ht[01;41H/[01;42Hk[01;43He[01;44Hr[01;45Hn[01;46He[01;47Hl[01;48H`[01;49H.[01;50H.[01;51H.[01;52H[01;01H[02;01Hl[02;02Hi[02;03Hm[02;04Hi[02;05Hn[02;06He[02;07H:[02;08H [02;09HL[02;10Ho[02;11Ha[02;12Hd[02;13Hi[02;14Hn[02;15Hg[02;16H [02;17Hm[02;18Ho[02;19Hd[02;20Hu[02;21Hl[02;22He[02;23H [02;24H`[02;25Hb[02;26Ho[02;27Ho[02;28Ht[02;29H([02;30H)[02;31H:[02;32H/[02;33Hb[02;34Ho[02;35Ho[02;36Ht[02;37H/[02;38Hi[02;39Hn[02;40Hi[02;41Ht[02;42Hr[02;43Ha[02;44Hm[02;45Hf[02;46Hs[02;47H-[02;48Ha[02;49Ha[02;50Hr[02;51Hc[02;52Hh[02;53H6[02;54H4[02;55H.[02;56Hc[02;57Hp[02;58Hi[02;59Ho[02;60H`[02;61H.[02;62H.[02;63H.[02;64H[02;01H[03;01HSCARLET_SHIELD_KERNEL_ADDRESSES_HIDDEN
+SCARLET_SHIELD_INIT_POLICY configured
+SCARLET_ANDROID_INIT_OWNS_BOOTSTRAP
+
+SCARLET_ANDROID_PROGRAM_START
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+SCARLET_INIT_NAMESPACE_OUTER child=5
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+SCARLET_INIT_NAMESPACE_INSIDE pid=1 ppid=0 tid=1
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+<6>init: init second stage started!
+<3>init: Unable to write -1000 to /proc/1/oom_score_adj: open() failed: No such file or directory
+<3>init: Failed to umount /debug_ramdisk: Function not implemented
+<6>init: Using Android DT directory /proc/device-tree/firmware/android/
+<3>init: Init cannot set 'ro.bootmode' to 'unknown': SELinux permission check failed
+<3>init: Init cannot set 'ro.baseband' to 'unknown': SELinux permission check failed
+<3>init: Init cannot set 'ro.bootloader' to 'unknown': SELinux permission check failed
+<3>init: Init cannot set 'ro.hardware' to 'unknown': SELinux permission check failed
+<3>init: Init cannot set 'ro.revision' to '0': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.system.brand' to 'Android' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.system.device' to 'generic' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.system.manufacturer' to 'Android' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.system.model' to 'mainline' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.system.name' to 'mainline' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system.product.cpu.abilist' to 'arm64-v8a' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system.product.cpu.abilist32' to '' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system.product.cpu.abilist64' to 'arm64-v8a' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system.build.date' to 'Thu Oct 12 14:09:32 UTC 2023' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system.build.date.utc' to '1697119772' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system.build.fingerprint' to 'Android/sdk_phone64_arm64/emulator64_arm64:13/TE1A.220922.034/10940250:userdebug/test-keys' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system.build.id' to 'TE1A.220922.034' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system.build.tags' to 'test-keys' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system.build.type' to 'userdebug' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system.build.version.incremental' to '10940250' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system.build.version.release' to '13' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system.build.version.release_or_codename' to '13' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system.build.version.sdk' to '33' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.id' to 'TE1A.220922.034' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.display.id' to 'sdk_phone64_arm64-userdebug 13 TE1A.220922.034 10940250 test-keys' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.version.incremental' to '10940250' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.version.sdk' to '33' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.version.preview_sdk' to '0' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.version.preview_sdk_fingerprint' to 'REL' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.version.codename' to 'REL' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.version.all_codenames' to 'REL' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.version.known_codenames' to 'Base,Base11,Cupcake,Donut,Eclair,Eclair01,EclairMr1,Froyo,Gingerbread,GingerbreadMr1,Honeycomb,HoneycombMr1,HoneycombMr2,IceCreamSandwich,IceCreamSandwichMr1,JellyBean,JellyBeanMr1,JellyBeanMr2,Kitkat,KitkatWatch,Lollipop,LollipopMr1,M,N,NMr1,O,OMr1,P,Q,R,S,Sv2,Tiramisu' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.version.release' to '13' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.version.release_or_codename' to '13' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.version.release_or_preview_display' to '13' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.version.security_patch' to '2022-11-05' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.version.base_os' to '' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.version.min_supported_target_sdk' to '23' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.date' to 'Thu Oct 12 14:09:32 UTC 2023' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.date.utc' to '1697119772' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.type' to 'userdebug' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.user' to 'android-build' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.host' to 'abfarm-release-2004-0130' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.tags' to 'test-keys' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.flavor' to 'sdk_phone64_arm64-userdebug' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.cpu.abi' to 'arm64-v8a' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.locale' to 'en-US' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.wifi.channels' to '' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.product' to 'emulator64_arm64' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.description' to 'sdk_phone64_arm64-userdebug 13 TE1A.220922.034 10940250 test-keys' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.treble.enabled' to 'true' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.actionable_compatible_property.enabled' to 'true' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'persist.debug.dalvik.vm.core_platform_api_policy' to 'just-warn' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.postinstall.fstab.prefix' to '/system' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.secure' to '1' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'security.perf_harden' to '1' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.allow.mock.location' to '0' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.debuggable' to '1' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.lockprof.threshold' to '500' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'net.bt.name' to 'Android' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'debug.atrace.tags.enableflags' to '0' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'persist.traced.enable' to '1' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.image-dex2oat-Xms' to '64m' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.image-dex2oat-Xmx' to '64m' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.dex2oat-Xms' to '64m' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.dex2oat-Xmx' to '512m' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.usejit' to 'true' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.usejitprofiles' to 'true' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.dexopt.secondary' to 'true' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.dexopt.thermal-cutoff' to '2' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.appimageformat' to 'lz4' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.dalvik.vm.native.bridge' to '0' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'pm.dexopt.first-boot' to 'verify' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'pm.dexopt.boot-after-ota' to 'verify' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'pm.dexopt.post-boot' to 'extract' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'pm.dexopt.install' to 'speed-profile' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'pm.dexopt.install-fast' to 'skip' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'pm.dexopt.install-bulk' to 'speed-profile' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'pm.dexopt.install-bulk-secondary' to 'verify' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'pm.dexopt.install-bulk-downgraded' to 'verify' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'pm.dexopt.install-bulk-secondary-downgraded' to 'extract' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'pm.dexopt.bg-dexopt' to 'speed-profile' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'pm.dexopt.ab-ota' to 'speed-profile' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'pm.dexopt.inactive' to 'verify' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'pm.dexopt.cmdline' to 'verify' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'pm.dexopt.shared' to 'speed' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.dex2oat-resolve-startup-strings' to 'true' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.dex2oat-max-image-block-size' to '524288' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.minidebuginfo' to 'true' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.dex2oat-minidebuginfo' to 'true' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.madvise.vdexfile.size' to '104857600' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.madvise.odexfile.size' to '104857600' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.madvise.artfile.size' to '4294967295' in property file '/system/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'persist.sys.usb.config' to 'adb' in property file '/system/build.prop': SELinux permission check failed
+<7>init: (Loading properties from /system/build.prop took 54ms.)
+<3>init: Do not have permissions to set 'ro.product.system_ext.brand' to 'Android' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.system_ext.device' to 'emulator64_arm64' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.system_ext.manufacturer' to 'unknown' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.system_ext.model' to 'Android SDK built for arm64' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.system_ext.name' to 'sdk_phone64_arm64' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system_ext.build.date' to 'Thu Oct 12 14:09:32 UTC 2023' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system_ext.build.date.utc' to '1697119772' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system_ext.build.fingerprint' to 'Android/sdk_phone64_arm64/emulator64_arm64:13/TE1A.220922.034/10940250:userdebug/test-keys' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system_ext.build.id' to 'TE1A.220922.034' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system_ext.build.tags' to 'test-keys' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system_ext.build.type' to 'userdebug' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system_ext.build.version.incremental' to '10940250' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system_ext.build.version.release' to '13' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system_ext.build.version.release_or_codename' to '13' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.system_ext.build.version.sdk' to '33' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.cp_system_other_odex' to '0' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.adb.secure' to '0' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.nnapi.extensions.deny_on_product' to 'true' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'persist.sys.disable_rescue' to 'true' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.control_privapp_permissions' to 'disable' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.lockscreen.disable.default' to '1' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.com.google.locationfeatures' to '1' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.setupwizard.mode' to 'DISABLED' in property file '/system_ext/etc/build.prop': SELinux permission check failed
+<7>init: (Loading properties from /system_ext/etc/build.prop took 11ms.)
+<4>init: Couldn't load property file '/system_dlkm/etc/build.prop': open() failed: No such file or directory: No such file or directory
+<4>init: Couldn't load property file '/vendor/default.prop': open() failed: No such file or directory: No such file or directory
+<3>init: Do not have permissions to set 'ro.product.vendor.brand' to 'Android' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.vendor.device' to 'emulator64_arm64' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.vendor.manufacturer' to 'unknown' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.vendor.model' to 'Android SDK built for arm64' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.vendor.name' to 'sdk_phone64_arm64' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.vendor.product.cpu.abilist' to 'arm64-v8a' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.vendor.product.cpu.abilist32' to '' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.vendor.product.cpu.abilist64' to 'arm64-v8a' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.vendor.build.date' to 'Thu Oct 12 14:09:32 UTC 2023' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.vendor.build.date.utc' to '1697119772' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.vendor.build.fingerprint' to 'Android/sdk_phone64_arm64/emulator64_arm64:13/TE1A.220922.034/10940250:userdebug/test-keys' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.vendor.build.id' to 'TE1A.220922.034' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.vendor.build.tags' to 'test-keys' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.vendor.build.type' to 'userdebug' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.vendor.build.version.incremental' to '10940250' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.vendor.build.version.release' to '13' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.vendor.build.version.release_or_codename' to '13' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.vendor.build.version.sdk' to '33' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.vndk.version' to '33' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.bionic.arch' to 'arm64' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.bionic.cpu_variant' to 'generic' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.bionic.2nd_arch' to '' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.bionic.2nd_cpu_variant' to 'generic' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'persist.sys.dalvik.vm.lib.2' to 'libart.so' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.isa.arm64.variant' to 'generic' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.isa.arm64.features' to 'default' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.boot.dynamic_partitions' to 'true' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.first_api_level' to '33' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.debugfs_restrictions.enabled' to 'true' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.vendor.build.security_patch' to '' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.board' to 'goldfish_arm64' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.board.platform' to '' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.hwui.use_vulkan' to '' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.ab_update' to 'false' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.zygote' to 'zygote64_32' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'tombstoned.max_tombstone_count' to '50' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.logd.size.stats' to '64K' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'log.tag.stats_log' to 'I' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.carrier' to 'unknown' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.config.notification_sound' to 'OnTheHunt.ogg' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.config.alarm_alert' to 'Alarm_Classic.ogg' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.apex.updatable' to 'true' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.heapstartsize' to '8m' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.heapgrowthlimit' to '192m' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.heapsize' to '512m' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.heaptargetutilization' to '0.75' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.heapminfree' to '512k' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'dalvik.vm.heapmaxfree' to '8m' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'external_storage.projid.enabled' to '1' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'external_storage.casefold.enabled' to '1' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'external_storage.sdcardfs.enabled' to '0' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'graphics.gpu.profiler.support' to 'true' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.surface_flinger.has_wide_color_display' to 'false' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.surface_flinger.has_HDR_display' to 'false' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.surface_flinger.use_color_management' to 'false' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.surface_flinger.protected_contents' to 'false' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'vendor.rild.libpath' to '/vendor/lib64/libgoldfish-ril.so' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.crypto.dm_default_key.options_format.version' to '2' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.control_privapp_permissions' to 'enforce' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.hardware.power' to 'ranchu' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.crypto.volume.filenames_mode' to 'aes-256-cts' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'persist.sys.zram_enabled' to '1' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.logd.size' to '1M' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'debug.stagefright.c2inputsurface' to '-1' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'debug.stagefright.ccodec' to '4' in property file '/vendor/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.incremental.enable' to 'yes' in property file '/vendor/build.prop': SELinux permission check failed
+<7>init: (Loading properties from /vendor/build.prop took 30ms.)
+<4>init: Couldn't load property file '/vendor_dlkm/etc/build.prop': open() failed: No such file or directory: No such file or directory
+<4>init: Couldn't load property file '/odm_dlkm/etc/build.prop': open() failed: No such file or directory: No such file or directory
+<4>init: Couldn't load property file '/odm/etc/build.prop': open() failed: No such file or directory: No such file or directory
+<4>init: Couldn't load property file '/odm/default.prop': open() failed: No such file or directory: No such file or directory
+<4>init: Couldn't load property file '/odm/build.prop': open() failed: No such file or directory: No such file or directory
+<4>init: Couldn't load property file '/odm/default.prop': open() failed: No such file or directory: No such file or directory
+<4>init: Couldn't load property file '/odm/build.prop': open() failed: No such file or directory: No such file or directory
+<3>init: Do not have permissions to set 'ro.product.product.brand' to 'Android' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.product.device' to 'emulator64_arm64' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.product.manufacturer' to 'unknown' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.product.model' to 'Android SDK built for arm64' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.product.name' to 'sdk_phone64_arm64' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.build.date' to 'Thu Oct 12 14:09:32 UTC 2023' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.build.date.utc' to '1697119772' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.build.fingerprint' to 'Android/sdk_phone64_arm64/emulator64_arm64:13/TE1A.220922.034/10940250:userdebug/test-keys' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.build.id' to 'TE1A.220922.034' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.build.tags' to 'test-keys' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.build.type' to 'userdebug' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.build.version.incremental' to '10940250' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.build.version.release' to '13' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.build.version.release_or_codename' to '13' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.build.version.sdk' to '33' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.device.class_of_device' to '90,2,12' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.bap.broadcast.assist.enabled' to 'false' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.bap.unicast.client.enabled' to 'false' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.bas.client.enabled' to 'false' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.ccp.server.enabled' to 'false' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.hap.client.enabled' to 'false' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.csip.set_coordinator.enabled' to 'false' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.vcp.controller.enabled' to 'false' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.a2dp.source.enabled' to 'true' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.avrcp.target.enabled' to 'true' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.gatt.enabled' to 'true' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.hfp.ag.enabled' to 'true' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.hid.device.enabled' to 'true' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.hid.host.enabled' to 'true' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.map.server.enabled' to 'true' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.mcp.server.enabled' to 'true' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.opp.enabled' to 'true' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.pan.nap.enabled' to 'true' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.pan.panu.enabled' to 'true' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'bluetooth.profile.pbap.server.enabled' to 'true' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.product.vndk.version' to '33' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.build.characteristics' to 'emulator' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.config.ringtone' to 'Ring_Synth_04.ogg' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.config.notification_sound' to 'pixiedust.ogg' in property file '/product/etc/build.prop': SELinux permission check failed
+<3>init: Do not have permissions to set 'ro.com.android.dataroaming' to 'true' in property file '/product/etc/build.prop': SELinux permission check failed
+<7>init: (Loading properties from /product/etc/build.prop took 19ms.)
+<3>init: vbmeta digest size too small 
+<6>init: Setting property 'ro.build.fingerprint' to 'unknown/unknown/unknown:unknown/unknown/unknown:unknown/unknown'
+<6>init: Setting property 'ro.product.cpu.abilist' to ''
+<6>init: Setting property 'ro.product.cpu.abilist32' to ''
+<6>init: Setting property 'ro.product.cpu.abilist64' to ''
+<3>init: Init cannot set 'persist.sys.usb.config' to 'none': SELinux permission check failed
+<3>init: Failed to umount /second_stage_resources: Function not implemented
+<3>selinux: No path given to file labeling backend
+<3>selinux: 
+<3>selinux: selinux_android_file_context: Error getting file context handle (No such file or directory)
+<3>selinux: 
+<6>init: Running restorecon...
+<4>init: CAP_SYS_BOOT is not supported: Operation not permitted
+<3>selinux: Unknown class property_service
+<3>init: Init cannot set 'ro.property_service.version' to '2': SELinux permission check failed
+<6>init: Created socket '/dev/socket/property_service', mode 666, user 0, group 0
+<6>init: [libfs_mgr]vendor overlay: vndk version not defined
+<3>selinux: Unknown class property_service
+<3>init: Unable to set property 'ro.kernel.version' from uid:0 gid:0 pid:1: SELinux permission check failed
+<6>init: SetupMountNamespaces done
+<6>init: Forked subcontext for 'u:r:vendor_init:s0' with pid 3
+<6>init: Parsing file /system/etc/init/hw/init.rc...
+<6>init: Added '/init.environ.rc' to import list
+<6>init: Added '/system/etc/init/hw/init.usb.rc' to import list
+<3>init: /system/etc/init/hw/init.rc: 9: Could not expand import: property 'ro.hardware' doesn't exist while expanding '/init.${ro.hardware}.rc'
+<3>init: /system/etc/init/hw/init.rc: 10: Could not expand import: property 'ro.hardware' doesn't exist while expanding '/vendor/etc/init/hw/init.${ro.hardware}.rc'
+<6>init: Added '/system/etc/init/hw/init.usb.configfs.rc' to import list
+<3>init: /system/etc/init/hw/init.rc: 12: Could not expand import: property 'ro.zygote' doesn't exist while expanding '/system/etc/init/hw/init.${ro.zygote}.rc'
+<6>init: Parsing file /init.environ.rc...
+<6>init: Unable to read config file '/init.environ.rc': open() failed: No such file or directory
+<6>init: Parsing file /system/etc/init/hw/init.usb.rc...
+<6>init: Unable to read config file '/system/etc/init/hw/init.usb.rc': open() failed: No such file or directory
+<6>init: Parsing file /system/etc/init/hw/init.usb.configfs.rc...
+<6>init: Unable to read config file '/system/etc/init/hw/init.usb.configfs.rc': open() failed: No such file or directory
+<7>init: (Parsing /system/etc/init/hw/init.rc took 10ms.)
+<6>init: Parsing directory /system/etc/init...
+<6>init: Parsing file /system_ext/etc/init...
+<6>init: Unable to read config file '/system_ext/etc/init': open() failed: No such file or directory
+<6>init: Parsing file /vendor/etc/init...
+<6>init: Unable to read config file '/vendor/etc/init': open() failed: No such file or directory
+<6>init: Parsing file /odm/etc/init...
+<6>init: Unable to read config file '/odm/etc/init': open() failed: No such file or directory
+<6>init: Parsing file /product/etc/init...
+<6>init: Unable to read config file '/product/etc/init': open() failed: No such file or directory
+<3>selinux: Unknown class property_service
+<3>init: Unable to set property 'ro.gsid.image_running' from uid:0 gid:0 pid:1: SELinux permission check failed
+<3>selinux: Unknown class property_service
+<3>init: Unable to set property 'gsid.image_installed' from uid:0 gid:0 pid:1: SELinux permission check failed
+<6>init: processing action (SetupCgroups) from (<Builtin Action>:0)
+<3>libprocessgroup: Failed to read task profiles from /etc/cgroups.json: No such file or directory
+<3>libprocessgroup: Failed to load cgroup description file
+<6>init: Command 'SetupCgroups' action=SetupCgroups (<Builtin Action>:0) took 0ms and failed: Failed to setup cgroups: No such file or directory
+<6>init: processing action (SetKptrRestrict) from (<Builtin Action>:0)
+<6>init: Command 'SetKptrRestrict' action=SetKptrRestrict (<Builtin Action>:0) took 0ms and succeeded
+<6>init: processing action (TestPerfEventSelinux) from (<Builtin Action>:0)
+<3>init: Unexpected perf_event_open error: Function not implemented
+<6>init: Command 'TestPerfEventSelinux' action=TestPerfEventSelinux (<Builtin Action>:0) took 0ms and succeeded
+<6>init: processing action (ConnectEarlyStageSnapuserd) from (<Builtin Action>:0)
+<6>init: Command 'ConnectEarlyStageSnapuserd' action=ConnectEarlyStageSnapuserd (<Builtin Action>:0) took 0ms and succeeded
+<6>init: processing action (early-init) from (/system/etc/init/hw/init.rc:15)
+<6>init: Command 'write /proc/sys/kernel/sysrq 0' action=early-init (/system/etc/init/hw/init.rc:17) took 0ms and failed: Unable to write to file '/proc/sys/kernel/sysrq': open() failed: No such file or directory
+<6>init: Command 'write /proc/sys/kernel/modprobe 
+<6>init: ' action=early-init (/system/etc/init/hw/init.rc:22) took 0ms and failed: Unable to write to file '/proc/sys/kernel/modprobe': open() failed: No such file or directory
+<6>init: Command 'restorecon /adb_keys' action=early-init (/system/etc/init/hw/init.rc:25) took 0ms and succeeded
+<6>init: Command 'restorecon /postinstall' action=early-init (/system/etc/init/hw/init.rc:28) took 0ms and succeeded
+<6>init: Command 'mkdir /acct/uid' action=early-init (/system/etc/init/hw/init.rc:30) took 0ms and failed: mkdir() failed on /acct/uid: No such file or directory
+<6>init: Command 'chown root system /dev/memcg/memory.pressure_level' action=early-init (/system/etc/init/hw/init.rc:33) took 0ms and failed: lchown() failed: No such file or directory
+<6>init: Command 'chmod 0040 /dev/memcg/memory.pressure_level' action=early-init (/system/etc/init/hw/init.rc:34) took 0ms and failed: fchmodat() failed: No such file or directory
+<6>init: Command 'mkdir /dev/memcg/apps/ 0755 system system' action=early-init (/system/etc/init/hw/init.rc:36) took 0ms and failed: mkdir() failed on /dev/memcg/apps/: No such file or directory
+<6>init: Command 'mkdir /dev/memcg/system 0550 system system' action=early-init (/system/etc/init/hw/init.rc:38) took 0ms and failed: mkdir() failed on /dev/memcg/system: No such file or directory
+<6>init: Command 'mkdir /dev/net 0755 root root' action=early-init (/system/etc/init/hw/init.rc:41) took 0ms and succeeded
+<6>init: Command 'symlink ../tun /dev/net/tun' action=early-init (/system/etc/init/hw/init.rc:42) took 0ms and succeeded
+<6>init: Command 'setrlimit nice 40 40' action=early-init (/system/etc/init/hw/init.rc:45) took 0ms and failed: setrlimit failed: Function not implemented
+<6>init: Command 'setrlimit nofile 32768 32768' action=early-init (/system/etc/init/hw/init.rc:48) took 0ms and failed: setrlimit failed: Function not implemented
+<6>init: Command 'mkdir /linkerconfig/bootstrap 0755' action=early-init (/system/etc/init/hw/init.rc:51) took 0ms and succeeded
+<6>init: Command 'mkdir /linkerconfig/default 0755' action=early-init (/system/etc/init/hw/init.rc:52) took 0ms and succeeded
+<6>init: Command 'write /sys/module/dm_verity/parameters/prefetch_cluster 0' action=early-init (/system/etc/init/hw/init.rc:56) took 0ms and failed: Unable to write to file '/sys/module/dm_verity/parameters/prefetch_cluster': open() failed: No such file or directory
+<6>init: Command 'exec -- /system/bin/bootstrap/linkerconfig --target /linkerconfig/bootstrap' action=early-init (/system/etc/init/hw/init.rc:59) took 0ms and failed: Could not start exec service: Cannot find '/system/bin/bootstrap/linkerconfig': No such file or directory
+<6>init: Command 'chmod 644 /linkerconfig/bootstrap/ld.config.txt' action=early-init (/system/etc/init/hw/init.rc:60) took 0ms and failed: fchmodat() failed: No such file or directory
+<6>init: Command 'copy /linkerconfig/bootstrap/ld.config.txt /linkerconfig/default/ld.config.txt' action=early-init (/system/etc/init/hw/init.rc:61) took 0ms and failed: Could not read input file '/linkerconfig/bootstrap/ld.config.txt': open() failed: No such file or directory
+<6>init: Command 'chmod 644 /linkerconfig/default/ld.config.txt' action=early-init (/system/etc/init/hw/init.rc:62) took 0ms and failed: fchmodat() failed: No such file or directory
+<6>init: Command 'mount none /linkerconfig/bootstrap /linkerconfig bind rec' action=early-init (/system/etc/init/hw/init.rc:65) took 0ms and failed: mount() failed: Device or resource busy
+<6>init: Command 'start ueventd' action=early-init (/system/etc/init/hw/init.rc:67) took 0ms and failed: Could not start service: Cannot find '/system/bin/ueventd': No such file or directory
+<6>init: Command 'exec_start apexd-bootstrap' action=early-init (/system/etc/init/hw/init.rc:72) took 0ms and failed: Service not found
+<6>linkerconfig: executing /apex/com.android.runtime/bin/linkerconfig failed: No such file or directory
+<3>logwrapper: executing /apex/com.android.runtime/bin/linkerconfig failed: No such file or directory
+<3>logwrapper: 
+SCARLET_INIT_NAMESPACE_STOP_REAP 5 9
+SCARLET_ANDROID_PROGRAM_EXIT 0
+SCARLET_ANDROID_PROGRAM_DONE

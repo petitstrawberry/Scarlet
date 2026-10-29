@@ -1,0 +1,17 @@
+{
+  "kind": "bounded-stock-init-diagnostic-v2",
+  "init_manifest_sha256": "3df5370509edc91770366a3d6bc865470042a586b4bfd90a676738e82e3db0e6",
+  "launcher_sha256": "dc5591f986dd409608eaac933707f6e8caeca0fa1a005937690633a40c09c69f",
+  "launcher_source_sha256": "eceda273d92210b20d0c526598ba0d8418312457301b5fd02af4c1a5652d313e",
+  "kmsg_logger_sha256": "d96f37d33f9744c791d0dbdfc3b38585fc60246f8fe85b365e30236f504629b8",
+  "kmsg_logger_source_sha256": "589777cae7e03a056cea8d75415da4ee0fd4902469436649dde860c3555610d3",
+  "runner_source_sha256": "b9d455117524c650f8fefcabfda154504e62125162ad8ae393f176e4557c1880",
+  "kernel_namespace_changes": "hierarchical PID visibility, explicit lifecycle scope, mount propagation and retained namespace capabilities",
+  "limits": [
+    "Diagnostic LD_PRELOAD redirects writable /dev/kmsg opens to the inherited console; no syscall result bypass",
+    "No boot-readiness assertion",
+    "Userspace bounded init/vendor_init policy and inherited Shield information restriction supplied",
+    "No fixture property snapshot or linkerconfig generation; stock init owns bootstrap",
+    "Explicit ProcessScope with init designated as reaper; outside controller closes scope after init exit"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "result": "fixture failure marker",
+  "qemu_exit_code": 0,
+  "elapsed_seconds": 5.568,
+  "dynamic_runtime": true,
+  "program_exit_status": null,
+  "service_readiness": "not tested"
+}

@@ -1,0 +1,20 @@
+{
+  "result": "PASS",
+  "qemu_exit_code": 0,
+  "elapsed_seconds": 6.866,
+  "dynamic_runtime": true,
+  "program_exit_status": 0,
+  "selinux": {
+    "result": "PASS",
+    "records": [
+      "SCARLET_LABEL_TRANSITION_BEGIN",
+      "SCARLET_LABEL_TRANSITION_PARENT_DENIED",
+      "SCARLET_LABEL_TRANSITION_EXEC_OK 10001",
+      "SCARLET_LABEL_TRANSITION_CHILD_OK 10001",
+      "SCARLET_LABEL_TRANSITION_EXEC_OK 10002",
+      "SCARLET_LABEL_TRANSITION_CHILD_OK 10002",
+      "SCARLET_LABEL_TRANSITION_OK"
+    ]
+  },
+  "servicemanager": "not tested"
+}

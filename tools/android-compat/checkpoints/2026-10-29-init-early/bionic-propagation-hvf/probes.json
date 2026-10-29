@@ -1,0 +1,76 @@
+{
+  "sources_sha256": {
+    "bionic-probe.c": "e077bd8291e48099ec85c8f86e75b93b96e44254fce524a0fff000f2280e76fe",
+    "binder-probe.c": "be073c21ff29a1c2974d410858c5cd3b80afe588feb32d5f021d92c0816007d7",
+    "binder-object-probe.c": "8479afd1d766058fcce967deda75660f02fda843967cae7a816f720ea261c8a9",
+    "credentials-probe.c": "0d6bbd8cd519aab857c0b9c197651df71ba2e66c39f6636fea0236993e73a827",
+    "seccomp-probe.c": "208e222c7d779562dd7a098ae88dcf586f255f72398a9926de5f899d879cb870",
+    "process-scope-probe.c": "4a964ab61c231701a39691dfeeb6d154f25c45b3e4252e1c99c21d26aa726b9c",
+    "mount-restrictions-probe.c": "2d7fa75d0d1bca1882b4f754720a5c969566eeb685c55a457ff8b030fea52528",
+    "mount-propagation-probe.c": "1c6b23644c1ea2b1ef90f2f016d9771161be4c2ab9e9d5962b61e1fc0037f6a3"
+  },
+  "api": 33,
+  "ndk": "Pkg.Desc = Android NDK\nPkg.Revision = 25.1.8937393\n",
+  "commands": [
+    [
+      "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+      "-O2",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-fno-emulated-tls",
+      "-static",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/bionic-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/binder-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/binder-object-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/credentials-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/seccomp-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/process-scope-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/mount-restrictions-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/mount-propagation-probe.c",
+      "-ldl",
+      "-o",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/bionic-propagation-build/bionic-static"
+    ],
+    [
+      "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+      "-O2",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-fno-emulated-tls",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/bionic-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/binder-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/binder-object-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/credentials-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/seccomp-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/process-scope-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/mount-restrictions-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/mount-propagation-probe.c",
+      "-ldl",
+      "-o",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/bionic-propagation-build/bionic-dynamic"
+    ],
+    [
+      "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+      "-O2",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-fno-emulated-tls",
+      "-fPIC",
+      "-shared",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/bionic-library.c",
+      "-o",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/bionic-propagation-build/libbionic-probe.so"
+    ]
+  ],
+  "sha256": {
+    "bionic-static": "6dba64693a94a0c688a4f7ea34dd786515eb40762acc1b73ce998a338b527b8d",
+    "bionic-dynamic": "a604c627c436966063d7d9cec03d53160f97b93670ef3676ef1b943787991653",
+    "libbionic-probe.so": "42213eb79b7285e379f16208d8343c0637739d704075638e68e3dd278510a2d4"
+  }
+}

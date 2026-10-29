@@ -1,0 +1,28 @@
+{
+  "result": "BUILT",
+  "kind": "stock-label-transition-v1",
+  "api": 33,
+  "command": [
+    "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+    "-std=c11",
+    "-D_GNU_SOURCE",
+    "-O2",
+    "-g",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/label-exec-v2-build/label-transition-probe.c",
+    "-ldl",
+    "-o",
+    "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/label-exec-v2-build/selinux-probe"
+  ],
+  "ndk": "Pkg.Desc = Android NDK\nPkg.Revision = 25.1.8937393\n",
+  "source_sha256": "211817d6cb7c0019426277926ad5aedbb365be2f3ee5adec675847fc35091278",
+  "runtime_manifest_sha256": "8490e2c89682565a1839b4ec45ae61648c7b56b0bed4b938821b5b8c7fcd1316",
+  "libselinux_sha256": "96bd1b0c040322d60cb7d23a28c4b5222452f67c95e49a4c36cff999299be4a3",
+  "binary_sha256": "43ceef47bf983e97f38f7d168f0ab325870e8aaf3cf643f7ec9cec46fce1c0c1",
+  "needed": [
+    "libdl.so",
+    "libc.so"
+  ]
+}

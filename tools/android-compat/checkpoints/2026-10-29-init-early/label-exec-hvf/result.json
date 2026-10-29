@@ -1,0 +1,14 @@
+{
+  "result": "missing or failed Shield evidence",
+  "qemu_exit_code": 0,
+  "elapsed_seconds": 6.081,
+  "dynamic_runtime": true,
+  "program_exit_status": 1,
+  "selinux": {
+    "result": "INCOMPLETE",
+    "records": [
+      "SCARLET_LABEL_TRANSITION_FAIL line=56 getcon_fn && setcon_fn && freecon_fn && getexeccon_fn && setexeccon_fn && enabled && enforcing errno=22"
+    ]
+  },
+  "servicemanager": "not tested"
+}

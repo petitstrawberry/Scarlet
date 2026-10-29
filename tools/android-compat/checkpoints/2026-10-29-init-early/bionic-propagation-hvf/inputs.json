@@ -1,0 +1,29 @@
+{
+  "kernel_sha256": "eae455f9ca8734a496ac6891830473e75a52ae00a13cb989264e73bd6f1c36a7",
+  "dex_sha256": null,
+  "apk_sha256": null,
+  "tampered_apk_sha256": null,
+  "framework_manifest_sha256": null,
+  "zygote_build_sha256": null,
+  "framework_build_sha256": null,
+  "framework_fixture_sha256": null,
+  "program_sha256": null,
+  "libbinder_build_sha256": null,
+  "service_build_sha256": null,
+  "service_manifest_sha256": null,
+  "service_fixture_sha256": null,
+  "service_contexts_sha256": null,
+  "selinux_build_sha256": null,
+  "zygote_transition_policy": false,
+  "stock_init_owns_bootstrap": false,
+  "stock_bootstrap_source_sha256": null,
+  "shield_fixture_sha256": null,
+  "stock_reference_config_sha256": null,
+  "stock_manifest_sha256": null,
+  "runtime_sha256": {
+    "system/bin/linker64": "c59c62110ee459b99ca752b3cd775f3b0f7c370eed2b8cf506c567bb75db0e68",
+    "apex/com.android.runtime/lib64/bionic/libc.so": "dff5613612e87332742e181ba5eca08eb91d1a982cfe336ccfb32453e88a149b",
+    "apex/com.android.runtime/lib64/bionic/libdl.so": "146669c99fef6efa03f133e61a5479d82c46592aaaf1b8e6ceeb7a5e4b135d76",
+    "apex/com.android.runtime/lib64/bionic/libm.so": "d5348e97648de62112f1625a70e87a93771ba641d1ee0c3f61f47e0858dec1e8"
+  }
+}

@@ -1,0 +1,172 @@
+UEFI firmware (version edk2-stable202408-prebuilt.qemu.org built at 16:28:50 on Sep 12 2024)
+ArmTrngLib could not be correctly initialized.
+Error: Image at 000BFDB6000 start failed: 00000001
+Error: Image at 000BFD6D000 start failed: Not Found
+Error: Image at 000BFCBA000 start failed: Unsupported
+Error: Image at 000BFC3F000 start failed: Not Found
+Error: Image at 000BFB65000 start failed: Aborted
+Tpm2SubmitCommand - Tcg2 - Not Found
+Tpm2GetCapabilityPcrs fail!
+Tpm2SubmitCommand - Tcg2 - Not Found
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI Non-Block Boot Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,0000000A00000000)
+BdsDxe: starting Boot0001 "UEFI Non-Block Boot Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,0000000A00000000)
+ConvertPages: range BEB2D000 - BEB30FFF covers multiple entries
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+[01;01H[01;01H[01;01Hl[01;02Hi[01;03Hm[01;04Hi[01;05Hn[01;06He[01;07H:[01;08H [01;09HL[01;10Ho[01;11Ha[01;12Hd[01;13Hi[01;14Hn[01;15Hg[01;16H [01;17He[01;18Hx[01;19He[01;20Hc[01;21Hu[01;22Ht[01;23Ha[01;24Hb[01;25Hl[01;26He[01;27H [01;28H`[01;29Hb[01;30Ho[01;31Ho[01;32Ht[01;33H([01;34H)[01;35H:[01;36H/[01;37Hb[01;38Ho[01;39Ho[01;40Ht[01;41H/[01;42Hk[01;43He[01;44Hr[01;45Hn[01;46He[01;47Hl[01;48H`[01;49H.[01;50H.[01;51H.[01;52H[01;01H[02;01Hl[02;02Hi[02;03Hm[02;04Hi[02;05Hn[02;06He[02;07H:[02;08H [02;09HL[02;10Ho[02;11Ha[02;12Hd[02;13Hi[02;14Hn[02;15Hg[02;16H [02;17Hm[02;18Ho[02;19Hd[02;20Hu[02;21Hl[02;22He[02;23H [02;24H`[02;25Hb[02;26Ho[02;27Ho[02;28Ht[02;29H([02;30H)[02;31H:[02;32H/[02;33Hb[02;34Ho[02;35Ho[02;36Ht[02;37H/[02;38Hi[02;39Hn[02;40Hi[02;41Ht[02;42Hr[02;43Ha[02;44Hm[02;45Hf[02;46Hs[02;47H-[02;48Ha[02;49Ha[02;50Hr[02;51Hc[02;52Hh[02;53H6[02;54H4[02;55H.[02;56Hc[02;57Hp[02;58Hi[02;59Ho[02;60H`[02;61H.[02;62H.[02;63H.[02;64H[02;01H[03;01H
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-static libc
+SCARLET_BIONIC_BEGIN libc
+SCARLET_NAMESPACE_OK capture fd native identity join retained-view uid-zero-no-grant
+SCARLET_PROPAGATION_OK shared slave recursive namespace bind no-backflow
+SCARLET_MOUNT_OK tmpfs noexec exec script mmap mprotect atomic fork COW close options mount-table
+SCARLET_SCOPE_BEGIN handle=3
+SCARLET_SCOPE_WAIT round=0 pid=13 worker=13 status=0 errno=1
+SCARLET_SCOPE_EXEC pid=14 parent=12 expected=12
+SCARLET_SCOPE_ORPHAN_EXEC_OK
+SCARLET_SCOPE_WAIT round=1 pid=14 worker=13 status=4352 errno=1
+SCARLET_SCOPE_OK orphan-reaper fork exec retained-without-handle no-escape terminate outside-survives
+SCARLET_IDENTITY_OK saved-id groups authority-drop fork exec auxv peercred queued-credentials
+SCARLET_SECCOMP_OK verify no-side-effect trap kill thread fork exec stacking native-escape
+SCARLET_BIONIC_OK libc
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-static libc 0
+
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-static thread
+SCARLET_BIONIC_BEGIN thread
+SCARLET_BIONIC_OK thread
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-static thread 0
+
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-static shared
+SCARLET_BIONIC_BEGIN shared
+SCARLET_BIONIC_OK shared
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-static shared 0
+
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-static signal
+SCARLET_BIONIC_BEGIN signal
+SCARLET_BIONIC_OK signal
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-static signal 0
+
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-static exec
+SCARLET_BIONIC_BEGIN exec
+SCARLET_BIONIC_BEGIN exec
+SCARLET_BIONIC_OK exec
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-static exec 0
+
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-static xattr
+SCARLET_BIONIC_BEGIN xattr
+SCARLET_BIONIC_OK xattr
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-static xattr 0
+
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-static mremap
+SCARLET_BIONIC_BEGIN mremap
+SCARLET_BIONIC_OK mremap
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-static mremap 0
+
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-static binder
+SCARLET_BIONIC_BEGIN binder
+SCARLET_BINDER_FLUSH_OK close dup3 duplicate-live
+SCARLET_BINDER_RPC_OK request reply buffer-free peer-death fork-isolation poll-timeout poll-interrupt epoll-level
+SCARLET_BINDER_OBJECTS_BEGIN
+SCARLET_BINDER_OBJECTS_REJECT_OK offsets bounds handles weak-only fd flags rollback
+SCARLET_BINDER_OBJECTS_TRANSFER_OK export retain call roundtrip third-process max64
+SCARLET_BINDER_OBJECTS_REFS strong-zero weak-live
+SCARLET_BINDER_OBJECTS_REFS balanced-before-close
+SCARLET_BINDER_OBJECTS_OK strong weak retain-before-free owner-roundtrip third-process offsets4 max64 rollback ref-notifications dead-nonzero-handle
+SCARLET_BIONIC_OK binder
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-static binder 0
+
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-dynamic libc
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+SCARLET_BIONIC_BEGIN libc
+SCARLET_NAMESPACE_OK capture fd native identity join retained-view uid-zero-no-grant
+SCARLET_PROPAGATION_OK shared slave recursive namespace bind no-backflow
+SCARLET_MOUNT_OK tmpfs noexec exec script mmap mprotect atomic fork COW close options mount-table
+SCARLET_SCOPE_BEGIN handle=4
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+SCARLET_SCOPE_WAIT round=0 pid=59 worker=59 status=0 errno=1
+SCARLET_SCOPE_EXEC pid=60 parent=58 expected=58
+SCARLET_SCOPE_ORPHAN_EXEC_OK
+SCARLET_SCOPE_WAIT round=1 pid=60 worker=59 status=4352 errno=1
+SCARLET_SCOPE_OK orphan-reaper fork exec retained-without-handle no-escape terminate outside-survives
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+SCARLET_IDENTITY_OK saved-id groups authority-drop fork exec auxv peercred queued-credentials
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+SCARLET_SECCOMP_OK verify no-side-effect trap kill thread fork exec stacking native-escape
+SCARLET_BIONIC_OK libc
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-dynamic libc 0
+
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-dynamic thread
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+SCARLET_BIONIC_BEGIN thread
+SCARLET_BIONIC_OK thread
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-dynamic thread 0
+
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-dynamic shared
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+SCARLET_BIONIC_BEGIN shared
+SCARLET_BIONIC_OK shared
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-dynamic shared 0
+
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-dynamic signal
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+SCARLET_BIONIC_BEGIN signal
+SCARLET_BIONIC_OK signal
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-dynamic signal 0
+
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-dynamic dynamic
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+SCARLET_BIONIC_BEGIN dynamic
+SCARLET_BIONIC_OK dynamic
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-dynamic dynamic 0
+
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-dynamic exec
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+SCARLET_BIONIC_BEGIN exec
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+SCARLET_BIONIC_BEGIN exec
+SCARLET_BIONIC_OK exec
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-dynamic exec 0
+
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-dynamic xattr
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+SCARLET_BIONIC_BEGIN xattr
+SCARLET_BIONIC_OK xattr
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-dynamic xattr 0
+
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-dynamic mremap
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+SCARLET_BIONIC_BEGIN mremap
+SCARLET_BIONIC_OK mremap
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-dynamic mremap 0
+
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-dynamic binder
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+SCARLET_BIONIC_BEGIN binder
+SCARLET_BINDER_FLUSH_OK close dup3 duplicate-live
+SCARLET_BINDER_RPC_OK request reply buffer-free peer-death fork-isolation poll-timeout poll-interrupt epoll-level
+SCARLET_BINDER_OBJECTS_BEGIN
+SCARLET_BINDER_OBJECTS_REJECT_OK offsets bounds handles weak-only fd flags rollback
+SCARLET_BINDER_OBJECTS_TRANSFER_OK export retain call roundtrip third-process max64
+SCARLET_BINDER_OBJECTS_REFS strong-zero weak-live
+SCARLET_BINDER_OBJECTS_REFS balanced-before-close
+SCARLET_BINDER_OBJECTS_OK strong weak retain-before-free owner-roundtrip third-process offsets4 max64 rollback ref-notifications dead-nonzero-handle
+SCARLET_BIONIC_OK binder
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-dynamic binder 0
+
+SCARLET_ANDROID_DIRECT_CASE /bin/bionic-static binder-absent
+SCARLET_BIONIC_BEGIN binder-absent
+SCARLET_BIONIC_OK binder-absent
+SCARLET_ANDROID_DIRECT_EXIT /bin/bionic-static binder-absent 0
+SCARLET_ANDROID_DIRECT_OK
