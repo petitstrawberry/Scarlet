@@ -13,6 +13,38 @@ MAX_PNG = 16 * 1024 * 1024
 MAX_PIXELS = 16 * 1024 * 1024
 
 
+def analyze_framework_services(data):
+    lines = data.replace(b"\r", b"").decode("utf-8", errors="replace").splitlines()
+    prefix = "SCARLET_FRAMEWORK_SERVICES_"
+    records = [line for line in lines if line.startswith(prefix)]
+    required = ["REGISTERED", "SERVER_CALL_OK", "CLIENT_CALL_OK", "SERVER_ONEWAY_OK", "CLIENT_CALLBACKS_OK", "DENIED_OK", "OWNER_EXITING", "DEATH_OK", "OK"]
+    required += [kind + " " + role for kind in ("PEER", "DONE") for role in ("owner", "client", "denied")]
+    required += ["EXIT " + role + " 0" for role in ("owner", "client", "denied")]
+    valid = all(records.count(prefix + item) == 1 for item in required)
+    pids = []
+    for role in ("manager", "owner", "client", "denied"):
+        matches = [re.fullmatch(prefix + "SPAWN " + role + r" ([1-9][0-9]*)", record) for record in records]
+        pids += [m.group(1) for m in matches if m]
+        valid &= sum(bool(m) for m in matches) == 1
+    stopped = [line for line in records if re.fullmatch(prefix + r"EXIT manager (137|-9)", line)]
+    valid &= len(set(pids)) == 4 and len(stopped) == 1 and len(records) == len(required) + 5
+    stock = [line for line in lines if line.startswith(("SCARLET_ANDROID_STOCK_", "SCARLET_PROPERTY_", "SCARLET_SERVICES_CONFIGURED"))]
+    stock = ["SCARLET_PROPERTY_SNAPSHOT_OK" if re.fullmatch(r"SCARLET_PROPERTY_SNAPSHOT_OK [1-9][0-9]*", line) else line for line in stock]
+    valid &= stock == ["SCARLET_SERVICES_CONFIGURED", "SCARLET_ANDROID_STOCK_START properties",
+                       "SCARLET_PROPERTY_SNAPSHOT_OK", "SCARLET_ANDROID_STOCK_EXIT properties 0",
+                       "SCARLET_ANDROID_STOCK_START linkerconfig", "SCARLET_ANDROID_STOCK_EXIT linkerconfig 0", "SCARLET_ANDROID_STOCK_OK"]
+    valid &= not any("_FAIL" in line for line in lines)
+    if valid:
+        position = lambda event: lines.index(prefix + event)
+        valid &= lines.index("SCARLET_ANDROID_STOCK_OK") < position("REGISTERED") < position("SERVER_CALL_OK") < position("CLIENT_CALL_OK") < position("OWNER_EXITING") < position("DEATH_OK") < position("DONE client")
+        valid &= all(position("CLIENT_CALL_OK") < position(event) < position("OWNER_EXITING")
+                     for event in ("SERVER_ONEWAY_OK", "CLIENT_CALLBACKS_OK"))
+        valid &= position("REGISTERED") < position("DENIED_OK") < position("OWNER_EXITING") < position("DONE owner")
+        valid &= all(position("SPAWN " + role + " " + pids[index]) < position("PEER " + role) < position("DONE " + role) < position("EXIT " + role + " 0") < lines.index(stopped[0]) < position("OK")
+                     for index, role in enumerate(("manager", "owner", "client", "denied")) if role != "manager")
+    return {"result": "PASS" if valid else "INCOMPLETE", "records": records}
+
+
 def analyze_framework(data):
     expected = ["SCARLET_ANDROID_STOCK_START properties", "SCARLET_PROPERTY_SNAPSHOT_OK",
                 "SCARLET_ANDROID_STOCK_EXIT properties 0", "SCARLET_ANDROID_STOCK_START linkerconfig",

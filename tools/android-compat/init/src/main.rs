@@ -4,6 +4,7 @@
 extern crate scarlet_std as std;
 #[path = "../../../../user/bin/src/bootstrap.rs"]
 mod bootstrap;
+mod framework_services;
 mod services;
 mod shield;
 mod stock;
@@ -36,7 +37,11 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
     ];
     if let Some(policy) = policy {
         stock::prepare(&environment, &android, &handles)?;
-        return services::run(&environment, &android, &handles, policy);
+        return if option_env!("SCARLET_ANDROID_FRAMEWORK_SERVICES") == Some("1") {
+            framework_services::run(&environment, &android, &handles, policy)
+        } else {
+            services::run(&environment, &android, &handles, policy)
+        };
     }
     if option_env!("SCARLET_ANDROID_ART") == Some("1") {
         // Keep startup faults visible even when ART never reaches Java or exit.
@@ -186,7 +191,9 @@ fn main() -> i32 {
             }
         }
         Err(error) => {
-            if diagnostic {
+            if option_env!("SCARLET_ANDROID_FRAMEWORK_SERVICES") == Some("1") {
+                println!("SCARLET_FRAMEWORK_SERVICES_FAIL: {}", error);
+            } else if diagnostic {
                 println!("SCARLET_ANDROID_PROGRAM_FAIL: {}", error);
             } else if art {
                 println!("SCARLET_ANDROID_ART_FAIL: {}", error);

@@ -32,6 +32,9 @@ def main():
     if args.framework_sdk:
         compile_command += ["-classpath", str(args.framework_sdk.resolve())]
     compile_command.append(str(source))
+    service_source = source.with_name("ScarletFrameworkService.java") if args.framework_sdk else None
+    if service_source:
+        compile_command.append(str(service_source))
     subprocess.run(compile_command, check=True)
     dex_command = [java, "-cp", str(d8), "com.android.tools.r8.D8", "--min-api", "23", "--output", str(output)]
     if args.framework_sdk:
@@ -43,6 +46,7 @@ def main():
         return subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True).stdout.strip()
     metadata = {"main_class": source.stem, "source_sha256": sha256(source),
         "framework_sdk_sha256": sha256(args.framework_sdk) if args.framework_sdk else None,
+        "framework_service_sha256": sha256(service_source) if service_source else None,
         "dex_sha256": validate_dex(output / "classes.dex"), "d8_sha256": sha256(d8),
         "java_version": version([java, "-version"]),
         "javac_version": version([java, "com.sun.tools.javac.Main", "-version"]),

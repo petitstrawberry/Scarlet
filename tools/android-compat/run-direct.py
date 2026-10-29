@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import sys
 
-from evidence import analyze_art, analyze_direct, analyze_libbinder, analyze_selinux, analyze_services, analyze_framework
+from evidence import analyze_art, analyze_direct, analyze_libbinder, analyze_selinux, analyze_services, analyze_framework, analyze_framework_services
 from art_inputs import art_launch, validate_dex, verify_art_runtime, sha256
 from libbinder_inputs import verify_libbinder_build
 from selinux_inputs import verify_selinux_build
@@ -44,6 +44,7 @@ def main():
     mode.add_argument("--selinux-probe", type=Path, help="build directory from build-selinux-probe.py; verify Shield allow/deny through stock libselinux")
     mode.add_argument("--service-probe", type=Path, help="stock servicemanager integration probe build")
     mode.add_argument("--framework-probe", type=Path, help="build-dex.py --framework-sdk output; verify stock app_process framework/JNI")
+    mode.add_argument("--framework-services", type=Path, help="framework probe build; stock manager and three labeled Java peers")
     parser.add_argument("--framework-inputs", type=Path, help="prepare-framework.py output")
     parser.add_argument("--service-inputs", type=Path, help="verified stock servicemanager from prepare-servicemanager.py")
     parser.add_argument("--runtime-root", type=Path, help="Android /system and /apex runtime tree")
@@ -54,11 +55,15 @@ def main():
     parser.add_argument("--accel", choices=("tcg", "hvf"), default="tcg")
     parser.add_argument("--binder", action="store_true", help="include Binder RPC and three-process object lifetime checks")
     args = parser.parse_args()
+    if args.framework_services:
+        if not args.service_inputs:
+            parser.error("--framework-services requires --service-inputs")
+        args.framework_probe = args.framework_services
     framework = None
     if args.framework_probe:
         if not args.runtime_root or not args.stock_inputs or not args.framework_inputs:
             parser.error("--framework-probe requires --runtime-root, --stock-inputs and --framework-inputs")
-        verify_framework_probe(args.framework_probe)
+        verify_framework_probe(args.framework_probe, services=bool(args.framework_services))
         framework = verify_framework_inputs(args.framework_inputs, args.runtime_root, args.stock_inputs)
         args.program = args.framework_inputs / PROGRAM
     elif args.framework_inputs:
@@ -69,7 +74,9 @@ def main():
         args.program = verify_libbinder_build(args.service_probe, args.runtime_root, service=True)
         verify_service_inputs(args.service_inputs, args.runtime_root)
     elif args.service_inputs:
-        parser.error("--service-inputs requires --service-probe")
+        if not args.framework_services:
+            parser.error("--service-inputs requires --service-probe or --framework-services")
+        verify_service_inputs(args.service_inputs, args.runtime_root)
     if args.selinux_probe:
         if not args.runtime_root or not args.stock_inputs:
             parser.error("--selinux-probe requires --runtime-root and --stock-inputs")
@@ -119,7 +126,7 @@ def main():
             "env": ["ANDROID_LOG_TAGS=*:v", "LD_LIBRARY_PATH=" + metadata["library_path"]],
         }
         if framework:
-            art = framework_launch(framework)
+            art = framework_launch(framework, services=bool(args.framework_services))
             dex_hash = validate_dex(args.framework_probe / "classes.dex")
         if args.linker_debug:
             art["env"].append("LD_DEBUG=3")
@@ -139,13 +146,13 @@ def main():
         "dex_sha256": dex_hash,
         "framework_manifest_sha256": sha256(args.framework_inputs / "framework-inputs.json") if framework else None,
         "framework_build_sha256": sha256(args.framework_probe / "build.json") if framework else None,
-        "framework_fixture_sha256": {name: sha256(SOURCE / "init/src" / name) for name in ("main.rs", "stock.rs")} if framework else None,
+        "framework_fixture_sha256": {name: sha256(SOURCE / "init/src" / name) for name in (("main.rs", "stock.rs", "services.rs", "framework_services.rs") if args.framework_services else ("main.rs", "stock.rs"))} if framework else None,
         "program_sha256": sha256(args.program) if args.program else None,
         "libbinder_build_sha256": sha256(args.libbinder_probe / "build.json") if args.libbinder_probe else None,
         "service_build_sha256": sha256(args.service_probe / "build.json") if args.service_probe else None,
-        "service_manifest_sha256": sha256(args.service_inputs / "service-inputs.json") if args.service_probe else None,
+        "service_manifest_sha256": sha256(args.service_inputs / "service-inputs.json") if args.service_inputs else None,
         "service_fixture_sha256": sha256(SOURCE / "init/src/services.rs") if args.service_probe else None,
-        "service_contexts_sha256": hashlib.sha256(CONTEXTS.encode()).hexdigest() if args.service_probe else None,
+        "service_contexts_sha256": hashlib.sha256(CONTEXTS.encode()).hexdigest() if args.service_inputs else None,
         "selinux_build_sha256": sha256(args.selinux_probe / "build.json") if args.selinux_probe else None,
         "shield_fixture_sha256": sha256(SOURCE / "init/src/shield.rs") if args.selinux_probe else None,
         "stock_reference_config_sha256": sha256(STOCK_CONFIG) if args.stock_inputs else None,
@@ -158,6 +165,7 @@ def main():
         shutil.copy2(args.framework_inputs / "framework-inputs.json", output / "framework-inputs.json")
     if args.service_probe:
         shutil.copy2(args.service_probe / "build.json", output / "service-build.json")
+    if args.service_inputs:
         shutil.copy2(args.service_inputs / "service-inputs.json", output / "service-inputs.json")
     if args.libbinder_probe:
         shutil.copy2(args.libbinder_probe / "build.json", output / "libbinder-build.json")
@@ -172,7 +180,7 @@ def main():
             (tree / name).mkdir(parents=True, exist_ok=True)
     for name in ["bin", "lib", "system/bin", "dev", "proc", "sys", "tmp", "root"]:
         (android / name).mkdir(parents=True, exist_ok=True)
-    if args.selinux_probe or args.service_probe:
+    if args.selinux_probe or args.service_probe or args.framework_services:
         (android / "sys/fs/selinux").mkdir(parents=True, exist_ok=True)
     if args.runtime_root:
         shutil.copytree(args.runtime_root, android, dirs_exist_ok=True, symlinks=True)
@@ -186,7 +194,7 @@ def main():
         if args.stock_inputs:
             stage_stock_inputs(args.stock_inputs, args.runtime_root, android)
             shutil.copy2(args.stock_inputs / "stock-inputs.json", output / "stock-inputs.json")
-        if args.service_probe:
+        if args.service_inputs:
             stage_service_inputs(args.service_inputs, args.runtime_root, android)
         if framework:
             bootstrap = stage_framework_inputs(args.framework_inputs, args.runtime_root, args.stock_inputs, android)
@@ -215,6 +223,7 @@ def main():
                SCARLET_ANDROID_ART="1" if art else "0",
                SCARLET_ANDROID_PROGRAM="1" if args.program else "0",
                SCARLET_ANDROID_FRAMEWORK="1" if framework else "0",
+               SCARLET_ANDROID_FRAMEWORK_SERVICES="1" if args.framework_services else "0",
                SCARLET_ART_ARGS="\x1f".join(art["argv"]) if art else "",
                SCARLET_ART_ENV="\x1f".join(art["env"]) if art else "")
     # Preserve the exact launch even if native compilation or image creation fails.
@@ -260,11 +269,21 @@ def main():
     prefix = b"SCARLET_ANDROID_PROGRAM" if args.program else (b"SCARLET_ANDROID_ART" if art else b"SCARLET_ANDROID_DIRECT")
     if args.service_probe:
         prefix = b"SCARLET_SERVICES"
-    smoke.SUCCESS = re.compile(rb"\n" + prefix + (rb"_DONE\r*\n" if args.program and not args.service_probe else rb"_OK\r*\n"))
+    if args.framework_services:
+        prefix = b"SCARLET_FRAMEWORK_SERVICES"
+    smoke.SUCCESS = re.compile(rb"\n" + prefix + (rb"_DONE\r*\n" if args.program and not (args.service_probe or args.framework_services) else rb"_OK\r*\n"))
     smoke.FAILURE = re.compile(rb"\n" + prefix + rb"_FAIL:")
     result = smoke.run_guest(command, output, args.timeout)
     result["dynamic_runtime"] = bool(args.runtime_root)
     data = (output / "serial.log").read_bytes()
+    if args.framework_services:
+        result["framework_services"] = analyze_framework_services(data)
+        if result["result"] == "PASS" and result["framework_services"]["result"] != "PASS":
+            result["result"] = "missing or failed Java service evidence"
+        result["apk_execution"] = "not tested"
+        (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+        print(f"Stock Java Binder service integration: {result['result']}")
+        return 0 if result["result"] == "PASS" else 1
     if args.service_probe:
         result["services"] = analyze_services(data)
         if result["result"] == "PASS" and result["services"]["result"] != "PASS":

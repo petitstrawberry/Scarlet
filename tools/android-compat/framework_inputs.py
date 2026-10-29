@@ -119,19 +119,21 @@ def verify_framework_inputs(root, runtime, stock):
     return metadata
 
 
-def verify_framework_probe(build):
+def verify_framework_probe(build, services=False):
     record = json.loads((build / "build.json").read_text())
     if (record.get("main_class") != "ScarletFrameworkHello" or not record.get("framework_sdk_sha256")
             or record.get("source_sha256") != sha256(SOURCE / "framework/ScarletFrameworkHello.java")
             or record.get("dex_sha256") != validate_dex(build / "classes.dex")):
         raise ValueError("changed or mismatched framework probe")
+    if services and record.get("framework_service_sha256") != sha256(SOURCE / "framework/ScarletFrameworkService.java"):
+        raise ValueError("changed or missing Java service probe")
     return record
 
 
-def framework_launch(metadata):
+def framework_launch(metadata, services=False):
     return {
         "argv": ["/" + PROGRAM, "-Xint", "-Xusejit:false", "-Ximage:/system/nonexistent/boot.art",
-                 "-Xnoimage-dex2oat", "-Xms16m", "-Xmx256m", "/system/bin", "--application", "ScarletFrameworkHello"],
+                 "-Xnoimage-dex2oat", "-Xms16m", "-Xmx256m", "/system/bin", "--application", "ScarletFrameworkService" if services else "ScarletFrameworkHello"],
         "env": ["PATH=/system/bin:/apex/com.android.art/bin", "ANDROID_ROOT=/system", "ANDROID_DATA=/data",
                 "ANDROID_ART_ROOT=/apex/com.android.art", "ANDROID_I18N_ROOT=/apex/com.android.i18n",
                 "ANDROID_TZDATA_ROOT=/apex/com.android.tzdata", "ANDROID_LOG_TAGS=*:v",

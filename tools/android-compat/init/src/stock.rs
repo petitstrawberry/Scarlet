@@ -39,7 +39,9 @@ pub fn environment(
     if option_env!("SCARLET_ANDROID_SHIELD") == Some("1") {
         super::shield::configure(&android)?;
     }
-    let policy = if option_env!("SCARLET_ANDROID_SERVICES") == Some("1") {
+    let policy = if option_env!("SCARLET_ANDROID_SERVICES") == Some("1")
+        || option_env!("SCARLET_ANDROID_FRAMEWORK_SERVICES") == Some("1")
+    {
         Some(super::services::configure(&android)?)
     } else {
         None
