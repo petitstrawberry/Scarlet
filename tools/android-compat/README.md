@@ -796,3 +796,44 @@ PermissionManager service, as retained in the diagnostic logs. Activity launch,
 installation, application identity isolation and graphics remain untested.
 The result explicitly reports `apk_execution: payload DEX only` and
 `activity_launch: not tested`. Host validation covers 48 tests.
+
+
+### Zygote specialization and conditional labels
+
+Shield policies can delegate an exact source-to-target label transition for a
+native principal. All three principal IDs must match; merely changing the active
+ID does not qualify. Android `setcon` uses this grant through an owner-bound
+`/proc/self/attr/current` descriptor. Inherited descriptors cannot relabel another
+process. Policies remain immutable, and ordinary policy query handles do not
+gain the ability to assign arbitrary labels.
+
+Build `build-selinux-probe.py --transitions` and run it with
+`run-direct.py --label-transition-probe` to check stock libselinux transitions for
+two app identities, rejected cross-identity/reverse transitions, inherited file
+descriptors, and fork/exec retention. Regenerate framework inputs to include the
+stock `plat_seapp_contexts` file.
+
+```sh
+python3 tools/android-compat/build-zygote-probe.py --child \
+  --ndk "$ANDROID_NDK_ROOT" --build-tools "$ANDROID_SDK_ROOT/build-tools/37.0.0" \
+  --framework-sdk "$ANDROID_SDK_ROOT/platforms/android-32/android.jar" \
+  --framework-inputs "$FRAMEWORK_INPUTS" --runtime-root "$ART_RUNTIME" \
+  --stock-inputs "$STOCK_INPUTS" --output "$ZYGOTE_CHILD_PROBE"
+python3 tools/android-compat/run-direct.py \
+  --kernel "$SCARLET_KERNEL" --zygote-probe "$ZYGOTE_CHILD_PROBE" \
+  --framework-inputs "$FRAMEWORK_INPUTS" --runtime-root "$ART_RUNTIME" \
+  --stock-inputs "$STOCK_INPUTS" --accel hvf --output "$ZYGOTE_CHILD_RUN"
+```
+
+The userspace fixture applies an enforcing Zygote policy, requests UID/GID 10001
+through the stock control socket, and checks the resulting app label selected
+by stock libselinux. A fixture Java main added to the boot classpath returns a
+proof through a separate socket. The supervisor matches it against the kernel's
+`SO_PEERCRED`, the PID returned by Zygote, and the live process label. It then
+acknowledges the child and observes socket closure. The supervisor reaps its own
+Zygote; the grandchild's exit status is not observed. There is no runtime preload.
+
+This validates Zygote child specialization and Java entry, not Activity launch,
+package installation, system_server boot, graphics, or complete app confinement.
+Category suffixes are exact opaque labels; Shield does not implement SELinux's
+MLS lattice. Cgroup accounting and general VFS ownership/DAC remain separate work.

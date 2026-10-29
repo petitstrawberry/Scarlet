@@ -77,11 +77,13 @@ def main():
     if args.apk_probe:
         args.framework_probe = args.apk_probe
     zygote = None
+    zygote_child = False
     if args.zygote_probe:
         if not args.framework_inputs or not args.runtime_root or not args.stock_inputs:
             parser.error("--zygote-probe requires --framework-inputs, --runtime-root and --stock-inputs")
         zygote = verify_framework_inputs(args.framework_inputs, args.runtime_root, args.stock_inputs)
         args.program = verify_zygote_build(args.zygote_probe, zygote, args.framework_inputs)
+        zygote_child = json.loads((args.zygote_probe / "build.json").read_text())["kind"] == "stock-zygote-child-v1"
     shield_fixture = bool(args.selinux_probe or args.zygote_probe or args.shield_fixture or args.zygote_policy)
     framework = None
     apk = None
@@ -232,6 +234,11 @@ def main():
             bootstrap = stage_framework_inputs(args.framework_inputs, args.runtime_root, args.stock_inputs, android)
             (output / "framework-bootstrap.json").write_text(json.dumps(bootstrap, indent=2) + "\n")
         if zygote:
+            if zygote_child:
+                destination = android / "data/local/tmp/zygote-child.dex"
+                shutil.copy2(args.zygote_probe / "classes.dex", destination)
+                if validate_dex(destination) != json.loads((args.zygote_probe / "build.json").read_text())["child_dex_sha256"]:
+                    raise ValueError("Zygote child DEX changed during staging")
             shutil.copy2(args.zygote_probe / "build.json", output / "zygote-build.json")
             shutil.copy2(args.zygote_probe / "zygote-config.h", output / "zygote-config.h")
             shutil.copy2(args.framework_inputs / "framework-inputs.json", output / "framework-inputs.json")
@@ -336,7 +343,7 @@ def main():
         exits = re.findall(rb"\nSCARLET_ANDROID_PROGRAM_EXIT (-?\d+)\r*\n", data)
         result["program_exit_status"] = int(exits[0]) if len(exits) == 1 else None
         if zygote:
-            result["zygote"] = analyze_zygote(data)
+            result["zygote"] = analyze_zygote(data, child=zygote_child)
             if result["result"] == "PASS" and result["zygote"]["result"] != "PASS":
                 result["result"] = "missing or failed Zygote readiness evidence"
             (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
