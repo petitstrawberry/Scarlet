@@ -420,7 +420,7 @@ impl TransparentExecutor {
         let mut image = task.new_exec_image();
         if explicit_transition {
             *image.credentials.write() = source.credentials.read().clone();
-        *image.execution_restrictions.write() = source.execution_restrictions.read().clone();
+            *image.execution_restrictions.write() = source.execution_restrictions.read().clone();
         }
         image.set_vfs(vfs);
         *image.mount_namespace.write() = mount_namespace;

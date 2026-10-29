@@ -100,7 +100,6 @@ pub trait AbiModule: Send + Sync + 'static {
         Ok(usize::MAX)
     }
 
-
     /// Clone this ABI module into a boxed trait object
     ///
     /// This method enables cloning ABI modules as trait objects,

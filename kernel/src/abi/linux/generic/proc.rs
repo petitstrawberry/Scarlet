@@ -754,6 +754,14 @@ pub fn sys_prctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             if trapframe.get_arg(1) > 1 { errno::to_result(errno::EINVAL) }
             else { abi.keep_caps = trapframe.get_arg(1) == 1; 0 }
         }
+        // Scarlet has no core-dump or ambient ptrace backend. Report the actual
+        // disabled state; only the idempotent disable is supported.
+        3 => 0, // PR_GET_DUMPABLE
+        4 => match arg2 {
+            0 => 0,
+            1 => errno::to_result(errno::EOPNOTSUPP),
+            _ => errno::to_result(errno::EINVAL),
+        },
         21 => super::seccomp::mode(&task), // PR_GET_SECCOMP
         22 => super::seccomp::set_mode(&task, arg2, trapframe.get_arg(2)),
         38 => { // PR_SET_NO_NEW_PRIVS: irreversible, inherited by all exec paths.
@@ -1995,6 +2003,15 @@ mod tests {
                 sys_prctl(&mut abi, &mut frame),
                 errno::to_result(errno::EINVAL)
             );
+        }
+        for (operation, value, expected) in [
+            (3, 0, 0), (4, 0, 0),
+            (4, 1, errno::to_result(errno::EOPNOTSUPP)),
+            (4, 2, errno::to_result(errno::EINVAL)),
+        ] {
+            frame.set_arg(0, operation);
+            frame.set_arg(1, value);
+            assert_eq!(sys_prctl(&mut abi, &mut frame), expected);
         }
         clear_mock_current_task();
     }
