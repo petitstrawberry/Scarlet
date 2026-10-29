@@ -828,9 +828,9 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
             // Wait for any process child owned by a thread in this process.
             // Joinable thread children are reaped only by specific-PID joins.
             for child_pid in get_waitable_process_children(&task) {
-                if task.get_namespace().resolve_local_id(child_pid).is_none() {
+                let Some(child_local_pid) = task.get_namespace().resolve_local_id(child_pid) else {
                     continue;
-                }
+                };
                 let Some(wait_owner) = get_thread_group_wait_owner(&task, child_pid) else {
                     continue;
                 };
@@ -867,12 +867,9 @@ pub fn sys_waitpid(trapframe: &mut Trapframe) -> usize {
                             return usize::MAX;
                         }
                         trapframe.increment_pc_next(&task);
-                        // Return child's PID in caller's namespace (if visible)
-                        if let Some(local) = task.get_namespace().resolve_local_id(child_pid) {
-                            return local;
-                        }
-                        // Not visible in this namespace; keep searching
-                        continue;
+                        // The task reaper can remove namespace mappings after
+                        // wait() succeeds. Return the ID captured before reaping.
+                        return child_local_pid;
                     }
                     Err(error) => match error {
                         WaitError::ChildNotExited(_) | WaitError::NoSuchChild(_) => continue,
@@ -1971,6 +1968,11 @@ pub fn sys_create_namespace(trapframe: &mut Trapframe) -> usize {
     // Never claim isolation for namespace types that are not implemented.
     // Validate before creating any of the requested namespaces.
     if flags & !(NS_CREATE_TASK | NS_CREATE_VFS) != 0 {
+        return SYSCALL_ERROR;
+    }
+
+    // A running thread group cannot be split into inconsistent PID spaces.
+    if flags & NS_CREATE_TASK != 0 && !task.can_replace_exec_image() {
         return SYSCALL_ERROR;
     }
 

@@ -94,14 +94,55 @@ impl TaskNamespace {
         id
     }
 
-    /// Allocate a new namespace-local task ID and register it for a global task.
+    /// Ensure a stable local ID in this namespace and each ancestor.
     ///
-    /// This is the preferred allocator when a task is created or enters this namespace,
-    /// because syscalls need a stable local↔global mapping.
+    /// Ancestor mappings let an outer supervisor address and reap descendants.
+    /// Registering an existing task again preserves every already assigned ID.
     pub fn allocate_task_id_for(&self, global_task_id: usize) -> usize {
-        let local_id = self.allocate_task_id();
-        self.register_mapping(local_id, global_task_id);
-        local_id
+        let mut current = Some(self);
+        let mut own_id = None;
+        while let Some(namespace) = current {
+            let local_id = {
+                // All mapping writers use local-to-global, global-to-local,
+                // then allocator order. No namespace lock spans an ancestor.
+                let mut local_to_global = namespace.local_to_global.lock();
+                let mut global_to_local = namespace.global_to_local.lock();
+                if let Some(id) = global_to_local.get(&global_task_id) {
+                    *id
+                } else {
+                    let id = namespace.allocate_task_id();
+                    local_to_global.insert(id, global_task_id);
+                    global_to_local.insert(global_task_id, id);
+                    id
+                }
+            };
+            own_id.get_or_insert(local_id);
+            current = namespace.parent.as_deref();
+        }
+        own_id.expect("namespace lineage includes itself")
+    }
+
+    fn contains_ancestor(&self, ancestor: &Self) -> bool {
+        let mut current = Some(self);
+        while let Some(namespace) = current {
+            if core::ptr::eq(namespace, ancestor) {
+                return true;
+            }
+            current = namespace.parent.as_deref();
+        }
+        false
+    }
+
+    /// Remove mappings outside a replacement namespace's lineage.
+    /// Shared ancestors retain their original IDs during a namespace change.
+    pub(crate) fn unregister_mappings_except(&self, global_task_id: usize, retained: &Self) {
+        let mut current = Some(self);
+        while let Some(namespace) = current {
+            if !retained.contains_ancestor(namespace) {
+                namespace.unregister_local_mapping(global_task_id);
+            }
+            current = namespace.parent.as_deref();
+        }
     }
 
     /// Register an existing namespace-local ID mapping for a global task ID.
@@ -113,12 +154,20 @@ impl TaskNamespace {
         global_to_local.insert(global_task_id, local_id);
     }
 
-    /// Remove the namespace-local and global mappings for a task.
+    /// Remove the task mappings from this namespace and all ancestors on reap.
     ///
     /// # Arguments
     ///
     /// * `global_task_id` - The global task identity to unregister.
     pub fn unregister_mapping_for_global(&self, global_task_id: usize) {
+        let mut current = Some(self);
+        while let Some(namespace) = current {
+            namespace.unregister_local_mapping(global_task_id);
+            current = namespace.parent.as_deref();
+        }
+    }
+
+    fn unregister_local_mapping(&self, global_task_id: usize) {
         // Match `register_mapping`'s local-to-global then global-to-local order.
         let mut local_to_global = self.local_to_global.lock();
         let mut global_to_local = self.global_to_local.lock();
@@ -230,6 +279,52 @@ mod tests {
 
         // Should return the same instance
         assert_eq!(Arc::as_ptr(root1), Arc::as_ptr(root2));
+    }
+
+    #[test_case]
+    fn descendant_ids_are_stable_visible_to_ancestors_and_hidden_from_siblings() {
+        let root = TaskNamespace::new_root("root".into());
+        let child = TaskNamespace::new_child(root.clone(), "child".into());
+        let nested = TaskNamespace::new_child(child.clone(), "nested".into());
+        let sibling = TaskNamespace::new_child(root.clone(), "sibling".into());
+        assert_eq!(root.allocate_task_id_for(100), 1);
+        assert_eq!(child.allocate_task_id_for(200), 1);
+        assert_eq!(nested.allocate_task_id_for(300), 1);
+        assert_eq!(root.resolve_local_id(300), Some(3));
+        assert_eq!(child.resolve_local_id(300), Some(2));
+        assert_eq!(child.resolve_local_id(100), None);
+        assert_eq!(sibling.resolve_local_id(300), None);
+        assert_eq!(nested.allocate_task_id_for(300), 1);
+        assert_eq!(root.allocate_task_id_for(300), 3);
+        nested.unregister_mapping_for_global(300);
+        for namespace in [&root, &child, &nested] {
+            assert_eq!(namespace.resolve_local_id(300), None);
+        }
+        assert_eq!(root.resolve_global_id(3), None);
+        assert_eq!(child.resolve_global_id(2), None);
+        assert_eq!(nested.resolve_global_id(1), None);
+        assert_eq!(root.resolve_global_id(2), Some(200));
+    }
+
+    #[test_case]
+    fn moving_between_lineages_keeps_only_shared_ancestor_ids() {
+        let root = TaskNamespace::new_root("root".into());
+        let left = TaskNamespace::new_child(root.clone(), "left".into());
+        let right = TaskNamespace::new_child(root.clone(), "right".into());
+        left.allocate_task_id_for(42);
+        let root_id = root.resolve_local_id(42);
+        right.allocate_task_id_for(42);
+        left.unregister_mappings_except(42, &right);
+        assert_eq!(left.resolve_local_id(42), None);
+        assert_eq!(root.resolve_local_id(42), root_id);
+        assert_eq!(right.resolve_local_id(42), Some(1));
+        // Separate test roots both have id 0; ancestry is object identity.
+        let unrelated = TaskNamespace::new_root("unrelated".into());
+        unrelated.allocate_task_id_for(42);
+        right.unregister_mappings_except(42, &unrelated);
+        assert_eq!(right.resolve_local_id(42), None);
+        assert_eq!(root.resolve_local_id(42), None);
+        assert_eq!(unrelated.resolve_local_id(42), Some(1));
     }
 
     #[test_case]

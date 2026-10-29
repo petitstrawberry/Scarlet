@@ -1875,28 +1875,21 @@ impl Task {
         self.namespace.read().clone()
     }
 
-    /// Set the task's namespace.
+    /// Change the task's namespace while preserving IDs in shared ancestors.
     ///
-    /// This allows changing a task's namespace, useful for ABI transitions
-    /// or when moving tasks between namespace contexts.
-    ///
-    /// **Warning**: This method allocates a new namespace-local ID each time
-    /// it's called. Changing a task's namespace multiple times may lead to
-    /// ID conflicts or unexpected behavior. This method should typically only
-    /// be called once during task initialization or ABI transition.
-    ///
-    /// # Arguments
-    /// * `ns` - New namespace for the task
+    /// A live userspace caller must be an exclusive, single-threaded process;
+    /// syscall validation enforces this before changing its identity space.
     pub fn set_namespace(&self, ns: Arc<namespace::TaskNamespace>) {
-        let previous_namespace = {
-            let mut namespace = self.namespace.write();
-            core::mem::replace(&mut *namespace, ns.clone())
-        };
-        if self.id != 0 {
-            previous_namespace.unregister_mapping_for_global(self.id);
-            self.namespace_id
-                .store(ns.allocate_task_id_for(self.id), atomic::Ordering::SeqCst);
+        let mut current = self.namespace.write();
+        if Arc::ptr_eq(&current, &ns) {
+            return;
         }
+        if self.id != 0 {
+            let local_id = ns.allocate_task_id_for(self.id);
+            current.unregister_mappings_except(self.id, &ns);
+            self.namespace_id.store(local_id, atomic::Ordering::SeqCst);
+        }
+        *current = ns;
     }
 
     /// Get the Thread Group ID (TGID)
@@ -5943,6 +5936,35 @@ mod tests {
         assert_ne!(id1, id2);
         assert_ne!(id2, id3);
         assert_ne!(id1, id3);
+    }
+
+    #[test_case]
+    fn entering_child_namespace_preserves_supervisor_pid_across_exec() {
+        reset();
+        let mut outer = super::new_user_task("OuterSupervisor".into(), 0);
+        outer.init();
+        let outer_id = add_task(outer, 0);
+        let mut inner = super::new_user_task("InnerInit".into(), 0);
+        inner.init();
+        let inner_id = add_task(inner, 0);
+        let outer = get_task_by_id(outer_id).unwrap();
+        let inner = get_task_by_id(inner_id).unwrap();
+        assert!(outer.adopt_registered_child(&inner));
+        let outer_namespace = outer.get_namespace();
+        let supervisor_pid = outer_namespace.resolve_local_id(inner_id).unwrap();
+        let child_namespace = super::namespace::TaskNamespace::new_child(outer_namespace.clone(), "android".into());
+        inner.set_namespace(child_namespace.clone());
+        assert_eq!(inner.get_namespace_id(), 1);
+        assert_eq!(outer_namespace.resolve_local_id(inner_id), Some(supervisor_pid));
+        assert_eq!(outer_namespace.resolve_global_id(supervisor_pid), Some(inner_id));
+        assert_eq!(child_namespace.resolve_local_id(outer_id), None);
+        inner.set_namespace(child_namespace.clone());
+        assert_eq!(inner.get_namespace_id(), 1);
+        let image = inner.new_exec_image();
+        assert!(Arc::ptr_eq(&image.get_namespace(), &child_namespace));
+        assert_eq!(image.get_namespace_id(), 1);
+        inner.exit(0);
+        assert_eq!(outer.wait(inner_id).unwrap(), 0);
     }
 
     #[test_case]
