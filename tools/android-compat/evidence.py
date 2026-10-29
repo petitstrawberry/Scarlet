@@ -13,6 +13,28 @@ MAX_PNG = 16 * 1024 * 1024
 MAX_PIXELS = 16 * 1024 * 1024
 
 
+def analyze_libbinder(data):
+    """Require stock setup, actual RPC/lifetime checks, and both process exits."""
+    expected = ["SCARLET_ANDROID_STOCK_START properties", "SCARLET_PROPERTY_SNAPSHOT_OK",
+                "SCARLET_ANDROID_STOCK_EXIT properties 0", "SCARLET_ANDROID_STOCK_START linkerconfig",
+                "SCARLET_ANDROID_STOCK_EXIT linkerconfig 0", "SCARLET_ANDROID_STOCK_OK",
+                "SCARLET_ANDROID_PROGRAM_START", "SCARLET_LIBBINDER_BEGIN",
+                "SCARLET_LIBBINDER_RUNTIME /system/lib64/libbinder.so", "SCARLET_LIBBINDER_SERVER_READY",
+                "SCARLET_LIBBINDER_CONTEXT_OK"]
+    for cycle in (1, 2):
+        expected += [f"SCARLET_LIBBINDER_CYCLE {cycle} {step}" for step in
+                     ("HANDLE_OK", "ROUNDTRIP_OK", "CALL_OK", "STATUS_OK",
+                      "STRONG_ZERO_WEAK_LIVE", "REFS_RELEASED")]
+    expected += ["SCARLET_LIBBINDER_SERVER_EXIT 0", "SCARLET_LIBBINDER_OK",
+                 "SCARLET_ANDROID_PROGRAM_EXIT 0", "SCARLET_ANDROID_PROGRAM_DONE"]
+    lines = data.replace(b"\r", b"").decode("utf-8", errors="replace").splitlines()
+    records = [line for line in lines if line.startswith(
+        ("SCARLET_LIBBINDER_", "SCARLET_ANDROID_PROGRAM_", "SCARLET_ANDROID_STOCK_", "SCARLET_PROPERTY_"))]
+    records = ["SCARLET_PROPERTY_SNAPSHOT_OK" if
+               re.fullmatch(r"SCARLET_PROPERTY_SNAPSHOT_OK [1-9][0-9]*", line) else line for line in records]
+    return {"result": "PASS" if records == expected else "INCOMPLETE", "records": records}
+
+
 def analyze_art(data, stock=False):
     """A Java marker alone, or a launcher exit alone, is not an ART pass."""
     expected = ["SCARLET_ANDROID_ART_START", "SCARLET_ART_BEGIN", "Scarlet ART: 42",

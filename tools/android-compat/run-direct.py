@@ -16,8 +16,9 @@ import shutil
 import subprocess
 import sys
 
-from evidence import analyze_art, analyze_direct
+from evidence import analyze_art, analyze_direct, analyze_libbinder
 from art_inputs import art_launch, validate_dex, verify_art_runtime, sha256
+from libbinder_inputs import verify_libbinder_build
 from stock_art import stage_stock_inputs, verify_stock_inputs
 
 sys.dont_write_bytecode = True
@@ -36,6 +37,7 @@ def main():
     mode.add_argument("--probes", type=Path)
     mode.add_argument("--art-dex", type=Path, help="run only dalvikvm64 -Xint with this classes.dex")
     mode.add_argument("--program", type=Path, help="diagnose this Android executable (exit is not a service-readiness test)")
+    mode.add_argument("--libbinder-probe", type=Path, help="build directory from build-libbinder-probe.py; verify stock-library RPC and lifetime")
     parser.add_argument("--runtime-root", type=Path, help="Android /system and /apex runtime tree")
     parser.add_argument("--linker-debug", action="store_true", help="enable Android LD_DEBUG=3 for ART diagnosis")
     parser.add_argument("--stock-inputs", type=Path, help="verified stock property/APEX overlay for ART or a program")
@@ -44,6 +46,10 @@ def main():
     parser.add_argument("--accel", choices=("tcg", "hvf"), default="tcg")
     parser.add_argument("--binder", action="store_true", help="include Binder RPC and three-process object lifetime checks")
     args = parser.parse_args()
+    if args.libbinder_probe:
+        if not args.runtime_root or not args.stock_inputs:
+            parser.error("--libbinder-probe requires --runtime-root and --stock-inputs")
+        args.program = verify_libbinder_build(args.libbinder_probe, args.runtime_root)
     if (args.art_dex or args.program) and (not args.runtime_root or args.binder):
         parser.error("--art-dex/--program requires --runtime-root and cannot use --binder")
     if args.linker_debug and not (args.art_dex or args.program):
@@ -101,11 +107,14 @@ def main():
         "kernel_sha256": hashlib.sha256(kernel.read_bytes()).hexdigest(),
         "dex_sha256": dex_hash,
         "program_sha256": sha256(args.program) if args.program else None,
+        "libbinder_build_sha256": sha256(args.libbinder_probe / "build.json") if args.libbinder_probe else None,
         "stock_reference_config_sha256": sha256(STOCK_CONFIG) if args.stock_inputs else None,
         "stock_manifest_sha256": sha256(args.stock_inputs / "stock-inputs.json") if args.stock_inputs else None,
         "runtime_sha256": {str(p.relative_to(args.runtime_root)): hashlib.sha256(p.read_bytes()).hexdigest()
                            for p in runtime_files},
     }, indent=2) + "\n")
+    if args.libbinder_probe:
+        shutil.copy2(args.libbinder_probe / "build.json", output / "libbinder-build.json")
     (output / "result.json").write_text('{"result":"PREPARING"}\n')
     staging = output / "staging"
     android = staging / "systems/android-aarch64"
@@ -201,6 +210,17 @@ def main():
         # timeout, never proves that its service interface is usable.
         exits = re.findall(rb"\nSCARLET_ANDROID_PROGRAM_EXIT (-?\d+)\r*\n", data)
         result["program_exit_status"] = int(exits[0]) if len(exits) == 1 else None
+        if args.libbinder_probe:
+            evidence = analyze_libbinder(data)
+            result["libbinder"] = evidence
+            if result["result"] == "PASS" and evidence["result"] != "PASS":
+                result["result"] = "missing or failed libbinder evidence"
+            result["service_readiness"] = ("custom BBinder context and transferred services verified"
+                                           if result["result"] == "PASS" else "not established")
+            result["servicemanager"] = "not tested"
+            (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+            print(f"Stock libbinder probe: {result['result']}")
+            return 0 if result["result"] == "PASS" else 1
         result["service_readiness"] = "not tested"
         if result["result"] == "PASS":
             result["result"] = "EXITED" if len(exits) == 1 else "INCOMPLETE"
