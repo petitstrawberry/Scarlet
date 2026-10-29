@@ -11,6 +11,8 @@ use std::{
     ffi::{CStr, c_char},
     sync::{Mutex, OnceLock},
 };
+mod scene;
+
 use sws_client::{
     Connection, Error, Event, EventReceiver, Handle, SgfxBufferIdentity, SgfxDamageRect,
     SurfaceBuilder,
@@ -37,7 +39,7 @@ pub struct SwsEvent {
     pub height: u32,
 }
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SwsBuffer {
     pub window_id: u32,
     pub buffer_id: u32,
@@ -64,6 +66,7 @@ pub struct SwsGpuEvent {
 
 struct Client {
     connection: Connection,
+    scenes: scene::Scenes,
     gpu_events: BTreeMap<u32, EventReceiver>,
     events: VecDeque<SwsEvent>,
     states: BTreeMap<u32, u32>,
@@ -75,6 +78,25 @@ impl Client {
         self.connection.dispatch()?;
         while let Some(event) = self.connection.poll_event() {
             let event = match event {
+                Event::Error { code } => return Err(Error::ServerError(code)),
+                Event::SceneBufferReleased {
+                    buffer_id,
+                    commit_serial,
+                } => {
+                    self.scenes.release(buffer_id, commit_serial);
+                    continue;
+                }
+                Event::OutputScaleChanged { scale_milli } => {
+                    for &id in self.gpu_events.keys() {
+                        self.events.push_back(SwsEvent {
+                            window_id: id,
+                            kind: 5,
+                            value: scale_milli as i32,
+                            ..Default::default()
+                        });
+                    }
+                    continue;
+                }
                 Event::Input(input) => SwsEvent {
                     window_id: input.surface_id,
                     kind: 1,
@@ -89,7 +111,9 @@ impl Client {
                     width,
                     height,
                 } => {
-                    if !self.gpu_events.contains_key(&surface_id) || self.closing.contains(&surface_id) {
+                    if !self.gpu_events.contains_key(&surface_id)
+                        || self.closing.contains(&surface_id)
+                    {
                         continue;
                     }
                     self.connection.resize_window(surface_id, width, height)?;
@@ -101,6 +125,11 @@ impl Client {
                         ..Default::default()
                     }
                 }
+                Event::WindowCloseRequested { window_id } => SwsEvent {
+                    window_id,
+                    kind: 7,
+                    ..Default::default()
+                },
                 Event::SurfaceDestroyed { surface_id } => {
                     if !self.gpu_events.contains_key(&surface_id) {
                         continue;
@@ -118,6 +147,12 @@ impl Client {
                 } => {
                     if self.gpu_events.contains_key(&surface_id) {
                         self.states.insert(surface_id, state_flags);
+                        self.events.push_back(SwsEvent {
+                            window_id: surface_id,
+                            kind: 6,
+                            value: state_flags as i32,
+                            ..Default::default()
+                        });
                     }
                     continue;
                 }
@@ -155,6 +190,7 @@ fn call(f: impl FnOnce(&mut Client) -> Result<i32, Error>) -> i32 {
         };
         *slot = Some(Client {
             connection,
+            scenes: scene::Scenes::default(),
             gpu_events: BTreeMap::new(),
             events: VecDeque::new(),
             states: BTreeMap::new(),
@@ -270,6 +306,7 @@ pub extern "C" fn sws_window_action(id: u32, action: u32) -> i32 {
             2 => client.connection.minimize_window(id)?,
             3 => client.connection.focus_window(id)?,
             4 => client.connection.maximize_window(id)?,
+            6 => client.connection.request_move_window(id)?,
             _ => return Err(Error::InvalidRequest),
         }
         Ok(0)
@@ -282,10 +319,19 @@ pub unsafe extern "C" fn sws_window_size(id: u32, width: *mut u32, height: *mut 
         return -1;
     }
     call(|client| {
-        let (w, h) = client
+        client.dispatch()?;
+        let (mut w, mut h) = client
             .connection
             .with_surface(id, |s| (s.width(), s.height()))
             .ok_or(Error::SurfaceNotFound)?;
+        if client.scenes.contains(id) {
+            let r = client
+                .scenes
+                .content(id, w, h, client.states.get(&id).copied().unwrap_or(0))
+                .ok_or(Error::InvalidRequest)?;
+            w = r.width;
+            h = r.height;
+        }
         unsafe {
             width.write(w);
             height.write(h);
@@ -303,7 +349,32 @@ pub extern "C" fn sws_window_resize(id: u32, width: u32, height: u32) -> i32 {
         if client.closed.contains(&id) {
             return Err(Error::SurfaceNotFound);
         }
-        client.connection.resize_window(id, width, height)?;
+        let (mut w, mut h) = (width, height);
+        if client.scenes.contains(id) {
+            let (outer_w, outer_h) = client
+                .connection
+                .with_surface(id, |s| (s.width(), s.height()))
+                .ok_or(Error::SurfaceNotFound)?;
+            let r = client
+                .scenes
+                .content(
+                    id,
+                    outer_w,
+                    outer_h,
+                    client.states.get(&id).copied().unwrap_or(0),
+                )
+                .ok_or(Error::InvalidRequest)?;
+            w = width
+                .checked_add(outer_w - r.width)
+                .ok_or(Error::InvalidRequest)?;
+            h = height
+                .checked_add(outer_h - r.height)
+                .ok_or(Error::InvalidRequest)?;
+        }
+        if !valid_size(w, h) {
+            return Err(Error::InvalidRequest);
+        }
+        client.connection.resize_window(id, w, h)?;
         Ok(0)
     })
 }
@@ -360,6 +431,7 @@ pub extern "C" fn sws_window_destroy(id: u32) -> i32 {
         if !client.closed.contains(&id) && !client.closing.contains(&id) {
             client.connection.destroy_surface(id)?;
         }
+        client.scenes.remove(&client.connection, id)?;
         client.gpu_events.remove(&id);
         client.states.remove(&id);
         client.closed.remove(&id);
@@ -373,7 +445,9 @@ pub extern "C" fn sws_window_destroy(id: u32) -> i32 {
 pub extern "C" fn sws_window_destroy_sync(id: u32, timeout_ms: u32) -> i32 {
     call(|client| {
         client.dispatch()?;
-        if !client.gpu_events.contains_key(&id) { return Err(Error::SurfaceNotFound); }
+        if !client.gpu_events.contains_key(&id) {
+            return Err(Error::SurfaceNotFound);
+        }
         if !client.closed.contains(&id) && !client.closing.contains(&id) {
             client.connection.destroy_surface(id)?;
             client.closing.insert(id);
@@ -381,12 +455,15 @@ pub extern "C" fn sws_window_destroy_sync(id: u32, timeout_ms: u32) -> i32 {
         let started = std::time::Instant::now();
         while !client.closed.contains(&id) {
             client.dispatch()?;
-            if client.closed.contains(&id) { break; }
+            if client.closed.contains(&id) {
+                break;
+            }
             if started.elapsed() >= std::time::Duration::from_millis(timeout_ms as u64) {
                 return Err(Error::TimedOut);
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        client.scenes.remove(&client.connection, id)?;
         client.gpu_events.remove(&id);
         client.states.remove(&id);
         client.closed.remove(&id);
@@ -476,6 +553,12 @@ pub extern "C" fn sws_gpu_register(
         }
         let handle =
             unsafe { Handle::from_raw(duplicated as i32) }.map_err(|_| Error::InvalidRequest)?;
+        if client.scenes.contains(buffer.window_id) {
+            client
+                .scenes
+                .register(&client.connection, buffer, width, height, &handle)?;
+            return Ok(0);
+        }
         client
             .connection
             .register_sgfx_buffer(buffer.into(), width, height, &handle)?;
@@ -485,6 +568,17 @@ pub extern "C" fn sws_gpu_register(
 #[unsafe(no_mangle)]
 pub extern "C" fn sws_gpu_commit(buffer: SwsBuffer, serial: u64, width: u32, height: u32) -> i32 {
     call(|client| {
+        if client.scenes.contains(buffer.window_id) {
+            client.scenes.commit(
+                &client.connection,
+                buffer,
+                serial,
+                width,
+                height,
+                client.states.get(&buffer.window_id).copied().unwrap_or(0),
+            )?;
+            return Ok(0);
+        }
         client.connection.commit_sgfx_frame(
             buffer.into(),
             serial,
@@ -501,7 +595,11 @@ pub extern "C" fn sws_gpu_commit(buffer: SwsBuffer, serial: u64, width: u32, hei
 #[unsafe(no_mangle)]
 pub extern "C" fn sws_gpu_destroy(buffer: SwsBuffer) -> i32 {
     call(|client| {
-        client.connection.destroy_sgfx_buffer(buffer.into())?;
+        if client.scenes.contains(buffer.window_id) {
+            client.scenes.destroy(&client.connection, buffer)?;
+        } else {
+            client.connection.destroy_sgfx_buffer(buffer.into())?;
+        }
         Ok(0)
     })
 }
@@ -515,6 +613,12 @@ pub unsafe extern "C" fn sws_gpu_poll(id: u32, out: *mut SwsGpuEvent) -> i32 {
         client.dispatch()?;
         if client.closed.contains(&id) {
             return Err(Error::SurfaceNotFound);
+        }
+        if let Some(event) = client.scenes.poll(id) {
+            unsafe {
+                out.write(event);
+            }
+            return Ok(1);
         }
         let receiver = client.gpu_events.get(&id).ok_or(Error::SurfaceNotFound)?;
         while let Some(event) = receiver.poll_event() {

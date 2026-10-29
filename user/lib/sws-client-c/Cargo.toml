@@ -10,3 +10,6 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 sws-client = { path = "../sws-client", default-features = false, features = ["std"] }
 scarlet-sys = { path = "../scarlet-sys" }
+
+sws-protocol = { path = "../sws-protocol", default-features = false, features = ["std"] }
+scarlet-os = { path = "../scarlet-os", default-features = false, features = ["std"] }
