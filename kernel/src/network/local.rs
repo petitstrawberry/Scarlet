@@ -1296,7 +1296,7 @@ impl SocketControl for LocalSocket {
 
     fn listen(&self, backlog: usize) -> Result<(), SocketError> {
         let mut state = self.state.write();
-        if *state != SocketState::Bound {
+        if !matches!(*state, SocketState::Bound | SocketState::Listening) {
             return Err(SocketError::InvalidOperation);
         }
 
@@ -1690,6 +1690,24 @@ pub fn local_socket_factory(
 
 #[cfg(test)]
 mod tests {
+    #[test_case]
+    fn listen_again_updates_backlog_and_preserves_pending_connections() {
+        use crate::network::socket::{SocketControl, SocketObject};
+        let socket =
+            super::LocalSocket::new(super::SocketType::Stream, super::SocketProtocol::Default);
+        *socket.state.write() = super::SocketState::Bound;
+        assert!(socket.listen(3).is_ok());
+        let queued = alloc::sync::Arc::new(super::LocalSocket::new(
+            super::SocketType::Stream,
+            super::SocketProtocol::Default,
+        ));
+        socket.backlog.write().push(queued.clone());
+        assert!(socket.listen(10).is_ok());
+        assert_eq!(*socket.max_backlog.read(), 10);
+        assert_eq!(socket.backlog.read().len(), 1);
+        assert_eq!(socket.accept().unwrap().state(), queued.state());
+        assert!(socket.backlog.read().is_empty());
+    }
     use super::*;
 
     #[test_case]

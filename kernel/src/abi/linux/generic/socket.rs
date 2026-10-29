@@ -1485,12 +1485,12 @@ fn sendmsg_for_task(
                 unsafe { core::ptr::read_unaligned(cmsg_bytes.as_ptr() as *const LinuxCmsghdr) };
             if cmsg.cmsg_level == SOL_SOCKET && cmsg.cmsg_type == SCM_RIGHTS {
                 if cmsg.cmsg_len > msg.msg_controllen as usize
-                    || cmsg.cmsg_len < size_of::<LinuxCmsghdr>() + size_of::<i32>()
+                    || cmsg.cmsg_len < size_of::<LinuxCmsghdr>()
                 {
                     return errno::to_result(errno::EINVAL);
                 }
                 let data_len = cmsg.cmsg_len.saturating_sub(size_of::<LinuxCmsghdr>());
-                if data_len == 0 || !data_len.is_multiple_of(size_of::<i32>()) {
+                if !data_len.is_multiple_of(size_of::<i32>()) {
                     return errno::to_result(errno::EINVAL);
                 }
                 let fd_count = data_len / size_of::<i32>();
