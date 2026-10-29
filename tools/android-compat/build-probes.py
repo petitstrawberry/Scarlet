@@ -26,7 +26,7 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     flags = [str(compiler), "-O2", "-g", "-Wall", "-Wextra", "-Werror", "-fno-emulated-tls"]
     probe_sources = [str(SOURCE / name) for name in
-                     ("bionic-probe.c", "binder-probe.c", "binder-object-probe.c", "credentials-probe.c", "seccomp-probe.c")]
+                     ("bionic-probe.c", "binder-probe.c", "binder-object-probe.c", "credentials-probe.c", "seccomp-probe.c", "process-scope-probe.c")]
     commands = [
         flags + ["-static"] + probe_sources + ["-ldl", "-o", str(output / "bionic-static")],
         flags + probe_sources + ["-ldl", "-o", str(output / "bionic-dynamic")],
@@ -35,7 +35,7 @@ def main():
     for command in commands:
         subprocess.run(command, check=True)
     names = ["bionic-static", "bionic-dynamic", "libbionic-probe.so"]
-    metadata = {"api": args.api, "ndk": (args.ndk / "source.properties").read_text(),
+    metadata = {"sources_sha256": {str(Path(name).name): hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in probe_sources}, "api": args.api, "ndk": (args.ndk / "source.properties").read_text(),
                 "commands": commands,
                 "sha256": {name: hashlib.sha256((output / name).read_bytes()).hexdigest() for name in names}}
     (output / "build.json").write_text(json.dumps(metadata, indent=2) + "\n")
