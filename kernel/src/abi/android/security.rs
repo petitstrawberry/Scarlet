@@ -43,6 +43,42 @@ const SERVICE_PERMISSIONS: u32 = (ADD | FIND | LIST) as u32;
 const SELINUX_MAGIC: i64 = 0xf97c_ff8c;
 const PAGE: usize = crate::environment::PAGE_SIZE;
 
+// Categories are retained as part of an exact, explicitly registered label.
+// This does not advertise an MLS lattice or imply dominance between labels.
+fn valid_context_name(name: &str) -> bool {
+    let parts: Vec<_> = name.split(':').collect();
+    if !(4..=5).contains(&parts.len())
+        || parts[3] != "s0"
+        || parts[..3]
+            .iter()
+            .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+    {
+        return false;
+    }
+    if parts.len() == 5 {
+        let mut previous = None;
+        for category in parts[4].split(',') {
+            let Some(number) = category.strip_prefix('c') else {
+                return false;
+            };
+            if number.is_empty()
+                || (number.len() > 1 && number.starts_with('0'))
+                || !number.bytes().all(|b| b.is_ascii_digit())
+            {
+                return false;
+            }
+            let Ok(value) = number.parse::<u16>() else {
+                return false;
+            };
+            if value > 1023 || previous.is_some_and(|p| p >= value) {
+                return false;
+            }
+            previous = Some(value);
+        }
+    }
+    true
+}
+
 fn fs_error(kind: FileSystemErrorKind) -> FileSystemError {
     FileSystemError::new(kind, "Android security filesystem")
 }
@@ -73,6 +109,7 @@ enum Content {
     Status,
     Access,
     Context,
+    Current(Weak<Task>),
 }
 struct Node {
     id: u64,
@@ -115,14 +152,7 @@ impl SecurityFs {
     fn new(policy: Arc<Policy>) -> Result<Arc<Self>, FileSystemError> {
         // Context tokens are an Android encoding constraint, not a native
         // policy rule. No policy may silently collapse two native identities.
-        if policy.labels().any(|(_, name)| {
-            let parts: Vec<_> = name.split(':').collect();
-            parts.len() != 4
-                || parts[3] != "s0"
-                || parts[..3].iter().any(|part| {
-                    part.is_empty() || !part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                })
-        }) {
+        if policy.labels().any(|(_, name)| !valid_context_name(name)) {
             return Err(fs_error(FileSystemErrorKind::InvalidData));
         }
         let status = Arc::new(
@@ -428,6 +458,27 @@ impl StreamOps for SecurityFile {
         if buffer.is_empty() || buffer.len() > 4095 {
             return Err(StreamError::InvalidArgument);
         }
+        if let Content::Current(owner) = &self.content {
+            let caller = crate::task::mytask().ok_or(StreamError::PermissionDenied)?;
+            let owner = owner.upgrade().ok_or(StreamError::PermissionDenied)?;
+            if !core::ptr::eq(&*caller, &*owner) {
+                return Err(StreamError::PermissionDenied);
+            }
+            let text = core::str::from_utf8(buffer).map_err(|_| StreamError::InvalidArgument)?;
+            let text = text.strip_suffix('\0').unwrap_or(text);
+            let target = self
+                .policy
+                .label_id(text)
+                .ok_or(StreamError::InvalidArgument)?;
+            let mut state = self.state.lock();
+            if state.written || state.position != 0 {
+                return Err(StreamError::InvalidArgument);
+            }
+            crate::shield::syscall::transition(&caller, &self.policy, target)
+                .map_err(|_| StreamError::PermissionDenied)?;
+            state.written = true;
+            return Ok(buffer.len());
+        }
         let response = match self.content {
             Content::Access => decision(&self.policy, buffer)?,
             Content::Context => {
@@ -564,9 +615,10 @@ pub(super) fn mmap(object: &KernelObject, mapping: &FileMapping) -> Option<usize
 pub(super) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> Option<usize> {
     let pid = path.strip_prefix("/proc/")?.strip_suffix("/attr/current")?;
     let result = (|| -> Result<usize, usize> {
-        if flags & 3 != 0 || flags & !(0x80000 | 0x800 | 0x20000) != 0 {
+        if flags & 3 == 3 || flags & !(0x80000 | 0x800 | 0x20000 | 3) != 0 {
             return Err(errno::EACCES);
         }
+        let writable = flags & 3 != 0;
         let target = if matches!(pid, "self" | "thread-self") {
             None
         } else {
@@ -597,14 +649,28 @@ pub(super) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> O
             return Err(errno::EACCES);
         }
         let bytes = format!("{}\0", subject.name()).into_bytes();
+        let content = if writable {
+            if !core::ptr::eq(target.as_deref().unwrap_or(task), task) || !caller.can_transition() {
+                return Err(errno::EACCES);
+            }
+            let current = crate::task::mytask().ok_or(errno::ESRCH)?;
+            if !core::ptr::eq(&*current, task) {
+                return Err(errno::EACCES);
+            }
+            let owner = crate::sched::scheduler::get_task_by_id(current.get_id()).ok_or(errno::ESRCH)?;
+            if !core::ptr::eq(owner.as_ref(), task) { return Err(errno::ESRCH); }
+            Content::Current(Arc::downgrade(&owner))
+        } else {
+            Content::Text(bytes.clone())
+        };
         let file = Arc::new(SecurityFile {
-            content: Content::Text(bytes.clone()),
+            content,
             policy: subject.policy().clone(),
             status: None,
             entries: Vec::new(),
-            metadata: metadata(1, bytes.len(), false, false),
-            readable: true,
-            writable: false,
+            metadata: metadata(1, bytes.len(), false, writable),
+            readable: flags & 3 != 1,
+            writable,
             state: IrqSpinLock::new(FileState {
                 bytes,
                 position: 0,
@@ -743,8 +809,106 @@ mod tests {
         assert!(!file.supports_permission_changes());
         assert!(file.write(b"0").is_err());
         assert!(
-            SecurityFs::new(Policy::new(vec![(1, "u:r:caller:s0:c1".into())], vec![]).unwrap())
+            SecurityFs::new(Policy::new(vec![(1, "u:r:caller:s1:c1".into())], vec![]).unwrap())
                 .is_err()
         );
+    }
+    #[test_case]
+    fn android_context_categories_are_exact_canonical_labels_without_implicit_grants() {
+        assert!(valid_context_name("u:r:app:s0:c1,c256,c512,c768"));
+        for invalid in [
+            "u:r:app:s0:",
+            "u:r:app:s0:c1,c1",
+            "u:r:app:s0:c2,c1",
+            "u:r:app:s0:c01",
+            "u:r:app:s0:c1024",
+            "u:r:app:s0:c1.c9",
+            "u:r:app:s0:c+1",
+            "u:r:app:s1",
+        ] {
+            assert!(!valid_context_name(invalid));
+        }
+        let p = Policy::new(
+            vec![
+                (1, "u:r:app:s0:c1,c256,c512,c768".into()),
+                (2, "u:r:app:s0:c2,c256,c512,c768".into()),
+            ],
+            vec![],
+        )
+        .unwrap();
+        assert!(SecurityFs::new(p.clone()).is_ok());
+        assert!(!p.subject(1).unwrap().permits(&p.subject(2).unwrap(), 1, 1));
+    }
+    #[test_case]
+    fn android_setcon_checks_live_subject_uid_policy_owner_and_single_thread_at_write() {
+        use crate::shield::{
+            TransitionRule,
+            identity::{Identities, Principal},
+        };
+        use crate::task::{
+            CloneFlags, CloneFlagsDef, TaskType, clear_mock_current_task, set_mock_current_task,
+        };
+        let p = Policy::with_transitions(
+            vec![
+                (1, "u:r:zygote:s0".into()),
+                (2, "u:r:app:s0:c1,c256,c512,c768".into()),
+            ],
+            vec![],
+            vec![TransitionRule {
+                source: 1,
+                target: 2,
+                principal: Principal(10001),
+            }],
+        )
+        .unwrap();
+        let task = Arc::new(Task::new("transition".into(), 1, TaskType::User));
+        *task.security_subject.write() = Some(p.subject(1).unwrap());
+        let mut abi = LinuxAbi::default();
+        set_mock_current_task(task.clone());
+        let file = SecurityFile {
+            content: Content::Current(Arc::downgrade(&task)), policy:p.clone(), status:None,
+            metadata:metadata(1,0,false,true), entries:Vec::new(), readable:false, writable:true,
+            state:IrqSpinLock::new(FileState {bytes:Vec::new(),position:0,written:false}),
+        };
+        let text = b"u:r:app:s0:c1,c256,c512,c768\0";
+        assert!(file.write(text).is_err()); // Open does not freeze credentials.
+        let child = Arc::new(task.clone_task(CloneFlags::default()).unwrap());
+        child
+            .credentials
+            .write()
+            .set_principals(Identities::all(Principal(10001)))
+            .unwrap();
+        set_mock_current_task(child.clone());
+        assert!(file.write(text).is_err()); // An inherited/transferred descriptor is not self.
+        set_mock_current_task(task.clone());
+        task.credentials
+            .write()
+            .set_principals(Identities::all(Principal(10001)))
+            .unwrap();
+        assert!(crate::shield::syscall::transition(&task, &policy(), 2).is_err());
+        let mut flags = CloneFlags::default();
+        flags.set(CloneFlagsDef::Vm);
+        let sharing = task.clone_task(flags).unwrap();
+        assert!(file.write(text).is_err());
+        drop(sharing);
+        assert_eq!(task.security_subject.read().as_ref().unwrap().label(), 1);
+        assert_eq!(file.write(text).unwrap(), text.len());
+        assert_eq!(task.security_subject.read().as_ref().unwrap().label(), 2);
+        assert_eq!(child.security_subject.read().as_ref().unwrap().label(), 1);
+        assert!(file.write(text).is_err());
+        assert_eq!(
+            open(&mut abi, &task, "/proc/self/attr/current", 1),
+            Some(errno::to_result(errno::EACCES))
+        );
+        assert_eq!(
+            task.new_exec_image()
+                .security_subject
+                .read()
+                .as_ref()
+                .unwrap()
+                .label(),
+            2
+        );
+        clear_mock_current_task();
     }
 }
