@@ -1,0 +1,82 @@
+{
+  "date": "2026-10-29",
+  "result": "PASS",
+  "revisions": {
+    "native_shield": "3f89e1ea8478ad63db234bd9c6217a03dd7752a0",
+    "android_adapter": "9265e9f2e8075fa43f42ebe49618660c76898e2c",
+    "probe_and_evidence": "20e0a9698a8b786fed3facbc0239a5f4f97ca9ab",
+    "validated_head": "05d55b030039339249580cc1fb78d88689f08a57"
+  },
+  "kernel_sha256": "a0c3f8820cafbb674d31232ed00957c502dac58c42a67307339a858a20908393",
+  "probe_sha256": "ad16c05753bfea1853638c639eb4b0e77adb2dd691ebd7dbb3e156dbd1f2064a",
+  "validation": {
+    "acceleration": "HVF",
+    "kernel_tests": 1639,
+    "bionic_cases": 18,
+    "host_tests": 35,
+    "riscv_release_check": "PASS",
+    "stock_libselinux": "PASS",
+    "stock_libbinder": "PASS"
+  },
+  "coverage": [
+    "Native immutable policies reject invalid inputs and deny unknown labels, classes, bits and cross-policy identities; query-only capabilities cannot create policies or assign subjects",
+    "Subjects survive Environment spawn, fork and exec; management handles are close-on-exec",
+    "Unmodified Android 13 libselinux loads from /system/lib64/libselinux.so and queries enabled/enforcing status with the readonly shared status page",
+    "Stock selinux_check_access allows add/find/list grants, returns EACCES for denied grants on three repeated AVC lookup cycles, and rejects unknown context/class/permission",
+    "Process-label writes, permissive writes, policy loading, writable status mmap and mprotect upgrade are rejected",
+    "Kernel tests exercise per-open access transactions, directory records, policy-scoped filesystem opens, Binder cross-policy confinement and relabel rejection",
+    "Unmodified libbinder retains its two object transfer/lifetime cycles, unlink, death callback, clear completion and DEAD_OBJECT regression checks",
+    "18 Bionic cases including both static and dynamic three-process Binder object probes"
+  ],
+  "limitations": [
+    "Service authorization query foundation only; stock servicemanager add/find and Android framework startup are not tested",
+    "No Android binary policy, VFS MAC, Unix credential enforcement, transitions, MLS categories, permissive mode or live policy updates; security.selinux xattrs remain opaque metadata",
+    "Binder policy confinement does not implement SELinux Binder call/transfer permission classes or security-context transaction records",
+    "Existing Binder FD transfer, weak promotion, one-way/nested calls and automatic worker-pool limits remain; endpoint lifetime still follows the open-file description",
+    "ART was unchanged and not rerun; no direct APK execution claim"
+  ],
+  "reproduction": {
+    "build": "cargo scarlet build --release --project projects/aarch64-limine-crosvm (inside nix develop; BSP resolution is preserved in bsp-build.Cargo.lock)",
+    "kernel": "CARGO_TARGET_AARCH64_UNKNOWN_NONE_ELF_RUNNER=\"python3 <checkpoint>/run-kernel-hvf.py <repository>\" cargo test --target targets/aarch64-unknown-none-elf.json (from kernel/, inside nix develop)",
+    "riscv": "cargo check --release --lib --target targets/riscv64gc-unknown-none-elf.json (from kernel/, inside nix develop)",
+    "runtime": "See README.md Shield section, the per-run commands.json and inputs.json, build metadata and the exact native shield-fixture.rs. All three runs use the same kernel hash; the Bionic run explicitly includes --binder."
+  },
+  "sha256": {
+    "art-runtime.json": "8490e2c89682565a1839b4ec45ae61648c7b56b0bed4b938821b5b8c7fcd1316",
+    "bionic-hvf/commands.json": "d4bad3c9bd0361d0f94fa7f826612ac31ce8476d69e9185d98042490236fd827",
+    "bionic-hvf/image-build.log": "250bc2a9d73d2c781f0a4df0062fd31f8a4273784877e36e36649eb44e63314b",
+    "bionic-hvf/inputs.json": "e144e4e0bde11be56722401257382f9f052887b6571da804c438c9b9218e643a",
+    "bionic-hvf/probes.json": "9742890417dbd16a0a157094c139157c6e1151d36a17cce04b0cc4f51c730460",
+    "bionic-hvf/result.json": "828601566b99415a56a0e26b2122b380dde2502518c69c0e068a09786dbb5c9e",
+    "bionic-hvf/rootfs-build.log": "40659a33005b5748b5af1c4ffc1d0d06c438782d2713cdd080ca85e94e905461",
+    "bionic-hvf/runner.log": "7443ebcfa156a5a7d94b9a70c268d7b44a655adcda14bf40665d6de4f82db3cb",
+    "bionic-hvf/serial.log": "ff312fd654258e37c065646505b51ef6283494b74f934eb6883926caaefa76fd",
+    "bsp-build.Cargo.lock": "10482fa0f39758edcd7735c7dbf0ab3e1919b851a9e4a03cbf05302382d64770",
+    "build.log": "10496919f3fefaed1b59f5023fd61fd4f1df198fce8ef2714aa3f566d2de620b",
+    "host-tests.log": "a21d898a2770eb500f083f0eb1f4c7848a4c8ba9b72733a1adfc0fcbb7ba5017",
+    "kernel-tests-hvf.log": "0222704dc7bdb66ee11f3d2ec9a25e5ddf4c4100f8adbad1ff85804c633dbfe1",
+    "libbinder-hvf/commands.json": "57ecaeba333ddf97e8a92f23341a47ef8a68b09ab43a58344889f2d0dd991e13",
+    "libbinder-hvf/image-build.log": "0a3cb355086ec35b2f185a07487ad642d2b6bf6ab5fdeb04067796eff0df5fb7",
+    "libbinder-hvf/inputs.json": "abde2988c48655308ca9f019a1d355a512a5f773c46e1eefb34de419e9983ab9",
+    "libbinder-hvf/libbinder-build.json": "ba0ff24c1678becf7e846467c6efed493f02716f023f86499e4b9ac26097c310",
+    "libbinder-hvf/program-launch.json": "a1bbe1eff8e6e8f60ba27b31e820c758f4ed63c67e55303e7ddc3d860b1d7162",
+    "libbinder-hvf/result.json": "139d74fcc90346765bd65ba0b47d5cae17190c509cce74e14a4c820a2d56109d",
+    "libbinder-hvf/rootfs-build.log": "76c4cb79da3dca9d06dd26c749097217eaa3c7695edb1c90d1380c2bbe404ee0",
+    "libbinder-hvf/runner.log": "0cf4d3f806a7928d7c793a0d8c8056abdbc61833c8cb7365a1c984419fcc2093",
+    "libbinder-hvf/serial.log": "640c4436e9c61cdbd2db8efa3b472f196c29004b2bfff13d7700d6a25b434e6a",
+    "probe-build.log": "edc3e53793409db22bf1ee7fdbb2360a5a32bf0576a503d8b4ce9f535a1f034a",
+    "riscv-check.log": "3cdd33cbe8eef59aa3920a10d6bb4467bf32311f3c1fc786b19e80c379598503",
+    "run-kernel-hvf.py": "0e08ec864c22cb4048da8f8714812cb48d160bcd9f89bde7507b77e482f9539d",
+    "selinux-hvf/commands.json": "fa3641cfdb4ec1ae861c6d31bd48455413e06df2110baf14983ea708324da8eb",
+    "selinux-hvf/image-build.log": "937b62650313858043dece84b72e38143e618a2759460ba36aa25d3dbc342f4c",
+    "selinux-hvf/inputs.json": "7be9bfae2ae2ba28e30fb8495d5b44922f2bc41905e6976b5ab1ba24650969f6",
+    "selinux-hvf/program-launch.json": "a1bbe1eff8e6e8f60ba27b31e820c758f4ed63c67e55303e7ddc3d860b1d7162",
+    "selinux-hvf/result.json": "aa64f1c050ef97ffa272b7df77d20542186ce8237b14b8b2a3fdf1ae9f956459",
+    "selinux-hvf/rootfs-build.log": "25faebc4e8f78742c22307cdae5bcafea14509b83e803b4801cf8457a0294ec7",
+    "selinux-hvf/runner.log": "026ee7cd48afe81414d30890e78d96806aff5059e97969044e4dfd21c77bdbaa",
+    "selinux-hvf/selinux-build.json": "b86707df1bca7c6e89ab686b79310b10d7c1dbb4ec1624a452f2cf737b4e6e2c",
+    "selinux-hvf/serial.log": "dd783bcb028327f9b5ad03602366bb3662941ce78e355ec59dc3d7d8e516db8d",
+    "shield-fixture.rs": "8f7a8950dbed1ec04ebba00d4b437eb7d225ffc565b85ed2881b53e5212d8b97",
+    "stock-inputs.json": "23e5877f6373efadf2fe8862efb04fbfbf54c9ec28d0b672494e7022e96424be"
+  }
+}

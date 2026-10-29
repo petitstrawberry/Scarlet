@@ -1,0 +1,19 @@
+warning: Git tree '/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet' is dirty
+...................................
+----------------------------------------------------------------------
+Ran 35 tests in 2.058s
+
+OK
+ART direct execution: missing or failed child evidence
+ART direct execution: PASS
+ART direct execution: missing or failed child evidence
+ART direct execution: PASS
+Android program diagnostic: EXITED; exit=0
+Android program diagnostic: EXITED; exit=127
+Android program diagnostic: timeout; exit=None
+Stock libbinder probe: PASS
+Stock libbinder probe: missing or failed libbinder evidence
+Stock libbinder probe: timeout
+Stock libselinux / Shield probe: PASS
+Stock libselinux / Shield probe: missing or failed Shield evidence
+Stock libselinux / Shield probe: timeout

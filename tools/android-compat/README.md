@@ -367,7 +367,7 @@ not a binderfs implementation and are not yet represented by normal VFS nodes.
 
 **Not implemented:** FD/buffer-object transfer, weak-to-strong promotion,
 one-way and nested calls, automatic thread-pool
-growth, priority inheritance, security-context records and SELinux policy.
+growth, priority inheritance, security-context records and full SELinux policy.
 Unsupported transaction features return errors. Stock libbinder serves a custom
 `BBinder` probe through this adapter; stock servicemanager is not yet usable.
 The separate minimal ART/Java fixture passes; direct APK execution remains unverified.
@@ -384,7 +384,7 @@ The unmodified SDK `servicemanager` reaches startup but exits with status 127;
 a separate diagnostic run redirecting Android logs to stderr identifies
 `selinux_status_open(true)` as the failing check. It does not reach a usable
 service manager. Stock libbinder is now tested separately below; SELinux
-compatibility remains a separate design task.
+compatibility is now being built on [Shield](../../docs/security/shield.md).
 
 `prepare-servicemanager.py` extracts the executable from the same pinned SDK
 archive as `prepare-art.py` and checks its library dependencies against the
@@ -418,7 +418,7 @@ Only the active recipient receives a callback, exactly once; processing
 clear completion restores the proxy's measured weak-reference count. Further
 transactions and subscriptions return `DEAD_OBJECT`, and polling finds no
 duplicate notification. This covers the death-notification prerequisite for
-stock servicemanager's `addService`; its SELinux permission model remains open.
+stock servicemanager's `addService`; its authorization adapter is described below.
 
 The builder downloads AOSP Android 13 headers at fixed Git commits and verifies
 their complete regular-file content maps. It links the stock platform C++ ABI
@@ -566,3 +566,31 @@ and tagged fault-address normalization, RPC cancellation/lifetime/bounds,
 Binder environment/device isolation, receive-buffer validation and Android ELF
 identification (including malformed/truncated inputs). The final AArch64 suite
 passes 1,623 tests on HVF; the RISC-V kernel library also compiles.
+
+### Shield and stock libselinux
+
+[Shield](../../docs/security/shield.md) supplies native policies and process
+labels independently of Environment/View/Namespace. The fixture explicitly
+creates a policy in userspace and mounts the Android query adapter; ordinary
+Android environments do not automatically acquire a policy.
+
+The [Shield checkpoint](checkpoints/2026-10-29-shield/verification.json) exercises
+unmodified Android 13 `libselinux.so`: real allowed and denied `service_manager`
+queries, unknown-label/class/permission rejection, refusal of permissive and
+process-label writes, an immutable mapped status page, and label inheritance
+through fork/exec. Query-only policy handles cannot assign a different label.
+This does not yet certify stock servicemanager registration/lookup or full
+SELinux policy enforcement.
+
+From `nix develop`, using the same NDK, prepared runtime and stock overlay:
+
+```sh
+python3 tools/android-compat/build-selinux-probe.py \
+  --ndk "$ANDROID_NDK_HOME" --runtime-root .build/android-compat/art-runtime \
+  --output .build/android-compat/selinux-probe
+python3 tools/android-compat/run-direct.py \
+  --kernel path/to/scarlet.elf --selinux-probe .build/android-compat/selinux-probe \
+  --runtime-root .build/android-compat/art-runtime \
+  --stock-inputs .build/android-compat/stock-inputs \
+  --output .build/android-compat/shield-run --accel hvf
+```
