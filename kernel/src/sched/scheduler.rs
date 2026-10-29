@@ -651,24 +651,41 @@ impl TaskPool {
         task.vm_manager.set_owner_task_id_if_unset(task_id);
         let task = Arc::new(task);
 
-        let mut tasks = self.tasks.lock();
-        match task_type {
-            crate::task::TaskType::User => {
-                tasks.pending_user_tasks -= 1;
-                tasks.active_user_tasks += 1;
+        let scope = task.process_scope.read().clone();
+        let publish = || {
+            let mut tasks = self.tasks.lock();
+            match task_type {
+                crate::task::TaskType::User => {
+                    tasks.pending_user_tasks -= 1;
+                    tasks.active_user_tasks += 1;
+                }
+                crate::task::TaskType::Kernel => {
+                    tasks.pending_kernel_tasks -= 1;
+                    tasks.active_kernel_tasks += 1;
+                }
             }
-            crate::task::TaskType::Kernel => {
-                tasks.pending_kernel_tasks -= 1;
-                tasks.active_kernel_tasks += 1;
+            tasks.tasks.insert(
+                task_id,
+                TaskEntry {
+                    generation: task_id,
+                    task: task.clone(),
+                },
+            );
+        };
+        if let Some(scope) = scope {
+            if let Err(error) = scope.publish(&task, publish) {
+                // No task was published. Undo reservation accounting and PID mappings.
+                {
+                    let mut tasks = self.tasks.lock();
+                    match task_type {
+                        crate::task::TaskType::User => tasks.pending_user_tasks -= 1,
+                        crate::task::TaskType::Kernel => tasks.pending_kernel_tasks -= 1,
+                    }
+                }
+                task.get_namespace().unregister_mapping_for_global(task_id);
+                return Err(error);
             }
-        }
-        tasks.tasks.insert(
-            task_id,
-            TaskEntry {
-                generation: task_id,
-                task,
-            },
-        );
+        } else { publish(); }
         Ok(task_id)
     }
 
@@ -781,6 +798,9 @@ impl TaskPool {
         for retired_task in reclaimable {
             let task_id = retired_task.task_id;
             let trace_fork_exit = DEBUG_FORK_TRACE_LOGGING && is_fork_trace_task(task_id);
+            if let Some(scope) = retired_task.task.lifecycle_scope() {
+                scope.retire(task_id);
+            }
             retired_task
                 .task
                 .get_namespace()

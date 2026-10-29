@@ -4,6 +4,7 @@
 
 pub mod elf_loader;
 pub mod namespace;
+pub mod process_scope;
 pub mod syscall;
 
 extern crate alloc;
@@ -881,6 +882,7 @@ pub struct Task {
     /// Granted only to the initial bootstrap process; never inherited by clone.
     pub bootstrap_environment: AtomicBool,
     /// ABI-neutral identity, inherited across clone/spawn/exec; assignment requires authority.
+    pub(crate) process_scope: IrqRwSpinLock<Option<Arc<process_scope::ProcessScope>>>,
     pub(crate) security_subject: IrqRwSpinLock<Option<crate::shield::Subject>>,
     pub(crate) credentials: IrqRwSpinLock<crate::shield::identity::Credentials>,
     pub(crate) execution_restrictions: IrqRwSpinLock<crate::shield::execution::Restrictions>,
@@ -1138,6 +1140,7 @@ impl Task {
             mount_namespace: IrqRwSpinLock::new(crate::fs::vfs_v2::namespace::MountNamespace::new()),
             execution_environment: IrqRwSpinLock::new(None),
             bootstrap_environment: AtomicBool::new(false),
+            process_scope: IrqRwSpinLock::new(None),
             security_subject: IrqRwSpinLock::new(None),
             credentials: IrqRwSpinLock::new(crate::shield::identity::Credentials::bootstrap()),
             execution_restrictions: IrqRwSpinLock::new(crate::shield::execution::Restrictions::default()),
@@ -1867,6 +1870,10 @@ impl Task {
         (namespace_id != 0).then_some(namespace_id)
     }
 
+    pub(crate) fn lifecycle_scope(&self) -> Option<Arc<process_scope::ProcessScope>> {
+        self.process_scope.read().clone()
+    }
+
     /// Get the task's namespace.
     ///
     /// # Returns
@@ -2403,6 +2410,11 @@ impl Task {
             return true;
         }
 
+        if let Some(reaper) = child.lifecycle_scope().and_then(|scope| scope.reaper_for(child))
+            && reaper.id != self.id && reaper.try_adopt_child(child, None) {
+            return true;
+        }
+
         if self.id != INIT_TASK_ID
             && let Some(init) = get_task_by_id(INIT_TASK_ID)
         {
@@ -2433,13 +2445,7 @@ impl Task {
                 return true;
             }
 
-            if self.id != INIT_TASK_ID
-                && let Some(init) = get_task_by_id(INIT_TASK_ID)
-            {
-                return init.try_adopt_child(child, None);
-            }
-
-            return false;
+            return self.adopt_registered_child(child);
         }
 
         self.adopt_registered_child(child)
@@ -2481,22 +2487,17 @@ impl Task {
                 continue;
             }
 
+            let scoped_reaper = child.lifecycle_scope().and_then(|scope| scope.reaper_for(&child));
+            let leader = reaper.as_ref().filter(|r| self.thread_group_id != self.id && r.id == self.thread_group_id).cloned();
+            let host_init = if self.id != INIT_TASK_ID { get_task_by_id(INIT_TASK_ID) } else { None };
             let mut new_parent_id = None;
-            if let Some(reaper) = &reaper
-                && reaper.try_adopt_child(&child, Some(self.id))
-            {
-                new_parent_id = Some(reaper.get_id());
-            }
-
-            if new_parent_id.is_none()
-                && self.id != INIT_TASK_ID
-                && reaper
-                    .as_ref()
-                    .is_none_or(|reaper| reaper.id != INIT_TASK_ID)
-                && let Some(init) = get_task_by_id(INIT_TASK_ID)
-                && init.try_adopt_child(&child, Some(self.id))
-            {
-                new_parent_id = Some(INIT_TASK_ID);
+            // A leader racing exit may reject adoption; still try the explicit
+            // scope reaper before the legacy host fallback.
+            for candidate in [leader, scoped_reaper, host_init].into_iter().flatten() {
+                if candidate.try_adopt_child(&child, Some(self.id)) {
+                    new_parent_id = Some(candidate.get_id());
+                    break;
+                }
             }
 
             if let Some(reaper_id) = new_parent_id {
@@ -3144,6 +3145,7 @@ impl Task {
         }
         *child.execution_environment.write() = self.execution_environment.read().clone();
         *child.mount_namespace.write() = self.mount_namespace.read().clone();
+        *child.process_scope.write() = self.process_scope.read().clone();
         *child.security_subject.write() = self.security_subject.read().clone();
         *child.credentials.write() = self.credentials.read().clone();
         *child.execution_restrictions.write() = self.execution_restrictions.read().clone();
@@ -3669,6 +3671,7 @@ impl Task {
             .namespace_id
             .store(self.try_get_namespace_id().unwrap_or(0), Ordering::Relaxed);
         image.thread_group_id = self.thread_group_id;
+        *image.process_scope.write() = self.process_scope.read().clone();
         *image.security_subject.write() = self.security_subject.read().clone();
         *image.credentials.write() = self.credentials.read().clone();
         *image.execution_restrictions.write() = self.execution_restrictions.read().clone();

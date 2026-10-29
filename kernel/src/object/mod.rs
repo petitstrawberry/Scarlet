@@ -30,6 +30,7 @@ use crate::hypervisor;
 /// Note: Debug is not implemented for KernelObject because it contains
 /// trait objects that may not implement Debug. Use introspection methods instead.
 pub enum KernelObject {
+    ProcessScope(Arc<crate::task::process_scope::ProcessScope>),
     ShieldPolicy(crate::shield::PolicyHandle),
     Environment(crate::executor::environment::EnvironmentHandle),
     VfsView(crate::executor::environment::ViewHandle),
@@ -289,6 +290,7 @@ impl<'a> KernelObjectRef<'a> {
             KernelObject::EventSubscription(_) => "EventSubscription",
             KernelObject::SharedMemory(_) => "SharedMemory",
             KernelObject::Gpu(_) => "Gpu",
+            KernelObject::ProcessScope(_) => "ProcessScope",
             KernelObject::ShieldPolicy(_) => "ShieldPolicy",
             KernelObject::Environment(_) => "Environment",
             KernelObject::VfsView(_) => "VfsView",
@@ -485,6 +487,7 @@ impl KernelObject {
             KernelObject::EventSubscription(_) => "EventSubscription",
             KernelObject::SharedMemory(_) => "SharedMemory",
             KernelObject::Gpu(_) => "Gpu",
+            KernelObject::ProcessScope(_) => "ProcessScope",
             KernelObject::ShieldPolicy(_) => "ShieldPolicy",
             KernelObject::Environment(_) => "Environment",
             KernelObject::VfsView(_) => "VfsView",
@@ -637,7 +640,8 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(_) => None,
-            KernelObject::ShieldPolicy(_)
+            KernelObject::ProcessScope(_)
+            | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -683,7 +687,8 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(_) => None,
-            KernelObject::ShieldPolicy(_)
+            KernelObject::ProcessScope(_)
+            | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -728,7 +733,8 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(_) => None,
-            KernelObject::ShieldPolicy(_)
+            KernelObject::ProcessScope(_)
+            | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -772,7 +778,8 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(_) => None,
-            KernelObject::ShieldPolicy(_)
+            KernelObject::ProcessScope(_)
+            | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -854,7 +861,8 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(_) => None,
-            KernelObject::ShieldPolicy(_)
+            KernelObject::ProcessScope(_)
+            | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -899,7 +907,8 @@ impl KernelObject {
                 None
             }
             KernelObject::Gpu(gpu) => gpu.as_control_ops(),
-            KernelObject::ShieldPolicy(_)
+            KernelObject::ProcessScope(_)
+            | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -951,7 +960,8 @@ impl KernelObject {
                 Some(memory_mapping_ops)
             }
             KernelObject::Gpu(gpu) => gpu.as_memory_mappable(),
-            KernelObject::ShieldPolicy(_)
+            KernelObject::ProcessScope(_)
+            | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -999,7 +1009,8 @@ impl KernelObject {
                 Some(weak_shmem)
             }
             KernelObject::Gpu(_) => None,
-            KernelObject::ShieldPolicy(_)
+            KernelObject::ProcessScope(_)
+            | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -1025,7 +1036,8 @@ impl KernelObject {
             KernelObject::SharedMemory(shared_memory) => {
                 Some(Arc::clone(shared_memory) as Arc<dyn MemoryMappingOps>)
             }
-            KernelObject::ShieldPolicy(_)
+            KernelObject::ProcessScope(_)
+            | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
             KernelObject::Gpu(gpu) => gpu.as_memory_mappable().map(|_| {
@@ -1108,7 +1120,8 @@ impl KernelObject {
             KernelObject::EventSubscription(_) => None,
             KernelObject::SharedMemory(_) => None,
             KernelObject::Gpu(gpu) => gpu.as_selectable(),
-            KernelObject::ShieldPolicy(_)
+            KernelObject::ProcessScope(_)
+            | KernelObject::ShieldPolicy(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => None,
             #[cfg(feature = "hypervisor")]
@@ -1145,6 +1158,7 @@ impl KernelObject {
                 KernelObject::SharedMemory(Arc::clone(shared_memory))
             }
             KernelObject::Gpu(gpu) => KernelObject::Gpu(Arc::clone(gpu)),
+            KernelObject::ProcessScope(scope) => KernelObject::ProcessScope(scope.clone()),
             KernelObject::ShieldPolicy(cap) => KernelObject::ShieldPolicy(cap.clone()),
             KernelObject::Environment(env) => KernelObject::Environment(env.clone()),
             KernelObject::VfsView(view) => KernelObject::VfsView(view.clone()),
@@ -1180,6 +1194,7 @@ impl Clone for KernelObject {
                     KernelObject::SharedMemory(Arc::clone(shared_memory))
                 }
                 KernelObject::Gpu(gpu) => KernelObject::Gpu(Arc::clone(gpu)),
+                KernelObject::ProcessScope(scope) => KernelObject::ProcessScope(scope.clone()),
                 KernelObject::ShieldPolicy(cap) => KernelObject::ShieldPolicy(cap.clone()),
                 KernelObject::Environment(env) => KernelObject::Environment(env.clone()),
                 KernelObject::VfsView(view) => KernelObject::VfsView(view.clone()),

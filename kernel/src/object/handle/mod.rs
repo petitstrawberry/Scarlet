@@ -221,7 +221,8 @@ impl HandleTable {
                 HandleType::IpcChannel
             }
             KernelObject::Timer(_) => HandleType::IpcChannel,
-            KernelObject::ShieldPolicy(_)
+            KernelObject::ProcessScope(_)
+            | KernelObject::ShieldPolicy(_)
             | KernelObject::Gpu(_)
             | KernelObject::Environment(_)
             | KernelObject::VfsView(_) => HandleType::Regular,
@@ -576,6 +577,11 @@ impl HandleTable {
         let (readable, writable) = metadata.access_mode.into();
 
         match kernel_obj {
+            KernelObject::ProcessScope(_) => {
+                let mut info = introspection::KernelObjectInfo::for_environment(false, true);
+                info.object_type = introspection::KernelObjectType::ProcessScope;
+                Some(info)
+            }
             KernelObject::ShieldPolicy(cap) => {
                 let mut info = introspection::KernelObjectInfo::for_environment(false, cap.administer);
                 info.object_type = introspection::KernelObjectType::ShieldPolicy;

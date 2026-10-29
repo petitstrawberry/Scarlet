@@ -46,6 +46,7 @@ pub enum KernelObjectType {
     Environment = 12,
     VfsView = 13,
     ShieldPolicy = 14,
+    ProcessScope = 15,
     /// Unknown or unsupported type
     Unknown = 0,
 }
