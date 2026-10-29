@@ -26,7 +26,7 @@ def header(metadata):
 
 def verify_build(build, metadata, framework):
     record = json.loads((build / "build.json").read_text())
-    if (record.get("kind") != "stock-zygote-control-v1"
+    if (record.get("kind") != "stock-zygote-control-v2"
             or record.get("source_sha256") != sha256(SOURCE / "zygote-probe.c")
             or record.get("framework_sha256") != sha256(framework / "framework-inputs.json")
             or record.get("program_sha256") != sha256(build / "zygote-probe")
@@ -41,7 +41,7 @@ def analyze(data):
     spawn = re.fullmatch(r"SCARLET_ZYGOTE_PROBE_SPAWN ([1-9][0-9]*)", events[0]) if events else None
     pid = int(spawn[1]) if spawn else None
     expected = [f"SCARLET_ZYGOTE_PROBE_SPAWN {pid}", "SCARLET_ZYGOTE_PROBE_ABI_OK arm64-v8a",
-                f"SCARLET_ZYGOTE_PROBE_PID_OK {pid}", "SCARLET_ZYGOTE_PROBE_REAP 9", "SCARLET_ZYGOTE_PROBE_OK"]
+                f"SCARLET_ZYGOTE_PROBE_PID_OK {pid}", "SCARLET_ZYGOTE_PROBE_SHIELD_OK", "SCARLET_ZYGOTE_PROBE_REAP 9", "SCARLET_ZYGOTE_PROBE_OK"]
     passed = (pid is not None and events == expected
               and lines.count("SCARLET_ANDROID_PROGRAM_EXIT 0") == 1
               and lines.count("SCARLET_ANDROID_STOCK_OK") == 1

@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stddef.h>
 #include <poll.h>
 #include <stdio.h>
@@ -33,6 +34,11 @@ static int query(struct sockaddr_un *address,socklen_t length,const char *comman
     result[size]=0;outcome=0;
 done: if(fd>=0)close(fd);return outcome;
 }
+static int check_text(const char *path,const char *expected,size_t length) {
+    char bytes[128];int fd=open(path,O_RDONLY|O_CLOEXEC);if(fd<0)return -1;
+    ssize_t count=read(fd,bytes,sizeof(bytes));close(fd);
+    return count==(ssize_t)length && !memcmp(bytes,expected,length)?0:-1;
+}
 int main(void) {
     setvbuf(stdout,NULL,_IONBF,0);
     struct sockaddr_un server,pool;socklen_t server_size,pool_size;
@@ -55,6 +61,11 @@ int main(void) {
             printf("SCARLET_ZYGOTE_PROBE_FAIL pid errno=%d\n",errno);passed=0;
         } else printf("SCARLET_ZYGOTE_PROBE_PID_OK %s\n",answer);
     }
+    char label_path[64];snprintf(label_path,sizeof(label_path),"/proc/%d/attr/current",child);
+    if(check_text("/sys/fs/selinux/enforce","1\n",2) ||
+       check_text(label_path,"u:r:scarlet_probe:s0",sizeof("u:r:scarlet_probe:s0"))) {
+        puts("SCARLET_ZYGOTE_PROBE_FAIL shield");passed=0;
+    } else puts("SCARLET_ZYGOTE_PROBE_SHIELD_OK");
     int status;
     if(kill(child,SIGKILL) || waitpid(child,&status,0)!=child || !WIFSIGNALED(status) || WTERMSIG(status)!=SIGKILL) {
         puts("SCARLET_ZYGOTE_PROBE_FAIL cleanup");return 1;

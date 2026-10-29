@@ -54,11 +54,14 @@ def main():
     parser.add_argument("--runtime-root", type=Path, help="Android /system and /apex runtime tree")
     parser.add_argument("--linker-debug", action="store_true", help="enable Android LD_DEBUG=3 for ART diagnosis")
     parser.add_argument("--stock-inputs", type=Path, help="verified stock property/APEX overlay for ART or a program")
+    parser.add_argument("--shield-fixture", action="store_true", help="apply the existing Shield test policy to a stock program diagnostic")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--accel", choices=("tcg", "hvf"), default="tcg")
     parser.add_argument("--binder", action="store_true", help="include Binder RPC and three-process object lifetime checks")
     args = parser.parse_args()
+    if args.shield_fixture and (not args.program or not args.stock_inputs):
+        parser.error("--shield-fixture requires --program and --stock-inputs")
     if args.framework_services:
         if not args.service_inputs:
             parser.error("--framework-services requires --service-inputs")
@@ -71,6 +74,7 @@ def main():
             parser.error("--zygote-probe requires --framework-inputs, --runtime-root and --stock-inputs")
         zygote = verify_framework_inputs(args.framework_inputs, args.runtime_root, args.stock_inputs)
         args.program = verify_zygote_build(args.zygote_probe, zygote, args.framework_inputs)
+    shield_fixture = bool(args.selinux_probe or args.zygote_probe or args.shield_fixture)
     framework = None
     apk = None
     if args.framework_probe:
@@ -173,7 +177,7 @@ def main():
         "service_fixture_sha256": sha256(SOURCE / "init/src/services.rs") if args.service_probe else None,
         "service_contexts_sha256": hashlib.sha256(CONTEXTS.encode()).hexdigest() if args.service_inputs else None,
         "selinux_build_sha256": sha256(args.selinux_probe / "build.json") if args.selinux_probe else None,
-        "shield_fixture_sha256": sha256(SOURCE / "init/src/shield.rs") if args.selinux_probe else None,
+        "shield_fixture_sha256": sha256(SOURCE / "init/src/shield.rs") if shield_fixture else None,
         "stock_reference_config_sha256": sha256(STOCK_CONFIG) if args.stock_inputs else None,
         "stock_manifest_sha256": sha256(args.stock_inputs / "stock-inputs.json") if args.stock_inputs else None,
         "runtime_sha256": {str(p.relative_to(args.runtime_root)): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -199,7 +203,7 @@ def main():
             (tree / name).mkdir(parents=True, exist_ok=True)
     for name in ["bin", "lib", "system/bin", "dev", "proc", "sys", "tmp", "root"]:
         (android / name).mkdir(parents=True, exist_ok=True)
-    if args.selinux_probe or args.service_probe or args.framework_services:
+    if shield_fixture or args.service_probe or args.framework_services:
         (android / "sys/fs/selinux").mkdir(parents=True, exist_ok=True)
     if args.runtime_root:
         shutil.copytree(args.runtime_root, android, dirs_exist_ok=True, symlinks=True)
@@ -244,7 +248,7 @@ def main():
                SCARLET_ANDROID_BINDER="1" if args.binder else "0",
                SCARLET_ANDROID_STOCK="1" if args.stock_inputs else "0",
                SCARLET_ANDROID_SERVICES="1" if args.service_probe else "0",
-               SCARLET_ANDROID_SHIELD="1" if args.selinux_probe else "0",
+               SCARLET_ANDROID_SHIELD="1" if shield_fixture else "0",
                SCARLET_ANDROID_ART="1" if art else "0",
                SCARLET_ANDROID_PROGRAM="1" if args.program else "0",
                SCARLET_ANDROID_FRAMEWORK="1" if framework else "0",

@@ -25,7 +25,7 @@ def main():
     command = [str(compiler), "-O2", "-Wall", "-Wextra", "-Werror", "-I", str(output),
                str(SOURCE / "zygote-probe.c"), "-o", str(output / "zygote-probe")]
     subprocess.run(command, check=True)
-    record = {"kind": "stock-zygote-control-v1", "command": command,
+    record = {"kind": "stock-zygote-control-v2", "command": command,
               "source_sha256": sha256(SOURCE / "zygote-probe.c"),
               "framework_sha256": sha256(args.framework_inputs / "framework-inputs.json"),
               "program_sha256": sha256(output / "zygote-probe")}

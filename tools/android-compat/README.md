@@ -99,14 +99,21 @@ there are no shared propagation peers in the current VFS.
 The Bionic fixture checks ID transitions, denied privilege recovery, groups,
 capability drops, exec auxiliary vectors, socket credentials and Binder calls
 across a mount split. These primitives do not yet provide full application
-confinement: VFS ownership/DAC, general capabilities and syscall filtering still
-require work.
+confinement: VFS ownership/DAC and general capabilities still require work.
+Shield also retains immutable syscall constraints across fork, spawn and exec.
+The AArch64 Linux adapter verifies seccomp cBPF and enforces errno, SIGSYS and
+termination actions before dispatch, including native-call escape attempts.
+Bionic exercises rejected writes without side effects, caught SIGSYS, per-thread
+filters, fatal actions, stacking and fork/exec inheritance. Strict mode, TSYNC
+and listener creation remain unsupported; RISC-V installation is rejected until
+its signal adapter supports synchronous SIGSYS metadata.
 
 `build-zygote-probe.py` and `run-direct.py --zygote-probe` verify stock
 `app_process64 -Xzygote ... --zygote` with lazy preload. A userspace supervisor
 creates the named control sockets, requests the ABI list and PID, then stops and
 reaps its owned Zygote. Success requires both correct protocol responses and
-cleanup; no `LD_PRELOAD` is used. Child specialization and Activity launch are
+cleanup, enforcing Shield status and the daemon's inherited label; no `LD_PRELOAD`
+is used. Child specialization and Activity launch are
 separate milestones.
 
 ```sh
