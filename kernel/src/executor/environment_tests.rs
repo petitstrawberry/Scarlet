@@ -431,7 +431,7 @@ fn mount_namespace_explicit_spawn_inherits_current_mappings_and_repeated_splits(
 #[test_case]
 fn unshare_rejects_unknown_flags_without_changes_and_private_mounts_stay_private() {
     use crate::abi::linux::generic::{
-        errno, fs::private_mount_propagation, proc::unshare_filesystem,
+        errno, fs::change_mount_propagation, proc::unshare_filesystem,
     };
     let (task, fs, _, _) = fixture();
     let namespace = task.mount_namespace.read().clone();
@@ -446,18 +446,18 @@ fn unshare_rejects_unknown_flags_without_changes_and_private_mounts_stay_private
     assert!(Arc::ptr_eq(&fs.view(), &task.get_vfs().unwrap().view()));
     task.get_vfs().unwrap().set_cwd_by_path("/").unwrap();
     assert_eq!(fs.get_cwd_path(), "/work");
-    assert_eq!(private_mount_propagation(&task, "/", 0x84000), Ok(()));
-    assert_eq!(private_mount_propagation(&task, "/", 0x40000), Ok(()));
+    assert_eq!(change_mount_propagation(&task, "/", 0x84000), Ok(()));
+    assert_eq!(change_mount_propagation(&task, "/", 0x40000), Ok(()));
     assert_eq!(
-        private_mount_propagation(&task, "/", 0x100000),
-        Err(errno::EOPNOTSUPP)
+        change_mount_propagation(&task, "/", 0x100000),
+        Ok(())
     );
     assert_eq!(
-        private_mount_propagation(&task, "/work", 0x80000),
+        change_mount_propagation(&task, "/work", 0x80000),
         Err(errno::EINVAL)
     );
     assert_eq!(
-        private_mount_propagation(&task, "/absent", 0x80000),
+        change_mount_propagation(&task, "/absent", 0x80000),
         Err(errno::ENOENT)
     );
 }
@@ -523,9 +523,10 @@ fn linux_tmpfs_mount_enforces_flags_options_and_native_mount_authority() {
 }
 
 #[test_case]
-fn unsupported_shared_mount_reports_operation_error_with_null_filesystem_type() {
+fn shared_mount_accepts_null_filesystem_type_and_creates_native_peer_group() {
     use crate::abi::linux::generic::{fs::sys_mount, errno, LinuxAbi};
     let task = Arc::new(new_user_task("shared-mount-request".into(), 0));
+    task.set_vfs(Arc::new(VfsManager::new()));
     let path = 0x20000000;
     task.allocate_stack_pages(path, 1).unwrap();
     crate::library::std::usercopy::copy_to_user(&task, path, b"/\0").unwrap();
@@ -535,5 +536,5 @@ fn unsupported_shared_mount_reports_operation_error_with_null_filesystem_type() 
     crate::task::set_mock_current_task(task);
     let result = sys_mount(&mut LinuxAbi::default(), &mut frame);
     crate::task::clear_mock_current_task();
-    assert_eq!(result, errno::to_result(errno::EOPNOTSUPP));
+    assert_eq!(result, 0);
 }

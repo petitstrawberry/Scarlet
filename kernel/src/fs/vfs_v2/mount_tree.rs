@@ -144,13 +144,14 @@ impl MountPoint {
 
     /// Create a new bind mount point
     pub fn new_bind(path: String, source: VfsEntryRef, restrictions: MountRestrictions) -> Arc<Self> {
+        let filesystem = source.node().filesystem().and_then(|fs| fs.upgrade());
         Arc::new(Self {
             id: MountId::new(),
             restrictions,
             mount_type: MountType::Bind,
             path: IrqRwSpinLock::new(path),
             root: source,
-            filesystem: None,
+            filesystem,
             parent: IrqRwSpinLock::new(None),
             parent_entry: IrqRwSpinLock::new(None),
             children: Arc::new(IrqRwSpinLock::new(BTreeMap::new())),

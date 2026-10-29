@@ -303,7 +303,23 @@ fn mount_view(task: &Task, tf: &crate::arch::Trapframe, restrictions: u32) -> Re
         .map_err(|_| "view mount failed")?;
     Ok(0)
 }
-handler!(sys_vfs_view_bind, |task, tf| {
+handler!(sys_vfs_view_propagation, |task, tf| {
+    let fs = view(&task, tf.get_arg(0), true)?;
+    let path = text_arg(&task, tf.get_arg(1))?;
+    let mode = match tf.get_arg(2) {
+        0 => crate::fs::vfs_v2::propagation::Propagation::Private,
+        1 => crate::fs::vfs_v2::propagation::Propagation::Shared,
+        2 => crate::fs::vfs_v2::propagation::Propagation::Downstream,
+        _ => return Err("invalid propagation mode"),
+    };
+    if tf.get_arg(3) > 1 { return Err("invalid recursive option"); }
+    let _guard = VIEW_COMPOSITION.lock();
+    fs.set_mount_propagation(&path, mode, tf.get_arg(3) == 1).map_err(|_| "propagation change failed")?;
+    Ok(0)
+});
+handler!(sys_vfs_view_bind, |task, tf| { bind_view(&task, tf, false) });
+handler!(sys_vfs_view_bind_recursive, |task, tf| { bind_view(&task, tf, true) });
+fn bind_view(task: &Task, tf: &Trapframe, recursive: bool) -> Result<usize> {
     let target = view(&task, tf.get_arg(0), true)?;
     let target_path = text_arg(&task, tf.get_arg(1))?;
     let source = view(&task, tf.get_arg(2), false)?;
@@ -316,10 +332,11 @@ handler!(sys_vfs_view_bind, |task, tf| {
         add_dependency(&target.view(), &source.view())?;
     }
     target
-        .bind_mount_from(&source, &source_path, &target_path)
+        .bind_mount_from_recursive(&source, &source_path, &target_path, recursive)
         .map_err(|_| "view bind failed")?;
     Ok(0)
-});
+}
+
 handler!(sys_vfs_view_overlay, |task, tf| {
     require_builder(&task)?;
     let lower = view(&task, tf.get_arg(0), false)?;

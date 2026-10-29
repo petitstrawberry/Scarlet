@@ -19,6 +19,11 @@ use core::convert::Infallible;
 use scarlet_abi::{RawEnvironmentExec, RawEnvironmentHandleMapping};
 use scarlet_sys::{Syscall, syscall0, syscall1, syscall2, syscall3, syscall4, syscall5};
 
+/// Mount-event relationships, configured independently from Environment.
+#[repr(usize)]
+#[derive(Clone, Copy, Debug)]
+pub enum MountPropagation { Private = 0, Shared = 1, Downstream = 2 }
+
 fn cstring(value: &str) -> HandleResult<Vec<u8>> {
     str_to_cstr_bytes(value).map_err(|_| HandleError::InvalidParameter)
 }
@@ -164,6 +169,21 @@ impl VfsView {
             restrictions as usize) }).map(|_| ())
     }
 
+    /// Configure native mount-event flow. Fresh independent Views start private.
+    pub fn set_propagation(&self, target: &str, mode: MountPropagation, recursive: bool) -> HandleResult<()> {
+        let target = cstring(target)?;
+        // SAFETY: the capability and pathname stay borrowed throughout the call.
+        result(unsafe { syscall4(Syscall::VfsViewSetPropagation, self.raw(), target.as_ptr() as usize,
+            mode as usize, usize::from(recursive)) }).map(|_| ())
+    }
+    /// Bind with a snapshot of all submounts; future events follow source propagation.
+    pub fn bind_recursive(&self, target: &str, source: &Self, source_path: &str) -> HandleResult<()> {
+        let target = cstring(target)?;
+        let path = cstring(source_path)?;
+        // SAFETY: both capabilities and pathnames stay live throughout the call.
+        result(unsafe { syscall4(Syscall::VfsViewBindRecursive, self.raw(), target.as_ptr() as usize,
+            source.raw(), path.as_ptr() as usize) }).map(|_| ())
+    }
     /// Non-recursive bind. Shared submounts must be bound explicitly.
     pub fn bind(&self, target: &str, source: &Self, source_path: &str) -> HandleResult<()> {
         let target = cstring(target)?;

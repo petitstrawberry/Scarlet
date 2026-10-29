@@ -1033,7 +1033,7 @@ enum OpenMode {
 }
 
 /// Translate Linux mount requests to immutable native mount restrictions.
-/// Propagation-only operations retain the private namespace model.
+/// Propagation requests use native peer groups and downstream channels.
 pub fn sys_mount(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
     let target = trapframe.get_arg(1);
@@ -1045,11 +1045,21 @@ pub fn sys_mount(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Ok(path) => path,
         Err(_) => return errno::to_result(errno::EFAULT),
     };
-    if flags & (0x40000 | 0x80000) != 0 {
-        return private_mount_propagation(&task, &path, flags).map_or_else(errno::to_result, |_| 0);
+    if flags & (0x40000 | 0x80000 | 0x100000) != 0 {
+        return change_mount_propagation(&task, &path, flags).map_or_else(errno::to_result, |_| 0);
     }
     if !task.credentials.read().permits(crate::shield::identity::MANAGE_MOUNTS) {
         return errno::to_result(errno::EPERM);
+    }
+    if flags & 0x1000 != 0 {
+        if flags & !(0x1000 | 0x4000) != 0 { return errno::to_result(errno::EOPNOTSUPP); }
+        let source = match parse_c_string_from_userspace(&task, trapframe.get_arg(0), MAX_PATH_LENGTH) {
+            Ok(path) => path, Err(_) => return errno::to_result(errno::EFAULT),
+        };
+        let fs = match task.get_vfs() { Some(fs) => fs, None => return errno::to_result(errno::EIO) };
+        let _composition = crate::executor::syscall::lock_composition();
+        return fs.bind_mount_recursive(&source, &path, flags & 0x4000 != 0)
+            .map_or_else(|e| errno::to_result(errno::from_fs_error(&e)), |_| 0);
     }
     // Propagation/remount requests do not carry a filesystem type. Reject
     // unsupported operations before interpreting their intentionally null pointers.
@@ -1104,21 +1114,23 @@ pub(crate) fn mount_tmpfs(task: &crate::task::Task, path: &str, fstype: &str, fl
     fs.mount(filesystem, path, restrictions).map_err(|e| errno::from_fs_error(&e))
 }
 
-pub(crate) fn private_mount_propagation(task: &crate::task::Task, path: &str, flags: usize) -> Result<(), usize> {
+pub(crate) fn change_mount_propagation(task: &crate::task::Task, path: &str, flags: usize) -> Result<(), usize> {
     if !task.credentials.read().permits(crate::shield::identity::MANAGE_MOUNTS) { return Err(errno::EPERM); }
     if path.is_empty() { return Err(errno::ENOENT); }
+    use crate::fs::vfs_v2::propagation::Propagation;
     const MS_REC: usize = 0x4000;
-    const MS_PRIVATE: usize = 0x40000;
-    const MS_SLAVE: usize = 0x80000;
-    if !matches!(flags & !MS_REC, MS_PRIVATE | MS_SLAVE) {
-        return Err(errno::EOPNOTSUPP);
-    }
+    let mode = match flags & !MS_REC {
+        0x40000 => Propagation::Private,
+        0x80000 => Propagation::Downstream,
+        0x100000 => Propagation::Shared,
+        _ => return Err(errno::EOPNOTSUPP),
+    };
     let fs = task.get_vfs().ok_or(errno::EIO)?;
-    let (entry, mount) = fs.resolve_path(path).map_err(|_| errno::ENOENT)?;
-    if !alloc::sync::Arc::ptr_eq(&entry, &mount.root) {
-        return Err(errno::EINVAL);
-    }
-    Ok(())
+    let _composition = crate::executor::syscall::lock_composition();
+    fs.set_mount_propagation(path, mode, flags & MS_REC != 0).map_err(|e| {
+        if e.kind == crate::fs::FileSystemErrorKind::InvalidPath { errno::EINVAL }
+        else { errno::from_fs_error(&e) }
+    })
 }
 
 /// Linux sys_openat implementation for Scarlet VFS v2

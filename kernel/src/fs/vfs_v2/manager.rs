@@ -186,6 +186,7 @@ impl VfsManager {
         flags: u32,
     ) -> Result<(), FileSystemError> {
         let restrictions = super::mount_tree::MountRestrictions::from_bits(flags)?;
+        let mut topology = super::propagation::transaction()?;
         if mount_point_str == "/" {
             // Remove the existing root FS from the list
             let old_root_fs = self
@@ -207,6 +208,7 @@ impl VfsManager {
             let new_root_entry = VfsEntry::new(None, "/".to_string(), new_root_node);
             let new_root_mount =
                 MountPoint::new_regular_restricted("/".to_string(), new_root_entry, filesystem.clone(), restrictions);
+            topology.forget_tree(&self.mount_tree.root_mount.read());
             self.mount_tree.replace_root(new_root_mount);
             // Push the new FS
             self.mounted_filesystems.write().push(filesystem.clone());
@@ -219,9 +221,22 @@ impl VfsManager {
         if Arc::ptr_eq(&target_entry, &target_mount_point.root) {
             return Err(vfs_error(FileSystemErrorKind::Busy, "Target already mounted"));
         }
-        self.mount_tree
-            .mount(target_entry, target_mount_point, filesystem.clone(), restrictions)?;
+        let entry = VfsEntry::new(None, "/".to_string(), filesystem.root_node());
+        let mount = MountPoint::new_regular_restricted(target_entry.name(), entry, filesystem.clone(), restrictions);
+        topology.publish(&target_mount_point, &target_entry, &mount, &self.view)?;
         self.mounted_filesystems.write().push(filesystem);
+        Ok(())
+    }
+
+    /// Change only selected mounts. Fresh Views start private; namespace copies
+    /// retain shared groups and downstream relationships explicitly configured here.
+    pub fn set_mount_propagation(&self, path: &str, mode: super::propagation::Propagation, recursive: bool) -> Result<(), FileSystemError> {
+        let mut topology = super::propagation::transaction()?;
+        let (entry, mount) = self.resolve_path(path)?;
+        if !Arc::ptr_eq(&entry, &mount.root) {
+            return Err(vfs_error(FileSystemErrorKind::InvalidPath, "Propagation target must be a mount root"));
+        }
+        topology.change(&mount, &self.view, mode, recursive);
         Ok(())
     }
 
@@ -251,6 +266,7 @@ impl VfsManager {
     /// Returns an error if the mount point is not valid or if the unmount operation fails.
     ///
     pub fn unmount(&self, mount_point_str: &str) -> Result<(), FileSystemError> {
+        let mut topology = super::propagation::transaction()?;
         let (entry, mount_point) = self.resolve_mount_point(mount_point_str)?;
         if !self.mount_tree.is_mount_point(&entry, &mount_point) {
             return Err(vfs_error(
@@ -258,7 +274,7 @@ impl VfsManager {
                 "Path is not a mount point",
             ));
         }
-        let unmounted_mount = self.mount_tree.unmount(&entry, &mount_point)?;
+        let unmounted_mount = topology.detach(&mount_point, &entry, &self.view)?;
         // Identify the unmounted fs and remove it from the holding list
         // If mount_point is a bind mount, we do not remove the filesystem
         if !unmounted_mount.is_bind_mount() {
@@ -292,6 +308,10 @@ impl VfsManager {
     /// or if the source is not a valid directory.
     ///
     pub fn bind_mount(&self, source_path: &str, target_path: &str) -> Result<(), FileSystemError> {
+        self.bind_mount_recursive(source_path, target_path, false)
+    }
+    pub fn bind_mount_recursive(&self, source_path: &str, target_path: &str, recursive: bool) -> Result<(), FileSystemError> {
+        let mut topology = super::propagation::transaction()?;
         // Resolve the target mount point
         let (target_entry, target_mount_point) = self.resolve_path(target_path)?;
         // Resolve the source entry
@@ -322,6 +342,8 @@ impl VfsManager {
         }
         // Create the bind mount entry
         self.bind_mount_entry(
+            &mut topology,
+            recursive,
             source_entry,
             source_mount_point,
             target_entry,
@@ -345,17 +367,22 @@ impl VfsManager {
     /// or if the source is not a valid directory.
     ///
     pub fn bind_mount_from(
-        &self,
-        source_vfs: &Arc<VfsManager>,
-        source_path: &str,
-        target_path: &str,
+        &self, source_vfs: &Arc<VfsManager>, source_path: &str, target_path: &str,
     ) -> Result<(), FileSystemError> {
+        self.bind_mount_from_recursive(source_vfs, source_path, target_path, false)
+    }
+    pub fn bind_mount_from_recursive(
+        &self, source_vfs: &Arc<VfsManager>, source_path: &str, target_path: &str, recursive: bool,
+    ) -> Result<(), FileSystemError> {
+        let mut topology = super::propagation::transaction()?;
         // Resolve the source and target paths
         let (source_entry, source_mount_point) = source_vfs.resolve_path(source_path)?;
         let (target_entry, target_mount_point) = self.resolve_path(target_path)?;
 
         // Create the bind mount entry
         self.bind_mount_entry(
+            &mut topology,
+            recursive,
             source_entry,
             source_mount_point,
             target_entry,
@@ -369,8 +396,11 @@ impl VfsManager {
         source_mount_point: Arc<MountPoint>,
         target_path: &str,
     ) -> Result<(), FileSystemError> {
+        let mut topology = super::propagation::transaction()?;
         let (target_entry, target_mount_point) = self.resolve_path(target_path)?;
         self.bind_mount_entry(
+            &mut topology,
+            false,
             source_entry,
             source_mount_point,
             target_entry,
@@ -384,40 +414,10 @@ impl VfsManager {
     pub fn clone_mount_namespace_deep(
         source: &Arc<VfsManager>,
     ) -> Result<Arc<VfsManager>, FileSystemError> {
-        fn copy_mount(
-            old: &Arc<MountPoint>,
-            depth: usize,
-        ) -> Result<Arc<MountPoint>, FileSystemError> {
-            if depth > 256 {
-                return Err(vfs_error(
-                    FileSystemErrorKind::InvalidPath,
-                    "mount tree too deep",
-                ));
-            }
-            let new = Arc::new(MountPoint {
-                id: super::mount_tree::MountId::new(),
-                restrictions: old.restrictions,
-                mount_type: old.mount_type.clone(),
-                path: IrqRwSpinLock::new(old.path.read().clone()),
-                root: old.root.clone(),
-                filesystem: old.filesystem.clone(),
-                parent: IrqRwSpinLock::new(None),
-                parent_entry: IrqRwSpinLock::new(None),
-                children: Arc::new(IrqRwSpinLock::new(alloc::collections::BTreeMap::new())),
-            });
-            let children: Vec<_> = old.children.read().values().cloned().collect();
-            for child in children {
-                let entry = child.parent_entry.read().clone().ok_or_else(|| {
-                    vfs_error(FileSystemErrorKind::InvalidPath, "orphan child mount")
-                })?;
-                let copy = copy_mount(&child, depth + 1)?;
-                new.add_child(&entry, copy)?;
-            }
-            Ok(new)
-        }
-        let root = source.mount_tree.root_mount.read().clone();
-        let root = copy_mount(&root, 0)?;
+        let mut topology = super::propagation::transaction()?;
         let new = Arc::new(Self::new());
+        let root = source.mount_tree.root_mount.read().clone();
+        let root = topology.copy_tree(&root, &new.view, true, 0)?;
         new.mount_tree.replace_root(root);
         *new.mounted_filesystems.write() = source.mounted_filesystems.read().clone();
         *new.dependencies.write() = source.dependencies.read().clone();
@@ -449,13 +449,30 @@ impl VfsManager {
     /// Create a bind mount from source_entry to target_entry
     fn bind_mount_entry(
         &self,
+        topology: &mut super::propagation::Topology,
+        recursive: bool,
         source_entry: Arc<VfsEntry>,
         source_mount_point: Arc<MountPoint>,
         target_entry: Arc<VfsEntry>,
         target_mount_point: Arc<MountPoint>,
     ) -> Result<(), FileSystemError> {
-        // Create a new MountPoint for the bind mount
-        let bind_mount = MountPoint::new_bind(target_entry.name(), source_entry, source_mount_point.restrictions);
+        if !source_entry.node().is_directory()? || !target_entry.node().is_directory()? {
+            return Err(vfs_error(FileSystemErrorKind::NotADirectory, "Bind requires directories"));
+        }
+        if Arc::ptr_eq(&target_entry, &target_mount_point.root) {
+            return Err(vfs_error(FileSystemErrorKind::Busy, "Target already mounted"));
+        }
+        let bind_mount = MountPoint::new_bind(target_entry.name(), source_entry.clone(), source_mount_point.restrictions);
+        if recursive {
+            let children: Vec<_> = source_mount_point.children.read().values().cloned().collect();
+            for child in children {
+                let entry = child.parent_entry.read().clone().ok_or_else(|| vfs_error(FileSystemErrorKind::InvalidPath, "Orphan bind source mount"))?;
+                if super::propagation::Topology::contains_entry(&source_entry, &entry) {
+                    let copy = topology.copy_tree(&child, &self.view, true, 0)?;
+                    bind_mount.add_child(&entry, copy)?;
+                }
+            }
+        }
         // Set parent/parent_entry
         *bind_mount.parent.write() = Some(Arc::downgrade(&target_mount_point));
         *bind_mount.parent_entry.write() = Some(target_entry.clone());
@@ -476,13 +493,8 @@ impl VfsManager {
                 mounted.push(fs);
             }
         }
-        let _ = source_mount_point;
-        // Add as child to target_mount_point
-        target_mount_point
-            .children
-            .write()
-            .insert(target_entry.node().id(), bind_mount);
-        Ok(())
+        topology.inherit(&source_mount_point, &bind_mount, &self.view);
+        topology.publish(&target_mount_point, &target_entry, &bind_mount, &self.view)
     }
 
     pub(crate) fn check_device_open(mount: &MountPoint, file_type: &FileType) -> Result<(), FileSystemError> {

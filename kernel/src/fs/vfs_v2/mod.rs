@@ -41,6 +41,7 @@ pub mod file_lock;
 pub mod manager;
 pub mod mount_tree;
 pub mod namespace;
+pub mod propagation;
 pub mod syscall;
 pub mod xattr;
 

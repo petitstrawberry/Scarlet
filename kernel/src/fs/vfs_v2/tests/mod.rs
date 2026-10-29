@@ -276,3 +276,5 @@ fn test_mount_options() {
 }
 
 pub mod mount_restrictions;
+
+pub mod propagation;

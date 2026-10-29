@@ -217,6 +217,8 @@ syscall_table! {
     VfsViewOpen = 523 => crate::executor::syscall::sys_vfs_view_open,
     VfsViewMount = 524 => crate::executor::syscall::sys_vfs_view_mount,
     VfsViewMountRestricted = 530 => crate::executor::syscall::sys_vfs_view_mount_restricted,
+    VfsViewSetPropagation = 531 => crate::executor::syscall::sys_vfs_view_propagation,
+    VfsViewBindRecursive = 532 => crate::executor::syscall::sys_vfs_view_bind_recursive,
     VfsViewBind = 525 => crate::executor::syscall::sys_vfs_view_bind,
     VfsViewOverlay = 526 => crate::executor::syscall::sys_vfs_view_overlay,
     VfsViewUnmount = 527 => crate::executor::syscall::sys_vfs_view_unmount,
