@@ -70,6 +70,7 @@ impl AbiModule for AndroidAarch64Abi {
         self.linux.on_task_cloned(parent, child, flags)
     }
     fn on_task_exit(&mut self, task: &Task) {
+        super::binder::task_exit(task);
         self.linux.on_task_exit(task);
     }
     fn on_process_exit(&mut self, task: &Task) {

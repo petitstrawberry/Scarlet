@@ -1,5 +1,5 @@
 //! Initial 64-bit Binder adapter over native RPC objects. Supports bounded,
-//! synchronous, byte-only transactions to the context manager. Object/FD
+//! synchronous transactions and flat object references over native RPC. FD
 //! transfer, one-way calls and nested transactions are explicitly unsupported.
 
 use crate::{
@@ -31,7 +31,11 @@ use alloc::{
 use core::any::Any;
 
 mod arena;
+mod objects;
 use arena::Arena;
+use objects::{
+    BC_ACQUIRE, BC_ACQUIRE_DONE, BC_DECREFS, BC_INCREFS, BC_INCREFS_DONE, BC_RELEASE, Objects,
+};
 
 const WRITE_READ: u32 = 0xc0306201;
 const VERSION: u32 = 0xc0046209;
@@ -50,7 +54,7 @@ const BR_REPLY: u32 = 0x80407203;
 const BR_DEAD_REPLY: u32 = 0x7205;
 const BR_COMPLETE: u32 = 0x7206;
 const MAX_THREADS: usize = 64;
-const MAX_DATA: usize = crate::ipc::rpc::MAX_MESSAGE_SIZE - 12;
+const MAX_DATA: usize = crate::ipc::rpc::MAX_MESSAGE_SIZE - objects::HEADER;
 
 fn u32_at(b: &[u8], p: usize) -> u32 {
     u32::from_le_bytes(b[p..p + 4].try_into().unwrap())
@@ -77,6 +81,7 @@ struct Domain {
     // Retain the environment so pointer identity cannot be reused while open.
     environment: Arc<Environment>,
     context: IrqSpinLock<Option<Context>>,
+    objects: objects::Registry,
 }
 type Domains = BTreeMap<(usize, u8), Weak<Domain>>;
 static DOMAINS: Once<IrqSpinLock<Domains>> = Once::new();
@@ -92,6 +97,7 @@ fn domain(environment: Arc<Environment>, device: u8) -> Arc<Domain> {
     let domain = Arc::new(Domain {
         environment,
         context: IrqSpinLock::new(None),
+        objects: IrqSpinLock::new(BTreeMap::new()),
     });
     domains.insert(key, Arc::downgrade(&domain));
     domain
@@ -100,9 +106,18 @@ fn domain(environment: Arc<Environment>, device: u8) -> Arc<Domain> {
 #[derive(Default)]
 struct Thread {
     looper: bool,
-    completed: VecDeque<u32>,
+    completed: VecDeque<Completed>,
     outgoing: Option<RpcCall>,
     incoming: Option<RpcRequest>,
+}
+struct Completed {
+    command: u32,
+    acquisitions: Vec<Arc<objects::Node>>,
+}
+impl Completed {
+    fn ready(&self) -> bool {
+        self.acquisitions.iter().all(|node| node.acquired())
+    }
 }
 struct State {
     threads: BTreeMap<usize, Thread>,
@@ -114,6 +129,8 @@ pub(crate) struct BinderFile {
     domain: Arc<Domain>,
     endpoint: Arc<RpcEndpoint>,
     state: IrqSpinLock<State>,
+    objects: IrqSpinLock<Objects>,
+    send_gate: IrqSpinLock<()>,
 }
 
 pub(crate) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> Option<usize> {
@@ -142,6 +159,8 @@ pub(crate) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> O
             owner: task.get_thread_group_id(),
             domain: domain(environment, device),
             endpoint: RpcEndpoint::new(),
+            send_gate: IrqSpinLock::new(()),
+            objects: IrqSpinLock::new(Objects::default()),
             state: IrqSpinLock::new(State {
                 threads: BTreeMap::new(),
                 arena: None,
@@ -240,7 +259,7 @@ impl BinderFile {
                     Ok(())
                 }
                 THREAD_EXIT => {
-                    self.state.lock().threads.remove(&task.get_id());
+                    self.thread_exit(task.get_id());
                     Ok(())
                 }
                 WRITE_READ => self.write_read(task, abi, tf, arg, nonblocking),
@@ -256,47 +275,43 @@ impl BinderFile {
                 self.state.lock().threads.get_mut(&tid).unwrap().looper = command != BC_EXIT_LOOPER;
             }
             BC_FREE_BUFFER => {
-                self.state
-                    .lock()
-                    .arena
-                    .as_ref()
-                    .ok_or(errno::EINVAL)?
-                    .free(u64_at(data, 0))?;
+                let arena = self.state.lock().arena.clone().ok_or(errno::EINVAL)?;
+                self.release_buffer(&arena, u64_at(data, 0))?;
+            }
+            BC_INCREFS | BC_ACQUIRE | BC_RELEASE | BC_DECREFS | BC_INCREFS_DONE
+            | BC_ACQUIRE_DONE => {
+                self.objects.lock().reference_command(command, data)?;
             }
             BC_TRANSACTION | BC_REPLY => {
                 let flags = u32_at(data, 20);
-                let len = u64_at(data, 32);
-                if u64_at(data, 40) != 0
-                    || flags & !(0x10 | 0x20 | if command == BC_REPLY { 8 } else { 0 }) != 0
-                {
+                if flags & !(0x10 | 0x20 | if command == BC_REPLY { 8 } else { 0 }) != 0 {
                     return Err(errno::EOPNOTSUPP);
                 }
-                if len > MAX_DATA {
-                    return Err(errno::E2BIG);
-                }
-                let mut payload = vec![0; len + 12];
-                payload[..4].copy_from_slice(&(flags & 8).to_le_bytes());
-                payload[4..8]
-                    .copy_from_slice(&(abi.visible_thread_group_id(task) as u32).to_le_bytes());
-                // Scarlet's Linux credential model currently reports euid 0.
-                copy_from_user(task, u64_at(data, 48), &mut payload[12..])
-                    .map_err(|_| errno::EFAULT)?;
-                let message = RpcMessage {
-                    opcode: u32_at(data, 16),
-                    bytes: payload,
-                    objects: Vec::new(),
-                    retained: None,
+                // target.handle is a u32 member of an 8-byte union. Its
+                // unused upper word is not part of the handle value.
+                let number = u32_at(data, 0);
+                let prepared = objects::prepare(task, abi, data)?;
+                // Serialize reference publication through transport admission.
+                // All fallible usercopy precedes this IRQ lock. A failed send
+                // releases its leases before another exporter can adopt them.
+                let _sending = self.send_gate.lock();
+                let target = if command == BC_TRANSACTION && number != 0 {
+                    Some(self.objects.lock().target(number as u32)?)
+                } else {
+                    None
                 };
+                let capability = target.as_ref().map(|lease| lease.node.object.clone());
+                let (message, acquisitions) = self.encode(task, data, prepared, target)?;
                 if command == BC_TRANSACTION {
-                    if u64_at(data, 0) != 0 {
-                        return Err(errno::EOPNOTSUPP);
-                    }
-                    let target = self
-                        .domain
-                        .context
-                        .lock()
-                        .as_ref()
-                        .and_then(|c| c.endpoint.upgrade());
+                    let context = if number == 0 {
+                        self.domain
+                            .context
+                            .lock()
+                            .as_ref()
+                            .and_then(|c| c.endpoint.upgrade())
+                    } else {
+                        None
+                    };
                     let mut state = self.state.lock();
                     let thread = state.threads.get_mut(&tid).unwrap();
                     if thread.outgoing.is_some() || thread.incoming.is_some() {
@@ -305,11 +320,29 @@ impl BinderFile {
                     if thread.completed.len() >= 64 {
                         return Err(errno::EAGAIN);
                     }
-                    if let Some(target) = target {
-                        thread.outgoing = Some(target.send(message).map_err(|_| errno::EAGAIN)?);
-                        thread.completed.push_back(BR_COMPLETE);
+                    let call = if let Some(capability) = capability {
+                        capability.send(message)
+                    } else if let Some(context) = context {
+                        context.send(message)
                     } else {
-                        thread.completed.push_back(BR_DEAD_REPLY);
+                        Err(crate::ipc::rpc::RpcError::PeerClosed)
+                    };
+                    match call {
+                        Ok(call) => {
+                            call.notify_on_completion(&self.endpoint.waker());
+                            thread.outgoing = Some(call);
+                            thread.completed.push_back(Completed {
+                                command: BR_COMPLETE,
+                                acquisitions,
+                            });
+                        }
+                        Err(crate::ipc::rpc::RpcError::PeerClosed) => {
+                            thread.completed.push_back(Completed {
+                                command: BR_DEAD_REPLY,
+                                acquisitions: Vec::new(),
+                            })
+                        }
+                        Err(_) => return Err(errno::EAGAIN),
                     }
                 } else {
                     let request = {
@@ -319,11 +352,19 @@ impl BinderFile {
                             return Err(errno::EAGAIN);
                         }
                         let request = thread.incoming.take().ok_or(errno::EINVAL)?;
-                        thread.completed.push_back(BR_COMPLETE);
                         request
                     };
-                    // A caller may have died while the server was processing.
                     let _ = request.reply(message);
+                    self.state
+                        .lock()
+                        .threads
+                        .get_mut(&tid)
+                        .unwrap()
+                        .completed
+                        .push_back(Completed {
+                            command: BR_COMPLETE,
+                            acquisitions,
+                        });
                 }
             }
             _ => return Err(errno::EOPNOTSUPP),
@@ -335,25 +376,76 @@ impl BinderFile {
         let Some(thread) = state.threads.get(&tid) else {
             return false;
         };
-        !thread.completed.is_empty()
-            || thread.outgoing.as_ref().is_some_and(RpcCall::ready)
-            || (thread.looper
-                && thread.outgoing.is_none()
-                && thread.incoming.is_none()
-                && self.endpoint.ready())
+        let objects = self.objects.lock();
+        if objects.ready(tid) {
+            return true;
+        }
+        if objects.pending_acquisition(tid) {
+            return false;
+        }
+        if let Some(completed) = thread.completed.front() {
+            return completed.ready();
+        }
+        !objects.pending_local_acquisitions()
+            && (thread.outgoing.as_ref().is_some_and(RpcCall::ready)
+                || (thread.looper
+                    && thread.outgoing.is_none()
+                    && thread.incoming.is_none()
+                    && self.endpoint.ready()))
     }
     fn waiter(&self, tid: usize) -> Arc<Waker> {
-        self.state
-            .lock()
-            .threads
-            .get(&tid)
-            .and_then(|t| t.outgoing.as_ref().map(RpcCall::waker))
-            .unwrap_or_else(|| self.endpoint.waker())
+        // Incoming calls, object-reference work and outgoing completions all
+        // notify this process source; readiness remains specific to each thread.
+        let _ = tid;
+        self.endpoint.waker()
     }
+    fn thread_exit(&self, tid: usize) {
+        let removed = self.state.lock().threads.remove(&tid);
+        let revoked = self.objects.lock().abandon_thread(tid);
+        // Native cancellation and lease destructors run outside Binder locks.
+        for object in revoked {
+            object.revoke();
+        }
+        drop(removed);
+        self.endpoint.waker().wake_all();
+    }
+    fn release_buffer(&self, arena: &Arena, address: usize) -> Result<(), usize> {
+        let mut objects = self.objects.lock();
+        arena.free(address)?;
+        objects.free_buffer(address);
+        Ok(())
+    }
+
     fn read_record(&self, task: &Task, output: usize, capacity: usize) -> Result<usize, usize> {
         let mut state = self.state.lock();
         let tid = task.get_id();
-        if let Some(command) = state.threads.get(&tid).unwrap().completed.front().copied() {
+        if self.objects.lock().ready(tid) {
+            if capacity < 20 {
+                return Err(errno::ENOSPC);
+            }
+            drop(state);
+            let record = {
+                // Do not expose acquisition work from an export until its
+                // transport admission has committed. A failed send must drop
+                // the corresponding lease before another thread observes it.
+                let _sending = self.send_gate.lock();
+                self.objects.lock().reference_record(tid)
+            };
+            return record.map_or(Ok(0), |record| record.write(task, output));
+        }
+        // Exporting code can drop its last local reference after completion.
+        // Finish the driver's acquire handshakes before reporting completion.
+        if self.objects.lock().pending_acquisition(tid) {
+            return Ok(0);
+        }
+        if let Some(completed) = state.threads.get(&tid).unwrap().completed.front() {
+            // Another thread may have begun this node's weak acquisition
+            // before this sender exported it strongly. Both exporters retain
+            // their userspace references until all needed holds are confirmed.
+            if !completed.ready() {
+                return Ok(0);
+            }
+            let command = completed.command;
             if capacity < 4 {
                 return Err(errno::ENOSPC);
             }
@@ -369,6 +461,12 @@ impl BinderFile {
                 .completed
                 .pop_front();
             return Ok(4);
+        }
+        // A target or a returned local object embeds userspace pointers. Hold
+        // payload delivery until acquisition is acknowledged. Message leases
+        // then preserve the relevant holds through decode and usercopy.
+        if self.objects.lock().pending_local_acquisitions() {
+            return Ok(0);
         }
         let thread = state.threads.get(&tid).unwrap();
         let replying = thread.outgoing.as_ref().is_some_and(RpcCall::ready);
@@ -397,13 +495,9 @@ impl BinderFile {
                 .unwrap()
         } else {
             match self.endpoint.receive() {
-                Ok(Some(request)) => {
-                    let message = RpcMessage {
-                        opcode: request.message.opcode,
-                        bytes: request.message.bytes.clone(),
-                        objects: request.message.objects.clone(),
-                        retained: request.message.retained.clone(),
-                    };
+                Ok(Some(mut request)) => {
+                    let message =
+                        core::mem::replace(&mut request.message, objects::message_empty());
                     incoming = Some(request);
                     Ok(message)
                 }
@@ -413,7 +507,7 @@ impl BinderFile {
                 }
             }
         };
-        let node = state.node;
+        let mut node = state.node;
         drop(state);
         let result = (|| {
             let message = match message {
@@ -423,8 +517,14 @@ impl BinderFile {
                     return Ok(4);
                 }
             };
-            let payload = &message.bytes[12..];
-            arena.store(address, payload)?;
+            if let Some(request) = incoming.as_mut() {
+                if let Some(key) = request.object_key() {
+                    let dispatch = self.objects.lock().dispatch(key)?;
+                    node = (dispatch.node.pointer, dispatch.node.cookie);
+                    request.message.retained = Some(Arc::new(dispatch));
+                }
+            }
+            let (length, offsets_length) = self.decode(&message, address, &arena)?;
             let mut record = [0u8; 68];
             record[..4]
                 .copy_from_slice(&(if replying { BR_REPLY } else { BR_TRANSACTION }).to_le_bytes());
@@ -435,9 +535,10 @@ impl BinderFile {
             }
             tx[16..20].copy_from_slice(&message.opcode.to_le_bytes());
             tx[20..32].copy_from_slice(&message.bytes[..12]);
-            put64(tx, 32, payload.len());
+            put64(tx, 32, length);
+            put64(tx, 40, offsets_length);
             put64(tx, 48, address);
-            put64(tx, 56, address + ((payload.len() + 7) & !7));
+            put64(tx, 56, address + ((length + 7) & !7));
             write(task, output, &record)?;
             if let Some(request) = incoming.take() {
                 self.state.lock().threads.get_mut(&tid).unwrap().incoming = Some(request);
@@ -445,7 +546,7 @@ impl BinderFile {
             Ok(68)
         })();
         if result != Ok(68) {
-            let _ = arena.free(address);
+            let _ = self.release_buffer(&arena, address);
         }
         result
     }
@@ -484,6 +585,8 @@ impl BinderFile {
                 let size = match command {
                     BC_TRANSACTION | BC_REPLY => 64,
                     BC_FREE_BUFFER => 8,
+                    BC_INCREFS | BC_ACQUIRE | BC_RELEASE | BC_DECREFS => 4,
+                    BC_INCREFS_DONE | BC_ACQUIRE_DONE => 16,
                     BC_ENTER_LOOPER | BC_REGISTER_LOOPER | BC_EXIT_LOOPER => 0,
                     _ => return Err(errno::EOPNOTSUPP),
                 };
@@ -519,6 +622,21 @@ impl BinderFile {
         put64(&mut bwr, 8, consumed);
         write(task, arg, &bwr)?;
         result
+    }
+}
+
+pub(super) fn task_exit(task: &Task) {
+    for handle in task.handle_table.active_handles() {
+        if let Some(object) = task.handle_table.get(handle) {
+            if let Some(file) = object
+                .as_file()
+                .and_then(|file| file.as_any().downcast_ref::<BinderFile>())
+            {
+                if file.owner == task.get_thread_group_id() {
+                    file.thread_exit(task.get_id());
+                }
+            }
+        }
     }
 }
 
@@ -637,6 +755,8 @@ mod tests {
             owner: task.get_thread_group_id(),
             domain: domain(environment.clone(), device),
             endpoint: RpcEndpoint::new(),
+            send_gate: IrqSpinLock::new(()),
+            objects: IrqSpinLock::new(Objects::default()),
             state: IrqSpinLock::new(State {
                 threads: BTreeMap::new(),
                 arena: None,
@@ -671,7 +791,7 @@ mod tests {
                 file.state.lock().threads[&task.get_id()]
                     .completed
                     .front()
-                    .copied(),
+                    .map(|completed| completed.command),
                 Some(BR_DEAD_REPLY)
             );
             assert!(server.endpoint.receive().unwrap().is_none());
