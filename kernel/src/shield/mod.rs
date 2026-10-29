@@ -5,6 +5,7 @@
 pub mod execution;
 pub mod exec_transition;
 pub mod information;
+pub mod resource;
 pub mod identity;
 pub mod syscall;
 
@@ -36,11 +37,21 @@ pub struct TransitionRule {
     pub principal: identity::Principal,
 }
 
+#[derive(Clone, Copy)]
+pub struct ExecTransitionRule {
+    pub source: u32,
+    pub resource: u32,
+    pub target: u32,
+    pub principal: identity::Principal,
+}
+
 pub struct Policy {
     labels: BTreeMap<u32, String>,
     names: BTreeMap<String, u32>,
     grants: BTreeMap<(u32, u32, u32), u64>,
     transitions: BTreeSet<(u32, u32, u32)>,
+    exec_transitions: BTreeMap<(u32, u32, u32), u32>,
+    resources: crate::sync::IrqRwSpinLock<resource::Resources>,
 }
 impl Policy {
     /// Validate the complete policy before publishing it. No live mutation or
@@ -53,6 +64,13 @@ impl Policy {
         rules: Vec<Rule>,
         transitions: Vec<TransitionRule>,
     ) -> Result<Arc<Self>, &'static str> {
+        Self::with_exec_transitions(labels, rules, transitions, Vec::new())
+    }
+    pub fn with_exec_transitions(
+        labels: Vec<(u32, String)>, rules: Vec<Rule>, transitions: Vec<TransitionRule>,
+        exec_transitions: Vec<ExecTransitionRule>,
+    ) -> Result<Arc<Self>, &'static str> {
+        if exec_transitions.len() > MAX_RULES { return Err("exec transition limit"); }
         if transitions.len() > MAX_RULES {
             return Err("transition limit");
         }
@@ -64,6 +82,8 @@ impl Policy {
             names: BTreeMap::new(),
             grants: BTreeMap::new(),
             transitions: BTreeSet::new(),
+            exec_transitions: BTreeMap::new(),
+            resources: crate::sync::IrqRwSpinLock::new(resource::Resources::new()),
         };
         for (id, name) in labels {
             if id == 0
@@ -102,6 +122,13 @@ impl Policy {
                 return Err("invalid or duplicate transition");
             }
         }
+        for rule in exec_transitions {
+            if !result.labels.contains_key(&rule.source) || !result.labels.contains_key(&rule.resource)
+                || !result.labels.contains_key(&rule.target)
+                || result.exec_transitions.insert((rule.source, rule.resource, rule.principal.0), rule.target).is_some() {
+                return Err("invalid or ambiguous exec transition");
+            }
+        }
         Ok(Arc::new(result))
     }
     pub fn label(&self, id: u32) -> Option<&str> {
@@ -134,6 +161,11 @@ impl Policy {
 pub struct Subject {
     policy: Arc<Policy>,
     label: u32,
+}
+impl core::fmt::Debug for Subject {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Subject").field("label", &self.label).field("name", &self.name()).finish()
+    }
 }
 impl Subject {
     pub fn policy(&self) -> &Arc<Policy> {

@@ -111,6 +111,7 @@ enum Content {
     Status,
     Access,
     Context,
+    Create,
     Current(Weak<Task>),
     Exec(Weak<Task>),
 }
@@ -138,7 +139,7 @@ impl VfsNode for Node {
                 _ => 0,
             },
             matches!(self.content, Content::Directory),
-            matches!(self.content, Content::Access | Content::Context),
+            matches!(self.content, Content::Access | Content::Context | Content::Create),
         ))
     }
     fn as_any(&self) -> &dyn Any {
@@ -184,6 +185,10 @@ impl SecurityFs {
                 ("mls", Content::Text(b"0\n".to_vec())),
                 ("access", Content::Access),
                 ("context", Content::Context),
+                ("create", Content::Create),
+                ("class/process", Content::Directory),
+                ("class/process/index", Content::Text(b"3\n".to_vec())),
+                ("class/process/perms", Content::Directory),
                 ("class", Content::Directory),
                 ("class/property_service", Content::Directory),
                 ("class/property_service/index", Content::Text(b"2\n".to_vec())),
@@ -257,7 +262,7 @@ impl SecurityFs {
         if !subject.is_some_and(|s| Arc::ptr_eq(s.policy(), &self.policy)) {
             return Err(fs_error(FileSystemErrorKind::PermissionDenied));
         }
-        let writable = matches!(node.content, Content::Access | Content::Context);
+        let writable = matches!(node.content, Content::Access | Content::Context | Content::Create);
         if flags & 3 == 3 || (flags & 3 != 0 && !writable) || flags & (0x200 | 0x400) != 0 {
             return Err(fs_error(FileSystemErrorKind::PermissionDenied));
         }
@@ -390,6 +395,20 @@ struct SecurityFile {
     writable: bool,
     state: IrqSpinLock<FileState>,
 }
+pub(super) fn resource_context(task: &Task, node: &dyn VfsNode) -> Option<Vec<u8>> {
+    let subject = task.security_subject.read().clone()?;
+    let label = subject.policy().resource_label(node)?;
+    Some(format!("{}\0", subject.policy().label(label)?).into_bytes())
+}
+fn create_context(policy: &Policy, input: &[u8]) -> Result<Vec<u8>, StreamError> {
+    let text = core::str::from_utf8(input).map_err(|_| StreamError::InvalidArgument)?.trim_end_matches('\0');
+    let fields: Vec<_> = text.split_ascii_whitespace().collect();
+    if !(3..=4).contains(&fields.len()) || fields[2] != "3" { return Err(StreamError::InvalidArgument); }
+    let source = policy.label_id(fields[0]).ok_or(StreamError::InvalidArgument)?;
+    let resource = policy.label_id(fields[1]).ok_or(StreamError::InvalidArgument)?;
+    let target = policy.preview_exec(source, resource).map_err(|_| StreamError::PermissionDenied)?;
+    Ok(format!("{}\0", policy.label(target).ok_or(StreamError::InvalidArgument)?).into_bytes())
+}
 fn decision(policy: &Policy, input: &[u8]) -> Result<Vec<u8>, StreamError> {
     let text = core::str::from_utf8(input).map_err(|_| StreamError::InvalidArgument)?;
     let fields: Vec<_> = text.split_ascii_whitespace().collect();
@@ -508,6 +527,7 @@ impl StreamOps for SecurityFile {
         }
         let response = match self.content {
             Content::Access => decision(&self.policy, buffer)?,
+            Content::Create => create_context(&self.policy, buffer)?,
             Content::Context => {
                 let text = core::str::from_utf8(buffer)
                     .map_err(|_| StreamError::InvalidArgument)?
@@ -771,6 +791,16 @@ mod tests {
         ] {
             assert!(decision(&p, input).is_err());
         }
+    }
+    #[test_case]
+    fn android_create_context_previews_only_registered_resource_exec_rules() {
+        use crate::shield::{ExecTransitionRule,identity::Principal};
+        let policy = Policy::with_exec_transitions(vec![
+            (1,"u:r:init:s0".into()),(2,"u:object_r:daemon_exec:s0".into()),(3,"u:r:daemon:s0".into()),
+        ],vec![],vec![],vec![ExecTransitionRule {source:1,resource:2,target:3,principal:Principal(1000)}]).unwrap();
+        assert_eq!(create_context(&policy,b"u:r:init:s0 u:object_r:daemon_exec:s0 3").unwrap(),b"u:r:daemon:s0\0");
+        assert!(create_context(&policy,b"u:r:daemon:s0 u:object_r:daemon_exec:s0 3").is_err());
+        assert!(create_context(&policy,b"u:r:init:s0 u:object_r:daemon_exec:s0 2").is_err());
     }
     #[test_case]
     fn android_property_grants_are_distinct_from_service_grants_and_unknown_bits_deny() {

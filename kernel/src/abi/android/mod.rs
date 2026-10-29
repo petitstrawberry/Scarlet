@@ -21,6 +21,22 @@ use crate::{
 struct AndroidExtensions;
 
 impl LinuxAbiExtensions for AndroidExtensions {
+    fn peer_security_context(&self, task: &Task, peer: &crate::shield::Subject) -> Option<Result<alloc::vec::Vec<u8>, usize>> {
+        let own = task.security_subject.read().clone();
+        Some(if own.is_some_and(|own| alloc::sync::Arc::ptr_eq(own.policy(), peer.policy())) {
+            Ok(alloc::format!("{}\0", peer.name()).into_bytes())
+        } else { Err(crate::abi::linux::generic::errno::EACCES) })
+    }
+    fn get_xattr(&self, task: &Task, node: &dyn crate::fs::vfs_v2::core::VfsNode, name: &[u8])
+        -> Option<Result<alloc::vec::Vec<u8>, usize>> {
+        if name != b"security.selinux" { return None; }
+        security::resource_context(task, node).map(Ok)
+    }
+    fn change_xattr(&self, task: &Task, node: &dyn crate::fs::vfs_v2::core::VfsNode, name: &[u8]) -> Option<Result<(), usize>> {
+        if name == b"security.selinux" && security::resource_context(task, node).is_some() {
+            Some(Err(crate::abi::linux::generic::errno::EACCES))
+        } else { None }
+    }
     fn open(&self, abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> Option<usize> {
         security::open(abi, task, path, flags).or_else(|| binder::open(abi, task, path, flags))
     }

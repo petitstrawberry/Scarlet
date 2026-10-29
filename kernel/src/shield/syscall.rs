@@ -56,6 +56,7 @@ fn create(
     rules_count: usize,
     transitions_ptr: usize,
     transitions_count: usize,
+    exec_transitions: Vec<ExecTransitionRule>,
 ) -> Result<usize, &'static str> {
     if !can_create(task) {
         return Err("policy construction authority required");
@@ -119,7 +120,7 @@ fn create(
     insert(
         task,
         PolicyHandle {
-            policy: Policy::with_transitions(labels, rules, transitions)?,
+            policy: Policy::with_exec_transitions(labels, rules, transitions, exec_transitions)?,
             administer: true,
         },
     )
@@ -144,6 +145,7 @@ pub fn sys_shield_policy_create(tf: &mut Trapframe) -> usize {
         tf.get_arg(3),
         0,
         0,
+        Vec::new(),
     )
     .unwrap_or(usize::MAX)
 }
@@ -158,6 +160,7 @@ pub fn sys_shield_policy_create_with_transitions(tf: &mut Trapframe) -> usize {
         tf.get_arg(3),
         tf.get_arg(4),
         tf.get_arg(5),
+        Vec::new(),
     )
     .unwrap_or(usize::MAX)
 }
@@ -289,4 +292,38 @@ mod tests {
             Some(SpecialSemantics::CloseOnExec)
         );
     }
+}
+
+/// Extended immutable policy specification: eight u64 pointer/count fields.
+pub fn sys_shield_policy_create_exec(tf: &mut Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap();
+    let pointer = tf.get_arg(0); let length = tf.get_arg(1);
+    tf.increment_pc_next(&task);
+    (|| {
+        if !can_create(&task) || length != 64 { return Err("invalid exec policy request"); }
+        let spec = read::<64>(&task, pointer)?;
+        let fields: Vec<usize> = (0..8).map(|i| address(u64_at(&spec, i * 8))).collect::<Result<_, _>>()?;
+        if fields[7] > MAX_RULES { return Err("exec rule bound"); }
+        fields[6].checked_add(fields[7] * 24).ok_or("exec rule pointer overflow")?;
+        let mut rules = Vec::with_capacity(fields[7]);
+        for i in 0..fields[7] {
+            let rule = read::<24>(&task, fields[6] + i * 24)?;
+            if u64_at(&rule, 16) != 0 { return Err("exec rule reserved bits"); }
+            rules.push(ExecTransitionRule {source:u32_at(&rule,0),resource:u32_at(&rule,4),
+                target:u32_at(&rule,8),principal:identity::Principal(u32_at(&rule,12))});
+        }
+        create(&task, fields[0],fields[1],fields[2],fields[3],fields[4],fields[5], rules)
+    })().unwrap_or(usize::MAX)
+}
+
+pub fn bind_file(task: &Task, policy_handle_id: usize, file: usize, label: usize) -> Result<(), &'static str> {
+    let policy = policy_handle(task, policy_handle_id, true)?;
+    let object = task.handle_table.get(u32::try_from(file).map_err(|_| "file handle")?).ok_or("file handle")?;
+    let file = object.as_file().and_then(|file| file.as_any().downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()).ok_or("retained VFS file required")?;
+    policy.bind_resource(file.get_vfs_entry().node(), u32::try_from(label).map_err(|_| "resource label")?)
+}
+pub fn sys_shield_bind_file(tf: &mut Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap();
+    tf.increment_pc_next(&task);
+    bind_file(&task, tf.get_arg(0),tf.get_arg(1),tf.get_arg(2)).map_or(usize::MAX, |_| 0)
 }

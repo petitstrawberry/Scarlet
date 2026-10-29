@@ -683,3 +683,38 @@ fn fork_and_explicit_nosuid_exec_keep_delegated_transition_separate_from_file_gr
     assert_eq!(crate::shield::information::constraints(&child), 1);
     assert!(!child.execution_restrictions.read().is_constrained());
 }
+
+#[test_case]
+fn resource_exec_conditions_enforce_file_identity_principal_nosuid_and_transactional_commit() {
+    use crate::shield::{Policy, ExecTransitionRule, identity::{Principal, Identities}};
+    let (task, fs, _, _) = fixture();
+    fs.create_file("/wrong-image", FileType::RegularFile).unwrap();
+    fs.create_dir("/no-grants").unwrap();
+    fs.mount(crate::fs::drivers::tmpfs::TmpFS::new(0), "/no-grants", 2).unwrap();
+    fs.create_file("/no-grants/image", FileType::RegularFile).unwrap();
+    let policy = Policy::with_exec_transitions(alloc::vec![
+        (1,"source".into()),(2,"daemon".into()),(3,"trusted-image".into()),
+    ], alloc::vec![],alloc::vec![],alloc::vec![ExecTransitionRule {source:1,resource:3,target:2,principal:Principal(0)}]).unwrap();
+    policy.bind_resource(fs.resolve_path("/txn-image").unwrap().0.node(),3).unwrap();
+    policy.bind_resource(fs.resolve_path("/no-grants/image").unwrap().0.node(),3).unwrap();
+    let subject = policy.subject(1).unwrap();
+    assert!(subject.transition(2,&task.credentials.read()).is_err());
+    *task.security_subject.write() = Some(subject);
+    crate::shield::exec_transition::reserve(&task,&policy,2).unwrap();
+    let mut frame = Trapframe::new();
+    for (path, env) in [("/wrong-image", &[][..]),("/txn-image", &["FAIL=1"][..]),("/no-grants/image", &[][..])] {
+        assert!(TransparentExecutor::execute_with_abi(path,&["image"],env,TestImageAbi::name(),&task,&mut frame).is_err());
+        assert!(task.pending_exec_transition.read().is_some());
+        assert_eq!(task.security_subject.read().as_ref().unwrap().label(),1);
+        assert_eq!(task.vm_manager.memmap_len(),0);
+    }
+    task.credentials.write().set_principals(Identities::all(Principal(42))).unwrap();
+    assert!(TransparentExecutor::execute_with_abi("/txn-image",&["image"],&[],TestImageAbi::name(),&task,&mut frame).is_err());
+    task.credentials.write().set_principals(Identities::all(Principal(0))).unwrap();
+    TransparentExecutor::execute_with_abi("/txn-image",&["image"],&[],TestImageAbi::name(),&task,&mut frame).unwrap();
+    assert_eq!(task.security_subject.read().as_ref().unwrap().label(),2);
+    assert!(task.pending_exec_transition.read().is_none());
+    *task.security_subject.write() = Some(policy.subject(1).unwrap());
+    TransparentExecutor::execute_with_abi("/txn-image",&["image"],&[],TestImageAbi::name(),&task,&mut frame).unwrap();
+    assert_eq!(task.security_subject.read().as_ref().unwrap().label(),2);
+}

@@ -127,3 +127,19 @@ These grants remain separate from `service_manager` grants. Unknown classes and
 permission bits deny access; registering a property label grants no authority.
 The native policy label bound is 512 so a manager can register the pinned image's
 property contexts alongside process subjects without merging label identities.
+
+File-dependent exec rules match the source label, registered inode label and all
+three native principal slots. The Android `create` query previews the target;
+common exec validates the actual opened inode and credentials before committing
+any process state. A failed exec retains its reservation. File-derived label
+changes respect no-privilege-gain mounts; direct delegated transitions remain
+separate. Registering an inode requires policy management authority. Bindings
+retain the inode and filesystem, survive rename and hard links, and cannot move
+to a replacement file at the same path. They are bounded and fixed once set.
+These labels provide exec selection; general filesystem MAC and file integrity
+measurement remain separate work.
+
+Local sockets snapshot the native subject alongside the originating credentials.
+Android translates the connected peer's captured subject through `SO_PEERSEC`;
+an exited or relabeled peer does not change the snapshot, and foreign policy
+identities fail authorization instead of returning a manufactured context.

@@ -4880,7 +4880,7 @@ impl Ext2FileSystem {
 }
 
 impl FileSystemOperations for Ext2FileSystem {
-    fn supports_advisory_locks(&self) -> bool {
+    fn supports_retained_node_identity(&self) -> bool {
         true
     }
 

@@ -31,3 +31,16 @@ pub struct RawTransition {
     pub reserved: u32,
 }
 const _: [(); 16] = [(); core::mem::size_of::<RawTransition>()];
+
+/// File-label-dependent exec selection. Query previews omit the principal;
+/// execution always checks all native principal slots. Reserved must be zero.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawExecTransition {
+    pub source: u32,
+    pub resource: u32,
+    pub target: u32,
+    pub principal: u32,
+    pub reserved: u64,
+}
+const _: [(); 24] = [(); core::mem::size_of::<RawExecTransition>()];

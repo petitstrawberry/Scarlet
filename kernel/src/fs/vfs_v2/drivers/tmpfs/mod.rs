@@ -140,7 +140,7 @@ impl FileSystemOperations for TmpFS {
         self.fs_id
     }
 
-    fn supports_advisory_locks(&self) -> bool {
+    fn supports_retained_node_identity(&self) -> bool {
         true
     }
 

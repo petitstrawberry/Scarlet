@@ -292,13 +292,17 @@ pub trait FileSystemOperations: Send + Sync {
     /// in combination with file identifiers to create globally unique cache keys.
     fn fs_id(&self) -> FileSystemId;
 
+    /// Retaining a node pins a stable inode identity across aliases and unlink.
+    /// Used by native metadata authorities that must never label a reused inode.
+    fn supports_retained_node_identity(&self) -> bool { false }
+
     /// Whether `(fs_id(), VfsNode::id())` is a safe advisory-lock identity.
     ///
     /// All aliases, including hard links, must keep the same node ID, and a
     /// live open description must prevent reuse of its inode identity. A
     /// path-based identity (such as the current overlay nodes) is insufficient.
     fn supports_advisory_locks(&self) -> bool {
-        false
+        self.supports_retained_node_identity()
     }
 
     /// Look up a child node by name within a parent directory

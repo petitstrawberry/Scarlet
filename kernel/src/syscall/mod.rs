@@ -234,6 +234,8 @@ syscall_table! {
     ProcessScopeSetReaper = 1322 => crate::task::process_scope::syscall::sys_process_scope_set_reaper,
     ProcessScopeTerminate = 1323 => crate::task::process_scope::syscall::sys_process_scope_terminate,
     ProcessScopeStatus = 1324 => crate::task::process_scope::syscall::sys_process_scope_status,
+    ShieldPolicyCreateExec = 1325 => crate::shield::syscall::sys_shield_policy_create_exec,
+    ShieldBindFile = 1326 => crate::shield::syscall::sys_shield_bind_file,
     ShieldPolicyCreate = 1310 => crate::shield::syscall::sys_shield_policy_create,
     ShieldPolicyCurrent = 1311 => crate::shield::syscall::sys_shield_policy_current,
     ShieldApply = 1312 => crate::shield::syscall::sys_shield_apply,

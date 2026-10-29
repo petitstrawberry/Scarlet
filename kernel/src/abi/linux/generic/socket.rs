@@ -1255,6 +1255,22 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return 0;
     }
 
+    if level == SOL_SOCKET && optname == 31 { // SO_PEERSEC
+        let result = (|| {
+            let handle = abi.get_handle(sockfd as usize).ok_or(errno::EBADF)?;
+            let socket = task.handle_table.get(handle).and_then(KernelObject::into_socket_arc).ok_or(errno::ENOTSOCK)?;
+            let local = LocalSocket::from_socket_object(socket.as_ref()).ok_or(errno::ENOPROTOOPT)?;
+            let peer = local.peer_credentials().ok_or(errno::ENOTCONN)?;
+            let subject = peer.subject.as_ref().ok_or(errno::ENODATA)?;
+            let bytes = abi.extensions.peer_security_context(&task, subject).ok_or(errno::ENOPROTOOPT)??;
+            copy_to_user(&task, optlen_ptr, &(bytes.len() as u32).to_ne_bytes()).map_err(|_| errno::EFAULT)?;
+            if (optlen as usize) < bytes.len() { return Err(errno::ERANGE); }
+            copy_to_user(&task, optval_ptr, &bytes).map_err(|_| errno::EFAULT)?;
+            Ok(0)
+        })();
+        return result.unwrap_or_else(errno::to_result);
+    }
+
     if level == SOL_SOCKET && optname == SO_PEERCRED {
         if optlen < size_of::<LinuxUcred>() as u32 {
             return errno::to_result(errno::EINVAL);

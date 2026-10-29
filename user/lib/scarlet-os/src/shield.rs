@@ -8,7 +8,7 @@ use crate::{
 };
 use alloc::vec::Vec;
 use scarlet_abi::shield::{RawLabel, RawRule};
-pub use scarlet_abi::shield::{RawRule as Rule, RawTransition as Transition};
+pub use scarlet_abi::shield::{RawRule as Rule, RawTransition as Transition, RawExecTransition as ExecTransition};
 use scarlet_sys::{Syscall, syscall0, syscall1, syscall2, syscall4, syscall6};
 
 pub struct Policy(Handle);
@@ -69,6 +69,22 @@ impl Policy {
                 transitions.len(),
             )
         })
+    }
+    /// Create file-dependent exec rules without delegating direct set-label authority.
+    pub fn create_with_exec_transitions(labels: &[(u32, &str)], rules: &[Rule], transitions: &[Transition], exec: &[ExecTransition]) -> HandleResult<Self> {
+        if labels.iter().any(|(_, name)| name.len() > 255) { return Err(HandleError::InvalidParameter); }
+        let raw: Vec<_> = labels.iter().map(|(id, name)| RawLabel {id:*id, name_len:name.len() as u32, name:name.as_ptr() as u64}).collect();
+        let spec = [raw.as_ptr() as u64, raw.len() as u64, rules.as_ptr() as u64, rules.len() as u64,
+            transitions.as_ptr() as u64, transitions.len() as u64, exec.as_ptr() as u64, exec.len() as u64];
+        // SAFETY: fixed-width specification and all borrowed arrays live through the copy.
+        Self::returned(unsafe { syscall2(Syscall::ShieldPolicyCreateExec, spec.as_ptr() as usize, 64) })
+    }
+    /// Bind a native inode identity to this policy until the policy is released.
+    /// Requires management authority; a different existing binding is rejected.
+    pub fn bind_file(&self, file: &Handle, label: u32) -> HandleResult<()> {
+        // SAFETY: both live capabilities are validated by the kernel.
+        let result = unsafe { scarlet_sys::syscall3(Syscall::ShieldBindFile, self.0.as_raw() as usize, file.as_raw() as usize, label as usize) };
+        if result == 0 { Ok(()) } else { Err(HandleError::InvalidParameter) }
     }
     /// Apply only a transition explicitly delegated by this immutable policy.
     /// Query authority identifies the policy; it does not grant transitions.

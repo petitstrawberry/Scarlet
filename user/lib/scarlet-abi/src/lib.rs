@@ -836,6 +836,8 @@ pub enum Syscall {
     ProcessScopeSetReaper = 1322,
     ProcessScopeTerminate = 1323,
     ProcessScopeStatus = 1324,
+    ShieldPolicyCreateExec = 1325,
+    ShieldBindFile = 1326,
     ShieldPolicyCreate = 1310,
     ShieldPolicyCurrent = 1311,
     ShieldApply = 1312,

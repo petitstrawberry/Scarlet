@@ -460,6 +460,9 @@ impl TransparentExecutor {
         let no_file_grants = file.as_file().is_some_and(|f| !f.allows_execution_privilege_gain());
         let inherited_credentials = no_file_grants.then(|| image.credentials.read().clone());
         let inherited_subject = image.security_subject.read().clone();
+        let resource_label = inherited_subject.as_ref().and_then(|subject| file.as_file()
+            .and_then(|file| file.as_any().downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>())
+            .and_then(|file| subject.policy().resource_label(file.get_vfs_entry().node().as_ref())));
         let mut next_trapframe = trapframe.clone();
         abi.execute_binary(file, argv, envp, &image, &mut next_trapframe)
             .map_err(failure)?;
@@ -477,8 +480,17 @@ impl TransparentExecutor {
             let source_subject = source.security_subject.read().clone().ok_or_else(|| failure("exec transition source lost"))?;
             let prepared_subject = image.security_subject.read().clone().ok_or_else(|| failure("exec transition source lost"))?;
             if !source_subject.same_identity(&prepared_subject) { return Err(failure("exec transition source changed")); }
-            let target = pending.resolve(&source_subject, &image.credentials.read()).map_err(failure)?;
+            let target = pending.resolve_for_resource(&source_subject, &image.credentials.read(), resource_label, !no_file_grants).map_err(failure)?;
             *image.security_subject.write() = Some(target);
+        } else if let (Some(subject), Some(resource)) = (&inherited_subject, resource_label) {
+            if subject.policy().has_exec_resource(subject.label(), resource) {
+                if !image.security_subject.read().as_ref().is_some_and(|prepared| prepared.same_identity(subject)) {
+                    return Err(failure("exec resource source changed"));
+                }
+                let target = subject.resource_exec(resource, &image.credentials.read()).map_err(failure)?;
+                if no_file_grants && !target.same_identity(subject) { return Err(failure("file-derived label change disabled on mount")); }
+                *image.security_subject.write() = Some(target);
+            }
         }
         image.set_executable_path(identity);
 

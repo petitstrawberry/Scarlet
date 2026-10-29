@@ -94,12 +94,16 @@ pub struct SocketCredentials {
     namespace: Option<Arc<crate::task::namespace::TaskNamespace>>,
     local_id: usize,
     pub identity: crate::shield::identity::ActiveIdentity,
+    pub subject: Option<crate::shield::Subject>,
 }
 impl PartialEq for SocketCredentials {
     fn eq(&self, other: &Self) -> bool {
         self.process_id == other.process_id
             && self.identity == other.identity
             && self.local_id == other.local_id
+            && match (&self.subject, &other.subject) {
+                (Some(a),Some(b)) => a.same_identity(b), (None,None) => true, _ => false,
+            }
             && match (&self.namespace, &other.namespace) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
                 (None, None) => true,
@@ -125,6 +129,7 @@ impl SocketCredentials {
         use crate::shield::identity::*;
         Self {
             process_id: 0,
+            subject: None,
             namespace: None,
             local_id: 0,
             identity: ActiveIdentity {
@@ -577,6 +582,7 @@ impl LocalSocket {
             }
         };
         SocketCredentials {
+            subject: task.security_subject.read().clone(),
             process_id: task.get_thread_group_id(),
             local_id: task
                 .get_namespace()
@@ -1793,6 +1799,7 @@ mod tests {
         let ns = crate::task::namespace::TaskNamespace::new_root("credential-snapshot".into());
         ns.register_mapping(7, 42);
         let first = SocketCredentials {
+            subject: None,
             process_id: 42,
             namespace: Some(ns.clone()),
             local_id: 7,
