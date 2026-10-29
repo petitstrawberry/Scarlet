@@ -1,0 +1,44 @@
+{
+  "date": "2026-10-29",
+  "revisions": {
+    "probe_builder": "80fbb5a28b79aa1d8bf664b89884fba35a8a9e56",
+    "runner_and_evidence": "518544ccff2bdb745215bcd5049e99da05c5f6e6"
+  },
+  "result": "PASS",
+  "acceleration": "HVF",
+  "host_tests": 32,
+  "kernel": {
+    "sha256": "e53def5070e622fbdb69a5917b492d7d88cd6983a50914c32ce0fcc355813e73",
+    "source_revision": "f4bc420e67400d5dba7e04cf7a0abbff24c504a1",
+    "reused_checkpoint": "../2026-10-29-binder-objects/verification.json",
+    "changed": false
+  },
+  "program_sha256": "f4c3aeb720dbd9159bb784f000ec4c4894b2b80f17a38b7487103d89f1807919",
+  "runtime_libraries": {
+    "system/lib64/libbinder.so": "12335fdbe5e53a16f8b84882a3421dafc3817169526bc0cca3a77678d2334ad6",
+    "system/lib64/libutils.so": "acb3e9a4371e162966bdf871c38cb769099e72f3837e83a2ba3b337ea28c9f46",
+    "system/lib64/liblog.so": "20af27adc3ad6ecc4b260de85be062becb8d101a3ad95da409aec5b930d76c8d",
+    "apex/com.android.art/lib64/libc++.so": "56c39cfbf535246ed3ce615132ebc069bfc3d415497543b35194b574c0fac408"
+  },
+  "observations": [
+    "Unmodified Android 13 libbinder/libutils/liblog/platform libc++ loaded; no LD_PRELOAD or Binder ioctl shim",
+    "Custom context BBinder in a separate process, manual polling; remote client obtains a transferred service",
+    "Two creation/release cycles: owner roundtrip and null object, interface tokens and caller PID, integer and UTF-16 reply, UNKNOWN_TRANSACTION status",
+    "Actual BBinder destruction at strong zero; server RefBase weak count falls from owner+driver (2) to owner only (1) after client weak release",
+    "Server and launcher child exit zero; exact ordered evidence accepted by dedicated runner"
+  ],
+  "limitations": [
+    "Custom service probe, not stock servicemanager or Android framework service registration",
+    "No worker pool, one-way/nested calls, FD transfer, death subscriptions, weak promotion, SELinux or direct APK claim"
+  ],
+  "sha256": {
+    "build.log": "f617569c4dd618d0c2a6d2f90beb1f6bff9b72ffce8c994f4b3d4e8be4362228",
+    "commands.json": "be6cee3219b083adefeba45f0916e7f0794cc6499222148d6d7982c6c30085ae",
+    "host-tests.log": "5c10cebea289b77a9205e8f503dc3758cd309ac812056dec218104c579564ac6",
+    "inputs.json": "a7a3398450ddd1fc510660327bfc407ca1e8b59def5f3adac9eda6e37b7c6ab6",
+    "libbinder-build.json": "b88e6831608ebda5655760f9c4d2c069583377405f94f3bb300308bbbd0ab189",
+    "program-launch.json": "a1bbe1eff8e6e8f60ba27b31e820c758f4ed63c67e55303e7ddc3d860b1d7162",
+    "result.json": "fdbd66b1aa5362351d98e479e807c5cfd588a47a7a04ca0d0cf0558606773538",
+    "serial.log": "ba02fde9f8ce99626b2e41acc849a75f84b4231d8b5eff553d55bb11668fe924"
+  }
+}

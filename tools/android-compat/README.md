@@ -6,8 +6,8 @@ neither fixture certifies general APK compatibility.
 | | Android in a VM | Direct Android userspace |
 |---|---|---|
 | Execution | APK → Android framework/ART → guest Linux → crosvm → Scarlet | Android ELF → Bionic/linker → Scarlet Android ABI (composes Linux ABI) |
-| Reused Android facilities | Guest Binder, Android init, framework and HALs | Real Bionic/linker and an initial Binder UAPI adapter |
-| Main work ahead | Finish framework boot, then connect display/input to SWS | Unmodified libbinder services, broader ART/JNI coverage, framework and graphics integration |
+| Reused Android facilities | Guest Binder, Android init, framework and HALs | Stock Bionic/linker and libbinder on Scarlet's Binder adapter |
+| Main work ahead | Finish framework boot, then connect display/input to SWS | Service manager integration, broader ART/JNI coverage, framework and graphics integration |
 | Current rendering | Cuttlefish ANGLE/SwiftShader, headless virtio-gpu stub | No Android graphics stack yet |
 | Fixture | [Cuttlefish project](../../projects/aarch64-limine-crosvm/README.md) | This directory |
 
@@ -356,9 +356,9 @@ not a binderfs implementation and are not yet represented by normal VFS nodes.
 **Not implemented:** FD/buffer-object transfer, weak-to-strong promotion,
 general death subscriptions, one-way and nested calls, automatic thread-pool
 growth, priority inheritance, security-context records and SELinux policy.
-Unsupported transaction features return errors. The Binder checkpoint does not
-yet run unmodified libbinder services or servicemanager. The separate minimal
-ART/Java fixture passes; direct APK execution remains unverified.
+Unsupported transaction features return errors. Stock libbinder serves a custom
+`BBinder` probe through this adapter; stock servicemanager is not yet usable.
+The separate minimal ART/Java fixture passes; direct APK execution remains unverified.
 
 The [object checkpoint](checkpoints/2026-10-29-binder-objects/verification.json)
 records the three-process NDK UAPI probes in both static and dynamic Bionic,
@@ -371,8 +371,8 @@ records the poll regression probes and native object transfer/lifetime tests.
 The unmodified SDK `servicemanager` reaches startup but exits with status 127;
 a separate diagnostic run redirecting Android logs to stderr identifies
 `selinux_status_open(true)` as the failing check. It does not reach a usable
-service manager. Unmodified libbinder service tests come next; SELinux
-compatibility is a separate design task.
+service manager. Stock libbinder is now tested separately below; SELinux
+compatibility remains a separate design task.
 
 `prepare-servicemanager.py` extracts the executable from the same pinned SDK
 archive as `prepare-art.py` and checks its library dependencies against the
@@ -380,6 +380,47 @@ prepared runtime. `run-direct.py --program <executable> --runtime-root <runtime>
 --stock-inputs <stock> ...` launches it for diagnosis. This mode records exit or
 timeout and explicitly leaves service readiness untested; it cannot produce a
 service PASS merely because a daemon stays alive or exits zero.
+
+### Stock libbinder service probe
+
+The [libbinder checkpoint](checkpoints/2026-10-29-stock-libbinder/verification.json)
+runs unmodified SDK `libbinder.so`, `libutils.so`, `liblog.so` and platform
+`libc++.so` on HVF. A custom C++ probe creates a context object in one process,
+then publishes `BBinder` services to a separate client through real `Parcel`
+transactions. It uses manual polling and no worker pool. It does not replace
+servicemanager or exercise Android framework service registration.
+
+Two creation/release cycles verify nonzero remote handles, interface tokens,
+sender PID, integers and UTF-16 strings, return of a Binder reference to its
+owner, null references, and `UNKNOWN_TRANSACTION` status replies. A client
+`wp<IBinder>` keeps only the weak reference alive after the final strong
+reference is dropped. The server verifies the actual `BBinder` destructor and
+`RefBase` weak count: owner plus driver, then owner only after weak release.
+The client also resolves `ProcessState::self` with `dladdr` to check that the
+loaded implementation is `/system/lib64/libbinder.so`.
+
+The builder downloads AOSP Android 13 headers at fixed Git commits and verifies
+their complete regular-file content maps. It links the stock platform C++ ABI
+(`std::__1`/`libc++.so`) rather than the NDK C++ runtime. Source snapshots, header
+pins, ELF dependencies and runtime library hashes are recorded in `build.json`.
+The runner rejects stale builds and requires every ordered RPC/lifetime marker,
+stock initialization, and successful exits from both processes. `--program`
+retains its diagnostic-only meaning.
+
+From `nix develop`, using the prepared runtime and stock overlay above:
+
+```sh
+python3 tools/android-compat/build-libbinder-probe.py \
+  --ndk "$ANDROID_NDK_HOME" \
+  --runtime-root .build/android-compat/art-runtime \
+  --output .build/android-compat/libbinder-probe
+python3 tools/android-compat/run-direct.py \
+  --kernel projects/aarch64-limine-crosvm/bsp/target/aarch64-unknown-none-elf/release/scarlet \
+  --libbinder-probe .build/android-compat/libbinder-probe \
+  --runtime-root .build/android-compat/art-runtime \
+  --stock-inputs .build/android-compat/stock-inputs \
+  --output .build/android-compat/libbinder-run --accel hvf
+```
 
 ### Kernel fixes exercised
 
