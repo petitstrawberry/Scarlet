@@ -100,3 +100,19 @@ source = { git = "https://github.com/petitstrawberry/easyrpg-player-scarlet.git"
 kind = "bundle"
 source = { git = "https://github.com/petitstrawberry/scarlet-bundle-linux-games.git", rev = "6f856392be9e42171339ae1633b2fd5e9fbe2e49" }
 subdir = "bundles/openttd"
+
+[[layers]]
+kind = "archive"
+url = "https://github.com/petitstrawberry/scarlet-bundle-lwjgl/releases/download/v0.2.6/lwjgl-3.4.3-aarch64-v0.2.6.tar.gz"
+sha256 = "sha256:8f3b401aa61f878e27e3e1476d289188e1ee832dde87a26bfc63496f215160d3"
+format = "tar-gz"
+strip_components = 1
+to = "/"
+
+[[layers]]
+kind = "archive"
+url = "https://github.com/petitstrawberry/scarlet-bundle-openjdk/releases/download/v0.1.14/openjdk-25-aarch64-v0.1.14.tar.gz"
+sha256 = "sha256:fb4cdc850baf25f48f9e03ba89a32ff568602d35daa2f9e6535225b4daf75c8e"
+format = "tar-gz"
+strip_components = 1
+to = "/"
