@@ -1,3 +1,4 @@
+pub(crate) mod uevent;
 use crate::ipc::IpcError;
 use crate::object::capability::StreamError;
 use crate::{
@@ -423,6 +424,8 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
+    if domain==16 {return uevent::create(abi,&task,socket_base_type,socket_flags,_protocol);}
+
     // Map Linux socket domain to Scarlet domain
     let scarlet_domain = match domain {
         AF_UNIX => SocketDomain::Local,
@@ -587,6 +590,10 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
+    if let Some(object)=abi.get_handle(sockfd as usize).and_then(|handle|task.handle_table.get(handle)) {
+        if let Some(socket)=uevent::from_object(&object) {return socket.bind(&task,addr_ptr,addrlen as usize);}
+    }
+
 
     // Get the file descriptor handle
     let handle_id = match abi.get_handle(sockfd as usize) {
@@ -1191,6 +1198,10 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
+    if let Some(object)=abi.get_handle(sockfd as usize).and_then(|handle|task.handle_table.get(handle)) {
+        if let Some(socket)=uevent::from_object(&object) {return socket.get_option(&task,level,optname,optval_ptr,optlen_ptr);}
+    }
+
 
     let mut optlen_bytes = [0u8; size_of::<u32>()];
     if copy_from_user(&task, optlen_ptr, &mut optlen_bytes).is_err() {
@@ -1374,6 +1385,10 @@ pub fn sys_setsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
+    if let Some(object)=abi.get_handle(sockfd as usize).and_then(|handle|task.handle_table.get(handle)) {
+        if let Some(socket)=uevent::from_object(&object) {return socket.set_option(&task,level,optname,optval_ptr,optlen as usize);}
+    }
+
 
     if level == SOL_SOCKET && optname == SO_PASSCRED {
         if optlen != size_of::<i32>() as u32 {
@@ -1741,6 +1756,10 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // );
 
     trapframe.increment_pc_next(&task);
+    if let Some(object)=abi.get_handle(sockfd as usize).and_then(|handle|task.handle_table.get(handle)) {
+        if let Some(socket)=uevent::from_object(&object) {return socket.receive_message(&task,msg_ptr,flags);}
+    }
+
 
     let handle = match abi.get_handle(sockfd) {
         Some(h) => h,

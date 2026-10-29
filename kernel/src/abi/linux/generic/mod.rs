@@ -1,3 +1,4 @@
+mod device_tree;
 pub mod credentials;
 pub mod cgroup;
 pub mod seccomp;
@@ -571,6 +572,7 @@ syscall_table! {
     Fcntl = 25 => fs::sys_fcntl,
     InotifyInit1 = 26 => fs::sys_inotify_init1,
     Ioctl = 29 => fs::sys_ioctl,
+    MknodAt = 33 => fs::sys_mknodat,
     MkdirAt = 34 => fs::sys_mkdirat,
     UnlinkAt = 35 => fs::sys_unlinkat,
     SymlinkAt = 36 => fs::sys_symlinkat,

@@ -4298,6 +4298,24 @@ pub fn sys_faccessat2(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 ///
 /// Currently supports only AT_FDCWD (current working directory) as dirfd.
 ///
+/// Create a node only for an endpoint already exposed in this View.
+pub fn sys_mknodat(abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
+    let Some(task)=mytask() else {return errno::to_result(errno::ESRCH);};
+    let dirfd=frame.get_arg(0) as i32;let path=frame.get_arg(1);let mode=frame.get_arg(2) as u32;let device=frame.get_arg(3);
+    frame.increment_pc_next(&task);
+    (|| -> Result<usize,usize> {
+        if !task.credentials.read().permits(crate::shield::identity::MANAGE_DEVICES) {return Err(errno::EPERM);}
+        let kind=match mode & 0o170000 {0o020000=>crate::device::DeviceType::Char,0o060000=>crate::device::DeviceType::Block,_=>return Err(errno::EOPNOTSUPP)};
+        let path=parse_c_string_from_userspace(&task,path,MAX_PATH_LENGTH).map_err(|_|errno::EFAULT)?;
+        let view=task.get_vfs().ok_or(errno::EIO)?;let path=path_at_to_absolute(abi,&task,&view,dirfd,&path)?;
+        if view.resolve_path_with_options(&path,&crate::fs::vfs_v2::PathResolutionOptions::no_follow()).is_ok() {return Err(errno::EEXIST);}
+        let endpoint=DeviceManager::get_manager().endpoint_snapshot().0.into_iter().find(|endpoint|endpoint.id==device && endpoint.kind==kind && super::socket::uevent::visible(&view,endpoint)).ok_or(errno::ENODEV)?;
+        view.create_device_file(&path,crate::fs::DeviceFileInfo {device_id:endpoint.id,device_type:endpoint.kind}).map_err(|error|errno::from_fs_error(&error))?;
+        let node=view.resolve_path(&path).map_err(|error|errno::from_fs_error(&error))?.0.node();
+        super::mode::set(&node,mode & 0o7777);Ok(0)
+    })().unwrap_or_else(errno::to_result)
+}
+
 pub fn sys_mkdirat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = match mytask() {
         Some(t) => t,
