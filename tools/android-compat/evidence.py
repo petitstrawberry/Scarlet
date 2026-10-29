@@ -13,6 +13,22 @@ MAX_PNG = 16 * 1024 * 1024
 MAX_PIXELS = 16 * 1024 * 1024
 
 
+def analyze_apk_runtime(data):
+    expected = ["SCARLET_ANDROID_STOCK_START properties", "SCARLET_PROPERTY_SNAPSHOT_OK",
+                "SCARLET_ANDROID_STOCK_EXIT properties 0", "SCARLET_ANDROID_STOCK_START linkerconfig",
+                "SCARLET_ANDROID_STOCK_EXIT linkerconfig 0", "SCARLET_ANDROID_STOCK_OK",
+                "SCARLET_ANDROID_PROGRAM_START", "SCARLET_APK_RUNTIME_BEGIN", "SCARLET_APK_RUNTIME_PACKAGE_LITE_OK",
+                "SCARLET_APK_RUNTIME_SIGNATURE_OK", "SCARLET_APK_RUNTIME_TAMPER_REJECTED", "SCARLET_APK_RUNTIME_RESOURCES_OK", "SCARLET_APK_RUNTIME_DEX_OK",
+                "SCARLET_APK_RUNTIME_OK", "SCARLET_ANDROID_PROGRAM_EXIT 0", "SCARLET_ANDROID_PROGRAM_DONE"]
+    lines = data.replace(b"\r", b"").decode("utf-8", errors="replace").splitlines()
+    records = [line for line in lines if line.startswith(
+        ("SCARLET_APK_RUNTIME_", "SCARLET_ANDROID_PROGRAM_", "SCARLET_ANDROID_STOCK_", "SCARLET_PROPERTY_"))]
+    records = ["SCARLET_PROPERTY_SNAPSHOT_OK" if
+               re.fullmatch(r"SCARLET_PROPERTY_SNAPSHOT_OK [1-9][0-9]*", line) else line for line in records]
+    return {"result": "PASS" if records == expected else "INCOMPLETE", "records": records,
+            "activity_launch": "not tested", "graphics": "not tested"}
+
+
 def analyze_framework_services(data):
     lines = data.replace(b"\r", b"").decode("utf-8", errors="replace").splitlines()
     prefix = "SCARLET_FRAMEWORK_SERVICES_"

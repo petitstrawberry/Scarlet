@@ -130,10 +130,10 @@ def verify_framework_probe(build, services=False):
     return record
 
 
-def framework_launch(metadata, services=False):
+def framework_launch(metadata, services=False, apk=False):
     return {
         "argv": ["/" + PROGRAM, "-Xint", "-Xusejit:false", "-Ximage:/system/nonexistent/boot.art",
-                 "-Xnoimage-dex2oat", "-Xms16m", "-Xmx256m", "/system/bin", "--application", "ScarletFrameworkService" if services else "ScarletFrameworkHello"],
+                 "-Xnoimage-dex2oat", "-Xms16m", "-Xmx256m", "/system/bin", "--application", "ScarletApkProbe" if apk else "ScarletFrameworkService" if services else "ScarletFrameworkHello"],
         "env": ["PATH=/system/bin:/apex/com.android.art/bin", "ANDROID_ROOT=/system", "ANDROID_DATA=/data",
                 "ANDROID_ART_ROOT=/apex/com.android.art", "ANDROID_I18N_ROOT=/apex/com.android.i18n",
                 "ANDROID_TZDATA_ROOT=/apex/com.android.tzdata", "ANDROID_LOG_TAGS=*:v",

@@ -16,7 +16,8 @@ import shutil
 import subprocess
 import sys
 
-from evidence import analyze_art, analyze_direct, analyze_libbinder, analyze_selinux, analyze_services, analyze_framework, analyze_framework_services
+from evidence import analyze_art, analyze_direct, analyze_libbinder, analyze_selinux, analyze_services, analyze_framework, analyze_framework_services, analyze_apk_runtime
+from apk_inputs import verify_apk_probe, stage_apk_probe
 from art_inputs import art_launch, validate_dex, verify_art_runtime, sha256
 from libbinder_inputs import verify_libbinder_build
 from selinux_inputs import verify_selinux_build
@@ -45,6 +46,7 @@ def main():
     mode.add_argument("--service-probe", type=Path, help="stock servicemanager integration probe build")
     mode.add_argument("--framework-probe", type=Path, help="build-dex.py --framework-sdk output; verify stock app_process framework/JNI")
     mode.add_argument("--framework-services", type=Path, help="framework probe build; stock manager and three labeled Java peers")
+    mode.add_argument("--apk-probe", type=Path, help="build-apk.py --runtime-probe output; package parsing, signature, resources and APK DEX, without Activity launch")
     parser.add_argument("--framework-inputs", type=Path, help="prepare-framework.py output")
     parser.add_argument("--service-inputs", type=Path, help="verified stock servicemanager from prepare-servicemanager.py")
     parser.add_argument("--runtime-root", type=Path, help="Android /system and /apex runtime tree")
@@ -59,12 +61,18 @@ def main():
         if not args.service_inputs:
             parser.error("--framework-services requires --service-inputs")
         args.framework_probe = args.framework_services
+    if args.apk_probe:
+        args.framework_probe = args.apk_probe
     framework = None
+    apk = None
     if args.framework_probe:
         if not args.runtime_root or not args.stock_inputs or not args.framework_inputs:
             parser.error("--framework-probe requires --runtime-root, --stock-inputs and --framework-inputs")
-        verify_framework_probe(args.framework_probe, services=bool(args.framework_services))
         framework = verify_framework_inputs(args.framework_inputs, args.runtime_root, args.stock_inputs)
+        if args.apk_probe:
+            apk = verify_apk_probe(args.apk_probe, framework)
+        else:
+            verify_framework_probe(args.framework_probe, services=bool(args.framework_services))
         args.program = args.framework_inputs / PROGRAM
     elif args.framework_inputs:
         parser.error("--framework-inputs requires --framework-probe")
@@ -126,7 +134,7 @@ def main():
             "env": ["ANDROID_LOG_TAGS=*:v", "LD_LIBRARY_PATH=" + metadata["library_path"]],
         }
         if framework:
-            art = framework_launch(framework, services=bool(args.framework_services))
+            art = framework_launch(framework, services=bool(args.framework_services), apk=bool(args.apk_probe))
             dex_hash = validate_dex(args.framework_probe / "classes.dex")
         if args.linker_debug:
             art["env"].append("LD_DEBUG=3")
@@ -144,6 +152,8 @@ def main():
     (output / "inputs.json").write_text(json.dumps({
         "kernel_sha256": hashlib.sha256(kernel.read_bytes()).hexdigest(),
         "dex_sha256": dex_hash,
+        "apk_sha256": apk["sha256"] if apk else None,
+        "tampered_apk_sha256": apk["tampered_sha256"] if apk else None,
         "framework_manifest_sha256": sha256(args.framework_inputs / "framework-inputs.json") if framework else None,
         "framework_build_sha256": sha256(args.framework_probe / "build.json") if framework else None,
         "framework_fixture_sha256": {name: sha256(SOURCE / "init/src" / name) for name in (("main.rs", "stock.rs", "services.rs", "framework_services.rs") if args.framework_services else ("main.rs", "stock.rs"))} if framework else None,
@@ -199,6 +209,8 @@ def main():
         if framework:
             bootstrap = stage_framework_inputs(args.framework_inputs, args.runtime_root, args.stock_inputs, android)
             (output / "framework-bootstrap.json").write_text(json.dumps(bootstrap, indent=2) + "\n")
+        if apk:
+            stage_apk_probe(args.apk_probe, android, apk["sha256"], apk["tampered_sha256"])
         if args.program and not framework:
             target = android / art["argv"][0].lstrip("/")
             if target.exists() or target.is_symlink():
@@ -296,6 +308,15 @@ def main():
         # timeout, never proves that its service interface is usable.
         exits = re.findall(rb"\nSCARLET_ANDROID_PROGRAM_EXIT (-?\d+)\r*\n", data)
         result["program_exit_status"] = int(exits[0]) if len(exits) == 1 else None
+        if apk:
+            result["apk_runtime"] = analyze_apk_runtime(data)
+            if result["result"] == "PASS" and result["apk_runtime"]["result"] != "PASS":
+                result["result"] = "missing or failed APK runtime evidence"
+            result["apk_execution"] = "payload DEX only" if result["result"] == "PASS" else "not established"
+            result["activity_launch"] = "not tested"
+            (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+            print(f"Stock APK parsing/resources/DEX probe: {result['result']}")
+            return 0 if result["result"] == "PASS" else 1
         if framework:
             result["framework"] = analyze_framework(data)
             if result["result"] == "PASS" and result["framework"]["result"] != "PASS":
