@@ -23,7 +23,10 @@ def successful_log():
     for cycle in (1, 2):
         for step in ("HANDLE_OK", "ROUNDTRIP_OK", "CALL_OK", "STATUS_OK", "STRONG_ZERO_WEAK_LIVE", "REFS_RELEASED"):
             lines.append(f"SCARLET_LIBBINDER_CYCLE {cycle} {step}")
-    lines += ["SCARLET_LIBBINDER_SERVER_EXIT 0", "SCARLET_LIBBINDER_OK",
+    lines += ["SCARLET_LIBBINDER_DEATH_UNLINK_OK", "SCARLET_LIBBINDER_DEATH_CALLBACK_OK",
+              "SCARLET_LIBBINDER_DEATH_CLEAR_OK", "SCARLET_LIBBINDER_DEAD_OBJECT_OK",
+              "SCARLET_LIBBINDER_DEATH_QUIET_OK",
+              "SCARLET_LIBBINDER_SERVER_EXIT 0", "SCARLET_LIBBINDER_OK",
               "SCARLET_ANDROID_PROGRAM_EXIT 0", "SCARLET_ANDROID_PROGRAM_DONE"]
     return "\n" + "\n".join(lines) + "\n"
 

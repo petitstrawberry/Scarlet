@@ -85,6 +85,27 @@ protected:
     }
 };
 
+class Recipient : public IBinder::DeathRecipient {
+    wp<IBinder> expected;
+public:
+    int calls = 0;
+    bool matched = false;
+    explicit Recipient(const sp<IBinder>& binder) : expected(binder) {}
+    void binderDied(const wp<IBinder>& who) override {
+        ++calls;
+        matched = who == expected;
+    }
+};
+
+static int pump(int fd) {
+    struct pollfd event = {fd, POLLIN, 0};
+    int count;
+    do { count = poll(&event, 1, 5000); } while (count < 0 && errno == EINTR);
+    CHECK(count == 1 && event.revents == POLLIN);
+    CHECK(IPCThreadState::self()->handlePolledCommands() == OK);
+    return 0;
+}
+
 static int server(int ready, int stop) {
     client_pid = getppid();
     auto process = ProcessState::self();
@@ -109,7 +130,8 @@ static int server(int ready, int stop) {
         CHECK(events[0].revents & POLLIN);
         CHECK(IPCThreadState::self()->handlePolledCommands() == OK);
     }
-    CHECK(created == CYCLES && destroyed == CYCLES);
+    // A final service remains referenced when its serving process exits.
+    CHECK(created == CYCLES + 1 && destroyed == CYCLES);
     return 0;
 }
 
@@ -178,9 +200,43 @@ static int client(int ready, int stop) {
         CHECK(stats(root, cycle, 1) == 0);
         dprintf(1, "SCARLET_LIBBINDER_CYCLE %d REFS_RELEASED\n", cycle);
     }
+    sp<IBinder> watched;
+    {
+        Parcel request, reply;
+        CHECK(request.writeInterfaceToken(descriptor()) == OK);
+        CHECK(root->transact(GET, request, &reply) == OK);
+        CHECK(reply.readStrongBinder(&watched) == OK && watched != nullptr);
+    }
+    int fd = -1;
+    CHECK(IPCThreadState::self()->setupPolling(&fd) == OK);
+    auto cancelled = sp<Recipient>::make(watched);
+    auto active = sp<Recipient>::make(watched);
+    const int weak_before = watched->getWeakRefs()->getWeakCount();
+    CHECK(watched->linkToDeath(cancelled) == OK);
+    CHECK(watched->unlinkToDeath(cancelled) == OK);
+    CHECK(pump(fd) == 0); // BR_CLEAR_DEATH_NOTIFICATION_DONE releases proxy hold
+    CHECK(cancelled->calls == 0 && watched->getWeakRefs()->getWeakCount() == weak_before);
+    dprintf(1, "SCARLET_LIBBINDER_DEATH_UNLINK_OK\n");
+    CHECK(watched->linkToDeath(active) == OK);
     root.clear();
     IPCThreadState::self()->flushCommands();
     CHECK(write(stop, "S", 1) == 1);
+    CHECK(pump(fd) == 0); // BR_DEAD_BINDER; libbinder emits CLEAR and DEAD_DONE
+    CHECK(active->calls == 1 && active->matched && cancelled->calls == 0);
+    dprintf(1, "SCARLET_LIBBINDER_DEATH_CALLBACK_OK\n");
+    CHECK(pump(fd) == 0); // CLEAR_DONE must follow DEAD_DONE
+    CHECK(watched->getWeakRefs()->getWeakCount() == weak_before);
+    dprintf(1, "SCARLET_LIBBINDER_DEATH_CLEAR_OK\n");
+    {
+        Parcel request, reply;
+        CHECK(watched->transact(ECHO, request, &reply) == DEAD_OBJECT);
+        CHECK(watched->linkToDeath(cancelled) == DEAD_OBJECT);
+    }
+    dprintf(1, "SCARLET_LIBBINDER_DEAD_OBJECT_OK\n");
+    struct pollfd idle = {fd, POLLIN, 0};
+    do { count = poll(&idle, 1, 50); } while (count < 0 && errno == EINTR);
+    CHECK(count == 0 && cancelled->calls == 0 && active->calls == 1);
+    dprintf(1, "SCARLET_LIBBINDER_DEATH_QUIET_OK\n");
     return 0;
 }
 

@@ -25,7 +25,10 @@ def analyze_libbinder(data):
         expected += [f"SCARLET_LIBBINDER_CYCLE {cycle} {step}" for step in
                      ("HANDLE_OK", "ROUNDTRIP_OK", "CALL_OK", "STATUS_OK",
                       "STRONG_ZERO_WEAK_LIVE", "REFS_RELEASED")]
-    expected += ["SCARLET_LIBBINDER_SERVER_EXIT 0", "SCARLET_LIBBINDER_OK",
+    expected += ["SCARLET_LIBBINDER_DEATH_UNLINK_OK", "SCARLET_LIBBINDER_DEATH_CALLBACK_OK",
+                 "SCARLET_LIBBINDER_DEATH_CLEAR_OK", "SCARLET_LIBBINDER_DEAD_OBJECT_OK",
+                 "SCARLET_LIBBINDER_DEATH_QUIET_OK",
+                 "SCARLET_LIBBINDER_SERVER_EXIT 0", "SCARLET_LIBBINDER_OK",
                  "SCARLET_ANDROID_PROGRAM_EXIT 0", "SCARLET_ANDROID_PROGRAM_DONE"]
     lines = data.replace(b"\r", b"").decode("utf-8", errors="replace").splitlines()
     records = [line for line in lines if line.startswith(
