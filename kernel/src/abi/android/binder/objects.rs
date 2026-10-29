@@ -230,6 +230,7 @@ pub(super) struct BufferReference {
     lease: Lease,
 }
 pub(super) struct Objects {
+    pub deaths: death::Deaths,
     nodes: BTreeMap<usize, Arc<Node>>,
     retired: Vec<Arc<Node>>,
     handles: BTreeMap<u32, Handle>,
@@ -241,6 +242,7 @@ pub(super) struct Objects {
 impl Default for Objects {
     fn default() -> Self {
         Self {
+            deaths: death::Deaths::default(),
             nodes: BTreeMap::new(),
             retired: Vec::new(),
             handles: BTreeMap::new(),
@@ -297,6 +299,34 @@ impl Objects {
         }
         Ok(handle.node.retain(true))
     }
+    pub fn request_death(
+        &mut self,
+        number: u32,
+        cookie: usize,
+        file: &BinderFile,
+    ) -> Result<(), usize> {
+        let object = if number == 0 {
+            if self.context_strong == 0 && self.context_weak == 0 {
+                return Err(errno::EINVAL);
+            }
+            file.domain
+                .context
+                .lock()
+                .as_ref()
+                .ok_or(errno::EINVAL)?
+                .object
+                .clone()
+        } else {
+            self.handles
+                .get(&number)
+                .ok_or(errno::EINVAL)?
+                .node
+                .object
+                .clone()
+        };
+        self.deaths
+            .request(number, cookie, &object, &file.endpoint.waker())
+    }
     fn exported(&self, number: u32, strong: bool) -> Result<Lease, usize> {
         let handle = self.handles.get(&number).ok_or(errno::EINVAL)?;
         if strong && !handle.can_call() {
@@ -339,6 +369,9 @@ impl Objects {
             } else {
                 count.checked_sub(1).ok_or(errno::EINVAL)?
             };
+            if self.context_strong == 0 && self.context_weak == 0 {
+                self.deaths.forget(0);
+            }
             return Ok(());
         }
         let handle = self.handles.get_mut(&number).ok_or(errno::EINVAL)?;
@@ -374,6 +407,7 @@ impl Objects {
         }
         if !handle.live() {
             self.handles.remove(&number);
+            self.deaths.forget(number);
         }
         Ok(())
     }
@@ -494,6 +528,7 @@ impl Objects {
                 }
                 if !handle.live() {
                     self.handles.remove(&number);
+                    self.deaths.forget(number);
                 }
             }
             drop(reference);
@@ -894,6 +929,44 @@ mod tests {
         assert!(!owner.objects.lock().pending_local_acquisitions());
         assert!(node.references.lock().idle());
         drop(calls);
+    }
+    #[test_case]
+    fn binder_death_subscription_accepts_weak_handles_and_follows_their_lifetime() {
+        for explicit_weak in [false, true] {
+            let domain = domain(Environment::new(), 0);
+            let owner = file(domain.clone());
+            let peer = file(domain);
+            let transit = owner
+                .objects
+                .lock()
+                .local(&owner, 0x1000, 0x2000, 0, false, 1)
+                .unwrap();
+            let mut objects = peer.objects.lock();
+            let reference = objects
+                .imported(&peer, transit.node.clone(), false)
+                .unwrap();
+            let handle = reference.handle.unwrap();
+            objects.buffers.insert(0x3000, vec![reference]);
+            assert_eq!(
+                objects.request_death(handle + 1, 88, &peer),
+                Err(errno::EINVAL)
+            );
+            objects.request_death(handle, 88, &peer).unwrap();
+            if explicit_weak {
+                objects
+                    .reference_command(BC_INCREFS, &handle.to_le_bytes())
+                    .unwrap();
+            }
+            objects.free_buffer(0x3000);
+            owner.endpoint.close();
+            assert_eq!(objects.deaths.ready(1, true), explicit_weak);
+            if explicit_weak {
+                objects
+                    .reference_command(BC_DECREFS, &handle.to_le_bytes())
+                    .unwrap();
+                assert!(!objects.deaths.ready(1, true));
+            }
+        }
     }
     #[test_case]
     fn binder_buffer_and_handle_references_balance_owner_notifications() {

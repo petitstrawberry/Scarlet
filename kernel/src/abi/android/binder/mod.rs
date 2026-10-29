@@ -31,8 +31,10 @@ use alloc::{
 use core::any::Any;
 
 mod arena;
+mod death;
 mod objects;
 use arena::Arena;
+use death::{BC_CLEAR_DEATH_NOTIFICATION, BC_DEAD_BINDER_DONE, BC_REQUEST_DEATH_NOTIFICATION};
 use objects::{
     BC_ACQUIRE, BC_ACQUIRE_DONE, BC_DECREFS, BC_INCREFS, BC_INCREFS_DONE, BC_RELEASE, Objects,
 };
@@ -76,6 +78,7 @@ fn write(task: &Task, ptr: usize, b: &[u8]) -> Result<(), usize> {
 
 struct Context {
     endpoint: Weak<RpcEndpoint>,
+    object: Arc<crate::ipc::rpc::RpcObject>,
 }
 struct Domain {
     // Retain the environment so pointer identity cannot be reused while open.
@@ -255,6 +258,7 @@ impl BinderFile {
                     self.state.lock().node = node;
                     *context = Some(Context {
                         endpoint: Arc::downgrade(&self.endpoint),
+                        object: self.endpoint.create_object().map_err(|_| errno::ENOMEM)?,
                     });
                     Ok(())
                 }
@@ -271,6 +275,29 @@ impl BinderFile {
     fn command(&self, task: &Task, abi: &LinuxAbi, command: u32, data: &[u8]) -> Result<(), usize> {
         let tid = task.get_id();
         match command {
+            BC_REQUEST_DEATH_NOTIFICATION => {
+                self.objects
+                    .lock()
+                    .request_death(u32_at(data, 0), u64_at(data, 4), self)?;
+            }
+            BC_CLEAR_DEATH_NOTIFICATION | BC_DEAD_BINDER_DONE => {
+                let target = self
+                    .state
+                    .lock()
+                    .threads
+                    .get(&tid)
+                    .unwrap()
+                    .looper
+                    .then_some(tid);
+                let mut objects = self.objects.lock();
+                if command == BC_CLEAR_DEATH_NOTIFICATION {
+                    objects
+                        .deaths
+                        .clear(u32_at(data, 0), u64_at(data, 4), target)?;
+                } else {
+                    objects.deaths.done(u64_at(data, 0), target)?;
+                }
+            }
             BC_ENTER_LOOPER | BC_REGISTER_LOOPER | BC_EXIT_LOOPER => {
                 self.state.lock().threads.get_mut(&tid).unwrap().looper = command != BC_EXIT_LOOPER;
             }
@@ -377,6 +404,10 @@ impl BinderFile {
             return false;
         };
         let objects = self.objects.lock();
+        let process_work = thread.looper && thread.outgoing.is_none() && thread.incoming.is_none();
+        if objects.deaths.ready(tid, process_work) {
+            return true;
+        }
         if objects.ready(tid) {
             return true;
         }
@@ -401,7 +432,11 @@ impl BinderFile {
     }
     fn thread_exit(&self, tid: usize) {
         let removed = self.state.lock().threads.remove(&tid);
-        let revoked = self.objects.lock().abandon_thread(tid);
+        let revoked = {
+            let mut objects = self.objects.lock();
+            objects.deaths.thread_exit(tid);
+            objects.abandon_thread(tid)
+        };
         // Native cancellation and lease destructors run outside Binder locks.
         for object in revoked {
             object.revoke();
@@ -419,6 +454,23 @@ impl BinderFile {
     fn read_record(&self, task: &Task, output: usize, capacity: usize) -> Result<usize, usize> {
         let mut state = self.state.lock();
         let tid = task.get_id();
+        let thread = state.threads.get(&tid).unwrap();
+        let process_work = thread.looper && thread.outgoing.is_none() && thread.incoming.is_none();
+        let death = {
+            let objects = self.objects.lock();
+            if objects.deaths.ready(tid, process_work) {
+                if capacity < 12 {
+                    return Err(errno::ENOSPC);
+                }
+                objects.deaths.record(tid, process_work)
+            } else {
+                None
+            }
+        };
+        if let Some(record) = death {
+            drop(state);
+            return record.write(task, output);
+        }
         if self.objects.lock().ready(tid) {
             if capacity < 20 {
                 return Err(errno::ENOSPC);
@@ -585,6 +637,8 @@ impl BinderFile {
                 let size = match command {
                     BC_TRANSACTION | BC_REPLY => 64,
                     BC_FREE_BUFFER => 8,
+                    BC_REQUEST_DEATH_NOTIFICATION | BC_CLEAR_DEATH_NOTIFICATION => 12,
+                    BC_DEAD_BINDER_DONE => 8,
                     BC_INCREFS | BC_ACQUIRE | BC_RELEASE | BC_DECREFS => 4,
                     BC_INCREFS_DONE | BC_ACQUIRE_DONE => 16,
                     BC_ENTER_LOOPER | BC_REGISTER_LOOPER | BC_EXIT_LOOPER => 0,
@@ -763,6 +817,37 @@ mod tests {
                 node: (0, 0),
             }),
         }
+    }
+    #[test_case]
+    fn binder_context_death_checks_wire_cookie_and_preserves_failed_usercopy() {
+        let environment = Environment::new();
+        let task = task(&environment, 1);
+        let server = file(&task, &environment, 0);
+        let client = file(&task, &environment, 0);
+        let abi = LinuxAbi::default();
+        let mut tf = Trapframe::new();
+        assert_eq!(server.ioctl(&task, &abi, &mut tf, SET_CONTEXT, 0, false), 0);
+        client.ensure_thread(1).unwrap();
+        client.command(&task, &abi, BC_ENTER_LOOPER, &[]).unwrap();
+        client
+            .command(&task, &abi, BC_INCREFS, &0u32.to_le_bytes())
+            .unwrap();
+        let mut data = [0; 12];
+        put64(&mut data, 4, 0x1234_5678_8765_4321);
+        client
+            .command(&task, &abi, BC_REQUEST_DEATH_NOTIFICATION, &data)
+            .unwrap();
+        assert!(!client.ready(1));
+        drop(server);
+        assert!(client.ready(1));
+        assert_eq!(client.read_record(&task, 0, 11), Err(errno::ENOSPC));
+        assert_eq!(client.read_record(&task, 0, 12), Err(errno::EFAULT));
+        assert!(client.ready(1));
+        // Dropping the last handle reference cancels its attached death work.
+        client
+            .command(&task, &abi, BC_DECREFS, &0u32.to_le_bytes())
+            .unwrap();
+        assert!(!client.ready(1));
     }
     #[test_case]
     fn binder_routes_only_within_the_same_environment_and_device() {
