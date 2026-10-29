@@ -27,7 +27,8 @@
     "Full legacy PackageParser.parsePackage reaches a missing PermissionManager service; the checkpoint uses Android archive inspection APIs and full cryptographic verification with forParsingWithoutPlatformCompat",
     "The Android fixture remains interpreter-only with explicit dalvik.vm.usejit=false property override",
     "UID/GID remain existing root-only Linux ABI stubs; no application identity or permission-isolation claim",
-    "Diagnostic earlier APK runs remain failures; their logs do not count toward the passing result"
+    "Diagnostic earlier APK runs remain failures; their logs do not count toward the passing result",
+    "Separate stock Zygote startup diagnosis reaches native initialization then aborts at unshare(CLONE_NEWNS); no Zygote readiness or app-fork claim. This diagnostic uses a log-only preload."
   ],
   "sha256": {
     "apk-build.json": "99b47aa61f102502713d86af97978f9f86faf2a29be84af1c1c16d8aa61f69f7",
@@ -59,6 +60,15 @@
     "diagnostics/apk-runtime-v3/program-launch.json": "fbe57e8365f984c117de7b7e6c6878fac7ab5ecc133f62a7ab2a44c8ce7a5f70",
     "diagnostics/apk-runtime-v3/result.json": "1d01cfea5fff1c625388363d77f23153df8126b73db0fa2c65ac12f2476e6799",
     "diagnostics/apk-runtime-v3/serial.log": "57324888aead2aae6df0e3d3c522e183377a35d852f8787ec31ab951e98c5472",
+    "diagnostics/zygote/diagnose-zygote.py": "7e57a5afca0a43166c4935c80fc01df430ba7332d90ce09eb36c88336d5a6bfc",
+    "diagnostics/zygote/framework-exit-logger.c": "d3d50aa1be2268028af2b2315e6d07dedff883bb2e257b5fcf835de6df4442a6",
+    "diagnostics/zygote/inputs.json": "6432b8541b0a93f0da2d989d77a7e774fc888e7dd4a53748f9558ca14dbfbb46",
+    "diagnostics/zygote/program-launch.json": "a1bbe1eff8e6e8f60ba27b31e820c758f4ed63c67e55303e7ddc3d860b1d7162",
+    "diagnostics/zygote/result.json": "f346fc375f165c2c8171def6ad8dcd05b31164486bee2180aa7a4017104d73d2",
+    "diagnostics/zygote/serial.log": "630a96edcaaff6af0ed492ffe35401f96e0e6bd3a883f5bd9b1d5adfc90254bc",
+    "diagnostics/zygote/zygote-config.h": "5e661c25bec25f87a082429b68f46ebcddfa13be3396621551a0ac7b5028ca12",
+    "diagnostics/zygote/zygote-diagnostic.json": "63a0ad14c9e93ccef33e029f3f2a2c9149e1c652be7b049b768097a5fefa6ca5",
+    "diagnostics/zygote/zygote-probe.c": "b76ae60697b7db56a330093f6adefc32617e56d2f11e3532efac8c9bc1241195",
     "fixture/apk/AndroidManifest.xml": "8c2e0bd15c93cd0ff9cb76524b0a305287dce3e95e0ba47358508ed21b1d721d",
     "fixture/apk/MainActivity.java": "594db9fce3cc5856b9bec2f99cba49c235f3e0a88627b8580db15a82bf03a762",
     "fixture/apk/RuntimePayload.java": "8007246beedb7c21ce1e79dd8de484394d9f8d23a5d657e477d17bba285158cd",
@@ -68,5 +78,12 @@
     "host-signatures.json": "be5a411eb45acc7cb516967d00e39c1a323f7128e609a2fd13b04c4e865a1155",
     "host-tests.log": "3cc6cc6e9189c21e6619b910ab8979192fa1f68478d47ee488909d0be5bf4c40",
     "prepare-framework.log": "4f37ec316b5d93506a1c08f609592de78602a61315e480d70cfba669d5c20d64"
+  },
+  "zygote_diagnostic": {
+    "result": "STOPPED_AT_UNIMPLEMENTED_UNSHARE",
+    "control_queries": "not successful",
+    "diagnostic_preload": true,
+    "required_syscall": "unshare(CLONE_NEWNS)",
+    "design_constraint": "Existing native VFS namespace creation clones Environment; Binder currently keys domains by Environment identity. Preserve the chosen communication scope when adding mount isolation."
   }
 }
