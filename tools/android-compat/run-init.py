@@ -45,7 +45,7 @@ def main():
             "kind": "bounded-stock-init-profile-v1", "probe_build_sha256": sha256(build / "build.json"),
             "runner_sha256": sha256(SOURCE / "run-init.py"), "acceleration": "hvf",
             "observation": "20 seconds or init exit, then close ProcessScope and verify zero live members",
-            "logging": "Diagnostic preload redirects userspace /dev/kmsg writes to inherited console; no syscall-success bypass",
+            "logging": "Diagnostic preload redirects userspace /dev/kmsg writes and child stdout/stderr to inherited console; no syscall-success bypass",
             "service_readiness": "not asserted", "apex_activation": "stock apexd must perform activation",
         }, indent=2) + "\n")
         return metadata

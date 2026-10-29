@@ -3,6 +3,7 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 static int console=-1;
@@ -28,3 +29,20 @@ int openat(int dir,const char *path,int flags,...) {
 }
 int __open_2(const char *path,int flags){return open(path,flags);}
 int __openat_2(int dir,const char *path,int flags){return openat(dir,path,flags);}
+
+/* Keep child diagnostic output visible when init installs /dev/null stdio. */
+static int diagnostic_output(int oldfd,int newfd) {
+ if(console<0 || oldfd==newfd || (newfd!=STDOUT_FILENO && newfd!=STDERR_FILENO))return oldfd;
+ char path[64],target[128];snprintf(path,sizeof(path),"/proc/self/fd/%d",oldfd);
+ ssize_t length=readlink(path,target,sizeof(target)-1);
+ if(length<0)return oldfd;target[length]=0;
+ return !strcmp(target,"/dev/null")?console:oldfd;
+}
+int dup2(int oldfd,int newfd) {
+ oldfd=diagnostic_output(oldfd,newfd);
+ int (*real)(int,int)=dlsym(RTLD_NEXT,"dup2");return real(oldfd,newfd);
+}
+int dup3(int oldfd,int newfd,int flags) {
+ oldfd=diagnostic_output(oldfd,newfd);
+ int (*real)(int,int,int)=dlsym(RTLD_NEXT,"dup3");return real(oldfd,newfd,flags);
+}

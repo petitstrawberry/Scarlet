@@ -4,10 +4,12 @@
 #include <fcntl.h>
 #include <sched.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 static int fail(const char *step) {
@@ -45,11 +47,43 @@ static int stacking(const char *target) {
     printf("SCARLET_MOUNT_STACK_OK bind regular retained-fd lazy-unmount\n");
     return 0;
 }
+static int resource_groups(const char *target) {
+    char root[256], child_path[256], procs[256], controllers[256], control[256];
+    snprintf(root,sizeof(root),"%s/resources",target);
+    snprintf(child_path,sizeof(child_path),"%s/resources/workers",target);
+    snprintf(procs,sizeof(procs),"%s/resources/workers/cgroup.procs",target);
+    snprintf(controllers,sizeof(controllers),"%s/resources/cgroup.controllers",target);
+    snprintf(control,sizeof(control),"%s/resources/cgroup.subtree_control",target);
+    if (mkdir(root,0755) || mount("none",root,"cgroup2",MS_NOEXEC|MS_NODEV|MS_NOSUID,NULL) || mkdir(child_path,0755)) return fail("resource view");
+    char buffer[128];int fd=open(controllers,O_RDONLY);ssize_t count;
+    if (fd<0 || (count=read(fd,buffer,sizeof(buffer)))!=1 || buffer[0]!='\n' || close(fd)) return fail("controller advertisement");
+    fd=open(control,O_WRONLY);if(fd<0)return fail("controller control open");
+    if(write(fd,"+memory",7)!=-1 || close(fd))return fail("unsupported memory controller accepted");
+    int command[2],event[2];if(pipe(command)||pipe(event))return fail("resource pipes");
+    pid_t worker=fork();if(worker<0)return fail("resource fork");
+    if(!worker) {
+        close(command[1]);close(event[0]);
+        if(token(command[0],0))_exit(1);
+        long handle=syscall(0x53430000L+1331);unsigned long long state[4]={0};
+        if(handle<0 || syscall(0x53430000L+1333,handle,state) || state[1]!=1)_exit(2);
+        if(syscall(0x53430000L+102,handle) || token(event[1],1))_exit(3);
+        if(token(command[0],0))_exit(4);
+        _exit(0);
+    }
+    close(command[0]);close(event[1]);fd=open(procs,O_WRONLY);
+    int size=snprintf(buffer,sizeof(buffer),"%d",worker);
+    if(fd<0 || write(fd,buffer,size)!=size || close(fd) || token(command[1],1) || token(event[0],0))return fail("resource migration");
+    fd=open(procs,O_RDONLY);if(fd<0)return fail("resource members open");count=read(fd,buffer,sizeof(buffer)-1);if(count<=0)return fail("resource members read");buffer[count]=0;
+    if(atoi(buffer)!=worker || close(fd) || rmdir(child_path)!=-1 || errno!=EBUSY)return fail("resource membership or busy removal");
+    if(token(command[1],1))return fail("resource release");int status;
+    if(waitpid(worker,&status,0)!=worker || status!=0 || rmdir(child_path) || umount2(root,MNT_DETACH))return fail("resource exit and removal");
+    close(command[1]);close(event[0]);printf("SCARLET_RESOURCE_GROUP_OK migration native-count no-controllers exit\n");return 0;
+}
 static int inner(const char *target) {
     /* The outer controller's View is never connected to these test groups. */
     if (unshare(CLONE_NEWNS) || mount(NULL, "/", NULL, MS_PRIVATE | MS_REC, NULL)) return fail("isolate view");
     if (mount("tmpfs", target, "tmpfs", MS_NOEXEC | MS_NODEV | MS_NOSUID, "mode=0755,size=8M")) return fail("mount base");
-    if (stacking(target)) return 1;
+    if (stacking(target) || resource_groups(target)) return 1;
     char up[256], local[256], source[256], alias[256], nested[256], deep[256], seed[256];
     snprintf(up, sizeof(up), "%s/up", target); snprintf(local, sizeof(local), "%s/local", target);
     snprintf(source, sizeof(source), "%s/source", target); snprintf(alias, sizeof(alias), "%s/alias", target);

@@ -9,6 +9,17 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <errno.h>
+struct task_info {
+ unsigned long pid,ppid;unsigned char state,type,cpu,reserved;int exit_status;unsigned long tgid;
+ char name[64];unsigned long long cpu_ns;unsigned util,min_util,capacity;unsigned char preference,padding[3];
+ unsigned long long migrations;int nice;unsigned weight;unsigned long long vruntime,deadline;
+};
+_Static_assert(sizeof(struct task_info)==152,"native task info layout");
+static void snapshot(void) {
+ struct task_info info[128];long count=syscall(0x53430000L+25,info,128);
+ for(long i=0;i<count && i<128;i++)if(info[i].type==1)
+  printf("SCARLET_INIT_TASK pid=%lu ppid=%lu tgid=%lu state=%u exit=%d cpu_ns=%llu name=%.64s\n",info[i].pid,info[i].ppid,info[i].tgid,info[i].state,info[i].exit_status,info[i].cpu_ns,info[i].name);
+}
 int main(int argc,char **argv) {
  setvbuf(stdout,NULL,_IONBF,0);
  if(argc==2 && !strcmp(argv[1],"inside")) {
@@ -43,6 +54,7 @@ int main(int argc,char **argv) {
    return 0;
   }
   if(got<0){perror("outer wait");return 6;}
+  if(tick==40 || tick==80)snapshot();
   usleep(100000);
  }
  if(syscall(0x53430000L+1322,scope,0) || syscall(0x53430000L+1323,scope)){perror("owned scope stop");return 7;}
