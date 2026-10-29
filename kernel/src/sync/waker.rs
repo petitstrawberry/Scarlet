@@ -1669,6 +1669,73 @@ mod tests {
     }
 
     #[test_case]
+    fn rpc_endpoint_arrival_wakes_receiver_behind_pending_caller() {
+        use crate::ipc::rpc::{RpcEndpoint, RpcMessage};
+
+        reset();
+        let local_cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(local_cpu);
+        let endpoint = RpcEndpoint::new();
+        let peer = RpcEndpoint::new();
+        let message = |opcode| RpcMessage {
+            opcode,
+            bytes: alloc::vec![],
+            objects: alloc::vec![],
+            retained: None,
+        };
+        let outgoing = peer.send(message(1)).unwrap();
+        let shared = endpoint.waker();
+        outgoing.notify_on_completion(&shared);
+        let caller_id = add_task(
+            Task::new("rpc-pending-caller".to_string(), 1, TaskType::Kernel),
+            local_cpu,
+        );
+        let receiver_id = add_task(
+            Task::new("rpc-idle-receiver".to_string(), 1, TaskType::Kernel),
+            local_cpu,
+        );
+        let caller = get_task_by_id(caller_id).unwrap();
+        let receiver = get_task_by_id(receiver_id).unwrap();
+        for (task, id) in [(&caller, caller_id), (&receiver, receiver_id)] {
+            remove_from_ready_queues(id);
+            task.set_state(TaskState::Blocked(BlockedType::Interruptible));
+            mark_blocked(id);
+        }
+        let caller_outcome = Arc::new(WaitOutcome::new());
+        let receiver_outcome = Arc::new(WaitOutcome::new());
+        // The first waiter cannot receive: it is waiting for a different call.
+        // A unicast arrival would wake it and strand the idle receiver behind it.
+        shared.wait_queue.lock().extend([
+            WaitQueueEntry::new(caller_id, caller_outcome.clone()),
+            WaitQueueEntry::new(receiver_id, receiver_outcome.clone()),
+        ]);
+        assert!(!outgoing.ready());
+        assert!(!endpoint.ready());
+        assert_eq!(shared.pending_wake_count_for_test(), 0);
+
+        let incoming = endpoint.send(message(2)).unwrap();
+        assert!(endpoint.ready());
+        assert!(!outgoing.ready());
+        assert_eq!(caller.get_state(), TaskState::Ready);
+        assert_eq!(receiver.get_state(), TaskState::Ready);
+        assert_eq!(shared.waiting_count(), 0);
+        assert_eq!(caller_outcome.finish_after_resume(), WaitResult::Woken);
+        assert_eq!(receiver_outcome.finish_after_resume(), WaitResult::Woken);
+
+        endpoint
+            .receive()
+            .unwrap()
+            .unwrap()
+            .reply(message(3))
+            .unwrap();
+        peer.receive().unwrap().unwrap().reply(message(4)).unwrap();
+        assert_eq!(incoming.take_reply().unwrap().unwrap().opcode, 3);
+        assert_eq!(outgoing.take_reply().unwrap().unwrap().opcode, 4);
+        drop((incoming, outgoing, caller, receiver));
+        reset();
+    }
+
+    #[test_case]
     fn test_timeout_cleanup_removes_only_its_wait_registration() {
         let waker = Waker::new_interruptible("registration-identity");
         let old = Arc::new(WaitOutcome::new());

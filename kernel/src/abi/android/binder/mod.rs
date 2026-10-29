@@ -285,6 +285,7 @@ impl BinderFile {
                     opcode: u32_at(data, 16),
                     bytes: payload,
                     objects: Vec::new(),
+                    retained: None,
                 };
                 if command == BC_TRANSACTION {
                     if u64_at(data, 0) != 0 {
@@ -401,6 +402,7 @@ impl BinderFile {
                         opcode: request.message.opcode,
                         bytes: request.message.bytes.clone(),
                         objects: request.message.objects.clone(),
+                        retained: request.message.retained.clone(),
                     };
                     incoming = Some(request);
                     Ok(message)

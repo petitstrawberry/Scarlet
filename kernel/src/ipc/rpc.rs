@@ -8,7 +8,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 pub const MAX_MESSAGE_OBJECTS: usize = 64;
@@ -22,12 +22,17 @@ pub enum RpcError {
     Cancelled,
 }
 
+#[derive(Clone)]
 pub struct RpcMessage {
     pub opcode: u32,
     pub bytes: Vec<u8>,
     /// Capabilities are carried separately from untrusted serialized bytes.
     /// An ABI adapter translates its wire handles and offsets into this list.
     pub objects: Vec<Arc<RpcObject>>,
+    /// Adapter-owned lifetime resources travel with the message, including
+    /// queued, cancelled and failed deliveries. The transport never interprets
+    /// them; releasing the last message copy releases these resources.
+    pub retained: Option<Arc<dyn Send + Sync>>,
 }
 
 impl RpcMessage {
@@ -46,6 +51,7 @@ impl RpcMessage {
 pub struct RpcObject {
     endpoint: Weak<RpcEndpoint>,
     key: u64,
+    revoked: AtomicBool,
 }
 
 impl RpcObject {
@@ -61,7 +67,16 @@ impl RpcObject {
         self.endpoint
             .upgrade()
             .ok_or(RpcError::PeerClosed)?
-            .send_to(Some(self.key), message)
+            .send_to(Some(self), message)
+    }
+    /// Revoke only this dispatch capability, including queued and received
+    /// unanswered calls. Other objects served by the endpoint remain usable.
+    pub fn revoke(&self) {
+        if !self.revoked.swap(true, Ordering::AcqRel) {
+            if let Some(endpoint) = self.endpoint.upgrade() {
+                endpoint.revoke_object(self.key);
+            }
+        }
     }
 }
 
@@ -76,6 +91,8 @@ struct CallState {
     completion: IrqSpinLock<Completion>,
     waker: Arc<Waker>,
     budget: Arc<AtomicUsize>,
+    notifier: IrqSpinLock<Option<Weak<Waker>>>,
+    object_key: Option<u64>,
 }
 
 impl CallState {
@@ -87,6 +104,10 @@ impl CallState {
         *state = completion;
         drop(state);
         self.waker.wake_all();
+        let notifier = self.notifier.lock().as_ref().and_then(Weak::upgrade);
+        if let Some(notifier) = notifier {
+            notifier.wake_all();
+        }
         Ok(())
     }
 }
@@ -102,6 +123,15 @@ pub struct RpcCall {
 }
 
 impl RpcCall {
+    /// Join completion with an adapter's existing readiness source. The weak
+    /// reference cannot keep the receiving process alive. Publishing before
+    /// rechecking completion also covers registration after an early reply.
+    pub fn notify_on_completion(&self, waker: &Arc<Waker>) {
+        *self.state.notifier.lock() = Some(Arc::downgrade(waker));
+        if self.ready() {
+            waker.wake_all();
+        }
+    }
     pub fn ready(&self) -> bool {
         !matches!(*self.state.completion.lock(), Completion::Pending)
     }
@@ -193,14 +223,20 @@ impl RpcEndpoint {
         Ok(Arc::new(RpcObject {
             endpoint: Arc::downgrade(self),
             key,
+            revoked: AtomicBool::new(false),
         }))
     }
-    fn send_to(&self, object_key: Option<u64>, message: RpcMessage) -> Result<RpcCall, RpcError> {
+    fn send_to(
+        &self,
+        object: Option<&RpcObject>,
+        message: RpcMessage,
+    ) -> Result<RpcCall, RpcError> {
         message.validate()?;
         let mut state = self.state.lock();
-        if state.closed {
+        if state.closed || object.is_some_and(|object| object.revoked.load(Ordering::Acquire)) {
             return Err(RpcError::PeerClosed);
         }
+        let object_key = object.map(RpcObject::key);
         state.queue.retain(|request| !request.cancelled());
         state.calls.retain(|call| call.strong_count() > 0);
         // Senders serialize here; completion drops only decrement this budget.
@@ -212,6 +248,8 @@ impl RpcEndpoint {
             completion: IrqSpinLock::new(Completion::Pending),
             waker: Arc::new(Waker::new_interruptible("rpc_reply")),
             budget: self.budget.clone(),
+            notifier: IrqSpinLock::new(None),
+            object_key,
         });
         state.queue.push_back(RpcRequest {
             message,
@@ -220,7 +258,9 @@ impl RpcEndpoint {
         });
         state.calls.push(Arc::downgrade(&call));
         drop(state);
-        self.waker.wake_one();
+        // Adapters can multiplex idle receivers and outstanding callers on
+        // this source. A wake must reach every distinct readiness predicate.
+        self.waker.wake_all();
         Ok(RpcCall { state: call })
     }
     pub fn receive(&self) -> Result<Option<RpcRequest>, RpcError> {
@@ -242,6 +282,33 @@ impl RpcEndpoint {
     }
     pub fn waker(&self) -> Arc<Waker> {
         self.waker.clone()
+    }
+    fn revoke_object(&self, key: u64) {
+        let (removed, calls) = {
+            let mut state = self.state.lock();
+            let mut removed = VecDeque::new();
+            let mut kept = VecDeque::new();
+            while let Some(request) = state.queue.pop_front() {
+                if request.object_key == Some(key) {
+                    removed.push_back(request);
+                } else {
+                    kept.push_back(request);
+                }
+            }
+            state.queue = kept;
+            let calls: Vec<_> = state
+                .calls
+                .iter()
+                .filter_map(Weak::upgrade)
+                .filter(|call| call.object_key == Some(key))
+                .collect();
+            (removed, calls)
+        };
+        drop(removed);
+        for call in calls {
+            let _ = call.finish(Completion::Failed(RpcError::PeerClosed));
+        }
+        self.waker.wake_all();
     }
     pub fn close(&self) {
         let (queue, calls) = {
@@ -272,11 +339,62 @@ impl Drop for RpcEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test_case]
+    fn rpc_retained_resources_follow_cancelled_requests_and_consumed_replies() {
+        let endpoint = RpcEndpoint::new();
+        let lifetime = Arc::new(42usize);
+        let weak = Arc::downgrade(&lifetime);
+        let mut outgoing = message(1);
+        outgoing.retained = Some(lifetime);
+        let call = endpoint.send(outgoing).unwrap();
+        drop(call);
+        assert!(endpoint.receive().unwrap().is_none());
+        assert!(weak.upgrade().is_none());
+
+        let lifetime = Arc::new(43usize);
+        let weak = Arc::downgrade(&lifetime);
+        let call = endpoint.send(message(2)).unwrap();
+        let request = endpoint.receive().unwrap().unwrap();
+        let mut reply = message(3);
+        reply.retained = Some(lifetime);
+        request.reply(reply).unwrap();
+        let reply = call.take_reply().unwrap().unwrap();
+        let copy = reply.clone();
+        drop(reply);
+        drop(call);
+        assert!(weak.upgrade().is_some());
+        drop(copy);
+        assert!(weak.upgrade().is_none());
+    }
+    #[test_case]
+    fn rpc_completion_notifier_is_weak_and_handles_early_replies() {
+        let endpoint = RpcEndpoint::new();
+        for early in [false, true] {
+            let call = endpoint.send(message(1)).unwrap();
+            let request = endpoint.receive().unwrap().unwrap();
+            let waker = Arc::new(Waker::new_interruptible("rpc-adapter-test"));
+            let weak = Arc::downgrade(&waker);
+            let mut request = Some(request);
+            if early {
+                request.take().unwrap().reply(message(2)).unwrap();
+            }
+            call.notify_on_completion(&waker);
+            if let Some(request) = request {
+                request.reply(message(2)).unwrap();
+            }
+            assert!(call.ready());
+            assert!(waker.pending_wake_count_for_test() > 0);
+            assert_eq!(Arc::strong_count(&waker), 1);
+            drop(waker);
+            assert!(weak.upgrade().is_none());
+        }
+    }
     fn message(n: u32) -> RpcMessage {
         RpcMessage {
             opcode: n,
             bytes: alloc::vec![1, 2, 3],
             objects: Vec::new(),
+            retained: None,
         }
     }
     #[test_case]
@@ -398,6 +516,96 @@ mod tests {
             endpoint.create_object(),
             Err(RpcError::PeerClosed)
         ));
+    }
+
+    #[test_case]
+    fn rpc_object_revoke_fails_only_its_calls_and_releases_retained_resources() {
+        let endpoint = RpcEndpoint::new();
+        let object = endpoint.create_object().unwrap();
+        let alias = object.clone();
+        let sibling = endpoint.create_object().unwrap();
+
+        let completed = object.send(message(1)).unwrap();
+        endpoint
+            .receive()
+            .unwrap()
+            .unwrap()
+            .reply(message(2))
+            .unwrap();
+
+        let received_lifetime = Arc::new(10usize);
+        let received_weak = Arc::downgrade(&received_lifetime);
+        let mut received_message = message(10);
+        received_message.retained = Some(received_lifetime);
+        let received = object.send(received_message).unwrap();
+        let request = endpoint.receive().unwrap().unwrap();
+        assert_eq!(request.object_key(), Some(object.key()));
+
+        let sibling_call = sibling.send(message(20)).unwrap();
+        let queued_lifetime = Arc::new(30usize);
+        let queued_weak = Arc::downgrade(&queued_lifetime);
+        let mut queued_message = message(30);
+        queued_message.retained = Some(queued_lifetime);
+        let queued = object.send(queued_message).unwrap();
+        let direct = endpoint.send(message(40)).unwrap();
+        let notifier = Arc::new(Waker::new_interruptible("rpc-revoke-test"));
+        received.notify_on_completion(&notifier);
+        assert_eq!(notifier.pending_wake_count_for_test(), 0);
+
+        object.revoke();
+        alias.revoke();
+        assert!(request.cancelled());
+        for call in [&received, &queued] {
+            assert!(call.ready());
+            assert!(call.waker().pending_wake_count_for_test() > 0);
+            assert!(matches!(call.take_reply(), Some(Err(RpcError::PeerClosed))));
+            assert!(call.take_reply().is_none());
+        }
+        assert!(notifier.pending_wake_count_for_test() > 0);
+        assert!(queued_weak.upgrade().is_none());
+        // A request already handed to the server still owns its payload.
+        assert!(received_weak.upgrade().is_some());
+        assert_eq!(completed.take_reply().unwrap().unwrap().opcode, 2);
+
+        assert!(!sibling_call.ready());
+        assert!(!direct.ready());
+        for (call, key, opcode) in [
+            (&sibling_call, Some(sibling.key()), 20),
+            (&direct, None, 40),
+        ] {
+            let survivor = endpoint.receive().unwrap().unwrap();
+            assert_eq!(survivor.object_key(), key);
+            assert_eq!(survivor.message.opcode, opcode);
+            survivor.reply(message(opcode + 1)).unwrap();
+            assert_eq!(call.take_reply().unwrap().unwrap().opcode, opcode + 1);
+        }
+        assert!(endpoint.receive().unwrap().is_none());
+
+        let reply_lifetime = Arc::new(50usize);
+        let reply_weak = Arc::downgrade(&reply_lifetime);
+        let mut late_reply = message(50);
+        late_reply.retained = Some(reply_lifetime);
+        assert_eq!(request.reply(late_reply), Err(RpcError::Cancelled));
+        assert!(received_weak.upgrade().is_none());
+        assert!(reply_weak.upgrade().is_none());
+        assert!(received.take_reply().is_none());
+
+        let rejected_lifetime = Arc::new(60usize);
+        let rejected_weak = Arc::downgrade(&rejected_lifetime);
+        let mut rejected = message(60);
+        rejected.retained = Some(rejected_lifetime);
+        assert!(matches!(alias.send(rejected), Err(RpcError::PeerClosed)));
+        assert!(rejected_weak.upgrade().is_none());
+        let next = sibling.send(message(70)).unwrap();
+        endpoint
+            .receive()
+            .unwrap()
+            .unwrap()
+            .reply(message(71))
+            .unwrap();
+        assert_eq!(next.take_reply().unwrap().unwrap().opcode, 71);
+        drop((completed, received, queued, sibling_call, direct, next));
+        assert_eq!(endpoint.budget.load(Ordering::Acquire), 0);
     }
 
     #[test_case]
