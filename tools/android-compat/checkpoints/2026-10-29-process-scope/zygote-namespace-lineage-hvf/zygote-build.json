@@ -1,0 +1,48 @@
+{
+  "kind": "stock-zygote-child-v1",
+  "command": [
+    "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+    "-O2",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-I",
+    "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/zygote-child-formal-build-v2",
+    "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/zygote-probe.c",
+    "-o",
+    "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/zygote-child-formal-build-v2/zygote-probe"
+  ],
+  "source_sha256": "5f138765837f6e33de45a530a8f89ab22b878400833da32e94f3c281542529a5",
+  "framework_sha256": "5c552bb97bc2cb33d0c480054276f305bcdda31d97de674b1720732b483fdcf0",
+  "program_sha256": "9433365d3ae3290e016f96556d004a38cd3e7b0bd7883796634543d25b941902",
+  "child_source_sha256": "077faeb4997bdf55cfc046f0e2e94882d5607bc0dfaf42db3c2b7cdc98d1bc3f",
+  "child_dex_sha256": "f1b0b23a8a8806831f36006fd5c9c299d4f57dc257ef9c480f331b33d54bb74e",
+  "framework_sdk_sha256": "173d24a7b972769008d3c789073c21b3be6a8ecdbf946bacb9ef261b70fdfa54",
+  "d8_sha256": "a26ee56252adcff6752c379ae255a0ad538ebec60189e078ec6855487107637d",
+  "child_commands": [
+    [
+      "java",
+      "com.sun.tools.javac.Main",
+      "--release",
+      "8",
+      "-classpath",
+      "/Users/petitstrawberry/Library/Android/sdk/platforms/android-32/android.jar",
+      "-d",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/zygote-child-formal-build-v2/classes",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/framework/ScarletZygoteChild.java"
+    ],
+    [
+      "java",
+      "-cp",
+      "/Users/petitstrawberry/Library/Android/sdk/build-tools/37.0.0/lib/d8.jar",
+      "com.android.tools.r8.D8",
+      "--min-api",
+      "23",
+      "--lib",
+      "/Users/petitstrawberry/Library/Android/sdk/platforms/android-32/android.jar",
+      "--output",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/zygote-child-formal-build-v2",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/zygote-child-formal-build-v2/classes/ScarletZygoteChild.class"
+    ]
+  ]
+}

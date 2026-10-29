@@ -1,0 +1,70 @@
+{
+  "sources_sha256": {
+    "bionic-probe.c": "d11117f3b7f26757b6c103fa15bfa8a310c17927b29787cef8acffb5f0c3b8df",
+    "binder-probe.c": "be073c21ff29a1c2974d410858c5cd3b80afe588feb32d5f021d92c0816007d7",
+    "binder-object-probe.c": "8479afd1d766058fcce967deda75660f02fda843967cae7a816f720ea261c8a9",
+    "credentials-probe.c": "0d6bbd8cd519aab857c0b9c197651df71ba2e66c39f6636fea0236993e73a827",
+    "seccomp-probe.c": "208e222c7d779562dd7a098ae88dcf586f255f72398a9926de5f899d879cb870",
+    "process-scope-probe.c": "4a964ab61c231701a39691dfeeb6d154f25c45b3e4252e1c99c21d26aa726b9c"
+  },
+  "api": 33,
+  "ndk": "Pkg.Desc = Android NDK\nPkg.Revision = 25.1.8937393\n",
+  "commands": [
+    [
+      "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+      "-O2",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-fno-emulated-tls",
+      "-static",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/bionic-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/binder-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/binder-object-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/credentials-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/seccomp-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/process-scope-probe.c",
+      "-ldl",
+      "-o",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/bionic-process-scope-trace2-build/bionic-static"
+    ],
+    [
+      "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+      "-O2",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-fno-emulated-tls",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/bionic-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/binder-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/binder-object-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/credentials-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/seccomp-probe.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/process-scope-probe.c",
+      "-ldl",
+      "-o",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/bionic-process-scope-trace2-build/bionic-dynamic"
+    ],
+    [
+      "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+      "-O2",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-fno-emulated-tls",
+      "-fPIC",
+      "-shared",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/bionic-library.c",
+      "-o",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/bionic-process-scope-trace2-build/libbionic-probe.so"
+    ]
+  ],
+  "sha256": {
+    "bionic-static": "a979fdcea8e00954105dfcad68e1ff296df43a0de570f3f38ac1223671c20236",
+    "bionic-dynamic": "b6b4628431f9414e9d8ea944228bde52f0f8ea0cf3a785aa2f5556a2386a9feb",
+    "libbionic-probe.so": "42213eb79b7285e379f16208d8343c0637739d704075638e68e3dd278510a2d4"
+  }
+}

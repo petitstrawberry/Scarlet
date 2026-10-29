@@ -1,0 +1,10 @@
+{
+  "original_properties_sha256": "62e21526dc835051bbef179a671219c47731157835fb6ffaf442a92007543ab6",
+  "staged_properties_sha256": "2c6f0edc7240509b8a240200af9813f619b602b48562777f43b034d76e229b43",
+  "fixture_overrides": {
+    "dalvik.vm.usejit": {
+      "original": "true",
+      "value": "false"
+    }
+  }
+}

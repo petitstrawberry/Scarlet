@@ -1,0 +1,2523 @@
+warning: Git tree '/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet' is dirty
+error (ignored): SQLite database '/Users/petitstrawberry/.cache/nix/eval-cache-v6/effb7914670975a361c880687cdb7e22ca473f8829d3eb583a9fb2664131d346.sqlite' is busy
+   Compiling scarlet v1.0.1 (/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel)
+warning: unused imports: `is_direct_mapped` and `virt_to_phys`
+  --> src/abi/linux/generic/mm.rs:10:16
+   |
+10 |     vm::addr::{is_direct_mapped, virt_to_phys},
+   |                ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `MemoryArea`
+  --> src/arch/aarch64/boot/limine.rs:18:23
+   |
+18 | use crate::vm::vmem::{MemoryArea, MemoryAttribute};
+   |                       ^^^^^^^^^^
+
+warning: unused import: `alloc::boxed::Box`
+ --> src/arch/aarch64/context.rs:7:5
+  |
+7 | use alloc::boxed::Box;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Page`
+  --> src/arch/aarch64/context.rs:11:41
+   |
+11 | use crate::mem::page::{ContiguousPages, Page};
+   |                                         ^^^^
+
+warning: unused import: `crate::vm::vmem::MemoryArea`
+  --> src/arch/aarch64/context.rs:12:5
+   |
+12 | use crate::vm::vmem::MemoryArea;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around function argument
+    --> src/arch/aarch64/iommu/arm_smmu_v2.rs:1068:23
+     |
+1068 |             return Ok((entry & TABLE_ADDRESS_MASK));
+     |                       ^                          ^
+     |
+     = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+     |
+1068 -             return Ok((entry & TABLE_ADDRESS_MASK));
+1068 +             return Ok(entry & TABLE_ADDRESS_MASK);
+     |
+
+warning: unnecessary parentheses around assigned value
+    --> src/arch/aarch64/iommu/arm_smmu_v2.rs:1097:21
+     |
+1097 |             table = (entry & TABLE_ADDRESS_MASK);
+     |                     ^                          ^
+     |
+help: remove these parentheses
+     |
+1097 -             table = (entry & TABLE_ADDRESS_MASK);
+1097 +             table = entry & TABLE_ADDRESS_MASK;
+     |
+
+warning: unused imports: `RelocationEntry` and `RelocationSection`
+ --> src/arch/aarch64/lsm/mod.rs:5:32
+  |
+5 |     ParsedSymbol, RelocObject, RelocationEntry, RelocationSection, SHF_ALLOC, SHN_UNDEF,
+  |                                ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `free_raw_pages`
+  --> src/arch/aarch64/vm/mod.rs:18:44
+   |
+18 | use crate::mem::page::{allocate_raw_pages, free_raw_pages};
+   |                                            ^^^^^^^^^^^^^^
+
+warning: unused import: `super::*`
+    --> src/arch/aarch64/mod.rs:1025:13
+     |
+1025 |         use super::*;
+     |             ^^^^^^^^
+
+warning: unused import: `crate::drivers::pic::Gic`
+    --> src/arch/aarch64/mod.rs:1029:17
+     |
+1029 |             use crate::drivers::pic::Gic;
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around function argument
+   --> src/boot/limine.rs:172:56
+    |
+172 |         let area = PhysicalMemoryArea::new(entry.base, (entry.base + entry.length - 1));
+    |                                                        ^                             ^
+    |
+help: remove these parentheses
+    |
+172 -         let area = PhysicalMemoryArea::new(entry.base, (entry.base + entry.length - 1));
+172 +         let area = PhysicalMemoryArea::new(entry.base, entry.base + entry.length - 1 );
+    |
+
+warning: unnecessary parentheses around assigned value
+   --> src/boot/limine.rs:272:25
+    |
+272 |         let entry_end = (entry.base + entry.length - 1);
+    |                         ^                             ^
+    |
+help: remove these parentheses
+    |
+272 -         let entry_end = (entry.base + entry.length - 1);
+272 +         let entry_end = entry.base + entry.length - 1 ;
+    |
+
+warning: unused import: `DisplayRegion`
+  --> src/device/graphics/tests/integration_tests.rs:15:13
+   |
+15 |             DisplayRegion, FramebufferConfig, GenericGraphicsDevice, PixelFormat,
+   |             ^^^^^^^^^^^^^
+
+warning: unused import: `PciConfig`
+  --> src/drivers/mmc/sdhci/pci.rs:13:40
+   |
+13 | use crate::device::pci::config::{self, PciConfig, command};
+   |                                        ^^^^^^^^^
+
+warning: unused import: `boxed::Box`
+  --> src/drivers/network/virtio_net.rs:27:13
+   |
+27 | use alloc::{boxed::Box, collections::VecDeque, string::String, sync::Arc, vec, vec::Vec};
+   |             ^^^^^^^^^^
+
+warning: unused import: `driver_initcall`
+  --> src/drivers/pic/gic.rs:15:5
+   |
+15 |     driver_initcall, early_initcall,
+   |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::initcall::early`
+ --> src/drivers/uart/pl011.rs:7:5
+  |
+7 | use crate::initcall::early;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ToString`
+  --> src/drivers/usb/cdc_ncm.rs:12:29
+   |
+12 | use alloc::string::{String, ToString};
+   |                             ^^^^^^^^
+
+warning: unnecessary parentheses around method argument
+   --> src/drivers/virtio/device/tests.rs:172:9
+    |
+172 |         (1u32 << (crate::drivers::virtio::features::VIRTIO_F_VERSION_1 - 32)),
+    |         ^                                                                   ^
+    |
+help: remove these parentheses
+    |
+172 -         (1u32 << (crate::drivers::virtio::features::VIRTIO_F_VERSION_1 - 32)),
+172 +         1u32 << (crate::drivers::virtio::features::VIRTIO_F_VERSION_1 - 32) ,
+    |
+
+warning: unused import: `alloc::boxed::Box`
+  --> src/drivers/virtio_input.rs:13:5
+   |
+13 | use alloc::boxed::Box;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec`
+  --> src/drivers/virtio_input.rs:16:5
+   |
+16 | use alloc::vec;
+   |     ^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+  --> src/drivers/virtio_input.rs:17:5
+   |
+17 | use alloc::vec::Vec;
+   |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::environment::PAGE_SIZE`
+  --> src/drivers/virtio_input.rs:28:5
+   |
+28 | use crate::environment::PAGE_SIZE;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `boxed::Box` and `vec`
+  --> src/drivers/virtio_rng.rs:23:13
+   |
+23 | use alloc::{boxed::Box, collections::VecDeque, vec};
+   |             ^^^^^^^^^^                         ^^^
+
+warning: unused import: `crate::environment::PAGE_SIZE`
+  --> src/drivers/virtio_rng.rs:29:5
+   |
+29 | use crate::environment::PAGE_SIZE;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around assigned value
+  --> src/environment/aarch64.rs:38:5
+   |
+38 |     (((TRAMPOLINE_VA_END - TRAMPOLINE_VA_RESERVE) & !(PAGE_SIZE - 1)) - 1);
+   |     ^                                                                    ^
+   |
+help: remove these parentheses
+   |
+38 -     (((TRAMPOLINE_VA_END - TRAMPOLINE_VA_RESERVE) & !(PAGE_SIZE - 1)) - 1);
+38 +     ((TRAMPOLINE_VA_END - TRAMPOLINE_VA_RESERVE) & !(PAGE_SIZE - 1)) - 1;
+   |
+
+warning: unused imports: `boxed::Box` and `vec`
+  --> src/fs/vfs_v2/drivers/ext2/node.rs:8:5
+   |
+ 8 |     boxed::Box,
+   |     ^^^^^^^^^^
+...
+13 |     vec,
+   |     ^^^
+
+warning: unused import: `core::panic`
+ --> src/fs/vfs_v2/drivers/ext2/tests.rs:6:5
+  |
+6 | use core::panic;
+  |     ^^^^^^^^^^^
+
+warning: unused imports: `FileSystemError`, `SocketFileInfo`, and `drivers::block::virtio_blk::VirtioBlockDevice`
+  --> src/fs/vfs_v2/drivers/ext2/tests.rs:13:5
+   |
+13 |     drivers::block::virtio_blk::VirtioBlockDevice,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+14 |     fs::{
+15 |         FileSystemError, FileSystemErrorKind, FileSystemType, FileType, SocketFileInfo,
+   |         ^^^^^^^^^^^^^^^                                                 ^^^^^^^^^^^^^^
+
+warning: unused import: `format`
+  --> src/fs/vfs_v2/drivers/ext2/tests.rs:21:13
+   |
+21 | use alloc::{format, string::ToString, sync::Arc, vec, vec::Vec};
+   |             ^^^^^^
+
+warning: unused imports: `boxed::Box` and `vec`
+  --> src/fs/vfs_v2/drivers/fat32/node.rs:8:5
+   |
+ 8 |     boxed::Box,
+   |     ^^^^^^^^^^
+...
+12 |     vec,
+   |     ^^^
+
+warning: unused import: `crate::println`
+  --> src/hypervisor/syscall.rs:10:5
+   |
+10 | use crate::println;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `crate::sync::IrqSpinLock`
+ --> src/hypervisor/vcpu.rs:3:5
+  |
+3 | use crate::sync::IrqSpinLock;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::sync::Arc`
+ --> src/hypervisor/vcpu.rs:4:5
+  |
+4 | use alloc::sync::Arc;
+  |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::sync::Weak`
+ --> src/hypervisor/vcpu.rs:5:5
+  |
+5 | use alloc::sync::Weak;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::arch::hv::guest_vcpu::GuestVcpu`
+ --> src/hypervisor/vcpu.rs:8:5
+  |
+8 | use crate::arch::hv::guest_vcpu::GuestVcpu;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::vm::vmem::VirtualMemoryMap`
+  --> src/ipc/shared_memory.rs:15:5
+   |
+15 | use crate::vm::vmem::VirtualMemoryMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+   --> src/ipc/shared_memory.rs:509:9
+    |
+509 |     use alloc::vec::Vec;
+    |         ^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::earlycon::EarlyConsole`
+  --> src/log.rs:11:5
+   |
+11 | use crate::earlycon::EarlyConsole;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `SocketObject`
+    --> src/network/local.rs:1772:53
+     |
+1772 |         use crate::network::socket::{SocketControl, SocketObject};
+     |                                                     ^^^^^^^^^^^^
+
+warning: unused import: `vec`
+  --> src/network/protocol_stack.rs:49:63
+   |
+49 | use alloc::{collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
+   |                                                               ^^^
+
+warning: unused import: `crate::arch`
+ --> src/test.rs:3:5
+  |
+3 | use crate::arch;
+  |     ^^^^^^^^^^^
+
+warning: unused import: `object::capability::selectable::Selectable`
+  --> src/abi/linux/generic/pipe.rs:11:5
+   |
+11 |     object::capability::selectable::Selectable,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `object::capability::StreamOps`
+  --> src/fs/vfs_v2/drivers/ext2/tests.rs:18:5
+   |
+18 |     object::capability::StreamOps,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `addr`
+   --> src/abi/linux/device/kvm/aarch64.rs:567:21
+    |
+567 |                 let addr = unsafe { core::ptr::read_volatile(kva as *const u64) };
+    |                     ^^^^ help: if this is intentional, prefix it with an underscore: `_addr`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable `sbi_count` is assigned to, but never used
+    --> src/abi/linux/device/kvm/mod.rs:1144:17
+     |
+1144 |             let mut sbi_count = 0u32;
+     |                 ^^^^^^^^^^^^^
+     |
+     = note: consider using `_sbi_count` instead
+
+warning: value assigned to `sbi_count` is never read
+    --> src/abi/linux/device/kvm/mod.rs:1172:29
+     |
+1172 | ...                   sbi_count += 1;
+     |                       ^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `aligned_length`
+   --> src/abi/linux/generic/mm.rs:946:5
+    |
+946 |     aligned_length: usize,
+    |     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_aligned_length`
+
+warning: variable does not need to be mutable
+   --> src/abi/linux/generic/mod.rs:772:13
+    |
+772 |         let mut sibling = exiting.clone();
+    |             ----^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `inherited_sctlr`
+   --> src/arch/aarch64/boot/limine.rs:295:64
+    |
+295 | extern "C" fn secondary_cpu_entry_after_el_drop(cpu_id: usize, inherited_sctlr: u64) -> ! {
+    |                                                                ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_inherited_sctlr`
+
+warning: unused variable: `cpu`
+   --> src/arch/aarch64/boot/limine.rs:439:5
+    |
+439 |     cpu: &fdt::node::FdtNode,
+    |     ^^^ help: if this is intentional, prefix it with an underscore: `_cpu`
+
+warning: unused variable: `inherited_sctlr`
+   --> src/arch/aarch64/boot/limine.rs:569:56
+    |
+569 | extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> ! {
+    |                                                        ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_inherited_sctlr`
+
+warning[E0133]: use of inline assembly is unsafe and requires unsafe block
+  --> src/arch/aarch64/fpu.rs:52:9
+   |
+52 | /         asm!(
+53 | |             ".arch armv8-a+fp+simd",
+54 | |             // Save all 32 vector registers using STP for Q registers
+55 | |             "stp q0, q1, [{0}, #0*32]",
+...  |
+72 | |             options(nostack),
+73 | |         );
+   | |_________^ use of inline assembly
+   |
+   = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+   = note: inline assembly is entirely unchecked and can cause undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+  --> src/arch/aarch64/fpu.rs:50:5
+   |
+50 |     pub unsafe fn save(&mut self) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(unsafe_op_in_unsafe_fn)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+
+warning[E0133]: use of inline assembly is unsafe and requires unsafe block
+  --> src/arch/aarch64/fpu.rs:77:9
+   |
+77 | /         asm!(
+78 | |             ".arch armv8-a+fp+simd",
+79 | |             "mrs {0}, fpcr",
+80 | |             "mrs {1}, fpsr",
+...  |
+83 | |             options(nomem, nostack),
+84 | |         );
+   | |_________^ use of inline assembly
+   |
+   = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+   = note: inline assembly is entirely unchecked and can cause undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> src/device/fdt.rs:157:14
+    |
+157 |         &mut *MANAGER.0.get()
+    |              ^^^^^^^^^^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+   --> src/device/fdt.rs:155:5
+    |
+155 |     pub unsafe fn get_mut_manager() -> &'static mut FdtManager<'static> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `trapframe`
+   --> src/device/input/event_device.rs:568:9
+    |
+568 |         trapframe: &mut Trapframe,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_trapframe`
+
+warning: unused variable: `enabled`
+   --> src/device/network/mod.rs:471:36
+    |
+471 |     fn set_promiscuous_mode(&self, enabled: bool) -> Result<(), &'static str> {
+    |                                    ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_enabled`
+
+warning: unused variable: `read_count`
+   --> src/drivers/block/virtio_blk.rs:397:13
+    |
+397 |         let read_count = requests
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_read_count`
+
+warning: unused variable: `write_count`
+   --> src/drivers/block/virtio_blk.rs:401:13
+    |
+401 |         let write_count = requests
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_write_count`
+
+warning: unused variable: `status_ptr`
+   --> src/drivers/block/virtio_blk.rs:481:17
+    |
+481 |             let status_ptr = status_alloc.as_ptr() as *mut u8;
+    |                 ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_status_ptr`
+
+warning: unused variable: `status`
+   --> src/drivers/block/virtio_blk.rs:597:17
+    |
+597 |             let status = self.read32_register(crate::drivers::virtio::device::Register::Status);
+    |                 ^^^^^^ help: if this is intentional, prefix it with an underscore: `_status`
+
+warning: value assigned to `registers` is never read
+    --> src/drivers/graphics/virtio_gpu.rs:3052:9
+     |
+3052 |         registers[config + VIRTIO_GPU_CONFIG_EVENTS_READ_OFFSET / 4] = VIRTIO_GPU_EVENT_DISPLAY;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: variable does not need to be mutable
+   --> src/drivers/network/virtio_net.rs:247:9
+    |
+247 |     let mut task =
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `buffer_ptr`
+   --> src/drivers/network/virtio_net.rs:595:17
+    |
+595 |             let buffer_ptr = buffer_alloc.as_ptr() as *mut u8;
+    |                 ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_buffer_ptr`
+
+warning: unused variable: `option`
+   --> src/fs/vfs_v2/drivers/cpiofs.rs:197:9
+    |
+197 |         option: Option<&str>,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_option`
+
+warning: unused variable: `vaddr`
+   --> src/fs/vfs_v2/drivers/ext2/node.rs:772:27
+    |
+772 |     fn on_unmapped(&self, vaddr: usize, _length: usize) {
+    |                           ^^^^^ help: if this is intentional, prefix it with an underscore: `_vaddr`
+
+warning: value assigned to `inode` is never read
+   --> src/fs/vfs_v2/drivers/ext2/char_device_tests.rs:186:9
+    |
+186 |         inode.block[0] = ((1u32 << 8) | 0u32).to_le();
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `inode_cache`
+    --> src/fs/vfs_v2/drivers/ext2/mod.rs:4874:13
+     |
+4874 |         let inode_cache = self.inode_cache.read();
+     |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_inode_cache`
+
+warning: unused variable: `block_cache`
+    --> src/fs/vfs_v2/drivers/ext2/mod.rs:4875:13
+     |
+4875 |         let block_cache = self.block_cache.read();
+     |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_block_cache`
+
+warning: variable does not need to be mutable
+   --> src/fs/vfs_v2/drivers/fat32/driver.rs:209:13
+    |
+209 |         let mut mock_device = MockBlockDevice::new("mock_fat32", 512, 65536);
+    |             ----^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `cluster_size`
+   --> src/fs/vfs_v2/drivers/fat32/mod.rs:646:13
+    |
+646 |         let cluster_size = (self.sectors_per_cluster * self.bytes_per_sector) as usize;
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cluster_size`
+
+warning: unused variable: `vaddr`
+    --> src/fs/vfs_v2/drivers/tmpfs/mod.rs:1719:27
+     |
+1719 |     fn on_unmapped(&self, vaddr: usize, _length: usize) {
+     |                           ^^^^^ help: if this is intentional, prefix it with an underscore: `_vaddr`
+
+warning: unused variable: `new_root_mount`
+   --> src/fs/vfs_v2/syscall.rs:840:9
+    |
+840 |     let new_root_mount = match parent_mount.get_child(&new_root_entry) {
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_root_mount`
+
+warning: unused variable: `result`
+   --> src/fs/vfs_v2/tests/advanced_tests.rs:177:9
+    |
+177 |     let result = vfs.remove("/fs1/dir_a");
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_result`
+
+warning: unused variable: `result`
+   --> src/fs/vfs_v2/tests/advanced_tests.rs:193:9
+    |
+193 |     let result = vfs.bind_mount("/fs1/dir_a", "/fs1/dir_a/subdir");
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_result`
+
+warning: unused variable: `tmpfs`
+   --> src/fs/vfs_v2/tests/performance_tests.rs:112:9
+    |
+112 |     let tmpfs = Arc::new(TmpFS::new(1024 * 1024));
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_tmpfs`
+
+warning: variable does not need to be mutable
+   --> src/ipc/counter.rs:135:13
+    |
+135 |         let mut counter = Self::new(initval, semaphore);
+    |             ----^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unnecessary `unsafe` block
+  --> src/lsm/symbol.rs:86:17
+   |
+86 |     let start = unsafe { core::ptr::addr_of!(__SCARLET_KSYMS_START) as usize };
+   |                 ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> src/lsm/symbol.rs:87:15
+   |
+87 |     let end = unsafe { core::ptr::addr_of!(__SCARLET_KSYMS_END) as usize };
+   |               ^^^^^^ unnecessary `unsafe` block
+
+warning: value assigned to `offset` is never read
+  --> src/lsm/symbol.rs:97:22
+   |
+97 |     let mut offset = 0usize;
+   |                      ^^^^^^
+   |
+   = help: maybe it is overwritten before being read?
+
+warning: unused variable: `e`
+  --> src/lsm/syscall.rs:80:13
+   |
+80 |         Err(e) => {
+   |             ^ help: if this is intentional, prefix it with an underscore: `_e`
+
+warning[E0133]: call to unsafe function `core::ptr::mut_ptr::<impl *mut T>::add` is unsafe and requires unsafe block
+   --> src/mem/pmm.rs:254:20
+    |
+254 |         let page = self.pages.add(page_idx);
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: consult the function's documentation for information on how to avoid undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+   --> src/mem/pmm.rs:253:5
+    |
+253 |     unsafe fn add_to_free_list(&mut self, page_idx: usize, order: usize) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> src/mem/pmm.rs:255:9
+    |
+255 |         (*page).order = order as u8;
+    |         ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> src/mem/pmm.rs:256:9
+    |
+256 |         (*page).flags |= PAGE_FLAG_BUDDY;
+    |         ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: call to unsafe function `mem::pmm::ListHead::add` is unsafe and requires unsafe block
+   --> src/mem/pmm.rs:259:9
+    |
+259 |         (*free_list).add(&mut (*page).state.lru as *mut ListHead);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: consult the function's documentation for information on how to avoid undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> src/mem/pmm.rs:259:9
+    |
+259 |         (*free_list).add(&mut (*page).state.lru as *mut ListHead);
+    |         ^^^^^^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: access to union field is unsafe and requires unsafe block
+   --> src/mem/pmm.rs:259:31
+    |
+259 |         (*free_list).add(&mut (*page).state.lru as *mut ListHead);
+    |                               ^^^^^^^^^^^^^^^^^ access to union field
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: the field may not be properly initialized: using uninitialized data will cause undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> src/mem/pmm.rs:259:31
+    |
+259 |         (*free_list).add(&mut (*page).state.lru as *mut ListHead);
+    |                               ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: call to unsafe function `mem::pmm::ListHead::remove` is unsafe and requires unsafe block
+   --> src/mem/pmm.rs:265:9
+    |
+265 |         (*free_list).remove(&mut (*page).state.lru as *mut ListHead);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: consult the function's documentation for information on how to avoid undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+   --> src/mem/pmm.rs:263:5
+    |
+263 |     unsafe fn del_from_free_list(&mut self, page: *mut Page, order: usize) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> src/mem/pmm.rs:265:9
+    |
+265 |         (*free_list).remove(&mut (*page).state.lru as *mut ListHead);
+    |         ^^^^^^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: access to union field is unsafe and requires unsafe block
+   --> src/mem/pmm.rs:265:34
+    |
+265 |         (*free_list).remove(&mut (*page).state.lru as *mut ListHead);
+    |                                  ^^^^^^^^^^^^^^^^^ access to union field
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: the field may not be properly initialized: using uninitialized data will cause undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> src/mem/pmm.rs:265:34
+    |
+265 |         (*free_list).remove(&mut (*page).state.lru as *mut ListHead);
+    |                                  ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> src/mem/pmm.rs:266:9
+    |
+266 |         (*page).flags &= !PAGE_FLAG_BUDDY;
+    |         ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> src/mem/pmm.rs:291:9
+    |
+291 |         (*page).order == order as u8 && ((*page).flags & PAGE_FLAG_BUDDY) != 0
+    |         ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+   --> src/mem/pmm.rs:290:5
+    |
+290 |     unsafe fn page_is_buddy(&self, page: *const Page, order: usize) -> bool {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> src/mem/pmm.rs:291:42
+    |
+291 |         (*page).order == order as u8 && ((*page).flags & PAGE_FLAG_BUDDY) != 0
+    |                                          ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning: unused variable: `eth_layer`
+   --> src/network/ethernet.rs:623:13
+    |
+623 |         let eth_layer = EthernetLayer::new();
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_eth_layer`
+
+warning: variable does not need to be mutable
+    --> src/network/ipv4.rs:1000:13
+     |
+1000 |         let mut bytes = vec![
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/network/ipv4.rs:1026:13
+     |
+1026 |         let mut bytes = alloc::vec![0x55u8; 20]; // Invalid version (5)
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `acked`
+    --> src/network/tcp.rs:1345:13
+     |
+1345 |         let acked = header.ack_number;
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_acked`
+
+warning: unused variable: `num_pages`
+   --> src/object/capability/memory_mapping/syscall.rs:325:5
+    |
+325 |     num_pages: usize,
+    |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_pages`
+
+warning: unused variable: `vaddr`
+   --> src/object/capability/memory_mapping/mod.rs:128:25
+    |
+128 |     fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {}
+    |                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_vaddr`
+
+warning: unused variable: `paddr`
+   --> src/object/capability/memory_mapping/mod.rs:128:39
+    |
+128 |     fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {}
+    |                                       ^^^^^ help: if this is intentional, prefix it with an underscore: `_paddr`
+
+warning: unused variable: `length`
+   --> src/object/capability/memory_mapping/mod.rs:128:51
+    |
+128 |     fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {}
+    |                                                   ^^^^^^ help: if this is intentional, prefix it with an underscore: `_length`
+
+warning: unused variable: `offset`
+   --> src/object/capability/memory_mapping/mod.rs:128:66
+    |
+128 |     fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {}
+    |                                                                  ^^^^^^ help: if this is intentional, prefix it with an underscore: `_offset`
+
+warning: unused variable: `vaddr`
+   --> src/object/capability/memory_mapping/mod.rs:143:27
+    |
+143 |     fn on_unmapped(&self, vaddr: usize, length: usize) {}
+    |                           ^^^^^ help: if this is intentional, prefix it with an underscore: `_vaddr`
+
+warning: unused variable: `length`
+   --> src/object/capability/memory_mapping/mod.rs:143:41
+    |
+143 |     fn on_unmapped(&self, vaddr: usize, length: usize) {}
+    |                                         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_length`
+
+warning: variable does not need to be mutable
+   --> src/object/capability/selectable/syscall.rs:100:9
+    |
+100 |     let mut options: PollOptions = if options_ptr != 0 {
+    |         ----^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/object/handle/tests/handle_metadata.rs:119:9
+    |
+119 |     let mut table = HandleTable::new();
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/object/handle/tests/handle_metadata.rs:137:9
+    |
+137 |     let mut table = HandleTable::new();
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/object/handle/tests/handle_metadata.rs:152:9
+    |
+152 |     let mut table = HandleTable::new();
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/object/handle/tests/handle_metadata.rs:179:9
+    |
+179 |     let mut table = HandleTable::new();
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/object/handle/tests/handle_metadata.rs:206:9
+    |
+206 |     let mut table = HandleTable::new();
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+  --> src/object/handle/tests/task_integration.rs:20:9
+   |
+20 |     let mut task = new_user_task("TestTask".to_string(), 1);
+   |         ----^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+  --> src/object/handle/tests/task_integration.rs:67:9
+   |
+67 |     let mut task = new_user_task("FDCompatTask".to_string(), 1);
+   |         ----^^^^
+   |         |
+   |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/object/handle/tests/task_integration.rs:101:9
+    |
+101 |     let mut task = new_user_task("LifecycleTask".to_string(), 1);
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/object/handle/tests/task_integration.rs:133:9
+    |
+133 |     let mut task = new_user_task("ErrorTask".to_string(), 1);
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/object/handle/tests/task_integration.rs:172:9
+    |
+172 |     let mut parent_task = new_user_task("ParentTask".to_string(), 1);
+    |         ----^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/object/handle/tests/task_integration.rs:257:9
+    |
+257 |     let mut parent = new_user_task("socket-parent".to_string(), 1);
+    |         ----^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/object/handle/tests/task_integration.rs:307:9
+    |
+307 |     let mut task = new_user_task("MemoryTask".to_string(), 1);
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/object/handle/tests/task_integration.rs:351:9
+    |
+351 |     let mut task = new_user_task("CapabilityTask".to_string(), 1);
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/sched/scheduler.rs:7309:13
+     |
+7309 |         let mut task = crate::task::new_user_task("UnreapedVm".to_string(), 0);
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/sched/scheduler.rs:7326:13
+     |
+7326 |         let mut leader = crate::task::new_user_task("UnreapedLeader".to_string(), 0);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/sched/scheduler.rs:7353:13
+     |
+7353 |         let mut leader = crate::task::new_user_task("SharedVmExit".to_string(), 0);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/task/process_scope.rs:274:13
+    |
+274 |         let mut task = crate::task::new_user_task(name.into(), 0);
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4502:13
+     |
+4502 |         let mut task = super::new_user_task("Task0".to_string(), 0);
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4644:13
+     |
+4644 |         let mut parent_task = super::new_user_task("ParentTask".to_string(), 0);
+     |             ----^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4647:13
+     |
+4647 |         let mut child_task = super::new_user_task("ChildTask".to_string(), 0);
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4681:13
+     |
+4681 |         let mut init_task = super::new_user_task("InitTask".to_string(), 0);
+     |             ----^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4686:13
+     |
+4686 |         let mut parent_task = super::new_user_task("ParentTask".to_string(), 0);
+     |             ----^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4690:13
+     |
+4690 |         let mut child_task = super::new_user_task("ChildTask".to_string(), 0);
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4711:13
+     |
+4711 |         let mut init_task = super::new_user_task("InitTask".to_string(), 0);
+     |             ----^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4716:13
+     |
+4716 |         let mut parent_task = super::new_user_task("ExitingParent".to_string(), 0);
+     |             ----^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4720:13
+     |
+4720 |         let mut existing_child = super::new_user_task("ExistingChild".to_string(), 0);
+     |             ----^^^^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4724:13
+     |
+4724 |         let mut late_child = super::new_user_task("LateChild".to_string(), 0);
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4745:13
+     |
+4745 |         let mut init_task = super::new_user_task("InitTask".to_string(), 0);
+     |             ----^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4749:13
+     |
+4749 |         let mut leader_task = super::new_user_task("Leader".to_string(), 0);
+     |             ----^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4758:13
+     |
+4758 |         let mut child_task = super::new_user_task("Orphan".to_string(), 0);
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4782:13
+     |
+4782 |         let mut init_task = super::new_user_task("InitTask".to_string(), 0);
+     |             ----^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4787:13
+     |
+4787 |         let mut parent_task = super::new_user_task("ParentTask".to_string(), 0);
+     |             ----^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4791:13
+     |
+4791 |         let mut child_task = super::new_user_task("ChildTask".to_string(), 0);
+     |             ----^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4821:13
+     |
+4821 |         let mut task = super::new_user_task("SessionDefaults".to_string(), 0);
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4837:13
+     |
+4837 |         let mut parent = super::new_user_task("SessionParent".to_string(), 0);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4885:13
+     |
+4885 |         let mut parent = super::new_user_task("ThreadGroupParent".to_string(), 0);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4902:13
+     |
+4902 |         let mut parent = super::new_user_task("ThreadGroupParent".to_string(), 0);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4948:13
+     |
+4948 |         let mut init = super::new_user_task("Init".to_string(), 0);
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4952:13
+     |
+4952 |         let mut leader = super::new_user_task("ProcessLeader".to_string(), 0);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4989:13
+     |
+4989 |         let mut init = super::new_user_task("Init".to_string(), 0);
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:4993:13
+     |
+4993 |         let mut leader = super::new_user_task("VmProcessLeader".to_string(), 0);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5021:13
+     |
+5021 |         let mut init = super::new_user_task("Init".to_string(), 0);
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5025:13
+     |
+5025 |         let mut leader = super::new_user_task("WaitLeader".to_string(), 0);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5037:13
+     |
+5037 |         let mut child = super::new_user_task("WorkerProcessChild".to_string(), 0);
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5064:13
+     |
+5064 |         let mut init = super::new_user_task("Init".to_string(), 0);
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5068:13
+     |
+5068 |         let mut leader = super::new_user_task("ThreadJoinLeader".to_string(), 0);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5105:13
+     |
+5105 |         let mut parent = super::new_user_task("WaitParent".to_string(), 0);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5109:13
+     |
+5109 |         let mut leader = super::new_user_task("ProcessLeader".to_string(), 0);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5143:13
+     |
+5143 |         let mut task = super::new_user_task("SetsidTask".to_string(), 0);
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5160:13
+     |
+5160 |         let mut task = super::new_user_task("StopReportTask".to_string(), 0);
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5175:13
+     |
+5175 |         let mut task = super::new_user_task("TaskWithExitStatus".to_string(), 0);
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5194:13
+     |
+5194 |         let mut parent_task = super::new_user_task("ParentTask".to_string(), 0);
+     |             ----^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5439:13
+     |
+5439 |         let mut parent_task = super::new_user_task("ParentWithStack".to_string(), 0);
+     |             ----^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5586:13
+     |
+5586 |         let mut parent_task = super::new_user_task("ParentWithShared".to_string(), 0);
+     |             ----^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5702:13
+     |
+5702 |         let mut parent = super::new_user_task("ParentWithOwnedShared".to_string(), 0);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5752:13
+     |
+5752 |         let mut parent = super::new_user_task("ParentCloneVm".to_string(), 0);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5824:13
+     |
+5824 |         let mut leader = super::new_user_task("ExitGroupLeader".to_string(), 0);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5865:13
+     |
+5865 |         let mut parent = super::new_user_task("Parent".to_string(), 0);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5901:13
+     |
+5901 |         let mut task1 = super::Task::new_with_namespace(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5907:13
+     |
+5907 |         let mut task2 = super::Task::new_with_namespace(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5913:13
+     |
+5913 |         let mut task3 = super::Task::new_with_namespace(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5947:13
+     |
+5947 |         let mut outer = super::new_user_task("OuterSupervisor".into(), 0);
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:5950:13
+     |
+5950 |         let mut inner = super::new_user_task("InnerInit".into(), 0);
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:6002:13
+     |
+6002 |         let mut task1 = super::new_user_task("Task1".to_string(), 0);
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:6003:13
+     |
+6003 |         let mut task2 = super::new_user_task("Task2".to_string(), 0);
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> src/task/mod.rs:6004:13
+     |
+6004 |         let mut task3 = super::new_user_task("Task3".to_string(), 0);
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/lib.rs:836:9
+    |
+836 |     let mut init_task = new_user_task("init".to_string(), 0);
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: type `gpu::resource::GpuPrivateImageBacking` is more private than the item `GpuImageBacking::Private::0`
+   --> src/device/gpu/resource.rs:975:13
+    |
+975 |     Private(GpuPrivateImageBacking),
+    |             ^^^^^^^^^^^^^^^^^^^^^^ field `GpuImageBacking::Private::0` is reachable at visibility `pub(crate)`
+    |
+note: but type `gpu::resource::GpuPrivateImageBacking` is only usable at visibility `pub(self)`
+   --> src/device/gpu/resource.rs:763:1
+    |
+763 | struct GpuPrivateImageBacking {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `GpuImportedImageBacking` is more private than the item `GpuImageBacking::Imported::0`
+   --> src/device/gpu/resource.rs:976:14
+    |
+976 |     Imported(GpuImportedImageBacking),
+    |              ^^^^^^^^^^^^^^^^^^^^^^^ field `GpuImageBacking::Imported::0` is reachable at visibility `pub(crate)`
+    |
+note: but type `GpuImportedImageBacking` is only usable at visibility `pub(self)`
+   --> src/device/gpu/resource.rs:968:1
+    |
+968 | struct GpuImportedImageBacking {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MIN_HEAP_SIZE` is never used
+   --> src/lib.rs:335:7
+    |
+335 | const MIN_HEAP_SIZE: usize = 32 * 1024;
+    |       ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `KVM_INTERRUPT_UNSET` is never used
+  --> src/abi/linux/device/kvm/mod.rs:89:7
+   |
+89 | const KVM_INTERRUPT_UNSET: u32 = u32::MAX - 1;
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `KVM_CAP_COALESCED_MMIO` is never used
+   --> src/abi/linux/device/kvm/mod.rs:673:19
+    |
+673 |             const KVM_CAP_COALESCED_MMIO: usize = 15;
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `log_vm_exit` is never used
+    --> src/abi/linux/device/kvm/mod.rs:1017:4
+     |
+1017 | fn log_vm_exit(exit: &crate::hypervisor::VmExit) {
+     |    ^^^^^^^^^^^
+
+warning: function `io_none` is never used
+   --> src/abi/linux/device/kvm/aarch64.rs:676:10
+    |
+676 | const fn io_none(ty: u32, nr: u32) -> u32 {
+    |          ^^^^^^^
+
+warning: field `id` is never read
+  --> src/abi/xv6/drivers/console.rs:11:5
+   |
+10 | pub struct ConsoleDevice {
+   |            ------------- field in this struct
+11 |     id: usize,
+   |     ^^
+
+warning: constant `GIC_DIST_SIZE` is never used
+  --> src/arch/aarch64/hv/trap.rs:57:7
+   |
+57 | const GIC_DIST_SIZE: u64 = 0x1_0000;
+   |       ^^^^^^^^^^^^^
+
+warning: function `activate_early_boot_page_table` is never used
+  --> src/arch/aarch64/vm/mmu/armv8_4k.rs:65:22
+   |
+65 | pub(crate) unsafe fn activate_early_boot_page_table(root_paddr: u64) {
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `direct_map` and `initramfs` are never read
+  --> src/boot/fdt_memory.rs:13:9
+   |
+12 | pub(crate) struct FdtMemory {
+   |                   --------- fields in this struct
+13 |     pub direct_map: DirectMapRegions,
+   |         ^^^^^^^^^^
+14 |     pub usable: DirectMapRegions,
+15 |     pub initramfs: Option<PhysicalMemoryArea>,
+   |         ^^^^^^^^^
+
+warning: associated function `parse` is never used
+  --> src/boot/fdt_memory.rs:19:12
+   |
+18 | impl FdtMemory {
+   | -------------- associated function in this implementation
+19 |     pub fn parse(
+   |            ^^^^^
+
+warning: function `enabled` is never used
+   --> src/boot/fdt_memory.rs:114:4
+    |
+114 | fn enabled(node: &fdt::node::FdtNode<'_, '_>) -> bool {
+    |    ^^^^^^^
+
+warning: function `reg_area` is never used
+   --> src/boot/fdt_memory.rs:119:4
+    |
+119 | fn reg_area(reg: fdt::node::RawReg<'_>) -> Result<Option<PhysicalMemoryArea>, &'static str> {
+    |    ^^^^^^^^
+
+warning: function `complete_pages` is never used
+   --> src/boot/fdt_memory.rs:137:4
+    |
+137 | fn complete_pages(area: PhysicalMemoryArea) -> Result<Option<PhysicalMemoryArea>, &'static str> {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `initramfs_area` is never used
+   --> src/boot/fdt_memory.rs:189:4
+    |
+189 | fn initramfs_area(fdt: &fdt::Fdt<'_>) -> Result<Option<PhysicalMemoryArea>, &'static str> {
+    |    ^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+   --> src/device/gpu/resource.rs:977:12
+    |
+977 |     Shared(Arc<crate::device::graphics::shared_image::SharedImage>),
+    |     ------ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+    |
+977 -     Shared(Arc<crate::device::graphics::shared_image::SharedImage>),
+977 +     Shared(()),
+    |
+
+warning: fields `fb_resource`, `mappings`, and `device_manager_addr` are never read
+   --> src/device/graphics/framebuffer_device.rs:259:5
+    |
+258 | struct FbCompatFlushHandler {
+    |        -------------------- fields in this struct
+259 |     fb_resource: Arc<FramebufferResource>,
+    |     ^^^^^^^^^^^
+260 |     mappings: Arc<IrqRwSpinLock<BTreeMap<(usize, usize), FramebufferMapping>>>,
+    |     ^^^^^^^^
+...
+264 |     device_manager_addr: Option<usize>,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: static `FB_COMPAT_FLUSH_WORKER_STARTED` is never used
+   --> src/device/graphics/framebuffer_device.rs:267:8
+    |
+267 | static FB_COMPAT_FLUSH_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `FB_COMPAT_FLUSH_HANDLERS` is never used
+   --> src/device/graphics/framebuffer_device.rs:269:8
+    |
+269 | static FB_COMPAT_FLUSH_HANDLERS: Once<IrqSpinLock<Vec<Weak<FbCompatFlushHandler>>>> = Once::new();
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `fb_compat_flush_handlers` is never used
+   --> src/device/graphics/framebuffer_device.rs:271:4
+    |
+271 | fn fb_compat_flush_handlers() -> &'static IrqSpinLock<Vec<Weak<FbCompatFlushHandler>>> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `process_deferred_fb_compat_flushes` is never used
+   --> src/device/graphics/framebuffer_device.rs:275:4
+    |
+275 | fn process_deferred_fb_compat_flushes() -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `fb_compat_flush_worker_entry` is never used
+   --> src/device/graphics/framebuffer_device.rs:300:4
+    |
+300 | fn fb_compat_flush_worker_entry() {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `register_fb_compat_flush_handler` is never used
+   --> src/device/graphics/framebuffer_device.rs:311:4
+    |
+311 | fn register_fb_compat_flush_handler(handler: &Arc<FbCompatFlushHandler>) {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `device_manager`, `current_framebuffer_info`, `trigger_display_update`, and `process_deferred_flush` are never used
+   --> src/device/graphics/framebuffer_device.rs:611:8
+    |
+609 | impl FbCompatFlushHandler {
+    | ------------------------- methods in this implementation
+610 |     #[cfg(test)]
+611 |     fn device_manager(&self) -> &DeviceManager {
+    |        ^^^^^^^^^^^^^^
+...
+623 |     fn current_framebuffer_info(&self) -> Result<CurrentFramebufferInfo, &'static str> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+647 |     fn trigger_display_update(&self, region: DisplayRegion) -> Result<(), &'static str> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+...
+668 |     fn process_deferred_flush(&self) {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `promiscuous` is never read
+   --> src/device/network/mod.rs:311:5
+    |
+307 | pub struct GenericNetworkDevice {
+    |            -------------------- field in this struct
+...
+311 |     promiscuous: bool,
+    |     ^^^^^^^^^^^
+
+warning: field `remove_fn` is never read
+   --> src/device/platform/mod.rs:246:5
+    |
+243 | pub struct PlatformDeviceDriver {
+    |            -------------------- field in this struct
+...
+246 |     remove_fn: fn(&PlatformDeviceInfo) -> Result<(), &'static str>,
+    |     ^^^^^^^^^
+
+warning: method `process_request` is never used
+   --> src/drivers/block/virtio_blk.rs:195:8
+    |
+127 | impl VirtioBlockDevice {
+    | ---------------------- method in this implementation
+...
+195 |     fn process_request(&self, req: &mut BlockIORequest) -> Result<(), &'static str> {
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `log_probe_properties` is never used
+   --> src/drivers/graphics/simple_framebuffer.rs:235:4
+    |
+235 | fn log_probe_properties(device: &PlatformDeviceInfo) {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM` is never used
+   --> src/drivers/graphics/virtio_gpu.rs:111:7
+    |
+111 | const VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM: u32 = 3;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM` is never used
+   --> src/drivers/graphics/virtio_gpu.rs:112:7
+    |
+112 | const VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM: u32 = 4;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM` is never used
+   --> src/drivers/graphics/virtio_gpu.rs:113:7
+    |
+113 | const VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM: u32 = 67;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM` is never used
+   --> src/drivers/graphics/virtio_gpu.rs:114:7
+    |
+114 | const VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM: u32 = 68;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM` is never used
+   --> src/drivers/graphics/virtio_gpu.rs:115:7
+    |
+115 | const VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM: u32 = 121;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM` is never used
+   --> src/drivers/graphics/virtio_gpu.rs:116:7
+    |
+116 | const VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM: u32 = 134;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `present_framebuffer_in_boot_test` is never used
+    --> src/drivers/graphics/virtio_gpu.rs:2832:19
+     |
+2831 | impl VirtioGpuDevice {
+     | -------------------- method in this implementation
+2832 |     pub(crate) fn present_framebuffer_in_boot_test(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BLOCK_COUNT` is never used
+  --> src/drivers/mmc/sdhci/mod.rs:22:15
+   |
+22 |     pub const BLOCK_COUNT: usize = 0x06;
+   |               ^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CSUM` is never used
+  --> src/drivers/network/virtio_net.rs:58:7
+   |
+58 | const VIRTIO_NET_F_CSUM: u32 = 0; // Device handles packets with partial checksum
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_CSUM` is never used
+  --> src/drivers/network/virtio_net.rs:59:7
+   |
+59 | const VIRTIO_NET_F_GUEST_CSUM: u32 = 1; // Guest handles packets with partial checksum
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CTRL_GUEST_OFFLOADS` is never used
+  --> src/drivers/network/virtio_net.rs:60:7
+   |
+60 | const VIRTIO_NET_F_CTRL_GUEST_OFFLOADS: u32 = 2; // Control channel offloads reconfiguration support
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_TSO4` is never used
+  --> src/drivers/network/virtio_net.rs:63:7
+   |
+63 | const VIRTIO_NET_F_GUEST_TSO4: u32 = 7; // Guest can handle TSOv4
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_TSO6` is never used
+  --> src/drivers/network/virtio_net.rs:64:7
+   |
+64 | const VIRTIO_NET_F_GUEST_TSO6: u32 = 8; // Guest can handle TSOv6
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_ECN` is never used
+  --> src/drivers/network/virtio_net.rs:65:7
+   |
+65 | const VIRTIO_NET_F_GUEST_ECN: u32 = 9; // Guest can handle TSO with ECN
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_UFO` is never used
+  --> src/drivers/network/virtio_net.rs:66:7
+   |
+66 | const VIRTIO_NET_F_GUEST_UFO: u32 = 10; // Guest can handle UFO
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_HOST_TSO4` is never used
+  --> src/drivers/network/virtio_net.rs:67:7
+   |
+67 | const VIRTIO_NET_F_HOST_TSO4: u32 = 11; // Device can handle TSOv4
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_HOST_TSO6` is never used
+  --> src/drivers/network/virtio_net.rs:68:7
+   |
+68 | const VIRTIO_NET_F_HOST_TSO6: u32 = 12; // Device can handle TSOv6
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_HOST_ECN` is never used
+  --> src/drivers/network/virtio_net.rs:69:7
+   |
+69 | const VIRTIO_NET_F_HOST_ECN: u32 = 13; // Device can handle TSO with ECN
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_HOST_UFO` is never used
+  --> src/drivers/network/virtio_net.rs:70:7
+   |
+70 | const VIRTIO_NET_F_HOST_UFO: u32 = 14; // Device can handle UFO
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_MRG_RXBUF` is never used
+  --> src/drivers/network/virtio_net.rs:71:7
+   |
+71 | const VIRTIO_NET_F_MRG_RXBUF: u32 = 15; // Guest can merge receive buffers
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CTRL_VQ` is never used
+  --> src/drivers/network/virtio_net.rs:73:7
+   |
+73 | const VIRTIO_NET_F_CTRL_VQ: u32 = 17; // Control channel available
+   |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CTRL_RX` is never used
+  --> src/drivers/network/virtio_net.rs:74:7
+   |
+74 | const VIRTIO_NET_F_CTRL_RX: u32 = 18; // Control channel RX mode support
+   |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CTRL_VLAN` is never used
+  --> src/drivers/network/virtio_net.rs:75:7
+   |
+75 | const VIRTIO_NET_F_CTRL_VLAN: u32 = 19; // Control channel VLAN filtering
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_ANNOUNCE` is never used
+  --> src/drivers/network/virtio_net.rs:76:7
+   |
+76 | const VIRTIO_NET_F_GUEST_ANNOUNCE: u32 = 21; // Guest can send gratuitous packets
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_MQ` is never used
+  --> src/drivers/network/virtio_net.rs:77:7
+   |
+77 | const VIRTIO_NET_F_MQ: u32 = 22; // Device supports multiqueue with automatic receive steering
+   |       ^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CTRL_MAC_ADDR` is never used
+  --> src/drivers/network/virtio_net.rs:78:7
+   |
+78 | const VIRTIO_NET_F_CTRL_MAC_ADDR: u32 = 23; // Set MAC address through control channel
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_S_ANNOUNCE` is never used
+  --> src/drivers/network/virtio_net.rs:82:7
+   |
+82 | const VIRTIO_NET_S_ANNOUNCE: u16 = 2; // Gratuitous packets should be sent
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GICD_IIDR` is never used
+  --> src/drivers/pic/gic.rs:30:7
+   |
+30 | const GICD_IIDR: usize = 0x0008; // Distributor Implementer Identification Register
+   |       ^^^^^^^^^
+
+warning: constant `GICD_ICPENDR` is never used
+  --> src/drivers/pic/gic.rs:35:7
+   |
+35 | const GICD_ICPENDR: usize = 0x0280; // Interrupt Clear-Pending Registers
+   |       ^^^^^^^^^^^^
+
+warning: constant `GICD_ISACTIVER` is never used
+  --> src/drivers/pic/gic.rs:36:7
+   |
+36 | const GICD_ISACTIVER: usize = 0x0300; // Interrupt Set-Active Registers
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `GICC_RPR` is never used
+  --> src/drivers/pic/gic.rs:49:7
+   |
+49 | const GICC_RPR: usize = 0x0014; // Running Priority Register
+   |       ^^^^^^^^
+
+warning: constant `GICC_HPPIR` is never used
+  --> src/drivers/pic/gic.rs:50:7
+   |
+50 | const GICC_HPPIR: usize = 0x0018; // Highest Priority Pending Interrupt Register
+   |       ^^^^^^^^^^
+
+warning: constant `UARTRSR` is never used
+  --> src/drivers/uart/pl011.rs:28:7
+   |
+28 | const UARTRSR: usize = 0x004; // Receive Status Register
+   |       ^^^^^^^
+
+warning: constant `FR_TXFE` is never used
+  --> src/drivers/uart/pl011.rs:39:7
+   |
+39 | const FR_TXFE: u32 = 1 << 7; // Transmit FIFO empty
+   |       ^^^^^^^
+
+warning: constant `FR_RXFF` is never used
+  --> src/drivers/uart/pl011.rs:40:7
+   |
+40 | const FR_RXFF: u32 = 1 << 6; // Receive FIFO full
+   |       ^^^^^^^
+
+warning: field `multi_tt` is never read
+   --> src/drivers/usb/xhci/mod.rs:542:5
+    |
+538 | struct HubRuntime {
+    |        ---------- field in this struct
+...
+542 |     multi_tt: bool,
+    |     ^^^^^^^^
+    |
+    = note: `HubRuntime` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: field `max_intrs` is never read
+   --> src/drivers/usb/xhci/mod.rs:848:5
+    |
+838 | pub struct XhciController {
+    |            -------------- field in this struct
+...
+848 |     max_intrs: u16,
+    |     ^^^^^^^^^
+
+warning: static `INPUT_COUNTER` is never used
+  --> src/drivers/virtio/device/mod.rs:33:8
+   |
+33 | static INPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+   |        ^^^^^^^^^^^^^
+
+warning: struct `VirtioInputConfig` is never constructed
+  --> src/drivers/virtio_input.rs:51:8
+   |
+51 | struct VirtioInputConfig {
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_INPUT_CFG_UNSET` is never used
+  --> src/drivers/virtio_input.rs:61:15
+   |
+61 |     pub const VIRTIO_INPUT_CFG_UNSET: u8 = 0x00;
+   |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_INPUT_CFG_ID_SERIAL` is never used
+  --> src/drivers/virtio_input.rs:63:15
+   |
+63 |     pub const VIRTIO_INPUT_CFG_ID_SERIAL: u8 = 0x02;
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_INPUT_CFG_ID_DEVIDS` is never used
+  --> src/drivers/virtio_input.rs:64:15
+   |
+64 |     pub const VIRTIO_INPUT_CFG_ID_DEVIDS: u8 = 0x03;
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `next_file_id` is never read
+   --> src/fs/vfs_v2/drivers/ext2/mod.rs:307:5
+    |
+291 | pub struct Ext2FileSystem {
+    |            -------------- field in this struct
+...
+307 |     next_file_id: IrqSpinLock<u64>,
+    |     ^^^^^^^^^^^^
+
+warning: methods `len` and `get_stats` are never used
+   --> src/fs/vfs_v2/drivers/ext2/mod.rs:445:8
+    |
+367 | impl InodeLruCache {
+    | ------------------ methods in this implementation
+...
+445 |     fn len(&self) -> usize {
+    |        ^^^
+...
+450 |     fn get_stats(&self) -> (u64, u64, usize) {
+    |        ^^^^^^^^^
+
+warning: methods `len` and `get_stats` are never used
+   --> src/fs/vfs_v2/drivers/ext2/mod.rs:564:8
+    |
+488 | impl BlockLruCache {
+    | ------------------ methods in this implementation
+...
+564 |     fn len(&self) -> usize {
+    |        ^^^
+...
+569 |     fn get_stats(&self) -> (u64, u64, usize) {
+    |        ^^^^^^^^^
+
+warning: method `free_block` is never used
+    --> src/fs/vfs_v2/drivers/ext2/mod.rs:3738:8
+     |
+ 583 | impl Ext2FileSystem {
+     | ------------------- method in this implementation
+...
+3738 |     fn free_block(&self, block_number: u32) -> Result<(), FileSystemError> {
+     |        ^^^^^^^^^^
+
+warning: struct `MockCharDevice` is never constructed
+  --> src/fs/vfs_v2/drivers/ext2/char_device_tests.rs:18:12
+   |
+18 |     struct MockCharDevice {
+   |            ^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> src/fs/vfs_v2/drivers/ext2/char_device_tests.rs:25:12
+   |
+24 |     impl MockCharDevice {
+   |     ------------------- associated function in this implementation
+25 |         fn new(name: &'static str) -> Self {
+   |            ^^^
+
+warning: field `content` is never read
+   --> src/fs/vfs_v2/drivers/tmpfs/mod.rs:693:5
+    |
+683 | pub struct TmpNode {
+    |            ------- field in this struct
+...
+693 |     content: IrqRwSpinLock<Vec<u8>>,
+    |     ^^^^^^^
+
+warning: method `resolve_symlink_target` is never used
+   --> src/fs/vfs_v2/mount_tree.rs:851:8
+    |
+228 | impl MountTree {
+    | -------------- method in this implementation
+...
+851 |     fn resolve_symlink_target(
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `e_type` is never read
+   --> src/lsm/elf.rs:155:5
+    |
+154 | struct Elf64_Ehdr {
+    |        ---------- field in this struct
+155 |     e_type: u16,
+    |     ^^^^^^
+    |
+    = note: `Elf64_Ehdr` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `is_object_locked` is never used
+   --> src/mem/page_cache.rs:395:8
+    |
+131 | impl PageCacheManager {
+    | --------------------- method in this implementation
+...
+395 |     fn is_object_locked(&self, id: CacheId) -> bool {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: field `entry` is never read
+   --> src/network/arp.rs:220:5
+    |
+218 | struct ArpPendingEntry {
+    |        --------------- field in this struct
+219 |     /// Cache entry
+220 |     entry: ArpCacheEntry,
+    |     ^^^^^
+    |
+    = note: `ArpPendingEntry` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: fields `timeout_ticks` and `cache_timeout` are never read
+   --> src/network/arp.rs:248:5
+    |
+242 | pub struct ArpLayer {
+    |            -------- fields in this struct
+...
+248 |     timeout_ticks: u64,
+    |     ^^^^^^^^^^^^^
+249 |     /// Cache timeout (in ticks)
+250 |     cache_timeout: u64,
+    |     ^^^^^^^^^^^^^
+
+warning: variants `XhciRxCopy` and `XhciTxCopy` are never constructed
+  --> src/network/profile.rs:19:5
+   |
+17 | pub(crate) enum Stage {
+   |                 ----- variants in this enum
+18 |     XhciRxInvalidate,
+19 |     XhciRxCopy,
+   |     ^^^^^^^^^^
+20 |     XhciRxRequeue,
+21 |     XhciTxCopy,
+   |     ^^^^^^^^^^
+   |
+   = note: `Stage` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: method `get_all_received` is never used
+    --> src/network/protocol_stack.rs:1342:12
+     |
+1327 |     impl MockTcpLayer {
+     |     ----------------- method in this implementation
+...
+1342 |         fn get_all_received(&self) -> Vec<Vec<u8>> {
+     |            ^^^^^^^^^^^^^^^^
+
+warning: methods `send_syn_ack` and `send_fin_ack` are never used
+    --> src/network/tcp.rs:2033:8
+     |
+ 716 | impl TcpSocket {
+     | -------------- methods in this implementation
+...
+2033 |     fn send_syn_ack(&self, dest_ip: Ipv4Address, dest_port: u16, their_seq: u32, ack_seq: u32) {
+     |        ^^^^^^^^^^^^
+...
+2138 |     fn send_fin_ack(&self) {
+     |        ^^^^^^^^^^^^
+
+warning: methods `as_kernel_object`, `as_hypervisor_vm_arc`, and `as_hypervisor_vcpu` are never used
+   --> src/object/mod.rs:274:19
+    |
+250 | impl<'a> KernelObjectRef<'a> {
+    | ---------------------------- methods in this implementation
+...
+274 |     pub(crate) fn as_kernel_object(&self) -> &'a KernelObject {
+    |                   ^^^^^^^^^^^^^^^^
+...
+312 |     pub(crate) fn as_hypervisor_vm_arc(&self) -> Option<&'a hypervisor::VmRef> {
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+325 |     pub(crate) fn as_hypervisor_vcpu(&self) -> Option<&'a dyn hypervisor::VcpuObject> {
+    |                   ^^^^^^^^^^^^^^^^^^
+
+warning: field `name` is never read
+  --> src/object/handle/tests/mock.rs:13:9
+   |
+12 | pub struct MockFileObject {
+   |            -------------- field in this struct
+13 |     pub name: String,
+   |         ^^^^
+
+warning: associated function `from_data` is never used
+  --> src/object/handle/tests/mock.rs:35:12
+   |
+18 | impl MockFileObject {
+   | ------------------- associated function in this implementation
+...
+35 |     pub fn from_data(data: Vec<u8>) -> Self {
+   |            ^^^^^^^^^
+
+warning: associated function `with_data` is never used
+   --> src/object/handle/tests/mock.rs:280:12
+    |
+272 | impl MockPipeObject {
+    | ------------------- associated function in this implementation
+...
+280 |     pub fn with_data(data: &str) -> Self {
+    |            ^^^^^^^^^
+
+warning: field `name` is never read
+  --> src/object/tests/mock.rs:13:9
+   |
+12 | pub struct MockFileObject {
+   |            -------------- field in this struct
+13 |     pub name: String,
+   |         ^^^^
+
+warning: associated functions `with_name_and_content` and `from_data` are never used
+  --> src/object/tests/mock.rs:27:12
+   |
+18 | impl MockFileObject {
+   | ------------------- associated functions in this implementation
+...
+27 |     pub fn with_name_and_content(name: &str, content: &str) -> Self {
+   |            ^^^^^^^^^^^^^^^^^^^^^
+...
+35 |     pub fn from_data(data: Vec<u8>) -> Self {
+   |            ^^^^^^^^^
+
+warning: struct `MockTaskFileObject` is never constructed
+   --> src/object/tests/mock.rs:149:12
+    |
+149 | pub struct MockTaskFileObject {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> src/object/tests/mock.rs:155:12
+    |
+154 | impl MockTaskFileObject {
+    | ----------------------- associated function in this implementation
+155 |     pub fn new(data: Vec<u8>) -> Self {
+    |            ^^^
+
+warning: struct `MockPipeObject` is never constructed
+   --> src/object/tests/mock.rs:267:12
+    |
+267 | pub struct MockPipeObject {
+    |            ^^^^^^^^^^^^^^
+
+warning: associated functions `new` and `with_data` are never used
+   --> src/object/tests/mock.rs:273:12
+    |
+272 | impl MockPipeObject {
+    | ------------------- associated functions in this implementation
+273 |     pub fn new() -> Self {
+    |            ^^^
+...
+280 |     pub fn with_data(data: &str) -> Self {
+    |            ^^^^^^^^^
+
+warning: constant `SLICE_DIAGNOSTIC_NONE` is never used
+   --> src/sched/scheduler.rs:260:7
+    |
+260 | const SLICE_DIAGNOSTIC_NONE: u64 = 0;
+    |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `reset_spin_contention_for_test` is never used
+   --> src/sync/preempt.rs:628:15
+    |
+628 | pub(crate) fn reset_spin_contention_for_test() {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `as_mut_ptr` is never used
+   --> src/sync/spinlock.rs:113:26
+    |
+ 39 | impl<T> SpinLock<T> {
+    | ------------------- method in this implementation
+...
+113 |     pub(crate) unsafe fn as_mut_ptr(&self) -> *mut T {
+    |                          ^^^^^^^^^^
+
+warning: methods `try_deadline_debug_state` and `has_software_timers` are never used
+    --> src/task/mod.rs:1315:19
+     |
+1045 | impl Task {
+     | --------- methods in this implementation
+...
+1315 |     pub(crate) fn try_deadline_debug_state(&self) -> Option<(bool, bool)> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3759 |     pub(crate) fn has_software_timers(&self) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `EI_MAG0` is never used
+   --> src/task/elf_loader/mod.rs:155:7
+    |
+155 | const EI_MAG0: usize = 0;
+    |       ^^^^^^^
+
+warning: constant `EI_MAG1` is never used
+   --> src/task/elf_loader/mod.rs:156:7
+    |
+156 | const EI_MAG1: usize = 1;
+    |       ^^^^^^^
+
+warning: constant `EI_MAG2` is never used
+   --> src/task/elf_loader/mod.rs:157:7
+    |
+157 | const EI_MAG2: usize = 2;
+    |       ^^^^^^^
+
+warning: constant `EI_MAG3` is never used
+   --> src/task/elf_loader/mod.rs:158:7
+    |
+158 | const EI_MAG3: usize = 3;
+    |       ^^^^^^^
+
+warning: static `TIMER_STALL_SAMPLES` is never used
+   --> src/timer.rs:151:8
+    |
+151 | static TIMER_STALL_SAMPLES: [ReportInterval; MAX_NUM_CPUS] =
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TIMER_STALL_SAMPLE_INTERVAL_NS` is never used
+   --> src/timer.rs:154:7
+    |
+154 | const TIMER_STALL_SAMPLE_INTERVAL_NS: u64 = 1_000_000_000;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `should_sample_timer_stalls` is never used
+   --> src/timer.rs:343:4
+    |
+343 | fn should_sample_timer_stalls(cpu_id: usize, now_ns: u64) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `diagnostic_time_ns` is never used
+   --> src/timer.rs:957:15
+    |
+957 | pub(crate) fn diagnostic_time_ns() -> Option<u64> {
+    |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `align_down` is never used
+  --> src/vm/mod.rs:54:4
+   |
+54 | fn align_down(addr: usize, align: usize) -> usize {
+   |    ^^^^^^^^^^
+
+warning: function `align_up` is never used
+  --> src/vm/mod.rs:58:4
+   |
+58 | fn align_up(addr: usize, align: usize) -> usize {
+   |    ^^^^^^^^
+
+warning: method `slot_index_for_base` is never used
+   --> src/vm/mod.rs:561:8
+    |
+536 | impl KernelKstackAllocator {
+    | -------------------------- method in this implementation
+...
+561 |     fn slot_index_for_base(&self, base: usize) -> Option<usize> {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: direct cast of function item into an integer
+   --> src/arch/aarch64/mod.rs:249:79
+    |
+249 |     let trap_exit_offset = (crate::arch::aarch64::trap::user::_switch_to_user as usize)
+    |                                                                               ^^^^^^^^
+    |
+    = note: `#[warn(function_casts_as_integer)]` on by default
+help: first cast to a pointer `as *const ()`
+    |
+249 |     let trap_exit_offset = (crate::arch::aarch64::trap::user::_switch_to_user as *const () as usize)
+    |                                                                               ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> src/arch/aarch64/mod.rs:250:74
+    |
+250 |         .wrapping_sub(crate::arch::aarch64::trap::user::_user_trap_entry as usize);
+    |                                                                          ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+250 |         .wrapping_sub(crate::arch::aarch64::trap::user::_user_trap_entry as *const () as usize);
+    |                                                                          ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> src/arch/aarch64/mod.rs:503:34
+    |
+503 |     trap::user::_user_trap_entry as usize
+    |                                  ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+503 |     trap::user::_user_trap_entry as *const () as usize
+    |                                  ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> src/arch/aarch64/mod.rs:517:38
+    |
+517 |     trap::kernel::_kernel_trap_entry as usize
+    |                                      ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+517 |     trap::kernel::_kernel_trap_entry as *const () as usize
+    |                                      ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> src/arch/aarch64/mod.rs:521:44
+    |
+521 |     trap::kernel::arch_kernel_trap_handler as usize
+    |                                            ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+521 |     trap::kernel::arch_kernel_trap_handler as *const () as usize
+    |                                            ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> src/arch/aarch64/mod.rs:525:40
+    |
+525 |     trap::user::arch_user_trap_handler as usize
+    |                                        ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+525 |     trap::user::arch_user_trap_handler as *const () as usize
+    |                                        ++++++++++++
+
+warning: transmuting an integer to a pointer creates a pointer without provenance
+   --> src/arch/aarch64/mod.rs:677:21
+    |
+677 |     return unsafe { transmute(tpidr_el1) };
+    |                     ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this is dangerous because dereferencing the resulting pointer is undefined behavior
+    = note: exposed provenance semantics can be used to create a pointer based on some previously exposed provenance
+    = help: if you truly mean to create a pointer without provenance, use `std::ptr::without_provenance_mut`
+    = help: for more information about transmute, see <https://doc.rust-lang.org/std/mem/fn.transmute.html#transmutation-between-pointers-and-integers>
+    = help: for more information about exposed provenance, see <https://doc.rust-lang.org/std/ptr/index.html#exposed-provenance>
+    = note: `#[warn(integer_to_ptr_transmutes)]` on by default
+help: use `std::ptr::with_exposed_provenance_mut` instead to use a previously exposed provenance
+    |
+677 -     return unsafe { transmute(tpidr_el1) };
+677 +     return unsafe { &mut *std::ptr::with_exposed_provenance_mut::<arch::aarch64::Aarch64>(tpidr_el1) };
+    |
+
+warning: direct cast of function item into an integer
+   --> src/arch/aarch64/hv/switch.rs:180:32
+    |
+180 |     el2_guest_exit_vector_base as usize
+    |                                ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+180 |     el2_guest_exit_vector_base as *const () as usize
+    |                                ++++++++++++
+
+warning: comparison is useless due to type limits
+    --> src/network/udp.rs:1268:35
+     |
+1268 |         assert!(port1 >= 49152 && port1 <= 65535);
+     |                                   ^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_comparisons)]` on by default
+
+warning: comparison is useless due to type limits
+    --> src/network/udp.rs:1269:35
+     |
+1269 |         assert!(port2 >= 49152 && port2 <= 65535);
+     |                                   ^^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0133`.
+warning: `scarlet` (lib test) generated 296 warnings (run `cargo fix --lib -p scarlet --tests` to apply 162 suggestions)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1m 03s
+warning: the following packages contain code that will be rejected by a future version of Rust: aes v0.9.3, core v0.0.0 (/nix/store/42rqgd28d15hwzrwb5va31qdkk3z5hji-scarlet-rust-toolchain-71dd0425890d/lib/rustlib/src/rust/library/core)
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (target/aarch64-unknown-none-elf/debug/deps/scarlet-7985073242f29824)
+Kernel validation override: -cpu host -accel hvf and HVF firmware
+Test runner starting (aarch64)...
+Generating fresh FAT32 test image...
+Creating fresh FAT32 test image: /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/fat32-test.img
+Populating test files using mtools...
+Fresh FAT32 test image ready: /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/fat32-test.img (64M)
+Verifying filesystem...
+fsck.fat 4.2 (2021-01-31)
+Checking we can access the last sector of the filesystem
+Boot sector contents:
+System ID "mkfs.fat"
+Media byte 0xf8 (hard disk)
+       512 bytes per logical sector
+       512 bytes per cluster
+        32 reserved sectors
+First FAT starts at byte 16384 (sector 32)
+         2 FATs, 32 bit entries
+    516608 bytes per FAT (= 1009 sectors)
+Root directory start at cluster 2 (arbitrary size)
+Data area starts at byte 1049600 (sector 2050)
+    129022 data clusters (66059264 bytes)
+32 sectors/track, 8 heads
+         0 hidden sectors
+    131072 sectors total
+Checking for unused clusters.
+Checking free cluster summary.
+/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/fat32-test.img: 19 files, 31/129022 clusters
+Filesystem verification: OK
+
+Ready for testing!
+Generating fresh ext2 test image...
+Creating fresh ext2 test image: /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/ext2-test.img
+Populating test files...
+Fresh ext2 test image ready: /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/ext2-test.img (64M)
+Verifying filesystem...
+Pass 1: Checking inodes, blocks, and sizes
+Pass 2: Checking directory structure
+Pass 3: Checking directory connectivity
+Pass 4: Checking reference counts
+Pass 5: Checking group summary information
+SCARLET: 30/16384 files (0.0% non-contiguous), 1059/16384 blocks
+Filesystem verification: OK
+
+Ready for testing!
+Created symbolic link: /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/target/aarch64-unknown-none-elf/debug/deps/../test-kernel -> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/target/aarch64-unknown-none-elf/debug/deps/scarlet-7985073242f29824
+cargo-scarlet-plugin-limine: running mformat -i /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/.test/limine-aarch64-boot.img -F -v SCARLET_AA ::
+cargo-scarlet-plugin-limine: running mmd -i /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/.test/limine-aarch64-boot.img ::/EFI
+cargo-scarlet-plugin-limine: running mmd -i /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/.test/limine-aarch64-boot.img ::/EFI/BOOT
+cargo-scarlet-plugin-limine: running mmd -i /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/.test/limine-aarch64-boot.img ::/boot
+cargo-scarlet-plugin-limine: running mcopy -i /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/.test/limine-aarch64-boot.img /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/.test/.cache/limine-12.4.0/BOOTAA64.EFI ::/EFI/BOOT/BOOTAA64.EFI
+cargo-scarlet-plugin-limine: running mcopy -i /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/.test/limine-aarch64-boot.img /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/.test/.limine-work/limine-aarch64.conf ::/EFI/BOOT/limine.conf
+cargo-scarlet-plugin-limine: running mcopy -i /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/.test/limine-aarch64-boot.img /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/target/aarch64-unknown-none-elf/debug/deps/scarlet-7985073242f29824 ::/boot/kernel
+cargo-scarlet-plugin-limine: running mcopy -i /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/.test/limine-aarch64-boot.img /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/.test/initramfs-test.cpio ::/boot/initramfs-aarch64.cpio
+cargo-scarlet-plugin-limine: running mcopy -i /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/.test/limine-aarch64-boot.img /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/.test/.limine-work/startup.nsh ::/startup.nsh
+cargo-scarlet-plugin-limine: created 192 MiB image /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/.test/limine-aarch64-boot.img
+qemu-system-aarch64: warning: hub 0 is not connected to host network
+UEFI firmware (version edk2-stable202408-prebuilt.qemu.org built at 16:28:50 on Sep 12 2024)
+ArmTrngLib could not be correctly initialized.
+Error: Image at 000BFDB6000 start failed: 00000001
+Error: Image at 000BFD6D000 start failed: Not Found
+Error: Image at 000BFCBA000 start failed: Unsupported
+Error: Image at 000BFC3F000 start failed: Not Found
+Error: Image at 000BFB65000 start failed: Aborted
+Tpm2SubmitCommand - Tcg2 - Not Found
+Tpm2GetCapabilityPcrs fail!
+Tpm2SubmitCommand - Tcg2 - Not Found
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI Non-Block Boot Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,0000000A00000000)
+BdsDxe: starting Boot0001 "UEFI Non-Block Boot Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,0000000A00000000)
+ConvertPages: range BE5A5000 - BE5D6FFF covers multiple entries
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+[01;01H[01;01H[01;01Hl[01;02Hi[01;03Hm[01;04Hi[01;05Hn[01;06He[01;07H:[01;08H [01;09HL[01;10Ho[01;11Ha[01;12Hd[01;13Hi[01;14Hn[01;15Hg[01;16H [01;17He[01;18Hx[01;19He[01;20Hc[01;21Hu[01;22Ht[01;23Ha[01;24Hb[01;25Hl[01;26He[01;27H [01;28H`[01;29Hb[01;30Ho[01;31Ho[01;32Ht[01;33H([01;34H)[01;35H:[01;36H/[01;37Hb[01;38Ho[01;39Ho[01;40Ht[01;41H/[01;42Hk[01;43He[01;44Hr[01;45Hn[01;46He[01;47Hl[01;48H`[01;49H.[01;50H.[01;51H.[01;52H[01;01H[02;01Hl[02;02Hi[02;03Hm[02;04Hi[02;05Hn[02;06He[02;07H:[02;08H [02;09HL[02;10Ho[02;11Ha[02;12Hd[02;13Hi[02;14Hn[02;15Hg[02;16H [02;17Hm[02;18Ho[02;19Hd[02;20Hu[02;21Hl[02;22He[02;23H [02;24H`[02;25Hb[02;26Ho[02;27Ho[02;28Ht[02;29H([02;30H)[02;31H:[02;32H/[02;33Hb[02;34Ho[02;35Ho[02;36Ht[02;37H/[02;38Hi[02;39Hn[02;40Hi[02;41Ht[02;42Hr[02;43Ha[02;44Hm[02;45Hf[02;46Hs[02;47H-[02;48Ha[02;49Ha[02;50Hr[02;51Hc[02;52Hh[02;53H6[02;54H4[02;55H.[02;56Hc[02;57Hp[02;58Hi[02;59Ho[02;60H`[02;61H.[02;62H.[02;63H.[02;64H[02;01H[03;01H[Scarlet Kernel] Initializing graphics subsystem...
+[Scarlet Kernel] Found 25 devices before graphics initialization
+[GraphicsManager] Initializing graphics device 17
+[virtio-gpu] init_graphics: get_display_info
+[virtio-gpu] init_graphics: setup_framebuffer
+[virtio-gpu] init_graphics: done
+[GraphicsManager] Graphics device 17 initialized
+[GraphicsManager] Graphics device 17 config 1280x800
+[GraphicsManager] Graphics device 17 framebuffer paddr=0x42460000
+[GraphicsManager] Registered framebuffer resource: 17 -> fb0
+[GraphicsManager] Creating framebuffer char device for fb0
+[GraphicsManager] Created framebuffer character device: /dev/fb0
+[GraphicsManager] Creating display char device for fb0
+[GraphicsManager] Created display character device: /dev/display0
+[GraphicsManager] Successfully registered framebuffer from device 17
+[Test Runner] Running 1672 tests
+[Test Runner] test name=scarlet::abi::android::binder::arena::tests::binder_arena_bounds_zeroing_and_partial_unmap
+[Test Runner] test name=scarlet::abi::android::binder::death::tests::binder_death_clear_before_close_cancels_and_targets_its_looper
+[Test Runner] test name=scarlet::abi::android::binder::death::tests::binder_death_clear_waits_for_ack_before_or_during_or_after_delivery
+[Test Runner] test name=scarlet::abi::android::binder::death::tests::binder_death_failed_copy_retries_and_preserves_concurrent_clear
+[Test Runner] test name=scarlet::abi::android::binder::death::tests::binder_death_reregistration_does_not_consume_old_clear_or_death
+[Test Runner] test name=scarlet::abi::android::binder::death::tests::binder_death_work_is_bounded_and_handle_release_cancels_attached_work
+[Test Runner] test name=scarlet::abi::android::binder::objects::tests::binder_abandoned_acquisition_revokes_only_its_node_and_releases_known_holds
+[Test Runner] test name=scarlet::abi::android::binder::objects::tests::binder_buffer_and_handle_references_balance_owner_notifications
+[Test Runner] test name=scarlet::abi::android::binder::objects::tests::binder_concurrent_exporters_wait_for_shared_acquisition_before_completion_or_dispatch
+[Test Runner] test name=scarlet::abi::android::binder::objects::tests::binder_death_subscription_accepts_weak_handles_and_follows_their_lifetime
+[Test Runner] test name=scarlet::abi::android::binder::objects::tests::binder_failed_record_copy_restores_notification_and_weak_handles_cannot_promote
+[Test Runner] test name=scarlet::abi::android::binder::objects::tests::binder_failed_transport_admission_leaves_no_acquisition_work
+[Test Runner] test name=scarlet::abi::android::binder::objects::tests::binder_forwarded_handles_keep_identity_and_do_not_reuse_released_numbers
+[Test Runner] test name=scarlet::abi::android::binder::objects::tests::binder_offsets_reject_overlap_alignment_bounds_and_fd_types
+[Test Runner] test name=scarlet::abi::android::binder::objects::tests::binder_transaction_handle_ignores_unused_union_upper_word
+[Test Runner] test name=scarlet::abi::android::binder::tests::binder_context_death_checks_wire_cookie_and_preserves_failed_usercopy
+[Test Runner] test name=scarlet::abi::android::binder::tests::binder_descriptor_flush_returns_each_waiter_without_revoking_rpc
+[Test Runner] test name=scarlet::abi::android::binder::tests::binder_oneway_completion_and_serialization_follow_receive_buffer_lifetime
+[Test Runner] test name=scarlet::abi::android::binder::tests::binder_rejects_a_handle_after_its_process_changes_environment
+[Test Runner] test name=scarlet::abi::android::binder::tests::binder_rejects_invalid_write_read_lengths_without_consuming_commands
+[Test Runner] test name=scarlet::abi::android::binder::tests::binder_routes_only_within_the_same_environment_and_device
+[Test Runner] test name=scarlet::abi::android::binder::tests::binder_shield_domain_and_relabel_cannot_reuse_foreign_authority
+[Test Runner] test name=scarlet::abi::android::binder::tests::binder_transports_framework_appops_flag_without_accepting_unknown_flags
+[Test Runner] test name=scarlet::abi::android::detect::tests::detects_android_interpreter_but_not_generic_linux_or_wrong_architecture
+[Test Runner] test name=scarlet::abi::android::detect::tests::detects_static_android_notes_and_rejects_truncated_or_overflowing_headers
+[Test Runner] test name=scarlet::abi::android::security::tests::android_context_categories_are_exact_canonical_labels_without_implicit_grants
+[Test Runner] test name=scarlet::abi::android::security::tests::android_setcon_checks_live_subject_uid_policy_owner_and_single_thread_at_write
+Mapped kernel stack window for Task (allocating): slot 3 0xfffffffffef12000 - 0xfffffffffef22fff
+Kernel stack guard OK (slot 3)
+Mapped kernel stack window for Task (allocating): slot 4 0xfffffffffef23000 - 0xfffffffffef33fff
+Kernel stack guard OK (slot 4)
+[Test Runner] test name=scarlet::abi::android::security::tests::android_shield_access_decisions_deny_unknown_classes_labels_and_permissions
+[Test Runner] test name=scarlet::abi::android::security::tests::android_shield_fs_binds_a_policy_and_keeps_access_transactions_per_open
+[Test Runner] test name=scarlet::abi::android::security::tests::android_shield_permissions_are_readable_directory_records_and_status_is_immutable
+[Test Runner] test name=scarlet::abi::linux::aarch64::signal::tests::invalid_signal_return_cannot_change_privileged_context
+[Test Runner] test name=scarlet::abi::linux::aarch64::signal::tests::signal_frame_restores_interrupted_registers_and_fpsimd
+[Test Runner] test name=scarlet::abi::linux::device::kvm::irqfd_tests::immediate_exit_returns_eintr_without_entering_guest
+[Test Runner] test name=scarlet::abi::linux::device::kvm::irqfd_tests::irqfd_resample_capability_is_architecture_specific
+[Test Runner] test name=scarlet::abi::linux::device::kvm::irqfd_tests::irqfd_resample_registration_validation_and_real_deassign
+[Test Runner] test name=scarlet::abi::linux::device::tty::tests::dev_tty_resolves_controlling_pty_without_standard_fds
+[Test Runner] test name=scarlet::abi::linux::device::tty::tests::tcgets_layout_matches_kernel_uapi_not_termios2
+[Test Runner] test name=scarlet::abi::linux::device::tty::tests::tcsetpgrp_requires_inherited_login_controlling_terminal
+Mapped kernel stack window for Task (allocating): slot 0 0xfffffffffeedf000 - 0xfffffffffeeeffff
+Kernel stack guard OK (slot 0)
+Mapped kernel stack window for Task (allocating): slot 1 0xfffffffffeef0000 - 0xfffffffffef00fff
+Kernel stack guard OK (slot 1)
+Mapped kernel stack window for Task (allocating): slot 2 0xfffffffffef01000 - 0xfffffffffef11fff
+Kernel stack guard OK (slot 2)
+[Test Runner] test name=scarlet::abi::linux::device::tty::tests::test_devpts_master_tty_ioctl_routing_is_limited
+[Test Runner] test name=scarlet::abi::linux::device::tty::tests::test_devpts_slave_routes_as_tty_not_pty_master
+[Test Runner] test name=scarlet::abi::linux::generic::credentials::tests::linux_identity_drop_saved_restore_and_permanent_capability_loss
+[Test Runner] test name=scarlet::abi::linux::generic::credentials::tests::linux_keepcaps_retains_ceiling_but_cannot_regain_removed_grants
+[Test Runner] test name=scarlet::abi::linux::generic::credentials::tests::linux_pair_saved_id_rules_and_failed_updates_are_atomic
+[Test Runner] test name=scarlet::abi::linux::generic::exec::tests::linux_exec_accepts_python_postinst_argument_count
+[Test Runner] test name=scarlet::abi::linux::generic::exec::tests::linux_exec_auxv_pair_crosses_noncontiguous_pages
+[Test Runner] test name=scarlet::abi::linux::generic::exec::tests::linux_exec_limits_include_pointers_and_share_environment_budget
+[Test Runner] test name=scarlet::abi::linux::generic::exec::tests::linux_exec_per_string_limit_and_large_stack_storage
+[Test Runner] test name=scarlet::abi::linux::generic::exec::tests::linux_exec_random_failure_does_not_publish_an_invalid_pointer
+[Test Runner] test name=scarlet::abi::linux::generic::exec::tests::linux_exec_random_is_readable_in_new_image_before_auxv_terminator
+[Test Runner] test name=scarlet::abi::linux::generic::exec::tests::linux_exec_string_crosses_stack_page_boundary
+[Test Runner] test name=scarlet::abi::linux::generic::exec::tests::linux_exec_strings_support_box64_argv_compaction
+[Test Runner] test name=scarlet::abi::linux::generic::fs::tests::access_checks_existence_and_final_symlink_in_the_selected_view
+[Test Runner] test name=scarlet::abi::linux::generic::fs::tests::chdir_preserves_missing_prefix_error_and_cwd_on_failure
+[Test Runner] test name=scarlet::abi::linux::generic::fs::tests::cross_page_read_preserves_would_block_instead_of_eof
+[Test Runner] test name=scarlet::abi::linux::generic::fs::tests::device_stat_identity_matches_path_reopens_and_duplicates
+[Test Runner] test name=scarlet::abi::linux::generic::fs::tests::fchdir_uses_open_directory_identity_and_rejects_invalid_descriptors
+[Test Runner] test name=scarlet::abi::linux::generic::fs::tests::getdents_records_cross_noncontiguous_pages_and_reach_eof
+[Test Runner] test name=scarlet::abi::linux::generic::fs::tests::linux_poll_waits_return_to_dispatch_pending_interrupt_and_kill
+[Test Runner] test name=scarlet::abi::linux::generic::fs::tests::pipe_descriptor_stat_identifies_both_ends_and_duplicates_as_one_fifo
+[Test Runner] test name=scarlet::abi::linux::generic::fs::tests::pipe_read_across_user_pages_returns_available_reply_without_second_wait
+[Test Runner] test name=scarlet::abi::linux::generic::fs::tests::proc_exe_follow_uses_owner_view_and_nofollow_keeps_link_identity
+Mapped kernel stack window for Task (allocating): slot 0 0xfffffffffeedf000 - 0xfffffffffeeeffff
+Kernel stack guard OK (slot 0)
+Mapped kernel stack window for Task (allocating): slot 1 0xfffffffffeef0000 - 0xfffffffffef00fff
+Kernel stack guard OK (slot 1)
+[Test Runner] test name=scarlet::abi::linux::generic::fs::tests::proc_exe_selector_accepts_only_one_process_component
+[Test Runner] test name=scarlet::abi::linux::generic::fs::tests::proc_exe_stat_describes_symlink_and_target_size
+[Test Runner] test name=scarlet::abi::linux::generic::fs::tests::socket_fionbio_updates_linux_status_flags_and_validates_user_pointer
+[Test Runner] test name=scarlet::abi::linux::generic::fs::tests::statfs_matches_asm_generic_64_layout
+[Test Runner] test name=scarlet::abi::linux::generic::fs::tests::stream_read_retries_would_block_and_propagates_interruptions
+[Test Runner] test name=scarlet::abi::linux::generic::fs::tests::timespec_timeout_rejects_invalid_fields
+[Test Runner] test name=scarlet::abi::linux::generic::fs::tests::timespec_timeout_saturates_far_future_values
+[Test Runner] test name=scarlet::abi::linux::generic::futex::tests::futex_wait_with_queued_interrupt_does_not_sleep_or_leave_a_waiter
+[Test Runner] test name=scarlet::abi::linux::generic::futex::tests::private_futex_keys_are_isolated_by_thread_group
+[Test Runner] test name=scarlet::abi::linux::generic::futex::tests::requeue_compares_atomically_and_preserves_waiter_bitsets
+[Test Runner] test name=scarlet::abi::linux::generic::futex::tests::requeue_syscall_validates_counts_addresses_and_compared_value
+[Test Runner] test name=scarlet::abi::linux::generic::futex::tests::requeued_waiters_are_removed_after_timeout_interrupt_and_exit
+[Test Runner] test name=scarlet::abi::linux::generic::futex::tests::shared_futex_keys_match_the_backing_address
+[Test Runner] test name=scarlet::abi::linux::generic::memfd::tests::memfd_default_seal_and_unsupported_bits_are_not_silently_accepted
+[Test Runner] test name=scarlet::abi::linux::generic::memfd::tests::memfd_fcntl_duplicate_and_ftruncate_observe_shared_seals_and_errno
+[Test Runner] test name=scarlet::abi::linux::generic::memfd::tests::memfd_size_seals_block_resize_but_allow_writes_inside_the_file
+[Test Runner] test name=scarlet::abi::linux::generic::mm::tests::linux_large_mapping_leaves_wine_pe_base_available
+[Test Runner] test name=scarlet::abi::linux::generic::mm::tests::madvise_discards_dirty_pages_without_populating_unused_stack_pages
+[Test Runner] test name=scarlet::abi::linux::generic::mm::tests::mmap_rejects_out_of_range_fixed_reservations_before_insertion
+[Test Runner] test name=scarlet::abi::linux::generic::mm::tests::mmap_unaligned_offset_preserves_fixed_mapping_and_aligned_offset_reads_file_page
+[Test Runner] test name=scarlet::abi::linux::generic::proc::tests::entry_stack_survives_clone_and_changes_only_on_committed_exec
+Mapped kernel stack window for Task (allocating): slot 0 0xfffffffffeedf000 - 0xfffffffffeeeffff
+Kernel stack guard OK (slot 0)
+Mapped kernel stack window for Task (allocating): slot 1 0xfffffffffeef0000 - 0xfffffffffef00fff
+Kernel stack guard OK (slot 1)
+[Test Runner] test name=scarlet::abi::linux::generic::proc::tests::linux_cpu_mask_uses_native_word_layout
+[Test Runner] test name=scarlet::abi::linux::generic::proc::tests::linux_getpriority_raw_encoding_covers_nice_range
+[Test Runner] test name=scarlet::abi::linux::generic::proc::tests::linux_scheduler_controls_reject_kernel_tasks
+[Test Runner] test name=scarlet::abi::linux::generic::proc::tests::linux_wait_encoding_distinguishes_exit_codes_from_signals
+[Test Runner] test name=scarlet::abi::linux::generic::proc::tests::prctl_rejects_unimplemented_tagged_pointer_and_security_operations
+[Test Runner] test name=scarlet::abi::linux::generic::proc::tests::prctl_task_name_stops_at_nul_and_linux_limit
+[Test Runner] test name=scarlet::abi::linux::generic::proc::tests::resource_queries_use_entry_reservation_and_validate_output
+[Test Runner] test name=scarlet::abi::linux::generic::proc::tests::wait4_decodes_zero_extended_negative_pid_at_the_syscall_boundary
+Mapped kernel stack window for Task (allocating): slot 0 0xfffffffffeedf000 - 0xfffffffffeeeffff
+Kernel stack guard OK (slot 0)
+Mapped kernel stack window for Task (allocating): slot 1 0xfffffffffeef0000 - 0xfffffffffef00fff
+Kernel stack guard OK (slot 1)
+[Scarlet Kernel] panic: panicked at src/abi/linux/generic/proc.rs:2035:46:
+called `Result::unwrap()` on an `Err` value: "Memory mapping overlaps with a preceding map"
+[Test Runner] Test failed
+[aarch64] Shutdown with exit code 1 requested
+[system-power] PowerOff via architecture firmware
+[aarch64] PSCI Hvc system request 0x84000008
+Test failure detected in output
+error: test failed, to rerun pass `--lib`
+
+Caused by:
+  process didn't exit successfully: `python3 /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/checkpoints/2026-10-29-shield/run-kernel-hvf.py /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/target/aarch64-unknown-none-elf/debug/deps/scarlet-7985073242f29824` (exit status: 1)
+note: test exited abnormally; to see the full output pass --no-capture to the harness.

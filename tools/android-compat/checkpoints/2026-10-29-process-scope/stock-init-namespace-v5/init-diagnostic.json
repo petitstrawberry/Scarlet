@@ -1,0 +1,17 @@
+{
+  "kind": "bounded-stock-init-diagnostic-v1",
+  "init_manifest_sha256": "3df5370509edc91770366a3d6bc865470042a586b4bfd90a676738e82e3db0e6",
+  "launcher_sha256": "cb5baa19bb0e5ccb8a2599f54b781d1a82fb34b7b84023b6d95b9283bd463c57",
+  "launcher_source_sha256": "848c91f83b6daa83ae31c8cb4be6604412112f3e15c08d904979773a90914d8a",
+  "kmsg_logger_sha256": "d96f37d33f9744c791d0dbdfc3b38585fc60246f8fe85b365e30236f504629b8",
+  "kmsg_logger_source_sha256": "589777cae7e03a056cea8d75415da4ee0fd4902469436649dde860c3555610d3",
+  "runner_source_sha256": "8c6a6de63fa10e5d7fbd6d1639d9eb4140456945008d9a614164ae22ebbd479d",
+  "kernel_namespace_changes": "ancestor visibility and stable parent PID mapping",
+  "limits": [
+    "Diagnostic LD_PRELOAD redirects writable /dev/kmsg opens to the inherited console; no syscall result bypass",
+    "No boot-readiness assertion",
+    "No Shield init policy supplied",
+    "Fixture property snapshot removed before stock init; init initializes its own property area",
+    "No namespace-init death or orphan-reaper semantics added"
+  ]
+}

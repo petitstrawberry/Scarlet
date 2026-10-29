@@ -1,0 +1,8 @@
+{
+  "result": "timeout waiting for the success marker",
+  "qemu_exit_code": 0,
+  "elapsed_seconds": 60.005,
+  "dynamic_runtime": true,
+  "program_exit_status": null,
+  "service_readiness": "not tested"
+}

@@ -1,0 +1,14 @@
+{
+  "kind": "bounded-stock-init-diagnostic-v1",
+  "init_manifest_sha256": "3df5370509edc91770366a3d6bc865470042a586b4bfd90a676738e82e3db0e6",
+  "launcher_sha256": "c38bf1d69fd969405cacac456c65b0167cd068583e4ef9e323ad41dd4319eee5",
+  "launcher_source_sha256": "e6ea49afef1603a21f24e56c39c75305f630afcf73b143281c9a88952d86cb73",
+  "runner_source_sha256": "cf6cd8b17649ea64443411e1e4b046fe7b731300b882258a47d0c4e5b40f8402",
+  "kernel_namespace_changes": "ancestor visibility and stable parent PID mapping",
+  "limits": [
+    "No boot-readiness assertion",
+    "No Shield init policy supplied",
+    "Existing property snapshot bootstrap retained",
+    "No namespace-init death or orphan-reaper semantics added"
+  ]
+}

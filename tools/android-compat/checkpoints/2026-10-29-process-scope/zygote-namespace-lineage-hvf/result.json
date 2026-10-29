@@ -1,0 +1,19 @@
+{
+  "result": "PASS",
+  "qemu_exit_code": 0,
+  "elapsed_seconds": 9.743,
+  "dynamic_runtime": true,
+  "program_exit_status": 0,
+  "zygote": {
+    "result": "PASS",
+    "pid": 8,
+    "queries": [
+      "--query-abi-list",
+      "--get-pid"
+    ],
+    "child_pid": 13,
+    "child_specialization": "PASS",
+    "child_exit_status": "not observed by supervisor",
+    "activity_launch": "not tested"
+  }
+}
