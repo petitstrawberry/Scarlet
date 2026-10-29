@@ -1375,7 +1375,9 @@ pub fn sys_wait4(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         None => return errno::to_result(errno::EPERM),
     };
 
-    let pid = trapframe.get_arg(0) as isize;
+    // Linux pid_t is a signed 32-bit argument. AArch64 callers may leave the
+    // upper register bits zero even for -1; the syscall must sign-extend it.
+    let pid = trapframe.get_arg(0) as u32 as i32 as isize;
     let wstatus = trapframe.get_arg(1) as *mut i32;
     let options = trapframe.get_arg(2);
     let _rusage = trapframe.get_arg(3); // TODO: Implement resource usage tracking
@@ -2012,6 +2014,34 @@ mod tests {
             frame.set_arg(0, operation);
             frame.set_arg(1, value);
             assert_eq!(sys_prctl(&mut abi, &mut frame), expected);
+        }
+        clear_mock_current_task();
+    }
+
+    #[test_case]
+    fn wait4_decodes_zero_extended_negative_pid_at_the_syscall_boundary() {
+        use crate::sched::scheduler::{register_task, reset};
+        use crate::task::{clear_mock_current_task, set_mock_current_task};
+        reset();
+        let parent = Task::new("wait4-pid-width".into(), 0, TaskType::User);
+        parent.init();
+        let parent = get_task_by_id(register_task(parent)).unwrap();
+        let child = Task::new("wait4-live-child".into(), 0, TaskType::User);
+        child.init();
+        let child = get_task_by_id(register_task(child)).unwrap();
+        assert!(parent.adopt_registered_child(&child));
+        let code = 0x2000_0000;
+        parent.allocate_stack_pages(code, 1).unwrap();
+        copy_to_user(&parent, code, &0x73u32.to_ne_bytes()).unwrap();
+        set_mock_current_task(parent.clone());
+        let mut abi = LinuxAbi::default();
+        for encoded in [u32::MAX as usize, usize::MAX] {
+            let mut frame = Trapframe::new();
+            frame.set_pc(code as u64);
+            frame.set_arg(0, encoded);
+            frame.set_arg(1, 0);
+            frame.set_arg(2, 1); // WNOHANG, with one live process child.
+            assert_eq!(sys_wait4(&mut abi, &mut frame), 0);
         }
         clear_mock_current_task();
     }
