@@ -34,6 +34,9 @@ pub fn environment(native: VfsView) -> Result<Environment, &'static str> {
     android
         .bind("/tmp", &native, "/tmp")
         .map_err(|_| "Android tmp")?;
+    if option_env!("SCARLET_ANDROID_SHIELD") == Some("1") {
+        super::shield::configure(&android)?;
+    }
     let env = Environment::create().map_err(|_| "stock Environment")?;
     env.set_root("scarlet", &native)
         .map_err(|_| "native view")?;

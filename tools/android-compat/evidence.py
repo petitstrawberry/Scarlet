@@ -13,6 +13,25 @@ MAX_PNG = 16 * 1024 * 1024
 MAX_PIXELS = 16 * 1024 * 1024
 
 
+def analyze_selinux(data):
+    expected = ["SCARLET_SHIELD_CONFIGURED",
+                "SCARLET_ANDROID_STOCK_START properties", "SCARLET_PROPERTY_SNAPSHOT_OK",
+                "SCARLET_ANDROID_STOCK_EXIT properties 0", "SCARLET_ANDROID_STOCK_START linkerconfig",
+                "SCARLET_ANDROID_STOCK_EXIT linkerconfig 0", "SCARLET_ANDROID_STOCK_OK",
+                "SCARLET_ANDROID_PROGRAM_START", "SCARLET_SHIELD_BEGIN",
+                "SCARLET_SHIELD_RUNTIME /system/lib64/libselinux.so", "SCARLET_SHIELD_STATUS_OK",
+                "SCARLET_SHIELD_ALLOW_DENY_OK", "SCARLET_SHIELD_UNKNOWN_DENIED",
+                "SCARLET_SHIELD_MUTATION_DENIED", "SCARLET_SHIELD_EXEC_LABEL_OK",
+                "SCARLET_SHIELD_FORK_EXEC_OK", "SCARLET_SHIELD_OK",
+                "SCARLET_ANDROID_PROGRAM_EXIT 0", "SCARLET_ANDROID_PROGRAM_DONE"]
+    lines = data.replace(b"\r", b"").decode("utf-8", errors="replace").splitlines()
+    records = [line for line in lines if line.startswith(
+        ("SCARLET_SHIELD_", "SCARLET_ANDROID_PROGRAM_", "SCARLET_ANDROID_STOCK_", "SCARLET_PROPERTY_"))]
+    records = ["SCARLET_PROPERTY_SNAPSHOT_OK" if
+               re.fullmatch(r"SCARLET_PROPERTY_SNAPSHOT_OK [1-9][0-9]*", line) else line for line in records]
+    return {"result": "PASS" if records == expected else "INCOMPLETE", "records": records}
+
+
 def analyze_libbinder(data):
     """Require stock setup, actual RPC/lifetime checks, and both process exits."""
     expected = ["SCARLET_ANDROID_STOCK_START properties", "SCARLET_PROPERTY_SNAPSHOT_OK",

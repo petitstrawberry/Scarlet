@@ -5,6 +5,7 @@ extern crate scarlet_std as std;
 #[path = "../../../../user/bin/src/bootstrap.rs"]
 mod bootstrap;
 mod stock;
+mod shield;
 
 use std::{environment::HandleMapping, println};
 

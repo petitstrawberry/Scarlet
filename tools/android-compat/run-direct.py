@@ -16,9 +16,10 @@ import shutil
 import subprocess
 import sys
 
-from evidence import analyze_art, analyze_direct, analyze_libbinder
+from evidence import analyze_art, analyze_direct, analyze_libbinder, analyze_selinux
 from art_inputs import art_launch, validate_dex, verify_art_runtime, sha256
 from libbinder_inputs import verify_libbinder_build
+from selinux_inputs import verify_selinux_build
 from stock_art import stage_stock_inputs, verify_stock_inputs
 
 sys.dont_write_bytecode = True
@@ -38,6 +39,7 @@ def main():
     mode.add_argument("--art-dex", type=Path, help="run only dalvikvm64 -Xint with this classes.dex")
     mode.add_argument("--program", type=Path, help="diagnose this Android executable (exit is not a service-readiness test)")
     mode.add_argument("--libbinder-probe", type=Path, help="build directory from build-libbinder-probe.py; verify stock-library RPC and lifetime")
+    mode.add_argument("--selinux-probe", type=Path, help="build directory from build-selinux-probe.py; verify Shield allow/deny through stock libselinux")
     parser.add_argument("--runtime-root", type=Path, help="Android /system and /apex runtime tree")
     parser.add_argument("--linker-debug", action="store_true", help="enable Android LD_DEBUG=3 for ART diagnosis")
     parser.add_argument("--stock-inputs", type=Path, help="verified stock property/APEX overlay for ART or a program")
@@ -46,6 +48,10 @@ def main():
     parser.add_argument("--accel", choices=("tcg", "hvf"), default="tcg")
     parser.add_argument("--binder", action="store_true", help="include Binder RPC and three-process object lifetime checks")
     args = parser.parse_args()
+    if args.selinux_probe:
+        if not args.runtime_root or not args.stock_inputs:
+            parser.error("--selinux-probe requires --runtime-root and --stock-inputs")
+        args.program = verify_selinux_build(args.selinux_probe, args.runtime_root)
     if args.libbinder_probe:
         if not args.runtime_root or not args.stock_inputs:
             parser.error("--libbinder-probe requires --runtime-root and --stock-inputs")
@@ -108,6 +114,8 @@ def main():
         "dex_sha256": dex_hash,
         "program_sha256": sha256(args.program) if args.program else None,
         "libbinder_build_sha256": sha256(args.libbinder_probe / "build.json") if args.libbinder_probe else None,
+        "selinux_build_sha256": sha256(args.selinux_probe / "build.json") if args.selinux_probe else None,
+        "shield_fixture_sha256": sha256(SOURCE / "init/src/shield.rs") if args.selinux_probe else None,
         "stock_reference_config_sha256": sha256(STOCK_CONFIG) if args.stock_inputs else None,
         "stock_manifest_sha256": sha256(args.stock_inputs / "stock-inputs.json") if args.stock_inputs else None,
         "runtime_sha256": {str(p.relative_to(args.runtime_root)): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -115,6 +123,8 @@ def main():
     }, indent=2) + "\n")
     if args.libbinder_probe:
         shutil.copy2(args.libbinder_probe / "build.json", output / "libbinder-build.json")
+    if args.selinux_probe:
+        shutil.copy2(args.selinux_probe / "build.json", output / "selinux-build.json")
     (output / "result.json").write_text('{"result":"PREPARING"}\n')
     staging = output / "staging"
     android = staging / "systems/android-aarch64"
@@ -124,6 +134,8 @@ def main():
             (tree / name).mkdir(parents=True, exist_ok=True)
     for name in ["bin", "lib", "system/bin", "dev", "proc", "sys", "tmp", "root"]:
         (android / name).mkdir(parents=True, exist_ok=True)
+    if args.selinux_probe:
+        (android / "sys/fs/selinux").mkdir(parents=True, exist_ok=True)
     if args.runtime_root:
         shutil.copytree(args.runtime_root, android, dirs_exist_ok=True, symlinks=True)
     if art:
@@ -155,6 +167,7 @@ def main():
     env = dict(os.environ, SCARLET_ANDROID_DYNAMIC="1" if args.runtime_root else "0",
                SCARLET_ANDROID_BINDER="1" if args.binder else "0",
                SCARLET_ANDROID_STOCK="1" if args.stock_inputs else "0",
+               SCARLET_ANDROID_SHIELD="1" if args.selinux_probe else "0",
                SCARLET_ANDROID_ART="1" if art else "0",
                SCARLET_ANDROID_PROGRAM="1" if args.program else "0",
                SCARLET_ART_ARGS="\x1f".join(art["argv"]) if art else "",
@@ -210,6 +223,14 @@ def main():
         # timeout, never proves that its service interface is usable.
         exits = re.findall(rb"\nSCARLET_ANDROID_PROGRAM_EXIT (-?\d+)\r*\n", data)
         result["program_exit_status"] = int(exits[0]) if len(exits) == 1 else None
+        if args.selinux_probe:
+            result["selinux"] = analyze_selinux(data)
+            if result["result"] == "PASS" and result["selinux"]["result"] != "PASS":
+                result["result"] = "missing or failed Shield evidence"
+            result["servicemanager"] = "not tested"
+            (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+            print(f"Stock libselinux / Shield probe: {result['result']}")
+            return 0 if result["result"] == "PASS" else 1
         if args.libbinder_probe:
             evidence = analyze_libbinder(data)
             result["libbinder"] = evidence
