@@ -32,6 +32,15 @@ impl LinuxAbiExtensions for AndroidExtensions {
         security::filesystem_type(filesystem)
     }
 
+    fn flush_on_close(&self, _task: &Task, object: &KernelObject) {
+        if let Some(file) = object
+            .as_file()
+            .and_then(|file| file.as_any().downcast_ref::<binder::BinderFile>())
+        {
+            file.flush_on_close();
+        }
+    }
+
     fn ioctl(
         &self,
         abi: &LinuxAbi,

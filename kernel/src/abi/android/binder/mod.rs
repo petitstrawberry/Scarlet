@@ -1,6 +1,7 @@
 //! Initial 64-bit Binder adapter over native RPC objects. Supports bounded,
 //! synchronous transactions and flat object references over native RPC. FD
-//! transfer, one-way calls and nested transactions are explicitly unsupported.
+//! transfer and nested synchronous transactions are explicitly unsupported.
+//! One-way delivery is serialized until userspace frees each receive buffer.
 
 use crate::{
     abi::linux::generic::{LinuxAbi, errno, fs::FD_CLOEXEC},
@@ -55,6 +56,7 @@ const BR_TRANSACTION: u32 = 0x80407202;
 const BR_REPLY: u32 = 0x80407203;
 const BR_DEAD_REPLY: u32 = 0x7205;
 const BR_COMPLETE: u32 = 0x7206;
+const BR_NOOP: u32 = 0x720c;
 const MAX_THREADS: usize = 64;
 const MAX_DATA: usize = crate::ipc::rpc::MAX_MESSAGE_SIZE - objects::HEADER;
 
@@ -127,6 +129,8 @@ fn domain(environment: Arc<Environment>, device: u8) -> Arc<Domain> {
 #[derive(Default)]
 struct Thread {
     looper: bool,
+    flush_generation: u64,
+    returned_flush: u64,
     completed: VecDeque<Completed>,
     outgoing: Option<RpcCall>,
     incoming: Option<RpcRequest>,
@@ -451,11 +455,26 @@ impl BinderFile {
         }
         Ok(())
     }
+    pub(super) fn flush_on_close(&self) {
+        // Linux binder_flush requests an ioctl return on every descriptor
+        // close, independently of the file's final release. In particular,
+        // app_process closes the driver while a Binder pool thread is waiting.
+        {
+            let mut state = self.state.lock();
+            for thread in state.threads.values_mut() {
+                thread.flush_generation = thread.flush_generation.wrapping_add(1);
+            }
+        }
+        self.endpoint.waker().wake_all();
+    }
     fn ready(&self, tid: usize) -> bool {
         let state = self.state.lock();
         let Some(thread) = state.threads.get(&tid) else {
             return false;
         };
+        if thread.flush_generation != thread.returned_flush {
+            return true;
+        }
         let objects = self.objects.lock();
         let process_work = thread.looper && thread.outgoing.is_none() && thread.incoming.is_none();
         if objects.deaths.ready(tid, process_work) {
@@ -513,6 +532,23 @@ impl BinderFile {
         let mut state = self.state.lock();
         let tid = task.get_id();
         let thread = state.threads.get(&tid).unwrap();
+        if thread.flush_generation != thread.returned_flush {
+            if capacity < 4 {
+                return Err(errno::ENOSPC);
+            }
+            let generation = thread.flush_generation;
+            drop(state);
+            write(task, output, &BR_NOOP.to_le_bytes())?;
+            // Usercopy may fault or race another close. A failed copy does not
+            // consume the notification, and a newer generation stays pending.
+            self.state
+                .lock()
+                .threads
+                .get_mut(&tid)
+                .unwrap()
+                .returned_flush = generation;
+            return Ok(4);
+        }
         let process_work = thread.looper && thread.outgoing.is_none() && thread.incoming.is_none();
         let death = {
             let objects = self.objects.lock();
@@ -881,6 +917,43 @@ mod tests {
             }),
         }
     }
+    #[test_case]
+    fn binder_descriptor_flush_returns_each_waiter_without_revoking_rpc() {
+        let environment = Environment::new();
+        let first = task(&environment, 1);
+        let second = task(&environment, 2);
+        let file = Arc::new(file(&first, &environment, 0));
+        let object = KernelObject::File(file.clone());
+        file.ensure_thread(1).unwrap();
+        file.ensure_thread(2).unwrap();
+        assert!(!file.ready(1) && !file.ready(2));
+        let abi = LinuxAbi::with_extensions(&crate::abi::android::AndroidExtensions);
+        abi.close_descriptor_object(&first, &object);
+        assert!(file.ready(1) && file.ready(2));
+        assert_eq!(file.read_record(&first, 0, 4), Err(errno::EFAULT));
+        assert!(file.ready(1));
+        let output = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
+        for task in [&first, &second] {
+            task.allocate_stack_pages(output, 1).unwrap();
+            assert_eq!(file.read_record(task, output, 3), Err(errno::ENOSPC));
+            assert_eq!(file.read_record(task, output, 4), Ok(4));
+            assert_eq!(u32_at(&read::<4>(task, output).unwrap(), 0), BR_NOOP);
+            assert!(!file.ready(task.get_id()));
+            assert_eq!(file.read_record(task, output, 4), Ok(0));
+        }
+        // A duplicate/retained descriptor continues using the same endpoint.
+        let call = file.endpoint.send(objects::message_empty()).unwrap();
+        file.endpoint
+            .receive()
+            .unwrap()
+            .unwrap()
+            .reply(objects::message_empty())
+            .unwrap();
+        assert!(call.ready());
+        abi.close_descriptor_object(&first, &object);
+        assert!(file.ready(1) && file.ready(2));
+    }
+
     #[test_case]
     fn binder_oneway_completion_and_serialization_follow_receive_buffer_lifetime() {
         let environment = Environment::new();

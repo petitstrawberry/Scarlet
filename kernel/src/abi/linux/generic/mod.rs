@@ -264,6 +264,15 @@ impl LinuxAbi {
             self.record_locks.unlock_file(key);
         }
     }
+    pub(crate) fn close_descriptor_object(
+        &self,
+        task: &crate::task::Task,
+        object: &crate::object::KernelObject,
+    ) {
+        self.release_record_locks_for_object(object);
+        self.extensions.flush_on_close(task, object);
+    }
+
     pub fn thread_state_mut(&mut self) -> &mut LinuxThreadState {
         &mut self.thread_state
     }
@@ -512,12 +521,6 @@ pub(crate) fn unsupported_syscall(trapframe: &mut Trapframe) -> usize {
         trapframe.increment_pc_next(&task);
     }
     errno::to_result(errno::ENOSYS)
-}
-
-pub(crate) fn close_kernel_object_for_linux(_object: &crate::object::KernelObject) {
-    // Socket finalization is tied to KernelObject logical ownership rather
-    // than Linux descriptor-table scans. Dropping the removed object releases
-    // exactly one owning reference, including fork/dup and queued IPC rights.
 }
 
 pub fn dispatch_common_syscall(

@@ -26,6 +26,11 @@ pub trait LinuxAbiExtensions: Send + Sync {
         None
     }
 
+    /// Linux flush semantics run when a descriptor is closed or replaced,
+    /// even while an in-flight operation or duplicate retains the file object.
+    /// This notification does not revoke the underlying object.
+    fn flush_on_close(&self, _task: &Task, _object: &KernelObject) {}
+
     fn ioctl(
         &self,
         _abi: &LinuxAbi,

@@ -1384,8 +1384,7 @@ pub fn sys_dup3(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             if let Some(replaced) = abi.remove_fd(newfd) {
                 if !is_epoll_handle(replaced) {
                     if let Some(object) = task.handle_table.remove(replaced) {
-                        abi.release_record_locks_for_object(&object);
-                        super::close_kernel_object_for_linux(&object);
+                        abi.close_descriptor_object(&task, &object);
                     }
                 }
             }
@@ -1405,7 +1404,7 @@ pub fn sys_dup3(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     if abi.get_handle(newfd).is_some() {
                         if let Some(old_new_handle) = abi.remove_fd(newfd) {
                             if let Some(object) = task.handle_table.remove(old_new_handle) {
-                                abi.release_record_locks_for_object(&object);
+                                abi.close_descriptor_object(&task, &object);
                             }
                         }
                     }
@@ -1450,8 +1449,7 @@ pub fn sys_close(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         if let Some(object) = task.handle_table.remove(handle) {
             // POSIX locks are released by closing any fd for this inode,
             // even when another duplicate or separately opened fd stays live.
-            abi.release_record_locks_for_object(&object);
-            super::close_kernel_object_for_linux(&object);
+            abi.close_descriptor_object(&task, &object);
             0
         } else {
             usize::MAX // Handle not found in handle table
