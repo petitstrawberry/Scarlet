@@ -7,7 +7,7 @@ neither fixture certifies general APK compatibility.
 |---|---|---|
 | Execution | APK → Android framework/ART → guest Linux → crosvm → Scarlet | Android ELF → Bionic/linker → Scarlet Android ABI (composes Linux ABI) |
 | Reused Android facilities | Guest Binder, Android init, framework and HALs | Stock Bionic/linker and libbinder on Scarlet's Binder adapter |
-| Main work ahead | Finish framework boot, then connect display/input to SWS | Java service integration, Android lifecycle management, and graphics integration |
+| Main work ahead | Finish framework boot, then connect display/input to SWS | Zygote child specialization, Android lifecycle management, and graphics integration |
 | Current rendering | Cuttlefish ANGLE/SwiftShader, headless virtio-gpu stub | No Android graphics stack yet |
 | Fixture | [Cuttlefish project](../../projects/aarch64-limine-crosvm/README.md) | This directory |
 
@@ -80,6 +80,46 @@ no generated `/linkerconfig/ld.config.txt`; the Android 13 linker prints a
 warning and uses its fallback namespace with the explicit library search path.
 It does not provide Android linker namespace isolation or framework services.
 Generated Android binaries and SDK images remain local artifacts.
+
+### Shield identities and stock Zygote control
+
+Shield stores process principals, groups, retained identities and independently
+revocable authority. Linux/Android translate real/effective/saved UID/GID,
+supplementary groups, `PR_SET_KEEPCAPS` and supported capability bits (`SETUID`,
+`SETGID`, `SYS_ADMIN`). Unknown capabilities and inheritable grants are rejected.
+Fork copies credentials; exec preserves identities, resets saved IDs and removes
+retained authority on a non-root Linux exec. Binder reports the caller's effective
+UID; UNIX peers and queued messages retain identity snapshots.
+
+`unshare(CLONE_NEWNS)` snapshots mount Views in a process-side namespace while
+retaining Environment identity and its Binder domain. Fork and exec preserve the
+mapping. Private/slave mount propagation requests are accepted on existing mounts;
+there are no shared propagation peers in the current VFS.
+
+The Bionic fixture checks ID transitions, denied privilege recovery, groups,
+capability drops, exec auxiliary vectors, socket credentials and Binder calls
+across a mount split. These primitives do not yet provide full application
+confinement: VFS ownership/DAC, general capabilities and syscall filtering still
+require work.
+
+`build-zygote-probe.py` and `run-direct.py --zygote-probe` verify stock
+`app_process64 -Xzygote ... --zygote` with lazy preload. A userspace supervisor
+creates the named control sockets, requests the ABI list and PID, then stops and
+reaps its owned Zygote. Success requires both correct protocol responses and
+cleanup; no `LD_PRELOAD` is used. Child specialization and Activity launch are
+separate milestones.
+
+```sh
+python3 tools/android-compat/build-zygote-probe.py \
+  --ndk "$ANDROID_NDK_HOME" --framework-inputs /path/to/framework-inputs \
+  --runtime-root /path/to/art-runtime --stock-inputs /path/to/stock-inputs \
+  --output .build/android-compat/zygote-probe
+python3 tools/android-compat/run-direct.py --kernel /path/to/scarlet \
+  --zygote-probe .build/android-compat/zygote-probe \
+  --framework-inputs /path/to/framework-inputs --runtime-root /path/to/art-runtime \
+  --stock-inputs /path/to/stock-inputs --accel hvf \
+  --output .build/android-compat/zygote-run
+```
 
 ### Preparing the ART interpreter checkpoint
 

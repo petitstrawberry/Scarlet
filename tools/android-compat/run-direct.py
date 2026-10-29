@@ -17,6 +17,7 @@ import subprocess
 import sys
 
 from evidence import analyze_art, analyze_direct, analyze_libbinder, analyze_selinux, analyze_services, analyze_framework, analyze_framework_services, analyze_apk_runtime
+from zygote_inputs import verify_build as verify_zygote_build, analyze as analyze_zygote
 from apk_inputs import verify_apk_probe, stage_apk_probe
 from art_inputs import art_launch, validate_dex, verify_art_runtime, sha256
 from libbinder_inputs import verify_libbinder_build
@@ -40,6 +41,7 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--probes", type=Path)
     mode.add_argument("--art-dex", type=Path, help="run only dalvikvm64 -Xint with this classes.dex")
+    mode.add_argument("--zygote-probe", type=Path, help="verified stock Zygote control-socket fixture")
     mode.add_argument("--program", type=Path, help="diagnose this Android executable (exit is not a service-readiness test)")
     mode.add_argument("--libbinder-probe", type=Path, help="build directory from build-libbinder-probe.py; verify stock-library RPC and lifetime")
     mode.add_argument("--selinux-probe", type=Path, help="build directory from build-selinux-probe.py; verify Shield allow/deny through stock libselinux")
@@ -63,6 +65,12 @@ def main():
         args.framework_probe = args.framework_services
     if args.apk_probe:
         args.framework_probe = args.apk_probe
+    zygote = None
+    if args.zygote_probe:
+        if not args.framework_inputs or not args.runtime_root or not args.stock_inputs:
+            parser.error("--zygote-probe requires --framework-inputs, --runtime-root and --stock-inputs")
+        zygote = verify_framework_inputs(args.framework_inputs, args.runtime_root, args.stock_inputs)
+        args.program = verify_zygote_build(args.zygote_probe, zygote, args.framework_inputs)
     framework = None
     apk = None
     if args.framework_probe:
@@ -74,7 +82,7 @@ def main():
         else:
             verify_framework_probe(args.framework_probe, services=bool(args.framework_services))
         args.program = args.framework_inputs / PROGRAM
-    elif args.framework_inputs:
+    elif args.framework_inputs and not zygote:
         parser.error("--framework-inputs requires --framework-probe")
     if args.service_probe:
         if not args.runtime_root or not args.stock_inputs or not args.service_inputs:
@@ -154,7 +162,8 @@ def main():
         "dex_sha256": dex_hash,
         "apk_sha256": apk["sha256"] if apk else None,
         "tampered_apk_sha256": apk["tampered_sha256"] if apk else None,
-        "framework_manifest_sha256": sha256(args.framework_inputs / "framework-inputs.json") if framework else None,
+        "framework_manifest_sha256": sha256(args.framework_inputs / "framework-inputs.json") if (framework or zygote) else None,
+        "zygote_build_sha256": sha256(args.zygote_probe / "build.json") if zygote else None,
         "framework_build_sha256": sha256(args.framework_probe / "build.json") if framework else None,
         "framework_fixture_sha256": {name: sha256(SOURCE / "init/src" / name) for name in (("main.rs", "stock.rs", "services.rs", "framework_services.rs") if args.framework_services else ("main.rs", "stock.rs"))} if framework else None,
         "program_sha256": sha256(args.program) if args.program else None,
@@ -206,9 +215,13 @@ def main():
             shutil.copy2(args.stock_inputs / "stock-inputs.json", output / "stock-inputs.json")
         if args.service_inputs:
             stage_service_inputs(args.service_inputs, args.runtime_root, android)
-        if framework:
+        if framework or zygote:
             bootstrap = stage_framework_inputs(args.framework_inputs, args.runtime_root, args.stock_inputs, android)
             (output / "framework-bootstrap.json").write_text(json.dumps(bootstrap, indent=2) + "\n")
+        if zygote:
+            shutil.copy2(args.zygote_probe / "build.json", output / "zygote-build.json")
+            shutil.copy2(args.zygote_probe / "zygote-config.h", output / "zygote-config.h")
+            shutil.copy2(args.framework_inputs / "framework-inputs.json", output / "framework-inputs.json")
         if apk:
             stage_apk_probe(args.apk_probe, android, apk["sha256"], apk["tampered_sha256"])
         if args.program and not framework:
@@ -308,6 +321,13 @@ def main():
         # timeout, never proves that its service interface is usable.
         exits = re.findall(rb"\nSCARLET_ANDROID_PROGRAM_EXIT (-?\d+)\r*\n", data)
         result["program_exit_status"] = int(exits[0]) if len(exits) == 1 else None
+        if zygote:
+            result["zygote"] = analyze_zygote(data)
+            if result["result"] == "PASS" and result["zygote"]["result"] != "PASS":
+                result["result"] = "missing or failed Zygote readiness evidence"
+            (output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+            print(f"Stock Zygote control socket: {result['result']}")
+            return 0 if result["result"] == "PASS" else 1
         if apk:
             result["apk_runtime"] = analyze_apk_runtime(data)
             if result["result"] == "PASS" and result["apk_runtime"]["result"] != "PASS":
