@@ -51,6 +51,14 @@ int main(int argc,char **argv) {
         CHECK(check(subject,target,"service_manager","list",NULL)==-1 && errno==EACCES);
     }
     dprintf(1,"SCARLET_SHIELD_ALLOW_DENY_OK\n");
+    const char *property="u:object_r:scarlet_property:s0";
+    CHECK(check(subject,property,"property_service","set",NULL)==0);
+    errno=0;
+    CHECK(check(denied,property,"property_service","set",NULL)==-1 && errno==EACCES);
+    errno=0;
+    CHECK(check(subject,target,"property_service","set",NULL)==-1 && errno==EACCES);
+    CHECK(check(subject,property,"property_service","unknown",NULL)==-1);
+    dprintf(1,"\nSCARLET_SHIELD_PROPERTY_ALLOW_DENY_OK\n");
     CHECK(check(subject,target,"service_manager","unknown",NULL)==-1);
     CHECK(check(subject,target,"unknown_class","add",NULL)==-1);
     CHECK(check("u:r:unknown:s0",target,"service_manager","add",NULL)==-1);

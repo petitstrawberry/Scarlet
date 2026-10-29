@@ -4,6 +4,7 @@
 extern crate scarlet_std as std;
 #[path = "../../../../user/bin/src/bootstrap.rs"]
 mod bootstrap;
+mod boot_profile;
 mod framework_services;
 mod services;
 mod shield;

@@ -25,6 +25,7 @@ from evidence import analyze_label_transitions
 from selinux_inputs import verify_selinux_build
 from service_inputs import verify_service_inputs, stage_service_inputs, CONTEXTS
 from stock_art import stage_stock_inputs, verify_stock_inputs
+from boot_profile import MANIFEST as BOOT_MANIFEST, verify_boot_inputs, stage_boot_inputs
 from framework_inputs import verify_framework_inputs, verify_framework_probe, framework_launch, stage_framework_inputs, PROGRAM
 
 sys.dont_write_bytecode = True
@@ -57,6 +58,7 @@ def main():
     parser.add_argument("--linker-debug", action="store_true", help="enable Android LD_DEBUG=3 for ART diagnosis")
     parser.add_argument("--stock-inputs", type=Path, help="verified stock property/APEX overlay for ART or a program")
     parser.add_argument("--init-bootstrap", action="store_true", help="program diagnostic: let stock init initialize properties and linker configuration")
+    parser.add_argument("--boot-profile", type=Path, help="verified flattened APEX and explicit stock-init manager configuration")
     parser.add_argument("--zygote-policy", action="store_true", help="apply the bounded Zygote/app transition fixture to a stock program diagnostic")
     parser.add_argument("--shield-fixture", action="store_true", help="apply the existing Shield test policy to a stock program diagnostic")
     parser.add_argument("--output", type=Path, required=True)
@@ -66,6 +68,10 @@ def main():
     args = parser.parse_args()
     if args.init_bootstrap and (not args.program or not args.stock_inputs):
         parser.error("--init-bootstrap requires --program and --stock-inputs")
+    if args.boot_profile:
+        if not args.init_bootstrap or not args.runtime_root:
+            parser.error("--boot-profile requires --init-bootstrap and --runtime-root")
+        verify_boot_inputs(args.boot_profile, args.runtime_root, args.stock_inputs)
     if args.label_transition_probe:
         args.selinux_probe = args.label_transition_probe
         args.zygote_policy = True
@@ -192,7 +198,8 @@ def main():
         "selinux_build_sha256": sha256(args.selinux_probe / "build.json") if args.selinux_probe else None,
         "zygote_transition_policy": bool(args.zygote_probe or args.zygote_policy),
         "stock_init_owns_bootstrap": args.init_bootstrap,
-        "init_security_sources_sha256": {name: sha256(SOURCE / "init/src" / name) for name in ("main.rs", "shield.rs", "stock.rs")} if args.init_bootstrap else None,
+        "boot_profile_manifest_sha256": sha256(args.boot_profile / BOOT_MANIFEST) if args.boot_profile else None,
+        "init_security_sources_sha256": {name: sha256(SOURCE / "init/src" / name) for name in ("main.rs", "shield.rs", "stock.rs", "boot_profile.rs")} if args.init_bootstrap else None,
         "stock_bootstrap_source_sha256": sha256(SOURCE / "init/src/stock.rs") if args.stock_inputs else None,
         "shield_fixture_sha256": sha256(SOURCE / "init/src/shield.rs") if shield_fixture else None,
         "stock_reference_config_sha256": sha256(STOCK_CONFIG) if args.stock_inputs else None,
@@ -234,6 +241,9 @@ def main():
         if args.stock_inputs:
             stage_stock_inputs(args.stock_inputs, args.runtime_root, android)
             shutil.copy2(args.stock_inputs / "stock-inputs.json", output / "stock-inputs.json")
+        if args.boot_profile:
+            stage_boot_inputs(args.boot_profile, args.runtime_root, args.stock_inputs, android)
+            shutil.copy2(args.boot_profile / BOOT_MANIFEST, output / BOOT_MANIFEST)
         if args.service_inputs:
             stage_service_inputs(args.service_inputs, args.runtime_root, android)
         if framework or zygote:
@@ -269,6 +279,7 @@ def main():
     env = dict(os.environ, SCARLET_ANDROID_DYNAMIC="1" if args.runtime_root else "0",
                SCARLET_ANDROID_BINDER="1" if args.binder else "0",
                SCARLET_ANDROID_STOCK="1" if args.stock_inputs else "0",
+               SCARLET_ANDROID_BOOT_PROFILE="1" if args.boot_profile else "0",
                SCARLET_ANDROID_INIT_BOOTSTRAP="1" if args.init_bootstrap else "0",
                SCARLET_ANDROID_SERVICES="1" if args.service_probe else "0",
                SCARLET_ANDROID_ZYGOTE_POLICY="1" if args.zygote_probe or args.zygote_policy else "0",

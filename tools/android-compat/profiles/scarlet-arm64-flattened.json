@@ -1,0 +1,154 @@
+{
+  "version": 1,
+  "name": "scarlet-arm64-flattened",
+  "apex_modules": [
+    "com.android.adbd",
+    "com.android.adservices",
+    "com.android.apex.cts.shim",
+    "com.android.appsearch",
+    "com.android.art",
+    "com.android.btservices",
+    "com.android.cellbroadcast",
+    "com.android.conscrypt",
+    "com.android.extservices",
+    "com.android.i18n",
+    "com.android.ipsec",
+    "com.android.media",
+    "com.android.media.swcodec",
+    "com.android.mediaprovider",
+    "com.android.neuralnetworks",
+    "com.android.ondevicepersonalization",
+    "com.android.os.statsd",
+    "com.android.permission",
+    "com.android.resolv",
+    "com.android.runtime",
+    "com.android.scheduling",
+    "com.android.sdkext",
+    "com.android.tethering",
+    "com.android.tzdata",
+    "com.android.uwb",
+    "com.android.vndk.v33",
+    "com.android.wifi"
+  ],
+  "boot_properties": {
+    "ro.apex.updatable": "false",
+    "ro.zygote": "zygote64",
+    "ro.hardware": "scarlet"
+  },
+  "bootconfig": {
+    "androidboot.hardware": "scarlet",
+    "androidboot.init_rc": "/scarlet/boot/init.rc",
+    "androidboot.container": "1"
+  },
+  "subjects": {
+    "u:r:init:s0": 1,
+    "u:r:vendor_init:s0": 2,
+    "u:r:apexd:s0": 3,
+    "u:r:ueventd:s0": 4,
+    "u:r:servicemanager:s0": 5,
+    "u:r:zygote:s0": 6
+  },
+  "transitions": [
+    [
+      "u:r:init:s0",
+      "u:r:vendor_init:s0",
+      0
+    ],
+    [
+      "u:r:init:s0",
+      "u:r:apexd:s0",
+      0
+    ],
+    [
+      "u:r:init:s0",
+      "u:r:ueventd:s0",
+      0
+    ],
+    [
+      "u:r:init:s0",
+      "u:r:servicemanager:s0",
+      1000
+    ],
+    [
+      "u:r:init:s0",
+      "u:r:zygote:s0",
+      0
+    ]
+  ],
+  "property_grants": {
+    "u:r:init:s0": [
+      "u:object_r:apexd_prop:s0",
+      "u:object_r:bluetooth_config_prop:s0",
+      "u:object_r:bootloader_prop:s0",
+      "u:object_r:boottime_prop:s0",
+      "u:object_r:build_prop:s0",
+      "u:object_r:build_vendor_prop:s0",
+      "u:object_r:cpu_variant_prop:s0",
+      "u:object_r:dalvik_config_prop:s0",
+      "u:object_r:dalvik_runtime_prop:s0",
+      "u:object_r:debug_prop:s0",
+      "u:object_r:debugfs_restriction_prop:s0",
+      "u:object_r:default_prop:s0",
+      "u:object_r:exported_default_prop:s0",
+      "u:object_r:exported_pm_prop:s0",
+      "u:object_r:fingerprint_prop:s0",
+      "u:object_r:graphics_config_prop:s0",
+      "u:object_r:gsid_prop:s0",
+      "u:object_r:incremental_prop:s0",
+      "u:object_r:init_perf_lsm_hooks_prop:s0",
+      "u:object_r:init_service_status_private_prop:s0",
+      "u:object_r:init_service_status_prop:s0",
+      "u:object_r:log_tag_prop:s0",
+      "u:object_r:logd_prop:s0",
+      "u:object_r:nnapi_ext_deny_product_prop:s0",
+      "u:object_r:packagemanager_config_prop:s0",
+      "u:object_r:persist_debug_prop:s0",
+      "u:object_r:pm_prop:s0",
+      "u:object_r:property_service_version_prop:s0",
+      "u:object_r:shell_prop:s0",
+      "u:object_r:storage_config_prop:s0",
+      "u:object_r:surfaceflinger_prop:s0",
+      "u:object_r:system_prop:s0",
+      "u:object_r:systemsound_config_prop:s0",
+      "u:object_r:telephony_config_prop:s0",
+      "u:object_r:tombstone_config_prop:s0",
+      "u:object_r:traced_enabled_prop:s0",
+      "u:object_r:vendor_default_prop:s0",
+      "u:object_r:vendor_security_patch_level_prop:s0",
+      "u:object_r:vndk_prop:s0",
+      "u:object_r:vold_config_prop:s0",
+      "u:object_r:zram_control_prop:s0"
+    ],
+    "u:r:apexd:s0": [
+      "u:object_r:apexd_prop:s0"
+    ],
+    "u:r:vendor_init:s0": [
+      "u:object_r:build_vendor_prop:s0",
+      "u:object_r:cpu_variant_prop:s0",
+      "u:object_r:dalvik_config_prop:s0",
+      "u:object_r:dalvik_runtime_prop:s0",
+      "u:object_r:debug_prop:s0",
+      "u:object_r:debugfs_restriction_prop:s0",
+      "u:object_r:exported_default_prop:s0",
+      "u:object_r:graphics_config_prop:s0",
+      "u:object_r:incremental_prop:s0",
+      "u:object_r:log_tag_prop:s0",
+      "u:object_r:logd_prop:s0",
+      "u:object_r:packagemanager_config_prop:s0",
+      "u:object_r:storage_config_prop:s0",
+      "u:object_r:surfaceflinger_prop:s0",
+      "u:object_r:systemsound_config_prop:s0",
+      "u:object_r:tombstone_config_prop:s0",
+      "u:object_r:vendor_default_prop:s0",
+      "u:object_r:vendor_security_patch_level_prop:s0",
+      "u:object_r:vndk_prop:s0",
+      "u:object_r:vold_config_prop:s0",
+      "u:object_r:zram_control_prop:s0"
+    ]
+  },
+  "init_imports": [
+    "/system/etc/init/hw/init.rc",
+    "/system/etc/init/apexd.rc",
+    "/system/etc/init/servicemanager.rc"
+  ]
+}
