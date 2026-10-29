@@ -16,6 +16,8 @@ mod platform;
 mod process;
 #[cfg(target_os = "scarlet")]
 mod runtime;
+#[cfg(any(target_os = "scarlet", test))]
+mod state;
 
 #[cfg(target_os = "scarlet")]
 pub use runtime::initialize;
