@@ -221,7 +221,8 @@ impl HandleTable {
                 HandleType::IpcChannel
             }
             KernelObject::Timer(_) => HandleType::IpcChannel,
-            KernelObject::ProcessScope(_)
+            KernelObject::ResourceGroup(_)
+            | KernelObject::ProcessScope(_)
             | KernelObject::MountNamespace(_)
             | KernelObject::ShieldPolicy(_)
             | KernelObject::Gpu(_)
@@ -581,6 +582,11 @@ impl HandleTable {
             KernelObject::MountNamespace(_) => {
                 let mut info = introspection::KernelObjectInfo::for_environment(false, false);
                 info.object_type = introspection::KernelObjectType::MountNamespace;
+                Some(info)
+            }
+            KernelObject::ResourceGroup(_) => {
+                let mut info = introspection::KernelObjectInfo::for_environment(false, true);
+                info.object_type = introspection::KernelObjectType::ResourceGroup;
                 Some(info)
             }
             KernelObject::ProcessScope(_) => {

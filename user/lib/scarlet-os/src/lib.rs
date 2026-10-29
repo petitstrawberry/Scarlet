@@ -41,6 +41,7 @@ pub mod power_supply;
 /// Scarlet Native process-control APIs not exposed by portable Rust `std`.
 pub mod process;
 pub mod process_scope;
+pub mod resource_group;
 
 /// Scarlet Native socket APIs.
 pub mod socket;

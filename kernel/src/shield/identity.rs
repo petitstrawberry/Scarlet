@@ -34,7 +34,8 @@ impl<T: Copy + Eq> Identities<T> {
 pub const CHANGE_PRINCIPAL: u32 = 1;
 pub const CHANGE_GROUPS: u32 = 2;
 pub const MANAGE_MOUNTS: u32 = 4;
-pub const ALL_AUTHORITY: u32 = CHANGE_PRINCIPAL | CHANGE_GROUPS | MANAGE_MOUNTS;
+pub const MANAGE_RESOURCES: u32 = 8;
+pub const ALL_AUTHORITY: u32 = CHANGE_PRINCIPAL | CHANGE_GROUPS | MANAGE_MOUNTS | MANAGE_RESOURCES;
 pub const MAX_GROUPS: usize = 65536;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

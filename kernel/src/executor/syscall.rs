@@ -502,6 +502,7 @@ handler!(sys_environment_spawn, |task, tf| {
         task.get_namespace(),
     );
     *child.process_scope.write() = task.process_scope.read().clone();
+    child.resource_membership = task.resource_membership.fork()?;
     *child.security_subject.write() = task.security_subject.read().clone();
     *child.pending_exec_transition.write() = task.pending_exec_transition.read().clone();
     *child.credentials.write() = task.credentials.read().clone();
