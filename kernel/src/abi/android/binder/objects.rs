@@ -232,6 +232,7 @@ pub(super) struct BufferReference {
 }
 pub(super) struct Objects {
     pub deaths: death::Deaths,
+    pub oneway: BTreeMap<usize, RpcRequest>,
     nodes: BTreeMap<usize, Arc<Node>>,
     retired: Vec<Arc<Node>>,
     handles: BTreeMap<u32, Handle>,
@@ -244,6 +245,7 @@ impl Default for Objects {
     fn default() -> Self {
         Self {
             deaths: death::Deaths::default(),
+            oneway: BTreeMap::new(),
             nodes: BTreeMap::new(),
             retired: Vec::new(),
             handles: BTreeMap::new(),
@@ -602,8 +604,13 @@ pub(super) fn prepare(task: &Task, abi: &LinuxAbi, data: &[u8]) -> Result<Prepar
         return Err(errno::E2BIG);
     }
     let mut bytes = vec![0; HEADER + aligned + offsets_len];
-    bytes[..4].copy_from_slice(&(u32_at(data, 20) & (8 | 0x20)).to_le_bytes());
-    bytes[4..8].copy_from_slice(&(abi.visible_thread_group_id(task) as u32).to_le_bytes());
+    bytes[..4].copy_from_slice(&(u32_at(data, 20) & (1 | 8 | 0x20)).to_le_bytes());
+    let sender = if u32_at(data, 20) & 1 != 0 {
+        0
+    } else {
+        abi.visible_thread_group_id(task) as u32
+    };
+    bytes[4..8].copy_from_slice(&sender.to_le_bytes());
     bytes[12..16].copy_from_slice(&(len as u32).to_le_bytes());
     bytes[16..20].copy_from_slice(&(offsets_len as u32).to_le_bytes());
     copy_from_user(task, u64_at(data, 48), &mut bytes[HEADER..HEADER + len])

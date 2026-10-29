@@ -333,11 +333,12 @@ impl BinderFile {
             }
             BC_TRANSACTION | BC_REPLY => {
                 let flags = u32_at(data, 20);
-                if flags & !(0x10 | 0x20 | if command == BC_REPLY { 8 } else { 0 }) != 0 {
+                if flags & !(0x10 | 0x20 | if command == BC_REPLY { 8 } else { 1 }) != 0 {
                     return Err(errno::EOPNOTSUPP);
                 }
                 // target.handle is a u32 member of an 8-byte union. Its
                 // unused upper word is not part of the handle value.
+                let oneway = command == BC_TRANSACTION && flags & 1 != 0;
                 let number = u32_at(data, 0);
                 let prepared = objects::prepare(task, abi, data)?;
                 // Serialize reference publication through transport admission.
@@ -370,11 +371,34 @@ impl BinderFile {
                     };
                     let mut state = self.state.lock();
                     let thread = state.threads.get_mut(&tid).unwrap();
-                    if thread.outgoing.is_some() || thread.incoming.is_some() {
+                    if !oneway && (thread.outgoing.is_some() || thread.incoming.is_some()) {
                         return Err(errno::EOPNOTSUPP);
                     }
                     if thread.completed.len() >= 64 {
                         return Err(errno::EAGAIN);
+                    }
+                    if oneway {
+                        let sent = if let Some(capability) = capability {
+                            capability.send_oneway(message)
+                        } else if let Some(context) = context {
+                            context.send_oneway(message)
+                        } else {
+                            Err(crate::ipc::rpc::RpcError::PeerClosed)
+                        };
+                        match sent {
+                            Ok(()) => thread.completed.push_back(Completed {
+                                command: BR_COMPLETE,
+                                acquisitions,
+                            }),
+                            Err(crate::ipc::rpc::RpcError::PeerClosed) => {
+                                thread.completed.push_back(Completed {
+                                    command: BR_DEAD_REPLY,
+                                    acquisitions: Vec::new(),
+                                })
+                            }
+                            Err(_) => return Err(errno::EAGAIN),
+                        }
+                        return Ok(());
                     }
                     let call = if let Some(capability) = capability {
                         capability.send(message)
@@ -477,6 +501,11 @@ impl BinderFile {
         let mut objects = self.objects.lock();
         arena.free(address)?;
         objects.free_buffer(address);
+        let request = objects.oneway.remove(&address);
+        drop(objects);
+        // Release native serialization and budget only after userspace has
+        // returned the receive buffer; other loopers can then dispatch it.
+        drop(request);
         Ok(())
     }
 
@@ -622,7 +651,11 @@ impl BinderFile {
             put64(tx, 56, address + ((length + 7) & !7));
             write(task, output, &record)?;
             if let Some(request) = incoming.take() {
-                self.state.lock().threads.get_mut(&tid).unwrap().incoming = Some(request);
+                if request.is_oneway() {
+                    self.objects.lock().oneway.insert(address, request);
+                } else {
+                    self.state.lock().threads.get_mut(&tid).unwrap().incoming = Some(request);
+                }
             }
             Ok(68)
         })();
@@ -847,6 +880,86 @@ mod tests {
                 node: (0, 0),
             }),
         }
+    }
+    #[test_case]
+    fn binder_oneway_completion_and_serialization_follow_receive_buffer_lifetime() {
+        let environment = Environment::new();
+        let sender = task(&environment, 1);
+        let receiver = task(&environment, 2);
+        let client = file(&sender, &environment, 0);
+        let server = file(&receiver, &environment, 0);
+        let abi = LinuxAbi::default();
+        assert_eq!(
+            server.ioctl(
+                &receiver,
+                &abi,
+                &mut Trapframe::new(),
+                SET_CONTEXT,
+                0,
+                false
+            ),
+            0
+        );
+        client.ensure_thread(1).unwrap();
+        server.ensure_thread(2).unwrap();
+        server
+            .command(&receiver, &abi, BC_ENTER_LOOPER, &[])
+            .unwrap();
+        assert!(server.mmap(&receiver, 0, 128 * 1024, 1, 2, 0) < usize::MAX - 4096);
+        let output = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
+        receiver.allocate_stack_pages(output, 1).unwrap();
+        // An oneway callback is allowed while this thread handles a sync call.
+        let call = client.endpoint.send(objects::message_empty()).unwrap();
+        client.state.lock().threads.get_mut(&1).unwrap().incoming =
+            client.endpoint.receive().unwrap();
+        let mut data = [0u8; 64];
+        data[20..24].copy_from_slice(&1u32.to_le_bytes());
+        client
+            .command(&sender, &abi, BC_TRANSACTION, &data)
+            .unwrap();
+        assert!(client.state.lock().threads[&1].outgoing.is_none());
+        assert!(client.state.lock().threads[&1].incoming.is_some());
+        assert_eq!(
+            client.state.lock().threads[&1]
+                .completed
+                .front()
+                .unwrap()
+                .command,
+            BR_COMPLETE
+        );
+        // A failed delivery cannot strand the per-object gate or its budget.
+        assert_eq!(server.read_record(&receiver, 0, 68), Err(errno::EFAULT));
+        for _ in 0..2 {
+            client
+                .command(&sender, &abi, BC_TRANSACTION, &data)
+                .unwrap();
+        }
+        for _ in 0..2 {
+            assert!(server.ready(2));
+            assert_eq!(server.read_record(&receiver, output, 68), Ok(68));
+            let record = read::<68>(&receiver, output).unwrap();
+            assert_eq!(u32_at(&record, 0), BR_TRANSACTION);
+            assert_eq!(u32_at(&record, 24), 1);
+            assert_eq!(u32_at(&record, 28), 0); // Linux oneway sender PID semantics
+            assert!(server.state.lock().threads[&2].incoming.is_none());
+            assert!(!server.ready(2));
+            let arena = server.state.lock().arena.clone().unwrap();
+            let address = u64_at(&record, 52);
+            assert_eq!(
+                server.release_buffer(&arena, address + 8),
+                Err(errno::EINVAL)
+            );
+            assert!(!server.ready(2));
+            let mut reply = data;
+            reply[20..24].fill(0);
+            assert_eq!(
+                server.command(&receiver, &abi, BC_REPLY, &reply),
+                Err(errno::EINVAL)
+            );
+            server.release_buffer(&arena, address).unwrap();
+        }
+        assert!(server.objects.lock().oneway.is_empty());
+        assert!(!call.ready());
     }
     #[test_case]
     fn binder_context_death_checks_wire_cookie_and_preserves_failed_usercopy() {
