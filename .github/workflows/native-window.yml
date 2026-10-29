@@ -1,0 +1,37 @@
+name: Native window contracts
+on:
+  pull_request:
+    paths:
+      - 'user/lib/sws-client/**'
+      - 'user/lib/sws-client-c/**'
+      - 'user/lib/sws-protocol/**'
+      - 'user/lib/scarlet-os/**'
+      - 'user/lib/scarlet-sys/**'
+      - '.github/workflows/native-window.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-window:
+    # These pure contract tests link Scarlet's syscall wrappers, which have
+    # AArch64/RISC-V implementations. They never issue a Scarlet syscall.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+            extra-substituters = https://scarlet-rust-toolchain.cachix.org
+            extra-trusted-public-keys = scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o=
+      - name: Install native toolchain
+        run: |
+          toolchain_path=$(nix build github:petitstrawberry/scarlet-rust-nix/79f356924d1a93b55904c6b2733d0b3da5ce0de5#scarlet-rust-toolchain --no-link --print-out-paths)
+          echo "$toolchain_path/bin" >> "$GITHUB_PATH"
+      - name: Test event routing and scene buffer ownership
+        run: |
+          cargo test --manifest-path user/lib/sws-client/Cargo.toml --no-default-features --features std --lib
+          cargo test --manifest-path user/lib/sws-client-c/Cargo.toml --lib
+      - name: Build native shared client
+        run: cargo build --manifest-path user/lib/sws-client-c/Cargo.toml --release --target aarch64-unknown-scarlet

@@ -62,8 +62,6 @@ contract_host=$(rustc -vV | sed -n 's/^host: //p')
 test -n "$contract_host"
 cargo test --locked --manifest-path user/lib/scarlet-abi/Cargo.toml --target "$contract_host"
 cargo test --locked --manifest-path user/lib/sws-protocol/Cargo.toml --target "$contract_host" --no-default-features --features std
-cargo test --manifest-path user/lib/sws-client/Cargo.toml --target "$contract_host" --no-default-features --features std --lib
-cargo test --manifest-path user/lib/sws-client-c/Cargo.toml --target "$contract_host" --lib
 '''
 
 [tasks.test-abi-foundation]
