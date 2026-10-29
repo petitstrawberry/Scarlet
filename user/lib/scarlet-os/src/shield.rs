@@ -7,9 +7,9 @@ use crate::{
     handle::{HandleError, HandleResult, introspection::KernelObjectType},
 };
 use alloc::vec::Vec;
-pub use scarlet_abi::shield::RawRule as Rule;
 use scarlet_abi::shield::{RawLabel, RawRule};
-use scarlet_sys::{Syscall, syscall0, syscall2, syscall4};
+pub use scarlet_abi::shield::{RawRule as Rule, RawTransition as Transition};
+use scarlet_sys::{Syscall, syscall0, syscall2, syscall4, syscall6};
 
 pub struct Policy(Handle);
 impl Policy {
@@ -38,7 +38,56 @@ impl Policy {
         };
         Self::returned(result)
     }
-    /// Returns query authority only; it cannot assign a process label.
+    /// Create immutable, explicitly delegated transitions without giving child
+    /// processes the management capability. Principal conditions are checked
+    /// against all three native identity slots when a transition is requested.
+    pub fn create_with_transitions(
+        labels: &[(u32, &str)],
+        rules: &[RawRule],
+        transitions: &[Transition],
+    ) -> HandleResult<Self> {
+        if labels.iter().any(|(_, name)| name.len() > 255) {
+            return Err(HandleError::InvalidParameter);
+        }
+        let raw: Vec<_> = labels
+            .iter()
+            .map(|(id, name)| RawLabel {
+                id: *id,
+                name_len: name.len() as u32,
+                name: name.as_ptr() as u64,
+            })
+            .collect();
+        // SAFETY: all borrowed arrays live through this synchronous kernel copy.
+        Self::returned(unsafe {
+            syscall6(
+                Syscall::ShieldPolicyCreateWithTransitions,
+                raw.as_ptr() as usize,
+                raw.len(),
+                rules.as_ptr() as usize,
+                rules.len(),
+                transitions.as_ptr() as usize,
+                transitions.len(),
+            )
+        })
+    }
+    /// Apply only a transition explicitly delegated by this immutable policy.
+    /// Query authority identifies the policy; it does not grant transitions.
+    pub fn transition(&self, label: u32) -> HandleResult<()> {
+        // SAFETY: the kernel checks the policy, source subject and identities.
+        let result = unsafe {
+            syscall2(
+                Syscall::ShieldTransition,
+                self.0.as_raw() as usize,
+                label as usize,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(HandleError::InvalidParameter)
+        }
+    }
+    /// Returns query authority only; arbitrary assignment remains forbidden.
     pub fn current() -> HandleResult<Self> {
         // SAFETY: no pointer arguments.
         Self::returned(unsafe { syscall0(Syscall::ShieldPolicyCurrent) })

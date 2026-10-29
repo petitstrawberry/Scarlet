@@ -19,3 +19,15 @@ pub struct RawRule {
 }
 const _: [(); 16] = [(); core::mem::size_of::<RawLabel>()];
 const _: [(); 24] = [(); core::mem::size_of::<RawRule>()];
+
+/// A conditional label transition. Principal is an ABI-neutral identity value;
+/// all principal slots must match. Reserved must be zero.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawTransition {
+    pub source: u32,
+    pub target: u32,
+    pub principal: u32,
+    pub reserved: u32,
+}
+const _: [(); 16] = [(); core::mem::size_of::<RawTransition>()];

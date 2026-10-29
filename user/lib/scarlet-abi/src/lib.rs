@@ -828,6 +828,8 @@ pub enum Syscall {
     ShieldPolicyCreate = 1310,
     ShieldPolicyCurrent = 1311,
     ShieldApply = 1312,
+    ShieldPolicyCreateWithTransitions = 1313,
+    ShieldTransition = 1314,
     EnvironmentCreate = 1300,
     EnvironmentSetRoot = 1301,
     EnvironmentRemoveRoot = 1302,

@@ -224,6 +224,8 @@ syscall_table! {
     ShieldPolicyCreate = 1310 => crate::shield::syscall::sys_shield_policy_create,
     ShieldPolicyCurrent = 1311 => crate::shield::syscall::sys_shield_policy_current,
     ShieldApply = 1312 => crate::shield::syscall::sys_shield_apply,
+    ShieldPolicyCreateWithTransitions = 1313 => crate::shield::syscall::sys_shield_policy_create_with_transitions,
+    ShieldTransition = 1314 => crate::shield::syscall::sys_shield_transition,
     EnvironmentCreate = 1300 => crate::executor::syscall::sys_environment_create,
     EnvironmentSetRoot = 1301 => crate::executor::syscall::sys_environment_set_root,
     EnvironmentRemoveRoot = 1302 => crate::executor::syscall::sys_environment_remove_root,

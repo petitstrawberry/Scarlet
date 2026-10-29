@@ -54,11 +54,17 @@ fn create(
     labels_count: usize,
     rules_ptr: usize,
     rules_count: usize,
+    transitions_ptr: usize,
+    transitions_count: usize,
 ) -> Result<usize, &'static str> {
     if !can_create(task) {
         return Err("policy construction authority required");
     }
-    if labels_count == 0 || labels_count > MAX_LABELS || rules_count > MAX_RULES {
+    if labels_count == 0
+        || labels_count > MAX_LABELS
+        || rules_count > MAX_RULES
+        || transitions_count > MAX_RULES
+    {
         return Err("policy size limit");
     }
     labels_ptr
@@ -67,6 +73,21 @@ fn create(
     rules_ptr
         .checked_add(rules_count * 24)
         .ok_or("invalid rules pointer")?;
+    transitions_ptr
+        .checked_add(transitions_count * 16)
+        .ok_or("invalid transitions pointer")?;
+    let mut transitions = Vec::with_capacity(transitions_count);
+    for i in 0..transitions_count {
+        let raw = read::<16>(task, transitions_ptr + i * 16)?;
+        if u32_at(&raw, 12) != 0 {
+            return Err("unsupported transition flags");
+        }
+        transitions.push(TransitionRule {
+            source: u32_at(&raw, 0),
+            target: u32_at(&raw, 4),
+            principal: identity::Principal(u32_at(&raw, 8)),
+        });
+    }
     let mut labels = Vec::with_capacity(labels_count);
     for i in 0..labels_count {
         let raw = read::<16>(task, labels_ptr + i * 16)?;
@@ -98,7 +119,7 @@ fn create(
     insert(
         task,
         PolicyHandle {
-            policy: Policy::new(labels, rules)?,
+            policy: Policy::with_transitions(labels, rules, transitions)?,
             administer: true,
         },
     )
@@ -121,9 +142,59 @@ pub fn sys_shield_policy_create(tf: &mut Trapframe) -> usize {
         tf.get_arg(1),
         tf.get_arg(2),
         tf.get_arg(3),
+        0,
+        0,
     )
     .unwrap_or(usize::MAX)
 }
+pub fn sys_shield_policy_create_with_transitions(tf: &mut Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap();
+    tf.increment_pc_next(&task);
+    create(
+        &task,
+        tf.get_arg(0),
+        tf.get_arg(1),
+        tf.get_arg(2),
+        tf.get_arg(3),
+        tf.get_arg(4),
+        tf.get_arg(5),
+    )
+    .unwrap_or(usize::MAX)
+}
+/// No management capability is needed here: the immutable policy explicitly
+/// delegates this particular transition. Both policy and current subject are
+/// rechecked at use; open descriptors confer no label-changing authority.
+pub fn transition(task: &Task, policy: &Arc<Policy>, target: u32) -> Result<(), &'static str> {
+    if !task.can_replace_exec_image() {
+        return Err("transition requires exclusive single-threaded task");
+    }
+    let credentials = task.credentials.read();
+    let mut current = task.security_subject.write();
+    let subject = current.as_ref().ok_or("task has no subject")?;
+    if !Arc::ptr_eq(subject.policy(), policy) {
+        return Err("foreign transition policy");
+    }
+    let next = subject.transition(target, &credentials)?;
+    *current = Some(next);
+    Ok(())
+}
+
+pub fn sys_shield_transition(tf: &mut Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap();
+    let handle = tf.get_arg(0);
+    let target = tf.get_arg(1);
+    tf.increment_pc_next(&task);
+    policy_handle(&task, handle, false)
+        .and_then(|policy| {
+            transition(
+                &task,
+                &policy,
+                u32::try_from(target).map_err(|_| "invalid label")?,
+            )
+        })
+        .map_or(usize::MAX, |_| 0)
+}
+
 pub fn sys_shield_policy_current(tf: &mut Trapframe) -> usize {
     let task = crate::task::mytask().unwrap();
     tf.increment_pc_next(&task);

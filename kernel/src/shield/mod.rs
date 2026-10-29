@@ -2,11 +2,16 @@
 //! Numeric classes and permission bits are interpreted by enforcement points,
 //! never by this policy engine.
 //! Possession of a policy identity is distinct from authority to assign labels.
-pub mod syscall;
-pub mod identity;
 pub mod execution;
+pub mod identity;
+pub mod syscall;
 
-use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    string::String,
+    sync::Arc,
+    vec::Vec,
+};
 
 pub const MAX_LABELS: usize = 256;
 pub const MAX_RULES: usize = 4096;
@@ -20,15 +25,35 @@ pub struct Rule {
     pub permissions: u64,
 }
 
+/// An explicit transition after all principal identity slots have become the
+/// delegated principal. Policy construction, not numeric identity, grants it.
+#[derive(Clone, Copy)]
+pub struct TransitionRule {
+    pub source: u32,
+    pub target: u32,
+    pub principal: identity::Principal,
+}
+
 pub struct Policy {
     labels: BTreeMap<u32, String>,
     names: BTreeMap<String, u32>,
     grants: BTreeMap<(u32, u32, u32), u64>,
+    transitions: BTreeSet<(u32, u32, u32)>,
 }
 impl Policy {
     /// Validate the complete policy before publishing it. No live mutation or
     /// permissive fallback exists; caches can retain decisions for its lifetime.
     pub fn new(labels: Vec<(u32, String)>, rules: Vec<Rule>) -> Result<Arc<Self>, &'static str> {
+        Self::with_transitions(labels, rules, Vec::new())
+    }
+    pub fn with_transitions(
+        labels: Vec<(u32, String)>,
+        rules: Vec<Rule>,
+        transitions: Vec<TransitionRule>,
+    ) -> Result<Arc<Self>, &'static str> {
+        if transitions.len() > MAX_RULES {
+            return Err("transition limit");
+        }
         if labels.is_empty() || labels.len() > MAX_LABELS || rules.len() > MAX_RULES {
             return Err("policy size limit");
         }
@@ -36,6 +61,7 @@ impl Policy {
             labels: BTreeMap::new(),
             names: BTreeMap::new(),
             grants: BTreeMap::new(),
+            transitions: BTreeSet::new(),
         };
         for (id, name) in labels {
             if id == 0
@@ -62,6 +88,17 @@ impl Policy {
                 .grants
                 .entry((rule.source, rule.target, rule.class))
                 .or_default() |= rule.permissions;
+        }
+        for rule in transitions {
+            if rule.source == rule.target
+                || !result.labels.contains_key(&rule.source)
+                || !result.labels.contains_key(&rule.target)
+                || !result
+                    .transitions
+                    .insert((rule.source, rule.target, rule.principal.0))
+            {
+                return Err("invalid or duplicate transition");
+            }
         }
         Ok(Arc::new(result))
     }
@@ -108,6 +145,28 @@ impl Subject {
     }
     pub fn same_identity(&self, other: &Self) -> bool {
         self.label == other.label && Arc::ptr_eq(&self.policy, &other.policy)
+    }
+    pub fn can_transition(&self) -> bool {
+        self.policy
+            .transitions
+            .iter()
+            .any(|&(source, _, _)| source == self.label)
+    }
+    pub fn transition(
+        &self,
+        target: u32,
+        credentials: &identity::Credentials,
+    ) -> Result<Self, &'static str> {
+        let ids = credentials.principals();
+        if ids != identity::Identities::all(ids.active)
+            || !self
+                .policy
+                .transitions
+                .contains(&(self.label, target, ids.active.0))
+        {
+            return Err("label transition not delegated for these identities");
+        }
+        self.policy.subject(target)
     }
     pub fn permits(&self, target: &Self, class: u32, requested: u64) -> bool {
         requested != 0
@@ -177,5 +236,69 @@ mod tests {
             .is_err()
         );
         assert!(Policy::new(vec![(1, "one".into()); MAX_LABELS + 1], vec![]).is_err());
+    }
+    #[test_case]
+    fn transitions_require_a_complete_identity_and_do_not_grant_reverse_moves() {
+        use identity::{Credentials, Identities, Principal};
+        let policy = Policy::with_transitions(
+            vec![(1, "launcher".into()), (2, "application".into())],
+            vec![],
+            vec![TransitionRule {
+                source: 1,
+                target: 2,
+                principal: Principal(10001),
+            }],
+        )
+        .unwrap();
+        let source = policy.subject(1).unwrap();
+        let mut credentials = Credentials::bootstrap();
+        assert!(source.transition(2, &credentials).is_err());
+        credentials
+            .set_principals(Identities {
+                base: Principal(0),
+                active: Principal(10001),
+                retained: Principal(0),
+            })
+            .unwrap();
+        assert!(source.transition(2, &credentials).is_err());
+        credentials
+            .set_principals(Identities::all(Principal(10001)))
+            .unwrap();
+        let target = source.transition(2, &credentials).unwrap();
+        assert_eq!(source.label(), 1);
+        assert_eq!(target.label(), 2);
+        assert!(!target.can_transition());
+        assert!(target.transition(1, &credentials).is_err());
+        credentials
+            .set_principals(Identities::all(Principal(10002)))
+            .unwrap();
+        assert!(source.transition(2, &credentials).is_err());
+    }
+    #[test_case]
+    fn transitions_reject_unknown_duplicate_and_unbounded_rules() {
+        let rule = TransitionRule {
+            source: 1,
+            target: 2,
+            principal: identity::Principal(10001),
+        };
+        let labels = vec![(1, "launcher".into()), (2, "application".into())];
+        assert!(Policy::with_transitions(labels.clone(), vec![], vec![rule, rule]).is_err());
+        assert!(
+            Policy::with_transitions(
+                labels.clone(),
+                vec![],
+                vec![TransitionRule { target: 3, ..rule }]
+            )
+            .is_err()
+        );
+        assert!(
+            Policy::with_transitions(
+                labels.clone(),
+                vec![],
+                vec![TransitionRule { target: 1, ..rule }]
+            )
+            .is_err()
+        );
+        assert!(Policy::with_transitions(labels, vec![], vec![rule; MAX_RULES + 1]).is_err());
     }
 }
