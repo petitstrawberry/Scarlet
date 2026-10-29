@@ -1,0 +1,11 @@
+mke2fs 1.47.3 (8-Jul-2025)
+Creating filesystem with 141240 4k blocks and 35360 inodes
+Filesystem UUID: 0f1795bf-262d-44c3-a058-5ae6223e8599
+Superblock backups stored on blocks: 
+	32768, 98304
+
+Allocating group tables: 0/5   done                            
+Writing inode tables: 0/5   done                            
+Copying files into the device: done
+Writing superblocks and filesystem accounting information: 0/5   done
+

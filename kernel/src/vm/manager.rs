@@ -501,7 +501,8 @@ impl VirtualMemoryManager {
     ///
     /// Permission increases are supported for private normal memory backed by
     /// the task or an anonymous/COW owner. Object/device mappings may only lose
-    /// permissions because their original maximum is not recorded in the VMA.
+    /// permissions unless their owner opts in. The permanent VMA authority
+    /// ceiling applies to both native and Linux protection changes.
     pub(crate) fn protect_memory_map_range(
         &self,
         vmarea: MemoryArea,
