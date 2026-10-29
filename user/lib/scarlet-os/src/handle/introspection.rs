@@ -56,6 +56,7 @@ pub enum KernelObjectType {
     Gpu = 11,
     Environment = 12,
     VfsView = 13,
+    ShieldPolicy = 14,
     /// Unknown or unsupported type
     Unknown = 0,
 }

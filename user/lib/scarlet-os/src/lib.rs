@@ -14,6 +14,7 @@
 extern crate std;
 
 pub mod environment;
+pub mod shield;
 pub mod ffi;
 
 /// Handle ownership and capability views.

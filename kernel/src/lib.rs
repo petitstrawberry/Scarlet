@@ -308,6 +308,7 @@ pub mod object;
 pub mod profiler;
 pub mod random;
 pub mod sched;
+pub mod shield;
 pub mod sync;
 pub mod syscall;
 pub mod system;

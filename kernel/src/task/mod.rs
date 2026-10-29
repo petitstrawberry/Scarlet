@@ -878,6 +878,8 @@ pub struct Task {
         IrqRwSpinLock<Option<Arc<crate::executor::environment::Environment>>>,
     /// Granted only to the initial bootstrap process; never inherited by clone.
     pub bootstrap_environment: AtomicBool,
+    /// ABI-neutral identity, inherited across clone/spawn/exec; assignment requires authority.
+    pub(crate) security_subject: IrqRwSpinLock<Option<crate::shield::Subject>>,
     /// Keep the dispatched ABI alive until its syscall handler has returned.
     retired_exec_abi: TaskLocal<Option<Box<dyn AbiModule + Send + Sync>>>,
     /// Pending task-owned timer callbacks and handles, cancelled together when
@@ -1131,6 +1133,7 @@ impl Task {
             vfs: IrqRwSpinLock::new(None),
             execution_environment: IrqRwSpinLock::new(None),
             bootstrap_environment: AtomicBool::new(false),
+            security_subject: IrqRwSpinLock::new(None),
             retired_exec_abi: TaskLocal::new(None),
             software_timers: IrqSpinLock::new(Vec::new()),
             software_timer_count: AtomicUsize::new(0),
@@ -3140,6 +3143,7 @@ impl Task {
             *child.vfs.write() = Some(VfsManager::clone_with_shared_mount_namespace(&vfs));
         }
         *child.execution_environment.write() = self.execution_environment.read().clone();
+        *child.security_subject.write() = self.security_subject.read().clone();
 
         // Ensure the cloned task has its own high-VA kernel stack window.
         // Task::new() already allocates a per-task kernel stack (KernelContext), but clone paths
@@ -3662,6 +3666,7 @@ impl Task {
             .namespace_id
             .store(self.try_get_namespace_id().unwrap_or(0), Ordering::Relaxed);
         image.thread_group_id = self.thread_group_id;
+        *image.security_subject.write() = self.security_subject.read().clone();
         image.max_stack_size = self.max_stack_size;
         image.max_data_size = self.max_data_size;
         image.max_text_size = self.max_text_size;

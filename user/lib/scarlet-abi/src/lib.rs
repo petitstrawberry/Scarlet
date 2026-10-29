@@ -8,6 +8,7 @@
 
 pub mod data_model;
 pub mod environment;
+pub mod shield;
 pub mod fs;
 pub mod hypervisor;
 pub mod native_scalar;
@@ -824,6 +825,9 @@ pub enum Syscall {
     VfsViewUnmount = 527,
     VfsViewCreateDirectory = 528,
     VfsViewRoot = 529,
+    ShieldPolicyCreate = 1310,
+    ShieldPolicyCurrent = 1311,
+    ShieldApply = 1312,
     EnvironmentCreate = 1300,
     EnvironmentSetRoot = 1301,
     EnvironmentRemoveRoot = 1302,

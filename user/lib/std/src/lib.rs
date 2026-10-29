@@ -45,6 +45,7 @@
 
 extern crate scarlet_rt;
 pub use scarlet_os::environment;
+pub use scarlet_os::shield;
 
 mod core_exports {
     extern crate core;

@@ -221,9 +221,10 @@ impl HandleTable {
                 HandleType::IpcChannel
             }
             KernelObject::Timer(_) => HandleType::IpcChannel,
-            KernelObject::Gpu(_) | KernelObject::Environment(_) | KernelObject::VfsView(_) => {
-                HandleType::Regular
-            }
+            KernelObject::ShieldPolicy(_)
+            | KernelObject::Gpu(_)
+            | KernelObject::Environment(_)
+            | KernelObject::VfsView(_) => HandleType::Regular,
             #[cfg(feature = "hypervisor")]
             KernelObject::HypervisorVm(_) => HandleType::Regular,
             #[cfg(feature = "hypervisor")]
@@ -575,6 +576,11 @@ impl HandleTable {
         let (readable, writable) = metadata.access_mode.into();
 
         match kernel_obj {
+            KernelObject::ShieldPolicy(cap) => {
+                let mut info = introspection::KernelObjectInfo::for_environment(false, cap.administer);
+                info.object_type = introspection::KernelObjectType::ShieldPolicy;
+                Some(info)
+            }
             KernelObject::Environment(cap) => Some(
                 introspection::KernelObjectInfo::for_environment(false, cap.writable),
             ),
