@@ -12,6 +12,10 @@ mod stock;
 use std::{environment::HandleMapping, println};
 
 fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
+    if option_env!("SCARLET_ANDROID_INIT_BOOTSTRAP") == Some("1") {
+        std::shield::hide_kernel_addresses().map_err(|_| "Shield kernel address constraint")?;
+        println!("SCARLET_SHIELD_KERNEL_ADDRESSES_HIDDEN");
+    }
     let backing = bootstrap::backing("root=/dev/vblk1", true)?;
     let (environment, policy) = if option_env!("SCARLET_ANDROID_STOCK") == Some("1") {
         stock::environment(backing)?
@@ -46,7 +50,7 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
     if option_env!("SCARLET_ANDROID_ART") == Some("1") {
         // Keep startup faults visible even when ART never reaches Java or exit.
         // The host runner owns the timeout and the private QEMU process.
-        let _logger = std::thread::Builder::new()
+        let _logger = if option_env!("SCARLET_ANDROID_INIT_BOOTSTRAP") == Some("1") { None } else { Some(std::thread::Builder::new()
             .spawn(|| {
                 let Ok(mut log) = std::fs::File::open("/dev/kmsg") else {
                     println!("SCARLET_ANDROID_ART_FAIL: kernel log open");
@@ -60,7 +64,7 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
                     std::print!("{}", std::string::String::from_utf8_lossy(&bytes[..count]));
                 }
             })
-            .map_err(|_| "kernel log thread")?;
+            .map_err(|_| "kernel log thread")?) };
         if option_env!("SCARLET_ANDROID_STOCK") == Some("1") {
             stock::prepare(&environment, &android, &handles)?;
         }

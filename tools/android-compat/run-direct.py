@@ -192,6 +192,7 @@ def main():
         "selinux_build_sha256": sha256(args.selinux_probe / "build.json") if args.selinux_probe else None,
         "zygote_transition_policy": bool(args.zygote_probe or args.zygote_policy),
         "stock_init_owns_bootstrap": args.init_bootstrap,
+        "init_security_sources_sha256": {name: sha256(SOURCE / "init/src" / name) for name in ("main.rs", "shield.rs", "stock.rs")} if args.init_bootstrap else None,
         "stock_bootstrap_source_sha256": sha256(SOURCE / "init/src/stock.rs") if args.stock_inputs else None,
         "shield_fixture_sha256": sha256(SOURCE / "init/src/shield.rs") if shield_fixture else None,
         "stock_reference_config_sha256": sha256(STOCK_CONFIG) if args.stock_inputs else None,
@@ -219,7 +220,7 @@ def main():
             (tree / name).mkdir(parents=True, exist_ok=True)
     for name in ["bin", "lib", "system/bin", "dev", "proc", "sys", "tmp", "root"]:
         (android / name).mkdir(parents=True, exist_ok=True)
-    if shield_fixture or args.service_probe or args.framework_services:
+    if shield_fixture or args.service_probe or args.framework_services or args.init_bootstrap:
         (android / "sys/fs/selinux").mkdir(parents=True, exist_ok=True)
     if args.runtime_root:
         shutil.copytree(args.runtime_root, android, dirs_exist_ok=True, symlinks=True)

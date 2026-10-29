@@ -40,6 +40,8 @@ static int fail(const char *case_name, const char *operation, int error) {
     return 1;
 }
 
+extern int information_case(const char *program);
+extern int information_exec_case(void);
 extern int mount_namespace_case(void);
 extern int mount_propagation_case(void);
 extern int mount_restrictions_case(const char *program);
@@ -102,6 +104,7 @@ static int libc_case(const char *program) {
         syscall(__NR_getrlimit, RLIMIT_STACK, NULL) != -1 || errno != EFAULT ||
         syscall(__NR_prlimit64, 0, RLIMIT_STACK, &stack_limit, NULL) != -1 || errno != EOPNOTSUPP)
         return fail("libc", "resource limit validation", errno);
+    if (information_case(program)) return 1;
     if (mount_namespace_case()) return 1;
     if (mount_propagation_case()) return 1;
     if (mount_restrictions_case(program)) return 1;
@@ -471,6 +474,7 @@ static int binder_absent_case(void) {
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc == 3 && !strcmp(argv[1], "scope-orphan-exec")) return process_scope_exec_case(argv[2]);
+    if (argc == 2 && !strcmp(argv[1], "information-exec")) return information_exec_case();
     if (argc == 2 && !strcmp(argv[1], "seccomp-exec")) return seccomp_exec_case();
     if (argc == 2 && !strcmp(argv[1], "identity-exec")) return credentials_exec_case();
     if (argc != 2) return fail("arguments", "expected one case name", 0);

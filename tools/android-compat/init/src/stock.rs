@@ -36,7 +36,9 @@ pub fn environment(
     android
         .bind("/tmp", &native, "/tmp")
         .map_err(|_| "Android tmp")?;
-    if option_env!("SCARLET_ANDROID_SHIELD") == Some("1") {
+    if option_env!("SCARLET_ANDROID_INIT_BOOTSTRAP") == Some("1") {
+        super::shield::configure_init(&android)?;
+    } else if option_env!("SCARLET_ANDROID_SHIELD") == Some("1") {
         super::shield::configure(&android)?;
     }
     let policy = if option_env!("SCARLET_ANDROID_SERVICES") == Some("1")
