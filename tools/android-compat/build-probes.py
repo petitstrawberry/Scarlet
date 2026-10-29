@@ -26,7 +26,7 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     flags = [str(compiler), "-O2", "-g", "-Wall", "-Wextra", "-Werror", "-fno-emulated-tls"]
     probe_sources = [str(SOURCE / name) for name in
-                     ("bionic-probe.c", "binder-probe.c", "binder-object-probe.c", "credentials-probe.c", "seccomp-probe.c", "process-scope-probe.c")]
+                     ("bionic-probe.c", "binder-probe.c", "binder-object-probe.c", "credentials-probe.c", "seccomp-probe.c", "process-scope-probe.c", "mount-restrictions-probe.c")]
     commands = [
         flags + ["-static"] + probe_sources + ["-ldl", "-o", str(output / "bionic-static")],
         flags + probe_sources + ["-ldl", "-o", str(output / "bionic-dynamic")],

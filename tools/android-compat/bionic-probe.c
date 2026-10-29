@@ -40,6 +40,7 @@ static int fail(const char *case_name, const char *operation, int error) {
     return 1;
 }
 
+extern int mount_restrictions_case(const char *program);
 extern int process_scope_case(const char *program);
 extern int process_scope_exec_case(const char *reaper);
 extern int seccomp_case(const char *program);
@@ -99,6 +100,7 @@ static int libc_case(const char *program) {
         syscall(__NR_getrlimit, RLIMIT_STACK, NULL) != -1 || errno != EFAULT ||
         syscall(__NR_prlimit64, 0, RLIMIT_STACK, &stack_limit, NULL) != -1 || errno != EOPNOTSUPP)
         return fail("libc", "resource limit validation", errno);
+    if (mount_restrictions_case(program)) return 1;
     if (process_scope_case(program)) return 1;
     if (credentials_case(program)) return 1;
     return seccomp_case(program);
