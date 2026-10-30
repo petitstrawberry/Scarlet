@@ -37,6 +37,7 @@ use core::any::Any;
 
 pub const SERVICE_MANAGER: u32 = 1;
 pub const PROPERTY_SERVICE: u32 = 2;
+const HW_SERVICE_MANAGER:u32=4;
 pub const PROPERTY_SET: u64 = 1;
 pub const ADD: u64 = 1;
 pub const FIND: u64 = 2;
@@ -202,6 +203,12 @@ impl SecurityFs {
                     Content::Text(b"1\n".to_vec()),
                 ),
                 ("class/service_manager/perms", Content::Directory),
+                ("class/hwservice_manager",Content::Directory),
+                ("class/hwservice_manager/index",Content::Text(b"4\n".to_vec())),
+                ("class/hwservice_manager/perms",Content::Directory),
+                ("class/hwservice_manager/perms/add",Content::Text(b"1\n".to_vec())),
+                ("class/hwservice_manager/perms/find",Content::Text(b"2\n".to_vec())),
+                ("class/hwservice_manager/perms/list",Content::Text(b"3\n".to_vec())),
                 (
                     "class/service_manager/perms/add",
                     Content::Text(b"1\n".to_vec()),
@@ -431,11 +438,12 @@ fn decision(policy: &Policy, input: &[u8]) -> Result<Vec<u8>, StreamError> {
     // Unknown classes/bits always deny. A decision carries all known grants,
     // matching the immutable AVC cache semantics of libselinux.
     let mask = match class {
-        SERVICE_MANAGER => SERVICE_PERMISSIONS,
+        SERVICE_MANAGER|HW_SERVICE_MANAGER => SERVICE_PERMISSIONS,
         PROPERTY_SERVICE => PROPERTY_SET as u32,
         _ => 0,
     };
-    let allowed = policy.allowed(source, target, class) as u32 & mask;
+    let native_class=if class==HW_SERVICE_MANAGER {SERVICE_MANAGER}else{class};
+    let allowed = policy.allowed(source, target, native_class) as u32 & mask;
     Ok(format!("{allowed:x} ffffffff 0 ffffffff 1 0").into_bytes())
 }
 impl StreamOps for SecurityFile {
@@ -808,6 +816,14 @@ mod tests {
         ] {
             assert!(decision(&p, input).is_err());
         }
+    }
+    #[test_case]
+    fn android_hwservice_permissions_translate_to_native_service_authorization() {
+        let p=policy();
+        assert_eq!(decision(&p,b"u:r:caller:s0 u:object_r:service:s0 4 7").unwrap(),b"3 ffffffff 0 ffffffff 1 0");
+        assert_eq!(decision(&p,b"u:r:denied:s0 u:object_r:service:s0 4 1").unwrap(),b"0 ffffffff 0 ffffffff 1 0");
+        let fs=SecurityFs::new(p).unwrap();
+        assert!(matches!(&fs.nodes["class/hwservice_manager/index"].content,Content::Text(bytes) if bytes==b"4\n"));
     }
     #[test_case]
     fn android_create_context_previews_only_registered_resource_exec_rules() {
