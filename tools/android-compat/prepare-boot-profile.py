@@ -236,10 +236,11 @@ def merge_platform(inputs,runtime,stock,archive):
             target=temporary/"files"/name
             system.dump("/"+name,target)
             copied[name]=target
-        # Zygote loads this library by name; it is not in app_process DT_NEEDED.
+        # Zygote and SystemServer load these by name, outside app_process DT_NEEDED.
         available={Path(name).name for name in metadata["files"]}
-        available|={Path(name).name for name in json.loads((runtime/"art-runtime.json").read_text())["files"]}
-        native_needed={};queue=["system/lib64/libcompiler_rt.so"];seen=set()
+        runtime_files=json.loads((runtime/"art-runtime.json").read_text())["files"]
+        available|={Path(name).name for name in runtime_files}
+        native_needed={};queue=["system/lib64/libcompiler_rt.so","system/lib64/libandroid_servers.so"];seen=set()
         while queue:
             name=queue.pop()
             if name in seen:continue
@@ -247,7 +248,14 @@ def merge_platform(inputs,runtime,stock,archive):
             seen.add(name);target=temporary/"files"/name;system.dump("/"+name,target)
             copied[name]=target;available.add(Path(name).name);native_needed[name]=elf_needed(target)
             for dependency in native_needed[name]:
-                if dependency not in available:queue.append("system/lib64/"+dependency)
+                relative="system/lib64/"+dependency
+                if relative in metadata["files"] or relative in metadata["symlinks"] or relative in runtime_files:continue
+                # A VNDK APEX basename does not make a library visible to the
+                # system-server classloader namespace. Prefer the platform file.
+                if "Type: regular" in system.command("stat "+quote_debugfs("/"+relative)):
+                    queue.append(relative)
+                elif dependency not in available:
+                    raise ValueError("missing platform native dependency: "+dependency)
         fragment=copied["system/etc/classpaths/systemserverclasspath.pb"]
         fragments=[fragment]+sorted(inputs.glob("system/apex/*/etc/classpaths/systemserverclasspath.pb"))
         classpaths={2:[],4:[]}
