@@ -20,6 +20,20 @@ static int zygote_diagnostic;
 static struct stat null_identity;
 static int have_null;
 static void report(const char *format,...);
+int security_check_context(const char *context) {
+ int (*real)(const char*)=dlsym(RTLD_NEXT,"security_check_context");
+ if(!real){errno=ENOSYS;return -1;}
+ int result=real(context),saved=errno;static unsigned failures;
+ if(result && __atomic_fetch_add(&failures,1,__ATOMIC_RELAXED)<32)report("SCARLET_INIT_CONTEXT_REJECT errno=%d label=%.255s\n",saved,context?context:"");
+ errno=saved;return result;
+}
+int security_check_context_raw(const char *context) {
+ int (*real)(const char*)=dlsym(RTLD_NEXT,"security_check_context_raw");
+ if(!real){errno=ENOSYS;return -1;}
+ int result=real(context),saved=errno;static unsigned failures;
+ if(result && __atomic_fetch_add(&failures,1,__ATOMIC_RELAXED)<32)report("SCARLET_INIT_CONTEXT_REJECT errno=%d label=%.255s\n",saved,context?context:"");
+ errno=saved;return result;
+}
 int ioctl(int fd,int request,...) {
  va_list args;va_start(args,request);void *argument=va_arg(args,void*);va_end(args);
  int (*real)(int,int,...)=dlsym(RTLD_NEXT,"ioctl");
