@@ -1,10 +1,9 @@
 //! Legacy submit keeps attachment authority and backing until every return.
 
 use alloc::sync::{Arc, Weak};
-use alloc::vec::Vec;
 
 use super::{TestBufferBackend, TestContext, TestImageBackend};
-use crate::device::gpu::execution::{GpuAttachedBuffer, GpuAttachedImage};
+use crate::device::gpu::execution::{AttachmentSet, GpuAttachedBuffer, GpuAttachedImage};
 use crate::device::gpu::resource::{GpuBufferBacking, GpuImageBacking};
 use crate::device::gpu::{
     GPU_IMAGE_FORMAT_BGRA8_UNORM, GPU_IMAGE_USAGE_SAMPLED, GpuBackendQueue, GpuBackendQueueInfo,
@@ -13,8 +12,8 @@ use crate::device::gpu::{
 use crate::sync::{IrqSpinLock, Mutex};
 
 struct RetentionCheckingQueue {
-    images: Weak<Mutex<Vec<GpuAttachedImage>>>,
-    buffers: Weak<Mutex<Vec<GpuAttachedBuffer>>>,
+    images: Weak<Mutex<AttachmentSet<GpuAttachedImage>>>,
+    buffers: Weak<Mutex<AttachmentSet<GpuAttachedBuffer>>>,
     image_backing: Weak<GpuImageBacking>,
     buffer_backing: Weak<GpuBufferBacking>,
     fail: bool,
