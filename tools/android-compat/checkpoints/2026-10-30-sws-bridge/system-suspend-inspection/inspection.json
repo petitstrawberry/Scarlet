@@ -1,0 +1,28 @@
+{
+  "partitions": {
+    "system": {
+      "offset": 3145728,
+      "size": 837705728,
+      "sha256": "cea78da8aafa4ef03c4fd993c0b1df2592286f7e5752e66a4aead7e439457217"
+    },
+    "system_ext": {
+      "offset": 840957952,
+      "size": 146337792,
+      "sha256": "03106097e796f6e9e72d75c5a3fd4a395e197e7d59a04022a604d6d8a2885fe5"
+    },
+    "product": {
+      "offset": 987758592,
+      "size": 289689600,
+      "sha256": "76dd3a2369c0da1b88a851432614688af33058f159fdf1434db4391693ba00d7"
+    },
+    "vendor": {
+      "offset": 1278214144,
+      "size": 90832896,
+      "sha256": "4222de4d8d0839d4550a15835cbe2fd7c42af90996357e6338e5605dbf3c2c52"
+    }
+  },
+  "files": {
+    "/system/etc/init/android.system.suspend@1.0-service.rc": "c7164caf27ccdc9df71555d54006d087be131ef0afa5bd380b42bb9c5726eb67",
+    "/system/bin/hw/android.system.suspend@1.0-service": "dbbfdd82dacc297cda889574167639627eaa6d03878f7c5f841e93a46e996332"
+  }
+}

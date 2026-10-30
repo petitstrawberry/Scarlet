@@ -1,0 +1,61 @@
+{
+  "git_revision": "6ce48c4665af88caeeccdfd516526303ad7f4aed",
+  "acceleration": "HVF only",
+  "position": "M4: stock init/SystemSuspend, Zygote and SystemServer; ActivityManager and PowerManager startup methods complete. DisplayManager waits for the absent SurfaceFlinger. No APK Activity/display/input yet.",
+  "observed": [
+    "67 host tests passed",
+    "stock SystemSuspend runs under UID1000 and its own Shield label, with the selected stock AIDL VINTF contract",
+    "PowerManager, ThermalManager, HintManager, RecoverySystem and LightsService startup methods complete",
+    "SurfaceFlinger discovery is authorized and waits for a provider instead of failing service-manager authorization",
+    "SWS C client builds as an aarch64-linux-android shared library needing only Bionic libc.so and libdl.so",
+    "Actual Android-target Rust SDK native calls match Bionic getpid before and after fork; probe exits zero on HVF",
+    "The reproducible builder produces the identical probe binary tested by the manual build"
+  ],
+  "limitations": [
+    "No Composer, allocator or mapper HAL is implemented by the SWS client build",
+    "No actual SWS window or Android pixel has been presented by these runs",
+    "Bounded init supervisor exit zero confirms scope closure, not service readiness or Android boot completion",
+    "Stock init still waits for odsign; diagnostic supervisor requests Zygote through the real init control socket",
+    "SurfaceFlinger and installd are not running; APK installation and Activity launch remain unfinished"
+  ],
+  "active_inputs": [
+    ".build/android-services/flattened-boot-inputs-v41",
+    ".build/android-services/init-profile-probe-v15",
+    ".build/android-services/scarlet-memory-info-v1.elf",
+    ".build/android-services/sws-android-v3/libsws_client_c.so",
+    ".build/android-services/sws-android-v3/native-transport-probe",
+    ".build/android-services/android-rust-1.95/sysroot"
+  ],
+  "binary_sha256": {
+    ".build/android-services/sws-android-v2/libsws_client_c.so": "849164071c6afa68f22bcbe0f2b222502ed15f3f8c55a0f34f5b8042094babd4",
+    ".build/android-services/sws-android-v2/native-transport-probe": "8cf2bcf9fb114016370402058052c0029085d6e5b5ab7c461a0ea1be511f3bed",
+    ".build/android-services/sws-android-v3/libsws_client_c.so": "849164071c6afa68f22bcbe0f2b222502ed15f3f8c55a0f34f5b8042094babd4",
+    ".build/android-services/sws-android-v3/native-transport-probe": "8cf2bcf9fb114016370402058052c0029085d6e5b5ab7c461a0ea1be511f3bed",
+    ".build/android-services/system-suspend-inspection/system/bin/hw/android.system.suspend@1.0-service": "dbbfdd82dacc297cda889574167639627eaa6d03878f7c5f841e93a46e996332",
+    ".build/android-services/surfaceflinger-inspection-v2/system/bin/surfaceflinger": "20e3c9feead24c0030eba5afd1c5e108f46ec6d6ab8b54841c6934df3ca1a525"
+  },
+  "archive": "/Users/petitstrawberry/Development/Rust/Scarlet/.build/android-socket-datagram-20261030",
+  "preservation_record_sha256": "7bc8ee63f0f0d383f645a89709f5875e6409e5889397181d05249ce6739bc55e",
+  "published_evidence_sha256": {
+    "test-host-sws-bridge-v1.log": "68a6e9e2da18585511ce7c0d0835d01cf4ff967008c7320a4d22a158dcf18969",
+    "graphics-source-review.json": "892b90285bf214a8f0359b046858934603ea06934684858e3b04037bb6712d41",
+    "build-sws-android-v3.log": "4f22142c3e7281d7bfdfac98f213068b56d549cc68c43ef7852a31bcdeee4651",
+    "sws-android-v3/build.json": "ed979e585189ad1b246e593c8383f5cb8df597c1293f2861626fd80ce837ed58",
+    "system-suspend-inspection/inspection.json": "74a1f638bdb4dacee3764160ec73c74501ce7c902ebf15233c90fff98bd9f11e",
+    "system-suspend-inspection/system/etc/init/android.system.suspend@1.0-service.rc": "c7164caf27ccdc9df71555d54006d087be131ef0afa5bd380b42bb9c5726eb67",
+    "native-transport-v1-hvf/boot-profile.json": "66f2b6e2aeada927fcd618feb302b598b55ee6e6d43887b3b535e3ba5f9e5506",
+    "native-transport-v1-hvf/result.json": "d45fae8cb2e0e21cf4397f8d1a952d82536e75d403fbdbb21016784e11267347",
+    "native-transport-v1-hvf/commands.json": "cde3eb6e64e54640deab39566188198fd069638f81437b51d295ea7936818811",
+    "native-transport-v1-hvf/serial.log": "971163c1066f132ae7dc02bdbae2d15c647ef6268d574a0a16bb4a09c7b00469",
+    "stock-init-compositor-discovery-v1/boot-profile.json": "458033e098c0d24ca04ce8d7b0bc607615bce1b54b53cfb8aa128d75ee8956dc",
+    "stock-init-compositor-discovery-v1/result.json": "0a370e3e3c4b6e8e3db68117fb4c296fdf54a83f3298f908cf2534081c7f6b71",
+    "stock-init-compositor-discovery-v1/init-probe-build.json": "334a33b540a63c6c814d0b60db7a7d3beb3b6b4bc52e765a2b9bb84a163a6bbf",
+    "stock-init-compositor-discovery-v1/commands.json": "e5498f6bc6f07a44cca89a90252aec1c25e7b2810fa2bd5d520606f33cb5e4bc",
+    "stock-init-compositor-discovery-v1/serial.log": "dfd424d701f487fe9ff73cd02445f35be625a70e1aea0823678fca3d6a43d52d",
+    "stock-init-compositor-discovery-v1/init-diagnostic.json": "fe0c374247c8f17f0d4624a22bf11c2b15b74d6410c962bf8906257e44718c90",
+    "android-rust-1.95/provenance.json": "db1533129cfb909fab651a227e07ccc9a7e85cccc8128f8819bf046090fa5172",
+    "android-rust-1.95/install.log": "37c577c4535727ecddd3ba3dc9c7d4b8fb22b79cf1b98fc4279959fb6db58abf",
+    "surfaceflinger-inspection-v2/inspection.json": "75757f9b09c192b0336e744b8c1c60d49dc6ea3f82b0089fe1c0ffc0acf884f5",
+    "surfaceflinger-inspection-v2/system/etc/init/surfaceflinger.rc": "9e6f53f645e4ab2c6dfb4a5679713757a7ed232dc606d8e501dcb3cae3810116"
+  }
+}

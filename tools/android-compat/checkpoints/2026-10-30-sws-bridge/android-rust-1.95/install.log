@@ -1,0 +1,5 @@
+install: creating uninstall script at /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/android-rust-1.95/sysroot/lib/rustlib/uninstall.sh
+install: installing component 'rust-std-aarch64-linux-android'
+
+    rust std installed.
+

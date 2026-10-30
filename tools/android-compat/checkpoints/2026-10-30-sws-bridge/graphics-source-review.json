@@ -1,0 +1,17 @@
+{
+  "scarlet_dev_reviewed": "f9350b244",
+  "stable_shared_client_commits": [
+    "65f8becaa",
+    "ebf26c627"
+  ],
+  "scene_chrome_commit": "ff643341f",
+  "sgfx_reviewed_head": "31d844c",
+  "sgfx_in_progress": "Vulkan modern-rendering branch has uncommitted feature and depth-transfer work; no edits made to that checkout",
+  "scarlet_ui_reviewed_head": "b6a7bec8",
+  "shared_contract": {
+    "software": "sws_window_present copies a complete pitched little-endian BGRA frame; native object handles are distinct from Linux descriptors",
+    "gpu": "existing imported-image identity, generation, compositor epoch and release serial; retain ownership until release",
+    "chrome": "new scene/frame geometry APIs on dev; native shared client is already available there"
+  },
+  "approved_design": "stock SurfaceFlinger, user-space Android graphics HAL to SWS; software rendering first; Environment unchanged"
+}
