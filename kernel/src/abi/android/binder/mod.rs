@@ -1,6 +1,6 @@
 //! Initial 64-bit Binder adapter over native RPC objects. Supports bounded,
 //! synchronous transactions, object references, descriptors and HIDL embedded
-//! buffers over native RPC. Nested synchronous transactions remain unsupported.
+//! buffers and nested synchronous transactions over native RPC call chains.
 //! One-way delivery is serialized until userspace frees each receive buffer.
 
 use crate::{
@@ -141,9 +141,31 @@ struct Thread {
     flush_generation: u64,
     returned_flush: u64,
     completed: VecDeque<Completed>,
-    outgoing: Option<RpcCall>,
-    incoming: Option<RpcRequest>,
-    incoming_accepts_fds: bool,
+    stack: Vec<Transaction>,
+}
+struct Incoming {
+    request: RpcRequest,
+    accepts_fds: bool,
+}
+enum Transaction {
+    Outgoing(RpcCall),
+    Incoming(Incoming),
+}
+impl Thread {
+    fn outgoing(&self) -> Option<&RpcCall> {
+        match self.stack.last() {Some(Transaction::Outgoing(call)) => Some(call), _ => None}
+    }
+    fn incoming(&self) -> Option<&Incoming> {
+        match self.stack.last() {Some(Transaction::Incoming(request)) => Some(request), _ => None}
+    }
+    fn can_receive(&self, endpoint: &RpcEndpoint) -> bool {
+        if let Some(call) = self.outgoing() {call.reentrant_ready(endpoint)}
+        else {self.looper && self.stack.is_empty() && endpoint.ready()}
+    }
+    fn receive(&self, endpoint: &RpcEndpoint) -> Result<Option<RpcRequest>,crate::ipc::rpc::RpcError> {
+        if let Some(call) = self.outgoing() {call.receive_reentrant(endpoint)}
+        else {endpoint.receive()}
+    }
 }
 struct Completed {
     command: u32,
@@ -347,7 +369,7 @@ impl BinderFile {
                     let accepts=if command==BC_TRANSACTION {
                         target.as_ref().is_some_and(|target|target.node.accepts_fds())
                     } else {
-                        self.state.lock().threads.get(&tid).is_some_and(|thread|thread.incoming_accepts_fds)
+                        self.state.lock().threads.get(&tid).is_some_and(|thread|thread.incoming().is_some_and(|incoming| incoming.accepts_fds))
                     };
                     if !accepts {return Err(errno::EPERM);}
                 }
@@ -371,8 +393,9 @@ impl BinderFile {
                     };
                     let mut state = self.state.lock();
                     let thread = state.threads.get_mut(&tid).unwrap();
-                    if !oneway && (thread.outgoing.is_some() || thread.incoming.is_some()) {
-                        return Err(errno::EOPNOTSUPP);
+                    if !oneway {
+                        if thread.outgoing().is_some() {return Err(errno::EINVAL);}
+                        if thread.stack.len() >= crate::ipc::rpc::MAX_CALL_DEPTH {return Err(errno::E2BIG);}
                     }
                     if thread.completed.len() >= 64 {
                         return Err(errno::EAGAIN);
@@ -400,17 +423,18 @@ impl BinderFile {
                         }
                         return Ok(());
                     }
+                    let parent = thread.incoming().and_then(|incoming| incoming.request.context());
                     let call = if let Some(capability) = capability {
-                        capability.send(message)
+                        capability.send_scoped(message, &self.endpoint, parent.as_ref())
                     } else if let Some(context) = context {
-                        context.send(message)
+                        context.send_scoped(message, &self.endpoint, parent.as_ref())
                     } else {
                         Err(crate::ipc::rpc::RpcError::PeerClosed)
                     };
                     match call {
                         Ok(call) => {
                             call.notify_on_completion(&self.endpoint.waker());
-                            thread.outgoing = Some(call);
+                            thread.stack.push(Transaction::Outgoing(call));
                             thread.completed.push_back(Completed {
                                 command: BR_COMPLETE,
                                 acquisitions,
@@ -422,6 +446,8 @@ impl BinderFile {
                                 acquisitions: Vec::new(),
                             })
                         }
+                        Err(crate::ipc::rpc::RpcError::TooLarge) => return Err(errno::E2BIG),
+                        Err(crate::ipc::rpc::RpcError::Cancelled) => return Err(errno::ECANCELED),
                         Err(_) => return Err(errno::EAGAIN),
                     }
                 } else {
@@ -431,8 +457,11 @@ impl BinderFile {
                         if thread.completed.len() >= 64 {
                             return Err(errno::EAGAIN);
                         }
-                        let request = thread.incoming.take().ok_or(errno::EINVAL)?;
-                        request
+                        if thread.incoming().is_none() {return Err(errno::EINVAL);}
+                        match thread.stack.pop().unwrap() {
+                            Transaction::Incoming(incoming) => incoming.request,
+                            _ => unreachable!(),
+                        }
                     };
                     let _ = request.reply(message);
                     self.state
@@ -472,7 +501,7 @@ impl BinderFile {
             return true;
         }
         let objects = self.objects.lock();
-        let process_work = thread.looper && thread.outgoing.is_none() && thread.incoming.is_none();
+        let process_work = thread.looper && thread.stack.is_empty();
         if objects.deaths.ready(tid, process_work) {
             return true;
         }
@@ -486,11 +515,7 @@ impl BinderFile {
             return completed.ready();
         }
         !objects.pending_local_acquisitions()
-            && (thread.outgoing.as_ref().is_some_and(RpcCall::ready)
-                || (thread.looper
-                    && thread.outgoing.is_none()
-                    && thread.incoming.is_none()
-                    && self.endpoint.ready()))
+            && (thread.outgoing().is_some_and(RpcCall::ready) || thread.can_receive(&self.endpoint))
     }
     fn waiter(&self, tid: usize) -> Arc<Waker> {
         // Incoming calls, object-reference work and outgoing completions all
@@ -551,7 +576,7 @@ impl BinderFile {
                 .returned_flush = generation;
             return Ok(4);
         }
-        let process_work = thread.looper && thread.outgoing.is_none() && thread.incoming.is_none();
+        let process_work = thread.looper && thread.stack.is_empty();
         let death = {
             let objects = self.objects.lock();
             if objects.deaths.ready(tid, process_work) {
@@ -617,11 +642,8 @@ impl BinderFile {
             return Ok(0);
         }
         let thread = state.threads.get(&tid).unwrap();
-        let replying = thread.outgoing.as_ref().is_some_and(RpcCall::ready);
-        let receiving = thread.looper
-            && thread.outgoing.is_none()
-            && thread.incoming.is_none()
-            && self.endpoint.ready();
+        let replying = thread.outgoing().is_some_and(RpcCall::ready);
+        let receiving = thread.can_receive(&self.endpoint);
         if !replying && !receiving {
             return Ok(0);
         }
@@ -632,17 +654,12 @@ impl BinderFile {
         let address = arena.reserve()?;
         let mut incoming = None;
         let message = if replying {
-            state
-                .threads
-                .get_mut(&tid)
-                .unwrap()
-                .outgoing
-                .take()
-                .unwrap()
-                .take_reply()
-                .unwrap()
+            match state.threads.get_mut(&tid).unwrap().stack.pop().unwrap() {
+                Transaction::Outgoing(call) => call.take_reply().unwrap(),
+                _ => unreachable!(),
+            }
         } else {
-            match self.endpoint.receive() {
+            match state.threads.get(&tid).unwrap().receive(&self.endpoint) {
                 Ok(Some(mut request)) => {
                     let message =
                         core::mem::replace(&mut request.message, objects::message_empty());
@@ -701,8 +718,9 @@ impl BinderFile {
                     self.objects.lock().oneway.insert(address, request);
                 } else {
                     let mut state=self.state.lock();let thread=state.threads.get_mut(&tid).unwrap();
-                    thread.incoming_accepts_fds=u32_at(&message.bytes,0)&0x10!=0;
-                    thread.incoming = Some(request);
+                    thread.stack.push(Transaction::Incoming(Incoming {
+                        accepts_fds:u32_at(&message.bytes,0)&0x10!=0, request,
+                    }));
                 }
             }
             Ok(68)
@@ -793,10 +811,7 @@ impl BinderFile {
 pub(super) fn task_exit(task: &Task) {
     for handle in task.handle_table.active_handles() {
         if let Some(object) = task.handle_table.get(handle) {
-            if let Some(file) = object
-                .as_file()
-                .and_then(|file| file.as_any().downcast_ref::<BinderFile>())
-            {
+            if let Some(file) = from_object(&object) {
                 if file.owner == task.get_thread_group_id() {
                     file.thread_exit(task.get_id());
                 }
@@ -932,6 +947,61 @@ mod tests {
         }
     }
     #[test_case]
+    fn binder_nested_calls_restore_reply_targets_and_fd_policy_after_reentry() {
+        let environment=Environment::new();let sender=task(&environment,1);let receiver=task(&environment,2);let manager_task=task(&environment,3);
+        let a=file(&sender,&environment,0);let b=file(&receiver,&environment,0);let manager=file(&manager_task,&environment,0);
+        let abi=LinuxAbi::default();
+        assert_eq!(manager.ioctl(&manager_task,&abi,&mut Trapframe::new(),SET_CONTEXT,0,false),0);
+        b.ensure_thread(2).unwrap();
+        assert!(b.mmap(&receiver,0,128*1024,1,2,0)<usize::MAX-4096);
+        let output=crate::environment::USER_STACK_END-crate::environment::PAGE_SIZE;
+        receiver.allocate_stack_pages(output,1).unwrap();
+        let outer=b.endpoint.send_scoped(objects::message_empty(),&a.endpoint,None).unwrap();
+        b.state.lock().threads.get_mut(&2).unwrap().stack.push(Transaction::Incoming(Incoming {
+            request:b.endpoint.receive().unwrap().unwrap(),accepts_fds:true,
+        }));
+        let mut transaction=[0u8;64];transaction[16..20].copy_from_slice(&41u32.to_le_bytes());
+        b.command(&receiver,&abi,BC_TRANSACTION,&transaction).unwrap();
+        assert_eq!(b.state.lock().threads[&2].stack.len(),2);
+        assert_eq!(b.read_record(&receiver,output,68),Ok(4));
+        let at_manager=manager.endpoint.receive().unwrap().unwrap();
+        let mut callback_message=at_manager.message.clone();callback_message.opcode=42;
+        let callback=b.endpoint.send_scoped(callback_message,&manager.endpoint,at_manager.context().as_ref()).unwrap();
+        // The waiting caller is not a registered looper. Its callback is routed
+        // to its outstanding call rather than requiring another pool thread.
+        assert!(!b.state.lock().threads[&2].looper);
+        assert!(b.ready(2));assert_eq!(b.read_record(&receiver,output,68),Ok(68));
+        assert_eq!(u32_at(&read::<68>(&receiver,output).unwrap(),0),BR_TRANSACTION);
+        assert!(!b.state.lock().threads[&2].incoming().unwrap().accepts_fds);
+        b.command(&receiver,&abi,BC_REPLY,&transaction).unwrap();
+        assert!(callback.take_reply().unwrap().is_ok());
+        assert_eq!(b.read_record(&receiver,output,68),Ok(4));
+        let response=at_manager.message.clone();at_manager.reply(response).unwrap();
+        assert_eq!(b.read_record(&receiver,output,68),Ok(68));
+        assert_eq!(u32_at(&read::<68>(&receiver,output).unwrap(),0),BR_REPLY);
+        assert!(b.state.lock().threads[&2].incoming().unwrap().accepts_fds);
+        b.command(&receiver,&abi,BC_REPLY,&transaction).unwrap();
+        assert!(outer.take_reply().unwrap().is_ok());
+        assert!(b.state.lock().threads[&2].stack.is_empty());
+    }
+
+    #[test_case]
+    fn binder_task_exit_cancels_transactions_through_vfs_wrappers() {
+        use crate::fs::vfs_v2::{core::VfsFileObject,drivers::tmpfs::TmpFS,manager::VfsManager};
+        let environment=Environment::new();let task=task(&environment,1);let server=RpcEndpoint::new();
+        let binder=Arc::new(file(&task,&environment,0));binder.ensure_thread(1).unwrap();
+        let call=server.send_scoped(objects::message_empty(),&binder.endpoint,None).unwrap();
+        let request=server.receive().unwrap().unwrap();
+        binder.state.lock().threads.get_mut(&1).unwrap().stack.push(Transaction::Outgoing(call));
+        let view=VfsManager::new_with_root(TmpFS::new(0));
+        let (entry,mount)=view.resolve_path("/").unwrap();
+        let wrapped=Arc::new(VfsFileObject::new(binder.clone(),entry,mount,"/dev/binder".into()));
+        task.handle_table.insert(KernelObject::File(wrapped)).unwrap();
+        task_exit(&task);
+        assert!(request.cancelled());assert!(binder.state.lock().threads.is_empty());
+    }
+
+    #[test_case]
     fn binder_descriptor_flush_returns_each_waiter_without_revoking_rpc() {
         let environment = Environment::new();
         let first = task(&environment, 1);
@@ -997,15 +1067,16 @@ mod tests {
         receiver.allocate_stack_pages(output, 1).unwrap();
         // An oneway callback is allowed while this thread handles a sync call.
         let call = client.endpoint.send(objects::message_empty()).unwrap();
-        client.state.lock().threads.get_mut(&1).unwrap().incoming =
-            client.endpoint.receive().unwrap();
+        client.state.lock().threads.get_mut(&1).unwrap().stack.push(Transaction::Incoming(Incoming {
+            request:client.endpoint.receive().unwrap().unwrap(), accepts_fds:false,
+        }));
         let mut data = [0u8; 64];
         data[20..24].copy_from_slice(&1u32.to_le_bytes());
         client
             .command(&sender, &abi, BC_TRANSACTION, &data)
             .unwrap();
-        assert!(client.state.lock().threads[&1].outgoing.is_none());
-        assert!(client.state.lock().threads[&1].incoming.is_some());
+        assert!(client.state.lock().threads[&1].outgoing().is_none());
+        assert!(client.state.lock().threads[&1].incoming().is_some());
         assert_eq!(
             client.state.lock().threads[&1]
                 .completed
@@ -1028,7 +1099,7 @@ mod tests {
             assert_eq!(u32_at(&record, 0), BR_TRANSACTION);
             assert_eq!(u32_at(&record, 24), 1);
             assert_eq!(u32_at(&record, 28), 0); // Linux oneway sender PID semantics
-            assert!(server.state.lock().threads[&2].incoming.is_none());
+            assert!(server.state.lock().threads[&2].incoming().is_none());
             assert!(!server.ready(2));
             let arena = server.state.lock().arena.clone().unwrap();
             let address = u64_at(&record, 52);
