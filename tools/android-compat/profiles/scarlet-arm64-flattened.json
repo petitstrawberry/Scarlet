@@ -158,7 +158,8 @@
     "u:r:system_server:s0": [
       "u:object_r:system_prop:s0",
       "u:object_r:exported_system_prop:s0",
-      "u:object_r:dalvik_runtime_prop:s0"
+      "u:object_r:dalvik_runtime_prop:s0",
+      "u:object_r:binder_cache_system_server_prop:s0"
     ]
   },
   "init_imports": [
@@ -640,6 +641,21 @@
       "u:r:system_server:s0",
       "u:object_r:window_service:s0",
       3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:platform_compat_service:s0",
+      3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:file_integrity_service:s0",
+      3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:installd_service:s0",
+      2
     ]
   ],
   "socket_labels": [
