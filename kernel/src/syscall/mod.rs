@@ -234,6 +234,8 @@ syscall_table! {
     ResourceGroupEnter = 1332 => crate::task::resource_group::syscall::sys_resource_group_enter,
     ResourceGroupStatus = 1333 => crate::task::resource_group::syscall::sys_resource_group_status,
     ResourceGroupRemove = 1334 => crate::task::resource_group::syscall::sys_resource_group_remove,
+    ResourceGroupCpus = 1335 => crate::task::resource_group::syscall::sys_resource_group_cpus,
+    ResourceGroupLeave = 1336 => crate::task::resource_group::syscall::sys_resource_group_leave,
     ProcessScopeCreate = 1320 => crate::task::process_scope::syscall::sys_process_scope_create,
     ProcessScopeEnter = 1321 => crate::task::process_scope::syscall::sys_process_scope_enter,
     ProcessScopeSetReaper = 1322 => crate::task::process_scope::syscall::sys_process_scope_set_reaper,

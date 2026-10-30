@@ -836,6 +836,8 @@ pub enum Syscall {
     ResourceGroupEnter = 1332,
     ResourceGroupStatus = 1333,
     ResourceGroupRemove = 1334,
+    ResourceGroupCpus = 1335,
+    ResourceGroupLeave = 1336,
     ProcessScopeCreate = 1320,
     ProcessScopeEnter = 1321,
     ProcessScopeSetReaper = 1322,

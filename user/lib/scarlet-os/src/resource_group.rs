@@ -3,7 +3,7 @@ use crate::{
     Handle,
     handle::{HandleError, HandleResult},
 };
-use scarlet_sys::{Syscall, syscall0, syscall1, syscall2};
+use scarlet_sys::{Syscall, syscall0, syscall1, syscall2, syscall4};
 pub struct ResourceGroup(Handle);
 #[repr(C)]
 #[derive(Default, Debug, Clone, Copy)]
@@ -68,6 +68,39 @@ impl ResourceGroup {
     pub fn remove(&self) -> HandleResult<()> {
         // SAFETY: the kernel rejects roots and groups with children or live memberships.
         result(unsafe { syscall1(Syscall::ResourceGroupRemove, self.0.as_raw() as usize) })
+    }
+    /// Set a native CPU mask, or inherit the parent's constraint.
+    pub fn set_cpus(&self, mask: Option<usize>) -> HandleResult<()> {
+        // SAFETY: no pointers; authority and all live tasks are checked atomically.
+        result(unsafe {
+            syscall4(
+                Syscall::ResourceGroupCpus,
+                self.0.as_raw() as usize,
+                if mask.is_some() { 1 } else { 2 },
+                mask.unwrap_or(0),
+                0,
+            )
+        })
+    }
+    /// Requested mask (zero means inherited) and effective online mask.
+    pub fn cpus(&self) -> HandleResult<(u64, u64)> {
+        let mut masks = [0u64; 2];
+        // SAFETY: exclusive fixed-size output remains live throughout the copy.
+        result(unsafe {
+            syscall4(
+                Syscall::ResourceGroupCpus,
+                self.0.as_raw() as usize,
+                0,
+                0,
+                masks.as_mut_ptr() as usize,
+            )
+        })?;
+        Ok((masks[0], masks[1]))
+    }
+    /// Leave this independent hierarchy, retaining all other memberships.
+    pub fn leave(&self) -> HandleResult<()> {
+        // SAFETY: native capability and resource-management authority are checked.
+        result(unsafe { syscall1(Syscall::ResourceGroupLeave, self.0.as_raw() as usize) })
     }
     pub fn as_handle(&self) -> &Handle {
         &self.0

@@ -3597,7 +3597,7 @@ fn validate_deadline_params(params: TaskDeadlineParams) -> Result<(), &'static s
 fn scheduler_affinity_snapshot(task: &Task) -> SchedulerAffinity {
     let mask = task.cpu_affinity_mask();
     match task.scheduler_affinity_kind() {
-        SCHED_AFFINITY_KIND_ANY => SchedulerAffinity::Any,
+        SCHED_AFFINITY_KIND_ANY if task.resource_membership.allowed_cpus() == usize::MAX => SchedulerAffinity::Any,
         SCHED_AFFINITY_KIND_SINGLE if mask.is_power_of_two() => {
             SchedulerAffinity::Single(mask.trailing_zeros() as usize)
         }
@@ -3614,7 +3614,9 @@ fn supported_cpu_mask() -> usize {
     }
 }
 
-fn validate_scheduler_affinity(affinity: SchedulerAffinity) -> Result<(), SchedulerControlResult> {
+fn validate_scheduler_affinity(task: &Task, affinity: SchedulerAffinity) -> Result<(), SchedulerControlResult> {
+    let mask = match affinity {SchedulerAffinity::Any => usize::MAX, SchedulerAffinity::Single(cpu) => 1usize.checked_shl(cpu as u32).unwrap_or(0), SchedulerAffinity::Mask(mask) => mask};
+    if mask & task.resource_membership.allowed_cpus() & online_cpu_mask() as usize == 0 {return Err(SchedulerControlResult::EmptyCpuMask);}
     match affinity {
         SchedulerAffinity::Any => Ok(()),
         SchedulerAffinity::Single(cpu_id) => {
@@ -3670,6 +3672,7 @@ fn initialize_deadline_state(
     let mut state = task.deadline.lock();
     debug_assert!(state.params.is_none());
     state.generation = state.generation.wrapping_add(1);
+    task.resource_membership.record_deadline_cpu(Some(cpu_id));
     state.params = Some(params);
     state.remaining_ns = params.runtime_ns;
     state.absolute_deadline_ns = now_ns.saturating_add(params.deadline_ns);
@@ -3725,6 +3728,7 @@ fn reconfigure_deadline_state(
         state.remaining_ns = params.runtime_ns;
         state.absolute_deadline_ns = now_ns.saturating_add(params.deadline_ns);
         state.next_replenishment_ns = now_ns.saturating_add(params.period_ns);
+        task.resource_membership.record_deadline_cpu(Some(target_cpu));
         state.cpu_id = target_cpu;
         state.throttled = false;
         state.deadline_misses = 0;
@@ -3760,7 +3764,7 @@ fn apply_scheduler_attributes(task: &Task, attributes: SchedulerAttr) -> Schedul
     {
         return SchedulerControlResult::InvalidArgument;
     }
-    if let Err(result) = validate_scheduler_affinity(attributes.affinity) {
+    if let Err(result) = validate_scheduler_affinity(task, attributes.affinity) {
         return result;
     }
 
@@ -3782,6 +3786,7 @@ fn apply_scheduler_attributes(task: &Task, attributes: SchedulerAttr) -> Schedul
             if cpu_id >= MAX_NUM_CPUS || !is_cpu_online(cpu_id) {
                 return SchedulerControlResult::CpuOffline;
             }
+            if task.resource_membership.allowed_cpus() & (1usize << cpu_id) == 0 {return SchedulerControlResult::EmptyCpuMask;}
             let Ok(units) = deadline_bandwidth_units(params) else {
                 return SchedulerControlResult::InvalidArgument;
             };
@@ -3814,6 +3819,7 @@ fn apply_current_task_scheduler_transaction(
     task: &Task,
     transaction: SchedulerTransaction,
 ) -> SchedulerControlResult {
+    let Ok(_placement_transaction) = crate::task::resource_group::transaction() else {return SchedulerControlResult::Busy;};
     match transaction {
         SchedulerTransaction::Attributes(attributes) => {
             apply_scheduler_attributes(task, attributes)
@@ -3840,7 +3846,7 @@ fn apply_current_task_scheduler_transaction(
             if task.deadline_enabled() {
                 return SchedulerControlResult::InvalidArgument;
             }
-            if let Err(result) = validate_scheduler_affinity(affinity) {
+            if let Err(result) = validate_scheduler_affinity(task, affinity) {
                 return result;
             }
             publish_scheduler_affinity(task, affinity);
@@ -3855,6 +3861,7 @@ fn apply_current_task_scheduler_transaction(
                 if !is_cpu_online(cpu_id) {
                     return SchedulerControlResult::CpuOffline;
                 }
+                if task.resource_membership.allowed_cpus() & (1usize << cpu_id) == 0 {return SchedulerControlResult::EmptyCpuMask;}
                 let Ok(units) = deadline_bandwidth_units(params) else {
                     return SchedulerControlResult::InvalidArgument;
                 };
@@ -4391,6 +4398,7 @@ pub(crate) fn release_task_deadline(task: &Task) {
         let units = state.admission_units;
         let timer = state.replenishment_timer.take();
         let handler = state.replenishment_handler.take();
+        task.resource_membership.record_deadline_cpu(None);
         state.params = None;
         state.remaining_ns = 0;
         state.absolute_deadline_ns = 0;
@@ -5185,7 +5193,8 @@ pub fn process_pending_events_before_user_return(trapframe: &mut Trapframe) {
 
     match current_task.process_pending_events() {
         Ok(EventProcessOutcome::NeedReschedule | EventProcessOutcome::Exited(_)) => {
-            schedule(trapframe)
+            schedule(trapframe);
+            return;
         }
         Ok(
             EventProcessOutcome::Continue
@@ -5195,7 +5204,10 @@ pub fn process_pending_events_before_user_return(trapframe: &mut Trapframe) {
         Err(_) => {}
     }
 
-    if task_state_requires_exit_reschedule(current_task.get_state()) {
+    let placed = if let Some(reservation) = current_task.deadline_snapshot() {
+        reservation.cpu_id == cpu_id && current_task.resource_membership.allowed_cpus() & (1usize << cpu_id) != 0
+    } else {current_task.cpu_allowed(cpu_id)};
+    if task_state_requires_exit_reschedule(current_task.get_state()) || !placed {
         schedule(trapframe);
     }
 }

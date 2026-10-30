@@ -1261,6 +1261,10 @@ impl Task {
     ///
     /// A bit mask in which bit `n` permits execution on scheduler CPU `n`.
     pub fn cpu_affinity_mask(&self) -> usize {
+        self.resource_membership.effective_affinity()
+    }
+
+    pub(crate) fn requested_cpu_affinity_mask(&self) -> usize {
         self.cpu_affinity_mask.load(Ordering::SeqCst)
     }
 
@@ -1283,6 +1287,7 @@ impl Task {
 
     /// Publish a scheduler affinity encoding and its CPU mask together.
     pub(crate) fn set_scheduler_affinity_config(&self, kind: u8, mask: usize) {
+        self.resource_membership.record_affinity(mask);
         self.cpu_affinity_mask.store(mask, Ordering::SeqCst);
         self.scheduler_affinity_kind.store(kind, Ordering::SeqCst);
     }
@@ -3136,7 +3141,7 @@ impl Task {
         child.set_core_preference(self.core_preference());
         child.set_scheduler_affinity_config(
             self.scheduler_affinity_kind(),
-            self.cpu_affinity_mask(),
+            self.requested_cpu_affinity_mask(),
         );
         child
             .sched_util_min
@@ -3168,7 +3173,7 @@ impl Task {
         *child.execution_environment.write() = self.execution_environment.read().clone();
         *child.mount_namespace.write() = self.mount_namespace.read().clone();
         *child.process_scope.write() = self.process_scope.read().clone();
-        child.resource_membership = if flags.is_set(CloneFlagsDef::Thread) { self.resource_membership.thread()? } else { self.resource_membership.fork()? };
+        child.resource_membership = if flags.is_set(CloneFlagsDef::Thread) { self.resource_membership.thread_with_affinity(child.requested_cpu_affinity_mask())? } else { self.resource_membership.fork_with_affinity(child.requested_cpu_affinity_mask())? };
         *child.creation_label.write() = self.creation_label.read().clone();
         *child.security_subject.write() = self.security_subject.read().clone();
         *child.pending_exec_transition.write() = self.pending_exec_transition.read().clone();

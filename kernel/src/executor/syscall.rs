@@ -502,7 +502,8 @@ handler!(sys_environment_spawn, |task, tf| {
         task.get_namespace(),
     );
     *child.process_scope.write() = task.process_scope.read().clone();
-    child.resource_membership = task.resource_membership.fork()?;
+    child.set_scheduler_affinity_config(task.scheduler_affinity_kind(), task.requested_cpu_affinity_mask());
+    child.resource_membership = task.resource_membership.fork_with_affinity(child.requested_cpu_affinity_mask())?;
     *child.security_subject.write() = task.security_subject.read().clone();
     *child.pending_exec_transition.write() = task.pending_exec_transition.read().clone();
     *child.creation_label.write() = task.creation_label.read().clone();
@@ -516,7 +517,6 @@ handler!(sys_environment_spawn, |task, tf| {
     child.set_controlling_tty(task.get_controlling_tty().as_ref().map(Arc::downgrade));
     child.set_nice(task.sched_nice.load(Ordering::Relaxed));
     child.set_core_preference(task.core_preference());
-    child.set_scheduler_affinity_config(task.scheduler_affinity_kind(), task.cpu_affinity_mask());
     child.init();
     let mut next_tf = Trapframe::new();
     TransparentExecutor::execute_in_environment_with_abi(
