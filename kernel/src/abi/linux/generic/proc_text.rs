@@ -209,7 +209,15 @@ fn mounts_content(fs: &crate::fs::VfsManager) -> String {
     content
 }
 
+fn layout_field(path:&str)->Option<bool> {
+    match path {"/proc/sys/vm/mmap_rnd_bits"=>Some(false),"/proc/sys/vm/mmap_rnd_compat_bits"=>Some(true),_=>None}
+}
+fn layout_text(path:&str)->Option<String> {
+    let low=layout_field(path)?;let task=crate::task::mytask()?;let policy=task.vm_manager.layout_policy();
+    Some(format!("{}\n",if low {policy.low_bits}else {policy.native_bits}))
+}
 fn text_content(path: &str) -> Option<String> {
+    if let Some(text)=layout_text(path) {return Some(text);}
     if path == "/proc/sys/kernel/kptr_restrict" {
         let caller = crate::task::mytask()?;
         return Some(String::from(if caller.execution_restrictions.read().kernel_addresses_hidden() { "2\n" } else { "0\n" }));
@@ -304,7 +312,7 @@ pub(super) fn open_proc_text_file(
     } else {
         text_content(path)?
     };
-    if flags & 3 == 3 || (flags & 3 != 0 && path != "/proc/sys/kernel/kptr_restrict") {
+    if flags & 3 == 3 || (flags & 3 != 0 && path != "/proc/sys/kernel/kptr_restrict" && layout_field(path).is_none()) {
         return Some(errno::to_result(errno::EACCES));
     }
     if flags & O_DIRECTORY != 0 && !directory {
@@ -388,7 +396,16 @@ impl StreamOps for ProcTextFile {
     }
 
     fn write(&self, buffer: &[u8]) -> Result<usize, StreamError> {
-        if self.access == 0 || self.path != "/proc/sys/kernel/kptr_restrict" { return Err(StreamError::PermissionDenied); }
+        if self.access==0 {return Err(StreamError::PermissionDenied);}
+        if let Some(low)=layout_field(&self.path) {
+            let caller=crate::task::mytask().ok_or(StreamError::PermissionDenied)?;
+            if !caller.credentials.read().permits(crate::shield::identity::MANAGE_LAYOUT) {return Err(StreamError::PermissionDenied);}
+            let value=core::str::from_utf8(buffer).map_err(|_|StreamError::InvalidArgument)?.trim().parse::<u8>().map_err(|_|StreamError::InvalidArgument)?;
+            let mut policy=caller.vm_manager.layout_policy();if low {policy.low_bits=value;}else {policy.native_bits=value;}
+            policy.validate().map_err(|_|StreamError::InvalidArgument)?;
+            caller.vm_manager.configure_layout(policy).map_err(|_|StreamError::NotSupported)?;return Ok(buffer.len());
+        }
+        if self.path!="/proc/sys/kernel/kptr_restrict" {return Err(StreamError::PermissionDenied);}
         let caller = crate::task::mytask().ok_or(StreamError::PermissionDenied)?;
         let value = core::str::from_utf8(buffer).map_err(|_| StreamError::InvalidArgument)?.trim();
         if !matches!(value, "0" | "1" | "2") { return Err(StreamError::InvalidArgument); }
@@ -455,7 +472,8 @@ impl FileObject for ProcTextFile {
             return Err(StreamError::InvalidArgument);
         }
         let start = usize::try_from(offset).map_err(|_| StreamError::InvalidArgument)?;
-        let bytes = if self.path == "/proc/sys/kernel/kptr_restrict" {
+        let layout=layout_text(&self.path);
+        let bytes = if let Some(layout)=&layout {layout.as_bytes()}else if self.path == "/proc/sys/kernel/kptr_restrict" {
             if crate::task::mytask().is_some_and(|task| task.execution_restrictions.read().kernel_addresses_hidden()) { b"2\n".as_slice() }
             else { b"0\n".as_slice() }
         } else { self.content.as_bytes() };

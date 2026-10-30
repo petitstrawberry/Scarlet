@@ -46,6 +46,7 @@
 extern crate scarlet_rt;
 pub use scarlet_os::environment;
 pub use scarlet_os::shield;
+pub use scarlet_os::vm;
 pub use scarlet_os::process_scope;
 pub use scarlet_os::resource_group;
 

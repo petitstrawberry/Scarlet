@@ -423,6 +423,7 @@ impl TransparentExecutor {
 
         let pending_transition = source.pending_exec_transition.read().clone();
         let mut image = task.new_exec_image();
+        image.vm_manager.configure_layout(source.vm_manager.layout_policy()).map_err(failure)?;
         if explicit_transition {
             *image.security_subject.write() = source.security_subject.read().clone();
             *image.credentials.write() = source.credentials.read().clone();

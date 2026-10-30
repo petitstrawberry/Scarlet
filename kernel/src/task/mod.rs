@@ -2829,6 +2829,7 @@ impl Task {
                     // to avoid creating new stack that would overwrite parent's stack content
                     let asid = alloc_virtual_address_space();
                     child.vm_manager.set_asid(asid);
+                    child.vm_manager.inherit_layout(&self.vm_manager);
                 } else {
                     // CLONE_VM: share the same address space via Arc<VirtualMemoryManager>
                     child.vm_manager = self.vm_manager.clone();

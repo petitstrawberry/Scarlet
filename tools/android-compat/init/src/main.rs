@@ -14,6 +14,8 @@ use std::{environment::HandleMapping, println};
 
 fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
     if option_env!("SCARLET_ANDROID_INIT_BOOTSTRAP") == Some("1") {
+        std::vm::configure_layout(24,16).map_err(|_| "Android address layout")?;
+        println!("SCARLET_ANDROID_MMAP_RANDOMIZED");
         std::shield::hide_kernel_addresses().map_err(|_| "Shield kernel address constraint")?;
         println!("SCARLET_SHIELD_KERNEL_ADDRESSES_HIDDEN");
         let resource = std::resource_group::ResourceGroup::create_root().map_err(|_| "Android resource root")?;

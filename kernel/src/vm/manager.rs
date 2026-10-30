@@ -131,6 +131,8 @@ struct InnerVmm {
     memmap: BTreeMap<usize, VirtualMemoryMap>,
     asid: u16,
     mmap_base: usize,
+    mmap_anchor: usize,
+    placement: super::layout::Placement,
     // [mmap_base, mmap_occupied_until) is known to contain no holes. Readers
     // may advance this hint under the VM read lock; writers lower it whenever
     // they remove coverage. It never skips a gap too small for an earlier ask.
@@ -212,6 +214,8 @@ impl VirtualMemoryManager {
             memmap: BTreeMap::new(),
             asid: 0,
             mmap_base: DEFAULT_USER_MMAP_BASE,
+            mmap_anchor: DEFAULT_USER_MMAP_BASE,
+            placement: super::layout::Placement::default(),
             mmap_occupied_until: AtomicUsize::new(DEFAULT_USER_MMAP_BASE),
             page_tables: Vec::new(),
             last_search_cache: None,
@@ -2044,12 +2048,36 @@ impl VirtualMemoryManager {
     /// # Arguments
     /// * `base` - New base address for mmap operations
     pub fn set_mmap_base(&self, base: usize) {
-        let mut inner = self.inner.write();
-        self.record_inner_writer(WRITE_SITE_MMAP_BASE);
-        inner.mmap_base = base;
-        inner
-            .mmap_occupied_until
-            .store(base, core::sync::atomic::Ordering::Relaxed);
+        let mut inner=self.inner.write();self.record_inner_writer(WRITE_SITE_MMAP_BASE);
+        inner.mmap_anchor=base;
+        inner.mmap_base=base.checked_add(inner.placement.offset(false)).unwrap_or(USER_LOWER_CANONICAL_END);
+        inner.mmap_occupied_until.store(inner.mmap_base,core::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn layout_policy(&self)->super::layout::LayoutPolicy {self.inner.read().placement.policy}
+    pub fn configure_layout(&self,policy:super::layout::LayoutPolicy)->Result<(),&'static str> {
+        let placement=policy.sample()?;
+        let mut inner=self.inner.write();let base=placement.base(inner.mmap_anchor,USER_LOWER_CANONICAL_END,false)?;
+        inner.placement=placement;inner.mmap_base=base;inner.mmap_occupied_until.store(base,core::sync::atomic::Ordering::Relaxed);Ok(())
+    }
+    /// Fork keeps the exact placement; exec samples on its unpublished image.
+    pub(crate) fn inherit_layout(&self,source:&Self) {
+        let (placement,anchor,base)={let parent=source.inner.read();(parent.placement,parent.mmap_anchor,parent.mmap_base)};
+        let mut child=self.inner.write();child.placement=placement;child.mmap_anchor=anchor;child.mmap_base=base;
+        child.mmap_occupied_until.store(base,core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A native low-address allocation window. This does not advertise a
+    /// 32-bit executable ABI; callers still validate their executable model.
+    pub fn find_low_unmapped_area(&self,size:usize,alignment:usize)->Option<usize> {
+        let inner=self.inner.read();let limit=0x8000_0000usize;
+        let mut candidate=checked_align_up(inner.placement.base(0x4000_0000,limit,true).ok()?,alignment)?;
+        let size=checked_align_up(size,alignment)?;if size==0 {return None;}
+        for map in inner.memmap.values() {
+            if map.vmarea.end<candidate {continue;}
+            if candidate.checked_add(size)?<=map.vmarea.start {break;}
+            candidate=checked_align_up(map.vmarea.end.checked_add(1)?,alignment)?;
+        }
+        candidate.checked_add(size).filter(|end|*end<=limit).map(|_|candidate)
     }
 
     /// Find a suitable address for new memory mapping
@@ -2472,6 +2500,21 @@ mod tests {
     use crate::vm::get_current_direct_map_phys_range;
     use crate::vm::{manager::VirtualMemoryManager, vmem::MemoryArea};
     use alloc::sync::Arc;
+
+    #[cfg(target_pointer_width="64")]
+    #[test_case]
+    fn mmap_layout_is_shared_by_threads_copied_by_fork_and_bounds_low_allocations() {
+        use super::super::layout::{LayoutPolicy,Placement};
+        let parent=VirtualMemoryManager::new();
+        {let mut inner=parent.inner.write();inner.placement=Placement {policy:LayoutPolicy {native_bits:24,low_bits:16},seed:0x123456789};}
+        parent.set_mmap_base(crate::environment::DEFAULT_USER_MMAP_BASE);
+        let child=VirtualMemoryManager::new();child.inherit_layout(&parent);
+        assert_eq!(child.layout_policy(),parent.layout_policy());assert_eq!(child.get_mmap_base(),parent.get_mmap_base());
+        let shared=parent.clone();shared.configure_layout(LayoutPolicy::default()).unwrap();
+        assert_eq!(parent.layout_policy(),LayoutPolicy::default());assert_eq!(child.layout_policy().native_bits,24);
+        assert_eq!(child.find_low_unmapped_area(PAGE_SIZE,PAGE_SIZE),Some(0x4000_0000+(0x123456789u64>>33) as usize*PAGE_SIZE));
+        assert!(child.find_low_unmapped_area(0x8000_0000,PAGE_SIZE).is_none());
+    }
 
     #[test_case]
     fn test_new_virtual_memory_manager() {

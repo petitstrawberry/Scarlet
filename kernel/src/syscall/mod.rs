@@ -244,6 +244,8 @@ syscall_table! {
     ShieldFilePolicy = 1340 => crate::shield::syscall::sys_shield_file_policy,
     ShieldCreationLabel = 1341 => crate::shield::syscall::sys_shield_creation_label,
     ShieldRelabelFile = 1342 => crate::shield::syscall::sys_shield_relabel_file,
+    VmLayoutConfigure = 1350 => crate::vm::layout::syscall::configure,
+    VmLayoutQuery = 1351 => crate::vm::layout::syscall::query,
     ShieldPolicyCreate = 1310 => crate::shield::syscall::sys_shield_policy_create,
     ShieldPolicyCurrent = 1311 => crate::shield::syscall::sys_shield_policy_current,
     ShieldApply = 1312 => crate::shield::syscall::sys_shield_apply,

@@ -3,6 +3,7 @@
 //! This module provides the virtual memory abstraction for the kernel. It
 //! includes functions for managing virtual address spaces.
 
+pub mod layout;
 pub mod addr;
 pub mod boot;
 pub mod direct_map;
