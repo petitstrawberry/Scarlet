@@ -4,7 +4,7 @@
 //! One-way delivery is serialized until userspace frees each receive buffer.
 
 use crate::{
-    abi::linux::generic::{LinuxAbi, errno, fs::FD_CLOEXEC},
+    abi::linux::generic::{LinuxAbi, errno},
     arch::Trapframe,
     executor::environment::Environment,
     fs::{FileMetadata, FilePermission, FileType, SeekFrom},
@@ -31,6 +31,7 @@ use alloc::{
 };
 use core::any::Any;
 
+pub(super) mod filesystem;
 mod arena;
 mod buffers;
 mod death;
@@ -169,60 +170,24 @@ pub(crate) struct BinderFile {
     auto_fds: IrqSpinLock<BTreeMap<usize, Vec<crate::abi::linux::generic::DescriptorReceipt>>>,
 }
 
-pub(crate) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> Option<usize> {
-    let device = match path {
-        "/dev/binder" => 0,
-        "/dev/hwbinder" => 1,
-        "/dev/vndbinder" => 2,
-        _ => return None,
-    };
-    let result = (|| {
-        if flags & 3 != 2 {
-            return Err(errno::EACCES);
-        }
-        if flags & 0x10000 != 0 {
-            return Err(errno::ENOTDIR);
-        }
-        if flags & !(3 | 0x80000 | 0x800 | 0x20000) != 0 {
-            return Err(errno::EINVAL);
-        }
-        let environment = task
-            .execution_environment
-            .read()
-            .clone()
-            .ok_or(errno::ENODEV)?;
-        let file = Arc::new(BinderFile {
-            owner: task.get_thread_group_id(),
-            subject: task.security_subject.read().clone(),
-            domain: domain(environment, device),
-            endpoint: RpcEndpoint::new(),
-            send_gate: IrqSpinLock::new(()),
-            auto_fds: IrqSpinLock::new(BTreeMap::new()),
-            objects: IrqSpinLock::new(Objects::default()),
-            state: IrqSpinLock::new(State {
-                threads: BTreeMap::new(),
-                arena: None,
-                node: (0, 0),
-            }),
-        });
-        let handle = task
-            .handle_table
-            .insert(KernelObject::File(file))
-            .map_err(|_| errno::EMFILE)?;
-        let fd = match abi.allocate_fd(handle) {
-            Ok(fd) => fd,
-            Err(_) => {
-                let _ = task.handle_table.remove(handle);
-                return Err(errno::EMFILE);
-            }
-        };
-        let _ = abi.set_file_status_flags(fd, flags as u32 & 0x803);
-        if flags & 0x80000 != 0 {
-            let _ = abi.set_fd_flags(fd, FD_CLOEXEC);
-        }
-        Ok(fd)
-    })();
-    Some(result.unwrap_or_else(errno::to_result))
+pub(super) fn new_file(task: &Task, device: u8) -> Result<Arc<BinderFile>, usize> {
+    if device > 2 { return Err(errno::EINVAL); }
+    let environment = task.execution_environment.read().clone().ok_or(errno::ENODEV)?;
+    Ok(Arc::new(BinderFile {
+        owner: task.get_thread_group_id(), subject: task.security_subject.read().clone(),
+        domain: domain(environment, device), endpoint: RpcEndpoint::new(),
+        send_gate: IrqSpinLock::new(()), auto_fds: IrqSpinLock::new(BTreeMap::new()),
+        objects: IrqSpinLock::new(Objects::default()),
+        state: IrqSpinLock::new(State { threads: BTreeMap::new(), arena: None, node: (0, 0) }),
+    }))
+}
+
+pub(super) fn from_object(object: &KernelObject) -> Option<&BinderFile> {
+    let mut file = object.as_file()?;
+    loop {
+        if let Some(binder) = file.as_any().downcast_ref::<BinderFile>() { return Some(binder); }
+        file = file.as_any().downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()?.inner().as_ref();
+    }
 }
 
 impl BinderFile {
@@ -866,7 +831,7 @@ impl FileObject for BinderFile {
     fn metadata(&self) -> Result<FileMetadata, StreamError> {
         Ok(FileMetadata {
             file_type: FileType::CharDevice(crate::fs::DeviceFileInfo {
-                device_id: 0,
+                device_id: self.domain.device as usize,
                 device_type: crate::device::DeviceType::Char,
             }),
             size: 0,

@@ -46,21 +46,18 @@ impl LinuxAbiExtensions for AndroidExtensions {
         })())
     }
     fn open(&self, abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> Option<usize> {
-        security::open(abi, task, path, flags).or_else(|| binder::open(abi, task, path, flags))
+        security::open(abi, task, path, flags)
     }
 
     fn filesystem_type(
         &self,
         filesystem: &dyn crate::fs::vfs_v2::core::FileSystemOperations,
     ) -> Option<i64> {
-        security::filesystem_type(filesystem)
+        security::filesystem_type(filesystem).or_else(|| binder::filesystem::filesystem_type(filesystem))
     }
 
     fn flush_on_close(&self, _task: &Task, object: &KernelObject) {
-        if let Some(file) = object
-            .as_file()
-            .and_then(|file| file.as_any().downcast_ref::<binder::BinderFile>())
-        {
+        if let Some(file) = binder::from_object(object) {
             file.flush_on_close();
         }
     }
@@ -75,10 +72,7 @@ impl LinuxAbiExtensions for AndroidExtensions {
         request: u32,
         arg: usize,
     ) -> Option<usize> {
-        let file = object
-            .as_file()?
-            .as_any()
-            .downcast_ref::<binder::BinderFile>()?;
+        let file = binder::from_object(object)?;
         let nonblocking = abi.get_file_status_flags(fd).unwrap_or(0) & 0x800 != 0;
         Some(file.ioctl(task, abi, trapframe, request, arg, nonblocking))
     }
@@ -87,10 +81,7 @@ impl LinuxAbiExtensions for AndroidExtensions {
         if let Some(result) = security::mmap(object, &mapping) {
             return Some(result);
         }
-        let file = object
-            .as_file()?
-            .as_any()
-            .downcast_ref::<binder::BinderFile>()?;
+        let file = binder::from_object(object)?;
         Some(file.mmap(
             task,
             mapping.address,
