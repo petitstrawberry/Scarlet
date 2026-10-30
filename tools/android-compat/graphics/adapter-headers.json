@@ -1,0 +1,23 @@
+{
+  "release": "android-13.0.0_r2",
+  "archives": {
+    "vndk33": {
+      "repository": "platform/prebuilts/vndk/v33",
+      "revision": "93fae1dca18368daaf6a46a051b401a1313fb74d",
+      "path": "arm64/include",
+      "tree_sha256": "02728f94fac722458637094e6f31d7f176a4fb0a505f2925e59da9f138411845"
+    },
+    "mapper-utils": {
+      "repository": "platform/hardware/interfaces",
+      "revision": "ad2871f7d266307f583f900b022ea45dbafba54f",
+      "path": "graphics/mapper/2.0/utils",
+      "tree_sha256": "de808d68d311d59e3270ccadd42fbfdc09507dd6c9e8e7d53ffe2a635bfcd14c"
+    },
+    "allocator-utils": {
+      "repository": "platform/hardware/interfaces",
+      "revision": "ad2871f7d266307f583f900b022ea45dbafba54f",
+      "path": "graphics/allocator/2.0/utils",
+      "tree_sha256": "106568a0d3ef484ff96c8108c34a4d95b0fd6e4ca8ab14ab12686576693132b5"
+    }
+  }
+}
