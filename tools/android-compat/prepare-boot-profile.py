@@ -232,10 +232,14 @@ def merge_platform(inputs,runtime,stock,archive):
         temporary=Path(directory)
         partitions=extract_partitions(archive,temporary)
         system=Ext4(temporary/"system.ext4")
-        for name in ["system/etc/selinux/plat_service_contexts","system/etc/classpaths/systemserverclasspath.pb"]:
+        for name in ["system/etc/selinux/plat_service_contexts","system/etc/classpaths/systemserverclasspath.pb","system/etc/fonts.xml"]:
             target=temporary/"files"/name
             system.dump("/"+name,target)
             copied[name]=target
+        font_aliases={}
+        tree(system,"/system/fonts","system/fonts",temporary/"files",font_aliases)
+        for target in (temporary/"files/system/fonts").rglob("*"):
+            if target.is_file():copied[str(target.relative_to(temporary/"files"))]=target
         # Zygote and SystemServer load these by name, outside app_process DT_NEEDED.
         available={Path(name).name for name in metadata["files"]}
         runtime_files=json.loads((runtime/"art-runtime.json").read_text())["files"]
@@ -282,6 +286,10 @@ def merge_platform(inputs,runtime,stock,archive):
             target=inputs/name
             if name in metadata["symlinks"] or target.exists() and sha256(target)!=sha256(source):raise ValueError("conflicting platform boot file")
             target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target)
+        for name,target in font_aliases.items():
+            if name in metadata["files"] or name in metadata["symlinks"] and metadata["symlinks"][name]!=target:
+                raise ValueError("conflicting platform font alias")
+            metadata["symlinks"][name]=target
         metadata["platform_boot"]={"sdk_sha256":SDK_SHA256,"partitions":partitions,"files":{name:sha256(source) for name,source in copied.items()},"classpaths":classpaths,"native_needed":native_needed}
     environment=inputs/"init.environ.rc"
     text="\n".join(line for line in environment.read_text().splitlines() if not line.startswith(("    export SYSTEMSERVERCLASSPATH ","    export STANDALONE_SYSTEMSERVER_JARS ")))+"\n"
