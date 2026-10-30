@@ -73,6 +73,15 @@ class BootProfileTest(unittest.TestCase):
             changed=deepcopy(p);changed["service_grants"]=[bad]
             with self.assertRaises(ValueError):validate_profile(changed)
 
+    def test_socket_label_delegation_is_explicit_and_uses_native_class(self):
+        p=profile();p.update(version=2,file_labels={},exec_transitions=[])
+        p["socket_labels"]=[["u:r:init:s0","u:r:vendor_init:s0"]]
+        text=shield_policy(p,["* u:object_r:gsid_prop:s0\n"])
+        self.assertIn("socket-create 1 2\n",text)
+        self.assertNotIn("service-allow",text)
+        p["socket_labels"]=[["u:r:init:s0","u:r:unknown:s0"]]
+        with self.assertRaises(ValueError):validate_profile(p)
+
     def test_staging_detects_file_changes_base_conflicts_and_alias_ancestors(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

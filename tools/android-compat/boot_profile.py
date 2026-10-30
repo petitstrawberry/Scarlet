@@ -43,6 +43,7 @@ def validate_profile(profile):
         if "resource_groups" in profile: fields.add("resource_groups")
         if "file_policy" in profile: fields.add("file_policy")
         if "service_grants" in profile: fields.add("service_grants")
+        if "socket_labels" in profile: fields.add("socket_labels")
     if set(profile) != fields or profile.get("version") not in (1, 2):
         raise ValueError("unsupported boot profile")
     if not re.fullmatch(r"[a-z0-9-]+", profile["name"]):
@@ -82,6 +83,8 @@ def validate_profile(profile):
         if subject not in subjects or len(set(targets)) != len(targets) or any(
                 not CONTEXT.fullmatch(label) or not label.startswith("u:object_r:") for label in targets):
             raise ValueError("invalid property grant")
+    socket_labels=profile.get("socket_labels",[])
+    if len(socket_labels)>4096 or len({tuple(rule) for rule in socket_labels})!=len(socket_labels) or any(len(rule)!=2 or any(label not in subjects for label in rule) for rule in socket_labels):raise ValueError("invalid socket label delegation")
     seen_services=set()
     for source,target,permissions in profile.get("service_grants",[]):
         if source not in subjects or not CONTEXT.fullmatch(target) or not (target.startswith("u:object_r:") or target in subjects) or type(permissions) is not int or not 1<=permissions<=7 or (source,target) in seen_services:
@@ -173,6 +176,7 @@ def shield_policy(profile, contexts):
               for source, target, principal in profile["transitions"]]
     lines += [f"property-set {identifiers[source]} {identifiers[target]}"
               for source, targets in sorted(grants.items()) for target in sorted(targets)]
+    lines += [f"socket-create {identifiers[source]} {identifiers[target]}" for source,target in profile.get("socket_labels",[])]
     lines += [f"service-allow {identifiers[source]} {identifiers[target]} {permissions}" for source,target,permissions in profile.get("service_grants",[])]
     lines += [f"file-exec {identifiers[source]} {identifiers[resource]} {identifiers[target]} {principal}"
               for source, resource, target, principal in profile.get("exec_transitions", [])]

@@ -31,6 +31,7 @@ pub fn policy(android: &VfsView) -> Result<Policy, &'static str> {
             ["property-set", _, _] => rules.push(Rule {
                 source: number(1)?, target: number(2)?, class: 2, reserved: 0, permissions: 1,
             }),
+            ["socket-create",_,_] => rules.push(Rule {source:number(1)?,target:number(2)?,class:std::shield::SOCKET_LABEL_CLASS,reserved:0,permissions:std::shield::SOCKET_LABEL_CREATE}),
             ["service-allow", _, _, _] => rules.push(Rule {source:number(1)?,target:number(2)?,class:1,reserved:0,permissions:number(3)? as u64}),
             ["transition", _, _, _] => transitions.push(Transition {
                 source: number(1)?, target: number(2)?, principal: number(3)?, reserved: 0,

@@ -115,6 +115,7 @@ enum Content {
     Current(Weak<Task>),
     Exec(Weak<Task>),
     FsCreate(Weak<Task>),
+    SockCreate(Weak<Task>),
 }
 struct Node {
     id: u64,
@@ -441,7 +442,7 @@ impl StreamOps for SecurityFile {
     fn write_empty(&self) -> Result<usize, StreamError> {
         if !self.writable { return Err(StreamError::PermissionDenied); }
         if matches!(self.content, Content::Current(_)) { return Err(StreamError::InvalidArgument); }
-        if let Content::Exec(owner) | Content::FsCreate(owner) = &self.content {
+        if let Content::Exec(owner) | Content::FsCreate(owner) | Content::SockCreate(owner) = &self.content {
             if !self.writable { return Err(StreamError::PermissionDenied); }
             let caller = crate::task::mytask().ok_or(StreamError::PermissionDenied)?;
             let owner = owner.upgrade().ok_or(StreamError::PermissionDenied)?;
@@ -449,7 +450,7 @@ impl StreamOps for SecurityFile {
             let mut state = self.state.lock();
             if state.written || state.position != 0 { return Err(StreamError::InvalidArgument); }
             if !caller.security_subject.read().as_ref().is_some_and(|subject|Arc::ptr_eq(subject.policy(),&self.policy)) {return Err(StreamError::PermissionDenied);}
-            if matches!(self.content,Content::FsCreate(_)) {crate::shield::file::select_creation_label(&caller,None)}else {crate::shield::exec_transition::cancel(&caller)}.map_err(|_|StreamError::PermissionDenied)?;
+            if matches!(self.content,Content::FsCreate(_)) {crate::shield::file::select_creation_label(&caller,None)}else if matches!(self.content,Content::SockCreate(_)) {crate::shield::socket::select(&caller,None)}else {crate::shield::exec_transition::cancel(&caller)}.map_err(|_|StreamError::PermissionDenied)?;
             state.written = true;
         }
         Ok(0)
@@ -503,7 +504,7 @@ impl StreamOps for SecurityFile {
         if buffer.is_empty() || buffer.len() > 4095 {
             return Err(StreamError::InvalidArgument);
         }
-        if let Content::Current(owner) | Content::Exec(owner) | Content::FsCreate(owner) = &self.content {
+        if let Content::Current(owner) | Content::Exec(owner) | Content::FsCreate(owner) | Content::SockCreate(owner) = &self.content {
             let caller = crate::task::mytask().ok_or(StreamError::PermissionDenied)?;
             let owner = owner.upgrade().ok_or(StreamError::PermissionDenied)?;
             if !core::ptr::eq(&*caller, &*owner) {
@@ -522,6 +523,9 @@ impl StreamOps for SecurityFile {
             if matches!(&self.content,Content::FsCreate(_)) {
                 if !caller.security_subject.read().as_ref().is_some_and(|subject|Arc::ptr_eq(subject.policy(),&self.policy)) {return Err(StreamError::PermissionDenied);}
                 crate::shield::file::select_creation_label(&caller,Some(target))
+            } else if matches!(&self.content,Content::SockCreate(_)) {
+                if !caller.security_subject.read().as_ref().is_some_and(|subject|Arc::ptr_eq(subject.policy(),&self.policy)) {return Err(StreamError::PermissionDenied);}
+                crate::shield::socket::select(&caller,Some(target))
             } else if matches!(&self.content, Content::Exec(_)) {
                 crate::shield::exec_transition::reserve(&caller, &self.policy, target)
             } else {
@@ -668,7 +672,8 @@ pub(super) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> O
     let proc_path = path.strip_prefix("/proc/")?;
     let (pid, attr) = if let Some(pid)=proc_path.strip_suffix("/attr/current") {(pid,0)}
         else if let Some(pid)=proc_path.strip_suffix("/attr/exec") {(pid,1)}
-        else {(proc_path.strip_suffix("/attr/fscreate")?,2)};
+        else if let Some(pid)=proc_path.strip_suffix("/attr/fscreate") {(pid,2)}
+        else {(proc_path.strip_suffix("/attr/sockcreate")?,3)};
     let exec=attr==1;
     let result = (|| -> Result<usize, usize> {
         if flags & 3 == 3 || flags & !(0x80000 | 0x800 | 0x20000 | 3) != 0 {
@@ -704,7 +709,9 @@ pub(super) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> O
         if !Arc::ptr_eq(caller.policy(), subject.policy()) {
             return Err(errno::EACCES);
         }
-        let bytes = if attr==2 {
+        let bytes = if attr==3 {
+            target.as_deref().unwrap_or(task).socket_creation_label.read().as_ref().map(|selected|format!("{}\0",selected.target().name()).into_bytes()).unwrap_or_default()
+        }else if attr==2 {
             target.as_deref().unwrap_or(task).creation_label.read().as_ref().filter(|selected|Arc::ptr_eq(&selected.policy,subject.policy()))
                 .map(|selected|format!("{}\0",subject.policy().label(selected.target).unwrap_or("")).into_bytes()).unwrap_or_default()
         }else if exec {
@@ -721,7 +728,7 @@ pub(super) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> O
             }
             let owner = crate::sched::scheduler::get_task_by_id(current.get_id()).ok_or(errno::ESRCH)?;
             if !core::ptr::eq(owner.as_ref(), task) { return Err(errno::ESRCH); }
-            if attr==2 {Content::FsCreate(Arc::downgrade(&owner))}else if exec { Content::Exec(Arc::downgrade(&owner)) } else { Content::Current(Arc::downgrade(&owner)) }
+            if attr==3 {Content::SockCreate(Arc::downgrade(&owner))}else if attr==2 {Content::FsCreate(Arc::downgrade(&owner))}else if exec { Content::Exec(Arc::downgrade(&owner)) } else { Content::Current(Arc::downgrade(&owner)) }
         } else {
             Content::Text(bytes.clone())
         };

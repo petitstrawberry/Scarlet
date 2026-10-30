@@ -110,7 +110,8 @@
       "u:object_r:zram_control_prop:s0",
       "u:object_r:persistent_properties_ready_prop:s0",
       "u:object_r:usb_control_prop:s0",
-      "u:object_r:keystore_listen_prop:s0"
+      "u:object_r:keystore_listen_prop:s0",
+      "u:object_r:ctl_start_prop:s0"
     ],
     "u:r:apexd:s0": [
       "u:object_r:apexd_prop:s0"
@@ -601,6 +602,12 @@
       "u:r:servicemanager:s0",
       "u:object_r:service_manager_service:s0",
       3
+    ]
+  ],
+  "socket_labels": [
+    [
+      "u:r:init:s0",
+      "u:r:zygote:s0"
     ]
   ]
 }
