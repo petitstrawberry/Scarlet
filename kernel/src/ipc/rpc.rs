@@ -15,6 +15,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 pub const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 pub const MAX_MESSAGE_OBJECTS: usize = 64;
 const MAX_IN_FLIGHT: usize = 64;
+pub const MAX_CALL_DEPTH: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RpcError {
@@ -80,6 +81,19 @@ impl RpcObject {
             .upgrade()
             .ok_or(RpcError::PeerClosed)?
             .send_to(Some(self), message, false)
+            .map(|state| RpcCall { state })
+    }
+    /// Continue a received call, preserving its bounded native return route.
+    pub fn send_scoped(
+        &self,
+        message: RpcMessage,
+        caller: &RpcEndpoint,
+        parent: Option<&RpcContext>,
+    ) -> Result<RpcCall, RpcError> {
+        self.endpoint
+            .upgrade()
+            .ok_or(RpcError::PeerClosed)?
+            .send_chained(Some(self), message, false, Some(caller), parent)
             .map(|state| RpcCall { state })
     }
     /// Admit a bounded notification without a reply capability. Notifications
@@ -174,6 +188,18 @@ struct CallState {
     budget: Arc<AtomicUsize>,
     notifier: IrqSpinLock<Option<Weak<Waker>>>,
     object_key: Option<u64>,
+    receiver: Weak<Waker>,
+    caller: Option<Weak<Waker>>,
+    parent: Option<Weak<CallState>>,
+    children: IrqSpinLock<Vec<Weak<CallState>>>,
+    depth: usize,
+}
+
+/// An unforgeable, weak continuation of a received synchronous request.
+/// It grants no object access and cannot outlive a completed parent call.
+#[derive(Clone)]
+pub struct RpcContext {
+    state: Weak<CallState>,
 }
 
 impl CallState {
@@ -182,8 +208,18 @@ impl CallState {
         if !matches!(*state, Completion::Pending) {
             return Err(RpcError::Cancelled);
         }
+        let child_error = match &completion {
+            Completion::Failed(error) => *error,
+            _ => RpcError::Cancelled,
+        };
         *state = completion;
+        let children = core::mem::take(&mut *self.children.lock());
         drop(state);
+        // The call tree is depth-bounded. Never retain a child or its server,
+        // and never run cancellation under an endpoint/ancestor queue lock.
+        for child in children.into_iter().filter_map(|child| child.upgrade()) {
+            let _ = child.finish(Completion::Failed(child_error));
+        }
         self.waker.wake_all();
         let notifier = self.notifier.lock().as_ref().and_then(Weak::upgrade);
         if let Some(notifier) = notifier {
@@ -219,6 +255,33 @@ impl RpcCall {
     pub fn waker(&self) -> Arc<Waker> {
         self.state.waker.clone()
     }
+    /// Only callbacks addressed to this precise outstanding call can reenter
+    /// its waiter. Ordinary loopers cannot steal them from the process queue.
+    pub fn reentrant_ready(&self, endpoint: &RpcEndpoint) -> bool {
+        self.state
+            .caller
+            .as_ref()
+            .is_some_and(|caller| caller.ptr_eq(&Arc::downgrade(&endpoint.waker)))
+            && !self.ready()
+            && endpoint.ready_for(Some(&self.state))
+    }
+    pub fn receive_reentrant(
+        &self,
+        endpoint: &RpcEndpoint,
+    ) -> Result<Option<RpcRequest>, RpcError> {
+        if !self
+            .state
+            .caller
+            .as_ref()
+            .is_some_and(|caller| caller.ptr_eq(&Arc::downgrade(&endpoint.waker)))
+        {
+            return Err(RpcError::Cancelled);
+        }
+        if self.ready() {
+            return Ok(None);
+        }
+        endpoint.receive_for(Some(&self.state))
+    }
     pub fn take_reply(&self) -> Option<Result<RpcMessage, RpcError>> {
         let mut state = self.state.completion.lock();
         if matches!(*state, Completion::Pending | Completion::Consumed) {
@@ -246,6 +309,7 @@ pub struct RpcRequest {
     reply: Arc<CallState>,
     async_gate: Option<Arc<AsyncGate>>,
     delivered: bool,
+    route: Option<Weak<CallState>>,
 }
 
 impl RpcRequest {
@@ -261,6 +325,18 @@ impl RpcRequest {
     }
     pub fn object_key(&self) -> Option<u64> {
         self.object_key
+    }
+    pub fn context(&self) -> Option<RpcContext> {
+        (!self.is_oneway() && self.delivered).then(|| RpcContext {
+            state: Arc::downgrade(&self.reply),
+        })
+    }
+    fn routed_to(&self, route: Option<&Arc<CallState>>) -> bool {
+        match (&self.route, route) {
+            (None, None) => true,
+            (Some(target), Some(call)) => target.ptr_eq(&Arc::downgrade(call)),
+            _ => false,
+        }
     }
     pub fn cancelled(&self) -> bool {
         !matches!(*self.reply.completion.lock(), Completion::Pending)
@@ -286,6 +362,7 @@ struct EndpointState {
     next_object_key: u64,
     queue: VecDeque<RpcRequest>,
     calls: Vec<Weak<CallState>>,
+    outgoing: Vec<Weak<CallState>>,
     objects: Vec<Weak<RpcObject>>,
 }
 
@@ -306,6 +383,7 @@ impl RpcEndpoint {
                 next_object_key: 1,
                 queue: VecDeque::new(),
                 calls: Vec::new(),
+                outgoing: Vec::new(),
                 objects: Vec::new(),
             }),
             waker,
@@ -318,6 +396,15 @@ impl RpcEndpoint {
     }
     pub fn send_oneway(&self, message: RpcMessage) -> Result<(), RpcError> {
         self.send_to(None, message, true).map(|_| ())
+    }
+    pub fn send_scoped(
+        &self,
+        message: RpcMessage,
+        caller: &RpcEndpoint,
+        parent: Option<&RpcContext>,
+    ) -> Result<RpcCall, RpcError> {
+        self.send_chained(None, message, false, Some(caller), parent)
+            .map(|state| RpcCall { state })
     }
     pub fn create_object(self: &Arc<Self>) -> Result<Arc<RpcObject>, RpcError> {
         let mut state = self.state.lock();
@@ -343,7 +430,28 @@ impl RpcEndpoint {
         message: RpcMessage,
         oneway: bool,
     ) -> Result<Arc<CallState>, RpcError> {
+        self.send_chained(object, message, oneway, None, None)
+    }
+    fn send_chained(
+        &self,
+        object: Option<&RpcObject>,
+        message: RpcMessage,
+        oneway: bool,
+        caller: Option<&RpcEndpoint>,
+        context: Option<&RpcContext>,
+    ) -> Result<Arc<CallState>, RpcError> {
         message.validate()?;
+        let parent = context
+            .map(|context| context.state.upgrade().ok_or(RpcError::Cancelled))
+            .transpose()?;
+        if let Some(parent) = &parent {
+            if caller.is_none_or(|caller| !parent.receiver.ptr_eq(&Arc::downgrade(&caller.waker))) {
+                return Err(RpcError::Cancelled);
+            }
+            if parent.depth >= MAX_CALL_DEPTH {
+                return Err(RpcError::TooLarge);
+            }
+        }
         self.purge_cancelled();
         let mut state = self.state.lock();
         if state.closed || object.is_some_and(|object| object.revoked.load(Ordering::Acquire)) {
@@ -362,7 +470,66 @@ impl RpcEndpoint {
             budget: self.budget.clone(),
             notifier: IrqSpinLock::new(None),
             object_key,
+            receiver: Arc::downgrade(&self.waker),
+            caller: caller.map(|caller| Arc::downgrade(&caller.waker)),
+            parent: parent.as_ref().map(Arc::downgrade),
+            children: IrqSpinLock::new(Vec::new()),
+            depth: parent.as_ref().map_or(1, |parent| parent.depth + 1),
         });
+        if let Some(parent) = &parent {
+            // Admission and parent completion serialize on the same lock.
+            // An endpoint close/caller exit either sees this child or prevents it.
+            let pending = parent.completion.lock();
+            if !matches!(*pending, Completion::Pending) {
+                return Err(RpcError::Cancelled);
+            }
+            let mut children = parent.children.lock();
+            children.retain(|child| child.strong_count() != 0);
+            if children.len() >= MAX_IN_FLIGHT {
+                return Err(RpcError::Busy);
+            }
+            children.push(Arc::downgrade(&call));
+        }
+        let mut route = None;
+        let mut ancestor = Some(call.clone());
+        while let Some(current) = ancestor {
+            if current
+                .caller
+                .as_ref()
+                .is_some_and(|caller| caller.ptr_eq(&Arc::downgrade(&self.waker)))
+            {
+                route = Some(Arc::downgrade(&current));
+                break;
+            }
+            ancestor = current.parent.as_ref().and_then(Weak::upgrade);
+        }
+        let routed_waker = route
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .map(|call| call.waker.clone());
+        // Register with the caller before publishing. Never lock two endpoint
+        // queues together: simultaneous A->B/B->A admissions must not deadlock.
+        drop(state);
+        if let Some(caller) = caller {
+            let mut caller_state = caller.state.lock();
+            if caller_state.closed {
+                return Err(RpcError::PeerClosed);
+            }
+            caller_state
+                .outgoing
+                .retain(|call| call.strong_count() != 0);
+            if caller_state.outgoing.len() >= MAX_IN_FLIGHT {
+                return Err(RpcError::Busy);
+            }
+            caller_state.outgoing.push(Arc::downgrade(&call));
+        }
+        let mut state = self.state.lock();
+        if state.closed || object.is_some_and(|object| object.revoked.load(Ordering::Acquire)) {
+            return Err(RpcError::PeerClosed);
+        }
+        if !matches!(*call.completion.lock(), Completion::Pending) {
+            return Err(RpcError::Cancelled);
+        }
         state.queue.push_back(RpcRequest {
             message,
             object_key,
@@ -370,22 +537,31 @@ impl RpcEndpoint {
             async_gate: oneway
                 .then(|| object.map_or_else(|| self.async_gate.clone(), |o| o.async_gate.clone())),
             delivered: false,
+            route,
         });
         state.calls.push(Arc::downgrade(&call));
         drop(state);
         // Adapters can multiplex idle receivers and outstanding callers on
         // this source. A wake must reach every distinct readiness predicate.
         self.waker.wake_all();
+        if let Some(waker) = routed_waker {
+            waker.wake_all();
+        }
         Ok(call)
     }
     pub fn receive(&self) -> Result<Option<RpcRequest>, RpcError> {
+        self.receive_for(None)
+    }
+    fn receive_for(&self, route: Option<&Arc<CallState>>) -> Result<Option<RpcRequest>, RpcError> {
         self.purge_cancelled();
         let mut state = self.state.lock();
         if let Some(index) = state.queue.iter().position(|request| {
-            request
-                .async_gate
-                .as_ref()
-                .is_none_or(|gate| !gate.active.load(Ordering::Acquire))
+            !request.cancelled()
+                && request.routed_to(route)
+                && request
+                    .async_gate
+                    .as_ref()
+                    .is_none_or(|gate| !gate.active.load(Ordering::Acquire))
         }) {
             let mut request = state.queue.remove(index).unwrap();
             if let Some(gate) = &request.async_gate {
@@ -401,10 +577,14 @@ impl RpcEndpoint {
         }
     }
     pub fn ready(&self) -> bool {
+        self.ready_for(None)
+    }
+    fn ready_for(&self, route: Option<&Arc<CallState>>) -> bool {
         let state = self.state.lock();
         state.closed
             || state.queue.iter().any(|request| {
                 !request.cancelled()
+                    && request.routed_to(route)
                     && request
                         .async_gate
                         .as_ref()
@@ -460,18 +640,19 @@ impl RpcEndpoint {
         self.waker.wake_all();
     }
     pub fn close(&self) {
-        let (queue, calls, objects) = {
+        let (queue, calls, outgoing, objects) = {
             let mut state = self.state.lock();
             state.closed = true;
             (
                 core::mem::take(&mut state.queue),
                 core::mem::take(&mut state.calls),
+                core::mem::take(&mut state.outgoing),
                 core::mem::take(&mut state.objects),
             )
         };
         // Dropping reply capabilities wakes their callers outside the queue lock.
         drop(queue);
-        for call in calls {
+        for call in calls.into_iter().chain(outgoing) {
             if let Some(call) = call.upgrade() {
                 let _ = call.finish(Completion::Failed(RpcError::PeerClosed));
             }
@@ -492,6 +673,155 @@ impl Drop for RpcEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test_case]
+    fn rpc_scoped_chain_routes_callbacks_only_to_the_matching_waiter() {
+        let a = RpcEndpoint::new();
+        let b = RpcEndpoint::new();
+        let c = RpcEndpoint::new();
+        let outer = b.send_scoped(message(1), &a, None).unwrap();
+        let unrelated = b.send_scoped(message(9), &a, None).unwrap();
+        let at_b = b.receive().unwrap().unwrap();
+        let middle = c
+            .send_scoped(message(2), &b, at_b.context().as_ref())
+            .unwrap();
+        let at_c = c.receive().unwrap().unwrap();
+        let callback = a.create_object().unwrap();
+        let inner = callback
+            .send_scoped(message(3), &c, at_c.context().as_ref())
+            .unwrap();
+        assert!(!a.ready() && a.receive().unwrap().is_none());
+        assert!(!unrelated.reentrant_ready(&a));
+        assert!(outer.reentrant_ready(&a));
+        assert!(matches!(
+            outer.receive_reentrant(&b),
+            Err(RpcError::Cancelled)
+        ));
+        let at_a = outer.receive_reentrant(&a).unwrap().unwrap();
+        assert_eq!(at_a.object_key(), Some(callback.key()));
+        at_a.reply(message(4)).unwrap();
+        assert_eq!(inner.take_reply().unwrap().unwrap().opcode, 4);
+        at_c.reply(message(5)).unwrap();
+        assert_eq!(middle.take_reply().unwrap().unwrap().opcode, 5);
+        at_b.reply(message(6)).unwrap();
+        assert_eq!(outer.take_reply().unwrap().unwrap().opcode, 6);
+        assert!(!unrelated.ready());
+    }
+
+    #[test_case]
+    fn rpc_parent_cancellation_and_peer_close_cancel_queued_and_received_descendants() {
+        for close_peer in [false, true] {
+            let a = RpcEndpoint::new();
+            let b = RpcEndpoint::new();
+            let c = RpcEndpoint::new();
+            let root = b.send_scoped(message(1), &a, None).unwrap();
+            let at_b = b.receive().unwrap().unwrap();
+            let child = c
+                .send_scoped(message(2), &b, at_b.context().as_ref())
+                .unwrap();
+            let at_c = c.receive().unwrap().unwrap();
+            let callback = a
+                .send_scoped(message(3), &c, at_c.context().as_ref())
+                .unwrap();
+            if close_peer {
+                b.close();
+            } else {
+                drop(root);
+            }
+            let error = if close_peer {
+                RpcError::PeerClosed
+            } else {
+                RpcError::Cancelled
+            };
+            assert_eq!(child.take_reply().unwrap().err(), Some(error));
+            assert_eq!(callback.take_reply().unwrap().err(), Some(error));
+            assert!(at_b.cancelled() && at_c.cancelled());
+            assert!(a.receive().unwrap().is_none());
+            assert!(matches!(
+                c.send_scoped(message(4), &b, at_b.context().as_ref()),
+                Err(RpcError::Cancelled)
+            ));
+            assert_eq!(at_c.reply(message(5)), Err(RpcError::Cancelled));
+        }
+    }
+
+    #[test_case]
+    fn rpc_scoped_depth_is_bounded_and_contexts_cannot_impersonate_a_receiver() {
+        let a = RpcEndpoint::new();
+        let b = RpcEndpoint::new();
+        let stranger = RpcEndpoint::new();
+        let mut calls = alloc::vec![b.send_scoped(message(1), &a, None).unwrap()];
+        let mut requests = alloc::vec![b.receive().unwrap().unwrap()];
+        assert!(matches!(
+            a.send_scoped(message(2), &stranger, requests[0].context().as_ref()),
+            Err(RpcError::Cancelled)
+        ));
+        for _ in 1..MAX_CALL_DEPTH {
+            let call = b
+                .send_scoped(message(2), &b, requests.last().unwrap().context().as_ref())
+                .unwrap();
+            assert!(b.receive().unwrap().is_none());
+            let request = call.receive_reentrant(&b).unwrap().unwrap();
+            calls.push(call);
+            requests.push(request);
+        }
+        assert!(matches!(
+            b.send_scoped(message(3), &b, requests.last().unwrap().context().as_ref()),
+            Err(RpcError::TooLarge)
+        ));
+        for (request, call) in requests.into_iter().zip(calls).rev() {
+            request.reply(message(4)).unwrap();
+            assert_eq!(call.take_reply().unwrap().unwrap().opcode, 4);
+        }
+        let weak = Arc::downgrade(&b);
+        drop(b);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test_case]
+    fn rpc_caller_close_cancels_its_calls_and_its_admission_limit_has_no_side_effects() {
+        let caller = RpcEndpoint::new();
+        let destinations: Vec<_> = (0..MAX_IN_FLIGHT + 1).map(|_| RpcEndpoint::new()).collect();
+        let mut calls = Vec::new();
+        for destination in destinations.iter().take(MAX_IN_FLIGHT) {
+            calls.push(destination.send_scoped(message(1), &caller, None).unwrap());
+        }
+        assert!(matches!(
+            destinations[MAX_IN_FLIGHT].send_scoped(message(2), &caller, None),
+            Err(RpcError::Busy)
+        ));
+        assert!(destinations[MAX_IN_FLIGHT].receive().unwrap().is_none());
+        caller.close();
+        for call in calls {
+            assert_eq!(call.take_reply().unwrap().err(), Some(RpcError::PeerClosed));
+        }
+        for destination in destinations {
+            assert!(destination.receive().unwrap().is_none());
+        }
+    }
+
+    #[test_case]
+    fn rpc_cancellation_at_maximum_depth_unwinds_without_retaining_endpoints() {
+        let a = RpcEndpoint::new();
+        let b = RpcEndpoint::new();
+        let mut calls = alloc::vec![b.send_scoped(message(1), &a, None).unwrap()];
+        let mut requests = alloc::vec![b.receive().unwrap().unwrap()];
+        for _ in 1..MAX_CALL_DEPTH {
+            let call = b
+                .send_scoped(message(2), &b, requests.last().unwrap().context().as_ref())
+                .unwrap();
+            requests.push(call.receive_reentrant(&b).unwrap().unwrap());
+            calls.push(call);
+        }
+        drop(calls.remove(0));
+        for call in calls {
+            assert_eq!(call.take_reply().unwrap().err(), Some(RpcError::Cancelled));
+        }
+        assert!(requests.iter().all(RpcRequest::cancelled));
+        drop(requests);
+        assert!(b.receive().unwrap().is_none());
+        assert!(b.send(message(3)).is_ok());
+    }
+
     #[test_case]
     fn rpc_native_capabilities_preserve_access_and_follow_reply_ownership() {
         use crate::object::handle::AccessMode;
