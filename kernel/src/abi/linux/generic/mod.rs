@@ -1,4 +1,5 @@
 mod device_tree;
+mod power_supply;
 pub mod credentials;
 pub mod cgroup;
 pub mod seccomp;
