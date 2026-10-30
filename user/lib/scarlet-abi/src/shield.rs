@@ -61,3 +61,29 @@ const _: [();16]=[();core::mem::size_of::<RawFileRelabel>()];
 /// Native endpoint labeling authority; separate from ABI permission classes.
 pub const SOCKET_LABEL_CLASS:u32=0x5343_0001;
 pub const SOCKET_LABEL_CREATE:u64=1;
+
+/// Append-only update of an administrator-owned policy. The complete batch is
+/// copied and validated before publication. Existing identities and grants are
+/// preserved. A stale expected generation leaves the policy unchanged.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RawPolicyUpdate {
+    pub version: u32,
+    pub flags: u32,
+    pub expected_generation: u64,
+    pub labels: u64,
+    pub label_count: u64,
+    pub rules: u64,
+    pub rule_count: u64,
+    pub transitions: u64,
+    pub transition_count: u64,
+    pub exec_transitions: u64,
+    pub exec_transition_count: u64,
+    pub file_create: u64,
+    pub file_create_count: u64,
+    pub file_relabel: u64,
+    pub file_relabel_count: u64,
+    pub reserved: [u64; 2],
+}
+pub const POLICY_UPDATE_VERSION: u32 = 1;
+const _: [(); 128] = [(); core::mem::size_of::<RawPolicyUpdate>()];

@@ -38,6 +38,19 @@ fn filesystem_timestamp_record_layout() {
 }
 
 #[test]
+fn policy_update_records_and_operation_numbers_are_stable() {
+    assert_layout!(abi::shield::RawPolicyUpdate,128,8,{
+        version:0, flags:4, expected_generation:8, labels:16,label_count:24,
+        rules:32,rule_count:40,transitions:48,transition_count:56,
+        exec_transitions:64,exec_transition_count:72,file_create:80,file_create_count:88,
+        file_relabel:96,file_relabel_count:104,reserved:112,
+    });
+    assert_eq!(abi::shield::POLICY_UPDATE_VERSION,1);
+    assert_eq!(abi::Syscall::ShieldPolicyExtend as usize,1344);
+    assert_eq!(abi::Syscall::ShieldPolicyGeneration as usize,1345);
+}
+
+#[test]
 fn atomic_rename_extension_keeps_legacy_operation_number() {
     assert_eq!(abi::Syscall::VfsRename as usize, 409);
     assert_eq!(abi::Syscall::VfsRenameWithStatus as usize, 419);
@@ -314,6 +327,7 @@ fn native_syscall_numbers() {
         ShieldClearExec = 1316,
         ShieldConstrainInformation = 1318,
         ShieldInformation = 1319,
+        ShieldPolicyExtend = 1344, ShieldPolicyGeneration = 1345,
 
     }
 }

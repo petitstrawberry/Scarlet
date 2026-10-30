@@ -1,15 +1,16 @@
-//! Shield: Scarlet's protection primitives. Immutable, ABI-neutral label policies.
+//! Shield: Scarlet's protection primitives. Versioned, ABI-neutral label policies.
 //! Numeric classes and permission bits are interpreted by enforcement points,
 //! never by this policy engine.
 //! Possession of a policy identity is distinct from authority to assign labels.
-pub mod file;
-pub mod socket;
-pub mod execution;
 pub mod exec_transition;
+pub mod execution;
+pub mod file;
+pub mod identity;
 pub mod information;
 pub mod resource;
-pub mod identity;
+pub mod socket;
 pub mod syscall;
+pub mod update;
 
 use alloc::{
     collections::{BTreeMap, BTreeSet},
@@ -47,18 +48,44 @@ pub struct ExecTransitionRule {
     pub principal: identity::Principal,
 }
 
-pub struct Policy {
+/// Immutable policy contents published together under one stable capability identity.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct PolicyData {
+    generation: u64,
     pub(crate) files: file::FilePolicy,
-    labels: BTreeMap<u32, String>,
+    labels: BTreeMap<u32, Arc<str>>,
     names: BTreeMap<String, u32>,
     grants: BTreeMap<(u32, u32, u32), u64>,
     transitions: BTreeSet<(u32, u32, u32)>,
     exec_transitions: BTreeMap<(u32, u32, u32), u32>,
+}
+
+/// ABI adapters may retain a weakly registered observer for cache invalidation.
+/// Notifications can coalesce or arrive out of order; observers retain the
+/// highest generation they have seen. No observer runs under the policy lock.
+pub trait PolicyObserver: Send + Sync {
+    fn policy_changed(&self, generation: u64);
+}
+
+pub struct Policy {
+    data: crate::sync::IrqRwSpinLock<Arc<PolicyData>>,
+    observers: crate::sync::IrqSpinLock<Vec<alloc::sync::Weak<dyn PolicyObserver>>>,
     resources: crate::sync::IrqRwSpinLock<resource::Resources>,
 }
 impl Policy {
-    /// Validate the complete policy before publishing it. No live mutation or
-    /// permissive fallback exists; caches can retain decisions for its lifetime.
+    fn from_data(data: PolicyData) -> Arc<Self> {
+        Arc::new(Self {
+            data: crate::sync::IrqRwSpinLock::new(Arc::new(data)),
+            observers: crate::sync::IrqSpinLock::new(Vec::new()),
+            resources: crate::sync::IrqRwSpinLock::new(resource::Resources::new()),
+        })
+    }
+    pub(crate) fn snapshot(&self) -> Arc<PolicyData> {
+        self.data.read().clone()
+    }
+    pub fn generation(&self) -> u64 {
+        self.data.read().generation
+    }
     pub fn new(labels: Vec<(u32, String)>, rules: Vec<Rule>) -> Result<Arc<Self>, &'static str> {
         Self::with_transitions(labels, rules, Vec::new())
     }
@@ -70,100 +97,136 @@ impl Policy {
         Self::with_exec_transitions(labels, rules, transitions, Vec::new())
     }
     pub fn with_exec_transitions(
-        labels: Vec<(u32, String)>, rules: Vec<Rule>, transitions: Vec<TransitionRule>,
+        labels: Vec<(u32, String)>,
+        rules: Vec<Rule>,
+        transitions: Vec<TransitionRule>,
         exec_transitions: Vec<ExecTransitionRule>,
     ) -> Result<Arc<Self>, &'static str> {
-        if exec_transitions.len() > MAX_RULES { return Err("exec transition limit"); }
-        if transitions.len() > MAX_RULES {
-            return Err("transition limit");
+        if labels.is_empty() {
+            return Err("policy requires labels");
         }
-        if labels.is_empty() || labels.len() > MAX_LABELS || rules.len() > MAX_RULES {
-            return Err("policy size limit");
-        }
-        let mut result = Self {
+        let mut data = PolicyData {
+            generation: 1,
             files: file::FilePolicy::default(),
             labels: BTreeMap::new(),
             names: BTreeMap::new(),
             grants: BTreeMap::new(),
             transitions: BTreeSet::new(),
             exec_transitions: BTreeMap::new(),
-            resources: crate::sync::IrqRwSpinLock::new(resource::Resources::new()),
         };
-        for (id, name) in labels {
-            if id == 0
-                || name.is_empty()
-                || name.len() > MAX_LABEL_BYTES
-                || name.contains('\0')
-                || result.labels.contains_key(&id)
-                || result.names.contains_key(&name)
-            {
-                return Err("invalid or duplicate label");
-            }
-            result.names.insert(name.clone(), id);
-            result.labels.insert(id, name);
-        }
-        for rule in rules {
-            if rule.class == 0
-                || rule.permissions == 0
-                || !result.labels.contains_key(&rule.source)
-                || !result.labels.contains_key(&rule.target)
-            {
-                return Err("invalid grant");
-            }
-            *result
-                .grants
-                .entry((rule.source, rule.target, rule.class))
-                .or_default() |= rule.permissions;
-        }
-        for rule in transitions {
-            if rule.source == rule.target
-                || !result.labels.contains_key(&rule.source)
-                || !result.labels.contains_key(&rule.target)
-                || !result
-                    .transitions
-                    .insert((rule.source, rule.target, rule.principal.0))
-            {
-                return Err("invalid or duplicate transition");
-            }
-        }
-        for rule in exec_transitions {
-            if !result.labels.contains_key(&rule.source) || !result.labels.contains_key(&rule.resource)
-                || !result.labels.contains_key(&rule.target)
-                || result.exec_transitions.insert((rule.source, rule.resource, rule.principal.0), rule.target).is_some() {
-                return Err("invalid or ambiguous exec transition");
-            }
-        }
-        Ok(Arc::new(result))
+        data.add(update::PolicyUpdate {
+            labels,
+            rules,
+            transitions,
+            exec_transitions,
+            ..Default::default()
+        })?;
+        Ok(Self::from_data(data))
     }
-    /// Derive a fresh immutable policy blueprint; inode bindings are explicitly
-    /// installed on the new identity by its administrator.
-    pub fn with_file_rules(&self,default:Option<u32>,create:Vec<file::CreateRule>,relabel:Vec<file::RelabelRule>)->Result<Arc<Self>,&'static str> {
-        let files=file::FilePolicy::build(self,default,create,relabel)?;
-        Ok(Arc::new(Self {labels:self.labels.clone(),names:self.names.clone(),grants:self.grants.clone(),transitions:self.transitions.clone(),exec_transitions:self.exec_transitions.clone(),resources:crate::sync::IrqRwSpinLock::new(resource::Resources::new()),files}))
+    /// Derivation keeps the explicit contents, creates a fresh policy identity,
+    /// and leaves inode bindings on the original identity.
+    pub fn with_file_rules(
+        &self,
+        default: Option<u32>,
+        create: Vec<file::CreateRule>,
+        relabel: Vec<file::RelabelRule>,
+    ) -> Result<Arc<Self>, &'static str> {
+        let mut data = (*self.snapshot()).clone();
+        data.files = file::FilePolicy::build(&data.labels, default, create, relabel)?;
+        data.generation = 1;
+        Ok(Self::from_data(data))
     }
-    pub fn label(&self, id: u32) -> Option<&str> {
-        self.labels.get(&id).map(String::as_str)
+    /// Additions never replace a label, remove a grant, or change an existing
+    /// exec/default selection. Validate a private snapshot before publishing it.
+    pub(crate) fn extend(
+        &self,
+        expected: u64,
+        update: update::PolicyUpdate,
+    ) -> Result<u64, &'static str> {
+        let previous = self.snapshot();
+        if previous.generation != expected {
+            return Err("policy generation changed");
+        }
+        let mut next = (*previous).clone();
+        next.add(update)?;
+        if next == *previous {
+            return Ok(expected);
+        }
+        next.generation = expected
+            .checked_add(1)
+            .ok_or("policy generation exhausted")?;
+        let generation = next.generation;
+        {
+            let mut data = self.data.write();
+            if data.generation != expected {
+                return Err("policy generation changed");
+            }
+            *data = Arc::new(next);
+        }
+        let listeners = {
+            let mut observers = self.observers.lock();
+            observers.retain(|observer| observer.strong_count() != 0);
+            observers
+                .iter()
+                .filter_map(alloc::sync::Weak::upgrade)
+                .collect::<Vec<_>>()
+        };
+        for observer in listeners {
+            observer.policy_changed(generation);
+        }
+        Ok(generation)
+    }
+    pub fn observe(&self, observer: &Arc<dyn PolicyObserver>) -> Result<(), &'static str> {
+        let mut observers = self.observers.lock();
+        observers.retain(|observer| observer.strong_count() != 0);
+        if observers.len() >= 64 {
+            return Err("policy observer bound");
+        }
+        // Register and initialize against publication notifications under the
+        // same observer lock, so a concurrent update cannot be missed.
+        observer.policy_changed(self.generation());
+        observers.push(Arc::downgrade(observer));
+        Ok(())
+    }
+    pub fn label(&self, id: u32) -> Option<Arc<str>> {
+        self.data.read().labels.get(&id).cloned()
     }
     pub fn label_id(&self, name: &str) -> Option<u32> {
-        self.names.get(name).copied()
+        self.data.read().names.get(name).copied()
     }
-    pub fn labels(&self) -> impl Iterator<Item = (u32, &str)> {
-        self.labels.iter().map(|(&id, name)| (id, name.as_str()))
+    pub fn labels(&self) -> impl Iterator<Item = (u32, Arc<str>)> {
+        self.data
+            .read()
+            .labels
+            .iter()
+            .map(|(&id, name)| (id, name.clone()))
+            .collect::<Vec<_>>()
+            .into_iter()
     }
     pub fn allowed(&self, source: u32, target: u32, class: u32) -> u64 {
-        self.grants
+        self.data
+            .read()
+            .grants
             .get(&(source, target, class))
             .copied()
             .unwrap_or(0)
     }
+    pub fn decision(&self, source: u32, target: u32, class: u32) -> (u64, u64) {
+        let data = self.data.read();
+        (
+            data.grants
+                .get(&(source, target, class))
+                .copied()
+                .unwrap_or(0),
+            data.generation,
+        )
+    }
     pub fn subject(self: &Arc<Self>, label: u32) -> Result<Subject, &'static str> {
-        self.labels
-            .contains_key(&label)
-            .then(|| Subject {
-                policy: self.clone(),
-                label,
-            })
-            .ok_or("unknown label")
+        Ok(Subject {
+            policy: self.clone(),
+            label,
+            name: self.label(label).ok_or("unknown label")?,
+        })
     }
 }
 
@@ -171,10 +234,14 @@ impl Policy {
 pub struct Subject {
     policy: Arc<Policy>,
     label: u32,
+    name: Arc<str>,
 }
 impl core::fmt::Debug for Subject {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Subject").field("label", &self.label).field("name", &self.name()).finish()
+        f.debug_struct("Subject")
+            .field("label", &self.label)
+            .field("name", &self.name())
+            .finish()
     }
 }
 impl Subject {
@@ -185,13 +252,14 @@ impl Subject {
         self.label
     }
     pub fn name(&self) -> &str {
-        self.policy.label(self.label).unwrap()
+        &self.name
     }
     pub fn same_identity(&self, other: &Self) -> bool {
         self.label == other.label && Arc::ptr_eq(&self.policy, &other.policy)
     }
     pub fn can_transition(&self) -> bool {
         self.policy
+            .snapshot()
             .transitions
             .iter()
             .any(|&(source, _, _)| source == self.label)
@@ -205,6 +273,7 @@ impl Subject {
         if ids != identity::Identities::all(ids.active)
             || !self
                 .policy
+                .snapshot()
                 .transitions
                 .contains(&(self.label, target, ids.active.0))
         {

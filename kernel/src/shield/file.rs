@@ -26,7 +26,7 @@ pub struct RelabelRule {
     pub target: u32,
     pub kind: u32,
 }
-#[derive(Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct FilePolicy {
     pub default: Option<u32>,
     defaults: BTreeMap<(u32, u32, u32), u32>,
@@ -35,57 +35,74 @@ pub(crate) struct FilePolicy {
 }
 impl FilePolicy {
     pub(crate) fn build(
-        policy: &Policy,
+        labels: &BTreeMap<u32, Arc<str>>,
         default: Option<u32>,
         create: Vec<CreateRule>,
         relabel: Vec<RelabelRule>,
     ) -> Result<Self, &'static str> {
-        if create.len() > super::MAX_RULES || relabel.len() > super::MAX_RULES {
-            return Err("file rule bound");
-        }
-        if default.is_some_and(|label| policy.label(label).is_none()) {
+        if default.is_some_and(|label| !labels.contains_key(&label)) {
             return Err("unknown default file label");
-        }
-        if default.is_none() && (!create.is_empty() || !relabel.is_empty()) {
-            return Err("file rules require a default label");
         }
         let mut result = Self {
             default,
             ..Self::default()
         };
+        result.add(labels, create, relabel)?;
+        Ok(result)
+    }
+    pub(super) fn add(
+        &mut self,
+        labels: &BTreeMap<u32, Arc<str>>,
+        create: Vec<CreateRule>,
+        relabel: Vec<RelabelRule>,
+    ) -> Result<(), &'static str> {
+        if create.len() > super::MAX_RULES || relabel.len() > super::MAX_RULES {
+            return Err("file rule bound");
+        }
+        if self.default.is_none() && (!create.is_empty() || !relabel.is_empty()) {
+            return Err("file rules require a default label");
+        }
+        let mut seen_create = BTreeSet::new();
+        let mut seen_relabel = BTreeSet::new();
         for rule in create {
+            let key = (rule.source, rule.parent, rule.kind, rule.target);
             if !(1..=7).contains(&rule.kind)
                 || [rule.source, rule.parent, rule.target]
                     .iter()
-                    .any(|id| policy.label(*id).is_none())
-                || !result
-                    .create
-                    .insert((rule.source, rule.parent, rule.kind, rule.target))
+                    .any(|id| !labels.contains_key(id))
+                || !seen_create.insert(key)
             {
                 return Err("invalid create rule");
             }
-            if rule.default
-                && result
+            self.create.insert(key);
+            if rule.default {
+                let key = (rule.source, rule.parent, rule.kind);
+                if self
                     .defaults
-                    .insert((rule.source, rule.parent, rule.kind), rule.target)
-                    .is_some()
-            {
-                return Err("ambiguous default create rule");
+                    .get(&key)
+                    .is_some_and(|old| *old != rule.target)
+                {
+                    return Err("ambiguous default create rule");
+                }
+                self.defaults.insert(key, rule.target);
             }
         }
         for rule in relabel {
+            let key = (rule.source, rule.old, rule.kind, rule.target);
             if !(1..=7).contains(&rule.kind)
                 || [rule.source, rule.old, rule.target]
                     .iter()
-                    .any(|id| policy.label(*id).is_none())
-                || !result
-                    .relabel
-                    .insert((rule.source, rule.old, rule.kind, rule.target))
+                    .any(|id| !labels.contains_key(id))
+                || !seen_relabel.insert(key)
             {
                 return Err("invalid relabel rule");
             }
+            self.relabel.insert(key);
         }
-        Ok(result)
+        if self.create.len() > super::MAX_RULES || self.relabel.len() > super::MAX_RULES {
+            return Err("complete file rule bound");
+        }
+        Ok(())
     }
 }
 /// Owned by an inode, shared by hard links and retained open files. Weak policy
@@ -164,7 +181,7 @@ impl CreateContext {
         let Some(subject) = task.security_subject.read().clone() else {
             return Ok(None);
         };
-        if subject.policy().files.default.is_none() {
+        if subject.policy().default_file_label().is_none() {
             return Ok(None);
         }
         let parent = subject
@@ -177,16 +194,19 @@ impl CreateContext {
         let target = if let Some(selected) = selected {
             if !Arc::ptr_eq(&selected.policy, &policy)
                 || selected.source != subject.label()
-                || !policy
-                    .files
-                    .create
-                    .contains(&(subject.label(), parent, kind, selected.target))
+                || !policy.snapshot().files.create.contains(&(
+                    subject.label(),
+                    parent,
+                    kind,
+                    selected.target,
+                ))
             {
                 return Err("file create override denied");
             }
             selected.target
         } else {
             *policy
+                .snapshot()
                 .files
                 .defaults
                 .get(&(subject.label(), parent, kind))
@@ -202,7 +222,7 @@ impl CreateContext {
 }
 impl Policy {
     pub fn default_file_label(&self) -> Option<u32> {
-        self.files.default
+        self.snapshot().files.default
     }
     pub fn relabel_file(
         self: &Arc<Self>,
@@ -231,12 +251,13 @@ impl Policy {
         let old = entries
             .get(&key)
             .map(|(_, label)| *label)
-            .or(self.files.default)
+            .or(self.snapshot().files.default)
             .ok_or("file label missing")?;
         if old == target {
             return Ok(());
         }
         if !self
+            .snapshot()
             .files
             .relabel
             .contains(&(subject.label(), old, kind, target))
@@ -259,6 +280,7 @@ pub fn select_creation_label(task: &Task, target: Option<u32>) -> Result<(), &'s
             .ok_or("subject missing")?;
         let policy = subject.policy();
         if !policy
+            .snapshot()
             .files
             .create
             .iter()

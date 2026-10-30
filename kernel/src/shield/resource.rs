@@ -28,7 +28,7 @@ impl Policy {
         Ok(())
     }
     pub fn resource_label(&self, node: &dyn VfsNode) -> Option<u32> {
-        self.bound_resource_label(node).or_else(||node.shield_labels().and_then(|labels|labels.get(self))).or(self.files.default)
+        self.bound_resource_label(node).or_else(||node.shield_labels().and_then(|labels|labels.get(self))).or(self.default_file_label())
     }
     pub(crate) fn bound_resource_label(&self, node: &dyn VfsNode) -> Option<u32> {
         let filesystem = node.filesystem()?.upgrade()?;
@@ -37,11 +37,11 @@ impl Policy {
     /// A query can select a label only if every registered principal condition
     /// agrees. Actual execution must additionally match the native credentials.
     pub fn has_exec_resource(&self, source: u32, resource: u32) -> bool {
-        self.exec_transitions.keys().any(|&(origin, file, _)| origin == source && file == resource)
+        self.snapshot().exec_transitions.keys().any(|&(origin, file, _)| origin == source && file == resource)
     }
     pub fn preview_exec(&self, source: u32, resource: u32) -> Result<u32, &'static str> {
         let mut target = None;
-        for (&(origin, file, _), &next) in &self.exec_transitions {
+        for (&(origin, file, _), &next) in &self.snapshot().exec_transitions {
             if origin == source && file == resource {
                 if target.is_some_and(|value| value != next) { return Err("ambiguous exec preview"); }
                 target = Some(next);
@@ -54,7 +54,7 @@ impl Subject {
     pub fn reserve_exec_target(&self, target: u32, credentials: &Credentials) -> Result<(), &'static str> {
         if self.transition(target, credentials).is_ok() { return Ok(()); }
         let ids = credentials.principals();
-        if ids == Identities::all(ids.active) && self.policy.exec_transitions.iter().any(
+        if ids == Identities::all(ids.active) && self.policy.snapshot().exec_transitions.iter().any(
             |(&(source, _, principal), &next)| source == self.label && principal == ids.active.0 && next == target) {
             Ok(())
         } else { Err("exec target not delegated") }
@@ -62,7 +62,8 @@ impl Subject {
     pub fn resource_exec(&self, resource: u32, credentials: &Credentials) -> Result<Subject, &'static str> {
         let ids = credentials.principals();
         if ids != Identities::all(ids.active) { return Err("mixed exec identities"); }
-        let target = self.policy.exec_transitions.get(&(self.label, resource, ids.active.0)).ok_or("resource exec not delegated")?;
+        let snapshot=self.policy.snapshot();
+        let target = snapshot.exec_transitions.get(&(self.label, resource, ids.active.0)).ok_or("resource exec not delegated")?;
         self.policy.subject(*target)
     }
 }

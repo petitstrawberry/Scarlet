@@ -153,31 +153,16 @@ pub(super) struct SecurityFs {
     id: FileSystemId,
     policy: Arc<Policy>,
     nodes: BTreeMap<String, Arc<Node>>,
-    status: Arc<crate::ipc::SharedMemory>,
+    status: Arc<super::policy_status::PolicyStatus>,
 }
 impl SecurityFs {
     fn new(policy: Arc<Policy>) -> Result<Arc<Self>, FileSystemError> {
         // Context tokens are an Android encoding constraint, not a native
         // policy rule. No policy may silently collapse two native identities.
-        if policy.labels().any(|(_, name)| !valid_context_name(name)) {
+        if policy.labels().any(|(_, name)| !valid_context_name(&name)) {
             return Err(fs_error(FileSystemErrorKind::InvalidData));
         }
-        let status = Arc::new(
-            crate::ipc::SharedMemory::new(PAGE, 1)
-                .map_err(|_| fs_error(FileSystemErrorKind::NoSpace))?,
-        );
-        let info = status
-            .get_mapping_info(0, PAGE)
-            .map_err(|_| fs_error(FileSystemErrorKind::NoSpace))?;
-        let values = [1u32, 0, 1, 1, 1]; // version, sequence, enforcing, policyload, deny_unknown
-        // SAFETY: fresh, zeroed page owned exclusively here before publication.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                values.as_ptr().cast::<u8>(),
-                crate::vm::addr::phys_to_virt(info.paddr) as *mut u8,
-                20,
-            );
-        }
+        let status=super::policy_status::PolicyStatus::new(&policy).map_err(|_|fs_error(FileSystemErrorKind::NoSpace))?;
         Ok(Arc::new_cyclic(|weak| {
             let entries = [
                 ("", Content::Directory),
@@ -279,7 +264,7 @@ impl SecurityFs {
             Content::Text(b) => b.clone(),
             Content::Status => {
                 let mut b = vec![0; PAGE];
-                for (i, v) in [1u32, 0, 1, 1, 1].iter().enumerate() {
+                for (i, v) in self.status.values().iter().enumerate() {
                     b[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
                 }
                 b
@@ -397,7 +382,7 @@ struct FileState {
 struct SecurityFile {
     content: Content,
     policy: Arc<Policy>,
-    status: Option<Arc<crate::ipc::SharedMemory>>,
+    status: Option<Arc<super::policy_status::PolicyStatus>>,
     metadata: FileMetadata,
     entries: Vec<DirectoryEntryInternal>,
     readable: bool,
@@ -443,8 +428,9 @@ fn decision(policy: &Policy, input: &[u8]) -> Result<Vec<u8>, StreamError> {
         _ => 0,
     };
     let native_class=if class==HW_SERVICE_MANAGER {SERVICE_MANAGER}else{class};
-    let allowed = policy.allowed(source, target, native_class) as u32 & mask;
-    Ok(format!("{allowed:x} ffffffff 0 ffffffff 1 0").into_bytes())
+    let (allowed,generation)=policy.decision(source,target,native_class);
+    let allowed=allowed as u32 & mask;let sequence=generation as u32;
+    Ok(format!("{allowed:x} ffffffff 0 ffffffff {sequence} 0").into_bytes())
 }
 impl StreamOps for SecurityFile {
     fn write_empty(&self) -> Result<usize, StreamError> {
@@ -496,6 +482,10 @@ impl StreamOps for SecurityFile {
             state.position += 1;
             return Ok(size);
         }
+        if matches!(self.content,Content::Status) {
+            let status=self.status.as_ref().ok_or(StreamError::InvalidArgument)?;
+            for (index,value) in status.values().iter().enumerate() {state.bytes[index*4..index*4+4].copy_from_slice(&value.to_le_bytes());}
+        }
         let n = buffer
             .len()
             .min(state.bytes.len().saturating_sub(state.position));
@@ -520,6 +510,7 @@ impl StreamOps for SecurityFile {
             }
             let text = core::str::from_utf8(buffer).map_err(|_| StreamError::InvalidArgument)?;
             let text = text.strip_suffix('\0').unwrap_or(text);
+            if !valid_context_name(text) {return Err(StreamError::InvalidArgument);}
             let target = self
                 .policy
                 .label_id(text)
@@ -549,6 +540,7 @@ impl StreamOps for SecurityFile {
                 let text = core::str::from_utf8(buffer)
                     .map_err(|_| StreamError::InvalidArgument)?
                     .trim_end_matches('\0');
+                if !valid_context_name(text) {return Err(StreamError::InvalidArgument);}
                 self.policy
                     .label_id(text)
                     .ok_or(StreamError::InvalidArgument)?;
@@ -598,7 +590,7 @@ impl MemoryMappingOps for SecurityFile {
         self.status
             .as_ref()
             .ok_or("no status backing")?
-            .get_mapping_info(offset, length)
+            .mapping(offset, length)
     }
 }
 impl FileObject for SecurityFile {
@@ -721,7 +713,7 @@ pub(super) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> O
             target.as_deref().unwrap_or(task).socket_creation_label.read().as_ref().map(|selected|format!("{}\0",selected.target().name()).into_bytes()).unwrap_or_default()
         }else if attr==2 {
             target.as_deref().unwrap_or(task).creation_label.read().as_ref().filter(|selected|Arc::ptr_eq(&selected.policy,subject.policy()))
-                .map(|selected|format!("{}\0",subject.policy().label(selected.target).unwrap_or("")).into_bytes()).unwrap_or_default()
+                .map(|selected|format!("{}\0",subject.policy().label(selected.target).as_deref().unwrap_or("")).into_bytes()).unwrap_or_default()
         }else if exec {
             target.as_deref().unwrap_or(task).pending_exec_transition.read().as_ref()
                 .map(|pending| format!("{}\0", pending.target().name()).into_bytes()).unwrap_or_default()
@@ -882,6 +874,22 @@ mod tests {
                 .write(b"0")
                 .is_err()
         );
+    }
+    #[test_case]
+    fn policy_extension_updates_existing_status_files_and_access_sequence_numbers() {
+        use crate::shield::update::PolicyUpdate;
+        let policy=policy();let subject=policy.subject(1).unwrap();
+        let fs=SecurityFs::new(policy.clone()).unwrap();
+        let status=fs.open_for(&(fs.nodes["status"].clone() as Arc<dyn VfsNode>),0,Some(&subject)).unwrap();
+        let old=decision(&policy,b"u:r:caller:s0 u:object_r:service:s0 1 1").unwrap();
+        policy.extend(1,PolicyUpdate {rules:vec![Rule {source:1,target:2,class:SERVICE_MANAGER,permissions:4}],..Default::default()}).unwrap();
+        assert_eq!(old,b"3 ffffffff 0 ffffffff 1 0");
+        assert_eq!(decision(&policy,b"u:r:caller:s0 u:object_r:service:s0 1 1").unwrap(),b"7 ffffffff 0 ffffffff 2 0");
+        let mut bytes=[0u8;20];assert_eq!(status.read(&mut bytes).unwrap(),20);
+        assert_eq!(u32::from_le_bytes(bytes[12..16].try_into().unwrap()),2);
+        policy.extend(2,PolicyUpdate {labels:vec![(4,"native label".into())],..Default::default()}).unwrap();
+        let context=fs.open_for(&(fs.nodes["context"].clone() as Arc<dyn VfsNode>),2,Some(&subject)).unwrap();
+        assert!(context.write(b"native label").is_err());
     }
     #[test_case]
     fn android_shield_permissions_are_readable_directory_records_and_status_is_immutable() {

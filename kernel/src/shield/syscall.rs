@@ -9,6 +9,176 @@ use crate::{
 };
 use core::sync::atomic::Ordering;
 
+fn update_array<const N: usize, T>(
+    task: &Task,
+    pointer: u64,
+    count: u64,
+    bound: usize,
+    mut parse: impl FnMut([u8; N]) -> Result<T, &'static str>,
+) -> Result<Vec<T>, &'static str> {
+    let count = address(count)?;
+    let pointer = address(pointer)?;
+    if count > bound {
+        return Err("update array bound");
+    }
+    pointer
+        .checked_add(count.checked_mul(N).ok_or("update array overflow")?)
+        .ok_or("update pointer overflow")?;
+    let mut values = Vec::with_capacity(count);
+    for index in 0..count {
+        values.push(parse(read::<N>(task, pointer + index * N)?)?);
+    }
+    Ok(values)
+}
+pub(crate) fn extend(
+    task: &Task,
+    handle: usize,
+    pointer: usize,
+    length: usize,
+) -> Result<(), &'static str> {
+    let policy = policy_handle(task, handle, true)?;
+    if length != 128 {
+        return Err("policy update size");
+    }
+    let spec = read::<128>(task, pointer)?;
+    if u32_at(&spec, 0) != 1 || u32_at(&spec, 4) != 0 || spec[112..].iter().any(|byte| *byte != 0) {
+        return Err("policy update version or reserved fields");
+    }
+    let labels = update_array::<16, _>(
+        task,
+        u64_at(&spec, 16),
+        u64_at(&spec, 24),
+        MAX_LABELS,
+        |raw| {
+            let length = u32_at(&raw, 4) as usize;
+            if length == 0 || length > MAX_LABEL_BYTES {
+                return Err("update label length");
+            }
+            let mut name = alloc::vec![0;length];
+            copy_from_user(task, address(u64_at(&raw, 8))?, &mut name)
+                .map_err(|_| "update label pointer")?;
+            Ok((
+                u32_at(&raw, 0),
+                String::from_utf8(name).map_err(|_| "update label encoding")?,
+            ))
+        },
+    )?;
+    let rules = update_array::<24, _>(
+        task,
+        u64_at(&spec, 32),
+        u64_at(&spec, 40),
+        MAX_RULES,
+        |raw| {
+            if u32_at(&raw, 12) != 0 {
+                return Err("update rule flags");
+            }
+            Ok(Rule {
+                source: u32_at(&raw, 0),
+                target: u32_at(&raw, 4),
+                class: u32_at(&raw, 8),
+                permissions: u64_at(&raw, 16),
+            })
+        },
+    )?;
+    let transitions = update_array::<16, _>(
+        task,
+        u64_at(&spec, 48),
+        u64_at(&spec, 56),
+        MAX_RULES,
+        |raw| {
+            if u32_at(&raw, 12) != 0 {
+                return Err("update transition flags");
+            }
+            Ok(TransitionRule {
+                source: u32_at(&raw, 0),
+                target: u32_at(&raw, 4),
+                principal: identity::Principal(u32_at(&raw, 8)),
+            })
+        },
+    )?;
+    let exec_transitions = update_array::<24, _>(
+        task,
+        u64_at(&spec, 64),
+        u64_at(&spec, 72),
+        MAX_RULES,
+        |raw| {
+            if u64_at(&raw, 16) != 0 {
+                return Err("update exec flags");
+            }
+            Ok(ExecTransitionRule {
+                source: u32_at(&raw, 0),
+                resource: u32_at(&raw, 4),
+                target: u32_at(&raw, 8),
+                principal: identity::Principal(u32_at(&raw, 12)),
+            })
+        },
+    )?;
+    let create = update_array::<24, _>(
+        task,
+        u64_at(&spec, 80),
+        u64_at(&spec, 88),
+        MAX_RULES,
+        |raw| {
+            if u32_at(&raw, 16) > 1 || u32_at(&raw, 20) != 0 {
+                return Err("update file flags");
+            }
+            Ok(file::CreateRule {
+                source: u32_at(&raw, 0),
+                parent: u32_at(&raw, 4),
+                target: u32_at(&raw, 8),
+                kind: u32_at(&raw, 12),
+                default: u32_at(&raw, 16) == 1,
+            })
+        },
+    )?;
+    let relabel = update_array::<16, _>(
+        task,
+        u64_at(&spec, 96),
+        u64_at(&spec, 104),
+        MAX_RULES,
+        |raw| {
+            Ok(file::RelabelRule {
+                source: u32_at(&raw, 0),
+                old: u32_at(&raw, 4),
+                target: u32_at(&raw, 8),
+                kind: u32_at(&raw, 12),
+            })
+        },
+    )?;
+    policy.extend(
+        u64_at(&spec, 8),
+        update::PolicyUpdate {
+            labels,
+            rules,
+            transitions,
+            exec_transitions,
+            create,
+            relabel,
+        },
+    )?;
+    Ok(())
+}
+pub fn sys_shield_policy_extend(tf: &mut Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap();
+    tf.increment_pc_next(&task);
+    extend(&task, tf.get_arg(0), tf.get_arg(1), tf.get_arg(2)).map_or(usize::MAX, |_| 0)
+}
+pub fn sys_shield_policy_generation(tf: &mut Trapframe) -> usize {
+    let task = crate::task::mytask().unwrap();
+    tf.increment_pc_next(&task);
+    (|| -> Result<usize, &'static str> {
+        let policy = policy_handle(&task, tf.get_arg(0), false)?;
+        crate::library::std::usercopy::copy_to_user(
+            &task,
+            tf.get_arg(1),
+            &policy.generation().to_ne_bytes(),
+        )
+        .map_err(|_| "generation pointer")?;
+        Ok(0)
+    })()
+    .unwrap_or(usize::MAX)
+}
+
 fn insert(task: &Task, cap: PolicyHandle) -> Result<usize, &'static str> {
     let handle = task.handle_table.insert(KernelObject::ShieldPolicy(cap))?;
     let mut metadata = task
@@ -378,4 +548,76 @@ pub fn sys_shield_socket_creation_label(tf:&mut Trapframe)->usize {
     let task=crate::task::mytask().unwrap();let target=tf.get_arg(0);tf.increment_pc_next(&task);
     let Ok(target)=u32::try_from(target) else {return usize::MAX;};
     socket::select(&task,(target!=0).then_some(target)).map_or(usize::MAX,|_|0)
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+    use alloc::vec;
+    #[test_case]
+    fn update_requires_the_admin_capability_and_copies_the_whole_batch_before_publication() {
+        use crate::library::std::usercopy::copy_to_user;
+        let mut task = Task::new("policy-update".into(), 0, crate::task::TaskType::User);
+        task.set_id(60031);
+        let base = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
+        task.allocate_stack_pages(base, 1).unwrap();
+        let policy = Policy::new(vec![(1, "manager".into())], vec![]).unwrap();
+        let admin = insert(
+            &task,
+            PolicyHandle {
+                policy: policy.clone(),
+                administer: true,
+            },
+        )
+        .unwrap();
+        let readonly = insert(
+            &task,
+            PolicyHandle {
+                policy: policy.clone(),
+                administer: false,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            task.handle_table
+                .get_metadata(admin as u32)
+                .unwrap()
+                .special_semantics,
+            Some(SpecialSemantics::CloseOnExec)
+        ));
+        assert!(extend(&task, readonly, usize::MAX, 128).is_err());
+        let mut spec = [0u8; 128];
+        spec[..4].copy_from_slice(&1u32.to_ne_bytes());
+        spec[8..16].copy_from_slice(&1u64.to_ne_bytes());
+        spec[16..24].copy_from_slice(&((base + 256) as u64).to_ne_bytes());
+        spec[24..32].copy_from_slice(&1u64.to_ne_bytes());
+        let mut label = [0u8; 16];
+        label[..4].copy_from_slice(&2u32.to_ne_bytes());
+        label[4..8].copy_from_slice(&3u32.to_ne_bytes());
+        label[8..].copy_from_slice(&((base + 512) as u64).to_ne_bytes());
+        copy_to_user(&task, base + 256, &label).unwrap();
+        copy_to_user(&task, base + 512, b"app").unwrap();
+        spec[112] = 1;
+        copy_to_user(&task, base, &spec).unwrap();
+        assert!(extend(&task, admin, base, 128).is_err());
+        assert!(policy.label(2).is_none());
+        assert_eq!(policy.generation(), 1);
+        spec[112] = 0;
+        spec[104..112].copy_from_slice(&1u64.to_ne_bytes());
+        spec[96..104].copy_from_slice(&u64::MAX.to_ne_bytes());
+        copy_to_user(&task, base, &spec).unwrap();
+        assert!(extend(&task, admin, base, 128).is_err());
+        assert!(policy.label(2).is_none());
+        spec[96..112].fill(0);
+        copy_to_user(&task, base, &spec).unwrap();
+        extend(&task, admin, base, 128).unwrap();
+        assert_eq!(policy.generation(), 2);
+        assert_eq!(policy.label(2).as_deref(), Some("app"));
+        assert!(extend(&task, admin, base, 128).is_err());
+        assert_eq!(policy.generation(), 2);
+        assert_eq!(
+            policy_handle(&task, readonly, false).unwrap().generation(),
+            2
+        );
+    }
 }

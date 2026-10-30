@@ -247,6 +247,8 @@ syscall_table! {
     ShieldCreationLabel = 1341 => crate::shield::syscall::sys_shield_creation_label,
     ShieldSocketCreationLabel = 1343 => crate::shield::syscall::sys_shield_socket_creation_label,
     ShieldRelabelFile = 1342 => crate::shield::syscall::sys_shield_relabel_file,
+    ShieldPolicyExtend = 1344 => crate::shield::syscall::sys_shield_policy_extend,
+    ShieldPolicyGeneration = 1345 => crate::shield::syscall::sys_shield_policy_generation,
     VmLayoutConfigure = 1350 => crate::vm::layout::syscall::configure,
     VmLayoutQuery = 1351 => crate::vm::layout::syscall::query,
     ShieldPolicyCreate = 1310 => crate::shield::syscall::sys_shield_policy_create,

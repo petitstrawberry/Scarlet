@@ -850,6 +850,8 @@ pub enum Syscall {
     ShieldCreationLabel = 1341,
     ShieldSocketCreationLabel = 1343,
     ShieldRelabelFile = 1342,
+    ShieldPolicyExtend = 1344,
+    ShieldPolicyGeneration = 1345,
     VmLayoutConfigure = 1350,
     VmLayoutQuery = 1351,
     ShieldPolicyCreate = 1310,

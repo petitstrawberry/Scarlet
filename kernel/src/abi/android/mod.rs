@@ -7,6 +7,7 @@ pub mod binder;
 #[cfg(target_arch = "aarch64")]
 mod detect;
 mod security;
+mod policy_status;
 
 use crate::{
     abi::linux::{

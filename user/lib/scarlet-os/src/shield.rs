@@ -1,4 +1,4 @@
-//! Immutable label policies and explicit subject assignment, independent of
+//! Versioned label policies and explicit subject assignment, independent of
 //! Environment, filesystem views and namespaces. Enforcement points choose
 //! their numeric classes and permission masks.
 extern crate alloc;
@@ -13,6 +13,91 @@ use scarlet_sys::{Syscall, syscall0, syscall1, syscall2, syscall4, syscall6};
 
 pub struct Policy(Handle);
 impl Policy {
+    pub fn generation(&self) -> HandleResult<u64> {
+        let mut generation = 0u64;
+        // SAFETY: the output lives through the synchronous copy.
+        let result = unsafe {
+            syscall2(
+                Syscall::ShieldPolicyGeneration,
+                self.0.as_raw() as usize,
+                &mut generation as *mut u64 as usize,
+            )
+        };
+        if result == 0 {
+            Ok(generation)
+        } else {
+            Err(HandleError::InvalidParameter)
+        }
+    }
+    /// Requires the management capability. A subject's current-policy handle
+    /// cannot publish updates. All borrowed records live through the copy.
+    pub fn extend(
+        &self,
+        expected_generation: u64,
+        labels: &[(u32, &str)],
+        rules: &[Rule],
+        transitions: &[Transition],
+        exec: &[ExecTransition],
+        create: &[FileCreate],
+        relabel: &[FileRelabel],
+    ) -> HandleResult<()> {
+        if labels.len() > 512
+            || labels
+                .iter()
+                .any(|(_, name)| name.is_empty() || name.len() > 255)
+            || [
+                rules.len(),
+                transitions.len(),
+                exec.len(),
+                create.len(),
+                relabel.len(),
+            ]
+            .iter()
+            .any(|count| *count > 4096)
+        {
+            return Err(HandleError::InvalidParameter);
+        }
+        let labels: Vec<_> = labels
+            .iter()
+            .map(|(id, name)| RawLabel {
+                id: *id,
+                name_len: name.len() as u32,
+                name: name.as_ptr() as u64,
+            })
+            .collect();
+        let raw = scarlet_abi::shield::RawPolicyUpdate {
+            version: scarlet_abi::shield::POLICY_UPDATE_VERSION,
+            expected_generation,
+            labels: labels.as_ptr() as u64,
+            label_count: labels.len() as u64,
+            rules: rules.as_ptr() as u64,
+            rule_count: rules.len() as u64,
+            transitions: transitions.as_ptr() as u64,
+            transition_count: transitions.len() as u64,
+            exec_transitions: exec.as_ptr() as u64,
+            exec_transition_count: exec.len() as u64,
+            file_create: create.as_ptr() as u64,
+            file_create_count: create.len() as u64,
+            file_relabel: relabel.as_ptr() as u64,
+            file_relabel_count: relabel.len() as u64,
+            ..Default::default()
+        };
+        // SAFETY: the specification, records and names are borrowed until return.
+        let result = unsafe {
+            scarlet_sys::syscall3(
+                Syscall::ShieldPolicyExtend,
+                self.0.as_raw() as usize,
+                &raw as *const _ as usize,
+                128,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(HandleError::InvalidParameter)
+        }
+    }
+
     /// Requires bootstrap authority or an existing policy management handle.
     pub fn create(labels: &[(u32, &str)], rules: &[RawRule]) -> HandleResult<Self> {
         let raw: Vec<_> = labels
