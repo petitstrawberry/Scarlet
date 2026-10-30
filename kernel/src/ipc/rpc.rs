@@ -1,7 +1,8 @@
 //! ABI-neutral, bounded calls and one-way notifications. Reply capabilities are
 //! single-use; dropping one completes its caller with PeerClosed. One-way
 //! deliveries serialize per dispatch object until the receiver releases them.
-//! Adapters own wire formats, peer discovery, credentials and userspace handles.
+//! The transport snapshots native sender identity outside serialized data.
+//! Adapters own wire formats, peer discovery and userspace handles.
 
 use crate::object::{KernelObject, handle::HandleMetadata};
 use crate::sync::{IrqSpinLock, waker::Waker};
@@ -23,6 +24,33 @@ pub enum RpcError {
     Busy,
     TooLarge,
     Cancelled,
+}
+
+/// Authenticated native identity at admission. Only the transport constructs
+/// this snapshot from a kernel task; serialized message bytes cannot replace it.
+/// It retains no task or handle table and grants no authority to the receiver.
+#[derive(Clone, Debug)]
+pub struct RpcSender {
+    principal: crate::shield::identity::Principal,
+    subject: Option<crate::shield::Subject>,
+}
+impl RpcSender {
+    fn capture(task: &crate::task::Task) -> Self {
+        // Same lock order as a Shield label transition; hold both through the
+        // snapshot so a concurrent change cannot combine two identities.
+        let credentials = task.credentials.read();
+        let subject = task.security_subject.read();
+        Self {
+            principal: credentials.principals().active,
+            subject: subject.clone(),
+        }
+    }
+    pub fn principal(&self) -> crate::shield::identity::Principal {
+        self.principal
+    }
+    pub fn subject(&self) -> Option<&crate::shield::Subject> {
+        self.subject.as_ref()
+    }
 }
 
 #[derive(Clone)]
@@ -95,7 +123,7 @@ impl RpcObject {
         self.endpoint
             .upgrade()
             .ok_or(RpcError::PeerClosed)?
-            .send_chained(Some(self), message, false, Some(caller), parent, 0)
+            .send_chained(Some(self), message, false, Some(caller), parent, 0, None)
             .map(|state| RpcCall { state })
     }
     pub fn send_scoped_with_priority(
@@ -108,8 +136,50 @@ impl RpcObject {
         self.endpoint
             .upgrade()
             .ok_or(RpcError::PeerClosed)?
-            .send_chained(Some(self), message, false, Some(caller), parent, priority)
+            .send_chained(
+                Some(self),
+                message,
+                false,
+                Some(caller),
+                parent,
+                priority,
+                None,
+            )
             .map(|state| RpcCall { state })
+    }
+    /// Kernel syscall adapters supply the authenticated invoking task, never a
+    /// caller-selected label or numeric identity from a wire structure.
+    pub(crate) fn send_scoped_from(
+        &self,
+        task: &crate::task::Task,
+        message: RpcMessage,
+        caller: &RpcEndpoint,
+        parent: Option<&RpcContext>,
+    ) -> Result<RpcCall, RpcError> {
+        self.endpoint
+            .upgrade()
+            .ok_or(RpcError::PeerClosed)?
+            .send_chained(
+                Some(self),
+                message,
+                false,
+                Some(caller),
+                parent,
+                task.fixed_priority.effective(),
+                Some(task),
+            )
+            .map(|state| RpcCall { state })
+    }
+    pub(crate) fn send_oneway_from(
+        &self,
+        task: &crate::task::Task,
+        message: RpcMessage,
+    ) -> Result<(), RpcError> {
+        self.endpoint
+            .upgrade()
+            .ok_or(RpcError::PeerClosed)?
+            .send_chained(Some(self), message, true, None, None, 0, Some(task))
+            .map(|_| ())
     }
     /// Admit a bounded notification without a reply capability. Notifications
     /// to this object are serialized until the receiver drops its delivery.
@@ -325,6 +395,7 @@ impl Drop for RpcCall {
 
 pub struct RpcRequest {
     pub message: RpcMessage,
+    sender: Option<RpcSender>,
     object_key: Option<u64>,
     reply: Arc<CallState>,
     async_gate: Option<Arc<AsyncGate>>,
@@ -333,6 +404,9 @@ pub struct RpcRequest {
 }
 
 impl RpcRequest {
+    pub fn sender(&self) -> Option<&RpcSender> {
+        self.sender.as_ref()
+    }
     pub fn reply(self, message: RpcMessage) -> Result<(), RpcError> {
         if self.is_oneway() {
             return Err(RpcError::Cancelled);
@@ -445,8 +519,34 @@ impl RpcEndpoint {
         caller: &RpcEndpoint,
         parent: Option<&RpcContext>,
     ) -> Result<RpcCall, RpcError> {
-        self.send_chained(None, message, false, Some(caller), parent, 0)
+        self.send_chained(None, message, false, Some(caller), parent, 0, None)
             .map(|state| RpcCall { state })
+    }
+    pub(crate) fn send_scoped_from(
+        &self,
+        task: &crate::task::Task,
+        message: RpcMessage,
+        caller: &RpcEndpoint,
+        parent: Option<&RpcContext>,
+    ) -> Result<RpcCall, RpcError> {
+        self.send_chained(
+            None,
+            message,
+            false,
+            Some(caller),
+            parent,
+            task.fixed_priority.effective(),
+            Some(task),
+        )
+        .map(|state| RpcCall { state })
+    }
+    pub(crate) fn send_oneway_from(
+        &self,
+        task: &crate::task::Task,
+        message: RpcMessage,
+    ) -> Result<(), RpcError> {
+        self.send_chained(None, message, true, None, None, 0, Some(task))
+            .map(|_| ())
     }
     pub fn create_object(self: &Arc<Self>) -> Result<Arc<RpcObject>, RpcError> {
         self.create_object_with_scheduling(0, false)
@@ -481,7 +581,7 @@ impl RpcEndpoint {
         message: RpcMessage,
         oneway: bool,
     ) -> Result<Arc<CallState>, RpcError> {
-        self.send_chained(object, message, oneway, None, None, 0)
+        self.send_chained(object, message, oneway, None, None, 0, None)
     }
     fn send_chained(
         &self,
@@ -491,8 +591,13 @@ impl RpcEndpoint {
         caller: Option<&RpcEndpoint>,
         context: Option<&RpcContext>,
         sender_priority: u8,
+        task: Option<&crate::task::Task>,
     ) -> Result<Arc<CallState>, RpcError> {
         message.validate()?;
+        let sender = match task {
+            Some(task) => Some(RpcSender::capture(task)),
+            None => crate::task::mytask().map(|task| RpcSender::capture(&task)),
+        };
         let parent = context
             .map(|context| context.state.upgrade().ok_or(RpcError::Cancelled))
             .transpose()?;
@@ -595,6 +700,7 @@ impl RpcEndpoint {
         }
         state.queue.push_back(RpcRequest {
             message,
+            sender,
             object_key,
             reply: call.clone(),
             async_gate: oneway
@@ -736,6 +842,123 @@ impl Drop for RpcEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn sender_task(
+        policy: &Arc<crate::shield::Policy>,
+        label: u32,
+        principal: u32,
+    ) -> crate::task::Task {
+        let task = crate::task::Task::new("rpc-sender".into(), 0, crate::task::TaskType::User);
+        task.credentials
+            .write()
+            .set_principals(crate::shield::identity::Identities::all(
+                crate::shield::identity::Principal(principal),
+            ))
+            .unwrap();
+        *task.security_subject.write() = Some(policy.subject(label).unwrap());
+        task
+    }
+    #[test_case]
+    fn rpc_sender_is_an_admission_snapshot_outside_mutable_message_bytes() {
+        let policy = crate::shield::Policy::new(
+            alloc::vec![(1, "sender".into()), (2, "later".into())],
+            alloc::vec![],
+        )
+        .unwrap();
+        let task = sender_task(&policy, 1, 10042);
+        let endpoint = RpcEndpoint::new();
+        let caller = RpcEndpoint::new();
+        let call = endpoint
+            .send_scoped_from(&task, message(1), &caller, None)
+            .unwrap();
+        task.credentials
+            .write()
+            .set_principals(crate::shield::identity::Identities::all(
+                crate::shield::identity::Principal(7),
+            ))
+            .unwrap();
+        *task.security_subject.write() = Some(policy.subject(2).unwrap());
+        drop(task);
+        let mut request = endpoint.receive().unwrap().unwrap();
+        request.message.bytes = alloc::vec![0;128];
+        assert_eq!(request.sender().unwrap().principal().0, 10042);
+        assert_eq!(
+            request.sender().unwrap().subject().unwrap().name(),
+            "sender"
+        );
+        assert!(Arc::ptr_eq(
+            request.sender().unwrap().subject().unwrap().policy(),
+            &policy
+        ));
+        request.reply(message(2)).unwrap();
+        assert!(call.take_reply().unwrap().is_ok());
+    }
+    #[test_case]
+    fn rpc_nested_and_oneway_senders_are_the_actual_broker_not_the_parent() {
+        let policy = crate::shield::Policy::new(
+            alloc::vec![(1, "client".into()), (2, "broker".into())],
+            alloc::vec![],
+        )
+        .unwrap();
+        let client = sender_task(&policy, 1, 10001);
+        let broker = sender_task(&policy, 2, 1000);
+        let a = RpcEndpoint::new();
+        let b = RpcEndpoint::new();
+        let c = RpcEndpoint::new();
+        let target = c.create_object().unwrap();
+        let outer = b.send_scoped_from(&client, message(1), &a, None).unwrap();
+        let parent = b.receive().unwrap().unwrap();
+        let inner = target
+            .send_scoped_from(&broker, message(2), &b, parent.context().as_ref())
+            .unwrap();
+        let request = c.receive().unwrap().unwrap();
+        assert_eq!(request.sender().unwrap().principal().0, 1000);
+        assert_eq!(
+            request.sender().unwrap().subject().unwrap().name(),
+            "broker"
+        );
+        request.reply(message(3)).unwrap();
+        assert!(inner.take_reply().unwrap().is_ok());
+        parent.reply(message(4)).unwrap();
+        assert!(outer.take_reply().unwrap().is_ok());
+        target.send_oneway_from(&broker, message(5)).unwrap();
+        let notice = c.receive().unwrap().unwrap();
+        assert_eq!(notice.sender().unwrap().subject().unwrap().name(), "broker");
+        drop(notice);
+    }
+    #[test_case]
+    fn rpc_sender_labels_release_on_cancel_close_and_consumed_reply() {
+        for complete in 0..3 {
+            let policy =
+                crate::shield::Policy::new(alloc::vec![(1, "sender".into())], alloc::vec![])
+                    .unwrap();
+            let weak = Arc::downgrade(&policy);
+            let task = sender_task(&policy, 1, 42);
+            let endpoint = RpcEndpoint::new();
+            let caller = RpcEndpoint::new();
+            let call = endpoint
+                .send_scoped_from(&task, message(1), &caller, None)
+                .unwrap();
+            drop(task);
+            drop(policy);
+            assert!(weak.upgrade().is_some());
+            match complete {
+                0 => {
+                    drop(call);
+                    assert!(endpoint.receive().unwrap().is_none());
+                }
+                1 => {
+                    endpoint.close();
+                    assert_eq!(call.take_reply().unwrap().err(), Some(RpcError::PeerClosed));
+                }
+                _ => {
+                    let request = endpoint.receive().unwrap().unwrap();
+                    request.reply(message(2)).unwrap();
+                    assert!(call.take_reply().unwrap().is_ok());
+                }
+            }
+            assert!(weak.upgrade().is_none());
+        }
+    }
     #[test_case]
     fn rpc_scoped_chain_routes_callbacks_only_to_the_matching_waiter() {
         let a = RpcEndpoint::new();
