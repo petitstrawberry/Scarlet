@@ -61,6 +61,18 @@ class BootProfileTest(unittest.TestCase):
         p["file_policy"]["property_areas"][0]["source"]="u:r:unknown:s0"
         with self.assertRaises(ValueError):validate_profile(p)
 
+    def test_service_grants_are_explicit_and_preserve_subject_identifiers(self):
+        p=profile();p.update(version=2,file_labels={},exec_transitions=[])
+        p["service_grants"]=[["u:r:init:s0","u:r:vendor_init:s0",4],["u:r:init:s0","u:object_r:manager_service:s0",3]]
+        text=shield_policy(p,["* u:object_r:gsid_prop:s0\n"])
+        self.assertIn("label 2 u:r:vendor_init:s0\n",text)
+        self.assertEqual(text.count(" u:r:vendor_init:s0\n"),1)
+        self.assertIn("service-allow 1 2 4\n",text)
+        self.assertNotIn("property-set 1 101\n",text)
+        for bad in [["u:r:unknown:s0","u:object_r:manager_service:s0",3],["u:r:init:s0","u:r:unknown:s0",1],["u:r:init:s0","u:object_r:manager_service:s0",8]]:
+            changed=deepcopy(p);changed["service_grants"]=[bad]
+            with self.assertRaises(ValueError):validate_profile(changed)
+
     def test_staging_detects_file_changes_base_conflicts_and_alias_ancestors(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

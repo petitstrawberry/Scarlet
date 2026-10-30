@@ -42,6 +42,7 @@ def validate_profile(profile):
         fields |= {"file_labels", "exec_transitions"}
         if "resource_groups" in profile: fields.add("resource_groups")
         if "file_policy" in profile: fields.add("file_policy")
+        if "service_grants" in profile: fields.add("service_grants")
     if set(profile) != fields or profile.get("version") not in (1, 2):
         raise ValueError("unsupported boot profile")
     if not re.fullmatch(r"[a-z0-9-]+", profile["name"]):
@@ -60,7 +61,7 @@ def validate_profile(profile):
             raise ValueError("invalid bootconfig entry")
     if "resource_groups" in profile:
         resources = profile["resource_groups"]
-        if resources != {"cgroup2_root": "/sys/fs/cgroup", "controllers": []}:
+        if resources not in ({"cgroup2_root": "/sys/fs/cgroup", "controllers": []}, {"cgroup2_root": "/sys/fs/cgroup", "controllers": [], "cpuset_root": "/dev/cpuset"}):
             raise ValueError("unsupported resource controller configuration")
     subjects = profile["subjects"]
     if len(subjects) > 64 or len(set(subjects.values())) != len(subjects) or any(
@@ -81,6 +82,12 @@ def validate_profile(profile):
         if subject not in subjects or len(set(targets)) != len(targets) or any(
                 not CONTEXT.fullmatch(label) or not label.startswith("u:object_r:") for label in targets):
             raise ValueError("invalid property grant")
+    seen_services=set()
+    for source,target,permissions in profile.get("service_grants",[]):
+        if source not in subjects or not CONTEXT.fullmatch(target) or not (target.startswith("u:object_r:") or target in subjects) or type(permissions) is not int or not 1<=permissions<=7 or (source,target) in seen_services:
+            raise ValueError("invalid service grant")
+        seen_services.add((source,target))
+    if len(seen_services)>4096:raise ValueError("service rule bound")
     resource_labels = set(profile.get("file_labels", {}).values())
     for path, label in profile.get("file_labels", {}).items():
         if not path.startswith(("/system/", "/apex/")) or not CONTEXT.fullmatch(label) or not label.startswith("u:object_r:"):
@@ -153,6 +160,8 @@ def shield_policy(profile, contexts):
         raise ValueError("property grant is absent from verified contexts")
     file_labels,create,relabel=file_rules(profile) if "file_policy" in profile else (set(),[],[])
     labels |= file_labels
+    labels |= {target for _,target,_ in profile.get("service_grants",[])}
+    labels -= set(profile["subjects"])
     if len(labels | set(profile.get("file_labels", {}).values())) + len(profile["subjects"]) > 512:
         raise ValueError("profile exceeds native label bound")
     labels |= set(profile.get("file_labels", {}).values())
@@ -164,6 +173,7 @@ def shield_policy(profile, contexts):
               for source, target, principal in profile["transitions"]]
     lines += [f"property-set {identifiers[source]} {identifiers[target]}"
               for source, targets in sorted(grants.items()) for target in sorted(targets)]
+    lines += [f"service-allow {identifiers[source]} {identifiers[target]} {permissions}" for source,target,permissions in profile.get("service_grants",[])]
     lines += [f"file-exec {identifiers[source]} {identifiers[resource]} {identifiers[target]} {principal}"
               for source, resource, target, principal in profile.get("exec_transitions", [])]
     lines += [f"file-label {identifiers[label]} {path}" for path, label in sorted(profile.get("file_labels", {}).items())]

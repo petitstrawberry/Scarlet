@@ -33,7 +33,8 @@
   "boot_properties": {
     "ro.apex.updatable": "false",
     "ro.zygote": "zygote64",
-    "ro.hardware": "scarlet"
+    "ro.hardware": "scarlet",
+    "dalvik.vm.usejit": "false"
   },
   "bootconfig": {
     "androidboot.hardware": "scarlet",
@@ -106,7 +107,10 @@
       "u:object_r:vendor_security_patch_level_prop:s0",
       "u:object_r:vndk_prop:s0",
       "u:object_r:vold_config_prop:s0",
-      "u:object_r:zram_control_prop:s0"
+      "u:object_r:zram_control_prop:s0",
+      "u:object_r:persistent_properties_ready_prop:s0",
+      "u:object_r:usb_control_prop:s0",
+      "u:object_r:keystore_listen_prop:s0"
     ],
     "u:r:apexd:s0": [
       "u:object_r:apexd_prop:s0"
@@ -149,7 +153,8 @@
     "/system/bin/apexd": "u:object_r:apexd_exec:s0",
     "/system/bin/servicemanager": "u:object_r:servicemanager_exec:s0",
     "/system/bin/boringssl_self_test64": "u:object_r:boringssl_self_test_exec:s0",
-    "/system/apex/com.android.conscrypt/bin/boringssl_self_test64": "u:object_r:boringssl_self_test_exec:s0"
+    "/system/apex/com.android.conscrypt/bin/boringssl_self_test64": "u:object_r:boringssl_self_test_exec:s0",
+    "/system/bin/app_process64": "u:object_r:zygote_exec:s0"
   },
   "exec_transitions": [
     [
@@ -175,10 +180,17 @@
       "u:object_r:boringssl_self_test_exec:s0",
       "u:r:boringssl_self_test:s0",
       0
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:zygote_exec:s0",
+      "u:r:zygote:s0",
+      0
     ]
   ],
   "resource_groups": {
     "cgroup2_root": "/sys/fs/cgroup",
+    "cpuset_root": "/dev/cpuset",
     "controllers": []
   },
   "file_policy": {
@@ -192,7 +204,8 @@
           "u:object_r:socket_device:s0"
         ],
         "targets": [
-          "u:object_r:property_socket:s0"
+          "u:object_r:property_socket:s0",
+          "u:object_r:zygote_socket:s0"
         ],
         "kinds": [
           6
@@ -232,7 +245,11 @@
           "u:object_r:apex_mnt_dir:s0",
           "u:object_r:linkerconfig_file:s0",
           "u:object_r:properties_device:s0",
-          "u:object_r:socket_device:s0"
+          "u:object_r:socket_device:s0",
+          "u:object_r:system_data_root_file:s0",
+          "u:object_r:system_data_file:s0",
+          "u:object_r:keystore_data_file:s0",
+          "u:object_r:tmpfs:s0"
         ],
         "targets": [
           "u:object_r:device:s0",
@@ -248,7 +265,10 @@
           "u:object_r:sysfs:s0",
           "u:object_r:rootfs:s0",
           "u:object_r:system_data_file:s0",
-          "u:object_r:socket_device:s0"
+          "u:object_r:socket_device:s0",
+          "u:object_r:system_data_root_file:s0",
+          "u:object_r:keystore_data_file:s0",
+          "u:object_r:tmpfs:s0"
         ],
         "kinds": [
           1,
@@ -575,5 +595,12 @@
         ]
       }
     ]
-  }
+  },
+  "service_grants": [
+    [
+      "u:r:servicemanager:s0",
+      "u:object_r:service_manager_service:s0",
+      3
+    ]
+  ]
 }

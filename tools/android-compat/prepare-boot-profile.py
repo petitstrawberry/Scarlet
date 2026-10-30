@@ -163,7 +163,10 @@ def configure(output, stock, profile, contexts, metadata):
         (output / name).mkdir(parents=True, exist_ok=True)
     if "resource_groups" in profile:
         (output / "etc").mkdir(exist_ok=True)
-        (output / "etc/cgroups.json").write_text(json.dumps({"Cgroups": [], "Cgroups2": {
+        cpusets = []
+        if "cpuset_root" in profile["resource_groups"]:
+            cpusets.append({"Controller": "cpuset", "Path": profile["resource_groups"]["cpuset_root"], "Mode": "0755", "UID": "system", "GID": "system"})
+        (output / "etc/cgroups.json").write_text(json.dumps({"Cgroups": cpusets, "Cgroups2": {
             "Path": profile["resource_groups"]["cgroup2_root"], "Mode": "0755", "UID": "root", "GID": "root", "Controllers": [],
         }}, indent=2) + "\n")
         (output / "sys/fs/cgroup").mkdir(parents=True, exist_ok=True)
@@ -185,6 +188,93 @@ def reconfigure(inputs, runtime, stock, profile_file, output):
     print("Prepared new manager configuration using verified factory payloads; boot has not been tested")
 
 
+def merge_framework(inputs,runtime,stock,framework):
+    from framework_inputs import verify_framework_inputs
+    metadata=verify_boot_inputs(inputs,runtime,stock)
+    verified=verify_framework_inputs(framework,runtime,stock)
+    for name,digest in verified["files"].items():
+        destination="system/"+name if name.startswith("apex/") else name
+        path=inputs/destination
+        if destination in metadata["symlinks"]:
+            raise ValueError("framework file conflicts with factory alias: "+destination)
+        if path.exists() and sha256(path)!=digest:
+            raise ValueError("framework file conflicts with verified boot payload: "+destination)
+        if name.startswith("apex/") and not path.exists():
+            raise ValueError("framework requires unselected factory APEX file: "+destination)
+        if not path.exists():
+            path.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(framework/name,path)
+        if sha256(path)!=digest: raise ValueError("changed framework input while copying")
+    # Explicit manager environment, derived only from the verified image fragments.
+    (inputs/"init.environ.rc").write_text("# Scarlet manager environment and verified Android classpath\non early-init\n    export ANDROID_ROOT /system\n    export ANDROID_DATA /data\n    export ANDROID_ART_ROOT /apex/com.android.art\n    export ANDROID_I18N_ROOT /apex/com.android.i18n\n    export ANDROID_TZDATA_ROOT /apex/com.android.tzdata\n    export BOOTCLASSPATH "+":".join(verified["boot_class_path"])+"\n")
+    previous=metadata.get("platform_boot",{}).get("classpaths")
+    if previous:
+        environment=inputs/"init.environ.rc"
+        text=environment.read_text()
+        for name,kind in [("SYSTEMSERVERCLASSPATH",2),("STANDALONE_SYSTEMSERVER_JARS",4)]:
+            paths=previous.get(str(kind),previous.get(kind,[]))
+            if not isinstance(paths,list) or len(paths)>1024 or any(not isinstance(path,str) or not re.fullmatch(r"/(system/framework|apex/[A-Za-z0-9_.]+/javalib)/[A-Za-z0-9_.-]+[.]jar",path) for path in paths):raise ValueError("invalid retained server classpath")
+            text+="    export "+name+" "+":".join(paths)+"\n"
+        environment.write_text(text)
+    metadata["framework_manifest_sha256"]=sha256(framework/"framework-inputs.json")
+    metadata["files"]={str(path.relative_to(inputs)):sha256(path) for path in sorted(inputs.rglob("*")) if path.is_file() and path.name!=MANIFEST}
+    metadata["directories"]=[str(path.relative_to(inputs)) for path in sorted(inputs.rglob("*")) if path.is_dir()]
+    (inputs/MANIFEST).write_text(json.dumps(metadata,indent=2)+"\n")
+    verify_boot_inputs(inputs,runtime,stock)
+    print("Merged verified framework and stock app_process64; app launch has not been tested")
+
+
+def merge_platform(inputs,runtime,stock,archive):
+    from framework_inputs import protobuf_fields
+    metadata=verify_boot_inputs(inputs,runtime,stock)
+    copied={}
+    with tempfile.TemporaryDirectory(prefix="platform-boot-",dir=inputs.parent) as directory:
+        temporary=Path(directory)
+        partitions=extract_partitions(archive,temporary)
+        system=Ext4(temporary/"system.ext4")
+        for name in ["system/etc/selinux/plat_service_contexts","system/etc/classpaths/systemserverclasspath.pb"]:
+            target=temporary/"files"/name
+            system.dump("/"+name,target)
+            copied[name]=target
+        fragment=copied["system/etc/classpaths/systemserverclasspath.pb"]
+        fragments=[fragment]+sorted(inputs.glob("system/apex/*/etc/classpaths/systemserverclasspath.pb"))
+        classpaths={2:[],4:[]}
+        for fragment in fragments:
+            for tag,record in protobuf_fields(fragment.read_bytes()):
+                if tag!=1 or not isinstance(record,bytes): raise ValueError("invalid server classpath record")
+                fields={}
+                for key,value in protobuf_fields(record):
+                    if key not in (1,2,3,4) or key in fields: raise ValueError("ambiguous server classpath field")
+                    fields[key]=value
+                if fields.get(2) not in classpaths or not isinstance(fields.get(1),bytes): raise ValueError("unsupported server classpath kind")
+                name=fields[1].decode()
+                if not re.fullmatch(r"/(system/framework|apex/[A-Za-z0-9_.]+/javalib)/[A-Za-z0-9_.-]+[.]jar",name):raise ValueError("invalid server JAR")
+                bounds=[fields.get(3,b""),fields.get(4,b"")]
+                if any(not isinstance(v,bytes) or v and not re.fullmatch(rb"[0-9]{1,3}",v) for v in bounds):raise ValueError("unsupported server API bound")
+                if not int(bounds[0] or b"0")<=33<=int(bounds[1] or b"999"):continue
+                if name in classpaths[fields[2]]:raise ValueError("duplicate server JAR")
+                classpaths[fields[2]].append(name)
+                if name.startswith("/system/"):
+                    target=temporary/"files"/name[1:]
+                    system.dump(name,target);copied[name[1:]]=target
+                elif not (inputs/("system"+name)).is_file(): raise ValueError("server JAR missing from selected APEX")
+        for name,source in copied.items():
+            target=inputs/name
+            if name in metadata["symlinks"] or target.exists() and sha256(target)!=sha256(source):raise ValueError("conflicting platform boot file")
+            target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target)
+        metadata["platform_boot"]={"sdk_sha256":SDK_SHA256,"partitions":partitions,"files":{name:sha256(source) for name,source in copied.items()},"classpaths":classpaths}
+    environment=inputs/"init.environ.rc"
+    text="\n".join(line for line in environment.read_text().splitlines() if not line.startswith(("    export SYSTEMSERVERCLASSPATH ","    export STANDALONE_SYSTEMSERVER_JARS ")))+"\n"
+    for name,kind in [("SYSTEMSERVERCLASSPATH",2),("STANDALONE_SYSTEMSERVER_JARS",4)]:
+        text+="    export "+name+" "+":".join(classpaths[kind])+"\n"
+    environment.write_text(text)
+    metadata["files"]={str(path.relative_to(inputs)):sha256(path) for path in sorted(inputs.rglob("*")) if path.is_file() and path.name!=MANIFEST}
+    metadata["directories"]=[str(path.relative_to(inputs)) for path in sorted(inputs.rglob("*")) if path.is_dir()]
+    (inputs/MANIFEST).write_text(json.dumps(metadata,indent=2)+"\n")
+    verify_boot_inputs(inputs,runtime,stock)
+    print("Merged verified platform service contexts and system-server JARs; startup has not been tested")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
@@ -192,11 +282,17 @@ def main():
     source.add_argument("--reuse-payloads", type=Path)
     for flag in ["runtime-root", "stock-inputs", "profile", "output"]:
         parser.add_argument("--" + flag, type=Path, required=True)
+    parser.add_argument("--framework-inputs",type=Path,help="verified stock framework and app_process64 for init boot")
+    parser.add_argument("--platform-image",type=Path,help="pinned SDK archive for stock service contexts and server JARs")
     args = parser.parse_args()
     if args.reuse_payloads:
         reconfigure(args.reuse_payloads, args.runtime_root, args.stock_inputs, args.profile, args.output)
     else:
         prepare(args.sdk_image, args.runtime_root, args.stock_inputs, args.profile, args.output)
+    if args.framework_inputs:
+        merge_framework(args.output,args.runtime_root,args.stock_inputs,args.framework_inputs)
+    if args.platform_image:
+        merge_platform(args.output,args.runtime_root,args.stock_inputs,args.platform_image)
 
 
 if __name__ == "__main__":
