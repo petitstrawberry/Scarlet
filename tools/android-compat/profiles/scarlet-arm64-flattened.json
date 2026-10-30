@@ -409,6 +409,27 @@
         "kinds": [
           1
         ]
+      },
+      {
+        "source": "u:r:installd:s0",
+        "from": [
+          "u:object_r:unlabeled:s0",
+          "u:object_r:system_data_file:s0",
+          "u:object_r:privapp_data_file:s0:c512,c768",
+          "u:object_r:app_data_file:s0:c512,c768",
+          "u:object_r:system_app_data_file:s0",
+          "u:object_r:shell_data_file:s0"
+        ],
+        "targets": [
+          "u:object_r:privapp_data_file:s0:c512,c768",
+          "u:object_r:app_data_file:s0:c512,c768",
+          "u:object_r:system_app_data_file:s0",
+          "u:object_r:shell_data_file:s0"
+        ],
+        "kinds": [
+          1,
+          2
+        ]
       }
     ],
     "property_areas": [
@@ -1041,6 +1062,11 @@
     [
       "u:r:system_server:s0",
       "u:object_r:domain_verification_service:s0",
+      3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:legacy_permission_service:s0",
       3
     ]
   ],
