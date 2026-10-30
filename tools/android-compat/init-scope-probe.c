@@ -46,7 +46,7 @@ int main(int argc,char **argv) {
   printf("SCARLET_INIT_NAMESPACE_INSIDE pid=%d ppid=%d tid=%ld\n",getpid(),getppid(),syscall(SYS_gettid));
   if(getpid()!=1 || getppid()!=0 || syscall(SYS_gettid)!=1)return 3;
   char *const args[]={"/system/bin/init","second_stage",NULL};
-  setenv("LD_PRELOAD","/system/lib64/libprobe-init-kmsg.so",1);
+  setenv("LD_PRELOAD","libprobe-init-kmsg.so",1);
   execv(args[0],args);perror("stock init exec");return 4;
  }
  long scope=syscall(0x53430000L+1320);if(scope<0)return 11;

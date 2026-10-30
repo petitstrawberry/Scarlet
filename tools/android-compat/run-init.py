@@ -2,6 +2,7 @@
 """Observe stock init under an explicit manager profile, without asserting boot readiness."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -13,6 +14,9 @@ SOURCE = Path(__file__).resolve().parent
 
 def main():
     arguments = sys.argv[1:]
+    compositor=None
+    if "--sws-native" in arguments:
+        index=arguments.index("--sws-native");compositor=Path(arguments[index+1]).resolve();del arguments[index:index+2]
     start_zygote="--start-zygote" in arguments
     if start_zygote:arguments.remove("--start-zygote")
     if "--init-probe" not in arguments or "--boot-profile" not in arguments:
@@ -39,9 +43,15 @@ def main():
 
     def stage(inputs, runtime, stock, root):
         metadata = original(inputs, runtime, stock, root)
-        shutil.copy2(build / "libprobe-init-kmsg.so", root / "system/lib64/libprobe-init-kmsg.so")
-        if sha256(root / "system/lib64/libprobe-init-kmsg.so") != record["files"]["libprobe-init-kmsg.so"]:
-            raise ValueError("log probe changed while staging")
+        if compositor:
+            destination=root.parent.parent/"bin/sws";shutil.copy2(compositor,destination)
+            if sha256(destination)!=sha256(compositor):raise ValueError("changed native SWS executable")
+            (output/"native-sws.json").write_text(json.dumps({"path":str(compositor),"sha256":sha256(compositor),"backend":"cpu"},indent=2)+"\n")
+        for partition in ["system","vendor"]:
+            destination=root/partition/"lib64/libprobe-init-kmsg.so"
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(build/"libprobe-init-kmsg.so",destination)
+            if sha256(destination)!=record["files"]["libprobe-init-kmsg.so"]:raise ValueError("log probe changed while staging")
         shutil.copy2(build / "build.json", output / "init-probe-build.json")
         (output / "init-diagnostic.json").write_text(json.dumps({
             "kind": "bounded-stock-init-profile-v1", "probe_build_sha256": sha256(build / "build.json"),
@@ -55,8 +65,22 @@ def main():
 
     if start_zygote:arguments.extend(["--program-argument","start-zygote"])
     runner.stage_boot_inputs = stage
+    original_run=runner.smoke.run_guest
+    previous=os.environ.get("SCARLET_ANDROID_SWS_NATIVE")
+    if compositor:
+        os.environ["SCARLET_ANDROID_SWS_NATIVE"]="1"
+        def run(command,directory,timeout):
+            command=list(command)+["-device","virtio-gpu-device,bus=virtio-mmio-bus.3"]
+            commands=json.loads((directory/"commands.json").read_text());commands["qemu"]=command
+            (directory/"commands.json").write_text(json.dumps(commands,indent=2)+"\n")
+            return original_run(command,directory,timeout)
+        runner.smoke.run_guest=run
     sys.argv = [str(SOURCE / "run-direct.py"), *arguments, "--program", str(build / "init-scope-probe"), "--init-bootstrap", "--accel", "hvf"]
-    return runner.main()
+    try:return runner.main()
+    finally:
+        if compositor:
+            if previous is None:os.environ.pop("SCARLET_ANDROID_SWS_NATIVE",None)
+            else:os.environ["SCARLET_ANDROID_SWS_NATIVE"]=previous
 
 
 if __name__ == "__main__":
