@@ -3,6 +3,7 @@
 //! deliveries serialize per dispatch object until the receiver releases them.
 //! Adapters own wire formats, peer discovery, credentials and userspace handles.
 
+use crate::object::{KernelObject, handle::HandleMetadata};
 use crate::sync::{IrqSpinLock, waker::Waker};
 use alloc::{
     collections::VecDeque,
@@ -30,6 +31,9 @@ pub struct RpcMessage {
     /// Capabilities are carried separately from untrusted serialized bytes.
     /// An ABI adapter translates its wire handles and offsets into this list.
     pub objects: Vec<Arc<RpcObject>>,
+    /// Owned native capabilities and their access metadata. They remain owned
+    /// while queued, in a reply, or retained by another message copy.
+    pub capabilities: Vec<(KernelObject, HandleMetadata)>,
     /// Adapter-owned lifetime resources travel with the message, including
     /// queued, cancelled and failed deliveries. The transport never interprets
     /// them; releasing the last message copy releases these resources.
@@ -38,7 +42,9 @@ pub struct RpcMessage {
 
 impl RpcMessage {
     fn validate(&self) -> Result<(), RpcError> {
-        if self.bytes.len() > MAX_MESSAGE_SIZE || self.objects.len() > MAX_MESSAGE_OBJECTS {
+        if self.bytes.len() > MAX_MESSAGE_SIZE
+            || self.objects.len().saturating_add(self.capabilities.len()) > MAX_MESSAGE_OBJECTS
+        {
             Err(RpcError::TooLarge)
         } else {
             Ok(())
@@ -338,12 +344,12 @@ impl RpcEndpoint {
         oneway: bool,
     ) -> Result<Arc<CallState>, RpcError> {
         message.validate()?;
+        self.purge_cancelled();
         let mut state = self.state.lock();
         if state.closed || object.is_some_and(|object| object.revoked.load(Ordering::Acquire)) {
             return Err(RpcError::PeerClosed);
         }
         let object_key = object.map(RpcObject::key);
-        state.queue.retain(|request| !request.cancelled());
         state.calls.retain(|call| call.strong_count() > 0);
         // Senders serialize here; completion drops only decrement this budget.
         if self.budget.load(Ordering::Acquire) >= MAX_IN_FLIGHT {
@@ -373,8 +379,8 @@ impl RpcEndpoint {
         Ok(call)
     }
     pub fn receive(&self) -> Result<Option<RpcRequest>, RpcError> {
+        self.purge_cancelled();
         let mut state = self.state.lock();
-        state.queue.retain(|request| !request.cancelled());
         if let Some(index) = state.queue.iter().position(|request| {
             request
                 .async_gate
@@ -407,6 +413,24 @@ impl RpcEndpoint {
     }
     pub fn waker(&self) -> Arc<Waker> {
         self.waker.clone()
+    }
+    fn purge_cancelled(&self) {
+        let removed = {
+            let mut state = self.state.lock();
+            let mut removed = VecDeque::new();
+            let mut kept = VecDeque::new();
+            while let Some(request) = state.queue.pop_front() {
+                if request.cancelled() {
+                    removed.push_back(request);
+                } else {
+                    kept.push_back(request);
+                }
+            }
+            state.queue = kept;
+            removed
+        };
+        // Capability destructors may close sockets and wake another endpoint.
+        drop(removed);
     }
     fn revoke_object(&self, key: u64) {
         let (removed, calls) = {
@@ -468,6 +492,95 @@ impl Drop for RpcEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test_case]
+    fn rpc_native_capabilities_preserve_access_and_follow_reply_ownership() {
+        use crate::object::handle::AccessMode;
+        let endpoint = RpcEndpoint::new();
+        let memory = Arc::new(crate::ipc::SharedMemory::new(4096, 1).unwrap());
+        let weak = Arc::downgrade(&memory);
+        let mut sent = message(1);
+        sent.capabilities.push((
+            KernelObject::SharedMemory(memory),
+            HandleMetadata {
+                access_mode: AccessMode::ReadOnly,
+                ..HandleMetadata::default()
+            },
+        ));
+        let call = endpoint.send(sent).unwrap();
+        let request = endpoint.receive().unwrap().unwrap();
+        assert_eq!(
+            request.message.capabilities[0].1.access_mode,
+            AccessMode::ReadOnly
+        );
+        let mut reply = message(2);
+        reply.capabilities = request.message.capabilities.clone();
+        request.reply(reply).unwrap();
+        assert!(weak.upgrade().is_some());
+        let reply = call.take_reply().unwrap().unwrap();
+        drop(call);
+        let forwarded = reply.clone();
+        drop(reply);
+        assert!(weak.upgrade().is_some());
+        drop(forwarded);
+        assert!(weak.upgrade().is_none());
+    }
+    #[test_case]
+    fn rpc_capability_bounds_include_both_dispatch_and_native_objects() {
+        let endpoint = RpcEndpoint::new();
+        let object = endpoint.create_object().unwrap();
+        let memory = Arc::new(crate::ipc::SharedMemory::new(4096, 1).unwrap());
+        let mut sent = message(1);
+        sent.objects = alloc::vec![object;MAX_MESSAGE_OBJECTS];
+        sent.capabilities.push((
+            KernelObject::SharedMemory(memory.clone()),
+            HandleMetadata::default(),
+        ));
+        assert!(matches!(endpoint.send(sent), Err(RpcError::TooLarge)));
+        assert_eq!(Arc::strong_count(&memory), 1);
+        let mut sent = message(2);
+        sent.capabilities = alloc::vec![(KernelObject::SharedMemory(memory.clone()),HandleMetadata::default());MAX_MESSAGE_OBJECTS];
+        let call = endpoint.send(sent).unwrap();
+        endpoint.close();
+        assert!(matches!(call.take_reply(), Some(Err(RpcError::PeerClosed))));
+        assert_eq!(Arc::strong_count(&memory), 1);
+    }
+    #[test_case]
+    fn rpc_cancelled_capabilities_drop_outside_the_endpoint_lock() {
+        struct OnDrop {
+            endpoint: Weak<RpcEndpoint>,
+            checked: Arc<AtomicBool>,
+        }
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                let endpoint = self.endpoint.upgrade().unwrap();
+                assert!(endpoint.state.try_lock().is_some());
+                self.checked.store(true, Ordering::Release);
+            }
+        }
+        for through_send in [false, true] {
+            let endpoint = RpcEndpoint::new();
+            let memory = Arc::new(crate::ipc::SharedMemory::new(4096, 1).unwrap());
+            let weak = Arc::downgrade(&memory);
+            let checked = Arc::new(AtomicBool::new(false));
+            let mut sent = message(1);
+            sent.capabilities.push((
+                KernelObject::SharedMemory(memory),
+                HandleMetadata::default(),
+            ));
+            sent.retained = Some(Arc::new(OnDrop {
+                endpoint: Arc::downgrade(&endpoint),
+                checked: checked.clone(),
+            }));
+            drop(endpoint.send(sent).unwrap());
+            if through_send {
+                drop(endpoint.send(message(2)).unwrap());
+            } else {
+                assert!(endpoint.receive().unwrap().is_none());
+            }
+            assert!(checked.load(Ordering::Acquire));
+            assert!(weak.upgrade().is_none());
+        }
+    }
     #[test_case]
     fn rpc_oneway_serializes_each_object_until_delivery_is_released() {
         let endpoint = RpcEndpoint::new();
@@ -642,6 +755,7 @@ mod tests {
             opcode: n,
             bytes: alloc::vec![1, 2, 3],
             objects: Vec::new(),
+            capabilities: Vec::new(),
             retained: None,
         }
     }

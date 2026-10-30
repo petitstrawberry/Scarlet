@@ -1681,6 +1681,7 @@ mod tests {
             opcode,
             bytes: alloc::vec![],
             objects: alloc::vec![],
+            capabilities: alloc::vec![],
             retained: None,
         };
         let outgoing = peer.send(message(1)).unwrap();

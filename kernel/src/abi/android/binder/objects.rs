@@ -549,6 +549,7 @@ pub(super) fn message_empty() -> RpcMessage {
         opcode: 0,
         bytes: Vec::new(),
         objects: Vec::new(),
+        capabilities: Vec::new(),
         retained: None,
     }
 }
@@ -688,6 +689,7 @@ impl BinderFile {
                 opcode: u32_at(data, 16),
                 bytes,
                 objects,
+                capabilities: Vec::new(),
                 retained: Some(Arc::new(leases)),
             },
             acquisitions,
