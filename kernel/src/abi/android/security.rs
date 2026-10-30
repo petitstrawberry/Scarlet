@@ -48,7 +48,7 @@ const PAGE: usize = crate::environment::PAGE_SIZE;
 
 // Categories are retained as part of an exact, explicitly registered label.
 // This does not advertise an MLS lattice or imply dominance between labels.
-fn valid_context_name(name: &str) -> bool {
+pub(super) fn valid_context_name(name: &str) -> bool {
     let parts: Vec<_> = name.split(':').collect();
     if !(4..=5).contains(&parts.len())
         || parts[3] != "s0"

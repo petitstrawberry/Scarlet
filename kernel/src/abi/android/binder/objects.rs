@@ -98,6 +98,7 @@ pub(super) struct Node {
 impl Node {
     pub(super) fn accepts_fds(&self)->bool {self.flags & 0x100!=0}
     pub(super) fn inherits_rt(&self)->bool {self.flags & 0x800!=0}
+    pub(super) fn requests_context(&self)->bool {self.flags & 0x1000!=0}
     pub(super) fn acquired(&self) -> bool {
         !self.references.lock().acquisition_needed()
     }
@@ -584,11 +585,11 @@ fn offsets(data: &[u8], encoded: &[u8]) -> Result<Vec<usize>, usize> {
         end=offset.checked_add(size).ok_or(errno::EINVAL)?;
         if end>data.len() {return Err(errno::EINVAL);}
         let flags = u32_at(data, offset + 4);
-        // FIFO requests become native object scheduling contracts. RR and
-        // security-context delivery remain unsupported rather than downgraded.
+        // FIFO requests become native object scheduling contracts. Caller
+        // labels are delivered from native RPC metadata, never wire bytes.
         if matches!(kind,BINDER|WEAK_BINDER|HANDLE|WEAK_HANDLE) {
             let policy=(flags>>9)&3;let priority=flags&0xff;
-            if flags & !0xbff !=0 || !match policy {0=>matches!(priority,0|19),1=>(1..=99).contains(&priority),_=>false} {
+            if flags & !0x1bff !=0 || !match policy {0=>matches!(priority,0|19),1=>(1..=99).contains(&priority),_=>false} {
                 return Err(errno::EOPNOTSUPP);
             }
         }
@@ -729,6 +730,10 @@ impl BinderFile {
     }
     pub(super) fn decode_received(&self,message:&RpcMessage,address:usize,arena:&Arena,installed:Option<&mut buffers::Installed<'_>>)
         ->Result<(usize,usize),usize> {
+        self.decode_received_context(message,address,arena,installed,None).map(|(length,offsets,_)|(length,offsets))
+    }
+    pub(super) fn decode_received_context(&self,message:&RpcMessage,address:usize,arena:&Arena,installed:Option<&mut buffers::Installed<'_>>,context:Option<&str>)
+        ->Result<(usize,usize,Option<usize>),usize> {
         if message.bytes.len() < HEADER {
             return Err(errno::EINVAL);
         }
@@ -746,6 +751,15 @@ impl BinderFile {
             return Err(errno::EINVAL);
         }
         let payload_length=aligned+offsets_len+extra;
+        let context_offset=payload_length.checked_add(7).ok_or(errno::EINVAL)? & !7;
+        if let Some(context)=context {
+            if context.len()>crate::shield::MAX_LABEL_BYTES || !super::super::security::valid_context_name(context) {
+                return Err(errno::EACCES);
+            }
+            if context_offset.checked_add(context.len()+1).is_none_or(|size|size>arena::SLOT) {
+                return Err(errno::E2BIG);
+            }
+        }
         let mut payload = message.bytes[HEADER..HEADER+payload_length].to_vec();
         let offsets = offsets(&payload[..len], &payload[aligned..aligned+offsets_len])?;
         buffers::receive(message,&mut payload,&offsets,address,len,offsets_len,installed)?;
@@ -795,8 +809,13 @@ impl BinderFile {
                 put64(&mut payload, offset + 16, cookie);
                 references.push(reference);
             }
+            let context_address=if let Some(context)=context {
+                payload.resize(context_offset,0);
+                payload.extend_from_slice(context.as_bytes());payload.push(0);
+                Some(address.checked_add(context_offset).ok_or(errno::EINVAL)?)
+            } else {None};
             arena.store(address, &payload)?;
-            Ok((len, offsets_len))
+            Ok((len, offsets_len,context_address))
         })();
         if result.is_ok() {
             table.buffers.insert(address, references);
@@ -822,6 +841,7 @@ mod tests {
                 threads: BTreeMap::new(),
                 arena: None,
                 node: (0, 0),
+                node_flags: 0,
             }),
             objects: IrqSpinLock::new(Objects::default()),
         }
@@ -1132,7 +1152,9 @@ mod tests {
         assert_eq!(offsets(&data,&[0;8]),Ok(vec![0]));
         data[4..8].copy_from_slice(&0xb02u32.to_le_bytes());
         assert_eq!(offsets(&data,&[0;8]),Ok(vec![0]));
-        for flags in [0xb00u32,0xd00,0x1900,0x901] {
+        data[4..8].copy_from_slice(&0x1900u32.to_le_bytes());
+        assert_eq!(offsets(&data,&[0;8]),Ok(vec![0]));
+        for flags in [0xb00u32,0xd00,0x3900,0x901] {
             data[4..8].copy_from_slice(&flags.to_le_bytes());
             assert_eq!(offsets(&data,&[0;8]),Err(errno::EOPNOTSUPP));
         }
