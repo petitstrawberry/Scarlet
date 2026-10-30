@@ -48,6 +48,19 @@ class BootProfileTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 guest_alias("system/apex/com.android.art/lib64/a.so", target)
 
+    def test_file_label_authority_does_not_grant_property_value_writes(self):
+        p=profile();p.update(version=2,file_labels={},exec_transitions=[])
+        p["file_policy"]={"default":"u:object_r:unlabeled:s0","create":[],"relabel":[],
+            "property_areas":[{"source":"u:r:init:s0","targets":["u:object_r:default_prop:s0"]}]}
+        text=shield_policy(p,["* u:object_r:default_prop:s0\nro.gsid. u:object_r:gsid_prop:s0\n"])
+        labels={line.split()[2]:line.split()[1] for line in text.splitlines() if line.startswith("label ")}
+        default=labels["u:object_r:default_prop:s0"];unlabeled=labels["u:object_r:unlabeled:s0"]
+        self.assertIn(f"file-relabel 1 {unlabeled} {default} 1\n",text)
+        self.assertNotIn(f"property-set 1 {default}\n",text)
+        self.assertNotIn("file-exec ",text)
+        p["file_policy"]["property_areas"][0]["source"]="u:r:unknown:s0"
+        with self.assertRaises(ValueError):validate_profile(p)
+
     def test_staging_detects_file_changes_base_conflicts_and_alias_ancestors(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

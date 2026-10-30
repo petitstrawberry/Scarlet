@@ -41,6 +41,7 @@ def validate_profile(profile):
     if profile.get("version") == 2:
         fields |= {"file_labels", "exec_transitions"}
         if "resource_groups" in profile: fields.add("resource_groups")
+        if "file_policy" in profile: fields.add("file_policy")
     if set(profile) != fields or profile.get("version") not in (1, 2):
         raise ValueError("unsupported boot profile")
     if not re.fullmatch(r"[a-z0-9-]+", profile["name"]):
@@ -94,7 +95,46 @@ def validate_profile(profile):
     for path in profile["init_imports"]:
         if not path.startswith("/") or not relative_path(path[1:]).endswith(".rc"):
             raise ValueError("invalid init import")
+    if "file_policy" in profile: file_rules(profile)
     return profile
+
+
+def file_rules(profile):
+    config=profile["file_policy"]
+    if set(config)!={"default","create","relabel","property_areas"}: raise ValueError("invalid file policy fields")
+    labels={config["default"]};create=set();relabel=set()
+    def contexts(values):
+        if not isinstance(values,list) or not values or len(set(values))!=len(values) or any(not isinstance(value,str) or not CONTEXT.fullmatch(value) or not value.startswith("u:object_r:") for value in values): raise ValueError("invalid file labels")
+        labels.update(values);return values
+    contexts([config["default"]])
+    for spec in config["create"]+config["relabel"]:
+        is_create="parents" in spec
+        expected={"source","parents","targets","kinds","default"} if is_create else {"source","from","targets","kinds"}
+        if set(spec)!=expected or spec["source"] not in profile["subjects"]: raise ValueError("invalid file subject or rule")
+        parents=contexts(spec["parents" if is_create else "from"]);targets=contexts(spec["targets"]);kinds=spec["kinds"]
+        if not isinstance(kinds,list) or not kinds or len(set(kinds))!=len(kinds) or any(type(kind)!=int or not 1<=kind<=7 for kind in kinds): raise ValueError("invalid native file kind")
+        if is_create and (type(spec["default"])!=bool or spec["default"] and len(targets)!=1): raise ValueError("ambiguous create default")
+        for parent in parents:
+            for target in targets:
+                for kind in kinds:
+                    if is_create: create.add((spec["source"],parent,target,kind,int(spec["default"])))
+                    elif parent!=target: relabel.add((spec["source"],parent,target,kind))
+    seen_areas=set()
+    for area in config["property_areas"]:
+        if not isinstance(area,dict) or set(area)!={"source","targets"}: raise ValueError("invalid property area configuration")
+        source=area["source"]
+        if source not in profile["subjects"] or source in seen_areas: raise ValueError("unknown or duplicate property area subject")
+        seen_areas.add(source)
+        parents=contexts([config["default"],"u:object_r:properties_device:s0"])
+        for target in contexts(area["targets"]):
+            for parent in parents:
+                create.add((source,parent,target,1,0));relabel.add((source,parent,target,1))
+    if len(create)>4096 or len(relabel)>4096: raise ValueError("file rule bound")
+    defaults={}
+    for source,parent,target,kind,default in create:
+        if default and (source,parent,kind) in defaults: raise ValueError("ambiguous file create default")
+        if default: defaults[(source,parent,kind)]=target
+    return labels,sorted(create),sorted(relabel)
 
 
 def shield_policy(profile, contexts):
@@ -111,6 +151,8 @@ def shield_policy(profile, contexts):
     grants = profile["property_grants"]
     if any(target not in labels for targets in grants.values() for target in targets):
         raise ValueError("property grant is absent from verified contexts")
+    file_labels,create,relabel=file_rules(profile) if "file_policy" in profile else (set(),[],[])
+    labels |= file_labels
     if len(labels | set(profile.get("file_labels", {}).values())) + len(profile["subjects"]) > 512:
         raise ValueError("profile exceeds native label bound")
     labels |= set(profile.get("file_labels", {}).values())
@@ -125,6 +167,10 @@ def shield_policy(profile, contexts):
     lines += [f"file-exec {identifiers[source]} {identifiers[resource]} {identifiers[target]} {principal}"
               for source, resource, target, principal in profile.get("exec_transitions", [])]
     lines += [f"file-label {identifiers[label]} {path}" for path, label in sorted(profile.get("file_labels", {}).items())]
+    if "file_policy" in profile:
+        lines += [f"file-default {identifiers[profile['file_policy']['default']]}"]
+        lines += [f"file-create {identifiers[source]} {identifiers[parent]} {identifiers[target]} {kind} {default}" for source,parent,target,kind,default in create]
+        lines += [f"file-relabel {identifiers[source]} {identifiers[old]} {identifiers[target]} {kind}" for source,old,target,kind in relabel]
     return "\n".join(lines) + "\n"
 
 

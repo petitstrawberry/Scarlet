@@ -101,6 +101,7 @@ def prepare(archive, runtime, stock, profile_file, output):
             system.dump(path, output / path[1:])
         for path in ["/system/etc/ueventd.rc", "/system/etc/selinux/plat_file_contexts"]:
             system.dump(path, output / path[1:])
+        system.dump("/system/etc/task_profiles.json",output / "etc/task_profiles.json")
         queue = []
         for name in ["init", "ueventd", "apexd", "servicemanager", "boringssl_self_test64", "bootstrap/linker64", "bootstrap/linkerconfig"]:
             path = output / "system/bin" / name
