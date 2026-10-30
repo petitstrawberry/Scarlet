@@ -64,6 +64,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--accel", choices=("tcg", "hvf"), default="tcg")
+    parser.add_argument("--cpus", type=int, choices=range(1,9), default=1, help="HVF CPU count for scheduler integration checks")
     parser.add_argument("--binder", action="store_true", help="include Binder RPC and three-process object lifetime checks")
     args = parser.parse_args()
     if args.init_bootstrap and (not args.program or not args.stock_inputs):
@@ -319,7 +320,7 @@ def main():
     shutil.copyfile(variables, runtime_vars)
     runtime_vars.chmod(0o600)
     command = ["qemu-system-aarch64", "-machine", "virt,gic-version=3,acpi=off", "-cpu",
-               "host" if args.accel == "hvf" else "max", "-m", "2G", "-smp", "1", "-accel", args.accel,
+               "host" if args.accel == "hvf" else "max", "-m", "2G", "-smp", str(args.cpus), "-accel", args.accel,
                "-display", "none", "-monitor", "none", "-serial", "stdio", "-no-reboot",
                "-drive", f"if=pflash,format=raw,unit=0,file={smoke.qemu_filename(code)},readonly=on",
                "-drive", f"if=pflash,format=raw,unit=1,file={smoke.qemu_filename(runtime_vars)}",

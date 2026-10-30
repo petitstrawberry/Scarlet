@@ -9,7 +9,7 @@ use crate::{
     arch::Trapframe,
     library::std::usercopy::{copy_from_user, copy_to_user},
     sched::scheduler::{
-        get_all_task_ids, get_task_by_id, online_cpu_mask, reconcile_task_affinity, schedule,
+        get_all_task_ids, get_task_by_id, online_cpu_mask, schedule,
         update_task_nice,
     },
     task::{CloneFlags, SCHED_NICE_MAX, SCHED_NICE_MIN, Task, TaskType, mytask},
@@ -247,8 +247,13 @@ pub fn sys_sched_setaffinity(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> 
     if mask == 0 {
         return errno::to_result(errno::EINVAL);
     }
-    target.set_cpu_affinity_mask(mask);
-    reconcile_task_affinity(&target);
+    if caller.credentials.read().identity().principal != target.credentials.read().identity().principal
+        && !caller.credentials.read().permits(crate::shield::identity::MANAGE_RESOURCES) {
+        return errno::to_result(errno::EPERM);
+    }
+    if crate::task::resource_group::set_task_affinity(&target, mask).is_err() {
+        return errno::to_result(errno::EINVAL);
+    }
     if target.get_id() == caller.get_id() {
         schedule(trapframe);
     }

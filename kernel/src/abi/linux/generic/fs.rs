@@ -409,6 +409,7 @@ impl LinuxStatFs {
         let filesystem_type = match name {
             "ext2" => 0xef53,
             "cgroup2" => 0x6367_7270,
+            "cpuset" => 0x27e0_eb,
             "fat32" => 0x4d44,
             "tmpfs_v2" | "devfs" => 0x0102_1994,
             "devpts" => 0x1cd1,
@@ -1105,6 +1106,8 @@ pub fn sys_mount(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
     if fstype == "cgroup2" { return super::cgroup::mount(&task,&path,flags,&options).map_or_else(errno::to_result, |_| 0); }
+    if fstype == "cpuset" && options.is_empty() { return super::cgroup::mount(&task,&path,flags,"cpuset").map_or_else(errno::to_result, |_| 0); }
+    if fstype == "cgroup" && options == "cpuset" { return super::cgroup::mount(&task,&path,flags,&options).map_or_else(errno::to_result, |_| 0); }
     mount_tmpfs(&task, &path, &fstype, flags, &options).map_or_else(errno::to_result, |_| 0)
 }
 
