@@ -854,3 +854,29 @@ Scarlet does not synthesize suspend sysfs or delegate machine suspend to Android
 The profile grants the daemon its own exec label and service registration rights,
 and gives system_server explicit lookup rights. These settings do not establish
 PowerManager readiness; the stock-init execution logs record the reached stage.
+
+### SWS client for the Android graphics bridge
+
+`build-sws-client.py` cross-compiles the existing shared SWS client against
+Bionic, using the supplied Rust toolchain's `aarch64-linux-android` standard
+library and Android NDK r25b/API 33. An optional `--sysroot` selects a local
+matching Rust standard-library installation. The output records source hashes,
+compiler version, build commands, dependencies and artifact hashes.
+
+```sh
+python3 tools/android-compat/build-sws-client.py \
+  --ndk "$ANDROID_NDK_HOME" --rust-toolchain "$RUST_TOOLCHAIN_DIR" \
+  --output .build/android-services/sws-android
+```
+
+The native SDK uses its tagged syscall transport on both Linux and Android;
+ordinary Bionic calls retain their ABI. The included `native-transport-probe`
+links the actual Android-target Rust SDK into Bionic and checks namespace-local
+PID calls before and after fork. Run it through the existing direct-program
+runner with `--accel hvf`.
+
+The first display path will copy completed BGRA frames through the existing
+`sws_window_present` contract. Newer SWS scene/chrome APIs on `dev` and the SGFX
+Vulkan work retain separate ownership: GPU handles, generations and release
+serials are already defined by SWS. Building the Android client or passing the
+transport probe does not establish a working Composer/allocator HAL or display.

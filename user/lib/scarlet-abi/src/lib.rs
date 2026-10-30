@@ -804,7 +804,7 @@ pub const fn decode_native_call(number: usize) -> Option<usize> {
 
 /// Select the native SDK transport without changing its argument convention.
 pub const fn syscall_transport_number(syscall: Syscall) -> usize {
-    if cfg!(target_os = "linux") {
+    if cfg!(any(target_os = "linux", target_os = "android")) {
         NATIVE_CALL_BASE | syscall as usize
     } else {
         syscall as usize
