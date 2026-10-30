@@ -1,0 +1,3 @@
+warning: Git tree '/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet' is dirty
+error (ignored): SQLite database '/Users/petitstrawberry/.cache/nix/eval-cache-v6/0965d1f255179637071c1883b87d556a1cdd6aa3329ba1aca28eef78bc6dbd68.sqlite' is busy
+/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/bionic-fixed-priority-v2
