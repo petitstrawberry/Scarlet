@@ -19,6 +19,16 @@ def profile():
 
 
 class BootProfileTest(unittest.TestCase):
+    def test_category_labels_are_exact_and_canonical(self):
+        p=profile();p.update(version=2,file_labels={},exec_transitions=[])
+        label="u:r:platform_app:s0:c512,c768";p["subjects"][label]=3
+        p["transitions"].append(["u:r:init:s0",label,10004])
+        text=shield_policy(p,["* u:object_r:default_prop:s0\nro.gsid. u:object_r:gsid_prop:s0\n"])
+        self.assertIn("label 3 "+label+"\n",text)
+        self.assertIn("transition 1 3 10004\n",text)
+        for suffix in ["c768,c512","c512,c512","c1024","c0512","c0.c3"]:
+            bad=deepcopy(p);bad["subjects"]["u:r:app:s0:"+suffix]=4
+            with self.subTest(suffix=suffix),self.assertRaises(ValueError):validate_profile(bad)
     def test_grants_are_explicit_and_not_inferred_from_registered_contexts(self):
         p = profile()
         contexts = ["ro.gsid. u:object_r:gsid_prop:s0\n* u:object_r:default_prop:s0\n"]

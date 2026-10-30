@@ -14,7 +14,15 @@ from art_inputs import SDK_SHA256, sha256
 
 MANIFEST = "boot-profile.json"
 POLICY = "scarlet/boot/shield.policy"
-CONTEXT = re.compile(r"u:(?:r|object_r):[A-Za-z0-9_]+:s0")
+CONTEXT = re.compile(r"u:(?:r|object_r):[A-Za-z0-9_]+:s0(?::c(?:0|[1-9][0-9]*)(?:,c(?:0|[1-9][0-9]*))*)?")
+
+
+def valid_context(name):
+    if not isinstance(name,str) or len(name)>255 or not CONTEXT.fullmatch(name):return False
+    fields=name.split(":")
+    if len(fields)==4:return True
+    values=[int(category[1:]) for category in fields[4].split(",")]
+    return all(value<=1023 for value in values) and values==sorted(set(values))
 
 
 def relative_path(name):
@@ -76,7 +84,7 @@ def validate_profile(profile):
             raise ValueError("unsupported resource controller configuration")
     subjects = profile["subjects"]
     if len(subjects) > 64 or len(set(subjects.values())) != len(subjects) or any(
-            not CONTEXT.fullmatch(label) or not label.startswith("u:r:") or
+            not valid_context(label) or not label.startswith("u:r:") or
             type(identifier) is not int or not 1 <= identifier < 100 for label, identifier in subjects.items()):
         raise ValueError("invalid profile subjects")
     if subjects.get("u:r:init:s0") != 1:
@@ -91,19 +99,19 @@ def validate_profile(profile):
         seen.add(key)
     for subject, targets in profile["property_grants"].items():
         if subject not in subjects or len(set(targets)) != len(targets) or any(
-                not CONTEXT.fullmatch(label) or not label.startswith("u:object_r:") for label in targets):
+                not valid_context(label) or not label.startswith("u:object_r:") for label in targets):
             raise ValueError("invalid property grant")
     socket_labels=profile.get("socket_labels",[])
-    if len(socket_labels)>4096 or len({tuple(rule) for rule in socket_labels})!=len(socket_labels) or any(len(rule)!=2 or rule[0] not in subjects or not CONTEXT.fullmatch(rule[1]) or rule[1] not in subjects and not rule[1].startswith("u:object_r:") for rule in socket_labels):raise ValueError("invalid socket label delegation")
+    if len(socket_labels)>4096 or len({tuple(rule) for rule in socket_labels})!=len(socket_labels) or any(len(rule)!=2 or rule[0] not in subjects or not valid_context(rule[1]) or rule[1] not in subjects and not rule[1].startswith("u:object_r:") for rule in socket_labels):raise ValueError("invalid socket label delegation")
     seen_services=set()
     for source,target,permissions in profile.get("service_grants",[]):
-        if source not in subjects or not CONTEXT.fullmatch(target) or not (target.startswith("u:object_r:") or target in subjects) or type(permissions) is not int or not 1<=permissions<=7 or (source,target) in seen_services:
+        if source not in subjects or not valid_context(target) or not (target.startswith("u:object_r:") or target in subjects) or type(permissions) is not int or not 1<=permissions<=7 or (source,target) in seen_services:
             raise ValueError("invalid service grant")
         seen_services.add((source,target))
     if len(seen_services)>4096:raise ValueError("service rule bound")
     resource_labels = set(profile.get("file_labels", {}).values())
     for path, label in profile.get("file_labels", {}).items():
-        if not path.startswith(("/system/", "/apex/", "/vendor/")) or not CONTEXT.fullmatch(label) or not label.startswith("u:object_r:"):
+        if not path.startswith(("/system/", "/apex/", "/vendor/")) or not valid_context(label) or not label.startswith("u:object_r:"):
             raise ValueError("invalid file-label binding")
         relative_path(path[1:])
     seen_exec = set()
@@ -124,7 +132,7 @@ def file_rules(profile):
     if set(config)!={"default","create","relabel","property_areas"}: raise ValueError("invalid file policy fields")
     labels={config["default"]};create=set();relabel=set()
     def contexts(values):
-        if not isinstance(values,list) or not values or len(set(values))!=len(values) or any(not isinstance(value,str) or not CONTEXT.fullmatch(value) or not value.startswith("u:object_r:") for value in values): raise ValueError("invalid file labels")
+        if not isinstance(values,list) or not values or len(set(values))!=len(values) or any(not isinstance(value,str) or not valid_context(value) or not value.startswith("u:object_r:") for value in values): raise ValueError("invalid file labels")
         labels.update(values);return values
     contexts([config["default"]])
     for spec in config["create"]+config["relabel"]:
@@ -165,7 +173,7 @@ def shield_policy(profile, contexts):
             fields = line.split("#", 1)[0].split()
             if not fields:
                 continue
-            if len(fields) < 2 or not CONTEXT.fullmatch(fields[1]):
+            if len(fields) < 2 or not valid_context(fields[1]):
                 raise ValueError("unsupported stock property context")
             labels.add(fields[1])
     grants = profile["property_grants"]
