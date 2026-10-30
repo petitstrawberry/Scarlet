@@ -120,6 +120,10 @@ impl GpuQueue {
             match copy_commands(request.command_ptr, request.command_size) {
                 Ok(commands) => commands,
                 Err("GPU command allocation failed") => {
+                    crate::println!(
+                        "[gpu] command allocation exhausted: bytes={}",
+                        request.command_size
+                    );
                     request.result = GPU_RESULT_OUT_OF_RESOURCES;
                     publish(&request)?;
                     return Ok(0);
@@ -135,7 +139,13 @@ impl GpuQueue {
             crate::device::gpu::child_handle_metadata(AccessMode::ReadOnly),
         ) {
             Ok(handle) => handle,
-            Err(_) => {
+            Err(error) => {
+                crate::println!(
+                    "[gpu] completion handle allocation failed: occupied={} limit={} error={}",
+                    handles.open_count(),
+                    HandleTable::MAX_HANDLES,
+                    error
+                );
                 request.result = GPU_RESULT_OUT_OF_RESOURCES;
                 publish(&request)?;
                 return Ok(0);
@@ -179,6 +189,11 @@ impl GpuQueue {
             return EnqueueOutcome::Rejected(GPU_RESULT_BUSY);
         };
         let (Ok(owned_images), Ok(owned_buffers)) = (snapshot(&images), snapshot(&buffers)) else {
+            crate::println!(
+                "[gpu] attachment snapshot allocation failed: images={} buffers={}",
+                images.len(),
+                buffers.len()
+            );
             return EnqueueOutcome::Rejected(GPU_RESULT_OUT_OF_RESOURCES);
         };
         let submission = GpuSubmission::new(

@@ -62,8 +62,9 @@ impl Drop for HandleReservation<'_> {
 }
 
 impl HandleTable {
-    /// Maximum number of handles per table (POSIX standard limit for fd)
-    pub const MAX_HANDLES: usize = 1024;
+    /// Bounded kernel-object namespace shared by files, GPU resources and
+    /// completion notifications. This is not a POSIX descriptor-set size.
+    pub const MAX_HANDLES: usize = 16_384;
 
     /// Create a new empty handle table.
     pub fn new() -> Self {
