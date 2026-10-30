@@ -143,13 +143,12 @@ def prepare(archive, runtime, stock, profile_file, output):
 
 
 def configure(output, stock, profile, contexts, metadata):
-    from host_services import MANAGED_RC, imports
-    if metadata.get("host_service_inputs") and not profile.get("host_services"):
-        path = output / MANAGED_RC
-        if sha256(path) != metadata["host_service_inputs"]["system_suspend"]["managed_rc_sha256"]:
-            raise ValueError("changed manager host service output")
-        path.unlink()
-        metadata.pop("host_service_inputs")
+    from host_services import MANAGED_RC,HW_MANAGED_RC,imports
+    for name,record in list(metadata.get("host_service_inputs",{}).items()):
+        if name not in profile.get("host_services",[]):
+            path=output/{"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC}[name]
+            if sha256(path)!=record["managed_rc_sha256"]:raise ValueError("changed manager host service output")
+            path.unlink();metadata["host_service_inputs"].pop(name)
     previous_vintf = metadata.get("vintf_inputs")
     if previous_vintf and previous_vintf["selection"] != profile.get("vintf"):
         for name, digest in previous_vintf["generated_sha256"].items():
@@ -258,8 +257,22 @@ def merge_platform(inputs,runtime,stock,archive):
             if MANAGED_RC in metadata["symlinks"] or destination.exists() and sha256(destination)!=previous:
                 raise ValueError("conflicting host service manager output")
             destination.parent.mkdir(parents=True,exist_ok=True);destination.write_bytes(managed)
-            metadata["host_service_inputs"]={"system_suspend":proof}
+            metadata.setdefault("host_service_inputs",{})["system_suspend"]=proof
             service_roots.append(BINARY)
+        if "hwservicemanager" in metadata["profile"].get("host_services",[]):
+            from host_services import HW_BINARY,HW_STOCK_RC,HW_MANAGED_RC,build_hwmanager
+            rc=temporary/"hwmanager-stock.rc";binary=temporary/"hwmanager-stock.bin"
+            system.dump("/"+HW_STOCK_RC,rc);system.dump("/"+HW_BINARY,binary)
+            managed,proof=build_hwmanager(rc.read_bytes(),binary.read_bytes())
+            destination=inputs/HW_MANAGED_RC
+            previous=metadata.get("host_service_inputs",{}).get("hwservicemanager",{}).get("managed_rc_sha256")
+            if HW_MANAGED_RC in metadata["symlinks"] or destination.exists() and sha256(destination)!=previous:
+                raise ValueError("conflicting hardware-service manager output")
+            destination.parent.mkdir(parents=True,exist_ok=True);destination.write_bytes(managed)
+            metadata.setdefault("host_service_inputs",{})["hwservicemanager"]=proof
+            service_roots.append(HW_BINARY)
+            name="system/etc/selinux/plat_hwservice_contexts";target=temporary/"files"/name
+            system.dump("/"+name,target);copied[name]=target
         if "vintf" in metadata["profile"]:
             from vintf_inputs import build_manifests
             source_paths=["/system/etc/vintf/manifest.xml"]

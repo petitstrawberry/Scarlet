@@ -1,4 +1,4 @@
-"""Explicit stock services whose Android instance does not control host power."""
+"""Explicit stock services selected for the hosted Android environment."""
 import hashlib
 
 SUSPEND = "system_suspend"
@@ -6,6 +6,10 @@ BINARY = "system/bin/hw/android.system.suspend@1.0-service"
 STOCK_RC = "system/etc/init/android.system.suspend@1.0-service.rc"
 MANAGED_RC = "scarlet/boot/services/system_suspend.rc"
 CONTRACT = "android.system.suspend.ISystemSuspend/default"
+HW_MANAGER="hwservicemanager"
+HW_BINARY="system/bin/hwservicemanager"
+HW_STOCK_RC="system/etc/init/hwservicemanager.rc"
+HW_MANAGED_RC="scarlet/boot/services/hwservicemanager.rc"
 STOCK_TEXT = ("service system_suspend /" + BINARY + "\n"
               "    class early_hal\n    user system\n    group system wakelock\n"
               "    capabilities BLOCK_SUSPEND\n")
@@ -13,7 +17,8 @@ STOCK_TEXT = ("service system_suspend /" + BINARY + "\n"
 
 def validate_selection(profile):
     names = profile.get("host_services", [])
-    if names not in ([], [SUSPEND]):
+    if (not isinstance(names,list) or len(names)>2 or
+            any(name not in (SUSPEND,HW_MANAGER) for name in names) or len(set(names))!=len(names)):
         raise ValueError("unsupported stock host service selection")
     selected = CONTRACT in profile.get("vintf", {}).get("framework", [])
     if selected != (SUSPEND in names):
@@ -22,7 +27,15 @@ def validate_selection(profile):
 
 
 def imports(profile):
-    return ["/" + MANAGED_RC] if SUSPEND in validate_selection(profile) else []
+    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC}[name] for name in validate_selection(profile)]
+
+
+def build_hwmanager(stock_rc,binary):
+    if not stock_rc.startswith(b"service hwservicemanager /system/bin/hwservicemanager\n"):
+        raise ValueError("changed stock hardware-service manager configuration")
+    digest=lambda value:hashlib.sha256(value).hexdigest()
+    return stock_rc,{"source_rc":HW_STOCK_RC,"source_rc_sha256":digest(stock_rc),
+                     "binary_sha256":digest(binary),"managed_rc_sha256":digest(stock_rc)}
 
 
 def build_suspend(stock_rc, binary):
@@ -51,3 +64,9 @@ def validate_staged(metadata):
                 record.get("host_suspend") is not False or
                 record.get("omitted_capabilities") != ["BLOCK_SUSPEND"]):
             raise ValueError("changed SystemSuspend host provider inputs")
+    if HW_MANAGER in names:
+        record=proof[HW_MANAGER]
+        if (metadata["files"].get(HW_BINARY)!=record.get("binary_sha256") or
+                metadata["files"].get(HW_MANAGED_RC)!=record.get("managed_rc_sha256") or
+                record.get("source_rc_sha256")!=record.get("managed_rc_sha256")):
+            raise ValueError("changed hardware-service manager inputs")

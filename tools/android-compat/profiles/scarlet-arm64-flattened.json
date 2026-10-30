@@ -53,7 +53,8 @@
     "u:r:boringssl_self_test:s0": 8,
     "u:r:system_server_startup:s0": 9,
     "u:r:system_server:s0": 10,
-    "u:r:system_suspend:s0": 11
+    "u:r:system_suspend:s0": 11,
+    "u:r:hwservicemanager:s0": 12
   },
   "transitions": [
     [
@@ -125,7 +126,8 @@
       "u:object_r:persistent_properties_ready_prop:s0",
       "u:object_r:usb_control_prop:s0",
       "u:object_r:keystore_listen_prop:s0",
-      "u:object_r:ctl_start_prop:s0"
+      "u:object_r:ctl_start_prop:s0",
+      "u:object_r:hwservicemanager_prop:s0"
     ],
     "u:r:apexd:s0": [
       "u:object_r:apexd_prop:s0"
@@ -161,6 +163,9 @@
       "u:object_r:exported_system_prop:s0",
       "u:object_r:dalvik_runtime_prop:s0",
       "u:object_r:binder_cache_system_server_prop:s0"
+    ],
+    "u:r:hwservicemanager:s0": [
+      "u:object_r:hwservicemanager_prop:s0"
     ]
   },
   "init_imports": [
@@ -176,7 +181,8 @@
     "/system/bin/boringssl_self_test64": "u:object_r:boringssl_self_test_exec:s0",
     "/system/apex/com.android.conscrypt/bin/boringssl_self_test64": "u:object_r:boringssl_self_test_exec:s0",
     "/system/bin/app_process64": "u:object_r:zygote_exec:s0",
-    "/system/bin/hw/android.system.suspend@1.0-service": "u:object_r:system_suspend_exec:s0"
+    "/system/bin/hw/android.system.suspend@1.0-service": "u:object_r:system_suspend_exec:s0",
+    "/system/bin/hwservicemanager": "u:object_r:hwservicemanager_exec:s0"
   },
   "exec_transitions": [
     [
@@ -213,6 +219,12 @@
       "u:r:init:s0",
       "u:object_r:system_suspend_exec:s0",
       "u:r:system_suspend:s0",
+      1000
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:hwservicemanager_exec:s0",
+      "u:r:hwservicemanager:s0",
       1000
     ]
   ],
@@ -864,6 +876,31 @@
       "u:r:system_server:s0",
       "u:object_r:surfaceflinger_service:s0",
       2
+    ],
+    [
+      "u:r:hwservicemanager:s0",
+      "u:object_r:hidl_manager_hwservice:s0",
+      3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:hidl_manager_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:r:hwservicemanager:s0",
+      4
+    ],
+    [
+      "u:r:hwservicemanager:s0",
+      "u:object_r:hidl_base_hwservice:s0",
+      3
+    ],
+    [
+      "u:r:hwservicemanager:s0",
+      "u:object_r:hidl_token_hwservice:s0",
+      3
     ]
   ],
   "socket_labels": [
@@ -880,6 +917,7 @@
     "device": []
   },
   "host_services": [
-    "system_suspend"
+    "system_suspend",
+    "hwservicemanager"
   ]
 }

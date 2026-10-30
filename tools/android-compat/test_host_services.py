@@ -2,10 +2,23 @@ from copy import deepcopy
 import unittest
 
 from host_services import (BINARY, CONTRACT, MANAGED_RC, STOCK_TEXT, build_suspend,
+                           HW_MANAGER,HW_BINARY,HW_MANAGED_RC,build_hwmanager,
                            imports, validate_selection, validate_staged)
 
 
 class HostServicesTest(unittest.TestCase):
+    def test_hwmanager_preserves_the_verified_stock_declaration(self):
+        rc=b"service hwservicemanager /system/bin/hwservicemanager\n    user system\n    disabled\n"
+        managed,proof=build_hwmanager(rc,b"verified hwmanager")
+        self.assertEqual(managed,rc)
+        profile={"host_services":[HW_MANAGER]}
+        self.assertEqual(imports(profile),["/"+HW_MANAGED_RC])
+        metadata={"profile":profile,"host_service_inputs":{HW_MANAGER:proof},
+                  "files":{HW_BINARY:proof["binary_sha256"],HW_MANAGED_RC:proof["managed_rc_sha256"]}}
+        validate_staged(metadata)
+        metadata["files"][HW_MANAGED_RC]="changed"
+        with self.assertRaises(ValueError):validate_staged(metadata)
+        with self.assertRaises(ValueError):build_hwmanager(b"service wrong /bin/wrong\n",b"binary")
     def test_suspend_requires_provider_and_matching_contract(self):
         profile = {"host_services": ["system_suspend"],
                    "vintf": {"framework": [CONTRACT], "device": []}}
