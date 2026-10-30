@@ -360,20 +360,16 @@ impl MountTree {
 
     /// Check if an entry is a source for a bind mount
     pub fn is_bind_source(&self, entry_to_check: &VfsEntryRef) -> bool {
-        let node_id = entry_to_check.node().id();
-        self.is_bind_source_in_mount(&self.root_mount.read(), node_id)
+        let node=entry_to_check.node();
+        let Some(filesystem)=node.filesystem().and_then(|weak|weak.upgrade()) else {return false;};
+        self.is_bind_source_in_mount(&self.root_mount.read(),filesystem.fs_id(),node.id())
     }
 
-    fn is_bind_source_in_mount(&self, mount: &Arc<MountPoint>, node_id: u64) -> bool {
-        if mount.is_bind_mount() && mount.root.node().id() == node_id {
-            return true;
-        }
-        for child in mount.children.read().values() {
-            if self.is_bind_source_in_mount(child, node_id) {
-                return true;
-            }
-        }
-        false
+    fn is_bind_source_in_mount(&self,mount:&Arc<MountPoint>,filesystem:crate::fs::vfs_v2::core::FileSystemId,node_id:u64)->bool {
+        let root=mount.root.node();
+        if mount.is_bind_mount() && root.id()==node_id
+            && root.filesystem().and_then(|weak|weak.upgrade()).is_some_and(|fs|fs.fs_id()==filesystem) {return true;}
+        mount.children.read().values().any(|child|self.is_bind_source_in_mount(child,filesystem,node_id))
     }
 
     /// Check if an entry is used in a mount (either as a mount point or a bind source)
