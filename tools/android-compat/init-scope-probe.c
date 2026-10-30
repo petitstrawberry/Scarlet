@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
+#include <sys/system_properties.h>
 struct task_info {
  unsigned long pid,ppid;unsigned char state,type,cpu,reserved;int exit_status;unsigned long tgid;
  char name[64];unsigned long long cpu_ns;unsigned util,min_util,capacity;unsigned char preference,padding[3];
@@ -74,6 +75,7 @@ int main(int argc,char **argv) {
    return 0;
   }
   if(got<0){perror("outer wait");return 6;}
+  if(tick==40 && argc==2 && !strcmp(argv[1],"start-zygote")) {int result=__system_property_set("ctl.start","zygote");printf("SCARLET_INIT_CONTROL_REQUEST service=zygote result=%d\n",result);}
   if(tick==40 || tick==80)snapshot();
   usleep(100000);
  }

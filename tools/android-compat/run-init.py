@@ -13,6 +13,8 @@ SOURCE = Path(__file__).resolve().parent
 
 def main():
     arguments = sys.argv[1:]
+    start_zygote="--start-zygote" in arguments
+    if start_zygote:arguments.remove("--start-zygote")
     if "--init-probe" not in arguments or "--boot-profile" not in arguments:
         raise ValueError("run-init requires --init-probe BUILD and --boot-profile INPUTS")
     index = arguments.index("--init-probe")
@@ -46,10 +48,12 @@ def main():
             "runner_sha256": sha256(SOURCE / "run-init.py"), "acceleration": "hvf",
             "observation": "20 seconds or init exit, then close ProcessScope and verify zero live members",
             "logging": "Diagnostic preload redirects userspace /dev/kmsg writes and child stdout/stderr to inherited console; no syscall-success bypass",
-            "service_readiness": "not asserted", "apex_activation": "stock apexd must perform activation",
+            "service_readiness": "not asserted",
+            "service_control_request": "ctl.start=zygote after 4 seconds" if start_zygote else None, "apex_activation": "stock apexd must perform activation",
         }, indent=2) + "\n")
         return metadata
 
+    if start_zygote:arguments.extend(["--program-argument","start-zygote"])
     runner.stage_boot_inputs = stage
     sys.argv = [str(SOURCE / "run-direct.py"), *arguments, "--program", str(build / "init-scope-probe"), "--init-bootstrap", "--accel", "hvf"]
     return runner.main()

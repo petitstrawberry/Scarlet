@@ -64,9 +64,12 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--accel", choices=("tcg", "hvf"), default="tcg")
+    parser.add_argument("--program-argument",action="append",default=[],help="argument passed to the selected diagnostic program")
     parser.add_argument("--cpus", type=int, choices=range(1,9), default=1, help="HVF CPU count for scheduler integration checks")
     parser.add_argument("--binder", action="store_true", help="include Binder RPC and three-process object lifetime checks")
     args = parser.parse_args()
+    if args.program_argument and not args.program:
+        parser.error("--program-argument requires --program")
     if args.init_bootstrap and (not args.program or not args.stock_inputs):
         parser.error("--init-bootstrap requires --program and --stock-inputs")
     if args.boot_profile:
@@ -162,7 +165,7 @@ def main():
             dex_hash = validate_dex(args.art_dex)
         metadata = verify_art_runtime(args.runtime_root)
         art = art_launch(metadata) if args.art_dex else {
-            "argv": ["/system/bin/scarlet-program-probe"],
+            "argv": ["/system/bin/scarlet-program-probe",*args.program_argument],
             "env": ["ANDROID_LOG_TAGS=*:v", "LD_LIBRARY_PATH=" + metadata["library_path"]],
         }
         if framework:
