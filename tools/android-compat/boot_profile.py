@@ -46,6 +46,7 @@ def validate_profile(profile):
         if "socket_labels" in profile: fields.add("socket_labels")
         if "vintf" in profile: fields.add("vintf")
         if "host_services" in profile: fields.add("host_services")
+        if "package_set" in profile: fields.add("package_set")
     if set(profile) != fields or profile.get("version") not in (1, 2):
         raise ValueError("unsupported boot profile")
     if not re.fullmatch(r"[a-z0-9-]+", profile["name"]):
@@ -55,6 +56,8 @@ def validate_profile(profile):
         validate_selection(profile["vintf"])
     from host_services import validate_selection as validate_host_services
     validate_host_services(profile)
+    from desktop_inputs import validate_selection as validate_packages
+    validate_packages(profile)
     modules = profile["apex_modules"]
     if not modules or len(set(modules)) != len(modules) or any(
             not re.fullmatch(r"com\.android\.[A-Za-z0-9_.]+", name) for name in modules):
@@ -235,6 +238,8 @@ def verify_boot_inputs(inputs, runtime, stock):
 
 def stage_boot_inputs(inputs, runtime, stock, root):
     metadata = verify_boot_inputs(inputs, runtime, stock)
+    from desktop_inputs import validate_staged as validate_packages
+    validate_packages(metadata)
     from vintf_inputs import validate_staged
     validate_staged(metadata)
     from host_services import validate_staged as validate_host_services

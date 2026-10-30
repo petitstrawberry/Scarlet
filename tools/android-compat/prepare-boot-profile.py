@@ -143,10 +143,10 @@ def prepare(archive, runtime, stock, profile_file, output):
 
 
 def configure(output, stock, profile, contexts, metadata):
-    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,imports
+    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,imports
     for name,record in list(metadata.get("host_service_inputs",{}).items()):
         if name not in profile.get("host_services",[]):
-            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC}[name]
+            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC}[name]
             path=output/relative
             expected=record["files"][relative] if name=="graphics_cpu" else record["managed_rc_sha256"]
             if sha256(path)!=expected:raise ValueError("changed manager host service output")
@@ -249,6 +249,11 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
         partitions=extract_partitions(archive,temporary)
         system=Ext4(temporary/"system.ext4")
         vendor=Ext4(temporary/"vendor.ext4")
+        if metadata["profile"].get("package_set"):
+            from desktop_inputs import prepare as prepare_packages
+            package_files,proof=prepare_packages(metadata["profile"],
+                {"system":system,"system_ext":Ext4(temporary/"system_ext.ext4"),"product":Ext4(temporary/"product.ext4")},temporary,entries)
+            copied.update(package_files);metadata["desktop_inputs"]=proof
         def image_path(name):
             return (vendor,"/"+name.removeprefix("vendor/")) if name.startswith("vendor/") else (system,"/"+name)
         from host_services import BINARY, MANAGED_RC, STOCK_RC, build_suspend
@@ -279,6 +284,18 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
             name="system/etc/selinux/plat_hwservice_contexts";target=temporary/"files"/name
             system.dump("/"+name,target);copied[name]=target
         device_providers={}
+        if "installd" in metadata["profile"].get("host_services",[]):
+            from host_services import INSTALLER_BINARY,INSTALLER_STOCK_RC,INSTALLER_MANAGED_RC,build_installer
+            rc=temporary/"installer-stock.rc";binary=temporary/"installer-stock.bin"
+            system.dump("/"+INSTALLER_STOCK_RC,rc);system.dump("/"+INSTALLER_BINARY,binary)
+            managed,proof=build_installer(rc.read_bytes(),binary.read_bytes())
+            destination=inputs/INSTALLER_MANAGED_RC
+            previous=metadata.get("host_service_inputs",{}).get("installd",{}).get("managed_rc_sha256")
+            if INSTALLER_MANAGED_RC in metadata["symlinks"] or destination.exists() and sha256(destination)!=previous:
+                raise ValueError("conflicting installer manager output")
+            destination.parent.mkdir(parents=True,exist_ok=True);destination.write_bytes(managed)
+            metadata.setdefault("host_service_inputs",{})["installd"]=proof
+            service_roots.append(INSTALLER_BINARY)
         if "graphics_cpu" in metadata["profile"].get("host_services",[]):
             if not graphics:raise ValueError("CPU graphics profile requires all three verified graphics builds")
             from graphics_boot import prepare as prepare_graphics

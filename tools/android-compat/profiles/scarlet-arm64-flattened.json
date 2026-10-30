@@ -60,7 +60,8 @@
     "u:r:hwservicemanager:s0": 12,
     "u:r:hal_graphics_allocator_default:s0": 13,
     "u:r:hal_graphics_composer_default:s0": 14,
-    "u:r:surfaceflinger:s0": 15
+    "u:r:surfaceflinger:s0": 15,
+    "u:r:installd:s0": 16
   },
   "transitions": [
     [
@@ -194,7 +195,8 @@
     "/system/bin/hwservicemanager": "u:object_r:hwservicemanager_exec:s0",
     "/vendor/bin/hw/android.hardware.graphics.allocator@2.0-service.scarlet": "u:object_r:hal_graphics_allocator_default_exec:s0",
     "/vendor/bin/hw/android.hardware.graphics.composer@2.1-service.scarlet": "u:object_r:hal_graphics_composer_default_exec:s0",
-    "/system/bin/surfaceflinger": "u:object_r:surfaceflinger_exec:s0"
+    "/system/bin/surfaceflinger": "u:object_r:surfaceflinger_exec:s0",
+    "/system/bin/installd": "u:object_r:installd_exec:s0"
   },
   "exec_transitions": [
     [
@@ -256,6 +258,12 @@
       "u:object_r:surfaceflinger_exec:s0",
       "u:r:surfaceflinger:s0",
       1000
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:installd_exec:s0",
+      "u:r:installd:s0",
+      0
     ]
   ],
   "resource_groups": {
@@ -1011,6 +1019,11 @@
       "u:r:system_server:s0",
       "u:object_r:hal_graphics_allocator_hwservice:s0",
       2
+    ],
+    [
+      "u:r:installd:s0",
+      "u:object_r:installd_service:s0",
+      3
     ]
   ],
   "socket_labels": [
@@ -1045,6 +1058,8 @@
   "host_services": [
     "system_suspend",
     "hwservicemanager",
-    "graphics_cpu"
-  ]
+    "graphics_cpu",
+    "installd"
+  ],
+  "package_set": "stock-home"
 }

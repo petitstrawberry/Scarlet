@@ -2,11 +2,23 @@ from copy import deepcopy
 import unittest
 
 from host_services import (BINARY, CONTRACT, MANAGED_RC, STOCK_TEXT, build_suspend,
+                           INSTALLER,INSTALLER_BINARY,INSTALLER_MANAGED_RC,build_installer,
                            HW_MANAGER,HW_BINARY,HW_MANAGED_RC,build_hwmanager,
                            imports, validate_selection, validate_staged)
 
 
 class HostServicesTest(unittest.TestCase):
+    def test_installer_keeps_stock_process_and_rejects_changed_inputs(self):
+        rc=b"\nservice installd /system/bin/installd\n    class main\n"
+        managed,proof=build_installer(rc,b"stock installd")
+        self.assertEqual(managed,rc)
+        metadata={"profile":{"host_services":[INSTALLER]},"host_service_inputs":{INSTALLER:proof},
+                  "files":{INSTALLER_BINARY:proof["binary_sha256"],INSTALLER_MANAGED_RC:proof["managed_rc_sha256"]}}
+        self.assertEqual(imports(metadata["profile"]),["/"+INSTALLER_MANAGED_RC])
+        validate_staged(metadata)
+        metadata["files"][INSTALLER_BINARY]="changed"
+        with self.assertRaises(ValueError):validate_staged(metadata)
+        with self.assertRaises(ValueError):build_installer(rc.replace(b"/system/bin/installd",b"/other"),b"binary")
     def test_hwmanager_preserves_the_verified_stock_declaration(self):
         rc=b"service hwservicemanager /system/bin/hwservicemanager\n    user system\n    disabled\n"
         managed,proof=build_hwmanager(rc,b"verified hwmanager")
