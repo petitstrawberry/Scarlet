@@ -818,5 +818,11 @@
       "u:r:init:s0",
       "u:r:zygote:s0"
     ]
-  ]
+  ],
+  "vintf": {
+    "framework": [
+      "android.frameworks.stats.IStats/default"
+    ],
+    "device": []
+  }
 }

@@ -143,6 +143,14 @@ def prepare(archive, runtime, stock, profile_file, output):
 
 
 def configure(output, stock, profile, contexts, metadata):
+    previous_vintf = metadata.get("vintf_inputs")
+    if previous_vintf and previous_vintf["selection"] != profile.get("vintf"):
+        for name, digest in previous_vintf["generated_sha256"].items():
+            path = output / name
+            if not path.is_file() or sha256(path) != digest:
+                raise ValueError("changed manager VINTF output")
+            path.unlink()
+        metadata.pop("vintf_inputs")
     (output / "scarlet/boot").mkdir(parents=True, exist_ok=True)
     (output / POLICY).write_text(shield_policy(profile, [(stock / name).read_text() for name in contexts]))
     # Stock init loads product properties last. Keep the original file separately
@@ -232,6 +240,24 @@ def merge_platform(inputs,runtime,stock,archive):
         temporary=Path(directory)
         partitions=extract_partitions(archive,temporary)
         system=Ext4(temporary/"system.ext4")
+        if "vintf" in metadata["profile"]:
+            from vintf_inputs import build_manifests
+            source_paths=["/system/etc/vintf/manifest.xml"]
+            source_paths += ["/system/etc/vintf/manifest/"+name for name,mode,_ in
+                             entries(system,"/system/etc/vintf/manifest") if stat.S_ISREG(mode) and name.endswith(".xml")]
+            if len(source_paths)>64:raise ValueError("VINTF source count exceeds bound")
+            sources={}
+            for name in source_paths:
+                target=temporary/"vintf-sources"/name[1:]
+                system.dump(name,target);sources[name]=target.read_bytes()
+            outputs,proof=build_manifests(metadata["profile"]["vintf"],sources)
+            previous=metadata.get("vintf_inputs",{}).get("generated_sha256",{})
+            for name,data in outputs.items():
+                target=inputs/name
+                if name in metadata["symlinks"] or target.exists() and sha256(target)!=previous.get(name):
+                    raise ValueError("conflicting VINTF manager output")
+                target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(data)
+            metadata["vintf_inputs"]=proof
         for name in ["system/etc/selinux/plat_service_contexts","system/etc/classpaths/systemserverclasspath.pb","system/etc/fonts.xml"]:
             target=temporary/"files"/name
             system.dump("/"+name,target)

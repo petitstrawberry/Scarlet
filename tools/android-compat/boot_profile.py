@@ -44,10 +44,14 @@ def validate_profile(profile):
         if "file_policy" in profile: fields.add("file_policy")
         if "service_grants" in profile: fields.add("service_grants")
         if "socket_labels" in profile: fields.add("socket_labels")
+        if "vintf" in profile: fields.add("vintf")
     if set(profile) != fields or profile.get("version") not in (1, 2):
         raise ValueError("unsupported boot profile")
     if not re.fullmatch(r"[a-z0-9-]+", profile["name"]):
         raise ValueError("invalid profile name")
+    if "vintf" in profile:
+        from vintf_inputs import validate_selection
+        validate_selection(profile["vintf"])
     modules = profile["apex_modules"]
     if not modules or len(set(modules)) != len(modules) or any(
             not re.fullmatch(r"com\.android\.[A-Za-z0-9_.]+", name) for name in modules):
@@ -227,6 +231,8 @@ def verify_boot_inputs(inputs, runtime, stock):
 
 def stage_boot_inputs(inputs, runtime, stock, root):
     metadata = verify_boot_inputs(inputs, runtime, stock)
+    from vintf_inputs import validate_staged
+    validate_staged(metadata)
     # Validate every destination before modifying any file. The prepared overlay
     # must never write through an alias from the base runtime or another input.
     for name in sorted(set(metadata["files"]) | set(metadata["symlinks"]) | set(metadata["directories"])):
