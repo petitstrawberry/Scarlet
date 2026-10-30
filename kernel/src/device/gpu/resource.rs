@@ -1680,6 +1680,12 @@ impl GpuBuffer {
         size_bytes: usize,
         flags: u32,
     ) -> Result<Self, &'static str> {
+        if flags & !super::GPU_BUFFER_FLAGS_VALID != 0
+            || (flags & super::GPU_BUFFER_FLAG_QUERY_RESULT != 0
+                && flags & super::GPU_BUFFER_FLAG_CPU_VISIBLE == 0)
+        {
+            return Err("GPU buffer flags are invalid");
+        }
         if size_bytes == 0 {
             return Err("GPU buffer size must be non-zero");
         }
@@ -1697,8 +1703,9 @@ impl GpuBuffer {
         let pages = ContiguousPages::new_aligned(allocation_size / PAGE_SIZE, alignment)
             .ok_or("Failed to allocate GPU buffer pages")?;
         let backing = Arc::new(GpuBufferBacking { pages });
-        let backend_buffer =
-            backend.create_buffer(GpuBufferCreateInfo::new(backing.paddr(), backend_size))?;
+        let backend_buffer = backend.create_buffer(
+            GpuBufferCreateInfo::new(backing.paddr(), backend_size).with_flags(flags),
+        )?;
         let backend_info = backend_buffer.query_info();
         if backend_info.command_resource_token == 0 || backend_info.allocation_size != backend_size
         {

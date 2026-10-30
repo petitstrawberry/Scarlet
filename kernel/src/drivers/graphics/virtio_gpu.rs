@@ -122,6 +122,8 @@ const PIPE_BIND_RENDER_TARGET: u32 = 1 << 1;
 const PIPE_BIND_DEPTH_STENCIL: u32 = 1 << 0;
 const PIPE_BIND_SAMPLER_VIEW: u32 = 1 << 3;
 const PIPE_BIND_VERTEX_BUFFER: u32 = 1 << 4;
+// VirGL protocol values differ from Gallium PIPE_BIND_* at this bit.
+const VIRGL_BIND_CUSTOM: u32 = 1 << 17;
 const PIPE_BIND_SCANOUT: u32 = 1 << 19;
 
 // Maximum number of scanouts
@@ -2697,7 +2699,11 @@ impl GpuBackend for VirtioGpuBackend {
             resource_id: 0,
             target: PIPE_BUFFER,
             format: 0,
-            bind: PIPE_BIND_VERTEX_BUFFER,
+            bind: if create.flags & crate::device::gpu::GPU_BUFFER_FLAG_QUERY_RESULT != 0 {
+                VIRGL_BIND_CUSTOM
+            } else {
+                PIPE_BIND_VERTEX_BUFFER
+            },
             width: u32::try_from(create.allocation_size)
                 .map_err(|_| "VirtIO GPU buffer allocation exceeds PIPE_BUFFER limits")?,
             height: 1,

@@ -144,8 +144,10 @@ pub const GPU_RESULT_DEVICE_LOST: u32 = 7;
 
 /// Create buffer flag permitting CPU memory mappings.
 pub const GPU_BUFFER_FLAG_CPU_VISIBLE: u32 = 1 << 0;
+/// Host-written GPU query state; requires CPU_VISIBLE and is not a draw/storage buffer.
+pub const GPU_BUFFER_FLAG_QUERY_RESULT: u32 = 1 << 1;
 /// All currently defined GPU buffer creation flags.
-pub const GPU_BUFFER_FLAGS_VALID: u32 = GPU_BUFFER_FLAG_CPU_VISIBLE;
+pub const GPU_BUFFER_FLAGS_VALID: u32 = GPU_BUFFER_FLAG_CPU_VISIBLE | GPU_BUFFER_FLAG_QUERY_RESULT;
 
 /// Generic BGRA8 normalized unsigned image format.
 pub const GPU_IMAGE_FORMAT_BGRA8_UNORM: u32 = 1;
