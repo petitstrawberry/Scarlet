@@ -9,6 +9,8 @@ pub(crate) mod exec;
 pub mod fs;
 pub mod futex;
 mod memfd;
+mod fd_transfer;
+pub(crate) use fd_transfer::DescriptorReceipt;
 pub mod mm;
 mod mode;
 mod native_handle;
@@ -100,6 +102,7 @@ pub struct LinuxFdTable {
     fd_flags: Vec<u32>,
     file_status_flags: Vec<u32>,
     free_fds: Vec<usize>,
+    generations: Vec<u64>,
 }
 
 impl Default for LinuxFdTable {
@@ -109,6 +112,7 @@ impl Default for LinuxFdTable {
 
         Self {
             fd_to_handle: vec![None; MAX_FDS],
+            generations: vec![0; MAX_FDS],
             fd_flags: vec![0; MAX_FDS],
             file_status_flags: vec![0; MAX_FDS],
             free_fds,
@@ -201,6 +205,7 @@ impl LinuxAbi {
         if source.is_none() {
             for handle in image.handle_table.active_handles() {
                 if (handle as usize) < MAX_FDS {
+                    table.generations[handle as usize]=1;
                     table.fd_to_handle[handle as usize] = Some(handle);
                     if image
                         .handle_table
@@ -314,11 +319,9 @@ impl LinuxAbi {
 
     pub fn allocate_fd(&mut self, handle: u32) -> Result<usize, &'static str> {
         let mut table = self.fd_table.write();
-        let fd = if let Some(freed_fd) = table.free_fds.pop() {
-            freed_fd
-        } else {
-            return Err("Too many open files");
-        };
+        let fd=*table.free_fds.last().ok_or("Too many open files")?;
+        let generation=table.generations[fd].checked_add(1).ok_or("Descriptor generation exhausted")?;
+        table.free_fds.pop();table.generations[fd]=generation;
         table.fd_to_handle[fd] = Some(handle);
         Ok(fd)
     }
@@ -331,9 +334,11 @@ impl LinuxAbi {
         if table.fd_to_handle[fd].is_some() {
             return Err("File descriptor already in use");
         }
+        let generation=table.generations[fd].checked_add(1).ok_or("Descriptor generation exhausted")?;
         if let Some(pos) = table.free_fds.iter().position(|&x| x == fd) {
             table.free_fds.remove(pos);
         }
+        table.generations[fd]=generation;
         table.fd_to_handle[fd] = Some(handle);
         Ok(())
     }
@@ -376,6 +381,7 @@ impl LinuxAbi {
 
     pub fn init_std_fds(&mut self, stdin_handle: u32, stdout_handle: u32, stderr_handle: u32) {
         let mut table = self.fd_table.write();
+        for fd in 0..3 {table.generations[fd]=table.generations[fd].checked_add(1).expect("stdio descriptor generation exhausted");}
         table.fd_to_handle[0] = Some(stdin_handle);
         table.fd_to_handle[1] = Some(stdout_handle);
         table.fd_to_handle[2] = Some(stderr_handle);

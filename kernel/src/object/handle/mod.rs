@@ -1,5 +1,5 @@
 use crate::sync::IrqRwSpinLock;
-use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
+use alloc::{boxed::Box, sync::{Arc,Weak}, vec, vec::Vec};
 
 use crate::object::{KernelObject, KernelObjectRef, introspection};
 
@@ -32,6 +32,14 @@ pub struct HandleTable {
     inner: Arc<IrqRwSpinLock<HandleTableInner>>,
 }
 
+/// Deferred cleanup may address a table without keeping every object in it
+/// alive (including the object that owns the cleanup registration).
+#[derive(Clone)]
+pub(crate) struct WeakHandleTable(Weak<IrqRwSpinLock<HandleTableInner>>);
+impl WeakHandleTable {
+    pub(crate) fn upgrade(&self)->Option<HandleTable> {self.0.upgrade().map(|inner|HandleTable{inner})}
+}
+
 /// An unpublished descriptor slot reserved before an operation with filesystem
 /// side effects. Other threads sharing the table cannot allocate this slot.
 /// Dropping the reservation on any error restores the slot automatically.
@@ -62,6 +70,7 @@ impl Drop for HandleReservation<'_> {
 }
 
 impl HandleTable {
+    pub(crate) fn downgrade(&self)->WeakHandleTable {WeakHandleTable(Arc::downgrade(&self.inner))}
     /// Maximum number of handles per table (POSIX standard limit for fd)
     pub const MAX_HANDLES: usize = 1024;
 
