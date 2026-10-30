@@ -3,7 +3,7 @@ import hashlib
 import unittest
 import xml.etree.ElementTree as ET
 
-from vintf_inputs import DEVICE, FRAMEWORK, build_manifests, validate_selection, validate_staged
+from vintf_inputs import DEVICE, FRAMEWORK, GRAPHICS_DEVICE, build_manifests, validate_selection, validate_staged
 
 SOURCE = b'''<manifest version="1.0" type="framework">
 <hal><name>android.frameworks.stats</name><version>1.0</version><fqname>@1.0::IStats/default</fqname></hal>
@@ -14,6 +14,24 @@ SELECTION = {"framework": ["android.frameworks.stats.IStats/default"], "device":
 
 
 class VintfInputsTest(unittest.TestCase):
+    def test_device_inventory_requires_real_matching_provider_files(self):
+        selected={name:transport for name,transport in GRAPHICS_DEVICE.items() if "composer@2.4" not in name}
+        selection={"framework":[],"device":list(selected)}
+        with self.assertRaisesRegex(ValueError,"exact provider"):
+            build_manifests(selection,{})
+        providers={name:{"transport":transport,"path":f"vendor/provider{index}.so","sha256":str(index)}
+                   for index,(name,transport) in enumerate(selected.items())}
+        outputs,proof=build_manifests(selection,{},providers)
+        hals=ET.fromstring(outputs[DEVICE]).findall("hal")
+        self.assertEqual(len(hals),3)
+        self.assertEqual([hal.find("transport").get("arch") for hal in hals],[None,"64",None])
+        metadata={"profile":{"vintf":selection},"vintf_inputs":proof,
+                  "files":{**{p["path"]:p["sha256"] for p in providers.values()},
+                           **{name:hashlib.sha256(data).hexdigest() for name,data in outputs.items()}}}
+        validate_staged(metadata)
+        metadata["files"][next(iter(providers.values()))["path"]]="changed"
+        with self.assertRaisesRegex(ValueError,"provider changed"):validate_staged(metadata)
+
     def test_selects_one_exact_stock_contract_and_no_device_hal(self):
         outputs, proof = build_manifests(SELECTION, {"stock.xml": SOURCE})
         framework = ET.fromstring(outputs[FRAMEWORK])

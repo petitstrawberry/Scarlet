@@ -10,6 +10,8 @@ HW_MANAGER="hwservicemanager"
 HW_BINARY="system/bin/hwservicemanager"
 HW_STOCK_RC="system/etc/init/hwservicemanager.rc"
 HW_MANAGED_RC="scarlet/boot/services/hwservicemanager.rc"
+GRAPHICS="graphics_cpu"
+GRAPHICS_RC="scarlet/boot/services/graphics_cpu.rc"
 STOCK_TEXT = ("service system_suspend /" + BINARY + "\n"
               "    class early_hal\n    user system\n    group system wakelock\n"
               "    capabilities BLOCK_SUSPEND\n")
@@ -17,17 +19,21 @@ STOCK_TEXT = ("service system_suspend /" + BINARY + "\n"
 
 def validate_selection(profile):
     names = profile.get("host_services", [])
-    if (not isinstance(names,list) or len(names)>2 or
-            any(name not in (SUSPEND,HW_MANAGER) for name in names) or len(set(names))!=len(names)):
+    if (not isinstance(names,list) or len(names)>3 or
+            any(name not in (SUSPEND,HW_MANAGER,GRAPHICS) for name in names) or len(set(names))!=len(names)):
         raise ValueError("unsupported stock host service selection")
     selected = CONTRACT in profile.get("vintf", {}).get("framework", [])
     if selected != (SUSPEND in names):
         raise ValueError("SystemSuspend requires both its host provider and VINTF contract")
+    from vintf_inputs import graphics_selection
+    device=profile.get("vintf",{}).get("device",[])
+    if (GRAPHICS in names and (HW_MANAGER not in names or not graphics_selection(device)) or
+            GRAPHICS not in names and device):raise ValueError("graphics services require their exact device inventory and hardware-service manager")
     return names
 
 
 def imports(profile):
-    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC}[name] for name in validate_selection(profile)]
+    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC,GRAPHICS:GRAPHICS_RC}[name] for name in validate_selection(profile)]
 
 
 def build_hwmanager(stock_rc,binary):
@@ -70,3 +76,9 @@ def validate_staged(metadata):
                 metadata["files"].get(HW_MANAGED_RC)!=record.get("managed_rc_sha256") or
                 record.get("source_rc_sha256")!=record.get("managed_rc_sha256")):
             raise ValueError("changed hardware-service manager inputs")
+    if GRAPHICS in names:
+        record=proof[GRAPHICS]
+        if record.get("backend")!="cpu-gralloc0" or not record.get("files"):
+            raise ValueError("missing CPU graphics provider inputs")
+        for path,digest in record["files"].items():
+            if metadata["files"].get(path)!=digest:raise ValueError("changed CPU graphics provider inputs")

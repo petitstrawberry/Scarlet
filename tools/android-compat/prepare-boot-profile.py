@@ -143,11 +143,13 @@ def prepare(archive, runtime, stock, profile_file, output):
 
 
 def configure(output, stock, profile, contexts, metadata):
-    from host_services import MANAGED_RC,HW_MANAGED_RC,imports
+    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,imports
     for name,record in list(metadata.get("host_service_inputs",{}).items()):
         if name not in profile.get("host_services",[]):
-            path=output/{"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC}[name]
-            if sha256(path)!=record["managed_rc_sha256"]:raise ValueError("changed manager host service output")
+            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC}[name]
+            path=output/relative
+            expected=record["files"][relative] if name=="graphics_cpu" else record["managed_rc_sha256"]
+            if sha256(path)!=expected:raise ValueError("changed manager host service output")
             path.unlink();metadata["host_service_inputs"].pop(name)
     previous_vintf = metadata.get("vintf_inputs")
     if previous_vintf and previous_vintf["selection"] != profile.get("vintf"):
@@ -238,7 +240,7 @@ def merge_framework(inputs,runtime,stock,framework):
     print("Merged verified framework and stock app_process64; app launch has not been tested")
 
 
-def merge_platform(inputs,runtime,stock,archive):
+def merge_platform(inputs,runtime,stock,archive,graphics=None):
     from framework_inputs import protobuf_fields
     metadata=verify_boot_inputs(inputs,runtime,stock)
     copied={}
@@ -246,6 +248,9 @@ def merge_platform(inputs,runtime,stock,archive):
         temporary=Path(directory)
         partitions=extract_partitions(archive,temporary)
         system=Ext4(temporary/"system.ext4")
+        vendor=Ext4(temporary/"vendor.ext4")
+        def image_path(name):
+            return (vendor,"/"+name.removeprefix("vendor/")) if name.startswith("vendor/") else (system,"/"+name)
         from host_services import BINARY, MANAGED_RC, STOCK_RC, build_suspend
         service_roots=[]
         if "system_suspend" in metadata["profile"].get("host_services",[]):
@@ -273,6 +278,20 @@ def merge_platform(inputs,runtime,stock,archive):
             service_roots.append(HW_BINARY)
             name="system/etc/selinux/plat_hwservice_contexts";target=temporary/"files"/name
             system.dump("/"+name,target);copied[name]=target
+        device_providers={}
+        if "graphics_cpu" in metadata["profile"].get("host_services",[]):
+            if not graphics:raise ValueError("CPU graphics profile requires all three verified graphics builds")
+            from graphics_boot import prepare as prepare_graphics
+            proof,device_providers,roots=prepare_graphics(inputs,metadata,system,vendor,graphics,temporary)
+            metadata.setdefault("host_service_inputs",{})["graphics_cpu"]=proof
+            service_roots.extend(roots)
+            # Extract stock runtime libraries before binding each declaration
+            # to its actual built or stock provider bytes.
+            for name in roots:
+                image,path=image_path(name);target=temporary/"files"/name;image.dump(path,target);copied[name]=target
+            for contract,provider in device_providers.items():
+                path=provider["path"];provider["sha256"]=sha256(copied[path] if path in copied else inputs/path)
+        elif graphics:raise ValueError("graphics builds require an explicit graphics host-service selection")
         if "vintf" in metadata["profile"]:
             from vintf_inputs import build_manifests
             source_paths=["/system/etc/vintf/manifest.xml"]
@@ -283,7 +302,7 @@ def merge_platform(inputs,runtime,stock,archive):
             for name in source_paths:
                 target=temporary/"vintf-sources"/name[1:]
                 system.dump(name,target);sources[name]=target.read_bytes()
-            outputs,proof=build_manifests(metadata["profile"]["vintf"],sources)
+            outputs,proof=build_manifests(metadata["profile"]["vintf"],sources,device_providers)
             previous=metadata.get("vintf_inputs",{}).get("generated_sha256",{})
             for name,data in outputs.items():
                 target=inputs/name
@@ -308,9 +327,14 @@ def merge_platform(inputs,runtime,stock,archive):
             name=queue.pop()
             if name in seen:continue
             if len(seen)>=1024:raise ValueError("platform native dependency bound")
-            seen.add(name);target=temporary/"files"/name;system.dump("/"+name,target)
+            seen.add(name);target=temporary/"files"/name
+            image,path=image_path(name)
+            if not target.exists():image.dump(path,target)
             copied[name]=target;available.add(Path(name).name);native_needed[name]=elf_needed(target)
             for dependency in native_needed[name]:
+                vendor_relative="vendor/lib64/"+dependency
+                if name.startswith("vendor/") and "Type: regular" in vendor.command("stat "+quote_debugfs("/lib64/"+dependency)):
+                    queue.append(vendor_relative);continue
                 relative="system/lib64/"+dependency
                 if relative in seen:continue
                 # A VNDK APEX basename does not make a library visible to the
@@ -412,7 +436,10 @@ def main():
     parser.add_argument("--framework-inputs",type=Path,help="verified stock framework and app_process64 for init boot")
     parser.add_argument("--platform-image",type=Path,help="pinned SDK archive for stock service contexts and server JARs")
     parser.add_argument("--angle-image",type=Path,help="pinned SDK archive supplying its ANGLE libraries")
+    for name in ["hal","adapters","client"]:parser.add_argument("--graphics-"+name,type=Path,help="verified CPU graphics "+name+" build")
     args = parser.parse_args()
+    graphics={name:getattr(args,"graphics_"+name) for name in ["hal","adapters","client"]}
+    if any(graphics.values()) and (not all(graphics.values()) or not args.platform_image):parser.error("graphics providers require all three builds and --platform-image")
     if args.reuse_payloads:
         reconfigure(args.reuse_payloads, args.runtime_root, args.stock_inputs, args.profile, args.output)
     else:
@@ -420,7 +447,7 @@ def main():
     if args.framework_inputs:
         merge_framework(args.output,args.runtime_root,args.stock_inputs,args.framework_inputs)
     if args.platform_image:
-        merge_platform(args.output,args.runtime_root,args.stock_inputs,args.platform_image)
+        merge_platform(args.output,args.runtime_root,args.stock_inputs,args.platform_image,graphics if any(graphics.values()) else None)
     if args.angle_image:
         merge_angle(args.output,args.runtime_root,args.stock_inputs,args.angle_image)
 

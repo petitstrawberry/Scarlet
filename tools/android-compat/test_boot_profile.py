@@ -79,6 +79,10 @@ class BootProfileTest(unittest.TestCase):
         text=shield_policy(p,["* u:object_r:gsid_prop:s0\n"])
         self.assertIn("socket-create 1 2\n",text)
         self.assertNotIn("service-allow",text)
+        p["socket_labels"]=[["u:r:init:s0","u:object_r:pdx_display_client_endpoint_socket:s0"]]
+        text=shield_policy(p,["* u:object_r:gsid_prop:s0\n"])
+        self.assertIn("u:object_r:pdx_display_client_endpoint_socket:s0",text)
+        self.assertIn("socket-create 1 ",text)
         p["socket_labels"]=[["u:r:init:s0","u:r:unknown:s0"]]
         with self.assertRaises(ValueError):validate_profile(p)
 

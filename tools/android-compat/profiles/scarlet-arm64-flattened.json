@@ -54,7 +54,10 @@
     "u:r:system_server_startup:s0": 9,
     "u:r:system_server:s0": 10,
     "u:r:system_suspend:s0": 11,
-    "u:r:hwservicemanager:s0": 12
+    "u:r:hwservicemanager:s0": 12,
+    "u:r:hal_graphics_allocator_default:s0": 13,
+    "u:r:hal_graphics_composer_default:s0": 14,
+    "u:r:surfaceflinger:s0": 15
   },
   "transitions": [
     [
@@ -166,6 +169,9 @@
     ],
     "u:r:hwservicemanager:s0": [
       "u:object_r:hwservicemanager_prop:s0"
+    ],
+    "u:r:surfaceflinger:s0": [
+      "u:object_r:graphics_config_prop:s0"
     ]
   },
   "init_imports": [
@@ -182,7 +188,10 @@
     "/system/apex/com.android.conscrypt/bin/boringssl_self_test64": "u:object_r:boringssl_self_test_exec:s0",
     "/system/bin/app_process64": "u:object_r:zygote_exec:s0",
     "/system/bin/hw/android.system.suspend@1.0-service": "u:object_r:system_suspend_exec:s0",
-    "/system/bin/hwservicemanager": "u:object_r:hwservicemanager_exec:s0"
+    "/system/bin/hwservicemanager": "u:object_r:hwservicemanager_exec:s0",
+    "/vendor/bin/hw/android.hardware.graphics.allocator@2.0-service.scarlet": "u:object_r:hal_graphics_allocator_default_exec:s0",
+    "/vendor/bin/hw/android.hardware.graphics.composer@2.1-service.scarlet": "u:object_r:hal_graphics_composer_default_exec:s0",
+    "/system/bin/surfaceflinger": "u:object_r:surfaceflinger_exec:s0"
   },
   "exec_transitions": [
     [
@@ -225,6 +234,24 @@
       "u:r:init:s0",
       "u:object_r:hwservicemanager_exec:s0",
       "u:r:hwservicemanager:s0",
+      1000
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:hal_graphics_allocator_default_exec:s0",
+      "u:r:hal_graphics_allocator_default:s0",
+      1000
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:hal_graphics_composer_default_exec:s0",
+      "u:r:hal_graphics_composer_default:s0",
+      1000
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:surfaceflinger_exec:s0",
+      "u:r:surfaceflinger:s0",
       1000
     ]
   ],
@@ -901,12 +928,84 @@
       "u:r:hwservicemanager:s0",
       "u:object_r:hidl_token_hwservice:s0",
       3
+    ],
+    [
+      "u:r:hal_graphics_allocator_default:s0",
+      "u:object_r:hidl_manager_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:hal_graphics_allocator_default:s0",
+      "u:object_r:hidl_base_hwservice:s0",
+      3
+    ],
+    [
+      "u:r:hal_graphics_composer_default:s0",
+      "u:object_r:hidl_manager_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:hal_graphics_composer_default:s0",
+      "u:object_r:hidl_base_hwservice:s0",
+      3
+    ],
+    [
+      "u:r:surfaceflinger:s0",
+      "u:object_r:hidl_manager_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:surfaceflinger:s0",
+      "u:object_r:hidl_base_hwservice:s0",
+      3
+    ],
+    [
+      "u:r:hal_graphics_allocator_default:s0",
+      "u:object_r:hal_graphics_allocator_hwservice:s0",
+      3
+    ],
+    [
+      "u:r:hal_graphics_composer_default:s0",
+      "u:object_r:hal_graphics_composer_hwservice:s0",
+      3
+    ],
+    [
+      "u:r:surfaceflinger:s0",
+      "u:object_r:hal_graphics_allocator_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:surfaceflinger:s0",
+      "u:object_r:hal_graphics_composer_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:surfaceflinger:s0",
+      "u:object_r:surfaceflinger_service:s0",
+      1
+    ],
+    [
+      "u:r:surfaceflinger:s0",
+      "u:object_r:gpu_service:s0",
+      1
     ]
   ],
   "socket_labels": [
     [
       "u:r:init:s0",
       "u:r:zygote:s0"
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:pdx_display_client_endpoint_socket:s0"
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:pdx_display_manager_endpoint_socket:s0"
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:pdx_display_vsync_endpoint_socket:s0"
     ]
   ],
   "vintf": {
@@ -914,10 +1013,15 @@
       "android.frameworks.stats.IStats/default",
       "android.system.suspend.ISystemSuspend/default"
     ],
-    "device": []
+    "device": [
+      "android.hardware.graphics.allocator@2.0::IAllocator/default",
+      "android.hardware.graphics.mapper@2.0::IMapper/default",
+      "android.hardware.graphics.composer@2.1::IComposer/default"
+    ]
   },
   "host_services": [
     "system_suspend",
-    "hwservicemanager"
+    "hwservicemanager",
+    "graphics_cpu"
   ]
 }

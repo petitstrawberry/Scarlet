@@ -91,7 +91,7 @@ def validate_profile(profile):
                 not CONTEXT.fullmatch(label) or not label.startswith("u:object_r:") for label in targets):
             raise ValueError("invalid property grant")
     socket_labels=profile.get("socket_labels",[])
-    if len(socket_labels)>4096 or len({tuple(rule) for rule in socket_labels})!=len(socket_labels) or any(len(rule)!=2 or any(label not in subjects for label in rule) for rule in socket_labels):raise ValueError("invalid socket label delegation")
+    if len(socket_labels)>4096 or len({tuple(rule) for rule in socket_labels})!=len(socket_labels) or any(len(rule)!=2 or rule[0] not in subjects or not CONTEXT.fullmatch(rule[1]) or rule[1] not in subjects and not rule[1].startswith("u:object_r:") for rule in socket_labels):raise ValueError("invalid socket label delegation")
     seen_services=set()
     for source,target,permissions in profile.get("service_grants",[]):
         if source not in subjects or not CONTEXT.fullmatch(target) or not (target.startswith("u:object_r:") or target in subjects) or type(permissions) is not int or not 1<=permissions<=7 or (source,target) in seen_services:
@@ -100,7 +100,7 @@ def validate_profile(profile):
     if len(seen_services)>4096:raise ValueError("service rule bound")
     resource_labels = set(profile.get("file_labels", {}).values())
     for path, label in profile.get("file_labels", {}).items():
-        if not path.startswith(("/system/", "/apex/")) or not CONTEXT.fullmatch(label) or not label.startswith("u:object_r:"):
+        if not path.startswith(("/system/", "/apex/", "/vendor/")) or not CONTEXT.fullmatch(label) or not label.startswith("u:object_r:"):
             raise ValueError("invalid file-label binding")
         relative_path(path[1:])
     seen_exec = set()
@@ -171,6 +171,7 @@ def shield_policy(profile, contexts):
     file_labels,create,relabel=file_rules(profile) if "file_policy" in profile else (set(),[],[])
     labels |= file_labels
     labels |= {target for _,target,_ in profile.get("service_grants",[])}
+    labels |= {target for _,target in profile.get("socket_labels",[])}
     labels -= set(profile["subjects"])
     if len(labels | set(profile.get("file_labels", {}).values())) + len(profile["subjects"]) > 512:
         raise ValueError("profile exceeds native label bound")
