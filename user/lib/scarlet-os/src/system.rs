@@ -1,4 +1,4 @@
-//! Running-kernel identification.
+//! Running-kernel identity and physical-memory information.
 //!
 //! Distribution names, versions, and release codenames belong in
 //! `/etc/os-release`. These queries describe the kernel currently executing
@@ -57,6 +57,52 @@ pub fn kernel_info() -> Result<KernelInfo, &'static str> {
     decode_kernel_info(&raw)
 }
 
+/// Physical pages currently managed by the kernel allocator.
+/// Reserved RAM and MMIO are excluded; free memory is an instantaneous snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryInfo {
+    pub page_size: u64,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+}
+
+/// Read physical-memory capacity and current free bytes through the native ABI.
+/// The returned snapshot does not reserve memory or guarantee a later allocation.
+pub fn memory_info() -> Result<MemoryInfo, &'static str> {
+    let mut raw = scarlet_abi::RawMemoryInfo::default();
+    // SAFETY: raw is initialized, exclusively borrowed, and has the exact
+    // output layout/capacity. The synchronous kernel query retains no pointer.
+    let result = unsafe {
+        syscall2(
+            Syscall::GetMemoryInfo,
+            core::ptr::from_mut(&mut raw) as usize,
+            core::mem::size_of_val(&raw),
+        )
+    };
+    if result != core::mem::size_of_val(&raw) {
+        return Err("Memory information unavailable");
+    }
+    decode_memory_info(&raw)
+}
+
+fn decode_memory_info(raw: &scarlet_abi::RawMemoryInfo) -> Result<MemoryInfo, &'static str> {
+    if !raw.page_size.is_power_of_two() || raw.total_pages == 0 || raw.free_pages > raw.total_pages
+    {
+        return Err("Invalid memory information");
+    }
+    Ok(MemoryInfo {
+        page_size: raw.page_size,
+        total_bytes: raw
+            .total_pages
+            .checked_mul(raw.page_size)
+            .ok_or("Memory size overflow")?,
+        free_bytes: raw
+            .free_pages
+            .checked_mul(raw.page_size)
+            .ok_or("Memory size overflow")?,
+    })
+}
+
 fn decode_kernel_info(raw: &RawKernelInfo) -> Result<KernelInfo, &'static str> {
     Ok(KernelInfo {
         name: decode_field(&raw.name)?,
@@ -79,6 +125,26 @@ fn decode_field(bytes: &[u8]) -> Result<String, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::{RawKernelInfo, decode_field, decode_kernel_info};
+
+    #[test]
+    fn memory_snapshot_reports_bytes_and_rejects_invalid_capacity() {
+        let mut raw = scarlet_abi::RawMemoryInfo {
+            page_size: 4096,
+            total_pages: 2_097_152,
+            free_pages: 1_048_576,
+        };
+        let info = super::decode_memory_info(&raw).unwrap();
+        assert_eq!(info.total_bytes, 8 * 1024 * 1024 * 1024);
+        assert_eq!(info.free_bytes, 4 * 1024 * 1024 * 1024);
+        raw.free_pages = raw.total_pages + 1;
+        assert!(super::decode_memory_info(&raw).is_err());
+        raw.free_pages = 0;
+        raw.page_size = 0;
+        assert!(super::decode_memory_info(&raw).is_err());
+        raw.page_size = 4096;
+        raw.total_pages = u64::MAX;
+        assert!(super::decode_memory_info(&raw).is_err());
+    }
 
     #[test]
     fn kernel_info_layout_matches_the_syscall_record() {
