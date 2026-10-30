@@ -238,6 +238,9 @@ impl FileSystemOperations for TmpFS {
         file_type: FileType,
         mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        self.create_labeled(parent_node,name,file_type,mode,None)
+    }
+    fn create_labeled(&self,parent_node:&Arc<dyn VfsNode>,name:&String,file_type:FileType,mode:u32,label:Option<&crate::shield::file::CreateContext>)->Result<Arc<dyn VfsNode>,FileSystemError> {
         let tmp_parent = Arc::downcast::<TmpNode>(parent_node.clone()).map_err(|_| {
             FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
@@ -314,6 +317,7 @@ impl FileSystemOperations for TmpFS {
         if let Some(tmp_node) = new_node.as_any().downcast_ref::<TmpNode>() {
             tmp_node.set_filesystem(fs_ref);
         }
+        if let Some(label)=label {label.initialize(new_node.as_ref()).map_err(|reason|FileSystemError::new(FileSystemErrorKind::PermissionDenied,reason))?;}
         // Add to parent directory
         {
             let mut children = tmp_parent.children.write();
@@ -681,6 +685,7 @@ impl FileSystemOperations for TmpFS {
 /// Each node contains metadata, content (for symlinks), children (for directories),
 /// and references to its parent and filesystem. All fields are protected by locks for thread safety.
 pub struct TmpNode {
+    labels: Arc<crate::shield::file::Labels>,
     /// File name
     name: IrqRwSpinLock<String>,
     /// File type
@@ -774,6 +779,7 @@ impl TmpNode {
             }),
             data_lock: Mutex::new(()),
             content: IrqRwSpinLock::new(Vec::new()),
+            labels: crate::shield::file::Labels::new(),
             xattrs: IrqRwSpinLock::new(BTreeMap::new()),
             owner: IrqRwSpinLock::new(initial_owner()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
@@ -805,6 +811,7 @@ impl TmpNode {
             }),
             data_lock: Mutex::new(()),
             content: IrqRwSpinLock::new(Vec::new()),
+            labels: crate::shield::file::Labels::new(),
             xattrs: IrqRwSpinLock::new(BTreeMap::new()),
             owner: IrqRwSpinLock::new(initial_owner()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
@@ -836,6 +843,7 @@ impl TmpNode {
             }),
             data_lock: Mutex::new(()),
             content: IrqRwSpinLock::new(Vec::new()),
+            labels: crate::shield::file::Labels::new(),
             xattrs: IrqRwSpinLock::new(BTreeMap::new()),
             owner: IrqRwSpinLock::new(initial_owner()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
@@ -868,6 +876,7 @@ impl TmpNode {
             data_lock: Mutex::new(()),
             // Store symlink target in content as UTF-8 bytes
             content: IrqRwSpinLock::new(target.into_bytes()),
+            labels: crate::shield::file::Labels::new(),
             xattrs: IrqRwSpinLock::new(BTreeMap::new()),
             owner: IrqRwSpinLock::new(initial_owner()),
             children: IrqRwSpinLock::new(BTreeMap::new()),
@@ -944,6 +953,8 @@ fn initial_owner() -> crate::shield::identity::ActiveIdentity {
 }
 
 impl VfsNode for TmpNode {
+    fn shield_labels(&self)->Option<Arc<crate::shield::file::Labels>> {Some(self.labels.clone())}
+
     fn owner_identity(&self) -> Option<crate::shield::identity::ActiveIdentity> { Some(*self.owner.read()) }
     fn set_owner_identity(&self, principal:Option<crate::shield::identity::Principal>, group:Option<crate::shield::identity::Group>) -> Result<(),FileSystemError> {
         use crate::shield::identity::MANAGE_OWNERS;

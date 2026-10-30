@@ -2,6 +2,7 @@
 //! Numeric classes and permission bits are interpreted by enforcement points,
 //! never by this policy engine.
 //! Possession of a policy identity is distinct from authority to assign labels.
+pub mod file;
 pub mod execution;
 pub mod exec_transition;
 pub mod information;
@@ -46,6 +47,7 @@ pub struct ExecTransitionRule {
 }
 
 pub struct Policy {
+    pub(crate) files: file::FilePolicy,
     labels: BTreeMap<u32, String>,
     names: BTreeMap<String, u32>,
     grants: BTreeMap<(u32, u32, u32), u64>,
@@ -78,6 +80,7 @@ impl Policy {
             return Err("policy size limit");
         }
         let mut result = Self {
+            files: file::FilePolicy::default(),
             labels: BTreeMap::new(),
             names: BTreeMap::new(),
             grants: BTreeMap::new(),
@@ -130,6 +133,12 @@ impl Policy {
             }
         }
         Ok(Arc::new(result))
+    }
+    /// Derive a fresh immutable policy blueprint; inode bindings are explicitly
+    /// installed on the new identity by its administrator.
+    pub fn with_file_rules(&self,default:Option<u32>,create:Vec<file::CreateRule>,relabel:Vec<file::RelabelRule>)->Result<Arc<Self>,&'static str> {
+        let files=file::FilePolicy::build(self,default,create,relabel)?;
+        Ok(Arc::new(Self {labels:self.labels.clone(),names:self.names.clone(),grants:self.grants.clone(),transitions:self.transitions.clone(),exec_transitions:self.exec_transitions.clone(),resources:crate::sync::IrqRwSpinLock::new(resource::Resources::new()),files}))
     }
     pub fn label(&self, id: u32) -> Option<&str> {
         self.labels.get(&id).map(String::as_str)

@@ -200,6 +200,9 @@ impl fmt::Debug for VfsEntry {
 /// This trait provides only basic APIs for file/directory attributes, type checks, fs reference, and downcasting.
 /// All operation APIs (lookup, create, remove, open, etc.) are consolidated in FileSystemOperations for clear separation of concerns.
 pub trait VfsNode: Send + Sync + Any {
+    /// Native labels belong to the inode rather than its pathname or an ABI.
+    fn shield_labels(&self) -> Option<Arc<crate::shield::file::Labels>> {None}
+
     /// Returns the unique identifier in the filesystem
     fn id(&self) -> u64;
 
@@ -344,6 +347,11 @@ pub trait FileSystemOperations: Send + Sync {
     }
 
     /// Create a new file in the specified directory
+    /// Backends initialize native labels before publishing a directory entry.
+    fn create_labeled(&self,parent:&Arc<dyn VfsNode>,name:&String,file_type:FileType,mode:u32,label:Option<&crate::shield::file::CreateContext>)->Result<Arc<dyn VfsNode>,FileSystemError> {
+        if label.is_some() {return Err(FileSystemError::new(FileSystemErrorKind::NotSupported,"Filesystem cannot atomically publish inode labels"));}
+        self.create(parent,name,file_type,mode)
+    }
     fn create(
         &self,
         parent_node: &Arc<dyn VfsNode>,

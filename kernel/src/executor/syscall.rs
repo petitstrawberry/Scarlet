@@ -505,6 +505,7 @@ handler!(sys_environment_spawn, |task, tf| {
     child.resource_membership = task.resource_membership.fork()?;
     *child.security_subject.write() = task.security_subject.read().clone();
     *child.pending_exec_transition.write() = task.pending_exec_transition.read().clone();
+    *child.creation_label.write() = task.creation_label.read().clone();
     *child.credentials.write() = task.credentials.read().clone();
     *child.execution_restrictions.write() = task.execution_restrictions.read().clone();
     child.max_stack_size = task.max_stack_size;

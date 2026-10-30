@@ -860,12 +860,9 @@ impl VfsManager {
             .ok_or_else(|| {
                 FileSystemError::new(FileSystemErrorKind::NotSupported, "No filesystem reference")
             })?;
-        let new_node = filesystem.create(
-            &parent_node,
-            &filename,
-            file_type,
-            0o644, // Default permissions
-        )?;
+        let label=crate::task::mytask().map(|task|crate::shield::file::CreateContext::prepare(&task,parent_node.as_ref(),&file_type)).transpose()
+            .map_err(|reason|FileSystemError::new(FileSystemErrorKind::PermissionDenied,reason))?.flatten();
+        let new_node=filesystem.create_labeled(&parent_node,&filename,file_type,0o644,label.as_ref())?;
 
         // Create VfsEntry and add to parent cache
         let new_entry = VfsEntry::new(

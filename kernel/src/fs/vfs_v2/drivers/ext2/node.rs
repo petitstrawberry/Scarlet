@@ -94,6 +94,11 @@ impl Ext2Node {
 }
 
 impl VfsNode for Ext2Node {
+    fn shield_labels(&self)->Option<Arc<crate::shield::file::Labels>> {
+        let filesystem=self.filesystem()?.upgrade()?;
+        Some(filesystem.as_any().downcast_ref::<Ext2FileSystem>()?.labels_for_inode(self.inode_number))
+    }
+
     fn set_times(&self, times: crate::fs::FileTimeUpdate) -> Result<(), FileSystemError> {
         let filesystem = self
             .filesystem()

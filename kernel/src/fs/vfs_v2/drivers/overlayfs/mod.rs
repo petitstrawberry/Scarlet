@@ -113,6 +113,7 @@ struct OverlayInodeIds {
 }
 
 struct OverlayInode {
+    labels: Arc<crate::shield::file::Labels>,
     id: u64,
     /// Regular files involved in rename retain their backing inode instead of
     /// resolving their old pathname. All independently looked-up nodes share
@@ -132,6 +133,7 @@ impl OverlayInode {
     fn new(id: u64) -> Arc<Self> {
         Arc::new(Self {
             id,
+            labels: crate::shield::file::Labels::new(),
             backing: IrqRwSpinLock::new(None),
         })
     }
@@ -198,6 +200,7 @@ impl Clone for OverlayNode {
 }
 
 impl VfsNode for OverlayNode {
+    fn shield_labels(&self)->Option<Arc<crate::shield::file::Labels>> {Some(self.inode.labels.clone())}
     fn id(&self) -> u64 {
         self.inode.id
     }
@@ -1226,6 +1229,9 @@ impl FileSystemOperations for OverlayFS {
         file_type: FileType,
         mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        self.create_labeled(parent_node,name,file_type,mode,None)
+    }
+    fn create_labeled(&self,parent_node:&Arc<dyn VfsNode>,name:&String,file_type:FileType,mode:u32,label:Option<&crate::shield::file::CreateContext>)->Result<Arc<dyn VfsNode>,FileSystemError> {
         let _namespace = self.lock_namespace()?;
         let upper = self.get_upper_layer()?;
         let upper_fs = Self::fs_from_mount(&upper.0)?;
@@ -1294,7 +1300,7 @@ impl FileSystemOperations for OverlayFS {
         let upper_parent = self.resolve_in_layer(&upper.0, &upper.1, &overlay_parent.path)?;
         let fs = Self::fs_from_mount(&upper.0)?;
         // let new_node = fs.create(&upper_parent, name, file_type, mode)?;
-        let new_node = match fs.create(&upper_parent, name, file_type, mode) {
+        let new_node = match fs.create_labeled(&upper_parent, name, file_type, mode, label) {
             Ok(node) => node,
             Err(e) => {
                 // crate::println!(
@@ -1313,6 +1319,7 @@ impl FileSystemOperations for OverlayFS {
         if let Some(ref fs) = *overlay_parent.overlay_fs.read() {
             overlay_node.set_overlay_fs(Arc::clone(fs));
         }
+        if let Some(label)=label {label.initialize(overlay_node.as_ref()).map_err(|reason|FileSystemError::new(FileSystemErrorKind::PermissionDenied,reason))?;}
         Ok(overlay_node)
     }
 

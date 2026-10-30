@@ -887,6 +887,7 @@ pub struct Task {
     /// ABI-neutral identity, inherited across clone/spawn/exec; assignment requires authority.
     pub(crate) process_scope: IrqRwSpinLock<Option<Arc<process_scope::ProcessScope>>>,
     pub(crate) resource_membership: resource_group::Membership,
+    pub(crate) creation_label: IrqRwSpinLock<Option<crate::shield::file::CreationLabel>>,
     pub(crate) security_subject: IrqRwSpinLock<Option<crate::shield::Subject>>,
     pub(crate) pending_exec_transition: IrqRwSpinLock<Option<crate::shield::exec_transition::PendingExecTransition>>,
     pub(crate) credentials: IrqRwSpinLock<crate::shield::identity::Credentials>,
@@ -1149,6 +1150,7 @@ impl Task {
             bootstrap_environment: AtomicBool::new(false),
             process_scope: IrqRwSpinLock::new(None),
             resource_membership: resource_group::Membership::initial(task_type == TaskType::User),
+            creation_label: IrqRwSpinLock::new(None),
             security_subject: IrqRwSpinLock::new(None),
             pending_exec_transition: IrqRwSpinLock::new(None),
             credentials: IrqRwSpinLock::new(crate::shield::identity::Credentials::bootstrap()),
@@ -3166,6 +3168,7 @@ impl Task {
         *child.mount_namespace.write() = self.mount_namespace.read().clone();
         *child.process_scope.write() = self.process_scope.read().clone();
         child.resource_membership = if flags.is_set(CloneFlagsDef::Thread) { self.resource_membership.thread()? } else { self.resource_membership.fork()? };
+        *child.creation_label.write() = self.creation_label.read().clone();
         *child.security_subject.write() = self.security_subject.read().clone();
         *child.pending_exec_transition.write() = self.pending_exec_transition.read().clone();
         *child.credentials.write() = self.credentials.read().clone();

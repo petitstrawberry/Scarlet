@@ -43,6 +43,7 @@ fn owner() -> ActiveIdentity {
         })
 }
 struct Node {
+    labels: Arc<crate::shield::file::Labels>,
     id: u64,
     group: Arc<ResourceGroup>,
     kind: u8,
@@ -56,6 +57,8 @@ impl Node {
     }
 }
 impl VfsNode for Node {
+    fn shield_labels(&self)->Option<Arc<crate::shield::file::Labels>> {Some(self.labels.clone())}
+
     fn id(&self) -> u64 {
         self.id
     }
@@ -125,6 +128,7 @@ impl CgroupFs {
     pub(crate) fn new(group: Arc<ResourceGroup>) -> Arc<Self> {
         Arc::new_cyclic(|weak| {
             let node = Arc::new(Node {
+                    labels: crate::shield::file::Labels::new(),
                 id: node_id(),
                 group: group.clone(),
                 kind: 0,
@@ -147,6 +151,7 @@ impl CgroupFs {
             .entry(key)
             .or_insert_with(|| {
                 Arc::new(Node {
+                    labels: crate::shield::file::Labels::new(),
                     id: node_id(),
                     group,
                     kind,
@@ -224,6 +229,9 @@ impl FileSystemOperations for CgroupFs {
         kind: FileType,
         _mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        self.create_labeled(parent,name,kind,_mode,None)
+    }
+    fn create_labeled(&self,parent:&Arc<dyn VfsNode>,name:&String,kind:FileType,_mode:u32,label:Option<&crate::shield::file::CreateContext>)->Result<Arc<dyn VfsNode>,FileSystemError> {
         let node = self.node(parent)?;
         let task = crate::task::mytask().ok_or_else(|| error(K::PermissionDenied))?;
         if node.kind != 0 || !node.writable(&task) {
@@ -235,11 +243,14 @@ impl FileSystemOperations for CgroupFs {
         if node.group.child(name).is_some() {
             return Err(error(K::FileExists));
         }
+        let mut nodes=self.nodes.write();
         let group = node
             .group
             .create(name)
             .map_err(|_| error(K::InvalidOperation))?;
-        Ok(self.get(group, 0, owner()))
+        let child=Arc::new(Node {labels:crate::shield::file::Labels::new(),id:node_id(),group:group.clone(),kind:0,owner:IrqRwSpinLock::new(owner()),fs:self.root.fs.clone()});
+        if let Some(label)=label {if let Err(reason)=label.initialize(child.as_ref()) {let _=group.remove();return Err(FileSystemError::new(K::PermissionDenied,reason));}}
+        nodes.insert((group.identity(),0),child.clone());Ok(child)
     }
     fn remove(&self, parent: &Arc<dyn VfsNode>, name: &String) -> Result<(), FileSystemError> {
         let node = self.node(parent)?;

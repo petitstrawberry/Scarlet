@@ -28,6 +28,9 @@ impl Policy {
         Ok(())
     }
     pub fn resource_label(&self, node: &dyn VfsNode) -> Option<u32> {
+        self.bound_resource_label(node).or_else(||node.shield_labels().and_then(|labels|labels.get(self))).or(self.files.default)
+    }
+    pub(crate) fn bound_resource_label(&self, node: &dyn VfsNode) -> Option<u32> {
         let filesystem = node.filesystem()?.upgrade()?;
         self.resources.read().0.get(&(filesystem.fs_id().get(), node.id())).map(|resource| resource.label)
     }

@@ -307,6 +307,7 @@ pub struct Ext2FileSystem {
     next_file_id: IrqSpinLock<u64>,
     /// LRU cached inodes
     inode_cache: IrqRwSpinLock<InodeLruCache>,
+    inode_labels: IrqSpinLock<BTreeMap<u32, Arc<crate::shield::file::Labels>>>,
     /// LRU cached blocks
     block_cache: IrqRwSpinLock<BlockLruCache>,
     /// Per-inode locks serialize directory mutations and regular-file writes,
@@ -636,6 +637,7 @@ impl Ext2FileSystem {
             name: "ext2".to_string(),
             next_file_id: IrqSpinLock::new(2), // Start from 2, root is 1
             inode_cache: IrqRwSpinLock::new(InodeLruCache::new(8192)),
+            inode_labels: IrqSpinLock::new(BTreeMap::new()),
             block_cache: IrqRwSpinLock::new(BlockLruCache::new(8192)),
             inode_locks: IrqRwSpinLock::new(BTreeMap::new()),
             open_inodes: Arc::new(IrqSpinLock::new(BTreeMap::new())),
@@ -691,6 +693,9 @@ impl Ext2FileSystem {
 
     /// Caller holds this inode's operation lock. The token is released only
     /// after final close writeback; separate aliases share this inode key.
+    fn labels_for_inode(&self,inode:u32)->Arc<crate::shield::file::Labels> {
+        self.inode_labels.lock().entry(inode).or_insert_with(crate::shield::file::Labels::new).clone()
+    }
     fn pin_open_inode(&self, inode: u32) -> Ext2OpenGuard {
         *self.open_inodes.lock().entry(inode).or_insert(0) += 1;
         Ext2OpenGuard {
@@ -3010,6 +3015,7 @@ impl Ext2FileSystem {
             self.block_cache.write().remove(bgd_block as u64);
 
             self.clear_inode_on_disk(inode_number)?;
+            self.inode_labels.lock().remove(&inode_number);
 
             // Update superblock statistics
             self.update_superblock_free_counts(0, 1)?;
@@ -5105,6 +5111,9 @@ impl FileSystemOperations for Ext2FileSystem {
         file_type: FileType,
         _mode: u32,
     ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        self.create_labeled(parent,name,file_type,_mode,None)
+    }
+    fn create_labeled(&self,parent:&Arc<dyn VfsNode>,name:&String,file_type:FileType,_mode:u32,label:Option<&crate::shield::file::CreateContext>)->Result<Arc<dyn VfsNode>,FileSystemError> {
         let ext2_parent = parent.as_any().downcast_ref::<Ext2Node>().ok_or_else(|| {
             FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
@@ -5327,28 +5336,6 @@ impl FileSystemOperations for Ext2FileSystem {
         self.write_inode(new_inode_number, &new_inode)?;
 
         // Add directory entry to parent directory
-        self.add_directory_entry(
-            ext2_parent.inode_number(),
-            name,
-            new_inode_number,
-            file_type.clone(),
-        )?;
-
-        if matches!(file_type, FileType::Directory) {
-            // Update parent directory's nlinks count (removing ".." entry)
-            let mut parent_inode = self.read_inode(ext2_parent.inode_number())?;
-            parent_inode.links_count = (u16::from_le(parent_inode.links_count) + 1).to_le();
-            self.write_inode(ext2_parent.inode_number(), &parent_inode)?;
-
-            // The new inode can live in a different group from its parent.
-            self.with_allocation_lock(|| {
-                let group = (new_inode_number - 1) / self.superblock.get_inodes_per_group();
-                let mut bgd = self.read_group_descriptor(group)?;
-                bgd.used_dirs_count = u16::from_le(bgd.used_dirs_count).saturating_add(1).to_le();
-                self.update_group_descriptor(group, &bgd)
-            })?;
-        }
-
         // Create new node
         let new_node = match &file_type {
             FileType::RegularFile => Arc::new(Ext2Node::new(
@@ -5385,6 +5372,29 @@ impl FileSystemOperations for Ext2FileSystem {
         // Set filesystem reference
         if let Some(fs_ref) = ext2_parent.filesystem() {
             new_node.set_filesystem(fs_ref);
+        }
+
+        if let Some(label)=label {label.initialize(new_node.as_ref()).map_err(|reason|FileSystemError::new(FileSystemErrorKind::PermissionDenied,reason))?;}
+        self.add_directory_entry(
+            ext2_parent.inode_number(),
+            name,
+            new_inode_number,
+            file_type.clone(),
+        )?;
+
+        if matches!(file_type, FileType::Directory) {
+            // Update parent directory's nlinks count (removing ".." entry)
+            let mut parent_inode = self.read_inode(ext2_parent.inode_number())?;
+            parent_inode.links_count = (u16::from_le(parent_inode.links_count) + 1).to_le();
+            self.write_inode(ext2_parent.inode_number(), &parent_inode)?;
+
+            // The new inode can live in a different group from its parent.
+            self.with_allocation_lock(|| {
+                let group = (new_inode_number - 1) / self.superblock.get_inodes_per_group();
+                let mut bgd = self.read_group_descriptor(group)?;
+                bgd.used_dirs_count = u16::from_le(bgd.used_dirs_count).saturating_add(1).to_le();
+                self.update_group_descriptor(group, &bgd)
+            })?;
         }
 
         Ok(new_node)
