@@ -9,6 +9,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <stdint.h>
 #include <sys/un.h>
 #include <dirent.h>
 #include <stdlib.h>
@@ -17,6 +19,22 @@ static int console=-1;
 static int zygote_diagnostic;
 static struct stat null_identity;
 static int have_null;
+static void report(const char *format,...);
+int ioctl(int fd,int request,...) {
+ va_list args;va_start(args,request);void *argument=va_arg(args,void*);va_end(args);
+ int (*real)(int,int,...)=dlsym(RTLD_NEXT,"ioctl");
+ if(!real){errno=ENOSYS;return -1;}
+ int result=real(fd,request,argument),saved=errno;
+ static unsigned failures;
+ if(result<0 && (unsigned)request==0xc0306201u && saved!=EAGAIN && saved!=EINTR && __atomic_fetch_add(&failures,1,__ATOMIC_RELAXED)<16) {
+  uint64_t *bwr=argument;
+  uint32_t command=0;
+  if(bwr && bwr[1]<=bwr[0] && bwr[0]-bwr[1]>=4 && bwr[0]<=1048576)memcpy(&command,(void*)(uintptr_t)(bwr[2]+bwr[1]),4);
+  report("SCARLET_INIT_BINDER_IOCTL_FAIL fd=%d tid=%d errno=%d write=%llu consumed=%llu read=%llu returned=%llu command=0x%x\n",fd,gettid(),saved,
+      bwr?(unsigned long long)bwr[0]:0,bwr?(unsigned long long)bwr[1]:0,bwr?(unsigned long long)bwr[3]:0,bwr?(unsigned long long)bwr[4]:0,command);
+ }
+ errno=saved;return result;
+}
 static void report(const char *format,...) {
  char message[4096];va_list args;va_start(args,format);int n=vsnprintf(message,sizeof(message),format,args);va_end(args);
  if(n<0)return;size_t length=(size_t)n<sizeof(message)?(size_t)n:sizeof(message)-1;

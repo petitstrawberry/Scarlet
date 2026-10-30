@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import tempfile
+import threading
 
 from art_inputs import sha256
 
@@ -14,9 +16,18 @@ SOURCE = Path(__file__).resolve().parent
 
 def main():
     arguments = sys.argv[1:]
+    observation=20
+    if "--observe-seconds" in arguments:
+        index=arguments.index("--observe-seconds");observation=int(arguments[index+1]);del arguments[index:index+2]
+        if not 20<=observation<=300:raise ValueError("observation must be 20..300 seconds")
     compositor=None
+    capture_frame="--capture-frame" in arguments
+    if capture_frame:arguments.remove("--capture-frame")
+    start_installer="--start-installer" in arguments
+    if start_installer:arguments.remove("--start-installer")
     if "--sws-native" in arguments:
         index=arguments.index("--sws-native");compositor=Path(arguments[index+1]).resolve();del arguments[index:index+2]
+    if capture_frame and not compositor:raise ValueError("frame capture requires --sws-native")
     start_zygote="--start-zygote" in arguments
     if start_zygote:arguments.remove("--start-zygote")
     if "--init-probe" not in arguments or "--boot-profile" not in arguments:
@@ -56,14 +67,17 @@ def main():
         (output / "init-diagnostic.json").write_text(json.dumps({
             "kind": "bounded-stock-init-profile-v1", "probe_build_sha256": sha256(build / "build.json"),
             "runner_sha256": sha256(SOURCE / "run-init.py"), "acceleration": "hvf",
-            "observation": "20 seconds or init exit, then close ProcessScope and verify zero live members",
+            "observation": f"{observation} seconds or init exit, then close ProcessScope and verify zero live members",
             "logging": "Diagnostic preload sends init/daemon messages to inherited console and Zygote messages through short-lived Unix datagrams; supervisor drains logdw wire records; runtime results remain unchanged",
             "service_readiness": "not asserted",
             "service_control_request": "ctl.start=zygote after 4 seconds" if start_zygote else None, "apex_activation": "stock apexd must perform activation",
+            "installer_control_request": "ctl.start=installd after 4 seconds" if start_installer else None,
         }, indent=2) + "\n")
         return metadata
 
     if start_zygote:arguments.extend(["--program-argument","start-zygote"])
+    arguments.extend(["--program-env",f"SCARLET_INIT_OBSERVE_SECONDS={observation}"])
+    if start_installer:arguments.extend(["--program-env","SCARLET_INIT_START_INSTALLER=1"])
     runner.stage_boot_inputs = stage
     original_run=runner.smoke.run_guest
     previous=os.environ.get("SCARLET_ANDROID_SWS_NATIVE")
@@ -71,9 +85,36 @@ def main():
         os.environ["SCARLET_ANDROID_SWS_NATIVE"]="1"
         def run(command,directory,timeout):
             command=list(command)+["-device","virtio-gpu-device,bus=virtio-mmio-bus.3"]
-            commands=json.loads((directory/"commands.json").read_text());commands["qemu"]=command
-            (directory/"commands.json").write_text(json.dumps(commands,indent=2)+"\n")
-            return original_run(command,directory,timeout)
+            def record_command():
+                commands=json.loads((directory/"commands.json").read_text());commands["qemu"]=command
+                (directory/"commands.json").write_text(json.dumps(commands,indent=2)+"\n")
+            if not capture_frame:
+                record_command();return original_run(command,directory,timeout)
+            sys.path.insert(0,str(SOURCE.parent.parent/"tools"))
+            from qmp import Qmp
+            spec=importlib.util.spec_from_file_location("init_frame_capture",SOURCE/"run-graphics-frame.py")
+            pixels=importlib.util.module_from_spec(spec);spec.loader.exec_module(pixels)
+            with tempfile.TemporaryDirectory(prefix="scarlet-init-frame-",dir="/tmp") as temporary:
+                socket=str(Path(temporary)/"qmp.sock")
+                command.extend(["-qmp",f"unix:{socket},server=on,wait=off"]);record_command()
+                stopped=threading.Event();capture={"scope":"observed SWS display; app readiness is not asserted","snapshots":0}
+                def screenshot():
+                    while not stopped.wait(2):
+                        serial=directory/"serial.log"
+                        if not serial.exists():continue
+                        data=serial.read_bytes()
+                        if b"SCARLET_INIT_NAMESPACE_STOP_REAP" in data:return
+                        if b"Finished setting power mode 2 on display 0" not in data:continue
+                        try:
+                            with Qmp(socket,timeout=3) as qmp:qmp.execute("screendump",{"filename":str(directory/"frame.ppm")})
+                            proof=pixels.capture_pixels(directory/"frame.ppm",directory/"frame.png")
+                            capture.update({key:proof[key] for key in ["size","frame_sha256"]});capture["snapshots"]+=1
+                        except Exception as error:capture["last_error"]=str(error)
+                worker=threading.Thread(target=screenshot,daemon=True);worker.start()
+                try:return original_run(command,directory,timeout)
+                finally:
+                    stopped.set();worker.join(timeout=4)
+                    (directory/"frame-observation.json").write_text(json.dumps(capture,indent=2)+"\n")
         runner.smoke.run_guest=run
     sys.argv = [str(SOURCE / "run-direct.py"), *arguments, "--program", str(build / "init-scope-probe"), "--init-bootstrap", "--accel", "hvf"]
     try:return runner.main()

@@ -42,6 +42,8 @@ static void drain_logs(int fd) {
 }
 int main(int argc,char **argv) {
  setvbuf(stdout,NULL,_IONBF,0);
+ int observation=20;const char *requested=getenv("SCARLET_INIT_OBSERVE_SECONDS");
+ if(requested) {char *end=NULL;long value=strtol(requested,&end,10);if(!*requested || *end || value<20 || value>300)return 16;observation=(int)value;}
  if(argc==2 && !strcmp(argv[1],"inside")) {
   printf("SCARLET_INIT_NAMESPACE_INSIDE pid=%d ppid=%d tid=%ld\n",getpid(),getppid(),syscall(SYS_gettid));
   if(getpid()!=1 || getppid()!=0 || syscall(SYS_gettid)!=1)return 3;
@@ -61,9 +63,9 @@ int main(int argc,char **argv) {
  }
  printf("SCARLET_INIT_NAMESPACE_OUTER child=%d\n",child);
  struct timespec started,now;if(clock_gettime(CLOCK_MONOTONIC,&started))return 15;
- for(int tick=0;tick<200;tick++) {
+ for(int tick=0;tick<observation*10;tick++) {
   if(clock_gettime(CLOCK_MONOTONIC,&now))return 15;
-  if(now.tv_sec-started.tv_sec>20 || (now.tv_sec-started.tv_sec==20 && now.tv_nsec>=started.tv_nsec))break;
+  if(now.tv_sec-started.tv_sec>observation || (now.tv_sec-started.tv_sec==observation && now.tv_nsec>=started.tv_nsec))break;
   drain_logs(logfd);
   int status;pid_t got=waitpid(child,&status,WNOHANG);
   if(got==child){
@@ -81,6 +83,9 @@ int main(int argc,char **argv) {
   }
   if(got<0){perror("outer wait");return 6;}
   if(tick==40 && argc==2 && !strcmp(argv[1],"start-zygote")) {int result=__system_property_set("ctl.start","zygote");printf("SCARLET_INIT_CONTROL_REQUEST service=zygote result=%d\n",result);}
+  if(tick==40 && getenv("SCARLET_INIT_START_INSTALLER") && !strcmp(getenv("SCARLET_INIT_START_INSTALLER"),"1")) {
+   int result=__system_property_set("ctl.start","installd");printf("SCARLET_INIT_CONTROL_REQUEST service=installd result=%d\n",result);
+  }
   if(tick==40 || tick==80)snapshot();
   usleep(100000);
  }
