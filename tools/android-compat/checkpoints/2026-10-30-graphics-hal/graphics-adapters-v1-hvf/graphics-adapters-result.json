@@ -1,0 +1,6 @@
+{
+  "result": "PASS",
+  "scope": "stock in-process Mapper/Allocator templates and imported CPU buffer lifetime",
+  "allocator_hwbinder_registration": "not tested",
+  "surfaceflinger": "not tested"
+}

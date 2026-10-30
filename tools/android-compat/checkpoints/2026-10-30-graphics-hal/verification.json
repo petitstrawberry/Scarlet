@@ -1,5 +1,5 @@
 {
-  "revision": "6e61c6c65967a952ac9775deba2e465caf19c92a",
+  "revision": "cad88cbc183a65077bb0dba194e7c97148d9a756",
   "acceleration": "HVF only",
   "milestone": "M4: actual CPU framebuffer HAL pixels displayed in SWS; stock SurfaceFlinger and an APK Activity are still pending",
   "observed": [
@@ -8,14 +8,16 @@
     "Bionic hwbinder peers transferred plain FDs, FD arrays and embedded buffer pointers in both directions, with lifetime and invalid-input checks",
     "Stock hwservicemanager started with its own Shield subject and logged ready after real hwbinder setup",
     "Android framebuffer HAL allocated, painted and presented a CPU buffer into an actual SWS window; QMP screenshot contains over 91000 pixels of each expected primary color",
-    "Private SWS was terminated and reaped by its owning supervisor"
+    "Private SWS was terminated and reaped by its owning supervisor",
+    "Stock HIDL Mapper/Allocator templates execute in a real Bionic process: allocate, import, release allocator copy, lock/write/unlock, relock/read, free imported buffer"
   ],
   "limitations": [
     "The shown frame is a HAL test pattern; no SurfaceFlinger composition or APK Activity has been displayed",
     "SystemServer still waits for SurfaceFlinger and installd",
     "RT priority inheritance and nested synchronous Binder transactions remain unsupported",
     "Stock init still needs the diagnostic supervisor to request Zygote during the bounded run",
-    "SWS binary supplied from the existing native build dated October 25; this does not validate newer scene/chrome work"
+    "SWS binary supplied from the existing native build dated October 25; this does not validate newer scene/chrome work",
+    "The adapter probe uses in-process templates; allocator daemon registration and Composer composition remain untested"
   ],
   "active_inputs": [
     ".build/android-services/flattened-boot-inputs-v43",
@@ -25,14 +27,17 @@
     ".build/android-services/init-profile-probe-v15",
     ".build/android-services/android-rust-1.95/sysroot",
     ".build/android-services/graphics-source-inspection",
-    ".build/android-services/swiftshader-android13-source"
+    ".build/android-services/swiftshader-android13-source",
+    ".build/android-services/stock-graphics-adapters-v1"
   ],
   "kernel_sha256": "b872eaf263e850fa614d23965e08535c6f6b14784bdc96718e773bd17f369797",
   "evidence_sha256": {
     "test-rpc-capabilities-v2-hvf.log": "00cd5882e2e44f37f56f0d73106d289ef727ef6bc5ebc8dcedda7d81edb75c03",
     "test-host-graphics-v2.log": "17c589adf5dca52998be7435876f24ad0b12544ae7ca37a72d1ac60f3b67b8a8",
+    "build-stock-graphics-adapters-v1.log": "85a84d1ba26ac4bca0129ea1f6d5fbb16a220d5b0559574890d10c890a6ff319",
     "build-sws-android-v4.log": "237185d14c501ad8ab784568afdcc302e9b18ec1c529fef19b12b18606fd2843",
     "test-binder-buffers-v6-hvf.log": "674b0c55dcf62e8f0f95d8a7f503ebb13e205e68e5b2918adc37d6b721538b50",
+    "test-host-graphics-adapters-v1.log": "70af3a3800f8cfd696d92bc2b47ae84ad9286590da278d46e2460428423e4ed1",
     "build-cpu-graphics-hal-v8.log": "d9258b2378082c5ac2a1b781fd334d62c459fcb519f4b9d5df940e982fe74357",
     "graphics-frame-v3-hvf/boot-profile.json": "458033e098c0d24ca04ce8d7b0bc607615bce1b54b53cfb8aa128d75ee8956dc",
     "graphics-frame-v3-hvf/graphics-inputs.json": "8db0f973d79eabfbf83074bb12e3e26e7244d222b8ec56b720b5b6fdecbdc987",
@@ -59,6 +64,12 @@
     "gralloc-v1-hvf/art-runtime.json": "8490e2c89682565a1839b4ec45ae61648c7b56b0bed4b938821b5b8c7fcd1316",
     "gralloc-v1-hvf/image-build.log": "01d4fcc2b9ed2ecb5b158c9ee1e33377a275840ecf46d7cb368dea9e6661aeee",
     "gralloc-v1-hvf/stock-inputs.json": "c0515f687079ec0320e73fece6d7d7ca9f539c708d7bfd4e936b85532834c34d",
+    "stock-graphics-adapters-experiment-v1/commands.json": "f59602d45b1f9f7ba15aacad4105adb75150a897b7c4baab33dc321853a34385",
+    "stock-graphics-adapters-experiment-v1/compile.log": "5514e361ac6c5a0a2b6bdbce6c98ef14345dc76e33fde6e9d3029c6bdca1dca7",
+    "stock-graphics-adapters-experiment-v1/compile-v4.log": "1f7ac00aba36f2c334c48ef04785a3a5d63d99031a6a2c9309dabde026bed421",
+    "stock-graphics-adapters-experiment-v1/allocator-service.cpp": "d96a25aab2c8d1ca5769e2f7a6c922898c0fc5a5ce9f7de3b33e5854f33fcdd0",
+    "stock-graphics-adapters-experiment-v1/compile-v2.log": "5514e361ac6c5a0a2b6bdbce6c98ef14345dc76e33fde6e9d3029c6bdca1dca7",
+    "stock-graphics-adapters-experiment-v1/compile-v3.log": "5a1f701329a84db12ac8906a551b8be7a7ce7acc075d6af3d42fb26c1f26c254",
     "graphics-frame-v2-hvf/boot-profile.json": "458033e098c0d24ca04ce8d7b0bc607615bce1b54b53cfb8aa128d75ee8956dc",
     "graphics-frame-v2-hvf/graphics-inputs.json": "4f2f0c8bf4f9543f76d3f7f99301402c9bf2319971467ca00474717e54af6f54",
     "graphics-frame-v2-hvf/result.json": "a9ee1209ee31ed05e8672cc3ceb42d911b183056929e137aa30a6bd968872262",
@@ -109,6 +120,19 @@
     "graphics-frame-v4-hvf/stock-inputs.json": "c0515f687079ec0320e73fece6d7d7ca9f539c708d7bfd4e936b85532834c34d",
     "graphics-frame-v4-hvf/graphics-hal-build.json": "47505bc7d31243b13021e47a826e6317dc6adef6627b57f70bbd0a3f3850d5a7",
     "cpu-graphics-hal-v8/build.json": "47505bc7d31243b13021e47a826e6317dc6adef6627b57f70bbd0a3f3850d5a7",
+    "graphics-adapters-v1-hvf/boot-profile.json": "528c6100599f05ea397cda6218e613ae803522f8fb1e449c3c36b2222be5bab1",
+    "graphics-adapters-v1-hvf/graphics-adapters-build.json": "8f03169178bb90cf996eb243c1641d7a725719118f092ea7881272b85258d53d",
+    "graphics-adapters-v1-hvf/result.json": "c46e55d3089d4460598fa737518fdccec5995efdadd219ed3491b8218a130d27",
+    "graphics-adapters-v1-hvf/program-launch.json": "57d55ebcbf55c708337e89a2de1f48d140c7e6ca3997803b848da19ebc42ecb7",
+    "graphics-adapters-v1-hvf/rootfs-build.log": "1a789a09412f2c418a701ea3ef009df79c396a5bca3a7b3573e5a777594e4cc8",
+    "graphics-adapters-v1-hvf/commands.json": "40d846226c3e34c2f5dcf5170b8f27624b079fb5b4f2907f464d16b776137d6a",
+    "graphics-adapters-v1-hvf/graphics-adapters-result.json": "00ea3adce4ec699b8f102f6ca184f7744eb08a55494a2b584db029f4a274d01f",
+    "graphics-adapters-v1-hvf/serial.log": "3eb4b6c5060ba9fc8bb154b32e5eb54d0b6a15845d0bbe113398e35fd03e19f5",
+    "graphics-adapters-v1-hvf/inputs.json": "80a55d18a79c06b38a932efd3415851f13bf57c69a86d7df6142e55a29c75677",
+    "graphics-adapters-v1-hvf/art-runtime.json": "8490e2c89682565a1839b4ec45ae61648c7b56b0bed4b938821b5b8c7fcd1316",
+    "graphics-adapters-v1-hvf/image-build.log": "8a7b871fb8321ad4c5ff17478c00d16e0a4c441167a6709ecc9e9454bbac9917",
+    "graphics-adapters-v1-hvf/stock-inputs.json": "c0515f687079ec0320e73fece6d7d7ca9f539c708d7bfd4e936b85532834c34d",
+    "graphics-adapters-v1-hvf/graphics-hal-build.json": "47505bc7d31243b13021e47a826e6317dc6adef6627b57f70bbd0a3f3850d5a7",
     "sws-android-v4/build.json": "f6611fd9eb2f1b54b111bcc402f626fe58db36c81d62fe8e3f0e7f55db438923",
     "stock-init-hwmanager-v1/boot-profile.json": "a092b2106284899f0ee678abb04fbf48825b8a2e9bd3006adb1136032f24b7b6",
     "stock-init-hwmanager-v1/result.json": "8cbac4c02d5f0e6a3ff37f352a0d31e1023318f4b9e068cffec4ec9bdf03b207",
@@ -122,6 +146,7 @@
     "stock-init-hwmanager-v1/art-runtime.json": "8490e2c89682565a1839b4ec45ae61648c7b56b0bed4b938821b5b8c7fcd1316",
     "stock-init-hwmanager-v1/image-build.log": "69329c681a190c2a918e446ec5eed3f5a9a8a606e9fe7b95c9567c4be4db853f",
     "stock-init-hwmanager-v1/stock-inputs.json": "c0515f687079ec0320e73fece6d7d7ca9f539c708d7bfd4e936b85532834c34d",
+    "stock-graphics-adapters-v1/build.json": "8f03169178bb90cf996eb243c1641d7a725719118f092ea7881272b85258d53d",
     "stock-init-hwmanager-v2/boot-profile.json": "528c6100599f05ea397cda6218e613ae803522f8fb1e449c3c36b2222be5bab1",
     "stock-init-hwmanager-v2/result.json": "4c0bef95a27f6f1f1c573113cdb6b12c16b9c4504e0de9708e33ab683305042c",
     "stock-init-hwmanager-v2/program-launch.json": "1a3554d219e19e432db4d7414f980b2770ecb27f9eac6d94cfd7efba49f0e80a",

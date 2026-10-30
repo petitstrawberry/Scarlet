@@ -80,6 +80,17 @@
     ".build/android-services/graphics-frame-v4-hvf/efi-vars.fd",
     ".build/android-services/graphics-frame-v4-hvf/initramfs.cpio",
     ".build/android-services/graphics-frame-v4-hvf/rootfs.ext2",
-    ".build/android-services/graphics-frame-v4-hvf/scarlet.elf"
+    ".build/android-services/graphics-frame-v4-hvf/scarlet.elf",
+    ".build/android-services/graphics-adapters-v1-hvf/target",
+    ".build/android-services/graphics-adapters-v1-hvf/staging",
+    ".build/android-services/graphics-adapters-v1-hvf/boot",
+    ".build/android-services/graphics-adapters-v1-hvf/limine-cache",
+    ".build/android-services/graphics-adapters-v1-hvf/.limine-work",
+    ".build/android-services/graphics-adapters-v1-hvf/boot.img",
+    ".build/android-services/graphics-adapters-v1-hvf/efi-vars.fd",
+    ".build/android-services/graphics-adapters-v1-hvf/initramfs.cpio",
+    ".build/android-services/graphics-adapters-v1-hvf/rootfs.ext2",
+    ".build/android-services/graphics-adapters-v1-hvf/scarlet.elf",
+    ".build/android-services/stock-graphics-adapters-experiment-v1"
   ]
 }

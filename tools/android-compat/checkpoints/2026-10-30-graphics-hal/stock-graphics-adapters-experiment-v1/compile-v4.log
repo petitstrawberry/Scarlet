@@ -1,0 +1,7 @@
+/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/stock-graphics-adapters-experiment-v1/allocator-service.cpp:1:9: warning: 'LOG_TAG' macro redefined [-Wmacro-redefined]
+#define LOG_TAG "scarlet-allocator"
+        ^
+<command line>:1:9: note: previous definition is here
+#define LOG_TAG "scarlet-graphics"
+        ^
+1 warning generated.

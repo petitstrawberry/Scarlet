@@ -1,0 +1,7 @@
+In file included from /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/graphics-source-inspection/mapper-passthrough.cpp:16:
+In file included from /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/graphics-source-inspection/vndk33-headers/generated-headers/hardware/interfaces/graphics/mapper/2.0/android.hardware.graphics.mapper@2.0_genc++_headers/gen/android/hardware/graphics/mapper/2.0/IMapper.h:4:
+In file included from /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/graphics-source-inspection/vndk33-headers/generated-headers/hardware/interfaces/graphics/common/1.0/android.hardware.graphics.common@1.0_genc++_headers/gen/android/hardware/graphics/common/1.0/types.h:5:
+/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/graphics-source-inspection/vndk33-headers/system/libhidl/base/include/hidl/MQDescriptor.h:23:10: fatal error: 'fmq/MQDescriptorBase.h' file not found
+#include <fmq/MQDescriptorBase.h>
+         ^~~~~~~~~~~~~~~~~~~~~~~~
+1 error generated.

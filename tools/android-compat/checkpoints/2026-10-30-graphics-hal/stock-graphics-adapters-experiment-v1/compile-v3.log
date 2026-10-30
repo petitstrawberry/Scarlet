@@ -1,0 +1,6 @@
+ld: error: undefined symbol: typeinfo for android::hardware::graphics::mapper::V2_0::IMapper
+>>> referenced by mapper-passthrough.cpp
+>>>               /tmp/nix-shell.0H8Duu/mapper-passthrough-4e08a9.o:(typeinfo for android::hardware::graphics::mapper::V2_0::hal::detail::MapperImpl<android::hardware::graphics::mapper::V2_0::IMapper, android::hardware::graphics::mapper::V2_0::hal::MapperHal>)
+>>> did you mean: VTT for android::hardware::graphics::mapper::V2_0::IMapper
+>>> defined in: /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/flattened-boot-inputs-v43/system/lib64/android.hardware.graphics.mapper@2.0.so
+clang-14: error: linker command failed with exit code 1 (use -v to see invocation)
