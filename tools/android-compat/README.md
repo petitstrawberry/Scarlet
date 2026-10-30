@@ -6,15 +6,21 @@ neither fixture certifies general APK compatibility.
 | | Android in a VM | Direct Android userspace |
 |---|---|---|
 | Execution | APK → Android framework/ART → guest Linux → crosvm → Scarlet | Android ELF → Bionic/linker → Scarlet Android ABI (composes Linux ABI) |
-| Reused Android facilities | Guest Binder, Android init, framework and HALs | Stock Bionic/linker and libbinder on Scarlet's Binder adapter |
-| Main work ahead | Finish framework boot, then connect display/input to SWS | Zygote child specialization, Android lifecycle management, and graphics integration |
-| Current rendering | Cuttlefish ANGLE/SwiftShader, headless virtio-gpu stub | No Android graphics stack yet |
+| Reused Android facilities | Guest Binder, Android init, framework and HALs | Stock init, Zygote/ART, framework, libbinder and graphics adapters over Scarlet primitives |
+| Main work ahead | Hardware-accelerated execution and display/input integration | Complete system-server startup and launch an Activity into SWS |
+| Current rendering | Cuttlefish ANGLE/SwiftShader, headless virtio-gpu stub | SurfaceFlinger + ANGLE/SwiftShader; CPU Composer connects display 0 to SWS; no app frame observed yet |
 | Fixture | [Cuttlefish project](../../projects/aarch64-limine-crosvm/README.md) | This directory |
 
 The direct fixture uses Android 13/API 33 while the pinned VM uses Android 17.
 These are compatibility checkpoints, not a controlled performance comparison.
-Continue the VM track toward a real APK while the direct track advances through
-Bionic → Binder client/server → ART/JNI → a minimal framework application.
+Current work focuses on direct execution under outer QEMU HVF. As of 2026-10-30,
+native FIFO scheduling, cancellable RPC priority inheritance and explicit
+nonroot exec capability delegation pass real Bionic probes and 1,759 kernel
+tests. Stock SurfaceFlinger connects its primary display; stock init runs
+installd and odsign, and PackageManager initializes after scanning 30 stock
+packages, including Launcher and SystemUI. App data labeling, remaining service
+startup and an actual Activity frame remain ahead. See the
+[display checkpoint](checkpoints/2026-10-30-fifo-display/verification.json).
 
 ## Direct Bionic execution
 
