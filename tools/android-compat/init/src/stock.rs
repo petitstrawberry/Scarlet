@@ -22,9 +22,13 @@ pub fn environment(
     devices
         .create_directory("/socket")
         .map_err(|_| "log socket directory")?;
+    devices.create_directory("/binderfs").map_err(|_| "Binder device directory")?;
+    let aliases=VfsView::create("android-binder","aliases").map_err(|_| "Binder aliases")?;
+    let devices=VfsView::overlay(&aliases,"/",Some((&devices,"/"))).map_err(|_| "Binder device aliases")?;
     android
         .bind("/dev", &devices, "/")
         .map_err(|_| "Android devices")?;
+    android.mount("/dev/binderfs","android-binder","").map_err(|_| "Binder device mount")?;
     // A separate bind gives property files real TmpFS inode identity rather
     // than overlay nodes; unsupported filesystems keep rejecting xattrs.
     android

@@ -3,6 +3,22 @@
 #include <stddef.h>
 #include <linux/memfd.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
+
+static int binderfs_case(void) {
+    struct stat alias,node,opened;
+    CHECK(lstat("/dev/hwbinder",&alias)==0 && S_ISLNK(alias.st_mode));
+    CHECK(stat("/dev/hwbinder",&alias)==0 && stat("/dev/binderfs/hwbinder",&node)==0);
+    CHECK(S_ISCHR(node.st_mode) && alias.st_ino==node.st_ino && alias.st_dev==node.st_dev);
+    CHECK(access("/dev/hwbinder",R_OK|W_OK)==0);
+    int fd=open("/dev/hwbinder",O_RDWR|O_CLOEXEC);CHECK(fd>=0);
+    CHECK(fstat(fd,&opened)==0 && opened.st_ino==node.st_ino && opened.st_dev==node.st_dev && opened.st_rdev==node.st_rdev);
+    CHECK(fchmod(fd,0600)==0 && stat("/dev/binderfs/hwbinder",&node)==0 && (node.st_mode&0777)==0600);
+    CHECK(chmod("/dev/hwbinder",0666)==0 && fstat(fd,&opened)==0 && (opened.st_mode&0777)==0666);
+    struct statfs filesystem;CHECK(fstatfs(fd,&filesystem)==0 && filesystem.f_type==0x6c6f6f70);
+    struct binder_version version={0};CHECK(ioctl(fd,BINDER_VERSION,&version)==0 && version.protocol_version==8);
+    CHECK(close(fd)==0);puts("SCARLET_ANDROID_BINDERFS_OK");return 0;
+}
 
 enum { BUFFER_EXCHANGE=0x801, BUFFER_STOP=0x802 };
 struct root_buffer { uintptr_t child; int fd; uint32_t marker; };
@@ -115,6 +131,7 @@ static int buffer_client(void) {
     CHECK(peer_close(&peer)==0);return 0;
 }
 int main(void) {
+    CHECK(binderfs_case()==0);
     int ready[2];if(pipe(ready))return 2;
     pid_t child=fork();if(child<0)return 3;
     if (!child) {close(ready[0]);_exit(buffer_server(ready[1]) ? 4 : 0);}
