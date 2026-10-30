@@ -217,6 +217,14 @@ fn layout_text(path:&str)->Option<String> {
     Some(format!("{}\n",if low {policy.low_bits}else {policy.native_bits}))
 }
 fn text_content(path: &str) -> Option<String> {
+    if path == "/proc/meminfo" {
+        let (total, free) = crate::mem::pmm::stats();
+        let kib_per_page = crate::environment::PAGE_SIZE / 1024;
+        // Expose existing PMM counters. Scarlet has no swap; unknown cache,
+        // reclaimability and kernel-category statistics remain absent.
+        return Some(format!("MemTotal: {} kB\nMemFree: {} kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
+            total.saturating_mul(kib_per_page), free.saturating_mul(kib_per_page)));
+    }
     if let Some(text)=layout_text(path) {return Some(text);}
     if path == "/proc/sys/kernel/kptr_restrict" {
         let caller = crate::task::mytask()?;
