@@ -849,6 +849,21 @@
       "u:r:system_server:s0",
       "u:object_r:system_suspend_control_internal_service:s0",
       2
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:hal_light_service:s0",
+      2
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:bluetooth_manager_service:s0",
+      2
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:surfaceflinger_service:s0",
+      2
     ]
   ],
   "socket_labels": [
