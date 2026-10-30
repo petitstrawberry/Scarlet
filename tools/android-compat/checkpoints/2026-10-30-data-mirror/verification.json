@@ -1,0 +1,32 @@
+{
+  "revision": "bddb5cbe7",
+  "kernel_sha256": "234d3a3761bf3bfe69d6b714c9ea4135c36b626d469e1cca1c55f244da38b6fb",
+  "acceleration": "hvf",
+  "passed": {
+    "native_kernel_tests": 1775,
+    "host_tool_tests": 75
+  },
+  "confirmed": [
+    "stock init mounts a tmpfs at /data_mirror with nodev,noexec,nosuid,mode=0700,uid=0,gid=1000",
+    "CE/DE mirror bind mounts for user data succeed",
+    "EntropyMixer writes its seed file through the corrected character-device path",
+    "SettingsProvider opens /data/user_de/0/com.android.providers.settings/databases/settings.db",
+    "SystemServer core services pass through Bugreport, KeyAttestation, KeyChain, SchedulingPolicy, TelephonyRegistry, EntropyMixer, Account, Content, InstallSystemProviders",
+    "startOtherServices reaches ResourceEconomy and AlarmManagerService"
+  ],
+  "current_stop": {
+    "service": "UpdateWatchdogTimeout / AlarmManagerService",
+    "cause": "MemoryIntArray nativeCreate fails: ashmem creation failed; zygote also logs F_SET_SEALS/F_ADD_SEALS unsupported and falls back to the missing /dev/ashmem",
+    "evidence": "stock-init-final-v1/serial.log",
+    "needed": "bounded native ashmem device or honoured memfd future-write sealing"
+  },
+  "not_confirmed": [
+    "Activity launch",
+    "SurfaceFlinger app frame in SWS",
+    "Launcher home screen"
+  ],
+  "known_gaps": [
+    "F_SEAL_FUTURE_WRITE is rejected rather than accepted ineffectively; ART therefore uses the ashmem fallback",
+    "stock vold is not selected: it exits 1 in this fixture (netlink/metadata), so the outer manager provides user-0 data roots"
+  ]
+}
