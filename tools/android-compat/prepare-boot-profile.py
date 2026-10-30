@@ -244,12 +244,12 @@ def merge_platform(inputs,runtime,stock,archive):
         while queue:
             name=queue.pop()
             if name in seen:continue
-            if len(seen)>=256:raise ValueError("platform native dependency bound")
+            if len(seen)>=1024:raise ValueError("platform native dependency bound")
             seen.add(name);target=temporary/"files"/name;system.dump("/"+name,target)
             copied[name]=target;available.add(Path(name).name);native_needed[name]=elf_needed(target)
             for dependency in native_needed[name]:
                 relative="system/lib64/"+dependency
-                if relative in metadata["files"] or relative in metadata["symlinks"] or relative in runtime_files:continue
+                if relative in seen:continue
                 # A VNDK APEX basename does not make a library visible to the
                 # system-server classloader namespace. Prefer the platform file.
                 if "Type: regular" in system.command("stat "+quote_debugfs("/"+relative)):

@@ -13,6 +13,7 @@
 #include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/system_properties.h>
+#include <time.h>
 struct task_info {
  unsigned long pid,ppid;unsigned char state,type,cpu,reserved;int exit_status;unsigned long tgid;
  char name[64];unsigned long long cpu_ns;unsigned util,min_util,capacity;unsigned char preference,padding[3];
@@ -59,7 +60,10 @@ int main(int argc,char **argv) {
   char *const args[]={argv[0],"inside",NULL};execv(args[0],args);_exit(5);
  }
  printf("SCARLET_INIT_NAMESPACE_OUTER child=%d\n",child);
+ struct timespec started,now;if(clock_gettime(CLOCK_MONOTONIC,&started))return 15;
  for(int tick=0;tick<200;tick++) {
+  if(clock_gettime(CLOCK_MONOTONIC,&now))return 15;
+  if(now.tv_sec-started.tv_sec>20 || (now.tv_sec-started.tv_sec==20 && now.tv_nsec>=started.tv_nsec))break;
   drain_logs(logfd);
   int status;pid_t got=waitpid(child,&status,WNOHANG);
   if(got==child){

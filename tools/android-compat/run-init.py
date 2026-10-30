@@ -47,7 +47,7 @@ def main():
             "kind": "bounded-stock-init-profile-v1", "probe_build_sha256": sha256(build / "build.json"),
             "runner_sha256": sha256(SOURCE / "run-init.py"), "acceleration": "hvf",
             "observation": "20 seconds or init exit, then close ProcessScope and verify zero live members",
-            "logging": "Diagnostic preload redirects userspace /dev/kmsg writes and child stdout/stderr to inherited console; no syscall-success bypass",
+            "logging": "Diagnostic preload sends init/daemon messages to inherited console and Zygote messages through short-lived Unix datagrams; supervisor drains logdw wire records; runtime results remain unchanged",
             "service_readiness": "not asserted",
             "service_control_request": "ctl.start=zygote after 4 seconds" if start_zygote else None, "apex_activation": "stock apexd must perform activation",
         }, indent=2) + "\n")
