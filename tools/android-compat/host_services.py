@@ -43,7 +43,9 @@ def validate_selection(profile):
     selected = CONTRACT in profile.get("vintf", {}).get("framework", [])
     if selected != (SUSPEND in names):
         raise ValueError("SystemSuspend requires both its host provider and VINTF contract")
-    from vintf_inputs import graphics_selection, HEALTH_CONTRACT
+    from vintf_inputs import graphics_selection, HEALTH_CONTRACT, FRAMEWORK_HIDL
+    if FRAMEWORK_HIDL.intersection(profile.get("vintf",{}).get("framework",[])) and HW_MANAGER not in names:
+        raise ValueError("HIDL framework management requires its stock provider")
     device=profile.get("vintf",{}).get("device",[])
     graphics=[name for name in device if name!=HEALTH_CONTRACT]
     if (GRAPHICS in names and (HW_MANAGER not in names or not graphics_selection(graphics)) or

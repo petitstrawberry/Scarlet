@@ -14,6 +14,10 @@ GRAPHICS_DEVICE = {
 }
 HEALTH_CONTRACT = "android.hardware.health@2.1::IHealth/default"
 DEVICE_PROVIDERS = {**GRAPHICS_DEVICE, HEALTH_CONTRACT: "hwbinder"}
+FRAMEWORK_HIDL = {
+    "android.hidl.manager@1.2::IServiceManager/default",
+    "android.hidl.token@1.0::ITokenManager/default",
+}
 
 
 def graphics_selection(device):
@@ -26,7 +30,8 @@ def validate_selection(selection):
         raise ValueError("invalid VINTF selection")
     names = selection["framework"]
     if (not isinstance(names, list) or len(names) > 64 or
-            any(not isinstance(name, str) or len(name) > 256 or not SERVICE.fullmatch(name) for name in names) or
+            any(not isinstance(name, str) or len(name) > 256 or
+                not (SERVICE.fullmatch(name) or name in FRAMEWORK_HIDL) for name in names) or
             len(set(names)) != len(names)):
         raise ValueError("invalid framework VINTF service selection")
     device=selection["device"]
@@ -48,7 +53,8 @@ def build_manifests(selection, sources, device_providers=None):
         if root.tag != "manifest" or root.get("type") != "framework":
             continue
         for hal in root.findall("hal"):
-            if hal.get("format") != "aidl":
+            kind=hal.get("format")
+            if kind not in ("aidl","hidl"):
                 continue
             package = hal.findtext("name", "")
             versions = [value.text for value in hal.findall("version")] or ["1"]
@@ -56,14 +62,27 @@ def build_manifests(selection, sources, device_providers=None):
             for interface in hal.findall("interface"):
                 instances.extend(f"{interface.findtext('name')}/{value.text}"
                                  for value in interface.findall("instance"))
-            for instance in instances:
-                service = f"{package}.{instance}"
+            declared=set()
+            for instance in dict.fromkeys(instances):
+                if kind=="hidl" and not isinstance(instance,str):raise ValueError("invalid HIDL instance")
+                if kind=="hidl" and not instance.startswith("@"):
+                    if len(versions)!=1:raise ValueError("ambiguous HIDL interface version")
+                    instance="@"+versions[0]+"::"+instance
+                service = f"{package}.{instance}" if kind=="aidl" else package+instance
                 if service not in selection["framework"]:
                     continue
-                if len(versions) != 1 or not isinstance(versions[0], str) or not re.fullmatch(r"[1-9][0-9]{0,4}", versions[0]):
+                if service in declared:continue
+                declared.add(service)
+                if kind=="hidl":
+                    version=instance[1:].split("::",1)[0]
+                    if service not in FRAMEWORK_HIDL or hal.findtext("transport")!="hwbinder":
+                        raise ValueError("unsupported framework HIDL contract")
+                elif len(versions) != 1 or not isinstance(versions[0], str) or not re.fullmatch(r"[1-9][0-9]{0,4}", versions[0]):
                     raise ValueError("ambiguous or unsupported AIDL VINTF version")
+                else:version=versions[0]
                 record = {"source": name, "source_sha256": hashlib.sha256(data).hexdigest(),
-                          "package": package, "version": versions[0], "fqname": instance}
+                          "package": package, "version": version, "fqname": instance}
+                if kind=="hidl":record.update(format=kind,transport="hwbinder")
                 if service in candidates:
                     raise ValueError("duplicate framework VINTF service declaration")
                 candidates[service] = record
@@ -72,7 +91,9 @@ def build_manifests(selection, sources, device_providers=None):
         if service not in candidates:
             raise ValueError("selected VINTF service absent from stock input: " + service)
         record = candidates[service]
-        hal = ET.SubElement(framework, "hal", {"format": "aidl"})
+        kind=record.get("format","aidl")
+        hal = ET.SubElement(framework, "hal", {"format": kind})
+        if kind=="hidl":ET.SubElement(hal,"transport").text=record["transport"]
         for tag in ("name", "version", "fqname"):
             ET.SubElement(hal, tag).text = record["package" if tag == "name" else tag]
     device = ET.Element("manifest", {"version": "5.0", "type": "device"})

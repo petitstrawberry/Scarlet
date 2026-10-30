@@ -14,6 +14,18 @@ SELECTION = {"framework": ["android.frameworks.stats.IStats/default"], "device":
 
 
 class VintfInputsTest(unittest.TestCase):
+    def test_selects_stock_hidl_manager_with_minor_version_and_interface_alias(self):
+        source=b'<manifest type="framework"><hal format="hidl"><name>android.hidl.manager</name><transport>hwbinder</transport><version>1.2</version><interface><name>IServiceManager</name><instance>default</instance></interface><fqname>@1.2::IServiceManager/default</fqname></hal></manifest>'
+        selection={"framework":["android.hidl.manager@1.2::IServiceManager/default"],"device":[]}
+        outputs,proof=build_manifests(selection,{"stock":source})
+        hal=ET.fromstring(outputs[FRAMEWORK]).find("hal")
+        self.assertEqual(hal.get("format"),"hidl")
+        self.assertEqual(hal.findtext("transport"),"hwbinder")
+        self.assertEqual(hal.findtext("fqname"),"@1.2::IServiceManager/default")
+        self.assertEqual(proof["contracts"][selection["framework"][0]]["version"],"1.2")
+        with self.assertRaisesRegex(ValueError,"duplicate"):
+            build_manifests(selection,{"first":source,"second":source})
+
     def test_device_inventory_requires_real_matching_provider_files(self):
         selected={name:transport for name,transport in GRAPHICS_DEVICE.items() if "composer@2.4" not in name}
         selection={"framework":[],"device":list(selected)}
