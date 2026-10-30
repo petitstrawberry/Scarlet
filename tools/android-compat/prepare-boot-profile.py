@@ -159,7 +159,7 @@ def configure(output, stock, profile, contexts, metadata):
         f'{name} = "{value}"\n' for name, value in sorted(profile["bootconfig"].items())))
     (output / "scarlet/boot/init.rc").write_text("# Explicit Scarlet device boot configuration\n" + "".join(
         "import " + path + "\n" for path in profile["init_imports"]))
-    for name in ["apex", "linkerconfig", "data", "sys/devices", "sys/fs/selinux", "system_ext/apex", "product/apex", "vendor/apex"]:
+    for name in ["storage", "apex", "linkerconfig", "data", "sys/devices", "sys/fs/selinux", "system_ext/apex", "product/apex", "vendor/apex"]:
         (output / name).mkdir(parents=True, exist_ok=True)
     if "resource_groups" in profile:
         (output / "etc").mkdir(exist_ok=True)
@@ -236,6 +236,18 @@ def merge_platform(inputs,runtime,stock,archive):
             target=temporary/"files"/name
             system.dump("/"+name,target)
             copied[name]=target
+        # Zygote loads this library by name; it is not in app_process DT_NEEDED.
+        available={Path(name).name for name in metadata["files"]}
+        available|={Path(name).name for name in json.loads((runtime/"art-runtime.json").read_text())["files"]}
+        native_needed={};queue=["system/lib64/libcompiler_rt.so"];seen=set()
+        while queue:
+            name=queue.pop()
+            if name in seen:continue
+            if len(seen)>=256:raise ValueError("platform native dependency bound")
+            seen.add(name);target=temporary/"files"/name;system.dump("/"+name,target)
+            copied[name]=target;available.add(Path(name).name);native_needed[name]=elf_needed(target)
+            for dependency in native_needed[name]:
+                if dependency not in available:queue.append("system/lib64/"+dependency)
         fragment=copied["system/etc/classpaths/systemserverclasspath.pb"]
         fragments=[fragment]+sorted(inputs.glob("system/apex/*/etc/classpaths/systemserverclasspath.pb"))
         classpaths={2:[],4:[]}
@@ -262,7 +274,7 @@ def merge_platform(inputs,runtime,stock,archive):
             target=inputs/name
             if name in metadata["symlinks"] or target.exists() and sha256(target)!=sha256(source):raise ValueError("conflicting platform boot file")
             target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target)
-        metadata["platform_boot"]={"sdk_sha256":SDK_SHA256,"partitions":partitions,"files":{name:sha256(source) for name,source in copied.items()},"classpaths":classpaths}
+        metadata["platform_boot"]={"sdk_sha256":SDK_SHA256,"partitions":partitions,"files":{name:sha256(source) for name,source in copied.items()},"classpaths":classpaths,"native_needed":native_needed}
     environment=inputs/"init.environ.rc"
     text="\n".join(line for line in environment.read_text().splitlines() if not line.startswith(("    export SYSTEMSERVERCLASSPATH ","    export STANDALONE_SYSTEMSERVER_JARS ")))+"\n"
     for name,kind in [("SYSTEMSERVERCLASSPATH",2),("STANDALONE_SYSTEMSERVER_JARS",4)]:
@@ -275,6 +287,46 @@ def merge_platform(inputs,runtime,stock,archive):
     print("Merged verified platform service contexts and system-server JARs; startup has not been tested")
 
 
+def merge_angle(inputs,runtime,stock,archive):
+    metadata=verify_boot_inputs(inputs,runtime,stock)
+    available={Path(name).name for name in metadata["files"]}
+    available|={Path(name).name for name in json.loads((runtime/"art-runtime.json").read_text())["files"]}
+    libraries={};needed={}
+    with tempfile.TemporaryDirectory(prefix="angle-inputs-",dir=inputs.parent) as directory:
+        temporary=Path(directory);partitions=extract_partitions(archive,temporary)
+        images={"system":Ext4(temporary/"system.ext4"),"vendor":Ext4(temporary/"vendor.ext4")}
+        queue=["vendor/lib64/egl/libEGL_angle.so","vendor/lib64/egl/libGLESv1_CM_angle.so","vendor/lib64/egl/libGLESv2_angle.so"]
+        seen=set()
+        while queue:
+            name=queue.pop()
+            if name in seen:continue
+            if len(seen)>=256:raise ValueError("ANGLE dependency bound")
+            seen.add(name)
+            partition,path=("vendor","/"+name.removeprefix("vendor/")) if name.startswith("vendor/") else ("system","/"+name)
+            target=temporary/"files"/name;images[partition].dump(path,target)
+            libraries[name]=target;available.add(Path(name).name)
+            needed[name]=elf_needed(target)
+            for dependency in needed[name]:
+                if dependency in available:continue
+                selected=None
+                for part,original,destination in [("vendor","/lib64/egl/"+dependency,"vendor/lib64/egl/"+dependency),("vendor","/lib64/"+dependency,"vendor/lib64/"+dependency),("system","/system/lib64/"+dependency,"system/lib64/"+dependency)]:
+                    if "Type: regular" in images[part].command("stat "+quote_debugfs(original)):
+                        selected=destination;break
+                if selected is None:raise ValueError("missing ANGLE dependency: "+dependency)
+                queue.append(selected)
+        for name,source in libraries.items():
+            target=inputs/name
+            if name in metadata["symlinks"] or target.exists() and sha256(target)!=sha256(source):raise ValueError("conflicting ANGLE library")
+            target.parent.mkdir(parents=True,exist_ok=True)
+            if not target.exists():shutil.copy2(source,target)
+        metadata["egl_inputs"]={"sdk_sha256":SDK_SHA256,"driver":"angle","partitions":partitions,"files":{name:sha256(source) for name,source in libraries.items()},"needed":needed,"display_connection":"not implemented or asserted"}
+    metadata["files"]={str(path.relative_to(inputs)):sha256(path) for path in sorted(inputs.rglob("*")) if path.is_file() and path.name!=MANIFEST}
+    metadata["directories"]=[str(path.relative_to(inputs)) for path in sorted(inputs.rglob("*")) if path.is_dir()]
+    (inputs/MANIFEST).write_text(json.dumps(metadata,indent=2)+"\n")
+    verify_boot_inputs(inputs,runtime,stock)
+    print("Merged verified SDK ANGLE libraries; EGL/display operation has not been tested")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group(required=True)
@@ -284,6 +336,7 @@ def main():
         parser.add_argument("--" + flag, type=Path, required=True)
     parser.add_argument("--framework-inputs",type=Path,help="verified stock framework and app_process64 for init boot")
     parser.add_argument("--platform-image",type=Path,help="pinned SDK archive for stock service contexts and server JARs")
+    parser.add_argument("--angle-image",type=Path,help="pinned SDK archive supplying its ANGLE libraries")
     args = parser.parse_args()
     if args.reuse_payloads:
         reconfigure(args.reuse_payloads, args.runtime_root, args.stock_inputs, args.profile, args.output)
@@ -293,6 +346,8 @@ def main():
         merge_framework(args.output,args.runtime_root,args.stock_inputs,args.framework_inputs)
     if args.platform_image:
         merge_platform(args.output,args.runtime_root,args.stock_inputs,args.platform_image)
+    if args.angle_image:
+        merge_angle(args.output,args.runtime_root,args.stock_inputs,args.angle_image)
 
 
 if __name__ == "__main__":

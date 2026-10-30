@@ -34,7 +34,8 @@
     "ro.apex.updatable": "false",
     "ro.zygote": "zygote64",
     "ro.hardware": "scarlet",
-    "dalvik.vm.usejit": "false"
+    "dalvik.vm.usejit": "false",
+    "ro.hardware.egl": "angle"
   },
   "bootconfig": {
     "androidboot.hardware": "scarlet",
@@ -49,7 +50,9 @@
     "u:r:servicemanager:s0": 5,
     "u:r:zygote:s0": 6,
     "u:r:linkerconfig:s0": 7,
-    "u:r:boringssl_self_test:s0": 8
+    "u:r:boringssl_self_test:s0": 8,
+    "u:r:system_server_startup:s0": 9,
+    "u:r:system_server:s0": 10
   },
   "transitions": [
     [
@@ -61,6 +64,16 @@
       "u:r:init:s0",
       "u:r:ueventd:s0",
       0
+    ],
+    [
+      "u:r:zygote:s0",
+      "u:r:system_server_startup:s0",
+      1000
+    ],
+    [
+      "u:r:system_server_startup:s0",
+      "u:r:system_server:s0",
+      1000
     ]
   ],
   "property_grants": {
