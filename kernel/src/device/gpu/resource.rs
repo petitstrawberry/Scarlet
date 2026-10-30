@@ -227,7 +227,9 @@ pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
         && if create.format == super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT {
             create.usage
                 & !(super::GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT
-                    | super::GPU_IMAGE_USAGE_SAMPLED)
+                    | super::GPU_IMAGE_USAGE_SAMPLED
+                    | super::GPU_IMAGE_USAGE_TRANSFER_SRC
+                    | super::GPU_IMAGE_USAGE_TRANSFER_DST)
                 == 0
         } else {
             create.usage & super::GPU_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT == 0
@@ -427,7 +429,7 @@ pub(crate) fn image_upload_native_layout(
     layout: GpuBackendImageLayout,
 ) -> Result<GpuImageUploadLayout, &'static str> {
     let bytes = match image.format {
-        GPU_IMAGE_FORMAT_BGRA8_UNORM => 4,
+        GPU_IMAGE_FORMAT_BGRA8_UNORM | super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT => 4,
         super::GPU_IMAGE_FORMAT_R8_UNORM => 1,
         super::GPU_IMAGE_FORMAT_RG8_UNORM => 2,
         _ => return Err("GPU image transfer format is unsupported"),
@@ -609,7 +611,7 @@ pub(crate) fn image_readback_native_layout(
     layout: GpuBackendImageLayout,
 ) -> Result<GpuImageReadbackLayout, &'static str> {
     let bytes = match image.format {
-        GPU_IMAGE_FORMAT_BGRA8_UNORM => 4,
+        GPU_IMAGE_FORMAT_BGRA8_UNORM | super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT => 4,
         super::GPU_IMAGE_FORMAT_R8_UNORM => 1,
         super::GPU_IMAGE_FORMAT_RG8_UNORM => 2,
         _ => return Err("GPU image transfer format is unsupported"),

@@ -772,9 +772,9 @@ impl VirtioGpuControl {
 
     fn gpu_backend_info(&self) -> GpuBackendInfo {
         let negotiated_features = *self.negotiated_features.read();
-        // Preserve the original 12-byte prefix. The optional final word is
-        // the host's VirGL v2 max_anisotropy (IEEE f32 bits), zero if unknown.
-        let mut opaque_info = [0u8; 16];
+        // Preserve the original 12-byte prefix. Optional words expose the host
+        // anisotropy limit (IEEE f32 bits), then kernel transfer capabilities.
+        let mut opaque_info = [0u8; 20];
         opaque_info[..8].copy_from_slice(&negotiated_features.to_le_bytes());
         let acceleration_usable = self.acceleration_usable();
         let dialect_count = if acceleration_usable {
@@ -786,6 +786,8 @@ impl VirtioGpuControl {
         if acceleration_usable {
             opaque_info[12..16]
                 .copy_from_slice(&self.virgl_anisotropy_bits(dialect_count).to_le_bytes());
+            // Backend metadata flag 0: native D32 transfer/upload/readback support.
+            opaque_info[16..20].copy_from_slice(&1u32.to_le_bytes());
         }
 
         let state = if *self.transport_ready.read() {
