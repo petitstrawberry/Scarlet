@@ -587,6 +587,13 @@ impl ControlOps for VfsFileObject {
 }
 
 impl MemoryMappingOps for VfsFileObject {
+    fn mapping_owner_for_range(&self, offset: usize, length: usize) -> Option<Arc<dyn MemoryMappingOps>> {
+        self.inner.mapping_owner_for_range(offset, length)
+    }
+    fn new_mapping_permissions(&self, is_shared: bool) -> usize {
+        self.inner.new_mapping_permissions(is_shared) & self.maximum_mapping_permissions()
+    }
+
     fn maximum_mapping_permissions(&self) -> usize {
         self.inner.maximum_mapping_permissions() & if self.mount_point.restrictions.allows_execution() {
             usize::MAX

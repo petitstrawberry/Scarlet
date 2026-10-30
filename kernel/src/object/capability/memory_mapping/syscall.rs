@@ -149,7 +149,8 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX, // Object doesn't support memory mapping operations
     };
 
-    if prot & !memory_mappable.maximum_mapping_permissions() != 0 {
+    let maximum_permissions = memory_mappable.new_mapping_permissions(flags & MAP_SHARED != 0);
+    if prot & !maximum_permissions != 0 {
         return usize::MAX;
     }
     // Check if the object supports mmap
@@ -193,10 +194,10 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
     prot_perm |= 0x08;
 
     if is_map_private_flag && !is_shared {
-        let owner = match task
+        let owner = match memory_mappable.mapping_owner_for_range(offset, aligned_length).or_else(|| task
             .handle_table
             .get_arc_clone(handle)
-            .and_then(|obj| obj.as_memory_mappable_arc())
+            .and_then(|obj| obj.as_memory_mappable_arc()))
         {
             Some(owner) => owner,
             None => return usize::MAX,
@@ -206,7 +207,7 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
             vmarea: MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1),
             vm_start: final_vaddr,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
-            maximum_permissions: memory_mappable.maximum_mapping_permissions(),
+            maximum_permissions,
             permissions: prot_perm,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
@@ -262,12 +263,13 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
         perm
     } | 0x08;
 
-    let owner = task
+    let owner = memory_mappable.mapping_owner_for_range(offset, aligned_length).or_else(|| task
         .handle_table
         .get_arc_clone(handle)
-        .and_then(|obj| obj.as_memory_mappable_arc());
-    let vm_map = VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner)
+        .and_then(|obj| obj.as_memory_mappable_arc()));
+    let mut vm_map = VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner)
         .with_memory_attribute(mapping_info.memory_attribute);
+    vm_map.maximum_permissions = maximum_permissions;
 
     if !is_map_fixed {
         if task.vm_manager.add_memory_map(vm_map.clone()).is_err() {
@@ -283,13 +285,14 @@ pub fn sys_memory_map(trapframe: &mut Trapframe) -> usize {
                 Some(area) => area,
                 None => return usize::MAX,
             };
-            let owner = task
+            let owner = memory_mappable.mapping_owner_for_range(offset, aligned_length).or_else(|| task
                 .handle_table
                 .get_arc_clone(handle)
-                .and_then(|obj| obj.as_memory_mappable_arc());
-            let retry_map =
+                .and_then(|obj| obj.as_memory_mappable_arc()));
+            let mut retry_map =
                 VirtualMemoryMap::new(pmarea, vmarea, final_permissions, is_shared, owner)
                     .with_memory_attribute(mapping_info.memory_attribute);
+            retry_map.maximum_permissions = maximum_permissions;
             if task.vm_manager.add_memory_map(retry_map).is_err() {
                 return usize::MAX;
             }

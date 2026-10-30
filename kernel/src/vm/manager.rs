@@ -565,7 +565,7 @@ impl VirtualMemoryManager {
                 return Err("Mapping permission ceiling exceeded");
             }
             if prot & !map.permissions != 0
-                && (map.is_shared
+                && ((map.is_shared && map.owner.as_ref().is_none_or(|owner| !owner.supports_shared_permission_changes()))
                     || map.memory_attribute != MemoryAttribute::Normal
                     || (!linux_private
                         && map

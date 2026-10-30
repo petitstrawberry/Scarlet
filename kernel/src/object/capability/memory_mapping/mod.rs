@@ -74,6 +74,20 @@ pub trait MemoryMappingOps: Send + Sync {
     /// Permanent permission ceiling, including subsequent protection changes.
     fn maximum_mapping_permissions(&self) -> usize { usize::MAX }
 
+    /// Admit a new mapping and capture its permission ceiling. Restrictions
+    /// added later must not revoke permissions from an already admitted VMA.
+    /// Call once per mmap and retain the result across placement retries,
+    /// protection changes, VMA splits, and fork. Private COW mappings may have
+    /// a different ceiling from mappings that can modify the shared object.
+    fn new_mapping_permissions(&self, _is_shared: bool) -> usize {
+        self.maximum_mapping_permissions()
+    }
+
+    /// Optional range-specific owner, retaining the object's backing and offset
+    /// independently of virtual addresses reused in other processes.
+    fn mapping_owner_for_range(&self, _offset: usize, _length: usize)
+        -> Option<alloc::sync::Arc<dyn MemoryMappingOps>> { None }
+
     /// Get mapping information for a region of the object
     ///
     /// Returns the physical address, permissions, sharing information, and
@@ -172,6 +186,10 @@ pub trait MemoryMappingOps: Send + Sync {
     fn supports_permission_changes(&self) -> bool {
         false
     }
+
+    /// Whether shared mappings may regain permissions within the ceiling
+    /// captured at admission. Device and other shared owners must opt in.
+    fn supports_shared_permission_changes(&self) -> bool { false }
 
     /// Whether private normal-memory backing can move while preserving page
     /// indices. Owners opting in must not track the original virtual address.

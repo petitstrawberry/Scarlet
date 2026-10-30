@@ -1,6 +1,7 @@
 //! Anonymous, seekable Linux memfd backed by shared physical pages.
 
 use core::any::Any;
+use alloc::sync::Arc;
 
 use crate::{
     arch::Trapframe,
@@ -24,6 +25,7 @@ struct MemfdState {
 const F_SEAL_SEAL: u32 = 1;
 const F_SEAL_SHRINK: u32 = 2;
 const F_SEAL_GROW: u32 = 4;
+const F_SEAL_FUTURE_WRITE: u32 = 0x10;
 
 fn sealed() -> StreamError {
     crate::fs::FileSystemError::new(
@@ -34,7 +36,7 @@ fn sealed() -> StreamError {
 }
 
 pub(super) struct MemfdFile {
-    backing: SharedMemory,
+    backing: Arc<SharedMemory>,
     operation: Mutex<()>,
     state: IrqRwSpinLock<MemfdState>,
 }
@@ -42,7 +44,7 @@ pub(super) struct MemfdFile {
 impl MemfdFile {
     pub(super) fn new(allow_sealing: bool) -> Result<Self, &'static str> {
         Ok(Self {
-            backing: SharedMemory::new(PAGE_SIZE, 0x3)?,
+            backing: Arc::new(SharedMemory::new(PAGE_SIZE, 0x7)?),
             operation: Mutex::new(()),
             state: IrqRwSpinLock::new(MemfdState {
                 size: 0,
@@ -57,9 +59,9 @@ impl MemfdFile {
     }
 
     pub(super) fn add_seals(&self, seals: u32) -> Result<(), StreamError> {
-        // WRITE/FUTURE_WRITE require writable-VMA accounting. Reject them
-        // until that enforcement exists rather than accepting an ineffective seal.
-        if seals & !(F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW) != 0 {
+        // F_SEAL_WRITE still requires accounting for existing writable VMAs.
+        // FUTURE_WRITE instead captures a ceiling when admitting each new VMA.
+        if seals & !(F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_FUTURE_WRITE) != 0 {
             return Err(StreamError::InvalidArgument);
         }
         let _guard = crate::object::capability::file::lock_file_operation(&self.operation)?;
@@ -96,6 +98,9 @@ impl MemfdFile {
     fn write_locked(&self, offset: usize, buffer: &[u8]) -> Result<usize, StreamError> {
         if buffer.is_empty() {
             return Ok(0);
+        }
+        if self.seals() & F_SEAL_FUTURE_WRITE != 0 {
+            return Err(sealed());
         }
         let end = offset
             .checked_add(buffer.len())
@@ -150,6 +155,24 @@ impl StreamOps for MemfdFile {
 impl ControlOps for MemfdFile {}
 
 impl MemoryMappingOps for MemfdFile {
+    fn mapping_owner_for_range(&self, offset: usize, length: usize) -> Option<Arc<dyn MemoryMappingOps>> {
+        Some(Arc::new(MemfdMapping { backing: self.backing.clone(), offset, length }))
+    }
+
+    fn new_mapping_permissions(&self, is_shared: bool) -> usize {
+        if is_shared && self.state.read().seals & F_SEAL_FUTURE_WRITE != 0 {
+            usize::MAX & !2
+        } else {
+            usize::MAX
+        }
+    }
+
+    fn supports_permission_changes(&self) -> bool {
+        true
+    }
+
+    fn supports_shared_permission_changes(&self) -> bool { true }
+
     fn get_mapping_info(
         &self,
         offset: usize,
@@ -192,6 +215,48 @@ impl MemoryMappingOps for MemfdFile {
         crate::object::capability::memory_mapping::ResolveFaultError,
     > {
         self.backing.resolve_fault(access, page_idx, vm_start)
+    }
+}
+
+/// A mapping keeps its file offset across fork, partial unmap and FD closure.
+struct MemfdMapping {
+    backing: Arc<SharedMemory>,
+    offset: usize,
+    length: usize,
+}
+
+impl MemoryMappingOps for MemfdMapping {
+    fn get_mapping_info(&self, offset: usize, length: usize) -> Result<MemoryMappingInfo, &'static str> {
+        if offset.checked_add(length).is_none_or(|end| end > self.length) {
+            return Err("Memfd mapping range exceeded");
+        }
+        self.backing.get_mapping_info(self.offset.checked_add(offset).ok_or("Memfd offset overflow")?, length)
+    }
+
+    fn supports_permission_changes(&self) -> bool { true }
+
+    fn supports_shared_permission_changes(&self) -> bool { true }
+
+    fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {
+        self.backing.on_mapped(vaddr, paddr, length, offset);
+    }
+
+    fn on_mapping_inherited(&self, vaddr: usize, paddr: u64, length: usize, _vm_start: usize) {
+        self.backing.on_mapped(vaddr, paddr, length, self.offset);
+    }
+
+    fn on_unmapped(&self, vaddr: usize, length: usize) {
+        self.backing.on_unmapped(vaddr, length);
+    }
+
+    fn resolve_fault(&self, _access: &crate::object::capability::memory_mapping::AccessKind,
+        page_idx: usize, _vm_start: usize)
+        -> Result<crate::object::capability::memory_mapping::ResolveFaultResult,
+                  crate::object::capability::memory_mapping::ResolveFaultError> {
+        use crate::object::capability::memory_mapping::{ResolveFaultError, ResolveFaultResult};
+        let offset = page_idx.checked_mul(PAGE_SIZE).ok_or(ResolveFaultError::Invalid)?;
+        let info = self.get_mapping_info(offset, PAGE_SIZE).map_err(|_| ResolveFaultError::Unmapped)?;
+        Ok(ResolveFaultResult { paddr_page_base: info.paddr, is_tail: false })
     }
 }
 
