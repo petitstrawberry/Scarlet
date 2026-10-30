@@ -6,7 +6,7 @@ use crate::executor::executor::{
 use crate::library::std::string::{StringConversionError, parse_c_string_from_userspace};
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::task::Task;
-use crate::task::elf_loader::{AT_NULL, AT_RANDOM, AuxVec};
+use crate::task::elf_loader::{AT_CLKTCK, AT_NULL, AT_RANDOM, AuxVec};
 use alloc::{string::String, vec::Vec};
 
 /// Read an exec vector with the same storage limit as the transactional loader.
@@ -112,6 +112,19 @@ pub(crate) fn push_string_vector(
     addresses.reverse();
     *sp = cursor;
     Ok(addresses)
+}
+
+/// Publish the Linux accounting unit used by Bionic's sysconf(_SC_CLK_TCK).
+/// This is an ABI conversion unit, independent of the hardware timer frequency.
+pub(crate) fn add_clock_auxv(auxv: &mut Vec<AuxVec>) -> Result<(), &'static str> {
+    let end = auxv.iter().position(|entry| entry.a_type == AT_NULL)
+        .ok_or("Missing auxiliary vector terminator")?;
+    if let Some(entry) = auxv[..end].iter_mut().find(|entry| entry.a_type == AT_CLKTCK) {
+        entry.a_val = super::time::USER_HZ;
+    } else {
+        auxv.insert(end, AuxVec::new(AT_CLKTCK, super::time::USER_HZ));
+    }
+    Ok(())
 }
 
 /// Supply the sixteen bytes required by glibc's stack and pointer guards.

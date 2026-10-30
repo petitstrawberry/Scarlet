@@ -23,6 +23,8 @@ use crate::{
 use alloc::sync::{Arc, Weak};
 const NSEC_PER_SEC_I64: i64 = 1_000_000_000;
 const NSEC_PER_SEC_U64: u64 = 1_000_000_000;
+/// Linux accounting units per second; native clocks retain nanosecond units.
+pub(crate) const USER_HZ: u64 = 100;
 const TIMER_ABSTIME: i32 = 1;
 
 /// Linux POSIX timer shared state guarded by a spin mutex for interior mutability.
