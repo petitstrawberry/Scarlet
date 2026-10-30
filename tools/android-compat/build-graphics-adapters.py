@@ -15,7 +15,9 @@ from libbinder_inputs import extract_headers
 
 SOURCE=Path(__file__).resolve().parent
 LIBRARIES=["libc++","libutils","libhidlbase","libhardware","liblog","libcutils","libsync",
-           "android.hardware.graphics.mapper@2.0","android.hardware.graphics.allocator@2.0"]
+           "android.hardware.graphics.mapper@2.0","android.hardware.graphics.allocator@2.0",
+           "android.hardware.graphics.mapper@3.0","android.hardware.graphics.mapper@4.0",
+           "android.hardware.graphics.composer@2.1","libfmq"]
 
 
 def main():
@@ -45,26 +47,35 @@ def main():
             extract_headers(data,pin["tree_sha256"],target,max_total=64*1024**2,max_files=10000)
     host={"Darwin":"darwin-x86_64","Linux":"linux-x86_64"}[platform.system()]
     compiler=args.ndk.resolve()/"toolchains/llvm/prebuilt"/host/"bin/aarch64-linux-android33-clang++"
-    flags=[str(compiler),"-std=c++17","-O2","-fPIC","-fno-rtti","-fno-exceptions","-nostdinc++","-nostdlib++","-Wl,-z,defs"]
+    flags=[str(compiler),"-std=c++17","-O2","-fPIC","-fno-rtti","-fno-exceptions","-nostdinc++","-nostdlib++","-Wl,-z,defs","-Wl,--as-needed"]
     vndk=output/"headers/vndk33"
     includes=["external/libcxx/include","system/libhidl/base/include","system/libhidl/transport/include",
-              "system/libhwbinder/include","system/libfmq/base","system/core/libutils/include",
+              "system/libhwbinder/include","system/libfmq/base","system/libfmq/include","system/core/libutils/include",
               "system/core/libcutils/include","system/core/libcutils/include_outside_system",
               "system/core/libsystem/include","system/libbase/include","system/logging/liblog/include_vndk",
               "hardware/libhardware/include","system/core/libsync/include"]
     for path in includes:flags += ["-isystem",str(vndk/path)]
     # Full qualified generated HIDL include names keep interface versions distinct.
     for path in sorted((vndk/"generated-headers").rglob("gen")):flags += ["-isystem",str(path)]
+    for path in sorted((output/"headers/composer21-headers").rglob("gen")):flags += ["-isystem",str(path)]
     for name in ["mapper-utils","allocator-utils"]:
         for kind in ["hal","passthrough"]:flags += ["-isystem",str(output/"headers"/name/kind/"include")]
-    libraries=[args.boot_profile.resolve()/"system/lib64"/(name+".so") for name in LIBRARIES]
+    for kind in ["hal","passthrough","resources","command-buffer","hwc2onfbadapter"]:
+        flags += ["-isystem",str(output/"headers/composer-utils"/kind/"include")]
+    libraries=[]
+    for name in LIBRARIES:
+        candidates=[args.boot_profile.resolve()/partition/"lib64"/(name+".so") for partition in ["system","vendor"]]
+        libraries.append(next((p for p in candidates if p.is_file()),candidates[0]))
     link=[str(path) for path in libraries]
     products={"android.hardware.graphics.mapper@2.0-impl.scarlet.so":("mapper.cpp",["-shared"]),
               "android.hardware.graphics.allocator@2.0-service.scarlet":("allocator-service.cpp",["-pie"]),
+              "android.hardware.graphics.composer@2.1-service.scarlet":("composer-service.cpp",["-pie"]),
               "graphics-adapter-probe":("adapter-probe.cpp",["-pie"])}
     commands=[]
     for name,(source,extra) in products.items():
         command=flags+extra+[str(SOURCE/"graphics"/source),*link,"-o",str(output/name)]
+        if source=="composer-service.cpp":
+            command[1:1]=[str(output/"headers/composer-utils"/p) for p in ["hwc2onfbadapter/HWC2OnFbAdapter.cpp","resources/ComposerResources.cpp"]]
         subprocess.run(command,check=True);commands.append(command)
     record={"kind":"android-stock-graphics-adapters-v1","headers":pins,"commands":commands,
             "sources":{str(p.relative_to(SOURCE)):sha256(p) for p in [SOURCE/"build-graphics-adapters.py",SOURCE/"graphics/adapter-headers.json",*[SOURCE/"graphics"/entry[0] for entry in products.values()]]},

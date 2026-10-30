@@ -18,6 +18,18 @@
       "revision": "ad2871f7d266307f583f900b022ea45dbafba54f",
       "path": "graphics/allocator/2.0/utils",
       "tree_sha256": "106568a0d3ef484ff96c8108c34a4d95b0fd6e4ca8ab14ab12686576693132b5"
+    },
+    "composer-utils": {
+      "repository": "platform/hardware/interfaces",
+      "revision": "ad2871f7d266307f583f900b022ea45dbafba54f",
+      "path": "graphics/composer/2.1/utils",
+      "tree_sha256": "9f6989c4b23a64319c96c21e493bc7b79991b2d575cfbe3b2d36a593ca9d7bf9"
+    },
+    "composer21-headers": {
+      "repository": "platform/prebuilts/vndk/v30",
+      "revision": "68f677b4f959ebacdc4a4bc0d16d302b6c9de4d9",
+      "path": "arm64/include/out/soong/.intermediates/hardware/interfaces/graphics/composer/2.1",
+      "tree_sha256": "47d2b5f884a77656ff730313210929eb6c26e83ce9d3b66a4d2d705d3c8e096e"
     }
   }
 }
