@@ -630,6 +630,16 @@
       "u:r:system_server:s0",
       "u:object_r:system_server_dumper_service:s0",
       3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:display_service:s0",
+      3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:window_service:s0",
+      3
     ]
   ],
   "socket_labels": [

@@ -255,7 +255,44 @@ fn text_content(path: &str) -> Option<String> {
 }
 
 fn is_cpu_directory(path: &str) -> bool {
-    cfg!(target_arch = "aarch64") && path.trim_end_matches('/') == CPU_DIRECTORY
+    if !cfg!(target_arch = "aarch64") {
+        return false;
+    }
+    let path = path.trim_end_matches('/');
+    if path == CPU_DIRECTORY {
+        return true;
+    }
+    path.strip_prefix(CPU_DIRECTORY)
+        .and_then(|suffix| suffix.strip_prefix("/cpu"))
+        .and_then(|id| id.parse::<usize>().ok())
+        .is_some_and(|id| {
+            path == format!("{CPU_DIRECTORY}/cpu{id}")
+                && crate::sched::scheduler::is_cpu_online(id)
+        })
+}
+
+fn cpu_directory_entry(path: &str, index: usize) -> Option<(String, bool)> {
+    match index {
+        0 => Some((String::from("."), true)),
+        1 => Some((String::from(".."), true)),
+        _ if path.trim_end_matches('/') != CPU_DIRECTORY => None,
+        _ => {
+            let index = index - 2;
+            if let Some(name) = CPU_FILES.get(index) {
+                return Some((String::from(*name), false));
+            }
+            let wanted = index - CPU_FILES.len();
+            let mut found = None;
+            let mut position = 0;
+            crate::sched::scheduler::for_each_online_cpu(|id| {
+                if position == wanted {
+                    found = Some((format!("cpu{id}"), true));
+                }
+                position += 1;
+            });
+            found
+        }
+    }
 }
 
 fn metadata(path: &str, size: usize, directory: bool) -> FileMetadata {
@@ -354,28 +391,23 @@ impl StreamOps for ProcTextFile {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         let mut position = self.position.write();
         if self.directory {
-            let name = match *position {
-                0 => ".",
-                1 => "..",
-                n => match CPU_FILES.get(n - 2) {
-                    Some(name) => name,
-                    None => return Ok(0),
-                },
+            let Some((name, directory)) = cpu_directory_entry(&self.path, *position) else {
+                return Ok(0);
             };
-            let path = match name {
+            let path = match name.as_str() {
                 "." => self.path.clone(),
-                ".." => String::from("/sys/devices/system"),
+                ".." => self.path.rsplit_once('/').map(|(parent, _)| String::from(parent)).unwrap_or_default(),
                 _ => format!("{}/{}", self.path, name),
             };
             let entry = DirectoryEntry::from_internal(&DirectoryEntryInternal {
-                name: String::from(name),
-                file_type: if *position < 2 {
+                name,
+                file_type: if directory {
                     FileType::Directory
                 } else {
                     FileType::RegularFile
                 },
                 size: 0,
-                file_id: metadata(&path, 0, *position < 2).file_id,
+                file_id: metadata(&path, 0, directory).file_id,
                 metadata: None,
             });
             let size = core::mem::size_of::<DirectoryEntry>();
@@ -452,7 +484,11 @@ impl FileObject for ProcTextFile {
             SeekFrom::Current(offset) => *position as i128 + offset as i128,
             SeekFrom::End(offset) => {
                 let end = if self.directory {
-                    CPU_FILES.len() + 2
+                    if self.path == CPU_DIRECTORY {
+                        CPU_FILES.len() + 2 + crate::sched::scheduler::num_online_cpus()
+                    } else {
+                        2
+                    }
                 } else {
                     self.content.len()
                 };
@@ -496,6 +532,23 @@ impl FileObject for ProcTextFile {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch="aarch64")]
+    #[test_case]
+    fn cpu_directory_exposes_real_sparse_cpu_ids_for_bionic_nprocs_conf() {
+        use super::*;
+        use crate::sched::scheduler::{reset,register_online_cpu};
+        reset();register_online_cpu(0);register_online_cpu(2);
+        assert_eq!(cpu_list(),"0,2\n");
+        assert_eq!(cpu_directory_entry(CPU_DIRECTORY,5),Some((String::from("cpu0"),true)));
+        assert_eq!(cpu_directory_entry(CPU_DIRECTORY,6),Some((String::from("cpu2"),true)));
+        assert_eq!(cpu_directory_entry(CPU_DIRECTORY,7),None);
+        assert!(is_cpu_directory("/sys/devices/system/cpu/cpu2"));
+        assert!(!is_cpu_directory("/sys/devices/system/cpu/cpu1"));
+        assert!(!is_cpu_directory("/sys/devices/system/cpu/cpu02"));
+        assert_eq!(cpu_directory_entry("/sys/devices/system/cpu/cpu2",2),None);
+        reset();
+    }
+
     #[test_case]
     fn kptr_control_confirms_a_real_inherited_constraint_and_never_loosens_it() {
         use super::*;
