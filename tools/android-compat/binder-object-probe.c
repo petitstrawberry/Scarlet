@@ -14,7 +14,8 @@
  * Objects deliberately start at offset 4 (legal, not eight-byte aligned).
  * Both request and reply paths exercise 64 24-byte flat objects; 65 is E2BIG.
  * Malformed layouts/unknown handles require EINVAL, inaccessible offsets
- * EFAULT, and FD objects/weak-only acquire or call EOPNOTSUPP. A successful
+ * EFAULT, FD delivery to a non-accepting target EPERM, and weak-only
+ * acquire/call EOPNOTSUPP. A successful
  * write, generic failure reply, or ignored unsupported command is no pass.
  * Rejected prefixes exercise rollback of strong, weak and new local objects.
  * Final RELEASE/DECREFS are checked with all three connections still open,
@@ -116,7 +117,7 @@ static int poll_until(struct pollfd *fds, nfds_t count, int timeout) {
     }
 }
 static int command(int fd, uint32_t cmd, const void *payload, size_t size) {
-    unsigned char bytes[sizeof(cmd) + sizeof(struct binder_transaction_data)];
+    unsigned char bytes[sizeof(cmd) + sizeof(struct binder_transaction_data_sg)];
     CHECK(size <= sizeof(bytes) - sizeof(cmd));
     memcpy(bytes, &cmd, sizeof(cmd));
     if (size) memcpy(bytes + sizeof(cmd), payload, size);
@@ -127,9 +128,9 @@ static int command(int fd, uint32_t cmd, const void *payload, size_t size) {
     CHECK(bwr.write_consumed == sizeof(cmd) + size);
     return 0;
 }
-static int peer_open(struct object_peer *p, unsigned owned) {
+static int peer_open_path(struct object_peer *p, unsigned owned,const char *path) {
     p->owned = owned;
-    p->fd = open("/dev/binder", O_RDWR | O_CLOEXEC | O_NONBLOCK);
+    p->fd = open(path, O_RDWR | O_CLOEXEC | O_NONBLOCK);
     CHECK(p->fd >= 0);
     struct binder_version version = {0};
     CHECK(ioctl(p->fd, BINDER_VERSION, &version) == 0 && version.protocol_version == 8);
@@ -138,6 +139,7 @@ static int peer_open(struct object_peer *p, unsigned owned) {
     CHECK(command(p->fd, BC_ENTER_LOOPER, NULL, 0) == 0);
     return 0;
 }
+static int peer_open(struct object_peer *p,unsigned owned) {return peer_open_path(p,owned,"/dev/binder");}
 static int peer_close(struct object_peer *p) {
     int result = 0;
     if (p->pool != MAP_FAILED) {
@@ -678,10 +680,11 @@ static int negative_cases(struct object_peer *p, const struct handles *h) {
     unsupported.hdr.type = BINDER_TYPE_FD;
     unsupported.handle = STDOUT_FILENO;
     packet_object(&packet, 1, unsupported);
-    CHECK(rejected_tx(p, "unsupported-fd-object", &base, EOPNOTSUPP) == 0);
+    CHECK(rejected_tx(p, "target-refuses-fd-object", &base, EPERM) == 0);
 
     const uint32_t bad_flags[] = {1, 1u << FLAT_BINDER_FLAG_SCHED_POLICY_SHIFT,
-                                 FLAT_BINDER_FLAG_TXN_SECURITY_CTX, FLAT_BINDER_FLAG_INHERIT_RT};
+                                 FLAT_BINDER_FLAG_TXN_SECURITY_CTX,
+                                 FLAT_BINDER_FLAG_INHERIT_RT | (1u << FLAT_BINDER_FLAG_SCHED_POLICY_SHIFT)};
     for (size_t i = 0; i < sizeof(bad_flags) / sizeof(bad_flags[0]); ++i) {
         struct flat_binder_object object = local_object(ROLLBACK, 1);
         object.flags = bad_flags[i];
