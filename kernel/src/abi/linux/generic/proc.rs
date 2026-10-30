@@ -372,47 +372,119 @@ pub fn sys_getpriority(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
     linux_raw_priority(nice)
 }
 
-#[repr(C)]
-struct LinuxSchedParam {
-    sched_priority: i32,
+fn set_fifo_policy(
+    caller: &Task,
+    target: &Task,
+    policy: usize,
+    priority: i32,
+) -> Result<(), usize> {
+    let value = match policy {
+        0 if priority == 0 => 0,
+        1 if (1..=99).contains(&priority) => priority as u8,
+        0 | 1 => return Err(errno::EINVAL),
+        _ => return Err(errno::EOPNOTSUPP),
+    };
+    let authorized = caller
+        .credentials
+        .read()
+        .permits(crate::shield::identity::MANAGE_SCHEDULING);
+    if (!authorized
+        && caller.credentials.read().identity().principal
+            != target.credentials.read().identity().principal)
+        || (!authorized && value > target.fixed_priority.base())
+    {
+        return Err(errno::EPERM);
+    }
+    let _transaction = crate::task::resource_group::transaction().map_err(|_| errno::EBUSY)?;
+    crate::sched::scheduler::set_task_fifo_priority(target, value).map_err(|_| errno::EBUSY)
 }
 
-pub fn sys_sched_getscheduler(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let _pid = trapframe.get_arg(0);
-
-    trapframe.increment_pc_next(&task);
-
-    0 // SCHED_OTHER
-}
-
-pub fn sys_sched_getparam(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = mytask().unwrap();
-    let _pid = trapframe.get_arg(0);
-    let param_ptr = trapframe.get_arg(1);
-
-    trapframe.increment_pc_next(&task);
-
-    if param_ptr == 0 {
+fn sched_set(abi: &mut LinuxAbi, frame: &mut Trapframe, parameter_only: bool) -> usize {
+    let _ = abi;
+    let caller = mytask().unwrap();
+    let pid = frame.get_arg(0);
+    let policy = frame.get_arg(1);
+    let pointer = frame.get_arg(if parameter_only { 1 } else { 2 });
+    frame.increment_pc_next(&caller);
+    let target = match resolve_task_pid(&caller, pid) {
+        Ok(task) => task,
+        Err(error) => return errno::to_result(error),
+    };
+    let mut bytes = [0u8; 4];
+    if copy_from_user(&caller, pointer, &mut bytes).is_err() {
         return errno::to_result(errno::EFAULT);
     }
-
-    let kva = match task.vm_manager.translate_to_kva(param_ptr) {
-        Some(kva) => kva,
-        None => return errno::to_result(errno::EFAULT),
+    let priority = i32::from_ne_bytes(bytes);
+    let policy = if parameter_only {
+        usize::from(target.fixed_priority.base() != 0)
+    } else {
+        policy
     };
-
-    unsafe {
-        // SAFETY: `kva` is the translated address for the user-provided
-        // `struct sched_param *` in the current task.
-        *(kva as *mut LinuxSchedParam) = LinuxSchedParam { sched_priority: 0 };
+    set_fifo_policy(&caller, &target, policy, priority).map_or_else(errno::to_result, |_| 0)
+}
+pub fn sys_sched_setscheduler(abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
+    sched_set(abi, frame, false)
+}
+pub fn sys_sched_setparam(abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
+    sched_set(abi, frame, true)
+}
+pub fn sys_sched_getscheduler(_abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
+    let caller = mytask().unwrap();
+    let pid = frame.get_arg(0);
+    frame.increment_pc_next(&caller);
+    match resolve_task_pid(&caller, pid) {
+        Ok(task) => {
+            if task.deadline_enabled() {
+                6
+            } else {
+                usize::from(task.fixed_priority.effective() != 0)
+            }
+        }
+        Err(error) => errno::to_result(error),
     }
-
-    0
+}
+pub fn sys_sched_getparam(_abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
+    let caller = mytask().unwrap();
+    let pid = frame.get_arg(0);
+    let pointer = frame.get_arg(1);
+    frame.increment_pc_next(&caller);
+    let task = match resolve_task_pid(&caller, pid) {
+        Ok(task) => task,
+        Err(error) => return errno::to_result(error),
+    };
+    let priority = task.fixed_priority.effective();
+    if priority > 99 {
+        return errno::to_result(errno::EOVERFLOW);
+    }
+    copy_to_user(&caller, pointer, &(priority as i32).to_ne_bytes())
+        .map_or_else(|_| errno::to_result(errno::EFAULT), |_| 0)
+}
+fn sched_priority_limit(frame: &mut Trapframe, maximum: bool) -> usize {
+    let caller = mytask().unwrap();
+    let policy = frame.get_arg(0);
+    frame.increment_pc_next(&caller);
+    match policy {
+        0 => 0,
+        1 => {
+            if maximum {
+                99
+            } else {
+                1
+            }
+        }
+        _ => errno::to_result(errno::EINVAL),
+    }
+}
+pub fn sys_sched_get_priority_max(_abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
+    sched_priority_limit(frame, true)
+}
+pub fn sys_sched_get_priority_min(_abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
+    sched_priority_limit(frame, false)
 }
 
 pub fn sys_sched_yield(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     let task = mytask().unwrap();
+    task.fixed_priority.request_yield();
 
     trapframe.increment_pc_next(&task);
     schedule(trapframe);
@@ -754,11 +826,18 @@ pub fn sys_prctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         // not accept tagged syscall pointers or implement MTE. Pretending SET
         // succeeded makes Bionic pass tags into that unsupported syscall ABI.
         PR_SET_TAGGED_ADDR_CTRL | PR_GET_TAGGED_ADDR_CTRL => errno::to_result(errno::EINVAL),
+        47 => {
+            if trapframe.get_arg(3)!=0 || trapframe.get_arg(4)!=0 {return errno::to_result(errno::EINVAL);}
+            super::credentials::ambient(&task,arg2,trapframe.get_arg(2))
+        }
         7 => usize::from(abi.keep_caps), // PR_GET_KEEPCAPS
         8 => { // PR_SET_KEEPCAPS: preserved across fork, reset on exec.
-            if trapframe.get_arg(1) > 1 { errno::to_result(errno::EINVAL) }
+            if abi.keep_caps_locked {errno::to_result(errno::EPERM)}
+            else if trapframe.get_arg(1) > 1 { errno::to_result(errno::EINVAL) }
             else { abi.keep_caps = trapframe.get_arg(1) == 1; 0 }
         }
+        27|28 => super::credentials::securebits(abi,&task,option,arg2),
+        23|24 => super::credentials::bounding(&task,option,arg2),
         // Scarlet has no core-dump or ambient ptrace backend. Report the actual
         // disabled state; only the idempotent disable is supported.
         3 => 0, // PR_GET_DUMPABLE

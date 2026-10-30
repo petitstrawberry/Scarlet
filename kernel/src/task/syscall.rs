@@ -45,6 +45,7 @@ const RAW_SCHEDULER_ATTR_V1_SIZE: usize = 128;
 const RAW_SCHEDULER_STATE_V1_SIZE: usize = 160;
 const SCHED_POLICY_FAIR: u32 = 0;
 const SCHED_POLICY_DEADLINE: u32 = 1;
+const SCHED_POLICY_FIFO:u32=2;
 const SCHED_AFFINITY_ANY: u32 = 0;
 const SCHED_AFFINITY_SINGLE: u32 = 1;
 const SCHED_AFFINITY_MASK: u32 = 2;
@@ -90,7 +91,7 @@ fn validate_scheduler_attr_header(bytes: &[u8]) -> Result<(), SchedulerControlRe
     if decode_native_u32(bytes, 12) != 0 {
         return Err(SchedulerControlResult::InvalidFlags);
     }
-    if decode_native_u32(bytes, 76) != 0
+    if (decode_native_u32(bytes,8)!=SCHED_POLICY_FIFO && decode_native_u32(bytes, 76) != 0)
         || (0..6).any(|index| decode_native_u64(bytes, 80 + index * 8) != 0)
     {
         return Err(SchedulerControlResult::InvalidArgument);
@@ -171,6 +172,13 @@ fn decode_scheduler_attr(
             }
             SchedulerPolicy::Fair
         }
+        SCHED_POLICY_FIFO => {
+            if decode_native_u64(bytes,48)!=0 || decode_native_u64(bytes,56)!=0 || decode_native_u64(bytes,64)!=0 || decode_native_u32(bytes,72)!=SCHED_CPU_ID_NONE {
+                return Err(SchedulerControlResult::InvalidArgument);
+            }
+            let priority=u8::try_from(decode_native_u32(bytes,76)).ok().filter(|priority|*priority!=0).ok_or(SchedulerControlResult::InvalidArgument)?;
+            SchedulerPolicy::Fifo {priority}
+        }
         SCHED_POLICY_DEADLINE => SchedulerPolicy::Deadline {
             params: TaskDeadlineParams {
                 runtime_ns: decode_native_u64(bytes, 48),
@@ -221,6 +229,7 @@ fn write_scheduler_attr(
 ) {
     let (policy, runtime_ns, deadline_ns, period_ns, deadline_cpu_id) = match attributes.policy {
         SchedulerPolicy::Fair => (SCHED_POLICY_FAIR, 0, 0, 0, SCHED_CPU_ID_NONE),
+        SchedulerPolicy::Fifo {..} => (SCHED_POLICY_FIFO,0,0,0,SCHED_CPU_ID_NONE),
         SchedulerPolicy::Deadline { params, cpu_id } => (
             SCHED_POLICY_DEADLINE,
             params.runtime_ns,
@@ -242,6 +251,7 @@ fn write_scheduler_attr(
     encode_native_u64(bytes, 56, deadline_ns);
     encode_native_u64(bytes, 64, period_ns);
     encode_native_u32(bytes, 72, deadline_cpu_id);
+    encode_native_u32(bytes,76,if let SchedulerPolicy::Fifo {priority}=attributes.policy {priority as u32} else {0});
 }
 
 fn write_scheduler_mask_metadata(
@@ -1583,6 +1593,7 @@ pub fn sys_get_scheduler_state(trapframe: &mut Trapframe) -> usize {
     let mut output = [0u8; RAW_SCHEDULER_STATE_V1_SIZE];
     let policy = match state.attributes.policy {
         SchedulerPolicy::Fair => SCHED_POLICY_FAIR,
+        SchedulerPolicy::Fifo {..} => SCHED_POLICY_FIFO,
         SchedulerPolicy::Deadline { .. } => SCHED_POLICY_DEADLINE,
     };
     let (affinity_kind, configured_cpu_id, _) = raw_affinity(state.active_affinity);
@@ -1590,6 +1601,7 @@ pub fn sys_get_scheduler_state(trapframe: &mut Trapframe) -> usize {
     encode_native_u32(&mut output, 4, SCHEDULER_CONTROL_VERSION_V1);
     encode_native_u32(&mut output, 8, state.status);
     encode_native_u32(&mut output, 12, policy);
+    encode_native_u32(&mut output,44,if let SchedulerPolicy::Fifo {priority}=state.attributes.policy {priority as u32} else {0});
     encode_native_u32(&mut output, 16, 0);
     encode_native_u32(&mut output, 20, affinity_kind);
     encode_native_u32(&mut output, 24, configured_cpu_id);
@@ -1791,7 +1803,8 @@ pub fn sys_yield(trapframe: &mut Trapframe) -> usize {
     // Increment PC before yielding to avoid re-executing the syscall on resume
     trapframe.increment_pc_next(&task);
 
-    // Yield CPU to scheduler - returns when this task is scheduled again
+    // FIFO yield rotates only among runnable peers at the same priority.
+    task.fixed_priority.request_yield();
     schedule(trapframe);
 
     0

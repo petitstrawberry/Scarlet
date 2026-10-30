@@ -8,7 +8,7 @@ use core::time::Duration;
 use scarlet_sys::{
     RawSchedulerAttrV1, RawSchedulerResult, RawSchedulerStateV1, RawSchedulerStatus,
     SCHED_AFFINITY_ANY, SCHED_AFFINITY_MASK, SCHED_AFFINITY_SINGLE, SCHED_ATTR_FLAGS_NONE,
-    SCHED_CPU_ID_NONE, SCHED_NICE_MAX, SCHED_NICE_MIN, SCHED_POLICY_DEADLINE, SCHED_POLICY_FAIR,
+    SCHED_CPU_ID_NONE, SCHED_NICE_MAX, SCHED_NICE_MIN, SCHED_POLICY_DEADLINE, SCHED_POLICY_FAIR, SCHED_POLICY_FIFO,
     SCHED_UTIL_SCALE, Syscall, syscall1,
 };
 
@@ -115,6 +115,8 @@ pub fn cpu_usage() -> Option<CpuUsageInfo> {
 pub enum SchedulerPolicy {
     /// Weighted EEVDF fair scheduling.
     Fair,
+    /// Preemptive FIFO scheduling, with a native priority in 1..=255.
+    Fifo { priority:u8 },
     /// Periodic deadline-reservation scheduling.
     Deadline,
 }
@@ -161,6 +163,8 @@ pub enum SchedulerResult {
     Busy,
     /// A supplied output buffer was too small.
     BufferTooSmall,
+    /// The caller has no scheduling authority.
+    PermissionDenied,
 }
 
 /// Safe scheduler-control failure.
@@ -473,6 +477,8 @@ impl DeadlineConfig {
 pub enum SchedulerConfig<'a> {
     /// Activate Fair scheduling with all Fair-owned controls.
     Fair(FairConfig<'a>),
+    /// Activate fixed-priority FIFO while retaining Fair fallback controls.
+    Fifo {priority:u8, fair:FairConfig<'a>},
     /// Activate Deadline scheduling with its required Fair fallback.
     Deadline {
         /// The active single-CPU Deadline reservation.
@@ -590,6 +596,12 @@ impl ConfiguredScheduler {
     /// # Returns
     ///
     /// Nothing; call [`Self::apply`] to atomically submit the change.
+    /// Select FIFO policy, retaining the existing Fair fallback and affinity.
+    pub fn activate_fifo(&mut self,priority:u8)->Result<(),SchedulerError> {
+        if priority==0 {return Err(SchedulerError::InvalidFieldsForPolicy);}
+        self.policy=SchedulerPolicy::Fifo {priority};self.deadline=None;Ok(())
+    }
+
     pub fn activate_fair(&mut self) {
         self.policy = SchedulerPolicy::Fair;
         self.deadline = None;
@@ -768,6 +780,7 @@ impl RuntimeSchedulerState {
 pub fn apply(config: SchedulerConfig<'_>) -> Result<(), SchedulerError> {
     let raw = match config {
         SchedulerConfig::Fair(fair) => encode_fair(fair),
+        SchedulerConfig::Fifo {priority,fair} => encode_fifo(priority,fair)?,
         SchedulerConfig::Deadline { deadline, fair } => encode_deadline(deadline, fair),
     };
     apply_raw(raw)
@@ -871,6 +884,7 @@ fn syscall_result(value: usize) -> Result<SchedulerResult, SchedulerError> {
         RawSchedulerResult::AdmissionFailed => SchedulerResult::AdmissionFailed,
         RawSchedulerResult::Busy => SchedulerResult::Busy,
         RawSchedulerResult::BufferTooSmall => SchedulerResult::BufferTooSmall,
+        RawSchedulerResult::PermissionDenied => SchedulerResult::PermissionDenied,
     })
 }
 
@@ -880,6 +894,11 @@ fn encode_fair(config: FairConfig<'_>) -> RawSchedulerAttrV1 {
     raw.util_min = config.util_min;
     encode_fair_affinity(&mut raw, config.affinity);
     raw
+}
+
+fn encode_fifo(priority:u8,fair:FairConfig<'_>)->Result<RawSchedulerAttrV1,SchedulerError> {
+    if priority==0 {return Err(SchedulerError::InvalidFieldsForPolicy);}
+    let mut raw=encode_fair(fair);raw.policy=SCHED_POLICY_FIFO;raw.reserved0=priority as u32;Ok(raw)
 }
 
 fn encode_deadline(config: DeadlineConfig, fair: FairConfig<'_>) -> RawSchedulerAttrV1 {
@@ -921,6 +940,7 @@ fn encode_configured(config: &ConfiguredScheduler) -> Result<RawSchedulerAttrV1,
     };
     match config.policy {
         SchedulerPolicy::Fair => Ok(encode_fair(fair)),
+        SchedulerPolicy::Fifo {priority} => encode_fifo(priority,fair),
         SchedulerPolicy::Deadline => {
             let deadline = config
                 .deadline
@@ -938,8 +958,13 @@ fn apply_raw(mut raw: RawSchedulerAttrV1) -> Result<(), SchedulerError> {
     }
 }
 
-fn decode_policy(value: u32) -> Result<SchedulerPolicy, SchedulerError> {
+fn decode_policy(value: u32, priority:u32) -> Result<SchedulerPolicy, SchedulerError> {
+    if value!=SCHED_POLICY_FIFO && priority!=0 {return Err(SchedulerError::InvalidFieldsForPolicy);}
     match value {
+        SCHED_POLICY_FIFO => {
+            let priority=u8::try_from(priority).ok().filter(|priority|*priority!=0).ok_or(SchedulerError::InvalidFieldsForPolicy)?;
+            Ok(SchedulerPolicy::Fifo {priority})
+        }
         SCHED_POLICY_FAIR => Ok(SchedulerPolicy::Fair),
         SCHED_POLICY_DEADLINE => Ok(SchedulerPolicy::Deadline),
         _ => Err(SchedulerError::UnknownPolicy(value)),
@@ -1004,14 +1029,14 @@ fn decode_configured(
     if raw.flags != SCHED_ATTR_FLAGS_NONE {
         return Err(SchedulerError::InvalidResponseFlags(raw.flags));
     }
-    if raw.reserved0 != 0 || raw.reserved != [0; 6] {
+    if (raw.policy!=SCHED_POLICY_FIFO && raw.reserved0 != 0) || raw.reserved != [0; 6] {
         return Err(SchedulerError::InvalidResponseReserved);
     }
     validate_fair_values(raw.nice, raw.util_min)?;
-    let policy = decode_policy(raw.policy)?;
+    let policy = decode_policy(raw.policy,raw.reserved0)?;
     let fair_affinity = decode_owned_affinity(&raw, mask)?;
     let deadline = match policy {
-        SchedulerPolicy::Fair => {
+        SchedulerPolicy::Fair | SchedulerPolicy::Fifo {..} => {
             if raw.runtime_ns != 0
                 || raw.deadline_ns != 0
                 || raw.period_ns != 0
@@ -1048,11 +1073,11 @@ fn decode_runtime_state(raw: RawSchedulerStateV1) -> Result<RuntimeSchedulerStat
     if raw.flags != SCHED_ATTR_FLAGS_NONE {
         return Err(SchedulerError::InvalidResponseFlags(raw.flags));
     }
-    if raw.reserved0 != 0 || raw.reserved1 != 0 || raw.reserved != [0; 5] {
+    if (raw.policy!=SCHED_POLICY_FIFO && raw.reserved0 != 0) || raw.reserved1 != 0 || raw.reserved != [0; 5] {
         return Err(SchedulerError::InvalidResponseReserved);
     }
     validate_fair_values(raw.nice, raw.util_min)?;
-    let policy = decode_policy(raw.policy)?;
+    let policy = decode_policy(raw.policy,raw.reserved0)?;
     match raw.affinity_kind {
         SCHED_AFFINITY_ANY | SCHED_AFFINITY_MASK if raw.configured_cpu_id == SCHED_CPU_ID_NONE => {}
         SCHED_AFFINITY_SINGLE if raw.configured_cpu_id != SCHED_CPU_ID_NONE => {}
@@ -1146,6 +1171,20 @@ mod tests {
         assert_eq!(raw.cpu_mask_bytes, 1);
         assert_eq!(raw.cpu_mask_nbits, 2);
         assert_eq!(raw.cpu_mask_ptr, bytes.as_ptr() as u64);
+    }
+
+    #[test]
+    fn fifo_configuration_and_runtime_priority_round_trip_without_deadline_fields() {
+        let fair=FairConfig::new(0,0,FairAffinity::Any).unwrap();
+        assert_eq!(encode_fifo(0,fair),Err(SchedulerError::InvalidFieldsForPolicy));
+        let raw=encode_fifo(9,fair).unwrap();
+        let mut configured=decode_configured(raw,None).unwrap();
+        assert_eq!(configured.policy(),SchedulerPolicy::Fifo {priority:9});
+        assert_eq!(encode_configured(&configured).unwrap(),raw);
+        configured.activate_fifo(7).unwrap();assert_eq!(encode_configured(&configured).unwrap().reserved0,7);
+        let mut runtime=RawSchedulerStateV1::new();runtime.policy=SCHED_POLICY_FIFO;runtime.reserved0=9;
+        assert_eq!(decode_runtime_state(runtime).unwrap().policy(),SchedulerPolicy::Fifo {priority:9});
+        runtime.reserved0=256;assert_eq!(decode_runtime_state(runtime),Err(SchedulerError::InvalidFieldsForPolicy));
     }
 
     #[test]
@@ -1251,10 +1290,11 @@ mod tests {
             SchedulerResult::AdmissionFailed,
             SchedulerResult::Busy,
             SchedulerResult::BufferTooSmall,
+            SchedulerResult::PermissionDenied,
         ];
         for (raw, result) in expected.into_iter().enumerate() {
             assert_eq!(syscall_result(raw), Ok(result));
         }
-        assert_eq!(syscall_result(12), Err(SchedulerError::UnknownResult(12)));
+        assert_eq!(syscall_result(13), Err(SchedulerError::UnknownResult(13)));
     }
 }

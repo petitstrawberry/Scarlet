@@ -12,6 +12,7 @@ extern crate alloc;
 
 mod accounting;
 mod scheduling;
+pub mod fixed_priority;
 use accounting::{CpuAccounting, CpuHog, SchedUtil};
 use scheduling::{ExecutionClock, FairRequest, PlacementHistory, SchedulingQuantum};
 
@@ -902,6 +903,7 @@ pub struct Task {
     software_timer_count: AtomicUsize,
     /// Periodic deadline reservation state.
     pub(crate) deadline: IrqSpinLock<TaskDeadlineState>,
+    pub(crate) fixed_priority: Arc<fixed_priority::FixedPriorityState>,
 
     // === IRQ spin lock fields (complex operations) ===
     /// VCPU state for context switching
@@ -1161,6 +1163,7 @@ impl Task {
             software_timers: IrqSpinLock::new(Vec::new()),
             software_timer_count: AtomicUsize::new(0),
             deadline: IrqSpinLock::new(TaskDeadlineState::new()),
+            fixed_priority: fixed_priority::FixedPriorityState::new(),
             // IRQ spin lock fields
             vcpu: IrqSpinLock::new(Vcpu::new(match task_type {
                 TaskType::Kernel => crate::arch::Mode::Kernel,
@@ -3130,7 +3133,9 @@ impl Task {
         *child.controlling_tty.write() = self.controlling_tty.read().clone();
         child.is_session_leader.store(false, Ordering::SeqCst);
 
-        // Copy scheduling and event handling state
+        // Copy scheduling and event handling state. Temporary RPC donations
+        // never become a child's configured policy.
+        child.fixed_priority.configure(self.fixed_priority.base());
         child.set_time_slice_duration_ns(self.time_slice_duration_ns());
         // Fair-scheduler state: nice/weight are inherited, but vruntime and
         // deadline must start fresh. The child will be `place`-d against the

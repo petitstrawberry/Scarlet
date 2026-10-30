@@ -274,6 +274,8 @@ pub const SCHEDULER_CONTROL_VERSION_V1: u32 = 1;
 pub const SCHED_POLICY_FAIR: u32 = 0;
 /// Periodic deadline-reservation scheduler policy.
 pub const SCHED_POLICY_DEADLINE: u32 = 1;
+/// Preemptive fixed-priority FIFO scheduling. Priority 1..=255 is in reserved0.
+pub const SCHED_POLICY_FIFO:u32=2;
 
 /// Allow execution on any online CPU.
 pub const SCHED_AFFINITY_ANY: u32 = 0;
@@ -325,6 +327,8 @@ pub enum RawSchedulerResult {
     Busy = 10,
     /// A user-provided output or affinity-mask buffer was too small.
     BufferTooSmall = 11,
+    /// The caller has no scheduling authority.
+    PermissionDenied = 12,
 }
 
 impl RawSchedulerResult {
@@ -351,6 +355,7 @@ impl RawSchedulerResult {
             9 => Some(Self::AdmissionFailed),
             10 => Some(Self::Busy),
             11 => Some(Self::BufferTooSmall),
+            12 => Some(Self::PermissionDenied),
             _ => None,
         }
     }
@@ -437,7 +442,7 @@ pub struct RawSchedulerAttrV1 {
     pub size: u32,
     /// ABI version, which must be [`SCHEDULER_CONTROL_VERSION_V1`] for v1.
     pub version: u32,
-    /// Requested policy: [`SCHED_POLICY_FAIR`] or [`SCHED_POLICY_DEADLINE`].
+    /// Requested policy: Fair, Deadline, or FIFO.
     pub policy: u32,
     /// Requested flags, which must be [`SCHED_ATTR_FLAGS_NONE`] in v1.
     pub flags: u32,
@@ -490,10 +495,8 @@ pub struct RawSchedulerAttrV1 {
     /// [`RawSchedulerAttrV1::affinity_kind`] and related mask fields regardless
     /// of the active policy.
     pub deadline_cpu_id: u32,
-    /// Reserved fixed-width field following [`RawSchedulerAttrV1::deadline_cpu_id`].
-    ///
-    /// Callers must initialize this to zero. The kernel must reject a nonzero
-    /// input value and return zero for output.
+    /// FIFO priority 1..=255 when policy is SCHED_POLICY_FIFO; zero otherwise.
+    /// This extends v1's policy-specific reserved field without changing layout.
     pub reserved0: u32,
     /// Reserved for future ABI expansion.
     ///
@@ -585,9 +588,7 @@ pub struct RawSchedulerStateV1 {
     pub nice: i32,
     /// Configured Fair fallback minimum utilization in capacity units.
     pub util_min: u32,
-    /// Reserved for future fixed-width state fields.
-    ///
-    /// The kernel must return this as zero; callers must ignore it.
+    /// Configured FIFO priority for SCHED_POLICY_FIFO; zero for other policies.
     pub reserved0: u32,
     /// Current EEVDF virtual runtime, in scheduler virtual-time units.
     pub fair_vruntime_ns: u64,

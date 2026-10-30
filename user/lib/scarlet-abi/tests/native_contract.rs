@@ -158,6 +158,7 @@ fn scheduler_results_preserve_unknown_values() {
         abi::RawSchedulerResult::AdmissionFailed,
         abi::RawSchedulerResult::Busy,
         abi::RawSchedulerResult::BufferTooSmall,
+        abi::RawSchedulerResult::PermissionDenied,
     ];
     for (raw, expected) in results.into_iter().enumerate() {
         assert_eq!(expected.as_raw(), raw as u32);
@@ -166,7 +167,7 @@ fn scheduler_results_preserve_unknown_values() {
             Some(expected)
         );
     }
-    for raw in [12, u32::MAX] {
+    for raw in [13, u32::MAX] {
         assert_eq!(abi::RawSchedulerResult::from_raw(raw), None);
     }
     let statuses = [
@@ -278,5 +279,41 @@ fn native_syscall_numbers() {
         EnvironmentRemoveRoot = 1302, EnvironmentSeal = 1303,
         EnvironmentCurrent = 1304, EnvironmentGetRoot = 1305,
         EnvironmentSpawn = 1306, EnvironmentExec = 1307,
+        MountNamespaceCurrent = 533,
+        MountNamespaceJoin = 534,
+        MountNamespaceIdentity = 535,
+        VfsViewSetPropagation = 531,
+        VfsViewBindRecursive = 532,
+        VfsViewMountRestricted = 530,
+        ResourceGroupCreate = 1330,
+        ResourceGroupCurrent = 1331,
+        ResourceGroupEnter = 1332,
+        ResourceGroupStatus = 1333,
+        ResourceGroupRemove = 1334,
+        ResourceGroupCpus = 1335,
+        ResourceGroupLeave = 1336,
+        ProcessScopeCreate = 1320,
+        ProcessScopeEnter = 1321,
+        ProcessScopeSetReaper = 1322,
+        ProcessScopeTerminate = 1323,
+        ProcessScopeStatus = 1324,
+        ShieldPolicyCreateExec = 1325,
+        ShieldBindFile = 1326,
+        ShieldFilePolicy = 1340,
+        ShieldCreationLabel = 1341,
+        ShieldSocketCreationLabel = 1343,
+        ShieldRelabelFile = 1342,
+        VmLayoutConfigure = 1350,
+        VmLayoutQuery = 1351,
+        ShieldPolicyCreate = 1310,
+        ShieldPolicyCurrent = 1311,
+        ShieldApply = 1312,
+        ShieldPolicyCreateWithTransitions = 1313,
+        ShieldTransition = 1314,
+        ShieldReserveExec = 1315,
+        ShieldClearExec = 1316,
+        ShieldConstrainInformation = 1318,
+        ShieldInformation = 1319,
+
     }
 }
