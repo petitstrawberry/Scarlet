@@ -5,6 +5,7 @@ extern crate scarlet_std as std;
 #[path = "../../../../user/bin/src/bootstrap.rs"]
 mod bootstrap;
 mod boot_profile;
+mod app_policy;
 mod framework_services;
 mod services;
 mod native_sws;
@@ -24,10 +25,10 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
         println!("SCARLET_ANDROID_RESOURCE_ROOT");
     }
     let backing = bootstrap::backing("root=/dev/vblk1", true)?;
-    let (environment, policy) = if option_env!("SCARLET_ANDROID_STOCK") == Some("1") {
+    let (environment, policy,boot_policy) = if option_env!("SCARLET_ANDROID_STOCK") == Some("1") {
         stock::environment(backing)?
     } else {
-        (bootstrap::environment(backing)?.0, None)
+        (bootstrap::environment(backing)?.0, None,None)
     };
     let android = environment
         .root("android-aarch64")
@@ -97,11 +98,15 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
             return Err("ART interpreter arguments");
         }
         let label = if diagnostic { "PROGRAM" } else { "ART" };
+        let app_manager=if option_env!("SCARLET_ANDROID_APP_POLICY")==Some("1") {
+            Some(app_policy::start(boot_policy.ok_or("manager policy capability missing")?,&android)?)
+        } else {None};
         println!("\nSCARLET_ANDROID_{}_START", label);
         let pid = environment
             .spawn(&executable, &argv, &env, "/", &handles)
             .map_err(|_| "ART spawn")?;
         let (waited, status) = std::task::waitpid(pid as i32, 0);
+        if let Some(manager)=app_manager {manager.finish()?;}
         println!("SCARLET_ANDROID_{}_EXIT {}", label, status);
         if diagnostic && waited == pid as i32 {
             return Ok(());

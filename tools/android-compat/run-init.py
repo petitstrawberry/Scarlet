@@ -25,6 +25,9 @@ def main():
     if capture_frame:arguments.remove("--capture-frame")
     start_installer="--start-installer" in arguments
     if start_installer:arguments.remove("--start-installer")
+    manage_apps="--manage-app-policy" in arguments
+    if manage_apps:arguments.remove("--manage-app-policy")
+    if manage_apps and "--boot-profile" not in arguments:raise ValueError("app policy management requires a boot profile")
     if "--sws-native" in arguments:
         index=arguments.index("--sws-native");compositor=Path(arguments[index+1]).resolve();del arguments[index:index+2]
     if capture_frame and not compositor:raise ValueError("frame capture requires --sws-native")
@@ -72,6 +75,7 @@ def main():
             "service_readiness": "not asserted",
             "service_control_request": "ctl.start=zygote after 4 seconds" if start_zygote else None, "apex_activation": "stock apexd must perform activation",
             "installer_control_request": "ctl.start=installd after 4 seconds" if start_installer else None,
+            "app_policy_manager": manage_apps,
         }, indent=2) + "\n")
         return metadata
 
@@ -81,6 +85,8 @@ def main():
     runner.stage_boot_inputs = stage
     original_run=runner.smoke.run_guest
     previous=os.environ.get("SCARLET_ANDROID_SWS_NATIVE")
+    previous_policy=os.environ.get("SCARLET_ANDROID_APP_POLICY")
+    if manage_apps:os.environ["SCARLET_ANDROID_APP_POLICY"]="1"
     if compositor:
         os.environ["SCARLET_ANDROID_SWS_NATIVE"]="1"
         def run(command,directory,timeout):
@@ -119,6 +125,9 @@ def main():
     sys.argv = [str(SOURCE / "run-direct.py"), *arguments, "--program", str(build / "init-scope-probe"), "--init-bootstrap", "--accel", "hvf"]
     try:return runner.main()
     finally:
+        if manage_apps:
+            if previous_policy is None:os.environ.pop("SCARLET_ANDROID_APP_POLICY",None)
+            else:os.environ["SCARLET_ANDROID_APP_POLICY"]=previous_policy
         if compositor:
             if previous is None:os.environ.pop("SCARLET_ANDROID_SWS_NATIVE",None)
             else:os.environ["SCARLET_ANDROID_SWS_NATIVE"]=previous

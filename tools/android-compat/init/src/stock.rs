@@ -6,7 +6,7 @@ use std::{
 
 pub fn environment(
     native: VfsView,
-) -> Result<(Environment, Option<std::shield::Policy>), &'static str> {
+) -> Result<(Environment, Option<std::shield::Policy>, Option<std::shield::Policy>), &'static str> {
     let android = native
         .rooted_at("/systems/android-aarch64")
         .map_err(|_| "stock Android view")?;
@@ -44,13 +44,14 @@ pub fn environment(
     android
         .bind("/tmp", &native, "/tmp")
         .map_err(|_| "Android tmp")?;
-    if option_env!("SCARLET_ANDROID_INIT_BOOTSTRAP") == Some("1") {
+    let boot_policy=if option_env!("SCARLET_ANDROID_INIT_BOOTSTRAP") == Some("1") {
         let discovery=VfsView::create("linux-device-tree", "").map_err(|_| "native device discovery")?;
         android.bind("/sys/devices", &discovery, "/").map_err(|_| "Android device discovery")?;
-        super::shield::configure_init(&android)?;
-    } else if option_env!("SCARLET_ANDROID_SHIELD") == Some("1") {
-        super::shield::configure(&android)?;
-    }
+        Some(super::shield::configure_init(&android)?)
+    } else {
+        if option_env!("SCARLET_ANDROID_SHIELD") == Some("1") {super::shield::configure(&android)?;}
+        None
+    };
     let policy = if option_env!("SCARLET_ANDROID_SERVICES") == Some("1")
         || option_env!("SCARLET_ANDROID_FRAMEWORK_SERVICES") == Some("1")
     {
@@ -64,7 +65,7 @@ pub fn environment(
     env.set_root("android-aarch64", &android)
         .map_err(|_| "Android view")?;
     env.seal().map_err(|_| "seal stock Environment")?;
-    Ok((env, policy))
+    Ok((env, policy,boot_policy))
 }
 
 fn run(

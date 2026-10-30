@@ -60,7 +60,7 @@ pub fn configure(android: &VfsView) -> Result<(), &'static str> {
 }
 
 /// Bounded boot diagnostic grants. This is not a complete Android policy.
-pub fn configure_init(android: &VfsView) -> Result<(), &'static str> {
+pub fn configure_init(android: &VfsView) -> Result<Policy, &'static str> {
     let policy = if option_env!("SCARLET_ANDROID_BOOT_PROFILE") == Some("1") {
         super::boot_profile::policy(android)?
     } else {
@@ -74,5 +74,5 @@ pub fn configure_init(android: &VfsView) -> Result<(), &'static str> {
     android.bind("/sys/fs/selinux", &fs, "/").map_err(|_| "init security mount")?;
     policy.apply(1).map_err(|_| "init Shield subject")?;
     std::println!("SCARLET_SHIELD_INIT_POLICY configured");
-    Ok(())
+    Ok(policy)
 }

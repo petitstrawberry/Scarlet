@@ -7,6 +7,7 @@ edition = "2024"
 
 [dependencies]
 scarlet-std = { path = "../../../user/lib/std" }
+scarlet-android-app-policy = { path = "../app-policy" }
 
 [profile.release]
 panic = "abort"
