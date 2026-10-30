@@ -109,8 +109,8 @@
             src = pkgs.fetchFromGitHub {
               owner = "petitstrawberry";
               repo = "virglrenderer";
-              rev = "f12cf08dce1fb886c9a3c448b9c20bf67a1ed8a8";
-              hash = "sha256-DLNNVMidAzhHk+VMT0Ika6gl832UVcBrwxty9ahJPBo=";
+              rev = "93cf28c5fa8506d7682deb22ba68450609abdac0";
+              hash = "sha256-0EuDZWga06lw/aPRrrf/IcabBu7EFmAU9mA4DHHlAT0=";
             };
             patches = prevAttrs.patches or [ ];
             buildInputs = (prevAttrs.buildInputs or [ ]) ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
