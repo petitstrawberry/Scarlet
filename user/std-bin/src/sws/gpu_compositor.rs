@@ -700,27 +700,10 @@ impl GpuCompositor {
             return Err(SgfxBufferError::InvalidBuffer);
         }
         let extent = (texture.width, texture.height);
-        // REGISTER creates a binding, but does not promise that the producer
-        // has drawn yet. Recreate it at every COMMIT, including first use:
-        // retaining the imported view can keep displaying its old contents.
-        // Only released slots reach here. Retire through MappedTarget's
-        // existing idle-wait path before importing: some backends forbid
-        // two sampled mappings of the same image. The descriptor pool
-        // reuses the retired slot rather than growing each frame.
-        let handle = texture
-            .handle
-            .duplicate()
-            .map_err(|_| SgfxBufferError::ImportFailed)?;
-        self.target
-            .release_imported_texture(texture.texture)
-            .map_err(|_| SgfxBufferError::Unavailable)?;
-        let refreshed = self
-            .target
-            .import_shared_bgra_texture(extent.0, extent.1, handle)
-            // A failed replacement leaves the binding unavailable; use
-            // the existing backend-loss path instead of sampling it again.
-            .map_err(|_| SgfxBufferError::Unavailable)?;
-        self.shared_textures[texture_index].texture = refreshed;
+        // The producer completes its GPU work before COMMIT. Keep the
+        // registered image and sampled view until DESTROY or a generation
+        // change: reimporting every frame drains the compositor queue and
+        // rebuilds sampler objects without changing the shared storage.
         let state = self
             .shared_windows
             .iter_mut()
