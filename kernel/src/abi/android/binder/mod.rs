@@ -32,6 +32,7 @@ use alloc::{
 use core::any::Any;
 
 mod arena;
+mod buffers;
 mod death;
 mod objects;
 use arena::Arena;
@@ -48,6 +49,8 @@ const SET_MAX_THREADS: u32 = 0x40046205;
 const THREAD_EXIT: u32 = 0x40046208;
 const BC_TRANSACTION: u32 = 0x40406300;
 const BC_REPLY: u32 = 0x40406301;
+const BC_TRANSACTION_SG:u32=0x40486311;
+const BC_REPLY_SG:u32=0x40486312;
 const BC_FREE_BUFFER: u32 = 0x40086303;
 const BC_REGISTER_LOOPER: u32 = 0x630b;
 const BC_ENTER_LOOPER: u32 = 0x630c;
@@ -106,6 +109,7 @@ struct Context {
 struct Domain {
     // Retain the environment so pointer identity cannot be reused while open.
     environment: Arc<Environment>,
+    device:u8,
     context: IrqSpinLock<Option<Context>>,
     objects: objects::Registry,
 }
@@ -122,6 +126,7 @@ fn domain(environment: Arc<Environment>, device: u8) -> Arc<Domain> {
     }
     let domain = Arc::new(Domain {
         environment,
+        device,
         context: IrqSpinLock::new(None),
         objects: IrqSpinLock::new(BTreeMap::new()),
     });
@@ -137,6 +142,7 @@ struct Thread {
     completed: VecDeque<Completed>,
     outgoing: Option<RpcCall>,
     incoming: Option<RpcRequest>,
+    incoming_accepts_fds: bool,
 }
 struct Completed {
     command: u32,
@@ -160,6 +166,7 @@ pub(crate) struct BinderFile {
     state: IrqSpinLock<State>,
     objects: IrqSpinLock<Objects>,
     send_gate: IrqSpinLock<()>,
+    auto_fds: IrqSpinLock<BTreeMap<usize, Vec<crate::abi::linux::generic::DescriptorReceipt>>>,
 }
 
 pub(crate) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> Option<usize> {
@@ -190,6 +197,7 @@ pub(crate) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> O
             domain: domain(environment, device),
             endpoint: RpcEndpoint::new(),
             send_gate: IrqSpinLock::new(()),
+            auto_fds: IrqSpinLock::new(BTreeMap::new()),
             objects: IrqSpinLock::new(Objects::default()),
             state: IrqSpinLock::new(State {
                 threads: BTreeMap::new(),
@@ -302,6 +310,7 @@ impl BinderFile {
         result.map_or_else(errno::to_result, |_| 0)
     }
     fn command(&self, task: &Task, abi: &LinuxAbi, command: u32, data: &[u8]) -> Result<(), usize> {
+        let command=match command {BC_TRANSACTION_SG=>BC_TRANSACTION,BC_REPLY_SG=>BC_REPLY,other=>other};
         let tid = task.get_id();
         match command {
             BC_REQUEST_DEATH_NOTIFICATION => {
@@ -339,6 +348,10 @@ impl BinderFile {
                 self.objects.lock().reference_command(command, data)?;
             }
             BC_TRANSACTION | BC_REPLY => {
+                // hwbinder's default INHERIT_RT flag is inert between Fair
+                // tasks. Do not turn a native reservation into an unimplemented
+                // inherited FIFO/RR transaction.
+                if self.domain.device==1 && task.deadline_enabled() {return Err(errno::EOPNOTSUPP);}
                 let flags = u32_at(data, 20);
                 if flags
                     & !(FLAG_COLLECT_NOTED_APP_OPS
@@ -364,6 +377,15 @@ impl BinderFile {
                     None
                 };
                 let capability = target.as_ref().map(|lease| lease.node.object.clone());
+                if task.deadline_enabled() && target.as_ref().is_some_and(|target|target.node.inherits_rt()) {return Err(errno::EOPNOTSUPP);}
+                if !prepared.capabilities.is_empty() {
+                    let accepts=if command==BC_TRANSACTION {
+                        target.as_ref().is_some_and(|target|target.node.accepts_fds())
+                    } else {
+                        self.state.lock().threads.get(&tid).is_some_and(|thread|thread.incoming_accepts_fds)
+                    };
+                    if !accepts {return Err(errno::EPERM);}
+                }
                 if target.as_ref().is_some_and(|target| {
                     !same_policy(self.subject.as_ref(), target.node.subject.as_ref())
                 }) {
@@ -531,6 +553,8 @@ impl BinderFile {
         objects.free_buffer(address);
         let request = objects.oneway.remove(&address);
         drop(objects);
+        let descriptors=self.auto_fds.lock().remove(&address);
+        drop(descriptors);
         // Release native serialization and budget only after userspace has
         // returned the receive buffer; other loopers can then dispatch it.
         drop(request);
@@ -538,6 +562,10 @@ impl BinderFile {
     }
 
     fn read_record(&self, task: &Task, output: usize, capacity: usize) -> Result<usize, usize> {
+        self.read_record_for_abi(task,None,output,capacity)
+    }
+    fn read_record_for_abi(&self,task:&Task,abi:Option<&LinuxAbi>,output:usize,capacity:usize)->Result<usize,usize> {
+        if self.domain.device==1 && task.deadline_enabled() {return Err(errno::EOPNOTSUPP);}
         let mut state = self.state.lock();
         let tid = task.get_id();
         let thread = state.threads.get(&tid).unwrap();
@@ -679,7 +707,8 @@ impl BinderFile {
                     request.message.retained = Some(Arc::new(dispatch));
                 }
             }
-            let (length, offsets_length) = self.decode(&message, address, &arena)?;
+            let mut installed=abi.map(|abi|buffers::Installed::new(task,abi));
+            let (length, offsets_length) = self.decode_received(&message, address, &arena,installed.as_mut())?;
             let mut record = [0u8; 68];
             record[..4]
                 .copy_from_slice(&(if replying { BR_REPLY } else { BR_TRANSACTION }).to_le_bytes());
@@ -695,11 +724,20 @@ impl BinderFile {
             put64(tx, 48, address);
             put64(tx, 56, address + ((length + 7) & !7));
             write(task, output, &record)?;
+            if let Some(installed)=installed {
+                let automatic=installed.commit();
+                if !automatic.is_empty() {
+                    let previous=self.auto_fds.lock().insert(address,automatic);
+                    drop(previous);
+                }
+            }
             if let Some(request) = incoming.take() {
                 if request.is_oneway() {
                     self.objects.lock().oneway.insert(address, request);
                 } else {
-                    self.state.lock().threads.get_mut(&tid).unwrap().incoming = Some(request);
+                    let mut state=self.state.lock();let thread=state.threads.get_mut(&tid).unwrap();
+                    thread.incoming_accepts_fds=u32_at(&message.bytes,0)&0x10!=0;
+                    thread.incoming = Some(request);
                 }
             }
             Ok(68)
@@ -743,6 +781,7 @@ impl BinderFile {
                 let command = u32_at(&read::<4>(task, source + consumed)?, 0);
                 let size = match command {
                     BC_TRANSACTION | BC_REPLY => 64,
+                    BC_TRANSACTION_SG|BC_REPLY_SG=>72,
                     BC_FREE_BUFFER => 8,
                     BC_REQUEST_DEATH_NOTIFICATION | BC_CLEAR_DEATH_NOTIFICATION => 12,
                     BC_DEAD_BINDER_DONE => 8,
@@ -754,7 +793,7 @@ impl BinderFile {
                 if write_size - consumed < 4 + size {
                     return Err(errno::EINVAL);
                 }
-                let mut data = [0; 64];
+                let mut data = [0; 72];
                 copy_from_user(task, source + consumed + 4, &mut data[..size])
                     .map_err(|_| errno::EFAULT)?;
                 self.command(task, abi, command, &data[..size])?;
@@ -764,7 +803,7 @@ impl BinderFile {
                 return Ok(());
             }
             loop {
-                let n = self.read_record(task, output, read_size)?;
+                let n = self.read_record_for_abi(task,Some(abi), output, read_size)?;
                 if n != 0 {
                     put64(&mut bwr, 32, n);
                     return Ok(());
@@ -918,6 +957,7 @@ mod tests {
             domain: domain(environment.clone(), device),
             endpoint: RpcEndpoint::new(),
             send_gate: IrqSpinLock::new(()),
+            auto_fds: IrqSpinLock::new(BTreeMap::new()),
             objects: IrqSpinLock::new(Objects::default()),
             state: IrqSpinLock::new(State {
                 threads: BTreeMap::new(),
@@ -1085,7 +1125,7 @@ mod tests {
         assert_eq!(server.read_record(&receiver, output, 68), Ok(68));
         let record = read::<68>(&receiver, output).unwrap();
         assert_eq!(u32_at(&record, 0), BR_TRANSACTION);
-        assert_eq!(u32_at(&record, 24), FLAG_COLLECT_NOTED_APP_OPS);
+        assert_eq!(u32_at(&record, 24), FLAG_COLLECT_NOTED_APP_OPS|0x10);
         assert_eq!(u32_at(&record, 28), 1);
         server.command(&receiver, &abi, BC_REPLY, &data).unwrap();
         assert_eq!(client.read_record(&sender, output, 68), Ok(4));
@@ -1093,7 +1133,7 @@ mod tests {
         assert_eq!(client.read_record(&sender, output, 68), Ok(68));
         let record = read::<68>(&sender, output).unwrap();
         assert_eq!(u32_at(&record, 0), BR_REPLY);
-        assert_eq!(u32_at(&record, 24), FLAG_COLLECT_NOTED_APP_OPS);
+        assert_eq!(u32_at(&record, 24), FLAG_COLLECT_NOTED_APP_OPS|0x10);
     }
     #[test_case]
     fn binder_context_death_checks_wire_cookie_and_preserves_failed_usercopy() {

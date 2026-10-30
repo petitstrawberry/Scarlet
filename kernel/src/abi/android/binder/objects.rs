@@ -96,6 +96,8 @@ pub(super) struct Node {
     waker: Weak<Waker>,
 }
 impl Node {
+    pub(super) fn accepts_fds(&self)->bool {self.flags & 0x100!=0}
+    pub(super) fn inherits_rt(&self)->bool {self.flags & 0x800!=0}
     pub(super) fn acquired(&self) -> bool {
         !self.references.lock().acquisition_needed()
     }
@@ -568,20 +570,27 @@ fn offsets(data: &[u8], encoded: &[u8]) -> Result<Vec<usize>, usize> {
         if !offset.is_multiple_of(4) || offset < end {
             return Err(errno::EINVAL);
         }
-        end = offset.checked_add(24).ok_or(errno::EINVAL)?;
-        if end > data.len() {
+        if offset.checked_add(8).is_none_or(|end|end>data.len()) {
             return Err(errno::EINVAL);
         }
         let kind = u32_at(data, offset);
-        if !matches!(kind, BINDER | WEAK_BINDER | HANDLE | WEAK_HANDLE) {
-            return Err(errno::EOPNOTSUPP);
-        }
+        let size=match kind {
+            BINDER|WEAK_BINDER|HANDLE|WEAK_HANDLE|buffers::FD=>24,
+            buffers::PTR=>40,
+            buffers::FDA=>32,
+            _=>return Err(errno::EOPNOTSUPP),
+        };
+        end=offset.checked_add(size).ok_or(errno::EINVAL)?;
+        if end>data.len() {return Err(errno::EINVAL);}
         let flags = u32_at(data, offset + 4);
         // Recognize libbinder's normal/default minimum-priority encoding.
-        // Real-time inheritance and security-context delivery are unsupported.
-        if flags & !0x1ff != 0 || !matches!(flags & 0xff, 0 | 19) {
+        // INHERIT_RT is accepted for the Fair-only hwbinder subset; actual RT
+        // scheduling policies and security-context delivery remain unsupported.
+        if matches!(kind,BINDER|WEAK_BINDER|HANDLE|WEAK_HANDLE) &&
+            (flags & !0x9ff != 0 || !matches!(flags & 0xff, 0 | 19)) {
             return Err(errno::EOPNOTSUPP);
         }
+        if (kind==buffers::PTR && flags & !1 !=0) || (matches!(kind,buffers::FD|buffers::FDA) && flags!=0) {return Err(errno::EINVAL);}
         result.push(offset);
     }
     Ok(result)
@@ -590,6 +599,7 @@ fn offsets(data: &[u8], encoded: &[u8]) -> Result<Vec<usize>, usize> {
 pub(super) struct Prepared {
     bytes: Vec<u8>,
     offsets: Vec<usize>,
+    pub capabilities: Vec<(KernelObject,crate::object::handle::HandleMetadata)>,
 }
 pub(super) fn prepare(task: &Task, abi: &LinuxAbi, data: &[u8]) -> Result<Prepared, usize> {
     let len = u64_at(data, 32);
@@ -606,7 +616,7 @@ pub(super) fn prepare(task: &Task, abi: &LinuxAbi, data: &[u8]) -> Result<Prepar
     }
     let mut bytes = vec![0; HEADER + aligned + offsets_len];
     bytes[..4].copy_from_slice(
-        &(u32_at(data, 20) & (1 | FLAG_COLLECT_NOTED_APP_OPS | 8 | 0x20)).to_le_bytes(),
+        &(u32_at(data, 20) & (1 | FLAG_COLLECT_NOTED_APP_OPS | 8 | 0x10 | 0x20)).to_le_bytes(),
     );
     let sender = if u32_at(data, 20) & 1 != 0 {
         0
@@ -624,7 +634,10 @@ pub(super) fn prepare(task: &Task, abi: &LinuxAbi, data: &[u8]) -> Result<Prepar
             .map_err(|_| errno::EFAULT)?;
     }
     let offsets = offsets(&bytes[HEADER..HEADER + len], &bytes[HEADER + aligned..])?;
-    Ok(Prepared { bytes, offsets })
+    let budget=if data.len()==72 {u64_at(data,64)}else{0};
+    if budget>crate::ipc::rpc::MAX_MESSAGE_SIZE {return Err(errno::E2BIG);}
+    let capabilities=buffers::prepare(task,abi,&mut bytes,&offsets,budget)?;
+    Ok(Prepared { bytes, offsets, capabilities })
 }
 impl BinderFile {
     pub(super) fn encode(
@@ -634,7 +647,7 @@ impl BinderFile {
         prepared: Prepared,
         target: Option<Lease>,
     ) -> Result<(RpcMessage, Vec<Arc<Node>>), usize> {
-        let Prepared { mut bytes, offsets } = prepared;
+        let Prepared { mut bytes, offsets, capabilities } = prepared;
         let mut leases = Vec::new();
         let mut objects = Vec::new();
         let mut acquisitions = Vec::new();
@@ -642,6 +655,7 @@ impl BinderFile {
         for offset in offsets {
             let position = HEADER + offset;
             let kind = u32_at(&bytes, position);
+            if matches!(kind,buffers::FD|buffers::PTR|buffers::FDA) {continue;}
             let strong = matches!(kind, BINDER | HANDLE);
             let value = if matches!(kind, BINDER | WEAK_BINDER) {
                 u64_at(&bytes, position + 8)
@@ -681,6 +695,7 @@ impl BinderFile {
             put64(&mut bytes, position + 16, 0);
         }
         drop(table);
+        if objects.len()+capabilities.len()>MAX_MESSAGE_OBJECTS {return Err(errno::E2BIG);}
         if let Some(target) = target {
             leases.push(target);
         }
@@ -689,7 +704,7 @@ impl BinderFile {
                 opcode: u32_at(data, 16),
                 bytes,
                 objects,
-                capabilities: Vec::new(),
+                capabilities,
                 retained: Some(Arc::new(leases)),
             },
             acquisitions,
@@ -702,26 +717,36 @@ impl BinderFile {
         address: usize,
         arena: &Arena,
     ) -> Result<(usize, usize), usize> {
+        self.decode_received(message,address,arena,None)
+    }
+    pub(super) fn decode_received(&self,message:&RpcMessage,address:usize,arena:&Arena,installed:Option<&mut buffers::Installed<'_>>)
+        ->Result<(usize,usize),usize> {
         if message.bytes.len() < HEADER {
             return Err(errno::EINVAL);
         }
         let len = u32_at(&message.bytes, 12) as usize;
         let offsets_len = u32_at(&message.bytes, 16) as usize;
         let aligned = len.checked_add(7).ok_or(errno::EINVAL)? & !7;
+        let extra=u32_at(&message.bytes,20) as usize;
         if HEADER
             .checked_add(aligned)
             .and_then(|n| n.checked_add(offsets_len))
+            .and_then(|n| n.checked_add(extra))
+            .and_then(|n| n.checked_add(message.capabilities.len()*4))
             != Some(message.bytes.len())
         {
             return Err(errno::EINVAL);
         }
-        let mut payload = message.bytes[HEADER..].to_vec();
-        let offsets = offsets(&payload[..len], &payload[aligned..])?;
+        let payload_length=aligned+offsets_len+extra;
+        let mut payload = message.bytes[HEADER..HEADER+payload_length].to_vec();
+        let offsets = offsets(&payload[..len], &payload[aligned..aligned+offsets_len])?;
+        buffers::receive(message,&mut payload,&offsets,address,len,offsets_len,installed)?;
         let mut references = Vec::new();
         let mut table = self.objects.lock();
         let result = (|| {
             for offset in offsets {
                 let kind = u32_at(&payload, offset);
+                if matches!(kind,buffers::FD|buffers::PTR|buffers::FDA) {continue;}
                 if matches!(kind, BINDER | WEAK_BINDER) && u64_at(&payload, offset + 8) == 0 {
                     continue;
                 }
@@ -784,6 +809,7 @@ mod tests {
             domain,
             endpoint: RpcEndpoint::new(),
             send_gate: IrqSpinLock::new(()),
+            auto_fds: IrqSpinLock::new(BTreeMap::new()),
             state: IrqSpinLock::new(State {
                 threads: BTreeMap::new(),
                 arena: None,
@@ -1070,7 +1096,7 @@ mod tests {
         assert!(node.references.lock().idle());
     }
     #[test_case]
-    fn binder_offsets_reject_overlap_alignment_bounds_and_fd_types() {
+    fn binder_offsets_reject_overlap_alignment_bounds_and_unknown_types() {
         let mut data = [0; 48];
         data[..4].copy_from_slice(&BINDER.to_le_bytes());
         data[24..28].copy_from_slice(&HANDLE.to_le_bytes());
@@ -1085,7 +1111,16 @@ mod tests {
         assert_eq!(offsets(&data, &encoded), Err(errno::EINVAL));
         assert_eq!(offsets(&data, &[0; 7]), Err(errno::EINVAL));
         data[..4].copy_from_slice(&0x66642a85u32.to_le_bytes());
+        assert_eq!(offsets(&data, &[0; 8]), Ok(vec![0]));
+        data[..4].copy_from_slice(&0xdeadbeefu32.to_le_bytes());
         assert_eq!(offsets(&data, &[0; 8]), Err(errno::EOPNOTSUPP));
+        data[..4].copy_from_slice(&BINDER.to_le_bytes());
+        data[4..8].copy_from_slice(&0x900u32.to_le_bytes());
+        assert_eq!(offsets(&data,&[0;8]),Ok(vec![0]));
+        for flags in [0xb00u32,0xd00,0x1900,0x901] {
+            data[4..8].copy_from_slice(&flags.to_le_bytes());
+            assert_eq!(offsets(&data,&[0;8]),Err(errno::EOPNOTSUPP));
+        }
     }
     #[test_case]
     fn binder_forwarded_handles_keep_identity_and_do_not_reuse_released_numbers() {
