@@ -1,5 +1,5 @@
 //! Linux UID/GID and capability translation over Shield identities. No user
-//! namespaces, file capabilities, ambient or inheritable grants are advertised.
+//! namespaces or file capabilities are advertised. Exec delegation uses Shield.
 use super::{LinuxAbi, errno};
 use crate::library::std::usercopy::{copy_from_user, copy_to_user};
 use crate::{
@@ -134,6 +134,10 @@ pub(crate) fn change_ids(
         }
         next.set_authority(permitted, active)
             .map_err(|_| errno::EPERM)?;
+        if ids.active!=old.active.0 {next.reserve_exec_authority(0).map_err(|_|errno::EPERM)?;}
+        if ids.active==0 {next.clear_exec_reservation();}
+        else if next.exec_reserved_authority().is_none() {next.reserve_exec_authority(0).map_err(|_|errno::EPERM)?;}
+
     }
     *creds = next;
     Ok(())
@@ -261,7 +265,7 @@ pub fn sys_setgroups(_abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
         .map_or_else(|_| errno::to_result(errno::EPERM), |_| 0)
 }
 
-const CAP_MAP: [(u32, u64); 7] = [
+const CAP_MAP: [(u32, u64); 9] = [
     (CHANGE_PRINCIPAL, 1 << 7),
     (CHANGE_GROUPS, 1 << 6),
     (MANAGE_MOUNTS, 1 << 21),
@@ -269,6 +273,8 @@ const CAP_MAP: [(u32, u64); 7] = [
     (MANAGE_OWNERS, 1 << 0),
     (MANAGE_DEVICES, 1 << 27),
     (MANAGE_LAYOUT, 1 << 21),
+    (MANAGE_SCHEDULING, 1 << 23),
+    (MANAGE_DELEGATION, 1 << 8),
 ];
 fn linux_caps(authority: u32) -> u64 {
     CAP_MAP
@@ -332,9 +338,6 @@ fn capabilities(frame: &mut Trapframe, write: bool) -> usize {
                     << (word * 32);
             }
         }
-        if sets[2] != 0 {
-            return errno::to_result(errno::EOPNOTSUPP);
-        }
         let effective = match native_caps(sets[0]) {
             Ok(v) => v,
             Err(e) => return errno::to_result(e),
@@ -343,20 +346,23 @@ fn capabilities(frame: &mut Trapframe, write: bool) -> usize {
             Ok(v) => v,
             Err(e) => return errno::to_result(e),
         };
-        task.credentials
-            .write()
-            .set_authority(permitted, effective)
-            .map_or_else(|_| errno::to_result(errno::EPERM), |_| 0)
+        let inheritable=match native_caps(sets[2]) {Ok(value)=>value,Err(error)=>return errno::to_result(error)};
+        let mut credentials=task.credentials.write();let mut next=credentials.clone();
+        if next.set_inheritable_authority(inheritable).is_err() || next.set_authority(permitted,effective).is_err() {
+            return errno::to_result(errno::EPERM);
+        }
+        *credentials=next;0
     } else {
-        let (effective, permitted) = {
+        let (effective, permitted, inheritable) = {
             let c = task.credentials.read();
             (
                 linux_caps(c.active_authority()),
                 linux_caps(c.permitted_authority()),
+                linux_caps(c.inheritable_authority()),
             )
         };
         for word in 0..words {
-            for (field, value) in [effective, permitted, 0].into_iter().enumerate() {
+            for (field, value) in [effective, permitted, inheritable].into_iter().enumerate() {
                 let offset = word * 12 + field * 4;
                 data[offset..offset + 4]
                     .copy_from_slice(&((value >> (word * 32)) as u32).to_ne_bytes());
@@ -366,6 +372,58 @@ fn capabilities(frame: &mut Trapframe, write: bool) -> usize {
             .map_or_else(|_| errno::to_result(errno::EFAULT), |_| 0)
     }
 }
+pub(super) fn securebits(abi: &mut LinuxAbi, task: &Task, option: i32, value: usize) -> usize {
+    const KEEP: usize = 1 << 4;
+    const LOCKED: usize = 1 << 5;
+    if option == 27 { return usize::from(abi.keep_caps)*KEEP | usize::from(abi.keep_caps_locked)*LOCKED; }
+    if value & !(KEEP|LOCKED) != 0 {return errno::to_result(errno::EOPNOTSUPP);}
+    if !task.credentials.read().permits(MANAGE_DELEGATION)
+        || abi.keep_caps_locked && (value & LOCKED == 0 || (value & KEEP != 0) != abi.keep_caps) {
+        return errno::to_result(errno::EPERM);
+    }
+    abi.keep_caps=value & KEEP != 0;abi.keep_caps_locked=value & LOCKED != 0;0
+}
+pub(super) fn bounding(task: &Task, operation: i32, capability: usize) -> usize {
+    // Linux 5.10/Android 13 capability numbers; absent native authority reads
+    // as unavailable. Removing an absent grant still requires delegation power.
+    if capability > 40 {return errno::to_result(errno::EINVAL);}
+    let authority=CAP_MAP.iter().filter(|(_,bit)|*bit == 1u64 << capability).fold(0,|mask,(value,_)|mask|*value);
+    let mut credentials=task.credentials.write();
+    if operation==23 {return usize::from(authority!=0 && credentials.delegable_authority() & authority == authority);}
+    credentials.drop_delegable_authority(authority).map_or_else(|_|errno::to_result(errno::EPERM),|_|0)
+}
+pub(super) fn ambient(task: &Task, operation: usize, capability: usize) -> usize {
+    if operation == 4 {
+        if capability != 0 {
+            return errno::to_result(errno::EINVAL);
+        }
+        return task
+            .credentials
+            .write()
+            .reserve_exec_authority(0)
+            .map_or_else(|_| errno::to_result(errno::EPERM), |_| 0);
+    }
+    if capability >= 64 {
+        return errno::to_result(errno::EINVAL);
+    }
+    let authority = match native_caps(1u64 << capability) {
+        Ok(authority) => authority,
+        Err(error) => return errno::to_result(error),
+    };
+    let mut credentials = task.credentials.write();
+    let reserved = credentials.exec_reserved_authority().unwrap_or(0);
+    match operation {
+        1 => usize::from(reserved & authority == authority),
+        2 => credentials
+            .reserve_exec_authority(reserved | authority)
+            .map_or_else(|_| errno::to_result(errno::EPERM), |_| 0),
+        3 => credentials
+            .reserve_exec_authority(reserved & !authority)
+            .map_or_else(|_| errno::to_result(errno::EPERM), |_| 0),
+        _ => errno::to_result(errno::EINVAL),
+    }
+}
+
 pub fn sys_capget(_abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
     capabilities(frame, false)
 }
@@ -381,10 +439,9 @@ pub(crate) fn prepare_exec(task: &Task) {
     g.retained = g.active;
     c.set_principals(p).unwrap();
     c.set_groups(g).unwrap();
-    // File/ambient capabilities are unsupported. Non-root exec cannot retain
-    // authority kept temporarily by PR_SET_KEEPCAPS before exec.
-    if p.active.0 != 0 {
-        c.set_authority(0, 0).unwrap();
+    // The native executor enforces this reservation for every target ABI.
+    if p.active.0 != 0 && c.exec_reserved_authority().is_none() {
+        c.reserve_exec_authority(0).unwrap();
     }
 }
 pub(crate) fn update_auxv(task: &Task, auxv: &mut [crate::task::elf_loader::AuxVec]) {
@@ -406,6 +463,26 @@ pub(crate) fn update_auxv(task: &Task, auxv: &mut [crate::task::elf_loader::AuxV
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test_case]
+    fn securebits_and_bounding_set_preserve_delegation_limits_across_exec() {
+        let task=Task::new("capability-delegation".into(),0,crate::task::TaskType::User);
+        let mut abi=LinuxAbi::default();
+        assert_eq!(securebits(&mut abi,&task,27,0),0);
+        assert_eq!(securebits(&mut abi,&task,28,48),0);
+        assert_eq!(securebits(&mut abi,&task,28,16),errno::to_result(errno::EPERM));
+        assert_eq!(securebits(&mut abi,&task,28,1),errno::to_result(errno::EOPNOTSUPP));
+        assert_eq!(bounding(&task,23,23),1);
+        assert_eq!(bounding(&task,24,23),0);
+        assert_eq!(bounding(&task,23,23),0);
+        assert!(task.credentials.read().permits(MANAGE_SCHEDULING));
+        assert_eq!(task.credentials.write().set_inheritable_authority(MANAGE_SCHEDULING),Err(()));
+        let mut image_abi=LinuxAbi::default();
+        image_abi.prepare_exec_fds(Some(&abi),&task);
+        assert_eq!(securebits(&mut image_abi,&task,27,0),32);
+        task.credentials.write().set_authority(0,0).unwrap();
+        assert_eq!(bounding(&task,24,8),errno::to_result(errno::EPERM));
+        assert_eq!(bounding(&task,23,41),errno::to_result(errno::EINVAL));
+    }
     #[test_case]
     fn linux_identity_drop_saved_restore_and_permanent_capability_loss() {
         let mut c = Credentials::bootstrap();

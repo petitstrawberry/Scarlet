@@ -171,6 +171,55 @@ fn failed_exec_keeps_memory_handles_environment_and_cwd() {
 }
 
 #[test_case]
+fn native_exec_enforces_reserved_authority_for_other_abis_and_preserves_failed_sources() {
+    use crate::shield::identity::{ALL_AUTHORITY, MANAGE_SCHEDULING};
+    let (task, _, _, _) = fixture();
+    {
+        let mut credentials = task.credentials.write();
+        credentials
+            .set_inheritable_authority(MANAGE_SCHEDULING)
+            .unwrap();
+        credentials
+            .reserve_exec_authority(MANAGE_SCHEDULING)
+            .unwrap();
+    }
+    let before = task.credentials.read().clone();
+    let mut frame = Trapframe::new();
+    assert!(
+        TransparentExecutor::execute_with_abi(
+            "/txn-image",
+            &["image"],
+            &["FAIL=1"],
+            TestImageAbi::name(),
+            &task,
+            &mut frame
+        )
+        .is_err()
+    );
+    assert_eq!(*task.credentials.read(), before);
+    TransparentExecutor::execute_with_abi(
+        "/txn-image",
+        &["image"],
+        &[],
+        TestImageAbi::name(),
+        &task,
+        &mut frame,
+    )
+    .unwrap();
+    assert_eq!(
+        task.credentials.read().active_authority(),
+        MANAGE_SCHEDULING
+    );
+    assert_eq!(
+        task.credentials
+            .write()
+            .set_authority(ALL_AUTHORITY, ALL_AUTHORITY),
+        Err(())
+    );
+    task.finish_exec_dispatch();
+}
+
+#[test_case]
 fn same_abi_exec_preserves_cwd_and_applies_cloexec_only_on_success() {
     let (task, _, _, handle) = fixture();
     let mut tf = Trapframe::new();

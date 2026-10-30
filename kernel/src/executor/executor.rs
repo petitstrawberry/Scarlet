@@ -458,6 +458,9 @@ impl TransparentExecutor {
             task.with_default_abi(|old| abi.prepare_exec_handles(Some(old), &image))
                 .map_err(failure)?;
         }
+        // This native restriction applies even when the destination changes ABI.
+        // Only the unpublished image is narrowed; failed exec leaves its source intact.
+        image.credentials.write().apply_exec_reservation();
         let no_file_grants = file.as_file().is_some_and(|f| !f.allows_execution_privilege_gain());
         let inherited_credentials = no_file_grants.then(|| image.credentials.read().clone());
         let inherited_subject = image.security_subject.read().clone();

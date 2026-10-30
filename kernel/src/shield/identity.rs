@@ -38,7 +38,9 @@ pub const MANAGE_RESOURCES: u32 = 8;
 pub const MANAGE_OWNERS: u32 = 16;
 pub const MANAGE_DEVICES: u32 = 32;
 pub const MANAGE_LAYOUT: u32 = 64;
-pub const ALL_AUTHORITY: u32 = CHANGE_PRINCIPAL | CHANGE_GROUPS | MANAGE_MOUNTS | MANAGE_RESOURCES | MANAGE_OWNERS | MANAGE_DEVICES | MANAGE_LAYOUT;
+pub const MANAGE_SCHEDULING: u32 = 128;
+pub const MANAGE_DELEGATION: u32 = 256;
+pub const ALL_AUTHORITY: u32 = CHANGE_PRINCIPAL | CHANGE_GROUPS | MANAGE_MOUNTS | MANAGE_RESOURCES | MANAGE_OWNERS | MANAGE_DEVICES | MANAGE_LAYOUT | MANAGE_SCHEDULING | MANAGE_DELEGATION;
 pub const MAX_GROUPS: usize = 65536;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +56,9 @@ pub struct Credentials {
     supplementary: Vec<Group>,
     permitted: u32,
     active: u32,
+    inheritable: u32,
+    delegable: u32,
+    exec_reserved: Option<u32>,
 }
 impl Credentials {
     /// Initial kernel-created task authority. Fork/spawn/exec must inherit the
@@ -65,6 +70,9 @@ impl Credentials {
             supplementary: Vec::new(),
             permitted: ALL_AUTHORITY,
             active: ALL_AUTHORITY,
+            inheritable: 0,
+            delegable: ALL_AUTHORITY,
+            exec_reserved: None,
         }
     }
     pub fn principals(&self) -> Identities<Principal> {
@@ -126,13 +134,80 @@ impl Credentials {
         }
         self.permitted = permitted;
         self.active = active;
+        if let Some(reserved) = self.exec_reserved {self.exec_reserved=Some(reserved & permitted);}
         Ok(())
     }
+    pub fn inheritable_authority(&self) -> u32 {
+        self.inheritable
+    }
+    pub fn delegable_authority(&self) -> u32 {
+        self.delegable
+    }
+    /// Remove future delegation possibilities without revoking existing grants.
+    /// The ceiling and its reductions are inherited through fork and exec.
+    pub fn drop_delegable_authority(&mut self, authority: u32) -> Result<(), ()> {
+        if !self.permits(MANAGE_DELEGATION) {
+            return Err(());
+        }
+        self.delegable &= !authority;
+        Ok(())
+    }
+    pub fn exec_reserved_authority(&self) -> Option<u32> {
+        self.exec_reserved
+    }
+    pub fn set_inheritable_authority(&mut self, authority: u32) -> Result<(), ()> {
+        if authority & !((self.permitted & self.delegable) | self.inheritable) != 0 {
+            return Err(());
+        }
+        self.inheritable = authority;
+        if let Some(reserved) = self.exec_reserved {
+            self.exec_reserved = Some(reserved & authority);
+        }
+        Ok(())
+    }
+    /// Reserve only already permitted and explicitly inheritable authority.
+    pub fn reserve_exec_authority(&mut self, authority: u32) -> Result<(), ()> {
+        if authority & !(self.permitted & self.inheritable) != 0 {
+            return Err(());
+        }
+        self.exec_reserved = Some(authority);
+        Ok(())
+    }
+    /// An ABI may restore its unrestricted exec mode only within the existing
+    /// ceiling. This grants no identity or capability by numeric principal.
+    pub(crate) fn clear_exec_reservation(&mut self) {
+        self.exec_reserved = None;
+    }
+    /// Enforced by the native executor for every target ABI, on its staged image.
+    pub(crate) fn apply_exec_reservation(&mut self) {
+        if let Some(reserved) = self.exec_reserved {
+            let authority = reserved & self.permitted & self.inheritable;
+            self.permitted = authority;
+            self.active = authority;
+            self.exec_reserved = Some(authority);
+        }
+    }
+
+
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test_case]
+    fn exec_reservations_cannot_exceed_the_delegated_ceiling_or_modify_a_failed_image_source() {
+        let mut source=Credentials::bootstrap();
+        assert_eq!(source.reserve_exec_authority(MANAGE_SCHEDULING),Err(()));
+        source.set_inheritable_authority(MANAGE_SCHEDULING).unwrap();
+        source.reserve_exec_authority(MANAGE_SCHEDULING).unwrap();
+        let original=source.clone();let mut image=source.clone();image.apply_exec_reservation();
+        assert_eq!(source,original);assert_eq!(image.active_authority(),MANAGE_SCHEDULING);
+        assert_eq!(image.permitted_authority(),MANAGE_SCHEDULING);
+        assert_eq!(image.set_authority(ALL_AUTHORITY,ALL_AUTHORITY),Err(()));
+        image.set_inheritable_authority(0).unwrap();image.apply_exec_reservation();
+        assert_eq!(image.active_authority(),0);assert_eq!(image.permitted_authority(),0);
+    }
+
     #[test_case]
     fn identity_authority_is_not_derived_from_numeric_zero() {
         let mut creds = Credentials::bootstrap();

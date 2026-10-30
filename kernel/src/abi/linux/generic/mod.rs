@@ -132,6 +132,7 @@ pub struct LinuxAbi {
     exec_unlocks: Vec<record_lock::FileKey>,
     pub(crate) umask: u32,
     pub(crate) keep_caps: bool,
+    pub(crate) keep_caps_locked: bool,
     #[cfg(target_arch = "aarch64")]
     pub(crate) signal_restorer: Arc<IrqSpinLock<Option<usize>>>,
 }
@@ -151,6 +152,7 @@ impl Default for LinuxAbi {
             exec_unlocks: Vec::new(),
             umask: 0o022,
             keep_caps: false,
+            keep_caps_locked: false,
             #[cfg(target_arch = "aarch64")]
             signal_restorer: Arc::new(IrqSpinLock::new(None)),
         }
@@ -193,6 +195,7 @@ impl LinuxAbi {
         credentials::prepare_exec(image);
         self.keep_caps = false;
         if let Some(source) = source {
+            self.keep_caps_locked = source.keep_caps_locked;
             self.umask = source.umask;
             self.record_locks = source.record_locks.clone();
             let mut signals = source.signal_state.lock().clone();
