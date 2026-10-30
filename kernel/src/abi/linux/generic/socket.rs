@@ -113,6 +113,7 @@ fn is_mozc_server_task(task: &crate::task::Task) -> bool {
 
 fn socket_error_to_errno(error: SocketError) -> usize {
     match error {
+        SocketError::PermissionDenied => errno::EACCES,
         SocketError::InvalidAddress | SocketError::InvalidArgument => errno::EINVAL,
         SocketError::AddressInUse => errno::EADDRINUSE,
         SocketError::AddressNotAvailable => errno::EADDRNOTAVAIL,
@@ -465,7 +466,7 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     let socket_obj: Arc<dyn crate::network::SocketObject> = match scarlet_domain {
         SocketDomain::Local => {
-            let local_socket = Arc::new(LocalSocket::new(scarlet_type, SocketProtocol::Default));
+            let local_socket = match LocalSocket::try_new(scarlet_type,SocketProtocol::Default) {Ok(socket)=>Arc::new(socket),Err(error)=>return errno::to_result(socket_error_to_errno(error))};
             LocalSocket::init_self_weak(&local_socket);
             local_socket as Arc<dyn crate::network::SocketObject>
         }
@@ -1271,9 +1272,9 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             let handle = abi.get_handle(sockfd as usize).ok_or(errno::EBADF)?;
             let socket = task.handle_table.get(handle).and_then(KernelObject::into_socket_arc).ok_or(errno::ENOTSOCK)?;
             let local = LocalSocket::from_socket_object(socket.as_ref()).ok_or(errno::ENOPROTOOPT)?;
-            let peer = local.peer_credentials().ok_or(errno::ENOTCONN)?;
-            let subject = peer.subject.as_ref().ok_or(errno::ENODATA)?;
-            let bytes = abi.extensions.peer_security_context(&task, subject).ok_or(errno::ENOPROTOOPT)??;
+            if local.peer_credentials().is_none() {return Err(errno::ENOTCONN);}
+            let subject = local.peer_security_label().ok_or(errno::ENODATA)?;
+            let bytes = abi.extensions.peer_security_context(&task, &subject).ok_or(errno::ENOPROTOOPT)??;
             copy_to_user(&task, optlen_ptr, &(bytes.len() as u32).to_ne_bytes()).map_err(|_| errno::EFAULT)?;
             if (optlen as usize) < bytes.len() { return Err(errno::ERANGE); }
             copy_to_user(&task, optval_ptr, &bytes).map_err(|_| errno::EFAULT)?;
@@ -2438,11 +2439,11 @@ pub fn sys_socketpair(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Create connected socket pair
-    let (socket1, socket2) = LocalSocket::create_connected_pair_with_type(
+    let (socket1, socket2) = match LocalSocket::try_create_connected_pair_with_type(
         local_type,
         alloc::string::String::from("socketpair:0"),
         alloc::string::String::from("socketpair:1"),
-    );
+    ) {Ok(pair)=>pair,Err(error)=>return errno::to_result(socket_error_to_errno(error))};
 
     // Set non-blocking mode if requested
     if nonblocking {

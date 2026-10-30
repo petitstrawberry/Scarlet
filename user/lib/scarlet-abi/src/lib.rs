@@ -847,6 +847,7 @@ pub enum Syscall {
     ShieldBindFile = 1326,
     ShieldFilePolicy = 1340,
     ShieldCreationLabel = 1341,
+    ShieldSocketCreationLabel = 1343,
     ShieldRelabelFile = 1342,
     VmLayoutConfigure = 1350,
     VmLayoutQuery = 1351,

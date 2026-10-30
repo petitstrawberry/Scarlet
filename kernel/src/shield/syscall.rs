@@ -373,3 +373,9 @@ pub fn sys_shield_relabel_file(tf:&mut Trapframe)->usize {
         policy.relabel_file(&subject,node.as_ref(),u32::try_from(tf.get_arg(2)).map_err(|_|"file label")?)
     })().map_or(usize::MAX,|_|0)
 }
+
+pub fn sys_shield_socket_creation_label(tf:&mut Trapframe)->usize {
+    let task=crate::task::mytask().unwrap();let target=tf.get_arg(0);tf.increment_pc_next(&task);
+    let Ok(target)=u32::try_from(target) else {return usize::MAX;};
+    socket::select(&task,(target!=0).then_some(target)).map_or(usize::MAX,|_|0)
+}

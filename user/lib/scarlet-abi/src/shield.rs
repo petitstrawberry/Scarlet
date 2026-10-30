@@ -57,3 +57,7 @@ pub struct RawFileCreate {
 pub struct RawFileRelabel {pub source:u32,pub old:u32,pub target:u32,pub kind:u32}
 const _: [();24]=[();core::mem::size_of::<RawFileCreate>()];
 const _: [();16]=[();core::mem::size_of::<RawFileRelabel>()];
+
+/// Native endpoint labeling authority; separate from ABI permission classes.
+pub const SOCKET_LABEL_CLASS:u32=0x5343_0001;
+pub const SOCKET_LABEL_CREATE:u64=1;

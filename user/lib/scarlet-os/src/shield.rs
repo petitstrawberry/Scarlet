@@ -181,3 +181,11 @@ pub fn file_creation_label(label:u32)->HandleResult<()> {
     // SAFETY: the kernel checks the current subject and immutable create grants.
     if unsafe {syscall1(Syscall::ShieldCreationLabel,label as usize)}==0 {Ok(())}else {Err(HandleError::InvalidParameter)}
 }
+
+pub use scarlet_abi::shield::{SOCKET_LABEL_CLASS,SOCKET_LABEL_CREATE};
+/// Select a delegated native local-socket endpoint label. Zero clears the selection.
+pub fn set_socket_creation_label(target:Option<u32>)->HandleResult<()> {
+    // SAFETY: no pointers; Shield checks current-subject authority.
+    let result=unsafe {syscall1(Syscall::ShieldSocketCreationLabel,target.unwrap_or(0) as usize)};
+    if result==0 {Ok(())}else {Err(HandleError::SystemError(-1))}
+}

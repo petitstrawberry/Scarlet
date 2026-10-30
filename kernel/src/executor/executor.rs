@@ -502,6 +502,7 @@ impl TransparentExecutor {
         core::mem::swap(&mut *task.security_subject.write(), &mut *image.security_subject.write());
         *task.pending_exec_transition.write() = None;
         *task.creation_label.write() = None;
+        *task.socket_creation_label.write() = None;
         core::mem::swap(&mut *task.credentials.write(), &mut *image.credentials.write());
         core::mem::swap(&mut *task.execution_restrictions.write(), &mut *image.execution_restrictions.write());
         task.handle_table.exchange_exec_table(&image.handle_table);

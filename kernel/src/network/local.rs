@@ -450,6 +450,10 @@ pub struct LocalSocket {
     /// Peer address (if connected)
     peer_addr: IrqRwSpinLock<Option<String>>,
 
+    // Socket identity is captured at creation, independently of process credentials.
+    security_label: Option<crate::shield::socket::Label>,
+    peer_security_label: IrqRwSpinLock<Option<crate::shield::socket::Label>>,
+
     /// Global thread-group leader ID whose credentials own this endpoint.
     ///
     /// For connection-oriented sockets this is captured by `listen()` or
@@ -530,13 +534,21 @@ impl LocalSocket {
     /// # Returns
     ///
     /// A new socket in the Unconnected state
-    pub fn new(socket_type: SocketType, protocol: SocketProtocol) -> Self {
+    #[cfg(test)]
+    pub fn new(socket_type: SocketType, protocol: SocketProtocol) -> Self {Self::new_labeled(socket_type,protocol,None)}
+    pub fn try_new(socket_type:SocketType,protocol:SocketProtocol)->Result<Self,SocketError> {
+        let label=crate::shield::socket::current_label().map_err(|_|SocketError::PermissionDenied)?;
+        Ok(Self::new_labeled(socket_type,protocol,label))
+    }
+    fn new_labeled(socket_type:SocketType,protocol:SocketProtocol,label:Option<crate::shield::Subject>)->Self {
         Self {
             socket_type,
             protocol,
             state: IrqRwSpinLock::new(SocketState::Unconnected),
             local_addr: IrqRwSpinLock::new(None),
             peer_addr: IrqRwSpinLock::new(None),
+            security_label:label.map(crate::shield::socket::Label::from_subject),
+            peer_security_label:IrqRwSpinLock::new(None),
             owner_credentials: IrqRwSpinLock::new(None),
             peer_credentials: IrqRwSpinLock::new(None),
             read_buffer: IrqRwSpinLock::new(SocketBuffer::new()),
@@ -565,6 +577,8 @@ impl LocalSocket {
             .map(|cred| cred.process_id)
             .filter(|pid| *pid != 0)
     }
+    pub fn security_label(&self)->Option<crate::shield::Subject> {self.security_label.as_ref().and_then(|label|label.subject())}
+    pub fn peer_security_label(&self)->Option<crate::shield::Subject> {self.peer_security_label.read().as_ref().and_then(|label|label.subject())}
     pub fn peer_credentials(&self) -> Option<SocketCredentials> {
         self.peer_credentials.read().clone()
     }
@@ -891,16 +905,26 @@ impl LocalSocket {
     /// # Returns
     ///
     /// A tuple of (local_socket, peer_socket) that are connected
+    #[cfg(test)]
     pub fn create_connected_pair(local_addr: String, peer_addr: String) -> (Arc<Self>, Arc<Self>) {
         Self::create_connected_pair_with_type(SocketType::Stream, local_addr, peer_addr)
     }
 
     /// Create a connected pair with the requested socket type.
+    #[cfg(test)]
     pub fn create_connected_pair_with_type(
         socket_type: SocketType,
         local_addr: String,
         peer_addr: String,
     ) -> (Arc<Self>, Arc<Self>) {
+        Self::pair_labeled(socket_type,local_addr,peer_addr,None)
+    }
+    pub fn try_create_connected_pair_with_type(socket_type:SocketType,local_addr:String,peer_addr:String)->Result<(Arc<Self>,Arc<Self>),SocketError> {
+        let label=crate::shield::socket::current_label().map_err(|_|SocketError::PermissionDenied)?;
+        Ok(Self::pair_labeled(socket_type,local_addr,peer_addr,label))
+    }
+    fn pair_labeled(socket_type:SocketType,local_addr:String,peer_addr:String,label:Option<crate::shield::Subject>)->(Arc<Self>,Arc<Self>) {
+        let label=label.map(crate::shield::socket::Label::from_subject);
         let owner = Self::current_credentials(true);
         // Create shared buffers for bidirectional communication
         let local_read_buffer = SocketBuffer::new();
@@ -914,6 +938,8 @@ impl LocalSocket {
             state: IrqRwSpinLock::new(SocketState::Connected),
             local_addr: IrqRwSpinLock::new(Some(local_addr.clone())),
             peer_addr: IrqRwSpinLock::new(Some(peer_addr.clone())),
+            security_label:label.clone(),
+            peer_security_label:IrqRwSpinLock::new(label.clone()),
             owner_credentials: IrqRwSpinLock::new(Some(owner.clone())),
             peer_credentials: IrqRwSpinLock::new(Some(owner.clone())),
             read_buffer: IrqRwSpinLock::new(local_read_buffer.clone()),
@@ -938,6 +964,8 @@ impl LocalSocket {
             state: IrqRwSpinLock::new(SocketState::Connected),
             local_addr: IrqRwSpinLock::new(Some(peer_addr)),
             peer_addr: IrqRwSpinLock::new(Some(local_addr)),
+            security_label:label.clone(),
+            peer_security_label:IrqRwSpinLock::new(label.clone()),
             owner_credentials: IrqRwSpinLock::new(Some(owner.clone())),
             peer_credentials: IrqRwSpinLock::new(Some(owner.clone())),
             read_buffer: IrqRwSpinLock::new(peer_read_buffer.clone()),
@@ -1462,6 +1490,8 @@ impl SocketControl for LocalSocket {
             state: IrqRwSpinLock::new(SocketState::Connected),
             local_addr: IrqRwSpinLock::new(Some(name.clone())),
             peer_addr: IrqRwSpinLock::new(Some(local_addr.clone())),
+            security_label:server_local.security_label.clone(),
+            peer_security_label:IrqRwSpinLock::new(self.security_label.clone()),
             owner_credentials: IrqRwSpinLock::new(server_credentials.clone()),
             peer_credentials: IrqRwSpinLock::new(Some(client_credentials.clone())),
             read_buffer: IrqRwSpinLock::new(server_read_buffer.clone()),
@@ -1487,6 +1517,7 @@ impl SocketControl for LocalSocket {
         *self.peer_addr.write() = Some(name.clone());
         *self.owner_credentials.write() = Some(client_credentials);
         *self.peer_credentials.write() = server_credentials;
+        *self.peer_security_label.write() = server_local.security_label.clone();
         *self.state.write() = SocketState::Connected;
 
         // Set peer_socket references - IMPORTANT for shutdown()
@@ -1516,6 +1547,7 @@ impl SocketControl for LocalSocket {
             *self.peer_socket.write() = None;
             *self.owner_credentials.write() = None;
             *self.peer_credentials.write() = None;
+            *self.peer_security_label.write() = None;
             return Err(SocketError::ConnectionRefused);
         }
         server_backlog.push(server_conn);
@@ -1767,7 +1799,7 @@ pub fn local_socket_factory(
     socket_type: SocketType,
     protocol: SocketProtocol,
 ) -> Result<Arc<dyn SocketObject>, SocketError> {
-    Ok(Arc::new(LocalSocket::new(socket_type, protocol)))
+    Ok(Arc::new(LocalSocket::try_new(socket_type, protocol)?))
 }
 
 #[cfg(test)]

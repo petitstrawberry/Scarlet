@@ -284,6 +284,8 @@ pub enum SocketState {
 /// Socket errors
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SocketError {
+    /// The requested endpoint label is not authorized.
+    PermissionDenied,
     /// Invalid socket address
     InvalidAddress,
     /// Address already in use
@@ -332,6 +334,7 @@ pub enum SocketError {
 /// Convert a socket error into the positive errno used by Scarlet Native.
 pub(crate) fn socket_error_to_native_errno(error: &SocketError) -> i32 {
     match error {
+        SocketError::PermissionDenied => 13,
         SocketError::InvalidAddress | SocketError::InvalidArgument => 22,
         SocketError::AddressInUse => 98,
         SocketError::AddressNotAvailable => 99,

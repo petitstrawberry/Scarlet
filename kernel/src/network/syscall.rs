@@ -577,7 +577,7 @@ pub fn sys_socket_create(tf: &mut Trapframe) -> usize {
 
     let socket = match domain {
         SocketDomain::Local => {
-            let socket = Arc::new(LocalSocket::new(socket_type, protocol));
+            let socket = match LocalSocket::try_new(socket_type,protocol) {Ok(socket)=>Arc::new(socket),Err(error)=>return socket_error_result(error)};
             LocalSocket::init_self_weak(&socket);
             socket as Arc<dyn SocketObject>
         }
@@ -1039,10 +1039,11 @@ pub fn sys_socketpair(tf: &mut Trapframe) -> usize {
     let array_ptr = tf.get_arg(0);
 
     // Create a connected socket pair using LocalSocket::create_connected_pair
-    let (socket1, socket2) = LocalSocket::create_connected_pair(
+    let (socket1, socket2) = match LocalSocket::try_create_connected_pair_with_type(
+        SocketType::Stream,
         String::from("socketpair:0"),
         String::from("socketpair:1"),
-    );
+    ) {Ok(pair)=>pair,Err(error)=>return socket_error_result(error)};
 
     // Add both sockets to handle table
     let kernel_obj1 = KernelObject::from_socket_object(socket1);

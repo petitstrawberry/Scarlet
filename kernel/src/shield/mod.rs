@@ -3,6 +3,7 @@
 //! never by this policy engine.
 //! Possession of a policy identity is distinct from authority to assign labels.
 pub mod file;
+pub mod socket;
 pub mod execution;
 pub mod exec_transition;
 pub mod information;
