@@ -35,7 +35,10 @@
     "ro.zygote": "zygote64",
     "ro.hardware": "scarlet",
     "dalvik.vm.usejit": "false",
-    "ro.hardware.egl": "angle"
+    "ro.hardware.egl": "angle",
+    "ro.hardware.vulkan": "pastel",
+    "ro.sf.lcd_density": "160",
+    "debug.renderengine.backend": "gles"
   },
   "bootconfig": {
     "androidboot.hardware": "scarlet",
@@ -988,6 +991,26 @@
       "u:r:surfaceflinger:s0",
       "u:object_r:gpu_service:s0",
       1
+    ],
+    [
+      "u:r:surfaceflinger:s0",
+      "u:object_r:hal_graphics_mapper_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:hal_graphics_composer_default:s0",
+      "u:object_r:hal_graphics_mapper_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:hal_graphics_mapper_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:hal_graphics_allocator_hwservice:s0",
+      2
     ]
   ],
   "socket_labels": [

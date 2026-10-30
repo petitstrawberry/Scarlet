@@ -24,7 +24,11 @@ def prepare(inputs,metadata,system,vendor,builds,temporary):
         target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target)
         if sha256(target)!=sha256(source):raise ValueError("changed graphics provider during staging")
         files[name]=sha256(target)
-    for name,kind in [("hal","android-cpu-graphics-hal-v1"),("adapters","android-stock-graphics-adapters-v1"),("client","android-sws-client-v1")]:
+    selections=[("hal","android-cpu-graphics-hal-v1"),("adapters","android-stock-graphics-adapters-v1"),("client","android-sws-client-v1")]
+    if "vulkan" in builds:selections.append(("vulkan","android-software-vulkan-v1"))
+    if ("vulkan" in builds)!=(metadata["profile"]["boot_properties"].get("ro.hardware.vulkan")=="pastel"):
+        raise ValueError("software Vulkan requires both its selected driver and verified build")
+    for name,kind in selections:
         directory=builds[name].resolve();record=json.loads((directory/"build.json").read_text())
         if record.get("kind")!=kind:raise ValueError("unexpected graphics provider build kind")
         for path,digest in record["files"].items():
@@ -44,6 +48,7 @@ def prepare(inputs,metadata,system,vendor,builds,temporary):
                         (builds["adapters"]/Path(COMPOSER).name,COMPOSER),
                         (builds["adapters"]/Path(MAPPER).name,MAPPER),
                         (builds["client"]/"libsws_client_c.so","vendor/lib64/libsws_client_c.so")]:install(source,name)
+    if "vulkan" in builds:install(builds["vulkan"]/"vulkan.pastel.so","vendor/lib64/hw/vulkan.pastel.so")
     # Composer HIDL is not part of the VNDK namespace shared with vendor.
     # Package the exact linked interface DSO alongside its vendor provider.
     interface="system/lib64/android.hardware.graphics.composer@2.1.so"

@@ -436,10 +436,11 @@ def main():
     parser.add_argument("--framework-inputs",type=Path,help="verified stock framework and app_process64 for init boot")
     parser.add_argument("--platform-image",type=Path,help="pinned SDK archive for stock service contexts and server JARs")
     parser.add_argument("--angle-image",type=Path,help="pinned SDK archive supplying its ANGLE libraries")
-    for name in ["hal","adapters","client"]:parser.add_argument("--graphics-"+name,type=Path,help="verified CPU graphics "+name+" build")
+    for name in ["hal","adapters","client","vulkan"]:parser.add_argument("--graphics-"+name,type=Path,help="verified CPU graphics "+name+" build")
     args = parser.parse_args()
     graphics={name:getattr(args,"graphics_"+name) for name in ["hal","adapters","client"]}
-    if any(graphics.values()) and (not all(graphics.values()) or not args.platform_image):parser.error("graphics providers require all three builds and --platform-image")
+    if (any(graphics.values()) or args.graphics_vulkan) and (not all(graphics.values()) or not args.platform_image):parser.error("graphics providers require all three builds and --platform-image")
+    if args.graphics_vulkan:graphics["vulkan"]=args.graphics_vulkan
     if args.reuse_payloads:
         reconfigure(args.reuse_payloads, args.runtime_root, args.stock_inputs, args.profile, args.output)
     else:
