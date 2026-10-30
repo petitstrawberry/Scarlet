@@ -1362,9 +1362,12 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                         }
                     }
                     Err(create_err) => {
-                        // Check if file already exists and O_EXCL is set
+                        // Only a concurrent successful creation permits reopening.
+                        // Preserve authorization and I/O errors from the create path.
+                        if !matches!(create_err.kind,crate::fs::FileSystemErrorKind::AlreadyExists|crate::fs::FileSystemErrorKind::FileExists) {
+                            return errno::to_result(errno::from_fs_error(&create_err));
+                        }
                         if flags & O_EXCL != 0
-                            && create_err.kind == crate::fs::FileSystemErrorKind::AlreadyExists
                         {
                             return errno::to_result(errno::EEXIST); // File exists and O_EXCL is set
                         }

@@ -8,7 +8,7 @@ use crate::{
 };
 use alloc::vec::Vec;
 use scarlet_abi::shield::{RawLabel, RawRule};
-pub use scarlet_abi::shield::{RawRule as Rule, RawTransition as Transition, RawExecTransition as ExecTransition};
+pub use scarlet_abi::shield::{RawRule as Rule, RawTransition as Transition, RawExecTransition as ExecTransition, RawFileCreate as FileCreate, RawFileRelabel as FileRelabel};
 use scarlet_sys::{Syscall, syscall0, syscall1, syscall2, syscall4, syscall6};
 
 pub struct Policy(Handle);
@@ -79,12 +79,23 @@ impl Policy {
         // SAFETY: fixed-width specification and all borrowed arrays live through the copy.
         Self::returned(unsafe { syscall2(Syscall::ShieldPolicyCreateExec, spec.as_ptr() as usize, 64) })
     }
+    /// Derive a fresh immutable policy before binding administrator-pinned files.
+    pub fn with_file_rules(&self,default:u32,create:&[FileCreate],relabel:&[FileRelabel])->HandleResult<Self> {
+        let spec=[default as u64,create.as_ptr() as u64,create.len() as u64,relabel.as_ptr() as u64,relabel.len() as u64];
+        // SAFETY: fixed-width specification and borrowed arrays live through the synchronous copy.
+        Self::returned(unsafe {scarlet_sys::syscall3(Syscall::ShieldFilePolicy,self.0.as_raw() as usize,spec.as_ptr() as usize,40)})
+    }
     /// Bind a native inode identity to this policy until the policy is released.
     /// Requires management authority; a different existing binding is rejected.
     pub fn bind_file(&self, file: &Handle, label: u32) -> HandleResult<()> {
         // SAFETY: both live capabilities are validated by the kernel.
         let result = unsafe { scarlet_sys::syscall3(Syscall::ShieldBindFile, self.0.as_raw() as usize, file.as_raw() as usize, label as usize) };
         if result == 0 { Ok(()) } else { Err(HandleError::InvalidParameter) }
+    }
+    /// Change inode metadata only when the current subject has an explicit rule.
+    pub fn relabel_file(&self,file:&Handle,label:u32)->HandleResult<()> {
+        // SAFETY: native policy identity, retained file and current subject are checked together.
+        if unsafe {scarlet_sys::syscall3(Syscall::ShieldRelabelFile,self.0.as_raw() as usize,file.as_raw() as usize,label as usize)}==0 {Ok(())}else {Err(HandleError::InvalidParameter)}
     }
     /// Apply only a transition explicitly delegated by this immutable policy.
     /// Query authority identifies the policy; it does not grant transitions.
@@ -163,4 +174,10 @@ pub fn hide_kernel_addresses() -> HandleResult<()> {
 pub fn kernel_addresses_hidden() -> bool {
     // SAFETY: scalar query of this caller's inherited restrictions.
     unsafe { syscall0(Syscall::ShieldInformation) & 1 != 0 }
+}
+
+/// Select a label authorized by this task's native policy, or zero to clear it.
+pub fn file_creation_label(label:u32)->HandleResult<()> {
+    // SAFETY: the kernel checks the current subject and immutable create grants.
+    if unsafe {syscall1(Syscall::ShieldCreationLabel,label as usize)}==0 {Ok(())}else {Err(HandleError::InvalidParameter)}
 }

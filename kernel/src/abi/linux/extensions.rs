@@ -27,7 +27,7 @@ pub trait LinuxAbiExtensions: Send + Sync {
     /// Translate a derived ABI's protected metadata after common path/fd checks.
     fn get_xattr(&self, _task: &Task, _node: &dyn crate::fs::vfs_v2::core::VfsNode, _name: &[u8])
         -> Option<Result<alloc::vec::Vec<u8>, usize>> { None }
-    fn change_xattr(&self, _task: &Task, _node: &dyn crate::fs::vfs_v2::core::VfsNode, _name: &[u8])
+    fn change_xattr(&self, _task: &Task, _node: &dyn crate::fs::vfs_v2::core::VfsNode, _name: &[u8], _value: Option<&[u8]>, _mode: crate::fs::vfs_v2::xattr::SetMode)
         -> Option<Result<(), usize>> { None }
 
     fn open(&self, _abi: &mut LinuxAbi, _task: &Task, _path: &str, _flags: i32) -> Option<usize> {

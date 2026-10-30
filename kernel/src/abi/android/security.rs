@@ -114,6 +114,7 @@ enum Content {
     Create,
     Current(Weak<Task>),
     Exec(Weak<Task>),
+    FsCreate(Weak<Task>),
 }
 struct Node {
     id: u64,
@@ -440,14 +441,15 @@ impl StreamOps for SecurityFile {
     fn write_empty(&self) -> Result<usize, StreamError> {
         if !self.writable { return Err(StreamError::PermissionDenied); }
         if matches!(self.content, Content::Current(_)) { return Err(StreamError::InvalidArgument); }
-        if let Content::Exec(owner) = &self.content {
+        if let Content::Exec(owner) | Content::FsCreate(owner) = &self.content {
             if !self.writable { return Err(StreamError::PermissionDenied); }
             let caller = crate::task::mytask().ok_or(StreamError::PermissionDenied)?;
             let owner = owner.upgrade().ok_or(StreamError::PermissionDenied)?;
             if !core::ptr::eq(&*caller, &*owner) { return Err(StreamError::PermissionDenied); }
             let mut state = self.state.lock();
             if state.written || state.position != 0 { return Err(StreamError::InvalidArgument); }
-            crate::shield::exec_transition::cancel(&caller).map_err(|_| StreamError::PermissionDenied)?;
+            if !caller.security_subject.read().as_ref().is_some_and(|subject|Arc::ptr_eq(subject.policy(),&self.policy)) {return Err(StreamError::PermissionDenied);}
+            if matches!(self.content,Content::FsCreate(_)) {crate::shield::file::select_creation_label(&caller,None)}else {crate::shield::exec_transition::cancel(&caller)}.map_err(|_|StreamError::PermissionDenied)?;
             state.written = true;
         }
         Ok(0)
@@ -501,7 +503,7 @@ impl StreamOps for SecurityFile {
         if buffer.is_empty() || buffer.len() > 4095 {
             return Err(StreamError::InvalidArgument);
         }
-        if let Content::Current(owner) | Content::Exec(owner) = &self.content {
+        if let Content::Current(owner) | Content::Exec(owner) | Content::FsCreate(owner) = &self.content {
             let caller = crate::task::mytask().ok_or(StreamError::PermissionDenied)?;
             let owner = owner.upgrade().ok_or(StreamError::PermissionDenied)?;
             if !core::ptr::eq(&*caller, &*owner) {
@@ -517,7 +519,10 @@ impl StreamOps for SecurityFile {
             if state.written || state.position != 0 {
                 return Err(StreamError::InvalidArgument);
             }
-            if matches!(&self.content, Content::Exec(_)) {
+            if matches!(&self.content,Content::FsCreate(_)) {
+                if !caller.security_subject.read().as_ref().is_some_and(|subject|Arc::ptr_eq(subject.policy(),&self.policy)) {return Err(StreamError::PermissionDenied);}
+                crate::shield::file::select_creation_label(&caller,Some(target))
+            } else if matches!(&self.content, Content::Exec(_)) {
                 crate::shield::exec_transition::reserve(&caller, &self.policy, target)
             } else {
                 crate::shield::syscall::transition(&caller, &self.policy, target)
@@ -661,8 +666,10 @@ pub(super) fn mmap(object: &KernelObject, mapping: &FileMapping) -> Option<usize
 
 pub(super) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> Option<usize> {
     let proc_path = path.strip_prefix("/proc/")?;
-    let (pid, exec) = if let Some(pid) = proc_path.strip_suffix("/attr/current") { (pid, false) }
-        else { (proc_path.strip_suffix("/attr/exec")?, true) };
+    let (pid, attr) = if let Some(pid)=proc_path.strip_suffix("/attr/current") {(pid,0)}
+        else if let Some(pid)=proc_path.strip_suffix("/attr/exec") {(pid,1)}
+        else {(proc_path.strip_suffix("/attr/fscreate")?,2)};
+    let exec=attr==1;
     let result = (|| -> Result<usize, usize> {
         if flags & 3 == 3 || flags & !(0x80000 | 0x800 | 0x20000 | 3) != 0 {
             return Err(errno::EACCES);
@@ -697,12 +704,15 @@ pub(super) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> O
         if !Arc::ptr_eq(caller.policy(), subject.policy()) {
             return Err(errno::EACCES);
         }
-        let bytes = if exec {
+        let bytes = if attr==2 {
+            target.as_deref().unwrap_or(task).creation_label.read().as_ref().filter(|selected|Arc::ptr_eq(&selected.policy,subject.policy()))
+                .map(|selected|format!("{}\0",subject.policy().label(selected.target).unwrap_or("")).into_bytes()).unwrap_or_default()
+        }else if exec {
             target.as_deref().unwrap_or(task).pending_exec_transition.read().as_ref()
                 .map(|pending| format!("{}\0", pending.target().name()).into_bytes()).unwrap_or_default()
         } else { format!("{}\0", subject.name()).into_bytes() };
         let content = if writable {
-            if !core::ptr::eq(target.as_deref().unwrap_or(task), task) || (!exec && !caller.can_transition()) {
+            if !core::ptr::eq(target.as_deref().unwrap_or(task), task) || (attr==0 && !caller.can_transition()) {
                 return Err(errno::EACCES);
             }
             let current = crate::task::mytask().ok_or(errno::ESRCH)?;
@@ -711,7 +721,7 @@ pub(super) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> O
             }
             let owner = crate::sched::scheduler::get_task_by_id(current.get_id()).ok_or(errno::ESRCH)?;
             if !core::ptr::eq(owner.as_ref(), task) { return Err(errno::ESRCH); }
-            if exec { Content::Exec(Arc::downgrade(&owner)) } else { Content::Current(Arc::downgrade(&owner)) }
+            if attr==2 {Content::FsCreate(Arc::downgrade(&owner))}else if exec { Content::Exec(Arc::downgrade(&owner)) } else { Content::Current(Arc::downgrade(&owner)) }
         } else {
             Content::Text(bytes.clone())
         };

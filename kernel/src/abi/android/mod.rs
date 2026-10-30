@@ -32,10 +32,18 @@ impl LinuxAbiExtensions for AndroidExtensions {
         if name != b"security.selinux" { return None; }
         security::resource_context(task, node).map(Ok)
     }
-    fn change_xattr(&self, task: &Task, node: &dyn crate::fs::vfs_v2::core::VfsNode, name: &[u8]) -> Option<Result<(), usize>> {
-        if name == b"security.selinux" && security::resource_context(task, node).is_some() {
-            Some(Err(crate::abi::linux::generic::errno::EACCES))
-        } else { None }
+    fn change_xattr(&self, task:&Task,node:&dyn crate::fs::vfs_v2::core::VfsNode,name:&[u8],value:Option<&[u8]>,mode:crate::fs::vfs_v2::xattr::SetMode)->Option<Result<(),usize>> {
+        if name!=b"security.selinux" {return None;}
+        let subject=task.security_subject.read().clone()?;
+        if subject.policy().resource_label(node).is_none() {return None;}
+        Some((|| {
+            if mode==crate::fs::vfs_v2::xattr::SetMode::Create {return Err(crate::abi::linux::generic::errno::EEXIST);}
+            let value=value.ok_or(crate::abi::linux::generic::errno::EACCES)?;
+            let text=core::str::from_utf8(value).map_err(|_|crate::abi::linux::generic::errno::EINVAL)?;
+            let text=text.strip_suffix('\0').unwrap_or(text);
+            let target=subject.policy().label_id(text).ok_or(crate::abi::linux::generic::errno::EACCES)?;
+            subject.policy().relabel_file(&subject,node,target).map_err(|_|crate::abi::linux::generic::errno::EACCES)
+        })())
     }
     fn open(&self, abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> Option<usize> {
         security::open(abi, task, path, flags).or_else(|| binder::open(abi, task, path, flags))

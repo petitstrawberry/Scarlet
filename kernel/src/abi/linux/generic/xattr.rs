@@ -182,7 +182,8 @@ fn dispatch(
                 return output(&task, a[2], a[3], &value?);
             }
         } else if matches!(op, Operation::Set | Operation::Remove) {
-            if let Some(result) = abi.extensions.change_xattr(&task, node.as_ref(), &attribute) {
+            writable(node.as_ref())?;
+            if let Some(result) = abi.extensions.change_xattr(&task, node.as_ref(), &attribute, if matches!(op,Operation::Set) {Some(&value)}else {None}, mode) {
                 return result.map(|_| 0);
             }
         }

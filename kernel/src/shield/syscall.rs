@@ -327,3 +327,49 @@ pub fn sys_shield_bind_file(tf: &mut Trapframe) -> usize {
     tf.increment_pc_next(&task);
     bind_file(&task, tf.get_arg(0),tf.get_arg(1),tf.get_arg(2)).map_or(usize::MAX, |_| 0)
 }
+
+/// Construct a new policy identity from an administrator-owned immutable blueprint.
+pub fn sys_shield_file_policy(tf:&mut Trapframe)->usize {
+    let task=crate::task::mytask().unwrap();tf.increment_pc_next(&task);
+    (||->Result<usize,&'static str> {
+        let policy=policy_handle(&task,tf.get_arg(0),true)?;
+        if tf.get_arg(2)!=40 {return Err("file policy specification size");}
+        let raw=read::<40>(&task,tf.get_arg(1))?;
+        if u32_at(&raw,4)!=0 {return Err("file policy flags");}
+        let create_count=address(u64_at(&raw,16))?;let relabel_count=address(u64_at(&raw,32))?;
+        if create_count>MAX_RULES || relabel_count>MAX_RULES {return Err("file rule bound");}
+        let create_ptr=address(u64_at(&raw,8))?;let relabel_ptr=address(u64_at(&raw,24))?;
+        create_ptr.checked_add(create_count*24).ok_or("create pointer overflow")?;
+        relabel_ptr.checked_add(relabel_count*16).ok_or("relabel pointer overflow")?;
+        let mut create=Vec::with_capacity(create_count);let mut relabel=Vec::with_capacity(relabel_count);
+        for index in 0..create_count {
+            let record=read::<24>(&task,create_ptr+index*24)?;let flags=u32_at(&record,16);
+            if flags>1 || u32_at(&record,20)!=0 {return Err("file create flags");}
+            create.push(file::CreateRule {source:u32_at(&record,0),parent:u32_at(&record,4),target:u32_at(&record,8),kind:u32_at(&record,12),default:flags==1});
+        }
+        for index in 0..relabel_count {
+            let record=read::<16>(&task,relabel_ptr+index*16)?;
+            relabel.push(file::RelabelRule {source:u32_at(&record,0),old:u32_at(&record,4),target:u32_at(&record,8),kind:u32_at(&record,12)});
+        }
+        let default=u32_at(&raw,0);
+        insert(&task,PolicyHandle {policy:policy.with_file_rules((default!=0).then_some(default),create,relabel)?,administer:true})
+    })().unwrap_or(usize::MAX)
+}
+pub fn sys_shield_creation_label(tf:&mut Trapframe)->usize {
+    let task=crate::task::mytask().unwrap();tf.increment_pc_next(&task);
+    let Ok(target)=u32::try_from(tf.get_arg(0)) else {return usize::MAX;};
+    file::select_creation_label(&task,(target!=0).then_some(target)).map_or(usize::MAX,|_|0)
+}
+
+pub fn sys_shield_relabel_file(tf:&mut Trapframe)->usize {
+    let task=crate::task::mytask().unwrap();tf.increment_pc_next(&task);
+    (||->Result<(),&'static str> {
+        let policy=policy_handle(&task,tf.get_arg(0),false)?;
+        let object=task.handle_table.get(u32::try_from(tf.get_arg(1)).map_err(|_|"file handle")?).ok_or("file handle")?;
+        let file=object.as_file().and_then(|file|file.as_any().downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()).ok_or("retained VFS file required")?;
+        let node=file.get_vfs_entry().node();
+        if node.filesystem().and_then(|weak|weak.upgrade()).is_none_or(|fs|fs.is_read_only()) {return Err("resource filesystem is read-only or gone");}
+        let subject=task.security_subject.read().clone().ok_or("subject missing")?;
+        policy.relabel_file(&subject,node.as_ref(),u32::try_from(tf.get_arg(2)).map_err(|_|"file label")?)
+    })().map_or(usize::MAX,|_|0)
+}

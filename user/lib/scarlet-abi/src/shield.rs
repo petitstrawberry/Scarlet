@@ -44,3 +44,16 @@ pub struct RawExecTransition {
     pub reserved: u64,
 }
 const _: [(); 24] = [(); core::mem::size_of::<RawExecTransition>()];
+
+/// Native file kinds: regular=1, directory=2, symlink=3, char=4,
+/// block=5, socket=6, pipe=7. Flags bit zero selects the default rule.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawFileCreate {
+    pub source:u32,pub parent:u32,pub target:u32,pub kind:u32,pub flags:u32,pub reserved:u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawFileRelabel {pub source:u32,pub old:u32,pub target:u32,pub kind:u32}
+const _: [();24]=[();core::mem::size_of::<RawFileCreate>()];
+const _: [();16]=[();core::mem::size_of::<RawFileRelabel>()];
