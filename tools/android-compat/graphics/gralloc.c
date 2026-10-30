@@ -285,7 +285,7 @@ static int open_framebuffer(const hw_module_t *module,hw_device_t **device) {
     Framebuffer *fb=calloc(1,sizeof(*fb));
     if (!fb) return -ENOMEM;
     fb->client=dlopen("libsws_client_c.so",RTLD_NOW|RTLD_LOCAL|RTLD_NODELETE);
-    if (!fb->client) { free(fb);return -ENODEV; }
+    if (!fb->client) { fprintf(stderr,"SWS framebuffer client load failed: %s\n",dlerror());free(fb);return -ENODEV; }
     int32_t (*create)(const char *,const char *,uint32_t,uint32_t,uint32_t,uint32_t *)=dlsym(fb->client,"sws_window_create_ex");
     fb->size=dlsym(fb->client,"sws_window_size");fb->present=dlsym(fb->client,"sws_window_present");
     fb->destroy=dlsym(fb->client,"sws_window_destroy");fb->poll=dlsym(fb->client,"sws_poll_event");

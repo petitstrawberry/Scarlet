@@ -1,6 +1,6 @@
 //! Initial 64-bit Binder adapter over native RPC objects. Supports bounded,
-//! synchronous transactions and flat object references over native RPC. FD
-//! transfer and nested synchronous transactions are explicitly unsupported.
+//! synchronous transactions, object references, descriptors and HIDL embedded
+//! buffers over native RPC. Nested synchronous transactions remain unsupported.
 //! One-way delivery is serialized until userspace frees each receive buffer.
 
 use crate::{

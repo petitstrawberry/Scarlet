@@ -52,13 +52,14 @@ def main():
     hal=SOURCE/"graphics/gralloc.c"
     commands=[flags+["-shared","-fPIC","-Wl,-z,defs",str(hal),"-ldl","-o",str(output/"gralloc.scarlet.so")],
               flags+["-static",str(hal),str(SOURCE/"graphics/gralloc-probe.c"),"-ldl","-o",str(output/"gralloc-probe")],
+              flags+["-fPIE","-pie",str(hal),str(SOURCE/"graphics/gralloc-probe.c"),"-ldl","-o",str(output/"gralloc-frame-probe")],
               flags+["-static",str(SOURCE/"binder-buffer-probe.c"),"-o",str(output/"binder-buffer-probe")]]
     for command in commands:subprocess.run(command,check=True)
     record={"kind":"android-cpu-graphics-hal-v1","commands":commands,"headers":pins,
             "sources":{str(name):sha256(SOURCE/name) for name in ["build-graphics-hal.py","graphics/headers.json","graphics/gralloc.c","graphics/gralloc-probe.c","binder-buffer-probe.c","binder-object-probe.c"]},
             "compiler":subprocess.check_output([str(compiler),"--version"],text=True),
             "needed":elf_needed(output/"gralloc.scarlet.so"),
-            "files":{name:sha256(output/name) for name in ["gralloc.scarlet.so","gralloc-probe","binder-buffer-probe"]},
+            "files":{name:sha256(output/name) for name in ["gralloc.scarlet.so","gralloc-probe","gralloc-frame-probe","binder-buffer-probe"]},
             "readiness":"not executed"}
     (output/"build.json").write_text(json.dumps(record,indent=2)+"\n")
     print("Built CPU buffer/framebuffer HAL; execution and stock-adapter integration are not asserted")

@@ -34,7 +34,33 @@ static int imported_copy(gralloc_module_t *module,buffer_handle_t buffer) {
     copy->data[7]--;CHECK(module->registerBuffer(module,copy)==-EINVAL);
     close(copy->data[0]);free(copy);return 0;
 }
-int main(void) {
+static int framebuffer_case(void) {
+    gralloc_module_t *module=&HAL_MODULE_INFO_SYM;framebuffer_device_t *fb=NULL;
+    for (int i=0;i<100 && !fb;i++) {
+        if (framebuffer_open(&module->common,&fb)) {fb=NULL;usleep(100000);}
+    }
+    CHECK(fb && fb->width && fb->height);
+    alloc_device_t *allocator=NULL;CHECK(gralloc_open(&module->common,&allocator)==0);
+    buffer_handle_t buffer;int stride;
+    CHECK(allocator->alloc(allocator,fb->width,fb->height,HAL_PIXEL_FORMAT_RGBA_8888,
+          GRALLOC_USAGE_HW_FB|GRALLOC_USAGE_SW_WRITE_OFTEN,&buffer,&stride)==0);
+    void *pixels;CHECK(module->lock(module,buffer,GRALLOC_USAGE_SW_WRITE_OFTEN,0,0,fb->width,fb->height,&pixels)==0);
+    for (uint32_t y=0;y<fb->height;y++) for (uint32_t x=0;x<fb->width;x++) {
+        uint8_t *p=(uint8_t *)pixels+((size_t)y*stride+x)*4;
+        p[0]=x<fb->width/3 ? 240 : 24;p[1]=x>=fb->width/3 && x<fb->width*2/3 ? 220 : 32;
+        p[2]=x>=fb->width*2/3 ? 230 : 40;p[3]=255;
+        if (y<24 || y+24>=fb->height) {p[0]=32;p[1]=32;p[2]=32;}
+    }
+    CHECK(module->unlock(module,buffer)==0);
+    CHECK(fb->post(fb,buffer)==0);
+    /* A standalone SWS may still be retrying its optional stemd notification. */
+    puts("SCARLET_ANDROID_FRAMEBUFFER_PRESENTED");fflush(stdout);sleep(15);
+    CHECK(allocator->free(allocator,buffer)==0 && gralloc_close(allocator)==0);
+    CHECK(framebuffer_close(fb)==0);
+    puts("SCARLET_ANDROID_FRAMEBUFFER_OK");return 0;
+}
+int main(int argc,char **argv) {
+    if (argc==2 && !strcmp(argv[1],"--framebuffer")) return framebuffer_case();
     gralloc_module_t *module=&HAL_MODULE_INFO_SYM;
     alloc_device_t *allocator=NULL;
     CHECK(gralloc_open(&module->common,&allocator)==0 && allocator);

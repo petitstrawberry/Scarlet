@@ -7,6 +7,7 @@ mod bootstrap;
 mod boot_profile;
 mod framework_services;
 mod services;
+mod native_sws;
 mod shield;
 mod stock;
 
@@ -45,6 +46,7 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
             target: 2,
         },
     ];
+    let _compositor = native_sws::Compositor::start(&environment, &handles)?;
     if let Some(policy) = policy {
         stock::prepare(&environment, &android, &handles)?;
         return if option_env!("SCARLET_ANDROID_FRAMEWORK_SERVICES") == Some("1") {

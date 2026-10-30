@@ -65,11 +65,14 @@ def main():
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--accel", choices=("tcg", "hvf"), default="tcg")
     parser.add_argument("--program-argument",action="append",default=[],help="argument passed to the selected diagnostic program")
+    parser.add_argument("--program-env",action="append",default=[],help="explicit KEY=VALUE for the selected diagnostic program")
     parser.add_argument("--cpus", type=int, choices=range(1,9), default=1, help="HVF CPU count for scheduler integration checks")
     parser.add_argument("--binder", action="store_true", help="include Binder RPC and three-process object lifetime checks")
     args = parser.parse_args()
     if args.program_argument and not args.program:
         parser.error("--program-argument requires --program")
+    if args.program_env and (not args.program or any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=[^\0]*",value) for value in args.program_env)):
+        parser.error("--program-env requires --program and valid KEY=VALUE records")
     if args.init_bootstrap and (not args.program or not args.stock_inputs):
         parser.error("--init-bootstrap requires --program and --stock-inputs")
     if args.boot_profile:
@@ -176,6 +179,9 @@ def main():
         if args.stock_inputs:
             verify_stock_inputs(args.stock_inputs, args.runtime_root)
             art["env"] = [value for value in art["env"] if not value.startswith("LD_LIBRARY_PATH=")]
+        for value in args.program_env:
+            name=value.split("=",1)[0]
+            art["env"]=[item for item in art["env"] if item.split("=",1)[0]!=name]+[value]
         runtime_files = [args.runtime_root / name for name in metadata["files"]]
     code = smoke.firmware(("SCARLET_EFI_CODE_ARM64_HVF", "SCARLET_EFI_CODE_ARM64")) if args.accel == "hvf" else smoke.firmware(("SCARLET_EFI_CODE_ARM64", "SCARLET_EFI_CODE_ARM64_EL2"))
     variables = smoke.firmware(("SCARLET_EFI_VARS_ARM64_HVF", "SCARLET_EFI_VARS_ARM64")) if args.accel == "hvf" else smoke.firmware(("SCARLET_EFI_VARS_ARM64", "SCARLET_EFI_VARS_ARM64_EL2"))
