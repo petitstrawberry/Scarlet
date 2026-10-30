@@ -2883,11 +2883,11 @@ impl Task {
                         .add_memory_map(shared_mmap.clone())
                         .map_err(|_| "Failed to add shared memory map to child task")?;
                     if let Some(owner) = &shared_mmap.owner {
-                        owner.on_mapped(
+                        owner.on_mapping_inherited(
                             shared_mmap.vmarea.start,
                             shared_mmap.pmarea.start,
                             shared_mmap.vmarea.size(),
-                            shared_mmap.vmarea.start - shared_mmap.vm_start,
+                            shared_mmap.vm_start,
                         );
                     }
 
@@ -4283,6 +4283,10 @@ mod tests {
         }
 
         fn on_mapped(&self, _vaddr: usize, _paddr: u64, _length: usize, _offset: usize) {
+            self.mappings.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn on_mapping_inherited(&self, _vaddr: usize, _paddr: u64, _length: usize, _vm_start: usize) {
             self.mappings.fetch_add(1, Ordering::SeqCst);
         }
 

@@ -1076,6 +1076,56 @@ mod tests {
     }
 
     #[test_case]
+    fn shared_file_fork_preserves_nonzero_backing_offset_and_split_origin() {
+        let task = crate::task::new_user_task("shared-file-offset-fork".into(), 0);
+        task.vm_manager.set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let vfs = alloc::sync::Arc::new(crate::fs::VfsManager::new());
+        task.set_vfs(vfs.clone());
+        vfs.create_file("/shared-image", crate::fs::FileType::RegularFile).unwrap();
+        let object = vfs.open("/shared-image", 2).unwrap();
+        let mut contents = alloc::vec![0u8; 4 * PAGE_SIZE];
+        for (index, page) in contents.chunks_exact_mut(PAGE_SIZE).enumerate() {
+            page.fill(0x11 * (index as u8 + 1));
+        }
+        object.as_stream().unwrap().write(&contents).unwrap();
+        let handle = task.handle_table.insert(object).unwrap();
+        let mut abi = LinuxAbi::default();
+        let fd = abi.allocate_fd(handle).unwrap();
+        let base = 0x4000_0000;
+        let mut frame = Trapframe::new();
+        frame.set_arg(0, base);
+        frame.set_arg(1, 3 * PAGE_SIZE);
+        frame.set_arg(2, 3);
+        frame.set_arg(3, 0x11); // MAP_SHARED | MAP_FIXED
+        frame.set_arg(4, fd);
+        frame.set_arg(5, PAGE_SIZE);
+        assert_eq!(mmap_for_task(&mut abi, &frame, &task), base);
+        let mut bytes = [0; 16];
+        copy_from_user(&task, base, &mut bytes).unwrap();
+        assert_eq!(bytes, [0x22; 16]);
+        let child = task.clone_task(crate::task::CloneFlags::default()).unwrap();
+        for process in [&task, &child] {
+            // The second page has not been faulted in before fork.
+            copy_from_user(process, base + PAGE_SIZE, &mut bytes).unwrap();
+            assert_eq!(bytes, [0x33; 16]);
+        }
+        copy_to_user(&child, base + PAGE_SIZE, &[0xa5; 16]).unwrap();
+        copy_from_user(&task, base + PAGE_SIZE, &mut bytes).unwrap();
+        assert_eq!(bytes, [0xa5; 16]);
+        // Remove the leading fragment, then inherit the original file binding
+        // into another child while its VMA starts after the mapping origin.
+        let removed = child.vm_manager.remove_memory_map_range(base, PAGE_SIZE);
+        reclaim_private_removed_mappings(&child, &removed);
+        let grandchild = child.clone_task(crate::task::CloneFlags::default()).unwrap();
+        drop(child);
+        task.handle_table.remove(handle);
+        for process in [&task, &grandchild] {
+            copy_from_user(process, base + 2 * PAGE_SIZE, &mut bytes).unwrap();
+            assert_eq!(bytes, [0x44; 16]);
+        }
+    }
+
+    #[test_case]
     fn mmap_unaligned_offset_preserves_fixed_mapping_and_aligned_offset_reads_file_page() {
         let task = Task::new("mmap-file-offset".into(), 0, TaskType::User);
         task.vm_manager

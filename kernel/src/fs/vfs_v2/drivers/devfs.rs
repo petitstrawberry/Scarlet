@@ -900,6 +900,12 @@ impl MemoryMappingOps for DevFileObject {
         }
     }
 
+    fn on_mapping_inherited(&self, vaddr: usize, paddr: u64, length: usize, vm_start: usize) {
+        if let Some(device_open) = &self.device_open {
+            device_open.on_mapping_inherited(vaddr, paddr, length, vm_start);
+        }
+    }
+
     fn on_unmapped(&self, vaddr: usize, length: usize) {
         if let Some(ref device_open) = self.device_open {
             let device_guard_ref = device_open.as_ref();

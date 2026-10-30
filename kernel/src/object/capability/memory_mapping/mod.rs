@@ -130,6 +130,15 @@ pub trait MemoryMappingOps: Send + Sync {
     /// a reserved VMA whose individual pages have not yet been faulted in.
     fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {}
 
+    /// Notify an owner that fork retained an existing shared mapping.
+    ///
+    /// `vm_start` is the original virtual mapping origin, including after a
+    /// partial unmap. It is not an offset in the backing object. Existing
+    /// backing bindings remain valid through the retained owner Arc. Owners
+    /// that count mapping references may increment that count here; the
+    /// default preserves the binding without registering a new mapping.
+    fn on_mapping_inherited(&self, vaddr: usize, paddr: u64, length: usize, vm_start: usize) {}
+
     /// Notification that a mapping has been removed
     ///
     /// Called when a mapping of this object has been removed from

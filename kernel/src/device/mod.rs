@@ -430,6 +430,10 @@ impl<T: Device + ?Sized> MemoryMappingOps for DefaultDeviceOpen<T> {
         self.device.on_mapped(vaddr, paddr, length, offset);
     }
 
+    fn on_mapping_inherited(&self, vaddr: usize, paddr: u64, length: usize, vm_start: usize) {
+        self.device.on_mapping_inherited(vaddr, paddr, length, vm_start);
+    }
+
     fn on_unmapped(&self, vaddr: usize, length: usize) {
         self.device.on_unmapped(vaddr, length);
     }

@@ -203,6 +203,12 @@ impl MemoryMappingOps for GpuMemoryMappingOwner {
         }
     }
 
+    fn on_mapping_inherited(&self, vaddr: usize, paddr: u64, length: usize, vm_start: usize) {
+        if let Some(mapping) = self.gpu.as_memory_mappable() {
+            mapping.on_mapping_inherited(vaddr, paddr, length, vm_start);
+        }
+    }
+
     fn on_unmapped(&self, vaddr: usize, length: usize) {
         if let Some(mapping) = self.gpu.as_memory_mappable() {
             mapping.on_unmapped(vaddr, length);
