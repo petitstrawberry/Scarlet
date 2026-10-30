@@ -175,7 +175,12 @@ def configure(output, stock, profile, contexts, metadata):
         f'{name} = "{value}"\n' for name, value in sorted(profile["bootconfig"].items())))
     (output / "scarlet/boot/init.rc").write_text("# Explicit Scarlet device boot configuration\n" + "".join(
         "import " + path + "\n" for path in profile["init_imports"] + imports(profile)))
-    for name in ["storage", "apex", "linkerconfig", "data", "sys/devices", "sys/class/power_supply", "sys/fs/selinux", "system_ext/apex", "product/apex", "vendor/apex"]:
+    # /data_mirror is a ramdisk directory on a real device; the generic
+    # Android init configuration mounts a private tmpfs over it before making
+    # the per-user mirror bind mounts used for app data.
+    # The outer Android manager owns volume policy: it provides the initial
+    # user-0 data roots that stock vold would otherwise create after key setup.
+    for name in ["storage", "apex", "linkerconfig", "data", "data_mirror", "data/user_de/0", "data/user/0", "sys/devices", "sys/class/power_supply", "sys/fs/selinux", "system_ext/apex", "product/apex", "vendor/apex"]:
         (output / name).mkdir(parents=True, exist_ok=True)
     if "resource_groups" in profile:
         (output / "etc").mkdir(exist_ok=True)

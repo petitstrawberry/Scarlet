@@ -37,7 +37,7 @@ STOCK_TEXT = ("service system_suspend /" + BINARY + "\n"
 
 def validate_selection(profile):
     names = profile.get("host_services", [])
-    if (not isinstance(names,list) or len(names)>6 or
+    if (not isinstance(names,list) or len(names)>7 or
             any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER,ODSIGN,HEALTH) for name in names) or len(set(names))!=len(names)):
         raise ValueError("unsupported stock host service selection")
     selected = CONTRACT in profile.get("vintf", {}).get("framework", [])
