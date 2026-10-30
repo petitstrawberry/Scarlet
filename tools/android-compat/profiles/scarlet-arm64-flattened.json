@@ -1218,6 +1218,21 @@
       "u:r:system_server:s0",
       "u:object_r:looper_stats_service:s0",
       3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:cacheinfo_service:s0",
+      3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:hal_health_service:s0",
+      2
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:hal_health_hwservice:s0",
+      2
     ]
   ],
   "socket_labels": [
