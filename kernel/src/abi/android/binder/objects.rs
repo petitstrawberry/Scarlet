@@ -592,7 +592,9 @@ fn offsets(data: &[u8], encoded: &[u8]) -> Result<Vec<usize>, usize> {
                 return Err(errno::EOPNOTSUPP);
             }
         }
-        if (kind==buffers::PTR && flags & !1 !=0) || (matches!(kind,buffers::FD|buffers::FDA) && flags!=0) {return Err(errno::EINVAL);}
+        // FD/FDA carry padding here, not Binder object scheduler flags. Stock
+        // libbinder writes 0x17f into the flat-FD padding; it grants no authority.
+        if kind==buffers::PTR && flags & !1 !=0 {return Err(errno::EINVAL);}
         result.push(offset);
     }
     Ok(result)
@@ -1118,6 +1120,11 @@ mod tests {
         assert_eq!(offsets(&data, &[0; 7]), Err(errno::EINVAL));
         data[..4].copy_from_slice(&0x66642a85u32.to_le_bytes());
         assert_eq!(offsets(&data, &[0; 8]), Ok(vec![0]));
+        for padding in [0x17fu32,u32::MAX] {
+            data[4..8].copy_from_slice(&padding.to_le_bytes());
+            assert_eq!(offsets(&data,&[0;8]),Ok(vec![0]));
+        }
+        data[4..8].fill(0);
         data[..4].copy_from_slice(&0xdeadbeefu32.to_le_bytes());
         assert_eq!(offsets(&data, &[0; 8]), Err(errno::EOPNOTSUPP));
         data[..4].copy_from_slice(&BINDER.to_le_bytes());

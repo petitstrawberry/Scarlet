@@ -62,7 +62,9 @@ mod tests {
         put64(payload, 96, 0);
         put64(payload, 104, 8);
         payload[112..116].copy_from_slice(&FD.to_le_bytes());
+        payload[116..120].copy_from_slice(&0x17fu32.to_le_bytes());
         put64(payload, 120, fd);
+        put64(payload, 128, 1);
         for (i, offset) in [0, 40, 80, 112].into_iter().enumerate() {
             put64(payload, 136 + i * 8, offset);
         }
