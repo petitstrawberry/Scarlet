@@ -563,12 +563,26 @@ fn linux_tmpfs_mount_enforces_flags_options_and_native_mount_authority() {
     assert_eq!(mount_tmpfs(&task, "/apex", "tmpfs", 14, "mode=0755,uid=0,gid=0,size=1M"), Ok(()));
     assert_eq!(fs.resolve_path("/apex").unwrap().1.restrictions.bits(), 14);
     for (flags, options, error) in [(15, "", errno::EOPNOTSUPP), (14, "unknown=1", errno::EOPNOTSUPP),
-        (14, "uid=1000", errno::EOPNOTSUPP), (14, "mode=xyz", errno::EINVAL), (14, "size=invalid", errno::EINVAL)] {
+        (14, "mode=xyz", errno::EINVAL), (14, "size=invalid", errno::EINVAL)] {
         assert_eq!(mount_tmpfs(&task, "/apex", "tmpfs", flags, options), Err(error));
         assert_eq!(fs.resolve_path("/apex").unwrap().1.restrictions.bits(), 14);
     }
     task.credentials.write().set_authority(0, 0).unwrap();
     assert_eq!(mount_tmpfs(&task, "/apex", "tmpfs", 14, ""), Err(errno::EPERM));
+}
+
+#[test_case]
+fn linux_tmpfs_mount_applies_root_identity_options_to_the_new_filesystem() {
+    use crate::abi::linux::generic::fs::mount_tmpfs;
+    use crate::fs::vfs_v2::core::VfsNode;
+    let (task, fs, _, _) = fixture();
+    fs.create_dir("/data_mirror").unwrap();
+    assert_eq!(mount_tmpfs(&task, "/data_mirror", "tmpfs", 14,
+        "mode=0700,uid=0,gid=1000"), Ok(()));
+    let root = fs.resolve_path("/data_mirror").unwrap().0.node();
+    let owner = root.owner_identity().unwrap();
+    assert_eq!(owner.principal.0, 0);
+    assert_eq!(owner.group.0, 1000);
 }
 
 #[test_case]

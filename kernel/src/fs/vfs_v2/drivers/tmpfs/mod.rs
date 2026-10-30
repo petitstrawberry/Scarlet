@@ -78,6 +78,29 @@ impl TmpFS {
         fs
     }
 
+    /// Apply the initial identity of the filesystem root. Linux tmpfs takes
+    /// these as mount options, so init can create a private mount point whose
+    /// first entries are owned by a specific principal/group with a fixed mode.
+    fn set_root_identity(&self, mode: Option<u32>, uid: Option<u32>, gid: Option<u32>) -> Result<(), FileSystemError> {
+        if mode.is_some_and(|mode| mode & !0o7777 != 0) {
+            return Err(FileSystemError::new(FileSystemErrorKind::InvalidOperation, "Invalid tmpfs mode"));
+        }
+        let root = self.root.read().clone();
+        if let Some(mode) = mode {
+            root.metadata.write().permissions = FilePermission {
+                read: mode & 0o444 != 0,
+                write: mode & 0o222 != 0,
+                execute: mode & 0o111 != 0,
+            };
+        }
+        if uid.is_some() || gid.is_some() {
+            let mut owner = root.owner.write();
+            if let Some(uid) = uid { owner.principal = crate::shield::identity::Principal(uid); }
+            if let Some(gid) = gid { owner.group = crate::shield::identity::Group(gid); }
+        }
+        Ok(())
+    }
+
     /// VFS v2 driver registration API: create from option string
     /// Example option: "mem=1048576" etc.
     pub fn create_from_option_string(option: Option<&str>) -> Arc<dyn FileSystemOperations> {
@@ -2072,16 +2095,43 @@ impl FileSystemDriver for TmpFSDriver {
     ) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
         // Parse tmpfs options (e.g., "size=64M")
         let mut memory_limit = 64 * 1024 * 1024;
+        let (mut mode, mut uid, mut gid) = (None, None, None);
         for option in options.split(',').filter(|part| !part.is_empty()) {
-            memory_limit = if option.starts_with("size=") {
-                parse_tmpfs_size_option(option)
-            } else if let Some(value) = option.strip_prefix("mem=") {
-                value.parse::<usize>().ok()
-            } else { None }.ok_or_else(|| FileSystemError::new(
-                FileSystemErrorKind::InvalidOperation, "Invalid or unsupported tmpfs option"))?;
-            if memory_limit == 0 { return Err(FileSystemError::new(FileSystemErrorKind::InvalidOperation, "Empty tmpfs size")); }
+            if option.starts_with("size=") || option.starts_with("mem=") {
+                memory_limit = if option.starts_with("size=") {
+                    parse_tmpfs_size_option(option)
+                } else {
+                    option.strip_prefix("mem=").and_then(|value| value.parse::<usize>().ok())
+                }.ok_or_else(|| FileSystemError::new(
+                    FileSystemErrorKind::InvalidOperation, "Invalid tmpfs size option"))?;
+                if memory_limit == 0 { return Err(FileSystemError::new(FileSystemErrorKind::InvalidOperation, "Empty tmpfs size")); }
+                continue;
+            }
+            // The remaining options are mount security flags the VFS enforces
+            // through its own mount constraints, plus root identity.
+            if matches!(option, "nodev" | "noexec" | "nosuid" | "relatime" | "rw" | "ro") {
+                continue;
+            }
+            let mut parse = |prefix: &str, radix: u32| -> Result<u32, FileSystemError> {
+                option.strip_prefix(prefix)
+                    .and_then(|value| u32::from_str_radix(value, radix).ok())
+                    .ok_or_else(|| FileSystemError::new(
+                        FileSystemErrorKind::InvalidOperation, "Invalid tmpfs identity option"))
+            };
+            if option.starts_with("mode=") {
+                mode = Some(parse("mode=", 8)?);
+            } else if option.starts_with("uid=") {
+                uid = Some(parse("uid=", 10)?);
+            } else if option.starts_with("gid=") {
+                gid = Some(parse("gid=", 10)?);
+            } else {
+                return Err(FileSystemError::new(
+                    FileSystemErrorKind::InvalidOperation, "Invalid or unsupported tmpfs option"));
+            }
         }
-        Ok(TmpFS::new(memory_limit))
+        let fs = TmpFS::new(memory_limit);
+        fs.set_root_identity(mode, uid, gid)?;
+        Ok(fs)
     }
 
     fn name(&self) -> &'static str {

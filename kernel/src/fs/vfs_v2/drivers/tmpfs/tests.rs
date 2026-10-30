@@ -18,6 +18,21 @@ mod tests {
     }
 
     #[test_case]
+    fn test_tmpfs_accepts_linux_mount_identity_and_security_options() {
+        use crate::fs::vfs_v2::core::FileSystemOperations;
+        use crate::fs::FileSystemDriver;
+        let driver=crate::fs::drivers::tmpfs::TmpFSDriver;
+        let fs=driver.create_from_option_string("mode=0700,uid=0,gid=1000,nodev,noexec,nosuid,size=4M").unwrap();
+        let root=fs.root_node();
+        let metadata=root.metadata().unwrap();
+        assert!(metadata.permissions.read&&metadata.permissions.write&&metadata.permissions.execute);
+        let owner=root.owner_identity().unwrap();
+        assert_eq!(owner.principal.0,0);assert_eq!(owner.group.0,1000);
+        assert!(driver.create_from_option_string("size=1M,bogus").is_err());
+        assert!(driver.create_from_option_string("size=1M,mode=0999").is_err());
+    }
+
+    #[test_case]
     fn test_character_device_write_failure_is_not_zero_byte_success() {
         use crate::fs::vfs_v2::core::FileSystemOperations;
         use crate::device::{DeviceType,manager::DeviceManager};

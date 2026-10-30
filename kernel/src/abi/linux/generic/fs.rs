@@ -1140,8 +1140,11 @@ pub(crate) fn mount_tmpfs(task: &crate::task::Task, path: &str, fstype: &str, fl
             if mode & !0o7777 != 0 { return Err(errno::EINVAL); }
         } else if let Some(value) = option.strip_prefix("uid=").or_else(|| option.strip_prefix("gid=")) {
             let id = value.parse::<u32>().map_err(|_| errno::EINVAL)?;
-            // Current VFS metadata represents the default owner only.
-            if id != 0 { return Err(errno::EOPNOTSUPP); }
+            // Mount owners are applied to the fresh root by the tmpfs driver;
+            // the numeric identity is Shield authority, never a Linux-only bit.
+            let _ = id;
+            if !driver_options.is_empty() { driver_options.push(','); }
+            driver_options.push_str(option);
         } else if option.starts_with("size=") {
             if !driver_options.is_empty() { driver_options.push(','); }
             driver_options.push_str(option);
