@@ -1,0 +1,46 @@
+diff --git a/kernel/src/abi/linux/aarch64/signal.rs b/kernel/src/abi/linux/aarch64/signal.rs
+index 94431d35b..ca1445d49 100644
+--- a/kernel/src/abi/linux/aarch64/signal.rs
++++ b/kernel/src/abi/linux/aarch64/signal.rs
+@@ -283,7 +283,8 @@ pub fn deliver_pending_handler(abi: &LinuxAbi, frame: &mut Trapframe, result: us
+     };
+     if let Some((signal, handler)) = pending {
+         if let Some(task) = mytask() {
+-            if setup_signal_handler(abi, &task, frame, handler, signal).is_err() {
++            if let Err(error)=setup_signal_handler(abi, &task, frame, handler, signal) {
++                crate::emergency_println!("SCARLET_SIGNAL_DIAG pid={} signal={:?} handler={:#x} error={}",task.get_id(),signal,handler,error);
+                 task.mark_signal_termination(11);
+                 task.request_deferred_exit_group(139);
+             }
+diff --git a/kernel/src/arch/aarch64/trap/exception.rs b/kernel/src/arch/aarch64/trap/exception.rs
+index b87e57384..934732818 100644
+--- a/kernel/src/arch/aarch64/trap/exception.rs
++++ b/kernel/src/arch/aarch64/trap/exception.rs
+@@ -502,6 +502,7 @@ fn terminate_current_user_exception(
+     reason: &'static str,
+     exit_status: i32,
+ ) {
++    crate::emergency_println!("SCARLET_FAULT_DIAG kind={} pc={:#x} far={:#x} esr={:#x} sp={:#x} lr={:#x} x0={:#x} x1={:#x} reason={}",event_kind,pc,vaddr,esr,trapframe.sp,trapframe.regs.reg[30],trapframe.regs.reg[0],trapframe.regs.reg[1],reason);
+     print_trap_info(trapframe, esr);
+     if let Some(task) = current_task(get_cpu().get_cpuid()) {
+         println!(
+diff --git a/kernel/src/task/mod.rs b/kernel/src/task/mod.rs
+index 9eb74ee27..e28f9b1fe 100644
+--- a/kernel/src/task/mod.rs
++++ b/kernel/src/task/mod.rs
+@@ -3406,6 +3406,15 @@ impl Task {
+     /// - The calling task is set to Zombie/Terminated
+     /// - Other tasks in the group are forcefully terminated
+     pub fn exit_group(&self, status: i32) {
++        if status==139 {
++            let frame=self.get_trapframe();
++            crate::emergency_println!("SCARLET_EXIT139_DIAG pid={} pc={:#x} lr={:#x} sp={:#x} far={:#x}",self.get_id(),frame.elr,frame.regs.reg[30],frame.sp,frame.far_el1);
++            for address in [frame.elr as usize,frame.regs.reg[30],frame.far_el1 as usize] {
++                if let Some(map)=self.vm_manager.search_memory_map(address) {
++                    crate::emergency_println!("SCARLET_EXIT139_MAP address={:#x} start={:#x} end={:#x} offset={:#x} owner={}",address,map.vmarea.start,map.vmarea.end,map.vm_start,map.owner.as_ref().map(|o|o.mmap_owner_name()).unwrap_or_default());
++                }
++            }
++        }
+         self.begin_exit();
+         let thread_group_id = self.thread_group_id;
+         let my_id = self.id;

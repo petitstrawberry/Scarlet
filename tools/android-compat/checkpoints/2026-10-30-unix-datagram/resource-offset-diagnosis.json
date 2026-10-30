@@ -1,0 +1,13 @@
+{
+  "apk_sha256": "f73b75e4da4aee410f0c0551ec18e118db6d00b71f2d93b627224b178fa7561b",
+  "diagnostic_run": "stock-init-system-server-resource-diag-v1",
+  "fault_function": "android::LoadedPackage::GetEntryOffset",
+  "framework_resource_zip_data_offset": "0xfe76f4",
+  "original_mmap_file_offset": "0xfe7000",
+  "virtual_mapping_start": "0x5608c5127000",
+  "resource_type_pointer": "0x5608c7761160",
+  "mapping_relative_offset": "0x263a160",
+  "incorrect_zero_offset_header": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "correct_header": "01025400942a00001100000020020000d40800004000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  "cause": "Task::clone_task reused on_mapped with a virtual displacement as the backing file offset for inherited shared mappings. The owner overwrote the original nonzero file binding."
+}
