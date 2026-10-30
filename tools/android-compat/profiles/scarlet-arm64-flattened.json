@@ -1188,6 +1188,36 @@
       "u:r:system_server:s0",
       "u:object_r:font_service:s0",
       3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:permission_service:s0",
+      3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:resources_manager_service:s0",
+      3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:sensorservice_service:s0",
+      3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:system_config_service:s0",
+      3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:binder_calls_stats_service:s0",
+      3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:looper_stats_service:s0",
+      3
     ]
   ],
   "socket_labels": [
