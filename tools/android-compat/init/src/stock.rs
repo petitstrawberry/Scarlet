@@ -47,6 +47,8 @@ pub fn environment(
     let boot_policy=if option_env!("SCARLET_ANDROID_INIT_BOOTSTRAP") == Some("1") {
         let discovery=VfsView::create("linux-device-tree", "").map_err(|_| "native device discovery")?;
         android.bind("/sys/devices", &discovery, "/").map_err(|_| "Android device discovery")?;
+        let supplies=VfsView::create("linux-power-supply", "").map_err(|_| "native supply telemetry")?;
+        android.bind("/sys/class/power_supply", &supplies, "/").map_err(|_| "Android supply telemetry")?;
         Some(super::shield::configure_init(&android)?)
     } else {
         if option_env!("SCARLET_ANDROID_SHIELD") == Some("1") {super::shield::configure(&android)?;}

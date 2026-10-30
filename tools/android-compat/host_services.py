@@ -1,5 +1,6 @@
 """Explicit stock services selected for the hosted Android environment."""
 import hashlib
+import xml.etree.ElementTree as ET
 
 SUSPEND = "system_suspend"
 BINARY = "system/bin/hw/android.system.suspend@1.0-service"
@@ -20,6 +21,15 @@ ODSIGN="odsign"
 ODSIGN_BINARY="system/bin/odsign"
 ODSIGN_STOCK_RC="system/etc/init/odsign.rc"
 ODSIGN_MANAGED_RC="scarlet/boot/services/odsign.rc"
+HEALTH="health"
+HEALTH_BINARY="vendor/bin/hw/android.hardware.health@2.1-service"
+HEALTH_IMPL="vendor/lib64/hw/android.hardware.health@2.0-impl-2.1.so"
+HEALTH_STOCK_RC="vendor/etc/init/android.hardware.health@2.1-service.rc"
+HEALTH_MANAGED_RC="scarlet/boot/services/health.rc"
+HEALTH_MANIFEST="vendor/etc/vintf/manifest/android.hardware.health@2.1.xml"
+HEALTH_TEXT=("service health-hal-2-1 /"+HEALTH_BINARY+"\n"
+             "    class hal charger\n    user system\n    group system\n"
+             "    capabilities WAKE_ALARM BLOCK_SUSPEND\n    file /dev/kmsg w\n")
 STOCK_TEXT = ("service system_suspend /" + BINARY + "\n"
               "    class early_hal\n    user system\n    group system wakelock\n"
               "    capabilities BLOCK_SUSPEND\n")
@@ -27,21 +37,47 @@ STOCK_TEXT = ("service system_suspend /" + BINARY + "\n"
 
 def validate_selection(profile):
     names = profile.get("host_services", [])
-    if (not isinstance(names,list) or len(names)>5 or
-            any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER,ODSIGN) for name in names) or len(set(names))!=len(names)):
+    if (not isinstance(names,list) or len(names)>6 or
+            any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER,ODSIGN,HEALTH) for name in names) or len(set(names))!=len(names)):
         raise ValueError("unsupported stock host service selection")
     selected = CONTRACT in profile.get("vintf", {}).get("framework", [])
     if selected != (SUSPEND in names):
         raise ValueError("SystemSuspend requires both its host provider and VINTF contract")
-    from vintf_inputs import graphics_selection
+    from vintf_inputs import graphics_selection, HEALTH_CONTRACT
     device=profile.get("vintf",{}).get("device",[])
-    if (GRAPHICS in names and (HW_MANAGER not in names or not graphics_selection(device)) or
-            GRAPHICS not in names and device):raise ValueError("graphics services require their exact device inventory and hardware-service manager")
+    graphics=[name for name in device if name!=HEALTH_CONTRACT]
+    if (GRAPHICS in names and (HW_MANAGER not in names or not graphics_selection(graphics)) or
+            GRAPHICS not in names and graphics):raise ValueError("graphics services require their exact device inventory and hardware-service manager")
+    if ((HEALTH in names)!=(HEALTH_CONTRACT in device) or
+            HEALTH in names and HW_MANAGER not in names):
+        raise ValueError("Health requires its exact device contract and hardware-service manager")
     return names
 
 
 def imports(profile):
-    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC,GRAPHICS:GRAPHICS_RC,INSTALLER:INSTALLER_MANAGED_RC,ODSIGN:ODSIGN_MANAGED_RC}[name] for name in validate_selection(profile)]
+    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC,GRAPHICS:GRAPHICS_RC,INSTALLER:INSTALLER_MANAGED_RC,ODSIGN:ODSIGN_MANAGED_RC,HEALTH:HEALTH_MANAGED_RC}[name] for name in validate_selection(profile)]
+
+
+def build_health(stock_rc,binary,manifest):
+    from vintf_inputs import HEALTH_CONTRACT
+    if stock_rc.decode()!=HEALTH_TEXT:raise ValueError("changed stock Health service configuration")
+    root=ET.fromstring(manifest)
+    hals=root.findall("hal")
+    if (root.tag!="manifest" or root.get("type")!="device" or len(hals)!=1 or
+            hals[0].get("format")!="hidl" or hals[0].findtext("name")!="android.hardware.health" or
+            hals[0].findtext("transport")!="hwbinder" or
+            [x.text for x in hals[0].findall("fqname")]!=["@2.1::IHealth/default"]):
+        raise ValueError("changed stock Health device contract")
+    managed=("# Read-only native telemetry; host wake and suspend remain external.\n"+
+             HEALTH_TEXT.replace("    capabilities WAKE_ALARM BLOCK_SUSPEND\n", "")).encode()
+    digest=lambda data:hashlib.sha256(data).hexdigest()
+    proof={"source_rc":HEALTH_STOCK_RC,"source_rc_sha256":digest(stock_rc),
+           "binary_sha256":digest(binary),"managed_rc_sha256":digest(managed),
+           "source_manifest":HEALTH_MANIFEST,"source_manifest_sha256":digest(manifest),
+           "omitted_capabilities":["WAKE_ALARM","BLOCK_SUSPEND"],"host_suspend":False}
+    provider={HEALTH_CONTRACT:{"transport":"hwbinder","path":HEALTH_BINARY,"sha256":digest(binary),
+                              "source":HEALTH_MANIFEST,"source_sha256":digest(manifest)}}
+    return managed,proof,provider
 
 
 def build_odsign(stock_rc,binary):
@@ -100,6 +136,15 @@ def validate_staged(metadata):
                 metadata["files"].get(HW_MANAGED_RC)!=record.get("managed_rc_sha256") or
                 record.get("source_rc_sha256")!=record.get("managed_rc_sha256")):
             raise ValueError("changed hardware-service manager inputs")
+    if HEALTH in names:
+        record=proof[HEALTH]
+        if (metadata["files"].get(HEALTH_BINARY)!=record.get("binary_sha256") or
+                metadata["files"].get(HEALTH_MANAGED_RC)!=record.get("managed_rc_sha256") or
+                not record.get("implementation_sha256") or
+                metadata["files"].get(HEALTH_IMPL)!=record["implementation_sha256"] or
+                record.get("host_suspend") is not False or
+                record.get("omitted_capabilities")!=["WAKE_ALARM","BLOCK_SUSPEND"]):
+            raise ValueError("changed Health host provider inputs")
     if GRAPHICS in names:
         record=proof[GRAPHICS]
         if record.get("backend")!="cpu-gralloc0" or not record.get("files"):

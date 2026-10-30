@@ -143,10 +143,10 @@ def prepare(archive, runtime, stock, profile_file, output):
 
 
 def configure(output, stock, profile, contexts, metadata):
-    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,ODSIGN_MANAGED_RC,imports
+    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,ODSIGN_MANAGED_RC,HEALTH_MANAGED_RC,imports
     for name,record in list(metadata.get("host_service_inputs",{}).items()):
         if name not in profile.get("host_services",[]):
-            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC,"odsign":ODSIGN_MANAGED_RC}[name]
+            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC,"odsign":ODSIGN_MANAGED_RC, "health":HEALTH_MANAGED_RC}[name]
             path=output/relative
             expected=record["files"][relative] if name=="graphics_cpu" else record["managed_rc_sha256"]
             if sha256(path)!=expected:raise ValueError("changed manager host service output")
@@ -175,7 +175,7 @@ def configure(output, stock, profile, contexts, metadata):
         f'{name} = "{value}"\n' for name, value in sorted(profile["bootconfig"].items())))
     (output / "scarlet/boot/init.rc").write_text("# Explicit Scarlet device boot configuration\n" + "".join(
         "import " + path + "\n" for path in profile["init_imports"] + imports(profile)))
-    for name in ["storage", "apex", "linkerconfig", "data", "sys/devices", "sys/fs/selinux", "system_ext/apex", "product/apex", "vendor/apex"]:
+    for name in ["storage", "apex", "linkerconfig", "data", "sys/devices", "sys/class/power_supply", "sys/fs/selinux", "system_ext/apex", "product/apex", "vendor/apex"]:
         (output / name).mkdir(parents=True, exist_ok=True)
     if "resource_groups" in profile:
         (output / "etc").mkdir(exist_ok=True)
@@ -287,6 +287,23 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
             name="system/etc/selinux/plat_hwservice_contexts";target=temporary/"files"/name
             system.dump("/"+name,target);copied[name]=target
         device_providers={}
+        if "health" in metadata["profile"].get("host_services",[]):
+            from host_services import HEALTH_BINARY,HEALTH_IMPL,HEALTH_STOCK_RC,HEALTH_MANAGED_RC,HEALTH_MANIFEST,build_health
+            rc=temporary/"health-stock.rc";binary=temporary/"health-stock.bin";manifest=temporary/"health-stock.xml"
+            vendor.dump("/"+HEALTH_STOCK_RC.removeprefix("vendor/"),rc)
+            vendor.dump("/"+HEALTH_BINARY.removeprefix("vendor/"),binary)
+            vendor.dump("/"+HEALTH_MANIFEST.removeprefix("vendor/"),manifest)
+            managed,proof,providers=build_health(rc.read_bytes(),binary.read_bytes(),manifest.read_bytes())
+            implementation=temporary/"files"/HEALTH_IMPL
+            vendor.dump("/"+HEALTH_IMPL.removeprefix("vendor/"),implementation)
+            proof["implementation_sha256"]=sha256(implementation)
+            destination=inputs/HEALTH_MANAGED_RC
+            previous=metadata.get("host_service_inputs",{}).get("health",{}).get("managed_rc_sha256")
+            if HEALTH_MANAGED_RC in metadata["symlinks"] or destination.exists() and sha256(destination)!=previous:
+                raise ValueError("conflicting Health service manager output")
+            destination.parent.mkdir(parents=True,exist_ok=True);destination.write_bytes(managed)
+            metadata.setdefault("host_service_inputs",{})["health"]=proof
+            device_providers.update(providers);service_roots.extend([HEALTH_BINARY,HEALTH_IMPL])
         from host_services import (INSTALLER_BINARY,INSTALLER_STOCK_RC,INSTALLER_MANAGED_RC,build_installer,
                                    ODSIGN_BINARY,ODSIGN_STOCK_RC,ODSIGN_MANAGED_RC,build_odsign)
         for name,program,stock_rc,managed_rc,builder in [
@@ -306,14 +323,15 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
         if "graphics_cpu" in metadata["profile"].get("host_services",[]):
             if not graphics:raise ValueError("CPU graphics profile requires all three verified graphics builds")
             from graphics_boot import prepare as prepare_graphics
-            proof,device_providers,roots=prepare_graphics(inputs,metadata,system,vendor,graphics,temporary)
+            proof,graphics_providers,roots=prepare_graphics(inputs,metadata,system,vendor,graphics,temporary)
+            device_providers.update(graphics_providers)
             metadata.setdefault("host_service_inputs",{})["graphics_cpu"]=proof
             service_roots.extend(roots)
             # Extract stock runtime libraries before binding each declaration
             # to its actual built or stock provider bytes.
             for name in roots:
                 image,path=image_path(name);target=temporary/"files"/name;image.dump(path,target);copied[name]=target
-            for contract,provider in device_providers.items():
+            for contract,provider in graphics_providers.items():
                 path=provider["path"];provider["sha256"]=sha256(copied[path] if path in copied else inputs/path)
         elif graphics:raise ValueError("graphics builds require an explicit graphics host-service selection")
         if "vintf" in metadata["profile"]:

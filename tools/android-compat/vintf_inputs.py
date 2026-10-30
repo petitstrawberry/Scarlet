@@ -12,6 +12,8 @@ GRAPHICS_DEVICE = {
     "android.hardware.graphics.composer@2.1::IComposer/default": "hwbinder",
     "android.hardware.graphics.composer@2.4::IComposer/default": "hwbinder",
 }
+HEALTH_CONTRACT = "android.hardware.health@2.1::IHealth/default"
+DEVICE_PROVIDERS = {**GRAPHICS_DEVICE, HEALTH_CONTRACT: "hwbinder"}
 
 
 def graphics_selection(device):
@@ -28,8 +30,8 @@ def validate_selection(selection):
             len(set(names)) != len(names)):
         raise ValueError("invalid framework VINTF service selection")
     device=selection["device"]
-    if (not isinstance(device,list) or len(device)>len(GRAPHICS_DEVICE) or
-            any(not isinstance(name,str) or name not in GRAPHICS_DEVICE for name in device) or len(set(device))!=len(device)):
+    if (not isinstance(device,list) or len(device)>len(DEVICE_PROVIDERS) or
+            any(not isinstance(name,str) or name not in DEVICE_PROVIDERS for name in device) or len(set(device))!=len(device)):
         raise ValueError("device HAL declarations require a configured Scarlet provider")
     return selection
 
@@ -76,11 +78,11 @@ def build_manifests(selection, sources, device_providers=None):
     device = ET.Element("manifest", {"version": "5.0", "type": "device"})
     for contract in selection["device"]:
         package,fqname=contract.split("@",1)
-        if providers[contract].get("transport")!=GRAPHICS_DEVICE[contract]:raise ValueError("device provider transport mismatch")
+        if providers[contract].get("transport")!=DEVICE_PROVIDERS[contract]:raise ValueError("device provider transport mismatch")
         hal=ET.SubElement(device,"hal",{"format":"hidl"})
         ET.SubElement(hal,"name").text=package
-        attributes={"arch":"64"} if GRAPHICS_DEVICE[contract]=="passthrough" else {}
-        ET.SubElement(hal,"transport",attributes).text=GRAPHICS_DEVICE[contract]
+        attributes={"arch":"64"} if DEVICE_PROVIDERS[contract]=="passthrough" else {}
+        ET.SubElement(hal,"transport",attributes).text=DEVICE_PROVIDERS[contract]
         ET.SubElement(hal,"fqname").text="@"+fqname
     outputs = {}
     for name, root in [(FRAMEWORK, framework), (DEVICE, device)]:
@@ -104,7 +106,7 @@ def validate_staged(metadata):
     providers=proof.get("device_providers",{})
     if set(providers)!=set(selection["device"]):raise ValueError("device inventory lacks verified providers")
     for name,provider in providers.items():
-        if (provider.get("transport")!=GRAPHICS_DEVICE[name] or not provider.get("path") or
+        if (provider.get("transport")!=DEVICE_PROVIDERS[name] or not provider.get("path") or
                 metadata["files"].get(provider["path"])!=provider.get("sha256")):
             raise ValueError("device inventory provider changed")
     for name in set(metadata["files"]) | set(metadata.get("symlinks", {})):

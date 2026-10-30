@@ -5,9 +5,34 @@ from host_services import (BINARY, CONTRACT, MANAGED_RC, STOCK_TEXT, build_suspe
                            INSTALLER,INSTALLER_BINARY,INSTALLER_MANAGED_RC,build_installer,
                            HW_MANAGER,HW_BINARY,HW_MANAGED_RC,build_hwmanager,
                            imports, validate_selection, validate_staged)
+from host_services import HEALTH, HEALTH_BINARY, HEALTH_IMPL, HEALTH_MANAGED_RC, HEALTH_TEXT, build_health
+from vintf_inputs import HEALTH_CONTRACT
 
 
 class HostServicesTest(unittest.TestCase):
+    def test_health_requires_real_provider_and_preserves_host_power_boundary(self):
+        manifest=b'<manifest type="device"><hal format="hidl"><name>android.hardware.health</name><transport>hwbinder</transport><fqname>@2.1::IHealth/default</fqname></hal></manifest>'
+        managed,proof,providers=build_health(HEALTH_TEXT.encode(),b"stock health",manifest)
+        self.assertNotIn(b"capabilities",managed)
+        self.assertIn(b"file /dev/kmsg w",managed)
+        profile={"host_services":[HW_MANAGER,HEALTH],"vintf":{"framework":[],"device":[HEALTH_CONTRACT]}}
+        self.assertEqual(validate_selection(profile),[HW_MANAGER,HEALTH])
+        self.assertEqual(providers[HEALTH_CONTRACT]["path"],HEALTH_BINARY)
+        proof["implementation_sha256"]="stock implementation"
+        _,manager=build_hwmanager(b"service hwservicemanager /system/bin/hwservicemanager\n",b"manager")
+        metadata={"profile":profile,"host_service_inputs":{HEALTH:proof,HW_MANAGER:manager},
+                  "files":{HEALTH_BINARY:proof["binary_sha256"],HEALTH_MANAGED_RC:proof["managed_rc_sha256"],
+                           HEALTH_IMPL:proof["implementation_sha256"],
+                           HW_BINARY:manager["binary_sha256"],HW_MANAGED_RC:manager["managed_rc_sha256"]}}
+        validate_staged(metadata)
+        for name in [HEALTH_BINARY,HEALTH_MANAGED_RC,HEALTH_IMPL]:
+            bad=deepcopy(metadata);bad["files"][name]="changed"
+            with self.assertRaises(ValueError):validate_staged(bad)
+        bad=deepcopy(metadata);bad["profile"]["host_services"].remove(HW_MANAGER)
+        with self.assertRaises(ValueError):validate_selection(bad["profile"])
+        with self.assertRaises(ValueError):build_health(HEALTH_TEXT.replace("user system","user root").encode(),b"stock",manifest)
+        with self.assertRaises(ValueError):build_health(HEALTH_TEXT.encode(),b"stock",manifest.replace(b"@2.1",b"@2.0"))
+
     def test_installer_keeps_stock_process_and_rejects_changed_inputs(self):
         rc=b"\nservice installd /system/bin/installd\n    class main\n"
         managed,proof=build_installer(rc,b"stock installd")
