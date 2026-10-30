@@ -81,6 +81,11 @@ impl Credentials {
             group: self.groups.active,
         }
     }
+    pub fn permits_owner_change(&self,owner:ActiveIdentity,principal:Option<Principal>,group:Option<Group>)->bool {
+        self.permits(MANAGE_OWNERS) || (self.identity().principal==owner.principal
+            && principal.is_none_or(|next|next==owner.principal)
+            && group.is_none_or(|next|self.groups().contains(next) || self.supplementary().contains(&next)))
+    }
     pub fn permits(&self, authority: u32) -> bool {
         self.active & authority == authority
     }

@@ -114,6 +114,7 @@ struct OverlayInodeIds {
 
 struct OverlayInode {
     labels: Arc<crate::shield::file::Labels>,
+    owner: IrqRwSpinLock<Option<crate::shield::identity::ActiveIdentity>>,
     id: u64,
     /// Regular files involved in rename retain their backing inode instead of
     /// resolving their old pathname. All independently looked-up nodes share
@@ -134,6 +135,7 @@ impl OverlayInode {
         Arc::new(Self {
             id,
             labels: crate::shield::file::Labels::new(),
+            owner: IrqRwSpinLock::new(None),
             backing: IrqRwSpinLock::new(None),
         })
     }
@@ -201,6 +203,18 @@ impl Clone for OverlayNode {
 
 impl VfsNode for OverlayNode {
     fn shield_labels(&self)->Option<Arc<crate::shield::file::Labels>> {Some(self.inode.labels.clone())}
+    fn owner_identity(&self)->Option<crate::shield::identity::ActiveIdentity> {
+        Some(self.inode.owner.read().unwrap_or(crate::shield::identity::ActiveIdentity {
+            principal:crate::shield::identity::Principal(0),group:crate::shield::identity::Group(0),
+        }))
+    }
+    fn set_owner_identity(&self,principal:Option<crate::shield::identity::Principal>,group:Option<crate::shield::identity::Group>)->Result<(),FileSystemError> {
+        let task=crate::task::mytask().ok_or_else(||FileSystemError::new(FileSystemErrorKind::PermissionDenied,"No owner authority"))?;
+        if !task.credentials.read().permits(crate::shield::identity::MANAGE_OWNERS) {return Err(FileSystemError::new(FileSystemErrorKind::PermissionDenied,"No owner authority"));}
+        let mut slot=self.inode.owner.write();let mut owner=slot.unwrap_or(crate::shield::identity::ActiveIdentity {principal:crate::shield::identity::Principal(0),group:crate::shield::identity::Group(0)});
+        if let Some(principal)=principal {owner.principal=principal;}if let Some(group)=group {owner.group=group;}*slot=Some(owner);Ok(())
+    }
+
     fn id(&self) -> u64 {
         self.inode.id
     }

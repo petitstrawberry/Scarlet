@@ -356,6 +356,19 @@ pub struct Ext2Inode {
 }
 
 impl Ext2Inode {
+    /// Linux-format osd2 uid/gid high words occupy offsets four and six.
+    /// https://www.kernel.org/doc/html/latest/filesystems/ext4/inodes.html
+    pub fn native_owner(&self)->crate::shield::identity::ActiveIdentity {
+        crate::shield::identity::ActiveIdentity {
+            principal:crate::shield::identity::Principal(u32::from(u16::from_le(self.uid)) | (u32::from(u16::from_le_bytes(self.osd2[4..6].try_into().unwrap()))<<16)),
+            group:crate::shield::identity::Group(u32::from(u16::from_le(self.gid)) | (u32::from(u16::from_le_bytes(self.osd2[6..8].try_into().unwrap()))<<16)),
+        }
+    }
+    pub fn set_native_owner(&mut self,owner:crate::shield::identity::ActiveIdentity) {
+        self.uid=(owner.principal.0 as u16).to_le();self.gid=(owner.group.0 as u16).to_le();
+        self.osd2[4..6].copy_from_slice(&((owner.principal.0>>16) as u16).to_le_bytes());
+        self.osd2[6..8].copy_from_slice(&((owner.group.0>>16) as u16).to_le_bytes());
+    }
     pub fn empty() -> Self {
         Self {
             mode: 0,

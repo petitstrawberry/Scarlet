@@ -94,6 +94,15 @@ impl Ext2Node {
 }
 
 impl VfsNode for Ext2Node {
+    fn owner_identity(&self)->Option<crate::shield::identity::ActiveIdentity> {
+        let filesystem=self.filesystem()?.upgrade()?;let fs=filesystem.as_any().downcast_ref::<Ext2FileSystem>()?;
+        (u32::from_le(fs.superblock.creator_os)==0).then(||fs.read_inode(self.inode_number).ok().map(|inode|inode.native_owner())).flatten()
+    }
+    fn set_owner_identity(&self,principal:Option<crate::shield::identity::Principal>,group:Option<crate::shield::identity::Group>)->Result<(),FileSystemError> {
+        let filesystem=self.filesystem().and_then(|weak|weak.upgrade()).ok_or_else(||FileSystemError::new(FileSystemErrorKind::IoError,"Resource filesystem gone"))?;
+        filesystem.as_any().downcast_ref::<Ext2FileSystem>().ok_or_else(||FileSystemError::new(FileSystemErrorKind::NotSupported,"Ownership unavailable"))?.set_inode_owner(self.inode_number,principal,group)
+    }
+
     fn shield_labels(&self)->Option<Arc<crate::shield::file::Labels>> {
         let filesystem=self.filesystem()?.upgrade()?;
         Some(filesystem.as_any().downcast_ref::<Ext2FileSystem>()?.labels_for_inode(self.inode_number))

@@ -1596,6 +1596,16 @@ impl Ext2FileSystem {
     }
 
     /// Persist selected times without losing cached writes or a later fsync.
+    fn set_inode_owner(&self,inode_num:u32,principal:Option<crate::shield::identity::Principal>,group:Option<crate::shield::identity::Group>)->Result<(),FileSystemError> {
+        if u32::from_le(self.superblock.creator_os)!=0 {return Err(FileSystemError::new(FileSystemErrorKind::NotSupported,"Unknown ext2 ownership format"));}
+        let task=crate::task::mytask().ok_or_else(||FileSystemError::new(FileSystemErrorKind::PermissionDenied,"Owner authority required"))?;
+        let inode_lock=self.get_inode_lock(inode_num);let _guard=inode_lock.lock();let mut inode=self.read_inode(inode_num)?;
+        let mut owner=inode.native_owner();
+        if !task.credentials.read().permits_owner_change(owner,principal,group) {return Err(FileSystemError::new(FileSystemErrorKind::PermissionDenied,"Owner change denied"));}
+        if let Some(principal)=principal {owner.principal=principal;}if let Some(group)=group {owner.group=group;}
+        inode.set_native_owner(owner);if let Some(now)=current_timestamp() {inode.ctime=now.to_le();}
+        self.write_inode(inode_num,&inode)?;self.inode_cache.write().insert(inode_num,inode);Ok(())
+    }
     fn set_inode_times(
         &self,
         inode_num: u32,
@@ -5268,6 +5278,9 @@ impl FileSystemOperations for Ext2FileSystem {
             }
         }
 
+        if u32::from_le(self.superblock.creator_os)==0 {
+            if let Some(task)=crate::task::mytask() {new_inode.set_native_owner(task.credentials.read().identity());}
+        }
         // Handle device file information storage
         if let FileType::CharDevice(device_info) | FileType::BlockDevice(device_info) = &file_type {
             // Store device major/minor numbers in the first direct block pointer
