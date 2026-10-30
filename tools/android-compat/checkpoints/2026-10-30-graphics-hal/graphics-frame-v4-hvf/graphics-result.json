@@ -1,0 +1,15 @@
+{
+  "size": [
+    1280,
+    800
+  ],
+  "expected_rgb_counts": [
+    92016,
+    92016,
+    91880
+  ],
+  "frame_sha256": "69d5d853f2a4eb272ecbfc86a349742f00fdc2abb3caa860e5b704a979cca02c",
+  "compositor_reaped": true,
+  "result": "PASS",
+  "apk_execution": "not tested"
+}

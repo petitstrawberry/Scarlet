@@ -1,0 +1,123 @@
+{
+  "kind": "android-cpu-graphics-hal-v1",
+  "commands": [
+    [
+      "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-isystem",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/cpu-graphics-hal-v6/headers/hardware",
+      "-isystem",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/cpu-graphics-hal-v6/headers/system",
+      "-isystem",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/cpu-graphics-hal-v6/headers/cutils",
+      "-I",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/user/lib/sws-client-c/include",
+      "-shared",
+      "-fPIC",
+      "-Wl,-z,defs",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/graphics/gralloc.c",
+      "-ldl",
+      "-o",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/cpu-graphics-hal-v6/gralloc.scarlet.so"
+    ],
+    [
+      "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-isystem",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/cpu-graphics-hal-v6/headers/hardware",
+      "-isystem",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/cpu-graphics-hal-v6/headers/system",
+      "-isystem",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/cpu-graphics-hal-v6/headers/cutils",
+      "-I",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/user/lib/sws-client-c/include",
+      "-static",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/graphics/gralloc.c",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/graphics/gralloc-probe.c",
+      "-ldl",
+      "-o",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/cpu-graphics-hal-v6/gralloc-probe"
+    ],
+    [
+      "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-isystem",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/cpu-graphics-hal-v6/headers/hardware",
+      "-isystem",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/cpu-graphics-hal-v6/headers/system",
+      "-isystem",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/cpu-graphics-hal-v6/headers/cutils",
+      "-I",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/user/lib/sws-client-c/include",
+      "-static",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/binder-buffer-probe.c",
+      "-o",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/cpu-graphics-hal-v6/binder-buffer-probe"
+    ]
+  ],
+  "headers": {
+    "release": "android-13.0.0_r2",
+    "archives": {
+      "system": {
+        "repository": "platform/system/core",
+        "revision": "83366e7e7a1556ab6cff117673bb9f17b973de99",
+        "path": "libsystem/include",
+        "tree_sha256": "2bf3e0ae93962acf5a285534e987449a7959b3ec79b8aebe8d7e43cba259310c"
+      },
+      "cutils": {
+        "repository": "platform/system/core",
+        "revision": "83366e7e7a1556ab6cff117673bb9f17b973de99",
+        "path": "libcutils/include",
+        "tree_sha256": "eb23414150a4691df1237c0d128035a9e50071476afbc6567bfa616186828e22"
+      }
+    },
+    "files": {
+      "hardware/fb.h": {
+        "repository": "platform/hardware/libhardware",
+        "revision": "bbd07bd2e60752a665ebc9b0915241f3c1636516",
+        "path": "include/hardware/fb.h",
+        "sha256": "2b23a40596f20c85d59dda0bd68869be87019043f99f6360a0bcc2814353870f"
+      },
+      "hardware/gralloc.h": {
+        "repository": "platform/hardware/libhardware",
+        "revision": "bbd07bd2e60752a665ebc9b0915241f3c1636516",
+        "path": "include/hardware/gralloc.h",
+        "sha256": "bd4610235a828b30c8d850be07e51375744ba2f6133f16cd7e10d7fe618806e6"
+      },
+      "hardware/hardware.h": {
+        "repository": "platform/hardware/libhardware",
+        "revision": "bbd07bd2e60752a665ebc9b0915241f3c1636516",
+        "path": "include/hardware/hardware.h",
+        "sha256": "05cc2f0108d6c87e36384380559943d34acd104e3c2ade9aeba4415cfb23aee8"
+      }
+    }
+  },
+  "sources": {
+    "build-graphics-hal.py": "a222ae01a22e1ce33d75b543eedd67d2fff312314b87d1a5b18edd41eaca77c3",
+    "graphics/headers.json": "db3dca37b4f9ff06683ba6e1126c5f380b967b084d9fb6cbafa3473fbb329fd0",
+    "graphics/gralloc.c": "441cd46296f05c59e4be48d37a22de517279380526def422f9401e838e4154f7",
+    "graphics/gralloc-probe.c": "1a070e7037888339e6bd2e40f3ae5466aaddb7536bbda667cb06c7393a93be6e",
+    "binder-buffer-probe.c": "16e457ed8d5297f0a66aa23695e3dccef1b9551235852199e481215d57a0545f",
+    "binder-object-probe.c": "ff2b7bed29fea7570106fa48e314bf4bee6900eaaf4688f0dd55bb3c5e93b2b8"
+  },
+  "compiler": "Android (8490178, based on r450784d) clang version 14.0.6 (https://android.googlesource.com/toolchain/llvm-project 4c603efb0cca074e9238af8b4106c30add4418f6)\nTarget: aarch64-unknown-linux-android33\nThread model: posix\nInstalledDir: /Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin\n",
+  "needed": [
+    "libdl.so",
+    "libc.so"
+  ],
+  "files": {
+    "gralloc.scarlet.so": "d21d504ee778e5c945a47dd827310c40c785322d69e30493dc156b4203f9cb7c",
+    "gralloc-probe": "a28ef63168477959240fbc817418de81d00669f3858c8ec248c349a01306f197",
+    "binder-buffer-probe": "6d3dde6611d35f8385089cd8774a716c58cb917b9cc117fbfd8be4b7c36bb1f5"
+  },
+  "readiness": "not executed"
+}

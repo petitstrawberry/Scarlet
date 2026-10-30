@@ -1,0 +1,7 @@
+{
+  "native_sws": "/Users/petitstrawberry/Development/Rust/Scarlet/.cargo/target/aarch64-unknown-scarlet/release/sws",
+  "native_sws_sha256": "e9c939ab52155fdc17bc5f0441cef08c35e23209c0a98fe28cbdcc6c3cd2d2de",
+  "runner_sha256": "44f9883655e159033dc296e127716384c4dd03307e98957c37bda5b9cbda710f",
+  "native_supervisor_sha256": "cd6b5f43ac212e5e06068073b4fe98a9e7905bb4b928c16916d680b5d5387cc1",
+  "scope": "private HVF guest; CPU compositor and Android framebuffer HAL test pattern; no APK or SurfaceFlinger claim"
+}

@@ -1,0 +1,86 @@
+UEFI firmware (version edk2-stable202408-prebuilt.qemu.org built at 16:28:50 on Sep 12 2024)
+ArmTrngLib could not be correctly initialized.
+Error: Image at 000BFDB6000 start failed: 00000001
+Error: Image at 000BFD6D000 start failed: Not Found
+Error: Image at 000BFCBA000 start failed: Unsupported
+Error: Image at 000BFC3F000 start failed: Not Found
+Error: Image at 000BFB65000 start failed: Aborted
+Tpm2SubmitCommand - Tcg2 - Not Found
+Tpm2GetCapabilityPcrs fail!
+Tpm2SubmitCommand - Tcg2 - Not Found
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI Non-Block Boot Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,0000000A00000000)
+BdsDxe: starting Boot0001 "UEFI Non-Block Boot Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,0000000A00000000)
+ConvertPages: range BEA2E000 - BEA47FFF covers multiple entries
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+ConvertPages: Incompatible memory types, the pages to allocate have been allocated
+[01;01H[01;01H[01;01Hl[01;02Hi[01;03Hm[01;04Hi[01;05Hn[01;06He[01;07H:[01;08H [01;09HL[01;10Ho[01;11Ha[01;12Hd[01;13Hi[01;14Hn[01;15Hg[01;16H [01;17He[01;18Hx[01;19He[01;20Hc[01;21Hu[01;22Ht[01;23Ha[01;24Hb[01;25Hl[01;26He[01;27H [01;28H`[01;29Hb[01;30Ho[01;31Ho[01;32Ht[01;33H([01;34H)[01;35H:[01;36H/[01;37Hb[01;38Ho[01;39Ho[01;40Ht[01;41H/[01;42Hk[01;43He[01;44Hr[01;45Hn[01;46He[01;47Hl[01;48H`[01;49H.[01;50H.[01;51H.[01;52H[01;01H[02;01Hl[02;02Hi[02;03Hm[02;04Hi[02;05Hn[02;06He[02;07H:[02;08H [02;09HL[02;10Ho[02;11Ha[02;12Hd[02;13Hi[02;14Hn[02;15Hg[02;16H [02;17Hm[02;18Ho[02;19Hd[02;20Hu[02;21Hl[02;22He[02;23H [02;24H`[02;25Hb[02;26Ho[02;27Ho[02;28Ht[02;29H([02;30H)[02;31H:[02;32H/[02;33Hb[02;34Ho[02;35Ho[02;36Ht[02;37H/[02;38Hi[02;39Hn[02;40Hi[02;41Ht[02;42Hr[02;43Ha[02;44Hm[02;45Hf[02;46Hs[02;47H-[02;48Ha[02;49Ha[02;50Hr[02;51Hc[02;52Hh[02;53H6[02;54H4[02;55H.[02;56Hc[02;57Hp[02;58Hi[02;59Ho[02;60H`[02;61H.[02;62H.[02;63H.[02;64H[02;01H[03;01HSCARLET_ANDROID_MMAP_RANDOMIZED
+SCARLET_SHIELD_KERNEL_ADDRESSES_HIDDEN
+SCARLET_ANDROID_RESOURCE_ROOT
+SCARLET_ANDROID_FILE_POLICY create=578 relabel=1790
+SCARLET_ANDROID_BOOT_FILES labels=8 exec_rules=6
+SCARLET_ANDROID_BOOT_POLICY labels=354 property_grants=123 transitions=4
+SCARLET_SHIELD_INIT_POLICY configured
+=== Scarlet Window Server (SWS) ===
+Initializing compositor...
+[Compositor] Starting initialization...
+[Compositor] Scanout swap: unavailable
+[Compositor] Screen: 1280x800
+[Compositor] Output scale: 2.0
+[Compositor] Shell action bindings: 8
+SCARLET_ANDROID_SWS_STARTED pid=6
+SCARLET_ANDROID_INIT_OWNS_BOOTSTRAP
+
+SCARLET_ANDROID_PROGRAM_START
+[Compositor] IME toggle bindings: 1
+[Compositor] Preferred input method: automatic
+[Compositor] Framebuffer: bpp=32 line_length=5120 smem_len=4096000
+[Compositor] Selected backend: Cpu
+[IpcServer] Initializing at /tmp/sws.sock
+[IpcServer] Creating socket at /tmp/sws.sock
+[IpcServer] Socket created (handle 6)
+[IpcServer] Socket bound to /tmp/sws.sock
+[IpcServer] Socket listening (handle 6)
+[SwsRemote] Listening at /tmp/sws-remote.sock
+[InputManager] Starting logical-seat input readers...
+[InputManager] Logical-seat input readers started
+[Compositor] Failed to load cursor theme /share/cursors/default: Failed to open cursor theme manifest; using built-in cursor
+linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+WARNING: linker: Warning: failed to find generated linker configuration from "/linkerconfig/ld.config.txt"
+[Compositor] CPU composition forced by SWS_BACKEND
+[Compositor] Input environment: generation=1 tablet=false lid_closed=false windowing=Freeform tablet_override=false windowing_override=false capabilities=0x0
+[IpcServer] Accept thread started
+[Compositor] Initializing display...
+[Compositor] No debug windows created (clean desktop startup)
+[Compositor] Display initialized; first present deferred
+Registering with sbus...
+Failed to connect to sbus: ConnectionFailed
+Continuing without sbus registration
+Compositor ready. Starting main loop...
+[AcceptThread] Starting with socket handle 6
+[ClientThread 0] Creating SHM for window 100 (640x480 = 1228800 bytes) [app=dev.scarlet.android, name=Android]
+[ClientThread 0] SHM mapped at 0xed6f90000
+[ClientThread 0] SHM zero-initialized
+[ClientThread 0] SHM first 16 bytes: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+SCARLET_ANDROID_FRAMEBUFFER_READY width=640 height=480
+SCARLET_ANDROID_FRAMEBUFFER_PRESENTED
+[sws] Failed to report ready to stemd after retries
+[Compositor] Starting main loop (multithreaded)
+[Compositor] Client 0 creating window #100 (640x480, type=0)
+[Compositor] Default placement for window #100: (32, 32)
+[Compositor] Window #100 uses SHM at 0xSome(ed6f90000)
+[WindowManager] Creating window #100 from IPC event with SHM at 0xSome(ed6f90000)
+[Compositor] Window #100 with SHM created
+[WindowManager] Window #100 type set to Normal, resizable=true, raise_on_focus=true
+[Compositor] Set window #100 type to Normal
+[WindowManager] Window #100 resizable set to false
+SCARLET_ANDROID_FRAMEBUFFER_OK
+[ClientThread 0] DestroyWindow request for window 100
+[Compositor] Client 0 destroying window #100
+[Compositor] Sent WINDOW_DESTROYED for window #100 to client 0
+[Compositor] Focused window destroyed, resetting last_focused_window_id (was=100)
+[Compositor] Active app window destroyed, resetting active_app_id (was=dev.scarlet.android)
+SCARLET_ANDROID_PROGRAM_EXIT 0
+SCARLET_ANDROID_SWS_STOPPED pid=6 waited=6 status=137 stop_result=0
+SCARLET_ANDROID_PROGRAM_DONE

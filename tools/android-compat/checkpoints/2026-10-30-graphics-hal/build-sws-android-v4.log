@@ -1,0 +1,56 @@
+warning: Git tree '/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet' is dirty
+   Compiling scarlet-abi v1.0.0 (/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/user/lib/scarlet-abi)
+   Compiling sws-protocol v1.0.0 (/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/user/lib/sws-protocol)
+   Compiling scarlet-sys v1.0.0 (/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/user/lib/scarlet-sys)
+   Compiling scarlet-os v1.0.0 (/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/user/lib/scarlet-os)
+warning: unexpected `cfg` condition value: `scarlet`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/user/lib/scarlet-os/src/ipc.rs:178:11
+    |
+178 | #[cfg(all(target_os = "scarlet", target_arch = "riscv64"))]
+    |           ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `helenos`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `motor`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `qurt`, `redox`, `rtems`, `solaris`, and `solid_asp3` and 14 more
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition value: `scarlet`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/user/lib/scarlet-os/src/ipc.rs:192:11
+    |
+192 | #[cfg(all(target_os = "scarlet", target_arch = "aarch64"))]
+    |           ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `helenos`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `motor`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `qurt`, `redox`, `rtems`, `solaris`, and `solid_asp3` and 14 more
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `scarlet`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/user/lib/scarlet-os/src/ipc.rs:205:5
+    |
+205 |     target_os = "scarlet",
+    |     ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `helenos`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `motor`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `qurt`, `redox`, `rtems`, `solaris`, and `solid_asp3` and 14 more
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `scarlet`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/user/lib/scarlet-os/src/ipc.rs:213:5
+    |
+213 |     target_os = "scarlet",
+    |     ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `helenos`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `motor`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `qurt`, `redox`, `rtems`, `solaris`, and `solid_asp3` and 14 more
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `scarlet`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/user/lib/scarlet-os/src/ipc.rs:221:5
+    |
+221 |     target_os = "scarlet",
+    |     ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `target_os` are: `aix`, `amdhsa`, `android`, `cuda`, `cygwin`, `dragonfly`, `emscripten`, `espidf`, `freebsd`, `fuchsia`, `haiku`, `helenos`, `hermit`, `horizon`, `hurd`, `illumos`, `ios`, `l4re`, `linux`, `lynxos178`, `macos`, `managarm`, `motor`, `netbsd`, `none`, `nto`, `nuttx`, `openbsd`, `psp`, `psx`, `qurt`, `redox`, `rtems`, `solaris`, and `solid_asp3` and 14 more
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+   Compiling sws-client v1.0.0 (/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/user/lib/sws-client)
+warning: `scarlet-os` (lib) generated 5 warnings
+   Compiling sws-client-c v1.0.0 (/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/user/lib/sws-client-c)
+    Finished `release` profile [optimized] target(s) in 3.41s
+Built Android SWS client and SDK transport probe; no display connection tested
