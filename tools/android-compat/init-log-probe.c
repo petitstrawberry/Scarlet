@@ -1,4 +1,4 @@
-/* Redirect userspace log writes only; raw kernel log reads remain constrained. */
+/* Observe userspace logs and EGL setup; raw kernel log reads remain constrained. */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <android/log.h>
@@ -102,4 +102,37 @@ int execv(const char *path,char *const argv[]) {
 void android_set_abort_message(const char *message) {
  report("SCARLET_INIT_ABORT_MESSAGE %s\n",message?message:"");
  void (*real)(const char*)=dlsym(RTLD_NEXT,"android_set_abort_message");real(message);
+}
+
+/* Observe real EGL setup and namespace identities without changing results. */
+#include <EGL/egl.h>
+#include <stdatomic.h>
+static atomic_uint graphics_current_calls;
+#include <link.h>
+static int graphics_library(struct dl_phdr_info *info,size_t size,void *data) {
+ (void)size;(void)data;
+ if(strstr(info->dlpi_name,"angle.so")) {
+  struct stat path_metadata={0},fd_metadata={0};int fd=open(info->dlpi_name,O_RDONLY|O_CLOEXEC);
+  int fd_result=fd<0?-1:fstat(fd,&fd_metadata);if(fd>=0)close(fd);
+  int path_result=stat(info->dlpi_name,&path_metadata);
+  report("SCARLET_INIT_EGL_LIBRARY base=%p name=%s stat=%d:%llu:%llu fstat=%d:%llu:%llu\n",(void*)info->dlpi_addr,info->dlpi_name,
+         path_result,(unsigned long long)path_metadata.st_dev,(unsigned long long)path_metadata.st_ino,
+         fd_result,(unsigned long long)fd_metadata.st_dev,(unsigned long long)fd_metadata.st_ino);
+ }
+ return 0;
+}
+EGLBoolean eglInitialize(EGLDisplay display,EGLint *major,EGLint *minor) {
+ EGLBoolean (*real)(EGLDisplay,EGLint*,EGLint*)=dlsym(RTLD_NEXT,"eglInitialize");
+ if(!real){report("SCARLET_INIT_EGL_MISSING eglInitialize\n");return EGL_FALSE;}
+ EGLBoolean result=real(display,major,minor);int saved=errno;
+ report("SCARLET_INIT_EGL_INITIALIZE display=%p result=%u\n",display,result);errno=saved;return result;
+}
+EGLBoolean eglMakeCurrent(EGLDisplay display,EGLSurface draw,EGLSurface read,EGLContext context) {
+ EGLBoolean (*real)(EGLDisplay,EGLSurface,EGLSurface,EGLContext)=dlsym(RTLD_NEXT,"eglMakeCurrent");
+ if(!real){report("SCARLET_INIT_EGL_MISSING eglMakeCurrent\n");return EGL_FALSE;}
+ int saved=errno;unsigned call=atomic_fetch_add(&graphics_current_calls,1);
+ if(call<8)report("SCARLET_INIT_EGL_MAKE_CURRENT display=%p draw=%p read=%p context=%p tid=%d\n",display,draw,read,context,gettid());
+ if(call==0)dl_iterate_phdr(graphics_library,NULL);errno=saved;
+ EGLBoolean result=real(display,draw,read,context);saved=errno;
+ if(call<8)report("SCARLET_INIT_EGL_CURRENT_RESULT result=%u\n",result);errno=saved;return result;
 }
