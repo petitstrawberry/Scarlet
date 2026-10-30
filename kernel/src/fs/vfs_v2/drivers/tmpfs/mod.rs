@@ -1402,14 +1402,11 @@ impl TmpFileObject {
             match device_guard_ref.device_type() {
                 DeviceType::Char => {
                     if let Some(char_device) = device_guard_ref.as_char_device() {
-                        let mut bytes_written = 0;
-                        for &byte in buffer {
-                            match char_device.write_byte(byte) {
-                                Ok(_) => bytes_written += 1,
-                                Err(_) => break,
-                            }
-                        }
-                        return Ok(bytes_written);
+                        // Preserve the device's bulk-write contract, including
+                        // atomicity and failures. Returning Ok(0) on a rejected
+                        // nonempty write makes userspace write-all loops spin.
+                        return char_device.write(buffer).map_err(|error|
+                            FileSystemError::new(FileSystemErrorKind::IoError,error));
                     } else {
                         return Err(FileSystemError {
                             kind: FileSystemErrorKind::NotSupported,

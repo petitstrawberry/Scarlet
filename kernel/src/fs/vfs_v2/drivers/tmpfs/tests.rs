@@ -18,6 +18,23 @@ mod tests {
     }
 
     #[test_case]
+    fn test_character_device_write_failure_is_not_zero_byte_success() {
+        use crate::fs::vfs_v2::core::FileSystemOperations;
+        use crate::device::{DeviceType,manager::DeviceManager};
+        use alloc::sync::Arc;
+        let manager=DeviceManager::get_manager();
+        let id=manager.register_device_with_name("tmpfs-rejected-write-test".into(),Arc::new(crate::random::RandomCharDevice::new()));
+        let fs=TmpFS::new(0);let node=fs.create(&fs.root_node(),&"random".into(),
+            FileType::CharDevice(crate::fs::DeviceFileInfo {device_id:id,device_type:DeviceType::Char}),0o666).unwrap();
+        let file=fs.open(&node,2).unwrap();
+        assert!(matches!(file.write(b"uncredited seed"),Err(StreamError::FileSystemError(error)) if error.kind==FileSystemErrorKind::IoError));
+        // A rejected write leaves the read side usable and doesn't pretend to
+        // have accepted or credited caller-controlled entropy.
+        assert_eq!(file.read(&mut [0u8;32]).unwrap(),32);
+        drop(file);assert!(manager.unregister_device(id).is_some());
+    }
+
+    #[test_case]
     fn test_xattrs_are_inode_owned_and_atomic() {
         use crate::fs::vfs_v2::{
             core::FileSystemOperations,
