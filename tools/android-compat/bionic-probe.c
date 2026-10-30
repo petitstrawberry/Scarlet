@@ -45,6 +45,8 @@ static int fail(const char *case_name, const char *operation, int error) {
 }
 
 extern int information_case(const char *program);
+extern int realtime_case(const char *program);
+extern int realtime_exec_case(const char *program, const char *mode);
 extern int information_exec_case(void);
 extern int mount_namespace_case(void);
 extern int mount_propagation_case(void);
@@ -510,6 +512,7 @@ static int binder_absent_case(void) {
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc == 2 && (!strcmp(argv[1], "realtime-ambient") || !strcmp(argv[1], "realtime-stripped"))) return realtime_exec_case(argv[0], argv[1]);
     if (argc == 3 && !strcmp(argv[1], "scope-orphan-exec")) return process_scope_exec_case(argv[2]);
     if (argc == 2 && !strcmp(argv[1], "information-exec")) return information_exec_case();
     if (argc == 2 && !strcmp(argv[1], "seccomp-exec")) return seccomp_exec_case();
@@ -526,6 +529,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "mremap")) rc = mremap_case();
     else if (!strcmp(argv[1], "xattr")) rc = xattr_case();
     else if (!strcmp(argv[1], "binder")) rc = binder_case();
+    else if (!strcmp(argv[1], "realtime")) rc = realtime_case(argv[0]);
     else if (!strcmp(argv[1], "exec")) rc = exec_case(argv[0]);
     else if (!strcmp(argv[1], "exec-child")) rc = exec_child_case();
     else if (!strcmp(argv[1], "binder-absent")) rc = binder_absent_case();

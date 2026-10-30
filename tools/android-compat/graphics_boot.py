@@ -58,8 +58,8 @@ def prepare(inputs,metadata,system,vendor,builds,temporary):
         source=temporary/(name+".rc");image.dump(path,source)
         text=source.read_text()
         if text.count("    capabilities SYS_NICE\n")!=1:raise ValueError("changed graphics service capability request")
-        rc_sources[name]={"sha256":sha256(source),"omitted_capabilities":["SYS_NICE"]}
-        rc_sources[name]["managed"]=text.replace("    capabilities SYS_NICE\n","")
+        rc_sources[name]={"sha256":sha256(source),"omitted_capabilities":[]}
+        rc_sources[name]["managed"]=text
     allocator=("service vendor.graphics-allocator-2-0 /"+ALLOCATOR+"\n    class hal\n    user system\n"
                "    group graphics\n    task_profiles ServiceCapacityLow\n")
     composer=("service vendor.graphics-composer-2-1 /"+COMPOSER+"\n    class hal animation\n    user system\n"
