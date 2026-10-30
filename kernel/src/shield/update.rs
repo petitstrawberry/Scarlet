@@ -231,7 +231,7 @@ mod tests {
                 ..Default::default()
             },
             PolicyUpdate {
-                labels: (4..516)
+                labels: (4..4 + super::MAX_LABELS as u32)
                     .map(|id| (id, alloc::format!("label-{id}")))
                     .collect(),
                 ..Default::default()

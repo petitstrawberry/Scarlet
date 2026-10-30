@@ -45,7 +45,9 @@ pub fn policy(android: &VfsView) -> Result<Policy, &'static str> {
             ["file-relabel",_,_,_,_] => relabel_rules.push(FileRelabel {source:number(1)?,old:number(2)?,target:number(3)?,kind:number(4)?}),
             _ => return Err("unknown boot policy record"),
         }
-        if labels.len() > 512 || rules.len() > 4096 || transitions.len() > 4096 || exec_transitions.len() > 4096 || create_rules.len()>4096 || relabel_rules.len()>4096 || files.len() > 4096 { return Err("boot policy record bound"); }
+        // Keep in sync with the native Shield bounds; Android 13's stock
+        // service inventory needs more exact labels than the original 512.
+        if labels.len() > 1024 || rules.len() > 4096 || transitions.len() > 4096 || exec_transitions.len() > 4096 || create_rules.len()>4096 || relabel_rules.len()>4096 || files.len() > 4096 { return Err("boot policy record bound"); }
     }
     if !labels.contains(&(1, "u:r:init:s0")) { return Err("boot init subject missing"); }
     let policy = Policy::create_with_exec_transitions(&labels, &rules, &transitions, &exec_transitions).map_err(|_| "boot Shield policy")?;
