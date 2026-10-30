@@ -772,7 +772,9 @@ impl VirtioGpuControl {
 
     fn gpu_backend_info(&self) -> GpuBackendInfo {
         let negotiated_features = *self.negotiated_features.read();
-        let mut opaque_info = [0u8; 12];
+        // Preserve the original 12-byte prefix. The optional final word is
+        // the host's VirGL v2 max_anisotropy (IEEE f32 bits), zero if unknown.
+        let mut opaque_info = [0u8; 16];
         opaque_info[..8].copy_from_slice(&negotiated_features.to_le_bytes());
         let acceleration_usable = self.acceleration_usable();
         let dialect_count = if acceleration_usable {
@@ -780,7 +782,11 @@ impl VirtioGpuControl {
         } else {
             0
         };
-        opaque_info[8..].copy_from_slice(&dialect_count.to_le_bytes());
+        opaque_info[8..12].copy_from_slice(&dialect_count.to_le_bytes());
+        if acceleration_usable {
+            opaque_info[12..16]
+                .copy_from_slice(&self.virgl_anisotropy_bits(dialect_count).to_le_bytes());
+        }
 
         let state = if *self.transport_ready.read() {
             GpuDeviceState::Ready
@@ -815,6 +821,32 @@ impl VirtioGpuControl {
             b"virtio-gpu",
             &opaque_info,
         )
+    }
+
+    fn virgl_anisotropy_bits(&self, count: u32) -> u32 {
+        // Stable wire offset in virgl_caps_v2, not a native Rust/C layout.
+        // Only transport opaque host metadata; filtering policy stays in userspace.
+        const END: usize = 764;
+        for index in 0..count.min(32) {
+            let Ok(info) = self.get_backend_dialect_info(index) else {
+                continue;
+            };
+            if info.id != 2 || info.max_size < END as u32 {
+                continue;
+            }
+            let mut caps = [0u8; END];
+            if self
+                .read_backend_dialect(info.id, info.max_version, &mut caps)
+                .is_ok()
+            {
+                let bits = u32::from_le_bytes(caps[760..END].try_into().unwrap());
+                // Positive, finite f32; compare bits without kernel FP operations.
+                if (0x3f80_0000..0x7f80_0000).contains(&bits) {
+                    return bits;
+                }
+            }
+        }
+        0
     }
 
     fn get_backend_dialect_info(
