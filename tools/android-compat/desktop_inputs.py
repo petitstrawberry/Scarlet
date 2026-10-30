@@ -2,18 +2,20 @@
 from art_inputs import sha256
 
 PACKAGES = {
-    "system": ["system/priv-app/SettingsProvider", "system/priv-app/PackageInstaller",
+    "system": ["system/app/ExtShared", "system/priv-app/SettingsProvider", "system/priv-app/PackageInstaller",
                "system/priv-app/Shell", "system/priv-app/InputDevices"],
     "system_ext": ["priv-app/Launcher3QuickStep", "priv-app/SystemUI", "priv-app/Provision", "priv-app/SdkSetup"],
     "product": ["app/LatinIME"],
 }
 CONFIGURATION = {
-    "system": ["system/etc/permissions/platform.xml", "system/etc/permissions/privapp-permissions-platform.xml",
+    "system": ["system/etc/selinux/plat_mac_permissions.xml",
+               "system/etc/permissions/platform.xml", "system/etc/permissions/privapp-permissions-platform.xml",
                "system/etc/sysconfig/framework-sysconfig.xml", "system/etc/sysconfig/preinstalled-packages-platform.xml"],
     "system_ext": ["etc/permissions/" + name + ".xml" for name in
                    ["com.android.launcher3", "com.android.systemui", "com.android.provision", "com.android.sdksetup",
                     "androidx.window.extensions", "androidx.window.sidecar"]] +
                   ["framework/androidx.window.extensions.jar", "framework/androidx.window.sidecar.jar"],
+    "vendor": ["etc/selinux/vendor_mac_permissions.xml"],
 }
 
 

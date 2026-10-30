@@ -255,7 +255,7 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
         if metadata["profile"].get("package_set"):
             from desktop_inputs import prepare as prepare_packages
             package_files,proof=prepare_packages(metadata["profile"],
-                {"system":system,"system_ext":Ext4(temporary/"system_ext.ext4"),"product":Ext4(temporary/"product.ext4")},temporary,entries)
+                {"system":system,"vendor":vendor,"system_ext":Ext4(temporary/"system_ext.ext4"),"product":Ext4(temporary/"product.ext4")},temporary,entries)
             copied.update(package_files);metadata["desktop_inputs"]=proof
         def image_path(name):
             return (vendor,"/"+name.removeprefix("vendor/")) if name.startswith("vendor/") else (system,"/"+name)
