@@ -34,7 +34,8 @@ static void drain_logs(int fd) {
  for(int count=0;count<128;count++) {unsigned char message[8192];ssize_t n=recv(fd,message,sizeof(message),MSG_DONTWAIT);
   if(n<0)break;
   printf("SCARLET_INIT_LOGD bytes=%zd ",n);
-  for(ssize_t i=0;i<n;i++)putchar(message[i]>=32 && message[i]<127?message[i]:'|');
+  for(ssize_t i=0;i<n;i++)if(message[i]<32 || message[i]>=127)message[i]='|';
+  fwrite(message,1,(size_t)n,stdout);
   putchar('\n');
  }
 }
