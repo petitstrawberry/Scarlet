@@ -342,7 +342,8 @@ mod tests {
         );
         assert!(InputDeviceKind::try_from(-1).is_err());
         assert_eq!(InputDeviceKind::try_from(7), Ok(InputDeviceKind::Gamepad));
-        assert!(InputDeviceKind::try_from(8).is_err());
+        assert_eq!(InputDeviceKind::try_from(8), Ok(InputDeviceKind::Buttons));
+        assert!(InputDeviceKind::try_from(9).is_err());
     }
 
     #[test]
