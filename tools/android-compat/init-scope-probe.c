@@ -9,6 +9,9 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/stat.h>
 struct task_info {
  unsigned long pid,ppid;unsigned char state,type,cpu,reserved;int exit_status;unsigned long tgid;
  char name[64];unsigned long long cpu_ns;unsigned util,min_util,capacity;unsigned char preference,padding[3];
@@ -20,6 +23,20 @@ static void snapshot(void) {
  for(long i=0;i<count && i<128;i++)if(info[i].type==1)
   printf("SCARLET_INIT_TASK pid=%lu ppid=%lu tgid=%lu state=%u exit=%d cpu_ns=%llu name=%.64s\n",info[i].pid,info[i].ppid,info[i].tgid,info[i].state,info[i].exit_status,info[i].cpu_ns,info[i].name);
 }
+static int log_socket(void) {
+ int fd=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0);if(fd<0)return -1;
+ struct sockaddr_un address={.sun_family=AF_UNIX};strcpy(address.sun_path,"/dev/socket/logdw");
+ if(bind(fd,(struct sockaddr*)&address,sizeof(address))){close(fd);return -1;}return fd;
+}
+static void drain_logs(int fd) {
+ if(fd<0)return;
+ for(int count=0;count<128;count++) {unsigned char message[8192];ssize_t n=recv(fd,message,sizeof(message),MSG_DONTWAIT);
+  if(n<0)break;
+  printf("SCARLET_INIT_LOGD bytes=%zd ",n);
+  for(ssize_t i=0;i<n;i++)putchar(message[i]>=32 && message[i]<127?message[i]:'|');
+  putchar('\n');
+ }
+}
 int main(int argc,char **argv) {
  setvbuf(stdout,NULL,_IONBF,0);
  if(argc==2 && !strcmp(argv[1],"inside")) {
@@ -30,8 +47,10 @@ int main(int argc,char **argv) {
   execv(args[0],args);perror("stock init exec");return 4;
  }
  long scope=syscall(0x53430000L+1320);if(scope<0)return 11;
+ int logfd=log_socket();if(logfd<0)perror("diagnostic logdw bind");
  pid_t child=fork();if(child<0)return 1;
  if(child==0) {
+  if(logfd>=0)close(logfd);
   // Native CreateNamespace before any seccomp installation. Exec rebuilds the Android ABI state.
   if(syscall(0x5343005c,3,"android-init-diagnostic")!=0){perror("namespace");_exit(2);}
   if(syscall(0x53430000L+1321,scope) || syscall(0x53430000L+1322,scope,0) || syscall(0x53430000L+102,scope))return 12;
@@ -39,6 +58,7 @@ int main(int argc,char **argv) {
  }
  printf("SCARLET_INIT_NAMESPACE_OUTER child=%d\n",child);
  for(int tick=0;tick<200;tick++) {
+  drain_logs(logfd);
   int status;pid_t got=waitpid(child,&status,WNOHANG);
   if(got==child){
    printf("SCARLET_INIT_NAMESPACE_REAP %d %d\n",got,status);
