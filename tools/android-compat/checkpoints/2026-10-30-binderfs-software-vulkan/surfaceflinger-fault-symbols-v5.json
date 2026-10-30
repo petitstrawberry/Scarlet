@@ -1,0 +1,97 @@
+[
+  {
+    "return": "0x44a8f33851f8",
+    "file": ".build/android-services/flattened-boot-inputs-v49/system/apex/com.android.runtime/lib64/bionic/libc.so",
+    "file_offset": "0x4a1f8"
+  },
+  {
+    "return": "0x44a8f315aa7c",
+    "file": ".build/android-services/flattened-boot-inputs-v49/system/lib64/libEGL.so",
+    "file_offset": "0x17a7c"
+  },
+  {
+    "return": "0x44a8f3159664",
+    "file": ".build/android-services/flattened-boot-inputs-v49/system/lib64/libEGL.so",
+    "file_offset": "0x16664"
+  },
+  {
+    "return": "0x44a8f3162348",
+    "file": ".build/android-services/flattened-boot-inputs-v49/system/lib64/libEGL.so",
+    "file_offset": "0x1f348"
+  },
+  {
+    "return": "0x44a8f315f2ac",
+    "file": ".build/android-services/flattened-boot-inputs-v49/system/lib64/libEGL.so",
+    "file_offset": "0x1c2ac"
+  },
+  {
+    "return": "0x44a8f33851f8",
+    "file": ".build/android-services/flattened-boot-inputs-v49/system/lib64/bootstrap/libc.so",
+    "file_offset": "0x4a1f8"
+  },
+  {
+    "return": "0x4056a2f8",
+    "file": ".build/android-services/flattened-boot-inputs-v49/system/bin/surfaceflinger",
+    "file_offset": "0x56a2f8"
+  },
+  {
+    "return": "0x40569d70",
+    "file": ".build/android-services/flattened-boot-inputs-v49/system/bin/surfaceflinger",
+    "file_offset": "0x569d70"
+  },
+  {
+    "return": "0x401a1cf0",
+    "file": ".build/android-services/flattened-boot-inputs-v49/system/bin/surfaceflinger",
+    "file_offset": "0x1a1cf0"
+  },
+  {
+    "return": "0x401d2674",
+    "file": ".build/android-services/flattened-boot-inputs-v49/system/bin/surfaceflinger",
+    "file_offset": "0x1d2674"
+  },
+  {
+    "return": "0x40143054",
+    "file": ".build/android-services/flattened-boot-inputs-v49/system/bin/surfaceflinger",
+    "file_offset": "0x143054"
+  },
+  {
+    "return": "0x44ab8d938ec8",
+    "file": ".build/android-services/flattened-boot-inputs-v49/vendor/lib64/egl/libGLESv2_angle.so",
+    "file_offset": "0x526ec8"
+  },
+  {
+    "return": "0x44ab8da077b0",
+    "file": ".build/android-services/flattened-boot-inputs-v49/vendor/lib64/egl/libGLESv2_angle.so",
+    "file_offset": "0x5f57b0"
+  },
+  {
+    "return": "0x44ab8d9d6cbc",
+    "file": ".build/android-services/flattened-boot-inputs-v49/vendor/lib64/egl/libGLESv2_angle.so",
+    "file_offset": "0x5c4cbc"
+  },
+  {
+    "return": "0x44a8f33851f8",
+    "file": "/Users/petitstrawberry/Development/Rust/Scarlet/.build/android-art-local/runtime/apex/com.android.runtime/lib64/bionic/libc.so",
+    "file_offset": "0x4a1f8"
+  },
+  {
+    "return": "0x44a8f315aa7c",
+    "file": "/Users/petitstrawberry/Development/Rust/Scarlet/.build/android-art-local/runtime/system/lib64/libEGL.so",
+    "file_offset": "0x17a7c"
+  },
+  {
+    "return": "0x44a8f3159664",
+    "file": "/Users/petitstrawberry/Development/Rust/Scarlet/.build/android-art-local/runtime/system/lib64/libEGL.so",
+    "file_offset": "0x16664"
+  },
+  {
+    "return": "0x44a8f3162348",
+    "file": "/Users/petitstrawberry/Development/Rust/Scarlet/.build/android-art-local/runtime/system/lib64/libEGL.so",
+    "file_offset": "0x1f348"
+  },
+  {
+    "return": "0x44a8f315f2ac",
+    "file": "/Users/petitstrawberry/Development/Rust/Scarlet/.build/android-art-local/runtime/system/lib64/libEGL.so",
+    "file_offset": "0x1c2ac"
+  }
+]

@@ -1,0 +1,72 @@
+diff --git a/kernel/src/abi/linux/aarch64/signal.rs b/kernel/src/abi/linux/aarch64/signal.rs
+index 94431d35b..11cea1245 100644
+--- a/kernel/src/abi/linux/aarch64/signal.rs
++++ b/kernel/src/abi/linux/aarch64/signal.rs
+@@ -260,6 +260,7 @@ pub fn sys_rt_sigreturn(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) ->
+         }
+         Err(error) => {
+             crate::println!("[linux] sigreturn failed: {}", error);
++            crate::arch::aarch64::trap::exception::probe_user_fault(alloc::format!("SCARLET_USER_SIGNAL_RETURN pc={:#x} error={}",trapframe.elr,error));
+             task.mark_signal_termination(11);
+             task.request_deferred_exit_group(139);
+             usize::MAX
+@@ -283,7 +284,8 @@ pub fn deliver_pending_handler(abi: &LinuxAbi, frame: &mut Trapframe, result: us
+     };
+     if let Some((signal, handler)) = pending {
+         if let Some(task) = mytask() {
+-            if setup_signal_handler(abi, &task, frame, handler, signal).is_err() {
++            if let Err(error)=setup_signal_handler(abi, &task, frame, handler, signal) {
++                crate::arch::aarch64::trap::exception::probe_user_fault(alloc::format!("SCARLET_USER_SIGNAL_SETUP pc={:#x} signal={:?} error={}",frame.elr,signal,error));
+                 task.mark_signal_termination(11);
+                 task.request_deferred_exit_group(139);
+             }
+diff --git a/kernel/src/arch/aarch64/trap/exception.rs b/kernel/src/arch/aarch64/trap/exception.rs
+index b87e57384..decab228a 100644
+--- a/kernel/src/arch/aarch64/trap/exception.rs
++++ b/kernel/src/arch/aarch64/trap/exception.rs
+@@ -504,6 +504,33 @@ fn terminate_current_user_exception(
+ ) {
+     print_trap_info(trapframe, esr);
+     if let Some(task) = current_task(get_cpu().get_cpuid()) {
++        probe_user_fault(alloc::format!("SCARLET_USER_FAULT task={} pc={:#x} lr={:#x} sp={:#x} address={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x}",task.get_id(),pc,trapframe.regs.reg[30],trapframe.sp,vaddr,trapframe.regs.reg[0],trapframe.regs.reg[1],trapframe.regs.reg[2],trapframe.regs.reg[3]));
++        probe_user_fault(alloc::format!("SCARLET_USER_FAULT_THREAD name={} tls={:#x} fp={:#x}",task.name.read(),trapframe.tpidr_el0,trapframe.regs.reg[29]));
++        let mut addresses=alloc::vec![pc as usize,trapframe.regs.reg[30] as usize];
++        let mut fp=trapframe.regs.reg[29] as usize;
++        for _ in 0..12 {
++            if fp%16!=0 || fp>=0x8000_0000_0000 {break;}
++            let (Some(previous),Some(saved))=(task.vm_manager.translate_to_kva(fp),task.vm_manager.translate_to_kva(fp+8)) else {break;};
++            let next=unsafe {core::ptr::read_unaligned(previous as *const usize)};
++            let ret=unsafe {core::ptr::read_unaligned(saved as *const usize)};
++            probe_user_fault(alloc::format!("SCARLET_USER_FAULT_FRAME fp={:#x} return={:#x}",fp,ret));
++            addresses.push(ret);
++            if next<=fp {break;} fp=next;
++        }
++        for address in addresses {
++            for index in 0..8 {
++                let instruction=address.wrapping_sub(16)+index*4;
++                if let Some(kva)=task.vm_manager.translate_to_kva(instruction) {
++                    let value=unsafe {core::ptr::read_unaligned(kva as *const u32)};
++                    probe_user_fault(alloc::format!("SCARLET_USER_FAULT_INSN address={:#x} word={:08x}",instruction,value));
++                }
++            }
++            if let Some(map)=task.vm_manager.search_memory_map(address) {
++                let owner=map.owner.as_ref().map(|owner|owner.mmap_owner_name()).unwrap_or_default();
++                let base=task.vm_manager.with_memmaps(|maps|maps.values().filter(|map|map.owner.as_ref().is_some_and(|candidate|candidate.mmap_owner_name()==owner)).map(|map|map.vmarea.start).min().unwrap_or(map.vmarea.start));
++                probe_user_fault(alloc::format!("SCARLET_USER_FAULT_CODE address={:#x} base={:#x} offset={:#x} owner={}",address,base,address-base,owner));
++            }
++        }
+         println!(
+             "Task {} (PID {}) caused {} at vaddr: {:#x} (write={}) from PC: {:#x}: {}",
+             task.name.read(),
+@@ -685,3 +712,11 @@ fn print_trap_info(trapframe: &Trapframe, esr: u64) {
+         trapframe.spsr
+     );
+ }
++
++pub(crate) fn probe_user_fault(message: alloc::string::String) {
++    for (_,device) in crate::device::manager::DeviceManager::get_manager().get_devices_with_ids() {
++        if device.as_any().is::<crate::drivers::uart::pl011::Pl011Uart>() {
++            if let Some(uart)=device.as_char_device() {let _=uart.write(message.as_bytes());let _=uart.write(b"\r\n");}
++        }
++    }
++}

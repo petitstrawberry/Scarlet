@@ -1,0 +1,137 @@
+{
+  "kind": "android-software-vulkan-v1",
+  "commands": [
+    [
+      "cmake",
+      "-G",
+      "Ninja",
+      "-S",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/swiftshader-android13-build-v1/source",
+      "-B",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/swiftshader-android13-build-v1/build",
+      "-DCMAKE_TOOLCHAIN_FILE=/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/build/cmake/android.toolchain.cmake",
+      "-DANDROID_ABI=arm64-v8a",
+      "-DANDROID_PLATFORM=android-33",
+      "-DANDROID_STL=c++_static",
+      "-DCMAKE_BUILD_TYPE=Release",
+      "-DSWIFTSHADER_BUILD_TESTS=OFF",
+      "-DSWIFTSHADER_BUILD_BENCHMARKS=OFF",
+      "-DSWIFTSHADER_WARNINGS_AS_ERRORS=OFF",
+      "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+    ],
+    [
+      "cmake",
+      "--build",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/swiftshader-android13-build-v1/build",
+      "--target",
+      "vk_swiftshader",
+      "--parallel",
+      "2"
+    ],
+    [
+      "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-fPIE",
+      "-pie",
+      "-I",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/swiftshader-android13-build-v1/private",
+      "-isystem",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/stock-graphics-adapters-v2/headers/vndk33/hardware/libhardware/include",
+      "-isystem",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/stock-graphics-adapters-v2/headers/vndk33/system/core/libcutils/include",
+      "-isystem",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/stock-graphics-adapters-v2/headers/vndk33/system/core/libsystem/include",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/tools/android-compat/graphics/vulkan-probe.c",
+      "-ldl",
+      "-o",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/swiftshader-android13-build-v1/vulkan-probe"
+    ]
+  ],
+  "pins": {
+    "repository": "platform/external/swiftshader",
+    "revision": "b2dbb0ab3d2bb753d94ad3fa10b5fa15582b8df6",
+    "release": "android-13.0.0_r2",
+    "archives": {
+      "src": {
+        "tree_sha256": "16919c4cbbe36adc6d09b55e046d0509228f8d33763d0bfc094ba9e5ead2dfa1"
+      },
+      "include": {
+        "tree_sha256": "33b2f7695f7df08d596d307f9788e71608c92910f5debe1e0aef8038bf051b7b"
+      },
+      "third_party/SPIRV-Headers": {
+        "tree_sha256": "a4e07dff970b654762c9989ed1a1cc1827b57ffa18b2352cd70be81e1f2a0412"
+      },
+      "third_party/SPIRV-Tools": {
+        "tree_sha256": "0453ee7af41d0db6c77c031361cd8dde9e4836db8349e153fc1ac5ff21847e3f"
+      },
+      "third_party/astc-encoder": {
+        "tree_sha256": "9fb4da7c3ac1132d0c92be7a1ff1ba8bc41805b2009023339a54c6227f3461de"
+      },
+      "third_party/boost": {
+        "tree_sha256": "108ed44e3a885118e8d0f6ed27bb35498d2a90507010d8ee76418c1de78248f5"
+      },
+      "third_party/llvm-10.0": {
+        "tree_sha256": "539348c9137421c061b6881262788e6b4593bb98f781f6a162e9c7be633b855b"
+      },
+      "third_party/marl": {
+        "tree_sha256": "bc61be6c772a9b2ff0951a627afc8c54436272d5a2d120fd702ee3487a46adaf"
+      },
+      "tools": {
+        "tree_sha256": "01dc426042716975c3af27ddd1fb4b556ee1cb8dcca9945b067e02c97f6976b3"
+      }
+    },
+    "files": {
+      "CMakeLists.txt": "466ded363a55f5076bd5e72da37b713cf2b80ecca103fb1e0000cd1ff2964a0c",
+      "LICENSE.txt": "3ddf9be5c28fe27dad143a5dc76eea25222ad1dd68934a047064e56ed2fa40c5",
+      "AUTHORS.txt": "046ab79547a7a472672457031cf7ccf9388fa22676131b6773410744cb8d1bd4"
+    },
+    "private_headers": {
+      "hardware/hwvulkan.h": {
+        "url": "https://android.googlesource.com/platform/frameworks/native/+/2fe7eddf185ecb63223eeadc58804f9bf6cbd426/vulkan/include/hardware/hwvulkan.h?format=TEXT",
+        "sha256": "c719f035ed301690d5688bf3378dde99ec398c4ceec1e5dce0983b4496a930e2"
+      },
+      "vulkan/vk_android_native_buffer.h": {
+        "url": "https://android.googlesource.com/platform/frameworks/native/+/2fe7eddf185ecb63223eeadc58804f9bf6cbd426/vulkan/include/vulkan/vk_android_native_buffer.h?format=TEXT",
+        "sha256": "2e056f486ff03efd93aa9d646860055c8561d3fcdb56c294aad702f427f0228f"
+      }
+    }
+  },
+  "platform_headers": {
+    "repository": "platform/prebuilts/vndk/v33",
+    "revision": "93fae1dca18368daaf6a46a051b401a1313fb74d",
+    "path": "arm64/include",
+    "tree_sha256": "02728f94fac722458637094e6f31d7f176a4fb0a505f2925e59da9f138411845"
+  },
+  "sources": {
+    "build-software-vulkan.py": "1a6470db2ceefc5a9ade357e091b38246499b67c776f3134ee2feca397d3890c",
+    "graphics/swiftshader-inputs.json": "2e2df898bf195ce7ca565d6fda009c06b2e7a9f7f46e441633f7126322eb5f92",
+    "graphics/vulkan-probe.c": "0ec5ee558b83b1f1bee13899a6bd08e45d9bc0d4fca8b2ad8ba28fecc54f1db6"
+  },
+  "ported_sources_sha256": "93108db59c70ba6acead3cab422363c6b5bd96472bc16079daca39dbb2ec98f7",
+  "libraries": {
+    "system/lib64/libhardware.so": "b043a86169d223a19f93af49aafc0024ef30a4f2ea81612561e2df3a47a28387",
+    "system/lib64/libsync.so": "212f7c50101e6601cde281b7f2d078b6e2fe2f13878b636dab4b8980e898ea82",
+    "system/lib64/liblog.so": "20af27adc3ad6ecc4b260de85be062becb8d101a3ad95da409aec5b930d76c8d",
+    "system/lib64/libcutils.so": "7bab7accfb8bf5ff81b245c00b8e4a5efae3127d1ba1edbdfb8eb38a189b884d",
+    "system/lib64/libnativewindow.so": "e65c915b393a47a54f67e03918cb835e219d22613f188793b3ee06e9bacff0e5"
+  },
+  "ndk": "Pkg.Desc = Android NDK\nPkg.Revision = 25.1.8937393\n",
+  "compiler": "Android (8490178, based on r450784d) clang version 14.0.6 (https://android.googlesource.com/toolchain/llvm-project 4c603efb0cca074e9238af8b4106c30add4418f6)\nTarget: aarch64-unknown-linux-android33\nThread model: posix\nInstalledDir: /Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin\n",
+  "files": {
+    "vulkan.pastel.so": "748c1c14367600fa9c33218083cd7f092d1308f2018ae1fe215b0c99b06f8331",
+    "vulkan-probe": "b8d5fd87baa13b0f5c8f256aedf43c5d7722d652cd819d7c0820aa573dd9f8ae"
+  },
+  "needed": [
+    "libdl.so",
+    "liblog.so",
+    "libhardware.so",
+    "libsync.so",
+    "libnativewindow.so",
+    "libm.so",
+    "libc.so"
+  ],
+  "readiness": "not executed"
+}

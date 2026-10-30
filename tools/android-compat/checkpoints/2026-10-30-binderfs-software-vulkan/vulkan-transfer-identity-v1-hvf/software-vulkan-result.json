@@ -1,0 +1,5 @@
+{
+  "result": "PASS",
+  "scope": "Android hardware-module entrypoint, CPU physical/logical device, command submission, fence wait and host readback",
+  "surfaceflinger_composition": "not tested"
+}
