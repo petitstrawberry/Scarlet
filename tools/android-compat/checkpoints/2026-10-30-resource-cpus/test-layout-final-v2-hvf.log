@@ -1,0 +1,3 @@
+Kernel validation override: -cpu host -accel hvf and HVF firmware
+[Test Runner] All 1723 tests passed
+All tests passed

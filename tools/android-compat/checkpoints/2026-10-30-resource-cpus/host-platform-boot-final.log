@@ -1,0 +1,36 @@
+warning: Git tree '/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet' is dirty
+............................................................
+----------------------------------------------------------------------
+Ran 60 tests in 0.934s
+
+OK
+Stock APK parsing/resources/DEX probe: PASS
+Stock APK parsing/resources/DEX probe: missing or failed APK runtime evidence
+Stock APK parsing/resources/DEX probe: timeout
+ART direct execution: missing or failed child evidence
+ART direct execution: PASS
+ART direct execution: missing or failed child evidence
+ART direct execution: PASS
+Android program diagnostic: EXITED; exit=0
+Android program diagnostic: EXITED; exit=127
+Android program diagnostic: timeout; exit=None
+Stock app_process framework/JNI probe: PASS
+Stock app_process framework/JNI probe: missing or failed framework evidence
+Stock app_process framework/JNI probe: timeout
+Stock Java Binder service integration: PASS
+Stock Java Binder service integration: missing or failed Java service evidence
+Stock Java Binder service integration: timeout
+Stock libbinder probe: PASS
+Stock libbinder probe: missing or failed libbinder evidence
+Stock libbinder probe: timeout
+Stock libselinux / Shield probe: missing or failed Shield evidence
+Stock libselinux / Shield probe: PASS
+Stock libselinux / Shield probe: missing or failed Shield evidence
+Stock libselinux / Shield probe: timeout
+Stock servicemanager integration: PASS
+Stock servicemanager integration: missing or failed service integration evidence
+Stock servicemanager integration: timeout
+Stock Zygote control socket: PASS
+Android program diagnostic: EXITED; exit=0
+Stock Zygote control socket: PASS
+Android program diagnostic: EXITED; exit=0

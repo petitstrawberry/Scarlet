@@ -1,0 +1,7 @@
+Kernel validation override: -cpu host -accel hvf and HVF firmware
+[Test Runner] test name=scarlet::abi::linux::generic::cgroup::tests::cpuset_lists_reject_invalid_ranges_without_mask_wraparound
+[Test Runner] test name=scarlet::task::resource_group::tests::cpu_constraints_preserve_deadline_pins_and_parent_subset
+[Test Runner] test name=scarlet::task::resource_group::tests::cpu_constraints_validate_unpublished_fork_and_thread_leases
+[Test Runner] test name=scarlet::task::resource_group::tests::independent_resource_hierarchies_retain_membership_and_intersect_constraints
+[Test Runner] All 1727 tests passed
+All tests passed

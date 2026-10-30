@@ -1,0 +1,8 @@
+{
+  "result": "EXITED",
+  "qemu_exit_code": 0,
+  "elapsed_seconds": 5.518,
+  "dynamic_runtime": true,
+  "program_exit_status": 0,
+  "service_readiness": "not tested"
+}
