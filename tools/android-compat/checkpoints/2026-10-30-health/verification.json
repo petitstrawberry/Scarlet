@@ -1,0 +1,42 @@
+{
+  "revision": "a844e1c2e",
+  "kernel_sha256": "0dd891b699649e32984108ca0475ef1ba9173262e49195cf2fdafe1a9b2c7edd",
+  "acceleration": "hvf",
+  "passed": {
+    "native_kernel_tests": 1766,
+    "host_tool_tests": 75
+  },
+  "confirmed": [
+    "read-only native PowerSupply to Linux sysfs translation; absent measurements remain absent",
+    "stock init starts the verified Health 2.1 daemon and its stock passthrough implementation",
+    "HIDL registration of android.hardware.health@2.1::IHealth/default",
+    "Health HAL reports: No battery devices found; battery none chg=",
+    "stock HIDL manager and token contracts retained from the framework manifest"
+  ],
+  "current_stop": {
+    "operation": "hwservicemanager exports its own Binder object to the Java Health wrapper",
+    "command": "BC_REPLY_SG (0x40486312)",
+    "errno": 95,
+    "object_type": "BINDER_TYPE_BINDER (0x73622a85)",
+    "object_flags": "0x1900 (includes FLAT_BINDER_FLAG_TXN_SECURITY_CTX)",
+    "evidence": "stock-init-health-v4/serial.log",
+    "needed": "authenticated caller-label delivery; not ignored or reported as implemented"
+  },
+  "not_confirmed": [
+    "BatteryService startup completion",
+    "Activity launch",
+    "SurfaceFlinger app frame in SWS",
+    "Launcher home screen"
+  ],
+  "host_power_control": {
+    "delegated": false,
+    "omitted_capabilities": [
+      "WAKE_ALARM",
+      "BLOCK_SUSPEND"
+    ]
+  },
+  "primary_source_urls": [
+    "https://android.googlesource.com/platform/hardware/interfaces/+/refs/tags/android-13.0.0_r2/health/2.1/default/service.cpp",
+    "https://android.googlesource.com/platform/system/hwservicemanager/+/refs/tags/android-13.0.0_r2/service.cpp"
+  ]
+}

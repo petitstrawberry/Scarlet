@@ -1,0 +1,1694 @@
+warning: Git tree '/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet' is dirty
+cargo-scarlet: resolved https://github.com/petitstrawberry/sgfx 0ee6b41669904ced227f01cc435933c646a60c75 -> 0ee6b41669904ced227f01cc435933c646a60c75
+cargo-scarlet: resolved https://github.com/petitstrawberry/Vulkan-Loader cabc0232da5ee6bbd1814acdfd6188714a1a1e4d -> cabc0232da5ee6bbd1814acdfd6188714a1a1e4d
+cargo-scarlet: resolved https://github.com/petitstrawberry/sgfx 0ee6b41669904ced227f01cc435933c646a60c75 -> 0ee6b41669904ced227f01cc435933c646a60c75
+cargo-scarlet: resolved https://github.com/petitstrawberry/Vulkan-Loader cabc0232da5ee6bbd1814acdfd6188714a1a1e4d -> cabc0232da5ee6bbd1814acdfd6188714a1a1e4d
+cargo-scarlet: running in /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/projects/aarch64-limine-crosvm/bsp -> cargo metadata --format-version 1 --filter-platform /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/projects/aarch64-limine-crosvm/bsp/../../../kernel/targets/aarch64-unknown-none-elf.json
+cargo-scarlet: refreshing BSP dependencies in /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/projects/aarch64-limine-crosvm/bsp -> cargo update
+    Updating crates.io index
+     Locking 0 packages to latest Rust 1.94.0-nightly compatible versions
+note: pass `--verbose` to see 1 unchanged dependencies behind latest
+cargo-scarlet: running in /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/projects/aarch64-limine-crosvm/bsp -> cargo build --release --target /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/projects/aarch64-limine-crosvm/bsp/../../../kernel/targets/aarch64-unknown-none-elf.json
+   Compiling scarlet v1.0.1 (/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel)
+warning: unused import: `ToString`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/abi/linux/generic/cgroup.rs:21:22
+   |
+21 |     string::{String, ToString},
+   |                      ^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `is_direct_mapped` and `virt_to_phys`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/abi/linux/generic/mm.rs:10:16
+   |
+10 |     vm::addr::{is_direct_mapped, virt_to_phys},
+   |                ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^
+
+warning: unused import: `MemoryArea`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/boot/limine.rs:18:23
+   |
+18 | use crate::vm::vmem::{MemoryArea, MemoryAttribute};
+   |                       ^^^^^^^^^^
+
+warning: unused import: `alloc::boxed::Box`
+ --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/context.rs:7:5
+  |
+7 | use alloc::boxed::Box;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Page`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/context.rs:11:41
+   |
+11 | use crate::mem::page::{ContiguousPages, Page};
+   |                                         ^^^^
+
+warning: unused import: `crate::vm::vmem::MemoryArea`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/context.rs:12:5
+   |
+12 | use crate::vm::vmem::MemoryArea;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around function argument
+    --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/iommu/arm_smmu_v2.rs:1068:23
+     |
+1068 |             return Ok((entry & TABLE_ADDRESS_MASK));
+     |                       ^                          ^
+     |
+     = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+     |
+1068 -             return Ok((entry & TABLE_ADDRESS_MASK));
+1068 +             return Ok(entry & TABLE_ADDRESS_MASK);
+     |
+
+warning: unnecessary parentheses around assigned value
+    --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/iommu/arm_smmu_v2.rs:1097:21
+     |
+1097 |             table = (entry & TABLE_ADDRESS_MASK);
+     |                     ^                          ^
+     |
+help: remove these parentheses
+     |
+1097 -             table = (entry & TABLE_ADDRESS_MASK);
+1097 +             table = entry & TABLE_ADDRESS_MASK;
+     |
+
+warning: unused imports: `RelocationEntry` and `RelocationSection`
+ --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/lsm/mod.rs:5:32
+  |
+5 |     ParsedSymbol, RelocObject, RelocationEntry, RelocationSection, SHF_ALLOC, SHN_UNDEF,
+  |                                ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `free_raw_pages`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/vm/mod.rs:18:44
+   |
+18 | use crate::mem::page::{allocate_raw_pages, free_raw_pages};
+   |                                            ^^^^^^^^^^^^^^
+
+warning: unused imports: `KERNEL_KSTACK_REGION_END` and `KERNEL_KSTACK_REGION_START`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/vm/mod.rs:23:26
+   |
+23 | use crate::environment::{KERNEL_KSTACK_REGION_END, KERNEL_KSTACK_REGION_START, TRAMPOLINE_VA_END};
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::println`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/vm/mod.rs:24:5
+   |
+24 | use crate::println;
+   |     ^^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around function argument
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/boot/limine.rs:172:56
+    |
+172 |         let area = PhysicalMemoryArea::new(entry.base, (entry.base + entry.length - 1));
+    |                                                        ^                             ^
+    |
+help: remove these parentheses
+    |
+172 -         let area = PhysicalMemoryArea::new(entry.base, (entry.base + entry.length - 1));
+172 +         let area = PhysicalMemoryArea::new(entry.base, entry.base + entry.length - 1 );
+    |
+
+warning: unnecessary parentheses around assigned value
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/boot/limine.rs:272:25
+    |
+272 |         let entry_end = (entry.base + entry.length - 1);
+    |                         ^                             ^
+    |
+help: remove these parentheses
+    |
+272 -         let entry_end = (entry.base + entry.length - 1);
+272 +         let entry_end = entry.base + entry.length - 1 ;
+    |
+
+warning: unused import: `PciConfig`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/mmc/sdhci/pci.rs:13:40
+   |
+13 | use crate::device::pci::config::{self, PciConfig, command};
+   |                                        ^^^^^^^^^
+
+warning: unused imports: `boxed::Box` and `vec`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:27:13
+   |
+27 | use alloc::{boxed::Box, collections::VecDeque, string::String, sync::Arc, vec, vec::Vec};
+   |             ^^^^^^^^^^                                                    ^^^
+
+warning: unused import: `driver_initcall`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/pic/gic.rs:15:5
+   |
+15 |     driver_initcall, early_initcall,
+   |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::initcall::early`
+ --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/uart/pl011.rs:7:5
+  |
+7 | use crate::initcall::early;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ToString`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/usb/cdc_ncm.rs:12:29
+   |
+12 | use alloc::string::{String, ToString};
+   |                             ^^^^^^^^
+
+warning: unused import: `alloc::vec`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/usb/cdc_ncm.rs:14:5
+   |
+14 | use alloc::vec;
+   |     ^^^^^^^^^^
+
+warning: unused import: `alloc::boxed::Box`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/virtio_input.rs:13:5
+   |
+13 | use alloc::boxed::Box;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::vec`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/virtio_input.rs:16:5
+   |
+16 | use alloc::vec;
+   |     ^^^^^^^^^^
+
+warning: unused import: `alloc::vec::Vec`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/virtio_input.rs:17:5
+   |
+17 | use alloc::vec::Vec;
+   |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::environment::PAGE_SIZE`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/virtio_input.rs:28:5
+   |
+28 | use crate::environment::PAGE_SIZE;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `boxed::Box` and `vec`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/virtio_rng.rs:23:13
+   |
+23 | use alloc::{boxed::Box, collections::VecDeque, vec};
+   |             ^^^^^^^^^^                         ^^^
+
+warning: unused import: `crate::environment::PAGE_SIZE`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/virtio_rng.rs:29:5
+   |
+29 | use crate::environment::PAGE_SIZE;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around assigned value
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/environment/aarch64.rs:38:5
+   |
+38 |     (((TRAMPOLINE_VA_END - TRAMPOLINE_VA_RESERVE) & !(PAGE_SIZE - 1)) - 1);
+   |     ^                                                                    ^
+   |
+help: remove these parentheses
+   |
+38 -     (((TRAMPOLINE_VA_END - TRAMPOLINE_VA_RESERVE) & !(PAGE_SIZE - 1)) - 1);
+38 +     ((TRAMPOLINE_VA_END - TRAMPOLINE_VA_RESERVE) & !(PAGE_SIZE - 1)) - 1;
+   |
+
+warning: unused imports: `boxed::Box` and `vec`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/drivers/ext2/node.rs:8:5
+   |
+ 8 |     boxed::Box,
+   |     ^^^^^^^^^^
+...
+13 |     vec,
+   |     ^^^
+
+warning: unused imports: `boxed::Box` and `vec`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/drivers/fat32/node.rs:8:5
+   |
+ 8 |     boxed::Box,
+   |     ^^^^^^^^^^
+...
+12 |     vec,
+   |     ^^^
+
+warning: unused import: `super::*`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/namespace.rs:203:9
+    |
+203 |     use super::*;
+    |         ^^^^^^^^
+
+warning: unused import: `crate::println`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/hypervisor/syscall.rs:10:5
+   |
+10 | use crate::println;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `crate::sync::IrqSpinLock`
+ --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/hypervisor/vcpu.rs:3:5
+  |
+3 | use crate::sync::IrqSpinLock;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::sync::Arc`
+ --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/hypervisor/vcpu.rs:4:5
+  |
+4 | use alloc::sync::Arc;
+  |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `alloc::sync::Weak`
+ --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/hypervisor/vcpu.rs:5:5
+  |
+5 | use alloc::sync::Weak;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::arch::hv::guest_vcpu::GuestVcpu`
+ --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/hypervisor/vcpu.rs:8:5
+  |
+8 | use crate::arch::hv::guest_vcpu::GuestVcpu;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::vm::vmem::VirtualMemoryMap`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/ipc/shared_memory.rs:15:5
+   |
+15 | use crate::vm::vmem::VirtualMemoryMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::earlycon::EarlyConsole`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/log.rs:11:5
+   |
+11 | use crate::earlycon::EarlyConsole;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `get_task_by_id`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/network/local.rs:34:48
+   |
+34 | use crate::sched::scheduler::{current_task_id, get_task_by_id};
+   |                                                ^^^^^^^^^^^^^^
+
+warning: unused import: `vec`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/network/protocol_stack.rs:49:63
+   |
+49 | use alloc::{collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
+   |                                                               ^^^
+
+warning: unused import: `object::capability::selectable::Selectable`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/abi/linux/generic/pipe.rs:11:5
+   |
+11 |     object::capability::selectable::Selectable,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `addr`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/abi/linux/device/kvm/aarch64.rs:567:21
+    |
+567 |                 let addr = unsafe { core::ptr::read_volatile(kva as *const u64) };
+    |                     ^^^^ help: if this is intentional, prefix it with an underscore: `_addr`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable `sbi_count` is assigned to, but never used
+    --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/abi/linux/device/kvm/mod.rs:1144:17
+     |
+1144 |             let mut sbi_count = 0u32;
+     |                 ^^^^^^^^^^^^^
+     |
+     = note: consider using `_sbi_count` instead
+
+warning: value assigned to `sbi_count` is never read
+    --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/abi/linux/device/kvm/mod.rs:1172:29
+     |
+1172 | ...                   sbi_count += 1;
+     |                       ^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `aligned_length`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/abi/linux/generic/mm.rs:955:5
+    |
+955 |     aligned_length: usize,
+    |     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_aligned_length`
+
+warning: unused variable: `inherited_sctlr`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/boot/limine.rs:295:64
+    |
+295 | extern "C" fn secondary_cpu_entry_after_el_drop(cpu_id: usize, inherited_sctlr: u64) -> ! {
+    |                                                                ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_inherited_sctlr`
+
+warning: unused variable: `cpu`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/boot/limine.rs:439:5
+    |
+439 |     cpu: &fdt::node::FdtNode,
+    |     ^^^ help: if this is intentional, prefix it with an underscore: `_cpu`
+
+warning: unused variable: `inherited_sctlr`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/boot/limine.rs:569:56
+    |
+569 | extern "C" fn limine_entry_after_el_drop(_arg0: usize, inherited_sctlr: u64) -> ! {
+    |                                                        ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_inherited_sctlr`
+
+warning[E0133]: use of inline assembly is unsafe and requires unsafe block
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/fpu.rs:52:9
+   |
+52 | /         asm!(
+53 | |             ".arch armv8-a+fp+simd",
+54 | |             // Save all 32 vector registers using STP for Q registers
+55 | |             "stp q0, q1, [{0}, #0*32]",
+...  |
+72 | |             options(nostack),
+73 | |         );
+   | |_________^ use of inline assembly
+   |
+   = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+   = note: inline assembly is entirely unchecked and can cause undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/fpu.rs:50:5
+   |
+50 |     pub unsafe fn save(&mut self) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(unsafe_op_in_unsafe_fn)]` (part of `#[warn(rust_2024_compatibility)]`) on by default
+
+warning[E0133]: use of inline assembly is unsafe and requires unsafe block
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/fpu.rs:77:9
+   |
+77 | /         asm!(
+78 | |             ".arch armv8-a+fp+simd",
+79 | |             "mrs {0}, fpcr",
+80 | |             "mrs {1}, fpsr",
+...  |
+83 | |             options(nomem, nostack),
+84 | |         );
+   | |_________^ use of inline assembly
+   |
+   = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+   = note: inline assembly is entirely unchecked and can cause undefined behavior
+
+warning: unused variable: `vaddr`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/vm/mmu/armv8_4k.rs:869:9
+    |
+869 |         vaddr: usize,
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_vaddr`
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/device/fdt.rs:157:14
+    |
+157 |         &mut *MANAGER.0.get()
+    |              ^^^^^^^^^^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/device/fdt.rs:155:5
+    |
+155 |     pub unsafe fn get_mut_manager() -> &'static mut FdtManager<'static> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `trapframe`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/device/input/event_device.rs:568:9
+    |
+568 |         trapframe: &mut Trapframe,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_trapframe`
+
+warning: unused variable: `enabled`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/device/network/mod.rs:471:36
+    |
+471 |     fn set_promiscuous_mode(&self, enabled: bool) -> Result<(), &'static str> {
+    |                                    ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_enabled`
+
+warning: unused variable: `read_count`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/block/virtio_blk.rs:397:13
+    |
+397 |         let read_count = requests
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_read_count`
+
+warning: unused variable: `write_count`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/block/virtio_blk.rs:401:13
+    |
+401 |         let write_count = requests
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_write_count`
+
+warning: unused variable: `status_ptr`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/block/virtio_blk.rs:481:17
+    |
+481 |             let status_ptr = status_alloc.as_ptr() as *mut u8;
+    |                 ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_status_ptr`
+
+warning: unused variable: `status`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/block/virtio_blk.rs:597:17
+    |
+597 |             let status = self.read32_register(crate::drivers::virtio::device::Register::Status);
+    |                 ^^^^^^ help: if this is intentional, prefix it with an underscore: `_status`
+
+warning: variable does not need to be mutable
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:247:9
+    |
+247 |     let mut task =
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `buffer_ptr`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:595:17
+    |
+595 |             let buffer_ptr = buffer_alloc.as_ptr() as *mut u8;
+    |                 ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_buffer_ptr`
+
+warning: unused variable: `option`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/drivers/cpiofs.rs:197:9
+    |
+197 |         option: Option<&str>,
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_option`
+
+warning: unused variable: `vaddr`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/drivers/ext2/node.rs:786:27
+    |
+786 |     fn on_unmapped(&self, vaddr: usize, _length: usize) {
+    |                           ^^^^^ help: if this is intentional, prefix it with an underscore: `_vaddr`
+
+warning: unused variable: `inode_cache`
+    --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/drivers/ext2/mod.rs:4890:13
+     |
+4890 |         let inode_cache = self.inode_cache.read();
+     |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_inode_cache`
+
+warning: unused variable: `block_cache`
+    --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/drivers/ext2/mod.rs:4891:13
+     |
+4891 |         let block_cache = self.block_cache.read();
+     |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_block_cache`
+
+warning: unused variable: `cluster_size`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/drivers/fat32/mod.rs:646:13
+    |
+646 |         let cluster_size = (self.sectors_per_cluster * self.bytes_per_sector) as usize;
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cluster_size`
+
+warning: unused variable: `cluster_index`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/drivers/fat32/mod.rs:820:13
+    |
+820 |         for cluster_index in 0..clusters_needed {
+    |             ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cluster_index`
+
+warning: unused variable: `vaddr`
+    --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/drivers/tmpfs/mod.rs:1759:27
+     |
+1759 |     fn on_unmapped(&self, vaddr: usize, _length: usize) {
+     |                           ^^^^^ help: if this is intentional, prefix it with an underscore: `_vaddr`
+
+warning: unused variable: `new_root_mount`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/syscall.rs:843:9
+    |
+843 |     let new_root_mount = match parent_mount.get_child(&new_root_entry) {
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_new_root_mount`
+
+warning: variable does not need to be mutable
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/ipc/counter.rs:135:13
+    |
+135 |         let mut counter = Self::new(initval, semaphore);
+    |             ----^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unnecessary `unsafe` block
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/lsm/symbol.rs:86:17
+   |
+86 |     let start = unsafe { core::ptr::addr_of!(__SCARLET_KSYMS_START) as usize };
+   |                 ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/lsm/symbol.rs:87:15
+   |
+87 |     let end = unsafe { core::ptr::addr_of!(__SCARLET_KSYMS_END) as usize };
+   |               ^^^^^^ unnecessary `unsafe` block
+
+warning: value assigned to `offset` is never read
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/lsm/symbol.rs:97:22
+   |
+97 |     let mut offset = 0usize;
+   |                      ^^^^^^
+   |
+   = help: maybe it is overwritten before being read?
+
+warning: unused variable: `e`
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/lsm/syscall.rs:80:13
+   |
+80 |         Err(e) => {
+   |             ^ help: if this is intentional, prefix it with an underscore: `_e`
+
+warning[E0133]: call to unsafe function `core::ptr::mut_ptr::<impl *mut T>::add` is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:254:20
+    |
+254 |         let page = self.pages.add(page_idx);
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: consult the function's documentation for information on how to avoid undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:253:5
+    |
+253 |     unsafe fn add_to_free_list(&mut self, page_idx: usize, order: usize) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:255:9
+    |
+255 |         (*page).order = order as u8;
+    |         ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:256:9
+    |
+256 |         (*page).flags |= PAGE_FLAG_BUDDY;
+    |         ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: call to unsafe function `mem::pmm::ListHead::add` is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:259:9
+    |
+259 |         (*free_list).add(&mut (*page).state.lru as *mut ListHead);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: consult the function's documentation for information on how to avoid undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:259:9
+    |
+259 |         (*free_list).add(&mut (*page).state.lru as *mut ListHead);
+    |         ^^^^^^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: access to union field is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:259:31
+    |
+259 |         (*free_list).add(&mut (*page).state.lru as *mut ListHead);
+    |                               ^^^^^^^^^^^^^^^^^ access to union field
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: the field may not be properly initialized: using uninitialized data will cause undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:259:31
+    |
+259 |         (*free_list).add(&mut (*page).state.lru as *mut ListHead);
+    |                               ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: call to unsafe function `mem::pmm::ListHead::remove` is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:265:9
+    |
+265 |         (*free_list).remove(&mut (*page).state.lru as *mut ListHead);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: consult the function's documentation for information on how to avoid undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:263:5
+    |
+263 |     unsafe fn del_from_free_list(&mut self, page: *mut Page, order: usize) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:265:9
+    |
+265 |         (*free_list).remove(&mut (*page).state.lru as *mut ListHead);
+    |         ^^^^^^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: access to union field is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:265:34
+    |
+265 |         (*free_list).remove(&mut (*page).state.lru as *mut ListHead);
+    |                                  ^^^^^^^^^^^^^^^^^ access to union field
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: the field may not be properly initialized: using uninitialized data will cause undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:265:34
+    |
+265 |         (*free_list).remove(&mut (*page).state.lru as *mut ListHead);
+    |                                  ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:266:9
+    |
+266 |         (*page).flags &= !PAGE_FLAG_BUDDY;
+    |         ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:291:9
+    |
+291 |         (*page).order == order as u8 && ((*page).flags & PAGE_FLAG_BUDDY) != 0
+    |         ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+note: an unsafe function restricts its caller, but its body is safe by default
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:290:5
+    |
+290 |     unsafe fn page_is_buddy(&self, page: *const Page, order: usize) -> bool {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning[E0133]: dereference of raw pointer is unsafe and requires unsafe block
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:291:42
+    |
+291 |         (*page).order == order as u8 && ((*page).flags & PAGE_FLAG_BUDDY) != 0
+    |                                          ^^^^^^^ dereference of raw pointer
+    |
+    = note: for more information, see <https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>
+    = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+
+warning: unused variable: `acked`
+    --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/network/tcp.rs:1345:13
+     |
+1345 |         let acked = header.ack_number;
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_acked`
+
+warning: unused variable: `num_pages`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/object/capability/memory_mapping/syscall.rs:329:5
+    |
+329 |     num_pages: usize,
+    |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_num_pages`
+
+warning: unused variable: `vaddr`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/object/capability/memory_mapping/mod.rs:131:25
+    |
+131 |     fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {}
+    |                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_vaddr`
+
+warning: unused variable: `paddr`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/object/capability/memory_mapping/mod.rs:131:39
+    |
+131 |     fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {}
+    |                                       ^^^^^ help: if this is intentional, prefix it with an underscore: `_paddr`
+
+warning: unused variable: `length`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/object/capability/memory_mapping/mod.rs:131:51
+    |
+131 |     fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {}
+    |                                                   ^^^^^^ help: if this is intentional, prefix it with an underscore: `_length`
+
+warning: unused variable: `offset`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/object/capability/memory_mapping/mod.rs:131:66
+    |
+131 |     fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {}
+    |                                                                  ^^^^^^ help: if this is intentional, prefix it with an underscore: `_offset`
+
+warning: unused variable: `vaddr`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/object/capability/memory_mapping/mod.rs:140:36
+    |
+140 |     fn on_mapping_inherited(&self, vaddr: usize, paddr: u64, length: usize, vm_start: usize) {}
+    |                                    ^^^^^ help: if this is intentional, prefix it with an underscore: `_vaddr`
+
+warning: unused variable: `paddr`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/object/capability/memory_mapping/mod.rs:140:50
+    |
+140 |     fn on_mapping_inherited(&self, vaddr: usize, paddr: u64, length: usize, vm_start: usize) {}
+    |                                                  ^^^^^ help: if this is intentional, prefix it with an underscore: `_paddr`
+
+warning: unused variable: `length`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/object/capability/memory_mapping/mod.rs:140:62
+    |
+140 |     fn on_mapping_inherited(&self, vaddr: usize, paddr: u64, length: usize, vm_start: usize) {}
+    |                                                              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_length`
+
+warning: unused variable: `vm_start`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/object/capability/memory_mapping/mod.rs:140:77
+    |
+140 |     fn on_mapping_inherited(&self, vaddr: usize, paddr: u64, length: usize, vm_start: usize) {}
+    |                                                                             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vm_start`
+
+warning: unused variable: `vaddr`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/object/capability/memory_mapping/mod.rs:155:27
+    |
+155 |     fn on_unmapped(&self, vaddr: usize, length: usize) {}
+    |                           ^^^^^ help: if this is intentional, prefix it with an underscore: `_vaddr`
+
+warning: unused variable: `length`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/object/capability/memory_mapping/mod.rs:155:41
+    |
+155 |     fn on_unmapped(&self, vaddr: usize, length: usize) {}
+    |                                         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_length`
+
+warning: variable does not need to be mutable
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/object/capability/selectable/syscall.rs:101:9
+    |
+101 |     let mut options: PollOptions = if options_ptr != 0 {
+    |         ----^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/lib.rs:836:9
+    |
+836 |     let mut init_task = new_user_task("init".to_string(), 0);
+    |         ----^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: type `GpuPrivateImageBacking` is more private than the item `GpuImageBacking::Private::0`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/device/gpu/resource.rs:975:13
+    |
+975 |     Private(GpuPrivateImageBacking),
+    |             ^^^^^^^^^^^^^^^^^^^^^^ field `GpuImageBacking::Private::0` is reachable at visibility `pub(crate)`
+    |
+note: but type `GpuPrivateImageBacking` is only usable at visibility `pub(self)`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/device/gpu/resource.rs:763:1
+    |
+763 | struct GpuPrivateImageBacking {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `GpuImportedImageBacking` is more private than the item `GpuImageBacking::Imported::0`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/device/gpu/resource.rs:976:14
+    |
+976 |     Imported(GpuImportedImageBacking),
+    |              ^^^^^^^^^^^^^^^^^^^^^^^ field `GpuImageBacking::Imported::0` is reachable at visibility `pub(crate)`
+    |
+note: but type `GpuImportedImageBacking` is only usable at visibility `pub(self)`
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/device/gpu/resource.rs:968:1
+    |
+968 | struct GpuImportedImageBacking {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `MIN_HEAP_SIZE` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/lib.rs:335:7
+    |
+335 | const MIN_HEAP_SIZE: usize = 32 * 1024;
+    |       ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `read_record` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/abi/android/binder/mod.rs:554:8
+    |
+215 | impl BinderFile {
+    | --------------- method in this implementation
+...
+554 |     fn read_record(&self, task: &Task, output: usize, capacity: usize) -> Result<usize, usize> {
+    |        ^^^^^^^^^^^
+
+warning: method `decode` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/abi/android/binder/objects.rs:722:19
+    |
+646 | impl BinderFile {
+    | --------------- method in this implementation
+...
+722 |     pub(super) fn decode(
+    |                   ^^^^^^
+
+warning: constant `KVM_INTERRUPT_UNSET` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/abi/linux/device/kvm/mod.rs:89:7
+   |
+89 | const KVM_INTERRUPT_UNSET: u32 = u32::MAX - 1;
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `KVM_CAP_COALESCED_MMIO` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/abi/linux/device/kvm/mod.rs:673:19
+    |
+673 |             const KVM_CAP_COALESCED_MMIO: usize = 15;
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `log_vm_exit` is never used
+    --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/abi/linux/device/kvm/mod.rs:1017:4
+     |
+1017 | fn log_vm_exit(exit: &crate::hypervisor::VmExit) {
+     |    ^^^^^^^^^^^
+
+warning: function `io_none` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/abi/linux/device/kvm/aarch64.rs:676:10
+    |
+676 | const fn io_none(ty: u32, nr: u32) -> u32 {
+    |          ^^^^^^^
+
+warning: associated function `new` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/abi/linux/generic/cgroup.rs:185:19
+    |
+184 | impl CgroupFs {
+    | ------------- associated function in this implementation
+185 |     pub(crate) fn new(group: Arc<ResourceGroup>) -> Arc<Self> {
+    |                   ^^^
+
+warning: field `id` is never read
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/abi/xv6/drivers/console.rs:11:5
+   |
+10 | pub struct ConsoleDevice {
+   |            ------------- field in this struct
+11 |     id: usize,
+   |     ^^
+
+warning: constant `S2_PXN` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/hv/mmu.rs:25:7
+   |
+25 | const S2_PXN: u64 = 1 << 53;
+   |       ^^^^^^
+
+warning: constant `S2_XN` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/hv/mmu.rs:26:7
+   |
+26 | const S2_XN: u64 = 1 << 54;
+   |       ^^^^^
+
+warning: constant `GIC_DIST_SIZE` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/hv/trap.rs:57:7
+   |
+57 | const GIC_DIST_SIZE: u64 = 0x1_0000;
+   |       ^^^^^^^^^^^^^
+
+warning: method `leaf_entry_bits` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/vm/mod.rs:232:19
+    |
+151 | impl RootPageTableGuard {
+    | ----------------------- method in this implementation
+...
+232 |     pub(crate) fn leaf_entry_bits(&mut self, vaddr: usize) -> Option<u64> {
+    |                   ^^^^^^^^^^^^^^^
+
+warning: constant `DEBUG_DEVICE_FAULT_VA` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/vm/mmu/armv8_4k.rs:48:7
+   |
+48 | const DEBUG_DEVICE_FAULT_VA: usize = 0xffff_0008_3afd_b000;
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `activate_early_boot_page_table` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/vm/mmu/armv8_4k.rs:65:22
+   |
+65 | pub(crate) unsafe fn activate_early_boot_page_table(root_paddr: u64) {
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new` and `walk` are never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/vm/mmu/armv8_4k.rs:471:41
+    |
+464 | impl PageTable {
+    | -------------- associated items in this implementation
+...
+471 |     pub(in crate::arch::aarch64::vm) fn new() -> Self {
+    |                                         ^^^
+...
+943 |     pub(in crate::arch::aarch64::vm) fn walk(
+    |                                         ^^^^
+
+warning: struct `FdtMemory` is never constructed
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/boot/fdt_memory.rs:12:19
+   |
+12 | pub(crate) struct FdtMemory {
+   |                   ^^^^^^^^^
+
+warning: associated items `parse`, `primary_usable`, and `reserve` are never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/boot/fdt_memory.rs:19:12
+    |
+ 18 | impl FdtMemory {
+    | -------------- associated items in this implementation
+ 19 |     pub fn parse(
+    |            ^^^^^
+...
+ 94 |     pub fn primary_usable(&self) -> PhysicalMemoryArea {
+    |            ^^^^^^^^^^^^^^
+...
+102 |     pub fn reserve(&mut self, area: PhysicalMemoryArea) -> Result<(), &'static str> {
+    |            ^^^^^^^
+
+warning: function `enabled` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/boot/fdt_memory.rs:114:4
+    |
+114 | fn enabled(node: &fdt::node::FdtNode<'_, '_>) -> bool {
+    |    ^^^^^^^
+
+warning: function `reg_area` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/boot/fdt_memory.rs:119:4
+    |
+119 | fn reg_area(reg: fdt::node::RawReg<'_>) -> Result<Option<PhysicalMemoryArea>, &'static str> {
+    |    ^^^^^^^^
+
+warning: function `area_from_size` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/boot/fdt_memory.rs:125:4
+    |
+125 | fn area_from_size(start: u64, size: u64) -> Result<Option<PhysicalMemoryArea>, &'static str> {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `complete_pages` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/boot/fdt_memory.rs:137:4
+    |
+137 | fn complete_pages(area: PhysicalMemoryArea) -> Result<Option<PhysicalMemoryArea>, &'static str> {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `subtract` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/boot/fdt_memory.rs:149:4
+    |
+149 | fn subtract(
+    |    ^^^^^^^^
+
+warning: function `initramfs_area` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/boot/fdt_memory.rs:189:4
+    |
+189 | fn initramfs_area(fdt: &fdt::Fdt<'_>) -> Result<Option<PhysicalMemoryArea>, &'static str> {
+    |    ^^^^^^^^^^^^^^
+
+warning: struct `ReservationEntries` is never constructed
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/boot/fdt_memory.rs:213:8
+    |
+213 | struct ReservationEntries<'a> {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/boot/fdt_memory.rs:219:8
+    |
+218 | impl<'a> ReservationEntries<'a> {
+    | ------------------------------- associated function in this implementation
+219 |     fn new(blob: &'a [u8]) -> Result<Self, &'static str> {
+    |        ^^^
+
+warning: function `target_request_for_domain` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/device/cpufreq.rs:713:4
+    |
+713 | fn target_request_for_domain(domain: u32, target_freq_khz: u64) -> Option<TargetRequest> {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/device/gpu/resource.rs:977:12
+    |
+977 |     Shared(Arc<crate::device::graphics::shared_image::SharedImage>),
+    |     ------ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |     |
+    |     field in this variant
+    |
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+    |
+977 -     Shared(Arc<crate::device::graphics::shared_image::SharedImage>),
+977 +     Shared(()),
+    |
+
+warning: field `promiscuous` is never read
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/device/network/mod.rs:311:5
+    |
+307 | pub struct GenericNetworkDevice {
+    |            -------------------- field in this struct
+...
+311 |     promiscuous: bool,
+    |     ^^^^^^^^^^^
+
+warning: field `remove_fn` is never read
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/device/platform/mod.rs:246:5
+    |
+243 | pub struct PlatformDeviceDriver {
+    |            -------------------- field in this struct
+...
+246 |     remove_fn: fn(&PlatformDeviceInfo) -> Result<(), &'static str>,
+    |     ^^^^^^^^^
+
+warning: method `process_request` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/block/virtio_blk.rs:195:8
+    |
+127 | impl VirtioBlockDevice {
+    | ---------------------- method in this implementation
+...
+195 |     fn process_request(&self, req: &mut BlockIORequest) -> Result<(), &'static str> {
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `log_probe_properties` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/graphics/simple_framebuffer.rs:235:4
+    |
+235 | fn log_probe_properties(device: &PlatformDeviceInfo) {
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/graphics/virtio_gpu.rs:111:7
+    |
+111 | const VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM: u32 = 3;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/graphics/virtio_gpu.rs:112:7
+    |
+112 | const VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM: u32 = 4;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/graphics/virtio_gpu.rs:113:7
+    |
+113 | const VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM: u32 = 67;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/graphics/virtio_gpu.rs:114:7
+    |
+114 | const VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM: u32 = 68;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/graphics/virtio_gpu.rs:115:7
+    |
+115 | const VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM: u32 = 121;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/graphics/virtio_gpu.rs:116:7
+    |
+116 | const VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM: u32 = 134;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `get_display_name` is never used
+    --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/graphics/virtio_gpu.rs:1429:8
+     |
+ 580 | impl VirtioGpuControl {
+     | --------------------- method in this implementation
+...
+1429 |     fn get_display_name(&self) -> &'static str {
+     |        ^^^^^^^^^^^^^^^^
+
+warning: constant `BLOCK_COUNT` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/mmc/sdhci/mod.rs:22:15
+   |
+22 |     pub const BLOCK_COUNT: usize = 0x06;
+   |               ^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CSUM` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:58:7
+   |
+58 | const VIRTIO_NET_F_CSUM: u32 = 0; // Device handles packets with partial checksum
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_CSUM` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:59:7
+   |
+59 | const VIRTIO_NET_F_GUEST_CSUM: u32 = 1; // Guest handles packets with partial checksum
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CTRL_GUEST_OFFLOADS` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:60:7
+   |
+60 | const VIRTIO_NET_F_CTRL_GUEST_OFFLOADS: u32 = 2; // Control channel offloads reconfiguration support
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_TSO4` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:63:7
+   |
+63 | const VIRTIO_NET_F_GUEST_TSO4: u32 = 7; // Guest can handle TSOv4
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_TSO6` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:64:7
+   |
+64 | const VIRTIO_NET_F_GUEST_TSO6: u32 = 8; // Guest can handle TSOv6
+   |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_ECN` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:65:7
+   |
+65 | const VIRTIO_NET_F_GUEST_ECN: u32 = 9; // Guest can handle TSO with ECN
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_UFO` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:66:7
+   |
+66 | const VIRTIO_NET_F_GUEST_UFO: u32 = 10; // Guest can handle UFO
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_HOST_TSO4` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:67:7
+   |
+67 | const VIRTIO_NET_F_HOST_TSO4: u32 = 11; // Device can handle TSOv4
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_HOST_TSO6` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:68:7
+   |
+68 | const VIRTIO_NET_F_HOST_TSO6: u32 = 12; // Device can handle TSOv6
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_HOST_ECN` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:69:7
+   |
+69 | const VIRTIO_NET_F_HOST_ECN: u32 = 13; // Device can handle TSO with ECN
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_HOST_UFO` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:70:7
+   |
+70 | const VIRTIO_NET_F_HOST_UFO: u32 = 14; // Device can handle UFO
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_MRG_RXBUF` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:71:7
+   |
+71 | const VIRTIO_NET_F_MRG_RXBUF: u32 = 15; // Guest can merge receive buffers
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CTRL_VQ` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:73:7
+   |
+73 | const VIRTIO_NET_F_CTRL_VQ: u32 = 17; // Control channel available
+   |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CTRL_RX` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:74:7
+   |
+74 | const VIRTIO_NET_F_CTRL_RX: u32 = 18; // Control channel RX mode support
+   |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CTRL_VLAN` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:75:7
+   |
+75 | const VIRTIO_NET_F_CTRL_VLAN: u32 = 19; // Control channel VLAN filtering
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_GUEST_ANNOUNCE` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:76:7
+   |
+76 | const VIRTIO_NET_F_GUEST_ANNOUNCE: u32 = 21; // Guest can send gratuitous packets
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_MQ` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:77:7
+   |
+77 | const VIRTIO_NET_F_MQ: u32 = 22; // Device supports multiqueue with automatic receive steering
+   |       ^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_F_CTRL_MAC_ADDR` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:78:7
+   |
+78 | const VIRTIO_NET_F_CTRL_MAC_ADDR: u32 = 23; // Set MAC address through control channel
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_NET_S_ANNOUNCE` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/network/virtio_net.rs:82:7
+   |
+82 | const VIRTIO_NET_S_ANNOUNCE: u16 = 2; // Gratuitous packets should be sent
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GICD_IIDR` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/pic/gic.rs:30:7
+   |
+30 | const GICD_IIDR: usize = 0x0008; // Distributor Implementer Identification Register
+   |       ^^^^^^^^^
+
+warning: constant `GICD_ICPENDR` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/pic/gic.rs:35:7
+   |
+35 | const GICD_ICPENDR: usize = 0x0280; // Interrupt Clear-Pending Registers
+   |       ^^^^^^^^^^^^
+
+warning: constant `GICD_ISACTIVER` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/pic/gic.rs:36:7
+   |
+36 | const GICD_ISACTIVER: usize = 0x0300; // Interrupt Set-Active Registers
+   |       ^^^^^^^^^^^^^^
+
+warning: constant `GICC_RPR` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/pic/gic.rs:49:7
+   |
+49 | const GICC_RPR: usize = 0x0014; // Running Priority Register
+   |       ^^^^^^^^
+
+warning: constant `GICC_HPPIR` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/pic/gic.rs:50:7
+   |
+50 | const GICC_HPPIR: usize = 0x0018; // Highest Priority Pending Interrupt Register
+   |       ^^^^^^^^^^
+
+warning: constant `UARTRSR` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/uart/pl011.rs:28:7
+   |
+28 | const UARTRSR: usize = 0x004; // Receive Status Register
+   |       ^^^^^^^
+
+warning: constant `FR_TXFE` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/uart/pl011.rs:39:7
+   |
+39 | const FR_TXFE: u32 = 1 << 7; // Transmit FIFO empty
+   |       ^^^^^^^
+
+warning: constant `FR_RXFF` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/uart/pl011.rs:40:7
+   |
+40 | const FR_RXFF: u32 = 1 << 6; // Receive FIFO full
+   |       ^^^^^^^
+
+warning: field `multi_tt` is never read
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/usb/xhci/mod.rs:542:5
+    |
+538 | struct HubRuntime {
+    |        ---------- field in this struct
+...
+542 |     multi_tt: bool,
+    |     ^^^^^^^^
+    |
+    = note: `HubRuntime` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: field `max_intrs` is never read
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/usb/xhci/mod.rs:848:5
+    |
+838 | pub struct XhciController {
+    |            -------------- field in this struct
+...
+848 |     max_intrs: u16,
+    |     ^^^^^^^^^
+
+warning: static `INPUT_COUNTER` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/virtio/device/mod.rs:33:8
+   |
+33 | static INPUT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+   |        ^^^^^^^^^^^^^
+
+warning: struct `VirtioInputConfig` is never constructed
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/virtio_input.rs:51:8
+   |
+51 | struct VirtioInputConfig {
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_INPUT_CFG_UNSET` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/virtio_input.rs:61:15
+   |
+61 |     pub const VIRTIO_INPUT_CFG_UNSET: u8 = 0x00;
+   |               ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_INPUT_CFG_ID_SERIAL` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/virtio_input.rs:63:15
+   |
+63 |     pub const VIRTIO_INPUT_CFG_ID_SERIAL: u8 = 0x02;
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `VIRTIO_INPUT_CFG_ID_DEVIDS` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/drivers/virtio_input.rs:64:15
+   |
+64 |     pub const VIRTIO_INPUT_CFG_ID_DEVIDS: u8 = 0x03;
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `next_file_id` is never read
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/drivers/ext2/mod.rs:307:5
+    |
+291 | pub struct Ext2FileSystem {
+    |            -------------- field in this struct
+...
+307 |     next_file_id: IrqSpinLock<u64>,
+    |     ^^^^^^^^^^^^
+
+warning: methods `len`, `get_stats`, and `print_stats` are never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/drivers/ext2/mod.rs:446:8
+    |
+368 | impl InodeLruCache {
+    | ------------------ methods in this implementation
+...
+446 |     fn len(&self) -> usize {
+    |        ^^^
+...
+451 |     fn get_stats(&self) -> (u64, u64, usize) {
+    |        ^^^^^^^^^
+...
+456 |     fn print_stats(&self, cache_name: &str) {
+    |        ^^^^^^^^^^^
+
+warning: methods `len`, `get_stats`, and `print_stats` are never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/drivers/ext2/mod.rs:565:8
+    |
+489 | impl BlockLruCache {
+    | ------------------ methods in this implementation
+...
+565 |     fn len(&self) -> usize {
+    |        ^^^
+...
+570 |     fn get_stats(&self) -> (u64, u64, usize) {
+    |        ^^^^^^^^^
+...
+575 |     fn print_stats(&self, cache_name: &str) {
+    |        ^^^^^^^^^^^
+
+warning: method `free_block` is never used
+    --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/drivers/ext2/mod.rs:3754:8
+     |
+ 584 | impl Ext2FileSystem {
+     | ------------------- method in this implementation
+...
+3754 |     fn free_block(&self, block_number: u32) -> Result<(), FileSystemError> {
+     |        ^^^^^^^^^^
+
+warning: field `fs` is never read
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/drivers/overlayfs/mod.rs:128:5
+    |
+126 | struct OverlayBacking {
+    |        -------------- field in this struct
+127 |     node: Arc<dyn VfsNode>,
+128 |     fs: Arc<dyn FileSystemOperations>,
+    |     ^^
+    |
+    = note: `OverlayBacking` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: field `content` is never read
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/drivers/tmpfs/mod.rs:698:5
+    |
+687 | pub struct TmpNode {
+    |            ------- field in this struct
+...
+698 |     content: IrqRwSpinLock<Vec<u8>>,
+    |     ^^^^^^^
+
+warning: method `resolve_symlink_target` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/fs/vfs_v2/mount_tree.rs:876:8
+    |
+257 | impl MountTree {
+    | -------------- method in this implementation
+...
+876 |     fn resolve_symlink_target(
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `e_type` is never read
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/lsm/elf.rs:155:5
+    |
+154 | struct Elf64_Ehdr {
+    |        ---------- field in this struct
+155 |     e_type: u16,
+    |     ^^^^^^
+    |
+    = note: `Elf64_Ehdr` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `is_object_locked` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/page_cache.rs:395:8
+    |
+131 | impl PageCacheManager {
+    | --------------------- method in this implementation
+...
+395 |     fn is_object_locked(&self, id: CacheId) -> bool {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/mem/pmm.rs:90:14
+   |
+89 | impl Page {
+   | --------- associated function in this implementation
+90 |     const fn new() -> Self {
+   |              ^^^
+
+warning: field `entry` is never read
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/network/arp.rs:220:5
+    |
+218 | struct ArpPendingEntry {
+    |        --------------- field in this struct
+219 |     /// Cache entry
+220 |     entry: ArpCacheEntry,
+    |     ^^^^^
+    |
+    = note: `ArpPendingEntry` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: fields `timeout_ticks` and `cache_timeout` are never read
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/network/arp.rs:248:5
+    |
+242 | pub struct ArpLayer {
+    |            -------- fields in this struct
+...
+248 |     timeout_ticks: u64,
+    |     ^^^^^^^^^^^^^
+249 |     /// Cache timeout (in ticks)
+250 |     cache_timeout: u64,
+    |     ^^^^^^^^^^^^^
+
+warning: method `recv_handles_and_data_batch` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/network/local.rs:801:19
+    |
+509 | impl LocalSocket {
+    | ---------------- method in this implementation
+...
+801 |     pub(crate) fn recv_handles_and_data_batch(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variants `XhciRxCopy` and `XhciTxCopy` are never constructed
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/network/profile.rs:19:5
+   |
+17 | pub(crate) enum Stage {
+   |                 ----- variants in this enum
+18 |     XhciRxInvalidate,
+19 |     XhciRxCopy,
+   |     ^^^^^^^^^^
+20 |     XhciRxRequeue,
+21 |     XhciTxCopy,
+   |     ^^^^^^^^^^
+   |
+   = note: `Stage` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: methods `send_syn_ack` and `send_fin_ack` are never used
+    --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/network/tcp.rs:2033:8
+     |
+ 716 | impl TcpSocket {
+     | -------------- methods in this implementation
+...
+2033 |     fn send_syn_ack(&self, dest_ip: Ipv4Address, dest_port: u16, their_seq: u32, ack_seq: u32) {
+     |        ^^^^^^^^^^^^
+...
+2138 |     fn send_fin_ack(&self) {
+     |        ^^^^^^^^^^^^
+
+warning: methods `as_kernel_object`, `as_hypervisor_vm_arc`, and `as_hypervisor_vcpu` are never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/object/mod.rs:282:19
+    |
+258 | impl<'a> KernelObjectRef<'a> {
+    | ---------------------------- methods in this implementation
+...
+282 |     pub(crate) fn as_kernel_object(&self) -> &'a KernelObject {
+    |                   ^^^^^^^^^^^^^^^^
+...
+322 |     pub(crate) fn as_hypervisor_vm_arc(&self) -> Option<&'a hypervisor::VmRef> {
+    |                   ^^^^^^^^^^^^^^^^^^^^
+...
+335 |     pub(crate) fn as_hypervisor_vcpu(&self) -> Option<&'a dyn hypervisor::VcpuObject> {
+    |                   ^^^^^^^^^^^^^^^^^^
+
+warning: constant `SLICE_DIAGNOSTIC_NONE` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/sched/scheduler.rs:264:7
+    |
+264 | const SLICE_DIAGNOSTIC_NONE: u64 = 0;
+    |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `snapshot` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/sync/diagnostic.rs:53:12
+   |
+33 | impl<T: Copy> TryDiagnosticState<T> {
+   | ----------------------------------- method in this implementation
+...
+53 |     pub fn snapshot(&self) -> Option<T> {
+   |            ^^^^^^^^
+
+warning: method `as_mut_ptr` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/sync/spinlock.rs:113:26
+    |
+ 39 | impl<T> SpinLock<T> {
+    | ------------------- method in this implementation
+...
+113 |     pub(crate) unsafe fn as_mut_ptr(&self) -> *mut T {
+    |                          ^^^^^^^^^^
+
+warning: struct `TaskExecutionDebugSnapshot` is never constructed
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/task/mod.rs:728:19
+    |
+728 | pub(crate) struct TaskExecutionDebugSnapshot {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `try_deadline_debug_state`, `execution_debug_snapshot`, and `has_software_timers` are never used
+    --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/task/mod.rs:1336:19
+     |
+1054 | impl Task {
+     | --------- methods in this implementation
+...
+1336 |     pub(crate) fn try_deadline_debug_state(&self) -> Option<(bool, bool)> {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1634 |     pub(crate) fn execution_debug_snapshot(&self) -> TaskExecutionDebugSnapshot {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+3798 |     pub(crate) fn has_software_timers(&self) -> bool {
+     |                   ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `EI_MAG0` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/task/elf_loader/mod.rs:155:7
+    |
+155 | const EI_MAG0: usize = 0;
+    |       ^^^^^^^
+
+warning: constant `EI_MAG1` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/task/elf_loader/mod.rs:156:7
+    |
+156 | const EI_MAG1: usize = 1;
+    |       ^^^^^^^
+
+warning: constant `EI_MAG2` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/task/elf_loader/mod.rs:157:7
+    |
+157 | const EI_MAG2: usize = 2;
+    |       ^^^^^^^
+
+warning: constant `EI_MAG3` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/task/elf_loader/mod.rs:158:7
+    |
+158 | const EI_MAG3: usize = 3;
+    |       ^^^^^^^
+
+warning: static `TIMER_STALL_SAMPLES` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/timer.rs:151:8
+    |
+151 | static TIMER_STALL_SAMPLES: [ReportInterval; MAX_NUM_CPUS] =
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `TIMER_STALL_SAMPLE_INTERVAL_NS` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/timer.rs:154:7
+    |
+154 | const TIMER_STALL_SAMPLE_INTERVAL_NS: u64 = 1_000_000_000;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `should_sample_timer_stalls` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/timer.rs:343:4
+    |
+343 | fn should_sample_timer_stalls(cpu_id: usize, now_ns: u64) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `diagnostic_time_ns` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/timer.rs:957:15
+    |
+957 | pub(crate) fn diagnostic_time_ns() -> Option<u64> {
+    |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `align_down` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/vm/mod.rs:55:4
+   |
+55 | fn align_down(addr: usize, align: usize) -> usize {
+   |    ^^^^^^^^^^
+
+warning: function `align_up` is never used
+  --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/vm/mod.rs:59:4
+   |
+59 | fn align_up(addr: usize, align: usize) -> usize {
+   |    ^^^^^^^^
+
+warning: method `slot_index_for_base` is never used
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/vm/mod.rs:572:8
+    |
+547 | impl KernelKstackAllocator {
+    | -------------------------- method in this implementation
+...
+572 |     fn slot_index_for_base(&self, base: usize) -> Option<usize> {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: direct cast of function item into an integer
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/mod.rs:249:79
+    |
+249 |     let trap_exit_offset = (crate::arch::aarch64::trap::user::_switch_to_user as usize)
+    |                                                                               ^^^^^^^^
+    |
+    = note: `#[warn(function_casts_as_integer)]` on by default
+help: first cast to a pointer `as *const ()`
+    |
+249 |     let trap_exit_offset = (crate::arch::aarch64::trap::user::_switch_to_user as *const () as usize)
+    |                                                                               ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/mod.rs:250:74
+    |
+250 |         .wrapping_sub(crate::arch::aarch64::trap::user::_user_trap_entry as usize);
+    |                                                                          ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+250 |         .wrapping_sub(crate::arch::aarch64::trap::user::_user_trap_entry as *const () as usize);
+    |                                                                          ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/mod.rs:503:34
+    |
+503 |     trap::user::_user_trap_entry as usize
+    |                                  ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+503 |     trap::user::_user_trap_entry as *const () as usize
+    |                                  ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/mod.rs:517:38
+    |
+517 |     trap::kernel::_kernel_trap_entry as usize
+    |                                      ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+517 |     trap::kernel::_kernel_trap_entry as *const () as usize
+    |                                      ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/mod.rs:521:44
+    |
+521 |     trap::kernel::arch_kernel_trap_handler as usize
+    |                                            ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+521 |     trap::kernel::arch_kernel_trap_handler as *const () as usize
+    |                                            ++++++++++++
+
+warning: direct cast of function item into an integer
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/mod.rs:525:40
+    |
+525 |     trap::user::arch_user_trap_handler as usize
+    |                                        ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+525 |     trap::user::arch_user_trap_handler as *const () as usize
+    |                                        ++++++++++++
+
+warning: transmuting an integer to a pointer creates a pointer without provenance
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/mod.rs:677:21
+    |
+677 |     return unsafe { transmute(tpidr_el1) };
+    |                     ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this is dangerous because dereferencing the resulting pointer is undefined behavior
+    = note: exposed provenance semantics can be used to create a pointer based on some previously exposed provenance
+    = help: if you truly mean to create a pointer without provenance, use `std::ptr::without_provenance_mut`
+    = help: for more information about transmute, see <https://doc.rust-lang.org/std/mem/fn.transmute.html#transmutation-between-pointers-and-integers>
+    = help: for more information about exposed provenance, see <https://doc.rust-lang.org/std/ptr/index.html#exposed-provenance>
+    = note: `#[warn(integer_to_ptr_transmutes)]` on by default
+help: use `std::ptr::with_exposed_provenance_mut` instead to use a previously exposed provenance
+    |
+677 -     return unsafe { transmute(tpidr_el1) };
+677 +     return unsafe { &mut *std::ptr::with_exposed_provenance_mut::<arch::aarch64::Aarch64>(tpidr_el1) };
+    |
+
+warning: direct cast of function item into an integer
+   --> /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/kernel/src/arch/aarch64/hv/switch.rs:180:32
+    |
+180 |     el2_guest_exit_vector_base as usize
+    |                                ^^^^^^^^
+    |
+help: first cast to a pointer `as *const ()`
+    |
+180 |     el2_guest_exit_vector_base as *const () as usize
+    |                                ++++++++++++
+
+   Compiling scarlet-modules v0.1.0 (/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/projects/aarch64-limine-crosvm/.scarlet/scarlet-modules)
+For more information about this error, try `rustc --explain E0133`.
+warning: `scarlet` (lib) generated 216 warnings (run `cargo fix --lib -p scarlet` to apply 90 suggestions)
+   Compiling aarch64-limine-crosvm-project v1.0.0 (/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/projects/aarch64-limine-crosvm/bsp)
+warning: unnecessary `unsafe` block
+  --> src/main.rs:27:5
+   |
+27 |     unsafe {
+   |     ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: `aarch64-limine-crosvm-project` (bin "scarlet") generated 1 warning
+    Finished `release` profile [optimized] target(s) in 33.36s
+warning: the following packages contain code that will be rejected by a future version of Rust: aes v0.9.3, core v0.0.0 (/nix/store/42rqgd28d15hwzrwb5va31qdkk3z5hji-scarlet-rust-toolchain-71dd0425890d/lib/rustlib/src/rust/library/core)
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+aarch64-unknown-linux-gnu-objcopy: /Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/projects/aarch64-limine-crosvm/bsp/target/aarch64-unknown-none-elf/release/stt3KfXt: warning: allocated section `.ksym' not in segment
+cargo-scarlet: ksym: injected 3090 symbols

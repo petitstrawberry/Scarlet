@@ -15,12 +15,18 @@ The direct fixture uses Android 13/API 33 while the pinned VM uses Android 17.
 These are compatibility checkpoints, not a controlled performance comparison.
 Current work focuses on direct execution under outer QEMU HVF. As of 2026-10-30,
 native FIFO scheduling, cancellable RPC priority inheritance and explicit
-nonroot exec capability delegation pass real Bionic probes and 1,759 kernel
-tests. Stock SurfaceFlinger connects its primary display; stock init runs
+nonroot exec capability delegation pass real Bionic probes. The current kernel
+suite passes 1,766 tests, including bounded Shield policy updates and native
+power-supply translation.
+Stock SurfaceFlinger connects its primary display; stock init runs
 installd and odsign, and PackageManager initializes after scanning 30 stock
-packages, including Launcher and SystemUI. App data labeling, remaining service
-startup and an actual Activity frame remain ahead. See the
-[display checkpoint](checkpoints/2026-10-30-fifo-display/verification.json).
+packages, including Launcher and SystemUI. The userspace manager adds application
+labels from those real UID assignments to the live Shield policy. Stock Health
+2.1 starts over read-only native power-supply telemetry and reports no battery
+in this fixture. BatteryService is now blocked by hwservicemanager's request for
+authenticated caller-label delivery when exporting itself to Java.
+App data initialization, remaining service startup and an actual Activity frame
+remain ahead. See the [Health checkpoint](checkpoints/2026-10-30-health/verification.json).
 
 ## Direct Bionic execution
 
