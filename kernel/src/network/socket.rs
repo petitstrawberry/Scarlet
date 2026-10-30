@@ -20,7 +20,7 @@ use alloc::{string::String, sync::Arc};
 use crate::ipc::StreamIpcOps;
 use crate::object::capability::{Selectable, StreamError};
 
-fn stream_error_to_socket_error(error: StreamError) -> SocketError {
+pub(super) fn stream_error_to_socket_error(error: StreamError) -> SocketError {
     match error {
         StreamError::WouldBlock => SocketError::WouldBlock,
         StreamError::Interrupted => SocketError::Interrupted,
@@ -286,6 +286,10 @@ pub enum SocketState {
 pub enum SocketError {
     /// The requested endpoint label is not authorized.
     PermissionDenied,
+    DestinationRequired,
+    MessageTooLarge,
+    ProtocolMismatch,
+    BrokenPipe,
     /// Invalid socket address
     InvalidAddress,
     /// Address already in use
@@ -335,6 +339,10 @@ pub enum SocketError {
 pub(crate) fn socket_error_to_native_errno(error: &SocketError) -> i32 {
     match error {
         SocketError::PermissionDenied => 13,
+        SocketError::DestinationRequired => 89,
+        SocketError::MessageTooLarge => 90,
+        SocketError::ProtocolMismatch => 91,
+        SocketError::BrokenPipe => 32,
         SocketError::InvalidAddress | SocketError::InvalidArgument => 22,
         SocketError::AddressInUse => 98,
         SocketError::AddressNotAvailable => 99,
@@ -352,6 +360,13 @@ pub(crate) fn socket_error_to_native_errno(error: &SocketError) -> i32 {
         SocketError::ProtocolNotSupported => 93,
         SocketError::InvalidPacket | SocketError::Other(_) => 5,
     }
+}
+
+/// Native message options; ABI modules translate their own flag encodings.
+pub mod message_flags {
+    pub const NONBLOCK:u32=1;
+    pub const PEEK:u32=2;
+    pub const FULL_LENGTH:u32=4;
 }
 
 /// Socket control operations trait

@@ -1,4 +1,7 @@
 pub(crate) mod uevent;
+#[path = "local_datagram.rs"]
+mod datagram;
+
 use crate::ipc::IpcError;
 use crate::object::capability::StreamError;
 use crate::{
@@ -114,6 +117,10 @@ fn is_mozc_server_task(task: &crate::task::Task) -> bool {
 fn socket_error_to_errno(error: SocketError) -> usize {
     match error {
         SocketError::PermissionDenied => errno::EACCES,
+        SocketError::DestinationRequired => errno::EDESTADDRREQ,
+        SocketError::MessageTooLarge => errno::EMSGSIZE,
+        SocketError::ProtocolMismatch => errno::EPROTOTYPE,
+        SocketError::BrokenPipe => errno::EPIPE,
         SocketError::InvalidAddress | SocketError::InvalidArgument => errno::EINVAL,
         SocketError::AddressInUse => errno::EADDRINUSE,
         SocketError::AddressNotAvailable => errno::EADDRNOTAVAIL,
@@ -958,6 +965,7 @@ pub fn sys_connect(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     unsafe {
         let sa_family = *(addr_paddr as *const u16);
         match sa_family {
+            0 if LocalSocket::from_socket_object(socket_arc.as_ref()).is_some_and(|local|local.is_datagram()) => return socket_arc.connect(&crate::network::SocketAddress::Unspecified).map_or_else(|error|errno::to_result(socket_error_to_errno(error)),|_|0),
             AF_UNIX_U16 => {
                 let path_start = (addr_paddr + 2) as *const u8;
                 let max_path_len = (addrlen - 2) as usize;
@@ -1482,7 +1490,7 @@ fn sendmsg_for_task(
         Err(error) => return errno::to_result(error),
     };
     let iovcnt = msg.msg_iovlen as usize;
-    if iovcnt == 0 {
+    if iovcnt == 0 && !kernel_obj.as_socket().and_then(LocalSocket::from_socket_object).is_some_and(|local|local.is_datagram()) {
         return 0;
     }
 
@@ -1496,6 +1504,10 @@ fn sendmsg_for_task(
         Err(error) => return errno::to_result(error),
     };
 
+    if let Some(local)=kernel_obj.as_socket().and_then(LocalSocket::from_socket_object).filter(|local|local.is_datagram()) {
+        let flags=flags | if abi.get_file_status_flags(sockfd).is_some_and(|flags|flags as i32&O_NONBLOCK!=0) {MSG_DONTWAIT}else {0};
+        return datagram::send(abi,task,local,&msg,&iovecs,flags);
+    }
     let mut attached_handles = Vec::new();
     if msg.msg_control != 0 && msg.msg_controllen as usize >= size_of::<LinuxCmsghdr>() {
         let socket = match kernel_obj.as_socket() {
@@ -1780,6 +1792,9 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         }
     };
 
+    if let Some(local)=kernel_obj.as_socket().and_then(LocalSocket::from_socket_object).filter(|local|local.is_datagram()) {
+        return datagram::receive(abi,&task,local,sockfd,msg_ptr,flags);
+    }
     let stream = match kernel_obj.as_stream() {
         Some(stream) => stream,
         None => {
@@ -2152,6 +2167,11 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         None => return errno::to_result(errno::ENOTSOCK),
     };
 
+    if LocalSocket::from_socket_object(socket.as_ref()).is_some_and(|local| local.is_datagram())
+        && len > crate::network::local::MAX_DATAGRAM_BYTES
+    {
+        return errno::to_result(errno::EMSGSIZE);
+    }
     let mut data = Vec::new();
     if data.try_reserve_exact(len).is_err() {
         return errno::to_result(errno::ENOMEM);
@@ -2185,8 +2205,7 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 crate::network::SocketAddress::Inet(sockaddr.to_inet())
             }
             AF_UNIX_U16 => {
-                // Unix domain socket sendto - usually not used for stream sockets
-                crate::network::SocketAddress::Unspecified
+                match linux_local_sockaddr_from_user(&task,(addr_kaddr+2) as *const u8,addrlen as usize-2,false) {Ok((address,_,_))=>address,Err(error)=>return errno::to_result(error)}
             }
             _ => return errno::to_result(errno::EAFNOSUPPORT),
         }
@@ -2196,7 +2215,10 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     // Send data
-    let result = socket.sendto(&data, &dest_addr, flags);
+    let datagram=LocalSocket::from_socket_object(socket.as_ref()).is_some_and(|local|local.is_datagram());
+    if datagram && flags & !((MSG_DONTWAIT as u32)|0x4000)!=0 {return errno::to_result(errno::EOPNOTSUPP);}
+    let native_flags=if datagram {if flags&MSG_DONTWAIT as u32!=0 {crate::network::socket::message_flags::NONBLOCK}else {0}}else {flags};
+    let result = socket.sendto(&data, &dest_addr, native_flags);
     if MOZC_IPC_TRACE_ENABLED && is_mozc_server_task(&task) {
         match &result {
             Ok(written) => crate::println!(
@@ -2223,7 +2245,7 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Err(crate::network::socket::SocketError::NotConnected) => errno::to_result(errno::ENOTCONN),
         Err(crate::network::socket::SocketError::NoRoute) => errno::to_result(errno::ENETUNREACH),
         Err(crate::network::socket::SocketError::InvalidAddress) => errno::to_result(errno::EINVAL),
-        Err(_) => errno::to_result(errno::EIO),
+        Err(error) => errno::to_result(socket_error_to_errno(error)),
     }
 }
 
@@ -2290,7 +2312,8 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // MSG_DONTWAIT affects this receive only. Preserve the socket's existing
     // mode, including when another descriptor shares the same socket.
-    let previous_nonblocking = socket.as_selectable().map(|selectable| {
+    let datagram=LocalSocket::from_socket_object(socket.as_ref()).is_some_and(|local|local.is_datagram());
+    let previous_nonblocking = socket.as_selectable().filter(|_|!datagram).map(|selectable| {
         let previous = selectable.is_nonblocking();
         if nonblocking && !previous {
             selectable.set_nonblocking(true);
@@ -2299,7 +2322,7 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     });
 
     // Receive data
-    let result = if flags & MSG_PEEK != 0 {
+    let result = if flags & MSG_PEEK != 0 && !LocalSocket::from_socket_object(socket.as_ref()).is_some_and(|local|local.is_datagram()) {
         match LocalSocket::from_socket_object(socket.as_ref()) {
             Some(local) => local.peek_record(&mut buffer).map(|record_len| {
                 let count =
@@ -2313,7 +2336,12 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             None => Err(SocketError::NotSupported),
         }
     } else {
-        socket.recvfrom(&mut buffer, flags)
+        if datagram {
+            use crate::network::socket::message_flags as native;
+            if flags & !((MSG_DONTWAIT as u32)|MSG_PEEK|MSG_TRUNC|0x100)!=0 {return errno::to_result(errno::EOPNOTSUPP);}
+            let options=if nonblocking {native::NONBLOCK}else {0} | if flags&MSG_PEEK!=0 {native::PEEK}else {0} | if flags&MSG_TRUNC!=0 {native::FULL_LENGTH}else {0};
+            socket.recvfrom(&mut buffer,options)
+        }else {socket.recvfrom(&mut buffer,flags)}
     };
 
     if nonblocking && previous_nonblocking == Some(false) {
@@ -2372,6 +2400,13 @@ pub fn sys_recvfrom(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                             }
                             addrlen_bytes = (size_of::<SockaddrIn>() as u32).to_ne_bytes();
                         }
+                    }
+                    crate::network::SocketAddress::Local(address) => {
+                        let mut bytes=Vec::from(AF_UNIX_U16.to_ne_bytes());
+                        if address.is_abstract() {bytes.push(0);bytes.extend_from_slice(address.path().as_bytes());}
+                        else if !address.path().is_empty() {bytes.extend_from_slice(address.path().as_bytes());bytes.push(0);}
+                        if copy_to_user(&task,src_addr_ptr,&bytes[..bytes.len().min(provided_len as usize)]).is_err() {return errno::to_result(errno::EFAULT);}
+                        addrlen_bytes=(bytes.len() as u32).to_ne_bytes();
                     }
                     _ => addrlen_bytes = 0u32.to_ne_bytes(),
                 }

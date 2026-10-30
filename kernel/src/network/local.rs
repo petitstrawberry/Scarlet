@@ -17,6 +17,10 @@
 //! 3. **Listening**: Server socket accepting connections
 //! 4. **Connected**: Client socket or accepted connection
 
+#[path = "local_datagram.rs"]
+mod datagram;
+pub(crate) use datagram::MAX_MESSAGE_BYTES as MAX_DATAGRAM_BYTES;
+
 use crate::sync::IrqRwSpinLock;
 use alloc::{
     collections::VecDeque,
@@ -85,6 +89,8 @@ fn local_socket_address_from_registry_name(name: &str) -> LocalSocketAddress {
         LocalSocketAddress::from_path(name).unwrap_or_else(|_| LocalSocketAddress::unnamed())
     }
 }
+
+pub(crate) fn datagram_source_address(name:&str)->LocalSocketAddress {local_socket_address_from_registry_name(name)}
 
 /// Immutable sender snapshot; receiving after exit or an identity change must
 /// not consult the sender's current task or manufacture a privileged identity.
@@ -431,6 +437,7 @@ impl SocketBuffer {
 pub struct LocalSocket {
     /// Socket type (Stream, Datagram, etc.)
     socket_type: SocketType,
+    datagrams:Arc<datagram::Inbox>,
 
     /// Weak self reference (initialized when wrapped in Arc)
     ///
@@ -543,6 +550,7 @@ impl LocalSocket {
     fn new_labeled(socket_type:SocketType,protocol:SocketProtocol,label:Option<crate::shield::Subject>)->Self {
         Self {
             socket_type,
+            datagrams:datagram::Inbox::new(),
             protocol,
             state: IrqRwSpinLock::new(SocketState::Unconnected),
             local_addr: IrqRwSpinLock::new(None),
@@ -632,6 +640,8 @@ impl LocalSocket {
         object: KernelObject,
         metadata: HandleMetadata,
     ) -> Result<(), crate::ipc::IpcError> {
+        if self.is_datagram() {return Err(crate::ipc::IpcError::InvalidState);}
+
         use crate::ipc::IpcError;
 
         // Verify socket is connected
@@ -710,6 +720,8 @@ impl LocalSocket {
         handles: Vec<(KernelObject, HandleMetadata)>,
         data: &[u8],
     ) -> Result<(), crate::ipc::IpcError> {
+        if self.is_datagram() {return Err(crate::ipc::IpcError::InvalidState);}
+
         use crate::ipc::IpcError;
 
         localsocket_log!(
@@ -764,6 +776,8 @@ impl LocalSocket {
         &self,
         max_data_len: usize,
     ) -> Result<(KernelObject, HandleMetadata, Vec<u8>), crate::ipc::IpcError> {
+        if self.is_datagram() {return Err(crate::ipc::IpcError::InvalidState);}
+
         use crate::ipc::IpcError;
 
         localsocket_log!(
@@ -805,6 +819,8 @@ impl LocalSocket {
         ),
         crate::ipc::IpcError,
     > {
+        if self.is_datagram() {return Err(crate::ipc::IpcError::InvalidState);}
+
         use crate::ipc::IpcError;
 
         if *self.state.read() != SocketState::Connected {
@@ -823,6 +839,8 @@ impl LocalSocket {
     ///
     /// The transferred object and exact handle metadata, or an IPC error.
     pub fn recv_handle(&self) -> Result<(KernelObject, HandleMetadata), crate::ipc::IpcError> {
+        if self.is_datagram() {return Err(crate::ipc::IpcError::InvalidState);}
+
         use crate::ipc::IpcError;
 
         // Verify socket is connected
@@ -934,6 +952,7 @@ impl LocalSocket {
         // It reads from local_read_buffer, writes to peer_read_buffer
         let local_socket = Arc::new(Self {
             socket_type,
+            datagrams:datagram::Inbox::new(),
             protocol: SocketProtocol::Default,
             state: IrqRwSpinLock::new(SocketState::Connected),
             local_addr: IrqRwSpinLock::new(Some(local_addr.clone())),
@@ -960,6 +979,7 @@ impl LocalSocket {
         // It reads from peer_read_buffer, writes to local_read_buffer
         let peer_socket = Arc::new(Self {
             socket_type,
+            datagrams:datagram::Inbox::new(),
             protocol: SocketProtocol::Default,
             state: IrqRwSpinLock::new(SocketState::Connected),
             local_addr: IrqRwSpinLock::new(Some(peer_addr)),
@@ -988,6 +1008,12 @@ impl LocalSocket {
         // Set peer references
         *local_socket.peer_socket.write() = Some(Arc::downgrade(&peer_socket));
         *peer_socket.peer_socket.write() = Some(Arc::downgrade(&local_socket));
+        if socket_type==SocketType::Datagram {
+            *local_socket.local_addr.write()=None;*local_socket.peer_addr.write()=None;
+            *peer_socket.local_addr.write()=None;*peer_socket.peer_addr.write()=None;
+            local_socket.datagrams.watch(&peer_socket).expect("fresh datagram inbox");
+            peer_socket.datagrams.watch(&local_socket).expect("fresh datagram inbox");
+        }
 
         (local_socket, peer_socket)
     }
@@ -1135,7 +1161,10 @@ impl LocalSocket {
         buffer: &mut [u8],
     ) -> Result<(usize, SocketCredentials), StreamError> {
         use crate::task::mytask;
-
+        if self.is_datagram() {
+            let message=self.receive_datagram(false,false).map_err(|error|match error {SocketError::WouldBlock=>StreamError::WouldBlock,SocketError::Interrupted=>StreamError::Interrupted,_=>StreamError::InvalidArgument})?;
+            let n=buffer.len().min(message.data.len());buffer[..n].copy_from_slice(&message.data[..n]);return Ok((n,message.sender));
+        }
         if buffer.is_empty() {
             return Ok((0, SocketCredentials::unknown()));
         }
@@ -1228,7 +1257,7 @@ impl StreamOps for LocalSocket {
 
     fn write(&self, data: &[u8]) -> Result<usize, StreamError> {
         use crate::task::mytask;
-
+        if self.is_datagram() {return self.send_datagram(data.to_vec(),Vec::new(),&SocketAddress::Unspecified,false).map_err(|error|match error {SocketError::WouldBlock=>StreamError::WouldBlock,SocketError::Interrupted=>StreamError::Interrupted,_=>StreamError::InvalidArgument});}
         if data.is_empty() {
             return Ok(0);
         }
@@ -1332,6 +1361,12 @@ impl LocalSocket {
     /// latter must not wait for transient `Arc` clones retained by an abandoned
     /// blocking syscall stack.
     fn close_internal(&self) {
+        if self.is_datagram() {
+            if let Some(path)=self.local_addr.read().as_ref() {NetworkManager::get_manager().unregister_named_socket(path,self);}
+            *self.state.write()=SocketState::Closed;self.datagrams.close();
+            if let Some(peer)=self.upgrade_peer() {peer.datagrams.event.wake_all();}
+            NetworkManager::get_manager().remove_socket_by_ptr(self as *const Self as usize);return;
+        }
         let state = *self.state.read();
 
         if matches!(state, SocketState::Bound | SocketState::Listening)
@@ -1409,6 +1444,7 @@ impl SocketControl for LocalSocket {
     }
 
     fn listen(&self, backlog: usize) -> Result<(), SocketError> {
+        if self.is_datagram() {return Err(SocketError::NotSupported);}
         let mut state = self.state.write();
         if !matches!(*state, SocketState::Bound | SocketState::Listening) {
             return Err(SocketError::InvalidOperation);
@@ -1440,6 +1476,7 @@ impl SocketControl for LocalSocket {
     }
 
     fn connect(&self, address: &SocketAddress) -> Result<(), SocketError> {
+        if self.is_datagram() {return self.connect_datagram(address);}
         // Validate current state
         let state = self.state.read();
         if *state != SocketState::Unconnected {
@@ -1486,6 +1523,7 @@ impl SocketControl for LocalSocket {
         // Create server-side connection socket that will be added to backlog
         let server_conn = Arc::new(Self {
             socket_type: SocketType::Stream,
+            datagrams:datagram::Inbox::new(),
             protocol: SocketProtocol::Default,
             state: IrqRwSpinLock::new(SocketState::Connected),
             local_addr: IrqRwSpinLock::new(Some(name.clone())),
@@ -1560,6 +1598,7 @@ impl SocketControl for LocalSocket {
     }
 
     fn shutdown(&self, how: ShutdownHow) -> Result<(), SocketError> {
+        if self.is_datagram() {return self.shutdown_datagram(how);}
         if *self.state.read() != SocketState::Connected {
             return Err(SocketError::NotConnected);
         }
@@ -1624,6 +1663,7 @@ impl SocketControl for LocalSocket {
             Some(path) => Ok(SocketAddress::Local(
                 local_socket_address_from_registry_name(path),
             )),
+            None if self.is_datagram() && *self.state.read()==SocketState::Connected => Ok(SocketAddress::Local(LocalSocketAddress::unnamed())),
             None => Err(SocketError::NotConnected),
         }
     }
@@ -1634,6 +1674,7 @@ impl SocketControl for LocalSocket {
             Some(path) => Ok(SocketAddress::Local(
                 local_socket_address_from_registry_name(path),
             )),
+            None if self.is_datagram() => Ok(SocketAddress::Local(LocalSocketAddress::unnamed())),
             None => Err(SocketError::InvalidOperation),
         }
     }
@@ -1644,6 +1685,17 @@ impl SocketObject for LocalSocket {
         self.close_internal();
     }
 
+    fn sendto(&self,data:&[u8],address:&SocketAddress,flags:u32)->Result<usize,SocketError> {
+        if self.is_datagram() {self.send_datagram(data.to_vec(),Vec::new(),address,flags&super::socket::message_flags::NONBLOCK!=0)}else {self.write(data).map_err(super::socket::stream_error_to_socket_error)}
+    }
+    fn recvfrom(&self,buffer:&mut[u8],flags:u32)->Result<(usize,SocketAddress),SocketError> {
+        if !self.is_datagram() {return self.read(buffer).map(|n|(n,SocketAddress::Unspecified)).map_err(super::socket::stream_error_to_socket_error);}
+        let message=self.receive_datagram(flags&super::socket::message_flags::PEEK!=0,flags&super::socket::message_flags::NONBLOCK!=0)?;
+        if message.end_of_input {return Ok((0,SocketAddress::Unspecified));}
+        let n=buffer.len().min(message.data.len());buffer[..n].copy_from_slice(&message.data[..n]);
+        let address=message.source.map(|name|SocketAddress::Local(local_socket_address_from_registry_name(&name))).unwrap_or(SocketAddress::Local(LocalSocketAddress::unnamed()));
+        Ok((if flags&super::socket::message_flags::FULL_LENGTH!=0 {message.data.len()}else {n},address))
+    }
     fn socket_type(&self) -> SocketType {
         self.socket_type
     }
@@ -1671,6 +1723,7 @@ impl SocketObject for LocalSocket {
 
 impl Selectable for LocalSocket {
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
+        if self.is_datagram() {return self.datagram_ready(interest);}
         let mut ready = ReadySet::none();
 
         let state = *self.state.read();
@@ -1718,6 +1771,7 @@ impl Selectable for LocalSocket {
         timeout_ticks: Option<u64>,
         min_wait_ticks: u64,
     ) -> SelectWaitOutcome {
+        if self.is_datagram() {return self.wait_datagram(interest,trapframe,timeout_ticks,min_wait_ticks);}
         let current = self.current_ready(interest);
         if (interest.read && current.read) || (interest.write && current.write) {
             return SelectWaitOutcome::Ready;
@@ -1751,6 +1805,7 @@ impl Selectable for LocalSocket {
 
     fn set_nonblocking(&self, enabled: bool) {
         *self.nonblocking.write() = enabled;
+        if self.is_datagram() {self.datagrams.event.wake_all();if let Some(peer)=self.upgrade_peer() {peer.datagrams.event.wake_all();}}
     }
 
     fn is_nonblocking(&self) -> bool {
@@ -1799,7 +1854,8 @@ pub fn local_socket_factory(
     socket_type: SocketType,
     protocol: SocketProtocol,
 ) -> Result<Arc<dyn SocketObject>, SocketError> {
-    Ok(Arc::new(LocalSocket::try_new(socket_type, protocol)?))
+    let socket=Arc::new(LocalSocket::try_new(socket_type,protocol)?);
+    LocalSocket::init_self_weak(&socket);Ok(socket)
 }
 
 #[cfg(test)]

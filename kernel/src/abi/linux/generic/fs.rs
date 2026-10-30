@@ -1795,6 +1795,14 @@ pub fn sys_write(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         None => return usize::MAX,
     };
 
+    #[cfg(feature="network")]
+    if let Some(local)=kernel_obj.as_socket().and_then(crate::network::local::LocalSocket::from_socket_object).filter(|socket|socket.is_datagram()) {
+        if count>crate::network::local::MAX_DATAGRAM_BYTES {return errno::to_result(errno::EMSGSIZE);}
+        let mut bytes=Vec::new();if bytes.try_reserve_exact(count).is_err() {return errno::to_result(errno::ENOMEM);}bytes.resize(count,0);
+        if crate::library::std::usercopy::copy_from_user(&task,user_buf,&mut bytes).is_err() {return errno::to_result(errno::EFAULT);}
+        let nonblocking=current_file_status_flags(abi,&task,fd).is_some_and(|flags|flags as i32&O_NONBLOCK!=0);
+        return local.send_datagram(bytes,Vec::new(),&crate::network::SocketAddress::Unspecified,nonblocking).map_or_else(|error|errno::to_result(crate::network::socket::socket_error_to_native_errno(&error) as usize),|n|n);
+    }
     let stream = match kernel_obj.as_stream() {
         Some(stream) => stream,
         None => return usize::MAX,
@@ -3865,6 +3873,8 @@ fn sys_vectored_io(abi: &mut LinuxAbi, trapframe: &mut Trapframe, reading: bool)
         vectors.push((base, length));
         total = next;
     }
+    #[cfg(feature="network")]
+    if !reading && object.as_socket().and_then(crate::network::local::LocalSocket::from_socket_object).is_some_and(|socket|socket.is_datagram()) && total>crate::network::local::MAX_DATAGRAM_BYTES {return errno::to_result(errno::EMSGSIZE);}
     let length = total.min(MAX_TRANSFER);
     if length == 0 {
         return 0;
@@ -3917,6 +3927,11 @@ fn sys_vectored_io(abi: &mut LinuxAbi, trapframe: &mut Trapframe, reading: bool)
             }
         }
     }
+    #[cfg(feature="network")]
+    if !reading {if let Some(local)=object.as_socket().and_then(crate::network::local::LocalSocket::from_socket_object).filter(|socket|socket.is_datagram()) {
+        let nonblocking=current_file_status_flags(abi,&task,fd).is_some_and(|flags|flags as i32&O_NONBLOCK!=0);
+        return local.send_datagram(buffer,Vec::new(),&crate::network::SocketAddress::Unspecified,nonblocking).map_or_else(|error|errno::to_result(crate::network::socket::socket_error_to_native_errno(&error) as usize),|n|n);
+    }}
     let nonblocking = current_file_status_flags(abi, &task, fd)
         .is_some_and(|flags| flags as i32 & O_NONBLOCK != 0);
     let transferred = loop {
