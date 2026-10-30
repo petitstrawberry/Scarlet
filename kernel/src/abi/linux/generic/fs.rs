@@ -717,8 +717,18 @@ pub(super) fn proc_exe_linux_stat(inode: u64, target_size: usize) -> LinuxStat {
     }
 }
 
-fn apply_node_owner(stat: &mut LinuxStat, node: &dyn crate::fs::vfs_v2::core::VfsNode) {
+// Zero denotes an unknown device; 1 and 2 identify anonymous pipes and sockets.
+// Keep the complete native filesystem identity and fail rather than alias it.
+fn filesystem_device(identity: u64) -> Result<u64, usize> {
+    identity.checked_add(2).ok_or(errno::EOVERFLOW)
+}
+
+fn apply_node_attributes(stat: &mut LinuxStat, node: &dyn crate::fs::vfs_v2::core::VfsNode) -> Result<(), usize> {
+    if let Some(filesystem) = node.filesystem().and_then(|filesystem| filesystem.upgrade()) {
+        stat.st_dev = filesystem_device(filesystem.fs_id().get())?;
+    }
     if let Some(owner) = node.owner_identity() { stat.st_uid = owner.principal.0; stat.st_gid = owner.group.0; }
+    Ok(())
 }
 
 /// Descriptor metadata must also describe anonymous pipes, which expose
@@ -754,7 +764,7 @@ fn stat_from_object(
                 .metadata()
                 .map_err(|error| errno::from_fs_error(&error))?;
             let mut stat = LinuxStat::from_metadata(&metadata);
-            apply_node_owner(&mut stat,node.as_ref());
+            apply_node_attributes(&mut stat,node.as_ref())?;
             if let Some(mode) = super::mode::get(&node) {
                 stat.st_mode = (stat.st_mode & !0o7777) | mode;
             }
@@ -909,8 +919,8 @@ fn fill_statx_from_stat(
     statx.stx_rdev_major =
         (((stat.st_rdev >> 8) & 0xfff) | ((stat.st_rdev >> 32) & 0xfffff000)) as u32;
     statx.stx_rdev_minor = ((stat.st_rdev & 0xff) | ((stat.st_rdev >> 12) & 0xffffff00)) as u32;
-    statx.stx_dev_major = 0;
-    statx.stx_dev_minor = 0;
+    statx.stx_dev_major = (((stat.st_dev >> 8) & 0xfff) | ((stat.st_dev >> 32) & 0xfffff000)) as u32;
+    statx.stx_dev_minor = ((stat.st_dev & 0xff) | ((stat.st_dev >> 12) & 0xffffff00)) as u32;
     statx.stx_mnt_id = 0;
     statx.stx_dio_mem_align = 0;
     statx.stx_dio_offset_align = 0;
@@ -2564,7 +2574,9 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Err(error) => return errno::to_result(errno::from_fs_error(&error)),
     };
     let mut statistics = LinuxStat::from_metadata(&metadata);
-    apply_node_owner(&mut statistics,node.as_ref());
+    if let Err(error) = apply_node_attributes(&mut statistics,node.as_ref()) {
+        return errno::to_result(error);
+    }
     if let Some(mode) = super::mode::get(&node) {
         statistics.st_mode = (statistics.st_mode & !0o7777) | mode;
     }
@@ -2728,7 +2740,9 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     let mut stat = LinuxStat::from_metadata(&metadata);
-    apply_node_owner(&mut stat,node.as_ref());
+    if let Err(error) = apply_node_attributes(&mut stat,node.as_ref()) {
+        return errno::to_result(error);
+    }
     if let Some(mode) = super::mode::get(&node) {
         stat.st_mode = (stat.st_mode & !0o7777) | mode;
     }
@@ -6010,7 +6024,7 @@ fn proc_exe_stat(
         .metadata()
         .map_err(|error| errno::from_fs_error(&error))?;
     let mut stat = LinuxStat::from_metadata(&metadata);
-    apply_node_owner(&mut stat,node.as_ref());
+    apply_node_attributes(&mut stat,node.as_ref())?;
     if let Some(mode) = super::mode::get(&node) {
         stat.st_mode = (stat.st_mode & !0o7777) | mode;
     }
@@ -6614,6 +6628,41 @@ mod tests {
         crate::library::std::usercopy::copy_from_user(&task, address, &mut bytes).unwrap();
         assert_eq!(bytes, [42; 16]);
         assert_eq!(reader.available_bytes(), 0);
+    }
+
+    #[test_case]
+    fn vfs_stat_identity_is_nonzero_stable_across_views_and_distinct_between_filesystems() {
+        use crate::fs::vfs_v2::{core::FileSystemOperations, drivers::tmpfs::TmpFS, manager::VfsManager};
+        use crate::fs::FileType;
+        let first = TmpFS::new(0);
+        let second = TmpFS::new(0);
+        let mut identities = alloc::vec::Vec::new();
+        for filesystem in [&first, &second] {
+            let node = filesystem.create(&filesystem.root_node(), &"library.so".into(), FileType::RegularFile, 0o644).unwrap();
+            let mut path_stat = super::LinuxStat::from_metadata(&node.metadata().unwrap());
+            super::apply_node_attributes(&mut path_stat,node.as_ref()).unwrap();
+            assert!(path_stat.st_dev > 2 && path_stat.st_ino != 0);
+            let identity = (path_stat.st_dev,path_stat.st_ino);
+            for _ in 0..2 {
+                let view = VfsManager::new_with_root((*filesystem).clone());
+                let opened = view.open("/library.so",0).unwrap();
+                // A duplicated kernel object retains the same open description.
+                for object in [opened.clone(),opened] {
+                    let (stat,birthtime) = super::stat_from_object(&object,17).unwrap();
+                    assert_eq!((stat.st_dev,stat.st_ino),identity);
+                    let mut statx = unsafe {core::mem::zeroed::<super::LinuxStatx>()};
+                    super::fill_statx_from_stat(&mut statx,&stat,birthtime,super::STATX_BASIC_STATS);
+                    let major = statx.stx_dev_major as u64; let minor = statx.stx_dev_minor as u64;
+                    let device = (minor & 0xff) | ((major & 0xfff) << 8) | ((minor & 0xffff_ff00) << 12) | ((major & 0xffff_f000) << 32);
+                    assert_eq!(device,identity.0);
+                    assert_eq!(statx.stx_ino,identity.1);
+                }
+            }
+            identities.push(identity);
+        }
+        assert_ne!(identities[0].0,identities[1].0);
+        assert_eq!(super::filesystem_device(u64::MAX),Err(super::errno::EOVERFLOW));
+        assert_eq!(super::filesystem_device(u64::MAX-1),Err(super::errno::EOVERFLOW));
     }
 
     #[test_case]
