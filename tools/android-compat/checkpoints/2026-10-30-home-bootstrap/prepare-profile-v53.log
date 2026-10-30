@@ -1,0 +1,3 @@
+warning: Git tree '/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet' is dirty
+Prepared new manager configuration using verified factory payloads; boot has not been tested
+Merged verified platform service contexts and system-server JARs; startup has not been tested

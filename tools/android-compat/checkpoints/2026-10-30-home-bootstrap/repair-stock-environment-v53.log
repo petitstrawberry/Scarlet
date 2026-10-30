@@ -1,0 +1,2 @@
+warning: Git tree '/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet' is dirty
+error (ignored): SQLite database '/Users/petitstrawberry/.cache/nix/eval-cache-v6/e916f615f9401307410806988c5b277395059ed67c0c1d1d6a01642867e2ec2e.sqlite' is busy

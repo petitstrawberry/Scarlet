@@ -1,0 +1,32 @@
+{
+  "revision": "6db1a869f",
+  "kernel_sha256": "96885dc375815cc1995fbca3d733f6833955f47946eec45b52c476e5510cbb6c",
+  "acceleration": "hvf",
+  "passed": {
+    "native_kernel_tests": 1764,
+    "native_abi_contract_tests": 12,
+    "native_abi_unit_tests": 2,
+    "userspace_tests": 22,
+    "app_label_selector_tests": 2,
+    "host_tool_tests": 73
+  },
+  "confirmed": [
+    "SurfaceFlinger display 0 connects and power turns on",
+    "stock PackageManager scans 30 packages and persists the real UID inventory",
+    "native manager atomically appends app labels and grants to the original Shield policy at generation 2"
+  ],
+  "current_stop": "BatteryService: IHealth service instance default is not available",
+  "not_yet_confirmed": [
+    "Activity launch",
+    "SurfaceFlinger app frame in SWS",
+    "Launcher home screen"
+  ],
+  "app_policy_log_excerpt": [
+    "SCARLET_ANDROID_APP_POLICY package=com.android.cts.priv.ctsshim uid=10009 domain=u:r:priv_app:s0:c512,c768 file=u:object_r:privapp_data_file:s0:c512,c768 generation=2",
+    "SCARLET_ANDROID_APP_POLICY package=com.android.uwb.resources uid=10019 domain=u:r:priv_app:s0:c512,c768 file=u:object_r:privapp_data_file:s0:c512,c768 generation=2",
+    "SCARLET_ANDROID_APP_POLICY package=com.android.adservices.api uid=10007 domain=u:r:priv_app:s0:c512,c768 file=u:object_r:privapp_data_file:s0:c512,c768 generation=2",
+    "SCARLET_ANDROID_APP_POLICY package=com.android.safetycenter.resources uid=10015 domain=u:r:priv_app:s0:c512,c768 file=u:object_r:privapp_data_file:s0:c512,c768 generation=2",
+    "SCARLET_ANDROID_APP_POLICY package=com.android.connectivity.resources uid=10017 domain=u:r:priv_app:s0:c512,c768 file=u:object_r:privapp_data_file:s0:c512,c768 generation=2",
+    "SCARLET_ANDROID_APP_POLICY package=com.android.wifi.dialog uid=10022 domain=u:r:untrusted_app:s0:c22,c256,c512,c768 file=u:object_r:app_data_file:s0:c22,c256,c512,c768 generation=2"
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "kind": "bounded-stock-init-probe-v1",
+  "result": "BUILT",
+  "sources_sha256": {
+    "init-scope-probe.c": "45ab3183acd2a8eb2b0114b9bb6fe4770a627dbb9d958bc03e769b8824f1a1d3",
+    "init-log-probe.c": "829a8faa1866f3c76fd3f751304a3702f5d8c16904d58576a1904f33ed33784d"
+  },
+  "files": {
+    "init-scope-probe": "292225963d7411ca161ea2c97f6bbe0dff4f255059d06afd665398f1dd814ccf",
+    "libprobe-init-kmsg.so": "475c1ad3754ea349cf90bb0a8d227286070453e522f1fb8baea67137acf62918"
+  },
+  "commands": [
+    [
+      "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+      "-std=c11",
+      "-O2",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/init-profile-probe-v23/init-scope-probe.c",
+      "-static",
+      "-o",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/init-profile-probe-v23/init-scope-probe"
+    ],
+    [
+      "/Users/petitstrawberry/Library/Android/sdk/ndk/25.1.8937393/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android33-clang",
+      "-std=c11",
+      "-O2",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/init-profile-probe-v23/init-log-probe.c",
+      "-shared",
+      "-fPIC",
+      "-ldl",
+      "-o",
+      "/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/.build/android-services/init-profile-probe-v23/libprobe-init-kmsg.so"
+    ]
+  ],
+  "ndk": "Pkg.Desc = Android NDK\nPkg.Revision = 25.1.8937393\n"
+}

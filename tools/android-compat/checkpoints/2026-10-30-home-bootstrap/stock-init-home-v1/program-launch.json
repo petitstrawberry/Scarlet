@@ -1,0 +1,10 @@
+{
+  "argv": [
+    "/system/bin/scarlet-program-probe",
+    "start-zygote"
+  ],
+  "env": [
+    "ANDROID_LOG_TAGS=*:v",
+    "SCARLET_INIT_OBSERVE_SECONDS=60"
+  ]
+}

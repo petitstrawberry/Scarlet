@@ -1,0 +1,34 @@
+warning: Git tree '/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet' is dirty
+error (ignored): SQLite database '/Users/petitstrawberry/.cache/nix/eval-cache-v6/0128a49293495b7922fb92b2679437776551021a3087b2a4e0d2535169524050.sqlite' is busy
+   Compiling scarlet-abi v1.0.0 (/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/user/lib/scarlet-abi)
+   Compiling scarlet-sys v1.0.0 (/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/user/lib/scarlet-sys)
+   Compiling scarlet-os v1.0.0 (/Users/petitstrawberry/.codex/worktrees/shv-pr-validation/Scarlet/user/lib/scarlet-os)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.96s
+     Running unittests src/lib.rs (.build/android-services/policy-host-tests/aarch64-apple-darwin/debug/deps/scarlet_os-9e9948520d5eff5d)
+
+running 22 tests
+test handle::capability::stream::tests::syscall_result_distinguishes_interrupted_from_would_block ... ok
+test handle::tests::explicit_close_dispatches_exactly_once ... ok
+test handle::tests::taking_raw_handle_disarms_drop ... ok
+test input::tests::input_kind_values_are_stable_and_validated ... ok
+test input::tests::multitouch_and_switch_abi_values_are_stable ... ok
+test scheduler::tests::configured_deadline_round_trips_masked_fair_fallback ... ok
+test scheduler::tests::configured_decode_rejects_unknown_policy_and_decodes_fair ... ok
+test scheduler::tests::cpu_mask_rejects_empty_and_non_canonical_masks ... ok
+test scheduler::tests::deadline_config_validates_duration_and_encodes_fair_fallback ... ok
+test scheduler::tests::fair_config_encodes_mask_without_dangling_pointer ... ok
+test scheduler::tests::fifo_configuration_and_runtime_priority_round_trip_without_deadline_fields ... ok
+test scheduler::tests::mask_probe_rejects_zero_and_absurd_requirements ... ok
+test scheduler::tests::raw_result_codes_have_stable_safe_mappings ... ok
+test scheduler::tests::runtime_decode_rejects_unknown_status ... ok
+test sensor::tests::sensor_abi_layout_and_enum_values_are_stable ... ok
+test sensor::tests::sensor_event_parser_requires_exact_size ... ok
+test sensor::tests::sensor_info_parser_validates_malformed_enums_and_headers ... ok
+test system::tests::decodes_kernel_identity_independently_of_distribution_version ... ok
+test system::tests::kernel_info_layout_matches_the_syscall_record ... ok
+test system::tests::rejects_empty_unterminated_and_invalid_utf8_fields ... ok
+test wireless_service::tests::malformed_commands_lengths_and_secret_tails_are_rejected ... ok
+test wireless_service::tests::scan_response_preserves_raw_ssids_and_ignores_invalid_records ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

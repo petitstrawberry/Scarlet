@@ -1,0 +1,8 @@
+{
+  "native_tests": 1759,
+  "tools_tests": 72,
+  "display_boot_phase": 100,
+  "package_manager": "constructing; legacy_permission grant missing in v4",
+  "kernel_sha256": "9fd06c7abb965c892f3076eb3d2b982886e2283c058ccfb787db1443802f2f78",
+  "apk_activity": "not yet launched"
+}
