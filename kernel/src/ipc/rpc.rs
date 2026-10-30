@@ -62,6 +62,8 @@ pub struct RpcObject {
     revoked: AtomicBool,
     observers: IrqSpinLock<Vec<Weak<DeathObserver>>>,
     async_gate: Arc<AsyncGate>,
+    minimum_priority: u8,
+    inherit_priority: bool,
 }
 struct DeathObserver {
     waker: Weak<Waker>,
@@ -93,7 +95,20 @@ impl RpcObject {
         self.endpoint
             .upgrade()
             .ok_or(RpcError::PeerClosed)?
-            .send_chained(Some(self), message, false, Some(caller), parent)
+            .send_chained(Some(self), message, false, Some(caller), parent, 0)
+            .map(|state| RpcCall { state })
+    }
+    pub fn send_scoped_with_priority(
+        &self,
+        message: RpcMessage,
+        caller: &RpcEndpoint,
+        parent: Option<&RpcContext>,
+        priority: u8,
+    ) -> Result<RpcCall, RpcError> {
+        self.endpoint
+            .upgrade()
+            .ok_or(RpcError::PeerClosed)?
+            .send_chained(Some(self), message, false, Some(caller), parent, priority)
             .map(|state| RpcCall { state })
     }
     /// Admit a bounded notification without a reply capability. Notifications
@@ -193,6 +208,8 @@ struct CallState {
     parent: Option<Weak<CallState>>,
     children: IrqSpinLock<Vec<Weak<CallState>>>,
     depth: usize,
+    priority: u8,
+    priority_lease: IrqSpinLock<Option<crate::task::fixed_priority::PriorityLease>>,
 }
 
 /// An unforgeable, weak continuation of a received synchronous request.
@@ -214,7 +231,10 @@ impl CallState {
         };
         *state = completion;
         let children = core::mem::take(&mut *self.children.lock());
+        let lease = self.priority_lease.lock().take();
         drop(state);
+        // Revoke scheduling donation even if the receiver still holds its request.
+        drop(lease);
         // The call tree is depth-bounded. Never retain a child or its server,
         // and never run cancellation under an endpoint/ancestor queue lock.
         for child in children.into_iter().filter_map(|child| child.upgrade()) {
@@ -326,6 +346,28 @@ impl RpcRequest {
     pub fn object_key(&self) -> Option<u64> {
         self.object_key
     }
+    pub fn priority(&self) -> u8 {
+        self.reply.priority
+    }
+    /// A delivered request owns one cancellable scheduling donation. Completion,
+    /// peer close and caller cancellation revoke it before waking the waiter.
+    pub fn enter_priority(&self, task: &crate::task::Task) -> Result<(), RpcError> {
+        if self.priority() == 0 {
+            return Ok(());
+        }
+        let lease = crate::task::fixed_priority::PriorityLease::enter(task, self.priority())
+            .map_err(|_| RpcError::Busy)?;
+        let pending = self.reply.completion.lock();
+        if !matches!(*pending, Completion::Pending) {
+            return Err(RpcError::Cancelled);
+        }
+        let mut slot = self.reply.priority_lease.lock();
+        if slot.is_some() {
+            return Err(RpcError::Busy);
+        }
+        *slot = lease;
+        Ok(())
+    }
     pub fn context(&self) -> Option<RpcContext> {
         (!self.is_oneway() && self.delivered).then(|| RpcContext {
             state: Arc::downgrade(&self.reply),
@@ -403,10 +445,17 @@ impl RpcEndpoint {
         caller: &RpcEndpoint,
         parent: Option<&RpcContext>,
     ) -> Result<RpcCall, RpcError> {
-        self.send_chained(None, message, false, Some(caller), parent)
+        self.send_chained(None, message, false, Some(caller), parent, 0)
             .map(|state| RpcCall { state })
     }
     pub fn create_object(self: &Arc<Self>) -> Result<Arc<RpcObject>, RpcError> {
+        self.create_object_with_scheduling(0, false)
+    }
+    pub fn create_object_with_scheduling(
+        self: &Arc<Self>,
+        minimum_priority: u8,
+        inherit_priority: bool,
+    ) -> Result<Arc<RpcObject>, RpcError> {
         let mut state = self.state.lock();
         if state.closed {
             return Err(RpcError::PeerClosed);
@@ -419,6 +468,8 @@ impl RpcEndpoint {
             revoked: AtomicBool::new(false),
             observers: IrqSpinLock::new(Vec::new()),
             async_gate: AsyncGate::new(&self.waker),
+            minimum_priority,
+            inherit_priority,
         });
         state.objects.retain(|object| object.strong_count() != 0);
         state.objects.push(Arc::downgrade(&object));
@@ -430,7 +481,7 @@ impl RpcEndpoint {
         message: RpcMessage,
         oneway: bool,
     ) -> Result<Arc<CallState>, RpcError> {
-        self.send_chained(object, message, oneway, None, None)
+        self.send_chained(object, message, oneway, None, None, 0)
     }
     fn send_chained(
         &self,
@@ -439,6 +490,7 @@ impl RpcEndpoint {
         oneway: bool,
         caller: Option<&RpcEndpoint>,
         context: Option<&RpcContext>,
+        sender_priority: u8,
     ) -> Result<Arc<CallState>, RpcError> {
         message.validate()?;
         let parent = context
@@ -452,6 +504,15 @@ impl RpcEndpoint {
                 return Err(RpcError::TooLarge);
             }
         }
+        let priority = object.map_or(0, |object| {
+            object
+                .minimum_priority
+                .max(if object.inherit_priority && !oneway {
+                    sender_priority.max(parent.as_ref().map_or(0, |parent| parent.priority))
+                } else {
+                    0
+                })
+        });
         self.purge_cancelled();
         let mut state = self.state.lock();
         if state.closed || object.is_some_and(|object| object.revoked.load(Ordering::Acquire)) {
@@ -475,6 +536,8 @@ impl RpcEndpoint {
             parent: parent.as_ref().map(Arc::downgrade),
             children: IrqSpinLock::new(Vec::new()),
             depth: parent.as_ref().map_or(1, |parent| parent.depth + 1),
+            priority,
+            priority_lease: IrqSpinLock::new(None),
         });
         if let Some(parent) = &parent {
             // Admission and parent completion serialize on the same lock.
@@ -820,6 +883,44 @@ mod tests {
         drop(requests);
         assert!(b.receive().unwrap().is_none());
         assert!(b.send(message(3)).is_ok());
+    }
+
+    #[test_case]
+    fn rpc_priority_donations_obey_object_contracts_and_are_revoked_on_cancellation() {
+        let endpoint = RpcEndpoint::new();
+        let caller = RpcEndpoint::new();
+        let object = endpoint.create_object_with_scheduling(7, true).unwrap();
+        let receiver =
+            crate::task::Task::new("rpc-priority".into(), 0, crate::task::TaskType::Kernel);
+        receiver.fixed_priority.configure(3);
+        let call = object
+            .send_scoped_with_priority(message(1), &caller, None, 9)
+            .unwrap();
+        let request = endpoint.receive().unwrap().unwrap();
+        assert_eq!(request.priority(), 9);
+        request.enter_priority(&receiver).unwrap();
+        assert_eq!(receiver.fixed_priority.effective(), 9);
+        drop(call);
+        assert_eq!(receiver.fixed_priority.effective(), 3);
+        assert!(request.cancelled());
+        drop(request);
+        object.send_oneway(message(2)).unwrap();
+        let request = endpoint.receive().unwrap().unwrap();
+        assert_eq!(request.priority(), 7);
+        request.enter_priority(&receiver).unwrap();
+        assert_eq!(receiver.fixed_priority.effective(), 7);
+        drop(request);
+        assert_eq!(receiver.fixed_priority.effective(), 3);
+        let minimum_only = endpoint.create_object_with_scheduling(5, false).unwrap();
+        let call = minimum_only
+            .send_scoped_with_priority(message(3), &caller, None, 9)
+            .unwrap();
+        let request = endpoint.receive().unwrap().unwrap();
+        assert_eq!(request.priority(), 5);
+        request.enter_priority(&receiver).unwrap();
+        request.reply(message(4)).unwrap();
+        assert_eq!(receiver.fixed_priority.effective(), 3);
+        assert!(call.take_reply().unwrap().is_ok());
     }
 
     #[test_case]

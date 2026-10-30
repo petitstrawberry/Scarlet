@@ -279,7 +279,8 @@ impl Objects {
         if self.nodes.len() + self.retired.len() >= MAX_NODES {
             return Err(errno::ENOSPC);
         }
-        let object = file.endpoint.create_object().map_err(|_| errno::ENOMEM)?;
+        let minimum=if (flags>>9)&3==1 {(flags&0xff) as u8}else{0};
+        let object = file.endpoint.create_object_with_scheduling(minimum,flags&0x800!=0).map_err(|_| errno::ENOMEM)?;
         let node = Arc::new(Node {
             subject: file.subject.clone(),
             object,
@@ -583,12 +584,13 @@ fn offsets(data: &[u8], encoded: &[u8]) -> Result<Vec<usize>, usize> {
         end=offset.checked_add(size).ok_or(errno::EINVAL)?;
         if end>data.len() {return Err(errno::EINVAL);}
         let flags = u32_at(data, offset + 4);
-        // Recognize libbinder's normal/default minimum-priority encoding.
-        // INHERIT_RT is accepted for the Fair-only hwbinder subset; actual RT
-        // scheduling policies and security-context delivery remain unsupported.
-        if matches!(kind,BINDER|WEAK_BINDER|HANDLE|WEAK_HANDLE) &&
-            (flags & !0x9ff != 0 || !matches!(flags & 0xff, 0 | 19)) {
-            return Err(errno::EOPNOTSUPP);
+        // FIFO requests become native object scheduling contracts. RR and
+        // security-context delivery remain unsupported rather than downgraded.
+        if matches!(kind,BINDER|WEAK_BINDER|HANDLE|WEAK_HANDLE) {
+            let policy=(flags>>9)&3;let priority=flags&0xff;
+            if flags & !0xbff !=0 || !match policy {0=>matches!(priority,0|19),1=>(1..=99).contains(&priority),_=>false} {
+                return Err(errno::EOPNOTSUPP);
+            }
         }
         if (kind==buffers::PTR && flags & !1 !=0) || (matches!(kind,buffers::FD|buffers::FDA) && flags!=0) {return Err(errno::EINVAL);}
         result.push(offset);
@@ -668,6 +670,10 @@ impl BinderFile {
                         return Err(errno::EINVAL);
                     }
                     continue;
+                }
+                if ((u32_at(&bytes,position+4)>>9)&3)==1
+                    && !task.credentials.read().permits(crate::shield::identity::MANAGE_SCHEDULING) {
+                    return Err(errno::EPERM);
                 }
                 table.local(
                     self,
@@ -1116,6 +1122,8 @@ mod tests {
         assert_eq!(offsets(&data, &[0; 8]), Err(errno::EOPNOTSUPP));
         data[..4].copy_from_slice(&BINDER.to_le_bytes());
         data[4..8].copy_from_slice(&0x900u32.to_le_bytes());
+        assert_eq!(offsets(&data,&[0;8]),Ok(vec![0]));
+        data[4..8].copy_from_slice(&0xb02u32.to_le_bytes());
         assert_eq!(offsets(&data,&[0;8]),Ok(vec![0]));
         for flags in [0xb00u32,0xd00,0x1900,0x901] {
             data[4..8].copy_from_slice(&flags.to_le_bytes());

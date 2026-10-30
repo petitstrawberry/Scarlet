@@ -425,7 +425,7 @@ impl BinderFile {
                     }
                     let parent = thread.incoming().and_then(|incoming| incoming.request.context());
                     let call = if let Some(capability) = capability {
-                        capability.send_scoped(message, &self.endpoint, parent.as_ref())
+                        capability.send_scoped_with_priority(message, &self.endpoint, parent.as_ref(),task.fixed_priority.effective())
                     } else if let Some(context) = context {
                         context.send_scoped(message, &self.endpoint, parent.as_ref())
                     } else {
@@ -688,6 +688,9 @@ impl BinderFile {
                     node = (dispatch.node.pointer, dispatch.node.cookie);
                     request.message.retained = Some(Arc::new(dispatch));
                 }
+            }
+            if let Some(request)=incoming.as_ref() {
+                request.enter_priority(task).map_err(|_|errno::EAGAIN)?;
             }
             let mut installed=abi.map(|abi|buffers::Installed::new(task,abi));
             let (length, offsets_length) = self.decode_received(&message, address, &arena,installed.as_mut())?;
