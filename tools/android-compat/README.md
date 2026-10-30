@@ -837,3 +837,20 @@ This validates Zygote child specialization and Java entry, not Activity launch,
 package installation, system_server boot, graphics, or complete app confinement.
 Category suffixes are exact opaque labels; Shield does not implement SELinux's
 MLS lattice. Cgroup accounting and general VFS ownership/DAC remain separate work.
+
+### Profile-selected SystemSuspend host service
+
+The flattened boot profile selects framework AIDL declarations from the verified
+SDK image through `vintf.framework`; it publishes no unimplemented device HALs.
+`host_services: ["system_suspend"]` additionally stages the stock SystemSuspend
+executable and its native dependencies. The manager generates an init declaration
+from the checked stock RC, omitting `BLOCK_SUSPEND`, which Scarlet does not expose.
+Source and generated hashes are recorded in `boot-profile.json`; staging rejects a
+missing provider or a stale declaration.
+
+The stock daemon already supports host-managed power: absent suspend sysfs leaves
+its suspend thread blocked while Binder wake-lock bookkeeping remains active.
+Scarlet does not synthesize suspend sysfs or delegate machine suspend to Android.
+The profile grants the daemon its own exec label and service registration rights,
+and gives system_server explicit lookup rights. These settings do not establish
+PowerManager readiness; the stock-init execution logs record the reached stage.

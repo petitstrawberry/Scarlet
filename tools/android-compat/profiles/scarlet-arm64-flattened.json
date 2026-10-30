@@ -52,7 +52,8 @@
     "u:r:linkerconfig:s0": 7,
     "u:r:boringssl_self_test:s0": 8,
     "u:r:system_server_startup:s0": 9,
-    "u:r:system_server:s0": 10
+    "u:r:system_server:s0": 10,
+    "u:r:system_suspend:s0": 11
   },
   "transitions": [
     [
@@ -174,7 +175,8 @@
     "/system/bin/servicemanager": "u:object_r:servicemanager_exec:s0",
     "/system/bin/boringssl_self_test64": "u:object_r:boringssl_self_test_exec:s0",
     "/system/apex/com.android.conscrypt/bin/boringssl_self_test64": "u:object_r:boringssl_self_test_exec:s0",
-    "/system/bin/app_process64": "u:object_r:zygote_exec:s0"
+    "/system/bin/app_process64": "u:object_r:zygote_exec:s0",
+    "/system/bin/hw/android.system.suspend@1.0-service": "u:object_r:system_suspend_exec:s0"
   },
   "exec_transitions": [
     [
@@ -206,6 +208,12 @@
       "u:object_r:zygote_exec:s0",
       "u:r:zygote:s0",
       0
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:system_suspend_exec:s0",
+      "u:r:system_suspend:s0",
+      1000
     ]
   ],
   "resource_groups": {
@@ -811,6 +819,36 @@
       "u:r:system_server:s0",
       "u:object_r:hal_power_service:s0",
       2
+    ],
+    [
+      "u:r:system_suspend:s0",
+      "u:object_r:hal_system_suspend_service:s0",
+      3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:hal_system_suspend_service:s0",
+      2
+    ],
+    [
+      "u:r:system_suspend:s0",
+      "u:object_r:system_suspend_control_service:s0",
+      3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:system_suspend_control_service:s0",
+      2
+    ],
+    [
+      "u:r:system_suspend:s0",
+      "u:object_r:system_suspend_control_internal_service:s0",
+      3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:system_suspend_control_internal_service:s0",
+      2
     ]
   ],
   "socket_labels": [
@@ -821,8 +859,12 @@
   ],
   "vintf": {
     "framework": [
-      "android.frameworks.stats.IStats/default"
+      "android.frameworks.stats.IStats/default",
+      "android.system.suspend.ISystemSuspend/default"
     ],
     "device": []
-  }
+  },
+  "host_services": [
+    "system_suspend"
+  ]
 }

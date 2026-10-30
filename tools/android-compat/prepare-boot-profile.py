@@ -143,6 +143,13 @@ def prepare(archive, runtime, stock, profile_file, output):
 
 
 def configure(output, stock, profile, contexts, metadata):
+    from host_services import MANAGED_RC, imports
+    if metadata.get("host_service_inputs") and not profile.get("host_services"):
+        path = output / MANAGED_RC
+        if sha256(path) != metadata["host_service_inputs"]["system_suspend"]["managed_rc_sha256"]:
+            raise ValueError("changed manager host service output")
+        path.unlink()
+        metadata.pop("host_service_inputs")
     previous_vintf = metadata.get("vintf_inputs")
     if previous_vintf and previous_vintf["selection"] != profile.get("vintf"):
         for name, digest in previous_vintf["generated_sha256"].items():
@@ -166,7 +173,7 @@ def configure(output, stock, profile, contexts, metadata):
     (output / "proc/bootconfig").write_text("".join(
         f'{name} = "{value}"\n' for name, value in sorted(profile["bootconfig"].items())))
     (output / "scarlet/boot/init.rc").write_text("# Explicit Scarlet device boot configuration\n" + "".join(
-        "import " + path + "\n" for path in profile["init_imports"]))
+        "import " + path + "\n" for path in profile["init_imports"] + imports(profile)))
     for name in ["storage", "apex", "linkerconfig", "data", "sys/devices", "sys/fs/selinux", "system_ext/apex", "product/apex", "vendor/apex"]:
         (output / name).mkdir(parents=True, exist_ok=True)
     if "resource_groups" in profile:
@@ -240,6 +247,19 @@ def merge_platform(inputs,runtime,stock,archive):
         temporary=Path(directory)
         partitions=extract_partitions(archive,temporary)
         system=Ext4(temporary/"system.ext4")
+        from host_services import BINARY, MANAGED_RC, STOCK_RC, build_suspend
+        service_roots=[]
+        if "system_suspend" in metadata["profile"].get("host_services",[]):
+            rc=temporary/"suspend-stock.rc";binary=temporary/"suspend-stock.bin"
+            system.dump("/"+STOCK_RC,rc);system.dump("/"+BINARY,binary)
+            managed,proof=build_suspend(rc.read_bytes(),binary.read_bytes())
+            destination=inputs/MANAGED_RC
+            previous=metadata.get("host_service_inputs",{}).get("system_suspend",{}).get("managed_rc_sha256")
+            if MANAGED_RC in metadata["symlinks"] or destination.exists() and sha256(destination)!=previous:
+                raise ValueError("conflicting host service manager output")
+            destination.parent.mkdir(parents=True,exist_ok=True);destination.write_bytes(managed)
+            metadata["host_service_inputs"]={"system_suspend":proof}
+            service_roots.append(BINARY)
         if "vintf" in metadata["profile"]:
             from vintf_inputs import build_manifests
             source_paths=["/system/etc/vintf/manifest.xml"]
@@ -270,7 +290,7 @@ def merge_platform(inputs,runtime,stock,archive):
         available={Path(name).name for name in metadata["files"]}
         runtime_files=json.loads((runtime/"art-runtime.json").read_text())["files"]
         available|={Path(name).name for name in runtime_files}
-        native_needed={};queue=["system/lib64/libcompiler_rt.so","system/lib64/libandroid_servers.so"];seen=set()
+        native_needed={};queue=["system/lib64/libcompiler_rt.so","system/lib64/libandroid_servers.so"]+service_roots;seen=set()
         while queue:
             name=queue.pop()
             if name in seen:continue
