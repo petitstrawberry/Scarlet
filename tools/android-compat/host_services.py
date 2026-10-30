@@ -16,6 +16,10 @@ INSTALLER="installd"
 INSTALLER_BINARY="system/bin/installd"
 INSTALLER_STOCK_RC="system/etc/init/installd.rc"
 INSTALLER_MANAGED_RC="scarlet/boot/services/installd.rc"
+ODSIGN="odsign"
+ODSIGN_BINARY="system/bin/odsign"
+ODSIGN_STOCK_RC="system/etc/init/odsign.rc"
+ODSIGN_MANAGED_RC="scarlet/boot/services/odsign.rc"
 STOCK_TEXT = ("service system_suspend /" + BINARY + "\n"
               "    class early_hal\n    user system\n    group system wakelock\n"
               "    capabilities BLOCK_SUSPEND\n")
@@ -23,8 +27,8 @@ STOCK_TEXT = ("service system_suspend /" + BINARY + "\n"
 
 def validate_selection(profile):
     names = profile.get("host_services", [])
-    if (not isinstance(names,list) or len(names)>4 or
-            any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER) for name in names) or len(set(names))!=len(names)):
+    if (not isinstance(names,list) or len(names)>5 or
+            any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER,ODSIGN) for name in names) or len(set(names))!=len(names)):
         raise ValueError("unsupported stock host service selection")
     selected = CONTRACT in profile.get("vintf", {}).get("framework", [])
     if selected != (SUSPEND in names):
@@ -37,7 +41,15 @@ def validate_selection(profile):
 
 
 def imports(profile):
-    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC,GRAPHICS:GRAPHICS_RC,INSTALLER:INSTALLER_MANAGED_RC}[name] for name in validate_selection(profile)]
+    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC,GRAPHICS:GRAPHICS_RC,INSTALLER:INSTALLER_MANAGED_RC,ODSIGN:ODSIGN_MANAGED_RC}[name] for name in validate_selection(profile)]
+
+
+def build_odsign(stock_rc,binary):
+    if not stock_rc.startswith(b"service odsign /system/bin/odsign\n    class core\n    user root\n    group system\n    disabled"):
+        raise ValueError("changed stock on-device signing configuration")
+    digest=lambda value:hashlib.sha256(value).hexdigest()
+    return stock_rc,{"source_rc":ODSIGN_STOCK_RC,"source_rc_sha256":digest(stock_rc),
+                     "binary_sha256":digest(binary),"managed_rc_sha256":digest(stock_rc)}
 
 
 def build_installer(stock_rc,binary):
@@ -94,9 +106,10 @@ def validate_staged(metadata):
             raise ValueError("missing CPU graphics provider inputs")
         for path,digest in record["files"].items():
             if metadata["files"].get(path)!=digest:raise ValueError("changed CPU graphics provider inputs")
-    if INSTALLER in names:
-        record=proof[INSTALLER]
-        if (metadata["files"].get(INSTALLER_BINARY)!=record.get("binary_sha256") or
-                metadata["files"].get(INSTALLER_MANAGED_RC)!=record.get("managed_rc_sha256") or
+    for name,binary,rc in [(INSTALLER,INSTALLER_BINARY,INSTALLER_MANAGED_RC),(ODSIGN,ODSIGN_BINARY,ODSIGN_MANAGED_RC)]:
+        if name not in names:continue
+        record=proof[name]
+        if (metadata["files"].get(binary)!=record.get("binary_sha256") or
+                metadata["files"].get(rc)!=record.get("managed_rc_sha256") or
                 record.get("source_rc_sha256")!=record.get("managed_rc_sha256")):
-            raise ValueError("changed stock installer inputs")
+            raise ValueError("changed stock service inputs: "+name)

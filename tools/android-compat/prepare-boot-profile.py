@@ -143,10 +143,10 @@ def prepare(archive, runtime, stock, profile_file, output):
 
 
 def configure(output, stock, profile, contexts, metadata):
-    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,imports
+    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,ODSIGN_MANAGED_RC,imports
     for name,record in list(metadata.get("host_service_inputs",{}).items()):
         if name not in profile.get("host_services",[]):
-            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC}[name]
+            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC,"odsign":ODSIGN_MANAGED_RC}[name]
             path=output/relative
             expected=record["files"][relative] if name=="graphics_cpu" else record["managed_rc_sha256"]
             if sha256(path)!=expected:raise ValueError("changed manager host service output")
@@ -249,6 +249,9 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
         partitions=extract_partitions(archive,temporary)
         system=Ext4(temporary/"system.ext4")
         vendor=Ext4(temporary/"vendor.ext4")
+        stock_environment=temporary/"init.environ.rc";system.dump("/init.environ.rc",stock_environment)
+        environment_exports=parse_stock_environment(stock_environment.read_text())
+        metadata["stock_environment"]={"source_sha256":sha256(stock_environment),"exports":environment_exports}
         if metadata["profile"].get("package_set"):
             from desktop_inputs import prepare as prepare_packages
             package_files,proof=prepare_packages(metadata["profile"],
@@ -284,18 +287,22 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
             name="system/etc/selinux/plat_hwservice_contexts";target=temporary/"files"/name
             system.dump("/"+name,target);copied[name]=target
         device_providers={}
-        if "installd" in metadata["profile"].get("host_services",[]):
-            from host_services import INSTALLER_BINARY,INSTALLER_STOCK_RC,INSTALLER_MANAGED_RC,build_installer
-            rc=temporary/"installer-stock.rc";binary=temporary/"installer-stock.bin"
-            system.dump("/"+INSTALLER_STOCK_RC,rc);system.dump("/"+INSTALLER_BINARY,binary)
-            managed,proof=build_installer(rc.read_bytes(),binary.read_bytes())
-            destination=inputs/INSTALLER_MANAGED_RC
-            previous=metadata.get("host_service_inputs",{}).get("installd",{}).get("managed_rc_sha256")
-            if INSTALLER_MANAGED_RC in metadata["symlinks"] or destination.exists() and sha256(destination)!=previous:
-                raise ValueError("conflicting installer manager output")
+        from host_services import (INSTALLER_BINARY,INSTALLER_STOCK_RC,INSTALLER_MANAGED_RC,build_installer,
+                                   ODSIGN_BINARY,ODSIGN_STOCK_RC,ODSIGN_MANAGED_RC,build_odsign)
+        for name,program,stock_rc,managed_rc,builder in [
+            ("installd",INSTALLER_BINARY,INSTALLER_STOCK_RC,INSTALLER_MANAGED_RC,build_installer),
+            ("odsign",ODSIGN_BINARY,ODSIGN_STOCK_RC,ODSIGN_MANAGED_RC,build_odsign)]:
+            if name not in metadata["profile"].get("host_services",[]):continue
+            rc=temporary/(name+"-stock.rc");binary=temporary/(name+"-stock.bin")
+            system.dump("/"+stock_rc,rc);system.dump("/"+program,binary)
+            managed,proof=builder(rc.read_bytes(),binary.read_bytes())
+            destination=inputs/managed_rc
+            previous=metadata.get("host_service_inputs",{}).get(name,{}).get("managed_rc_sha256")
+            if managed_rc in metadata["symlinks"] or destination.exists() and sha256(destination)!=previous:
+                raise ValueError("conflicting stock service manager output: "+name)
             destination.parent.mkdir(parents=True,exist_ok=True);destination.write_bytes(managed)
-            metadata.setdefault("host_service_inputs",{})["installd"]=proof
-            service_roots.append(INSTALLER_BINARY)
+            metadata.setdefault("host_service_inputs",{})[name]=proof
+            service_roots.append(program)
         if "graphics_cpu" in metadata["profile"].get("host_services",[]):
             if not graphics:raise ValueError("CPU graphics profile requires all three verified graphics builds")
             from graphics_boot import prepare as prepare_graphics
@@ -393,6 +400,7 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
         metadata["platform_boot"]={"sdk_sha256":SDK_SHA256,"partitions":partitions,"files":{name:sha256(source) for name,source in copied.items()},"classpaths":classpaths,"native_needed":native_needed}
     environment=inputs/"init.environ.rc"
     text="\n".join(line for line in environment.read_text().splitlines() if not line.startswith(("    export SYSTEMSERVERCLASSPATH ","    export STANDALONE_SYSTEMSERVER_JARS ")))+"\n"
+    text=retain_stock_environment(text,environment_exports)
     for name,kind in [("SYSTEMSERVERCLASSPATH",2),("STANDALONE_SYSTEMSERVER_JARS",4)]:
         text+="    export "+name+" "+":".join(classpaths[kind])+"\n"
     environment.write_text(text)
@@ -401,6 +409,27 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
     (inputs/MANIFEST).write_text(json.dumps(metadata,indent=2)+"\n")
     verify_boot_inputs(inputs,runtime,stock)
     print("Merged verified platform service contexts and system-server JARs; startup has not been tested")
+
+
+def parse_stock_environment(text):
+    exports={}
+    for line in text.splitlines():
+        line=line.strip()
+        if not line or line.startswith("#") or line=="on early-init":continue
+        fields=line.split()
+        if len(fields)!=3 or fields[0]!="export" or not re.fullmatch(r"[A-Z][A-Z0-9_]*",fields[1]) or not re.fullmatch(r"[A-Za-z0-9_./:+@-]+",fields[2]) or fields[1] in exports:
+            raise ValueError("unexpected stock environment syntax")
+        exports[fields[1]]=fields[2]
+    return exports
+
+
+def retain_stock_environment(text,exports):
+    existing={match[1]:match[2] for match in re.finditer(r"^    export ([A-Z][A-Z0-9_]*) ([^\n]+)$",text,re.M)}
+    for name,value in exports.items():
+        if name in existing:
+            if existing[name]!=value:raise ValueError("manager environment conflicts with stock: "+name)
+        else:text+="    export "+name+" "+value+"\n"
+    return text
 
 
 def merge_angle(inputs,runtime,stock,archive):

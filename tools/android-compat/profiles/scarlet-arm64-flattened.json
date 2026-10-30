@@ -61,7 +61,8 @@
     "u:r:hal_graphics_allocator_default:s0": 13,
     "u:r:hal_graphics_composer_default:s0": 14,
     "u:r:surfaceflinger:s0": 15,
-    "u:r:installd:s0": 16
+    "u:r:installd:s0": 16,
+    "u:r:odsign:s0": 17
   },
   "transitions": [
     [
@@ -134,7 +135,8 @@
       "u:object_r:usb_control_prop:s0",
       "u:object_r:keystore_listen_prop:s0",
       "u:object_r:ctl_start_prop:s0",
-      "u:object_r:hwservicemanager_prop:s0"
+      "u:object_r:hwservicemanager_prop:s0",
+      "u:object_r:odsign_prop:s0"
     ],
     "u:r:apexd:s0": [
       "u:object_r:apexd_prop:s0"
@@ -176,6 +178,10 @@
     ],
     "u:r:surfaceflinger:s0": [
       "u:object_r:graphics_config_prop:s0"
+    ],
+    "u:r:odsign:s0": [
+      "u:object_r:odsign_prop:s0",
+      "u:object_r:ctl_odsign_prop:s0"
     ]
   },
   "init_imports": [
@@ -196,7 +202,8 @@
     "/vendor/bin/hw/android.hardware.graphics.allocator@2.0-service.scarlet": "u:object_r:hal_graphics_allocator_default_exec:s0",
     "/vendor/bin/hw/android.hardware.graphics.composer@2.1-service.scarlet": "u:object_r:hal_graphics_composer_default_exec:s0",
     "/system/bin/surfaceflinger": "u:object_r:surfaceflinger_exec:s0",
-    "/system/bin/installd": "u:object_r:installd_exec:s0"
+    "/system/bin/installd": "u:object_r:installd_exec:s0",
+    "/system/bin/odsign": "u:object_r:odsign_exec:s0"
   },
   "exec_transitions": [
     [
@@ -263,6 +270,12 @@
       "u:r:init:s0",
       "u:object_r:installd_exec:s0",
       "u:r:installd:s0",
+      0
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:odsign_exec:s0",
+      "u:r:odsign:s0",
       0
     ]
   ],
@@ -1024,6 +1037,11 @@
       "u:r:installd:s0",
       "u:object_r:installd_service:s0",
       3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:domain_verification_service:s0",
+      3
     ]
   ],
   "socket_labels": [
@@ -1059,7 +1077,8 @@
     "system_suspend",
     "hwservicemanager",
     "graphics_cpu",
-    "installd"
+    "installd",
+    "odsign"
   ],
   "package_set": "stock-home"
 }
