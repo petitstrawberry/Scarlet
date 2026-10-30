@@ -46,6 +46,19 @@ int ioctl(int fd,int request,...) {
   if(bwr && bwr[1]<=bwr[0] && bwr[0]-bwr[1]>=4 && bwr[0]<=1048576)memcpy(&command,(void*)(uintptr_t)(bwr[2]+bwr[1]),4);
   report("SCARLET_INIT_BINDER_IOCTL_FAIL fd=%d tid=%d errno=%d write=%llu consumed=%llu read=%llu returned=%llu command=0x%x\n",fd,gettid(),saved,
       bwr?(unsigned long long)bwr[0]:0,bwr?(unsigned long long)bwr[1]:0,bwr?(unsigned long long)bwr[3]:0,bwr?(unsigned long long)bwr[4]:0,command);
+  if(bwr && bwr[1]<=bwr[0] && bwr[0]-bwr[1]>=68 &&
+     (command==0x40406300u || command==0x40406301u || command==0x40486311u || command==0x40486312u)) {
+   uint64_t tx[8];memcpy(tx,(void*)(uintptr_t)(bwr[2]+bwr[1]+4),sizeof(tx));
+   report("SCARLET_INIT_BINDER_TRANSACTION code=%u flags=0x%x bytes=%llu offsets=%llu\n",(unsigned)tx[2],(unsigned)(tx[2]>>32),(unsigned long long)tx[4],(unsigned long long)tx[5]);
+   if(tx[4]<=1048576 && tx[5]<=512 && tx[5]%8==0 && tx[6] && tx[7]) {
+    for(uint64_t i=0;i<tx[5] && i<64;i+=8) {
+     uint64_t offset;memcpy(&offset,(void*)(uintptr_t)(tx[7]+i),8);
+     if(offset>tx[4] || tx[4]-offset<8)continue;
+     uint32_t object[2];memcpy(object,(void*)(uintptr_t)(tx[6]+offset),8);
+     report("SCARLET_INIT_BINDER_OBJECT index=%llu type=0x%x flags=0x%x\n",(unsigned long long)(i/8),object[0],object[1]);
+    }
+   }
+  }
  }
  errno=saved;return result;
 }
