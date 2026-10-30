@@ -1,0 +1,37 @@
+{
+  "release": "android-13.0.0_r2",
+  "archives": {
+    "system": {
+      "repository": "platform/system/core",
+      "revision": "83366e7e7a1556ab6cff117673bb9f17b973de99",
+      "path": "libsystem/include",
+      "tree_sha256": "2bf3e0ae93962acf5a285534e987449a7959b3ec79b8aebe8d7e43cba259310c"
+    },
+    "cutils": {
+      "repository": "platform/system/core",
+      "revision": "83366e7e7a1556ab6cff117673bb9f17b973de99",
+      "path": "libcutils/include",
+      "tree_sha256": "eb23414150a4691df1237c0d128035a9e50071476afbc6567bfa616186828e22"
+    }
+  },
+  "files": {
+    "hardware/fb.h": {
+      "repository": "platform/hardware/libhardware",
+      "revision": "bbd07bd2e60752a665ebc9b0915241f3c1636516",
+      "path": "include/hardware/fb.h",
+      "sha256": "2b23a40596f20c85d59dda0bd68869be87019043f99f6360a0bcc2814353870f"
+    },
+    "hardware/gralloc.h": {
+      "repository": "platform/hardware/libhardware",
+      "revision": "bbd07bd2e60752a665ebc9b0915241f3c1636516",
+      "path": "include/hardware/gralloc.h",
+      "sha256": "bd4610235a828b30c8d850be07e51375744ba2f6133f16cd7e10d7fe618806e6"
+    },
+    "hardware/hardware.h": {
+      "repository": "platform/hardware/libhardware",
+      "revision": "bbd07bd2e60752a665ebc9b0915241f3c1636516",
+      "path": "include/hardware/hardware.h",
+      "sha256": "05cc2f0108d6c87e36384380559943d34acd104e3c2ade9aeba4415cfb23aee8"
+    }
+  }
+}

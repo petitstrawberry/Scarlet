@@ -880,3 +880,20 @@ The first display path will copy completed BGRA frames through the existing
 Vulkan work retain separate ownership: GPU handles, generations and release
 serials are already defined by SWS. Building the Android client or passing the
 transport probe does not establish a working Composer/allocator HAL or display.
+
+### CPU gralloc and SWS framebuffer HAL
+
+`build-graphics-hal.py --ndk "$ANDROID_NDK_HOME" --output "$HAL_BUILD"`
+produces `gralloc.scarlet.so` and a static Bionic `gralloc-probe`, using checked
+Android 13 gralloc/framebuffer headers. Handles contain one sealed-size memfd
+and fixed-width layout fields. Imports validate the descriptor, seals, stride,
+format and byte extent; each process bounds its mapped buffers. Protected and
+YUV allocations are rejected. Locking and asynchronous-fence ownership are
+implemented for the supported RGB formats.
+
+The framebuffer opens a fixed Android display in SWS through the shared Bionic
+client. Posting converts supported RGB buffers into BGRA, letterboxes negotiated
+window sizes, and copies the completed frame with `sws_window_present`. Screen
+blanking uses SWS hide/show. The allocator probe checks sharing after fork,
+zero-filled allocation, descriptor imports, size seals and busy/unregistered
+buffer errors. It does not exercise stock Composer registration or an Activity.
