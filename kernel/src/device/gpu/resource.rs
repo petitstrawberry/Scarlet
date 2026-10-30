@@ -189,7 +189,9 @@ pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
     (create.format == GPU_IMAGE_FORMAT_BGRA8_UNORM
         || create.format == super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT
         || create.format == super::GPU_IMAGE_FORMAT_R8_UNORM
-        || create.format == super::GPU_IMAGE_FORMAT_RG8_UNORM)
+        || create.format == super::GPU_IMAGE_FORMAT_RG8_UNORM
+        || create.format == super::GPU_IMAGE_FORMAT_RGBA16_FLOAT
+        || create.format == super::GPU_IMAGE_FORMAT_RGBA32_FLOAT)
         && create.usage != 0
         && create.usage & !GPU_IMAGE_USAGE_VALID == 0
         && (create.usage & super::GPU_IMAGE_USAGE_DEPTH_COMPATIBLE == 0
@@ -208,6 +210,8 @@ pub(crate) const fn image_create_is_valid(create: GpuImageCreateInfo) -> bool {
                 / match create.format {
                     super::GPU_IMAGE_FORMAT_R8_UNORM => 1,
                     super::GPU_IMAGE_FORMAT_RG8_UNORM => 2,
+                    super::GPU_IMAGE_FORMAT_RGBA16_FLOAT => 8,
+                    super::GPU_IMAGE_FORMAT_RGBA32_FLOAT => 16,
                     _ => 4,
                 }
         && create.mip_levels != 0
@@ -432,6 +436,8 @@ pub(crate) fn image_upload_native_layout(
         GPU_IMAGE_FORMAT_BGRA8_UNORM | super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT => 4,
         super::GPU_IMAGE_FORMAT_R8_UNORM => 1,
         super::GPU_IMAGE_FORMAT_RG8_UNORM => 2,
+        super::GPU_IMAGE_FORMAT_RGBA16_FLOAT => 8,
+        super::GPU_IMAGE_FORMAT_RGBA32_FLOAT => 16,
         _ => return Err("GPU image transfer format is unsupported"),
     };
 
@@ -614,6 +620,8 @@ pub(crate) fn image_readback_native_layout(
         GPU_IMAGE_FORMAT_BGRA8_UNORM | super::GPU_IMAGE_FORMAT_DEPTH32_FLOAT => 4,
         super::GPU_IMAGE_FORMAT_R8_UNORM => 1,
         super::GPU_IMAGE_FORMAT_RG8_UNORM => 2,
+        super::GPU_IMAGE_FORMAT_RGBA16_FLOAT => 8,
+        super::GPU_IMAGE_FORMAT_RGBA32_FLOAT => 16,
         _ => return Err("GPU image transfer format is unsupported"),
     };
 

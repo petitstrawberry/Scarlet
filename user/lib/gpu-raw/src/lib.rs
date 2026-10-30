@@ -157,6 +157,10 @@ pub const GPU_IMAGE_FORMAT_DEPTH32_FLOAT: u32 = 2;
 pub const GPU_IMAGE_FORMAT_R8_UNORM: u32 = 4;
 /// Generic two-channel normalized unsigned 8-bit image format.
 pub const GPU_IMAGE_FORMAT_RG8_UNORM: u32 = 5;
+/// Four 16-bit floating-point color components.
+pub const GPU_IMAGE_FORMAT_RGBA16_FLOAT: u32 = 6;
+/// Four 32-bit floating-point color components.
+pub const GPU_IMAGE_FORMAT_RGBA32_FLOAT: u32 = 7;
 
 /// Byte size of one uncompressed single-plane texel, without conversion.
 pub const fn image_format_bytes_per_texel(format: u32) -> Option<u32> {
@@ -164,6 +168,8 @@ pub const fn image_format_bytes_per_texel(format: u32) -> Option<u32> {
         GPU_IMAGE_FORMAT_BGRA8_UNORM | GPU_IMAGE_FORMAT_DEPTH32_FLOAT => Some(4),
         GPU_IMAGE_FORMAT_R8_UNORM => Some(1),
         GPU_IMAGE_FORMAT_RG8_UNORM => Some(2),
+        GPU_IMAGE_FORMAT_RGBA16_FLOAT => Some(8),
+        GPU_IMAGE_FORMAT_RGBA32_FLOAT => Some(16),
         _ => None,
     }
 }

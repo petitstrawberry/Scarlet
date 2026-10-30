@@ -55,8 +55,8 @@ pub use abi::{
 };
 pub use abi::{
     GPU_CONTEXT_READBACK_IMAGE, GPU_CONTEXT_UPLOAD_IMAGE, GPU_IMAGE_FORMAT_R8_UNORM,
-    GPU_IMAGE_FORMAT_RG8_UNORM, GpuContextReadbackImage, GpuContextUploadImage,
-    image_format_bytes_per_texel,
+    GPU_IMAGE_FORMAT_RG8_UNORM, GPU_IMAGE_FORMAT_RGBA16_FLOAT, GPU_IMAGE_FORMAT_RGBA32_FLOAT,
+    GpuContextReadbackImage, GpuContextUploadImage, image_format_bytes_per_texel,
 };
 pub use abi::{GPU_CONTEXT_UPLOAD_BUFFER, GPU_MAX_BUFFER_UPLOAD_SIZE, GpuContextUploadBuffer};
 pub use abi::{

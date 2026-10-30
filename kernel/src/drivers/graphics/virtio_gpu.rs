@@ -784,10 +784,11 @@ impl VirtioGpuControl {
         };
         opaque_info[8..12].copy_from_slice(&dialect_count.to_le_bytes());
         if acceleration_usable {
-            opaque_info[12..16]
-                .copy_from_slice(&self.virgl_anisotropy_bits(dialect_count).to_le_bytes());
-            // Backend metadata flag 0: native D32 transfer/upload/readback support.
-            opaque_info[16..20].copy_from_slice(&1u32.to_le_bytes());
+            let (anisotropy, float_color) = self.virgl_color_metadata(dialect_count);
+            opaque_info[12..16].copy_from_slice(&anisotropy.to_le_bytes());
+            // Flag 0: D32 transfers. Flag 1: RGBA16F/RGBA32F sampled render targets.
+            opaque_info[16..20]
+                .copy_from_slice(&(1u32 | (u32::from(float_color) << 1)).to_le_bytes());
         }
 
         let state = if *self.transport_ready.read() {
@@ -825,7 +826,7 @@ impl VirtioGpuControl {
         )
     }
 
-    fn virgl_anisotropy_bits(&self, count: u32) -> u32 {
+    fn virgl_color_metadata(&self, count: u32) -> (u32, bool) {
         // Stable wire offset in virgl_caps_v2, not a native Rust/C layout.
         // Only transport opaque host metadata; filtering policy stays in userspace.
         const END: usize = 764;
@@ -843,12 +844,25 @@ impl VirtioGpuControl {
             {
                 let bits = u32::from_le_bytes(caps[760..END].try_into().unwrap());
                 // Positive, finite f32; compare bits without kernel FP operations.
-                if (0x3f80_0000..0x7f80_0000).contains(&bits) {
-                    return bits;
-                }
+                let anisotropy = if (0x3f80_0000..0x7f80_0000).contains(&bits) {
+                    bits
+                } else {
+                    0
+                };
+                let supported = |mask: usize, format: usize| {
+                    let offset = mask + format / 32 * 4;
+                    u32::from_le_bytes(caps[offset..offset + 4].try_into().unwrap())
+                        & (1 << (format % 32))
+                        != 0
+                };
+                // Stable v1 sampler/render masks, each sixteen u32 words.
+                let float_color = [31, 94]
+                    .into_iter()
+                    .all(|f| supported(4, f) && supported(68, f));
+                return (anisotropy, float_color);
             }
         }
-        0
+        (0, false)
     }
 
     fn get_backend_dialect_info(
@@ -2584,7 +2598,9 @@ fn virgl_image_format(format: u32) -> Result<u32, &'static str> {
         GPU_IMAGE_FORMAT_BGRA8_UNORM => Ok(VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM),
         GPU_IMAGE_FORMAT_DEPTH32_FLOAT => Ok(VIRGL_FORMAT_Z32_FLOAT),
         crate::device::gpu::GPU_IMAGE_FORMAT_R8_UNORM => Ok(64), // VIRGL_FORMAT_R8_UNORM
-        crate::device::gpu::GPU_IMAGE_FORMAT_RG8_UNORM => Ok(65), // VIRGL_FORMAT_R8G8_UNORM
+        crate::device::gpu::GPU_IMAGE_FORMAT_RGBA16_FLOAT => Ok(94), // VIRGL_FORMAT_R16G16B16A16_FLOAT
+        crate::device::gpu::GPU_IMAGE_FORMAT_RGBA32_FLOAT => Ok(31), // VIRGL_FORMAT_R32G32B32A32_FLOAT
+        crate::device::gpu::GPU_IMAGE_FORMAT_RG8_UNORM => Ok(65),    // VIRGL_FORMAT_R8G8_UNORM
         _ => Err("VirtIO GPU image format is unsupported"),
     }
 }
