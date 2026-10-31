@@ -10,6 +10,27 @@ from vintf_inputs import HEALTH_CONTRACT
 
 
 class HostServicesTest(unittest.TestCase):
+    def test_keystore_preserves_stock_identity_storage_and_init_order(self):
+        from host_services import (build_keystore, KEYSTORE_BINARY, KEYSTORE_MANAGED_RC)
+        rc = (b"# Stock service\nservice keystore2 /system/bin/keystore2 /data/misc/keystore\n"
+              b"    class early_hal\n    user keystore\n    group keystore readproc log\n"
+              b"    task_profiles ProcessCapacityHigh\n")
+        managed, proof = build_keystore(rc, b"stock keystore2")
+        self.assertEqual(managed, rc)
+        metadata = {"profile": {"host_services": ["keystore2"]},
+                    "host_service_inputs": {"keystore2": proof},
+                    "files": {KEYSTORE_BINARY: proof["binary_sha256"],
+                              KEYSTORE_MANAGED_RC: proof["managed_rc_sha256"]}}
+        validate_staged(metadata)
+        metadata["files"][KEYSTORE_BINARY] = "changed"
+        with self.assertRaises(ValueError):
+            validate_staged(metadata)
+        for old, new in [(b"user keystore", b"user root"),
+                         (b"/data/misc/keystore", b"/data/other"),
+                         (b"class early_hal", b"class late_start")]:
+            with self.subTest(old=old), self.assertRaises(ValueError):
+                build_keystore(rc.replace(old, new), b"binary")
+
     def test_audio_policy_keeps_only_the_primary_stock_graph(self):
         from host_services import primary_audio_policy
         stock=(b'<audioPolicyConfiguration>\n'

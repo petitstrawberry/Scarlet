@@ -146,10 +146,10 @@ def prepare(archive, runtime, stock, profile_file, output):
 
 
 def configure(output, stock, profile, contexts, metadata):
-    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,ODSIGN_MANAGED_RC,HEALTH_MANAGED_RC,VOLD_MANAGED_RC,LMKD_MANAGED_RC,NETD_MANAGED_RC,AUDIOSERVER_MANAGED_RC,AUDIO_HAL_MANAGED_RC,imports
+    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,ODSIGN_MANAGED_RC,HEALTH_MANAGED_RC,VOLD_MANAGED_RC,LMKD_MANAGED_RC,NETD_MANAGED_RC,AUDIOSERVER_MANAGED_RC,AUDIO_HAL_MANAGED_RC,KEYSTORE_MANAGED_RC,imports
     for name,record in list(metadata.get("host_service_inputs",{}).items()):
         if name not in profile.get("host_services",[]):
-            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC,"odsign":ODSIGN_MANAGED_RC, "health":HEALTH_MANAGED_RC,"vold":VOLD_MANAGED_RC,"lmkd":LMKD_MANAGED_RC,"netd":NETD_MANAGED_RC,"audioserver":AUDIOSERVER_MANAGED_RC,"audio_hal":AUDIO_HAL_MANAGED_RC}[name]
+            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC,"odsign":ODSIGN_MANAGED_RC, "health":HEALTH_MANAGED_RC,"vold":VOLD_MANAGED_RC,"lmkd":LMKD_MANAGED_RC,"netd":NETD_MANAGED_RC,"audioserver":AUDIOSERVER_MANAGED_RC,"audio_hal":AUDIO_HAL_MANAGED_RC,"keystore2":KEYSTORE_MANAGED_RC}[name]
             path=output/relative
             expected=record["files"][relative] if name=="graphics_cpu" else record["managed_rc_sha256"]
             if sha256(path)!=expected:raise ValueError("changed manager host service output")
@@ -249,12 +249,12 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
     # Reusing verified payloads must not implicitly require a new SDK archive.
     # Provider refreshes are explicitly requested by supplying that archive.
     refreshed_services={name for name in profile.get("host_services",[])
-                        if name=="netd" and service_image is not None}
-    if service_image is not None:
+                        if name=="netd" and service_image is not None and not added_services}
+    if service_image is not None and not added_services:
         refreshed_services |= {name for name in profile.get("host_services",[]) if name in ("audioserver","audio_hal")}
     providers_to_add=added_services|refreshed_services
-    if providers_to_add and (not providers_to_add.issubset({"vold","lmkd","netd","audioserver","audio_hal"}) or not service_image):
-        raise ValueError("adding a stock provider requires --service-image; supported additions: vold, lmkd, netd, audioserver, audio_hal")
+    if providers_to_add and (not providers_to_add.issubset({"vold","lmkd","netd","audioserver","audio_hal","keystore2"}) or not service_image):
+        raise ValueError("adding a stock provider requires --service-image; supported additions: vold, lmkd, netd, audioserver, audio_hal, keystore2")
     if "netd" in providers_to_add and not firewall_compat:
         raise ValueError("netd provider requires --netd-firewall-compat")
     if providers_to_add.intersection({"audioserver","audio_hal"}) and not audio_start:
@@ -333,7 +333,8 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
 
 def add_stock_provider(output, metadata, archive, name, firewall_compat=None, audio_start=None, audio_binder_compat=None):
     service_name=name
-    from host_services import (VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold,
+    from host_services import (KEYSTORE_BINARY,KEYSTORE_STOCK_RC,KEYSTORE_MANAGED_RC,build_keystore,
+                               VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold,
                                LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd,
                                NETD_BINARY,NETD_STOCK_RC,NETD_MANAGED_RC,NETD_FIREWALL_BINARY,
                                NETD_FIREWALL_ALIASES,build_netd,
@@ -341,6 +342,7 @@ def add_stock_provider(output, metadata, archive, name, firewall_compat=None, au
                                AUDIO_HAL,AUDIO_HAL_BINARY,AUDIO_HAL_STOCK_RC,AUDIO_HAL_MANAGED_RC,AUDIO_CONFIG_FILES,
                                AUDIO_HAL_MODULES,AUDIO_START_BINARY,AUDIO_BINDER_COMPAT,primary_audio_policy,build_audio_hal)
     binary_path,stock_rc,managed_rc,builder={
+        "keystore2":(KEYSTORE_BINARY,KEYSTORE_STOCK_RC,KEYSTORE_MANAGED_RC,build_keystore),
         "vold":(VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold),
         "lmkd":(LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd),
         "netd":(NETD_BINARY,NETD_STOCK_RC,NETD_MANAGED_RC,build_netd),
@@ -527,12 +529,14 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
             destination.parent.mkdir(parents=True,exist_ok=True);destination.write_bytes(managed)
             metadata.setdefault("host_service_inputs",{})["health"]=proof
             device_providers.update(providers);service_roots.extend([HEALTH_BINARY,HEALTH_IMPL])
-        from host_services import (INSTALLER_BINARY,INSTALLER_STOCK_RC,INSTALLER_MANAGED_RC,build_installer,
+        from host_services import (KEYSTORE_BINARY,KEYSTORE_STOCK_RC,KEYSTORE_MANAGED_RC,build_keystore,
+                                   INSTALLER_BINARY,INSTALLER_STOCK_RC,INSTALLER_MANAGED_RC,build_installer,
                                    ODSIGN_BINARY,ODSIGN_STOCK_RC,ODSIGN_MANAGED_RC,build_odsign,
                                    VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold,
                                    LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd,
                                    NETD_BINARY,NETD_STOCK_RC,NETD_MANAGED_RC,build_netd)
         for name,program,stock_rc,managed_rc,builder in [
+            ("keystore2",KEYSTORE_BINARY,KEYSTORE_STOCK_RC,KEYSTORE_MANAGED_RC,build_keystore),
             ("installd",INSTALLER_BINARY,INSTALLER_STOCK_RC,INSTALLER_MANAGED_RC,build_installer),
             ("odsign",ODSIGN_BINARY,ODSIGN_STOCK_RC,ODSIGN_MANAGED_RC,build_odsign),
             ("vold",VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold),

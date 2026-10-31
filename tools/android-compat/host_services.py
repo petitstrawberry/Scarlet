@@ -18,6 +18,10 @@ INSTALLER="installd"
 INSTALLER_BINARY="system/bin/installd"
 INSTALLER_STOCK_RC="system/etc/init/installd.rc"
 INSTALLER_MANAGED_RC="scarlet/boot/services/installd.rc"
+KEYSTORE="keystore2"
+KEYSTORE_BINARY="system/bin/keystore2"
+KEYSTORE_STOCK_RC="system/etc/init/keystore2.rc"
+KEYSTORE_MANAGED_RC="scarlet/boot/services/keystore2.rc"
 ODSIGN="odsign"
 ODSIGN_BINARY="system/bin/odsign"
 ODSIGN_STOCK_RC="system/etc/init/odsign.rc"
@@ -112,8 +116,8 @@ STOCK_TEXT = ("service system_suspend /" + BINARY + "\n"
 
 def validate_selection(profile):
     names = profile.get("host_services", [])
-    if (not isinstance(names,list) or len(names)>11 or
-            any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER,ODSIGN,HEALTH,VOLD,LMKD,NETD,AUDIOSERVER,AUDIO_HAL) for name in names) or len(set(names))!=len(names)):
+    if (not isinstance(names,list) or len(names)>12 or
+            any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER,ODSIGN,HEALTH,VOLD,LMKD,NETD,AUDIOSERVER,AUDIO_HAL,KEYSTORE) for name in names) or len(set(names))!=len(names)):
         raise ValueError("unsupported stock host service selection")
     selected = CONTRACT in profile.get("vintf", {}).get("framework", [])
     if selected != (SUSPEND in names):
@@ -139,7 +143,19 @@ def validate_selection(profile):
 
 
 def imports(profile):
-    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC,GRAPHICS:GRAPHICS_RC,INSTALLER:INSTALLER_MANAGED_RC,ODSIGN:ODSIGN_MANAGED_RC,HEALTH:HEALTH_MANAGED_RC,VOLD:VOLD_MANAGED_RC,LMKD:LMKD_MANAGED_RC,NETD:NETD_MANAGED_RC,AUDIOSERVER:AUDIOSERVER_MANAGED_RC,AUDIO_HAL:AUDIO_HAL_MANAGED_RC}[name] for name in validate_selection(profile)]
+    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC,GRAPHICS:GRAPHICS_RC,INSTALLER:INSTALLER_MANAGED_RC,ODSIGN:ODSIGN_MANAGED_RC,HEALTH:HEALTH_MANAGED_RC,VOLD:VOLD_MANAGED_RC,LMKD:LMKD_MANAGED_RC,NETD:NETD_MANAGED_RC,AUDIOSERVER:AUDIOSERVER_MANAGED_RC,AUDIO_HAL:AUDIO_HAL_MANAGED_RC,KEYSTORE:KEYSTORE_MANAGED_RC}[name] for name in validate_selection(profile)]
+
+
+def build_keystore(stock_rc,binary):
+    directives = [line.strip() for line in stock_rc.decode().splitlines()
+                  if line.strip() and not line.lstrip().startswith("#")]
+    if directives != ["service keystore2 /system/bin/keystore2 /data/misc/keystore",
+                      "class early_hal", "user keystore", "group keystore readproc log",
+                      "task_profiles ProcessCapacityHigh"]:
+        raise ValueError("changed stock keystore2 service configuration")
+    digest=lambda data:hashlib.sha256(data).hexdigest()
+    return stock_rc,{"source_rc":KEYSTORE_STOCK_RC,"source_rc_sha256":digest(stock_rc),
+                     "binary_sha256":digest(binary),"managed_rc_sha256":digest(stock_rc)}
 
 
 def build_vold(stock_rc,binary):
@@ -380,7 +396,7 @@ def validate_staged(metadata):
                 set(record.get("native_needed",{}))!=set(files) or
                 any(metadata["files"].get(path)!=digest for path,digest in files.items())):
             raise ValueError("changed audio provider inputs")
-    for name,binary,rc in [(INSTALLER,INSTALLER_BINARY,INSTALLER_MANAGED_RC),(ODSIGN,ODSIGN_BINARY,ODSIGN_MANAGED_RC)]:
+    for name,binary,rc in [(INSTALLER,INSTALLER_BINARY,INSTALLER_MANAGED_RC),(ODSIGN,ODSIGN_BINARY,ODSIGN_MANAGED_RC),(KEYSTORE,KEYSTORE_BINARY,KEYSTORE_MANAGED_RC)]:
         if name not in names:continue
         record=proof[name]
         if (metadata["files"].get(binary)!=record.get("binary_sha256") or
