@@ -86,6 +86,8 @@ pub(super) struct Scenes {
     registered: bool,
     next_resource: u32,
     next_serial: u64,
+    layers_scratch: Vec<Layer>,
+    payload_scratch: Vec<u8>,
     windows: BTreeMap<u32, Window>,
     buffers: BTreeMap<u32, Lease>,
 }
@@ -270,7 +272,8 @@ impl Scenes {
             .checked_add(1)
             .ok_or(Error::InvalidRequest)?;
         let serial = self.next_serial;
-        let mut layers = Vec::new();
+        let mut layers = std::mem::take(&mut self.layers_scratch);
+        layers.clear();
         let frame = window.frame.as_ref().filter(|f| {
             (f.width, f.height) == (width, height)
                 && f.insets.content(width, height) == Some(content)
@@ -286,7 +289,7 @@ impl Scenes {
                         height,
                     }];
                     let clip = frame.map_or(fallback.as_slice(), |f| f.clip.as_slice());
-                    layers = content_layers(resource, content, clip);
+                    append_content_layers(&mut layers, resource, content, clip);
                     if !layers.is_empty() {
                         selected = Some(resource);
                     }
@@ -318,8 +321,14 @@ impl Scenes {
             height,
             layers,
         };
-        let payload = scene.encode().map_err(|_| Error::InvalidRequest)?;
-        connection.send_message(msg::EXTENSION_COMMIT_SCENE, &payload)?;
+        let sent = scene
+            .encode_into(&mut self.payload_scratch)
+            .map_err(|_| Error::InvalidRequest)
+            .and_then(|()| {
+                connection.send_message(msg::EXTENSION_COMMIT_SCENE, &self.payload_scratch)
+            });
+        self.layers_scratch = scene.layers;
+        sent?;
         if let Some(resource) = selected {
             self.buffers.get_mut(&resource).unwrap().scene_serial = Some(serial);
         } else {
@@ -328,8 +337,18 @@ impl Scenes {
         Ok(())
     }
 }
+#[cfg(test)]
 fn content_layers(resource: u32, content: SwsRect, clip: &[SwsRect]) -> Vec<Layer> {
     let mut layers = Vec::new();
+    append_content_layers(&mut layers, resource, content, clip);
+    layers
+}
+fn append_content_layers(
+    layers: &mut Vec<Layer>,
+    resource: u32,
+    content: SwsRect,
+    clip: &[SwsRect],
+) {
     for r in clip {
         let x = r.x.max(content.x);
         let y = r.y.max(content.y);
@@ -352,7 +371,6 @@ fn content_layers(resource: u32, content: SwsRect, clip: &[SwsRect]) -> Vec<Laye
             transform: 0,
         });
     }
-    layers
 }
 fn retire_frame(connection: &Connection, frame: Frame) -> Result<(), Error> {
     connection.send_message(

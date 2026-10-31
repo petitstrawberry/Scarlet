@@ -33,6 +33,7 @@ pub(super) struct ControlRequest {
     command: ContiguousPages,
     response: ContiguousPages,
     command_len: u32,
+    command_capacity: usize,
     response_len: u32,
     expected_fence: Option<u64>,
     published: AtomicBool,
@@ -58,15 +59,28 @@ impl ControlRequest {
         response_len: usize,
         expected_fence: Option<u64>,
     ) -> Result<Arc<Self>, &'static str> {
-        if commands.is_empty() || response_len < core::mem::size_of::<VirtioGpuCtrlHdr>() {
+        Self::allocate_parts(commands, &[], response_len, expected_fence)
+    }
+
+    pub(super) fn allocate_parts(
+        prefix: &[u8],
+        commands: &[u8],
+        response_len: usize,
+        expected_fence: Option<u64>,
+    ) -> Result<Arc<Self>, &'static str> {
+        let length = prefix
+            .len()
+            .checked_add(commands.len())
+            .ok_or("VirtIO GPU command length overflows")?;
+        if length == 0 || response_len < core::mem::size_of::<VirtioGpuCtrlHdr>() {
             return Err("VirtIO GPU control buffers must include a command and response header");
         }
-        let command_len = u32::try_from(commands.len())
+        let command_len = u32::try_from(length)
             .map_err(|_| "VirtIO GPU command buffer exceeds the descriptor limit")?;
         let response_len = u32::try_from(response_len)
             .map_err(|_| "VirtIO GPU response buffer exceeds the descriptor limit")?;
         let page_size = crate::environment::PAGE_SIZE;
-        let command = ContiguousPages::new(commands.len().div_ceil(page_size))
+        let command = ContiguousPages::new(length.div_ceil(page_size))
             .ok_or("Failed to allocate VirtIO GPU command DMA buffer")?;
         let response = ContiguousPages::new((response_len as usize).div_ceil(page_size))
             .ok_or("Failed to allocate VirtIO GPU response DMA buffer")?;
@@ -74,8 +88,13 @@ impl ControlRequest {
         // They are not visible to the device until enqueue publishes the chain.
         unsafe {
             core::ptr::copy_nonoverlapping(
-                commands.as_ptr(),
+                prefix.as_ptr(),
                 command.as_ptr() as *mut u8,
+                prefix.len(),
+            );
+            core::ptr::copy_nonoverlapping(
+                commands.as_ptr(),
+                (command.as_ptr() as *mut u8).add(prefix.len()),
                 commands.len(),
             );
             core::ptr::write_bytes(response.as_ptr() as *mut u8, 0, response_len as usize);
@@ -84,12 +103,79 @@ impl ControlRequest {
             command,
             response,
             command_len,
+            command_capacity: length.div_ceil(page_size) * page_size,
             response_len,
             expected_fence,
             published: AtomicBool::new(false),
             status: IrqSpinLock::new(ControlStatus::Pending),
             completion_waker: Arc::new(Waker::new_uninterruptible("virtio-gpu-control")),
         }))
+    }
+
+    /// Refill privately owned, retired storage. The caller must hold the sole
+    /// Arc, so neither the device transport nor a completion observer can see
+    /// this request changing. Capacity is retained between submissions.
+    pub(super) fn reuse_parts(
+        &mut self,
+        prefix: &[u8],
+        commands: &[u8],
+        expected_fence: Option<u64>,
+    ) -> Result<(), &'static str> {
+        if self.published.load(Ordering::Acquire)
+            && !matches!(self.status(), ControlStatus::Complete(_))
+        {
+            return Err("VirtIO GPU DMA request has not retired");
+        }
+        let length = prefix
+            .len()
+            .checked_add(commands.len())
+            .ok_or("VirtIO GPU command length overflows")?;
+        let command_len = u32::try_from(length)
+            .map_err(|_| "VirtIO GPU command buffer exceeds the descriptor limit")?;
+        if length > self.command_capacity {
+            let pages = length.div_ceil(crate::environment::PAGE_SIZE);
+            let command = ContiguousPages::new(pages)
+                .ok_or("Failed to grow VirtIO GPU command DMA buffer")?;
+            self.command = command;
+            self.command_capacity = pages * crate::environment::PAGE_SIZE;
+        }
+        // SAFETY: exclusive ownership plus successful capacity checks cover
+        // both writes. This storage is not published until enqueue_batch.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                prefix.as_ptr(),
+                self.command.as_ptr() as *mut u8,
+                prefix.len(),
+            );
+            core::ptr::copy_nonoverlapping(
+                commands.as_ptr(),
+                (self.command.as_ptr() as *mut u8).add(prefix.len()),
+                commands.len(),
+            );
+            core::ptr::write_bytes(
+                self.response.as_ptr() as *mut u8,
+                0,
+                self.response_len as usize,
+            );
+        }
+        self.command_len = command_len;
+        self.expected_fence = expected_fence;
+        *self.status.lock() = ControlStatus::Pending;
+        self.published.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    /// Assign the unique fence at the short publication critical section.
+    pub(super) fn set_checkpoint_fence(&mut self, fence: u64) {
+        debug_assert!(!self.published.load(Ordering::Acquire));
+        debug_assert!(self.expected_fence.is_some());
+        self.expected_fence = Some(fence);
+        // SAFETY: this exclusively owned command contains a complete control
+        // header and has not been published to the device.
+        unsafe {
+            let header = self.command.as_ptr() as *mut VirtioGpuCtrlHdr;
+            core::ptr::addr_of_mut!((*header).fence_id).write_unaligned(fence);
+        }
     }
 
     pub(super) fn status(&self) -> ControlStatus {
@@ -229,6 +315,11 @@ impl ControlQueue {
             ControlStatus::Pending => Ok(false),
             ControlStatus::Failed(error) => Err(error),
         }
+    }
+
+    /// Capacity for an atomic presentation batch, regardless of older work.
+    pub(super) fn can_enqueue_batch(&self, count: usize) -> bool {
+        (1..=3).contains(&count) && self.ring.free_descriptors.len() >= count * 2
     }
 
     pub(super) fn pending_request(&self) -> Option<Arc<ControlRequest>> {

@@ -87,6 +87,12 @@ typedef struct SwsSceneFrame {
     const void *pixels; size_t bytes;
     const SwsRect *clip; size_t clip_count;
 } SwsSceneFrame;
+/* Optional presentation timing: operation 2=commit, 3=size, 4=GPU events.
+ * Called after releasing the client lock. Keep callback code loaded until
+ * cleared; pass NULL to disable all timing clock reads. */
+typedef void (*sws_timing_callback)(uint32_t operation, uint64_t lock_wait_ns, uint64_t service_ns);
+void sws_set_timing_callback(sws_timing_callback callback);
+
 int32_t sws_get_output_scale(uint32_t *scale_milli);
 int32_t sws_scene_create(const char *title, uint32_t outer_width, uint32_t outer_height,
                          uint32_t resizable, uint32_t *window_id);

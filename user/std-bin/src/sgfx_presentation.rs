@@ -5,13 +5,16 @@
 
 use framebuffer::{DisplayPresentRegion, DisplaySurface};
 use scarlet_os::handle::Handle;
+use std::io::{BufWriter, Write};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 struct Present {
     sequence: u64,
     slot: usize,
     region: Option<DisplayPresentRegion>,
+    queued_at: Option<Instant>,
 }
 
 pub(super) struct PresentationQueue {
@@ -19,6 +22,7 @@ pub(super) struct PresentationQueue {
     retired: Receiver<Result<u64, &'static str>>,
     worker: Option<JoinHandle<()>>,
     completed: u64,
+    profiling: bool,
 }
 
 impl PresentationQueue {
@@ -30,21 +34,58 @@ impl PresentationQueue {
         // be rendered only after a later completed flip released its old use.
         let (sender, jobs) = mpsc::sync_channel::<Present>(1);
         let (responses, retired) = mpsc::sync_channel(3);
+        let profiling = std::env::var("SWS_FRAME_PROFILE").is_ok_and(|value| value == "1");
         let worker = thread::Builder::new()
             .name("sws-present".into())
             .spawn(move || {
-                while let Ok(job) = jobs.recv() {
+                let mut profile = if profiling {
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(format!("/tmp/sws-display-{}.tsv", std::process::id()))
+                        .ok()
+                        .map(|file| BufWriter::with_capacity(32768, file))
+                } else {
+                    None
+                };
+                if let Some(file) = &mut profile {
+                    let _ = writeln!(file, "sequence\tslot\tqueue_ns\tdisplay_ns\tsuccess");
+                }
+                loop {
+                    let job_result = jobs.recv();
+                    let Ok(job) = job_result else {
+                        break;
+                    };
+                    let started = job.queued_at.map(|_| Instant::now());
                     let result = images
                         .get(job.slot)
                         .ok_or("Invalid presentation slot")
                         .and_then(|image| {
-                            presenter
-                                .present_swapchain_image(image, job.region)
-                                .map_err(|_| "Display page flip failed")
+                            let result =
+                                presenter.present_completed_swapchain_image(image, job.region);
+                            result.map_err(|_| "Display page flip failed")
                         })
                         .map(|()| job.sequence);
                     let failed = result.is_err();
-                    if responses.send(result).is_err() || failed {
+                    let finished = started.map(|_| Instant::now());
+                    let reply = responses.send(result);
+                    if let (Some(file), Some(queued), Some(start), Some(end)) =
+                        (&mut profile, job.queued_at, started, finished)
+                    {
+                        let written = writeln!(
+                            file,
+                            "{}\t{}\t{}\t{}\t{}",
+                            job.sequence,
+                            job.slot,
+                            start.duration_since(queued).as_nanos(),
+                            end.duration_since(start).as_nanos(),
+                            u8::from(!failed)
+                        );
+                        if written.is_err() || (job.sequence % 60 == 0 && file.flush().is_err()) {
+                            profile = None;
+                        }
+                    }
+                    if reply.is_err() || failed {
                         break;
                     }
                 }
@@ -55,6 +96,7 @@ impl PresentationQueue {
             retired,
             worker: Some(worker),
             completed: 0,
+            profiling,
         })
     }
 
@@ -65,20 +107,22 @@ impl PresentationQueue {
         region: Option<DisplayPresentRegion>,
     ) -> Result<(), &'static str> {
         self.poll()?;
-        self.sender
-            .as_ref()
-            .ok_or("Display presentation stopped")?
+        let sender = self.sender.as_ref().ok_or("Display presentation stopped")?;
+        let result = sender
             .send(Present {
                 sequence,
                 slot,
                 region,
+                queued_at: self.profiling.then(Instant::now),
             })
-            .map_err(|_| "Display presentation stopped")
+            .map_err(|_| "Display presentation stopped");
+        result
     }
 
     fn poll(&mut self) -> Result<(), &'static str> {
         loop {
-            match self.retired.try_recv() {
+            let result = self.retired.try_recv();
+            match result {
                 Ok(result) => self.completed = result?,
                 Err(TryRecvError::Empty) => return Ok(()),
                 Err(TryRecvError::Disconnected) => return Err("Display presentation stopped"),
@@ -91,10 +135,8 @@ impl PresentationQueue {
     pub(super) fn wait_after(&mut self, sequence: u64) -> Result<(), &'static str> {
         self.poll()?;
         while self.completed <= sequence {
-            self.completed = self
-                .retired
-                .recv()
-                .map_err(|_| "Display presentation stopped")??;
+            let result = self.retired.recv();
+            self.completed = result.map_err(|_| "Display presentation stopped")??;
         }
         Ok(())
     }

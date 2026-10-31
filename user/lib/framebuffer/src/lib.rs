@@ -11,17 +11,17 @@ extern crate scarlet_std as std;
 
 use alloc::{format, vec};
 #[cfg(feature = "std")]
-use scarlet_os::handle::capability::memory_mapping::{flags, munmap, prot};
-#[cfg(feature = "std")]
 use scarlet_os::handle::capability::SeekFrom;
+#[cfg(feature = "std")]
+use scarlet_os::handle::capability::memory_mapping::{flags, munmap, prot};
 #[cfg(feature = "std")]
 use scarlet_os::handle::{Handle, HandleError, HandleResult};
 #[cfg(not(feature = "std"))]
 use std::{
     fs::File,
     handle::{
-        capability::memory_mapping::{flags, munmap, prot},
         Handle, HandleError, HandleResult,
+        capability::memory_mapping::{flags, munmap, prot},
     },
     io::SeekFrom,
 };
@@ -214,9 +214,12 @@ pub struct DisplayPresentImage {
 pub const DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME: u32 = 1 << 0;
 /// The producer will not rewrite this image until another image is presented.
 pub const DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER: u32 = 1 << 1;
+/// All writes to this image have completed successfully before this request.
+pub const DISPLAY_PRESENT_IMAGE_FLAG_PRODUCER_COMPLETE: u32 = 1 << 2;
 /// All currently defined GPU image presentation flags.
-pub const DISPLAY_PRESENT_IMAGE_FLAGS_VALID: u32 =
-    DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME | DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER;
+pub const DISPLAY_PRESENT_IMAGE_FLAGS_VALID: u32 = DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME
+    | DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER
+    | DISPLAY_PRESENT_IMAGE_FLAG_PRODUCER_COMPLETE;
 
 /// Color bit field information
 #[repr(C)]
@@ -429,6 +432,22 @@ impl DisplayPresenter {
             image,
             region,
             DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER,
+        )
+    }
+    /// Present a swapchain image whose GPU producer has already completed.
+    /// The caller must observe successful completion of all writes first and
+    /// preserve the same image-reuse guarantee as `present_swapchain_image`.
+    pub fn present_completed_swapchain_image(
+        &self,
+        image: &Handle,
+        region: Option<DisplayPresentRegion>,
+    ) -> HandleResult<()> {
+        present_gpu_image_with_flags(
+            &self.handle,
+            image,
+            region,
+            DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER
+                | DISPLAY_PRESENT_IMAGE_FLAG_PRODUCER_COMPLETE,
         )
     }
 }
@@ -2444,7 +2463,7 @@ impl Drop for DisplaySurface {
 
 #[cfg(test)]
 mod tests {
-    use super::{brightness_percent_from_control, HandleError};
+    use super::{HandleError, brightness_percent_from_control};
 
     #[test]
     fn brightness_control_result_accepts_inclusive_range() {

@@ -177,12 +177,67 @@ impl Client {
     }
 }
 
+type TimingCallback = extern "C" fn(u32, u64, u64);
+static TIMING_CALLBACK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Optional per-call timing sink. The callback must remain loaded until cleared;
+/// it runs after releasing the client mutex. None disables all clock reads.
+#[unsafe(no_mangle)]
+pub extern "C" fn sws_set_timing_callback(callback: Option<TimingCallback>) {
+    TIMING_CALLBACK.store(
+        callback.map_or(0, |callback| callback as usize),
+        std::sync::atomic::Ordering::Release,
+    );
+}
+struct CallTiming {
+    callback: TimingCallback,
+    operation: u32,
+    started: std::time::Instant,
+    acquired: Option<std::time::Instant>,
+}
+impl CallTiming {
+    fn new(operation: u32) -> Option<Self> {
+        let address = TIMING_CALLBACK.load(std::sync::atomic::Ordering::Acquire);
+        if address == 0 {
+            return None;
+        }
+        Some(Self {
+            callback: unsafe { std::mem::transmute::<usize, TimingCallback>(address) },
+            operation,
+            started: std::time::Instant::now(),
+            acquired: None,
+        })
+    }
+}
+impl Drop for CallTiming {
+    fn drop(&mut self) {
+        let ended = std::time::Instant::now();
+        let acquired = self.acquired.unwrap_or(ended);
+        (self.callback)(
+            self.operation,
+            acquired.duration_since(self.started).as_nanos() as u64,
+            ended.duration_since(acquired).as_nanos() as u64,
+        );
+    }
+}
 fn call(f: impl FnOnce(&mut Client) -> Result<i32, Error>) -> i32 {
+    call_profiled(0, f)
+}
+fn call_profiled(operation: u32, f: impl FnOnce(&mut Client) -> Result<i32, Error>) -> i32 {
+    let mut timing = if operation == 0 {
+        None
+    } else {
+        CallTiming::new(operation)
+    };
+
     static CLIENT: OnceLock<Mutex<Option<Client>>> = OnceLock::new();
     let mut slot = match CLIENT.get_or_init(|| Mutex::new(None)).lock() {
         Ok(slot) => slot,
         Err(_) => return -3,
     };
+    if let Some(timing) = timing.as_mut() {
+        timing.acquired = Some(std::time::Instant::now());
+    }
     if slot.is_none() {
         let connection = match Connection::connect_default() {
             Ok(connection) => connection,
@@ -318,7 +373,7 @@ pub unsafe extern "C" fn sws_window_size(id: u32, width: *mut u32, height: *mut 
     if width.is_null() || height.is_null() {
         return -1;
     }
-    call(|client| {
+    call_profiled(3, |client| {
         client.dispatch()?;
         let (mut w, mut h) = client
             .connection
@@ -567,7 +622,7 @@ pub extern "C" fn sws_gpu_register(
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn sws_gpu_commit(buffer: SwsBuffer, serial: u64, width: u32, height: u32) -> i32 {
-    call(|client| {
+    call_profiled(2, |client| {
         if client.scenes.contains(buffer.window_id) {
             client.scenes.commit(
                 &client.connection,
@@ -609,7 +664,7 @@ pub unsafe extern "C" fn sws_gpu_poll(id: u32, out: *mut SwsGpuEvent) -> i32 {
     if out.is_null() {
         return -1;
     }
-    call(|client| {
+    call_profiled(4, |client| {
         client.dispatch()?;
         if client.closed.contains(&id) {
             return Err(Error::SurfaceNotFound);

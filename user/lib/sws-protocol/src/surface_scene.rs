@@ -91,8 +91,15 @@ impl Commit {
         Ok(())
     }
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
+        let mut out = Vec::new();
+        self.encode_into(&mut out)?;
+        Ok(out)
+    }
+    /// Encode into reusable caller-owned storage without changing the wire format.
+    pub fn encode_into(&self, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
         self.validate()?;
-        let mut out = Vec::with_capacity(HEADER_BYTES + self.layers.len() * LAYER_BYTES);
+        out.clear();
+        out.reserve(HEADER_BYTES + self.layers.len() * LAYER_BYTES);
         out.extend_from_slice(&self.external_client_id.to_le_bytes());
         out.extend_from_slice(&self.window_id.to_le_bytes());
         out.extend_from_slice(&self.serial.to_le_bytes());
@@ -122,7 +129,7 @@ impl Commit {
                 out.extend_from_slice(&v.to_le_bytes());
             }
         }
-        Ok(out)
+        Ok(())
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
         let count = read_u32(bytes, 32)? as usize;
