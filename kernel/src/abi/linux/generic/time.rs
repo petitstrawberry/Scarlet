@@ -332,6 +332,17 @@ fn write_timer_spec(task: &crate::task::Task, address: usize, spec: &ItimerSpec)
     crate::library::std::usercopy::copy_to_user(task,address,&bytes).map_err(|_| errno::EFAULT)
 }
 
+fn write_clock_timespec(
+    task: &crate::task::Task,
+    address: usize,
+    value: &TimeSpec,
+) -> Result<(), usize> {
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&value.tv_sec.to_ne_bytes());
+    bytes[8..].copy_from_slice(&value.tv_nsec.to_ne_bytes());
+    crate::library::std::usercopy::copy_to_user(task, address, &bytes).map_err(|_| errno::EFAULT)
+}
+
 /// Linux clock IDs (subset of commonly used ones)
 pub const CLOCK_REALTIME: i32 = 0;
 pub const CLOCK_MONOTONIC: i32 = 1;
@@ -807,10 +818,7 @@ pub fn sys_clock_gettime(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
 
     trapframe.increment_pc_next(&task);
 
-    let timespec_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
-        Some(ptr) => ptr as *mut TimeSpec,   // a1
-        None => return (-14_isize) as usize, // -EFAULT
-    };
+    let timespec_ptr = trapframe.get_arg(1);
 
     // Get the current time based on the clock type
     let timespec = match clock_id {
@@ -851,12 +859,7 @@ pub fn sys_clock_gettime(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
         }
     };
 
-    // Write the timespec to user space
-    unsafe {
-        *timespec_ptr = timespec;
-    }
-
-    0 // Success
+    write_clock_timespec(&task, timespec_ptr, &timespec).map_or_else(errno::to_result, |_| 0)
 }
 
 /// Sleep relative to monotonic time, validating the Linux timespec and writing
@@ -990,22 +993,11 @@ pub fn sys_clock_getres(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
-    // If res pointer is provided, write resolution
-    if res_ptr != 0 {
-        if let Some(res_paddr) = task.vm_manager.translate_to_kva(res_ptr) {
-            unsafe {
-                // Write timespec structure with nanosecond resolution
-                // struct timespec { long tv_sec; long tv_nsec; }
-                let timespec = res_paddr as *mut [u64; 2];
-                *timespec = [
-                    0,         // tv_sec = 0
-                    1_000_000, // tv_nsec = 1 millisecond (reasonable resolution)
-                ];
-            }
-        }
+    if res_ptr == 0 {
+        return 0;
     }
-
-    0 // Always succeed
+    let resolution = TimeSpec { tv_sec: 0, tv_nsec: 1_000_000 };
+    write_clock_timespec(&task, res_ptr, &resolution).map_or_else(errno::to_result, |_| 0)
 }
 
 #[cfg(test)]
@@ -1024,6 +1016,37 @@ mod tests {
         assert_eq!((read.it_interval.tv_sec,read.it_interval.tv_nsec,read.it_value.tv_sec,read.it_value.tv_nsec),(2,3,4,5));
         assert!(matches!(read_timer_spec(&task,USER_STACK_END-16),Err(errno::EFAULT)));
         assert_eq!(write_timer_spec(&task,USER_STACK_END-16,&spec),Err(errno::EFAULT));
+    }
+
+    #[test_case]
+    fn clock_timespec_is_page_split_and_fork_cow_isolated() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::library::std::usercopy::{copy_from_user, copy_to_user};
+        use crate::task::{CloneFlags, Task, TaskType};
+
+        let parent = Task::new("linux-clock-cow".into(), 0, TaskType::User);
+        parent
+            .vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let base = USER_STACK_END - 2 * PAGE_SIZE;
+        parent.allocate_stack_pages(base, 2).unwrap();
+        copy_to_user(&parent, base + PAGE_SIZE - 8, &[0xa5; 24]).unwrap();
+        let child = parent.clone_task(CloneFlags::default()).unwrap();
+        let value = TimeSpec { tv_sec: 123, tv_nsec: 456 };
+        write_clock_timespec(&child, base + PAGE_SIZE - 8, &value).unwrap();
+
+        let mut child_bytes = [0; 24];
+        copy_from_user(&child, base + PAGE_SIZE - 8, &mut child_bytes).unwrap();
+        assert_eq!(i64::from_ne_bytes(child_bytes[..8].try_into().unwrap()), 123);
+        assert_eq!(i64::from_ne_bytes(child_bytes[8..16].try_into().unwrap()), 456);
+        assert_eq!(&child_bytes[16..], &[0xa5; 8]);
+        let mut parent_bytes = [0; 24];
+        copy_from_user(&parent, base + PAGE_SIZE - 8, &mut parent_bytes).unwrap();
+        assert_eq!(parent_bytes, [0xa5; 24]);
+        assert_eq!(
+            write_clock_timespec(&parent, USER_STACK_END - 8, &value),
+            Err(errno::EFAULT)
+        );
     }
 
     #[test_case]

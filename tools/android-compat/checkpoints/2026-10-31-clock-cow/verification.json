@@ -1,0 +1,21 @@
+{
+  "revision": "ee7ecc1af0b5883d7d9ec334555ce6e74b80559a",
+  "kernel_tests": 1798,
+  "kernel_sha256": "f87166a1a640add6d31560f9f1fdd5f9d6098fdfa04d1160c3717e502849f088",
+  "before": {
+    "result": "SCARLET_COPYOUT_ISOLATION_LEAK",
+    "offset": 128
+  },
+  "after": {
+    "result": "SCARLET_COPYOUT_OK",
+    "program_exit": 0,
+    "wake_flags": 0,
+    "wake_pending": 0
+  },
+  "confirmed": [
+    "clock_gettime output copies into the child private COW page without modifying the parent",
+    "A 16-byte timespec crossing a page boundary is written and read correctly",
+    "clock_getres now reports EFAULT for an inaccessible non-null pointer instead of silently succeeding",
+    "All 1798 kernel tests pass"
+  ]
+}
