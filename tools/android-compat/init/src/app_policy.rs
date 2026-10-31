@@ -140,6 +140,10 @@ impl Manager {
                 "alarm",
                 "role",
                 "clipboard",
+                "content_capture",
+                "legacy_permission",
+                "game",
+                "netstats",
             ] {
                 let label = std::format!("u:object_r:{}_service:s0", name);
                 if let Some(target) = self.labels.get(&label) {

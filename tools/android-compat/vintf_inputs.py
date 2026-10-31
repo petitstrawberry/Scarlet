@@ -14,9 +14,10 @@ GRAPHICS_DEVICE = {
 }
 HEALTH_CONTRACT = "android.hardware.health@2.1::IHealth/default"
 AUDIO_CONTRACT = "android.hardware.audio@7.1::IDevicesFactory/default"
-AUDIO_EFFECT_CONTRACT = "android.hardware.audio.effect@7.1::IEffectsFactory/default"
+AUDIO_EFFECT_CONTRACT = "android.hardware.audio.effect@7.0::IEffectsFactory/default"
+AUDIO_EFFECT_LEGACY_CONTRACT = "android.hardware.audio.effect@7.1::IEffectsFactory/default"
 DEVICE_PROVIDERS = {**GRAPHICS_DEVICE, HEALTH_CONTRACT: "hwbinder", AUDIO_CONTRACT: "hwbinder",
-                    AUDIO_EFFECT_CONTRACT: "hwbinder"}
+                    AUDIO_EFFECT_CONTRACT: "hwbinder", AUDIO_EFFECT_LEGACY_CONTRACT: "hwbinder"}
 FRAMEWORK_HIDL = {
     "android.hidl.manager@1.2::IServiceManager/default",
     "android.hidl.token@1.0::ITokenManager/default",

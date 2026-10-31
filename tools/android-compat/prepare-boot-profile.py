@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Prepare verified factory payloads and explicit manager configuration for stock init."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -264,11 +265,17 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
         previous = metadata.get("vintf_inputs", {})
         previous_device=previous.get("selection", {}).get("device",[])
         selected_device=profile.get("vintf", {}).get("device",[])
-        from vintf_inputs import AUDIO_CONTRACT, AUDIO_EFFECT_CONTRACT
+        from vintf_inputs import AUDIO_CONTRACT, AUDIO_EFFECT_CONTRACT, AUDIO_EFFECT_LEGACY_CONTRACT
         from host_services import AUDIO_HAL
-        audio_contracts={AUDIO_CONTRACT,AUDIO_EFFECT_CONTRACT}
+        audio_contracts={AUDIO_CONTRACT,AUDIO_EFFECT_CONTRACT,AUDIO_EFFECT_LEGACY_CONTRACT}
+        audio_additions = set(selected_device) - set(previous_device)
+        audio_removals = set(previous_device) - set(selected_device)
+        audio_inventory_change = (
+            (audio_additions <= audio_contracts and not audio_removals) or
+            (audio_additions == {AUDIO_EFFECT_CONTRACT} and
+             audio_removals == {AUDIO_EFFECT_LEGACY_CONTRACT}))
         if (selected_device != previous_device and
-                not (set(selected_device)-set(previous_device)<=audio_contracts and set(previous_device)<=set(selected_device) and AUDIO_HAL in providers_to_add)):
+                not (audio_inventory_change and AUDIO_HAL in providers_to_add)):
             raise ValueError("changed device inventory requires matching provider preparation")
         from vintf_inputs import build_manifests
         from vintf_inputs import AUDIO_CONTRACT
@@ -289,6 +296,7 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
                 system.dump(name, destination)
                 sources[name] = destination.read_bytes()
             providers=dict(previous.get("device_providers",{}))
+            providers.pop(AUDIO_EFFECT_LEGACY_CONTRACT, None)
             if AUDIO_HAL in providers_to_add:
                 vendor=Ext4(temporary/"vendor.ext4");binary=temporary/AUDIO_HAL_BINARY
                 vendor.dump("/"+AUDIO_HAL_BINARY.removeprefix("vendor/"),binary)
@@ -328,7 +336,7 @@ def add_stock_provider(output, metadata, archive, name, firewall_compat=None, au
                                NETD_FIREWALL_ALIASES,build_netd,
                                AUDIOSERVER,AUDIOSERVER_BINARY,AUDIOSERVER_STOCK_RC,AUDIOSERVER_MANAGED_RC,build_audioserver,
                                AUDIO_HAL,AUDIO_HAL_BINARY,AUDIO_HAL_STOCK_RC,AUDIO_HAL_MANAGED_RC,AUDIO_CONFIG_FILES,
-                               AUDIO_HAL_MODULES,AUDIO_START_BINARY,AUDIO_BINDER_COMPAT,build_audio_hal)
+                               AUDIO_HAL_MODULES,AUDIO_START_BINARY,AUDIO_BINDER_COMPAT,primary_audio_policy,build_audio_hal)
     binary_path,stock_rc,managed_rc,builder={
         "vold":(VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold),
         "lmkd":(LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd),
@@ -386,10 +394,12 @@ def add_stock_provider(output, metadata, archive, name, firewall_compat=None, au
         if service_name=="audio_hal":
             for config in AUDIO_CONFIG_FILES:
                 source=temporary/"files"/config;vendor.dump("/etc/"+config.removeprefix("vendor/etc/"),source)
-                digest=sha256(source);destination=output/config
-                if config in metadata.get("symlinks",{}) or destination.exists() and sha256(destination)!=digest:
+                destination=output/config;data=source.read_bytes()
+                if config=="vendor/etc/audio_policy_configuration.xml":data=primary_audio_policy(data)
+                digest=hashlib.sha256(data).hexdigest()
+                if config in metadata.get("symlinks",{}):
                     raise ValueError("conflicting audio configuration: "+config)
-                destination.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,destination)
+                destination.parent.mkdir(parents=True,exist_ok=True);destination.write_bytes(data)
                 digests[config]=digest;needed[config]=[]
         if service_name in ("audioserver","audio_hal"):
             record=json.loads((audio_start/"build.json").read_text())
@@ -496,7 +506,7 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
             service_roots.append(HW_BINARY)
             name="system/etc/selinux/plat_hwservice_contexts";target=temporary/"files"/name
             system.dump("/"+name,target);copied[name]=target
-        device_providers={}
+        device_providers=dict(metadata.get("vintf_inputs",{}).get("device_providers",{}))
         if "health" in metadata["profile"].get("host_services",[]):
             from host_services import HEALTH_BINARY,HEALTH_IMPL,HEALTH_STOCK_RC,HEALTH_MANAGED_RC,HEALTH_MANIFEST,build_health
             rc=temporary/"health-stock.rc";binary=temporary/"health-stock.bin";manifest=temporary/"health-stock.xml"
@@ -581,7 +591,7 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
         runtime_files=json.loads((runtime/"art-runtime.json").read_text())["files"]
         available|={Path(name).name for name in runtime_files}
         native_needed={};queue=["system/lib64/libcompiler_rt.so","system/lib64/libandroid_servers.so",
-                               "system/lib64/libalarm_jni.so"]+service_roots;seen=set()
+                               "system/lib64/libalarm_jni.so","system/lib64/libsoundpool.so"]+service_roots;seen=set()
         while queue:
             name=queue.pop()
             if name in seen:continue
@@ -637,8 +647,9 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
             reachable=set();pending=[root]
             while pending:
                 name=pending.pop()
-                if name in reachable:continue
-                reachable.add(name);pending.extend(native_needed[name])
+                if name in reachable or name not in native_needed:continue
+                reachable.add(name)
+                pending.extend(dependency for dependency in native_needed[name] if dependency in native_needed)
             proof=metadata["host_service_inputs"][service]
             proof["files"]={name:sha256(copied[name]) for name in reachable}
             proof["native_needed"]={name:native_needed[name] for name in reachable}

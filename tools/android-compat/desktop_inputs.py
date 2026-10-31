@@ -5,7 +5,7 @@ PACKAGES = {
     "system": ["system/app/ExtShared", "system/priv-app/SettingsProvider", "system/priv-app/PackageInstaller",
                "system/priv-app/Shell", "system/priv-app/InputDevices"],
     "system_ext": ["priv-app/Launcher3QuickStep", "priv-app/SystemUI", "priv-app/Provision", "priv-app/SdkSetup"],
-    "product": ["app/LatinIME"],
+    "product": ["app/LatinIME", "app/ModuleMetadata"],
 }
 CONFIGURATION = {
     "system": ["system/etc/selinux/plat_mac_permissions.xml",

@@ -39,6 +39,7 @@
     "ro.hardware.egl": "angle",
     "ro.hardware.vulkan": "pastel",
     "ro.sf.lcd_density": "160",
+    "ro.hw_timeout_multiplier": "4",
     "debug.renderengine.backend": "gles"
   },
   "bootconfig": {
@@ -113,6 +114,7 @@
       "u:object_r:fingerprint_prop:s0",
       "u:object_r:graphics_config_prop:s0",
       "u:object_r:gsid_prop:s0",
+      "u:object_r:hw_timeout_multiplier_prop:s0",
       "u:object_r:incremental_prop:s0",
       "u:object_r:init_perf_lsm_hooks_prop:s0",
       "u:object_r:init_service_status_private_prop:s0",
@@ -181,7 +183,8 @@
       "u:object_r:exported_system_prop:s0",
       "u:object_r:dalvik_runtime_prop:s0",
       "u:object_r:binder_cache_system_server_prop:s0",
-      "u:object_r:debug_prop:s0"
+      "u:object_r:debug_prop:s0",
+      "u:object_r:retaildemo_prop:s0"
     ],
     "u:r:hwservicemanager:s0": [
       "u:object_r:hwservicemanager_prop:s0"
@@ -2295,6 +2298,16 @@
     ],
     [
       "u:r:system_server:s0",
+      "u:r:servicemanager:s0",
+      4
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:netd_listener_service:s0",
+      1
+    ],
+    [
+      "u:r:system_server:s0",
       "u:object_r:slice_service:s0",
       3
     ],
@@ -2540,6 +2553,36 @@
     ],
     [
       "u:r:audioserver:s0",
+      "u:object_r:activity_service:s0",
+      2
+    ],
+    [
+      "u:r:audioserver:s0",
+      "u:object_r:sensor_privacy_service:s0",
+      2
+    ],
+    [
+      "u:r:audioserver:s0",
+      "u:object_r:mediametrics_service:s0",
+      2
+    ],
+    [
+      "u:r:audioserver:s0",
+      "u:object_r:permission_service:s0",
+      2
+    ],
+    [
+      "u:r:audioserver:s0",
+      "u:object_r:hal_system_suspend_service:s0",
+      2
+    ],
+    [
+      "u:r:vold:s0",
+      "u:object_r:hal_system_suspend_service:s0",
+      2
+    ],
+    [
+      "u:r:audioserver:s0",
       "u:object_r:hal_audio_hwservice:s0",
       2
     ],
@@ -2625,7 +2668,7 @@
       "android.hardware.graphics.composer@2.1::IComposer/default",
       "android.hardware.health@2.1::IHealth/default",
       "android.hardware.audio@7.1::IDevicesFactory/default",
-      "android.hardware.audio.effect@7.1::IEffectsFactory/default"
+      "android.hardware.audio.effect@7.0::IEffectsFactory/default"
     ]
   },
   "host_services": [

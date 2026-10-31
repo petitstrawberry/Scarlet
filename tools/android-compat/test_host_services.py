@@ -10,6 +10,25 @@ from vintf_inputs import HEALTH_CONTRACT
 
 
 class HostServicesTest(unittest.TestCase):
+    def test_audio_policy_keeps_only_the_primary_stock_graph(self):
+        from host_services import primary_audio_policy
+        stock=(b'<audioPolicyConfiguration>\n'
+               b'<xi:include href="primary_audio_policy_configuration.xml"/>\n'
+               b'<xi:include href="audio_policy_volumes.xml"/>\n'
+               b'<xi:include href="default_volume_tables.xml"/>\n'
+               b'<xi:include href="a2dp_in_audio_policy_configuration_7_0.xml"/>\n'
+               b'<xi:include href="r_submix_audio_policy_configuration.xml"/>\n'
+               b'<xi:include href="bluetooth_audio_policy_configuration_7_0.xml"/>\n'
+               b'</audioPolicyConfiguration>')
+        filtered=primary_audio_policy(stock)
+        self.assertIn(b'primary_audio_policy_configuration.xml',filtered)
+        self.assertIn(b'default_volume_tables.xml',filtered)
+        self.assertNotIn(b'a2dp_in_',filtered)
+        self.assertNotIn(b'r_submix_',filtered)
+        self.assertNotIn(b'bluetooth_audio_',filtered)
+        with self.assertRaisesRegex(ValueError,"changed stock audio policy"):
+            primary_audio_policy(stock.replace(b'default_volume_tables.xml',b'other.xml'))
+
     def test_vold_keeps_storage_provider_but_delegates_host_reboot(self):
         from host_services import VOLD,VOLD_BINARY,VOLD_MANAGED_RC,VOLD_TEXT,build_vold
         managed,proof=build_vold(VOLD_TEXT.encode(),b"stock vold")
