@@ -1,0 +1,26 @@
+{
+  "revision": "318b2cfa0154e5193dee80ca1d4b31aeeba1ee64",
+  "kernel_sha256": "25f332c6dcb07d7bc5d8dffdfd002c9db4aebcae9e9a768a7fb88d8ed5d4b4b6",
+  "acceleration": "hvf",
+  "kernel_tests": 1791,
+  "bionic_probe": "SCARLET_INOTIFY_OK create rename-cookie delete fork short-buffer epoll dup oneshot ignored",
+  "stock_progress": [
+    "StartInputManagerService took to complete: 21ms",
+    "DeviceStateManagerService took to complete: 30ms"
+  ],
+  "current_stop": {
+    "cause": "Missing property grant for debug.tracing.device_state",
+    "fatal": "FATAL EXCEPTION IN SYSTEM PROCESS: android.display; RuntimeException: failed to set system property"
+  },
+  "teardown": {
+    "scope_live": 0,
+    "wake_flags": 4,
+    "wake_pending": 0
+  },
+  "limits": [
+    "Directory create/delete/move/self-remove events only; unsupported event masks are rejected",
+    "Overlay directory identities are stable for supported operations; overlay directory rename remains unsupported",
+    "No Android app frame or home screen confirmed",
+    "Previously observed intermittent SystemServer exit139 remains under investigation"
+  ]
+}
