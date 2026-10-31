@@ -246,10 +246,10 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
     if any(profile[key] != metadata["profile"][key] for key in ("apex_modules", "init_imports")):
         raise ValueError("changed payload or imports require preparation from the pinned image")
     added_services=set(profile.get("host_services",[]))-set(metadata["profile"].get("host_services",[]))
-    provider_inputs=metadata.get("host_service_inputs",{})
-    refreshed_services={name for name in profile.get("host_services",[]) if name=="netd" and
-                        (service_image is not None or "netd" not in provider_inputs or
-                         "system/bin/iptables" not in provider_inputs["netd"].get("files",{}))}
+    # Reusing verified payloads must not implicitly require a new SDK archive.
+    # Provider refreshes are explicitly requested by supplying that archive.
+    refreshed_services={name for name in profile.get("host_services",[])
+                        if name=="netd" and service_image is not None}
     if service_image is not None:
         refreshed_services |= {name for name in profile.get("host_services",[]) if name in ("audioserver","audio_hal")}
     providers_to_add=added_services|refreshed_services
