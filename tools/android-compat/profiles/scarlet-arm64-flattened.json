@@ -181,7 +181,9 @@
       "u:object_r:hwservicemanager_prop:s0"
     ],
     "u:r:surfaceflinger:s0": [
-      "u:object_r:graphics_config_prop:s0"
+      "u:object_r:graphics_config_prop:s0",
+      "u:object_r:system_prop:s0",
+      "u:object_r:bootanim_system_prop:s0"
     ],
     "u:r:odsign:s0": [
       "u:object_r:odsign_prop:s0",
@@ -1038,7 +1040,7 @@
     [
       "u:r:surfaceflinger:s0",
       "u:object_r:surfaceflinger_service:s0",
-      1
+      3
     ],
     [
       "u:r:surfaceflinger:s0",
