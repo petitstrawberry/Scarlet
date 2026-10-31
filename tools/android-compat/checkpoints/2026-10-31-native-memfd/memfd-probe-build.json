@@ -1,0 +1,14 @@
+{
+  "source": "tools/android-compat/memfd-seal-probe.c",
+  "source_sha256": "6f0427a0ab95cce242c77a2892fa7ecf70a9483d300835efe124b3ffcdb8f39f",
+  "binary_sha256": "b26f8ba959c03148b0d2012f83535a32670acbdb212bd24b346d9a400a23f2c0",
+  "compiler": "aarch64-linux-android33-clang (NDK 25.1.8937393)",
+  "flags": [
+    "-O2",
+    "-g",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-static"
+  ]
+}

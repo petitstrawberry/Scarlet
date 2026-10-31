@@ -1,0 +1,44 @@
+{
+  "revision": "4f84e0452",
+  "kernel_sha256": "4c81442c73758be0e28a2571c50120d267fc5da5aaf072f0253e57844c273467",
+  "boot_profile_sha256": "c2150d44a4f7ef7834076aa2564995440a02bf89601c6d05c97fe6afb44cfb92",
+  "acceleration": "hvf",
+  "passed": {
+    "native_kernel_tests": 1777,
+    "host_tool_tests": 76,
+    "stock_bionic_memfd_probe": true
+  },
+  "confirmed": [
+    "F_SEAL_FUTURE_WRITE rejects file writes and new shared writable mappings while preserving existing writers and private COW",
+    "mprotect and fork retain the per-mapping permission ceiling",
+    "RX and nonzero-offset aliases share bytes across fork, FD closure and partial unmap",
+    "memfd backing remains owned until the last mapping-range Arc is dropped",
+    "stock post-fs-data explicitly enables memfd; the original init.rc and its hash are retained",
+    "SettingsProvider completes InstallSystemProviders without generation-tracker or ashmem-creation errors",
+    "stock AlarmManager JNI and its dependencies are present and native init is reached",
+    "ProcessScope teardown leaves zero live members"
+  ],
+  "current_stop": {
+    "service": "AlarmManagerService native init",
+    "cause": "timerfd_create(CLOCK_REALTIME_ALARM / CLOCK_BOOTTIME_ALARM) is not implemented; stock JNI aborts",
+    "design_pending": "Native wake-deadline primitive coordinated with outer power management, or an explicit userspace ordinary-clock adapter. User confirmation requested; neither implemented."
+  },
+  "not_confirmed": [
+    "WindowManager ready",
+    "Launcher activity launched",
+    "Android application frame presented to SWS",
+    "Home screen"
+  ],
+  "known_gaps": [
+    "F_SEAL_WRITE remains rejected because existing-writer accounting is not implemented",
+    "One earlier run exited SystemServer with 139; this was not reproduced by the diagnostic run or final run; later runs reach the explicit AlarmManager abort",
+    "Stock vold is not selected; the outer manager supplies user-0 roots",
+    "No physical suspend/resume validation"
+  ],
+  "shared_memory_init": {
+    "source": "system/etc/init/hw/init.rc",
+    "source_sha256": "6333e2e7789821cb4c85c9f4421378f8bcf5acca244accda0273dfdba806c5ac",
+    "configured_sha256": "09a63e48734d837aa00d987574a77bbc3ec863bef591b8b6a4270803cdbcedc0",
+    "mechanism": "memfd-future-write"
+  }
+}
