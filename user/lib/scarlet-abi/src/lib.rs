@@ -108,7 +108,8 @@ pub struct RawSystemTimeUpdateV1 {
 const _: [(); 24] = [(); core::mem::size_of::<RawSystemTimeUpdateV1>()];
 
 /// Coherent view of native wake reservations. Flags: bit 0 has a monotonic
-/// deadline, bit 1 has unread wake events, bit 2 is software-only. The power
+/// deadline, bit 1 has unread wake events, bit 2 is software-only, and bit 3
+/// has explicit suspend inhibitors. The power
 /// manager must remain awake for unread events, and must arrange hardware wake
 /// before suspending with a deadline. Reserved is zero; version is one.
 #[repr(C)]

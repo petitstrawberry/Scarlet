@@ -11,9 +11,9 @@ const MAX_RESERVATIONS: usize = 4096;
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct Entry { deadline: Option<u64>, pending: bool }
 
-struct Registry { entries: BTreeMap<u64, Entry>, next: u64, revision: u64 }
+struct Registry { entries: BTreeMap<u64, Entry>, next: u64, revision: u64, inhibitors: u32 }
 impl Registry {
-    const fn new() -> Self { Self { entries: BTreeMap::new(), next: 1, revision: 0 } }
+    const fn new() -> Self { Self { entries: BTreeMap::new(), next: 1, revision: 0, inhibitors: 0 } }
     fn reserve(&mut self) -> Result<u64, &'static str> {
         if self.entries.len() >= MAX_RESERVATIONS { return Err("wake reservation limit"); }
         let id = self.next;
@@ -34,7 +34,8 @@ impl Registry {
     fn snapshot(&self) -> Snapshot {
         Snapshot { revision: self.revision,
             deadline_ns: self.entries.values().filter_map(|e| e.deadline).min(),
-            pending_events: self.entries.values().filter(|e| e.pending).count() as u32 }
+            pending_events: self.entries.values().filter(|e| e.pending).count() as u32,
+            inhibitors: self.inhibitors }
     }
 }
 static REGISTRY: IrqSpinLock<Registry> = IrqSpinLock::new(Registry::new());
@@ -44,6 +45,7 @@ pub struct Snapshot {
     pub revision: u64,
     pub deadline_ns: Option<u64>,
     pub pending_events: u32,
+    pub inhibitors: u32,
 }
 pub fn snapshot() -> Snapshot { REGISTRY.lock().snapshot() }
 
@@ -57,6 +59,26 @@ impl Reservation {
 }
 impl Drop for Reservation { fn drop(&mut self) { REGISTRY.lock().remove(self.0); } }
 
+/// An explicit, lifetime-owned refusal to suspend. The power manager must
+/// respect it even when no timer is armed. Sharing the Arc shares one token.
+pub struct Inhibitor(());
+impl Inhibitor {
+    pub fn new() -> Result<Self, &'static str> {
+        let mut registry = REGISTRY.lock();
+        if registry.inhibitors >= MAX_RESERVATIONS as u32 { return Err("suspend inhibitor limit"); }
+        registry.inhibitors += 1;
+        registry.revision = registry.revision.wrapping_add(1);
+        Ok(Self(()))
+    }
+}
+impl Drop for Inhibitor {
+    fn drop(&mut self) {
+        let mut registry = REGISTRY.lock();
+        registry.inhibitors -= 1;
+        registry.revision = registry.revision.wrapping_add(1);
+    }
+}
+
 /// Native management query; no hardware wake support is advertised.
 pub fn sys_query(frame: &mut crate::arch::Trapframe) -> usize {
     use crate::library::std::usercopy::copy_to_user;
@@ -66,7 +88,8 @@ pub fn sys_query(frame: &mut crate::arch::Trapframe) -> usize {
         return usize::MAX;
     }
     let state = snapshot();
-    let flags: u32 = 4 | u32::from(state.deadline_ns.is_some()) | (u32::from(state.pending_events != 0) << 1);
+    let flags: u32 = 4 | u32::from(state.deadline_ns.is_some()) | (u32::from(state.pending_events != 0) << 1)
+        | (u32::from(state.inhibitors != 0) << 3);
     let mut bytes = [0;32];
     bytes[..4].copy_from_slice(&1u32.to_ne_bytes());
     bytes[4..8].copy_from_slice(&flags.to_ne_bytes());
@@ -79,6 +102,16 @@ pub fn sys_query(frame: &mut crate::arch::Trapframe) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test_case]
+    fn shared_inhibitor_keeps_suspend_blocked_until_its_last_owner_is_gone() {
+        let before = snapshot();
+        let token = alloc::sync::Arc::new(Inhibitor::new().unwrap());
+        let duplicate = token.clone();
+        assert_eq!(snapshot().inhibitors,before.inhibitors+1);
+        drop(token);assert_eq!(snapshot().inhibitors,before.inhibitors+1);
+        drop(duplicate);assert_eq!(snapshot().inhibitors,before.inhibitors);
+        assert_ne!(snapshot().revision,before.revision);
+    }
     #[test_case]
     fn native_query_copies_a_fixed_record_and_checks_authority_even_for_identity_zero() {
         use crate::{environment::{PAGE_SIZE,USER_STACK_END}, task::{Task,TaskType,set_mock_current_task,clear_mock_current_task}};

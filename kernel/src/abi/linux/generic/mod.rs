@@ -104,6 +104,7 @@ pub struct LinuxFdTable {
     file_status_flags: Vec<u32>,
     free_fds: Vec<usize>,
     generations: Vec<u64>,
+    epolls: BTreeMap<u32, Arc<fs::EpollLifetime>>,
 }
 
 impl Default for LinuxFdTable {
@@ -117,7 +118,20 @@ impl Default for LinuxFdTable {
             fd_flags: vec![0; MAX_FDS],
             file_status_flags: vec![0; MAX_FDS],
             free_fds,
+            epolls: BTreeMap::new(),
         }
+    }
+}
+
+impl LinuxFdTable {
+    fn retain_epoll(&mut self, handle: u32) {
+        if fs::is_epoll_handle(handle) {
+            self.epolls.entry(handle).or_insert_with(|| Arc::new(fs::EpollLifetime::new(handle)));
+        }
+    }
+    fn prune_epolls(&mut self) {
+        let descriptors = &self.fd_to_handle;
+        self.epolls.retain(|handle,_| descriptors.contains(&Some(*handle)));
     }
 }
 
@@ -231,7 +245,7 @@ impl LinuxAbi {
         for fd in 0..MAX_FDS {
             if let Some(handle) = table.fd_to_handle[fd] {
                 if (source.is_some() && table.fd_flags[fd] & fs::FD_CLOEXEC != 0)
-                    || !image.handle_table.is_valid_handle(handle)
+                    || (!fs::is_epoll_handle(handle) && !image.handle_table.is_valid_handle(handle))
                 {
                     // Defer lock release until exec commits. A failed loader
                     // must preserve both the descriptor and its POSIX locks.
@@ -254,6 +268,7 @@ impl LinuxAbi {
             .rev()
             .filter(|&fd| table.fd_to_handle[fd].is_none())
             .collect();
+        table.prune_epolls();
         self.fd_table = Arc::new(IrqRwSpinLock::new(table));
         self.namespace = image.get_namespace().clone();
         self.thread_state.tgid = image.try_get_namespace_id().unwrap_or(0);
@@ -327,6 +342,7 @@ impl LinuxAbi {
         let generation=table.generations[fd].checked_add(1).ok_or("Descriptor generation exhausted")?;
         table.free_fds.pop();table.generations[fd]=generation;
         table.fd_to_handle[fd] = Some(handle);
+        table.retain_epoll(handle);
         Ok(fd)
     }
 
@@ -344,6 +360,7 @@ impl LinuxAbi {
         }
         table.generations[fd]=generation;
         table.fd_to_handle[fd] = Some(handle);
+        table.retain_epoll(handle);
         Ok(())
     }
 
@@ -362,6 +379,7 @@ impl LinuxAbi {
                 table.fd_flags[fd] = 0;
                 table.file_status_flags[fd] = 0;
                 table.free_fds.push(fd);
+                table.prune_epolls();
                 Some(handle)
             } else {
                 None

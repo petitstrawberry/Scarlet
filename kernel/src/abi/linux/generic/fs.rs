@@ -103,26 +103,39 @@ const EPOLL_HANDLE_BASE: u32 = 0x3000_0000;
 const EPOLLIN: u32 = 0x0001;
 const EPOLLPRI: u32 = 0x0002;
 const EPOLLOUT: u32 = 0x0004;
+const EPOLLWAKEUP: u32 = 1 << 29;
 const EPOLL_CTL_ADD: i32 = 1;
 const EPOLL_CTL_DEL: i32 = 2;
 const EPOLL_CTL_MOD: i32 = 3;
 const EPOLL_EVENT_DATA_OFFSET: usize = 8;
 const EPOLL_EVENT_SIZE: usize = 16;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct EpollInterest {
     epoll_handle: u32,
     fd: i32,
     watched_handle: u32,
     events: u32,
     data: u64,
+    // Until device wake sources are available, hold this throughout the
+    // registration, including sleep and event processing, rather than risk
+    // suspending before an event can be delivered.
+    inhibitor: Option<alloc::sync::Arc<crate::system_power::wake::Inhibitor>>,
+}
+
+/// Shared by duplicates, forked fd tables and surviving exec descriptors.
+/// Dropping the last epoll owner unregisters interests and releases inhibitors.
+pub(super) struct EpollLifetime(u32);
+impl EpollLifetime { pub(super) fn new(handle:u32)->Self { Self(handle) } }
+impl Drop for EpollLifetime {
+    fn drop(&mut self) { epoll_interests().write().retain(|interest| interest.epoll_handle != self.0); }
 }
 
 fn epoll_interests() -> &'static IrqRwSpinLock<Vec<EpollInterest>> {
     EPOLL_INTERESTS.call_once(|| IrqRwSpinLock::new(Vec::new()))
 }
 
-fn is_epoll_handle(handle: u32) -> bool {
+pub(super) fn is_epoll_handle(handle: u32) -> bool {
     (handle & 0xf000_0000) == EPOLL_HANDLE_BASE
 }
 
@@ -180,7 +193,7 @@ fn write_linux_epoll_event(
     copy_to_user_pagewise(ptr, &buf, &task.vm_manager) == EPOLL_EVENT_SIZE
 }
 
-fn epoll_ready_events(abi: &LinuxAbi, task: &crate::task::Task, interest: EpollInterest) -> u32 {
+fn epoll_ready_events(abi: &LinuxAbi, task: &crate::task::Task, interest: &EpollInterest) -> u32 {
     let Some(handle) = abi.get_handle(interest.fd as usize) else {
         return 0;
     };
@@ -205,7 +218,7 @@ fn epoll_ready_events(abi: &LinuxAbi, task: &crate::task::Task, interest: EpollI
                 .read()
                 .iter()
                 .filter(|child| child.epoll_handle == handle)
-                .copied()
+                .cloned()
                 .collect();
             for child in children {
                 if abi.get_handle(child.fd as usize) != Some(child.watched_handle) {
@@ -215,7 +228,7 @@ fn epoll_ready_events(abi: &LinuxAbi, task: &crate::task::Task, interest: EpollI
                     if child.events & EPOLLIN != 0 {
                         pending.push(child.watched_handle);
                     }
-                } else if epoll_ready_events(abi, task, child) != 0 {
+                } else if epoll_ready_events(abi, task, &child) != 0 {
                     return EPOLLIN;
                 }
             }
@@ -4760,7 +4773,7 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     match op {
         EPOLL_CTL_ADD | EPOLL_CTL_MOD => {
-            let Some((events, data)) = read_linux_epoll_event(&task, event_ptr) else {
+            let Some((mut events, data)) = read_linux_epoll_event(&task, event_ptr) else {
                 return errno::to_result(errno::EFAULT);
             };
             let Some(watched_handle) = abi.get_handle(fd as usize) else {
@@ -4770,6 +4783,17 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             if watched_handle == epoll_handle {
                 return errno::to_result(errno::EINVAL);
             }
+
+            // Linux ignores EPOLLWAKEUP when the caller lacks the authority.
+            if !task.credentials.read().permits(crate::shield::identity::INHIBIT_SUSPEND) {
+                events &= !EPOLLWAKEUP;
+            }
+            let inhibitor = if events & EPOLLWAKEUP != 0 {
+                match crate::system_power::wake::Inhibitor::new() {
+                    Ok(token) => Some(alloc::sync::Arc::new(token)),
+                    Err(_) => return errno::to_result(errno::ENOMEM),
+                }
+            } else { None };
 
             let mut interests = epoll_interests().write();
             if op == EPOLL_CTL_ADD && is_epoll_handle(watched_handle) {
@@ -4804,6 +4828,7 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 existing.events = events;
                 existing.data = data;
                 existing.watched_handle = watched_handle;
+                existing.inhibitor = inhibitor;
             } else {
                 if op == EPOLL_CTL_MOD {
                     return errno::to_result(errno::ENOENT);
@@ -4814,6 +4839,7 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     watched_handle,
                     events,
                     data,
+                    inhibitor,
                 });
             }
             0
@@ -4906,7 +4932,7 @@ fn epoll_wait_for_task(
             .read()
             .iter()
             .filter(|interest| interest.epoll_handle == epoll_handle)
-            .copied()
+            .cloned()
             .collect();
 
         let mut ready_count = 0usize;
@@ -4914,7 +4940,7 @@ fn epoll_wait_for_task(
             if ready_count >= maxevents {
                 break;
             }
-            let ready = epoll_ready_events(abi, &task, interest);
+            let ready = epoll_ready_events(abi, &task, &interest);
             if ready == 0 {
                 continue;
             }
@@ -6451,6 +6477,64 @@ mod tests {
         proc_exe_linux_stat, proc_exe_selector,
     };
     use crate::abi::linux::generic::errno;
+
+    fn wake_epoll_fixture() -> (alloc::sync::Arc<crate::task::Task>, crate::abi::linux::generic::LinuxAbi, crate::arch::Trapframe, usize, usize) {
+        use crate::environment::{PAGE_SIZE,USER_STACK_END};
+        let mut task=crate::task::Task::new("epoll-wake-lifetime".into(),1,crate::task::TaskType::User);
+        task.set_id(991);
+        let task=alloc::sync::Arc::new(task);
+        let base=USER_STACK_END-PAGE_SIZE;task.allocate_stack_pages(base,1).unwrap();
+        for index in 0..64 {crate::library::std::usercopy::copy_to_user(&task,base+index*4,&0x73u32.to_ne_bytes()).unwrap();}
+        crate::task::set_mock_current_task(task.clone());
+        let mut abi=crate::abi::linux::generic::LinuxAbi::default();
+        let object=crate::ipc::counter::Counter::create_kernel_object(0,0);
+        let handle=task.handle_table.insert(object).unwrap();let watched=abi.allocate_fd(handle).unwrap();
+        let mut frame=crate::arch::Trapframe::new();frame.set_pc(base as u64);
+        (task,abi,frame,base+512,watched)
+    }
+    fn wake_epoll_ctl(abi:&mut crate::abi::linux::generic::LinuxAbi, frame:&mut crate::arch::Trapframe,
+        task:&crate::task::Task, address:usize, epfd:usize, watched:usize, operation:i32, events:u32)->usize {
+        let mut bytes=[0;16];bytes[..4].copy_from_slice(&events.to_ne_bytes());
+        crate::library::std::usercopy::copy_to_user(task,address,&bytes).unwrap();
+        frame.set_arg(0,epfd);frame.set_arg(1,operation as usize);frame.set_arg(2,watched);frame.set_arg(3,address);
+        super::sys_epoll_ctl(abi,frame)
+    }
+    #[test_case]
+    fn epoll_wakeup_modify_delete_and_unprivileged_registration_control_real_inhibitors() {
+        let before=crate::system_power::wake::snapshot().inhibitors;
+        let (task,mut abi,mut frame,address,watched)=wake_epoll_fixture();
+        frame.set_arg(0,0);let epfd=super::sys_epoll_create1(&mut abi,&mut frame);
+        for (op,events,expected) in [(1,super::EPOLLIN|super::EPOLLWAKEUP,before+1),
+            (3,super::EPOLLIN,before),(3,super::EPOLLIN|super::EPOLLWAKEUP,before+1),(2,0,before)] {
+            assert_eq!(wake_epoll_ctl(&mut abi,&mut frame,&task,address,epfd,watched,op,events),0);
+            assert_eq!(crate::system_power::wake::snapshot().inhibitors,expected);
+        }
+        task.credentials.write().set_authority(0,0).unwrap();
+        assert_eq!(wake_epoll_ctl(&mut abi,&mut frame,&task,address,epfd,watched,1,super::EPOLLIN|super::EPOLLWAKEUP),0);
+        assert_eq!(crate::system_power::wake::snapshot().inhibitors,before);
+        drop(abi);crate::task::clear_mock_current_task();
+    }
+    #[test_case]
+    fn epoll_wakeup_lifetime_survives_dup_fork_and_exec_and_releases_on_last_close() {
+        let before=crate::system_power::wake::snapshot().inhibitors;
+        let (task,mut abi,mut frame,address,watched)=wake_epoll_fixture();
+        frame.set_arg(0,0);let epfd=super::sys_epoll_create1(&mut abi,&mut frame);
+        assert_eq!(wake_epoll_ctl(&mut abi,&mut frame,&task,address,epfd,watched,1,super::EPOLLIN|super::EPOLLWAKEUP),0);
+        let duplicate=super::duplicate_epoll_fd(&mut abi,epfd,10,false);assert_eq!(duplicate,10);
+        abi.remove_fd(epfd);assert_eq!(crate::system_power::wake::snapshot().inhibitors,before+1);
+        let mut child=abi.clone();child.unshare_fd_table();abi.remove_fd(duplicate);drop(abi);
+        assert_eq!(crate::system_power::wake::snapshot().inhibitors,before+1);
+        let mut image=crate::abi::linux::generic::LinuxAbi::default();
+        image.prepare_exec_fds(Some(&child),&task);
+        assert!(image.get_handle(duplicate).is_some());
+        child.set_fd_flags(duplicate,super::FD_CLOEXEC).unwrap();
+        let mut closed_image=crate::abi::linux::generic::LinuxAbi::default();
+        closed_image.prepare_exec_fds(Some(&child),&task);
+        assert!(closed_image.get_handle(duplicate).is_none());
+        drop(child);assert_eq!(crate::system_power::wake::snapshot().inhibitors,before+1);
+        drop(image);assert_eq!(crate::system_power::wake::snapshot().inhibitors,before);
+        drop(closed_image);crate::task::clear_mock_current_task();
+    }
 
     #[test_case]
     fn stream_read_retries_would_block_and_propagates_interruptions() {
