@@ -63,13 +63,21 @@ int ioctl(int fd,int request,...) {
  errno=saved;return result;
 }
 static void report(const char *format,...) {
- char message[4096];va_list args;va_start(args,format);int n=vsnprintf(message,sizeof(message),format,args);va_end(args);
+ char message[16384];va_list args;va_start(args,format);int n=vsnprintf(message,sizeof(message),format,args);va_end(args);
  if(n<0)return;size_t length=(size_t)n<sizeof(message)?(size_t)n:sizeof(message)-1;
  if(!zygote_diagnostic){if(console>=0)write(console,message,length);return;}
  // No diagnostic descriptor survives between messages or into a Zygote fork.
- int fd=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0);if(fd<0)return;
+ int fd=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0);if(fd<0)return;
  struct sockaddr_un address={.sun_family=AF_UNIX};strcpy(address.sun_path,"/dev/socket/logdw");
- if(!connect(fd,(struct sockaddr*)&address,sizeof(address)))send(fd,message,length,MSG_DONTWAIT);
+ if(!connect(fd,(struct sockaddr*)&address,sizeof(address))) {
+  size_t offset=0;
+  while(offset<length) {
+   size_t chunk=length-offset>3072?3072:length-offset;
+   ssize_t sent=send(fd,message+offset,chunk,0);
+   if(sent<=0)break;
+   offset+=(size_t)sent;
+  }
+ }
  close(fd);
 }
 static void diagnostic_log(const struct __android_log_message *message) {
