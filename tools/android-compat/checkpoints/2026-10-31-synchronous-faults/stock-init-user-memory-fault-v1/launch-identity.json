@@ -1,0 +1,14 @@
+{
+  "kernel_sha256": "1f0f473430612211f87bc9af7d23f2012f665f9ee484262dbc62bf959cd93a2b",
+  "program_sha256": "c0172ed7667c7662dd0fd9e611df91b0a4430d8f6d645f8110b332e2a0dd7fcd",
+  "boot_profile_manifest_sha256": "cd25db50a5f76493849b2da314b76ec0c1d4a56e0860db72ee2c96ef24f5b719",
+  "init_security_sources_sha256": {
+    "main.rs": "0625d96e285063339b1bd8cb2b2bdd21ca67fe4daee730a7708d82855e929c2c",
+    "shield.rs": "5f5bf0d159dc3ec3301b519c253c211ea8d6da9edd4bbffed1ddfc9d4b1e0e7d",
+    "stock.rs": "c3ab87c3f5f30be5b834b3f96efd4fa9d1df0f4493ae1abdde69805d7636d42f",
+    "boot_profile.rs": "3dee5b7b2ea22f19110e23a7d2c0a5c0cb701158ff020d84d37fe7a7435279ef",
+    "app_policy.rs": "a9b34ca2ec987b51827ed2a5f97f9e6db2ca61a91521092268b193523cccbc15",
+    "kernel_log.rs": "eac807d697c9c1884a54d32b4a4ef65ebdb54030a6030bfb3ed990f14a745780"
+  },
+  "native_kernel_log_diagnostic": true
+}

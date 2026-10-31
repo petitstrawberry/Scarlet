@@ -1,0 +1,26 @@
+{
+  "runtime/fault_handler.cc": {
+    "url": "https://android.googlesource.com/platform/art/+/refs/tags/android-13.0.0_r75/runtime/fault_handler.cc?format=TEXT",
+    "sha256": "bbd069023e4dffcbc9d9197b0835df81ecfbef580c7f210bb0262534618e4441"
+  },
+  "runtime/arch/arm64/fault_handler_arm64.cc": {
+    "url": "https://android.googlesource.com/platform/art/+/refs/tags/android-13.0.0_r75/runtime/arch/arm64/fault_handler_arm64.cc?format=TEXT",
+    "sha256": "33971518d8538d7662c48e2d4c0869b05aabf9d24b0d8fbb1ebb88e26c4cd8d1"
+  },
+  "runtime/interpreter/mterp/arm64ng/main.S": {
+    "url": "https://android.googlesource.com/platform/art/+/refs/tags/android-13.0.0_r75/runtime/interpreter/mterp/arm64ng/main.S?format=TEXT",
+    "sha256": "ea1d82ae786acb447e9c5ffb83411fedf5f1d03e161d3c67ff1c03192c83c249"
+  },
+  "sigchainlib/sigchain.cc": {
+    "url": "https://android.googlesource.com/platform/art/+/refs/tags/android-13.0.0_r75/sigchainlib/sigchain.cc?format=TEXT",
+    "sha256": "95b05701c063b08e8428111e36967e4d52048eb92f2d4f786e3b7eeefdd39cc0"
+  },
+  "libartbase/base/safe_copy.cc": {
+    "url": "https://android.googlesource.com/platform/art/+/refs/tags/android-13.0.0_r75/libartbase/base/safe_copy.cc?format=TEXT",
+    "sha256": "b2897b8a4886a606b035dcec668e35629988bedeb0d5fbcb70f589cf952655a4"
+  },
+  "libartbase/base/safe_copy.h": {
+    "url": "https://android.googlesource.com/platform/art/+/refs/tags/android-13.0.0_r75/libartbase/base/safe_copy.h?format=TEXT",
+    "sha256": "a60337d835e92e656755cb38fe7bb68cab7ac725b09f8e324927ff8cfd211dc8"
+  }
+}

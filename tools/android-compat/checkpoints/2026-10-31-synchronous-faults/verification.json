@@ -1,0 +1,31 @@
+{
+  "revision": "f374a2f495d1d38c701ccb227a2fcca3015f03c2",
+  "acceleration": "hvf",
+  "kernel_tests": 1797,
+  "kernel_sha256": "dc68c0c4f1d51548def25b39a5b960c952884e2cd9cdc0ad3dd327f9c4c04942",
+  "passed": [
+    "Typed native user-memory faults and PC-based ABI dispatch; backing/allocation failures remain separate",
+    "Real Bionic MAPERR, read/write protection and NX faults return through SIGSEGV handlers",
+    "siginfo fault address/code, ucontext PC, alternate stack and ESR/FPSIMD records match AArch64 UAPI",
+    "Signal return restores general/FPU state and permits ART-style eight-byte stack adjustment",
+    "Self-address-space process_vm_readv scatters data and returns partial/error results for inaccessible ranges",
+    "Bionic process_vm_readv denies a separate forked address space",
+    "Stock ART converts the previous nterp hardware fault into a Java NullPointerException with Java stack trace"
+  ],
+  "stock_stop": {
+    "service": "StorageManagerService",
+    "reason": "android.os.IVold.needsCheckpoint() on null because vold is absent",
+    "resolution_approved": "stock vold inside Android Namespace; outer manager selects volumes/devices and controls host reboot",
+    "in_progress": "verified stock provider preparation"
+  },
+  "stock_teardown": {
+    "scope_live": 0,
+    "wake_flags": 4,
+    "wake_pending": 0
+  },
+  "limits": [
+    "No Android home screen or app frame confirmed",
+    "process_vm_readv is limited to the caller shared address space; cross-process debugging authority is not implemented",
+    "Synchronous memory-signal conversion currently targets AArch64 Linux/Android unmapped/protection faults"
+  ]
+}

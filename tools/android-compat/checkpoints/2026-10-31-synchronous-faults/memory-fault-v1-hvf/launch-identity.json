@@ -1,0 +1,7 @@
+{
+  "kernel_sha256": "1f0f473430612211f87bc9af7d23f2012f665f9ee484262dbc62bf959cd93a2b",
+  "program_sha256": "a05aeb094e8e0026556b01f1a9b14057972d13b2b85e3fc98ccfd2fc7a403b8f",
+  "boot_profile_manifest_sha256": null,
+  "init_security_sources_sha256": null,
+  "native_kernel_log_diagnostic": false
+}
