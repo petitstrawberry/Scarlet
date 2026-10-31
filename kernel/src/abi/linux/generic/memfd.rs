@@ -74,9 +74,16 @@ impl MemfdBacking {
     }
 
     fn range_is_valid(&self, offset: usize, length: usize) -> bool {
+        if length == 0 {
+            return false;
+        }
+        let state = self.state.read();
+        if offset >= state.size {
+            return false;
+        }
         offset
             .checked_add(length)
-            .is_some_and(|end| end <= self.state.read().size)
+            .is_some_and(|end| end <= state.size.div_ceil(PAGE_SIZE) * PAGE_SIZE)
     }
 
     fn read_range(&self, offset: usize, buffer: &mut [u8]) -> usize {
@@ -154,10 +161,7 @@ impl MemfdBacking {
             return Err(ResolveFaultError::Invalid);
         }
         let mut state = self.state.write();
-        if offset
-            .checked_add(PAGE_SIZE)
-            .is_none_or(|end| end > state.size)
-        {
+        if offset >= state.size {
             return Err(ResolveFaultError::Unmapped);
         }
         let slot = state
@@ -546,9 +550,9 @@ impl FileObject for MemfdFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::abi::linux::generic::{LinuxAbi, errno, fs};
+    use crate::abi::linux::generic::{errno, fs, LinuxAbi};
     use crate::object::KernelObject;
-    use crate::task::{Task, TaskType, clear_mock_current_task, set_mock_current_task};
+    use crate::task::{clear_mock_current_task, set_mock_current_task, Task, TaskType};
     use alloc::sync::Arc;
 
     fn assert_sealed<T: core::fmt::Debug>(result: Result<T, StreamError>) {
@@ -626,6 +630,30 @@ mod tests {
         );
         assert_eq!(&bytes, b"cross-page");
         assert_eq!(file.backing.resident_pages(), 2);
+    }
+
+    #[test_case]
+    fn memfd_mapping_includes_the_partial_final_page() {
+        use crate::object::capability::memory_mapping::{AccessKind, AccessOp, MemoryMappingOps};
+
+        let file = MemfdFile::new(true).unwrap();
+        file.truncate((PAGE_SIZE - 1) as u64).unwrap();
+        file.write_at((PAGE_SIZE - 4) as u64, b"tail").unwrap();
+
+        let owner = file.mapping_owner_for_range(0, PAGE_SIZE).unwrap();
+        let access = AccessKind {
+            op: AccessOp::Load,
+            vaddr: PAGE_SIZE - 1,
+            size: Some(1),
+        };
+        let before = owner.resolve_fault(&access, 0, 0).unwrap();
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                phys_to_virt(before.paddr_page_base) as *const u8,
+                PAGE_SIZE,
+            )
+        };
+        assert_eq!(&bytes[PAGE_SIZE - 4..], b"tail");
     }
 
     #[test_case]
