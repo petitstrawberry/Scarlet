@@ -38,6 +38,13 @@ use core::any::Any;
 pub const SERVICE_MANAGER: u32 = 1;
 pub const PROPERTY_SERVICE: u32 = 2;
 const HW_SERVICE_MANAGER:u32=4;
+const KEYSTORE_MANAGER: u32 = 5;
+const KEYSTORE_PERMISSIONS: [&str; 16] = [
+    "add_auth", "clear_ns", "get_state", "list", "lock", "reset", "unlock",
+    "change_user", "change_password", "clear_uid", "get_auth_token",
+    "early_boot_ended", "report_off_body", "pull_metrics", "delete_all_keys",
+    "get_attestation_key",
+];
 pub const PROPERTY_SET: u64 = 1;
 pub const ADD: u64 = 1;
 pub const FIND: u64 = 2;
@@ -207,12 +214,21 @@ impl SecurityFs {
                     Content::Text(b"3\n".to_vec()),
                 ),
             ];
+            let mut entries: Vec<(String, Content)> = entries.into_iter()
+                .map(|(path, content)| (path.into(), content)).collect();
+            entries.push(("class/keystore2".into(), Content::Directory));
+            entries.push(("class/keystore2/index".into(), Content::Text(b"5\n".to_vec())));
+            entries.push(("class/keystore2/perms".into(), Content::Directory));
+            for (index, name) in KEYSTORE_PERMISSIONS.iter().enumerate() {
+                entries.push((format!("class/keystore2/perms/{name}"),
+                    Content::Text(format!("{}\n", index + 1).into_bytes())));
+            }
             let nodes = entries
                 .into_iter()
                 .enumerate()
                 .map(|(i, (path, content))| {
                     (
-                        path.into(),
+                        path.clone(),
                         Arc::new(Node {
                             id: i as u64 + 1,
                             path: path.into(),
@@ -425,6 +441,7 @@ fn decision(policy: &Policy, input: &[u8]) -> Result<Vec<u8>, StreamError> {
     let mask = match class {
         SERVICE_MANAGER|HW_SERVICE_MANAGER => SERVICE_PERMISSIONS,
         PROPERTY_SERVICE => PROPERTY_SET as u32,
+        KEYSTORE_MANAGER => (1 << KEYSTORE_PERMISSIONS.len()) - 1,
         _ => 0,
     };
     let native_class=if class==HW_SERVICE_MANAGER {SERVICE_MANAGER}else{class};
@@ -769,6 +786,23 @@ pub(super) fn open(abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> O
 mod tests {
     use super::*;
     use crate::shield::Rule;
+    #[test_case]
+    fn keystore_queries_use_explicit_policy_and_mask_unknown_operations() {
+        let policy = Policy::new(vec![
+            (1, "u:r:system_server:s0".into()), (2, "u:r:keystore:s0".into()),
+            (3, "u:r:denied:s0".into()),
+        ], vec![Rule { source: 1, target: 2, class: KEYSTORE_MANAGER,
+            permissions: (1 << 2) | (1 << 31) }]).unwrap();
+        let fs = SecurityFs::new(policy.clone()).unwrap();
+        assert!(matches!(&fs.nodes["class/keystore2/perms/get_state"].content,
+            Content::Text(bytes) if bytes == b"3\n"));
+        assert!(decision(&policy, b"u:r:system_server:s0 u:r:keystore:s0 5 4").unwrap()
+            .starts_with(b"4 "));
+        assert!(decision(&policy, b"u:r:denied:s0 u:r:keystore:s0 5 4").unwrap()
+            .starts_with(b"0 "));
+        assert!(decision(&policy, b"u:r:system_server:s0 u:r:keystore:s0 99 4").unwrap()
+            .starts_with(b"0 "));
+    }
     fn policy() -> Arc<Policy> {
         Policy::new(
             vec![

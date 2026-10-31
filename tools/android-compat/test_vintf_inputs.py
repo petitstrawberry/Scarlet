@@ -3,7 +3,7 @@ import hashlib
 import unittest
 import xml.etree.ElementTree as ET
 
-from vintf_inputs import DEVICE, FRAMEWORK, GRAPHICS_DEVICE, build_manifests, validate_selection, validate_staged
+from vintf_inputs import DEVICE, FRAMEWORK, GRAPHICS_DEVICE, KEYMINT_DEVICE, build_manifests, validate_selection, validate_staged
 
 SOURCE = b'''<manifest version="1.0" type="framework">
 <hal><name>android.frameworks.stats</name><version>1.0</version><fqname>@1.0::IStats/default</fqname></hal>
@@ -14,6 +14,21 @@ SELECTION = {"framework": ["android.frameworks.stats.IStats/default"], "device":
 
 
 class VintfInputsTest(unittest.TestCase):
+    def test_software_keymint_device_inventory_uses_aidl_contracts(self):
+        selection={"framework":[],"device":list(KEYMINT_DEVICE)}
+        providers={contract:{"transport":"aidl","path":"vendor/bin/hw/keymint",
+                             "sha256":"binary"} for contract in KEYMINT_DEVICE}
+        outputs,proof=build_manifests(selection,{},providers)
+        hals=ET.fromstring(outputs[DEVICE]).findall("hal")
+        self.assertEqual(len(hals),4)
+        self.assertTrue(all(hal.get("format")=="aidl" for hal in hals))
+        self.assertEqual([hal.findtext("version") for hal in hals],["2","2","1","1"])
+        self.assertEqual([hal.findtext("fqname") for hal in hals],
+                         [value[2] for value in KEYMINT_DEVICE.values()])
+        providers[next(iter(providers))]["transport"]="hwbinder"
+        with self.assertRaisesRegex(ValueError,"transport"):
+            build_manifests(selection,{},providers)
+
     def test_framework_sensor_declaration_requires_stock_hwbinder_contract(self):
         service = "android.frameworks.sensorservice@1.0::ISensorManager/default"
         selection = {"framework": [service], "device": []}

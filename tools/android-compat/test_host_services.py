@@ -11,16 +11,34 @@ from vintf_inputs import HEALTH_CONTRACT
 
 class HostServicesTest(unittest.TestCase):
     def test_keystore_preserves_stock_identity_storage_and_init_order(self):
-        from host_services import (build_keystore, KEYSTORE_BINARY, KEYSTORE_MANAGED_RC)
+        from host_services import (build_keystore, KEYSTORE_BINARY, KEYSTORE_MANAGED_RC,
+                                   build_keymint, KEYMINT_BINARY, KEYMINT_MANAGED_RC,
+                                   KEYMINT_MANIFESTS)
         rc = (b"# Stock service\nservice keystore2 /system/bin/keystore2 /data/misc/keystore\n"
               b"    class early_hal\n    user keystore\n    group keystore readproc log\n"
               b"    task_profiles ProcessCapacityHigh\n")
         managed, proof = build_keystore(rc, b"stock keystore2")
         self.assertEqual(managed, rc)
-        metadata = {"profile": {"host_services": ["keystore2"]},
-                    "host_service_inputs": {"keystore2": proof},
+        from vintf_inputs import KEYMINT_DEVICE
+        keymint_rc = (b"service vendor.keymint-default /vendor/bin/hw/android.hardware.security.keymint-service\n"
+                      b"    class early_hal\n    user nobody\n")
+        manifests = {}
+        for source, path in KEYMINT_MANIFESTS.items():
+            contracts=[contract for contract,others in KEYMINT_DEVICE.items()
+                       if contract==source or (KEYMINT_MANIFESTS[source].endswith("keymint-service.xml") and
+                       contract.endswith("IRemotelyProvisionedComponent/default"))]
+            hals="".join(f'<hal format="aidl"><name>{KEYMINT_DEVICE[contract][0]}</name>'
+                f'<version>{KEYMINT_DEVICE[contract][1]}</version>'
+                f'<fqname>{KEYMINT_DEVICE[contract][2]}</fqname></hal>' for contract in contracts)
+            manifests[source]=(f'<manifest version="1.0" type="device">{hals}</manifest>').encode()
+        _, keymint_proof, _ = build_keymint(keymint_rc, b"stock keymint", manifests)
+        metadata = {"profile": {"host_services": ["keystore2", "keymint"],
+                                "vintf": {"framework": [], "device": list(KEYMINT_DEVICE)}},
+                    "host_service_inputs": {"keystore2": proof, "keymint": keymint_proof},
                     "files": {KEYSTORE_BINARY: proof["binary_sha256"],
-                              KEYSTORE_MANAGED_RC: proof["managed_rc_sha256"]}}
+                              KEYSTORE_MANAGED_RC: proof["managed_rc_sha256"],
+                              KEYMINT_BINARY: keymint_proof["binary_sha256"],
+                              KEYMINT_MANAGED_RC: keymint_proof["managed_rc_sha256"]}}
         validate_staged(metadata)
         metadata["files"][KEYSTORE_BINARY] = "changed"
         with self.assertRaises(ValueError):

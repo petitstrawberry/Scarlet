@@ -14,6 +14,9 @@ from art_inputs import SDK_SHA256, sha256
 
 MANIFEST = "boot-profile.json"
 POLICY = "scarlet/boot/shield.policy"
+KEYSTORE_PERMISSIONS = ["add_auth", "clear_ns", "get_state", "list", "lock", "reset", "unlock",
+    "change_user", "change_password", "clear_uid", "get_auth_token", "early_boot_ended",
+    "report_off_body", "pull_metrics", "delete_all_keys", "get_attestation_key"]
 CONTEXT = re.compile(r"u:(?:r|object_r):[A-Za-z0-9_]+:s0(?::c(?:0|[1-9][0-9]*)(?:,c(?:0|[1-9][0-9]*))*)?")
 
 
@@ -51,6 +54,7 @@ def validate_profile(profile):
         if "resource_groups" in profile: fields.add("resource_groups")
         if "file_policy" in profile: fields.add("file_policy")
         if "service_grants" in profile: fields.add("service_grants")
+        if "keystore_grants" in profile: fields.add("keystore_grants")
         if "socket_labels" in profile: fields.add("socket_labels")
         if "vintf" in profile: fields.add("vintf")
         if "host_services" in profile: fields.add("host_services")
@@ -124,6 +128,14 @@ def validate_profile(profile):
         if not path.startswith("/") or not relative_path(path[1:]).endswith(".rc"):
             raise ValueError("invalid init import")
     if "file_policy" in profile: file_rules(profile)
+    if not isinstance(profile.get("keystore_grants", []), list) or len(profile.get("keystore_grants", [])) > 64:
+        raise ValueError("invalid keystore grants")
+    for rule in profile.get("keystore_grants", []):
+        if (not isinstance(rule, list) or len(rule) != 3 or rule[0] not in subjects or
+                rule[1] not in subjects or not isinstance(rule[2], list) or not rule[2] or
+                any(name not in KEYSTORE_PERMISSIONS for name in rule[2]) or
+                len(set(rule[2])) != len(rule[2])):
+            raise ValueError("invalid keystore grant")
     return profile
 
 
@@ -198,6 +210,9 @@ def shield_policy(profile, contexts):
               for source, targets in sorted(grants.items()) for target in sorted(targets)]
     lines += [f"socket-create {identifiers[source]} {identifiers[target]}" for source,target in profile.get("socket_labels",[])]
     lines += [f"service-allow {identifiers[source]} {identifiers[target]} {permissions}" for source,target,permissions in profile.get("service_grants",[])]
+    lines += [f"keystore-allow {identifiers[source]} {identifiers[target]} " +
+              str(sum(1 << KEYSTORE_PERMISSIONS.index(name) for name in permissions))
+              for source, target, permissions in profile.get("keystore_grants", [])]
     lines += [f"file-exec {identifiers[source]} {identifiers[resource]} {identifiers[target]} {principal}"
               for source, resource, target, principal in profile.get("exec_transitions", [])]
     lines += [f"file-label {identifiers[label]} {path}" for path, label in sorted(profile.get("file_labels", {}).items())]

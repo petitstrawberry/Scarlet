@@ -19,6 +19,21 @@ def profile():
 
 
 class BootProfileTest(unittest.TestCase):
+    def test_keystore_grants_keep_operations_and_subjects_explicit(self):
+        p = profile()
+        p.update(version=2, file_labels={}, exec_transitions=[])
+        p["keystore_grants"] = [["u:r:init:s0", "u:r:vendor_init:s0", ["get_state"]]]
+        text = shield_policy(p, ["* u:object_r:gsid_prop:s0\n"])
+        self.assertIn("keystore-allow 1 2 4\n", text)
+        self.assertNotIn("keystore-allow 2 ", text)
+        for rule in [["u:r:missing:s0", "u:r:vendor_init:s0", ["get_state"]],
+                     ["u:r:init:s0", "u:r:vendor_init:s0", ["all"]],
+                     ["u:r:init:s0", "u:r:vendor_init:s0", ["get_state", "get_state"]]]:
+            invalid = deepcopy(p)
+            invalid["keystore_grants"] = [rule]
+            with self.subTest(rule=rule), self.assertRaises(ValueError):
+                validate_profile(invalid)
+
     def test_category_labels_are_exact_and_canonical(self):
         p=profile();p.update(version=2,file_labels={},exec_transitions=[])
         label="u:r:platform_app:s0:c512,c768";p["subjects"][label]=3

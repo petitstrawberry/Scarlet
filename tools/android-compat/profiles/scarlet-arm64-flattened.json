@@ -73,7 +73,9 @@
     "u:r:audioserver:s0": 22,
     "u:r:hal_audio_default:s0": 23,
     "u:r:vold_prepare_subdirs:s0": 24,
-    "u:r:user_unlock:s0": 25
+    "u:r:user_unlock:s0": 25,
+    "u:r:keystore:s0": 26,
+    "u:r:hal_keymint_default:s0": 27
   },
   "transitions": [
     [
@@ -144,7 +146,7 @@
       "u:object_r:vendor_security_patch_level_prop:s0",
       "u:object_r:vndk_prop:s0",
       "u:object_r:vold_config_prop:s0",
-    "u:object_r:vold_status_prop:s0",
+      "u:object_r:vold_status_prop:s0",
       "u:object_r:zram_control_prop:s0",
       "u:object_r:persistent_properties_ready_prop:s0",
       "u:object_r:usb_control_prop:s0",
@@ -194,7 +196,8 @@
       "u:object_r:binder_cache_system_server_prop:s0",
       "u:object_r:debug_prop:s0",
       "u:object_r:bootanim_system_prop:s0",
-      "u:object_r:retaildemo_prop:s0"
+      "u:object_r:retaildemo_prop:s0",
+      "u:object_r:theme_prop:s0"
     ],
     "u:r:user_unlock:s0": [
       "u:object_r:exported3_system_prop:s0"
@@ -210,6 +213,9 @@
     "u:r:odsign:s0": [
       "u:object_r:odsign_prop:s0",
       "u:object_r:ctl_odsign_prop:s0"
+    ],
+    "u:r:keystore:s0": [
+      "u:object_r:keystore_crash_prop:s0"
     ]
   },
   "init_imports": [
@@ -241,7 +247,9 @@
     "/system/bin/netd": "u:object_r:netd_exec:s0",
     "/system/bin/audioserver": "u:object_r:audioserver_exec:s0",
     "/vendor/bin/hw/android.hardware.audio.service": "u:object_r:hal_audio_default_exec:s0",
-    "/system/bin/scarlet-audio-late-start": "u:object_r:audio_start_exec:s0"
+    "/system/bin/scarlet-audio-late-start": "u:object_r:audio_start_exec:s0",
+    "/system/bin/keystore2": "u:object_r:keystore_exec:s0",
+    "/vendor/bin/hw/android.hardware.security.keymint-service": "u:object_r:hal_keymint_default_exec:s0"
   },
   "exec_transitions": [
     [
@@ -381,6 +389,18 @@
       "u:object_r:audio_start_exec:s0",
       "u:r:init:s0",
       0
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:keystore_exec:s0",
+      "u:r:keystore:s0",
+      1017
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:hal_keymint_default_exec:s0",
+      "u:r:hal_keymint_default:s0",
+      9999
     ]
   ],
   "resource_groups": {
@@ -2680,6 +2700,111 @@
       "u:r:vold:s0",
       "u:r:system_server:s0",
       4
+    ],
+    [
+      "u:r:keystore:s0",
+      "u:object_r:keystore_service:s0",
+      3
+    ],
+    [
+      "u:r:keystore:s0",
+      "u:object_r:apc_service:s0",
+      3
+    ],
+    [
+      "u:r:keystore:s0",
+      "u:object_r:authorization_service:s0",
+      3
+    ],
+    [
+      "u:r:keystore:s0",
+      "u:object_r:keystore_maintenance_service:s0",
+      3
+    ],
+    [
+      "u:r:keystore:s0",
+      "u:object_r:keystore_metrics_service:s0",
+      3
+    ],
+    [
+      "u:r:keystore:s0",
+      "u:object_r:legacykeystore_service:s0",
+      3
+    ],
+    [
+      "u:r:keystore:s0",
+      "u:object_r:remoteprovisioning_service:s0",
+      3
+    ],
+    [
+      "u:r:keystore:s0",
+      "u:object_r:remotelyprovisionedkeypool_service:s0",
+      3
+    ],
+    [
+      "u:r:keystore:s0",
+      "u:object_r:keystore_compat_hal_service:s0",
+      3
+    ],
+    [
+      "u:r:keystore:s0",
+      "u:object_r:hal_keymint_service:s0",
+      2
+    ],
+    [
+      "u:r:keystore:s0",
+      "u:object_r:hidl_manager_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:keystore:s0",
+      "u:object_r:hidl_base_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:keystore:s0",
+      "u:object_r:hal_keymaster_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:vold:s0",
+      "u:object_r:keystore_maintenance_service:s0",
+      2
+    ],
+    [
+      "u:r:hal_keymint_default:s0",
+      "u:object_r:hal_keymint_service:s0",
+      1
+    ],
+    [
+      "u:r:hal_keymint_default:s0",
+      "u:object_r:hal_remotelyprovisionedcomponent_service:s0",
+      1
+    ],
+    [
+      "u:r:keystore:s0",
+      "u:object_r:hal_remotelyprovisionedcomponent_service:s0",
+      2
+    ],
+    [
+      "u:r:hal_keymint_default:s0",
+      "u:object_r:hal_secureclock_service:s0",
+      1
+    ],
+    [
+      "u:r:keystore:s0",
+      "u:object_r:hal_secureclock_service:s0",
+      2
+    ],
+    [
+      "u:r:hal_keymint_default:s0",
+      "u:object_r:hal_sharedsecret_service:s0",
+      1
+    ],
+    [
+      "u:r:keystore:s0",
+      "u:object_r:hal_sharedsecret_service:s0",
+      2
     ]
   ],
   "socket_labels": [
@@ -2720,7 +2845,8 @@
       "android.hidl.manager@1.2::IServiceManager/default",
       "android.hidl.token@1.0::ITokenManager/default",
       "android.frameworks.sensorservice@1.0::ISensorManager/default",
-      "android.frameworks.schedulerservice@1.0::ISchedulingPolicyService/default"
+      "android.frameworks.schedulerservice@1.0::ISchedulingPolicyService/default",
+      "android.system.keystore2.IKeystoreService/default"
     ],
     "device": [
       "android.hardware.graphics.allocator@2.0::IAllocator/default",
@@ -2728,7 +2854,11 @@
       "android.hardware.graphics.composer@2.1::IComposer/default",
       "android.hardware.health@2.1::IHealth/default",
       "android.hardware.audio@7.1::IDevicesFactory/default",
-      "android.hardware.audio.effect@7.0::IEffectsFactory/default"
+      "android.hardware.audio.effect@7.0::IEffectsFactory/default",
+      "android.hardware.security.keymint.IKeyMintDevice/default",
+      "android.hardware.security.keymint.IRemotelyProvisionedComponent/default",
+      "android.hardware.security.secureclock.ISecureClock/default",
+      "android.hardware.security.sharedsecret.ISharedSecret/default"
     ]
   },
   "host_services": [
@@ -2742,7 +2872,28 @@
     "lmkd",
     "netd",
     "audioserver",
-    "audio_hal"
+    "audio_hal",
+    "keymint",
+    "keystore2"
   ],
-  "package_set": "stock-home"
+  "package_set": "stock-home",
+  "keystore_grants": [
+    [
+      "u:r:system_server:s0",
+      "u:r:keystore:s0",
+      [
+        "get_state",
+        "change_user",
+        "unlock",
+        "early_boot_ended"
+      ]
+    ],
+    [
+      "u:r:vold:s0",
+      "u:r:keystore:s0",
+      [
+        "early_boot_ended"
+      ]
+    ]
+  ]
 }

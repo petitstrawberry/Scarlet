@@ -146,10 +146,10 @@ def prepare(archive, runtime, stock, profile_file, output):
 
 
 def configure(output, stock, profile, contexts, metadata):
-    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,ODSIGN_MANAGED_RC,HEALTH_MANAGED_RC,VOLD_MANAGED_RC,LMKD_MANAGED_RC,NETD_MANAGED_RC,AUDIOSERVER_MANAGED_RC,AUDIO_HAL_MANAGED_RC,KEYSTORE_MANAGED_RC,imports
+    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,ODSIGN_MANAGED_RC,HEALTH_MANAGED_RC,VOLD_MANAGED_RC,LMKD_MANAGED_RC,NETD_MANAGED_RC,AUDIOSERVER_MANAGED_RC,AUDIO_HAL_MANAGED_RC,KEYSTORE_MANAGED_RC,KEYMINT_MANAGED_RC,imports
     for name,record in list(metadata.get("host_service_inputs",{}).items()):
         if name not in profile.get("host_services",[]):
-            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC,"odsign":ODSIGN_MANAGED_RC, "health":HEALTH_MANAGED_RC,"vold":VOLD_MANAGED_RC,"lmkd":LMKD_MANAGED_RC,"netd":NETD_MANAGED_RC,"audioserver":AUDIOSERVER_MANAGED_RC,"audio_hal":AUDIO_HAL_MANAGED_RC,"keystore2":KEYSTORE_MANAGED_RC}[name]
+            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC,"odsign":ODSIGN_MANAGED_RC, "health":HEALTH_MANAGED_RC,"vold":VOLD_MANAGED_RC,"lmkd":LMKD_MANAGED_RC,"netd":NETD_MANAGED_RC,"audioserver":AUDIOSERVER_MANAGED_RC,"audio_hal":AUDIO_HAL_MANAGED_RC,"keystore2":KEYSTORE_MANAGED_RC,"keymint":KEYMINT_MANAGED_RC}[name]
             path=output/relative
             expected=record["files"][relative] if name=="graphics_cpu" else record["managed_rc_sha256"]
             if sha256(path)!=expected:raise ValueError("changed manager host service output")
@@ -253,8 +253,8 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
     if service_image is not None and not added_services:
         refreshed_services |= {name for name in profile.get("host_services",[]) if name in ("audioserver","audio_hal")}
     providers_to_add=added_services|refreshed_services
-    if providers_to_add and (not providers_to_add.issubset({"vold","lmkd","netd","audioserver","audio_hal","keystore2"}) or not service_image):
-        raise ValueError("adding a stock provider requires --service-image; supported additions: vold, lmkd, netd, audioserver, audio_hal, keystore2")
+    if providers_to_add and (not providers_to_add.issubset({"vold","lmkd","netd","audioserver","audio_hal","keystore2","keymint"}) or not service_image):
+        raise ValueError("adding a stock provider requires --service-image; supported additions: vold, lmkd, netd, audioserver, audio_hal, keystore2, keymint")
     if "netd" in providers_to_add and not firewall_compat:
         raise ValueError("netd provider requires --netd-firewall-compat")
     if providers_to_add.intersection({"audioserver","audio_hal"}) and not audio_start:
@@ -268,8 +268,8 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
         previous = metadata.get("vintf_inputs", {})
         previous_device=previous.get("selection", {}).get("device",[])
         selected_device=profile.get("vintf", {}).get("device",[])
-        from vintf_inputs import AUDIO_CONTRACT, AUDIO_EFFECT_CONTRACT, AUDIO_EFFECT_LEGACY_CONTRACT
-        from host_services import AUDIO_HAL
+        from vintf_inputs import AUDIO_CONTRACT, AUDIO_EFFECT_CONTRACT, AUDIO_EFFECT_LEGACY_CONTRACT, KEYMINT_DEVICE
+        from host_services import AUDIO_HAL, KEYMINT, KEYMINT_BINARY, KEYMINT_STOCK_RC, KEYMINT_MANIFESTS, build_keymint
         audio_contracts={AUDIO_CONTRACT,AUDIO_EFFECT_CONTRACT,AUDIO_EFFECT_LEGACY_CONTRACT}
         audio_additions = set(selected_device) - set(previous_device)
         audio_removals = set(previous_device) - set(selected_device)
@@ -277,8 +277,12 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
             (audio_additions <= audio_contracts and not audio_removals) or
             (audio_additions == {AUDIO_EFFECT_CONTRACT} and
              audio_removals == {AUDIO_EFFECT_LEGACY_CONTRACT}))
+        keymint_contracts=set(KEYMINT_DEVICE)
+        keymint_inventory_change = (set(selected_device)-set(previous_device)==keymint_contracts and
+                                    not set(previous_device)-set(selected_device) and KEYMINT in providers_to_add)
         if (selected_device != previous_device and
-                not (audio_inventory_change and AUDIO_HAL in providers_to_add)):
+                not (audio_inventory_change and AUDIO_HAL in providers_to_add) and
+                not keymint_inventory_change):
             raise ValueError("changed device inventory requires matching provider preparation")
         from vintf_inputs import build_manifests
         from vintf_inputs import AUDIO_CONTRACT
@@ -300,6 +304,18 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
                 sources[name] = destination.read_bytes()
             providers=dict(previous.get("device_providers",{}))
             providers.pop(AUDIO_EFFECT_LEGACY_CONTRACT, None)
+            if KEYMINT in providers_to_add:
+                vendor=Ext4(temporary/"vendor.ext4")
+                rc=temporary/"keymint.rc";binary=temporary/"keymint.bin"
+                vendor.dump("/"+KEYMINT_STOCK_RC.removeprefix("vendor/"),rc)
+                vendor.dump("/"+KEYMINT_BINARY.removeprefix("vendor/"),binary)
+                manifests={}
+                for contract,path in KEYMINT_MANIFESTS.items():
+                    target=temporary/("vintf-"+path.rsplit("/",1)[-1])
+                    vendor.dump("/"+path.removeprefix("vendor/"),target)
+                    manifests[contract]=target.read_bytes()
+                _,_,keymint_providers=build_keymint(rc.read_bytes(),binary.read_bytes(),manifests)
+                providers.update(keymint_providers)
             if AUDIO_HAL in providers_to_add:
                 vendor=Ext4(temporary/"vendor.ext4");binary=temporary/AUDIO_HAL_BINARY
                 vendor.dump("/"+AUDIO_HAL_BINARY.removeprefix("vendor/"),binary)
@@ -334,6 +350,7 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
 def add_stock_provider(output, metadata, archive, name, firewall_compat=None, audio_start=None, audio_binder_compat=None):
     service_name=name
     from host_services import (KEYSTORE_BINARY,KEYSTORE_STOCK_RC,KEYSTORE_MANAGED_RC,build_keystore,
+                               KEYMINT_BINARY,KEYMINT_STOCK_RC,KEYMINT_MANAGED_RC,KEYMINT_MANIFESTS,build_keymint,
                                VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold,
                                LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd,
                                NETD_BINARY,NETD_STOCK_RC,NETD_MANAGED_RC,NETD_FIREWALL_BINARY,
@@ -342,6 +359,7 @@ def add_stock_provider(output, metadata, archive, name, firewall_compat=None, au
                                AUDIO_HAL,AUDIO_HAL_BINARY,AUDIO_HAL_STOCK_RC,AUDIO_HAL_MANAGED_RC,AUDIO_CONFIG_FILES,
                                AUDIO_HAL_MODULES,AUDIO_START_BINARY,AUDIO_BINDER_COMPAT,primary_audio_policy,build_audio_hal)
     binary_path,stock_rc,managed_rc,builder={
+        "keymint":(KEYMINT_BINARY,KEYMINT_STOCK_RC,KEYMINT_MANAGED_RC,build_keymint),
         "keystore2":(KEYSTORE_BINARY,KEYSTORE_STOCK_RC,KEYSTORE_MANAGED_RC,build_keystore),
         "vold":(VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold),
         "lmkd":(LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd),
@@ -359,7 +377,7 @@ def add_stock_provider(output, metadata, archive, name, firewall_compat=None, au
         def image_source(path):
             return "/"+path.removeprefix("vendor/") if path.startswith("vendor/") else "/"+path
         image(stock_rc).dump(image_source(stock_rc),rc);image(binary_path).dump(image_source(binary_path),binary)
-        managed,proof=builder(rc.read_bytes(),binary.read_bytes())
+        managed,proof=(None,None) if service_name=="keymint" else builder(rc.read_bytes(),binary.read_bytes())
         available={Path(name).name for name in metadata["files"]}
         queue=[binary_path]+(AUDIO_HAL_MODULES if service_name=="audio_hal" else []);needed={};digests={}
         while queue:
@@ -424,6 +442,14 @@ def add_stock_provider(output, metadata, archive, name, firewall_compat=None, au
             source=audio_binder_compat/"libscarlet-audiobinder.so";destination=output/AUDIO_BINDER_COMPAT
             destination.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,destination)
             digests[AUDIO_BINDER_COMPAT]=sha256(source);needed[AUDIO_BINDER_COMPAT]=elf_needed(source)
+        if service_name=="keymint":
+            manifests={}
+            for contract,path in KEYMINT_MANIFESTS.items():
+                source=temporary/"keymint-manifests"/contract.rsplit(".",1)[-1]
+                source.parent.mkdir(parents=True,exist_ok=True)
+                vendor.dump("/"+path.removeprefix("vendor/"),source)
+                manifests[contract]=source.read_bytes()
+            managed,proof,_=build_keymint(rc.read_bytes(),binary.read_bytes(),manifests)
         path=output/managed_rc;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(managed)
         proof.update(native_needed=needed,files=digests,partitions=partitions)
         metadata.setdefault("host_service_inputs",{})[service_name]=proof
@@ -529,6 +555,25 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
             destination.parent.mkdir(parents=True,exist_ok=True);destination.write_bytes(managed)
             metadata.setdefault("host_service_inputs",{})["health"]=proof
             device_providers.update(providers);service_roots.extend([HEALTH_BINARY,HEALTH_IMPL])
+        if "keymint" in metadata["profile"].get("host_services",[]):
+            from host_services import KEYMINT_BINARY,KEYMINT_STOCK_RC,KEYMINT_MANAGED_RC,KEYMINT_MANIFESTS,build_keymint
+            rc=temporary/"keymint-stock.rc";binary=temporary/"keymint-stock.bin"
+            vendor.dump("/"+KEYMINT_STOCK_RC.removeprefix("vendor/"),rc)
+            vendor.dump("/"+KEYMINT_BINARY.removeprefix("vendor/"),binary)
+            manifests={}
+            for contract,path in KEYMINT_MANIFESTS.items():
+                source=temporary/"keymint-manifests"/contract.rsplit(".",1)[-1]
+                source.parent.mkdir(parents=True,exist_ok=True)
+                vendor.dump("/"+path.removeprefix("vendor/"),source)
+                manifests[contract]=source.read_bytes()
+            managed,proof,providers=build_keymint(rc.read_bytes(),binary.read_bytes(),manifests)
+            destination=inputs/KEYMINT_MANAGED_RC
+            previous=metadata.get("host_service_inputs",{}).get("keymint",{}).get("managed_rc_sha256")
+            if KEYMINT_MANAGED_RC in metadata["symlinks"] or destination.exists() and sha256(destination)!=previous:
+                raise ValueError("conflicting KeyMint service manager output")
+            destination.parent.mkdir(parents=True,exist_ok=True);destination.write_bytes(managed)
+            metadata.setdefault("host_service_inputs",{})["keymint"]=proof
+            device_providers.update(providers);service_roots.append(KEYMINT_BINARY)
         from host_services import (KEYSTORE_BINARY,KEYSTORE_STOCK_RC,KEYSTORE_MANAGED_RC,build_keystore,
                                    INSTALLER_BINARY,INSTALLER_STOCK_RC,INSTALLER_MANAGED_RC,build_installer,
                                    ODSIGN_BINARY,ODSIGN_STOCK_RC,ODSIGN_MANAGED_RC,build_odsign,

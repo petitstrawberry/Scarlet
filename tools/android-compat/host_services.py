@@ -22,6 +22,18 @@ KEYSTORE="keystore2"
 KEYSTORE_BINARY="system/bin/keystore2"
 KEYSTORE_STOCK_RC="system/etc/init/keystore2.rc"
 KEYSTORE_MANAGED_RC="scarlet/boot/services/keystore2.rc"
+KEYMINT="keymint"
+KEYMINT_BINARY="vendor/bin/hw/android.hardware.security.keymint-service"
+KEYMINT_STOCK_RC="vendor/etc/init/android.hardware.security.keymint-service.rc"
+KEYMINT_MANAGED_RC="scarlet/boot/services/keymint.rc"
+KEYMINT_MANIFESTS={
+    "android.hardware.security.keymint.IKeyMintDevice/default":
+        "vendor/etc/vintf/manifest/android.hardware.security.keymint-service.xml",
+    "android.hardware.security.secureclock.ISecureClock/default":
+        "vendor/etc/vintf/manifest/android.hardware.security.secureclock-service.xml",
+    "android.hardware.security.sharedsecret.ISharedSecret/default":
+        "vendor/etc/vintf/manifest/android.hardware.security.sharedsecret-service.xml",
+}
 ODSIGN="odsign"
 ODSIGN_BINARY="system/bin/odsign"
 ODSIGN_STOCK_RC="system/etc/init/odsign.rc"
@@ -116,19 +128,20 @@ STOCK_TEXT = ("service system_suspend /" + BINARY + "\n"
 
 def validate_selection(profile):
     names = profile.get("host_services", [])
-    if (not isinstance(names,list) or len(names)>12 or
-            any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER,ODSIGN,HEALTH,VOLD,LMKD,NETD,AUDIOSERVER,AUDIO_HAL,KEYSTORE) for name in names) or len(set(names))!=len(names)):
+    if (not isinstance(names,list) or len(names)>13 or
+            any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER,ODSIGN,HEALTH,VOLD,LMKD,NETD,AUDIOSERVER,AUDIO_HAL,KEYSTORE,KEYMINT) for name in names) or len(set(names))!=len(names)):
         raise ValueError("unsupported stock host service selection")
     selected = CONTRACT in profile.get("vintf", {}).get("framework", [])
     if selected != (SUSPEND in names):
         raise ValueError("SystemSuspend requires both its host provider and VINTF contract")
     from vintf_inputs import (graphics_selection, HEALTH_CONTRACT, AUDIO_CONTRACT, AUDIO_EFFECT_CONTRACT,
-                              AUDIO_EFFECT_LEGACY_CONTRACT, FRAMEWORK_HIDL)
+                              AUDIO_EFFECT_LEGACY_CONTRACT, FRAMEWORK_HIDL, KEYMINT_DEVICE)
     if FRAMEWORK_HIDL.intersection(profile.get("vintf",{}).get("framework",[])) and HW_MANAGER not in names:
         raise ValueError("HIDL framework management requires its stock provider")
     device=profile.get("vintf",{}).get("device",[])
+    keymint_contracts=set(KEYMINT_DEVICE)
     graphics=[name for name in device if name not in
-              (HEALTH_CONTRACT,AUDIO_CONTRACT,AUDIO_EFFECT_CONTRACT,AUDIO_EFFECT_LEGACY_CONTRACT)]
+              (HEALTH_CONTRACT,AUDIO_CONTRACT,AUDIO_EFFECT_CONTRACT,AUDIO_EFFECT_LEGACY_CONTRACT,*keymint_contracts)]
     if (GRAPHICS in names and (HW_MANAGER not in names or not graphics_selection(graphics)) or
             GRAPHICS not in names and graphics):raise ValueError("graphics services require their exact device inventory and hardware-service manager")
     if ((HEALTH in names)!=(HEALTH_CONTRACT in device) or
@@ -139,11 +152,59 @@ def validate_selection(profile):
     if ((AUDIO_HAL in names)!=audio_device or
             AUDIO_HAL in names and HW_MANAGER not in names):
         raise ValueError("Audio HAL requires its exact device contract and hardware-service manager")
+    keymint_selected = bool(set(device) & keymint_contracts)
+    if ((KEYMINT in names) != keymint_selected or
+            keymint_selected and set(device) & keymint_contracts != keymint_contracts):
+        raise ValueError("KeyMint requires its exact device contract inventory")
+    if KEYSTORE in names and KEYMINT not in names:
+        raise ValueError("Keystore2 requires the software KeyMint provider")
     return names
 
 
 def imports(profile):
-    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC,GRAPHICS:GRAPHICS_RC,INSTALLER:INSTALLER_MANAGED_RC,ODSIGN:ODSIGN_MANAGED_RC,HEALTH:HEALTH_MANAGED_RC,VOLD:VOLD_MANAGED_RC,LMKD:LMKD_MANAGED_RC,NETD:NETD_MANAGED_RC,AUDIOSERVER:AUDIOSERVER_MANAGED_RC,AUDIO_HAL:AUDIO_HAL_MANAGED_RC,KEYSTORE:KEYSTORE_MANAGED_RC}[name] for name in validate_selection(profile)]
+    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC,GRAPHICS:GRAPHICS_RC,INSTALLER:INSTALLER_MANAGED_RC,ODSIGN:ODSIGN_MANAGED_RC,HEALTH:HEALTH_MANAGED_RC,VOLD:VOLD_MANAGED_RC,LMKD:LMKD_MANAGED_RC,NETD:NETD_MANAGED_RC,AUDIOSERVER:AUDIOSERVER_MANAGED_RC,AUDIO_HAL:AUDIO_HAL_MANAGED_RC,KEYSTORE:KEYSTORE_MANAGED_RC,KEYMINT:KEYMINT_MANAGED_RC}[name] for name in validate_selection(profile)]
+
+
+def build_keymint(stock_rc,binary,manifests):
+    from vintf_inputs import KEYMINT_DEVICE
+    directives = [line.strip() for line in stock_rc.decode().splitlines()
+                  if line.strip() and not line.lstrip().startswith("#")]
+    if directives != ["service vendor.keymint-default " + "/" + KEYMINT_BINARY,
+                      "class early_hal", "user nobody"]:
+        raise ValueError("changed stock KeyMint service configuration")
+    if set(manifests) != set(KEYMINT_MANIFESTS):
+        raise ValueError("changed KeyMint manifest set")
+    digest=lambda value:hashlib.sha256(value).hexdigest()
+    binary_digest=digest(binary)
+    providers={}
+    manifest_proof={}
+    declared={}
+    for contract,path in KEYMINT_MANIFESTS.items():
+        data=manifests[contract]
+        root=ET.fromstring(data)
+        if root.tag!="manifest" or root.get("type")!="device":
+            raise ValueError("changed stock KeyMint device contract")
+        manifest_proof[path]=digest(data)
+        for hal in root.findall("hal"):
+            package=hal.findtext("name","")
+            version=hal.findtext("version","1")
+            fqname=hal.findtext("fqname","")
+            identity=(package,version,fqname)
+            matches=[name for name,value in KEYMINT_DEVICE.items() if value==identity]
+            if hal.get("format")!="aidl" or len(matches)!=1 or matches[0] in declared:
+                raise ValueError("changed stock KeyMint device contract")
+            declared[matches[0]]=path
+    if set(declared)!=set(KEYMINT_DEVICE):
+        raise ValueError("changed stock KeyMint device contract")
+    for contract in KEYMINT_DEVICE:
+        path=declared[contract]
+        providers[contract]={"transport":"aidl","path":KEYMINT_BINARY,"sha256":binary_digest,
+                             "source":path,"source_sha256":manifest_proof[path]}
+    proof={"source_rc":KEYMINT_STOCK_RC,"source_rc_sha256":digest(stock_rc),
+           "binary_sha256":binary_digest,"managed_rc_sha256":digest(stock_rc),
+           "manifests":manifest_proof,"protection_level":"software",
+           "declared_service_count":len(providers)}
+    return stock_rc,proof,providers
 
 
 def build_keystore(stock_rc,binary):
@@ -396,10 +457,17 @@ def validate_staged(metadata):
                 set(record.get("native_needed",{}))!=set(files) or
                 any(metadata["files"].get(path)!=digest for path,digest in files.items())):
             raise ValueError("changed audio provider inputs")
-    for name,binary,rc in [(INSTALLER,INSTALLER_BINARY,INSTALLER_MANAGED_RC),(ODSIGN,ODSIGN_BINARY,ODSIGN_MANAGED_RC),(KEYSTORE,KEYSTORE_BINARY,KEYSTORE_MANAGED_RC)]:
+    for name,binary,rc in [(INSTALLER,INSTALLER_BINARY,INSTALLER_MANAGED_RC),(ODSIGN,ODSIGN_BINARY,ODSIGN_MANAGED_RC),(KEYSTORE,KEYSTORE_BINARY,KEYSTORE_MANAGED_RC),(KEYMINT,KEYMINT_BINARY,KEYMINT_MANAGED_RC)]:
         if name not in names:continue
         record=proof[name]
         if (metadata["files"].get(binary)!=record.get("binary_sha256") or
                 metadata["files"].get(rc)!=record.get("managed_rc_sha256") or
                 record.get("source_rc_sha256")!=record.get("managed_rc_sha256")):
             raise ValueError("changed stock service inputs: "+name)
+        if name==KEYMINT:
+            manifests=record.get("manifests",{})
+            if (set(manifests)!=set(KEYMINT_MANIFESTS.values()) or
+                    any(not digest for digest in manifests.values()) or
+                    record.get("protection_level")!="software" or
+                    record.get("declared_service_count")!=4):
+                raise ValueError("changed stock KeyMint provider inputs")

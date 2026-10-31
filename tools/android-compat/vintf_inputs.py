@@ -12,12 +12,23 @@ GRAPHICS_DEVICE = {
     "android.hardware.graphics.composer@2.1::IComposer/default": "hwbinder",
     "android.hardware.graphics.composer@2.4::IComposer/default": "hwbinder",
 }
+KEYMINT_DEVICE = {
+    "android.hardware.security.keymint.IKeyMintDevice/default":
+        ("android.hardware.security.keymint", "2", "IKeyMintDevice/default"),
+    "android.hardware.security.keymint.IRemotelyProvisionedComponent/default":
+        ("android.hardware.security.keymint", "2", "IRemotelyProvisionedComponent/default"),
+    "android.hardware.security.secureclock.ISecureClock/default":
+        ("android.hardware.security.secureclock", "1", "ISecureClock/default"),
+    "android.hardware.security.sharedsecret.ISharedSecret/default":
+        ("android.hardware.security.sharedsecret", "1", "ISharedSecret/default"),
+}
 HEALTH_CONTRACT = "android.hardware.health@2.1::IHealth/default"
 AUDIO_CONTRACT = "android.hardware.audio@7.1::IDevicesFactory/default"
 AUDIO_EFFECT_CONTRACT = "android.hardware.audio.effect@7.0::IEffectsFactory/default"
 AUDIO_EFFECT_LEGACY_CONTRACT = "android.hardware.audio.effect@7.1::IEffectsFactory/default"
 DEVICE_PROVIDERS = {**GRAPHICS_DEVICE, HEALTH_CONTRACT: "hwbinder", AUDIO_CONTRACT: "hwbinder",
-                    AUDIO_EFFECT_CONTRACT: "hwbinder", AUDIO_EFFECT_LEGACY_CONTRACT: "hwbinder"}
+                    AUDIO_EFFECT_CONTRACT: "hwbinder", AUDIO_EFFECT_LEGACY_CONTRACT: "hwbinder",
+                    **{contract: "aidl" for contract in KEYMINT_DEVICE}}
 FRAMEWORK_HIDL = {
     "android.hidl.manager@1.2::IServiceManager/default",
     "android.hidl.token@1.0::ITokenManager/default",
@@ -105,8 +116,15 @@ def build_manifests(selection, sources, device_providers=None):
             ET.SubElement(hal, tag).text = record["package" if tag == "name" else tag]
     device = ET.Element("manifest", {"version": "5.0", "type": "device"})
     for contract in selection["device"]:
-        package,fqname=contract.split("@",1)
         if providers[contract].get("transport")!=DEVICE_PROVIDERS[contract]:raise ValueError("device provider transport mismatch")
+        if contract in KEYMINT_DEVICE:
+            package, version, fqname = KEYMINT_DEVICE[contract]
+            hal=ET.SubElement(device,"hal",{"format":"aidl"})
+            ET.SubElement(hal,"name").text=package
+            ET.SubElement(hal,"version").text=version
+            ET.SubElement(hal,"fqname").text=fqname
+            continue
+        package,fqname=contract.split("@",1)
         hal=ET.SubElement(device,"hal",{"format":"hidl"})
         ET.SubElement(hal,"name").text=package
         attributes={"arch":"64"} if DEVICE_PROVIDERS[contract]=="passthrough" else {}
