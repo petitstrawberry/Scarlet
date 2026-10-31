@@ -3573,16 +3573,6 @@ pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     errno::to_result(errno::ENOSYS)
 }
 
-pub fn sys_inotify_init1(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
-    let task = match mytask() {
-        Some(task) => task,
-        None => return errno::to_result(errno::EFAULT),
-    };
-
-    trapframe.increment_pc_next(&task);
-    errno::to_result(errno::ENOSYS)
-}
-
 /// Linux sys_flock - Apply or remove an advisory lock on an open file
 ///
 /// Apply or remove an advisory lock on the open file specified by fd.

@@ -23,6 +23,7 @@ mod mount_namespace;
 mod record_lock;
 pub mod signal;
 mod signalfd;
+mod inotify;
 pub mod socket;
 pub mod time;
 pub mod utimens;
@@ -598,7 +599,9 @@ syscall_table! {
     Dup = 23 => fs::sys_dup,
     Dup3 = 24 => fs::sys_dup3,
     Fcntl = 25 => fs::sys_fcntl,
-    InotifyInit1 = 26 => fs::sys_inotify_init1,
+    InotifyInit1 = 26 => inotify::sys_init1,
+    InotifyAddWatch = 27 => inotify::sys_add_watch,
+    InotifyRmWatch = 28 => inotify::sys_rm_watch,
     Ioctl = 29 => fs::sys_ioctl,
     MknodAt = 33 => fs::sys_mknodat,
     MkdirAt = 34 => fs::sys_mkdirat,
