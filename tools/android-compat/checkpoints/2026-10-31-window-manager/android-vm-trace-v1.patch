@@ -1,0 +1,54 @@
+diff --git a/kernel/src/abi/linux/generic/memfd.rs b/kernel/src/abi/linux/generic/memfd.rs
+index 768dc7c6e..4ab3583d2 100644
+--- a/kernel/src/abi/linux/generic/memfd.rs
++++ b/kernel/src/abi/linux/generic/memfd.rs
+@@ -314,7 +314,7 @@ impl FileObject for MemfdFile {
+         }
+         self.backing
+             .resize(size)
+-            .map_err(|_| StreamError::NoSpace)?;
++            .map_err(|error| {crate::println!("ANDROID_VM_TRACE memfd_resize old={} new={} error={}",old_size,size,error);StreamError::NoSpace})?;
+         if size > old_size {
+             let backing = self
+                 .backing
+diff --git a/kernel/src/abi/linux/generic/mm.rs b/kernel/src/abi/linux/generic/mm.rs
+index 24530d858..36dadec6e 100644
+--- a/kernel/src/abi/linux/generic/mm.rs
++++ b/kernel/src/abi/linux/generic/mm.rs
+@@ -55,7 +55,11 @@ pub fn sys_mmap(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+         None => return usize::MAX,
+     };
+     trapframe.increment_pc_next(&task);
+-    mmap_for_task(abi, trapframe, &task)
++    let result=mmap_for_task(abi, trapframe, &task);
++    if trapframe.get_arg(0)<0x80000000 && trapframe.get_arg(0)!=0 || result<0x80000000 {
++        crate::println!("ANDROID_VM_TRACE mmap task={} addr={:#x} len={:#x} prot={:#x} flags={:#x} fd={} off={:#x} result={:#x}",task.get_id(),trapframe.get_arg(0),trapframe.get_arg(1),trapframe.get_arg(2),trapframe.get_arg(3),trapframe.get_arg(4),trapframe.get_arg(5),result);
++    }
++    result
+ }
+ 
+ fn mmap_for_task(abi: &mut LinuxAbi, trapframe: &Trapframe, task: &crate::task::Task) -> usize {
+@@ -566,6 +570,7 @@ pub fn sys_madvise(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+     let addr = trapframe.get_arg(0);
+     let length = trapframe.get_arg(1);
+     let advice = trapframe.get_arg(2);
++    if addr<0x80000000 {crate::println!("ANDROID_VM_TRACE madvise task={} addr={:#x} len={:#x} advice={}",task.get_id(),addr,length,advice);}
+ 
+     trapframe.increment_pc_next(&task);
+     madvise_for_task(&task, addr, length, advice)
+@@ -814,6 +819,7 @@ pub fn sys_munmap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+ 
+     let vaddr = trapframe.get_arg(0);
+     let length = trapframe.get_arg(1);
++    if vaddr<0x80000000 {crate::println!("ANDROID_VM_TRACE munmap task={} addr={:#x} len={:#x}",task.get_id(),vaddr,length);}
+ 
+     trapframe.increment_pc_next(&task);
+ 
+@@ -852,6 +858,7 @@ pub fn sys_mremap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
+     let new_size = trapframe.get_arg(2);
+     let flags = trapframe.get_arg(3);
+     let destination = trapframe.get_arg(4);
++    if address<0x80000000 {crate::println!("ANDROID_VM_TRACE mremap task={} addr={:#x} old={:#x} new={:#x} flags={:#x} dest={:#x}",task.get_id(),address,old_size,new_size,flags,destination);}
+     trapframe.increment_pc_next(&task);
+ 
+     const MREMAP_MAYMOVE: usize = 1;

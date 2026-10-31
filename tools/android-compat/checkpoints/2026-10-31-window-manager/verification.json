@@ -1,0 +1,45 @@
+{
+  "revision": "68c8885d3edb1336c6c324751bbd26837a391ff0",
+  "acceleration": "hvf",
+  "kernel_tests": 1792,
+  "host_tests": 77,
+  "kernel_sha256": "cac9623252adabbef1ba99e8d7bf01f5ecbd251cbeaaed9b195180faf1fe0f77",
+  "libart_sha256": "1e0e9f2c3d166a8a67091039012d1681ec83f5ac784b17397dbbc39280939366",
+  "confirmed": [
+    "InputManagerService and WindowManagerService initialization complete",
+    "Stock sensor and scheduling framework HIDL services register after verified VINTF selection and explicit Shield service grants",
+    "Input starts; MakeDisplayReady, StorageManager, StorageStats, UiModeManager and LocaleManager initialization complete",
+    "SurfaceFlinger self-discovery and display-state property denials disappear after explicit profile grants",
+    "Native kernel-fault collector is a bounded external process and is stopped and reaped by its owner",
+    "Linux private anonymous mappings now use the immutable zero source already used by native mmap; sparse fork regression preserves contents and write isolation",
+    "Real Bionic inotify fork/dup/event/epoll probe passes on the corrected private-anonymous kernel; native wake query reports no residual resources"
+  ],
+  "faults": {
+    "before_anonymous_fix": {
+      "allocation": "64MiB memfd physical allocation and a private COW page allocation failed",
+      "gc": "HeapTaskDaemon read unmapped 0x152a32d8; libart file offset 0x3c9c28 is ConcurrentCopying Object::VisitReferences"
+    },
+    "after_anonymous_fix": {
+      "task": "StorageManagerS",
+      "address": "0x0",
+      "libart_file_offset": "0x2041a8",
+      "symbol": "nterp_op_invoke_interface",
+      "instruction": "ldr w2, [x1] with x1=0",
+      "stop": "Kernel terminates instead of delivering the synchronous memory fault to ART"
+    }
+  },
+  "pending_design": "ABI-neutral native user-memory-exception hook; Linux/Android synchronous SIGSEGV conversion for unmapped/protection faults",
+  "limits": [
+    "No home screen or Android app frame confirmed",
+    "The memory allocation correction is validated structurally and by 1792 tests; complete Android stability is not claimed",
+    "Some diagnostic host runs stop at the first captured native fault, so their fixture result is failure even if the outer probe exits 0",
+    "VM-trace-v1 host logging failed due to disk exhaustion and is excluded from validation; task-owned completed-run image/build caches were removed",
+    "Physical suspend/resume remains untested"
+  ],
+  "bionic_after_anonymous_fix": {
+    "inotify_probe": "passed",
+    "program_exit": 0,
+    "wake_flags": 4,
+    "wake_pending": 0
+  }
+}

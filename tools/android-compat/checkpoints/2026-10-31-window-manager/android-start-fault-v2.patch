@@ -1,0 +1,87 @@
+diff --git a/kernel/src/abi/linux/aarch64/signal.rs b/kernel/src/abi/linux/aarch64/signal.rs
+index 94431d35b..de7781fee 100644
+--- a/kernel/src/abi/linux/aarch64/signal.rs
++++ b/kernel/src/abi/linux/aarch64/signal.rs
+@@ -259,6 +259,7 @@ pub fn sys_rt_sigreturn(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) ->
+             trapframe.get_return_value()
+         }
+         Err(error) => {
++            crate::emergency_println!("SCARLET_ANDROID_SIGRETURN_ERROR pid={} error={} sp={:#x}",task.get_id(),error,trapframe.sp);
+             crate::println!("[linux] sigreturn failed: {}", error);
+             task.mark_signal_termination(11);
+             task.request_deferred_exit_group(139);
+@@ -283,7 +284,8 @@ pub fn deliver_pending_handler(abi: &LinuxAbi, frame: &mut Trapframe, result: us
+     };
+     if let Some((signal, handler)) = pending {
+         if let Some(task) = mytask() {
+-            if setup_signal_handler(abi, &task, frame, handler, signal).is_err() {
++            if let Err(error) = setup_signal_handler(abi, &task, frame, handler, signal) {
++                crate::emergency_println!("SCARLET_ANDROID_SIGNAL_ERROR pid={} signal={} error={} pc={:#x} sp={:#x}",task.get_id(),signal as u32,error,frame.elr,frame.sp);
+                 task.mark_signal_termination(11);
+                 task.request_deferred_exit_group(139);
+             }
+diff --git a/kernel/src/abi/linux/generic/memfd.rs b/kernel/src/abi/linux/generic/memfd.rs
+index 768dc7c6e..19cc38d00 100644
+--- a/kernel/src/abi/linux/generic/memfd.rs
++++ b/kernel/src/abi/linux/generic/memfd.rs
+@@ -314,7 +314,7 @@ impl FileObject for MemfdFile {
+         }
+         self.backing
+             .resize(size)
+-            .map_err(|_| StreamError::NoSpace)?;
++            .map_err(|error| {crate::emergency_println!("SCARLET_ANDROID_MEMFD_RESIZE old={} new={} error={}",old_size,size,error);StreamError::NoSpace})?;
+         if size > old_size {
+             let backing = self
+                 .backing
+diff --git a/kernel/src/abi/linux/generic/signal.rs b/kernel/src/abi/linux/generic/signal.rs
+index acb182cf0..23349c5e4 100644
+--- a/kernel/src/abi/linux/generic/signal.rs
++++ b/kernel/src/abi/linux/generic/signal.rs
+@@ -804,6 +804,7 @@ pub fn handle_event_for_task(
+             match setup_signal_handler(abi, &target_task, trapframe, handler_addr, signal) {
+                 Ok(()) => EventProcessOutcome::UserHandlerArmed,
+                 Err(error) => {
++                    crate::emergency_println!("SCARLET_ANDROID_EVENT_SIGNAL_ERROR pid={} signal={} error={}",target_task.get_id(),signal as u32,error);
+                     crate::println!("[linux] signal frame failed: {}", error);
+                     target_task.mark_signal_termination(LinuxSignal::SIGSEGV as u8);
+                     EventProcessOutcome::Exited(128 + LinuxSignal::SIGSEGV as i32)
+@@ -812,6 +813,7 @@ pub fn handle_event_for_task(
+         }
+         SignalAction::Ignore => EventProcessOutcome::Continue,
+         SignalAction::ForceTerminate | SignalAction::Terminate => {
++            if signal == LinuxSignal::SIGSEGV {crate::emergency_println!("SCARLET_ANDROID_FATAL_SEGV pid={} sender={:?}",target_task.get_id(),event.metadata.sender);}
+             crate::println!(
+                 "[linux] fatal signal={} sender={:?} target={} name={}",
+                 signal as u32,
+diff --git a/kernel/src/arch/aarch64/trap/exception.rs b/kernel/src/arch/aarch64/trap/exception.rs
+index b87e57384..e3cc20dba 100644
+--- a/kernel/src/arch/aarch64/trap/exception.rs
++++ b/kernel/src/arch/aarch64/trap/exception.rs
+@@ -502,6 +502,7 @@ fn terminate_current_user_exception(
+     reason: &'static str,
+     exit_status: i32,
+ ) {
++    crate::emergency_println!("SCARLET_INPUT_USER_FAULT kind={} pc={:#x} far={:#x} esr={:#x} sp={:#x} lr={:#x} reason={}",event_kind,pc,vaddr,esr,trapframe.sp,trapframe.regs.reg[30],reason);
+     print_trap_info(trapframe, esr);
+     if let Some(task) = current_task(get_cpu().get_cpuid()) {
+         println!(
+diff --git a/kernel/src/task/mod.rs b/kernel/src/task/mod.rs
+index 37864b7fd..076b942ca 100644
+--- a/kernel/src/task/mod.rs
++++ b/kernel/src/task/mod.rs
+@@ -3411,6 +3411,15 @@ impl Task {
+     /// - The calling task is set to Zombie/Terminated
+     /// - Other tasks in the group are forcefully terminated
+     pub fn exit_group(&self, status: i32) {
++        if status == 139 {
++            let frame = self.get_trapframe();
++            crate::emergency_println!("SCARLET_INPUT_EXIT139 pid={} pc={:#x} lr={:#x} sp={:#x} far={:#x} x8={:#x}", self.get_id(), frame.elr, frame.regs.reg[30], frame.sp, frame.far_el1, frame.regs.reg[8]);
++            for address in [frame.elr as usize, frame.regs.reg[30], frame.far_el1 as usize] {
++                if let Some(map) = self.vm_manager.search_memory_map(address) {
++                    crate::emergency_println!("SCARLET_INPUT_FAULT_MAP address={:#x} start={:#x} end={:#x} origin={:#x} permissions={:#x} owner={}", address, map.vmarea.start, map.vmarea.end, map.vm_start, map.permissions, map.owner.as_ref().map(|o|o.mmap_owner_name()).unwrap_or_default());
++                }
++            }
++        }
+         self.begin_exit();
+         let thread_group_id = self.thread_group_id;
+         let my_id = self.id;

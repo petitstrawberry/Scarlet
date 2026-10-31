@@ -1,0 +1,2 @@
+nterp_op_invoke_interface at crtbegin_so.c:0
+void art::mirror::Object::VisitReferences<true, (art::VerifyObjectFlags)0, (art::ReadBarrierOption)1, art::gc::collector::ConcurrentCopying::ComputeLiveBytesAndMarkRefFieldsVisitor<true>, art::gc::collector::ConcurrentCopying::ComputeLiveBytesAndMarkRefFieldsVisitor<true> >(art::gc::collector::ConcurrentCopying::ComputeLiveBytesAndMarkRefFieldsVisitor<true> const&, art::gc::collector::ConcurrentCopying::ComputeLiveBytesAndMarkRefFieldsVisitor<true> const&) at concurrent_copying.cc:0
