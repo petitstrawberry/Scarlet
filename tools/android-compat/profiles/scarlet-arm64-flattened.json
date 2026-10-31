@@ -39,7 +39,7 @@
     "ro.hardware.egl": "angle",
     "ro.hardware.vulkan": "pastel",
     "ro.sf.lcd_density": "160",
-    "ro.hw_timeout_multiplier": "4",
+    "ro.hw_timeout_multiplier": "16",
     "debug.renderengine.backend": "gles"
   },
   "bootconfig": {
@@ -184,6 +184,7 @@
       "u:object_r:dalvik_runtime_prop:s0",
       "u:object_r:binder_cache_system_server_prop:s0",
       "u:object_r:debug_prop:s0",
+      "u:object_r:bootanim_system_prop:s0",
       "u:object_r:retaildemo_prop:s0"
     ],
     "u:r:hwservicemanager:s0": [

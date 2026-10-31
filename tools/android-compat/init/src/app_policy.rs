@@ -144,6 +144,10 @@ impl Manager {
                 "legacy_permission",
                 "game",
                 "netstats",
+                "sensorservice",
+                "device_state",
+                "sensor_privacy",
+                "launcherapps",
             ] {
                 let label = std::format!("u:object_r:{}_service:s0", name);
                 if let Some(target) = self.labels.get(&label) {
@@ -183,12 +187,9 @@ impl Manager {
             for parent in &old {
                 for kind in [1, 2] {
                     if *parent != target {
-                        relabel.push(FileRelabel {
-                            source: installer,
-                            old: *parent,
-                            target,
-                            kind,
-                        });
+                        for source in [installer, zygote] {
+                            relabel.push(FileRelabel { source, old: *parent, target, kind });
+                        }
                     }
                     create.push(FileCreate {
                         source: installer,
@@ -198,6 +199,29 @@ impl Manager {
                         flags: 0,
                         reserved: 0,
                     });
+                }
+            }
+            for parent in &old {
+                if *parent != target {
+                    relabel.push(FileRelabel { source: zygote, old: *parent, target, kind: 3 });
+                }
+            }
+        }
+        for target in [
+            "u:object_r:system_data_root_file:s0",
+            "u:object_r:system_data_file:s0",
+            "u:object_r:unlabeled:s0",
+        ]
+        .into_iter()
+        .filter_map(|name| self.labels.get(name).copied())
+        .filter(|target| !files.contains(target))
+        {
+            for parent in &old {
+                if *parent != target {
+                    for kind in [1, 2] {
+                        relabel.push(FileRelabel { source: zygote, old: *parent, target, kind });
+                    }
+                    relabel.push(FileRelabel { source: zygote, old: *parent, target, kind: 3 });
                 }
             }
         }
