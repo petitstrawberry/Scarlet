@@ -202,6 +202,12 @@ impl Clone for OverlayNode {
 }
 
 impl VfsNode for OverlayNode {
+    fn supports_directory_notifications(&self) -> bool {
+        // Directory inode IDs survive copy-up and are never reused after
+        // removal. Directory rename is unsupported by this overlay driver.
+        // Regular-file retained identity remains a separate capability.
+        self.file_type == FileType::Directory
+    }
     fn shield_labels(&self)->Option<Arc<crate::shield::file::Labels>> {Some(self.inode.labels.clone())}
     fn owner_identity(&self)->Option<crate::shield::identity::ActiveIdentity> {
         Some(self.inode.owner.read().unwrap_or(crate::shield::identity::ActiveIdentity {

@@ -209,6 +209,13 @@ pub trait VfsNode: Send + Sync + Any {
     /// Returns a (Weak) reference to the filesystem this node belongs to
     fn filesystem(&self) -> Option<Weak<dyn FileSystemOperations>>;
 
+    /// Directory watches require a non-reused identity until removal retires
+    /// the watch. This does not grant retained file authority or advisory locks.
+    fn supports_directory_notifications(&self) -> bool {
+        self.is_directory().unwrap_or(false) && self.filesystem().and_then(|fs| fs.upgrade())
+            .is_some_and(|fs| fs.supports_retained_node_identity())
+    }
+
     /// Get metadata for this node
     fn metadata(&self) -> Result<FileMetadata, FileSystemError>;
 

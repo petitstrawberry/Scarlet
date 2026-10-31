@@ -813,7 +813,8 @@ impl VfsManager {
             filename.clone(),
             node.clone(),
         );
-        parent_entry.add_child(filename, entry.clone());
+        parent_entry.add_child(filename.clone(), entry.clone());
+        super::notify::emit(&parent_node,super::notify::Kind::Created,&filename,false,0);
 
         // Retain the created node; do not resolve the caller's path again.
         // The namespace guard also protects path-based overlay driver callbacks.
@@ -862,6 +863,7 @@ impl VfsManager {
             })?;
         let label=crate::task::mytask().map(|task|crate::shield::file::CreateContext::prepare(&task,parent_node.as_ref(),&file_type)).transpose()
             .map_err(|reason|FileSystemError::new(FileSystemErrorKind::PermissionDenied,reason))?.flatten();
+        let is_directory=file_type==FileType::Directory;
         let new_node=filesystem.create_labeled(&parent_node,&filename,file_type,0o644,label.as_ref())?;
 
         // Create VfsEntry and add to parent cache
@@ -871,7 +873,8 @@ impl VfsManager {
             new_node,
         );
 
-        parent_entry.add_child(filename, new_entry);
+        parent_entry.add_child(filename.clone(), new_entry);
+        super::notify::emit(&parent_node,super::notify::Kind::Created,&filename,is_directory,0);
 
         Ok(())
     }
@@ -890,6 +893,19 @@ impl VfsManager {
     ///
     pub fn create_dir(&self, path: &str) -> Result<(), FileSystemError> {
         self.create_file(path, FileType::Directory)
+    }
+
+    /// Register against a resolved, readable directory while excluding
+    /// namespace mutations. Views which explicitly share an inode share its
+    /// notifications; unrelated filesystem identities cannot cross-deliver.
+    pub fn watch_directory(&self,path:&str,path_options:&PathResolutionOptions,
+        queue:&super::notify::ChangeQueue,options:super::notify::WatchOptions)->Result<u64,FileSystemError> {
+        let _namespace_guard=lock_namespace_mutations()?;
+        let (entry,_)=self.resolve_path_with_options(path,path_options)?;
+        let node=entry.node();let metadata=node.metadata()?;
+        if metadata.file_type!=FileType::Directory {return Err(vfs_error(FileSystemErrorKind::NotADirectory,"Directory watch requires a directory"));}
+        if !metadata.permissions.read {return Err(vfs_error(FileSystemErrorKind::PermissionDenied,"Directory watch requires read access"));}
+        queue.watch(node,options)
     }
 
     /// Create a symbolic link at the specified path
@@ -1053,10 +1069,14 @@ impl VfsManager {
                 "Directory not empty",
             ));
         }
+        let removed_node=entry_to_remove.node();
+        let is_directory=removed_node.is_directory()?;
         filesystem.remove(&parent_node, &filename)?;
 
         // Remove from parent cache
         let _ = parent_entry.remove_child(&filename);
+        super::notify::emit(&parent_node,super::notify::Kind::Deleted,&filename,is_directory,0);
+        if is_directory {super::notify::emit(&removed_node,super::notify::Kind::RemovedSelf,"",true,0);}
 
         // Socket cleanup can run subsystem callbacks; namespace mutation is
         // complete, so do not retain this lock across those callbacks.
@@ -1568,6 +1588,7 @@ impl VfsManager {
         }
 
         // Create the hard link
+        let is_directory=source_node.is_directory()?;
         let link_node =
             source_fs.create_hardlink(&target_parent_node, &target_filename, &source_node)?;
 
@@ -1577,7 +1598,8 @@ impl VfsManager {
             target_filename.clone(),
             link_node,
         );
-        target_parent_entry.add_child(target_filename, link_entry);
+        target_parent_entry.add_child(target_filename.clone(), link_entry);
+        super::notify::emit(&target_parent_node,super::notify::Kind::Created,&target_filename,is_directory,0);
 
         Ok(())
     }
@@ -1698,7 +1720,7 @@ impl VfsManager {
             }
         }
 
-        match self.resolve_path_with_options(new_lookup, &options) {
+        let replaced_node=match self.resolve_path_with_options(new_lookup, &options) {
             Ok((entry, _)) if new_path.ends_with('/') && !entry.node().is_directory()? => {
                 return Err(vfs_error(
                     FileSystemErrorKind::NotADirectory,
@@ -1715,12 +1737,12 @@ impl VfsManager {
                 // POSIX rename of the same file (including hard links) is a no-op.
                 return Ok(());
             }
-            Ok(_) => {}
+            Ok((entry,_)) => Some(entry.node()),
             Err(error)
                 if error.kind == FileSystemErrorKind::NotFound
-                    && (!new_path.ends_with('/') || old_entry.node().is_directory()?) => {}
+                    && (!new_path.ends_with('/') || old_entry.node().is_directory()?) => None,
             Err(error) => return Err(error),
-        }
+        };
 
         let old_parent_node = old_parent_entry.node();
         let new_parent_node = new_parent_entry.node();
@@ -1767,6 +1789,8 @@ impl VfsManager {
         }
 
         // Delegate to the filesystem driver
+        let is_directory=old_entry.node().is_directory()?;
+        let replaced_directory=replaced_node.as_ref().map(|node|node.is_directory()).transpose()?.unwrap_or(false);
         old_fs.rename(&old_parent_node, &old_name, &new_parent_node, &new_name)?;
 
         // Update VfsEntry caches:
@@ -1779,7 +1803,12 @@ impl VfsManager {
         // 3. Move the original entry so cwd, children, open directory handles
         // and descendant mountpoints observe its new location too.
         old_entry.relocate(new_name.clone(), new_parent_entry.clone());
-        new_parent_entry.add_child(new_name, old_entry);
+        new_parent_entry.add_child(new_name.clone(), old_entry.clone());
+        let cookie=super::notify::move_cookie();
+        super::notify::emit(&old_parent_node,super::notify::Kind::MovedFrom,&old_name,is_directory,cookie);
+        super::notify::emit(&new_parent_node,super::notify::Kind::MovedTo,&new_name,is_directory,cookie);
+        if is_directory {super::notify::emit(&old_entry.node(),super::notify::Kind::MovedSelf,"",true,0);}
+        if replaced_directory {super::notify::emit(replaced_node.as_ref().unwrap(),super::notify::Kind::RemovedSelf,"",true,0);}
 
         Ok(())
     }
