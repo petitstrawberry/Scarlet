@@ -17,7 +17,8 @@ impl Compositor {
         // Do not let an early compositor exit interrupt the Android child wait.
         let mut display_ready = false;
         for _ in 0..500 {
-            if native.open("/dev/display0", 0).is_ok() {
+            if (0..8).any(|index| native.open(&std::format!("/dev/display{index}"), 0)
+                .is_ok_and(|display| display.as_file().is_ok())) {
                 display_ready = true;
                 break;
             }
