@@ -21,6 +21,16 @@ static int minimum_log_priority;
 static struct stat null_identity;
 static int have_null;
 static void report(const char *format,...);
+/* Java crash-buffer writes can bypass the logger installed during init. */
+int __android_log_buf_write(int buffer,int priority,const char *tag,const char *message) {
+ int (*real)(int,int,const char*,const char*)=dlsym(RTLD_NEXT,"__android_log_buf_write");
+ if(priority>=ANDROID_LOG_ERROR && tag && !strcmp(tag,"AndroidRuntime")) {
+  int saved=errno;
+  report("SCARLET_INIT_JAVA_FATAL pid=%d tid=%d buffer=%d %s\n",getpid(),gettid(),buffer,message?message:"");
+  errno=saved;
+ }
+ return real(buffer,priority,tag,message);
+}
 int security_check_context(const char *context) {
  int (*real)(const char*)=dlsym(RTLD_NEXT,"security_check_context");
  if(!real){errno=ENOSYS;return -1;}
