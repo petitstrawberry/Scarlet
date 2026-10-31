@@ -201,6 +201,9 @@ def configure(output, stock, profile, contexts, metadata):
         f'{name} = "{value}"\n' for name, value in sorted(profile["bootconfig"].items())))
     (output / "scarlet/boot/init.rc").write_text("# Explicit Scarlet device boot configuration\n" + "".join(
         "import " + path + "\n" for path in profile["init_imports"] + imports(profile)))
+    if metadata.get("user_unlock_inputs"):
+        from user_unlock_inputs import apply_service
+        apply_service(output)
     # /data_mirror is a ramdisk directory on a real device; the generic
     # Android init configuration mounts a private tmpfs over it before making
     # the per-user mirror bind mounts used for app data.
@@ -667,6 +670,28 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
     print("Merged verified platform service contexts and system-server JARs; startup has not been tested")
 
 
+def merge_user_unlock(inputs,runtime,stock,build):
+    from user_unlock_inputs import install
+    metadata=verify_boot_inputs(inputs,runtime,stock)
+    install(inputs,metadata,build)
+    metadata["files"]={str(path.relative_to(inputs)):sha256(path) for path in sorted(inputs.rglob("*")) if path.is_file() and path.name!=MANIFEST}
+    metadata["directories"]=[str(path.relative_to(inputs)) for path in sorted(inputs.rglob("*")) if path.is_dir()]
+    (inputs/MANIFEST).write_text(json.dumps(metadata,indent=2)+"\n")
+    verify_boot_inputs(inputs,runtime,stock)
+    print("Merged verified Android user-0 unlock helper; unlock behavior has not been tested")
+
+
+def merge_vold_subdirs(inputs,runtime,stock,build):
+    from vold_inputs import install
+    metadata=verify_boot_inputs(inputs,runtime,stock)
+    install(inputs,metadata,build)
+    metadata["files"]={str(path.relative_to(inputs)):sha256(path) for path in sorted(inputs.rglob("*")) if path.is_file() and path.name!=MANIFEST}
+    metadata["directories"]=[str(path.relative_to(inputs)) for path in sorted(inputs.rglob("*")) if path.is_dir()]
+    (inputs/MANIFEST).write_text(json.dumps(metadata,indent=2)+"\n")
+    verify_boot_inputs(inputs,runtime,stock)
+    print("Merged verified vold user-storage helper; vold execution has not been tested")
+
+
 def parse_stock_environment(text):
     exports={}
     for line in text.splitlines():
@@ -742,6 +767,8 @@ def main():
     for flag in ["runtime-root", "stock-inputs", "profile", "output"]:
         parser.add_argument("--" + flag, type=Path, required=True)
     parser.add_argument("--framework-inputs",type=Path,help="verified stock framework and app_process64 for init boot")
+    parser.add_argument("--user-unlock-build",type=Path,help="verified Android user-0 unlock DEX build")
+    parser.add_argument("--vold-subdirs-build",type=Path,help="verified vold user-storage helper build")
     parser.add_argument("--platform-image",type=Path,help="pinned SDK archive for stock service contexts and server JARs")
     parser.add_argument("--angle-image",type=Path,help="pinned SDK archive supplying its ANGLE libraries")
     for name in ["hal","adapters","client","vulkan"]:parser.add_argument("--graphics-"+name,type=Path,help="verified CPU graphics "+name+" build")
@@ -759,6 +786,10 @@ def main():
         prepare(args.sdk_image, args.runtime_root, args.stock_inputs, args.profile, args.output)
     if args.framework_inputs:
         merge_framework(args.output,args.runtime_root,args.stock_inputs,args.framework_inputs)
+    if args.user_unlock_build:
+        merge_user_unlock(args.output,args.runtime_root,args.stock_inputs,args.user_unlock_build)
+    if args.vold_subdirs_build:
+        merge_vold_subdirs(args.output,args.runtime_root,args.stock_inputs,args.vold_subdirs_build)
     if args.platform_image:
         merge_platform(args.output,args.runtime_root,args.stock_inputs,args.platform_image,graphics if any(graphics.values()) else None)
     if args.angle_image:

@@ -32,6 +32,7 @@
   ],
   "boot_properties": {
     "ro.apex.updatable": "false",
+    "ro.crypto.state": "unencrypted",
     "ro.zygote": "zygote64",
     "ro.hardware": "scarlet",
     "dalvik.vm.usejit": "false",
@@ -70,7 +71,9 @@
     "u:r:lmkd:s0": 20,
     "u:r:netd:s0": 21,
     "u:r:audioserver:s0": 22,
-    "u:r:hal_audio_default:s0": 23
+    "u:r:hal_audio_default:s0": 23,
+    "u:r:vold_prepare_subdirs:s0": 24,
+    "u:r:user_unlock:s0": 25
   },
   "transitions": [
     [
@@ -140,6 +143,7 @@
       "u:object_r:vendor_security_patch_level_prop:s0",
       "u:object_r:vndk_prop:s0",
       "u:object_r:vold_config_prop:s0",
+    "u:object_r:vold_status_prop:s0",
       "u:object_r:zram_control_prop:s0",
       "u:object_r:persistent_properties_ready_prop:s0",
       "u:object_r:usb_control_prop:s0",
@@ -187,6 +191,9 @@
       "u:object_r:bootanim_system_prop:s0",
       "u:object_r:retaildemo_prop:s0"
     ],
+    "u:r:user_unlock:s0": [
+      "u:object_r:exported3_system_prop:s0"
+    ],
     "u:r:hwservicemanager:s0": [
       "u:object_r:hwservicemanager_prop:s0"
     ],
@@ -213,6 +220,7 @@
     "/system/bin/boringssl_self_test64": "u:object_r:boringssl_self_test_exec:s0",
     "/system/apex/com.android.conscrypt/bin/boringssl_self_test64": "u:object_r:boringssl_self_test_exec:s0",
     "/system/bin/app_process64": "u:object_r:zygote_exec:s0",
+    "/system/bin/vdc": "u:object_r:vdc_exec:s0",
     "/system/bin/hw/android.system.suspend@1.0-service": "u:object_r:system_suspend_exec:s0",
     "/system/bin/hwservicemanager": "u:object_r:hwservicemanager_exec:s0",
     "/vendor/bin/hw/android.hardware.graphics.allocator@2.0-service.scarlet": "u:object_r:hal_graphics_allocator_default_exec:s0",
@@ -222,6 +230,8 @@
     "/system/bin/odsign": "u:object_r:odsign_exec:s0",
     "/vendor/bin/hw/android.hardware.health@2.1-service": "u:object_r:hal_health_default_exec:s0",
     "/system/bin/vold": "u:object_r:vold_exec:s0",
+    "/system/bin/vold_prepare_subdirs": "u:object_r:vold_prepare_subdirs_exec:s0",
+    "/system/bin/scarlet-user-unlock": "u:object_r:user_unlock_exec:s0",
     "/system/bin/lmkd": "u:object_r:lmkd_exec:s0",
     "/system/bin/netd": "u:object_r:netd_exec:s0",
     "/system/bin/audioserver": "u:object_r:audioserver_exec:s0",
@@ -312,6 +322,30 @@
       "u:object_r:vold_exec:s0",
       "u:r:vold:s0",
       0
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:vdc_exec:s0",
+      "u:r:system_server:s0",
+      1000
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:vdc_exec:s0",
+      "u:r:system_server:s0",
+      0
+    ],
+    [
+      "u:r:vold:s0",
+      "u:object_r:vold_prepare_subdirs_exec:s0",
+      "u:r:vold_prepare_subdirs:s0",
+      0
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:user_unlock_exec:s0",
+      "u:r:user_unlock:s0",
+      1000
     ],
     [
       "u:r:init:s0",
@@ -790,6 +824,26 @@
     [
       "u:r:system_server:s0",
       "u:object_r:activity_service:s0",
+      3
+    ],
+    [
+      "u:r:user_unlock:s0",
+      "u:object_r:activity_service:s0",
+      3
+    ],
+    [
+      "u:r:user_unlock:s0",
+      "u:object_r:mount_service:s0",
+      3
+    ],
+    [
+      "u:r:user_unlock:s0",
+      "u:object_r:package_service:s0",
+      3
+    ],
+    [
+      "u:r:user_unlock:s0",
+      "u:object_r:user_service:s0",
       3
     ],
     [
@@ -2680,6 +2734,7 @@
     "odsign",
     "health",
     "vold",
+    "lmkd",
     "netd",
     "audioserver",
     "audio_hal"
