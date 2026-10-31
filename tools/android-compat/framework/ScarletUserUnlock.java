@@ -1,5 +1,6 @@
 import android.os.IBinder;
 import android.content.Intent;
+import android.content.ComponentName;
 import android.app.ActivityManager.RunningAppProcessInfo;
 
 import java.io.FileDescriptor;
@@ -25,6 +26,7 @@ public final class ScarletUserUnlock {
         final Class<?> userManagerStub = Class.forName("android.os.IUserManager$Stub");
         final Method userAsInterface = userManagerStub.getMethod("asInterface", IBinder.class);
         final Class<?> systemProperties = Class.forName("android.os.SystemProperties");
+        final Method getProperty = systemProperties.getMethod("get", String.class);
 
         Object storageManager = null;
         Method isUserKeyUnlocked = null;
@@ -35,10 +37,14 @@ public final class ScarletUserUnlock {
         Method isFrameworkUserUnlocked = null;
         final Intent homeIntent = new Intent(Intent.ACTION_MAIN);
         homeIntent.addCategory(Intent.CATEGORY_HOME);
-        final Intent sdksetupIntent = new Intent(homeIntent);
-        sdksetupIntent.setPackage("com.android.sdksetup");
+        final Intent launcherIntent = new Intent(homeIntent);
+        launcherIntent.setComponent(new ComponentName("com.android.launcher3",
+                "com.android.launcher3.uioverrides.QuickstepLauncher"));
         boolean ceAvailable = false;
         boolean frameworkUnlocked = false;
+        boolean bootCompleted = false;
+        int bootReadyAttempt = -1;
+        int launcherStarts = 0;
         boolean requestedUserStart = false;
         for (int attempt = 0; attempt < 360; ++attempt) {
             IBinder binder = (IBinder) getService.invoke(null, "activity");
@@ -128,6 +134,14 @@ public final class ScarletUserUnlock {
                 }
             }
             frameworkUnlocked = false;
+            try {
+                bootCompleted = "1".equals(getProperty.invoke(null, "sys.boot_completed"));
+            } catch (Exception ignored) {
+                bootCompleted = false;
+            }
+            if (bootCompleted && bootReadyAttempt < 0) {
+                bootReadyAttempt = attempt;
+            }
             if (userManager != null) {
                 try {
                     frameworkUnlocked = Boolean.TRUE.equals(
@@ -145,30 +159,35 @@ public final class ScarletUserUnlock {
                             packageManager, homeIntent, null, 0L, 0);
                     Object autoResolved = resolveIntent.invoke(
                             packageManager, homeIntent, null, 1049600L, 0);
-                    Object sdksetupResolved = resolveIntent.invoke(
-                            packageManager, sdksetupIntent, null, 0L, 0);
+                    Object launcherResolved = resolveIntent.invoke(
+                            packageManager, launcherIntent, null, 0L, 0);
                     if (attempt % 20 == 0) {
                         out.println("SCARLET_USER_HOME_QUERY attempt=" + attempt
                                 + " all=" + resolved + " auto=" + autoResolved
-                                + " sdksetup=" + sdksetupResolved
+                                + " launcher=" + launcherResolved
                                 + " package=" + getPackageInfo.invoke(
-                                        packageManager, "com.android.sdksetup", 0L, 0)
-                                + " frameworkUnlocked=" + frameworkUnlocked);
+                                        packageManager, "com.android.launcher3", 0L, 0)
+                                + " frameworkUnlocked=" + frameworkUnlocked
+                                + " bootCompleted=" + bootCompleted);
                     }
-                    if (frameworkUnlocked && resolved != null && binder != null) {
-                        out.println("SCARLET_USER_HOME_RESOLVED attempt=" + attempt
-                                + " auto=" + autoResolved + " result=" + resolved);
+                    if (frameworkUnlocked && bootReadyAttempt >= 0 && launcherResolved != null &&
+                            binder != null && attempt >= bootReadyAttempt + 20 &&
+                            attempt < bootReadyAttempt + 80 && attempt % 20 == 0) {
+                        out.println("SCARLET_LAUNCHER_RESOLVED attempt=" + attempt
+                                + " result=" + launcherResolved);
                         Method startHome = manager.getClass().getMethod(
                                 "startActivityAsUserWithFeature", Class.forName("android.app.IApplicationThread"),
                                 String.class, String.class, Intent.class, String.class, IBinder.class,
                                 String.class, int.class, int.class,
                                 Class.forName("android.app.ProfilerInfo"), android.os.Bundle.class,
                                 int.class);
-                        homeIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        launcherIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                         Object started = startHome.invoke(manager, null, "android", null,
-                                homeIntent, null, null, null, 0, 0, null, null, 0);
-                        out.println("SCARLET_USER_HOME_START result=" + started);
-                        return;
+                                launcherIntent, null, null, null, 0, 0, null, null, 0);
+                        ++launcherStarts;
+                        out.println("SCARLET_LAUNCHER_START attempt=" + attempt
+                                + " count=" + launcherStarts + " result=" + started);
+                        if (launcherStarts >= 3) return;
                     }
                 } catch (Exception error) {
                     if (attempt % 20 == 0) {
