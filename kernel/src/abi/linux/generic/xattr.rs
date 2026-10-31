@@ -81,6 +81,13 @@ fn node(
     Ok(entry.node())
 }
 
+fn posix_acl_name(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"system.posix_acl_access" | b"system.posix_acl_default"
+    )
+}
+
 fn supported_name(node: &dyn VfsNode, name: &[u8], write: bool) -> Result<(), usize> {
     if name.starts_with(b"user.") && name.len() > 5 {
         if !matches!(
@@ -90,10 +97,24 @@ fn supported_name(node: &dyn VfsNode, name: &[u8], write: bool) -> Result<(), us
             return Err(if write { errno::EPERM } else { errno::ENODATA });
         }
         Ok(())
-    } else if (name.starts_with(b"trusted.") && name.len() > 8) || name == b"security.selinux" {
+    } else if (name.starts_with(b"trusted.") && name.len() > 8)
+        || name == b"security.selinux"
+        || posix_acl_name(name)
+    {
         Ok(())
     } else {
         Err(errno::EOPNOTSUPP)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test_case]
+    fn recognizes_only_the_native_posix_acl_attributes() {
+        assert!(super::posix_acl_name(b"system.posix_acl_access"));
+        assert!(super::posix_acl_name(b"system.posix_acl_default"));
+        assert!(!super::posix_acl_name(b"system.posix_acl_other"));
+        assert!(!super::posix_acl_name(b"system.admin"));
     }
 }
 
