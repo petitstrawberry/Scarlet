@@ -25,6 +25,7 @@ pub mod signal;
 mod signalfd;
 mod inotify;
 mod process_memory;
+mod bpf;
 pub mod socket;
 pub mod time;
 pub mod utimens;
@@ -730,6 +731,7 @@ syscall_table! {
     Mincore = 232 => mm::sys_mincore,
     Madvise = 233 => mm::sys_madvise,
     ProcessVmReadv = 270 => process_memory::sys_readv,
+    Bpf = 280 => bpf::sys_bpf,
     Mlock2 = 284 => mm::sys_mlock2,
     Accept4 = 242 => socket::sys_accept4,
     Getrandom = 278 => fs::sys_getrandom,
