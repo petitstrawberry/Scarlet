@@ -14,5 +14,7 @@ pub const DEAFAULT_MAX_TASK_TEXT_SIZE: usize = usize::MAX; // Unlimited
 // Per-task kernel stack configuration
 pub const TASK_KERNEL_STACK_SIZE: usize = 0x10000;
 
-// Number of slots available for concurrent tasks
-pub const KERNEL_KSTACK_SLOTS: usize = 256;
+// Number of slots available for concurrent tasks. This must cover the task
+// pool's admission limits (895 user tasks + 128 kernel tasks), with one spare
+// slot for the initial kernel context.
+pub const KERNEL_KSTACK_SLOTS: usize = 1024;

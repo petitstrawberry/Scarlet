@@ -1424,7 +1424,7 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
             child_linux_tid
         }
-        Err(_) => usize::MAX,
+        Err(error) => errno::to_result(clone_failure_errno(error)),
     };
 
     // Clear pending flag in parent after clone completes
@@ -1432,6 +1432,23 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     abi.thread_state_mut().pending_clone_share_sighand = false;
     abi.thread_state_mut().clear_child_tid_ptr = previous_clear_child_tid;
     ret
+}
+
+/// Translate Scarlet task-creation failures into the Linux clone errno that
+/// libc can report without relying on a stale value from an earlier syscall.
+fn clone_failure_errno(error: &str) -> usize {
+    if error.starts_with("Failed to allocate pages")
+        || error.contains("kernel stack memory")
+        || error.contains("kernel stack mmap")
+        || error.contains("map kernel stack")
+        || error.contains("Kernel root page table")
+    {
+        errno::ENOMEM
+    } else {
+        // Task-pool exhaustion, kernel-stack slot exhaustion and transient
+        // resource-admission contention are all retryable by pthread users.
+        errno::EAGAIN
+    }
 }
 
 /// Wait for process to change state (wait4 system call).
@@ -1972,6 +1989,17 @@ pub fn sys_memfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize 
 
 #[cfg(test)]
 mod tests {
+    #[test_case]
+    fn clone_failures_report_stable_resource_errors() {
+        assert_eq!(clone_failure_errno("Failed to allocate pages"), errno::ENOMEM);
+        assert_eq!(clone_failure_errno("kernel stack mmap failed"), errno::ENOMEM);
+        assert_eq!(
+            clone_failure_errno("No free kernel stack window slots"),
+            errno::EAGAIN
+        );
+        assert_eq!(clone_failure_errno("task pool is full"), errno::EAGAIN);
+    }
+
     #[test_case]
     fn resource_queries_use_entry_reservation_and_validate_output() {
         use crate::environment::{PAGE_SIZE, USER_STACK_END};
