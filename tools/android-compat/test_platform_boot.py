@@ -8,6 +8,14 @@ spec.loader.exec_module(prepare)
 
 
 class PlatformBootTest(unittest.TestCase):
+    def test_memfd_profile_overrides_the_late_stock_reset_and_rejects_drift(self):
+        stock = "on post-fs-data\n    mkdir /data\n    setprop sys.use_memfd false\n    chmod 0700 /data\n"
+        selected = prepare.select_memfd_in_init(stock)
+        self.assertEqual(selected, stock.replace("sys.use_memfd false", "sys.use_memfd true"))
+        for invalid in [stock + "    setprop sys.use_memfd false\n", selected, stock.replace("sys.use_memfd", "other")]:
+            with self.subTest(source=invalid), self.assertRaises(ValueError):
+                prepare.select_memfd_in_init(invalid)
+
     def test_retaining_stock_storage_environment_preserves_managed_classpath(self):
         stock = "on early-init\n    export ANDROID_DATA /data\n    export ASEC_MOUNTPOINT /mnt/asec\n"
         managed = "on early-init\n    export ANDROID_DATA /data\n    export BOOTCLASSPATH /system/framework/framework.jar\n"

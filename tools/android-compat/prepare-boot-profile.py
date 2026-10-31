@@ -161,6 +161,29 @@ def configure(output, stock, profile, contexts, metadata):
         metadata.pop("vintf_inputs")
     (output / "scarlet/boot").mkdir(parents=True, exist_ok=True)
     (output / POLICY).write_text(shield_policy(profile, [(stock / name).read_text() for name in contexts]))
+    # Android 13's post-fs-data action resets this property to false, after
+    # build.prop is loaded. Select the native memfd path in that action too.
+    # Retain the verified original so reconfiguration can reverse the choice.
+    memory_source = "system/etc/init/hw/init.rc"
+    memory_original = "scarlet/boot/init-hw.rc.original"
+    previous_memory = metadata.get("shared_memory_init")
+    memory_init = output / memory_source
+    if previous_memory:
+        original = (output / memory_original).read_bytes()
+        if sha256(output / memory_original) != previous_memory["source_sha256"]:
+            raise ValueError("changed stock shared-memory init source")
+        memory_init.write_bytes(original)
+    if profile["boot_properties"].get("sys.use_memfd") == "true":
+        original = memory_init.read_text()
+        configured = select_memfd_in_init(original)
+        (output / memory_original).write_text(original)
+        memory_init.write_text(configured)
+        metadata["shared_memory_init"] = {"source": memory_source,
+            "source_sha256": sha256(output / memory_original),
+            "configured_sha256": sha256(memory_init), "mechanism": "memfd-future-write"}
+    else:
+        metadata.pop("shared_memory_init", None)
+        (output / memory_original).unlink(missing_ok=True)
     # Stock init loads product properties last. Keep the original file separately
     # and record the deliberate machine-profile replacement and exact old hash.
     product = "product/etc/build.prop"
@@ -191,6 +214,13 @@ def configure(output, stock, profile, contexts, metadata):
             "Path": profile["resource_groups"]["cgroup2_root"], "Mode": "0755", "UID": "root", "GID": "root", "Controllers": [],
         }}, indent=2) + "\n")
         (output / "sys/fs/cgroup").mkdir(parents=True, exist_ok=True)
+
+
+def select_memfd_in_init(text):
+    command = "    setprop sys.use_memfd false\n"
+    if text.count(command) != 1:
+        raise ValueError("unexpected stock shared-memory init action")
+    return text.replace(command, "    setprop sys.use_memfd true\n")
 
 
 def reconfigure(inputs, runtime, stock, profile_file, output):
@@ -369,7 +399,8 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
         available={Path(name).name for name in metadata["files"]}
         runtime_files=json.loads((runtime/"art-runtime.json").read_text())["files"]
         available|={Path(name).name for name in runtime_files}
-        native_needed={};queue=["system/lib64/libcompiler_rt.so","system/lib64/libandroid_servers.so"]+service_roots;seen=set()
+        native_needed={};queue=["system/lib64/libcompiler_rt.so","system/lib64/libandroid_servers.so",
+                               "system/lib64/libalarm_jni.so"]+service_roots;seen=set()
         while queue:
             name=queue.pop()
             if name in seen:continue
