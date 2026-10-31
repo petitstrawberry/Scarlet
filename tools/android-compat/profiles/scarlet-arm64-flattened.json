@@ -2424,6 +2424,21 @@
       "u:r:system_server:s0",
       "u:object_r:default_android_service:s0",
       3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:fwk_sensor_hwservice:s0",
+      3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:fwk_scheduler_hwservice:s0",
+      3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:hidl_base_hwservice:s0",
+      3
     ]
   ],
   "socket_labels": [
@@ -2449,7 +2464,9 @@
       "android.frameworks.stats.IStats/default",
       "android.system.suspend.ISystemSuspend/default",
       "android.hidl.manager@1.2::IServiceManager/default",
-      "android.hidl.token@1.0::ITokenManager/default"
+      "android.hidl.token@1.0::ITokenManager/default",
+      "android.frameworks.sensorservice@1.0::ISensorManager/default",
+      "android.frameworks.schedulerservice@1.0::ISchedulingPolicyService/default"
     ],
     "device": [
       "android.hardware.graphics.allocator@2.0::IAllocator/default",
