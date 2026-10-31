@@ -48,6 +48,12 @@ cargo scarlet app build --source dist/player.app \
 ```
 
 The first implementation supports one native AArch64 or RISC-V64 target per app.
+A runtime entry point may also be a shell script beginning with `#!/bin/sh`;
+this uses Scarlet’s system shell through the kernel shebang path, preserves
+arguments and environment, and does not invoke a command-string interpreter.
+Other interpreters and shebang arguments are unsupported. Native binaries retain
+their existing format checks.
+
 It checks ELFOSABI_SCARLET, architecture, file types, executable permissions and
 `/bin/scarlet-ld` for any interpreter. It rejects escaping source/resource paths,
 absolute runtime paths, `..`, symlinks, multiple descriptors, mixed-ABI ELF files,

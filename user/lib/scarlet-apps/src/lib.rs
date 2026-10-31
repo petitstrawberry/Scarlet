@@ -468,6 +468,19 @@ fn app_path(root: &str, relative: &str) -> Result<String, &'static str> {
     Ok(format!("{root}/{relative}"))
 }
 
+// Match the system shell supported by the kernel's shebang execution path.
+fn shell_script_header(header: &[u8]) -> bool {
+    let end = header.iter().position(|&byte| byte == b'\n');
+    if end.is_none() && header.len() == 256 {
+        return false;
+    }
+    let line = &header[..end.unwrap_or(header.len())];
+    core::str::from_utf8(line)
+        .ok()
+        .and_then(|line| line.strip_prefix("#!"))
+        .is_some_and(|interpreter| interpreter.trim() == "/bin/sh")
+}
+
 fn parse_app(root: &str, filename: &str, content: String) -> Result<DesktopEntry, &'static str> {
     let mut in_entry = false;
     let mut version = None;
@@ -541,21 +554,33 @@ fn parse_app(root: &str, filename: &str, content: String) -> Result<DesktopEntry
     words[0] = app_path(root, &words[0])?;
     let mut executable =
         scarlet_fs::open_read_nofollow(&words[0]).map_err(|_| "Missing app executable")?;
-    let mut header = [0u8; 20];
-    executable
-        .read_exact(&mut header)
-        .map_err(|_| "Invalid native app executable")?;
-    let machine = u16::from_le_bytes([header[18], header[19]]);
-    if &header[..8] != b"\x7fELF\x02\x01\x01\x53"
-        || !matches!(u16::from_le_bytes([header[16], header[17]]), 2 | 3)
-        || machine
-            != if target == "aarch64-unknown-scarlet" {
-                183
-            } else {
-                243
-            }
-    {
-        return Err("Incompatible native app executable");
+    let mut header = [0u8; 256];
+    let mut length = 0;
+    while length < header.len() {
+        let count = executable
+            .read(&mut header[length..])
+            .map_err(|_| "Invalid native app executable")?;
+        if count == 0 {
+            break;
+        }
+        length += count;
+    }
+    if !shell_script_header(&header[..length]) {
+        if length < 20 {
+            return Err("Invalid native app executable");
+        }
+        let machine = u16::from_le_bytes([header[18], header[19]]);
+        if &header[..8] != b"\x7fELF\x02\x01\x01\x53"
+            || !matches!(u16::from_le_bytes([header[16], header[17]]), 2 | 3)
+            || machine
+                != if target == "aarch64-unknown-scarlet" {
+                    183
+                } else {
+                    243
+                }
+        {
+            return Err("Incompatible native app executable");
+        }
     }
     // Keep the argv contract used by launch, MIME and shell activation.
     entry.exec = words
@@ -965,6 +990,30 @@ mod app_tests {
         assert_eq!(fallback.len(), 1);
         assert_eq!(fallback[0].name, "Legacy");
     }
+    #[test]
+    fn shell_script_app_preserves_argv_and_rejects_other_interpreters() {
+        let f = Fixture::new();
+        f.write_app("bin/player");
+        let path = f.0.join("applications/renamed.app/bin/player");
+        for script in ["#!/bin/sh\necho ok\n", "#! /bin/sh\r\necho ok\n"] {
+            fs::write(&path, script).unwrap();
+            let entry = f.scan().unwrap().remove(0);
+            assert_eq!(
+                expand_exec(&entry.exec, &["/tmp/a file".into()]).unwrap()[1],
+                "/tmp/a file"
+            );
+        }
+        for script in [
+            "echo no shebang\n",
+            "#!/bin/sh -c\necho no\n",
+            "#!/usr/bin/env sh\necho no\n",
+            "#!/tmp/sh\necho no\n",
+        ] {
+            fs::write(&path, script).unwrap();
+            assert!(f.scan().is_err());
+        }
+    }
+
     #[test]
     fn invalid_and_ambiguous_apps_reject_the_next_catalog() {
         let f = Fixture::new();

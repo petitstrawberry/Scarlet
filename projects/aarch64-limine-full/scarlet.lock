@@ -9,7 +9,7 @@ hash = "sha256:474ac327371d01e3308bd1a6a1c0acc593f302fc7d3c56a340d23773597ebab8"
 layers = []
 
 [sections.initramfs]
-hash = "sha256:a0cbe207edf45154ee256668e643b5a13fe0bfef256e1ca22e91835f479e4ce8"
+hash = "sha256:3501bdd46be6c577230339e0ab36b61777f89329f06cf8d14b8d8be311aa3493"
 
 [[sections.initramfs.layers]]
 kind = "script"
@@ -160,7 +160,7 @@ kind = "cargo"
 package = "scarlet-std-bin"
 bin = "stemd"
 to = "/bin/stemd"
-hash = "sha256:eb967e600ec690c21e418de9379344a7b50b28ea1201f2edace90698620f83b8"
+hash = "sha256:23aa62e6f2f515f27c918f3239e2168df96b105998d8c40bfa4dc63d6c049a88"
 
 [sections.initramfs.layers.source]
 type = "path"
