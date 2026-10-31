@@ -49,6 +49,12 @@ impl Arena {
         slots[index] = true;
         Ok(self.base.load(Ordering::Relaxed) + index * SLOT)
     }
+    pub(super) fn has_free_slot(&self) -> bool {
+        self.live.load(Ordering::Acquire) && {
+            let slots = self.slots.lock();
+            slots.iter().any(|used| !used)
+        }
+    }
     fn index(&self, address: usize) -> Result<usize, usize> {
         let offset = address
             .checked_sub(self.base.load(Ordering::Relaxed))
@@ -180,8 +186,10 @@ mod tests {
         assert_eq!(arena.free(usize::MAX), Err(errno::EINVAL));
         let address = arena.reserve().unwrap();
         assert_eq!(arena.reserve(), Err(errno::ENOSPC));
+        assert!(!arena.has_free_slot());
         arena.store(address, b"secret").unwrap();
         arena.free(address).unwrap();
+        assert!(arena.has_free_slot());
         assert_eq!(arena.free(address), Err(errno::EINVAL));
         assert_eq!(arena.reserve().unwrap(), address);
         // SAFETY: the arena retains this initialized, contiguous backing.

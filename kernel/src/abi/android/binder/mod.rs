@@ -334,6 +334,10 @@ impl BinderFile {
             BC_FREE_BUFFER => {
                 let arena = self.state.lock().arena.clone().ok_or(errno::EINVAL)?;
                 self.release_buffer(&arena, u64_at(data, 0))?;
+                // A process can have more outstanding synchronous Binder calls
+                // than receive slots. Releasing one buffer must wake loopers
+                // waiting to deliver the next request or reply.
+                self.endpoint.waker().wake_all();
             }
             BC_INCREFS | BC_ACQUIRE | BC_RELEASE | BC_DECREFS | BC_INCREFS_DONE
             | BC_ACQUIRE_DONE => {
@@ -519,8 +523,14 @@ impl BinderFile {
         if let Some(completed) = thread.completed.front() {
             return completed.ready();
         }
+        let has_delivery =
+            thread.outgoing().is_some_and(RpcCall::ready) || thread.can_receive(&self.endpoint);
         !objects.pending_local_acquisitions()
-            && (thread.outgoing().is_some_and(RpcCall::ready) || thread.can_receive(&self.endpoint))
+            && has_delivery
+            && state
+                .arena
+                .as_ref()
+                .is_none_or(|arena| arena.has_free_slot())
     }
     fn waiter(&self, tid: usize) -> Arc<Waker> {
         // Incoming calls, object-reference work and outgoing completions all
@@ -661,7 +671,11 @@ impl BinderFile {
             return Err(errno::ENOSPC);
         }
         let arena = state.arena.clone().ok_or(errno::EINVAL)?;
-        let address = arena.reserve()?;
+        let address = match arena.reserve() {
+            Ok(address) => address,
+            Err(errno::ENOSPC) => return Ok(0),
+            Err(error) => return Err(error),
+        };
         let mut incoming = None;
         let message = if replying {
             match state.threads.get_mut(&tid).unwrap().stack.pop().unwrap() {
