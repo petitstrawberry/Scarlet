@@ -103,16 +103,16 @@ subdir = "bundles/openttd"
 
 [[layers]]
 kind = "archive"
-url = "https://github.com/petitstrawberry/scarlet-bundle-lwjgl/releases/download/v0.2.6/lwjgl-3.4.3-aarch64-v0.2.6.tar.gz"
-sha256 = "sha256:8f3b401aa61f878e27e3e1476d289188e1ee832dde87a26bfc63496f215160d3"
+url = "https://github.com/petitstrawberry/scarlet-bundle-lwjgl/releases/download/v0.2.10/lwjgl-3.4.3-aarch64-v0.2.10.tar.gz"
+sha256 = "sha256:63fbba4dfd5bb4502ca52bca503755ba549d91219cf877f5f4a8e286f5bf34db"
 format = "tar-gz"
 strip_components = 1
 to = "/"
 
 [[layers]]
 kind = "archive"
-url = "https://github.com/petitstrawberry/scarlet-bundle-openjdk/releases/download/v0.1.14/openjdk-25-aarch64-v0.1.14.tar.gz"
-sha256 = "sha256:fb4cdc850baf25f48f9e03ba89a32ff568602d35daa2f9e6535225b4daf75c8e"
+url = "https://github.com/petitstrawberry/scarlet-bundle-openjdk/releases/download/v0.1.23/openjdk-25-aarch64-v0.1.23.tar.gz"
+sha256 = "sha256:121163b04de0b2caba9414e9a662fb022a9fe6fc7a4fab82d1a23d28accefe4d"
 format = "tar-gz"
 strip_components = 1
 to = "/"

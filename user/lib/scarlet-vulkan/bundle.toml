@@ -24,7 +24,7 @@ subdir = "native"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/sgfx", rev = "12df11ee00f4af173f191079b9365548b1c60301" }
+source = { git = "https://github.com/petitstrawberry/sgfx", rev = "cb34b7562820802dd42b707d8db8f8e2c610a6e9" }
 package = "vulkan-sgfx"
 lib = "vulkan_sgfx"
 default-features = false
