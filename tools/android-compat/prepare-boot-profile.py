@@ -143,10 +143,10 @@ def prepare(archive, runtime, stock, profile_file, output):
 
 
 def configure(output, stock, profile, contexts, metadata):
-    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,ODSIGN_MANAGED_RC,HEALTH_MANAGED_RC,VOLD_MANAGED_RC,imports
+    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,ODSIGN_MANAGED_RC,HEALTH_MANAGED_RC,VOLD_MANAGED_RC,LMKD_MANAGED_RC,imports
     for name,record in list(metadata.get("host_service_inputs",{}).items()):
         if name not in profile.get("host_services",[]):
-            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC,"odsign":ODSIGN_MANAGED_RC, "health":HEALTH_MANAGED_RC,"vold":VOLD_MANAGED_RC}[name]
+            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC,"odsign":ODSIGN_MANAGED_RC, "health":HEALTH_MANAGED_RC,"vold":VOLD_MANAGED_RC,"lmkd":LMKD_MANAGED_RC}[name]
             path=output/relative
             expected=record["files"][relative] if name=="graphics_cpu" else record["managed_rc_sha256"]
             if sha256(path)!=expected:raise ValueError("changed manager host service output")
@@ -205,6 +205,17 @@ def configure(output, stock, profile, contexts, metadata):
     # user-0 data roots that stock vold would otherwise create after key setup.
     for name in ["storage", "apex", "linkerconfig", "data", "data_mirror", "data/user_de/0", "data/user/0", "sys/devices", "sys/class/power_supply", "sys/fs/selinux", "system_ext/apex", "product/apex", "vendor/apex"]:
         (output / name).mkdir(parents=True, exist_ok=True)
+    if "lmkd" in profile.get("host_services", []):
+        # The pinned lmkd accepts the kernel-lowmemory-killer interface when it
+        # cannot observe PSI or vmpressure. Scarlet currently has neither monitor;
+        # expose the writable target file so the service remains available to AMS.
+        parameter = output / "sys/module/lowmemorykiller/parameters/minfree"
+        parameter.parent.mkdir(parents=True, exist_ok=True)
+        parameter.write_text("18432,23040,27648,32256,55296,80640\n")
+        parameter.chmod(0o666)
+        event = output / "proc/lowmemorykiller"
+        event.parent.mkdir(parents=True, exist_ok=True)
+        event.write_text("")
     if "resource_groups" in profile:
         (output / "etc").mkdir(exist_ok=True)
         cpusets = []
@@ -229,8 +240,8 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
     if any(profile[key] != metadata["profile"][key] for key in ("apex_modules", "init_imports")):
         raise ValueError("changed payload or imports require preparation from the pinned image")
     added_services=set(profile.get("host_services",[]))-set(metadata["profile"].get("host_services",[]))
-    if added_services and (added_services!={"vold"} or not service_image):
-        raise ValueError("adding a stock provider requires --service-image; supported addition: vold")
+    if added_services and (not added_services.issubset({"vold","lmkd"}) or not service_image):
+        raise ValueError("adding a stock provider requires --service-image; supported additions: vold, lmkd")
     refreshed_vintf = None
     if profile.get("vintf") != metadata["profile"].get("vintf"):
         if not vintf_image:
@@ -260,8 +271,8 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
     shutil.copytree(inputs, output)
     metadata.update(profile=profile, profile_source_sha256=sha256(profile_file), reused_payload_manifest_sha256=original_manifest)
     configure(output,stock,profile,metadata["property_context_files"],metadata)
-    if added_services:
-        add_vold_provider(output,metadata,service_image)
+    for provider in sorted(added_services):
+        add_stock_provider(output,metadata,service_image,provider)
     if refreshed_vintf:
         outputs, proof = refreshed_vintf
         for name, data in outputs.items():
@@ -276,16 +287,22 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
     print("Prepared new manager configuration using verified factory payloads; boot has not been tested")
 
 
-def add_vold_provider(output, metadata, archive):
-    from host_services import VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold
-    with tempfile.TemporaryDirectory(prefix="scarlet-vold-provider-") as directory:
+def add_stock_provider(output, metadata, archive, name):
+    service_name=name
+    from host_services import (VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold,
+                               LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd)
+    binary_path,stock_rc,managed_rc,builder={
+        "vold":(VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold),
+        "lmkd":(LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd),
+    }[name]
+    with tempfile.TemporaryDirectory(prefix="scarlet-stock-provider-") as directory:
         temporary=Path(directory);partitions=extract_partitions(archive,temporary)
         system=Ext4(temporary/"system.ext4")
-        rc=temporary/"vold.rc";binary=temporary/"vold"
-        system.dump("/"+VOLD_STOCK_RC,rc);system.dump("/"+VOLD_BINARY,binary)
-        managed,proof=build_vold(rc.read_bytes(),binary.read_bytes())
+        rc=temporary/"service.rc";binary=temporary/"binary"
+        system.dump("/"+stock_rc,rc);system.dump("/"+binary_path,binary)
+        managed,proof=builder(rc.read_bytes(),binary.read_bytes())
         available={Path(name).name for name in metadata["files"]}
-        queue=[VOLD_BINARY];needed={};digests={}
+        queue=[binary_path];needed={};digests={}
         while queue:
             name=queue.pop()
             if name in needed:continue
@@ -302,9 +319,9 @@ def add_vold_provider(output, metadata, archive):
                     queue.append(relative)
                 elif dependency not in available:
                     raise ValueError("missing stock service dependency: "+dependency)
-        path=output/VOLD_MANAGED_RC;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(managed)
+        path=output/managed_rc;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(managed)
         proof.update(native_needed=needed,files=digests,partitions=partitions)
-        metadata.setdefault("host_service_inputs",{})["vold"]=proof
+        metadata.setdefault("host_service_inputs",{})[service_name]=proof
 
 
 def merge_framework(inputs,runtime,stock,framework):
@@ -408,10 +425,14 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
             metadata.setdefault("host_service_inputs",{})["health"]=proof
             device_providers.update(providers);service_roots.extend([HEALTH_BINARY,HEALTH_IMPL])
         from host_services import (INSTALLER_BINARY,INSTALLER_STOCK_RC,INSTALLER_MANAGED_RC,build_installer,
-                                   ODSIGN_BINARY,ODSIGN_STOCK_RC,ODSIGN_MANAGED_RC,build_odsign)
+                                   ODSIGN_BINARY,ODSIGN_STOCK_RC,ODSIGN_MANAGED_RC,build_odsign,
+                                   VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold,
+                                   LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd)
         for name,program,stock_rc,managed_rc,builder in [
             ("installd",INSTALLER_BINARY,INSTALLER_STOCK_RC,INSTALLER_MANAGED_RC,build_installer),
-            ("odsign",ODSIGN_BINARY,ODSIGN_STOCK_RC,ODSIGN_MANAGED_RC,build_odsign)]:
+            ("odsign",ODSIGN_BINARY,ODSIGN_STOCK_RC,ODSIGN_MANAGED_RC,build_odsign),
+            ("vold",VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold),
+            ("lmkd",LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd)]:
             if name not in metadata["profile"].get("host_services",[]):continue
             rc=temporary/(name+"-stock.rc");binary=temporary/(name+"-stock.bin")
             system.dump("/"+stock_rc,rc);system.dump("/"+program,binary)
@@ -519,6 +540,16 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
             if name in metadata["files"] or name in metadata["symlinks"] and metadata["symlinks"][name]!=target:
                 raise ValueError("conflicting platform font alias")
             metadata["symlinks"][name]=target
+        for service,root in (("vold",VOLD_BINARY),("lmkd",LMKD_BINARY)):
+            if service not in metadata["profile"].get("host_services",[]):continue
+            reachable=set();pending=[root]
+            while pending:
+                name=pending.pop()
+                if name in reachable:continue
+                reachable.add(name);pending.extend(native_needed[name])
+            proof=metadata["host_service_inputs"][service]
+            proof["files"]={name:sha256(copied[name]) for name in reachable}
+            proof["native_needed"]={name:native_needed[name] for name in reachable}
         metadata["platform_boot"]={"sdk_sha256":SDK_SHA256,"partitions":partitions,"files":{name:sha256(source) for name,source in copied.items()},"classpaths":classpaths,"native_needed":native_needed}
     environment=inputs/"init.environ.rc"
     text="\n".join(line for line in environment.read_text().splitlines() if not line.startswith(("    export SYSTEMSERVERCLASSPATH ","    export STANDALONE_SYSTEMSERVER_JARS ")))+"\n"

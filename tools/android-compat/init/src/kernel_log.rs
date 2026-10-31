@@ -62,6 +62,7 @@ fn collect_fault_snapshots() {
         };
         for line in std::string::String::from_utf8_lossy(&bytes[..count]).lines() {
             if line.contains("[fault]") || line.contains("caused") || line.contains("ANDROID_VM_TRACE")
+                || line.contains("SCARLET_EXEC_FAILURE")
                 || line.contains("[user-bt]") || line.contains("fatal signal=")
                 || line.contains("sigreturn failed") || line.contains("signal frame failed")
                 || line.starts_with("ESR_EL1:") || line.starts_with("FAR_EL1:")

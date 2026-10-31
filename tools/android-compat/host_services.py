@@ -31,6 +31,26 @@ VOLD="vold"
 VOLD_BINARY="system/bin/vold"
 VOLD_STOCK_RC="system/etc/init/vold.rc"
 VOLD_MANAGED_RC="scarlet/boot/services/vold.rc"
+LMKD="lmkd"
+LMKD_BINARY="system/bin/lmkd"
+LMKD_STOCK_RC="system/etc/init/lmkd.rc"
+LMKD_MANAGED_RC="scarlet/boot/services/lmkd.rc"
+LMKD_TEXT=("service lmkd /system/bin/lmkd\n    class core\n    user lmkd\n"
+           "    group lmkd system readproc\n"
+           "    capabilities DAC_OVERRIDE KILL IPC_LOCK SYS_NICE SYS_RESOURCE\n"
+           "    critical\n    socket lmkd seqpacket+passcred 0660 system system\n"
+           "    task_profiles ServiceCapacityLow\n\n"
+           "on property:lmkd.reinit=1\n    exec_background /system/bin/lmkd --reinit\n\n"
+           "# reinitialize lmkd after device finished booting if experiments set any flags during boot\n"
+           "on property:sys.boot_completed=1 && property:lmkd.reinit=0\n    setprop lmkd.reinit 1\n\n"
+           "# properties most likely to be used in experiments\n"
+           "# setting persist.device_config.* property either triggers immediate lmkd re-initialization\n"
+           "# if the device finished booting or sets lmkd.reinit=0 to re-initialize lmkd after boot completes\n")
+for _name in ("debug","kill_heaviest_task","kill_timeout_ms","swap_free_low_percentage",
+              "psi_partial_stall_ms","psi_complete_stall_ms","thrashing_limit",
+              "thrashing_limit_decay","thrashing_limit_critical","swap_util_max","filecache_min_kb"):
+    LMKD_TEXT += "on property:persist.device_config.lmkd_native." + _name + "=*\n    setprop lmkd.reinit ${sys.boot_completed:-0}\n\n"
+LMKD_TEXT = LMKD_TEXT.rstrip("\n") + "\n"
 VOLD_TEXT=("service vold /system/bin/vold \\\n"
            "        --blkid_context=u:r:blkid:s0 --blkid_untrusted_context=u:r:blkid_untrusted:s0 \\\n"
            "        --fsck_context=u:r:fsck:s0 --fsck_untrusted_context=u:r:fsck_untrusted:s0\n"
@@ -46,8 +66,8 @@ STOCK_TEXT = ("service system_suspend /" + BINARY + "\n"
 
 def validate_selection(profile):
     names = profile.get("host_services", [])
-    if (not isinstance(names,list) or len(names)>7 or
-            any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER,ODSIGN,HEALTH,VOLD) for name in names) or len(set(names))!=len(names)):
+    if (not isinstance(names,list) or len(names)>8 or
+            any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER,ODSIGN,HEALTH,VOLD,LMKD) for name in names) or len(set(names))!=len(names)):
         raise ValueError("unsupported stock host service selection")
     selected = CONTRACT in profile.get("vintf", {}).get("framework", [])
     if selected != (SUSPEND in names):
@@ -66,7 +86,7 @@ def validate_selection(profile):
 
 
 def imports(profile):
-    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC,GRAPHICS:GRAPHICS_RC,INSTALLER:INSTALLER_MANAGED_RC,ODSIGN:ODSIGN_MANAGED_RC,HEALTH:HEALTH_MANAGED_RC,VOLD:VOLD_MANAGED_RC}[name] for name in validate_selection(profile)]
+    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC,GRAPHICS:GRAPHICS_RC,INSTALLER:INSTALLER_MANAGED_RC,ODSIGN:ODSIGN_MANAGED_RC,HEALTH:HEALTH_MANAGED_RC,VOLD:VOLD_MANAGED_RC,LMKD:LMKD_MANAGED_RC}[name] for name in validate_selection(profile)]
 
 
 def build_vold(stock_rc,binary):
@@ -76,6 +96,19 @@ def build_vold(stock_rc,binary):
     return managed,{"source_rc":VOLD_STOCK_RC,"source_rc_sha256":digest(stock_rc),
                     "binary_sha256":digest(binary),"managed_rc_sha256":digest(managed),
                     "outer_volume_policy":True,"host_reboot":False,"omitted_ioprio":"be 2"}
+
+
+def build_lmkd(stock_rc,binary):
+    if not stock_rc.startswith(b"service lmkd /system/bin/lmkd\n") or b"    socket lmkd seqpacket+passcred 0660 system system\n" not in stock_rc:
+        raise ValueError("changed stock lmkd service configuration")
+    omitted="    capabilities DAC_OVERRIDE KILL IPC_LOCK SYS_NICE SYS_RESOURCE\n".encode()
+    if stock_rc.count(omitted)!=1:raise ValueError("changed lmkd capability declaration")
+    managed=stock_rc.replace(omitted,b"")
+    digest=lambda data:hashlib.sha256(data).hexdigest()
+    return managed,{"source_rc":LMKD_STOCK_RC,"source_rc_sha256":digest(stock_rc),
+                    "binary_sha256":digest(binary),"managed_rc_sha256":digest(managed),
+                    "omitted_capabilities":["DAC_OVERRIDE","KILL","IPC_LOCK","SYS_NICE","SYS_RESOURCE"],
+                    "socket":{"name":"lmkd","type":"seqpacket","credentials":True,"mode":"0660"}}
 
 
 def build_health(stock_rc,binary,manifest):
@@ -183,6 +216,17 @@ def validate_staged(metadata):
                 set(record.get("native_needed",{}))!=set(files) or
                 any(metadata["files"].get(path)!=digest for path,digest in files.items())):
             raise ValueError("changed vold dependency inputs")
+    if LMKD in names:
+        record=proof[LMKD]
+        if (metadata["files"].get(LMKD_BINARY)!=record.get("binary_sha256") or
+                metadata["files"].get(LMKD_MANAGED_RC)!=record.get("managed_rc_sha256") or
+                record.get("omitted_capabilities") != ["DAC_OVERRIDE","KILL","IPC_LOCK","SYS_NICE","SYS_RESOURCE"]):
+            raise ValueError("changed lmkd provider inputs")
+        files=record.get("files",{})
+        if (files.get(LMKD_BINARY)!=record.get("binary_sha256") or
+                set(record.get("native_needed",{}))!=set(files) or
+                any(metadata["files"].get(path)!=digest for path,digest in files.items())):
+            raise ValueError("changed lmkd dependency inputs")
     for name,binary,rc in [(INSTALLER,INSTALLER_BINARY,INSTALLER_MANAGED_RC),(ODSIGN,ODSIGN_BINARY,ODSIGN_MANAGED_RC)]:
         if name not in names:continue
         record=proof[name]

@@ -28,6 +28,20 @@ class HostServicesTest(unittest.TestCase):
             with self.assertRaises(ValueError):validate_staged(bad)
         with self.assertRaises(ValueError):build_vold(VOLD_TEXT.replace("class core","class main").encode(),b"stock")
 
+    def test_lmkd_preserves_stock_socket_and_native_dependencies(self):
+        from host_services import LMKD,LMKD_BINARY,LMKD_MANAGED_RC,LMKD_TEXT,build_lmkd
+        managed,proof=build_lmkd(LMKD_TEXT.encode(),b"stock lmkd")
+        self.assertIn(b"socket lmkd seqpacket+passcred 0660 system system",managed)
+        self.assertNotIn(b"capabilities",managed)
+        proof.update(files={LMKD_BINARY:proof["binary_sha256"],"system/lib64/libpsi.so":"dependency"},
+                     native_needed={LMKD_BINARY:["libpsi.so"],"system/lib64/libpsi.so":[]})
+        metadata={"profile":{"host_services":[LMKD]},"host_service_inputs":{LMKD:proof},
+                  "files":{**proof["files"],LMKD_MANAGED_RC:proof["managed_rc_sha256"]}}
+        validate_staged(metadata)
+        bad=deepcopy(metadata);bad["files"]["system/lib64/libpsi.so"]="changed"
+        with self.assertRaises(ValueError):validate_staged(bad)
+        with self.assertRaises(ValueError):build_lmkd(b"service lmkd /system/bin/lmkd\n",b"stock")
+
     def test_health_requires_real_provider_and_preserves_host_power_boundary(self):
         manifest=b'<manifest type="device"><hal format="hidl"><name>android.hardware.health</name><transport>hwbinder</transport><fqname>@2.1::IHealth/default</fqname></hal></manifest>'
         managed,proof,providers=build_health(HEALTH_TEXT.encode(),b"stock health",manifest)
