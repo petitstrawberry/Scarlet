@@ -200,6 +200,19 @@ fn main() -> i32 {
     match check(&stdio) {
         Ok(()) => {
             if diagnostic {
+                // Observe the outer power-management interface after the
+                // Android scope and native compositor have been reaped.
+                let mut wake = [0u8;32];
+                // SAFETY: This fixed-size output stays writable for the synchronous query.
+                let result = unsafe { std::syscall::syscall2(std::syscall::Syscall::WakeDeadlineQuery,
+                    wake.as_mut_ptr() as usize, wake.len()) };
+                if result == 0 {
+                    println!("SCARLET_ANDROID_WAKE_STATE version={} flags={} pending={} revision={}",
+                        u32::from_ne_bytes(wake[..4].try_into().unwrap()),
+                        u32::from_ne_bytes(wake[4..8].try_into().unwrap()),
+                        u32::from_ne_bytes(wake[24..28].try_into().unwrap()),
+                        u64::from_ne_bytes(wake[8..16].try_into().unwrap()));
+                }
                 println!("SCARLET_ANDROID_PROGRAM_DONE");
             } else if art {
                 println!("SCARLET_ANDROID_ART_OK");
