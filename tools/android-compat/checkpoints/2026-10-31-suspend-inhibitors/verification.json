@@ -1,0 +1,40 @@
+{
+  "revision": "4da1ddf766de4af9e18f51c83f2cf031a2a6a6d9",
+  "kernel_sha256": "33c23f01050dac63f77fafa516bd498135cda8835c6e1b120ceeb98b359dca6f",
+  "acceleration": "hvf",
+  "passed": {
+    "kernel_tests": 1785,
+    "stock_bionic_wake_timers": true,
+    "native_power_query_after_bionic": {
+      "flags": 4,
+      "pending": 0
+    },
+    "native_power_query_after_stock_scope": {
+      "flags": 4,
+      "pending": 0
+    }
+  },
+  "confirmed": [
+    "Native lifetime-owned suspend inhibitors appear in the outer power-management snapshot",
+    "Linux CAP_BLOCK_SUSPEND maps to Shield INHIBIT_SUSPEND; unprivileged EPOLLWAKEUP registration does not acquire authority",
+    "EPOLLWAKEUP registrations conservatively inhibit suspend until deletion, modification or final epoll ownership release",
+    "Epoll ownership survives dup, fork and non-CLOEXEC exec, while CLOEXEC and final close release ownership",
+    "Stock EventHub passes its capability check and then attempts an inotify watch on /dev",
+    "Native query after Android scope teardown reports no pending deadline, wake event or suspend inhibitor"
+  ],
+  "current_stop": {
+    "service": "InputManagerService / EventHub",
+    "message": "Could not register INotify for /dev: Function not implemented",
+    "approved_next": "Native VFS change queues with bounded watches/events, create/delete/rename notifications, target lifetime and overflow handling; Linux inotify translation"
+  },
+  "limits": [
+    "No physical suspend/resume or hardware wake source is claimed",
+    "Suspend inhibition is conservative for the entire EPOLLWAKEUP registration",
+    "One production run exited SystemServer with 139 before Java startup. The diagnostic retry and final production run reached the explicit inotify failure; no root cause for the intermittent 139 has been established",
+    "No home screen or Android app frame is confirmed"
+  ],
+  "boot_profile": {
+    "checkpoint": "../2026-10-31-native-memfd/profile-v74.json",
+    "sha256": "c2150d44a4f7ef7834076aa2564995440a02bf89601c6d05c97fe6afb44cfb92"
+  }
+}
