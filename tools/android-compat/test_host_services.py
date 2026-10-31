@@ -10,6 +10,24 @@ from vintf_inputs import HEALTH_CONTRACT
 
 
 class HostServicesTest(unittest.TestCase):
+    def test_vold_keeps_storage_provider_but_delegates_host_reboot(self):
+        from host_services import VOLD,VOLD_BINARY,VOLD_MANAGED_RC,VOLD_TEXT,build_vold
+        managed,proof=build_vold(VOLD_TEXT.encode(),b"stock vold")
+        self.assertNotIn(b"reboot_on_failure",managed)
+        self.assertNotIn(b"ioprio",managed)
+        self.assertIn(b"task_profiles ProcessCapacityHigh",managed)
+        proof.update(files={VOLD_BINARY:proof["binary_sha256"],"system/lib64/libvold.so":"dependency"},
+                     native_needed={VOLD_BINARY:["libvold.so"],"system/lib64/libvold.so":[]})
+        metadata={"profile":{"host_services":[VOLD]},"host_service_inputs":{VOLD:proof},
+                  "files":{**proof["files"],VOLD_MANAGED_RC:proof["managed_rc_sha256"]}}
+        validate_staged(metadata)
+        for changed in ["dependency","reboot"]:
+            bad=deepcopy(metadata)
+            if changed=="dependency":bad["files"]["system/lib64/libvold.so"]="changed"
+            else:bad["host_service_inputs"][VOLD]["host_reboot"]=True
+            with self.assertRaises(ValueError):validate_staged(bad)
+        with self.assertRaises(ValueError):build_vold(VOLD_TEXT.replace("class core","class main").encode(),b"stock")
+
     def test_health_requires_real_provider_and_preserves_host_power_boundary(self):
         manifest=b'<manifest type="device"><hal format="hidl"><name>android.hardware.health</name><transport>hwbinder</transport><fqname>@2.1::IHealth/default</fqname></hal></manifest>'
         managed,proof,providers=build_health(HEALTH_TEXT.encode(),b"stock health",manifest)

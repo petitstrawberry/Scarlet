@@ -143,10 +143,10 @@ def prepare(archive, runtime, stock, profile_file, output):
 
 
 def configure(output, stock, profile, contexts, metadata):
-    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,ODSIGN_MANAGED_RC,HEALTH_MANAGED_RC,imports
+    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,ODSIGN_MANAGED_RC,HEALTH_MANAGED_RC,VOLD_MANAGED_RC,imports
     for name,record in list(metadata.get("host_service_inputs",{}).items()):
         if name not in profile.get("host_services",[]):
-            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC,"odsign":ODSIGN_MANAGED_RC, "health":HEALTH_MANAGED_RC}[name]
+            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC,"odsign":ODSIGN_MANAGED_RC, "health":HEALTH_MANAGED_RC,"vold":VOLD_MANAGED_RC}[name]
             path=output/relative
             expected=record["files"][relative] if name=="graphics_cpu" else record["managed_rc_sha256"]
             if sha256(path)!=expected:raise ValueError("changed manager host service output")
@@ -223,11 +223,14 @@ def select_memfd_in_init(text):
     return text.replace(command, "    setprop sys.use_memfd true\n")
 
 
-def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None):
+def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, service_image=None):
     metadata = verify_boot_inputs(inputs, runtime, stock)
     profile = validate_profile(json.loads(profile_file.read_text()))
     if any(profile[key] != metadata["profile"][key] for key in ("apex_modules", "init_imports")):
         raise ValueError("changed payload or imports require preparation from the pinned image")
+    added_services=set(profile.get("host_services",[]))-set(metadata["profile"].get("host_services",[]))
+    if added_services and (added_services!={"vold"} or not service_image):
+        raise ValueError("adding a stock provider requires --service-image; supported addition: vold")
     refreshed_vintf = None
     if profile.get("vintf") != metadata["profile"].get("vintf"):
         if not vintf_image:
@@ -257,6 +260,8 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None):
     shutil.copytree(inputs, output)
     metadata.update(profile=profile, profile_source_sha256=sha256(profile_file), reused_payload_manifest_sha256=original_manifest)
     configure(output,stock,profile,metadata["property_context_files"],metadata)
+    if added_services:
+        add_vold_provider(output,metadata,service_image)
     if refreshed_vintf:
         outputs, proof = refreshed_vintf
         for name, data in outputs.items():
@@ -269,6 +274,37 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None):
     (output / MANIFEST).write_text(json.dumps(metadata,indent=2)+"\n")
     verify_boot_inputs(output,runtime,stock)
     print("Prepared new manager configuration using verified factory payloads; boot has not been tested")
+
+
+def add_vold_provider(output, metadata, archive):
+    from host_services import VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold
+    with tempfile.TemporaryDirectory(prefix="scarlet-vold-provider-") as directory:
+        temporary=Path(directory);partitions=extract_partitions(archive,temporary)
+        system=Ext4(temporary/"system.ext4")
+        rc=temporary/"vold.rc";binary=temporary/"vold"
+        system.dump("/"+VOLD_STOCK_RC,rc);system.dump("/"+VOLD_BINARY,binary)
+        managed,proof=build_vold(rc.read_bytes(),binary.read_bytes())
+        available={Path(name).name for name in metadata["files"]}
+        queue=[VOLD_BINARY];needed={};digests={}
+        while queue:
+            name=queue.pop()
+            if name in needed:continue
+            if len(needed)>=1024:raise ValueError("stock service dependency bound")
+            source=temporary/"files"/name;system.dump("/"+name,source)
+            digest=sha256(source);destination=output/name
+            if name in metadata.get("symlinks",{}) or destination.exists() and sha256(destination)!=digest:
+                raise ValueError("conflicting stock service input: "+name)
+            destination.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,destination)
+            digests[name]=digest;needed[name]=elf_needed(source);available.add(Path(name).name)
+            for dependency in needed[name]:
+                relative="system/lib64/"+dependency
+                if "Type: regular" in system.command("stat "+quote_debugfs("/"+relative)):
+                    queue.append(relative)
+                elif dependency not in available:
+                    raise ValueError("missing stock service dependency: "+dependency)
+        path=output/VOLD_MANAGED_RC;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(managed)
+        proof.update(native_needed=needed,files=digests,partitions=partitions)
+        metadata.setdefault("host_service_inputs",{})["vold"]=proof
 
 
 def merge_framework(inputs,runtime,stock,framework):
@@ -565,6 +601,7 @@ def main():
     source.add_argument("--reuse-payloads", type=Path)
     parser.add_argument("--vintf-image", type=Path,
                         help="pinned SDK image for changing framework declarations while reusing providers")
+    parser.add_argument("--service-image",type=Path,help="pinned SDK image for adding the stock vold provider")
     for flag in ["runtime-root", "stock-inputs", "profile", "output"]:
         parser.add_argument("--" + flag, type=Path, required=True)
     parser.add_argument("--framework-inputs",type=Path,help="verified stock framework and app_process64 for init boot")
@@ -574,11 +611,13 @@ def main():
     args = parser.parse_args()
     if args.vintf_image and not args.reuse_payloads:
         parser.error("--vintf-image requires --reuse-payloads")
+    if args.service_image and not args.reuse_payloads:
+        parser.error("--service-image requires --reuse-payloads")
     graphics={name:getattr(args,"graphics_"+name) for name in ["hal","adapters","client"]}
     if (any(graphics.values()) or args.graphics_vulkan) and (not all(graphics.values()) or not args.platform_image):parser.error("graphics providers require all three builds and --platform-image")
     if args.graphics_vulkan:graphics["vulkan"]=args.graphics_vulkan
     if args.reuse_payloads:
-        reconfigure(args.reuse_payloads, args.runtime_root, args.stock_inputs, args.profile, args.output, args.vintf_image)
+        reconfigure(args.reuse_payloads, args.runtime_root, args.stock_inputs, args.profile, args.output, args.vintf_image, args.service_image)
     else:
         prepare(args.sdk_image, args.runtime_root, args.stock_inputs, args.profile, args.output)
     if args.framework_inputs:

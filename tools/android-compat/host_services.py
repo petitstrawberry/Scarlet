@@ -27,6 +27,15 @@ HEALTH_IMPL="vendor/lib64/hw/android.hardware.health@2.0-impl-2.1.so"
 HEALTH_STOCK_RC="vendor/etc/init/android.hardware.health@2.1-service.rc"
 HEALTH_MANAGED_RC="scarlet/boot/services/health.rc"
 HEALTH_MANIFEST="vendor/etc/vintf/manifest/android.hardware.health@2.1.xml"
+VOLD="vold"
+VOLD_BINARY="system/bin/vold"
+VOLD_STOCK_RC="system/etc/init/vold.rc"
+VOLD_MANAGED_RC="scarlet/boot/services/vold.rc"
+VOLD_TEXT=("service vold /system/bin/vold \\\n"
+           "        --blkid_context=u:r:blkid:s0 --blkid_untrusted_context=u:r:blkid_untrusted:s0 \\\n"
+           "        --fsck_context=u:r:fsck:s0 --fsck_untrusted_context=u:r:fsck_untrusted:s0\n"
+           "    class core\n    ioprio be 2\n    task_profiles ProcessCapacityHigh\n"
+           "    shutdown critical\n    group root reserved_disk\n    reboot_on_failure reboot,vold-failed\n")
 HEALTH_TEXT=("service health-hal-2-1 /"+HEALTH_BINARY+"\n"
              "    class hal charger\n    user system\n    group system\n"
              "    capabilities WAKE_ALARM BLOCK_SUSPEND\n    file /dev/kmsg w\n")
@@ -38,7 +47,7 @@ STOCK_TEXT = ("service system_suspend /" + BINARY + "\n"
 def validate_selection(profile):
     names = profile.get("host_services", [])
     if (not isinstance(names,list) or len(names)>7 or
-            any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER,ODSIGN,HEALTH) for name in names) or len(set(names))!=len(names)):
+            any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER,ODSIGN,HEALTH,VOLD) for name in names) or len(set(names))!=len(names)):
         raise ValueError("unsupported stock host service selection")
     selected = CONTRACT in profile.get("vintf", {}).get("framework", [])
     if selected != (SUSPEND in names):
@@ -57,7 +66,16 @@ def validate_selection(profile):
 
 
 def imports(profile):
-    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC,GRAPHICS:GRAPHICS_RC,INSTALLER:INSTALLER_MANAGED_RC,ODSIGN:ODSIGN_MANAGED_RC,HEALTH:HEALTH_MANAGED_RC}[name] for name in validate_selection(profile)]
+    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC,GRAPHICS:GRAPHICS_RC,INSTALLER:INSTALLER_MANAGED_RC,ODSIGN:ODSIGN_MANAGED_RC,HEALTH:HEALTH_MANAGED_RC,VOLD:VOLD_MANAGED_RC}[name] for name in validate_selection(profile)]
+
+
+def build_vold(stock_rc,binary):
+    if stock_rc.decode()!=VOLD_TEXT:raise ValueError("changed stock vold service configuration")
+    managed=stock_rc.replace(b"    ioprio be 2\n",b"").replace(b"    reboot_on_failure reboot,vold-failed\n",b"")
+    digest=lambda data:hashlib.sha256(data).hexdigest()
+    return managed,{"source_rc":VOLD_STOCK_RC,"source_rc_sha256":digest(stock_rc),
+                    "binary_sha256":digest(binary),"managed_rc_sha256":digest(managed),
+                    "outer_volume_policy":True,"host_reboot":False,"omitted_ioprio":"be 2"}
 
 
 def build_health(stock_rc,binary,manifest):
@@ -153,6 +171,18 @@ def validate_staged(metadata):
             raise ValueError("missing CPU graphics provider inputs")
         for path,digest in record["files"].items():
             if metadata["files"].get(path)!=digest:raise ValueError("changed CPU graphics provider inputs")
+    if VOLD in names:
+        record=proof[VOLD]
+        if (metadata["files"].get(VOLD_BINARY)!=record.get("binary_sha256") or
+                metadata["files"].get(VOLD_MANAGED_RC)!=record.get("managed_rc_sha256") or
+                record.get("outer_volume_policy") is not True or record.get("host_reboot") is not False or
+                record.get("omitted_ioprio")!="be 2"):
+            raise ValueError("changed vold provider or outer management boundary")
+        files=record.get("files",{})
+        if (files.get(VOLD_BINARY)!=record.get("binary_sha256") or
+                set(record.get("native_needed",{}))!=set(files) or
+                any(metadata["files"].get(path)!=digest for path,digest in files.items())):
+            raise ValueError("changed vold dependency inputs")
     for name,binary,rc in [(INSTALLER,INSTALLER_BINARY,INSTALLER_MANAGED_RC),(ODSIGN,ODSIGN_BINARY,ODSIGN_MANAGED_RC)]:
         if name not in names:continue
         record=proof[name]
