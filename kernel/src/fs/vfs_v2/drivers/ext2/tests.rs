@@ -325,6 +325,25 @@ fn test_ext2_node_creation() {
 }
 
 #[test_case]
+fn test_ext2_inode_xattrs_are_owned_and_atomic() {
+    use super::node::*;
+    use crate::fs::vfs_v2::{core::FileSystemOperations, xattr::{Error, SetMode}};
+
+    let fs=Ext2FileSystem::new(Arc::new(create_test_ext2_device())).unwrap();
+    let node=Ext2Node::new(12,FileType::RegularFile,100);
+    node.set_filesystem(Arc::downgrade(&(fs.clone() as Arc<dyn FileSystemOperations>)));
+    assert_eq!(node.get_xattr(b"user.serial"),Err(Error::Missing));
+    node.set_xattr(b"user.serial",b"42",SetMode::Create).unwrap();
+    assert_eq!(node.get_xattr(b"user.serial").unwrap(),b"42");
+    assert_eq!(node.set_xattr(b"user.serial",b"other",SetMode::Create),Err(Error::Exists));
+    node.set_xattr(b"user.serial",b"43",SetMode::Replace).unwrap();
+    assert_eq!(node.get_xattr(b"user.serial").unwrap(),b"43");
+    assert_eq!(node.list_xattrs().unwrap(),vec![b"user.serial".to_vec()]);
+    node.remove_xattr(b"user.serial").unwrap();
+    assert_eq!(node.remove_xattr(b"user.serial"),Err(Error::Missing));
+}
+
+#[test_case]
 fn test_ext2_file_object_operations() {
     use super::node::*;
     // use crate::fs::SeekFrom; // disabled because unused

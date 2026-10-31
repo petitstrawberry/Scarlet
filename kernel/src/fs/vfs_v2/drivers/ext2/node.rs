@@ -94,6 +94,58 @@ impl Ext2Node {
 }
 
 impl VfsNode for Ext2Node {
+    fn get_xattr(&self, name: &[u8]) -> Result<Vec<u8>, crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr;
+        xattr::validate_name(name)?;
+        let filesystem=self.filesystem().and_then(|weak|weak.upgrade()).ok_or(xattr::Error::Unsupported)?;
+        let fs=filesystem.as_any().downcast_ref::<Ext2FileSystem>().ok_or(xattr::Error::Unsupported)?;
+        fs.inode_xattrs.read().get(&self.inode_number).and_then(|attrs|attrs.get(name)).cloned().ok_or(xattr::Error::Missing)
+    }
+
+    fn set_xattr(&self,name:&[u8],value:&[u8],mode:crate::fs::vfs_v2::xattr::SetMode)->Result<(),crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr;
+        xattr::validate_name(name)?;
+        if value.len()>xattr::MAX_VALUE{return Err(xattr::Error::TooLarge);}
+        let filesystem=self.filesystem().and_then(|weak|weak.upgrade()).ok_or(xattr::Error::Unsupported)?;
+        let fs=filesystem.as_any().downcast_ref::<Ext2FileSystem>().ok_or(xattr::Error::Unsupported)?;
+        let mut all=fs.inode_xattrs.write();
+        if !all.contains_key(&self.inode_number) {
+            if matches!(mode,xattr::SetMode::Replace) {return Err(xattr::Error::Missing);}
+            all.insert(self.inode_number,BTreeMap::new());
+        }
+        let attrs=all.get_mut(&self.inode_number).unwrap();
+        let old=attrs.get(name);
+        match (mode,old.is_some()) {
+            (xattr::SetMode::Create,true)=>return Err(xattr::Error::Exists),
+            (xattr::SetMode::Replace,false)=>return Err(xattr::Error::Missing),
+            _=>(),
+        }
+        let old_size=old.map_or(0,|value|name.len()+value.len());
+        let new_size=name.len()+value.len();
+        let used:usize=attrs.iter().map(|(key,value)|key.len()+value.len()).sum();
+        if used-old_size+new_size>xattr::MAX_NODE_BYTES || (old.is_none() && attrs.len()==xattr::MAX_NODE_ATTRIBUTES) {
+            return Err(xattr::Error::NoSpace);
+        }
+        attrs.insert(name.to_vec(),value.to_vec());
+        Ok(())
+    }
+
+    fn list_xattrs(&self)->Result<Vec<Vec<u8>>,crate::fs::vfs_v2::xattr::Error> {
+        let filesystem=self.filesystem().and_then(|weak|weak.upgrade()).ok_or(crate::fs::vfs_v2::xattr::Error::Unsupported)?;
+        let fs=filesystem.as_any().downcast_ref::<Ext2FileSystem>().ok_or(crate::fs::vfs_v2::xattr::Error::Unsupported)?;
+        Ok(fs.inode_xattrs.read().get(&self.inode_number).map(|attrs|attrs.keys().cloned().collect()).unwrap_or_default())
+    }
+
+    fn remove_xattr(&self,name:&[u8])->Result<(),crate::fs::vfs_v2::xattr::Error> {
+        use crate::fs::vfs_v2::xattr;
+        xattr::validate_name(name)?;
+        let filesystem=self.filesystem().and_then(|weak|weak.upgrade()).ok_or(xattr::Error::Unsupported)?;
+        let fs=filesystem.as_any().downcast_ref::<Ext2FileSystem>().ok_or(xattr::Error::Unsupported)?;
+        let mut all=fs.inode_xattrs.write();
+        let attrs=all.get_mut(&self.inode_number).ok_or(xattr::Error::Missing)?;
+        attrs.remove(name).map(|_|()).ok_or(xattr::Error::Missing)
+    }
+
     fn owner_identity(&self)->Option<crate::shield::identity::ActiveIdentity> {
         let filesystem=self.filesystem()?.upgrade()?;let fs=filesystem.as_any().downcast_ref::<Ext2FileSystem>()?;
         (u32::from_le(fs.superblock.creator_os)==0).then(||fs.read_inode(self.inode_number).ok().map(|inode|inode.native_owner())).flatten()

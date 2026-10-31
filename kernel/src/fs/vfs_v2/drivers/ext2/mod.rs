@@ -308,6 +308,9 @@ pub struct Ext2FileSystem {
     /// LRU cached inodes
     inode_cache: IrqRwSpinLock<InodeLruCache>,
     inode_labels: IrqSpinLock<BTreeMap<u32, Arc<crate::shield::file::Labels>>>,
+    /// Generic opaque attributes retained for the lifetime of this filesystem.
+    /// Disk-backed ext2 xattr blocks remain a separate unsupported format.
+    inode_xattrs: IrqRwSpinLock<BTreeMap<u32, BTreeMap<Vec<u8>, Vec<u8>>>>,
     /// LRU cached blocks
     block_cache: IrqRwSpinLock<BlockLruCache>,
     /// Per-inode locks serialize directory mutations and regular-file writes,
@@ -638,6 +641,7 @@ impl Ext2FileSystem {
             next_file_id: IrqSpinLock::new(2), // Start from 2, root is 1
             inode_cache: IrqRwSpinLock::new(InodeLruCache::new(8192)),
             inode_labels: IrqSpinLock::new(BTreeMap::new()),
+            inode_xattrs: IrqRwSpinLock::new(BTreeMap::new()),
             block_cache: IrqRwSpinLock::new(BlockLruCache::new(8192)),
             inode_locks: IrqRwSpinLock::new(BTreeMap::new()),
             open_inodes: Arc::new(IrqSpinLock::new(BTreeMap::new())),
@@ -3026,6 +3030,7 @@ impl Ext2FileSystem {
 
             self.clear_inode_on_disk(inode_number)?;
             self.inode_labels.lock().remove(&inode_number);
+            self.inode_xattrs.write().remove(&inode_number);
 
             // Update superblock statistics
             self.update_superblock_free_counts(0, 1)?;
