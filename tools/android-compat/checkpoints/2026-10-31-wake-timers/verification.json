@@ -1,0 +1,51 @@
+{
+  "revision": "efd592be47afef5837de277f4d4cd03a54cb68f4",
+  "kernel_sha256": "c900c7297666f6e29b91eaac2249fdd81b077773cc04635502625e20b3e3f617",
+  "acceleration": "hvf",
+  "boot_profile": {
+    "checkpoint": "../2026-10-31-native-memfd/profile-v74.json",
+    "sha256": "c2150d44a4f7ef7834076aa2564995440a02bf89601c6d05c97fe6afb44cfb92"
+  },
+  "passed": {
+    "native_kernel_tests": 1782,
+    "stock_bionic_alarm_timerfds": true,
+    "bionic_process_exit": 0
+  },
+  "confirmed": [
+    "Owned, bounded native wake reservations expose earliest deadline, revision and unread wake events",
+    "Native management syscall and userspace wrapper query the wake registry under resource-management authority",
+    "Dropping the last timer handle releases its reservation; unread expirations keep a wake event pending",
+    "Native wall-clock observers rebase absolute timers or deliver a cancellation; stale callbacks are rejected",
+    "Linux CAP_WAKE_ALARM translates into Shield RESERVE_WAKE; create and rearm require it",
+    "Stock Bionic creates REALTIME_ALARM and BOOTTIME_ALARM timerfds, receives epoll events, reads expirations and creates a disarmed CANCEL_ON_SET monitor",
+    "A forked process after setuid cannot create or rearm wake timers",
+    "Timerfd records safely cross user page boundaries and reject unmapped tails",
+    "Stock SystemServer completes AlarmManagerService and reaches InputManagerService",
+    "ProcessScope teardown leaves no live members"
+  ],
+  "current_stop": {
+    "service": "InputManagerService / EventHub",
+    "message": "Input must be able to block suspend to properly process events",
+    "cause": "CAP_BLOCK_SUSPEND is not advertised because native suspend-inhibition and EPOLLWAKEUP enforcement are not implemented",
+    "approved_next": "Lifetime-owned native suspend-inhibition tokens coordinated with outer power management, including conservative inhibition throughout EPOLLWAKEUP registration until input wake sources are supported."
+  },
+  "limits": [
+    "The registry reports software-only scheduling. No hardware wake source or physical suspend/resume support is claimed",
+    "Wall-clock discontinuity handling is covered by native unit tests; physical RTC stepping during suspend is not tested",
+    "No Android application frame or home screen is confirmed"
+  ],
+  "probe_build": {
+    "source": "tools/android-compat/wake-timer-probe.c",
+    "source_sha256": "6ffb2a84d3b987881bbb9de3dbba65acbc3f1e78e4543e997c023c7786407581",
+    "binary_sha256": "d75ae6b3312acaabe06fdb3c7823dafea8940df1f09d13949f6ff399ea4ed9d7",
+    "compiler": "NDK 25.1.8937393 aarch64-linux-android33-clang",
+    "flags": [
+      "-O2",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-static"
+    ]
+  }
+}
