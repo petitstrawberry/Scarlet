@@ -991,7 +991,7 @@ mod tests {
         write(&server,base,&object).unwrap();
         assert_eq!(endpoint.ioctl(&server,&LinuxAbi::default(),&mut Trapframe::new(),SET_CONTEXT_EXT,base,false),0);
         endpoint.ensure_thread(server.get_id()).unwrap();endpoint.state.lock().threads.get_mut(&server.get_id()).unwrap().looper=true;
-        assert!(endpoint.mmap(&server,0,128*1024,1,2,0)<usize::MAX-4096);
+        assert!(endpoint.mmap(&server,0,256*1024,1,2,0)<usize::MAX-4096);
         (server,client,endpoint,policy,base+512)
     }
     fn context_message() -> RpcMessage {
@@ -1044,7 +1044,7 @@ mod tests {
         let abi=LinuxAbi::default();
         assert_eq!(manager.ioctl(&manager_task,&abi,&mut Trapframe::new(),SET_CONTEXT,0,false),0);
         b.ensure_thread(2).unwrap();
-        assert!(b.mmap(&receiver,0,128*1024,1,2,0)<usize::MAX-4096);
+        assert!(b.mmap(&receiver,0,256*1024,1,2,0)<usize::MAX-4096);
         let output=crate::environment::USER_STACK_END-crate::environment::PAGE_SIZE;
         receiver.allocate_stack_pages(output,1).unwrap();
         let outer=b.endpoint.send_scoped(objects::message_empty(),&a.endpoint,None).unwrap();
@@ -1153,7 +1153,7 @@ mod tests {
         server
             .command(&receiver, &abi, BC_ENTER_LOOPER, &[])
             .unwrap();
-        assert!(server.mmap(&receiver, 0, 128 * 1024, 1, 2, 0) < usize::MAX - 4096);
+        assert!(server.mmap(&receiver, 0, 256 * 1024, 1, 2, 0) < usize::MAX - 4096);
         let output = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
         receiver.allocate_stack_pages(output, 1).unwrap();
         // An oneway callback is allowed while this thread handles a sync call.
@@ -1232,7 +1232,7 @@ mod tests {
         let output = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
         for (file, task) in [(&client, &sender), (&server, &receiver)] {
             file.ensure_thread(task.get_id()).unwrap();
-            assert!(file.mmap(task, 0, 128 * 1024, 1, 2, 0) < usize::MAX - 4096);
+            assert!(file.mmap(task, 0, 256 * 1024, 1, 2, 0) < usize::MAX - 4096);
             task.allocate_stack_pages(output, 1).unwrap();
         }
         server

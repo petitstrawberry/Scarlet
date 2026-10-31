@@ -13,7 +13,7 @@ use alloc::{
 };
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-pub const MAX_MESSAGE_SIZE: usize = 64 * 1024;
+pub const MAX_MESSAGE_SIZE: usize = 256 * 1024;
 pub const MAX_MESSAGE_OBJECTS: usize = 64;
 const MAX_IN_FLIGHT: usize = 64;
 pub const MAX_CALL_DEPTH: usize = 32;

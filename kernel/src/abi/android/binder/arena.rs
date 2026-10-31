@@ -10,7 +10,7 @@ use crate::{
 };
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-pub(super) const SLOT: usize = 64 * 1024;
+pub(super) const SLOT: usize = 128 * 1024;
 pub(super) struct Arena {
     backing: SharedMemory,
     paddr: u64,
