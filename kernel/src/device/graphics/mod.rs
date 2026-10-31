@@ -133,6 +133,7 @@ pub struct GpuDisplayResource {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GpuPresentOptions {
     swapchain_buffer: bool,
+    producer_complete: bool,
 }
 
 impl GpuPresentOptions {
@@ -145,7 +146,19 @@ impl GpuPresentOptions {
     pub const fn swapchain_buffer() -> Self {
         Self {
             swapchain_buffer: true,
+            producer_complete: false,
         }
+    }
+
+    /// The producer has observed successful completion of every write to this image.
+    /// This permits presentation without draining unrelated GPU contexts.
+    pub const fn with_producer_complete(mut self) -> Self {
+        self.producer_complete = true;
+        self
+    }
+
+    pub const fn is_producer_complete(self) -> bool {
+        self.producer_complete
     }
 
     /// Return whether the producer supplied the swapchain lifetime guarantee.

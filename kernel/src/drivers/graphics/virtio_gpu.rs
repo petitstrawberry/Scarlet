@@ -1653,12 +1653,31 @@ enum PresentTarget {
     Gpu {
         resource: GpuDisplayResource,
         region: DisplayRegion,
+        producer_complete: bool,
     },
     Framebuffer {
         config: FramebufferConfig,
         physical_addr: u64,
         region: DisplayRegion,
     },
+}
+
+impl PresentTarget {
+    fn needs_idle_barrier(&self) -> bool {
+        !matches!(
+            self,
+            Self::Gpu {
+                producer_complete: true,
+                ..
+            }
+        )
+    }
+    fn request_count(&self) -> usize {
+        match self {
+            Self::Gpu { .. } => 2,
+            Self::Framebuffer { .. } => 3,
+        }
+    }
 }
 
 fn remove_presentations(
@@ -1755,7 +1774,9 @@ fn prepare_present_target(
     target: &PresentTarget,
 ) -> Result<Vec<Arc<ControlRequest>>, &'static str> {
     match target {
-        PresentTarget::Gpu { resource, region } => {
+        PresentTarget::Gpu {
+            resource, region, ..
+        } => {
             if resource.backend_cookie() != core.backend_cookie() {
                 return Err("GPU display resource belongs to a different VirtIO GPU device");
             }
@@ -1940,7 +1961,19 @@ impl VirtioGpuDevice {
                 let pending = {
                     let queues = core.virtqueues.lock();
                     queues.control.check()?;
-                    queues.control.pending_request()
+                    let target = core
+                        .presentations
+                        .iter()
+                        .find(|operation| operation.id == id)
+                        .and_then(|operation| operation.target.as_ref())
+                        .ok_or("VirtIO GPU presentation ownership was abandoned")?;
+                    if target.needs_idle_barrier()
+                        || !queues.control.can_enqueue_batch(target.request_count())
+                    {
+                        queues.control.pending_request()
+                    } else {
+                        None
+                    }
                 };
                 if let Some(pending) = pending {
                     let weak = Arc::downgrade(&pending);
@@ -1952,8 +1985,9 @@ impl VirtioGpuDevice {
                     operation.barrier = Some(pending);
                     Some(weak)
                 } else {
-                    // Idle validation and publication share the outer guard:
-                    // no new submission can slip between the barrier and batch.
+                    // Legacy callers require idle validation. Completed-image
+                    // callers need only batch capacity; unrelated contexts keep
+                    // running. The guard makes either admission check atomic.
                     let target = core
                         .presentations
                         .iter()
@@ -2377,6 +2411,7 @@ impl GpuBackendContext for VirtioGpuBackendContext {
             control: Arc::clone(&self.control),
             context_id: self.context_id,
             async_enabled: self.core.lock().async_enabled,
+            submit_pool: Arc::new(asynchronous::RequestPool::new()),
         }))
     }
 
@@ -2511,6 +2546,7 @@ struct VirtioGpuBackendQueue {
     control: Arc<VirtioGpuControl>,
     context_id: u32,
     async_enabled: bool,
+    submit_pool: Arc<asynchronous::RequestPool>,
 }
 
 impl GpuBackendQueue for VirtioGpuBackendQueue {
@@ -2542,6 +2578,16 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
     }
 
     fn enqueue(&self, submission: GpuSubmission) -> Result<(), GpuBackendEnqueueError> {
+        // Private DMA preparation can grow storage only before taking any
+        // device/transport lock. Steady-state requests reuse retired storage.
+        let mut prepared = match asynchronous::Prepared::new(
+            &self.submit_pool,
+            self.context_id,
+            submission.commands(),
+        ) {
+            Ok(prepared) => Some(prepared),
+            Err(error) => return Err(GpuBackendEnqueueError::Rejected(error, submission)),
+        };
         // A concurrent legacy control operation may wait for GPU execution.
         // Async admission reports pressure instead of joining that wait.
         let Some(mut guard) = self.core.try_lock() else {
@@ -2555,11 +2601,13 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
         if synchronous.blocked() {
             return Err(GpuBackendEnqueueError::Busy(submission));
         }
-        if core
-            .presentations
-            .iter()
-            .any(|operation| operation.awaiting_admission)
-        {
+        if core.presentations.iter().any(|operation| {
+            operation.awaiting_admission
+                && operation
+                    .target
+                    .as_ref()
+                    .is_none_or(PresentTarget::needs_idle_barrier)
+        }) {
             return Err(GpuBackendEnqueueError::Busy(submission));
         }
         if !self.async_enabled {
@@ -2584,6 +2632,7 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
                 self.context_id,
                 fence,
                 submission,
+                &mut prepared,
                 crate::timer::get_time_ns(),
             )?;
         }
@@ -2839,19 +2888,33 @@ impl GraphicsDevice for VirtioGpuDevice {
         resource: GpuDisplayResource,
         region: DisplayRegion,
     ) -> Result<(), &'static str> {
-        self.begin_present(PresentTarget::Gpu { resource, region }, None)?
-            .wait()
+        self.begin_present(
+            PresentTarget::Gpu {
+                resource,
+                region,
+                producer_complete: false,
+            },
+            None,
+        )?
+        .wait()
     }
 
     fn begin_gpu_resource_present(
         &self,
         resource: GpuDisplayResource,
         region: DisplayRegion,
-        _options: GpuPresentOptions,
+        options: GpuPresentOptions,
         owners: PresentationOwners,
     ) -> Result<Option<Box<dyn PresentationWait>>, &'static str> {
-        self.begin_present(PresentTarget::Gpu { resource, region }, Some(owners))
-            .map(Some)
+        self.begin_present(
+            PresentTarget::Gpu {
+                resource,
+                region,
+                producer_complete: options.is_producer_complete(),
+            },
+            Some(owners),
+        )
+        .map(Some)
     }
 
     fn init_graphics(&self) -> Result<(), &'static str> {

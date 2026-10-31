@@ -589,6 +589,7 @@ struct TransportState {
     subscribers: BTreeMap<u64, EventMailbox>,
     next_subscriber_id: u64,
     text_input_windows: BTreeMap<u32, u32>,
+    output_scale: Option<u32>,
     terminal_error: Option<Error>,
     window_event_wake: Option<WindowEventWake>,
 }
@@ -607,6 +608,7 @@ impl TransportState {
             subscribers: BTreeMap::new(),
             next_subscriber_id: 1,
             text_input_windows: BTreeMap::new(),
+            output_scale: None,
             terminal_error: None,
             window_event_wake: None,
         }
@@ -1072,6 +1074,9 @@ impl TransportState {
     }
 
     fn push_event(&mut self, event: Event) {
+        if let Event::OutputScaleChanged { scale_milli } = &event {
+            self.output_scale = Some((*scale_milli).max(1));
+        }
         let target_window = self.event_window_id(&event);
         let mut delivered = false;
         for mailbox in self.subscribers.values_mut() {
@@ -3345,19 +3350,28 @@ mod pointer_lock_tests {
 
     #[test]
     fn scene_releases_remain_available_to_the_resource_owner() {
-        let event = Event::SceneBufferReleased { buffer_id: 7, commit_serial: 11 };
-        assert!(!TransportState::event_matches(EventFilter::Window(27), None, &event));
-        assert!(!TransportState::event_matches(EventFilter::Sgfx(27), None, &event));
+        let event = Event::SceneBufferReleased {
+            buffer_id: 7,
+            commit_serial: 11,
+        };
+        assert!(!TransportState::event_matches(
+            EventFilter::Window(27),
+            None,
+            &event
+        ));
+        assert!(!TransportState::event_matches(
+            EventFilter::Sgfx(27),
+            None,
+            &event
+        ));
     }
 
     #[test]
     fn close_request_decodes_to_a_window_event_not_surface_destruction() {
         let payload = protocol::payload_window_close_requested(27);
-        let message = protocol::parse_server_message(
-            protocol::server_msg::WINDOW_CLOSE_REQUESTED,
-            &payload,
-        )
-        .unwrap();
+        let message =
+            protocol::parse_server_message(protocol::server_msg::WINDOW_CLOSE_REQUESTED, &payload)
+                .unwrap();
         let ServerMessage::WindowCloseRequested { window_id } = message else {
             panic!("expected a close request");
         };
@@ -3526,16 +3540,21 @@ impl Connection {
     /// An empty clipboard is distinct from a copied empty string. This bounded
     /// IPC operation may block; GUI clients should call it off the event loop.
     pub fn read_clipboard_text(&self, window_id: u32) -> Result<Option<String>, Error> {
-        use protocol::clipboard::{Request, OK, EMPTY, DENIED, BUSY};
+        use protocol::clipboard::{BUSY, DENIED, EMPTY, OK, Request};
         let response = self.clipboard_request(Request::Get { window_id })?;
         match response.message() {
             ServerMessage::ClipboardText(header) if header.status == OK => {
-                let text = core::str::from_utf8(&response.payload()[8..]).map_err(|_| Error::InvalidResponse)?;
+                let text = core::str::from_utf8(&response.payload()[8..])
+                    .map_err(|_| Error::InvalidResponse)?;
                 Ok(Some(String::from(text)))
             }
             ServerMessage::ClipboardText(header) if header.status == EMPTY => Ok(None),
-            ServerMessage::ClipboardText(header) if header.status == DENIED => Err(Error::ClipboardDenied),
-            ServerMessage::ClipboardText(header) if header.status == BUSY => Err(Error::ClipboardBusy),
+            ServerMessage::ClipboardText(header) if header.status == DENIED => {
+                Err(Error::ClipboardDenied)
+            }
+            ServerMessage::ClipboardText(header) if header.status == BUSY => {
+                Err(Error::ClipboardBusy)
+            }
             _ => Err(Error::InvalidResponse),
         }
     }
@@ -3543,18 +3562,29 @@ impl Connection {
     /// Replace session clipboard text only if this window is owned and focused.
     /// A rejected write leaves the previous clipboard unchanged.
     pub fn write_clipboard_text(&self, window_id: u32, text: &str) -> Result<(), Error> {
-        use protocol::clipboard::{Request, OK, DENIED, BUSY, MAX_TEXT_BYTES};
-        if text.len() > MAX_TEXT_BYTES { return Err(Error::ClipboardTooLarge); }
+        use protocol::clipboard::{BUSY, DENIED, MAX_TEXT_BYTES, OK, Request};
+        if text.len() > MAX_TEXT_BYTES {
+            return Err(Error::ClipboardTooLarge);
+        }
         let response = self.clipboard_request(Request::Set { window_id, text })?;
         match response.message() {
-            ServerMessage::ClipboardText(header) if header.status == OK && header.text_len == 0 => Ok(()),
-            ServerMessage::ClipboardText(header) if header.status == DENIED => Err(Error::ClipboardDenied),
-            ServerMessage::ClipboardText(header) if header.status == BUSY => Err(Error::ClipboardBusy),
+            ServerMessage::ClipboardText(header) if header.status == OK && header.text_len == 0 => {
+                Ok(())
+            }
+            ServerMessage::ClipboardText(header) if header.status == DENIED => {
+                Err(Error::ClipboardDenied)
+            }
+            ServerMessage::ClipboardText(header) if header.status == BUSY => {
+                Err(Error::ClipboardBusy)
+            }
             _ => Err(Error::InvalidResponse),
         }
     }
 
-    fn clipboard_request(&self, request: protocol::clipboard::Request<'_>) -> Result<Response, Error> {
+    fn clipboard_request(
+        &self,
+        request: protocol::clipboard::Request<'_>,
+    ) -> Result<Response, Error> {
         if self.get_capabilities()?.capabilities & protocol::capabilities::TEXT_CLIPBOARD == 0 {
             return Err(Error::ClipboardUnsupported);
         }
@@ -3831,11 +3861,23 @@ impl Connection {
 
     /// Get the output scale in milli-units.
     ///
-    /// This is a synchronous request: it blocks until the server responds with OUTPUT_SCALE.
+    /// The first call retrieves the initial value synchronously. Subsequent
+    /// calls use the value updated by OutputScaleChanged notifications after
+    /// dispatching available messages, without a request/response round trip.
     pub fn get_output_scale(&self) -> Result<u32, Error> {
+        self.dispatch()?;
+        if let Some(scale) = mutex_lock(&self.transport).output_scale {
+            return Ok(scale);
+        }
         let response = self.request(protocol::client_msg::GET_OUTPUT_SCALE, &[])?;
         match response.message() {
-            ServerMessage::OutputScale { scale_milli } => Ok(scale_milli.max(1)),
+            ServerMessage::OutputScale { scale_milli } => {
+                // A newer change event can arrive while waiting for this
+                // response. Do not overwrite a value already supplied by it.
+                Ok(*mutex_lock(&self.transport)
+                    .output_scale
+                    .get_or_insert(scale_milli.max(1)))
+            }
             _ => Err(Error::InvalidResponse),
         }
     }

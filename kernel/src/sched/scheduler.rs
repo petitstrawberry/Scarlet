@@ -2511,8 +2511,9 @@ pub fn handle_timer_reschedule(
     can_schedule: bool,
 ) -> bool {
     let requested = take_local_slice_reschedule(cpu_id);
+    let deferred = take_deferred_reschedule(cpu_id);
     let needs_idle_handoff = current_task_is_idle(cpu_id) && has_ready_tasks(cpu_id);
-    if !(requested || needs_idle_handoff) {
+    if !(requested || deferred || needs_idle_handoff) {
         return false;
     }
     if can_schedule && may_schedule_from_interrupt(cpu_id) {
@@ -2544,8 +2545,9 @@ pub fn consume_guest_timer_reschedule(cpu_id: usize) -> bool {
     }
 
     let requested = take_local_slice_reschedule(cpu_id);
+    let deferred = take_deferred_reschedule(cpu_id);
     let needs_idle_handoff = current_task_is_idle(cpu_id) && has_ready_tasks(cpu_id);
-    if requested || needs_idle_handoff {
+    if requested || deferred || needs_idle_handoff {
         defer_reschedule(cpu_id);
         true
     } else {
@@ -5483,7 +5485,7 @@ pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
             );
         }
         request_remote_reschedule(target_cpu);
-    } else if task.deadline_enabled() {
+    } else {
         defer_reschedule(target_cpu);
     }
 

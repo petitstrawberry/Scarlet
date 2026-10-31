@@ -162,9 +162,12 @@ pub struct DisplayPresentImage {
 pub const DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME: u32 = 1 << 0;
 /// The producer will not rewrite this image until another image is presented.
 pub const DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER: u32 = 1 << 1;
+/// All writes to this image have completed successfully before this request.
+pub const DISPLAY_PRESENT_IMAGE_FLAG_PRODUCER_COMPLETE: u32 = 1 << 2;
 /// All currently defined GPU image presentation flags.
-pub const DISPLAY_PRESENT_IMAGE_FLAGS_VALID: u32 =
-    DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME | DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER;
+pub const DISPLAY_PRESENT_IMAGE_FLAGS_VALID: u32 = DISPLAY_PRESENT_IMAGE_FLAG_FULL_FRAME
+    | DISPLAY_PRESENT_IMAGE_FLAG_SWAPCHAIN_BUFFER
+    | DISPLAY_PRESENT_IMAGE_FLAG_PRODUCER_COMPLETE;
 
 #[derive(Debug, Clone)]
 struct DisplayBackingInfo {
@@ -565,6 +568,11 @@ impl DisplayCharDevice {
                 GpuPresentOptions::swapchain_buffer()
             } else {
                 GpuPresentOptions::default()
+            };
+            let options = if request.flags & DISPLAY_PRESENT_IMAGE_FLAG_PRODUCER_COMPLETE != 0 {
+                options.with_producer_complete()
+            } else {
+                options
             };
             let completion = graphics.begin_gpu_resource_present(
                 resource.clone(),
