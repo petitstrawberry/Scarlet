@@ -13,7 +13,8 @@ LIBRARIES = ("system/lib64/libbinder.so", "system/lib64/libutils.so", "system/li
              "apex/com.android.art/lib64/libc++.so")
 
 
-def extract_headers(data, expected_tree_sha256, target, *, max_total=16 * 1024**2, max_files=1000):
+def extract_headers(data, expected_tree_sha256, target, *, max_total=16 * 1024**2, max_files=1000,
+                    max_file=2 * 1024**2):
     """Extract only regular header files; upstream compatibility symlinks are unused."""
     members, contents, total = [], {}, 0
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
@@ -26,7 +27,7 @@ def extract_headers(data, expected_tree_sha256, target, *, max_total=16 * 1024**
             if not member.isfile():
                 raise ValueError("unsupported header archive entry")
             total += member.size
-            if member.size > 2 * 1024**2 or total > max_total or len(members) >= max_files:
+            if member.size > max_file or total > max_total or len(members) >= max_files:
                 raise ValueError("header archive exceeds extraction limits")
             if member.name in contents:
                 raise ValueError("duplicate header archive path")

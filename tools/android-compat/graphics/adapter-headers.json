@@ -5,7 +5,7 @@
       "repository": "platform/prebuilts/vndk/v33",
       "revision": "93fae1dca18368daaf6a46a051b401a1313fb74d",
       "path": "arm64/include",
-      "tree_sha256": "02728f94fac722458637094e6f31d7f176a4fb0a505f2925e59da9f138411845"
+      "tree_sha256": "d4714fc3e266d9cff7c68ab13b42c5b0f6c14e1e0ad5b2bfb260f78bf8a6905c"
     },
     "mapper-utils": {
       "repository": "platform/hardware/interfaces",

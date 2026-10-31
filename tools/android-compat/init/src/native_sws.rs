@@ -27,6 +27,9 @@ impl Compositor {
         if !display_ready {
             return Err("SWS display discovery timeout");
         }
+        // Device publication precedes framebuffer information and the first
+        // swapchain setup. Let the display control endpoint finish that work.
+        std::thread::sleep(std::time::Duration::from_millis(500));
         let executable = native.open("/bin/sws", 0).map_err(|_| "SWS executable")?;
         let pid = environment
             .spawn(

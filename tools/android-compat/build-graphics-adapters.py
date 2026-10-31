@@ -44,7 +44,8 @@ def main():
             url=f"https://android.googlesource.com/{pin['repository']}/+archive/{pin['revision']}/{pin['path']}.tar.gz"
             with urllib.request.urlopen(url,timeout=30) as response:data=response.read(8*1024**2+1)
             if len(data)>8*1024**2:raise ValueError("header download exceeds bound")
-            extract_headers(data,pin["tree_sha256"],target,max_total=64*1024**2,max_files=10000)
+            extract_headers(data,pin["tree_sha256"],target,max_total=256*1024**2,
+                            max_files=100000,max_file=16*1024**2)
     host={"Darwin":"darwin-x86_64","Linux":"linux-x86_64"}[platform.system()]
     compiler=args.ndk.resolve()/"toolchains/llvm/prebuilt"/host/"bin/aarch64-linux-android33-clang++"
     flags=[str(compiler),"-std=c++17","-O2","-fPIC","-fno-rtti","-fno-exceptions","-nostdinc++","-nostdlib++","-Wl,-z,defs","-Wl,--as-needed"]

@@ -598,6 +598,9 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
             destination.parent.mkdir(parents=True,exist_ok=True);destination.write_bytes(managed)
             metadata.setdefault("host_service_inputs",{})[name]=proof
             service_roots.append(program)
+            # vold's control protocol is driven through the stock vdc client.
+            if name == "vold":
+                service_roots.append("system/bin/vdc")
         if "graphics_cpu" in metadata["profile"].get("host_services",[]):
             if not graphics:raise ValueError("CPU graphics profile requires all three verified graphics builds")
             from graphics_boot import prepare as prepare_graphics
