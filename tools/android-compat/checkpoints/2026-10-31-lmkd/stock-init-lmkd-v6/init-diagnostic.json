@@ -1,0 +1,13 @@
+{
+  "kind": "bounded-stock-init-profile-v1",
+  "probe_build_sha256": "d28b936b0511591adf641be860a50c42818c5de70bd0a08ffd5446249d403684",
+  "runner_sha256": "0814dc7dad6ca9b2f58527e742767a2a61817169d85015a08b0eb2dce30e0a21",
+  "acceleration": "hvf",
+  "observation": "150 seconds or init exit, then close ProcessScope and verify zero live members",
+  "logging": "Diagnostic preload sends init/daemon messages to inherited console and Zygote messages through short-lived Unix datagrams; supervisor drains logdw wire records; runtime results remain unchanged",
+  "service_readiness": "not asserted",
+  "service_control_request": "ctl.start=zygote after 4 seconds",
+  "apex_activation": "stock apexd must perform activation",
+  "installer_control_request": "ctl.start=installd after 4 seconds",
+  "app_policy_manager": true
+}

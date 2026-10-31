@@ -1,0 +1,22 @@
+{
+  "revision": "997ad6f74c7ef712483824ec971247fbf2f9c238",
+  "acceleration": "hvf",
+  "host_tests": 79,
+  "kernel_sha256": "167c66feff278c547e50a2580c0a901447f5f65a4224a79c45c9ce704386e33a",
+  "lmkd_source_sha256": "a62dcef0942d78e0a01c347eb8fca13ac107cfe0e0081a57c4c3775e945094b9",
+  "lmkd_progress": [
+    "init creates /dev/socket/lmkd and execs stock lmkd as UID 1069",
+    "lmkd initializes a worker and remains alive after repeated init start requests",
+    "SystemServer passes StorageManagerService and LockSettingsService",
+    "lmkd control socket accepts ActivityManager data connections"
+  ],
+  "current_stop": {
+    "service": "NetworkManagementService",
+    "message": "Connecting native netd service"
+  },
+  "limits": [
+    "No Android home screen or app frame confirmed",
+    "No real PSI or vmpressure source; lmkd uses its in-kernel interface fallback for availability",
+    "Watchdog aborted SystemServer while the main thread waited for netd; service readiness is not asserted"
+  ]
+}
