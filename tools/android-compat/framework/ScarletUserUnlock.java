@@ -139,9 +139,6 @@ public final class ScarletUserUnlock {
             } catch (Exception ignored) {
                 bootCompleted = false;
             }
-            if (bootCompleted && bootReadyAttempt < 0) {
-                bootReadyAttempt = attempt;
-            }
             if (userManager != null) {
                 try {
                     frameworkUnlocked = Boolean.TRUE.equals(
@@ -152,6 +149,10 @@ public final class ScarletUserUnlock {
                                 + " error=" + error);
                     }
                 }
+            }
+            if (bootReadyAttempt < 0 && frameworkUnlocked &&
+                    (bootCompleted || attempt >= 200)) {
+                bootReadyAttempt = attempt;
             }
             if (ceAvailable && packageManager != null) {
                 try {
@@ -171,8 +172,8 @@ public final class ScarletUserUnlock {
                                 + " bootCompleted=" + bootCompleted);
                     }
                     if (frameworkUnlocked && bootReadyAttempt >= 0 && launcherResolved != null &&
-                            binder != null && attempt >= bootReadyAttempt + 20 &&
-                            attempt < bootReadyAttempt + 80 && attempt % 20 == 0) {
+                            binder != null && attempt >= bootReadyAttempt &&
+                            attempt < bootReadyAttempt + 60 && attempt % 20 == 0) {
                         out.println("SCARLET_LAUNCHER_RESOLVED attempt=" + attempt
                                 + " result=" + launcherResolved);
                         Method startHome = manager.getClass().getMethod(
