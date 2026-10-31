@@ -1,5 +1,6 @@
 import android.os.IBinder;
 import android.content.Intent;
+import android.app.ActivityManager.RunningAppProcessInfo;
 
 import java.io.FileDescriptor;
 import java.io.FileOutputStream;
@@ -24,7 +25,6 @@ public final class ScarletUserUnlock {
         final Class<?> userManagerStub = Class.forName("android.os.IUserManager$Stub");
         final Method userAsInterface = userManagerStub.getMethod("asInterface", IBinder.class);
         final Class<?> systemProperties = Class.forName("android.os.SystemProperties");
-        final Method setProperty = systemProperties.getMethod("set", String.class, String.class);
 
         Object storageManager = null;
         Method isUserKeyUnlocked = null;
@@ -38,13 +38,34 @@ public final class ScarletUserUnlock {
         final Intent sdksetupIntent = new Intent(homeIntent);
         sdksetupIntent.setPackage("com.android.sdksetup");
         boolean ceAvailable = false;
-        boolean restartedUser = false;
+        boolean frameworkUnlocked = false;
+        boolean requestedUserStart = false;
         for (int attempt = 0; attempt < 360; ++attempt) {
             IBinder binder = (IBinder) getService.invoke(null, "activity");
             Object manager = null;
             if (binder != null) {
                 manager = asInterface.invoke(null, binder);
-                if (!ceAvailable) {
+                // SystemUI is launched after AMS has initialized its system-service
+                // dependencies. A fixed delay can race that initialization.
+                if (!requestedUserStart && attempt % 4 == 0) {
+                    Method running = manager.getClass().getMethod("getRunningAppProcesses");
+                    java.util.List<?> processes = (java.util.List<?>) running.invoke(manager);
+                    if (processes != null) {
+                        for (Object process : processes) {
+                            if ("com.android.systemui".equals(
+                                    ((RunningAppProcessInfo) process).processName)) {
+                                Method startUser = manager.getClass().getMethod(
+                                        "startUserInBackground", int.class);
+                                Object started = startUser.invoke(manager, 0);
+                                requestedUserStart = Boolean.TRUE.equals(started);
+                                out.println("SCARLET_USER_START_AFTER_SYSTEMUI attempt=" + attempt
+                                        + " started=" + started);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (!frameworkUnlocked && attempt % 4 == 0) {
                     Method unlock = manager.getClass().getMethod(
                             "unlockUser", int.class, byte[].class, byte[].class, listenerClass);
                     try {
@@ -75,7 +96,6 @@ public final class ScarletUserUnlock {
                 try {
                     Object unlocked = isUserKeyUnlocked.invoke(storageManager, 0);
                     if (Boolean.TRUE.equals(unlocked) && !ceAvailable) {
-                        setProperty.invoke(null, "sys.user.0.ce_available", "true");
                         ceAvailable = true;
                         out.println("SCARLET_USER_UNLOCK_DONE attempt=" + attempt
                                 + " ce_available=" + systemProperties.getMethod("get", String.class)
@@ -107,7 +127,7 @@ public final class ScarletUserUnlock {
                             "isUserUnlocked", int.class);
                 }
             }
-            boolean frameworkUnlocked = false;
+            frameworkUnlocked = false;
             if (userManager != null) {
                 try {
                     frameworkUnlocked = Boolean.TRUE.equals(
@@ -117,28 +137,6 @@ public final class ScarletUserUnlock {
                         out.println("SCARLET_USER_STATE_QUERY_RETRY attempt=" + attempt
                                 + " error=" + error);
                     }
-                }
-            }
-            if (ceAvailable && !frameworkUnlocked && attempt >= 140 && binder != null) {
-                try {
-                    if (!restartedUser) {
-                        Method startUser = manager.getClass().getMethod(
-                                "startUserInBackground", int.class);
-                        Object started = startUser.invoke(manager, 0);
-                        restartedUser = true;
-                        out.println("SCARLET_USER_RESTART attempt=" + attempt
-                                + " started=" + started);
-                    }
-                    if (restartedUser && attempt == 160) {
-                        Method unlock = manager.getClass().getMethod(
-                                "unlockUser", int.class, byte[].class, byte[].class, listenerClass);
-                        Object unlocked = unlock.invoke(manager, 0, null, null, null);
-                        out.println("SCARLET_USER_UNLOCK_AFTER_START attempt=" + attempt
-                                + " result=" + unlocked);
-                    }
-                } catch (Exception error) {
-                    out.println("SCARLET_USER_RESTART_RETRY attempt=" + attempt
-                            + " error=" + error);
                 }
             }
             if (ceAvailable && packageManager != null) {
@@ -157,13 +155,19 @@ public final class ScarletUserUnlock {
                                         packageManager, "com.android.sdksetup", 0L, 0)
                                 + " frameworkUnlocked=" + frameworkUnlocked);
                     }
-                    if (resolved != null && binder != null) {
+                    if (frameworkUnlocked && resolved != null && binder != null) {
                         out.println("SCARLET_USER_HOME_RESOLVED attempt=" + attempt
                                 + " auto=" + autoResolved + " result=" + resolved);
-                        Method startUser = manager.getClass().getMethod(
-                                "startUserInBackground", int.class);
-                        out.println("SCARLET_USER_HOME_START result="
-                                + startUser.invoke(manager, 0));
+                        Method startHome = manager.getClass().getMethod(
+                                "startActivityAsUserWithFeature", Class.forName("android.app.IApplicationThread"),
+                                String.class, String.class, Intent.class, String.class, IBinder.class,
+                                String.class, int.class, int.class,
+                                Class.forName("android.app.ProfilerInfo"), android.os.Bundle.class,
+                                int.class);
+                        homeIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        Object started = startHome.invoke(manager, null, "android", null,
+                                homeIntent, null, null, null, 0, 0, null, null, 0);
+                        out.println("SCARLET_USER_HOME_START result=" + started);
                         return;
                     }
                 } catch (Exception error) {
