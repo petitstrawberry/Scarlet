@@ -25,6 +25,8 @@ const RESERVED: usize = MCONTEXT + 288;
 const FRAME_SIZE: usize = RESERVED + 4096;
 const FPSIMD_MAGIC: u32 = 0x4650_8001;
 const FPSIMD_SIZE: usize = 528;
+const ESR_MAGIC: u32 = 0x4553_5201;
+const ESR_SIZE: usize = 16;
 const SA_ONSTACK: u64 = 0x0800_0000;
 const SA_NODEFER: u64 = 0x4000_0000;
 const SA_RESETHAND: u64 = 0x8000_0000;
@@ -80,10 +82,13 @@ fn decode_context(frame: &[u8], regs: &mut Trapframe) -> Result<FpuContext, &'st
     }
     // Only FPSIMD is currently exposed to Linux applications. Validate the
     // record and terminator before mutating the live register context.
+    let mut terminator = RESERVED + FPSIMD_SIZE;
+    if get32(frame, terminator) == ESR_MAGIC && get32(frame, terminator + 4) == ESR_SIZE as u32 {
+        terminator += ESR_SIZE;
+    }
     if get32(frame, RESERVED) != FPSIMD_MAGIC
         || get32(frame, RESERVED + 4) != FPSIMD_SIZE as u32
-        || get64(frame, RESERVED + FPSIMD_SIZE) != 0
-    {
+        || get64(frame, terminator) != 0 {
         return Err("invalid FPSIMD signal context");
     }
     let mut fp = FpuContext::new();
@@ -150,6 +155,15 @@ pub fn setup_signal_handler(
     handler: usize,
     signal: LinuxSignal,
 ) -> Result<(), &'static str> {
+    setup_signal_frame(abi, task, trapframe, handler, signal, None)
+}
+
+struct MemoryFaultInfo { address: usize, code: u32, esr: u64 }
+
+fn setup_signal_frame(
+    abi: &LinuxAbi, task: &Task, trapframe: &mut Trapframe,
+    handler: usize, signal: LinuxSignal, fault: Option<MemoryFaultInfo>,
+) -> Result<(), &'static str> {
     let (action, old_mask) = {
         let state = abi.signal_state.lock();
         (state.get_sigaction(signal), state.blocked.raw())
@@ -181,6 +195,10 @@ pub fn setup_signal_handler(
     let mut frame = vec![0u8; FRAME_SIZE];
     put32(&mut frame, 0, signal as u32);
     put32(&mut frame, 8, 128); // SI_KERNEL, for terminal process-control events.
+    if let Some(info) = &fault {
+        put32(&mut frame, 8, info.code);
+        put64(&mut frame, 16, info.address as u64);
+    }
     put64(&mut frame, UCONTEXT + 16, stack.sigaltstack_sp as u64);
     put32(
         &mut frame,
@@ -205,6 +223,12 @@ pub fn setup_signal_handler(
         vcpu.fpu.clone()
     };
     encode_context(&mut frame, trapframe, &fp, old_mask);
+    if let Some(info) = fault {
+        put64(&mut frame, MCONTEXT, info.address as u64);
+        put32(&mut frame, RESERVED + FPSIMD_SIZE, ESR_MAGIC);
+        put32(&mut frame, RESERVED + FPSIMD_SIZE + 4, ESR_SIZE as u32);
+        put64(&mut frame, RESERVED + FPSIMD_SIZE + 8, info.esr);
+    }
     copy_to_user(task, base, &frame).map_err(|_| "cannot write signal frame")?;
     {
         let mut state = abi.signal_state.lock();
@@ -224,6 +248,27 @@ pub fn setup_signal_handler(
     trapframe.regs.reg[2] = base + UCONTEXT;
     trapframe.regs.reg[30] = restorer;
     Ok(())
+}
+
+/// Synchronous faults carry the original faulting PC, never a post-SVC PC.
+/// Blocked, ignored and default dispositions cannot defer a hardware fault.
+pub fn deliver_memory_fault(abi: &LinuxAbi, task: &Task, frame: &mut Trapframe,
+    fault: crate::vm::fault::UserMemoryFault) -> Result<bool, &'static str>
+{
+    use crate::vm::fault::UserMemoryFaultReason;
+    let handler = {
+        let state = abi.signal_state.lock();
+        if state.blocked.is_blocked(LinuxSignal::SIGSEGV) { return Ok(false); }
+        match state.get_handler(LinuxSignal::SIGSEGV) {
+            SignalAction::Custom(handler) => handler,
+            _ => return Ok(false),
+        }
+    };
+    let info = MemoryFaultInfo { address: fault.access.vaddr,
+        code: match fault.reason { UserMemoryFaultReason::Unmapped => 1, UserMemoryFaultReason::Protection => 2 },
+        esr: frame.esr_el1 };
+    setup_signal_frame(abi, task, frame, handler, LinuxSignal::SIGSEGV, Some(info))?;
+    Ok(true)
 }
 
 pub fn sys_rt_sigreturn(abi: &mut LinuxAarch64Abi, trapframe: &mut Trapframe) -> usize {
@@ -336,6 +381,36 @@ mod tests {
         assert_eq!(restored_fp.fpcr, fp.fpcr);
         assert_eq!(restored_fp.fpsr, fp.fpsr);
         assert_eq!(get64(&bytes, MASK), 0x1234);
+    }
+
+    #[test_case]
+    fn fault_esr_record_is_accepted_but_malformed_extra_context_is_rejected() {
+        let mut original=Trapframe::new();original.sp=0x800000;original.elr=0x400000;
+        let mut bytes=vec![0;FRAME_SIZE];
+        encode_context(&mut bytes,&original,&FpuContext::new(),0);
+        let extra=RESERVED+FPSIMD_SIZE;
+        put32(&mut bytes,extra,ESR_MAGIC);put32(&mut bytes,extra+4,ESR_SIZE as u32);
+        put64(&mut bytes,extra+8,0x92000006);
+        let mut restored=Trapframe::new();assert!(decode_context(&bytes,&mut restored).is_ok());
+        assert_eq!(restored.elr,original.elr);
+        put32(&mut bytes,extra+4,8);assert!(decode_context(&bytes,&mut restored).is_err());
+        put32(&mut bytes,extra+4,ESR_SIZE as u32);put32(&mut bytes,extra+ESR_SIZE,1);
+        assert!(decode_context(&bytes,&mut restored).is_err());
+    }
+
+    #[test_case]
+    fn ignored_or_blocked_synchronous_faults_do_not_install_a_context() {
+        use crate::vm::fault::{UserMemoryFault,UserMemoryFaultReason};
+        use crate::object::capability::memory_mapping::{AccessKind,AccessOp};
+        let abi=LinuxAbi::default();let task=crate::task::new_user_task("unhandled-fault".into(),0);
+        let mut frame=Trapframe::new();frame.elr=0x400000;
+        let fault=UserMemoryFault {access:AccessKind {op:AccessOp::Load,vaddr:0,size:None},reason:UserMemoryFaultReason::Unmapped};
+        assert!(!deliver_memory_fault(&abi,&task,&mut frame,fault).unwrap());
+        abi.signal_state.lock().set_handler(LinuxSignal::SIGSEGV,SignalAction::Ignore);
+        assert!(!deliver_memory_fault(&abi,&task,&mut frame,fault).unwrap());
+        {let mut state=abi.signal_state.lock();state.set_handler(LinuxSignal::SIGSEGV,SignalAction::Custom(0x500000));state.blocked.set_raw(1<<10);}
+        assert!(!deliver_memory_fault(&abi,&task,&mut frame,fault).unwrap());
+        assert_eq!(frame.elr,0x400000);assert_eq!(frame.sp,0);
     }
 
     #[test_case]

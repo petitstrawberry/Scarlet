@@ -85,6 +85,14 @@ impl AbiModule for LinuxAarch64Abi {
     }
 
     fn execution_domain(&self) -> &'static str { "linux-aarch64" }
+    fn handle_user_memory_fault(&mut self, fault: crate::vm::fault::UserMemoryFault,
+        frame: &mut crate::arch::Trapframe) -> Result<bool, &'static str> {
+        let task = crate::task::mytask().ok_or("memory fault without task")?;
+        self.0.bind_task_signals(&task);
+        let result = signal::deliver_memory_fault(&self.0, &task, frame, fault);
+        if !matches!(result, Ok(true)) { task.mark_signal_termination(11); }
+        result
+    }
     fn handle_execution_denial(&mut self, denial: crate::shield::execution::Denial, frame: &mut crate::arch::Trapframe) -> Result<usize, &'static str> {
         Ok(generic::seccomp::handle_denial(&mut self.0, denial, frame))
     }
