@@ -109,10 +109,17 @@
             src = pkgs.fetchFromGitHub {
               owner = "petitstrawberry";
               repo = "virglrenderer";
-              rev = "dfb43e3191adbc76547a1b33a9acdbf24787d085";
-              hash = "sha256-7RlUTQPjwXwV0krMiBfv1sEHgr9tNavYpBmzaN1ax28=";
+              rev = "93cf28c5fa8506d7682deb22ba68450609abdac0";
+              hash = "sha256-0EuDZWga06lw/aPRrrf/IcabBu7EFmAU9mA4DHHlAT0=";
             };
             patches = prevAttrs.patches or [ ];
+            buildInputs = (prevAttrs.buildInputs or [ ]) ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+              pkgs.shaderc
+              pkgs.spirv-cross
+            ];
+            mesonFlags = (prevAttrs.mesonFlags or [ ]) ++ [
+              "-Dmetal-compute=${if pkgs.stdenv.isDarwin then "enabled" else "disabled"}"
+            ];
           });
 
           cargo-scarlet = pkgs.rustPlatform.buildRustPackage {
