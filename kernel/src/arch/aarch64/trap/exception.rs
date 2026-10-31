@@ -418,7 +418,7 @@ fn handle_instruction_fault(trapframe: &mut Trapframe, vaddr: usize) {
         size: None,
     };
 
-    match task.vm_manager.lazy_map_page_with(access) {
+    match task.vm_manager.resolve_user_memory_fault(access) {
         Ok(_) => (),
         Err(e) => {
             terminate_current_user_fault(
@@ -456,7 +456,7 @@ fn handle_data_fault(trapframe: &mut Trapframe, vaddr: usize, is_write: bool) {
         size: None,
     };
 
-    match task.vm_manager.lazy_map_page_with(access) {
+    match task.vm_manager.resolve_user_memory_fault(access) {
         Ok(_) => {
             crate::breadcrumb::drop(crate::breadcrumb::DATA_FAULT_DONE, vaddr as u64, 0);
         }
@@ -473,8 +473,21 @@ fn terminate_current_user_fault(
     vaddr: usize,
     is_write: bool,
     pc: u64,
-    reason: &'static str,
+    failure: crate::vm::fault::UserFaultResolutionError,
 ) {
+    use crate::vm::fault::{UserFaultResolutionError, UserMemoryFaultReason};
+    let reason = match failure {
+        UserFaultResolutionError::User(fault) => {
+            if matches!(crate::abi::dispatch_user_memory_fault(fault, trapframe), Ok(true)) {
+                return;
+            }
+            match fault.reason {
+                UserMemoryFaultReason::Unmapped => "Unmapped user address",
+                UserMemoryFaultReason::Protection => "User mapping protection violation",
+            }
+        }
+        UserFaultResolutionError::Internal(reason) => reason,
+    };
     let event_kind = match fault_kind {
         "instruction" => "instruction fault",
         "data" => "data fault",

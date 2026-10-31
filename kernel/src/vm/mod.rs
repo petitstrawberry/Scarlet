@@ -9,6 +9,7 @@ pub mod boot;
 pub mod direct_map;
 pub mod ioremap;
 pub mod manager;
+pub mod fault;
 pub mod vmem;
 
 pub use addr::{

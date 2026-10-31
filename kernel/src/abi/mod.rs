@@ -123,6 +123,16 @@ pub trait AbiModule: Send + Sync + 'static {
     /// value can itself encode an ABI-level error such as a negative errno.
     fn handle_syscall(&mut self, trapframe: &mut Trapframe) -> Result<usize, &'static str>;
 
+    /// Convert a synchronous user access violation into this ABI's exception
+    /// convention. The saved PC still identifies the faulting instruction.
+    /// Return true only after installing a complete resumable handler context.
+    /// Unsupported ABIs keep the native fatal-fault behavior.
+    fn handle_user_memory_fault(
+        &mut self,
+        _fault: crate::vm::fault::UserMemoryFault,
+        _frame: &mut Trapframe,
+    ) -> Result<bool, &'static str> { Ok(false) }
+
     /// Hook invoked after Task::clone_task creates the child
     ///
     /// # Arguments
@@ -622,6 +632,14 @@ pub enum EventProcessOutcome {
     NeedReschedule,
     /// The task must exit with this status after the ABI mutable borrow is released.
     Exited(i32),
+}
+
+pub fn dispatch_user_memory_fault(fault: crate::vm::fault::UserMemoryFault, frame: &mut Trapframe)
+    -> Result<bool, &'static str>
+{
+    let task = mytask().ok_or("user memory fault without a task")?;
+    let pc = frame.get_current_pc() as usize;
+    task.with_resolve_abi_mut(pc, |abi| abi.handle_user_memory_fault(fault, frame))
 }
 
 pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static str> {
