@@ -13,6 +13,19 @@ impl Compositor {
             return Ok(None);
         }
         let native = environment.root("scarlet").map_err(|_| "SWS native view")?;
+        // Device discovery can finish after init starts on another CPU.
+        // Do not let an early compositor exit interrupt the Android child wait.
+        let mut display_ready = false;
+        for _ in 0..500 {
+            if native.open("/dev/display0", 0).is_ok() {
+                display_ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if !display_ready {
+            return Err("SWS display discovery timeout");
+        }
         let executable = native.open("/bin/sws", 0).map_err(|_| "SWS executable")?;
         let pid = environment
             .spawn(
