@@ -117,8 +117,8 @@
               pkgs.shaderc
               pkgs.spirv-cross
             ];
-            mesonFlags = (prevAttrs.mesonFlags or [ ]) ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-              "-Dmetal-compute=enabled"
+            mesonFlags = (prevAttrs.mesonFlags or [ ]) ++ [
+              "-Dmetal-compute=${if pkgs.stdenv.isDarwin then "enabled" else "disabled"}"
             ];
           });
 
