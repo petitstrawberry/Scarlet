@@ -65,7 +65,8 @@
     "u:r:installd:s0": 16,
     "u:r:odsign:s0": 17,
     "u:r:hal_health_default:s0": 18,
-    "u:r:vold:s0": 19
+    "u:r:vold:s0": 19,
+    "u:r:lmkd:s0": 20
   },
   "transitions": [
     [
@@ -212,7 +213,8 @@
     "/system/bin/installd": "u:object_r:installd_exec:s0",
     "/system/bin/odsign": "u:object_r:odsign_exec:s0",
     "/vendor/bin/hw/android.hardware.health@2.1-service": "u:object_r:hal_health_default_exec:s0",
-    "/system/bin/vold": "u:object_r:vold_exec:s0"
+    "/system/bin/vold": "u:object_r:vold_exec:s0",
+    "/system/bin/lmkd": "u:object_r:lmkd_exec:s0"
   },
   "exec_transitions": [
     [
@@ -298,6 +300,12 @@
       "u:object_r:vold_exec:s0",
       "u:r:vold:s0",
       0
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:lmkd_exec:s0",
+      "u:r:lmkd:s0",
+      1069
     ]
   ],
   "resource_groups": {
@@ -317,7 +325,8 @@
         ],
         "targets": [
           "u:object_r:property_socket:s0",
-          "u:object_r:zygote_socket:s0"
+          "u:object_r:zygote_socket:s0",
+          "u:object_r:lmkd_socket:s0"
         ],
         "kinds": [
           6
@@ -369,6 +378,7 @@
           "u:object_r:null_device:s0",
           "u:object_r:ptmx_device:s0",
           "u:object_r:property_socket:s0",
+          "u:object_r:lmkd_socket:s0",
           "u:object_r:random_device:s0",
           "u:object_r:properties_device:s0",
           "u:object_r:property_info:s0",
@@ -2473,6 +2483,14 @@
     ],
     [
       "u:r:init:s0",
+      "u:object_r:lmkd_socket:s0"
+    ],
+    [
+      "u:r:init:s0",
+      "u:r:lmkd:s0"
+    ],
+    [
+      "u:r:init:s0",
       "u:object_r:pdx_display_client_endpoint_socket:s0"
     ],
     [
@@ -2507,7 +2525,8 @@
     "installd",
     "odsign",
     "health",
-    "vold"
+    "vold",
+    "lmkd"
   ],
   "package_set": "stock-home"
 }
