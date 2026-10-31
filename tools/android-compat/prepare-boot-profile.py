@@ -12,6 +12,8 @@ from art_inputs import Ext4, SDK_SHA256, elf_needed, quote_debugfs, sha256, unpa
 from boot_profile import MANIFEST, POLICY, guest_alias, relative_path, shield_policy, validate_profile, verify_boot_inputs
 from stock_art import apex_identity, extract_partitions, verify_stock_inputs
 
+SOURCE = Path(__file__).resolve().parent
+
 
 def entries(image, source):
     info = image.command("stat " + quote_debugfs(source))
@@ -143,10 +145,10 @@ def prepare(archive, runtime, stock, profile_file, output):
 
 
 def configure(output, stock, profile, contexts, metadata):
-    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,ODSIGN_MANAGED_RC,HEALTH_MANAGED_RC,VOLD_MANAGED_RC,LMKD_MANAGED_RC,imports
+    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,ODSIGN_MANAGED_RC,HEALTH_MANAGED_RC,VOLD_MANAGED_RC,LMKD_MANAGED_RC,NETD_MANAGED_RC,AUDIOSERVER_MANAGED_RC,AUDIO_HAL_MANAGED_RC,imports
     for name,record in list(metadata.get("host_service_inputs",{}).items()):
         if name not in profile.get("host_services",[]):
-            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC,"odsign":ODSIGN_MANAGED_RC, "health":HEALTH_MANAGED_RC,"vold":VOLD_MANAGED_RC,"lmkd":LMKD_MANAGED_RC}[name]
+            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC,"odsign":ODSIGN_MANAGED_RC, "health":HEALTH_MANAGED_RC,"vold":VOLD_MANAGED_RC,"lmkd":LMKD_MANAGED_RC,"netd":NETD_MANAGED_RC,"audioserver":AUDIOSERVER_MANAGED_RC,"audio_hal":AUDIO_HAL_MANAGED_RC}[name]
             path=output/relative
             expected=record["files"][relative] if name=="graphics_cpu" else record["managed_rc_sha256"]
             if sha256(path)!=expected:raise ValueError("changed manager host service output")
@@ -234,22 +236,43 @@ def select_memfd_in_init(text):
     return text.replace(command, "    setprop sys.use_memfd true\n")
 
 
-def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, service_image=None):
+def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, service_image=None, firewall_compat=None, audio_start=None, audio_binder_compat=None):
     metadata = verify_boot_inputs(inputs, runtime, stock)
     profile = validate_profile(json.loads(profile_file.read_text()))
     if any(profile[key] != metadata["profile"][key] for key in ("apex_modules", "init_imports")):
         raise ValueError("changed payload or imports require preparation from the pinned image")
     added_services=set(profile.get("host_services",[]))-set(metadata["profile"].get("host_services",[]))
-    if added_services and (not added_services.issubset({"vold","lmkd"}) or not service_image):
-        raise ValueError("adding a stock provider requires --service-image; supported additions: vold, lmkd")
+    provider_inputs=metadata.get("host_service_inputs",{})
+    refreshed_services={name for name in profile.get("host_services",[]) if name=="netd" and
+                        (service_image is not None or "netd" not in provider_inputs or
+                         "system/bin/iptables" not in provider_inputs["netd"].get("files",{}))}
+    if service_image is not None:
+        refreshed_services |= {name for name in profile.get("host_services",[]) if name in ("audioserver","audio_hal")}
+    providers_to_add=added_services|refreshed_services
+    if providers_to_add and (not providers_to_add.issubset({"vold","lmkd","netd","audioserver","audio_hal"}) or not service_image):
+        raise ValueError("adding a stock provider requires --service-image; supported additions: vold, lmkd, netd, audioserver, audio_hal")
+    if "netd" in providers_to_add and not firewall_compat:
+        raise ValueError("netd provider requires --netd-firewall-compat")
+    if providers_to_add.intersection({"audioserver","audio_hal"}) and not audio_start:
+        raise ValueError("audio providers require --audio-start-build")
+    if "audio_hal" in providers_to_add and not audio_binder_compat:
+        raise ValueError("audio HAL requires --audio-binder-compat")
     refreshed_vintf = None
     if profile.get("vintf") != metadata["profile"].get("vintf"):
         if not vintf_image:
             raise ValueError("changed VINTF selection requires --vintf-image")
         previous = metadata.get("vintf_inputs", {})
-        if profile.get("vintf", {}).get("device") != previous.get("selection", {}).get("device"):
+        previous_device=previous.get("selection", {}).get("device",[])
+        selected_device=profile.get("vintf", {}).get("device",[])
+        from vintf_inputs import AUDIO_CONTRACT, AUDIO_EFFECT_CONTRACT
+        from host_services import AUDIO_HAL
+        audio_contracts={AUDIO_CONTRACT,AUDIO_EFFECT_CONTRACT}
+        if (selected_device != previous_device and
+                not (set(selected_device)-set(previous_device)<=audio_contracts and set(previous_device)<=set(selected_device) and AUDIO_HAL in providers_to_add)):
             raise ValueError("changed device inventory requires matching provider preparation")
         from vintf_inputs import build_manifests
+        from vintf_inputs import AUDIO_CONTRACT
+        from host_services import AUDIO_HAL,AUDIO_HAL_BINARY
         with tempfile.TemporaryDirectory(prefix="scarlet-vintf-") as directory:
             temporary = Path(directory)
             extract_partitions(vintf_image, temporary)
@@ -265,14 +288,24 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
                 destination = temporary / "sources" / name[1:]
                 system.dump(name, destination)
                 sources[name] = destination.read_bytes()
-            refreshed_vintf = build_manifests(profile["vintf"], sources,
-                                             previous.get("device_providers", {}))
+            providers=dict(previous.get("device_providers",{}))
+            if AUDIO_HAL in providers_to_add:
+                vendor=Ext4(temporary/"vendor.ext4");binary=temporary/AUDIO_HAL_BINARY
+                vendor.dump("/"+AUDIO_HAL_BINARY.removeprefix("vendor/"),binary)
+                declaration=temporary/"audio-vintf.xml";declaration_path="/vendor/etc/vintf/manifest/android.hardware.audio@7.1-impl.ranchu.xml"
+                vendor.dump("/etc/vintf/manifest/android.hardware.audio@7.1-impl.ranchu.xml",declaration)
+                audio_provider={"transport":"hwbinder","path":AUDIO_HAL_BINARY,
+                    "sha256":sha256(binary),"source":declaration_path,
+                    "source_sha256":sha256(declaration)}
+                providers[AUDIO_CONTRACT]=audio_provider
+                providers[AUDIO_EFFECT_CONTRACT]=dict(audio_provider)
+            refreshed_vintf = build_manifests(profile["vintf"], sources, providers)
     original_manifest = sha256(inputs / MANIFEST)
     shutil.copytree(inputs, output)
     metadata.update(profile=profile, profile_source_sha256=sha256(profile_file), reused_payload_manifest_sha256=original_manifest)
     configure(output,stock,profile,metadata["property_context_files"],metadata)
-    for provider in sorted(added_services):
-        add_stock_provider(output,metadata,service_image,provider)
+    for provider in sorted(providers_to_add):
+        add_stock_provider(output,metadata,service_image,provider,firewall_compat,audio_start,audio_binder_compat)
     if refreshed_vintf:
         outputs, proof = refreshed_vintf
         for name, data in outputs.items():
@@ -287,38 +320,95 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
     print("Prepared new manager configuration using verified factory payloads; boot has not been tested")
 
 
-def add_stock_provider(output, metadata, archive, name):
+def add_stock_provider(output, metadata, archive, name, firewall_compat=None, audio_start=None, audio_binder_compat=None):
     service_name=name
     from host_services import (VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold,
-                               LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd)
+                               LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd,
+                               NETD_BINARY,NETD_STOCK_RC,NETD_MANAGED_RC,NETD_FIREWALL_BINARY,
+                               NETD_FIREWALL_ALIASES,build_netd,
+                               AUDIOSERVER,AUDIOSERVER_BINARY,AUDIOSERVER_STOCK_RC,AUDIOSERVER_MANAGED_RC,build_audioserver,
+                               AUDIO_HAL,AUDIO_HAL_BINARY,AUDIO_HAL_STOCK_RC,AUDIO_HAL_MANAGED_RC,AUDIO_CONFIG_FILES,
+                               AUDIO_HAL_MODULES,AUDIO_START_BINARY,AUDIO_BINDER_COMPAT,build_audio_hal)
     binary_path,stock_rc,managed_rc,builder={
         "vold":(VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold),
         "lmkd":(LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd),
+        "netd":(NETD_BINARY,NETD_STOCK_RC,NETD_MANAGED_RC,build_netd),
+        "audioserver":(AUDIOSERVER_BINARY,AUDIOSERVER_STOCK_RC,AUDIOSERVER_MANAGED_RC,build_audioserver),
+        "audio_hal":(AUDIO_HAL_BINARY,AUDIO_HAL_STOCK_RC,AUDIO_HAL_MANAGED_RC,build_audio_hal),
     }[name]
     with tempfile.TemporaryDirectory(prefix="scarlet-stock-provider-") as directory:
         temporary=Path(directory);partitions=extract_partitions(archive,temporary)
         system=Ext4(temporary/"system.ext4")
+        vendor=Ext4(temporary/"vendor.ext4")
         rc=temporary/"service.rc";binary=temporary/"binary"
-        system.dump("/"+stock_rc,rc);system.dump("/"+binary_path,binary)
+        def image(path):
+            return vendor if path.startswith("vendor/") else system
+        def image_source(path):
+            return "/"+path.removeprefix("vendor/") if path.startswith("vendor/") else "/"+path
+        image(stock_rc).dump(image_source(stock_rc),rc);image(binary_path).dump(image_source(binary_path),binary)
         managed,proof=builder(rc.read_bytes(),binary.read_bytes())
         available={Path(name).name for name in metadata["files"]}
-        queue=[binary_path];needed={};digests={}
+        queue=[binary_path]+(AUDIO_HAL_MODULES if service_name=="audio_hal" else []);needed={};digests={}
         while queue:
             name=queue.pop()
             if name in needed:continue
             if len(needed)>=1024:raise ValueError("stock service dependency bound")
-            source=temporary/"files"/name;system.dump("/"+name,source)
+            source=temporary/"files"/name;image(name).dump(image_source(name),source)
             digest=sha256(source);destination=output/name
             if name in metadata.get("symlinks",{}) or destination.exists() and sha256(destination)!=digest:
                 raise ValueError("conflicting stock service input: "+name)
             destination.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,destination)
             digests[name]=digest;needed[name]=elf_needed(source);available.add(Path(name).name)
             for dependency in needed[name]:
-                relative="system/lib64/"+dependency
-                if "Type: regular" in system.command("stat "+quote_debugfs("/"+relative)):
+                relative=("vendor/lib64/" if name.startswith("vendor/") else "system/lib64/")+dependency
+                if "Type: regular" in image(relative).command("stat "+quote_debugfs(image_source(relative))):
                     queue.append(relative)
                 elif dependency not in available:
                     raise ValueError("missing stock service dependency: "+dependency)
+        if service_name=="netd":
+            firewall_record=json.loads((firewall_compat/"build.json").read_text())
+            if (firewall_record.get("kind")!="scarlet-netd-firewall-compat-v1" or
+                    firewall_record.get("result")!="BUILT" or
+                    firewall_record.get("source_sha256")!=sha256(SOURCE/"iptables-compat.c") or
+                    firewall_record.get("binary_sha256")!=sha256(firewall_compat/"iptables-restore")):
+                raise ValueError("changed netd firewall compatibility build")
+            source=firewall_compat/"iptables-restore";destination=output/NETD_FIREWALL_BINARY
+            if NETD_FIREWALL_BINARY in metadata.get("symlinks",{}):
+                raise ValueError("conflicting netd firewall implementation")
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            if destination.is_file():destination.unlink()
+            shutil.copy2(source,destination)
+            digests[NETD_FIREWALL_BINARY]=sha256(source);needed[NETD_FIREWALL_BINARY]=elf_needed(source)
+            for alias,target in NETD_FIREWALL_ALIASES.items():
+                if alias in metadata["files"] or alias in metadata.get("symlinks",{}) and metadata["symlinks"][alias]!=target:
+                    raise ValueError("conflicting netd firewall alias: "+alias)
+                metadata.setdefault("symlinks",{})[alias]=target
+        if service_name=="audio_hal":
+            for config in AUDIO_CONFIG_FILES:
+                source=temporary/"files"/config;vendor.dump("/etc/"+config.removeprefix("vendor/etc/"),source)
+                digest=sha256(source);destination=output/config
+                if config in metadata.get("symlinks",{}) or destination.exists() and sha256(destination)!=digest:
+                    raise ValueError("conflicting audio configuration: "+config)
+                destination.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,destination)
+                digests[config]=digest;needed[config]=[]
+        if service_name in ("audioserver","audio_hal"):
+            record=json.loads((audio_start/"build.json").read_text())
+            if (record.get("kind")!="scarlet-audio-late-start-v1" or record.get("result")!="BUILT" or
+                    record.get("source_sha256")!=sha256(SOURCE/"audio-late-start.c") or
+                    record.get("binary_sha256")!=sha256(audio_start/"scarlet-audio-late-start")):
+                raise ValueError("changed audio startup helper")
+            source=audio_start/"scarlet-audio-late-start";destination=output/AUDIO_START_BINARY
+            destination.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,destination)
+            digests[AUDIO_START_BINARY]=sha256(source);needed[AUDIO_START_BINARY]=elf_needed(source)
+        if service_name=="audio_hal":
+            record=json.loads((audio_binder_compat/"build.json").read_text())
+            if (record.get("kind")!="scarlet-audio-binder-compat-v1" or record.get("result")!="BUILT" or
+                    record.get("source_sha256")!=sha256(SOURCE/"audio-binder-compat.cpp") or
+                    record.get("binary_sha256")!=sha256(audio_binder_compat/"libscarlet-audiobinder.so")):
+                raise ValueError("changed audio binder compatibility build")
+            source=audio_binder_compat/"libscarlet-audiobinder.so";destination=output/AUDIO_BINDER_COMPAT
+            destination.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,destination)
+            digests[AUDIO_BINDER_COMPAT]=sha256(source);needed[AUDIO_BINDER_COMPAT]=elf_needed(source)
         path=output/managed_rc;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(managed)
         proof.update(native_needed=needed,files=digests,partitions=partitions)
         metadata.setdefault("host_service_inputs",{})[service_name]=proof
@@ -427,12 +517,14 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
         from host_services import (INSTALLER_BINARY,INSTALLER_STOCK_RC,INSTALLER_MANAGED_RC,build_installer,
                                    ODSIGN_BINARY,ODSIGN_STOCK_RC,ODSIGN_MANAGED_RC,build_odsign,
                                    VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold,
-                                   LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd)
+                                   LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd,
+                                   NETD_BINARY,NETD_STOCK_RC,NETD_MANAGED_RC,build_netd)
         for name,program,stock_rc,managed_rc,builder in [
             ("installd",INSTALLER_BINARY,INSTALLER_STOCK_RC,INSTALLER_MANAGED_RC,build_installer),
             ("odsign",ODSIGN_BINARY,ODSIGN_STOCK_RC,ODSIGN_MANAGED_RC,build_odsign),
             ("vold",VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold),
-            ("lmkd",LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd)]:
+            ("lmkd",LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd),
+            ("netd",NETD_BINARY,NETD_STOCK_RC,NETD_MANAGED_RC,build_netd)]:
             if name not in metadata["profile"].get("host_services",[]):continue
             rc=temporary/(name+"-stock.rc");binary=temporary/(name+"-stock.bin")
             system.dump("/"+stock_rc,rc);system.dump("/"+program,binary)
@@ -540,7 +632,7 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
             if name in metadata["files"] or name in metadata["symlinks"] and metadata["symlinks"][name]!=target:
                 raise ValueError("conflicting platform font alias")
             metadata["symlinks"][name]=target
-        for service,root in (("vold",VOLD_BINARY),("lmkd",LMKD_BINARY)):
+        for service,root in (("vold",VOLD_BINARY),("lmkd",LMKD_BINARY),("netd",NETD_BINARY)):
             if service not in metadata["profile"].get("host_services",[]):continue
             reachable=set();pending=[root]
             while pending:
@@ -633,6 +725,9 @@ def main():
     parser.add_argument("--vintf-image", type=Path,
                         help="pinned SDK image for changing framework declarations while reusing providers")
     parser.add_argument("--service-image",type=Path,help="pinned SDK image for adding the stock vold provider")
+    parser.add_argument("--netd-firewall-compat",type=Path,help="verified Scarlet netd firewall compatibility build")
+    parser.add_argument("--audio-start-build",type=Path,help="verified audioserver startup helper build")
+    parser.add_argument("--audio-binder-compat",type=Path,help="verified audio HAL binder compatibility build")
     for flag in ["runtime-root", "stock-inputs", "profile", "output"]:
         parser.add_argument("--" + flag, type=Path, required=True)
     parser.add_argument("--framework-inputs",type=Path,help="verified stock framework and app_process64 for init boot")
@@ -648,7 +743,7 @@ def main():
     if (any(graphics.values()) or args.graphics_vulkan) and (not all(graphics.values()) or not args.platform_image):parser.error("graphics providers require all three builds and --platform-image")
     if args.graphics_vulkan:graphics["vulkan"]=args.graphics_vulkan
     if args.reuse_payloads:
-        reconfigure(args.reuse_payloads, args.runtime_root, args.stock_inputs, args.profile, args.output, args.vintf_image, args.service_image)
+        reconfigure(args.reuse_payloads, args.runtime_root, args.stock_inputs, args.profile, args.output, args.vintf_image, args.service_image, args.netd_firewall_compat, args.audio_start_build, args.audio_binder_compat)
     else:
         prepare(args.sdk_image, args.runtime_root, args.stock_inputs, args.profile, args.output)
     if args.framework_inputs:

@@ -86,6 +86,12 @@ int main(int argc,char **argv) {
   if(tick==40 && getenv("SCARLET_INIT_START_INSTALLER") && !strcmp(getenv("SCARLET_INIT_START_INSTALLER"),"1")) {
    int result=__system_property_set("ctl.start","installd");printf("SCARLET_INIT_CONTROL_REQUEST service=installd result=%d\n",result);
   }
+  if(tick==40 && getenv("SCARLET_INIT_START_NETD") && !strcmp(getenv("SCARLET_INIT_START_NETD"),"1")) {
+   int bpfflag=__system_property_set("bpf.progs_loaded","1");
+   char bpfvalue[PROP_VALUE_MAX]={0};__system_property_get("bpf.progs_loaded",bpfvalue);
+   printf("SCARLET_INIT_BPF_LOADER_FLAG set=%d value=%s\n",bpfflag,bpfvalue);
+   int result=__system_property_set("ctl.start","netd");printf("SCARLET_INIT_CONTROL_REQUEST service=netd result=%d\n",result);
+  }
   if(tick==40 || tick==80)snapshot();
   usleep(100000);
  }

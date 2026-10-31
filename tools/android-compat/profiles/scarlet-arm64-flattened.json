@@ -66,7 +66,10 @@
     "u:r:odsign:s0": 17,
     "u:r:hal_health_default:s0": 18,
     "u:r:vold:s0": 19,
-    "u:r:lmkd:s0": 20
+    "u:r:lmkd:s0": 20,
+    "u:r:netd:s0": 21,
+    "u:r:audioserver:s0": 22,
+    "u:r:hal_audio_default:s0": 23
   },
   "transitions": [
     [
@@ -96,6 +99,7 @@
       "u:object_r:bluetooth_config_prop:s0",
       "u:object_r:bootloader_prop:s0",
       "u:object_r:boottime_prop:s0",
+      "u:object_r:bpf_progs_loaded_prop:s0",
       "u:object_r:build_prop:s0",
       "u:object_r:build_vendor_prop:s0",
       "u:object_r:cpu_variant_prop:s0",
@@ -214,7 +218,11 @@
     "/system/bin/odsign": "u:object_r:odsign_exec:s0",
     "/vendor/bin/hw/android.hardware.health@2.1-service": "u:object_r:hal_health_default_exec:s0",
     "/system/bin/vold": "u:object_r:vold_exec:s0",
-    "/system/bin/lmkd": "u:object_r:lmkd_exec:s0"
+    "/system/bin/lmkd": "u:object_r:lmkd_exec:s0",
+    "/system/bin/netd": "u:object_r:netd_exec:s0",
+    "/system/bin/audioserver": "u:object_r:audioserver_exec:s0",
+    "/vendor/bin/hw/android.hardware.audio.service": "u:object_r:hal_audio_default_exec:s0",
+    "/system/bin/scarlet-audio-late-start": "u:object_r:audio_start_exec:s0"
   },
   "exec_transitions": [
     [
@@ -306,6 +314,30 @@
       "u:object_r:lmkd_exec:s0",
       "u:r:lmkd:s0",
       1069
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:netd_exec:s0",
+      "u:r:netd:s0",
+      0
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:audioserver_exec:s0",
+      "u:r:audioserver:s0",
+      1041
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:hal_audio_default_exec:s0",
+      "u:r:hal_audio_default:s0",
+      1041
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:audio_start_exec:s0",
+      "u:r:init:s0",
+      0
     ]
   ],
   "resource_groups": {
@@ -326,7 +358,10 @@
         "targets": [
           "u:object_r:property_socket:s0",
           "u:object_r:zygote_socket:s0",
-          "u:object_r:lmkd_socket:s0"
+          "u:object_r:lmkd_socket:s0",
+          "u:object_r:dnsproxyd_socket:s0",
+          "u:object_r:mdns_socket:s0",
+          "u:object_r:fwmarkd_socket:s0"
         ],
         "kinds": [
           6
@@ -379,6 +414,9 @@
           "u:object_r:ptmx_device:s0",
           "u:object_r:property_socket:s0",
           "u:object_r:lmkd_socket:s0",
+          "u:object_r:dnsproxyd_socket:s0",
+          "u:object_r:mdns_socket:s0",
+          "u:object_r:fwmarkd_socket:s0",
           "u:object_r:random_device:s0",
           "u:object_r:properties_device:s0",
           "u:object_r:property_info:s0",
@@ -2466,6 +2504,71 @@
       3
     ],
     [
+      "u:r:netd:s0",
+      "u:object_r:dnsresolver_service:s0",
+      3
+    ],
+    [
+      "u:r:netd:s0",
+      "u:object_r:netd_service:s0",
+      3
+    ],
+    [
+      "u:r:netd:s0",
+      "u:object_r:mdns_service:s0",
+      3
+    ],
+    [
+      "u:r:netd:s0",
+      "u:object_r:system_net_netd_hwservice:s0",
+      3
+    ],
+    [
+      "u:r:netd:s0",
+      "u:object_r:hidl_base_hwservice:s0",
+      3
+    ],
+    [
+      "u:r:audioserver:s0",
+      "u:object_r:audioserver_service:s0",
+      3
+    ],
+    [
+      "u:r:audioserver:s0",
+      "u:object_r:batterystats_service:s0",
+      2
+    ],
+    [
+      "u:r:audioserver:s0",
+      "u:object_r:hal_audio_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:audioserver:s0",
+      "u:object_r:hidl_manager_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:hal_audio_default:s0",
+      "u:object_r:hal_audio_hwservice:s0",
+      3
+    ],
+    [
+      "u:r:hal_audio_default:s0",
+      "u:object_r:hidl_manager_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:hal_audio_default:s0",
+      "u:object_r:hidl_base_hwservice:s0",
+      3
+    ],
+    [
+      "u:r:system_server:s0",
+      "u:object_r:hal_audio_hwservice:s0",
+      2
+    ],
+    [
       "u:r:system_server:s0",
       "u:r:vold:s0",
       4
@@ -2491,6 +2594,10 @@
     ],
     [
       "u:r:init:s0",
+      "u:r:netd:s0"
+    ],
+    [
+      "u:r:init:s0",
       "u:object_r:pdx_display_client_endpoint_socket:s0"
     ],
     [
@@ -2506,6 +2613,7 @@
     "framework": [
       "android.frameworks.stats.IStats/default",
       "android.system.suspend.ISystemSuspend/default",
+      "android.system.net.netd@1.1::INetd/default",
       "android.hidl.manager@1.2::IServiceManager/default",
       "android.hidl.token@1.0::ITokenManager/default",
       "android.frameworks.sensorservice@1.0::ISensorManager/default",
@@ -2515,7 +2623,9 @@
       "android.hardware.graphics.allocator@2.0::IAllocator/default",
       "android.hardware.graphics.mapper@2.0::IMapper/default",
       "android.hardware.graphics.composer@2.1::IComposer/default",
-      "android.hardware.health@2.1::IHealth/default"
+      "android.hardware.health@2.1::IHealth/default",
+      "android.hardware.audio@7.1::IDevicesFactory/default",
+      "android.hardware.audio.effect@7.1::IEffectsFactory/default"
     ]
   },
   "host_services": [
@@ -2526,7 +2636,9 @@
     "odsign",
     "health",
     "vold",
-    "lmkd"
+    "netd",
+    "audioserver",
+    "audio_hal"
   ],
   "package_set": "stock-home"
 }

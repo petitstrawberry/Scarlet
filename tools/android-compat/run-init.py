@@ -25,6 +25,8 @@ def main():
     if capture_frame:arguments.remove("--capture-frame")
     start_installer="--start-installer" in arguments
     if start_installer:arguments.remove("--start-installer")
+    start_netd="--start-netd" in arguments
+    if start_netd:arguments.remove("--start-netd")
     manage_apps="--manage-app-policy" in arguments
     if manage_apps:arguments.remove("--manage-app-policy")
     if manage_apps and "--boot-profile" not in arguments:raise ValueError("app policy management requires a boot profile")
@@ -75,6 +77,7 @@ def main():
             "service_readiness": "not asserted",
             "service_control_request": "ctl.start=zygote after 4 seconds" if start_zygote else None, "apex_activation": "stock apexd must perform activation",
             "installer_control_request": "ctl.start=installd after 4 seconds" if start_installer else None,
+            "netd_control_request": "ctl.start=netd after 4 seconds" if start_netd else None,
             "app_policy_manager": manage_apps,
         }, indent=2) + "\n")
         return metadata
@@ -82,6 +85,7 @@ def main():
     if start_zygote:arguments.extend(["--program-argument","start-zygote"])
     arguments.extend(["--program-env",f"SCARLET_INIT_OBSERVE_SECONDS={observation}"])
     if start_installer:arguments.extend(["--program-env","SCARLET_INIT_START_INSTALLER=1"])
+    if start_netd:arguments.extend(["--program-env","SCARLET_INIT_START_NETD=1"])
     runner.stage_boot_inputs = stage
     original_run=runner.smoke.run_guest
     previous=os.environ.get("SCARLET_ANDROID_SWS_NATIVE")

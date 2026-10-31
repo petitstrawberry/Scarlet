@@ -42,6 +42,27 @@ class HostServicesTest(unittest.TestCase):
         with self.assertRaises(ValueError):validate_staged(bad)
         with self.assertRaises(ValueError):build_lmkd(b"service lmkd /system/bin/lmkd\n",b"stock")
 
+    def test_netd_preserves_control_sockets_and_removes_unsupported_capabilities(self):
+        from host_services import NETD,NETD_BINARY,NETD_MANAGED_RC,build_netd
+        stock=(b"service netd /system/bin/netd\n    class main\n"
+               b"    capabilities CHOWN DAC_OVERRIDE DAC_READ_SEARCH FOWNER IPC_LOCK KILL NET_ADMIN NET_BIND_SERVICE NET_RAW SETUID SETGID\n"
+               b"    group root net_admin\n    socket dnsproxyd stream 0660 root inet\n"
+               b"    onrestart restart zygote\n    onrestart restart zygote_secondary\n")
+        managed,proof=build_netd(stock,b"stock netd")
+        self.assertNotIn(b"capabilities",managed)
+        self.assertIn(b"socket dnsproxyd",managed)
+        self.assertIn(b"setprop bpf.progs_loaded 1",managed)
+        self.assertIn(b"oneshot\n    disabled",managed)
+        self.assertNotIn(b"onrestart restart zygote",managed)
+        self.assertEqual(proof["bpf_loader"],"unavailable")
+        proof.update(files={NETD_BINARY:proof["binary_sha256"],"system/lib64/libnetd_resolv.so":"dependency"},
+                     native_needed={NETD_BINARY:["libnetd_resolv.so"],"system/lib64/libnetd_resolv.so":[]})
+        metadata={"profile":{"host_services":[NETD]},"host_service_inputs":{NETD:proof},
+                  "files":{**proof["files"],NETD_MANAGED_RC:proof["managed_rc_sha256"]}}
+        validate_staged(metadata)
+        bad=deepcopy(metadata);bad["files"]["system/lib64/libnetd_resolv.so"]="changed"
+        with self.assertRaises(ValueError):validate_staged(bad)
+
     def test_health_requires_real_provider_and_preserves_host_power_boundary(self):
         manifest=b'<manifest type="device"><hal format="hidl"><name>android.hardware.health</name><transport>hwbinder</transport><fqname>@2.1::IHealth/default</fqname></hal></manifest>'
         managed,proof,providers=build_health(HEALTH_TEXT.encode(),b"stock health",manifest)

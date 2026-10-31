@@ -51,6 +51,40 @@ for _name in ("debug","kill_heaviest_task","kill_timeout_ms","swap_free_low_perc
               "thrashing_limit_decay","thrashing_limit_critical","swap_util_max","filecache_min_kb"):
     LMKD_TEXT += "on property:persist.device_config.lmkd_native." + _name + "=*\n    setprop lmkd.reinit ${sys.boot_completed:-0}\n\n"
 LMKD_TEXT = LMKD_TEXT.rstrip("\n") + "\n"
+NETD="netd"
+NETD_BINARY="system/bin/netd"
+NETD_STOCK_RC="system/etc/init/netd.rc"
+NETD_MANAGED_RC="scarlet/boot/services/netd.rc"
+NETD_FIREWALL_BINARY="system/bin/iptables"
+NETD_FIREWALL_ALIASES={"system/bin/iptables-restore":"iptables","system/bin/iptables-save":"iptables",
+                       "system/bin/ip6tables":"iptables","system/bin/ip6tables-restore":"iptables",
+                       "system/bin/ip6tables-save":"iptables"}
+AUDIOSERVER="audioserver"
+AUDIOSERVER_BINARY="system/bin/audioserver"
+AUDIOSERVER_STOCK_RC="system/etc/init/audioserver.rc"
+AUDIOSERVER_MANAGED_RC="scarlet/boot/services/audioserver.rc"
+AUDIO_HAL="audio_hal"
+AUDIO_HAL_BINARY="vendor/bin/hw/android.hardware.audio.service"
+AUDIO_HAL_STOCK_RC="vendor/etc/init/android.hardware.audio.service.rc"
+AUDIO_HAL_MANAGED_RC="scarlet/boot/services/audio_hal.rc"
+AUDIO_START_BINARY="system/bin/scarlet-audio-late-start"
+AUDIO_BINDER_COMPAT="vendor/lib64/libscarlet-audiobinder.so"
+AUDIO_CONFIG_FILES=["vendor/etc/a2dp_in_audio_policy_configuration_7_0.xml","vendor/etc/audio_effects.xml",
+                    "vendor/etc/audio_policy_configuration.xml","vendor/etc/audio_policy_volumes.xml",
+                    "vendor/etc/bluetooth_audio_policy_configuration_7_0.xml",
+                    "vendor/etc/primary_audio_policy_configuration.xml",
+                    "vendor/etc/r_submix_audio_policy_configuration.xml"]
+AUDIO_HAL_MODULES=["vendor/lib64/hw/android.hardware.audio@7.1-impl.ranchu.so",
+                   "vendor/lib64/hw/android.hardware.audio.legacy@7.1-impl.ranchu.so",
+                   "vendor/lib64/hw/android.hardware.audio.effect@7.0-impl.so",
+                   "vendor/lib64/hw/audio.primary.default.so",
+                   "vendor/lib64/hw/audio.r_submix.default.so",
+                   "vendor/lib64/hw/audio.bluetooth.default.so",
+                   "system/lib64/libaudiohal@7.1.so",
+                   "system/lib64/libaudiohal_deathhandler.so"]
+AUDIO_PRELOAD_MODULES=["vendor/lib64/hw/android.hardware.audio@7.1-impl.ranchu.so",
+                       "vendor/lib64/hw/android.hardware.audio.legacy@7.1-impl.ranchu.so",
+                       "vendor/lib64/hw/android.hardware.audio.effect@7.0-impl.so"]
 VOLD_TEXT=("service vold /system/bin/vold \\\n"
            "        --blkid_context=u:r:blkid:s0 --blkid_untrusted_context=u:r:blkid_untrusted:s0 \\\n"
            "        --fsck_context=u:r:fsck:s0 --fsck_untrusted_context=u:r:fsck_untrusted:s0\n"
@@ -66,27 +100,30 @@ STOCK_TEXT = ("service system_suspend /" + BINARY + "\n"
 
 def validate_selection(profile):
     names = profile.get("host_services", [])
-    if (not isinstance(names,list) or len(names)>8 or
-            any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER,ODSIGN,HEALTH,VOLD,LMKD) for name in names) or len(set(names))!=len(names)):
+    if (not isinstance(names,list) or len(names)>11 or
+            any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER,ODSIGN,HEALTH,VOLD,LMKD,NETD,AUDIOSERVER,AUDIO_HAL) for name in names) or len(set(names))!=len(names)):
         raise ValueError("unsupported stock host service selection")
     selected = CONTRACT in profile.get("vintf", {}).get("framework", [])
     if selected != (SUSPEND in names):
         raise ValueError("SystemSuspend requires both its host provider and VINTF contract")
-    from vintf_inputs import graphics_selection, HEALTH_CONTRACT, FRAMEWORK_HIDL
+    from vintf_inputs import graphics_selection, HEALTH_CONTRACT, AUDIO_CONTRACT, AUDIO_EFFECT_CONTRACT, FRAMEWORK_HIDL
     if FRAMEWORK_HIDL.intersection(profile.get("vintf",{}).get("framework",[])) and HW_MANAGER not in names:
         raise ValueError("HIDL framework management requires its stock provider")
     device=profile.get("vintf",{}).get("device",[])
-    graphics=[name for name in device if name!=HEALTH_CONTRACT]
+    graphics=[name for name in device if name not in (HEALTH_CONTRACT,AUDIO_CONTRACT,AUDIO_EFFECT_CONTRACT)]
     if (GRAPHICS in names and (HW_MANAGER not in names or not graphics_selection(graphics)) or
             GRAPHICS not in names and graphics):raise ValueError("graphics services require their exact device inventory and hardware-service manager")
     if ((HEALTH in names)!=(HEALTH_CONTRACT in device) or
             HEALTH in names and HW_MANAGER not in names):
         raise ValueError("Health requires its exact device contract and hardware-service manager")
+    if ((AUDIO_HAL in names)!=(AUDIO_CONTRACT in device and AUDIO_EFFECT_CONTRACT in device) or
+            AUDIO_HAL in names and HW_MANAGER not in names):
+        raise ValueError("Audio HAL requires its exact device contract and hardware-service manager")
     return names
 
 
 def imports(profile):
-    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC,GRAPHICS:GRAPHICS_RC,INSTALLER:INSTALLER_MANAGED_RC,ODSIGN:ODSIGN_MANAGED_RC,HEALTH:HEALTH_MANAGED_RC,VOLD:VOLD_MANAGED_RC,LMKD:LMKD_MANAGED_RC}[name] for name in validate_selection(profile)]
+    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC,GRAPHICS:GRAPHICS_RC,INSTALLER:INSTALLER_MANAGED_RC,ODSIGN:ODSIGN_MANAGED_RC,HEALTH:HEALTH_MANAGED_RC,VOLD:VOLD_MANAGED_RC,LMKD:LMKD_MANAGED_RC,NETD:NETD_MANAGED_RC,AUDIOSERVER:AUDIOSERVER_MANAGED_RC,AUDIO_HAL:AUDIO_HAL_MANAGED_RC}[name] for name in validate_selection(profile)]
 
 
 def build_vold(stock_rc,binary):
@@ -109,6 +146,75 @@ def build_lmkd(stock_rc,binary):
                     "binary_sha256":digest(binary),"managed_rc_sha256":digest(managed),
                     "omitted_capabilities":["DAC_OVERRIDE","KILL","IPC_LOCK","SYS_NICE","SYS_RESOURCE"],
                     "socket":{"name":"lmkd","type":"seqpacket","credentials":True,"mode":"0660"}}
+
+
+def build_netd(stock_rc,binary):
+    if not stock_rc.startswith(b"service netd /system/bin/netd\n") or b"    socket dnsproxyd stream 0660 root inet\n" not in stock_rc:
+        raise ValueError("changed stock netd service configuration")
+    capabilities=b"    capabilities CHOWN DAC_OVERRIDE DAC_READ_SEARCH FOWNER IPC_LOCK KILL NET_ADMIN NET_BIND_SERVICE NET_RAW SETUID SETGID\n"
+    if stock_rc.count(capabilities)!=1:raise ValueError("changed netd capability declaration")
+    marker=b"service netd /system/bin/netd\n"
+    restart=b"    onrestart restart zygote\n    onrestart restart zygote_secondary\n"
+    if stock_rc.count(restart)!=1:raise ValueError("changed netd restart policy")
+    managed=(stock_rc.replace(marker,b"# eBPF loading is not attached to this boot profile.\n"
+        b"on init\n    setprop bpf.progs_loaded 1\n\n"+marker)
+        .replace(capabilities,b"")
+        .replace(restart,b"# A failed optional network daemon must not restart Zygote.\n    oneshot\n    disabled\n"))
+    digest=lambda data:hashlib.sha256(data).hexdigest()
+    return managed,{"source_rc":NETD_STOCK_RC,"source_rc_sha256":digest(stock_rc),
+                    "binary_sha256":digest(binary),"managed_rc_sha256":digest(managed),
+                    "firewall_binary":NETD_FIREWALL_BINARY,"firewall_aliases":NETD_FIREWALL_ALIASES,
+                    "firewall_implementation":"scarlet-compat-v1","packet_filtering":"unavailable",
+                    "bpf_loader":"unavailable",
+                    "omitted_capabilities":["CHOWN","DAC_OVERRIDE","DAC_READ_SEARCH","FOWNER","IPC_LOCK","KILL","NET_ADMIN","NET_BIND_SERVICE","NET_RAW","SETUID","SETGID"]}
+
+
+def build_audioserver(stock_rc,binary):
+    if b"service audioserver /system/bin/audioserver\n" not in stock_rc or b"    user audioserver\n" not in stock_rc:
+        raise ValueError("changed stock audioserver configuration")
+    managed=stock_rc
+    for line in (b"    capabilities BLOCK_SUSPEND\n",b"    ioprio rt 4\n",b"    task_profiles ProcessCapacityHigh HighPerformance\n"):
+        if managed.count(line)!=1:raise ValueError("changed audioserver scheduling declaration")
+        managed=managed.replace(line,b"")
+    lines=[];running=False;inserted=False
+    for line in managed.splitlines():
+        if line.startswith(b"on property:init.svc.audioserver=running"):running=True
+        elif line.startswith(b"on "):running=False
+        if line.strip().startswith(b"start vendor.audio-hal"):
+            if running and not inserted:
+                lines.append(b"    start audio-start-helper")
+                inserted=True
+            continue
+        if not line.startswith(b"    onrestart "):lines.append(line)
+    if not inserted:raise ValueError("missing audioserver readiness action")
+    managed=(b"\n".join(lines)+b"\n\nservice audio-start-helper /"+AUDIO_START_BINARY.encode()+
+             b"\n    class core\n    user root\n    group root\n    seclabel u:r:init:s0\n    oneshot\n    disabled\n")
+    digest=lambda data:hashlib.sha256(data).hexdigest()
+    return managed,{"source_rc":AUDIOSERVER_STOCK_RC,"source_rc_sha256":digest(stock_rc),
+                    "binary_sha256":digest(binary),"managed_rc_sha256":digest(managed),
+                    "rt_scheduling":"unavailable","start_helper":AUDIO_START_BINARY}
+
+
+def build_audio_hal(stock_rc,binary):
+    if b"service vendor.audio-hal /vendor/bin/hw/android.hardware.audio.service\n" not in stock_rc:
+        raise ValueError("changed stock audio HAL configuration")
+    managed=stock_rc
+    for line in (b"    capabilities BLOCK_SUSPEND\n",b"    ioprio rt 4\n",b"    task_profiles ProcessCapacityHigh HighPerformance\n"):
+        if managed.count(line)!=1:raise ValueError("changed audio HAL scheduling declaration")
+        managed=managed.replace(line,b"")
+    managed=managed.replace(b"    class hal\n",b"    class hal\n    disabled\n")
+    preload=b"    setenv LD_PRELOAD /"+AUDIO_BINDER_COMPAT.encode()+b"".join(
+        b":/"+path.encode() for path in AUDIO_PRELOAD_MODULES)+b"\n"
+    managed=managed.replace(b"    group audio camera drmrpc inet media mediadrm net_bt net_bt_admin net_bw_acct wakelock context_hub\n",
+        b"    group audio camera drmrpc inet media mediadrm net_bt net_bt_admin net_bw_acct wakelock context_hub\n"
+        b"    chdir /\n    setenv LD_LIBRARY_PATH /vendor/lib64/hw:/vendor/lib64:/system/lib64\n"+preload)
+    managed=b"\n".join(line for line in managed.splitlines() if not line.startswith(b"    onrestart "))+b"\n"
+    digest=lambda data:hashlib.sha256(data).hexdigest()
+    return managed,{"source_rc":AUDIO_HAL_STOCK_RC,"source_rc_sha256":digest(stock_rc),
+                    "binary_sha256":digest(binary),"managed_rc_sha256":digest(managed),
+                    "rt_scheduling":"unavailable","audio_output":"stock HAL initialization only",
+                    "configuration_files":AUDIO_CONFIG_FILES,"start_helper":AUDIO_START_BINARY,
+                    "binder_compat":AUDIO_BINDER_COMPAT}
 
 
 def build_health(stock_rc,binary,manifest):
@@ -227,6 +333,36 @@ def validate_staged(metadata):
                 set(record.get("native_needed",{}))!=set(files) or
                 any(metadata["files"].get(path)!=digest for path,digest in files.items())):
             raise ValueError("changed lmkd dependency inputs")
+    if NETD in names:
+        record=proof[NETD]
+        if (metadata["files"].get(NETD_BINARY)!=record.get("binary_sha256") or
+                metadata["files"].get(NETD_MANAGED_RC)!=record.get("managed_rc_sha256") or
+                record.get("bpf_loader")!="unavailable" or
+                record.get("firewall_binary")!=NETD_FIREWALL_BINARY or
+                record.get("firewall_aliases")!=NETD_FIREWALL_ALIASES or
+                record.get("firewall_implementation")!="scarlet-compat-v1" or
+                record.get("packet_filtering")!="unavailable" or
+                not record.get("omitted_capabilities")):
+            raise ValueError("changed netd provider inputs")
+        files=record.get("files",{})
+        if (files.get(NETD_BINARY)!=record.get("binary_sha256") or
+                set(record.get("native_needed",{}))!=set(files) or
+                any(metadata["files"].get(path)!=digest for path,digest in files.items())):
+            raise ValueError("changed netd dependency inputs")
+    for name,binary,managed_rc in ((AUDIOSERVER,AUDIOSERVER_BINARY,AUDIOSERVER_MANAGED_RC),
+                                   (AUDIO_HAL,AUDIO_HAL_BINARY,AUDIO_HAL_MANAGED_RC)):
+        if name not in names:continue
+        record=proof[name];files=record.get("files",{})
+        if (metadata["files"].get(binary)!=record.get("binary_sha256") or
+                metadata["files"].get(managed_rc)!=record.get("managed_rc_sha256") or
+                record.get("rt_scheduling")!="unavailable" or
+                record.get("start_helper")!=AUDIO_START_BINARY or
+                name==AUDIO_HAL and record.get("configuration_files")!=AUDIO_CONFIG_FILES or
+                name==AUDIO_HAL and record.get("binder_compat")!=AUDIO_BINDER_COMPAT or
+                files.get(binary)!=record.get("binary_sha256") or
+                set(record.get("native_needed",{}))!=set(files) or
+                any(metadata["files"].get(path)!=digest for path,digest in files.items())):
+            raise ValueError("changed audio provider inputs")
     for name,binary,rc in [(INSTALLER,INSTALLER_BINARY,INSTALLER_MANAGED_RC),(ODSIGN,ODSIGN_BINARY,ODSIGN_MANAGED_RC)]:
         if name not in names:continue
         record=proof[name]
