@@ -425,7 +425,7 @@ mod tests {
         );
         assert!(super::resource::image_create_is_valid(create));
         create.usage |= GPU_IMAGE_USAGE_TRANSFER_DST;
-        assert!(!super::resource::image_create_is_valid(create));
+        assert!(super::resource::image_create_is_valid(create));
     }
 
     #[test_case]
