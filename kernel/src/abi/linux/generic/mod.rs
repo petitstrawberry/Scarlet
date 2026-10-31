@@ -24,6 +24,7 @@ mod record_lock;
 pub mod signal;
 mod signalfd;
 mod inotify;
+mod process_memory;
 pub mod socket;
 pub mod time;
 pub mod utimens;
@@ -728,6 +729,7 @@ syscall_table! {
     Munlockall = 231 => mm::sys_munlockall,
     Mincore = 232 => mm::sys_mincore,
     Madvise = 233 => mm::sys_madvise,
+    ProcessVmReadv = 270 => process_memory::sys_readv,
     Mlock2 = 284 => mm::sys_mlock2,
     Accept4 = 242 => socket::sys_accept4,
     Getrandom = 278 => fs::sys_getrandom,
