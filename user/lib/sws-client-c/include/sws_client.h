@@ -64,6 +64,10 @@ int32_t sws_poll_event(SwsEvent *event);
  * duplicates it before sending it to SWS and retains the caller's ownership. */
 int32_t sws_gpu_register(SwsBuffer buffer, uint32_t width, uint32_t height,
                          int32_t raw_handle);
+/* Opaque surfaces (including Vulkan COMPOSITE_ALPHA_OPAQUE) ignore stored alpha.
+ * The original registration retains premultiplied-alpha scene semantics. */
+int32_t sws_gpu_register_opaque(SwsBuffer buffer, uint32_t width, uint32_t height,
+                                int32_t raw_handle);
 int32_t sws_gpu_commit(SwsBuffer buffer, uint64_t commit_serial,
                        uint32_t width, uint32_t height);
 int32_t sws_gpu_destroy(SwsBuffer buffer);

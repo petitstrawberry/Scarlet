@@ -1481,6 +1481,7 @@ pub enum ClientMessageRef<'a> {
         compositor_epoch: u32,
         width: u32,
         height: u32,
+        opaque: bool,
     },
 
     /// Request destruction of a reusable external buffer object.
@@ -2626,13 +2627,22 @@ pub fn parse_client_message<'a>(
             })
         }
         client_msg::EXTENSION_DEFINE_GPU_BUFFER => {
-            if payload.len() != 16 {
+            if !matches!(payload.len(), 16 | 20) {
                 return Err(ProtocolError::MalformedPayload);
             }
             let buffer_id = read_u32(payload, 0)?;
             let compositor_epoch = read_u32(payload, 4)?;
             let width = read_u32(payload, 8)?;
             let height = read_u32(payload, 12)?;
+            let opaque = if payload.len() == 20 {
+                match read_u32(payload, 16)? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(ProtocolError::MalformedPayload),
+                }
+            } else {
+                false
+            };
             if buffer_id == 0 || compositor_epoch == 0 || width == 0 || height == 0 {
                 return Err(ProtocolError::MalformedPayload);
             }
@@ -2641,6 +2651,7 @@ pub fn parse_client_message<'a>(
                 compositor_epoch,
                 width,
                 height,
+                opaque,
             })
         }
         client_msg::EXTENSION_DESTROY_BUFFER => {
@@ -4326,6 +4337,22 @@ pub fn payload_extension_define_gpu_buffer(
     payload
 }
 
+/// Register GPU contents whose alpha channel must be ignored during composition.
+/// Legacy 16-byte registrations retain premultiplied-alpha semantics.
+pub fn payload_extension_define_opaque_gpu_buffer(
+    buffer_id: u32,
+    epoch: u32,
+    width: u32,
+    height: u32,
+) -> [u8; 20] {
+    let mut payload = [0; 20];
+    payload[..16].copy_from_slice(&payload_extension_define_gpu_buffer(
+        buffer_id, epoch, width, height,
+    ));
+    payload[16..].copy_from_slice(&1_u32.to_le_bytes());
+    payload
+}
+
 /// Build a reusable extension-buffer definition payload.
 ///
 /// # Arguments
@@ -5946,7 +5973,23 @@ mod tests {
                 compositor_epoch: 7,
                 width: 128,
                 height: 96,
+                opaque: false,
             })
+        );
+        let mut opaque_gpu = super::payload_extension_define_opaque_gpu_buffer(5, 7, 128, 96);
+        assert_eq!(
+            parse_client_message(client_msg::EXTENSION_DEFINE_GPU_BUFFER, &opaque_gpu),
+            Ok(ClientMessageRef::ExtensionDefineGpuBuffer {
+                buffer_id: 5,
+                compositor_epoch: 7,
+                width: 128,
+                height: 96,
+                opaque: true,
+            })
+        );
+        opaque_gpu[16..].copy_from_slice(&2_u32.to_le_bytes());
+        assert!(
+            parse_client_message(client_msg::EXTENSION_DEFINE_GPU_BUFFER, &opaque_gpu).is_err()
         );
         for invalid in [
             super::payload_extension_define_gpu_buffer(0, 7, 128, 96),

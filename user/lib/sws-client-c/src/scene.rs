@@ -167,19 +167,33 @@ impl Scenes {
         width: u32,
         height: u32,
         handle: &Handle,
+        opaque: bool,
     ) -> Result<(), Error> {
         if self.buffers.values().any(|b| b.identity == identity) {
             return Err(Error::InvalidRequest);
         }
         let resource = self.resource()?;
-        let token = connection.send_request_with_handle(
-            msg::EXTENSION_DEFINE_GPU_BUFFER,
-            &p::payload_extension_define_gpu_buffer(
+        let alpha_payload = p::payload_extension_define_gpu_buffer(
+            resource,
+            identity.compositor_epoch,
+            width,
+            height,
+        );
+        let opaque_payload;
+        let payload = if opaque {
+            opaque_payload = p::payload_extension_define_opaque_gpu_buffer(
                 resource,
                 identity.compositor_epoch,
                 width,
                 height,
-            ),
+            );
+            opaque_payload.as_slice()
+        } else {
+            alpha_payload.as_slice()
+        };
+        let token = connection.send_request_with_handle(
+            msg::EXTENSION_DEFINE_GPU_BUFFER,
+            payload,
             handle,
         )?;
         match connection.wait_response(token)?.message() {

@@ -588,6 +588,21 @@ pub extern "C" fn sws_gpu_register(
     height: u32,
     raw_handle: i32,
 ) -> i32 {
+    gpu_register(buffer, width, height, raw_handle, false)
+}
+
+/// Register native opaque content without interpreting its stored alpha.
+#[unsafe(no_mangle)]
+pub extern "C" fn sws_gpu_register_opaque(
+    buffer: SwsBuffer,
+    width: u32,
+    height: u32,
+    raw_handle: i32,
+) -> i32 {
+    gpu_register(buffer, width, height, raw_handle, true)
+}
+
+fn gpu_register(buffer: SwsBuffer, width: u32, height: u32, raw_handle: i32, opaque: bool) -> i32 {
     if width == 0 || height == 0 || raw_handle < 0 {
         return -1;
     }
@@ -611,7 +626,7 @@ pub extern "C" fn sws_gpu_register(
         if client.scenes.contains(buffer.window_id) {
             client
                 .scenes
-                .register(&client.connection, buffer, width, height, &handle)?;
+                .register(&client.connection, buffer, width, height, &handle, opaque)?;
             return Ok(0);
         }
         client
