@@ -2257,6 +2257,7 @@ fn stream_error_to_errno(err: StreamError) -> usize {
         StreamError::Closed => errno::EBADF,
         StreamError::InvalidArgument => errno::EINVAL,
         StreamError::Interrupted => errno::EINTR,
+        StreamError::Cancelled => errno::ECANCELED,
         StreamError::PermissionDenied => errno::EACCES,
         StreamError::DeviceError => errno::EIO,
         StreamError::NotSupported | StreamError::SeekError => errno::ESPIPE,

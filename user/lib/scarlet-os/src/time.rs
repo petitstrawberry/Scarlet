@@ -46,6 +46,17 @@ pub fn system_time() -> Option<Duration> {
     system_time_ns().map(Duration::from_nanos)
 }
 
+/// Read the native wake-deadline snapshot for an outer power manager. Pending
+/// events require staying awake. Software-only deadlines require an actual
+/// wake source before suspend; this query never claims one is available.
+pub fn wake_deadlines() -> Result<scarlet_sys::RawWakeDeadlineSnapshotV1, &'static str> {
+    let mut state = scarlet_sys::RawWakeDeadlineSnapshotV1::default();
+    // SAFETY: The initialized fixed-width output remains writable for the call.
+    let result = unsafe { scarlet_sys::syscall2(Syscall::WakeDeadlineQuery,
+        core::ptr::from_mut(&mut state) as usize, core::mem::size_of_val(&state)) };
+    if result == 0 && state.version == 1 { Ok(state) } else { Err("wake deadline query denied or invalid") }
+}
+
 /// Set UTC valid at a previously sampled boot-relative monotonic instant.
 ///
 /// Only the init thread group may call this; other processes request an update

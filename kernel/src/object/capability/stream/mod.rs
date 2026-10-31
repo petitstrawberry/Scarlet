@@ -25,6 +25,8 @@ pub enum StreamError {
     InvalidArgument,
     /// Operation interrupted by signal
     Interrupted,
+    /// A pending operation was cancelled by a change to its clock or resource.
+    Cancelled,
     /// Permission denied for this operation
     PermissionDenied,
     /// Device-specific error

@@ -107,6 +107,22 @@ pub struct RawSystemTimeUpdateV1 {
 
 const _: [(); 24] = [(); core::mem::size_of::<RawSystemTimeUpdateV1>()];
 
+/// Coherent view of native wake reservations. Flags: bit 0 has a monotonic
+/// deadline, bit 1 has unread wake events, bit 2 is software-only. The power
+/// manager must remain awake for unread events, and must arrange hardware wake
+/// before suspending with a deadline. Reserved is zero; version is one.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RawWakeDeadlineSnapshotV1 {
+    pub version: u32,
+    pub flags: u32,
+    pub revision: u64,
+    pub monotonic_deadline_ns: u64,
+    pub pending_events: u32,
+    pub reserved: u32,
+}
+const _: [(); 32] = [(); core::mem::size_of::<RawWakeDeadlineSnapshotV1>()];
+
 /// Running-kernel identity returned by [`Syscall::GetKernelInfo`].
 ///
 /// Every field contains a NUL-terminated UTF-8 string. This record describes
@@ -724,6 +740,7 @@ pub const SCTL_SOCKET_TAKE_ERROR: u32 = 0x5353_0010;
 
 /// Interrupted system call.
 pub const ERRNO_EINTR: i32 = 4;
+pub const ERRNO_ECANCELED: i32 = 125;
 /// Input/output error.
 pub const ERRNO_EIO: i32 = 5;
 /// Bad handle.
@@ -918,6 +935,10 @@ pub enum Syscall {
     /// references and UTC overflow (including the unavailable sentinel) fail.
     /// Does not change monotonic time or persist to hardware RTC.
     SetSystemTime = 52,
+    /// Query pending native wake deadlines. Arguments: writable
+    /// RawWakeDeadlineSnapshotV1 pointer and size (32). Requires resource
+    /// management authority. A software-only snapshot cannot authorize suspend.
+    WakeDeadlineQuery = 53,
 
     // Process information
     GetTaskInfoCount = 24,

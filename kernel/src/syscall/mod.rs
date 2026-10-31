@@ -322,6 +322,7 @@ syscall_table! {
     FutexWake = 50 => sys_futex_wake,
     GetKernelInfo = 51 => crate::system::sys_get_kernel_info,
     SetSystemTime = 52 => crate::task::syscall::sys_set_system_time,
+    WakeDeadlineQuery = 53 => crate::system_power::wake::sys_query,
 
     // ABI Zone Management
     RegisterAbiZone = 90 => sys_register_abi_zone,

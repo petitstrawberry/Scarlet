@@ -41,6 +41,7 @@ fn stream_error_result(error: super::StreamError) -> usize {
     match error {
         super::StreamError::WouldBlock => (-EAGAIN) as usize,
         super::StreamError::Interrupted => (-EINTR) as usize,
+        super::StreamError::Cancelled => (-(scarlet_abi::ERRNO_ECANCELED as isize)) as usize,
         _ => usize::MAX,
     }
 }

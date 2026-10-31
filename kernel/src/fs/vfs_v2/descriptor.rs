@@ -31,6 +31,7 @@ fn stream_errno(error: StreamError) -> usize {
         StreamError::PermissionDenied => negative(ERRNO_EACCES),
         StreamError::NoSpace => negative(ERRNO_ENOSPC),
         StreamError::Interrupted => negative(scarlet_abi::ERRNO_EINTR),
+        StreamError::Cancelled => negative(scarlet_abi::ERRNO_ECANCELED),
         StreamError::WouldBlock => negative(scarlet_abi::ERRNO_EAGAIN),
         StreamError::BrokenPipe => negative(ERRNO_EPIPE),
         StreamError::Closed => negative(ERRNO_EBADF),

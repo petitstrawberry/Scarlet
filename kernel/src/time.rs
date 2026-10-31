@@ -4,6 +4,9 @@
 //! including current time access for filesystem operations.
 
 use crate::sync::IrqSpinLock;
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 mod wall_clock;
 use wall_clock::WallClock;
@@ -53,6 +56,26 @@ pub fn udelay(us: u64) {
 // Keep each UTC/monotonic pair coherent across CPUs, including readers in IRQs.
 static WALL_CLOCK: IrqSpinLock<WallClock> = IrqSpinLock::new(WallClock::new());
 
+/// Native observers of discontinuous wall-clock updates. Callbacks run after
+/// the clock/observer locks have been released, and may rearm native timers.
+pub trait ClockChangeListener: Send + Sync {
+    fn clock_changed(self: Arc<Self>, revision: u64);
+}
+static CLOCK_REVISION: AtomicU64 = AtomicU64::new(0);
+static CLOCK_LISTENERS: IrqSpinLock<Vec<Weak<dyn ClockChangeListener>>> = IrqSpinLock::new(Vec::new());
+pub fn clock_revision() -> u64 { CLOCK_REVISION.load(Ordering::Acquire) }
+pub fn observe_clock_changes(listener: &Arc<dyn ClockChangeListener>) -> Result<(), &'static str> {
+    let mut listeners = CLOCK_LISTENERS.lock();
+    listeners.retain(|listener| listener.strong_count() != 0);
+    if listeners.len() >= 4096 { return Err("clock observer limit"); }
+    listeners.push(Arc::downgrade(listener));
+    Ok(())
+}
+fn notify_clock_changes(revision: u64) {
+    let listeners: Vec<_> = CLOCK_LISTENERS.lock().iter().filter_map(Weak::upgrade).collect();
+    for listener in listeners { listener.clock_changed(revision); }
+}
+
 /// Get the current wall-clock time in nanoseconds since the Unix epoch.
 ///
 /// # Returns
@@ -68,8 +91,13 @@ pub fn system_time_ns() -> Option<u64> {
 /// Apply UTC valid at a prior monotonic instant, accounting for delivery delay.
 /// This neither changes the monotonic clock nor writes any hardware RTC.
 pub fn set_system_time_at(unix_ns: u64, monotonic_ns: u64) -> Result<(), &'static str> {
-    let mut clock = WALL_CLOCK.lock();
-    clock.set(unix_ns, monotonic_ns, current_time_ns())
+    let revision = {
+        let mut clock = WALL_CLOCK.lock();
+        clock.set(unix_ns, monotonic_ns, current_time_ns())?;
+        CLOCK_REVISION.fetch_add(1, Ordering::AcqRel) + 1
+    };
+    notify_clock_changes(revision);
+    Ok(())
 }
 
 /// Get the current wall-clock time in microseconds since the Unix epoch.
