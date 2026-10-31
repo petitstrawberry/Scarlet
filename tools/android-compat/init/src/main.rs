@@ -11,10 +11,12 @@ mod services;
 mod native_sws;
 mod shield;
 mod stock;
+mod kernel_log;
 
 use std::{environment::HandleMapping, println};
 
 fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
+    let _diagnostic_log = kernel_log::Collector::start()?;
     if option_env!("SCARLET_ANDROID_INIT_BOOTSTRAP") == Some("1") {
         std::vm::configure_layout(24,16).map_err(|_| "Android address layout")?;
         println!("SCARLET_ANDROID_MMAP_RANDOMIZED");
@@ -57,22 +59,8 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
         };
     }
     if option_env!("SCARLET_ANDROID_ART") == Some("1") {
-        // Keep startup faults visible even when ART never reaches Java or exit.
-        // The host runner owns the timeout and the private QEMU process.
         let _logger = if option_env!("SCARLET_ANDROID_INIT_BOOTSTRAP") == Some("1") { None } else { Some(std::thread::Builder::new()
-            .spawn(|| {
-                let Ok(mut log) = std::fs::File::open("/dev/kmsg") else {
-                    println!("SCARLET_ANDROID_ART_FAIL: kernel log open");
-                    return;
-                };
-                let mut bytes = [0; 8192];
-                while let Ok(count) = log.read(&mut bytes) {
-                    if count == 0 {
-                        break;
-                    }
-                    std::print!("{}", std::string::String::from_utf8_lossy(&bytes[..count]));
-                }
-            })
+            .spawn(|| kernel_log::collect())
             .map_err(|_| "kernel log thread")?) };
         if option_env!("SCARLET_ANDROID_STOCK") == Some("1") {
             stock::prepare(&environment, &android, &handles)?;
