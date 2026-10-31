@@ -14,7 +14,6 @@
 #include <sys/stat.h>
 #include <sys/system_properties.h>
 #include <time.h>
-#include <dirent.h>
 struct task_info {
  unsigned long pid,ppid;unsigned char state,type,cpu,reserved;int exit_status;unsigned long tgid;
  char name[64];unsigned long long cpu_ns;unsigned util,min_util,capacity;unsigned char preference,padding[3];
@@ -27,19 +26,19 @@ static void snapshot(void) {
   printf("SCARLET_INIT_TASK pid=%lu ppid=%lu tgid=%lu state=%u exit=%d cpu_ns=%llu name=%.64s\n",info[i].pid,info[i].ppid,info[i].tgid,info[i].state,info[i].exit_status,info[i].cpu_ns,info[i].name);
 }
 static void dump_java_process(const char *package) {
- DIR *directory=opendir("/proc");if(!directory)return;
- struct dirent *entry;
- while((entry=readdir(directory))) {
-  char *end;long pid=strtol(entry->d_name,&end,10);if(*end || pid<=0)continue;
-  char path[64],cmdline[256];snprintf(path,sizeof(path),"/proc/%ld/cmdline",pid);
-  int fd=open(path,O_RDONLY|O_CLOEXEC);if(fd<0)continue;
-  ssize_t length=read(fd,cmdline,sizeof(cmdline)-1);close(fd);if(length<=0)continue;cmdline[length]=0;
-  if(strstr(cmdline,package)) {
-   printf("SCARLET_INIT_JAVA_DUMP package=%s pid=%ld\n",package,pid);
-   kill((pid_t)pid,SIGQUIT);
+ static int dumped;
+ struct task_info info[256];long count=syscall(0x53430000L+25,info,256);
+ int mains=0;
+ for(long i=0;i<count && i<256;i++)if(info[i].type==1 && info[i].pid==info[i].tgid && !strcmp(info[i].name,"main"))mains++;
+ if(dumped || mains<2)return;
+ dumped=1;
+ for(long i=0;i<count && i<256;i++) {
+  if(info[i].type==1 && info[i].pid==info[i].tgid && !strcmp(info[i].name,"main")) {
+   printf("SCARLET_INIT_JAVA_DUMP pid=%lu\n",info[i].pid);
+   kill((pid_t)info[i].pid,SIGQUIT);
   }
  }
- closedir(directory);
+ (void)package;
 }
 static int log_socket(void) {
  int fd=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0);if(fd<0)return -1;
@@ -109,7 +108,7 @@ int main(int argc,char **argv) {
    int result=__system_property_set("ctl.start","netd");printf("SCARLET_INIT_CONTROL_REQUEST service=netd result=%d\n",result);
   }
   if(tick==40 || tick==80)snapshot();
-  if(tick==600)dump_java_process("com.android.permissioncontroller");
+  dump_java_process("com.android.permissioncontroller");
   usleep(100000);
  }
  if(syscall(0x53430000L+1322,scope,0) || syscall(0x53430000L+1323,scope)){perror("owned scope stop");return 7;}

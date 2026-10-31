@@ -17,6 +17,7 @@
 #include <unistd.h>
 static int console=-1;
 static int zygote_diagnostic;
+static int minimum_log_priority;
 static struct stat null_identity;
 static int have_null;
 static void report(const char *format,...);
@@ -81,10 +82,13 @@ static void report(const char *format,...) {
  close(fd);
 }
 static void diagnostic_log(const struct __android_log_message *message) {
+ if(message->priority<minimum_log_priority)return;
  report("SCARLET_INIT_LOG priority=%d tag=%s %s\n",message->priority,message->tag?message->tag:"",message->message?message->message:"");
 }
 __attribute__((constructor)) static void capture_console(void) {
  const char *program=getprogname();zygote_diagnostic=program && !strcmp(program,"app_process64");
+ const char *priority=getenv("SCARLET_ANDROID_LOG_MIN_PRIORITY");
+ if(priority)minimum_log_priority=atoi(priority);
  if(zygote_diagnostic) {
   // Restore stock /dev/null stdio and close only inherited diagnostic consoles.
   int nullfd=open("/dev/null",O_RDWR|O_CLOEXEC);
