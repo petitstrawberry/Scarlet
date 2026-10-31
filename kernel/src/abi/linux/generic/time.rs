@@ -276,17 +276,6 @@ fn is_supported_clock(clock_id: i32) -> bool {
     )
 }
 
-fn realtime_deadline_to_monotonic(
-    realtime_deadline_ns: u64,
-    realtime_now_ns: u64,
-    monotonic_now_ns: u64,
-) -> u64 {
-    monotonic_now_ns
-        .saturating_add(realtime_deadline_ns.saturating_sub(realtime_now_ns))
-        // TimerObject reserves zero as the disarmed value.
-        .max(1)
-}
-
 fn timespec_to_ns(ts: &TimeSpec) -> Result<u64, usize> {
     if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= NSEC_PER_SEC_I64 {
         return Err(errno::EINVAL);
@@ -328,6 +317,21 @@ struct ItimerSpec {
     it_value: TimeSpec,
 }
 
+fn read_timer_spec(task: &crate::task::Task, address: usize) -> Result<ItimerSpec, usize> {
+    let mut bytes = [0;32];
+    crate::library::std::usercopy::copy_from_user(task,address,&mut bytes).map_err(|_| errno::EFAULT)?;
+    let number = |offset| i64::from_ne_bytes(bytes[offset..offset+8].try_into().unwrap());
+    Ok(ItimerSpec { it_interval: TimeSpec { tv_sec:number(0), tv_nsec:number(8) },
+                   it_value: TimeSpec { tv_sec:number(16), tv_nsec:number(24) } })
+}
+fn write_timer_spec(task: &crate::task::Task, address: usize, spec: &ItimerSpec) -> Result<(), usize> {
+    let mut bytes = [0;32];
+    for (index,value) in [spec.it_interval.tv_sec,spec.it_interval.tv_nsec,spec.it_value.tv_sec,spec.it_value.tv_nsec].iter().enumerate() {
+        bytes[index*8..index*8+8].copy_from_slice(&value.to_ne_bytes());
+    }
+    crate::library::std::usercopy::copy_to_user(task,address,&bytes).map_err(|_| errno::EFAULT)
+}
+
 /// Linux clock IDs (subset of commonly used ones)
 pub const CLOCK_REALTIME: i32 = 0;
 pub const CLOCK_MONOTONIC: i32 = 1;
@@ -337,6 +341,8 @@ pub const CLOCK_MONOTONIC_RAW: i32 = 4;
 pub const CLOCK_REALTIME_COARSE: i32 = 5;
 pub const CLOCK_MONOTONIC_COARSE: i32 = 6;
 pub const CLOCK_BOOTTIME: i32 = 7;
+pub const CLOCK_REALTIME_ALARM: i32 = 8;
+pub const CLOCK_BOOTTIME_ALARM: i32 = 9;
 
 const TFD_NONBLOCK: i32 = 0o00004000;
 const TFD_CLOEXEC: i32 = 0o02000000;
@@ -354,8 +360,12 @@ pub fn sys_timerfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
 
     trapframe.increment_pc_next(&task);
 
-    if !is_supported_clock(clock_id) {
+    let wakeup = matches!(clock_id, CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM);
+    if !matches!(clock_id, CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_BOOTTIME | CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM) {
         return errno::to_result(errno::EINVAL);
+    }
+    if wakeup && !task.credentials.read().permits(crate::shield::identity::RESERVE_WAKE) {
+        return errno::to_result(errno::EPERM);
     }
 
     let valid_flags = TFD_NONBLOCK | TFD_CLOEXEC;
@@ -363,7 +373,14 @@ pub fn sys_timerfd_create(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
         return errno::to_result(errno::EINVAL);
     }
 
-    let timer = Arc::new(Timer::new(clock_id, (flags & TFD_NONBLOCK) != 0));
+    let nonblocking = flags & TFD_NONBLOCK != 0;
+    let timer = if wakeup {
+        match Timer::new_wakeup(clock_id, nonblocking) {
+            Ok(timer) => timer,
+            Err(_) => return errno::to_result(errno::ENOMEM),
+        }
+    } else { Timer::new(clock_id, nonblocking) };
+    let timer = Arc::new(timer);
     let kernel_obj = KernelObject::from_timer(timer);
     let handle = match task.handle_table.insert(kernel_obj) {
         Ok(handle) => handle,
@@ -423,14 +440,16 @@ pub fn sys_timerfd_settime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
         Some(timer) => timer,
         None => return errno::to_result(errno::EINVAL),
     };
+    if timer.is_wakeup() && !task.credentials.read().permits(crate::shield::identity::RESERVE_WAKE) {
+        return errno::to_result(errno::EPERM);
+    }
 
-    let new_value_paddr = match task.vm_manager.translate_to_kva(new_value_ptr) {
-        Some(addr) => addr,
-        None => return errno::to_result(errno::EFAULT),
+    let new_spec = match read_timer_spec(&task,new_value_ptr) {
+        Ok(spec) => spec,
+        Err(error) => return errno::to_result(error),
     };
-    let new_spec = unsafe { *(new_value_paddr as *const ItimerSpec) };
 
-    let mut first_ns = match timespec_to_ns(&new_spec.it_value) {
+    let first_ns = match timespec_to_ns(&new_spec.it_value) {
         Ok(ns) => ns,
         Err(errno_val) => return errno::to_result(errno_val),
     };
@@ -440,28 +459,20 @@ pub fn sys_timerfd_settime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
     };
 
     if old_value_ptr != 0 {
-        let old_value_paddr = match task.vm_manager.translate_to_kva(old_value_ptr) {
-            Some(addr) => addr as *mut ItimerSpec,
-            None => return errno::to_result(errno::EFAULT),
-        };
         let (remaining_ns, previous_interval_ns) = timer.snapshot();
         let snapshot = ItimerSpec {
             it_interval: ns_to_timespec(previous_interval_ns),
             it_value: ns_to_timespec(remaining_ns),
         };
-        unsafe {
-            *old_value_paddr = snapshot;
+        if let Err(error) = write_timer_spec(&task,old_value_ptr,&snapshot) {
+            return errno::to_result(error);
         }
     }
 
     let absolute = (flags & TIMER_ABSTIME) != 0;
-    if absolute
-        && first_ns != 0
-        && matches!(timer.clock_id(), CLOCK_REALTIME | CLOCK_REALTIME_COARSE)
-    {
-        let monotonic_now_ns = get_time_ns();
-        let realtime_now_ns = system_time_ns().unwrap_or(monotonic_now_ns);
-        first_ns = realtime_deadline_to_monotonic(first_ns, realtime_now_ns, monotonic_now_ns);
+    if absolute && matches!(timer.clock_id(), CLOCK_REALTIME | CLOCK_REALTIME_ALARM) {
+        return timer.set_wall_time(first_ns, interval_ns, flags & TFD_TIMER_CANCEL_ON_SET != 0)
+            .map_or_else(|_| errno::to_result(errno::ENOMEM), |_| 0);
     }
 
     timer.set_time(first_ns, interval_ns, absolute);
@@ -497,20 +508,12 @@ pub fn sys_timerfd_gettime(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usi
         None => return errno::to_result(errno::EINVAL),
     };
 
-    let curr_value_paddr = match task.vm_manager.translate_to_kva(curr_value_ptr) {
-        Some(addr) => addr as *mut ItimerSpec,
-        None => return errno::to_result(errno::EFAULT),
-    };
     let (remaining_ns, interval_ns) = timer.snapshot();
     let snapshot = ItimerSpec {
         it_interval: ns_to_timespec(interval_ns),
         it_value: ns_to_timespec(remaining_ns),
     };
-    unsafe {
-        *curr_value_paddr = snapshot;
-    }
-
-    0
+    write_timer_spec(&task,curr_value_ptr,&snapshot).map_or_else(errno::to_result, |_| 0)
 }
 
 /// Linux `timer_create` implementation.
@@ -811,7 +814,7 @@ pub fn sys_clock_gettime(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
 
     // Get the current time based on the clock type
     let timespec = match clock_id {
-        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => {
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM => {
             // Wall clock (Unix epoch). Falls back to monotonic if no RTC has
             // initialized the wall clock yet (e.g. RTC-less hardware), so that
             // clock_gettime never fails for REALTIME.
@@ -826,7 +829,7 @@ pub fn sys_clock_gettime(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
                 tv_nsec: ((time_us % 1_000_000) * 1000) as i64,
             }
         }
-        CLOCK_BOOTTIME => {
+        CLOCK_BOOTTIME | CLOCK_BOOTTIME_ALARM => {
             // Boot time (same as monotonic for now)
             let time_us = current_time();
             TimeSpec {
@@ -1010,6 +1013,20 @@ mod tests {
     use super::*;
 
     #[test_case]
+    fn timerfd_specs_cross_user_pages_and_reject_an_unmapped_tail() {
+        use crate::environment::{PAGE_SIZE,USER_STACK_END};
+        use crate::task::{Task,TaskType};
+        let task=Task::new("timerfd-usercopy".into(),0,TaskType::User);
+        let base=USER_STACK_END-2*PAGE_SIZE;task.allocate_stack_pages(base,2).unwrap();
+        let spec=ItimerSpec { it_interval:TimeSpec {tv_sec:2,tv_nsec:3},it_value:TimeSpec {tv_sec:4,tv_nsec:5} };
+        write_timer_spec(&task,base+PAGE_SIZE-16,&spec).unwrap();
+        let read=read_timer_spec(&task,base+PAGE_SIZE-16).unwrap();
+        assert_eq!((read.it_interval.tv_sec,read.it_interval.tv_nsec,read.it_value.tv_sec,read.it_value.tv_nsec),(2,3,4,5));
+        assert!(matches!(read_timer_spec(&task,USER_STACK_END-16),Err(errno::EFAULT)));
+        assert_eq!(write_timer_spec(&task,USER_STACK_END-16,&spec),Err(errno::EFAULT));
+    }
+
+    #[test_case]
     fn gettimeofday_writes_microseconds_across_user_pages() {
         use crate::environment::{PAGE_SIZE, USER_STACK_END};
         use crate::library::std::usercopy::{copy_from_user, copy_to_user};
@@ -1065,19 +1082,4 @@ mod tests {
         assert_eq!(CLOCK_THREAD_CPUTIME_ID, 3);
     }
 
-    #[test_case]
-    fn realtime_deadline_preserves_remaining_wall_time() {
-        assert_eq!(realtime_deadline_to_monotonic(1_050, 1_000, 200), 250);
-    }
-
-    #[test_case]
-    fn past_realtime_deadline_maps_to_monotonic_now() {
-        assert_eq!(realtime_deadline_to_monotonic(999, 1_000, 200), 200);
-        assert_eq!(realtime_deadline_to_monotonic(999, 1_000, 0), 1);
-    }
-
-    #[test_case]
-    fn realtime_deadline_conversion_saturates() {
-        assert_eq!(realtime_deadline_to_monotonic(u64::MAX, 0, 1), u64::MAX);
-    }
 }
