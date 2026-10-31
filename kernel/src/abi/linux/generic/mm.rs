@@ -469,10 +469,15 @@ fn handle_anonymous_mapping(
         }
     }
 
-    let owner: alloc::sync::Arc<dyn crate::object::capability::memory_mapping::MemoryMappingOps> =
-        alloc::sync::Arc::new(
-            crate::object::capability::memory_mapping::anon_owner::AnonymousPageOwner::new(),
-        );
+    use crate::object::capability::memory_mapping::anon_owner::{AnonymousPageOwner, AnonymousZeroPageOwner};
+    // Match native mmap: private faults already acquire their own physical
+    // page in the VM. Retaining a second mutable source page also makes fork
+    // clone that whole source owner once per fragmented VMA.
+    let owner: alloc::sync::Arc<dyn crate::object::capability::memory_mapping::MemoryMappingOps> = if is_shared {
+        alloc::sync::Arc::new(AnonymousPageOwner::new())
+    } else {
+        alloc::sync::Arc::new(AnonymousZeroPageOwner::new())
+    };
 
     let vmarea = MemoryArea::new(final_vaddr, final_vaddr + aligned_length - 1);
     let vm_map = VirtualMemoryMap {
@@ -1350,6 +1355,31 @@ mod tests {
         assert_eq!(byte, [0xa5]);
     }
 
+    #[test_case]
+    fn linux_private_anonymous_fork_keeps_only_immutable_zero_backing() {
+        let task=crate::task::new_user_task("linux-sparse-private".into(),0);
+        task.vm_manager.set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let base=0x2000_0000;
+        assert_eq!(handle_anonymous_mapping(&task,base,16*PAGE_SIZE,3,0x32),base);
+        let source=task.vm_manager.search_memory_map(base).unwrap().owner.unwrap();
+        for index in (0..16).step_by(2) {
+            copy_to_user(&task,base+index*PAGE_SIZE,&[index as u8+1]).unwrap();
+            // Private resident pages belong to the VM, not a duplicate mutable
+            // source owner which would be cloned for every remaining hole.
+            assert_eq!(source.is_page_resident(index),Some(false));
+        }
+        let child=task.clone_task(crate::task::CloneFlags::default()).unwrap();
+        let mut byte=[0];
+        for index in 0..16 {
+            copy_from_user(&child,base+index*PAGE_SIZE,&mut byte).unwrap();
+            assert_eq!(byte,[if index%2==0 {index as u8+1}else{0}]);
+        }
+        copy_to_user(&child,base,&[0xee]).unwrap();
+        copy_from_user(&task,base,&mut byte).unwrap();assert_eq!(byte,[1]);
+        copy_to_user(&child,base+PAGE_SIZE,&[0xdd]).unwrap();
+        copy_from_user(&task,base+PAGE_SIZE,&mut byte).unwrap();assert_eq!(byte,[0]);
+        assert_eq!(source.is_page_resident(1),Some(false));
+    }
     #[test_case]
     fn madvise_discards_dirty_pages_without_populating_unused_stack_pages() {
         let task = Task::new("madvise-sparse-stack".into(), 0, TaskType::User);
