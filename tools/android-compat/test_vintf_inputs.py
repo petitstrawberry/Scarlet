@@ -14,6 +14,18 @@ SELECTION = {"framework": ["android.frameworks.stats.IStats/default"], "device":
 
 
 class VintfInputsTest(unittest.TestCase):
+    def test_framework_sensor_declaration_requires_stock_hwbinder_contract(self):
+        service = "android.frameworks.sensorservice@1.0::ISensorManager/default"
+        selection = {"framework": [service], "device": []}
+        source = b'<manifest type="framework"><hal format="hidl"><name>android.frameworks.sensorservice</name><transport>hwbinder</transport><fqname>@1.0::ISensorManager/default</fqname></hal></manifest>'
+        with self.assertRaisesRegex(ValueError, "absent"):
+            build_manifests(selection, {})
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            build_manifests(selection, {"stock": source.replace(b"hwbinder", b"passthrough")})
+        outputs, proof = build_manifests(selection, {"stock": source})
+        self.assertEqual(ET.fromstring(outputs[DEVICE]).findall("hal"), [])
+        self.assertEqual(proof["contracts"][service]["source_sha256"], hashlib.sha256(source).hexdigest())
+
     def test_selects_stock_hidl_manager_with_minor_version_and_interface_alias(self):
         source=b'<manifest type="framework"><hal format="hidl"><name>android.hidl.manager</name><transport>hwbinder</transport><version>1.2</version><interface><name>IServiceManager</name><instance>default</instance></interface><fqname>@1.2::IServiceManager/default</fqname></hal></manifest>'
         selection={"framework":["android.hidl.manager@1.2::IServiceManager/default"],"device":[]}

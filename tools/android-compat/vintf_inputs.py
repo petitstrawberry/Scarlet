@@ -17,6 +17,8 @@ DEVICE_PROVIDERS = {**GRAPHICS_DEVICE, HEALTH_CONTRACT: "hwbinder"}
 FRAMEWORK_HIDL = {
     "android.hidl.manager@1.2::IServiceManager/default",
     "android.hidl.token@1.0::ITokenManager/default",
+    "android.frameworks.sensorservice@1.0::ISensorManager/default",
+    "android.frameworks.schedulerservice@1.0::ISchedulingPolicyService/default",
 }
 
 

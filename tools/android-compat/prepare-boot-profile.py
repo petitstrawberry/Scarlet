@@ -223,15 +223,47 @@ def select_memfd_in_init(text):
     return text.replace(command, "    setprop sys.use_memfd true\n")
 
 
-def reconfigure(inputs, runtime, stock, profile_file, output):
+def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None):
     metadata = verify_boot_inputs(inputs, runtime, stock)
     profile = validate_profile(json.loads(profile_file.read_text()))
     if any(profile[key] != metadata["profile"][key] for key in ("apex_modules", "init_imports")):
         raise ValueError("changed payload or imports require preparation from the pinned image")
+    refreshed_vintf = None
+    if profile.get("vintf") != metadata["profile"].get("vintf"):
+        if not vintf_image:
+            raise ValueError("changed VINTF selection requires --vintf-image")
+        previous = metadata.get("vintf_inputs", {})
+        if profile.get("vintf", {}).get("device") != previous.get("selection", {}).get("device"):
+            raise ValueError("changed device inventory requires matching provider preparation")
+        from vintf_inputs import build_manifests
+        with tempfile.TemporaryDirectory(prefix="scarlet-vintf-") as directory:
+            temporary = Path(directory)
+            extract_partitions(vintf_image, temporary)
+            system = Ext4(temporary / "system.ext4")
+            paths = ["/system/etc/vintf/manifest.xml"]
+            paths += ["/system/etc/vintf/manifest/" + name for name, mode, _ in
+                      entries(system, "/system/etc/vintf/manifest")
+                      if stat.S_ISREG(mode) and name.endswith(".xml")]
+            if len(paths) > 64:
+                raise ValueError("VINTF source count exceeds bound")
+            sources = {}
+            for name in paths:
+                destination = temporary / "sources" / name[1:]
+                system.dump(name, destination)
+                sources[name] = destination.read_bytes()
+            refreshed_vintf = build_manifests(profile["vintf"], sources,
+                                             previous.get("device_providers", {}))
     original_manifest = sha256(inputs / MANIFEST)
     shutil.copytree(inputs, output)
     metadata.update(profile=profile, profile_source_sha256=sha256(profile_file), reused_payload_manifest_sha256=original_manifest)
     configure(output,stock,profile,metadata["property_context_files"],metadata)
+    if refreshed_vintf:
+        outputs, proof = refreshed_vintf
+        for name, data in outputs.items():
+            destination = output / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+        metadata["vintf_inputs"] = proof
     metadata["files"] = {str(path.relative_to(output)):sha256(path) for path in sorted(output.rglob("*")) if path.is_file() and path.name != MANIFEST}
     metadata["directories"] = [str(path.relative_to(output)) for path in sorted(output.rglob("*")) if path.is_dir()]
     (output / MANIFEST).write_text(json.dumps(metadata,indent=2)+"\n")
@@ -531,6 +563,8 @@ def main():
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--sdk-image", type=Path)
     source.add_argument("--reuse-payloads", type=Path)
+    parser.add_argument("--vintf-image", type=Path,
+                        help="pinned SDK image for changing framework declarations while reusing providers")
     for flag in ["runtime-root", "stock-inputs", "profile", "output"]:
         parser.add_argument("--" + flag, type=Path, required=True)
     parser.add_argument("--framework-inputs",type=Path,help="verified stock framework and app_process64 for init boot")
@@ -538,11 +572,13 @@ def main():
     parser.add_argument("--angle-image",type=Path,help="pinned SDK archive supplying its ANGLE libraries")
     for name in ["hal","adapters","client","vulkan"]:parser.add_argument("--graphics-"+name,type=Path,help="verified CPU graphics "+name+" build")
     args = parser.parse_args()
+    if args.vintf_image and not args.reuse_payloads:
+        parser.error("--vintf-image requires --reuse-payloads")
     graphics={name:getattr(args,"graphics_"+name) for name in ["hal","adapters","client"]}
     if (any(graphics.values()) or args.graphics_vulkan) and (not all(graphics.values()) or not args.platform_image):parser.error("graphics providers require all three builds and --platform-image")
     if args.graphics_vulkan:graphics["vulkan"]=args.graphics_vulkan
     if args.reuse_payloads:
-        reconfigure(args.reuse_payloads, args.runtime_root, args.stock_inputs, args.profile, args.output)
+        reconfigure(args.reuse_payloads, args.runtime_root, args.stock_inputs, args.profile, args.output, args.vintf_image)
     else:
         prepare(args.sdk_image, args.runtime_root, args.stock_inputs, args.profile, args.output)
     if args.framework_inputs:
