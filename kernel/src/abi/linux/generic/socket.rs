@@ -1,4 +1,5 @@
 pub(crate) mod uevent;
+pub(crate) mod netlink;
 #[path = "local_datagram.rs"]
 mod datagram;
 
@@ -432,7 +433,13 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
-    if domain==16 {return uevent::create(abi,&task,socket_base_type,socket_flags,_protocol);}
+    if domain==16 {
+        return match _protocol {
+            15 => uevent::create(abi,&task,socket_base_type,socket_flags,_protocol),
+            0 | 12 => netlink::create(abi,&task,socket_base_type,socket_flags,_protocol),
+            _ => errno::to_result(errno::EPROTONOSUPPORT),
+        };
+    }
 
     // Map Linux socket domain to Scarlet domain
     let scarlet_domain = match domain {
@@ -600,6 +607,7 @@ pub fn sys_bind(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(&task);
     if let Some(object)=abi.get_handle(sockfd as usize).and_then(|handle|task.handle_table.get(handle)) {
         if let Some(socket)=uevent::from_object(&object) {return socket.bind(&task,addr_ptr,addrlen as usize);}
+        if let Some(socket)=netlink::from_object(&object) {return socket.bind(&task,addr_ptr,addrlen as usize);}
     }
 
 
@@ -1209,6 +1217,7 @@ pub fn sys_getsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(&task);
     if let Some(object)=abi.get_handle(sockfd as usize).and_then(|handle|task.handle_table.get(handle)) {
         if let Some(socket)=uevent::from_object(&object) {return socket.get_option(&task,level,optname,optval_ptr,optlen_ptr);}
+        if let Some(socket)=netlink::from_object(&object) {return socket.get_option(&task,level,optname,optval_ptr,optlen_ptr);}
     }
 
 
@@ -1396,6 +1405,7 @@ pub fn sys_setsockopt(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(&task);
     if let Some(object)=abi.get_handle(sockfd as usize).and_then(|handle|task.handle_table.get(handle)) {
         if let Some(socket)=uevent::from_object(&object) {return socket.set_option(&task,level,optname,optval_ptr,optlen as usize);}
+        if let Some(socket)=netlink::from_object(&object) {return socket.set_option(&task,level,optname,optval_ptr,optlen as usize);}
     }
 
 
@@ -1771,6 +1781,7 @@ pub fn sys_recvmsg(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(&task);
     if let Some(object)=abi.get_handle(sockfd as usize).and_then(|handle|task.handle_table.get(handle)) {
         if let Some(socket)=uevent::from_object(&object) {return socket.receive_message(&task,msg_ptr,flags);}
+        if let Some(socket)=netlink::from_object(&object) {return socket.receive_message(&task,msg_ptr,flags);}
     }
 
 
@@ -2156,6 +2167,12 @@ pub fn sys_sendto(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         Some(h) => h,
         None => return errno::to_result(errno::EBADF),
     };
+
+    if let Some(object)=task.handle_table.get(handle) {
+        if let Some(socket)=netlink::from_object(&object) {
+            return socket.send_message(&task, buf_ptr, len, dest_addr_ptr, addrlen as usize);
+        }
+    }
 
     // Get socket object
     let socket = match task
