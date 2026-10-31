@@ -8,13 +8,39 @@ use super::super::{
     VIRTIO_GPU_FLAG_FENCE, VIRTIO_GPU_MAX_OPAQUE_COMMAND_SIZE,
     VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, VIRTIO_GPU_RESP_OK_NODATA, VirtioGpuCtrlHdr,
 };
-use super::{ASYNC_CAPACITY, AsyncSubmissions, InterruptState};
+use super::{ASYNC_CAPACITY, AsyncSubmissions, InterruptState, Prepared, RequestPool};
 use crate::device::gpu::{
     GpuBackendContext, GpuBackendContextInfo, GpuBackendEnqueueError, GpuBackendQueue,
     GpuBackendQueueInfo, GpuBackendSubmitError, GpuCompletion, GpuCompletionFailure,
     GpuCompletionState, GpuSubmission,
 };
 use crate::sync::IrqSpinLock;
+
+// Exercise the same preparation-before-device-lock boundary as production.
+impl AsyncSubmissions {
+    fn enqueue_test(
+        &mut self,
+        control: &mut ControlQueue,
+        context_id: u32,
+        fence: u64,
+        submission: GpuSubmission,
+        now_ns: u64,
+    ) -> Result<(), GpuBackendEnqueueError> {
+        let pool = Arc::new(RequestPool::new());
+        let prepared = match Prepared::new(&pool, context_id, submission.commands()) {
+            Ok(prepared) => prepared,
+            Err(error) => return Err(GpuBackendEnqueueError::Rejected(error, submission)),
+        };
+        self.enqueue(
+            control,
+            context_id,
+            fence,
+            submission,
+            &mut Some(prepared),
+            now_ns,
+        )
+    }
+}
 
 #[test_case]
 fn mmio_irq_claim_preserves_cause_until_deferred_worker_acknowledges() {
@@ -118,7 +144,7 @@ fn async_admits_packets_larger_than_the_legacy_staging_buffer_as_one_request() {
     let bytes = alloc::vec![0; VIRTIO_GPU_MAX_OPAQUE_COMMAND_SIZE as usize * 3];
     let (completion, request) = submission(&bytes, &drops, &lock);
     state
-        .enqueue(&mut control, 1, 1, request, 0)
+        .enqueue_test(&mut control, 1, 1, request, 0)
         .expect("one admission");
     assert_eq!(
         *control.ring.avail.idx, 2,
@@ -141,10 +167,10 @@ fn async_submit_returns_pending_and_retires_out_of_order_responses_in_order() {
     let (first, first_request) = submission(&[0; 4], &drops, &lock);
     let (second, second_request) = submission(&[], &drops, &lock);
     state
-        .enqueue(&mut control, 1, 1, first_request, 0)
+        .enqueue_test(&mut control, 1, 1, first_request, 0)
         .expect("first accepted");
     state
-        .enqueue(&mut control, 1, 2, second_request, 0)
+        .enqueue_test(&mut control, 1, 2, second_request, 0)
         .expect("empty checkpoint accepted");
     assert_eq!(*control.ring.avail.idx, 3);
     assert_eq!(*control.ring.used.idx, 0);
@@ -179,7 +205,7 @@ fn async_observer_drop_does_not_release_resources_before_independent_checkpoint(
     let lock = Arc::new(IrqSpinLock::new(()));
     let (completion, request) = submission(&[0; 4], &drops, &lock);
     state
-        .enqueue(&mut control, 1, 8, request, 0)
+        .enqueue_test(&mut control, 1, 8, request, 0)
         .expect("accepted");
     drop(completion);
     control.test_respond(head(&control, 0), response(None, false));
@@ -201,7 +227,7 @@ fn async_execution_error_waits_for_prefix_retirement_without_poisoning_queue() {
     let lock = Arc::new(IrqSpinLock::new(()));
     let (completion, request) = submission(&[0; 4], &drops, &lock);
     state
-        .enqueue(&mut control, 1, 5, request, 0)
+        .enqueue_test(&mut control, 1, 5, request, 0)
         .expect("accepted");
     control.test_respond(head(&control, 0), response(None, true));
     assert!(state.poll_one(&mut control, 1).is_none());
@@ -219,7 +245,7 @@ fn async_execution_error_waits_for_prefix_retirement_without_poisoning_queue() {
     assert!(control.check().is_ok());
     let (next, request) = submission(&[], &drops, &lock);
     state
-        .enqueue(&mut control, 1, 6, request, 3)
+        .enqueue_test(&mut control, 1, 6, request, 3)
         .expect("queue remains usable");
     control.test_respond(head(&control, 2), response(Some(6), false));
     state
@@ -242,7 +268,7 @@ fn async_bad_checkpoint_quarantines_all_owners_and_blocks_legacy_drain() {
         let lock = Arc::new(IrqSpinLock::new(()));
         let (completion, request) = submission(&[], &drops, &lock);
         state
-            .enqueue(&mut control, 1, 7, request, 0)
+            .enqueue_test(&mut control, 1, 7, request, 0)
             .expect("accepted");
         control.test_respond(head(&control, 0), bad_response);
         // The same transport reap used by synchronous detach/upload must not
@@ -258,7 +284,7 @@ fn async_bad_checkpoint_quarantines_all_owners_and_blocks_legacy_drain() {
         let (_, rejected) = submission(&[], &drops, &lock);
         release_unaccepted(
             state
-                .enqueue(&mut control, 1, 8, rejected, 2)
+                .enqueue_test(&mut control, 1, 8, rejected, 2)
                 .expect_err("failed device rejects new work"),
         );
         drop((control, state, completion));
@@ -279,13 +305,13 @@ fn async_device_budget_and_batch_admission_never_publish_a_rejected_prefix() {
     for index in 0..ASYNC_CAPACITY {
         let (_, request) = submission(&[0; 4], &drops, &lock);
         state
-            .enqueue(&mut control, 1, u64::from(index + 1), request, 0)
+            .enqueue_test(&mut control, 1, u64::from(index + 1), request, 0)
             .expect("within device bound");
     }
     let available = *control.ring.avail.idx;
     let (_, request) = submission(&[0; 4], &drops, &lock);
     let error = state
-        .enqueue(&mut control, 1, 99, request, 0)
+        .enqueue_test(&mut control, 1, 99, request, 0)
         .expect_err("device full");
     assert!(matches!(&error, GpuBackendEnqueueError::Busy(_)));
     release_unaccepted(error);
@@ -305,7 +331,7 @@ fn async_device_budget_and_batch_admission_never_publish_a_rejected_prefix() {
     let (_, request) = submission(&[1; 3], &drops, &lock);
     release_unaccepted(
         state
-            .enqueue(&mut control, 1, 100, request, 2)
+            .enqueue_test(&mut control, 1, 100, request, 2)
             .expect_err("invalid byte length"),
     );
     assert_eq!(*control.ring.avail.idx, available);
@@ -319,7 +345,7 @@ fn async_checkpoint_timeout_reports_failure_but_keeps_resources() {
     let lock = Arc::new(IrqSpinLock::new(()));
     let (completion, request) = submission(&[], &drops, &lock);
     state
-        .enqueue(&mut control, 1, 1, request, 0)
+        .enqueue_test(&mut control, 1, 1, request, 0)
         .expect("accepted");
     assert!(
         state

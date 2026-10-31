@@ -430,6 +430,18 @@ impl Waker {
         trapframe: &mut Trapframe,
         timeout_ns: u64,
     ) -> bool {
+        self.wait_with_timeout_until_owned(task_id, trapframe, timeout_ns, || false)
+    }
+
+    /// Register a timed wait, then recheck readiness before scheduling.
+    /// The readiness closure and its captures are consumed before sleeping.
+    pub fn wait_with_timeout_until_owned(
+        self: Arc<Self>,
+        task_id: usize,
+        trapframe: &mut Trapframe,
+        timeout_ns: u64,
+        ready: impl FnOnce() -> bool,
+    ) -> bool {
         if timeout_ns == 0 {
             return false;
         }
@@ -498,6 +510,9 @@ impl Waker {
         }
 
         let mut should_schedule = self.prepare_wait_registration(task_id, outcome.clone());
+        if ready() {
+            outcome.claim_coalesced_event();
+        }
         if !outcome.is_pending() && self.cancel_prepared_wait_registration(task_id, Some(&outcome))
         {
             should_schedule = false;

@@ -9,6 +9,7 @@ use scarlet_os::handle::Handle;
 use scarlet_os::ipc::SharedMemory;
 use scarlet_ui_renderer_sgfx::FrameSubmissionError;
 use sgfx::ir::{Color, LoadOp, PixelRect, TextureId};
+use std::cell::RefCell;
 use std::env;
 use std::fmt;
 use std::time::Instant;
@@ -215,6 +216,11 @@ struct SceneTexture {
     height: u32,
     serial: Option<u64>,
     texture: TextureId,
+    // A full GPU layer can be sampled by the final composition pass.
+    // The retained scene keeps its client buffer lease until replacement.
+    direct: bool,
+    direct_layers: Vec<Quad>,
+    uploaded_source_buffers: Vec<Option<u32>>,
     sources: Vec<(u32, u32, Option<TextureId>)>,
 }
 
@@ -270,6 +276,8 @@ struct CursorTextureSet {
 
 /// GPU resources and texture cache used by the internal SWS compositor.
 pub(super) struct GpuCompositor {
+    operations: RefCell<Vec<Quad>>,
+    frame_profile: Option<super::trace::FrameProfile>,
     target: MappedTarget,
     quad_renderer: QuadRenderer,
     cursor_images: Vec<CursorTextureSet>,
@@ -327,7 +335,9 @@ impl GpuCompositor {
         };
 
         Ok(Self {
+            operations: RefCell::new(Vec::with_capacity(COMPOSITION_QUAD_CAPACITY)),
             target,
+            frame_profile: super::trace::FrameProfile::open(),
             quad_renderer,
             cursor_images,
             textures: Vec::new(),
@@ -700,27 +710,10 @@ impl GpuCompositor {
             return Err(SgfxBufferError::InvalidBuffer);
         }
         let extent = (texture.width, texture.height);
-        // REGISTER creates a binding, but does not promise that the producer
-        // has drawn yet. Recreate it at every COMMIT, including first use:
-        // retaining the imported view can keep displaying its old contents.
-        // Only released slots reach here. Retire through MappedTarget's
-        // existing idle-wait path before importing: some backends forbid
-        // two sampled mappings of the same image. The descriptor pool
-        // reuses the retired slot rather than growing each frame.
-        let handle = texture
-            .handle
-            .duplicate()
-            .map_err(|_| SgfxBufferError::ImportFailed)?;
-        self.target
-            .release_imported_texture(texture.texture)
-            .map_err(|_| SgfxBufferError::Unavailable)?;
-        let refreshed = self
-            .target
-            .import_shared_bgra_texture(extent.0, extent.1, handle)
-            // A failed replacement leaves the binding unavailable; use
-            // the existing backend-loss path instead of sampling it again.
-            .map_err(|_| SgfxBufferError::Unavailable)?;
-        self.shared_textures[texture_index].texture = refreshed;
+        // The producer completes its GPU work before COMMIT. Keep the
+        // registered image and sampled view until DESTROY or a generation
+        // change: reimporting every frame drains the compositor queue and
+        // rebuilds sampler objects without changing the shared storage.
         let state = self
             .shared_windows
             .iter_mut()
@@ -953,11 +946,11 @@ impl GpuCompositor {
             .iter()
             .any(|entry| entry.window_id == Some(window.id));
         let has_current_backing = window.presentation_pixels().is_ok();
-        let scene_texture = self
+        let scene_entry = self
             .scene_textures
             .iter()
-            .find(|entry| entry.window_id == window.id)
-            .map(|entry| (entry.texture, entry.width, entry.height));
+            .find(|entry| entry.window_id == window.id);
+        let scene_texture = scene_entry.map(|entry| (entry.texture, entry.width, entry.height));
         let shared_texture = self.committed_shared_texture(window);
         let imported_shm_texture = self.imported_shm_texture(window);
         if trace_home {
@@ -991,6 +984,42 @@ impl GpuCompositor {
             |instance| (window.opacity * instance.transform.opacity).clamp(0.0, 1.0),
         );
         let transformed = instance.is_some() || window.presentation_transform.is_some();
+        if let Some(entry) = scene_entry.filter(|entry| entry.direct) {
+            // Direct scenes are selected only for an untransformed, opaque
+            // group entirely inside the target. Layer UVs and premultiplied
+            // alpha remain unchanged, including client-side decorations.
+            for &quad in &entry.direct_layers {
+                let Quad::SampledUv {
+                    mut rect,
+                    uv,
+                    premultiplied,
+                } = quad
+                else {
+                    unreachable!()
+                };
+                rect.destination = PixelRect::new(
+                    visual_geometry.0 as u32 + rect.destination.x(),
+                    visual_geometry.1 as u32 + rect.destination.y(),
+                    rect.destination.width(),
+                    rect.destination.height(),
+                )
+                .map_err(|_| "Invalid direct scene projection")?;
+                append_rounded_quad(
+                    operations,
+                    Quad::SampledUv {
+                        rect,
+                        uv,
+                        premultiplied,
+                    },
+                    rounded_clip,
+                    operation_clip,
+                    self.target.width,
+                    self.target.height,
+                )?;
+            }
+            return Ok(());
+        }
+
         if scene_texture.is_some()
             || shared_texture.is_some()
             || imported_shm_texture.is_some()
@@ -1147,7 +1176,7 @@ impl GpuCompositor {
         scene_damage: Option<&[(i32, i32, u32, u32)]>,
         backdrops: &[(WindowId, BackdropGeometry)],
     ) -> Result<Vec<SgfxCommitToken>, GpuCompositionError> {
-        let profiling = super::trace::profile_enabled();
+        let profiling = super::trace::profile_enabled() || self.frame_profile.is_some();
         let profile_start = profiling.then(Instant::now);
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_SYNC_WINDOWS);
         // ResourceTable slots live for the session. Rebuild before changing
@@ -1176,12 +1205,18 @@ impl GpuCompositor {
             self.rebuild_pending = true;
         }
         self.rebuild_if_needed(cursor, windows)?;
-        self.prepare_scene_textures(scenes, windows)?;
+        self.target.frame_timings = profiling.then(Default::default);
+        let mut texture_uploads = Vec::new();
+        self.prepare_scene_textures(scenes, windows, &mut texture_uploads)?;
         self.transfer_visible_imported_shm(windows)?;
         // Propagate damage through overlapping sampling halos. Repairing an
         // old swapchain image or moving the cursor does not change the clean
         // scene captured by these materials.
-        let mut source_damage = scene_damage.map(<[_]>::to_vec);
+        let mut source_damage = if backdrops.is_empty() {
+            None
+        } else {
+            scene_damage.map(<[_]>::to_vec)
+        };
         if let Some(rects) = source_damage.as_mut() {
             let geometries: Vec<_> = backdrops.iter().map(|(_, geometry)| *geometry).collect();
             expand_damage(&geometries, rects);
@@ -1197,7 +1232,6 @@ impl GpuCompositor {
         }
         let force_full_repaint = self.force_full_repaint;
         let damage = if force_full_repaint { None } else { damage };
-        let mut texture_uploads = Vec::new();
         let mut uploaded_texture_indices = Vec::new();
         for window in windows {
             super::trace::set_gpu_window(window.id);
@@ -1232,19 +1266,32 @@ impl GpuCompositor {
             .target
             .prepare_render_area(requested_clip.unwrap_or(full_area))
             .map_err(|_| "Failed to prepare GPU swapchain damage")?;
-        // Buffer-age repair can touch a material independently of this
-        // frame's logical damage. Expand repair only, not damage history.
-        let geometries: Vec<_> = backdrops.iter().map(|(_, geometry)| *geometry).collect();
-        let mut repair = vec![(
-            render_area.x() as i32,
-            render_area.y() as i32,
-            render_area.width(),
-            render_area.height(),
-        )];
-        expand_damage(&geometries, &mut repair);
-        let repair = repair[0];
-        render_area = PixelRect::new(repair.0 as u32, repair.1 as u32, repair.2, repair.3)
-            .map_err(|_| "Invalid backdrop repair damage")?;
+        let (render_area, repair) = if backdrops.is_empty() {
+            (
+                render_area,
+                (
+                    render_area.x() as i32,
+                    render_area.y() as i32,
+                    render_area.width(),
+                    render_area.height(),
+                ),
+            )
+        } else {
+            // Buffer-age repair can touch a material independently of this
+            // frame's logical damage. Expand repair only, not damage history.
+            let geometries: Vec<_> = backdrops.iter().map(|(_, geometry)| *geometry).collect();
+            let mut repair = vec![(
+                render_area.x() as i32,
+                render_area.y() as i32,
+                render_area.width(),
+                render_area.height(),
+            )];
+            expand_damage(&geometries, &mut repair);
+            let repair = repair[0];
+            render_area = PixelRect::new(repair.0 as u32, repair.1 as u32, repair.2, repair.3)
+                .map_err(|_| "Invalid backdrop repair damage")?;
+            (render_area, repair)
+        };
         for &(id, geometry) in backdrops {
             if !self
                 .backdrops
@@ -1262,7 +1309,8 @@ impl GpuCompositor {
             }
         }
         let damage_clip = (render_area != full_area).then_some(render_area);
-        let mut operations = Vec::new();
+        let mut operations = self.operations.borrow_mut();
+        operations.clear();
         let mut backdrop_splits = Vec::new();
         let mut overview_backplates_drawn = false;
         for window in windows {
@@ -1468,26 +1516,29 @@ impl GpuCompositor {
         self.target
             .present(display, region)
             .map_err(GpuCompositionError::Backend)?;
-        if let (Some(start), Some(synced), Some(encoded), Some(submitted)) = (
-            profile_start,
-            profile_synced,
-            profile_encoded,
-            profile_submitted,
-        ) {
-            std::println!(
-                "[SWS_PROFILE] {}x{} damage={}x{} blur={} blur_refresh={} quads={} sync_us={} encode_us={} submit_us={} present_us={}",
-                self.target.width,
-                self.target.height,
-                render_area.width(),
-                render_area.height(),
-                backdrop_passes.len(),
-                backdrop_passes.iter().filter(|pass| pass.refresh).count(),
-                operations.len(),
-                synced.duration_since(start).as_micros(),
-                encoded.duration_since(synced).as_micros(),
-                submitted.duration_since(encoded).as_micros(),
-                submitted.elapsed().as_micros(),
-            );
+        let profile_presented = profiling.then(Instant::now);
+        if super::trace::profile_enabled() {
+            if let (Some(start), Some(synced), Some(encoded), Some(submitted)) = (
+                profile_start,
+                profile_synced,
+                profile_encoded,
+                profile_submitted,
+            ) {
+                std::println!(
+                    "[SWS_PROFILE] {}x{} damage={}x{} blur={} blur_refresh={} quads={} sync_us={} encode_us={} submit_us={} present_us={}",
+                    self.target.width,
+                    self.target.height,
+                    render_area.width(),
+                    render_area.height(),
+                    backdrop_passes.len(),
+                    backdrop_passes.iter().filter(|pass| pass.refresh).count(),
+                    operations.len(),
+                    synced.duration_since(start).as_micros(),
+                    encoded.duration_since(synced).as_micros(),
+                    submitted.duration_since(encoded).as_micros(),
+                    submitted.elapsed().as_micros(),
+                );
+            }
         }
         // Only a successfully published frame certifies the clean capture and
         // horizontal filter for cursor-only redraws. Failed submissions stay cold.
@@ -1495,9 +1546,64 @@ impl GpuCompositor {
         for (index, _) in backdrop_splits {
             self.backdrops[index].2.valid = true;
         }
+        // Publish the direct-scene cache only after successful GPU submission
+        // and presentation. Busy/error retries must retain pending SHM uploads.
+        for view in scenes {
+            if windows
+                .iter()
+                .any(|window| window.id == view.scene.window_id && window.is_presented())
+                && let Some(entry) = self
+                    .scene_textures
+                    .iter_mut()
+                    .find(|entry| entry.window_id == view.scene.window_id && entry.direct)
+            {
+                entry.serial = Some(view.scene.serial);
+                for ((cached, layer), source) in entry
+                    .uploaded_source_buffers
+                    .iter_mut()
+                    .zip(&view.scene.layers)
+                    .zip(&view.sources)
+                {
+                    *cached = source.gpu_buffer.is_none().then_some(layer.buffer_id);
+                }
+            }
+        }
         self.force_full_repaint = false;
         super::trace::set_compositor_stage(super::trace::STAGE_GPU_COLLECT_RELEASES);
-        Ok(self.take_presented_releases(windows))
+        let quad_count = operations.len();
+        drop(operations);
+        let releases = self.take_presented_releases(windows);
+        if let (
+            Some(profile),
+            Some(start),
+            Some(synced),
+            Some(encoded),
+            Some(submitted),
+            Some(presented),
+            Some(timings),
+        ) = (
+            &mut self.frame_profile,
+            profile_start,
+            profile_synced,
+            profile_encoded,
+            profile_submitted,
+            profile_presented,
+            &self.target.frame_timings,
+        ) {
+            if profile
+                .record(
+                    [start, synced, encoded, submitted, presented, Instant::now()],
+                    timings,
+                    quad_count,
+                    u64::from(render_area.width()) * u64::from(render_area.height()),
+                )
+                .is_err()
+            {
+                self.frame_profile = None;
+                std::println!("[SWS_PROFILE] frame file write failed; profiling disabled");
+            }
+        }
+        Ok(releases)
     }
 
     pub(super) fn has_committed_shared_buffer(&self, window_id: WindowId) -> bool {
@@ -1577,10 +1683,11 @@ impl GpuCompositor {
         }
     }
 
-    fn prepare_scene_textures(
+    fn prepare_scene_textures<'a>(
         &mut self,
-        scenes: &[SceneView<'_>],
+        scenes: &[SceneView<'a>],
         windows: &[Window],
+        direct_uploads: &mut Vec<TextureUpload<'a>>,
     ) -> Result<(), GpuCompositionError> {
         for view in scenes {
             let scene = view.scene;
@@ -1626,13 +1733,92 @@ impl GpuCompositor {
                         height: scene.height,
                         serial: None,
                         texture,
+                        direct: false,
+                        direct_layers: Vec::new(),
+                        uploaded_source_buffers: vec![None; sources.len()],
                         sources,
                     });
                     self.scene_textures.len() - 1
                 }
             };
+            let inline = windows
+                .iter()
+                .find(|window| window.id == scene.window_id)
+                .is_some_and(|window| {
+                    let (x, y, width, height) = window.presentation_geometry();
+                    window.presentation_transform.is_none()
+                        && window.presentation_instances.is_empty()
+                        && window.presentation_opacity() == 1.0
+                        && width == scene.width
+                        && height == scene.height
+                        && x >= 0
+                        && y >= 0
+                        && u64::from(x as u32) + u64::from(width) <= u64::from(self.target.width)
+                        && u64::from(y as u32) + u64::from(height) <= u64::from(self.target.height)
+                });
             let entry = &self.scene_textures[index];
-            if entry.serial == Some(scene.serial) {
+            if entry.serial == Some(scene.serial) && entry.direct == inline {
+                continue;
+            }
+            if inline {
+                let entry = &mut self.scene_textures[index];
+                entry.direct_layers.clear();
+                let white = Color::rgba(1.0, 1.0, 1.0, 1.0).map_err(|_| "Invalid scene tint")?;
+                for (source_index, ((layer, source), &(width, height, upload_texture))) in scene
+                    .layers
+                    .iter()
+                    .zip(&view.sources)
+                    .zip(&entry.sources)
+                    .enumerate()
+                {
+                    let area = PixelRect::new(0, 0, width, height)
+                        .map_err(|_| "Invalid scene source extent")?;
+                    let texture = if let Some((client_id, buffer_id)) = source.gpu_buffer {
+                        self.extension_gpu_textures
+                            .iter()
+                            .find(|image| {
+                                (image.client_id, image.buffer_id, image.width, image.height)
+                                    == (client_id, buffer_id, width, height)
+                            })
+                            .ok_or("GPU scene image is not registered")?
+                            .texture
+                    } else {
+                        let texture = upload_texture.ok_or("Missing SHM scene texture")?;
+                        // A retained SHM buffer remains leased and immutable.
+                        // Reuse its uploaded texture while only the GPU layer flips.
+                        if entry.uploaded_source_buffers[source_index] != Some(layer.buffer_id) {
+                            direct_uploads.push(TextureUpload {
+                                texture,
+                                destination: area,
+                                stride: source.stride as u32,
+                                bytes: source.bytes,
+                            });
+                        }
+                        texture
+                    };
+                    entry.direct_layers.push(Quad::SampledUv {
+                        rect: SampledRect {
+                            texture,
+                            texture_width: width,
+                            texture_height: height,
+                            destination: PixelRect::new(
+                                layer.x as u32,
+                                layer.y as u32,
+                                layer.width,
+                                layer.height,
+                            )
+                            .map_err(|_| "Invalid scene layer extent")?,
+                            source: area,
+                            tint: white,
+                            ignore_source_alpha: source.opaque,
+                            clip: None,
+                        },
+                        uv: source_uv(layer, width, height),
+                        premultiplied: true,
+                    });
+                }
+                entry.direct = true;
+                entry.serial = None;
                 continue;
             }
             let mut uploads = Vec::with_capacity(view.sources.len());
@@ -1716,6 +1902,7 @@ impl GpuCompositor {
                     &quads,
                 )?;
             }
+            self.scene_textures[index].direct = false;
             self.scene_textures[index].serial = Some(scene.serial);
         }
         Ok(())

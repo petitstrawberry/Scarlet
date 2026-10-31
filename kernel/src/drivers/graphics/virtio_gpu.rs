@@ -122,6 +122,8 @@ const PIPE_BIND_RENDER_TARGET: u32 = 1 << 1;
 const PIPE_BIND_DEPTH_STENCIL: u32 = 1 << 0;
 const PIPE_BIND_SAMPLER_VIEW: u32 = 1 << 3;
 const PIPE_BIND_VERTEX_BUFFER: u32 = 1 << 4;
+// VirGL protocol values differ from Gallium PIPE_BIND_* at this bit.
+const VIRGL_BIND_CUSTOM: u32 = 1 << 17;
 const PIPE_BIND_SCANOUT: u32 = 1 << 19;
 
 // Maximum number of scanouts
@@ -770,7 +772,9 @@ impl VirtioGpuControl {
 
     fn gpu_backend_info(&self) -> GpuBackendInfo {
         let negotiated_features = *self.negotiated_features.read();
-        let mut opaque_info = [0u8; 12];
+        // Preserve the original 12-byte prefix. Optional words expose the host
+        // anisotropy limit (IEEE f32 bits), then kernel transfer capabilities.
+        let mut opaque_info = [0u8; 20];
         opaque_info[..8].copy_from_slice(&negotiated_features.to_le_bytes());
         let acceleration_usable = self.acceleration_usable();
         let dialect_count = if acceleration_usable {
@@ -778,7 +782,14 @@ impl VirtioGpuControl {
         } else {
             0
         };
-        opaque_info[8..].copy_from_slice(&dialect_count.to_le_bytes());
+        opaque_info[8..12].copy_from_slice(&dialect_count.to_le_bytes());
+        if acceleration_usable {
+            let (anisotropy, float_color) = self.virgl_color_metadata(dialect_count);
+            opaque_info[12..16].copy_from_slice(&anisotropy.to_le_bytes());
+            // Flag 0: D32 transfers. Flag 1: RGBA16F/RGBA32F sampled render targets.
+            opaque_info[16..20]
+                .copy_from_slice(&(1u32 | (u32::from(float_color) << 1)).to_le_bytes());
+        }
 
         let state = if *self.transport_ready.read() {
             GpuDeviceState::Ready
@@ -813,6 +824,45 @@ impl VirtioGpuControl {
             b"virtio-gpu",
             &opaque_info,
         )
+    }
+
+    fn virgl_color_metadata(&self, count: u32) -> (u32, bool) {
+        // Stable wire offset in virgl_caps_v2, not a native Rust/C layout.
+        // Only transport opaque host metadata; filtering policy stays in userspace.
+        const END: usize = 764;
+        for index in 0..count.min(32) {
+            let Ok(info) = self.get_backend_dialect_info(index) else {
+                continue;
+            };
+            if info.id != 2 || info.max_size < END as u32 {
+                continue;
+            }
+            let mut caps = [0u8; END];
+            if self
+                .read_backend_dialect(info.id, info.max_version, &mut caps)
+                .is_ok()
+            {
+                let bits = u32::from_le_bytes(caps[760..END].try_into().unwrap());
+                // Positive, finite f32; compare bits without kernel FP operations.
+                let anisotropy = if (0x3f80_0000..0x7f80_0000).contains(&bits) {
+                    bits
+                } else {
+                    0
+                };
+                let supported = |mask: usize, format: usize| {
+                    let offset = mask + format / 32 * 4;
+                    u32::from_le_bytes(caps[offset..offset + 4].try_into().unwrap())
+                        & (1 << (format % 32))
+                        != 0
+                };
+                // Stable v1 sampler/render masks, each sixteen u32 words.
+                let float_color = [31, 94]
+                    .into_iter()
+                    .all(|f| supported(4, f) && supported(68, f));
+                return (anisotropy, float_color);
+            }
+        }
+        (0, false)
     }
 
     fn get_backend_dialect_info(
@@ -1603,12 +1653,31 @@ enum PresentTarget {
     Gpu {
         resource: GpuDisplayResource,
         region: DisplayRegion,
+        producer_complete: bool,
     },
     Framebuffer {
         config: FramebufferConfig,
         physical_addr: u64,
         region: DisplayRegion,
     },
+}
+
+impl PresentTarget {
+    fn needs_idle_barrier(&self) -> bool {
+        !matches!(
+            self,
+            Self::Gpu {
+                producer_complete: true,
+                ..
+            }
+        )
+    }
+    fn request_count(&self) -> usize {
+        match self {
+            Self::Gpu { .. } => 2,
+            Self::Framebuffer { .. } => 3,
+        }
+    }
 }
 
 fn remove_presentations(
@@ -1705,7 +1774,9 @@ fn prepare_present_target(
     target: &PresentTarget,
 ) -> Result<Vec<Arc<ControlRequest>>, &'static str> {
     match target {
-        PresentTarget::Gpu { resource, region } => {
+        PresentTarget::Gpu {
+            resource, region, ..
+        } => {
             if resource.backend_cookie() != core.backend_cookie() {
                 return Err("GPU display resource belongs to a different VirtIO GPU device");
             }
@@ -1890,7 +1961,19 @@ impl VirtioGpuDevice {
                 let pending = {
                     let queues = core.virtqueues.lock();
                     queues.control.check()?;
-                    queues.control.pending_request()
+                    let target = core
+                        .presentations
+                        .iter()
+                        .find(|operation| operation.id == id)
+                        .and_then(|operation| operation.target.as_ref())
+                        .ok_or("VirtIO GPU presentation ownership was abandoned")?;
+                    if target.needs_idle_barrier()
+                        || !queues.control.can_enqueue_batch(target.request_count())
+                    {
+                        queues.control.pending_request()
+                    } else {
+                        None
+                    }
                 };
                 if let Some(pending) = pending {
                     let weak = Arc::downgrade(&pending);
@@ -1902,8 +1985,9 @@ impl VirtioGpuDevice {
                     operation.barrier = Some(pending);
                     Some(weak)
                 } else {
-                    // Idle validation and publication share the outer guard:
-                    // no new submission can slip between the barrier and batch.
+                    // Legacy callers require idle validation. Completed-image
+                    // callers need only batch capacity; unrelated contexts keep
+                    // running. The guard makes either admission check atomic.
                     let target = core
                         .presentations
                         .iter()
@@ -2327,6 +2411,7 @@ impl GpuBackendContext for VirtioGpuBackendContext {
             control: Arc::clone(&self.control),
             context_id: self.context_id,
             async_enabled: self.core.lock().async_enabled,
+            submit_pool: Arc::new(asynchronous::RequestPool::new()),
         }))
     }
 
@@ -2461,6 +2546,7 @@ struct VirtioGpuBackendQueue {
     control: Arc<VirtioGpuControl>,
     context_id: u32,
     async_enabled: bool,
+    submit_pool: Arc<asynchronous::RequestPool>,
 }
 
 impl GpuBackendQueue for VirtioGpuBackendQueue {
@@ -2492,6 +2578,16 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
     }
 
     fn enqueue(&self, submission: GpuSubmission) -> Result<(), GpuBackendEnqueueError> {
+        // Private DMA preparation can grow storage only before taking any
+        // device/transport lock. Steady-state requests reuse retired storage.
+        let mut prepared = match asynchronous::Prepared::new(
+            &self.submit_pool,
+            self.context_id,
+            submission.commands(),
+        ) {
+            Ok(prepared) => Some(prepared),
+            Err(error) => return Err(GpuBackendEnqueueError::Rejected(error, submission)),
+        };
         // A concurrent legacy control operation may wait for GPU execution.
         // Async admission reports pressure instead of joining that wait.
         let Some(mut guard) = self.core.try_lock() else {
@@ -2505,11 +2601,13 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
         if synchronous.blocked() {
             return Err(GpuBackendEnqueueError::Busy(submission));
         }
-        if core
-            .presentations
-            .iter()
-            .any(|operation| operation.awaiting_admission)
-        {
+        if core.presentations.iter().any(|operation| {
+            operation.awaiting_admission
+                && operation
+                    .target
+                    .as_ref()
+                    .is_none_or(PresentTarget::needs_idle_barrier)
+        }) {
             return Err(GpuBackendEnqueueError::Busy(submission));
         }
         if !self.async_enabled {
@@ -2534,6 +2632,7 @@ impl GpuBackendQueue for VirtioGpuBackendQueue {
                 self.context_id,
                 fence,
                 submission,
+                &mut prepared,
                 crate::timer::get_time_ns(),
             )?;
         }
@@ -2548,7 +2647,9 @@ fn virgl_image_format(format: u32) -> Result<u32, &'static str> {
         GPU_IMAGE_FORMAT_BGRA8_UNORM => Ok(VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM),
         GPU_IMAGE_FORMAT_DEPTH32_FLOAT => Ok(VIRGL_FORMAT_Z32_FLOAT),
         crate::device::gpu::GPU_IMAGE_FORMAT_R8_UNORM => Ok(64), // VIRGL_FORMAT_R8_UNORM
-        crate::device::gpu::GPU_IMAGE_FORMAT_RG8_UNORM => Ok(65), // VIRGL_FORMAT_R8G8_UNORM
+        crate::device::gpu::GPU_IMAGE_FORMAT_RGBA16_FLOAT => Ok(94), // VIRGL_FORMAT_R16G16B16A16_FLOAT
+        crate::device::gpu::GPU_IMAGE_FORMAT_RGBA32_FLOAT => Ok(31), // VIRGL_FORMAT_R32G32B32A32_FLOAT
+        crate::device::gpu::GPU_IMAGE_FORMAT_RG8_UNORM => Ok(65),    // VIRGL_FORMAT_R8G8_UNORM
         _ => Err("VirtIO GPU image format is unsupported"),
     }
 }
@@ -2697,7 +2798,11 @@ impl GpuBackend for VirtioGpuBackend {
             resource_id: 0,
             target: PIPE_BUFFER,
             format: 0,
-            bind: PIPE_BIND_VERTEX_BUFFER,
+            bind: if create.flags & crate::device::gpu::GPU_BUFFER_FLAG_QUERY_RESULT != 0 {
+                VIRGL_BIND_CUSTOM
+            } else {
+                PIPE_BIND_VERTEX_BUFFER
+            },
             width: u32::try_from(create.allocation_size)
                 .map_err(|_| "VirtIO GPU buffer allocation exceeds PIPE_BUFFER limits")?,
             height: 1,
@@ -2783,19 +2888,33 @@ impl GraphicsDevice for VirtioGpuDevice {
         resource: GpuDisplayResource,
         region: DisplayRegion,
     ) -> Result<(), &'static str> {
-        self.begin_present(PresentTarget::Gpu { resource, region }, None)?
-            .wait()
+        self.begin_present(
+            PresentTarget::Gpu {
+                resource,
+                region,
+                producer_complete: false,
+            },
+            None,
+        )?
+        .wait()
     }
 
     fn begin_gpu_resource_present(
         &self,
         resource: GpuDisplayResource,
         region: DisplayRegion,
-        _options: GpuPresentOptions,
+        options: GpuPresentOptions,
         owners: PresentationOwners,
     ) -> Result<Option<Box<dyn PresentationWait>>, &'static str> {
-        self.begin_present(PresentTarget::Gpu { resource, region }, Some(owners))
-            .map(Some)
+        self.begin_present(
+            PresentTarget::Gpu {
+                resource,
+                region,
+                producer_complete: options.is_producer_complete(),
+            },
+            Some(owners),
+        )
+        .map(Some)
     }
 
     fn init_graphics(&self) -> Result<(), &'static str> {

@@ -27,7 +27,7 @@ use super::control::{ControlEnqueueError, ControlQueue, ControlRequest, ControlS
 use super::core_lock::CoreLock;
 use super::{
     VIRTIO_GPU_CMD_SUBMIT_3D, VIRTIO_GPU_FLAG_FENCE, VirtioGpuCmdSubmit3d, VirtioGpuCtrlHdr,
-    VirtioGpuDevice, VirtioGpuDeviceCore, append_pod_bytes, validate_execution_response,
+    VirtioGpuDevice, VirtioGpuDeviceCore, validate_execution_response,
 };
 
 // Two descriptor chains (four descriptors) per nonempty submission, shared
@@ -38,12 +38,12 @@ const PROGRESS_INTERVAL_NS: u64 = 1_000_000;
 struct PendingSubmission {
     context_id: u32,
     command_len: usize,
-    payload: Option<Arc<ControlRequest>>,
-    checkpoint: Arc<ControlRequest>,
+    prepared: Prepared,
     submission: GpuSubmission,
 }
 
 pub(super) struct RetiredSubmission {
+    prepared: Prepared,
     submission: GpuSubmission,
     failed: bool,
 }
@@ -52,27 +52,145 @@ impl RetiredSubmission {
     pub(super) fn retire(self) {
         // Resource/context destructors issue synchronous GPU commands. This
         // must run after releasing the outer core lock and transport locks.
-        if self.failed {
-            self.submission
-                .retire_failed(GpuCompletionFailure::Execution);
+        let Self {
+            prepared,
+            submission,
+            failed,
+        } = self;
+        drop(prepared);
+        if failed {
+            submission.retire_failed(GpuCompletionFailure::Execution);
         } else {
-            self.submission.complete();
+            submission.complete();
         }
     }
 }
 
-#[derive(Default)]
+struct Requests {
+    payload: Arc<ControlRequest>,
+    checkpoint: Arc<ControlRequest>,
+}
+
+pub(super) struct RequestPool {
+    free: IrqSpinLock<[Option<Requests>; ASYNC_CAPACITY as usize]>,
+}
+impl RequestPool {
+    pub(super) fn new() -> Self {
+        Self {
+            free: IrqSpinLock::new(core::array::from_fn(|_| None)),
+        }
+    }
+}
+
+pub(super) struct Prepared {
+    requests: Option<Requests>,
+    pool: Arc<RequestPool>,
+}
+impl Prepared {
+    pub(super) fn new(
+        pool: &Arc<RequestPool>,
+        context_id: u32,
+        commands: &[u8],
+    ) -> Result<Self, GpuBackendSubmitError> {
+        if !commands.len().is_multiple_of(4)
+            || commands.len() > GPU_MAX_OPAQUE_COMMAND_SIZE as usize
+        {
+            return Err(GpuBackendSubmitError::Rejected(
+                "VirGL commands must be bounded complete dwords",
+            ));
+        }
+        let cached = {
+            let mut free = pool.free.lock();
+            free.iter_mut().find_map(Option::take)
+        };
+        let mut prepared = Self {
+            requests: cached,
+            pool: Arc::clone(pool),
+        };
+        let refill = |request: &mut Arc<ControlRequest>, header: &[u8], data: &[u8], fence| {
+            if let Some(private) = Arc::get_mut(request) {
+                private.reuse_parts(header, data, fence)
+            } else {
+                *request = ControlRequest::allocate_parts(
+                    header,
+                    data,
+                    core::mem::size_of::<VirtioGpuCtrlHdr>(),
+                    fence,
+                )?;
+                Ok(())
+            }
+        };
+        let payload_header = submit_header(context_id, commands.len(), None);
+        let checkpoint_header = submit_header(context_id, 0, Some(0));
+        // SAFETY: repr(C) transport structures have initialized fields and no
+        // implicit padding; the borrowed headers remain live through the copy.
+        fn header_bytes(header: &VirtioGpuCmdSubmit3d) -> &[u8] {
+            unsafe {
+                core::slice::from_raw_parts(
+                    core::ptr::from_ref(header).cast::<u8>(),
+                    core::mem::size_of::<VirtioGpuCmdSubmit3d>(),
+                )
+            }
+        }
+        let payload = header_bytes(&payload_header);
+        let checkpoint = header_bytes(&checkpoint_header);
+        let result = if let Some(requests) = &mut prepared.requests {
+            refill(&mut requests.payload, payload, commands, None)
+                .and_then(|()| refill(&mut requests.checkpoint, checkpoint, &[], Some(0)))
+        } else {
+            (|| {
+                let payload = ControlRequest::allocate_parts(
+                    payload,
+                    commands,
+                    core::mem::size_of::<VirtioGpuCtrlHdr>(),
+                    None,
+                )?;
+                let checkpoint = ControlRequest::allocate_parts(
+                    checkpoint,
+                    &[],
+                    core::mem::size_of::<VirtioGpuCtrlHdr>(),
+                    Some(0),
+                )?;
+                prepared.requests = Some(Requests {
+                    payload,
+                    checkpoint,
+                });
+                Ok(())
+            })()
+        };
+        result.map_err(GpuBackendSubmitError::Unavailable)?;
+        Ok(prepared)
+    }
+}
+impl Drop for Prepared {
+    fn drop(&mut self) {
+        let mut requests = self.requests.take();
+        {
+            let mut free = self.pool.free.lock();
+            if let Some(slot) = free.iter_mut().find(|slot| slot.is_none()) {
+                *slot = requests.take();
+            }
+        }
+        // Excess storage and outstanding observer references retire outside
+        // the pool lock as well as outside the GPU device-core lock.
+        drop(requests);
+    }
+}
+
 pub(super) struct AsyncSubmissions {
     pending: VecDeque<PendingSubmission>,
     failed: bool,
 }
-
-fn command_bytes(
-    context_id: u32,
-    commands: &[u8],
-    fence: Option<u64>,
-) -> Result<Vec<u8>, &'static str> {
-    let header = VirtioGpuCmdSubmit3d {
+impl Default for AsyncSubmissions {
+    fn default() -> Self {
+        Self {
+            pending: VecDeque::with_capacity(ASYNC_CAPACITY as usize),
+            failed: false,
+        }
+    }
+}
+fn submit_header(context_id: u32, length: usize, fence: Option<u64>) -> VirtioGpuCmdSubmit3d {
+    VirtioGpuCmdSubmit3d {
         hdr: VirtioGpuCtrlHdr {
             hdr_type: VIRTIO_GPU_CMD_SUBMIT_3D,
             flags: if fence.is_some() {
@@ -84,16 +202,9 @@ fn command_bytes(
             ctx_id: context_id,
             padding: 0,
         },
-        size: commands.len() as u32,
+        size: length as u32,
         padding: 0,
-    };
-    let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(core::mem::size_of::<VirtioGpuCmdSubmit3d>() + commands.len())
-        .map_err(|_| "Failed to allocate VirtIO GPU submit header")?;
-    append_pod_bytes(&mut bytes, &header);
-    bytes.extend_from_slice(commands);
-    Ok(bytes)
+    }
 }
 
 impl AsyncSubmissions {
@@ -107,6 +218,7 @@ impl AsyncSubmissions {
         context_id: u32,
         fence: u64,
         submission: GpuSubmission,
+        prepared: &mut Option<Prepared>,
         now_ns: u64,
     ) -> Result<(), GpuBackendEnqueueError> {
         if let Err(error) = control.check() {
@@ -118,47 +230,28 @@ impl AsyncSubmissions {
         if self.pending.len() >= ASYNC_CAPACITY as usize {
             return Err(GpuBackendEnqueueError::Busy(submission));
         }
-        let commands = submission.commands();
-        let command_len = commands.len();
-        if !commands.len().is_multiple_of(4)
-            || commands.len() > GPU_MAX_OPAQUE_COMMAND_SIZE as usize
-        {
+        let command_len = submission.commands().len();
+        let requests = prepared
+            .as_mut()
+            .and_then(|p| p.requests.as_mut())
+            .expect("prepared DMA storage");
+        let Some(checkpoint) = Arc::get_mut(&mut requests.checkpoint) else {
             return Err(GpuBackendEnqueueError::Rejected(
-                GpuBackendSubmitError::Rejected("VirGL commands must be bounded complete dwords"),
+                GpuBackendSubmitError::Unavailable("Checkpoint storage is not private"),
                 submission,
             ));
-        }
-        let prepared = (|| {
-            self.pending
-                .try_reserve(1)
-                .map_err(|_| "Failed to retain VirtIO GPU async submission")?;
-            let payload = if commands.is_empty() {
-                None
-            } else {
-                Some(ControlRequest::new(
-                    &command_bytes(context_id, commands, None)?,
-                    core::mem::size_of::<VirtioGpuCtrlHdr>(),
-                )?)
-            };
-            let checkpoint = ControlRequest::new_checkpoint(
-                &command_bytes(context_id, &[], Some(fence))?,
-                fence,
-            )?;
-            Ok::<_, &'static str>((payload, checkpoint))
-        })();
-        let (payload, checkpoint) = match prepared {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return Err(GpuBackendEnqueueError::Rejected(
-                    GpuBackendSubmitError::Unavailable(error),
-                    submission,
-                ));
-            }
         };
-        let published = if let Some(payload) = &payload {
-            control.enqueue_batch(&[Arc::clone(payload), Arc::clone(&checkpoint)], now_ns)
+        checkpoint.set_checkpoint_fence(fence);
+        let published = if command_len != 0 {
+            control.enqueue_batch(
+                &[
+                    Arc::clone(&requests.payload),
+                    Arc::clone(&requests.checkpoint),
+                ],
+                now_ns,
+            )
         } else {
-            control.enqueue(&checkpoint, now_ns)
+            control.enqueue(&requests.checkpoint, now_ns)
         };
         if let Err(error) = published {
             return Err(match error {
@@ -169,13 +262,12 @@ impl AsyncSubmissions {
                 ),
             });
         }
-        // Capacity is reserved and publication has no fallible successor. The
-        // caller holds the core lock until this owner is visible to the worker.
+        // Fixed admission capacity was reserved at device initialization.
+        // No allocation or payload copy occurs under the publication lock.
         self.pending.push_back(PendingSubmission {
             context_id,
             command_len,
-            payload,
-            checkpoint,
+            prepared: prepared.take().expect("accepted DMA storage"),
             submission,
         });
         Ok(())
@@ -196,10 +288,16 @@ impl AsyncSubmissions {
             return None;
         }
         let pending = self.pending.front()?;
-        if !matches!(pending.checkpoint.status(), ControlStatus::Complete(_)) {
+        let requests = pending
+            .prepared
+            .requests
+            .as_ref()
+            .expect("pending DMA storage");
+        if !matches!(requests.checkpoint.status(), ControlStatus::Complete(_)) {
             return None;
         }
-        let failed = if let Some(payload) = &pending.payload {
+        let failed = if pending.command_len != 0 {
+            let payload = &requests.payload;
             if !matches!(payload.status(), ControlStatus::Complete(_)) {
                 return None;
             }
@@ -228,6 +326,7 @@ impl AsyncSubmissions {
         // out of order. A later receipt never skips an earlier pending request.
         let pending = self.pending.pop_front().expect("ready front submission");
         Some(RetiredSubmission {
+            prepared: pending.prepared,
             submission: pending.submission,
             failed,
         })

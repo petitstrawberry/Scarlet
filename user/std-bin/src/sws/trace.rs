@@ -3,8 +3,71 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use core::time::Duration;
 use std::env;
+use std::io::{BufWriter, Write};
 use std::println;
 use std::thread;
+use std::time::Instant;
+
+/// One compact row per completed composition; no per-frame console output.
+pub(crate) struct FrameProfile {
+    file: BufWriter<std::fs::File>,
+    epoch: Instant,
+    frame: u64,
+}
+
+impl FrameProfile {
+    pub(crate) fn open() -> Option<Self> {
+        if !env::var("SWS_FRAME_PROFILE").is_ok_and(|value| value == "1") {
+            return None;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(format!("/tmp/sws-frames-{}.tsv", std::process::id()))
+            .ok()?;
+        let mut file = BufWriter::with_capacity(32768, file);
+        writeln!(file, "frame\tbegin_ns\tend_ns\tprepare_ns\tencode_ns\tsubmit_ns\tpresent_ns\tretire_ns\tencode_submit_ns\tbackend_admit_ns\tgpu_wait_ns\tdisplay_enqueue_ns\timage_reuse_wait_ns\tquads\tdamage_pixels").ok()?;
+        Some(Self {
+            file,
+            epoch: Instant::now(),
+            frame: 0,
+        })
+    }
+
+    pub(crate) fn record(
+        &mut self,
+        stages: [Instant; 6],
+        timings: &crate::sgfx_ir_support::FrameTimings,
+        quads: usize,
+        damage_pixels: u64,
+    ) -> std::io::Result<()> {
+        let [start, synced, encoded, submitted, presented, end] = stages;
+        self.frame += 1;
+        writeln!(
+            self.file,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            self.frame,
+            start.duration_since(self.epoch).as_nanos(),
+            end.duration_since(self.epoch).as_nanos(),
+            synced.duration_since(start).as_nanos(),
+            encoded.duration_since(synced).as_nanos(),
+            submitted.duration_since(encoded).as_nanos(),
+            presented.duration_since(submitted).as_nanos(),
+            end.duration_since(presented).as_nanos(),
+            timings.encode_submit_ns,
+            timings.backend_admit_ns,
+            timings.gpu_wait_ns,
+            timings.display_enqueue_ns,
+            timings.image_reuse_wait_ns,
+            quads,
+            damage_pixels
+        )?;
+        if self.frame % 60 == 0 {
+            self.file.flush()?;
+        }
+        Ok(())
+    }
+}
 
 pub(crate) const STAGE_STARTING: u32 = 0;
 pub(crate) const STAGE_PROCESS_EVENTS: u32 = 1;

@@ -518,3 +518,16 @@ fn buffer_partial_usercopy_failure_releases_inline_guard_without_callback() {
     assert_eq!(*backend.state.lock().events, [1, 3]);
     assert!(!backend.state.lock().reserved);
 }
+
+#[test_case]
+fn buffer_query_results_require_cpu_visibility_and_reach_backend() {
+    use super::super::{GPU_BUFFER_FLAG_CPU_VISIBLE, GPU_BUFFER_FLAG_QUERY_RESULT};
+    let backend = Arc::new(Backend::new(PAGE_SIZE));
+    assert!(GpuBuffer::new(backend.clone(), PAGE_SIZE, GPU_BUFFER_FLAG_QUERY_RESULT).is_err());
+    assert!(GpuBuffer::new(backend.clone(), PAGE_SIZE, 1 << 31).is_err());
+    assert_eq!(backend.state.lock().calls, 0);
+    let flags = GPU_BUFFER_FLAG_CPU_VISIBLE | GPU_BUFFER_FLAG_QUERY_RESULT;
+    let buffer = GpuBuffer::new(backend.clone(), PAGE_SIZE, flags).unwrap();
+    assert_eq!(backend.state.lock().create.unwrap().flags, flags);
+    assert!(buffer.get_mapping_info(0, PAGE_SIZE).is_ok());
+}

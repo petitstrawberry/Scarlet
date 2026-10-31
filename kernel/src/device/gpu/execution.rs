@@ -29,8 +29,64 @@ use crate::object::handle::AccessMode;
 /// a real backend context while one of its child queues remains usable.
 pub struct GpuContext {
     backend_context: Arc<dyn GpuBackendContext>,
-    attached_images: Arc<crate::sync::Mutex<Vec<GpuAttachedImage>>>,
-    attached_buffers: Arc<crate::sync::Mutex<Vec<GpuAttachedBuffer>>>,
+    attached_images: Arc<crate::sync::Mutex<AttachmentSet<GpuAttachedImage>>>,
+    attached_buffers: Arc<crate::sync::Mutex<AttachmentSet<GpuAttachedBuffer>>>,
+}
+
+/// Attached resources plus the immutable submission view for the current epoch.
+///
+/// Mutating methods invalidate the cache before changing `entries`. Submissions
+/// keep their own `Arc`, so later attach/detach operations cannot release or
+/// rewrite the backing retained by work already admitted by the backend.
+pub(super) struct AttachmentSet<T> {
+    entries: Vec<T>,
+    cached: Option<Arc<Vec<T>>>,
+}
+
+impl<T> Default for AttachmentSet<T> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            cached: None,
+        }
+    }
+}
+
+impl<T: Clone> AttachmentSet<T> {
+    /// Retain one allocation-free view until the next attachment mutation.
+    pub(super) fn snapshot(&mut self) -> Result<Arc<Vec<T>>, ()> {
+        if let Some(cached) = &self.cached {
+            return Ok(Arc::clone(cached));
+        }
+        let mut snapshot = Vec::new();
+        snapshot
+            .try_reserve_exact(self.entries.len())
+            .map_err(|_| ())?;
+        snapshot.extend_from_slice(&self.entries);
+        let snapshot = Arc::new(snapshot);
+        self.cached = Some(Arc::clone(&snapshot));
+        Ok(snapshot)
+    }
+
+    /// Reserve entry capacity without invalidating an existing snapshot.
+    pub(super) fn try_reserve(&mut self, additional: usize) -> Result<(), ()> {
+        self.entries.try_reserve(additional).map_err(|_| ())
+    }
+}
+
+impl<T> core::ops::Deref for AttachmentSet<T> {
+    type Target = Vec<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+impl<T> core::ops::DerefMut for AttachmentSet<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.cached = None;
+        &mut self.entries
+    }
 }
 
 /// Backend buffer and page backing retained by a context and its child queues.
@@ -62,8 +118,8 @@ impl GpuContext {
     pub fn new(backend_context: Arc<dyn GpuBackendContext>) -> Self {
         Self {
             backend_context,
-            attached_images: Arc::new(crate::sync::Mutex::new(Vec::new())),
-            attached_buffers: Arc::new(crate::sync::Mutex::new(Vec::new())),
+            attached_images: Arc::new(crate::sync::Mutex::new(AttachmentSet::default())),
+            attached_buffers: Arc::new(crate::sync::Mutex::new(AttachmentSet::default())),
         }
     }
 
@@ -773,8 +829,8 @@ impl GpuObject for GpuContext {
 /// Kernel-owned GPU execution queue child capability.
 pub struct GpuQueue {
     _backend_context: Arc<dyn GpuBackendContext>,
-    _attached_images: Arc<crate::sync::Mutex<Vec<GpuAttachedImage>>>,
-    _attached_buffers: Arc<crate::sync::Mutex<Vec<GpuAttachedBuffer>>>,
+    _attached_images: Arc<crate::sync::Mutex<AttachmentSet<GpuAttachedImage>>>,
+    _attached_buffers: Arc<crate::sync::Mutex<AttachmentSet<GpuAttachedBuffer>>>,
     backend_queue: Arc<dyn GpuBackendQueue>,
     // Async admission never waits on a backend's potentially blocking legacy
     // query path. Freeze its maximum at queue creation, before any submit.
