@@ -515,6 +515,9 @@ fn terminate_current_user_exception(
     reason: &'static str,
     exit_status: i32,
 ) {
+    if trap_from_user(trapframe) && crate::abi::user_exception_dispatcher(trapframe, vaddr, esr) {
+        return;
+    }
     print_trap_info(trapframe, esr);
     if let Some(task) = current_task(get_cpu().get_cpuid()) {
         println!(

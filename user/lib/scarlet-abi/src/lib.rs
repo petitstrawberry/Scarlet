@@ -830,6 +830,34 @@ pub const fn syscall_transport_number(syscall: Syscall) -> usize {
     }
 }
 
+/// Snapshot of physical pages managed by the kernel allocator. Reserved RAM,
+/// MMIO and reclaimable filesystem caches are not counted as free memory.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RawMemoryInfo {
+    pub page_size: u64,
+    pub total_pages: u64,
+    pub free_pages: u64,
+}
+
+const _: [(); 24] = [(); core::mem::size_of::<RawMemoryInfo>()];
+
+/// AArch64 native synchronous-fault context, version 1 (304 bytes).
+/// The handler may change integer registers, SP, PC and NZCV before returning
+/// through NativeFaultReturn. FP/SIMD and TLS state are preserved by the kernel.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RawNativeFaultContext {
+    pub version: u64,
+    pub size: u64,
+    pub fault_address: u64,
+    pub syndrome: u64,
+    pub registers: [u64; 31],
+    pub sp: u64,
+    pub pc: u64,
+    pub nzcv: u64,
+}
+
 /// Scarlet Native syscall numbers.
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -939,7 +967,10 @@ pub enum Syscall {
     /// Query pending native wake deadlines. Arguments: writable
     /// RawWakeDeadlineSnapshotV1 pointer and size (32). Requires resource
     /// management authority. A software-only snapshot cannot authorize suspend.
-    WakeDeadlineQuery = 53,
+    WakeDeadlineQuery = 54,
+    /// Copy a 24-byte RawMemoryInfo snapshot to (output, capacity).
+    /// Returns 24, or usize::MAX; ignore the output on failure.
+    GetMemoryInfo = 53,
 
     // Process information
     GetTaskInfoCount = 24,
@@ -1065,6 +1096,13 @@ pub enum Syscall {
     EventReturn = 643,
     /// Register a native event handler with an executable event-return restorer.
     EventHandlerRegisterWithRestorer = 644,
+    /// AArch64: register (handler, alternate_stack_base, stack_size) for the
+    /// current thread's synchronous faults. All zeros unregister. Returns 0
+    /// or usize::MAX. Registrations are not inherited by cloned threads.
+    NativeFaultRegister = 645,
+    /// AArch64: resume the active synchronous fault using a context pointer
+    /// supplied to the handler. Invalid contexts fail without resuming.
+    NativeFaultReturn = 646,
 
     // Memory mapping operations
     MemoryMap = 700,
@@ -1073,6 +1111,11 @@ pub enum Syscall {
     MemoryProtect = 702,
     /// Return caller virtual mapping start/end_exclusive into output: *mut [usize; 2].
     MemoryQuery = 703,
+    /// Read an aligned 4-byte or native-word value from normal user memory.
+    /// Arguments: (address, width, fallback). Returns the zero-extended value,
+    /// or fallback for an unreadable, unaligned, or unsupported address/width.
+    /// The kernel keeps the mapping alive through the single scalar load.
+    MemoryReadWord = 704,
 
     // Socket operations
     SocketCreate = 900,

@@ -40,8 +40,8 @@ impl Drop for SubmissionPermit {
 
 /// Attachment snapshots and owners retained independently of observer handles.
 pub(super) struct SubmissionResources {
-    pub(super) _images: Vec<GpuAttachedImage>,
-    pub(super) _buffers: Vec<GpuAttachedBuffer>,
+    pub(super) _images: Arc<Vec<GpuAttachedImage>>,
+    pub(super) _buffers: Arc<Vec<GpuAttachedBuffer>>,
     pub(super) _context: Arc<dyn GpuBackendContext>,
     pub(super) _queue: Arc<dyn GpuBackendQueue>,
 }
@@ -94,8 +94,8 @@ impl GpuSubmission {
         let submission = Self::new(
             commands,
             SubmissionResources {
-                _images: Vec::new(),
-                _buffers: Vec::new(),
+                _images: Arc::new(Vec::new()),
+                _buffers: Arc::new(Vec::new()),
                 _context: context,
                 _queue: queue,
             },
@@ -129,6 +129,18 @@ impl GpuSubmission {
     /// and resource authorization remain the backend's responsibility.
     pub fn commands(&self) -> &[u8] {
         self.retained.as_ref().map_or(&[], |owned| &owned.commands)
+    }
+
+    /// Test-only view of the immutable attachment epoch retained by this work.
+    #[cfg(test)]
+    pub(crate) fn attachment_snapshot_arcs(
+        &self,
+    ) -> (Arc<Vec<GpuAttachedImage>>, Arc<Vec<GpuAttachedBuffer>>) {
+        let resources = &self.retained.as_ref().expect("owned submission")._resources;
+        (
+            Arc::clone(&resources._images),
+            Arc::clone(&resources._buffers),
+        )
     }
 
     /// Retire successful work, release its retained ownership, and wake observers.
@@ -205,7 +217,10 @@ impl core::fmt::Debug for GpuSubmission {
 
 #[cfg(test)]
 mod tests {
+    use alloc::sync::Arc;
+
     use super::{MAX_PENDING_SUBMISSIONS, SubmissionSlots};
+    use crate::device::gpu::execution::AttachmentSet;
 
     #[test_case]
     fn admission_slots_are_bounded_and_reclaimed_independently_of_observers() {
@@ -225,5 +240,22 @@ mod tests {
         assert!(slots.reserve(u32::MAX).is_none());
         drop(held);
         assert!(slots.reserve(1).is_some());
+    }
+
+    #[test_case]
+    fn attachment_snapshots_share_until_mutation_and_old_epoch_stays_frozen() {
+        let mut attachments = AttachmentSet::default();
+        attachments.push(1u32);
+        attachments.push(2u32);
+
+        let first = attachments.snapshot().unwrap();
+        let second = attachments.snapshot().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        attachments.push(3u32);
+        let third = attachments.snapshot().unwrap();
+        assert!(!Arc::ptr_eq(&first, &third));
+        assert_eq!(first.as_slice(), &[1, 2]);
+        assert_eq!(third.as_slice(), &[1, 2, 3]);
     }
 }

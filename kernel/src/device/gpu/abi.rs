@@ -112,8 +112,10 @@ pub const GPU_RESULT_DEVICE_LOST: u32 = 7;
 
 /// Create buffer flag permitting CPU memory mappings.
 pub const GPU_BUFFER_FLAG_CPU_VISIBLE: u32 = 1 << 0;
+/// Host-written GPU query state; requires CPU_VISIBLE and is not a draw/storage buffer.
+pub const GPU_BUFFER_FLAG_QUERY_RESULT: u32 = 1 << 1;
 /// All currently defined GPU buffer creation flags.
-pub const GPU_BUFFER_FLAGS_VALID: u32 = GPU_BUFFER_FLAG_CPU_VISIBLE;
+pub const GPU_BUFFER_FLAGS_VALID: u32 = GPU_BUFFER_FLAG_CPU_VISIBLE | GPU_BUFFER_FLAG_QUERY_RESULT;
 
 /// Fixed byte capacity of a backend or dialect identifier.
 pub const GPU_BACKEND_ID_BYTES: usize = 32;
@@ -141,6 +143,10 @@ pub const GPU_IMAGE_FORMAT_DEPTH32_FLOAT: u32 = 2;
 pub const GPU_IMAGE_FORMAT_R8_UNORM: u32 = 4;
 /// Generic two-channel normalized unsigned 8-bit image format.
 pub const GPU_IMAGE_FORMAT_RG8_UNORM: u32 = 5;
+/// Four 16-bit floating-point color components.
+pub const GPU_IMAGE_FORMAT_RGBA16_FLOAT: u32 = 6;
+/// Four 32-bit floating-point color components.
+pub const GPU_IMAGE_FORMAT_RGBA32_FLOAT: u32 = 7;
 
 /// Byte size of one uncompressed single-plane texel, without conversion.
 pub const fn image_format_bytes_per_texel(format: u32) -> Option<u32> {
@@ -148,6 +154,8 @@ pub const fn image_format_bytes_per_texel(format: u32) -> Option<u32> {
         GPU_IMAGE_FORMAT_BGRA8_UNORM | GPU_IMAGE_FORMAT_DEPTH32_FLOAT => Some(4),
         GPU_IMAGE_FORMAT_R8_UNORM => Some(1),
         GPU_IMAGE_FORMAT_RG8_UNORM => Some(2),
+        GPU_IMAGE_FORMAT_RGBA16_FLOAT => Some(8),
+        GPU_IMAGE_FORMAT_RGBA32_FLOAT => Some(16),
         _ => None,
     }
 }

@@ -93,8 +93,8 @@ pub(crate) fn remove_task_waiter(task_id: usize, thread_group_id: usize) {
 /// Wait while a process-private 32-bit futex word equals an expected value.
 ///
 /// Spurious wakeups are permitted. Userspace must re-check its atomic state in
-/// a loop. Registering the keyed waker before the second value check closes the
-/// unlock-before-wait race without polling a software timer.
+/// a loop. Rechecking the word after registering this task closes the
+/// unlock-before-wait race, including broadcasts with other queued waiters.
 ///
 /// # Arguments
 ///
@@ -128,12 +128,16 @@ pub fn sys_futex_wait(trapframe: &mut Trapframe) -> usize {
     }
 
     let task_id = task.get_id();
-    drop(task);
+    // A keyed waker alone is not a wait registration. A broadcast can wake
+    // existing waiters between the value check and our queue insertion without
+    // leaving a pending wake for us. Recheck after insertion, before sleeping.
+    // The closure consumes the task reference before scheduling.
+    let changed = move || read_futex_value(&task, address) != Some(expected);
     let woken = if timeout_ns == FUTEX_WAIT_FOREVER {
-        waiter.wait_owned(task_id, trapframe);
+        waiter.wait_result_until_owned(task_id, trapframe, changed);
         true
     } else {
-        waiter.wait_with_timeout_owned(task_id, trapframe, timeout_ns as u64)
+        waiter.wait_with_timeout_until_owned(task_id, trapframe, timeout_ns as u64, changed)
     };
     remove_unused_waiter(key);
     if woken { 0 } else { FUTEX_TIMED_OUT }

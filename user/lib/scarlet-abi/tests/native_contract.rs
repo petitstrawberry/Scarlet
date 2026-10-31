@@ -76,6 +76,19 @@ fn system_time_update_v1_layout() {
 }
 
 #[test]
+fn native_memory_query_contract() {
+    assert_layout!(abi::RawMemoryInfo, 24, 8, {
+        page_size: 0, total_pages: 8, free_pages: 16,
+    });
+    assert_eq!(abi::Syscall::GetMemoryInfo as usize, 53);
+    assert_eq!(abi::Syscall::MemoryReadWord as usize, 704);
+    assert_layout!(abi::RawNativeFaultContext, 304, 8, {
+        version: 0, size: 8, fault_address: 16, syndrome: 24,
+        registers: 32, sp: 280, pc: 288, nzcv: 296,
+    });
+}
+
+#[test]
 fn scheduler_v1_field_layouts() {
     assert_layout!(abi::RawTaskDeadlineParams, 24, 8, {
         runtime_ns: 0, deadline_ns: 8, period_ns: 16,
@@ -243,7 +256,7 @@ fn native_syscall_numbers() {
         SetTaskCpuAffinity = 42, GetTaskCpuAffinity = 43,
         SetTaskDeadline = 44, GetTaskDeadline = 45, SetSchedulerAttr = 46,
         GetSchedulerAttr = 47, GetSchedulerState = 48, FutexWait = 49,
-        FutexWake = 50, GetKernelInfo = 51, SetSystemTime = 52,
+        FutexWake = 50, GetKernelInfo = 51, SetSystemTime = 52, GetMemoryInfo = 53,
         RegisterAbiZone = 90, UnregisterAbiZone = 91,
         CreateNamespace = 92, HandleQuery = 100, HandleSetRole = 101,
         HandleClose = 102, HandleDuplicate = 103,
@@ -276,7 +289,9 @@ fn native_syscall_numbers() {
         SocketSendHandleAndData = 632, SocketRecvHandleAndData = 633,
         EventHandlerRegister = 640, EventHandlerUnregister = 641,
         EventMask = 642, EventReturn = 643, EventHandlerRegisterWithRestorer = 644,
-        MemoryMap = 700, MemoryUnmap = 701, MemoryProtect = 702, MemoryQuery = 703, SocketCreate = 900, SocketBind = 901,
+        NativeFaultRegister = 645, NativeFaultReturn = 646,
+        MemoryMap = 700, MemoryUnmap = 701, MemoryProtect = 702, MemoryQuery = 703,
+        MemoryReadWord = 704, SocketCreate = 900, SocketBind = 901,
         SocketListen = 902, SocketConnect = 903, SocketAccept = 904,
         Socketpair = 905, SocketShutdown = 906, SocketRecvFrom = 907,
         SocketSendTo = 908, SocketBindInterface = 909, NetworkSetIpv4 = 910,

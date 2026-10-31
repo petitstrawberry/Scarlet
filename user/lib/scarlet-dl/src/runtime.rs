@@ -1,7 +1,8 @@
+use crate::state::{self, fail};
 use crate::{platform::NativePlatform, process::Process};
 use scarlet_loader_core::{Error, LoaderContext, Machine, ObjectId};
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::ffi::{CStr, c_char, c_int, c_void};
+use std::sync::{Mutex, OnceLock};
 
 const RTLD_NOW: c_int = 2;
 const RTLD_GLOBAL: c_int = 0x100;
@@ -25,38 +26,8 @@ struct Runtime {
 // transfer, and owns both startup DT_NEEDED and later dlopen objects.
 static RUNTIME: OnceLock<Mutex<Runtime>> = OnceLock::new();
 
-struct ErrorState {
-    pending: Option<CString>,
-    returned: Option<CString>,
-}
-
-// scarlet-ld and the loaded program currently have independent Rust standard
-// libraries but share Scarlet's emulated TLS key table. A loader-owned
-// `thread_local!` can therefore alias a program-owned key. The current loader
-// contract rejects concurrent operations and its libloading adapter serializes
-// calls, so keep dlerror state in the interpreter instead.
-static ERROR: Mutex<ErrorState> = Mutex::new(ErrorState {
-    pending: None,
-    returned: None,
-});
-
-fn lock_error() -> MutexGuard<'static, ErrorState> {
-    ERROR.lock().unwrap_or_else(|error| error.into_inner())
-}
-
-fn fail(error: impl std::fmt::Display) {
-    let message = error.to_string().replace('\0', "?");
-    lock_error().pending = Some(CString::new(message).unwrap());
-}
-
-fn lock_runtime() -> Result<MutexGuard<'static, Runtime>, &'static str> {
-    RUNTIME
-        .get()
-        .ok_or("dynamic loader is not initialized")?
-        .try_lock()
-        .map_err(
-            |_| "dynamic loader is busy (constructor reentry and concurrent calls are unsupported)",
-        )
+fn lock_runtime() -> Result<state::Guard<'static, Runtime>, &'static str> {
+    state::lock(RUNTIME.get().ok_or("dynamic loader is not initialized")?)
 }
 
 impl Runtime {
@@ -104,7 +75,9 @@ pub unsafe fn initialize(initial_stack: usize) -> Result<usize, Error> {
     }
     // SAFETY: Forward the kernel initial stack guaranteed by the caller.
     let process = unsafe { Process::from_stack(initial_stack) }?;
-    unsafe { ENVIRON = process.envp as *const *const c_char; }
+    unsafe {
+        ENVIRON = process.envp as *const *const c_char;
+    }
     #[cfg(target_arch = "aarch64")]
     let machine = Machine::Aarch64;
     #[cfg(target_arch = "riscv64")]
@@ -234,14 +207,9 @@ pub extern "C" fn dlclose(handle: *mut c_void) -> c_int {
     }
 }
 
-/// Return and clear the last pending loader error. Loader calls are serialized;
-/// the returned string remains valid until the next call to dlerror.
+/// Return and clear this thread's last pending loader error. The returned
+/// string remains valid until this thread's next call to dlerror.
 #[unsafe(no_mangle)]
 pub extern "C" fn dlerror() -> *mut c_char {
-    let mut state = lock_error();
-    state.returned = state.pending.take();
-    state
-        .returned
-        .as_ref()
-        .map_or(std::ptr::null_mut(), |s| s.as_ptr().cast_mut())
+    state::take_error()
 }

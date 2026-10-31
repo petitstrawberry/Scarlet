@@ -1,5 +1,6 @@
 //! Private helpers for driving the modern SGFX frontend from Scarlet binaries.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::vec::Vec;
 use std::{error, fmt};
@@ -113,6 +114,17 @@ pub(crate) struct MappedTarget {
     session: MappedTargetSession,
     reusable_imports: Vec<ReusableImport>,
     tracked_submission: bool,
+    pub(crate) frame_timings: Option<FrameTimings>,
+}
+
+/// Nested wall-time components of the compositor's current frame.
+#[derive(Default)]
+pub(crate) struct FrameTimings {
+    pub(crate) encode_submit_ns: u128,
+    pub(crate) backend_admit_ns: u128,
+    pub(crate) gpu_wait_ns: u128,
+    pub(crate) display_enqueue_ns: u128,
+    pub(crate) image_reuse_wait_ns: u128,
 }
 
 #[cfg(target_os = "scarlet")]
@@ -211,6 +223,7 @@ impl MappedTarget {
             session,
             reusable_imports: Vec::new(),
             tracked_submission,
+            frame_timings: None,
         })
     }
 
@@ -335,10 +348,17 @@ impl MappedTarget {
                 .present_sequence
                 .checked_add(1)
                 .ok_or("SGFX presentation sequence exhausted")?;
+            let enqueue_start = self
+                .frame_timings
+                .as_ref()
+                .map(|_| std::time::Instant::now());
             self.presentation
                 .as_mut()
                 .unwrap()
                 .present(sequence, self.current_slot, region)?;
+            if let (Some(start), Some(timings)) = (enqueue_start, &mut self.frame_timings) {
+                timings.display_enqueue_ns += start.elapsed().as_nanos();
+            }
             self.present_sequence = sequence;
             self.finish_present(sequence)
                 .map_err(|_| "Failed to track SGFX swapchain damage")?;
@@ -346,7 +366,14 @@ impl MappedTarget {
             if let Some(previous) = self.slots[next].last_present {
                 // Completing image N's flip makes it the front. It is released
                 // only when a LATER image has actually replaced it at scanout.
+                let wait_start = self
+                    .frame_timings
+                    .as_ref()
+                    .map(|_| std::time::Instant::now());
                 self.presentation.as_mut().unwrap().wait_after(previous)?;
+                if let (Some(start), Some(timings)) = (wait_start, &mut self.frame_timings) {
+                    timings.image_reuse_wait_ns += start.elapsed().as_nanos();
+                }
             }
             self.current_slot = next;
             self.texture = self.slots[next].texture;
@@ -583,7 +610,30 @@ struct CompositionRegion {
     operations: Vec<Quad>,
 }
 
+#[cfg(target_os = "scarlet")]
+struct TimedExecutor<'a, E> {
+    inner: &'a mut E,
+    elapsed_ns: Option<&'a mut u128>,
+}
+
+#[cfg(target_os = "scarlet")]
+impl<E: CommandExecutor> CommandExecutor for TimedExecutor<'_, E> {
+    type Error = E::Error;
+    fn execute<'r, 'data>(
+        &mut self,
+        commands: &ir::CommandBuffer<'r, 'data>,
+    ) -> Result<(), Self::Error> {
+        let start = self.elapsed_ns.as_ref().map(|_| std::time::Instant::now());
+        let result = self.inner.execute(commands);
+        if let (Some(start), Some(elapsed)) = (start, self.elapsed_ns.as_deref_mut()) {
+            *elapsed += start.elapsed().as_nanos();
+        }
+        result
+    }
+}
+
 pub(crate) struct QuadRenderer {
+    vertex_scratch: RefCell<Vec<u8>>,
     buffer: BufferId,
     sampler: SamplerId,
     solid_pipeline: RenderPipelineId,
@@ -637,6 +687,7 @@ impl QuadRenderer {
                 .id())
         };
         Ok(Self {
+            vertex_scratch: RefCell::new(Vec::with_capacity(buffer_size as usize)),
             buffer,
             sampler,
             solid_pipeline: define_pipeline(
@@ -768,9 +819,18 @@ impl QuadRenderer {
         operations: &[Quad],
         backdrops: &[BackdropPass<'_>],
     ) -> Result<(), QuadSubmitError<FrameSubmissionError<sgfx::Error, sgfx::Submission>>> {
+        let encode_start = target
+            .frame_timings
+            .as_ref()
+            .map(|_| std::time::Instant::now());
         let mut executor = FrameExecutor::new(target.session.executor());
+        let mut backend_admit_ns = 0;
+        let mut timed = TimedExecutor {
+            inner: &mut executor,
+            elapsed_ns: target.frame_timings.as_ref().map(|_| &mut backend_admit_ns),
+        };
         let encoded = self.encode_scene_with_uploads(
-            &mut executor,
+            &mut timed,
             Rc::clone(&target.resources),
             texture,
             extent.0,
@@ -781,6 +841,10 @@ impl QuadRenderer {
             operations,
             backdrops,
         );
+        drop(timed);
+        if let Some(timings) = &mut target.frame_timings {
+            timings.backend_admit_ns += backend_admit_ns;
+        }
         if let Err(error) = encoded {
             if matches!(
                 &error,
@@ -794,7 +858,18 @@ impl QuadRenderer {
             }
             return Err(error);
         }
-        match executor.wait() {
+        if let (Some(start), Some(timings)) = (encode_start, &mut target.frame_timings) {
+            timings.encode_submit_ns += start.elapsed().as_nanos();
+        }
+        let wait_start = target
+            .frame_timings
+            .as_ref()
+            .map(|_| std::time::Instant::now());
+        let result = executor.wait();
+        if let (Some(start), Some(timings)) = (wait_start, &mut target.frame_timings) {
+            timings.gpu_wait_ns += start.elapsed().as_nanos();
+        }
+        match result {
             Ok(CompletionStatus::Complete) => Ok(()),
             Ok(_) => Err(QuadSubmitError::Execution(FrameSubmissionError::Pending)),
             Err(error) => Err(QuadSubmitError::Execution(error)),
@@ -1100,7 +1175,8 @@ impl QuadRenderer {
         // Record captures, reductions, and filters in order in one stream. Each
         // draw has its own vertex range; later uploads cannot overwrite vertices
         // that an earlier asynchronous pass is still using.
-        let mut vertices = Vec::new();
+        let mut vertices = self.vertex_scratch.borrow_mut();
+        vertices.clear();
         for region in regions {
             append_operation_vertices(
                 &mut vertices,
@@ -1183,7 +1259,8 @@ impl QuadRenderer {
                 "SGFX texture upload command capacity exceeded",
             ));
         }
-        let mut vertices = Vec::new();
+        let mut vertices = self.vertex_scratch.borrow_mut();
+        vertices.clear();
         append_operation_vertices(&mut vertices, width, height, operations)?;
 
         let mut batch_start = 0usize;

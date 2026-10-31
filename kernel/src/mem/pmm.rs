@@ -724,6 +724,12 @@ impl PmmInner {
 
 static PMM: IrqSpinLock<PmmInner> = IrqSpinLock::new(PmmInner::new());
 
+/// Atomically snapshot the total and free page counts of active RAM regions.
+/// The returned counts are advisory; allocations may change them immediately.
+pub fn page_counts() -> (usize, usize) {
+    PMM.lock().stats()
+}
+
 /// Register an initial physical RAM region with the buddy allocator.
 ///
 /// # Arguments

@@ -1,0 +1,29 @@
+name: Native window contracts
+on:
+  pull_request:
+    paths:
+      - 'user/lib/sws-client/**'
+      - 'user/lib/sws-client-c/**'
+      - 'user/lib/sws-protocol/**'
+      - 'user/lib/scarlet-os/**'
+      - 'user/lib/scarlet-sys/**'
+      - '.github/workflows/native-window.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-window:
+    # These pure contract tests link Scarlet's syscall wrappers, which have
+    # AArch64/RISC-V implementations. They never issue a Scarlet syscall.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2025-12-31
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host Rust
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Test event routing and scene buffer ownership
+        run: |
+          cargo test --manifest-path user/lib/sws-client/Cargo.toml --no-default-features --features std --lib
+          cargo test --manifest-path user/lib/sws-client-c/Cargo.toml --lib

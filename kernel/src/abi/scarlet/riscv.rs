@@ -199,6 +199,23 @@ impl Default for ScarletAbi {
 }
 
 impl ScarletAbi {
+    // This port has no native synchronous-fault context ABI yet.
+    pub(super) fn register_fault_handler(
+        &mut self,
+        _task: &crate::task::Task,
+        _trap: &mut Trapframe,
+    ) -> usize {
+        usize::MAX
+    }
+
+    pub(super) fn return_from_fault(
+        &mut self,
+        _task: &crate::task::Task,
+        _trap: &mut Trapframe,
+    ) -> usize {
+        usize::MAX
+    }
+
     /// Get the TLS pointer for this task
     pub fn tls_pointer(&self) -> Option<usize> {
         self.tls_pointer
@@ -706,6 +723,11 @@ impl AbiModule for ScarletAbi {
     }
 
     fn handle_syscall(&mut self, trapframe: &mut Trapframe) -> Result<usize, &'static str> {
+        if let Some(result) =
+            super::fault::handle_syscall(self, trapframe, trapframe.get_syscall_number())
+        {
+            return Ok(result);
+        }
         syscall_handler(trapframe)
     }
 

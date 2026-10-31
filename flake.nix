@@ -12,7 +12,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     scarlet-rust-toolchain.url = "github:petitstrawberry/scarlet-rust-nix/3c23906c35053e28d56f3aa9b1d29142535ffab7";
     scarlet-sdk = {
-      url = "github:petitstrawberry/scarlet-sdk/a071222231e8bbd96c1d54f38d99d1b27ec90805";
+      url = "github:petitstrawberry/scarlet-sdk/5f7b7cfba43958a6a0d19156fdfe2cae43cfded5";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.scarlet-rust-toolchain.follows = "scarlet-rust-toolchain";
     };
@@ -109,10 +109,17 @@
             src = pkgs.fetchFromGitHub {
               owner = "petitstrawberry";
               repo = "virglrenderer";
-              rev = "dfb43e3191adbc76547a1b33a9acdbf24787d085";
-              hash = "sha256-7RlUTQPjwXwV0krMiBfv1sEHgr9tNavYpBmzaN1ax28=";
+              rev = "93cf28c5fa8506d7682deb22ba68450609abdac0";
+              hash = "sha256-0EuDZWga06lw/aPRrrf/IcabBu7EFmAU9mA4DHHlAT0=";
             };
             patches = prevAttrs.patches or [ ];
+            buildInputs = (prevAttrs.buildInputs or [ ]) ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+              pkgs.shaderc
+              pkgs.spirv-cross
+            ];
+            mesonFlags = (prevAttrs.mesonFlags or [ ]) ++ [
+              "-Dmetal-compute=${if pkgs.stdenv.isDarwin then "enabled" else "disabled"}"
+            ];
           });
 
           cargo-scarlet = pkgs.rustPlatform.buildRustPackage {

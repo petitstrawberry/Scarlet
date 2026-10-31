@@ -656,3 +656,23 @@ fn descriptor_reservation_install_publishes_exact_slot_and_metadata() {
     table.remove(0).unwrap();
     assert_eq!(table.free_handles_len(), HandleTable::MAX_HANDLES);
 }
+
+#[test_case]
+fn gpu_capabilities_above_legacy_fd_count_survive_clone_and_reuse() {
+    struct TestGpu;
+    impl GpuObject for TestGpu {}
+    let table = HandleTable::new();
+    let object: Arc<dyn GpuObject> = Arc::new(TestGpu);
+    for expected in 0..1100 {
+        assert_eq!(
+            table.insert(KernelObject::Gpu(object.clone())).unwrap(),
+            expected
+        );
+    }
+    let clone = table.deep_clone();
+    assert!(clone.get(1099).is_some());
+    table.remove(1099);
+    assert!(clone.get(1099).is_some());
+    assert_eq!(table.insert(KernelObject::Gpu(object)).unwrap(), 1099);
+    assert_eq!(table.open_count(), 1100);
+}

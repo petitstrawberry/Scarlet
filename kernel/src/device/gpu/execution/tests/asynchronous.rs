@@ -277,6 +277,86 @@ fn async_submission_does_not_wait_for_attachment_locks() {
 }
 
 #[test_case]
+fn attachment_snapshots_are_shared_between_submissions_until_mutation() {
+    let (context, queue, backend, _) = fixture();
+    let handles = HandleTable::new();
+    let buffer_drops = Arc::new(IrqSpinLock::new(0));
+    let buffer = GpuBuffer::new(
+        Arc::new(TestBufferBackend {
+            drops: Arc::clone(&buffer_drops),
+        }),
+        4096,
+        0,
+    )
+    .expect("buffer");
+    context.attach_buffer(&buffer).expect("attach buffer");
+
+    assert_eq!(submit(&queue, &handles, &[1]).accepted, 1);
+    assert_eq!(submit(&queue, &handles, &[2]).accepted, 1);
+    let first = backend.take_next();
+    let second = backend.take_next();
+    let first_snapshot = first.attachment_snapshot_arcs();
+    let second_snapshot = second.attachment_snapshot_arcs();
+    assert!(Arc::ptr_eq(&first_snapshot.0, &second_snapshot.0));
+    assert!(Arc::ptr_eq(&first_snapshot.1, &second_snapshot.1));
+    assert_eq!((first_snapshot.0.len(), first_snapshot.1.len()), (0, 1));
+    first.complete();
+    second.complete();
+
+    context.detach_buffer(&buffer).expect("detach buffer");
+    assert_eq!(submit(&queue, &handles, &[3]).accepted, 1);
+    let third = backend.take_next();
+    let third_snapshot = third.attachment_snapshot_arcs();
+    // Image entries were not mutated, so their epoch remains shared.
+    assert!(Arc::ptr_eq(&first_snapshot.0, &third_snapshot.0));
+    assert!(!Arc::ptr_eq(&first_snapshot.1, &third_snapshot.1));
+    assert_eq!((third_snapshot.0.len(), third_snapshot.1.len()), (0, 0));
+    third.complete();
+}
+
+#[test_case]
+fn detached_epoch_backing_survives_a_newer_submission_until_completion() {
+    let (context, queue, backend, _) = fixture();
+    let handles = HandleTable::new();
+    let first_drops = Arc::new(IrqSpinLock::new(0));
+    let first = GpuBuffer::new(
+        Arc::new(TestBufferBackend {
+            drops: Arc::clone(&first_drops),
+        }),
+        4096,
+        0,
+    )
+    .expect("first buffer");
+    let first_backing = Arc::downgrade(&first.backing());
+    context.attach_buffer(&first).expect("attach first buffer");
+    assert_eq!(submit(&queue, &handles, &[1]).accepted, 1);
+    context.detach_buffer(&first).expect("detach first buffer");
+    drop(first);
+    assert!(first_backing.upgrade().is_some());
+
+    let second_drops = Arc::new(IrqSpinLock::new(0));
+    let second = GpuBuffer::new(
+        Arc::new(TestBufferBackend {
+            drops: Arc::clone(&second_drops),
+        }),
+        4096,
+        0,
+    )
+    .expect("second buffer");
+    context
+        .attach_buffer(&second)
+        .expect("attach second buffer");
+    assert_eq!(submit(&queue, &handles, &[2]).accepted, 1);
+    let first_pending = backend.take_next();
+    let second_pending = backend.take_next();
+    assert!(first_backing.upgrade().is_some());
+    first_pending.complete();
+    assert!(first_backing.upgrade().is_none());
+    assert_eq!(*first_drops.lock(), 1);
+    second_pending.complete();
+}
+
+#[test_case]
 fn malformed_async_requests_are_rejected_before_command_copy() {
     let (_context, queue, backend, _) = fixture();
     let handles = HandleTable::new();

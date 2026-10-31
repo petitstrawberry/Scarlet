@@ -2,15 +2,15 @@
 # GUI and desktop environment components.
 # Composes sgfx-native + base + cli-utils + desktop-specific packages.
 
-[[layers]]
-kind = "bundle"
-path = "../wireless/bundle.toml"
-
 # Prepare SGFX sources, userspace Cargo configuration, and native drivers
 # before any userspace packages from this bundle are built.
 [[layers]]
 kind = "bundle"
 path = "../sgfx-native/bundle.toml"
+
+[[layers]]
+kind = "bundle"
+path = "../wireless/bundle.toml"
 
 [[layers]]
 kind = "bundle"
@@ -110,7 +110,7 @@ to = "/bin/ui-benchmark"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "b6a7bec8bc33b2abbf8dda1397529ab836e91ead" }
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "409b91758b67a0084f411b133c885a88e54b1461" }
 subdir = "examples/widget-factory"
 package = "scarlet-ui-widget-factory"
 bin = "scarlet-ui-widget-factory"

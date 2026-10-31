@@ -259,6 +259,8 @@ pub struct GpuBackendQueueInfo {
 /// Backend-neutral physical backing for a GPU buffer resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpuBufferCreateInfo {
+    /// Validated backend-neutral GPU_BUFFER_FLAG_* creation flags.
+    pub flags: u32,
     /// Physical address of the stable contiguous backing allocation.
     pub paddr: u64,
     /// Allocation size rounded to the backend backing granule, in bytes.
@@ -278,9 +280,18 @@ impl GpuBufferCreateInfo {
     /// Backend-neutral buffer backing information.
     pub const fn new(paddr: u64, allocation_size: u64) -> Self {
         Self {
+            flags: 0,
             paddr,
             allocation_size,
         }
+    }
+}
+
+impl GpuBufferCreateInfo {
+    /// Attach validated resource usage flags to the physical backing.
+    pub const fn with_flags(mut self, flags: u32) -> Self {
+        self.flags = flags;
+        self
     }
 }
 

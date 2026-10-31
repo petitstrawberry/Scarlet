@@ -3819,6 +3819,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                 compositor_epoch: epoch,
                 width,
                 height,
+                opaque,
             }) => {
                 let Some(handle) = received_handle else {
                     let _ = write_protocol_error(
@@ -3847,6 +3848,7 @@ fn client_thread_main(client_id: usize, mut socket: Socket, wake_read: Option<Ha
                     buffer_id,
                     width,
                     height,
+                    opaque,
                     handle,
                 });
             }
@@ -5070,6 +5072,7 @@ pub enum IpcEvent {
         buffer_id: u32,
         width: u32,
         height: u32,
+        opaque: bool,
         handle: Handle,
     },
 

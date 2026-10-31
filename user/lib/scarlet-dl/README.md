@@ -23,8 +23,10 @@ void *symbol = library ? dlsym(library, "plugin_entry") : 0;
   that object's dependency closure. Missing names produce `dlerror` text.
 - Constructors run dependency-first, once, after relocation and protection.
   The executable entry remains responsible for its own constructors, as
-  Scarlet's native std `_start` already is. Constructor reentry and overlapping
-  loader operations report a busy error; they do not wait or deadlock.
+  Scarlet's native std `_start` already is. Concurrent loader operations wait
+  for one another. Same-thread constructor reentry reports an error before
+  acquiring the lock. Error messages belong to the calling thread and remain
+  valid until that thread calls `dlerror` again.
 - `dlclose` invalidates its handle, but objects remain pinned until process
   exit. Previously returned symbols therefore retain their mappings. Unload
   and finalizers are not supported. Handles are never reused.

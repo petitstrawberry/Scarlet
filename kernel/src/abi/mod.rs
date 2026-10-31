@@ -133,6 +133,23 @@ pub trait AbiModule: Send + Sync + 'static {
         _frame: &mut Trapframe,
     ) -> Result<bool, &'static str> { Ok(false) }
 
+    /// Deliver an unrecoverable synchronous userspace exception through this ABI.
+    ///
+    /// The architecture trap handler calls this after VM fault resolution fails.
+    /// `address` and `syndrome` are the architecture's fault address and raw cause;
+    /// only the architecture-specific ABI implementation interprets the context.
+    /// Return true only after arming a user handler in `trapframe`. False leaves
+    /// the trapframe unchanged and selects the existing fatal exception path.
+    fn handle_user_exception(
+        &mut self,
+        _task: &crate::task::Task,
+        _trapframe: &mut Trapframe,
+        _address: usize,
+        _syndrome: u64,
+    ) -> bool {
+        false
+    }
+
     /// Hook invoked after Task::clone_task creates the child
     ///
     /// # Arguments
@@ -640,6 +657,18 @@ pub fn dispatch_user_memory_fault(fault: crate::vm::fault::UserMemoryFault, fram
     let task = mytask().ok_or("user memory fault without a task")?;
     let pc = frame.get_current_pc() as usize;
     task.with_resolve_abi_mut(pc, |abi| abi.handle_user_memory_fault(fault, frame))
+}
+
+/// Dispatch a user exception through the ABI owning the faulting PC.
+/// The caller must first establish that the exception originated in userspace.
+pub fn user_exception_dispatcher(trapframe: &mut Trapframe, address: usize, syndrome: u64) -> bool {
+    let Some(task) = mytask() else {
+        return false;
+    };
+    let pc = trapframe.get_current_pc() as usize;
+    task.with_resolve_abi_mut(pc, |abi| {
+        abi.handle_user_exception(&task, trapframe, address, syndrome)
+    })
 }
 
 pub fn syscall_dispatcher(trapframe: &mut Trapframe) -> Result<usize, &'static str> {

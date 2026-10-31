@@ -81,7 +81,11 @@ impl GpuConnection {
             write_user_value(arg, &request)?;
             return Ok(0);
         }
-        if request.reserved != 0 || request.flags & !GPU_BUFFER_FLAGS_VALID != 0 {
+        if request.reserved != 0
+            || request.flags & !GPU_BUFFER_FLAGS_VALID != 0
+            || (request.flags & super::GPU_BUFFER_FLAG_QUERY_RESULT != 0
+                && request.flags & super::GPU_BUFFER_FLAG_CPU_VISIBLE == 0)
+        {
             request.result = GPU_RESULT_INVALID_ARGUMENT;
             write_user_value(arg, &request)?;
             return Ok(0);

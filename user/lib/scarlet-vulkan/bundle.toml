@@ -1,12 +1,30 @@
 # Native Vulkan package: SDK-managed Cargo artifacts and runtime resources.
+# GLFW and the ICD must share this SWS client connection.
+[[layers]]
+kind = "cargo"
+source = "../sws-client-c"
+package = "sws-client-c"
+lib = "sws_client_c"
+architectures = ["aarch64"]
+to = "/lib/libsws_client_c.so"
+
+# Standard Window chrome for native hosts with externally rendered content.
+[[layers]]
+kind = "cargo"
+source = { git = "https://github.com/petitstrawberry/scarlet-ui", rev = "409b91758b67a0084f411b133c885a88e54b1461" }
+package = "scarlet-ui-window-c"
+lib = "scarlet_ui_window"
+architectures = ["aarch64"]
+to = "/lib/libscarlet_ui_window.so"
+
 [[layers]]
 kind = "bundle"
-source = { git = "https://github.com/petitstrawberry/Vulkan-Loader", rev = "cabc0232da5ee6bbd1814acdfd6188714a1a1e4d" }
+source = { git = "https://github.com/petitstrawberry/Vulkan-Loader", rev = "83f0038b735f08e9a8282ef37b74e1eab1fbf896" }
 subdir = "native"
 
 [[layers]]
 kind = "cargo"
-source = { git = "https://github.com/petitstrawberry/sgfx", rev = "0ee6b41669904ced227f01cc435933c646a60c75" }
+source = { git = "https://github.com/petitstrawberry/sgfx", rev = "fe99dc6f3f66bb1780d76ab2b559f16bbb8d2e44" }
 package = "vulkan-sgfx"
 lib = "vulkan_sgfx"
 default-features = false

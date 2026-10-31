@@ -2382,7 +2382,11 @@ struct ExtensionShmBufferView {
 #[derive(Debug, Clone, Copy)]
 enum ExtensionBufferBacking {
     Shm(ExtensionShmBufferView),
-    Gpu { width: u32, height: u32 },
+    Gpu {
+        width: u32,
+        height: u32,
+        opaque: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -9293,7 +9297,12 @@ impl Compositor {
                 .get(&(client_id, layer.buffer_id))
                 .ok_or("Unknown scene buffer")?;
             let ExtensionBufferBacking::Shm(view) = buffer.backing else {
-                let ExtensionBufferBacking::Gpu { width, height } = buffer.backing else {
+                let ExtensionBufferBacking::Gpu {
+                    width,
+                    height,
+                    opaque,
+                } = buffer.backing
+                else {
                     unreachable!()
                 };
                 if !layer.fits_buffer(width, height) {
@@ -9304,7 +9313,7 @@ impl Compositor {
                     width,
                     height,
                     stride: 0,
-                    opaque: false,
+                    opaque,
                     gpu_buffer: Some((client_id, layer.buffer_id)),
                 });
                 continue;
@@ -13330,6 +13339,7 @@ impl Compositor {
                 buffer_id,
                 width,
                 height,
+                opaque,
                 handle,
             } => {
                 let key = (client_id, buffer_id);
@@ -13359,7 +13369,11 @@ impl Compositor {
                     self.extension_buffers.insert(
                         key,
                         ExtensionBuffer {
-                            backing: ExtensionBufferBacking::Gpu { width, height },
+                            backing: ExtensionBufferBacking::Gpu {
+                                width,
+                                height,
+                                opaque,
+                            },
                             destroy_requested: false,
                             last_commit_serial: 0,
                         },

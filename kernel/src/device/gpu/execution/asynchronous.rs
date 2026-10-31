@@ -31,13 +31,6 @@ fn backend_result(error: GpuBackendSubmitError) -> u32 {
     }
 }
 
-fn snapshot<T: Clone>(attached: &[T]) -> Result<Vec<T>, ()> {
-    let mut owned = Vec::new();
-    owned.try_reserve_exact(attached.len()).map_err(|_| ())?;
-    owned.extend_from_slice(attached);
-    Ok(owned)
-}
-
 impl GpuQueue {
     fn async_capacity(&self) -> u32 {
         self.backend_queue
@@ -120,6 +113,10 @@ impl GpuQueue {
             match copy_commands(request.command_ptr, request.command_size) {
                 Ok(commands) => commands,
                 Err("GPU command allocation failed") => {
+                    crate::println!(
+                        "[gpu] command allocation exhausted: bytes={}",
+                        request.command_size
+                    );
                     request.result = GPU_RESULT_OUT_OF_RESOURCES;
                     publish(&request)?;
                     return Ok(0);
@@ -135,7 +132,13 @@ impl GpuQueue {
             crate::device::gpu::child_handle_metadata(AccessMode::ReadOnly),
         ) {
             Ok(handle) => handle,
-            Err(_) => {
+            Err(error) => {
+                crate::println!(
+                    "[gpu] completion handle allocation failed: occupied={} limit={} error={}",
+                    handles.open_count(),
+                    HandleTable::MAX_HANDLES,
+                    error
+                );
                 request.result = GPU_RESULT_OUT_OF_RESOURCES;
                 publish(&request)?;
                 return Ok(0);
@@ -172,13 +175,18 @@ impl GpuQueue {
         // Do not wait for a synchronous attach/detach to finish GPU work. Keep
         // both locks through backend validation/enqueue to prevent snapshots
         // from retaining different authority than the backend actually checks.
-        let Some(images) = self._attached_images.try_lock() else {
+        let Some(mut images) = self._attached_images.try_lock() else {
             return EnqueueOutcome::Rejected(GPU_RESULT_BUSY);
         };
-        let Some(buffers) = self._attached_buffers.try_lock() else {
+        let Some(mut buffers) = self._attached_buffers.try_lock() else {
             return EnqueueOutcome::Rejected(GPU_RESULT_BUSY);
         };
-        let (Ok(owned_images), Ok(owned_buffers)) = (snapshot(&images), snapshot(&buffers)) else {
+        let (Ok(owned_images), Ok(owned_buffers)) = (images.snapshot(), buffers.snapshot()) else {
+            crate::println!(
+                "[gpu] attachment snapshot allocation failed: images={} buffers={}",
+                images.len(),
+                buffers.len()
+            );
             return EnqueueOutcome::Rejected(GPU_RESULT_OUT_OF_RESOURCES);
         };
         let submission = GpuSubmission::new(

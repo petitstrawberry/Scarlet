@@ -434,6 +434,19 @@ impl Waker {
             .legacy_woken()
     }
 
+    /// Compatibility wrapper for callers that only distinguish an event wake
+    /// from a timeout.
+    pub fn wait_with_timeout_until_owned(
+        self: Arc<Self>,
+        task_id: usize,
+        trapframe: &mut Trapframe,
+        timeout_ns: u64,
+        ready: impl FnOnce() -> bool,
+    ) -> bool {
+        self.wait_with_timeout_result_until_owned(task_id, trapframe, timeout_ns, ready)
+            .legacy_woken()
+    }
+
     /// Consume an owned Waker and readiness closure before scheduling, with
     /// a relative timeout and distinct interruption result. Register first,
     /// then recheck readiness so a concurrent producer cannot be missed.

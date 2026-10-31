@@ -3,13 +3,8 @@
 //! rasterized here, and its published backing is immutable until retirement.
 use super::decoration_state::{Mode, State};
 use super::*;
-use scarlet_ui_core::color::Color;
-use scarlet_ui_core::event::{Event, MouseButton, MouseEvent, WindowEvent};
-use scarlet_ui_core::geometry::{Rect, Size};
-use scarlet_ui_core::pipeline::RenderingPipeline;
-use scarlet_ui_core::renderer::{CpuPaintRenderer, PaintContext};
-use scarlet_ui_core::view::View;
-use scarlet_ui_core::views::{Spacer, Window, WindowContentLayout};
+use scarlet_ui_core::event::{MouseButton, MouseEvent, WindowEvent};
+use scarlet_ui_core::window_chrome::{WindowChrome, chrome_insets};
 
 pub(super) struct Decoration {
     pub state: State,
@@ -17,7 +12,7 @@ pub(super) struct Decoration {
 }
 
 struct Frame {
-    pipeline: RenderingPipeline,
+    chrome: WindowChrome,
     title: String,
     width: u32,
     height: u32,
@@ -33,41 +28,17 @@ struct ChromeResource {
     parts: Vec<(u32, u32, u32, u32, u32)>, // buffer, x, y, width, height
 }
 
-impl Drop for Frame {
-    fn drop(&mut self) {
-        self.pipeline.teardown();
-    }
-}
-
 impl Frame {
-    fn new(title: String, width: u32, height: u32, scale: u32) -> Self {
-        let window = Window::new(title.clone(), Spacer::new())
-            .size(Size::new(
-                width as f32 / scale as f32,
-                height as f32 / scale as f32,
-            ))
-            .shadow(false)
-            .background_color(Color::TRANSPARENT)
-            .opaque(false);
-        let mut pipeline = RenderingPipeline::new();
-        pipeline.set_scale_milli(scale * 1000);
-        pipeline.set_root(window.create_element());
-        let info = pipeline.layout_initial();
-        // Rasterize ScarletUI's own window clip using its resolved radius.
-        // This mask clips the external image, while the transparent Window
-        // paints titlebar/border above it just like Window::paint_overlay.
-        let mut paint = PaintContext::new();
-        paint.fill_rounded_rect(
-            Rect::from_xywh(0.0, 0.0, info.size.width, info.size.height),
-            info.effective_corner_radius(),
-            Color::WHITE,
-        );
-        let mut mask_renderer = CpuPaintRenderer::new(info.size, scale * 1000, Color::TRANSPARENT);
-        mask_renderer.execute(&paint);
-        let mask = WaylandBridge::chrome_mask(mask_renderer.buffer().data(), width, height);
-        let chrome_margin = (info.effective_corner_radius() * scale as f32) as u32 + scale;
-        Self {
-            pipeline,
+    fn new(title: String, width: u32, height: u32, scale: u32) -> Result<Self, &'static str> {
+        let chrome = WindowChrome::new(title.clone(), width, height, scale * 1000, true, true)?;
+        let mask = chrome
+            .clip()
+            .iter()
+            .map(|r| (r.x, r.y, r.width, r.height))
+            .collect();
+        let chrome_margin = chrome.margin();
+        Ok(Self {
+            chrome,
             title,
             width,
             height,
@@ -76,7 +47,7 @@ impl Frame {
             chrome_margin,
             mask,
             grabbed_buttons: BTreeSet::new(),
-        }
+        })
     }
 }
 
@@ -287,15 +258,12 @@ impl WaylandBridge {
         if !self.decoration_visible(root) {
             return (0, 0, 0, 0);
         }
-        let layout = WindowContentLayout::new(true);
-        let offset = layout.offset();
-        let size = layout.decoration_size();
-        let scale = self.output_scale.max(1) as f32;
+        let insets = chrome_insets(self.output_scale.max(1) as u32 * 1000, true);
         (
-            (offset.x * scale) as i32,
-            (offset.y * scale) as i32,
-            (size.width * scale) as u32,
-            (size.height * scale) as u32,
+            insets.left as i32,
+            insets.top as i32,
+            insets.left + insets.right,
+            insets.top + insets.bottom,
         )
     }
 
@@ -373,7 +341,7 @@ impl WaylandBridge {
                 .and_then(|mut f| f.resource.take());
             self.retire_decoration_resource(old)?;
             self.decorations.get_mut(&root).unwrap().frame =
-                Some(Frame::new(title, width, height, scale));
+                Some(Frame::new(title, width, height, scale)?);
         }
         let frame = self
             .decorations
@@ -382,10 +350,10 @@ impl WaylandBridge {
             .frame
             .as_mut()
             .unwrap();
-        let repaint = frame.resource.is_none() || frame.pipeline.has_dirty();
+        let repaint = frame.resource.is_none() || frame.chrome.has_dirty();
         if repaint {
             let pixels = frame
-                .pipeline
+                .chrome
                 .render()
                 .ok_or("ScarletUI decoration render failed")?
                 .data()
@@ -564,30 +532,6 @@ impl WaylandBridge {
         id
     }
 
-    fn chrome_mask(pixels: &[u8], width: u32, height: u32) -> Vec<(u32, u32, u32, u32)> {
-        let mut bands: Vec<(u32, u32, u32, u32)> = Vec::new();
-        for y in 0..height {
-            let row =
-                &pixels[y as usize * width as usize * 4..(y + 1) as usize * width as usize * 4];
-            let left = (0..width).find(|x| row[*x as usize * 4 + 3] >= 128);
-            let right = (0..width).rev().find(|x| row[*x as usize * 4 + 3] >= 128);
-            let (Some(left), Some(right)) = (left, right) else {
-                continue;
-            };
-            let span = right - left + 1;
-            if let Some(last) = bands.last_mut()
-                && last.0 == left
-                && last.2 == span
-                && last.1 + last.3 == y
-            {
-                last.3 += 1;
-            } else {
-                bands.push((left, y, span, 1));
-            }
-        }
-        bands
-    }
-
     pub(super) fn decoration_mouse(&mut self, root: u32, event: MouseEvent) {
         let Some(frame) = self
             .decorations
@@ -596,13 +540,10 @@ impl WaylandBridge {
         else {
             return;
         };
-        frame.pipeline.handle_event(&Event::Mouse(event));
-        for event in frame.pipeline.take_emitted_events() {
-            if let Event::Window(action) = event {
-                self.decoration_actions.push((root, action));
-            }
+        for action in frame.chrome.mouse(event) {
+            self.decoration_actions.push((root, action));
         }
-        if frame.pipeline.has_dirty() {
+        if frame.chrome.has_dirty() {
             self.decoration_updates.insert(root);
         }
     }
@@ -611,12 +552,11 @@ impl WaylandBridge {
         if let Some(root) = self.focused_surface
             && self.decoration_visible(root)
         {
-            let scale = self.output_scale.max(1);
             self.decoration_mouse(
                 root,
                 MouseEvent::Moved {
-                    x: self.pointer_x / scale,
-                    y: self.pointer_y / scale,
+                    x: self.pointer_x,
+                    y: self.pointer_y,
                 },
             );
         }
@@ -641,16 +581,11 @@ impl WaylandBridge {
             frame.grabbed_buttons.remove(&code);
             grabbed
         } else {
-            let layout = WindowContentLayout::new(true);
-            let scale = frame.scale as i32;
-            let x = self.pointer_x / scale;
-            let y = self.pointer_y / scale;
-            let offset = layout.offset();
-            let extra = layout.decoration_size();
-            let in_content = x >= offset.x as i32
-                && y >= offset.y as i32
-                && x < frame.width as i32 / scale - (extra.width - offset.x) as i32
-                && y < frame.height as i32 / scale - (extra.height - offset.y) as i32;
+            let content = frame.chrome.content();
+            let in_content = self.pointer_x >= content.x as i32
+                && self.pointer_y >= content.y as i32
+                && self.pointer_x < (content.x + content.width) as i32
+                && self.pointer_y < (content.y + content.height) as i32;
             // A client press retains its implicit grab across frame boundaries.
             let capture = grabbed || (!in_content && self.pointer_buttons.is_empty());
             if capture {
@@ -659,9 +594,8 @@ impl WaylandBridge {
             capture
         };
         if captured && code == 0x110 {
-            let scale = self.output_scale.max(1);
-            let x = self.pointer_x / scale;
-            let y = self.pointer_y / scale;
+            let x = self.pointer_x;
+            let y = self.pointer_y;
             let event = if value == 0 {
                 MouseEvent::ButtonReleased {
                     button: MouseButton::Left,
