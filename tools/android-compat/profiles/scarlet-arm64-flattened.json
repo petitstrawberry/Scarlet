@@ -131,6 +131,7 @@
       "u:object_r:persist_debug_prop:s0",
       "u:object_r:pm_prop:s0",
       "u:object_r:property_service_version_prop:s0",
+      "u:object_r:restorecon_prop:s0",
       "u:object_r:shell_prop:s0",
       "u:object_r:storage_config_prop:s0",
       "u:object_r:surfaceflinger_prop:s0",
@@ -155,6 +156,9 @@
     ],
     "u:r:apexd:s0": [
       "u:object_r:apexd_prop:s0"
+    ],
+    "u:r:vold:s0": [
+      "u:object_r:restorecon_prop:s0"
     ],
     "u:r:vendor_init:s0": [
       "u:object_r:build_vendor_prop:s0",
@@ -185,6 +189,7 @@
     "u:r:system_server:s0": [
       "u:object_r:system_prop:s0",
       "u:object_r:exported_system_prop:s0",
+      "u:object_r:exported3_system_prop:s0",
       "u:object_r:dalvik_runtime_prop:s0",
       "u:object_r:binder_cache_system_server_prop:s0",
       "u:object_r:debug_prop:s0",
