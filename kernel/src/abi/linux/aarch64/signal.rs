@@ -75,7 +75,6 @@ fn decode_context(frame: &[u8], regs: &mut Trapframe) -> Result<FpuContext, &'st
     if pc >= USER_LOWER_CANONICAL_END as u64
         || pc & 3 != 0
         || sp >= USER_LOWER_CANONICAL_END as u64
-        || sp & 15 != 0
         || pstate & 0xf != 0
     {
         return Err("invalid signal return context");
@@ -420,7 +419,7 @@ mod tests {
         original.elr = 0x400000;
         let mut frame = vec![0; FRAME_SIZE];
         encode_context(&mut frame, &original, &FpuContext::new(), 0);
-        for (offset, value) in [(PSTATE, 5), (PC, u64::MAX), (SP, 0x800001), (RESERVED, 0)] {
+        for (offset, value) in [(PSTATE, 5), (PC, u64::MAX), (SP, u64::MAX), (RESERVED, 0)] {
             let saved = get64(&frame, offset);
             put64(&mut frame, offset, value);
             let mut target = original.clone();
@@ -430,6 +429,16 @@ mod tests {
             assert_eq!(target.regs.reg, original.regs.reg);
             put64(&mut frame, offset, saved);
         }
+    }
+
+    #[test_case]
+    fn signal_return_allows_a_user_stack_adjusted_by_the_runtime() {
+        // ART's null-pointer trampoline pushes an eight-byte return PC into
+        // the interrupted stack, then restores alignment in its entry code.
+        let mut original=Trapframe::new();original.sp=0x800008;original.elr=0x400000;
+        let mut bytes=vec![0;FRAME_SIZE];encode_context(&mut bytes,&original,&FpuContext::new(),0);
+        let mut restored=Trapframe::new();decode_context(&bytes,&mut restored).unwrap();
+        assert_eq!(restored.sp,0x800008);
     }
 }
 

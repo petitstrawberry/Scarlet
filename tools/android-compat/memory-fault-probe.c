@@ -1,10 +1,13 @@
 /* Real AArch64 faults, Linux siginfo/ucontext and resumable handler state. */
 #define _GNU_SOURCE
+#include <errno.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/uio.h>
+#include <sys/wait.h>
 #include <ucontext.h>
 #include <unistd.h>
 #define CHECK(x) do {if(!(x)){perror(#x);return 1;}} while(0)
@@ -15,14 +18,21 @@ __asm__(".text\n.p2align 2\n"
         ".global fault_store\nfault_store:\n"
         ".global fault_store_pc\nfault_store_pc:\nstr x1,[x0]\nret\n"
         ".global fault_resume\nfault_resume:\nret\n");
+__asm__(".global fault_half_sp_resume\nfault_half_sp_resume:\nadd sp,sp,#8\nb fault_load_pc+4\n");
 extern uint64_t fault_load(void *,uint64_t,uint64_t *);
 extern uint64_t fault_store(void *,uint64_t);
 extern char fault_load_pc[],fault_store_pc[],fault_resume[];
+extern char fault_half_sp_resume[];
 static uintptr_t alt_begin,alt_end,expected_address,expected_pc,resume_pc;
 static int expected_code,expected_execute,expected_write;
+static int resume_half_sp;
 static volatile sig_atomic_t caught;
 static void handler(int signal,siginfo_t *info,void *context) {
     ucontext_t *uc=context;uintptr_t local=(uintptr_t)&uc;
+    uint64_t saved_pc=0;
+    struct iovec destination={.iov_base=&saved_pc,.iov_len=sizeof(saved_pc)};
+    struct iovec source={.iov_base=&uc->uc_mcontext.pc,.iov_len=sizeof(saved_pc)};
+    if(process_vm_readv(getpid(),&destination,1,&source,1,0)!=sizeof(saved_pc) || saved_pc!=expected_pc)_exit(85);
     if(signal!=SIGSEGV || info->si_signo!=SIGSEGV || info->si_errno || info->si_code!=expected_code ||
        (uintptr_t)info->si_addr!=expected_address || uc->uc_mcontext.fault_address!=expected_address ||
        uc->uc_mcontext.pc!=expected_pc || local<alt_begin || local>=alt_end) _exit(81);
@@ -43,6 +53,7 @@ static void handler(int signal,siginfo_t *info,void *context) {
     if(esr_seen!=1 || fpsimd_seen!=1)_exit(84);
     caught++;
     uc->uc_mcontext.regs[0]=MAGIC;uc->uc_mcontext.pc=resume_pc;
+    if(resume_half_sp) {uc->uc_mcontext.sp-=8;uc->uc_mcontext.pc=(uintptr_t)fault_half_sp_resume;}
     /* The saved FPSIMD state must restore d0 after this deliberate clobber. */
     __asm__ volatile("movi v0.16b,#0x33":::"v0");
 }
@@ -58,11 +69,27 @@ int main(void) {
     stack_t stack={.ss_sp=alt,.ss_size=65536};CHECK(sigaltstack(&stack,NULL)==0);
     struct sigaction action={.sa_sigaction=handler,.sa_flags=SA_SIGINFO|SA_ONSTACK};
     CHECK(sigemptyset(&action.sa_mask)==0 && sigaction(SIGSEGV,&action,NULL)==0);
+    char original[]="abcdefgh",first[3]={0},second[5]={0};
+    struct iovec local_vectors[]={{first,3},{second,5}},remote_vectors[]={{original,8}};
+    CHECK(process_vm_readv(getpid(),local_vectors,2,remote_vectors,1,0)==8);
+    CHECK(!memcmp(first,"abc",3) && !memcmp(second,"defgh",5));
+    errno=0;CHECK(process_vm_readv(getpid(),local_vectors,2,remote_vectors,1,1)==-1 && errno==EINVAL);
+    int pipefd[2];CHECK(pipe(pipefd)==0);pid_t child=fork();CHECK(child>=0);
+    if(!child) {char byte;_exit(read(pipefd[0],&byte,1)==1?0:87);}
+    errno=0;CHECK(process_vm_readv(child,local_vectors,2,remote_vectors,1,0)==-1 && errno==EPERM);
+    CHECK(write(pipefd[1],"x",1)==1);int status;CHECK(waitpid(child,&status,0)==child && WIFEXITED(status) && WEXITSTATUS(status)==0);
+    CHECK(close(pipefd[0])==0 && close(pipefd[1])==0);
     uint64_t sentinel=UINT64_C(0x71935abce02468df),observed=0;
     expect(NULL,(uintptr_t)fault_load_pc,SEGV_MAPERR,0,0);
+    resume_half_sp=1;
     CHECK(fault_load(NULL,sentinel,&observed)==MAGIC && observed==sentinel && caught==1);
+    resume_half_sp=0;
     void *region=mmap(NULL,page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);CHECK(region!=MAP_FAILED);
     *(uint64_t *)region=123;CHECK(mprotect(region,page,PROT_NONE)==0);
+    char readback[16];struct iovec output={readback,sizeof(readback)};
+    struct iovec inputs[]={{original,8},{region,8}};
+    CHECK(process_vm_readv(getpid(),&output,1,inputs,2,0)==8 && !memcmp(readback,original,8));
+    errno=0;CHECK(process_vm_readv(getpid(),&output,1,&inputs[1],1,0)==-1 && errno==EFAULT);
     expect(region,(uintptr_t)fault_load_pc,SEGV_ACCERR,0,0);
     CHECK(fault_load(region,sentinel,&observed)==MAGIC && observed==sentinel && caught==2);
     CHECK(mprotect(region,page,PROT_READ)==0);
@@ -75,6 +102,6 @@ int main(void) {
     sigset_t mask;CHECK(sigprocmask(SIG_SETMASK,NULL,&mask)==0 && sigismember(&mask,SIGSEGV)==0);
     CHECK(munmap(region,page)==0);
     stack.ss_flags=SS_DISABLE;CHECK(sigaltstack(&stack,NULL)==0 && munmap(alt,65536)==0);
-    puts("SCARLET_MEMORY_FAULT_OK maperr protection-read protection-write nx altstack fpsimd sigreturn");
+    puts("SCARLET_MEMORY_FAULT_OK maperr protection-read protection-write nx altstack fpsimd sigreturn self-readv half-sp");
     return 0;
 }
