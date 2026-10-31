@@ -98,8 +98,15 @@ typedef void (*sws_timing_callback)(uint32_t operation, uint64_t lock_wait_ns, u
 void sws_set_timing_callback(sws_timing_callback callback);
 
 int32_t sws_get_output_scale(uint32_t *scale_milli);
+/* Normal windows show opaque black content until their first GPU image arrives.
+ * Rounded frame corners remain transparent. Explicitly transparent hosts may
+ * opt out with sws_scene_create_with_flags. */
+#define SWS_SCENE_CONTENT_TRANSPARENT 1u
 int32_t sws_scene_create(const char *title, uint32_t outer_width, uint32_t outer_height,
                          uint32_t resizable, uint32_t *window_id);
+int32_t sws_scene_create_with_flags(const char *title, uint32_t outer_width,
+                                    uint32_t outer_height, uint32_t resizable,
+                                    uint32_t scene_flags, uint32_t *window_id);
 /* Resize the complete outer surface, for a host changing its frame insets. */
 int32_t sws_scene_resize(uint32_t window_id, uint32_t outer_width, uint32_t outer_height);
 int32_t sws_scene_geometry(uint32_t window_id, SwsSceneGeometry *geometry);

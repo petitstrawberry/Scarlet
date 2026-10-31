@@ -71,6 +71,7 @@ struct Frame {
 struct Window {
     frame: Option<Frame>,
     selected: Option<u32>,
+    transparent: bool,
     events: VecDeque<SwsGpuEvent>,
 }
 struct Lease {
@@ -90,8 +91,45 @@ pub(super) struct Scenes {
     payload_scratch: Vec<u8>,
     windows: BTreeMap<u32, Window>,
     buffers: BTreeMap<u32, Lease>,
+    // One immutable opaque pixel, shared by windows awaiting their first image.
+    // The server retains its pool/buffer until this client disconnects.
+    background: Option<u32>,
 }
 impl Scenes {
+    fn ensure_background(&mut self, connection: &Connection) -> Result<(), Error> {
+        if self.background.is_some() {
+            return Ok(());
+        }
+        let shm =
+            SharedMemory::create(4, permissions::READ_WRITE).map_err(|_| Error::ShmHandleFailed)?;
+        let mapping = shm
+            .as_handle()
+            .as_memory_mapping()
+            .map_err(|_| Error::ShmHandleFailed)?;
+        // SAFETY: this fresh four-byte mapping exclusively owns one BGRA pixel.
+        let address = unsafe { mapping.mmap(0, 4, permissions::READ_WRITE, flags::SHARED, 0) }
+            .map_err(|_| Error::ShmHandleFailed)?;
+        unsafe { (address as *mut u32).write(u32::from_ne_bytes([0, 0, 0, 255])) };
+        unsafe { munmap(address, 4) }.map_err(|_| Error::ShmHandleFailed)?;
+        let pool = self.resource()?;
+        let buffer = self.resource()?;
+        let token = connection.send_request_with_handle(
+            msg::EXTENSION_REGISTER_SHM_POOL,
+            &p::payload_extension_register_shm_pool(pool, 4),
+            shm.as_handle(),
+        )?;
+        match connection.wait_response(token)?.message() {
+            ServerMessage::ExtensionShmPoolRegistered { pool_id, .. } if pool_id == pool => {}
+            ServerMessage::Error { code } => return Err(Error::ServerError(code)),
+            _ => return Err(Error::InvalidResponse),
+        }
+        connection.send_message(
+            msg::EXTENSION_DEFINE_BUFFER,
+            &p::payload_extension_define_buffer(buffer, pool, 0, 1, 1, 4, 1),
+        )?;
+        self.background = Some(buffer);
+        Ok(())
+    }
     fn resource(&mut self) -> Result<u32, Error> {
         self.next_resource = self
             .next_resource
@@ -310,6 +348,17 @@ impl Scenes {
                 }
             }
         }
+        if selected.is_none() && !window.transparent {
+            let buffer = self.background.ok_or(Error::InvalidRequest)?;
+            let fallback = [SwsRect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            }];
+            let clip = frame.map_or(fallback.as_slice(), |f| f.clip.as_slice());
+            append_background_layers(&mut layers, buffer, content, clip);
+        }
         if let Some(f) = frame {
             layers.push(Layer {
                 surface_id: layers.len() as u32 + 1,
@@ -349,6 +398,22 @@ impl Scenes {
             self.windows.get_mut(&id).unwrap().selected = None;
         }
         Ok(())
+    }
+}
+fn append_background_layers(
+    layers: &mut Vec<Layer>,
+    buffer: u32,
+    content: SwsRect,
+    clip: &[SwsRect],
+) {
+    let first = layers.len();
+    append_content_layers(layers, buffer, content, clip);
+    for layer in &mut layers[first..] {
+        // Scale the same immutable pixel into each clipped content rectangle.
+        layer.source_x = 0;
+        layer.source_y = 0;
+        layer.source_width = 256;
+        layer.source_height = 256;
     }
 }
 #[cfg(test)]
@@ -417,10 +482,23 @@ pub unsafe extern "C" fn sws_scene_create(
     resizable: u32,
     out: *mut u32,
 ) -> i32 {
+    unsafe { sws_scene_create_with_flags(title, width, height, resizable, 0, out) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sws_scene_create_with_flags(
+    title: *const c_char,
+    width: u32,
+    height: u32,
+    resizable: u32,
+    scene_flags: u32,
+    out: *mut u32,
+) -> i32 {
     if title.is_null()
         || out.is_null()
         || !valid_size(width, height)
         || width as u64 * height as u64 > 16 * 1024 * 1024
+        || scene_flags & !1 != 0
     {
         return -1;
     }
@@ -439,6 +517,10 @@ pub unsafe extern "C" fn sws_scene_create(
                 _ => return Err(Error::InvalidResponse),
             }
         }
+        let transparent = scene_flags & 1 != 0;
+        if !transparent {
+            c.scenes.ensure_background(&c.connection)?;
+        }
         let id = c.connection.create_scene_surface(1, width, height)?;
         if let Err(e) = c
             .connection
@@ -450,7 +532,19 @@ pub unsafe extern "C" fn sws_scene_create(
         }
         c.gpu_events
             .insert(id, c.connection.subscribe_sgfx_events(id));
-        c.scenes.windows.insert(id, Window::default());
+        c.scenes.windows.insert(
+            id,
+            Window {
+                transparent,
+                ..Window::default()
+            },
+        );
+        if let Err(error) = c.scenes.publish(&c.connection, id, 0) {
+            c.scenes.windows.remove(&id);
+            c.gpu_events.remove(&id);
+            let _ = c.connection.destroy_surface(id);
+            return Err(error);
+        }
         unsafe {
             out.write(id);
         }
@@ -637,6 +731,29 @@ mod tests {
             (4, 512, 228 * 256)
         );
         assert!(layers.iter().all(|l| l.fits_buffer(320, 240)));
+        let mut background = Vec::new();
+        append_background_layers(
+            &mut background,
+            9,
+            content,
+            &[SwsRect {
+                x: 4,
+                y: 260,
+                width: 316,
+                height: 12,
+            }],
+        );
+        assert_eq!(background.len(), 1);
+        assert_eq!(
+            (
+                background[0].x,
+                background[0].y,
+                background[0].width,
+                background[0].height
+            ),
+            (4, 260, 316, 12)
+        );
+        assert!(background[0].fits_buffer(1, 1));
     }
     #[test]
     fn chrome_repaint_does_not_release_a_selected_gpu_use() {
