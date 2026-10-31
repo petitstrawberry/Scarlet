@@ -156,6 +156,9 @@ impl ControlOps for MemfdFile {}
 
 impl MemoryMappingOps for MemfdFile {
     fn mapping_owner_for_range(&self, offset: usize, length: usize) -> Option<Arc<dyn MemoryMappingOps>> {
+        // One backing reference per range owner. VMA fragments and forked
+        // processes share its Arc; removing one fragment must not release it.
+        self.backing.on_mapped(0, 0, length, offset);
         Some(Arc::new(MemfdMapping { backing: self.backing.clone(), offset, length }))
     }
 
@@ -179,18 +182,6 @@ impl MemoryMappingOps for MemfdFile {
         length: usize,
     ) -> Result<MemoryMappingInfo, &'static str> {
         self.backing.get_mapping_info(offset, length)
-    }
-
-    fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {
-        self.backing.on_mapped(vaddr, paddr, length, offset);
-    }
-
-    fn on_mapping_inherited(&self, vaddr: usize, paddr: u64, length: usize, vm_start: usize) {
-        self.backing.on_mapping_inherited(vaddr, paddr, length, vm_start);
-    }
-
-    fn on_unmapped(&self, vaddr: usize, length: usize) {
-        self.backing.on_unmapped(vaddr, length);
     }
 
     fn supports_mmap(&self) -> bool {
@@ -225,6 +216,12 @@ struct MemfdMapping {
     length: usize,
 }
 
+impl Drop for MemfdMapping {
+    fn drop(&mut self) {
+        self.backing.on_unmapped(0, self.length);
+    }
+}
+
 impl MemoryMappingOps for MemfdMapping {
     fn get_mapping_info(&self, offset: usize, length: usize) -> Result<MemoryMappingInfo, &'static str> {
         if offset.checked_add(length).is_none_or(|end| end > self.length) {
@@ -236,18 +233,6 @@ impl MemoryMappingOps for MemfdMapping {
     fn supports_permission_changes(&self) -> bool { true }
 
     fn supports_shared_permission_changes(&self) -> bool { true }
-
-    fn on_mapped(&self, vaddr: usize, paddr: u64, length: usize, offset: usize) {
-        self.backing.on_mapped(vaddr, paddr, length, offset);
-    }
-
-    fn on_mapping_inherited(&self, vaddr: usize, paddr: u64, length: usize, _vm_start: usize) {
-        self.backing.on_mapped(vaddr, paddr, length, self.offset);
-    }
-
-    fn on_unmapped(&self, vaddr: usize, length: usize) {
-        self.backing.on_unmapped(vaddr, length);
-    }
 
     fn resolve_fault(&self, _access: &crate::object::capability::memory_mapping::AccessKind,
         page_idx: usize, _vm_start: usize)
