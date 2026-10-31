@@ -227,17 +227,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1791947752,
-        "narHash": "sha256-WpVevKHtcMzQr4RU6kroc9eYEAoXvmY1JSfM6J2fC0U=",
+        "lastModified": 1793454770,
+        "narHash": "sha256-ZWNuIx/ZCeGhTxlZFYa8l/GSXPN/nCzn8VhVm/iJogc=",
         "owner": "petitstrawberry",
         "repo": "scarlet-sdk",
-        "rev": "a071222231e8bbd96c1d54f38d99d1b27ec90805",
+        "rev": "b8645cab9a3764a2fc03b7a1c4afd05bd5ff7cf0",
         "type": "github"
       },
       "original": {
         "owner": "petitstrawberry",
         "repo": "scarlet-sdk",
-        "rev": "a071222231e8bbd96c1d54f38d99d1b27ec90805",
+        "rev": "b8645cab9a3764a2fc03b7a1c4afd05bd5ff7cf0",
         "type": "github"
       }
     },
