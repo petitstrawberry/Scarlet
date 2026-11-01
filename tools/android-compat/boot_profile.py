@@ -257,9 +257,6 @@ def verify_boot_inputs(inputs, runtime, stock):
     contexts = [(stock / name).read_text() for name in metadata["property_context_files"]]
     if (inputs / POLICY).read_text() != shield_policy(metadata["profile"], contexts):
         raise ValueError("boot Shield policy differs from explicit profile")
-    if metadata.get("user_unlock_inputs") is not None:
-        from user_unlock_inputs import validate_staged as validate_user_unlock
-        validate_user_unlock(metadata, inputs)
     if metadata.get("vold_subdirs_inputs") is not None:
         from vold_inputs import validate_staged as validate_vold_subdirs
         validate_vold_subdirs(metadata, inputs)

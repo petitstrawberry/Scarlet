@@ -32,9 +32,10 @@ static int log_socket(void) {
 }
 static void drain_logs(int fd) {
  if(fd<0)return;
- if(getenv("SCARLET_INIT_QUIET"))return;
+ int quiet=getenv("SCARLET_INIT_QUIET")!=NULL;
  for(int count=0;count<128;count++) {unsigned char message[8192];ssize_t n=recv(fd,message,sizeof(message),MSG_DONTWAIT);
   if(n<0)break;
+  if(quiet)continue;
   printf("SCARLET_INIT_LOGD bytes=%zd ",n);
   for(ssize_t i=0;i<n;i++)if(message[i]<32 || message[i]>=127)message[i]='|';
   fwrite(message,1,(size_t)n,stdout);
@@ -95,16 +96,6 @@ int main(int argc,char **argv) {
    return 0;
   }
   if(got<0){perror("outer wait");return 6;}
-  if(tick==40 && argc==2 && !strcmp(argv[1],"start-zygote")) {int result=__system_property_set("ctl.start","zygote");printf("SCARLET_INIT_CONTROL_REQUEST service=zygote result=%d\n",result);}
-  if(tick==40 && getenv("SCARLET_INIT_START_INSTALLER") && !strcmp(getenv("SCARLET_INIT_START_INSTALLER"),"1")) {
-   int result=__system_property_set("ctl.start","installd");printf("SCARLET_INIT_CONTROL_REQUEST service=installd result=%d\n",result);
-  }
-  if(tick==40 && getenv("SCARLET_INIT_START_NETD") && !strcmp(getenv("SCARLET_INIT_START_NETD"),"1")) {
-   int bpfflag=__system_property_set("bpf.progs_loaded","1");
-   char bpfvalue[PROP_VALUE_MAX]={0};__system_property_get("bpf.progs_loaded",bpfvalue);
-   printf("SCARLET_INIT_BPF_LOADER_FLAG set=%d value=%s\n",bpfflag,bpfvalue);
-   int result=__system_property_set("ctl.start","netd");printf("SCARLET_INIT_CONTROL_REQUEST service=netd result=%d\n",result);
-  }
   if(tick==40 || tick==80 || tick==200 || tick==240 || tick==280)snapshot();
   usleep(100000);
  }

@@ -28,18 +28,12 @@ def main():
     compositor=None
     capture_frame="--capture-frame" in arguments
     if capture_frame:arguments.remove("--capture-frame")
-    start_installer="--start-installer" in arguments
-    if start_installer:arguments.remove("--start-installer")
-    start_netd="--start-netd" in arguments
-    if start_netd:arguments.remove("--start-netd")
     manage_apps="--manage-app-policy" in arguments
     if manage_apps:arguments.remove("--manage-app-policy")
     if manage_apps and "--boot-profile" not in arguments:raise ValueError("app policy management requires a boot profile")
     if "--sws-native" in arguments:
         index=arguments.index("--sws-native");compositor=Path(arguments[index+1]).resolve();del arguments[index:index+2]
     if capture_frame and not compositor:raise ValueError("frame capture requires --sws-native")
-    start_zygote="--start-zygote" in arguments
-    if start_zygote:arguments.remove("--start-zygote")
     launcher_app=None
     if "--launcher-app" in arguments:
         index=arguments.index("--launcher-app");launcher_app=Path(arguments[index+1]).resolve();del arguments[index:index+2]
@@ -47,13 +41,6 @@ def main():
     if "--stock-product" in arguments:
         index=arguments.index("--stock-product");stock_product=Path(arguments[index+1]).resolve();del arguments[index:index+2]
         if not stock_product.is_file():raise ValueError("stock product image is missing")
-    systemui_compat=None
-    if "--systemui-compat" in arguments:
-        index=arguments.index("--systemui-compat");systemui_compat=Path(arguments[index+1]).resolve();del arguments[index:index+2]
-        if not systemui_compat.is_file():raise ValueError("SystemUI compatibility APK is missing")
-    launch_sample="--launch-sample" in arguments
-    if launch_sample:arguments.remove("--launch-sample")
-    if launch_sample and launcher_app is None:raise ValueError("--launch-sample requires --launcher-app")
     if "--init-probe" not in arguments or "--boot-profile" not in arguments:
         raise ValueError("run-init requires --init-probe BUILD and --boot-profile INPUTS")
     index = arguments.index("--init-probe")
@@ -98,11 +85,6 @@ def main():
             destination=root.parent.parent/"bin/sws";shutil.copy2(compositor,destination)
             if sha256(destination)!=sha256(compositor):raise ValueError("changed native SWS executable")
             (output/"native-sws.json").write_text(json.dumps({"path":str(compositor),"sha256":sha256(compositor),"backend":"cpu"},indent=2)+"\n")
-        if systemui_compat:
-            destination=root/"system_ext/priv-app/SystemUI/SystemUI.apk"
-            shutil.copy2(systemui_compat,destination)
-            if sha256(destination)!=sha256(systemui_compat):
-                raise ValueError("SystemUI compatibility APK changed while staging")
         if launcher_app:
             destination=root/"system/app/ScarletCompat/ScarletCompat.apk"
             destination.parent.mkdir(parents=True,exist_ok=True)
@@ -160,9 +142,8 @@ def main():
             "observation": f"{observation} seconds or init exit, then close ProcessScope and verify zero live members",
             "logging": "Diagnostic preload sends init/daemon messages to inherited console and Zygote messages through short-lived Unix datagrams; supervisor drains logdw wire records; runtime results remain unchanged",
             "service_readiness": "not asserted",
-            "service_control_request": "ctl.start=zygote after 4 seconds" if start_zygote else None, "apex_activation": "stock apexd must perform activation",
-            "installer_control_request": "ctl.start=installd after 4 seconds" if start_installer else None,
-            "netd_control_request": "ctl.start=netd after 4 seconds" if start_netd else None,
+            "service_start": "stock init zygote-start and nonencrypted actions",
+            "apex_activation": "stock apexd must perform activation",
             "app_policy_manager": manage_apps,
             "launcher_app": None if not launcher_app else {
                 "package": launcher_app_record["package"],
@@ -171,31 +152,20 @@ def main():
                 "path": "/system/app/ScarletCompat/ScarletCompat.apk",
                 "wallpaper_path": "/system/etc/scarlet/wallpaper.png",
                 "user_wallpaper_path": "/data/system/users/0/wallpaper",
-                "launch_sample": launch_sample,
             },
             "stock_product": None if not stock_product else {
                 "path": str(stock_product),
                 "sha256": sha256(stock_product),
                 "packages": [f"{directory}/{name}/{source_name}" for directory,name,source_name,_filename in stock_product_apps],
             },
-            "systemui_compat": None if not systemui_compat else {
-                "path": str(systemui_compat),
-                "sha256": sha256(systemui_compat),
-                "change": "early keyguard initialization and PowerManager compatibility shim",
-            },
         }, indent=2) + "\n")
         return metadata
 
-    if start_zygote:arguments.extend(["--program-argument","start-zygote"])
     arguments.extend(["--program-env",f"SCARLET_INIT_OBSERVE_SECONDS={observation}"])
     arguments.extend(["--program-env",f"ANDROID_LOG_TAGS={'*:v' if verbose_logs else '*:e'}"])
     arguments.extend(["--program-env",f"SCARLET_ANDROID_LOG_MIN_PRIORITY={'0' if verbose_logs else '4'}"])
     if not verbose_logs:
         arguments.extend(["--program-env","SCARLET_INIT_QUIET=1"])
-    if launch_sample:
-        arguments.extend(["--program-env","SCARLET_LAUNCH_APP=dev.scarlet.compat/.MainActivity"])
-    if start_installer:arguments.extend(["--program-env","SCARLET_INIT_START_INSTALLER=1"])
-    if start_netd:arguments.extend(["--program-env","SCARLET_INIT_START_NETD=1"])
     runner.stage_boot_inputs = stage
     original_run=runner.smoke.run_guest
     previous=os.environ.get("SCARLET_ANDROID_SWS_NATIVE")

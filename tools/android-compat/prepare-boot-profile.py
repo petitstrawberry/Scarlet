@@ -106,7 +106,8 @@ def prepare(archive, runtime, stock, profile_file, output):
             system.dump(path, output / path[1:])
         system.dump("/system/etc/task_profiles.json",output / "etc/task_profiles.json")
         queue = []
-        for name in ["init", "ueventd", "apexd", "servicemanager", "boringssl_self_test64", "bootstrap/linker64", "bootstrap/linkerconfig"]:
+        for name in ["init", "ueventd", "apexd", "servicemanager", "bootanimation",
+                     "boringssl_self_test64", "bootstrap/linker64", "bootstrap/linkerconfig"]:
             path = output / "system/bin" / name
             if name == "ueventd":
                 info = system.command('stat "/system/bin/ueventd"')
@@ -201,6 +202,11 @@ def configure(output, stock, profile, contexts, metadata):
         f'{name} = "{value}"\n' for name, value in sorted(profile["bootconfig"].items())))
     manager_init = "# Explicit Scarlet device boot configuration\n" + "".join(
         "import " + path + "\n" for path in profile["init_imports"] + imports(profile))
+    if "/system/etc/init/bootanim.rc" in profile["init_imports"]:
+        manager_init += (
+            "\non property:init.svc.surfaceflinger=running\n"
+            "    start bootanim\n"
+        )
     if "com.android.tethering" in profile["apex_modules"]:
         # NetworkStats opens its APEX data directory before the stock traffic
         # controller finishes initializing. Seed the persistent directory the
@@ -212,16 +218,22 @@ def configure(output, stock, profile, contexts, metadata):
             "    mkdir /data/misc/apexdata/com.android.tethering 0771 root system\n"
             "    mkdir /data/misc/apexdata/com.android.tethering/netstats 0771 root system\n"
         )
-    (output / "scarlet/boot/init.rc").write_text(manager_init)
     feature_permissions = output / "system_ext/etc/permissions/scarlet-android-features.xml"
     feature_permissions.parent.mkdir(parents=True, exist_ok=True)
     feature_permissions.write_text(
         '<permissions>\n'
         '    <feature name="android.software.app_widgets" />\n'
         '</permissions>\n')
-    if metadata.get("user_unlock_inputs"):
-        from user_unlock_inputs import apply_service
-        apply_service(output)
+    # The generic system image starts zygote from zygote-start, while the
+    # unencrypted-device transition that starts the remaining main services is
+    # normally supplied by vold/device fstab.  The direct data view does not use
+    # that storage transition, so connect the stock nonencrypted action once
+    # zygote has entered the standard boot trigger.
+    manager_init += (
+        "\non zygote-start && property:ro.crypto.state=unencrypted\n"
+        "    trigger nonencrypted\n"
+    )
+    (output / "scarlet/boot/init.rc").write_text(manager_init)
     # /data_mirror is a ramdisk directory on a real device; the generic
     # Android init configuration mounts a private tmpfs over it before making
     # the per-user mirror bind mounts used for app data.
@@ -664,7 +676,9 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
         runtime_files=json.loads((runtime/"art-runtime.json").read_text())["files"]
         available|={Path(name).name for name in runtime_files}
         native_needed={};queue=["system/lib64/libcompiler_rt.so","system/lib64/libandroid_servers.so",
-                               "system/lib64/libalarm_jni.so","system/lib64/libsoundpool.so"]+service_roots;seen=set()
+                               "system/lib64/libalarm_jni.so","system/lib64/libbootanimation.so",
+                               "system/lib64/libmedia_jni.so",
+                               "system/lib64/libsoundpool.so"]+service_roots;seen=set()
         while queue:
             name=queue.pop()
             if name in seen:continue
@@ -738,17 +752,6 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
     (inputs/MANIFEST).write_text(json.dumps(metadata,indent=2)+"\n")
     verify_boot_inputs(inputs,runtime,stock)
     print("Merged verified platform service contexts and system-server JARs; startup has not been tested")
-
-
-def merge_user_unlock(inputs,runtime,stock,build):
-    from user_unlock_inputs import install
-    metadata=verify_boot_inputs(inputs,runtime,stock)
-    install(inputs,metadata,build)
-    metadata["files"]={str(path.relative_to(inputs)):sha256(path) for path in sorted(inputs.rglob("*")) if path.is_file() and path.name!=MANIFEST}
-    metadata["directories"]=[str(path.relative_to(inputs)) for path in sorted(inputs.rglob("*")) if path.is_dir()]
-    (inputs/MANIFEST).write_text(json.dumps(metadata,indent=2)+"\n")
-    verify_boot_inputs(inputs,runtime,stock)
-    print("Merged verified Android user-0 unlock helper; unlock behavior has not been tested")
 
 
 def merge_vold_subdirs(inputs,runtime,stock,build):
@@ -837,7 +840,6 @@ def main():
     for flag in ["runtime-root", "stock-inputs", "profile", "output"]:
         parser.add_argument("--" + flag, type=Path, required=True)
     parser.add_argument("--framework-inputs",type=Path,help="verified stock framework and app_process64 for init boot")
-    parser.add_argument("--user-unlock-build",type=Path,help="verified Android user-0 unlock DEX build")
     parser.add_argument("--vold-subdirs-build",type=Path,help="verified vold user-storage helper build")
     parser.add_argument("--platform-image",type=Path,help="pinned SDK archive for stock service contexts and server JARs")
     parser.add_argument("--angle-image",type=Path,help="pinned SDK archive supplying its ANGLE libraries")
@@ -856,8 +858,6 @@ def main():
         prepare(args.sdk_image, args.runtime_root, args.stock_inputs, args.profile, args.output)
     if args.framework_inputs:
         merge_framework(args.output,args.runtime_root,args.stock_inputs,args.framework_inputs)
-    if args.user_unlock_build:
-        merge_user_unlock(args.output,args.runtime_root,args.stock_inputs,args.user_unlock_build)
     if args.vold_subdirs_build:
         merge_vold_subdirs(args.output,args.runtime_root,args.stock_inputs,args.vold_subdirs_build)
     if args.platform_image:

@@ -74,14 +74,14 @@
     "u:r:audioserver:s0": 22,
     "u:r:hal_audio_default:s0": 23,
     "u:r:vold_prepare_subdirs:s0": 24,
-    "u:r:user_unlock:s0": 25,
     "u:r:keystore:s0": 26,
     "u:r:hal_keymint_default:s0": 27,
     "u:r:system_app:s0": 28,
     "u:r:platform_app:s0": 29,
     "u:r:priv_app:s0": 30,
     "u:r:untrusted_app:s0": 31,
-    "u:r:untrusted_app_25:s0": 32
+    "u:r:untrusted_app_25:s0": 32,
+    "u:r:bootanim:s0": 33
   },
   "transitions": [
     [
@@ -207,16 +207,15 @@
       "u:object_r:retaildemo_prop:s0",
       "u:object_r:theme_prop:s0"
     ],
-    "u:r:user_unlock:s0": [
-      "u:object_r:exported3_system_prop:s0"
-    ],
     "u:r:hwservicemanager:s0": [
       "u:object_r:hwservicemanager_prop:s0"
     ],
     "u:r:surfaceflinger:s0": [
+      "u:object_r:bootanim_system_prop:s0",
+      "u:object_r:ctl_bootanim_prop:s0",
+      "u:object_r:ctl_start_prop:s0",
       "u:object_r:graphics_config_prop:s0",
-      "u:object_r:system_prop:s0",
-      "u:object_r:bootanim_system_prop:s0"
+      "u:object_r:system_prop:s0"
     ],
     "u:r:odsign:s0": [
       "u:object_r:odsign_prop:s0",
@@ -224,12 +223,18 @@
     ],
     "u:r:keystore:s0": [
       "u:object_r:keystore_crash_prop:s0"
+    ],
+    "u:r:bootanim:s0": [
+      "u:object_r:bootanim_system_prop:s0",
+      "u:object_r:graphics_config_prop:s0",
+      "u:object_r:system_prop:s0"
     ]
   },
   "init_imports": [
     "/system/etc/init/hw/init.rc",
     "/system/etc/init/apexd.rc",
-    "/system/etc/init/servicemanager.rc"
+    "/system/etc/init/servicemanager.rc",
+    "/system/etc/init/bootanim.rc"
   ],
   "file_labels": {
     "/system/bin/bootstrap/linkerconfig": "u:object_r:linkerconfig_exec:s0",
@@ -250,14 +255,14 @@
     "/vendor/bin/hw/android.hardware.health@2.1-service": "u:object_r:hal_health_default_exec:s0",
     "/system/bin/vold": "u:object_r:vold_exec:s0",
     "/system/bin/vold_prepare_subdirs": "u:object_r:vold_prepare_subdirs_exec:s0",
-    "/system/bin/scarlet-user-unlock": "u:object_r:user_unlock_exec:s0",
     "/system/bin/lmkd": "u:object_r:lmkd_exec:s0",
     "/system/bin/netd": "u:object_r:netd_exec:s0",
     "/system/bin/audioserver": "u:object_r:audioserver_exec:s0",
     "/vendor/bin/hw/android.hardware.audio.service": "u:object_r:hal_audio_default_exec:s0",
     "/system/bin/scarlet-audio-late-start": "u:object_r:audio_start_exec:s0",
     "/system/bin/keystore2": "u:object_r:keystore_exec:s0",
-    "/vendor/bin/hw/android.hardware.security.keymint-service": "u:object_r:hal_keymint_default_exec:s0"
+    "/vendor/bin/hw/android.hardware.security.keymint-service": "u:object_r:hal_keymint_default_exec:s0",
+    "/system/bin/bootanimation": "u:object_r:bootanim_exec:s0"
   },
   "exec_transitions": [
     [
@@ -364,12 +369,6 @@
     ],
     [
       "u:r:init:s0",
-      "u:object_r:user_unlock_exec:s0",
-      "u:r:user_unlock:s0",
-      1000
-    ],
-    [
-      "u:r:init:s0",
       "u:object_r:lmkd_exec:s0",
       "u:r:lmkd:s0",
       1069
@@ -409,6 +408,12 @@
       "u:object_r:hal_keymint_default_exec:s0",
       "u:r:hal_keymint_default:s0",
       9999
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:bootanim_exec:s0",
+      "u:r:bootanim:s0",
+      1003
     ]
   ],
   "resource_groups": {
@@ -1001,71 +1006,6 @@
     [
       "u:r:system_server:s0",
       "u:object_r:activity_service:s0",
-      3
-    ],
-    [
-      "u:r:user_unlock:s0",
-      "u:object_r:activity_service:s0",
-      3
-    ],
-    [
-      "u:r:user_unlock:s0",
-      "u:object_r:mount_service:s0",
-      3
-    ],
-    [
-      "u:r:user_unlock:s0",
-      "u:object_r:package_service:s0",
-      3
-    ],
-    [
-      "u:r:user_unlock:s0",
-      "u:object_r:user_service:s0",
-      3
-    ],
-    [
-      "u:r:user_unlock:s0",
-      "u:object_r:gatekeeper_service:s0",
-      3
-    ],
-    [
-      "u:r:user_unlock:s0",
-      "u:object_r:search_service:s0",
-      3
-    ],
-    [
-      "u:r:user_unlock:s0",
-      "u:object_r:appwidget_service:s0",
-      3
-    ],
-    [
-      "u:r:user_unlock:s0",
-      "u:object_r:device_policy_service:s0",
-      3
-    ],
-    [
-      "u:r:user_unlock:s0",
-      "u:object_r:audio_service:s0",
-      3
-    ],
-    [
-      "u:r:user_unlock:s0",
-      "u:object_r:window_service:s0",
-      3
-    ],
-    [
-      "u:r:user_unlock:s0",
-      "u:object_r:display_service:s0",
-      3
-    ],
-    [
-      "u:r:user_unlock:s0",
-      "u:object_r:statusbar_service:s0",
-      3
-    ],
-    [
-      "u:r:user_unlock:s0",
-      "u:object_r:wallpaper_service:s0",
       3
     ],
     [
@@ -3016,6 +2956,31 @@
     [
       "u:r:keystore:s0",
       "u:object_r:hal_sharedsecret_service:s0",
+      2
+    ],
+    [
+      "u:r:bootanim:s0",
+      "u:object_r:surfaceflinger_service:s0",
+      2
+    ],
+    [
+      "u:r:bootanim:s0",
+      "u:object_r:activity_service:s0",
+      2
+    ],
+    [
+      "u:r:bootanim:s0",
+      "u:object_r:display_service:s0",
+      2
+    ],
+    [
+      "u:r:bootanim:s0",
+      "u:object_r:hal_graphics_mapper_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:bootanim:s0",
+      "u:object_r:hal_graphics_allocator_hwservice:s0",
       2
     ]
   ],
