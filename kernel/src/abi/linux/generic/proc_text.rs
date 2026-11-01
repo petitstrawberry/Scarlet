@@ -173,6 +173,77 @@ fn task_stat(task: &Task, thread: bool) -> String {
     content
 }
 
+fn proc_task(caller: &Task, path: &str, field: &str) -> Option<Arc<Task>> {
+    let path = path.trim_end_matches('/');
+    let self_path = format!("/proc/self/{field}");
+    let thread_self_path = format!("/proc/thread-self/{field}");
+    let id = if path == self_path {
+        caller.get_thread_group_id()
+    } else if path == thread_self_path {
+        caller.get_id()
+    } else {
+        let local_pid = path
+            .strip_prefix("/proc/")?
+            .strip_suffix(&format!("/{field}"))?
+            .parse::<usize>()
+            .ok()?;
+        caller.get_namespace().resolve_global_id(local_pid)?
+    };
+    crate::sched::scheduler::get_task_by_id(id)
+}
+
+/// Android checks process identity by parsing the `Uid:` line from procfs.
+/// Keep the fields that libcore and process-group users rely on, while deriving
+/// every value from Scarlet's native task and credential state.
+fn task_status(caller: &Task, task: &Task) -> String {
+    use crate::task::TaskState;
+
+    let namespace = caller.get_namespace();
+    let local = |id| namespace.resolve_local_id(id).unwrap_or(0);
+    let name = {
+        let name = task.name.read();
+        let mut length = name.len().min(15);
+        while !name.is_char_boundary(length) {
+            length -= 1;
+        }
+        String::from(&name[..length])
+    };
+    let state = match task.get_state() {
+        TaskState::Ready | TaskState::Running | TaskState::NotInitialized => 'R',
+        TaskState::Blocked(_) => 'S',
+        TaskState::Zombie | TaskState::Terminated => 'Z',
+    };
+    let credentials = task.credentials.read();
+    let uids = credentials.principals();
+    let gids = credentials.groups();
+    let threads = crate::sched::scheduler::get_task_pool()
+        .task_ids_snapshot()
+        .into_iter()
+        .filter(|id| {
+            crate::sched::scheduler::get_task_by_id(*id).is_some_and(|member| {
+                member.get_thread_group_id() == task.get_thread_group_id()
+                    && !matches!(member.get_state(), TaskState::Zombie | TaskState::Terminated)
+            })
+        })
+        .count()
+        .max(1);
+
+    format!(
+        "Name:\t{name}\nState:\t{state}\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nTracerPid:\t0\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nThreads:\t{threads}\n",
+        local(task.get_thread_group_id()),
+        local(task.get_id()),
+        task.get_parent_id().map_or(0, local),
+        uids.base.0,
+        uids.active.0,
+        uids.retained.0,
+        uids.active.0,
+        gids.base.0,
+        gids.active.0,
+        gids.retained.0,
+        gids.active.0,
+    )
+}
+
 /// mntent escapes must preserve whitespace and backslashes in mount paths.
 fn mount_field(value: &str) -> String {
     let mut escaped = String::new();
@@ -234,13 +305,15 @@ fn text_content(path: &str) -> Option<String> {
         let fs = crate::task::mytask()?.get_vfs()?;
         return Some(mounts_content(&fs));
     }
-    if matches!(path, "/proc/self/stat" | "/proc/thread-self/stat") {
+    if path.trim_end_matches('/').ends_with("/stat") {
         let caller = crate::task::mytask()?;
-        let thread = path == "/proc/thread-self/stat";
-        let leader = (!thread)
-            .then(|| crate::sched::scheduler::get_task_by_id(caller.get_thread_group_id()))
-            .flatten();
-        return Some(task_stat(leader.as_deref().unwrap_or(&caller), thread));
+        let target = proc_task(&caller, path, "stat")?;
+        return Some(task_stat(&target, target.get_id() != target.get_thread_group_id()));
+    }
+    if path.trim_end_matches('/').ends_with("/status") {
+        let caller = crate::task::mytask()?;
+        let target = proc_task(&caller, path, "status")?;
+        return Some(task_status(&caller, &target));
     }
     if matches!(path, "/proc/self/maps" | "/proc/thread-self/maps") {
         return self_maps();
@@ -575,6 +648,47 @@ mod tests {
         }
 
         drop(members);
+        drop(leader);
+        reset();
+    }
+
+    #[test_case]
+    fn status_exposes_credentials_for_android_process_liveness_checks() {
+        use crate::sched::scheduler::{get_task_by_id, register_task, reset};
+        use crate::shield::identity::{Group, Identities, Principal};
+        use crate::task::{BlockedType, Task, TaskState, TaskType};
+
+        reset();
+        let leader_id = register_task(Task::new("StatusLeader".into(), 0, TaskType::User));
+        let leader = get_task_by_id(leader_id).unwrap();
+        leader
+            .credentials
+            .write()
+            .set_principals(Identities::all(Principal(1000)))
+            .unwrap();
+        leader
+            .credentials
+            .write()
+            .set_groups(Identities::all(Group(1000)))
+            .unwrap();
+        let mut member = Task::new("BlockedStatus".into(), 0, TaskType::User);
+        member.set_thread_group_id(leader_id);
+        member.set_state(TaskState::Blocked(BlockedType::Interruptible));
+        let member_id = register_task(member);
+        assert_eq!(get_task_by_id(member_id).unwrap().get_thread_group_id(), leader_id);
+
+        let local_pid = leader.get_namespace_id();
+        crate::task::set_mock_current_task(leader.clone());
+        let self_status = super::text_content("/proc/self/status").unwrap();
+        let numeric_status = super::text_content(&alloc::format!("/proc/{local_pid}/status")).unwrap();
+        let numeric_stat = super::text_content(&alloc::format!("/proc/{local_pid}/stat")).unwrap();
+        assert_eq!(numeric_stat, super::text_content("/proc/self/stat").unwrap());
+        assert_eq!(self_status, numeric_status);
+        assert!(self_status.contains("Name:\tStatusLeader\n"));
+        assert!(self_status.contains("Uid:\t1000\t1000\t1000\t1000\n"));
+        assert!(self_status.contains("Gid:\t1000\t1000\t1000\t1000\n"));
+        assert!(self_status.contains("Threads:\t2\n"));
+        crate::task::clear_mock_current_task();
         drop(leader);
         reset();
     }
