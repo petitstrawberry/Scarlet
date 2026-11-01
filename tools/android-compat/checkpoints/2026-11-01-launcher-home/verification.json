@@ -1,0 +1,32 @@
+{
+  "kind": "scarlet-android-launcher-sws-home-v1",
+  "result": "PASS",
+  "scope": "A stock SDK 33 Launcher3 activity completed workspace, app, shortcut, and widget loading and presented its home surface through SurfaceFlinger to the native SWS framebuffer.",
+  "artifacts": {
+    "launcher_home.png": "2623d731d3312a09cd0f3694fa96e95ef77b3da458aa0f3ed3f3234d88bb400f",
+    "scarlet.elf": "2a84414aec7ed66c0f0a2506ff4eead7a11f4e901a197947bda656270f896508",
+    "boot_profile.json": "ccb71787e2cc1e36fb100ee5560d21b2db8a9d3c99a048aa88f6c49e1604ab11",
+    "init_probe_build.json": "f25ace9ad9f2f6907e24309f65f5f553408227e54331e4f0bccbb474b0e76d7f"
+  },
+  "markers": {
+    "app_widget_service": "StartAppWidgetService",
+    "launcher_process": "Start proc 437:com.android.launcher3/u0a6 for top-activity",
+    "launcher_egl": "SCARLET_INIT_EGL_CREATE_SURFACE",
+    "launcher_swaps": "OpenGLRenderer|Davey!",
+    "workspace": "LoaderTask|run:      2296 ms, loadWorkspace",
+    "applications": "LoaderTask|run:      1654 ms, loadAllApps",
+    "deep_shortcuts": "LoaderTask|run:         0 ms, loadDeepShortcuts",
+    "widgets": "LoaderTask|run:      1169 ms, load widgets",
+    "complete": "LoaderTask|run: end, 8064 ms"
+  },
+  "frame": {
+    "size": [1280, 800],
+    "window_size": [640, 480],
+    "visible": ["black Launcher3 home surface", "Search widget", "mouse cursor"]
+  },
+  "limitations": [
+    "The pinned SDK image does not contain the device applications referenced by Launcher3's stock default workspace, so this clean run has no populated workspace icon row.",
+    "SystemUI still exits while creating MediaFlags; Launcher itself continues and reaches its completed model state.",
+    "The diagnostic runner exits with its fixture failure marker after the observation window rather than declaring product readiness."
+  ]
+}
