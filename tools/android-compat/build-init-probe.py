@@ -24,9 +24,13 @@ def main():
     record = {"kind": "bounded-stock-init-probe-v1", "result": "PREPARING", "sources_sha256": {}, "files": {}, "commands": []}
     (output / "build.json").write_text(json.dumps(record) + "\n")
     for source, binary, options in [("init-scope-probe.c", "init-scope-probe", ["-static"]),
-                                    ("init-log-probe.c", "libprobe-init-kmsg.so", ["-shared", "-fPIC", "-ldl"])]:
+                                    ("init-log-probe.c", "libprobe-init-kmsg.so", ["-shared", "-fPIC", "-ldl"]),
+                                    ("init-signal-helper.c", "init-signal-helper", ["-pie"]),
+                                    ("android-runtime-shim.S", "libscarlet-android-shim.so",
+                                     ["-shared", "-nostdlib"])]:
         shutil.copy2(SOURCE / source, output / source)
-        command = [str(compiler), "-std=c11", "-O2", "-g", "-Wall", "-Wextra", "-Werror",
+        language_options = ["-x", "assembler-with-cpp"] if source.endswith(".S") else ["-std=c11"]
+        command = [str(compiler), *language_options, "-O2", "-g", "-Wall", "-Wextra", "-Werror",
                    str(output / source), *options, "-o", str(output / binary)]
         subprocess.run(command, check=True)
         record["commands"].append(command)

@@ -25,21 +25,6 @@ static void snapshot(void) {
  for(long i=0;i<count && i<128;i++)if(info[i].type==1)
   printf("SCARLET_INIT_TASK pid=%lu ppid=%lu tgid=%lu state=%u exit=%d cpu_ns=%llu name=%.64s\n",info[i].pid,info[i].ppid,info[i].tgid,info[i].state,info[i].exit_status,info[i].cpu_ns,info[i].name);
 }
-static void dump_java_process(const char *package) {
- static int dumped;
- struct task_info info[256];long count=syscall(0x53430000L+25,info,256);
- int mains=0;
- for(long i=0;i<count && i<256;i++)if(info[i].type==1 && info[i].pid==info[i].tgid && !strcmp(info[i].name,"main"))mains++;
- if(dumped || mains<2)return;
- dumped=1;
- for(long i=0;i<count && i<256;i++) {
-  if(info[i].type==1 && info[i].pid==info[i].tgid && !strcmp(info[i].name,"main")) {
-   printf("SCARLET_INIT_JAVA_DUMP pid=%lu\n",info[i].pid);
-   kill((pid_t)info[i].pid,SIGQUIT);
-  }
- }
- (void)package;
-}
 static int log_socket(void) {
  int fd=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0);if(fd<0)return -1;
  struct sockaddr_un address={.sun_family=AF_UNIX};strcpy(address.sun_path,"/dev/socket/logdw");
@@ -63,7 +48,7 @@ int main(int argc,char **argv) {
   printf("SCARLET_INIT_NAMESPACE_INSIDE pid=%d ppid=%d tid=%ld\n",getpid(),getppid(),syscall(SYS_gettid));
   if(getpid()!=1 || getppid()!=0 || syscall(SYS_gettid)!=1)return 3;
   char *const args[]={"/system/bin/init","second_stage",NULL};
-  setenv("LD_PRELOAD","libprobe-init-kmsg.so",1);
+  setenv("LD_PRELOAD","libscarlet-android-shim.so:libprobe-init-kmsg.so",1);
   execv(args[0],args);perror("stock init exec");return 4;
  }
  long scope=syscall(0x53430000L+1320);if(scope<0)return 11;
@@ -74,6 +59,18 @@ int main(int argc,char **argv) {
   // Native CreateNamespace before any seccomp installation. Exec rebuilds the Android ABI state.
   if(syscall(0x5343005c,3,"android-init-diagnostic")!=0){perror("namespace");_exit(2);}
   if(syscall(0x53430000L+1321,scope) || syscall(0x53430000L+1322,scope,0) || syscall(0x53430000L+102,scope))return 12;
+  // The namespace supervisor outside Android cannot address namespace-local
+  // PIDs. Keep this diagnostic helper inside the namespace and let init retain
+  // PID 1 while the helper observes application metadata and sends SIGQUIT.
+  pid_t signaler=getenv("SCARLET_INIT_JAVA_DUMP")?fork():-1;
+  if(signaler==0) {
+   // Let stock init publish linker configuration before loading the dynamic
+   // helper; a dynamic Android ELF selects the Linux ABI that implements tgkill.
+   sleep(10);
+   char value[16];snprintf(value,sizeof(value),"%d",observation);
+   char *const helper[]={"/system/bin/scarlet-signal-helper",value,NULL};
+   execv(helper[0],helper);perror("signal helper exec");_exit(6);
+  }
   char *const args[]={argv[0],"inside",NULL};execv(args[0],args);_exit(5);
  }
  printf("SCARLET_INIT_NAMESPACE_OUTER child=%d\n",child);
@@ -107,8 +104,7 @@ int main(int argc,char **argv) {
    printf("SCARLET_INIT_BPF_LOADER_FLAG set=%d value=%s\n",bpfflag,bpfvalue);
    int result=__system_property_set("ctl.start","netd");printf("SCARLET_INIT_CONTROL_REQUEST service=netd result=%d\n",result);
   }
-  if(tick==40 || tick==80)snapshot();
-  dump_java_process("com.android.permissioncontroller");
+  if(tick==40 || tick==80 || tick==200 || tick==240 || tick==280)snapshot();
   usleep(100000);
  }
  if(syscall(0x53430000L+1322,scope,0) || syscall(0x53430000L+1323,scope)){perror("owned scope stop");return 7;}

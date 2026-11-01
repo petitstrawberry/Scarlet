@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <android/log.h>
+#include <android/dlext.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -12,15 +13,61 @@
 #include <sys/ioctl.h>
 #include <stdint.h>
 #include <sys/un.h>
+#include <sys/uio.h>
 #include <dirent.h>
 #include <stdlib.h>
 #include <unistd.h>
 static int console=-1;
 static int zygote_diagnostic;
 static int minimum_log_priority;
+static long binder_trace_uid=-1;
 static struct stat null_identity;
 static int have_null;
 static void report(const char *format,...);
+static int utf16_contains(const unsigned char *data,size_t length,const char *text) {
+ size_t needle_length=strlen(text);
+ for(size_t start=0;start+needle_length*2<=length;start+=2) {
+  size_t index=0;
+  while(index<needle_length && data[start+index*2]==(unsigned char)text[index] &&
+        data[start+index*2+1]==0)index++;
+  if(index==needle_length)return 1;
+ }
+ return 0;
+}
+ssize_t write(int fd,const void *buffer,size_t length) {
+ ssize_t (*real)(int,const void*,size_t)=dlsym(RTLD_NEXT,"write");
+ if(zygote_diagnostic && (fd==STDOUT_FILENO || fd==STDERR_FILENO)) {
+  report("SCARLET_ANDROID_STDIO %.*s",(int)(length>16384?16384:length),(const char*)buffer);
+  return (ssize_t)length;
+ }
+ return real(fd,buffer,length);
+}
+ssize_t __write_chk(int fd,const void *buffer,size_t length,size_t buffer_length) {
+ return write(fd,buffer,length>buffer_length?buffer_length:length);
+}
+ssize_t writev(int fd,const struct iovec *vectors,int count) {
+ ssize_t (*real)(int,const struct iovec*,int)=dlsym(RTLD_NEXT,"writev");
+ if(zygote_diagnostic && (fd==STDOUT_FILENO || fd==STDERR_FILENO)) {
+  size_t written=0,total=0;
+  for(int i=0;i<count;i++) {
+   total+=vectors[i].iov_len;
+   size_t chunk=vectors[i].iov_len;if(chunk>16384-written)chunk=16384-written;
+   if(chunk)report("SCARLET_ANDROID_STDIO %.*s",(int)chunk,(const char*)vectors[i].iov_base);
+   written+=chunk;
+  }
+  return (ssize_t)total;
+ }
+ return real(fd,vectors,count);
+}
+void *android_dlopen_ext(const char *filename,int flags,const android_dlextinfo *info) {
+ void *(*real)(const char*,int,const android_dlextinfo*)=dlsym(RTLD_NEXT,"android_dlopen_ext");
+ if(!real)return NULL;
+ void *result=real(filename,flags,info);int saved=errno;
+ if(filename && (strstr(filename,"EGL") || strstr(filename,"GLES") || strstr(filename,"gralloc") ||
+                 strstr(filename,"hwui") || strstr(filename,"vulkan") || strstr(filename,"SurfaceFlinger")))
+  report("SCARLET_INIT_DLOPEN path=%s flags=0x%x result=%p pid=%d tid=%d\n",filename,flags,result,getpid(),gettid());
+ errno=saved;return result;
+}
 /* Java crash-buffer writes can bypass the logger installed during init. */
 int __android_log_buf_write(int buffer,int priority,const char *tag,const char *message) {
  int (*real)(int,int,const char*,const char*)=dlsym(RTLD_NEXT,"__android_log_buf_write");
@@ -49,7 +96,46 @@ int ioctl(int fd,int request,...) {
  va_list args;va_start(args,request);void *argument=va_arg(args,void*);va_end(args);
  int (*real)(int,int,...)=dlsym(RTLD_NEXT,"ioctl");
  if(!real){errno=ENOSYS;return -1;}
+ static unsigned transaction_calls;
+ int trace_transaction=0;uint32_t trace_command=0;unsigned long long trace_target=0;
+ if(binder_trace_uid>=0 && getuid()==(uid_t)binder_trace_uid && (unsigned)request==0xc0306201u && argument) {
+  uint64_t *bwr=argument;
+  if(bwr[1]<=bwr[0] && bwr[0]-bwr[1]>=4 && bwr[0]<=1048576) {
+   uint32_t command=0;memcpy(&command,(void*)(uintptr_t)(bwr[2]+bwr[1]),4);
+   if(bwr[1]<=bwr[0] && bwr[0]-bwr[1]>=68 &&
+      (command==0x40406300u || command==0x40406301u || command==0x40486311u || command==0x40486312u)) {
+    uint64_t tx[8];memcpy(tx,(void*)(uintptr_t)(bwr[2]+bwr[1]+4),sizeof(tx));
+    const unsigned char *payload=(const unsigned char*)(uintptr_t)tx[6];
+    if((unsigned)tx[2]==24) {
+     report("SCARLET_INIT_PUBLISH_PARCEL tid=%d target=%llu bytes=%llu offsets=%llu\n",
+            gettid(),tx[0],tx[4],tx[5]);
+    }
+    if(payload && tx[4]<=1048576 && (utf16_contains(payload,tx[4],"SettingsProvider") ||
+       utf16_contains(payload,tx[4],"IconsContentProvider"))) {
+     report("SCARLET_INIT_PROVIDER_PARCEL tid=%d command=0x%x target=%llu code=%u flags=0x%x bytes=%llu offsets=%llu\n",
+            gettid(),command,tx[0],(unsigned)tx[2],(unsigned)(tx[2]>>32),tx[4],tx[5]);
+     if(tx[5]<=512 && tx[5]%8==0 && tx[7]) {
+      for(uint64_t i=0;i<tx[5];i+=8) {
+       uint64_t offset;memcpy(&offset,(void*)(uintptr_t)(tx[7]+i),8);
+       if(offset>tx[4] || tx[4]-offset<8)continue;
+       uint32_t object[2];memcpy(object,(void*)(uintptr_t)(tx[6]+offset),8);
+       report("SCARLET_INIT_PROVIDER_OBJECT index=%llu type=0x%x flags=0x%x\n",
+              (unsigned long long)(i/8),object[0],object[1]);
+      }
+     }
+    }
+    if(__atomic_fetch_add(&transaction_calls,1,__ATOMIC_RELAXED)<64) {
+     trace_transaction=1;trace_command=command;trace_target=tx[0];
+     report("SCARLET_INIT_BINDER_BEGIN fd=%d tid=%d command=0x%x target=%llu code=%u flags=0x%x bytes=%llu\n",
+            fd,gettid(),command,trace_target,(unsigned)tx[2],(unsigned)(tx[2]>>32),tx[4]);
+    }
+   }
+  }
+ }
  int result=real(fd,request,argument),saved=errno;
+ if(trace_transaction)
+  report("SCARLET_INIT_BINDER_END tid=%d command=0x%x target=%llu result=%d errno=%d\n",
+         gettid(),trace_command,trace_target,result,saved);
  static unsigned failures;
  if(result<0 && (unsigned)request==0xc0306201u && saved!=EAGAIN && saved!=EINTR && __atomic_fetch_add(&failures,1,__ATOMIC_RELAXED)<16) {
   uint64_t *bwr=argument;
@@ -99,6 +185,8 @@ __attribute__((constructor)) static void capture_console(void) {
  const char *program=getprogname();zygote_diagnostic=program && !strcmp(program,"app_process64");
  const char *priority=getenv("SCARLET_ANDROID_LOG_MIN_PRIORITY");
  if(priority)minimum_log_priority=atoi(priority);
+ const char *trace_uid=getenv("SCARLET_ANDROID_BINDER_TRACE_UID");
+ if(trace_uid){char *end;long value=strtol(trace_uid,&end,10);if(*trace_uid && !*end && value>=0 && value<=UINT32_MAX)binder_trace_uid=value;}
  if(zygote_diagnostic) {
   // Restore stock /dev/null stdio and close only inherited diagnostic consoles.
   int nullfd=open("/dev/null",O_RDWR|O_CLOEXEC);
@@ -193,6 +281,34 @@ EGLBoolean eglInitialize(EGLDisplay display,EGLint *major,EGLint *minor) {
  if(!real){report("SCARLET_INIT_EGL_MISSING eglInitialize\n");return EGL_FALSE;}
  EGLBoolean result=real(display,major,minor);int saved=errno;
  report("SCARLET_INIT_EGL_INITIALIZE display=%p result=%u\n",display,result);errno=saved;return result;
+}
+EGLDisplay eglGetDisplay(EGLNativeDisplayType display_id) {
+ EGLDisplay (*real)(EGLNativeDisplayType)=dlsym(RTLD_NEXT,"eglGetDisplay");
+ if(!real){report("SCARLET_INIT_EGL_MISSING eglGetDisplay\n");return EGL_NO_DISPLAY;}
+ EGLDisplay result=real(display_id);int saved=errno;
+ report("SCARLET_INIT_EGL_GET_DISPLAY native=%p result=%p pid=%d tid=%d\n",(void*)display_id,(void*)result,getpid(),gettid());
+ errno=saved;return result;
+}
+EGLBoolean eglChooseConfig(EGLDisplay display,const EGLint *attributes,EGLConfig *configs,EGLint count,EGLint *num_config) {
+ EGLBoolean (*real)(EGLDisplay,const EGLint*,EGLConfig*,EGLint,EGLint*)=dlsym(RTLD_NEXT,"eglChooseConfig");
+ if(!real){report("SCARLET_INIT_EGL_MISSING eglChooseConfig\n");return EGL_FALSE;}
+ EGLBoolean result=real(display,attributes,configs,count,num_config);int saved=errno;
+ report("SCARLET_INIT_EGL_CHOOSE_CONFIG display=%p count=%d result=%u chosen=%d pid=%d tid=%d\n",(void*)display,count,result,num_config?*num_config:-1,getpid(),gettid());
+ errno=saved;return result;
+}
+EGLSurface eglCreateWindowSurface(EGLDisplay display,EGLConfig config,EGLNativeWindowType window,const EGLint *attributes) {
+ EGLSurface (*real)(EGLDisplay,EGLConfig,EGLNativeWindowType,const EGLint*)=dlsym(RTLD_NEXT,"eglCreateWindowSurface");
+ if(!real){report("SCARLET_INIT_EGL_MISSING eglCreateWindowSurface\n");return EGL_NO_SURFACE;}
+ EGLSurface result=real(display,config,window,attributes);int saved=errno;
+ report("SCARLET_INIT_EGL_CREATE_SURFACE display=%p window=%p result=%p pid=%d tid=%d\n",(void*)display,(void*)window,(void*)result,getpid(),gettid());
+ errno=saved;return result;
+}
+EGLContext eglCreateContext(EGLDisplay display,EGLConfig config,EGLContext share,const EGLint *attributes) {
+ EGLContext (*real)(EGLDisplay,EGLConfig,EGLContext,const EGLint*)=dlsym(RTLD_NEXT,"eglCreateContext");
+ if(!real){report("SCARLET_INIT_EGL_MISSING eglCreateContext\n");return EGL_NO_CONTEXT;}
+ EGLContext result=real(display,config,share,attributes);int saved=errno;
+ report("SCARLET_INIT_EGL_CREATE_CONTEXT display=%p share=%p result=%p pid=%d tid=%d\n",(void*)display,(void*)share,(void*)result,getpid(),gettid());
+ errno=saved;return result;
 }
 EGLBoolean eglMakeCurrent(EGLDisplay display,EGLSurface draw,EGLSurface read,EGLContext context) {
  EGLBoolean (*real)(EGLDisplay,EGLSurface,EGLSurface,EGLContext)=dlsym(RTLD_NEXT,"eglMakeCurrent");

@@ -20,6 +20,9 @@ def main():
     if "--observe-seconds" in arguments:
         index=arguments.index("--observe-seconds");observation=int(arguments[index+1]);del arguments[index:index+2]
         if not 20<=observation<=300:raise ValueError("observation must be 20..300 seconds")
+    dump_java="--dump-java-stacks" in arguments
+    if dump_java:arguments.remove("--dump-java-stacks")
+    if dump_java:arguments.extend(["--program-env","SCARLET_INIT_JAVA_DUMP=1"])
     compositor=None
     capture_frame="--capture-frame" in arguments
     if capture_frame:arguments.remove("--capture-frame")
@@ -43,10 +46,12 @@ def main():
     record = json.loads((build / "build.json").read_text())
     if record.get("kind") != "bounded-stock-init-probe-v1" or record.get("result") != "BUILT":
         raise ValueError("incomplete init probe build")
-    for name in ("init-scope-probe.c", "init-log-probe.c"):
+    for name in ("init-scope-probe.c", "init-log-probe.c", "init-signal-helper.c",
+                 "android-runtime-shim.S"):
         if record["sources_sha256"].get(name) != sha256(SOURCE / name):
             raise ValueError("stale init probe source")
-    for name in ("init-scope-probe", "libprobe-init-kmsg.so"):
+    for name in ("init-scope-probe", "libprobe-init-kmsg.so", "init-signal-helper",
+                 "libscarlet-android-shim.so"):
         if record["files"].get(name) != sha256(build / name):
             raise ValueError("changed init probe binary")
     if any(flag in arguments for flag in ["--program", "--init-bootstrap", "--accel"]):
@@ -68,6 +73,12 @@ def main():
             destination.parent.mkdir(parents=True,exist_ok=True)
             shutil.copy2(build/"libprobe-init-kmsg.so",destination)
             if sha256(destination)!=record["files"]["libprobe-init-kmsg.so"]:raise ValueError("log probe changed while staging")
+            shim=root/partition/"lib64/libscarlet-android-shim.so"
+            shutil.copy2(build/"libscarlet-android-shim.so",shim)
+            if sha256(shim)!=record["files"]["libscarlet-android-shim.so"]:raise ValueError("runtime shim changed while staging")
+        helper=root/"system/bin/scarlet-signal-helper"
+        shutil.copy2(build/"init-signal-helper",helper)
+        if sha256(helper)!=record["files"]["init-signal-helper"]:raise ValueError("signal helper changed while staging")
         shutil.copy2(build / "build.json", output / "init-probe-build.json")
         (output / "init-diagnostic.json").write_text(json.dumps({
             "kind": "bounded-stock-init-profile-v1", "probe_build_sha256": sha256(build / "build.json"),
@@ -114,7 +125,7 @@ def main():
                         if not serial.exists():continue
                         data=serial.read_bytes()
                         if b"SCARLET_INIT_NAMESPACE_STOP_REAP" in data:return
-                        if b"Finished setting power mode 2 on display 0" not in data:continue
+                        if b"SCARLET_ANDROID_FRAMEBUFFER_READY" not in data:continue
                         try:
                             with Qmp(socket,timeout=3) as qmp:qmp.execute("screendump",{"filename":str(directory/"frame.ppm")})
                             proof=pixels.capture_pixels(directory/"frame.ppm",directory/"frame.png")
