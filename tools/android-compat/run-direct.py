@@ -59,6 +59,8 @@ def main():
     parser.add_argument("--stock-inputs", type=Path, help="verified stock property/APEX overlay for ART or a program")
     parser.add_argument("--init-bootstrap", action="store_true", help="program diagnostic: let stock init initialize properties and linker configuration")
     parser.add_argument("--boot-profile", type=Path, help="verified flattened APEX and explicit stock-init manager configuration")
+    parser.add_argument("--reuse-rootfs", type=Path,
+                        help="clone a previously booted rootfs for a faster development iteration")
     parser.add_argument("--zygote-policy", action="store_true", help="apply the bounded Zygote/app transition fixture to a stock program diagnostic")
     parser.add_argument("--shield-fixture", action="store_true", help="apply the existing Shield test policy to a stock program diagnostic")
     parser.add_argument("--output", type=Path, required=True)
@@ -317,11 +319,18 @@ def main():
         for tree in (staging, boot):
             shutil.copy2(compiled, tree / destination)
     rootfs = output / "rootfs.ext2"
-    size = sum(p.stat().st_size for p in staging.rglob("*") if p.is_file() and not p.is_symlink())
-    with rootfs.open("xb") as f:
-        f.truncate(max(128 * 1024**2, size * 2 + 64 * 1024**2))
-    with (output / "rootfs-build.log").open("wb") as log:
-        subprocess.run(["mkfs.ext2", "-F", "-d", str(staging), str(rootfs)], stdout=log, stderr=subprocess.STDOUT, check=True)
+    if args.reuse_rootfs:
+        if not args.reuse_rootfs.is_file():
+            raise ValueError("reused rootfs image is missing")
+        shutil.copyfile(args.reuse_rootfs, rootfs)
+        (output / "rootfs-build.log").write_text(
+            f"cloned development rootfs {args.reuse_rootfs}\n")
+    else:
+        size = sum(p.stat().st_size for p in staging.rglob("*") if p.is_file() and not p.is_symlink())
+        with rootfs.open("xb") as f:
+            f.truncate(max(128 * 1024**2, size * 2 + 64 * 1024**2))
+        with (output / "rootfs-build.log").open("wb") as log:
+            subprocess.run(["mkfs.ext2", "-F", "-d", str(staging), str(rootfs)], stdout=log, stderr=subprocess.STDOUT, check=True)
     archive, image = output / "initramfs.cpio", output / "boot.img"
     smoke.create_initramfs(boot, archive)
     build = ["cargo-scarlet-plugin-limine", "--arch", "aarch64", "--kernel", str(kernel),
