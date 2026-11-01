@@ -97,6 +97,11 @@ def prepare(archive, runtime, stock, profile_file, output):
             if embedded.exists():
                 embedded.unlink()
         tree(system, "/system/lib64/bootstrap", "system/lib64/bootstrap", output, aliases)
+        if "com.android.os.statsd" in profile["apex_modules"]:
+            # statsd is an APEX binary but its incident client libraries remain
+            # in the system partition in the pinned SDK image.
+            for name in ("libincident.so", "libincidentpriv.so"):
+                system.dump("/system/lib64/" + name, output / "system/lib64" / name)
         tree(system, "/system/etc/init/hw", "system/etc/init/hw", output, aliases)
         for path in profile["init_imports"]:
             if path.startswith("/system/etc/init/hw/"):
