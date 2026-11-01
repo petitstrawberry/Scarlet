@@ -45,7 +45,7 @@ static void drain_logs(int fd) {
 int main(int argc,char **argv) {
  setvbuf(stdout,NULL,_IONBF,0);
  int observation=20;const char *requested=getenv("SCARLET_INIT_OBSERVE_SECONDS");
- if(requested) {char *end=NULL;long value=strtol(requested,&end,10);if(!*requested || *end || value<20 || value>480)return 16;observation=(int)value;}
+ if(requested) {char *end=NULL;long value=strtol(requested,&end,10);if(!*requested || *end || value<20 || value>1800)return 16;observation=(int)value;}
  if(argc==2 && !strcmp(argv[1],"inside")) {
   printf("SCARLET_INIT_NAMESPACE_INSIDE pid=%d ppid=%d tid=%ld\n",getpid(),getppid(),syscall(SYS_gettid));
   if(getpid()!=1 || getppid()!=0 || syscall(SYS_gettid)!=1)return 3;
