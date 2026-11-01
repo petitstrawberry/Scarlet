@@ -111,6 +111,16 @@ int32_t sws_scene_create_with_flags(const char *title, uint32_t outer_width,
 int32_t sws_scene_resize(uint32_t window_id, uint32_t outer_width, uint32_t outer_height);
 int32_t sws_scene_geometry(uint32_t window_id, SwsSceneGeometry *geometry);
 int32_t sws_scene_frame(uint32_t window_id, const SwsSceneFrame *frame);
+/* Present a CPU BGRA image in a normal window with ScarletUI's standard
+ * titlebar, border and rounded clip. content_width/height are the unscaled
+ * image extent; SWS content size follows resize and the image is contained
+ * with black letterboxing. */
+int32_t sws_scene_chrome_create(const char *title, uint32_t content_width,
+                                uint32_t content_height, uint32_t resizable,
+                                uint32_t *window_id);
+int32_t sws_scene_chrome_present(uint32_t window_id, const void *pixels,
+                                 size_t bytes, uint32_t width, uint32_t height,
+                                 size_t pitch);
 int32_t sws_window_resizable(uint32_t window_id, uint32_t enabled);
 
 #ifdef __cplusplus
