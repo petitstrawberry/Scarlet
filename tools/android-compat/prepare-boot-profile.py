@@ -212,6 +212,12 @@ def configure(output, stock, profile, contexts, metadata):
             "    mkdir /data/misc/apexdata/com.android.tethering/netstats 0771 root system\n"
         )
     (output / "scarlet/boot/init.rc").write_text(manager_init)
+    feature_permissions = output / "system_ext/etc/permissions/scarlet-android-features.xml"
+    feature_permissions.parent.mkdir(parents=True, exist_ok=True)
+    feature_permissions.write_text(
+        '<permissions>\n'
+        '    <feature name="android.software.app_widgets" />\n'
+        '</permissions>\n')
     if metadata.get("user_unlock_inputs"):
         from user_unlock_inputs import apply_service
         apply_service(output)
