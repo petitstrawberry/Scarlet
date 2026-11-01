@@ -19,7 +19,7 @@ def main():
     observation=20
     if "--observe-seconds" in arguments:
         index=arguments.index("--observe-seconds");observation=int(arguments[index+1]);del arguments[index:index+2]
-        if not 20<=observation<=480:raise ValueError("observation must be 20..480 seconds")
+        if not 20<=observation<=1800:raise ValueError("observation must be 20..1800 seconds")
     dump_java="--dump-java-stacks" in arguments
     if dump_java:arguments.remove("--dump-java-stacks")
     if dump_java:arguments.extend(["--program-env","SCARLET_INIT_JAVA_DUMP=1"])
