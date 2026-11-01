@@ -1,0 +1,39 @@
+{
+  "kind": "scarlet-android-launcher-app-v1",
+  "result": "PASS",
+  "scope": "The stock Launcher3 home surface contains the installed sample application and the sample Activity starts and renders through SurfaceFlinger to native SWS.",
+  "artifacts": {
+    "home-with-app.png": "3c83adc32ca217337793729673c27c13e8ab7f69b3372e7f041a75489624061f",
+    "sample-app.png": "ed1091e4308a8f4cd04641b8e174ad4f83e36a6dd5d52e9ad0afadb0d8249239",
+    "scarlet.elf": "2a84414aec7ed66c0f0a2506ff4eead7a11f4e901a197947bda656270f896508",
+    "boot_profile.json": "3492f0e972d36eeb264d884049ac86d1118bbc079c05a15a57d2fdf61ea30a17",
+    "sample.apk": "300e2266e88879820ef8c3f5a48b61c32f0a548dcbff0a51dbd75557561d2c4f",
+    "sample_build.json": "fa6bfcddb62b823778dd941a1ed7479daadd060c7842c2ff24f41a4c6a6bcb57"
+  },
+  "sample": {
+    "package": "dev.scarlet.compat",
+    "activity": "dev.scarlet.compat/.MainActivity",
+    "system_path": "/system/app/ScarletCompat/ScarletCompat.apk",
+    "app_uid": 10002,
+    "home_container": "hotseat",
+    "home_cell": 0
+  },
+  "markers": {
+    "package_scan": "PackageManager|/system/app/ScarletCompat changed; collecting certs",
+    "policy": "SCARLET_ANDROID_APP_POLICY package=dev.scarlet.compat uid=10002",
+    "home_shortcut": "container=-101",
+    "home_model_complete": "LoaderTask|run: end, 13001 ms",
+    "activity_start": "START u0 {act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x10000000 cmp=dev.scarlet.compat/.MainActivity} from uid 1000",
+    "process_start": "Start proc 564:dev.scarlet.compat/u0a2 for next-top-activity",
+    "activity_resumed": "ScarletCompat|SCARLET_APK_RESUMED null"
+  },
+  "frames": {
+    "home": ["Search widget", "sample application icon in the hotseat"],
+    "application": ["Scarlet Android title bar", "Touches: 0"]
+  },
+  "launch_path": "The bounded manager requested the sample activity through ActivityManager.startActivityAsUserWithFeature after Launcher3 finished publishing user 0. The same component is listed on the Launcher home surface.",
+  "limitations": [
+    "This verifies programmatic Activity launch rather than a host-generated pointer click.",
+    "SystemUI still exits during MediaFlags initialization; Launcher and the sample application remain usable."
+  ]
+}
