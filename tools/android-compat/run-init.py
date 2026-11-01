@@ -9,7 +9,7 @@ import sys
 import tempfile
 import threading
 
-from art_inputs import sha256
+from art_inputs import Ext4, sha256
 
 SOURCE = Path(__file__).resolve().parent
 
@@ -19,10 +19,12 @@ def main():
     observation=20
     if "--observe-seconds" in arguments:
         index=arguments.index("--observe-seconds");observation=int(arguments[index+1]);del arguments[index:index+2]
-        if not 20<=observation<=300:raise ValueError("observation must be 20..300 seconds")
+        if not 20<=observation<=480:raise ValueError("observation must be 20..480 seconds")
     dump_java="--dump-java-stacks" in arguments
     if dump_java:arguments.remove("--dump-java-stacks")
     if dump_java:arguments.extend(["--program-env","SCARLET_INIT_JAVA_DUMP=1"])
+    verbose_logs="--verbose-logs" in arguments
+    if verbose_logs:arguments.remove("--verbose-logs")
     compositor=None
     capture_frame="--capture-frame" in arguments
     if capture_frame:arguments.remove("--capture-frame")
@@ -41,6 +43,17 @@ def main():
     launcher_app=None
     if "--launcher-app" in arguments:
         index=arguments.index("--launcher-app");launcher_app=Path(arguments[index+1]).resolve();del arguments[index:index+2]
+    stock_product=None
+    if "--stock-product" in arguments:
+        index=arguments.index("--stock-product");stock_product=Path(arguments[index+1]).resolve();del arguments[index:index+2]
+        if not stock_product.is_file():raise ValueError("stock product image is missing")
+    systemui_compat=None
+    if "--systemui-compat" in arguments:
+        index=arguments.index("--systemui-compat");systemui_compat=Path(arguments[index+1]).resolve();del arguments[index:index+2]
+        if not systemui_compat.is_file():raise ValueError("SystemUI compatibility APK is missing")
+    launch_sample="--launch-sample" in arguments
+    if launch_sample:arguments.remove("--launch-sample")
+    if launch_sample and launcher_app is None:raise ValueError("--launch-sample requires --launcher-app")
     if "--init-probe" not in arguments or "--boot-profile" not in arguments:
         raise ValueError("run-init requires --init-probe BUILD and --boot-profile INPUTS")
     index = arguments.index("--init-probe")
@@ -61,12 +74,18 @@ def main():
         raise ValueError("run-init selects its bounded program and HVF accelerator")
     launcher_app_record=None
     launcher_app_apk=None
+    launcher_app_wallpaper=None
     if launcher_app:
         launcher_app_record=json.loads((launcher_app/"build.json").read_text())
         launcher_app_apk=launcher_app/"scarlet-compat.apk"
+        launcher_app_wallpaper=launcher_app/"wallpaper.png"
         if (launcher_app_record.get("package")!="dev.scarlet.compat" or
-                launcher_app_record.get("sha256")!=sha256(launcher_app_apk)):
+                launcher_app_record.get("sha256")!=sha256(launcher_app_apk) or
+                launcher_app_record.get("wallpaper_sha256")!=sha256(launcher_app_wallpaper)):
             raise ValueError("changed or incomplete launcher app build")
+    stock_product_apps=[] if stock_product is None else [
+        ("app", "Camera2", "Camera2.apk", "Camera2.apk"),
+    ]
     output = Path(arguments[arguments.index("--output") + 1])
     spec = importlib.util.spec_from_file_location("direct_init_runner", SOURCE / "run-direct.py")
     runner = importlib.util.module_from_spec(spec)
@@ -79,12 +98,50 @@ def main():
             destination=root.parent.parent/"bin/sws";shutil.copy2(compositor,destination)
             if sha256(destination)!=sha256(compositor):raise ValueError("changed native SWS executable")
             (output/"native-sws.json").write_text(json.dumps({"path":str(compositor),"sha256":sha256(compositor),"backend":"cpu"},indent=2)+"\n")
+        if systemui_compat:
+            destination=root/"system_ext/priv-app/SystemUI/SystemUI.apk"
+            shutil.copy2(systemui_compat,destination)
+            if sha256(destination)!=sha256(systemui_compat):
+                raise ValueError("SystemUI compatibility APK changed while staging")
         if launcher_app:
             destination=root/"system/app/ScarletCompat/ScarletCompat.apk"
             destination.parent.mkdir(parents=True,exist_ok=True)
             shutil.copy2(launcher_app_apk,destination)
             if sha256(destination)!=launcher_app_record["sha256"]:
                 raise ValueError("launcher app changed while staging")
+            wallpaper=root/"system/etc/scarlet/wallpaper.png"
+            wallpaper.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(launcher_app_wallpaper,wallpaper)
+            if sha256(wallpaper)!=launcher_app_record["wallpaper_sha256"]:
+                raise ValueError("launcher wallpaper changed while staging")
+            # Seed user-0's static wallpaper as the manager-owned display
+            # policy. WallpaperManagerService otherwise starts from its
+            # wallpaper-free ImageWallpaper fallback on every fresh data image.
+            user_wallpaper=root/"data/system/users/0/wallpaper"
+            user_wallpaper.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(launcher_app_wallpaper,user_wallpaper)
+            user_wallpaper.chmod(0o644)
+            wallpaper_info=user_wallpaper.parent/"wallpaper_info.xml"
+            wallpaper_info.write_text(
+                "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n"
+                '<wp width="640" height="480" name="Scarlet" backup="true" '
+                'cropLeft="0" cropTop="0" cropRight="640" cropBottom="480" />\n')
+            wallpaper_info.chmod(0o644)
+        if stock_product:
+            product=Ext4(stock_product)
+            permissions=root/"product/etc/permissions"
+            permissions.mkdir(parents=True,exist_ok=True)
+            for name,_mode,_size in product.entries("/etc/permissions"):
+                if name.endswith(".xml"):
+                    product.dump(f"/etc/permissions/{name}",permissions/name)
+            for directory,name,source_name,filename in stock_product_apps:
+                source=f"/{directory}/{name}/{source_name}"
+                # Treat the selected product APKs as regular system applications
+                # in this minimal image. The product partition in the pinned
+                # emulator image has additional mount and policy assumptions that
+                # are not present in the direct-execution view.
+                destination=root/"system/app"/name/filename
+                product.dump(source,destination)
         for partition in ["system","vendor"]:
             destination=root/partition/"lib64/libprobe-init-kmsg.so"
             destination.parent.mkdir(parents=True,exist_ok=True)
@@ -110,14 +167,29 @@ def main():
             "launcher_app": None if not launcher_app else {
                 "package": launcher_app_record["package"],
                 "apk_sha256": launcher_app_record["sha256"],
+                "wallpaper_sha256": launcher_app_record["wallpaper_sha256"],
                 "path": "/system/app/ScarletCompat/ScarletCompat.apk",
+                "wallpaper_path": "/system/etc/scarlet/wallpaper.png",
+                "user_wallpaper_path": "/data/system/users/0/wallpaper",
+                "launch_sample": launch_sample,
+            },
+            "stock_product": None if not stock_product else {
+                "path": str(stock_product),
+                "sha256": sha256(stock_product),
+                "packages": [f"{directory}/{name}/{source_name}" for directory,name,source_name,_filename in stock_product_apps],
+            },
+            "systemui_compat": None if not systemui_compat else {
+                "path": str(systemui_compat),
+                "sha256": sha256(systemui_compat),
+                "change": "early keyguard initialization and PowerManager compatibility shim",
             },
         }, indent=2) + "\n")
         return metadata
 
     if start_zygote:arguments.extend(["--program-argument","start-zygote"])
     arguments.extend(["--program-env",f"SCARLET_INIT_OBSERVE_SECONDS={observation}"])
-    if launcher_app:
+    arguments.extend(["--program-env",f"ANDROID_LOG_TAGS={'*:v' if verbose_logs else '*:e'}"])
+    if launch_sample:
         arguments.extend(["--program-env","SCARLET_LAUNCH_APP=dev.scarlet.compat/.MainActivity"])
     if start_installer:arguments.extend(["--program-env","SCARLET_INIT_START_INSTALLER=1"])
     if start_netd:arguments.extend(["--program-env","SCARLET_INIT_START_NETD=1"])
