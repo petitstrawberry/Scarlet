@@ -244,6 +244,20 @@ fn task_status(caller: &Task, task: &Task) -> String {
     )
 }
 
+fn task_syscall(task: &Task) -> String {
+    let state = task.execution_debug_snapshot();
+    if !state.syscall_active || state.syscall_number == u64::MAX {
+        return String::from("running\n");
+    }
+    // Linux report_layout is syscall, six arguments, stack pointer, program
+    // counter. Scarlet records the number and entry PC; it does not retain the
+    // scalar argument registers after dispatch, so those fields stay zero.
+    format!(
+        "{} 0 0 0 0 0 0 0 0x{:x}\n",
+        state.syscall_number, state.syscall_pc
+    )
+}
+
 /// mntent escapes must preserve whitespace and backslashes in mount paths.
 fn mount_field(value: &str) -> String {
     let mut escaped = String::new();
@@ -314,6 +328,11 @@ fn text_content(path: &str) -> Option<String> {
         let caller = crate::task::mytask()?;
         let target = proc_task(&caller, path, "status")?;
         return Some(task_status(&caller, &target));
+    }
+    if path.trim_end_matches('/').ends_with("/syscall") {
+        let caller = crate::task::mytask()?;
+        let target = proc_task(&caller, path, "syscall")?;
+        return Some(task_syscall(&target));
     }
     if matches!(path, "/proc/self/maps" | "/proc/thread-self/maps") {
         return self_maps();
