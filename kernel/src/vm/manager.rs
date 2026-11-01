@@ -3672,6 +3672,7 @@ mod tests {
             vm_start: 0x4000,
             mapping_origin: crate::vm::vmem::MappingOrigin::new(),
             permissions: 0x08, // User guard page, no permitted accesses.
+            maximum_permissions: usize::MAX,
             is_shared: false,
             memory_attribute: crate::vm::vmem::MemoryAttribute::Normal,
             owner: Some(owner),
