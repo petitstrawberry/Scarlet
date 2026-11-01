@@ -49,6 +49,37 @@ class HostServicesTest(unittest.TestCase):
             with self.subTest(old=old), self.assertRaises(ValueError):
                 build_keystore(rc.replace(old, new), b"binary")
 
+    def test_gatekeeper_keeps_stock_service_pair_and_contract(self):
+        from host_services import (build_gatekeeper, GATEKEEPER_BINARY, GATEKEEPER_HAL_BINARY,
+                                   GATEKEEPER_CONTRACT)
+        daemon = (b"service gatekeeperd /system/bin/gatekeeperd /data/misc/gatekeeper\n"
+                  b"    class late_start\n    user system\n    task_profiles ServiceCapacityLow\n")
+        hal = (b"service vendor.gatekeeper-1-0 /vendor/bin/hw/android.hardware.gatekeeper@1.0-service.software\n"
+               b"    class hal\n    user system\n    group system\n")
+        manifest = (b'<manifest version="1.0" type="device"><hal format="hidl">'
+                    b'<name>android.hardware.gatekeeper</name><transport>hwbinder</transport>'
+                    b'<version>1.0</version><interface><name>IGatekeeper</name>'
+                    b'<instance>default</instance></interface></hal></manifest>')
+        managed, proof, providers = build_gatekeeper(daemon, b"gatekeeperd", hal, b"gatekeeper-hal", manifest)
+        self.assertIn(b"service gatekeeperd /system/bin/gatekeeperd /data/misc/gatekeeper", managed)
+        self.assertIn(hal.strip(), managed)
+        self.assertEqual(set(providers), {GATEKEEPER_CONTRACT})
+        self.assertEqual(providers[GATEKEEPER_CONTRACT]["path"], GATEKEEPER_HAL_BINARY)
+        self.assertEqual(providers[GATEKEEPER_CONTRACT]["transport"], "hwbinder")
+        with self.subTest(change="daemon user"):
+            with self.assertRaises(ValueError):
+                build_gatekeeper(daemon.replace(b"user system", b"user root"), b"gatekeeperd",
+                                 hal, b"gatekeeper-hal", manifest)
+        with self.subTest(change="hal group"):
+            with self.assertRaises(ValueError):
+                build_gatekeeper(daemon, b"gatekeeperd",
+                                 hal.replace(b"group system", b"group root"),
+                                 b"gatekeeper-hal", manifest)
+        with self.subTest(change="manifest transport"):
+            with self.assertRaises(ValueError):
+                build_gatekeeper(daemon, b"gatekeeperd", hal, b"gatekeeper-hal",
+                                 manifest.replace(b"hwbinder", b"passthrough"))
+
     def test_audio_policy_keeps_only_the_primary_stock_graph(self):
         from host_services import primary_audio_policy
         stock=(b'<audioPolicyConfiguration>\n'

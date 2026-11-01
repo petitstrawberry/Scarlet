@@ -84,6 +84,9 @@
     "u:r:untrusted_app_25:s0": 32,
     "u:r:bootanim:s0": 33,
     "u:r:statsd:s0": 34,
+    "u:r:gatekeeperd:s0": 35,
+    "u:r:hal_gatekeeper_default:s0": 36,
+    "u:r:storaged:s0": 37
   },
   "transitions": [
     [
@@ -270,6 +273,9 @@
     "/vendor/bin/hw/android.hardware.security.keymint-service": "u:object_r:hal_keymint_default_exec:s0",
     "/system/bin/bootanimation": "u:object_r:bootanim_exec:s0",
     "/system/apex/com.android.os.statsd/bin/statsd": "u:object_r:statsd_exec:s0",
+    "/system/bin/gatekeeperd": "u:object_r:gatekeeper_exec:s0",
+    "/vendor/bin/hw/android.hardware.gatekeeper@1.0-service.software": "u:object_r:hal_gatekeeper_default_exec:s0",
+    "/system/bin/storaged": "u:object_r:storaged_exec:s0"
   },
   "exec_transitions": [
     [
@@ -430,11 +436,21 @@
     ],
     [
       "u:r:init:s0",
+      "u:object_r:gatekeeper_exec:s0",
+      "u:r:gatekeeperd:s0",
       1000
     ],
     [
       "u:r:init:s0",
+      "u:object_r:hal_gatekeeper_default_exec:s0",
+      "u:r:hal_gatekeeper_default:s0",
       1000
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:storaged_exec:s0",
+      "u:r:storaged:s0",
+      0
     ]
   ],
   "resource_groups": {
@@ -2982,16 +2998,48 @@
       1
     ],
     [
+      "u:r:hal_gatekeeper_default:s0",
+      "u:object_r:hal_gatekeeper_hwservice:s0",
       3
     ],
     [
+      "u:r:hal_gatekeeper_default:s0",
+      "u:object_r:hidl_manager_hwservice:s0",
       2
     ],
     [
+      "u:r:hal_gatekeeper_default:s0",
+      "u:object_r:hidl_base_hwservice:s0",
+      3
+    ],
+    [
+      "u:r:gatekeeperd:s0",
+      "u:object_r:hidl_manager_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:gatekeeperd:s0",
+      "u:object_r:hidl_base_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:gatekeeperd:s0",
+      "u:object_r:hal_gatekeeper_hwservice:s0",
+      2
+    ],
+    [
+      "u:r:gatekeeperd:s0",
+      "u:object_r:gatekeeper_service:s0",
+      1
+    ],
+    [
+      "u:r:storaged:s0",
+      "u:object_r:storaged_service:s0",
       1
     ],
     [
       "u:r:keystore:s0",
+      "u:object_r:gatekeeper_service:s0",
       2
     ],
     [
@@ -3106,6 +3154,7 @@
       "android.hardware.security.keymint.IRemotelyProvisionedComponent/default",
       "android.hardware.security.secureclock.ISecureClock/default",
       "android.hardware.security.sharedsecret.ISharedSecret/default",
+      "android.hardware.gatekeeper@1.0::IGatekeeper/default"
     ]
   },
   "host_services": [
@@ -3122,6 +3171,8 @@
     "audio_hal",
     "keymint",
     "keystore2",
+    "gatekeeper",
+    "storaged"
   ],
   "package_set": "stock-home",
   "keystore_grants": [

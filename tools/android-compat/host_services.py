@@ -34,6 +34,18 @@ KEYMINT_MANIFESTS={
     "android.hardware.security.sharedsecret.ISharedSecret/default":
         "vendor/etc/vintf/manifest/android.hardware.security.sharedsecret-service.xml",
 }
+GATEKEEPER="gatekeeper"
+GATEKEEPER_BINARY="system/bin/gatekeeperd"
+GATEKEEPER_STOCK_RC="system/etc/init/gatekeeperd.rc"
+GATEKEEPER_MANAGED_RC="scarlet/boot/services/gatekeeper.rc"
+GATEKEEPER_HAL_BINARY="vendor/bin/hw/android.hardware.gatekeeper@1.0-service.software"
+GATEKEEPER_HAL_STOCK_RC="vendor/etc/init/android.hardware.gatekeeper@1.0-service.software.rc"
+GATEKEEPER_MANIFEST="vendor/etc/vintf/manifest/android.hardware.gatekeeper@1.0-service.software.xml"
+GATEKEEPER_CONTRACT="android.hardware.gatekeeper@1.0::IGatekeeper/default"
+STORAGED="storaged"
+STORAGED_BINARY="system/bin/storaged"
+STORAGED_STOCK_RC="system/etc/init/storaged.rc"
+STORAGED_MANAGED_RC="scarlet/boot/services/storaged.rc"
 ODSIGN="odsign"
 ODSIGN_BINARY="system/bin/odsign"
 ODSIGN_STOCK_RC="system/etc/init/odsign.rc"
@@ -128,20 +140,21 @@ STOCK_TEXT = ("service system_suspend /" + BINARY + "\n"
 
 def validate_selection(profile):
     names = profile.get("host_services", [])
-    if (not isinstance(names,list) or len(names)>13 or
-            any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER,ODSIGN,HEALTH,VOLD,LMKD,NETD,AUDIOSERVER,AUDIO_HAL,KEYSTORE,KEYMINT) for name in names) or len(set(names))!=len(names)):
+    if (not isinstance(names,list) or len(names)>15 or
+            any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER,ODSIGN,HEALTH,VOLD,LMKD,NETD,AUDIOSERVER,AUDIO_HAL,KEYSTORE,KEYMINT,GATEKEEPER,STORAGED) for name in names) or len(set(names))!=len(names)):
         raise ValueError("unsupported stock host service selection")
     selected = CONTRACT in profile.get("vintf", {}).get("framework", [])
     if selected != (SUSPEND in names):
         raise ValueError("SystemSuspend requires both its host provider and VINTF contract")
     from vintf_inputs import (graphics_selection, HEALTH_CONTRACT, AUDIO_CONTRACT, AUDIO_EFFECT_CONTRACT,
-                              AUDIO_EFFECT_LEGACY_CONTRACT, FRAMEWORK_HIDL, KEYMINT_DEVICE)
+                              AUDIO_EFFECT_LEGACY_CONTRACT, FRAMEWORK_HIDL, KEYMINT_DEVICE, GATEKEEPER_CONTRACT)
     if FRAMEWORK_HIDL.intersection(profile.get("vintf",{}).get("framework",[])) and HW_MANAGER not in names:
         raise ValueError("HIDL framework management requires its stock provider")
     device=profile.get("vintf",{}).get("device",[])
     keymint_contracts=set(KEYMINT_DEVICE)
     graphics=[name for name in device if name not in
-              (HEALTH_CONTRACT,AUDIO_CONTRACT,AUDIO_EFFECT_CONTRACT,AUDIO_EFFECT_LEGACY_CONTRACT,*keymint_contracts)]
+              (HEALTH_CONTRACT,AUDIO_CONTRACT,AUDIO_EFFECT_CONTRACT,AUDIO_EFFECT_LEGACY_CONTRACT,
+               GATEKEEPER_CONTRACT,*keymint_contracts)]
     if (GRAPHICS in names and (HW_MANAGER not in names or not graphics_selection(graphics)) or
             GRAPHICS not in names and graphics):raise ValueError("graphics services require their exact device inventory and hardware-service manager")
     if ((HEALTH in names)!=(HEALTH_CONTRACT in device) or
@@ -158,11 +171,15 @@ def validate_selection(profile):
         raise ValueError("KeyMint requires its exact device contract inventory")
     if KEYSTORE in names and KEYMINT not in names:
         raise ValueError("Keystore2 requires the software KeyMint provider")
+    gatekeeper_selected = GATEKEEPER_CONTRACT in profile.get("vintf", {}).get("device", [])
+    if ((GATEKEEPER in names) != gatekeeper_selected or
+            gatekeeper_selected and HW_MANAGER not in names):
+        raise ValueError("GateKeeper requires its exact device contract and hardware-service manager")
     return names
 
 
 def imports(profile):
-    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC,GRAPHICS:GRAPHICS_RC,INSTALLER:INSTALLER_MANAGED_RC,ODSIGN:ODSIGN_MANAGED_RC,HEALTH:HEALTH_MANAGED_RC,VOLD:VOLD_MANAGED_RC,LMKD:LMKD_MANAGED_RC,NETD:NETD_MANAGED_RC,AUDIOSERVER:AUDIOSERVER_MANAGED_RC,AUDIO_HAL:AUDIO_HAL_MANAGED_RC,KEYSTORE:KEYSTORE_MANAGED_RC,KEYMINT:KEYMINT_MANAGED_RC}[name] for name in validate_selection(profile)]
+    return ["/"+{SUSPEND:MANAGED_RC,HW_MANAGER:HW_MANAGED_RC,GRAPHICS:GRAPHICS_RC,INSTALLER:INSTALLER_MANAGED_RC,ODSIGN:ODSIGN_MANAGED_RC,HEALTH:HEALTH_MANAGED_RC,VOLD:VOLD_MANAGED_RC,LMKD:LMKD_MANAGED_RC,NETD:NETD_MANAGED_RC,AUDIOSERVER:AUDIOSERVER_MANAGED_RC,AUDIO_HAL:AUDIO_HAL_MANAGED_RC,KEYSTORE:KEYSTORE_MANAGED_RC,KEYMINT:KEYMINT_MANAGED_RC,GATEKEEPER:GATEKEEPER_MANAGED_RC,STORAGED:STORAGED_MANAGED_RC}[name] for name in validate_selection(profile)]
 
 
 def build_keymint(stock_rc,binary,manifests):
@@ -205,6 +222,63 @@ def build_keymint(stock_rc,binary,manifests):
            "manifests":manifest_proof,"protection_level":"software",
            "declared_service_count":len(providers)}
     return stock_rc,proof,providers
+
+
+def build_storaged(stock_rc,binary):
+    directives=[line.strip() for line in stock_rc.decode().splitlines()
+                if line.strip() and not line.lstrip().startswith("#")]
+    if directives!=["service storaged /system/bin/storaged","class main",
+                    "capabilities DAC_READ_SEARCH","priority 10",
+                    "file /d/mmc0/mmc0:0001/ext_csd r","task_profiles ServiceCapacityLow",
+                    "user root","group package_info"]:
+        raise ValueError("changed stock storaged service configuration")
+    managed=stock_rc
+    for line in (b"    capabilities DAC_READ_SEARCH\n",b"    file /d/mmc0/mmc0:0001/ext_csd r\n"):
+        if managed.count(line)!=1:
+            raise ValueError("changed storaged capability or control file declaration")
+        managed=managed.replace(line,b"")
+    digest=lambda data:hashlib.sha256(data).hexdigest()
+    return managed,{"source_rc":STORAGED_STOCK_RC,"source_rc_sha256":digest(stock_rc),
+                    "binary_sha256":digest(binary),"managed_rc_sha256":digest(managed),
+                    "omitted_capabilities":["DAC_READ_SEARCH"],
+                    "omitted_control_files":["/d/mmc0/mmc0:0001/ext_csd"]}
+
+
+def build_gatekeeper(daemon_rc,daemon_binary,hal_rc,hal_binary,manifest):
+    directives=[line.strip() for line in daemon_rc.decode().splitlines()
+                if line.strip() and not line.lstrip().startswith("#")]
+    if directives!=["service gatekeeperd /system/bin/gatekeeperd /data/misc/gatekeeper",
+                    "class late_start","user system","task_profiles ServiceCapacityLow"]:
+        raise ValueError("changed stock gatekeeperd service configuration")
+    hal_directives=[line.strip() for line in hal_rc.decode().splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")]
+    if hal_directives!=["service vendor.gatekeeper-1-0 /"+GATEKEEPER_HAL_BINARY,
+                        "class hal","user system","group system"]:
+        raise ValueError("changed stock GateKeeper HAL service configuration")
+    root=ET.fromstring(manifest)
+    if root.tag!="manifest" or root.get("type")!="device":
+        raise ValueError("changed stock GateKeeper device contract")
+    declared=[]
+    for hal in root.findall("hal"):
+        package=hal.findtext("name","")
+        versions=[value.text for value in hal.findall("version")]
+        instances=[f"{interface.findtext('name')}/{value.text}"
+                   for interface in hal.findall("interface")
+                   for value in interface.findall("instance")]
+        declared.append((hal.get("format"),package,hal.findtext("transport"),versions,instances))
+    if declared!=[("hidl","android.hardware.gatekeeper","hwbinder",["1.0"],["IGatekeeper/default"])]:
+        raise ValueError("changed stock GateKeeper device contract")
+    managed=daemon_rc.rstrip(b"\n")+b"\n\n"+hal_rc
+    digest=lambda data:hashlib.sha256(data).hexdigest()
+    providers={GATEKEEPER_CONTRACT:{"transport":"hwbinder","path":GATEKEEPER_HAL_BINARY,
+               "sha256":digest(hal_binary),"source":GATEKEEPER_MANIFEST,
+               "source_sha256":digest(manifest)}}
+    proof={"source_rc":GATEKEEPER_STOCK_RC,"source_rc_sha256":digest(daemon_rc),
+           "binary_sha256":digest(daemon_binary),"managed_rc_sha256":digest(managed),
+           "hal_source_rc":GATEKEEPER_HAL_STOCK_RC,"hal_source_rc_sha256":digest(hal_rc),
+           "hal_binary_sha256":digest(hal_binary),"manifest_sha256":digest(manifest),
+           "protection_level":"software","declared_service_count":len(providers)}
+    return managed,proof,providers
 
 
 def build_keystore(stock_rc,binary):

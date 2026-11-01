@@ -152,10 +152,10 @@ def prepare(archive, runtime, stock, profile_file, output):
 
 
 def configure(output, stock, profile, contexts, metadata):
-    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,ODSIGN_MANAGED_RC,HEALTH_MANAGED_RC,VOLD_MANAGED_RC,LMKD_MANAGED_RC,NETD_MANAGED_RC,AUDIOSERVER_MANAGED_RC,AUDIO_HAL_MANAGED_RC,KEYSTORE_MANAGED_RC,KEYMINT_MANAGED_RC,imports
+    from host_services import MANAGED_RC,HW_MANAGED_RC,GRAPHICS_RC,INSTALLER_MANAGED_RC,ODSIGN_MANAGED_RC,HEALTH_MANAGED_RC,VOLD_MANAGED_RC,LMKD_MANAGED_RC,NETD_MANAGED_RC,AUDIOSERVER_MANAGED_RC,AUDIO_HAL_MANAGED_RC,KEYSTORE_MANAGED_RC,KEYMINT_MANAGED_RC,GATEKEEPER_MANAGED_RC,STORAGED_MANAGED_RC,imports
     for name,record in list(metadata.get("host_service_inputs",{}).items()):
         if name not in profile.get("host_services",[]):
-            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC,"odsign":ODSIGN_MANAGED_RC, "health":HEALTH_MANAGED_RC,"vold":VOLD_MANAGED_RC,"lmkd":LMKD_MANAGED_RC,"netd":NETD_MANAGED_RC,"audioserver":AUDIOSERVER_MANAGED_RC,"audio_hal":AUDIO_HAL_MANAGED_RC,"keystore2":KEYSTORE_MANAGED_RC,"keymint":KEYMINT_MANAGED_RC}[name]
+            relative={"system_suspend":MANAGED_RC,"hwservicemanager":HW_MANAGED_RC,"graphics_cpu":GRAPHICS_RC,"installd":INSTALLER_MANAGED_RC,"odsign":ODSIGN_MANAGED_RC, "health":HEALTH_MANAGED_RC,"vold":VOLD_MANAGED_RC,"lmkd":LMKD_MANAGED_RC,"netd":NETD_MANAGED_RC,"audioserver":AUDIOSERVER_MANAGED_RC,"audio_hal":AUDIO_HAL_MANAGED_RC,"keystore2":KEYSTORE_MANAGED_RC,"keymint":KEYMINT_MANAGED_RC,"gatekeeper":GATEKEEPER_MANAGED_RC,"storaged":STORAGED_MANAGED_RC}[name]
             path=output/relative
             expected=record["files"][relative] if name=="graphics_cpu" else record["managed_rc_sha256"]
             if sha256(path)!=expected:raise ValueError("changed manager host service output")
@@ -288,8 +288,8 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
     if service_image is not None and not added_services:
         refreshed_services |= {name for name in profile.get("host_services",[]) if name in ("audioserver","audio_hal")}
     providers_to_add=added_services|refreshed_services
-    if providers_to_add and (not providers_to_add.issubset({"vold","lmkd","netd","audioserver","audio_hal","keystore2","keymint"}) or not service_image):
-        raise ValueError("adding a stock provider requires --service-image; supported additions: vold, lmkd, netd, audioserver, audio_hal, keystore2, keymint")
+    if providers_to_add and (not providers_to_add.issubset({"vold","lmkd","netd","audioserver","audio_hal","keystore2","keymint","gatekeeper","storaged"}) or not service_image):
+        raise ValueError("adding a stock provider requires --service-image; supported additions: vold, lmkd, netd, audioserver, audio_hal, keystore2, keymint, gatekeeper, storaged")
     if "netd" in providers_to_add and not firewall_compat:
         raise ValueError("netd provider requires --netd-firewall-compat")
     if providers_to_add.intersection({"audioserver","audio_hal"}) and not audio_start:
@@ -303,8 +303,10 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
         previous = metadata.get("vintf_inputs", {})
         previous_device=previous.get("selection", {}).get("device",[])
         selected_device=profile.get("vintf", {}).get("device",[])
-        from vintf_inputs import AUDIO_CONTRACT, AUDIO_EFFECT_CONTRACT, AUDIO_EFFECT_LEGACY_CONTRACT, KEYMINT_DEVICE
+        from vintf_inputs import AUDIO_CONTRACT, AUDIO_EFFECT_CONTRACT, AUDIO_EFFECT_LEGACY_CONTRACT, KEYMINT_DEVICE, GATEKEEPER_CONTRACT
         from host_services import AUDIO_HAL, KEYMINT, KEYMINT_BINARY, KEYMINT_STOCK_RC, KEYMINT_MANIFESTS, build_keymint
+        from host_services import GATEKEEPER, GATEKEEPER_BINARY, GATEKEEPER_STOCK_RC, GATEKEEPER_HAL_BINARY
+        from host_services import GATEKEEPER_HAL_STOCK_RC, GATEKEEPER_MANIFEST, build_gatekeeper
         audio_contracts={AUDIO_CONTRACT,AUDIO_EFFECT_CONTRACT,AUDIO_EFFECT_LEGACY_CONTRACT}
         audio_additions = set(selected_device) - set(previous_device)
         audio_removals = set(previous_device) - set(selected_device)
@@ -315,9 +317,11 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
         keymint_contracts=set(KEYMINT_DEVICE)
         keymint_inventory_change = (set(selected_device)-set(previous_device)==keymint_contracts and
                                     not set(previous_device)-set(selected_device) and KEYMINT in providers_to_add)
+        gatekeeper_inventory_change = (set(selected_device)-set(previous_device)=={GATEKEEPER_CONTRACT} and
+                                       not set(previous_device)-set(selected_device) and GATEKEEPER in providers_to_add)
         if (selected_device != previous_device and
                 not (audio_inventory_change and AUDIO_HAL in providers_to_add) and
-                not keymint_inventory_change):
+                not keymint_inventory_change and not gatekeeper_inventory_change):
             raise ValueError("changed device inventory requires matching provider preparation")
         from vintf_inputs import build_manifests
         from vintf_inputs import AUDIO_CONTRACT
@@ -351,6 +355,19 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
                     manifests[contract]=target.read_bytes()
                 _,_,keymint_providers=build_keymint(rc.read_bytes(),binary.read_bytes(),manifests)
                 providers.update(keymint_providers)
+            if GATEKEEPER in providers_to_add:
+                vendor=Ext4(temporary/"vendor.ext4");system_image=Ext4(temporary/"system.ext4")
+                daemon_rc=temporary/"gatekeeper-daemon.rc";daemon=temporary/"gatekeeper-daemon.bin"
+                hal_rc=temporary/"gatekeeper-hal.rc";hal=temporary/"gatekeeper-hal.bin"
+                manifest=temporary/"gatekeeper-manifest.xml"
+                system_image.dump("/"+GATEKEEPER_STOCK_RC,daemon_rc)
+                system_image.dump("/"+GATEKEEPER_BINARY,daemon)
+                vendor.dump("/"+GATEKEEPER_HAL_STOCK_RC.removeprefix("vendor/"),hal_rc)
+                vendor.dump("/"+GATEKEEPER_HAL_BINARY.removeprefix("vendor/"),hal)
+                vendor.dump("/"+GATEKEEPER_MANIFEST.removeprefix("vendor/"),manifest)
+                _,_,gatekeeper_providers=build_gatekeeper(daemon_rc.read_bytes(),daemon.read_bytes(),
+                                                          hal_rc.read_bytes(),hal.read_bytes(),manifest.read_bytes())
+                providers.update(gatekeeper_providers)
             if AUDIO_HAL in providers_to_add:
                 vendor=Ext4(temporary/"vendor.ext4");binary=temporary/AUDIO_HAL_BINARY
                 vendor.dump("/"+AUDIO_HAL_BINARY.removeprefix("vendor/"),binary)
@@ -393,8 +410,13 @@ def add_stock_provider(output, metadata, archive, name, firewall_compat=None, au
                                AUDIOSERVER,AUDIOSERVER_BINARY,AUDIOSERVER_STOCK_RC,AUDIOSERVER_MANAGED_RC,build_audioserver,
                                AUDIO_HAL,AUDIO_HAL_BINARY,AUDIO_HAL_STOCK_RC,AUDIO_HAL_MANAGED_RC,AUDIO_CONFIG_FILES,
                                AUDIO_HAL_MODULES,AUDIO_START_BINARY,AUDIO_BINDER_COMPAT,primary_audio_policy,build_audio_hal)
+    from host_services import (GATEKEEPER,GATEKEEPER_BINARY,GATEKEEPER_STOCK_RC,GATEKEEPER_MANAGED_RC,
+                               GATEKEEPER_HAL_BINARY,GATEKEEPER_HAL_STOCK_RC,GATEKEEPER_MANIFEST,build_gatekeeper)
+    from host_services import (STORAGED_BINARY,STORAGED_STOCK_RC,STORAGED_MANAGED_RC,build_storaged)
     binary_path,stock_rc,managed_rc,builder={
         "keymint":(KEYMINT_BINARY,KEYMINT_STOCK_RC,KEYMINT_MANAGED_RC,build_keymint),
+        "gatekeeper":(GATEKEEPER_BINARY,GATEKEEPER_STOCK_RC,GATEKEEPER_MANAGED_RC,build_gatekeeper),
+        "storaged":(STORAGED_BINARY,STORAGED_STOCK_RC,STORAGED_MANAGED_RC,build_storaged),
         "keystore2":(KEYSTORE_BINARY,KEYSTORE_STOCK_RC,KEYSTORE_MANAGED_RC,build_keystore),
         "vold":(VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold),
         "lmkd":(LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd),
@@ -412,9 +434,17 @@ def add_stock_provider(output, metadata, archive, name, firewall_compat=None, au
         def image_source(path):
             return "/"+path.removeprefix("vendor/") if path.startswith("vendor/") else "/"+path
         image(stock_rc).dump(image_source(stock_rc),rc);image(binary_path).dump(image_source(binary_path),binary)
-        managed,proof=(None,None) if service_name=="keymint" else builder(rc.read_bytes(),binary.read_bytes())
+        managed,proof=(None,None) if service_name in ("keymint","gatekeeper") else builder(rc.read_bytes(),binary.read_bytes())
         available={Path(name).name for name in metadata["files"]}
         queue=[binary_path]+(AUDIO_HAL_MODULES if service_name=="audio_hal" else []);needed={};digests={}
+        if service_name=="gatekeeper":
+            hal_rc=temporary/"gatekeeper-hal.rc";hal=temporary/"gatekeeper-hal.bin"
+            manifest=temporary/"gatekeeper-manifest.xml"
+            vendor.dump("/"+GATEKEEPER_HAL_STOCK_RC.removeprefix("vendor/"),hal_rc)
+            vendor.dump("/"+GATEKEEPER_HAL_BINARY.removeprefix("vendor/"),hal)
+            vendor.dump("/"+GATEKEEPER_MANIFEST.removeprefix("vendor/"),manifest)
+            managed,proof,_=builder(rc.read_bytes(),binary.read_bytes(),hal_rc.read_bytes(),hal.read_bytes(),manifest.read_bytes())
+            queue.append(GATEKEEPER_HAL_BINARY)
         while queue:
             name=queue.pop()
             if name in needed:continue
@@ -621,19 +651,41 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
             destination.parent.mkdir(parents=True,exist_ok=True);destination.write_bytes(managed)
             metadata.setdefault("host_service_inputs",{})["keymint"]=proof
             device_providers.update(providers);service_roots.append(KEYMINT_BINARY)
+        if "gatekeeper" in metadata["profile"].get("host_services",[]):
+            from host_services import (GATEKEEPER_BINARY,GATEKEEPER_STOCK_RC,GATEKEEPER_MANAGED_RC,
+                                       GATEKEEPER_HAL_BINARY,GATEKEEPER_HAL_STOCK_RC,GATEKEEPER_MANIFEST,
+                                       build_gatekeeper)
+            daemon_rc=temporary/"gatekeeper-daemon.rc";daemon=temporary/"gatekeeper-daemon.bin"
+            hal_rc=temporary/"gatekeeper-hal.rc";hal=temporary/"gatekeeper-hal.bin"
+            manifest=temporary/"gatekeeper-manifest.xml"
+            system.dump("/"+GATEKEEPER_STOCK_RC,daemon_rc);system.dump("/"+GATEKEEPER_BINARY,daemon)
+            vendor.dump("/"+GATEKEEPER_HAL_STOCK_RC.removeprefix("vendor/"),hal_rc)
+            vendor.dump("/"+GATEKEEPER_HAL_BINARY.removeprefix("vendor/"),hal)
+            vendor.dump("/"+GATEKEEPER_MANIFEST.removeprefix("vendor/"),manifest)
+            managed,proof,providers=build_gatekeeper(daemon_rc.read_bytes(),daemon.read_bytes(),
+                                                     hal_rc.read_bytes(),hal.read_bytes(),manifest.read_bytes())
+            destination=inputs/GATEKEEPER_MANAGED_RC
+            previous=metadata.get("host_service_inputs",{}).get("gatekeeper",{}).get("managed_rc_sha256")
+            if GATEKEEPER_MANAGED_RC in metadata["symlinks"] or destination.exists() and sha256(destination)!=previous:
+                raise ValueError("conflicting GateKeeper service manager output")
+            destination.parent.mkdir(parents=True,exist_ok=True);destination.write_bytes(managed)
+            metadata.setdefault("host_service_inputs",{})["gatekeeper"]=proof
+            device_providers.update(providers);service_roots.extend([GATEKEEPER_BINARY,GATEKEEPER_HAL_BINARY])
         from host_services import (KEYSTORE_BINARY,KEYSTORE_STOCK_RC,KEYSTORE_MANAGED_RC,build_keystore,
                                    INSTALLER_BINARY,INSTALLER_STOCK_RC,INSTALLER_MANAGED_RC,build_installer,
                                    ODSIGN_BINARY,ODSIGN_STOCK_RC,ODSIGN_MANAGED_RC,build_odsign,
                                    VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold,
                                    LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd,
                                    NETD_BINARY,NETD_STOCK_RC,NETD_MANAGED_RC,build_netd)
+        from host_services import STORAGED_BINARY,STORAGED_STOCK_RC,STORAGED_MANAGED_RC,build_storaged
         for name,program,stock_rc,managed_rc,builder in [
             ("keystore2",KEYSTORE_BINARY,KEYSTORE_STOCK_RC,KEYSTORE_MANAGED_RC,build_keystore),
             ("installd",INSTALLER_BINARY,INSTALLER_STOCK_RC,INSTALLER_MANAGED_RC,build_installer),
             ("odsign",ODSIGN_BINARY,ODSIGN_STOCK_RC,ODSIGN_MANAGED_RC,build_odsign),
             ("vold",VOLD_BINARY,VOLD_STOCK_RC,VOLD_MANAGED_RC,build_vold),
             ("lmkd",LMKD_BINARY,LMKD_STOCK_RC,LMKD_MANAGED_RC,build_lmkd),
-            ("netd",NETD_BINARY,NETD_STOCK_RC,NETD_MANAGED_RC,build_netd)]:
+            ("netd",NETD_BINARY,NETD_STOCK_RC,NETD_MANAGED_RC,build_netd),
+            ("storaged",STORAGED_BINARY,STORAGED_STOCK_RC,STORAGED_MANAGED_RC,build_storaged)]:
             if name not in metadata["profile"].get("host_services",[]):continue
             rc=temporary/(name+"-stock.rc");binary=temporary/(name+"-stock.bin")
             system.dump("/"+stock_rc,rc);system.dump("/"+program,binary)

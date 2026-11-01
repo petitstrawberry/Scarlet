@@ -26,8 +26,10 @@ HEALTH_CONTRACT = "android.hardware.health@2.1::IHealth/default"
 AUDIO_CONTRACT = "android.hardware.audio@7.1::IDevicesFactory/default"
 AUDIO_EFFECT_CONTRACT = "android.hardware.audio.effect@7.0::IEffectsFactory/default"
 AUDIO_EFFECT_LEGACY_CONTRACT = "android.hardware.audio.effect@7.1::IEffectsFactory/default"
+GATEKEEPER_CONTRACT = "android.hardware.gatekeeper@1.0::IGatekeeper/default"
 DEVICE_PROVIDERS = {**GRAPHICS_DEVICE, HEALTH_CONTRACT: "hwbinder", AUDIO_CONTRACT: "hwbinder",
                     AUDIO_EFFECT_CONTRACT: "hwbinder", AUDIO_EFFECT_LEGACY_CONTRACT: "hwbinder",
+                    GATEKEEPER_CONTRACT: "hwbinder",
                     **{contract: "aidl" for contract in KEYMINT_DEVICE}}
 FRAMEWORK_HIDL = {
     "android.hidl.manager@1.2::IServiceManager/default",
