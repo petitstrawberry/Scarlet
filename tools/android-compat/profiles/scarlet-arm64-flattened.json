@@ -476,7 +476,8 @@
           "u:object_r:system_data_root_file:s0",
           "u:object_r:system_data_file:s0",
           "u:object_r:keystore_data_file:s0",
-          "u:object_r:tmpfs:s0"
+          "u:object_r:tmpfs:s0",
+          "u:object_r:wallpaper_file:s0"
         ],
         "targets": [
           "u:object_r:device:s0",
@@ -499,7 +500,8 @@
           "u:object_r:socket_device:s0",
           "u:object_r:system_data_root_file:s0",
           "u:object_r:keystore_data_file:s0",
-          "u:object_r:tmpfs:s0"
+          "u:object_r:tmpfs:s0",
+          "u:object_r:wallpaper_file:s0"
         ],
         "kinds": [
           1,
@@ -559,14 +561,16 @@
           "u:object_r:app_data_file:s0:c512,c768",
           "u:object_r:system_app_data_file:s0",
           "u:object_r:shell_data_file:s0",
-          "u:object_r:profiles_data_file:s0"
+          "u:object_r:profiles_data_file:s0",
+          "u:object_r:wallpaper_file:s0"
         ],
         "targets": [
           "u:object_r:privapp_data_file:s0:c512,c768",
           "u:object_r:app_data_file:s0:c512,c768",
           "u:object_r:system_app_data_file:s0",
           "u:object_r:shell_data_file:s0",
-          "u:object_r:profiles_data_file:s0"
+          "u:object_r:profiles_data_file:s0",
+          "u:object_r:wallpaper_file:s0"
         ],
         "kinds": [
           1,
