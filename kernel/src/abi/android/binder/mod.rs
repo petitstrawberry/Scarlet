@@ -61,6 +61,7 @@ const BR_TRANSACTION_SEC_CTX: u32 = 0x80487202;
 const BR_REPLY: u32 = 0x80407203;
 const BR_DEAD_REPLY: u32 = 0x7205;
 const BR_COMPLETE: u32 = 0x7206;
+const BR_FAILED_REPLY: u32 = 0x7209;
 const BR_NOOP: u32 = 0x720c;
 // Framework BinderProxy uses this userspace flag to request AppOps collection.
 // Transport it unchanged; collection itself belongs to the Java recipient.
@@ -440,6 +441,13 @@ impl BinderFile {
                                     acquisitions: Vec::new(),
                                 })
                             }
+                            // Binder one-way calls have no reply consumer to
+                            // observe transport backpressure. Complete the
+                            // command instead of aborting the stock looper;
+                            // the application-facing notification is dropped.
+                            Err(crate::ipc::rpc::RpcError::Busy) => thread
+                                .completed
+                                .push_back(Completed { command: BR_COMPLETE, acquisitions: Vec::new() }),
                             Err(_) => return Err(errno::EAGAIN),
                         }
                         return Ok(());
@@ -469,6 +477,9 @@ impl BinderFile {
                         }
                         Err(crate::ipc::rpc::RpcError::TooLarge) => return Err(errno::E2BIG),
                         Err(crate::ipc::rpc::RpcError::Cancelled) => return Err(errno::ECANCELED),
+                        Err(crate::ipc::rpc::RpcError::Busy) => thread
+                            .completed
+                            .push_back(Completed { command: BR_FAILED_REPLY, acquisitions: Vec::new() }),
                         Err(_) => return Err(errno::EAGAIN),
                     }
                 } else {
