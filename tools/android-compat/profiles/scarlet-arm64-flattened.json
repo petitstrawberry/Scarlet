@@ -35,6 +35,7 @@
     "ro.crypto.state": "unencrypted",
     "ro.zygote": "zygote64",
     "ro.hardware": "scarlet",
+    "dalvik.vm.dex2oat64.enabled": "true",
     "dalvik.vm.usejit": "false",
     "sys.use_memfd": "true",
     "ro.hardware.egl": "angle",
@@ -1180,6 +1181,11 @@
       "u:r:surfaceflinger:s0",
       "u:object_r:surfaceflinger_service:s0",
       3
+    ],
+    [
+      "u:r:surfaceflinger:s0",
+      "u:object_r:hal_graphics_allocator_service:s0",
+      2
     ],
     [
       "u:r:surfaceflinger:s0",
