@@ -2,7 +2,7 @@
 
 use super::{
     environment::Environment,
-    executor::{ExecutorError, HandleMapping, TransparentExecutor},
+    executor::{ExecutorError, HandleMapping, TransparentExecutor, stable_execution_path},
 };
 use crate::{
     abi::{AbiModule, AbiRegistry},
@@ -134,6 +134,37 @@ fn environment_seal_freezes_slots_not_file_data() {
             .is_err()
     );
     assert!(Environment::new().seal().is_err());
+}
+
+#[test_case]
+fn bind_mounted_execution_keeps_the_namespace_visible_path() {
+    let (_, fs, _, _) = fixture();
+    for path in [
+        "/system",
+        "/system/apex",
+        "/system/apex/com.android.art",
+        "/system/apex/com.android.art/bin",
+    ] {
+        fs.create_dir(path).unwrap();
+    }
+    fs.create_file(
+        "/system/apex/com.android.art/bin/dex2oat64",
+        FileType::RegularFile,
+    )
+    .unwrap();
+    fs.create_dir("/apex").unwrap();
+    fs.bind_mount("/system/apex", "/apex").unwrap();
+    let file = fs.open("/apex/com.android.art/bin/dex2oat64", 0).unwrap();
+    let view = fs.view();
+    assert_eq!(
+        stable_execution_path(
+            "/apex/com.android.art/bin/dex2oat64",
+            &view,
+            &file,
+        )
+        .as_deref(),
+        Some("/apex/com.android.art/bin/dex2oat64")
+    );
 }
 
 #[test_case]

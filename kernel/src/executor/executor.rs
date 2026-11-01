@@ -113,6 +113,29 @@ fn path_in_environment_view(
     best.map(|(_, abi, view, relative)| (abi, view, relative))
 }
 
+/// Keep the pathname used for this exec when the target Environment exposes
+/// the same node at that pathname. Bind mounts can have an underlying source
+/// path that differs from the namespace-visible path; using the source path
+/// breaks Bionic's linker namespace selection and `/proc/self/exe` identity.
+pub(super) fn stable_execution_path(
+    path: &str,
+    view: &Arc<crate::fs::vfs_v2::manager::VfsView>,
+    file: &KernelObject,
+) -> Option<String> {
+    let resolved = VfsManager::from_view(view.clone()).resolve_path(path).ok()?;
+    let expected = file
+        .as_file()?
+        .as_any()
+        .downcast_ref::<crate::fs::vfs_v2::core::VfsFileObject>()?
+        .get_vfs_entry()
+        .node();
+    let actual = resolved.0.node();
+    let expected_fs = expected.filesystem()?;
+    let actual_fs = actual.filesystem()?;
+    (expected.id() == actual.id() && alloc::sync::Weak::ptr_eq(&expected_fs, &actual_fs))
+        .then(|| path.to_string())
+}
+
 /// Explicit Environment transitions inherit only these source → target handles.
 pub struct HandleMapping {
     pub source: u32,
@@ -265,7 +288,9 @@ impl TransparentExecutor {
         let view_identity = view_path
             .as_ref()
             .filter(|(view_name, _, _)| *view_name == name)
-            .map(|(_, _, relative)| relative.clone());
+            .map(|(_, view, relative)| {
+                stable_execution_path(path, view, &file).unwrap_or_else(|| relative.clone())
+            });
         let identity = view_identity.as_deref().unwrap_or(path);
         let mut view_argv = argv.to_vec();
         if let Some(first) = view_argv.first_mut()
