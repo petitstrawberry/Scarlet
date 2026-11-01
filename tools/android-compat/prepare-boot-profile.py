@@ -275,6 +275,27 @@ def select_memfd_in_init(text):
     return text.replace(command, "    setprop sys.use_memfd true\n")
 
 
+def install_incident_libraries(output, profile, archive):
+    """Restore the incident client libraries statsd loads from the system partition."""
+    if "com.android.os.statsd" not in profile["apex_modules"]:
+        return
+    with tempfile.TemporaryDirectory(prefix="scarlet-incident-") as directory:
+        temporary = Path(directory)
+        extract_partitions(archive, temporary)
+        system = Ext4(temporary / "system.ext4")
+        for name in ("libincident.so", "libincidentpriv.so"):
+            relative = "system/lib64/" + name
+            source = temporary / "files" / name
+            system.dump("/" + relative, source)
+            destination = output / relative
+            if destination.exists():
+                if sha256(destination) != sha256(source):
+                    raise ValueError("conflicting incident client library: " + name)
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+
+
 def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, service_image=None, firewall_compat=None, audio_start=None, audio_binder_compat=None):
     metadata = verify_boot_inputs(inputs, runtime, stock)
     profile = validate_profile(json.loads(profile_file.read_text()))
@@ -383,6 +404,8 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
     shutil.copytree(inputs, output)
     metadata.update(profile=profile, profile_source_sha256=sha256(profile_file), reused_payload_manifest_sha256=original_manifest)
     configure(output,stock,profile,metadata["property_context_files"],metadata)
+    if service_image:
+        install_incident_libraries(output, profile, service_image)
     for provider in sorted(providers_to_add):
         add_stock_provider(output,metadata,service_image,provider,firewall_compat,audio_start,audio_binder_compat)
     if refreshed_vintf:
