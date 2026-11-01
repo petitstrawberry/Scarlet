@@ -224,6 +224,7 @@ typedef struct Framebuffer {
 static int framebuffer_post(framebuffer_device_t *device,buffer_handle_t handle) {
     Framebuffer *fb=(Framebuffer *)device;
     pthread_mutex_lock(&fb->lock); int result=-ENODEV;
+    static unsigned diagnostic_frames;
     SwsEvent event;
     for (int i=0;i<64 && fb->poll(&event)>0;i++)
         if (event.window_id==fb->window && event.kind==SWS_EVENT_DESTROYED) fb->closed=1;
@@ -260,6 +261,13 @@ static int framebuffer_post(framebuffer_device_t *device,buffer_handle_t handle)
     } else if (m && (m->readers || m->writer)) result=-EBUSY;
     pthread_mutex_unlock(&mappings_lock);
     if (!result && fb->present(fb->window,fb->pixels,bytes,width,height,(size_t)width*4)<0) result=-EIO;
+    if (!result && __atomic_fetch_add(&diagnostic_frames,1,__ATOMIC_RELAXED)<4) {
+        size_t nonzero=0;
+        for (size_t offset=0;offset<bytes;offset+=256)
+            nonzero+=(fb->pixels[offset]|fb->pixels[offset+1]|fb->pixels[offset+2])!=0;
+        fprintf(stderr,"SCARLET_ANDROID_FB_POST width=%u height=%u sampled_nonzero=%zu\n",
+                width,height,nonzero);
+    }
 done:
     pthread_mutex_unlock(&fb->lock);return result;
 }

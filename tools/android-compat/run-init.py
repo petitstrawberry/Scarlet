@@ -189,6 +189,7 @@ def main():
     if start_zygote:arguments.extend(["--program-argument","start-zygote"])
     arguments.extend(["--program-env",f"SCARLET_INIT_OBSERVE_SECONDS={observation}"])
     arguments.extend(["--program-env",f"ANDROID_LOG_TAGS={'*:v' if verbose_logs else '*:e'}"])
+    arguments.extend(["--program-env",f"SCARLET_ANDROID_LOG_MIN_PRIORITY={'0' if verbose_logs else '4'}"])
     if not verbose_logs:
         arguments.extend(["--program-env","SCARLET_INIT_QUIET=1"])
     if launch_sample:
