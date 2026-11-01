@@ -219,6 +219,7 @@ typedef struct Framebuffer {
     int32_t (*destroy)(uint32_t);
     int32_t (*poll)(SwsEvent *);
     int32_t (*action)(uint32_t,uint32_t);
+    int32_t (*fullscreen)(uint32_t,uint32_t);
 } Framebuffer;
 static int framebuffer_post(framebuffer_device_t *device,buffer_handle_t handle) {
     Framebuffer *fb=(Framebuffer *)device;
@@ -290,9 +291,16 @@ static int open_framebuffer(const hw_module_t *module,hw_device_t **device) {
     fb->size=dlsym(fb->client,"sws_window_size");fb->present=dlsym(fb->client,"sws_window_present");
     fb->destroy=dlsym(fb->client,"sws_window_destroy");fb->poll=dlsym(fb->client,"sws_poll_event");
     fb->action=dlsym(fb->client,"sws_window_action");
+    fb->fullscreen=dlsym(fb->client,"sws_window_fullscreen");
     uint32_t width=640,height=480;
     if (!create || !fb->size || !fb->present || !fb->destroy || !fb->poll || !fb->action ||
         create("dev.scarlet.android","Android",width,height,0,&fb->window)<0) { dlclose(fb->client);free(fb);return -ENODEV; }
+    /* The Android framebuffer is the foreground device surface. Ask SWS to
+     * use the complete primary output instead of presenting a fixed-size
+     * desktop window. The configure event is consumed by the fullscreen call,
+     * so query the resulting extent before publishing the HAL framebuffer. */
+    if (fb->fullscreen && fb->fullscreen(fb->window,1)<0)
+        fprintf(stderr,"SWS framebuffer fullscreen request failed\n");
     if (fb->size(fb->window,&width,&height)<0 || !width || !height || width>MAX_DIMENSION || height>MAX_DIMENSION) {
         fb->destroy(fb->window);dlclose(fb->client);free(fb);return -ENODEV;
     }
