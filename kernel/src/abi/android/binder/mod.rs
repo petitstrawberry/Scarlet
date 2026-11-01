@@ -82,6 +82,18 @@ fn read<const N: usize>(task: &Task, ptr: usize) -> Result<[u8; N], usize> {
     copy_from_user(task, ptr, &mut b).map_err(|_| errno::EFAULT)?;
     Ok(b)
 }
+
+fn enter_request_priority(request: &RpcRequest, task: &Task) -> Result<(), usize> {
+    // Framework Binder clients publish a scheduling priority for many ordinary
+    // calls. A fair-scheduled receiver has no fixed priority to raise, so
+    // applying that request as a hard error makes stock Binder loops exit on
+    // EAGAIN. Keep the donation contract for fixed-priority receivers.
+    if task.fixed_priority.base() != 0 {
+        request.enter_priority(task).map_err(|_| errno::EAGAIN)?;
+    }
+    Ok(())
+}
+
 fn write(task: &Task, ptr: usize, b: &[u8]) -> Result<(), usize> {
     copy_to_user(task, ptr, b).map_err(|_| errno::EFAULT)
 }
@@ -730,7 +742,7 @@ impl BinderFile {
                 Some(subject.name())
             } else {None};
             if let Some(request)=incoming.as_ref() {
-                request.enter_priority(task).map_err(|_|errno::EAGAIN)?;
+                enter_request_priority(request,task)?;
             }
             let mut installed=abi.map(|abi|buffers::Installed::new(task,abi));
             let (length, offsets_length, context_address) = self.decode_received_context(&message, address, &arena,installed.as_mut(),context)?;
@@ -992,6 +1004,37 @@ mod tests {
                 node_flags: 0,
             }),
         }
+    }
+    #[test_case]
+    fn binder_priority_donation_only_applies_to_fixed_priority_receivers() {
+        let endpoint = RpcEndpoint::new();
+        let caller = RpcEndpoint::new();
+        let object = endpoint.create_object_with_scheduling(0, true).unwrap();
+        let call = object
+            .send_scoped_with_priority(
+                RpcMessage {
+                    opcode: 1,
+                    bytes: Vec::new(),
+                    objects: Vec::new(),
+                    capabilities: Vec::new(),
+                    retained: None,
+                },
+                &caller,
+                None,
+                8,
+            )
+            .unwrap();
+        let request = endpoint.receive().unwrap().unwrap();
+        let receiver = Task::new("binder-priority".into(), 0, TaskType::User);
+
+        assert_eq!(enter_request_priority(&request, &receiver), Ok(()));
+        assert_eq!(receiver.fixed_priority.effective(), 0);
+
+        receiver.fixed_priority.configure(3);
+        assert_eq!(enter_request_priority(&request, &receiver), Ok(()));
+        assert_eq!(receiver.fixed_priority.effective(), 8);
+        drop(call);
+        assert_eq!(receiver.fixed_priority.effective(), 3);
     }
     fn context_fixture() -> (Task,Task,BinderFile,Arc<crate::shield::Policy>,usize) {
         let env=Environment::new();let server=task(&env,301);let client=task(&env,302);
