@@ -194,7 +194,7 @@ public final class ScarletUserUnlock {
                     IBinder search = (IBinder) checkService.invoke(null, "search");
                     boolean launchServicesReady = search != null && search.pingBinder();
                     for (String name : new String[]{"appwidget", "device_policy", "audio",
-                            "window", "display", "statusbar", "wallpaper"}) {
+                            "window", "display"}) {
                         IBinder service = (IBinder) checkService.invoke(null, name);
                         launchServicesReady &= service != null && service.pingBinder();
                     }
