@@ -6,7 +6,9 @@ import android.content.Intent;
 import android.content.ComponentName;
 import android.app.ActivityManager.RunningAppProcessInfo;
 
+import java.io.File;
 import java.io.FileDescriptor;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.PrintStream;
 import java.lang.reflect.Method;
@@ -62,24 +64,19 @@ public final class ScarletUserUnlock {
         boolean sampleLaunchRequested = false;
         String sampleComponent = System.getenv("SCARLET_LAUNCH_APP");
         boolean requestedUserStart = false;
-        boolean activityReady = false;
         for (int attempt = 0; attempt < 1080; ++attempt) {
-            IBinder binder = (IBinder) getService.invoke(null, "activity");
+            // Do not synchronously enter ActivityManagerService while its main
+            // thread is still bringing up SystemUI. The native proc scan gives a
+            // boot-progress signal without taking a binder lock in system_server.
+            boolean systemUiPresent = hasProcess("com.android.systemui");
+            IBinder binder = systemUiPresent ?
+                    (IBinder) getService.invoke(null, "activity") : null;
             Object manager = null;
             if (binder != null) {
                 manager = asInterface.invoke(null, binder);
-                // The activity service is published before ActivityManagerService
-                // can safely enumerate processes. Defer that query until the
-                // manager is ready; user unlock below must still run during boot.
-                try {
-                    Method isReady = manager.getClass().getMethod("isSystemReady");
-                    activityReady = Boolean.TRUE.equals(isReady.invoke(manager));
-                } catch (Exception ignored) {
-                    activityReady = false;
-                }
                 // SystemUI is launched after AMS has initialized its system-service
                 // dependencies. A fixed delay can race that initialization.
-                if (activityReady && !requestedUserStart && attempt % 4 == 0) {
+                if (!requestedUserStart && attempt % 4 == 0) {
                     try {
                         Method running = manager.getClass().getMethod("getRunningAppProcesses");
                         java.util.List<?> processes = (java.util.List<?>) running.invoke(manager);
@@ -286,6 +283,29 @@ public final class ScarletUserUnlock {
             return;
         }
         throw new NoSuchMethodException("ServiceManager.addService");
+    }
+
+    private static boolean hasProcess(String packageName) {
+        File[] entries = new File("/proc").listFiles();
+        if (entries == null) return false;
+        byte[] command = new byte[256];
+        for (File entry : entries) {
+            String name = entry.getName();
+            if (name.isEmpty() || !Character.isDigit(name.charAt(0))) continue;
+            try (FileInputStream input = new FileInputStream(
+                    new File(entry, "cmdline"))) {
+                int length = input.read(command);
+                int end = 0;
+                while (end < length && command[end] != 0) ++end;
+                if (end == packageName.length() &&
+                        new String(command, 0, end, "US-ASCII").equals(packageName)) {
+                    return true;
+                }
+            } catch (Exception ignored) {
+                // Processes can exit while /proc is being scanned.
+            }
+        }
+        return false;
     }
 
     private static final class GateKeeper extends Binder {
