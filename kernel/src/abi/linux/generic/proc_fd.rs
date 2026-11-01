@@ -1,6 +1,6 @@
 //! Linux proc directories backed by the calling process's descriptors and threads.
 
-use alloc::{format, string::String, vec::Vec};
+use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::{any::Any, mem::size_of};
 
 use crate::{
@@ -38,36 +38,122 @@ fn live_threads(task: &Task) -> Vec<usize> {
         .collect()
 }
 
+fn task_path_target(task: &Task, path: &str) -> Option<(Arc<Task>, Option<usize>)> {
+    let path = path.trim_end_matches('/');
+    let namespace = task.get_namespace();
+    let self_suffix = path
+        .strip_prefix("/proc/self/task")
+        .or_else(|| path.strip_prefix("/proc/thread-self/task"));
+    let (group_id, thread_id) = if let Some(suffix) = self_suffix {
+        if !suffix.is_empty() && !suffix.starts_with('/') {
+            return None;
+        }
+        let thread_id = if suffix.is_empty() {
+            None
+        } else {
+            let name = suffix.strip_prefix('/')?;
+            if name.is_empty() || name.contains('/') {
+                return None;
+            }
+            Some(namespace.resolve_global_id(name.parse().ok()?)?)
+        };
+        (task.get_thread_group_id(), thread_id)
+    } else {
+        let (pid, suffix) = path.strip_prefix("/proc/")?.split_once("/task")?;
+        if pid.contains('/') || (!suffix.is_empty() && !suffix.starts_with('/')) {
+            return None;
+        }
+        let group_id = namespace.resolve_global_id(pid.parse().ok()?)?;
+        let thread_id = if suffix.is_empty() {
+            None
+        } else {
+            let name = suffix.strip_prefix('/')?;
+            if name.is_empty() || name.contains('/') {
+                return None;
+            }
+            Some(namespace.resolve_global_id(name.parse().ok()?)?)
+        };
+        (group_id, thread_id)
+    };
+    let leader = crate::sched::scheduler::get_task_by_id(group_id)?;
+    if leader.get_thread_group_id() != group_id {
+        return None;
+    }
+    if thread_id.is_some_and(|id| !live_threads(&leader).contains(&id)) {
+        return None;
+    }
+    Some((leader, thread_id))
+}
+
+fn is_task_path(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    if let Some(suffix) = path
+        .strip_prefix("/proc/self/task")
+        .or_else(|| path.strip_prefix("/proc/thread-self/task"))
+    {
+        return suffix.is_empty()
+            || suffix
+                .strip_prefix('/')
+                .is_some_and(|name| !name.is_empty() && !name.contains('/'));
+    }
+    let Some((pid, suffix)) = path
+        .strip_prefix("/proc/")
+        .and_then(|path| path.split_once("/task"))
+    else {
+        return false;
+    };
+    !pid.is_empty()
+        && !pid.contains('/')
+        && (suffix.is_empty()
+            || suffix
+                .strip_prefix('/')
+                .is_some_and(|name| !name.is_empty() && !name.contains('/')))
+}
+
 pub(super) fn open_self_task_directory(abi: &mut LinuxAbi, task: &Task, flags: i32) -> usize {
-    let ids = live_threads(task)
+    open_task_directory(abi, task, "/proc/self/task", flags)
+        .unwrap_or_else(|| errno::to_result(errno::ENOENT))
+}
+
+/// Open a synthetic task directory reached through either self or an explicit
+/// process ID. Android uses `/proc/<pid>/task/<tid>` to validate render-thread
+/// ownership from another process, so those names must resolve in the same
+/// procfs view as `/proc/<pid>/status`.
+pub(super) fn open_task_directory(
+    abi: &mut LinuxAbi,
+    caller: &Task,
+    path: &str,
+    flags: i32,
+) -> Option<usize> {
+    let (target, thread_id) = task_path_target(caller, path)?;
+    if thread_id.is_some() {
+        return Some(errno::to_result(errno::ENOTDIR));
+    }
+    let namespace = caller.get_namespace();
+    let ids = live_threads(&target)
         .into_iter()
-        .filter_map(|id| task.get_namespace().resolve_local_id(id))
+        .filter_map(|id| namespace.resolve_local_id(id))
         .collect();
-    open_directory(abi, task, flags, Some(ids))
+    Some(open_directory(abi, caller, flags, Some(ids)))
 }
 
 /// Metadata for the proc task directory used by Chromium's thread checks.
 /// It is visible only through Linux ABI stat calls, never mounted in VFS.
 pub(super) fn self_task_metadata(task: &Task, path: &str) -> Option<Option<FileMetadata>> {
-    let path = path.trim_end_matches('/');
-    let suffix = path.strip_prefix("/proc/self/task")?;
-    let threads = live_threads(task);
-    let link_count = if suffix.is_empty() {
-        2 + threads.len()
-    } else {
-        let Some(name) = suffix.strip_prefix('/') else {
-            return None;
-        };
-        let Some(local_id) = name.parse::<usize>().ok() else {
-            return Some(None);
-        };
-        if !threads
-            .iter()
-            .any(|id| task.get_namespace().resolve_local_id(*id) == Some(local_id))
-        {
-            return Some(None);
-        }
+    task_path_metadata(task, path)
+}
+
+pub(super) fn task_path_metadata(
+    caller: &Task,
+    path: &str,
+) -> Option<Option<FileMetadata>> {
+    let Some((target, thread_id)) = task_path_target(caller, path) else {
+        return is_task_path(path).then_some(None);
+    };
+    let link_count = if thread_id.is_some() {
         2
+    } else {
+        2 + live_threads(&target).len()
     };
     Some(Some(FileMetadata {
         file_type: FileType::Directory,
@@ -80,7 +166,7 @@ pub(super) fn self_task_metadata(task: &Task, path: &str) -> Option<Option<FileM
         created_time: 0,
         modified_time: 0,
         accessed_time: 0,
-        file_id: task.get_thread_group_id() as u64,
+        file_id: thread_id.unwrap_or_else(|| target.get_thread_group_id()) as u64,
         link_count: link_count.min(u32::MAX as usize) as u32,
     }))
 }
@@ -344,6 +430,47 @@ mod tests {
         );
         let blocked_path = format!("/proc/self/task/{}", members[0].get_namespace_id());
         assert!(self_task_metadata(&leader, &blocked_path).unwrap().is_some());
+        let process_path = format!("/proc/{}/task", leader.get_namespace_id());
+        assert_eq!(
+            task_path_metadata(&leader, &process_path)
+                .unwrap()
+                .unwrap()
+                .link_count,
+            4
+        );
+        let process_fd = open_task_directory(&mut abi, &leader, &process_path, 0).unwrap();
+        let process_object = leader
+            .handle_table
+            .get(abi.get_handle(process_fd).unwrap())
+            .unwrap();
+        let process_directory = process_object
+            .as_file()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ProcIdDirectory>()
+            .unwrap();
+        assert_eq!(process_directory.descriptors.read().len(), 2);
+        let process_thread = format!(
+            "/proc/{}/task/{}",
+            leader.get_namespace_id(),
+            members[0].get_namespace_id()
+        );
+        assert_eq!(
+            task_path_metadata(&leader, &process_thread)
+                .unwrap()
+                .unwrap()
+                .file_id,
+            members[0].get_id() as u64
+        );
+        let unrelated_path = format!(
+            "/proc/{}/task/{}",
+            leader.get_namespace_id(),
+            namespace.resolve_local_id(unrelated_id).unwrap()
+        );
+        assert!(matches!(
+            task_path_metadata(&leader, &unrelated_path),
+            Some(None)
+        ));
         for id in [members[1].get_id(), members[2].get_id(), unrelated_id] {
             let local_id = namespace.resolve_local_id(id).unwrap();
             assert!(

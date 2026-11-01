@@ -1260,8 +1260,8 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         if let Some(fd) = abi.extensions.open(abi, &task, &absolute, flags) {
             return fd;
         }
-        if absolute.trim_end_matches('/') == "/proc/self/task" {
-            return super::proc_fd::open_self_task_directory(abi, &task, flags);
+        if let Some(fd) = super::proc_fd::open_task_directory(abi, &task, &absolute, flags) {
+            return fd;
         }
         if super::proc_fd::is_self_fd_directory(&absolute) {
             return super::proc_fd::open_self_fd_directory(abi, &task, flags);
@@ -2501,7 +2501,7 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return write_linux_stat(&task, stat_ptr, &stat).map(|_| 0).unwrap_or_else(errno::to_result);
     }
     if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs_for_proc, dirfd, &path_str)
-        && let Some(metadata) = super::proc_fd::self_task_metadata(&task, &absolute)
+        && let Some(metadata) = super::proc_fd::task_path_metadata(&task, &absolute)
     {
         let Some(metadata) = metadata else {
             return errno::to_result(errno::ENOENT);
@@ -2682,6 +2682,18 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         let mut statx = unsafe { core::mem::zeroed::<LinuxStatx>() };
         fill_statx_from_stat(&mut statx, &stat, 0, mask);
         return write_linux_statx(&task, statx_ptr, &statx).map(|_| 0).unwrap_or_else(errno::to_result);
+    }
+    if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs, dirfd, &path_str)
+        && let Some(metadata) = super::proc_fd::task_path_metadata(&task, &absolute)
+    {
+        let Some(metadata) = metadata else {
+            return errno::to_result(errno::ENOENT);
+        };
+        let mut statx = unsafe { core::mem::zeroed::<LinuxStatx>() };
+        fill_statx_from_stat(&mut statx, &LinuxStat::from_metadata(&metadata), 0, mask);
+        return write_linux_statx(&task, statx_ptr, &statx)
+            .map(|_| 0)
+            .unwrap_or_else(errno::to_result);
     }
     if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs, dirfd, &path_str)
         && let Some(metadata) = super::proc_text::path_metadata(&absolute)
@@ -4320,6 +4332,17 @@ fn faccessat(abi: &LinuxAbi, trapframe: &mut Trapframe, flags: i32) -> usize {
         Ok(path) => path,
         Err(error) => return errno::to_result(error),
     };
+    if let Some(metadata) = super::proc_fd::task_path_metadata(&task, &path) {
+        if let Err(error) = validate_access_arguments(mode, flags) {
+            return errno::to_result(error);
+        }
+        let Some(metadata) = metadata else {
+            return errno::to_result(errno::ENOENT);
+        };
+        return linux_access_metadata(&metadata, false, mode)
+            .err()
+            .map_or(0, errno::to_result);
+    }
     linux_access_path(&vfs, &path, mode, flags)
         .err()
         .map_or(0, errno::to_result)
