@@ -1,0 +1,36 @@
+{
+  "kind": "scarlet-android-launcher-window-v1",
+  "result": "PASS",
+  "scope": "Stock SDK 33 Launcher3 completed its workspace load and presented the wallpapered home surface through SurfaceFlinger into a decorated Scarlet window.",
+  "artifacts": {
+    "launcher-home.png": "66969798df40b4127ee7db277c629d454f5fd54f2e31018d44845beb421ba1e5"
+  },
+  "frame": {
+    "size": [
+      1280,
+      800
+    ],
+    "window_content": [
+      640,
+      480
+    ],
+    "visible": [
+      "window chrome",
+      "wallpaper",
+      "status bar clock",
+      "search pill",
+      "camera shortcut",
+      "pointer"
+    ]
+  },
+  "markers": {
+    "boot_completed": "sys.boot_completed=1",
+    "launcher_process": "Start proc 421:com.android.launcher3/u0a9",
+    "workspace": "LoaderTask|run: end, 29372 ms"
+  },
+  "limitations": [
+    "This run reused a previously booted data image, so package dexopt costs are excluded.",
+    "The display stays awake because that data image holds stay_on_while_plugged_in=7; the manager-side settings path for this policy is not implemented yet.",
+    "SystemUI initialization is still partial; only the status bar and the launcher surface are verified."
+  ]
+}

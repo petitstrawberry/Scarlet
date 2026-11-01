@@ -246,6 +246,14 @@ def configure(output, stock, profile, contexts, metadata):
     # user-0 data roots that stock vold would otherwise create after key setup.
     for name in ["storage", "apex", "linkerconfig", "data", "data_mirror", "data/user_de/0", "data/user/0", "sys/devices", "sys/class/power_supply", "sys/fs/selinux", "sys/fs/fuse/connections", "system_ext/apex", "product/apex", "vendor/apex"]:
         (output / name).mkdir(parents=True, exist_ok=True)
+    if "health" in profile.get("host_services", []):
+        # The hosted device is mains powered. Publish an AC supply so the
+        # stock health HAL reports a plugged-in device instead of no battery,
+        # which lets the framework apply its stay-awake policy.
+        supply = output / "sys/class/power_supply/AC"
+        supply.mkdir(parents=True, exist_ok=True)
+        (supply / "type").write_text("Mains\n")
+        (supply / "online").write_text("1\n")
     if "lmkd" in profile.get("host_services", []):
         # The pinned lmkd accepts the kernel-lowmemory-killer interface when it
         # cannot observe PSI or vmpressure. Scarlet currently has neither monitor;
