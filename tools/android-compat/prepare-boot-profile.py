@@ -208,6 +208,7 @@ def configure(output, stock, profile, contexts, metadata):
         # system server during first boot.
         manager_init += (
             "\non post-fs-data\n"
+            "    mkdir /data/misc/apexdata 0711 root root\n"
             "    mkdir /data/misc/apexdata/com.android.tethering 0771 root system\n"
             "    mkdir /data/misc/apexdata/com.android.tethering/netstats 0771 root system\n"
         )
