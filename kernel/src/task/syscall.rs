@@ -29,7 +29,7 @@ use crate::sched::scheduler::{
     SchedulerAffinity, SchedulerAttr, SchedulerControlResult, SchedulerPolicy, cleanup_zombie,
     cpu_usage_snapshot, current_task_deadline, current_task_scheduler_attr,
     current_task_scheduler_state, disable_current_task_deadline, enable_current_task_deadline,
-    enqueue_task, get_all_task_ids, get_task_by_id, remove_task_from_queues, schedule,
+    enqueue_task, get_all_task_ids, get_task_by_id, get_task_pool, remove_task_from_queues, schedule,
     set_current_task_scheduler_affinity, set_current_task_scheduler_attr,
     update_current_task_scheduler_fair_fields,
 };
@@ -2050,6 +2050,10 @@ pub fn sys_shutdown(trapframe: &mut Trapframe) -> usize {
     }
 }
 
+fn task_info_ids() -> alloc::vec::Vec<usize> {
+    get_task_pool().task_ids_snapshot()
+}
+
 /// Return the number of tasks currently visible to the caller.
 ///
 /// # Arguments
@@ -2064,7 +2068,7 @@ pub fn sys_get_task_info_count(trapframe: &mut Trapframe) -> usize {
     if task.get_thread_group_id() == 1 {
         crate::emergency_println!("[power-trace] init task-count enter");
     }
-    let count = get_all_task_ids().len();
+    let count = task_info_ids().len();
     #[cfg(feature = "sync-debug")]
     if task.get_thread_group_id() == 1 {
         crate::emergency_println!("[power-trace] init task-count result={}", count);
@@ -2099,7 +2103,10 @@ pub fn sys_get_task_info_list(trapframe: &mut Trapframe) -> usize {
         crate::emergency_println!("[power-trace] init task-list enter");
     }
 
-    let ids = get_all_task_ids();
+    // Scheduler queues omit tasks that are blocked while waiting for a lock,
+    // binder reply, futex or signal. The task-info ABI promises a snapshot of
+    // every active task, so enumerate the task pool rather than run queues.
+    let ids = task_info_ids();
     let count = core::cmp::min(capacity, ids.len());
     let now_ns = crate::time::current_time_ns();
     #[cfg(feature = "sync-debug")]
@@ -2466,7 +2473,24 @@ pub fn sys_get_cpu_debug_info(trapframe: &mut Trapframe) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::process_control_for_signal;
+    use super::{process_control_for_signal, task_info_ids};
+
+    #[test_case]
+    fn task_info_snapshot_keeps_blocked_tasks_outside_run_queues() {
+        use crate::sched::scheduler::{get_task_by_id, register_task, remove_task_from_queues, reset};
+        use crate::task::{BlockedType, Task, TaskState, TaskType};
+        use alloc::string::ToString;
+        use core::sync::atomic::Ordering;
+
+        reset();
+        let id = register_task(Task::new("BlockedTaskInfo".to_string(), 1, TaskType::Kernel));
+        let target = get_task_by_id(id).unwrap();
+        target.state.store(TaskState::Blocked(BlockedType::Interruptible), Ordering::SeqCst);
+        remove_task_from_queues(id);
+        assert!(task_info_ids().contains(&id));
+        drop(target);
+        reset();
+    }
     use crate::ipc::event::ProcessControlType;
 
     #[test_case]
