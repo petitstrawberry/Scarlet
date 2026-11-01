@@ -124,12 +124,17 @@ def main():
                 # are not present in the direct-execution view.
                 destination=root/"system/app"/name/filename
                 product.dump(source,destination)
-        for partition in ["system","vendor"]:
-            destination=root/partition/"lib64/libprobe-init-kmsg.so"
+        # LD_PRELOAD is inherited across exec, but Bionic resolves it again in
+        # the executable's isolated linker namespace. Mirror the diagnostic
+        # libraries into each APEX's own lib directory as well as the system and
+        # vendor namespaces; /system/lib64 is not a search path for APEX hosts.
+        library_directories={root/"system/lib64",root/"vendor/lib64",*root.glob("*/apex/*/lib64")}
+        for library_directory in sorted(library_directories):
+            destination=library_directory/"libprobe-init-kmsg.so"
             destination.parent.mkdir(parents=True,exist_ok=True)
             shutil.copy2(build/"libprobe-init-kmsg.so",destination)
             if sha256(destination)!=record["files"]["libprobe-init-kmsg.so"]:raise ValueError("log probe changed while staging")
-            shim=root/partition/"lib64/libscarlet-android-shim.so"
+            shim=library_directory/"libscarlet-android-shim.so"
             shutil.copy2(build/"libscarlet-android-shim.so",shim)
             if sha256(shim)!=record["files"]["libscarlet-android-shim.so"]:raise ValueError("runtime shim changed while staging")
         helper=root/"system/bin/scarlet-signal-helper"

@@ -239,7 +239,7 @@ def configure(output, stock, profile, contexts, metadata):
     # the per-user mirror bind mounts used for app data.
     # The outer Android manager owns volume policy: it provides the initial
     # user-0 data roots that stock vold would otherwise create after key setup.
-    for name in ["storage", "apex", "linkerconfig", "data", "data_mirror", "data/user_de/0", "data/user/0", "sys/devices", "sys/class/power_supply", "sys/fs/selinux", "system_ext/apex", "product/apex", "vendor/apex"]:
+    for name in ["storage", "apex", "linkerconfig", "data", "data_mirror", "data/user_de/0", "data/user/0", "sys/devices", "sys/class/power_supply", "sys/fs/selinux", "sys/fs/fuse/connections", "system_ext/apex", "product/apex", "vendor/apex"]:
         (output / name).mkdir(parents=True, exist_ok=True)
     if "lmkd" in profile.get("host_services", []):
         # The pinned lmkd accepts the kernel-lowmemory-killer interface when it
@@ -535,9 +535,21 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
         metadata["stock_environment"]={"source_sha256":sha256(stock_environment),"exports":environment_exports}
         if metadata["profile"].get("package_set"):
             from desktop_inputs import prepare as prepare_packages
+            images={"system":system,"vendor":vendor,"system_ext":Ext4(temporary/"system_ext.ext4"),"product":Ext4(temporary/"product.ext4")}
             package_files,proof=prepare_packages(metadata["profile"],
-                {"system":system,"vendor":vendor,"system_ext":Ext4(temporary/"system_ext.ext4"),"product":Ext4(temporary/"product.ext4")},temporary,entries)
+                images,temporary,entries)
             copied.update(package_files);metadata["desktop_inputs"]=proof
+            # Match APKs with the SDK's preinstalled OAT/Vdex artifacts. The
+            # stock first-boot flow otherwise invokes dex2oat synchronously for
+            # every selected app before SystemServer can finish starting.
+            for group in proof["packages"]:
+                partition,directory=group.split(":/",1);image=images[partition]
+                source="/"+directory+"/oat/arm64"
+                if "Type: directory" not in image.command("stat "+quote_debugfs(source)):continue
+                relative=(directory if partition=="system" else partition+"/"+directory)+"/oat/arm64"
+                tree(image,source,relative,temporary/"files",metadata["symlinks"])
+                for target in (temporary/"files"/relative).rglob("*"):
+                    if target.is_file():copied[str(target.relative_to(temporary/"files"))]=target
         def image_path(name):
             return (vendor,"/"+name.removeprefix("vendor/")) if name.startswith("vendor/") else (system,"/"+name)
         from host_services import BINARY, MANAGED_RC, STOCK_RC, build_suspend
@@ -671,6 +683,26 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
         tree(system,"/system/fonts","system/fonts",temporary/"files",font_aliases)
         for target in (temporary/"files/system/fonts").rglob("*"):
             if target.is_file():copied[str(target.relative_to(temporary/"files"))]=target
+        # The SDK image ships first-boot AOT/Vdex products. Preserve them with
+        # their device-encoded APEX names so ART does not recompile the complete
+        # service classpath through installd on every fresh data image.
+        precompiled=[]
+        for directory in ("/system/framework/arm64","/system/framework/oat/arm64"):
+            relative=directory.removeprefix("/")
+            tree(system,directory,relative,temporary/"files",metadata["symlinks"])
+            for target in (temporary/"files"/relative).rglob("*"):
+                if target.is_file():
+                    name=str(target.relative_to(temporary/"files"));copied[name]=target;precompiled.append(name)
+        for name,mode,_ in entries(system,"/system/framework"):
+            if stat.S_ISREG(mode) and name.endswith((".prof",".bprof",".vdex")):
+                relative="system/framework/"+name;target=temporary/"files"/relative
+                system.dump("/"+relative,target);copied[relative]=target;precompiled.append(relative)
+            elif stat.S_ISLNK(mode) and name.endswith(".vdex"):
+                relative="system/framework/"+name
+                info=system.command("stat "+quote_debugfs("/"+relative))
+                match=re.search(r'^Fast link dest: "([^"\n]+)"$',info,re.MULTILINE)
+                if not match:raise ValueError("unsupported framework vdex link: "+relative)
+                metadata["symlinks"][relative]=guest_alias(relative,match[1]);precompiled.append(relative)
         # Zygote and SystemServer load these by name, outside app_process DT_NEEDED.
         available={Path(name).name for name in metadata["files"]}
         runtime_files=json.loads((runtime/"art-runtime.json").read_text())["files"]
@@ -740,7 +772,7 @@ def merge_platform(inputs,runtime,stock,archive,graphics=None):
             proof=metadata["host_service_inputs"][service]
             proof["files"]={name:sha256(copied[name]) for name in reachable}
             proof["native_needed"]={name:native_needed[name] for name in reachable}
-        metadata["platform_boot"]={"sdk_sha256":SDK_SHA256,"partitions":partitions,"files":{name:sha256(source) for name,source in copied.items()},"classpaths":classpaths,"native_needed":native_needed}
+        metadata["platform_boot"]={"sdk_sha256":SDK_SHA256,"partitions":partitions,"files":{name:sha256(source) for name,source in copied.items()},"precompiled":precompiled,"classpaths":classpaths,"native_needed":native_needed}
     environment=inputs/"init.environ.rc"
     text="\n".join(line for line in environment.read_text().splitlines() if not line.startswith(("    export SYSTEMSERVERCLASSPATH ","    export STANDALONE_SYSTEMSERVER_JARS ")))+"\n"
     text=retain_stock_environment(text,environment_exports)
