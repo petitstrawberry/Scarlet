@@ -145,7 +145,7 @@ fn task_stat(task: &Task, thread: bool) -> String {
     let nice = task.sched_nice.load(core::sync::atomic::Ordering::Relaxed);
     fields[18 - 4] = (20 + nice) as i128;
     fields[19 - 4] = nice as i128;
-    fields[20 - 4] = crate::sched::scheduler::get_all_task_ids()
+    fields[20 - 4] = crate::sched::scheduler::get_task_pool().task_ids_snapshot()
         .into_iter()
         .filter(|id| {
             crate::sched::scheduler::get_task_by_id(*id).is_some_and(|other| {
@@ -540,6 +540,45 @@ impl FileObject for ProcTextFile {
 
 #[cfg(test)]
 mod tests {
+    #[test_case]
+    fn stat_num_threads_counts_blocked_members_outside_run_queues() {
+        use crate::sched::scheduler::{get_all_task_ids, get_task_by_id, register_task, reset};
+        use crate::task::{BlockedType, Task, TaskState, TaskType};
+
+        reset();
+        let leader_id = register_task(Task::new("StatLeader".into(), 0, TaskType::Kernel));
+        let leader = get_task_by_id(leader_id).unwrap();
+        let mut members = alloc::vec::Vec::new();
+        for state in [
+            TaskState::Blocked(BlockedType::Interruptible),
+            TaskState::Blocked(BlockedType::Uninterruptible),
+            TaskState::Zombie,
+            TaskState::Terminated,
+        ] {
+            let mut member = Task::new("StatThread".into(), 0, TaskType::Kernel);
+            member.set_thread_group_id(leader_id);
+            member.set_state(state);
+            let id = register_task(member);
+            members.push(get_task_by_id(id).unwrap());
+        }
+        register_task(Task::new("OtherProcess".into(), 0, TaskType::Kernel));
+        assert!(!get_all_task_ids().contains(&members[0].get_id()));
+        assert!(!get_all_task_ids().contains(&members[1].get_id()));
+
+        for (task, thread) in [(&leader, false), (&members[0], true)] {
+            let stat = super::task_stat(task, thread);
+            let fields: alloc::vec::Vec<_> = stat[stat.rfind(')').unwrap() + 1..]
+                .split_whitespace()
+                .collect();
+            assert_eq!(fields[20 - 3], "3");
+            assert_eq!(fields[0], if thread { "S" } else { "R" });
+        }
+
+        drop(members);
+        drop(leader);
+        reset();
+    }
+
     #[cfg(target_arch="aarch64")]
     #[test_case]
     fn cpu_directory_exposes_real_sparse_cpu_ids_for_bionic_nprocs_conf() {

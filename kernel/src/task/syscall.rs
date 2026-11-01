@@ -29,7 +29,7 @@ use crate::sched::scheduler::{
     SchedulerAffinity, SchedulerAttr, SchedulerControlResult, SchedulerPolicy, cleanup_zombie,
     cpu_usage_snapshot, current_task_deadline, current_task_scheduler_attr,
     current_task_scheduler_state, disable_current_task_deadline, enable_current_task_deadline,
-    enqueue_task, get_all_task_ids, get_task_by_id, get_task_pool, remove_task_from_queues, schedule,
+    enqueue_task, get_task_by_id, get_task_pool, remove_task_from_queues, schedule,
     set_current_task_scheduler_affinity, set_current_task_scheduler_attr,
     update_current_task_scheduler_fair_fields,
 };
@@ -2276,7 +2276,7 @@ pub fn sys_get_task_debug_info(trapframe: &mut Trapframe) -> usize {
         let target_tgid = selected.get_thread_group_id();
         let local_tgid = namespace.resolve_local_id(target_tgid).unwrap_or(0);
 
-        let targets: Vec<_> = get_all_task_ids()
+        let targets: Vec<_> = task_info_ids()
             .into_iter()
             .filter_map(|global_id| {
                 let local_pid = namespace.resolve_local_id(global_id)?;
@@ -2474,6 +2474,47 @@ pub fn sys_get_cpu_debug_info(trapframe: &mut Trapframe) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{process_control_for_signal, task_info_ids};
+
+    #[cfg(feature = "sync-debug")]
+    #[test_case]
+    fn task_debug_info_count_includes_blocked_threads_outside_run_queues() {
+        use crate::arch::Trapframe;
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::library::std::usercopy::copy_to_user;
+        use crate::sched::scheduler::{get_all_task_ids, get_task_by_id, register_task, reset};
+        use crate::task::{BlockedType, Task, TaskDebugInfo, TaskState, TaskType};
+
+        reset();
+        let leader_id = register_task(Task::new("DebugLeader".into(), 0, TaskType::Kernel));
+        let leader = get_task_by_id(leader_id).unwrap();
+        let mut member = Task::new("DebugBlocked".into(), 0, TaskType::Kernel);
+        member.set_thread_group_id(leader_id);
+        member.set_state(TaskState::Blocked(BlockedType::Interruptible));
+        let member_id = register_task(member);
+        let member = get_task_by_id(member_id).unwrap();
+        register_task(Task::new("OtherProcess".into(), 0, TaskType::Kernel));
+        assert!(!get_all_task_ids().contains(&member_id));
+        crate::task::set_mock_current_task(leader.clone());
+        // RISC-V advances the syscall PC by fetching the calling instruction.
+        let code = USER_STACK_END - PAGE_SIZE;
+        leader.allocate_stack_pages(code, 1).unwrap();
+        for index in 0..2 {
+            copy_to_user(&leader, code + index * 4, &0x73u32.to_ne_bytes()).unwrap();
+        }
+        let mut frame = Trapframe::new();
+        frame.set_pc(code as u64);
+        frame.set_arg(2, 0);
+        frame.set_arg(3, core::mem::size_of::<TaskDebugInfo>());
+        // Selecting either member must return the full thread group.
+        for selector in [leader.get_namespace_id(), member.get_namespace_id()] {
+            frame.set_arg(0, selector);
+            assert_eq!(super::sys_get_task_debug_info(&mut frame), 2);
+        }
+        crate::task::clear_mock_current_task();
+        drop(member);
+        drop(leader);
+        reset();
+    }
 
     #[test_case]
     fn task_info_snapshot_keeps_blocked_tasks_outside_run_queues() {

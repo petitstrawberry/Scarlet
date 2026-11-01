@@ -24,7 +24,7 @@ use crate::{
 };
 
 fn live_threads(task: &Task) -> Vec<usize> {
-    crate::sched::scheduler::get_all_task_ids()
+    crate::sched::scheduler::get_task_pool().task_ids_snapshot()
         .into_iter()
         .filter(|id| {
             crate::sched::scheduler::get_task_by_id(*id).is_some_and(|candidate| {
@@ -283,5 +283,78 @@ impl FileObject for ProcIdDirectory {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn self_task_directory_includes_blocked_threads_with_namespace_local_ids() {
+        use crate::sched::scheduler::{get_all_task_ids, get_task_by_id, register_task, reset};
+        use crate::task::{BlockedType, TaskType, namespace::TaskNamespace};
+
+        reset();
+        let namespace = TaskNamespace::new_root("proc-task-test".into());
+        // Ensure directory entries exercise translation rather than global IDs.
+        namespace.allocate_task_id_for(usize::MAX);
+        let leader = Task::new("ProcLeader".into(), 0, TaskType::Kernel);
+        leader.set_namespace(namespace.clone());
+        let leader_id = register_task(leader);
+        let leader = get_task_by_id(leader_id).unwrap();
+        let mut members = Vec::new();
+        for state in [
+            TaskState::Blocked(BlockedType::Interruptible),
+            TaskState::Zombie,
+            TaskState::Terminated,
+        ] {
+            let mut member = Task::new("ProcThread".into(), 0, TaskType::Kernel);
+            member.set_namespace(namespace.clone());
+            member.set_thread_group_id(leader_id);
+            member.set_state(state);
+            let id = register_task(member);
+            members.push(get_task_by_id(id).unwrap());
+        }
+        let unrelated = Task::new("OtherProcess".into(), 0, TaskType::Kernel);
+        unrelated.set_namespace(namespace.clone());
+        let unrelated_id = register_task(unrelated);
+        assert!(!get_all_task_ids().contains(&members[0].get_id()));
+        let mut ids = live_threads(&leader);
+        ids.sort_unstable();
+        let mut expected = alloc::vec![leader_id, members[0].get_id()];
+        expected.sort_unstable();
+        assert_eq!(ids, expected);
+
+        let mut abi = LinuxAbi::default();
+        let fd = open_self_task_directory(&mut abi, &leader, 0);
+        let object = leader.handle_table.get(abi.get_handle(fd).unwrap()).unwrap();
+        let file = object.as_file().unwrap();
+        let directory = file.as_any().downcast_ref::<ProcIdDirectory>().unwrap();
+        let mut entries = directory.descriptors.read().clone();
+        entries.sort_unstable();
+        let mut expected = alloc::vec![leader.get_namespace_id(), members[0].get_namespace_id()];
+        expected.sort_unstable();
+        assert_eq!(entries, expected);
+        assert_eq!(directory.metadata().unwrap().link_count, 4);
+        assert_eq!(
+            self_task_metadata(&leader, "/proc/self/task")
+                .unwrap().unwrap().link_count,
+            4
+        );
+        let blocked_path = format!("/proc/self/task/{}", members[0].get_namespace_id());
+        assert!(self_task_metadata(&leader, &blocked_path).unwrap().is_some());
+        for id in [members[1].get_id(), members[2].get_id(), unrelated_id] {
+            let local_id = namespace.resolve_local_id(id).unwrap();
+            assert!(
+                self_task_metadata(&leader, &format!("/proc/self/task/{local_id}"))
+                    .unwrap().is_none()
+            );
+        }
+
+        drop(object);
+        drop(members);
+        drop(leader);
+        reset();
     }
 }
