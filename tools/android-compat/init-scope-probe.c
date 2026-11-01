@@ -32,6 +32,7 @@ static int log_socket(void) {
 }
 static void drain_logs(int fd) {
  if(fd<0)return;
+ if(getenv("SCARLET_INIT_QUIET"))return;
  for(int count=0;count<128;count++) {unsigned char message[8192];ssize_t n=recv(fd,message,sizeof(message),MSG_DONTWAIT);
   if(n<0)break;
   printf("SCARLET_INIT_LOGD bytes=%zd ",n);

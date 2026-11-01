@@ -189,6 +189,8 @@ def main():
     if start_zygote:arguments.extend(["--program-argument","start-zygote"])
     arguments.extend(["--program-env",f"SCARLET_INIT_OBSERVE_SECONDS={observation}"])
     arguments.extend(["--program-env",f"ANDROID_LOG_TAGS={'*:v' if verbose_logs else '*:e'}"])
+    if not verbose_logs:
+        arguments.extend(["--program-env","SCARLET_INIT_QUIET=1"])
     if launch_sample:
         arguments.extend(["--program-env","SCARLET_LAUNCH_APP=dev.scarlet.compat/.MainActivity"])
     if start_installer:arguments.extend(["--program-env","SCARLET_INIT_START_INSTALLER=1"])
