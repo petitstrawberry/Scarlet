@@ -9,8 +9,11 @@ spec.loader.exec_module(prepare)
 
 class PlatformBootTest(unittest.TestCase):
     def test_home_package_set_includes_the_module_metadata_provider(self):
-        from desktop_inputs import PACKAGES
+        from desktop_inputs import CONFIGURATION, PACKAGES
         self.assertIn("app/ModuleMetadata",PACKAGES["product"])
+        self.assertIn("system/priv-app/IntentResolver", PACKAGES["system"])
+        self.assertIn("system/etc/permissions/com.android.intentresolver.xml",
+                      CONFIGURATION["system"])
 
     def test_memfd_profile_overrides_the_late_stock_reset_and_rejects_drift(self):
         stock = "on post-fs-data\n    mkdir /data\n    setprop sys.use_memfd false\n    chmod 0700 /data\n"

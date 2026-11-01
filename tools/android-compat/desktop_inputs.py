@@ -3,13 +3,14 @@ from art_inputs import sha256
 
 PACKAGES = {
     "system": ["system/app/ExtShared", "system/priv-app/SettingsProvider", "system/priv-app/PackageInstaller",
-               "system/priv-app/FusedLocation",
+               "system/priv-app/FusedLocation", "system/priv-app/IntentResolver",
                "system/priv-app/Shell", "system/priv-app/InputDevices"],
     "system_ext": ["priv-app/Launcher3QuickStep", "priv-app/SystemUI", "priv-app/Provision", "priv-app/SdkSetup"],
     "product": ["app/LatinIME", "app/ModuleMetadata"],
 }
 CONFIGURATION = {
     "system": ["system/etc/selinux/plat_mac_permissions.xml",
+               "system/etc/permissions/com.android.intentresolver.xml",
                "system/etc/permissions/platform.xml", "system/etc/permissions/privapp-permissions-platform.xml",
                "system/etc/sysconfig/framework-sysconfig.xml", "system/etc/sysconfig/preinstalled-packages-platform.xml"],
     "system_ext": ["etc/permissions/" + name + ".xml" for name in
