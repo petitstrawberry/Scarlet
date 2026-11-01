@@ -22,7 +22,7 @@ use alloc::{
 /// Android 13's stock service and app inventory needs more exact labels than
 /// the original 512-entry bound; the limit stays a fixed, checked resource.
 pub const MAX_LABELS: usize = 1024;
-pub const MAX_RULES: usize = 4096;
+pub const MAX_RULES: usize = 16384;
 pub const MAX_LABEL_BYTES: usize = 255;
 
 #[derive(Clone, Copy)]

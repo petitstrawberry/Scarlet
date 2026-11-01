@@ -41,7 +41,7 @@
     "ro.hardware.egl": "angle",
     "ro.hardware.vulkan": "pastel",
     "ro.sf.lcd_density": "160",
-    "ro.hw_timeout_multiplier": "16",
+    "ro.hw_timeout_multiplier": "32",
     "debug.renderengine.backend": "gles"
   },
   "bootconfig": {
@@ -76,7 +76,12 @@
     "u:r:vold_prepare_subdirs:s0": 24,
     "u:r:user_unlock:s0": 25,
     "u:r:keystore:s0": 26,
-    "u:r:hal_keymint_default:s0": 27
+    "u:r:hal_keymint_default:s0": 27,
+    "u:r:system_app:s0": 28,
+    "u:r:platform_app:s0": 29,
+    "u:r:priv_app:s0": 30,
+    "u:r:untrusted_app:s0": 31,
+    "u:r:untrusted_app_25:s0": 32
   },
   "transitions": [
     [
@@ -553,17 +558,132 @@
           "u:object_r:privapp_data_file:s0:c512,c768",
           "u:object_r:app_data_file:s0:c512,c768",
           "u:object_r:system_app_data_file:s0",
-          "u:object_r:shell_data_file:s0"
+          "u:object_r:shell_data_file:s0",
+          "u:object_r:profiles_data_file:s0"
         ],
         "targets": [
           "u:object_r:privapp_data_file:s0:c512,c768",
           "u:object_r:app_data_file:s0:c512,c768",
           "u:object_r:system_app_data_file:s0",
-          "u:object_r:shell_data_file:s0"
+          "u:object_r:shell_data_file:s0",
+          "u:object_r:profiles_data_file:s0"
         ],
         "kinds": [
           1,
           2
+        ]
+      },
+      {
+        "source": "u:r:zygote:s0",
+        "from": [
+          "u:object_r:unlabeled:s0",
+          "u:object_r:system_userdir_file:s0",
+          "u:object_r:system_data_root_file:s0",
+          "u:object_r:system_data_file:s0",
+          "u:object_r:privapp_data_file:s0:c512,c768",
+          "u:object_r:app_data_file:s0:c512,c768",
+          "u:object_r:system_app_data_file:s0"
+        ],
+        "targets": [
+          "u:object_r:privapp_data_file:s0:c512,c768",
+          "u:object_r:app_data_file:s0:c512,c768",
+          "u:object_r:system_app_data_file:s0"
+        ],
+        "kinds": [
+          1,
+          2,
+          3
+        ]
+      },
+      {
+        "source": "u:r:system_app:s0",
+        "from": [
+          "u:object_r:unlabeled:s0",
+          "u:object_r:system_userdir_file:s0",
+          "u:object_r:system_data_root_file:s0",
+          "u:object_r:system_data_file:s0"
+        ],
+        "targets": [
+          "u:object_r:system_app_data_file:s0"
+        ],
+        "kinds": [
+          1,
+          2,
+          3
+        ]
+      },
+      {
+        "source": "u:r:platform_app:s0",
+        "from": [
+          "u:object_r:unlabeled:s0",
+          "u:object_r:system_userdir_file:s0",
+          "u:object_r:system_data_root_file:s0",
+          "u:object_r:system_data_file:s0",
+          "u:object_r:app_data_file:s0:c512,c768"
+        ],
+        "targets": [
+          "u:object_r:app_data_file:s0:c512,c768",
+          "u:object_r:privapp_data_file:s0:c512,c768"
+        ],
+        "kinds": [
+          1,
+          2,
+          3
+        ]
+      },
+      {
+        "source": "u:r:priv_app:s0",
+        "from": [
+          "u:object_r:unlabeled:s0",
+          "u:object_r:system_userdir_file:s0",
+          "u:object_r:system_data_root_file:s0",
+          "u:object_r:system_data_file:s0",
+          "u:object_r:app_data_file:s0:c512,c768",
+          "u:object_r:privapp_data_file:s0:c512,c768"
+        ],
+        "targets": [
+          "u:object_r:privapp_data_file:s0:c512,c768"
+        ],
+        "kinds": [
+          1,
+          2,
+          3
+        ]
+      },
+      {
+        "source": "u:r:untrusted_app:s0",
+        "from": [
+          "u:object_r:unlabeled:s0",
+          "u:object_r:system_userdir_file:s0",
+          "u:object_r:system_data_root_file:s0",
+          "u:object_r:system_data_file:s0",
+          "u:object_r:app_data_file:s0:c512,c768"
+        ],
+        "targets": [
+          "u:object_r:app_data_file:s0:c512,c768"
+        ],
+        "kinds": [
+          1,
+          2,
+          3
+        ]
+      },
+      {
+        "source": "u:r:untrusted_app_25:s0",
+        "from": [
+          "u:object_r:unlabeled:s0",
+          "u:object_r:system_userdir_file:s0",
+          "u:object_r:system_data_root_file:s0",
+          "u:object_r:system_data_file:s0",
+          "u:object_r:app_data_file:s0:c512,c768"
+        ],
+        "targets": [
+          "u:object_r:app_data_file:s0:c512,c768"
+        ],
+        "kinds": [
+          1,
+          2,
+          3
         ]
       }
     ],
@@ -844,6 +964,31 @@
     ]
   },
   "service_grants": [
+    [
+      "u:r:system_app:s0",
+      "u:object_r:thermal_service:s0",
+      3
+    ],
+    [
+      "u:r:platform_app:s0",
+      "u:object_r:thermal_service:s0",
+      3
+    ],
+    [
+      "u:r:priv_app:s0",
+      "u:object_r:thermal_service:s0",
+      3
+    ],
+    [
+      "u:r:untrusted_app:s0",
+      "u:object_r:thermal_service:s0",
+      3
+    ],
+    [
+      "u:r:untrusted_app_25:s0",
+      "u:object_r:thermal_service:s0",
+      3
+    ],
     [
       "u:r:servicemanager:s0",
       "u:object_r:service_manager_service:s0",

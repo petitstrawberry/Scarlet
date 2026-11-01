@@ -131,6 +131,7 @@ impl Manager {
                 "permission_checker",
                 "appops",
                 "power",
+                "thermal",
                 "content",
                 "input",
                 "input_method",
@@ -150,6 +151,14 @@ impl Manager {
                 "launcherapps",
                 "search",
                 "audio",
+                "registry",
+                "trust",
+                "lock_settings",
+                "fingerprint",
+                "biometric",
+                "dreams",
+                "user",
+                "smartspace",
                 "accessibility",
                 "account",
                 "appwidget",
@@ -174,6 +183,32 @@ impl Manager {
                         reserved: 0,
                         permissions: 2,
                     });
+                }
+            }
+            // Framework managers keep their own caller-UID and Android
+            // permission checks after Binder lookup. The Shield rule grants
+            // discovery of registered framework services without exposing
+            // hardware service endpoints.
+            let privileged = self
+                .labels
+                .iter()
+                .find(|(_, id)| **id == source)
+                .is_some_and(|(name, _)| {
+                    name.starts_with("u:r:platform_app:")
+                        || name.starts_with("u:r:priv_app:")
+                        || name.starts_with("u:r:system_app:")
+                });
+            if privileged {
+                for (label, target) in &self.labels {
+                    if label.starts_with("u:object_r:") && label.ends_with("_service:s0") {
+                        rules.push(Rule {
+                            source,
+                            target: *target,
+                            class: 1,
+                            reserved: 0,
+                            permissions: 2,
+                        });
+                    }
                 }
             }
         }
