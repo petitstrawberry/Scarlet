@@ -197,6 +197,8 @@
       "u:object_r:binder_cache_system_server_prop:s0",
       "u:object_r:debug_prop:s0",
       "u:object_r:bootanim_system_prop:s0",
+      "u:object_r:boot_status_prop:s0",
+      "u:object_r:provisioned_prop:s0",
       "u:object_r:retaildemo_prop:s0",
       "u:object_r:theme_prop:s0"
     ],
@@ -873,6 +875,51 @@
       3
     ],
     [
+      "u:r:user_unlock:s0",
+      "u:object_r:gatekeeper_service:s0",
+      3
+    ],
+    [
+      "u:r:user_unlock:s0",
+      "u:object_r:search_service:s0",
+      3
+    ],
+    [
+      "u:r:user_unlock:s0",
+      "u:object_r:appwidget_service:s0",
+      3
+    ],
+    [
+      "u:r:user_unlock:s0",
+      "u:object_r:device_policy_service:s0",
+      3
+    ],
+    [
+      "u:r:user_unlock:s0",
+      "u:object_r:audio_service:s0",
+      3
+    ],
+    [
+      "u:r:user_unlock:s0",
+      "u:object_r:window_service:s0",
+      3
+    ],
+    [
+      "u:r:user_unlock:s0",
+      "u:object_r:display_service:s0",
+      3
+    ],
+    [
+      "u:r:user_unlock:s0",
+      "u:object_r:statusbar_service:s0",
+      3
+    ],
+    [
+      "u:r:user_unlock:s0",
+      "u:object_r:wallpaper_service:s0",
+      3
+    ],
+    [
       "u:r:system_server:s0",
       "u:object_r:system_server_dumper_service:s0",
       3
@@ -1185,6 +1232,16 @@
     [
       "u:r:surfaceflinger:s0",
       "u:object_r:hal_graphics_allocator_service:s0",
+      2
+    ],
+    [
+      "u:r:surfaceflinger:s0",
+      "u:object_r:hal_graphics_composer_service:s0",
+      2
+    ],
+    [
+      "u:r:surfaceflinger:s0",
+      "u:object_r:permission_service:s0",
       2
     ],
     [

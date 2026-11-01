@@ -115,7 +115,7 @@ impl Manager {
         let mut rules = Vec::new();
         // Discovery of public framework endpoints; each service retains its
         // own Android permissions and caller-UID checks. Applications cannot add.
-        for source in subjects {
+        for &source in &subjects {
             for name in [
                 "activity",
                 "activity_task",
@@ -148,8 +148,44 @@ impl Manager {
                 "device_state",
                 "sensor_privacy",
                 "launcherapps",
+                "search",
+                "audio",
+                "accessibility",
+                "account",
+                "appwidget",
+                "device_policy",
+                "dropbox",
+                "graphicsstats",
+                "jobscheduler",
+                "location",
+                "media_session",
+                "media_projection",
+                "media_router",
+                "shortcut",
+                "uri_grants",
+                "vibrator",
             ] {
                 let label = std::format!("u:object_r:{}_service:s0", name);
+                if let Some(target) = self.labels.get(&label) {
+                    rules.push(Rule {
+                        source,
+                        target: *target,
+                        class: 1,
+                        reserved: 0,
+                        permissions: 2,
+                    });
+                }
+            }
+        }
+        // These graphics HAL endpoints are public to Android clients. Keep
+        // their own UID/permission checks while allowing applications to load
+        // the CPU gralloc mapper used by RenderThread and ANGLE.
+        for &source in &subjects {
+            for name in [
+                "hal_graphics_mapper_hwservice",
+                "hal_graphics_allocator_hwservice",
+            ] {
+                let label = std::format!("u:object_r:{name}:s0");
                 if let Some(target) = self.labels.get(&label) {
                     rules.push(Rule {
                         source,

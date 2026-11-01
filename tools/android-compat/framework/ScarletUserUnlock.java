@@ -1,4 +1,7 @@
 import android.os.IBinder;
+import android.os.Binder;
+import android.os.Parcel;
+import android.os.RemoteException;
 import android.content.Intent;
 import android.content.ComponentName;
 import android.app.ActivityManager.RunningAppProcessInfo;
@@ -14,8 +17,17 @@ public final class ScarletUserUnlock {
             new PrintStream(new FileOutputStream(FileDescriptor.out));
 
     public static void main(String[] args) throws Exception {
+        try {
+            Class<?> serviceManagerClass = Class.forName("android.os.ServiceManager");
+            addService(serviceManagerClass, "android.service.gatekeeper.IGateKeeperService",
+                    new GateKeeper());
+            out.println("SCARLET_GATEKEEPER_REGISTERED");
+        } catch (Exception error) {
+            out.println("SCARLET_GATEKEEPER_REGISTER_RETRY " + error);
+        }
         final Class<?> serviceManager = Class.forName("android.os.ServiceManager");
         final Method getService = serviceManager.getMethod("getService", String.class);
+        final Method checkService = serviceManager.getMethod("checkService", String.class);
         final Class<?> activityManagerStub = Class.forName("android.app.IActivityManager$Stub");
         final Method asInterface = activityManagerStub.getMethod("asInterface", IBinder.class);
         final Class<?> listenerClass = Class.forName("android.os.IProgressListener");
@@ -45,6 +57,7 @@ public final class ScarletUserUnlock {
         boolean bootCompleted = false;
         int bootReadyAttempt = -1;
         int launcherStarts = 0;
+        int servicesReadyAttempts = 0;
         boolean requestedUserStart = false;
         for (int attempt = 0; attempt < 360; ++attempt) {
             IBinder binder = (IBinder) getService.invoke(null, "activity");
@@ -54,20 +67,27 @@ public final class ScarletUserUnlock {
                 // SystemUI is launched after AMS has initialized its system-service
                 // dependencies. A fixed delay can race that initialization.
                 if (!requestedUserStart && attempt % 4 == 0) {
-                    Method running = manager.getClass().getMethod("getRunningAppProcesses");
-                    java.util.List<?> processes = (java.util.List<?>) running.invoke(manager);
-                    if (processes != null) {
-                        for (Object process : processes) {
-                            if ("com.android.systemui".equals(
-                                    ((RunningAppProcessInfo) process).processName)) {
-                                Method startUser = manager.getClass().getMethod(
-                                        "startUserInBackground", int.class);
-                                Object started = startUser.invoke(manager, 0);
-                                requestedUserStart = Boolean.TRUE.equals(started);
-                                out.println("SCARLET_USER_START_AFTER_SYSTEMUI attempt=" + attempt
-                                        + " started=" + started);
-                                break;
+                    try {
+                        Method running = manager.getClass().getMethod("getRunningAppProcesses");
+                        java.util.List<?> processes = (java.util.List<?>) running.invoke(manager);
+                        if (processes != null) {
+                            for (Object process : processes) {
+                                if ("com.android.systemui".equals(
+                                        ((RunningAppProcessInfo) process).processName)) {
+                                    Method startUser = manager.getClass().getMethod(
+                                            "startUserInBackground", int.class);
+                                    Object started = startUser.invoke(manager, 0);
+                                    requestedUserStart = Boolean.TRUE.equals(started);
+                                    out.println("SCARLET_USER_START_AFTER_SYSTEMUI attempt="
+                                            + attempt + " started=" + started);
+                                    break;
+                                }
                             }
+                        }
+                    } catch (Exception error) {
+                        if (attempt % 20 == 0) {
+                            out.println("SCARLET_USER_START_QUERY_RETRY attempt=" + attempt
+                                    + " error=" + error);
                         }
                     }
                 }
@@ -151,7 +171,7 @@ public final class ScarletUserUnlock {
                 }
             }
             if (bootReadyAttempt < 0 && frameworkUnlocked &&
-                    (bootCompleted || attempt >= 200)) {
+                    (bootCompleted || attempt >= 80)) {
                 bootReadyAttempt = attempt;
             }
             if (ceAvailable && packageManager != null) {
@@ -171,9 +191,17 @@ public final class ScarletUserUnlock {
                                 + " frameworkUnlocked=" + frameworkUnlocked
                                 + " bootCompleted=" + bootCompleted);
                     }
+                    IBinder search = (IBinder) checkService.invoke(null, "search");
+                    boolean launchServicesReady = search != null && search.pingBinder();
+                    for (String name : new String[]{"appwidget", "device_policy", "audio",
+                            "window", "display", "statusbar", "wallpaper"}) {
+                        IBinder service = (IBinder) checkService.invoke(null, name);
+                        launchServicesReady &= service != null && service.pingBinder();
+                    }
+                    servicesReadyAttempts = launchServicesReady ? servicesReadyAttempts + 1 : 0;
                     if (frameworkUnlocked && bootReadyAttempt >= 0 && launcherResolved != null &&
-                            binder != null && attempt >= bootReadyAttempt &&
-                            attempt < bootReadyAttempt + 60 && attempt % 20 == 0) {
+                            binder != null && servicesReadyAttempts >= 4 && attempt >= bootReadyAttempt &&
+                            attempt < bootReadyAttempt + 90 && attempt % 20 == 0) {
                         out.println("SCARLET_LAUNCHER_RESOLVED attempt=" + attempt
                                 + " result=" + launcherResolved);
                         Method startHome = manager.getClass().getMethod(
@@ -201,5 +229,40 @@ public final class ScarletUserUnlock {
         }
         out.println("SCARLET_USER_UNLOCK_FAIL attempts=360");
         System.exit(1);
+    }
+
+    private static void addService(Class<?> serviceManager, String name, IBinder binder)
+            throws Exception {
+        for (Method method : serviceManager.getMethods()) {
+            Class<?>[] parameters = method.getParameterTypes();
+            if (!method.getName().equals("addService") || parameters.length < 2
+                    || parameters[0] != String.class || parameters[1] != IBinder.class) {
+                continue;
+            }
+            if (parameters.length == 2) {
+                method.invoke(null, name, binder);
+            } else if (parameters.length == 4) {
+                method.invoke(null, name, binder, false, 0);
+            }
+            return;
+        }
+        throw new NoSuchMethodException("ServiceManager.addService");
+    }
+
+    private static final class GateKeeper extends Binder {
+        @Override
+        protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
+                throws RemoteException {
+            // No trusted execution environment exists in this host build. The
+            // setup-completion notification is sufficient for service startup;
+            // credential checks remain unavailable instead of being faked.
+            if (reply != null) {
+                reply.writeNoException();
+                if (code == 4) {
+                    reply.writeLong(0L);
+                }
+            }
+            return true;
+        }
     }
 }
