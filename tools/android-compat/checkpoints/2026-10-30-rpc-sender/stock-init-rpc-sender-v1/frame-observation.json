@@ -1,0 +1,9 @@
+{
+  "scope": "observed SWS display; app readiness is not asserted",
+  "snapshots": 25,
+  "size": [
+    1280,
+    800
+  ],
+  "frame_sha256": "2d3eb3f2ed3c13061030b5f2856eb992ff4cacb448009227b8171312b3d1fa44"
+}
