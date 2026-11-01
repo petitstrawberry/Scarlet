@@ -38,6 +38,9 @@ def main():
     if capture_frame and not compositor:raise ValueError("frame capture requires --sws-native")
     start_zygote="--start-zygote" in arguments
     if start_zygote:arguments.remove("--start-zygote")
+    launcher_app=None
+    if "--launcher-app" in arguments:
+        index=arguments.index("--launcher-app");launcher_app=Path(arguments[index+1]).resolve();del arguments[index:index+2]
     if "--init-probe" not in arguments or "--boot-profile" not in arguments:
         raise ValueError("run-init requires --init-probe BUILD and --boot-profile INPUTS")
     index = arguments.index("--init-probe")
@@ -56,6 +59,14 @@ def main():
             raise ValueError("changed init probe binary")
     if any(flag in arguments for flag in ["--program", "--init-bootstrap", "--accel"]):
         raise ValueError("run-init selects its bounded program and HVF accelerator")
+    launcher_app_record=None
+    launcher_app_apk=None
+    if launcher_app:
+        launcher_app_record=json.loads((launcher_app/"build.json").read_text())
+        launcher_app_apk=launcher_app/"scarlet-compat.apk"
+        if (launcher_app_record.get("package")!="dev.scarlet.compat" or
+                launcher_app_record.get("sha256")!=sha256(launcher_app_apk)):
+            raise ValueError("changed or incomplete launcher app build")
     output = Path(arguments[arguments.index("--output") + 1])
     spec = importlib.util.spec_from_file_location("direct_init_runner", SOURCE / "run-direct.py")
     runner = importlib.util.module_from_spec(spec)
@@ -68,6 +79,12 @@ def main():
             destination=root.parent.parent/"bin/sws";shutil.copy2(compositor,destination)
             if sha256(destination)!=sha256(compositor):raise ValueError("changed native SWS executable")
             (output/"native-sws.json").write_text(json.dumps({"path":str(compositor),"sha256":sha256(compositor),"backend":"cpu"},indent=2)+"\n")
+        if launcher_app:
+            destination=root/"system/app/ScarletCompat/ScarletCompat.apk"
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(launcher_app_apk,destination)
+            if sha256(destination)!=launcher_app_record["sha256"]:
+                raise ValueError("launcher app changed while staging")
         for partition in ["system","vendor"]:
             destination=root/partition/"lib64/libprobe-init-kmsg.so"
             destination.parent.mkdir(parents=True,exist_ok=True)
@@ -90,11 +107,18 @@ def main():
             "installer_control_request": "ctl.start=installd after 4 seconds" if start_installer else None,
             "netd_control_request": "ctl.start=netd after 4 seconds" if start_netd else None,
             "app_policy_manager": manage_apps,
+            "launcher_app": None if not launcher_app else {
+                "package": launcher_app_record["package"],
+                "apk_sha256": launcher_app_record["sha256"],
+                "path": "/system/app/ScarletCompat/ScarletCompat.apk",
+            },
         }, indent=2) + "\n")
         return metadata
 
     if start_zygote:arguments.extend(["--program-argument","start-zygote"])
     arguments.extend(["--program-env",f"SCARLET_INIT_OBSERVE_SECONDS={observation}"])
+    if launcher_app:
+        arguments.extend(["--program-env","SCARLET_LAUNCH_APP=dev.scarlet.compat/.MainActivity"])
     if start_installer:arguments.extend(["--program-env","SCARLET_INIT_START_INSTALLER=1"])
     if start_netd:arguments.extend(["--program-env","SCARLET_INIT_START_NETD=1"])
     runner.stage_boot_inputs = stage
@@ -105,7 +129,11 @@ def main():
     if compositor:
         os.environ["SCARLET_ANDROID_SWS_NATIVE"]="1"
         def run(command,directory,timeout):
-            command=list(command)+["-device","virtio-gpu-device,bus=virtio-mmio-bus.3"]
+            command=list(command)+[
+                "-device","virtio-gpu-device,bus=virtio-mmio-bus.3",
+                "-device","virtio-mouse-device,bus=virtio-mmio-bus.4",
+                "-device","virtio-keyboard-device,bus=virtio-mmio-bus.5",
+            ]
             def record_command():
                 commands=json.loads((directory/"commands.json").read_text());commands["qemu"]=command
                 (directory/"commands.json").write_text(json.dumps(commands,indent=2)+"\n")

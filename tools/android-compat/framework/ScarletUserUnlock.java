@@ -58,6 +58,9 @@ public final class ScarletUserUnlock {
         int bootReadyAttempt = -1;
         int launcherStarts = 0;
         int servicesReadyAttempts = 0;
+        int sampleLaunchAt = -1;
+        boolean sampleLaunchRequested = false;
+        String sampleComponent = System.getenv("SCARLET_LAUNCH_APP");
         boolean requestedUserStart = false;
         for (int attempt = 0; attempt < 360; ++attempt) {
             IBinder binder = (IBinder) getService.invoke(null, "activity");
@@ -216,7 +219,30 @@ public final class ScarletUserUnlock {
                         ++launcherStarts;
                         out.println("SCARLET_LAUNCHER_START attempt=" + attempt
                                 + " count=" + launcherStarts + " result=" + started);
+                        if (launcherStarts == 1 && sampleComponent != null
+                                && !sampleComponent.isEmpty()) {
+                            sampleLaunchAt = attempt + 20;
+                        }
                         if (launcherStarts >= 3) return;
+                    }
+                    if (!sampleLaunchRequested && sampleLaunchAt >= 0
+                            && attempt >= sampleLaunchAt && sampleComponent != null) {
+                        Intent sampleIntent = new Intent(Intent.ACTION_MAIN);
+                        sampleIntent.addCategory(Intent.CATEGORY_LAUNCHER);
+                        sampleIntent.setComponent(ComponentName.unflattenFromString(sampleComponent));
+                        Method startActivity = manager.getClass().getMethod(
+                                "startActivityAsUserWithFeature",
+                                Class.forName("android.app.IApplicationThread"),
+                                String.class, String.class, Intent.class, String.class, IBinder.class,
+                                String.class, int.class, int.class,
+                                Class.forName("android.app.ProfilerInfo"), android.os.Bundle.class,
+                                int.class);
+                        sampleIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        Object result = startActivity.invoke(manager, null, "android", null,
+                                sampleIntent, null, null, null, 0, 0, null, null, 0);
+                        sampleLaunchRequested = true;
+                        out.println("SCARLET_SAMPLE_APP_START attempt=" + attempt
+                                + " component=" + sampleComponent + " result=" + result);
                     }
                 } catch (Exception error) {
                     if (attempt % 20 == 0) {
