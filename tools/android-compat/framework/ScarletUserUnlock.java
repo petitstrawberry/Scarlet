@@ -62,14 +62,24 @@ public final class ScarletUserUnlock {
         boolean sampleLaunchRequested = false;
         String sampleComponent = System.getenv("SCARLET_LAUNCH_APP");
         boolean requestedUserStart = false;
-        for (int attempt = 0; attempt < 360; ++attempt) {
+        boolean activityReady = false;
+        for (int attempt = 0; attempt < 1080; ++attempt) {
             IBinder binder = (IBinder) getService.invoke(null, "activity");
             Object manager = null;
             if (binder != null) {
                 manager = asInterface.invoke(null, binder);
+                // The activity service is published before ActivityManagerService
+                // can safely enumerate processes. Defer that query until the
+                // manager is ready; user unlock below must still run during boot.
+                try {
+                    Method isReady = manager.getClass().getMethod("isSystemReady");
+                    activityReady = Boolean.TRUE.equals(isReady.invoke(manager));
+                } catch (Exception ignored) {
+                    activityReady = false;
+                }
                 // SystemUI is launched after AMS has initialized its system-service
                 // dependencies. A fixed delay can race that initialization.
-                if (!requestedUserStart && attempt % 4 == 0) {
+                if (activityReady && !requestedUserStart && attempt % 4 == 0) {
                     try {
                         Method running = manager.getClass().getMethod("getRunningAppProcesses");
                         java.util.List<?> processes = (java.util.List<?>) running.invoke(manager);
@@ -94,6 +104,9 @@ public final class ScarletUserUnlock {
                         }
                     }
                 }
+                // User-0 CE unlock is required for AMS to finish boot. It is
+                // safe to request once the activity service is published;
+                // unlike process enumeration it does not require systemReady.
                 if (!frameworkUnlocked && attempt % 4 == 0) {
                     Method unlock = manager.getClass().getMethod(
                             "unlockUser", int.class, byte[].class, byte[].class, listenerClass);
@@ -253,7 +266,7 @@ public final class ScarletUserUnlock {
             }
             Thread.sleep(500);
         }
-        out.println("SCARLET_USER_UNLOCK_FAIL attempts=360");
+        out.println("SCARLET_USER_UNLOCK_FAIL attempts=1080");
         System.exit(1);
     }
 
