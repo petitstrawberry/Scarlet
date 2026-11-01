@@ -39,7 +39,7 @@ def main():
     shared = output / "libsws_client_c.so"
     shutil.copy2(release / shared.name, shared)
     commands.append([str(toolchain / "rustc"), "--edition", "2024", "--target", "aarch64-linux-android",
-                     *rustflags, "--crate-type", "staticlib", "-C", "panic=abort", "-C", "opt-level=2",
+                     *rustflags, "--crate-type", "staticlib", "-C", "panic=unwind", "-C", "opt-level=2",
                      "-L", "dependency=" + str(release / "deps")])
     for name in ("scarlet_abi", "scarlet_sys"):
         candidates = list((release / "deps").glob("lib" + name + "-*.rlib"))
