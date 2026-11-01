@@ -199,8 +199,19 @@ def configure(output, stock, profile, contexts, metadata):
     (output / "proc").mkdir(exist_ok=True)
     (output / "proc/bootconfig").write_text("".join(
         f'{name} = "{value}"\n' for name, value in sorted(profile["bootconfig"].items())))
-    (output / "scarlet/boot/init.rc").write_text("# Explicit Scarlet device boot configuration\n" + "".join(
-        "import " + path + "\n" for path in profile["init_imports"] + imports(profile)))
+    manager_init = "# Explicit Scarlet device boot configuration\n" + "".join(
+        "import " + path + "\n" for path in profile["init_imports"] + imports(profile))
+    if "com.android.tethering" in profile["apex_modules"]:
+        # NetworkStats opens its APEX data directory before the stock traffic
+        # controller finishes initializing. Seed the persistent directory the
+        # manager owns so a transient native-init failure cannot kill the
+        # system server during first boot.
+        manager_init += (
+            "\non post-fs-data\n"
+            "    mkdir /data/misc/apexdata/com.android.tethering 0771 root system\n"
+            "    mkdir /data/misc/apexdata/com.android.tethering/netstats 0771 root system\n"
+        )
+    (output / "scarlet/boot/init.rc").write_text(manager_init)
     if metadata.get("user_unlock_inputs"):
         from user_unlock_inputs import apply_service
         apply_service(output)
