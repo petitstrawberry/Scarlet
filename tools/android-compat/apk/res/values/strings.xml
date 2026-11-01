@@ -1,5 +1,14 @@
 <resources>
     <string name="app_name">Scarlet compatibility probe</string>
+    <string name="phone">Phone</string>
+    <string name="messages">Messages</string>
+    <string name="browser">Browser</string>
+    <string name="camera">Camera</string>
+    <string name="email">Email</string>
+    <string name="gallery">Gallery</string>
+    <string name="maps">Maps</string>
+    <string name="music">Music</string>
+    <string name="store">Store</string>
     <string name="probe_message">Android resources on Scarlet</string>
     <integer name="probe_answer">42</integer>
 </resources>

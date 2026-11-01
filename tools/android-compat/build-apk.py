@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import struct
 import zipfile
@@ -57,10 +58,13 @@ def main():
     run([str(build_tools / "apksigner"), "sign", "--ks", str(output / "test.keystore"),
                     "--ks-pass", "pass:android", "--out", str(apk), str(output / "aligned.apk")])
     run([str(build_tools / "apksigner"), "verify", str(apk)])
+    wallpaper = output / "wallpaper.png"
+    shutil.copy2(SOURCE / "apk/res/drawable-nodpi/scarlet_wallpaper.png", wallpaper)
     metadata = {"platform": args.platform, "build_tools": args.build_tools,
         "commands": commands,
         "tools_sha256": {name: sha256(build_tools / name) for name in ("aapt2", "zipalign", "lib/d8.jar", "lib/apksigner.jar")},
         "package": "dev.scarlet.compat", "sha256": sha256(apk), "framework_sdk_sha256": sha256(jar),
+        "wallpaper_sha256": sha256(wallpaper),
         "sources": {str(p.relative_to(SOURCE)): sha256(p) for p in sorted((SOURCE / "apk").rglob("*")) if p.is_file()}}
     if args.runtime_probe:
         loader = output / "loader"
