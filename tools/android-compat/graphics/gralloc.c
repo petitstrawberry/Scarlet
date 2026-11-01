@@ -214,7 +214,6 @@ typedef struct Framebuffer {
     int enabled, closed;
     uint8_t *pixels;
     size_t capacity;
-    int32_t (*size)(uint32_t,uint32_t *,uint32_t *);
     int32_t (*present)(uint32_t,const void *,size_t,uint32_t,uint32_t,size_t);
     int32_t (*destroy)(uint32_t);
     int32_t (*poll)(SwsEvent *);
@@ -225,13 +224,13 @@ static int framebuffer_post(framebuffer_device_t *device,buffer_handle_t handle)
     Framebuffer *fb=(Framebuffer *)device;
     pthread_mutex_lock(&fb->lock); int result=-ENODEV;
     static unsigned diagnostic_frames;
+    static unsigned diagnostic_failures;
     SwsEvent event;
     for (int i=0;i<64 && fb->poll(&event)>0;i++)
         if (event.window_id==fb->window && event.kind==SWS_EVENT_DESTROYED) fb->closed=1;
     if (fb->closed) goto done;
     if (!fb->enabled) { result=0; goto done; }
-    uint32_t width,height;
-    if (fb->size(fb->window,&width,&height)<0 || !width || !height || width>MAX_DIMENSION || height>MAX_DIMENSION) goto done;
+    uint32_t width=device->width,height=device->height;
     size_t bytes=(size_t)width*height*4;
     if (bytes>MAX_BUFFER_BYTES) { result=-ENOMEM;goto done; }
     if (bytes>fb->capacity) {
@@ -243,16 +242,12 @@ static int framebuffer_post(framebuffer_device_t *device,buffer_handle_t handle)
     Mapping *m=find_locked(handle);
     result=-EINVAL;
     if (m && m->wire[WIDTH]==(int)device->width && m->wire[HEIGHT]==(int)device->height && !m->readers && !m->writer) {
-        /* Letterbox a fixed Android display when SWS changes the outer extent. */
-        uint32_t outw=width,outh=(uint64_t)width*device->height/device->width;
-        if (outh>height) { outh=height;outw=(uint64_t)height*device->width/device->height; }
-        uint32_t left=(width-outw)/2,top=(height-outh)/2;
-        memset(fb->pixels,0,bytes);
+        /* Keep the Android scanout extent stable. The scene presenter owns
+         * window chrome, resizing and aspect-preserving letterboxing. */
         int bpp=pixel_bytes(m->wire[FORMAT]);
-        for (uint32_t y=0;y<outh;y++) for (uint32_t x=0;x<outw;x++) {
-            size_t sx=(uint64_t)x*device->width/outw,sy=(uint64_t)y*device->height/outh;
-            const uint8_t *p=(const uint8_t *)m->address+(sy*m->wire[STRIDE]+sx)*bpp;
-            uint8_t *q=fb->pixels+((y+top)*width+x+left)*4;
+        for (uint32_t y=0;y<height;y++) for (uint32_t x=0;x<width;x++) {
+            const uint8_t *p=(const uint8_t *)m->address+(y*m->wire[STRIDE]+x)*bpp;
+            uint8_t *q=fb->pixels+(y*width+x)*4;
             if (m->wire[FORMAT]==HAL_PIXEL_FORMAT_BGRA_8888) memcpy(q,p,4);
             else if (bpp==4) { q[0]=p[2];q[1]=p[1];q[2]=p[0];q[3]=m->wire[FORMAT]==HAL_PIXEL_FORMAT_RGBX_8888 ? 255 : p[3]; }
             else { uint16_t rgb=(uint16_t)p[0]|(uint16_t)p[1]<<8;q[0]=(rgb&31)*255/31;q[1]=((rgb>>5)&63)*255/63;q[2]=(rgb>>11)*255/31;q[3]=255; }
@@ -269,6 +264,8 @@ static int framebuffer_post(framebuffer_device_t *device,buffer_handle_t handle)
                 width,height,nonzero);
     }
 done:
+    if (result && __atomic_fetch_add(&diagnostic_failures,1,__ATOMIC_RELAXED)<8)
+        fprintf(stderr,"SCARLET_ANDROID_FB_POST_ERROR result=%d\n",result);
     pthread_mutex_unlock(&fb->lock);return result;
 }
 static int framebuffer_close_device(hw_device_t *device) {
@@ -295,23 +292,21 @@ static int open_framebuffer(const hw_module_t *module,hw_device_t **device) {
     if (!fb) return -ENOMEM;
     fb->client=dlopen("libsws_client_c.so",RTLD_NOW|RTLD_LOCAL|RTLD_NODELETE);
     if (!fb->client) { fprintf(stderr,"SWS framebuffer client load failed: %s\n",dlerror());free(fb);return -ENODEV; }
-    int32_t (*create)(const char *,const char *,uint32_t,uint32_t,uint32_t,uint32_t *)=dlsym(fb->client,"sws_window_create_ex");
-    fb->size=dlsym(fb->client,"sws_window_size");fb->present=dlsym(fb->client,"sws_window_present");
+    int32_t (*create)(const char *,uint32_t,uint32_t,uint32_t,uint32_t *)=dlsym(fb->client,"sws_scene_chrome_create");
+    fb->present=dlsym(fb->client,"sws_scene_chrome_present");
     fb->destroy=dlsym(fb->client,"sws_window_destroy");fb->poll=dlsym(fb->client,"sws_poll_event");
     fb->action=dlsym(fb->client,"sws_window_action");
     fb->fullscreen=dlsym(fb->client,"sws_window_fullscreen");
     uint32_t width=640,height=480;
-    if (!create || !fb->size || !fb->present || !fb->destroy || !fb->poll || !fb->action ||
-        create("dev.scarlet.android","Android",width,height,0,&fb->window)<0) { dlclose(fb->client);free(fb);return -ENODEV; }
-    /* The Android framebuffer is the foreground device surface. Ask SWS to
-     * use the complete primary output instead of presenting a fixed-size
-     * desktop window. The configure event is consumed by the fullscreen call,
-     * so query the resulting extent before publishing the HAL framebuffer. */
-    if (fb->fullscreen && fb->fullscreen(fb->window,1)<0)
+    if (!create || !fb->present || !fb->destroy || !fb->poll || !fb->action ||
+        create("Android",width,height,1,&fb->window)<0) { dlclose(fb->client);free(fb);return -ENODEV; }
+    /* Present Android as a normal resizable window with ScarletUI's shared
+     * titlebar, border and rounded clip. Fullscreen remains available for
+     * device-style launches, but is no longer forced for every boot. */
+    const char *fullscreen=getenv("SCARLET_ANDROID_FULLSCREEN");
+    int fullscreen_requested=fullscreen && !strcmp(fullscreen,"1");
+    if (fullscreen_requested && (!fb->fullscreen || fb->fullscreen(fb->window,1)<0))
         fprintf(stderr,"SWS framebuffer fullscreen request failed\n");
-    if (fb->size(fb->window,&width,&height)<0 || !width || !height || width>MAX_DIMENSION || height>MAX_DIMENSION) {
-        fb->destroy(fb->window);dlclose(fb->client);free(fb);return -ENODEV;
-    }
     /* Initialize the ABI's const fields as a whole object, before publication. */
     framebuffer_device_t initialized={
         .common={.tag=HARDWARE_DEVICE_TAG,.version=0,.module=(hw_module_t *)module,.close=framebuffer_close_device},
@@ -321,7 +316,7 @@ static int open_framebuffer(const hw_module_t *module,hw_device_t **device) {
     };
     memcpy(&fb->device,&initialized,sizeof(initialized));
     pthread_mutex_init(&fb->lock,NULL);fb->enabled=1;*device=&fb->device.common;
-    fprintf(stderr,"SCARLET_ANDROID_FRAMEBUFFER_READY width=%u height=%u\n",width,height);
+    fprintf(stderr,"SCARLET_ANDROID_FRAMEBUFFER_READY width=%u height=%u fullscreen=%d chrome=scarlet-ui\n",width,height,fullscreen_requested);
     return 0;
 }
 static int allocation_close(hw_device_t *device) { free(device);return 0; }
