@@ -15,7 +15,10 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub const MAX_MESSAGE_SIZE: usize = 256 * 1024;
 pub const MAX_MESSAGE_OBJECTS: usize = 64;
-const MAX_IN_FLIGHT: usize = 64;
+// Stock Android services fan out package and lifecycle callbacks across many
+// binder threads. A legacy 64-call endpoint budget is reachable during normal
+// Launcher startup and turns into an EAGAIN that libbinder treats as fatal.
+pub(crate) const MAX_IN_FLIGHT: usize = 256;
 pub const MAX_CALL_DEPTH: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

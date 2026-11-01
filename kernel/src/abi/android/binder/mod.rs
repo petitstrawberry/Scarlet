@@ -418,7 +418,7 @@ impl BinderFile {
                         if thread.outgoing().is_some() {return Err(errno::EINVAL);}
                         if thread.stack.len() >= crate::ipc::rpc::MAX_CALL_DEPTH {return Err(errno::E2BIG);}
                     }
-                    if thread.completed.len() >= 64 {
+                    if thread.completed.len() >= crate::ipc::rpc::MAX_IN_FLIGHT {
                         return Err(errno::EAGAIN);
                     }
                     if oneway {
@@ -475,7 +475,7 @@ impl BinderFile {
                     let request = {
                         let mut state = self.state.lock();
                         let thread = state.threads.get_mut(&tid).unwrap();
-                        if thread.completed.len() >= 64 {
+                        if thread.completed.len() >= crate::ipc::rpc::MAX_IN_FLIGHT {
                             return Err(errno::EAGAIN);
                         }
                         if thread.incoming().is_none() {return Err(errno::EINVAL);}

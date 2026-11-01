@@ -420,7 +420,7 @@ and synchronous calls can proceed while that notification is in service.
 The queue bound includes both queued and delivered notifications. One-way
 callbacks are also allowed while a thread handles a synchronous request.
 
-Limits: 64 in-flight native calls/notifications per endpoint, 64 tracked threads per Binder
+Limits: 256 in-flight native calls/notifications per endpoint, 64 tracked threads per Binder
 open, 1,024 local/retired nodes, 1,024 imported handles and 1,024 death records
 (including pending clear acknowledgements), one incoming/outgoing
 call per thread, at most 64 flat objects per message, and a

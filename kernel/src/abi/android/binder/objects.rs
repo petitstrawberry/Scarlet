@@ -977,7 +977,7 @@ mod tests {
     fn binder_failed_transport_admission_leaves_no_acquisition_work() {
         let owner = file(domain(Environment::new(), 0));
         let destination = RpcEndpoint::new();
-        let calls: Vec<_> = (0..64)
+        let calls: Vec<_> = (0..crate::ipc::rpc::MAX_IN_FLIGHT)
             .map(|_| destination.send(message_empty()).unwrap())
             .collect();
         let lease = owner
