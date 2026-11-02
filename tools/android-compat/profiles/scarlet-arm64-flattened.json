@@ -32,7 +32,7 @@
   ],
   "boot_properties": {
     "ro.apex.updatable": "false",
-    "ro.scarlet.autostart": "dev.scarlet.compat/.MainActivity",
+    "ro.scarlet.autostart": "dev.scarlet.compat/dev.scarlet.compat.MainActivity",
     "ro.scarlet.display_policy": "awake",
     "ro.crypto.state": "unencrypted",
     "ro.zygote": "zygote64",
