@@ -256,7 +256,7 @@ def configure(output, stock, profile, contexts, metadata):
         if not re.fullmatch(r"[A-Za-z0-9_.]+/[A-Za-z0-9_.]+", autostart):
             raise ValueError("invalid autostart component")
         policy_services += (
-            "\nservice scarlet-autostart /system/bin/cmd activity start -n " + autostart + "\n"
+            "\nservice scarlet-autostart /system/bin/cmd activity start --user 0 -n " + autostart + "\n"
             "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
         )
     if policy_services:
