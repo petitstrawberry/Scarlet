@@ -280,6 +280,7 @@
     "/vendor/bin/hw/android.hardware.gatekeeper@1.0-service.software": "u:object_r:hal_gatekeeper_default_exec:s0",
     "/system/bin/storaged": "u:object_r:storaged_exec:s0"
     ,"/system/bin/cmd": "u:object_r:scarlet_policy_exec:s0"
+    ,"/system/app/ScarletCompat/ScarletCompat.apk": "u:object_r:system_file:s0"
   },
   "exec_transitions": [
     [
