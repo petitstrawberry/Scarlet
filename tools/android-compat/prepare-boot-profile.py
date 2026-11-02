@@ -261,6 +261,9 @@ def configure(output, stock, profile, contexts, metadata):
             "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
             "\nservice scarlet-autostart /system/bin/cmd activity start --user 0 -n " + autostart + "\n"
             "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
+            "\nservice scarlet-autostart-intent /system/bin/cmd activity start --user 0 "
+            "-a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p " + package + "\n"
+            "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
         )
     if policy_services:
         manager_init += policy_services + "\non property:sys.boot_completed=1\n"
@@ -269,10 +272,14 @@ def configure(output, stock, profile, contexts, metadata):
         if autostart is not None:
             manager_init += "    start scarlet-install-existing\n"
     if autostart is not None:
-        # Chain the launch after the install state is refreshed for user 0.
+        # Chain the launch after the primary-user install state is refreshed.
         manager_init += (
             "\non property:init.svc.scarlet-install-existing=stopped\n"
             "    start scarlet-autostart\n"
+        )
+        manager_init += (
+            "\non property:init.svc.scarlet-autostart=stopped\n"
+            "    start scarlet-autostart-intent\n"
         )
     (output / "scarlet/boot/init.rc").write_text(manager_init)
     # /data_mirror is a ramdisk directory on a real device; the generic
