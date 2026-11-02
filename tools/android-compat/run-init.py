@@ -35,6 +35,10 @@ def main():
         index=arguments.index("--sws-native");compositor=Path(arguments[index+1]).resolve();del arguments[index:index+2]
     if capture_frame and not compositor:raise ValueError("frame capture requires --sws-native")
     launcher_app=None
+    data_source=None
+    if "--seed-data" in arguments:
+        index=arguments.index("--seed-data");data_source=Path(arguments[index+1]).resolve();del arguments[index:index+2]
+        if not data_source.is_file():raise ValueError("seed data image is missing")
     if "--launcher-app" in arguments:
         index=arguments.index("--launcher-app");launcher_app=Path(arguments[index+1]).resolve();del arguments[index:index+2]
     stock_product=None
@@ -81,6 +85,28 @@ def main():
 
     def stage(inputs, runtime, stock, root):
         metadata = original(inputs, runtime, stock, root)
+        if data_source:
+            # Reuse a previously booted /data while keeping the freshly
+            # prepared system image, so a new manager policy is exercised
+            # without paying the first-boot dexopt cost again.
+            import subprocess
+            with tempfile.TemporaryDirectory(prefix="scarlet-seed-data-") as directory:
+                seeded=Path(directory)/"data"
+                # The prepared rootfs keeps the Android tree below /systems,
+                # so the seed image stores user data at that path.
+                for source in ("/systems/android-aarch64/data","/data"):
+                    info=subprocess.run(["debugfs","-R",f"stat {source}",str(data_source)],
+                                        capture_output=True,text=True)
+                    if "Type: directory" in info.stdout:break
+                else:
+                    raise ValueError("seed image has no /data")
+                subprocess.run(["debugfs","-R",f"rdump {source} {directory}",str(data_source)],
+                               check=True,capture_output=True)
+                if not seeded.is_dir():
+                    # debugfs rdump copies the directory contents directly.
+                    seeded=Path(directory)
+                if not any(seeded.iterdir()):raise ValueError("seed image has no /data")
+                shutil.copytree(seeded,root/"data",dirs_exist_ok=True,symlinks=True)
         if compositor:
             destination=root.parent.parent/"bin/sws";shutil.copy2(compositor,destination)
             if sha256(destination)!=sha256(compositor):raise ValueError("changed native SWS executable")
