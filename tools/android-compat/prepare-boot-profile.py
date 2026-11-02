@@ -255,7 +255,10 @@ def configure(output, stock, profile, contexts, metadata):
     if autostart is not None:
         if not re.fullmatch(r"[A-Za-z0-9_.]+/[A-Za-z0-9_.]+", autostart):
             raise ValueError("invalid autostart component")
+        package = autostart.split("/", 1)[0]
         policy_services += (
+            "\nservice scarlet-install-existing /system/bin/cmd package install-existing --user 0 " + package + "\n"
+            "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
             "\nservice scarlet-autostart /system/bin/cmd activity start --user 0 -n " + autostart + "\n"
             "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
         )
@@ -264,7 +267,13 @@ def configure(output, stock, profile, contexts, metadata):
         if display_policy == "awake":
             manager_init += "    start scarlet-display-policy\n"
         if autostart is not None:
-            manager_init += "    start scarlet-autostart\n"
+            manager_init += "    start scarlet-install-existing\n"
+    if autostart is not None:
+        # Chain the launch after the install state is refreshed for user 0.
+        manager_init += (
+            "\non property:init.svc.scarlet-install-existing=stopped\n"
+            "    start scarlet-autostart\n"
+        )
     (output / "scarlet/boot/init.rc").write_text(manager_init)
     # /data_mirror is a ramdisk directory on a real device; the generic
     # Android init configuration mounts a private tmpfs over it before making
