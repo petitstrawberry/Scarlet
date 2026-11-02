@@ -3063,6 +3063,11 @@
       3
     ],
     [
+      "u:r:scarlet_policy:s0",
+      "u:object_r:package_service:s0",
+      3
+    ],
+    [
       "u:r:keystore:s0",
       "u:object_r:gatekeeper_service:s0",
       2
