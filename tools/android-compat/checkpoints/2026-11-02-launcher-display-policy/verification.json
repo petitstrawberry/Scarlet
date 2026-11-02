@@ -1,0 +1,36 @@
+{
+  "kind": "scarlet-android-manager-display-policy-v1",
+  "result": "PASS",
+  "scope": "The boot profile asks the manager to apply the display policy at sys.boot_completed=1 with the stock cmd tool; SettingsProvider accepts the write and Launcher3 keeps presenting its wallpapered home surface.",
+  "artifacts": {
+    "launcher-home.png": "6ed17701411aaf85e53235063f94f2facd3b15ad0d0eef8d5f746c1f65f64af6"
+  },
+  "markers": {
+    "policy_service": "init: starting service 'scarlet-display-policy'",
+    "setting_write": "callingUid=2000 call([settings, PUT_system, screen_off_timeout, Bundle[{_user=0, value=2147483647}]]) = null",
+    "setting_read": "GET_system, screen_off_timeout ... = Bundle[{value=2147483647}]",
+    "workspace": "LoaderTask|run: end"
+  },
+  "frame": {
+    "size": [
+      1280,
+      800
+    ],
+    "window_content": [
+      640,
+      480
+    ],
+    "visible": [
+      "window chrome",
+      "wallpaper",
+      "status bar",
+      "search pill",
+      "camera shortcut"
+    ]
+  },
+  "limitations": [
+    "The policy command must run with the shell package identity; a native process owned by the system user has no package and crashes SettingsProvider through AppOps.",
+    "Application auto-start is configured in the same profile, but the sample activity was not resolvable when the data image carried stale package state.",
+    "The dalvik cache is shared from an earlier boot; first-boot dexopt behavior is unchanged."
+  ]
+}
