@@ -91,10 +91,11 @@ def main():
             # without paying the first-boot dexopt cost again.
             import subprocess
             with tempfile.TemporaryDirectory(prefix="scarlet-seed-data-") as directory:
-                seeded=Path(directory)/"data"
-                # The prepared rootfs keeps the Android tree below /systems,
-                # so the seed image stores user data at that path.
-                for source in ("/systems/android-aarch64/data","/data"):
+                seeded=Path(directory)/"dalvik-cache"
+                # Reuse only the compiled application cache: package manager
+                # state and per-app data come from the fresh image so the stock
+                # installation flow still runs.
+                for source in ("/systems/android-aarch64/data/dalvik-cache","/data/dalvik-cache"):
                     info=subprocess.run(["debugfs","-R",f"stat {source}",str(data_source)],
                                         capture_output=True,text=True)
                     if "Type: directory" in info.stdout:break
@@ -105,8 +106,8 @@ def main():
                 if not seeded.is_dir():
                     # debugfs rdump copies the directory contents directly.
                     seeded=Path(directory)
-                if not any(seeded.iterdir()):raise ValueError("seed image has no /data")
-                shutil.copytree(seeded,root/"data",dirs_exist_ok=True,symlinks=True)
+                if not any(seeded.iterdir()):raise ValueError("seed image has no dalvik cache")
+                shutil.copytree(seeded,root/"data/dalvik-cache",dirs_exist_ok=True,symlinks=True)
         if compositor:
             destination=root.parent.parent/"bin/sws";shutil.copy2(compositor,destination)
             if sha256(destination)!=sha256(compositor):raise ValueError("changed native SWS executable")

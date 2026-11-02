@@ -248,7 +248,7 @@ def configure(output, stock, profile, contexts, metadata):
         # from the manager once the framework is up.
         policy_services += (
             "\nservice scarlet-display-policy /system/bin/cmd settings put system screen_off_timeout 2147483647\n"
-            "    class core\n    user system\n    group system\n    oneshot\n    disabled\n"
+            "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
         )
     if display_policy not in (None, "awake"):
         raise ValueError("unsupported display policy")
@@ -257,7 +257,7 @@ def configure(output, stock, profile, contexts, metadata):
             raise ValueError("invalid autostart component")
         policy_services += (
             "\nservice scarlet-autostart /system/bin/cmd activity start -n " + autostart + "\n"
-            "    class core\n    user system\n    group system\n    oneshot\n    disabled\n"
+            "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
         )
     if policy_services:
         manager_init += policy_services + "\non property:sys.boot_completed=1\n"

@@ -460,7 +460,7 @@
       "u:r:init:s0",
       "u:object_r:scarlet_policy_exec:s0",
       "u:r:scarlet_policy:s0",
-      1000
+      2000
     ]
   ],
   "resource_groups": {
