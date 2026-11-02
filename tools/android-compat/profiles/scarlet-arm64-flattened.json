@@ -32,6 +32,8 @@
   ],
   "boot_properties": {
     "ro.apex.updatable": "false",
+    "ro.scarlet.autostart": "dev.scarlet.compat/.MainActivity",
+    "ro.scarlet.display_policy": "awake",
     "ro.crypto.state": "unencrypted",
     "ro.zygote": "zygote64",
     "ro.hardware": "scarlet",
@@ -87,6 +89,7 @@
     "u:r:gatekeeperd:s0": 35,
     "u:r:hal_gatekeeper_default:s0": 36,
     "u:r:storaged:s0": 37
+    ,"u:r:scarlet_policy:s0": 38
   },
   "transitions": [
     [
@@ -276,6 +279,7 @@
     "/system/bin/gatekeeperd": "u:object_r:gatekeeper_exec:s0",
     "/vendor/bin/hw/android.hardware.gatekeeper@1.0-service.software": "u:object_r:hal_gatekeeper_default_exec:s0",
     "/system/bin/storaged": "u:object_r:storaged_exec:s0"
+    ,"/system/bin/cmd": "u:object_r:scarlet_policy_exec:s0"
   },
   "exec_transitions": [
     [
@@ -451,6 +455,12 @@
       "u:object_r:storaged_exec:s0",
       "u:r:storaged:s0",
       0
+    ],
+    [
+      "u:r:init:s0",
+      "u:object_r:scarlet_policy_exec:s0",
+      "u:r:scarlet_policy:s0",
+      1000
     ]
   ],
   "resource_groups": {
@@ -3036,6 +3046,21 @@
       "u:r:storaged:s0",
       "u:object_r:storaged_service:s0",
       1
+    ],
+    [
+      "u:r:scarlet_policy:s0",
+      "u:object_r:settings_service:s0",
+      3
+    ],
+    [
+      "u:r:scarlet_policy:s0",
+      "u:object_r:activity_service:s0",
+      3
+    ],
+    [
+      "u:r:scarlet_policy:s0",
+      "u:object_r:activity_task_service:s0",
+      3
     ],
     [
       "u:r:keystore:s0",

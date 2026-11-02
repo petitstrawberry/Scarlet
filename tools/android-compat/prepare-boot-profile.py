@@ -141,6 +141,7 @@ def prepare(archive, runtime, stock, profile_file, output):
                     system.dump("/" + relative, target)
                 queue.append(target)
     configure(output, stock, profile, contexts, metadata)
+    install_manager_command(output, profile, archive)
     metadata.update(result="PREPARED", activation="not executed", factory_apexes=payloads, needed=needed,
                     symlinks=aliases,
                     files={str(path.relative_to(output)): sha256(path) for path in sorted(output.rglob("*"))
@@ -238,6 +239,32 @@ def configure(output, stock, profile, contexts, metadata):
         "\non zygote-start && property:ro.crypto.state=unencrypted\n"
         "    trigger nonencrypted\n"
     )
+    display_policy = profile["boot_properties"].get("ro.scarlet.display_policy")
+    autostart = profile["boot_properties"].get("ro.scarlet.autostart")
+    policy_services = ""
+    if display_policy == "awake":
+        # The hosted device is presented as a desktop window: keep the display
+        # awake while that window exists by applying the stock system setting
+        # from the manager once the framework is up.
+        policy_services += (
+            "\nservice scarlet-display-policy /system/bin/cmd settings put system screen_off_timeout 2147483647\n"
+            "    class core\n    user system\n    group system\n    oneshot\n    disabled\n"
+        )
+    if display_policy not in (None, "awake"):
+        raise ValueError("unsupported display policy")
+    if autostart is not None:
+        if not re.fullmatch(r"[A-Za-z0-9_.]+/[A-Za-z0-9_.]+", autostart):
+            raise ValueError("invalid autostart component")
+        policy_services += (
+            "\nservice scarlet-autostart /system/bin/cmd activity start -n " + autostart + "\n"
+            "    class core\n    user system\n    group system\n    oneshot\n    disabled\n"
+        )
+    if policy_services:
+        manager_init += policy_services + "\non property:sys.boot_completed=1\n"
+        if display_policy == "awake":
+            manager_init += "    start scarlet-display-policy\n"
+        if autostart is not None:
+            manager_init += "    start scarlet-autostart\n"
     (output / "scarlet/boot/init.rc").write_text(manager_init)
     # /data_mirror is a ramdisk directory on a real device; the generic
     # Android init configuration mounts a private tmpfs over it before making
@@ -302,6 +329,47 @@ def install_incident_libraries(output, profile, archive):
                 continue
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
+
+
+def install_manager_command(output, profile, archive):
+    """Stage the stock cmd tool used to apply manager display and launch policy."""
+    properties = profile["boot_properties"]
+    if (properties.get("ro.scarlet.display_policy") is None and
+            properties.get("ro.scarlet.autostart") is None):
+        return
+    with tempfile.TemporaryDirectory(prefix="scarlet-manager-cmd-") as directory:
+        temporary = Path(directory)
+        extract_partitions(archive, temporary)
+        system = Ext4(temporary / "system.ext4")
+        queue = ["system/bin/cmd"]
+        seen = set()
+        while queue:
+            name = queue.pop()
+            if name in seen:
+                continue
+            if len(seen) >= 256:
+                raise ValueError("manager command dependency bound")
+            seen.add(name)
+            source = temporary / "files" / name
+            system.dump("/" + name, source)
+            digest = sha256(source)
+            destination = output / name
+            if destination.exists():
+                if sha256(destination) != digest:
+                    raise ValueError("conflicting manager command input: " + name)
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+            for dependency in elf_needed(source):
+                if dependency in ("libc.so", "libm.so", "libdl.so", "libdl_android.so", "ld-android.so"):
+                    continue
+                relative = "system/lib64/" + dependency
+                if relative in seen:
+                    continue
+                if "Type: regular" in system.command("stat " + quote_debugfs("/" + relative)):
+                    queue.append(relative)
+                elif not (output / relative).is_file():
+                    raise ValueError("missing manager command dependency: " + dependency)
 
 
 def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, service_image=None, firewall_compat=None, audio_start=None, audio_binder_compat=None):
@@ -414,6 +482,7 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
     configure(output,stock,profile,metadata["property_context_files"],metadata)
     if service_image:
         install_incident_libraries(output, profile, service_image)
+        install_manager_command(output, profile, service_image)
     for provider in sorted(providers_to_add):
         add_stock_provider(output,metadata,service_image,provider,firewall_compat,audio_start,audio_binder_compat)
     if refreshed_vintf:
