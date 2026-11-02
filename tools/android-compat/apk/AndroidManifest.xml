@@ -1,8 +1,7 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.scarlet.compat">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="dev.scarlet.compat"
+        android:forceQueryable="true">
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="32" />
-    <application android:label="@string/app_name" android:icon="@drawable/ic_scarlet"
-            android:roundIcon="@drawable/ic_scarlet"
-            android:theme="@android:style/Theme.Material.NoActionBar" android:allowBackup="false">
+    <application android:label="Scarlet" android:allowBackup="false">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
