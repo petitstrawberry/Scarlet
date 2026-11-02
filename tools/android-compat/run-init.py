@@ -36,9 +36,14 @@ def main():
     if capture_frame and not compositor:raise ValueError("frame capture requires --sws-native")
     launcher_app=None
     data_source=None
+    cache_source=None
     if "--seed-data" in arguments:
         index=arguments.index("--seed-data");data_source=Path(arguments[index+1]).resolve();del arguments[index:index+2]
         if not data_source.is_file():raise ValueError("seed data image is missing")
+    if "--seed-cache" in arguments:
+        index=arguments.index("--seed-cache");cache_source=Path(arguments[index+1]).resolve();del arguments[index:index+2]
+        if not cache_source.is_file():raise ValueError("seed cache image is missing")
+    if data_source and cache_source:raise ValueError("choose one seed image")
     if "--launcher-app" in arguments:
         index=arguments.index("--launcher-app");launcher_app=Path(arguments[index+1]).resolve();del arguments[index:index+2]
     stock_product=None
@@ -85,29 +90,31 @@ def main():
 
     def stage(inputs, runtime, stock, root):
         metadata = original(inputs, runtime, stock, root)
-        if data_source:
-            # Reuse a previously booted /data while keeping the freshly
-            # prepared system image, so a new manager policy is exercised
-            # without paying the first-boot dexopt cost again.
+        if data_source or cache_source:
+            # Reuse a previously booted /data, or only its compiled
+            # application cache, while the system tree comes from the freshly
+            # prepared inputs.
             import subprocess
             with tempfile.TemporaryDirectory(prefix="scarlet-seed-data-") as directory:
-                seeded=Path(directory)/"dalvik-cache"
-                # Reuse only the compiled application cache: package manager
-                # state and per-app data come from the fresh image so the stock
-                # installation flow still runs.
-                for source in ("/systems/android-aarch64/data/dalvik-cache","/data/dalvik-cache"):
-                    info=subprocess.run(["debugfs","-R",f"stat {source}",str(data_source)],
+                image=str(data_source or cache_source)
+                subdirectory="/dalvik-cache" if cache_source else ""
+                for source in (f"/systems/android-aarch64/data{subdirectory}",f"/data{subdirectory}"):
+                    info=subprocess.run(["debugfs","-R",f"stat {source}",image],
                                         capture_output=True,text=True)
                     if "Type: directory" in info.stdout:break
                 else:
                     raise ValueError("seed image has no /data")
-                subprocess.run(["debugfs","-R",f"rdump {source} {directory}",str(data_source)],
+                subprocess.run(["debugfs","-R",f"rdump {source} {directory}",image],
                                check=True,capture_output=True)
-                if not seeded.is_dir():
+                seeded=Path(directory)/"data"
+                if not seeded.is_dir() and not cache_source:
                     # debugfs rdump copies the directory contents directly.
                     seeded=Path(directory)
-                if not any(seeded.iterdir()):raise ValueError("seed image has no dalvik cache")
-                shutil.copytree(seeded,root/"data/dalvik-cache",dirs_exist_ok=True,symlinks=True)
+                if not seeded.is_dir():seeded=Path(directory)/"dalvik-cache"
+                if not seeded.is_dir():seeded=Path(directory)
+                if not any(seeded.iterdir()):raise ValueError("seed image is empty")
+                target=root/"data/dalvik-cache" if cache_source else root/"data"
+                shutil.copytree(seeded,target,dirs_exist_ok=True,symlinks=True)
         if compositor:
             destination=root.parent.parent/"bin/sws";shutil.copy2(compositor,destination)
             if sha256(destination)!=sha256(compositor):raise ValueError("changed native SWS executable")
