@@ -1,4 +1,4 @@
-/* Bounded diagnostic supervisor. Init exit and observation timeout are distinct. */
+/* Init supervisor. A zero observation interval keeps an interactive session alive. */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,7 +60,8 @@ static void drain_logs(int fd) {
 int main(int argc,char **argv) {
  setvbuf(stdout,NULL,_IONBF,0);
  int observation=20;const char *requested=getenv("SCARLET_INIT_OBSERVE_SECONDS");
- if(requested) {char *end=NULL;long value=strtol(requested,&end,10);if(!*requested || *end || value<20 || value>1800)return 16;observation=(int)value;}
+ if(requested) {char *end=NULL;long value=strtol(requested,&end,10);if(!*requested || *end || value<0 || (value>0 && value<20) || value>1800)return 16;observation=(int)value;}
+ if(!observation && getenv("SCARLET_INIT_JAVA_DUMP"))return 16;
  if(argc==2 && !strcmp(argv[1],"inside")) {
   printf("SCARLET_INIT_NAMESPACE_INSIDE pid=%d ppid=%d tid=%ld\n",getpid(),getppid(),syscall(SYS_gettid));
   if(getpid()!=1 || getppid()!=0 || syscall(SYS_gettid)!=1)return 3;
@@ -92,9 +93,9 @@ int main(int argc,char **argv) {
  }
  printf("SCARLET_INIT_NAMESPACE_OUTER child=%d\n",child);
  struct timespec started,now;if(clock_gettime(CLOCK_MONOTONIC,&started))return 15;
- for(int tick=0;tick<observation*10;tick++) {
+ for(unsigned long long tick=0;!observation || tick<(unsigned)observation*10;tick++) {
   if(clock_gettime(CLOCK_MONOTONIC,&now))return 15;
-  if(now.tv_sec-started.tv_sec>observation || (now.tv_sec-started.tv_sec==observation && now.tv_nsec>=started.tv_nsec))break;
+  if(observation && (now.tv_sec-started.tv_sec>observation || (now.tv_sec-started.tv_sec==observation && now.tv_nsec>=started.tv_nsec)))break;
   drain_logs(logfd);
   int status;pid_t got=waitpid(child,&status,WNOHANG);
   if(got==child){
