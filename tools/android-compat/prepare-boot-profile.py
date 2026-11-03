@@ -567,7 +567,7 @@ def add_stock_provider(output, metadata, archive, name, firewall_compat=None, au
                     raise ValueError("missing stock service dependency: "+dependency)
         if service_name=="netd":
             firewall_record=json.loads((firewall_compat/"build.json").read_text())
-            if (firewall_record.get("kind")!="scarlet-netd-firewall-compat-v1" or
+            if (firewall_record.get("kind")!="scarlet-netd-firewall-compat-v2" or
                     firewall_record.get("result")!="BUILT" or
                     firewall_record.get("source_sha256")!=sha256(SOURCE/"iptables-compat.c") or
                     firewall_record.get("binary_sha256")!=sha256(firewall_compat/"iptables-restore")):

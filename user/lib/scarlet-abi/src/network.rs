@@ -57,10 +57,43 @@ pub struct NetworkUpdateIpv4V1 {
     pub reserved: u32,
 }
 
+pub const TRAFFIC_CONFIGURE_VERSION_V1: u32 = 1;
+pub const TRAFFIC_CONFIGURE_METER_SET: u32 = 1;
+pub const TRAFFIC_CONFIGURE_METER_REMOVE: u32 = 2;
+pub const TRAFFIC_CONFIGURE_LINK_SET: u32 = 3;
+pub const TRAFFIC_CONFIGURE_LINK_CLEAR: u32 = 4;
+pub const TRAFFIC_CONFIGURE_GLOBAL_SET: u32 = 5;
+pub const TRAFFIC_CONFIGURE_GLOBAL_CLEAR: u32 = 6;
+pub const TRAFFIC_CONFIGURE_LINKS_CLEAR_METER: u32 = 7;
+
+/// Management adapter request for a named packet meter or its attachment to
+/// one link/global scope. Names are UTF-8, NUL-padded and bounded.
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetworkTrafficConfigureV1 {
+    pub version: u32,
+    pub operation: u32,
+    pub remaining: u64,
+    pub subject: [u8; 32],
+    pub meter: [u8; 32],
+}
+
+impl NetworkTrafficConfigureV1 {
+    pub fn subject_name(&self) -> Option<&str> {
+        let end = self.subject.iter().position(|byte| *byte == 0)?;
+        core::str::from_utf8(&self.subject[..end]).ok()
+    }
+    pub fn meter_name(&self) -> Option<&str> {
+        let end = self.meter.iter().position(|byte| *byte == 0)?;
+        core::str::from_utf8(&self.meter[..end]).ok()
+    }
+}
+
 const _: () = {
     assert!(core::mem::size_of::<NetworkLinkInfoV1>() == 64);
     assert!(core::mem::offset_of!(NetworkLinkInfoV1, mtu) == 56);
     assert!(core::mem::size_of::<NetworkUpdateIpv4V1>() == 40);
+    assert!(core::mem::size_of::<NetworkTrafficConfigureV1>() == 80);
 };
 
 #[cfg(test)]

@@ -138,7 +138,8 @@ class HostServicesTest(unittest.TestCase):
                b"    group root net_admin\n    socket dnsproxyd stream 0660 root inet\n"
                b"    onrestart restart zygote\n    onrestart restart zygote_secondary\n")
         managed,proof=build_netd(stock,b"stock netd")
-        self.assertNotIn(b"capabilities",managed)
+        self.assertIn(b"capabilities NET_ADMIN",managed)
+        self.assertNotIn(b"capabilities CHOWN",managed)
         self.assertIn(b"socket dnsproxyd",managed)
         self.assertIn(b"setprop bpf.progs_loaded 1",managed)
         self.assertIn(b"oneshot\n    disabled",managed)

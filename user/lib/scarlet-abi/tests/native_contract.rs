@@ -228,6 +228,9 @@ fn network_management_v1_layouts() {
         id: 0, generation: 8, address: 16, netmask: 20, gateway: 24,
         flags: 28, metric: 32, reserved: 36,
     });
+    assert_layout!(abi::network::NetworkTrafficConfigureV1, 80, 8, {
+        version: 0, operation: 4, remaining: 8, subject: 16, meter: 48,
+    });
 }
 
 #[test]
@@ -257,6 +260,7 @@ fn native_syscall_numbers() {
         SetTaskDeadline = 44, GetTaskDeadline = 45, SetSchedulerAttr = 46,
         GetSchedulerAttr = 47, GetSchedulerState = 48, FutexWait = 49,
         FutexWake = 50, GetKernelInfo = 51, SetSystemTime = 52, GetMemoryInfo = 53,
+        WakeDeadlineQuery = 54,
         RegisterAbiZone = 90, UnregisterAbiZone = 91,
         CreateNamespace = 92, HandleQuery = 100, HandleSetRole = 101,
         HandleClose = 102, HandleDuplicate = 103,
@@ -299,7 +303,7 @@ fn native_syscall_numbers() {
         NetworkListInterfaces = 914, NetworkConfigureIpv4 = 915,
         NetworkListInterfacesV2 = 916, NetworkClearIpv4 = 917,
         SocketGetLocalAddress = 918, SocketGetPeerAddress = 919,
-        NetworkListLinksV1 = 920, NetworkUpdateIpv4V1 = 921,
+        NetworkListLinksV1 = 920, NetworkUpdateIpv4V1 = 921, NetworkTrafficConfigureV1 = 922,
         GetCpuDebugInfo = 997, GetTaskDebugInfo = 998, ProfilerDump = 999,
         Shutdown = 1000, ShvVmCreate = 1100, ShvVcpuCreate = 1101,
         ShvVcpuRun = 1102, LsmLoad = 1200, LsmUnload = 1201, LsmList = 1202,

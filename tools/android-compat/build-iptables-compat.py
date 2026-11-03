@@ -18,9 +18,9 @@ def main():
     output.mkdir(parents=True);binary=output/"iptables-restore";source=SOURCE/"iptables-compat.c"
     command=[str(args.compiler.resolve()),"-std=c11","-O2","-Wall","-Wextra","-Werror",str(source),"-static","-o",str(binary)]
     subprocess.run(command,check=True)
-    record={"kind":"scarlet-netd-firewall-compat-v1","result":"BUILT",
+    record={"kind":"scarlet-netd-firewall-compat-v2","result":"BUILT",
             "source_sha256":sha256(source),"binary_sha256":sha256(binary),"commands":[command],
-            "limitation":"iptables rules are parsed for netd startup but netfilter packet filtering is unavailable"}
+            "limitation":"quota2 rules use native traffic meters; general netfilter rules remain unavailable"}
     (output/"build.json").write_text(json.dumps(record,indent=2)+"\n")
     print(json.dumps(record,indent=2))
 

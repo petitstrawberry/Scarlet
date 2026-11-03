@@ -1263,6 +1263,9 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         if let Some(fd) = super::proc_fd::open_task_directory(abi, &task, &absolute, flags) {
             return fd;
         }
+        if let Some(fd) = super::quota::open_proc_quota_file(abi, &task, &absolute, flags) {
+            return fd;
+        }
         if super::proc_fd::is_self_fd_directory(&absolute) {
             return super::proc_fd::open_self_fd_directory(abi, &task, flags);
         }
@@ -2514,6 +2517,13 @@ pub fn sys_newfstatat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     }
 
     if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs_for_proc, dirfd, &path_str)
+        && let Some(metadata) = super::quota::path_metadata(&absolute)
+    {
+        return write_linux_stat(&task, stat_ptr, &LinuxStat::from_metadata(&metadata))
+            .map(|_| 0)
+            .unwrap_or_else(errno::to_result);
+    }
+    if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs_for_proc, dirfd, &path_str)
         && let Some(metadata) = super::proc_text::path_metadata(&absolute)
     {
         return write_linux_stat(&task, stat_ptr, &LinuxStat::from_metadata(&metadata))
@@ -2689,6 +2699,15 @@ pub fn sys_statx(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         let Some(metadata) = metadata else {
             return errno::to_result(errno::ENOENT);
         };
+        let mut statx = unsafe { core::mem::zeroed::<LinuxStatx>() };
+        fill_statx_from_stat(&mut statx, &LinuxStat::from_metadata(&metadata), 0, mask);
+        return write_linux_statx(&task, statx_ptr, &statx)
+            .map(|_| 0)
+            .unwrap_or_else(errno::to_result);
+    }
+    if let Ok(absolute) = path_at_to_absolute(abi, &task, &vfs, dirfd, &path_str)
+        && let Some(metadata) = super::quota::path_metadata(&absolute)
+    {
         let mut statx = unsafe { core::mem::zeroed::<LinuxStatx>() };
         fill_statx_from_stat(&mut statx, &LinuxStat::from_metadata(&metadata), 0, mask);
         return write_linux_statx(&task, statx_ptr, &statx)
@@ -4258,6 +4277,9 @@ fn linux_access_path(
     }
     if let Some(metadata) = super::proc_text::path_metadata(path) {
         return linux_access_metadata(&metadata, true, mode);
+    }
+    if let Some(metadata) = super::quota::path_metadata(path) {
+        return linux_access_metadata(&metadata, false, mode);
     }
     let options = crate::fs::vfs_v2::manager::PathResolutionOptions {
         no_follow: flags & ACCESS_AT_SYMLINK_NOFOLLOW != 0,

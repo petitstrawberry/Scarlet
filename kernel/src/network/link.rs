@@ -60,6 +60,110 @@ impl LinkRegistry {
     }
 }
 impl NetworkManager {
+    fn valid_traffic_name(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() < 32
+            && name != "."
+            && name != ".."
+            && !name.contains('/')
+            && !name.as_bytes().contains(&0)
+    }
+
+    fn ipv4_layer(&self) -> Result<alloc::sync::Arc<dyn super::NetworkLayer>, &'static str> {
+        self.get_layer("ip").ok_or("IPv4 layer missing")
+    }
+
+    pub fn set_traffic_meter(&self, name: &str, remaining: u64) -> Result<(), &'static str> {
+        if !Self::valid_traffic_name(name) {
+            return Err("Invalid traffic meter name");
+        }
+        let mut meters = self.traffic_meters.write();
+        match meters.get(name) {
+            Some(meter) => meter.reset(remaining),
+            None => {
+                meters.insert(String::from(name), super::traffic_policy::Meter::new(remaining));
+                Ok(())
+            }
+        }
+    }
+
+    pub fn traffic_meter(&self, name: &str) -> Option<alloc::sync::Arc<super::traffic_policy::Meter>> {
+        self.traffic_meters.read().get(name).cloned()
+    }
+
+    pub fn remove_traffic_meter(&self, name: &str) -> Result<(), &'static str> {
+        if !Self::valid_traffic_name(name) {
+            return Err("Invalid traffic meter name");
+        }
+        if let Some(meter) = self.traffic_meters.write().remove(name) {
+            self.ipv4_layer()?
+                .as_any()
+                .downcast_ref::<super::ipv4::Ipv4Layer>()
+                .ok_or("IPv4 layer unavailable")?
+                .clear_traffic_meter(&meter);
+        }
+        Ok(())
+    }
+
+    pub fn set_interface_traffic_meter(
+        &self,
+        interface: &str,
+        meter: Option<&str>,
+    ) -> Result<(), &'static str> {
+        let mut links = self.link_lifecycle.lock();
+        links.refresh(self);
+        let link = links.records.get(interface).ok_or("Link removed")?;
+        let policy = match meter {
+            Some(name) => {
+                if !Self::valid_traffic_name(name) {
+                    return Err("Invalid traffic meter name");
+                }
+                let meter = self.traffic_meter(name).ok_or("Traffic meter missing")?;
+                Some(super::traffic_policy::Policy::deny_when_exhausted(meter))
+            }
+            None => None,
+        };
+        let name = link.interface_name().ok_or("Invalid link name")?;
+        self.ipv4_layer()?
+            .as_any()
+            .downcast_ref::<super::ipv4::Ipv4Layer>()
+            .ok_or("IPv4 layer unavailable")?
+            .set_traffic_policy(name, policy);
+        Ok(())
+    }
+
+    pub fn set_global_traffic_meter(&self, meter: Option<&str>) -> Result<(), &'static str> {
+        let policy = match meter {
+            Some(name) => {
+                if !Self::valid_traffic_name(name) {
+                    return Err("Invalid traffic meter name");
+                }
+                let meter = self.traffic_meter(name).ok_or("Traffic meter missing")?;
+                Some(super::traffic_policy::Policy::deny_when_exhausted(meter))
+            }
+            None => None,
+        };
+        self.ipv4_layer()?
+            .as_any()
+            .downcast_ref::<super::ipv4::Ipv4Layer>()
+            .ok_or("IPv4 layer unavailable")?
+            .set_global_traffic_policy(policy);
+        Ok(())
+    }
+
+    pub fn clear_link_traffic_meter(&self, name: &str) -> Result<(), &'static str> {
+        if !Self::valid_traffic_name(name) {
+            return Err("Invalid traffic meter name");
+        }
+        let Some(meter) = self.traffic_meter(name) else { return Ok(()); };
+        self.ipv4_layer()?
+            .as_any()
+            .downcast_ref::<super::ipv4::Ipv4Layer>()
+            .ok_or("IPv4 layer unavailable")?
+            .clear_links_using_traffic_meter(&meter);
+        Ok(())
+    }
+
     /// Bind native IPv4 packet rules to an existing link incarnation. External
     /// control adapters must check their management authority before calling.
     /// Sharing a meter across policies explicitly aggregates those links only.

@@ -247,6 +247,7 @@ pub struct Ipv4Layer {
     protocols: IrqRwSpinLock<BTreeMap<u8, alloc::sync::Arc<dyn NetworkLayer>>>,
     /// Explicit per-link rules, removed with the link registration.
     traffic_policies: IrqRwSpinLock<BTreeMap<String, alloc::sync::Arc<super::traffic_policy::Policy>>>,
+    global_traffic_policy: IrqRwSpinLock<Option<alloc::sync::Arc<super::traffic_policy::Policy>>>,
     /// Statistics
     stats: IrqRwSpinLock<NetworkLayerStats>,
     /// Default TTL
@@ -261,6 +262,7 @@ impl Ipv4Layer {
             routing_table: IrqRwSpinLock::new(Vec::new()),
             protocols: IrqRwSpinLock::new(BTreeMap::new()),
             traffic_policies: IrqRwSpinLock::new(BTreeMap::new()),
+            global_traffic_policy: IrqRwSpinLock::new(None),
             stats: IrqRwSpinLock::new(NetworkLayerStats::default()),
             default_ttl: 64,
         })
@@ -306,8 +308,34 @@ impl Ipv4Layer {
         direction: super::traffic::Direction,
         bytes: usize,
     ) -> bool {
+        let global = self.global_traffic_policy.read().clone();
+        if global.is_some_and(|policy| !policy.admit(direction, bytes)) {
+            return false;
+        }
         let policy = self.traffic_policies.read().get(interface).cloned();
         policy.is_none_or(|policy| policy.admit(direction, bytes))
+    }
+
+    pub(super) fn set_global_traffic_policy(
+        &self,
+        policy: Option<alloc::sync::Arc<super::traffic_policy::Policy>>,
+    ) {
+        *self.global_traffic_policy.write() = policy;
+    }
+
+    pub(super) fn clear_traffic_meter(&self, meter: &alloc::sync::Arc<super::traffic_policy::Meter>) {
+        self.traffic_policies.write().retain(|_, policy| !policy.uses_meter(meter));
+        let mut global = self.global_traffic_policy.write();
+        if global.as_ref().is_some_and(|policy| policy.uses_meter(meter)) {
+            *global = None;
+        }
+    }
+
+    pub(super) fn clear_links_using_traffic_meter(
+        &self,
+        meter: &alloc::sync::Arc<super::traffic_policy::Meter>,
+    ) {
+        self.traffic_policies.write().retain(|_, policy| !policy.uses_meter(meter));
     }
 
     /// Add an IPv4 address to an interface

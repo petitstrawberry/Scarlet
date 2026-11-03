@@ -265,7 +265,7 @@ pub fn sys_setgroups(_abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
         .map_or_else(|_| errno::to_result(errno::EPERM), |_| 0)
 }
 
-const CAP_MAP: [(u32, u64); 11] = [
+const CAP_MAP: [(u32, u64); 12] = [
     (CHANGE_PRINCIPAL, 1 << 7),
     (CHANGE_GROUPS, 1 << 6),
     (MANAGE_MOUNTS, 1 << 21),
@@ -277,6 +277,7 @@ const CAP_MAP: [(u32, u64); 11] = [
     (MANAGE_DELEGATION, 1 << 8),
     (RESERVE_WAKE, 1 << 35),
     (INHIBIT_SUSPEND, 1 << 36),
+    (MANAGE_TRAFFIC, 1 << 12),
 ];
 fn linux_caps(authority: u32) -> u64 {
     CAP_MAP
@@ -526,6 +527,7 @@ mod tests {
             Err(errno::EPERM)
         );
         assert!(c.set_authority(ALL_AUTHORITY, ALL_AUTHORITY).is_err());
+        assert_eq!(native_caps(1u64 << 12), Ok(MANAGE_TRAFFIC));
         assert_eq!(native_caps(1u64 << 63), Err(errno::EOPNOTSUPP));
     }
     #[test_case]

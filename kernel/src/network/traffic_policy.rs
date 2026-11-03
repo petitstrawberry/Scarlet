@@ -221,6 +221,19 @@ impl Policy {
         }
         true
     }
+    pub(crate) fn uses_meter(&self, meter: &Arc<Meter>) -> bool {
+        self.rules.iter().any(|rule| Arc::ptr_eq(&rule.meter, meter))
+    }
+    pub fn deny_when_exhausted(meter: Arc<Meter>) -> Arc<Self> {
+        Arc::new(Self {
+            rules: alloc::vec![Rule {
+                meter,
+                direction: None,
+                boundary: Boundary::Exclusive,
+                action: Action::DenyExhausted,
+            }],
+        })
+    }
 }
 
 #[cfg(test)]

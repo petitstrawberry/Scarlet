@@ -165,7 +165,21 @@ pub fn list_interface_configs() -> Result<Vec<NetworkInterfaceConfig>, HandleErr
     Ok(records[..count].to_vec())
 }
 
-pub use scarlet_abi::network::{NetworkLinkInfoV1, NetworkUpdateIpv4V1};
+pub use scarlet_abi::network::{
+    NetworkLinkInfoV1, NetworkTrafficConfigureV1, NetworkUpdateIpv4V1,
+};
+
+/// Apply a named native packet-meter operation.
+pub fn configure_traffic(request: &NetworkTrafficConfigureV1) -> Result<(), HandleError> {
+    // SAFETY: request is fully initialized and remains borrowed through the call.
+    let result = unsafe {
+        syscall1(
+            Syscall::NetworkTrafficConfigureV1,
+            request as *const NetworkTrafficConfigureV1 as usize,
+        )
+    };
+    HandleError::from_syscall_result(result).map(|_| ())
+}
 
 /// Return a complete link snapshot, retrying if devices were added during sizing.
 pub fn list_links() -> Result<Vec<NetworkLinkInfoV1>, HandleError> {

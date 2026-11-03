@@ -325,15 +325,15 @@ def build_netd(stock_rc,binary):
     if stock_rc.count(restart)!=1:raise ValueError("changed netd restart policy")
     managed=(stock_rc.replace(marker,b"# eBPF loading is not attached to this boot profile.\n"
         b"on init\n    setprop bpf.progs_loaded 1\n\n"+marker)
-        .replace(capabilities,b"")
+        .replace(capabilities,b"    capabilities NET_ADMIN\n")
         .replace(restart,b"# A failed optional network daemon must not restart Zygote.\n    oneshot\n    disabled\n"))
     digest=lambda data:hashlib.sha256(data).hexdigest()
     return managed,{"source_rc":NETD_STOCK_RC,"source_rc_sha256":digest(stock_rc),
                     "binary_sha256":digest(binary),"managed_rc_sha256":digest(managed),
                     "firewall_binary":NETD_FIREWALL_BINARY,"firewall_aliases":NETD_FIREWALL_ALIASES,
-                    "firewall_implementation":"scarlet-compat-v1","packet_filtering":"unavailable",
+                    "firewall_implementation":"scarlet-compat-v2","packet_filtering":"quota2-native-ipv4",
                     "bpf_loader":"unavailable",
-                    "omitted_capabilities":["CHOWN","DAC_OVERRIDE","DAC_READ_SEARCH","FOWNER","IPC_LOCK","KILL","NET_ADMIN","NET_BIND_SERVICE","NET_RAW","SETUID","SETGID"]}
+                    "omitted_capabilities":["CHOWN","DAC_OVERRIDE","DAC_READ_SEARCH","FOWNER","IPC_LOCK","KILL","NET_BIND_SERVICE","NET_RAW","SETUID","SETGID"]}
 
 
 def build_audioserver(stock_rc,binary):
@@ -507,8 +507,8 @@ def validate_staged(metadata):
                 record.get("bpf_loader")!="unavailable" or
                 record.get("firewall_binary")!=NETD_FIREWALL_BINARY or
                 record.get("firewall_aliases")!=NETD_FIREWALL_ALIASES or
-                record.get("firewall_implementation")!="scarlet-compat-v1" or
-                record.get("packet_filtering")!="unavailable" or
+                record.get("firewall_implementation")!="scarlet-compat-v2" or
+                record.get("packet_filtering")!="quota2-native-ipv4" or
                 not record.get("omitted_capabilities")):
             raise ValueError("changed netd provider inputs")
         files=record.get("files",{})

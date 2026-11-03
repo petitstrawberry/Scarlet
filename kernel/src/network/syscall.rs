@@ -1412,3 +1412,54 @@ pub fn sys_network_update_ipv4_v1(tf: &mut Trapframe) -> usize {
         Err(_) => usize::MAX,
     }
 }
+
+pub fn sys_network_traffic_configure_v1(tf: &mut Trapframe) -> usize {
+    let Some(task) = mytask() else { return usize::MAX; };
+    tf.increment_pc_next(&task);
+    if !task.credentials.read().permits(crate::shield::identity::MANAGE_TRAFFIC) {
+        return usize::MAX;
+    }
+    let mut request = scarlet_abi::network::NetworkTrafficConfigureV1::default();
+    let bytes = unsafe {
+        core::slice::from_raw_parts_mut(
+            (&mut request as *mut scarlet_abi::network::NetworkTrafficConfigureV1).cast::<u8>(),
+            80,
+        )
+    };
+    if copy_from_user(&task, tf.get_arg(0), bytes).is_err()
+        || request.version != scarlet_abi::network::TRAFFIC_CONFIGURE_VERSION_V1
+    {
+        return usize::MAX;
+    }
+    let manager = NetworkManager::get_manager();
+    let result = match request.operation {
+        scarlet_abi::network::TRAFFIC_CONFIGURE_METER_SET => request
+            .subject_name()
+            .ok_or("Invalid meter name")
+            .and_then(|name| manager.set_traffic_meter(name, request.remaining)),
+        scarlet_abi::network::TRAFFIC_CONFIGURE_METER_REMOVE => request
+            .subject_name()
+            .ok_or("Invalid meter name")
+            .and_then(|name| manager.remove_traffic_meter(name)),
+        scarlet_abi::network::TRAFFIC_CONFIGURE_LINK_SET => request
+            .subject_name()
+            .zip(request.meter_name())
+            .ok_or("Invalid link meter")
+            .and_then(|(interface, meter)| manager.set_interface_traffic_meter(interface, Some(meter))),
+        scarlet_abi::network::TRAFFIC_CONFIGURE_LINK_CLEAR => request
+            .subject_name()
+            .ok_or("Invalid link name")
+            .and_then(|interface| manager.set_interface_traffic_meter(interface, None)),
+        scarlet_abi::network::TRAFFIC_CONFIGURE_GLOBAL_SET => request
+            .meter_name()
+            .ok_or("Invalid global meter")
+            .and_then(|meter| manager.set_global_traffic_meter(Some(meter))),
+        scarlet_abi::network::TRAFFIC_CONFIGURE_GLOBAL_CLEAR => manager.set_global_traffic_meter(None),
+        scarlet_abi::network::TRAFFIC_CONFIGURE_LINKS_CLEAR_METER => request
+            .meter_name()
+            .ok_or("Invalid traffic meter")
+            .and_then(|meter| manager.clear_link_traffic_meter(meter)),
+        _ => Err("Unknown traffic operation"),
+    };
+    result.map_or(usize::MAX, |_| 0)
+}

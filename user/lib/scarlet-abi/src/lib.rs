@@ -1141,6 +1141,7 @@ pub enum Syscall {
     NetworkClearIpv4 = 917,
     NetworkListLinksV1 = 920,
     NetworkUpdateIpv4V1 = 921,
+    NetworkTrafficConfigureV1 = 922,
     /// Write the socket's local IPv4 address to an eight-byte native address buffer.
     SocketGetLocalAddress = 918,
     /// Write the socket's peer IPv4 address to an eight-byte native address buffer.

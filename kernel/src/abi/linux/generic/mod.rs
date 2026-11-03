@@ -19,6 +19,7 @@ pub mod pipe;
 pub mod proc;
 mod proc_fd;
 mod proc_text;
+pub(crate) mod quota;
 mod mount_namespace;
 mod record_lock;
 pub mod signal;

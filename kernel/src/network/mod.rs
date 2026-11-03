@@ -287,6 +287,9 @@ pub struct NetworkManager {
 
     /// Network configuration
     network_config: IrqRwSpinLock<NetworkConfig>,
+
+    /// Named metering objects shared by management adapters and packet rules.
+    traffic_meters: IrqRwSpinLock<BTreeMap<String, Arc<traffic_policy::Meter>>>,
 }
 
 impl NetworkManager {
@@ -306,6 +309,7 @@ impl NetworkManager {
             default_interface: IrqRwSpinLock::new(None),
             arp_cache: IrqRwSpinLock::new(BTreeMap::new()),
             network_config: IrqRwSpinLock::new(NetworkConfig::default()),
+            traffic_meters: IrqRwSpinLock::new(BTreeMap::new()),
         }
     }
 
@@ -1134,5 +1138,25 @@ mod tests {
             manager.lookup_named_socket(name),
             Err(SocketError::ConnectionRefused)
         ));
+    }
+
+    #[test_case]
+    fn named_global_meter_is_shared_with_the_real_ipv4_admission_path() {
+        let manager = NetworkManager::new();
+        let ip = ipv4::Ipv4Layer::new();
+        manager.register_layer("ip", ip.clone());
+        manager.set_traffic_meter("globalAlert", 10).unwrap();
+        assert_eq!(
+            manager.set_interface_traffic_meter("missing", Some("globalAlert")),
+            Err("Link removed")
+        );
+        manager.set_global_traffic_meter(Some("globalAlert")).unwrap();
+        assert!(ip.admit_traffic("any", traffic::Direction::Receive, 6));
+        assert!(!ip.admit_traffic("any", traffic::Direction::Transmit, 5));
+        assert_eq!(manager.traffic_meter("globalAlert").unwrap().snapshot().remaining, 0);
+        manager.set_global_traffic_meter(None).unwrap();
+        assert!(ip.admit_traffic("any", traffic::Direction::Transmit, 5));
+        manager.remove_traffic_meter("globalAlert").unwrap();
+        assert!(manager.traffic_meter("globalAlert").is_none());
     }
 }
