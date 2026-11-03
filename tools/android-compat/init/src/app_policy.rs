@@ -17,10 +17,10 @@ fn read(view: &VfsView, path: &str, bound: usize) -> Result<Option<String>, &'st
         return Ok(None);
     };
     let stream = file.as_stream().map_err(|_| "manager input stream")?;
-    let mut bytes = std::vec![0;bound];
+    let mut bytes = std::vec![0;bound + 1];
     let mut length = 0;
     loop {
-        if length == bound {
+        if length > bound {
             return Err("manager input bound");
         }
         let count = stream
@@ -96,9 +96,10 @@ impl Manager {
                     error
                 })?;
             let domain = self.label(&mapping.domain, &mut added)?;
-            let file = self.label(&mapping.file, &mut added)?;
             subjects.insert(domain);
-            files.insert(file);
+            if let Some(name) = &mapping.file {
+                files.insert(self.label(name, &mut added)?);
+            }
             transitions.insert((domain, uid));
             registrations.push((key, mapping.domain, mapping.file));
         }
@@ -208,7 +209,11 @@ impl Manager {
                 &create,
                 &relabel,
             )
-            .map_err(|_| "manager policy publication")?;
+            .map_err(|error| {
+                std::println!("SCARLET_ANDROID_APP_POLICY_UPDATE_FAIL generation={} labels={} rules={} transitions={} create={} relabel={} error={:?}",
+                    before, references.len(), rules.len(), transitions.len(), create.len(), relabel.len(), error);
+                "manager policy publication"
+            })?;
         let after = self
             .policy
             .generation()
@@ -220,7 +225,7 @@ impl Manager {
                 key.0,
                 key.1,
                 domain,
-                file,
+                file.as_deref().unwrap_or("<no app-data rule>"),
                 after
             );
             self.seen.insert(key);
@@ -271,7 +276,7 @@ pub fn start(policy: Policy, android: &VfsView) -> Result<Worker, &'static str> 
         .ok_or("manager compiled service policy missing")?;
     let services = Services::parse(&services)?;
     let text =
-        read(&view, "/scarlet/boot/shield.policy", 128 * 1024)?.ok_or("manager boot policy")?;
+        read(&view, "/scarlet/boot/shield.policy", crate::boot_profile::MAX_POLICY_BYTES)?.ok_or("manager boot policy")?;
     let mut labels = BTreeMap::new();
     let mut next = 1u32;
     for line in text.lines() {

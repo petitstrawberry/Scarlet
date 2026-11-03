@@ -159,7 +159,7 @@ pub struct Contexts(Vec<Rule>);
 pub struct Mapping {
     pub uid: u32,
     pub domain: String,
-    pub file: String,
+    pub file: Option<String>,
 }
 impl Contexts {
     pub fn parse(text: &str) -> Result<Self, &'static str> {
@@ -244,7 +244,7 @@ impl Contexts {
                 }
             }
         }
-        let select = |file: bool| -> Result<String, &'static str> {
+        let select = |file: bool| -> Result<Option<String>, &'static str> {
             let mut selected: Option<(&Rule, [u32; 11])> = None;
             for rule in &self.0 {
                 let output = if file { &rule.file } else { &rule.domain };
@@ -279,7 +279,7 @@ impl Contexts {
                 }
                 selected = Some((rule, priority));
             }
-            let (rule, _) = selected.ok_or("no delegated seapp rule")?;
+            let Some((rule, _)) = selected else { return Ok(None); };
             let range = match rule.level.as_str() {
                 "none" => "s0".to_string(),
                 "user" => format!(
@@ -297,7 +297,7 @@ impl Contexts {
                 ),
                 _ => return Err("unsupported seapp level"),
             };
-            Ok(format!(
+            Ok(Some(format!(
                 "u:{}:{}:{}",
                 if file { "object_r" } else { "r" },
                 if file {
@@ -307,11 +307,11 @@ impl Contexts {
                 }
                 .unwrap(),
                 range
-            ))
+            )))
         };
         Ok(Mapping {
             uid,
-            domain: select(false)?,
+            domain: select(false)?.ok_or("no delegated seapp domain")?,
             file: select(true)?,
         })
     }
@@ -332,7 +332,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(app.domain, "u:r:platform_app:s0:c512,c768");
-        assert_eq!(app.file, "u:object_r:app_data_file:s0:c512,c768");
+        assert_eq!(app.file.as_deref(), Some("u:object_r:app_data_file:s0:c512,c768"));
         let app = contexts
             .classify(
                 "com.android.special",
@@ -371,5 +371,17 @@ mod tests {
             Contexts::parse("user=_app domain=one type=data\nuser=_app domain=two type=data")
                 .unwrap();
         assert!(duplicate.classify("example.app", 10000, "default").is_err());
+    }
+
+    #[test]
+    fn stock_domain_only_rule_does_not_invent_an_app_data_label() {
+        let contexts = Contexts::parse(
+            "user=secure_element seinfo=platform domain=secure_element levelFrom=all\n"
+        ).unwrap();
+        let mapping = contexts.classify("com.android.se", 1068,
+            "platform:privapp:targetSdkVersion=33").unwrap();
+        assert_eq!(mapping.domain, "u:r:secure_element:s0:c44,c260,c512,c768");
+        assert!(mapping.file.is_none());
+        assert!(contexts.classify("example.app", 10000, "platform").is_err());
     }
 }

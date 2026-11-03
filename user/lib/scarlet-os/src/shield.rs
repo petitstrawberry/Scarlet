@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use scarlet_abi::shield::{RawLabel, RawRule};
 pub use scarlet_abi::shield::{RawRule as Rule, RawTransition as Transition, RawExecTransition as ExecTransition, RawFileCreate as FileCreate, RawFileRelabel as FileRelabel};
 use scarlet_sys::{Syscall, syscall0, syscall1, syscall2, syscall4, syscall6};
+use scarlet_abi::shield::{MAX_LABELS, MAX_RULES, MAX_LABEL_BYTES};
 
 pub struct Policy(Handle);
 impl Policy {
@@ -41,10 +42,10 @@ impl Policy {
         create: &[FileCreate],
         relabel: &[FileRelabel],
     ) -> HandleResult<()> {
-        if labels.len() > 512
+        if labels.len() > MAX_LABELS
             || labels
                 .iter()
-                .any(|(_, name)| name.is_empty() || name.len() > 255)
+                .any(|(_, name)| name.is_empty() || name.len() > MAX_LABEL_BYTES)
             || [
                 rules.len(),
                 transitions.len(),
@@ -53,7 +54,7 @@ impl Policy {
                 relabel.len(),
             ]
             .iter()
-            .any(|count| *count > 4096)
+            .any(|count| *count > MAX_RULES)
         {
             return Err(HandleError::InvalidParameter);
         }

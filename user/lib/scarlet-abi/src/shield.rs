@@ -1,6 +1,12 @@
 //! Fixed-width native policy records. All reserved fields must be zero.
 //! ShieldPolicyCreate(labels, label_count, rules, rule_count) copies them
 //! synchronously and returns an immutable policy management capability.
+
+/// Bounded policy capacities shared by the kernel and native SDK.
+pub const MAX_LABELS: usize = 1024;
+pub const MAX_RULES: usize = 16384;
+pub const MAX_LABEL_BYTES: usize = 255;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RawLabel {

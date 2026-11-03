@@ -1,16 +1,21 @@
 //! Explicit userspace policy loaded from the manager's verified boot inputs.
 use std::{environment::VfsView, shield::{Policy, Rule, Transition, ExecTransition, FileCreate, FileRelabel}, vec::Vec};
 
+// Stock service rules exceed the original fixture size. Native record counts
+// are checked independently below before the policy is installed.
+pub const MAX_POLICY_BYTES: usize = 1024 * 1024;
+
 pub fn policy(android: &VfsView) -> Result<Policy, &'static str> {
     let file = android.open("/scarlet/boot/shield.policy", 0).map_err(|_| "boot policy open")?;
     let stream = file.as_stream().map_err(|_| "boot policy stream")?;
-    let mut bytes = std::vec![0; 128 * 1024];
+    let mut bytes = std::vec![0; MAX_POLICY_BYTES + 1];
     let mut length = 0;
     loop {
         if length == bytes.len() { return Err("boot policy size bound"); }
         let count = stream.read(&mut bytes[length..]).map_err(|_| "boot policy read")?;
         if count == 0 { break; }
         length += count;
+        if length > MAX_POLICY_BYTES { return Err("boot policy size bound"); }
     }
     let text = core::str::from_utf8(&bytes[..length]).map_err(|_| "boot policy encoding")?;
     let mut lines = text.lines();
