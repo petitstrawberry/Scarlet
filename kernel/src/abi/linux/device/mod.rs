@@ -7,3 +7,4 @@
 #[cfg(feature = "hypervisor")]
 pub mod kvm;
 pub mod tty;
+pub mod fuse;
