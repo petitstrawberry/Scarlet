@@ -240,7 +240,6 @@ def configure(output, stock, profile, contexts, metadata):
         "    trigger nonencrypted\n"
     )
     display_policy = profile["boot_properties"].get("ro.scarlet.display_policy")
-    autostart = profile["boot_properties"].get("ro.scarlet.autostart")
     policy_services = ""
     if display_policy == "awake":
         # The hosted device is presented as a desktop window: keep the display
@@ -252,20 +251,10 @@ def configure(output, stock, profile, contexts, metadata):
         )
     if display_policy not in (None, "awake"):
         raise ValueError("unsupported display policy")
-    if autostart is not None:
-        if not re.fullmatch(r"[A-Za-z0-9_.]+/[A-Za-z0-9_.]+", autostart):
-            raise ValueError("invalid autostart component")
-        shutil.copy2(Path(__file__).with_name("app-autostart.sh"), output / "scarlet/boot/autostart.sh")
-        policy_services += (
-            "\nservice scarlet-autostart /system/bin/sh /scarlet/boot/autostart.sh " + autostart + "\n"
-            "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
-        )
     if policy_services:
         manager_init += policy_services + "\non property:sys.boot_completed=1\n"
         if display_policy == "awake":
             manager_init += "    start scarlet-display-policy\n"
-        if autostart is not None:
-            manager_init += "    start scarlet-autostart\n"
     (output / "scarlet/boot/init.rc").write_text(manager_init)
     # /data_mirror is a ramdisk directory on a real device; the generic
     # Android init configuration mounts a private tmpfs over it before making
@@ -333,18 +322,15 @@ def install_incident_libraries(output, profile, archive):
 
 
 def install_manager_command(output, profile, archive):
-    """Stage the stock cmd tool used to apply manager display and launch policy."""
+    """Stage the stock cmd tool used to apply manager display policy."""
     properties = profile["boot_properties"]
-    if (properties.get("ro.scarlet.display_policy") is None and
-            properties.get("ro.scarlet.autostart") is None):
+    if properties.get("ro.scarlet.display_policy") is None:
         return
     with tempfile.TemporaryDirectory(prefix="scarlet-manager-cmd-") as directory:
         temporary = Path(directory)
         extract_partitions(archive, temporary)
         system = Ext4(temporary / "system.ext4")
         queue = ["system/bin/cmd"]
-        if properties.get("ro.scarlet.autostart") is not None:
-            queue += ["system/bin/sh", "system/bin/toybox"]
         seen = set()
         while queue:
             name = queue.pop()
