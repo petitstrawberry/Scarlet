@@ -24,15 +24,21 @@ pub struct Evdev {
     inner: Arc<dyn FileObject>,
     clock: AtomicI32,
 }
+/// An input endpoint can be opened for event reads and configuration without
+/// granting the write side of Linux's conventional evdev open mode.
+pub fn is_receive_only_input(object: &KernelObject) -> bool {
+    object.as_file().is_some_and(is_receive_only_input_file)
+}
+fn is_receive_only_input_file(inner: &dyn FileObject) -> bool {
+    !inner.as_any().is::<Evdev>()
+        && inner.control(SCTL_INPUT_HAS_EVENT_CODE, 0) == Ok(1)
+        && matches!(inner.control(SCTL_INPUT_GET_KIND, 0), Ok(1 | 4))
+}
 /// Preserve open-description sharing through dup, fork and descriptor transfer.
 /// Only devices declaring exact event-code support can be represented honestly.
 pub fn wrap(object: KernelObject) -> KernelObject {
     match object {
-        KernelObject::File(inner)
-            if !inner.as_any().is::<Evdev>()
-                && inner.control(SCTL_INPUT_HAS_EVENT_CODE, 0) == Ok(1)
-                && matches!(inner.control(SCTL_INPUT_GET_KIND, 0), Ok(1 | 4)) =>
-        {
+        KernelObject::File(inner) if is_receive_only_input_file(&*inner) => {
             KernelObject::from_file_object(Arc::new(Evdev {
                 inner,
                 clock: AtomicI32::new(0),

@@ -646,6 +646,39 @@ pub const O_PATH: i32 = 0o10000000; // Path-based operations only
 #[allow(dead_code)]
 pub const O_TMPFILE: i32 = 0o20000000 | O_DIRECTORY; // Create unnamed temporary file
 
+// VFS flags are architecture-independent. On AArch64 Linux the directory,
+// no-follow, direct and large-file bits differ from the native VFS values.
+fn native_open_flags(flags: i32) -> u32 {
+    let mut native = (flags & !(O_DIRECTORY | O_NOFOLLOW | O_DIRECT | O_LARGEFILE)) as u32;
+    if flags & O_DIRECTORY != 0 { native |= scarlet_abi::fs::VFS_O_DIRECTORY; }
+    if flags & O_NOFOLLOW != 0 { native |= scarlet_abi::fs::VFS_O_NOFOLLOW; }
+    if flags & O_DIRECT != 0 { native |= 0x4000; }
+    native
+}
+
+// Linux input readers request evdev read/write access. A published input
+// capability carries only the receive side; the resulting Evdev object still
+// denies writes, so this retry cannot inject events.
+fn open_from_evdev_compatible(
+    vfs: &crate::fs::vfs_v2::manager::VfsManager,
+    base_entry: &alloc::sync::Arc<crate::fs::vfs_v2::core::VfsEntry>,
+    base_mount: &alloc::sync::Arc<crate::fs::vfs_v2::mount_tree::MountPoint>,
+    path: &str,
+    flags: u32,
+) -> Result<crate::object::KernelObject, crate::fs::FileSystemError> {
+    match vfs.open_from(base_entry, base_mount, path, flags) {
+        Err(original) if original.kind == crate::fs::FileSystemErrorKind::PermissionDenied
+            && flags & scarlet_abi::fs::VFS_O_ACCMODE == scarlet_abi::fs::VFS_O_RDWR => {
+            let object = vfs.open_from(base_entry, base_mount, path,
+                flags & !scarlet_abi::fs::VFS_O_ACCMODE)?;
+            if crate::abi::linux::device::evdev::is_receive_only_input(&object) {
+                Ok(object)
+            } else { Err(original) }
+        }
+        result => result,
+    }
+}
+
 use crate::device::DeviceCapability;
 
 impl LinuxStat {
@@ -1350,7 +1383,8 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     //     }
     // }
 
-    let file = vfs.open_from(&base_entry, &base_mount, &mapped_path, flags as u32);
+    let native_flags = native_open_flags(flags);
+    let file = open_from_evdev_compatible(&vfs, &base_entry, &base_mount, &mapped_path, native_flags);
 
     let kernel_obj = match file {
         Ok(obj) => {
@@ -1388,7 +1422,7 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                             Some(vfs) => vfs,
                             None => return errno::to_result(errno::EIO),
                         };
-                        match vfs.open_from(&base_entry, &base_mount, &mapped_path, flags as u32) {
+                        match vfs.open_from(&base_entry, &base_mount, &mapped_path, native_flags) {
                             Ok(obj) => obj,
                             Err(err) => return errno::to_result(errno::from_fs_error(&err)),
                         }
@@ -1408,7 +1442,7 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                             Some(vfs) => vfs,
                             None => return errno::to_result(errno::EIO),
                         };
-                        let reopen_flags = (flags as u32) & !((O_CREAT | O_EXCL) as u32);
+                        let reopen_flags = native_flags & !((O_CREAT | O_EXCL) as u32);
                         match vfs.open_from(&base_entry, &base_mount, &mapped_path, reopen_flags) {
                             Ok(obj) => obj,
                             Err(open_err) => {
@@ -6923,6 +6957,46 @@ mod tests {
         let (other, _) = UnidirectionalPipe::create_pair(4096);
         let (stat, _) = super::stat_from_object(&other, 0).unwrap();
         assert_ne!(Some((stat.st_dev, stat.st_ino)), identity);
+    }
+
+    #[test_case]
+    fn linux_opendir_and_receive_only_evdev_use_native_flags() {
+        use super::{copy_from_user_pagewise, native_open_flags, open_from_evdev_compatible,
+            read_linux_dirents_to_user, O_CLOEXEC, O_DIRECTORY, O_LARGEFILE, O_NONBLOCK};
+        use crate::device::input::virtual_device::InputEndpoint;
+        use crate::fs::{vfs_v2::{capability_files::{CapabilityFiles, Export}, manager::VfsManager}, FileType};
+        use crate::object::capability::StreamError;
+        let vfs = VfsManager::new();
+        vfs.create_dir("/input").unwrap();
+        let (_, receiver) = InputEndpoint::pair(1, 0, 0).unwrap();
+        let input = CapabilityFiles::new(alloc::vec![Export::new("event0".into(), receiver, 1).unwrap()]).unwrap();
+        vfs.mount(input, "/input", 0).unwrap();
+        let (root, mount) = vfs.resolve_path("/").unwrap();
+        let flags = native_open_flags(O_DIRECTORY | O_CLOEXEC | O_NONBLOCK | O_LARGEFILE);
+        assert_eq!(flags & scarlet_abi::fs::VFS_O_DIRECTORY, scarlet_abi::fs::VFS_O_DIRECTORY);
+        let directory = vfs.open_from(&root, &mount, "/input", flags).unwrap();
+        let task = crate::task::new_user_task("published-opendir".into(), 1);
+        let address = crate::environment::USER_STACK_END - crate::environment::PAGE_SIZE;
+        task.allocate_stack_pages(address, 1).unwrap();
+        assert_eq!(read_linux_dirents_to_user(directory.as_stream().unwrap(), &task.vm_manager, address, 1024), Ok(32));
+        let mut entry = [0; 32];
+        assert_eq!(copy_from_user_pagewise(&mut entry, address, &task.vm_manager), 32);
+        assert_eq!(&entry[19..26], b"event0\0");
+
+        let object = open_from_evdev_compatible(&vfs, &root, &mount, "/input/event0", scarlet_abi::fs::VFS_O_RDWR).unwrap();
+        assert!(crate::abi::linux::device::evdev::is_receive_only_input(&object));
+        let object = crate::abi::linux::device::evdev::wrap(object);
+        assert!(matches!(object.as_file().unwrap().write(&[0; 16]), Err(StreamError::PermissionDenied)));
+
+        vfs.create_file("/ordinary", FileType::RegularFile).unwrap();
+        let source = match vfs.open("/ordinary", 0).unwrap() {
+            crate::object::KernelObject::File(file) => file,
+            _ => panic!("ordinary source must be a file"),
+        };
+        let ordinary = CapabilityFiles::new(alloc::vec![Export::new("data".into(), source, 1).unwrap()]).unwrap();
+        vfs.create_dir("/published").unwrap();
+        vfs.mount(ordinary, "/published", 0).unwrap();
+        assert_eq!(open_from_evdev_compatible(&vfs, &root, &mount, "/published/data", scarlet_abi::fs::VFS_O_RDWR).err().unwrap().kind, crate::fs::FileSystemErrorKind::PermissionDenied);
     }
 
     #[test_case]
