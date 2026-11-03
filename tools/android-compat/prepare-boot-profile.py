@@ -241,7 +241,7 @@ def configure(output, stock, profile, contexts, metadata):
     )
     display_policy = profile["boot_properties"].get("ro.scarlet.display_policy")
     autostart = profile["boot_properties"].get("ro.scarlet.autostart")
-    autostart_attempts = 40
+    autostart_attempts = 120
     policy_services = ""
     if display_policy == "awake":
         # The hosted device is presented as a desktop window: keep the display
