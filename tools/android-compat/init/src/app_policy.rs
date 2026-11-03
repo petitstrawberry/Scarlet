@@ -121,10 +121,10 @@ impl Manager {
             let context = self.labels.iter().find(|(_, id)| **id == source)
                 .map(|(name, _)| name.clone()).ok_or("manager subject label")?;
             let grants: Vec<_> = self.services.grants(&context)?.iter()
-                .map(|grant| (grant.target.clone(), grant.permissions)).collect();
-            for (name, permissions) in grants {
+                .map(|grant| (grant.target.clone(), grant.class, grant.permissions)).collect();
+            for (name, class, permissions) in grants {
                 let target = self.label(&name, &mut added)?;
-                rules.push(Rule { source, target, class: 1, reserved: 0, permissions });
+                rules.push(Rule { source, target, class, reserved: 0, permissions });
             }
         }
         let transitions: Vec<_> = transitions

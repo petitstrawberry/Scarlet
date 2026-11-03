@@ -3,6 +3,7 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 pub struct Grant {
     pub target: String,
+    pub class: u32,
     pub permissions: u64,
 }
 
@@ -21,9 +22,11 @@ impl Services {
             return Err("service policy size or termination");
         }
         let mut lines = text.lines();
-        if lines.next() != Some("scarlet-android-service-policy-v1") {
-            return Err("service policy version");
-        }
+        let properties = match lines.next() {
+            Some("scarlet-android-service-policy-v1") => false,
+            Some("scarlet-android-access-policy-v2") => true,
+            _ => return Err("service policy version"),
+        };
         let mut domains: BTreeMap<String, Vec<Grant>> = BTreeMap::new();
         let mut count = 0;
         for line in lines {
@@ -36,14 +39,20 @@ impl Services {
                         return Err("service policy domain");
                     }
                 }
-                ["allow", source, target, permissions] => {
+                ["allow", source, target, values @ ..] => {
+                    let (class, permissions) = match (properties, values) {
+                        (false, [permissions]) => (1, *permissions),
+                        (true, ["1", permissions]) => (1, *permissions),
+                        (true, ["2", "1"]) => (2, "1"),
+                        _ => return Err("access policy class or permission"),
+                    };
                     let grants = domains.get_mut(*source).ok_or("service policy source")?;
                     let label: Vec<_> = target.split(':').collect();
                     if !matches!(label.as_slice(), ["u", "r" | "object_r", name, "s0"] if symbol(name))
                     {
                         return Err("service policy target");
                     }
-                    let permissions = match *permissions {
+                    let permissions = match permissions {
                         "1" => 1,
                         "2" => 2,
                         "3" => 3,
@@ -54,11 +63,12 @@ impl Services {
                         _ => return Err("service policy permissions"),
                     };
                     count += 1;
-                    if count > 16384 || grants.iter().any(|g| g.target == *target) {
+                    if count > 16384 || grants.iter().any(|g| g.target == *target && g.class == class) {
                         return Err("service policy duplicate or count");
                     }
                     grants.push(Grant {
                         target: String::from(*target),
+                        class,
                         permissions,
                     });
                 }
@@ -137,5 +147,17 @@ mod tests {
             assert!(Services::parse(&alloc::format!("{POLICY}{suffix}")).is_err());
         }
         assert!(Services::parse(POLICY.trim_end()).is_err());
+    }
+    #[test]
+    fn property_grants_are_separate_and_cannot_expand_their_vocabulary() {
+        let prefix = "scarlet-android-access-policy-v2\ndomain system_app\n";
+        let valid = alloc::format!("{prefix}allow system_app u:object_r:device_owner_prop:s0 2 1\n");
+        let parsed = Services::parse(&valid).unwrap();
+        let grants = parsed.grants("u:r:system_app:s0").unwrap();
+        assert_eq!(grants[0].class, 2);
+        assert_eq!(grants[0].permissions, 1);
+        for invalid in ["2 2", "3 1", "2 7", "1"] {
+            assert!(Services::parse(&alloc::format!("{prefix}allow system_app u:object_r:device_owner_prop:s0 {invalid}\n")).is_err());
+        }
     }
 }

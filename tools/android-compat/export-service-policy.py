@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from service_policy import MAGIC, export, validate
+from service_policy import export, validate
 
 
 def main():
@@ -15,21 +15,23 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--domain", action="append", default=[],
                         help="also export a daemon domain used by the hosted device")
+    parser.add_argument("--properties", action="store_true", help="also translate stock property_service set grants")
     args = parser.parse_args()
     data = args.policy.read_bytes()
     policy = setools.SELinuxPolicy(str(args.policy))
-    text = export(policy, setools, args.domain)
+    text = export(policy, setools, args.domain, properties=args.properties)
     if args.policy.read_bytes() != data:
         raise ValueError("compiled policy changed during export")
     domains, rules = validate(text)
     args.output.mkdir(parents=True, exist_ok=False)
     (args.output / "service-policy.txt").write_text(text)
-    metadata = {"kind": MAGIC, "source_sha256": hashlib.sha256(data).hexdigest(),
+    metadata = {"kind": text.splitlines()[0], "source_sha256": hashlib.sha256(data).hexdigest(),
                 "source": str(args.policy), "setools_version": setools.__version__,
                 "policy_version": policy.version, "domains": len(domains),
                 "rules": len(rules), "text_sha256": hashlib.sha256(text.encode()).hexdigest(),
                 "additional_domains": sorted(set(args.domain)),
-                "scope": "App and explicitly requested daemon service_manager/hwservice_manager allows; not a full SELinux implementation"}
+                "properties": args.properties,
+                "scope": "App and explicitly requested daemon service allows, plus property_service set when requested; not a full SELinux implementation"}
     (args.output / "service-policy.json").write_text(json.dumps(metadata, indent=2) + "\n")
     print(f"Exported {len(rules)} service rules for {len(domains)} app domains")
 

@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
-from service_policy import CLASSES, MAGIC, PERMISSIONS, apply_boot_policy, export, validate
+from service_policy import ACCESS_MAGIC, CLASSES, MAGIC, PERMISSIONS, apply_boot_policy, export, validate
 
 
 class RuleNotConditional(Exception):
@@ -33,6 +33,17 @@ class ServicePolicyTests(unittest.TestCase):
         self.assertIn("label 101 u:object_r:wifinl80211_service:s0", result)
         self.assertIn("service-allow 10 101 2", result)
         self.assertEqual(apply_boot_policy(result, services), result)
+
+    def test_property_rules_replace_only_selected_subjects_and_preserve_classes(self):
+        boot = "scarlet-android-boot-policy-v2\nlabel 1 u:r:init:s0\nlabel 2 u:r:system_server:s0\nlabel 3 u:object_r:device_owner_prop:s0\nproperty-set 1 3\nproperty-set 2 3\nsocket-create 2 3\n"
+        text = ACCESS_MAGIC + "\ndomain system_server\nallow system_server u:object_r:device_owner_prop:s0 2 1\n"
+        result = apply_boot_policy(boot, text)
+        self.assertEqual(result.count("property-set 2 3"), 1)
+        self.assertIn("property-set 1 3", result)
+        self.assertIn("socket-create 2 3", result)
+        for invalid in ("2 2", "2 7", "3 1", "1"):
+            with self.assertRaises(ValueError):
+                validate(ACCESS_MAGIC + "\ndomain system_server\nallow system_server u:object_r:device_owner_prop:s0 " + invalid + "\n")
 
     def test_export_rejects_unrepresentable_constraints_and_class_overlap(self):
         class Kind:
@@ -80,8 +91,14 @@ class ServicePolicyTests(unittest.TestCase):
                     with self.subTest(source=source, target=target, permission=permission):
                         expected = bool(list(setools.TERuleQuery(policy, ruletype=["allow"],
                             source=source, target=target, tclass=[kind], perms=[permission]).results()))
-                        actual = bool(exported.get((source, f"u:object_r:{target}:s0"), 0) & bit)
+                        actual = bool(exported.get((source, f"u:object_r:{target}:s0", 1), 0) & bit)
                         self.assertEqual(expected, actual)
+        _, exported = validate(export(policy, setools, ["system_server"], properties=True))
+        for source in ("system_server", "bluetooth", "untrusted_app", "mediaprovider_app"):
+            for target in ("device_logging_prop", "binder_cache_bluetooth_server_prop", "bluetooth_prop", "default_prop"):
+                expected = bool(list(setools.TERuleQuery(policy, ruletype=["allow"], source=source,
+                    target=target, tclass=["property_service"], perms=["set"]).results()))
+                self.assertEqual(bool(exported.get((source, f"u:object_r:{target}:s0", 2), 0) & 1), expected)
 
 
 if __name__ == "__main__":
