@@ -580,7 +580,6 @@ fn compose_chrome_frame(
     if chrome.pixels.len() != bytes {
         return Err(Error::InvalidRequest);
     }
-    output.copy_from_slice(chrome.pixels);
     let content = chrome
         .insets
         .content(chrome.width, chrome.height)
@@ -639,6 +638,15 @@ fn compose_chrome_frame(
             let source = source_y * pitch + source_x * 4;
             let target = y as usize * stride + x as usize * 4;
             output[target..target + 4].copy_from_slice(&pixels[source..source + 4]);
+        }
+    }
+    // Match the layered scene: content is below the premultiplied ScarletUI
+    // chrome. In particular, the rounded border overlaps the content inset.
+    for (target, source) in output.chunks_exact_mut(4).zip(chrome.pixels.chunks_exact(4)) {
+        let inverse = 255 - u32::from(source[3]);
+        for channel in 0..4 {
+            target[channel] = (u32::from(source[channel])
+                + (u32::from(target[channel]) * inverse + 127) / 255).min(255) as u8;
         }
     }
     Ok(output)
@@ -930,6 +938,23 @@ mod tests {
             &output[((0 * 6 + 0) * 4)..((0 * 6 + 0) * 4 + 4)],
             &[0, 0, 0, 0]
         );
+    }
+    #[test]
+    fn cpu_chrome_covers_content_and_letterboxing_without_filling_rounded_corners() {
+        let mut pixels = [0u8;36];
+        pixels[4..8].copy_from_slice(&[5,6,7,255]);
+        pixels[12..16].copy_from_slice(&[10,20,30,128]);
+        let clip = [SwsRect{x:1,y:0,width:1,height:1}, SwsRect{x:0,y:1,width:3,height:1}, SwsRect{x:1,y:2,width:1,height:1}];
+        let chrome=CpuFrame{width:3,height:3,insets:SwsInsets::default(),clip:&clip,pixels:&pixels};
+        let source=[100,100,100,255].repeat(9);
+        let output=compose_chrome_frame(&chrome,&source,3,3,12).unwrap();
+        assert_eq!(&output[..4],&[0;4]);
+        assert_eq!(&output[4..8],&[5,6,7,255]);
+        assert_eq!(&output[12..16],&[60,70,80,255]);
+        let output=compose_chrome_frame(&chrome,&source[..12],1,3,4).unwrap();
+        assert_eq!(&output[..4],&[0;4]);
+        assert_eq!(&output[12..16],&[10,20,30,255]);
+        assert_eq!(&output[16..20],&[100,100,100,255]);
     }
     #[test]
     fn cropped_gpu_layers_keep_content_coordinates() {
