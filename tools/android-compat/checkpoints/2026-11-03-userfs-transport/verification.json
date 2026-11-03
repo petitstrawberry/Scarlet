@@ -1,0 +1,24 @@
+{
+  "result": "TRANSPORT_AND_CODEC_TESTS_PASS",
+  "tests": 1829,
+  "acceleration": "HVF",
+  "cpus": 4,
+  "memory_gib": 4,
+  "commit": "bc2732a3c25dbe3b5f03bb4c467e72c84ebe3ea0",
+  "sources": {
+    "kernel/src/fs/vfs_v2/userfs.rs": "8c7f445622b24ec4d1eb785bd4d159cc1d462081a0d4ea6d3bd61dbeadabeb08",
+    "kernel/src/abi/linux/device/fuse.rs": "43f464d8c72a585695c784a96375569469e46e49a9544caf76a2a87b382ff842"
+  },
+  "implemented": [
+    "bounded native request queue and authenticated caller identity",
+    "server death, pending cancellation and late resource reply recovery",
+    "baseline FUSE request/reply codec and initialization negotiation"
+  ],
+  "not_yet_connected": [
+    "VFS namespace locking redesign",
+    "userspace filesystem driver and mount",
+    "/dev/fuse endpoint",
+    "stock vold/MediaProvider mount"
+  ],
+  "earlier_failure": "codec fixture lacked a native task ID; corrected, full suite rerun"
+}
