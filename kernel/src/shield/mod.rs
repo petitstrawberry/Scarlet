@@ -22,6 +22,7 @@ use alloc::{
 /// Android 13's stock service and app inventory needs more exact labels than
 /// the original 512-entry bound; the limit stays a fixed, checked resource.
 pub use scarlet_abi::shield::{MAX_LABELS, MAX_RULES, MAX_LABEL_BYTES};
+pub mod sets;
 
 #[derive(Clone, Copy)]
 pub struct Rule {
@@ -53,6 +54,7 @@ pub struct ExecTransitionRule {
 pub(crate) struct PolicyData {
     generation: u64,
     pub(crate) files: file::FilePolicy,
+    sets: sets::SetPolicy,
     labels: BTreeMap<u32, Arc<str>>,
     names: BTreeMap<String, u32>,
     grants: BTreeMap<(u32, u32, u32), u64>,
@@ -108,6 +110,7 @@ impl Policy {
         let mut data = PolicyData {
             generation: 1,
             files: file::FilePolicy::default(),
+            sets: sets::SetPolicy::default(),
             labels: BTreeMap::new(),
             names: BTreeMap::new(),
             grants: BTreeMap::new(),
@@ -133,6 +136,7 @@ impl Policy {
     ) -> Result<Arc<Self>, &'static str> {
         let mut data = (*self.snapshot()).clone();
         data.files = file::FilePolicy::build(&data.labels, default, create, relabel)?;
+        data.sets.clear_file_rules();
         data.generation = 1;
         Ok(Self::from_data(data))
     }
@@ -204,12 +208,12 @@ impl Policy {
             .into_iter()
     }
     pub fn allowed(&self, source: u32, target: u32, class: u32) -> u64 {
-        self.data
-            .read()
+        let data = self.data.read();
+        data
             .grants
             .get(&(source, target, class))
             .copied()
-            .unwrap_or(0)
+            .unwrap_or(0) | data.sets.allowed(source, target, class)
     }
     pub fn decision(&self, source: u32, target: u32, class: u32) -> (u64, u64) {
         let data = self.data.read();
@@ -217,7 +221,7 @@ impl Policy {
             data.grants
                 .get(&(source, target, class))
                 .copied()
-                .unwrap_or(0),
+                .unwrap_or(0) | data.sets.allowed(source, target, class),
             data.generation,
         )
     }

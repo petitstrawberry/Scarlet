@@ -194,12 +194,7 @@ impl CreateContext {
         let target = if let Some(selected) = selected {
             if !Arc::ptr_eq(&selected.policy, &policy)
                 || selected.source != subject.label()
-                || !policy.snapshot().files.create.contains(&(
-                    subject.label(),
-                    parent,
-                    kind,
-                    selected.target,
-                ))
+                || !policy.snapshot().creation_allowed(subject.label(), parent, kind, selected.target)
             {
                 return Err("file create override denied");
             }
@@ -256,11 +251,7 @@ impl Policy {
         if old == target {
             return Ok(());
         }
-        if !self
-            .snapshot()
-            .files
-            .relabel
-            .contains(&(subject.label(), old, kind, target))
+        if !self.snapshot().relabel_allowed(subject.label(), old, kind, target)
         {
             return Err("file relabel denied");
         }
@@ -279,12 +270,7 @@ pub fn select_creation_label(task: &Task, target: Option<u32>) -> Result<(), &'s
             .clone()
             .ok_or("subject missing")?;
         let policy = subject.policy();
-        if !policy
-            .snapshot()
-            .files
-            .create
-            .iter()
-            .any(|&(source, _, _, label)| source == subject.label() && label == target)
+        if !policy.snapshot().creation_delegated(subject.label(), target)
         {
             return Err("file creation label not delegated");
         }
@@ -297,6 +283,21 @@ pub fn select_creation_label(task: &Task, target: Option<u32>) -> Result<(), &'s
         *task.creation_label.write() = None;
     }
     Ok(())
+}
+
+impl super::PolicyData {
+    fn creation_allowed(&self, source:u32, parent:u32, kind:u32, target:u32)->bool {
+        self.files.create.contains(&(source,parent,kind,target))
+            || self.sets.file_allowed(source,parent,target,kind,super::sets::FileAction::Create)
+    }
+    fn relabel_allowed(&self, source:u32, old:u32, kind:u32, target:u32)->bool {
+        self.files.relabel.contains(&(source,old,kind,target))
+            || self.sets.file_allowed(source,old,target,kind,super::sets::FileAction::Relabel)
+    }
+    fn creation_delegated(&self, source:u32, target:u32)->bool {
+        self.files.create.iter().any(|&(s,_,_,t)|s==source && t==target)
+            || self.sets.creation_delegated(source,target)
+    }
 }
 
 #[cfg(test)]
@@ -413,6 +414,28 @@ mod tests {
         );
         assert!(select_creation_label(&task, Some(5)).is_err());
         clear_mock_current_task();
+    }
+    #[test_case]
+    fn shared_file_rules_reach_vfs_creation_and_relabel_checks_without_changing_defaults() {
+        use super::super::{sets::{Update,Selector,FileRule,FileAction},update::PolicyUpdate};
+        let policy=policy();let subject=policy.subject(1).unwrap();
+        let task=Arc::new(Task::new("set-file-label".into(),1,TaskType::User));
+        *task.security_subject.write()=Some(subject.clone());
+        assert!(select_creation_label(&task,Some(5)).is_err());
+        policy.extend(1,PolicyUpdate {sets:Update {sets:vec![9],members:vec![(9,5)],files:vec![
+            FileRule {source:Selector::Label(1),origin:Selector::Label(2),target:Selector::Set(9),kind:1,action:FileAction::Create,different:false},
+            FileRule {source:Selector::Label(1),origin:Selector::Set(9),target:Selector::Label(4),kind:1,action:FileAction::Relabel,different:true},
+        ],..Default::default()},..Default::default()}).unwrap();
+        let fs=VfsManager::new();set_mock_current_task(task.clone());
+        select_creation_label(&task,Some(5)).unwrap();fs.create_file("/selected",FileType::RegularFile).unwrap();
+        let node=fs.resolve_path("/selected").unwrap().0.node();assert_eq!(policy.resource_label(node.as_ref()),Some(5));
+        policy.relabel_file(&subject,node.as_ref(),4).unwrap();assert_eq!(policy.resource_label(node.as_ref()),Some(4));
+        assert!(policy.relabel_file(&subject,node.as_ref(),5).is_err());
+        select_creation_label(&task,None).unwrap();fs.create_file("/default",FileType::RegularFile).unwrap();
+        assert_eq!(policy.resource_label(fs.resolve_path("/default").unwrap().0.node().as_ref()),Some(3));
+        let derived=policy.with_file_rules(Some(2),vec![],vec![]).unwrap();
+        *task.security_subject.write()=Some(derived.subject(1).unwrap());
+        assert!(select_creation_label(&task,Some(5)).is_err());clear_mock_current_task();
     }
     #[test_case]
     fn relabel_rechecks_current_inode_label_and_preserves_administrator_bindings() {

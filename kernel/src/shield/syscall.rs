@@ -37,11 +37,12 @@ pub(crate) fn extend(
     length: usize,
 ) -> Result<(), &'static str> {
     let policy = policy_handle(task, handle, true)?;
-    if length != 128 {
+    if length != 128 && length != 208 {
         return Err("policy update size");
     }
     let spec = read::<128>(task, pointer)?;
-    if u32_at(&spec, 0) != 1 || u32_at(&spec, 4) != 0 || spec[112..].iter().any(|byte| *byte != 0) {
+    let version = u32_at(&spec, 0);
+    if !matches!((version,length),(1,128)|(2,208)) || u32_at(&spec, 4) != 0 || spec[112..].iter().any(|byte| *byte != 0) {
         return Err("policy update version or reserved fields");
     }
     let labels = update_array::<16, _>(
@@ -145,6 +146,9 @@ pub(crate) fn extend(
             })
         },
     )?;
+    let sets = if version == 2 {
+        parse_set_update(task, pointer.checked_add(128).ok_or("set update address overflow")?)?
+    } else { sets::Update::default() };
     policy.extend(
         u64_at(&spec, 8),
         update::PolicyUpdate {
@@ -154,9 +158,33 @@ pub(crate) fn extend(
             exec_transitions,
             create,
             relabel,
+            sets,
         },
     )?;
     Ok(())
+}
+
+fn parse_set_update(task:&Task, pointer:usize)->Result<sets::Update,&'static str> {
+    let spec=read::<80>(task,pointer)?;
+    if spec[64..].iter().any(|byte|*byte!=0) {return Err("set update reserved fields");}
+    let selector=|bytes:&[u8],offset:usize|->Result<sets::Selector,&'static str> {
+        match u32_at(bytes,offset) {0=>Ok(sets::Selector::Label(u32_at(bytes,offset+4))),
+            1=>Ok(sets::Selector::Set(u32_at(bytes,offset+4))),_=>Err("unknown label selector")}
+    };
+    let declarations=update_array::<8,_>(task,u64_at(&spec,0),u64_at(&spec,8),sets::MAX_SETS,|raw| {
+        if u32_at(&raw,4)!=0 {return Err("set declaration reserved fields");} Ok(u32_at(&raw,0))
+    })?;
+    let members=update_array::<8,_>(task,u64_at(&spec,16),u64_at(&spec,24),sets::MAX_MEMBERS,|raw|Ok((u32_at(&raw,0),u32_at(&raw,4))))?;
+    let grants=update_array::<32,_>(task,u64_at(&spec,32),u64_at(&spec,40),MAX_RULES,|raw| {
+        if u32_at(&raw,20)!=0 {return Err("set grant reserved fields");}
+        Ok(sets::Grant {source:selector(&raw,0)?,target:selector(&raw,8)?,class:u32_at(&raw,16),permissions:u64_at(&raw,24)})
+    })?;
+    let files=update_array::<40,_>(task,u64_at(&spec,48),u64_at(&spec,56),MAX_RULES,|raw| {
+        if u32_at(&raw,36)!=0 || u32_at(&raw,32)>1 {return Err("set file flags");}
+        let action=match u32_at(&raw,28) {1=>sets::FileAction::Create,2=>sets::FileAction::Relabel,_=>return Err("set file action")};
+        Ok(sets::FileRule {source:selector(&raw,0)?,origin:selector(&raw,8)?,target:selector(&raw,16)?,kind:u32_at(&raw,24),action,different:u32_at(&raw,32)==1})
+    })?;
+    Ok(sets::Update {sets:declarations,members,grants,files})
 }
 pub fn sys_shield_policy_extend(tf: &mut Trapframe) -> usize {
     let task = crate::task::mytask().unwrap();
@@ -554,6 +582,39 @@ pub fn sys_shield_socket_creation_label(tf:&mut Trapframe)->usize {
 mod update_tests {
     use super::*;
     use alloc::vec;
+    #[test_case]
+    fn set_update_abi_is_atomic_bounded_and_requires_management_authority() {
+        use crate::library::std::usercopy::copy_to_user;
+        use scarlet_abi::shield::*;
+        fn bytes<T>(value:&T)->&[u8] {
+            // The test uses initialized fixed-width records with no padding.
+            unsafe {core::slice::from_raw_parts(value as *const T as *const u8,core::mem::size_of::<T>())}
+        }
+        let mut task=Task::new("policy-sets".into(),0,crate::task::TaskType::User);task.set_id(60032);
+        let base=crate::environment::USER_STACK_END-crate::environment::PAGE_SIZE;
+        task.allocate_stack_pages(base,1).unwrap();
+        let policy=Policy::new(vec![(1,"source".into()),(2,"target".into())],vec![]).unwrap().with_file_rules(Some(1),vec![],vec![]).unwrap();
+        let admin=insert(&task,PolicyHandle {policy:policy.clone(),administer:true}).unwrap();
+        let readonly=insert(&task,PolicyHandle {policy:policy.clone(),administer:false}).unwrap();
+        let mut spec=RawPolicyUpdateWithSets {base:RawPolicyUpdate {version:2,expected_generation:1,..Default::default()},
+            sets:(base+256) as u64,set_count:1,members:(base+272) as u64,member_count:1,
+            set_grants:(base+288) as u64,set_grant_count:1,set_files:(base+336) as u64,set_file_count:1,..Default::default()};
+        let set=RawLabelSet {id:9,reserved:0};let member=RawSetMember {set:9,label:1};
+        let mut grant=RawSetGrant {source:RawLabelSelector::set(9),target:RawLabelSelector::label(2),class:1,reserved:0,permissions:2};
+        let file=RawSetFileRule {source:RawLabelSelector::set(9),origin:RawLabelSelector::label(1),target:RawLabelSelector::label(2),kind:1,action:1,flags:0,reserved:0};
+        for (offset,data) in [(0,bytes(&spec)),(256,bytes(&set)),(272,bytes(&member)),(288,bytes(&grant)),(336,bytes(&file))] {
+            copy_to_user(&task,base+offset,data).unwrap();
+        }
+        assert!(extend(&task,readonly,base,208).is_err());
+        assert!(extend(&task,admin,base,128).is_err());
+        grant.source.kind=2;copy_to_user(&task,base+288,bytes(&grant)).unwrap();
+        assert!(extend(&task,admin,base,208).is_err());assert_eq!(policy.generation(),1);assert_eq!(policy.allowed(1,2,1),0);
+        grant.source.kind=1;copy_to_user(&task,base+288,bytes(&grant)).unwrap();
+        extend(&task,admin,base,208).unwrap();assert_eq!(policy.generation(),2);assert_eq!(policy.allowed(1,2,1),2);
+        assert!(extend(&task,admin,base,208).is_err());
+        spec.base.expected_generation=2;spec.member_count=MAX_SET_MEMBERS as u64+1;
+        copy_to_user(&task,base,bytes(&spec)).unwrap();assert!(extend(&task,admin,base,208).is_err());assert_eq!(policy.generation(),2);
+    }
     #[test_case]
     fn update_requires_the_admin_capability_and_copies_the_whole_batch_before_publication() {
         use crate::library::std::usercopy::copy_to_user;

@@ -10,6 +10,7 @@ pub struct PolicyUpdate {
     pub exec_transitions: Vec<ExecTransitionRule>,
     pub create: Vec<file::CreateRule>,
     pub relabel: Vec<file::RelabelRule>,
+    pub sets: sets::Update,
 }
 
 impl PolicyData {
@@ -88,6 +89,7 @@ impl PolicyData {
         }
         self.files
             .add(&self.labels, update.create, update.relabel)?;
+        self.sets.add(&self.labels, self.files.default.is_some(), update.sets)?;
         if self.labels.len() > MAX_LABELS
             || self.grants.len() > MAX_RULES
             || self.transitions.len() > MAX_RULES

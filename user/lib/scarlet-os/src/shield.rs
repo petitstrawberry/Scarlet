@@ -11,6 +11,16 @@ use scarlet_abi::shield::{RawLabel, RawRule};
 pub use scarlet_abi::shield::{RawRule as Rule, RawTransition as Transition, RawExecTransition as ExecTransition, RawFileCreate as FileCreate, RawFileRelabel as FileRelabel};
 use scarlet_sys::{Syscall, syscall0, syscall1, syscall2, syscall4, syscall6};
 use scarlet_abi::shield::{MAX_LABELS, MAX_RULES, MAX_LABEL_BYTES};
+pub use scarlet_abi::shield::{RawLabelSet as LabelSet, RawSetMember as SetMember,
+    RawLabelSelector as LabelSelector, RawSetGrant as SetGrant, RawSetFileRule as SetFileRule};
+
+#[derive(Default)]
+pub struct LabelSetUpdate<'a> {
+    pub sets:&'a [LabelSet],
+    pub members:&'a [SetMember],
+    pub grants:&'a [SetGrant],
+    pub files:&'a [SetFileRule],
+}
 
 pub struct Policy(Handle);
 impl Policy {
@@ -42,6 +52,24 @@ impl Policy {
         create: &[FileCreate],
         relabel: &[FileRelabel],
     ) -> HandleResult<()> {
+        self.extend_with_sets(expected_generation,labels,rules,transitions,exec,create,relabel,LabelSetUpdate::default())
+    }
+
+    /// Atomically add label sets, memberships and shared rules along with an
+    /// ordinary update. Set identifiers are scoped to this policy capability.
+    pub fn extend_with_sets(
+        &self,
+        expected_generation:u64,
+        labels:&[(u32,&str)],
+        rules:&[Rule],
+        transitions:&[Transition],
+        exec:&[ExecTransition],
+        create:&[FileCreate],
+        relabel:&[FileRelabel],
+        sets:LabelSetUpdate<'_>,
+    )->HandleResult<()> {
+        if sets.sets.len()>scarlet_abi::shield::MAX_LABEL_SETS || sets.members.len()>scarlet_abi::shield::MAX_SET_MEMBERS
+            || sets.grants.len()>MAX_RULES || sets.files.len()>MAX_RULES {return Err(HandleError::InvalidParameter);}
         if labels.len() > MAX_LABELS
             || labels
                 .iter()
@@ -66,8 +94,9 @@ impl Policy {
                 name: name.as_ptr() as u64,
             })
             .collect();
+        let has_sets = !sets.sets.is_empty() || !sets.members.is_empty() || !sets.grants.is_empty() || !sets.files.is_empty();
         let raw = scarlet_abi::shield::RawPolicyUpdate {
-            version: scarlet_abi::shield::POLICY_UPDATE_VERSION,
+            version: if has_sets {scarlet_abi::shield::POLICY_UPDATE_SETS_VERSION} else {scarlet_abi::shield::POLICY_UPDATE_VERSION},
             expected_generation,
             labels: labels.as_ptr() as u64,
             label_count: labels.len() as u64,
@@ -83,13 +112,21 @@ impl Policy {
             file_relabel_count: relabel.len() as u64,
             ..Default::default()
         };
+        let extended = scarlet_abi::shield::RawPolicyUpdateWithSets {
+            base: raw,
+            sets:sets.sets.as_ptr() as u64,set_count:sets.sets.len() as u64,
+            members:sets.members.as_ptr() as u64,member_count:sets.members.len() as u64,
+            set_grants:sets.grants.as_ptr() as u64,set_grant_count:sets.grants.len() as u64,
+            set_files:sets.files.as_ptr() as u64,set_file_count:sets.files.len() as u64,
+            reserved:[0;2],
+        };
         // SAFETY: the specification, records and names are borrowed until return.
         let result = unsafe {
             scarlet_sys::syscall3(
                 Syscall::ShieldPolicyExtend,
                 self.0.as_raw() as usize,
-                &raw as *const _ as usize,
-                128,
+                &extended as *const _ as usize,
+                if has_sets {208} else {128},
             )
         };
         if result == 0 {

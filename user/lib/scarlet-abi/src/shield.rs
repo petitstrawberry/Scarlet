@@ -93,3 +93,63 @@ pub struct RawPolicyUpdate {
 }
 pub const POLICY_UPDATE_VERSION: u32 = 1;
 const _: [(); 128] = [(); core::mem::size_of::<RawPolicyUpdate>()];
+
+/// Version two retains the complete version-one prefix and reserved bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RawPolicyUpdateWithSets {
+    pub base: RawPolicyUpdate,
+    pub sets: u64,
+    pub set_count: u64,
+    pub members: u64,
+    pub member_count: u64,
+    pub set_grants: u64,
+    pub set_grant_count: u64,
+    pub set_files: u64,
+    pub set_file_count: u64,
+    pub reserved: [u64; 2],
+}
+pub const POLICY_UPDATE_SETS_VERSION: u32 = 2;
+pub const MAX_LABEL_SETS: usize = 256;
+pub const MAX_SET_MEMBERS: usize = 16384;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawLabelSet { pub id:u32, pub reserved:u32 }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawSetMember { pub set:u32, pub label:u32 }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawLabelSelector { pub kind:u32, pub id:u32 }
+impl RawLabelSelector {
+    pub const fn label(id:u32)->Self {Self {kind:0,id}}
+    pub const fn set(id:u32)->Self {Self {kind:1,id}}
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawSetGrant {
+    pub source:RawLabelSelector,
+    pub target:RawLabelSelector,
+    pub class:u32,
+    pub reserved:u32,
+    pub permissions:u64,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawSetFileRule {
+    pub source:RawLabelSelector,
+    pub origin:RawLabelSelector,
+    pub target:RawLabelSelector,
+    pub kind:u32,
+    /// 1: creation authorization, 2: relabel authorization. No default selection.
+    pub action:u32,
+    /// Bit 0 requires different old and new labels (relabel rules only).
+    pub flags:u32,
+    pub reserved:u32,
+}
+const _:[();208]=[();core::mem::size_of::<RawPolicyUpdateWithSets>()];
+const _:[();8]=[();core::mem::size_of::<RawLabelSet>()];
+const _:[();8]=[();core::mem::size_of::<RawSetMember>()];
+const _:[();32]=[();core::mem::size_of::<RawSetGrant>()];
+const _:[();40]=[();core::mem::size_of::<RawSetFileRule>()];
