@@ -1082,6 +1082,10 @@ pub enum Syscall {
     // Shared memory
     SharedMemoryCreate = 620,
     SharedMemoryResize = 621,
+    /// Create anonymous input endpoints: (kind, width, height, output:*mut [i32;2]).
+    /// Kind 1 is keyboard (zero dimensions); kind 4 is direct touch (2..=65536).
+    /// Returns 0 and [producer, receiver], or usize::MAX without leaking handles.
+    InputChannelCreate = 625,
 
     // Socket handle transfer
     SocketSendHandle = 630,

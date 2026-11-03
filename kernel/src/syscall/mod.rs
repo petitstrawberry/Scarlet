@@ -409,6 +409,7 @@ syscall_table! {
 
     // Shared Memory
     SharedMemoryCreate = 620 => sys_shared_memory_create,      // Create shared memory region
+    InputChannelCreate = 625 => crate::device::input::virtual_device::sys_input_channel_create,
     SharedMemoryResize = 621 => sys_shared_memory_resize,      // Resize shared memory region
 
     // Socket Handle Transfer (similar to SCM_RIGHTS)

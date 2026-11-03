@@ -288,7 +288,7 @@ fn native_syscall_numbers() {
         VfsViewOverlay = 526, VfsViewUnmount = 527,
         VfsViewCreateDirectory = 528, VfsViewRoot = 529,
         Pipe = 600, EventSendDirect = 615,
-        EventSendGroup = 616, SharedMemoryCreate = 620, SharedMemoryResize = 621,
+        EventSendGroup = 616, SharedMemoryCreate = 620, SharedMemoryResize = 621, InputChannelCreate = 625,
         SocketSendHandle = 630, SocketRecvHandle = 631,
         SocketSendHandleAndData = 632, SocketRecvHandleAndData = 633,
         EventHandlerRegister = 640, EventHandlerUnregister = 641,

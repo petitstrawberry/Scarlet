@@ -7,6 +7,7 @@
 use core::mem::size_of;
 
 pub mod event_device;
+pub mod virtual_device;
 
 /// Input event structure
 ///
