@@ -1722,6 +1722,19 @@ impl SocketObject for LocalSocket {
 }
 
 impl Selectable for LocalSocket {
+    fn is_hung_up(&self) -> bool {
+        // A datagram peer disappearing is not a stream hangup. For connected
+        // streams/seqpackets, closure belongs to the logical peer handle, even
+        // while temporary kernel Arc references keep its allocation alive.
+        if self.is_datagram() { return false; }
+        let state = *self.state.read();
+        match state {
+            SocketState::Closed => true,
+            SocketState::Connected => self.upgrade_peer()
+                .is_none_or(|peer| *peer.state.read() == SocketState::Closed),
+            _ => false,
+        }
+    }
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
         if self.is_datagram() {return self.datagram_ready(interest);}
         let mut ready = ReadySet::none();
@@ -2110,6 +2123,33 @@ mod tests {
         );
     }
 
+    #[test_case]
+    fn stream_hangup_follows_peer_handle_close_without_discarding_queued_data() {
+        let mut data = [0; 16];
+        for kind in [SocketType::Stream, SocketType::SeqPacket] {
+            let (client, server) = LocalSocket::create_connected_pair_with_type(
+                kind, "hup-client".into(), "hup-server".into());
+            assert!(!server.is_hung_up());
+            client.write(b"queued").unwrap();
+            let retained = client.clone();
+            client.close_handle();
+            assert!(server.is_hung_up());
+            assert_eq!(retained.state(), SocketState::Closed);
+            assert_eq!(server.read(&mut data).unwrap(), 6);
+            assert_eq!(&data[..6], b"queued");
+            assert_eq!(server.read(&mut data).unwrap(), 0);
+        }
+        let (client, server) = LocalSocket::create_connected_pair("half-client".into(), "half-server".into());
+        client.shutdown(ShutdownHow::Write).unwrap();
+        assert!(!server.is_hung_up());
+        assert_eq!(server.read(&mut data).unwrap(), 0);
+        server.write(b"reply").unwrap();
+        assert_eq!(client.read(&mut data).unwrap(), 5);
+        server.shutdown(ShutdownHow::Both).unwrap();
+        assert!(client.is_hung_up());
+        let listener = LocalSocket::new(SocketType::Stream, SocketProtocol::Default);
+        assert!(!listener.is_hung_up());
+    }
     #[test_case]
     fn test_shutdown_write_rejects_later_writes() {
         let (sock1, sock2) =
