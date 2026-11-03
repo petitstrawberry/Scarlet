@@ -39,7 +39,7 @@
     "ro.hardware": "scarlet",
     "dalvik.vm.dex2oat64.enabled": "true",
     "dalvik.vm.usejit": "true",
-    "pm.dexopt.first-boot": "assume-verified",
+    "pm.dexopt.first-boot": "verify",
     "sys.use_memfd": "true",
     "ro.hardware.egl": "angle",
     "ro.hardware.vulkan": "pastel",
