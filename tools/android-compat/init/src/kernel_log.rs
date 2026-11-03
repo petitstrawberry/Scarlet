@@ -53,9 +53,13 @@ fn collect_fault_snapshots() {
     // Read bounded fresh snapshots so a collector cannot sleep through a fault.
     let mut bytes = std::vec![0; 256 * 1024];
     let mut seen = std::collections::BTreeSet::new();
+    let Ok(mut log) = std::fs::File::open("/dev/kmsg") else {
+        println!("SCARLET_ANDROID_KERNEL_LOG_FAIL: open");
+        return;
+    };
     loop {
-        let snapshot = std::fs::File::open("/dev/kmsg")
-            .and_then(|mut log| log.read(&mut bytes));
+        let snapshot = log.seek(std::io::SeekFrom::Start(0))
+            .and_then(|_| log.read(&mut bytes));
         let count = match snapshot {
             Ok(count) => count,
             Err(error) => { println!("SCARLET_ANDROID_KERNEL_LOG_FAIL: {}", error); return; }
