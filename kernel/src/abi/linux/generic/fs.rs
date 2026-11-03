@@ -4389,12 +4389,8 @@ pub fn sys_mkdirat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     trapframe.increment_pc_next(&task);
     let dirfd = trapframe.get_arg(0) as i32;
     let mode = (trapframe.get_arg(2) as u32 & !abi.umask) & 0o7777;
-    let path_ptr = match task.vm_manager.translate_to_kva(trapframe.get_arg(1)) {
-        Some(ptr) => ptr as *const u8,
-        None => return errno::to_result(errno::EFAULT),
-    };
-    let path = match cstring_to_string(path_ptr, MAX_PATH_LENGTH) {
-        Ok((p, _)) => p,
+    let path = match parse_c_string_from_userspace(&task, trapframe.get_arg(1), MAX_PATH_LENGTH) {
+        Ok(path) => path,
         Err(_) => return errno::to_result(errno::EFAULT),
     };
     if path.is_empty() {

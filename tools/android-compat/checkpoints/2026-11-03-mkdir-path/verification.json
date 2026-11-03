@@ -1,0 +1,11 @@
+{
+  "result": "PASS",
+  "before_kernel_sha256": "0342958986f81dd28a1eb4488491c919008fd2101b57e3dd9867a9062ff36ebf",
+  "probe_sha256": "5ea533f52fd4a45952347b863ceac721d972ff632f6b926ec6ddadc4a0f0f822",
+  "before": "mkdirat succeeded although the pathname continued into a PROT_NONE user page; the regression exited 1.",
+  "scope": "Pathname user-copy correctness; association with the Zygote profile-directory failure remains to be checked in Android.",
+  "intermediate": "Changing mkdirat to the existing user-copy helper alone still accepted PROT_NONE. The common user-copy read translation also lacked user/read permission checks; both are now changed, with regression validation pending.",
+  "after_kernel_sha256": "82b3362b153251ab0b2026dc2f4cc5535a15f39206290111730e591316d810e8",
+  "after": "Protected continuation returns EFAULT; readable cross-page mkdirat, stat and chmod pass; a NUL at the first page end works with an inaccessible next page.",
+  "kernel_suite": "1819 tests passed under HVF"
+}
