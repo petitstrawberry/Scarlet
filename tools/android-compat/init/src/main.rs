@@ -82,7 +82,9 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
             .unwrap_or("")
             .split('\u{1f}')
             .collect();
-        if argv.first().copied() != Some(program) || (!diagnostic && !argv.contains(&"-Xint")) {
+        if argv.first().copied() != Some(program)
+            || (!diagnostic && !argv.contains(&"-Xint") && !argv.contains(&"-Xusejit:true"))
+        {
             return Err("ART interpreter arguments");
         }
         let label = if diagnostic { "PROGRAM" } else { "ART" };

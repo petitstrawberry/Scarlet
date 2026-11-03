@@ -249,7 +249,9 @@ def main():
         shutil.copytree(args.runtime_root, android, dirs_exist_ok=True, symlinks=True)
     if art:
         if args.art_dex or framework:
-            shutil.copy2(args.art_dex or args.framework_probe / "classes.dex", android / "data/local/tmp/classes.dex")
+            dex_target = android / "data/local/tmp/classes.dex"
+            dex_target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(args.art_dex or args.framework_probe / "classes.dex", dex_target)
             if validate_dex(android / "data/local/tmp/classes.dex") != dex_hash:
                 raise ValueError("DEX changed during staging")
         verify_art_runtime(android)

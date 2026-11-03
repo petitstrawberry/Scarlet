@@ -1,6 +1,7 @@
 """Read-only input preparation for the pinned Android 13 ARM64 ART fixture."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -204,11 +205,15 @@ def verify_art_runtime(root):
 
 def art_launch(metadata):
     """Keep recorded and compiled launcher arguments identical."""
-    return {
-        "argv": ["/apex/com.android.art/bin/dalvikvm64", "-Xint", "-Xusejit:false",
+    argv = ["/apex/com.android.art/bin/dalvikvm64", "-Xint", "-Xusejit:false",
                  "-Ximage:/system/nonexistent/boot.art", "-Xnoimage-dex2oat",
                  "-Xbootclasspath:" + metadata["boot_class_path"],
-                 "-Xms16m", "-Xmx128m", "-cp", "/data/local/tmp/classes.dex", "ScarletArtHello"],
+                 "-Xms16m", "-Xmx128m", "-cp", "/data/local/tmp/classes.dex", "ScarletArtHello"]
+    if os.environ.get("SCARLET_ART_JIT") == "1":
+        argv = ["-Xusejit:true" if value == "-Xusejit:false" else value
+                for value in argv if value != "-Xint"]
+    return {
+        "argv": argv,
         "env": ["PATH=/system/bin:/apex/com.android.art/bin", "ANDROID_ROOT=/system",
                 "ANDROID_DATA=/data", "ANDROID_ART_ROOT=/apex/com.android.art",
                 "ANDROID_I18N_ROOT=/apex/com.android.i18n", "ANDROID_TZDATA_ROOT=/apex/com.android.tzdata",
