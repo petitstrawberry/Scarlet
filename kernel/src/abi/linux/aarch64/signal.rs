@@ -163,9 +163,10 @@ fn setup_signal_frame(
     abi: &LinuxAbi, task: &Task, trapframe: &mut Trapframe,
     handler: usize, signal: LinuxSignal, fault: Option<MemoryFaultInfo>,
 ) -> Result<(), &'static str> {
-    let (action, old_mask) = {
+    let (action, active_mask, old_mask) = {
         let state = abi.signal_state.lock();
-        (state.get_sigaction(signal), state.blocked.raw())
+        let active = state.blocked.raw();
+        (state.get_sigaction(signal), active, state.suspend_restore_mask.unwrap_or(active))
     };
     let stack = &abi.thread_state;
     let on_altstack = stack.sigaltstack_size != 0
@@ -231,7 +232,8 @@ fn setup_signal_frame(
     copy_to_user(task, base, &frame).map_err(|_| "cannot write signal frame")?;
     {
         let mut state = abi.signal_state.lock();
-        let mut blocked = old_mask | action.mask;
+        state.suspend_restore_mask = None;
+        let mut blocked = active_mask | action.mask;
         if action.flags & SA_NODEFER == 0 {
             blocked |= 1u64 << (signal as u32 - 1);
         }
@@ -342,6 +344,7 @@ pub fn dispatch_arch_syscall(
     syscall: usize,
 ) -> Option<usize> {
     match syscall {
+        133 => Some(crate::abi::linux::generic::signal::sys_rt_sigsuspend(&mut abi.0, frame)),
         139 => Some(sys_rt_sigreturn(abi, frame)),
         _ => None,
     }
@@ -350,6 +353,70 @@ pub fn dispatch_arch_syscall(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn sigsuspend_delivers_child_exit_and_sigreturn_restores_original_mask() {
+        use crate::abi::linux::generic::{errno, signal::sys_rt_sigsuspend};
+        use crate::environment::USER_STACK_END;
+        use crate::ipc::event::{Event, ProcessControlType};
+        use crate::task::{clear_mock_current_task, set_mock_current_task};
+        let mut task = crate::task::new_user_task("sigsuspend-child-exit".into(), 0);
+        task.set_id(usize::MAX - 64);
+        // A real exec allocates an address space before signal trampolines can
+        // fault in their private executable page.
+        task.vm_manager.set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let task = Arc::new(task);
+        let base = USER_STACK_END - 3 * PAGE_SIZE;
+        task.allocate_stack_pages(base, 3).unwrap();
+        copy_to_user(&task, base, &0x73u32.to_ne_bytes()).unwrap();
+        let mask_address = base + 16;
+        // Attempts to block SIGKILL/SIGSTOP must be discarded.
+        copy_to_user(&task, mask_address, &UNMASKABLE.to_ne_bytes()).unwrap();
+        let original_mask = (1u64 << 16) | (1u64 << 9);
+        let mut abi = LinuxAarch64Abi::default();
+        {
+            let mut state = abi.signal_state.lock();
+            state.blocked.set_raw(original_mask);
+            state.set_handler(LinuxSignal::SIGCHLD, SignalAction::Custom(0x400000));
+            // Ignored pending signals must not finish sigsuspend first.
+            state.set_handler(LinuxSignal::SIGUSR1, SignalAction::Ignore);
+            state.add_pending(LinuxSignal::SIGUSR1);
+        }
+        task.event_queue.lock().enqueue(Event::immediate_process_control(
+            task.get_id() as u32, ProcessControlType::ChildExit,
+        ));
+        set_mock_current_task(task.clone());
+        let mut frame = Trapframe::new();
+        frame.set_pc(base as u64);
+        frame.sp = (USER_STACK_END - 16) as u64;
+        frame.set_arg(0, mask_address);
+        frame.set_arg(1, 8);
+        let result = sys_rt_sigsuspend(&mut abi.0, &mut frame);
+        assert_eq!(result, errno::to_result(errno::EINTR));
+        assert_eq!(abi.signal_state.lock().blocked.raw(), 0);
+        let return_pc = frame.elr;
+        assert_eq!(deliver_pending_handler(&abi.0, &mut frame, result), 17);
+        assert_eq!(frame.elr, 0x400000);
+        let mut saved = vec![0; FRAME_SIZE];
+        copy_from_user(&task, frame.sp as usize, &mut saved).unwrap();
+        assert_eq!(get64(&saved, MASK), original_mask);
+        assert_eq!(get64(&saved, REGS), result as u64);
+        assert_eq!(abi.signal_state.lock().blocked.raw(), 1 << 16);
+        assert_eq!(abi.signal_state.lock().suspend_restore_mask, None);
+        assert_eq!(sys_rt_sigreturn(&mut abi, &mut frame), result);
+        assert_eq!(frame.elr, return_pc);
+        assert_eq!(abi.signal_state.lock().blocked.raw(), original_mask);
+
+        for (address, size, error) in [(mask_address, 16, errno::EINVAL), (0, 8, errno::EFAULT)] {
+            frame.set_pc(base as u64);
+            frame.set_arg(0, address);
+            frame.set_arg(1, size);
+            assert_eq!(sys_rt_sigsuspend(&mut abi.0, &mut frame), errno::to_result(error));
+            assert_eq!(abi.signal_state.lock().blocked.raw(), original_mask);
+            assert_eq!(abi.signal_state.lock().suspend_restore_mask, None);
+        }
+        clear_mock_current_task();
+    }
 
     #[test_case]
     fn signal_frame_restores_interrupted_registers_and_fpsimd() {

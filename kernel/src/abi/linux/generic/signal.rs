@@ -235,6 +235,8 @@ pub struct SignalState {
     /// Pending signals that are blocked
     pub pending: SignalMask,
     pub(crate) pending_waker: Arc<crate::sync::waker::Waker>,
+    /// The pre-sigsuspend mask is restored by sigreturn, not before delivery.
+    pub(crate) suspend_restore_mask: Option<u64>,
 }
 
 // A snapshot (fork/exec) must not mutate the source's dispositions. Thread
@@ -248,6 +250,7 @@ impl Clone for SignalState {
             blocked: self.blocked,
             pending: self.pending,
             pending_waker: self.pending_waker.clone(),
+            suspend_restore_mask: None,
         }
     }
 }
@@ -280,6 +283,7 @@ impl Default for SignalState {
             blocked: SignalMask::new(),
             pending: SignalMask::new(),
             pending_waker: Arc::new(crate::sync::waker::Waker::new_interruptible("linux_signal")),
+            suspend_restore_mask: None,
         }
     }
 }
@@ -302,6 +306,7 @@ impl SignalState {
             blocked: self.blocked,
             pending: SignalMask::new(),
             pending_waker: Arc::new(crate::sync::waker::Waker::new_interruptible("linux_signal")),
+            suspend_restore_mask: None,
         }
     }
 
@@ -617,6 +622,83 @@ pub fn sys_rt_sigprocmask(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usiz
         abi.signal_state.lock().blocked.set_raw(mask & !unmaskable);
     }
     0
+}
+
+/// Atomically replace the signal mask and wait for a caught or fatal signal.
+/// The architecture must save suspend_restore_mask in its signal frame before
+/// exposing this syscall; only AArch64 currently has that frame contract.
+#[cfg(target_arch = "aarch64")]
+pub fn sys_rt_sigsuspend(abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
+    use crate::library::std::usercopy::copy_from_user;
+    let Some(task) = mytask() else { return errno::to_result(errno::ESRCH); };
+    let mask_address = frame.get_arg(0);
+    let size = frame.get_arg(1);
+    frame.increment_pc_next(&task);
+    if size != 8 { return errno::to_result(errno::EINVAL); }
+    let mut bytes = [0; 8];
+    if copy_from_user(&task, mask_address, &mut bytes).is_err() {
+        return errno::to_result(errno::EFAULT);
+    }
+    let unmaskable = (1u64 << (LinuxSignal::SIGKILL as u32 - 1))
+        | (1u64 << (LinuxSignal::SIGSTOP as u32 - 1));
+    abi.bind_task_signals(&task);
+    let state = abi.signal_state.clone();
+    let waker = {
+        let mut state = state.lock();
+        state.suspend_restore_mask = Some(state.blocked.raw());
+        state.blocked.set_raw(u64::from_ne_bytes(bytes) & !unmaskable);
+        state.pending_waker.clone()
+    };
+    loop {
+        // Native child-exit and other process-control events normally become
+        // signals at user return. Import them while suspended so masked and
+        // ignored signals cannot incorrectly complete this wait. Non-signal
+        // events remain queued for their own consumers.
+        loop {
+            let event = task.event_queue.lock()
+                .dequeue_matching(|event| handle_event_to_signal(event).is_some());
+            let Some(event) = event else { break; };
+            state.lock().add_pending(handle_event_to_signal(&event).unwrap());
+        }
+        if task.termination_signal().is_some() {
+            return errno::to_result(errno::EINTR);
+        }
+        let action = {
+            let mut state = state.lock();
+            state.next_deliverable_signal().map(|signal| {
+                let action = state.get_handler(signal);
+                if matches!(action, SignalAction::Ignore | SignalAction::Continue | SignalAction::Stop) {
+                    state.remove_pending(signal);
+                }
+                action
+            })
+        };
+        match action {
+            Some(SignalAction::Custom(_) | SignalAction::Terminate | SignalAction::ForceTerminate) => {
+                // Leave the signal pending for the ordinary delivery path.
+                // Its frame saves -EINTR and the mask from before sigsuspend.
+                return errno::to_result(errno::EINTR);
+            }
+            Some(SignalAction::Ignore | SignalAction::Continue) => continue,
+            Some(SignalAction::Stop) => {
+                // Keep Continue's enqueue/wake atomic with entering Stop.
+                let events = task.event_queue.lock();
+                if events.has_pending_continue() { continue; }
+                stop_target_for_signal(&task);
+                drop(events);
+                crate::sched::scheduler::schedule(frame);
+                continue;
+            }
+            None => {}
+        }
+        // Registration rechecks both queues, closing the signal-arrival race.
+        // Spurious wakes do not return to userspace or restore the old mask.
+        waker.wait_with_condition(task.get_id(), frame, None, 0, || {
+            state.lock().next_deliverable_signal().is_some()
+                || task.has_pending_process_control()
+                || task.termination_signal().is_some()
+        });
+    }
 }
 
 /// Consume one matching pending signal. Like signalfd, the current event model
