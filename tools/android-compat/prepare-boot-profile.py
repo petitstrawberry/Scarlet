@@ -241,6 +241,7 @@ def configure(output, stock, profile, contexts, metadata):
     )
     display_policy = profile["boot_properties"].get("ro.scarlet.display_policy")
     autostart = profile["boot_properties"].get("ro.scarlet.autostart")
+    autostart_attempts = 40
     policy_services = ""
     if display_policy == "awake":
         # The hosted device is presented as a desktop window: keep the display
@@ -259,12 +260,21 @@ def configure(output, stock, profile, contexts, metadata):
         policy_services += (
             "\nservice scarlet-install-existing /system/bin/cmd package install-existing --user 0 " + package + "\n"
             "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
-            "\nservice scarlet-autostart /system/bin/cmd activity start --user 0 -n " + autostart + "\n"
-            "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
-            "\nservice scarlet-autostart-intent /system/bin/cmd activity start --user 0 "
-            "-a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p " + package + "\n"
-            "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
         )
+        # The launcher activity only resolves once the primary user leaves the
+        # locked state, which happens after sys.boot_completed. Retry through a
+        # bounded chain of oneshot services instead of depending on that timing.
+        for attempt in range(autostart_attempts):
+            if attempt % 2:
+                command = ("-a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p "
+                           + package)
+            else:
+                command = "-n " + autostart
+            policy_services += (
+                "\nservice scarlet-autostart-" + str(attempt) +
+                " /system/bin/cmd activity start --user 0 -f 0x30000000 " + command + "\n"
+                "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
+            )
     if policy_services:
         manager_init += policy_services + "\non property:sys.boot_completed=1\n"
         if display_policy == "awake":
@@ -272,15 +282,17 @@ def configure(output, stock, profile, contexts, metadata):
         if autostart is not None:
             manager_init += "    start scarlet-install-existing\n"
     if autostart is not None:
-        # Chain the launch after the primary-user install state is refreshed.
+        # Chain the launch attempts after the primary-user install state is
+        # refreshed and stop after the bounded number of retries.
         manager_init += (
             "\non property:init.svc.scarlet-install-existing=stopped\n"
-            "    start scarlet-autostart\n"
+            "    start scarlet-autostart-0\n"
         )
-        manager_init += (
-            "\non property:init.svc.scarlet-autostart=stopped\n"
-            "    start scarlet-autostart-intent\n"
-        )
+        for attempt in range(autostart_attempts - 1):
+            manager_init += (
+                "\non property:init.svc.scarlet-autostart-" + str(attempt) + "=stopped\n"
+                "    start scarlet-autostart-" + str(attempt + 1) + "\n"
+            )
     (output / "scarlet/boot/init.rc").write_text(manager_init)
     # /data_mirror is a ramdisk directory on a real device; the generic
     # Android init configuration mounts a private tmpfs over it before making
