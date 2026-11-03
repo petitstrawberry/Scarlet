@@ -60,6 +60,30 @@ impl LinkRegistry {
     }
 }
 impl NetworkManager {
+    /// Bind native IPv4 packet rules to an existing link incarnation. External
+    /// control adapters must check their management authority before calling.
+    /// Sharing a meter across policies explicitly aggregates those links only.
+    pub fn set_link_traffic_policy(
+        &self,
+        id: u64,
+        generation: u64,
+        policy: Option<alloc::sync::Arc<super::traffic_policy::Policy>>,
+    ) -> Result<(), &'static str> {
+        let mut links = self.link_lifecycle.lock();
+        links.refresh(self);
+        let link = links.records.values().find(|link| link.id == id)
+            .ok_or("Link removed")?;
+        if link.generation != generation {
+            return Err("Link changed");
+        }
+        let name = link.interface_name().ok_or("Invalid link name")?;
+        let layer = self.get_layer("ip").ok_or("IPv4 layer missing")?;
+        let ip = layer.as_any().downcast_ref::<super::ipv4::Ipv4Layer>()
+            .ok_or("IPv4 layer unavailable")?;
+        ip.set_traffic_policy(name, policy);
+        Ok(())
+    }
+
     pub fn link_snapshot(&self) -> Vec<NetworkLinkInfoV1> {
         let mut links = self.link_lifecycle.lock();
         links.refresh(self);

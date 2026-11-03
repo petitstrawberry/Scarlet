@@ -44,6 +44,7 @@ pub mod socket;
 pub mod syscall;
 pub mod tcp;
 pub mod traffic;
+pub mod traffic_policy;
 pub mod udp;
 #[cfg(all(test, target_arch = "riscv64"))]
 pub mod virtio_net_tests;
@@ -409,6 +410,11 @@ impl NetworkManager {
         let _ = crate::network::config::clear_interface_ipv4(name);
         self.interfaces.write().remove(name);
         links.remove(name);
+        if let Some(layer) = self.get_layer("ip")
+            && let Some(ip) = layer.as_any().downcast_ref::<ipv4::Ipv4Layer>()
+        {
+            ip.set_traffic_policy(name, None);
+        }
         if let Some(layer) = self.get_layer("ethernet")
             && let Some(ethernet) = layer.as_any().downcast_ref::<ethernet::EthernetLayer>()
         {
@@ -709,6 +715,9 @@ impl NetworkManager {
                 .as_any()
                 .downcast_ref::<crate::network::ipv4::Ipv4Layer>()
             {
+                if !ip.admit_traffic(interface_name, traffic::Direction::Receive, total_length) {
+                    return;
+                }
                 if let Some(handler) = ip.get_protocol_handler(protocol) {
                     let src_ip = crate::network::ipv4::Ipv4Address::from_bytes(header.source_ip);
                     let dst_ip = crate::network::ipv4::Ipv4Address::from_bytes(header.dest_ip);

@@ -245,6 +245,8 @@ pub struct Ipv4Layer {
     routing_table: IrqRwSpinLock<Vec<RouteEntry>>,
     /// Protocol handlers registered by protocol number
     protocols: IrqRwSpinLock<BTreeMap<u8, alloc::sync::Arc<dyn NetworkLayer>>>,
+    /// Explicit per-link rules, removed with the link registration.
+    traffic_policies: IrqRwSpinLock<BTreeMap<String, alloc::sync::Arc<super::traffic_policy::Policy>>>,
     /// Statistics
     stats: IrqRwSpinLock<NetworkLayerStats>,
     /// Default TTL
@@ -258,6 +260,7 @@ impl Ipv4Layer {
             addresses: IrqRwSpinLock::new(BTreeMap::new()),
             routing_table: IrqRwSpinLock::new(Vec::new()),
             protocols: IrqRwSpinLock::new(BTreeMap::new()),
+            traffic_policies: IrqRwSpinLock::new(BTreeMap::new()),
             stats: IrqRwSpinLock::new(NetworkLayerStats::default()),
             default_ttl: 64,
         })
@@ -280,6 +283,31 @@ impl Ipv4Layer {
             .get_layer("ethernet")
             .expect("EthernetLayer must be initialized before Ipv4Layer");
         ethernet.register_protocol(crate::network::ethernet::ether_type::IPV4, layer);
+    }
+
+    /// Called under the manager's link lifecycle lock. Removal clears the
+    /// binding before an interface name can be registered again.
+    pub(super) fn set_traffic_policy(
+        &self,
+        interface: &str,
+        policy: Option<alloc::sync::Arc<super::traffic_policy::Policy>>,
+    ) {
+        let mut policies = self.traffic_policies.write();
+        if let Some(policy) = policy {
+            policies.insert(interface.to_string(), policy);
+        } else {
+            policies.remove(interface);
+        }
+    }
+
+    pub(super) fn admit_traffic(
+        &self,
+        interface: &str,
+        direction: super::traffic::Direction,
+        bytes: usize,
+    ) -> bool {
+        let policy = self.traffic_policies.read().get(interface).cloned();
+        policy.is_none_or(|policy| policy.admit(direction, bytes))
     }
 
     /// Add an IPv4 address to an interface
@@ -759,6 +787,15 @@ impl NetworkLayer for Ipv4Layer {
 
         packet.prepend(&header.to_array())?;
         let packet_size = packet.len();
+        // Evaluate once before ARP deferral or device backpressure. These
+        // counters intentionally are not refunded like submission reservations.
+        if !self.admit_traffic(
+            &interface_name,
+            super::traffic::Direction::Transmit,
+            packet_size,
+        ) {
+            return Err(SocketError::PermissionDenied);
+        }
         if let Some(budget) = context.traffic_budget() {
             packet.reserve_traffic(budget)?;
         }
@@ -854,6 +891,16 @@ impl NetworkLayer for Ipv4Layer {
             return Err(SocketError::InvalidPacket);
         }
 
+        if let Some(interface) = context.and_then(|value| value.get("interface")) {
+            let interface =
+                core::str::from_utf8(interface).map_err(|_| SocketError::InvalidPacket)?;
+            if !self.admit_traffic(interface, super::traffic::Direction::Receive, total_length) {
+                return Err(SocketError::PermissionDenied);
+            }
+        } else if !self.traffic_policies.read().is_empty() {
+            // A policy-bound stack cannot silently admit unattributed ingress.
+            return Err(SocketError::PermissionDenied);
+        }
         let payload = &packet[header_len..total_length];
 
         if LOG_IPV4_PACKET_TRACE {
