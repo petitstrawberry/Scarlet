@@ -67,6 +67,7 @@ def main():
         native=android.parent.parent/"bin/sws";shutil.copy2(selected["sws-native"],native)
         if sha256(native)!=sws_digest:raise ValueError("changed native compositor during staging")
         for original,destination in [(selected["sws-client"]/"libsws_client_c.so",android/"vendor/lib64/libsws_client_c.so"),
+                                     (selected["sws-client"]/"libscarlet_ui_window.so",android/"vendor/lib64/libscarlet_ui_window.so"),
                                      (selected["graphics-hal"]/"gralloc.scarlet.so",android/"vendor/lib64/hw/gralloc.scarlet.so")]:
             if destination.exists():raise ValueError("graphics overlay conflicts with a stock input")
             destination.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(original,destination)

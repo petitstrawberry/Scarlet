@@ -47,7 +47,8 @@ def prepare(inputs,metadata,system,vendor,builds,temporary):
                         (builds["adapters"]/Path(ALLOCATOR).name,ALLOCATOR),
                         (builds["adapters"]/Path(COMPOSER).name,COMPOSER),
                         (builds["adapters"]/Path(MAPPER).name,MAPPER),
-                        (builds["client"]/"libsws_client_c.so","vendor/lib64/libsws_client_c.so")]:install(source,name)
+                        (builds["client"]/"libsws_client_c.so","vendor/lib64/libsws_client_c.so"),
+                        (builds["client"]/"libscarlet_ui_window.so","vendor/lib64/libscarlet_ui_window.so")]:install(source,name)
     if "vulkan" in builds:install(builds["vulkan"]/"vulkan.pastel.so","vendor/lib64/hw/vulkan.pastel.so")
     # Composer HIDL is not part of the VNDK namespace shared with vendor.
     # Package the exact linked interface DSO alongside its vendor provider.

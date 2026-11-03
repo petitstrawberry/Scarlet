@@ -21,6 +21,7 @@ def main():
     p.add_argument("--ndk",type=Path,required=True)
     p.add_argument("--output",type=Path,required=True)
     p.add_argument("--reuse-headers",type=Path,help="reuse a local header tree after checking every pinned content hash")
+    p.add_argument("--scarlet-ui-source",type=Path,required=True,help="source used to build libscarlet_ui_window.so")
     args=p.parse_args()
     output=args.output.resolve();output.mkdir(parents=True,exist_ok=False)
     pins=json.loads((SOURCE/"graphics/headers.json").read_text())
@@ -49,13 +50,15 @@ def main():
     flags=[str(compiler),"-O2","-Wall","-Wextra","-Werror"]
     for name in ["hardware",*pins["archives"]]:flags += ["-isystem",str(output/"headers"/name)]
     flags += ["-I",str(SOURCE.parent.parent/"user/lib/sws-client-c/include")]
+    ui_header=args.scarlet_ui_source.resolve()/"crates/scarlet-ui-window-c/include/scarlet_ui_window.h"
+    flags += ["-I",str(ui_header.parent)]
     hal=SOURCE/"graphics/gralloc.c"
     commands=[flags+["-shared","-fPIC","-Wl,-z,defs",str(hal),"-ldl","-o",str(output/"gralloc.scarlet.so")],
               flags+["-static",str(hal),str(SOURCE/"graphics/gralloc-probe.c"),"-ldl","-o",str(output/"gralloc-probe")],
               flags+["-fPIE","-pie",str(hal),str(SOURCE/"graphics/gralloc-probe.c"),"-ldl","-o",str(output/"gralloc-frame-probe")],
               flags+["-static",str(SOURCE/"binder-buffer-probe.c"),"-o",str(output/"binder-buffer-probe")]]
     for command in commands:subprocess.run(command,check=True)
-    record={"kind":"android-cpu-graphics-hal-v1","commands":commands,"headers":pins,
+    record={"kind":"android-cpu-graphics-hal-v1","commands":commands,"headers":pins,"scarlet_ui_header_sha256":sha256(ui_header),
             "sources":{str(name):sha256(SOURCE/name) for name in ["build-graphics-hal.py","graphics/headers.json","graphics/gralloc.c","graphics/gralloc-probe.c","binder-buffer-probe.c","binder-object-probe.c"]},
             "compiler":subprocess.check_output([str(compiler),"--version"],text=True),
             "needed":elf_needed(output/"gralloc.scarlet.so"),

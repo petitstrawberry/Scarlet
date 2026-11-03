@@ -19,6 +19,7 @@ def main():
     for name in ("ndk", "rust-toolchain", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--sysroot", type=Path, help="optional local Rust sysroot containing the Android standard library")
+    parser.add_argument("--scarlet-ui-source", type=Path, required=True, help="ScarletUI source matching the native bundle window ABI")
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -38,6 +39,13 @@ def main():
     release = output / "target/aarch64-linux-android/release"
     shared = output / "libsws_client_c.so"
     shutil.copy2(release / shared.name, shared)
+    ui_root = args.scarlet_ui_source.resolve()
+    commands.append([str(toolchain / "cargo"), "build", "--manifest-path",
+                     str(ui_root / "crates/scarlet-ui-window-c/Cargo.toml"),
+                     "--target", "aarch64-linux-android", "--release", "--target-dir", str(output / "target")])
+    subprocess.run(commands[-1], check=True, env=environment, cwd=ui_root)
+    ui_shared = output / "libscarlet_ui_window.so"
+    shutil.copy2(release / ui_shared.name, ui_shared)
     commands.append([str(toolchain / "rustc"), "--edition", "2024", "--target", "aarch64-linux-android",
                      *rustflags, "--crate-type", "staticlib", "-C", "panic=unwind", "-C", "opt-level=2",
                      "-L", "dependency=" + str(release / "deps")])
@@ -62,7 +70,10 @@ def main():
     record = {"kind": "android-sws-client-v1", "target": "aarch64-linux-android", "commands": commands,
               "rustc": subprocess.check_output([str(toolchain / "rustc"), "-Vv"], text=True),
               "sources": sources, "needed": elf_needed(shared),
-              "files": {path.name: sha256(path) for path in (shared, program)},
+              "files": {path.name: sha256(path) for path in (shared, ui_shared, program)},
+              "scarlet_ui": {str(path.relative_to(ui_root)): sha256(path)
+                             for path in ui_root.rglob("*")
+                             if path.is_file() and path.suffix in (".rs", ".toml", ".h") and "target" not in path.parts},
               "display_readiness": "not tested"}
     (output / "build.json").write_text(json.dumps(record, indent=2) + "\n")
     print("Built Android SWS client and SDK transport probe; no display connection tested")

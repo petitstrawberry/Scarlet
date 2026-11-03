@@ -17,7 +17,9 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <time.h>
 #include "sws_client.h"
+#include "scarlet_ui_window.h"
 
 enum { MAX_DIMENSION = 4096, MAX_BUFFERS = 256, HANDLE_INTS = 9,
        MAX_BUFFER_BYTES = 64 * 1024 * 1024, MAX_MAPPED_BYTES = 128 * 1024 * 1024,
@@ -209,26 +211,176 @@ static int lock_async_ycbcr(const gralloc_module_t *m,buffer_handle_t b,int u,in
 typedef struct Framebuffer {
     framebuffer_device_t device;
     pthread_mutex_t lock;
-    void *client;
+    pthread_cond_t wake;
+    pthread_t ui_thread;
+    void *client, *ui;
+    ScarletUiFrame *frame;
+    SwsSceneGeometry geometry;
+    SwsSceneFrame chrome;
+    uint8_t *chrome_pixels;
+    SwsRect chrome_clip[256];
+    int ready, stopping, pending, posting, result, visibility_changed;
+    int x, y;
+    unsigned frame_buttons, content_buttons;
     uint32_t window;
     int enabled, closed;
     uint8_t *pixels;
     size_t capacity;
-    int32_t (*present)(uint32_t,const void *,size_t,uint32_t,uint32_t,size_t);
+    int32_t (*present)(uint32_t,const SwsSceneFrame *,const void *,size_t,uint32_t,uint32_t,size_t);
+    int32_t (*create)(const char *,uint32_t,uint32_t,uint32_t,uint32_t *);
+    int32_t (*scale)(uint32_t *);
+    int32_t (*geometry_get)(uint32_t,SwsSceneGeometry *);
+    uint32_t (*frame_abi)(void);
+    int32_t (*frame_insets)(uint32_t,uint32_t,ScarletUiInsets *);
+    ScarletUiFrame *(*frame_create)(void);
+    int32_t (*frame_configure)(ScarletUiFrame *,const char *,uint32_t,uint32_t,uint32_t,uint32_t);
+    int32_t (*frame_render)(ScarletUiFrame *,ScarletUiFrameView *);
+    int32_t (*frame_pointer)(ScarletUiFrame *,uint32_t,int32_t,int32_t,uint32_t *);
+    int32_t (*frame_dirty)(ScarletUiFrame *);
+    void (*frame_destroy)(ScarletUiFrame *);
     int32_t (*destroy)(uint32_t);
     int32_t (*poll)(SwsEvent *);
     int32_t (*action)(uint32_t,uint32_t);
     int32_t (*fullscreen)(uint32_t,uint32_t);
 } Framebuffer;
+/* As in GLFW's Scarlet backend, the shared frame stays on one UI thread.
+ * Android may post from other threads; posts hand off pixels and wait for the
+ * presentation result. Idle input handling does not depend on Android draws. */
+static int frame_refresh(Framebuffer *fb) {
+    SwsSceneGeometry g;
+    if (fb->geometry_get(fb->window,&g)<0) return -EIO;
+    uint32_t flags=SCARLET_UI_FRAME_RESIZABLE;
+    if (!(g.state & (4|16))) flags|=SCARLET_UI_FRAME_DECORATED;
+    if (fb->frame_configure(fb->frame,"Android",g.width,g.height,g.scale_milli,flags)<0) return -EIO;
+    ScarletUiInsets insets;
+    if (fb->frame_insets(g.scale_milli,flags,&insets)<0) return -EIO;
+    if (insets.left+insets.right>=g.width || insets.top+insets.bottom>=g.height) return -EINVAL;
+    g.content=(SwsRect){insets.left,insets.top,g.width-insets.left-insets.right,g.height-insets.top-insets.bottom};
+    fb->geometry=g;
+    return 0;
+}
+static int frame_pointer(Framebuffer *fb,uint32_t kind,int x,int y) {
+    uint32_t actions=0;
+    if (fb->frame_pointer(fb->frame,kind,x,y,&actions)<0) return -EIO;
+    if ((actions&SCARLET_UI_FRAME_MOVE) && fb->action(fb->window,SWS_WINDOW_MOVE)<0) return -EIO;
+    if ((actions&SCARLET_UI_FRAME_MINIMIZE) && fb->action(fb->window,SWS_WINDOW_HIDE)<0) return -EIO;
+    if (actions&SCARLET_UI_FRAME_TOGGLE_MAXIMIZE) {
+        if (fb->action(fb->window,(fb->geometry.state&2) ? SWS_WINDOW_RESTORE : SWS_WINDOW_MAXIMIZE)<0) return -EIO;
+    }
+    if (actions&SCARLET_UI_FRAME_CLOSE) fb->closed=1;
+    return 0;
+}
+static int in_content(Framebuffer *fb) {
+    SwsRect r=fb->geometry.content;
+    return fb->x>=(int)r.x && fb->y>=(int)r.y && fb->x<(int)(r.x+r.width) && fb->y<(int)(r.y+r.height);
+}
+static int frame_event(Framebuffer *fb,const SwsEvent *e) {
+    if (e->window_id!=fb->window) return 0;
+    if (e->kind==SWS_EVENT_DESTROYED || e->kind==SWS_EVENT_CLOSE_REQUESTED) { fb->closed=1;return 0; }
+    if (e->kind==SWS_EVENT_CONFIGURE || e->kind==SWS_EVENT_SCALE || e->kind==SWS_EVENT_STATE) return frame_refresh(fb);
+    if (e->kind==SWS_EVENT_FOCUS && !e->value) {
+        if (fb->frame_buttons&1) {
+            if (frame_pointer(fb,SCARLET_UI_POINTER_MOVE,-1,-1) || frame_pointer(fb,SCARLET_UI_POINTER_RELEASE,-1,-1)) return -EIO;
+        }
+        fb->frame_buttons=fb->content_buttons=0;
+    }
+    if (e->kind!=SWS_EVENT_INPUT) return 0;
+    if ((e->type==2 || e->type==3) && e->code<=1) {
+        int *position=e->code ? &fb->y : &fb->x;
+        if (e->type==3) *position=e->value; else *position+=e->value;
+        return frame_pointer(fb,SCARLET_UI_POINTER_MOVE,fb->x,fb->y);
+    }
+    if (e->type==1 && e->code>=0x110 && e->code<=0x117) {
+        unsigned bit=1u<<(e->code-0x110);
+        if (e->value) {
+            if (fb->frame_buttons || (!fb->content_buttons && !in_content(fb))) {
+                fb->frame_buttons|=bit;
+                if (bit==1) return frame_pointer(fb,SCARLET_UI_POINTER_PRESS,fb->x,fb->y);
+            } else fb->content_buttons|=bit;
+        } else if (fb->frame_buttons&bit) {
+            fb->frame_buttons&=~bit;
+            if (bit==1) return frame_pointer(fb,SCARLET_UI_POINTER_RELEASE,fb->x,fb->y);
+        } else fb->content_buttons&=~bit;
+    }
+    return 0;
+}
+static int frame_present(Framebuffer *fb) {
+    int dirty=fb->frame_dirty(fb->frame);
+    if (dirty<0) return -EIO;
+    if (dirty || !fb->chrome_pixels) {
+        ScarletUiFrameView view;
+        if (fb->frame_render(fb->frame,&view)<0 || !view.clip_count || view.clip_count>=256 || view.bytes>MAX_BUFFER_BYTES) return -EIO;
+        void *pixels=realloc(fb->chrome_pixels,view.bytes);
+        if (!pixels) return -ENOMEM;
+        fb->chrome_pixels=pixels;
+        memcpy(fb->chrome_pixels,view.pixels,view.bytes);
+        for (size_t i=0;i<view.clip_count;i++)
+            fb->chrome_clip[i]=(SwsRect){view.clip[i].x,view.clip[i].y,view.clip[i].width,view.clip[i].height};
+        fb->chrome=(SwsSceneFrame){view.width,view.height,view.stride,
+            {view.insets.left,view.insets.top,view.insets.right,view.insets.bottom},
+            fb->chrome_pixels,view.bytes,fb->chrome_clip,view.clip_count};
+    }
+    /* The FFI view expires on the next frame call. Keep only its pixel snapshot
+     * between repaints; the live shared controls remain owned by this thread. */
+    return fb->present(fb->window,&fb->chrome,fb->pixels,fb->capacity,fb->device.width,fb->device.height,(size_t)fb->device.width*4)<0 ? -EIO : 0;
+}
+static void *frame_loop(void *opaque) {
+    Framebuffer *fb=opaque;
+    pthread_mutex_lock(&fb->lock);
+    uint32_t scale;ScarletUiInsets inset;
+    fb->result=-EIO;
+    if (fb->scale(&scale)<0 || fb->frame_insets(scale,3,&inset)<0) goto finished;
+    fb->frame=fb->frame_create();
+    if (!fb->frame || fb->create("Android",fb->device.width+inset.left+inset.right,
+        fb->device.height+inset.top+inset.bottom,1,&fb->window)<0) goto finished;
+    const char *fullscreen=getenv("SCARLET_ANDROID_FULLSCREEN");
+    if (fullscreen && !strcmp(fullscreen,"1") && fb->fullscreen(fb->window,1)<0) goto finished;
+    if (frame_refresh(fb) || frame_present(fb)) goto finished;
+    fb->result=0;fb->ready=1;pthread_cond_broadcast(&fb->wake);
+    while (!fb->stopping && !fb->closed) {
+        int result=0,polled;SwsEvent event;
+        /* Bound one batch so a continuous pointer stream cannot starve posts. */
+        for (int i=0;i<128;i++) {
+            polled=fb->poll(&event);
+            if (polled<0) { result=-EIO;break; }
+            if (!polled) break;
+            result=frame_event(fb,&event);
+            if (result || fb->closed) break;
+        }
+        if (result || fb->closed) { fb->result=result ? result : -ENODEV;break; }
+        if (fb->visibility_changed) {
+            result=fb->action(fb->window,fb->enabled ? SWS_WINDOW_SHOW : SWS_WINDOW_HIDE)<0 ? -EIO : 0;
+            fb->visibility_changed=0;
+        }
+        int dirty=fb->frame_dirty(fb->frame);
+        if (dirty<0) result=-EIO;
+        if (!result && (fb->pending || dirty)) result=frame_present(fb);
+        fb->result=result;
+        fb->pending=0;pthread_cond_broadcast(&fb->wake);
+        if (result) break;
+        struct timespec until;
+        if (clock_gettime(CLOCK_MONOTONIC,&until)) { fb->result=-errno;break; }
+        until.tv_nsec+=16000000;
+        if (until.tv_nsec>=1000000000) { until.tv_sec++;until.tv_nsec-=1000000000; }
+        pthread_cond_timedwait(&fb->wake,&fb->lock,&until);
+    }
+finished:
+    if (fb->result && !fb->stopping) fprintf(stderr,"SWS framebuffer event loop failed: %d\n",fb->result);
+    free(fb->chrome_pixels);fb->chrome_pixels=NULL;
+    if (fb->window) fb->destroy(fb->window);
+    if (fb->frame) fb->frame_destroy(fb->frame);
+    fb->closed=1;fb->ready=1;fb->pending=0;pthread_cond_broadcast(&fb->wake);
+    pthread_mutex_unlock(&fb->lock);
+    return NULL;
+}
 static int framebuffer_post(framebuffer_device_t *device,buffer_handle_t handle) {
     Framebuffer *fb=(Framebuffer *)device;
     pthread_mutex_lock(&fb->lock); int result=-ENODEV;
     static unsigned diagnostic_frames;
     static unsigned diagnostic_failures;
-    SwsEvent event;
-    for (int i=0;i<64 && fb->poll(&event)>0;i++)
-        if (event.window_id==fb->window && event.kind==SWS_EVENT_DESTROYED) fb->closed=1;
-    if (fb->closed) goto done;
+    while (fb->posting && !fb->closed) pthread_cond_wait(&fb->wake,&fb->lock);
+    if (fb->closed) { pthread_mutex_unlock(&fb->lock);return -ENODEV; }
+    fb->posting=1;
     if (!fb->enabled) { result=0; goto done; }
     uint32_t width=device->width,height=device->height;
     size_t bytes=(size_t)width*height*4;
@@ -255,7 +407,11 @@ static int framebuffer_post(framebuffer_device_t *device,buffer_handle_t handle)
         result=0;
     } else if (m && (m->readers || m->writer)) result=-EBUSY;
     pthread_mutex_unlock(&mappings_lock);
-    if (!result && fb->present(fb->window,fb->pixels,bytes,width,height,(size_t)width*4)<0) result=-EIO;
+    if (!result) {
+        fb->pending=1;pthread_cond_broadcast(&fb->wake);
+        while (fb->pending && !fb->closed) pthread_cond_wait(&fb->wake,&fb->lock);
+        result=fb->closed ? -ENODEV : fb->result;
+    }
     if (!result && __atomic_fetch_add(&diagnostic_frames,1,__ATOMIC_RELAXED)<4) {
         size_t nonzero=0;
         for (size_t offset=0;offset<bytes;offset+=256)
@@ -266,15 +422,18 @@ static int framebuffer_post(framebuffer_device_t *device,buffer_handle_t handle)
 done:
     if (result && __atomic_fetch_add(&diagnostic_failures,1,__ATOMIC_RELAXED)<8)
         fprintf(stderr,"SCARLET_ANDROID_FB_POST_ERROR result=%d\n",result);
+    fb->posting=0;pthread_cond_broadcast(&fb->wake);
     pthread_mutex_unlock(&fb->lock);return result;
 }
 static int framebuffer_close_device(hw_device_t *device) {
     Framebuffer *fb=(Framebuffer *)device;
     pthread_mutex_lock(&fb->lock);
-    fb->destroy(fb->window);free(fb->pixels);
-    pthread_mutex_unlock(&fb->lock);pthread_mutex_destroy(&fb->lock);
+    fb->stopping=1;pthread_cond_broadcast(&fb->wake);
+    pthread_mutex_unlock(&fb->lock);
+    pthread_join(fb->ui_thread,NULL);
+    free(fb->pixels);pthread_cond_destroy(&fb->wake);pthread_mutex_destroy(&fb->lock);
     /* NODELETE retains the shared client's connection; balance this open ref. */
-    dlclose(fb->client);
+    dlclose(fb->ui);dlclose(fb->client);
     free(fb);return 0;
 }
 static int swap_interval(framebuffer_device_t *dev,int interval) { (void)dev;return interval==1 ? 0 : -EINVAL; }
@@ -283,8 +442,12 @@ static int enable_screen(framebuffer_device_t *dev,int enabled) {
     if (enabled!=0 && enabled!=1) return -EINVAL;
     Framebuffer *fb=(Framebuffer *)dev;
     pthread_mutex_lock(&fb->lock);
-    int result=fb->action(fb->window,enabled ? SWS_WINDOW_SHOW : SWS_WINDOW_HIDE)<0 ? -EIO : 0;
-    if (!result) fb->enabled=enabled;
+    int result=fb->closed ? -ENODEV : 0;
+    if (!result) {
+        fb->enabled=enabled;fb->visibility_changed=1;pthread_cond_broadcast(&fb->wake);
+        while (fb->visibility_changed && !fb->closed) pthread_cond_wait(&fb->wake,&fb->lock);
+        result=fb->closed ? -ENODEV : fb->result;
+    }
     pthread_mutex_unlock(&fb->lock);return result;
 }
 static int open_framebuffer(const hw_module_t *module,hw_device_t **device) {
@@ -292,21 +455,20 @@ static int open_framebuffer(const hw_module_t *module,hw_device_t **device) {
     if (!fb) return -ENOMEM;
     fb->client=dlopen("libsws_client_c.so",RTLD_NOW|RTLD_LOCAL|RTLD_NODELETE);
     if (!fb->client) { fprintf(stderr,"SWS framebuffer client load failed: %s\n",dlerror());free(fb);return -ENODEV; }
-    int32_t (*create)(const char *,uint32_t,uint32_t,uint32_t,uint32_t *)=dlsym(fb->client,"sws_scene_chrome_create");
-    fb->present=dlsym(fb->client,"sws_scene_chrome_present");
-    fb->destroy=dlsym(fb->client,"sws_window_destroy");fb->poll=dlsym(fb->client,"sws_poll_event");
-    fb->action=dlsym(fb->client,"sws_window_action");
-    fb->fullscreen=dlsym(fb->client,"sws_window_fullscreen");
+    fb->ui=dlopen("libscarlet_ui_window.so",RTLD_NOW|RTLD_LOCAL|RTLD_NODELETE);
+    if (!fb->ui) { fprintf(stderr,"ScarletUI frame load failed: %s\n",dlerror());goto failed; }
+#define LOAD(target,library,symbol) do { fb->target=dlsym(fb->library,symbol);if (!fb->target) goto failed; } while (0)
+    LOAD(create,client,"sws_scene_create");LOAD(present,client,"sws_scene_cpu_present");
+    LOAD(scale,client,"sws_get_output_scale");LOAD(geometry_get,client,"sws_scene_geometry");
+    LOAD(destroy,client,"sws_window_destroy");LOAD(poll,client,"sws_poll_event");
+    LOAD(action,client,"sws_window_action");LOAD(fullscreen,client,"sws_window_fullscreen");
+    LOAD(frame_abi,ui,"scarlet_ui_frame_abi");LOAD(frame_insets,ui,"scarlet_ui_frame_insets");
+    LOAD(frame_create,ui,"scarlet_ui_frame_create");LOAD(frame_configure,ui,"scarlet_ui_frame_configure");
+    LOAD(frame_render,ui,"scarlet_ui_frame_render");LOAD(frame_pointer,ui,"scarlet_ui_frame_pointer");
+    LOAD(frame_dirty,ui,"scarlet_ui_frame_dirty");LOAD(frame_destroy,ui,"scarlet_ui_frame_destroy");
+#undef LOAD
+    if (fb->frame_abi()!=1) goto failed;
     uint32_t width=640,height=480;
-    if (!create || !fb->present || !fb->destroy || !fb->poll || !fb->action ||
-        create("Android",width,height,1,&fb->window)<0) { dlclose(fb->client);free(fb);return -ENODEV; }
-    /* Present Android as a normal resizable window with ScarletUI's shared
-     * titlebar, border and rounded clip. Fullscreen remains available for
-     * device-style launches, but is no longer forced for every boot. */
-    const char *fullscreen=getenv("SCARLET_ANDROID_FULLSCREEN");
-    int fullscreen_requested=fullscreen && !strcmp(fullscreen,"1");
-    if (fullscreen_requested && (!fb->fullscreen || fb->fullscreen(fb->window,1)<0))
-        fprintf(stderr,"SWS framebuffer fullscreen request failed\n");
     /* Initialize the ABI's const fields as a whole object, before publication. */
     framebuffer_device_t initialized={
         .common={.tag=HARDWARE_DEVICE_TAG,.version=0,.module=(hw_module_t *)module,.close=framebuffer_close_device},
@@ -315,10 +477,36 @@ static int open_framebuffer(const hw_module_t *module,hw_device_t **device) {
         .setSwapInterval=swap_interval,.post=framebuffer_post,.compositionComplete=composition_complete,.enableScreen=enable_screen,
     };
     memcpy(&fb->device,&initialized,sizeof(initialized));
-    pthread_mutex_init(&fb->lock,NULL);fb->enabled=1;*device=&fb->device.common;
-    fprintf(stderr,"SCARLET_ANDROID_FRAMEBUFFER_READY width=%u height=%u fullscreen=%d chrome=scarlet-ui\n",width,height,fullscreen_requested);
+    fb->capacity=(size_t)width*height*4;fb->pixels=calloc(1,fb->capacity);
+    if (!fb->pixels) goto failed;
+    for (size_t i=3;i<fb->capacity;i+=4) fb->pixels[i]=255;
+    if (pthread_mutex_init(&fb->lock,NULL)) goto failed;
+    pthread_condattr_t attr;
+    if (pthread_condattr_init(&attr)) goto failed_mutex;
+    int error=pthread_condattr_setclock(&attr,CLOCK_MONOTONIC);
+    if (!error) error=pthread_cond_init(&fb->wake,&attr);
+    pthread_condattr_destroy(&attr);
+    if (error) goto failed_mutex;
+    fb->enabled=1;
+    if (pthread_create(&fb->ui_thread,NULL,frame_loop,fb)) goto failed_cond;
+    pthread_mutex_lock(&fb->lock);
+    while (!fb->ready) pthread_cond_wait(&fb->wake,&fb->lock);
+    int result=fb->result;int closed=fb->closed;
+    pthread_mutex_unlock(&fb->lock);
+    if (closed || result) { pthread_join(fb->ui_thread,NULL);goto failed_cond; }
+    *device=&fb->device.common;
+    fprintf(stderr,"SCARLET_ANDROID_FRAMEBUFFER_READY width=%u height=%u chrome=scarlet-ui\n",width,height);
     return 0;
+failed_cond:
+    pthread_cond_destroy(&fb->wake);
+failed_mutex:
+    pthread_mutex_destroy(&fb->lock);
+failed:
+    free(fb->pixels);
+    if (fb->ui) dlclose(fb->ui);
+    dlclose(fb->client);free(fb);return -ENODEV;
 }
+
 static int allocation_close(hw_device_t *device) { free(device);return 0; }
 static int open_device(const hw_module_t *module,const char *name,hw_device_t **device) {
     if (!name || !device) return -EINVAL;
