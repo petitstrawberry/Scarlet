@@ -2,7 +2,7 @@
 //! exec, and translate the package manager's installed-UID inventory into exact
 //! label delegations. Android processes receive no management capability.
 use core::sync::atomic::{AtomicBool, Ordering};
-use scarlet_android_app_policy::Contexts;
+use scarlet_android_app_policy::{Contexts, services::Services};
 use std::{
     collections::{BTreeMap, BTreeSet},
     environment::VfsView,
@@ -39,6 +39,7 @@ fn read(view: &VfsView, path: &str, bound: usize) -> Result<Option<String>, &'st
 struct Manager {
     policy: Policy,
     contexts: Contexts,
+    services: Services,
     labels: BTreeMap<String, u32>,
     next: u32,
     seen: BTreeSet<(String, u32, String)>,
@@ -113,123 +114,16 @@ impl Manager {
             .get("u:r:installd:s0")
             .ok_or("manager installer subject")?;
         let mut rules = Vec::new();
-        // Discovery of public framework endpoints; each service retains its
-        // own Android permissions and caller-UID checks. Applications cannot add.
+        // The image's compiled policy supplies exact domain-specific rules.
+        // No privileged-app blanket grants or invented service-name list.
         for &source in &subjects {
-            for name in [
-                "activity",
-                "activity_task",
-                "package",
-                "package_native",
-                "window",
-                "display",
-                "surfaceflinger",
-                "gpu",
-                "user",
-                "permission",
-                "permissionmgr",
-                "permission_checker",
-                "appops",
-                "power",
-                "thermal",
-                "content",
-                "input",
-                "input_method",
-                "notification",
-                "statusbar",
-                "wallpaper",
-                "alarm",
-                "role",
-                "clipboard",
-                "content_capture",
-                "legacy_permission",
-                "game",
-                "netstats",
-                "sensorservice",
-                "device_state",
-                "sensor_privacy",
-                "launcherapps",
-                "search",
-                "audio",
-                "registry",
-                "trust",
-                "lock_settings",
-                "fingerprint",
-                "biometric",
-                "dreams",
-                "user",
-                "smartspace",
-                "accessibility",
-                "account",
-                "appwidget",
-                "device_policy",
-                "dropbox",
-                "graphicsstats",
-                "jobscheduler",
-                "location",
-                "media_session",
-                "media_projection",
-                "media_router",
-                "shortcut",
-                "uri_grants",
-                "vibrator",
-            ] {
-                let label = std::format!("u:object_r:{}_service:s0", name);
-                if let Some(target) = self.labels.get(&label) {
-                    rules.push(Rule {
-                        source,
-                        target: *target,
-                        class: 1,
-                        reserved: 0,
-                        permissions: 2,
-                    });
-                }
-            }
-            // Framework managers keep their own caller-UID and Android
-            // permission checks after Binder lookup. The Shield rule grants
-            // discovery of registered framework services without exposing
-            // hardware service endpoints.
-            let privileged = self
-                .labels
-                .iter()
-                .find(|(_, id)| **id == source)
-                .is_some_and(|(name, _)| {
-                    name.starts_with("u:r:platform_app:")
-                        || name.starts_with("u:r:priv_app:")
-                        || name.starts_with("u:r:system_app:")
-                });
-            if privileged {
-                for (label, target) in &self.labels {
-                    if label.starts_with("u:object_r:") && label.ends_with("_service:s0") {
-                        rules.push(Rule {
-                            source,
-                            target: *target,
-                            class: 1,
-                            reserved: 0,
-                            permissions: 2,
-                        });
-                    }
-                }
-            }
-        }
-        // These graphics HAL endpoints are public to Android clients. Keep
-        // their own UID/permission checks while allowing applications to load
-        // the CPU gralloc mapper used by RenderThread and ANGLE.
-        for &source in &subjects {
-            for name in [
-                "hal_graphics_mapper_hwservice",
-                "hal_graphics_allocator_hwservice",
-            ] {
-                let label = std::format!("u:object_r:{name}:s0");
-                if let Some(target) = self.labels.get(&label) {
-                    rules.push(Rule {
-                        source,
-                        target: *target,
-                        class: 1,
-                        reserved: 0,
-                        permissions: 2,
-                    });
-                }
+            let context = self.labels.iter().find(|(_, id)| **id == source)
+                .map(|(name, _)| name.clone()).ok_or("manager subject label")?;
+            let grants: Vec<_> = self.services.grants(&context)?.iter()
+                .map(|grant| (grant.target.clone(), grant.permissions)).collect();
+            for (name, permissions) in grants {
+                let target = self.label(&name, &mut added)?;
+                rules.push(Rule { source, target, class: 1, reserved: 0, permissions });
             }
         }
         let transitions: Vec<_> = transitions
@@ -373,6 +267,9 @@ pub fn start(policy: Policy, android: &VfsView) -> Result<Worker, &'static str> 
     let contexts = read(&view, "/system/etc/selinux/plat_seapp_contexts", 128 * 1024)?
         .ok_or("manager seapp input")?;
     let contexts = Contexts::parse(&contexts)?;
+    let services = read(&view, "/scarlet/boot/service-policy.txt", 1024 * 1024)?
+        .ok_or("manager compiled service policy missing")?;
+    let services = Services::parse(&services)?;
     let text =
         read(&view, "/scarlet/boot/shield.policy", 128 * 1024)?.ok_or("manager boot policy")?;
     let mut labels = BTreeMap::new();
@@ -398,6 +295,7 @@ pub fn start(policy: Policy, android: &VfsView) -> Result<Worker, &'static str> 
             let mut manager = Manager {
                 policy,
                 contexts,
+                services,
                 labels,
                 next,
                 seen: BTreeSet::new(),

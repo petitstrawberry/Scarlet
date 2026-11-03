@@ -2,6 +2,7 @@
 //! exact names; registration and authorization remain native Shield operations.
 #![no_std]
 extern crate alloc;
+pub mod services;
 use alloc::{
     collections::BTreeSet,
     format,

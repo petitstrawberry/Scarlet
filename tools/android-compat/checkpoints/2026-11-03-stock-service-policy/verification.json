@@ -1,0 +1,42 @@
+{
+  "result": "MEDIA_PROVIDER_CODEC_ABORT_RESOLVED_APP_START_INCOMPLETE",
+  "kernel_sha256": "82b3362b153251ab0b2026dc2f4cc5535a15f39206290111730e591316d810e8",
+  "platform": {
+    "accel": "hvf",
+    "cpus": 4,
+    "memory_gib": 4
+  },
+  "source_policy": {
+    "kind": "scarlet-android-service-policy-v1",
+    "source_sha256": "2be08e2a2e93d22c6a1c5e4e32fa4d571ecb07695877cdcfe0c3a9f48ba9234c",
+    "source": ".build/android-services/stock-precompiled-sepolicy",
+    "setools_version": "4.4.1",
+    "policy_version": 30,
+    "domains": 28,
+    "rules": 5026,
+    "text_sha256": "cf6b8f0e2193b5a21741d27179e9d1b80d38cd223b23c58fbdb02fbc62842ba4",
+    "scope": "App-domain service_manager and hwservice_manager allows only; not a full SELinux implementation"
+  },
+  "runner_result": {
+    "result": "fixture failure marker",
+    "qemu_exit_code": 0,
+    "elapsed_seconds": 186.604,
+    "dynamic_runtime": true,
+    "program_exit_status": 0,
+    "service_readiness": "not tested"
+  },
+  "checks": {
+    "rust_app_policy": "4 passed",
+    "python_service_policy": "3 passed, including 32 independent queries against the pinned compiled policy",
+    "media_provider_codec_abort": "not observed; previous identical kernel/profile/data run aborted in MediaCodec.native_setup",
+    "media_provider_progress": "Reached external database xattr lookup",
+    "app_launch": "Last reported state RUNNING_LOCKED; no successful launch observed",
+    "scope_closed": true
+  },
+  "remaining": [
+    "vold cannot open /dev/fuse, so emulated storage mount fails.",
+    "Stock media.swcodec service cannot obtain process context.",
+    "AppSearch reports missing Contacts Provider and file mmap EINVAL.",
+    "These observations do not prove the sole cause of incomplete unlock."
+  ]
+}

@@ -32,6 +32,13 @@ def main():
     manage_apps="--manage-app-policy" in arguments
     if manage_apps:arguments.remove("--manage-app-policy")
     if manage_apps and "--boot-profile" not in arguments:raise ValueError("app policy management requires a boot profile")
+    service_policy=None
+    if "--service-policy" in arguments:
+        index=arguments.index("--service-policy");service_policy=Path(arguments[index+1]).resolve();del arguments[index:index+2]
+        from service_policy import verify
+        verify(service_policy)
+    if manage_apps and service_policy is None:
+        raise ValueError("app policy management requires --service-policy from the pinned compiled policy")
     if "--sws-native" in arguments:
         index=arguments.index("--sws-native");compositor=Path(arguments[index+1]).resolve();del arguments[index:index+2]
     if capture_frame and not compositor:raise ValueError("frame capture requires --sws-native")
@@ -101,6 +108,14 @@ def main():
     def stage(inputs, runtime, stock, root):
         nonlocal seed_inodes, seed_destination
         metadata = original(inputs, runtime, stock, root)
+        if service_policy:
+            from service_policy import verify
+            verify(service_policy)
+            target=root/"scarlet/boot/service-policy.txt"
+            shutil.copy2(service_policy/"service-policy.txt",target)
+            if sha256(target)!=sha256(service_policy/"service-policy.txt"):
+                raise ValueError("service policy changed during staging")
+            shutil.copy2(service_policy/"service-policy.json",output/"service-policy.json")
         if data_source or cache_source:
             # Reuse a previously booted /data, or only its compiled
             # application cache, while the system tree comes from the freshly
