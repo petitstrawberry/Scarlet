@@ -54,7 +54,7 @@ fn copy_from_user_inner<const DISJOINT: bool>(
         let chunk_len = core::cmp::min(dst.len() - copied, PAGE_SIZE - page_off);
         let kaddr = task
             .vm_manager
-            .translate_to_kva(current_vaddr)
+            .translate_user_to_kva_for_read(current_vaddr)
             .ok_or(UserCopyError::TranslationError)?;
 
         if DISJOINT {

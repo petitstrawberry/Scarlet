@@ -585,7 +585,9 @@ mod tests {
                     physical + 2 * PAGE_SIZE as u64 - 1,
                 ),
                 MemoryArea::new(base, base + 2 * PAGE_SIZE - 1),
-                VirtualMemoryPermission::Read as usize | VirtualMemoryPermission::Write as usize,
+                VirtualMemoryPermission::Read as usize
+                    | VirtualMemoryPermission::Write as usize
+                    | VirtualMemoryPermission::User as usize,
                 false,
                 None,
             ))

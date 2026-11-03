@@ -55,25 +55,25 @@ pub fn parse_c_string_from_userspace(
     }
 
     let mut bytes = Vec::new();
-    let mut found_nul = false;
-    for i in 0..max_len {
-        let mut byte = [0u8; 1];
+    let mut buffer = [0u8; 128];
+    while bytes.len() < max_len {
         let address = ptr
-            .checked_add(i)
+            .checked_add(bytes.len())
             .ok_or(StringConversionError::TranslationError)?;
-        copy_from_user(task, address, &mut byte)
+        // Do not touch the next page before finding out whether this page
+        // terminates the string. Batch translations within that boundary.
+        let page_left = crate::environment::PAGE_SIZE
+            - (address & (crate::environment::PAGE_SIZE - 1));
+        let length = buffer.len().min(page_left).min(max_len - bytes.len());
+        copy_from_user(task, address, &mut buffer[..length])
             .map_err(|_| StringConversionError::TranslationError)?;
-        if byte[0] == 0 {
-            found_nul = true;
-            break;
+        if let Some(end) = buffer[..length].iter().position(|byte| *byte == 0) {
+            bytes.extend_from_slice(&buffer[..end]);
+            return String::from_utf8(bytes).map_err(|_| StringConversionError::Utf8Error);
         }
-        bytes.push(byte[0]);
+        bytes.extend_from_slice(&buffer[..length]);
     }
-    if !found_nul {
-        return Err(StringConversionError::ExceedsMaxLength);
-    }
-
-    String::from_utf8(bytes).map_err(|_| StringConversionError::Utf8Error)
+    Err(StringConversionError::ExceedsMaxLength)
 }
 
 /// Parse an array of string pointers (char **) from user space
@@ -144,7 +144,8 @@ mod tests {
                 .add_memory_map(VirtualMemoryMap::new(
                     PhysicalMemoryArea::new(pa, pa + PAGE_SIZE as u64 - 1),
                     MemoryArea::new(va, va + PAGE_SIZE - 1),
-                    0o644,
+                    crate::vm::vmem::VirtualMemoryPermission::Read as usize
+                        | crate::vm::vmem::VirtualMemoryPermission::User as usize,
                     false,
                     None,
                 ))

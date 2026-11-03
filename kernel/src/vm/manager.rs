@@ -1997,6 +1997,18 @@ impl VirtualMemoryManager {
         self.translate_to_phys(vaddr).map(phys_to_virt)
     }
 
+    /// Resolve a readable user source for a kernel copy, including lazy pages.
+    /// The raw physical-alias translator is also used for kernel access and
+    /// does not itself require user read permission.
+    pub fn translate_user_to_kva_for_read(&self, vaddr: usize) -> Option<usize> {
+        let map = self.search_memory_map(vaddr)?;
+        if !VirtualMemoryPermission::User.contained_in(map.permissions) {
+            return None;
+        }
+        self.translate_to_phys_with_access(vaddr, AccessOp::Load)
+            .map(phys_to_virt)
+    }
+
     pub fn translate_to_kva_for_write(&self, vaddr: usize) -> Option<usize> {
         self.translate_to_phys_with_access(vaddr, AccessOp::Store)
             .map(phys_to_virt)
@@ -3678,6 +3690,7 @@ mod tests {
             owner: Some(owner),
         };
         manager.add_memory_map(map.clone()).unwrap();
+        assert_eq!(manager.translate_user_to_kva_for_read(0x4000), None);
         for op in [AccessOp::Load, AccessOp::Store, AccessOp::Instruction] {
             assert_eq!(
                 manager.lazy_map_page_with(AccessKind {
@@ -3705,6 +3718,7 @@ mod tests {
             Err("Access denied by virtual mapping permissions")
         );
         assert_eq!(manager.read_user_word(0x4000, 4), Some(0));
+        assert!(manager.translate_user_to_kva_for_read(0x4000).is_some());
         // The guarded native load must also reject supervisor-only mappings.
         manager
             .add_memory_map_fixed(VirtualMemoryMap {
@@ -3714,6 +3728,7 @@ mod tests {
             .unwrap();
         assert!(manager.lazy_map_page(0x4000).is_ok());
         assert_eq!(manager.read_user_word(0x4000, 4), None);
+        assert_eq!(manager.translate_user_to_kva_for_read(0x4000), None);
     }
 
     #[test_case]
