@@ -241,7 +241,6 @@ def configure(output, stock, profile, contexts, metadata):
     )
     display_policy = profile["boot_properties"].get("ro.scarlet.display_policy")
     autostart = profile["boot_properties"].get("ro.scarlet.autostart")
-    autostart_attempts = 120
     policy_services = ""
     if display_policy == "awake":
         # The hosted device is presented as a desktop window: keep the display
@@ -256,49 +255,17 @@ def configure(output, stock, profile, contexts, metadata):
     if autostart is not None:
         if not re.fullmatch(r"[A-Za-z0-9_.]+/[A-Za-z0-9_.]+", autostart):
             raise ValueError("invalid autostart component")
-        package = autostart.split("/", 1)[0]
+        shutil.copy2(Path(__file__).with_name("app-autostart.sh"), output / "scarlet/boot/autostart.sh")
         policy_services += (
-            "\nservice scarlet-install-existing /system/bin/cmd package install-existing --user 0 " + package + "\n"
-            "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
-            "\nservice scarlet-compile /system/bin/cmd package compile -m speed -f " + package + "\n"
+            "\nservice scarlet-autostart /system/bin/sh /scarlet/boot/autostart.sh " + autostart + "\n"
             "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
         )
-        # The launcher activity only resolves once the primary user leaves the
-        # locked state, which happens after sys.boot_completed. Retry through a
-        # bounded chain of oneshot services instead of depending on that timing.
-        for attempt in range(autostart_attempts):
-            if attempt % 2:
-                command = ("-a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p "
-                           + package)
-            else:
-                command = "-n " + autostart
-            policy_services += (
-                "\nservice scarlet-autostart-" + str(attempt) +
-                " /system/bin/cmd activity start --user 0 -f 0x30000000 " + command + "\n"
-                "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
-            )
     if policy_services:
         manager_init += policy_services + "\non property:sys.boot_completed=1\n"
         if display_policy == "awake":
             manager_init += "    start scarlet-display-policy\n"
         if autostart is not None:
-            manager_init += "    start scarlet-install-existing\n"
-    if autostart is not None:
-        # Chain the launch attempts after the primary-user install state is
-        # refreshed and stop after the bounded number of retries.
-        manager_init += (
-            "\non property:init.svc.scarlet-install-existing=stopped\n"
-            "    start scarlet-compile\n"
-        )
-        manager_init += (
-            "\non property:init.svc.scarlet-compile=stopped\n"
-            "    start scarlet-autostart-0\n"
-        )
-        for attempt in range(autostart_attempts - 1):
-            manager_init += (
-                "\non property:init.svc.scarlet-autostart-" + str(attempt) + "=stopped\n"
-                "    start scarlet-autostart-" + str(attempt + 1) + "\n"
-            )
+            manager_init += "    start scarlet-autostart\n"
     (output / "scarlet/boot/init.rc").write_text(manager_init)
     # /data_mirror is a ramdisk directory on a real device; the generic
     # Android init configuration mounts a private tmpfs over it before making
@@ -376,6 +343,8 @@ def install_manager_command(output, profile, archive):
         extract_partitions(archive, temporary)
         system = Ext4(temporary / "system.ext4")
         queue = ["system/bin/cmd"]
+        if properties.get("ro.scarlet.autostart") is not None:
+            queue += ["system/bin/sh", "system/bin/toybox"]
         seen = set()
         while queue:
             name = queue.pop()
@@ -406,7 +375,7 @@ def install_manager_command(output, profile, archive):
                     raise ValueError("missing manager command dependency: " + dependency)
 
 
-def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, service_image=None, firewall_compat=None, audio_start=None, audio_binder_compat=None):
+def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, service_image=None, firewall_compat=None, audio_start=None, audio_binder_compat=None, manager_image=None):
     metadata = verify_boot_inputs(inputs, runtime, stock)
     profile = validate_profile(json.loads(profile_file.read_text()))
     if any(profile[key] != metadata["profile"][key] for key in ("apex_modules", "init_imports")):
@@ -516,7 +485,8 @@ def reconfigure(inputs, runtime, stock, profile_file, output, vintf_image=None, 
     configure(output,stock,profile,metadata["property_context_files"],metadata)
     if service_image:
         install_incident_libraries(output, profile, service_image)
-        install_manager_command(output, profile, service_image)
+    if manager_image or service_image:
+        install_manager_command(output, profile, manager_image or service_image)
     for provider in sorted(providers_to_add):
         add_stock_provider(output,metadata,service_image,provider,firewall_compat,audio_start,audio_binder_compat)
     if refreshed_vintf:
@@ -1057,6 +1027,7 @@ def main():
     parser.add_argument("--vintf-image", type=Path,
                         help="pinned SDK image for changing framework declarations while reusing providers")
     parser.add_argument("--service-image",type=Path,help="pinned SDK image for adding the stock vold provider")
+    parser.add_argument("--manager-image", type=Path, help="pinned SDK image for manager command binaries without refreshing service providers")
     parser.add_argument("--netd-firewall-compat",type=Path,help="verified Scarlet netd firewall compatibility build")
     parser.add_argument("--audio-start-build",type=Path,help="verified audioserver startup helper build")
     parser.add_argument("--audio-binder-compat",type=Path,help="verified audio HAL binder compatibility build")
@@ -1072,11 +1043,13 @@ def main():
         parser.error("--vintf-image requires --reuse-payloads")
     if args.service_image and not args.reuse_payloads:
         parser.error("--service-image requires --reuse-payloads")
+    if args.manager_image and not args.reuse_payloads:
+        parser.error("--manager-image requires --reuse-payloads")
     graphics={name:getattr(args,"graphics_"+name) for name in ["hal","adapters","client"]}
     if (any(graphics.values()) or args.graphics_vulkan) and (not all(graphics.values()) or not args.platform_image):parser.error("graphics providers require all three builds and --platform-image")
     if args.graphics_vulkan:graphics["vulkan"]=args.graphics_vulkan
     if args.reuse_payloads:
-        reconfigure(args.reuse_payloads, args.runtime_root, args.stock_inputs, args.profile, args.output, args.vintf_image, args.service_image, args.netd_firewall_compat, args.audio_start_build, args.audio_binder_compat)
+        reconfigure(args.reuse_payloads, args.runtime_root, args.stock_inputs, args.profile, args.output, args.vintf_image, args.service_image, args.netd_firewall_compat, args.audio_start_build, args.audio_binder_compat, args.manager_image)
     else:
         prepare(args.sdk_image, args.runtime_root, args.stock_inputs, args.profile, args.output)
     if args.framework_inputs:
