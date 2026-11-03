@@ -700,6 +700,59 @@ impl Ext2FileSystem {
     fn labels_for_inode(&self,inode:u32)->Arc<crate::shield::file::Labels> {
         self.inode_labels.lock().entry(inode).or_insert_with(crate::shield::file::Labels::new).clone()
     }
+    /// The parent operation lock must cover reading its directory entry through
+    /// pinning the child. Otherwise unlink can reclaim/reuse that inode between
+    /// name lookup and Ext2Node::set_filesystem acquiring its retained identity.
+    fn lookup_locked(
+        &self,
+        ext2_parent: &Ext2Node,
+        name: &str,
+    ) -> Result<Arc<dyn VfsNode>, FileSystemError> {
+        // Read parent inode
+        let parent_inode = self.read_inode(ext2_parent.inode_number())?;
+
+        // Ensure parent is a directory
+        if parent_inode.mode & EXT2_S_IFMT != EXT2_S_IFDIR {
+            return Err(FileSystemError::new(
+                FileSystemErrorKind::NotADirectory,
+                "Parent is not a directory",
+            ));
+        }
+
+        // Read directory entries
+        let entries = self.read_directory_entries(&parent_inode)?;
+
+        // Find the requested entry
+        for entry in entries {
+            let entry_name = entry.name_str()?;
+            if entry_name == name {
+                // Read the inode for this entry
+                let child_inode = self.read_inode(entry.entry.inode)?;
+
+                // Use file_type_from_inode to get the correct file type including device files
+                let file_type = self.file_type_from_inode(&child_inode, entry.entry.inode)?;
+
+                // Use inode number as stable file_id for page cache identity
+                let file_id = entry.entry.inode as u64;
+
+                // Create new node
+                let node = Ext2Node::new(entry.entry.inode, file_type, file_id);
+
+                // Set filesystem reference from parent
+                if let Some(fs_ref) = ext2_parent.filesystem() {
+                    node.set_filesystem(fs_ref);
+                }
+
+                return Ok(Arc::new(node));
+            }
+        }
+
+        Err(FileSystemError::new(
+            FileSystemErrorKind::NotFound,
+            "File not found",
+        ))
+    }
+
     fn pin_open_inode(&self, inode: u32) -> Ext2OpenGuard {
         *self.open_inodes.lock().entry(inode).or_insert(0) += 1;
         Ext2OpenGuard {
@@ -4922,49 +4975,9 @@ impl FileSystemOperations for Ext2FileSystem {
             )
         })?;
 
-        // Read parent inode
-        let parent_inode = self.read_inode(ext2_parent.inode_number())?;
-
-        // Ensure parent is a directory
-        if parent_inode.mode & EXT2_S_IFMT != EXT2_S_IFDIR {
-            return Err(FileSystemError::new(
-                FileSystemErrorKind::NotADirectory,
-                "Parent is not a directory",
-            ));
-        }
-
-        // Read directory entries
-        let entries = self.read_directory_entries(&parent_inode)?;
-
-        // Find the requested entry
-        for entry in entries {
-            let entry_name = entry.name_str()?;
-            if entry_name == *name {
-                // Read the inode for this entry
-                let child_inode = self.read_inode(entry.entry.inode)?;
-
-                // Use file_type_from_inode to get the correct file type including device files
-                let file_type = self.file_type_from_inode(&child_inode, entry.entry.inode)?;
-
-                // Use inode number as stable file_id for page cache identity
-                let file_id = entry.entry.inode as u64;
-
-                // Create new node
-                let node = Ext2Node::new(entry.entry.inode, file_type, file_id);
-
-                // Set filesystem reference from parent
-                if let Some(fs_ref) = ext2_parent.filesystem() {
-                    node.set_filesystem(fs_ref);
-                }
-
-                return Ok(Arc::new(node));
-            }
-        }
-
-        Err(FileSystemError::new(
-            FileSystemErrorKind::NotFound,
-            "File not found",
-        ))
+        let parent_lock = self.get_inode_lock(ext2_parent.inode_number());
+        let _parent_guard = parent_lock.lock();
+        self.lookup_locked(ext2_parent, name)
     }
 
     fn readdir(
@@ -5451,7 +5464,7 @@ impl FileSystemOperations for Ext2FileSystem {
         let _guard = inode_lock.lock();
 
         // Try to lookup the file to ensure it exists and get its inode number
-        let node = self.lookup(parent, name)?;
+        let node = self.lookup_locked(ext2_parent, name)?;
         let ext2_node = node.as_any().downcast_ref::<Ext2Node>().ok_or_else(|| {
             FileSystemError::new(
                 FileSystemErrorKind::NotSupported,
@@ -5565,7 +5578,7 @@ impl FileSystemOperations for Ext2FileSystem {
                 "Link parent was removed",
             ));
         }
-        match self.lookup(link_parent, link_name) {
+        match self.lookup_locked(parent, link_name) {
             Ok(_) => {
                 return Err(FileSystemError::new(
                     FileSystemErrorKind::FileExists,
@@ -5728,6 +5741,15 @@ impl FileSystemOperations for Ext2FileSystem {
                 self.remove(new_parent, new_name)?;
             }
         }
+
+        // VFS still serializes rename validation with other namespace changes.
+        // Directory readers now use these per-inode locks independently: keep
+        // both parents stable while publishing the move, in inode order.
+        let first_parent = self.get_inode_lock(old_parent_ino.min(new_parent_ino));
+        let second_parent = (!same_parent)
+            .then(|| self.get_inode_lock(old_parent_ino.max(new_parent_ino)));
+        let _first_guard = first_parent.lock();
+        let _second_guard = second_parent.as_ref().map(|lock| lock.lock());
 
         // Add new directory entry in new_parent pointing to the source inode
         self.add_directory_entry(new_parent_ino, new_name, src_inode_num, src_file_type)?;

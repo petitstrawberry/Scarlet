@@ -1,0 +1,10 @@
+{
+  "result": "PASS",
+  "tests": 1833,
+  "acceleration": "HVF",
+  "cpus": 4,
+  "memory_gib": 4,
+  "source_sha256": "5cf4363fc7c8941bb432f7c3af493a0ba7672dc0d05e162837bc935f816b3035",
+  "scope": "ext2 directory lookup pins the returned inode under the parent operation lock; internal unlink/link avoid recursive acquisition; rename publication locks both parent directories",
+  "remaining": "VFS global namespace guard replacement and userfs mount integration remain incomplete"
+}
