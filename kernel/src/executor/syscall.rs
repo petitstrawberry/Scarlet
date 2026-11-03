@@ -280,6 +280,41 @@ handler!(sys_vfs_view_mkdir, |task, tf| {
         .map_err(|_| "create directory failed")?;
     Ok(0)
 });
+// Retain every source capability before publishing the single immutable mount.
+// Reading source records never changes the destination View on failure.
+fn publication_files(task: &Task, address: usize, count: usize) -> Result<Vec<crate::fs::vfs_v2::capability_files::Export>> {
+    use crate::object::handle::AccessMode;
+    use crate::fs::vfs_v2::capability_files::Export;
+    if count == 0 || count > 64 { return Err("invalid publication count"); }
+    let mut exports = Vec::new();
+    for index in 0..count {
+        let mut bytes = [0;16];
+        let pointer = address.checked_add(index * 16).ok_or("invalid publication pointer")?;
+        copy_from_user(task, pointer, &mut bytes).map_err(|_| "invalid publication record")?;
+        let name = u64::from_ne_bytes(bytes[..8].try_into().unwrap());
+        let handle = u32::from_ne_bytes(bytes[8..12].try_into().unwrap());
+        let access = u32::from_ne_bytes(bytes[12..16].try_into().unwrap());
+        let name = text_arg(task, usize::try_from(name).map_err(|_| "invalid name address")?)?;
+        let (source, metadata) = task.handle_table.get_arc_clone_with_metadata(handle).ok_or("invalid source handle")?;
+        let ceiling = match metadata.access_mode { AccessMode::ReadOnly => 1, AccessMode::WriteOnly => 2, AccessMode::ReadWrite => 3 };
+        if access == 0 || access & !ceiling != 0 { return Err("publication exceeds source handle access"); }
+        let source = match source { KernelObject::File(file) => file, _ => return Err("file capability required") };
+        exports.push(Export::new(name, source, access).map_err(|_| "invalid file publication")?);
+    }
+    Ok(exports)
+}
+handler!(sys_vfs_view_publish_files, |task, tf| {
+    let fs = view(&task, tf.get_arg(0), true)?;
+    let path = text_arg(&task, tf.get_arg(1))?;
+    let files = publication_files(&task, tf.get_arg(2), tf.get_arg(3))?;
+    let published = crate::fs::vfs_v2::capability_files::CapabilityFiles::new(files).map_err(|_| "invalid publications")?;
+    let _guard = VIEW_COMPOSITION.lock();
+    if is_root_path(&fs, &path) { return Err("cannot publish over View root"); }
+    use crate::fs::vfs_v2::mount_tree::MountRestrictions;
+    fs.mount(published, &path, MountRestrictions::NO_EXECUTE | MountRestrictions::NO_PRIVILEGE_GAIN)
+        .map_err(|_| "file publication mount failed")?;
+    Ok(0)
+});
 handler!(sys_vfs_view_mount, |task, tf| { mount_view(&task, tf, 0) });
 handler!(sys_vfs_view_mount_restricted, |task, tf| { mount_view(&task, tf, u32::try_from(tf.get_arg(4)).map_err(|_| "invalid mount restrictions")?) });
 fn mount_view(task: &Task, tf: &crate::arch::Trapframe, restrictions: u32) -> Result<usize> {
@@ -668,5 +703,32 @@ mod tests {
             exec_options(&task, base + 2 * PAGE_SIZE - 1).err(),
             Some("invalid options")
         );
+    }
+}
+
+#[cfg(test)]
+mod file_publication_tests {
+    use super::*;
+    use crate::object::capability::Selectable;
+    use crate::object::handle::{AccessMode, HandleMetadata, HandleType};
+    #[test_case]
+    fn file_publication_checks_handle_rights_and_user_record_bounds() {
+        let task=Task::new("publication-test".into(),0,crate::task::TaskType::User);
+        let address=crate::environment::USER_STACK_END-crate::environment::PAGE_SIZE;
+        task.allocate_stack_pages(address,1).unwrap();
+        let (send,receive)=crate::device::input::virtual_device::InputEndpoint::pair(1,0,0).unwrap();
+        let handle=task.handle_table.insert_with_metadata(KernelObject::from_file_object(receive),HandleMetadata{
+            handle_type:HandleType::IpcChannel,access_mode:AccessMode::ReadOnly,special_semantics:None}).unwrap();
+        let mut record=[0;16];record[..8].copy_from_slice(&((address+64) as u64).to_ne_bytes());
+        record[8..12].copy_from_slice(&handle.to_ne_bytes());record[12..16].copy_from_slice(&1u32.to_ne_bytes());
+        crate::library::std::usercopy::copy_to_user(&task,address+64,b"event0\0").unwrap();
+        crate::library::std::usercopy::copy_to_user(&task,address,&record).unwrap();
+        assert!(publication_files(&task,address,1).is_ok());
+        record[12..16].copy_from_slice(&3u32.to_ne_bytes());
+        crate::library::std::usercopy::copy_to_user(&task,address,&record).unwrap();
+        assert!(publication_files(&task,address,1).is_err());
+        assert!(publication_files(&task,usize::MAX,1).is_err());
+        assert!(publication_files(&task,address,65).is_err());
+        task.handle_table.remove(handle);assert!(send.is_hung_up());
     }
 }

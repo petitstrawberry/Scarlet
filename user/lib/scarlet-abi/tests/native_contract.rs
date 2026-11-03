@@ -284,7 +284,7 @@ fn native_syscall_numbers() {
         FsMount = 500, FsUmount = 501,
         FsPivotRoot = 502,
         VfsViewCreate = 520, VfsViewCurrent = 521, VfsViewClone = 522,
-        VfsViewOpen = 523, VfsViewMount = 524, VfsViewBind = 525,
+        VfsViewOpen = 523, VfsViewMount = 524, VfsViewBind = 525, VfsViewPublishFiles = 536,
         VfsViewOverlay = 526, VfsViewUnmount = 527,
         VfsViewCreateDirectory = 528, VfsViewRoot = 529,
         Pipe = 600, EventSendDirect = 615,

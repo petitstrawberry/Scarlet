@@ -19,6 +19,14 @@ use core::convert::Infallible;
 use scarlet_abi::{RawEnvironmentExec, RawEnvironmentHandleMapping};
 use scarlet_sys::{Syscall, syscall0, syscall1, syscall2, syscall3, syscall4, syscall5};
 
+/// One file capability to publish in a View. Access is 1 for read, 2 for write,
+/// or 3 for both; the kernel rejects authority absent from the source handle.
+pub struct FilePublication<'a> {
+    pub name: &'a str,
+    pub file: &'a Handle,
+    pub access: u32,
+}
+
 /// Mount-event relationships, configured independently from Environment.
 #[repr(usize)]
 #[derive(Clone, Copy, Debug)]
@@ -229,6 +237,22 @@ impl VfsView {
             )
         })
         .map(|_| ())
+    }
+    /// Publish up to 64 borrowed file capabilities beneath an existing directory.
+    /// The immutable mount retains sources; opens share their cursor and control
+    /// state. Each entry's access is intersected with its source handle authority.
+    /// Publication is atomic, and the mount can be removed with `unmount`.
+    pub fn publish_files(&self, target: &str, files: &[FilePublication<'_>]) -> HandleResult<()> {
+        if files.is_empty() || files.len() > 64 { return Err(HandleError::InvalidParameter); }
+        let target = cstring(target)?;
+        let names: Vec<_> = files.iter().map(|file| cstring(file.name)).collect::<HandleResult<_>>()?;
+        let records: Vec<_> = files.iter().zip(&names).map(|(file, name)| scarlet_abi::RawFilePublication {
+            name: name.as_ptr() as u64, handle: file.file.as_raw() as u32, access: file.access,
+        }).collect();
+        // SAFETY: all source handles, C strings and initialized records remain
+        // borrowed for the complete synchronous call; no ownership is transferred.
+        result(unsafe { syscall4(Syscall::VfsViewPublishFiles, self.raw(), target.as_ptr() as usize,
+            records.as_ptr() as usize, records.len()) }).map(|_| ())
     }
     pub fn unmount(&self, path: &str) -> HandleResult<()> {
         let path = cstring(path)?;

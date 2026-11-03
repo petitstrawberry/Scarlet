@@ -877,6 +877,11 @@ pub enum Syscall {
     MountNamespaceIdentity = 535,
     VfsViewSetPropagation = 531,
     VfsViewBindRecursive = 532,
+    /// Publish immutable named file capabilities under an existing directory.
+    /// (administrative View, target C string, RawFilePublication array, count).
+    /// At most 64 entries; access is 1=read, 2=write. Opens share source cursors.
+    /// Direct native mapping and execution are unsupported; names are immutable.
+    VfsViewPublishFiles = 536,
     VfsViewMountRestricted = 530,
     ResourceGroupCreate = 1330,
     ResourceGroupCurrent = 1331,
@@ -1168,4 +1173,14 @@ pub enum Syscall {
     LsmLoad = 1200,
     LsmUnload = 1201,
     LsmList = 1202,
+}
+
+/// Native 64-bit record for VfsViewPublishFiles. No ownership transfers: the
+/// kernel retains each source on success. Name is a bounded NUL-terminated string.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RawFilePublication {
+    pub name: u64,
+    pub handle: u32,
+    pub access: u32,
 }
