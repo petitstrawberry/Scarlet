@@ -43,6 +43,7 @@ pub mod protocol_stack;
 pub mod socket;
 pub mod syscall;
 pub mod tcp;
+pub mod traffic;
 pub mod udp;
 #[cfg(all(test, target_arch = "riscv64"))]
 pub mod virtio_net_tests;

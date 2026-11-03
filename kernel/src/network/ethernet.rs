@@ -486,6 +486,7 @@ impl NetworkLayer for EthernetLayer {
                 );
             }
             let token = packet.link_token();
+            let traffic = packet.take_traffic_reservation();
             let mut pkt = DevicePacket::with_data(packet.into_vec());
             pkt.link_token = token;
             device.send(pkt).map_err(|e| {
@@ -495,6 +496,9 @@ impl NetworkLayer for EthernetLayer {
                 println!("[Ethernet] Send failed: {}", e);
                 SocketError::Other("send failed".into())
             })?;
+            if let Some(traffic) = traffic {
+                traffic.commit();
+            }
             if LOG_ETHERNET_PACKET_TRACE {
                 println!("[Ethernet] Send succeeded");
             }
@@ -674,7 +678,11 @@ mod owned_packet_tests {
         fn set_ip_address(&self, _: crate::network::ipv4::Ipv4Address) {}
         fn clear_ip_address(&self) {}
         fn send(&self, packet: DevicePacket) -> Result<(), &'static str> {
-            *self.0.lock() = Some(packet);
+            let mut slot = self.0.lock();
+            if slot.is_some() {
+                return Err(crate::network::TX_QUEUE_FULL);
+            }
+            *slot = Some(packet);
             Ok(())
         }
         fn poll(&self) -> Result<Vec<DevicePacket>, &'static str> {
@@ -712,5 +720,47 @@ mod owned_packet_tests {
             assert!(packet.as_slice()[14 + size..].iter().all(|byte| *byte == 0));
             assert_eq!(packet.len, (14 + size).max(60));
         }
+    }
+
+    #[test_case]
+    fn ipv4_budget_enforces_real_submission_and_refunds_driver_backpressure() {
+        use crate::network::{
+            ipv4::{Ipv4Address, Ipv4AddressInfo, Ipv4Layer},
+            traffic::Budget,
+        };
+        let ip = Ipv4Layer::new();
+        let eth = EthernetLayer::new();
+        let device = Arc::new(QueuedInterface(IrqSpinLock::new(None)));
+        eth.register_interface(device.name(), device.mac_address(), device.clone());
+        ip.add_address(
+            device.name(),
+            Ipv4AddressInfo {
+                address: Ipv4Address::new(192, 168, 1, 100),
+                netmask: Ipv4Address::new(255, 255, 255, 0),
+                broadcast: None,
+                is_primary: true,
+            },
+        );
+        let budget = Budget::new();
+        budget.configure(Some(100), Some(60)).unwrap();
+        let mut context = LayerContext::new();
+        context.set("interface", device.name().as_bytes());
+        context.set("ip_src", &[192, 168, 1, 100]);
+        context.set("ip_dst", &[192, 168, 1, 1]);
+        context.set("eth_dst_mac", &[2, 9, 8, 7, 6, 5]);
+        context.set_traffic_budget(budget.clone());
+        let send = |payload| ip.send(&alloc::vec![7;payload], &context, &[eth.clone()]);
+        send(40).unwrap();
+        assert_eq!(budget.snapshot().transmitted.bytes, 60); // IPv4, not Ethernet padding.
+        assert_eq!(budget.snapshot().alerts, 1);
+        assert_eq!(send(1), Err(SocketError::TransmitBusy));
+        assert_eq!(budget.snapshot().reserved_bytes, 0);
+        assert_eq!(budget.snapshot().transmitted.bytes, 60);
+        assert_eq!(send(21), Err(SocketError::PermissionDenied));
+        assert_eq!(device.0.lock().take().unwrap().len, 74);
+        send(20).unwrap();
+        assert_eq!(budget.snapshot().transmitted.bytes, 100);
+        assert_eq!(budget.snapshot().transmitted.packets, 2);
+        assert_eq!(device.0.lock().take().unwrap().len, 60);
     }
 }

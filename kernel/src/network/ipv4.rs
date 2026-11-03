@@ -759,6 +759,9 @@ impl NetworkLayer for Ipv4Layer {
 
         packet.prepend(&header.to_array())?;
         let packet_size = packet.len();
+        if let Some(budget) = context.traffic_budget() {
+            packet.reserve_traffic(budget)?;
+        }
 
         if LOG_IPV4_PACKET_TRACE {
             println!(
