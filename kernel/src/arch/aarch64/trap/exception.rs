@@ -253,7 +253,7 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
         // Data abort from lower EL
         ExceptionClass::DataAbortLowerEl => {
             let far = user_data_fault_address(trapframe.far_el1);
-            let is_write = (esr >> 6) & 1 == 1; // WnR bit
+            let is_write = user_data_abort_is_write(esr);
             handle_data_fault(trapframe, far, is_write);
         }
 
@@ -330,6 +330,15 @@ pub fn arch_exception_handler(trapframe: &mut Trapframe, trap_kind: usize) {
     }
 }
 
+/// EL0 cache maintenance may set WnR without storing to user memory. Resolve
+/// its translation fault with read access so DC CVAU on a lazy RX JIT alias
+/// can populate the page without granting write access or breaking COW.
+fn user_data_abort_is_write(esr: u64) -> bool {
+    const WNR: u64 = 1 << 6;
+    const CM: u64 = 1 << 8;
+    esr & WNR != 0 && esr & CM == 0
+}
+
 /// TBI0 applies to TTBR0 only. Retain bits 55:48 so invalid addresses cannot
 /// alias a valid user mapping, and leave TTBR1/kernel addresses unchanged.
 fn user_data_fault_address(address: u64) -> usize {
@@ -341,8 +350,17 @@ fn user_data_fault_address(address: u64) -> usize {
 }
 
 #[cfg(test)]
-mod tagged_address_tests {
-    use super::user_data_fault_address;
+mod user_data_fault_tests {
+    use super::{user_data_abort_is_write, user_data_fault_address};
+
+    #[test_case]
+    fn cache_maintenance_is_not_a_user_store() {
+        assert!(!user_data_abort_is_write(0x9200_0146)); // ART DC CVAU, translation fault
+        assert!(!user_data_abort_is_write(0x9200_0007)); // ordinary load
+        assert!(user_data_abort_is_write(0x9200_0047)); // ordinary store
+        assert!(user_data_abort_is_write(0x9200_004f)); // store permission fault
+    }
+
 
     #[test_case]
     fn user_fault_tags_do_not_change_mapping_identity_or_hide_invalid_bits() {
