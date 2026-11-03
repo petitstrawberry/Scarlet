@@ -26,7 +26,9 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
         resource.enter(0).map_err(|_| "Android resource membership")?;
         println!("SCARLET_ANDROID_RESOURCE_ROOT");
     }
-    let backing = bootstrap::backing("root=/dev/vblk1", true)?;
+    let args = std::env::args_vec();
+    let cmdline = args.get(1).map(|arg| arg.as_str()).unwrap_or("");
+    let backing = bootstrap::backing(cmdline, true)?;
     let (environment, policy,boot_policy) = if option_env!("SCARLET_ANDROID_STOCK") == Some("1") {
         stock::environment(backing)?
     } else {

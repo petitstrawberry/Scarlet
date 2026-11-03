@@ -342,7 +342,7 @@ def main():
     smoke.create_initramfs(boot, archive)
     build = ["cargo-scarlet-plugin-limine", "--arch", "aarch64", "--kernel", str(kernel),
              "--initramfs", str(archive), "--output", str(image), "--cache-dir", str(output / "limine-cache"),
-             "--cmdline", "console=ttyAMA0 init=/init"]
+             "--cmdline", "console=ttyAMA0 init=/init root=/dev/vblk1 rootfstype=ext2"]
     with (output / "image-build.log").open("wb") as log:
         subprocess.run(build, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=180)
     runtime_vars = output / "efi-vars.fd"

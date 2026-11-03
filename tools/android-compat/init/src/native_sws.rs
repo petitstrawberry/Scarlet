@@ -35,7 +35,7 @@ impl Compositor {
             .spawn(
                 &executable,
                 &["/bin/sws"],
-                &["PATH=/bin", "SWS_BACKEND=cpu"],
+                &["PATH=/bin"],
                 "/",
                 handles,
             )
