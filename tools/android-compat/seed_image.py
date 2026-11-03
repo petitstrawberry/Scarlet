@@ -28,6 +28,10 @@ def inode_metadata(image, root):
             inode, mode, uid, gid, name, _size = match.groups()
             if int(inode) == 0 or name == "..":
                 continue
+            # rdump omits Unix sockets. Their endpoints belong to the previous
+            # boot's processes; Android recreates them during this boot.
+            if stat.S_ISSOCK(int(mode, 8)):
+                continue
             key = relative if name == "." else (relative + "/" if relative else "") + name
             quote_debugfs(key)
             result[key] = {"mode": int(mode, 8), "uid": int(uid), "gid": int(gid)}

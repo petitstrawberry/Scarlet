@@ -18,6 +18,7 @@ class SeedImageTest(unittest.TestCase):
             app.mkdir(parents=True)
             (app / "preferences").write_bytes(b"persisted application state")
             (app / "alias").symlink_to("preferences")
+            (app / "old-socket").touch()
 
             def image(name, directory):
                 path = base / name
@@ -27,7 +28,11 @@ class SeedImageTest(unittest.TestCase):
                 return path
 
             source = image("source.ext2", tree)
+            subprocess.run(["debugfs", "-w", "-R",
+                            "set_inode_field /data/user_de/0/example/old-socket mode 0140777", str(source)],
+                           check=True, capture_output=True)
             identities = inode_metadata(source, "/data")
+            self.assertNotIn("user_de/0/example/old-socket", identities)
             for relative, fields in identities.items():
                 fields["uid"] = fields["gid"] = 10027 if "example" in relative else 1000
             identities["user_de/0/example"]["mode"] = 0o42770
