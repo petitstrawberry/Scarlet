@@ -1429,6 +1429,8 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         return errno::to_result(errno::ENXIO);
     }
 
+    let kernel_obj = crate::abi::linux::device::evdev::wrap(kernel_obj);
+
     // Post-open flag handling (O_DIRECTORY, O_TRUNC, O_APPEND)
     if let Some(file_obj) = kernel_obj.as_file() {
         if (flags & O_DIRECTORY) != 0 {
@@ -3096,6 +3098,9 @@ fn ioctl_for_task(
         None => return errno::to_result(errno::EBADF),
     };
 
+    if let Some(result) = crate::abi::linux::device::evdev::ioctl(kernel_object.as_kernel_object(), task, request, arg) {
+        return result;
+    }
     if matches!(kernel_object, crate::object::KernelObject::MountNamespace(_)) {
         return if request == 0xb703 { 0x20000 } else { errno::to_result(errno::ENOTTY) };
     }

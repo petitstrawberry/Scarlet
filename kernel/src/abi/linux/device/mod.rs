@@ -8,3 +8,5 @@
 pub mod kvm;
 pub mod tty;
 pub mod fuse;
+
+pub mod evdev;
