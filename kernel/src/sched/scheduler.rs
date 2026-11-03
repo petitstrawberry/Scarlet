@@ -5563,22 +5563,28 @@ pub fn first_switch_to_kernel_task(task_id: usize) -> ! {
 /// A non-owning guard for the local current task, or `None` when the requested
 /// CPU is remote, has no current task, or no longer owns that task.
 pub fn current_task(cpu_id: usize) -> Option<CurrentTaskRef> {
+    // Keep the local scheduler publication stable through ownership validation.
+    // A local lookup already has a running-CPU owner; it need not acquire the
+    // global pool lock or create a temporary owning handle.
+    let _irq_guard = IrqGuard::new();
     if get_cpu().get_cpuid() != cpu_id {
         return None;
     }
 
     let task_id = current_task_id(cpu_id)?;
-    let task = TaskPool::get_task(task_id)?;
+    let task_ptr = CURRENT_TASK_PTRS[cpu_id].load(Ordering::Acquire);
+    if task_ptr.is_null() {
+        return None;
+    }
+    // SAFETY: The local scheduler publishes this pointer while IRQs are masked.
+    // It replaces or clears the pointer before releasing the old CPU owner. That owner
+    // prevents pool retirement. The IRQ guard prevents a local switch or
+    // migration between loading the pointer and constructing the borrowed guard.
+    let task = unsafe { &*task_ptr };
     if task.get_id() != task_id {
         return None;
     }
-    let current_task = CurrentTaskRef::from_running_task(&task, cpu_id);
-
-    // The guard is non-owning. The TaskPool slot and running_cpu token retain
-    // the task while it executes on this CPU, so this temporary lookup Arc can
-    // and must be dropped before returning to the caller.
-    drop(task);
-    current_task
+    CurrentTaskRef::from_running_task(task, cpu_id)
 }
 
 fn local_current_task_for_diagnostics(cpu_id: usize) -> Option<&'static Task> {
@@ -6980,6 +6986,14 @@ mod tests {
         let current_task_ref = current_task(cpu_id).expect("current task must be local");
         assert_eq!(current_task_ref.get_id(), task_id);
         assert_eq!(Arc::strong_count(&task), strong_count);
+        // Interrupt/syscall paths may look up their own task while another CPU
+        // owns the pool lock. Local lookup must not reacquire that global lock.
+        {
+            let _pool_guard = get_task_pool().tasks.lock();
+            let local = current_task(cpu_id).expect("local lookup must not lock the pool");
+            assert_eq!(local.get_id(), task_id);
+            assert_eq!(Arc::strong_count(&task), strong_count);
+        }
         if MAX_NUM_CPUS > 1 {
             let remote_cpu_id = (cpu_id + 1) % MAX_NUM_CPUS;
             assert!(current_task(remote_cpu_id).is_none());
