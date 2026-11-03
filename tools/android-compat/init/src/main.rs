@@ -15,6 +15,28 @@ mod kernel_log;
 
 use std::{environment::HandleMapping, println};
 
+fn wait_for_program(pid: i32) -> Result<i32, &'static str> {
+    loop {
+        let (waited, status) = std::task::waitpid(pid, 0);
+        if waited == pid {
+            return Ok(status);
+        }
+        if waited >= 0 {
+            return Err("unexpected program wait result");
+        }
+        // Native waitpid can be interrupted by another child's exit. Its -1
+        // result does not distinguish interruption from a missing child, so
+        // recheck this specific child without sleeping before retrying.
+        let (waited, status) = std::task::waitpid(pid, std::task::WAIT_NOHANG);
+        if waited == pid {
+            return Ok(status);
+        }
+        if waited != 0 {
+            return Err("program child is no longer waitable");
+        }
+    }
+}
+
 fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
     let _diagnostic_log = kernel_log::Collector::start()?;
     if option_env!("SCARLET_ANDROID_INIT_BOOTSTRAP") == Some("1") {
@@ -97,16 +119,13 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
         let pid = environment
             .spawn(&executable, &argv, &env, "/", &handles)
             .map_err(|_| "ART spawn")?;
-        let (waited, status) = std::task::waitpid(pid as i32, 0);
+        let status = wait_for_program(pid as i32)?;
         if let Some(manager)=app_manager {manager.finish()?;}
         println!("SCARLET_ANDROID_{}_EXIT {}", label, status);
-        if diagnostic && waited == pid as i32 {
-            return Ok(());
-        }
-        return if waited == pid as i32 && status == 0 {
+        return if status == 0 {
             Ok(())
         } else {
-            Err("ART wait or exit")
+            Err("ART exit")
         };
     }
     let mut failed = false;
