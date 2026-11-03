@@ -7,6 +7,7 @@
 //! modules import these types from `crate::sync`; the `spin` crate is no
 //! longer re-exported.
 
+pub(crate) mod cache_padded;
 pub(crate) mod counter;
 pub mod cpu_local;
 pub(crate) mod diagnostic;

@@ -31,8 +31,10 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::arch::try_get_cpuid;
 use crate::environment::MAX_NUM_CPUS;
+use crate::sync::cache_padded::CachePadded;
 
-static PREEMPT_COUNT: [AtomicU32; MAX_NUM_CPUS] = [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
+static PREEMPT_COUNT: [CachePadded<AtomicU32>; MAX_NUM_CPUS] =
+    [const { CachePadded::new(AtomicU32::new(0)) }; MAX_NUM_CPUS];
 
 /// Origin of a preemption guard, used by the optional sync diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -375,8 +377,8 @@ pub fn preempt_enable() {
 // statistic. Keep it native on RV32, especially inside lock diagnostics.
 const SPIN_CONTENTION_REPORT_THRESHOLD: u32 = 1 << 22;
 
-static SPIN_CONTENTION_COUNT: [AtomicU32; MAX_NUM_CPUS] =
-    [const { AtomicU32::new(0) }; MAX_NUM_CPUS];
+static SPIN_CONTENTION_COUNT: [CachePadded<AtomicU32>; MAX_NUM_CPUS] =
+    [const { CachePadded::new(AtomicU32::new(0)) }; MAX_NUM_CPUS];
 
 /// Note one busy-wait iteration in a lock's spin loop.
 ///

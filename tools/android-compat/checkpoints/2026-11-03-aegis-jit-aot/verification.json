@@ -1,0 +1,24 @@
+{
+  "result": "APP_UI_OBSERVED",
+  "app": "com.beemdevelopment.aegis",
+  "apk_sha256": "0eecec45de0da3ff1358004b51e2960d9178551643a6ed44f6496ea9ec999c19",
+  "kernel_sha256": "ee4e78c31ece04b89ff70d81f215b49c7ac1899631d107a145710012545dd2ce",
+  "jit": "true",
+  "aot": {
+    "command": "cmd package compile -m speed -f com.beemdevelopment.aegis",
+    "result": "Success",
+    "native_compiler_executed": true
+  },
+  "platform": {
+    "cpus": 4,
+    "memory_gib": 4,
+    "accelerator": "hvf"
+  },
+  "observation": "Stock Aegis Welcome onboarding UI is visible in the SWS window. No Google login used.",
+  "performance": "Prior run with identical inputs except kernel counter layout did not finish AOT during 600 seconds. UI observed approximately 80-90 seconds into the padded-counter run. This is not a controlled statistical benchmark.",
+  "limitations": [
+    "Display is rotated 90 degrees; input has not been exercised.",
+    "Runtime profile-directory labels still require correction.",
+    "Startup configuration still forces AOT and makes 120 launch attempts; normal warm-start timing has not been measured."
+  ]
+}
