@@ -20,7 +20,7 @@ from stock_art import PARTITIONS
 
 MANIFEST = "stock-packages.json"
 TREES = ("app", "priv-app", "overlay", "framework", "lib64", "media",
-         "etc/permissions", "etc/sysconfig")
+         "etc/permissions", "etc/sysconfig", "etc/compatconfig")
 
 
 def source_entries(image, path):

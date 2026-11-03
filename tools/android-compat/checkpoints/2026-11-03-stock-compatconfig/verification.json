@@ -1,0 +1,109 @@
+{
+  "result": "STOCK_COMPAT_CONFIG_RESTORED_HOME_RENDERED_SYSTEMSERVER_LATER_FAILED",
+  "acceleration": "HVF",
+  "cpus": 4,
+  "memory_gib": 4,
+  "runtime": {
+    "result": "fixture failure marker",
+    "qemu_exit_code": 0,
+    "elapsed_seconds": 186.543,
+    "dynamic_runtime": true,
+    "program_exit_status": 0,
+    "service_readiness": "not tested"
+  },
+  "stock_package_nodes": 2023,
+  "stock_package_trees": [
+    "system/app",
+    "system/priv-app",
+    "system/framework",
+    "system/lib64",
+    "system/etc/permissions",
+    "system/etc/sysconfig",
+    "system/etc/compatconfig",
+    "system_ext/priv-app",
+    "system_ext/framework",
+    "system_ext/lib64",
+    "system_ext/etc/permissions",
+    "system_ext/etc/compatconfig",
+    "product/app",
+    "product/priv-app",
+    "product/overlay",
+    "product/lib64",
+    "product/media",
+    "product/etc/permissions",
+    "product/etc/sysconfig",
+    "vendor/overlay",
+    "vendor/lib64",
+    "vendor/etc/permissions"
+  ],
+  "compatconfig": {
+    "system/etc/compatconfig/TeleService-platform-compat-config.xml": {
+      "mode": 33188,
+      "uid": 0,
+      "gid": 0,
+      "size": 1742,
+      "sha256": "fef98090e78bae753038b0859c5778e13309c9841b549c3eb16691a1ab037cdf"
+    },
+    "system/etc/compatconfig/calendar-provider-compat-config.xml": {
+      "mode": 33188,
+      "uid": 0,
+      "gid": 0,
+      "size": 261,
+      "sha256": "c13394dd8fd9073be252ae8238fd34fcd37fea4c268962896cb17596c033bae3"
+    },
+    "system/etc/compatconfig/contacts-provider-platform-compat-config.xml": {
+      "mode": 33188,
+      "uid": 0,
+      "gid": 0,
+      "size": 49,
+      "sha256": "d92339fad7335a72cf968f2f835aa179abcfef70895e44ec23e2dad553dfdcf3"
+    },
+    "system/etc/compatconfig/documents-ui-compat-config.xml": {
+      "mode": 33188,
+      "uid": 0,
+      "gid": 0,
+      "size": 448,
+      "sha256": "92e8d0dc96d189f90bd602813a5de0c59dcef05a3917a32fe9c2952053cb2c3b"
+    },
+    "system/etc/compatconfig/framework-platform-compat-config.xml": {
+      "mode": 33188,
+      "uid": 0,
+      "gid": 0,
+      "size": 33589,
+      "sha256": "c88beb08f8dbcf933a18e7cff4cb7fc94752eb977a4929de01a694544cd0366f"
+    },
+    "system/etc/compatconfig/icu4j-platform-compat-config.xml": {
+      "mode": 33188,
+      "uid": 0,
+      "gid": 0,
+      "size": 302,
+      "sha256": "3553a78f81c9efe67ab88169e8c602321db8ddd1935dbe77aea05bfb85203536"
+    },
+    "system/etc/compatconfig/services-platform-compat-config.xml": {
+      "mode": 33188,
+      "uid": 0,
+      "gid": 0,
+      "size": 23780,
+      "sha256": "29dfe1f38ea5d98105408010467e5b1cb015ef598c6bf3f4824b66376005861a"
+    },
+    "system_ext/etc/compatconfig/settings-platform-compat-config.xml": {
+      "mode": 33188,
+      "uid": 0,
+      "gid": 0,
+      "size": 440,
+      "sha256": "399828627c67b223dfb666405b5a6e418b6c0a6822a7ea986bf90dc0daed7e5b"
+    }
+  },
+  "observations": [
+    "Stock CompatConfig.isChangeEnabled returns true for unknown IDs; missing input previously enabled disabled/target-dependent changes",
+    "No RECEIVER_EXPORTED / PendingIntent FLAG_IMMUTABLE failures in this observation",
+    "Launcher3 workspace and wallpaper rendered through SurfaceFlinger into native SWS window",
+    "Later SystemServer NetworkStats fatal: bandwidthSetGlobalAlert cannot open /proc/net/xt_quota/globalAlert",
+    "The existing iptables replacement cannot create actual quota rules; network implementation design requested",
+    "/dev/fuse absent; native VFS/userfs integration remains pending",
+    "Attempted a Gallery icon click; no successful app activity asserted",
+    "ProcessScope closed with live=0, VM and native SWS stopped"
+  ],
+  "source_code_sha256": "4045cecf6852df5bb00922e8b2e245dc90b842398315ecda0149e7b789a057bf",
+  "home_sha256": "a7bf811acacea1203a2343dcd8e72e441095cf114bafa907aedcfbd7421ef8ba"
+}
