@@ -35,6 +35,7 @@ def main():
         index=arguments.index("--sws-native");compositor=Path(arguments[index+1]).resolve();del arguments[index:index+2]
     if capture_frame and not compositor:raise ValueError("frame capture requires --sws-native")
     launcher_app=None
+    system_apk=None
     data_source=None
     cache_source=None
     if "--seed-data" in arguments:
@@ -46,6 +47,10 @@ def main():
     if data_source and cache_source:raise ValueError("choose one seed image")
     if "--launcher-app" in arguments:
         index=arguments.index("--launcher-app");launcher_app=Path(arguments[index+1]).resolve();del arguments[index:index+2]
+    if "--system-apk" in arguments:
+        index=arguments.index("--system-apk");system_apk=Path(arguments[index+1]).resolve();del arguments[index:index+2]
+        if not system_apk.is_file():raise ValueError("system APK is missing")
+    if launcher_app and system_apk:raise ValueError("choose one system application source")
     stock_product=None
     if "--stock-product" in arguments:
         index=arguments.index("--stock-product");stock_product=Path(arguments[index+1]).resolve();del arguments[index:index+2]
@@ -143,6 +148,12 @@ def main():
                 '<wp width="640" height="480" name="Scarlet" backup="true" '
                 'cropLeft="0" cropTop="0" cropRight="640" cropBottom="480" />\n')
             wallpaper_info.chmod(0o644)
+        if system_apk:
+            # Stage an arbitrary application into the labeled system app path
+            # used by the compatibility profile.
+            destination=root/"system/app/ScarletCompat/ScarletCompat.apk"
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(system_apk,destination)
         if stock_product:
             product=Ext4(stock_product)
             permissions=root/"product/etc/permissions"

@@ -260,6 +260,8 @@ def configure(output, stock, profile, contexts, metadata):
         policy_services += (
             "\nservice scarlet-install-existing /system/bin/cmd package install-existing --user 0 " + package + "\n"
             "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
+            "\nservice scarlet-compile /system/bin/cmd package compile -m speed -f " + package + "\n"
+            "    class core\n    user shell\n    group shell\n    oneshot\n    disabled\n"
         )
         # The launcher activity only resolves once the primary user leaves the
         # locked state, which happens after sys.boot_completed. Retry through a
@@ -286,6 +288,10 @@ def configure(output, stock, profile, contexts, metadata):
         # refreshed and stop after the bounded number of retries.
         manager_init += (
             "\non property:init.svc.scarlet-install-existing=stopped\n"
+            "    start scarlet-compile\n"
+        )
+        manager_init += (
+            "\non property:init.svc.scarlet-compile=stopped\n"
             "    start scarlet-autostart-0\n"
         )
         for attempt in range(autostart_attempts - 1):
