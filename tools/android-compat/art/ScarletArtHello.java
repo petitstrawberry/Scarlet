@@ -17,7 +17,10 @@ public final class ScarletArtHello {
         for (int i = 0; i < 2000000; i++) {
             hot = mix(hot);
         }
-        System.out.println("Scarlet ART: " + answer + " hot=" + (hot & 0xffff));
+        if ((hot & 0xffff) != 42517) {
+            throw new AssertionError("hot-loop arithmetic");
+        }
+        System.out.println("Scarlet ART: " + answer);
         System.out.println("SCARLET_ART_OK");
     }
 }

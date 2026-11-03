@@ -38,7 +38,7 @@
     "ro.zygote": "zygote64",
     "ro.hardware": "scarlet",
     "dalvik.vm.dex2oat64.enabled": "true",
-    "dalvik.vm.usejit": "false",
+    "dalvik.vm.usejit": "true",
     "pm.dexopt.first-boot": "assume-verified",
     "sys.use_memfd": "true",
     "ro.hardware.egl": "angle",
