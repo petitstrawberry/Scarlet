@@ -45,6 +45,7 @@ pub mod notify;
 pub mod propagation;
 pub mod syscall;
 pub mod xattr;
+pub mod userfs;
 
 // VFS v2 test modules
 #[cfg(test)]
