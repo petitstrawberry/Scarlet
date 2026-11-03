@@ -8,7 +8,7 @@ use crate::{
     arch::Trapframe,
     executor::environment::Environment,
     fs::{FileMetadata, FilePermission, FileType, SeekFrom},
-    ipc::rpc::{RpcCall, RpcEndpoint, RpcMessage, RpcRequest},
+    ipc::rpc::{RpcCall, RpcEndpoint, RpcError, RpcMessage, RpcRequest},
     library::std::usercopy::{copy_from_user, copy_to_user},
     object::{
         KernelObject,
@@ -157,6 +157,25 @@ struct Thread {
     completed: VecDeque<Completed>,
     stack: Vec<Transaction>,
     pending_receive: Option<RpcRequest>,
+    pending_delivery: Option<Delivery>,
+}
+// Retain a dequeued message while its receive allocation is unavailable.
+// Native completion/request ownership must survive arena backpressure.
+struct Delivery {
+    message: Result<RpcMessage, RpcError>,
+    incoming: Option<RpcRequest>,
+    replying: bool,
+}
+impl Delivery {
+    fn allocation_size(&self) -> usize {
+        // The wire representation includes all data, offsets and HIDL buffers.
+        // Leave room for the authenticated sender context on incoming calls.
+        self.message.as_ref().map_or(8, |message| {
+            message.bytes.len().saturating_add(if self.replying { 0 } else {
+                crate::shield::MAX_LABEL_BYTES + 8
+            })
+        })
+    }
 }
 struct Incoming {
     request: RpcRequest,
@@ -532,6 +551,10 @@ impl BinderFile {
         if thread.flush_generation != thread.returned_flush {
             return true;
         }
+        if thread.pending_delivery.as_ref().and_then(|delivery| delivery.incoming.as_ref())
+            .is_some_and(RpcRequest::cancelled) {
+            return true;
+        }
         let objects = self.objects.lock();
         let process_work = thread.looper && thread.stack.is_empty();
         if objects.deaths.ready(tid, process_work) {
@@ -547,13 +570,13 @@ impl BinderFile {
             return completed.ready();
         }
         let has_delivery =
-            thread.outgoing().is_some_and(RpcCall::ready) || thread.can_receive(&self.endpoint);
+            thread.pending_delivery.is_some() || thread.outgoing().is_some_and(RpcCall::ready) || thread.can_receive(&self.endpoint);
         !objects.pending_local_acquisitions()
             && has_delivery
             && state
                 .arena
                 .as_ref()
-                .is_none_or(|arena| arena.has_free_slot())
+                .is_none_or(|arena| arena.has_space(thread.pending_delivery.as_ref().map_or(8, Delivery::allocation_size)))
     }
     fn waiter(&self, tid: usize) -> Arc<Waker> {
         // Incoming calls, object-reference work and outgoing completions all
@@ -600,6 +623,12 @@ impl BinderFile {
             let cancelled=state.threads.get_mut(&tid).unwrap().pending_receive.take();
             drop(state);drop(cancelled);
             return self.read_record_for_abi(task,abi,output,capacity);
+        }
+        if state.threads.get(&tid).unwrap().pending_delivery.as_ref()
+            .and_then(|delivery| delivery.incoming.as_ref()).is_some_and(RpcRequest::cancelled) {
+            let cancelled = state.threads.get_mut(&tid).unwrap().pending_delivery.take();
+            drop(state); drop(cancelled);
+            return self.read_record_for_abi(task, abi, output, capacity);
         }
         let thread = state.threads.get(&tid).unwrap();
         if thread.flush_generation != thread.returned_flush {
@@ -687,38 +716,39 @@ impl BinderFile {
         let thread = state.threads.get(&tid).unwrap();
         let replying = thread.pending_receive.is_none() && thread.outgoing().is_some_and(RpcCall::ready);
         let receiving = thread.can_receive(&self.endpoint);
-        if !replying && !receiving {
+        if thread.pending_delivery.is_none() && !replying && !receiving {
             return Ok(0);
         }
         if capacity < 68 {
             return Err(errno::ENOSPC);
         }
         let arena = state.arena.clone().ok_or(errno::EINVAL)?;
-        let address = match arena.reserve() {
-            Ok(address) => address,
-            Err(errno::ENOSPC) => return Ok(0),
-            Err(error) => return Err(error),
-        };
-        let mut incoming = None;
-        let message = if replying {
-            match state.threads.get_mut(&tid).unwrap().stack.pop().unwrap() {
+        let delivery = if let Some(delivery) = state.threads.get_mut(&tid).unwrap().pending_delivery.take() {
+            delivery
+        } else if replying {
+            let message = match state.threads.get_mut(&tid).unwrap().stack.pop().unwrap() {
                 Transaction::Outgoing(call) => call.take_reply().unwrap(),
                 _ => unreachable!(),
-            }
+            };
+            Delivery { message, incoming: None, replying: true }
         } else {
             match state.threads.get_mut(&tid).unwrap().receive(&self.endpoint) {
                 Ok(Some(mut request)) => {
-                    let message =
-                        core::mem::replace(&mut request.message, objects::message_empty());
-                    incoming = Some(request);
-                    Ok(message)
+                    let message = core::mem::replace(&mut request.message, objects::message_empty());
+                    Delivery { message: Ok(message), incoming: Some(request), replying: false }
                 }
-                _ => {
-                    arena.free(address)?;
-                    return Ok(0);
-                }
+                _ => return Ok(0),
             }
         };
+        let address = match arena.reserve(delivery.allocation_size()) {
+            Ok(address) => address,
+            Err(errno::ENOSPC) => {
+                state.threads.get_mut(&tid).unwrap().pending_delivery = Some(delivery);
+                return Ok(0);
+            }
+            Err(error) => return Err(error),
+        };
+        let Delivery { message, mut incoming, replying } = delivery;
         let mut node = state.node;
         let mut context_requested = state.node_flags & 0x1000 != 0;
         drop(state);
@@ -1068,6 +1098,43 @@ mod tests {
         message.bytes[8..12].copy_from_slice(&0u32.to_le_bytes());message
     }
     #[test_case]
+    fn binder_receive_backpressure_retains_native_request_until_space_is_freed() {
+        let (server, client, endpoint, _, output) = context_fixture();
+        let arena = endpoint.state.lock().arena.clone().unwrap();
+        let occupied = arena.reserve(256 * 1024).unwrap();
+        let caller = RpcEndpoint::new();
+        let call = endpoint.endpoint.send_scoped_from(&client, context_message(), &caller, None).unwrap();
+        assert_eq!(endpoint.read_record(&server, output, 76), Ok(0));
+        assert!(endpoint.state.lock().threads[&server.get_id()].pending_delivery.is_some());
+        assert!(!endpoint.ready(server.get_id()));
+        assert!(!call.ready());
+        arena.free(occupied).unwrap();
+        assert!(endpoint.ready(server.get_id()));
+        assert_eq!(endpoint.read_record(&server, output, 76), Ok(76));
+        assert!(endpoint.state.lock().threads[&server.get_id()].pending_delivery.is_none());
+        let record = read::<76>(&server, output).unwrap();
+        endpoint.release_buffer(&arena, u64_at(&record, 52)).unwrap();
+    }
+    #[test_case]
+    fn binder_reply_backpressure_retains_completed_reply() {
+        let (server, _, endpoint, _, output) = context_fixture();
+        let arena = endpoint.state.lock().arena.clone().unwrap();
+        let occupied = arena.reserve(256 * 1024).unwrap();
+        let peer = RpcEndpoint::new();
+        let call = peer.send_scoped(context_message(), &endpoint.endpoint, None).unwrap();
+        peer.receive().unwrap().unwrap().reply(context_message()).unwrap();
+        endpoint.state.lock().threads.get_mut(&server.get_id()).unwrap()
+            .stack.push(Transaction::Outgoing(call));
+        assert_eq!(endpoint.read_record(&server, output, 68), Ok(0));
+        assert!(!endpoint.ready(server.get_id()));
+        arena.free(occupied).unwrap();
+        assert!(endpoint.ready(server.get_id()));
+        assert_eq!(endpoint.read_record(&server, output, 68), Ok(68));
+        let record = read::<68>(&server, output).unwrap();
+        assert_eq!(u32_at(&record, 0), BR_REPLY);
+        endpoint.release_buffer(&arena, u64_at(&record, 52)).unwrap();
+    }
+    #[test_case]
     fn binder_context_records_use_native_sender_snapshot_and_read_only_lifetime() {
         let (server,client,endpoint,policy,output)=context_fixture();let caller=RpcEndpoint::new();
         let call=endpoint.endpoint.send_scoped_from(&client,context_message(),&caller,None).unwrap();
@@ -1093,7 +1160,7 @@ mod tests {
         let call=endpoint.endpoint.send_scoped_from(&client,context_message(),&caller,None).unwrap();
         assert_eq!(endpoint.read_record(&server,0,76),Err(errno::EFAULT));
         assert_eq!(call.take_reply().unwrap().err(),Some(crate::ipc::rpc::RpcError::PeerClosed));
-        let arena=endpoint.state.lock().arena.clone().unwrap();let address=arena.reserve().unwrap();arena.free(address).unwrap();
+        let arena=endpoint.state.lock().arena.clone().unwrap();let address=arena.reserve(8).unwrap();arena.free(address).unwrap();
     }
     #[test_case]
     fn binder_context_delivery_rejects_absent_and_foreign_native_labels() {

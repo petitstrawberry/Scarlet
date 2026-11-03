@@ -756,7 +756,7 @@ impl BinderFile {
             if context.len()>crate::shield::MAX_LABEL_BYTES || !super::super::security::valid_context_name(context) {
                 return Err(errno::EACCES);
             }
-            if context_offset.checked_add(context.len()+1).is_none_or(|size|size>arena::SLOT) {
+            if context_offset.checked_add(context.len()+1).is_none_or(|size|size>4*1024*1024) {
                 return Err(errno::E2BIG);
             }
         }

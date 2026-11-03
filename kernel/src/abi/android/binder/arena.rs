@@ -10,14 +10,14 @@ use crate::{
 };
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-pub(super) const SLOT: usize = 128 * 1024;
+const ALIGNMENT: usize = 8;
 pub(super) struct Arena {
     backing: SharedMemory,
     paddr: u64,
     size: usize,
     base: AtomicUsize,
     live: AtomicBool,
-    slots: IrqSpinLock<Vec<bool>>,
+    allocations: IrqSpinLock<BTreeMap<usize, usize>>,
 }
 impl Arena {
     fn new(size: usize) -> Result<Arc<Self>, usize> {
@@ -26,8 +26,7 @@ impl Arena {
             .get_mapping_info(0, size)
             .map_err(|_| errno::ENOMEM)?
             .paddr;
-        // SAFETY: this newly allocated contiguous backing is owned exclusively
-        // here and has not been exposed to a task yet. Zero every mapped byte.
+        // SAFETY: fresh contiguous backing has not been exposed to userspace.
         unsafe {
             core::ptr::write_bytes(phys_to_virt(paddr) as *mut u8, 0, size);
         }
@@ -37,63 +36,76 @@ impl Arena {
             size,
             base: AtomicUsize::new(0),
             live: AtomicBool::new(false),
-            slots: IrqSpinLock::new(vec![false; size / SLOT]),
+            allocations: IrqSpinLock::new(BTreeMap::new()),
         }))
     }
-    pub(super) fn reserve(&self) -> Result<usize, usize> {
+    fn aligned_size(size: usize) -> Result<usize, usize> {
+        size.max(1)
+            .checked_add(ALIGNMENT - 1)
+            .map(|size| size & !(ALIGNMENT - 1))
+            .ok_or(errno::E2BIG)
+    }
+    fn find_space(&self, allocations: &BTreeMap<usize, usize>, size: usize) -> Option<usize> {
+        let mut offset = 0;
+        for (&start, &length) in allocations {
+            if start.checked_sub(offset)? >= size {
+                return Some(offset);
+            }
+            offset = start.checked_add(length)?;
+        }
+        (self.size.checked_sub(offset)? >= size).then_some(offset)
+    }
+    pub(super) fn reserve(&self, size: usize) -> Result<usize, usize> {
         if !self.live.load(Ordering::Acquire) {
             return Err(errno::EINVAL);
         }
-        let mut slots = self.slots.lock();
-        let index = slots.iter().position(|used| !*used).ok_or(errno::ENOSPC)?;
-        slots[index] = true;
-        Ok(self.base.load(Ordering::Relaxed) + index * SLOT)
-    }
-    pub(super) fn has_free_slot(&self) -> bool {
-        self.live.load(Ordering::Acquire) && {
-            let slots = self.slots.lock();
-            slots.iter().any(|used| !used)
+        let size = Self::aligned_size(size)?;
+        if size > self.size {
+            return Err(errno::E2BIG);
         }
+        let mut allocations = self.allocations.lock();
+        let offset = self.find_space(&allocations, size).ok_or(errno::ENOSPC)?;
+        allocations.insert(offset, size);
+        Ok(self.base.load(Ordering::Relaxed) + offset)
     }
-    fn index(&self, address: usize) -> Result<usize, usize> {
-        let offset = address
+    pub(super) fn has_space(&self, size: usize) -> bool {
+        if !self.live.load(Ordering::Acquire) {
+            return true;
+        } // let delivery report invalidation
+        let Ok(size) = Self::aligned_size(size) else {
+            return true;
+        };
+        size > self.size || self.find_space(&self.allocations.lock(), size).is_some()
+    }
+    fn offset(&self, address: usize) -> Result<usize, usize> {
+        address
             .checked_sub(self.base.load(Ordering::Relaxed))
-            .ok_or(errno::EINVAL)?;
-        if offset / SLOT >= self.size / SLOT || !offset.is_multiple_of(SLOT) {
-            return Err(errno::EINVAL);
-        }
-        Ok(offset / SLOT)
+            .ok_or(errno::EINVAL)
     }
     pub(super) fn free(&self, address: usize) -> Result<(), usize> {
-        let index = self.index(address)?;
-        let mut slots = self.slots.lock();
-        if !slots[index] {
-            return Err(errno::EINVAL);
-        }
-        // SAFETY: this live slot belongs to the immutable contiguous backing.
-        // Zeroing on release also implements TF_CLEAR_BUF conservatively.
+        let offset = self.offset(address)?;
+        let mut allocations = self.allocations.lock();
+        let size = *allocations.get(&offset).ok_or(errno::EINVAL)?;
+        // SAFETY: the allocation lies within the retained contiguous backing.
+        // Zero before publishing the range as free (also implements TF_CLEAR_BUF).
         unsafe {
-            core::ptr::write_bytes(
-                (phys_to_virt(self.paddr) as *mut u8).add(index * SLOT),
-                0,
-                SLOT,
-            );
+            core::ptr::write_bytes((phys_to_virt(self.paddr) as *mut u8).add(offset), 0, size);
         }
-        slots[index] = false;
+        allocations.remove(&offset);
         Ok(())
     }
     pub(super) fn store(&self, address: usize, bytes: &[u8]) -> Result<(), usize> {
-        let index = self.index(address)?;
-        let slots = self.slots.lock();
-        if bytes.len() > SLOT || !slots[index] || !self.live.load(Ordering::Acquire) {
+        let offset = self.offset(address)?;
+        let allocations = self.allocations.lock();
+        let size = *allocations.get(&offset).ok_or(errno::EINVAL)?;
+        if bytes.len() > size || !self.live.load(Ordering::Acquire) {
             return Err(errno::EINVAL);
         }
-        // SAFETY: immutable backing spans this reserved slot; the source is an
-        // owned RPC Vec, disjoint from every userspace receive mapping.
+        // SAFETY: source is owned RPC bytes, disjoint from the reserved backing.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 bytes.as_ptr(),
-                (phys_to_virt(self.paddr) as *mut u8).add(index * SLOT),
+                (phys_to_virt(self.paddr) as *mut u8).add(offset),
                 bytes.len(),
             );
         }
@@ -142,7 +154,7 @@ impl BinderFile {
             if addr != 0
                 || offset != 0
                 || prot != 1
-                || !(SLOT..=4 * 1024 * 1024).contains(&length)
+                || !(4096..=4 * 1024 * 1024).contains(&length)
                 || !matches!(flags & 3, 1 | 2)
                 || flags & !(3 | 0x4000) != 0
             {
@@ -177,27 +189,34 @@ impl BinderFile {
 mod tests {
     use super::*;
     #[test_case]
-    fn binder_arena_bounds_zeroing_and_partial_unmap() {
-        let arena = Arena::new(SLOT * 2 - 4096).unwrap();
+    fn binder_arena_variable_allocations_reuse_zeroing_and_unmap() {
+        let arena = Arena::new(4096).unwrap();
         arena.on_mapped(0x100000, arena.paddr, arena.size, 0);
-        assert_eq!(arena.get_mapping_info(0, 4096).unwrap().permissions, 1);
         assert!(!arena.inherit_on_fork());
-        assert_eq!(arena.free(0x100000 + SLOT), Err(errno::EINVAL));
-        assert_eq!(arena.free(usize::MAX), Err(errno::EINVAL));
-        let address = arena.reserve().unwrap();
-        assert_eq!(arena.reserve(), Err(errno::ENOSPC));
-        assert!(!arena.has_free_slot());
-        arena.store(address, b"secret").unwrap();
-        arena.free(address).unwrap();
-        assert!(arena.has_free_slot());
-        assert_eq!(arena.free(address), Err(errno::EINVAL));
-        assert_eq!(arena.reserve().unwrap(), address);
-        // SAFETY: the arena retains this initialized, contiguous backing.
+        let mut addresses = Vec::new();
+        for _ in 0..32 {
+            addresses.push(arena.reserve(17).unwrap());
+        }
+        assert_eq!(addresses[1] - addresses[0], 24);
+        assert_eq!(arena.free(addresses[0] + 1), Err(errno::EINVAL));
+        arena.store(addresses[0], b"secret").unwrap();
+        assert_eq!(arena.store(addresses[0], &[1; 25]), Err(errno::EINVAL));
+        arena.free(addresses[0]).unwrap();
+        assert_eq!(arena.free(addresses[0]), Err(errno::EINVAL));
+        assert_eq!(arena.reserve(24).unwrap(), addresses[0]);
         let bytes =
-            unsafe { core::slice::from_raw_parts(phys_to_virt(arena.paddr) as *const u8, 6) };
-        assert_eq!(bytes, &[0; 6]);
-        arena.on_unmapped(address, 4096);
-        assert_eq!(arena.reserve(), Err(errno::EINVAL));
-        assert_eq!(arena.store(address, b"new"), Err(errno::EINVAL));
+            unsafe { core::slice::from_raw_parts(phys_to_virt(arena.paddr) as *const u8, 24) };
+        assert_eq!(bytes, &[0; 24]);
+        let tail = arena.reserve(4096 - 32 * 24).unwrap();
+        assert!(!arena.has_space(8));
+        assert_eq!(arena.reserve(8), Err(errno::ENOSPC));
+        arena.free(addresses[1]).unwrap();
+        arena.free(addresses[2]).unwrap();
+        assert!(arena.has_space(48));
+        assert_eq!(arena.reserve(48).unwrap(), addresses[1]);
+        assert_eq!(arena.reserve(usize::MAX), Err(errno::E2BIG));
+        arena.on_unmapped(tail, 4096);
+        assert_eq!(arena.reserve(8), Err(errno::EINVAL));
+        assert_eq!(arena.store(addresses[0], b"new"), Err(errno::EINVAL));
     }
 }
