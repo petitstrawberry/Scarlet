@@ -30,12 +30,27 @@ static int log_socket(void) {
  struct sockaddr_un address={.sun_family=AF_UNIX};strcpy(address.sun_path,"/dev/socket/logdw");
  if(bind(fd,(struct sockaddr*)&address,sizeof(address))){close(fd);return -1;}return fd;
 }
+static int important_log(const unsigned char *message,size_t length) {
+ // The same socket carries Android logger packets and the preload's plain
+ // text diagnostics. Quiet mode must retain crashes and command results.
+ const char *prefixes[]={"SCARLET_INIT_JAVA_FATAL ","SCARLET_INIT_ABORT_MESSAGE ",
+                         "SCARLET_ANDROID_STDIO ","SCARLET_INIT_LOG priority=6 ",
+                         "SCARLET_INIT_LOG priority=7 "};
+ for(unsigned i=0;i<sizeof(prefixes)/sizeof(prefixes[0]);i++) {
+  size_t n=strlen(prefixes[i]);
+  if(length>=n && !memcmp(message,prefixes[i],n))return 1;
+ }
+ // Packed logdw header: log ID (1), TID (2), seconds (4), nanoseconds (4).
+ // Events/stats/security buffers contain binary records, not a priority byte.
+ return length>11 && (message[0]==0 || message[0]==1 || message[0]==3 || message[0]==4) &&
+        message[11]>=6 && message[11]<=7;
+}
 static void drain_logs(int fd) {
  if(fd<0)return;
  int quiet=getenv("SCARLET_INIT_QUIET")!=NULL;
  for(int count=0;count<128;count++) {unsigned char message[8192];ssize_t n=recv(fd,message,sizeof(message),MSG_DONTWAIT);
   if(n<0)break;
-  if(quiet)continue;
+  if(quiet && !important_log(message,(size_t)n))continue;
   printf("SCARLET_INIT_LOGD bytes=%zd ",n);
   for(ssize_t i=0;i<n;i++)if(message[i]<32 || message[i]>=127)message[i]='|';
   fwrite(message,1,(size_t)n,stdout);
