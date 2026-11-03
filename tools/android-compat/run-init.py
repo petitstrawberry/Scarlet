@@ -10,6 +10,7 @@ import tempfile
 import threading
 
 from art_inputs import Ext4, sha256
+from seed_image import inode_metadata, restore_inode_metadata
 
 SOURCE = Path(__file__).resolve().parent
 
@@ -45,6 +46,8 @@ def main():
         index=arguments.index("--seed-cache");cache_source=Path(arguments[index+1]).resolve();del arguments[index:index+2]
         if not cache_source.is_file():raise ValueError("seed cache image is missing")
     if data_source and cache_source:raise ValueError("choose one seed image")
+    if (data_source or cache_source) and "--reuse-rootfs" in arguments:
+        raise ValueError("choose seed data or a complete reused rootfs")
     if "--launcher-app" in arguments:
         index=arguments.index("--launcher-app");launcher_app=Path(arguments[index+1]).resolve();del arguments[index:index+2]
     if "--system-apk" in arguments:
@@ -92,8 +95,11 @@ def main():
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
     original = runner.stage_boot_inputs
+    seed_inodes = {}
+    seed_destination = None
 
     def stage(inputs, runtime, stock, root):
+        nonlocal seed_inodes, seed_destination
         metadata = original(inputs, runtime, stock, root)
         if data_source or cache_source:
             # Reuse a previously booted /data, or only its compiled
@@ -109,6 +115,8 @@ def main():
                     if "Type: directory" in info.stdout:break
                 else:
                     raise ValueError("seed image has no /data")
+                seed_inodes = inode_metadata(image, source)
+                seed_destination = "/" + str(root.relative_to(output.resolve()/"staging") / "data") + subdirectory
                 subprocess.run(["debugfs","-R",f"rdump {source} {directory}",image],
                                check=True,capture_output=True)
                 seeded=Path(directory)/"data"
@@ -218,6 +226,19 @@ def main():
         arguments.extend(["--program-env","SCARLET_INIT_QUIET=1"])
     runner.stage_boot_inputs = stage
     original_run=runner.smoke.run_guest
+    if data_source or cache_source:
+        unseeded_run = original_run
+        def run_with_seed_metadata(command, directory, timeout):
+            if seed_destination is None or not seed_inodes:
+                raise ValueError("seed inode metadata was not collected")
+            restore_inode_metadata(directory/"rootfs.ext2", seed_destination, seed_inodes)
+            (directory/"seed-inodes.json").write_text(json.dumps({
+                "source": str(data_source or cache_source), "destination": seed_destination,
+                "inodes": len(seed_inodes), "ownership_and_modes": "verified",
+            }, indent=2)+"\n")
+            return unseeded_run(command, directory, timeout)
+        original_run = run_with_seed_metadata
+        runner.smoke.run_guest = original_run
     previous=os.environ.get("SCARLET_ANDROID_SWS_NATIVE")
     previous_policy=os.environ.get("SCARLET_ANDROID_APP_POLICY")
     if manage_apps:os.environ["SCARLET_ANDROID_APP_POLICY"]="1"
