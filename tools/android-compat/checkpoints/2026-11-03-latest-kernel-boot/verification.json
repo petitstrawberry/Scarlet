@@ -1,0 +1,52 @@
+{
+  "source_revision": "aaa115450974cf1c29b784c167845f077d163a77",
+  "dev_revision": "c617fccdd3de46e996f7d56dfc28c335bdbf2e59",
+  "kernel_sha256": "82b3362b153251ab0b2026dc2f4cc5535a15f39206290111730e591316d810e8",
+  "kernel_code_revision": "057517b39",
+  "android_inputs": "Existing warm Android compatibility profile; not a new complete AOSP product build",
+  "apk": {
+    "name": "Aegis",
+    "source": "Extracted unchanged from retained aegis-jit-padded/rootfs.ext2",
+    "sha256": "0eecec45de0da3ff1358004b51e2960d9178551643a6ed44f6496ea9ec999c19"
+  },
+  "platform": {
+    "accel": "hvf",
+    "cpus": 4,
+    "memory_gib": 4
+  },
+  "data_seed": "aegis-jit-padded/rootfs.ext2",
+  "boot_profile": "boot-inputs-aegis-warm-permission",
+  "stock_inputs": "stock-launch-v1",
+  "source_changes_in_this_run": false,
+  "result": "NORMAL_APP_START_NOT_REACHED",
+  "runner_result": {
+    "result": "fixture failure marker",
+    "qemu_exit_code": 0,
+    "elapsed_seconds": 186.529,
+    "dynamic_runtime": true,
+    "program_exit_status": 0,
+    "service_readiness": "not tested"
+  },
+  "observations": [
+    "SWS Android window displayed; final captured content is a blank gray surface.",
+    "Last reported user state: RUNNING_LOCKED; no RUNNING_UNLOCKED or successful Activity start in the observed log.",
+    "MediaProvider media.player and HIDL manager lookups denied; Codec2Client asserts Hardware service manager is not running, followed by MediaCodec.native_setup runtime abort.",
+    "Media dependency/authorization failure is observed; it is not proven to be the sole cause of incomplete user unlock.",
+    "Namespace teardown completed with live=0; QEMU stopped."
+  ],
+  "frame": {
+    "scope": "observed SWS display; app readiness is not asserted",
+    "snapshots": 78,
+    "size": [
+      1280,
+      800
+    ],
+    "frame_sha256": "3a78989522ac8e45e39c1b76e2bf768fc218cd24fde4cf7ff58281abc732228b"
+  },
+  "serial_sha256": "981e9b97b941438f3116858412f2aa6fb9a63b9a3176cf7bc9382136c9c0fe18",
+  "setup_errors": [
+    "Initial stock-clean-v1 overlay failed manifest verification; unchanged stock-launch-v1 was used.",
+    "Initial invocation omitted the system APK and failed boot file labeling. Corrected invocation uses Aegis extracted from the retained successful disk."
+  ],
+  "full_run_directory": ".build/android-services/latest-build-20261103-v2"
+}
