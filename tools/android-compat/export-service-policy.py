@@ -13,10 +13,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--domain", action="append", default=[],
+                        help="also export a daemon domain used by the hosted device")
     args = parser.parse_args()
     data = args.policy.read_bytes()
     policy = setools.SELinuxPolicy(str(args.policy))
-    text = export(policy, setools)
+    text = export(policy, setools, args.domain)
     if args.policy.read_bytes() != data:
         raise ValueError("compiled policy changed during export")
     domains, rules = validate(text)
@@ -26,7 +28,8 @@ def main():
                 "source": str(args.policy), "setools_version": setools.__version__,
                 "policy_version": policy.version, "domains": len(domains),
                 "rules": len(rules), "text_sha256": hashlib.sha256(text.encode()).hexdigest(),
-                "scope": "App-domain service_manager and hwservice_manager allows only; not a full SELinux implementation"}
+                "additional_domains": sorted(set(args.domain)),
+                "scope": "App and explicitly requested daemon service_manager/hwservice_manager allows; not a full SELinux implementation"}
     (args.output / "service-policy.json").write_text(json.dumps(metadata, indent=2) + "\n")
     print(f"Exported {len(rules)} service rules for {len(domains)} app domains")
 

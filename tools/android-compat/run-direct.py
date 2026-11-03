@@ -70,6 +70,8 @@ def main():
     parser.add_argument("--program-env",action="append",default=[],help="explicit KEY=VALUE for the selected diagnostic program")
     parser.add_argument("--cpus", type=int, choices=range(1,9), default=1, help="HVF CPU count for scheduler integration checks")
     parser.add_argument("--memory", type=int, choices=range(2,9), default=2, help="Guest RAM in GiB")
+    parser.add_argument("--rootfs-extra-bytes", type=int, default=0,
+                        help="additional offline import capacity in a newly generated rootfs")
     parser.add_argument("--binder", action="store_true", help="include Binder RPC and three-process object lifetime checks")
     args = parser.parse_args()
     if args.program_argument and not args.program:
@@ -142,6 +144,8 @@ def main():
         parser.error("--stock-inputs requires --art-dex or --program")
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("timeout must be finite and positive")
+    if not 0 <= args.rootfs_extra_bytes <= 16 * 1024**3 or args.rootfs_extra_bytes and args.reuse_rootfs:
+        parser.error("extra rootfs capacity requires a new image and must be at most 16 GiB")
     kernel, output = args.kernel.resolve(), args.output.resolve()
     probes = args.probes.resolve() if args.probes else None
     if output.exists():
@@ -331,7 +335,7 @@ def main():
     else:
         size = sum(p.stat().st_size for p in staging.rglob("*") if p.is_file() and not p.is_symlink())
         with rootfs.open("xb") as f:
-            f.truncate(max(128 * 1024**2, size * 2 + 64 * 1024**2))
+            f.truncate(max(128 * 1024**2, size * 2 + args.rootfs_extra_bytes + 64 * 1024**2))
         with (output / "rootfs-build.log").open("wb") as log:
             subprocess.run(["mkfs.ext2", "-F", "-d", str(staging), str(rootfs)], stdout=log, stderr=subprocess.STDOUT, check=True)
     archive, image = output / "initramfs.cpio", output / "boot.img"

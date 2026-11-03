@@ -1,0 +1,43 @@
+{
+  "result": "BLOCKED",
+  "kernel_sha256": "82b3362b153251ab0b2026dc2f4cc5535a15f39206290111730e591316d810e8",
+  "cpus": 4,
+  "memory_gib": 4,
+  "acceleration": "HVF",
+  "package_import": {
+    "manifest_sha256": "d3dc116cdc4e23ce8db6cbab31f860cbfe61d1c569685de572247725fd3ca5c4",
+    "nodes": 2013,
+    "device_overrides": {
+      "vendor/lib64/android.hardware.graphics.composer@2.1.so": "5716beb3ba32fffab74dcc40191e8c6c3d708b5bdf0b73bc78aac82375a4a027"
+    },
+    "contents_and_inode_metadata": "verified"
+  },
+  "boot_policy": {
+    "sha256": "bf23b213876f442d6b876bd74f9e912b4fa83ae118601e498185a665e665c59f",
+    "source_manifest_sha256": "6f8a3077bb939a79e58f7482e224f1e0385005172b926d3b2f85e373e4248591"
+  },
+  "observed": [
+    "stock package trees scanned",
+    "system_server progressed beyond WifiService initialization",
+    "user 0 remained RUNNING_LOCKED",
+    "vold cannot open /dev/fuse",
+    "app manager policy publication failed",
+    "SystemServer fatal setting ro.organization_owned"
+  ],
+  "stopped": {
+    "reason": "SystemServer fatal while setting device-ownership property; stop EOF log loop",
+    "normal_scope_teardown": false,
+    "time": 1793689319.217126
+  },
+  "limitations": [
+    "No verified home or app launch",
+    "App trees and libraries restored; init service selection remains device-profile work",
+    "Full filesystem xattrs and hardlink identity not imported",
+    "Native SDK stale update bound fixed after this run; runtime result pending"
+  ],
+  "tests": [
+    "5 Rust app-policy tests passed",
+    "3 actual ext2 package import tests passed",
+    "4 policy tests including 32 compiled-policy queries passed"
+  ]
+}

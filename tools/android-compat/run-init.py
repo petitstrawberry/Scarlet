@@ -39,6 +39,12 @@ def main():
         verify(service_policy)
     if manage_apps and service_policy is None:
         raise ValueError("app policy management requires --service-policy from the pinned compiled policy")
+    stock_packages=None
+    if "--stock-packages" in arguments:
+        index=arguments.index("--stock-packages");stock_packages=Path(arguments[index+1]).resolve();del arguments[index:index+2]
+        from stock_packages import verify
+        packages=verify(stock_packages)
+        arguments.extend(["--rootfs-extra-bytes",str(sum(node["size"] for node in packages["nodes"].values()))])
     if "--sws-native" in arguments:
         index=arguments.index("--sws-native");compositor=Path(arguments[index+1]).resolve();del arguments[index:index+2]
     if capture_frame and not compositor:raise ValueError("frame capture requires --sws-native")
@@ -104,18 +110,30 @@ def main():
     original = runner.stage_boot_inputs
     seed_inodes = {}
     seed_destination = None
+    package_overrides = {}
 
     def stage(inputs, runtime, stock, root):
         nonlocal seed_inodes, seed_destination
         metadata = original(inputs, runtime, stock, root)
+        if stock_packages:
+            from stock_packages import stage as validate_packages, MANIFEST
+            # Retain only the graphics interface relocation already verified
+            # by this device profile. All other existing bytes must match AOSP.
+            graphics=metadata.get("host_service_inputs",{}).get("graphics_cpu",{})
+            package_overrides.update({name:metadata["files"][name] for name in graphics.get("relocations",{})})
+            validate_packages(stock_packages,root,package_overrides)
+            shutil.copy2(stock_packages/MANIFEST,output/MANIFEST)
         if service_policy:
-            from service_policy import verify
+            from service_policy import verify, apply_boot_policy
             verify(service_policy)
             target=root/"scarlet/boot/service-policy.txt"
             shutil.copy2(service_policy/"service-policy.txt",target)
             if sha256(target)!=sha256(service_policy/"service-policy.txt"):
                 raise ValueError("service policy changed during staging")
+            policy=root/"scarlet/boot/shield.policy"
+            policy.write_text(apply_boot_policy(policy.read_text(),target.read_text()))
             shutil.copy2(service_policy/"service-policy.json",output/"service-policy.json")
+            (output/"applied-boot-policy.json").write_text(json.dumps({"sha256":sha256(policy),"source_manifest_sha256":sha256(service_policy/"service-policy.json")},indent=2)+"\n")
         if data_source or cache_source:
             # Reuse a previously booted /data, or only its compiled
             # application cache, while the system tree comes from the freshly
@@ -254,6 +272,15 @@ def main():
             return unseeded_run(command, directory, timeout)
         original_run = run_with_seed_metadata
         runner.smoke.run_guest = original_run
+    if stock_packages:
+        packages_previous_run=original_run
+        def run_with_packages(command,directory,timeout):
+            from stock_packages import install_image
+            proof=install_image(stock_packages,directory/"rootfs.ext2","/systems/android-aarch64",overrides=package_overrides)
+            (directory/"stock-packages-install.json").write_text(json.dumps(proof,indent=2)+"\n")
+            return packages_previous_run(command,directory,timeout)
+        original_run=run_with_packages
+        runner.smoke.run_guest=original_run
     previous=os.environ.get("SCARLET_ANDROID_SWS_NATIVE")
     previous_policy=os.environ.get("SCARLET_ANDROID_APP_POLICY")
     if manage_apps:os.environ["SCARLET_ANDROID_APP_POLICY"]="1"

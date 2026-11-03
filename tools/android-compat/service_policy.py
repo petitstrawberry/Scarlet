@@ -11,7 +11,7 @@ PERMISSIONS = {"add": 1, "find": 2, "list": 4}
 SDK_POLICY_SHA256 = "2be08e2a2e93d22c6a1c5e4e32fa4d571ecb07695877cdcfe0c3a9f48ba9234c"
 
 
-def export(policy, setools):
+def export(policy, setools, additional_domains=()):
     # A type-only Shield rule cannot represent conditional or MLS constraints.
     # Reject those inputs instead of silently granting a superset of access.
     if list(setools.ConstraintQuery(policy, tclass=CLASSES).results()):
@@ -21,6 +21,7 @@ def export(policy, setools):
         raise ValueError("unsupported Android service permission vocabulary")
     domains = {str(t) for t in policy.lookup_typeattr("domain").expand()}
     apps = {str(t) for t in policy.lookup_typeattr("appdomain").expand()}
+    apps.update(additional_domains)
     if not apps or not apps <= domains:
         raise ValueError("invalid app domain inventory")
     rules = {}
@@ -95,3 +96,37 @@ def verify(directory):
         raise ValueError("changed service policy output")
     validate(path.read_text())
     return metadata
+
+
+def apply_boot_policy(boot, service_text):
+    """Use the same compiled rules for existing boot subjects and future apps."""
+    domains, grants = validate(service_text)
+    labels, identifiers = {}, set()
+    lines = boot.splitlines()
+    for line in lines:
+        fields = line.split()
+        if fields[:1] == ["label"]:
+            if len(fields) != 3:
+                raise ValueError("boot label syntax")
+            identifier, name = int(fields[1]), fields[2]
+            if name in labels or identifier in identifiers:
+                raise ValueError("duplicate boot label")
+            labels[name] = identifier
+            identifiers.add(identifier)
+    sources = {name.split(":")[2]: identifier for name, identifier in labels.items()
+               if re.fullmatch(r"u:r:[A-Za-z0-9_]+:s0", name) and name.split(":")[2] in domains}
+    replaced = set(sources.values())
+    kept = [line for line in lines if not (line.startswith("service-allow ") and int(line.split()[1]) in replaced)]
+    next_id = max(identifiers, default=0) + 1
+    added, rules = [], []
+    for (source, target), mask in sorted(grants.items()):
+        if source not in sources:
+            continue
+        if target not in labels:
+            labels[target] = next_id
+            added.append(f"label {next_id} {target}")
+            next_id += 1
+        rules.append(f"service-allow {sources[source]} {labels[target]} {mask}")
+    if len(labels) > 1024 or sum(line.startswith(("service-allow ", "property-set ", "socket-create ", "keystore-allow ")) for line in kept) + len(rules) > 16384:
+        raise ValueError("compiled service policy exceeds native policy bounds")
+    return "\n".join(kept + added + rules) + "\n"
