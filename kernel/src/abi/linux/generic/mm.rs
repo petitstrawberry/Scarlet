@@ -644,13 +644,20 @@ fn user_range_is_mapped(task: &crate::task::Task, addr: usize, length: usize) ->
     let Some(end) = addr.checked_add(length - 1) else {
         return false;
     };
+    if end >= crate::environment::USER_LOWER_CANONICAL_END {
+        return false;
+    }
 
     let mut page = addr & !(PAGE_SIZE - 1);
+    let last_page = end & !(PAGE_SIZE - 1);
     loop {
-        if task.vm_manager.translate_to_kva(page).is_none() {
+        // A reserved VMA is mapped even when its PTE has not faulted in, or
+        // when PROT_NONE prevents access. Range queries must not require RAM
+        // backing or inspect the page immediately after the requested range.
+        if task.vm_manager.search_memory_map(page).is_none() {
             return false;
         }
-        if page >= end {
+        if page == last_page {
             break;
         }
         let Some(next) = page.checked_add(PAGE_SIZE) else {
