@@ -2,11 +2,11 @@
 //! exec, and translate the package manager's installed-UID inventory into exact
 //! label delegations. Android processes receive no management capability.
 use core::sync::atomic::{AtomicBool, Ordering};
-use scarlet_android_app_policy::{Contexts, services::Services};
+use scarlet_android_app_policy::{Contexts, services::Services, groups::FileBatch};
 use std::{
     collections::{BTreeMap, BTreeSet},
     environment::VfsView,
-    shield::{FileCreate, FileRelabel, Policy, Rule, Transition},
+    shield::{Policy, Transition, LabelSet, SetMember, LabelSelector, SetGrant, LabelSetUpdate},
     string::String,
     sync::Arc,
     vec::Vec,
@@ -44,6 +44,8 @@ struct Manager {
     next: u32,
     seen: BTreeSet<(String, u32, String)>,
     data_labels: BTreeSet<u32>,
+    domain_sets:BTreeMap<String,u32>,
+    next_set:u32,
 }
 impl Manager {
     fn label(&mut self, name: &str, added: &mut Vec<(u32, String)>) -> Result<u32, &'static str> {
@@ -114,6 +116,8 @@ impl Manager {
             .labels
             .get("u:r:installd:s0")
             .ok_or("manager installer subject")?;
+        let mut sets = Vec::new();
+        let mut members = Vec::new();
         let mut rules = Vec::new();
         // The image's compiled policy supplies exact domain-specific rules.
         // No privileged-app blanket grants or invented service-name list.
@@ -122,10 +126,19 @@ impl Manager {
                 .map(|(name, _)| name.clone()).ok_or("manager subject label")?;
             let grants: Vec<_> = self.services.grants(&context)?.iter()
                 .map(|grant| (grant.target.clone(), grant.class, grant.permissions)).collect();
-            for (name, class, permissions) in grants {
-                let target = self.label(&name, &mut added)?;
-                rules.push(Rule { source, target, class, reserved: 0, permissions });
-            }
+            let domain = context.split(':').nth(2).ok_or("manager domain type")?;
+            let group = if let Some(id) = self.domain_sets.get(domain) { *id } else {
+                let id = self.next_set;
+                self.next_set = self.next_set.checked_add(1).ok_or("manager label set identity")?;
+                sets.push(LabelSet {id,reserved:0});
+                for (name,class,permissions) in grants {
+                    let target=self.label(&name,&mut added)?;
+                    rules.push(SetGrant {source:LabelSelector::set(id),target:LabelSelector::label(target),class,reserved:0,permissions});
+                }
+                self.domain_sets.insert(String::from(domain),id);
+                id
+            };
+            members.push(SetMember {set:group,label:source});
         }
         let transitions: Vec<_> = transitions
             .into_iter()
@@ -136,61 +149,20 @@ impl Manager {
                 reserved: 0,
             })
             .collect();
-        let mut old = self.data_labels.clone();
-        old.extend(files.iter().copied());
+        let mut base = BTreeSet::new();
         for name in [
             "u:object_r:unlabeled:s0",
             "u:object_r:system_data_file:s0",
             "u:object_r:system_data_root_file:s0",
         ] {
             if let Some(id) = self.labels.get(name) {
-                old.insert(*id);
+                base.insert(*id);
             }
         }
-        let mut relabel = Vec::new();
-        let mut create = Vec::new();
-        for target in files.iter().copied() {
-            for parent in &old {
-                for kind in [1, 2] {
-                    if *parent != target {
-                        for source in [installer, zygote] {
-                            relabel.push(FileRelabel { source, old: *parent, target, kind });
-                        }
-                    }
-                    create.push(FileCreate {
-                        source: installer,
-                        parent: *parent,
-                        target,
-                        kind,
-                        flags: 0,
-                        reserved: 0,
-                    });
-                }
-            }
-            for parent in &old {
-                if *parent != target {
-                    relabel.push(FileRelabel { source: zygote, old: *parent, target, kind: 3 });
-                }
-            }
-        }
-        for target in [
-            "u:object_r:system_data_root_file:s0",
-            "u:object_r:system_data_file:s0",
-            "u:object_r:unlabeled:s0",
-        ]
-        .into_iter()
-        .filter_map(|name| self.labels.get(name).copied())
-        .filter(|target| !files.contains(target))
-        {
-            for parent in &old {
-                if *parent != target {
-                    for kind in [1, 2] {
-                        relabel.push(FileRelabel { source: zygote, old: *parent, target, kind });
-                    }
-                    relabel.push(FileRelabel { source: zygote, old: *parent, target, kind: 3 });
-                }
-            }
-        }
+        let batch = FileBatch::new(&self.data_labels,&files,&base,self.next_set,installer,zygote)?;
+        self.next_set=batch.next_set;
+        sets.extend(batch.sets);
+        members.extend(batch.members);
         let references: Vec<_> = added
             .iter()
             .map(|(id, name)| (*id, name.as_str()))
@@ -200,24 +172,27 @@ impl Manager {
             .generation()
             .map_err(|_| "manager generation query")?;
         self.policy
-            .extend(
+            .extend_with_sets(
                 before,
                 &references,
-                &rules,
+                &[],
                 &transitions,
                 &[],
-                &create,
-                &relabel,
+                &[],
+                &[],
+                LabelSetUpdate {sets:&sets,members:&members,grants:&rules,files:&batch.rules},
             )
             .map_err(|error| {
-                std::println!("SCARLET_ANDROID_APP_POLICY_UPDATE_FAIL generation={} labels={} rules={} transitions={} create={} relabel={} error={:?}",
-                    before, references.len(), rules.len(), transitions.len(), create.len(), relabel.len(), error);
+                std::println!("SCARLET_ANDROID_APP_POLICY_UPDATE_FAIL generation={} labels={} rules={} transitions={} sets={} members={} file_rules={} error={:?}",
+                    before, references.len(), rules.len(), transitions.len(), sets.len(), members.len(), batch.rules.len(), error);
                 "manager policy publication"
             })?;
         let after = self
             .policy
             .generation()
             .map_err(|_| "manager committed generation")?;
+        std::println!("SCARLET_ANDROID_APP_POLICY_SETS generation={} sets={} members={} shared_grants={} file_rules={}",
+            after,sets.len(),members.len(),rules.len(),batch.rules.len());
         self.data_labels.extend(files);
         for (key, domain, file) in registrations {
             std::println!(
@@ -305,6 +280,8 @@ pub fn start(policy: Policy, android: &VfsView) -> Result<Worker, &'static str> 
                 next,
                 seen: BTreeSet::new(),
                 data_labels: BTreeSet::new(),
+                domain_sets:BTreeMap::new(),
+                next_set:1,
             };
             let mut previous = String::new();
             while !thread_stop.load(Ordering::Acquire) {

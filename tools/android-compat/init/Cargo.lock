@@ -55,6 +55,9 @@ version = "1.0.0"
 [[package]]
 name = "scarlet-android-app-policy"
 version = "0.1.0"
+dependencies = [
+ "scarlet-abi",
+]
 
 [[package]]
 name = "scarlet-os"

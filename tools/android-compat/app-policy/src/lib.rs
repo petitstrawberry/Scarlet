@@ -3,6 +3,7 @@
 #![no_std]
 extern crate alloc;
 pub mod services;
+pub mod groups;
 use alloc::{
     collections::BTreeSet,
     format,
