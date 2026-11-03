@@ -20,6 +20,10 @@ pub const SCTL_INPUT_GET_MT_SLOT_COUNT: u32 = 0x5353_0104;
 pub const SCTL_INPUT_GET_SWITCH_CAPABILITIES: u32 = 0x5353_0105;
 /// Query the current state of the `SW_*` switch code passed as the control argument.
 pub const SCTL_INPUT_GET_SWITCH_STATE: u32 = 0x5353_0106;
+/// Query support for packed (event type << 16 | code), returning zero or one.
+pub const SCTL_INPUT_HAS_EVENT_CODE: u32 = 0x5353_0107;
+/// Query current value for a supported packed (event type << 16 | code).
+pub const SCTL_INPUT_GET_EVENT_VALUE: u32 = 0x5353_0108;
 
 /// Device produces key or button events.
 pub const INPUT_CAP_KEY: u32 = 1 << 0;

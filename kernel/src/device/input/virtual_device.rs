@@ -11,9 +11,9 @@ use crate::{
             Selectable, StreamError, StreamOps,
         },
     },
-    sync::{Waker, waker::WaitResult},
+    sync::{IrqSpinLock, Waker, waker::WaitResult},
 };
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::{
     any::Any,
     sync::atomic::{AtomicBool, Ordering},
@@ -21,6 +21,7 @@ use core::{
 
 struct Channel {
     device: EventDevice,
+    values: IrqSpinLock<BTreeMap<(u16, u16), i32>>,
     kind: u32,
     width: i32,
     height: i32,
@@ -55,6 +56,7 @@ impl InputEndpoint {
         };
         let channel = Arc::new(Channel {
             device: EventDevice::new_with_metadata("input", metadata),
+            values: IrqSpinLock::new(BTreeMap::new()),
             kind,
             width: width as i32,
             height: height as i32,
@@ -78,7 +80,9 @@ impl InputEndpoint {
     fn valid(&self, type_: u16, code: u16, value: i32) -> bool {
         match (type_, code) {
             (0, 0) => value == 0,
-            (1, code) if self.channel.kind == 1 => code <= 0x2ff && (0..=2).contains(&value),
+            (1, code) if self.channel.kind == 1 => {
+                (1..=0xff).contains(&code) && (0..=2).contains(&value)
+            }
             (1, 0x14a) if self.channel.kind == 4 => (0..=1).contains(&value),
             (3, 0) if self.channel.kind == 4 => (0..self.channel.width).contains(&value),
             (3, 1) if self.channel.kind == 4 => (0..self.channel.height).contains(&value),
@@ -144,7 +148,18 @@ impl StreamOps for InputEndpoint {
         if events.last() != Some(&(0, 0, 0)) {
             return Err(StreamError::InvalidArgument);
         }
-        self.channel.device.push_events(&events);
+        {
+            let mut values = self.channel.values.lock();
+            for &(type_, code, value) in &events {
+                if type_ != 0 {
+                    values.insert(
+                        (type_, code),
+                        if type_ == 1 && value == 2 { 1 } else { value },
+                    );
+                }
+            }
+            self.channel.device.push_events(&events);
+        }
         self.channel.waker.wake_all();
         Ok(buffer.len())
     }
@@ -157,6 +172,22 @@ impl ControlOps for InputEndpoint {
         if command == 0x5353_0007 {
             self.set_nonblocking(arg != 0);
             return Ok(0);
+        }
+        if matches!(
+            command,
+            SCTL_INPUT_HAS_EVENT_CODE | SCTL_INPUT_GET_EVENT_VALUE
+        ) {
+            let packed = u32::try_from(arg).map_err(|_| "Invalid input event selector")?;
+            let type_ = (packed >> 16) as u16;
+            let code = packed as u16;
+            let supported = self.valid(type_, code, 0);
+            if command == SCTL_INPUT_HAS_EVENT_CODE {
+                return Ok(i32::from(supported));
+            }
+            if !supported {
+                return Err("Unsupported input event code");
+            }
+            return Ok(*self.channel.values.lock().get(&(type_, code)).unwrap_or(&0));
         }
         self.channel.device.control(command, arg)
     }
@@ -373,6 +404,15 @@ mod tests {
         assert_eq!(count, 32);
         assert_eq!(u16::from_ne_bytes(output[10..12].try_into().unwrap()), 3);
         assert_eq!(u16::from_ne_bytes(output[26..28].try_into().unwrap()), 0);
+        assert_eq!(
+            receive.control(SCTL_INPUT_GET_EVENT_VALUE, (1 << 16) | 0x14a),
+            Ok(1)
+        );
+        assert_eq!(receive.control(SCTL_INPUT_GET_EVENT_VALUE, 3 << 16), Ok(99));
+        assert_eq!(
+            receive.control(SCTL_INPUT_HAS_EVENT_CODE, (3 << 16) | 2),
+            Ok(0)
+        );
         receive.control(0x5353_0007, 1).unwrap();
         assert!(receive.is_nonblocking());
         drop(receive);
