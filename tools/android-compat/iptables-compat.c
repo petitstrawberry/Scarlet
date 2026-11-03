@@ -168,6 +168,7 @@ int main(int argc, char **argv) {
     char buffer[4096];
     char line[4096];
     size_t used = 0;
+    int list_tether_stats = 0;
     struct operation operations[MAX_OPERATIONS];
     size_t count = 0;
     for (;;) {
@@ -185,10 +186,19 @@ int main(int argc, char **argv) {
                 continue;
             }
             line[used] = 0;
+            if (strstr(line, "-L") && strstr(line, "tetherctrl_counters")) list_tether_stats = 1;
             if (!ignore_v6 && parse_line(line, operations, &count) != 0) return 1;
             if (strcmp(line, "#PING") == 0 && write(STDOUT_FILENO, "#PING\n", 6) != 6) return 1;
             if (strcmp(line, "COMMIT") == 0) {
                 if (!ignore_v6 && commit(operations, count) != 0) return 1;
+                if (list_tether_stats) {
+                    static const char empty_chain[] =
+                        "Chain tetherctrl_counters (0 references)\n"
+                        "pkts bytes target prot opt in out source destination\n";
+                    if (write(STDOUT_FILENO, empty_chain, sizeof(empty_chain) - 1) != sizeof(empty_chain) - 1)
+                        return 1;
+                    list_tether_stats = 0;
+                }
                 count = 0;
             }
             used = 0;

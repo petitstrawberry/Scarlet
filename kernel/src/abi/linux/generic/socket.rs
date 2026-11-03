@@ -433,6 +433,45 @@ pub fn sys_socket(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     // Increment PC to avoid infinite loop
     trapframe.increment_pc_next(&task);
 
+    // Android uses a close-only PF_KEY socket as an RCU quiescence barrier
+    // after swapping BPF maps. Scarlet's map state is synchronously visible,
+    // so provide the required socket lifetime without emulating PF_KEY data.
+    if domain == 15 && _protocol == 2 && socket_base_type == SOCK_RAW {
+        let socket: Arc<dyn crate::network::SocketObject> = match LocalSocket::try_new(
+            SocketType::Datagram,
+            SocketProtocol::Default,
+        ) {
+            Ok(socket) => {
+                let socket = Arc::new(socket);
+                LocalSocket::init_self_weak(&socket);
+                socket
+            }
+            Err(error) => return errno::to_result(socket_error_to_errno(error)),
+        };
+        let _ = NetworkManager::get_manager().allocate_socket_id(Arc::clone(&socket));
+        let handle = match task
+            .handle_table
+            .insert(KernelObject::from_socket_object(socket))
+        {
+            Ok(handle) => handle,
+            Err(_) => return errno::to_result(errno::EMFILE),
+        };
+        let fd = match abi.allocate_fd(handle) {
+            Ok(fd) => fd,
+            Err(_) => {
+                let _ = task.handle_table.remove(handle);
+                return errno::to_result(errno::EMFILE);
+            }
+        };
+        if set_cloexec {
+            let _ = abi.set_fd_flags(fd, FD_CLOEXEC);
+        }
+        if set_nonblock {
+            let _ = abi.set_file_status_flags(fd, O_NONBLOCK as u32);
+        }
+        return fd;
+    }
+
     if domain==16 {
         return match _protocol {
             15 => uevent::create(abi,&task,socket_base_type,socket_flags,_protocol),
