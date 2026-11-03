@@ -938,6 +938,15 @@ pub fn sys_mremap(_abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 })
             });
     }
+    if new_len == old_len {
+        // Linux keeps the existing mapping when the requested size matches;
+        // MREMAP_MAYMOVE is only permission to relocate, not a requirement.
+        return if task.vm_manager.search_memory_map(address).is_some() {
+            address
+        } else {
+            to_result(errno::EFAULT)
+        };
+    }
     let removed = match task
         .vm_manager
         .shrink_memory_map_range(address, old_len, new_len)
