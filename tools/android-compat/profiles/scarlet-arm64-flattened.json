@@ -3201,6 +3201,11 @@
       "u:r:bootanim:s0",
       "u:object_r:hal_graphics_allocator_hwservice:s0",
       2
+    ],
+    [
+      "u:r:gatekeeperd:s0",
+      "u:object_r:permission_service:s0",
+      2
     ]
   ],
   "socket_labels": [
