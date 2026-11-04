@@ -1938,7 +1938,7 @@ pub fn sys_write(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         let mut bytes=Vec::new();if bytes.try_reserve_exact(count).is_err() {return errno::to_result(errno::ENOMEM);}bytes.resize(count,0);
         if crate::library::std::usercopy::copy_from_user(&task,user_buf,&mut bytes).is_err() {return errno::to_result(errno::EFAULT);}
         let nonblocking=current_file_status_flags(abi,&task,fd).is_some_and(|flags|flags as i32&O_NONBLOCK!=0);
-        return local.send_datagram(bytes,Vec::new(),&crate::network::SocketAddress::Unspecified,nonblocking).map_or_else(|error|errno::to_result(crate::network::socket::socket_error_to_native_errno(&error) as usize),|n|n);
+        return local.send_datagram(bytes,Vec::new(),&crate::network::SocketAddress::Unspecified,nonblocking).map_or_else(|error|errno::to_result(crate::network::socket::socket_io_error_to_native_errno(&error) as usize),|n|n);
     }
     let stream = match kernel_obj.as_stream() {
         Some(stream) => stream,
@@ -2384,7 +2384,7 @@ pub fn sys_pwrite64(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 fn stream_error_to_errno(err: StreamError) -> usize {
     match err {
         StreamError::EndOfStream => errno::SUCCESS,
-        StreamError::WouldBlock => errno::EAGAIN,
+        StreamError::WouldBlock | StreamError::TimedOut => errno::EAGAIN,
         StreamError::IoError => errno::EIO,
         StreamError::Closed => errno::EBADF,
         StreamError::InvalidArgument => errno::EINVAL,
@@ -4104,7 +4104,7 @@ fn sys_vectored_io(abi: &mut LinuxAbi, trapframe: &mut Trapframe, reading: bool)
     #[cfg(feature="network")]
     if !reading {if let Some(local)=object.as_socket().and_then(crate::network::local::LocalSocket::from_socket_object).filter(|socket|socket.is_datagram()) {
         let nonblocking=current_file_status_flags(abi,&task,fd).is_some_and(|flags|flags as i32&O_NONBLOCK!=0);
-        return local.send_datagram(buffer,Vec::new(),&crate::network::SocketAddress::Unspecified,nonblocking).map_or_else(|error|errno::to_result(crate::network::socket::socket_error_to_native_errno(&error) as usize),|n|n);
+        return local.send_datagram(buffer,Vec::new(),&crate::network::SocketAddress::Unspecified,nonblocking).map_or_else(|error|errno::to_result(crate::network::socket::socket_io_error_to_native_errno(&error) as usize),|n|n);
     }}
     let nonblocking = current_file_status_flags(abi, &task, fd)
         .is_some_and(|flags| flags as i32 & O_NONBLOCK != 0);
@@ -6862,6 +6862,16 @@ mod tests {
             }
         }
 
+        struct ExpiredDeadline;
+        impl StreamOps for ExpiredDeadline {
+            fn read(&self, _: &mut [u8]) -> Result<usize, StreamError> {
+                Err(StreamError::TimedOut)
+            }
+            fn write(&self, _: &[u8]) -> Result<usize, StreamError> {
+                Err(StreamError::NotSupported)
+            }
+        }
+
         let mut buffer = [0];
         let stream = DelayedByte(AtomicUsize::new(0));
         let mut waits = 0;
@@ -6889,6 +6899,18 @@ mod tests {
             Err(StreamError::Interrupted)
         ));
         assert_eq!(stream.0.load(Ordering::Relaxed), 1);
+
+        let expired = ExpiredDeadline;
+        assert!(matches!(
+            super::read_stream_retry(&expired, &mut buffer, false, || panic!(
+                "an expired deadline must not retry"
+            )),
+            Err(StreamError::TimedOut)
+        ));
+        assert_eq!(
+            super::stream_error_to_errno(StreamError::TimedOut),
+            errno::EAGAIN
+        );
     }
 
     #[cfg(target_arch = "aarch64")]

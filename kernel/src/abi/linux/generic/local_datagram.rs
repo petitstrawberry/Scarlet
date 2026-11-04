@@ -133,7 +133,7 @@ pub(super) fn send(
         )?;
         socket
             .send_datagram(data, handles, &destination, flags & MSG_DONTWAIT != 0)
-            .map_err(socket_error_to_errno)
+            .map_err(socket_io_error_to_errno)
     })();
     result.unwrap_or_else(errno::to_result)
 }
@@ -219,7 +219,7 @@ pub(super) fn receive(
                 .is_some_and(|flags| flags as i32 & O_NONBLOCK != 0);
         let packet = socket
             .receive_datagram(flags & (MSG_PEEK as i32) != 0, nonblocking)
-            .map_err(socket_error_to_errno)?;
+            .map_err(socket_io_error_to_errno)?;
         let length = packet.data.len();
         let amount = length.min(capacity);
         let mut offset = 0;
