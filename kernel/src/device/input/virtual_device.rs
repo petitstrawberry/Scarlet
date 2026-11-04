@@ -35,12 +35,16 @@ pub struct InputEndpoint {
     nonblocking: AtomicBool,
 }
 impl InputEndpoint {
-    /// Create keyboard (kind 1, dimensions zero) or direct single-contact
+    /// Create keyboard (kind 1) or mouse (kind 2), both with zero dimensions,
+    /// or direct single-contact
     /// touchscreen (kind 4, dimensions 2..=65536) endpoints.
     pub fn pair(kind: u32, width: u32, height: u32) -> Result<(Arc<Self>, Arc<Self>), StreamError> {
         let metadata = match kind {
             1 if width == 0 && height == 0 => {
                 InputDeviceMetadata::new(InputDeviceKind::Keyboard, INPUT_CAP_KEY)
+            }
+            2 if width == 0 && height == 0 => {
+                InputDeviceMetadata::new(InputDeviceKind::Mouse, INPUT_CAP_KEY | INPUT_CAP_REL)
             }
             4 if (2..=65536).contains(&width) && (2..=65536).contains(&height) => {
                 InputDeviceMetadata::new(
@@ -84,6 +88,8 @@ impl InputEndpoint {
                 (1..=0xff).contains(&code) && (0..=2).contains(&value)
             }
             (1, 0x14a) if self.channel.kind == 4 => (0..=1).contains(&value),
+            (1, 0x110..=0x112) if self.channel.kind == 2 => (0..=1).contains(&value),
+            (2, 0 | 1 | 6 | 8) if self.channel.kind == 2 => true,
             (3, 0) if self.channel.kind == 4 => (0..self.channel.width).contains(&value),
             (3, 1) if self.channel.kind == 4 => (0..self.channel.height).contains(&value),
             _ => false,
@@ -391,6 +397,29 @@ mod tests {
         assert_eq!(&output[8..16], &bytes[8..16]);
         assert_eq!(receive.read(&mut output).unwrap(), 0);
     }
+    #[test_case]
+    fn input_mouse_preserves_relative_axes_buttons_and_atomic_validation() {
+        assert!(InputEndpoint::pair(2, 640, 480).is_err());
+        let (send, receive) = InputEndpoint::pair(2, 0, 0).unwrap();
+        assert_eq!(receive.control(SCTL_INPUT_GET_KIND, 0), Ok(2));
+        assert_eq!(receive.control(SCTL_INPUT_GET_CAPABILITIES, 0), Ok((INPUT_CAP_KEY | INPUT_CAP_REL) as i32));
+        let records = [(2, 0, -17), (2, 1, 29), (2, 8, -1), (2, 6, 2),
+                       (1, 0x110, 1), (1, 0x111, 1), (1, 0x112, 1), (0, 0, 0)];
+        let bytes = frame(&records);
+        assert_eq!(send.write(&bytes).unwrap(), bytes.len());
+        let mut out = vec![0; bytes.len()];
+        assert_eq!(receive.read(&mut out).unwrap(), bytes.len());
+        for (original, actual) in bytes.chunks_exact(16).zip(out.chunks_exact(16)) {
+            assert_eq!(&original[8..], &actual[8..]);
+        }
+        for invalid in [(1, 30, 1), (1, 0x14a, 1), (1, 0x110, 2), (2, 2, 1), (3, 0, 1)] {
+            assert!(matches!(send.write(&frame(&[(1, 0x110, 0), invalid, (0, 0, 0)])), Err(StreamError::InvalidArgument)));
+            assert_eq!(receive.control(SCTL_INPUT_GET_EVENT_VALUE, (1 << 16) | 0x110), Ok(1));
+            assert!(!receive.current_ready(ReadyInterest::read()).read);
+        }
+        assert!(matches!(receive.write(&bytes), Err(StreamError::PermissionDenied)));
+    }
+
     #[test_case]
     fn input_touch_frames_validate_atomically_and_use_existing_overflow_recovery() {
         assert!(InputEndpoint::pair(4, 1, 100).is_err());

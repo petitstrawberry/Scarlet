@@ -32,7 +32,7 @@ pub fn is_receive_only_input(object: &KernelObject) -> bool {
 fn is_receive_only_input_file(inner: &dyn FileObject) -> bool {
     !inner.as_any().is::<Evdev>()
         && inner.control(SCTL_INPUT_HAS_EVENT_CODE, 0) == Ok(1)
-        && matches!(inner.control(SCTL_INPUT_GET_KIND, 0), Ok(1 | 4))
+        && matches!(inner.control(SCTL_INPUT_GET_KIND, 0), Ok(1 | 2 | 4))
 }
 /// Preserve open-description sharing through dup, fork and descriptor transfer.
 /// Only devices declaring exact event-code support can be represented honestly.
@@ -76,7 +76,8 @@ impl Evdev {
             } else if type_ == 0 {
                 match code {
                     0 => true,
-                    1 => self.supports(1, 30) || self.supports(1, 0x14a),
+                    1 => self.supports(1, 30) || self.supports(1, 0x14a) || self.supports(1, 0x110),
+                    2 => self.supports(2, 0),
                     3 => self.supports(3, 0),
                     _ => false,
                 }
@@ -99,16 +100,19 @@ impl Evdev {
                 (id, false)
             }
             6 => {
-                let name = if self.query(SCTL_INPUT_GET_KIND, 0)? == 4 {
-                    b"Scarlet virtual touchscreen\0".as_slice()
-                } else {
-                    b"Scarlet virtual keyboard\0".as_slice()
+                let name = match self.query(SCTL_INPUT_GET_KIND, 0)? {
+                    4 => b"Scarlet virtual touchscreen\0".as_slice(),
+                    2 => b"Scarlet virtual mouse\0".as_slice(),
+                    _ => b"Scarlet virtual keyboard\0".as_slice(),
                 };
                 (name.to_vec(), true)
             }
             7 | 8 => return Err(errno::ENOENT),
             9 => {
                 let mut properties = vec![0; 8];
+                if self.query(SCTL_INPUT_GET_KIND, 0)? == 2 {
+                    properties[0] |= 1; // INPUT_PROP_POINTER, not direct touch.
+                }
                 if self.query(SCTL_INPUT_GET_CAPABILITIES, 0)? as u32 & INPUT_CAP_DIRECT_TOUCH != 0
                 {
                     properties[0] |= 2;
@@ -293,6 +297,24 @@ mod tests {
         }
         bytes
     }
+    #[test_case]
+    fn evdev_mouse_reports_cursor_axes_buttons_and_wheels_without_touch() {
+        let (_, receive) = InputEndpoint::pair(2, 0, 0).unwrap();
+        let object = wrap(KernelObject::from_file_object(receive));
+        let device = object.as_file().unwrap().as_any().downcast_ref::<Evdev>().unwrap();
+        let (types, _) = device.read_ioctl(0x20, 8).unwrap();
+        assert_eq!(types[0], 0b111); // SYN, KEY, REL; no ABS.
+        let (relative, _) = device.read_ioctl(0x22, 8).unwrap();
+        assert_eq!(relative[0], 0b0100_0011); // X, Y, horizontal wheel.
+        assert_eq!(relative[1], 1); // Vertical wheel.
+        let (keys, _) = device.read_ioctl(0x21, 96).unwrap();
+        assert_eq!(keys[0x110 / 8] & 7, 7);
+        assert_eq!(keys[0x14a / 8] & (1 << (0x14a % 8)), 0);
+        assert_eq!(device.read_ioctl(9, 1).unwrap(), (vec![1], 1));
+        assert_eq!(device.read_ioctl(6, 64).unwrap().0, b"Scarlet virtual mouse\0");
+        assert_eq!(device.read_ioctl(0x40, 24), Err(errno::EINVAL));
+    }
+
     #[test_case]
     fn evdev_records_are_whole_and_queries_reflect_native_state() {
         let (send, receive) = InputEndpoint::pair(4, 640, 480).unwrap();

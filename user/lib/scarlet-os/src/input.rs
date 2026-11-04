@@ -381,6 +381,12 @@ pub fn create_virtual_keyboard() -> HandleResult<(Handle, Handle)> {
     create_virtual_channel(1, 0, 0)
 }
 
+/// Create an anonymous relative mouse with three buttons and vertical and
+/// horizontal wheel axes. Returns separate producer and receiver capabilities.
+pub fn create_virtual_mouse() -> HandleResult<(Handle, Handle)> {
+    create_virtual_channel(2, 0, 0)
+}
+
 /// Create a single-contact direct touchscreen with coordinates in
 /// [0,width) × [0,height). Each dimension must be between 2 and 65536.
 /// Returns (producer, receiver), with the same ownership as keyboard channels.
