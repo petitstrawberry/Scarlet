@@ -52,6 +52,23 @@ class VintfInputsTest(unittest.TestCase):
         self.assertEqual(ET.fromstring(outputs[DEVICE]).findall("hal"), [])
         self.assertEqual(proof["contracts"][service]["source_sha256"], hashlib.sha256(source).hexdigest())
 
+    def test_selects_legacy_formatless_stock_hidl_declaration(self):
+        service = "android.hidl.allocator@1.0::IAllocator/ashmem"
+        selection = {"framework": [service], "device": []}
+        source = (b'<manifest version="1.0" type="framework"><hal>'
+                  b'<name>android.hidl.allocator</name><transport>hwbinder</transport>'
+                  b'<version>1.0</version><interface><name>IAllocator</name>'
+                  b'<instance>ashmem</instance></interface></hal></manifest>')
+        outputs, proof = build_manifests(selection, {"stock.xml": source})
+        hal = ET.fromstring(outputs[FRAMEWORK]).find("hal")
+        self.assertEqual(hal.get("format"), "hidl")
+        self.assertEqual(hal.findtext("transport"), "hwbinder")
+        self.assertEqual(hal.findtext("name"), "android.hidl.allocator")
+        self.assertEqual(hal.findtext("version"), "1.0")
+        self.assertEqual(hal.findtext("fqname"), "@1.0::IAllocator/ashmem")
+        self.assertEqual(proof["contracts"][service]["source_sha256"],
+                         hashlib.sha256(source).hexdigest())
+
     def test_selects_stock_hidl_manager_with_minor_version_and_interface_alias(self):
         source=b'<manifest type="framework"><hal format="hidl"><name>android.hidl.manager</name><transport>hwbinder</transport><version>1.2</version><interface><name>IServiceManager</name><instance>default</instance></interface><fqname>@1.2::IServiceManager/default</fqname></hal></manifest>'
         selection={"framework":["android.hidl.manager@1.2::IServiceManager/default"],"device":[]}

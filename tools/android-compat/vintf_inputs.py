@@ -34,6 +34,7 @@ DEVICE_PROVIDERS = {**GRAPHICS_DEVICE, HEALTH_CONTRACT: "hwbinder", AUDIO_CONTRA
                     GATEKEEPER_CONTRACT: "hwbinder",
                     **{contract: "aidl" for contract in KEYMINT_DEVICE}}
 FRAMEWORK_HIDL = {
+    "android.hidl.allocator@1.0::IAllocator/ashmem",
     "android.hidl.manager@1.2::IServiceManager/default",
     "android.hidl.token@1.0::ITokenManager/default",
     "android.frameworks.sensorservice@1.0::ISensorManager/default",
@@ -75,7 +76,7 @@ def build_manifests(selection, sources, device_providers=None):
         if root.tag != "manifest" or root.get("type") != "framework":
             continue
         for hal in root.findall("hal"):
-            kind=hal.get("format")
+            kind=hal.get("format", "hidl")
             if kind not in ("aidl","hidl"):
                 continue
             package = hal.findtext("name", "")
