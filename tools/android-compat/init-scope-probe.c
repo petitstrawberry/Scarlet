@@ -20,6 +20,12 @@ struct task_info {
  unsigned long long migrations;int nice;unsigned weight;unsigned long long vruntime,deadline;
 };
 _Static_assert(sizeof(struct task_info)==152,"native task info layout");
+static void capacity_snapshot(void) {
+ struct {unsigned size,version;unsigned long long users,kernels,stack_bytes,active_users,active_kernels,pending_users,pending_kernels,slots,used_slots;} info={0};
+ _Static_assert(sizeof(info)==80,"native task capacity layout");
+ if(syscall(0x53430000L+55,0,&info,sizeof(info))==0 && info.size==sizeof(info) && info.version==1)
+  printf("SCARLET_INIT_CAPACITY max_user=%llu max_kernel=%llu stack_bytes=%llu active_user=%llu active_kernel=%llu pending_user=%llu pending_kernel=%llu stack_slots=%llu used_stack_slots=%llu\n",info.users,info.kernels,info.stack_bytes,info.active_users,info.active_kernels,info.pending_users,info.pending_kernels,info.slots,info.used_slots);
+}
 static void snapshot(void) {
  struct timespec now;
  if(!clock_gettime(CLOCK_MONOTONIC,&now))
@@ -128,8 +134,10 @@ int main(int argc,char **argv) {
   }
   if(got<0){perror("outer wait");return 6;}
   if(tick==40 || tick==80 || tick==200 || tick==240 || tick==280)snapshot();
+  if(tick%300==0)capacity_snapshot();
   usleep(100000);
  }
+ capacity_snapshot();
  if(syscall(0x53430000L+1322,scope,0) || syscall(0x53430000L+1323,scope)){perror("owned scope stop");return 7;}
  int status;if(waitpid(child,&status,0)!=child)return 8;
  printf("SCARLET_INIT_NAMESPACE_STOP_REAP %d %d\n",child,status);

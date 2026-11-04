@@ -531,7 +531,10 @@ impl StreamOps for SecurityFile {
             let target = self
                 .policy
                 .label_id(text)
-                .ok_or(StreamError::InvalidArgument)?;
+                .ok_or_else(|| {
+                    crate::println!("[android label] unknown process context requested: {}", text);
+                    StreamError::InvalidArgument
+                })?;
             let mut state = self.state.lock();
             if state.written || state.position != 0 {
                 return Err(StreamError::InvalidArgument);
@@ -546,7 +549,10 @@ impl StreamOps for SecurityFile {
                 crate::shield::exec_transition::reserve(&caller, &self.policy, target)
             } else {
                 crate::shield::syscall::transition(&caller, &self.policy, target)
-            }.map_err(|_| StreamError::PermissionDenied)?;
+            }.map_err(|reason| {
+                crate::println!("[android label] process context denied: target={} reason={}", text, reason);
+                StreamError::PermissionDenied
+            })?;
             state.written = true;
             return Ok(buffer.len());
         }
@@ -560,7 +566,10 @@ impl StreamOps for SecurityFile {
                 if !valid_context_name(text) {return Err(StreamError::InvalidArgument);}
                 self.policy
                     .label_id(text)
-                    .ok_or(StreamError::InvalidArgument)?;
+                    .ok_or_else(|| {
+                        crate::println!("[android label] unknown context validation requested: {}", text);
+                        StreamError::InvalidArgument
+                    })?;
                 let mut response = text.as_bytes().to_vec();
                 response.push(0);
                 response
