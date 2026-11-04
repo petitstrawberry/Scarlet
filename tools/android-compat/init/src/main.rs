@@ -13,6 +13,7 @@ mod native_display;
 mod shield;
 mod stock;
 mod kernel_log;
+mod input_bridge;
 
 use std::{environment::HandleMapping, println};
 

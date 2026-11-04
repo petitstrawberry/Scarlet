@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import zipfile
 
 from art_inputs import Ext4, sha256
 from seed_image import inode_metadata, restore_inode_metadata
@@ -28,16 +29,18 @@ def main():
     if verbose_logs:arguments.remove("--verbose-logs")
     compositor=None
     android_runtime=None
+    input_bridge=None
     capture_frame="--capture-frame" in arguments
     if capture_frame:arguments.remove("--capture-frame")
     manage_apps="--manage-app-policy" in arguments
     if manage_apps:arguments.remove("--manage-app-policy")
     if manage_apps and "--boot-profile" not in arguments:raise ValueError("app policy management requires a boot profile")
     service_policy=None
+    service_policy_metadata=None
     if "--service-policy" in arguments:
         index=arguments.index("--service-policy");service_policy=Path(arguments[index+1]).resolve();del arguments[index:index+2]
         from service_policy import verify
-        verify(service_policy)
+        service_policy_metadata=verify(service_policy)
     if manage_apps and service_policy is None:
         raise ValueError("app policy management requires --service-policy from the pinned compiled policy")
     stock_packages=None
@@ -45,15 +48,37 @@ def main():
         index=arguments.index("--stock-packages");stock_packages=Path(arguments[index+1]).resolve();del arguments[index:index+2]
         from stock_packages import verify
         packages=verify(stock_packages)
-        arguments.extend(["--rootfs-extra-bytes",str(sum(node["size"] for node in packages["nodes"].values()))])
+        init_bytes=sum(node["size"] for name,node in packages["nodes"].items()
+                       if (name.startswith("system/etc/init/") or name.startswith("system_ext/etc/init/"))
+                       and "/" not in name.split("/etc/init/",1)[1])
+        arguments.extend(["--rootfs-extra-bytes",str(sum(node["size"] for node in packages["nodes"].values()) + init_bytes)])
     if "--sws-native" in arguments:
         index=arguments.index("--sws-native");compositor=Path(arguments[index+1]).resolve();del arguments[index:index+2]
     if "--android-runtime" in arguments:
         index=arguments.index("--android-runtime");android_runtime=Path(arguments[index+1]).resolve();del arguments[index:index+2]
         if not android_runtime.is_file():raise ValueError("native Android runtime executable is missing")
+    if "--android-input-bridge" in arguments:
+        index=arguments.index("--android-input-bridge");input_bridge=Path(arguments[index+1]).resolve();del arguments[index:index+2]
+        if not input_bridge.is_file():raise ValueError("Android input bridge JAR is missing")
+        with zipfile.ZipFile(input_bridge) as jar:
+            entries=jar.namelist()
+            if len(entries)!=len(set(entries)) or set(entries)-{"META-INF/","META-INF/MANIFEST.MF","classes.dex"} or "classes.dex" not in entries:
+                raise ValueError("unexpected Android input bridge archive")
+            if jar.getinfo("classes.dex").file_size>2*1024*1024:
+                raise ValueError("Android input bridge DEX bound")
+            dex=jar.read("classes.dex")
+            if len(dex)<112 or dex[:4]!=b"dex\n" or int.from_bytes(dex[32:36],"little")!=len(dex):
+                raise ValueError("invalid Android input bridge DEX")
+        bridge_sha256=sha256(input_bridge)
+        if "--rootfs-extra-bytes" in arguments:
+            index=arguments.index("--rootfs-extra-bytes")+1
+            arguments[index]=str(int(arguments[index])+input_bridge.stat().st_size)
+        else:
+            arguments.extend(["--rootfs-extra-bytes",str(input_bridge.stat().st_size)])
     if compositor and android_runtime is None:
         raise ValueError("native display requires --android-runtime with the built Scarlet application")
     if android_runtime and not compositor:raise ValueError("native Android runtime requires --sws-native")
+    if bool(compositor)!=bool(input_bridge):raise ValueError("native display requires --android-input-bridge JAR")
     if capture_frame and not compositor:raise ValueError("frame capture requires --sws-native")
     launcher_app=None
     system_apk=None
@@ -118,29 +143,39 @@ def main():
     seed_inodes = {}
     seed_destination = None
     package_overrides = {}
-
     def stage(inputs, runtime, stock, root):
-        nonlocal seed_inodes, seed_destination
+        nonlocal seed_inodes, seed_destination, package_overrides
         metadata = original(inputs, runtime, stock, root)
         if stock_packages:
-            from stock_packages import stage as validate_packages, MANIFEST
-            # Retain only the graphics interface relocation already verified
-            # by this device profile. All other existing bytes must match AOSP.
-            graphics=metadata.get("host_service_inputs",{}).get("graphics_cpu",{})
-            package_overrides.update({name:metadata["files"][name] for name in graphics.get("relocations",{})})
+            from stock_packages import (MANIFEST, assemble_generic_init,
+                                        authenticated_package_overrides,
+                                        stage as validate_packages,
+                                        validate_host_service_proofs)
+            # The current manager proof gate is authoritative. In particular,
+            # a stale netd record must fail rather than being rewritten here.
+            validate_host_service_proofs(metadata)
+            package_overrides=authenticated_package_overrides(metadata)
+            metadata["stock_init"]=assemble_generic_init(stock_packages,root,metadata)
             validate_packages(stock_packages,root,package_overrides)
             shutil.copy2(stock_packages/MANIFEST,output/MANIFEST)
+            (output/"stock-init.json").write_text(json.dumps(metadata["stock_init"],indent=2)+"\n")
         if service_policy:
-            from service_policy import verify, apply_boot_policy
-            verify(service_policy)
+            if service_policy_metadata is None:
+                raise ValueError("service policy metadata was not validated")
+            from service_policy import apply_boot_policy
             target=root/"scarlet/boot/service-policy.txt"
             shutil.copy2(service_policy/"service-policy.txt",target)
             if sha256(target)!=sha256(service_policy/"service-policy.txt"):
                 raise ValueError("service policy changed during staging")
             policy=root/"scarlet/boot/shield.policy"
-            policy.write_text(apply_boot_policy(policy.read_text(),target.read_text()))
+            policy.write_text(apply_boot_policy(policy.read_text(),target.read_text(),
+                                                 service_policy_metadata))
             shutil.copy2(service_policy/"service-policy.json",output/"service-policy.json")
-            (output/"applied-boot-policy.json").write_text(json.dumps({"sha256":sha256(policy),"source_manifest_sha256":sha256(service_policy/"service-policy.json")},indent=2)+"\n")
+            (output/"applied-boot-policy.json").write_text(json.dumps({
+                "sha256":sha256(policy),
+                "source_manifest_sha256":sha256(service_policy/"service-policy.json"),
+                "policy_version":service_policy_metadata["policy_version"],
+            },indent=2)+"\n")
         if data_source or cache_source:
             # Reuse a previously booted /data, or only its compiled
             # application cache, while the system tree comes from the freshly
@@ -173,6 +208,12 @@ def main():
             shutil.copy2(android_runtime,destination)
             if sha256(destination)!=sha256(android_runtime):raise ValueError("changed native Android runtime executable")
             (output/"native-display.json").write_text(json.dumps({"path":str(android_runtime),"sha256":sha256(android_runtime)},indent=2)+"\n")
+        if input_bridge:
+            destination=root/"scarlet/runtime/input-bridge.jar"
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(input_bridge,destination)
+            if sha256(destination)!=bridge_sha256:raise ValueError("changed Android input bridge JAR")
+            (output/"input-bridge.json").write_text(json.dumps({"path":str(input_bridge),"sha256":bridge_sha256},indent=2)+"\n")
         if compositor:
             destination=root.parent.parent/"bin/sws";shutil.copy2(compositor,destination)
             if sha256(destination)!=sha256(compositor):raise ValueError("changed native SWS executable")
