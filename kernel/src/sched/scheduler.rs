@@ -3501,11 +3501,12 @@ fn notify_remote_ready_task(target_cpu: usize, task_id: usize, label: &'static s
         return;
     }
 
-    let seq = DEBUG_ENQUEUE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-    DEBUG_REMOTE_ENQUEUE_TASK[target_cpu].store(encode_task_id(Some(task_id)), Ordering::SeqCst);
-    DEBUG_REMOTE_ENQUEUE_FROM_CPU[target_cpu].store(get_cpu().get_cpuid(), Ordering::SeqCst);
-    DEBUG_REMOTE_ENQUEUE_SEQ[target_cpu].store(seq, Ordering::SeqCst);
     if DEBUG_SMP_TASK_FLOW {
+        let seq = DEBUG_ENQUEUE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+        DEBUG_REMOTE_ENQUEUE_TASK[target_cpu]
+            .store(encode_task_id(Some(task_id)), Ordering::SeqCst);
+        DEBUG_REMOTE_ENQUEUE_FROM_CPU[target_cpu].store(get_cpu().get_cpuid(), Ordering::SeqCst);
+        DEBUG_REMOTE_ENQUEUE_SEQ[target_cpu].store(seq, Ordering::SeqCst);
         println!(
             "[SMPDBG {}] seq={} from_cpu={} target_cpu={} task={} name={} ready_len={}",
             label,
@@ -5264,12 +5265,12 @@ pub fn enqueue_task(task_id: usize, cpu_id: usize) {
     let target_cpu = TaskPool::get_task(task_id)
         .map(|task| select_enqueue_cpu_for_task(&task, cpu_id, get_time_ns()))
         .unwrap_or(cpu_id);
-    let seq = DEBUG_ENQUEUE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
     if let Some(task) = TaskPool::get_task(task_id) {
         task.last_cpu.store(target_cpu, Ordering::SeqCst);
     }
     push_ready_task_with_mode(target_cpu, task_id, PlaceMode::New);
     if DEBUG_SMP_TASK_FLOW {
+        let seq = DEBUG_ENQUEUE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
         println!(
             "[SMPDBG enqueue] seq={} from_cpu={} target_cpu={} task={} name={} remote={} ready_len={}",
             seq,
@@ -5283,11 +5284,12 @@ pub fn enqueue_task(task_id: usize, cpu_id: usize) {
     }
     let remote = is_cpu_online(target_cpu) && target_cpu != get_cpu().get_cpuid();
     if remote {
-        DEBUG_REMOTE_ENQUEUE_TASK[target_cpu]
-            .store(encode_task_id(Some(task_id)), Ordering::SeqCst);
-        DEBUG_REMOTE_ENQUEUE_FROM_CPU[target_cpu].store(current_cpu, Ordering::SeqCst);
-        DEBUG_REMOTE_ENQUEUE_SEQ[target_cpu].store(seq, Ordering::SeqCst);
         if DEBUG_SMP_TASK_FLOW {
+            let seq = DEBUG_ENQUEUE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+            DEBUG_REMOTE_ENQUEUE_TASK[target_cpu]
+                .store(encode_task_id(Some(task_id)), Ordering::SeqCst);
+            DEBUG_REMOTE_ENQUEUE_FROM_CPU[target_cpu].store(current_cpu, Ordering::SeqCst);
+            DEBUG_REMOTE_ENQUEUE_SEQ[target_cpu].store(seq, Ordering::SeqCst);
             println!(
                 "[SMPDBG ipi-send] seq={} from_cpu={} target_cpu={} task={} name={} ready_len={}",
                 seq,
@@ -5754,12 +5756,12 @@ pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
     task.last_cpu.store(target_cpu, Ordering::SeqCst);
 
     if target_cpu != get_cpu().get_cpuid() {
-        let seq = DEBUG_ENQUEUE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-        DEBUG_REMOTE_ENQUEUE_TASK[target_cpu]
-            .store(encode_task_id(Some(task_id)), Ordering::SeqCst);
-        DEBUG_REMOTE_ENQUEUE_FROM_CPU[target_cpu].store(get_cpu().get_cpuid(), Ordering::SeqCst);
-        DEBUG_REMOTE_ENQUEUE_SEQ[target_cpu].store(seq, Ordering::SeqCst);
         if DEBUG_SMP_TASK_FLOW {
+            let seq = DEBUG_ENQUEUE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+            DEBUG_REMOTE_ENQUEUE_TASK[target_cpu]
+                .store(encode_task_id(Some(task_id)), Ordering::SeqCst);
+            DEBUG_REMOTE_ENQUEUE_FROM_CPU[target_cpu].store(get_cpu().get_cpuid(), Ordering::SeqCst);
+            DEBUG_REMOTE_ENQUEUE_SEQ[target_cpu].store(seq, Ordering::SeqCst);
             println!(
                 "[SMPDBG wake-ipi-send] seq={} from_cpu={} target_cpu={} task={} name={} ready_len={}",
                 seq,
