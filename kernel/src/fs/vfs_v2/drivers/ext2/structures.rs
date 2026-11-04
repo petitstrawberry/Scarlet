@@ -11,7 +11,7 @@ use core::mem;
 pub const EXT2_SUPER_MAGIC: u16 = 0xEF53;
 
 /// The compatible feature bit indicating that external EA blocks are in use.
-pub const EXT2_FEATURE_COMPAT_EXT_ATTR: u32 = 0x0004;
+pub const EXT2_FEATURE_COMPAT_EXT_ATTR: u32 = 0x0008;
 
 /// ext2 extended-attribute block magic (`0xEA020000` on disk).
 pub const EXT2_XATTR_MAGIC: u32 = 0xEA02_0000;
@@ -25,7 +25,8 @@ pub const EXT2_XATTR_INDEX_USER: u8 = 1;
 pub const EXT2_XATTR_INDEX_POSIX_ACL_ACCESS: u8 = 2;
 pub const EXT2_XATTR_INDEX_POSIX_ACL_DEFAULT: u8 = 3;
 pub const EXT2_XATTR_INDEX_TRUSTED: u8 = 4;
-pub const EXT2_XATTR_INDEX_SYSTEM: u8 = 5;
+// e2fsprogs' system.* namespace uses index 7; index 5 is reserved for Lustre.
+pub const EXT2_XATTR_INDEX_SYSTEM: u8 = 7;
 pub const EXT2_XATTR_INDEX_SECURITY: u8 = 6;
 
 /// ext2 root inode number

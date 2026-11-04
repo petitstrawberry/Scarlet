@@ -101,6 +101,12 @@ fn ext2_xattr_persists_across_remount_and_reuses_removed_block() {
         let node = xattr_node(&fs);
         node.set_xattr(b"user.serial", b"alpha", SetMode::Create)
             .unwrap();
+        // On-disk ext2 assigns bit 3 to external attributes. Bit 2 denotes
+        // a journal, and must stay clear on this non-journaled fixture.
+        let disk_superblock=read_block(&device,1);
+        let compat=u32::from_le_bytes(disk_superblock[92..96].try_into().unwrap());
+        assert_eq!(compat & 0x0008,0x0008);
+        assert_eq!(compat & 0x0004,0);
         assert_eq!(node.get_xattr(b"user.serial").unwrap(), b"alpha");
         assert_eq!(
             node.set_xattr(b"user.serial", b"duplicate", SetMode::Create),
@@ -235,7 +241,7 @@ fn ext2_xattr_namespaces_bounds_and_corruption_are_explicit() {
     assert_eq!(EXT2_XATTR_INDEX_POSIX_ACL_ACCESS, 2);
     assert_eq!(EXT2_XATTR_INDEX_POSIX_ACL_DEFAULT, 3);
     assert_eq!(EXT2_XATTR_INDEX_TRUSTED, 4);
-    assert_eq!(EXT2_XATTR_INDEX_SYSTEM, 5);
+    assert_eq!(EXT2_XATTR_INDEX_SYSTEM, 7);
     assert_eq!(EXT2_XATTR_INDEX_SECURITY, 6);
     assert_eq!(
         Ext2FileSystem::xattr_name_parts(b"user.name").unwrap(),
