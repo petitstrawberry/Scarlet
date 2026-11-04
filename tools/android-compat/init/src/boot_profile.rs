@@ -4,8 +4,9 @@ use std::{environment::VfsView, shield::{Policy, Rule, Transition, ExecTransitio
 // Stock service rules exceed the original fixture size. Native record counts
 // are checked independently below before the policy is installed.
 pub const MAX_POLICY_BYTES: usize = 1024 * 1024;
+const SUPPORTED_POLICY_VERSION: u32 = 30;
 
-pub fn policy(android: &VfsView) -> Result<Policy, &'static str> {
+pub fn policy(android: &VfsView) -> Result<(Policy, Option<u32>), &'static str> {
     let file = android.open("/scarlet/boot/shield.policy", 0).map_err(|_| "boot policy open")?;
     let stream = file.as_stream().map_err(|_| "boot policy stream")?;
     let mut bytes = std::vec![0; MAX_POLICY_BYTES + 1];
@@ -25,6 +26,7 @@ pub fn policy(android: &VfsView) -> Result<Policy, &'static str> {
     let mut transitions = Vec::new();
     let mut exec_transitions = Vec::new();
     let mut files = Vec::new();
+    let mut policy_version = None;
     let mut file_default=None;let mut create_rules=Vec::new();let mut relabel_rules=Vec::new();
     for line in lines {
         let fields: Vec<_> = line.split_ascii_whitespace().collect();
@@ -49,6 +51,10 @@ pub fn policy(android: &VfsView) -> Result<Policy, &'static str> {
             ["file-default", _] => {if file_default.replace(number(1)?).is_some() {return Err("duplicate file default");}},
             ["file-create",_,_,_,_,_] => create_rules.push(FileCreate {source:number(1)?,parent:number(2)?,target:number(3)?,kind:number(4)?,flags:number(5)?,reserved:0}),
             ["file-relabel",_,_,_,_] => relabel_rules.push(FileRelabel {source:number(1)?,old:number(2)?,target:number(3)?,kind:number(4)?}),
+            ["policy-version", _] => {
+                let version = number(1)?;
+                if version != SUPPORTED_POLICY_VERSION || policy_version.replace(version).is_some() { return Err("boot policy version metadata"); }
+            },
             _ => return Err("unknown boot policy record"),
         }
         // Keep in sync with the native Shield bounds; Android 13's stock
@@ -65,5 +71,5 @@ pub fn policy(android: &VfsView) -> Result<Policy, &'static str> {
     }
     std::println!("SCARLET_ANDROID_BOOT_FILES labels={} exec_rules={}", files.len(), exec_transitions.len());
     std::println!("SCARLET_ANDROID_BOOT_POLICY labels={} property_grants={} transitions={}", labels.len(), rules.len(), transitions.len());
-    Ok(policy)
+    Ok((policy, policy_version))
 }

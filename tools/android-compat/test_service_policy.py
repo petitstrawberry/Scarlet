@@ -1,9 +1,13 @@
 import os
+import hashlib
+import json
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 
-from service_policy import ACCESS_MAGIC, CLASSES, MAGIC, PERMISSIONS, apply_boot_policy, export, validate
+from service_policy import (ACCESS_MAGIC, CLASSES, MAGIC, PERMISSIONS, SDK_POLICY_SHA256, SDK_POLICY_VERSION,
+                            apply_boot_policy, export, validate, validate_metadata, verify)
 
 
 class RuleNotConditional(Exception):
@@ -22,6 +26,53 @@ class Rule:
 
 
 class ServicePolicyTests(unittest.TestCase):
+    @staticmethod
+    def manifest(text, version=SDK_POLICY_VERSION):
+        domains, rules = validate(text)
+        return {"kind": text.splitlines()[0], "source_sha256": SDK_POLICY_SHA256,
+                "policy_version": version, "domains": len(domains), "rules": len(rules),
+                "text_sha256": hashlib.sha256(text.encode()).hexdigest()}
+
+    def test_verified_manifest_exports_policy_version_without_inventing_it(self):
+        boot = "scarlet-android-boot-policy-v2\nlabel 1 u:r:init:s0\nlabel 2 u:r:vendor_init:s0\n"
+        services = MAGIC + "\ndomain vendor_init\nallow vendor_init u:object_r:manager_service:s0 3\n"
+        metadata = self.manifest(services)
+        versioned = apply_boot_policy(boot, services, metadata)
+        self.assertEqual(versioned.splitlines()[:2], [boot.splitlines()[0], "policy-version 30"])
+        self.assertEqual(versioned.count("policy-version 30\n"), 1)
+        self.assertNotIn("policy-version", apply_boot_policy(boot, services))
+        self.assertEqual(apply_boot_policy(versioned, services, metadata), versioned)
+
+        for invalid in (True, 0, 15, 31, 0xffffffff, "30"):
+            metadata["policy_version"] = invalid
+            with self.subTest(version=invalid):
+                with self.assertRaisesRegex(ValueError, "version"):
+                    validate_metadata(metadata, services)
+                with self.assertRaisesRegex(ValueError, "version"):
+                    apply_boot_policy(versioned, services, metadata)
+
+    def test_manager_manifest_binds_version_to_exact_source_and_text(self):
+        services = MAGIC + "\ndomain app\nallow app u:object_r:endpoint:s0 2\n"
+        metadata = self.manifest(services)
+        self.assertEqual(validate_metadata(metadata, services), SDK_POLICY_VERSION)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "service-policy.txt").write_text(services)
+            (root / "service-policy.json").write_text(json.dumps(metadata))
+            self.assertEqual(verify(root)["policy_version"], 30)
+            for field, value in (("text_sha256", "0" * 64), ("source_sha256", "0" * 64),
+                                 ("domains", 2), ("rules", 2), ("policy_version", 0),
+                                 ("policy_version", 31), ("policy_version", 0xffffffff)):
+                changed = dict(metadata)
+                changed[field] = value
+                (root / "service-policy.json").write_text(json.dumps(changed))
+                with self.subTest(field=field), self.assertRaises(ValueError):
+                    verify(root)
+            (root / "service-policy.json").write_text(json.dumps(metadata))
+            (root / "service-policy.txt").write_text(services + "# changed\n")
+            with self.assertRaises(ValueError):
+                verify(root)
+
     def test_compiled_grants_apply_to_each_category_instance_of_the_same_domain(self):
         boot = "scarlet-android-boot-policy-v2\nlabel 1 u:r:init:s0\nlabel 40 u:r:shared_relro:s0\nlabel 41 u:r:shared_relro:s0:c13,c260,c512,c768\nlabel 42 u:r:shared_relro:s0:c14,c260,c512,c768\nlabel 100 u:object_r:activity_service:s0\nservice-allow 41 100 7\nservice-allow 1 100 4\n"
         services = MAGIC + "\ndomain shared_relro\nallow shared_relro u:object_r:activity_service:s0 2\n"

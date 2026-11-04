@@ -61,16 +61,19 @@ pub fn configure(android: &VfsView) -> Result<(), &'static str> {
 
 /// Bounded boot diagnostic grants. This is not a complete Android policy.
 pub fn configure_init(android: &VfsView) -> Result<Policy, &'static str> {
-    let policy = if option_env!("SCARLET_ANDROID_BOOT_PROFILE") == Some("1") {
+    let (policy, policy_version) = if option_env!("SCARLET_ANDROID_BOOT_PROFILE") == Some("1") {
         super::boot_profile::policy(android)?
     } else {
-        Policy::create_with_transitions(&[
+        (Policy::create_with_transitions(&[
             (1, "u:r:init:s0"), (2, "u:r:vendor_init:s0"),
         ], &[], &[Transition { source: 1, target: 2, principal: 0, reserved: 0 }])
-            .map_err(|_| "init Shield policy")?
+            .map_err(|_| "init Shield policy")?, None)
     };
-    let fs = VfsView::create("android-selinux", &std::format!("policy={}", policy.as_handle().as_raw()))
-        .map_err(|_| "init Shield security view")?;
+    let options = match policy_version {
+        Some(version) => std::format!("policy={},policy_version={version}", policy.as_handle().as_raw()),
+        None => std::format!("policy={}", policy.as_handle().as_raw()),
+    };
+    let fs = VfsView::create("android-selinux", &options).map_err(|_| "init Shield security view")?;
     android.bind("/sys/fs/selinux", &fs, "/").map_err(|_| "init security mount")?;
     policy.apply(1).map_err(|_| "init Shield subject")?;
     std::println!("SCARLET_SHIELD_INIT_POLICY configured");

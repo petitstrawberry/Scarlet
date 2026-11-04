@@ -51,6 +51,7 @@ pub const FIND: u64 = 2;
 pub const LIST: u64 = 4;
 const SERVICE_PERMISSIONS: u32 = (ADD | FIND | LIST) as u32;
 const SELINUX_MAGIC: i64 = 0xf97c_ff8c;
+const SUPPORTED_POLICY_VERSION: u32 = 30;
 const PAGE: usize = crate::environment::PAGE_SIZE;
 
 // Categories are retained as part of an exact, explicitly registered label.
@@ -164,6 +165,15 @@ pub(super) struct SecurityFs {
 }
 impl SecurityFs {
     fn new(policy: Arc<Policy>) -> Result<Arc<Self>, FileSystemError> {
+        Self::with_policy_version(policy, None)
+    }
+    fn with_policy_version(
+        policy: Arc<Policy>,
+        policy_version: Option<u32>,
+    ) -> Result<Arc<Self>, FileSystemError> {
+        if policy_version.is_some_and(|version| version != SUPPORTED_POLICY_VERSION) {
+            return Err(fs_error(FileSystemErrorKind::InvalidData));
+        }
         // Context tokens are an Android encoding constraint, not a native
         // policy rule. No policy may silently collapse two native identities.
         if policy.labels().any(|(_, name)| !valid_context_name(&name)) {
@@ -222,6 +232,12 @@ impl SecurityFs {
             for (index, name) in KEYSTORE_PERMISSIONS.iter().enumerate() {
                 entries.push((format!("class/keystore2/perms/{name}"),
                     Content::Text(format!("{}\n", index + 1).into_bytes())));
+            }
+            if let Some(version) = policy_version {
+                entries.push((
+                    "policyvers".into(),
+                    Content::Text(format!("{version}\n").into_bytes()),
+                ));
             }
             let nodes = entries
                 .into_iter()
@@ -649,6 +665,44 @@ impl FileObject for SecurityFile {
 }
 
 struct Driver;
+fn parse_mount_options(options: &str) -> Result<(usize, Option<u32>), FileSystemError> {
+    let decimal = |value: &str| {
+        !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+    };
+    let mut policy = None;
+    let mut policy_version = None;
+    for option in options.split(',') {
+        let (name, value) = option
+            .split_once('=')
+            .ok_or_else(|| fs_error(FileSystemErrorKind::InvalidData))?;
+        if !decimal(value) {
+            return Err(fs_error(FileSystemErrorKind::InvalidData));
+        }
+        match name {
+            "policy" if policy.is_none() => {
+                policy = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| fs_error(FileSystemErrorKind::InvalidData))?,
+                );
+            }
+            "policy_version" if policy_version.is_none() => {
+                let version = value
+                    .parse::<u32>()
+                    .map_err(|_| fs_error(FileSystemErrorKind::InvalidData))?;
+                if version != SUPPORTED_POLICY_VERSION {
+                    return Err(fs_error(FileSystemErrorKind::InvalidData));
+                }
+                policy_version = Some(version);
+            }
+            _ => return Err(fs_error(FileSystemErrorKind::InvalidData)),
+        }
+    }
+    Ok((
+        policy.ok_or_else(|| fs_error(FileSystemErrorKind::InvalidData))?,
+        policy_version,
+    ))
+}
 impl FileSystemDriver for Driver {
     fn name(&self) -> &'static str {
         "android-selinux"
@@ -663,15 +717,12 @@ impl FileSystemDriver for Driver {
         &self,
         options: &str,
     ) -> Result<Arc<dyn FileSystemOperations>, FileSystemError> {
-        let handle = options
-            .strip_prefix("policy=")
-            .and_then(|n| n.parse::<usize>().ok())
-            .ok_or_else(|| fs_error(FileSystemErrorKind::InvalidData))?;
+        let (handle, policy_version) = parse_mount_options(options)?;
         let task =
             crate::task::mytask().ok_or_else(|| fs_error(FileSystemErrorKind::PermissionDenied))?;
         let policy = crate::shield::syscall::policy_handle(&task, handle, true)
             .map_err(|_| fs_error(FileSystemErrorKind::PermissionDenied))?;
-        Ok(SecurityFs::new(policy)?)
+        Ok(SecurityFs::with_policy_version(policy, policy_version)?)
     }
 }
 fn register() {
@@ -834,6 +885,61 @@ mod tests {
             }],
         )
         .unwrap()
+    }
+    #[test_case]
+    fn android_security_mount_options_are_exact_and_versioned_bindings_are_read_only() {
+        assert_eq!(
+            parse_mount_options("policy=17,policy_version=30").unwrap(),
+            (17, Some(30))
+        );
+        assert_eq!(parse_mount_options("policy=17").unwrap(), (17, None));
+        for invalid in [
+            "",
+            "policy=17,",
+            "policy_version=30",
+            "policy=",
+            "policy=17,policy=18",
+            "policy=17,policy_version=30,policy_version=31",
+            "policy=17,policy_version=0",
+            "policy=17,policy_version=15",
+            "policy=17,policy_version=31",
+            "policy=17,policy_version=4294967296",
+            "policy=+17",
+            "policy=17,policy_version=+30",
+            "policy=17,policy_version=-1",
+            "policy=17,unknown=30",
+            "policy=17,policy_version=030x",
+        ] {
+            assert!(parse_mount_options(invalid).is_err(), "{invalid}");
+        }
+
+        let p = policy();
+        assert!(SecurityFs::with_policy_version(p.clone(), Some(31)).is_err());
+        let fs = SecurityFs::with_policy_version(p.clone(), Some(30)).unwrap();
+        let subject = p.subject(1).unwrap();
+        let node = fs.lookup(&fs.root_node(), &"policyvers".into()).unwrap();
+        assert!(fs.open_for(&node, 1, Some(&subject)).is_err());
+        let other = policy();
+        assert!(
+            fs.open_for(&node, 0, Some(&other.subject(1).unwrap()))
+                .is_err()
+        );
+        let foreign_fs = SecurityFs::new(other).unwrap();
+        let foreign = foreign_fs
+            .lookup(&foreign_fs.root_node(), &"status".into())
+            .unwrap();
+        assert!(fs.open_for(&foreign, 0, Some(&subject)).is_err());
+
+        let file = fs.open_for(&node, 0, Some(&subject)).unwrap();
+        let mut bytes = [0; 8];
+        let length = file.read(&mut bytes).unwrap();
+        assert_eq!(&bytes[..length], b"30\n");
+        assert_eq!(file.read(&mut bytes).unwrap(), 0);
+        assert!(file.write(b"31").is_err());
+        assert!(!file.metadata().unwrap().permissions.write);
+
+        let unversioned = SecurityFs::new(p).unwrap();
+        assert!(!unversioned.nodes.contains_key("policyvers"));
     }
     #[test_case]
     fn android_shield_access_decisions_deny_unknown_classes_labels_and_permissions() {

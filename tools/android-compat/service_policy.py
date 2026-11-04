@@ -10,6 +10,35 @@ CLASSES = ("service_manager", "hwservice_manager")
 PERMISSIONS = {"add": 1, "find": 2, "list": 4}
 # /vendor/etc/selinux/precompiled_sepolicy in the SDK pinned by art_inputs.py.
 SDK_POLICY_SHA256 = "2be08e2a2e93d22c6a1c5e4e32fa4d571ecb07695877cdcfe0c3a9f48ba9234c"
+SDK_POLICY_VERSION = 30
+
+
+def policy_version(metadata):
+    """Return the mapped version of the pinned Android source policy."""
+    if not isinstance(metadata, dict):
+        raise ValueError("service policy metadata")
+    version = metadata.get("policy_version")
+    if type(version) is not int or version != SDK_POLICY_VERSION:
+        raise ValueError("service policy version")
+    return version
+
+
+def validate_metadata(metadata, text, source=None):
+    """Bind a manager manifest to its exact generated and source bytes."""
+    if not isinstance(metadata, dict):
+        raise ValueError("service policy metadata")
+    domains, rules = validate(text)
+    version = policy_version(metadata)
+    if (metadata.get("kind") != text.splitlines()[0] or
+            metadata.get("text_sha256") != hashlib.sha256(text.encode()).hexdigest() or
+            type(metadata.get("domains")) is not int or metadata["domains"] != len(domains) or
+            type(metadata.get("rules")) is not int or metadata["rules"] != len(rules)):
+        raise ValueError("changed service policy metadata")
+    if metadata.get("source_sha256") != SDK_POLICY_SHA256:
+        raise ValueError("service policy source")
+    if source is not None and hashlib.sha256(source).hexdigest() != SDK_POLICY_SHA256:
+        raise ValueError("changed service policy source")
+    return version
 
 
 def export(policy, setools, additional_domains=(), properties=False):
@@ -97,20 +126,19 @@ def verify(directory):
     directory = Path(directory)
     metadata = json.loads((directory / "service-policy.json").read_text())
     path = directory / "service-policy.txt"
-    if (metadata.get("kind") not in (MAGIC, ACCESS_MAGIC) or
-            path.read_text().splitlines()[:1] != [metadata["kind"]] or
-            metadata.get("source_sha256") != SDK_POLICY_SHA256 or
-            metadata.get("text_sha256") != hashlib.sha256(path.read_bytes()).hexdigest()):
-        raise ValueError("changed service policy output")
-    validate(path.read_text())
+    text = path.read_text()
+    validate_metadata(metadata, text)
     return metadata
 
 
-def apply_boot_policy(boot, service_text):
+def apply_boot_policy(boot, service_text, metadata=None):
     """Use the same compiled rules for existing boot subjects and future apps."""
     domains, grants = validate(service_text)
+    version = validate_metadata(metadata, service_text) if metadata is not None else None
     labels, identifiers = {}, set()
     lines = boot.splitlines()
+    if not lines or lines[0] not in ("scarlet-android-boot-policy-v1", "scarlet-android-boot-policy-v2"):
+        raise ValueError("boot policy version")
     for line in lines:
         fields = line.split()
         if fields[:1] == ["label"]:
@@ -131,6 +159,9 @@ def apply_boot_policy(boot, service_text):
     replaced = {identifier for identifiers in sources.values() for identifier in identifiers}
     replaced_kinds = ("service-allow ", "property-set ") if service_text.startswith(ACCESS_MAGIC + "\n") else ("service-allow ",)
     kept = [line for line in lines if not (line.startswith(replaced_kinds) and int(line.split()[1]) in replaced)]
+    if version is not None:
+        kept = [line for line in kept if not line.startswith("policy-version ")]
+        kept.insert(1, f"policy-version {version}")
     next_id = max(identifiers, default=0) + 1
     added, rules = [], []
     for (source, target, kind), mask in sorted(grants.items()):
