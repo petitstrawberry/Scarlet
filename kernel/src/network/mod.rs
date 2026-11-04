@@ -35,6 +35,8 @@ pub mod ethernet;
 pub mod ethernet_interface;
 pub mod icmp;
 pub mod ipv4;
+pub mod ip;
+pub mod ipv6;
 pub mod link;
 pub mod local;
 pub mod packet;
