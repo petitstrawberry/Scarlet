@@ -330,8 +330,12 @@ def main():
         if not args.reuse_rootfs.is_file():
             raise ValueError("reused rootfs image is missing")
         shutil.copyfile(args.reuse_rootfs, rootfs)
+        from seed_image import refresh_native_files
+        installed = refresh_native_files(rootfs, staging)
         (output / "rootfs-build.log").write_text(
-            f"cloned development rootfs {args.reuse_rootfs}\n")
+            f"cloned development rootfs {args.reuse_rootfs}\n" +
+            "".join(f"native file {record['path']} sha256={record['sha256']}\n"
+                    for record in installed))
     else:
         size = sum(p.stat().st_size for p in staging.rglob("*") if p.is_file() and not p.is_symlink())
         with rootfs.open("xb") as f:

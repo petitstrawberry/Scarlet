@@ -12,6 +12,7 @@ from seed_image import (
     _read_extended_attributes,
     inode_metadata,
     restore_inode_metadata,
+    refresh_native_files,
     stage_seed_data,
 )
 
@@ -101,6 +102,42 @@ class SeedDirectoryEntriesTest(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("debugfs") and shutil.which("mkfs.ext2"), "e2fsprogs required")
 class SeedImageTest(unittest.TestCase):
+    def test_native_refresh_preserves_data_inodes_and_guest_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            tree, staging = base / "tree", base / "staging"
+            (tree / "bin").mkdir(parents=True)
+            (tree / "data/app").mkdir(parents=True)
+            (tree / "data/app/state").write_bytes(b"persistent state")
+            (staging / "bin").mkdir(parents=True)
+            for name in ("init", "bin/scarlet-ld", "bin/sws", "bin/android-runtime"):
+                (tree / name).write_bytes(b"old executable")
+                (staging / name).write_bytes(("new " + name).encode())
+            image = base / "warm.ext2"
+            with image.open("wb") as stream:
+                stream.truncate(16 * 1024**2)
+            subprocess.run(["mkfs.ext2", "-q", "-F", "-d", str(tree), str(image)], check=True)
+            subprocess.run(["debugfs", "-w", "-R", "set_inode_field /bin/sws mode 0100710", str(image)],
+                           check=True, capture_output=True)
+            def inode(path):
+                result = subprocess.run(["debugfs", "-R", "stat " + path, str(image)],
+                                        check=True, capture_output=True, text=True)
+                return result.stdout.splitlines()[0].split()[1]
+            before_data = inode_metadata(image, "/data")
+            identities = {path: inode(path) for path in ("/data", "/data/app", "/data/app/state")}
+            records = refresh_native_files(image, staging)
+            self.assertEqual(len(records), 4)
+            self.assertEqual(inode_metadata(image, "/data"), before_data)
+            self.assertEqual({path: inode(path) for path in identities}, identities)
+            self.assertEqual(inode_metadata(image, "/bin")["sws"]["mode"], 0o100710)
+            for name in ("init", "bin/scarlet-ld", "bin/sws", "bin/android-runtime"):
+                result = subprocess.run(["debugfs", "-R", "cat /" + name, str(image)],
+                                        check=True, capture_output=True)
+                self.assertEqual(result.stdout, (staging / name).read_bytes())
+            installed_inodes = {record["path"]: inode(record["path"]) for record in records}
+            self.assertEqual(refresh_native_files(image, staging), records)
+            self.assertEqual({path: inode(path) for path in installed_inodes}, installed_inodes)
+
     def test_android_identity_survives_host_staging(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

@@ -1,5 +1,6 @@
 """Keep Android inode metadata when staging a warm image through the host."""
 import re
+import hashlib
 import shutil
 import stat
 import subprocess
@@ -7,6 +8,53 @@ import tempfile
 from pathlib import Path
 
 from art_inputs import quote_debugfs
+
+
+def refresh_native_files(image, staging):
+    """Install the declared native executables into an offline reused disk.
+
+    Keep the existing filesystem and its data inode identities. Rebuilding a
+    filesystem from exported data changes IDs stored by Android's app manager.
+    The caller operates on a clone, so a failed update never modifies its seed.
+    """
+    image, staging = Path(image), Path(staging)
+    names = ["init", "bin/scarlet-ld", "bin/sws", "bin/android-runtime"]
+    sources = {name: staging / name for name in names if (staging / name).is_file()}
+    if any(source.is_symlink() for source in sources.values()):
+        raise ValueError("native executable input is a symlink")
+    metadata = inode_metadata(image, "/")
+    desired, installed = {}, []
+    with tempfile.TemporaryDirectory(prefix="scarlet-native-refresh-") as directory:
+        temporary = Path(directory)
+        commands = []
+        for index, (name, source) in enumerate(sources.items()):
+            old = metadata.get(name)
+            if old and not stat.S_ISREG(old["mode"]):
+                raise ValueError("native executable conflicts with a non-file: " + name)
+            parent = str(Path(name).parent)
+            if parent != "." and not stat.S_ISDIR(metadata.get(parent, {}).get("mode", 0)):
+                raise ValueError("native executable parent is missing: " + parent)
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            installed.append({"path": "/" + name, "sha256": digest})
+            output = temporary / f"old-{index}"
+            if old:
+                _run_script([f"dump {quote_debugfs('/' + name)} {quote_debugfs(output)}"],
+                            image, temporary, f"read-{index}.debugfs")
+                if hashlib.sha256(output.read_bytes()).hexdigest() == digest:
+                    continue
+                commands.append("rm " + quote_debugfs("/" + name))
+            commands.append("write " + quote_debugfs(source.resolve()) + " " + quote_debugfs("/" + name))
+            desired[name] = old or {"mode": stat.S_IFREG | 0o755, "uid": 0, "gid": 0}
+        if commands:
+            _run_script(commands, image, temporary, "install.debugfs", writable=True)
+            restore_inode_metadata(image, "/", desired)
+        for index, record in enumerate(installed):
+            output = temporary / f"verify-{index}"
+            _run_script([f"dump {quote_debugfs(record['path'])} {quote_debugfs(output)}"],
+                        image, temporary, f"verify-{index}.debugfs")
+            if hashlib.sha256(output.read_bytes()).hexdigest() != record["sha256"]:
+                raise ValueError("native executable update was not preserved: " + record["path"])
+    return installed
 
 
 def stage_seed_data(source, target):
