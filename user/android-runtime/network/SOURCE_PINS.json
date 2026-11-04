@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "aosp": {
+    "repository": "platform/packages/modules/Connectivity",
+    "tag": "android-13.0.0_r16",
+    "tag_object": "1ae3bb003fed19948ccd190eecf598ca7df266b1",
+    "commit": "a4d6851e1910a9bde2a64d73373259e1a986e797"
+  },
+  "pins": {
+    "public_header": {
+      "aosp_path": "netd/include/NetdUpdatablePublic.h",
+      "git_blob": "1ca5ea2aeb6525131428d8d8846de8cf671d6104",
+      "local_path": "include/NetdUpdatablePublic.h",
+      "sha256": "12188419dc8eed5edc6f0546bc59a30bb81575ed1a8cd61cae900d14b5d0d27b"
+    },
+    "version_script": {
+      "aosp_path": "netd/libnetd_updatable.map.txt",
+      "git_blob": "dcb11a1019164cd77b948e651ad8ae8c37970345",
+      "local_path": "libnetd_updatable.map.txt",
+      "sha256": "999af600447d588d654f61da146e3246bd60f714f2ecd70f0d821b75c1a10ca5"
+    }
+  }
+}
+
