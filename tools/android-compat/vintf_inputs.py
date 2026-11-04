@@ -118,7 +118,7 @@ def build_manifests(selection, sources, device_providers=None):
         if kind=="hidl":ET.SubElement(hal,"transport").text=record["transport"]
         for tag in ("name", "version", "fqname"):
             ET.SubElement(hal, tag).text = record["package" if tag == "name" else tag]
-    device = ET.Element("manifest", {"version": "5.0", "type": "device"})
+    device = ET.Element("manifest", {"version": "5.0", "type": "device", "target-level": "7"})
     device_sepolicy = ET.SubElement(device, "sepolicy")
     ET.SubElement(device_sepolicy, "version").text = "33.0"
     for contract in selection["device"]:
@@ -139,6 +139,9 @@ def build_manifests(selection, sources, device_providers=None):
     framework_matrix = ET.Element(
         "compatibility-matrix", {"version": "5.0", "type": "framework", "level": "7"}
     )
+    # This device contract targets Scarlet's Linux ABI baseline. It makes no
+    # claims about Linux Kconfig options or the host kernel implementation.
+    ET.SubElement(framework_matrix, "kernel", {"version": "6.1.0", "level": "7"})
     sepolicy = ET.SubElement(framework_matrix, "sepolicy")
     ET.SubElement(sepolicy, "kernel-sepolicy-version").text = "30"
     for version in ("28.0", "29.0", "30.0", "31.0", "32.0", "33.0"):

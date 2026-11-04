@@ -1144,6 +1144,16 @@ pub struct UtsName {
     pub domainname: [u8; 65],
 }
 
+// Keep uname and /proc/version consistent within the Linux ABI.
+pub(super) const LINUX_ABI_RELEASE: &str = "6.1.0-scarlet_linux_abi_module";
+pub(super) const LINUX_ABI_VERSION: &str = "#1 SMP Scarlet";
+
+pub(super) fn linux_version_text() -> alloc::string::String {
+    alloc::format!(
+        "Linux version {LINUX_ABI_RELEASE} ({LINUX_ABI_VERSION}) (scarlet@build) #1\n"
+    )
+}
+
 impl UtsName {
     /// Create a new UtsName with Scarlet system information
     pub fn new() -> Self {
@@ -1165,11 +1175,11 @@ impl UtsName {
         uts.nodename[..nodename.len()].copy_from_slice(nodename);
 
         // Release (kernel version)
-        let release = b"6.1.0-scarlet_linux_abi_module";
+        let release = LINUX_ABI_RELEASE.as_bytes();
         uts.release[..release.len()].copy_from_slice(release);
 
         // Version (build info)
-        let version = b"#1 SMP Scarlet";
+        let version = LINUX_ABI_VERSION.as_bytes();
         uts.version[..version.len()].copy_from_slice(version);
 
         let machine = if cfg!(target_arch = "riscv64") {

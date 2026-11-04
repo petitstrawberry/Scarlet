@@ -302,6 +302,9 @@ fn layout_text(path:&str)->Option<String> {
     Some(format!("{}\n",if low {policy.low_bits}else {policy.native_bits}))
 }
 fn text_content(path: &str) -> Option<String> {
+    if path == "/proc/version" {
+        return Some(super::proc::linux_version_text());
+    }
     if path == "/proc/meminfo" {
         let (total, free) = crate::mem::pmm::stats();
         let kib_per_page = crate::environment::PAGE_SIZE / 1024;
@@ -632,6 +635,13 @@ impl FileObject for ProcTextFile {
 
 #[cfg(test)]
 mod tests {
+    #[test_case]
+    fn proc_version_matches_uname_release() {
+        let version = super::text_content("/proc/version").unwrap();
+        assert!(version.starts_with(&alloc::format!("Linux version {} ", super::super::proc::LINUX_ABI_RELEASE)));
+        assert!(version.ends_with('\n'));
+    }
+
     #[test_case]
     fn stat_num_threads_counts_blocked_members_outside_run_queues() {
         use crate::sched::scheduler::{get_all_task_ids, get_task_by_id, register_task, reset};
