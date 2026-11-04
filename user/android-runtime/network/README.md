@@ -1,4 +1,4 @@
-# Scarlet `libnetd_updatable` provider
+# Scarlet Android network backends
 
 This component supplies the three-function `libnetd_updatable.so` interface that stock
 Android 13 `netd` loads from the tethering APEX. It is a userland adapter over Scarlet's
@@ -43,17 +43,31 @@ never report invented success. A missing descriptor or non-socket descriptor ret
 the corresponding `EBADF` or `ENOTSOCK` error. Before initialization, both calls return
 `-EPERM`, matching the stock provider's pre-init behavior.
 
+## Interface statistics
+
+`libnetworkstats.so` implements the pinned AOSP C++ entry points used by
+`libservice-connectivity.so`. Interface and device snapshots enumerate native links
+with syscall 920 and read their existing link-layer byte/packet counters with syscall
+923. Each read checks the link ID and generation so hotplug cannot silently attribute
+a replacement device's counters to an old observation. Failed reads leave the caller's
+output unchanged. Per-UID/tag detail remains `-EOPNOTSUPP`; the adapter does not create
+BPF maps or fabricate zero counters.
+
+The C++ library links against the selected tethering APEX's `libc++.so` using its
+`__1` namespace. The build records that runtime's hash, and staging verifies it before
+replacing either library. The unchanged public headers are pinned in `SOURCE_PINS.json`.
+
 ## Build and test
 
 The Android build uses NDK `25.1.8937393` for arm64 Android API 33:
 
 ```sh
-make
+make PLATFORM_LIBCXX=/path/to/selected/tethering/apex/lib64/libc++.so
 make test
 ```
 
 Override `NDK_HOME`, `ANDROID_SDK`, `ABI`, or `API` in the make environment when
-needed. Both builds are bounded to four compiler processes by default; override
+needed. Both builds are bounded to two compiler processes by default; override
 `JOBS` deliberately for a different limit. The normal non-CFI DSO is compiled with
 the NDK's default Clang settings. No
 global CFI disable switch or synthetic `__cfi_check` bypass is used. Internal backend

@@ -7,7 +7,8 @@ CMAKE ?= $(lastword $(sort $(wildcard $(ANDROID_SDK)/cmake/*/bin/cmake)))
 CMAKE := $(if $(CMAKE),$(CMAKE),cmake)
 CTEST ?= $(lastword $(sort $(wildcard $(ANDROID_SDK)/cmake/*/bin/ctest)))
 CTEST := $(if $(CTEST),$(CTEST),ctest)
-JOBS ?= 4
+JOBS ?= 2
+PLATFORM_LIBCXX ?=
 
 ANDROID_BUILD := $(CURDIR)/build/android-$(ABI)
 HOST_BUILD := $(CURDIR)/build/host
@@ -23,6 +24,8 @@ android:
 		-DCMAKE_TOOLCHAIN_FILE="$(NDK_HOME)/build/cmake/android.toolchain.cmake" \
 		-DANDROID_ABI="$(ABI)" \
 		-DANDROID_PLATFORM="android-$(API)" \
+		-DSCARLET_PLATFORM_LIBCXX="$(PLATFORM_LIBCXX)" \
+		-DNETD_BUILD_JOBS="$(JOBS)" \
 		-DCMAKE_BUILD_TYPE=Release
 	$(CMAKE) --build "$(ANDROID_BUILD)" --parallel "$(JOBS)"
 
@@ -30,7 +33,7 @@ test:
 	$(CMAKE) -S "$(CURDIR)" -B "$(HOST_BUILD)" \
 		-DNETD_UPDATABLE_BUILD_TESTS=ON \
 		-DCMAKE_BUILD_TYPE=Release
-	$(CMAKE) --build "$(HOST_BUILD)" --target netd_updatable_provider_test --parallel "$(JOBS)"
+	$(CMAKE) --build "$(HOST_BUILD)" --target netd_updatable_provider_test networkstats_test --parallel "$(JOBS)"
 	$(CTEST) --test-dir "$(HOST_BUILD)" --output-on-failure
 
 clean:

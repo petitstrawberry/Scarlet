@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(scarlet_libnetd_updatable LANGUAGES C)
+project(scarlet_libnetd_updatable LANGUAGES C CXX)
+set(NETD_BUILD_JOBS 2 CACHE STRING "Parallel build jobs recorded in metadata")
 
 set(SOURCE_PINS "${CMAKE_CURRENT_SOURCE_DIR}/SOURCE_PINS.json")
 set(MANIFEST_HELPER "${CMAKE_CURRENT_SOURCE_DIR}/cmake/WriteBuildMetadata.cmake")
@@ -9,7 +10,7 @@ string(JSON source_pins_schema GET "${source_pins_json}" schema)
 if(NOT source_pins_schema EQUAL 1)
     message(FATAL_ERROR "SOURCE_PINS.json schema must be 1")
 endif()
-foreach(pin IN ITEMS public_header version_script)
+foreach(pin IN ITEMS public_header version_script networkstats_header networkstats_types)
     string(JSON pinned_path GET "${source_pins_json}" pins ${pin} local_path)
     string(JSON pinned_sha256 GET "${source_pins_json}" pins ${pin} sha256)
     set(pinned_file "${CMAKE_CURRENT_SOURCE_DIR}/${pinned_path}")
@@ -22,6 +23,26 @@ foreach(pin IN ITEMS public_header version_script)
             "Pinned source hash mismatch for ${pinned_path}: expected ${pinned_sha256}, got ${actual_sha256}")
     endif()
 endforeach()
+
+add_library(networkstats SHARED src/NetworkStats.cpp src/NetworkStatsBackend.c)
+target_include_directories(networkstats PRIVATE include src)
+target_compile_features(networkstats PRIVATE cxx_std_17)
+target_compile_definitions(networkstats PRIVATE _GNU_SOURCE)
+target_compile_options(networkstats PRIVATE -O2 -Wall -Wextra -Werror -g0
+    -ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=.)
+set_target_properties(networkstats PROPERTIES C_VISIBILITY_PRESET hidden
+    CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+if(ANDROID)
+    if(NOT EXISTS "${SCARLET_PLATFORM_LIBCXX}")
+        message(FATAL_ERROR "SCARLET_PLATFORM_LIBCXX must select the pinned AOSP libc++.so")
+    endif()
+    target_compile_definitions(networkstats PRIVATE _LIBCPP_ABI_NAMESPACE=__1)
+    target_compile_options(networkstats PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions> $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>)
+    target_link_options(networkstats PRIVATE -nostdlib++ -Wl,--no-undefined
+        -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libnetworkstats.map.txt)
+    target_link_libraries(networkstats PRIVATE "${SCARLET_PLATFORM_LIBCXX}")
+endif()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${SOURCE_PINS}"
     "${MANIFEST_HELPER}"
@@ -77,14 +98,25 @@ set(BUILD_METADATA_INPUTS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Backend.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Backend.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Provider.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/NetworkStats.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/NetworkStatsBackend.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/NetworkStatsBackend.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/NetworkStatsPublic.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/upstream/BpfNetworkStats.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/upstream/bpf_shared.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/libnetworkstats.map.txt"
 )
-add_custom_command(TARGET netd_updatable POST_BUILD
+add_custom_target(network_build_metadata ALL
+    DEPENDS netd_updatable networkstats
     COMMAND "${CMAKE_COMMAND}"
         "-DNETD_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
         "-DNETD_ARTIFACT=$<TARGET_FILE:netd_updatable>"
+        "-DNETD_STATS_ARTIFACT=$<TARGET_FILE:networkstats>"
         "-DNETD_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/build.json"
         "-DNETD_INPUT_FILES=${BUILD_METADATA_INPUTS}"
         "-DNETD_COMPILER=${CMAKE_C_COMPILER}"
+        "-DNETD_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+        "-DNETD_PLATFORM_LIBCXX=${SCARLET_PLATFORM_LIBCXX}"
         "-DNETD_COMPILER_ID=${CMAKE_C_COMPILER_ID}"
         "-DNETD_COMPILER_VERSION=${CMAKE_C_COMPILER_VERSION}"
         "-DNETD_COMPILER_TARGET=${CMAKE_C_COMPILER_TARGET}"
@@ -97,7 +129,7 @@ add_custom_command(TARGET netd_updatable POST_BUILD
         "-DNETD_CMAKE_VERSION=${CMAKE_VERSION}"
         "-DNETD_ANDROID_NDK=${CMAKE_ANDROID_NDK}"
         "-DNETD_ANDROID_NDK_VERSION=${NETD_ANDROID_NDK_VERSION}"
-        "-DNETD_BUILD_JOBS=4"
+        "-DNETD_BUILD_JOBS=${NETD_BUILD_JOBS}"
         -P "${MANIFEST_HELPER}"
     VERBATIM
 )
@@ -105,6 +137,7 @@ add_custom_command(TARGET netd_updatable POST_BUILD
 install(TARGETS netd_updatable
     LIBRARY DESTINATION lib64
 )
+install(TARGETS networkstats LIBRARY DESTINATION lib64)
 install(FILES include/NetdUpdatablePublic.h
     DESTINATION include
 )
@@ -139,5 +172,10 @@ if(NETD_UPDATABLE_BUILD_TESTS)
     add_test(NAME netd_updatable_provider_test
         COMMAND netd_updatable_provider_test
     )
+    add_executable(networkstats_test src/NetworkStats.cpp tests/NetworkStatsTest.cpp)
+    target_include_directories(networkstats_test PRIVATE include src)
+    target_compile_features(networkstats_test PRIVATE cxx_std_17)
+    target_compile_options(networkstats_test PRIVATE -O2 -Wall -Wextra -Werror)
+    add_test(NAME networkstats_test COMMAND networkstats_test)
 endif()
 

@@ -3,9 +3,11 @@ cmake_minimum_required(VERSION 3.20)
 foreach(required IN ITEMS
         NETD_SOURCE_DIR
         NETD_ARTIFACT
+        NETD_STATS_ARTIFACT
         NETD_OUTPUT
         NETD_INPUT_FILES
         NETD_COMPILER
+        NETD_CXX_COMPILER
         NETD_COMPILER_ID
         NETD_COMPILER_VERSION
         NETD_COMPILER_TARGET
@@ -49,6 +51,16 @@ endif()
 file(SHA256 "${NETD_ARTIFACT}" artifact_sha256)
 file(SIZE "${NETD_ARTIFACT}" artifact_size)
 file(RELATIVE_PATH artifact_relative "${NETD_SOURCE_DIR}" "${NETD_ARTIFACT}")
+file(SHA256 "${NETD_STATS_ARTIFACT}" stats_sha256)
+file(SIZE "${NETD_STATS_ARTIFACT}" stats_size)
+file(RELATIVE_PATH stats_relative "${NETD_SOURCE_DIR}" "${NETD_STATS_ARTIFACT}")
+json_escape("${stats_relative}" stats_relative_json)
+json_escape("${NETD_CXX_COMPILER}" cxx_compiler_json)
+set(platform_runtime "null")
+if(NETD_PLATFORM_LIBCXX)
+    file(SHA256 "${NETD_PLATFORM_LIBCXX}" runtime_sha256)
+    set(platform_runtime "{\"soname\":\"libc++.so\",\"sha256\":\"${runtime_sha256}\",\"namespace\":\"__1\"}")
+endif()
 
 json_escape("${NETD_COMPILER}" compiler_json)
 json_escape("${NETD_COMPILER_ID}" compiler_id_json)
@@ -68,7 +80,7 @@ json_escape("${artifact_relative}" artifact_relative_json)
 set(metadata "{
   \"schema\": 1,
   \"component\": \"user/android-runtime/network\",
-  \"generated_by\": \"CMakeLists.txt:netd_updatable POST_BUILD\",
+  \"generated_by\": \"CMakeLists.txt:network_build_metadata\",
   \"build\": {
     \"system\": \"CMake\",
     \"cmake_version\": \"${cmake_version_json}\",
@@ -82,6 +94,7 @@ set(metadata "{
   },
   \"compiler\": {
     \"path\": \"${compiler_json}\",
+    \"cxx_path\": \"${cxx_compiler_json}\",
     \"cmake_id\": \"${compiler_id_json}\",
     \"version\": \"${compiler_version_json}\",
     \"target\": \"${compiler_target_json}\",
@@ -113,6 +126,22 @@ set(metadata "{
     \"claims_bpf_support\": false,
     \"sets_bpf_progs_loaded\": false,
     \"packet_attachments\": false
+  },
+  \"statistics_artifact\": {
+    \"path\": \"${stats_relative_json}\",
+    \"size_bytes\": ${stats_size},
+    \"sha256\": \"${stats_sha256}\",
+    \"soname\": \"libnetworkstats.so\"
+  },
+  \"statistics_runtime\": ${platform_runtime},
+  \"statistics_contract\": {
+    \"native_query\": \"0x53430000+923\",
+    \"counter_layer\": \"link\",
+    \"interface_counters\": true,
+    \"uid_counters\": false,
+    \"tag_counters\": false,
+    \"unsupported_error\": \"EOPNOTSUPP\",
+    \"claims_bpf_support\": false
   },
   \"export_verification\": \"parent readelf step\"
 }
