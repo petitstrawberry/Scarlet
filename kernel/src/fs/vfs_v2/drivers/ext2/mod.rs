@@ -316,6 +316,10 @@ pub struct Ext2FileSystem {
     /// Per-inode locks serialize directory mutations and regular-file writes,
     /// size/timestamp publication, truncation, and writeback across open handles.
     inode_locks: IrqRwSpinLock<BTreeMap<u32, Arc<Mutex<()>>>>,
+    /// Per-inode-table-block locks serialize whole-block read-modify-write.
+    /// Inodes in the same table block share this lock even though their
+    /// narrower per-inode locks are independent.
+    inode_table_block_locks: IrqRwSpinLock<BTreeMap<u64, Arc<Mutex<()>>>>,
     /// Live nodes and open descriptions across aliases and mount namespaces.
     /// Their scalar guards prevent reuse of an unlinked inode while a fd, cwd,
     /// mapping, or retained directory entry can still access it.
@@ -324,6 +328,8 @@ pub struct Ext2FileSystem {
     reclaim_lock: Mutex<()>,
     #[cfg(test)]
     before_write_publish: IrqSpinLock<Option<fn(&Ext2FileSystem, u32, usize)>>,
+    #[cfg(test)]
+    before_inode_table_write: IrqSpinLock<Option<fn(&Ext2FileSystem, u64)>>,
     /// Global lock to serialize block allocation operations
     allocation_lock: Mutex<()>,
 }
@@ -597,8 +603,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; 1024],
         });
 
-        block_device.enqueue_request(request);
-        let results = block_device.process_requests();
+        let results = block_device.submit_requests(vec![request]);
 
         let superblock_data = if let Some(result) = results.first() {
             match &result.result {
@@ -644,11 +649,14 @@ impl Ext2FileSystem {
             inode_xattrs: IrqRwSpinLock::new(BTreeMap::new()),
             block_cache: IrqRwSpinLock::new(BlockLruCache::new(8192)),
             inode_locks: IrqRwSpinLock::new(BTreeMap::new()),
+            inode_table_block_locks: IrqRwSpinLock::new(BTreeMap::new()),
             open_inodes: Arc::new(IrqSpinLock::new(BTreeMap::new())),
             unlinked_inodes: IrqSpinLock::new(BTreeMap::new()),
             reclaim_lock: Mutex::new(()),
             #[cfg(test)]
             before_write_publish: IrqSpinLock::new(None),
+            #[cfg(test)]
+            before_inode_table_write: IrqSpinLock::new(None),
             allocation_lock: Mutex::new(()),
         });
 
@@ -797,11 +805,27 @@ impl Ext2FileSystem {
             .clone()
     }
 
+    fn get_inode_table_block_lock(&self, block: u64) -> Arc<Mutex<()>> {
+        let mut locks = self.inode_table_block_locks.write();
+        locks
+            .entry(block)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     #[cfg(test)]
     fn observe_pending_write(&self, inode_num: u32, write_end: usize) {
         let observer = *self.before_write_publish.lock();
         if let Some(observer) = observer {
             observer(self, inode_num, write_end);
+        }
+    }
+
+    #[cfg(test)]
+    fn observe_inode_table_write(&self, block: u64) {
+        let observer = *self.before_inode_table_write.lock();
+        if let Some(observer) = observer {
+            observer(self, block);
         }
     }
 
@@ -1731,6 +1755,12 @@ impl Ext2FileSystem {
         let target_block = inode_table_block + block_offset;
         let target_sector = self.block_to_sector(target_block as u64);
 
+        // Different inodes commonly share one inode-table block. Their per-inode
+        // locks do not prevent one inode's whole-block RMW from replacing a
+        // neighbor's concurrently committed bytes or 256-byte inode tail.
+        let table_block_lock = self.get_inode_table_block_lock(target_block as u64);
+        let _table_block_guard = table_block_lock.lock();
+
         // Read the current block containing the inode
         let read_request = Box::new(crate::device::block::request::BlockIORequest {
             request_type: crate::device::block::request::BlockIORequestType::Read,
@@ -1741,8 +1771,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(read_request);
-        let read_results = self.block_device.process_requests();
+        let read_results = self.block_device.submit_requests(vec![read_request]);
 
         let mut block_data = if let Some(result) = read_results.first() {
             match &result.result {
@@ -1760,6 +1789,9 @@ impl Ext2FileSystem {
                 "No result from inode table block read",
             ));
         };
+
+        #[cfg(test)]
+        self.observe_inode_table_write(target_block as u64);
 
         // Write the inode data into the block
         let inode_bytes = unsafe {
@@ -1791,8 +1823,7 @@ impl Ext2FileSystem {
             buffer: block_data,
         });
 
-        self.block_device.enqueue_request(write_request);
-        let write_results = self.block_device.process_requests();
+        let write_results = self.block_device.submit_requests(vec![write_request]);
 
         if let Some(result) = write_results.first() {
             match &result.result {
@@ -1907,8 +1938,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let bgd_data = if let Some(result) = results.first() {
             match &result.result {
@@ -1955,8 +1985,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let mut bitmap_data = if let Some(result) = results.first() {
             match &result.result {
@@ -2044,8 +2073,6 @@ impl Ext2FileSystem {
                     cylinder: 0,
                     buffer: bitmap_data,
                 });
-                self.block_device.enqueue_request(bitmap_write);
-
                 // Prepare BGD update
                 let mut updated_bgd_data = bgd_data.clone();
                 let mut bgd_update =
@@ -2063,14 +2090,14 @@ impl Ext2FileSystem {
                     cylinder: 0,
                     buffer: updated_bgd_data,
                 });
-                self.block_device.enqueue_request(bgd_write);
-
                 // Process both writes in one batch
                 // crate::println!(
                 //     "[ext2] allocate_block_in_group: Writing bitmap+BGD for block {}",
                 //     block_num
                 // );
-                let write_results = self.block_device.process_requests();
+                let write_results = self
+                    .block_device
+                    .submit_requests(vec![bitmap_write, bgd_write]);
                 // crate::println!(
                 //     "[ext2] allocate_block_in_group: Processed {} requests",
                 //     write_results.len()
@@ -2163,8 +2190,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let bgd_data = if let Some(result) = results.first() {
             match &result.result {
@@ -2209,8 +2235,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let mut bitmap_data = if let Some(result) = results.first() {
             match &result.result {
@@ -2298,8 +2323,6 @@ impl Ext2FileSystem {
                     cylinder: 0,
                     buffer: bitmap_data,
                 });
-                self.block_device.enqueue_request(bitmap_write);
-
                 // Prepare BGD update (reduce free_blocks_count by count)
                 let mut updated_bgd_data = bgd_data.clone();
                 let mut bgd_update =
@@ -2318,15 +2341,15 @@ impl Ext2FileSystem {
                     cylinder: 0,
                     buffer: updated_bgd_data,
                 });
-                self.block_device.enqueue_request(bgd_write);
-
                 // Process both writes in one batch
                 #[cfg(test)]
                 crate::println!(
                     "[ext2] allocate_blocks_contiguous_in_group: Processing 2 writes in batch for {} blocks",
                     count
                 );
-                let write_results = self.block_device.process_requests();
+                let write_results = self
+                    .block_device
+                    .submit_requests(vec![bitmap_write, bgd_write]);
 
                 if write_results.len() != 2 || write_results.iter().any(|r| r.result.is_err()) {
                     return Err(FileSystemError::new(
@@ -2937,8 +2960,7 @@ impl Ext2FileSystem {
                 buffer: vec![0u8; self.block_size as usize],
             });
 
-            self.block_device.enqueue_request(request);
-            let results = self.block_device.process_requests();
+            let results = self.block_device.submit_requests(vec![request]);
 
             let mut bgd_data = if let Some(result) = results.first() {
                 match &result.result {
@@ -2974,8 +2996,7 @@ impl Ext2FileSystem {
                 buffer: vec![0u8; self.block_size as usize],
             });
 
-            self.block_device.enqueue_request(request);
-            let results = self.block_device.process_requests();
+            let results = self.block_device.submit_requests(vec![request]);
 
             let mut bitmap_data = if let Some(result) = results.first() {
                 match &result.result {
@@ -3018,8 +3039,7 @@ impl Ext2FileSystem {
                 buffer: bitmap_data,
             });
 
-            self.block_device.enqueue_request(write_request);
-            let write_results = self.block_device.process_requests();
+            let write_results = self.block_device.submit_requests(vec![write_request]);
 
             if let Some(write_result) = write_results.first() {
                 match &write_result.result {
@@ -3058,8 +3078,7 @@ impl Ext2FileSystem {
                 buffer: bgd_data,
             });
 
-            self.block_device.enqueue_request(write_bgd_request);
-            let bgd_write_results = self.block_device.process_requests();
+            let bgd_write_results = self.block_device.submit_requests(vec![write_bgd_request]);
 
             if let Some(bgd_write_result) = bgd_write_results.first() {
                 match &bgd_write_result.result {
@@ -3662,8 +3681,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let mut bgd_data = if let Some(result) = results.first() {
             match &result.result {
@@ -3698,8 +3716,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let mut bitmap_data = if let Some(result) = results.first() {
             match &result.result {
@@ -3742,8 +3759,7 @@ impl Ext2FileSystem {
             buffer: bitmap_data,
         });
 
-        self.block_device.enqueue_request(write_request);
-        let write_results = self.block_device.process_requests();
+        let write_results = self.block_device.submit_requests(vec![write_request]);
 
         if let Some(write_result) = write_results.first() {
             match &write_result.result {
@@ -3779,8 +3795,7 @@ impl Ext2FileSystem {
             buffer: bgd_data,
         });
 
-        self.block_device.enqueue_request(write_bgd_request);
-        let bgd_write_results = self.block_device.process_requests();
+        let bgd_write_results = self.block_device.submit_requests(vec![write_bgd_request]);
 
         if let Some(bgd_write_result) = bgd_write_results.first() {
             match &bgd_write_result.result {
@@ -3879,8 +3894,7 @@ impl Ext2FileSystem {
                     buffer: clear_data,
                 });
 
-                self.block_device.enqueue_request(clear_request);
-                let _results = self.block_device.process_requests();
+                let _results = self.block_device.submit_requests(vec![clear_request]);
             }
 
             let double_indirect_block = inode.block[13];
@@ -3896,8 +3910,7 @@ impl Ext2FileSystem {
                 buffer: vec![0u8; self.block_size as usize],
             });
 
-            self.block_device.enqueue_request(request);
-            let results = self.block_device.process_requests();
+            let results = self.block_device.submit_requests(vec![request]);
 
             let mut double_indirect_data = if let Some(result) = results.first() {
                 match &result.result {
@@ -3943,8 +3956,7 @@ impl Ext2FileSystem {
                     buffer: double_indirect_data.clone(),
                 });
 
-                self.block_device.enqueue_request(write_request);
-                let write_results = self.block_device.process_requests();
+                let write_results = self.block_device.submit_requests(vec![write_request]);
 
                 if let Some(write_result) = write_results.first() {
                     match &write_result.result {
@@ -3974,8 +3986,7 @@ impl Ext2FileSystem {
                     buffer: clear_data,
                 });
 
-                self.block_device.enqueue_request(clear_request);
-                let _results = self.block_device.process_requests();
+                let _results = self.block_device.submit_requests(vec![clear_request]);
             }
 
             // Read the first level indirect block
@@ -3989,8 +4000,7 @@ impl Ext2FileSystem {
                 buffer: vec![0u8; self.block_size as usize],
             });
 
-            self.block_device.enqueue_request(request);
-            let results = self.block_device.process_requests();
+            let results = self.block_device.submit_requests(vec![request]);
 
             let mut first_indirect_data = if let Some(result) = results.first() {
                 match &result.result {
@@ -4024,8 +4034,7 @@ impl Ext2FileSystem {
                 buffer: first_indirect_data,
             });
 
-            self.block_device.enqueue_request(write_request);
-            let write_results = self.block_device.process_requests();
+            let write_results = self.block_device.submit_requests(vec![write_request]);
 
             if let Some(write_result) = write_results.first() {
                 match &write_result.result {
@@ -4395,8 +4404,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; self.block_size as usize],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let mut bgd_data = if let Some(result) = results.first() {
             match &result.result {
@@ -4428,8 +4436,7 @@ impl Ext2FileSystem {
             buffer: bgd_data,
         });
 
-        self.block_device.enqueue_request(write_request);
-        let write_results = self.block_device.process_requests();
+        let write_results = self.block_device.submit_requests(vec![write_request]);
 
         if let Some(write_result) = write_results.first() {
             match &write_result.result {
@@ -4464,8 +4471,7 @@ impl Ext2FileSystem {
             buffer: vec![0u8; 1024],
         });
 
-        self.block_device.enqueue_request(request);
-        let results = self.block_device.process_requests();
+        let results = self.block_device.submit_requests(vec![request]);
 
         let mut superblock_data = if let Some(result) = results.first() {
             match &result.result {
@@ -4535,8 +4541,7 @@ impl Ext2FileSystem {
             buffer: superblock_data,
         });
 
-        self.block_device.enqueue_request(write_request);
-        let write_results = self.block_device.process_requests();
+        let write_results = self.block_device.submit_requests(vec![write_request]);
 
         if let Some(write_result) = write_results.first() {
             match &write_result.result {
@@ -5274,8 +5279,7 @@ impl FileSystemOperations for Ext2FileSystem {
                     buffer: block_data,
                 });
 
-                self.block_device.enqueue_request(write_request);
-                let write_results = self.block_device.process_requests();
+                let write_results = self.block_device.submit_requests(vec![write_request]);
 
                 if let Some(write_result) = write_results.first() {
                     match &write_result.result {

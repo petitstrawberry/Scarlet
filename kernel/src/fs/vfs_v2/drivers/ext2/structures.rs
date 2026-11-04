@@ -591,8 +591,7 @@ impl Ext2Inode {
                 buffer: vec![0u8; filesystem.block_size as usize],
             });
 
-            filesystem.block_device.enqueue_request(request);
-            let results = filesystem.block_device.process_requests();
+            let results = filesystem.block_device.submit_requests(vec![request]);
 
             let block_data = if let Some(result) = results.first() {
                 match &result.result {

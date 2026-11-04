@@ -25,15 +25,15 @@ fn unlink_fixture(two_links: bool) -> Arc<Ext2FileSystem> {
     descriptors[0..4].copy_from_slice(&3_u32.to_le_bytes());
     descriptors[4..8].copy_from_slice(&4_u32.to_le_bytes());
     descriptors[8..12].copy_from_slice(&5_u32.to_le_bytes());
-    device.enqueue_request(Box::new(BlockIORequest {
+    let results = device.submit_requests(vec![Box::new(BlockIORequest {
         request_type: BlockIORequestType::Write,
         sector: 4,
         sector_count: 2,
         head: 0,
         cylinder: 0,
         buffer: descriptors,
-    }));
-    assert!(device.process_requests()[0].result.is_ok());
+    })]);
+    assert!(results[0].result.is_ok());
     let mut bitmap = vec![0; 1024];
     bitmap[1 / 8] |= 1 << (1 % 8); // root inode 2
     bitmap[10 / 8] |= 1 << (10 % 8); // file inode 11
@@ -72,15 +72,15 @@ fn ext2_block_symlinks_at_inline_boundary_read_and_reclaim_data() {
         fs.write_inode(11, &inode).unwrap();
         let mut buffer = vec![0; 1024];
         buffer[..length].copy_from_slice(target.as_bytes());
-        fs.block_device.enqueue_request(Box::new(BlockIORequest {
+        let results = fs.block_device.submit_requests(vec![Box::new(BlockIORequest {
             request_type: BlockIORequestType::Write,
             sector: fs.block_to_sector(300),
             sector_count: 2,
             head: 0,
             cylinder: 0,
             buffer,
-        }));
-        assert!(fs.block_device.process_requests()[0].result.is_ok());
+        })]);
+        assert!(results[0].result.is_ok());
         let root = fs.root_node();
         let node = fs.lookup(&root, &"file".to_string()).unwrap();
         assert!(node.is_symlink().unwrap());

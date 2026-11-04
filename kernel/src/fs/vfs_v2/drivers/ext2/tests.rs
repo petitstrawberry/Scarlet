@@ -443,15 +443,15 @@ fn create_writeback_test_file() -> (Arc<MockBlockDevice>, Arc<Ext2FileSystem>, A
     // table so writeback cannot accidentally overwrite the superblock.
     let mut descriptors = vec![0; 1024];
     descriptors[8..12].copy_from_slice(&5_u32.to_le_bytes());
-    device.enqueue_request(Box::new(BlockIORequest {
+    let results = device.submit_requests(vec![Box::new(BlockIORequest {
         request_type: BlockIORequestType::Write,
         sector: 4,
         sector_count: 2,
         head: 0,
         cylinder: 0,
         buffer: descriptors,
-    }));
-    assert!(device.process_requests()[0].result.is_ok());
+    })]);
+    assert!(results[0].result.is_ok());
     let fs = Ext2FileSystem::new(device.clone()).unwrap();
     let mut inode = Ext2Inode::empty();
     inode.mode = (EXT2_S_IFREG | 0o644).to_le();
@@ -501,15 +501,14 @@ fn test_ext2_sync_through_second_handle_persists_shared_writes_and_times() {
     assert_eq!(persisted.get_mtime(), 7);
     assert_eq!(persisted.get_ctime() as u64, changed_time);
     assert_eq!(node.metadata().unwrap().created_time, changed_time);
-    device.enqueue_request(Box::new(BlockIORequest {
+    let result = device.submit_requests(vec![Box::new(BlockIORequest {
         request_type: BlockIORequestType::Read,
         sector: 600,
         sector_count: 2,
         head: 0,
         cylinder: 0,
         buffer: vec![0; 1024],
-    }));
-    let result = device.process_requests();
+    })]);
     assert!(result[0].result.is_ok());
     assert_eq!(&result[0].request.buffer[..contents.len()], contents);
 
@@ -566,15 +565,14 @@ fn test_ext2_write_publication_excludes_second_handle_writeback() {
     let end = 64 + positional.len() + sequential.len();
     assert_eq!(fs.read_inode(11).unwrap().get_size() as usize, end);
 
-    device.enqueue_request(Box::new(BlockIORequest {
+    let result = device.submit_requests(vec![Box::new(BlockIORequest {
         request_type: BlockIORequestType::Read,
         sector: 600,
         sector_count: 2,
         head: 0,
         cylinder: 0,
         buffer: vec![0; 1024],
-    }));
-    let result = device.process_requests();
+    })]);
     assert!(result[0].result.is_ok());
     assert_eq!(
         &result[0].request.buffer[64..64 + positional.len()],
@@ -852,8 +850,7 @@ fn create_test_ext2_device() -> MockBlockDevice {
         buffer: superblock_data,
     });
 
-    mock_device.enqueue_request(superblock_request);
-    mock_device.process_requests();
+    mock_device.submit_requests(vec![superblock_request]);
 
     mock_device
 }
@@ -1056,8 +1053,7 @@ fn test_ext2_virtio_blk_filesystem() {
         buffer: vec![0u8; 1024],
     });
 
-    virtio_device.enqueue_request(request);
-    let results = virtio_device.process_requests();
+    let results = virtio_device.submit_requests(vec![request]);
 
     assert_eq!(results.len(), 1);
     let result = &results[0];
@@ -2570,15 +2566,14 @@ fn test_ext2_truncate_preserves_blocks_after_sparse_hole() {
 
     let device = Arc::new(create_test_ext2_device());
     let transfer = |request_type, block: usize, buffer: Vec<u8>| {
-        device.enqueue_request(Box::new(BlockIORequest {
+        let mut results = device.submit_requests(vec![Box::new(BlockIORequest {
             request_type,
             sector: block * 2,
             sector_count: 2,
             head: 0,
             cylinder: 0,
             buffer,
-        }));
-        let mut results = device.process_requests();
+        })]);
         assert_eq!(results.len(), 1);
         let result = results.remove(0);
         assert!(result.result.is_ok());
@@ -2808,4 +2803,290 @@ fn ext2_directory_creation_accounts_for_inode_group_beyond_first_gdt_block() {
     assert_eq!(u16::from_le(count), 1);
     let count = remounted.read_group_descriptor(0).unwrap().used_dirs_count;
     assert_eq!(u16::from_le(count), 1);
+}
+
+mod inode_table_request_tests {
+    use super::*;
+    use crate::device::block::BlockDevice;
+    use crate::device::{Device, DeviceType};
+    use crate::object::capability::selectable::{ReadyInterest, SelectWaitOutcome, Selectable};
+    use crate::object::capability::{ControlOps, MemoryMappingOps};
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    const INODE_TABLE_BLOCK: u64 = 5;
+    const TARGET_INODE: u32 = 2;
+    const NEIGHBOR_INODE_OFFSET: usize = 512;
+
+    fn raw_block_request(
+        request_type: BlockIORequestType,
+        block: u64,
+        buffer: Vec<u8>,
+    ) -> Box<BlockIORequest> {
+        Box::new(BlockIORequest {
+            request_type,
+            sector: block as usize * 2,
+            sector_count: 2,
+            head: 0,
+            cylinder: 0,
+            buffer,
+        })
+    }
+
+    fn read_mock_block(device: &MockBlockDevice, block: u64) -> Vec<u8> {
+        let mut results = device.submit_requests(vec![raw_block_request(
+            BlockIORequestType::Read,
+            block,
+            vec![0; 1024],
+        )]);
+        assert_eq!(results.len(), 1);
+        let result = results.remove(0);
+        assert!(result.result.is_ok());
+        result.request.buffer
+    }
+
+    fn write_mock_block(device: &MockBlockDevice, block: u64, buffer: Vec<u8>) {
+        let results = device.submit_requests(vec![raw_block_request(
+            BlockIORequestType::Write,
+            block,
+            buffer,
+        )]);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].result.is_ok());
+    }
+
+    /// Four 256-byte inode slots share each table block in this fixture.
+    fn create_extended_inode_device() -> Arc<MockBlockDevice> {
+        let device = Arc::new(create_test_ext2_device());
+
+        let mut superblock = read_mock_block(&device, 1);
+        superblock[88..90].copy_from_slice(&256_u16.to_le_bytes());
+        write_mock_block(&device, 1, superblock);
+
+        let mut descriptors = vec![0; 1024];
+        descriptors[0..4].copy_from_slice(&3_u32.to_le_bytes());
+        descriptors[4..8].copy_from_slice(&4_u32.to_le_bytes());
+        descriptors[8..12].copy_from_slice(&(INODE_TABLE_BLOCK as u32).to_le_bytes());
+        descriptors[12..14].copy_from_slice(&100_u16.to_le_bytes());
+        descriptors[14..16].copy_from_slice(&2000_u16.to_le_bytes());
+        write_mock_block(&device, 2, descriptors);
+
+        let mut table = vec![0x66; 1024];
+        table[256..384].fill(0x11); // inode 2 first 128 bytes
+        table[384..512].fill(0x5a); // inode 2 extended tail
+        table[512..640].fill(0x33); // neighboring inode 3
+        table[640..768].fill(0xc3); // inode 3 extended tail
+        table[768..896].fill(0x44); // inode 4
+        table[896..1024].fill(0x7d); // inode 4 extended tail
+        write_mock_block(&device, INODE_TABLE_BLOCK, table);
+        device
+    }
+
+    fn inode_with_mode(mode: u16) -> Ext2Inode {
+        let mut inode = Ext2Inode::empty();
+        inode.mode = mode.to_le();
+        inode.links_count = 1_u16.to_le();
+        inode
+    }
+
+    static INODE_TABLE_LOCK_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
+
+    fn observe_table_lock(fs: &Ext2FileSystem, block: u64) {
+        assert_eq!(block, INODE_TABLE_BLOCK);
+        assert!(fs
+            .get_inode_table_block_lock(block)
+            .try_lock()
+            .is_none());
+        INODE_TABLE_LOCK_OBSERVATIONS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test_case]
+    fn ext2_write_inode_preserves_neighbor_inode_and_extended_tail() {
+        let device = create_extended_inode_device();
+        let fs = Ext2FileSystem::new(device.clone()).unwrap();
+        let inode = inode_with_mode(EXT2_S_IFREG | 0o640);
+        INODE_TABLE_LOCK_OBSERVATIONS.store(0, Ordering::SeqCst);
+        *fs.before_inode_table_write.lock() = Some(observe_table_lock);
+
+        fs.write_inode(TARGET_INODE, &inode).unwrap();
+        *fs.before_inode_table_write.lock() = None;
+
+        assert_eq!(INODE_TABLE_LOCK_OBSERVATIONS.load(Ordering::SeqCst), 1);
+        let block = read_mock_block(&device, INODE_TABLE_BLOCK);
+        let expected = unsafe {
+            core::slice::from_raw_parts(
+                &inode as *const Ext2Inode as *const u8,
+                core::mem::size_of::<Ext2Inode>(),
+            )
+        };
+        assert_eq!(&block[256..384], expected);
+        assert!(block[384..512].iter().all(|byte| *byte == 0x5a));
+        assert!(block[NEIGHBOR_INODE_OFFSET..NEIGHBOR_INODE_OFFSET + 128]
+            .iter()
+            .all(|byte| *byte == 0x33));
+        assert!(block[640..768].iter().all(|byte| *byte == 0xc3));
+        assert!(block[768..896].iter().all(|byte| *byte == 0x44));
+        assert!(block[896..1024].iter().all(|byte| *byte == 0x7d));
+    }
+
+    #[test_case]
+    fn ext2_write_inode_leaves_unrelated_queued_request_queued() {
+        let device = create_extended_inode_device();
+        let fs = Ext2FileSystem::new(device.clone()).unwrap();
+        device.enqueue_request(raw_block_request(
+            BlockIORequestType::Write,
+            300,
+            vec![0x4f; 1024],
+        ));
+
+        fs.write_inode(TARGET_INODE, &inode_with_mode(EXT2_S_IFREG | 0o600))
+            .unwrap();
+
+        let queued = device.process_requests();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].request.request_type, BlockIORequestType::Write);
+        assert_eq!(queued[0].request.sector, 600);
+        assert!(queued[0].result.is_ok());
+        assert!(read_mock_block(&device, 300).iter().all(|byte| *byte == 0x4f));
+
+        let block = read_mock_block(&device, INODE_TABLE_BLOCK);
+        assert_eq!(
+            u16::from_le_bytes(block[256..258].try_into().unwrap()),
+            EXT2_S_IFREG | 0o600
+        );
+        assert!(block[384..512].iter().all(|byte| *byte == 0x5a));
+        assert!(block[NEIGHBOR_INODE_OFFSET..NEIGHBOR_INODE_OFFSET + 128]
+            .iter()
+            .all(|byte| *byte == 0x33));
+    }
+
+    struct FailingTableReadDevice {
+        inner: Arc<MockBlockDevice>,
+        fail_read_sector: usize,
+        writes: AtomicUsize,
+    }
+
+    impl FailingTableReadDevice {
+        fn new(inner: Arc<MockBlockDevice>, fail_read_sector: usize) -> Self {
+            Self {
+                inner,
+                fail_read_sector,
+                writes: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Device for FailingTableReadDevice {
+        fn device_type(&self) -> DeviceType {
+            DeviceType::Block
+        }
+
+        fn name(&self) -> &'static str {
+            "failing-inode-table-read"
+        }
+
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+            self
+        }
+
+        fn as_block_device(&self) -> Option<&dyn BlockDevice> {
+            Some(self)
+        }
+
+        fn into_block_device(self: Arc<Self>) -> Option<Arc<dyn BlockDevice>> {
+            Some(self)
+        }
+    }
+
+    impl ControlOps for FailingTableReadDevice {}
+
+    impl MemoryMappingOps for FailingTableReadDevice {
+        fn get_mapping_info(
+            &self,
+            _offset: usize,
+            _length: usize,
+        ) -> Result<crate::object::capability::MemoryMappingInfo, &'static str> {
+            Err("Memory mapping not supported")
+        }
+
+        fn supports_mmap(&self) -> bool {
+            false
+        }
+    }
+
+    impl Selectable for FailingTableReadDevice {
+        fn wait_until_ready(
+            &self,
+            _interest: ReadyInterest,
+            _trapframe: &mut crate::arch::Trapframe,
+            _timeout_ns: Option<u64>,
+            _min_wait_ns: u64,
+        ) -> SelectWaitOutcome {
+            SelectWaitOutcome::Ready
+        }
+    }
+
+    impl BlockDevice for FailingTableReadDevice {
+        fn get_disk_name(&self) -> &'static str {
+            self.inner.get_disk_name()
+        }
+
+        fn get_disk_size(&self) -> usize {
+            self.inner.get_disk_size()
+        }
+
+        fn enqueue_request(&self, request: Box<BlockIORequest>) {
+            self.inner.enqueue_request(request);
+        }
+
+        fn process_requests(&self) -> Vec<crate::device::block::request::BlockIOResult> {
+            self.inner.process_requests()
+        }
+
+        fn submit_requests(
+            &self,
+            requests: Vec<Box<BlockIORequest>>,
+        ) -> Vec<crate::device::block::request::BlockIOResult> {
+            let mut results = Vec::with_capacity(requests.len());
+            for request in requests {
+                if request.request_type == BlockIORequestType::Read
+                    && request.sector == self.fail_read_sector
+                {
+                    results.push(crate::device::block::request::BlockIOResult {
+                        request,
+                        result: Err("injected inode table read failure"),
+                    });
+                    continue;
+                }
+                if request.request_type == BlockIORequestType::Write {
+                    self.writes.fetch_add(1, Ordering::SeqCst);
+                }
+                let mut inner_results = self.inner.submit_requests(vec![request]);
+                assert_eq!(inner_results.len(), 1);
+                results.push(inner_results.remove(0));
+            }
+            results
+        }
+    }
+
+    #[test_case]
+    fn ext2_write_inode_read_failure_does_not_write() {
+        let device = create_extended_inode_device();
+        let before = read_mock_block(&device, INODE_TABLE_BLOCK);
+        let failing = Arc::new(FailingTableReadDevice::new(
+            device.clone(),
+            INODE_TABLE_BLOCK as usize * 2,
+        ));
+        let fs = Ext2FileSystem::new(failing.clone()).unwrap();
+
+        let error = fs
+            .write_inode(TARGET_INODE, &inode_with_mode(EXT2_S_IFREG | 0o644))
+            .unwrap_err();
+        assert_eq!(error.kind, FileSystemErrorKind::IoError);
+        assert_eq!(failing.writes.load(Ordering::SeqCst), 0);
+        assert_eq!(read_mock_block(&device, INODE_TABLE_BLOCK), before);
+    }
 }
