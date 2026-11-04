@@ -3472,6 +3472,32 @@ pub fn sys_fcntl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
     // Log the fcntl command to understand usage patterns
     match cmd {
+        1031 | 1032 => {
+            let Some(handle) = abi.get_handle(fd) else {
+                return errno::to_result(errno::EBADF);
+            };
+            let Some(object) = task.handle_table.get(handle) else {
+                return errno::to_result(errno::EBADF);
+            };
+            let Some(pipe) = object.as_pipe() else {
+                return errno::to_result(errno::EINVAL);
+            };
+            if cmd == 1032 { return pipe.buffer_size(); }
+            let requested = arg as i32;
+            if requested < 0 { return errno::to_result(errno::EINVAL); }
+            let Some(size) = (requested as usize).max(crate::environment::PAGE_SIZE)
+                .checked_next_power_of_two() else {
+                return errno::to_result(errno::EINVAL);
+            };
+            // Bound the Linux adapter's unprivileged per-pipe allocation.
+            if size > 1024 * 1024 { return errno::to_result(errno::EPERM); }
+            return pipe.resize_buffer(size).unwrap_or_else(|error| errno::to_result(match error {
+                StreamError::InvalidArgument => errno::EBUSY,
+                StreamError::NoSpace => errno::ENOMEM,
+                StreamError::NotSupported => errno::EOPNOTSUPP,
+                _ => errno::EIO,
+            }));
+        }
         1033 | 1034 => {
             // F_ADD_SEALS / F_GET_SEALS apply to the underlying memfd, so
             // duplicated descriptors observe and enforce the same seal set.
@@ -6727,6 +6753,42 @@ mod tests {
         proc_exe_linux_stat, proc_exe_selector,
     };
     use crate::abi::linux::generic::errno;
+
+    #[test_case]
+    fn fcntl_pipe_capacity_changes_the_shared_pipe_and_preserves_failed_shrinks() {
+        use crate::ipc::pipe::UnidirectionalPipe;
+        let task = alloc::sync::Arc::new(crate::task::Task::new(
+            "fcntl-pipe-capacity".into(), 1, crate::task::TaskType::User));
+        crate::task::set_mock_current_task(task.clone());
+        let mut abi = crate::abi::linux::generic::LinuxAbi::default();
+        let (reader, writer) = UnidirectionalPipe::create_pair(65536);
+        writer.as_stream().unwrap().write(&alloc::vec![0x5a; 8192]).unwrap();
+        let read_handle = task.handle_table.insert(reader).unwrap();
+        let write_handle = task.handle_table.insert(writer).unwrap();
+        let read_fd = abi.allocate_fd(read_handle).unwrap();
+        let write_fd = abi.allocate_fd(write_handle).unwrap();
+        let mut frame = crate::arch::Trapframe::new();
+        for (fd, command, size, expected) in [
+            (read_fd, 1031, 4096, errno::to_result(errno::EBUSY)),
+            (write_fd, 1032, 0, 65536),
+            (read_fd, 1031, 6145, 8192),
+            (write_fd, 1032, 0, 8192),
+            (read_fd, 1031, 1024 * 1024, 1024 * 1024),
+            (write_fd, 1031, 2 * 1024 * 1024, errno::to_result(errno::EPERM)),
+            (read_fd, 1032, 0, 1024 * 1024),
+            (read_fd, 1031, usize::MAX, errno::to_result(errno::EINVAL)),
+        ] {
+            frame.set_arg(0, fd); frame.set_arg(1, command); frame.set_arg(2, size);
+            assert_eq!(super::sys_fcntl(&mut abi, &mut frame), expected);
+        }
+        let mut bytes = alloc::vec![0; 8192];
+        assert_eq!(task.handle_table.get(read_handle).unwrap().as_stream().unwrap()
+            .read(&mut bytes).unwrap(), 8192);
+        assert!(bytes.iter().all(|byte| *byte == 0x5a));
+        frame.set_arg(0, write_fd); frame.set_arg(1, 1031); frame.set_arg(2, 0);
+        assert_eq!(super::sys_fcntl(&mut abi, &mut frame), crate::environment::PAGE_SIZE);
+        crate::task::clear_mock_current_task();
+    }
 
     fn wake_epoll_fixture() -> (alloc::sync::Arc<crate::task::Task>, crate::abi::linux::generic::LinuxAbi, crate::arch::Trapframe, usize, usize) {
         use crate::environment::{PAGE_SIZE,USER_STACK_END};
