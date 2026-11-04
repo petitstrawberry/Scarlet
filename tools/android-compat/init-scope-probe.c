@@ -138,7 +138,10 @@ int main(int argc,char **argv) {
    }
    if(state[0]!=1 || state[1]!=0){printf("SCARLET_INIT_SCOPE_PENDING closing=%u live=%u members=%u\n",state[0],state[1],state[2]);return 14;}
    printf("SCARLET_INIT_SCOPE_CLOSED live=%u members=%u\n",state[1],state[2]);
-   return 0;
+   // Cleanup success must not hide an init crash from the outer manager.
+   if(WIFEXITED(status))return WEXITSTATUS(status);
+   if(WIFSIGNALED(status))return 128+WTERMSIG(status);
+   return 6;
   }
   if(got<0){perror("outer wait");return 6;}
   if(tick==40 || tick==80 || tick==200 || tick==240 || tick==280)snapshot();
