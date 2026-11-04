@@ -358,7 +358,7 @@ pub(super) fn text_content(path: &str) -> Option<String> {
         Err(_) => return None,
     };
     let protection = target.reclaim_preference.read().protection();
-    Some(format!("{}\n", -(protection as i32)))
+    Some(format!("{}\n", protection_to_score(protection)))
 }
 
 pub(super) fn path_metadata(path: &str) -> Option<FileMetadata> {
@@ -369,7 +369,7 @@ pub(super) fn path_metadata(path: &str) -> Option<FileMetadata> {
     };
     let content = format!(
         "{}\n",
-        -(target.reclaim_preference.read().protection() as i32)
+        protection_to_score(target.reclaim_preference.read().protection())
     );
     Some(FileMetadata {
         file_type: FileType::RegularFile,
