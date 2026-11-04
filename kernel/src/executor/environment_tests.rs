@@ -693,6 +693,60 @@ fn mount_namespace_capture_and_native_handle_duplication_do_not_grant_join_autho
 }
 
 #[test_case]
+fn mount_namespace_management_captures_only_visible_live_descendants() {
+    use crate::sched::scheduler::{register_task, get_task_by_id, reset};
+    use crate::task::{CloneFlags, TaskState};
+    reset();
+    let mut parent = new_user_task("namespace-manager".into(), 0); parent.init();
+    parent.set_vfs(Arc::new(VfsManager::new()));
+    let parent = get_task_by_id(register_task(parent)).unwrap();
+    let original = parent.capture_mount_namespace().unwrap();
+    let child = get_task_by_id(register_task(parent.clone_task(CloneFlags::default()).unwrap())).unwrap();
+    assert!(parent.adopt_registered_process_child(&child));
+    child.set_namespace(crate::task::namespace::TaskNamespace::new_child(parent.get_namespace(), "managed-child".into()));
+    let (private, fs) = child.prepare_mount_namespace().unwrap();
+    child.install_mount_namespace(private.clone(), fs);
+    let grandchild = get_task_by_id(register_task(child.clone_task(CloneFlags::default()).unwrap())).unwrap();
+    assert!(child.adopt_registered_process_child(&grandchild));
+    let local = parent.get_namespace().resolve_local_id(grandchild.get_id()).unwrap();
+    assert_ne!(local, grandchild.get_namespace_id());
+    let captured = parent.capture_descendant_mount_namespace(local).unwrap();
+    assert_eq!(captured.id(), private.id());
+    assert_eq!(parent.capture_mount_namespace().unwrap().id(), original.id());
+    let mut other = new_user_task("unrelated".into(), 0); other.init();
+    other.set_vfs(Arc::new(VfsManager::new()));
+    let other = get_task_by_id(register_task(other)).unwrap();
+    let unrelated = parent.get_namespace().resolve_local_id(other.get_id()).unwrap();
+    assert!(parent.capture_descendant_mount_namespace(unrelated).is_err());
+    assert!(parent.capture_descendant_mount_namespace(usize::MAX).is_err());
+    let own = parent.get_namespace().resolve_local_id(parent.get_id()).unwrap();
+    assert!(parent.capture_descendant_mount_namespace(own).is_err());
+    grandchild.set_state(TaskState::Zombie);
+    assert!(parent.capture_descendant_mount_namespace(local).is_err());
+    drop((parent, child, grandchild, other));
+    reset();
+    assert_eq!(captured.id(), private.id()); // Retention outlives the child.
+}
+
+#[test_case]
+fn mount_namespace_descendant_capture_requires_management_authority() {
+    use crate::sched::scheduler::{register_task, get_task_by_id, reset};
+    use crate::task::CloneFlags;
+    reset();
+    let mut parent = new_user_task("namespace-unprivileged".into(), 0); parent.init();
+    parent.set_vfs(Arc::new(VfsManager::new()));
+    let parent = get_task_by_id(register_task(parent)).unwrap();
+    let child = get_task_by_id(register_task(parent.clone_task(CloneFlags::default()).unwrap())).unwrap();
+    assert!(parent.adopt_registered_process_child(&child));
+    let local = parent.get_namespace().resolve_local_id(child.get_id()).unwrap();
+    parent.credentials.write().set_authority(0, 0).unwrap();
+    assert!(parent.capture_descendant_mount_namespace(local).is_err());
+    assert!(parent.capture_mount_namespace().is_ok());
+    drop((parent, child));
+    reset();
+}
+
+#[test_case]
 fn mount_namespace_join_rejects_live_clone_fs_but_accepts_an_unshared_context() {
     use crate::sched::scheduler::{register_task, get_task_by_id, reset};
     use crate::task::{CloneFlags, CloneFlagsDef};

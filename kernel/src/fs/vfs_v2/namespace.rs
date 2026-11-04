@@ -117,12 +117,46 @@ impl MountNamespace {
 
 impl crate::task::Task {
     pub(crate) fn capture_mount_namespace(&self) -> Result<Arc<MountNamespace>, &'static str> {
-        let namespace = self.mount_namespace.read().clone();
+        // A management task may capture another task while it switches views.
+        // Pair the namespace and filesystem under install_mount_namespace's
+        // lock order rather than taking two independently changing snapshots.
+        let namespace_guard = self.mount_namespace.read();
+        let namespace = namespace_guard.clone();
         let fs = self.get_vfs().ok_or("missing filesystem context")?;
+        drop(namespace_guard);
         let mut roots: Vec<_> = self.execution_environment.read().as_ref()
             .map(|env| env.roots().into_iter().map(|(_, view)| view).collect()).unwrap_or_default();
         roots.push(namespace.source_view(&fs.view()));
         namespace.retain_roots(&roots)?;
+        Ok(namespace)
+    }
+
+    pub(crate) fn capture_descendant_mount_namespace(&self, pid: usize) -> Result<Arc<MountNamespace>, &'static str> {
+        use crate::{sched::scheduler::get_task_by_id, task::{TaskState, TaskType}};
+        if !self.credentials.read().permits(crate::shield::identity::MANAGE_MOUNTS) {
+            return Err("mount namespace authority required");
+        }
+        let target = self.get_namespace().resolve_global_id(pid)
+            .and_then(get_task_by_id).ok_or("mount namespace child not visible")?;
+        if target.task_type != TaskType::User
+            || matches!(target.get_state(), TaskState::Zombie | TaskState::Terminated)
+            || target.get_thread_group_id() == self.get_thread_group_id() {
+            return Err("live descendant process required");
+        }
+        let owned = || {
+            let mut parent = target.get_parent_id();
+            let mut visited = alloc::collections::BTreeSet::new();
+            while let Some(id) = parent {
+                if !visited.insert(id) { return false; }
+                let Some(ancestor) = get_task_by_id(id) else { return false; };
+                if ancestor.get_thread_group_id() == self.get_thread_group_id() { return true; }
+                parent = ancestor.get_parent_id();
+            }
+            false
+        };
+        if !owned() { return Err("process is not an owned descendant"); }
+        let namespace = target.capture_mount_namespace()?;
+        if !owned() { return Err("descendant ownership changed"); }
         Ok(namespace)
     }
 
@@ -206,6 +240,17 @@ pub mod syscall {
         let task = crate::task::mytask().unwrap(); tf.increment_pc_next(&task);
         (|| -> Result<usize, &'static str> {
             let namespace = task.capture_mount_namespace()?;
+            let handle = task.handle_table.insert(KernelObject::MountNamespace(namespace))?;
+            let mut metadata = task.handle_table.get_metadata(handle).ok_or("handle metadata")?;
+            metadata.special_semantics = Some(SpecialSemantics::CloseOnExec);
+            task.handle_table.update_metadata(handle, metadata)?;
+            Ok(handle as usize)
+        })().unwrap_or(usize::MAX)
+    }
+    pub fn sys_mount_namespace_capture_descendant(tf: &mut Trapframe) -> usize {
+        let task = crate::task::mytask().unwrap(); tf.increment_pc_next(&task);
+        (|| -> Result<usize, &'static str> {
+            let namespace = task.capture_descendant_mount_namespace(tf.get_arg(0))?;
             let handle = task.handle_table.insert(KernelObject::MountNamespace(namespace))?;
             let mut metadata = task.handle_table.get_metadata(handle).ok_or("handle metadata")?;
             metadata.special_semantics = Some(SpecialSemantics::CloseOnExec);

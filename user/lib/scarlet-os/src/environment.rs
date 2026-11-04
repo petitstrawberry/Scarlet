@@ -56,6 +56,12 @@ impl MountNamespace {
         // SAFETY: no pointer arguments; returns a new close-on-exec capability.
         handle(unsafe { syscall0(Syscall::MountNamespaceCurrent) }).map(Self)
     }
+    /// Capture a namespace-local descendant PID without joining it. Requires
+    /// mount management authority and retains a close-on-exec capability.
+    pub fn capture_descendant(pid: u32) -> HandleResult<Self> {
+        // SAFETY: the kernel validates visibility, live ancestry and authority.
+        handle(unsafe { syscall1(Syscall::MountNamespaceCaptureDescendant, pid as usize) }).map(Self)
+    }
     pub fn from_handle(handle: Handle) -> HandleResult<Self> {
         if handle.object_info().object_type != crate::handle::introspection::KernelObjectType::MountNamespace {
             return Err(HandleError::InvalidParameter);

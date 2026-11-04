@@ -912,6 +912,9 @@ pub enum Syscall {
     MountNamespaceCurrent = 533,
     MountNamespaceJoin = 534,
     MountNamespaceIdentity = 535,
+    /// Retain a live, visible descendant's mount namespace. Requires mount
+    /// management authority; capture does not change the caller's Environment.
+    MountNamespaceCaptureDescendant = 537,
     VfsViewSetPropagation = 531,
     VfsViewBindRecursive = 532,
     /// Publish immutable named file capabilities under an existing directory.

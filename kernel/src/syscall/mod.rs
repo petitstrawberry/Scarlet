@@ -223,6 +223,7 @@ syscall_table! {
     MountNamespaceCurrent = 533 => crate::fs::vfs_v2::namespace::syscall::sys_mount_namespace_current,
     MountNamespaceJoin = 534 => crate::fs::vfs_v2::namespace::syscall::sys_mount_namespace_join,
     MountNamespaceIdentity = 535 => crate::fs::vfs_v2::namespace::syscall::sys_mount_namespace_identity,
+    MountNamespaceCaptureDescendant = 537 => crate::fs::vfs_v2::namespace::syscall::sys_mount_namespace_capture_descendant,
     VfsViewSetPropagation = 531 => crate::executor::syscall::sys_vfs_view_propagation,
     VfsViewPublishFiles = 536 => crate::executor::syscall::sys_vfs_view_publish_files,
     VfsViewBindRecursive = 532 => crate::executor::syscall::sys_vfs_view_bind_recursive,

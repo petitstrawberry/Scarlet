@@ -326,6 +326,7 @@ fn native_syscall_numbers() {
         MountNamespaceCurrent = 533,
         MountNamespaceJoin = 534,
         MountNamespaceIdentity = 535,
+        MountNamespaceCaptureDescendant = 537,
         VfsViewSetPropagation = 531,
         VfsViewBindRecursive = 532,
         VfsViewMountRestricted = 530,
