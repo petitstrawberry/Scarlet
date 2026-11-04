@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from service_policy import (ACCESS_MAGIC, CLASSES, MAGIC, PERMISSIONS, SDK_POLICY_SHA256, SDK_POLICY_VERSION,
                             AID_HEADER_SHA256, GENERIC_MAGIC, GENERIC_PARTITIONS,
-                            apply_boot_policy, apply_generic_boot_policy, export, export_generic,
+                            _generic_graph, apply_boot_policy, apply_generic_boot_policy, export, export_generic,
                             generic_transition, generic_uids, validate, validate_generic, validate_metadata, verify)
 
 
@@ -43,14 +43,94 @@ class ServicePolicyTests(unittest.TestCase):
             "rc_sha256": "a" * 64, "disposition": "source-derived", "resolved_executable": "/system/bin/daemon",
             "file_label": label, "target": target, "executable_sha256": "b" * 64,
             "source_xattr_sha256": hashlib.sha256((label + "\0").encode()).hexdigest(),
-            "policy_rules": ["allow init daemon:process transition;"], "seclabel": target if explicit else None}
+            "policy_rules": ["allow init daemon:process transition;"], "seclabel": target if explicit else None,
+            "sockets": []}
         value = {"kind": GENERIC_MAGIC, "source_sha256": SDK_POLICY_SHA256, "policy_version": SDK_POLICY_VERSION,
             "partitions": GENERIC_PARTITIONS, "aid_header_sha256": AID_HEADER_SHA256,
             "rc_files": {service["rc"]: service["rc_sha256"]}, "services": [service],
             "file_labels": {"/system/bin/daemon": label},
             "exec_transitions": [] if explicit else [["u:r:init:s0", label, target, 1058]],
-            "transitions": [["u:r:init:s0", target, 1058]] if explicit else []}
+            "transitions": [["u:r:init:s0", target, 1058]] if explicit else [], "socket_labels": []}
         return self.seal_generic(value)
+
+    def test_generic_socket_delegations_follow_selected_service_options(self):
+        manifest = self.generic_manifest()
+        service = manifest["services"][0]
+        service["sockets"] = [
+            {"name": "daemon", "type": "stream", "mode": "0666", "uid": "daemon", "gid": "daemon", "seclabel": None},
+            {"name": "daemon_control", "type": "seqpacket", "mode": "0660", "uid": "root", "gid": "daemon", "seclabel": None},
+            {"name": "daemon_explicit", "type": "dgram", "mode": "0660", "uid": "root", "gid": "daemon",
+             "seclabel": "u:object_r:daemon_socket:s0"}]
+        service["socket_labels"] = ["u:object_r:daemon_socket:s0", "u:r:daemon:s0"]
+        manifest["socket_labels"] = [["u:r:init:s0", "u:object_r:daemon_socket:s0"],
+                                     ["u:r:init:s0", "u:r:daemon:s0"]]
+        self.seal_generic(manifest)
+        boot = ("scarlet-android-boot-policy-v2\nlabel 1 u:r:init:s0\n"
+                "label 40 u:r:scarlet_input_bridge:s0\n")
+        result = apply_generic_boot_policy(boot, manifest)
+        labels = {line.split()[2]: int(line.split()[1]) for line in result.splitlines() if line.startswith("label ")}
+        self.assertIn(f"socket-create 1 {labels['u:r:daemon:s0']}\n", result)
+        self.assertIn(f"socket-create 1 {labels['u:object_r:daemon_socket:s0']}\n", result)
+        self.assertEqual(result.count("socket-create "), 2)
+        self.assertEqual(apply_generic_boot_policy(result, manifest), result)
+
+        managed = self.generic_manifest()
+        managed["services"][0].update(disposition="profile-managed", sockets=service["sockets"])
+        managed["services"][0].pop("socket_labels", None)
+        managed["file_labels"], managed["exec_transitions"], managed["transitions"] = {}, [], []
+        self.seal_generic(managed)
+        self.assertEqual(apply_generic_boot_policy(boot, managed), boot)
+
+        changed = deepcopy(manifest)
+        changed["services"][0]["sockets"].append({"name": "unmanaged", "type": "stream", "mode": "0666",
+            "uid": "root", "gid": "root", "seclabel": "u:object_r:unmanaged_socket:s0"})
+        self.seal_generic(changed)
+        with self.assertRaisesRegex(ValueError, "differs from options"):
+            apply_generic_boot_policy(boot, changed)
+
+    def test_generic_graph_records_only_declared_service_sockets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            relative = "scarlet/boot/init.rc"
+            path = root / relative
+            path.parent.mkdir(parents=True)
+            data = ("service logd /system/bin/logd\n"
+                    "    socket logd stream 0666 logd logd\n"
+                    "    socket logdw dgram+passcred 0222 logd logd\n"
+                    "    user logd\n\n"
+                    "service tombstoned /system/bin/tombstoned\n"
+                    "    socket tombstoned_crash seqpacket 0666 system system\n\n"
+                    "service daemon /system/bin/daemon\n").encode()
+            path.write_bytes(data)
+            metadata = {"profile": {"boot_properties": {}}, "files": {relative: hashlib.sha256(data).hexdigest()}}
+            _, services = _generic_graph(root, metadata)
+            records = {service["service"]: service for service in services}
+            self.assertEqual([socket["name"] for socket in records["logd"]["sockets"]], ["logd", "logdw"])
+            self.assertEqual([socket["name"] for socket in records["tombstoned"]["sockets"]], ["tombstoned_crash"])
+            self.assertEqual(records["daemon"]["sockets"], [])
+
+    def test_generic_relabels_keep_source_origin_kind_and_existing_ids_exact(self):
+        manifest = self.generic_manifest()
+        manifest["file_relabels"] = [["u:r:init:s0", "u:object_r:unlabeled:s0", "u:object_r:dalvikcache_data_file:s0", 1]]
+        manifest["file_relabel_evidence"] = ["allow init dalvikcache_data_file:file relabelto;"]
+        self.seal_generic(manifest)
+        boot = ("scarlet-android-boot-policy-v2\nlabel 1 u:r:init:s0\n"
+                "label 40 u:r:scarlet_input_bridge:s0\nlabel 100 u:object_r:unlabeled:s0\nfile-default 100\n")
+        result = apply_generic_boot_policy(boot, manifest)
+        labels = {line.split()[2]: int(line.split()[1]) for line in result.splitlines() if line.startswith("label ")}
+        self.assertEqual(labels["u:r:scarlet_input_bridge:s0"], 40)
+        target = labels["u:object_r:dalvikcache_data_file:s0"]
+        self.assertIn(f"file-relabel 1 100 {target} 1\n", result)
+        self.assertNotIn(f"file-relabel 1 100 {target} 2\n", result)
+        self.assertEqual(apply_generic_boot_policy(result, manifest), result)
+        with self.assertRaisesRegex(ValueError, "file default"):
+            apply_generic_boot_policy(boot.replace("file-default 100\n", ""), manifest)
+        for index, value in [(0, "u:r:untrusted_app:s0"), (1, "u:object_r:system_data_file:s0"), (2, "u:object_r:app_data_file:s0:c1"), (3, 8)]:
+            invalid = deepcopy(manifest)
+            invalid["file_relabels"][0][index] = value
+            self.seal_generic(invalid)
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                validate_generic(invalid)
 
     def test_generic_apply_preserves_runtime_ids_and_rejects_conflicting_bindings(self):
         boot = ("scarlet-android-boot-policy-v2\nlabel 1 u:r:init:s0\n"
@@ -149,6 +229,16 @@ class ServicePolicyTests(unittest.TestCase):
             self.assertEqual(target, {record["target"].split(":")[2]})
         self.assertEqual(records["ueventd"]["resolved_executable"], "/system/bin/init")
         self.assertFalse(any(rule[1] == "u:object_r:init_exec:s0" for rule in manifest["exec_transitions"]))
+        for name in ("logd", "tombstoned", "traced", "mdnsd"):
+            self.assertIn(["u:r:init:s0", records[name]["target"]], manifest["socket_labels"])
+        relabels = manifest["file_relabels"]
+        self.assertIn(["u:r:init:s0", "u:object_r:unlabeled:s0", "u:object_r:dalvikcache_data_file:s0", 1], relabels)
+        for target in ("dalvikcache_data_file", "vold_data_file", "system_app_data_file"):
+            for kind, name in ((1, "file"), (2, "dir")):
+                self.assertIn(["u:r:init:s0", "u:object_r:unlabeled:s0", f"u:object_r:{target}:s0", kind], relabels)
+                for label, permission in (("unlabeled", "relabelfrom"), (target, "relabelto")):
+                    self.assertTrue(list(setools.TERuleQuery(policy, ruletype=["allow"], source="init",
+                        target=label, tclass=[name], perms=[permission]).results()))
         from boot_profile import shield_policy
         profile = json.loads(Path("tools/android-compat/profiles/scarlet-arm64-flattened.json").read_text())
         contexts = ["* " + label for label in {label for values in profile["property_grants"].values() for label in values}]

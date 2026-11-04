@@ -23,6 +23,50 @@ PERMISSIONS = {"add": 1, "find": 2, "list": 4}
 # /vendor/etc/selinux/precompiled_sepolicy in the SDK pinned by art_inputs.py.
 SDK_POLICY_SHA256 = "2be08e2a2e93d22c6a1c5e4e32fa4d571ecb07695877cdcfe0c3a9f48ba9234c"
 SDK_POLICY_VERSION = 30
+MAX_NATIVE_LABELS = 2048
+
+
+def generic_file_relabels(policy, setools, context_sources, configured_contexts=()):
+    """Canonical s0 init restorecon grants for an initially unlabeled View.
+
+    Both relabelfrom and relabelto must be present in the pinned TE policy.
+    Targets come from actual file_contexts and explicit management inputs.
+    App-specific category labels remain the package manager's responsibility.
+    """
+    contexts = {context for context in configured_contexts
+                if re.fullmatch(r"u:object_r:[A-Za-z0-9_]+:s0", context)}
+    for data in context_sources.values():
+        for line in data.decode().splitlines():
+            fields = line.split("#", 1)[0].split()
+            if fields and re.fullmatch(r"u:object_r:[A-Za-z0-9_]+:s0", fields[-1]):
+                contexts.add(fields[-1])
+    selected = {context.split(":")[2]: context for context in contexts}
+    grants, evidence = set(), set()
+    for kind, name in enumerate(("file", "dir", "lnk_file", "chr_file", "blk_file", "sock_file", "fifo_file"), 1):
+        for constraint in setools.ConstraintQuery(policy, tclass=[name], perms=["relabelfrom", "relabelto"]).results():
+            expression = " ".join(str(constraint.expression).split())
+            if (str(constraint.ruletype) != "mlsconstrain" or expression !=
+                    "( l2 == h2 and ( l1 == l2 ) or ( t1 == mlstrustedsubject ) )"):
+                raise ValueError("unsupported init file relabel constraint: " + str(constraint))
+        if list(setools.ConstraintQuery(policy, ruletype=["validatetrans", "mlsvalidatetrans"], tclass=[name]).results()):
+            raise ValueError("init file validatetrans requires a different translation")
+        origins = list(setools.TERuleQuery(policy, ruletype=["allow"], source="init",
+            target="unlabeled", tclass=[name], perms=["relabelfrom"]).results())
+        for rule in origins:
+            _unconditional(rule, setools)
+        if not origins:
+            continue
+        for rule in setools.TERuleQuery(policy, ruletype=["allow"], source="init",
+                tclass=[name], perms=["relabelto"]).results():
+            targets = {str(target) for target in rule.target.expand()} & selected.keys()
+            if not targets:
+                continue
+            _unconditional(rule, setools)
+            evidence.update(map(str, origins))
+            evidence.add(str(rule))
+            grants.update(("u:r:init:s0", "u:object_r:unlabeled:s0", selected[target], kind)
+                          for target in targets if target != "unlabeled")
+    return [list(rule) for rule in sorted(grants)], sorted(evidence)
 
 
 def policy_version(metadata):
@@ -189,7 +233,7 @@ def apply_boot_policy(boot, service_text, metadata=None):
             next_id += 1
         for identifier in sorted(sources[source]):
             rules.append(f"service-allow {identifier} {labels[target]} {mask}" if kind == 1 else f"property-set {identifier} {labels[target]}")
-    if len(labels) > 1024 or sum(line.startswith(("service-allow ", "property-set ", "socket-create ", "keystore-allow ")) for line in kept) + len(rules) > 16384:
+    if len(labels) > MAX_NATIVE_LABELS or sum(line.startswith(("service-allow ", "property-set ", "socket-create ", "keystore-allow ")) for line in kept) + len(rules) > 16384:
         raise ValueError("compiled service policy exceeds native policy bounds")
     return "\n".join(kept + added + rules) + "\n"
 
@@ -327,10 +371,22 @@ def _generic_graph(root, metadata):
                     if len(values) > 1 or values and len(values[0]) != 2:
                         raise ValueError("ambiguous generic service " + key)
                     return values[0][1] if values else default
+                sockets = []
+                for socket in (value for value in options if value[0] == "socket"):
+                    # init's socket grammar has an optional SELinux context.
+                    # Without one, it delegates to the service's verified
+                    # process-transition target.
+                    if len(socket) not in (6, 7):
+                        raise ValueError("generic service socket syntax: " + name)
+                    if any(item["name"] == socket[1] for item in sockets):
+                        raise ValueError("duplicate generic service socket: " + name)
+                    sockets.append({"name": socket[1], "type": socket[2],
+                        "mode": socket[3], "uid": socket[4], "gid": socket[5],
+                        "seclabel": socket[6] if len(socket) == 7 else None})
                 services[name] = {"service": name, "rc": relative, "rc_line": section["line"],
                     "rc_sha256": _digest(data), "executable": expand(words[2]),
                     "user": option("user", "root"), "seclabel": option("seclabel", None),
-                    "flags": flags}
+                    "sockets": sockets, "flags": flags}
         for section in sections:
             if section["header"][0] != "import":
                 continue
@@ -359,7 +415,7 @@ def _generic_graph(root, metadata):
 
 def export_generic(policy, setools, policy_path, root, boot_manifest, partitions,
                    packages, aid_header, debugfs="debugfs"):
-    """Export bounded source-backed exec records; no file-write permissions."""
+    """Export source-backed service launches, sockets and init label restoration."""
     import ctypes
     import ctypes.util
     import posixpath
@@ -397,7 +453,8 @@ def export_generic(policy, setools, policy_path, root, boot_manifest, partitions
         "boot_manifest_sha256": sha256(boot_manifest), "package_manifest_sha256": sha256(package_manifest),
         "aid_header_sha256": _digest(header), "passwd_sha256": _digest(passwd),
         "rc_files": configs, "services": [], "file_labels": {}, "exec_transitions": [], "transitions": [],
-        "scope": "Effective init service launches only; no filesystem write, socket or service grants"}
+        "socket_labels": [],
+        "scope": "Effective init launches, declared sockets and canonical init label restoration; no file content writes or blanket service access"}
     nodes = package_data["nodes"]
     bindings = metadata["profile"].get("file_labels", {})
     existing = metadata["profile"].get("exec_transitions", [])
@@ -435,6 +492,10 @@ def export_generic(policy, setools, policy_path, root, boot_manifest, partitions
             "vendor:/etc/selinux/vendor_file_contexts":
             images["vendor"].command("cat /etc/selinux/vendor_file_contexts")}
         manifest["file_contexts"] = {name: _digest(data) for name, data in context_sources.items()}
+        if metadata["profile"].get("file_policy", {}).get("default") == "u:object_r:unlabeled:s0":
+            from boot_profile import file_rules
+            configured_contexts, _, _ = file_rules(metadata["profile"])
+            manifest["file_relabels"], manifest["file_relabel_evidence"] = generic_file_relabels(policy, setools, context_sources, configured_contexts)
         context_path = temporary / "file_contexts"
         context_path.write_bytes(b"\n".join(context_sources.values()))
         library = ctypes.CDLL(ctypes.util.find_library("selinux"), use_errno=True)
@@ -557,6 +618,17 @@ def export_generic(policy, setools, policy_path, root, boot_manifest, partitions
                 record["file_label"] = label
                 record.update(disposition="source-derived", target=target, policy_rules=evidence)
                 manifest["file_labels"]["/" + resolved] = label
+                socket_labels = set()
+                for socket in record["sockets"]:
+                    socket_label = socket["seclabel"] or target
+                    if not re.fullmatch(r"u:(r|object_r):[A-Za-z0-9_]+:s0", socket_label):
+                        raise ValueError("generic service socket label: " + service["service"])
+                    policy.lookup_type(socket_label.split(":")[2])
+                    socket_labels.add(socket_label)
+                if socket_labels:
+                    record["socket_labels"] = sorted(socket_labels)
+                    manifest["socket_labels"].extend(
+                        ["u:r:init:s0", socket_label] for socket_label in sorted(socket_labels))
                 # Explicit seclabel is a delegated setexeccon selection, not an
                 # automatic inode transition (ueventd aliases init itself).
                 field = "transitions" if service["seclabel"] else "exec_transitions"
@@ -577,6 +649,8 @@ def export_generic(policy, setools, policy_path, root, boot_manifest, partitions
         raise ValueError("generic package manifest changed during export")
     manifest["exec_transitions"].sort()
     manifest["transitions"].sort()
+    manifest["socket_labels"] = [list(rule) for rule in sorted({
+        tuple(rule) for rule in manifest["socket_labels"]})]
     manifest["manifest_sha256"] = _digest(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode())
     validate_generic(manifest)
     return manifest
@@ -599,13 +673,29 @@ def validate_generic(manifest):
         relative_path(name)
         if not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ValueError("generic RC digest")
-    files, transitions, direct, names = {}, set(), set(), set()
+    files, transitions, direct, socket_rules, names = {}, set(), set(), set(), set()
+    socket_count = 0
     for service in value["services"]:
         if (service["service"] in names or type(service["principal"]) is not int or
                 not 0 <= service["principal"] <= 0xffffffff or
                 value["rc_files"].get(service["rc"]) != service["rc_sha256"]):
             raise ValueError("generic service record")
         names.add(service["service"])
+        sockets = service.get("sockets", [])
+        if type(sockets) is not list or len(sockets) > 4096:
+            raise ValueError("generic service sockets")
+        socket_count += len(sockets)
+        if socket_count > 4096:
+            raise ValueError("generic service socket bound")
+        socket_names = set()
+        for socket in sockets:
+            if (type(socket) is not dict or set(socket) != {"name", "type", "mode", "uid", "gid", "seclabel"} or
+                    socket["name"] in socket_names or any(type(socket[key]) is not str or not socket[key]
+                    for key in ("name", "type", "mode", "uid", "gid")) or
+                    socket["seclabel"] is not None and (type(socket["seclabel"]) is not str or
+                    not re.fullmatch(r"u:(r|object_r):[A-Za-z0-9_]+:s0", socket["seclabel"]))):
+                raise ValueError("generic service socket record")
+            socket_names.add(socket["name"])
         if service["disposition"] == "source-derived":
             path, label, target = service["resolved_executable"], service["file_label"], service["target"]
             relative_path(path.lstrip("/"))
@@ -624,19 +714,42 @@ def validate_generic(manifest):
                 direct.add(("u:r:init:s0", target, service["principal"]))
             else:
                 transitions.add(("u:r:init:s0", label, target, service["principal"]))
+            expected_sockets = sorted({socket["seclabel"] or target for socket in sockets})
+            if service.get("socket_labels", []) != expected_sockets:
+                raise ValueError("generic service socket delegation differs from options")
+            socket_rules.update(("u:r:init:s0", socket_label) for socket_label in expected_sockets)
         elif service["disposition"] not in ("profile-managed", "optional-absent"):
             raise ValueError("generic disposition")
+        elif service.get("socket_labels"):
+            raise ValueError("generic managed service socket delegation")
     if (files != value["file_labels"] or sorted(transitions) != [tuple(rule) for rule in value["exec_transitions"]] or
-            sorted(direct) != [tuple(rule) for rule in value["transitions"]]):
+            sorted(direct) != [tuple(rule) for rule in value["transitions"]] or
+            value.get("socket_labels", []) != sorted(map(list, socket_rules))):
         raise ValueError("generic exec selection differs from evidence")
+    relabels = value.get("file_relabels", [])
+    evidence = value.get("file_relabel_evidence", [])
+    if (not isinstance(relabels, list) or len(relabels) > 4096 or
+            not isinstance(evidence, list) or len(evidence) > 4096 or
+            bool(relabels) != bool(evidence) or
+            any(not isinstance(line, str) or not line.startswith("allow init ") or len(line) > 4096 for line in evidence)):
+        raise ValueError("generic init relabel evidence")
+    for rule in relabels:
+        if (not isinstance(rule, list) or len(rule) != 4 or
+                rule[:2] != ["u:r:init:s0", "u:object_r:unlabeled:s0"] or
+                not isinstance(rule[2], str) or not re.fullmatch(r"u:object_r:[A-Za-z0-9_]+:s0", rule[2]) or
+                rule[2] == rule[1] or type(rule[3]) is not int or not 1 <= rule[3] <= 7):
+            raise ValueError("generic init file relabel")
+    if len({tuple(rule) for rule in relabels}) != len(relabels):
+        raise ValueError("duplicate generic init file relabel")
     return manifest
 
 
 def apply_generic_boot_policy(boot, manifest, root=None):
-    """Append verified exec records, retaining every existing subject identifier.
+    """Append verified launch, socket and label records with existing identifiers.
 
     Apply before apply_boot_policy() so the ordinary source service export also
-    selects the newly registered daemon subjects. This grants no file writes.
+    selects the newly registered daemon subjects. File content writes and
+    service access are separate; sockets follow selected service declarations.
     """
     validate_generic(manifest)
     if root is not None:
@@ -648,7 +761,8 @@ def apply_generic_boot_policy(boot, manifest, root=None):
     lines = boot.splitlines()
     if not lines or lines[0] != "scarlet-android-boot-policy-v2":
         raise ValueError("generic exec requires boot policy v2")
-    labels, ids, files, rules, direct = {}, set(), {}, {}, set()
+    labels, ids, files, rules, direct, sockets, relabels = {}, set(), {}, {}, set(), set(), set()
+    file_default = None
     for line in lines:
         fields = line.split()
         if fields[0] == "label":
@@ -663,6 +777,12 @@ def apply_generic_boot_policy(boot, manifest, root=None):
             rules[key] = int(fields[3])
         elif fields[0] == "transition":
             direct.add(tuple(map(int, fields[1:])))
+        elif fields[0] == "socket-create":
+            sockets.add((int(fields[1]), int(fields[2])))
+        elif fields[0] == "file-default":
+            file_default = int(fields[1])
+        elif fields[0] == "file-relabel":
+            relabels.add(tuple(map(int, fields[1:])))
     added = []
     def identifier(label):
         if label not in labels:
@@ -690,6 +810,18 @@ def apply_generic_boot_policy(boot, manifest, root=None):
         if rule not in direct:
             added.append("transition " + " ".join(map(str, rule)))
             direct.add(rule)
-    if len(labels) > 1024 or len(files) > 4096 or len(rules) > 16384 or len(direct) > 16384:
+    for source, target in manifest.get("socket_labels", []):
+        rule = (identifier(source), identifier(target))
+        if rule not in sockets:
+            added.append(f"socket-create {rule[0]} {rule[1]}")
+            sockets.add(rule)
+    if manifest.get("file_relabels") and file_default != labels.get("u:object_r:unlabeled:s0"):
+        raise ValueError("init label restoration requires the matching native file default")
+    for source, origin, target, kind in manifest.get("file_relabels", []):
+        rule = (identifier(source), identifier(origin), identifier(target), kind)
+        if rule not in relabels:
+            added.append("file-relabel " + " ".join(map(str, rule)))
+            relabels.add(rule)
+    if len(labels) > MAX_NATIVE_LABELS or len(files) > 4096 or len(rules) > 16384 or len(direct) > 16384 or len(sockets) > 16384 or len(relabels) > 16384:
         raise ValueError("generic native policy bound")
     return "\n".join(lines + added) + "\n"
