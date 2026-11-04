@@ -1378,7 +1378,7 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     abi.thread_state_mut().pending_clone_is_thread = false;
                     abi.thread_state_mut().pending_clone_share_sighand = false;
                     abi.thread_state_mut().clear_child_tid_ptr = previous_clear_child_tid;
-                    return usize::MAX;
+                    return errno::to_result(errno::EAGAIN);
                 }
             };
             // Linux-facing process/thread IDs are namespace-local.  The child
@@ -1436,7 +1436,11 @@ pub fn sys_clone(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 
             child_linux_tid
         }
-        Err(error) => errno::to_result(clone_failure_errno(error)),
+        Err(error) => {
+            crate::println!("[linux clone] creation failed: parent={} flags={:#x} reason={}",
+                parent_task.get_id(), flags, error);
+            errno::to_result(clone_failure_errno(error))
+        }
     };
 
     // Clear pending flag in parent after clone completes

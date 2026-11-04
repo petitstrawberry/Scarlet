@@ -43,7 +43,11 @@ impl LinuxAbiExtensions for AndroidExtensions {
             let text=core::str::from_utf8(value).map_err(|_|crate::abi::linux::generic::errno::EINVAL)?;
             let text=text.strip_suffix('\0').unwrap_or(text);
             let target=subject.policy().label_id(text).ok_or(crate::abi::linux::generic::errno::EACCES)?;
-            subject.policy().relabel_file(&subject,node,target).map_err(|_|crate::abi::linux::generic::errno::EACCES)
+            subject.policy().relabel_file(&subject,node,target).map_err(|reason| {
+                crate::println!("[android label] relabel denied: source={} old={:?} target={} reason={}",
+                    subject.name(), subject.policy().resource_label(node), target, reason);
+                crate::abi::linux::generic::errno::EACCES
+            })
         })())
     }
     fn open(&self, abi: &mut LinuxAbi, task: &Task, path: &str, flags: i32) -> Option<usize> {
