@@ -19,7 +19,7 @@ from boot_profile import guest_alias, relative_path
 from stock_art import PARTITIONS
 
 MANIFEST = "stock-packages.json"
-TREES = ("app", "priv-app", "overlay", "framework", "lib64", "media",
+TREES = ("app", "priv-app", "overlay", "framework", "lib64", "media", "usr",
          "etc/permissions", "etc/sysconfig", "etc/compatconfig")
 
 
