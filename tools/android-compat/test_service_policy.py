@@ -22,6 +22,16 @@ class Rule:
 
 
 class ServicePolicyTests(unittest.TestCase):
+    def test_compiled_grants_apply_to_each_category_instance_of_the_same_domain(self):
+        boot = "scarlet-android-boot-policy-v2\nlabel 1 u:r:init:s0\nlabel 40 u:r:shared_relro:s0\nlabel 41 u:r:shared_relro:s0:c13,c260,c512,c768\nlabel 42 u:r:shared_relro:s0:c14,c260,c512,c768\nlabel 100 u:object_r:activity_service:s0\nservice-allow 41 100 7\nservice-allow 1 100 4\n"
+        services = MAGIC + "\ndomain shared_relro\nallow shared_relro u:object_r:activity_service:s0 2\n"
+        result = apply_boot_policy(boot, services)
+        for identifier in (40, 41, 42):
+            self.assertIn(f"service-allow {identifier} 100 2\n", result)
+            self.assertNotIn(f"service-allow {identifier} 100 7\n", result)
+        self.assertIn("service-allow 1 100 4\n", result)
+        self.assertEqual(apply_boot_policy(result, services), result)
+
     def test_boot_subject_rules_are_replaced_without_changing_other_classes(self):
         boot = "scarlet-android-boot-policy-v2\nlabel 1 u:r:init:s0\nlabel 10 u:r:system_server:s0\nlabel 100 u:object_r:wifi_service:s0\nservice-allow 10 100 7\nservice-allow 1 100 4\nproperty-set 10 100\n"
         services = MAGIC + "\ndomain system_server\nallow system_server u:object_r:wifi_service:s0 3\nallow system_server u:object_r:wifinl80211_service:s0 2\n"

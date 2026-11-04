@@ -121,9 +121,14 @@ def apply_boot_policy(boot, service_text):
                 raise ValueError("duplicate boot label")
             labels[name] = identifier
             identifiers.add(identifier)
-    sources = {name.split(":")[2]: identifier for name, identifier in labels.items()
-               if re.fullmatch(r"u:r:[A-Za-z0-9_]+:s0", name) and name.split(":")[2] in domains}
-    replaced = set(sources.values())
+    from boot_profile import valid_context
+    sources = {}
+    for name, identifier in labels.items():
+        if name.startswith("u:r:") and valid_context(name):
+            domain = name.split(":")[2]
+            if domain in domains:
+                sources.setdefault(domain, set()).add(identifier)
+    replaced = {identifier for identifiers in sources.values() for identifier in identifiers}
     replaced_kinds = ("service-allow ", "property-set ") if service_text.startswith(ACCESS_MAGIC + "\n") else ("service-allow ",)
     kept = [line for line in lines if not (line.startswith(replaced_kinds) and int(line.split()[1]) in replaced)]
     next_id = max(identifiers, default=0) + 1
@@ -135,7 +140,8 @@ def apply_boot_policy(boot, service_text):
             labels[target] = next_id
             added.append(f"label {next_id} {target}")
             next_id += 1
-        rules.append(f"service-allow {sources[source]} {labels[target]} {mask}" if kind == 1 else f"property-set {sources[source]} {labels[target]}")
+        for identifier in sorted(sources[source]):
+            rules.append(f"service-allow {identifier} {labels[target]} {mask}" if kind == 1 else f"property-set {identifier} {labels[target]}")
     if len(labels) > 1024 or sum(line.startswith(("service-allow ", "property-set ", "socket-create ", "keystore-allow ")) for line in kept) + len(rules) > 16384:
         raise ValueError("compiled service policy exceeds native policy bounds")
     return "\n".join(kept + added + rules) + "\n"
