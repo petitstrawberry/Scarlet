@@ -37,12 +37,12 @@ pub(crate) fn extend(
     length: usize,
 ) -> Result<(), &'static str> {
     let policy = policy_handle(task, handle, true)?;
-    if length != 128 && length != 208 {
+    if length != 128 && length != 208 && length != 224 {
         return Err("policy update size");
     }
     let spec = read::<128>(task, pointer)?;
     let version = u32_at(&spec, 0);
-    if !matches!((version,length),(1,128)|(2,208)) || u32_at(&spec, 4) != 0 || spec[112..].iter().any(|byte| *byte != 0) {
+    if !matches!((version,length),(1,128)|(2,208)|(3,224)) || u32_at(&spec, 4) != 0 || spec[112..].iter().any(|byte| *byte != 0) {
         return Err("policy update version or reserved fields");
     }
     let labels = update_array::<16, _>(
@@ -146,15 +146,23 @@ pub(crate) fn extend(
             })
         },
     )?;
-    let sets = if version == 2 {
+    let sets = if version >= 2 {
         parse_set_update(task, pointer.checked_add(128).ok_or("set update address overflow")?)?
     } else { sets::Update::default() };
+    let principal_ranges=if version==3 {
+        let ranges=read::<16>(task,pointer.checked_add(208).ok_or("range update address overflow")?)?;
+        update_array::<16,_>(task,u64_at(&ranges,0),u64_at(&ranges,8),MAX_RULES,|raw| Ok(PrincipalRangeTransitionRule {
+            source:u32_at(&raw,0),target:u32_at(&raw,4),
+            first:identity::Principal(u32_at(&raw,8)),last:identity::Principal(u32_at(&raw,12)),
+        }))?
+    }else {Vec::new()};
     policy.extend(
         u64_at(&spec, 8),
         update::PolicyUpdate {
             labels,
             rules,
             transitions,
+            principal_ranges,
             exec_transitions,
             create,
             relabel,
@@ -638,6 +646,35 @@ pub fn sys_shield_socket_creation_label(tf:&mut Trapframe)->usize {
 mod update_tests {
     use super::*;
     use alloc::vec;
+    #[test_case]
+    fn principal_range_update_abi_requires_authority_and_validates_the_complete_batch() {
+        use crate::library::std::usercopy::copy_to_user;
+        use scarlet_abi::shield::*;
+        fn bytes<T>(value:&T)->&[u8] {
+            unsafe {core::slice::from_raw_parts(value as *const T as *const u8,core::mem::size_of::<T>())}
+        }
+        let mut task=Task::new("policy-ranges".into(),0,crate::task::TaskType::User);task.set_id(60033);
+        let base=crate::environment::USER_STACK_END-crate::environment::PAGE_SIZE;
+        task.allocate_stack_pages(base,1).unwrap();
+        let policy=Policy::new(vec![(1,"parent".into()),(2,"child".into())],vec![]).unwrap();
+        let admin=insert(&task,PolicyHandle {policy:policy.clone(),administer:true}).unwrap();
+        let readonly=insert(&task,PolicyHandle {policy:policy.clone(),administer:false}).unwrap();
+        let mut spec=RawPolicyUpdateWithPrincipalRanges {base:RawPolicyUpdateWithSets {
+            base:RawPolicyUpdate {version:3,expected_generation:1,..Default::default()},..Default::default()},
+            principal_ranges:(base+256) as u64,principal_range_count:1};
+        let mut range=RawPrincipalRangeTransition {source:1,target:2,first:100,last:199};
+        copy_to_user(&task,base,bytes(&spec)).unwrap();copy_to_user(&task,base+256,bytes(&range)).unwrap();
+        assert!(extend(&task,readonly,base,224).is_err());
+        assert!(extend(&task,admin,base,208).is_err());
+        range.first=200;copy_to_user(&task,base+256,bytes(&range)).unwrap();
+        assert!(extend(&task,admin,base,224).is_err());assert_eq!(policy.generation(),1);
+        range.first=100;copy_to_user(&task,base+256,bytes(&range)).unwrap();
+        extend(&task,admin,base,224).unwrap();assert_eq!(policy.generation(),2);
+        assert!(extend(&task,admin,base,224).is_err());
+        spec.base.base.expected_generation=2;spec.principal_range_count=MAX_RULES as u64+1;
+        copy_to_user(&task,base,bytes(&spec)).unwrap();
+        assert!(extend(&task,admin,base,224).is_err());assert_eq!(policy.generation(),2);
+    }
     #[test_case]
     fn set_update_abi_is_atomic_bounded_and_requires_management_authority() {
         use crate::library::std::usercopy::copy_to_user;

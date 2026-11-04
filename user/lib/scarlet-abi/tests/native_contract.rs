@@ -49,6 +49,9 @@ fn policy_update_records_and_operation_numbers_are_stable() {
     assert_eq!(abi::Syscall::ShieldPolicyExtend as usize,1344);
     assert_eq!(abi::Syscall::ShieldPolicyGeneration as usize,1345);
     assert_eq!(abi::Syscall::ShieldFilePersistence as usize,1346);
+    assert_layout!(abi::shield::RawPrincipalRangeTransition,16,4,{source:0,target:4,first:8,last:12});
+    assert_layout!(abi::shield::RawPolicyUpdateWithPrincipalRanges,224,8,{base:0,principal_ranges:208,principal_range_count:216});
+    assert_eq!(abi::shield::POLICY_UPDATE_PRINCIPAL_RANGES_VERSION,3);
 }
 
 #[test]

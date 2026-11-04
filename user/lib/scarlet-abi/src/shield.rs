@@ -175,6 +175,25 @@ pub struct RawPolicyUpdateWithSets {
     pub reserved: [u64; 2],
 }
 pub const POLICY_UPDATE_SETS_VERSION: u32 = 2;
+/// Version three appends bounded principal conditions to the version-two prefix.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RawPolicyUpdateWithPrincipalRanges {
+    pub base: RawPolicyUpdateWithSets,
+    pub principal_ranges: u64,
+    pub principal_range_count: u64,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RawPrincipalRangeTransition {
+    pub source: u32,
+    pub target: u32,
+    pub first: u32,
+    pub last: u32,
+}
+pub const POLICY_UPDATE_PRINCIPAL_RANGES_VERSION: u32 = 3;
+const _: [();224] = [();core::mem::size_of::<RawPolicyUpdateWithPrincipalRanges>()];
+const _: [();16] = [();core::mem::size_of::<RawPrincipalRangeTransition>()];
 pub const MAX_LABEL_SETS: usize = 256;
 pub const MAX_SET_MEMBERS: usize = 16384;
 

@@ -41,6 +41,16 @@ pub struct TransitionRule {
     pub principal: identity::Principal,
 }
 
+/// An inclusive principal interval delegated by the policy manager. All
+/// identity slots must match one principal inside this interval at use time.
+#[derive(Clone, Copy)]
+pub struct PrincipalRangeTransitionRule {
+    pub source: u32,
+    pub target: u32,
+    pub first: identity::Principal,
+    pub last: identity::Principal,
+}
+
 #[derive(Clone, Copy)]
 pub struct ExecTransitionRule {
     pub source: u32,
@@ -60,6 +70,7 @@ pub(crate) struct PolicyData {
     names: BTreeMap<String, u32>,
     grants: BTreeMap<(u32, u32, u32), u64>,
     transitions: BTreeSet<(u32, u32, u32)>,
+    principal_ranges: BTreeSet<(u32, u32, u32, u32)>,
     exec_transitions: BTreeMap<(u32, u32, u32), u32>,
 }
 
@@ -117,6 +128,7 @@ impl Policy {
             names: BTreeMap::new(),
             grants: BTreeMap::new(),
             transitions: BTreeSet::new(),
+            principal_ranges: BTreeSet::new(),
             exec_transitions: BTreeMap::new(),
         };
         data.add(update::PolicyUpdate {
@@ -264,11 +276,9 @@ impl Subject {
         self.label == other.label && Arc::ptr_eq(&self.policy, &other.policy)
     }
     pub fn can_transition(&self) -> bool {
-        self.policy
-            .snapshot()
-            .transitions
-            .iter()
-            .any(|&(source, _, _)| source == self.label)
+        let policy=self.policy.snapshot();
+        policy.transitions.iter().any(|&(source, _, _)| source == self.label)
+            || policy.principal_ranges.iter().any(|&(source, _, _, _)| source == self.label)
     }
     pub fn transition(
         &self,
@@ -276,12 +286,11 @@ impl Subject {
         credentials: &identity::Credentials,
     ) -> Result<Self, &'static str> {
         let ids = credentials.principals();
+        let policy=self.policy.snapshot();
         if ids != identity::Identities::all(ids.active)
-            || !self
-                .policy
-                .snapshot()
-                .transitions
-                .contains(&(self.label, target, ids.active.0))
+            || !(policy.transitions.contains(&(self.label, target, ids.active.0))
+                || policy.principal_ranges.iter().any(|&(source,next,first,last)|
+                    source==self.label && next==target && (first..=last).contains(&ids.active.0)))
         {
             return Err("label transition not delegated for these identities");
         }

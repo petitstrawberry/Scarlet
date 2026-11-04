@@ -14,7 +14,8 @@ pub use scarlet_abi::shield::{
     MAX_LABELS, MAX_RULES, MAX_LABEL_BYTES, MAX_LABEL_SETS, MAX_SET_MEMBERS,
 };
 pub use scarlet_abi::shield::{RawLabelSet as LabelSet, RawSetMember as SetMember,
-    RawLabelSelector as LabelSelector, RawSetGrant as SetGrant, RawSetFileRule as SetFileRule};
+    RawLabelSelector as LabelSelector, RawSetGrant as SetGrant, RawSetFileRule as SetFileRule,
+    RawPrincipalRangeTransition as PrincipalRangeTransition};
 
 #[derive(Default)]
 pub struct LabelSetUpdate<'a> {
@@ -70,6 +71,26 @@ impl Policy {
         relabel:&[FileRelabel],
         sets:LabelSetUpdate<'_>,
     )->HandleResult<()> {
+        self.extend_with_principal_ranges(expected_generation,labels,rules,transitions,exec,create,relabel,sets,&[])
+    }
+
+    /// Publish principal intervals and their labels/grants in one generation.
+    /// The existing management capability remains required by the kernel.
+    pub fn extend_with_principal_ranges(
+        &self,
+        expected_generation:u64,
+        labels:&[(u32,&str)],
+        rules:&[Rule],
+        transitions:&[Transition],
+        exec:&[ExecTransition],
+        create:&[FileCreate],
+        relabel:&[FileRelabel],
+        sets:LabelSetUpdate<'_>,
+        principal_ranges:&[PrincipalRangeTransition],
+    )->HandleResult<()> {
+        if principal_ranges.len()>MAX_RULES || principal_ranges.iter().any(|rule| rule.first>rule.last) {
+            return Err(HandleError::InvalidParameter);
+        }
         if sets.sets.len()>scarlet_abi::shield::MAX_LABEL_SETS || sets.members.len()>scarlet_abi::shield::MAX_SET_MEMBERS
             || sets.grants.len()>MAX_RULES || sets.files.len()>MAX_RULES {return Err(HandleError::InvalidParameter);}
         if labels.len() > MAX_LABELS
@@ -98,7 +119,8 @@ impl Policy {
             .collect();
         let has_sets = !sets.sets.is_empty() || !sets.members.is_empty() || !sets.grants.is_empty() || !sets.files.is_empty();
         let raw = scarlet_abi::shield::RawPolicyUpdate {
-            version: if has_sets {scarlet_abi::shield::POLICY_UPDATE_SETS_VERSION} else {scarlet_abi::shield::POLICY_UPDATE_VERSION},
+            version: if !principal_ranges.is_empty() {scarlet_abi::shield::POLICY_UPDATE_PRINCIPAL_RANGES_VERSION}
+                else if has_sets {scarlet_abi::shield::POLICY_UPDATE_SETS_VERSION} else {scarlet_abi::shield::POLICY_UPDATE_VERSION},
             expected_generation,
             labels: labels.as_ptr() as u64,
             label_count: labels.len() as u64,
@@ -122,13 +144,17 @@ impl Policy {
             set_files:sets.files.as_ptr() as u64,set_file_count:sets.files.len() as u64,
             reserved:[0;2],
         };
+        let ranged=scarlet_abi::shield::RawPolicyUpdateWithPrincipalRanges {
+            base:extended,principal_ranges:principal_ranges.as_ptr() as u64,
+            principal_range_count:principal_ranges.len() as u64,
+        };
         // SAFETY: the specification, records and names are borrowed until return.
         let result = unsafe {
             scarlet_sys::syscall3(
                 Syscall::ShieldPolicyExtend,
                 self.0.as_raw() as usize,
-                &extended as *const _ as usize,
-                if has_sets {208} else {128},
+                &ranged as *const _ as usize,
+                if !principal_ranges.is_empty() {224} else if has_sets {208} else {128},
             )
         };
         if result == 0 {
