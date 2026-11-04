@@ -284,6 +284,17 @@ def main():
         # libraries into each APEX's own lib directory as well as the system and
         # vendor namespaces; /system/lib64 is not a search path for APEX hosts.
         library_directories={root/"system/lib64",root/"vendor/lib64",*root.glob("*/apex/*/lib64")}
+        # Some stock APEX executables (including derive_sdk) have no lib64
+        # directory in their payload. Their isolated loader still resolves
+        # inherited preloads there, so include configured flattened modules
+        # even when that directory must be created for instrumentation.
+        for module in metadata["profile"]["apex_modules"]:
+            for partition in ("system", "system_ext", "product", "vendor"):
+                apex=root/partition/"apex"/module
+                if apex.is_dir() and not apex.is_symlink() and (apex/"apex_manifest.pb").is_file():
+                    library=apex/"lib64"
+                    if library.is_symlink():raise ValueError("APEX diagnostic library directory is an alias")
+                    library_directories.add(library)
         for library_directory in sorted(library_directories):
             destination=library_directory/"libprobe-init-kmsg.so"
             destination.parent.mkdir(parents=True,exist_ok=True)
