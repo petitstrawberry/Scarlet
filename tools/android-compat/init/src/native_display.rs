@@ -156,6 +156,9 @@ impl Setup {
         Ok(Display {pid, _bridge: bridge})
     }
 }
+impl Display {
+    pub fn set_session(&self, pid: u32) { self._bridge.set_session(pid); }
+}
 impl Drop for Display {
     fn drop(&mut self) {
         // SAFETY: only the renderer spawned and owned by this fixture is targeted.

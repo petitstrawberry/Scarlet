@@ -1,6 +1,7 @@
 //! Native owner of Android's outer window and input. The Android HAL supplies
 //! only CPU scanout frames on the inherited transport; it never owns this UI.
 mod input;
+mod bridge;
 mod mouse_wire;
 mod protocol;
 use scarlet_os::{Handle, handle::capability::StreamError, socket::Socket};
@@ -422,8 +423,11 @@ fn owned(raw: u32) -> Result<Handle> {
     unsafe { Handle::from_raw(raw as i32) }.map_err(|_| "inherited display handle")
 }
 fn run() -> Result<()> {
-    let args: Vec<_> = std::env::args()
-        .skip(1)
+    let raw_args: Vec<_> = std::env::args().skip(1).collect();
+    if raw_args.first().map(String::as_str) == Some("--input-bridge") {
+        return bridge::run(&raw_args[1..]);
+    }
+    let args: Vec<_> = raw_args.iter()
         .map(|v| v.parse::<u32>())
         .collect::<std::result::Result<_, _>>()
         .map_err(|_| "display arguments")?;

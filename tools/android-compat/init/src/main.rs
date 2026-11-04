@@ -122,6 +122,7 @@ fn check(stdio: &[std::handle::Handle; 3]) -> Result<(), &'static str> {
         let pid = environment
             .spawn(&executable, &argv, &env, "/", &handles)
             .map_err(|_| "ART spawn")?;
+        if let Some(display) = &_display { display.set_session(pid); }
         let status = wait_for_program(pid as i32)?;
         if let Some(manager)=app_manager {manager.finish()?;}
         println!("SCARLET_ANDROID_{}_EXIT {}", label, status);
