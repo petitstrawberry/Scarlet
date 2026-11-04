@@ -11,6 +11,7 @@ pub struct Setup {
     listener: Socket,
     keyboard: Handle,
     touch: Handle,
+    mouse: Handle,
 }
 pub struct Display(u32);
 pub fn prepare(android: &VfsView) -> Result<Option<Setup>, &'static str> {
@@ -21,6 +22,8 @@ pub fn prepare(android: &VfsView) -> Result<Option<Setup>, &'static str> {
         std::input::create_virtual_keyboard().map_err(|_| "keyboard channel")?;
     let (touch, touch_events) =
         std::input::create_virtual_touchscreen(640, 480).map_err(|_| "touch channel")?;
+    let (mouse, mouse_events) =
+        std::input::create_virtual_mouse().map_err(|_| "mouse channel")?;
     android
         .create_directory("/dev/input")
         .or_else(|_| android.open("/dev/input", 0).map(|_| ()))
@@ -37,6 +40,11 @@ pub fn prepare(android: &VfsView) -> Result<Option<Setup>, &'static str> {
                 FilePublication {
                     name: "event1",
                     file: &touch_events,
+                    access: 1,
+                },
+                FilePublication {
+                    name: "event2",
+                    file: &mouse_events,
                     access: 1,
                 },
             ],
@@ -95,6 +103,7 @@ pub fn prepare(android: &VfsView) -> Result<Option<Setup>, &'static str> {
         listener,
         keyboard,
         touch,
+        mouse,
     }))
 }
 impl Setup {
@@ -129,11 +138,15 @@ impl Setup {
                 source: self.listener.as_handle(),
                 target: 5,
             },
+            HandleMapping {
+                source: &self.mouse,
+                target: 6,
+            },
         ]);
         let pid = environment
             .spawn(
                 &executable,
-                &["/bin/android-runtime", "5", "3", "4", "640", "480"],
+                &["/bin/android-runtime", "5", "3", "4", "6", "640", "480"],
                 &["PATH=/bin"],
                 "/",
                 &handles,

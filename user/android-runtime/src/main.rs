@@ -9,7 +9,7 @@ use scarlet_ui_core::{
 };
 use std::time::Duration;
 use sws_client_c::{
-    self as sws, SwsEvent,
+    self as sws, SwsEvent, SwsTouchChange, SwsTouchFrame,
     scene::{self, SwsInsets, SwsRect, SwsSceneFrame, SwsSceneGeometry},
 };
 type Result<T> = std::result::Result<T, &'static str>;
@@ -46,6 +46,10 @@ impl Window {
                 &mut id,
             )
         })?;
+        if let Err(error) = check(sws::sws_window_set_touch_input(id, 1)) {
+            let _ = sws::sws_window_destroy(id);
+            return Err(error);
+        }
         let geometry = SwsSceneGeometry {
             width: width + inset.left + inset.right,
             height: height + inset.top + inset.bottom,
@@ -142,23 +146,113 @@ impl Window {
         }
         Ok(close)
     }
+    fn content_fit(&self) -> SwsRect {
+        let r = self.frame.content();
+        input::fit(
+            SwsRect {
+                x: r.x,
+                y: r.y,
+                width: r.width,
+                height: r.height,
+            },
+            self.width,
+            self.height,
+        )
+    }
+    fn inside_content(&self, fit: SwsRect) -> bool {
+        input::contains(fit, self.x, self.y)
+            && self.frame.clip().iter().any(|r| {
+                input::contains(
+                    SwsRect {
+                        x: r.x,
+                        y: r.y,
+                        width: r.width,
+                        height: r.height,
+                    },
+                    self.x,
+                    self.y,
+                )
+            })
+    }
+    fn poll_touch(&self, input: &mut input::Input) -> Result<()> {
+        let mut header = SwsTouchFrame {
+            window_id: 0,
+            seat_id: 0,
+            serial: 0,
+            time_ns: 0,
+            change_count: 0,
+            reserved: 0,
+        };
+        // SWS accepts up to 128 changes in one touch frame.
+        let mut changes: [SwsTouchChange; 128] = std::array::from_fn(|_| SwsTouchChange {
+            id: 0,
+            phase: 0,
+            x: 0,
+            y: 0,
+            pressure: 0,
+            touch_major: 0,
+            reserved: 0,
+        });
+        // Each kind-8 marker represents exactly one queued frame. Consuming one
+        // here preserves its ordering relative to later mouse and focus events.
+        let count = unsafe {
+            sws::sws_poll_touch_frame(
+                self.id,
+                &mut header,
+                changes.as_mut_ptr(),
+                changes.len() as u32,
+            )
+        };
+        if count < 0 {
+            return Err("SWS touch poll");
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        if header.window_id != self.id || header.change_count as usize > changes.len() {
+            return Err("SWS touch frame");
+        }
+        let fit = self.content_fit();
+        for change in &changes[..header.change_count as usize] {
+            let phase = match change.phase {
+                0 => input::TouchPhase::Down,
+                1 => input::TouchPhase::Move,
+                2 => input::TouchPhase::Up,
+                3 => input::TouchPhase::Cancel,
+                _ => continue,
+            };
+            input.touch(
+                fit,
+                input::TouchChange {
+                    id: change.id,
+                    phase,
+                    x: change.x,
+                    y: change.y,
+                },
+            )?;
+        }
+        Ok(())
+    }
     fn event(&mut self, event: SwsEvent, input: &mut input::Input) -> Result<bool> {
         if event.window_id != self.id {
             return Ok(false);
         }
         match event.kind {
             3 | 7 => return Ok(true),
+            8 => self.poll_touch(input)?,
             2 | 5 | 6 => {
                 self.refresh()?;
                 self.present()?;
             }
             4 if event.value == 0 => {
                 input.release()?;
-                self.pointer(MouseEvent::ButtonCancelled {
-                    button: MouseButton::Left,
-                    x: self.x,
-                    y: self.y,
-                })?;
+                for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+                    self.pointer(MouseEvent::ButtonCancelled {
+                        button,
+                        x: self.x,
+                        y: self.y,
+                    })?;
+                }
             }
             1 => {
                 if matches!(event.type_, 2 | 3) && event.code <= 1 {
@@ -176,62 +270,36 @@ impl Window {
                         x: self.x,
                         y: self.y,
                     })?;
-                    let r = self.frame.content();
-                    let fit = input::fit(
-                        SwsRect {
-                            x: r.x,
-                            y: r.y,
-                            width: r.width,
-                            height: r.height,
-                        },
-                        self.width,
-                        self.height,
-                    );
-                    input.pointer(fit, self.x, self.y, None, false)?;
-                } else if event.type_ == 1 && matches!(event.code, 0x110 | 0x14a) {
-                    let event = if event.value != 0 {
+                    let fit = self.content_fit();
+                    let inside = self.inside_content(fit);
+                    input.mouse_motion(fit, self.x, self.y, inside)?;
+                } else if event.type_ == 2 && matches!(event.code, 6 | 8) {
+                    let fit = self.content_fit();
+                    let inside = self.inside_content(fit);
+                    input.mouse_wheel(fit, self.x, self.y, event.code, event.value, inside)?;
+                } else if event.type_ == 1 && matches!(event.code, 0x110..=0x112) {
+                    let button = pointer_button(event.code);
+                    let mouse = if event.value != 0 {
                         MouseEvent::ButtonPressed {
-                            button: MouseButton::Left,
+                            button,
                             x: self.x,
                             y: self.y,
                             click_count: 1,
                         }
                     } else {
                         MouseEvent::ButtonReleased {
-                            button: MouseButton::Left,
+                            button,
                             x: self.x,
                             y: self.y,
                             click_count: 1,
                         }
                     };
-                    if self.pointer(event)? {
+                    if self.pointer(mouse)? {
                         return Ok(true);
                     }
-                    let r = self.frame.content();
-                    let fit = input::fit(
-                        SwsRect {
-                            x: r.x,
-                            y: r.y,
-                            width: r.width,
-                            height: r.height,
-                        },
-                        self.width,
-                        self.height,
-                    );
-                    let inside = input::contains(fit, self.x, self.y)
-                        && self.frame.clip().iter().any(|r| {
-                            input::contains(
-                                SwsRect {
-                                    x: r.x,
-                                    y: r.y,
-                                    width: r.width,
-                                    height: r.height,
-                                },
-                                self.x,
-                                self.y,
-                            )
-                        });
-                    input.pointer(fit, self.x, self.y, Some(event_value(event)), inside)?;
+                    let fit = self.content_fit();
+                    let inside = self.inside_content(fit);
+                    input.mouse_button(fit, self.x, self.y, event.code, event.value, inside)?;
                 } else if event.type_ == 1 {
                     input.key(event.code, event.value)?;
                 }
@@ -244,8 +312,13 @@ impl Window {
         Ok(false)
     }
 }
-fn event_value(event: MouseEvent) -> bool {
-    matches!(event, MouseEvent::ButtonPressed { .. })
+fn pointer_button(code: u16) -> MouseButton {
+    match code {
+        0x110 => MouseButton::Left,
+        0x111 => MouseButton::Right,
+        0x112 => MouseButton::Middle,
+        _ => unreachable!(),
+    }
 }
 impl Drop for Window {
     fn drop(&mut self) {
@@ -263,23 +336,32 @@ fn run() -> Result<()> {
         .map(|v| v.parse::<u32>())
         .collect::<std::result::Result<_, _>>()
         .map_err(|_| "display arguments")?;
-    if args.len() != 5
-        || args[..3].iter().any(|v| *v > i32::MAX as u32)
+    if args.len() != 6
+        || args[..4].iter().any(|v| *v > i32::MAX as u32)
         || args[0] == args[1]
         || args[0] == args[2]
+        || args[0] == args[3]
         || args[1] == args[2]
-        || !(2..=4096).contains(&args[3])
+        || args[1] == args[3]
+        || args[2] == args[3]
         || !(2..=4096).contains(&args[4])
+        || !(2..=4096).contains(&args[5])
     {
         return Err(
-            "usage: android-runtime listener-handle keyboard-producer touch-producer width height",
+            "usage: android-runtime listener-handle keyboard-producer touch-producer mouse-producer width height",
         );
     }
     let server = Socket::from_handle(owned(args[0])?).map_err(|_| "display listener")?;
     server
         .set_nonblocking(true)
         .map_err(|_| "display listener mode")?;
-    let mut input = input::Input::new(owned(args[1])?, owned(args[2])?, args[3], args[4]);
+    let mut input = input::Input::new(
+        owned(args[1])?,
+        owned(args[2])?,
+        owned(args[3])?,
+        args[4],
+        args[5],
+    );
     let mut peer: Option<Socket> = None;
     let mut window: Option<Window> = None;
     let mut bytes = Vec::new();
@@ -345,8 +427,8 @@ fn run() -> Result<()> {
                         match header.kind {
                             protocol::HELLO => {
                                 if window.is_some()
-                                    || header.width != args[3]
-                                    || header.height != args[4]
+                                    || header.width != args[4]
+                                    || header.height != args[5]
                                 {
                                     return Err("display dimensions");
                                 }
