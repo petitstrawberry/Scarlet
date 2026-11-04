@@ -104,6 +104,8 @@ const EPOLLIN: u32 = 0x0001;
 const EPOLLPRI: u32 = 0x0002;
 const EPOLLOUT: u32 = 0x0004;
 const EPOLLWAKEUP: u32 = 1 << 29;
+const EPOLLONESHOT: u32 = 1 << 30;
+const EPOLLET: u32 = 1 << 31;
 const EPOLL_CTL_ADD: i32 = 1;
 const EPOLL_CTL_DEL: i32 = 2;
 const EPOLL_CTL_MOD: i32 = 3;
@@ -117,6 +119,8 @@ struct EpollInterest {
     watched_handle: u32,
     events: u32,
     data: u64,
+    subscriptions: Option<Vec<crate::sync::readiness::ReadinessRegistration>>,
+    delivery: alloc::sync::Arc<crate::sync::IrqSpinLock<EpollDelivery>>,
     // Until device wake sources are available, hold this throughout the
     // registration, including sleep and event processing, rather than risk
     // suspending before an event can be delivered.
@@ -125,10 +129,53 @@ struct EpollInterest {
 
 /// Shared by duplicates, forked fd tables and surviving exec descriptors.
 /// Dropping the last epoll owner unregisters interests and releases inhibitors.
-pub(super) struct EpollLifetime(u32);
-impl EpollLifetime { pub(super) fn new(handle:u32)->Self { Self(handle) } }
+pub(super) struct EpollLifetime {
+    handle: u32,
+    waker: alloc::sync::Arc<crate::sync::Waker>,
+}
+impl EpollLifetime {
+    pub(super) fn new(handle: u32) -> Self {
+        Self { handle, waker: alloc::sync::Arc::new(crate::sync::Waker::new_interruptible("epoll")) }
+    }
+}
 impl Drop for EpollLifetime {
-    fn drop(&mut self) { epoll_interests().write().retain(|interest| interest.epoll_handle != self.0); }
+    fn drop(&mut self) { epoll_interests().write().retain(|interest| interest.epoll_handle != self.handle); }
+}
+
+struct EpollDelivery {
+    active: bool,
+    armed: bool,
+    initial: bool,
+    last_ready: u32,
+    generations: Vec<u64>,
+}
+impl EpollDelivery {
+    fn new() -> Self {
+        Self { active: true, armed: true, initial: true, last_ready: 0, generations: Vec::new() }
+    }
+    fn pending(&mut self, events: u32, ready: u32, generations: &[u64]) -> u32 {
+        self.last_ready &= ready;
+        if !self.active || !self.armed { return 0; }
+        if events & EPOLLET != 0 && !self.initial && self.generations == generations
+            && ready & !self.last_ready == 0 { return 0; }
+        ready
+    }
+    fn delivered(&mut self, events: u32, ready: u32, generations: Vec<u64>) {
+        self.initial = false;
+        self.last_ready = ready;
+        self.generations = generations;
+        if events & EPOLLONESHOT != 0 { self.armed = false; }
+    }
+}
+
+impl EpollInterest {
+    fn generations(&self) -> Vec<u64> {
+        self.subscriptions.as_ref().map(|registrations| registrations.iter()
+            .map(|registration| registration.generation()).collect()).unwrap_or_default()
+    }
+    fn pending(&self, ready: u32) -> u32 {
+        self.delivery.lock().pending(self.events, ready, &self.generations())
+    }
 }
 
 fn epoll_interests() -> &'static IrqRwSpinLock<Vec<EpollInterest>> {
@@ -207,9 +254,9 @@ fn epoll_ready_events(abi: &LinuxAbi, task: &crate::task::Task, interest: &Epoll
         // Walk on the heap rather than recursing on the kernel stack. An
         // epoll FD is readable when its own ready list is nonempty. Release
         // the registry lock before consulting any watched kernel object.
-        let mut pending = vec![handle];
+        let mut pending = vec![(handle, Vec::<EpollInterest>::new())];
         let mut visited = Vec::new();
-        while let Some(handle) = pending.pop() {
+        while let Some((handle, path)) = pending.pop() {
             if visited.contains(&handle) {
                 continue;
             }
@@ -226,10 +273,17 @@ fn epoll_ready_events(abi: &LinuxAbi, task: &crate::task::Task, interest: &Epoll
                 }
                 if is_epoll_handle(child.watched_handle) {
                     if child.events & EPOLLIN != 0 {
-                        pending.push(child.watched_handle);
+                        let state = child.delivery.lock();
+                        if state.active && state.armed {
+                            let mut branch = path.clone();
+                            branch.push(child.clone());
+                            pending.push((child.watched_handle, branch));
+                        }
                     }
-                } else if epoll_ready_events(abi, task, &child) != 0 {
-                    return EPOLLIN;
+                } else if child.pending(epoll_ready_events(abi, task, &child)) != 0 {
+                    if path.iter().all(|ancestor| ancestor.pending(EPOLLIN) != 0) {
+                        return EPOLLIN;
+                    }
                 }
             }
         }
@@ -4854,6 +4908,41 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 return errno::to_result(errno::EINVAL);
             }
 
+            let Some(owner) = abi.fd_table.read().epolls.get(&epoll_handle).cloned() else {
+                return errno::to_result(errno::EBADF);
+            };
+            let child_owner = if is_epoll_handle(watched_handle) {
+                let Some(child) = abi.fd_table.read().epolls.get(&watched_handle).cloned() else {
+                    return errno::to_result(errno::EBADF);
+                };
+                Some(child)
+            } else { None };
+            let mut subscriptions = if child_owner.is_some() { Some(Vec::new()) } else {
+                let Some(object) = task.handle_table.get(watched_handle) else {
+                    return errno::to_result(errno::EBADF);
+                };
+                if let Some(file) = object.as_file()
+                    && file.as_any().is::<crate::fs::vfs_v2::VfsFileObject>()
+                    && file.metadata().is_ok_and(|metadata| matches!(metadata.file_type,
+                        FileType::RegularFile | FileType::Directory)) {
+                    return errno::to_result(errno::EPERM);
+                }
+                let Some(selectable) = object.as_selectable() else {
+                    return errno::to_result(errno::EPERM);
+                };
+                selectable.subscribe_readiness(
+                    crate::object::capability::selectable::ReadyInterest {
+                        read: events & EPOLLIN != 0,
+                        write: events & EPOLLOUT != 0,
+                        except: events & EPOLLPRI != 0,
+                    }, &owner.waker)
+            };
+            // Edge-triggered delivery needs producer notifications, including
+            // transitions that happen between two readiness scans.
+            if events & EPOLLET != 0 && subscriptions.is_none() {
+                return errno::to_result(errno::EOPNOTSUPP);
+            }
+
             // Linux ignores EPOLLWAKEUP when the caller lacks the authority.
             if !task.credentials.read().permits(crate::shield::identity::INHIBIT_SUSPEND) {
                 events &= !EPOLLWAKEUP;
@@ -4887,6 +4976,9 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     }
                 }
             }
+            if let Some(child) = child_owner {
+                subscriptions = Some(vec![child.waker.subscribe_readiness(&owner.waker)]);
+            }
             if let Some(existing) = interests.iter_mut().find(|interest| {
                 interest.epoll_handle == epoll_handle
                     && interest.fd == fd
@@ -4899,6 +4991,9 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                 existing.data = data;
                 existing.watched_handle = watched_handle;
                 existing.inhibitor = inhibitor;
+                existing.delivery.lock().active = false;
+                existing.delivery = alloc::sync::Arc::new(crate::sync::IrqSpinLock::new(EpollDelivery::new()));
+                existing.subscriptions = subscriptions;
             } else {
                 if op == EPOLL_CTL_MOD {
                     return errno::to_result(errno::ENOENT);
@@ -4910,8 +5005,12 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
                     events,
                     data,
                     inhibitor,
+                    subscriptions,
+                    delivery: alloc::sync::Arc::new(crate::sync::IrqSpinLock::new(EpollDelivery::new())),
                 });
             }
+            drop(interests);
+            owner.waker.wake_all();
             0
         }
         EPOLL_CTL_DEL => {
@@ -4921,13 +5020,20 @@ pub fn sys_epoll_ctl(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
             let mut interests = epoll_interests().write();
             let before = interests.len();
             interests.retain(|interest| {
-                !(interest.epoll_handle == epoll_handle
+                let remove = interest.epoll_handle == epoll_handle
                     && interest.fd == fd
-                    && interest.watched_handle == watched_handle)
+                    && interest.watched_handle == watched_handle;
+                if remove { interest.delivery.lock().active = false; }
+                !remove
             });
-            if interests.len() == before {
+            let removed = interests.len() != before;
+            drop(interests);
+            if !removed {
                 errno::to_result(errno::ENOENT)
             } else {
+                if let Some(owner) = abi.fd_table.read().epolls.get(&epoll_handle).cloned() {
+                    owner.waker.wake_all();
+                }
                 0
             }
         }
@@ -4988,6 +5094,9 @@ fn epoll_wait_for_task(
     if !is_epoll_handle(epoll_handle) || events_ptr == 0 || maxevents == 0 {
         return errno::to_result(errno::EINVAL);
     }
+    let Some(owner) = abi.fd_table.read().epolls.get(&epoll_handle).cloned() else {
+        return errno::to_result(errno::EBADF);
+    };
 
     let timeout_ns = if timeout_ms < 0 {
         None
@@ -5006,20 +5115,42 @@ fn epoll_wait_for_task(
             .collect();
 
         let mut ready_count = 0usize;
-        for interest in interests {
+        let needs_recheck = interests.iter().any(|interest| {
+            let state = interest.delivery.lock();
+            state.active && state.armed && interest.subscriptions.is_none()
+        });
+        let mut delivered = Vec::new();
+        for interest in &interests {
             if ready_count >= maxevents {
                 break;
             }
-            let ready = epoll_ready_events(abi, &task, &interest);
+            // Snapshot notifications before sampling the level: a producer
+            // racing the scan then remains visible on the next iteration.
+            let generations = interest.generations();
+            let raw_ready = epoll_ready_events(abi, &task, interest);
+            let mut state = interest.delivery.lock();
+            let ready = state.pending(interest.events, raw_ready, &generations);
             if ready == 0 {
                 continue;
             }
             if !write_linux_epoll_event(&task, events_ptr, ready_count, ready, interest.data) {
                 return errno::to_result(errno::EFAULT);
             }
+            state.delivered(interest.events, ready, generations);
+            delivered.push(interest.delivery.clone());
             ready_count += 1;
         }
         if ready_count != 0 {
+            // Round-robin the ready set when userspace has a smaller output
+            // array than the number of continuously ready descriptors.
+            let mut registry = epoll_interests().write();
+            for state in delivered {
+                if let Some(index) = registry.iter().position(|interest|
+                    alloc::sync::Arc::ptr_eq(&interest.delivery, &state)) {
+                    let interest = registry.remove(index);
+                    registry.push(interest);
+                }
+            }
             return ready_count;
         }
 
@@ -5034,16 +5165,16 @@ fn epoll_wait_for_task(
         if linux_poll_interrupted(abi, task) {
             return errno::to_result(errno::EINTR);
         }
-        let Some(recheck_delay_ns) =
-            crate::object::capability::selectable::multi_readiness_recheck_delay(
-                deadline,
-                crate::timer::get_time_ns(),
-            )
-        else {
-            return 0;
-        };
-        if let Err(error) = linux_poll_sleep(task, trapframe, Some(recheck_delay_ns)) {
-            return errno::to_result(error);
+        let now = crate::timer::get_time_ns();
+        let wait_ns = if needs_recheck {
+            crate::object::capability::selectable::multi_readiness_recheck_delay(deadline, now)
+        } else { deadline.map(|end| end.saturating_sub(now)) };
+        // Sources retain registrations for the whole epoll lifetime. Waker's
+        // pre-wait latch closes the scan-to-sleep race, including ctl changes.
+        if matches!(owner.waker.wait_with_timeout_precision_result(
+            task.get_id(), trapframe, wait_ns, crate::timer::TimerPrecision::Exact,
+        ), crate::sync::waker::WaitResult::Interrupted) {
+            return errno::to_result(errno::EINTR);
         }
     }
 }
@@ -6568,6 +6699,63 @@ mod tests {
         crate::library::std::usercopy::copy_to_user(task,address,&bytes).unwrap();
         frame.set_arg(0,epfd);frame.set_arg(1,operation as usize);frame.set_arg(2,watched);frame.set_arg(3,address);
         super::sys_epoll_ctl(abi,frame)
+    }
+    fn poll_epoll_now(abi: &mut crate::abi::linux::generic::LinuxAbi,
+        task: &crate::task::Task, frame: &mut crate::arch::Trapframe, epfd: usize, address: usize) -> usize {
+        frame.set_arg(0, epfd); frame.set_arg(1, address);
+        frame.set_arg(2, 1); frame.set_arg(3, 0);
+        super::epoll_wait_for_task(abi, frame, task)
+    }
+
+    #[test_case]
+    fn epoll_edge_reports_constant_writable_only_once_until_rearmed() {
+        let (task, mut abi, mut frame, address, watched) = wake_epoll_fixture();
+        frame.set_arg(0, 0);
+        let epfd = super::sys_epoll_create1(&mut abi, &mut frame);
+        let events = super::EPOLLOUT | super::EPOLLET;
+        assert_eq!(wake_epoll_ctl(&mut abi, &mut frame, &task, address, epfd, watched, 1, events), 0);
+        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 1);
+        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 0);
+        assert_eq!(wake_epoll_ctl(&mut abi, &mut frame, &task, address, epfd, watched, 3, events), 0);
+        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 1);
+        drop(abi); crate::task::clear_mock_current_task();
+    }
+
+    #[test_case]
+    fn epoll_edge_retains_events_that_arrive_between_waits() {
+        let (task, mut abi, mut frame, address, watched) = wake_epoll_fixture();
+        let object = task.handle_table.get(abi.get_handle(watched).unwrap()).unwrap();
+        let stream = object.as_stream().unwrap();
+        frame.set_arg(0, 0);
+        let epfd = super::sys_epoll_create1(&mut abi, &mut frame);
+        assert_eq!(wake_epoll_ctl(&mut abi, &mut frame, &task, address, epfd, watched, 1,
+            super::EPOLLIN | super::EPOLLET), 0);
+        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 0);
+        stream.write(&1u64.to_ne_bytes()).unwrap();
+        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 1);
+        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 0);
+        stream.read(&mut [0; 8]).unwrap();
+        stream.write(&1u64.to_ne_bytes()).unwrap();
+        // The level is readable on both scans; the producer notification,
+        // rather than observing an empty counter, must preserve this edge.
+        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 1);
+        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 0);
+        drop(abi); crate::task::clear_mock_current_task();
+    }
+
+    #[test_case]
+    fn epoll_oneshot_is_shared_and_modify_rearms_a_ready_descriptor() {
+        let (task, mut abi, mut frame, address, watched) = wake_epoll_fixture();
+        frame.set_arg(0, 0);
+        let epfd = super::sys_epoll_create1(&mut abi, &mut frame);
+        let events = super::EPOLLOUT | super::EPOLLONESHOT;
+        assert_eq!(wake_epoll_ctl(&mut abi, &mut frame, &task, address, epfd, watched, 1, events), 0);
+        let mut shared = abi.clone();
+        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 1);
+        assert_eq!(poll_epoll_now(&mut shared, &task, &mut frame, epfd, address + 64), 0);
+        assert_eq!(wake_epoll_ctl(&mut shared, &mut frame, &task, address, epfd, watched, 3, events), 0);
+        assert_eq!(poll_epoll_now(&mut abi, &task, &mut frame, epfd, address + 64), 1);
+        drop(shared); drop(abi); crate::task::clear_mock_current_task();
     }
     #[test_case]
     fn epoll_wakeup_modify_delete_and_unprivileged_registration_control_real_inhibitors() {
