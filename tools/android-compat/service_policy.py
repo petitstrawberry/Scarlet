@@ -26,6 +26,56 @@ SDK_POLICY_VERSION = 30
 MAX_NATIVE_LABELS = 2048
 
 
+def _generic_file_contexts(context_sources, configured_contexts):
+    contexts = {":".join(context.split(":")[:4]) for context in configured_contexts
+                if re.fullmatch(r"u:object_r:[A-Za-z0-9_]+:s0(?::c[0-9]+(?:,c[0-9]+)*)?", context)}
+    for data in context_sources.values():
+        for line in data.decode().splitlines():
+            fields = line.split("#", 1)[0].split()
+            if fields and re.fullmatch(r"u:object_r:[A-Za-z0-9_]+:s0", fields[-1]):
+                contexts.add(fields[-1])
+    return {context.split(":")[2]: context for context in contexts}
+
+
+def generic_file_creates(policy, setools, context_sources, configured_contexts, sources):
+    """Exact canonical setfscreate delegations, without expanding label pairs."""
+    selected = _generic_file_contexts(context_sources, configured_contexts)
+    constraints = {
+        "create": {"( l2 == h2 and ( l1 == l2 ) or ( t1 == mlstrustedsubject ) )"},
+        "add_name": {"t2 != app_data_file_type or ( l1 dom l2 ) or ( t1 == mlstrustedsubject )",
+                     "t2 == app_data_file_type or ( l1 == l2 ) or ( t1 == mlstrustedsubject ) or ( t2 == mlstrustedobject )"},
+        "setfscreate": set(),
+    }
+    for name, permission in [("dir","add_name"),("process","setfscreate")]+[(name,"create") for name in ("file","dir","lnk_file","chr_file","blk_file","sock_file","fifo_file")]:
+        for rule in setools.ConstraintQuery(policy,tclass=[name],perms=[permission]).results():
+            if str(rule.ruletype)!="mlsconstrain" or " ".join(str(rule.expression).split()) not in constraints[permission]:
+                raise ValueError("unsupported canonical file creation constraint: "+str(rule))
+        if list(setools.ConstraintQuery(policy,ruletype=["validatetrans","mlsvalidatetrans"],tclass=[name]).results()):
+            raise ValueError("file creation validatetrans requires a different translation")
+    groups, evidence = [], set()
+    domains = {str(t) for t in policy.lookup_typeattr("domain").expand()}
+    for source in sorted(sources):
+        if source not in domains:raise ValueError("unknown file creation subject")
+        delegates = list(setools.TERuleQuery(policy,ruletype=["allow"],source=source,target=source,tclass=["process"],perms=["setfscreate"]).results())
+        for rule in delegates:_unconditional(rule,setools)
+        if not delegates:continue
+        def permitted(name,permission):
+            result=set()
+            for rule in setools.TERuleQuery(policy,ruletype=["allow"],source=source,tclass=[name],perms=[permission]).results():
+                targets={str(t) for t in rule.target.expand()} & selected.keys()
+                if targets:
+                    _unconditional(rule,setools);evidence.add(str(rule));result.update(selected[t] for t in targets)
+            return sorted(result)
+        parents=permitted("dir","add_name")
+        if not parents:continue
+        for kind,name in enumerate(("file","dir","lnk_file","chr_file","blk_file","sock_file","fifo_file"),1):
+            targets=permitted(name,"create")
+            if targets:
+                evidence.update(map(str,delegates))
+                groups.append({"source":f"u:r:{source}:s0","parents":parents,"targets":targets,"kind":kind})
+    return groups,sorted(evidence)
+
+
 def generic_file_relabels(policy, setools, context_sources, configured_contexts=(), source="init"):
     """Canonical s0 restorecon grants for an initially unlabeled View.
 
@@ -35,14 +85,7 @@ def generic_file_relabels(policy, setools, context_sources, configured_contexts=
     """
     if source not in ("init", "installd"):
         raise ValueError("unsupported stock label restorer")
-    contexts = {":".join(context.split(":")[:4]) for context in configured_contexts
-                if re.fullmatch(r"u:object_r:[A-Za-z0-9_]+:s0(?::c[0-9]+(?:,c[0-9]+)*)?", context)}
-    for data in context_sources.values():
-        for line in data.decode().splitlines():
-            fields = line.split("#", 1)[0].split()
-            if fields and re.fullmatch(r"u:object_r:[A-Za-z0-9_]+:s0", fields[-1]):
-                contexts.add(fields[-1])
-    selected = {context.split(":")[2]: context for context in contexts}
+    selected = _generic_file_contexts(context_sources, configured_contexts)
     grants, evidence = set(), set()
     for kind, name in enumerate(("file", "dir", "lnk_file", "chr_file", "blk_file", "sock_file", "fifo_file"), 1):
         for constraint in setools.ConstraintQuery(policy, tclass=[name], perms=["relabelfrom", "relabelto"]).results():
@@ -498,6 +541,8 @@ def export_generic(policy, setools, policy_path, root, boot_manifest, partitions
         if metadata["profile"].get("file_policy", {}).get("default") == "u:object_r:unlabeled:s0":
             from boot_profile import file_rules
             configured_contexts, _, _ = file_rules(metadata["profile"])
+            actors={source for source in ("init","vendor_init","vold","apexd","installd","ueventd") if f"u:r:{source}:s0" in metadata["profile"]["subjects"]}
+            manifest["file_create_groups"],manifest["file_create_evidence"]=generic_file_creates(policy,setools,context_sources,configured_contexts,actors)
             manifest["file_relabels"], manifest["file_relabel_evidence"] = generic_file_relabels(policy, setools, context_sources, configured_contexts)
             if "u:r:installd:s0" in metadata["profile"]["subjects"]:
                 grants, evidence = generic_file_relabels(policy, setools, context_sources, configured_contexts, "installd")
@@ -748,6 +793,25 @@ def validate_generic(manifest):
             raise ValueError("generic init file relabel")
     if len({tuple(rule) for rule in relabels}) != len(relabels):
         raise ValueError("duplicate generic init file relabel")
+    creates=value.get("file_create_groups",[])
+    evidence=value.get("file_create_evidence",[])
+    if (not isinstance(creates,list) or len(creates)>42 or not isinstance(evidence,list) or len(evidence)>16384 or
+            creates and not evidence or any(not isinstance(line,str) or not line.startswith("allow ") or len(line)>4096 for line in evidence)):
+        raise ValueError("generic file creation evidence")
+    seen=set()
+    for group in creates:
+        if (not isinstance(group,dict) or set(group)!={"source","parents","targets","kind"} or
+                group["source"] not in {f"u:r:{source}:s0" for source in ("init","vendor_init","vold","apexd","installd","ueventd")} or
+                type(group["kind"]) is not int or not 1<=group["kind"]<=7):
+            raise ValueError("generic file creation group")
+        for key in ("parents","targets"):
+            names=group[key]
+            if (not isinstance(names,list) or not names or len(names)>2048 or
+                    any(not isinstance(name,str) or not re.fullmatch(r"u:object_r:[A-Za-z0-9_]+:s0",name) for name in names) or
+                    names!=sorted(set(names))):raise ValueError("generic file creation labels")
+        key=(group["source"],group["kind"])
+        if key in seen:raise ValueError("duplicate generic file creation group")
+        seen.add(key)
     return manifest
 
 
@@ -769,6 +833,7 @@ def apply_generic_boot_policy(boot, manifest, root=None):
     if not lines or lines[0] != "scarlet-android-boot-policy-v2":
         raise ValueError("generic exec requires boot policy v2")
     labels, ids, files, rules, direct, sockets, relabels = {}, set(), {}, {}, set(), set(), set()
+    label_sets, set_members, set_rules = set(), {}, set()
     file_default = None
     for line in lines:
         fields = line.split()
@@ -790,6 +855,9 @@ def apply_generic_boot_policy(boot, manifest, root=None):
             file_default = int(fields[1])
         elif fields[0] == "file-relabel":
             relabels.add(tuple(map(int, fields[1:])))
+        elif fields[0] == "label-set":label_sets.add(int(fields[1]))
+        elif fields[0] == "set-member":set_members.setdefault(int(fields[1]),set()).add(int(fields[2]))
+        elif fields[0] == "file-set":set_rules.add(tuple(map(int,fields[1:])))
     added = []
     def identifier(label):
         if label not in labels:
@@ -829,6 +897,24 @@ def apply_generic_boot_policy(boot, manifest, root=None):
         if rule not in relabels:
             added.append("file-relabel " + " ".join(map(str, rule)))
             relabels.add(rule)
+    if manifest.get("file_create_groups") and file_default is None:
+        raise ValueError("file creation groups require a native file default")
+    def group_id(names):
+        members={identifier(name) for name in names}
+        for group in sorted(label_sets):
+            if set_members.get(group,set())==members:return group
+        group=max(label_sets,default=0)+1
+        if group>0xffffffff:raise ValueError("native label set identity exhaustion")
+        label_sets.add(group);set_members[group]=members
+        added.append(f"label-set {group}")
+        added.extend(f"set-member {group} {member}" for member in sorted(members))
+        return group
+    for group in manifest.get("file_create_groups",[]):
+        rule=(identifier(group["source"]),group_id(group["parents"]),group_id(group["targets"]),group["kind"],1,0)
+        if rule not in set_rules:
+            added.append("file-set "+" ".join(map(str,rule)));set_rules.add(rule)
+    if len(label_sets)>256 or sum(map(len,set_members.values()))>16384 or len(set_rules)>16384:
+        raise ValueError("generic label set policy bound")
     if len(labels) > MAX_NATIVE_LABELS or len(files) > 4096 or len(rules) > 16384 or len(direct) > 16384 or len(sockets) > 16384 or len(relabels) > 16384:
         raise ValueError("generic native policy bound")
     return "\n".join(lines + added) + "\n"

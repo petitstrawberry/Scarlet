@@ -1,5 +1,5 @@
 //! Explicit userspace policy loaded from the manager's verified boot inputs.
-use std::{environment::VfsView, shield::{Policy, Rule, Transition, ExecTransition, FileCreate, FileRelabel}, vec::Vec};
+use std::{environment::VfsView, shield::{Policy, Rule, Transition, ExecTransition, FileCreate, FileRelabel, LabelSet, SetMember, SetFileRule, LabelSelector, LabelSetUpdate}, vec::Vec};
 
 // Stock service rules exceed the original fixture size. Native record counts
 // are checked independently below before the policy is installed.
@@ -28,6 +28,7 @@ pub fn policy(android: &VfsView) -> Result<(Policy, Option<u32>), &'static str> 
     let mut files = Vec::new();
     let mut policy_version = None;
     let mut file_default=None;let mut create_rules=Vec::new();let mut relabel_rules=Vec::new();
+    let mut label_sets=Vec::new();let mut set_members=Vec::new();let mut set_files=Vec::new();
     for line in lines {
         let fields: Vec<_> = line.split_ascii_whitespace().collect();
         let number = |index: usize| -> Result<u32, &'static str> {
@@ -51,6 +52,9 @@ pub fn policy(android: &VfsView) -> Result<(Policy, Option<u32>), &'static str> 
             ["file-default", _] => {if file_default.replace(number(1)?).is_some() {return Err("duplicate file default");}},
             ["file-create",_,_,_,_,_] => create_rules.push(FileCreate {source:number(1)?,parent:number(2)?,target:number(3)?,kind:number(4)?,flags:number(5)?,reserved:0}),
             ["file-relabel",_,_,_,_] => relabel_rules.push(FileRelabel {source:number(1)?,old:number(2)?,target:number(3)?,kind:number(4)?}),
+            ["label-set",_] => label_sets.push(LabelSet {id:number(1)?,reserved:0}),
+            ["set-member",_,_] => set_members.push(SetMember {set:number(1)?,label:number(2)?}),
+            ["file-set",_,_,_,_,_,_] => set_files.push(SetFileRule {source:LabelSelector::label(number(1)?),origin:LabelSelector::set(number(2)?),target:LabelSelector::set(number(3)?),kind:number(4)?,action:number(5)?,flags:number(6)?,reserved:0}),
             ["policy-version", _] => {
                 let version = number(1)?;
                 if version != SUPPORTED_POLICY_VERSION || policy_version.replace(version).is_some() { return Err("boot policy version metadata"); }
@@ -60,10 +64,15 @@ pub fn policy(android: &VfsView) -> Result<(Policy, Option<u32>), &'static str> 
         // Keep in sync with the native Shield bounds; Android 13's stock
         // service inventory needs more exact labels than the original 512.
         if labels.len() > std::shield::MAX_LABELS || rules.len() > std::shield::MAX_RULES || transitions.len() > std::shield::MAX_RULES || exec_transitions.len() > std::shield::MAX_RULES || create_rules.len()>std::shield::MAX_RULES || relabel_rules.len()>std::shield::MAX_RULES || files.len() > std::shield::MAX_RULES { return Err("boot policy record bound"); }
+        if label_sets.len()>std::shield::MAX_LABEL_SETS || set_members.len()>std::shield::MAX_SET_MEMBERS || set_files.len()>std::shield::MAX_RULES {return Err("boot policy set bound");}
     }
     if !labels.contains(&(1, "u:r:init:s0")) { return Err("boot init subject missing"); }
     let policy = Policy::create_with_exec_transitions(&labels, &rules, &transitions, &exec_transitions).map_err(|_| "boot Shield policy")?;
     let policy=if let Some(default)=file_default {policy.with_file_rules(default,&create_rules,&relabel_rules).map_err(|_| "boot file policy")?}else {policy};
+    if !label_sets.is_empty() || !set_members.is_empty() || !set_files.is_empty() {
+        let generation=policy.generation().map_err(|_|"boot policy generation")?;
+        policy.extend_with_sets(generation,&[],&[],&[],&[],&[],&[],LabelSetUpdate {sets:&label_sets,members:&set_members,grants:&[],files:&set_files}).map_err(|_|"boot policy sets")?;
+    }
     std::println!("SCARLET_ANDROID_FILE_POLICY create={} relabel={}",create_rules.len(),relabel_rules.len());
     for (label, path) in &files {
         let file = android.open(path, 0).map_err(|_| "boot file-label open")?;

@@ -132,6 +132,26 @@ class ServicePolicyTests(unittest.TestCase):
             with self.subTest(index=index), self.assertRaises(ValueError):
                 validate_generic(invalid)
 
+    def test_file_create_groups_are_compact_explicit_and_idempotent(self):
+        manifest=self.generic_manifest()
+        group={"source":"u:r:init:s0","parents":["u:object_r:device:s0","u:object_r:unlabeled:s0"],
+               "targets":["u:object_r:logdw_socket:s0"],"kind":6}
+        manifest["file_create_groups"]=[group,dict(group,kind=1)]
+        manifest["file_create_evidence"]=["allow init logdw_socket:sock_file create;"]
+        self.seal_generic(manifest)
+        boot="scarlet-android-boot-policy-v2\nlabel 1 u:r:init:s0\nlabel 40 u:r:scarlet_input_bridge:s0\nlabel 100 u:object_r:unlabeled:s0\nfile-default 100\n"
+        result=apply_generic_boot_policy(boot,manifest)
+        self.assertEqual(result.count("label-set "),2)
+        self.assertIn("file-set 1 1 2 6 1 0\n",result)
+        self.assertIn("file-set 1 1 2 1 1 0\n",result)
+        self.assertNotIn("file-create ",result)
+        self.assertEqual(apply_generic_boot_policy(result,manifest),result)
+        for key,value in [("source","u:r:untrusted_app:s0"),("kind",0),("parents",["u:object_r:device:s0:c1"])]:
+            bad=deepcopy(manifest);bad["file_create_groups"][0][key]=value;self.seal_generic(bad)
+            with self.subTest(key=key),self.assertRaises(ValueError):validate_generic(bad)
+        with self.assertRaisesRegex(ValueError,"file default"):
+            apply_generic_boot_policy(boot.replace("file-default 100\n",""),manifest)
+
     def test_generic_apply_preserves_runtime_ids_and_rejects_conflicting_bindings(self):
         boot = ("scarlet-android-boot-policy-v2\nlabel 1 u:r:init:s0\n"
                 "label 40 u:r:scarlet_input_bridge:s0\nlabel 41 u:r:webview_zygote:s0\n"
@@ -231,6 +251,12 @@ class ServicePolicyTests(unittest.TestCase):
         self.assertFalse(any(rule[1] == "u:object_r:init_exec:s0" for rule in manifest["exec_transitions"]))
         for name in ("logd", "tombstoned", "traced", "mdnsd"):
             self.assertIn(["u:r:init:s0", records[name]["target"]], manifest["socket_labels"])
+        socket_creates=[group for group in manifest["file_create_groups"] if group["source"]=="u:r:init:s0" and group["kind"]==6]
+        self.assertEqual(len(socket_creates),1)
+        self.assertIn("u:object_r:logdw_socket:s0",socket_creates[0]["targets"])
+        self.assertIn("u:object_r:unlabeled:s0",socket_creates[0]["parents"])
+        for label,kind,permission in (("logdw_socket","sock_file","create"),("unlabeled","dir","add_name"),("init","process","setfscreate")):
+            self.assertTrue(list(setools.TERuleQuery(policy,ruletype=["allow"],source="init",target=label,tclass=[kind],perms=[permission]).results()))
         relabels = manifest["file_relabels"]
         self.assertIn(["u:r:init:s0", "u:object_r:unlabeled:s0", "u:object_r:dalvikcache_data_file:s0", 1], relabels)
         # This preparation belongs to init; don't invent an installer grant.

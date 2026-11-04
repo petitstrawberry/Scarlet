@@ -254,12 +254,17 @@ pub fn start(policy: Policy, android: &VfsView) -> Result<Worker, &'static str> 
         read(&view, "/scarlet/boot/shield.policy", crate::boot_profile::MAX_POLICY_BYTES)?.ok_or("manager boot policy")?;
     let mut labels = BTreeMap::new();
     let mut next = 1u32;
+    let mut next_set = 1u32;
     for line in text.lines() {
         let fields: Vec<_> = line.split_ascii_whitespace().collect();
         if let ["label", id, name] = fields.as_slice() {
             let id = id.parse::<u32>().map_err(|_| "manager label number")?;
             next = next.max(id.checked_add(1).ok_or("manager label number")?);
             labels.insert(String::from(*name), id);
+        }
+        if let ["label-set",id] = fields.as_slice() {
+            let id=id.parse::<u32>().map_err(|_|"manager set number")?;
+            next_set=next_set.max(id.checked_add(1).ok_or("manager set number")?);
         }
     }
     policy
@@ -281,7 +286,7 @@ pub fn start(policy: Policy, android: &VfsView) -> Result<Worker, &'static str> 
                 seen: BTreeSet::new(),
                 data_labels: BTreeSet::new(),
                 domain_sets:BTreeMap::new(),
-                next_set:1,
+                next_set,
             };
             let mut previous = String::new();
             while !thread_stop.load(Ordering::Acquire) {
