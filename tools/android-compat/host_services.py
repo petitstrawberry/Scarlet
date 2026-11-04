@@ -5,6 +5,8 @@ import xml.etree.ElementTree as ET
 
 NATIVE_NETWORK_LIBRARY="system/apex/com.android.tethering/lib64/libnetd_updatable.so"
 STOCK_NETWORK_LIBRARY_SHA256="e330a6e91ee2e6bf5edcbce08f9b9bfdafddf42e01dd99d1855286781d996b29"
+NETWORK_STATS_LIBRARY="system/apex/com.android.tethering/lib64/libnetworkstats.so"
+STOCK_NETWORK_STATS_SHA256="89d00b0bba1ae2d6b513c33a16ba55eed4131f47e3850f019a503ea803ff0515"
 
 def stage_native_network(root, build):
     """Replace the selected APEX's public backend using verified source output."""
@@ -18,7 +20,10 @@ def stage_native_network(root, build):
     record=json.loads(manifest.read_text())
     inputs={"CMakeLists.txt","Makefile","SOURCE_PINS.json","cmake/WriteBuildMetadata.cmake",
             "include/NetdUpdatablePublic.h","libnetd_updatable.map.txt",
-            "src/Backend.c","src/Backend.h","src/Provider.c"}
+            "src/Backend.c","src/Backend.h","src/Provider.c",
+            "include/NetworkStatsPublic.h","include/upstream/BpfNetworkStats.h",
+            "include/upstream/bpf_shared.h","libnetworkstats.map.txt",
+            "src/NetworkStats.cpp","src/NetworkStatsBackend.c","src/NetworkStatsBackend.h"}
     if (record.get("schema")!=1 or record.get("component")!="user/android-runtime/network" or
             record.get("build",{}).get("android_abi")!="arm64-v8a" or
             set(record.get("inputs_sha256",{}))!=inputs or
@@ -41,15 +46,51 @@ def stage_native_network(root, build):
             contract.get("sets_bpf_progs_loaded") is not False or
             contract.get("uid_socket_tagging")!={"supported":False,"error":"EOPNOTSUPP"}):
         raise ValueError("native network provider capability contract")
+    stats=build/"libnetworkstats.so"
+    if sha256(stats)!=record.get("statistics_artifact",{}).get("sha256"):
+        raise ValueError("changed native network statistics library")
+    stats_dependencies=elf_needed(stats)
+    if set(stats_dependencies)!={"libc++.so","libc.so","libm.so","libdl.so"}:
+        raise ValueError("native network statistics dependency contract")
+    stats_symbols=subprocess.run([reader,"--dyn-syms","--wide",str(stats)],check=True,capture_output=True,text=True).stdout
+    stats_exports={line.split()[-1] for line in stats_symbols.splitlines()
+                   if " FUNC " in line and " GLOBAL " in line and " UND " not in line}
+    required_stats_exports={
+        "_ZN7android3bpf14bpfGetUidStatsEjP5Stats",
+        "_ZN7android3bpf16bpfGetIfaceStatsEPKcP5Stats",
+        "_ZN7android3bpf23parseBpfNetworkStatsDevEPNSt3__16vectorINS0_10stats_lineENS1_9allocatorIS3_EEEE",
+        "_ZN7android3bpf26parseBpfNetworkStatsDetailEPNSt3__16vectorINS0_10stats_lineENS1_9allocatorIS3_EEEERKNS2_INS1_12basic_stringIcNS1_11char_traitsIcEENS4_IcEEEENS4_ISC_EEEEii",
+    }
+    if not required_stats_exports.issubset(stats_exports):
+        raise ValueError("native network statistics export contract")
+    stats_contract=record.get("statistics_contract",{})
+    if stats_contract!={"native_query":"0x53430000+923","counter_layer":"link",
+                        "interface_counters":True,"uid_counters":False,"tag_counters":False,
+                        "unsupported_error":"EOPNOTSUPP","claims_bpf_support":False}:
+        raise ValueError("native network statistics capability contract")
+    runtime=record.get("statistics_runtime",{})
+    runtime_file=Path(root)/"system/apex/com.android.tethering/lib64/libc++.so"
+    if (runtime.get("soname")!="libc++.so" or runtime.get("namespace")!="__1" or
+            sha256(runtime_file)!=runtime.get("sha256")):
+        raise ValueError("changed network statistics C++ runtime")
     target=Path(root)/NATIVE_NETWORK_LIBRARY
-    if sha256(target)!=STOCK_NETWORK_LIBRARY_SHA256:
+    stats_target=Path(root)/NETWORK_STATS_LIBRARY
+    if sha256(target) not in {STOCK_NETWORK_LIBRARY_SHA256,record["artifact"]["sha256"]}:
         raise ValueError("changed source APEX network library")
+    if sha256(stats_target) not in {STOCK_NETWORK_STATS_SHA256,record["statistics_artifact"]["sha256"]}:
+        raise ValueError("changed source APEX network statistics library")
     shutil.copy2(library,target)
+    shutil.copy2(stats,stats_target)
     if sha256(target)!=record["artifact"]["sha256"]:raise ValueError("changed network provider during copy")
+    if sha256(stats_target)!=record["statistics_artifact"]["sha256"]:
+        raise ValueError("changed network statistics during copy")
     return {"kind":"scarlet-native-network-provider-v1","path":NATIVE_NETWORK_LIBRARY,
             "stock_sha256":STOCK_NETWORK_LIBRARY_SHA256,"sha256":sha256(target),
             "build_sha256":sha256(manifest),"inputs_sha256":record["inputs_sha256"],
-            "needed":dependencies,"exports":sorted(exports),"contract":contract}
+            "needed":dependencies,"exports":sorted(exports),"contract":contract,
+            "statistics":{"path":NETWORK_STATS_LIBRARY,"stock_sha256":STOCK_NETWORK_STATS_SHA256,
+                          "sha256":sha256(stats_target),"needed":stats_dependencies,
+                          "exports":sorted(stats_exports),"contract":stats_contract,"runtime":runtime}}
 
 SUSPEND = "system_suspend"
 BINARY = "system/bin/hw/android.system.suspend@1.0-service"

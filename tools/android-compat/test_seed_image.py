@@ -109,6 +109,10 @@ class SeedImageTest(unittest.TestCase):
             (tree / "bin").mkdir(parents=True)
             (tree / "data/app").mkdir(parents=True)
             (tree / "data/app/state").write_bytes(b"persistent state")
+            library = "systems/android-aarch64/system/apex/example/lib64/libexample.so"
+            for root, value in ((tree,b"old library"),(staging,b"new library")):
+                (root / library).parent.mkdir(parents=True)
+                (root / library).write_bytes(value)
             (staging / "bin").mkdir(parents=True)
             for name in ("init", "bin/scarlet-ld", "bin/sws", "bin/android-runtime"):
                 (tree / name).write_bytes(b"old executable")
@@ -137,6 +141,18 @@ class SeedImageTest(unittest.TestCase):
             installed_inodes = {record["path"]: inode(record["path"]) for record in records}
             self.assertEqual(refresh_native_files(image, staging), records)
             self.assertEqual({path: inode(path) for path in installed_inodes}, installed_inodes)
+            import hashlib
+            replacements={library:hashlib.sha256(b"new library").hexdigest()}
+            records=refresh_native_files(image,staging,replacements)
+            self.assertEqual(len(records),5)
+            result=subprocess.run(["debugfs","-R","cat /"+library,str(image)],
+                                  check=True,capture_output=True)
+            self.assertEqual(result.stdout,b"new library")
+            self.assertEqual({path:inode(path) for path in identities},identities)
+            self.assertEqual(inode_metadata(image,"/data"),before_data)
+            replacements[library]="0"*64
+            with self.assertRaisesRegex(ValueError,"changed verified replacement"):
+                refresh_native_files(image,staging,replacements)
 
     def test_android_identity_survives_host_staging(self):
         with tempfile.TemporaryDirectory() as temporary:

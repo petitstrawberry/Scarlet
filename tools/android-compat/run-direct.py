@@ -163,6 +163,7 @@ def main():
     runtime_files = []
     art = None
     dex_hash = None
+    boot_metadata = None
     if args.runtime_root:
         runtime_files = [args.runtime_root / name for name in (
             "system/bin/linker64", "apex/com.android.runtime/lib64/bionic/libc.so",
@@ -265,7 +266,7 @@ def main():
             stage_stock_inputs(args.stock_inputs, args.runtime_root, android)
             shutil.copy2(args.stock_inputs / "stock-inputs.json", output / "stock-inputs.json")
         if args.boot_profile:
-            stage_boot_inputs(args.boot_profile, args.runtime_root, args.stock_inputs, android)
+            boot_metadata = stage_boot_inputs(args.boot_profile, args.runtime_root, args.stock_inputs, android)
             shutil.copy2(args.boot_profile / BOOT_MANIFEST, output / BOOT_MANIFEST)
         if args.service_inputs:
             stage_service_inputs(args.service_inputs, args.runtime_root, android)
@@ -331,7 +332,11 @@ def main():
             raise ValueError("reused rootfs image is missing")
         shutil.copyfile(args.reuse_rootfs, rootfs)
         from seed_image import refresh_native_files
-        installed = refresh_native_files(rootfs, staging)
+        replacements = {}
+        if boot_metadata and (provider := boot_metadata.get("native_network_provider")):
+            for record in (provider, provider["statistics"]):
+                replacements["systems/android-aarch64/" + record["path"]] = record["sha256"]
+        installed = refresh_native_files(rootfs, staging, replacements)
         (output / "rootfs-build.log").write_text(
             f"cloned development rootfs {args.reuse_rootfs}\n" +
             "".join(f"native file {record['path']} sha256={record['sha256']}\n"

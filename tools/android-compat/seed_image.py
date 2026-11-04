@@ -10,7 +10,7 @@ from pathlib import Path
 from art_inputs import quote_debugfs
 
 
-def refresh_native_files(image, staging):
+def refresh_native_files(image, staging, verified_files=None):
     """Install the declared native executables into an offline reused disk.
 
     Keep the existing filesystem and its data inode identities. Rebuilding a
@@ -19,6 +19,18 @@ def refresh_native_files(image, staging):
     """
     image, staging = Path(image), Path(staging)
     names = ["init", "bin/scarlet-ld", "bin/sws", "bin/android-runtime"]
+    verified_files = verified_files or {}
+    for name, digest in verified_files.items():
+        path = Path(name)
+        if (path.is_absolute() or ".." in path.parts or path.as_posix() != name or
+                name in names or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise ValueError("invalid verified replacement")
+        source = staging / name
+        if (not source.is_file() or any(part.is_symlink() for part in (source, *source.parents)
+                                       if part != staging and staging in part.parents) or
+                hashlib.sha256(source.read_bytes()).hexdigest() != digest):
+            raise ValueError("changed verified replacement: " + name)
+        names.append(name)
     sources = {name: staging / name for name in names if (staging / name).is_file()}
     if any(source.is_symlink() for source in sources.values()):
         raise ValueError("native executable input is a symlink")

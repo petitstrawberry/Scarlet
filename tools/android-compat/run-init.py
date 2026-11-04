@@ -155,6 +155,10 @@ def main():
             if not metadata.get("profile",{}).get("network_provider"):
                 raise ValueError("native network provider requires explicit profile selection")
             metadata["native_network_provider"]=stage_native_network(root,native_network)
+            provider=metadata["native_network_provider"]
+            for record in (provider,provider["statistics"]):
+                metadata["files"][record["path"]]=record["sha256"]
+                metadata["needed"][record["path"]]=record["needed"]
             (output/"native-network-provider.json").write_text(json.dumps(metadata["native_network_provider"],indent=2)+"\n")
         if stock_packages:
             from stock_packages import (MANIFEST, assemble_generic_init,
