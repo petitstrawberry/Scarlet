@@ -202,6 +202,11 @@ impl MemoryMappingOps for InputEndpoint {
     }
 }
 impl Selectable for InputEndpoint {
+    fn subscribe_readiness(&self, _interest: ReadyInterest, waiter: &Arc<Waker>)
+        -> Option<Vec<crate::sync::ReadinessRegistration>> {
+        // Injection and either endpoint's close notify this shared source.
+        Some(alloc::vec![self.channel.waker.subscribe_readiness(waiter)])
+    }
     fn is_hung_up(&self) -> bool {
         if self.producer {
             !self.channel.receiver_alive.load(Ordering::Acquire)
