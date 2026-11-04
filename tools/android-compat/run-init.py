@@ -265,7 +265,8 @@ def main():
         return metadata
 
     arguments.extend(["--program-env",f"SCARLET_INIT_OBSERVE_SECONDS={observation}"])
-    arguments.extend(["--program-env",f"ANDROID_LOG_TAGS={'*:v' if verbose_logs else '*:e'}"])
+    log_tags = "*:v" if verbose_logs else "*:e ActivityManager:i ActivityTaskManager:i InputReader:i libc:w"
+    arguments.extend(["--program-env", f"ANDROID_LOG_TAGS={log_tags}"])
     arguments.extend(["--program-env",f"SCARLET_ANDROID_LOG_MIN_PRIORITY={'0' if verbose_logs else '4'}"])
     if not verbose_logs:
         arguments.extend(["--program-env","SCARLET_INIT_QUIET=1"])

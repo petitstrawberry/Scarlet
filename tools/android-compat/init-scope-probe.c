@@ -47,10 +47,11 @@ static int important_log(const unsigned char *message,size_t length) {
  // Events/stats/security buffers contain binary records, not a priority byte.
  if(length<=12 || !(message[0]==0 || message[0]==1 || message[0]==3 || message[0]==4))return 0;
  if(message[11]>=6 && message[11]<=7)return 1;
- if(message[11]!=4)return 0;
+ if(message[11]!=4 && message[11]!=5)return 0;
  // Keep boot/input/activity evidence without the full framework info stream.
  const char *tag=(const char*)message+12;size_t tag_length=strnlen(tag,length-12);
  if(tag_length==length-12)return 0;
+ if(message[11]==5)return tag_length==sizeof("libc")-1 && !memcmp(tag,"libc",sizeof("libc")-1);
  const char *body=tag+tag_length+1;size_t body_length=length-13-tag_length;
  if(tag_length==sizeof("InputReader")-1 && !memcmp(tag,"InputReader",sizeof("InputReader")-1))return 1;
  if(tag_length==sizeof("ActivityTaskManager")-1 && !memcmp(tag,"ActivityTaskManager",sizeof("ActivityTaskManager")-1))
