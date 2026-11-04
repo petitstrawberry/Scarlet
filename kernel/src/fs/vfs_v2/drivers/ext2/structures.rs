@@ -19,6 +19,14 @@ pub const EXT2_XATTR_REFCOUNT_MAX: u32 = 1024;
 pub const EXT2_XATTR_HEADER_SIZE: usize = 32;
 pub const EXT2_XATTR_ENTRY_SIZE: usize = 16;
 pub const EXT2_XATTR_PAD: usize = 4;
+/// Prefix of an inode-body extended-attribute area. Unlike an external EA
+/// block, this consists only of the magic value followed by entries.
+pub const EXT2_XATTR_IBODY_HEADER_SIZE: usize = 4;
+/// Inodes can carry `i_extra_isize` and inode-body EAs after the original
+/// 128-byte ext2 inode. The extension is aligned to four bytes.
+pub const EXT2_GOOD_OLD_INODE_SIZE: usize = 128;
+pub const EXT2_INODE_EXTRA_ISIZE_OFFSET: usize = EXT2_GOOD_OLD_INODE_SIZE;
+pub const EXT2_MINIMAL_EXTRA_ISIZE: usize = 4;
 
 /// Extended-attribute name indexes. Index zero stores the VFS name verbatim.
 pub const EXT2_XATTR_INDEX_USER: u8 = 1;
