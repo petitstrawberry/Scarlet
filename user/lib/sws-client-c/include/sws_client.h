@@ -23,8 +23,24 @@ typedef struct SwsEvent {
     uint32_t width, height;
 } SwsEvent;
 enum { SWS_EVENT_INPUT = 1, SWS_EVENT_CONFIGURE = 2,
-       SWS_EVENT_DESTROYED = 3, SWS_EVENT_FOCUS = 4, SWS_EVENT_SCALE = 5, SWS_EVENT_STATE = 6, SWS_EVENT_CLOSE_REQUESTED = 7 };
+       SWS_EVENT_DESTROYED = 3, SWS_EVENT_FOCUS = 4, SWS_EVENT_SCALE = 5,
+       SWS_EVENT_STATE = 6, SWS_EVENT_CLOSE_REQUESTED = 7, SWS_EVENT_TOUCH = 8 };
 /* SWS_EVENT_FOCUS.value is 1 when this window gains focus and 0 when it loses it. */
+/* SWS_EVENT_TOUCH marks one complete frame available to sws_poll_touch_frame.
+ * Mouse input remains SWS_EVENT_INPUT. Direct touch is a separate stream. */
+typedef struct SwsTouchFrame {
+    uint32_t window_id, seat_id;
+    uint64_t serial, time_ns;
+    uint32_t change_count, reserved;
+} SwsTouchFrame;
+typedef struct SwsTouchChange {
+    uint64_t id;
+    uint32_t phase;
+    int32_t x, y, pressure, touch_major;
+    uint32_t reserved;
+} SwsTouchChange;
+enum { SWS_TOUCH_DOWN = 0, SWS_TOUCH_MOVE = 1,
+       SWS_TOUCH_UP = 2, SWS_TOUCH_CANCEL = 3 };
 typedef struct SwsBuffer {
     uint32_t window_id, buffer_id, generation, compositor_epoch;
 } SwsBuffer;
@@ -59,7 +75,14 @@ int32_t sws_window_destroy(uint32_t window_id);
 int32_t sws_window_destroy_sync(uint32_t window_id, uint32_t timeout_ms);
 int32_t sws_window_fullscreen(uint32_t window_id, uint32_t enabled);
 int32_t sws_window_pointer_lock(uint32_t window_id, uint32_t enabled);
+/* Subscribe through the shared connection. Touch frames are bounded to 64
+ * pending frames per window; overflow queues a close request for the window. */
+int32_t sws_window_set_touch_input(uint32_t window_id, int32_t enabled);
 int32_t sws_poll_event(SwsEvent *event);
+/* Returns 1 with one complete frame, 0 when none is queued, or a negative
+ * error. Insufficient capacity returns -1 without consuming the frame. */
+int32_t sws_poll_touch_frame(uint32_t window_id, SwsTouchFrame *frame,
+                             SwsTouchChange *changes, uint32_t capacity);
 /* raw_handle is a borrowed Scarlet object handle, never a Linux fd. Registration
  * duplicates it before sending it to SWS and retains the caller's ownership. */
 int32_t sws_gpu_register(SwsBuffer buffer, uint32_t width, uint32_t height,
