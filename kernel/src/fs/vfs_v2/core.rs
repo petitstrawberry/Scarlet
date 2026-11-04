@@ -718,6 +718,13 @@ impl FileObject for VfsFileObject {
 }
 
 impl Selectable for VfsFileObject {
+    fn subscribe_readiness(
+        &self,
+        interest: ReadyInterest,
+        waiter: &alloc::sync::Arc<crate::sync::Waker>,
+    ) -> Option<alloc::vec::Vec<crate::sync::readiness::ReadinessRegistration>> {
+        self.inner.subscribe_readiness(interest, waiter)
+    }
     fn is_hung_up(&self) -> bool {
         self.inner.is_hung_up()
     }

@@ -238,6 +238,13 @@ impl Selectable for Evdev {
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
         self.inner.current_ready(interest)
     }
+    fn subscribe_readiness(
+        &self,
+        interest: ReadyInterest,
+        waiter: &Arc<crate::sync::Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        self.inner.subscribe_readiness(interest, waiter)
+    }
     fn wait_until_ready(
         &self,
         interest: ReadyInterest,

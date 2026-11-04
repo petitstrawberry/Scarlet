@@ -614,6 +614,31 @@ impl crate::object::capability::Selectable for UdpSocket {
         ready
     }
 
+    fn subscribe_readiness(
+        &self,
+        interest: crate::object::capability::selectable::ReadyInterest,
+        waiter: &Arc<crate::sync::Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        let mut registrations = Vec::new();
+        if interest.read {
+            let waker = self
+                .recv_waker
+                .lock()
+                .get_or_insert_with(|| Arc::new(crate::sync::Waker::new_interruptible("udp_recv")))
+                .clone();
+            registrations.push(waker.subscribe_readiness(waiter));
+        }
+        if interest.write {
+            let waker = self
+                .send_waker
+                .lock()
+                .get_or_insert_with(|| Arc::new(crate::sync::Waker::new_interruptible("udp_send")))
+                .clone();
+            registrations.push(waker.subscribe_readiness(waiter));
+        }
+        Some(registrations)
+    }
+
     fn wait_until_ready(
         &self,
         interest: crate::object::capability::selectable::ReadyInterest,
@@ -1165,6 +1190,24 @@ impl UdpLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn readiness_subscription_initializes_receive_waker_and_tracks_delivery() {
+        let socket = UdpSocket::new(UdpLayer::new());
+        let waiter = Arc::new(crate::sync::Waker::new_interruptible("udp-readiness"));
+        let mut registrations = socket
+            .subscribe_readiness(
+                crate::object::capability::selectable::ReadyInterest::read(),
+                &waiter,
+            )
+            .unwrap();
+        assert_eq!(registrations.len(), 1);
+        assert!(socket.recv_waker.lock().is_some());
+
+        let generation = registrations[0].generation();
+        socket.deliver_datagram(b"ready".to_vec());
+        assert!(registrations[0].generation() > generation);
+    }
 
     #[test_case]
     fn connected_udp_can_send_without_a_destination() {

@@ -1777,6 +1777,39 @@ impl Selectable for LocalSocket {
         ready
     }
 
+    fn subscribe_readiness(
+        &self,
+        interest: ReadyInterest,
+        waiter: &Arc<Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        if self.is_datagram() {
+            if interest.read || interest.write {
+                return Some(alloc::vec![
+                    self.datagrams.event.subscribe_readiness(waiter)
+                ]);
+            }
+            return Some(Vec::new());
+        }
+
+        let state = *self.state.read();
+        let mut registrations = Vec::new();
+        if interest.read {
+            match state {
+                SocketState::Listening => {
+                    registrations.push(self.accept_waker.subscribe_readiness(waiter))
+                }
+                SocketState::Connected => {
+                    registrations.push(self.read_waker.subscribe_readiness(waiter))
+                }
+                _ => {}
+            }
+        }
+        if interest.write && matches!(state, SocketState::Connected) {
+            registrations.push(self.write_waker.subscribe_readiness(waiter));
+        }
+        Some(registrations)
+    }
+
     fn wait_until_ready(
         &self,
         interest: ReadyInterest,

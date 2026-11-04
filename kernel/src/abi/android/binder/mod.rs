@@ -966,6 +966,15 @@ impl FileObject for BinderFile {
     }
 }
 impl Selectable for BinderFile {
+    fn subscribe_readiness(
+        &self,
+        interest: ReadyInterest,
+        waiter: &Arc<Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        Some(if interest.read {
+            alloc::vec![self.endpoint.waker().subscribe_readiness(waiter)]
+        } else { Vec::new() })
+    }
     fn current_ready(&self, interest: ReadyInterest) -> ReadySet {
         ReadySet {
             read: interest.read

@@ -3304,6 +3304,43 @@ impl crate::object::capability::Selectable for TcpSocket {
         ready
     }
 
+    fn subscribe_readiness(
+        &self,
+        interest: crate::object::capability::selectable::ReadyInterest,
+        waiter: &Arc<crate::sync::Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        let mut registrations = Vec::new();
+        // Deferred errors are published through the receive/accept source and
+        // are also visible as exceptional readiness.
+        if interest.read || interest.except {
+            let waker = if self.get_state() == TcpState::Listen {
+                self.accept_waker
+                    .lock()
+                    .get_or_insert_with(|| {
+                        Arc::new(crate::sync::Waker::new_interruptible("tcp_accept"))
+                    })
+                    .clone()
+            } else {
+                self.recv_waker
+                    .lock()
+                    .get_or_insert_with(|| {
+                        Arc::new(crate::sync::Waker::new_interruptible("tcp_recv"))
+                    })
+                    .clone()
+            };
+            registrations.push(waker.subscribe_readiness(waiter));
+        }
+        if interest.write {
+            let waker = self
+                .send_waker
+                .lock()
+                .get_or_insert_with(|| Arc::new(crate::sync::Waker::new_interruptible("tcp_send")))
+                .clone();
+            registrations.push(waker.subscribe_readiness(waiter));
+        }
+        Some(registrations)
+    }
+
     fn wait_until_ready(
         &self,
         interest: crate::object::capability::selectable::ReadyInterest,
@@ -3741,6 +3778,22 @@ impl TcpLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object::capability::selectable::Selectable;
+
+    #[test_case]
+    fn readiness_subscription_initializes_read_and_write_wakers() {
+        let socket = TcpSocket::new(Weak::new());
+        let waiter = Arc::new(crate::sync::Waker::new_interruptible("tcp-readiness"));
+        let registrations = socket
+            .subscribe_readiness(
+                crate::object::capability::selectable::ReadyInterest::rw(),
+                &waiter,
+            )
+            .unwrap();
+        assert_eq!(registrations.len(), 2);
+        assert!(socket.recv_waker.lock().is_some());
+        assert!(socket.send_waker.lock().is_some());
+    }
 
     #[test_case]
     fn receive_window_accumulates_small_drains_since_the_last_advertisement() {

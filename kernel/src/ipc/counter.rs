@@ -324,6 +324,21 @@ impl Selectable for Counter {
         set
     }
 
+    fn subscribe_readiness(
+        &self,
+        interest: ReadyInterest,
+        waiter: &Arc<Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        let mut registrations = Vec::new();
+        if interest.read {
+            registrations.push(self.data.read_waker.subscribe_readiness(waiter));
+        }
+        if interest.write {
+            registrations.push(self.data.write_waker.subscribe_readiness(waiter));
+        }
+        Some(registrations)
+    }
+
     fn wait_until_ready(
         &self,
         interest: ReadyInterest,

@@ -8,6 +8,7 @@ extern crate alloc;
 use crate::sync::IrqSpinLock;
 use alloc::collections::VecDeque;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -581,6 +582,19 @@ impl Selectable for EventDevice {
         set.write = false;
 
         set
+    }
+
+    fn subscribe_readiness(
+        &self,
+        interest: ReadyInterest,
+        waiter: &Arc<Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        if interest.read {
+            Some(alloc::vec![self.waker.subscribe_readiness(waiter)])
+        } else {
+            // Input devices have no writable readiness source.
+            Some(Vec::new())
+        }
     }
 
     fn wait_until_ready(

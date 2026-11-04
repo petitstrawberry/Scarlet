@@ -319,6 +319,15 @@ impl Selectable for Published {
         interest.write &= self.access & 2 != 0;
         self.inner.current_ready(interest)
     }
+    fn subscribe_readiness(
+        &self,
+        mut interest: ReadyInterest,
+        waiter: &Arc<crate::sync::Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        interest.read &= self.access & 1 != 0;
+        interest.write &= self.access & 2 != 0;
+        self.inner.subscribe_readiness(interest, waiter)
+    }
     fn wait_until_ready(
         &self,
         mut interest: ReadyInterest,
@@ -425,6 +434,13 @@ impl Selectable for Directory {
             write: false,
             except: false,
         }
+    }
+    fn subscribe_readiness(
+        &self,
+        _: ReadyInterest,
+        _: &Arc<crate::sync::Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        Some(Vec::new())
     }
     fn wait_until_ready(
         &self,

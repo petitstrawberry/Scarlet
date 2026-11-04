@@ -1,6 +1,6 @@
 //! Linux directory-change records over the native VFS notification queue.
 use super::{LinuxAbi,errno};
-use alloc::sync::Arc;
+use alloc::{sync::Arc,vec::Vec};
 use core::{any::Any,sync::atomic::{AtomicBool,AtomicU32,Ordering}};
 use crate::{arch::Trapframe,fs::{FileMetadata,FilePermission,FileType,SeekFrom},
     fs::vfs_v2::{notify::{self,ChangeQueue,Kind,WatchOptions},PathResolutionOptions},
@@ -38,6 +38,7 @@ impl StreamOps for InotifyFile {
 }
 impl Selectable for InotifyFile {
     fn current_ready(&self,interest:ReadyInterest)->ReadySet {self.queue.current_ready(interest)}
+    fn subscribe_readiness(&self,interest:ReadyInterest,waiter:&Arc<crate::sync::Waker>)->Option<Vec<crate::sync::readiness::ReadinessRegistration>> {self.queue.subscribe_readiness(interest,waiter)}
     fn wait_until_ready(&self,interest:ReadyInterest,tf:&mut Trapframe,timeout:Option<u64>,minimum:u64)->SelectWaitOutcome {self.queue.wait_until_ready(interest,tf,timeout,minimum)}
     fn set_nonblocking(&self,enabled:bool) {self.nonblocking.store(enabled,Ordering::Release);}
     fn is_nonblocking(&self)->bool {self.nonblocking.load(Ordering::Acquire)}

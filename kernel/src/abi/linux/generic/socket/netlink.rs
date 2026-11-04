@@ -162,6 +162,14 @@ impl Selectable for RouteSocket {
     fn current_ready(&self, _: ReadyInterest) -> ReadySet {
         ReadySet::none()
     }
+    fn subscribe_readiness(
+        &self,
+        _: ReadyInterest,
+        _: &alloc::sync::Arc<crate::sync::Waker>,
+    ) -> Option<alloc::vec::Vec<crate::sync::readiness::ReadinessRegistration>> {
+        // Routing observations have no producer in this adapter yet.
+        Some(alloc::vec::Vec::new())
+    }
     fn wait_until_ready(&self, _: ReadyInterest, _: &mut Trapframe, _: Option<u64>, _: u64) -> SelectWaitOutcome {
         SelectWaitOutcome::TimedOut
     }

@@ -359,6 +359,21 @@ impl Selectable for UeventSocket {
             && (self.peek.lock().is_some() || self.subscription.pending());
         set
     }
+    fn subscribe_readiness(
+        &self,
+        interest: ReadyInterest,
+        waiter: &alloc::sync::Arc<crate::sync::Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        if !interest.read {
+            return Some(Vec::new());
+        }
+        Some(vec![
+            DeviceManager::get_manager()
+                .lifecycle
+                .changed
+                .subscribe_readiness(waiter),
+        ])
+    }
     fn wait_until_ready(
         &self,
         interest: ReadyInterest,

@@ -17,7 +17,7 @@ use crate::{
     sync::{IrqSpinLock, waker::WaitResult},
     task::mytask,
 };
-use alloc::sync::Arc;
+use alloc::{sync::Arc,vec,vec::Vec};
 use core::{
     any::Any,
     sync::atomic::{AtomicBool, Ordering},
@@ -106,6 +106,18 @@ impl Selectable for SignalFd {
         let mut ready = ReadySet::none();
         ready.read = interest.read && reader_state().is_some_and(|s| self.ready(&s.lock()));
         ready
+    }
+    fn subscribe_readiness(
+        &self,
+        interest: ReadyInterest,
+        waiter: &Arc<crate::sync::Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        if !interest.read {
+            return Some(Vec::new());
+        }
+        let state = reader_state()?;
+        let waker = state.lock().pending_waker.clone();
+        Some(vec![waker.subscribe_readiness(waiter)])
     }
     fn wait_until_ready(
         &self,

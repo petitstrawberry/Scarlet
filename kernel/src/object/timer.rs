@@ -2,6 +2,7 @@
 
 use crate::sync::IrqSpinLock;
 use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::object::capability::selectable::{
@@ -258,6 +259,21 @@ impl Selectable for Timer {
         set
     }
 
+    fn subscribe_readiness(
+        &self,
+        interest: ReadyInterest,
+        waiter: &Arc<Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        if interest.read {
+            Some(alloc::vec![
+                self.shared.read_waker.subscribe_readiness(waiter),
+            ])
+        } else {
+            // Timer descriptors expose expiration through read readiness only.
+            Some(Vec::new())
+        }
+    }
+
     fn wait_until_ready(
         &self,
         interest: ReadyInterest,
@@ -405,6 +421,11 @@ mod tests {
     fn wake_event_remains_pending_until_read_and_last_handle_releases_reservation() {
         let before = crate::system_power::wake::snapshot();
         let timer = Arc::new(Timer::new_wakeup(9, true).unwrap());
+        let waiter = Arc::new(Waker::new_interruptible("timer-readiness"));
+        let mut registrations = timer
+            .subscribe_readiness(ReadyInterest::read(), &waiter)
+            .unwrap();
+        let readiness_generation = registrations[0].generation();
         timer.set_time(1_000_000_000_000, 0, false);
         assert!(crate::system_power::wake::snapshot().deadline_ns.is_some());
         let generation = {
@@ -414,6 +435,7 @@ mod tests {
             state.generation
         };
         timer.handler.clone().on_timer_expired(generation as usize);
+        assert!(registrations[0].generation() > readiness_generation);
         assert_eq!(crate::system_power::wake::snapshot().pending_events, before.pending_events + 1);
         let mut bytes = [0;8]; assert_eq!(timer.read(&mut bytes).unwrap(), 8);
         assert_eq!(u64::from_ne_bytes(bytes), 1);

@@ -5,9 +5,7 @@
 //! - UnidirectionalPipe: Traditional unidirectional pipe (read-only or write-only)
 
 use crate::sync::{IrqSpinLock, sequence::IdSequence};
-#[cfg(test)]
-use alloc::vec::Vec;
-use alloc::{collections::VecDeque, format, string::String, sync::Arc};
+use alloc::{collections::VecDeque, format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::Ordering;
 
 use super::{IpcError, StreamIpcOps};
@@ -604,6 +602,21 @@ impl Selectable for UnidirectionalPipe {
             set.except = false;
         }
         set
+    }
+
+    fn subscribe_readiness(
+        &self,
+        interest: ReadyInterest,
+        waiter: &Arc<Waker>,
+    ) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        let mut registrations = Vec::new();
+        if interest.read && self.endpoint.can_read {
+            registrations.push(self.endpoint.data.read_waker.subscribe_readiness(waiter));
+        }
+        if interest.write && self.endpoint.can_write {
+            registrations.push(self.endpoint.data.write_waker.subscribe_readiness(waiter));
+        }
+        Some(registrations)
     }
 
     fn wait_until_ready(

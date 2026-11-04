@@ -102,6 +102,10 @@ impl ChangeQueue {
 }
 
 impl crate::object::capability::Selectable for ChangeQueue {
+    fn subscribe_readiness(&self, interest: crate::object::capability::ReadyInterest,
+        waiter: &Arc<crate::sync::Waker>) -> Option<Vec<crate::sync::readiness::ReadinessRegistration>> {
+        Some(if interest.read { alloc::vec![self.waker.subscribe_readiness(waiter)] } else { Vec::new() })
+    }
     fn current_ready(&self,interest:crate::object::capability::ReadyInterest)->crate::object::capability::ReadySet {
         let mut ready=crate::object::capability::ReadySet::none();ready.read=interest.read && self.ready();ready
     }
