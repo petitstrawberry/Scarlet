@@ -1,6 +1,7 @@
 //! Native owner of Android's outer window and input. The Android HAL supplies
 //! only CPU scanout frames on the inherited transport; it never owns this UI.
 mod input;
+mod mouse_wire;
 mod protocol;
 use scarlet_os::{Handle, handle::capability::StreamError, socket::Socket};
 use scarlet_ui_core::{
@@ -13,6 +14,18 @@ use sws_client_c::{
     scene::{self, SwsInsets, SwsRect, SwsSceneFrame, SwsSceneGeometry},
 };
 type Result<T> = std::result::Result<T, &'static str>;
+const EV_SYN: u16 = 0;
+const EV_KEY: u16 = 1;
+const EV_REL: u16 = 2;
+const EV_ABS: u16 = 3;
+const SYN_REPORT: u16 = 0;
+const SYN_DROPPED: u16 = 3;
+
+enum PendingMouseEvent {
+    Button { code: u16, value: i32 },
+    Wheel { code: u16, value: i32 },
+}
+
 fn check(result: i32) -> Result<()> {
     if result < 0 {
         Err("SWS display operation")
@@ -30,6 +43,9 @@ struct Window {
     height: u32,
     x: i32,
     y: i32,
+    pending_x: Option<i32>,
+    pending_y: Option<i32>,
+    pending_mouse: Vec<PendingMouseEvent>,
 }
 impl Window {
     fn new(width: u32, height: u32) -> Result<Self> {
@@ -100,6 +116,9 @@ impl Window {
             height,
             x: 0,
             y: 0,
+            pending_x: None,
+            pending_y: None,
+            pending_mouse: Vec::new(),
         })
     }
     fn refresh(&mut self) -> Result<()> {
@@ -258,53 +277,37 @@ impl Window {
         }
         Ok(())
     }
-    fn event(&mut self, event: SwsEvent, input: &mut input::Input) -> Result<bool> {
-        if event.window_id != self.id {
-            return Ok(false);
+    fn discard_mouse_frame(&mut self) {
+        self.pending_x = None;
+        self.pending_y = None;
+        self.pending_mouse.clear();
+    }
+    fn commit_mouse_frame(&mut self, input: &mut input::Input) -> Result<bool> {
+        let received_position = self.pending_x.is_some() || self.pending_y.is_some();
+        if let Some(x) = self.pending_x.take() {
+            self.x = x;
         }
-        match event.kind {
-            3 | 7 => return Ok(true),
-            8 => self.poll_touch(input)?,
-            2 | 5 | 6 => {
-                self.refresh()?;
-                self.present()?;
+        if let Some(y) = self.pending_y.take() {
+            self.y = y;
+        }
+        if received_position {
+            if self.pointer(MouseEvent::Moved {
+                x: self.x,
+                y: self.y,
+            })? {
+                return Ok(true);
             }
-            4 if event.value == 0 => {
-                input.release()?;
-                for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
-                    self.pointer(MouseEvent::ButtonCancelled {
-                        button,
-                        x: self.x,
-                        y: self.y,
-                    })?;
-                }
-            }
-            1 => {
-                if matches!(event.type_, 2 | 3) && event.code <= 1 {
-                    let value = if event.code == 0 {
-                        &mut self.x
-                    } else {
-                        &mut self.y
-                    };
-                    *value = if event.type_ == 3 {
-                        event.value
-                    } else {
-                        value.saturating_add(event.value)
-                    };
-                    self.pointer(MouseEvent::Moved {
-                        x: self.x,
-                        y: self.y,
-                    })?;
-                    let fit = self.content_fit();
-                    let inside = self.inside_content(fit);
-                    input.mouse_motion(fit, self.x, self.y, inside)?;
-                } else if event.type_ == 2 && matches!(event.code, 6 | 8) {
-                    let fit = self.content_fit();
-                    let inside = self.inside_content(fit);
-                    input.mouse_wheel(fit, self.x, self.y, event.code, event.value, inside)?;
-                } else if event.type_ == 1 && matches!(event.code, 0x110..=0x112) {
-                    let button = pointer_button(event.code);
-                    let mouse = if event.value != 0 {
+            let fit = self.content_fit();
+            let inside = self.inside_content(fit);
+            input.mouse_motion(fit, self.x, self.y, inside)?;
+        }
+
+        let pending = std::mem::take(&mut self.pending_mouse);
+        for event in pending {
+            match event {
+                PendingMouseEvent::Button { code, value } => {
+                    let button = pointer_button(code);
+                    let mouse = if value != 0 {
                         MouseEvent::ButtonPressed {
                             button,
                             x: self.x,
@@ -324,8 +327,71 @@ impl Window {
                     }
                     let fit = self.content_fit();
                     let inside = self.inside_content(fit);
-                    input.mouse_button(fit, self.x, self.y, event.code, event.value, inside)?;
-                } else if event.type_ == 1 {
+                    input.mouse_button(fit, self.x, self.y, code, value, inside)?;
+                }
+                PendingMouseEvent::Wheel { code, value } => {
+                    let fit = self.content_fit();
+                    let inside = self.inside_content(fit);
+                    input.mouse_wheel(fit, self.x, self.y, code, value, inside)?;
+                }
+            }
+        }
+        Ok(false)
+    }
+    fn cancel_input(&mut self, input: &mut input::Input) -> Result<()> {
+        self.discard_mouse_frame();
+        input.release()?;
+        for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+            self.pointer(MouseEvent::ButtonCancelled {
+                button,
+                x: self.x,
+                y: self.y,
+            })?;
+        }
+        Ok(())
+    }
+    fn event(&mut self, event: SwsEvent, input: &mut input::Input) -> Result<bool> {
+        if event.window_id != self.id {
+            return Ok(false);
+        }
+        match event.kind {
+            3 | 7 => {
+                self.cancel_input(input)?;
+                return Ok(true);
+            }
+            8 => self.poll_touch(input)?,
+            2 | 5 | 6 => {
+                self.refresh()?;
+                self.present()?;
+            }
+            4 if event.value == 0 => {
+                self.cancel_input(input)?;
+            }
+            1 => {
+                if event.type_ == EV_ABS && event.code <= 1 {
+                    if event.code == 0 {
+                        self.pending_x = Some(event.value);
+                    } else {
+                        self.pending_y = Some(event.value);
+                    }
+                } else if event.type_ == EV_SYN && event.code == SYN_REPORT {
+                    if self.commit_mouse_frame(input)? {
+                        return Ok(true);
+                    }
+                } else if event.type_ == EV_SYN && event.code == SYN_DROPPED {
+                    self.discard_mouse_frame();
+                    input.mouse_cancel();
+                } else if event.type_ == EV_REL && matches!(event.code, 6 | 8) {
+                    self.pending_mouse.push(PendingMouseEvent::Wheel {
+                        code: event.code,
+                        value: event.value,
+                    });
+                } else if event.type_ == EV_KEY && matches!(event.code, 0x110..=0x112) {
+                    self.pending_mouse.push(PendingMouseEvent::Button {
+                        code: event.code,
+                        value: event.value,
+                    });
+                } else if event.type_ == EV_KEY {
                     input.key(event.code, event.value)?;
                 }
             }
@@ -373,7 +439,7 @@ fn run() -> Result<()> {
         || !(2..=4096).contains(&args[5])
     {
         return Err(
-            "usage: android-runtime listener-handle keyboard-producer touch-producer mouse-producer width height",
+            "usage: android-runtime listener-handle keyboard-producer touch-producer mouse-pipe width height",
         );
     }
     let server = Socket::from_handle(owned(args[0])?).map_err(|_| "display listener")?;
@@ -502,6 +568,7 @@ fn run() -> Result<()> {
                 }
             }
         }
+        input.flush_mouse();
         std::thread::sleep(Duration::from_millis(8));
     }
 }

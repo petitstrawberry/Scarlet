@@ -1,14 +1,12 @@
+use crate::mouse_wire::{Event as MouseWireEvent, Modifiers, MouseProducer, PushError};
 use scarlet_os::Handle;
 use sws_client_c::scene::SwsRect;
 
 pub const MOUSE_LEFT: u16 = 0x110;
 pub const MOUSE_RIGHT: u16 = 0x111;
 pub const MOUSE_MIDDLE: u16 = 0x112;
-const REL_X: u16 = 0;
-const REL_Y: u16 = 1;
 const REL_HWHEEL: u16 = 6;
 const REL_WHEEL: u16 = 8;
-const EV_REL: u16 = 2;
 const EV_ABS: u16 = 3;
 const EV_KEY: u16 = 1;
 const ABS_X: u16 = 0;
@@ -21,13 +19,20 @@ type WireEvent = (u16, u16, i32);
 struct Routed {
     keyboard: Vec<WireEvent>,
     touch: Vec<WireEvent>,
-    mouse: Vec<WireEvent>,
+    mouse_cancel: Option<(i32, i32)>,
 }
 
 #[derive(Default)]
 struct MouseState {
     buttons: [bool; 3],
     last: Option<(i32, i32)>,
+}
+
+#[derive(Default)]
+struct ModifierLocks {
+    caps: bool,
+    num: bool,
+    scroll: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +66,7 @@ struct TouchState {
 struct Core {
     keys: [bool; 256],
     mouse: MouseState,
+    locks: ModifierLocks,
     touch: TouchState,
     width: u32,
     height: u32,
@@ -71,6 +77,7 @@ impl Default for Core {
         Self {
             keys: [false; 256],
             mouse: MouseState::default(),
+            locks: ModifierLocks::default(),
             touch: TouchState::default(),
             width: 0,
             height: 0,
@@ -84,28 +91,66 @@ impl Core {
             return Vec::new();
         }
         self.keys[code as usize] = value != 0;
+        if value == 1 {
+            match code {
+                58 => self.locks.caps = !self.locks.caps,
+                69 => self.locks.num = !self.locks.num,
+                70 => self.locks.scroll = !self.locks.scroll,
+                _ => {}
+            }
+        }
         vec![(EV_KEY, code, value)]
     }
 
-    fn mouse_motion(&mut self, r: SwsRect, x: i32, y: i32, inside: bool) -> Vec<WireEvent> {
+    fn modifiers(&self) -> Modifiers {
+        let mut bits = 0;
+        if self.keys[42] || self.keys[54] {
+            bits |= Modifiers::SHIFT;
+        }
+        if self.keys[29] || self.keys[97] {
+            bits |= Modifiers::CONTROL;
+        }
+        if self.keys[56] || self.keys[100] {
+            bits |= Modifiers::ALT;
+        }
+        if self.keys[125] || self.keys[126] {
+            bits |= Modifiers::META;
+        }
+        if self.locks.caps {
+            bits |= Modifiers::CAPS_LOCK;
+        }
+        if self.locks.num {
+            bits |= Modifiers::NUM_LOCK;
+        }
+        if self.locks.scroll {
+            bits |= Modifiers::SCROLL_LOCK;
+        }
+        Modifiers::new(bits)
+    }
+
+    fn mouse_motion(&mut self, r: SwsRect, x: i32, y: i32, inside: bool) -> Vec<MouseWireEvent> {
         let captured = self.mouse.buttons.iter().any(|down| *down);
         if (!inside || !contains(r, x, y)) && !captured {
-            self.mouse.last = None;
-            return Vec::new();
+            return self
+                .mouse
+                .last
+                .take()
+                .map(|(x, y)| MouseWireEvent::Cancel { x, y })
+                .into_iter()
+                .collect();
         }
         let Some(position) = map(r, self.width, self.height, x, y) else {
             self.mouse.last = None;
             return Vec::new();
         };
-        let Some(previous) = self.mouse.last.replace(position) else {
+        if self.mouse.last == Some(position) {
             return Vec::new();
-        };
-        let (dx, dy) = (position.0 - previous.0, position.1 - previous.1);
-        if dx == 0 && dy == 0 {
-            Vec::new()
-        } else {
-            vec![(EV_REL, REL_X, dx), (EV_REL, REL_Y, dy)]
         }
+        self.mouse.last = Some(position);
+        vec![MouseWireEvent::Position {
+            x: position.0,
+            y: position.1,
+        }]
     }
 
     fn mouse_button(
@@ -116,7 +161,7 @@ impl Core {
         code: u16,
         value: i32,
         inside: bool,
-    ) -> Vec<WireEvent> {
+    ) -> Vec<MouseWireEvent> {
         let Some(index) = mouse_button_index(code) else {
             return Vec::new();
         };
@@ -129,12 +174,38 @@ impl Core {
             if !inside || !contains(r, x, y) || self.mouse.buttons[index] {
                 return Vec::new();
             }
-            self.mouse.last = map(r, self.width, self.height, x, y);
+            let Some(position) = map(r, self.width, self.height, x, y) else {
+                return Vec::new();
+            };
+            self.mouse.last = Some(position);
             self.mouse.buttons[index] = true;
-            vec![(EV_KEY, code, 1)]
+            vec![MouseWireEvent::Button {
+                x: position.0,
+                y: position.1,
+                code,
+                value: 1,
+            }]
         } else if self.mouse.buttons[index] {
             self.mouse.buttons[index] = false;
-            vec![(EV_KEY, code, 0)]
+            let position = map(r, self.width, self.height, x, y)
+                .or(self.mouse.last)
+                .unwrap_or((0, 0));
+            let mut events = vec![MouseWireEvent::Button {
+                x: position.0,
+                y: position.1,
+                code,
+                value: 0,
+            }];
+            if !inside && !self.mouse.buttons.iter().any(|down| *down) {
+                self.mouse.last = None;
+                events.push(MouseWireEvent::Cancel {
+                    x: position.0,
+                    y: position.1,
+                });
+            } else {
+                self.mouse.last = Some(position);
+            }
+            events
         } else {
             Vec::new()
         }
@@ -148,11 +219,28 @@ impl Core {
         code: u16,
         value: i32,
         inside: bool,
-    ) -> Vec<WireEvent> {
+    ) -> Vec<MouseWireEvent> {
         if !inside || !contains(r, x, y) || !matches!(code, REL_WHEEL | REL_HWHEEL) || value == 0 {
             return Vec::new();
         }
-        vec![(EV_REL, code, value)]
+        let Some(position) = map(r, self.width, self.height, x, y) else {
+            return Vec::new();
+        };
+        vec![MouseWireEvent::Scroll {
+            x: position.0,
+            y: position.1,
+            code,
+            value,
+        }]
+    }
+
+    fn mouse_cancel(&mut self) -> Option<MouseWireEvent> {
+        let had_buttons = self.mouse.buttons.iter().any(|down| *down);
+        self.mouse.buttons = [false; 3];
+        let position = self.mouse.last.take();
+        position
+            .or(had_buttons.then_some((0, 0)))
+            .map(|(x, y)| MouseWireEvent::Cancel { x, y })
     }
 
     fn touch(&mut self, r: SwsRect, change: TouchChange) -> Vec<WireEvent> {
@@ -222,33 +310,39 @@ impl Core {
     }
 
     fn release(&mut self) -> Routed {
-        let mut routed = Routed::default();
-        for (index, code) in [MOUSE_LEFT, MOUSE_RIGHT, MOUSE_MIDDLE]
-            .into_iter()
-            .enumerate()
-        {
-            if self.mouse.buttons[index] {
-                self.mouse.buttons[index] = false;
-                routed.mouse.push((EV_KEY, code, 0));
-            }
+        Routed {
+            keyboard: self.release_keys(),
+            touch: self.release_touch(),
+            mouse_cancel: self.mouse_cancel().and_then(|event| match event {
+                MouseWireEvent::Cancel { x, y } => Some((x, y)),
+                _ => None,
+            }),
         }
-        self.mouse.last = None;
-        if let Some(active) = self.touch.active.take()
-            && active.forwarded
-        {
-            routed.touch.extend_from_slice(&[
-                (EV_ABS, ABS_X, self.touch.last.0),
-                (EV_ABS, ABS_Y, self.touch.last.1),
-                (EV_KEY, BTN_TOUCH, 0),
-            ]);
-        }
+    }
+
+    fn release_keys(&mut self) -> Vec<WireEvent> {
+        let mut keyboard = Vec::new();
         for code in 1..256 {
             if self.keys[code] {
-                routed.keyboard.push((EV_KEY, code as u16, 0));
+                keyboard.push((EV_KEY, code as u16, 0));
                 self.keys[code] = false;
             }
         }
-        routed
+        keyboard
+    }
+
+    fn release_touch(&mut self) -> Vec<WireEvent> {
+        let Some(active) = self.touch.active.take() else {
+            return Vec::new();
+        };
+        if !active.forwarded {
+            return Vec::new();
+        }
+        vec![
+            (EV_ABS, ABS_X, self.touch.last.0),
+            (EV_ABS, ABS_Y, self.touch.last.1),
+            (EV_KEY, BTN_TOUCH, 0),
+        ]
     }
 }
 
@@ -327,12 +421,16 @@ pub fn contains(r: SwsRect, x: i32, y: i32) -> bool {
 pub struct Input {
     keyboard: Handle,
     touch: Handle,
-    mouse: Handle,
+    mouse: MouseProducer,
     core: Core,
 }
 
 impl Input {
     pub fn new(keyboard: Handle, touch: Handle, mouse: Handle, width: u32, height: u32) -> Self {
+        let mouse = MouseProducer::new(mouse).unwrap_or_else(|error| {
+            eprintln!("android-runtime: absolute mouse pipe disabled: {error}");
+            MouseProducer::disabled()
+        });
         Self {
             keyboard,
             touch,
@@ -342,6 +440,29 @@ impl Input {
                 height,
                 ..Core::default()
             },
+        }
+    }
+
+    fn enqueue_mouse(&mut self, events: Vec<MouseWireEvent>) {
+        if !self.mouse.is_enabled() {
+            return;
+        }
+        let modifiers = self.core.modifiers();
+        for event in events {
+            match self.mouse.push(event, modifiers) {
+                Ok(()) => {}
+                Err(PushError::Full) => {
+                    eprintln!("android-runtime: absolute mouse pipe disabled: bounded queue full");
+                    break;
+                }
+                Err(PushError::Closed) => break,
+            }
+        }
+    }
+
+    pub fn flush_mouse(&mut self) {
+        if self.mouse.is_enabled() && self.mouse.flush().is_err() {
+            eprintln!("android-runtime: absolute mouse pipe disabled: write failure");
         }
     }
 
@@ -358,7 +479,8 @@ impl Input {
         inside: bool,
     ) -> Result<(), &'static str> {
         let events = self.core.mouse_motion(r, x, y, inside);
-        send(&self.mouse, &events)
+        self.enqueue_mouse(events);
+        Ok(())
     }
 
     pub fn mouse_button(
@@ -371,7 +493,8 @@ impl Input {
         inside: bool,
     ) -> Result<(), &'static str> {
         let events = self.core.mouse_button(r, x, y, code, value, inside);
-        send(&self.mouse, &events)
+        self.enqueue_mouse(events);
+        Ok(())
     }
 
     pub fn mouse_wheel(
@@ -384,7 +507,15 @@ impl Input {
         inside: bool,
     ) -> Result<(), &'static str> {
         let events = self.core.mouse_wheel(r, x, y, code, value, inside);
-        send(&self.mouse, &events)
+        self.enqueue_mouse(events);
+        Ok(())
+    }
+
+    pub fn mouse_cancel(&mut self) {
+        if let Some(event) = self.core.mouse_cancel() {
+            self.enqueue_mouse(vec![event]);
+        }
+        self.flush_mouse();
     }
 
     pub fn touch(&mut self, r: SwsRect, change: TouchChange) -> Result<(), &'static str> {
@@ -394,9 +525,14 @@ impl Input {
 
     pub fn release(&mut self) -> Result<(), &'static str> {
         let routed = self.core.release();
-        send(&self.mouse, &routed.mouse)?;
-        send(&self.touch, &routed.touch)?;
-        send(&self.keyboard, &routed.keyboard)
+        if let Some((x, y)) = routed.mouse_cancel {
+            self.enqueue_mouse(vec![MouseWireEvent::Cancel { x, y }]);
+        }
+        self.flush_mouse();
+        let touch = send(&self.touch, &routed.touch);
+        let keyboard = send(&self.keyboard, &routed.keyboard);
+        touch?;
+        keyboard
     }
 }
 
@@ -441,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    fn letterbox_mapping_matches_physical_content_and_clamps_captured_drag() {
+    fn letterbox_mapping_and_captured_drag_keep_source_clamps() {
         let r = fitted();
         assert_eq!((r.x, r.y, r.width, r.height), (82, 42, 640, 480));
         assert!(!contains(r, 81, 42));
@@ -449,31 +585,208 @@ mod tests {
         assert_eq!(map(r, 640, 480, 1000, -1), Some((639, 0)));
 
         let mut core = core();
-        core.touch(
-            r,
-            TouchChange {
-                id: 1,
-                phase: TouchPhase::Down,
-                x: 82,
-                y: 42,
+        assert_eq!(
+            core.mouse_motion(r, 196, 100, true),
+            vec![MouseWireEvent::Position { x: 114, y: 58 }]
+        );
+        assert_eq!(
+            core.mouse_button(r, 196, 100, MOUSE_LEFT, 1, true),
+            vec![MouseWireEvent::Button {
+                x: 114,
+                y: 58,
+                code: MOUSE_LEFT,
+                value: 1,
+            }]
+        );
+        assert_eq!(
+            core.mouse_motion(r, 1000, 600, false),
+            vec![MouseWireEvent::Position { x: 639, y: 479 }]
+        );
+        assert_eq!(
+            core.mouse_button(r, 1000, 600, MOUSE_LEFT, 0, false),
+            vec![
+                MouseWireEvent::Button {
+                    x: 639,
+                    y: 479,
+                    code: MOUSE_LEFT,
+                    value: 0,
+                },
+                MouseWireEvent::Cancel { x: 639, y: 479 },
+            ]
+        );
+    }
+
+    #[test]
+    fn initial_absolute_motion_scaling_and_mouseleave_are_explicit() {
+        let r = fitted();
+        let mut core = core();
+        assert_eq!(
+            core.mouse_motion(r, 100, 100, true),
+            vec![MouseWireEvent::Position { x: 18, y: 58 }]
+        );
+        assert_eq!(
+            core.mouse_motion(r, 132, 100, true),
+            vec![MouseWireEvent::Position { x: 50, y: 58 }]
+        );
+        assert_eq!(
+            core.mouse_motion(r, 20, 20, false),
+            vec![MouseWireEvent::Cancel { x: 50, y: 58 }]
+        );
+        assert_eq!(
+            core.mouse_motion(r, 164, 100, true),
+            vec![MouseWireEvent::Position { x: 82, y: 58 }]
+        );
+
+        let scaled = fit(
+            SwsRect {
+                x: 20,
+                y: 30,
+                width: 320,
+                height: 240,
             },
+            640,
+            480,
+        );
+        let mut scaled_core = Core {
+            width: 640,
+            height: 480,
+            ..Core::default()
+        };
+        assert_eq!(
+            scaled_core.mouse_motion(scaled, 180, 150, true),
+            vec![MouseWireEvent::Position { x: 320, y: 240 }]
+        );
+    }
+
+    #[test]
+    fn buttons_and_wheels_carry_mapped_absolute_positions() {
+        let r = fitted();
+        let mut core = core();
+        assert_eq!(
+            core.mouse_button(r, 196, 100, MOUSE_LEFT, 1, true),
+            vec![MouseWireEvent::Button {
+                x: 114,
+                y: 58,
+                code: MOUSE_LEFT,
+                value: 1,
+            }]
+        );
+        assert_eq!(
+            core.mouse_button(r, 0, 0, MOUSE_LEFT, 0, false),
+            vec![
+                MouseWireEvent::Button {
+                    x: 0,
+                    y: 0,
+                    code: MOUSE_LEFT,
+                    value: 0,
+                },
+                MouseWireEvent::Cancel { x: 0, y: 0 },
+            ]
+        );
+        assert_eq!(
+            core.mouse_wheel(r, 196, 100, REL_WHEEL, -1, true),
+            vec![MouseWireEvent::Scroll {
+                x: 114,
+                y: 58,
+                code: REL_WHEEL,
+                value: -1,
+            }]
+        );
+        assert_eq!(
+            core.mouse_wheel(r, 196, 100, REL_HWHEEL, 2, true),
+            vec![MouseWireEvent::Scroll {
+                x: 114,
+                y: 58,
+                code: REL_HWHEEL,
+                value: 2,
+            }]
+        );
+        assert!(core.mouse_wheel(r, 20, 20, REL_WHEEL, 1, false).is_empty());
+    }
+
+    #[test]
+    fn focus_release_cancels_mouse_but_preserves_touch_and_key_release() {
+        let r = fitted();
+        let mut core = core();
+        core.mouse_button(r, 196, 100, MOUSE_RIGHT, 1, true);
+        assert_eq!(
+            core.touch(r, down(5)),
+            vec![
+                (EV_ABS, ABS_X, 18),
+                (EV_ABS, ABS_Y, 58),
+                (EV_KEY, BTN_TOUCH, 1),
+            ]
+        );
+        core.key(30, 1);
+        let released = core.release();
+        assert_eq!(released.mouse_cancel, Some((114, 58)));
+        assert_eq!(
+            released.touch,
+            vec![
+                (EV_ABS, ABS_X, 18),
+                (EV_ABS, ABS_Y, 58),
+                (EV_KEY, BTN_TOUCH, 0),
+            ]
+        );
+        assert_eq!(released.keyboard, vec![(EV_KEY, 30, 0)]);
+    }
+
+    #[test]
+    fn mouse_and_real_touch_state_remain_independent() {
+        let r = fitted();
+        let mut core = core();
+        core.mouse_motion(r, 100, 100, true);
+        assert_eq!(core.touch(r, down(9)).len(), 3);
+        assert_eq!(
+            core.touch(
+                r,
+                TouchChange {
+                    id: 9,
+                    phase: TouchPhase::Move,
+                    x: 110,
+                    y: 100,
+                },
+            ),
+            vec![
+                (EV_ABS, ABS_X, 28),
+                (EV_ABS, ABS_Y, 58),
+                (EV_KEY, BTN_TOUCH, 1),
+            ]
+        );
+        assert_eq!(
+            core.mouse_motion(r, 20, 20, false),
+            vec![MouseWireEvent::Cancel { x: 18, y: 58 }]
         );
         assert_eq!(
             core.touch(
                 r,
                 TouchChange {
-                    id: 1,
+                    id: 9,
                     phase: TouchPhase::Up,
-                    x: 1000,
-                    y: -1,
+                    x: 110,
+                    y: 100,
                 },
             ),
             vec![
-                (EV_ABS, ABS_X, 639),
-                (EV_ABS, ABS_Y, 0),
-                (EV_KEY, BTN_TOUCH, 0)
+                (EV_ABS, ABS_X, 28),
+                (EV_ABS, ABS_Y, 58),
+                (EV_KEY, BTN_TOUCH, 0),
             ]
         );
+    }
+
+    #[test]
+    fn portable_modifiers_track_both_sides_and_lock_keys() {
+        let mut core = core();
+        for code in [42, 29, 56, 125, 58, 69, 70] {
+            core.key(code, 1);
+        }
+        let modifiers = core.modifiers();
+        assert_eq!(modifiers.bits(), 0x7f);
+        core.key(42, 0);
+        assert_eq!(core.modifiers().bits(), 0x7f & !Modifiers::SHIFT);
+        core.key(54, 1);
+        assert_eq!(core.modifiers().bits() & Modifiers::SHIFT, Modifiers::SHIFT);
     }
 
     #[test]
@@ -610,111 +923,5 @@ mod tests {
                 (EV_KEY, BTN_TOUCH, 0)
             ]
         );
-    }
-
-    #[test]
-    fn mouse_motion_buttons_and_wheels_use_only_the_mouse_producer() {
-        let r = fitted();
-        let mut core = core();
-        assert!(core.mouse_motion(r, 100, 100, true).is_empty());
-        assert_eq!(
-            core.mouse_motion(r, 132, 100, true),
-            vec![(EV_REL, REL_X, 32), (EV_REL, REL_Y, 0)]
-        );
-        assert!(core.mouse_motion(r, 20, 20, false).is_empty());
-        assert!(core.mouse_motion(r, 164, 100, true).is_empty());
-        assert_eq!(
-            core.mouse_motion(r, 196, 100, true),
-            vec![(EV_REL, REL_X, 32), (EV_REL, REL_Y, 0)]
-        );
-
-        let mut press = |code| core.mouse_button(r, 196, 100, code, 1, true);
-        assert_eq!(press(MOUSE_LEFT), vec![(EV_KEY, MOUSE_LEFT, 1)]);
-        assert_eq!(press(MOUSE_RIGHT), vec![(EV_KEY, MOUSE_RIGHT, 1)]);
-        assert_eq!(press(MOUSE_MIDDLE), vec![(EV_KEY, MOUSE_MIDDLE, 1)]);
-        assert_eq!(
-            core.mouse_button(r, 0, 0, MOUSE_LEFT, 0, false),
-            vec![(EV_KEY, MOUSE_LEFT, 0)]
-        );
-        assert!(core.mouse_button(r, 0, 0, MOUSE_LEFT, 0, false).is_empty());
-        assert_eq!(
-            core.mouse_wheel(r, 196, 100, REL_WHEEL, -1, true),
-            vec![(EV_REL, REL_WHEEL, -1)]
-        );
-        assert_eq!(
-            core.mouse_wheel(r, 196, 100, REL_HWHEEL, 2, true),
-            vec![(EV_REL, REL_HWHEEL, 2)]
-        );
-        assert!(core.mouse_wheel(r, 20, 20, REL_WHEEL, 1, false).is_empty());
-    }
-
-    #[test]
-    fn captured_mouse_drag_clamps_outside_but_new_outside_presses_stay_rejected() {
-        let r = fitted();
-        let mut core = core();
-        core.mouse_motion(r, 196, 100, true);
-        assert_eq!(
-            core.mouse_button(r, 196, 100, MOUSE_LEFT, 1, true),
-            vec![(EV_KEY, MOUSE_LEFT, 1)]
-        );
-        assert_eq!(
-            core.mouse_motion(r, 1000, 600, false),
-            vec![(EV_REL, REL_X, 525), (EV_REL, REL_Y, 421)]
-        );
-        assert_eq!(
-            core.mouse_button(r, 1000, 600, MOUSE_LEFT, 0, false),
-            vec![(EV_KEY, MOUSE_LEFT, 0)]
-        );
-        assert!(core.mouse_motion(r, 1100, 700, false).is_empty());
-        assert!(
-            core.mouse_button(r, 196, 100, MOUSE_RIGHT, 1, false)
-                .is_empty()
-        );
-        assert!(core.mouse_motion(r, 220, 100, false).is_empty());
-    }
-
-    #[test]
-    fn titlebar_press_is_not_injected_and_focus_release_is_complete() {
-        let r = fitted();
-        let mut core = core();
-        assert!(
-            core.mouse_button(r, 20, 10, MOUSE_LEFT, 1, false)
-                .is_empty()
-        );
-        assert_eq!(
-            core.mouse_button(r, 196, 100, MOUSE_RIGHT, 1, true),
-            vec![(EV_KEY, MOUSE_RIGHT, 1)]
-        );
-        assert_eq!(
-            core.touch(
-                r,
-                TouchChange {
-                    id: 5,
-                    phase: TouchPhase::Down,
-                    x: 196,
-                    y: 100,
-                }
-            )
-            .len(),
-            3
-        );
-        core.key(30, 1);
-        let released = core.release();
-        assert_eq!(released.mouse, vec![(EV_KEY, MOUSE_RIGHT, 0)]);
-        assert_eq!(released.touch.last().copied(), Some((EV_KEY, BTN_TOUCH, 0)));
-        assert_eq!(released.keyboard, vec![(EV_KEY, 30, 0)]);
-    }
-
-    #[test]
-    fn native_records_have_stable_layout_and_append_syn() {
-        let bytes = encode(&[(EV_REL, REL_X, 7), (EV_KEY, MOUSE_LEFT, 1)]);
-        assert_eq!(bytes.len(), 48);
-        assert_eq!(u16::from_ne_bytes([bytes[8], bytes[9]]), EV_REL);
-        assert_eq!(u16::from_ne_bytes([bytes[10], bytes[11]]), REL_X);
-        assert_eq!(i32::from_ne_bytes(bytes[12..16].try_into().unwrap()), 7);
-        assert_eq!(u16::from_ne_bytes([bytes[24], bytes[25]]), EV_KEY);
-        assert_eq!(u16::from_ne_bytes([bytes[26], bytes[27]]), MOUSE_LEFT);
-        assert_eq!(i32::from_ne_bytes(bytes[28..32].try_into().unwrap()), 1);
-        assert_eq!(&bytes[32..], &[0; 16]);
     }
 }
