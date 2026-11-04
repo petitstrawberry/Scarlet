@@ -58,6 +58,9 @@ static int important_log(const unsigned char *message,size_t length) {
  const char *tag=(const char*)message+12;size_t tag_length=strnlen(tag,length-12);
  if(tag_length==length-12)return 0;
  if(message[11]==5)return tag_length==sizeof("libc")-1 && !memcmp(tag,"libc",sizeof("libc")-1);
+ const char *boot_tags[]={"UserController","StorageManagerService","FallbackHome","WindowManager","SystemServer"};
+ for(unsigned i=0;i<sizeof(boot_tags)/sizeof(boot_tags[0]);i++)
+  if(tag_length==strlen(boot_tags[i]) && !memcmp(tag,boot_tags[i],tag_length))return 1;
  const char *body=tag+tag_length+1;size_t body_length=length-13-tag_length;
  if(tag_length==sizeof("InputReader")-1 && !memcmp(tag,"InputReader",sizeof("InputReader")-1))return 1;
  if(tag_length==sizeof("ActivityTaskManager")-1 && !memcmp(tag,"ActivityTaskManager",sizeof("ActivityTaskManager")-1))

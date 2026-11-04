@@ -550,7 +550,14 @@ impl StreamOps for SecurityFile {
             } else {
                 crate::shield::syscall::transition(&caller, &self.policy, target)
             }.map_err(|reason| {
-                crate::println!("[android label] process context denied: target={} reason={}", text, reason);
+                let operation = match &self.content {
+                    Content::FsCreate(_) => "file-create",
+                    Content::SockCreate(_) => "socket-create",
+                    Content::Exec(_) => "exec",
+                    _ => "current",
+                };
+                crate::println!("[android label] context denied: operation={} source={:?} target={} reason={}",
+                    operation, caller.security_subject.read().as_ref().map(|subject| subject.label()), text, reason);
                 StreamError::PermissionDenied
             })?;
             state.written = true;

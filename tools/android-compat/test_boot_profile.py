@@ -31,6 +31,8 @@ class BootProfileTest(unittest.TestCase):
         packages=labels["u:object_r:packages_list_file:s0"]
         for old in ("u:object_r:unlabeled:s0","u:object_r:system_data_file:s0"):
             self.assertIn(f"file-relabel 4 {labels[old]} {packages} 1\n",text)
+            self.assertIn(f"file-create 4 {labels[old]} {packages} 1 0\n",text)
+        self.assertNotIn(f"file-create 1 {labels['u:object_r:unlabeled:s0']} {packages} 1 ",text)
 
     def test_stock_shared_relro_uid_rule_is_exact(self):
         p=profile();p.update(version=2,file_labels={},exec_transitions=[])
@@ -38,7 +40,7 @@ class BootProfileTest(unittest.TestCase):
         p["file_policy"]={"default":"u:object_r:unlabeled:s0","create":[],"relabel":[],"property_areas":[]}
         text=shield_policy(p,["* u:object_r:gsid_prop:s0\n"])
         labels={line.split()[2]:int(line.split()[1]) for line in text.splitlines() if line.startswith("label ")}
-        shared="u:r:shared_relro:s0:c37,c260,c512,c768"
+        shared="u:r:shared_relro:s0:c13,c260,c512,c768"
         self.assertEqual(labels[shared],6)
         self.assertIn(f"transition {labels['u:r:zygote:s0']} 6 1037\n",text)
 

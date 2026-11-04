@@ -24,7 +24,10 @@ ZYGOTE_LABEL = "u:r:zygote:s0"
 SYSTEM_SERVER_LABEL = "u:r:system_server:s0"
 WEBVIEW_ZYGOTE_LABEL = "u:r:webview_zygote:s0"
 # Stock `user=shared_relro domain=shared_relro levelFrom=all` for uid 1037.
-SHARED_RELRO_LABEL = "u:r:shared_relro:s0:c37,c260,c512,c768"
+SHARED_RELRO_LABEL = (
+    f"u:r:shared_relro:s0:c{SHARED_RELRO_UID & 0xff},"
+    f"c{256 + ((SHARED_RELRO_UID >> 8) & 0xff)},c512,c768"
+)
 UNLABELED_FILE = "u:object_r:unlabeled:s0"
 SYSTEM_DATA_FILE = "u:object_r:system_data_file:s0"
 # Stock plat_file_contexts assigns /data/system/packages.list this exact type.
@@ -195,6 +198,7 @@ def webview_and_packages_rules(profile):
     labels = set()
     transitions = []
     relabel = set()
+    create = set()
     if ZYGOTE_LABEL in subjects:
         webview = WEBVIEW_ZYGOTE_LABEL
         if webview not in subjects:
@@ -222,8 +226,9 @@ def webview_and_packages_rules(profile):
         for old in (UNLABELED_FILE, SYSTEM_DATA_FILE):
             labels.add(old)
             relabel.add((SYSTEM_SERVER_LABEL, old, PACKAGES_LIST_LABEL, 1))
+            create.add((SYSTEM_SERVER_LABEL, old, PACKAGES_LIST_LABEL, 1, 0))
         labels.add(PACKAGES_LIST_LABEL)
-    return subjects, labels, transitions, relabel
+    return subjects, labels, transitions, relabel, create
 
 
 def shield_policy(profile, contexts):
@@ -241,9 +246,10 @@ def shield_policy(profile, contexts):
     if any(target not in labels for targets in grants.values() for target in targets):
         raise ValueError("property grant is absent from verified contexts")
     file_labels,create,relabel=file_rules(profile) if "file_policy" in profile else (set(),[],[])
-    runtime_subjects,runtime_labels,runtime_transitions,runtime_relabel=webview_and_packages_rules(profile)
+    runtime_subjects,runtime_labels,runtime_transitions,runtime_relabel,runtime_create=webview_and_packages_rules(profile)
     labels |= runtime_labels
     relabel = set(relabel) | runtime_relabel
+    create = set(create) | runtime_create
     labels |= file_labels
     labels |= {target for _,target,_ in profile.get("service_grants",[])}
     labels |= {target for _,target in profile.get("socket_labels",[])}
@@ -270,8 +276,8 @@ def shield_policy(profile, contexts):
     lines += [f"file-label {identifiers[label]} {path}" for path, label in sorted(profile.get("file_labels", {}).items())]
     if "file_policy" in profile:
         lines += [f"file-default {identifiers[profile['file_policy']['default']]}"]
-        lines += [f"file-create {identifiers[source]} {identifiers[parent]} {identifiers[target]} {kind} {default}" for source,parent,target,kind,default in create]
-        lines += [f"file-relabel {identifiers[source]} {identifiers[old]} {identifiers[target]} {kind}" for source,old,target,kind in relabel]
+        lines += [f"file-create {identifiers[source]} {identifiers[parent]} {identifiers[target]} {kind} {default}" for source,parent,target,kind,default in sorted(create)]
+        lines += [f"file-relabel {identifiers[source]} {identifiers[old]} {identifiers[target]} {kind}" for source,old,target,kind in sorted(relabel)]
     return "\n".join(lines) + "\n"
 
 
