@@ -34,6 +34,7 @@ pub enum RpcError {
 /// It retains no task or handle table and grants no authority to the receiver.
 #[derive(Clone, Debug)]
 pub struct RpcSender {
+    process_id: usize,
     principal: crate::shield::identity::Principal,
     subject: Option<crate::shield::Subject>,
 }
@@ -44,9 +45,14 @@ impl RpcSender {
         let credentials = task.credentials.read();
         let subject = task.security_subject.read();
         Self {
+            process_id: task.get_thread_group_id(),
             principal: credentials.principals().active,
             subject: subject.clone(),
         }
+    }
+    /// Monotonic native process identity, translated by the receiving ABI.
+    pub fn process_id(&self) -> usize {
+        self.process_id
     }
     pub fn principal(&self) -> crate::shield::identity::Principal {
         self.principal
@@ -867,7 +873,8 @@ mod tests {
             alloc::vec![],
         )
         .unwrap();
-        let task = sender_task(&policy, 1, 10042);
+        let mut task = sender_task(&policy, 1, 10042);
+        task.set_id(1234);
         let endpoint = RpcEndpoint::new();
         let caller = RpcEndpoint::new();
         let call = endpoint
@@ -883,6 +890,7 @@ mod tests {
         drop(task);
         let mut request = endpoint.receive().unwrap().unwrap();
         request.message.bytes = alloc::vec![0;128];
+        assert_eq!(request.sender().unwrap().process_id(), 1234);
         assert_eq!(request.sender().unwrap().principal().0, 10042);
         assert_eq!(
             request.sender().unwrap().subject().unwrap().name(),

@@ -623,12 +623,8 @@ pub(super) fn prepare(task: &Task, abi: &LinuxAbi, data: &[u8]) -> Result<Prepar
     bytes[..4].copy_from_slice(
         &(u32_at(data, 20) & (1 | FLAG_COLLECT_NOTED_APP_OPS | 8 | 0x10 | 0x20)).to_le_bytes(),
     );
-    let sender = if u32_at(data, 20) & 1 != 0 {
-        0
-    } else {
-        abi.visible_thread_group_id(task) as u32
-    };
-    bytes[4..8].copy_from_slice(&sender.to_le_bytes());
+    // Sender PID is resolved from native RPC metadata in the receiver's
+    // namespace, not serialized in the sender's namespace here.
     bytes[8..12].copy_from_slice(&task.credentials.read().principals().active.0.to_le_bytes());
     bytes[12..16].copy_from_slice(&(len as u32).to_le_bytes());
     bytes[16..20].copy_from_slice(&(offsets_len as u32).to_le_bytes());

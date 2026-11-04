@@ -300,7 +300,9 @@ impl BinderFile {
                         let object = read::<24>(task, arg)?;
                         // Context-manager scheduling floors remain unsupported.
                         // Security context requests use native sender metadata.
-                        if u32_at(&object, 0) != 0x73622a85 || u32_at(&object, 4) & !0x1100 != 0 {
+                        // This ioctl consumes flags, not a serialized Binder
+                        // object. Stock ProcessState leaves the header zero.
+                        if u32_at(&object, 4) & !0x1100 != 0 {
                             return Err(errno::EOPNOTSUPP);
                         }
                         ((u64_at(&object, 8), u64_at(&object, 16)),u32_at(&object,4))
@@ -798,6 +800,11 @@ impl BinderFile {
             }
             tx[16..20].copy_from_slice(&message.opcode.to_le_bytes());
             tx[20..32].copy_from_slice(&message.bytes[..12]);
+            let sender_pid = if !replying && u32_at(&message.bytes, 0) & 1 == 0 {
+                sender.and_then(|sender| task.get_namespace().resolve_local_id(sender.process_id()))
+                    .and_then(|id| i32::try_from(id).ok()).unwrap_or(0)
+            } else {0};
+            tx[24..28].copy_from_slice(&sender_pid.to_le_bytes());
             if let Some(sender)=sender {tx[28..32].copy_from_slice(&sender.principal().0.to_le_bytes());}
             put64(tx, 32, length);
             put64(tx, 40, offsets_length);
@@ -1094,7 +1101,8 @@ mod tests {
         client.credentials.write().set_principals(crate::shield::identity::Identities::all(crate::shield::identity::Principal(10042))).unwrap();
         let endpoint=file(&server,&env,1);let base=crate::environment::USER_STACK_END-crate::environment::PAGE_SIZE;
         server.allocate_stack_pages(base,1).unwrap();let mut object=[0u8;24];
-        object[..4].copy_from_slice(&0x73622a85u32.to_le_bytes());object[4..8].copy_from_slice(&0x1000u32.to_le_bytes());
+        // Stock ProcessState supplies only flags; the header is zero.
+        object[4..8].copy_from_slice(&0x1000u32.to_le_bytes());
         write(&server,base,&object).unwrap();
         assert_eq!(endpoint.ioctl(&server,&LinuxAbi::default(),&mut Trapframe::new(),SET_CONTEXT_EXT,base,false),0);
         endpoint.ensure_thread(server.get_id()).unwrap();endpoint.state.lock().threads.get_mut(&server.get_id()).unwrap().looper=true;
@@ -1142,6 +1150,33 @@ mod tests {
         let record = read::<68>(&server, output).unwrap();
         assert_eq!(u32_at(&record, 0), BR_REPLY);
         endpoint.release_buffer(&arena, u64_at(&record, 52)).unwrap();
+    }
+    #[test_case]
+    fn binder_sender_pid_uses_receiver_namespace_and_never_serialized_identity() {
+        let (server,client,endpoint,_policy,output)=context_fixture();
+        let namespace=crate::task::namespace::TaskNamespace::new_root("binder-receiver".into());
+        server.set_namespace(namespace.clone());
+        let unrelated=namespace.allocate_task_id_for(909);
+        let local=namespace.allocate_task_id_for(client.get_thread_group_id());
+        assert_ne!(local,client.get_namespace_id());
+        let caller=RpcEndpoint::new();
+        for visible in [true,false] {
+            if !visible {namespace.unregister_mapping_for_global(client.get_thread_group_id());}
+            let mut message=context_message();
+            message.bytes[4..8].copy_from_slice(&(unrelated as u32).to_le_bytes());
+            let call=endpoint.endpoint.send_scoped_from(&client,message,&caller,None).unwrap();
+            assert_eq!(endpoint.read_record(&server,output,76),Ok(76));
+            let record=read::<76>(&server,output).unwrap();
+            assert_eq!(u32_at(&record,28),if visible {local as u32}else{0});
+            assert_eq!(u32_at(&record,0),BR_TRANSACTION_SEC_CTX);
+            let pointer=u64_at(&record,68);
+            assert_eq!(read::<18>(&server,pointer).unwrap(),*b"u:r:rpc_client:s0\0");
+            endpoint.command(&server,&LinuxAbi::default(),BC_REPLY,&[0;64]).unwrap();
+            assert!(call.take_reply().unwrap().is_ok());
+            endpoint.release_buffer(&endpoint.state.lock().arena.clone().unwrap(),u64_at(&record,52)).unwrap();
+            assert_eq!(endpoint.read_record(&server,output,76),Ok(4));
+            assert_eq!(u32_at(&read::<4>(&server,output).unwrap(),0),BR_COMPLETE);
+        }
     }
     #[test_case]
     fn binder_context_records_use_native_sender_snapshot_and_read_only_lifetime() {
