@@ -6950,7 +6950,7 @@ impl Compositor {
             let native = self
                 .window_manager
                 .get_window(window_id)
-                .is_some_and(|window| window.touch_input && window.extension_owner.is_none());
+                .is_some_and(|window| window.touch_input);
             // The compatibility ABI exposes one logical pointer, not one
             // pointer per physical source. Keep a single legacy-primary
             // contact across the whole seat so duplicate/overlapping direct
