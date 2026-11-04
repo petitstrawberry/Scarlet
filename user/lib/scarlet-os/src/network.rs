@@ -169,6 +169,20 @@ pub use scarlet_abi::network::{
     NetworkLinkInfoV1, NetworkTrafficConfigureV1, NetworkUpdateIpv4V1,
 };
 
+/// Query native packet-meter support without altering traffic policy.
+pub fn traffic_capabilities() -> Result<u64, HandleError> {
+    let request = NetworkTrafficConfigureV1 {
+        version: scarlet_abi::network::TRAFFIC_CONFIGURE_VERSION_V1,
+        operation: scarlet_abi::network::TRAFFIC_CONFIGURE_QUERY,
+        ..Default::default()
+    };
+    // SAFETY: request remains initialized and borrowed for the synchronous call.
+    let result = unsafe {
+        syscall1(Syscall::NetworkTrafficConfigureV1, &request as *const _ as usize)
+    };
+    HandleError::from_syscall_result(result).map(|mask| mask as u64)
+}
+
 /// Apply a named native packet-meter operation.
 pub fn configure_traffic(request: &NetworkTrafficConfigureV1) -> Result<(), HandleError> {
     // SAFETY: request is fully initialized and remains borrowed through the call.

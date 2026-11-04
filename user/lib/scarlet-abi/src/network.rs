@@ -58,6 +58,9 @@ pub struct NetworkUpdateIpv4V1 {
 }
 
 pub const TRAFFIC_CONFIGURE_VERSION_V1: u32 = 1;
+/// Read the supported operation mask without changing meters or attachments.
+/// All payload fields must be zero. Success returns one bit per operation.
+pub const TRAFFIC_CONFIGURE_QUERY: u32 = 0;
 pub const TRAFFIC_CONFIGURE_METER_SET: u32 = 1;
 pub const TRAFFIC_CONFIGURE_METER_REMOVE: u32 = 2;
 pub const TRAFFIC_CONFIGURE_LINK_SET: u32 = 3;
@@ -65,6 +68,11 @@ pub const TRAFFIC_CONFIGURE_LINK_CLEAR: u32 = 4;
 pub const TRAFFIC_CONFIGURE_GLOBAL_SET: u32 = 5;
 pub const TRAFFIC_CONFIGURE_GLOBAL_CLEAR: u32 = 6;
 pub const TRAFFIC_CONFIGURE_LINKS_CLEAR_METER: u32 = 7;
+pub const TRAFFIC_CONFIGURE_SUPPORTED_V1: u64 =
+    (1 << TRAFFIC_CONFIGURE_METER_SET) | (1 << TRAFFIC_CONFIGURE_METER_REMOVE)
+    | (1 << TRAFFIC_CONFIGURE_LINK_SET) | (1 << TRAFFIC_CONFIGURE_LINK_CLEAR)
+    | (1 << TRAFFIC_CONFIGURE_GLOBAL_SET) | (1 << TRAFFIC_CONFIGURE_GLOBAL_CLEAR)
+    | (1 << TRAFFIC_CONFIGURE_LINKS_CLEAR_METER);
 
 /// Management adapter request for a named packet meter or its attachment to
 /// one link/global scope. Names are UTF-8, NUL-padded and bounded.

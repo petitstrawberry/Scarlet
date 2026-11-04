@@ -1431,6 +1431,11 @@ pub fn sys_network_traffic_configure_v1(tf: &mut Trapframe) -> usize {
     {
         return usize::MAX;
     }
+    if request.operation == scarlet_abi::network::TRAFFIC_CONFIGURE_QUERY {
+        // This mask describes the native operations implemented below, not
+        // foreign packet programs or socket-tag accounting.
+        return traffic_query(&request).unwrap_or(usize::MAX);
+    }
     let manager = NetworkManager::get_manager();
     let result = match request.operation {
         scarlet_abi::network::TRAFFIC_CONFIGURE_METER_SET => request
@@ -1462,4 +1467,26 @@ pub fn sys_network_traffic_configure_v1(tf: &mut Trapframe) -> usize {
         _ => Err("Unknown traffic operation"),
     };
     result.map_or(usize::MAX, |_| 0)
+}
+
+fn traffic_query(request: &scarlet_abi::network::NetworkTrafficConfigureV1) -> Option<usize> {
+    (request.remaining == 0 && request.subject == [0; 32] && request.meter == [0; 32])
+        .then_some(scarlet_abi::network::TRAFFIC_CONFIGURE_SUPPORTED_V1 as usize)
+}
+
+#[cfg(test)]
+mod traffic_query_tests {
+    #[test_case]
+    fn capability_query_rejects_configuration_payloads() {
+        let mut request = scarlet_abi::network::NetworkTrafficConfigureV1::default();
+        assert_eq!(super::traffic_query(&request), Some(0xfe));
+        request.remaining = 1;
+        assert_eq!(super::traffic_query(&request), None);
+        request.remaining = 0;
+        request.subject[31] = 1;
+        assert_eq!(super::traffic_query(&request), None);
+        request.subject = [0; 32];
+        request.meter[0] = 1;
+        assert_eq!(super::traffic_query(&request), None);
+    }
 }
