@@ -73,7 +73,7 @@ fn environment_values(view: &VfsView) -> Result<Vec<String>, &'static str> {
     if values.len() != names.len() {
         return Err("input bridge environment incomplete");
     }
-    values.push(String::from("CLASSPATH=/scarlet/runtime/input-bridge.jar"));
+    values.push(String::from("CLASSPATH=/scarlet/lib/input-bridge.jar"));
     values.push(String::from("PATH=/system/bin:/apex/com.android.art/bin"));
     Ok(values)
 }
@@ -97,7 +97,7 @@ impl Bridge {
         // A missing bundle component is an assembly error, not a reason to
         // silently fall back to accelerated relative mouse motion.
         let _jar = view
-            .open("/scarlet/runtime/input-bridge.jar", 0)
+            .open("/scarlet/lib/input-bridge.jar", 0)
             .map_err(|_| "input bridge bundle missing")?;
         let env = environment_values(&view)?;
         let stdio: Vec<_> = stdio

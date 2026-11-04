@@ -47,7 +47,7 @@ change here), using the Android `BOOTCLASSPATH` it parses from
 `/init.environ.rc`, with fd 3 inherited as the request pipe:
 
 ```sh
-CLASSPATH=/scarlet/runtime/input-bridge.jar \
+CLASSPATH=/scarlet/lib/input-bridge.jar \
   /system/bin/app_process64 /system/bin \
   org.scarlet.android.input.InputBridge
 ```

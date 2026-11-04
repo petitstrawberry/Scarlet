@@ -209,7 +209,7 @@ def main():
             if sha256(destination)!=sha256(android_runtime):raise ValueError("changed native Android runtime executable")
             (output/"native-display.json").write_text(json.dumps({"path":str(android_runtime),"sha256":sha256(android_runtime)},indent=2)+"\n")
         if input_bridge:
-            destination=root/"scarlet/runtime/input-bridge.jar"
+            destination=root/"scarlet/lib/input-bridge.jar"
             destination.parent.mkdir(parents=True,exist_ok=True)
             shutil.copy2(input_bridge,destination)
             if sha256(destination)!=bridge_sha256:raise ValueError("changed Android input bridge JAR")
