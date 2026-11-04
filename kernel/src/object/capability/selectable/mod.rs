@@ -108,6 +108,11 @@ pub enum SelectWaitOutcome {
 
 /// Objects that can be waited on by select/pselect.
 pub trait Selectable {
+    /// Acknowledge readiness that has actually been delivered to a caller.
+    /// Queries and nested wait-set peeks must not consume notifications. This
+    /// nonblocking hook is for coalesced notifications, not stream payloads.
+    fn acknowledge_ready(&self, _ready: ReadySet) {}
+
     /// Whether the peer endpoint has disconnected, independent of requested readiness.
     fn is_hung_up(&self) -> bool {
         false

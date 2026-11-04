@@ -232,6 +232,9 @@ impl MemoryMappingOps for Evdev {
     }
 }
 impl Selectable for Evdev {
+    fn acknowledge_ready(&self, ready: ReadySet) {
+        self.inner.acknowledge_ready(ready);
+    }
     fn is_hung_up(&self) -> bool {
         self.inner.is_hung_up()
     }

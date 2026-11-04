@@ -718,6 +718,9 @@ impl FileObject for VfsFileObject {
 }
 
 impl Selectable for VfsFileObject {
+    fn acknowledge_ready(&self, ready: ReadySet) {
+        self.inner.acknowledge_ready(ready);
+    }
     fn subscribe_readiness(
         &self,
         interest: ReadyInterest,

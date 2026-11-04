@@ -311,6 +311,11 @@ impl MemoryMappingOps for Published {
     }
 }
 impl Selectable for Published {
+    fn acknowledge_ready(&self, mut ready: ReadySet) {
+        ready.read &= self.access & 1 != 0;
+        ready.write &= self.access & 2 != 0;
+        self.inner.acknowledge_ready(ready);
+    }
     fn is_hung_up(&self) -> bool {
         self.inner.is_hung_up()
     }
