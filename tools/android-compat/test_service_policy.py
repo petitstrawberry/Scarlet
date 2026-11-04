@@ -5,9 +5,13 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from copy import deepcopy
+from unittest.mock import patch
 
 from service_policy import (ACCESS_MAGIC, CLASSES, MAGIC, PERMISSIONS, SDK_POLICY_SHA256, SDK_POLICY_VERSION,
-                            apply_boot_policy, export, validate, validate_metadata, verify)
+                            AID_HEADER_SHA256, GENERIC_MAGIC, GENERIC_PARTITIONS,
+                            apply_boot_policy, apply_generic_boot_policy, export, export_generic,
+                            generic_transition, generic_uids, validate, validate_generic, validate_metadata, verify)
 
 
 class RuleNotConditional(Exception):
@@ -26,6 +30,135 @@ class Rule:
 
 
 class ServicePolicyTests(unittest.TestCase):
+    @staticmethod
+    def seal_generic(value):
+        value.pop("manifest_sha256", None)
+        value["manifest_sha256"] = hashlib.sha256(json.dumps(value, sort_keys=True,
+            separators=(",", ":")).encode()).hexdigest()
+        return value
+
+    def generic_manifest(self, explicit=False):
+        label, target = "u:object_r:daemon_exec:s0", "u:r:daemon:s0"
+        service = {"service": "daemon", "principal": 1058, "rc": "scarlet/boot/init.d/system/daemon.rc",
+            "rc_sha256": "a" * 64, "disposition": "source-derived", "resolved_executable": "/system/bin/daemon",
+            "file_label": label, "target": target, "executable_sha256": "b" * 64,
+            "source_xattr_sha256": hashlib.sha256((label + "\0").encode()).hexdigest(),
+            "policy_rules": ["allow init daemon:process transition;"], "seclabel": target if explicit else None}
+        value = {"kind": GENERIC_MAGIC, "source_sha256": SDK_POLICY_SHA256, "policy_version": SDK_POLICY_VERSION,
+            "partitions": GENERIC_PARTITIONS, "aid_header_sha256": AID_HEADER_SHA256,
+            "rc_files": {service["rc"]: service["rc_sha256"]}, "services": [service],
+            "file_labels": {"/system/bin/daemon": label},
+            "exec_transitions": [] if explicit else [["u:r:init:s0", label, target, 1058]],
+            "transitions": [["u:r:init:s0", target, 1058]] if explicit else []}
+        return self.seal_generic(value)
+
+    def test_generic_apply_preserves_runtime_ids_and_rejects_conflicting_bindings(self):
+        boot = ("scarlet-android-boot-policy-v2\nlabel 1 u:r:init:s0\n"
+                "label 40 u:r:scarlet_input_bridge:s0\nlabel 41 u:r:webview_zygote:s0\n"
+                "label 42 u:r:shared_relro:s0:c13,c260,c512,c768\n"
+                "label 100 u:object_r:unlabeled:s0\nfile-default 100\n")
+        manifest = self.generic_manifest()
+        result = apply_generic_boot_policy(boot, manifest)
+        self.assertTrue(result.startswith(boot))
+        self.assertEqual(result, apply_generic_boot_policy(result, manifest))
+        self.assertIn("file-exec 1 101 102 1058\n", result)
+        self.assertNotIn("service-allow", result)
+        self.assertNotIn("file-create", result)
+        self.assertNotIn("file-relabel", result)
+        for conflict in ("file-label 100 /system/bin/daemon\n",
+                         "label 101 u:object_r:daemon_exec:s0\nfile-exec 1 101 1 1058\n"):
+            with self.assertRaisesRegex(ValueError, "conflict"):
+                apply_generic_boot_policy(boot + conflict, manifest)
+        changed = deepcopy(manifest); changed["exec_transitions"][0][3] = 0
+        with self.assertRaisesRegex(ValueError, "manifest"):
+            apply_generic_boot_policy(boot, changed)
+        self.seal_generic(changed)
+        with self.assertRaisesRegex(ValueError, "evidence"):
+            apply_generic_boot_policy(boot, changed)
+
+    def test_generic_explicit_seclabel_never_becomes_automatic_exec(self):
+        manifest = self.generic_manifest(explicit=True)
+        result = apply_generic_boot_policy("scarlet-android-boot-policy-v2\nlabel 1 u:r:init:s0\n", manifest)
+        self.assertIn("transition 1 3 1058\n", result)
+        self.assertNotIn("file-exec", result)
+        self.assertEqual(result, apply_generic_boot_policy(result, manifest))
+        changed = deepcopy(manifest); changed["services"][0]["seclabel"] = "u:r:other:s0"
+        with self.assertRaisesRegex(ValueError, "target mismatch"):
+            validate_generic(self.seal_generic(changed))
+
+    def test_generic_uid_resolution_is_bound_to_source_not_host_accounts(self):
+        header = (b"#define AID_ROOT 0\n#define AID_NOBODY 9999\n#define AID_TOMBSTONED 1058\n"
+                  b"#define AID_MEDIA_CODEC 1046\n#define AID_MEDIA_EX 1040\n#define AID_MEDIA_DRM 1031\n")
+        with self.assertRaisesRegex(ValueError, "header source"):
+            generic_uids(b"", header)
+        with patch("service_policy.AID_HEADER_SHA256", hashlib.sha256(header).hexdigest()):
+            aids = generic_uids(b"vendor_test:x:2901:2901::/:/bin/false\n", header)
+            self.assertEqual((aids["root"], aids["nobody"], aids["tombstoned"], aids["mediacodec"]),
+                             (0, 9999, 1058, 1046))
+            self.assertEqual(aids["vendor_test"], 2901)
+            self.assertNotIn("petitstrawberry", aids)
+            with self.assertRaisesRegex(ValueError, "conflicting"):
+                generic_uids(b"tombstoned:x:0:0::/:/bin/false\n", header)
+
+    def test_generic_transition_requires_authorization_and_rejects_conditional_rules(self):
+        class ExecRule(Rule):
+            default = "daemon"
+            def __str__(self): return "compiled rule"
+        policy = SimpleNamespace(lookup_type=lambda _: None,
+            lookup_typeattr=lambda _: SimpleNamespace(expand=lambda: ["daemon"]),
+            lookup_role=lambda _: SimpleNamespace(types=lambda: ["daemon"]))
+        transitions, allows, constraints = [ExecRule()], [ExecRule()], []
+        api = SimpleNamespace(ConstraintQuery=lambda *a, **k: SimpleNamespace(results=lambda: constraints),
+            TERuleQuery=lambda *a, **k: SimpleNamespace(results=lambda:
+                transitions if k["ruletype"] == ["type_transition"] else allows),
+            exception=SimpleNamespace(RuleNotConditional=RuleNotConditional))
+        label = "u:object_r:daemon_exec:s0"
+        self.assertEqual(generic_transition(policy, api, label)[0], "u:r:daemon:s0")
+        transitions.clear()
+        with self.assertRaisesRegex(ValueError, "missing or ambiguous"):
+            generic_transition(policy, api, label)
+        self.assertEqual(generic_transition(policy, api, label, "u:r:daemon:s0")[0], "u:r:daemon:s0")
+        allows.clear()
+        with self.assertRaisesRegex(ValueError, "missing generic"):
+            generic_transition(policy, api, label, "u:r:daemon:s0")
+        allows.append(SimpleNamespace(conditional=True))
+        with self.assertRaisesRegex(ValueError, "conditional"):
+            generic_transition(policy, api, label, "u:r:daemon:s0")
+        allows[:] = [ExecRule()]
+        transitions.append(SimpleNamespace(conditional=True))
+        with self.assertRaisesRegex(ValueError, "conditional"):
+            generic_transition(policy, api, label)
+
+    @unittest.skipUnless(os.getenv("SCARLET_TEST_GENERIC_ROOT"), "requires source images, assembled init graph and SETools")
+    def test_generic_export_against_real_source_images_and_compiled_policy(self):
+        import setools
+        policy_path = Path(os.environ["SCARLET_TEST_COMPILED_POLICY"])
+        policy = setools.SELinuxPolicy(str(policy_path))
+        manifest = export_generic(policy, setools, policy_path, os.environ["SCARLET_TEST_GENERIC_ROOT"],
+            os.environ["SCARLET_TEST_GENERIC_BOOT_PROFILE"], os.environ["SCARLET_TEST_GENERIC_PARTITIONS"],
+            os.environ["SCARLET_TEST_GENERIC_PACKAGES"], os.environ["SCARLET_TEST_GENERIC_AID_HEADER"])
+        records = {record["service"]: record for record in manifest["services"]}
+        for name, uid in (("tombstoned", 1058), ("traced", 9999), ("traced_probes", 9999),
+                          ("traced_perf", 9999), ("mm_events", 9999), ("perfetto_trace_on_boot", 2000)):
+            record = records[name]
+            self.assertEqual(record["principal"], uid)
+            self.assertEqual(record["disposition"], "source-derived")
+            target = {str(rule.default) for rule in setools.TERuleQuery(policy,
+                ruletype=["type_transition"], source="init", target=record["file_label"].split(":")[2],
+                tclass=["process"]).results()}
+            self.assertEqual(target, {record["target"].split(":")[2]})
+        self.assertEqual(records["ueventd"]["resolved_executable"], "/system/bin/init")
+        self.assertFalse(any(rule[1] == "u:object_r:init_exec:s0" for rule in manifest["exec_transitions"]))
+        from boot_profile import shield_policy
+        profile = json.loads(Path("tools/android-compat/profiles/scarlet-arm64-flattened.json").read_text())
+        contexts = ["* " + label for label in {label for values in profile["property_grants"].values() for label in values}]
+        boot = shield_policy(profile, ["\n".join(contexts)], manifest, os.environ["SCARLET_TEST_GENERIC_ROOT"])
+        labels = {line.split()[2]: int(line.split()[1]) for line in boot.splitlines() if line.startswith("label ")}
+        self.assertEqual(labels["u:r:scarlet_input_bridge:s0"], 40)
+        self.assertEqual(labels["u:r:webview_zygote:s0"], 41)
+        self.assertEqual(labels["u:r:shared_relro:s0:c13,c260,c512,c768"], 42)
+        self.assertEqual(apply_generic_boot_policy(boot, manifest), boot)
+
     @staticmethod
     def manifest(text, version=SDK_POLICY_VERSION):
         domains, rules = validate(text)

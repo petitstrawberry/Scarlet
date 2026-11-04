@@ -131,7 +131,7 @@ def validate_profile(profile):
     if len(seen_services)>4096:raise ValueError("service rule bound")
     resource_labels = set(profile.get("file_labels", {}).values())
     for path, label in profile.get("file_labels", {}).items():
-        if not path.startswith(("/system/", "/apex/", "/vendor/")) or not valid_context(label) or not label.startswith("u:object_r:"):
+        if not path.startswith(("/system/", "/apex/", "/vendor/", "/data/")) or not valid_context(label) or not label.startswith("u:object_r:"):
             raise ValueError("invalid file-label binding")
         relative_path(path[1:])
     seen_exec = set()
@@ -232,7 +232,7 @@ def webview_and_packages_rules(profile):
     return subjects, labels, transitions, relabel, create
 
 
-def shield_policy(profile, contexts):
+def shield_policy(profile, contexts, generic_policy=None, generic_root=None):
     validate_profile(profile)
     labels = set()
     for text in contexts:
@@ -279,7 +279,11 @@ def shield_policy(profile, contexts):
         lines += [f"file-default {identifiers[profile['file_policy']['default']]}"]
         lines += [f"file-create {identifiers[source]} {identifiers[parent]} {identifiers[target]} {kind} {default}" for source,parent,target,kind,default in sorted(create)]
         lines += [f"file-relabel {identifiers[source]} {identifiers[old]} {identifiers[target]} {kind}" for source,old,target,kind in sorted(relabel)]
-    return "\n".join(lines) + "\n"
+    text = "\n".join(lines) + "\n"
+    if generic_policy is not None:
+        from service_policy import apply_generic_boot_policy
+        text = apply_generic_boot_policy(text, generic_policy, generic_root)
+    return text
 
 
 def verify_boot_inputs(inputs, runtime, stock):
