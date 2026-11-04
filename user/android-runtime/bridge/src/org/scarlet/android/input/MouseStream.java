@@ -23,10 +23,22 @@ final class MouseStream {
     }
 
     void run() throws IOException {
+        int rejected = 0;
         try {
             while (readFrame()) {
                 MouseProtocol.Frame decoded = MouseProtocol.decode(frame);
-                state.apply(decoded, clock.uptimeMillis(), sink);
+                try {
+                    state.apply(decoded, clock.uptimeMillis(), sink);
+                } catch (MouseState.RejectedEventException failure) {
+                    rejected++;
+                    // A focus/window transition can reject one event. Reset the
+                    // synthetic state so later navigation input stays usable.
+                    try {
+                        state.cancel(clock.uptimeMillis(), sink);
+                    } catch (MouseState.RejectedEventException ignored) {
+                        // cancel() already cleared the state before emitting.
+                    }
+                }
             }
         } catch (IOException | MouseProtocol.ProtocolException | RuntimeException failure) {
             try {
@@ -43,6 +55,10 @@ final class MouseStream {
             throw new IOException(failure.getMessage(), failure);
         }
         state.releaseAll(clock.uptimeMillis(), sink);
+        if (rejected != 0) {
+            System.err.println("scarlet-mouse-bridge: recovered from "
+                    + rejected + " transient input rejections");
+        }
     }
 
     private boolean readFrame() throws IOException, MouseProtocol.ProtocolException {

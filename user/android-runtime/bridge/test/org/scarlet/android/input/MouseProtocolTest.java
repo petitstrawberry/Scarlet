@@ -19,6 +19,7 @@ public final class MouseProtocolTest {
         exitsHoverAtEof();
         releasesAllButtonStateAtEof();
         releasesAllButtonStateOnTruncatedFrame();
+        recoversFromTransientInputManagerRejection();
         System.out.println("MouseProtocolTest: PASS");
     }
 
@@ -180,6 +181,21 @@ public final class MouseProtocolTest {
         check(sink.events.get(2).buttonState == 0, "cleanup release is post-release");
     }
 
+    private static void recoversFromTransientInputManagerRejection() throws Exception {
+        byte[] input = concat(
+                positionBytes(1, 2, ms(20), 0),
+                positionBytes(3, 4, ms(21), 0));
+        RejectingSink sink = new RejectingSink();
+        MouseStream stream = new MouseStream(
+                new ByteArrayInputStream(input), new MouseState(), sink, () -> 22);
+        stream.run();
+        expectActions(sink.events,
+                MouseState.ACTION_HOVER_EXIT,
+                MouseState.ACTION_HOVER_ENTER,
+                MouseState.ACTION_HOVER_EXIT);
+        check(sink.rejected == 1, "one transient rejection");
+    }
+
     private static MouseProtocol.Frame position(int x, int y, long timeNs, int modifiers) throws Exception {
         return MouseProtocol.decode(encodeFrame(
                 MouseProtocol.KIND_POSITION, x, y, 0, 0, timeNs, modifiers));
@@ -289,6 +305,22 @@ public final class MouseProtocolTest {
 
         @Override
         public void emit(MouseState.Event event) {
+            events.add(event);
+        }
+    }
+
+    private static final class RejectingSink implements MouseState.Sink {
+        final List<MouseState.Event> events = new ArrayList<>();
+        int rejected;
+        boolean rejectNext = true;
+
+        @Override
+        public void emit(MouseState.Event event) throws IOException {
+            if (rejectNext) {
+                rejectNext = false;
+                rejected++;
+                throw new MouseState.RejectedEventException(event.action, event.x, event.y);
+            }
             events.add(event);
         }
     }

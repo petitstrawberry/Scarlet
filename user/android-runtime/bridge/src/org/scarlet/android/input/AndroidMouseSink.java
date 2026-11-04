@@ -9,7 +9,7 @@ import java.lang.reflect.InvocationTargetException;
 
 /** Injects stock Android mouse MotionEvents through the platform InputManager. */
 final class AndroidMouseSink implements MouseState.Sink {
-    private static final int INJECT_INPUT_EVENT_MODE_WAIT_FOR_RESULT = 1;
+    private static final int INJECT_INPUT_EVENT_MODE_ASYNC = 0;
     private static final int SOURCE_MOUSE = 0x00002002;
     private static final int DISPLAY_ID = 0;
     private static final int DEVICE_ID = 0;
@@ -59,16 +59,14 @@ final class AndroidMouseSink implements MouseState.Sink {
             try {
                 accepted = (Boolean) PlatformInputManager.INJECT_INPUT_EVENT.invoke(
                         inputManager, motionEvent,
-                        INJECT_INPUT_EVENT_MODE_WAIT_FOR_RESULT);
+                        INJECT_INPUT_EVENT_MODE_ASYNC);
             } catch (IllegalAccessException failure) {
                 throw PlatformInputManager.reflectionFailure("accessing InputManager.injectInputEvent", failure);
             } catch (InvocationTargetException failure) {
                 throw PlatformInputManager.reflectionFailure("injecting mouse event", failure.getCause());
             }
             if (!accepted) {
-                throw new IOException("InputManager rejected "
-                        + MotionEvent.actionToString(event.action)
-                        + " at " + event.x + "," + event.y);
+                throw new MouseState.RejectedEventException(event.action, event.x, event.y);
             }
         } finally {
             motionEvent.recycle();

@@ -27,6 +27,20 @@ final class MouseState {
         void emit(Event event) throws IOException;
     }
 
+    /** A transient InputManager rejection; the stream can reset and keep running. */
+    static final class RejectedEventException extends IOException {
+        final int action;
+        final int x;
+        final int y;
+
+        RejectedEventException(int action, int x, int y) {
+            super("InputManager rejected " + action + " at " + x + "," + y);
+            this.action = action;
+            this.x = x;
+            this.y = y;
+        }
+    }
+
     static final class Event {
         final long downTimeMs;
         final long eventTimeMs;
@@ -117,8 +131,8 @@ final class MouseState {
     private void position(long eventTime, Sink sink) throws IOException {
         if (buttons == 0) {
             int action = hovered ? ACTION_HOVER_MOVE : ACTION_HOVER_ENTER;
-            emit(eventTime, eventTime, action, 0, 0, SCROLL_NONE, 0f, sink);
             hovered = true;
+            emit(eventTime, eventTime, action, 0, 0, SCROLL_NONE, 0f, sink);
         } else {
             emit(downTimeMs, eventTime, ACTION_MOVE, buttons, 0,
                     SCROLL_NONE, 0f, sink);
@@ -171,18 +185,21 @@ final class MouseState {
                 buttons, 0, axis, value, sink);
     }
 
-    private void cancel(long eventTime, Sink sink) throws IOException {
-        if (buttons != 0) {
-            emit(downTimeMs, eventTime, ACTION_CANCEL, 0, 0,
-                    SCROLL_NONE, 0f, sink);
-            downTimeMs = 0;
-            hasDown = false;
-        }
+    void cancel(long eventTime, Sink sink) throws IOException {
+        long canceledDownTime = downTimeMs;
+        boolean canceledDown = hasDown;
+        boolean canceledHover = hovered;
         buttons = 0;
-        if (hovered) {
+        downTimeMs = 0;
+        hasDown = false;
+        hovered = false;
+        if (canceledDown) {
+            emit(canceledDownTime, eventTime, ACTION_CANCEL, 0, 0,
+                    SCROLL_NONE, 0f, sink);
+        }
+        if (canceledHover) {
             emit(eventTime, eventTime, ACTION_HOVER_EXIT, 0, 0,
                     SCROLL_NONE, 0f, sink);
-            hovered = false;
         }
     }
 
