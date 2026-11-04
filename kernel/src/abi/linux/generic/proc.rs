@@ -4,7 +4,7 @@ use crate::task::INIT_TASK_ID;
 use crate::{
     abi::linux::generic::{
         LinuxAbi, errno,
-        signal::{LinuxSignal, deliver_signal},
+        signal::LinuxSignal,
     },
     arch::Trapframe,
     library::std::usercopy::{copy_from_user, copy_to_user},
@@ -673,7 +673,7 @@ pub fn sys_kill(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
     };
 
     for target in targets {
-        let result = deliver_signal(abi, &task, &target, signal);
+        let result = super::signal::deliver_process_signal(abi, &task, &target, signal);
         if result != 0 {
             return result;
         }

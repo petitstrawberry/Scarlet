@@ -6,7 +6,7 @@
 use crate::abi::linux::aarch64::LinuxAarch64Abi;
 use crate::abi::linux::generic::{
     LinuxAbi,
-    signal::{LinuxSignal, SignalAction},
+    signal::{LinuxSignal, SignalAction, SignalInfo},
 };
 use crate::arch::{Trapframe, fpu::FpuContext};
 use crate::environment::{PAGE_SIZE, USER_LOWER_CANONICAL_END};
@@ -43,6 +43,11 @@ fn put32(bytes: &mut [u8], offset: usize, value: u32) {
 }
 fn get32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+fn write_siginfo(frame: &mut [u8], signal: LinuxSignal, info: Option<SignalInfo>) {
+    let info = info.unwrap_or_else(|| SignalInfo::kernel(signal));
+    frame[..128].copy_from_slice(&info.bytes);
 }
 
 fn encode_context(frame: &mut [u8], regs: &Trapframe, fp: &FpuContext, mask: u64) {
@@ -154,14 +159,34 @@ pub fn setup_signal_handler(
     handler: usize,
     signal: LinuxSignal,
 ) -> Result<(), &'static str> {
-    setup_signal_frame(abi, task, trapframe, handler, signal, None)
+    setup_signal_frame(abi, task, trapframe, handler, signal, None, None)
+}
+
+pub(crate) fn setup_signal_handler_with_info(
+    abi: &LinuxAbi,
+    task: &Task,
+    trapframe: &mut Trapframe,
+    handler: usize,
+    signal: LinuxSignal,
+    info: SignalInfo,
+) -> Result<(), &'static str> {
+    setup_signal_frame(
+        abi,
+        task,
+        trapframe,
+        handler,
+        signal,
+        Some(info),
+        None,
+    )
 }
 
 struct MemoryFaultInfo { address: usize, code: u32, esr: u64 }
 
 fn setup_signal_frame(
     abi: &LinuxAbi, task: &Task, trapframe: &mut Trapframe,
-    handler: usize, signal: LinuxSignal, fault: Option<MemoryFaultInfo>,
+    handler: usize, signal: LinuxSignal, siginfo: Option<SignalInfo>,
+    fault: Option<MemoryFaultInfo>,
 ) -> Result<(), &'static str> {
     let (action, active_mask, old_mask) = {
         let state = abi.signal_state.lock();
@@ -193,8 +218,7 @@ fn setup_signal_frame(
         return_stub(abi, task)?
     };
     let mut frame = vec![0u8; FRAME_SIZE];
-    put32(&mut frame, 0, signal as u32);
-    put32(&mut frame, 8, 128); // SI_KERNEL, for terminal process-control events.
+    write_siginfo(&mut frame, signal, siginfo);
     if let Some(info) = &fault {
         put32(&mut frame, 8, info.code);
         put64(&mut frame, 16, info.address as u64);
@@ -268,7 +292,15 @@ pub fn deliver_memory_fault(abi: &LinuxAbi, task: &Task, frame: &mut Trapframe,
     let info = MemoryFaultInfo { address: fault.access.vaddr,
         code: match fault.reason { UserMemoryFaultReason::Unmapped => 1, UserMemoryFaultReason::Protection => 2 },
         esr: frame.esr_el1 };
-    setup_signal_frame(abi, task, frame, handler, LinuxSignal::SIGSEGV, Some(info))?;
+    setup_signal_frame(
+        abi,
+        task,
+        frame,
+        handler,
+        LinuxSignal::SIGSEGV,
+        None,
+        Some(info),
+    )?;
     Ok(true)
 }
 
@@ -318,18 +350,20 @@ pub fn deliver_pending_handler(abi: &LinuxAbi, frame: &mut Trapframe, result: us
     frame.set_return_value(result);
     let pending = {
         let mut state = abi.signal_state.lock();
-        state.next_deliverable_signal().and_then(|signal| {
+        loop {
+            let Some(signal) = state.next_deliverable_signal() else { break None; };
             if let SignalAction::Custom(handler) = state.get_handler(signal) {
-                state.remove_pending(signal);
-                Some((signal, handler))
+                if let Some(info) = state.take_pending_info(signal) {
+                    break Some((signal, handler, info));
+                }
             } else {
-                None
+                break None;
             }
-        })
+        }
     };
-    if let Some((signal, handler)) = pending {
+    if let Some((signal, handler, info)) = pending {
         if let Some(task) = mytask() {
-            if setup_signal_handler(abi, &task, frame, handler, signal).is_err() {
+            if setup_signal_handler_with_info(abi, &task, frame, handler, signal, info).is_err() {
                 task.mark_signal_termination(11);
                 task.request_deferred_exit_group(139);
             }
@@ -353,6 +387,44 @@ pub fn dispatch_arch_syscall(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn signal_frame_preserves_signal_info_sender_and_payload() {
+        use crate::environment::USER_STACK_END;
+        let mut task = crate::task::new_user_task("signal-siginfo".into(), 0);
+        task.vm_manager
+            .set_asid(crate::arch::vm::alloc_virtual_address_space());
+        let task = Arc::new(task);
+        task.allocate_stack_pages(USER_STACK_END - 2 * PAGE_SIZE, 2)
+            .unwrap();
+        let abi = LinuxAbi::default();
+        abi.signal_state
+            .lock()
+            .set_handler(LinuxSignal::SIGUSR1, SignalAction::Custom(0x400000));
+        let mut info = SignalInfo::kernel(LinuxSignal::SIGUSR1);
+        info.bytes[8..12].copy_from_slice(&(-1i32).to_ne_bytes());
+        info.bytes[16..20].copy_from_slice(&1234i32.to_ne_bytes());
+        info.bytes[20..24].copy_from_slice(&5678u32.to_ne_bytes());
+        info.bytes[24..32].copy_from_slice(&0x1234_5678_9abc_def0u64.to_ne_bytes());
+        abi.signal_state
+            .lock()
+            .queue_pending_info(LinuxSignal::SIGUSR1, info)
+            .unwrap();
+        crate::task::set_mock_current_task(task.clone());
+        let mut frame = Trapframe::new();
+        frame.sp = USER_STACK_END as u64;
+        let result = 17;
+        assert_eq!(deliver_pending_handler(&abi, &mut frame, result), LinuxSignal::SIGUSR1 as usize);
+        let mut saved = vec![0; FRAME_SIZE];
+        copy_from_user(&task, frame.sp as usize, &mut saved).unwrap();
+        assert_eq!(get64(&saved, REGS), result as u64);
+        assert_eq!(get32(&saved, 0), LinuxSignal::SIGUSR1 as u32);
+        assert_eq!(get32(&saved, 8) as i32, -1);
+        assert_eq!(get32(&saved, 16) as i32, 1234);
+        assert_eq!(get32(&saved, 20), 5678);
+        assert_eq!(get64(&saved, 24), 0x1234_5678_9abc_def0);
+        crate::task::clear_mock_current_task();
+    }
 
     #[test_case]
     fn sigsuspend_delivers_child_exit_and_sigreturn_restores_original_mask() {

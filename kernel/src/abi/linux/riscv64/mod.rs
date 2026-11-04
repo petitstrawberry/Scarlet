@@ -90,7 +90,7 @@ impl AbiModule for LinuxRiscv64Abi {
             &self.0,
             &event,
             target_task_id,
-            |_abi, _task, frame, handler, signal_number| {
+            |_abi, _task, frame, handler, signal_number, _info| {
                 signal::setup_signal_handler(frame, handler, signal_number);
                 Ok(())
             },
@@ -110,13 +110,9 @@ impl AbiModule for LinuxRiscv64Abi {
             self.0.reset_posix_timers();
             self.0.reset_record_locks();
         }
-        if self.0.thread_state.pending_clone_share_sighand
-            || _flags.is_set(crate::task::CloneFlagsDef::Thread)
-        {
-            self.0.clone_signal_state(true);
-        } else {
-            self.0.fork_signal_state();
-        }
+        let thread = _flags.is_set(crate::task::CloneFlagsDef::Thread);
+        self.0.clone_signal_state_with_group(
+            self.0.thread_state.pending_clone_share_sighand || thread, thread);
         self.0.bind_task_signals(_child_task);
 
         let clear_child_tid = if _flags.is_set(crate::task::CloneFlagsDef::ClearChildTid) {

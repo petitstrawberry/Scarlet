@@ -201,9 +201,14 @@ impl LinuxAbi {
     }
 
     pub(crate) fn clone_signal_state(&mut self, share_handlers: bool) {
-        // Every child inherits a mask value, never the parent's mutable mask
-        // or pending queue. CLONE_SIGHAND shares only the disposition table.
-        let state = self.signal_state.lock().clone_for_child(share_handlers);
+        self.clone_signal_state_with_group(share_handlers, false);
+    }
+
+    pub(crate) fn clone_signal_state_with_group(&mut self, share_handlers: bool, share_pending: bool) {
+        // Each child owns its mask and thread-directed queue. Only threads
+        // share process-directed pending records; CLONE_SIGHAND alone shares
+        // the disposition table without joining that process queue.
+        let state = self.signal_state.lock().clone_for_child(share_handlers, share_pending);
         self.signal_state = Arc::new(IrqSpinLock::new(state));
         #[cfg(target_arch = "aarch64")]
         {
@@ -505,6 +510,7 @@ impl LinuxAbi {
     }
 
     pub fn handle_event_direct(&self, event: &crate::ipc::event::Event) {
+        if signal::is_pending_wake(event) { return; }
         if let Some(signal) = signal::handle_event_to_signal(event) {
             let mut signal_state = self.signal_state.lock();
             signal_state.add_pending(signal);
@@ -685,6 +691,7 @@ syscall_table! {
     RtSigaction = 134 => signal::sys_rt_sigaction,
     RtSigprocmask = 135 => signal::sys_rt_sigprocmask,
     RtSigtimedwait = 137 => signal::sys_rt_sigtimedwait,
+    RtSigqueueinfo = 138 => signal::sys_rt_sigqueueinfo,
     Setpriority = 140 => proc::sys_setpriority,
     Getpriority = 141 => proc::sys_getpriority,
     SetRegid = 143 => credentials::sys_setregid,
