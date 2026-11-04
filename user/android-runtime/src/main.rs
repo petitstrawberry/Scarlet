@@ -36,12 +36,37 @@ impl Window {
         let mut scale = 1000;
         check(unsafe { scene::sws_get_output_scale(&mut scale) })?;
         let inset = chrome_insets(scale, true);
+        // Chrome and scanout content use the same physical output scale. The
+        // scanout and input endpoints retain their original Android dimensions.
+        let content_width = u32::try_from((u64::from(width) * u64::from(scale)).div_ceil(1000))
+            .map_err(|_| "display content width")?;
+        let content_height = u32::try_from((u64::from(height) * u64::from(scale)).div_ceil(1000))
+            .map_err(|_| "display content height")?;
+        let mut output = sws::SwsDisplay {
+            width: 0, height: 0, compositor_epoch: 0, compositor_backend: 0, capabilities: 0,
+        };
+        check(unsafe { sws::sws_get_display(&mut output) })?;
+        let available_width = output.width.checked_sub(inset.left + inset.right)
+            .filter(|w| *w > 0).ok_or("display output width")?;
+        let available_height = output.height.checked_sub(inset.top + inset.bottom)
+            .filter(|h| *h > 0).ok_or("display output height")?;
+        // Keep the entire initial window, including Android's navigation bar,
+        // reachable when the scaled scanout exceeds the physical output.
+        let fitted = input::fit(SwsRect {
+            x: 0, y: 0,
+            width: content_width.min(available_width),
+            height: content_height.min(available_height),
+        }, width, height);
+        let outer_width = fitted.width.checked_add(inset.left).and_then(|w| w.checked_add(inset.right))
+            .ok_or("display frame width")?;
+        let outer_height = fitted.height.checked_add(inset.top).and_then(|h| h.checked_add(inset.bottom))
+            .ok_or("display frame height")?;
         let mut id = 0;
         check(unsafe {
             scene::sws_scene_create(
                 c"Android".as_ptr(),
-                width + inset.left + inset.right,
-                height + inset.top + inset.bottom,
+                outer_width,
+                outer_height,
                 1,
                 &mut id,
             )
@@ -51,8 +76,8 @@ impl Window {
             return Err(error);
         }
         let geometry = SwsSceneGeometry {
-            width: width + inset.left + inset.right,
-            height: height + inset.top + inset.bottom,
+            width: outer_width,
+            height: outer_height,
             scale_milli: scale,
             state: 0,
             content: SwsRect::default(),
