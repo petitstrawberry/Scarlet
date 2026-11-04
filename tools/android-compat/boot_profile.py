@@ -19,9 +19,12 @@ KEYSTORE_PERMISSIONS = ["add_auth", "clear_ns", "get_state", "list", "lock", "re
     "report_off_body", "pull_metrics", "delete_all_keys", "get_attestation_key"]
 # Android 13's AID_WEBVIEW_ZYGOTE and its stock seapp selector/domain.
 WEBVIEW_ZYGOTE_UID = 1053
+SHARED_RELRO_UID = 1037
 ZYGOTE_LABEL = "u:r:zygote:s0"
 SYSTEM_SERVER_LABEL = "u:r:system_server:s0"
 WEBVIEW_ZYGOTE_LABEL = "u:r:webview_zygote:s0"
+# Stock `user=shared_relro domain=shared_relro levelFrom=all` for uid 1037.
+SHARED_RELRO_LABEL = "u:r:shared_relro:s0:c37,c260,c512,c768"
 UNLABELED_FILE = "u:object_r:unlabeled:s0"
 SYSTEM_DATA_FILE = "u:object_r:system_data_file:s0"
 # Stock plat_file_contexts assigns /data/system/packages.list this exact type.
@@ -187,7 +190,7 @@ def file_rules(profile):
 
 
 def webview_and_packages_rules(profile):
-    """Translate the exact stock WebView zygote and packages.list policy records."""
+    """Translate the exact stock WebView, shared RELRO, and packages.list records."""
     subjects = dict(profile["subjects"])
     labels = set()
     transitions = []
@@ -200,6 +203,16 @@ def webview_and_packages_rules(profile):
                 raise ValueError("stock runtime subject identifier bound")
             subjects[webview] = identifier
         transition = (ZYGOTE_LABEL, webview, WEBVIEW_ZYGOTE_UID)
+        if not any(tuple(rule) == transition for rule in profile["transitions"]):
+            transitions.append(transition)
+
+        shared_relro = SHARED_RELRO_LABEL
+        if shared_relro not in subjects:
+            identifier = max(subjects.values()) + 1
+            if identifier >= 100:
+                raise ValueError("stock runtime subject identifier bound")
+            subjects[shared_relro] = identifier
+        transition = (ZYGOTE_LABEL, shared_relro, SHARED_RELRO_UID)
         if not any(tuple(rule) == transition for rule in profile["transitions"]):
             transitions.append(transition)
 
