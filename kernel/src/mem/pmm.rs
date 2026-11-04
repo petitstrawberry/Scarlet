@@ -7,6 +7,7 @@
 
 use crate::sync::IrqSpinLock;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::environment::PAGE_SIZE;
 use crate::println;
@@ -724,6 +725,29 @@ impl PmmInner {
 
 static PMM: IrqSpinLock<PmmInner> = IrqSpinLock::new(PmmInner::new());
 
+// Allocation failures are cold-path diagnostics. Keeping these atomics separate
+// from the PMM lock leaves ordinary allocation behavior and scalability intact.
+static ALLOCATION_FAILURES: AtomicU64 = AtomicU64::new(0);
+static ALLOCATION_FAILED_PAGES: AtomicU64 = AtomicU64::new(0);
+
+/// Account for a rejected allocation request. The page total is the number of
+/// pages requested by failed calls, not a claim about the pages actually held
+/// before an individual-page allocation was rolled back.
+fn note_allocation_failure(pages: usize) {
+    ALLOCATION_FAILURES.fetch_add(1, Ordering::Relaxed);
+    let pages = u64::try_from(pages).unwrap_or(u64::MAX);
+    let _ = ALLOCATION_FAILED_PAGES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(pages))
+    });
+}
+
+pub(crate) fn allocation_failure_totals() -> (u64, u64) {
+    (
+        ALLOCATION_FAILURES.load(Ordering::Relaxed),
+        ALLOCATION_FAILED_PAGES.load(Ordering::Relaxed),
+    )
+}
+
 /// Atomically snapshot the total and free page counts of active RAM regions.
 /// The returned counts are advisory; allocations may change them immediately.
 pub fn page_counts() -> (usize, usize) {
@@ -792,7 +816,13 @@ pub fn add_region(area: PhysicalMemoryArea) -> Result<(), &'static str> {
 /// The starting physical address of an owned allocation, or `None` if it cannot
 /// be allocated. Contents are not zeroed here. Free with the original page count.
 pub fn alloc_contiguous_pages(pages: usize) -> Option<u64> {
-    PMM.lock().alloc(pages)
+    match PMM.lock().alloc(pages) {
+        Some(paddr) => Some(paddr),
+        None => {
+            note_allocation_failure(pages);
+            None
+        }
+    }
 }
 
 /// Allocate aligned contiguous physical pages.
@@ -809,7 +839,13 @@ pub fn alloc_contiguous_pages(pages: usize) -> Option<u64> {
 /// if sizing, allocation, or aligned-allocation tracking fails. Release with
 /// [`free_contiguous_pages`] using the returned address and original `pages` count.
 pub fn alloc_contiguous_pages_aligned(pages: usize, align_pages: usize) -> Option<u64> {
-    PMM.lock().alloc_aligned(pages, align_pages)
+    match PMM.lock().alloc_aligned(pages, align_pages) {
+        Some(paddr) => Some(paddr),
+        None => {
+            note_allocation_failure(pages);
+            None
+        }
+    }
 }
 
 fn aligned_allocation_backing_order(pages: usize, align_pages: usize) -> Option<usize> {
@@ -840,6 +876,7 @@ pub fn alloc_individual_pages(count: usize) -> Option<Vec<u64>> {
                 for paddr in pages {
                     PMM.lock().free(paddr, 1);
                 }
+                note_allocation_failure(count);
                 return None;
             }
         }
@@ -891,6 +928,18 @@ fn align_down(addr: usize, align: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test_case]
+    fn failed_allocation_updates_cold_path_telemetry() {
+        let (requests_before, pages_before) = allocation_failure_totals();
+        assert_eq!(
+            alloc_contiguous_pages((1usize << MAX_ORDER).saturating_add(1)),
+            None
+        );
+        let (requests_after, pages_after) = allocation_failure_totals();
+        assert!(requests_after > requests_before);
+        assert!(pages_after > pages_before);
+    }
 
     #[test_case]
     fn metadata_prefix_does_not_fragment_the_usable_buddy_extent() {

@@ -34,7 +34,9 @@ extern crate alloc;
 use super::accounting::{Activity, CpuClock};
 use crate::sync::counter::SaturatingCounter;
 use crate::sync::diagnostic::{DiagnosticRecord, ReportInterval};
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 
 use alloc::{
     collections::{BTreeMap, BTreeSet, vec_deque::VecDeque},
@@ -1020,6 +1022,421 @@ static PENDING_RESCHEDULE_IPI: [AtomicBool; MAX_NUM_CPUS] =
     [const { AtomicBool::new(false) }; MAX_NUM_CPUS];
 static CPU_CLOCKS: Once<[CpuClock; MAX_NUM_CPUS]> = Once::new();
 
+// Only reclaim-active scheduler operations write this shared tracking state.
+// In particular, normal scheduling does not increment a global revision.
+// Activation must also drain operations that entered on the inactive path:
+// each online CPU acknowledges at a completed pick_next or task-context
+// reclaim boundary. A preempted, unfinished non-idle scheduler caller remains
+// visible as a current, deferred-previous, or ready ID. Idle-context queue work
+// runs in IRQ callbacks, before the interrupt's scheduler safe point. Reclaim
+// must not be entered from inside a scheduler mutation or the heap allocator.
+struct MemoryPressureTracking {
+    revision: AtomicU64,
+    writers: AtomicUsize,
+    activation: AtomicU64,
+    acknowledged: [AtomicU64; MAX_NUM_CPUS],
+}
+
+impl MemoryPressureTracking {
+    const fn new() -> Self {
+        Self {
+            revision: AtomicU64::new(0),
+            writers: AtomicUsize::new(0),
+            activation: AtomicU64::new(0),
+            acknowledged: [const { AtomicU64::new(0) }; MAX_NUM_CPUS],
+        }
+    }
+
+    fn advance_revision(&self) -> u64 {
+        self.revision
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |revision| {
+                revision.checked_add(1)
+            })
+            .map_or(u64::MAX, |revision| revision + 1)
+    }
+
+    fn begin(&self) {
+        self.writers.fetch_add(1, Ordering::SeqCst);
+        self.advance_revision();
+    }
+
+    fn finish(&self) -> bool {
+        self.advance_revision();
+        self.writers.fetch_sub(1, Ordering::SeqCst) == 1
+    }
+
+    fn valid(&self, revision: u64) -> bool {
+        revision != u64::MAX
+            && self.writers.load(Ordering::SeqCst) == 0
+            && self.revision.load(Ordering::SeqCst) == revision
+    }
+
+    fn all_acknowledged(&self, online: u64) -> bool {
+        let activation = self.activation.load(Ordering::SeqCst);
+        activation != 0
+            && activation != u64::MAX
+            && online != 0
+            && online_cpu_ids_from_mask(online)
+                .all(|cpu| self.acknowledged[cpu].load(Ordering::SeqCst) == activation)
+    }
+}
+
+static MEMORY_PRESSURE_TRACKING: MemoryPressureTracking = MemoryPressureTracking::new();
+// One publisher, with a dirty bit for reentrant wakeups and concurrent callers.
+const PRESSURE_PUBLISHING: usize = 1;
+const PRESSURE_DIRTY: usize = 2;
+static MEMORY_PRESSURE_PUBLISHER: AtomicUsize = AtomicUsize::new(0);
+static MEMORY_PRESSURE_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+mod memory_pressure_tests {
+    use super::*;
+
+    #[test_case]
+    fn inactive_scheduler_hooks_do_not_write_shared_tracking_state() {
+        assert!(!crate::mem::pressure::reclaim_active_fast());
+        let revision = MEMORY_PRESSURE_TRACKING.revision.load(Ordering::SeqCst);
+        let writers = MEMORY_PRESSURE_TRACKING.writers.load(Ordering::SeqCst);
+        let publication = MEMORY_PRESSURE_PUBLISHER.load(Ordering::SeqCst);
+        drop(SchedulerPressureChange::begin());
+        drop(MemoryPressureSafePoint);
+        assert_eq!(
+            MEMORY_PRESSURE_TRACKING.revision.load(Ordering::SeqCst),
+            revision
+        );
+        assert_eq!(
+            MEMORY_PRESSURE_TRACKING.writers.load(Ordering::SeqCst),
+            writers
+        );
+        assert_eq!(
+            MEMORY_PRESSURE_PUBLISHER.load(Ordering::SeqCst),
+            publication
+        );
+    }
+
+    #[test_case]
+    fn full_snapshot_rejects_a_writer_started_after_sampling() {
+        let tracking = MemoryPressureTracking::new();
+        let sampled = tracking.advance_revision();
+        assert!(tracking.valid(sampled));
+        tracking.begin();
+        assert!(!tracking.valid(sampled));
+        assert!(tracking.finish());
+        // The writer can complete before the old sample reaches the consumer.
+        assert!(!tracking.valid(sampled));
+        assert!(tracking.valid(tracking.advance_revision()));
+    }
+
+    #[test_case]
+    fn full_snapshot_rejects_overlapping_smp_writers() {
+        let tracking = MemoryPressureTracking::new();
+        tracking.begin();
+        tracking.begin();
+        assert!(!tracking.finish());
+        let revision = tracking.advance_revision();
+        assert!(!tracking.valid(revision));
+        assert!(tracking.finish());
+        assert!(!tracking.valid(revision));
+        assert!(tracking.valid(tracking.advance_revision()));
+    }
+
+    #[test_case]
+    fn full_activation_requires_fresh_safe_points_on_all_online_cpus() {
+        let tracking = MemoryPressureTracking::new();
+        let online = 1 | (1 << (MAX_NUM_CPUS - 1));
+        assert!(!tracking.all_acknowledged(online));
+        tracking.activation.store(1, Ordering::SeqCst);
+        tracking.acknowledged[0].store(1, Ordering::SeqCst);
+        if MAX_NUM_CPUS > 1 {
+            assert!(!tracking.all_acknowledged(online));
+        }
+        tracking.acknowledged[MAX_NUM_CPUS - 1].store(1, Ordering::SeqCst);
+        assert!(tracking.all_acknowledged(online));
+        // An inactive pick can straddle activation. Earlier acknowledgments
+        // must not let its empty-queue / old-current gap count as full.
+        tracking.activation.store(2, Ordering::SeqCst);
+        assert!(!tracking.all_acknowledged(online));
+        assert!(!tracking.all_acknowledged(0));
+    }
+
+    #[test_case]
+    fn full_revision_exhaustion_fails_closed() {
+        let tracking = MemoryPressureTracking::new();
+        tracking.revision.store(u64::MAX - 1, Ordering::SeqCst);
+        assert_eq!(tracking.advance_revision(), u64::MAX);
+        assert!(!tracking.valid(u64::MAX));
+        assert_eq!(tracking.advance_revision(), u64::MAX);
+        assert!(!tracking.valid(0));
+    }
+
+    #[test_case]
+    fn full_sampler_uses_ready_ids_and_fails_closed_on_queue_contention() {
+        reset();
+        let cpu = get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+        let tracking = MemoryPressureTracking::new();
+        tracking.activation.store(1, Ordering::SeqCst);
+        tracking.acknowledged[cpu].store(1, Ordering::SeqCst);
+        // Deliberately absent from TaskPool: sampling must never look it up.
+        let stalled_id = 41;
+        let other_id = 42;
+        CURRENT_TASK_IDS[cpu].store(stalled_id, Ordering::SeqCst);
+        {
+            let _pool = get_task_pool().tasks.lock();
+            assert!(sample_memory_pressure_full(&tracking, &[stalled_id]));
+            let _held = FAIR_QUEUES[cpu].lock();
+            assert!(!sample_memory_pressure_full(&tracking, &[stalled_id]));
+        }
+        assert!(!sample_memory_pressure_full(&tracking, &[]));
+        let fair_key = FairKey {
+            deadline: 10,
+            vruntime: 0,
+            task_id: other_id,
+        };
+        FAIR_QUEUES[cpu]
+            .lock()
+            .insert(other_id, fair_key, 0, NICE_0_LOAD);
+        assert!(!sample_memory_pressure_full(&tracking, &[stalled_id]));
+        FAIR_QUEUES[cpu].lock().remove(other_id);
+        FIXED_QUEUES[cpu]
+            .lock()
+            .insert((core::cmp::Reverse(1), 0, other_id));
+        assert!(!sample_memory_pressure_full(&tracking, &[stalled_id]));
+        FIXED_QUEUES[cpu].lock().remove(other_id);
+        DEADLINE_QUEUES[cpu]
+            .lock()
+            .insert(DeadlineKey::new(10, other_id));
+        assert!(!sample_memory_pressure_full(&tracking, &[stalled_id]));
+        DEADLINE_QUEUES[cpu].lock().remove(other_id);
+        // A previous runnable task remains conservative false until context
+        // save has completed and release_deferred_prev has requeued it.
+        SCHEDULE_PREV_TASK[cpu].store(other_id, Ordering::SeqCst);
+        assert!(!sample_memory_pressure_full(&tracking, &[stalled_id]));
+        SCHEDULE_PREV_TASK[cpu].store(0, Ordering::SeqCst);
+        CURRENT_TASK_IDS[cpu].store(other_id, Ordering::SeqCst);
+        assert!(!sample_memory_pressure_full(&tracking, &[stalled_id]));
+        IDLE_TASK_IDS[cpu].store(other_id, Ordering::SeqCst);
+        assert!(sample_memory_pressure_full(&tracking, &[stalled_id]));
+        IDLE_TASK_IDS[cpu].store(0, Ordering::SeqCst);
+        CURRENT_TASK_IDS[cpu].store(0, Ordering::SeqCst);
+        reset();
+    }
+}
+
+/// Validate a sampled scheduler revision under the pressure accounting lock.
+/// No scheduler lock or task-pool lookup is needed by the consumer.
+pub(crate) fn memory_pressure_snapshot_valid(revision: u64) -> bool {
+    MEMORY_PRESSURE_TRACKING.valid(revision)
+}
+
+/// Bracket a scheduler operation, including its queue-to-current or migration
+/// gap. Declare before acquiring queue locks so Drop runs after their release.
+/// Outside reclaim the only tracking operation is the fixed active-bit load.
+struct SchedulerPressureChange {
+    tracked: bool,
+}
+
+impl SchedulerPressureChange {
+    #[inline]
+    fn begin() -> Self {
+        if !crate::mem::pressure::reclaim_active_fast() {
+            return Self { tracked: false };
+        }
+        MEMORY_PRESSURE_TRACKING.begin();
+        Self { tracked: true }
+    }
+}
+
+impl Drop for SchedulerPressureChange {
+    fn drop(&mut self) {
+        if self.tracked && MEMORY_PRESSURE_TRACKING.finish() {
+            publish_memory_pressure_state();
+        }
+    }
+}
+
+/// Forced writer token for pressure membership/active-bit changes.
+///
+/// Acquire BEFORE taking the pressure lock; drop AFTER releasing it. These
+/// calls originate in task-context reclaim, outside scheduler operations.
+/// Their CPU is a safe point for activation; a scheduler operation already in
+/// flight on another CPU must finish before that CPU acknowledges activation.
+pub(crate) struct MemoryPressureStateChange {
+    _irq: IrqGuard,
+    activating: bool,
+}
+
+pub(crate) fn memory_pressure_state_change_begin() -> MemoryPressureStateChange {
+    let irq = IrqGuard::new();
+    MEMORY_PRESSURE_TRACKING.begin();
+    let activating = !crate::mem::pressure::reclaim_active_fast();
+    if activating {
+        // A new activation never inherits an earlier CPU acknowledgment.
+        MEMORY_PRESSURE_TRACKING
+            .activation
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |activation| {
+                activation.checked_add(1)
+            })
+            .ok();
+    }
+    MemoryPressureStateChange {
+        _irq: irq,
+        activating,
+    }
+}
+
+impl Drop for MemoryPressureStateChange {
+    fn drop(&mut self) {
+        let active = crate::mem::pressure::reclaim_active_fast();
+        if active {
+            acknowledge_memory_pressure_activation();
+        }
+        let last = MEMORY_PRESSURE_TRACKING.finish();
+        if last {
+            publish_memory_pressure_state();
+        }
+        if self.activating && active {
+            // An idle CPU needs an event to reach a post-activation safe point.
+            // A busy CPU handles this at its next interrupt-safe pick_next.
+            for_each_online_cpu(|cpu| {
+                if scheduler_ready(cpu) {
+                    request_remote_reschedule(cpu);
+                }
+            });
+        }
+    }
+}
+
+fn acknowledge_memory_pressure_activation() {
+    let cpu = get_cpu().get_cpuid();
+    let activation = MEMORY_PRESSURE_TRACKING.activation.load(Ordering::SeqCst);
+    MEMORY_PRESSURE_TRACKING.acknowledged[cpu].store(activation, Ordering::SeqCst);
+}
+
+// Created at the outer pick_next boundary, before its IRQ/queue guards. Even
+// an operation that entered while pressure was inactive acknowledges only
+// after completing its queue/current publication, closing the activation race.
+struct MemoryPressureSafePoint;
+
+impl Drop for MemoryPressureSafePoint {
+    fn drop(&mut self) {
+        if crate::mem::pressure::reclaim_active_fast() {
+            let _irq = IrqGuard::new();
+            MEMORY_PRESSURE_TRACKING.begin();
+            acknowledge_memory_pressure_activation();
+            if MEMORY_PRESSURE_TRACKING.finish() {
+                publish_memory_pressure_state();
+            }
+        }
+    }
+}
+
+fn memory_pressure_ready_id(task_id: usize, idle_id: usize, reclaim: &[usize]) -> bool {
+    task_id != 0 && task_id != idle_id && !reclaim.contains(&task_id)
+}
+
+/// The fixed membership snapshot is taken once; no TaskPool lookup occurs
+/// while any queue is locked. Unknown/contended state always means false.
+fn sample_memory_pressure_full(tracking: &MemoryPressureTracking, reclaim: &[usize]) -> bool {
+    if reclaim.is_empty() {
+        return false;
+    }
+    let online = online_cpu_mask();
+    if !tracking.all_acknowledged(online) {
+        return false;
+    }
+    for cpu in 0..MAX_NUM_CPUS {
+        let idle = IDLE_TASK_IDS[cpu].load(Ordering::SeqCst);
+        if online & cpu_mask_bit(cpu) != 0 {
+            let current = CURRENT_TASK_IDS[cpu].load(Ordering::SeqCst);
+            let previous = SCHEDULE_PREV_TASK[cpu].load(Ordering::SeqCst);
+            if memory_pressure_ready_id(current, idle, reclaim)
+                || memory_pressure_ready_id(previous, idle, reclaim)
+            {
+                return false;
+            }
+        }
+        let Some(fair) = FAIR_QUEUES[cpu].try_lock() else {
+            return false;
+        };
+        if fair
+            .task_ids()
+            .any(|id| memory_pressure_ready_id(id, idle, reclaim))
+        {
+            return false;
+        }
+        drop(fair);
+        let Some(fixed) = FIXED_QUEUES[cpu].try_lock() else {
+            return false;
+        };
+        if fixed
+            .entries
+            .keys()
+            .any(|&id| memory_pressure_ready_id(id, idle, reclaim))
+        {
+            return false;
+        }
+        drop(fixed);
+        let Some(deadline) = DEADLINE_QUEUES[cpu].try_lock() else {
+            return false;
+        };
+        if deadline
+            .task_ids()
+            .any(|id| memory_pressure_ready_id(id, idle, reclaim))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Serialize callbacks without blocking on another publisher (including a
+/// reentrant wake). A bounded retry handles a dirty snapshot; sustained churn
+/// finishes with false rather than spinning or leaving an obsolete true.
+fn publish_memory_pressure_state() {
+    let _irq = IrqGuard::new();
+    let old = MEMORY_PRESSURE_PUBLISHER.fetch_or(PRESSURE_DIRTY, Ordering::SeqCst);
+    if old & PRESSURE_PUBLISHING != 0
+        || MEMORY_PRESSURE_PUBLISHER
+            .compare_exchange(
+                PRESSURE_DIRTY,
+                PRESSURE_PUBLISHING,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_err()
+    {
+        return;
+    }
+
+    for _ in 0..2 {
+        MEMORY_PRESSURE_PUBLISHER.store(PRESSURE_PUBLISHING, Ordering::SeqCst);
+        // Reserve the publication revision BEFORE sampling any membership or
+        // queue. A later writer invalidates it, never relabels stale data new.
+        let revision = MEMORY_PRESSURE_TRACKING.advance_revision();
+        let membership = crate::mem::pressure::try_reclaim_tasks_snapshot();
+        let (epoch, full) = match membership {
+            Some((epoch, tasks, count)) => (
+                Some(epoch),
+                memory_pressure_snapshot_valid(revision)
+                    && sample_memory_pressure_full(&MEMORY_PRESSURE_TRACKING, &tasks[..count])
+                    && memory_pressure_snapshot_valid(revision),
+            ),
+            None => (None, false),
+        };
+        crate::mem::pressure::scheduler_full_state_changed(revision, full, epoch);
+        if MEMORY_PRESSURE_PUBLISHER
+            .compare_exchange(PRESSURE_PUBLISHING, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            return;
+        }
+    }
+    let revision = MEMORY_PRESSURE_TRACKING.advance_revision();
+    crate::mem::pressure::scheduler_full_state_changed(revision, false, None);
+    MEMORY_PRESSURE_PUBLISHER.store(0, Ordering::SeqCst);
+}
+
 fn cpu_clocks() -> &'static [CpuClock; MAX_NUM_CPUS] {
     CPU_CLOCKS.call_once(|| core::array::from_fn(|_| CpuClock::new()))
 }
@@ -1780,6 +2197,7 @@ pub fn debug_log_reschedule_ipi(cpu_id: usize, from_kernel: bool, can_schedule: 
 }
 
 fn release_deferred_prev(cpu_id: usize) {
+    let _pressure_change = SchedulerPressureChange::begin();
     let prev_id = SCHEDULE_PREV_TASK[cpu_id].swap(0, Ordering::SeqCst);
     let Some(prev_id) = decode_task_id(prev_id) else {
         return;
@@ -2640,6 +3058,7 @@ pub fn refresh_current_task_slice(cpu_id: usize) {
 ///
 /// This function returns no value.
 pub fn register_online_cpu(cpu_id: usize) {
+    let _pressure_change = SchedulerPressureChange::begin();
     debug_assert!(cpu_id < MAX_NUM_CPUS);
     if cpu_id < MAX_NUM_CPUS {
         ONLINE_CPU_MASK.fetch_or(1usize << cpu_id, Ordering::Release);
@@ -3126,6 +3545,7 @@ fn steal_candidate_from_cpu(
 }
 
 fn remove_ready_task_from_cpu(cpu_id: usize, task_id: usize) -> bool {
+    let _pressure_change = SchedulerPressureChange::begin();
     let Some(task) = TaskPool::get_task(task_id) else {
         return false;
     };
@@ -3141,6 +3561,7 @@ fn remove_ready_task_from_cpu(cpu_id: usize, task_id: usize) -> bool {
 }
 
 fn steal_fixed_task(target_cpu: usize, now_ns: u64) -> Option<usize> {
+    let _pressure_change = SchedulerPressureChange::begin();
     let mut best: Option<(FixedKey, usize)> = None;
     for_each_online_cpu(|cpu| {
         if cpu == target_cpu {
@@ -3184,6 +3605,7 @@ fn steal_fixed_task(target_cpu: usize, now_ns: u64) -> Option<usize> {
 }
 
 fn steal_ready_task_for_cpu(target_cpu: usize, now_ns: u64) -> Option<usize> {
+    let _pressure_change = SchedulerPressureChange::begin();
     if let Some(task)=steal_fixed_task(target_cpu,now_ns) {return Some(task);}
     let online_mask = online_cpu_mask();
     let online_count = online_mask.count_ones() as usize;
@@ -3541,6 +3963,7 @@ pub fn num_online_cpus() -> usize {
 ///
 /// * `task` - Task whose affinity mask was just replaced.
 pub fn reconcile_task_affinity(task: &Task) {
+    let _pressure_change = SchedulerPressureChange::begin();
     let running_cpu = task.running_cpu.load(Ordering::SeqCst);
     if running_cpu != NO_CPU {
         if !task.cpu_allowed(running_cpu) && is_cpu_online(running_cpu) {
@@ -4191,6 +4614,7 @@ fn release_deadline_bandwidth(cpu_id: usize, units: u32) {
 }
 
 fn enqueue_deadline(task: &Task) -> bool {
+    let _pressure_change = SchedulerPressureChange::begin();
     let state = task.deadline.lock();
     let Some(_) = state.params else {
         return false;
@@ -4218,6 +4642,7 @@ fn enqueue_deadline(task: &Task) -> bool {
 }
 
 fn remove_deadline_task_from_cpu(cpu_id: usize, task: &Task) -> bool {
+    let _pressure_change = SchedulerPressureChange::begin();
     let removed = deadline_queue(cpu_id)
         .lock()
         .remove(task.get_id())
@@ -4233,6 +4658,7 @@ fn advance_deadline_period(
     now_ns: u64,
     expected_callback: Option<&Arc<DeadlineTimerHandler>>,
 ) -> bool {
+    let _pressure_change = SchedulerPressureChange::begin();
     let (timer, handler, should_enqueue) = {
         let mut state = task.deadline.lock();
         let Some(params) = state.params else {
@@ -4320,6 +4746,7 @@ fn deadline_key_for_running(task: &Task, cpu_id: usize) -> Option<DeadlineKey> {
 }
 
 fn pick_deadline(cpu_id: usize) -> Option<usize> {
+    let _pressure_change = SchedulerPressureChange::begin();
     loop {
         let key = deadline_queue(cpu_id).lock().pop()?;
         let Some(task) = TaskPool::get_task(key.task_id) else {
@@ -4491,6 +4918,7 @@ pub fn current_task_scheduler_state() -> Option<SchedulerStateSnapshot> {
 ///
 /// * `task` - Task whose reservation should be released.
 pub(crate) fn release_task_deadline(task: &Task) {
+    let _pressure_change = SchedulerPressureChange::begin();
     let (cpu_id, units, timer, handler, was_enabled) = {
         let mut state = task.deadline.lock();
         let was_enabled = state.params.is_some();
@@ -4597,6 +5025,7 @@ fn update_curr_fair(task: &Task, queue: &mut FairQueue, now_ns: u64) {
 
 /// Place and insert a task into the destination CPU's fair queue.
 fn enqueue_fair(cpu_id: usize, task: &Task, mode: PlaceMode) {
+    let _pressure_change = SchedulerPressureChange::begin();
     if task
         .sched_on_rq
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -4614,6 +5043,7 @@ fn enqueue_fair(cpu_id: usize, task: &Task, mode: PlaceMode) {
 }
 
 fn enqueue_fixed(cpu_id: usize, task: &Task, mode: PlaceMode) {
+    let _pressure_change = SchedulerPressureChange::begin();
     if task
         .sched_on_rq
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -4633,6 +5063,7 @@ fn enqueue_fixed(cpu_id: usize, task: &Task, mode: PlaceMode) {
     queue.insert((core::cmp::Reverse(priority), ticket, task.get_id()));
 }
 fn pick_fixed(cpu_id: usize) -> Option<usize> {
+    let _pressure_change = SchedulerPressureChange::begin();
     loop {
         let key = {
             let mut queue = FIXED_QUEUES[cpu_id].lock();
@@ -4687,6 +5118,7 @@ fn keep_running_fixed(task: &Task, cpu_id: usize) -> bool {
 
 /// Reconcile a native priority change without keeping a task alive in a lease.
 pub(crate) fn fixed_priority_changed(task: &Task, previous: u8) {
+    let _pressure_change = SchedulerPressureChange::begin();
     let Some(_id) = task.registered_id() else {
         return;
     };
@@ -4737,6 +5169,7 @@ pub fn set_task_fifo_priority(task: &Task, priority: u8) -> Result<(), ()> {
 /// its task id. Returns `None` when the queue is empty or no entity can be
 /// claimed.
 fn pick_fair(cpu_id: usize) -> Option<usize> {
+    let _pressure_change = SchedulerPressureChange::begin();
     loop {
         let key = {
             let mut queue = fair_queue(cpu_id).lock();
@@ -4754,6 +5187,7 @@ fn pick_fair(cpu_id: usize) -> Option<usize> {
 
 #[inline]
 fn set_current_task_id(cpu_id: usize, task_id: Option<usize>) {
+    let _pressure_change = SchedulerPressureChange::begin();
     assert_valid_cpu_id(cpu_id);
     let task_ptr = task_id
         .and_then(TaskPool::get_task)
@@ -4780,6 +5214,7 @@ pub fn push_ready_task(cpu_id: usize, task_id: usize) {
 }
 
 fn push_ready_task_with_mode(cpu_id: usize, task_id: usize, mode: PlaceMode) {
+    let _pressure_change = SchedulerPressureChange::begin();
     let Some(task) = TaskPool::get_task(task_id) else {
         return;
     };
@@ -4982,6 +5417,8 @@ pub fn finalize_zombie(task_id: usize, parent_id: Option<usize>) {
 }
 
 fn pick_next(cpu: &Arch) -> (Option<usize>, Option<usize>) {
+    let _pressure_safe_point = MemoryPressureSafePoint;
+    let _pressure_change = SchedulerPressureChange::begin();
     crate::breadcrumb::drop(
         crate::breadcrumb::PICK_NEXT_ENTER,
         cpu.get_cpuid() as u64,
@@ -5260,6 +5697,7 @@ pub fn register_task(task: Task) -> usize {
 
 /// Make a registered task runnable on the specified CPU.
 pub fn enqueue_task(task_id: usize, cpu_id: usize) {
+    let _pressure_change = SchedulerPressureChange::begin();
     let irq_guard = IrqGuard::new();
     let current_cpu = get_cpu().get_cpuid();
     let target_cpu = TaskPool::get_task(task_id)
@@ -5463,6 +5901,7 @@ fn idle_entry() {
 }
 
 pub fn spawn_idle_task(cpu_id: usize) -> usize {
+    let _pressure_change = SchedulerPressureChange::begin();
     let name = alloc::format!("idle{}", cpu_id);
     let task = new_kernel_task(name, 0, idle_entry);
     task.set_pinned_cpu(Some(cpu_id));
@@ -5515,6 +5954,10 @@ pub fn start_scheduler() -> Option<usize> {
     //     next_task_id
     // );
     set_scheduler_ready(cpu_id, true);
+    if !MEMORY_PRESSURE_INITIALIZED.swap(true, Ordering::SeqCst) {
+        // Advertise full only after the real scheduler producer is installed.
+        publish_memory_pressure_state();
+    }
     start_task_cpu_watchdog(cpu_id);
     next_task_id
 }
@@ -5708,6 +6151,7 @@ fn context_safe_wake_cpu(task: &Task, requested_cpu: usize, now_ns: u64) -> usiz
 }
 
 pub fn wake_task_on(task_id: usize, target_cpu: usize) -> bool {
+    let _pressure_change = SchedulerPressureChange::begin();
     let _irq_guard = IrqGuard::new();
     let Some(task) = TaskPool::get_task(task_id) else {
         return false;
@@ -5828,6 +6272,7 @@ pub fn complete_non_current_task_exit(task_id: usize) {
 }
 
 pub fn remove_from_ready_queues(task_id: usize) {
+    let _pressure_change = SchedulerPressureChange::begin();
     let _irq_guard = IrqGuard::new();
 
     let Some(task) = TaskPool::get_task(task_id) else {
