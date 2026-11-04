@@ -367,6 +367,9 @@ pub struct ResolveFaultResult {
 pub enum ResolveFaultError {
     Invalid,
     Unmapped,
+    /// Backing could not be allocated. Unlike an invalid address, this may
+    /// be retried after reclaiming unused cache pages outside the owner lock.
+    NoMemory,
 }
 
 #[cfg(test)]

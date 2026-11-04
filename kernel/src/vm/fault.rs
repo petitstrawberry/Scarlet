@@ -30,6 +30,50 @@ mod tests {
         }
         assert!(matches!(vm.resolve_user_memory_fault(access),Err(UserFaultResolutionError::Internal(_))));
     }
+
+    struct AllocationShortage {
+        attempts: core::sync::atomic::AtomicUsize,
+        always_fails: bool,
+        page: crate::mem::page::ContiguousPages,
+    }
+    impl MemoryMappingOps for AllocationShortage {
+        fn get_mapping_info(&self, _: usize, _: usize) -> Result<MemoryMappingInfo, &'static str> {
+            Err("fault-backed test mapping")
+        }
+        fn supports_mmap(&self) -> bool { true }
+        fn resolve_fault(&self, _: &AccessKind, _: usize, _: usize)
+            -> Result<crate::object::capability::memory_mapping::ResolveFaultResult,
+                crate::object::capability::memory_mapping::ResolveFaultError> {
+            use crate::object::capability::memory_mapping::{ResolveFaultError, ResolveFaultResult};
+            let attempt = self.attempts.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if self.always_fails || attempt == 0 { return Err(ResolveFaultError::NoMemory); }
+            Ok(ResolveFaultResult { paddr_page_base: self.page.as_paddr(), is_tail: false })
+        }
+    }
+
+    #[test_case]
+    fn memory_shortage_retries_once_and_keeps_exhaustion_an_internal_fault() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        for always_fails in [false, true] {
+            let vm = VirtualMemoryManager::new();
+            vm.set_asid(crate::arch::vm::alloc_virtual_address_space());
+            let owner = Arc::new(AllocationShortage {
+                attempts: AtomicUsize::new(0), always_fails,
+                page: crate::mem::page::ContiguousPages::new(1).unwrap(),
+            });
+            let access = AccessKind { op: AccessOp::Load, vaddr: 0x30000000, size: None };
+            vm.add_memory_map(VirtualMemoryMap::new(PhysicalMemoryArea::new(0, 0),
+                MemoryArea::new(access.vaddr, access.vaddr + 4095), 9, true, Some(owner.clone()))).unwrap();
+            let result = vm.resolve_user_memory_fault(access);
+            if always_fails {
+                assert!(matches!(result, Err(UserFaultResolutionError::Internal(_))));
+            } else {
+                assert!(result.is_ok(), "{result:?}");
+                assert_eq!(vm.get_root_page_table().unwrap().translate(access.vaddr), Some(owner.page.as_paddr()));
+            }
+            assert_eq!(owner.attempts.load(Ordering::Relaxed), 2);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

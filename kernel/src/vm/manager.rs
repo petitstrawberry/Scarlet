@@ -1578,6 +1578,14 @@ impl VirtualMemoryManager {
         &self,
         access: crate::object::capability::memory_mapping::AccessKind,
     ) -> Result<(), &'static str> {
+        self.lazy_map_page_with_reclaim(access, true)
+    }
+
+    fn lazy_map_page_with_reclaim(
+        &self,
+        access: crate::object::capability::memory_mapping::AccessKind,
+        allow_reclaim: bool,
+    ) -> Result<(), &'static str> {
         let vaddr = access.vaddr;
         let memory_map = match self.search_memory_map(vaddr) {
             Some(map) => map,
@@ -1643,8 +1651,19 @@ impl VirtualMemoryManager {
                             page_vaddr as u64,
                             0,
                         );
-                        let new_alloc = ContiguousPages::new(1)
-                            .ok_or("Failed to allocate page for private mapping COW")?;
+                        let new_alloc = match ContiguousPages::new(1) {
+                            Some(allocation) => allocation,
+                            None if allow_reclaim => {
+                                // No owner/VMM lock is held here. Reclamation
+                                // must never run inside the general allocator.
+                                let _pressure = crate::mem::pressure::begin_reclaim();
+                                crate::mem::page_cache::PageCacheManager::global()
+                                    .reclaim_clean_pages(64);
+                                ContiguousPages::new(1)
+                                    .ok_or("Failed to allocate page for private mapping COW")?
+                            }
+                            None => return Err("Failed to allocate page for private mapping COW"),
+                        };
                         let new_paddr = new_alloc.as_paddr();
                         crate::breadcrumb::drop(
                             crate::breadcrumb::PMM_ALLOC_DONE,
@@ -1725,6 +1744,15 @@ impl VirtualMemoryManager {
                     }
 
                     res.paddr_page_base
+                }
+                Err(crate::object::capability::memory_mapping::ResolveFaultError::NoMemory) => {
+                    if allow_reclaim {
+                        let _pressure = crate::mem::pressure::begin_reclaim();
+                        crate::mem::page_cache::PageCacheManager::global()
+                            .reclaim_clean_pages(64);
+                        return self.lazy_map_page_with_reclaim(access, false);
+                    }
+                    return Err("Failed to allocate memory for mapping backing");
                 }
                 Err(_) => {
                     if memory_map.pmarea.start != 0 {

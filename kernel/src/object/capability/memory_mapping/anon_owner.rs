@@ -64,7 +64,7 @@ impl MemoryMappingOps for AnonymousZeroPageOwner {
     ) -> Result<ResolveFaultResult, ResolveFaultError> {
         let mut page = self.page.write();
         if page.is_none() {
-            *page = Some(ContiguousPages::new(1).ok_or(ResolveFaultError::Unmapped)?);
+            *page = Some(ContiguousPages::new(1).ok_or(ResolveFaultError::NoMemory)?);
         }
         Ok(ResolveFaultResult {
             paddr_page_base: page.as_ref().unwrap().as_paddr(),
@@ -148,7 +148,7 @@ impl MemoryMappingOps for AnonymousPageOwner {
         let paddr = if let Some(&existing) = pages.get(&page_idx) {
             existing
         } else {
-            let paddr = self.alloc_page().ok_or(ResolveFaultError::Unmapped)?;
+            let paddr = self.alloc_page().ok_or(ResolveFaultError::NoMemory)?;
             pages.insert(page_idx, paddr);
             paddr
         };
