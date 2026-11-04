@@ -1,7 +1,9 @@
 //! Small proc/sys snapshots in the Linux ABI view.
 
-use alloc::{format, string::String, sync::Arc};
+use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::{any::Any, arch::asm};
+
+use scarlet_abi::network::{NetworkLinkInfoV1, NetworkReadLinkStatisticsV1};
 
 use crate::{
     abi::linux::generic::{
@@ -75,6 +77,9 @@ fn cpu_info() -> String {
 
 const CPU_DIRECTORY: &str = "/sys/devices/system/cpu";
 const CPU_FILES: &[&str] = &["online", "possible", "present"];
+const NETWORK_DIRECTORY: &str = "/sys/class/net";
+const NETWORK_STATISTICS_DIRECTORY: &str = "statistics";
+const NETWORK_STATISTICS_FILES: &[&str] = &["rx_bytes", "rx_packets", "tx_bytes", "tx_packets"];
 
 /// Report a native address space, including ELF loader mappings.
 /// Box64 uses these ranges before retrying a hinted mmap with MAP_FIXED.
@@ -416,6 +421,122 @@ fn cpu_directory_entry(path: &str, index: usize) -> Option<(String, bool)> {
     }
 }
 
+type ProcDirectoryEntry = (String, bool);
+
+#[derive(Clone, Copy)]
+enum NetworkStatistic {
+    RxBytes,
+    RxPackets,
+    TxBytes,
+    TxPackets,
+}
+
+impl NetworkStatistic {
+    fn value(self, statistics: &NetworkReadLinkStatisticsV1) -> u64 {
+        match self {
+            Self::RxBytes => statistics.rx_bytes,
+            Self::RxPackets => statistics.rx_packets,
+            Self::TxBytes => statistics.tx_bytes,
+            Self::TxPackets => statistics.tx_packets,
+        }
+    }
+}
+
+enum NetworkPath {
+    Root,
+    Interface,
+    Statistics,
+    Statistic(NetworkLinkInfoV1, NetworkStatistic),
+}
+
+enum NetworkSnapshot {
+    Directory(Vec<ProcDirectoryEntry>),
+    File(Vec<u8>),
+}
+
+fn network_path(path: &str) -> Option<NetworkPath> {
+    let path = path.trim_end_matches('/');
+    if path == NETWORK_DIRECTORY {
+        return Some(NetworkPath::Root);
+    }
+    let suffix = path.strip_prefix(NETWORK_DIRECTORY)?.strip_prefix('/')?;
+    let (name, tail) = match suffix.split_once('/') {
+        Some((name, tail)) if !tail.is_empty() => (name, Some(tail)),
+        Some(_) => return None,
+        None => (suffix, None),
+    };
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+        return None;
+    }
+    let link = crate::network::NetworkManager::get_manager()
+        .link_snapshot()
+        .into_iter()
+        .find(|link| link.interface_name() == Some(name))?;
+    match tail {
+        None => Some(NetworkPath::Interface),
+        Some("statistics") => Some(NetworkPath::Statistics),
+        Some("statistics/rx_bytes") => Some(NetworkPath::Statistic(link, NetworkStatistic::RxBytes)),
+        Some("statistics/rx_packets") => Some(NetworkPath::Statistic(link, NetworkStatistic::RxPackets)),
+        Some("statistics/tx_bytes") => Some(NetworkPath::Statistic(link, NetworkStatistic::TxBytes)),
+        Some("statistics/tx_packets") => Some(NetworkPath::Statistic(link, NetworkStatistic::TxPackets)),
+        Some(_) => None,
+    }
+}
+
+fn base_directory_entries() -> Vec<ProcDirectoryEntry> {
+    alloc::vec![(String::from("."), true), (String::from(".."), true)]
+}
+
+fn network_root_directory_entries(links: &[NetworkLinkInfoV1]) -> Vec<ProcDirectoryEntry> {
+    let mut entries = base_directory_entries();
+    for link in links {
+        if let Some(name) = link.interface_name()
+            && !name.is_empty()
+            && name != "."
+            && name != ".."
+            && !name.contains('/')
+        {
+            entries.push((String::from(name), true));
+        }
+    }
+    entries
+}
+
+fn network_directory_entries(path: &str) -> Option<Vec<ProcDirectoryEntry>> {
+    match network_path(path)? {
+        NetworkPath::Root => Some(network_root_directory_entries(
+            &crate::network::NetworkManager::get_manager().link_snapshot(),
+        )),
+        NetworkPath::Interface => {
+            let mut entries = base_directory_entries();
+            entries.push((String::from(NETWORK_STATISTICS_DIRECTORY), true));
+            Some(entries)
+        }
+        NetworkPath::Statistics => {
+            let mut entries = base_directory_entries();
+            entries.extend(NETWORK_STATISTICS_FILES.iter().map(|name| (String::from(*name), false)));
+            Some(entries)
+        }
+        NetworkPath::Statistic(_, _) => None,
+    }
+}
+
+fn network_statistic_content(link: NetworkLinkInfoV1, statistic: NetworkStatistic) -> Option<Vec<u8>> {
+    let statistics = crate::network::NetworkManager::get_manager()
+        .read_link_statistics(NetworkReadLinkStatisticsV1::query(link.id, link.generation))
+        .ok()?;
+    Some(format!("{}\n", statistic.value(&statistics)).into_bytes())
+}
+
+fn network_snapshot(path: &str) -> Option<NetworkSnapshot> {
+    match network_path(path)? {
+        NetworkPath::Statistic(link, statistic) => {
+            Some(NetworkSnapshot::File(network_statistic_content(link, statistic)?))
+        }
+        _ => Some(NetworkSnapshot::Directory(network_directory_entries(path)?)),
+    }
+}
+
 fn metadata(path: &str, size: usize, directory: bool) -> FileMetadata {
     // Stable across open/stat, distinct for each synthetic entry.
     let file_id = path
@@ -456,6 +577,12 @@ pub(super) fn path_metadata(path: &str) -> Option<FileMetadata> {
     if let Some(metadata) = super::oom::path_metadata(path) {
         return Some(metadata);
     }
+    if let Some(snapshot) = network_snapshot(path) {
+        return Some(match snapshot {
+            NetworkSnapshot::Directory(_) => metadata(path, 0, true),
+            NetworkSnapshot::File(content) => metadata(path, content.len(), false),
+        });
+    }
     if is_cpu_directory(path) {
         Some(metadata(path, 0, true))
     } else {
@@ -483,9 +610,17 @@ pub(super) fn open_proc_text_file(
     {
         return Some(errno::to_result(error));
     }
-    let directory = is_cpu_directory(path);
+    let cpu_directory = is_cpu_directory(path);
+    let (network_directory, network_content, network_entries) = match network_snapshot(path) {
+        Some(NetworkSnapshot::Directory(entries)) => (true, None, Some(entries)),
+        Some(NetworkSnapshot::File(content)) => (false, Some(content), None),
+        None => (false, None, None),
+    };
+    let directory = cpu_directory || network_directory;
     let content = if directory {
         alloc::vec::Vec::new()
+    } else if let Some(content) = network_content {
+        content
     } else {
         snapshot_content(path)?
     };
@@ -500,6 +635,7 @@ pub(super) fn open_proc_text_file(
         content,
         path: String::from(path.trim_end_matches('/')),
         directory,
+        directory_entries: network_entries,
         access: flags & 3,
     });
     let handle = match task.handle_table.insert(KernelObject::File(file)) {
@@ -524,6 +660,9 @@ struct ProcTextFile {
     content: alloc::vec::Vec<u8>,
     path: String,
     directory: bool,
+    /// Network entries are captured at open; CPU directories retain their
+    /// scheduler-backed live iteration.
+    directory_entries: Option<Vec<ProcDirectoryEntry>>,
     access: i32,
 }
 
@@ -531,7 +670,10 @@ impl StreamOps for ProcTextFile {
     fn read(&self, buffer: &mut [u8]) -> Result<usize, StreamError> {
         let mut position = self.position.write();
         if self.directory {
-            let Some((name, directory)) = cpu_directory_entry(&self.path, *position) else {
+            let entry = self.directory_entries.as_ref()
+                .and_then(|entries| entries.get(*position).cloned())
+                .or_else(|| cpu_directory_entry(&self.path, *position));
+            let Some((name, directory)) = entry else {
                 return Ok(0);
             };
             let path = match name.as_str() {
@@ -624,7 +766,9 @@ impl FileObject for ProcTextFile {
             SeekFrom::Current(offset) => *position as i128 + offset as i128,
             SeekFrom::End(offset) => {
                 let end = if self.directory {
-                    if self.path == CPU_DIRECTORY {
+                    if let Some(entries) = &self.directory_entries {
+                        entries.len()
+                    } else if self.path == CPU_DIRECTORY {
                         CPU_FILES.len() + 2 + crate::sched::scheduler::num_online_cpus()
                     } else {
                         2
@@ -672,6 +816,64 @@ impl FileObject for ProcTextFile {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::{
+        device::network::{DevicePacket, MacAddress},
+        network::{InterfaceStats, NetworkInterface, NetworkManager},
+    };
+
+    struct NetworkStatsTestInterface {
+        name: &'static str,
+        statistics: Arc<IrqRwSpinLock<InterfaceStats>>,
+    }
+
+    impl NetworkInterface for NetworkStatsTestInterface {
+        fn name(&self) -> &str { self.name }
+        fn mac_address(&self) -> MacAddress { MacAddress::new([2, 0, 0, 0, 0, 1]) }
+        fn link_state(&self) -> u8 { scarlet_abi::network::LINK_UP }
+        fn ip_address(&self) -> Option<crate::network::ipv4::Ipv4Address> { None }
+        fn set_ip_address(&self, _: crate::network::ipv4::Ipv4Address) {}
+        fn clear_ip_address(&self) {}
+        fn send(&self, _: DevicePacket) -> Result<(), &'static str> {
+            Err("network statistics test interface")
+        }
+        fn poll(&self) -> Result<Vec<DevicePacket>, &'static str> { Ok(Vec::new()) }
+        fn stats(&self) -> InterfaceStats { self.statistics.read().clone() }
+    }
+
+    fn file_contents(file: &dyn FileObject) -> Vec<u8> {
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut contents = Vec::new();
+        let mut buffer = [0; 16];
+        loop {
+            let read = file.read(&mut buffer).unwrap();
+            if read == 0 { return contents; }
+            contents.extend_from_slice(&buffer[..read]);
+        }
+    }
+
+    fn directory_names(file: &dyn FileObject) -> Vec<String> {
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut names = Vec::new();
+        let mut buffer = [0; core::mem::size_of::<DirectoryEntry>()];
+        loop {
+            let read = file.read(&mut buffer).unwrap();
+            if read == 0 { return names; }
+            assert_eq!(read, buffer.len());
+            names.push(String::from(DirectoryEntry::parse(&buffer).unwrap().name_str().unwrap()));
+        }
+    }
+
+    fn open_directory(task: &Task, abi: &mut LinuxAbi, path: &str) -> usize {
+        super::open_proc_text_file(abi, task, path, O_DIRECTORY).unwrap()
+    }
+
+    fn read_synthetic_file(task: &Task, abi: &mut LinuxAbi, path: &str) -> Vec<u8> {
+        let fd = super::open_proc_text_file(abi, task, path, 0).unwrap();
+        let object = task.handle_table.get(abi.get_handle(fd).unwrap()).unwrap();
+        file_contents(object.as_file().unwrap())
+    }
+
     #[test_case]
     fn config_gzip_has_consistent_binary_reads_metadata_and_read_only_access() {
         use super::*;
@@ -841,12 +1043,112 @@ mod tests {
     }
 
     #[test_case]
+    fn network_directories_are_native_read_only_and_relative_openable() {
+        let name = "sysfsdir0";
+        let manager = NetworkManager::get_manager();
+        manager.register_interface(name, Arc::new(NetworkStatsTestInterface {
+            name,
+            statistics: Arc::new(IrqRwSpinLock::new(InterfaceStats::default())),
+        })).unwrap();
+        let task = crate::task::new_user_task("network-directory".into(), 0);
+        let mut abi = LinuxAbi::default();
+        let root_fd = open_directory(&task, &mut abi, NETWORK_DIRECTORY);
+        let interface_path = format!("{NETWORK_DIRECTORY}/{name}");
+        let interface_fd = open_directory(&task, &mut abi, &interface_path);
+        let statistics_path = format!("{interface_path}/{NETWORK_STATISTICS_DIRECTORY}");
+        let statistics_fd = open_directory(&task, &mut abi, &statistics_path);
+        let root = task.handle_table.get(abi.get_handle(root_fd).unwrap()).unwrap();
+        let interface = task.handle_table.get(abi.get_handle(interface_fd).unwrap()).unwrap();
+        let statistics = task.handle_table.get(abi.get_handle(statistics_fd).unwrap()).unwrap();
+        let root_file = root.as_file().unwrap();
+        let interface_file = interface.as_file().unwrap();
+        let statistics_file = statistics.as_file().unwrap();
+
+        // These are the exact paths consumed by ABI fs::openat for dirfd walks.
+        assert_eq!(directory_path(root_file), Some(NETWORK_DIRECTORY));
+        assert_eq!(directory_path(interface_file), Some(interface_path.as_str()));
+        assert_eq!(directory_path(statistics_file), Some(statistics_path.as_str()));
+        assert_eq!(directory_names(interface_file), alloc::vec![
+            String::from("."), String::from(".."), String::from("statistics"),
+        ]);
+        assert_eq!(directory_names(statistics_file), alloc::vec![
+            String::from("."), String::from(".."), String::from("rx_bytes"),
+            String::from("rx_packets"), String::from("tx_bytes"), String::from("tx_packets"),
+        ]);
+        let root_entries = directory_names(root_file);
+        assert!(root_entries.contains(&String::from(name)));
+        assert!(matches!(root_file.write(b"x"), Err(StreamError::PermissionDenied)));
+
+        manager.unregister_interface(name);
+        assert_eq!(directory_names(root_file), root_entries);
+        assert!(path_metadata(&interface_path).is_none());
+        assert!(path_metadata(&statistics_path).is_none());
+        let current_fd = open_directory(&task, &mut abi, NETWORK_DIRECTORY);
+        let current = task.handle_table.get(abi.get_handle(current_fd).unwrap()).unwrap();
+        assert!(!directory_names(current.as_file().unwrap()).contains(&String::from(name)));
+        assert_eq!(network_root_directory_entries(&[]), base_directory_entries());
+    }
+
+    #[test_case]
+    fn network_statistics_use_real_counters_and_per_open_file_snapshots() {
+        let name = "sysfsstats0";
+        let statistics = Arc::new(IrqRwSpinLock::new(InterfaceStats {
+            rx_packets: 23,
+            rx_bytes: 1234,
+            tx_packets: 17,
+            tx_bytes: 0x1234,
+            drops: 2,
+            errors: 3,
+        }));
+        let manager = NetworkManager::get_manager();
+        manager.register_interface(name, Arc::new(NetworkStatsTestInterface {
+            name,
+            statistics: Arc::clone(&statistics),
+        })).unwrap();
+        let task = crate::task::new_user_task("network-statistics".into(), 0);
+        let mut abi = LinuxAbi::default();
+        let base = format!("{NETWORK_DIRECTORY}/{name}/{NETWORK_STATISTICS_DIRECTORY}");
+        assert_eq!(read_synthetic_file(&task, &mut abi, &format!("{base}/rx_bytes")).as_slice(), b"1234\n".as_slice());
+        assert_eq!(read_synthetic_file(&task, &mut abi, &format!("{base}/rx_packets")).as_slice(), b"23\n".as_slice());
+        assert_eq!(read_synthetic_file(&task, &mut abi, &format!("{base}/tx_bytes")).as_slice(), b"4660\n".as_slice());
+        assert_eq!(read_synthetic_file(&task, &mut abi, &format!("{base}/tx_packets")).as_slice(), b"17\n".as_slice());
+
+        let rx_bytes = format!("{base}/rx_bytes");
+        let fd = super::open_proc_text_file(&mut abi, &task, &rx_bytes, 0).unwrap();
+        let object = task.handle_table.get(abi.get_handle(fd).unwrap()).unwrap();
+        let file = object.as_file().unwrap();
+        assert_eq!(file_contents(file).as_slice(), b"1234\n".as_slice());
+        statistics.write().rx_bytes = 9876;
+        assert_eq!(file_contents(file).as_slice(), b"1234\n".as_slice());
+        assert_eq!(read_synthetic_file(&task, &mut abi, &rx_bytes).as_slice(), b"9876\n".as_slice());
+        assert_eq!(file.seek(SeekFrom::Start(0)).unwrap(), 0);
+        let mut at = [0; 2];
+        assert_eq!(file.read_at(1, &mut at).unwrap(), 2);
+        assert_eq!(&at, b"23");
+        let mut positioned = [0; 2];
+        assert_eq!(file.read(&mut positioned).unwrap(), 2);
+        assert_eq!(&positioned, b"12");
+        assert_eq!(file.seek(SeekFrom::Start(1)).unwrap(), 1);
+        let mut next = [0; 2];
+        assert_eq!(file.read(&mut next).unwrap(), 2);
+        assert_eq!(&next, b"23");
+        assert!(matches!(file.write(b"0\n"), Err(StreamError::PermissionDenied)));
+        assert_eq!(super::open_proc_text_file(&mut abi, &task, &rx_bytes, 1), Some(errno::to_result(errno::EACCES)));
+        let unknown = format!("{base}/unknown");
+        assert!(path_metadata(&unknown).is_none());
+        assert_eq!(super::open_proc_text_file(&mut abi, &task, &unknown, 0), None);
+        manager.unregister_interface(name);
+        assert!(path_metadata(&rx_bytes).is_none());
+    }
+
+    #[test_case]
     fn kptr_control_confirms_a_real_inherited_constraint_and_never_loosens_it() {
         use super::*;
         let task = Arc::new(crate::task::new_user_task("kptr-control".into(), 0));
         crate::task::set_mock_current_task(task.clone());
         let file = ProcTextFile { position: IrqRwSpinLock::new(0), content: b"0\n".to_vec(),
-            path: String::from("/proc/sys/kernel/kptr_restrict"), directory: false, access: 2 };
+            path: String::from("/proc/sys/kernel/kptr_restrict"), directory: false,
+            directory_entries: None, access: 2 };
         assert!(file.write(b"2").is_err()); // Cannot fabricate a global policy setting.
         crate::shield::information::constrain(&task, 1).unwrap();
         assert_eq!(file.write(b"2\n").unwrap(), 2);
