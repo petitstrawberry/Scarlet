@@ -6,10 +6,12 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from copy import deepcopy
 
 from art_inputs import SDK_SHA256, sha256
 from aosp_inventory import Image
 from stock_art import PARTITIONS
+from host_services import BPF_PROFILE_FIELDS, BPF_STOCK_RC
 from stock_packages import (GENERIC_TREES, INIT_SLOTS, MANAGER_INIT_IMPORTS, MANIFEST,
                             assemble_generic_init, authenticated_package_overrides,
                             install_image, package_trees, stage,
@@ -97,6 +99,8 @@ class StockPackageProofTests(unittest.TestCase):
         add("system/bin/tombstoned", b"tombstoned")
         add("system/bin/perfetto", b"perfetto")
         add("system/bin/health", b"health")
+        add("system/bin/bpfloader", b"bpfloader")
+        add("system/bin/netd", b"netd")
         add("system/etc/init/daemon.rc",
             b"service daemon /system/bin/daemon\n    class core\n    capabilities KILL\n")
         add("system/etc/init/tombstoned.rc",
@@ -108,6 +112,14 @@ class StockPackageProofTests(unittest.TestCase):
             b"service init_helper /system/bin/daemon\n    class core\n")
         add("system/etc/init/hw/init.zygote64.rc",
             b"service zygote /system/bin/daemon\n    class main\n    updatable\n")
+        add("system/etc/init/bpfloader.rc",
+            b"# stock BPF startup\n"
+            b"on load_bpf_programs\n"
+            b"    exec_start bpfloader\n"
+            b"\n"
+            b"service bpfloader /system/bin/bpfloader\n"
+            b"    capabilities CHOWN SYS_ADMIN NET_ADMIN\n"
+            b"    oneshot\n    reboot_on_failure reboot,bpfloader-failed\n")
         add("system_ext/etc/init/init.system_ext.rc", b"on init\n    setprop sys.test 1\n")
         metadata = {"kind": "scarlet-stock-packages-v1", "sdk_sha256": SDK_SHA256,
                     "result": "PREPARED", "partitions": dict.fromkeys(PARTITIONS, "0" * 64),
@@ -143,20 +155,97 @@ class StockPackageProofTests(unittest.TestCase):
                          "service health-hal /system/bin/health\n    class hal\n")
         return inputs, root, metadata, nodes
 
+    def bpf_assembly_inputs(self):
+        inputs, root, metadata, nodes = self.assembly_inputs()
+        metadata["profile"]["host_services"] = ["netd"]
+        metadata["profile"]["network_provider"] = {
+            **BPF_PROFILE_FIELDS,
+            "source_sha256": nodes[BPF_STOCK_RC]["sha256"],
+        }
+        from host_services import NETD, NETD_BINARY, NETD_MANAGED_RC, build_netd
+        stock = (b"service netd /system/bin/netd\n    class main\n"
+                 b"    capabilities CHOWN DAC_OVERRIDE DAC_READ_SEARCH FOWNER IPC_LOCK KILL NET_ADMIN NET_BIND_SERVICE NET_RAW SETUID SETGID\n"
+                 b"    group root net_admin\n    socket dnsproxyd stream 0660 root inet\n"
+                 b"    onrestart restart zygote\n    onrestart restart zygote_secondary\n")
+        managed, proof = build_netd(stock, b"stock netd")
+        path = root / NETD_MANAGED_RC
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(managed)
+        digest = sha256(path)
+        metadata["files"][NETD_MANAGED_RC] = digest
+        proof.update(files={NETD_BINARY: proof["binary_sha256"],
+                            "system/bin/iptables": "native trafficstats adapter"},
+                     native_needed={NETD_BINARY: ["libnetd_resolv.so"],
+                                    "system/bin/iptables": []})
+        metadata["host_service_inputs"][NETD] = proof
+        return inputs, root, metadata, nodes
+
+    def test_bpf_profile_replaces_only_stock_startup_and_preserves_objects(self):
+        inputs, root, metadata, nodes = self.bpf_assembly_inputs()
+        source_record = dict(nodes[BPF_STOCK_RC])
+        source_data = (inputs / "objects" / source_record["sha256"]).read_bytes()
+        unrelated_record = nodes["system/etc/init/perfetto.rc"]
+        unrelated_data = (inputs / "objects" / unrelated_record["sha256"]).read_bytes()
+
+        proof = assemble_generic_init(inputs, root, metadata)
+        effective = (root / INIT_SLOTS["system"] / "bpfloader.rc").read_text()
+        self.assertNotIn("on load_bpf_programs", effective)
+        self.assertNotIn("service bpfloader /system/bin/bpfloader", effective)
+        self.assertEqual(effective.splitlines(), [
+            "# Scarlet userspace network provider selected.",
+            "# Stock BPF loader action and service excluded."])
+        self.assertNotIn("setprop bpf.progs_loaded", effective)
+        self.assertEqual(proof["bpf_boundary"]["source_sha256"], source_record["sha256"])
+        self.assertEqual(proof["bpf_boundary"]["actions_replaced"], ["load_bpf_programs"])
+        self.assertEqual(proof["bpf_boundary"]["services_replaced"], ["bpfloader"])
+        self.assertIs(proof["bpf_boundary"]["bpf_progs_loaded"], False)
+        self.assertEqual(proof["bpf_boundary"]["provider"], "netd-iptables-trafficstats-v2")
+        self.assertEqual(proof["bpf_boundary"]["native_backend"], "quota2-native-ipv4")
+        self.assertEqual(proof["bpf_boundary"]["bpf_status"], "unsupported")
+        self.assertEqual(proof["bpf_boundary"]["netd_readiness"], "source-repair-required")
+        for field, value in metadata["profile"]["network_provider"].items():
+            self.assertEqual(proof["bpf_boundary"][field], value)
+        self.assertEqual(nodes[BPF_STOCK_RC], source_record)
+        self.assertEqual((inputs / "objects" / source_record["sha256"]).read_bytes(), source_data)
+        self.assertEqual((root / INIT_SLOTS["system"] / "perfetto.rc").read_bytes(), unrelated_data)
+        for path in (root / INIT_SLOTS["system"]).glob("*.rc"):
+            self.assertNotIn("setprop bpf.progs_loaded 1", path.read_text())
+
+    def test_bpf_profile_rejects_source_hash_provider_and_missing_netd(self):
+        inputs, root, metadata, _nodes = self.bpf_assembly_inputs()
+        metadata["profile"]["network_provider"]["source_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "stock bpfloader source hash mismatch"):
+            assemble_generic_init(inputs, root, metadata)
+
+        for changed in ("provider", "backend", "missing_netd"):
+            inputs, root, metadata, _nodes = self.bpf_assembly_inputs()
+            if changed == "provider":
+                metadata["profile"]["network_provider"]["provider"] = "kernel-bpf"
+            elif changed == "backend":
+                metadata["profile"]["network_provider"]["backend"] = "ebpf"
+            else:
+                metadata["profile"]["host_services"] = []
+            with self.subTest(change=changed), self.assertRaises(ValueError):
+                assemble_generic_init(inputs, root, metadata)
+
     def test_complete_init_slots_replace_stock_once_and_preserve_payloads(self):
         inputs, root, metadata, nodes = self.assembly_inputs()
         before = {name: (record["sha256"], (inputs / "objects" / record["sha256"]).read_bytes())
                   for name, record in nodes.items()}
         proof = assemble_generic_init(inputs, root, metadata)
         system_slots = sorted(path.name for path in (root / INIT_SLOTS["system"]).glob("*.rc"))
-        self.assertEqual(system_slots, ["daemon.rc", "perfetto.rc", "scarlet-health.rc", "tombstoned.rc"])
+        self.assertEqual(system_slots, ["bpfloader.rc", "daemon.rc", "perfetto.rc",
+                                       "scarlet-health.rc", "tombstoned.rc"])
         self.assertIn("tombstoned", (root / INIT_SLOTS["system"] / "tombstoned.rc").read_text())
         self.assertIn("/system/bin/perfetto", (root / INIT_SLOTS["system"] / "perfetto.rc").read_text())
         self.assertNotIn("capabilities KILL", (root / INIT_SLOTS["system"] / "daemon.rc").read_text())
         self.assertEqual(proof["replacements"][0]["source"], "system/etc/init/daemon.rc")
         self.assertEqual([item["managed"] for item in proof["additions"]],
                          ["scarlet/boot/services/health.rc"])
-        self.assertEqual(proof["stock_slots"], 4)
+        self.assertEqual(proof["stock_slots"], 5)
+        self.assertIsNone(proof["bpf_boundary"])
+        self.assertIn("service bpfloader /system/bin/bpfloader",
+                      (root / INIT_SLOTS["system"] / "bpfloader.rc").read_text())
         for name, (digest, data) in before.items():
             self.assertEqual(nodes[name]["sha256"], digest)
             self.assertEqual((inputs / "objects" / digest).read_bytes(), data)
@@ -245,6 +334,14 @@ class StockPackageProofTests(unittest.TestCase):
         metadata["host_service_inputs"][NETD]["firewall_implementation"] = "scarlet-compat-v1"
         with self.assertRaisesRegex(ValueError, "firewall_implementation='scarlet-compat-v1'"):
             validate_host_service_proofs(metadata)
+        for field, changed, expected in (("bpf_progs_loaded", True, "bpf_progs_loaded=True"),
+                                          ("userspace_trafficstats", {"backend": "ebpf"},
+                                           "userspace_trafficstats=")):
+            bad = deepcopy(metadata)
+            bad["host_service_inputs"][NETD]["firewall_implementation"] = "scarlet-compat-v2"
+            bad["host_service_inputs"][NETD][field] = changed
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, expected):
+                validate_host_service_proofs(bad)
 
     def test_generic_tree_scope_is_system_and_system_ext_only(self):
         self.assertEqual(GENERIC_TREES, {"system": ("bin", "etc/init"),

@@ -88,6 +88,19 @@ NETD_FIREWALL_BINARY="system/bin/iptables"
 NETD_FIREWALL_ALIASES={"system/bin/iptables-restore":"iptables","system/bin/iptables-save":"iptables",
                        "system/bin/ip6tables":"iptables","system/bin/ip6tables-restore":"iptables",
                        "system/bin/ip6tables-save":"iptables"}
+BPF_PROVIDER="netd-iptables-trafficstats-v2"
+BPF_BACKEND="quota2-native-ipv4"
+BPF_STATUS="unsupported"
+BPF_NETD_READINESS="source-repair-required"
+BPF_STOCK_RC="system/etc/init/bpfloader.rc"
+BPF_PROFILE_FIELDS={
+    "provider":BPF_PROVIDER,
+    "backend":BPF_BACKEND,
+    "source_rc":BPF_STOCK_RC,
+    "bpf_progs_loaded":False,
+    "bpf_status":BPF_STATUS,
+    "readiness":BPF_NETD_READINESS,
+}
 AUDIOSERVER="audioserver"
 AUDIOSERVER_BINARY="system/bin/audioserver"
 AUDIOSERVER_STOCK_RC="system/etc/init/audioserver.rc"
@@ -138,11 +151,27 @@ STOCK_TEXT = ("service system_suspend /" + BINARY + "\n"
               "    capabilities BLOCK_SUSPEND\n")
 
 
+def validate_network_provider(profile):
+    if "network_provider" not in profile:
+        return None
+    selected=profile["network_provider"]
+    if (not isinstance(selected,dict) or
+            set(selected)!=set(BPF_PROFILE_FIELDS)|{"source_sha256"} or
+            any(selected.get(key)!=value for key,value in BPF_PROFILE_FIELDS.items()) or
+            selected.get("bpf_progs_loaded") is not False or
+            not isinstance(selected.get("source_sha256"),str) or
+            not re.fullmatch(r"[0-9a-f]{64}",selected["source_sha256"]) or
+            NETD not in profile.get("host_services",[])):
+        raise ValueError("unsupported Scarlet userspace BPF provider selection")
+    return selected
+
+
 def validate_selection(profile):
     names = profile.get("host_services", [])
     if (not isinstance(names,list) or len(names)>15 or
             any(name not in (SUSPEND,HW_MANAGER,GRAPHICS,INSTALLER,ODSIGN,HEALTH,VOLD,LMKD,NETD,AUDIOSERVER,AUDIO_HAL,KEYSTORE,KEYMINT,GATEKEEPER,STORAGED) for name in names) or len(set(names))!=len(names)):
         raise ValueError("unsupported stock host service selection")
+    validate_network_provider(profile)
     selected = CONTRACT in profile.get("vintf", {}).get("framework", [])
     if selected != (SUSPEND in names):
         raise ValueError("SystemSuspend requires both its host provider and VINTF contract")
@@ -320,19 +349,22 @@ def build_netd(stock_rc,binary):
         raise ValueError("changed stock netd service configuration")
     capabilities=b"    capabilities CHOWN DAC_OVERRIDE DAC_READ_SEARCH FOWNER IPC_LOCK KILL NET_ADMIN NET_BIND_SERVICE NET_RAW SETUID SETGID\n"
     if stock_rc.count(capabilities)!=1:raise ValueError("changed netd capability declaration")
-    marker=b"service netd /system/bin/netd\n"
     restart=b"    onrestart restart zygote\n    onrestart restart zygote_secondary\n"
     if stock_rc.count(restart)!=1:raise ValueError("changed netd restart policy")
-    managed=(stock_rc.replace(marker,b"# eBPF loading is not attached to this boot profile.\n"
-        b"on init\n    setprop bpf.progs_loaded 1\n\n"+marker)
+    managed=(stock_rc
         .replace(capabilities,b"    capabilities NET_ADMIN\n")
         .replace(restart,b"# A failed optional network daemon must not restart Zygote.\n    oneshot\n    disabled\n"))
     digest=lambda data:hashlib.sha256(data).hexdigest()
     return managed,{"source_rc":NETD_STOCK_RC,"source_rc_sha256":digest(stock_rc),
                     "binary_sha256":digest(binary),"managed_rc_sha256":digest(managed),
                     "firewall_binary":NETD_FIREWALL_BINARY,"firewall_aliases":NETD_FIREWALL_ALIASES,
-                    "firewall_implementation":"scarlet-compat-v2","packet_filtering":"quota2-native-ipv4",
+                    "firewall_implementation":"scarlet-compat-v2","packet_filtering":BPF_BACKEND,
                     "bpf_loader":"unavailable",
+                    "bpf_progs_loaded":False,
+                    "userspace_trafficstats":{"provider":BPF_PROVIDER,
+                        "binary":NETD_FIREWALL_BINARY,"implementation":"scarlet-compat-v2",
+                        "backend":BPF_BACKEND,"available":True,"bpf_status":BPF_STATUS,
+                        "netd_readiness":BPF_NETD_READINESS},
                     "omitted_capabilities":["CHOWN","DAC_OVERRIDE","DAC_READ_SEARCH","FOWNER","IPC_LOCK","KILL","NET_BIND_SERVICE","NET_RAW","SETUID","SETGID"]}
 
 
@@ -508,7 +540,12 @@ def validate_staged(metadata):
                 record.get("firewall_binary")!=NETD_FIREWALL_BINARY or
                 record.get("firewall_aliases")!=NETD_FIREWALL_ALIASES or
                 record.get("firewall_implementation")!="scarlet-compat-v2" or
-                record.get("packet_filtering")!="quota2-native-ipv4" or
+                record.get("packet_filtering")!=BPF_BACKEND or
+                record.get("bpf_progs_loaded") is not False or
+                record.get("userspace_trafficstats")!={ "provider":BPF_PROVIDER,
+                    "binary":NETD_FIREWALL_BINARY,"implementation":"scarlet-compat-v2",
+                    "backend":BPF_BACKEND,"available":True,"bpf_status":BPF_STATUS,
+                    "netd_readiness":BPF_NETD_READINESS} or
                 not record.get("omitted_capabilities")):
             raise ValueError("changed netd provider inputs")
         files=record.get("files",{})

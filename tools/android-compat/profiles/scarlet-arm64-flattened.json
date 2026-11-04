@@ -47,6 +47,15 @@
     "ro.hw_timeout_multiplier": "32",
     "debug.renderengine.backend": "gles"
   },
+  "network_provider": {
+    "provider": "netd-iptables-trafficstats-v2",
+    "backend": "quota2-native-ipv4",
+    "source_rc": "system/etc/init/bpfloader.rc",
+    "source_sha256": "aef3af91463902a43d4c00c6e8ed641f35e66db69ba04f3ee533c6a4246d0670",
+    "bpf_status": "unsupported",
+    "bpf_progs_loaded": false,
+    "readiness": "source-repair-required"
+  },
   "bootconfig": {
     "androidboot.hardware": "scarlet",
     "androidboot.init_rc": "/scarlet/boot/init.rc",
@@ -90,7 +99,8 @@
     "u:r:hal_gatekeeper_default:s0": 36,
     "u:r:storaged:s0": 37,
     "u:r:scarlet_policy:s0": 38,
-    "u:r:adbd:s0": 39
+    "u:r:adbd:s0": 39,
+    "u:r:scarlet_input_bridge:s0": 40
   },
   "transitions": [
     [
@@ -116,6 +126,11 @@
     [
       "u:r:init:s0",
       "u:r:adbd:s0",
+      0
+    ],
+    [
+      "u:r:init:s0",
+      "u:r:scarlet_input_bridge:s0",
       0
     ]
   ],
@@ -3213,6 +3228,11 @@
     [
       "u:r:gatekeeperd:s0",
       "u:object_r:permission_service:s0",
+      2
+    ],
+    [
+      "u:r:scarlet_input_bridge:s0",
+      "u:object_r:input_service:s0",
       2
     ]
   ],

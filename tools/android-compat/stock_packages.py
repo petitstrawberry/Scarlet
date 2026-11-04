@@ -5,6 +5,7 @@ the manifest until staging, and source inode identities are restored in the
 generated disk rather than chowning files on the host.
 """
 import argparse
+import hashlib
 import json
 import os
 import posixpath
@@ -18,6 +19,8 @@ import stat
 from aosp_images import verify as verify_images
 from aosp_inventory import Image, extent_hash, parse_rc
 from art_inputs import SDK_SHA256, quote_debugfs, sha256
+from host_services import (BPF_BACKEND, BPF_NETD_READINESS, BPF_PROVIDER, BPF_STATUS,
+                           NETD_FIREWALL_BINARY, validate_network_provider)
 from stock_art import PARTITIONS
 
 MANIFEST = "stock-packages.json"
@@ -29,6 +32,10 @@ INIT_SLOTS = {"system": "scarlet/boot/init.d/system",
 MANAGER_INIT_IMPORTS = ["/system/etc/init/hw/init.rc",
                         "/scarlet/boot/init.d/system",
                         "/scarlet/boot/init.d/system_ext"]
+BPF_REPLACEMENT = (
+    "# Scarlet userspace network provider selected.\n"
+    "# Stock BPF loader action and service excluded.\n"
+)
 
 # These are declarations in stock RC files whose unavailable providers are
 # deliberately outside the generic system/system_ext bootstrap. Unknown names
@@ -283,7 +290,8 @@ def validate_host_service_proofs(metadata):
     except ValueError as error:
         netd = metadata.get("host_service_inputs", {}).get("netd", {})
         fields = ", ".join(f"{key}={netd.get(key)!r}" for key in
-                           ("firewall_implementation", "packet_filtering", "bpf_loader")
+                           ("firewall_implementation", "packet_filtering", "bpf_loader",
+                            "bpf_progs_loaded", "userspace_trafficstats")
                            if key in netd)
         suffix = ": " + fields if fields else ""
         raise ValueError(f"stale or incomplete host service proof{suffix}; {error}") from error
@@ -503,6 +511,58 @@ def _versioned_apex_configs(directory):
     return [path for _, path in sorted(selected.values(), key=lambda item: item[1].name)]
 
 
+def _replace_bpf_sections(text, source):
+    """Remove only the reviewed stock action and service declarations."""
+    sections = parse_rc(text)
+    action = [item for item in sections
+              if item["header"] == ["on", "load_bpf_programs"]]
+    service = [item for item in sections
+               if item["header"] == ["service", "bpfloader", "/system/bin/bpfloader"]]
+    if (len(sections) != 2 or len(action) != 1 or len(service) != 1 or
+            ("exec_start", "bpfloader") not in
+            {tuple(command["args"]) for command in action[0]["commands"]}):
+        raise ValueError("changed stock bpfloader action or service: " + source)
+    return BPF_REPLACEMENT
+
+
+def _bpf_replacement(inputs, nodes, profile, metadata):
+    selected = validate_network_provider(profile)
+    if selected is None:
+        return None
+    supplied_hash = selected["source_sha256"]
+
+    record = metadata.get("host_service_inputs", {}).get("netd", {})
+    expected_backend = {"provider": BPF_PROVIDER, "binary": NETD_FIREWALL_BINARY,
+                        "implementation": "scarlet-compat-v2", "backend": BPF_BACKEND,
+                        "available": True, "bpf_status": BPF_STATUS,
+                        "netd_readiness": BPF_NETD_READINESS}
+    if (record.get("packet_filtering") != BPF_BACKEND or
+            record.get("bpf_progs_loaded") is not False or
+            record.get("userspace_trafficstats") != expected_backend):
+        raise ValueError("Scarlet userspace BPF provider proof is incomplete")
+
+    source = selected["source_rc"]
+    stock_record = nodes.get(source)
+    if (not stock_record or not stat.S_ISREG(stock_record["mode"]) or
+            stock_record.get("sha256") != supplied_hash):
+        raise ValueError("stock bpfloader source hash mismatch")
+    stock = _node_bytes(inputs, stock_record)
+    if hashlib.sha256(stock).hexdigest() != supplied_hash:
+        raise ValueError("stock bpfloader source hash mismatch")
+    replacement = _replace_bpf_sections(stock.decode(), source).encode()
+    return {
+        "kind": "scarlet-userspace-trafficstats-replacement-v1",
+        **selected,
+        "source": source,
+        "actions_replaced": ["load_bpf_programs"],
+        "services_replaced": ["bpfloader"],
+        "native_backend": BPF_BACKEND,
+        "netd_readiness": BPF_NETD_READINESS,
+        "source_preserved": True,
+        "effective_sha256": hashlib.sha256(replacement).hexdigest(),
+    }
+
+
 def assemble_generic_init(inputs, root, metadata):
     """Build the effective generic init view without copying the stock tree.
 
@@ -519,6 +579,7 @@ def assemble_generic_init(inputs, root, metadata):
     stock_services = {name: {service for service, _command, _options in
                              _service_sections(_node_bytes(inputs, record).decode(), name)}
                       for name, record in stock["system"].items()}
+    bpf = _bpf_replacement(inputs, nodes, profile, metadata)
 
     replacements = {}
     additions = {}
@@ -551,8 +612,13 @@ def assemble_generic_init(inputs, root, metadata):
     effective = {}
     for name, record in stock["system"].items():
         replacement = replacements.get(name)
-        effective[INIT_SLOTS["system"] + "/" + Path(name).name] = (
-            replacement["text"].encode() if replacement else _node_bytes(inputs, record))
+        if bpf and name == bpf["source"]:
+            if replacement:
+                raise ValueError("multiple replacements for stock init: " + name)
+            data = _replace_bpf_sections(_node_bytes(inputs, record).decode(), name).encode()
+        else:
+            data = replacement["text"].encode() if replacement else _node_bytes(inputs, record)
+        effective[INIT_SLOTS["system"] + "/" + Path(name).name] = data
     for slot, replacement in additions.items():
         effective[INIT_SLOTS["system"] + "/" + slot] = replacement["text"].encode()
     for name, record in stock["system_ext"].items():
@@ -673,6 +739,7 @@ def assemble_generic_init(inputs, root, metadata):
         "stock_source_payloads": "preserved in immutable package objects",
         "optional_service_executables": sorted([" ".join(item) for item in OPTIONAL_SERVICE_EXECUTABLES]),
         "optional_service_references": sorted(OPTIONAL_SERVICE_REFERENCES | set(DYNAMIC_SERVICE_REFERENCES)),
+        "bpf_boundary": bpf,
     }
 
 

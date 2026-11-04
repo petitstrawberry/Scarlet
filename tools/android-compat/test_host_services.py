@@ -134,7 +134,8 @@ class HostServicesTest(unittest.TestCase):
         with self.assertRaises(ValueError):build_lmkd(b"service lmkd /system/bin/lmkd\n",b"stock")
 
     def test_netd_preserves_control_sockets_and_removes_unsupported_capabilities(self):
-        from host_services import NETD,NETD_BINARY,NETD_MANAGED_RC,build_netd
+        from host_services import (NETD,NETD_BINARY,NETD_MANAGED_RC,BPF_PROFILE_FIELDS,
+                                   build_netd)
         stock=(b"service netd /system/bin/netd\n    class main\n"
                b"    capabilities CHOWN DAC_OVERRIDE DAC_READ_SEARCH FOWNER IPC_LOCK KILL NET_ADMIN NET_BIND_SERVICE NET_RAW SETUID SETGID\n"
                b"    group root net_admin\n    socket dnsproxyd stream 0660 root inet\n"
@@ -143,10 +144,35 @@ class HostServicesTest(unittest.TestCase):
         self.assertIn(b"capabilities NET_ADMIN",managed)
         self.assertNotIn(b"capabilities CHOWN",managed)
         self.assertIn(b"socket dnsproxyd",managed)
-        self.assertIn(b"setprop bpf.progs_loaded 1",managed)
+        self.assertNotIn(b"bpf.progs_loaded",managed)
         self.assertIn(b"oneshot\n    disabled",managed)
         self.assertNotIn(b"onrestart restart zygote",managed)
         self.assertEqual(proof["bpf_loader"],"unavailable")
+        self.assertIs(proof["bpf_progs_loaded"],False)
+        self.assertEqual(proof["userspace_trafficstats"],{
+            "provider":"netd-iptables-trafficstats-v2",
+            "binary":NETD_BINARY.replace("netd","iptables"),
+            "implementation":"scarlet-compat-v2",
+            "backend":"quota2-native-ipv4","available":True,
+            "bpf_status":"unsupported",
+            "netd_readiness":"source-repair-required"})
+        bpf_profile={"host_services":[NETD],"network_provider":{
+            **BPF_PROFILE_FIELDS,"source_sha256":"0"*64}}
+        self.assertEqual(validate_selection(bpf_profile),[NETD])
+        self.assertEqual(validate_selection({"host_services":[NETD]}),[NETD])
+        bad=deepcopy(bpf_profile);bad["host_services"]=[]
+        with self.assertRaisesRegex(ValueError,"userspace BPF provider"):
+            validate_selection(bad)
+        for selection in (None, {}, "native", {**bpf_profile["network_provider"],
+                                              "bpf_progs_loaded":0},
+                          {**bpf_profile["network_provider"], "bpf_progs_loaded":True},
+                          {**bpf_profile["network_provider"], "readiness":"ready"},
+                          {**bpf_profile["network_provider"], "source_rc":"system/etc/init/netd.rc"},
+                          {**bpf_profile["network_provider"], "source_sha256":"invalid"},
+                          {**bpf_profile["network_provider"], "extra":True}):
+            bad=deepcopy(bpf_profile);bad["network_provider"]=selection
+            with self.subTest(selection=selection), self.assertRaises(ValueError):
+                validate_selection(bad)
         proof.update(files={NETD_BINARY:proof["binary_sha256"],"system/lib64/libnetd_resolv.so":"dependency"},
                      native_needed={NETD_BINARY:["libnetd_resolv.so"],"system/lib64/libnetd_resolv.so":[]})
         metadata={"profile":{"host_services":[NETD]},"host_service_inputs":{NETD:proof},
