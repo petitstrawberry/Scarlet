@@ -62,8 +62,10 @@ fn ext2_sparse_growth_needs_no_free_blocks_and_clears_raw_eof_tail() {
     let mut bytes = [1; 128];
     assert_eq!(reopened.read_at(0, &mut bytes).unwrap(), bytes.len());
     assert_eq!(bytes, [0; 128]);
-    assert_eq!(fs.read_inode(11).unwrap().get_blocks(), 2);
-    assert_eq!(fs.read_block_cached(3).unwrap(), before_bitmap);
+    assert_eq!(fs.read_inode(11).unwrap().get_blocks(), 0);
+    let mut freed_bitmap = before_bitmap;
+    freed_bitmap[299 / 8] &= !(1 << (299 % 8));
+    assert_eq!(fs.read_block_cached(3).unwrap(), freed_bitmap);
     drop(reopened);
     PageCacheManager::global().invalidate(cache_id);
 }
@@ -86,6 +88,140 @@ fn ext2_clean_uncached_partial_truncate_zeroes_disk_before_regrowth() {
     assert!(bytes[13..].iter().all(|byte| *byte == 0));
     drop(reopened);
     PageCacheManager::global().invalidate(cache_id);
+}
+
+#[test_case]
+fn ext2_shrink_prunes_partial_indirect_tree_and_releases_triple_tree() {
+    let (device, fs, node) = create_writeback_test_file();
+    configure_free_blocks(&fs, 700, 0);
+    // Sparse data spans direct, single, double and triple indirect ranges.
+    for (table, entries) in [
+        (600, vec![(0, 610_u32), (1, 611)]),
+        (601, vec![(0, 602)]),
+        (602, vec![(0, 612), (1, 613)]),
+        (603, vec![(0, 604)]),
+        (604, vec![(0, 605)]),
+        (605, vec![(0, 614)]),
+    ] {
+        let mut data = vec![0; 1024];
+        for (index, pointer) in entries {
+            data[index * 4..index * 4 + 4].copy_from_slice(&pointer.to_le_bytes());
+        }
+        fs.write_block_cached(table, &data).unwrap();
+    }
+    fs.write_block_cached(612, &vec![0x6c; 1024]).unwrap();
+    let mut inode = fs.read_inode(11).unwrap();
+    inode.size = ((12 + 256 + 256 * 256 + 1) * 1024_u32).to_le();
+    inode.blocks = 24_u32.to_le(); // six data and six pointer blocks
+    inode.block[12] = 600_u32.to_le();
+    inode.block[13] = 601_u32.to_le();
+    inode.block[14] = 603_u32.to_le();
+    fs.write_inode(11, &inode).unwrap();
+    let file = fs.open(&node, 0).unwrap();
+    file.truncate((268 * 1024 + 17) as u64).unwrap();
+
+    let remounted = Ext2FileSystem::new(device).unwrap();
+    let shrunk = remounted.read_inode(11).unwrap();
+    assert_eq!(shrunk.get_size(), 268 * 1024 + 17);
+    assert_eq!(shrunk.get_blocks(), 14); // four data and three pointer blocks
+    assert_eq!(remounted.get_inode_block(&shrunk, 268).unwrap(), 612);
+    assert_eq!(remounted.get_inode_block(&shrunk, 269).unwrap(), 0);
+    let pointers = shrunk.block;
+    assert_eq!(pointers[14], 0);
+    let boundary = remounted.read_block_cached(612).unwrap();
+    assert!(boundary[..17].iter().all(|byte| *byte == 0x6c));
+    assert!(boundary[17..].iter().all(|byte| *byte == 0));
+    let bitmap = remounted.read_block_cached(3).unwrap();
+    for block in [603, 604, 605, 613, 614] {
+        let bit = (block - 1) as usize;
+        assert_eq!(bitmap[bit / 8] & (1 << (bit % 8)), 0);
+    }
+    for block in [300, 600, 601, 602, 610, 611, 612] {
+        let bit = (block - 1) as usize;
+        assert_ne!(bitmap[bit / 8] & (1 << (bit % 8)), 0);
+    }
+    file.truncate(12 * 1024).unwrap();
+    assert_eq!(fs.read_inode(11).unwrap().get_blocks(), 2);
+    file.truncate(0).unwrap();
+    assert_eq!(fs.read_inode(11).unwrap().get_blocks(), 0);
+    drop(file);
+    PageCacheManager::global().invalidate(CacheId::new((fs.fs_id().get() << 32) | 11));
+}
+
+#[test_case]
+fn ext2_full_content_shrink_releases_disk_allocation() {
+    let (device, fs, _) = create_writeback_test_file();
+    configure_free_blocks(&fs, 600, 0);
+    fs.write_file_content(11, &[]).unwrap();
+    let remounted = Ext2FileSystem::new(device).unwrap();
+    let inode = remounted.read_inode(11).unwrap();
+    assert_eq!(inode.get_size(), 0);
+    assert_eq!(inode.get_blocks(), 0);
+    let pointers = inode.block;
+    assert!(pointers.iter().all(|pointer| *pointer == 0));
+    let bitmap = remounted.read_block_cached(3).unwrap();
+    assert_eq!(bitmap[299 / 8] & (1 << (299 % 8)), 0);
+}
+
+#[test_case]
+fn ext2_single_indirect_shrink_regrows_zeroes_after_freed_blocks_are_reused() {
+    let (device, fs, node) = create_writeback_test_file();
+    configure_free_blocks(&fs, 700, 0);
+    let mut inode = fs.read_inode(11).unwrap();
+    inode.size = (14 * 1024_u32).to_le();
+    inode.blocks = 10_u32.to_le(); // four data blocks plus one indirect table
+    inode.block[11] = 611_u32.to_le();
+    inode.block[12] = 600_u32.to_le();
+    let mut table = vec![0; 1024];
+    table[..4].copy_from_slice(&612_u32.to_le_bytes());
+    table[4..8].copy_from_slice(&613_u32.to_le_bytes());
+    fs.write_block_cached(600, &table).unwrap();
+    fs.write_block_cached(612, &vec![b'C'; 1024]).unwrap();
+    fs.write_block_cached(613, &vec![b'D'; 1024]).unwrap();
+    fs.write_inode(11, &inode).unwrap();
+    let file = fs.open(&node, 0).unwrap();
+    let cache_id = CacheId::new((fs.fs_id().get() << 32) | 11);
+    let mut bytes = [0; 16];
+    assert_eq!(file.read_at(12 * 1024, &mut bytes).unwrap(), 16);
+    assert_eq!(bytes, [b'C'; 16]);
+    let pinned = PageCacheManager::global().try_pin(cache_id, 3).unwrap();
+
+    // Retain one entry in the single-indirect table, then cross its boundary.
+    file.truncate(12 * 1024 + 13).unwrap();
+    let partial = fs.read_inode(11).unwrap();
+    assert_eq!(partial.get_blocks(), 8);
+    assert_eq!(fs.get_inode_block(&partial, 12).unwrap(), 612);
+    assert_eq!(fs.get_inode_block(&partial, 13).unwrap(), 0);
+    file.truncate(12 * 1024).unwrap();
+    assert_eq!(fs.read_inode(11).unwrap().get_blocks(), 4);
+    // Reuse both data blocks and the table as another caller's allocation.
+    for expected in [600, 612, 613] {
+        let block = fs.allocate_block().unwrap();
+        assert_eq!(block, expected);
+        fs.write_block_cached(block, &vec![0xee; 1024]).unwrap();
+    }
+    file.truncate(14 * 1024).unwrap();
+    assert_eq!(file.read_at(12 * 1024, &mut bytes).unwrap(), 16);
+    assert_eq!(bytes, [0; 16]);
+    // A cache pin retains its physical page despite disk block reclamation.
+    unsafe {
+        let page = core::slice::from_raw_parts(
+            crate::vm::addr::phys_to_virt(pinned.paddr()) as *const u8,
+            PAGE_SIZE,
+        );
+        assert!(page.iter().all(|byte| *byte == 0));
+    }
+    drop(pinned);
+    drop(file);
+    PageCacheManager::global().invalidate(cache_id);
+    let remounted = Ext2FileSystem::new(device).unwrap();
+    let inode = remounted.read_inode(11).unwrap();
+    assert_eq!(inode.get_size(), 14 * 1024);
+    assert_eq!(inode.get_blocks(), 4);
+    assert_eq!(remounted.get_inode_block(&inode, 12).unwrap(), 0);
+    assert_eq!(remounted.get_inode_block(&inode, 13).unwrap(), 0);
+    let content = remounted.read_file_content(11, 14 * 1024).unwrap();
+    assert!(content[12 * 1024..].iter().all(|byte| *byte == 0));
 }
 
 #[test_case]
@@ -133,14 +269,29 @@ fn ext2_truncate_flushes_multiple_dirty_batches_with_pins_and_counts_pointer_tab
     }
     drop(pinned_first);
     drop(pinned_second_batch);
-    let allocation_before_shrink = fs.read_block_cached(3).unwrap();
+    let mut allocated = Vec::new();
+    fs.walk_inode_allocated_blocks(&inode, &mut |_, block, _| {
+        allocated.push(block);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(allocated.len(), PAGES + 3);
     file.truncate(5).unwrap();
-    assert_eq!(
-        fs.read_inode(11).unwrap().get_blocks(),
-        (PAGES as u32 + 3) * 2
-    );
+    let shrunk = fs.read_inode(11).unwrap();
+    assert_eq!(shrunk.get_blocks(), 2);
+    let pointers = shrunk.block;
+    assert_eq!(pointers[0], 300);
+    assert!(pointers[1..].iter().all(|pointer| *pointer == 0));
+    let allocation_after_shrink = fs.read_block_cached(3).unwrap();
+    for &block in &allocated {
+        let bit = (block - 1) as usize;
+        assert_eq!(
+            allocation_after_shrink[bit / 8] & (1 << (bit % 8)),
+            if block == 300 { 1 << (bit % 8) } else { 0 }
+        );
+    }
     file.truncate(new_size + 1).unwrap();
-    assert_eq!(fs.read_block_cached(3).unwrap(), allocation_before_shrink);
+    assert_eq!(fs.read_block_cached(3).unwrap(), allocation_after_shrink);
     drop(file);
     PageCacheManager::global().invalidate(cache_id);
     let reopened = fs.open(&node, 0).unwrap();
@@ -160,18 +311,18 @@ fn ext2_truncate_flushes_multiple_dirty_batches_with_pins_and_counts_pointer_tab
     }
     drop(reopened);
     PageCacheManager::global().invalidate(cache_id);
-    // Even EOF=0 must reclaim every retained data and indirect block.
+    // EOF=0 must also release the surviving first block.
     let file = fs.open(&node, 0).unwrap();
     file.truncate(0).unwrap();
     drop(file);
     PageCacheManager::global().invalidate(cache_id);
-    let mut allocated = Vec::new();
+    let mut remaining = Vec::new();
     fs.walk_inode_allocated_blocks(&fs.read_inode(11).unwrap(), &mut |_, block, _| {
-        allocated.push(block);
+        remaining.push(block);
         Ok(())
     })
     .unwrap();
-    assert_eq!(allocated.len(), PAGES + 3);
+    assert!(remaining.is_empty());
     fs.free_inode(11).unwrap();
     let bitmap = fs.read_block_cached(3).unwrap();
     for block in allocated {

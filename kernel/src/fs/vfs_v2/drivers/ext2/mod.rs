@@ -2838,6 +2838,46 @@ impl Ext2FileSystem {
         Ok(())
     }
 
+    /// Prepare an in-place '..' rewrite without changing record lengths or
+    /// reallocating the directory. The caller holds the moved inode's lock.
+    fn directory_parent_update(
+        &self,
+        inode_number: u32,
+        old_parent: u32,
+        new_parent: u32,
+    ) -> Result<(u64, Vec<u8>), FileSystemError> {
+        let inode = self.read_inode(inode_number)?;
+        let block = self.get_inode_block(&inode, 0)?;
+        if block != 0 {
+            let mut data = self.read_block_cached(block)?;
+            let mut offset = 0;
+            while offset + 8 <= data.len() {
+                let entry = Ext2DirectoryEntryRaw::from_bytes(&data[offset..])?;
+                let length = usize::from(entry.get_rec_len());
+                let name_len = usize::from(entry.get_name_len());
+                if length < 8
+                    || length & 3 != 0
+                    || offset + length > data.len()
+                    || name_len > length - 8
+                {
+                    break;
+                }
+                if entry.get_inode() == old_parent
+                    && name_len == 2
+                    && &data[offset + 8..offset + 10] == b".."
+                {
+                    data[offset..offset + 4].copy_from_slice(&new_parent.to_le_bytes());
+                    return Ok((block, data));
+                }
+                offset += length;
+            }
+        }
+        Err(FileSystemError::new(
+            FileSystemErrorKind::InvalidData,
+            "Moved ext2 directory has no matching '..' entry",
+        ))
+    }
+
     /// Remove a directory entry from a parent directory
     fn remove_directory_entry(
         &self,
@@ -3340,19 +3380,19 @@ impl Ext2FileSystem {
             self.write_blocks_cached(&write_blocks)?;
         }
 
-        if u64::from(content_size) < old_size {
-            self.zero_retained_file_tail(&inode, u64::from(content_size), old_size)?;
-        }
-
         // Update inode size, block count, and modification time
-        inode.size = content_size;
+        inode.size = content_size.to_le();
         if let Some(time) = current_timestamp() {
             inode.mtime = time.to_le();
             inode.ctime = time.to_le();
         }
 
         // Write updated inode to disk
-        self.write_inode(inode_num, &inode)?;
+        if u64::from(content_size) < old_size {
+            self.write_inode_reclaiming_tail(inode_num, &mut inode)?;
+        } else {
+            self.write_inode(inode_num, &inode)?;
+        }
 
         // Update inode cache with LRU eviction
         {
@@ -3383,7 +3423,7 @@ impl Ext2FileSystem {
 
     /// Finish a truncate under the inode operation lock. Data writes and tail
     /// zeroing are not transactional on I/O errors, but EOF is published last.
-    /// Allocation is retained until final unlink; growing a hole allocates none.
+    /// Shrinking releases whole blocks beyond EOF; growing a hole allocates none.
     fn truncate_inode_locked(
         &self,
         inode_num: u32,
@@ -3398,10 +3438,12 @@ impl Ext2FileSystem {
         })?;
         let mut inode = self.read_inode(inode_num)?;
         if new_size < old_size {
+            // Only the surviving partial block needs zeroing. Whole blocks
+            // beyond EOF must be detached, not retained as ext2 preallocation.
             self.zero_allocated_file_range(
                 &inode,
                 new_size as u64,
-                (old_size as u64).max(u64::from(inode.get_size())),
+                (new_size as u64).div_ceil(u64::from(self.block_size)) * u64::from(self.block_size),
             )?;
         } else {
             self.zero_allocated_file_range(&inode, old_size as u64, new_size as u64)?;
@@ -3411,23 +3453,110 @@ impl Ext2FileSystem {
             inode.mtime = now.to_le();
             inode.ctime = now.to_le();
         }
-        self.write_inode(inode_num, &inode)?;
+        if new_size < old_size {
+            self.write_inode_reclaiming_tail(inode_num, &mut inode)?;
+        } else {
+            self.write_inode(inode_num, &inode)?;
+        }
         self.inode_cache.write().insert(inode_num, inode);
         Ok(())
     }
 
-    /// The full-content writer already zero-pads its partial final block.
-    fn zero_retained_file_tail(
+    /// Publish removed pointers before returning their blocks to the allocator.
+    /// The caller holds the inode operation lock; allocation stays serialized
+    /// until all data and now-empty indirect tables have been freed.
+    /// Partial metadata I/O failure may leak detached allocation, but no bitmap
+    /// bit is cleared until every surviving pointer and the inode are written.
+    fn write_inode_reclaiming_tail(
         &self,
-        inode: &Ext2Inode,
-        new_size: u64,
-        old_size: u64,
+        inode_num: u32,
+        inode: &mut Ext2Inode,
     ) -> Result<(), FileSystemError> {
-        self.zero_allocated_file_range(
-            inode,
-            new_size.div_ceil(u64::from(self.block_size)) * u64::from(self.block_size),
-            old_size,
-        )
+        self.with_allocation_lock(|| {
+            let keep = u64::from(inode.get_size()).div_ceil(u64::from(self.block_size));
+            let mut released = Vec::new();
+            for logical in 0..12 {
+                inode.block[logical] = self.prune_inode_subtree(
+                    inode.block[logical],
+                    logical as u64,
+                    0,
+                    keep,
+                    &mut released,
+                )?;
+            }
+            let pointers = u64::from(self.block_size / 4);
+            let mut logical = 12;
+            for depth in 1..=3 {
+                let index = 11 + depth as usize;
+                inode.block[index] = self.prune_inode_subtree(
+                    inode.block[index],
+                    logical,
+                    depth,
+                    keep,
+                    &mut released,
+                )?;
+                logical += pointers.pow(u32::from(depth));
+            }
+            let sectors = (released.len() as u32)
+                .checked_mul(self.block_size / 512)
+                .and_then(|removed| inode.get_blocks().checked_sub(removed))
+                .ok_or_else(|| {
+                    FileSystemError::new(
+                        FileSystemErrorKind::InvalidData,
+                        "Invalid ext2 allocated sector count",
+                    )
+                })?;
+            inode.blocks = sectors.to_le();
+            self.write_inode(inode_num, inode)?;
+            for block in released {
+                self.free_block_unlocked(block)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Return the surviving on-disk pointer, collecting removed blocks in
+    /// post-order. Only the subtree crossing EOF requires pointer-block writes.
+    fn prune_inode_subtree(
+        &self,
+        pointer: u32,
+        logical: u64,
+        depth: u8,
+        keep: u64,
+        released: &mut Vec<u32>,
+    ) -> Result<u32, FileSystemError> {
+        let block = u32::from_le(pointer);
+        let pointers = u64::from(self.block_size / 4);
+        if block == 0 || logical + pointers.pow(u32::from(depth)) <= keep {
+            return Ok(pointer);
+        }
+        if logical >= keep {
+            self.walk_allocated_subtree(pointer, logical, depth, &mut |_, block, _| {
+                released.push(block);
+                Ok(())
+            })?;
+            return Ok(0);
+        }
+        let mut data = self.read_block_cached(u64::from(block))?;
+        let span = pointers.pow(u32::from(depth - 1));
+        for (index, bytes) in data.chunks_exact_mut(4).enumerate() {
+            let child = u32::from_le_bytes(bytes.try_into().unwrap()).to_le();
+            let retained = self.prune_inode_subtree(
+                child,
+                logical + index as u64 * span,
+                depth - 1,
+                keep,
+                released,
+            )?;
+            bytes.copy_from_slice(&u32::from_le(retained).to_le_bytes());
+        }
+        if data.iter().all(|byte| *byte == 0) {
+            released.push(block);
+            Ok(0)
+        } else {
+            self.write_block_cached(u64::from(block), &data)?;
+            Ok(pointer)
+        }
     }
 
     /// Zero only allocated bytes in a range. Walk allocated subtrees rather
@@ -5755,15 +5884,25 @@ impl FileSystemOperations for Ext2FileSystem {
         let _first_guard = first_parent.lock();
         let _second_guard = second_parent.as_ref().map(|lock| lock.lock());
 
+        let source_lock = (src_is_dir && !same_parent)
+            .then(|| self.get_inode_lock(src_inode_num));
+        let _source_guard = source_lock.as_ref().map(|lock| lock.lock());
+        let parent_update = if src_is_dir && !same_parent {
+            Some(self.directory_parent_update(src_inode_num, old_parent_ino, new_parent_ino)?)
+        } else {
+            None
+        };
+
         // Add new directory entry in new_parent pointing to the source inode
         self.add_directory_entry(new_parent_ino, new_name, src_inode_num, src_file_type)?;
 
         // Remove old directory entry from old_parent (without freeing the inode)
         self.remove_directory_entry(old_parent_ino, old_name)?;
 
-        // If source is a directory and parents differ, update link counts:
-        // The ".." entry inside src_inode now points to new_parent instead of old_parent.
-        if src_is_dir && !same_parent {
+        // The moved directory's '..' and both link counts must describe the
+        // same parent. Updating counts alone leaves a stale on-disk back-reference.
+        if let Some((block, data)) = parent_update {
+            self.write_block_cached(block, &data)?;
             // Decrement old_parent link count (losing one ".." back-reference)
             let mut old_parent_inode = self.read_inode(old_parent_ino)?;
             let links = u16::from_le(old_parent_inode.links_count);
