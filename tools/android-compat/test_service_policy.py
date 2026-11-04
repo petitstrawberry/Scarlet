@@ -233,6 +233,9 @@ class ServicePolicyTests(unittest.TestCase):
             self.assertIn(["u:r:init:s0", records[name]["target"]], manifest["socket_labels"])
         relabels = manifest["file_relabels"]
         self.assertIn(["u:r:init:s0", "u:object_r:unlabeled:s0", "u:object_r:dalvikcache_data_file:s0", 1], relabels)
+        # This preparation belongs to init; don't invent an installer grant.
+        self.assertNotIn(["u:r:installd:s0", "u:object_r:unlabeled:s0", "u:object_r:system_data_file:s0", 2], relabels)
+        self.assertNotIn(["u:r:init:s0", "u:object_r:unlabeled:s0", "u:object_r:app_data_file:s0", 2], relabels)
         for target in ("dalvikcache_data_file", "vold_data_file", "system_app_data_file"):
             for kind, name in ((1, "file"), (2, "dir")):
                 self.assertIn(["u:r:init:s0", "u:object_r:unlabeled:s0", f"u:object_r:{target}:s0", kind], relabels)

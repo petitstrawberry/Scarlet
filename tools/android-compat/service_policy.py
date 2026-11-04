@@ -26,15 +26,17 @@ SDK_POLICY_VERSION = 30
 MAX_NATIVE_LABELS = 2048
 
 
-def generic_file_relabels(policy, setools, context_sources, configured_contexts=()):
-    """Canonical s0 init restorecon grants for an initially unlabeled View.
+def generic_file_relabels(policy, setools, context_sources, configured_contexts=(), source="init"):
+    """Canonical s0 restorecon grants for an initially unlabeled View.
 
     Both relabelfrom and relabelto must be present in the pinned TE policy.
     Targets come from actual file_contexts and explicit management inputs.
     App-specific category labels remain the package manager's responsibility.
     """
-    contexts = {context for context in configured_contexts
-                if re.fullmatch(r"u:object_r:[A-Za-z0-9_]+:s0", context)}
+    if source not in ("init", "installd"):
+        raise ValueError("unsupported stock label restorer")
+    contexts = {":".join(context.split(":")[:4]) for context in configured_contexts
+                if re.fullmatch(r"u:object_r:[A-Za-z0-9_]+:s0(?::c[0-9]+(?:,c[0-9]+)*)?", context)}
     for data in context_sources.values():
         for line in data.decode().splitlines():
             fields = line.split("#", 1)[0].split()
@@ -50,13 +52,13 @@ def generic_file_relabels(policy, setools, context_sources, configured_contexts=
                 raise ValueError("unsupported init file relabel constraint: " + str(constraint))
         if list(setools.ConstraintQuery(policy, ruletype=["validatetrans", "mlsvalidatetrans"], tclass=[name]).results()):
             raise ValueError("init file validatetrans requires a different translation")
-        origins = list(setools.TERuleQuery(policy, ruletype=["allow"], source="init",
+        origins = list(setools.TERuleQuery(policy, ruletype=["allow"], source=source,
             target="unlabeled", tclass=[name], perms=["relabelfrom"]).results())
         for rule in origins:
             _unconditional(rule, setools)
         if not origins:
             continue
-        for rule in setools.TERuleQuery(policy, ruletype=["allow"], source="init",
+        for rule in setools.TERuleQuery(policy, ruletype=["allow"], source=source,
                 tclass=[name], perms=["relabelto"]).results():
             targets = {str(target) for target in rule.target.expand()} & selected.keys()
             if not targets:
@@ -64,7 +66,7 @@ def generic_file_relabels(policy, setools, context_sources, configured_contexts=
             _unconditional(rule, setools)
             evidence.update(map(str, origins))
             evidence.add(str(rule))
-            grants.update(("u:r:init:s0", "u:object_r:unlabeled:s0", selected[target], kind)
+            grants.update((f"u:r:{source}:s0", "u:object_r:unlabeled:s0", selected[target], kind)
                           for target in targets if target != "unlabeled")
     return [list(rule) for rule in sorted(grants)], sorted(evidence)
 
@@ -427,7 +429,8 @@ def export_generic(policy, setools, policy_path, root, boot_manifest, partitions
         (policy_path, root, boot_manifest, partitions, packages, aid_header))
     if sha256(policy_path) != SDK_POLICY_SHA256 or policy.version != SDK_POLICY_VERSION:
         raise ValueError("generic compiled policy source")
-    metadata = json.loads(boot_manifest.read_text())
+    boot_bytes = boot_manifest.read_bytes()
+    metadata = json.loads(boot_bytes)
     if metadata.get("sdk_sha256") != SDK_SHA256 or metadata.get("result") != "PREPARED":
         raise ValueError("generic boot source")
     package_manifest = packages / "stock-packages.json"
@@ -450,11 +453,11 @@ def export_generic(policy, setools, policy_path, root, boot_manifest, partitions
     manifest = {"kind": GENERIC_MAGIC, "source_sha256": SDK_POLICY_SHA256,
         "policy_version": policy.version, "setools_version": setools.__version__,
         "sdk_sha256": SDK_SHA256, "partitions": dict(GENERIC_PARTITIONS),
-        "boot_manifest_sha256": sha256(boot_manifest), "package_manifest_sha256": sha256(package_manifest),
+        "boot_manifest_sha256": _digest(boot_bytes), "package_manifest_sha256": sha256(package_manifest),
         "aid_header_sha256": _digest(header), "passwd_sha256": _digest(passwd),
         "rc_files": configs, "services": [], "file_labels": {}, "exec_transitions": [], "transitions": [],
         "socket_labels": [],
-        "scope": "Effective init launches, declared sockets and canonical init label restoration; no file content writes or blanket service access"}
+        "scope": "Effective init launches, declared sockets and canonical filesystem label restoration; no file content writes or blanket service access"}
     nodes = package_data["nodes"]
     bindings = metadata["profile"].get("file_labels", {})
     existing = metadata["profile"].get("exec_transitions", [])
@@ -496,6 +499,10 @@ def export_generic(policy, setools, policy_path, root, boot_manifest, partitions
             from boot_profile import file_rules
             configured_contexts, _, _ = file_rules(metadata["profile"])
             manifest["file_relabels"], manifest["file_relabel_evidence"] = generic_file_relabels(policy, setools, context_sources, configured_contexts)
+            if "u:r:installd:s0" in metadata["profile"]["subjects"]:
+                grants, evidence = generic_file_relabels(policy, setools, context_sources, configured_contexts, "installd")
+                manifest["file_relabels"] = sorted(manifest["file_relabels"] + grants)
+                manifest["file_relabel_evidence"] = sorted(set(manifest["file_relabel_evidence"] + evidence))
         context_path = temporary / "file_contexts"
         context_path.write_bytes(b"\n".join(context_sources.values()))
         library = ctypes.CDLL(ctypes.util.find_library("selinux"), use_errno=True)
@@ -731,11 +738,11 @@ def validate_generic(manifest):
     if (not isinstance(relabels, list) or len(relabels) > 4096 or
             not isinstance(evidence, list) or len(evidence) > 4096 or
             bool(relabels) != bool(evidence) or
-            any(not isinstance(line, str) or not line.startswith("allow init ") or len(line) > 4096 for line in evidence)):
+            any(not isinstance(line, str) or not re.match(r"allow (init|installd) ", line) or len(line) > 4096 for line in evidence)):
         raise ValueError("generic init relabel evidence")
     for rule in relabels:
         if (not isinstance(rule, list) or len(rule) != 4 or
-                rule[:2] != ["u:r:init:s0", "u:object_r:unlabeled:s0"] or
+                rule[0] not in ("u:r:init:s0", "u:r:installd:s0") or rule[1] != "u:object_r:unlabeled:s0" or
                 not isinstance(rule[2], str) or not re.fullmatch(r"u:object_r:[A-Za-z0-9_]+:s0", rule[2]) or
                 rule[2] == rule[1] or type(rule[3]) is not int or not 1 <= rule[3] <= 7):
             raise ValueError("generic init file relabel")
