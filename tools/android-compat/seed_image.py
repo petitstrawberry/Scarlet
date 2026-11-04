@@ -22,12 +22,14 @@ def inode_metadata(image, root):
         for row in listing.stdout.splitlines():
             if not row.strip():
                 continue
-            match = re.fullmatch(r"/(\d+)/([0-7]+)/(\d+)/(\d+)/([^/]+)/([0-9]*)/", row)
+            match = re.fullmatch(r"/(\d+)/([0-7]+)/(\d+)/(\d+)/([^/]*)/([0-9]*)/", row)
             if not match:
                 raise ValueError(f"unrecognized seed inode: {row}")
             inode, mode, uid, gid, name, _size = match.groups()
             if int(inode) == 0 or name == "..":
                 continue
+            if not name:
+                raise ValueError(f"empty live seed inode name: {row}")
             # rdump omits Unix sockets. Their endpoints belong to the previous
             # boot's processes; Android recreates them during this boot.
             if stat.S_ISSOCK(int(mode, 8)):

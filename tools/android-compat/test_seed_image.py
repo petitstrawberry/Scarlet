@@ -4,8 +4,24 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from seed_image import inode_metadata, restore_inode_metadata
+
+
+class SeedDirectoryEntriesTest(unittest.TestCase):
+    def test_unused_empty_entries_do_not_hide_live_metadata(self):
+        listing = subprocess.CompletedProcess([], 0, stdout="/11/040755/1000/1000/.//\n/0/000000/0/0//0/\n/12/100640/10027/10027/preferences/12/\n")
+        with patch("seed_image.subprocess.run", return_value=listing):
+            metadata = inode_metadata(Path("image.ext2"), "/data")
+        self.assertEqual(set(metadata), {"", "preferences"})
+        self.assertEqual(metadata["preferences"], {"mode": 0o100640, "uid": 10027, "gid": 10027})
+
+    def test_live_entries_still_require_a_name(self):
+        listing = subprocess.CompletedProcess([], 0, stdout="/12/100640/1000/1000//12/\n")
+        with patch("seed_image.subprocess.run", return_value=listing):
+            with self.assertRaisesRegex(ValueError, "empty live seed inode name"):
+                inode_metadata(Path("image.ext2"), "/data")
 
 
 @unittest.skipUnless(shutil.which("debugfs") and shutil.which("mkfs.ext2"), "e2fsprogs required")
