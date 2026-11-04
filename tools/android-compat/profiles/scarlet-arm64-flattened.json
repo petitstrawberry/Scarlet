@@ -33,6 +33,7 @@
   "boot_properties": {
     "ro.apex.updatable": "false",
     "ro.scarlet.display_policy": "awake",
+    "qemu.hw.mainkeys": "0",
     "ro.crypto.state": "unencrypted",
     "ro.zygote": "zygote64",
     "ro.hardware": "scarlet",
