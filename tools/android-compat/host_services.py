@@ -64,7 +64,7 @@ def stage_native_network(root, build):
     if not required_stats_exports.issubset(stats_exports):
         raise ValueError("native network statistics export contract")
     stats_contract=record.get("statistics_contract",{})
-    if stats_contract!={"native_query":"0x53430000+923","counter_layer":"link",
+    if stats_contract!={"source":"/sys/class/net/<interface>/statistics","counter_layer":"link",
                         "interface_counters":True,"uid_counters":False,"tag_counters":False,
                         "unsupported_error":"EOPNOTSUPP","claims_bpf_support":False}:
         raise ValueError("native network statistics capability contract")

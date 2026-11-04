@@ -33,7 +33,7 @@ test:
 	$(CMAKE) -S "$(CURDIR)" -B "$(HOST_BUILD)" \
 		-DNETD_UPDATABLE_BUILD_TESTS=ON \
 		-DCMAKE_BUILD_TYPE=Release
-	$(CMAKE) --build "$(HOST_BUILD)" --target netd_updatable_provider_test networkstats_test --parallel "$(JOBS)"
+	$(CMAKE) --build "$(HOST_BUILD)" --target netd_updatable_provider_test networkstats_test networkstats_backend_test --parallel "$(JOBS)"
 	$(CTEST) --test-dir "$(HOST_BUILD)" --output-on-failure
 
 clean:

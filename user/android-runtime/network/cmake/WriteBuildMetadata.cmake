@@ -135,7 +135,7 @@ set(metadata "{
   },
   \"statistics_runtime\": ${platform_runtime},
   \"statistics_contract\": {
-    \"native_query\": \"0x53430000+923\",
+    \"source\": \"/sys/class/net/<interface>/statistics\",
     \"counter_layer\": \"link\",
     \"interface_counters\": true,
     \"uid_counters\": false,

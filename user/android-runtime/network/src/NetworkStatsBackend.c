@@ -1,74 +1,80 @@
 #include "NetworkStatsBackend.h"
+#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stddef.h>
-#include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
-#include <sys/syscall.h>
 #include <unistd.h>
 
-#define NATIVE_BASE 0x53430000L
-#define LIST_LINKS_V1 920
-#define READ_LINK_STATISTICS_V1 923
 #define MAX_LINKS 1024u
 
-struct LinkInfo {
-    uint64_t id, generation;
-    char name[32];
-    uint8_t mac[6], kind, state;
-    uint32_t mtu, reserved;
-};
-struct LinkStatistics {
-    uint32_t version, size;
-    uint64_t id, generation;
-    uint64_t rx_packets, rx_bytes, tx_packets, tx_bytes;
-    uint32_t layer, reserved;
-};
-_Static_assert(sizeof(struct LinkInfo) == 64, "Native link ABI");
-_Static_assert(sizeof(struct LinkStatistics) == 64, "Native statistics ABI");
-_Static_assert(offsetof(struct LinkStatistics, rx_packets) == 24, "Native counters offset");
+static int read_counter(int directory, const char* name, uint64_t* out) {
+    int fd = openat(directory, name, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -errno;
+    char buffer[32];
+    size_t length = 0;
+    int result = 0;
+    for (;;) {
+        ssize_t count = read(fd, buffer + length, sizeof(buffer) - length);
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            result = -errno; break;
+        }
+        if (count == 0) break;
+        length += (size_t)count;
+        if (length == sizeof(buffer)) { result = -EOVERFLOW; break; }
+    }
+    close(fd);
+    if (result) return result;
+    if (length && buffer[length - 1] == '\n') --length;
+    if (!length) return -EPROTO;
+    uint64_t value = 0;
+    for (size_t i = 0; i < length; ++i) {
+        if (buffer[i] < '0' || buffer[i] > '9') return -EPROTO;
+        unsigned digit = (unsigned)(buffer[i] - '0');
+        if (value > (UINT64_MAX - digit) / 10) return -EOVERFLOW;
+        value = value * 10 + digit;
+    }
+    *out = value;
+    return 0;
+}
+
+/* The directory parameter also permits real filesystem fixtures in host tests. */
+int networkstats_backend_visit_at(const char* path, NetworkStatsVisitor visitor, void* context) {
+    if (!path || !visitor) return -EINVAL;
+    DIR* directory = opendir(path);
+    if (!directory) return -errno;
+    int result = 0;
+    unsigned count = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent* entry = readdir(directory);
+        if (!entry) { if (errno) result = -errno; break; }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (++count > MAX_LINKS) { result = -E2BIG; break; }
+        if (!entry->d_name[0] || strnlen(entry->d_name, 32) == 32) { result = -EPROTO; break; }
+        struct NetworkStatsInterface record = {0};
+        memcpy(record.name, entry->d_name, strlen(entry->d_name));
+        int interface = openat(dirfd(directory), entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (interface < 0) { result = -errno; break; }
+        int stats = openat(interface, "statistics", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        int error = errno;
+        close(interface);
+        if (stats < 0) { result = -error; break; }
+        result = read_counter(stats, "rx_packets", &record.rx_packets);
+        if (!result) result = read_counter(stats, "rx_bytes", &record.rx_bytes);
+        if (!result) result = read_counter(stats, "tx_packets", &record.tx_packets);
+        if (!result) result = read_counter(stats, "tx_bytes", &record.tx_bytes);
+        close(stats);
+        if (result) break;
+        result = visitor(&record, context);
+        if (result) break;
+    }
+    closedir(directory);
+    return result;
+}
 
 int networkstats_backend_visit(NetworkStatsVisitor visitor, void* context) {
-    if (visitor == NULL) return -EINVAL;
-    struct LinkInfo* links = NULL;
-    size_t capacity = 16;
-    long count = -1;
-    int collected = 0;
-    for (unsigned attempt = 0; attempt < 4; ++attempt) {
-        struct LinkInfo* next = realloc(links, capacity * sizeof(*links));
-        if (next == NULL) { free(links); return -ENOMEM; }
-        links = next;
-        errno = 0;
-        count = syscall(NATIVE_BASE + LIST_LINKS_V1, links, capacity);
-        if (count < 0) { int error = errno ? errno : EIO; free(links); return -error; }
-        if ((size_t)count <= capacity) { collected = 1; break; }
-        if ((size_t)count > MAX_LINKS) { free(links); return -E2BIG; }
-        capacity = (size_t)count;
-    }
-    if (!collected) { free(links); return -EAGAIN; }
-    for (long i = 0; i < count; ++i) {
-        if (memchr(links[i].name, 0, sizeof(links[i].name)) == NULL || links[i].name[0] == 0) {
-            free(links); return -EPROTO;
-        }
-        struct LinkStatistics stats = {
-            .version = 1, .size = sizeof(stats), .id = links[i].id,
-            .generation = links[i].generation,
-        };
-        errno = 0;
-        if (syscall(NATIVE_BASE + READ_LINK_STATISTICS_V1, &stats, sizeof(stats)) < 0) {
-            int error = errno ? errno : EIO; free(links); return -error;
-        }
-        if (stats.version != 1 || stats.size != sizeof(stats) || stats.id != links[i].id ||
-            stats.generation != links[i].generation || stats.layer != 1 || stats.reserved != 0) {
-            free(links); return -EPROTO;
-        }
-        struct NetworkStatsInterface record = {
-            .rx_packets = stats.rx_packets, .rx_bytes = stats.rx_bytes,
-            .tx_packets = stats.tx_packets, .tx_bytes = stats.tx_bytes,
-        };
-        memcpy(record.name, links[i].name, sizeof(record.name));
-        int result = visitor(&record, context);
-        if (result != 0) { free(links); return result; }
-    }
-    free(links);
-    return 0;
+    return networkstats_backend_visit_at("/sys/class/net", visitor, context);
 }

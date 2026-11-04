@@ -46,12 +46,14 @@ the corresponding `EBADF` or `ENOTSOCK` error. Before initialization, both calls
 ## Interface statistics
 
 `libnetworkstats.so` implements the pinned AOSP C++ entry points used by
-`libservice-connectivity.so`. Interface and device snapshots enumerate native links
-with syscall 920 and read their existing link-layer byte/packet counters with syscall
-923. Each read checks the link ID and generation so hotplug cannot silently attribute
-a replacement device's counters to an old observation. Failed reads leave the caller's
-output unchanged. Per-UID/tag detail remains `-EOPNOTSUPP`; the adapter does not create
-BPF maps or fabricate zero counters.
+`libservice-connectivity.so`. It enumerates `/sys/class/net` and reads the four
+byte/packet statistics through ordinary Linux ABI file operations. The ABI adapter
+obtains each file's snapshot from the native link counters, checking the observed link
+ID and generation. The four files are sampled separately, as with Linux sysfs.
+This works within AOSP's syscall filters; native calls from a filtered Android thread
+would be rejected as calls into another ABI. Failed reads leave the caller's output
+unchanged. Per-UID/tag detail remains `-EOPNOTSUPP`; the adapter does not create BPF maps
+or fabricate zero counters.
 
 The C++ library links against the selected tethering APEX's `libc++.so` using its
 `__1` namespace. The build records that runtime's hash, and staging verifies it before

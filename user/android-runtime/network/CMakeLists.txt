@@ -177,5 +177,18 @@ if(NETD_UPDATABLE_BUILD_TESTS)
     target_compile_features(networkstats_test PRIVATE cxx_std_17)
     target_compile_options(networkstats_test PRIVATE -O2 -Wall -Wextra -Werror)
     add_test(NAME networkstats_test COMMAND networkstats_test)
+
+    add_executable(networkstats_backend_test
+        src/NetworkStatsBackend.c
+        tests/NetworkStatsBackendTest.c
+    )
+    target_include_directories(networkstats_backend_test PRIVATE include src)
+    target_compile_features(networkstats_backend_test PRIVATE c_std_11)
+    target_compile_definitions(networkstats_backend_test PRIVATE _GNU_SOURCE)
+    target_compile_options(networkstats_backend_test PRIVATE -O2 -Wall -Wextra -Werror)
+    if(APPLE)
+        target_compile_options(networkstats_backend_test PRIVATE -Wno-deprecated-declarations)
+    endif()
+    add_test(NAME networkstats_backend_test COMMAND networkstats_backend_test)
 endif()
 
