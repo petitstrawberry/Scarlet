@@ -1359,6 +1359,9 @@ pub fn sys_openat(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         if let Some(fd) = abi.extensions.open(abi, &task, &absolute, flags) {
             return fd;
         }
+        if let Some(fd) = super::proc_fd::open_process_directory(abi, &task, &absolute, flags) {
+            return fd;
+        }
         if let Some(fd) = super::proc_fd::open_task_directory(abi, &task, &absolute, flags) {
             return fd;
         }
@@ -3100,7 +3103,10 @@ fn to_absolute_path_v2(task: &crate::task::Task, path: &str) -> Result<String, (
 fn proc_directory_path(abi: &LinuxAbi, task: &crate::task::Task, dirfd: i32) -> Option<String> {
     let handle = abi.get_handle(usize::try_from(dirfd).ok()?)?;
     let object = task.handle_table.get(handle)?;
-    super::proc_text::directory_path(object.as_file()?).map(String::from)
+    let file = object.as_file()?;
+    super::proc_text::directory_path(file)
+        .or_else(|| super::proc_fd::directory_path(file))
+        .map(String::from)
 }
 
 fn path_at_to_absolute(
@@ -6717,7 +6723,7 @@ pub fn sys_eventfd2(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        LinuxStatFs, LinuxTimespec, S_IFLNK, S_IFMT, linux_timespec_timeout_ns,
+        LinuxStatFs, LinuxTimespec, S_IFDIR, S_IFLNK, S_IFMT, linux_timespec_timeout_ns,
         proc_exe_linux_stat, proc_exe_selector,
     };
     use crate::abi::linux::generic::errno;
@@ -7518,6 +7524,87 @@ mod tests {
         assert_eq!(proc_exe_selector("/proc/42/exe"), Some("42"));
         assert_eq!(proc_exe_selector("/proc/42/fd/1"), None);
         assert_eq!(proc_exe_selector("/proc//exe"), None);
+    }
+
+    #[test_case]
+    fn proc_process_directory_resolves_relative_status_open() {
+        use super::{proc_directory_path,stat_from_fd,path_at_to_absolute,O_CLOEXEC};
+        use crate::sched::scheduler::{get_task_by_id, register_task, reset};
+        use crate::task::{Task, TaskType, clear_mock_current_task, set_mock_current_task};
+
+        reset();
+        let task = Task::new("relative-proc-open".into(), 0, TaskType::User);
+        let task_id = register_task(task);
+        let task = get_task_by_id(task_id).unwrap();
+        let pid = task.get_namespace_id();
+        let directory_path = alloc::format!("/proc/{pid}");
+        let mut abi = crate::abi::linux::generic::LinuxAbi::default();
+        let dirfd = super::super::proc_fd::open_process_directory(
+            &mut abi,
+            &task,
+            &directory_path,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            proc_directory_path(&abi, &task, dirfd as i32),
+            Some(directory_path.clone())
+        );
+        let (directory_stat, _) = stat_from_fd(&abi, &task, dirfd).unwrap();
+        assert_eq!(directory_stat.st_mode & S_IFMT, S_IFDIR);
+
+        let vfs = crate::fs::VfsManager::new();
+        let status_path = path_at_to_absolute(
+            &abi,
+            &task,
+            &vfs,
+            dirfd as i32,
+            "status",
+        )
+        .unwrap();
+        assert_eq!(status_path, alloc::format!("{directory_path}/status"));
+        set_mock_current_task(task.clone());
+        let status_fd = super::super::proc_text::open_proc_text_file(
+            &mut abi,
+            &task,
+            &status_path,
+            O_CLOEXEC,
+        )
+        .unwrap();
+        let object = task.handle_table.get(abi.get_handle(status_fd).unwrap()).unwrap();
+        let file = object.as_file().unwrap();
+        let mut status = alloc::vec![0u8; 512];
+        let read = file.read(&mut status).unwrap();
+        assert!(core::str::from_utf8(&status[..read])
+            .unwrap()
+            .contains(&alloc::format!("Pid:\t{pid}\n")));
+
+        drop(object);
+        let task_path = path_at_to_absolute(
+            &abi,
+            &task,
+            &vfs,
+            dirfd as i32,
+            "task",
+        )
+        .unwrap();
+        assert_eq!(task_path, alloc::format!("{directory_path}/task"));
+        let task_fd = super::super::proc_fd::open_task_directory(
+            &mut abi,
+            &task,
+            &task_path,
+            0,
+        )
+        .unwrap();
+        let task_object = task.handle_table.get(abi.get_handle(task_fd).unwrap()).unwrap();
+        assert_eq!(
+            super::super::proc_fd::directory_path(task_object.as_file().unwrap()),
+            Some(task_path.as_str())
+        );
+        drop(task_object);
+        clear_mock_current_task();
+        drop(task);
+        reset();
     }
 
     #[test_case]

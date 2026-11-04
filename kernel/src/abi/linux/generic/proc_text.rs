@@ -76,10 +76,9 @@ fn cpu_info() -> String {
 const CPU_DIRECTORY: &str = "/sys/devices/system/cpu";
 const CPU_FILES: &[&str] = &["online", "possible", "present"];
 
-/// Report the calling address space, including native ELF loader mappings.
+/// Report a native address space, including ELF loader mappings.
 /// Box64 uses these ranges before retrying a hinted mmap with MAP_FIXED.
-fn self_maps() -> Option<String> {
-    let task = crate::task::mytask()?;
+fn task_maps(task: &Task) -> String {
     let ranges = task.vm_manager.with_memmaps(|maps| {
         maps.values()
             .filter(|map| map.vmarea.start < crate::environment::USER_LOWER_CANONICAL_END)
@@ -106,7 +105,7 @@ fn self_maps() -> Option<String> {
             if shared { 's' } else { 'p' },
         ));
     }
-    Some(content)
+    content
 }
 
 /// A fixed-shape Linux stat record. Identity, state, scheduling priority,
@@ -175,6 +174,10 @@ fn task_stat(task: &Task, thread: bool) -> String {
 
 fn proc_task(caller: &Task, path: &str, field: &str) -> Option<Arc<Task>> {
     let path = path.trim_end_matches('/');
+    let directory = path.strip_suffix(&format!("/{field}"))?;
+    if let Some(target) = super::proc_fd::thread_directory_target(caller, directory) {
+        return Some(target);
+    }
     let self_path = format!("/proc/self/{field}");
     let thread_self_path = format!("/proc/thread-self/{field}");
     let id = if path == self_path {
@@ -190,6 +193,16 @@ fn proc_task(caller: &Task, path: &str, field: &str) -> Option<Arc<Task>> {
         caller.get_namespace().resolve_global_id(local_pid)?
     };
     crate::sched::scheduler::get_task_by_id(id)
+}
+
+fn maps_target(caller: &Task, path: &str) -> Option<Result<Arc<Task>, usize>> {
+    let target = proc_task(caller, path, "maps")?;
+    // Match process_vm_readv's existing address-space boundary. Namespace
+    // visibility alone is insufficient for cross-process memory metadata.
+    if !caller.vm_manager.shares_address_space(&target.vm_manager) {
+        return Some(Err(errno::EPERM));
+    }
+    Some(Ok(target))
 }
 
 /// Android checks process identity by parsing the `Uid:` line from procfs.
@@ -340,8 +353,10 @@ fn text_content(path: &str) -> Option<String> {
         let target = proc_task(&caller, path, "syscall")?;
         return Some(task_syscall(&target));
     }
-    if matches!(path, "/proc/self/maps" | "/proc/thread-self/maps") {
-        return self_maps();
+    if path.trim_end_matches('/').ends_with("/maps") {
+        let caller = crate::task::mytask()?;
+        let target = maps_target(&caller, path)?.ok()?;
+        return Some(task_maps(&target));
     }
     #[cfg(target_arch = "aarch64")]
     return Some(match path {
@@ -462,6 +477,11 @@ pub(super) fn open_proc_text_file(
 ) -> Option<usize> {
     if let Some(fd) = super::oom::open(abi, task, path, flags) {
         return Some(fd);
+    }
+    if path.trim_end_matches('/').ends_with("/maps")
+        && let Some(Err(error)) = maps_target(task, path)
+    {
+        return Some(errno::to_result(error));
     }
     let directory = is_cpu_directory(path);
     let content = if directory {
@@ -764,6 +784,42 @@ mod tests {
         assert!(self_status.contains("Threads:\t2\n"));
         crate::task::clear_mock_current_task();
         drop(leader);
+        reset();
+    }
+
+    #[test_case]
+    fn numeric_maps_require_the_process_memory_address_space_authority() {
+        use super::{LinuxAbi,errno,O_CLOEXEC};
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::sched::scheduler::{get_task_by_id, register_task, reset};
+        use crate::task::{Task, TaskType};
+
+        reset();
+        let caller = Task::new("MapCaller".into(), 0, TaskType::User);
+        let caller_id = register_task(caller);
+        let caller = get_task_by_id(caller_id).unwrap();
+        let target = Task::new("MapTarget".into(), 0, TaskType::User);
+        let target_id = register_task(target);
+        let target = get_task_by_id(target_id).unwrap();
+        target.allocate_stack_pages(USER_STACK_END - PAGE_SIZE, 1).unwrap();
+        let maps_path = alloc::format!("/proc/{}/maps", target.get_namespace_id());
+
+        crate::task::set_mock_current_task(target.clone());
+        let maps = super::text_content(&maps_path).unwrap();
+        let start = USER_STACK_END - PAGE_SIZE;
+        assert!(maps.contains(&alloc::format!("{start:08x}-{USER_STACK_END:08x} rw-p")));
+
+        crate::task::set_mock_current_task(caller.clone());
+        assert!(super::text_content(&maps_path).is_none());
+        let mut abi = LinuxAbi::default();
+        assert_eq!(
+            super::open_proc_text_file(&mut abi, &caller, &maps_path, O_CLOEXEC),
+            Some(errno::to_result(errno::EPERM))
+        );
+
+        crate::task::clear_mock_current_task();
+        drop(target);
+        drop(caller);
         reset();
     }
 
