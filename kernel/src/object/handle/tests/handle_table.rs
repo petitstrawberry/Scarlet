@@ -633,6 +633,43 @@ fn descriptor_reservation_excludes_shared_allocators_and_releases_on_drop() {
 }
 
 #[test_case]
+fn fork_snapshot_preserves_free_order_and_reclaims_only_source_reservations() {
+    let table=HandleTable::new();
+    let object=||KernelObject::File(Arc::new(MockFileObject::new(b"snapshot".to_vec())));
+    for expected in 0..3 {assert_eq!(table.insert(object()).unwrap(),expected);}
+    drop(table.remove(1));
+    let first=table.reserve_lowest().unwrap();
+    let second=table.reserve_lowest().unwrap();
+    let child=table.deep_clone();
+    assert_eq!(child.open_count(),2);
+    assert_eq!(child.insert(object()).unwrap(),3);
+    assert_eq!(child.insert(object()).unwrap(),1);
+    assert_eq!(child.insert(object()).unwrap(),4);
+    assert_eq!(table.insert(object()).unwrap(),4);
+    assert!(table.get(1).is_none());assert!(table.get(3).is_none());
+    drop(second);drop(first);
+    assert_eq!(table.insert(object()).unwrap(),1);
+    assert_eq!(table.insert(object()).unwrap(),3);
+}
+
+#[test_case]
+fn forked_pipe_writer_remains_live_until_the_child_descriptor_is_closed() {
+    use crate::ipc::pipe::UnidirectionalPipe;
+    let table=HandleTable::new();
+    let (reader,writer)=UnidirectionalPipe::create_pair(128);
+    let read_fd=table.insert(reader).unwrap();let write_fd=table.insert(writer).unwrap();
+    let reader=table.get(read_fd).unwrap();
+    let KernelObject::Pipe(reader)=reader else {panic!("pipe reader");};
+    let child=table.deep_clone();
+    assert_eq!(reader.peer_count(),2);
+    drop(table.remove(write_fd));
+    assert_eq!(reader.peer_count(),1);
+    drop(child.remove(write_fd));
+    assert_eq!(reader.peer_count(),0);
+    assert_eq!(reader.read(&mut [0u8;1]).unwrap(),0);
+}
+
+#[test_case]
 fn descriptor_reservation_install_publishes_exact_slot_and_metadata() {
     let table = HandleTable::new();
     let reserved = table.reserve_lowest().unwrap();

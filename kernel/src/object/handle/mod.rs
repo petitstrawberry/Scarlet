@@ -107,29 +107,36 @@ impl HandleTable {
     /// including all handles and metadata. Use this when you need separate
     /// handle tables for parent and child tasks (non-CLONE_FILES behavior).
     pub fn deep_clone(&self) -> Self {
-        let inner = self.inner.read();
-
-        let handles_clone = {
-            let vec: Vec<Option<KernelObject>> = inner.handles.to_vec();
-            vec.try_into()
-                .unwrap_or_else(|_| panic!("slice with incorrect length"))
-        };
-
-        let metadata_clone = {
-            let vec: Vec<Option<HandleMetadata>> = inner.metadata.to_vec();
-            vec.try_into()
-                .unwrap_or_else(|_| panic!("slice with incorrect length"))
-        };
-
-        // An in-progress open belongs only to the originating table. A fork
-        // sees published descriptors and must not inherit an unfillable slot.
-        let mut free_handles = inner.free_handles.clone();
-        for (index, object) in inner.handles.iter().enumerate() {
-            let handle = index as Handle;
-            if object.is_none() && !free_handles.contains(&handle) {
-                free_handles.push(handle);
+        // Allocate the destination and free-slot bitmap before masking IRQs.
+        let mut handles = vec![None; Self::MAX_HANDLES];
+        let mut metadata = vec![None; Self::MAX_HANDLES];
+        let mut available = vec![false; Self::MAX_HANDLES];
+        let mut free_handles = Vec::with_capacity(Self::MAX_HANDLES);
+        {
+            let inner = self.inner.read();
+            free_handles.extend_from_slice(&inner.free_handles);
+            for &handle in &free_handles {
+                available[handle as usize] = true;
+            }
+            for index in 0..Self::MAX_HANDLES {
+                // Logical duplication must precede a concurrent last close of
+                // the source descriptor, so retain the snapshot lock here.
+                // An Arc-only snapshot followed by cloning outside this lock
+                // could expose a spurious pipe EOF or socket disconnect.
+                handles[index] = inner.handles[index].clone();
+                metadata[index] = inner.metadata[index].clone();
+                // Reservations belong only to the source table. Preserve the
+                // existing free-stack order and reclaim its reserved slots in
+                // one linear scan, rather than a contains() scan per slot.
+                if handles[index].is_none() && !available[index] {
+                    free_handles.push(index as Handle);
+                }
             }
         }
+        let handles_clone = handles.try_into()
+            .unwrap_or_else(|_| panic!("slice with incorrect length"));
+        let metadata_clone = metadata.try_into()
+            .unwrap_or_else(|_| panic!("slice with incorrect length"));
         Self {
             inner: Arc::new(IrqRwSpinLock::new(HandleTableInner {
                 handles: handles_clone,
