@@ -1979,7 +1979,15 @@ pub fn sys_write(abi: &mut LinuxAbi, trapframe: &mut Trapframe) -> usize {
         // Keep one write as one stream operation across user pages. Splitting
         // a <= PIPE_BUF write into page fragments defeats the pipe's atomic
         // capacity check, and splitting datagrams changes record boundaries.
-        let length = count.min(1024 * 1024);
+        // Preserve a single write when staging discontiguous user pages.
+        // In particular, Bionic serializes an entire GNU RELRO segment with
+        // one write and requires the complete result before remapping it.
+        // Apply Linux's per-call transfer ceiling, rather than introducing
+        // an unconditional 1 MiB short write even when memory is available.
+        let length = count.min((i32::MAX as usize) & !(crate::environment::PAGE_SIZE - 1));
+        if user_buf == 0 || user_buf.checked_add(length - 1).is_none() {
+            return errno::to_result(errno::EFAULT);
+        }
         let mut buffer = Vec::new();
         if buffer.try_reserve_exact(length).is_err() {
             return errno::to_result(errno::ENOMEM);
@@ -6984,6 +6992,51 @@ mod tests {
             task.event_queue.lock().dequeue();
         }
         abi.remove_fd(epfd);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test_case]
+    fn write_serializes_a_large_relro_without_an_artificial_short_result() {
+        use crate::environment::{PAGE_SIZE, USER_STACK_END};
+        use crate::fs::vfs_v2::{core::FileSystemOperations, drivers::tmpfs::TmpFS, manager::VfsManager};
+        use crate::fs::FileType;
+        use crate::library::std::usercopy::copy_to_user;
+        use crate::task::{Task, TaskType};
+        use alloc::sync::Arc;
+
+        // The verified stock WebView's PT_GNU_RELRO spans this many bytes.
+        const LENGTH: usize = 4_476_928;
+        let task = Arc::new(Task::new("write-large-relro".into(), 0, TaskType::User));
+        let pages = LENGTH / PAGE_SIZE + 1;
+        let base = USER_STACK_END - pages * PAGE_SIZE;
+        task.allocate_stack_pages(base, pages).unwrap();
+        let address = base + 17;
+        for offset in (0..LENGTH).step_by(PAGE_SIZE) {
+            let bytes = [((offset / PAGE_SIZE) % 251) as u8; PAGE_SIZE];
+            copy_to_user(&task, address + offset, &bytes).unwrap();
+        }
+        let fs = TmpFS::new(0);
+        fs.create(&fs.root_node(), &"relro".into(), FileType::RegularFile, 0o600).unwrap();
+        let view = VfsManager::new_with_root(fs);
+        let object = view.open("/relro", 2).unwrap();
+        let handle = task.handle_table.insert(object.clone()).unwrap();
+        let mut abi = crate::abi::linux::generic::LinuxAbi::default();
+        let fd = abi.allocate_fd(handle).unwrap();
+        crate::task::set_mock_current_task(task.clone());
+        let mut frame = crate::arch::Trapframe::new();
+        frame.set_arg(0, fd);
+        frame.set_arg(1, address);
+        frame.set_arg(2, LENGTH);
+        assert_eq!(super::sys_write(&mut abi, &mut frame), LENGTH);
+        crate::task::clear_mock_current_task();
+        let file = object.as_file().unwrap();
+        assert_eq!(file.metadata().unwrap().size, LENGTH);
+        for offset in (0..LENGTH).step_by(PAGE_SIZE) {
+            let mut bytes = [0; 4];
+            assert_eq!(file.read_at(offset as u64, &mut bytes).unwrap(), 4);
+            assert_eq!(bytes, [((offset / PAGE_SIZE) % 251) as u8; 4]);
+        }
+        assert_eq!(file.seek(crate::object::capability::SeekFrom::Current(0)).unwrap(), LENGTH as u64);
     }
 
     #[cfg(target_arch = "aarch64")]
