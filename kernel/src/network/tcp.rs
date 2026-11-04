@@ -3313,22 +3313,17 @@ impl crate::object::capability::Selectable for TcpSocket {
         // Deferred errors are published through the receive/accept source and
         // are also visible as exceptional readiness.
         if interest.read || interest.except {
-            let waker = if self.get_state() == TcpState::Listen {
-                self.accept_waker
+            // epoll registrations persist when an unconnected socket starts
+            // listening. Keep both read sources subscribed across that change.
+            for source in [&self.accept_waker, &self.recv_waker] {
+                let waker = source
                     .lock()
                     .get_or_insert_with(|| {
-                        Arc::new(crate::sync::Waker::new_interruptible("tcp_accept"))
+                        Arc::new(crate::sync::Waker::new_interruptible("tcp_readiness"))
                     })
-                    .clone()
-            } else {
-                self.recv_waker
-                    .lock()
-                    .get_or_insert_with(|| {
-                        Arc::new(crate::sync::Waker::new_interruptible("tcp_recv"))
-                    })
-                    .clone()
-            };
-            registrations.push(waker.subscribe_readiness(waiter));
+                    .clone();
+                registrations.push(waker.subscribe_readiness(waiter));
+            }
         }
         if interest.write {
             let waker = self
@@ -3790,7 +3785,12 @@ mod tests {
                 &waiter,
             )
             .unwrap();
-        assert_eq!(registrations.len(), 2);
+        assert_eq!(registrations.len(), 3);
+        assert!(socket.accept_waker.lock().is_some());
+        socket.accept_waker.lock().as_ref().unwrap().wake_one();
+        socket.recv_waker.lock().as_ref().unwrap().wake_all();
+        assert_eq!(registrations[0].generation(), 1);
+        assert_eq!(registrations[1].generation(), 1);
         assert!(socket.recv_waker.lock().is_some());
         assert!(socket.send_waker.lock().is_some());
     }

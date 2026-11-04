@@ -1593,6 +1593,8 @@ impl SocketControl for LocalSocket {
 
         // Wake up any task waiting in accept()
         server_local.accept_waker.wake_one();
+        // A client registered before connect can now send without blocking.
+        self.write_waker.wake_all();
 
         Ok(())
     }
@@ -1791,20 +1793,14 @@ impl Selectable for LocalSocket {
             return Some(Vec::new());
         }
 
-        let state = *self.state.read();
+        // Registrations outlive bind/listen/connect. Subscribe to the stable
+        // sources rather than choosing one from the socket's current state.
         let mut registrations = Vec::new();
         if interest.read {
-            match state {
-                SocketState::Listening => {
-                    registrations.push(self.accept_waker.subscribe_readiness(waiter))
-                }
-                SocketState::Connected => {
-                    registrations.push(self.read_waker.subscribe_readiness(waiter))
-                }
-                _ => {}
-            }
+            registrations.push(self.accept_waker.subscribe_readiness(waiter));
+            registrations.push(self.read_waker.subscribe_readiness(waiter));
         }
-        if interest.write && matches!(state, SocketState::Connected) {
+        if interest.write {
             registrations.push(self.write_waker.subscribe_readiness(waiter));
         }
         Some(registrations)
@@ -1999,6 +1995,23 @@ mod tests {
         assert_eq!(&next, b"next");
         sender.close_handle();
         assert_eq!(receiver.peek_record(&mut []).unwrap(), 0);
+    }
+
+    #[test_case]
+    fn readiness_registered_before_connection_tracks_all_stream_sources() {
+        let socket = LocalSocket::new(SocketType::Stream, SocketProtocol::Default);
+        let waiter = Arc::new(Waker::new_interruptible("local-state-readiness"));
+        let registrations = socket.subscribe_readiness(ReadyInterest::rw(), &waiter).unwrap();
+        assert_eq!(registrations.len(), 3);
+        assert!(registrations.iter().all(|r| r.generation() == 0));
+        *socket.state.write() = SocketState::Listening;
+        socket.accept_waker.wake_one();
+        assert_eq!(registrations[0].generation(), 1);
+        *socket.state.write() = SocketState::Connected;
+        socket.read_waker.wake_all();
+        socket.write_waker.wake_all();
+        assert_eq!(registrations[1].generation(), 1);
+        assert_eq!(registrations[2].generation(), 1);
     }
 
     #[test_case]
