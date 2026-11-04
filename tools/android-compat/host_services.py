@@ -3,6 +3,54 @@ import hashlib
 import re
 import xml.etree.ElementTree as ET
 
+NATIVE_NETWORK_LIBRARY="system/apex/com.android.tethering/lib64/libnetd_updatable.so"
+STOCK_NETWORK_LIBRARY_SHA256="e330a6e91ee2e6bf5edcbce08f9b9bfdafddf42e01dd99d1855286781d996b29"
+
+def stage_native_network(root, build):
+    """Replace the selected APEX's public backend using verified source output."""
+    import json
+    import shutil
+    import subprocess
+    from pathlib import Path
+    from art_inputs import sha256, elf_needed
+    source=Path(__file__).resolve().parents[2]/"user/android-runtime/network"
+    build=Path(build);manifest=build/"build.json"
+    record=json.loads(manifest.read_text())
+    inputs={"CMakeLists.txt","Makefile","SOURCE_PINS.json","cmake/WriteBuildMetadata.cmake",
+            "include/NetdUpdatablePublic.h","libnetd_updatable.map.txt",
+            "src/Backend.c","src/Backend.h","src/Provider.c"}
+    if (record.get("schema")!=1 or record.get("component")!="user/android-runtime/network" or
+            record.get("build",{}).get("android_abi")!="arm64-v8a" or
+            set(record.get("inputs_sha256",{}))!=inputs or
+            any(sha256(source/name)!=digest for name,digest in record["inputs_sha256"].items())):
+        raise ValueError("stale native network provider build")
+    library=build/"libnetd_updatable.so"
+    if sha256(library)!=record.get("artifact",{}).get("sha256"):
+        raise ValueError("changed native network provider library")
+    dependencies=elf_needed(library)
+    reader=shutil.which("readelf") or shutil.which("llvm-readelf")
+    symbols=subprocess.run([reader,"--dyn-syms","--wide",str(library)],check=True,capture_output=True,text=True).stdout
+    exports={line.split()[-1] for line in symbols.splitlines()
+             if " FUNC " in line and " GLOBAL " in line and " UND " not in line}
+    expected={name+"@@LIBNETD_UPDATABLE" for name in
+              ("libnetd_updatable_init","libnetd_updatable_tagSocket","libnetd_updatable_untagSocket")}
+    if exports!=expected:raise ValueError("native network provider export contract")
+    contract=record.get("provider_contract",{})
+    if (contract.get("supported_operations_mask")!="0xfe" or
+            contract.get("claims_bpf_support") is not False or
+            contract.get("sets_bpf_progs_loaded") is not False or
+            contract.get("uid_socket_tagging")!={"supported":False,"error":"EOPNOTSUPP"}):
+        raise ValueError("native network provider capability contract")
+    target=Path(root)/NATIVE_NETWORK_LIBRARY
+    if sha256(target)!=STOCK_NETWORK_LIBRARY_SHA256:
+        raise ValueError("changed source APEX network library")
+    shutil.copy2(library,target)
+    if sha256(target)!=record["artifact"]["sha256"]:raise ValueError("changed network provider during copy")
+    return {"kind":"scarlet-native-network-provider-v1","path":NATIVE_NETWORK_LIBRARY,
+            "stock_sha256":STOCK_NETWORK_LIBRARY_SHA256,"sha256":sha256(target),
+            "build_sha256":sha256(manifest),"inputs_sha256":record["inputs_sha256"],
+            "needed":dependencies,"exports":sorted(exports),"contract":contract}
+
 SUSPEND = "system_suspend"
 BINARY = "system/bin/hw/android.system.suspend@1.0-service"
 STOCK_RC = "system/etc/init/android.system.suspend@1.0-service.rc"

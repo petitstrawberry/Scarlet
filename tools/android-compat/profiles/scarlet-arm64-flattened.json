@@ -303,7 +303,9 @@
     "/system/bin/cmd": "u:object_r:scarlet_policy_exec:s0",
     "/system/app/ScarletCompat/ScarletCompat.apk": "u:object_r:system_file:s0",
     "/system/bin/sh": "u:object_r:scarlet_policy_exec:s0",
-    "/system/bin/toybox": "u:object_r:scarlet_policy_exec:s0"
+    "/system/bin/toybox": "u:object_r:scarlet_policy_exec:s0",
+    "/data/dalvik-cache": "u:object_r:dalvikcache_data_file:s0",
+    "/data/dalvik-cache/arm64": "u:object_r:dalvikcache_data_file:s0"
   },
   "exec_transitions": [
     [

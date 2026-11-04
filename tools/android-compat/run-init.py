@@ -30,6 +30,10 @@ def main():
     compositor=None
     android_runtime=None
     input_bridge=None
+    native_network=None
+    if "--native-network-provider" in arguments:
+        index=arguments.index("--native-network-provider");native_network=Path(arguments[index+1]).resolve();del arguments[index:index+2]
+        if not (native_network/"build.json").is_file():raise ValueError("native network provider build is missing")
     capture_frame="--capture-frame" in arguments
     if capture_frame:arguments.remove("--capture-frame")
     manage_apps="--manage-app-policy" in arguments
@@ -146,6 +150,12 @@ def main():
     def stage(inputs, runtime, stock, root):
         nonlocal seed_inodes, seed_destination, package_overrides
         metadata = original(inputs, runtime, stock, root)
+        if native_network:
+            from host_services import stage_native_network
+            if not metadata.get("profile",{}).get("network_provider"):
+                raise ValueError("native network provider requires explicit profile selection")
+            metadata["native_network_provider"]=stage_native_network(root,native_network)
+            (output/"native-network-provider.json").write_text(json.dumps(metadata["native_network_provider"],indent=2)+"\n")
         if stock_packages:
             from stock_packages import (MANIFEST, assemble_generic_init,
                                         authenticated_package_overrides,
@@ -168,6 +178,12 @@ def main():
             if sha256(target)!=sha256(service_policy/"service-policy.txt"):
                 raise ValueError("service policy changed during staging")
             policy=root/"scarlet/boot/shield.policy"
+            generic_path=service_policy/"generic-service-policy.json"
+            if generic_path.is_file():
+                from service_policy import apply_generic_boot_policy
+                generic=json.loads(generic_path.read_text())
+                policy.write_text(apply_generic_boot_policy(policy.read_text(),generic,root))
+                shutil.copy2(generic_path,output/"generic-service-policy.json")
             policy.write_text(apply_boot_policy(policy.read_text(),target.read_text(),
                                                  service_policy_metadata))
             shutil.copy2(service_policy/"service-policy.json",output/"service-policy.json")
