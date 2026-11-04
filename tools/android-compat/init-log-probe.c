@@ -92,20 +92,6 @@ void *android_dlopen_ext(const char *filename,int flags,const android_dlextinfo 
   report("SCARLET_INIT_DLOPEN path=%s flags=0x%x result=%p pid=%d tid=%d\n",filename,flags,result,getpid(),gettid());
  errno=saved;return result;
 }
-/* ART may replace the installed logger; retain Java system/crash errors too. */
-int __android_log_buf_write(int buffer,int priority,const char *tag,const char *message) {
- int (*real)(int,int,const char*,const char*)=dlsym(RTLD_NEXT,"__android_log_buf_write");
- if(zygote_diagnostic && priority>=ANDROID_LOG_ERROR && priority>=minimum_log_priority) {
-  int saved=errno;
-  report("SCARLET_INIT_LOG priority=%d tag=%s %s\n",priority,tag?tag:"",message?message:"");
-  errno=saved;
- }else if(priority>=ANDROID_LOG_ERROR && tag && !strcmp(tag,"AndroidRuntime")) {
-  int saved=errno;
-  report("SCARLET_INIT_JAVA_FATAL pid=%d tid=%d buffer=%d %s\n",getpid(),gettid(),buffer,message?message:"");
-  errno=saved;
- }
- return real(buffer,priority,tag,message);
-}
 int security_check_context(const char *context) {
  int (*real)(const char*)=dlsym(RTLD_NEXT,"security_check_context");
  if(!real){errno=ENOSYS;return -1;}
@@ -188,22 +174,26 @@ int ioctl(int fd,int request,...) {
  errno=saved;return result;
 }
 static void report(const char *format,...) {
+ int saved=errno;
  char message[16384];va_list args;va_start(args,format);int n=vsnprintf(message,sizeof(message),format,args);va_end(args);
- if(n<0)return;size_t length=(size_t)n<sizeof(message)?(size_t)n:sizeof(message)-1;
- if(!zygote_diagnostic){if(console>=0)write(console,message,length);return;}
+ if(n<0){errno=saved;return;}size_t length=(size_t)n<sizeof(message)?(size_t)n:sizeof(message)-1;
+ if(!zygote_diagnostic){if(console>=0)write(console,message,length);errno=saved;return;}
  // No diagnostic descriptor survives between messages or into a Zygote fork.
- int fd=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC,0);if(fd<0)return;
+ // Diagnostics may be dropped under pressure; logging must not wait for the
+ // observer and stall an application or an Android service.
+ int fd=socket(AF_UNIX,SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0);if(fd<0){errno=saved;return;}
  struct sockaddr_un address={.sun_family=AF_UNIX};strcpy(address.sun_path,"/scarlet/boot/diagnostic.sock");
  if(!connect(fd,(struct sockaddr*)&address,sizeof(address))) {
   size_t offset=0;
   while(offset<length) {
    size_t chunk=length-offset>3072?3072:length-offset;
-   ssize_t sent=send(fd,message+offset,chunk,0);
+   ssize_t sent=send(fd,message+offset,chunk,MSG_DONTWAIT|MSG_NOSIGNAL);
    if(sent<=0)break;
    offset+=(size_t)sent;
   }
  }
  close(fd);
+ errno=saved;
 }
 static void diagnostic_log(const struct __android_log_message *message) {
  if(message->priority<minimum_log_priority)return;
