@@ -437,7 +437,9 @@ pub fn sys_sched_getscheduler(_abi: &mut LinuxAbi, frame: &mut Trapframe) -> usi
             if task.deadline_enabled() {
                 6
             } else {
-                usize::from(task.fixed_priority.effective() != 0)
+                // RPC priority inheritance affects dispatch, not the
+                // configured policy that userspace can inherit or restore.
+                usize::from(task.fixed_priority.base() != 0)
             }
         }
         Err(error) => errno::to_result(error),
@@ -452,7 +454,7 @@ pub fn sys_sched_getparam(_abi: &mut LinuxAbi, frame: &mut Trapframe) -> usize {
         Ok(task) => task,
         Err(error) => return errno::to_result(error),
     };
-    let priority = task.fixed_priority.effective();
+    let priority = task.fixed_priority.base();
     if priority > 99 {
         return errno::to_result(errno::EOVERFLOW);
     }
@@ -2297,6 +2299,40 @@ mod tests {
         assert_eq!(linux_raw_priority(SCHED_NICE_MIN), 40);
         assert_eq!(linux_raw_priority(0), 20);
         assert_eq!(linux_raw_priority(SCHED_NICE_MAX), 1);
+    }
+
+    #[test_case]
+    fn scheduler_queries_keep_rpc_donations_out_of_userspace_policy() {
+        use crate::sched::scheduler::{register_task, reset};
+        use crate::task::{clear_mock_current_task, set_mock_current_task};
+        reset();
+        let task = Task::new("sched-query-donation".into(), 0, TaskType::User);
+        task.init();
+        let task = get_task_by_id(register_task(task)).unwrap();
+        let address = 0x2000_0000;
+        task.allocate_stack_pages(address, 1).unwrap();
+        copy_to_user(&task, address, &0x73u32.to_ne_bytes()).unwrap();
+        set_mock_current_task(task.clone());
+        let mut abi = LinuxAbi::default();
+        let donation = crate::task::fixed_priority::PriorityLease::enter(&task, 8).unwrap();
+        for base in [0, 3] {
+            task.fixed_priority.configure(base);
+            let mut frame = Trapframe::new();
+            frame.set_pc(address as u64);
+            frame.set_arg(0, 0);
+            assert_eq!(sys_sched_getscheduler(&mut abi, &mut frame), usize::from(base != 0));
+            frame.set_pc(address as u64);
+            frame.set_arg(1, address + 16);
+            assert_eq!(sys_sched_getparam(&mut abi, &mut frame), 0);
+            let mut bytes = [0; 4];
+            copy_from_user(&task, address + 16, &mut bytes).unwrap();
+            assert_eq!(i32::from_ne_bytes(bytes), i32::from(base));
+            assert_eq!(task.fixed_priority.effective(), 8);
+        }
+        drop(donation);
+        clear_mock_current_task();
+        drop(task);
+        reset();
     }
 
     #[test_case]
