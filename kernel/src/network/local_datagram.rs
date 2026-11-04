@@ -149,6 +149,7 @@ impl LocalSocket {
         address: &SocketAddress,
         nonblocking: bool,
     ) -> Result<usize, SocketError> {
+        let deadline = Self::timeout_deadline(self.write_timeout_ns());
         if data.len() > MAX_MESSAGE_BYTES || handles.len() > MAX_HANDLE_QUEUE_SIZE {
             return Err(SocketError::MessageTooLarge);
         }
@@ -206,10 +207,10 @@ impl LocalSocket {
                 return Err(SocketError::WouldBlock);
             }
             let task = crate::task::mytask().ok_or(SocketError::WouldBlock)?;
-            if self.datagrams.event.wait_with_condition(
+            match self.datagrams.event.wait_with_condition(
                 task.get_id(),
                 task.get_trapframe(),
-                None,
+                Self::remaining_timeout_ns(deadline),
                 0,
                 || {
                     if self.datagrams.state.read().write_shutdown || *self.nonblocking.read() {
@@ -220,9 +221,10 @@ impl LocalSocket {
                         || Inbox::fits(&state, length, handle_count)
                         || *self.state.read() == SocketState::Closed
                 },
-            ) == WaitResult::Interrupted
-            {
-                return Err(SocketError::Interrupted);
+            ) {
+                WaitResult::Interrupted => return Err(SocketError::Interrupted),
+                WaitResult::TimedOut => return Err(SocketError::TimedOut),
+                WaitResult::Woken => {}
             }
         }
     }
@@ -231,6 +233,7 @@ impl LocalSocket {
         peek: bool,
         nonblocking: bool,
     ) -> Result<Message, SocketError> {
+        let deadline = Self::timeout_deadline(self.read_timeout_ns());
         loop {
             let message = {
                 let mut state = self.datagrams.state.write();
@@ -265,18 +268,19 @@ impl LocalSocket {
                 return Err(SocketError::WouldBlock);
             }
             let task = crate::task::mytask().ok_or(SocketError::WouldBlock)?;
-            if self.datagrams.event.wait_with_condition(
+            match self.datagrams.event.wait_with_condition(
                 task.get_id(),
                 task.get_trapframe(),
-                None,
+                Self::remaining_timeout_ns(deadline),
                 0,
                 || {
                     let state = self.datagrams.state.read();
                     state.closed || !state.messages.is_empty() || *self.nonblocking.read()
                 },
-            ) == WaitResult::Interrupted
-            {
-                return Err(SocketError::Interrupted);
+            ) {
+                WaitResult::Interrupted => return Err(SocketError::Interrupted),
+                WaitResult::TimedOut => return Err(SocketError::TimedOut),
+                WaitResult::Woken => {}
             }
         }
     }
@@ -342,6 +346,7 @@ impl LocalSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object::capability::ControlOps;
     fn pair() -> (Arc<LocalSocket>, Arc<LocalSocket>) {
         LocalSocket::create_connected_pair_with_type(
             SocketType::Datagram,
@@ -454,4 +459,5 @@ mod tests {
             Err(SocketError::WouldBlock)
         ));
     }
+
 }

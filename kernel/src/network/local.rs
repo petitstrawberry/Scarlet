@@ -57,6 +57,9 @@ macro_rules! localsocket_log {
 /// Maximum queued byte-stream data per socket (64 KiB).
 const MAX_STREAM_BUFFER_SIZE: usize = 64 * 1024;
 
+/// A sequenced packet must fit in one stream record.
+pub(crate) const MAX_SEQPACKET_MESSAGE_SIZE: usize = MAX_STREAM_BUFFER_SIZE;
+
 /// Maximum size of one handle-and-data record.
 ///
 /// SWS permits a 1 MiB payload behind its 8-byte frame header. Keeping the
@@ -65,6 +68,9 @@ pub const MAX_HANDLE_DATA_RECORD_SIZE: usize = 1024 * 1024 + 8;
 
 /// Maximum total handle-and-data payload queued per socket.
 const MAX_HANDLE_DATA_QUEUE_SIZE: usize = MAX_HANDLE_DATA_RECORD_SIZE;
+
+/// The native timeout controls use signed millisecond values in the ABI.
+const MAX_SOCKET_TIMEOUT_MS: u64 = i32::MAX as u64;
 
 /// Maximum number of handles that can be queued for transfer
 /// This prevents unbounded memory growth from DoS attacks
@@ -502,6 +508,12 @@ pub struct LocalSocket {
     /// Nonblocking I/O flag
     nonblocking: IrqRwSpinLock<bool>,
 
+    /// Receive timeout in milliseconds; zero waits indefinitely.
+    read_timeout_ms: IrqRwSpinLock<u64>,
+
+    /// Send timeout in milliseconds; zero waits indefinitely.
+    write_timeout_ms: IrqRwSpinLock<u64>,
+
     /// Whether recvmsg should attach the sending process credentials.
     passcred: IrqRwSpinLock<bool>,
 }
@@ -570,6 +582,8 @@ impl LocalSocket {
             write_waker: Waker::new_interruptible("socket_write"),
             self_weak: IrqRwSpinLock::new(Weak::new()),
             nonblocking: IrqRwSpinLock::new(false),
+            read_timeout_ms: IrqRwSpinLock::new(0),
+            write_timeout_ms: IrqRwSpinLock::new(0),
             passcred: IrqRwSpinLock::new(false),
         }
     }
@@ -617,6 +631,44 @@ impl LocalSocket {
 
     pub fn set_passcred(&self, enabled: bool) {
         *self.passcred.write() = enabled;
+    }
+
+    fn timeout_ms_to_ns(timeout_ms: u64) -> Option<u64> {
+        (timeout_ms != 0).then(|| crate::timer::ms_to_ns(timeout_ms))
+    }
+
+    fn read_timeout_ns(&self) -> Option<u64> {
+        Self::timeout_ms_to_ns(*self.read_timeout_ms.read())
+    }
+
+    fn write_timeout_ns(&self) -> Option<u64> {
+        Self::timeout_ms_to_ns(*self.write_timeout_ms.read())
+    }
+
+    fn timeout_deadline(timeout_ns: Option<u64>) -> Option<u64> {
+        timeout_ns.map(|timeout| crate::timer::get_time_ns().saturating_add(timeout))
+    }
+
+    fn remaining_timeout_ns(deadline: Option<u64>) -> Option<u64> {
+        deadline.map(|deadline| deadline.saturating_sub(crate::timer::get_time_ns()))
+    }
+
+    fn set_read_timeout_ms(&self, timeout_ms: usize) -> Result<(), SocketError> {
+        let timeout_ms = u64::try_from(timeout_ms).map_err(|_| SocketError::InvalidArgument)?;
+        if timeout_ms > MAX_SOCKET_TIMEOUT_MS {
+            return Err(SocketError::InvalidArgument);
+        }
+        *self.read_timeout_ms.write() = timeout_ms;
+        Ok(())
+    }
+
+    fn set_write_timeout_ms(&self, timeout_ms: usize) -> Result<(), SocketError> {
+        let timeout_ms = u64::try_from(timeout_ms).map_err(|_| SocketError::InvalidArgument)?;
+        if timeout_ms > MAX_SOCKET_TIMEOUT_MS {
+            return Err(SocketError::InvalidArgument);
+        }
+        *self.write_timeout_ms.write() = timeout_ms;
+        Ok(())
     }
 
     pub fn passcred(&self) -> bool {
@@ -876,6 +928,7 @@ impl LocalSocket {
         task_id: usize,
         trapframe: &mut crate::arch::Trapframe,
     ) -> Result<Arc<dyn SocketObject>, SocketError> {
+        let deadline = Self::timeout_deadline(self.read_timeout_ns());
         let state = self.state.read();
         if *state != SocketState::Listening {
             return Err(SocketError::NotListening);
@@ -896,14 +949,18 @@ impl LocalSocket {
             }
 
             // No connection available, block the task
-            if self
-                .accept_waker
-                .wait_with_condition(task_id, trapframe, None, 0, || {
+            match self.accept_waker.wait_with_condition(
+                task_id,
+                trapframe,
+                Self::remaining_timeout_ns(deadline),
+                0,
+                || {
                     *self.state.read() != SocketState::Listening || !self.backlog.read().is_empty()
-                })
-                == WaitResult::Interrupted
-            {
-                return Err(SocketError::Interrupted);
+                },
+            ) {
+                WaitResult::Interrupted => return Err(SocketError::Interrupted),
+                WaitResult::TimedOut => return Err(SocketError::TimedOut),
+                WaitResult::Woken => {}
             }
 
             // When we reach here, task has been woken up
@@ -972,6 +1029,8 @@ impl LocalSocket {
             write_waker: Waker::new_interruptible("socket_write"),
             self_weak: IrqRwSpinLock::new(Weak::new()),
             nonblocking: IrqRwSpinLock::new(false),
+            read_timeout_ms: IrqRwSpinLock::new(0),
+            write_timeout_ms: IrqRwSpinLock::new(0),
             passcred: IrqRwSpinLock::new(false),
         });
 
@@ -999,6 +1058,8 @@ impl LocalSocket {
             write_waker: Waker::new_interruptible("socket_write"),
             self_weak: IrqRwSpinLock::new(Weak::new()),
             nonblocking: IrqRwSpinLock::new(false),
+            read_timeout_ms: IrqRwSpinLock::new(0),
+            write_timeout_ms: IrqRwSpinLock::new(0),
             passcred: IrqRwSpinLock::new(false),
         });
 
@@ -1029,6 +1090,7 @@ impl LocalSocket {
         trapframe: &mut crate::arch::Trapframe,
     ) -> Result<(KernelObject, HandleMetadata), crate::ipc::IpcError> {
         use crate::ipc::IpcError;
+        let deadline = Self::timeout_deadline(self.read_timeout_ns());
 
         loop {
             // Verify socket is connected
@@ -1079,12 +1141,16 @@ impl LocalSocket {
             }
 
             // No handle available, block the task
-            if self
-                .handle_waker
-                .wait_with_condition(task_id, trapframe, None, 0, || self.receive_can_progress())
-                == WaitResult::Interrupted
-            {
-                return Err(StreamError::Interrupted.into());
+            match self.handle_waker.wait_with_condition(
+                task_id,
+                trapframe,
+                Self::remaining_timeout_ns(deadline),
+                0,
+                || self.receive_can_progress(),
+            ) {
+                WaitResult::Interrupted => return Err(StreamError::Interrupted.into()),
+                WaitResult::TimedOut => return Err(IpcError::ChannelEmpty),
+                WaitResult::Woken => {}
             }
         }
     }
@@ -1121,6 +1187,7 @@ impl LocalSocket {
     /// Copy the next record's prefix without consuming bytes or handles, and
     /// return its full payload length even when `output` is empty.
     pub fn peek_record(&self, output: &mut [u8]) -> Result<usize, SocketError> {
+        let deadline = Self::timeout_deadline(self.read_timeout_ns());
         loop {
             if let Some(len) = self.read_buffer.read().queue.read().peek_record(output) {
                 return Ok(len);
@@ -1142,15 +1209,16 @@ impl LocalSocket {
                 return Err(SocketError::WouldBlock);
             }
             let task = crate::task::mytask().ok_or(SocketError::WouldBlock)?;
-            if self.read_waker.wait_with_condition(
+            match self.read_waker.wait_with_condition(
                 task.get_id(),
                 task.get_trapframe(),
-                None,
+                Self::remaining_timeout_ns(deadline),
                 0,
                 || self.receive_can_progress() || *self.nonblocking.read(),
-            ) == WaitResult::Interrupted
-            {
-                return Err(SocketError::Interrupted);
+            ) {
+                WaitResult::Interrupted => return Err(SocketError::Interrupted),
+                WaitResult::TimedOut => return Err(SocketError::TimedOut),
+                WaitResult::Woken => {}
             }
         }
     }
@@ -1160,9 +1228,24 @@ impl LocalSocket {
         &self,
         buffer: &mut [u8],
     ) -> Result<(usize, SocketCredentials), StreamError> {
+        let deadline = Self::timeout_deadline(self.read_timeout_ns());
+        self.read_with_sender_until(buffer, deadline)
+    }
+
+    /// Capture the receive deadline before a multi-step socket operation.
+    pub(crate) fn read_deadline(&self) -> Option<u64> {
+        Self::timeout_deadline(self.read_timeout_ns())
+    }
+
+    /// Read using a deadline captured by an earlier receive step.
+    pub(crate) fn read_with_sender_until(
+        &self,
+        buffer: &mut [u8],
+        deadline: Option<u64>,
+    ) -> Result<(usize, SocketCredentials), StreamError> {
         use crate::task::mytask;
         if self.is_datagram() {
-            let message=self.receive_datagram(false,false).map_err(|error|match error {SocketError::WouldBlock=>StreamError::WouldBlock,SocketError::Interrupted=>StreamError::Interrupted,_=>StreamError::InvalidArgument})?;
+            let message=self.receive_datagram(false,false).map_err(|error|match error {SocketError::WouldBlock=>StreamError::WouldBlock,SocketError::TimedOut=>StreamError::TimedOut,SocketError::Interrupted=>StreamError::Interrupted,_=>StreamError::InvalidArgument})?;
             let n=buffer.len().min(message.data.len());buffer[..n].copy_from_slice(&message.data[..n]);return Ok((n,message.sender));
         }
         if buffer.is_empty() {
@@ -1233,15 +1316,16 @@ impl LocalSocket {
             }
 
             if let Some(task) = mytask() {
-                if self.read_waker.wait_with_condition(
+                match self.read_waker.wait_with_condition(
                     task.get_id(),
                     task.get_trapframe(),
-                    None,
+                    Self::remaining_timeout_ns(deadline),
                     0,
                     || self.receive_can_progress() || *self.nonblocking.read(),
-                ) == WaitResult::Interrupted
-                {
-                    return Err(StreamError::Interrupted);
+                ) {
+                    WaitResult::Interrupted => return Err(StreamError::Interrupted),
+                    WaitResult::TimedOut => return Err(StreamError::TimedOut),
+                    WaitResult::Woken => {}
                 }
             } else {
                 return Err(StreamError::WouldBlock);
@@ -1257,10 +1341,11 @@ impl StreamOps for LocalSocket {
 
     fn write(&self, data: &[u8]) -> Result<usize, StreamError> {
         use crate::task::mytask;
-        if self.is_datagram() {return self.send_datagram(data.to_vec(),Vec::new(),&SocketAddress::Unspecified,false).map_err(|error|match error {SocketError::WouldBlock=>StreamError::WouldBlock,SocketError::Interrupted=>StreamError::Interrupted,_=>StreamError::InvalidArgument});}
+        if self.is_datagram() {return self.send_datagram(data.to_vec(),Vec::new(),&SocketAddress::Unspecified,false).map_err(|error|match error {SocketError::WouldBlock=>StreamError::WouldBlock,SocketError::TimedOut=>StreamError::TimedOut,SocketError::Interrupted=>StreamError::Interrupted,_=>StreamError::InvalidArgument});}
         if data.is_empty() {
             return Ok(0);
         }
+        let deadline = Self::timeout_deadline(self.write_timeout_ns());
 
         loop {
             if *self.state.read() == SocketState::Closed {
@@ -1317,15 +1402,16 @@ impl StreamOps for LocalSocket {
             }
 
             if let Some(task) = mytask() {
-                if self.write_waker.wait_with_condition(
+                match self.write_waker.wait_with_condition(
                     task.get_id(),
                     task.get_trapframe(),
-                    None,
+                    Self::remaining_timeout_ns(deadline),
                     0,
                     || self.send_can_progress() || *self.nonblocking.read(),
-                ) == WaitResult::Interrupted
-                {
-                    return Err(StreamError::Interrupted);
+                ) {
+                    WaitResult::Interrupted => return Err(StreamError::Interrupted),
+                    WaitResult::TimedOut => return Err(StreamError::TimedOut),
+                    WaitResult::Woken => {}
                 }
             } else {
                 return Err(StreamError::WouldBlock);
@@ -1543,6 +1629,8 @@ impl SocketControl for LocalSocket {
             write_waker: Waker::new_interruptible("socket_write"),
             self_weak: IrqRwSpinLock::new(Weak::new()),
             nonblocking: IrqRwSpinLock::new(false),
+            read_timeout_ms: IrqRwSpinLock::new(*server_local.read_timeout_ms.read()),
+            write_timeout_ms: IrqRwSpinLock::new(*server_local.write_timeout_ms.read()),
             passcred: IrqRwSpinLock::new(server_local.passcred()),
         });
 
@@ -1867,6 +1955,22 @@ impl ControlOps for LocalSocket {
                 let is_nonblocking = self.is_nonblocking();
                 Ok(if is_nonblocking { 1 } else { 0 })
             }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS => {
+                self.set_read_timeout_ms(arg)
+                    .map_err(|_| "Invalid read timeout")?;
+                Ok(0)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_SET_WRITE_TIMEOUT_MS => {
+                self.set_write_timeout_ms(arg)
+                    .map_err(|_| "Invalid write timeout")?;
+                Ok(0)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_GET_READ_TIMEOUT_MS => {
+                Ok(*self.read_timeout_ms.read() as i32)
+            }
+            crate::network::socket::socket_ctl::SCTL_SOCKET_GET_WRITE_TIMEOUT_MS => {
+                Ok(*self.write_timeout_ms.read() as i32)
+            }
             _ => {
                 localsocket_log!("[LocalSocket::control] Unknown command");
                 Err("Unknown control command")
@@ -1883,6 +1987,22 @@ impl ControlOps for LocalSocket {
             (
                 crate::network::socket::socket_ctl::SCTL_SOCKET_GET_NONBLOCK,
                 "Get non-blocking mode",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS,
+                "Set read timeout",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_SET_WRITE_TIMEOUT_MS,
+                "Set write timeout",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_GET_READ_TIMEOUT_MS,
+                "Get read timeout",
+            ),
+            (
+                crate::network::socket::socket_ctl::SCTL_SOCKET_GET_WRITE_TIMEOUT_MS,
+                "Get write timeout",
             ),
         ]
     }
@@ -1903,6 +2023,8 @@ pub fn local_socket_factory(
 #[cfg(test)]
 mod tests {
     use core::sync::atomic::Ordering;
+    use crate::object::capability::ControlOps;
+
     #[test_case]
     fn listen_again_updates_backlog_and_preserves_pending_connections() {
         use crate::network::socket::{SocketControl, SocketObject};
@@ -1975,7 +2097,7 @@ mod tests {
             .send_handles_and_data(
                 alloc::vec![(
                     KernelObject::from_shared_memory_object(Arc::new(memory)),
-                    HandleMetadata::default()
+                    HandleMetadata::default(),
                 )],
                 b"packet",
             )
@@ -2046,11 +2168,30 @@ mod tests {
             .unwrap();
         listener.bind(&address).unwrap();
         listener.listen(1).unwrap();
+        use crate::network::socket::socket_ctl;
+        let listener_control = listener.as_control_ops().unwrap();
+        assert_eq!(
+            listener_control.control(socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS, 7),
+            Ok(0)
+        );
+        assert_eq!(
+            listener_control.control(socket_ctl::SCTL_SOCKET_SET_WRITE_TIMEOUT_MS, 9),
+            Ok(0)
+        );
 
         let client = local_socket_factory(SocketType::SeqPacket, SocketProtocol::Default).unwrap();
         client.connect(&address).unwrap();
         let accepted = listener.accept().unwrap();
         assert_eq!(accepted.socket_type(), SocketType::SeqPacket);
+        let accepted_control = accepted.as_control_ops().unwrap();
+        assert_eq!(
+            accepted_control.control(socket_ctl::SCTL_SOCKET_GET_READ_TIMEOUT_MS, 0),
+            Ok(7)
+        );
+        assert_eq!(
+            accepted_control.control(socket_ctl::SCTL_SOCKET_GET_WRITE_TIMEOUT_MS, 0),
+            Ok(9)
+        );
 
         accepted.write(b"one").unwrap();
         accepted.write(b"two").unwrap();
@@ -2167,6 +2308,99 @@ mod tests {
         drop(listener);
         drop(client);
         drop(server);
+        set_current_task_for_test(cpu, None);
+        task.running_cpu.store(usize::MAX, Ordering::SeqCst);
+        drop(task);
+        reset();
+    }
+
+    #[test_case]
+    fn expired_receive_deadline_preserves_queued_data_and_handles() {
+        use crate::arch::Trapframe;
+        use crate::ipc::SharedMemory;
+        use crate::network::socket::socket_ctl;
+        use crate::sched::scheduler::{
+            add_task, register_online_cpu, remove_from_ready_queues, reset,
+            set_current_task_for_test,
+        };
+        use crate::task::{Task, TaskState, TaskType};
+
+        reset();
+        let cpu = crate::arch::get_cpu().get_cpuid();
+        register_online_cpu(cpu);
+        let fixture = Task::new("socket-timeout".into(), 1, TaskType::Kernel);
+        fixture.init();
+        let id = add_task(fixture, cpu);
+        let task = get_task_by_id(id).unwrap();
+        task.set_state(TaskState::Running);
+        task.running_cpu.store(cpu, Ordering::SeqCst);
+        set_current_task_for_test(cpu, Some(id));
+        remove_from_ready_queues(id);
+
+        let (client, server) = LocalSocket::create_connected_pair(
+            "timeout-client".into(),
+            "timeout-server".into(),
+        );
+        assert_eq!(
+            client.control(socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS, 1),
+            Ok(0)
+        );
+        assert_eq!(
+            client.control(socket_ctl::SCTL_SOCKET_GET_READ_TIMEOUT_MS, 0),
+            Ok(1)
+        );
+        assert!(
+            client
+                .control(
+                    socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS,
+                    i32::MAX as usize + 1,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            client.control(socket_ctl::SCTL_SOCKET_GET_READ_TIMEOUT_MS, 0),
+            Ok(1)
+        );
+        assert_eq!(
+            client.control(socket_ctl::SCTL_SOCKET_SET_WRITE_TIMEOUT_MS, 1),
+            Ok(0)
+        );
+
+        let mut byte = [0u8; 1];
+        assert!(matches!(
+            client.read_with_sender_until(&mut byte, Some(0)),
+            Err(StreamError::TimedOut)
+        ));
+        // An expired deadline must not hide already available data.
+        server.write(b"x").unwrap();
+        assert_eq!(client.read_with_sender_until(&mut byte, Some(0)).unwrap().0, 1);
+        assert_eq!(byte, [b'x']);
+
+        let (sender, receiver) = LocalSocket::create_connected_pair_with_type(
+            SocketType::SeqPacket,
+            "timeout-packets".into(),
+            "timeout-records".into(),
+        );
+        assert_eq!(
+            receiver.control(socket_ctl::SCTL_SOCKET_SET_READ_TIMEOUT_MS, 1),
+            Ok(0)
+        );
+        let memory = SharedMemory::new(4096, 0x3).unwrap();
+        sender
+            .send_handles_and_data(
+                alloc::vec![(
+                    KernelObject::from_shared_memory_object(Arc::new(memory)),
+                    HandleMetadata::default(),
+                )],
+                b"packet",
+            )
+            .unwrap();
+        let (handles, data) = receiver.recv_handles_and_data_batch(6, 1).unwrap();
+        assert_eq!(handles.len(), 1);
+        assert_eq!(handles[0].0.as_shared_memory().unwrap().size(), 4096);
+        assert_eq!(data, b"packet");
+
+        drop((sender, receiver, server, client));
         set_current_task_for_test(cpu, None);
         task.running_cpu.store(usize::MAX, Ordering::SeqCst);
         drop(task);

@@ -2460,13 +2460,13 @@ impl TcpSocket {
             }
             let remaining = deadline.map(|end| end.saturating_sub(crate::timer::get_time_ns()));
             if remaining == Some(0) {
-                return Err(SocketError::WouldBlock);
+                return Err(SocketError::TimedOut);
             }
             match waker.wait_with_condition(task_id, trapframe, remaining, 0, || {
                 self.writable_capacity() > 0 || !tcp_send_side_open(self.get_state())
             }) {
                 WaitResult::Woken => {}
-                WaitResult::TimedOut => return Err(SocketError::WouldBlock),
+                WaitResult::TimedOut => return Err(SocketError::TimedOut),
                 WaitResult::Interrupted => return Err(SocketError::Interrupted),
             }
         }
@@ -2527,6 +2527,9 @@ impl TcpSocket {
         trapframe: &mut crate::arch::Trapframe,
     ) -> Result<usize, SocketError> {
         let nonblocking = !self.blocking_mode.load(Ordering::SeqCst);
+        let deadline = self
+            .read_timeout_ns()
+            .map(|timeout| crate::timer::get_time_ns().saturating_add(timeout));
 
         loop {
             {
@@ -2581,9 +2584,13 @@ impl TcpSocket {
                 if !self.recv_buffer.lock().is_empty() {
                     continue;
                 }
-                match waker.wait_with_timeout_result(task_id, trapframe, self.read_timeout_ns()) {
+                let remaining = deadline.map(|end| end.saturating_sub(crate::timer::get_time_ns()));
+                if remaining == Some(0) {
+                    return Err(SocketError::TimedOut);
+                }
+                match waker.wait_with_timeout_result(task_id, trapframe, remaining) {
                     WaitResult::Woken => {}
-                    WaitResult::TimedOut => return Err(SocketError::WouldBlock),
+                    WaitResult::TimedOut => return Err(SocketError::TimedOut),
                     WaitResult::Interrupted => return Err(SocketError::Interrupted),
                 }
             }
@@ -3215,6 +3222,7 @@ impl crate::object::capability::StreamOps for TcpSocket {
         if Selectable::is_nonblocking(self) {
             return self.recv_data(buffer).map_err(|err| match err {
                 SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::TimedOut => crate::object::capability::StreamError::TimedOut,
                 SocketError::Interrupted => crate::object::capability::StreamError::Interrupted,
                 SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
                 _ => crate::object::capability::StreamError::Other("tcp recv error".into()),
@@ -3233,6 +3241,7 @@ impl crate::object::capability::StreamOps for TcpSocket {
         self.recv_blocking(buffer, task.get_id(), task.get_trapframe())
             .map_err(|err| match err {
                 SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::TimedOut => crate::object::capability::StreamError::TimedOut,
                 SocketError::Interrupted => crate::object::capability::StreamError::Interrupted,
                 SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
                 _ => crate::object::capability::StreamError::Other("tcp recv error".into()),
@@ -3245,6 +3254,7 @@ impl crate::object::capability::StreamOps for TcpSocket {
         if Selectable::is_nonblocking(self) {
             return self.send_data(data).map_err(|err| match err {
                 SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::TimedOut => crate::object::capability::StreamError::TimedOut,
                 SocketError::Interrupted => crate::object::capability::StreamError::Interrupted,
                 SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
                 _ => crate::object::capability::StreamError::Other("tcp send error".into()),
@@ -3263,6 +3273,7 @@ impl crate::object::capability::StreamOps for TcpSocket {
         self.send_blocking(data, task.get_id(), task.get_trapframe())
             .map_err(|err| match err {
                 SocketError::WouldBlock => crate::object::capability::StreamError::WouldBlock,
+                SocketError::TimedOut => crate::object::capability::StreamError::TimedOut,
                 SocketError::Interrupted => crate::object::capability::StreamError::Interrupted,
                 SocketError::NotConnected => crate::object::capability::StreamError::BrokenPipe,
                 _ => crate::object::capability::StreamError::Other("tcp send error".into()),

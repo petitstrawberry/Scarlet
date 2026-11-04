@@ -19,6 +19,10 @@ pub enum StreamError {
     EndOfStream,
     /// Operation would block (for non-blocking streams)
     WouldBlock,
+    /// The operation's I/O deadline elapsed before it could make progress.
+    /// Callers may report this as a terminal result; it is not a transient
+    /// readiness signal like [`StreamError::WouldBlock`].
+    TimedOut,
     /// Stream was closed or is invalid
     Closed,
     /// Invalid arguments provided (e.g., null buffer, invalid offset)

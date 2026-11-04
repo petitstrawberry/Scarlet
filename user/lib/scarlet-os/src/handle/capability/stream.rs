@@ -65,7 +65,7 @@ mod tests {
     use super::StreamError;
 
     #[test]
-    fn syscall_result_distinguishes_interrupted_from_would_block() {
+    fn syscall_result_decodes_interrupted_would_block_and_timeout() {
         assert_eq!(
             StreamError::from_syscall_result((-(4i32)) as usize),
             Err(StreamError::Interrupted)
@@ -73,6 +73,10 @@ mod tests {
         assert_eq!(
             StreamError::from_syscall_result((-(11i32)) as usize),
             Err(StreamError::WouldBlock)
+        );
+        assert_eq!(
+            StreamError::from_syscall_result((-(110i32)) as usize),
+            Err(StreamError::SystemError(110))
         );
         assert_eq!(StreamError::from_syscall_result(7), Ok(7));
     }

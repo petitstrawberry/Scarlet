@@ -23,6 +23,7 @@ use crate::object::capability::{Selectable, StreamError};
 pub(super) fn stream_error_to_socket_error(error: StreamError) -> SocketError {
     match error {
         StreamError::WouldBlock => SocketError::WouldBlock,
+        StreamError::TimedOut => SocketError::TimedOut,
         StreamError::Interrupted => SocketError::Interrupted,
         StreamError::Closed | StreamError::BrokenPipe => SocketError::NotConnected,
         StreamError::InvalidArgument => SocketError::InvalidArgument,
@@ -362,6 +363,17 @@ pub(crate) fn socket_error_to_native_errno(error: &SocketError) -> i32 {
     }
 }
 
+/// Map socket I/O failures to Scarlet's native errno space. I/O deadlines use
+/// the retry-style `EAGAIN` result expected by Linux `SO_RCVTIMEO` and
+/// `SO_SNDTIMEO`; connect deadlines remain `ETIMEDOUT`.
+pub(crate) fn socket_io_error_to_native_errno(error: &SocketError) -> i32 {
+    match error {
+        SocketError::TimedOut | SocketError::WouldBlock => 11,
+        SocketError::Interrupted => 4,
+        error => socket_error_to_native_errno(error),
+    }
+}
+
 /// Native message options; ABI modules translate their own flag encodings.
 pub mod message_flags {
     pub const NONBLOCK:u32=1;
@@ -504,6 +516,22 @@ mod tests {
     fn test_socket_type() {
         assert_eq!(SocketType::Stream, SocketType::Stream);
         assert_ne!(SocketType::Stream, SocketType::Datagram);
+    }
+
+    #[test_case]
+    fn terminal_stream_deadline_maps_to_socket_timeout_and_io_eagain() {
+        assert_eq!(
+            stream_error_to_socket_error(StreamError::TimedOut),
+            SocketError::TimedOut
+        );
+        assert_eq!(
+            socket_error_to_native_errno(&SocketError::TimedOut),
+            110
+        );
+        assert_eq!(
+            socket_io_error_to_native_errno(&SocketError::TimedOut),
+            11
+        );
     }
 
     #[test_case]
