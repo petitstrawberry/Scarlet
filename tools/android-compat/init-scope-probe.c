@@ -57,7 +57,12 @@ static int important_log(const unsigned char *message,size_t length) {
  // Keep boot/input/activity evidence without the full framework info stream.
  const char *tag=(const char*)message+12;size_t tag_length=strnlen(tag,length-12);
  if(tag_length==length-12)return 0;
- if(message[11]==5)return tag_length==sizeof("libc")-1 && !memcmp(tag,"libc",sizeof("libc")-1);
+ if(message[11]==5) {
+  const char *warning_tags[]={"libc","VintfObject","libvintf"};
+  for(unsigned i=0;i<sizeof(warning_tags)/sizeof(warning_tags[0]);i++)
+   if(tag_length==strlen(warning_tags[i]) && !memcmp(tag,warning_tags[i],tag_length))return 1;
+  return 0;
+ }
  const char *boot_tags[]={"UserController","StorageManagerService","FallbackHome","WindowManager","SystemServer"};
  for(unsigned i=0;i<sizeof(boot_tags)/sizeof(boot_tags[0]);i++)
   if(tag_length==strlen(boot_tags[i]) && !memcmp(tag,boot_tags[i],tag_length))return 1;
