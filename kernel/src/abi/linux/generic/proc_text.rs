@@ -454,6 +454,7 @@ enum NetworkSnapshot {
     File(Vec<u8>),
 }
 
+#[cfg(feature = "network")]
 fn network_path(path: &str) -> Option<NetworkPath> {
     let path = path.trim_end_matches('/');
     if path == NETWORK_DIRECTORY {
@@ -502,6 +503,7 @@ fn network_root_directory_entries(links: &[NetworkLinkInfoV1]) -> Vec<ProcDirect
     entries
 }
 
+#[cfg(feature = "network")]
 fn network_directory_entries(path: &str) -> Option<Vec<ProcDirectoryEntry>> {
     match network_path(path)? {
         NetworkPath::Root => Some(network_root_directory_entries(
@@ -521,6 +523,7 @@ fn network_directory_entries(path: &str) -> Option<Vec<ProcDirectoryEntry>> {
     }
 }
 
+#[cfg(feature = "network")]
 fn network_statistic_content(link: NetworkLinkInfoV1, statistic: NetworkStatistic) -> Option<Vec<u8>> {
     let statistics = crate::network::NetworkManager::get_manager()
         .read_link_statistics(NetworkReadLinkStatisticsV1::query(link.id, link.generation))
@@ -528,6 +531,7 @@ fn network_statistic_content(link: NetworkLinkInfoV1, statistic: NetworkStatisti
     Some(format!("{}\n", statistic.value(&statistics)).into_bytes())
 }
 
+#[cfg(feature = "network")]
 fn network_snapshot(path: &str) -> Option<NetworkSnapshot> {
     match network_path(path)? {
         NetworkPath::Statistic(link, statistic) => {
@@ -536,6 +540,9 @@ fn network_snapshot(path: &str) -> Option<NetworkSnapshot> {
         _ => Some(NetworkSnapshot::Directory(network_directory_entries(path)?)),
     }
 }
+
+#[cfg(not(feature = "network"))]
+fn network_snapshot(_path: &str) -> Option<NetworkSnapshot> { None }
 
 fn metadata(path: &str, size: usize, directory: bool) -> FileMetadata {
     // Stable across open/stat, distinct for each synthetic entry.
@@ -817,16 +824,19 @@ impl FileObject for ProcTextFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "network")]
     use crate::{
         device::network::{DevicePacket, MacAddress},
         network::{InterfaceStats, NetworkInterface, NetworkManager},
     };
 
+    #[cfg(feature = "network")]
     struct NetworkStatsTestInterface {
         name: &'static str,
         statistics: Arc<IrqRwSpinLock<InterfaceStats>>,
     }
 
+    #[cfg(feature = "network")]
     impl NetworkInterface for NetworkStatsTestInterface {
         fn name(&self) -> &str { self.name }
         fn mac_address(&self) -> MacAddress { MacAddress::new([2, 0, 0, 0, 0, 1]) }
@@ -1042,6 +1052,7 @@ mod tests {
         reset();
     }
 
+    #[cfg(feature = "network")]
     #[test_case]
     fn network_directories_are_native_read_only_and_relative_openable() {
         let name = "sysfsdir0";
@@ -1089,6 +1100,7 @@ mod tests {
         assert_eq!(network_root_directory_entries(&[]), base_directory_entries());
     }
 
+    #[cfg(feature = "network")]
     #[test_case]
     fn network_statistics_use_real_counters_and_per_open_file_snapshots() {
         let name = "sysfsstats0";
