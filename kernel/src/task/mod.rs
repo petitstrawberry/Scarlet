@@ -5,6 +5,7 @@
 pub mod elf_loader;
 pub mod namespace;
 pub mod process_scope;
+pub mod reclaim_preference;
 pub mod resource_group;
 pub mod syscall;
 
@@ -893,6 +894,10 @@ pub struct Task {
     pub(crate) security_subject: IrqRwSpinLock<Option<crate::shield::Subject>>,
     pub(crate) pending_exec_transition: IrqRwSpinLock<Option<crate::shield::exec_transition::PendingExecTransition>>,
     pub(crate) credentials: IrqRwSpinLock<crate::shield::identity::Credentials>,
+    /// Process-shared memory-reclaim protection. Threads share this handle;
+    /// fork and exec install independent snapshots.
+    pub(crate) reclaim_preference:
+        Arc<IrqRwSpinLock<reclaim_preference::ReclaimPreference>>,
     pub(crate) execution_restrictions: IrqRwSpinLock<crate::shield::execution::Restrictions>,
     /// Keep the dispatched ABI alive until its syscall handler has returned.
     retired_exec_abi: TaskLocal<Option<Box<dyn AbiModule + Send + Sync>>>,
@@ -1158,6 +1163,9 @@ impl Task {
             security_subject: IrqRwSpinLock::new(None),
             pending_exec_transition: IrqRwSpinLock::new(None),
             credentials: IrqRwSpinLock::new(crate::shield::identity::Credentials::bootstrap()),
+            reclaim_preference: Arc::new(IrqRwSpinLock::new(
+                reclaim_preference::ReclaimPreference::default(),
+            )),
             execution_restrictions: IrqRwSpinLock::new(crate::shield::execution::Restrictions::default()),
             retired_exec_abi: TaskLocal::new(None),
             software_timers: IrqSpinLock::new(Vec::new()),
@@ -3186,6 +3194,11 @@ impl Task {
         *child.security_subject.write() = self.security_subject.read().clone();
         *child.pending_exec_transition.write() = self.pending_exec_transition.read().clone();
         *child.credentials.write() = self.credentials.read().clone();
+        if flags.is_set(CloneFlagsDef::Thread) {
+            child.reclaim_preference = self.reclaim_preference.clone();
+        } else {
+            *child.reclaim_preference.write() = *self.reclaim_preference.read();
+        }
         *child.execution_restrictions.write() = self.execution_restrictions.read().clone();
 
         // Ensure the cloned task has its own high-VA kernel stack window.
@@ -3713,6 +3726,8 @@ impl Task {
         *image.process_scope.write() = self.process_scope.read().clone();
         *image.security_subject.write() = self.security_subject.read().clone();
         *image.credentials.write() = self.credentials.read().clone();
+        // Exec preserves the process preference and inherited permission ceiling.
+        *image.reclaim_preference.write() = *self.reclaim_preference.read();
         *image.execution_restrictions.write() = self.execution_restrictions.read().clone();
         image.max_stack_size = self.max_stack_size;
         image.max_data_size = self.max_data_size;
@@ -4955,6 +4970,86 @@ mod tests {
         let child_id = add_task(child, 0);
         let child = get_task_by_id(child_id).unwrap();
         assert_eq!(child.get_thread_group_id(), parent.get_thread_group_id());
+    }
+
+    #[test_case]
+    fn reclaim_preference_is_shared_by_threads_and_snapshotted_by_fork_and_exec() {
+        use crate::shield::identity::{Identities, Principal};
+
+        reset();
+        let mut parent = super::new_user_task("ReclaimParent".to_string(), 0);
+        parent.init();
+        let parent_id = add_task(parent, 0);
+        let parent = get_task_by_id(parent_id).unwrap();
+        {
+            let mut credentials = parent.credentials.write();
+            credentials
+                .set_principals(Identities::all(Principal(1000)))
+                .unwrap();
+            credentials.set_authority(0, 0).unwrap();
+            parent
+                .reclaim_preference
+                .write()
+                .update(
+                    crate::task::reclaim_preference::DEFAULT_PROTECTION - 250,
+                    &credentials,
+                    Principal(1000),
+                )
+                .unwrap();
+        }
+
+        let fork = parent.clone_task(CloneFlags::default()).unwrap();
+        assert!(!Arc::ptr_eq(
+            &parent.reclaim_preference,
+            &fork.reclaim_preference
+        ));
+        assert_eq!(
+            fork.reclaim_preference.read().protection(),
+            crate::task::reclaim_preference::DEFAULT_PROTECTION - 250
+        );
+
+        let mut flags = CloneFlags::default();
+        flags.set(CloneFlagsDef::Thread);
+        let thread = parent.clone_task(flags).unwrap();
+        assert!(Arc::ptr_eq(
+            &parent.reclaim_preference,
+            &thread.reclaim_preference
+        ));
+        {
+            let credentials = parent.credentials.read();
+            thread
+                .reclaim_preference
+                .write()
+                .update(
+                    crate::task::reclaim_preference::DEFAULT_PROTECTION - 400,
+                    &credentials,
+                    Principal(1000),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            parent.reclaim_preference.read().protection(),
+            crate::task::reclaim_preference::DEFAULT_PROTECTION - 400
+        );
+        assert_eq!(
+            fork.reclaim_preference.read().protection(),
+            crate::task::reclaim_preference::DEFAULT_PROTECTION - 250
+        );
+
+        let image = parent.new_exec_image();
+        assert!(!Arc::ptr_eq(
+            &parent.reclaim_preference,
+            &image.reclaim_preference
+        ));
+        assert_eq!(
+            image.reclaim_preference.read().protection(),
+            crate::task::reclaim_preference::DEFAULT_PROTECTION - 400
+        );
+        assert_eq!(
+            image.reclaim_preference.read().protection_ceiling(),
+            parent.reclaim_preference.read().protection_ceiling()
+        );
+        reset();
     }
 
     #[test_case]
