@@ -1,11 +1,36 @@
 """Keep Android inode metadata when staging a warm image through the host."""
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
 from pathlib import Path
 
 from art_inputs import quote_debugfs
+
+
+def stage_seed_data(source, target):
+    """Replace generated data with one warm snapshot, preserving deletions too."""
+    source, target = Path(source), Path(target)
+    if source.is_symlink() or not source.is_dir():
+        raise ValueError("seed data source is not a directory")
+    if target.is_symlink() or target.exists() and not target.is_dir():
+        raise ValueError("seed staging destination is not a directory")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Complete the new copy before touching the previous generated tree. Both
+    # renames stay on the staging filesystem, and publication can roll back.
+    with tempfile.TemporaryDirectory(prefix=".scarlet-seed-", dir=target.parent) as directory:
+        temporary = Path(directory)
+        incoming, previous = temporary / "incoming", temporary / "previous"
+        shutil.copytree(source, incoming, symlinks=True)
+        if target.exists():
+            target.rename(previous)
+        try:
+            incoming.rename(target)
+        except OSError:
+            if previous.exists():
+                previous.rename(target)
+            raise
 
 
 _DEBUGFS_BANNER = re.compile(r"^debugfs \S+ \([^\n]+\)$")

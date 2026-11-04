@@ -12,10 +12,41 @@ from seed_image import (
     _read_extended_attributes,
     inode_metadata,
     restore_inode_metadata,
+    stage_seed_data,
 )
 
 
 class SeedDirectoryEntriesTest(unittest.TestCase):
+    def test_warm_stage_preserves_deletions_and_symbolic_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source=Path(directory)/"source";target=Path(directory)/"staging/data"
+            source.mkdir();target.mkdir(parents=True)
+            (source/"packages.xml").write_text("new inventory")
+            (source/"link").symlink_to("packages.xml")
+            (target/"packages.xml").write_text("old inventory")
+            (target/"packages-backup.xml").write_text("deleted backup")
+            stage_seed_data(source,target)
+            self.assertEqual((target/"packages.xml").read_text(),"new inventory")
+            self.assertFalse((target/"packages-backup.xml").exists())
+            self.assertTrue((target/"link").is_symlink())
+            self.assertEqual((source/"packages.xml").read_text(),"new inventory")
+            self.assertEqual(sorted(p.name for p in target.parent.iterdir()),["data"])
+
+    def test_failed_seed_publication_restores_the_previous_generated_tree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source=Path(directory)/"source";target=Path(directory)/"staging/data"
+            source.mkdir();target.mkdir(parents=True)
+            (source/"new").write_text("new");(target/"old").write_text("old")
+            rename=Path.rename
+            def fail_incoming(path,destination):
+                if path.name=="incoming":raise OSError("publication failed")
+                return rename(path,destination)
+            with patch.object(Path,"rename",fail_incoming),self.assertRaises(OSError):
+                stage_seed_data(source,target)
+            self.assertEqual((target/"old").read_text(),"old")
+            self.assertFalse((target/"new").exists())
+            self.assertEqual(sorted(p.name for p in target.parent.iterdir()),["data"])
+
     def test_unused_empty_entries_do_not_hide_live_metadata(self):
         listing = subprocess.CompletedProcess([], 0, stdout="/11/040755/1000/1000/.//\n/0/000000/0/0//0/\n/12/100640/10027/10027/preferences/12/\n")
         with patch("seed_image.subprocess.run", return_value=listing), \

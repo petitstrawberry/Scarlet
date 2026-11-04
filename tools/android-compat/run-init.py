@@ -218,7 +218,8 @@ def main():
                 if not seeded.is_dir():seeded=Path(directory)
                 if not any(seeded.iterdir()):raise ValueError("seed image is empty")
                 target=root/"data/dalvik-cache" if cache_source else root/"data"
-                shutil.copytree(seeded,target,dirs_exist_ok=True,symlinks=True)
+                from seed_image import stage_seed_data
+                stage_seed_data(seeded,target)
         if android_runtime:
             destination=root.parent.parent/"bin/android-runtime"
             shutil.copy2(android_runtime,destination)
